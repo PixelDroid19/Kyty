@@ -625,7 +625,7 @@ static bool Close(GameApi* /*game*/)
 }
 static void SetPause(GameApi* game, bool flag)
 {
-	printf("Pause: %s\n", flag ? "true" : "false");
+	KYTY_LOG_DEBUG("Pause: %s\n", flag ? "true" : "false");
 
 	Audio::AudioOut::AudioOutSetHostPaused(flag);
 	game->m_game_is_paused = flag;
@@ -717,7 +717,7 @@ void game_show_window(GameApi* game, const Core::Timer& timer)
 		if (p->skip_frames > 0)
 		{
 			p->skip_frames--;
-			printf("skip frame %d\n", p->skip_frames);
+			KYTY_LOG_DEBUG("skip frame %d\n", p->skip_frames);
 		} else
 		{
 			VideoOut::VideoOutBeginVblank();
@@ -733,14 +733,14 @@ void game_show_window(GameApi* game, const Core::Timer& timer)
 
 void game_event_quit(GameApi* game)
 {
-	printf("Event: quit\n");
+	KYTY_LOG_DEBUG("Event: quit\n");
 
 	game->m_game_need_exit = true;
 }
 
 void game_event_terminate(GameApi* game)
 {
-	printf("Event: terminate\n");
+	KYTY_LOG_DEBUG("Event: terminate\n");
 
 	game->m_game_need_exit = true;
 }
@@ -766,7 +766,7 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 	}
 
 #ifdef KYTY_DBG_INPUT
-	printf("Key: time = %.04f, %s%s, %s%s, %s, scan = %d, key = %d, mod = %04" PRIx16 "\n", key->timestamp_seconds,
+	KYTY_LOG_DEBUG("Key: time = %.04f, %s%s, %s%s, %s, scan = %d, key = %d, mod = %04" PRIx16 "\n", key->timestamp_seconds,
 	       (key->down ? "down" : ""), (key->up ? "up" : ""), (key->pressed ? "pressed" : ""), (key->released ? "released" : ""),
 	       (key->repeat ? "repeat" : ""), key->scan_code, key->key_code, key->mod);
 #endif
@@ -835,15 +835,15 @@ void game_event_mouse([[maybe_unused]] GameApi* game, [[maybe_unused]] const Eve
 #ifdef KYTY_DBG_INPUT
 	if (mb->wheel)
 	{
-		printf("Mouse wheel: time = %.04f, %s[%d, %d]\n", mb->timestamp_seconds, (mb->touch ? "touch, " : ""), mb->x, mb->y);
+		KYTY_LOG_DEBUG("Mouse wheel: time = %.04f, %s[%d, %d]\n", mb->timestamp_seconds, (mb->touch ? "touch, " : ""), mb->x, mb->y);
 	} else if (mb->motion)
 	{
-		printf("Mouse motion: time = %.04f, %s%s%s%s%s%s, [%d, %d], (%d, %d)\n", mb->timestamp_seconds, (mb->left ? "left" : ""),
+		KYTY_LOG_DEBUG("Mouse motion: time = %.04f, %s%s%s%s%s%s, [%d, %d], (%d, %d)\n", mb->timestamp_seconds, (mb->left ? "left" : ""),
 		       (mb->middle ? "middle" : ""), (mb->right ? "right" : ""), (mb->x1 ? "x1" : ""), (mb->x2 ? "x2" : ""),
 		       (mb->touch ? "_touch" : ""), mb->x, mb->y, mb->motion_x, mb->motion_y);
 	} else
 	{
-		printf("Mouse click: time = %.04f, %d, %s%s%s%s%s%s, %s%s, %s%s, [%d, %d]\n", mb->timestamp_seconds, mb->num_of_clicks,
+		KYTY_LOG_DEBUG("Mouse click: time = %.04f, %d, %s%s%s%s%s%s, %s%s, %s%s, [%d, %d]\n", mb->timestamp_seconds, mb->num_of_clicks,
 		       (mb->left ? "left" : ""), (mb->middle ? "middle" : ""), (mb->right ? "right" : ""), (mb->x1 ? "x1" : ""),
 		       (mb->x2 ? "x2" : ""), (mb->touch ? "_touch" : ""), (mb->down ? "down" : ""), (mb->up ? "up" : ""),
 		       (mb->pressed ? "pressed" : ""), (mb->released ? "released" : ""), mb->x, mb->y);
@@ -865,11 +865,11 @@ void game_event_finger([[maybe_unused]] GameApi* game, [[maybe_unused]] const Ev
 #ifdef KYTY_DBG_INPUT
 	if (f->motion)
 	{
-		printf("Finger motion: time = %.04f, %d, %d, (x,y) = [%f, %f], (dx,dy) = [%f, %f], pressure = %f\n", f->timestamp_seconds,
+		KYTY_LOG_DEBUG("Finger motion: time = %.04f, %d, %d, (x,y) = [%f, %f], (dx,dy) = [%f, %f], pressure = %f\n", f->timestamp_seconds,
 		       f->touch_id, f->finger_id, f->x, f->y, f->dx, f->dy, f->pressure);
 	} else
 	{
-		printf("Finger press: time = %.04f, %d, %d, %s%s, (x,y) = [%f, %f], (dx,dy) = [%f, %f], pressure = %f\n", f->timestamp_seconds,
+		KYTY_LOG_DEBUG("Finger press: time = %.04f, %d, %d, %s%s, (x,y) = [%f, %f], (dx,dy) = [%f, %f], pressure = %f\n", f->timestamp_seconds,
 		       f->touch_id, f->finger_id, (f->down ? "down" : ""), (f->up ? "up" : ""), f->x, f->y, f->dx, f->dy, f->pressure);
 	}
 #endif
@@ -886,14 +886,14 @@ void game_event_controller([[maybe_unused]] GameApi* game, [[maybe_unused]] cons
 #ifdef KYTY_DBG_INPUT
 	if (f->added || f->removed)
 	{
-		printf("Controller %s: %d, time = %.04f\n", (f->added ? "added" : "removed"), f->id, f->timestamp_seconds);
+		KYTY_LOG_DEBUG("Controller %s: %d, time = %.04f\n", (f->added ? "added" : "removed"), f->id, f->timestamp_seconds);
 	} else if (f->axis)
 	{
-		printf("Controller axis: %d, axis = %d, value = %d, time = %.04f\n", f->id, static_cast<int>(f->axis_id), f->axis_value,
+		KYTY_LOG_DEBUG("Controller axis: %d, axis = %d, value = %d, time = %.04f\n", f->id, static_cast<int>(f->axis_id), f->axis_value,
 		       f->timestamp_seconds);
 	} else
 	{
-		printf("Controller button: "
+		KYTY_LOG_DEBUG("Controller button: "
 		       "%d, %s%s, %s%s, button = %d, time = %.04f\n",
 		       f->id, (f->down ? "down" : ""), (f->up ? "up" : ""), (f->pressed ? "pressed" : ""), (f->released ? "released" : ""),
 		       static_cast<int>(f->button), f->timestamp_seconds);
@@ -993,29 +993,29 @@ void game_event_display([[maybe_unused]] GameApi* game, [[maybe_unused]] const E
 
 void game_event_low_memory(GameApi* /*game*/)
 {
-	printf("Event: low_memory\n");
+	KYTY_LOG_DEBUG("Event: low_memory\n");
 }
 
 void game_event_will_enter_background(GameApi* game)
 {
-	printf("Event: will_enter_background\n");
+	KYTY_LOG_DEBUG("Event: will_enter_background\n");
 
 	SetPause(game, true);
 }
 
 void game_event_did_enter_background(GameApi* /*game*/)
 {
-	printf("Event: did_enter_background\n");
+	KYTY_LOG_DEBUG("Event: did_enter_background\n");
 }
 
 void game_event_will_enter_foreground(GameApi* /*game*/)
 {
-	printf("Event: will_enter_foreground\n");
+	KYTY_LOG_DEBUG("Event: will_enter_foreground\n");
 }
 
 void game_event_did_enter_foreground(GameApi* game)
 {
-	printf("Event: did_enter_foreground\n");
+	KYTY_LOG_DEBUG("Event: did_enter_foreground\n");
 
 	SetPause(game, false);
 }
@@ -1058,19 +1058,19 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 {
 	switch (window.event)
 	{
-		case ::Kyty::Emulator::Host::WindowEvent::Shown: printf("Window %" PRIu32 " shown\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Shown: KYTY_LOG_DEBUG("Window %" PRIu32 " shown\n", window.window_id); break;
 
-		case ::Kyty::Emulator::Host::WindowEvent::Hidden: printf("Window %" PRIu32 " hidden\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Hidden: KYTY_LOG_DEBUG("Window %" PRIu32 " hidden\n", window.window_id); break;
 
-		case ::Kyty::Emulator::Host::WindowEvent::Exposed: printf("Window %" PRIu32 " exposed\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Exposed: KYTY_LOG_DEBUG("Window %" PRIu32 " exposed\n", window.window_id); break;
 
 		case ::Kyty::Emulator::Host::WindowEvent::Moved:
-			printf("Window %" PRIu32 " moved to %" PRId32 ",%" PRId32 "\n", window.window_id, window.data1, window.data2);
+			KYTY_LOG_DEBUG("Window %" PRIu32 " moved to %" PRId32 ",%" PRId32 "\n", window.window_id, window.data1, window.data2);
 			break;
 
 		case ::Kyty::Emulator::Host::WindowEvent::Resized:
 		case ::Kyty::Emulator::Host::WindowEvent::SizeChanged:
-			printf("Window %" PRIu32 " drawable size changed to %" PRId32 "x%" PRId32 "\n", window.window_id, window.data1, window.data2);
+			KYTY_LOG_DEBUG("Window %" PRIu32 " drawable size changed to %" PRId32 "x%" PRId32 "\n", window.window_id, window.data1, window.data2);
 			if (game->event_resize != nullptr && window.data1 > 0 && window.data2 > 0 &&
 			    (game->m_screen_width != static_cast<uint32_t>(window.data1) ||
 			     game->m_screen_height != static_cast<uint32_t>(window.data2)))
@@ -1080,26 +1080,26 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 			break;
 
 		case ::Kyty::Emulator::Host::WindowEvent::Minimized:
-			printf("Window %" PRIu32 " minimized\n", window.window_id);
+			KYTY_LOG_DEBUG("Window %" PRIu32 " minimized\n", window.window_id);
 			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
 				g_window_ctx->host_window->SetMinimized(true);
 				SetHostCursorVisible(true);
 			}
 			break;
-		case ::Kyty::Emulator::Host::WindowEvent::Maximized: printf("Window %" PRIu32 " maximized\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Maximized: KYTY_LOG_DEBUG("Window %" PRIu32 " maximized\n", window.window_id); break;
 		case ::Kyty::Emulator::Host::WindowEvent::Restored:
-			printf("Window %" PRIu32 " restored\n", window.window_id);
+			KYTY_LOG_DEBUG("Window %" PRIu32 " restored\n", window.window_id);
 			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
 				g_window_ctx->host_window->SetMinimized(false);
 				UpdateHostCursorPolicy();
 			}
 			break;
-		case ::Kyty::Emulator::Host::WindowEvent::Enter: printf("Mouse entered window %" PRIu32 "\n", window.window_id); break;
-		case ::Kyty::Emulator::Host::WindowEvent::Leave: printf("Mouse left window %" PRIu32 "\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Enter: KYTY_LOG_DEBUG("Mouse entered window %" PRIu32 "\n", window.window_id); break;
+		case ::Kyty::Emulator::Host::WindowEvent::Leave: KYTY_LOG_DEBUG("Mouse left window %" PRIu32 "\n", window.window_id); break;
 		case ::Kyty::Emulator::Host::WindowEvent::FocusGained:
-			printf("Window %" PRIu32 " gained keyboard focus\n", window.window_id);
+			KYTY_LOG_DEBUG("Window %" PRIu32 " gained keyboard focus\n", window.window_id);
 			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
 				g_window_ctx->host_window->SetFocused(true);
@@ -1110,7 +1110,7 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 			}
 			break;
 		case ::Kyty::Emulator::Host::WindowEvent::FocusLost:
-			printf("Window %" PRIu32 " lost keyboard focus\n", window.window_id);
+			KYTY_LOG_DEBUG("Window %" PRIu32 " lost keyboard focus\n", window.window_id);
 			if (g_window_ctx != nullptr && g_window_ctx->host_window != nullptr)
 			{
 				g_window_ctx->host_window->SetFocused(false);
@@ -1120,11 +1120,11 @@ static void process_window_event(GameApi* game, const ::Kyty::Emulator::Host::Wi
 			ApplyKeyboardLeftStickControllerAxes(ResetKeyboardLeftStick(g_keyboard_left_stick));
 			break;
 		case ::Kyty::Emulator::Host::WindowEvent::Close:
-			printf("Window %" PRIu32 " closed\n", window.window_id);
+			KYTY_LOG_DEBUG("Window %" PRIu32 " closed\n", window.window_id);
 			game->m_game_need_exit = true;
 			break;
 		default:
-			printf("Window %" PRIu32 " got unknown event %" PRIu8 "\n", window.window_id,
+			KYTY_LOG_DEBUG("Window %" PRIu32 " got unknown event %" PRIu8 "\n", window.window_id,
 			       static_cast<uint8_t>(window.event));
 			break;
 	}
@@ -1135,21 +1135,21 @@ static void process_display_event(GameApi* game, const ::Kyty::Emulator::Host::D
 	if (!display.native_orientation &&
 	    display.orientation_value != static_cast<int32_t>(::Kyty::Emulator::Host::DisplayOrientation::DisplayEventOrientation))
 	{
-		printf("Display %" PRIu32 " got unknown orientation event 0x%" PRIx32 "\n", display.display,
+		KYTY_LOG_DEBUG("Display %" PRIu32 " got unknown orientation event 0x%" PRIx32 "\n", display.display,
 		       static_cast<uint32_t>(display.orientation_value));
 		return;
 	}
 
-	printf("Display %" PRIu32 "[%s] changed orientation to %" PRId32 " - ", display.display,
+	KYTY_LOG_DEBUG("Display %" PRIu32 "[%s] changed orientation to %" PRId32 " - ", display.display,
 	       display.native_orientation ? "SDL" : "Kyty", display.orientation_value);
 	switch (display.orientation)
 	{
-		case ::Kyty::Emulator::Host::DisplayOrientation::Unknown: printf("UNKNOWN\n"); break;
-		case ::Kyty::Emulator::Host::DisplayOrientation::Landscape: printf("LANDSCAPE\n"); break;
-		case ::Kyty::Emulator::Host::DisplayOrientation::LandscapeFlipped: printf("LANDSCAPE_FLIPPED\n"); break;
-		case ::Kyty::Emulator::Host::DisplayOrientation::Portrait: printf("PORTRAIT\n"); break;
-		case ::Kyty::Emulator::Host::DisplayOrientation::PortraitFlipped: printf("PORTRAIT_FLIPPED\n"); break;
-		default: printf("???\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::Unknown: KYTY_LOG_DEBUG("UNKNOWN\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::Landscape: KYTY_LOG_DEBUG("LANDSCAPE\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::LandscapeFlipped: KYTY_LOG_DEBUG("LANDSCAPE_FLIPPED\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::Portrait: KYTY_LOG_DEBUG("PORTRAIT\n"); break;
+		case ::Kyty::Emulator::Host::DisplayOrientation::PortraitFlipped: KYTY_LOG_DEBUG("PORTRAIT_FLIPPED\n"); break;
+		default: KYTY_LOG_DEBUG("???\n"); break;
 	}
 
 	if (!display.native_orientation && game->event_display != nullptr)
@@ -1194,7 +1194,7 @@ void game_process_event(GameApi* game, double time_s)
 
 	DebugOverlayProcessEvent(input->GetNativeEvent());
 
-	// printf("Event: 0x%04" PRIx32 "\n", event.type);
+	// KYTY_LOG_DEBUG("Event: 0x%04" PRIx32 "\n", event.type);
 
 	EXIT_IF(!input->DisplayEventsEnabled());
 
@@ -1270,7 +1270,7 @@ void game_process_event(GameApi* game, double time_s)
 		{
 			EventMouse mb = event->mouse;
 
-			// printf("event.button.which = %" PRIu32"\n", event.button.which);
+			// KYTY_LOG_DEBUG("event.button.which = %" PRIu32"\n", event.button.which);
 
 			mb.timestamp_seconds = time_s;
 
@@ -1771,7 +1771,7 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		vkGetPhysicalDeviceProperties(device, &device_properties);
 		vkGetPhysicalDeviceFeatures2(device, &device_features2);
 
-		printf("Vulkan device: %s\n", device_properties.deviceName);
+		KYTY_LOG_DEBUG("Vulkan device: %s\n", device_properties.deviceName);
 
 		VulkanQueues qs;
 		VulkanFindQueues(device, surface, GraphicContext::QUEUE_GFX_NUM, GraphicContext::QUEUE_COMPUTE_NUM, GraphicContext::QUEUE_UTIL_NUM,
@@ -1781,7 +1781,7 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		    !(qs.compute.Size() >= 1 && qs.compute.Size() <= GraphicContext::QUEUE_COMPUTE_NUM) ||
 		    qs.transfer.Size() != GraphicContext::QUEUE_UTIL_NUM || qs.present.Size() != GraphicContext::QUEUE_PRESENT_NUM)
 		{
-			printf("Not enough queues\n");
+			KYTY_LOG_DEBUG("Not enough queues\n");
 			skip_device = true;
 		}
 
@@ -1789,42 +1789,42 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		{
 			// Not fatal: without VK_EXT_color_write_enable (e.g. MoltenVK) we bake
 			// the color write mask into the pipeline instead of using dynamic state.
-			printf("colorWriteEnable is not supported (using pipeline fallback)\n");
+			KYTY_LOG_DEBUG("colorWriteEnable is not supported (using pipeline fallback)\n");
 		}
 
 		if (device_features2.features.fragmentStoresAndAtomics != VK_TRUE)
 		{
-			printf("fragmentStoresAndAtomics is not supported\n");
+			KYTY_LOG_DEBUG("fragmentStoresAndAtomics is not supported\n");
 			skip_device = true;
 		}
 		if (device_features2.features.vertexPipelineStoresAndAtomics != VK_TRUE)
 		{
-			printf("vertexPipelineStoresAndAtomics is not supported\n");
+			KYTY_LOG_DEBUG("vertexPipelineStoresAndAtomics is not supported\n");
 			skip_device = true;
 		}
 
 		if (device_features2.features.robustBufferAccess != VK_TRUE)
 		{
-			printf("robustBufferAccess is not supported\n");
+			KYTY_LOG_DEBUG("robustBufferAccess is not supported\n");
 			skip_device = true;
 		}
 
 		if (device_features2.features.samplerAnisotropy != VK_TRUE)
 		{
-			printf("samplerAnisotropy is not supported\n");
+			KYTY_LOG_DEBUG("samplerAnisotropy is not supported\n");
 			skip_device = true;
 		}
 
 		if (device_features2.features.shaderStorageImageReadWithoutFormat != VK_TRUE ||
 		    device_features2.features.shaderStorageImageWriteWithoutFormat != VK_TRUE)
 		{
-			printf("formatless storage images are not supported\n");
+			KYTY_LOG_DEBUG("formatless storage images are not supported\n");
 			skip_device = true;
 		}
 
 		//		if (device_features2.features.shaderImageGatherExtended != VK_TRUE)
 		//		{
-		//			printf("shaderImageGatherExtended is not supported\n");
+		//			KYTY_LOG_DEBUG("shaderImageGatherExtended is not supported\n");
 		//			skip_device = true;
 		//		}
 
@@ -1852,7 +1852,7 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 				}
 				if (!available_extensions.Contains(ext, [](auto p, auto ext) { return strcmp(p.extensionName, ext) == 0; }))
 				{
-					printf("Vulkan device extension missing: %s\n", ext);
+					KYTY_LOG_DEBUG("Vulkan device extension missing: %s\n", ext);
 					skip_device = true;
 					break;
 				}
@@ -1862,7 +1862,7 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 			{
 				for (const auto& ext: available_extensions)
 				{
-					printf("Vulkan available extension: %s, version = %u\n", ext.extensionName, ext.specVersion);
+					KYTY_LOG_DEBUG("Vulkan available extension: %s, version = %u\n", ext.extensionName, ext.specVersion);
 				}
 			}
 		}
@@ -1873,32 +1873,32 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 
 			if ((out_capabilities->capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0)
 			{
-				printf("Surface cannot be destination of blit\n");
+				KYTY_LOG_DEBUG("Surface cannot be destination of blit\n");
 				skip_device = true;
 			}
 		}
 
 		if (!skip_device && !CheckFormat(device, VK_FORMAT_R8G8B8A8_SRGB, true, VK_FORMAT_FEATURE_BLIT_SRC_BIT))
 		{
-			printf("Format VK_FORMAT_R8G8B8A8_SRGB cannot be used as transfer source\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_R8G8B8A8_SRGB cannot be used as transfer source\n");
 			skip_device = true;
 		}
 
 		if (!skip_device && !CheckFormat(device, VK_FORMAT_D32_SFLOAT, true, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
 		{
-			printf("Format VK_FORMAT_D32_SFLOAT cannot be used as depth buffer\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_D32_SFLOAT cannot be used as depth buffer\n");
 			skip_device = true;
 		}
 
 		if (!skip_device && !CheckFormat(device, VK_FORMAT_D32_SFLOAT_S8_UINT, true, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
 		{
-			printf("Format VK_FORMAT_D32_SFLOAT_S8_UINT cannot be used as depth buffer\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_D32_SFLOAT_S8_UINT cannot be used as depth buffer\n");
 			skip_device = true;
 		}
 
 		if (!skip_device && !CheckFormat(device, VK_FORMAT_D16_UNORM, true, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
 		{
-			printf("Format VK_FORMAT_D16_UNORM cannot be used as depth buffer\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_D16_UNORM cannot be used as depth buffer\n");
 			skip_device = true;
 		}
 
@@ -1906,60 +1906,60 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		{
 			// Apple GPUs / MoltenVK do not support D24_UNORM_S8_UINT; D32_SFLOAT_S8_UINT
 			// (validated above) is used instead, so this is not fatal.
-			printf("Format VK_FORMAT_D24_UNORM_S8_UINT cannot be used as depth buffer (using D32_SFLOAT_S8_UINT)\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_D24_UNORM_S8_UINT cannot be used as depth buffer (using D32_SFLOAT_S8_UINT)\n");
 		}
 
 		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_BC3_SRGB_BLOCK, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
-			printf("Format VK_FORMAT_BC3_SRGB_BLOCK cannot be used as texture\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_BC3_SRGB_BLOCK cannot be used as texture\n");
 			skip_device = true;
 		}
 
 		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_BC7_UNORM_BLOCK, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
-			printf("Format VK_FORMAT_BC7_UNORM_BLOCK cannot be used as texture\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_BC7_UNORM_BLOCK cannot be used as texture\n");
 			skip_device = true;
 		}
 
 		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_BC7_SRGB_BLOCK, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
-			printf("Format VK_FORMAT_BC7_SRGB_BLOCK cannot be used as texture\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_BC7_SRGB_BLOCK cannot be used as texture\n");
 			skip_device = true;
 		}
 
 		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_R8G8B8A8_SRGB, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
-			printf("Format VK_FORMAT_R8G8B8A8_SRGB cannot be used as texture\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_R8G8B8A8_SRGB cannot be used as texture\n");
 			skip_device = true;
 		}
 
 		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_R8_UNORM, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
-			printf("Format VK_FORMAT_R8_UNORM cannot be used as texture\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_R8_UNORM cannot be used as texture\n");
 			skip_device = true;
 		}
 
 		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_R8G8_UNORM, true, VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
-			printf("Format VK_FORMAT_R8G8_UNORM cannot be used as texture\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_R8G8_UNORM cannot be used as texture\n");
 			skip_device = true;
 		}
 
 		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_R8G8B8A8_SRGB, true, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
-			printf("Format VK_FORMAT_R8G8B8A8_SRGB cannot be used as texture\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_R8G8B8A8_SRGB cannot be used as texture\n");
 
 			if (!skip_device && !CheckFormat(device, VK_FORMAT_R8G8B8A8_UNORM, true,
 			                                 VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 			{
-				printf("Format VK_FORMAT_R8G8B8A8_UNORM cannot be used as texture\n");
+				KYTY_LOG_DEBUG("Format VK_FORMAT_R8G8B8A8_UNORM cannot be used as texture\n");
 				skip_device = true;
 			}
 		}
@@ -1967,25 +1967,25 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		if (!skip_device &&
 		    !CheckFormat(device, VK_FORMAT_B8G8R8A8_SRGB, true, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 		{
-			printf("Format VK_FORMAT_B8G8R8A8_SRGB cannot be used as texture\n");
+			KYTY_LOG_DEBUG("Format VK_FORMAT_B8G8R8A8_SRGB cannot be used as texture\n");
 
 			if (!skip_device && !CheckFormat(device, VK_FORMAT_B8G8R8A8_UNORM, true,
 			                                 VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
 			{
-				printf("Format VK_FORMAT_B8G8R8A8_UNORM cannot be used as texture\n");
+				KYTY_LOG_DEBUG("Format VK_FORMAT_B8G8R8A8_UNORM cannot be used as texture\n");
 				skip_device = true;
 			}
 		}
 
 		/*if (!skip_device && !CheckFormat(device, VK_FORMAT_S8_UINT, true, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
 		{
-		    printf("Format VK_FORMAT_S8_UINT cannot be used as depth buffer");
+		    KYTY_LOG_DEBUG("Format VK_FORMAT_S8_UINT cannot be used as depth buffer");
 		    skip_device = true;
 		}*/
 
 		if (!skip_device && device_properties.limits.maxSamplerAnisotropy < 16.0f)
 		{
-			printf("maxSamplerAnisotropy < 16.0f");
+			KYTY_LOG_DEBUG("maxSamplerAnisotropy < 16.0f");
 			skip_device = true;
 		}
 
@@ -2132,12 +2132,12 @@ static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window
 
 	for (const char* ext: r->required_extensions)
 	{
-		printf("Vulkan required extension: %s\n", ext);
+		KYTY_LOG_DEBUG("Vulkan required extension: %s\n", ext);
 	}
 
 	for (const auto& ext: r->available_extensions)
 	{
-		printf("Vulkan available extension: %s, version = %u\n", ext.extensionName, ext.specVersion);
+		KYTY_LOG_DEBUG("Vulkan available extension: %s, version = %u\n", ext.extensionName, ext.specVersion);
 	}
 
 	vkEnumerateInstanceLayerProperties(&available_layers_count, nullptr);
@@ -2150,7 +2150,7 @@ static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window
 
 	for (const auto& l: r->available_layers)
 	{
-		printf("Vulkan available layer: %s, specVersion = %u, implVersion = %u, %s\n", l.layerName, l.specVersion, l.implementationVersion,
+		KYTY_LOG_DEBUG("Vulkan available layer: %s, specVersion = %u, implVersion = %u, %s\n", l.layerName, l.specVersion, l.implementationVersion,
 		       l.description);
 	}
 
@@ -2162,7 +2162,7 @@ static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window
 		{
 			if (!r->available_layers.Contains(l, [](auto s, auto l) { return strcmp(s.layerName, l) == 0; }))
 			{
-				printf("no validation layer: %s\n", l);
+				KYTY_LOG_DEBUG("no validation layer: %s\n", l);
 				r->enable_validation_layers = false;
 				break;
 			}
@@ -2179,7 +2179,7 @@ static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window
 
 		for (const auto& ext: available_extensions)
 		{
-			printf("VK_LAYER_KHRONOS_validation available extension: %s, version = %u\n", ext.extensionName, ext.specVersion);
+			KYTY_LOG_DEBUG("VK_LAYER_KHRONOS_validation available extension: %s, version = %u\n", ext.extensionName, ext.specVersion);
 		}
 
 		// Optional: keep validation layers even when VK_EXT_validation_features is
@@ -2241,7 +2241,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugMessengerCallback(VkDebugUtilsM
 
 	if (!skip)
 	{
-		printf("%s[Vulkan][%s][%u]: %s%s\n", severity_color, severity_str, static_cast<uint32_t>(message_types), callback_data->pMessage,
+		KYTY_LOG_DEBUG("%s[Vulkan][%s][%u]: %s%s\n", severity_color, severity_str, static_cast<uint32_t>(message_types), callback_data->pMessage,
 		       FG_DEFAULT);
 	}
 
@@ -2250,7 +2250,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugMessengerCallback(VkDebugUtilsM
 		auto strs = String::FromUtf8(callback_data->pMessage).Split(U'|');
 		if (!strs.IsEmpty())
 		{
-			printf("%s%s%s\n", severity_color, strs.At(strs.Size() - 1).C_Str(), FG_DEFAULT);
+			KYTY_LOG_DEBUG("%s%s%s\n", severity_color, strs.At(strs.Size() - 1).C_Str(), FG_DEFAULT);
 		}
 	}
 
@@ -2389,10 +2389,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	const VkResult create_result = vkCreateSwapchainKHR(device, &create_info, nullptr, &swapchain);
 	if (create_result != VK_SUCCESS || swapchain == nullptr)
 	{
-		printf("vkCreateSwapchainKHR failed: result = %d\n", static_cast<int>(create_result));
+		KYTY_LOG_DEBUG("vkCreateSwapchainKHR failed: result = %d\n", static_cast<int>(create_result));
 		return nullptr;
 	}
-	printf("Swapchain presentMode=%d extent=%ux%u minImageCount=%u\n", static_cast<int>(create_info.presentMode), extent.width,
+	KYTY_LOG_DEBUG("Swapchain presentMode=%d extent=%ux%u minImageCount=%u\n", static_cast<int>(create_info.presentMode), extent.width,
 	       extent.height, create_info.minImageCount);
 
 	vkGetSwapchainImagesKHR(device, swapchain, swapchain_images_count, nullptr);
@@ -2569,7 +2569,7 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 	}
 
 	s->current_index = static_cast<uint32_t>(-1);
-	printf("Swapchain recreated: %ux%u images=%u\n", s->swapchain_extent.width, s->swapchain_extent.height, s->swapchain_images_count);
+	KYTY_LOG_DEBUG("Swapchain recreated: %ux%u images=%u\n", s->swapchain_extent.width, s->swapchain_extent.height, s->swapchain_images_count);
 
 	DebugOverlayOnSwapchainRecreated(ctx, s);
 }
@@ -2721,21 +2721,21 @@ static void VulkanCreate(WindowContext* ctx)
 		if (!ctx->graphic_ctx.color_write_enable_supported)
 		{
 			drop_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
-			printf("VK_EXT_color_write_enable absent: baking color write mask into pipelines\n");
+			KYTY_LOG_DEBUG("VK_EXT_color_write_enable absent: baking color write mask into pipelines\n");
 		}
 
 		ctx->graphic_ctx.depth_clip_enable_supported = has_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
 		if (!ctx->graphic_ctx.depth_clip_enable_supported)
 		{
 			drop_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
-			printf("VK_EXT_depth_clip_enable absent: using depthClampEnable fallback\n");
+			KYTY_LOG_DEBUG("VK_EXT_depth_clip_enable absent: using depthClampEnable fallback\n");
 		}
 
 		ctx->graphic_ctx.depth_clip_control_supported = has_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
 		if (!ctx->graphic_ctx.depth_clip_control_supported)
 		{
 			drop_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
-			printf("VK_EXT_depth_clip_control absent: OpenGL clip space needs host remapping\n");
+			KYTY_LOG_DEBUG("VK_EXT_depth_clip_control absent: OpenGL clip space needs host remapping\n");
 		} else if (!device_extensions.Contains(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME, [](auto s, auto l) { return strcmp(s, l) == 0; }))
 		{
 			device_extensions.Add(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
@@ -2757,7 +2757,7 @@ static void VulkanCreate(WindowContext* ctx)
 		if (ctx->graphic_ctx.sample_location_capabilities.extension_enabled == 0)
 		{
 			drop_ext(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME);
-			printf("VK_EXT_sample_locations absent: custom sample locations are unavailable\n");
+			KYTY_LOG_DEBUG("VK_EXT_sample_locations absent: custom sample locations are unavailable\n");
 		} else
 		{
 			VkPhysicalDeviceSampleLocationsPropertiesEXT sample_location_properties {};
@@ -2806,7 +2806,7 @@ static void VulkanCreate(WindowContext* ctx)
 	ctx->graphic_ctx.depth_bias_clamp_supported    = device_features.depthBiasClamp == VK_TRUE;
 	ctx->graphic_ctx.sample_rate_shading_supported = device_features.sampleRateShading == VK_TRUE;
 
-	printf("Select device: %s\n", device_properties.deviceName);
+	KYTY_LOG_DEBUG("Select device: %s\n", device_properties.deviceName);
 
 	memcpy(ctx->device_name, device_properties.deviceName, sizeof(ctx->device_name));
 	memcpy(ctx->processor_name, Core::GetSystemInfo().ProcessorName.C_Str(), sizeof(ctx->processor_name));
@@ -3012,7 +3012,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	if (result == VK_ERROR_OUT_OF_DATE_KHR)
 	{
-		printf("vkAcquireNextImageKHR: result = %d, recreating swapchain\n", static_cast<int>(result));
+		KYTY_LOG_DEBUG("vkAcquireNextImageKHR: result = %d, recreating swapchain\n", static_cast<int>(result));
 		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
 		g_window_ctx->swapchain->current_index = static_cast<uint32_t>(-1);
 		result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, UINT64_MAX, nullptr,
@@ -3027,7 +3027,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	if (result != VK_SUCCESS)
 	{
-		printf("vkAcquireNextImageKHR failed: result = %d\n", static_cast<int>(result));
+		KYTY_LOG_DEBUG("vkAcquireNextImageKHR failed: result = %d\n", static_cast<int>(result));
 	}
 	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
 	EXIT_NOT_IMPLEMENTED(g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1));
