@@ -572,7 +572,7 @@ set_tests_properties(KytyGraphicsTables.SyntheticFixtures PROPERTIES TIMEOUT 15)
 add_test(
 	NAME KytyArchitectureBoundaryIntegration.Repository
 	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration>
-		"${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" "${CMAKE_SOURCE_DIR}"
+		"${Python3_EXECUTABLE}" "${KYTY_ARCHITECTURE_BOUNDARY_CHECKER}" "${CMAKE_SOURCE_DIR}" --strict
 )
 set_tests_properties(KytyArchitectureBoundaryIntegration.Repository PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries

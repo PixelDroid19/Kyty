@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from typing import Iterable, List, Optional, Tuple
@@ -148,6 +149,9 @@ KERNEL_LOADER_INCLUDE_PREFIXES = (
     "emulator/include/Emulator/Loader/",
 )
 KERNEL_TIME_INCLUDE = "Emulator/Kernel/Time.h"
+KERNEL_IMPLEMENTATION_ROOT = "emulator/src/Kernel"
+KERNEL_NAMESPACE_PATTERN = re.compile(r"\bnamespace\s+Kyty::Kernel(?:\s*::|\s*\{)")
+LEGACY_KERNEL_NAMESPACE_PATTERN = re.compile(r"\bnamespace\s+Kyty::Libs(?:\s*::|\s*\{)")
 
 @dataclass(frozen=True)
 class Violation:
@@ -355,6 +359,43 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
     ):
         return "RuntimeLinker -> Profiler"
     return None
+
+
+def _strict_kernel_namespace_diagnostics(source_root: Path) -> List[Tuple[str, str]]:
+    """Ensure every kernel implementation belongs to the guest-kernel namespace."""
+
+    implementation_root = source_root.joinpath(*Path(KERNEL_IMPLEMENTATION_ROOT).parts)
+    try:
+        implementation_files = sorted(implementation_root.glob("*.cpp"))
+    except OSError as error:
+        return [(KERNEL_IMPLEMENTATION_ROOT, f"{KERNEL_IMPLEMENTATION_ROOT}: unable to enumerate kernel sources: {error}")]
+
+    diagnostics: List[Tuple[str, str]] = []
+    for implementation_file in implementation_files:
+        if not implementation_file.is_file():
+            continue
+        relative_path = implementation_file.relative_to(source_root).as_posix()
+        contents, input_error = _read_allowlisted_source(source_root, relative_path)
+        if input_error is not None:
+            diagnostics.append((relative_path, input_error))
+            continue
+        if contents is None:
+            continue
+        if LEGACY_KERNEL_NAMESPACE_PATTERN.search(contents):
+            diagnostics.append(
+                (
+                    relative_path,
+                    f"{relative_path}: kernel implementation must not use the Kyty::Libs namespace",
+                )
+            )
+        if not KERNEL_NAMESPACE_PATTERN.search(contents):
+            diagnostics.append(
+                (
+                    relative_path,
+                    f"{relative_path}: kernel implementation must declare a Kyty::Kernel namespace",
+                )
+            )
+    return diagnostics
 
 
 def _splice_escaped_newlines(contents: str) -> Tuple[str, List[int]]:
@@ -613,6 +654,8 @@ def check_source_root(source_root: Path, strict: bool = False) -> CheckResult:
 
     assert root is not None
     input_diagnostics: List[Tuple[str, str]] = []
+    if strict:
+        input_diagnostics.extend(_strict_kernel_namespace_diagnostics(root))
     violations: List[Violation] = []
     for relative_path in ALLOWED_SOURCE_FILES:
         contents, input_error = _read_allowlisted_source(root, relative_path)
@@ -1349,10 +1392,44 @@ class BoundaryCheckerTests(unittest.TestCase):
             self.assertEqual(check_source_root(root), expected)
             self.assertEqual(check_source_root(root, strict=True), expected)
 
+    def test_strict_rejects_legacy_kernel_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/src/Kernel/EventFlag.cpp",
+                "namespace Kyty::Libs {}\nnamespace Kyty::Kernel {}\n",
+            )
+
+            self.assertEqual(
+                check_source_root(root, strict=True),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Kernel/EventFlag.cpp: kernel implementation must not use the Kyty::Libs namespace",
+                    ),
+                ),
+            )
+
+    def test_strict_rejects_kernel_source_without_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, "emulator/src/Kernel/EventFlag.cpp", "int kernel_fixture;\n")
+
+            self.assertEqual(
+                check_source_root(root, strict=True),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Kernel/EventFlag.cpp: kernel implementation must declare a Kyty::Kernel namespace",
+                    ),
+                ),
+            )
+
 def parse_arguments(argv: Optional[Iterable[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_root", nargs="?", type=Path, help="path to the source root")
-    parser.add_argument("--strict", action="store_true", help="compatibility spelling; the normal policy already rejects every guarded edge")
+    parser.add_argument("--strict", action="store_true", help="also enforce implementation namespaces for every kernel source")
     parser.add_argument("--self-test", action="store_true", help="run checker fixture tests")
     arguments = parser.parse_args(argv)
     if arguments.self_test:
