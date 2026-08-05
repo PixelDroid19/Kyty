@@ -5,6 +5,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 #include "Emulator/Loader/SystemContent.h"
 
 #include <cstring>
@@ -66,9 +67,9 @@ int KYTY_SYSV_ABI PlayGoInitialize(const PlayGoInitParams* init)
 
 	EXIT_NOT_IMPLEMENTED(init == nullptr);
 
-	printf("\t buf_addr = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(init->buf_addr));
-	printf("\t buf_size = %" PRIu32 "\n", init->buf_size);
-	printf("\t reserved = %" PRId32 "\n", init->reserved);
+	KYTY_LOG_DEBUG("\t buf_addr = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(init->buf_addr));
+	KYTY_LOG_DEBUG("\t buf_size = %" PRIu32 "\n", init->buf_size);
+	KYTY_LOG_DEBUG("\t reserved = %" PRId32 "\n", init->reserved);
 
 	return OK;
 }
@@ -91,7 +92,7 @@ int KYTY_SYSV_ABI PlayGoOpen(int* out_handle, const void* param)
 
 	if (!Loader::SystemContentGetChunksNum(&g_chunks_num))
 	{
-		printf("Warning: assume that chunks count is 1\n");
+		KYTY_LOG_DEBUG("Warning: assume that chunks count is 1\n");
 		g_chunks_num = 1;
 	}
 
@@ -111,7 +112,7 @@ int KYTY_SYSV_ABI PlayGoGetLocus(int handle, const uint16_t* chunk_ids, uint32_t
 {
 	PRINT_NAME();
 
-	printf("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 
 	EXIT_NOT_IMPLEMENTED(handle != 1);
 	EXIT_NOT_IMPLEMENTED(chunk_ids == nullptr);
@@ -121,7 +122,7 @@ int KYTY_SYSV_ABI PlayGoGetLocus(int handle, const uint16_t* chunk_ids, uint32_t
 
 	for (uint32_t i = 0; i < number_of_entries; i++)
 	{
-		printf("\t chunk_ids[%u] = %" PRIu16 "\n", i, chunk_ids[i]);
+		KYTY_LOG_DEBUG("\t chunk_ids[%u] = %" PRIu16 "\n", i, chunk_ids[i]);
 
 		if (chunk_ids[i] <= g_chunks_num)
 		{
@@ -139,8 +140,8 @@ int KYTY_SYSV_ABI PlayGoGetLocus(int handle, const uint16_t* chunk_ids, uint32_t
 static int KYTY_SYSV_ABI PlayGoSetInstallSpeed(int handle, int32_t speed)
 {
 	PRINT_NAME();
-	printf("\t handle = %d\n", handle);
-	printf("\t speed  = %" PRId32 "\n", speed);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t speed  = %" PRId32 "\n", speed);
 	if (handle != 1)
 	{
 		return PLAYGO_ERROR_BAD_HANDLE;
@@ -158,10 +159,10 @@ static int KYTY_SYSV_ABI PlayGoGetChunkId(int handle, uint16_t* out_chunk_id_lis
                                           uint32_t number_of_entries, uint32_t* out_entries)
 {
 	PRINT_NAME();
-	printf("\t handle            = %d\n", handle);
-	printf("\t out_chunk_id_list = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(out_chunk_id_list));
-	printf("\t number_of_entries = %" PRIu32 "\n", number_of_entries);
-	printf("\t out_entries       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(out_entries));
+	KYTY_LOG_DEBUG("\t handle            = %d\n", handle);
+	KYTY_LOG_DEBUG("\t out_chunk_id_list = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(out_chunk_id_list));
+	KYTY_LOG_DEBUG("\t number_of_entries = %" PRIu32 "\n", number_of_entries);
+	KYTY_LOG_DEBUG("\t out_entries       = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(out_entries));
 	if (handle != 1)
 	{
 		return PLAYGO_ERROR_BAD_HANDLE;
@@ -235,8 +236,8 @@ static int KYTY_SYSV_ABI PlayGoGetLanguageMask(int handle, uint64_t* mask)
 static int KYTY_SYSV_ABI PlayGoSetLanguageMask(int handle, uint64_t mask)
 {
 	PRINT_NAME();
-	printf("\t handle = %d\n", handle);
-	printf("\t mask   = %" PRIu64 "\n", mask);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t mask   = %" PRIu64 "\n", mask);
 	return (handle == 1 ? OK : PLAYGO_ERROR_BAD_HANDLE);
 }
 
@@ -258,8 +259,8 @@ static int KYTY_SYSV_ABI PlayGoGetToDoList(int handle, void* out_list, uint32_t 
 static int KYTY_SYSV_ABI PlayGoSetToDoList(int handle, const void* list, uint32_t number_of_entries)
 {
 	PRINT_NAME();
-	printf("\t handle            = %d\n", handle);
-	printf("\t number_of_entries = %" PRIu32 "\n", number_of_entries);
+	KYTY_LOG_DEBUG("\t handle            = %d\n", handle);
+	KYTY_LOG_DEBUG("\t number_of_entries = %" PRIu32 "\n", number_of_entries);
 	(void)list;
 	return (handle == 1 ? OK : PLAYGO_ERROR_BAD_HANDLE);
 }

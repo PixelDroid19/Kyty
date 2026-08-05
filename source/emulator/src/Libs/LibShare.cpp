@@ -1,6 +1,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -21,9 +22,9 @@ static std::atomic_int g_share_initialized {0};
 static KYTY_SYSV_ABI int ShareInitialize(size_t memory_size, int priority, uint64_t affinity_mask)
 {
 	PRINT_NAME();
-	printf("\t memory_size         = 0x%016" PRIx64 "\n", static_cast<uint64_t>(memory_size));
-	printf("\t priority            = %d\n", priority);
-	printf("\t affinity_mask       = 0x%016" PRIx64 "\n", affinity_mask);
+	KYTY_LOG_DEBUG("\t memory_size         = 0x%016" PRIx64 "\n", static_cast<uint64_t>(memory_size));
+	KYTY_LOG_DEBUG("\t priority            = %d\n", priority);
+	KYTY_LOG_DEBUG("\t affinity_mask       = 0x%016" PRIx64 "\n", affinity_mask);
 	if (memory_size == 0)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -38,14 +39,14 @@ static KYTY_SYSV_ABI int ShareInitialize(size_t memory_size, int priority, uint6
 static KYTY_SYSV_ABI int ShareSetContentParam(const char* content_param)
 {
 	PRINT_NAME();
-	printf("\t content_param = %s\n", content_param != nullptr ? content_param : "(null)");
+	KYTY_LOG_DEBUG("\t content_param = %s\n", content_param != nullptr ? content_param : "(null)");
 	if (content_param == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	if (g_share_initialized.load(std::memory_order_relaxed) == 0)
 	{
-		printf("\t note: set_content_param before initialize\n");
+		KYTY_LOG_DEBUG("\t note: set_content_param before initialize\n");
 	}
 	return OK;
 }
@@ -58,10 +59,10 @@ static KYTY_SYSV_ABI int ShareSetContentParam(const char* content_param)
 static KYTY_SYSV_ABI int ShareLogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
 {
 	PRINT_NAME();
-	printf("\t a0 = 0x%016" PRIx64 "\n", a0);
-	printf("\t a1 = 0x%016" PRIx64 "\n", a1);
-	printf("\t a2 = 0x%016" PRIx64 "\n", a2);
-	printf("\t a3 = 0x%016" PRIx64 "\n", a3);
+	KYTY_LOG_DEBUG("\t a0 = 0x%016" PRIx64 "\n", a0);
+	KYTY_LOG_DEBUG("\t a1 = 0x%016" PRIx64 "\n", a1);
+	KYTY_LOG_DEBUG("\t a2 = 0x%016" PRIx64 "\n", a2);
+	KYTY_LOG_DEBUG("\t a3 = 0x%016" PRIx64 "\n", a3);
 	return OK;
 }
 
@@ -70,8 +71,8 @@ static KYTY_SYSV_ABI int ShareLogAndOk(uint64_t a0, uint64_t a1, uint64_t a2, ui
 static KYTY_SYSV_ABI int ShareRegisterContentEventCallback(void* callback, void* user_data)
 {
 	PRINT_NAME();
-	printf("\t callback  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback));
-	printf("\t user_data = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_data));
+	KYTY_LOG_DEBUG("\t callback  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback));
+	KYTY_LOG_DEBUG("\t user_data = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_data));
 	return OK;
 }
 
@@ -79,7 +80,7 @@ static KYTY_SYSV_ABI int ShareRegisterContentEventCallback(void* callback, void*
 static KYTY_SYSV_ABI int ShareUnregisterContentEventCallback(void* callback)
 {
 	PRINT_NAME();
-	printf("\t callback = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback));
+	KYTY_LOG_DEBUG("\t callback = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(callback));
 	return OK;
 }
 

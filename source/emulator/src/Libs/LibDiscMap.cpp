@@ -3,6 +3,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -23,10 +24,10 @@ static KYTY_SYSV_ABI int DiscMapIsRequestOnHDD(const char* file, uint64_t a2, ui
 {
 	PRINT_NAME();
 
-	printf("\tfile = %s\n", file);
-	printf("\ta2 = %016" PRIx64 "\n", a2);
-	printf("\ta3 = %016" PRIx64 "\n", a3);
-	printf("\t*a4 = %08" PRIx32 "\n", *a4);
+	KYTY_LOG_DEBUG("\tfile = %s\n", file);
+	KYTY_LOG_DEBUG("\ta2 = %016" PRIx64 "\n", a2);
+	KYTY_LOG_DEBUG("\ta3 = %016" PRIx64 "\n", a3);
+	KYTY_LOG_DEBUG("\t*a4 = %08" PRIx32 "\n", *a4);
 
 	return 0;
 }
@@ -35,12 +36,12 @@ static KYTY_SYSV_ABI int Unknown1(const char* file, uint64_t a2, uint64_t a3, co
 {
 	PRINT_NAME();
 
-	printf("\tfile = %s\n", file);
-	printf("\ta2 = %016" PRIx64 "\n", a2);
-	printf("\ta3 = %016" PRIx64 "\n", a3);
-	printf("\t*a4 = %016" PRIx64 "\n", *a4);
-	printf("\t*a5 = %016" PRIx64 "\n", *a5);
-	printf("\t*a6 = %016" PRIx64 "\n", *a6);
+	KYTY_LOG_DEBUG("\tfile = %s\n", file);
+	KYTY_LOG_DEBUG("\ta2 = %016" PRIx64 "\n", a2);
+	KYTY_LOG_DEBUG("\ta3 = %016" PRIx64 "\n", a3);
+	KYTY_LOG_DEBUG("\t*a4 = %016" PRIx64 "\n", *a4);
+	KYTY_LOG_DEBUG("\t*a5 = %016" PRIx64 "\n", *a5);
+	KYTY_LOG_DEBUG("\t*a6 = %016" PRIx64 "\n", *a6);
 
 	return 0;
 }
@@ -49,12 +50,12 @@ static KYTY_SYSV_ABI int Unknown2(const char* file, uint64_t a2, uint64_t a3, co
 {
 	PRINT_NAME();
 
-	printf("\tfile = %s\n", file);
-	printf("\ta2 = %016" PRIx64 "\n", a2);
-	printf("\ta3 = %016" PRIx64 "\n", a3);
-	printf("\t*a4 = %016" PRIx64 "\n", *a4);
-	printf("\t*a5 = %016" PRIx64 "\n", *a5);
-	printf("\t*a6 = %016" PRIx64 "\n", *a6);
+	KYTY_LOG_DEBUG("\tfile = %s\n", file);
+	KYTY_LOG_DEBUG("\ta2 = %016" PRIx64 "\n", a2);
+	KYTY_LOG_DEBUG("\ta3 = %016" PRIx64 "\n", a3);
+	KYTY_LOG_DEBUG("\t*a4 = %016" PRIx64 "\n", *a4);
+	KYTY_LOG_DEBUG("\t*a5 = %016" PRIx64 "\n", *a5);
+	KYTY_LOG_DEBUG("\t*a6 = %016" PRIx64 "\n", *a6);
 
 	return 0;
 }

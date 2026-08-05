@@ -9,6 +9,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include <algorithm>
 
@@ -67,8 +68,8 @@ static void AllocShadow(uintptr_t min_addr, uintptr_t max_addr)
 
 	auto size = max_shadow - min_shadow + page_size;
 
-	printf("\t shadow = %016" PRIx64 "\n", static_cast<uint64_t>(min_shadow));
-	printf("\t size   = %016" PRIx64 "\n", static_cast<uint64_t>(size));
+	KYTY_LOG_DEBUG("\t shadow = %016" PRIx64 "\n", static_cast<uint64_t>(min_shadow));
+	KYTY_LOG_DEBUG("\t size   = %016" PRIx64 "\n", static_cast<uint64_t>(size));
 
 	for (uintptr_t page = min_shadow; page <= max_shadow; page += page_size)
 	{
@@ -103,8 +104,8 @@ static void FreeShadow(uintptr_t min_addr, uintptr_t max_addr)
 
 	auto size = max_shadow - min_shadow + page_size;
 
-	printf("\t shadow = %016" PRIx64 "\n", static_cast<uint64_t>(min_shadow));
-	printf("\t size   = %016" PRIx64 "\n", static_cast<uint64_t>(size));
+	KYTY_LOG_DEBUG("\t shadow = %016" PRIx64 "\n", static_cast<uint64_t>(min_shadow));
+	KYTY_LOG_DEBUG("\t size   = %016" PRIx64 "\n", static_cast<uint64_t>(size));
 
 	for (uintptr_t page = min_shadow; page <= max_shadow; page += page_size)
 	{
@@ -164,9 +165,9 @@ static void KYTY_SYSV_ABI asan_register_elf_globals(uintptr_t* flag, Global* sta
 {
 	PRINT_NAME();
 
-	printf("\t flag  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(flag));
-	printf("\t start = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(start));
-	printf("\t stop  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(stop));
+	KYTY_LOG_DEBUG("\t flag  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(flag));
+	KYTY_LOG_DEBUG("\t start = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(start));
+	KYTY_LOG_DEBUG("\t stop  = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(stop));
 
 	if (flag == nullptr || start == nullptr || stop == nullptr)
 	{
@@ -189,17 +190,17 @@ static void KYTY_SYSV_ABI asan_register_elf_globals(uintptr_t* flag, Global* sta
 		{
 			auto* g = start + i;
 
-			printf("asan global:\n");
-			printf("\t beg               = %016" PRIx64 "\n", static_cast<uint64_t>(g->beg));
-			printf("\t size              = %016" PRIx64 "\n", static_cast<uint64_t>(g->size));
-			printf("\t size_with_redzone = %016" PRIx64 "\n", static_cast<uint64_t>(g->size_with_redzone));
-			printf("\t name              = %s\n", g->name);
-			printf("\t module_name       = %s\n", g->module_name);
-			printf("\t has_dynamic_init  = %" PRIu64 "\n", static_cast<uint64_t>(g->has_dynamic_init));
-			printf("\t odr_indicator     = %016" PRIx64 "\n", static_cast<uint64_t>(g->odr_indicator));
+			KYTY_LOG_DEBUG("asan global:\n");
+			KYTY_LOG_DEBUG("\t beg               = %016" PRIx64 "\n", static_cast<uint64_t>(g->beg));
+			KYTY_LOG_DEBUG("\t size              = %016" PRIx64 "\n", static_cast<uint64_t>(g->size));
+			KYTY_LOG_DEBUG("\t size_with_redzone = %016" PRIx64 "\n", static_cast<uint64_t>(g->size_with_redzone));
+			KYTY_LOG_DEBUG("\t name              = %s\n", g->name);
+			KYTY_LOG_DEBUG("\t module_name       = %s\n", g->module_name);
+			KYTY_LOG_DEBUG("\t has_dynamic_init  = %" PRIu64 "\n", static_cast<uint64_t>(g->has_dynamic_init));
+			KYTY_LOG_DEBUG("\t odr_indicator     = %016" PRIx64 "\n", static_cast<uint64_t>(g->odr_indicator));
 			if (g->location != nullptr)
 			{
-				printf("\t location          = %s:%d\n", g->location->filename, g->location->line_no);
+				KYTY_LOG_DEBUG("\t location          = %s:%d\n", g->location->filename, g->location->line_no);
 			}
 
 			min_addr = std::min(g->beg, min_addr);
@@ -216,7 +217,7 @@ static void KYTY_SYSV_ABI asan_before_dynamic_init(const char* module_name)
 {
 	PRINT_NAME();
 
-	printf("\t name = %s\n", module_name);
+	KYTY_LOG_DEBUG("\t name = %s\n", module_name);
 }
 
 static void KYTY_SYSV_ABI asan_after_dynamic_init()

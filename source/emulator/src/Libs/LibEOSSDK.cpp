@@ -1,5 +1,6 @@
 #include "Emulator/Common.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Log.h"
 
 #include "Kyty/Core/MemoryAlloc.h"
 #include "Kyty/Core/Threads.h"
@@ -368,9 +369,9 @@ static KYTY_SYSV_ABI int InflateInit(void* strm, const char* version, int stream
 {
 	PRINT_NAME();
 
-	printf("\t version      = %s\n", version != nullptr ? version : "(null)");
-	printf("\t stream_size  = %d\n", stream_size);
-	printf("\t sizeof(z_stream) = %zu\n", sizeof(mz_stream));
+	KYTY_LOG_DEBUG("\t version      = %s\n", version != nullptr ? version : "(null)");
+	KYTY_LOG_DEBUG("\t stream_size  = %d\n", stream_size);
+	KYTY_LOG_DEBUG("\t sizeof(z_stream) = %zu\n", sizeof(mz_stream));
 
 	if (strm == nullptr)
 	{
@@ -395,10 +396,10 @@ static KYTY_SYSV_ABI int InflateInit(void* strm, const char* version, int stream
 static KYTY_SYSV_ABI int InflateInit2(void* strm, int window_bits, const char* version, int stream_size)
 {
 	PRINT_NAME();
-	printf("\t window_bits  = %d\n", window_bits);
-	printf("\t version      = %s\n", version != nullptr ? version : "(null)");
-	printf("\t stream_size  = %d\n", stream_size);
-	printf("\t sizeof(z_stream) = %zu\n", sizeof(mz_stream));
+	KYTY_LOG_DEBUG("\t window_bits  = %d\n", window_bits);
+	KYTY_LOG_DEBUG("\t version      = %s\n", version != nullptr ? version : "(null)");
+	KYTY_LOG_DEBUG("\t stream_size  = %d\n", stream_size);
+	KYTY_LOG_DEBUG("\t sizeof(z_stream) = %zu\n", sizeof(mz_stream));
 
 	if (strm == nullptr)
 	{
@@ -459,12 +460,12 @@ static KYTY_SYSV_ABI int InflateCompatFlexible(uint64_t a0, uint64_t a1, uint64_
 static KYTY_SYSV_ABI int InflateCompatReturnZero(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5)
 {
 	PRINT_NAME();
-	printf("\t a0 = 0x%016" PRIx64 "\n", a0);
-	printf("\t a1 = 0x%016" PRIx64 "\n", a1);
-	printf("\t a2 = 0x%016" PRIx64 "\n", a2);
-	printf("\t a3 = 0x%016" PRIx64 "\n", a3);
-	printf("\t a4 = 0x%016" PRIx64 "\n", a4);
-	printf("\t a5 = 0x%016" PRIx64 "\n", a5);
+	KYTY_LOG_DEBUG("\t a0 = 0x%016" PRIx64 "\n", a0);
+	KYTY_LOG_DEBUG("\t a1 = 0x%016" PRIx64 "\n", a1);
+	KYTY_LOG_DEBUG("\t a2 = 0x%016" PRIx64 "\n", a2);
+	KYTY_LOG_DEBUG("\t a3 = 0x%016" PRIx64 "\n", a3);
+	KYTY_LOG_DEBUG("\t a4 = 0x%016" PRIx64 "\n", a4);
+	KYTY_LOG_DEBUG("\t a5 = 0x%016" PRIx64 "\n", a5);
 	return 0;
 }
 
