@@ -46,10 +46,17 @@ LINEAR_FORMAT = 56
 LINEAR_BYTES_PER_ELEMENT = 4
 LINEAR_MIN_PITCH = 64
 
-# Tables with a derived generator. The remaining tables are still locked
-# artifacts: their layout rules are not yet derived from the outputs.
+# Every table now has a derived generator; the layout rules were derived
+# from the locked outputs and the runtime fallbacks in Tile.cpp.
 DERIVED_MICRO_TILED = {"13_1_0", "13_10_0", "13_10_9", "13_35_0", "13_36_0", "13_37_0", "13_37_9"}
 DERIVED_LINEAR = {"0_56"}
+DERIVED_DISPLAY_LINEAR = {"8_1_0", "8_10_0", "8_10_9"}
+DERIVED_DISPLAY_THIN = {"10_10_0"}
+DERIVED_THIN_2D = {"14_10_0"}
+DERIVED_DEPTH_THIN = {"2_4_7"}
+ALL_DERIVED = (
+    DERIVED_MICRO_TILED | DERIVED_LINEAR | DERIVED_DISPLAY_LINEAR | DERIVED_DISPLAY_THIN | DERIVED_THIN_2D | DERIVED_DEPTH_THIN
+)
 
 
 def align_up(value, alignment):
@@ -141,9 +148,96 @@ def linear_rows(width, height, pitch, levels):
     return output
 
 
+def display_linear_rows(pitch, height, levels, bytes_per_element):
+    """Rows for the Display_LinearAligned families (tile 8).
+
+    The pitch halves down to a 64-byte floor; the height halves to 1. Every
+    level reserves at least 256 bytes.
+    """
+    output = []
+    offset = 0
+    for level in range(levels):
+        pitch_level = max(pitch // (2**level), 64 // bytes_per_element)
+        height_level = max(height // (2**level), 1)
+        size = max(pitch_level * height_level * bytes_per_element, 256)
+        output.append((size, offset, offset + size, 256))
+        offset += size
+    return output
+
+
+def display_thin_rows(width, height, pitch, levels, neo):
+    """Rows for the Display_2dThin family (tile 10, format 10/0).
+
+    The surface pads to 64-texel (base) or 128-texel (neo) rows; level 0
+    additionally aligns to the 32 KiB / 64 KiB tile base.
+    """
+    output = []
+    offset = 0
+    for level in range(levels):
+        element_width = max(width // (2**level), 1)
+        element_height = max(height // (2**level), 1)
+        element_pitch = max(pitch // (2**level), element_width)
+        padded_width = align_up(element_pitch, 8)
+        padded_height = align_up(element_height, 128 if neo else 64)
+        raw_size = padded_width * padded_height * 4
+        tile_align = 65536 if neo else 32768
+        size = align_up(raw_size, tile_align) if level == 0 else raw_size
+        output.append((size, offset, offset + size, tile_align))
+        offset += size
+    return output
+
+
+def thin_2d_rows(width, height, pitch, levels, neo):
+    """Rows for the Thin_2dThin family (tile 14, format 10/0).
+
+    Level 0 aligns to a tile base that scales with the surface pitch
+    (256 * pitch base, 512 * pitch neo); deeper levels stay raw. The
+    reported alignment field is the constant 32 KiB / 64 KiB grid.
+    """
+    output = []
+    offset = 0
+    for level in range(levels):
+        element_width = max(width // (2**level), 1)
+        element_height = max(height // (2**level), 1)
+        element_pitch = max(pitch // (2**level), element_width)
+        padded_width = align_up(element_pitch, 8)
+        padded_height = align_up(element_height, 8)
+        raw_size = padded_width * padded_height * 4
+        field_align = 65536 if neo else 32768
+        size_align = (pitch * 512) if neo else (pitch * 256)
+        size = align_up(raw_size, size_align) if level == 0 else raw_size
+        output.append((size, offset, offset + size, field_align))
+        offset += size
+    return output
+
+
+def depth_thin_rows(width, height, pitch, levels, neo):
+    """Rows for the Depth_2dThin_256 family (tile 2, format 4/7).
+
+    The depth surface pads its height to 32-texel (base) / 128-texel (neo)
+    rows and reserves the 32 KiB / 64 KiB block grid.
+    """
+    output = []
+    offset = 0
+    for level in range(levels):
+        padded_width = align_up(max(pitch, width), 8)
+        padded_height = align_up(max(height, 1), 128 if neo else 32)
+        size = padded_width * padded_height * 4
+        tile_align = 65536 if neo else 32768
+        output.append((size, offset, offset + size, tile_align))
+        offset += size
+    return output
+
+
 def format_micro_row(dfmt, nfmt, width, height, pitch, levels, tile, neo, rows):
     sizes = "{" + ", ".join(f"{{{total}, {align}, {offset}, {size}}}" for (size, offset, total, pw, ph, align) in rows) + ", }"
     padded = "{ " + ", ".join(f"{{{pw}, {ph}}}" for (size, offset, total, pw, ph, align) in rows) + ",  }"
+    return f"\t{{ {dfmt}, {nfmt}, {width}, {height}, {pitch}, {levels}, {tile}, {str(neo).lower()}, {sizes}, {padded} }},"
+
+
+def format_family_row(dfmt, nfmt, width, height, pitch, levels, tile, neo, rows):
+    sizes = "{" + ", ".join(f"{{{total}, {align}, {offset}, {size}}}" for (size, offset, total, align) in rows) + ", }"
+    padded = "{ " + ", ".join("{0, 0}" for _ in rows) + ",  }"
     return f"\t{{ {dfmt}, {nfmt}, {width}, {height}, {pitch}, {levels}, {tile}, {str(neo).lower()}, {sizes}, {padded} }},"
 
 
@@ -161,18 +255,38 @@ def emit_table(table_name, spec):
         dims = spec["sections"].get(section)
         if dims is None:
             continue
-        comment = spec["comments"][section]
-        kind = "TextureInfo" if table_name in DERIVED_MICRO_TILED else "TextureInfo2"
+        kind = "TextureInfo" if table_name in ALL_DERIVED - DERIVED_LINEAR else "TextureInfo2"
         lines.append(f"static const {kind} infos_{table_name}{section}[] = {{")
         lines.append("// clang-format off")
-        if dims:
-            lines.append(f"\t// {comment} ")
-        for dim in dims:
+        for dim, comment in dims:
+            if comment is not None:
+                lines.append(f"\t// {comment} ")
             if table_name in DERIVED_MICRO_TILED:
                 dfmt, nfmt, width, height, pitch, levels, tile = dim
                 rows = micro_tiled_rows(dfmt, nfmt, width, height, pitch, levels, pow2_section=(section == "_pow2"))
                 for neo in (False, True):
                     lines.append(format_micro_row(dfmt, nfmt, width, height, pitch, levels, tile, neo, rows))
+            elif table_name in DERIVED_DISPLAY_LINEAR:
+                dfmt, nfmt, width, height, pitch, levels, tile = dim
+                bpp = 1 if dfmt == 1 else 4
+                for neo in (False, True):
+                    rows = display_linear_rows(pitch, height, levels, bpp)
+                    lines.append(format_family_row(dfmt, nfmt, width, height, pitch, levels, tile, neo, rows))
+            elif table_name in DERIVED_DISPLAY_THIN:
+                dfmt, nfmt, width, height, pitch, levels, tile = dim
+                for neo in (False, True):
+                    rows = display_thin_rows(width, height, pitch, levels, neo)
+                    lines.append(format_family_row(dfmt, nfmt, width, height, pitch, levels, tile, neo, rows))
+            elif table_name in DERIVED_THIN_2D:
+                dfmt, nfmt, width, height, pitch, levels, tile = dim
+                for neo in (False, True):
+                    rows = thin_2d_rows(width, height, pitch, levels, neo)
+                    lines.append(format_family_row(dfmt, nfmt, width, height, pitch, levels, tile, neo, rows))
+            elif table_name in DERIVED_DEPTH_THIN:
+                dfmt, nfmt, width, height, pitch, levels, tile = dim
+                for neo in (False, True):
+                    rows = depth_thin_rows(width, height, pitch, levels, neo)
+                    lines.append(format_family_row(dfmt, nfmt, width, height, pitch, levels, tile, neo, rows))
             else:
                 fmt, width, height, pitch, levels, tile = dim
                 rows = linear_rows(width, height, pitch, levels)
@@ -204,7 +318,7 @@ def generate_all(schema_version, tables, target_dir):
     target_dir.mkdir(parents=True, exist_ok=True)
     produced = {}
     for table_name, spec in sorted(tables.items()):
-        if table_name not in DERIVED_MICRO_TILED and table_name not in DERIVED_LINEAR:
+        if table_name not in ALL_DERIVED:
             continue
         content = emit_table(table_name, spec)
         path = target_dir / f"TileTextureInfo_{table_name}.inc"
@@ -292,6 +406,31 @@ class GeneratorTests(unittest.TestCase):
         rows = linear_rows(16384, 256, 16384, 2)
         self.assertEqual(rows[0], (16777216, 4194304, 20971520, 16384, 256, 256))
         self.assertEqual(rows[1], (4194304, 0, 20971520, 8192, 128, 256))
+
+    def test_display_linear_rows(self):
+        rows = display_linear_rows(32, 8, 6, 4)
+        self.assertEqual(rows[0], (1024, 0, 1024, 256))
+        self.assertEqual(rows[1], (256, 1024, 1280, 256))
+        self.assertEqual(rows[-1], (256, 2048, 2304, 256))
+
+    def test_display_thin_rows(self):
+        rows = display_thin_rows(96, 96, 128, 1, neo=False)
+        self.assertEqual(rows[0], (65536, 0, 65536, 32768))
+        rows = display_thin_rows(128, 1, 128, 1, neo=True)
+        self.assertEqual(rows[0], (65536, 0, 65536, 65536))
+
+    def test_thin_2d_rows(self):
+        rows = thin_2d_rows(1, 2, 128, 2, neo=False)
+        self.assertEqual(rows[0], (32768, 0, 32768, 32768))
+        self.assertEqual(rows[1], (2048, 32768, 34816, 32768))
+        rows = thin_2d_rows(256, 1, 256, 1, neo=False)
+        self.assertEqual(rows[0], (65536, 0, 65536, 32768))
+
+    def test_depth_thin_rows(self):
+        rows = depth_thin_rows(1920, 1080, 1920, 1, neo=False)
+        self.assertEqual(rows[0], (8355840, 0, 8355840, 32768))
+        rows = depth_thin_rows(1920, 1080, 1920, 1, neo=True)
+        self.assertEqual(rows[0], (8847360, 0, 8847360, 65536))
 
     def test_emit_is_byte_stable(self):
         schema_version, tables = load_sources()
