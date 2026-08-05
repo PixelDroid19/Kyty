@@ -51,7 +51,7 @@ struct GpuMappingReleaseTransaction
 {
 	uint64_t                         vaddr           = 0;
 	uint64_t                         size            = 0;
-	LibKernel::Memory::KernelGpuMappingCompletion completion = nullptr;
+	Kernel::Memory::KernelGpuMappingCompletion completion = nullptr;
 	void*                            completion_data = nullptr;
 };
 
@@ -79,7 +79,7 @@ bool GraphicsCompleteGpuMappingRelease(void* data)
 }
 
 bool GraphicsReleaseGpuMappingRange(void* context, uint64_t vaddr, uint64_t size,
-	                                LibKernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
+	                                Kernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
 {
 	(void)context;
 	if (vaddr == 0 || size == 0 || vaddr > std::numeric_limits<uint64_t>::max() - size || completion == nullptr)
@@ -104,17 +104,17 @@ bool GraphicsQueryMappedRange(uint64_t address, uint64_t size, Kyty::Emulator::G
 		return false;
 	}
 
-	LibKernel::Memory::KernelMappedRange mapped {};
-	if (!LibKernel::Memory::KernelQueryMappedRange(address, size, &mapped))
+	Kernel::Memory::KernelMappedRange mapped {};
+	if (!Kernel::Memory::KernelQueryMappedRange(address, size, &mapped))
 	{
 		return false;
 	}
 
 	switch (mapped.kind)
 	{
-		case LibKernel::Memory::KernelMappedRangeKind::None: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::None; break;
-		case LibKernel::Memory::KernelMappedRangeKind::Physical: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::Physical; break;
-		case LibKernel::Memory::KernelMappedRangeKind::Flexible: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::Flexible; break;
+		case Kernel::Memory::KernelMappedRangeKind::None: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::None; break;
+		case Kernel::Memory::KernelMappedRangeKind::Physical: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::Physical; break;
+		case Kernel::Memory::KernelMappedRangeKind::Flexible: out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::Flexible; break;
 	}
 	out->base = mapped.base;
 	out->size = mapped.size;
@@ -123,7 +123,7 @@ bool GraphicsQueryMappedRange(uint64_t address, uint64_t size, Kyty::Emulator::G
 
 int GraphicsQueryProtection(void* address, void** start, void** end, int* protection)
 {
-	return LibKernel::Memory::KernelQueryMemoryProtection(address, start, end, protection);
+	return Kernel::Memory::KernelQueryMemoryProtection(address, start, end, protection);
 }
 
 } // namespace
@@ -148,12 +148,12 @@ KYTY_SUBSYSTEM_INIT(Graphics)
 	    GpuDirtyPageTrackerNotifyFaultHandlerInstalled,
 	};
 	EXIT_IF(!Kyty::Emulator::GpuMemoryFault::GetPort().Install(gpu_memory_fault_callbacks));
-	const LibKernel::Memory::GpuMappingLifecycleCallbacks gpu_mapping_lifecycle_callbacks {
+	const Kernel::Memory::GpuMappingLifecycleCallbacks gpu_mapping_lifecycle_callbacks {
 	    nullptr,
 	    GraphicsRegisterGpuMappingRange,
 	    GraphicsReleaseGpuMappingRange,
 	};
-	EXIT_IF(!LibKernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));
+	EXIT_IF(!Kernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));
 	const Kyty::Emulator::GuestMemory::Callbacks guest_memory_callbacks {GraphicsQueryMappedRange, GraphicsQueryProtection};
 	EXIT_IF(!Kyty::Emulator::GuestMemory::GetPort().Install(guest_memory_callbacks));
 	const Kyty::Emulator::VideoFrameMemory::Callbacks video_frame_memory_callbacks {
@@ -1654,7 +1654,7 @@ int KYTY_SYSV_ABI GraphicsBuildDescriptorTable(uint64_t output_address, uint64_t
 	auto* output = reinterpret_cast<uint64_t*>(output_address);
 	if (output == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	if (source_address == 0u)
@@ -1672,7 +1672,7 @@ int KYTY_SYSV_ABI GraphicsBuildDescriptorTable(uint64_t output_address, uint64_t
 	}
 	if (descriptor_address == 0u || count > kDescriptorTableEntries)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	const auto* descriptor = reinterpret_cast<const uint8_t*>(descriptor_address);
@@ -1681,7 +1681,7 @@ int KYTY_SYSV_ABI GraphicsBuildDescriptorTable(uint64_t output_address, uint64_t
 	const auto* source_entries = reinterpret_cast<const uint32_t*>(ReadDescriptorField<uint64_t>(source, 0x30u));
 	if (source_entries == nullptr || (mask_count != 0u && masks == nullptr))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	for (uint32_t i = 0; i < count; ++i)
@@ -2203,12 +2203,12 @@ int KYTY_SYSV_ABI GraphicsSetCxRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 
 	if (cmd == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	if (num_regs > UINT32_MAX - cmd[1])
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	cmd[1] += num_regs;
 
@@ -2224,12 +2224,12 @@ int KYTY_SYSV_ABI GraphicsSetShRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 
 	if (cmd == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	if (num_regs > UINT32_MAX - cmd[1])
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	cmd[1] += num_regs;
 
@@ -2245,12 +2245,12 @@ int KYTY_SYSV_ABI GraphicsSetUcRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 
 	if (cmd == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	if (num_regs > UINT32_MAX - cmd[1])
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	cmd[1] += num_regs;
 
@@ -2643,14 +2643,14 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uin
 
 	if (cmd == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	const uint32_t header = cmd[0];
 	if ((header >> 30u) != 3u || ((header >> 8u) & 0xffu) != Pm4::IT_NOP || KYTY_PM4_R(header) != Pm4::R_RELEASE_MEM ||
 	    KYTY_PM4_LEN(header) < 7u)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	// ReleaseMem stores the 64-bit destination address in payload dwords 1..2.
@@ -2766,7 +2766,7 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64
 
 	if (cmd == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	const auto op  = (cmd[0] >> 8u) & 0xffu;
@@ -2817,7 +2817,7 @@ int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, ui
 
 	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	cmd[4] = static_cast<uint32_t>(destination_address & 0xffffffffu);
 	cmd[5] = static_cast<uint32_t>((destination_address >> 32u) & 0xffffffffu);
@@ -2832,7 +2832,7 @@ int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(uint32
 
 	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	cmd[6] = static_cast<uint32_t>(source_value & 0xffffffffu);
 	cmd[7] = static_cast<uint32_t>((source_value >> 32u) & 0xffffffffu);
@@ -2848,12 +2848,12 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchAddress(uint32_t* cmd, uint64_t addr
 
 	if (cmd == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	const uint32_t byte_off = GraphicsWaitRegMemAddressByteOffset(cmd[0]);
 	if (byte_off == 0 || (byte_off % 4u) != 0)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	const uint32_t dw = byte_off / 4u;
 	switch (GraphicsGetWaitRegMemForm(cmd[0]))
@@ -2883,7 +2883,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchCompareFunction(uint32_t* cmd, uint3
 
 	if (cmd == nullptr || compare_function > 7u)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	uint32_t byte_off = 0;
@@ -2892,7 +2892,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchCompareFunction(uint32_t* cmd, uint3
 		case GraphicsWaitRegMemForm::ItWaitRegMem: byte_off = 4u; break;
 		case GraphicsWaitRegMemForm::CustomWaitMem32: byte_off = 20u; break;
 		case GraphicsWaitRegMemForm::CustomWaitMem64: byte_off = 28u; break;
-		default: return LibKernel::KERNEL_ERROR_EINVAL;
+		default: return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	const uint32_t dw = byte_off / 4u;
@@ -2908,7 +2908,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchReference(uint32_t* cmd, uint64_t re
 
 	if (cmd == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	switch (GraphicsGetWaitRegMemForm(cmd[0]))
@@ -2923,7 +2923,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchReference(uint32_t* cmd, uint64_t re
 			cmd[5] = static_cast<uint32_t>(reference & 0xffffffffu);
 			cmd[6] = static_cast<uint32_t>((reference >> 32u) & 0xffffffffu);
 			return OK;
-		default: return LibKernel::KERNEL_ERROR_EINVAL;
+		default: return Kernel::KERNEL_ERROR_EINVAL;
 	}
 }
 
@@ -2935,7 +2935,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchMask(uint32_t* cmd, uint64_t mask)
 
 	if (cmd == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	switch (GraphicsGetWaitRegMemForm(cmd[0]))
@@ -2950,7 +2950,7 @@ int KYTY_SYSV_ABI GraphicsAgcWaitRegMemPatchMask(uint32_t* cmd, uint64_t mask)
 			cmd[3] = static_cast<uint32_t>(mask & 0xffffffffu);
 			cmd[4] = static_cast<uint32_t>((mask >> 32u) & 0xffffffffu);
 			return OK;
-		default: return LibKernel::KERNEL_ERROR_EINVAL;
+		default: return Kernel::KERNEL_ERROR_EINVAL;
 	}
 }
 
@@ -2962,7 +2962,7 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchGcrCntl(uint32_t* cmd, uin
 
 	if (cmd == nullptr || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	cmd[2] = GraphicsPatchUInt32Bits(cmd[2], 0x0000ffffu, gcr_cntl);
@@ -2977,7 +2977,7 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchData(uint32_t* cmd, uint64
 
 	if (cmd == nullptr || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	cmd[5] = static_cast<uint32_t>(data & 0xffffffffu);
@@ -2993,7 +2993,7 @@ int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchType(uint32_t* cmd, uint32
 
 	if (cmd == nullptr || data_selection > 3u || !GraphicsIsAgcReleaseMemPacket(cmd[0]))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	cmd[2] = GraphicsPatchUInt32Bits(cmd[2], 0x00ff0000u, data_selection << 16u);
@@ -3023,7 +3023,7 @@ static int GraphicsWriteDataPatchControlByte(uint32_t* cmd, uint32_t value, uint
 {
 	if (cmd == nullptr || !GraphicsIsWriteDataPacket(cmd[0]) || byte_index > 3u)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	const uint32_t shift = byte_index * 8u;
@@ -3042,7 +3042,7 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetCachePolicy(uint32_t* cmd, uintptr_t 
 	uint32_t  value  = 0;
 	if (!GraphicsResolveWriteDataPatchArgs(reinterpret_cast<uint64_t>(cmd), static_cast<uint64_t>(arg1), &packet, &value))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	return GraphicsWriteDataPatchControlByte(packet, value, 1u);
 }
@@ -3058,7 +3058,7 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetDst(uint32_t* cmd, uintptr_t arg1)
 	uint32_t  value  = 0;
 	if (!GraphicsResolveWriteDataPatchArgs(reinterpret_cast<uint64_t>(cmd), static_cast<uint64_t>(arg1), &packet, &value))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	return GraphicsWriteDataPatchControlByte(packet, value, 0u);
 }

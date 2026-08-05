@@ -8,7 +8,7 @@
 
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
-#include "Emulator/Libs/Errno.h"
+#include "Emulator/Kernel/Errors.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
 
@@ -45,7 +45,7 @@ int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(
 {
 	if (size == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	constexpr size_t header_bytes       = 256;
@@ -66,18 +66,18 @@ int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(
 	if (!checked_add_scaled(unaligned, max_resources, resource_bytes, &unaligned) ||
 	    !checked_add_scaled(unaligned, max_owners, owner_bytes, &unaligned) || unaligned > max_size - (required_alignment - 1))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	*size = (unaligned + required_alignment - 1) & ~(required_alignment - 1);
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t size, uint32_t max_owners)
 {
 	if (memory == nullptr || size == 0 || max_owners == 0)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	static std::atomic<void*>    registration_memory {nullptr};
@@ -86,7 +86,7 @@ int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t si
 	registration_memory.store(memory, std::memory_order_release);
 	registration_size.store(size, std::memory_order_release);
 	registration_max_owners.store(max_owners, std::memory_order_release);
-	return OK;
+	return Kernel::OK;
 }
 
 // Handle reserved for the driver's default resource owner. Named owners are
@@ -97,12 +97,12 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterDefaultOwner(uint32_t options)
 {
 	if (options != 0)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	static std::atomic<bool> default_owner_registered {false};
 	default_owner_registered.store(true, std::memory_order_release);
-	return OK;
+	return Kernel::OK;
 }
 
 // sce::Agc::ResourceRegistration::getDefaultOwner(unsigned int*): returns the
@@ -111,11 +111,11 @@ int KYTY_SYSV_ABI GraphicsDriverGetDefaultOwner(uint32_t* owner)
 {
 	if (owner == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	*owner = GRAPHICS_DEFAULT_OWNER;
-	return OK;
+	return Kernel::OK;
 }
 
 // Maximum length, including the terminator, accepted for a registered resource
@@ -127,23 +127,23 @@ int KYTY_SYSV_ABI GraphicsDriverGetResourceRegistrationMaxNameLength(uint32_t* m
 {
 	if (max_length == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	*max_length = GRAPHICS_RESOURCE_NAME_MAX;
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverRegisterOwner(uint32_t* owner, const char* name)
 {
 	if (owner == nullptr || name == nullptr || name[0] == '\0')
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	static std::atomic<uint32_t> next_owner {GRAPHICS_DEFAULT_OWNER + 1};
 	*owner = next_owner.fetch_add(1, std::memory_order_relaxed);
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t owner, const void* base, uint64_t size, const char* name,
@@ -151,7 +151,7 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t ow
 {
 	if (resource == nullptr || owner == 0 || base == nullptr || size == 0 || name == nullptr || name[0] == '\0')
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	static std::atomic<uint32_t> next_resource {1};
@@ -160,24 +160,24 @@ int KYTY_SYSV_ABI GraphicsDriverRegisterResource(uint32_t* resource, uint32_t ow
 		Core::LockGuard lock(g_resource_registration_mutex);
 		g_registered_resources.Add(*resource);
 	}
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverUnregisterResource(uint32_t resource)
 {
 	if (resource == 0)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	Core::LockGuard lock(g_resource_registration_mutex);
 	const auto      index = g_registered_resources.Find(resource);
 	if (!g_registered_resources.IndexValid(index))
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 	g_registered_resources.RemoveAt(index);
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverSetTFRing(const volatile void* base, uint32_t size)
@@ -187,7 +187,7 @@ int KYTY_SYSV_ABI GraphicsDriverSetTFRing(const volatile void* base, uint32_t si
 	g_tf_ring_size.store(size, std::memory_order_release);
 			KYTY_LOG_DEBUG("\t base = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(base));
 			KYTY_LOG_DEBUG("\t size = 0x%08" PRIx32 "\n", size);
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverSetHsOffchipParam(uint64_t value0, uint64_t value1, uint64_t value2)
@@ -199,23 +199,23 @@ int KYTY_SYSV_ABI GraphicsDriverSetHsOffchipParam(uint64_t value0, uint64_t valu
 			KYTY_LOG_DEBUG("\t value0 = 0x%016" PRIx64 "\n", value0);
 			KYTY_LOG_DEBUG("\t value1 = 0x%016" PRIx64 "\n", value1);
 			KYTY_LOG_DEBUG("\t value2 = 0x%016" PRIx64 "\n", value2);
-	return OK;
+	return Kernel::OK;
 }
 
 static int SubmitDcbBuffer(uint32_t* address, uint32_t size_in_dwords)
 {
 	if (size_in_dwords == 0)
 	{
-		return OK;
+		return Kernel::OK;
 	}
 	if (address == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	GraphicsDbgDumpDcb("d", size_in_dwords, address);
 	GraphicsRunSubmit(address, size_in_dwords, nullptr, 0, GraphicsSubmissionCompletion::QueuedGraphicsInterrupt);
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet)
@@ -224,7 +224,7 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitDcb(const Packet* packet)
 
 	if (packet == nullptr || packet->pad[0] != 0)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 			KYTY_LOG_DEBUG("\t addr   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
@@ -240,22 +240,22 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, 
 
 	if (count == 0)
 	{
-		return OK;
+		return Kernel::OK;
 	}
 	if (dcb_gpu_addrs == nullptr || dcb_sizes_in_dwords == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
+		return Kernel::KERNEL_ERROR_EINVAL;
 	}
 
 	for (uint32_t i = 0; i < count; i++)
 	{
 		const int result = SubmitDcbBuffer(dcb_gpu_addrs[i], dcb_sizes_in_dwords[i]);
-		if (result != OK)
+		if (result != Kernel::OK)
 		{
 			return result;
 		}
 	}
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
@@ -266,7 +266,7 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
 
 	if (packet == nullptr)
 	{
-		return OK;
+		return Kernel::OK;
 	}
 
 			KYTY_LOG_DEBUG("\t acb    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
@@ -281,7 +281,7 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
 		GraphicsDbgDumpDcb("a", packet->dw_num, packet->addr);
 		GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0, GraphicsSubmissionCompletion::None);
 	}
-	return OK;
+	return Kernel::OK;
 }
 
 int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, void* udata)
@@ -289,7 +289,7 @@ int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(LibKernel::EventQueue::KernelEqueue e
 	PRINT_NAME();
 	if (eq == nullptr)
 	{
-		return LibKernel::KERNEL_ERROR_EBADF;
+		return Kernel::KERNEL_ERROR_EBADF;
 	}
 	return GraphicsRenderAddEqEvent(eq, id, udata);
 }

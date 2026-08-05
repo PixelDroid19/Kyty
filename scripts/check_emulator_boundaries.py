@@ -82,7 +82,13 @@ GRAPHICS_TIME_PORT_SOURCE_FILES = (
 	"emulator/src/Graphics/VideoOut.cpp",
 )
 GRAPHICS_ERROR_SOURCE_FILES = (
-    "emulator/src/Graphics/Graphics.cpp",
+	"emulator/src/Graphics/Graphics.cpp",
+)
+GRAPHICS_ERROR_ADDITIONAL_SOURCE_FILES = (
+	"emulator/src/Graphics/Gen5Driver.cpp",
+	"emulator/src/Graphics/GraphicsRenderContext.cpp",
+	"emulator/src/Graphics/GraphicsRenderEop.cpp",
+	"emulator/src/Graphics/VideoOut.cpp",
 )
 LOADER_SOURCE_FILES = (
     "emulator/src/Loader/SystemContent.cpp",
@@ -101,6 +107,7 @@ ALLOWED_SOURCE_FILES = (
     *LOADER_SOURCE_FILES,
     GRAPHICS_RUN_SOURCE,
     *GRAPHICS_TIME_PORT_SOURCE_FILES,
+    "emulator/src/Graphics/Gen5Driver.cpp",
     RUNTIME_LINKER_SOURCE,
 )
 
@@ -310,7 +317,7 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path == _canonical_include_path(KERNEL_TIME_INCLUDE) for canonical_path in canonical_paths
     ):
         return "Graphics -> Kernel time"
-    if relative_path in GRAPHICS_ERROR_SOURCE_FILES and any(
+    if relative_path in GRAPHICS_ERROR_SOURCE_FILES + GRAPHICS_ERROR_ADDITIONAL_SOURCE_FILES and any(
         canonical_path == _canonical_include_path("Emulator/Libs/Errno.h") for canonical_path in canonical_paths
     ):
         return "Graphics -> Libs errno"
@@ -973,19 +980,21 @@ class BoundaryCheckerTests(unittest.TestCase):
             )
 
     def test_rejects_libs_errno_include_from_graphics(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self.write_fixture(root, "emulator/src/Graphics/Graphics.cpp", '#include "Emulator/Libs/Errno.h"\n')
+        for source_path in GRAPHICS_ERROR_SOURCE_FILES + GRAPHICS_ERROR_ADDITIONAL_SOURCE_FILES:
+            with self.subTest(source_path=source_path):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    self.write_fixture(root, source_path, '#include "Emulator/Libs/Errno.h"\n')
 
-            self.assertEqual(
-                check_source_root(root),
-                CheckResult(
-                    exit_code=1,
-                    diagnostics=(
-                        "emulator/src/Graphics/Graphics.cpp:1: forbidden include (Graphics -> Libs errno): Emulator/Libs/Errno.h",
-                    ),
-                ),
-            )
+                    self.assertEqual(
+                        check_source_root(root),
+                        CheckResult(
+                            exit_code=1,
+                            diagnostics=(
+                                f"{source_path}:1: forbidden include (Graphics -> Libs errno): Emulator/Libs/Errno.h",
+                            ),
+                        ),
+                    )
 
     def test_rejects_forbidden_loader_graphics_include(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

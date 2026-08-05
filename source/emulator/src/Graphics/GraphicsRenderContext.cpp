@@ -18,9 +18,9 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/TimePort.h"
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
 #include <atomic>
@@ -208,7 +208,7 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
 		const auto result = LibKernel::EventQueue::KernelTriggerEvent(trigger.pin, static_cast<uintptr_t>(trigger.id),
 		                                                              LibKernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
 		                                                              trigger_data);
-		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
+		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
 	}
 
 	if (EopTraceEnabled())

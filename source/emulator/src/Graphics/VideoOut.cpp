@@ -21,9 +21,9 @@
 #include "Emulator/Graphics/VideoOutHostAccessGate.h"
 #include "Emulator/Graphics/VideoOutMaterializationGate.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/TimePort.h"
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
@@ -750,7 +750,7 @@ void VideoOutContext::Close(int handle)
 	{
 		const auto result =
 		    EventQueue::KernelDeleteEvent(pending.pin, pending.ident, EventQueue::KERNEL_EVFILT_VIDEO_OUT);
-		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
+		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
 	}
 	event_deletes.clear();
 	for (const auto identity: closing_queues)
@@ -976,7 +976,7 @@ void VideoOutContext::VblankEnd()
 			const auto result =
 			    EventQueue::KernelTriggerEvent(pin, VIDEO_OUT_EVENT_VBLANK, EventQueue::KERNEL_EVFILT_VIDEO_OUT,
 			                                   reinterpret_cast<void*>(count));
-			EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
+			EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
 		}
 	}
 }
@@ -1540,8 +1540,8 @@ bool FlipQueue::Flip(uint32_t micros)
 		const auto result =
 		    EventQueue::KernelTriggerEvent(pin, VIDEO_OUT_EVENT_FLIP, EventQueue::KERNEL_EVFILT_VIDEO_OUT,
 		                                   reinterpret_cast<void*>(r.flip_arg));
-		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
-		if (result == OK)
+		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
+		if (result == Kernel::OK)
 		{
 			flip_triggered++;
 		}
@@ -1643,7 +1643,7 @@ KYTY_SYSV_ABI int VideoOutClose(int handle)
 	    &handle);
 	EXIT_IF(!closed);
 
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStatus* status)
@@ -1658,7 +1658,7 @@ KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStat
 	EXIT_NOT_IMPLEMENTED(!session);
 	*status = session.Get()->resolution;
 
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI void VideoOutSetBufferAttribute(VideoOutBufferAttribute* attribute, uint32_t pixel_format, uint32_t tiling_mode,
@@ -1728,7 +1728,7 @@ KYTY_SYSV_ABI int VideoOutSetFlipRate(int handle, int rate)
 	EXIT_NOT_IMPLEMENTED(!session);
 	session.Get()->flip_rate = rate;
 
-	return OK;
+	return Kernel::OK;
 }
 
 static void flip_event_reset_func(LibKernel::EventQueue::KernelEqueueEvent* event)
@@ -1908,7 +1908,7 @@ KYTY_SYSV_ABI int VideoOutAddFlipEvent(EventQueue::KernelEqueue eq, int handle, 
 	VideoOutEventBinding* release = nullptr;
 	{
 		Core::LockGuard config_lock(ctx->mutex);
-		if (result == OK && !binding->deleted)
+		if (result == Kernel::OK && !binding->deleted)
 		{
 			ctx->flip_events.Add(binding);
 			binding->published = true;
@@ -1980,7 +1980,7 @@ KYTY_SYSV_ABI int VideoOutAddVblankEvent(LibKernel::EventQueue::KernelEqueue eq,
 	VideoOutEventBinding* release = nullptr;
 	{
 		Core::LockGuard config_lock(ctx->mutex);
-		if (result == OK && !binding->deleted)
+		if (result == Kernel::OK && !binding->deleted)
 		{
 			ctx->vblank_events.Add(binding);
 			binding->published = true;
@@ -2216,7 +2216,7 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 			ctx->buffers_sets_seq++;
 		}
 
-		return generate_set_id ? effective_set_id : OK;
+		return generate_set_id ? effective_set_id : Kernel::OK;
 	}
 }
 
@@ -2463,7 +2463,7 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 
 	switch (g_video_out_context->SubmitFlip(handle, index, flip_arg))
 	{
-		case SubmitFlipStatus::Submitted: return OK;
+		case SubmitFlipStatus::Submitted: return Kernel::OK;
 		case SubmitFlipStatus::InvalidHandle: return VIDEO_OUT_ERROR_INVALID_HANDLE;
 		case SubmitFlipStatus::InvalidIndex: return VIDEO_OUT_ERROR_INVALID_INDEX;
 		case SubmitFlipStatus::QueueFull: return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
@@ -2535,7 +2535,7 @@ KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status)
 	printf("\t flipPendingNum = %d\n", status->flipPendingNum);
 	printf("\t currentBuffer = %d\n", status->currentBuffer);
 
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutIsFlipPending(int handle)
@@ -2591,7 +2591,7 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	status->dynamicRange = 1;
 	status->refreshRate  = 1;
 	status->reserved     = 0;
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutColorSettingsSetGamma(VideoOutColorSettings* settings, float gamma)
@@ -2603,7 +2603,7 @@ KYTY_SYSV_ABI int VideoOutColorSettingsSetGamma(VideoOutColorSettings* settings,
 		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
 	}
 	settings->gamma = gamma;
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutAdjustColor(int handle, const VideoOutColorSettings* settings)
@@ -2616,7 +2616,7 @@ KYTY_SYSV_ABI int VideoOutAdjustColor(int handle, const VideoOutColorSettings* s
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
 	(void)settings;
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutSubmitChangeBufferAttribute2(int handle, int set_index, const VideoOutBufferAttribute2* attribute)
@@ -2629,7 +2629,7 @@ KYTY_SYSV_ABI int VideoOutSubmitChangeBufferAttribute2(int handle, int set_index
 	{
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status)
@@ -2659,7 +2659,7 @@ KYTY_SYSV_ABI int VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* stat
 	printf("\t processTime = %" PRIu64 "\n", status->processTime);
 	printf("\t tsc = %" PRIu64 "\n", status->tsc);
 
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom)
@@ -2677,7 +2677,7 @@ KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom)
 	printf("\t top    = %d\n", top);
 	printf("\t bottom = %d\n", bottom);
 
-	return OK;
+	return Kernel::OK;
 }
 
 namespace {
@@ -2726,10 +2726,10 @@ KYTY_SYSV_ABI int VideoOutDeleteVblankEvent(LibKernel::EventQueue::KernelEqueue 
 	{
 		const auto result =
 		    EventQueue::KernelDeleteEvent(pin, VIDEO_OUT_EVENT_VBLANK, EventQueue::KERNEL_EVFILT_VIDEO_OUT);
-		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
+		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
 	}
 
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutDeleteFlipEvent(LibKernel::EventQueue::KernelEqueue eq, int handle)
@@ -2764,10 +2764,10 @@ KYTY_SYSV_ABI int VideoOutDeleteFlipEvent(LibKernel::EventQueue::KernelEqueue eq
 	{
 		const auto result =
 		    EventQueue::KernelDeleteEvent(pin, VIDEO_OUT_EVENT_FLIP, EventQueue::KERNEL_EVFILT_VIDEO_OUT);
-		EXIT_NOT_IMPLEMENTED(result != OK && result != LibKernel::KERNEL_ERROR_ENOENT);
+		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
 	}
 
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutGetEventId(const LibKernel::EventQueue::KernelEvent* ev)
@@ -2802,7 +2802,7 @@ KYTY_SYSV_ABI int VideoOutGetEventData(const LibKernel::EventQueue::KernelEvent*
 	}
 
 	*data = ev->ident == VIDEO_OUT_EVENT_FLIP ? static_cast<uint64_t>(ev->data) : static_cast<uint64_t>(ev->data) >> 16u;
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutConfigureOutput(int handle)
@@ -2817,7 +2817,7 @@ KYTY_SYSV_ABI int VideoOutConfigureOutput(int handle)
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
 
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutInitializeOutputOptions(void* options)
@@ -2830,7 +2830,7 @@ KYTY_SYSV_ABI int VideoOutInitializeOutputOptions(void* options)
 	}
 
 	std::memset(options, 0, kVideoOutOutputOptionsSize);
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutIsOutputSupported(int handle, uint64_t mode, const void* options, const void* reserved_pointer,
@@ -2921,7 +2921,7 @@ KYTY_SYSV_ABI int VideoOutUnregisterBuffers(int handle, int attribute_index)
 		}
 	}
 	ctx->buffers_sets.RemoveAt(set_index);
-	return OK;
+	return Kernel::OK;
 }
 
 KYTY_SYSV_ABI int VideoOutWaitVblank(int handle)
@@ -2950,13 +2950,13 @@ KYTY_SYSV_ABI int VideoOutWaitVblank(int handle)
 			Core::LockGuard config_lock(ctx->mutex);
 			if (ctx->vblank_status.count > start_count)
 			{
-				return OK;
+				return Kernel::OK;
 			}
 		}
 		LibKernel::KernelUsleep(1000);
 	}
 
-	return OK;
+	return Kernel::OK;
 }
 
 } // namespace Kyty::Libs::VideoOut

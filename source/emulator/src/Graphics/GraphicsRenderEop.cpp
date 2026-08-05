@@ -12,9 +12,9 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
+#include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/TimePort.h"
-#include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
 #include <algorithm>
@@ -413,7 +413,7 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 	auto eq_pin = LibKernel::EventQueue::KernelAcquireEqueue(eq);
 	if (!eq_pin)
 	{
-		return LibKernel::KERNEL_ERROR_EBADF;
+		return Kernel::KERNEL_ERROR_EBADF;
 	}
 	Core::LockGuard registration_lock(g_render_ctx->GetEopRegistrationMutex());
 
@@ -440,7 +440,7 @@ int GraphicsRenderAddEqEvent(LibKernel::EventQueue::KernelEqueue eq, int id, voi
 	const int result = LibKernel::EventQueue::KernelAddEvent(eq_pin, event);
 	if (registration != nullptr)
 	{
-		if (result == OK)
+		if (result == Kernel::OK)
 		{
 			g_render_ctx->PublishEopEqRegistration(registration);
 		} else
