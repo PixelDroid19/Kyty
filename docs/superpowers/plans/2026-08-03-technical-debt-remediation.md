@@ -133,7 +133,7 @@
 - Modify: `source/emulator/src/Graphics/Window.cpp`
 - Modify: `source/emulator/src/Graphics/DebugOverlay.cpp`
 - Modify: `source/emulator/src/Graphics/NativeCapture.cpp`
-- Modify: `source/emulator/src/Graphics/Image.cpp`
+- Modify: `source/emulator/src/Graphics/ImageAsset.cpp`
 - Add platform-specific integration cases under `source/integration_test/src/`
 
 **Interfaces:**
@@ -197,7 +197,7 @@
 
 **Files:**
 - Add Kernel/Libs/Loader/Graphics integration cases
-- Rename `Graphics/Image.cpp`, `Library/KeyboardInput.cpp`, and the audio/video
+- Rename `Graphics/ImageAsset.cpp`, `Library/KeyboardInput.cpp`, and the audio/video
   namespace only with public include aliases or coordinated call-site changes
 - Create a versioned generator under `tools/graphics_tables/` and golden tests
 - Update architecture and build documentation
@@ -213,4 +213,3 @@
 - [ ] Rename only after include-graph and build checks pass.
 - [ ] Run both build matrices, all CTest integration suites, enabled GTests,
   and source-graph checks; review the complete diff.
-
