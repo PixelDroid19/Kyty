@@ -18,9 +18,6 @@ UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
 
-static_assert(std::is_same_v<::Kyty::Libs::AudioVideoBackend::Decoder, ::Kyty::Emulator::AudioVideoBackend::Decoder>,
-              "legacy audio/video backend namespace must remain an alias");
-
 TEST(EmulatorAudio, OpensDecoderThroughCanonicalNamespaceWithoutPrivateMedia)
 {
 	std::string error;

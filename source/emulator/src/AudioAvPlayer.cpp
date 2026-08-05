@@ -41,7 +41,6 @@ namespace VideoFrameMemory = Kyty::Emulator::VideoFrameMemory;
 namespace GuestRuntimePort = ::Kyty::Emulator::GuestRuntimePort;
 // Keep the guest-facing implementation readable while the decoder remains a
 // neutral host runtime service.
-namespace AudioVideoBackend = ::Kyty::Emulator::AudioVideoBackend;
 
 namespace AvPlayer {
 
@@ -122,7 +121,7 @@ struct AvPlayerInternal
 	int32_t              requested_framebuffers = 0;
 	String               host_filename;
 	mutable std::shared_mutex decoder_mutex;
-	std::unique_ptr<AudioVideoBackend::Decoder> decoder;
+	std::unique_ptr<::Kyty::Emulator::AudioVideoBackend::Decoder> decoder;
 	uint64_t             last_media_time_ms    = 0;
 	uint64_t             media_duration_ms     = 0;
 	uint32_t             media_audio_channels  = 0;
@@ -659,7 +658,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 	uint32_t                             frame_index = 0;
 	uint32_t                             frame_count = 0;
 	size_t                               frame_bytes = 0;
-	AudioVideoBackend::Decoder*           decoder    = nullptr;
+	::Kyty::Emulator::AudioVideoBackend::Decoder*           decoder    = nullptr;
 
 	{
 		Core::LockGuard lock(r->mutex);
@@ -680,7 +679,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 	const bool is_real = decoder != nullptr;
 	if (is_real)
 	{
-		AudioVideoBackend::VideoFrame decoded;
+		::Kyty::Emulator::AudioVideoBackend::VideoFrame decoded;
 		if (!decoder->TryReadVideoFrame(&decoded) || decoded.width != width || decoded.height != height || decoded.pitch != width ||
 		    decoded.data.size() != frame_bytes)
 		{
@@ -916,7 +915,7 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 		}
 	}
 	std::string decoder_error;
-	auto decoder = AudioVideoBackend::Decoder::Open(host_filename.C_Str(), &decoder_error);
+	auto decoder = ::Kyty::Emulator::AudioVideoBackend::Decoder::Open(host_filename.C_Str(), &decoder_error);
 	if (decoder == nullptr || !decoder->GetStreamInfo().has_video)
 	{
 		if (avplayer_dump_enabled())
@@ -987,7 +986,7 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 			if (avplayer_dump_enabled())
 			{
 				KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER backend=%s path=%s %ux%u fps=%.3f duration=%" PRIu64 " audio=%u/%u\n",
-				             AudioVideoBackend::Decoder::BackendName(), host_filename.C_Str(), h->synthetic_width, h->synthetic_height,
+				             ::Kyty::Emulator::AudioVideoBackend::Decoder::BackendName(), host_filename.C_Str(), h->synthetic_width, h->synthetic_height,
 				             h->synthetic_frame_rate, h->media_duration_ms, h->media_audio_channels, h->media_audio_rate);
 			}
 		}
@@ -1353,7 +1352,7 @@ Bool KYTY_SYSV_ABI AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 	}
 	h = player.get();
 	std::shared_lock<std::shared_mutex> decoder_lock(h->decoder_mutex);
-	AudioVideoBackend::Decoder*          decoder = nullptr;
+	::Kyty::Emulator::AudioVideoBackend::Decoder*          decoder = nullptr;
 	uint64_t                             timestamp = 0;
 	uint64_t                             start_time = 0;
 	uint32_t                             channels = 2;
@@ -1373,7 +1372,7 @@ Bool KYTY_SYSV_ABI AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 
 	if (decoder != nullptr)
 	{
-		AudioVideoBackend::AudioFrame decoded;
+		::Kyty::Emulator::AudioVideoBackend::AudioFrame decoded;
 		if (!decoder->TryReadAudioFrame(&decoded) || decoded.data.empty())
 		{
 			return 0;
