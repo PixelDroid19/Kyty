@@ -6,6 +6,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Host/Platform.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Log.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/LibraryRegistration.h"
 #include "Emulator/Libs/Libs.h"
@@ -266,7 +267,7 @@ int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id)
 {
 	PRINT_NAME();
 
-	printf("\t user_id  = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t user_id  = %d\n", user_id);
 
 	if (user_id < 0)
 	{
@@ -278,7 +279,7 @@ int KYTY_SYSV_ABI SaveDataCreateTransactionResource(int32_t user_id)
 		std::lock_guard<std::mutex> lock(g_transaction_mutex);
 		g_transaction_resources.insert(id);
 	}
-	printf("\t resource = %d\n", id);
+	KYTY_LOG_DEBUG("\t resource = %d\n", id);
 	return id;
 }
 
@@ -287,7 +288,7 @@ int KYTY_SYSV_ABI SaveDataDeleteTransactionResource(int32_t resource)
 {
 	PRINT_NAME();
 
-	printf("\t resource = %d\n", resource);
+	KYTY_LOG_DEBUG("\t resource = %d\n", resource);
 
 	if (resource <= 0)
 	{
@@ -323,11 +324,11 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, S
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	printf("\t user_id       = %d\n", cond->user_id);
-	printf("\t title_id      = %s\n", (cond->title_id != nullptr ? cond->title_id->data : "(null)"));
-	printf("\t dir_name_pat  = %s\n", (cond->dir_name != nullptr ? cond->dir_name->data : "(null)"));
-	printf("\t key/order     = %u/%u\n", cond->key, cond->order);
-	printf("\t dir_names_num = %u\n", result->dir_names_num);
+	KYTY_LOG_DEBUG("\t user_id       = %d\n", cond->user_id);
+	KYTY_LOG_DEBUG("\t title_id      = %s\n", (cond->title_id != nullptr ? cond->title_id->data : "(null)"));
+	KYTY_LOG_DEBUG("\t dir_name_pat  = %s\n", (cond->dir_name != nullptr ? cond->dir_name->data : "(null)"));
+	KYTY_LOG_DEBUG("\t key/order     = %u/%u\n", cond->key, cond->order);
+	KYTY_LOG_DEBUG("\t dir_names_num = %u\n", result->dir_names_num);
 
 	result->hit_num = 0;
 	result->set_num = 0;
@@ -398,7 +399,7 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, S
 	}
 
 	result->set_num = written;
-	printf("\t hit_num = %u set_num = %u\n", result->hit_num, result->set_num);
+	KYTY_LOG_DEBUG("\t hit_num = %u set_num = %u\n", result->hit_num, result->set_num);
 	return OK;
 }
 
@@ -411,12 +412,12 @@ int KYTY_SYSV_ABI SaveDataMount(const SaveDataMount* mount, SaveDataMountResult*
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	printf("\t user_id     = %d\n", mount->user_id);
-	printf("\t title_id    = %s\n", mount->title_id != nullptr ? mount->title_id : "<current>");
-	printf("\t dir_name    = %s\n", mount->dir_name);
-	printf("\t fingerprint = %s\n", mount->fingerprint != nullptr ? mount->fingerprint : "<null>");
-	printf("\t blocks      = %" PRIu64 "\n", mount->blocks);
-	printf("\t mount_mode  = %" PRIu32 "\n", mount->mount_mode);
+	KYTY_LOG_DEBUG("\t user_id     = %d\n", mount->user_id);
+	KYTY_LOG_DEBUG("\t title_id    = %s\n", mount->title_id != nullptr ? mount->title_id : "<current>");
+	KYTY_LOG_DEBUG("\t dir_name    = %s\n", mount->dir_name);
+	KYTY_LOG_DEBUG("\t fingerprint = %s\n", mount->fingerprint != nullptr ? mount->fingerprint : "<null>");
+	KYTY_LOG_DEBUG("\t blocks      = %" PRIu64 "\n", mount->blocks);
+	KYTY_LOG_DEBUG("\t mount_mode  = %" PRIu32 "\n", mount->mount_mode);
 
 	String mount_dir;
 	if (!ResolveSaveDataSlot(mount->title_id, mount->dir_name, &mount_dir))
@@ -435,10 +436,10 @@ int KYTY_SYSV_ABI SaveDataMount2(const SaveDataMount2* mount, SaveDataMountResul
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	printf("\t user_id    = %d\n", mount->user_id);
-	printf("\t dir_name   = %s\n", mount->dir_name->data);
-	printf("\t blocks     = %" PRIu64 "\n", mount->blocks);
-	printf("\t mount_mode = %" PRIu32 "\n", mount->mount_mode);
+	KYTY_LOG_DEBUG("\t user_id    = %d\n", mount->user_id);
+	KYTY_LOG_DEBUG("\t dir_name   = %s\n", mount->dir_name->data);
+	KYTY_LOG_DEBUG("\t blocks     = %" PRIu64 "\n", mount->blocks);
+	KYTY_LOG_DEBUG("\t mount_mode = %" PRIu32 "\n", mount->mount_mode);
 
 	String mount_dir;
 	if (!ResolveSaveDataSlot(nullptr, mount->dir_name->data, &mount_dir))
@@ -495,9 +496,9 @@ int KYTY_SYSV_ABI SaveDataTransferringMount(const SaveDataTransferringMountParam
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	printf("\t user_id  = %d\n", mount->user_id);
-	printf("\t title_id = %s\n", mount->title_id != nullptr ? mount->title_id->data : "<null>");
-	printf("\t dir_name = %s\n", mount->dir_name->data);
+	KYTY_LOG_DEBUG("\t user_id  = %d\n", mount->user_id);
+	KYTY_LOG_DEBUG("\t title_id = %s\n", mount->title_id != nullptr ? mount->title_id->data : "<null>");
+	KYTY_LOG_DEBUG("\t dir_name = %s\n", mount->dir_name->data);
 
 	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, 0x20u, mount_result);
 }
@@ -525,7 +526,7 @@ int KYTY_SYSV_ABI SaveDataUmount(const SaveDataMountPoint* mount_point)
 {
 	PRINT_NAME();
 
-	printf("\t mount_point = %s\n", mount_point != nullptr ? mount_point->data : "(null)");
+	KYTY_LOG_DEBUG("\t mount_point = %s\n", mount_point != nullptr ? mount_point->data : "(null)");
 	return UnmountSaveDataPoint(mount_point);
 }
 
@@ -540,8 +541,8 @@ int KYTY_SYSV_ABI SaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount
 {
 	PRINT_NAME();
 
-	printf("\t mode        = %u\n", mode);
-	printf("\t mount_point = %s\n", mount_point != nullptr ? mount_point->data : "(null)");
+	KYTY_LOG_DEBUG("\t mode        = %u\n", mode);
+	KYTY_LOG_DEBUG("\t mount_point = %s\n", mount_point != nullptr ? mount_point->data : "(null)");
 
 	const int result = UnmountSaveDataPoint(mount_point);
 	if (result != OK)
@@ -561,18 +562,18 @@ int KYTY_SYSV_ABI SaveDataSetParam(const SaveDataMountPoint* mount_point, uint32
 
 	EXIT_NOT_IMPLEMENTED(mount_point == nullptr);
 
-	printf("\t mount_point    = %s\n", mount_point->data);
-	printf("\t param_type     = %u\n", param_type);
-	printf("\t param_buf_size = %" PRIu64 "\n", param_buf_size);
+	KYTY_LOG_DEBUG("\t mount_point    = %s\n", mount_point->data);
+	KYTY_LOG_DEBUG("\t param_type     = %u\n", param_type);
+	KYTY_LOG_DEBUG("\t param_buf_size = %" PRIu64 "\n", param_buf_size);
 
 	if (param_type == 0)
 	{
 		const auto* p = static_cast<const SaveDataParam*>(param_buf);
 
-		printf("\t title      = %s\n", p->title);
-		printf("\t sub_title  = %s\n", p->sub_title);
-		printf("\t detail     = %s\n", p->detail);
-		printf("\t user_param = %u\n", p->user_param);
+		KYTY_LOG_DEBUG("\t title      = %s\n", p->title);
+		KYTY_LOG_DEBUG("\t sub_title  = %s\n", p->sub_title);
+		KYTY_LOG_DEBUG("\t detail     = %s\n", p->detail);
+		KYTY_LOG_DEBUG("\t user_param = %u\n", p->user_param);
 	} else
 	{
 		KYTY_NOT_IMPLEMENTED;
@@ -590,7 +591,7 @@ int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, Sa
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	printf("\t mount_point = %s\n", mount_point->data);
+	KYTY_LOG_DEBUG("\t mount_point = %s\n", mount_point->data);
 
 	// Mounted save capacity reported to the guest. Values are large enough for
 	// typical title save slots; free_blocks tracks remaining capacity.
@@ -707,7 +708,7 @@ int KYTY_SYSV_ABI SaveDataSyncSaveDataMemory(const SaveDataMemorySync* sync)
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	printf("\t user_id = %d slot=%u\n", sync->user_id, sync->slot_id);
+	KYTY_LOG_DEBUG("\t user_id = %d slot=%u\n", sync->user_id, sync->slot_id);
 
 	const auto result = g_save_memory_store.Sync(path);
 	if (result != SaveDataMemoryStoreResult::Success)
@@ -762,9 +763,9 @@ int KYTY_SYSV_ABI SaveDataPrepare(const SaveDataMountPoint* mount_point, const S
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	printf("\t mount_point  = %s\n", mount_point->data);
-	printf("\t resource     = %d\n", param->resource);
-	printf("\t prepare_mode = %u\n", param->prepare_mode);
+	KYTY_LOG_DEBUG("\t mount_point  = %s\n", mount_point->data);
+	KYTY_LOG_DEBUG("\t resource     = %d\n", param->resource);
+	KYTY_LOG_DEBUG("\t prepare_mode = %u\n", param->prepare_mode);
 	return OK;
 }
 
@@ -778,8 +779,8 @@ int KYTY_SYSV_ABI SaveDataCommit(const SaveDataCommitParam* commit_param)
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	printf("\t resource    = %d\n", commit_param->resource);
-	printf("\t commit_mode = %u\n", commit_param->commit_mode);
+	KYTY_LOG_DEBUG("\t resource    = %d\n", commit_param->resource);
+	KYTY_LOG_DEBUG("\t commit_mode = %u\n", commit_param->commit_mode);
 	if ((commit_param->commit_mode & 1u) != 0)
 	{
 		EnqueueSaveDataEvent(SAVE_DATA_EVENT_TYPE_COMMIT_BACKUP_END, 0);
@@ -792,9 +793,9 @@ int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const 
 	EXIT_NOT_IMPLEMENTED(mount_point == nullptr);
 	EXIT_NOT_IMPLEMENTED(icon == nullptr);
 
-	printf("\t buf       = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(icon->buf));
-	printf("\t buf_size  = %" PRIu64 "\n", icon->buf_size);
-	printf("\t data_size = %" PRIu64 "\n", icon->data_size);
+	KYTY_LOG_DEBUG("\t buf       = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(icon->buf));
+	KYTY_LOG_DEBUG("\t buf_size  = %" PRIu64 "\n", icon->buf_size);
+	KYTY_LOG_DEBUG("\t data_size = %" PRIu64 "\n", icon->data_size);
 
 	return OK;
 }
@@ -863,14 +864,14 @@ static_assert(offsetof(SaveDataMemorySet2, slot_id) == 36);
 int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(void* setup_param, void* result_out)
 {
 	PRINT_NAME();
-	printf("\t setup_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(setup_param));
-	printf("\t result_out  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(result_out));
+	KYTY_LOG_DEBUG("\t setup_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(setup_param));
+	KYTY_LOG_DEBUG("\t result_out  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(result_out));
 	if (setup_param == nullptr)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 	const auto* setup = static_cast<const SaveDataMemorySetup2*>(setup_param);
-	printf("\t option=%#x user_id=%d memory_size=%" PRIu64 " slot=%u\n", setup->option, setup->user_id,
+	KYTY_LOG_DEBUG("\t option=%#x user_id=%d memory_size=%" PRIu64 " slot=%u\n", setup->option, setup->user_id,
 	       static_cast<uint64_t>(setup->memory_size), setup->slot_id);
 
 	std::filesystem::path path;
@@ -897,13 +898,13 @@ int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(void* setup_param, void* result_o
 int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(void* get_param)
 {
 	PRINT_NAME();
-	printf("\t get_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(get_param));
+	KYTY_LOG_DEBUG("\t get_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(get_param));
 	if (get_param == nullptr)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 	auto* get = static_cast<SaveDataMemoryGet2*>(get_param);
-	printf("\t user_id=%d data=%p slot=%u\n", get->user_id, static_cast<void*>(get->data), get->slot_id);
+	KYTY_LOG_DEBUG("\t user_id=%d data=%p slot=%u\n", get->user_id, static_cast<void*>(get->data), get->slot_id);
 
 	std::filesystem::path path;
 	if (!ResolveSaveDataMemorySlot(get->user_id, get->slot_id, &path))
@@ -929,13 +930,13 @@ int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(void* get_param)
 int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(void* set_param)
 {
 	PRINT_NAME();
-	printf("\t set_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(set_param));
+	KYTY_LOG_DEBUG("\t set_param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(set_param));
 	if (set_param == nullptr)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 	const auto* set = static_cast<const SaveDataMemorySet2*>(set_param);
-	printf("\t user_id=%d data=%p data_num=%u slot=%u\n", set->user_id, static_cast<const void*>(set->data), set->data_num, set->slot_id);
+	KYTY_LOG_DEBUG("\t user_id=%d data=%p data_num=%u slot=%u\n", set->user_id, static_cast<const void*>(set->data), set->data_num, set->slot_id);
 
 	std::filesystem::path path;
 	if (!ResolveSaveDataMemorySlot(set->user_id, set->slot_id, &path) || set->data_num > SaveDataMemoryStore::MaximumWriteRanges() ||
@@ -983,9 +984,9 @@ int KYTY_SYSV_ABI SaveDataGetParam(const SaveDataMountPoint* mount_point, uint32
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	printf("\t mount_point    = %s\n", mount_point->data);
-	printf("\t param_type     = %u\n", param_type);
-	printf("\t param_buf_size = %" PRIu64 "\n", static_cast<uint64_t>(param_buf_size));
+	KYTY_LOG_DEBUG("\t mount_point    = %s\n", mount_point->data);
+	KYTY_LOG_DEBUG("\t param_type     = %u\n", param_type);
+	KYTY_LOG_DEBUG("\t param_buf_size = %" PRIu64 "\n", static_cast<uint64_t>(param_buf_size));
 	std::memset(param_buf, 0, param_buf_size);
 	return OK;
 }

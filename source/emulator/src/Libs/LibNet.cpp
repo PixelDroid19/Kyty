@@ -1,6 +1,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Log.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Network.h"
@@ -75,8 +76,8 @@ int KYTY_SYSV_ABI NetGetMacAddress(Net::NetEtherAddr* addr, int flags)
 static int KYTY_SYSV_ABI NetEpollCreate(const char* name, int flags)
 {
 	PRINT_NAME();
-	printf("\t name  = %s\n", name != nullptr ? name : "(null)");
-	printf("\t flags = %d\n", flags);
+	KYTY_LOG_DEBUG("\t name  = %s\n", name != nullptr ? name : "(null)");
+	KYTY_LOG_DEBUG("\t flags = %d\n", flags);
 	EXIT("Net epoll is not implemented\n");
 	return -1;
 }
@@ -84,7 +85,7 @@ static int KYTY_SYSV_ABI NetEpollCreate(const char* name, int flags)
 static int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id)
 {
 	PRINT_NAME();
-	printf("\t epoll_id = %d\n", epoll_id);
+	KYTY_LOG_DEBUG("\t epoll_id = %d\n", epoll_id);
 	EXIT("Net epoll is not implemented\n");
 	return -1;
 }
@@ -92,10 +93,10 @@ static int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id)
 static int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket, const void* event)
 {
 	PRINT_NAME();
-	printf("\t epoll_id = %d\n", epoll_id);
-	printf("\t operation = %d\n", operation);
-	printf("\t socket    = %d\n", socket);
-	printf("\t event     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(event));
+	KYTY_LOG_DEBUG("\t epoll_id = %d\n", epoll_id);
+	KYTY_LOG_DEBUG("\t operation = %d\n", operation);
+	KYTY_LOG_DEBUG("\t socket    = %d\n", socket);
+	KYTY_LOG_DEBUG("\t event     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(event));
 	EXIT("Net epoll is not implemented\n");
 	return -1;
 }
@@ -103,10 +104,10 @@ static int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket
 static int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int timeout_ms)
 {
 	PRINT_NAME();
-	printf("\t epoll_id   = %d\n", epoll_id);
-	printf("\t events     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(events));
-	printf("\t max_events = %d\n", max_events);
-	printf("\t timeout_ms = %d\n", timeout_ms);
+	KYTY_LOG_DEBUG("\t epoll_id   = %d\n", epoll_id);
+	KYTY_LOG_DEBUG("\t events     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(events));
+	KYTY_LOG_DEBUG("\t max_events = %d\n", max_events);
+	KYTY_LOG_DEBUG("\t timeout_ms = %d\n", timeout_ms);
 	EXIT("Net epoll is not implemented\n");
 	return -1;
 }
@@ -115,12 +116,12 @@ static int KYTY_SYSV_ABI NetResolverStartNtoa(int resolver_id, const char* hostn
                                               int flags)
 {
 	PRINT_NAME();
-	printf("\t resolver_id = %d\n", resolver_id);
-	printf("\t hostname    = %s\n", hostname != nullptr ? hostname : "(null)");
-	printf("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-	printf("\t timeout_ms  = %d\n", timeout_ms);
-	printf("\t retries     = %d\n", retries);
-	printf("\t flags       = %d\n", flags);
+	KYTY_LOG_DEBUG("\t resolver_id = %d\n", resolver_id);
+	KYTY_LOG_DEBUG("\t hostname    = %s\n", hostname != nullptr ? hostname : "(null)");
+	KYTY_LOG_DEBUG("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
+	KYTY_LOG_DEBUG("\t timeout_ms  = %d\n", timeout_ms);
+	KYTY_LOG_DEBUG("\t retries     = %d\n", retries);
+	KYTY_LOG_DEBUG("\t flags       = %d\n", flags);
 	EXIT("Net resolver is not implemented\n");
 	return -1;
 }
@@ -135,10 +136,10 @@ static int KYTY_SYSV_ABI NetResolverStartAton()
 static int KYTY_SYSV_ABI NetGetSockInfo(int socket, void* info, int info_size, int flags)
 {
 	PRINT_NAME();
-	printf("\t socket    = %d\n", socket);
-	printf("\t info      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
-	printf("\t info_size = %d\n", info_size);
-	printf("\t flags     = %d\n", flags);
+	KYTY_LOG_DEBUG("\t socket    = %d\n", socket);
+	KYTY_LOG_DEBUG("\t info      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
+	KYTY_LOG_DEBUG("\t info_size = %d\n", info_size);
+	KYTY_LOG_DEBUG("\t flags     = %d\n", flags);
 	EXIT("Net socket information is not implemented\n");
 	return -1;
 }
@@ -298,7 +299,7 @@ LIB_VERSION("NpSessionSignaling", 1, "NpSessionSignaling", 1, 1);
 static int KYTY_SYSV_ABI NpSessionSignalingInitialize(void* parameters)
 {
 	PRINT_NAME();
-	printf("\t parameters = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(parameters));
+	KYTY_LOG_DEBUG("\t parameters = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(parameters));
 
 	// The offline contract only establishes the library. Network signaling is
 	// deliberately not fabricated until a caller requests a concrete operation.
@@ -356,23 +357,23 @@ static int g_npwebapi2_next = 1;
 static int KYTY_SYSV_ABI NpWebApi2Initialize(int lib_http_ctx_id, size_t pool_size)
 {
 	PRINT_NAME();
-	printf("\t lib_http_ctx_id = %d\n", lib_http_ctx_id);
-	printf("\t pool_size       = %" PRIu64 "\n", static_cast<uint64_t>(pool_size));
+	KYTY_LOG_DEBUG("\t lib_http_ctx_id = %d\n", lib_http_ctx_id);
+	KYTY_LOG_DEBUG("\t pool_size       = %" PRIu64 "\n", static_cast<uint64_t>(pool_size));
 	return g_npwebapi2_next++;
 }
 
 static int KYTY_SYSV_ABI NpWebApi2Terminate(int lib_ctx_id)
 {
 	PRINT_NAME();
-	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
+	KYTY_LOG_DEBUG("\t lib_ctx_id = %d\n", lib_ctx_id);
 	return OK;
 }
 
 static int KYTY_SYSV_ABI NpWebApi2CreateUserContext(int lib_ctx_id, int user_id)
 {
 	PRINT_NAME();
-	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
-	printf("\t user_id    = %d\n", user_id);
+	KYTY_LOG_DEBUG("\t lib_ctx_id = %d\n", lib_ctx_id);
+	KYTY_LOG_DEBUG("\t user_id    = %d\n", user_id);
 	static int next = 1;
 	return next++;
 }
@@ -380,14 +381,14 @@ static int KYTY_SYSV_ABI NpWebApi2CreateUserContext(int lib_ctx_id, int user_id)
 static int KYTY_SYSV_ABI NpWebApi2DeleteUserContext(int user_ctx_id)
 {
 	PRINT_NAME();
-	printf("\t user_ctx_id = %d\n", user_ctx_id);
+	KYTY_LOG_DEBUG("\t user_ctx_id = %d\n", user_ctx_id);
 	return OK;
 }
 
 static int KYTY_SYSV_ABI NpWebApi2PushEventCreateHandle(int lib_ctx_id)
 {
 	PRINT_NAME();
-	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
+	KYTY_LOG_DEBUG("\t lib_ctx_id = %d\n", lib_ctx_id);
 	static int handle = 1;
 	return handle++;
 }
@@ -395,14 +396,14 @@ static int KYTY_SYSV_ABI NpWebApi2PushEventCreateHandle(int lib_ctx_id)
 static int KYTY_SYSV_ABI NpWebApi2PushEventDeleteHandle(int handle)
 {
 	PRINT_NAME();
-	printf("\t handle = %d\n", handle);
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 	return OK;
 }
 
 static int KYTY_SYSV_ABI NpWebApi2PushEventCreateFilter(int handle, const void* filter, size_t size)
 {
 	PRINT_NAME();
-	printf("\t handle = %d size = %" PRIu64 "\n", handle, static_cast<uint64_t>(size));
+	KYTY_LOG_DEBUG("\t handle = %d size = %" PRIu64 "\n", handle, static_cast<uint64_t>(size));
 	static int filter_id = 1;
 	return filter_id++;
 }
@@ -410,14 +411,14 @@ static int KYTY_SYSV_ABI NpWebApi2PushEventCreateFilter(int handle, const void* 
 static int KYTY_SYSV_ABI NpWebApi2PushEventRegisterCallback(int handle, void* cb, void* user)
 {
 	PRINT_NAME();
-	printf("\t handle = %d cb = 0x%016" PRIx64 "\n", handle, reinterpret_cast<uint64_t>(cb));
+	KYTY_LOG_DEBUG("\t handle = %d cb = 0x%016" PRIx64 "\n", handle, reinterpret_cast<uint64_t>(cb));
 	return OK;
 }
 
 static int KYTY_SYSV_ABI NpWebApi2CheckTimeout(int lib_ctx_id)
 {
 	PRINT_NAME();
-	printf("\t lib_ctx_id = %d\n", lib_ctx_id);
+	KYTY_LOG_DEBUG("\t lib_ctx_id = %d\n", lib_ctx_id);
 	return OK;
 }
 
@@ -666,10 +667,10 @@ Http2Registry g_http2_registry;
 static int KYTY_SYSV_ABI Http2Init(int libnet_mem_id, int libssl_ctx_id, size_t pool_size, int max_concurrent_request)
 {
 	PRINT_NAME();
-	printf("\t libnet_mem_id          = %d\n", libnet_mem_id);
-	printf("\t libssl_ctx_id          = %d\n", libssl_ctx_id);
-	printf("\t pool_size              = %" PRIu64 "\n", static_cast<uint64_t>(pool_size));
-	printf("\t max_concurrent_request = %d\n", max_concurrent_request);
+	KYTY_LOG_DEBUG("\t libnet_mem_id          = %d\n", libnet_mem_id);
+	KYTY_LOG_DEBUG("\t libssl_ctx_id          = %d\n", libssl_ctx_id);
+	KYTY_LOG_DEBUG("\t pool_size              = %" PRIu64 "\n", static_cast<uint64_t>(pool_size));
+	KYTY_LOG_DEBUG("\t max_concurrent_request = %d\n", max_concurrent_request);
 
 	std::lock_guard lock(g_http2_registry.mutex);
 	const int       context_id = g_http2_registry.next_context_id++;
@@ -687,10 +688,10 @@ static int KYTY_SYSV_ABI Http2CreateTemplate(int lib_http2_context_id, const cha
                                              int is_auto_proxy_configuration)
 {
 	PRINT_NAME();
-	printf("\t lib_http2_context_id       = %d\n", lib_http2_context_id);
-	printf("\t user_agent                 = %s\n", user_agent != nullptr ? user_agent : "(null)");
-	printf("\t http_version               = %d\n", http_version);
-	printf("\t auto_proxy_configuration   = %d\n", is_auto_proxy_configuration);
+	KYTY_LOG_DEBUG("\t lib_http2_context_id       = %d\n", lib_http2_context_id);
+	KYTY_LOG_DEBUG("\t user_agent                 = %s\n", user_agent != nullptr ? user_agent : "(null)");
+	KYTY_LOG_DEBUG("\t http_version               = %d\n", http_version);
+	KYTY_LOG_DEBUG("\t auto_proxy_configuration   = %d\n", is_auto_proxy_configuration);
 
 	if (user_agent == nullptr)
 	{
@@ -717,10 +718,10 @@ static int KYTY_SYSV_ABI Http2CreateTemplate(int lib_http2_context_id, const cha
 static int KYTY_SYSV_ABI Http2CreateRequestWithUrl(int template_id, const char* method, const char* url, uint64_t content_length)
 {
 	PRINT_NAME();
-	printf("\t template_id    = %d\n", template_id);
-	printf("\t method         = %s\n", method != nullptr ? method : "(null)");
-	printf("\t url            = %s\n", url != nullptr ? url : "(null)");
-	printf("\t content_length = %" PRIu64 "\n", content_length);
+	KYTY_LOG_DEBUG("\t template_id    = %d\n", template_id);
+	KYTY_LOG_DEBUG("\t method         = %s\n", method != nullptr ? method : "(null)");
+	KYTY_LOG_DEBUG("\t url            = %s\n", url != nullptr ? url : "(null)");
+	KYTY_LOG_DEBUG("\t content_length = %" PRIu64 "\n", content_length);
 
 	if (method == nullptr || url == nullptr)
 	{
@@ -742,10 +743,10 @@ static int KYTY_SYSV_ABI Http2CreateRequestWithUrl(int template_id, const char* 
 static int KYTY_SYSV_ABI Http2AddRequestHeader(int request_id, const char* name, const char* value, uint32_t mode)
 {
 	PRINT_NAME();
-	printf("\t request_id = %d\n", request_id);
-	printf("\t name       = %s\n", name != nullptr ? name : "(null)");
-	printf("\t value      = %s\n", value != nullptr ? value : "(null)");
-	printf("\t mode       = %" PRIu32 "\n", mode);
+	KYTY_LOG_DEBUG("\t request_id = %d\n", request_id);
+	KYTY_LOG_DEBUG("\t name       = %s\n", name != nullptr ? name : "(null)");
+	KYTY_LOG_DEBUG("\t value      = %s\n", value != nullptr ? value : "(null)");
+	KYTY_LOG_DEBUG("\t mode       = %" PRIu32 "\n", mode);
 
 	if (name == nullptr || value == nullptr)
 	{
@@ -766,8 +767,8 @@ static int KYTY_SYSV_ABI Http2AddRequestHeader(int request_id, const char* name,
 static int KYTY_SYSV_ABI Http2SetRequestContentLength(int request_id, uint64_t content_length)
 {
 	PRINT_NAME();
-	printf("\t request_id     = %d\n", request_id);
-	printf("\t content_length = %" PRIu64 "\n", content_length);
+	KYTY_LOG_DEBUG("\t request_id     = %d\n", request_id);
+	KYTY_LOG_DEBUG("\t content_length = %" PRIu64 "\n", content_length);
 
 	std::lock_guard lock(g_http2_registry.mutex);
 	auto            request = g_http2_registry.requests.find(request_id);
@@ -783,9 +784,9 @@ static int KYTY_SYSV_ABI Http2SetRequestContentLength(int request_id, uint64_t c
 static int KYTY_SYSV_ABI Http2SendRequest(int request_id, const void* post_data, size_t size)
 {
 	PRINT_NAME();
-	printf("\t request_id = %d\n", request_id);
-	printf("\t post_data  = %p\n", post_data);
-	printf("\t size       = %" PRIu64 "\n", static_cast<uint64_t>(size));
+	KYTY_LOG_DEBUG("\t request_id = %d\n", request_id);
+	KYTY_LOG_DEBUG("\t post_data  = %p\n", post_data);
+	KYTY_LOG_DEBUG("\t size       = %" PRIu64 "\n", static_cast<uint64_t>(size));
 
 	if (post_data == nullptr && size != 0u)
 	{
@@ -807,11 +808,11 @@ static int KYTY_SYSV_ABI Http2SendRequestAsync(int request_id, const void* post_
 	                                              void* option)
 {
 	PRINT_NAME();
-	printf("\t request_id    = %d\n", request_id);
-	printf("\t post_data     = %p\n", post_data);
-	printf("\t size          = %" PRIu64 "\n", static_cast<uint64_t>(size));
-	printf("\t kqueue_option = %p\n", kqueue_option);
-	printf("\t option        = %p\n", option);
+	KYTY_LOG_DEBUG("\t request_id    = %d\n", request_id);
+	KYTY_LOG_DEBUG("\t post_data     = %p\n", post_data);
+	KYTY_LOG_DEBUG("\t size          = %" PRIu64 "\n", static_cast<uint64_t>(size));
+	KYTY_LOG_DEBUG("\t kqueue_option = %p\n", kqueue_option);
+	KYTY_LOG_DEBUG("\t option        = %p\n", option);
 
 	if (post_data == nullptr && size != 0u)
 	{
@@ -834,10 +835,10 @@ static int KYTY_SYSV_ABI Http2SendRequestAsync(int request_id, const void* post_
 static int KYTY_SYSV_ABI Http2WaitAsync(int request_id, Http2AsyncResult* result, uint32_t* timeout, void* option)
 {
 	PRINT_NAME();
-	printf("\t request_id = %d\n", request_id);
-	printf("\t result     = %p\n", static_cast<void*>(result));
-	printf("\t timeout    = %p\n", static_cast<void*>(timeout));
-	printf("\t option     = %p\n", option);
+	KYTY_LOG_DEBUG("\t request_id = %d\n", request_id);
+	KYTY_LOG_DEBUG("\t result     = %p\n", static_cast<void*>(result));
+	KYTY_LOG_DEBUG("\t timeout    = %p\n", static_cast<void*>(timeout));
+	KYTY_LOG_DEBUG("\t option     = %p\n", option);
 
 	if (result == nullptr)
 	{
