@@ -8,6 +8,13 @@ file(GLOB emulator_src CONFIGURE_DEPENDS
 	src/Loader/*.cpp
 	include/*.h
 )
+
+# Keep the guest-kernel implementation in its own archive.  The public HLE
+# adapters still link it through the emulator target, but the CMake ownership
+# boundary prevents new Kernel sources from silently becoming part of the
+# graphics/audio/loader monolith.
+file(GLOB kernel_src CONFIGURE_DEPENDS src/Kernel/*.cpp)
+list(REMOVE_ITEM emulator_src ${kernel_src})
 list(REMOVE_ITEM emulator_src "${CMAKE_CURRENT_SOURCE_DIR}/src/AudioPcm.cpp")
 
 if (MSVC AND CLANG)
@@ -17,6 +24,21 @@ endif()
 #add_library(emulator_obj OBJECT ${emulator_src})
 #add_library(emulator STATIC $<TARGET_OBJECTS:emulator_obj>)
 add_library(emulator STATIC ${emulator_src})
+add_library(kyty_kernel STATIC ${kernel_src})
+
+# Fail at configure time if a future glob or explicit source entry collapses
+# the kernel back into the emulator archive.
+get_target_property(_emulator_sources emulator SOURCES)
+foreach(_emulator_source IN LISTS _emulator_sources)
+	if(_emulator_source MATCHES "(^|/)src/Kernel/")
+		message(FATAL_ERROR "Kernel source leaked into emulator target: ${_emulator_source}")
+	endif()
+endforeach()
+get_target_property(_kernel_sources kyty_kernel SOURCES)
+if(NOT _kernel_sources)
+	message(FATAL_ERROR "kyty_kernel target has no implementation sources")
+endif()
+
 target_sources(emulator PRIVATE
 	$<TARGET_OBJECTS:imgui_sdl_backend_obj>
 	include/Emulator/Profiling.h
@@ -48,9 +70,6 @@ target_sources(emulator PRIVATE
 	src/Agent/AgentServer.cpp
 	src/Agent/AgentSubsystem.cpp
 	src/Agent/AgentLifecycle.cpp
-	src/Kernel/Time.cpp
-	src/Kernel/TimePort.cpp
-	src/Kernel/AmprPort.cpp
 	src/GuestRuntimePort.cpp
 	include/Emulator/Kernel/Errors.h
 	include/Emulator/Kernel/Trace.h
@@ -140,6 +159,7 @@ add_dependencies(emulator KytyBuildInfo)
 
 target_link_libraries(emulator
 	PUBLIC
+	kyty_kernel
 	core
 	math
 	scripts
@@ -156,6 +176,12 @@ target_link_libraries(emulator
 		kyty_agent_transport
 		kyty_audio_pcm
 )
+
+target_include_directories(kyty_kernel PUBLIC
+	"${CMAKE_CURRENT_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/include"
+)
+target_link_libraries(kyty_kernel PUBLIC core math sys scripts)
 
 if(MSVC OR MINGW)
 	target_link_libraries(emulator PRIVATE psapi)
