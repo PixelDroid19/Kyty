@@ -163,9 +163,6 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 	EXIT_IF(swapchain == nullptr);
 	EXIT_IF(g_initialized);
 
-	void* native_window = window->GetNativeHandle();
-	EXIT_IF(native_window == nullptr);
-
 	g_visible = EnvHudEnabledByDefault();
 	DebugStatsInit();
 
@@ -192,7 +189,7 @@ void DebugOverlayInit(::Kyty::Emulator::Host::HostWindow* window, GraphicContext
 		return;
 	}
 
-	if (!::Kyty::Emulator::Host::HostGuiInit(native_window))
+	if (!::Kyty::Emulator::Host::HostGuiInit(window))
 	{
 		KYTY_LOG_WARN("DebugOverlay: ImGui host GUI initialization failed\n");
 		DestroyFramebuffers(ctx->device);
