@@ -1556,7 +1556,7 @@ bool FlipQueue::Flip(uint32_t micros)
 		}
 	}
 
-	printf("Flip done: %d\n", r.index);
+	KYTY_LOG_DEBUG("Flip done: %d\n", r.index);
 
 	m_mutex.Lock();
 
@@ -1615,7 +1615,7 @@ KYTY_SYSV_ABI int VideoOutOpen(int user_id, int bus_type, int index, const void*
 	EXIT_NOT_IMPLEMENTED(index != 0);
 	// Gen5 titles pass a non-null open-param block; attributes are applied later
 	// via SetBufferAttribute*. Accept and ignore for Open().
-	printf("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 
 	int handle = g_video_out_context->Open();
 
@@ -1668,12 +1668,12 @@ KYTY_SYSV_ABI void VideoOutSetBufferAttribute(VideoOutBufferAttribute* attribute
 
 	EXIT_NOT_IMPLEMENTED(attribute == nullptr);
 
-	printf("\t pixel_format   = %08" PRIx32 "\n", pixel_format);
-	printf("\t tiling_mode    = %" PRIu32 "\n", tiling_mode);
-	printf("\t aspect_ratio   = %" PRIu32 "\n", aspect_ratio);
-	printf("\t width          = %" PRIu32 "\n", width);
-	printf("\t height         = %" PRIu32 "\n", height);
-	printf("\t pitch_in_pixel = %" PRIu32 "\n", pitch_in_pixel);
+	KYTY_LOG_DEBUG("\t pixel_format   = %08" PRIx32 "\n", pixel_format);
+	KYTY_LOG_DEBUG("\t tiling_mode    = %" PRIu32 "\n", tiling_mode);
+	KYTY_LOG_DEBUG("\t aspect_ratio   = %" PRIu32 "\n", aspect_ratio);
+	KYTY_LOG_DEBUG("\t width          = %" PRIu32 "\n", width);
+	KYTY_LOG_DEBUG("\t height         = %" PRIu32 "\n", height);
+	KYTY_LOG_DEBUG("\t pitch_in_pixel = %" PRIu32 "\n", pitch_in_pixel);
 
 	memset(attribute, 0, sizeof(VideoOutBufferAttribute));
 
@@ -1693,13 +1693,13 @@ KYTY_SYSV_ABI void VideoOutSetBufferAttribute2(VideoOutBufferAttribute2* attribu
 
 	EXIT_NOT_IMPLEMENTED(attribute == nullptr);
 
-	printf("\t pixel_format                = %016" PRIx64 "\n", pixel_format);
-	printf("\t tiling_mode                 = %" PRIu32 "\n", tiling_mode);
-	printf("\t width                       = %" PRIu32 "\n", width);
-	printf("\t height                      = %" PRIu32 "\n", height);
-	printf("\t option                      = %016" PRIx64 "\n", option);
-	printf("\t dcc_control                 = %08" PRIx32 "\n", dcc_control);
-	printf("\t dcc_cb_register_clear_color = %016" PRIx64 "\n", dcc_cb_register_clear_color);
+	KYTY_LOG_DEBUG("\t pixel_format                = %016" PRIx64 "\n", pixel_format);
+	KYTY_LOG_DEBUG("\t tiling_mode                 = %" PRIu32 "\n", tiling_mode);
+	KYTY_LOG_DEBUG("\t width                       = %" PRIu32 "\n", width);
+	KYTY_LOG_DEBUG("\t height                      = %" PRIu32 "\n", height);
+	KYTY_LOG_DEBUG("\t option                      = %016" PRIx64 "\n", option);
+	KYTY_LOG_DEBUG("\t dcc_control                 = %08" PRIx32 "\n", dcc_control);
+	KYTY_LOG_DEBUG("\t dcc_cb_register_clear_color = %016" PRIx64 "\n", dcc_cb_register_clear_color);
 
 	memset(attribute, 0, sizeof(VideoOutBufferAttribute2));
 
@@ -1722,7 +1722,7 @@ KYTY_SYSV_ABI int VideoOutSetFlipRate(int handle, int rate)
 
 	EXIT_NOT_IMPLEMENTED(rate < 0 || rate > 2);
 
-	printf("\trate = %d\n", rate);
+	KYTY_LOG_DEBUG("\trate = %d\n", rate);
 
 	auto session = g_video_out_context->AcquireSession(handle);
 	EXIT_NOT_IMPLEMENTED(!session);
@@ -2208,7 +2208,7 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 			staged_buffers[i].host_height               = 0;
 			ctx->buffers[slot]                          = staged_buffers[i];
 			ctx->buffer_registration_reserved[slot]     = false;
-			printf("\tbuffers[%d] = %016" PRIx64 "\n", slot, reinterpret_cast<uint64_t>(addresses[i]));
+			KYTY_LOG_DEBUG("\tbuffers[%d] = %016" PRIx64 "\n", slot, reinterpret_cast<uint64_t>(addresses[i]));
 		}
 		ctx->buffers_sets.Add(new_set);
 		if (generate_set_id)
@@ -2327,15 +2327,15 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers(int handle, int start_index, void* con
 		return VIDEO_OUT_ERROR_INVALID_VALUE;
 	}
 
-	printf("\t start_index    = %d\n", start_index);
-	printf("\t buffer_num     = %d\n", buffer_num);
-	printf("\t pixel_format   = 0x%08" PRIx32 "\n", attribute->pixel_format);
-	printf("\t tiling_mode    = %" PRIu32 "\n", attribute->tiling_mode);
-	printf("\t aspect_ratio   = %" PRIu32 "\n", attribute->aspect_ratio);
-	printf("\t width          = %" PRIu32 "\n", attribute->width);
-	printf("\t height         = %" PRIu32 "\n", attribute->height);
-	printf("\t pitch_in_pixel = %" PRIu32 "\n", attribute->pitch_in_pixel);
-	printf("\t option         = %" PRIu32 "\n", attribute->option);
+	KYTY_LOG_DEBUG("\t start_index    = %d\n", start_index);
+	KYTY_LOG_DEBUG("\t buffer_num     = %d\n", buffer_num);
+	KYTY_LOG_DEBUG("\t pixel_format   = 0x%08" PRIx32 "\n", attribute->pixel_format);
+	KYTY_LOG_DEBUG("\t tiling_mode    = %" PRIu32 "\n", attribute->tiling_mode);
+	KYTY_LOG_DEBUG("\t aspect_ratio   = %" PRIu32 "\n", attribute->aspect_ratio);
+	KYTY_LOG_DEBUG("\t width          = %" PRIu32 "\n", attribute->width);
+	KYTY_LOG_DEBUG("\t height         = %" PRIu32 "\n", attribute->height);
+	KYTY_LOG_DEBUG("\t pitch_in_pixel = %" PRIu32 "\n", attribute->pitch_in_pixel);
+	KYTY_LOG_DEBUG("\t option         = %" PRIu32 "\n", attribute->option);
 
 	// EXIT_NOT_IMPLEMENTED(attribute->pixel_format != 0x80000000);
 	EXIT_NOT_IMPLEMENTED(attribute->tiling_mode != 0);
@@ -2368,16 +2368,16 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 		return VIDEO_OUT_ERROR_INVALID_VALUE;
 	}
 
-	printf("\t start_index    = %d\n", buffer_index_start);
-	printf("\t buffer_num     = %d\n", buffer_num);
-	printf("\t set_index      = %d\n", set_index);
-	printf("\t pixel_format   = 0x%016" PRIx64 "\n", attribute->pixel_format);
-	printf("\t tiling_mode    = %" PRIu32 "\n", attribute->tiling_mode);
-	printf("\t aspect_ratio   = %" PRIu32 "\n", attribute->aspect_ratio);
-	printf("\t width          = %" PRIu32 "\n", attribute->width);
-	printf("\t height         = %" PRIu32 "\n", attribute->height);
-	printf("\t pitch_in_pixel = %" PRIu32 "\n", attribute->pitch_in_pixel);
-	printf("\t option         = %" PRIu64 "\n", attribute->option);
+	KYTY_LOG_DEBUG("\t start_index    = %d\n", buffer_index_start);
+	KYTY_LOG_DEBUG("\t buffer_num     = %d\n", buffer_num);
+	KYTY_LOG_DEBUG("\t set_index      = %d\n", set_index);
+	KYTY_LOG_DEBUG("\t pixel_format   = 0x%016" PRIx64 "\n", attribute->pixel_format);
+	KYTY_LOG_DEBUG("\t tiling_mode    = %" PRIu32 "\n", attribute->tiling_mode);
+	KYTY_LOG_DEBUG("\t aspect_ratio   = %" PRIu32 "\n", attribute->aspect_ratio);
+	KYTY_LOG_DEBUG("\t width          = %" PRIu32 "\n", attribute->width);
+	KYTY_LOG_DEBUG("\t height         = %" PRIu32 "\n", attribute->height);
+	KYTY_LOG_DEBUG("\t pitch_in_pixel = %" PRIu32 "\n", attribute->pitch_in_pixel);
+	KYTY_LOG_DEBUG("\t option         = %" PRIu64 "\n", attribute->option);
 
 	// EXIT_NOT_IMPLEMENTED(attribute->pixel_format != 0x80000000);
 	VideoOutAppendLog("/tmp/kyty_vo2.log", "REG2: handle=%d set=%d start=%d num=%d fmt=0x%016llx tiling=%u aspect=%u w=%u h=%u pitch=%u option=%llu dcc_color=%llu dcc_ctrl=%llu\n",
@@ -2526,14 +2526,14 @@ KYTY_SYSV_ABI int VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status)
 
 	g_video_out_context->GetFlipQueue().GetFlipStatus(ctx, status);
 
-	printf("\t count = %" PRIu64 "\n", status->count);
-	printf("\t processTime = %" PRIu64 "\n", status->processTime);
-	printf("\t processTimeCounter = %" PRIu64 "\n", status->processTimeCounter);
-	printf("\t submitProcessTimeCounter = %" PRIu64 "\n", status->submitProcessTimeCounter);
-	printf("\t flipArg = %" PRId64 "\n", status->flipArg);
-	printf("\t gcQueueNum = %d\n", status->gcQueueNum);
-	printf("\t flipPendingNum = %d\n", status->flipPendingNum);
-	printf("\t currentBuffer = %d\n", status->currentBuffer);
+	KYTY_LOG_DEBUG("\t count = %" PRIu64 "\n", status->count);
+	KYTY_LOG_DEBUG("\t processTime = %" PRIu64 "\n", status->processTime);
+	KYTY_LOG_DEBUG("\t processTimeCounter = %" PRIu64 "\n", status->processTimeCounter);
+	KYTY_LOG_DEBUG("\t submitProcessTimeCounter = %" PRIu64 "\n", status->submitProcessTimeCounter);
+	KYTY_LOG_DEBUG("\t flipArg = %" PRId64 "\n", status->flipArg);
+	KYTY_LOG_DEBUG("\t gcQueueNum = %d\n", status->gcQueueNum);
+	KYTY_LOG_DEBUG("\t flipPendingNum = %d\n", status->flipPendingNum);
+	KYTY_LOG_DEBUG("\t currentBuffer = %d\n", status->currentBuffer);
 
 	return Kernel::OK;
 }
@@ -2553,7 +2553,7 @@ KYTY_SYSV_ABI int VideoOutIsFlipPending(int handle)
 
 	VideoOutFlipStatus status {};
 	g_video_out_context->GetFlipQueue().GetFlipStatus(ctx, &status);
-	printf("\t flipPendingNum = %d\n", status.flipPendingNum);
+	KYTY_LOG_DEBUG("\t flipPendingNum = %d\n", status.flipPendingNum);
 	return status.flipPendingNum;
 }
 
@@ -2597,7 +2597,7 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 KYTY_SYSV_ABI int VideoOutColorSettingsSetGamma(VideoOutColorSettings* settings, float gamma)
 {
 	PRINT_NAME();
-	printf("\t gamma = %g\n", static_cast<double>(gamma));
+	KYTY_LOG_DEBUG("\t gamma = %g\n", static_cast<double>(gamma));
 	if (settings == nullptr)
 	{
 		return VIDEO_OUT_ERROR_INVALID_ADDRESS;
@@ -2623,7 +2623,7 @@ KYTY_SYSV_ABI int VideoOutSubmitChangeBufferAttribute2(int handle, int set_index
 {
 	PRINT_NAME();
 	EXIT_IF(g_video_out_context == nullptr);
-	printf("\t handle = %d set_index = %d attr = 0x%016" PRIx64 "\n", handle, set_index, reinterpret_cast<uint64_t>(attribute));
+	KYTY_LOG_DEBUG("\t handle = %d set_index = %d attr = 0x%016" PRIx64 "\n", handle, set_index, reinterpret_cast<uint64_t>(attribute));
 	auto session = g_video_out_context->AcquireSession(handle);
 	if (!session)
 	{
@@ -2655,9 +2655,9 @@ KYTY_SYSV_ABI int VideoOutGetVblankStatus(int handle, VideoOutVblankStatus* stat
 	FillMonotonicVblankStatus(ctx, status);
 	ctx->mutex.Unlock();
 
-	printf("\t count = %" PRIu64 "\n", status->count);
-	printf("\t processTime = %" PRIu64 "\n", status->processTime);
-	printf("\t tsc = %" PRIu64 "\n", status->tsc);
+	KYTY_LOG_DEBUG("\t count = %" PRIu64 "\n", status->count);
+	KYTY_LOG_DEBUG("\t processTime = %" PRIu64 "\n", status->processTime);
+	KYTY_LOG_DEBUG("\t tsc = %" PRIu64 "\n", status->tsc);
 
 	return Kernel::OK;
 }
@@ -2674,8 +2674,8 @@ KYTY_SYSV_ABI int VideoOutSetWindowModeMargins(int handle, int top, int bottom)
 		return VIDEO_OUT_ERROR_INVALID_HANDLE;
 	}
 
-	printf("\t top    = %d\n", top);
-	printf("\t bottom = %d\n", bottom);
+	KYTY_LOG_DEBUG("\t top    = %d\n", top);
+	KYTY_LOG_DEBUG("\t bottom = %d\n", bottom);
 
 	return Kernel::OK;
 }
