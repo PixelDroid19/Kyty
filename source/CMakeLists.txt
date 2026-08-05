@@ -284,7 +284,18 @@ if(_kyty_emulator_links AND "kyty_devtools_core" IN_LIST _kyty_emulator_links)
 	message(FATAL_ERROR "emulator must not link kyty_devtools_core; use kyty_runtime_devtools from the host")
 endif()
 
-add_executable(fc_script ${KYTY_SCRIPT_SRC}) 
+add_executable(fc_script ${KYTY_SCRIPT_SRC})
+
+if(KYTY_BUILD_UNIT_TESTS)
+	# fc_script embeds the unit-test archive for its Lua test entry point.  The
+	# GoogleTest translation unit is compiled as part of that host executable,
+	# so its private include roots must be scoped here rather than inherited from
+	# the standalone runner.
+	target_include_directories(fc_script PRIVATE
+		"${CMAKE_SOURCE_DIR}/3rdparty/gtest/include"
+		"${CMAKE_SOURCE_DIR}/3rdparty/gtest"
+	)
+endif()
 
 if(MINGW OR (UNIX AND NOT APPLE))
 	# unit_test references supervisor APIs only from fc_script. Pull every
