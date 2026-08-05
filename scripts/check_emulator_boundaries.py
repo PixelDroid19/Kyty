@@ -134,6 +134,36 @@ RUNTIME_CORE_AUDITED_MUTABLE_GLOBALS = {
     "emulator/src/Config.cpp": {"g_config"},
     "emulator/src/VideoFrameMemory.cpp": {"g_callbacks"},
 }
+# The Gen5 command-flow and shader decode layer is Vulkan-neutral: it turns
+# guest packets and shader words into IR without touching GPU objects. A
+# Vulkan include here would drag the backend into the decode layer.
+GRAPHICS_COMMAND_FLOW_FILES = (
+    "emulator/src/Graphics/GraphicsRun.cpp",
+    "emulator/src/Graphics/GraphicsRunHelpers.cpp",
+    "emulator/src/Graphics/GraphicsRunOpParsers.cpp",
+    "emulator/src/Graphics/GraphicsRunRegisterParsers.cpp",
+    "emulator/src/Graphics/GraphicsRunTrace.cpp",
+    "emulator/src/Graphics/Pm4.cpp",
+    "emulator/src/Graphics/ShaderParse.cpp",
+    "emulator/src/Graphics/ShaderParseDS.cpp",
+    "emulator/src/Graphics/ShaderParseEXP.cpp",
+    "emulator/src/Graphics/ShaderParseMIMG.cpp",
+    "emulator/src/Graphics/ShaderParseMTBUF.cpp",
+    "emulator/src/Graphics/ShaderParseMUBUF.cpp",
+    "emulator/src/Graphics/ShaderParseOperands.cpp",
+    "emulator/src/Graphics/ShaderParseSMEM.cpp",
+    "emulator/src/Graphics/ShaderParseSMRD.cpp",
+    "emulator/src/Graphics/ShaderParseSOP1.cpp",
+    "emulator/src/Graphics/ShaderParseSOP2.cpp",
+    "emulator/src/Graphics/ShaderParseSOPC.cpp",
+    "emulator/src/Graphics/ShaderParseSOPK.cpp",
+    "emulator/src/Graphics/ShaderParseSOPP.cpp",
+    "emulator/src/Graphics/ShaderParseVINTRP.cpp",
+    "emulator/src/Graphics/ShaderParseVOP1.cpp",
+    "emulator/src/Graphics/ShaderParseVOP2.cpp",
+    "emulator/src/Graphics/ShaderParseVOP3.cpp",
+    "emulator/src/Graphics/ShaderParseVOPC.cpp",
+)
 RUNTIME_CORE_SOURCE_FILES = (
     "emulator/src/Log.cpp",
     "emulator/src/Config.cpp",
@@ -150,6 +180,7 @@ RUNTIME_CORE_SOURCE_FILES = (
 )
 RUNTIME_LINKER_SOURCE = "emulator/src/Loader/RuntimeLinker.cpp"
 ALLOWED_SOURCE_FILES = (
+    *GRAPHICS_COMMAND_FLOW_FILES,
     *RUNTIME_CORE_SOURCE_FILES,
     *AUDIO_SOURCE_FILES,
     *KERNEL_SOURCE_FILES,
@@ -161,7 +192,6 @@ ALLOWED_SOURCE_FILES = (
     GRAPHICS_DEBUG_OVERLAY_SOURCE,
     GRAPHICS_WINDOW_SOURCE,
     *LOADER_SOURCE_FILES,
-    GRAPHICS_RUN_SOURCE,
     *GRAPHICS_TIME_PORT_SOURCE_FILES,
     "emulator/src/Graphics/Gen5Driver.cpp",
     *GRAPHICS_HLE_SOURCE_FILES,
@@ -346,6 +376,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(LEGACY_NAMESPACE_HEADER_CANONICAL) for canonical_path in canonical_paths
     ):
         return "legacy Kernel Namespace header"
+    if relative_path in GRAPHICS_COMMAND_FLOW_FILES and any(
+        canonical_path.startswith("vulkan/") or "vulkan_core" in canonical_path for canonical_path in canonical_paths
+    ):
+        return "CommandFlow -> Vulkan"
     if relative_path in RUNTIME_CORE_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold())
         for canonical_path in canonical_paths
