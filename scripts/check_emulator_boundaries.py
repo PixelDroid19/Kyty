@@ -117,6 +117,23 @@ LOADER_SOURCE_FILES = (
 # Neutral runtime services below every domain: the emulator archive split
 # moved Log, Config, the ports and the guest-state bridges into
 # kyty_runtime_core. They must not reach up into any domain implementation.
+# Audited mutable globals in the neutral runtime layer. Every entry is
+# service-owned instance state (the owning service initializes and tears it
+# down through its lifecycle); the checker rejects NEW mutable globals here
+# so the neutral layer cannot silently accumulate unowned state.
+RUNTIME_CORE_AUDITED_MUTABLE_GLOBALS = {
+    "emulator/src/Log.cpp": {
+        "g_log_initialized",
+        "g_dir",
+        "g_file",
+        "g_colored_printf",
+        "g_thread_local_files",
+        "g_file_log_bytes",
+        "g_file_log_capped",
+    },
+    "emulator/src/Config.cpp": {"g_config"},
+    "emulator/src/VideoFrameMemory.cpp": {"g_callbacks"},
+}
 RUNTIME_CORE_SOURCE_FILES = (
     "emulator/src/Log.cpp",
     "emulator/src/Config.cpp",
@@ -205,6 +222,14 @@ LEGACY_KERNEL_IMPORT_PATTERN = re.compile(
 )
 LEGACY_NAMESPACE_HEADER_CANONICAL = "emulator/kernel/namespace.h"
 LEGACY_IMAGE_ALIAS_PATTERN = re.compile(r"\busing\s+Image\s*=\s*ImageAsset\s*;")
+RUNTIME_CORE_MUTABLE_GLOBAL_PATTERN = re.compile(
+    r"\bstatic\s+(?!(?:const|thread_local|constexpr|inline)\b)([A-Za-z_:<>,\s*&\[\]0-9]+?)\s+(g_[A-Za-z0-9_]+)\s*(?:=|;|\()"
+)
+
+
+def _runtime_core_global_is_legitimate(match) -> bool:
+    """Synchronization primitives and atomics are audited classes, not state."""
+    return any(kind in match.group(1) for kind in ("Mutex", "atomic", "LockGuard"))
 
 @dataclass(frozen=True)
 class Violation:
@@ -783,6 +808,18 @@ def check_source_root(source_root: Path, strict: bool = False) -> CheckResult:
                     Violation(relative_path, line_number, label, None, message=f"{label}: {match.group(0).strip()}")
                 )
 
+        if relative_path in RUNTIME_CORE_SOURCE_FILES:
+            audited = RUNTIME_CORE_AUDITED_MUTABLE_GLOBALS.get(relative_path, set())
+            for match in RUNTIME_CORE_MUTABLE_GLOBAL_PATTERN.finditer(contents):
+                name = match.group(2)
+                if name in audited or _runtime_core_global_is_legitimate(match):
+                    continue
+                line_number = contents.count("\n", 0, match.start()) + 1
+                violations.append(
+                    Violation(relative_path, line_number, "unowned runtime-core global", None,
+                              message=f"unowned runtime-core mutable global: {name}")
+                )
+
     ordered_input_diagnostics = [diagnostic for _, diagnostic in sorted(input_diagnostics)]
     ordered_violations = sorted(
         violations,
@@ -1085,6 +1122,36 @@ class BoundaryCheckerTests(unittest.TestCase):
                     ),
                 ),
             )
+
+    def test_rejects_unowned_runtime_core_global(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/src/Ports/ControllerInputPort.cpp",
+                "static int g_extra_state = 0;\n",
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Ports/ControllerInputPort.cpp:1: unowned runtime-core mutable global: g_extra_state",
+                    ),
+                ),
+            )
+
+    def test_accepts_audited_runtime_core_global(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root,
+                "emulator/src/Config.cpp",
+                "static Config* g_config = nullptr;\n",
+            )
+
+            self.assertEqual(check_source_root(root), CheckResult(exit_code=0, diagnostics=()))
 
     def test_rejects_legacy_image_alias(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
