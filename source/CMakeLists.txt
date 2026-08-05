@@ -138,9 +138,7 @@ if(BUILD_TESTING)
 	find_package(Python3 REQUIRED COMPONENTS Interpreter)
 endif()
 
-include_directories(	
-	3rdparty/gtest/include
-	3rdparty/gtest
+include_directories(
 	3rdparty/rijndael/source
 	3rdparty/miniz
 	3rdparty/magic_enum/include
@@ -199,6 +197,10 @@ add_subdirectory(audio_pcm)
 add_subdirectory(emulator)
 if(KYTY_BUILD_UNIT_TESTS)
 	add_subdirectory(unit_test)
+	target_include_directories(unit_test PRIVATE
+		"${CMAKE_SOURCE_DIR}/3rdparty/gtest/include"
+		"${CMAKE_SOURCE_DIR}/3rdparty/gtest"
+	)
 else()
 	add_library(unit_test STATIC unit_test/src/UnitTestDisabled.cpp)
 	target_link_libraries(unit_test core)
@@ -242,6 +244,10 @@ if(KYTY_BUILD_UNIT_TESTS)
 	add_executable(kyty_unit_test
 		unit_test/src/UnitTestMain.cpp
 		3rdparty/gtest/src/gtest-all.cc
+	)
+	target_include_directories(kyty_unit_test PRIVATE
+		"${CMAKE_SOURCE_DIR}/3rdparty/gtest/include"
+		"${CMAKE_SOURCE_DIR}/3rdparty/gtest"
 	)
 	target_link_libraries(kyty_unit_test
 		PRIVATE
