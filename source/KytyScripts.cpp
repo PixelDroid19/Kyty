@@ -150,7 +150,12 @@ int main(int argc, char* argv[])
 		return 125;
 	}
 
-	auto& slist = *SubsystemsList::Instance();
+	// The script host owns this lifecycle graph.  Keep the legacy singleton
+	// available to old embedding code, but make the active owner explicit so
+	// fatal paths do not construct or mutate a process-global registry.
+	SubsystemsList       lifecycle;
+	ScopedSubsystemsList active_lifecycle(lifecycle);
+	auto&                slist = lifecycle;
 
 	slist.SetArgs(argc, argv);
 

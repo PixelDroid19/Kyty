@@ -5,6 +5,7 @@
 #include "Kyty/Sys/SysStdio.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
@@ -13,6 +14,12 @@
 #include <vector>
 
 namespace Kyty::Core {
+
+namespace {
+
+std::atomic<SubsystemsList*> g_active_subsystems {nullptr};
+
+} // namespace
 
 class SubsystemPrivate
 {
@@ -528,6 +535,26 @@ void SubsystemsList::SetArgs(int argc, char* argv[])
 void SubsystemsList::ShutdownAll()
 {
 	m_p->ShutdownAll();
+}
+
+SubsystemsList* SubsystemsList::Active() noexcept
+{
+	return g_active_subsystems.load(std::memory_order_acquire);
+}
+
+void SubsystemsList::SetActive(SubsystemsList* list) noexcept
+{
+	g_active_subsystems.store(list, std::memory_order_release);
+}
+
+ScopedSubsystemsList::ScopedSubsystemsList(SubsystemsList& list) noexcept: m_previous(SubsystemsList::Active())
+{
+	SubsystemsList::SetActive(&list);
+}
+
+ScopedSubsystemsList::~ScopedSubsystemsList()
+{
+	SubsystemsList::SetActive(m_previous);
 }
 
 } // namespace Kyty::Core

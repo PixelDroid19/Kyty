@@ -81,7 +81,10 @@ static void kyty_close()
 
 	printf("done!\n");
 
-	Core::SubsystemsListSingleton::Instance()->ShutdownAll();
+	if (auto* subsystems = Core::SubsystemsList::Active(); subsystems != nullptr)
+	{
+		subsystems->ShutdownAll();
+	}
 }
 
 static void Init(const Scripts::ScriptVar& cfg)

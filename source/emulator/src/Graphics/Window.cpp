@@ -2882,7 +2882,10 @@ void WindowRun()
 
 	DebugOverlayShutdown(&g_window_ctx->graphic_ctx);
 
-	Core::SubsystemsListSingleton::Instance()->ShutdownAll();
+	if (auto* subsystems = Core::SubsystemsList::Active(); subsystems != nullptr)
+	{
+		subsystems->ShutdownAll();
+	}
 	std::_Exit(0);
 }
 

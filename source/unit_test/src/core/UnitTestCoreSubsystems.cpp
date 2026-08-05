@@ -104,4 +104,21 @@ TEST(CoreSubsystems, InitializesAndDestroysInDependencyOrder)
 	EXPECT_EQ(events, (std::vector<std::string> {"init:core", "init:graphics", "init:window", "destroy:window", "destroy:graphics", "destroy:core"}));
 }
 
+TEST(CoreSubsystems, ActiveListIsScopedAndRestored)
+{
+	Core::SubsystemsList outer;
+	Core::SubsystemsList inner;
+
+	Core::SubsystemsList::SetActive(&outer);
+	EXPECT_EQ(Core::SubsystemsList::Active(), &outer);
+	{
+		Core::ScopedSubsystemsList scope(inner);
+		EXPECT_EQ(Core::SubsystemsList::Active(), &inner);
+	}
+	EXPECT_EQ(Core::SubsystemsList::Active(), &outer);
+
+	Core::SubsystemsList::SetActive(nullptr);
+	EXPECT_EQ(Core::SubsystemsList::Active(), nullptr);
+}
+
 UT_END();

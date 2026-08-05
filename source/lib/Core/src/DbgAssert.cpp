@@ -28,6 +28,14 @@ void NotifyHostFault(const char* code, const char* message) noexcept
 	}
 }
 
+void ShutdownActiveSubsystems() noexcept
+{
+	if (auto* list = SubsystemsList::Active(); list != nullptr)
+	{
+		list->ShutdownAll();
+	}
+}
+
 } // namespace
 
 void SetHostFaultHook(HostFaultHook hook) noexcept
@@ -88,7 +96,7 @@ int dbg_assert_handler(char const* expr, char const* file, int line)
 	char msg[192];
 	std::snprintf(msg, sizeof(msg), "assert %s", expr != nullptr ? expr : "");
 	NotifyHostFault("assert", msg);
-	SubsystemsListSingleton::Instance()->ShutdownAll();
+	ShutdownActiveSubsystems();
 	return 1;
 }
 
@@ -100,7 +108,7 @@ int dbg_exit_if_handler(char const* expr, char const* file, int line)
 	char msg[192];
 	std::snprintf(msg, sizeof(msg), "exit_if %s", expr != nullptr ? expr : "");
 	NotifyHostFault("exit_if", msg);
-	SubsystemsListSingleton::Instance()->ShutdownAll();
+	ShutdownActiveSubsystems();
 	return 1;
 }
 
@@ -120,7 +128,7 @@ int dbg_not_implemented_handler(char const* expr, char const* file, int line)
 	char msg[192];
 	std::snprintf(msg, sizeof(msg), "not_implemented %s", expr != nullptr ? expr : "");
 	NotifyHostFault("not_implemented_halt", msg);
-	SubsystemsListSingleton::Instance()->ShutdownAll();
+	ShutdownActiveSubsystems();
 	return 1;
 }
 
@@ -139,7 +147,7 @@ int dbg_exit_handler(char const* file, int line, const char* f, ...)
 	std::snprintf(msg, sizeof(msg), "exit %s:%d", file != nullptr ? file : "?", line);
 	NotifyHostFault("exit", msg);
 
-	SubsystemsListSingleton::Instance()->ShutdownAll();
+	ShutdownActiveSubsystems();
 
 	va_end(args);
 

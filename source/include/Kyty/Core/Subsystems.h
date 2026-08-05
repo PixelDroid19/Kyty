@@ -33,6 +33,12 @@ public:
 
 	void ShutdownAll();
 
+	// The runtime owns its lifecycle list explicitly.  Instance() remains as a
+	// source-compatible fallback for legacy callers and tests, but fatal paths
+	// and host integrations should use the active list installed by the owner.
+	[[nodiscard]] static SubsystemsList* Active() noexcept;
+	static void                       SetActive(SubsystemsList* list) noexcept;
+
 	static SubsystemsList* Instance() { return Core::Singleton<SubsystemsList>::Instance(); }
 
 	KYTY_CLASS_NO_COPY(SubsystemsList);
@@ -42,6 +48,18 @@ private:
 };
 
 using SubsystemsListSingleton = Kyty::Core::Singleton<SubsystemsList>;
+
+class ScopedSubsystemsList
+{
+public:
+	explicit ScopedSubsystemsList(SubsystemsList& list) noexcept;
+	~ScopedSubsystemsList();
+
+	KYTY_CLASS_NO_COPY(ScopedSubsystemsList);
+
+private:
+	SubsystemsList* m_previous {nullptr};
+};
 
 class Subsystem
 {

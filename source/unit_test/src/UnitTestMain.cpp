@@ -23,7 +23,9 @@ int main(int argc, char* argv[])
 
 	Kyty::Core::mem_set_max_size(static_cast<size_t>(2048) * 1024 * 1024 - 1);
 
-	auto& subsystems = *Kyty::Core::SubsystemsList::Instance();
+	Kyty::Core::SubsystemsList       lifecycle;
+	Kyty::Core::ScopedSubsystemsList active_lifecycle(lifecycle);
+	auto&                            subsystems = lifecycle;
 	subsystems.SetArgs(argc, argv);
 
 	auto* core      = Kyty::Core::CoreSubsystem::Instance();
