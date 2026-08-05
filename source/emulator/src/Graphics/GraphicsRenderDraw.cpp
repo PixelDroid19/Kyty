@@ -806,12 +806,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		hw_print(*ctx);
 		hw_check(*ctx, true);
 
-		printf("GraphicsRenderDrawIndex():Parameters:\n");
-		printf("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
-		printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
-		printf("\t index_addr          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
-		printf("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
-		printf("\t type                = 0x%08" PRIx32 "\n", type);
+		KYTY_LOG_DEBUG("GraphicsRenderDrawIndex():Parameters:\n");
+		KYTY_LOG_DEBUG("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
+		KYTY_LOG_DEBUG("\t index_count         = 0x%08" PRIx32 "\n", index_count);
+		KYTY_LOG_DEBUG("\t index_addr          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
+		KYTY_LOG_DEBUG("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
+		KYTY_LOG_DEBUG("\t type                = 0x%08" PRIx32 "\n", type);
 
 		EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
 		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, index_type_and_size, index_addr);
@@ -835,12 +835,12 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
 
-	printf("GraphicsRenderDrawIndex():Parameters:\n");
-	printf("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
-	printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
-	printf("\t index_addr          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
-	printf("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
-	printf("\t type                = 0x%08" PRIx32 "\n", type);
+	KYTY_LOG_DEBUG("GraphicsRenderDrawIndex():Parameters:\n");
+	KYTY_LOG_DEBUG("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
+	KYTY_LOG_DEBUG("\t index_count         = 0x%08" PRIx32 "\n", index_count);
+	KYTY_LOG_DEBUG("\t index_addr          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
+	KYTY_LOG_DEBUG("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
+	KYTY_LOG_DEBUG("\t type                = 0x%08" PRIx32 "\n", type);
 
 	VkIndexType index_type = VK_INDEX_TYPE_UINT16;
 	uint64_t    index_size = 0;
@@ -1544,9 +1544,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		hw_print(*ctx);
 		hw_check(*ctx, true);
 
-		printf("GraphicsRenderDrawIndex():Parameters:\n");
-		printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
-		printf("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
+		KYTY_LOG_DEBUG("GraphicsRenderDrawIndex():Parameters:\n");
+		KYTY_LOG_DEBUG("\t index_count         = 0x%08" PRIx32 "\n", index_count);
+		KYTY_LOG_DEBUG("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 
 		EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
 		EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
@@ -1570,9 +1570,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	hw_print(*ctx);
 	hw_check(*ctx);
 
-	printf("GraphicsRenderDrawIndex():Parameters:\n");
-	printf("\t index_count         = 0x%08" PRIx32 "\n", index_count);
-	printf("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
+	KYTY_LOG_DEBUG("GraphicsRenderDrawIndex():Parameters:\n");
+	KYTY_LOG_DEBUG("\t index_count         = 0x%08" PRIx32 "\n", index_count);
+	KYTY_LOG_DEBUG("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 
 	EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
 	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);

@@ -10,6 +10,7 @@
 
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Log.h"
 
 #include <limits>
 #include <unordered_map>
@@ -370,7 +371,7 @@ int KYTY_SYSV_ABI KernelCreateEqueue(KernelEqueue* eq, const char* name)
 		EXIT_IF(!inserted);
 	}
 
-	printf("\tEqueue create: %s\n", name);
+	KYTY_LOG_DEBUG("\tEqueue create: %s\n", name);
 
 	return OK;
 }
@@ -398,11 +399,11 @@ int KYTY_SYSV_ABI KernelAddAmprEvent(KernelEqueue eq, uint64_t reserved0, uint64
 {
 	PRINT_NAME();
 
-	printf("\t eq        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
-	printf("\t reserved0 = 0x%016" PRIx64 "\n", reserved0);
-	printf("\t reserved1 = 0x%016" PRIx64 "\n", reserved1);
-	printf("\t ident     = 0x%016" PRIx64 "\n", static_cast<uint64_t>(ident));
-	printf("\t udata     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(udata));
+	KYTY_LOG_DEBUG("\t eq        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	KYTY_LOG_DEBUG("\t reserved0 = 0x%016" PRIx64 "\n", reserved0);
+	KYTY_LOG_DEBUG("\t reserved1 = 0x%016" PRIx64 "\n", reserved1);
+	KYTY_LOG_DEBUG("\t ident     = 0x%016" PRIx64 "\n", static_cast<uint64_t>(ident));
+	KYTY_LOG_DEBUG("\t udata     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(udata));
 
 	if (eq == nullptr)
 	{
@@ -429,8 +430,8 @@ int KYTY_SYSV_ABI KernelDeleteAmprEvent(KernelEqueue eq, uintptr_t ident)
 {
 	PRINT_NAME();
 
-	printf("\t eq    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
-	printf("\t ident = 0x%016" PRIx64 "\n", static_cast<uint64_t>(ident));
+	KYTY_LOG_DEBUG("\t eq    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	KYTY_LOG_DEBUG("\t ident = 0x%016" PRIx64 "\n", static_cast<uint64_t>(ident));
 
 	return KernelDeleteEvent(eq, ident, KERNEL_EVFILT_AMPR);
 }
@@ -562,8 +563,8 @@ static int KernelAddUserEventInternal(KernelEqueue eq, int id, bool /*edge*/)
 {
 	PRINT_NAME();
 
-	printf("\t eq = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t eq = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 
 	if (eq == nullptr)
 	{
@@ -600,8 +601,8 @@ int KYTY_SYSV_ABI KernelDeleteUserEvent(KernelEqueue eq, int id)
 {
 	PRINT_NAME();
 
-	printf("\t eq = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
-	printf("\t id = %d\n", id);
+	KYTY_LOG_DEBUG("\t eq = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	KYTY_LOG_DEBUG("\t id = %d\n", id);
 
 	return KernelDeleteEvent(eq, static_cast<uintptr_t>(id), KERNEL_EVFILT_USER);
 }
@@ -610,9 +611,9 @@ int KYTY_SYSV_ABI KernelTriggerUserEvent(KernelEqueue eq, int id, void* udata)
 {
 	PRINT_NAME();
 
-	printf("\t eq    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
-	printf("\t id    = %d\n", id);
-	printf("\t udata = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(udata));
+	KYTY_LOG_DEBUG("\t eq    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	KYTY_LOG_DEBUG("\t id    = %d\n", id);
+	KYTY_LOG_DEBUG("\t udata = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(udata));
 
 	return KernelTriggerEvent(eq, static_cast<uintptr_t>(id), KERNEL_EVFILT_USER, udata);
 }
@@ -716,7 +717,7 @@ int KYTY_SYSV_ABI KernelDeleteEqueue(KernelEqueue eq)
 	g_equeue_lifetime_changed.SignalAll();
 	g_equeue_lifetime_mutex.Unlock();
 
-	printf("\tEqueue delete: %s\n", eq->GetName().C_Str());
+	KYTY_LOG_DEBUG("\tEqueue delete: %s\n", eq->GetName().C_Str());
 
 	delete eq;
 
@@ -761,7 +762,7 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		return KERNEL_ERROR_EBADF;
 	}
 
-	// printf("\tEqueue wait: %s\n", eq->GetName().C_Str());
+	// KYTY_LOG_DEBUG("\tEqueue wait: %s\n", eq->GetName().C_Str());
 
 	if (timo == nullptr)
 	{
@@ -786,10 +787,10 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	}
 	if (*out == 0)
 	{
-		// printf("\ttimedout\n");
+		// KYTY_LOG_DEBUG("\ttimedout\n");
 		return KERNEL_ERROR_ETIMEDOUT;
 	}
-	// printf("\treceived %u events\n", *out);
+	// KYTY_LOG_DEBUG("\treceived %u events\n", *out);
 
 	return OK;
 }

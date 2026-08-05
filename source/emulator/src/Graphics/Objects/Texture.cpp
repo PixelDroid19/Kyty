@@ -76,7 +76,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	// SKIPPED: levels >= 16
 	if (levels >= 16)
 	{
-		printf("WARNING: skipped check: levels >= 16\n");
+		KYTY_LOG_DEBUG("WARNING: skipped check: levels >= 16\n");
 	}
 	if (three_dimensional)
 	{
@@ -224,7 +224,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// SKIPPED: bytes == 0u
 		if (bytes == 0u)
 		{
-			printf("WARNING: skipped check: bytes == 0u\n");
+			KYTY_LOG_DEBUG("WARNING: skipped check: bytes == 0u\n");
 		}
 		std::vector<uint8_t>    zeros(static_cast<size_t>(bytes), 0);
 		Vector<BufferImageCopy> clear_regions(1);
@@ -248,7 +248,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// Other modes remain unsupported until their layout is evidenced.
 		if (tile != 0 && tile != 5 && tile != 9 && tile != 24 && tile != 27)
 		{
-			printf("WARNING: skipped check: tile != 0 && tile != 5 && tile != 27 && tile != 9\n");
+			KYTY_LOG_DEBUG("WARNING: skipped check: tile != 0 && tile != 5 && tile != 27 && tile != 9\n");
 		}
 
 		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
@@ -257,7 +257,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// SKIPPED: tile != 8 && tile != 13 && tile != 10
 		if (tile != 8 && tile != 13 && tile != 10)
 		{
-			printf("WARNING: skipped check: tile != 8 && tile != 13 && tile != 10\n");
+			KYTY_LOG_DEBUG("WARNING: skipped check: tile != 8 && tile != 13 && tile != 10\n");
 		}
 
 		TileGetTextureSize(dfmt, nfmt, width, height, pitch, levels, tile, neo, nullptr, level_sizes, nullptr);
@@ -275,7 +275,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// SKIPPED: level_sizes[i].size == 0
 		if (level_sizes[i].size == 0)
 		{
-			printf("WARNING: skipped check: level_sizes[i].size == 0\n");
+			KYTY_LOG_DEBUG("WARNING: skipped check: level_sizes[i].size == 0\n");
 		}
 
 		regions[i].offset    = level_sizes[i].offset;
@@ -372,12 +372,12 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// SKIPPED: pitch != width
 			if (pitch != width)
 			{
-				printf("WARNING: skipped check: pitch != width\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: pitch != width\n");
 			}
 			// SKIPPED: fmt != 0
 			if (fmt != 0)
 			{
-				printf("WARNING: skipped check: fmt != 0\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: fmt != 0\n");
 			}
 			auto* temp_buf = new uint8_t[*size];
 			TileConvertTiledToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), TileMode::TextureTiled, dfmt, nfmt, width, height, pitch,
@@ -392,18 +392,18 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// SKIPPED: !(dfmt == 10 && nfmt == 0)
 			if (!(dfmt == 10 && nfmt == 0))
 			{
-				printf("WARNING: skipped check: !(dfmt == 10 && nfmt == 0)\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: !(dfmt == 10 && nfmt == 0)\n");
 			}
 			// SKIPPED: levels != 1
 			if (levels != 1)
 			{
-				printf("WARNING: skipped check: levels != 1\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: levels != 1\n");
 			}
 			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * 4u;
 			// SKIPPED: linear_bytes == 0
 			if (linear_bytes == 0)
 			{
-				printf("WARNING: skipped check: linear_bytes == 0\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: linear_bytes == 0\n");
 			}
 			auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
 			TileConvertDisplayThinBgraToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch, neo);
@@ -454,7 +454,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 							                  static_cast<uint32_t>(pitch));
 							UtilWriteRgba8Png(out_path_w, base, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
 							                  static_cast<uint32_t>(width));
-							printf("KYTY_DUMP_LINEAR_SAMPLE wrote %ux%u pitch=%u -> %s\n", static_cast<unsigned>(width),
+							KYTY_LOG_DEBUG("KYTY_DUMP_LINEAR_SAMPLE wrote %ux%u pitch=%u -> %s\n", static_cast<unsigned>(width),
 							       static_cast<unsigned>(height), static_cast<unsigned>(pitch), out_path);
 						}
 					}
@@ -468,7 +468,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// SKIPPED: bytes_per_element == 0u || levels != 1u
 			if (bytes_per_element == 0u || levels != 1u)
 			{
-				printf("WARNING: skipped check: bytes_per_element == 0u || levels != 1u\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: bytes_per_element == 0u || levels != 1u\n");
 			}
 			const uint32_t element_width  = block_compressed ? (width + 3u) / 4u : width;
 			const uint32_t element_height = block_compressed ? (height + 3u) / 4u : height;
@@ -477,7 +477,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// SKIPPED: linear_bytes == 0u || linear_bytes > *size
 			if (linear_bytes == 0u || linear_bytes > *size)
 			{
-				printf("WARNING: skipped check: linear_bytes == 0u || linear_bytes > *size\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: linear_bytes == 0u || linear_bytes > *size\n");
 			}
 			std::vector<uint8_t> temp_buf(static_cast<size_t>(linear_bytes));
 			TileConvertStandard4KBToLinear(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch,
@@ -564,23 +564,23 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// SKIPPED: tile == 9 && fmt != 56
 			if (tile == 9 && fmt != 56)
 			{
-				printf("WARNING: skipped check: tile == 9 && fmt != 56\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: tile == 9 && fmt != 56\n");
 			}
 			// SKIPPED: fmt != 56 && fmt != 133
 			if (fmt != 56 && fmt != 133)
 			{
-				printf("WARNING: skipped check: fmt != 56 && fmt != 133\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: fmt != 56 && fmt != 133\n");
 			}
 			// SKIPPED: levels != 1
 			if (levels != 1)
 			{
-				printf("WARNING: skipped check: levels != 1\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: levels != 1\n");
 			}
 			const bool bc1 = (fmt == 133u);
 			// SKIPPED: bc1 && tile != 27
 			if (bc1 && tile != 27)
 			{
-				printf("WARNING: skipped check: bc1 && tile != 27\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: bc1 && tile != 27\n");
 			}
 			const uint32_t bpp          = (bc1 ? 8u : 4u);
 			const uint32_t copy_width   = bc1 ? std::max((static_cast<uint32_t>(width) + 3u) / 4u, 1u) : static_cast<uint32_t>(width);
@@ -680,7 +680,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	// SKIPPED: levels >= 16
 	if (levels >= 16)
 	{
-		printf("WARNING: skipped check: levels >= 16\n");
+		KYTY_LOG_DEBUG("WARNING: skipped check: levels >= 16\n");
 	}
 
 	uint32_t mip_width  = width;
@@ -946,7 +946,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 			// SKIPPED: src_image == nullptr
 			if (src_image == nullptr)
 			{
-				printf("WARNING: skipped check: src_image == nullptr\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: src_image == nullptr\n");
 			}
 
 			if (storage)
