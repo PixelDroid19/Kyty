@@ -114,8 +114,26 @@ GRAPHICS_HLE_SOURCE_FILES = (
 LOADER_SOURCE_FILES = (
     "emulator/src/Loader/SystemContent.cpp",
 )
+# Neutral runtime services below every domain: the emulator archive split
+# moved Log, Config, the ports and the guest-state bridges into
+# kyty_runtime_core. They must not reach up into any domain implementation.
+RUNTIME_CORE_SOURCE_FILES = (
+    "emulator/src/Log.cpp",
+    "emulator/src/Config.cpp",
+    "emulator/src/GuestRuntimePort.cpp",
+    "emulator/src/GuestMemory.cpp",
+    "emulator/src/GpuMemoryFault.cpp",
+    "emulator/src/AtomicFile.cpp",
+    "emulator/src/Validation/DomainValidators.cpp",
+    "emulator/src/SystemContentPort.cpp",
+    "emulator/src/PresentationStats.cpp",
+    "emulator/src/VideoFrameMemory.cpp",
+    "emulator/src/Ports/ControllerInputPort.cpp",
+    "emulator/src/Ports/AudioPausePort.cpp",
+)
 RUNTIME_LINKER_SOURCE = "emulator/src/Loader/RuntimeLinker.cpp"
 ALLOWED_SOURCE_FILES = (
+    *RUNTIME_CORE_SOURCE_FILES,
     *AUDIO_SOURCE_FILES,
     *KERNEL_SOURCE_FILES,
     *KERNEL_HOST_SOURCE_FILES,
@@ -303,6 +321,27 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         canonical_path.startswith(LEGACY_NAMESPACE_HEADER_CANONICAL) for canonical_path in canonical_paths
     ):
         return "legacy Kernel Namespace header"
+    if relative_path in RUNTIME_CORE_SOURCE_FILES and any(
+        canonical_path.startswith(prefix.casefold())
+        for canonical_path in canonical_paths
+        for prefix in (
+            GRAPHICS_INCLUDE_PREFIX,
+            SOURCE_GRAPHICS_INCLUDE_PREFIX,
+            "emulator/libs/",
+            "emulator/include/emulator/libs/",
+            "emulator/loader/",
+            "emulator/include/emulator/loader/",
+            "emulator/hle/",
+            "emulator/include/emulator/hle/",
+            "emulator/agent/",
+            "emulator/include/emulator/agent/",
+            "emulator/host/",
+            "emulator/include/emulator/host/",
+            "emulator/kernel/",
+            "emulator/include/emulator/kernel/",
+        )
+    ):
+        return "RuntimeCore -> domain"
     if relative_path in AUDIO_SOURCE_FILES and any(
         canonical_path.startswith(prefix.casefold()) for canonical_path in canonical_paths for prefix in graphics_prefixes
     ):
@@ -1025,6 +1064,24 @@ class BoundaryCheckerTests(unittest.TestCase):
                     diagnostics=(
                         "emulator/src/Hle/LibGraphicsDriver.cpp:1: forbidden include (legacy Kernel Namespace header): "
                         "Emulator/Kernel/Namespace.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_runtime_core_domain_include(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(
+                root, "emulator/src/Ports/ControllerInputPort.cpp", '#include "Emulator/Graphics/Window.h"\n'
+            )
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Ports/ControllerInputPort.cpp:1: forbidden include (RuntimeCore -> domain): "
+                        "Emulator/Graphics/Window.h",
                     ),
                 ),
             )
