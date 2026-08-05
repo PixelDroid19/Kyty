@@ -119,6 +119,7 @@ ALLOWED_SOURCE_FILES = (
 GRAPHICS_INCLUDE_PREFIX = "Emulator/Graphics/"
 SOURCE_GRAPHICS_INCLUDE_PREFIX = "emulator/include/Emulator/Graphics/"
 SDL_INCLUDE_PREFIX = "SDL"
+IMGUI_SDL_INCLUDE = "imgui_impl_sdl2.h"
 DEVTOOLS_INCLUDE_PREFIXES = (
     "Emulator/DevTools/",
     "Kyty/DevTools/",
@@ -306,6 +307,10 @@ def _rule_for_include(relative_path: str, include_path: str) -> Optional[str]:
         _is_sdl_include(canonical_path) for canonical_path in canonical_paths
     ):
         return "Graphics DebugOverlay -> SDL"
+    if relative_path == GRAPHICS_DEBUG_OVERLAY_SOURCE and any(
+        canonical_path.rsplit("/", 1)[-1] == IMGUI_SDL_INCLUDE for canonical_path in canonical_paths
+    ):
+        return "Graphics DebugOverlay -> SDL GUI"
     if relative_path == GRAPHICS_WINDOW_SOURCE and any(
         _is_sdl_include(canonical_path) for canonical_path in canonical_paths
     ):
@@ -939,6 +944,21 @@ class BoundaryCheckerTests(unittest.TestCase):
                     exit_code=1,
                     diagnostics=(
                         "emulator/src/Graphics/DebugOverlay.cpp:1: forbidden include (Graphics DebugOverlay -> SDL): SDL_events.h",
+                    ),
+                ),
+            )
+
+    def test_rejects_imgui_sdl_backend_from_graphics_debug_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_fixture(root, GRAPHICS_DEBUG_OVERLAY_SOURCE, '#include "imgui_impl_sdl2.h"\n')
+
+            self.assertEqual(
+                check_source_root(root),
+                CheckResult(
+                    exit_code=1,
+                    diagnostics=(
+                        "emulator/src/Graphics/DebugOverlay.cpp:1: forbidden include (Graphics DebugOverlay -> SDL GUI): imgui_impl_sdl2.h",
                     ),
                 ),
             )
