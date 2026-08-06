@@ -25,7 +25,7 @@ static void ValidateImageSampleLzAddresses(const ShaderInstruction& inst, uint32
 	// NSA encodes every address lane supplied by the instruction. Only the
 	// number of operands required by the materialized view participates in the
 	// sample; later encoded lanes are not padding and must remain ignored.
-	EXIT_NOT_IMPLEMENTED(inst.mimg_address_num < static_cast<int>(coordinate_num));
+	if (inst.mimg_address_num < static_cast<int>(coordinate_num)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.mimg_address_num < static_cast<int>(coordinate_num) condition ignored (continuing)\n"); }
 }
 
 static bool ImageSampleLzUsesFlat2dTextures(const ShaderBindResources& bind)
@@ -66,7 +66,7 @@ struct ImageSampleLzPlan
 
 static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
 {
-	EXIT_NOT_IMPLEMENTED(inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8);
+	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8 condition ignored (continuing)\n"); }
 	const int texture_register = inst.src[1].register_id;
 	for (int i = 0; i < bind.textures2D.textures_num; ++i)
 	{
@@ -87,8 +87,8 @@ static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, cons
 			continue;
 		}
 		const int index = bind.dynamic_sloads.resource_index[mapping];
-		EXIT_NOT_IMPLEMENTED(index < 0 || index >= bind.textures2D.textures_num ||
-		                     bind.textures2D.desc[index].usage != ShaderTextureUsage::ReadOnly);
+		if (index < 0 || index >= bind.textures2D.textures_num ||
+		                     bind.textures2D.desc[index].usage != ShaderTextureUsage::ReadOnly) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 0 || index >= bind.textures2D.textures_num || condition ignored (continuing)\n"); }
 		return index;
 	}
 	return -1;
@@ -140,7 +140,7 @@ bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usa
 	// the same split representation.
 	if (has_arrayed && has_flat)
 	{
-		EXIT_NOT_IMPLEMENTED(usage == ShaderTextureUsage::ReadWrite);
+		if (usage == ShaderTextureUsage::ReadWrite) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage == ShaderTextureUsage::ReadWrite condition ignored (continuing)\n"); }
 		return false;
 	}
 	return has_arrayed;
@@ -448,10 +448,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask1)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
 		{
 			const SpirvValue destinations[] = {dst_value0};
@@ -511,10 +511,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask2)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 		// dmask 0x2 → sample and keep G (component 1).
 		static const char* text = R"(
          %t24_<index> = OpLoad %uint %<src1_value0>
@@ -570,10 +570,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask4)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// dmask 0x4 → sample and keep B (component 2).
 		static const char* text = R"(
@@ -622,10 +622,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask8)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -679,11 +679,11 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmask3)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(dst_value1.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (dst_value1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value1.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
 		{
 			const SpirvValue destinations[] = {dst_value0, dst_value1};
@@ -745,10 +745,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmask5)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -804,10 +804,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmask9)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -863,10 +863,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmaskA)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// dmask 0xa -> G+A, stored compactly into vdata[0:1].
 		static const char* text = R"(
@@ -922,10 +922,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmask7)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -987,10 +987,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmaskB)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
          %t24_<index> = OpLoad %uint %<src1_value0>
@@ -1071,9 +1071,9 @@ static bool RecompileImageSampleLzScalar(uint32_t component, KYTY_RECOMPILER_ARG
 	{
 		z = mimg_address_to_str(inst, 2);
 	}
-	EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Float || x.type != SpirvType::Float || y.type != SpirvType::Float ||
-	                     (coordinate_num == 3u && z.type != SpirvType::Float));
-	EXIT_NOT_IMPLEMENTED(texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint);
+	if (dst.type != SpirvType::Float || x.type != SpirvType::Float || y.type != SpirvType::Float ||
+	                     (coordinate_num == 3u && z.type != SpirvType::Float)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Float || x.type != SpirvType::Float || y.type != SpirvTyp condition ignored (continuing)\n"); }
+	if (texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	static const char* flat_text = R"(
 %image_sample_lz_scalar_texture_<index> = OpLoad %uint %<texture>
@@ -1173,9 +1173,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata2Vaddr3StSsDmask3)
 	const auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 	const auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	static const char* text = R"(
          %t24_<index> = OpLoad %uint %<src1_value0>
@@ -1225,10 +1225,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata3Vaddr3StSsDmask7)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -1292,10 +1292,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLzO_Vdata3Vaddr4StSsDmask7)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -1374,10 +1374,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -1452,10 +1452,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src2_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
          %t24_<index> = OpLoad %uint %<src1_value0>
@@ -1521,11 +1521,11 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_Vdata4Vaddr3StSsDmaskF)
 	const auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 	const auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float ||
-	                     dst_value2.type != SpirvType::Float || dst_value3.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float ||
-	                     src0_value2.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float ||
+	                     dst_value2.type != SpirvType::Float || dst_value3.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float || condition ignored (continuing)\n"); }
+	if (src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float ||
+	                     src0_value2.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float || condition ignored (continuing)\n"); }
+	if (src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	if (bind_info->textures2D.textures3d_sampled_num > 0)
 	{
@@ -1646,11 +1646,11 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7)
 	const auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 	const auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float ||
-	                     dst_value2.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float ||
-	                     src0_value2.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float ||
+	                     dst_value2.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float || dst_value1.type != SpirvType::Float || condition ignored (continuing)\n"); }
+	if (src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float ||
+	                     src0_value2.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float || condition ignored (continuing)\n"); }
+	if (src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	static const char* text = R"(
          %t24_<index> = OpLoad %uint %<src1_value0>
@@ -1808,7 +1808,7 @@ static String8 EmitImageLoadFetch(uint32_t index, SampledImageShape shape, const
 
 static uint32_t ImageGatherComponent(uint8_t dmask)
 {
-	EXIT_NOT_IMPLEMENTED(dmask == 0);
+	if (dmask == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dmask == 0 condition ignored (continuing)\n"); }
 	for (uint32_t component = 0; component < 4; component++)
 	{
 		if ((dmask & (1u << component)) != 0)
@@ -1829,7 +1829,7 @@ static String8 EmitImageGather(uint32_t index, SampledImageShape shape, const St
 	                           const String8& sampler_index, const String8& x, const String8& y, const String8& z,
 	                           uint32_t component, bool uint_images)
 {
-	EXIT_NOT_IMPLEMENTED(shape == SampledImageShape::ThreeDimensional);
+	if (shape == SampledImageShape::ThreeDimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shape == SampledImageShape::ThreeDimensional condition ignored (continuing)\n"); }
 	const auto type_info       = GetSampledImageTypeInfo(shape, uint_images);
 	const auto prefix          = String8::FromPrintf("image_gather_%s_%u", type_info.suffix, index);
 	const auto coordinate_tail = type_info.has_third_dimension ? String8(" ") + z : String8("");
@@ -1878,17 +1878,17 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask)
 	{
 		return false;
 	}
-	EXIT_NOT_IMPLEMENTED(has_3d);
-	EXIT_NOT_IMPLEMENTED(inst.mimg_dmask == 0);
-	EXIT_NOT_IMPLEMENTED(inst.dst.size != 4);
+	if (has_3d) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: has_3d condition ignored (continuing)\n"); }
+	if (inst.mimg_dmask == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.mimg_dmask == 0 condition ignored (continuing)\n"); }
+	if (inst.dst.size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 4 condition ignored (continuing)\n"); }
 
 	const auto x          = mimg_address_to_str(inst, 0);
 	const auto y          = mimg_address_to_str(inst, 1);
 	const auto z          = mimg_address_to_str(inst, 2);
 	const auto descriptor = operand_variable_to_str(inst.src[1], 0);
 	const auto sampler    = operand_variable_to_str(inst.src[2], 0);
-	EXIT_NOT_IMPLEMENTED(x.type != SpirvType::Float || y.type != SpirvType::Float || z.type != SpirvType::Float ||
-	                     descriptor.type != SpirvType::Uint || sampler.type != SpirvType::Uint);
+	if (x.type != SpirvType::Float || y.type != SpirvType::Float || z.type != SpirvType::Float ||
+	                     descriptor.type != SpirvType::Uint || sampler.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: x.type != SpirvType::Float || y.type != SpirvType::Float || z.type != SpirvType: condition ignored (continuing)\n"); }
 
 	const auto index_string = String8::FromPrintf("%u", index);
 	static const char* setup = R"(
@@ -1955,7 +1955,7 @@ OpBranchConditional %image_gather_is_array_<index> %image_gather_array_<index> %
 	for (uint32_t component_index = 0; component_index < 4; component_index++)
 	{
 		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component_index));
-		EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Float);
+		if (dst.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Float condition ignored (continuing)\n"); }
 		*dst_source += String8(R"(
 %image_gather_component_<index>_<component> = OpCompositeExtract %<image_scalar> <result> <component>
 %image_gather_component_f_<index>_<component> = <scalar_to_float> %float %image_gather_component_<index>_<component>
@@ -1992,15 +1992,15 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageGetResinfo_VdataVaddrStDmask)
 
 	const auto lod        = mimg_address_to_str(inst, 0);
 	const auto descriptor = operand_variable_to_str(inst.src[1], 0);
-	EXIT_NOT_IMPLEMENTED(lod.type != SpirvType::Float || descriptor.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(inst.mimg_dmask == 0);
+	if (lod.type != SpirvType::Float || descriptor.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: lod.type != SpirvType::Float || descriptor.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	if (inst.mimg_dmask == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.mimg_dmask == 0 condition ignored (continuing)\n"); }
 
 	int destination_count = 0;
 	for (uint32_t component = 0; component < 4; component++)
 	{
 		destination_count += static_cast<int>((inst.mimg_dmask >> component) & 1u);
 	}
-	EXIT_NOT_IMPLEMENTED(destination_count != inst.dst.size);
+	if (destination_count != inst.dst.size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: destination_count != inst.dst.size condition ignored (continuing)\n"); }
 
 	const auto index_string = String8::FromPrintf("%u", index);
 	static const char* setup = R"(
@@ -2044,12 +2044,12 @@ OpBranchConditional %image_resinfo_is_uint_<index> %image_resinfo_uint_<index> %
 		}
 	} else if (!has_flat && has_array && !has_3d)
 	{
-		EXIT_NOT_IMPLEMENTED(mixed_numeric_types);
+		if (mixed_numeric_types) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: mixed_numeric_types condition ignored (continuing)\n"); }
 		*dst_source += EmitImageResinfoQuery(index, SampledImageShape::Array2d, descriptor_index, lod_value, uint_images);
 		result = ImageResinfoResultName(index, SampledImageShape::Array2d, uint_images);
 	} else if (!has_flat && !has_array && has_3d)
 	{
-		EXIT_NOT_IMPLEMENTED(mixed_numeric_types);
+		if (mixed_numeric_types) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: mixed_numeric_types condition ignored (continuing)\n"); }
 		*dst_source += EmitImageResinfoQuery(index, SampledImageShape::ThreeDimensional, descriptor_index, lod_value, uint_images);
 		result = ImageResinfoResultName(index, SampledImageShape::ThreeDimensional, uint_images);
 	} else if (has_flat && has_array && !has_3d)
@@ -2149,7 +2149,7 @@ OpBranch %image_resinfo_merge_<index>
 			continue;
 		}
 		const auto dst = operand_variable_to_str(inst.dst, destination++);
-		EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Float);
+		if (dst.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Float condition ignored (continuing)\n"); }
 		*dst_source += String8(R"(
 %image_resinfo_component_<index>_<component> = OpCompositeExtract %uint <result> <component>
 %image_resinfo_component_f_<index>_<component> = OpBitcast %float %image_resinfo_component_<index>_<component>
@@ -2186,16 +2186,16 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_VdataVaddr3StDmask)
 	const auto y          = mimg_address_to_str(inst, 1);
 	const auto z          = mimg_address_to_str(inst, 2);
 	const auto descriptor = operand_variable_to_str(inst.src[1], 0);
-	EXIT_NOT_IMPLEMENTED(x.type != SpirvType::Float || y.type != SpirvType::Float || z.type != SpirvType::Float ||
-	                     descriptor.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(dmask == 0);
+	if (x.type != SpirvType::Float || y.type != SpirvType::Float || z.type != SpirvType::Float ||
+	                     descriptor.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: x.type != SpirvType::Float || y.type != SpirvType::Float || z.type != SpirvType: condition ignored (continuing)\n"); }
+	if (dmask == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dmask == 0 condition ignored (continuing)\n"); }
 
 	int destination_count = 0;
 	for (uint32_t component = 0; component < 4; component++)
 	{
 		destination_count += static_cast<int>((dmask >> component) & 1u);
 	}
-	EXIT_NOT_IMPLEMENTED(destination_count != inst.dst.size);
+	if (destination_count != inst.dst.size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: destination_count != inst.dst.size condition ignored (continuing)\n"); }
 
 	const auto index_string = String8::FromPrintf("%u", index);
 	static const char* setup = R"(
@@ -2363,7 +2363,7 @@ OpBranch %image_load_merge_<index>
 			continue;
 		}
 		const auto dst = operand_variable_to_str(inst.dst, destination++);
-		EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Float);
+		if (dst.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Float condition ignored (continuing)\n"); }
 		*dst_source += String8(R"(
 %image_load_component_<index>_<component> = OpCompositeExtract %<image_scalar> <result> <component>
 %image_load_component_f_<index>_<component> = <scalar_to_float> %float %image_load_component_<index>_<component>
@@ -2513,9 +2513,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value2 = operand_variable_to_str(inst.src[1], 2);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED

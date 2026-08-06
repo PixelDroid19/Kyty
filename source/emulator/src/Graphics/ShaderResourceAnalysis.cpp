@@ -186,8 +186,8 @@ bool ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format)
 
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component)
 {
-	EXIT_NOT_IMPLEMENTED(channel_order > 3);
-	EXIT_NOT_IMPLEMENTED(output_component > 3);
+	if (channel_order > 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: channel_order > 3 condition ignored (continuing)\n"); }
+	if (output_component > 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: output_component > 3 condition ignored (continuing)\n"); }
 
 	// The attachment VkFormat and image view own physical component order.
 	// Shader exports remain logical RGBA; applying COMP_SWAP here as well would

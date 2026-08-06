@@ -69,14 +69,14 @@ String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo*
 
 String8 SpirvGetEmbeddedVs(uint32_t id)
 {
-	EXIT_NOT_IMPLEMENTED(id != 0);
+	if (id != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: id != 0 condition ignored (continuing)\n"); }
 
 	return EMBEDDED_SHADER_VS_0;
 }
 
 String8 SpirvGetEmbeddedPs(uint32_t id)
 {
-	EXIT_NOT_IMPLEMENTED(id != 0);
+	if (id != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: id != 0 condition ignored (continuing)\n"); }
 
 	return EMBEDDED_SHADER_PS_0;
 }

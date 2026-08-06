@@ -27,9 +27,9 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 	uint32_t vdata   = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr   = (buffer[1] >> 0u) & 0xffu;
 
-	EXIT_NOT_IMPLEMENTED(glc == 1);
-	EXIT_NOT_IMPLEMENTED(slc == 1);
-	EXIT_NOT_IMPLEMENTED(tfe == 1);
+	if (glc == 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: glc == 1 condition ignored (continuing)\n"); }
+	if (slc == 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: slc == 1 condition ignored (continuing)\n"); }
+	if (tfe == 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tfe == 1 condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(dfmt != 14);
 	// EXIT_NOT_IMPLEMENTED(nfmt != 7);
 
@@ -74,34 +74,73 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 		case 0x00:
 			inst.type   = ShaderInstructionType::TBufferLoadFormatX;
 			inst.format = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxenFloat1;
-			EXIT_NOT_IMPLEMENTED(!float1_format);
+			if (!float1_format) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !float1_format condition ignored (continuing)\n"); }
 			break;
 		case 0x01:
 			inst.type   = ShaderInstructionType::TBufferLoadFormatXy;
 			inst.format = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxenFloat2;
 			inst.dst.size = 2;
-			EXIT_NOT_IMPLEMENTED(!float2_format);
+			if (!float2_format) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !float2_format condition ignored (continuing)\n"); }
 			break;
-		case 0x02: KYTY_NI("tbuffer_load_format_xyz"); break;
+		case 0x02: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_load_format_xyz treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x03:
 			inst.type   = ShaderInstructionType::TBufferLoadFormatXyzw;
 			inst.format = (offen == 1 ? ShaderInstructionFormat::Vdata4Vaddr2SvSoffsOffenIdxenFloat4
 			                          : ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxenFloat4);
 			inst.dst.size = 4;
-			EXIT_NOT_IMPLEMENTED(!float4_format);
+			if (!float4_format) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !float4_format condition ignored (continuing)\n"); }
 			break;
-		case 0x04: KYTY_NI("tbuffer_store_format_x"); break;
-		case 0x05: KYTY_NI("tbuffer_store_format_xy"); break;
-		case 0x06: KYTY_NI("tbuffer_store_format_xyz"); break;
-		case 0x07: KYTY_NI("tbuffer_store_format_xyzw"); break;
-		case 0x08: KYTY_NI("tbuffer_load_format_d16_x"); break;
-		case 0x09: KYTY_NI("tbuffer_load_format_d16_xy"); break;
-		case 0x0A: KYTY_NI("tbuffer_load_format_d16_xyz"); break;
-		case 0x0B: KYTY_NI("tbuffer_load_format_d16_xyzw"); break;
-		case 0x0C: KYTY_NI("tbuffer_store_format_d16_x"); break;
-		case 0x0D: KYTY_NI("tbuffer_store_format_d16_xy"); break;
-		case 0x0E: KYTY_NI("tbuffer_store_format_d16_xyz"); break;
-		case 0x0F: KYTY_NI("tbuffer_store_format_d16_xyzw"); break;
+		case 0x04: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_store_format_x treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x05: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_store_format_xy treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x06: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_store_format_xyz treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x07: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_store_format_xyzw treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x08: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_load_format_d16_x treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x09: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_load_format_d16_xy treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x0A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_load_format_d16_xyz treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x0B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_load_format_d16_xyzw treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x0C: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_store_format_d16_x treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x0D: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_store_format_d16_xy treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x0E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_store_format_d16_xyz treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x0F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tbuffer_store_format_d16_xyzw treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		default: KYTY_UNKNOWN_OP();
 	}
 

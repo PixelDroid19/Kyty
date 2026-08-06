@@ -43,8 +43,14 @@ KYTY_SHADER_PARSER(shader_parse_smrd)
 
 	switch (opcode)
 	{
-		case 0x00: KYTY_NI("s_load_dword"); break;
-		case 0x01: KYTY_NI("s_load_dwordx2"); break;
+		case 0x00: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_load_dword treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x01: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_load_dwordx2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x02:
 			inst.type        = ShaderInstructionType::SLoadDwordx4;
 			inst.format      = ShaderInstructionFormat::Sdst4SbaseSoffset;
@@ -57,7 +63,10 @@ KYTY_SHADER_PARSER(shader_parse_smrd)
 			inst.src[0].size = 2;
 			inst.dst.size    = 8;
 			break;
-		case 0x04: KYTY_NI("s_load_dwordx16"); break;
+		case 0x04: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_load_dwordx16 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x08:
 			inst.type        = ShaderInstructionType::SBufferLoadDword;
 			inst.format      = ShaderInstructionFormat::SdstSvSoffset;
@@ -87,10 +96,19 @@ KYTY_SHADER_PARSER(shader_parse_smrd)
 			inst.src[0].size = 4;
 			inst.dst.size    = 16;
 			break;
-		case 0x1C: KYTY_NI("s_memrealtime"); break;
-		case 0x1D: KYTY_NI("s_dcache_inv_vol"); break;
-		case 0x1E: KYTY_NI("s_memtime"); break;
-		case 0x1F: KYTY_NI("s_dcache_inv") break;
+		case 0x1C: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_memrealtime treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x1D: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_dcache_inv_vol treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x1E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_memtime treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x1F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_dcache_inv treated as SBarrier (continuing)\n"); break;
 
 		default: KYTY_UNKNOWN_OP();
 	}

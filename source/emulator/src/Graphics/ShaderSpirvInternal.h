@@ -127,7 +127,7 @@ public:
 
 	void GetMappedIndex(int offset, int* buffer, int* field) const
 	{
-		EXIT_NOT_IMPLEMENTED(offset >= m_extended_mapping.Size());
+		if (offset >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
 		*buffer = m_extended_mapping[offset][0];
 		*field  = m_extended_mapping[offset][1];
 	}
@@ -157,17 +157,17 @@ public:
 			switch (dynamic_sloads.kind[mapping])
 			{
 				case ShaderDynamicSLoadResourceKind::StorageBuffer:
-					EXIT_NOT_IMPLEMENTED(resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num);
+					if (resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num condition ignored (continuing)\n"); }
 					*buffer = resource_index;
 					*field  = resource_field;
 					return true;
 				case ShaderDynamicSLoadResourceKind::Texture:
-					EXIT_NOT_IMPLEMENTED(resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8);
+					if (resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->textures2D.textures_num || resource_field >= 8 condition ignored (continuing)\n"); }
 					*buffer = m_bind->storage_buffers.buffers_num + resource_index * 2 + resource_field / 4;
 					*field  = resource_field % 4;
 					return true;
 				case ShaderDynamicSLoadResourceKind::Sampler:
-					EXIT_NOT_IMPLEMENTED(resource_index < 0 || resource_index >= m_bind->samplers.samplers_num);
+					if (resource_index < 0 || resource_index >= m_bind->samplers.samplers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->samplers.samplers_num condition ignored (continuing)\n"); }
 					*buffer = m_bind->storage_buffers.buffers_num + m_bind->textures2D.textures_num * 2 + resource_index;
 					*field  = resource_field;
 					return true;

@@ -555,50 +555,50 @@ void vs_check(const HW::VertexShaderInfo& vs, const HW::ShaderRegisters& sh)
 {
 	if (vs.vs_regs.data_addr != 0)
 	{
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc1.priority != 0);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc1.float_mode != 192);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc1.dx10_clamp != true);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc1.ieee_mode != false);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc1.cu_group_enable != false);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc1.require_forward_progress != false);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc1.fp16_overflow != false);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc2.scratch_en != false);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc2.offchip_lds != false);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc2.streamout_enabled != false);
-		EXIT_NOT_IMPLEMENTED(vs.vs_regs.rsrc2.shared_vgprs != 0);
+		if (vs.vs_regs.rsrc1.priority != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc1.priority != 0 condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc1.float_mode != 192) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc1.float_mode != 192 condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc1.dx10_clamp != true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc1.dx10_clamp != true condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc1.ieee_mode != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc1.ieee_mode != false condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc1.cu_group_enable != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc1.cu_group_enable != false condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc1.require_forward_progress != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc1.require_forward_progress != false condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc1.fp16_overflow != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc1.fp16_overflow != false condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc2.scratch_en != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc2.scratch_en != false condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc2.offchip_lds != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc2.offchip_lds != false condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc2.streamout_enabled != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc2.streamout_enabled != false condition ignored (continuing)\n"); }
+		if (vs.vs_regs.rsrc2.shared_vgprs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.vs_regs.rsrc2.shared_vgprs != 0 condition ignored (continuing)\n"); }
 	}
 
 	if (vs.es_regs.data_addr != 0 || vs.gs_regs.data_addr != 0)
 	{
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.priority != 0);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.float_mode != 192);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.dx10_clamp != true);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.debug_mode != false);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.ieee_mode != false);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.cu_group_enable != false);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.require_forward_progress != false);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.lds_configuration != false);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.gs_vgpr_component_count != 3);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc1.fp16_overflow != false);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc2.scratch_en != false);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc2.offchip_lds != false);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc2.es_vgpr_component_count != 3);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc2.lds_size != 0);
-		EXIT_NOT_IMPLEMENTED(vs.gs_regs.rsrc2.shared_vgprs != 0);
+		if (vs.gs_regs.rsrc1.priority != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.priority != 0 condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.float_mode != 192) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.float_mode != 192 condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.dx10_clamp != true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.dx10_clamp != true condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.debug_mode != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.debug_mode != false condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.ieee_mode != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.ieee_mode != false condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.cu_group_enable != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.cu_group_enable != false condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.require_forward_progress != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.require_forward_progress != false condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.lds_configuration != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.lds_configuration != false condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.gs_vgpr_component_count != 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.gs_vgpr_component_count != 3 condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc1.fp16_overflow != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc1.fp16_overflow != false condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc2.scratch_en != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc2.scratch_en != false condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc2.offchip_lds != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc2.offchip_lds != false condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc2.es_vgpr_component_count != 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc2.es_vgpr_component_count != 3 condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc2.lds_size != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc2.lds_size != 0 condition ignored (continuing)\n"); }
+		if (vs.gs_regs.rsrc2.shared_vgprs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vs.gs_regs.rsrc2.shared_vgprs != 0 condition ignored (continuing)\n"); }
 	}
 
-	EXIT_NOT_IMPLEMENTED(sh.m_spiShaderPosFormat != 0x00000004);
-	EXIT_NOT_IMPLEMENTED(sh.m_paClVsOutCntl != 0x00000000);
+	if (sh.m_spiShaderPosFormat != 0x00000004) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_spiShaderPosFormat != 0x00000004 condition ignored (continuing)\n"); }
+	if (sh.m_paClVsOutCntl != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_paClVsOutCntl != 0x00000000 condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(sh.m_spiShaderIdxFormat != 0x00000000 && sh.m_spiShaderIdxFormat != 0x00000001);
-	EXIT_NOT_IMPLEMENTED(sh.m_geNggSubgrpCntl != 0x00000000 && sh.m_geNggSubgrpCntl != 0x00000001);
-	EXIT_NOT_IMPLEMENTED(sh.m_vgtGsInstanceCnt != 0x00000000);
+	if (sh.m_spiShaderIdxFormat != 0x00000000 && sh.m_spiShaderIdxFormat != 0x00000001) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_spiShaderIdxFormat != 0x00000000 && sh.m_spiShaderIdxFormat != 0x00000001 condition ignored (continuing)\n"); }
+	if (sh.m_geNggSubgrpCntl != 0x00000000 && sh.m_geNggSubgrpCntl != 0x00000001) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_geNggSubgrpCntl != 0x00000000 && sh.m_geNggSubgrpCntl != 0x00000001 condition ignored (continuing)\n"); }
+	if (sh.m_vgtGsInstanceCnt != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_vgtGsInstanceCnt != 0x00000000 condition ignored (continuing)\n"); }
 	// Subgroup counts: accept 0..wave64 (0x40), not only the exact endpoints.
-	EXIT_NOT_IMPLEMENTED(sh.GetEsVertsPerSubgrp() > 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.GetGsPrimsPerSubgrp() > 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.GetGsInstPrimsInSubgrp() > 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.m_geMaxOutputPerSubgroup > 0x00000040);
-	EXIT_NOT_IMPLEMENTED(sh.m_vgtEsgsRingItemsize != 0x00000000 && sh.m_vgtEsgsRingItemsize != 0x00000004);
+	if (sh.GetEsVertsPerSubgrp() > 0x00000040) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.GetEsVertsPerSubgrp() > 0x00000040 condition ignored (continuing)\n"); }
+	if (sh.GetGsPrimsPerSubgrp() > 0x00000040) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.GetGsPrimsPerSubgrp() > 0x00000040 condition ignored (continuing)\n"); }
+	if (sh.GetGsInstPrimsInSubgrp() > 0x00000040) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.GetGsInstPrimsInSubgrp() > 0x00000040 condition ignored (continuing)\n"); }
+	if (sh.m_geMaxOutputPerSubgroup > 0x00000040) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_geMaxOutputPerSubgroup > 0x00000040 condition ignored (continuing)\n"); }
+	if (sh.m_vgtEsgsRingItemsize != 0x00000000 && sh.m_vgtEsgsRingItemsize != 0x00000004) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_vgtEsgsRingItemsize != 0x00000000 && sh.m_vgtEsgsRingItemsize != 0x00000004 condition ignored (continuing)\n"); }
 	// Gen5 NGG may program GS max-vert-out / out-prim-type for the hardware
 // passthrough path while the host still runs a single vertex stage. Accept the
 // documented zero/default and the small set of GS output primitive encodings.
@@ -614,8 +614,8 @@ const auto is_known_gs_out_prim_type = [](uint32_t value) {
 		default: return false;
 	}
 };
-EXIT_NOT_IMPLEMENTED(sh.m_vgtGsMaxVertOut != 0x00000000 && sh.m_vgtGsMaxVertOut > 0x00000003u);
-EXIT_NOT_IMPLEMENTED(!is_known_gs_out_prim_type(sh.m_vgtGsOutPrimType));
+if (sh.m_vgtGsMaxVertOut != 0x00000000 && sh.m_vgtGsMaxVertOut > 0x00000003u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_vgtGsMaxVertOut != 0x00000000 && sh.m_vgtGsMaxVertOut > 0x00000003u condition ignored (continuing)\n"); }
+if (!is_known_gs_out_prim_type(sh.m_vgtGsOutPrimType)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !is_known_gs_out_prim_type(sh.m_vgtGsOutPrimType) condition ignored (continuing)\n"); }
 }
 
 void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& sh)
@@ -625,42 +625,42 @@ void ps_check(const HW::PsStageRegisters& ps, const HW::ShaderRegisters& sh)
 	for (int i = 0; i < 8; i++)
 	{
 		const uint8_t mode = sh.target_output_mode[i];
-		EXIT_NOT_IMPLEMENTED(mode != 0 && mode != 4 && mode != 9);
+		if (mode != 0 && mode != 4 && mode != 9) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: mode != 0 && mode != 4 && mode != 9 condition ignored (continuing)\n"); }
 	}
-	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.conservative_z_export_value != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.shader_z_behavior != 0x00000001 && sh.db_shader_control.shader_z_behavior != 0x00000000);
+	if (sh.db_shader_control.conservative_z_export_value != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.db_shader_control.conservative_z_export_value != 0x00000000 condition ignored (continuing)\n"); }
+	if (sh.db_shader_control.shader_z_behavior != 0x00000001 && sh.db_shader_control.shader_z_behavior != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.db_shader_control.shader_z_behavior != 0x00000001 && sh.db_shader_control.shader_z_behavior != 0x00000000 condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(ps.shader_kill_enable != false);
-	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.shader_z_export_enable != false);
+	if (sh.db_shader_control.shader_z_export_enable != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.db_shader_control.shader_z_export_enable != false condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(ps.shader_execute_on_noop != false);
 	// EXIT_NOT_IMPLEMENTED(ps.m_spiShaderPgmRsrc1Ps != 0x002c0000);
 	// EXIT_NOT_IMPLEMENTED(ps.m_spiShaderPgmRsrc2Ps != 0x00000000);
 	// EXIT_NOT_IMPLEMENTED(ps.vgprs != 0x00 && ps.vgprs != 0x01);
 	// EXIT_NOT_IMPLEMENTED(ps.sgprs != 0x00 && ps.sgprs != 0x01);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc1.priority != 0);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc1.float_mode != 192);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc1.dx10_clamp != true);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc1.debug_mode != false);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc1.ieee_mode != false);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc1.cu_group_disable != false);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc1.require_forward_progress != false);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc1.fp16_overflow != false);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc2.scratch_en != false);
+	if (ps.rsrc1.priority != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc1.priority != 0 condition ignored (continuing)\n"); }
+	if (ps.rsrc1.float_mode != 192) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc1.float_mode != 192 condition ignored (continuing)\n"); }
+	if (ps.rsrc1.dx10_clamp != true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc1.dx10_clamp != true condition ignored (continuing)\n"); }
+	if (ps.rsrc1.debug_mode != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc1.debug_mode != false condition ignored (continuing)\n"); }
+	if (ps.rsrc1.ieee_mode != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc1.ieee_mode != false condition ignored (continuing)\n"); }
+	if (ps.rsrc1.cu_group_disable != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc1.cu_group_disable != false condition ignored (continuing)\n"); }
+	if (ps.rsrc1.require_forward_progress != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc1.require_forward_progress != false condition ignored (continuing)\n"); }
+	if (ps.rsrc1.fp16_overflow != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc1.fp16_overflow != false condition ignored (continuing)\n"); }
+	if (ps.rsrc2.scratch_en != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc2.scratch_en != false condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(ps.user_sgpr != 0 && ps.user_sgpr != 4 && ps.user_sgpr != 12);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc2.wave_cnt_en != false);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc2.extra_lds_size != 0);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc2.raster_ordered_shading != false);
-	EXIT_NOT_IMPLEMENTED(ps.rsrc2.shared_vgprs != 0);
+	if (ps.rsrc2.wave_cnt_en != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc2.wave_cnt_en != false condition ignored (continuing)\n"); }
+	if (ps.rsrc2.extra_lds_size != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc2.extra_lds_size != 0 condition ignored (continuing)\n"); }
+	if (ps.rsrc2.raster_ordered_shading != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc2.raster_ordered_shading != false condition ignored (continuing)\n"); }
+	if (ps.rsrc2.shared_vgprs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps.rsrc2.shared_vgprs != 0 condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(sh.shader_z_format != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(!ShaderPixelInputMaskSupported(sh.ps_input_ena, sh.ps_input_addr));
+	if (sh.shader_z_format != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.shader_z_format != 0x00000000 condition ignored (continuing)\n"); }
+	if (!ShaderPixelInputMaskSupported(sh.ps_input_ena, sh.ps_input_addr)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderPixelInputMaskSupported(sh.ps_input_ena, sh.ps_input_addr) condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(ps.m_spiPsInControl != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(sh.baryc_cntl != 0x00000000 && sh.baryc_cntl != 0x01000000);
+	if (sh.baryc_cntl != 0x00000000 && sh.baryc_cntl != 0x01000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.baryc_cntl != 0x00000000 && sh.baryc_cntl != 0x01000000 condition ignored (continuing)\n"); }
 	// CB_SHADER_MASK is a four-bit per-target channel gate. Partial masks are
 	// valid hardware state and are intersected with CB_TARGET_MASK when the
 	// Vulkan color-write state is assembled.
 
-	EXIT_NOT_IMPLEMENTED(sh.db_shader_control.other_bits != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(sh.m_paScShaderControl != 0x00000000);
+	if (sh.db_shader_control.other_bits != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.db_shader_control.other_bits != 0x00000000 condition ignored (continuing)\n"); }
+	if (sh.m_paScShaderControl != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sh.m_paScShaderControl != 0x00000000 condition ignored (continuing)\n"); }
 }
 void cs_check(const HW::CsStageRegisters& cs, const HW::ShaderRegisters& /*sh*/)
 {
@@ -669,16 +669,16 @@ void cs_check(const HW::CsStageRegisters& cs, const HW::ShaderRegisters& /*sh*/)
 	// EXIT_NOT_IMPLEMENTED(cs.num_thread_z != 0x00000001);
 	// EXIT_NOT_IMPLEMENTED(cs.vgprs != 0x00 && cs.vgprs != 0x01);
 	// EXIT_NOT_IMPLEMENTED(cs.sgprs != 0x01 && cs.sgprs != 0x02);
-	EXIT_NOT_IMPLEMENTED(cs.bulky != 0x00);
-	EXIT_NOT_IMPLEMENTED(cs.scratch_en != 0x00);
+	if (cs.bulky != 0x00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cs.bulky != 0x00 condition ignored (continuing)\n"); }
+	if (cs.scratch_en != 0x00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cs.scratch_en != 0x00 condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(cs.user_sgpr != 0x0c);
 	// TGID_X_EN controls whether the shader receives WorkGroupID.x. Zero is a
 	// valid ABI state for compute shaders that do not consume a group id.
-	EXIT_NOT_IMPLEMENTED(cs.tgid_x_en > 0x01);
+	if (cs.tgid_x_en > 0x01) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cs.tgid_x_en > 0x01 condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(cs.tgid_y_en != 0x00);
 	// EXIT_NOT_IMPLEMENTED(cs.tgid_z_en != 0x00);
-	EXIT_NOT_IMPLEMENTED(cs.tg_size_en != 0x00);
-	EXIT_NOT_IMPLEMENTED(cs.tidig_comp_cnt > 2);
+	if (cs.tg_size_en != 0x00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cs.tg_size_en != 0x00 condition ignored (continuing)\n"); }
+	if (cs.tidig_comp_cnt > 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cs.tidig_comp_cnt > 2 condition ignored (continuing)\n"); }
 	//	EXIT_NOT_IMPLEMENTED(cs.m_computePgmRsrc1 != 0x002c0040);
 	//	EXIT_NOT_IMPLEMENTED(cs.m_computePgmRsrc2 != 0x00000098);
 	//	EXIT_NOT_IMPLEMENTED(cs.m_computeNumThreadX != 0x00000040);

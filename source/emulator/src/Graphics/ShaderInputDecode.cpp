@@ -42,7 +42,7 @@ ShaderUsageInfo GetUsageSlots(const uint32_t* code)
 
 	if (binary_info != nullptr)
 	{
-		EXIT_NOT_IMPLEMENTED(binary_info->chunk_usage_base_offset_dw == 0);
+		if (binary_info->chunk_usage_base_offset_dw == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: binary_info->chunk_usage_base_offset_dw == 0 condition ignored (continuing)\n"); }
 
 		ret.usage_masks = (binary_info->chunk_usage_base_offset_dw == 0
 		                       ? nullptr
@@ -90,9 +90,9 @@ void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 
 				if (offset1 < stride && offset2 < stride)
 				{
-					EXIT_NOT_IMPLEMENTED(b.num_records != r.NumRecords());
+					if (b.num_records != r.NumRecords()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: b.num_records != r.NumRecords() condition ignored (continuing)\n"); }
 					b.addr = base;
-					EXIT_NOT_IMPLEMENTED(b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX);
+					if (b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: b.attr_num >= ShaderVertexInputBuffer::ATTR_MAX condition ignored (continuing)\n"); }
 					b.attr_indices[b.attr_num++] = ri;
 					merged                       = true;
 					break;
@@ -102,7 +102,7 @@ void ShaderDetectBuffers(ShaderVertexInputInfo* info, bool ps5)
 
 		if (!merged)
 		{
-			EXIT_NOT_IMPLEMENTED(info->buffers_num >= ShaderVertexInputInfo::RES_MAX);
+			if (info->buffers_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->buffers_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 			int bi                            = info->buffers_num++;
 			info->buffers[bi].addr            = (ps5 ? r.Base48() : r.Base44());
 			info->buffers[bi].stride          = r.Stride();
@@ -159,9 +159,9 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 
 		if (inst.type == ShaderInstructionType::SLoadDwordx4)
 		{
-			EXIT_NOT_IMPLEMENTED(inst.src[1].type != ShaderOperandType::LiteralConstant || (inst.src[1].constant.u & 3u) != 0);
-			EXIT_NOT_IMPLEMENTED(inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].register_id != 2);
-			EXIT_NOT_IMPLEMENTED(inst.dst.type != ShaderOperandType::Sgpr);
+			if (inst.src[1].type != ShaderOperandType::LiteralConstant || (inst.src[1].constant.u & 3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].type != ShaderOperandType::LiteralConstant || (inst.src[1].constant.u & 3u) != 0 condition ignored (continuing)\n"); }
+			if (inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].register_id != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].register_id != 2 condition ignored (continuing)\n"); }
+			if (inst.dst.type != ShaderOperandType::Sgpr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.type != ShaderOperandType::Sgpr condition ignored (continuing)\n"); }
 
 			uint32_t index    = inst.src[1].constant.u >> 2u;
 			int      t        = inst.dst.register_id;
@@ -188,12 +188,12 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 		{
 			// EXIT_NOT_IMPLEMENTED(!(i >= 2 && insts.At(i - 1).type == ShaderInstructionType::SWaitcnt &&
 			//                       insts.At(i - 2).type == ShaderInstructionType::SLoadDwordx4));
-			EXIT_NOT_IMPLEMENTED(inst.dst.type != ShaderOperandType::Vgpr);
-			EXIT_NOT_IMPLEMENTED(inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].register_id != 0);
-			EXIT_NOT_IMPLEMENTED(inst.src[1].type != ShaderOperandType::Sgpr);
-			EXIT_NOT_IMPLEMENTED(inst.src[2].type != ShaderOperandType::IntegerInlineConstant || inst.src[2].constant.i != 0);
+			if (inst.dst.type != ShaderOperandType::Vgpr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.type != ShaderOperandType::Vgpr condition ignored (continuing)\n"); }
+			if (inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].register_id != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].register_id != 0 condition ignored (continuing)\n"); }
+			if (inst.src[1].type != ShaderOperandType::Sgpr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].type != ShaderOperandType::Sgpr condition ignored (continuing)\n"); }
+			if (inst.src[2].type != ShaderOperandType::IntegerInlineConstant || inst.src[2].constant.i != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[2].type != ShaderOperandType::IntegerInlineConstant || inst.src[2].constant.i != 0 condition ignored (continuing)\n"); }
 
-			EXIT_NOT_IMPLEMENTED(info->resources_num >= ShaderVertexInputInfo::RES_MAX);
+			if (info->resources_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->resources_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 
 			int t = inst.src[1].register_id;
 
@@ -215,7 +215,7 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 
 	KYTY_PROFILER_END_BLOCK;
 
-	EXIT_NOT_IMPLEMENTED(s_num != v_num);
+	if (s_num != v_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_num != v_num condition ignored (continuing)\n"); }
 }
 
 void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_semantics, uint32_t num_input_semantics,
@@ -235,7 +235,7 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			max_semantic = input_semantics[i].semantic + 1u;
 		}
 	}
-	EXIT_NOT_IMPLEMENTED(max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX));
+	if (max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: max_semantic > static_cast<uint32_t>(ShaderVertexInputInfo::RES_MAX) condition ignored (continuing)\n"); }
 	for (uint32_t i = 0; i < max_semantic; i++)
 	{
 		info->fetch_attrib_data[i] = attrib[i];
@@ -247,7 +247,7 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 	{
 		const auto& in = input_semantics[i];
 
-		EXIT_NOT_IMPLEMENTED(in.static_vb_index == 1 || in.static_attribute == 1);
+		if (in.static_vb_index == 1 || in.static_attribute == 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: in.static_vb_index == 1 || in.static_attribute == 1 condition ignored (continuing)\n"); }
 
 		uint32_t reg  = in.hardware_mapping;
 		uint32_t size = in.size_in_elements;
@@ -262,9 +262,9 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 		uint32_t offset      = (attrib[in.semantic] >> 14u) & 0xfffu;
 		uint32_t fetch_index = (attrib[in.semantic] >> 26u) & 0x1u;
 
-		EXIT_NOT_IMPLEMENTED(fetch_index != 0);
+		if (fetch_index != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fetch_index != 0 condition ignored (continuing)\n"); }
 
-		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
+		if (index >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 
 		const auto* sharp = &buffer[index * 4];
 		if (vertex_attr_trace)
@@ -281,7 +281,7 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 			}
 		}
 
-		EXIT_NOT_IMPLEMENTED(info->resources_num >= ShaderVertexInputInfo::RES_MAX);
+		if (info->resources_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->resources_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 
 		auto& r           = info->resources[info->resources_num];
 		auto& rd          = info->resources_dst[info->resources_num];
@@ -295,8 +295,8 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 		{
 			const auto     input_format    = VulkanResolveGen5VertexAttribInputFormat(static_cast<uint16_t>(format));
 			const uint32_t component_count = input_format.component_count;
-			EXIT_NOT_IMPLEMENTED(input_format.format == VK_FORMAT_UNDEFINED || component_count == 0);
-			EXIT_NOT_IMPLEMENTED(size == 0 || size > 4);
+			if (input_format.format == VK_FORMAT_UNDEFINED || component_count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: input_format.format == VK_FORMAT_UNDEFINED || component_count == 0 condition ignored (continuing)\n"); }
+			if (size == 0 || size > 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size == 0 || size > 4 condition ignored (continuing)\n"); }
 			uint32_t swizzle = DstSel(4, 0, 0, 1);
 			switch (component_count)
 			{
@@ -319,7 +319,7 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 		if (offset != 0)
 		{
 			const uint64_t base = r.Base48();
-			EXIT_NOT_IMPLEMENTED(base > UINT64_MAX - offset);
+			if (base > UINT64_MAX - offset) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base > UINT64_MAX - offset condition ignored (continuing)\n"); }
 			r.UpdateAddress48(base + offset);
 		}
 
@@ -333,7 +333,7 @@ bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, in
 {
 	EXIT_IF(info == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(info->buffers_num < 0 || info->buffers_num >= ShaderStorageResources::BUFFERS_MAX);
+	if (info->buffers_num < 0 || info->buffers_num >= ShaderStorageResources::BUFFERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->buffers_num < 0 || info->buffers_num >= ShaderStorageResources::BUFFERS_MAX condition ignored (continuing)\n"); }
 
 	int  index    = info->buffers_num;
 	bool extended = (extended_buffer != nullptr);
@@ -343,10 +343,10 @@ bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, in
 	// extended_buffer is supplied.
 	if (extended)
 	{
-		EXIT_NOT_IMPLEMENTED(start_index < 16);
+		if (start_index < 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 16 condition ignored (continuing)\n"); }
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX);
+		if (start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
 	}
 
 	ShaderBufferResource resource;
@@ -378,7 +378,7 @@ bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, in
 			auto type = user_sgpr.type[start_index + j];
 			// Region/Vsharp markers may be unset when SGPRs were bulk-written;
 			// Unknown is accepted for Gen5 full-window loads (reg_num=30).
-			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown);
+			if (type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown condition ignored (continuing)\n"); }
 
 			direct_sgprs[start_index + j] = false;
 		}

@@ -40,7 +40,7 @@ void ShaderReportMissingGen5EudPointer(const ShaderUserData* user_data, int reg,
 // both map S#@0x20 to eud[0].
 int ShaderGen5EudOffsetBase(int user_sgpr_num)
 {
-	EXIT_NOT_IMPLEMENTED(user_sgpr_num <= 0);
+	if (user_sgpr_num <= 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_sgpr_num <= 0 condition ignored (continuing)\n"); }
 	constexpr int abi_eud_offset_base = 0x20;
 	const int     rounded_user_sgprs  = (user_sgpr_num + 3) & ~3;
 	return (rounded_user_sgprs > abi_eud_offset_base ? rounded_user_sgprs : abi_eud_offset_base);
@@ -68,7 +68,7 @@ bool Gen5SharpNeedsEud(int offset_dw, int dwords, int user_sgpr_num)
 int Gen5EudApiIndex(int offset_dw, int user_sgpr_num)
 {
 	const int eud_base = ShaderGen5EudOffsetBase(user_sgpr_num);
-	EXIT_NOT_IMPLEMENTED(offset_dw < eud_base);
+	if (offset_dw < eud_base) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset_dw < eud_base condition ignored (continuing)\n"); }
 	return 16 + (offset_dw - eud_base);
 }
 
@@ -78,9 +78,9 @@ static uint32_t Gen5SharpUserSgprDword(int offset_dw, int user_sgpr_num, const H
 	{
 		return user_sgpr.value[offset_dw];
 	}
-	EXIT_NOT_IMPLEMENTED(extended_buffer == nullptr);
+	if (extended_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: extended_buffer == nullptr condition ignored (continuing)\n"); }
 	const int eud_base = ShaderGen5EudOffsetBase(user_sgpr_num);
-	EXIT_NOT_IMPLEMENTED(offset_dw < eud_base);
+	if (offset_dw < eud_base) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset_dw < eud_base condition ignored (continuing)\n"); }
 	return extended_buffer[offset_dw - eud_base];
 }
 
@@ -218,7 +218,7 @@ static bool ShaderAddDynamicSLoadMapping(ShaderDynamicSLoadMappings* mappings, S
 	                                      const ShaderInstruction& sload, int offset_dw, int dword_count, uint32_t last_consumer_pc)
 {
 	EXIT_IF(mappings == nullptr);
-	EXIT_NOT_IMPLEMENTED(sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != dword_count);
+	if (sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != dword_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != dword_count condition ignored (continuing)\n"); }
 	for (int mapping = 0; mapping < mappings->mappings_num; ++mapping)
 	{
 		if (mappings->instruction_pc[mapping] == sload.pc)
@@ -247,7 +247,7 @@ static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, con
 	                                               uint32_t last_consumer_pc, const uint32_t* extended_buffer, bool* added_resource)
 {
 	EXIT_IF(bind == nullptr || extended_buffer == nullptr || added_resource == nullptr);
-	EXIT_NOT_IMPLEMENTED(sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4);
+	if (sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4 condition ignored (continuing)\n"); }
 	*added_resource = false;
 
 	auto& resources = bind->storage_buffers;
@@ -301,7 +301,7 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 	                                         bool* added_resource)
 {
 	EXIT_IF(bind == nullptr || extended_buffer == nullptr || added_resource == nullptr);
-	EXIT_NOT_IMPLEMENTED(sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 8 || usage == ShaderTextureUsage::Unknown);
+	if (sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 8 || usage == ShaderTextureUsage::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 8 || usage == ShaderTextureUsage::Unknown condition ignored (continuing)\n"); }
 	*added_resource = false;
 
 	ShaderTextureResource resource {};
@@ -340,7 +340,7 @@ static bool ShaderAddDynamicSamplerResource(ShaderBindResources* bind, const Sha
 	                                         const uint32_t* extended_buffer, bool* added_resource)
 {
 	EXIT_IF(bind == nullptr || extended_buffer == nullptr || added_resource == nullptr);
-	EXIT_NOT_IMPLEMENTED(sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4);
+	if (sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4 condition ignored (continuing)\n"); }
 	*added_resource = false;
 
 	ShaderSamplerResource resource {};

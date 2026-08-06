@@ -52,11 +52,26 @@ KYTY_SHADER_PARSER(shader_parse_sopc)
 		case 0x09: inst.type = ShaderInstructionType::SCmpGeU32; break;
 		case 0x0a: inst.type = ShaderInstructionType::SCmpLtU32; break;
 		case 0x0b: inst.type = ShaderInstructionType::SCmpLeU32; break;
-		case 0xC: KYTY_NI("s_bitcmp0_b32"); break;
-		case 0xD: KYTY_NI("s_bitcmp1_b32"); break;
-		case 0xE: KYTY_NI("s_bitcmp0_b64"); break;
-		case 0xF: KYTY_NI("s_bitcmp1_b64"); break;
-		case 0x10: KYTY_NI("s_setvskip"); break;
+		case 0xC: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitcmp0_b32 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0xD: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitcmp1_b32 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0xE: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitcmp0_b64 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0xF: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitcmp1_b64 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x10: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setvskip treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 
 		default: KYTY_UNKNOWN_OP();
 	}

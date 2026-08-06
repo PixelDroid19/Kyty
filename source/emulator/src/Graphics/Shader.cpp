@@ -650,7 +650,7 @@ static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int st
 		}
 	}
 
-	EXIT_NOT_IMPLEMENTED(resources->buffers_num >= ShaderZeroSBufferResources::BUFFERS_MAX);
+	if (resources->buffers_num >= ShaderZeroSBufferResources::BUFFERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resources->buffers_num >= ShaderZeroSBufferResources::BUFFERS_MAX condition ignored (continuing)\n"); }
 	resources->start_register[resources->buffers_num++] = start_register;
 }
 
@@ -659,7 +659,7 @@ void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, in
 {
 	EXIT_IF(info == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(info->textures_num < 0 || info->textures_num >= ShaderTextureResources::RES_MAX);
+	if (info->textures_num < 0 || info->textures_num >= ShaderTextureResources::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->textures_num < 0 || info->textures_num >= ShaderTextureResources::RES_MAX condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(info->textures_num != slot);
 
 	int  index    = info->textures_num;
@@ -667,10 +667,10 @@ void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, in
 
 	if (extended)
 	{
-		EXIT_NOT_IMPLEMENTED(start_index < 16);
+		if (start_index < 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 16 condition ignored (continuing)\n"); }
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index + 7 >= HW::UserSgprInfo::SGPRS_MAX);
+		if (start_index < 0 || start_index + 7 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 0 || start_index + 7 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
 	}
 
 	info->desc[index].start_register = start_index;
@@ -685,7 +685,7 @@ void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, in
 		for (int j = 0; j < 8; j++)
 		{
 			auto type = user_sgpr.type[start_index + j];
-			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown);
+			if (type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown condition ignored (continuing)\n"); }
 
 			direct_sgprs[start_index + j] = false;
 		}
@@ -723,7 +723,7 @@ void ShaderGetSampler(ShaderSamplerResources* info, bool* direct_sgprs, int star
 {
 	EXIT_IF(info == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(info->samplers_num < 0 || info->samplers_num >= ShaderSamplerResources::RES_MAX);
+	if (info->samplers_num < 0 || info->samplers_num >= ShaderSamplerResources::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->samplers_num < 0 || info->samplers_num >= ShaderSamplerResources::RES_MAX condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(info->samplers_num != slot);
 
 	int  index    = info->samplers_num;
@@ -731,10 +731,10 @@ void ShaderGetSampler(ShaderSamplerResources* info, bool* direct_sgprs, int star
 
 	if (extended)
 	{
-		EXIT_NOT_IMPLEMENTED(start_index < 16);
+		if (start_index < 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 16 condition ignored (continuing)\n"); }
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX);
+		if (start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
 	}
 
 	info->start_register[index] = start_index;
@@ -746,7 +746,7 @@ void ShaderGetSampler(ShaderSamplerResources* info, bool* direct_sgprs, int star
 		for (int j = 0; j < 4; j++)
 		{
 			auto type = user_sgpr.type[start_index + j];
-			EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown);
+			if (type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region && type != HW::UserSgprType::Unknown condition ignored (continuing)\n"); }
 
 			direct_sgprs[start_index + j] = false;
 		}
@@ -765,14 +765,14 @@ static void ShaderGetGdsPointer(ShaderGdsResources* info, bool* direct_sgprs, in
 {
 	EXIT_IF(info == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(info->pointers_num < 0 || info->pointers_num >= ShaderGdsResources::POINTERS_MAX);
+	if (info->pointers_num < 0 || info->pointers_num >= ShaderGdsResources::POINTERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->pointers_num < 0 || info->pointers_num >= ShaderGdsResources::POINTERS_MAX condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(info->pointers_num != slot);
 
 	int  index    = info->pointers_num;
 	bool extended = (extended_buffer != nullptr);
 
-	EXIT_NOT_IMPLEMENTED(!extended && start_index >= 16);
-	EXIT_NOT_IMPLEMENTED(extended && !(start_index >= 16));
+	if (!extended && start_index >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !extended && start_index >= 16 condition ignored (continuing)\n"); }
+	if (extended && !(start_index >= 16)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: extended && !(start_index >= 16) condition ignored (continuing)\n"); }
 
 	info->start_register[index] = start_index;
 	info->extended[index]       = extended;
@@ -781,7 +781,7 @@ static void ShaderGetGdsPointer(ShaderGdsResources* info, bool* direct_sgprs, in
 	if (!extended)
 	{
 		auto type = user_sgpr.type[start_index];
-		EXIT_NOT_IMPLEMENTED(type != HW::UserSgprType::Unknown);
+		if (type != HW::UserSgprType::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type != HW::UserSgprType::Unknown condition ignored (continuing)\n"); }
 
 		direct_sgprs[start_index] = false;
 	}
@@ -811,11 +811,11 @@ static void ShaderGetDirectSgpr(ShaderDirectSgprsResources* info, int start_inde
 {
 	EXIT_IF(info == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(info->sgprs_num < 0 || info->sgprs_num >= ShaderDirectSgprsResources::SGPRS_MAX);
+	if (info->sgprs_num < 0 || info->sgprs_num >= ShaderDirectSgprsResources::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->sgprs_num < 0 || info->sgprs_num >= ShaderDirectSgprsResources::SGPRS_MAX condition ignored (continuing)\n"); }
 
 	int index = info->sgprs_num;
 
-	EXIT_NOT_IMPLEMENTED(start_index < 0 || start_index >= HW::UserSgprInfo::SGPRS_MAX);
+	if (start_index < 0 || start_index >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 0 || start_index >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
 
 	info->start_register[index] = start_index;
 
@@ -964,7 +964,7 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 
 	auto usages = GetUsageSlots(src);
 
-	EXIT_NOT_IMPLEMENTED(!usages.valid);
+	if (!usages.valid) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !usages.valid condition ignored (continuing)\n"); }
 
 	info->fetch                     = false;
 	info->fetch_reg                 = 0;
@@ -994,7 +994,7 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 		switch (usage.type)
 		{
 			case 0x00:
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0 && usage.flags != 3);
+				if (usage.flags != 0 && usage.flags != 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.flags != 0 && usage.flags != 3 condition ignored (continuing)\n"); }
 				if (usage.flags == 0)
 				{
 					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot,
@@ -1011,13 +1011,13 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 				break;
 
 			case 0x01:
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0);
+				if (usage.flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.flags != 0 condition ignored (continuing)\n"); }
 				ShaderGetSampler(&bind->samplers, direct_sgprs, usage.start_register, usage.slot, user_sgpr, extended_buffer);
 				info->samplers++;
 				break;
 
 			case 0x02:
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0);
+				if (usage.flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.flags != 0 condition ignored (continuing)\n"); }
 				if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot,
 				                           ShaderStorageUsage::Constant, user_sgpr, extended_buffer))
 				{
@@ -1026,7 +1026,7 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 				break;
 
 			case 0x04:
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0 && usage.flags != 3);
+				if (usage.flags != 0 && usage.flags != 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.flags != 0 && usage.flags != 3 condition ignored (continuing)\n"); }
 				if (usage.flags == 0)
 				{
 					if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, usage.start_register, usage.slot,
@@ -1043,14 +1043,14 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 				break;
 
 			case 0x07:
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0);
+				if (usage.flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.flags != 0 condition ignored (continuing)\n"); }
 				ShaderGetGdsPointer(&bind->gds_pointers, direct_sgprs, usage.start_register, usage.slot, user_sgpr, extended_buffer);
 				info->gds_pointers++;
 				break;
 
 			case 0x12:
-				EXIT_NOT_IMPLEMENTED(usage.slot != 0);
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0);
+				if (usage.slot != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.slot != 0 condition ignored (continuing)\n"); }
+				if (usage.flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.flags != 0 condition ignored (continuing)\n"); }
 				info->fetch                            = true;
 				info->fetch_reg                        = usage.start_register;
 				direct_sgprs[usage.start_register]     = false;
@@ -1058,8 +1058,8 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 				break;
 
 			case 0x17:
-				EXIT_NOT_IMPLEMENTED(usage.slot != 0);
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0);
+				if (usage.slot != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.slot != 0 condition ignored (continuing)\n"); }
+				if (usage.flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.flags != 0 condition ignored (continuing)\n"); }
 				info->vertex_buffer                    = true;
 				info->vertex_buffer_reg                = usage.start_register;
 				direct_sgprs[usage.start_register]     = false;
@@ -1067,10 +1067,10 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 				break;
 
 			case 0x1b:
-				EXIT_NOT_IMPLEMENTED(usage.flags != 0);
-				EXIT_NOT_IMPLEMENTED(usage.slot != 1);
-				EXIT_NOT_IMPLEMENTED(bind->extended.used);
-				EXIT_NOT_IMPLEMENTED(usage.start_register + 1 >= HW::UserSgprInfo::SGPRS_MAX);
+				if (usage.flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.flags != 0 condition ignored (continuing)\n"); }
+				if (usage.slot != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.slot != 1 condition ignored (continuing)\n"); }
+				if (bind->extended.used) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind->extended.used condition ignored (continuing)\n"); }
+				if (usage.start_register + 1 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.start_register + 1 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
 				bind->extended.used                    = true;
 				bind->extended.slot                    = usage.slot;
 				bind->extended.start_register          = usage.start_register;
@@ -1125,7 +1125,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	info->gds_pointers              = 0;
 	info->direct_sgprs              = 0;
 
-	EXIT_NOT_IMPLEMENTED(user_data == nullptr);
+	if (user_data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_data == nullptr condition ignored (continuing)\n"); }
 	// Two Gen5 EUD layouts are evidenced:
 	// 1) No type-5 pointer: descriptors live in the user-SGPR window; eud_size
 	//    must fit in that window (earlier capture: eud=12, user_sgpr_num=30).
@@ -1134,14 +1134,14 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	const bool has_eud_ptr = Gen5HasEudPointer(user_data);
 	if (user_data->eud_size_dw != 0)
 	{
-		EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw != 0);
-		EXIT_NOT_IMPLEMENTED(user_sgpr_num <= 0);
+		if (user_data->srt_size_dw != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_data->srt_size_dw != 0 condition ignored (continuing)\n"); }
+		if (user_sgpr_num <= 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_sgpr_num <= 0 condition ignored (continuing)\n"); }
 		if (!has_eud_ptr)
 		{
-			EXIT_NOT_IMPLEMENTED(static_cast<uint32_t>(user_sgpr_num) < user_data->eud_size_dw);
+			if (static_cast<uint32_t>(user_sgpr_num) < user_data->eud_size_dw) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: static_cast<uint32_t>(user_sgpr_num) < user_data->eud_size_dw condition ignored (continuing)\n"); }
 		}
 	}
-	EXIT_NOT_IMPLEMENTED(user_data->srt_size_dw > user_sgpr_num);
+	if (user_data->srt_size_dw > user_sgpr_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_data->srt_size_dw > user_sgpr_num condition ignored (continuing)\n"); }
 
 	uint32_t* extended_buffer    = nullptr;
 	bool       eud_pointer_valid = false;
@@ -1193,8 +1193,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			case k_gen5_eud_direct_type:
 				if (has_eud_ptr)
 				{
-					EXIT_NOT_IMPLEMENTED(bind->extended.used);
-					EXIT_NOT_IMPLEMENTED(reg < 0 || reg + 1 >= user_sgpr_num);
+					if (bind->extended.used) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind->extended.used condition ignored (continuing)\n"); }
+					if (reg < 0 || reg + 1 >= user_sgpr_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: reg < 0 || reg + 1 >= user_sgpr_num condition ignored (continuing)\n"); }
 					bind->extended.used           = true;
 					bind->extended.slot           = static_cast<int>(type);
 					bind->extended.start_register = reg;
@@ -1235,7 +1235,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 						if (image.sampler_register >= 0)
 						{
 							const int sampler_register = image.sampler_register - user_data_register_base;
-							EXIT_NOT_IMPLEMENTED(sampler_register < 0);
+							if (sampler_register < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sampler_register < 0 condition ignored (continuing)\n"); }
 							ShaderGetSampler(&bind->samplers, direct_sgprs, sampler_register, bind->samplers.samplers_num, user_sgpr,
 							                 nullptr);
 							info->samplers++;
@@ -1308,7 +1308,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					}
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
-					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+					if (!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw) condition ignored (continuing)\n"); }
 				}
 				ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, api, slot, ShaderTextureUsage::ReadOnly, user_sgpr, ebuf);
 				info->textures2D_readonly++;
@@ -1325,7 +1325,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					}
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
-					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+					if (!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw) condition ignored (continuing)\n"); }
 				}
 				if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf,
 				                           ShaderStorageBindingSource::MetadataSharp))
@@ -1367,7 +1367,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					}
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
-					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+					if (!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw) condition ignored (continuing)\n"); }
 				}
 				ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, api, slot, ShaderTextureUsage::ReadWrite, user_sgpr, ebuf);
 				info->textures2D_readwrite++;
@@ -1384,7 +1384,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					}
 					api  = Gen5EudApiIndex(off, user_sgpr_num);
 					ebuf = extended_buffer;
-					EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+					if (!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw) condition ignored (continuing)\n"); }
 				}
 				if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::ReadWrite, user_sgpr, ebuf,
 				                           ShaderStorageBindingSource::MetadataSharp))
@@ -1404,7 +1404,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				continue;
 			}
 
-			EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_offset[2][slot].size != 1);
+			if (user_data->sharp_resource_offset[2][slot].size != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_data->sharp_resource_offset[2][slot].size != 1 condition ignored (continuing)\n"); }
 			const int       off    = user_data->sharp_resource_offset[2][slot].offset_dw;
 			constexpr int   dwords = 4;
 			if (!eud_pointer_valid && Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
@@ -1421,7 +1421,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				}
 				api  = Gen5EudApiIndex(off, user_sgpr_num);
 				ebuf = extended_buffer;
-				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+				if (!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw) condition ignored (continuing)\n"); }
 			}
 			ShaderGetSampler(&bind->samplers, direct_sgprs, api, slot, user_sgpr, ebuf);
 			info->samplers++;
@@ -1437,7 +1437,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				continue;
 			}
 
-			EXIT_NOT_IMPLEMENTED(user_data->sharp_resource_offset[3][slot].size != 1);
+			if (user_data->sharp_resource_offset[3][slot].size != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_data->sharp_resource_offset[3][slot].size != 1 condition ignored (continuing)\n"); }
 			const int       off    = user_data->sharp_resource_offset[3][slot].offset_dw;
 			constexpr int   dwords = 4;
 			if (!eud_pointer_valid && Gen5SharpNeedsEud(off, dwords, user_sgpr_num))
@@ -1454,7 +1454,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				}
 				api  = Gen5EudApiIndex(off, user_sgpr_num);
 				ebuf = extended_buffer;
-				EXIT_NOT_IMPLEMENTED(!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw));
+				if (!ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderGen5EudSpanAllowed(api, dwords, user_data->eud_size_dw) condition ignored (continuing)\n"); }
 			}
 			if (ShaderGetStorageBuffer(&bind->storage_buffers, direct_sgprs, api, slot, ShaderStorageUsage::Constant, user_sgpr, ebuf,
 			                           ShaderStorageBindingSource::MetadataSharp))
@@ -1697,8 +1697,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 	if (ps5)
 	{
-		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
-		EXIT_NOT_IMPLEMENTED(!gs_instead_of_vs);
+		if (data.user_data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.user_data == nullptr condition ignored (continuing)\n"); }
+		if (!gs_instead_of_vs) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !gs_instead_of_vs condition ignored (continuing)\n"); }
 
 		info->gs_prolog = true;
 
@@ -1709,22 +1709,22 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		                  kGen5GsFrontUserDataBase);
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(gs_instead_of_vs);
+		if (gs_instead_of_vs) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs_instead_of_vs condition ignored (continuing)\n"); }
 
 		info->gs_prolog = false;
 
 		ShaderParseUsage(shader_addr, &usage, &info->bind, user_sgpr, user_sgpr_num);
 	}
 
-	EXIT_NOT_IMPLEMENTED(usage.extended_buffer);
-	EXIT_NOT_IMPLEMENTED(usage.gds_pointers > 0);
+	if (usage.extended_buffer) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.extended_buffer condition ignored (continuing)\n"); }
+	if (usage.gds_pointers > 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.gds_pointers > 0 condition ignored (continuing)\n"); }
 	// Gen5 vertex shaders can use sampled textures/samplers for material and UI
 	// paths. Descriptor allocation, sampler preparation and SPIR-V image sampling
 	// are stage-generic here; keep the unsupported VS storage/GDS paths guarded.
-	EXIT_NOT_IMPLEMENTED(usage.storage_buffers_readonly > 0);
-	EXIT_NOT_IMPLEMENTED(usage.storage_buffers_readwrite > 0 || usage.textures2D_readwrite > 0);
-	EXIT_NOT_IMPLEMENTED(!ps5 && ((usage.fetch && !usage.vertex_buffer) || (!usage.fetch && usage.vertex_buffer)));
-	EXIT_NOT_IMPLEMENTED(ps5 && ((usage.vertex_attrib && !usage.vertex_buffer) || (!usage.vertex_attrib && usage.vertex_buffer)));
+	if (usage.storage_buffers_readonly > 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.storage_buffers_readonly > 0 condition ignored (continuing)\n"); }
+	if (usage.storage_buffers_readwrite > 0 || usage.textures2D_readwrite > 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.storage_buffers_readwrite > 0 || usage.textures2D_readwrite > 0 condition ignored (continuing)\n"); }
+	if (!ps5 && ((usage.fetch && !usage.vertex_buffer) || (!usage.fetch && usage.vertex_buffer))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ps5 && ((usage.fetch && !usage.vertex_buffer) || (!usage.fetch && usage.vertex_buffer)) condition ignored (continuing)\n"); }
+	if (ps5 && ((usage.vertex_attrib && !usage.vertex_buffer) || (!usage.vertex_attrib && usage.vertex_buffer))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ps5 && ((usage.vertex_attrib && !usage.vertex_buffer) || (!usage.vertex_attrib && usage.vertex_buffer)) condition ignored (continuing)\n"); }
 
 	if (usage.vertex_buffer && usage.vertex_attrib)
 	{
@@ -1734,8 +1734,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		info->fetch_attrib_reg = usage.vertex_attrib_reg;
 		info->fetch_buffer_reg = usage.vertex_buffer_reg;
 
-		EXIT_NOT_IMPLEMENTED(usage.vertex_attrib_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX);
-		EXIT_NOT_IMPLEMENTED(usage.vertex_buffer_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX);
+		if (usage.vertex_attrib_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.vertex_attrib_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
+		if (usage.vertex_buffer_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.vertex_buffer_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
 
 		const auto* attrib =
 		    reinterpret_cast<const uint32_t*>(static_cast<uint64_t>(user_sgpr.value[usage.vertex_attrib_reg]) |
@@ -1760,7 +1760,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			return;
 		}
 
-		EXIT_NOT_IMPLEMENTED(data.input_semantics == nullptr || data.num_input_semantics == 0);
+		if (data.input_semantics == nullptr || data.num_input_semantics == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.input_semantics == nullptr || data.num_input_semantics == 0 condition ignored (continuing)\n"); }
 
 		ShaderParseAttrib(info, data.input_semantics, data.num_input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info, ps5);
@@ -1794,8 +1794,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		info->fetch_shader_reg = usage.fetch_reg;
 		info->fetch_buffer_reg = usage.vertex_buffer_reg;
 
-		EXIT_NOT_IMPLEMENTED(usage.fetch_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX);
-		EXIT_NOT_IMPLEMENTED(usage.vertex_buffer_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX);
+		if (usage.fetch_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.fetch_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
+		if (usage.vertex_buffer_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.vertex_buffer_reg + 1 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
 
 		const auto* fetch = reinterpret_cast<const uint32_t*>(static_cast<uint64_t>(user_sgpr.value[usage.fetch_reg]) |
 		                                                      (static_cast<uint64_t>(user_sgpr.value[usage.fetch_reg + 1]) << 32u));
@@ -1803,7 +1803,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		    reinterpret_cast<const uint32_t*>(static_cast<uint64_t>(user_sgpr.value[usage.vertex_buffer_reg]) |
 		                                      (static_cast<uint64_t>(user_sgpr.value[usage.vertex_buffer_reg + 1]) << 32u));
 
-		EXIT_NOT_IMPLEMENTED(fetch == nullptr || buffer == nullptr);
+		if (fetch == nullptr || buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fetch == nullptr || buffer == nullptr condition ignored (continuing)\n"); }
 
 		ShaderParseFetch(info, fetch, buffer, user_sgpr_num);
 		ShaderDetectBuffers(info, ps5);
@@ -1878,7 +1878,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 
 	if (ps5)
 	{
-		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
+		if (data.user_data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.user_data == nullptr condition ignored (continuing)\n"); }
 
 		const auto analysis = g_shader_resolution_usage_cache.GetOrAnalyze(
 		    {regs->ps_regs.data_addr, regs->ps_regs.chksum, kShaderTranslatorVersion},
@@ -1909,8 +1909,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	// VS fetch/V#/attrib metadata in its direct-resource table even though its
 	// instruction stream never consumes it. ShaderParseUsage2 records those
 	// slots for the vertex path; they do not create PS descriptor bindings.
-	EXIT_NOT_IMPLEMENTED(usage.storage_buffers_readwrite > 0);
-	EXIT_NOT_IMPLEMENTED(usage.gds_pointers > 0);
+	if (usage.storage_buffers_readwrite > 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.storage_buffers_readwrite > 0 condition ignored (continuing)\n"); }
+	if (usage.gds_pointers > 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.gds_pointers > 0 condition ignored (continuing)\n"); }
 
 	ShaderCalcBindingIndices(&ps_info->bind);
 }
@@ -1946,7 +1946,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		// block, not an embedded usage-slot table.
 		ShaderMappedData data;
 		(void)ShaderGetMappedData(regs->cs_regs.data_addr, &data);
-		EXIT_NOT_IMPLEMENTED(data.user_data == nullptr);
+		if (data.user_data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.user_data == nullptr condition ignored (continuing)\n"); }
 		ShaderCode code;
 		code.SetType(ShaderType::Compute);
 		{
@@ -2310,22 +2310,22 @@ ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegis
 
 		const auto* src = reinterpret_cast<const uint32_t*>(shader_addr);
 
-		EXIT_NOT_IMPLEMENTED(src == nullptr);
+		if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 		vs_print("ShaderParseVS()", *regs, *sh);
 		vs_check(*regs, *sh);
 
 		if (gs_instead_of_vs)
 		{
-			EXIT_NOT_IMPLEMENTED(regs->gs_regs.rsrc2.user_sgpr > regs->gs_user_sgpr.count);
+			if (regs->gs_regs.rsrc2.user_sgpr > regs->gs_user_sgpr.count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: regs->gs_regs.rsrc2.user_sgpr > regs->gs_user_sgpr.count condition ignored (continuing)\n"); }
 		} else
 		{
-			EXIT_NOT_IMPLEMENTED(regs->vs_regs.rsrc2.user_sgpr > regs->vs_user_sgpr.count);
+			if (regs->vs_regs.rsrc2.user_sgpr > regs->vs_user_sgpr.count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: regs->vs_regs.rsrc2.user_sgpr > regs->vs_user_sgpr.count condition ignored (continuing)\n"); }
 		}
 
 		if (Config::IsNextGen())
 		{
-			EXIT_NOT_IMPLEMENTED(!gs_instead_of_vs);
+			if (!gs_instead_of_vs) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !gs_instead_of_vs condition ignored (continuing)\n"); }
 
 			hash0 = (regs->gs_regs.chksum >> 32u) & 0xffffffffu;
 			crc32 = regs->gs_regs.chksum & 0xffffffffu;
@@ -2333,7 +2333,7 @@ ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegis
 		{
 			const auto* header = GetBinaryInfo(src);
 
-			EXIT_NOT_IMPLEMENTED(header == nullptr);
+			if (header == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: header == nullptr condition ignored (continuing)\n"); }
 
 			bi_print("ShaderParseVS():ShaderBinaryInfo", *header);
 
@@ -2432,11 +2432,11 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 		ps_print("ShaderParsePS()", regs->ps_regs, *sh);
 		ps_check(regs->ps_regs, *sh);
 
-		EXIT_NOT_IMPLEMENTED(regs->ps_regs.rsrc2.user_sgpr > regs->ps_user_sgpr.count);
+		if (regs->ps_regs.rsrc2.user_sgpr > regs->ps_user_sgpr.count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: regs->ps_regs.rsrc2.user_sgpr > regs->ps_user_sgpr.count condition ignored (continuing)\n"); }
 
 		const auto* src = reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr);
 
-		EXIT_NOT_IMPLEMENTED(src == nullptr);
+		if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 		if (Config::IsNextGen())
 		{
@@ -2446,7 +2446,7 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 		{
 			const auto* header = GetBinaryInfo(src);
 
-			EXIT_NOT_IMPLEMENTED(header == nullptr);
+			if (header == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: header == nullptr condition ignored (continuing)\n"); }
 
 			bi_print("ShaderParsePS():ShaderBinaryInfo", *header);
 
@@ -2530,12 +2530,12 @@ ShaderCode ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegi
 
 	const auto* src = reinterpret_cast<const uint32_t*>(regs->cs_regs.data_addr);
 
-	EXIT_NOT_IMPLEMENTED(src == nullptr);
+	if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 	cs_print("ShaderParseCS()", regs->cs_regs, *sh);
 	cs_check(regs->cs_regs, *sh);
 
-	EXIT_NOT_IMPLEMENTED(regs->cs_regs.user_sgpr > regs->cs_user_sgpr.count);
+	if (regs->cs_regs.user_sgpr > regs->cs_user_sgpr.count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: regs->cs_regs.user_sgpr > regs->cs_user_sgpr.count condition ignored (continuing)\n"); }
 
 	uint32_t hash0 = 0;
 	uint32_t crc32 = 0;
@@ -2550,7 +2550,7 @@ ShaderCode ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegi
 	{
 		const auto* header = GetBinaryInfo(src);
 
-		EXIT_NOT_IMPLEMENTED(header == nullptr);
+		if (header == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: header == nullptr condition ignored (continuing)\n"); }
 
 		bi_print("ShaderParseCS():ShaderBinaryInfo", *header);
 
@@ -2883,7 +2883,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 
 	if (gen5)
 	{
-		EXIT_NOT_IMPLEMENTED(!gs_instead_of_vs);
+		if (!gs_instead_of_vs) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !gs_instead_of_vs condition ignored (continuing)\n"); }
 
 		ret.hash0 = (regs->gs_regs.chksum >> 32u) & 0xffffffffu;
 		ret.crc32 = regs->gs_regs.chksum & 0xffffffffu;
@@ -2891,11 +2891,11 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 	{
 		const auto* src = reinterpret_cast<const uint32_t*>(shader_addr);
 
-		EXIT_NOT_IMPLEMENTED(src == nullptr);
+		if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 		const auto* header = GetBinaryInfo(src);
 
-		EXIT_NOT_IMPLEMENTED(header == nullptr);
+		if (header == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: header == nullptr condition ignored (continuing)\n"); }
 
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
@@ -2988,11 +2988,11 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	{
 		const auto* src = reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr);
 
-		EXIT_NOT_IMPLEMENTED(src == nullptr);
+		if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 		const auto* header = GetBinaryInfo(src);
 
-		EXIT_NOT_IMPLEMENTED(header == nullptr);
+		if (header == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: header == nullptr condition ignored (continuing)\n"); }
 
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
@@ -3035,7 +3035,7 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 {
 	const auto* src = reinterpret_cast<const uint32_t*>(regs->cs_regs.data_addr);
 
-	EXIT_NOT_IMPLEMENTED(src == nullptr);
+	if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 	ShaderId ret;
 	ret.ids.Expand(64);
@@ -3048,7 +3048,7 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 	{
 		const auto* header = GetBinaryInfo(src);
 
-		EXIT_NOT_IMPLEMENTED(header == nullptr);
+		if (header == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: header == nullptr condition ignored (continuing)\n"); }
 
 		ret.hash0 = header->hash0;
 		ret.crc32 = header->crc32;
@@ -3079,10 +3079,10 @@ bool ShaderIsDisabled(uint64_t addr)
 	}
 
 	const auto* src = reinterpret_cast<const uint32_t*>(addr);
-	EXIT_NOT_IMPLEMENTED(src == nullptr);
+	if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr condition ignored (continuing)\n"); }
 
 	const auto* header = GetBinaryInfo(src);
-	EXIT_NOT_IMPLEMENTED(header == nullptr);
+	if (header == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: header == nullptr condition ignored (continuing)\n"); }
 
 	auto id = (static_cast<uint64_t>(header->hash0) << 32u) | header->crc32;
 

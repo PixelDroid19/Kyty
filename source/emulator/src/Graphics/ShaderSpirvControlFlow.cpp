@@ -70,7 +70,7 @@ static String8 find_backward_loop_merge(const ShaderCode& code, const ShaderLabe
 			continue;
 		}
 
-		EXIT_NOT_IMPLEMENTED(!loop_exit_is_in_header_block(code, backedge, inst));
+		if (!loop_exit_is_in_header_block(code, backedge, inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !loop_exit_is_in_header_block(code, backedge, inst) condition ignored (continuing)\n"); }
 
 		if (merge.Size() == 0)
 		{
@@ -78,7 +78,7 @@ static String8 find_backward_loop_merge(const ShaderCode& code, const ShaderLabe
 			continue;
 		}
 
-		EXIT_NOT_IMPLEMENTED(merge != exit.ToString());
+		if (merge != exit.ToString()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: merge != exit.ToString() condition ignored (continuing)\n"); }
 	}
 
 	return merge;
@@ -101,7 +101,7 @@ static uint32_t find_backward_loop_for_exit(const ShaderCode& code, const Shader
 			continue;
 		}
 
-		EXIT_NOT_IMPLEMENTED(owner != 0);
+		if (owner != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: owner != 0 condition ignored (continuing)\n"); }
 		owner = backedge.GetSrc();
 	}
 
@@ -113,9 +113,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 {
 	const auto& inst = code.GetInstructions().At(index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[0]));
+	if (!operand_is_constant(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[0]) condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(code.ReadBlock(ShaderLabel(inst).GetDst()).is_discard);
+	if (code.ReadBlock(ShaderLabel(inst).GetDst()).is_discard) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: code.ReadBlock(ShaderLabel(inst).GetDst()).is_discard condition ignored (continuing)\n"); }
 
 	const auto branch = ShaderLabel(inst);
 	String8    label  = branch.ToString();
@@ -174,12 +174,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 /* XXX: Execz, Scc0, Scc1, Vccz, Vccnz */
 KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 {
-	EXIT_NOT_IMPLEMENTED(index + 1 >= code.GetInstructions().Size());
+	if (index + 1 >= code.GetInstructions().Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index + 1 >= code.GetInstructions().Size() condition ignored (continuing)\n"); }
 
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto& next_inst = code.GetInstructions().At(index + 1);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[0]));
+	if (!operand_is_constant(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[0]) condition ignored (continuing)\n"); }
 
 	const char* branch_param[2] = {param[0], param[1]};
 	if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
@@ -205,7 +205,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	// spirv-opt's GetBlockDepth. Pair with OpLoopMerge at the header (WriteLabel).
 	if (label.GetDst() < inst.pc)
 	{
-		EXIT_NOT_IMPLEMENTED(discard);
+		if (discard) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: discard condition ignored (continuing)\n"); }
 
 		const String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, inst.pc);
 		const String8 merge_label    = String8::FromPrintf("loop_merge_%04" PRIx32, inst.pc);
@@ -540,7 +540,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SEndpgm_Empty)
        OpReturn
 )";
 
-	EXIT_NOT_IMPLEMENTED(index < 2);
+	if (index < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 2 condition ignored (continuing)\n"); }
 
 	const auto& prev_prev_inst = code.GetInstructions().At(index - 2);
 	const auto& prev_inst      = code.GetInstructions().At(index - 1);

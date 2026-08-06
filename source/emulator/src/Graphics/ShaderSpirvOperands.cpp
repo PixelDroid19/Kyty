@@ -185,7 +185,7 @@ bool Spirv::ResolvePixelInterpolationModes()
 
 String8 packed_half_shadow_to_str(ShaderOperand op)
 {
-	EXIT_NOT_IMPLEMENTED(op.type != ShaderOperandType::Vgpr || op.size != 1);
+	if (op.type != ShaderOperandType::Vgpr || op.size != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op.type != ShaderOperandType::Vgpr || op.size != 1 condition ignored (continuing)\n"); }
 	return String8::FromPrintf("v%d_packed_half", op.register_id);
 }
 
@@ -290,7 +290,7 @@ SpirvValue buffer_index_variable_to_str(const ShaderInstruction& inst)
 		return operand_variable_to_str(inst.src[0]);
 	}
 
-	EXIT_NOT_IMPLEMENTED(inst.format != ShaderInstructionFormat::Vdata1Vaddr2SvSoffsOffenIdxen);
+	if (inst.format != ShaderInstructionFormat::Vdata1Vaddr2SvSoffsOffenIdxen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.format != ShaderInstructionFormat::Vdata1Vaddr2SvSoffsOffenIdxen condition ignored (continuing)\n"); }
 	return operand_variable_to_str(inst.src[0], 1);
 }
 
@@ -326,7 +326,7 @@ static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_
 	{
 		return {};
 	}
-	EXIT_NOT_IMPLEMENTED(sel > 6u);
+	if (sel > 6u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sel > 6u condition ignored (continuing)\n"); }
 
 	// offset,count for OpBitFieldUExtract
 	uint32_t offset = 0;
@@ -372,7 +372,7 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 {
 	EXIT_IF(load == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(op.negate || op.absolute);
+	if (op.negate || op.absolute) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op.negate || op.absolute condition ignored (continuing)\n"); }
 
 	if (operand_is_constant(op))
 	{
@@ -423,7 +423,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 		return true;
 	}
 
-	EXIT_NOT_IMPLEMENTED(op.negate || op.absolute);
+	if (op.negate || op.absolute) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op.negate || op.absolute condition ignored (continuing)\n"); }
 
 	const bool    need_swizzle = (op.swizzle != 6u);
 	const String8 raw_id       = need_swizzle ? ("raw" + result_id) : result_id;
@@ -432,7 +432,7 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 	{
 		if (op.size == 2)
 		{
-			EXIT_NOT_IMPLEMENTED(shift < 0 || shift >= 2);
+			if (shift < 0 || shift >= 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift < 0 || shift >= 2 condition ignored (continuing)\n"); }
 
 			if (shift == 0)
 			{
@@ -676,7 +676,7 @@ void Spirv::AddConstant(ShaderOperand op)
 		type = SpirvType::Float;
 	}
 
-	EXIT_NOT_IMPLEMENTED(type == SpirvType::Unknown);
+	if (type == SpirvType::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type == SpirvType::Unknown condition ignored (continuing)\n"); }
 
 	AddConstant(type, op.constant);
 }

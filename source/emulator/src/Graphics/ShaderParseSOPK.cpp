@@ -39,7 +39,10 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 	{
 		case 0x00: inst.type = ShaderInstructionType::SMovkI32; break;
 
-		case 0x02: KYTY_NI("s_cmovk_i32"); break;
+		case 0x02: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cmovk_i32 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x03: set_compare(ShaderInstructionType::SCmpEqI32); break;
 		case 0x04: set_compare(ShaderInstructionType::SCmpLgI32); break;
 		case 0x05: set_compare(ShaderInstructionType::SCmpGtI32); break;
@@ -52,13 +55,31 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 		case 0x0C: set_compare(ShaderInstructionType::SCmpGeU32); break;
 		case 0x0D: set_compare(ShaderInstructionType::SCmpLtU32); break;
 		case 0x0E: set_compare(ShaderInstructionType::SCmpLeU32); break;
-		case 0x0F: KYTY_NI("s_addk_i32"); break;
+		case 0x0F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_addk_i32 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x10: inst.type = ShaderInstructionType::SMulkI32; break;
-		case 0x11: KYTY_NI("s_cbranch_i_fork"); break;
-		case 0x12: KYTY_NI("s_getreg_b32"); break;
-		case 0x13: KYTY_NI("s_setreg_b32"); break;
-		case 0x14: KYTY_NI("s_getreg_regrd_b32"); break;
-		case 0x15: KYTY_NI("s_setreg_imm32_b32"); break;
+		case 0x11: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_i_fork treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x12: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getreg_b32 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x13: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setreg_b32 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x14: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getreg_regrd_b32 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x15: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setreg_imm32_b32 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 
 		default: KYTY_UNKNOWN_OP();
 	}

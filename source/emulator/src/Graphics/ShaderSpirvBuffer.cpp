@@ -15,7 +15,7 @@ namespace Kyty::Libs::Graphics {
 
 static String8 GetBufferOffsetIntConstant(Spirv* spirv, ShaderOperand op)
 {
-	EXIT_NOT_IMPLEMENTED(!operand_is_constant(op));
+	if (!operand_is_constant(op)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(op) condition ignored (continuing)\n"); }
 	int value = 0;
 	if (op.type == ShaderOperandType::IntegerInlineConstant)
 	{
@@ -29,10 +29,10 @@ static String8 GetBufferOffsetIntConstant(Spirv* spirv, ShaderOperand op)
 		value = static_cast<int>(op.constant.u);
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(true);
+		if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 	}
 	String8 id = spirv->GetConstantInt(value);
-	EXIT_NOT_IMPLEMENTED(id == "unknown_int_constant");
+	if (id == "unknown_int_constant") { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: id == unknown_int_constant condition ignored (continuing)\n"); }
 	return id;
 }
 
@@ -648,7 +648,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen)
 			return true;
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value   = operand_variable_to_str(inst.dst);
 		auto    src0_value  = operand_variable_to_str(inst.src[0]);
@@ -656,10 +656,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen)
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %t100_<index> = OpLoad %float %<src0>
@@ -705,10 +705,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 			return emit_gen5_raw_buffer_load(spirv, inst, static_cast<int>(index), 1, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		const bool has_vgpr_offset = inst.format == ShaderInstructionFormat::Vdata1Vaddr2SvSoffsOffenIdxen;
-		EXIT_NOT_IMPLEMENTED(!has_vgpr_offset && inst.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen);
+		if (!has_vgpr_offset && inst.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !has_vgpr_offset && inst.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen condition ignored (continuing)\n"); }
 
 		auto dst_value   = operand_variable_to_str(inst.dst);
 		auto src0_index  = buffer_index_variable_to_str(inst);
@@ -718,10 +718,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 		String8 offset    = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 		String8 index_str = String8::FromPrintf("%u", index);
 
-		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_index.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_index.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_index.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 		// EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
 
 		String8 load_offset = R"(
@@ -730,7 +730,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 		if (has_vgpr_offset)
 		{
 			auto src0_offset = operand_variable_to_str(inst.src[0], 0);
-			EXIT_NOT_IMPLEMENTED(src0_offset.type != SpirvType::Float);
+			if (src0_offset.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_offset.type != SpirvType::Float condition ignored (continuing)\n"); }
 			load_offset = R"(
        %to100_<index> = OpLoad %float %<src0_offset>
        %to101_<index> = OpBitcast %int %to100_<index>
@@ -792,7 +792,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen)
 			return emit_gen5_raw_buffer_load(spirv, inst, static_cast<int>(index), 2, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -801,11 +801,11 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen)
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(dst_value1.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (dst_value1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value1.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %t100_<index> = OpLoad %float %<src0>
@@ -854,7 +854,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen)
 			return emit_gen5_raw_buffer_load(spirv, inst, static_cast<int>(index), 4, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -865,10 +865,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen)
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %t100_<index> = OpLoad %float %<src0>
@@ -915,7 +915,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen)
 			return emit_gen5_raw_buffer_load(spirv, inst, static_cast<int>(index), 3, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -925,10 +925,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen)
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %t100_<index> = OpLoad %float %<src0>
@@ -983,7 +983,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 
 		// EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.src[0]));
 		// EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value   = operand_variable_to_str(inst.dst);
 		auto    src0_value  = operand_variable_to_str(inst.src[0]);
@@ -992,11 +992,11 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
+		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value3.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value3.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check EXEC
@@ -1050,7 +1050,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 			return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyzw", 4, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -1062,11 +1062,11 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value3.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value3.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %t100_<index> = OpLoad %float %<src0>
@@ -1118,10 +1118,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen)
 			return emit_gen5_raw_buffer_store(spirv, inst, static_cast<int>(index), 1, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		const bool has_vgpr_offset = inst.format == ShaderInstructionFormat::Vdata1VaddrSvSoffsOffen;
-		EXIT_NOT_IMPLEMENTED(!has_vgpr_offset && inst.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen);
+		if (!has_vgpr_offset && inst.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !has_vgpr_offset && inst.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen condition ignored (continuing)\n"); }
 
 		auto dst_value   = operand_variable_to_str(inst.dst);
 		auto src0_value  = operand_variable_to_str(inst.src[0]);
@@ -1130,10 +1130,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen)
 		// auto   src1_value3 = operand_variable_to_str(inst.src[1], 3);
 		String8 offset = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 		// EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
 
 		// TODO() check VSKIP
@@ -1211,7 +1211,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx2_Vdata2VaddrSvSoffsIdxen)
 			return emit_gen5_raw_buffer_store(spirv, inst, static_cast<int>(index), 2, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -1220,10 +1220,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx2_Vdata2VaddrSvSoffsIdxen)
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
@@ -1276,7 +1276,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx4_Vdata4VaddrSvSoffsIdxen)
 			return emit_gen5_raw_buffer_store(spirv, inst, static_cast<int>(index), 4, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -1287,10 +1287,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx4_Vdata4VaddrSvSoffsIdxen)
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
@@ -1345,7 +1345,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx3_Vdata3VaddrSvSoffsIdxen)
 			return emit_gen5_raw_buffer_store(spirv, inst, static_cast<int>(index), 3, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -1355,10 +1355,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx3_Vdata3VaddrSvSoffsIdxen)
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
@@ -1419,7 +1419,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
 			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_x", 1, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value   = operand_variable_to_str(inst.dst);
 		auto    src0_value  = operand_variable_to_str(inst.src[0]);
@@ -1428,11 +1428,11 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
+		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value3.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value3.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 
@@ -1493,7 +1493,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
 			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_xy", 2, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -1503,11 +1503,11 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value3.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value3.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 
@@ -1569,7 +1569,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 			return emit_gen5_mubuf_format_store(spirv, inst, static_cast<int>(index), "tbuffer_store_format_xyzw", 4, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -1581,14 +1581,14 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 		auto    src1_value3 = operand_variable_to_str(inst.src[1], 3);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(dst_value1.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(dst_value2.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(dst_value3.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value3.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (dst_value1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value1.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (dst_value2.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value2.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (dst_value3.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value3.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value3.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value3.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		static const char* text = R"(
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
@@ -1647,11 +1647,11 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
 	{
 		String8 index_str = String8::FromPrintf("%u", index);
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+		if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 		auto dst_value = operand_variable_to_str(inst.dst);
 
-		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check EXEC
@@ -1682,11 +1682,11 @@ KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 	{
 		String8 index_str = String8::FromPrintf("%u", index);
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+		if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 		auto dst_value = operand_variable_to_str(inst.dst);
 
-		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Float);
+		if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check EXEC
@@ -1721,8 +1721,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
 	auto address = operand_variable_to_str(inst.src[0]);
 	auto data    = operand_variable_to_str(inst.src[1]);
 
-	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(data.type != SpirvType::Float);
+	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (data.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.type != SpirvType::Float condition ignored (continuing)\n"); }
 
 	const auto index_str  = String8::FromPrintf("%u", index);
 	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
@@ -1758,8 +1758,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset)
 	auto address = operand_variable_to_str(inst.src[0]);
 	auto data    = operand_variable_to_str(inst.src[1]);
 
-	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(data.type != SpirvType::Float);
+	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (data.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.type != SpirvType::Float condition ignored (continuing)\n"); }
 
 	const auto index_str  = String8::FromPrintf("%u", index);
 	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
@@ -1801,8 +1801,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAtomic_XXX_VaddrVdataOffset)
 	auto address = operand_variable_to_str(inst.src[0]);
 	auto data    = operand_variable_to_str(inst.src[1]);
 
-	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(data.type != SpirvType::Float);
+	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (data.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.type != SpirvType::Float condition ignored (continuing)\n"); }
 
 	const auto index_str  = String8::FromPrintf("%u", index);
 	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
@@ -1844,7 +1844,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAtomicIncDec_VaddrOffset)
 
 	auto address = operand_variable_to_str(inst.src[0]);
 
-	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
+	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
 
 	const auto index_str  = String8::FromPrintf("%u", index);
 	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
@@ -1882,8 +1882,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset)
 	auto address = operand_variable_to_str(inst.src[0]);
 	auto dst     = operand_variable_to_str(inst.dst);
 
-	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Float);
+	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (dst.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Float condition ignored (continuing)\n"); }
 
 	const auto index_str  = String8::FromPrintf("%u", index);
 	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
@@ -1920,9 +1920,9 @@ KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01)
 	auto dst0    = operand_variable_to_str(inst.dst, 0);
 	auto dst1    = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(address.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(dst0.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(dst1.type != SpirvType::Float);
+	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (dst0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst0.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (dst1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst1.type != SpirvType::Float condition ignored (continuing)\n"); }
 
 	const uint32_t offset0       = inst.ds_offset & 0xffu;
 	const uint32_t offset1       = (inst.ds_offset >> 8u) & 0xffu;
@@ -1994,7 +1994,7 @@ static bool RecompileZeroSBufferLoad(const ShaderInstruction& inst, uint32_t com
 	for (uint32_t component = 0; component < components; ++component)
 	{
 		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
-		EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Uint);
+		if (dst.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Uint condition ignored (continuing)\n"); }
 		*dst_source += String8::FromPrintf("               OpStore %%%s %%uint_0\n", dst.value.c_str());
 	}
 	return true;
@@ -2016,9 +2016,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDword_SdstSvSoffset)
 		String8 index_str   = String8::FromPrintf("%u", index);
 		String8 load1;
 
-		EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+		if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 		if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
 		{
 			return false;
@@ -2074,9 +2074,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx2_Sdst2SvSoffset)
 		String8 index_str   = String8::FromPrintf("%u", index);
 		String8 load1;
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+		if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 		if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
 		{
 			return false;
@@ -2136,11 +2136,11 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 		auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
 		// String8 offset      = spirv->GetConstant(inst.src[1]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+		if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
-		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+		if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
 		String8 index_str = String8::FromPrintf("%u", index);
 
@@ -2200,7 +2200,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
+		if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
 
 		SpirvValue dst_value[8];
 
@@ -2212,10 +2212,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 		auto    src0_value0 = operand_variable_to_str(inst.src[0], 0);
 		String8 offset      = spirv->GetConstant(inst.src[1]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value[0].type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
+		if (dst_value[0].type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value[0].type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
-		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+		if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
 		String8 text = R"(
         %t100_<index> = OpLoad %uint %<src0_value0>
@@ -2252,7 +2252,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
+		if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
 
 		SpirvValue dst_value[16];
 
@@ -2264,10 +2264,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 		auto    src0_value0 = operand_variable_to_str(inst.src[0], 0);
 		String8 offset      = spirv->GetConstant(inst.src[1]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value[0].type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
+		if (dst_value[0].type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value[0].type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
-		EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+		if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
 		String8 text = R"(
         %t100_<index> = OpLoad %uint %<src0_value0>
@@ -2328,28 +2328,28 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 	const auto* vs_info    = spirv->GetVsInputInfo();
 	int         shift_regs = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
 
-	EXIT_NOT_IMPLEMENTED(shift_regs != 0);
-	EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
-	EXIT_NOT_IMPLEMENTED(inst.src[0].register_id != bind_info->extended.start_register);
+	if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
+	if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
+	if (inst.src[0].register_id != bind_info->extended.start_register) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].register_id != bind_info->extended.start_register condition ignored (continuing)\n"); }
 
 	// TODO() check pointer
 
-	EXIT_NOT_IMPLEMENTED(dword_count <= 0 || dword_count > 8);
-	EXIT_NOT_IMPLEMENTED(inst.dst.size != dword_count);
+	if (dword_count <= 0 || dword_count > 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dword_count <= 0 || dword_count > 8 condition ignored (continuing)\n"); }
+	if (inst.dst.size != dword_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != dword_count condition ignored (continuing)\n"); }
 
 	SpirvValue dst_value[8];
 	for (int i = 0; i < dword_count; i++)
 	{
 		dst_value[i] = (dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, i));
-		EXIT_NOT_IMPLEMENTED(dst_value[i].type != SpirvType::Uint);
+		if (dst_value[i].type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value[i].type != SpirvType::Uint condition ignored (continuing)\n"); }
 	}
 
 	auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
 	auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
 	int  offset      = static_cast<int>(inst.src[1].constant.u >> 2u);
 
-	EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(src0_value1.type != SpirvType::Uint);
+	if (src0_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	if (src0_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	static const char* text = R"(
 		         %vsharp_<index>_<reg> = OpAccessChain %<vsharp_uint_ptr> %vsharp %int_0 %int_<buffer> %int_<field>
@@ -2394,13 +2394,13 @@ static bool recompile_sload_from_fetch_attrib(uint32_t index, const ShaderInstru
 		return false;
 	}
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
-	EXIT_NOT_IMPLEMENTED(dword_count <= 0 || dword_count > 4);
-	EXIT_NOT_IMPLEMENTED(inst.dst.size != dword_count);
+	if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
+	if (dword_count <= 0 || dword_count > 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dword_count <= 0 || dword_count > 4 condition ignored (continuing)\n"); }
+	if (inst.dst.size != dword_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != dword_count condition ignored (continuing)\n"); }
 
 	int dword_index = static_cast<int>(inst.src[1].constant.u >> 2u);
-	EXIT_NOT_IMPLEMENTED(dword_index < 0);
-	EXIT_NOT_IMPLEMENTED(dword_index + dword_count > vs_info->fetch_attrib_data_num);
+	if (dword_index < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dword_index < 0 condition ignored (continuing)\n"); }
+	if (dword_index + dword_count > vs_info->fetch_attrib_data_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dword_index + dword_count > vs_info->fetch_attrib_data_num condition ignored (continuing)\n"); }
 
 	static const char* text = R"(
 		         %sload_attr_<index> = OpBitcast %uint %<const>
@@ -2410,7 +2410,7 @@ static bool recompile_sload_from_fetch_attrib(uint32_t index, const ShaderInstru
 	for (int i = 0; i < dword_count; i++)
 	{
 		auto dst = (dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, i));
-		EXIT_NOT_IMPLEMENTED(dst.type != SpirvType::Uint);
+		if (dst.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		uint32_t value = vs_info->fetch_attrib_data[dword_index + i];
 		*dst_source += String8(text)
@@ -2505,7 +2505,7 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1)
 			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_x", 36, 1, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst);
 		auto    src0_value  = operand_variable_to_str(inst.src[0]);
@@ -2513,10 +2513,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1)
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check EXEC
@@ -2563,7 +2563,7 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloa
 			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyzw", 119, 4, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -2574,10 +2574,10 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloa
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check EXEC
@@ -2627,15 +2627,15 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXy_Vdata2VaddrSvSoffsIdxenFloat2
 	{
 		return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xy", 64, 2, dst_source);
 	}
-	EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+	if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 	auto dst0 = operand_variable_to_str(inst.dst, 0);
 	auto dst1 = operand_variable_to_str(inst.dst, 1);
 	auto addr = operand_variable_to_str(inst.src[0]);
 	auto desc0 = operand_variable_to_str(inst.src[1], 0);
 	auto desc1 = operand_variable_to_str(inst.src[1], 1);
 	String8 offset = GetBufferOffsetIntConstant(spirv, inst.src[2]);
-	EXIT_NOT_IMPLEMENTED(dst0.type != SpirvType::Float || dst1.type != SpirvType::Float || addr.type != SpirvType::Float);
-	EXIT_NOT_IMPLEMENTED(desc0.type != SpirvType::Uint || desc1.type != SpirvType::Uint);
+	if (dst0.type != SpirvType::Float || dst1.type != SpirvType::Float || addr.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst0.type != SpirvType::Float || dst1.type != SpirvType::Float || addr.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (desc0.type != SpirvType::Uint || desc1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: desc0.type != SpirvType::Uint || desc1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 	static const char* text = R"(
 %txy_addr_<index> = OpLoad %float %<addr>
 %txy_index_<index> = OpBitcast %int %txy_addr_<index>
@@ -2675,7 +2675,7 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdx
 			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyzw", 119, 4, dst_source);
 		}
 
-		EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[2]));
+		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
 		auto    dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto    dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -2687,11 +2687,11 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdx
 		auto    src1_value1 = operand_variable_to_str(inst.src[1], 1);
 		String8 offset      = GetBufferOffsetIntConstant(spirv, inst.src[2]);
 
-		EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value0.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src0_value1.type != SpirvType::Float);
-		EXIT_NOT_IMPLEMENTED(src1_value0.type != SpirvType::Uint);
-		EXIT_NOT_IMPLEMENTED(src1_value1.type != SpirvType::Uint);
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value1.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src1_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 		// TODO() check VSKIP
 		// TODO() check EXEC

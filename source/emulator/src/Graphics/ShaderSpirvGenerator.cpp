@@ -135,7 +135,7 @@ void Spirv::GenerateSource()
 			             " addr=0x%08" PRIx32 "\n",
 			             code_id, m_ps_input_info->input_num, m_ps_input_info->system_input_enable,
 			             m_ps_input_info->system_input_address);
-			EXIT_NOT_IMPLEMENTED(true);
+			if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 		}
 	}
 
@@ -431,7 +431,7 @@ void Spirv::WriteHeader()
 					if (ShaderPixelCanonicalInterpolator(*m_ps_input_info, i) == i)
 					{
 						ShaderPixelInterpolator interpolator {};
-						EXIT_NOT_IMPLEMENTED(!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator));
+						if (!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator) condition ignored (continuing)\n"); }
 						if (interpolator.source == ShaderPixelInterpolatorSource::Parameter)
 						{
 							vars.Add(String8::FromPrintf("%%attr%d", i));
@@ -567,7 +567,7 @@ void Spirv::WriteAnnotations()
 					}
 
 					ShaderPixelInterpolator interpolator {};
-					EXIT_NOT_IMPLEMENTED(!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator));
+					if (!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator) condition ignored (continuing)\n"); }
 					if (interpolator.source == ShaderPixelInterpolatorSource::Default)
 					{
 						continue;
@@ -1225,7 +1225,7 @@ void Spirv::WriteGlobalVariables()
 					if (ShaderPixelCanonicalInterpolator(*m_ps_input_info, i) == i)
 					{
 						ShaderPixelInterpolator interpolator {};
-						EXIT_NOT_IMPLEMENTED(!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator));
+						if (!ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderDecodePixelInterpolator(m_ps_input_info->interpolator_settings[i], &interpolator) condition ignored (continuing)\n"); }
 						if (interpolator.source == ShaderPixelInterpolatorSource::Parameter)
 						{
 							vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v4float Input", i));
@@ -1523,8 +1523,8 @@ void Spirv::WriteLocalVariables()
 				if (extended)
 				{
 					EXIT_IF(start_reg < 16);
-					EXIT_NOT_IMPLEMENTED(shift_regs != 0);
-					EXIT_NOT_IMPLEMENTED(start_reg - 16 + f >= m_extended_mapping.Size());
+					if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
+					if (start_reg - 16 + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
 					m_extended_mapping[start_reg - 16 + f][0] = buffer_index + i;
 					m_extended_mapping[start_reg - 16 + f][1] = f;
 				} else
@@ -1560,8 +1560,8 @@ void Spirv::WriteLocalVariables()
 					if (extended)
 					{
 						EXIT_IF(start_reg < 16);
-						EXIT_NOT_IMPLEMENTED(shift_regs != 0);
-						EXIT_NOT_IMPLEMENTED(start_reg - 16 + 4 * ti + f >= m_extended_mapping.Size());
+						if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
+						if (start_reg - 16 + 4 * ti + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + 4 * ti + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
 						m_extended_mapping[start_reg - 16 + 4 * ti + f][0] = buffer_index + i * 2 + ti;
 						m_extended_mapping[start_reg - 16 + 4 * ti + f][1] = f;
 					} else
@@ -1596,8 +1596,8 @@ void Spirv::WriteLocalVariables()
 				if (extended)
 				{
 					EXIT_IF(start_reg < 16);
-					EXIT_NOT_IMPLEMENTED(shift_regs != 0);
-					EXIT_NOT_IMPLEMENTED(start_reg - 16 + f >= m_extended_mapping.Size());
+					if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
+					if (start_reg - 16 + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
 					m_extended_mapping[start_reg - 16 + f][0] = buffer_index + i;
 					m_extended_mapping[start_reg - 16 + f][1] = f;
 				} else
@@ -1624,8 +1624,8 @@ void Spirv::WriteLocalVariables()
 			if (extended)
 			{
 				EXIT_IF(start_reg < 16);
-				EXIT_NOT_IMPLEMENTED(shift_regs != 0);
-				EXIT_NOT_IMPLEMENTED(start_reg - 16 >= m_extended_mapping.Size());
+				if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
+				if (start_reg - 16 >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
 				m_extended_mapping[start_reg - 16][0] = buffer_index + i / 4;
 				m_extended_mapping[start_reg - 16][1] = i % 4;
 			} else
@@ -1721,8 +1721,8 @@ void Spirv::DetectFetch()
 	EXIT_IF(m_vs_input_info == nullptr);
 	EXIT_IF(!m_vs_input_info->fetch_embedded);
 
-	EXIT_NOT_IMPLEMENTED(!m_vs_input_info->gs_prolog);
-	EXIT_NOT_IMPLEMENTED(m_vs_input_info->fetch_inline);
+	if (!m_vs_input_info->gs_prolog) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_vs_input_info->gs_prolog condition ignored (continuing)\n"); }
+	if (m_vs_input_info->fetch_inline) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_vs_input_info->fetch_inline condition ignored (continuing)\n"); }
 
 	enum class Type
 	{
@@ -1789,8 +1789,8 @@ void Spirv::DetectFetch()
 				case ShaderInstructionType::SLoadDwordx16:
 					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == attrib_reg)
 					{
-						EXIT_NOT_IMPLEMENTED(!operand_is_constant(inst.src[1]));
-						EXIT_NOT_IMPLEMENTED(inst.src[1].constant.i < 0);
+						if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
+						if (inst.src[1].constant.i < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].constant.i < 0 condition ignored (continuing)\n"); }
 						int register_id = sgpr_reg(inst.dst);
 						int index       = inst.src[1].constant.i / 4;
 						for (int i = 0; i < inst.dst.size; i++)
@@ -1801,8 +1801,8 @@ void Spirv::DetectFetch()
 					}
 					if (is_sgpr(inst.src[0]) && sgpr_reg(inst.src[0]) == buffer_reg)
 					{
-						EXIT_NOT_IMPLEMENTED(operand_is_constant(inst.src[1]));
-						EXIT_NOT_IMPLEMENTED(is_sgpr(inst.src[1]) && sgprs[sgpr_reg(inst.src[1])].type != Type::Attrib);
+						if (operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
+						if (is_sgpr(inst.src[1]) && sgprs[sgpr_reg(inst.src[1])].type != Type::Attrib) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: is_sgpr(inst.src[1]) && sgprs[sgpr_reg(inst.src[1])].type != Type::Attrib condition ignored (continuing)\n"); }
 						int register_id = sgpr_reg(inst.dst);
 						for (int i = 0; i < inst.dst.size; i++)
 						{
@@ -1833,9 +1833,9 @@ void Spirv::DetectFetch()
 				case ShaderInstructionType::BufferLoadFormatXyz:
 				case ShaderInstructionType::BufferLoadFormatXyzw:
 				{
-					EXIT_NOT_IMPLEMENTED(!(vgprs[vgpr_reg(inst.src[0])].type == Type::Index &&
+					if (!(vgprs[vgpr_reg(inst.src[0])].type == Type::Index &&
 					                       sgprs[sgpr_reg(inst.src[1])].type == Type::Buffer &&
-					                       sgprs[sgpr_reg(inst.src[2])].type == Type::Attrib));
+					                       sgprs[sgpr_reg(inst.src[2])].type == Type::Attrib)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(vgprs[vgpr_reg(inst.src[0])].type == Type::Index && condition ignored (continuing)\n"); }
 
 					const int semantic = sgprs[sgpr_reg(inst.src[1])].attrib_id;
 					int       resource = -1;
@@ -1902,15 +1902,15 @@ void Spirv::WriteInstructions()
 	for (const auto& inst: instructions)
 	{
 		index++;
-		EXIT_NOT_IMPLEMENTED(uses_arrayed_2d_sampled_images && IsSampledImageInstruction(inst) &&
-		                     !SupportsArrayed2dImageInstruction(inst));
-		EXIT_NOT_IMPLEMENTED(uses_arrayed_2d_storage_images && IsStorageImageInstruction(inst) &&
-		                     !SupportsArrayed2dImageInstruction(inst));
+		if (uses_arrayed_2d_sampled_images && IsSampledImageInstruction(inst) &&
+		                     !SupportsArrayed2dImageInstruction(inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uses_arrayed_2d_sampled_images && IsSampledImageInstruction(inst) && condition ignored (continuing)\n"); }
+		if (uses_arrayed_2d_storage_images && IsStorageImageInstruction(inst) &&
+		                     !SupportsArrayed2dImageInstruction(inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uses_arrayed_2d_storage_images && IsStorageImageInstruction(inst) && condition ignored (continuing)\n"); }
 		// Mixed 2D/3D sampled descriptors carry an explicit runtime tag. Image
 		// operations that have not yet needed a 3D coordinate keep their 2D
 		// path; ImageSampleL below consumes the tagged 3D path used by the
 		// captured material shader.
-		EXIT_NOT_IMPLEMENTED(uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst));
+		if (uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst) condition ignored (continuing)\n"); }
 
 		WriteLabel(index);
 
@@ -2289,7 +2289,7 @@ void Spirv::FindVariables()
 	{
 		if (m_ps_input_info->ps_pos_xy)
 		{
-			EXIT_NOT_IMPLEMENTED(!m_ps_input_info->host_to_guest_scale.IsValid());
+			if (!m_ps_input_info->host_to_guest_scale.IsValid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_ps_input_info->host_to_guest_scale.IsValid() condition ignored (continuing)\n"); }
 			AddVariable(ShaderOperandType::Vgpr, 2, 1);
 			AddVariable(ShaderOperandType::Vgpr, 3, 1);
 		}

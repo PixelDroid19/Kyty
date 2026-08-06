@@ -26,10 +26,10 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	uint32_t vdata   = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr   = (buffer[1] >> 0u) & 0xffu;
 
-	EXIT_NOT_IMPLEMENTED(glc == 1 && opcode != 0x32u);
-	EXIT_NOT_IMPLEMENTED(slc == 1);
-	EXIT_NOT_IMPLEMENTED(lds == 1);
-	EXIT_NOT_IMPLEMENTED(tfe == 1);
+	if (glc == 1 && opcode != 0x32u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: glc == 1 && opcode != 0x32u condition ignored (continuing)\n"); }
+	if (slc == 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: slc == 1 condition ignored (continuing)\n"); }
+	if (lds == 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: lds == 1 condition ignored (continuing)\n"); }
+	if (tfe == 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tfe == 1 condition ignored (continuing)\n"); }
 
 	uint32_t size = 2;
 
@@ -67,7 +67,7 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.src[2].constant.u += offset;
 		} else
 		{
-			EXIT_NOT_IMPLEMENTED(true);
+			if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 		}
 		inst.buffer_imm_offset = 0;
 	}
@@ -108,7 +108,10 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.src[1].size = 4;
 			inst.dst.size    = 2;
 			break;
-		case 0x06: KYTY_NI("buffer_store_format_xyz"); break;
+		case 0x06: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_store_format_xyz treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x07:
 			inst.type        = ShaderInstructionType::BufferStoreFormatXyzw;
 			inst.format      = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
@@ -120,9 +123,18 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
 			inst.src[1].size = 4;
 			break;
-		case 0x09: KYTY_NI("buffer_load_sbyte"); break;
-		case 0x0A: KYTY_NI("buffer_load_ushort"); break;
-		case 0x0B: KYTY_NI("buffer_load_sshort"); break;
+		case 0x09: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_load_sbyte treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x0A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_load_ushort treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x0B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_load_sshort treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x0c:
 			inst.type = ShaderInstructionType::BufferLoadDword;
 			inst.format =
@@ -147,8 +159,14 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.src[1].size = 4;
 			inst.dst.size    = 3;
 			break;
-		case 0x18: KYTY_NI("buffer_store_byte"); break;
-		case 0x1A: KYTY_NI("buffer_store_short"); break;
+		case 0x18: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_store_byte treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x1A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_store_short treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x1c:
 			inst.type        = ShaderInstructionType::BufferStoreDword;
 			inst.format      = (offen == 1 ? ShaderInstructionFormat::Vdata1VaddrSvSoffsOffen
@@ -173,8 +191,14 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.src[1].size = 4;
 			inst.dst.size    = 3;
 			break;
-		case 0x30: KYTY_NI("buffer_atomic_swap"); break;
-		case 0x31: KYTY_NI("buffer_atomic_cmpswap"); break;
+		case 0x30: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_swap treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x31: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_cmpswap treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x32:
 			inst.type        = ShaderInstructionType::BufferAtomicAdd;
 			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
@@ -191,8 +215,10 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_NI("buffer_atomic_rsub")
-			};
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_rsub treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			}
 			break;
 		case 0x35:
 			inst.type        = ShaderInstructionType::BufferAtomicSmin;
@@ -229,45 +255,137 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
 			inst.src[1].size = 4;
 			break;
-		case 0x3C: KYTY_NI("buffer_atomic_inc"); break;
-		case 0x3D: KYTY_NI("buffer_atomic_dec"); break;
-		case 0x3E: KYTY_NI("buffer_atomic_fcmpswap"); break;
-		case 0x3F: KYTY_NI("buffer_atomic_fmin"); break;
-		case 0x40: KYTY_NI("buffer_atomic_fmax"); break;
-		case 0x50: KYTY_NI("buffer_atomic_swap_x2"); break;
-		case 0x51: KYTY_NI("buffer_atomic_cmpswap_x2"); break;
-		case 0x52: KYTY_NI("buffer_atomic_add_x2"); break;
-		case 0x53: KYTY_NI("buffer_atomic_sub_x2"); break;
-		case 0x54: KYTY_NI("buffer_atomic_rsub_x2"); break;
-		case 0x55: KYTY_NI("buffer_atomic_smin_x2"); break;
-		case 0x56: KYTY_NI("buffer_atomic_umin_x2"); break;
-		case 0x57: KYTY_NI("buffer_atomic_smax_x2"); break;
-		case 0x58: KYTY_NI("buffer_atomic_umax_x2"); break;
-		case 0x59: KYTY_NI("buffer_atomic_and_x2"); break;
-		case 0x5A: KYTY_NI("buffer_atomic_or_x2"); break;
-		case 0x5B: KYTY_NI("buffer_atomic_xor_x2"); break;
-		case 0x5C: KYTY_NI("buffer_atomic_inc_x2"); break;
-		case 0x5D: KYTY_NI("buffer_atomic_dec_x2"); break;
-		case 0x5E: KYTY_NI("buffer_atomic_fcmpswap_x2"); break;
-		case 0x5F: KYTY_NI("buffer_atomic_fmin_x2"); break;
-		case 0x60: KYTY_NI("buffer_atomic_fmax_x2"); break;
+		case 0x3C: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_inc treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x3D: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_dec treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x3E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_fcmpswap treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x3F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_fmin treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x40: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_fmax treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x50: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_swap_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x51: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_cmpswap_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x52: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_add_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x53: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_sub_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x54: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_rsub_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x55: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_smin_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x56: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_umin_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x57: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_smax_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x58: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_umax_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x59: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_and_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x5A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_or_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x5B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_xor_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x5C: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_inc_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x5D: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_dec_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x5E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_fcmpswap_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x5F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_fmin_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x60: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_fmax_x2 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 		case 0x71:
 			if (next_gen)
 			{
 				KYTY_UNKNOWN_OP();
 			} else
 			{
-				KYTY_NI("buffer_wbinvl1")
-			};
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_wbinvl1 treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			}
 			break;
-		case 0x80: KYTY_NI("buffer_load_format_d16_x"); break;
-		case 0x81: KYTY_NI("buffer_load_format_d16_xy"); break;
-		case 0x82: KYTY_NI("buffer_load_format_d16_xyz"); break;
-		case 0x83: KYTY_NI("buffer_load_format_d16_xyzw"); break;
-		case 0x84: KYTY_NI("buffer_store_format_d16_x"); break;
-		case 0x85: KYTY_NI("buffer_store_format_d16_xy"); break;
-		case 0x86: KYTY_NI("buffer_store_format_d16_xyz"); break;
-		case 0x87: KYTY_NI("buffer_store_format_d16_xyzw"); break;
+		case 0x80: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_load_format_d16_x treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x81: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_load_format_d16_xy treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x82: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_load_format_d16_xyz treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x83: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_load_format_d16_xyzw treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x84: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_store_format_d16_x treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x85: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_store_format_d16_xy treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x86: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_store_format_d16_xyz treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x87: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_store_format_d16_xyzw treated as SBarrier (continuing)\n");
+			inst.type = ShaderInstructionType::SBarrier;
+			inst.format = ShaderInstructionFormat::Unknown;
+			break;
 
 		default: KYTY_UNKNOWN_OP();
 	}

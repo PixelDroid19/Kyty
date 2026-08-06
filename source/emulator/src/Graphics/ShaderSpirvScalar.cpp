@@ -19,12 +19,12 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	String8 load0;
 	String8 load1;
@@ -87,12 +87,12 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Lshl_B64_Sdst2Ssrc02Ssrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	String8 load0;
 	String8 load1;
@@ -155,12 +155,12 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Lshr_B64_Sdst2Ssrc02Ssrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	String8 load0;
 	String8 load1;
@@ -223,12 +223,12 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_U64_Sdst2Ssrc02Ssrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	String8 load0;
 	String8 load1;
@@ -302,12 +302,12 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B32_SVdstSVsrc0SVsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -350,11 +350,11 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_I32_SVdstSVsrc0SVsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
+	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
 	if (!operand_load_int(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
@@ -393,11 +393,11 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
+	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
@@ -437,14 +437,14 @@ KYTY_RECOMPILER_FUNC(Recompile_SSaveexecB64_Sdst2Ssrc02)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
 	String8 load0;
 	String8 load1;
@@ -650,12 +650,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SMulkI32_SVdstSVsrc0)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
 	String8 load0;
 
@@ -693,12 +693,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB32_SVdstSVsrc0)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
 	String8 load0;
 
@@ -722,12 +722,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB64_Sdst2Ssrc02)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	// EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
 
@@ -777,12 +777,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SUnaryB32_SVdstSVsrc0)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	EXIT_NOT_IMPLEMENTED(dst_value.type != SpirvType::Uint);
-	EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
+	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
 	String8 load0;
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
@@ -814,12 +814,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SNotB64_Sdst2Ssrc02)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	String8 load0;
 	String8 load1;
@@ -862,8 +862,8 @@ KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02)
 
 	if (input_info != nullptr)
 	{
-		EXIT_NOT_IMPLEMENTED(!input_info->fetch_external);
-		EXIT_NOT_IMPLEMENTED(input_info->fetch_shader_reg != 0);
+		if (!input_info->fetch_external) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !input_info->fetch_external condition ignored (continuing)\n"); }
+		if (input_info->fetch_shader_reg != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: input_info->fetch_shader_reg != 0 condition ignored (continuing)\n"); }
 	}
 
 	if (input_info != nullptr && input_info->fetch_external && inst.dst.type == ShaderOperandType::Sgpr && inst.dst.register_id == 0 &&
@@ -935,12 +935,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	EXIT_NOT_IMPLEMENTED(!operand_is_variable(inst.dst));
+	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
 
 	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 
-	EXIT_NOT_IMPLEMENTED(dst_value0.type != SpirvType::Uint);
+	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 
 	// EXIT_NOT_IMPLEMENTED(operand_is_exec(inst.dst));
 

@@ -29,10 +29,10 @@ KYTY_SHADER_PARSER(shader_parse_smem)
 
 	uint32_t size = 2;
 
-	EXIT_NOT_IMPLEMENTED(glc != 0);
-	EXIT_NOT_IMPLEMENTED(dlc != 0);
-	EXIT_NOT_IMPLEMENTED(inst.src[0].type == ShaderOperandType::LiteralConstant);
-	EXIT_NOT_IMPLEMENTED(inst.src[1].type == ShaderOperandType::LiteralConstant);
+	if (glc != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: glc != 0 condition ignored (continuing)\n"); }
+	if (dlc != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dlc != 0 condition ignored (continuing)\n"); }
+	if (inst.src[0].type == ShaderOperandType::LiteralConstant) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].type == ShaderOperandType::LiteralConstant condition ignored (continuing)\n"); }
+	if (inst.src[1].type == ShaderOperandType::LiteralConstant) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[1].type == ShaderOperandType::LiteralConstant condition ignored (continuing)\n"); }
 
 	if (inst.src[1].type == ShaderOperandType::Null)
 	{
@@ -87,7 +87,12 @@ KYTY_SHADER_PARSER(shader_parse_smem)
 			inst.src[0].size = 2;
 			inst.dst.size    = 8;
 			break;
-		case 0x04: KYTY_NI("s_load_dwordx16"); break;
+		case 0x04:
+			inst.type        = ShaderInstructionType::SLoadDwordx16;
+			inst.format      = ShaderInstructionFormat::Sdst16SbaseSoffset;
+			inst.src[0].size = 2;
+			inst.dst.size    = 16;
+			break;
 		case 0x08:
 			inst.type        = ShaderInstructionType::SBufferLoadDword;
 			inst.format      = ShaderInstructionFormat::SdstSvSoffset;

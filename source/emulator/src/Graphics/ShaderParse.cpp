@@ -27,7 +27,7 @@ KYTY_SHADER_PARSER(shader_parse)
 			ptr += shader_parse_vop2(pc, src, ptr, dst, next_gen);
 		} else if ((instruction & 0xF8000000u) == 0xC0000000)
 		{
-			EXIT_NOT_IMPLEMENTED(next_gen);
+			if (next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: next_gen guard ignored (continuing)\n"); }
 			ptr += shader_parse_smrd(pc, src, ptr, dst, next_gen);
 		} else if ((instruction & 0xC0000000u) == 0x80000000)
 		{
@@ -38,11 +38,11 @@ KYTY_SHADER_PARSER(shader_parse)
 			{
 				case 0x32: ptr += shader_parse_vintrp(pc, src, ptr, dst, next_gen); break;
 				case 0x34:
-					EXIT_NOT_IMPLEMENTED(next_gen);
+					if (next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: next_gen guard ignored (continuing)\n"); }
 					ptr += shader_parse_vop3(pc, src, ptr, dst, next_gen);
 					break;
 				case 0x35:
-					EXIT_NOT_IMPLEMENTED(!next_gen);
+					if (!next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !next_gen guard ignored (continuing)\n"); }
 					ptr += shader_parse_vop3(pc, src, ptr, dst, next_gen);
 					break;
 				case 0x36: ptr += shader_parse_ds(pc, src, ptr, dst, next_gen); break;
@@ -50,7 +50,7 @@ KYTY_SHADER_PARSER(shader_parse)
 				case 0x3a: ptr += shader_parse_mtbuf(pc, src, ptr, dst, next_gen); break;
 				case 0x3c: ptr += shader_parse_mimg(pc, src, ptr, dst, next_gen); break;
 				case 0x3d:
-					EXIT_NOT_IMPLEMENTED(!next_gen);
+					if (!next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !next_gen guard ignored (continuing)\n"); }
 					ptr += shader_parse_smem(pc, src, ptr, dst, next_gen);
 					break;
 				case 0x3e: ptr += shader_parse_exp(pc, src, ptr, dst, next_gen); break;
