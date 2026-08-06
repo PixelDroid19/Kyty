@@ -9,6 +9,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -328,7 +329,7 @@ void CommandPool::Create(int id)
 
 	if (m_pool[id]->pool == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_pool[id]->pool == nullptr condition ignored (continuing)\n"); }
 
-	m_pool[id]->buffers_count = 4;
+	m_pool[id]->buffers_count = CommandProcessorSubmissionSlots::SlotCount;
 	m_pool[id]->buffers       = new VkCommandBuffer[m_pool[id]->buffers_count];
 	m_pool[id]->fences        = new VkFence[m_pool[id]->buffers_count];
 	m_pool[id]->semaphores    = new VkSemaphore[m_pool[id]->buffers_count];

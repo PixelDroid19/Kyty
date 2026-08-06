@@ -172,10 +172,10 @@ TEST(EmulatorGpuSubmissionCoordinator, RotatesCommandProcessorSlotsWithExactMono
 	SubmissionId reused;
 	ASSERT_EQ(slots.BeginRecording(0, &reused, nullptr), GpuSubmissionResult::Success);
 	EXPECT_EQ(reused.queue, GpuQueueId(3));
-	EXPECT_EQ(reused.sequence, 5u);
+	EXPECT_EQ(reused.sequence, static_cast<uint64_t>(CommandProcessorSubmissionSlots::SlotCount) + 1);
 }
 
-TEST(EmulatorGpuSubmissionCoordinator, KeepsFourCommandProcessorSubmissionsInFlightUntilExactSlotReuse)
+TEST(EmulatorGpuSubmissionCoordinator, KeepsMaxSlotsInFlightUntilExactSlotReuse)
 {
 	GpuSubmissionCoordinator        coordinator;
 	CommandProcessorSubmissionSlots slots(&coordinator, GpuQueueId(3));
@@ -194,7 +194,7 @@ TEST(EmulatorGpuSubmissionCoordinator, KeepsFourCommandProcessorSubmissionsInFli
 
 	ASSERT_EQ(slots.MarkFenceCompleted(0), GpuSubmissionResult::Success);
 	ASSERT_EQ(slots.BeginRecording(0, &blocked, nullptr), GpuSubmissionResult::Success);
-	EXPECT_EQ(blocked.sequence, 5u);
+	EXPECT_EQ(blocked.sequence, static_cast<uint64_t>(CommandProcessorSubmissionSlots::SlotCount) + 1);
 	ASSERT_EQ(slots.RetirePublished(in_flight[0]), GpuSubmissionResult::Success);
 
 	for (uint32_t slot = 1; slot < CommandProcessorSubmissionSlots::SlotCount; slot++)

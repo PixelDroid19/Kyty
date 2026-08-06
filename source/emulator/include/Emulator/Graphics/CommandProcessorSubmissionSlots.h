@@ -14,7 +14,7 @@ namespace Kyty::Libs::Graphics {
 class CommandProcessorSubmissionSlots
 {
 public:
-	static constexpr uint32_t SlotCount = 4;
+	static constexpr uint32_t SlotCount = 6;
 
 	CommandProcessorSubmissionSlots(GpuSubmissionCoordinator* coordinator, GpuQueueId queue);
 	~CommandProcessorSubmissionSlots() = default;
