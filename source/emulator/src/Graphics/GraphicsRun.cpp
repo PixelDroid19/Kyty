@@ -336,7 +336,6 @@ void CommandProcessor::BufferInit()
 
 SubmissionId CommandProcessor::BufferFlush()
 {
-	ProcessDeferredWaits();
 	SubmissionId latest_completed;
 	SubmissionId submitted;
 
@@ -352,7 +351,6 @@ SubmissionId CommandProcessor::BufferFlush()
 
 SubmissionId CommandProcessor::BufferFlushForGpuWait()
 {
-	ProcessDeferredWaits();
 	SubmissionId latest_completed;
 	SubmissionId submitted;
 
@@ -363,193 +361,6 @@ SubmissionId CommandProcessor::BufferFlushForGpuWait()
 
 	PublishCompletedSubmissions();
 	return submitted;
-}
-
-bool CommandProcessor::DeferredWaitsOverlap(uint64_t addr, uint32_t size, uint64_t mask) const
-{
-	for (const auto& deferred: m_deferred_waits)
-	{
-		const uint64_t deferred_end = deferred.addr + deferred.size;
-		const uint64_t new_end      = addr + size;
-		if (deferred.addr >= new_end || addr >= deferred_end)
-		{
-			continue;
-		}
-		for (uint32_t byte = 0; byte < size; ++byte)
-		{
-			const uint8_t byte_mask = static_cast<uint8_t>((mask >> (byte * 8u)) & 0xffu);
-			if (byte_mask == 0)
-			{
-				continue;
-			}
-			const uint64_t byte_addr = addr + byte;
-			if (byte_addr < deferred.addr || byte_addr >= deferred_end)
-			{
-				continue;
-			}
-			const uint32_t deferred_shift = static_cast<uint32_t>((byte_addr - deferred.addr) * 8u);
-			const uint8_t  deferred_mask  = static_cast<uint8_t>((deferred.mask >> deferred_shift) & 0xffu);
-			if ((byte_mask & deferred_mask) != 0)
-			{
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-bool CommandProcessor::TryDeferWait(uint64_t addr, uint32_t size, uint32_t func, uint64_t ref, uint64_t mask, SubmissionId producer)
-{
-	std::lock_guard<std::mutex> lock(m_deferred_mutex);
-	if (m_deferred_waits.size() >= 32)
-	{
-		return false;
-	}
-	if (DeferredWaitsOverlap(addr, size, mask))
-	{
-		return false;
-	}
-	auto now = std::chrono::steady_clock::now();
-	for (const auto& deferred: m_deferred_waits)
-	{
-		auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - deferred.start).count();
-		if (elapsed_ms > 500)
-		{
-			return false;
-		}
-	}
-	DeferredWait wait {};
-	wait.addr     = addr;
-	wait.size     = size;
-	wait.func     = func;
-	wait.ref      = ref;
-	wait.mask     = mask;
-	wait.producer = producer;
-	wait.start    = now;
-	m_deferred_waits.push_back(wait);
-	return true;
-}
-
-void CommandProcessor::ProcessDeferredWaits()
-{
-	std::vector<DeferredWait> pending;
-	{
-		std::lock_guard<std::mutex> lock(m_deferred_mutex);
-		pending = m_deferred_waits;
-	}
-	for (auto& deferred: pending)
-	{
-		const void* addr_ptr = reinterpret_cast<const void*>(deferred.addr);
-		bool        satisfied = false;
-		if (deferred.size == 4)
-		{
-			const uint32_t value = *reinterpret_cast<const uint32_t*>(addr_ptr);
-			satisfied            = GraphicsWaitRegMemCompare(deferred.func, value, static_cast<uint32_t>(deferred.ref),
-			                                                  static_cast<uint32_t>(deferred.mask));
-		} else if (deferred.size == 8)
-		{
-			const uint64_t value = *reinterpret_cast<const uint64_t*>(addr_ptr);
-			satisfied            = GraphicsWaitRegMemCompare(deferred.func, value, deferred.ref, deferred.mask);
-		}
-		if (satisfied)
-		{
-			std::lock_guard<std::mutex> lock(m_deferred_mutex);
-			for (auto it = m_deferred_waits.begin(); it != m_deferred_waits.end(); ++it)
-			{
-				if (it->addr == deferred.addr && it->producer == deferred.producer)
-				{
-					m_deferred_waits.erase(it);
-					break;
-				}
-			}
-			continue;
-		}
-		auto now        = std::chrono::steady_clock::now();
-		auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - deferred.start).count();
-		if (elapsed_ms > 500)
-		{
-			g_gpu->WaitSubmission(deferred.producer);
-			bool now_satisfied = false;
-			if (deferred.size == 4)
-			{
-				const uint32_t value = *reinterpret_cast<const uint32_t*>(addr_ptr);
-				now_satisfied        = GraphicsWaitRegMemCompare(deferred.func, value, static_cast<uint32_t>(deferred.ref),
-				                                                  static_cast<uint32_t>(deferred.mask));
-			} else if (deferred.size == 8)
-			{
-				const uint64_t value = *reinterpret_cast<const uint64_t*>(addr_ptr);
-				now_satisfied        = GraphicsWaitRegMemCompare(deferred.func, value, deferred.ref, deferred.mask);
-			}
-			bool need_suspend      = false;
-			DeferredWait saved_for_suspend {};
-			{
-				std::lock_guard<std::mutex> lock(m_deferred_mutex);
-				for (auto it = m_deferred_waits.begin(); it != m_deferred_waits.end(); ++it)
-				{
-					if (it->addr == deferred.addr && it->producer == deferred.producer)
-					{
-						if (now_satisfied)
-						{
-							m_deferred_waits.erase(it);
-						} else
-						{
-							saved_for_suspend = *it;
-							m_deferred_waits.erase(it);
-							need_suspend = true;
-						}
-						break;
-					}
-				}
-			}
-			if (need_suspend)
-			{
-				RequestSuspendedWait(reinterpret_cast<const void*>(saved_for_suspend.addr), saved_for_suspend.size,
-				                     saved_for_suspend.func, saved_for_suspend.ref, saved_for_suspend.mask);
-			}
-			continue;
-		}
-		// Not yet expired and not satisfied: wait for producer at rotation point
-		g_gpu->WaitSubmission(deferred.producer);
-		bool now_satisfied = false;
-		if (deferred.size == 4)
-		{
-			const uint32_t value = *reinterpret_cast<const uint32_t*>(addr_ptr);
-			now_satisfied        = GraphicsWaitRegMemCompare(deferred.func, value, static_cast<uint32_t>(deferred.ref),
-			                                                  static_cast<uint32_t>(deferred.mask));
-		} else if (deferred.size == 8)
-		{
-			const uint64_t value = *reinterpret_cast<const uint64_t*>(addr_ptr);
-			now_satisfied        = GraphicsWaitRegMemCompare(deferred.func, value, deferred.ref, deferred.mask);
-		}
-		{
-			bool need_suspend      = false;
-			DeferredWait saved_for_suspend {};
-			{
-				std::lock_guard<std::mutex> lock(m_deferred_mutex);
-				for (auto it = m_deferred_waits.begin(); it != m_deferred_waits.end(); ++it)
-				{
-					if (it->addr == deferred.addr && it->producer == deferred.producer)
-					{
-						if (now_satisfied)
-						{
-							m_deferred_waits.erase(it);
-						} else
-						{
-							saved_for_suspend = *it;
-							m_deferred_waits.erase(it);
-							need_suspend = true;
-						}
-						break;
-					}
-				}
-			}
-			if (need_suspend)
-			{
-				RequestSuspendedWait(reinterpret_cast<const void*>(saved_for_suspend.addr), saved_for_suspend.size,
-				                     saved_for_suspend.func, saved_for_suspend.ref, saved_for_suspend.mask);
-			}
-		}
-	}
 }
 
 SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_completed)
@@ -875,18 +686,6 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	const bool           producer_is_current_submission = has_current_submission && dependency.producer == current_submission;
 	if (producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
 	                     producer != GpuSubmissionResult::ProducerNotFound) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::Pro condition ignored (continuing)\n"); }
-	// Deferral-in-order: when the awaited producer is already queued but
-	// not the current submission, let the ring continue to the buffer
-	// boundary and wait once at rotation, preserving per-address FIFO
-	// and adding a watchdog fallback.
-	if (producer == GpuSubmissionResult::Success && !producer_is_current_submission)
-	{
-		if (TryDeferWait(reinterpret_cast<uint64_t>(addr), 4, func, ref, mask, dependency.producer))
-		{
-			TraceWait("wait32_deferred", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, dependency.producer.sequence);
-			return;
-		}
-	}
 	// Submit the command buffer before resolving the dependency so pending EOP
 	// labels become visible to the completion publisher.  A matching producer
 	// is already ordered by the submission graph; keep that path in the current
@@ -947,18 +746,6 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	const bool           producer_is_current_submission = has_current_submission && dependency.producer == current_submission;
 	if (producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
 	                     producer != GpuSubmissionResult::ProducerNotFound) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::Pro condition ignored (continuing)\n"); }
-	// Deferral-in-order: when the awaited producer is already queued but
-	// not the current submission, let the ring continue to the buffer
-	// boundary and wait once at rotation, preserving per-address FIFO
-	// and adding a watchdog fallback.
-	if (producer == GpuSubmissionResult::Success && !producer_is_current_submission)
-	{
-		if (TryDeferWait(reinterpret_cast<uint64_t>(addr), 8, func, ref, mask, dependency.producer))
-		{
-			TraceWait("wait64_deferred", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, dependency.producer.sequence);
-			return;
-		}
-	}
 	// Keep a matching producer in the current decode for render-pass continuity;
 	// suspend only when the tracker cannot prove that the current value will
 	// satisfy this wait.

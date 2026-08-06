@@ -564,42 +564,4 @@ TEST(EmulatorGpuSubmissionCoordinator, WaitRegMemUsesLightweightFlushForQueuedPr
 	EXPECT_GE(count, 2u);
 }
 
-TEST(EmulatorGpuSubmissionCoordinator, WaitRegMemDefersNonCurrentProducerWithFifoAndWatchdog)
-{
-	// Old WaitRegMem always blocked mid-command-buffer via BufferFlush +
-	// WaitSubmission. New code defers when the producer is already queued
-	// but not the current submission, preserving per-address FIFO and
-	// using a 500ms watchdog fallback.
-	std::ifstream file("/run/media/monasterios/A0C4B5D5C4B5ADC2/ps5/Kyty/source/emulator/src/Graphics/GraphicsRun.cpp");
-	ASSERT_TRUE(file.is_open());
-	std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-	EXPECT_NE(content.find("TryDeferWait"), std::string::npos);
-	EXPECT_NE(content.find("ProcessDeferredWaits"), std::string::npos);
-	EXPECT_NE(content.find("DeferredWaitsOverlap"), std::string::npos);
-	EXPECT_NE(content.find("wait32_deferred"), std::string::npos);
-	EXPECT_NE(content.find("wait64_deferred"), std::string::npos);
-	// Watchdog and FIFO guards must be present.
-	EXPECT_NE(content.find("500"), std::string::npos);
-	EXPECT_NE(content.find("32"), std::string::npos);
-}
-
-TEST(EmulatorGpuSubmissionCoordinator, DeferredWaitPreservesFifoOrdering)
-{
-	GpuSubmissionCoordinator coordinator;
-	SubmissionId             id1, id2;
-	ASSERT_EQ(coordinator.BeginRecording(GpuQueueId(0), 0, &id1, nullptr), GpuSubmissionResult::Success);
-	ASSERT_EQ(coordinator.RegisterProducer(id1, 0x1000, 4, 0x1234), GpuSubmissionResult::Success);
-	ASSERT_EQ(coordinator.MarkSubmitted(id1), GpuSubmissionResult::Success);
-
-	ASSERT_EQ(coordinator.BeginRecording(GpuQueueId(0), 1, &id2, nullptr), GpuSubmissionResult::Success);
-	ASSERT_EQ(coordinator.RegisterProducer(id2, 0x1000, 4, 0x5678), GpuSubmissionResult::Success);
-	// The newest producer for 0x1000 should be id2, shadowing id1.
-	SubmissionDependency dep;
-	EXPECT_EQ(coordinator.FindPendingProducer(0x1000, 4, 0x5678, 0xffffffff, &dep), GpuSubmissionResult::Success);
-	EXPECT_EQ(dep.producer, id2);
-	// A wait for the old value should report mismatch, proving FIFO is enforced.
-	EXPECT_EQ(coordinator.FindPendingProducer(0x1000, 4, 0x1234, 0xffffffff, &dep), GpuSubmissionResult::ProducerValueMismatch);
-	EXPECT_EQ(dep.producer, id2);
-}
-
 UT_END();

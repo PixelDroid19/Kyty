@@ -354,20 +354,6 @@ private:
 	void                 PublishCompletedSubmissions();
 	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
 	SubmissionId         BufferFlushForGpuWait();
-	bool                 TryDeferWait(uint64_t addr, uint32_t size, uint32_t func, uint64_t ref, uint64_t mask, SubmissionId producer);
-	void                 ProcessDeferredWaits();
-	bool                 DeferredWaitsOverlap(uint64_t addr, uint32_t size, uint64_t mask) const;
-
-	struct DeferredWait
-	{
-		uint64_t                                 addr  = 0;
-		uint32_t                                 size  = 0;
-		uint32_t                                 func  = 0;
-		uint64_t                                 ref   = 0;
-		uint64_t                                 mask  = 0;
-		SubmissionId                             producer {};
-		std::chrono::steady_clock::time_point    start {};
-	};
 
 	struct Counter
 	{
@@ -398,9 +384,6 @@ private:
 
 	Counter m_de_counter;
 	Counter m_ce_counter;
-
-	std::vector<DeferredWait> m_deferred_waits;
-	std::mutex                m_deferred_mutex;
 
 	uint32_t m_const_ram[0x3000] = {0};
 
