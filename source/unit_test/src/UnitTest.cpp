@@ -40,6 +40,8 @@ UT_LINK(EmulatorLibcCxxLocale);
 UT_LINK(EmulatorSaveData);
 UT_LINK(EmulatorAudio);
 UT_LINK(EmulatorPad);
+UT_LINK(EmulatorIme);
+UT_LINK(EmulatorLibcString);
 UT_LINK(EmulatorLoaderTls);
 UT_LINK(EmulatorModuleLoad);
 UT_LINK(EmulatorNeutralPorts);
