@@ -338,6 +338,12 @@ against the same correct gameplay capture.
   while opaque early-Z shaders retain it.
 - Temporary MRT, descriptor, and frame-selection instrumentation was removed
   before the semantic commit.
+- Eliding the CPU fence wait for a `WAIT_REG_MEM` whose newest producer was in
+  the just-flushed submission was tested as a performance hypothesis. A
+  capture-enabled strict run then stopped on `VideoOut` buffer
+  `invalid_index`; the experiment is rejected because the fence also protects
+  presentation-buffer lifetime. Keep the fence until that lifetime contract
+  is redesigned with an independent completion proof.
 
 ## Validation gate for the next change
 
