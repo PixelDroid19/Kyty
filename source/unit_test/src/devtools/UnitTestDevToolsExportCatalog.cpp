@@ -30,6 +30,63 @@ TEST(DevToolsExportCatalog, SeedLoadsMultiSourceEntries)
 	EXPECT_GE(cat.CountByStatus(ExportStatus::Conflict), 1u);
 }
 
+TEST(DevToolsExportCatalog, RegisteredExportsKeepVerifiedNids)
+{
+	struct Expected
+	{
+		const char* name;
+		const char* nid;
+	};
+	static constexpr Expected kExpected[] = {
+		{"scePadOpen", "xk0AcarP3V4"},
+		{"scePadReadState", "YndgXqQVV7c"},
+		{"scePadRead", "q1cHNfGycLI"},
+		{"scePadClose", "6ncge5+l5Qs"},
+		{"sceUserServiceGetInitialUser", "CdWp0oHWGr0"},
+		{"sceUserServiceGetUserName", "1xxcMiGu2fo"},
+		{"scePthreadCreate", "6UgtwV+0zb4"},
+		{"scePthreadJoin", "onNY9Byn-W8"},
+		{"sceKernelAllocateDirectMemory", "rTXw65xmLIA"},
+		{"sceKernelMapDirectMemory", "L-Q3LEjIbgA"},
+		{"sceKernelMapNamedFlexibleMemory", "mL8NDH86iQI"},
+		{"sceVideoOutOpen", "Up36PTk687E"},
+		{"sceVideoOutSubmitFlip", "U46NwOiJpys"},
+		{"sceVideoOutRegisterBuffers", "w3BY+tAEiQY"},
+		{"sceAgcInit", "23LRUSvYu1M"},
+		{"sceAgcCreateShader", "f3dg2CSgRKY"},
+		{"sceAgcDriverSubmitDcb", "UglJIZjGssM"},
+		{"sceNpTrophyCreateContext", "XbkjbobZlCY"},
+		{"sceSaveDataInitialize3", "TywrFKCoLGY"},
+		{"sceSaveDataMount", "32HQAQdwM2o"},
+		{"sceSystemServiceHideSplashScreen", "Vo5V8KAwCmk"},
+		{"sceSystemServiceGetStatus", "rPo6tV8D9bM"},
+		{"sceMsgDialogOpen", "b06Hh0DPEaE"},
+		{"sceMsgDialogUpdateStatus", "6fIC3XKt2k0"},
+		{"sceAudioOutOpen", "ekNvsT22rsY"},
+		{"sceAudioOutOutputs", "w3PdaSTSwGE"},
+		{"_sceFiberInitializeImpl", "hVYD7Ou2pCQ"},
+		{"sceFiberSwitch", "PFT2S-tJ7Uk"},
+		{"malloc", "gQX+4GDQjpM"},
+		{"free", "tIhsqj0qsFE"},
+		{"sceGnmDrawIndex", "HlTPoZ-oY7Y"},
+		{"sceGnmDrawIndexAuto", "GGsn7jMTxw4"},
+		{"sceHttpCreateTemplate", "0gYjPTR-6cY"},
+		{"sceSslInit", "hdpVEUDFW3s"},
+	};
+
+	ExportCatalog cat;
+	ASSERT_EQ(SeedPublicExportCatalog(&cat), 46u);
+	for (const auto& expected: kExpected)
+	{
+		uint32_t idx = 0;
+		ASSERT_EQ(cat.FindByName(expected.name, &idx), ExportCatalogResult::Ok);
+		const ExportEntry* entry = cat.At(idx);
+		ASSERT_NE(entry, nullptr);
+		EXPECT_STREQ(entry->nid, expected.nid);
+		EXPECT_EQ(entry->status, ExportStatus::Implemented);
+	}
+}
+
 TEST(DevToolsExportCatalog, QueryByNameNidAndLibrary)
 {
 	ExportCatalog cat;

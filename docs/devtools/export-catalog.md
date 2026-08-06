@@ -19,7 +19,7 @@ Local versioned inventory **separate from HLE registration**.
 - `Insert` / `SeedPublicExportCatalog` **never** install trampolines or mark imports executable.
 - Unresolved statuses remain diagnostic-only.
 - Conflict: same library+NID with different export names marks the existing entry `CONFLICT`.
-- Seed uses only NID strings already present in-tree (comments / fixtures). No invented NIDs.
+- Seed uses only NID strings already present in-tree (registrations, comments, or fixtures). No invented NIDs.
 
 ## Queries
 

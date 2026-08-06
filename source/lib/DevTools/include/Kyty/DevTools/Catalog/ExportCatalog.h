@@ -27,7 +27,7 @@ enum class ExportSymbolType: uint8_t
 
 inline constexpr uint32_t kExportCatalogSchemaMajor = 1u;
 inline constexpr uint32_t kExportCatalogSchemaMinor = 0u;
-inline constexpr uint32_t kExportCatalogMaxEntries  = 512u; // seed capacity for phase-1
+inline constexpr uint32_t kExportCatalogMaxEntries  = 4096u;
 
 struct ExportEntry
 {

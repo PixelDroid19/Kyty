@@ -245,8 +245,8 @@ uint32_t SeedPublicExportCatalog(ExportCatalog* catalog) noexcept
 	}
 	catalog->Clear();
 
-	// All NID strings below appear as in-tree comments / unit-test fixtures.
-	// No invented NIDs. Catalog never registers HLE trampolines.
+	// All NID strings below are backed by in-tree export registrations or fixtures.
+	// Catalog never registers HLE trampolines.
 
 	// --- Source A: public-table / stub vocabulary (ABI may still be incomplete).
 	SeedOne(catalog, "libSceLibcInternal", "libSceLibcInternal", "vsnprintf", "Q2V+iqvjgC0", "any",
@@ -294,6 +294,76 @@ uint32_t SeedPublicExportCatalog(ExportCatalog* catalog) noexcept
 		e.symbol_type = ExportSymbolType::Func;
 		(void)catalog->Insert(e);
 	}
+
+	// --- Source E: exports registered by the emulator (inventory only).
+	SeedOne(catalog, "libScePad", "libScePad", "scePadOpen", "xk0AcarP3V4", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libScePad", "libScePad", "scePadReadState", "YndgXqQVV7c", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libScePad", "libScePad", "scePadRead", "q1cHNfGycLI", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libScePad", "libScePad", "scePadClose", "6ncge5+l5Qs", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceUserService", "libSceUserService", "sceUserServiceGetInitialUser", "CdWp0oHWGr0", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceUserService", "libSceUserService", "sceUserServiceGetUserName", "1xxcMiGu2fo", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libkernel", "libkernel", "scePthreadCreate", "6UgtwV+0zb4", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libkernel", "libkernel", "scePthreadJoin", "onNY9Byn-W8", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libkernel", "libkernel", "sceKernelAllocateDirectMemory", "rTXw65xmLIA", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libkernel", "libkernel", "sceKernelMapDirectMemory", "L-Q3LEjIbgA", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libkernel", "libkernel", "sceKernelMapNamedFlexibleMemory", "mL8NDH86iQI", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceVideoOut", "libSceVideoOut", "sceVideoOutOpen", "Up36PTk687E", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceVideoOut", "libSceVideoOut", "sceVideoOutSubmitFlip", "U46NwOiJpys", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceVideoOut", "libSceVideoOut", "sceVideoOutRegisterBuffers", "w3BY+tAEiQY", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceAgc", "libSceAgc", "sceAgcInit", "23LRUSvYu1M", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceAgc", "libSceAgc", "sceAgcCreateShader", "f3dg2CSgRKY", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceAgcDriver", "libSceAgcDriver", "sceAgcDriverSubmitDcb", "UglJIZjGssM", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceNpTrophy", "libSceNpTrophy", "sceNpTrophyCreateContext", "XbkjbobZlCY", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceSaveData", "libSceSaveData", "sceSaveDataInitialize3", "TywrFKCoLGY", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceSaveData", "libSceSaveData", "sceSaveDataMount", "32HQAQdwM2o", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceSystemService", "libSceSystemService", "sceSystemServiceHideSplashScreen", "Vo5V8KAwCmk", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceSystemService", "libSceSystemService", "sceSystemServiceGetStatus", "rPo6tV8D9bM", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceCommonDialog", "libSceCommonDialog", "sceMsgDialogOpen", "b06Hh0DPEaE", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceCommonDialog", "libSceCommonDialog", "sceMsgDialogUpdateStatus", "6fIC3XKt2k0", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceAudioOut", "libSceAudioOut", "sceAudioOutOpen", "ekNvsT22rsY", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceAudioOut", "libSceAudioOut", "sceAudioOutOutputs", "w3PdaSTSwGE", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceFiber", "libSceFiber", "_sceFiberInitializeImpl", "hVYD7Ou2pCQ", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceFiber", "libSceFiber", "sceFiberSwitch", "PFT2S-tJ7Uk", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libc", "libc", "malloc", "gQX+4GDQjpM", "any", "seed:kyty-hle-name", ExportStatus::Implemented,
+	        ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libc", "libc", "free", "tIhsqj0qsFE", "any", "seed:kyty-hle-name", ExportStatus::Implemented,
+	        ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceGnmDriver", "libSceGnmDriver", "sceGnmDrawIndex", "HlTPoZ-oY7Y", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceGnmDriver", "libSceGnmDriver", "sceGnmDrawIndexAuto", "GGsn7jMTxw4", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceHttp", "libSceHttp", "sceHttpCreateTemplate", "0gYjPTR-6cY", "any",
+	        "seed:kyty-hle-name", ExportStatus::Implemented, ExportSymbolType::Func, 1);
+	SeedOne(catalog, "libSceSsl", "libSceSsl", "sceSslInit", "hdpVEUDFW3s", "any", "seed:kyty-hle-name",
+	        ExportStatus::Implemented, ExportSymbolType::Func, 1);
 
 	return catalog->Size();
 }
