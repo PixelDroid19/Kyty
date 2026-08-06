@@ -26,7 +26,6 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 
 	bool custom = (cmd_id == 0xc0061050);
 
-	uint32_t                  stall_mode   = buffer[0] >> 31u;
 	uint32_t                  cache_action = buffer[0] & 0x7fffffffu;
 	uint64_t                  size_lo      = buffer[1];
 	uint32_t                  size_hi      = buffer[2];
@@ -196,12 +195,10 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 		default: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown barrier (continuing)\n");
 	}
 
-	if (stall_mode == 0)
-	{
-		cp->BufferFlush();
-		cp->BufferWait();
-	}
-
+	// ACQUIRE_MEM is a GPU ordering operation. Keep its Vulkan barrier in the
+	// recording buffer; an explicit host submission here would serialize every
+	// DCB and turn a stream of barriers into one fence wait per packet. CPU-visible
+	// ordering is handled by WAIT_REG_MEM and WriteBack at their actual boundaries.
 	return (custom ? 7 : 6);
 }
 
