@@ -25,6 +25,35 @@ write a scalar/vector register, memory, or control-flow state. The shader parser
 now lowers it to the existing no-op instruction path instead of rejecting the
 entire shader stage.
 
+## Persistent shader-module cache invalidation
+
+The dotted glyphs on the license screen were caused by a stale persistent
+SPIR-V module, not by the R8 font texture, its detile, component mapping,
+sampler, or the host GPU. The same draw was clean with an empty SPIR-V cache
+and reproduced the dotted glyphs when an older persistent module was reused.
+
+`ShaderTranslationCache` includes the translator version in the key for every
+persisted module. If translator code changes without a version change, an old
+`.spvmod` can satisfy the lookup and bypass the current translation path. The
+old module was the source of the invalid SDF glyph output; changing the texture
+or sampler contract would only mask the cache problem and could regress other
+text paths.
+
+`kShaderTranslatorVersion` is now `9`. Existing cache entries remain on disk,
+but no longer match the key and are recompiled automatically. No title-specific
+texture or sampler override is involved.
+
+The bounded A/B evidence was:
+
+- the previous translator version with the existing persistent cache produced
+  dotted regular glyphs;
+- the same binary with an empty cache produced clean glyphs;
+- the rebuilt translator version `9` with the existing cache produced clean
+  glyphs again.
+
+Validation therefore uses the rebuilt binary and reaches the license screen;
+manually deleting the cache is not required after the version bump.
+
 ## Bounded integration reproduction
 
 Use a legally obtained guest fixture and keep all runtime artifacts outside the
