@@ -48,6 +48,10 @@ static bool                                    g_mem_initialized = false;
 static sys_heap_id_t                           g_default_heap    = nullptr;
 static size_t                                  g_mem_max_size    = 0;
 static MemoryAllocDetail::ThreadDomainRegistry g_guest_thread_domains;
+// Per-thread guest classification cache in host TLS (see
+// mem_guest_thread_enter/leave). Kept as a plain thread_local bool so the
+// per-allocation fast path never scans the registry.
+static thread_local bool                       g_mem_guest_thread_active = false;
 // Bootstrap symbol loading can allocate one tiny object per guest export. The
 // debug tracker records a stack and a hashmap entry for each one, which is
 // useful for leak diagnostics but pathological on the emulator's launch path.
@@ -136,15 +140,21 @@ static void mem_system_free(void* ptr)
 
 static uint64_t mem_current_thread_token()
 {
+	// The host thread id is immutable for the life of the thread. Cache it in
+	// host thread-local storage (not guest-visible TLS, which the guest can
+	// replace) so the per-allocation fast path does not perform a syscall.
+	thread_local uint64_t cached_token = []() -> uint64_t {
 #ifdef __APPLE__
-	uint64_t token = 0;
-	EXIT_IF(pthread_threadid_np(nullptr, &token) != 0);
-	return token;
+		uint64_t token = 0;
+		EXIT_IF(pthread_threadid_np(nullptr, &token) != 0);
+		return token;
 #elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	return static_cast<uint64_t>(GetCurrentThreadId());
+		return static_cast<uint64_t>(GetCurrentThreadId());
 #else
-	return static_cast<uint64_t>(::syscall(SYS_gettid));
+		return static_cast<uint64_t>(::syscall(SYS_gettid));
 #endif
+	}();
+	return cached_token;
 }
 
 #ifdef MEM_TRACKER
@@ -337,16 +347,24 @@ void core_memory_init()
 void mem_guest_thread_enter()
 {
 	EXIT_IF(!g_guest_thread_domains.Add(mem_current_thread_token()));
+	// Cache the per-thread classification in host TLS (never guest-visible TLS)
+	// so the per-allocation fast path skips the registry scan entirely. The
+	// enter/leave calls always run on the thread whose state changes.
+	g_mem_guest_thread_active = true;
 }
 
 void mem_guest_thread_leave()
 {
 	EXIT_IF(!g_guest_thread_domains.Remove(mem_current_thread_token()));
+	g_mem_guest_thread_active = false;
 }
 
 bool mem_guest_thread_is_active()
 {
-	return g_guest_thread_domains.Contains(mem_current_thread_token());
+	// Host TLS is out of reach of guest code, which can only replace its own
+	// guest TLS segment. A thread that never entered guest execution always
+	// returns false here, matching the empty-registry fast path.
+	return g_mem_guest_thread_active;
 }
 
 void* mem_alloc_check_alignment(void* ptr)

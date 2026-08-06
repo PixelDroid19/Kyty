@@ -140,6 +140,25 @@ public:
 		return true;
 	}
 
+	// Borrowed-lookup: returns the cached value without copying it. The caller
+	// must not retain the reference past the next Store/Invalidate on this
+	// cache, which is guaranteed while GpuMemory serializes queries under its
+	// object-graph mutex.
+	[[nodiscard]] const Value* BorrowLookup(const GpuMemoryRangeQueryKey& key) const
+	{
+		if (!key.Valid())
+		{
+			return nullptr;
+		}
+
+		const auto& slot = m_entries[static_cast<size_t>(key.Hash()) & (Capacity - 1u)];
+		if (!slot.has_value() || slot->epoch != m_epoch || !(slot->key == key))
+		{
+			return nullptr;
+		}
+		return &slot->value;
+	}
+
 	void Store(const GpuMemoryRangeQueryKey& key, const Value& value)
 	{
 		if (!key.Valid())

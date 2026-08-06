@@ -300,9 +300,9 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 	}
 	const auto query = GpuMemoryRangeQueryKey::Create(vaddr, size, vaddr_num, only_first);
 	EXIT_IF(!query.Valid());
-	if (heap.overlap_cache->Lookup(query, &ret))
+	if (const auto* cached = heap.overlap_cache->BorrowLookup(query))
 	{
-		return ret;
+		return *cached;
 	}
 
 	const Vector<int> candidates =
