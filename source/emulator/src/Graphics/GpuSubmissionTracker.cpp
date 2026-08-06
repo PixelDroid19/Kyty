@@ -238,24 +238,27 @@ bool GpuSubmissionTracker::ProducerMatches(const Producer& producer, uint64_t ad
 	}
 
 	const uint64_t producer_end = producer.address + producer.size_bytes;
-	for (uint32_t bit = 0; bit < size_bytes * 8u; bit++)
+	// Producer ranges are byte-addressed. A masked byte has one coverage and
+	// comparison decision, so inspecting each bit only repeats the same range
+	// check up to eight times.
+	for (uint32_t byte = 0; byte < size_bytes; byte++)
 	{
-		const uint64_t wait_bit = uint64_t {1} << bit;
-		if ((mask & wait_bit) == 0)
+		const uint8_t byte_mask = static_cast<uint8_t>((mask >> (byte * 8u)) & 0xffu);
+		if (byte_mask == 0)
 		{
 			continue;
 		}
 
-		const uint64_t byte_address = address + bit / 8u;
+		const uint64_t byte_address = address + byte;
 		if (byte_address < producer.address || byte_address >= producer_end)
 		{
 			return false;
 		}
 
-		const uint32_t producer_bit = static_cast<uint32_t>((byte_address - producer.address) * 8u) + bit % 8u;
-		const bool     produced     = ((producer.value >> producer_bit) & 1u) != 0;
-		const bool     expected     = ((reference >> bit) & 1u) != 0;
-		if (produced != expected)
+		const uint32_t producer_shift = static_cast<uint32_t>((byte_address - producer.address) * 8u);
+		const uint8_t  produced       = static_cast<uint8_t>((producer.value >> producer_shift) & 0xffu);
+		const uint8_t  expected       = static_cast<uint8_t>((reference >> (byte * 8u)) & 0xffu);
+		if (((produced ^ expected) & byte_mask) != 0)
 		{
 			return false;
 		}
@@ -266,14 +269,14 @@ bool GpuSubmissionTracker::ProducerMatches(const Producer& producer, uint64_t ad
 bool GpuSubmissionTracker::ProducerTouchesMaskedBits(const Producer& producer, uint64_t address, uint32_t size_bytes, uint64_t mask)
 {
 	const uint64_t producer_end = producer.address + producer.size_bytes;
-	for (uint32_t bit = 0; bit < size_bytes * 8u; bit++)
+	for (uint32_t byte = 0; byte < size_bytes; byte++)
 	{
-		const uint64_t wait_bit = uint64_t {1} << bit;
-		if ((mask & wait_bit) == 0)
+		const uint8_t byte_mask = static_cast<uint8_t>((mask >> (byte * 8u)) & 0xffu);
+		if (byte_mask == 0)
 		{
 			continue;
 		}
-		const uint64_t byte_address = address + bit / 8u;
+		const uint64_t byte_address = address + byte;
 		if (byte_address >= producer.address && byte_address < producer_end)
 		{
 			return true;

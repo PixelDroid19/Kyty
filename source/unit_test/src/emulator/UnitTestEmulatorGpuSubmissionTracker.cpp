@@ -196,6 +196,24 @@ TEST(EmulatorGpuSubmissionTracker, MatchesOnlyMaskedBytesCoveredByProducerRange)
 	EXPECT_EQ(dependency.producer, id);
 }
 
+TEST(EmulatorGpuSubmissionTracker, MatchesMaskedBytesAcrossUnalignedProducerRange)
+{
+	GpuSubmissionTracker tracker;
+	SubmissionId         id;
+	SubmissionDependency dependency;
+
+	ASSERT_EQ(tracker.BeginRecording(GpuQueueId(0), 0, &id, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(tracker.RegisterProducer(id, 0x1001, 2, 0xbbaa), GpuSubmissionResult::Success);
+	ASSERT_EQ(tracker.MarkSubmitted(id), GpuSubmissionResult::Success);
+
+	const uint64_t covered_mask = 0x0000ff00ull;
+	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 0x0000aa00ull, covered_mask, &dependency), GpuSubmissionResult::Success);
+	EXPECT_EQ(dependency.producer, id);
+	EXPECT_EQ(tracker.FindPendingProducer(0x1000, 4, 0x0000bb00ull, covered_mask, &dependency),
+	          GpuSubmissionResult::ProducerValueMismatch);
+	EXPECT_EQ(dependency.producer, id);
+}
+
 TEST(EmulatorGpuSubmissionTracker, CompletionKeepsProducerUntilGuestPublicationRetiresIt)
 {
 	GpuSubmissionTracker tracker;
