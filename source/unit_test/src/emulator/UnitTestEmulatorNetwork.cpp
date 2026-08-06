@@ -3,12 +3,13 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
+#include "Emulator/Network.h"
 #include "Emulator/Network/HttpUri.h"
 
 #include <array>
 #include <cstring>
 
-namespace Kyty::UnitTest {
+UT_BEGIN(EmulatorNetwork);
 
 namespace {
 
@@ -98,4 +99,62 @@ TEST(EmulatorNetwork, HttpUriParseRegistersExactHttpIdentity)
 	EXPECT_EQ(symbols.Find(HttpFunction(u"libNet", u"IWalAn-guFs")), nullptr);
 }
 
-} // namespace Kyty::UnitTest
+TEST(EmulatorNetwork, NetEpollRejectsInvalidArgumentsBeforeHostAccess)
+{
+	using namespace Libs::Network::Net;
+
+	void* events_slot = nullptr;
+
+	// Null/zero argument validation must not touch the host epoll instance.
+	EXPECT_LT(NetEpollControl(1, 0, 1, nullptr), 0);
+	EXPECT_LT(NetEpollControl(1, 4, 1, nullptr), 0);
+	EXPECT_LT(NetEpollWait(1, nullptr, 1, 0), 0);
+	EXPECT_LT(NetEpollWait(1, &events_slot, 0, 0), 0);
+}
+
+TEST(EmulatorNetwork, NetEpollCreateDestroyRoundTrip)
+{
+	using namespace Libs::Network::Net;
+
+	const int epoll_id = NetEpollCreate("test-epoll", 0);
+	EXPECT_GT(epoll_id, 0);
+	EXPECT_EQ(NetEpollDestroy(epoll_id), 0);
+	EXPECT_LT(NetEpollDestroy(epoll_id), 0);
+}
+
+TEST(EmulatorNetwork, NetResolverRejectsNullInputs)
+{
+	using namespace Libs::Network::Net;
+
+	void* address_slot = nullptr;
+	char* host_slot    = nullptr;
+
+	EXPECT_LT(NetResolverStartNtoa(1, nullptr, &address_slot, 0, 0, 0), 0);
+	EXPECT_LT(NetResolverStartNtoa(1, "host", nullptr, 0, 0, 0), 0);
+	EXPECT_LT(NetResolverStartAton(1, nullptr, host_slot, 64, 0, 0, 0), 0);
+	EXPECT_LT(NetResolverStartAton(1, &address_slot, nullptr, 0, 0, 0, 0), 0);
+}
+
+TEST(EmulatorNetwork, NetResolverResolvesLiteralAddressWithoutHostLookup)
+{
+	using namespace Libs::Network::Net;
+
+	// A dotted-quad literal must be answered from the address itself, so the
+	// test is deterministic and does not require a network stack.
+	uint8_t address[4] {};
+	EXPECT_EQ(NetResolverStartNtoa(1, "127.0.0.1", address, 0, 0, 0), 0);
+	EXPECT_EQ(address[0], 127u);
+	EXPECT_EQ(address[3], 1u);
+}
+
+TEST(EmulatorNetwork, NetGetSockInfoValidatesArguments)
+{
+	using namespace Libs::Network::Net;
+
+	void* info_slot = nullptr;
+
+	EXPECT_LT(NetGetSockInfo(1, nullptr, 0, 0), 0);
+	EXPECT_LT(NetGetSockInfo(0, &info_slot, 16, 0), 0);
+}
+
+UT_END();

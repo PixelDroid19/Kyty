@@ -53,6 +53,23 @@ int KYTY_SYSV_ABI NetResolverCreate(const char* name, int memid, int flags);
 int KYTY_SYSV_ABI NetResolverDestroy(int rid);
 int KYTY_SYSV_ABI NetResolverGetError(int rid, int* result);
 
+// Completion-style host resolver. Registers the pending lookup in a per-pool
+// table and reports the result through the pool error slot so the guest can
+// poll it without blocking a guest thread on the host network.
+int KYTY_SYSV_ABI NetResolverStartNtoa(int rid, const char* hostname, void* addr, int timeout_ms, int retries, int flags);
+int KYTY_SYSV_ABI NetResolverStartAton(int rid, const void* addr, char* hostname, int hostname_len, int timeout_ms, int retries,
+                                       int flags);
+
+// Edge-triggered readiness notification over the host socket descriptors.
+// The guest epoll id maps 1:1 to a host epoll instance so the kernel can
+// report readiness for the actual pollable descriptor.
+int KYTY_SYSV_ABI NetEpollCreate(const char* name, int flags);
+int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id);
+int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket_id, const void* event);
+int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int timeout_ms);
+
+int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int info_size, int flags);
+
 } // namespace Net
 
 namespace Ssl {

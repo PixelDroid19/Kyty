@@ -78,73 +78,39 @@ int KYTY_SYSV_ABI NetGetMacAddress(Net::NetEtherAddr* addr, int flags)
 
 static int KYTY_SYSV_ABI NetEpollCreate(const char* name, int flags)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t name  = %s\n", name != nullptr ? name : "(null)");
-	KYTY_LOG_DEBUG("\t flags = %d\n", flags);
-	EXIT("Net epoll is not implemented\n");
-	return -1;
+	return NET_CALL(Net::NetEpollCreate(name, flags));
 }
 
 static int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t epoll_id = %d\n", epoll_id);
-	EXIT("Net epoll is not implemented\n");
-	return -1;
+	return NET_CALL(Net::NetEpollDestroy(epoll_id));
 }
 
 static int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket, const void* event)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t epoll_id = %d\n", epoll_id);
-	KYTY_LOG_DEBUG("\t operation = %d\n", operation);
-	KYTY_LOG_DEBUG("\t socket    = %d\n", socket);
-	KYTY_LOG_DEBUG("\t event     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(event));
-	EXIT("Net epoll is not implemented\n");
-	return -1;
+	return NET_CALL(Net::NetEpollControl(epoll_id, operation, socket, event));
 }
 
 static int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int timeout_ms)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t epoll_id   = %d\n", epoll_id);
-	KYTY_LOG_DEBUG("\t events     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(events));
-	KYTY_LOG_DEBUG("\t max_events = %d\n", max_events);
-	KYTY_LOG_DEBUG("\t timeout_ms = %d\n", timeout_ms);
-	EXIT("Net epoll is not implemented\n");
-	return -1;
+	return NET_CALL(Net::NetEpollWait(epoll_id, events, max_events, timeout_ms));
 }
 
 static int KYTY_SYSV_ABI NetResolverStartNtoa(int resolver_id, const char* hostname, void* address, int timeout_ms, int retries,
                                               int flags)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t resolver_id = %d\n", resolver_id);
-	KYTY_LOG_DEBUG("\t hostname    = %s\n", hostname != nullptr ? hostname : "(null)");
-	KYTY_LOG_DEBUG("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-	KYTY_LOG_DEBUG("\t timeout_ms  = %d\n", timeout_ms);
-	KYTY_LOG_DEBUG("\t retries     = %d\n", retries);
-	KYTY_LOG_DEBUG("\t flags       = %d\n", flags);
-	EXIT("Net resolver is not implemented\n");
-	return -1;
+	return NET_CALL(Net::NetResolverStartNtoa(resolver_id, hostname, address, timeout_ms, retries, flags));
 }
 
-static int KYTY_SYSV_ABI NetResolverStartAton()
+static int KYTY_SYSV_ABI NetResolverStartAton(int resolver_id, const void* address, char* hostname, int hostname_len,
+                                              int timeout_ms, int retries, int flags)
 {
-	PRINT_NAME();
-	EXIT("Net address-to-name resolver is not implemented\n");
-	return -1;
+	return NET_CALL(Net::NetResolverStartAton(resolver_id, address, hostname, hostname_len, timeout_ms, retries, flags));
 }
 
 static int KYTY_SYSV_ABI NetGetSockInfo(int socket, void* info, int info_size, int flags)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t socket    = %d\n", socket);
-	KYTY_LOG_DEBUG("\t info      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
-	KYTY_LOG_DEBUG("\t info_size = %d\n", info_size);
-	KYTY_LOG_DEBUG("\t flags     = %d\n", flags);
-	EXIT("Net socket information is not implemented\n");
-	return -1;
+	return NET_CALL(Net::NetGetSockInfo(socket, info, info_size, flags));
 }
 
 LIB_DEFINE(InitNet_1_Net)

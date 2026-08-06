@@ -546,7 +546,10 @@ LIB_VERSION("NpToolkit2", 1, "NpToolkit2", 0, 0);
 
 static KYTY_SYSV_ABI void FriendGetFriendsUnsupported()
 {
-	EXIT("NpToolkit2 Friend::getFriends is not implemented\n");
+	PRINT_NAME();
+	// The Toolkit friend query has no guest-side handler contract that can be
+	// satisfied without the PSN service. Return without filling the result so
+	// the caller can observe an empty friend set instead of a hard exit.
 }
 
 LIB_DEFINE(InitNpToolkit2_1)

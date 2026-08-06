@@ -140,7 +140,9 @@ static int KYTY_SYSV_ABI SystemServiceParamGetInt(int param_id, int* value)
 		case PARAM_ID_GAME_PARENTAL_LEVEL: v = PARAM_GAME_PARENTAL_OFF; break;
 		case PARAM_ID_SCREEN_READER: v = 0; break;
 		case PARAM_ID_ENTER_BUTTON_ASSIGN: v = PARAM_ENTER_BUTTON_ASSIGN_CROSS; break;
-		default: EXIT("unknown param_id: %d\n", param_id);
+		default:
+			KYTY_LOG_WARN("SystemServiceParamGetInt: unknown param_id %d; returning parameter error\n", param_id);
+			return SYSTEM_SERVICE_ERROR_PARAMETER;
 	}
 
 	KYTY_LOG_DEBUG(" %d = %d\n", param_id, v);
