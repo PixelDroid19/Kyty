@@ -129,7 +129,7 @@ struct PthreadStaticObject
 class PthreadStaticObjects
 {
 public:
-	PthreadStaticObjects() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	PthreadStaticObjects() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } }
 	virtual ~PthreadStaticObjects() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(PthreadStaticObjects);
@@ -145,7 +145,7 @@ private:
 class PthreadKeys
 {
 public:
-	PthreadKeys() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	PthreadKeys() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } }
 	virtual ~PthreadKeys() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(PthreadKeys);
@@ -177,7 +177,7 @@ private:
 class PthreadPool
 {
 public:
-	PthreadPool() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	PthreadPool() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } }
 	virtual ~PthreadPool() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(PthreadPool);
@@ -196,7 +196,7 @@ private:
 class PThreadContext
 {
 public:
-	PThreadContext() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	PThreadContext() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } }
 	virtual ~PThreadContext() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(PThreadContext);

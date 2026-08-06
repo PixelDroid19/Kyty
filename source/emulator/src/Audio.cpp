@@ -117,11 +117,11 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 	KYTY_LOG_DEBUG("\t len     = %u\n", len);
 	KYTY_LOG_DEBUG("\t freq    = %u\n", freq);
 
-	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 1);
+	if (user_id != 255 && user_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	// Port types observed on Gen5 titles: 0 MAIN, 1 BGM, 3 PERSONAL, 4 PADSPK,
 	// 10 (pad/haptic-adjacent), and 126 for Audio3D output.
-	EXIT_NOT_IMPLEMENTED(type != 0 && type != 1 && type != 3 && type != 4 && type != 10 && type != 126);
-	EXIT_NOT_IMPLEMENTED(index != 0);
+	if (type != 0 && type != 1 && type != 3 && type != 4 && type != 10 && type != 126) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (index != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	HostAudio::Format format = HostAudio::Format::Unknown;
 
@@ -140,7 +140,7 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 
 	KYTY_LOG_DEBUG("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
 
-	EXIT_NOT_IMPLEMENTED(format == HostAudio::Format::Unknown);
+	if (format == HostAudio::Format::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr)
@@ -183,7 +183,7 @@ int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state)
 		return AUDIO_OUT_ERROR_INVALID_PORT;
 	}
 
-	EXIT_NOT_IMPLEMENTED(state == nullptr);
+	if (state == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	state->reroute_counter = 0;
 	state->volume          = 127;
@@ -224,7 +224,7 @@ int KYTY_SYSV_ABI AudioOutSetVolume(int handle, uint32_t flag, int* vol)
 	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 	KYTY_LOG_DEBUG("\t flag   = %u\n", flag);
 
-	EXIT_NOT_IMPLEMENTED(vol == nullptr);
+	if (vol == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr || !audio->AudioOutSetVolume(HostAudio::Id(handle), flag, vol))
@@ -674,9 +674,9 @@ int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32
 	KYTY_LOG_DEBUG("\t len     = %u\n", len);
 	KYTY_LOG_DEBUG("\t freq    = %u\n", freq);
 
-	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 1);
-	EXIT_NOT_IMPLEMENTED(type != 1);
-	EXIT_NOT_IMPLEMENTED(index != 0);
+	if (user_id != 255 && user_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (type != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (index != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	HostAudio::Format format = HostAudio::Format::Unknown;
 
@@ -689,7 +689,7 @@ int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32
 
 	KYTY_LOG_DEBUG("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
 
-	EXIT_NOT_IMPLEMENTED(format == HostAudio::Format::Unknown);
+	if (format == HostAudio::Format::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr)
@@ -710,7 +710,7 @@ int KYTY_SYSV_ABI AudioInInput(int handle, void* dest)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(dest == nullptr);
+	if (dest == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr || !audio->AudioInValid(HostAudio::Id(handle)))

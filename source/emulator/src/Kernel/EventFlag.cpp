@@ -239,7 +239,7 @@ void KernelEventFlagPrivate::Set(uint64_t bits)
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(m_status == Status::Deleted);
+	if (m_status == Status::Deleted) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	while (m_status != Status::Set)
 	{
@@ -257,7 +257,7 @@ void KernelEventFlagPrivate::Clear(uint64_t bits)
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(m_status == Status::Deleted);
+	if (m_status == Status::Deleted) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	while (m_status != Status::Set)
 	{
@@ -273,7 +273,7 @@ void KernelEventFlagPrivate::Cancel(uint64_t bits, int* num_waiting_threads)
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(m_status == Status::Deleted);
+	if (m_status == Status::Deleted) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	while (m_status != Status::Set)
 	{
@@ -306,7 +306,7 @@ int KYTY_SYSV_ABI KernelCreateEventFlag(KernelEventFlag* ef, const char* name, u
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(param != nullptr);
+	if (param != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	if (ef == nullptr || name == nullptr)
 	{

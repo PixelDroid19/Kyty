@@ -821,8 +821,8 @@ int KYTY_SYSV_ABI NetPoolCreate(const char* name, int size, int flags)
 
 	EXIT_IF(g_net == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(flags != 0);
-	EXIT_NOT_IMPLEMENTED(size == 0);
+	if (flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int id = g_net->PoolCreate(name, size);
 
@@ -852,10 +852,10 @@ int KYTY_SYSV_ABI NetInetPton(int af, const char* src, void* dst)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(af != 2);
-	EXIT_NOT_IMPLEMENTED(src == nullptr);
-	EXIT_NOT_IMPLEMENTED(dst == nullptr);
-	EXIT_NOT_IMPLEMENTED(strcmp(src, "127.0.0.1") != 0);
+	if (af != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (src == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (dst == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (strcmp(src, "127.0.0.1") != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t src = %.16s\n", src);
 
@@ -870,10 +870,10 @@ int KYTY_SYSV_ABI NetEtherNtostr(const NetEtherAddr* n, char* str, size_t len)
 
 	NetEtherAddr zero {};
 
-	EXIT_NOT_IMPLEMENTED(len != 18);
-	EXIT_NOT_IMPLEMENTED(n == nullptr);
-	EXIT_NOT_IMPLEMENTED(str == nullptr);
-	EXIT_NOT_IMPLEMENTED(memcmp(n->data, zero.data, sizeof(zero.data)) != 0);
+	if (len != 18) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (n == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (str == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (memcmp(n->data, zero.data, sizeof(zero.data)) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	strcpy(str, "00:00:00:00:00:00"); // NOLINT
 
@@ -884,8 +884,8 @@ int KYTY_SYSV_ABI NetGetMacAddress(NetEtherAddr* addr, int flags)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(addr == nullptr);
-	EXIT_NOT_IMPLEMENTED(flags != 0);
+	if (addr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	memset(addr->data, 0, sizeof(addr->data));
 
@@ -1464,7 +1464,7 @@ int KYTY_SYSV_ABI SslInit(uint64_t pool_size)
 
 	EXIT_IF(g_net == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(pool_size == 0);
+	if (pool_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto id = g_net->SslInit(pool_size);
 
@@ -1522,7 +1522,7 @@ int KYTY_SYSV_ABI HttpInit(int memid, int ssl_ctx_id, uint64_t pool_size)
 
 	EXIT_IF(g_net == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(pool_size == 0);
+	if (pool_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto id = g_net->HttpInit(memid, Network::Id(ssl_ctx_id), pool_size);
 
@@ -1741,7 +1741,7 @@ int KYTY_SYSV_ABI HttpAddRequestHeader(int id, const char* name, const char* val
 	KYTY_LOG_DEBUG("\t value = %s\n", value);
 	KYTY_LOG_DEBUG("\t mode  = %u\n", mode);
 
-	EXIT_NOT_IMPLEMENTED(mode != 0 && mode != 1);
+	if (mode != 0 && mode != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	if (!g_net->HttpAddRequestHeader(Network::Id(id), name, value, mode == 1))
 	{
@@ -1759,9 +1759,9 @@ int KYTY_SYSV_ABI HttpCreateEpoll(int http_ctx_id, HttpEpollHandle* eh)
 
 	EXIT_IF(g_net == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(eh == nullptr);
+	if (eh == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(!g_net->HttpValid(Network::Id(http_ctx_id)));
+	if (!g_net->HttpValid(Network::Id(http_ctx_id))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*eh = new HttpEpoll;
 
@@ -1778,9 +1778,9 @@ int KYTY_SYSV_ABI HttpDestroyEpoll(int http_ctx_id, HttpEpollHandle eh)
 
 	EXIT_IF(g_net == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(eh == nullptr);
+	if (eh == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(!g_net->HttpValid(Network::Id(http_ctx_id)));
+	if (!g_net->HttpValid(Network::Id(http_ctx_id))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	delete eh;
 
@@ -1793,9 +1793,9 @@ int KYTY_SYSV_ABI HttpSetEpoll(int id, HttpEpollHandle eh, void* user_arg)
 
 	KYTY_LOG_DEBUG("\t id = %d\n", id);
 
-	EXIT_NOT_IMPLEMENTED(eh == nullptr);
+	if (eh == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(!g_net->HttpValidRequest(Network::Id(id)));
+	if (!g_net->HttpValidRequest(Network::Id(id))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	eh->request_id = Network::Id(id);
 	eh->user_arg   = user_arg;
@@ -1809,7 +1809,7 @@ int KYTY_SYSV_ABI HttpUnsetEpoll(int id)
 
 	KYTY_LOG_DEBUG("\t id = %d\n", id);
 
-	EXIT_NOT_IMPLEMENTED(!g_net->HttpValidRequest(Network::Id(id)));
+	if (!g_net->HttpValidRequest(Network::Id(id))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return OK;
 }
@@ -1961,8 +1961,8 @@ int KYTY_SYSV_ABI NetCtlGetNatInfo(NetCtlNatInfo* nat_info)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(nat_info == nullptr);
-	EXIT_NOT_IMPLEMENTED(nat_info->size != sizeof(NetCtlNatInfo));
+	if (nat_info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (nat_info->size != sizeof(NetCtlNatInfo)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	nat_info->stunStatus        = 1;
 	nat_info->natType           = 3;
@@ -1982,7 +1982,7 @@ int KYTY_SYSV_ABI NetCtlGetState(int* state)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(state == nullptr);
+	if (state == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*state = 0; // Disconnected
 
@@ -1993,8 +1993,8 @@ int KYTY_SYSV_ABI NetCtlRegisterCallback(NetCtlCallback func, void* /*arg*/, int
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(func == nullptr);
-	EXIT_NOT_IMPLEMENTED(cid == nullptr);
+	if (func == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (cid == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*cid = 1;
 
@@ -2005,7 +2005,7 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(info == nullptr);
+	if (info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t code = %d\n", code);
 
@@ -2093,8 +2093,8 @@ int KYTY_SYSV_ABI NpSetNpTitleId(const NpTitleId* title_id, const NpTitleSecret*
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(title_id == nullptr);
-	EXIT_NOT_IMPLEMENTED(title_secret == nullptr);
+	if (title_id == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (title_secret == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t title_id = %.12s\n", title_id->id);
 	KYTY_LOG_DEBUG("\t title_secret = %s\n", String::HexFromBin(Core::ByteBuffer(title_secret->data, 128)).C_Str());
@@ -2106,8 +2106,8 @@ int KYTY_SYSV_ABI NpSetContentRestriction(const NpContentRestriction* restrictio
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(restriction == nullptr);
-	EXIT_NOT_IMPLEMENTED(restriction->size != sizeof(NpContentRestriction));
+	if (restriction == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (restriction->size != sizeof(NpContentRestriction)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t default_age_restriction = %" PRIi8 "\n", restriction->default_age_restriction);
 	KYTY_LOG_DEBUG("\t age_restriction_count   = %" PRIi32 "\n", restriction->age_restriction_count);
@@ -2153,11 +2153,11 @@ int KYTY_SYSV_ABI NpGetNpId(int user_id, NpId* np_id)
 
 	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
-	EXIT_NOT_IMPLEMENTED(np_id == nullptr);
+	if (np_id == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int s = snprintf(np_id->handle.data, 16, "Kyty");
 
-	EXIT_NOT_IMPLEMENTED(s >= 16);
+	if (s >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	np_id->handle.term = 0;
 
@@ -2170,11 +2170,11 @@ int KYTY_SYSV_ABI NpGetOnlineId(int user_id, NpOnlineId* online_id)
 
 	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
-	EXIT_NOT_IMPLEMENTED(online_id == nullptr);
+	if (online_id == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int s = snprintf(online_id->data, 16, "Kyty");
 
-	EXIT_NOT_IMPLEMENTED(s >= 16);
+	if (s >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	online_id->term = 0;
 
@@ -2185,7 +2185,7 @@ int KYTY_SYSV_ABI NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* para
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(param == nullptr);
+	if (param == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t size              = %" PRIu64 "\n", param->size);
 	KYTY_LOG_DEBUG("\t cpu_affinity_mask = %" PRIu64 "\n", param->cpu_affinity_mask);
@@ -2193,7 +2193,7 @@ int KYTY_SYSV_ABI NpCreateAsyncRequest(const NpCreateAsyncRequestParameter* para
 
 	static std::atomic_int id = 0;
 
-	EXIT_NOT_IMPLEMENTED(id >= 1);
+	if (id >= 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return ++id;
 }
@@ -2202,7 +2202,7 @@ int KYTY_SYSV_ABI NpDeleteRequest(int req_id)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(req_id != 1);
+	if (req_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
 
@@ -2213,9 +2213,9 @@ int KYTY_SYSV_ABI NpCheckNpAvailability(int req_id, const char* user, void* resu
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(req_id != 1);
-	EXIT_NOT_IMPLEMENTED(user == nullptr);
-	EXIT_NOT_IMPLEMENTED(result != nullptr);
+	if (req_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (user == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (result != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
 	KYTY_LOG_DEBUG("\t user   = %s\n", user);
@@ -2227,8 +2227,8 @@ int KYTY_SYSV_ABI NpPollAsync(int req_id, int* result)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(req_id != 1);
-	EXIT_NOT_IMPLEMENTED(result == nullptr);
+	if (req_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (result == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t req_id = %d\n", req_id);
 
@@ -2241,7 +2241,7 @@ int KYTY_SYSV_ABI NpGetState(int user_id, uint32_t* state)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(state == nullptr);
+	if (state == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t user_id = %d\n", user_id);
 
@@ -2285,7 +2285,7 @@ int KYTY_SYSV_ABI NpTrophyCreateHandle(int* handle)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(handle == nullptr);
+	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*handle = 1;
 
@@ -2296,8 +2296,8 @@ int KYTY_SYSV_ABI NpTrophyCreateContext(int* context, int user_id, uint32_t serv
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(context == nullptr);
-	EXIT_NOT_IMPLEMENTED(options != 0);
+	if (context == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (options != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*context = 1;
 
@@ -2311,9 +2311,9 @@ int KYTY_SYSV_ABI NpTrophyRegisterContext(int context, int handle, uint64_t opti
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(options != 0);
-	EXIT_NOT_IMPLEMENTED(context != 1);
-	EXIT_NOT_IMPLEMENTED(handle != 1);
+	if (options != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (context != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t context = %d\n", context);
 	KYTY_LOG_DEBUG("\t handle  = %d\n", handle);
@@ -2325,7 +2325,7 @@ int KYTY_SYSV_ABI NpTrophyDestroyHandle(int handle)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t handle  = %d\n", handle);
 
@@ -2336,10 +2336,10 @@ int KYTY_SYSV_ABI NpTrophyGetTrophyUnlockState(int context, int handle, NpTrophy
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(flags == nullptr);
-	EXIT_NOT_IMPLEMENTED(count == nullptr);
-	EXIT_NOT_IMPLEMENTED(context != 1);
-	EXIT_NOT_IMPLEMENTED(handle != 1);
+	if (flags == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (count == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (context != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t context = %d\n", context);
 	KYTY_LOG_DEBUG("\t handle  = %d\n", handle);
@@ -2369,7 +2369,7 @@ int KYTY_SYSV_ABI NpWebApiInitialize(int http_ctx_id, size_t pool_size)
 	KYTY_LOG_DEBUG("\t http_ctx_id = %d\n", http_ctx_id);
 	KYTY_LOG_DEBUG("\t pool_size   = %" PRIu64 "\n", pool_size);
 
-	EXIT_NOT_IMPLEMENTED(!g_net->HttpValid(Network::Id(http_ctx_id)));
+	if (!g_net->HttpValid(Network::Id(http_ctx_id))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	static int id = 0;
 

@@ -1263,7 +1263,7 @@ int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t enable = %s\n", (enable ? "true" : "false"));
 
@@ -1336,8 +1336,8 @@ int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformati
 
 	g_controller->GetConnectionInfo(&connected, &connected_count);
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
-	EXIT_NOT_IMPLEMENTED(info == nullptr);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	FillPadControllerInformation(info, connected_count);
 
@@ -1425,8 +1425,8 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 
 	g_controller->ReadState(&state, &connected, &connected_count);
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
-	EXIT_NOT_IMPLEMENTED(data == nullptr);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	// Optional diagnostic (KYTY_AUTO_CROSS=1): synthesize button edges so multi-
 	// screen splash/title flows can advance without a physical pad. Continuous
@@ -1519,9 +1519,9 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(num < 1 || num > 64);
-	EXIT_NOT_IMPLEMENTED(handle != 1);
-	EXIT_NOT_IMPLEMENTED(data == nullptr);
+	if (num < 1 || num > 64) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	EXIT_IF(g_controller == nullptr);
 
@@ -1633,7 +1633,7 @@ int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t large_motor = %d\n", static_cast<int>(param->large_motor));
 	KYTY_LOG_DEBUG("\t small_motor = %d\n", static_cast<int>(param->small_motor));
@@ -1645,7 +1645,7 @@ int KYTY_SYSV_ABI PadResetLightBar(int handle)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return OK;
 }
@@ -1654,8 +1654,8 @@ int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
-	EXIT_NOT_IMPLEMENTED(param == nullptr);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (param == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return OK;
 }

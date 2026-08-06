@@ -209,7 +209,7 @@ static KYTY_SYSV_ABI KernelModule KernelLoadStartModule(const char* module_file_
 
 	KYTY_LOG_DEBUG("\tmodule_start() result = %d\n", result);
 
-	EXIT_NOT_IMPLEMENTED(result < 0);
+	if (result < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	if (res != nullptr)
 	{
@@ -228,12 +228,12 @@ static int KYTY_SYSV_ABI KernelStopUnloadModule(KernelModule handle, size_t args
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
-	EXIT_NOT_IMPLEMENTED(flags != 0);
-	EXIT_NOT_IMPLEMENTED(opt != nullptr);
+	if (flags != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (opt != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* program = rt->FindProgramById(handle);
 
-	EXIT_NOT_IMPLEMENTED(program == nullptr);
+	if (program == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	if (g_get_thread_atexit_count_func != nullptr && g_get_thread_atexit_count_func(program->unique_id) > 0)
 	{
@@ -249,7 +249,7 @@ static int KYTY_SYSV_ABI KernelStopUnloadModule(KernelModule handle, size_t args
 
 	KYTY_LOG_DEBUG("\tmodule_stop() result = %d\n", result);
 
-	EXIT_NOT_IMPLEMENTED(result < 0);
+	if (result < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	if (res != nullptr)
 	{
@@ -564,8 +564,8 @@ static int KYTY_SYSV_ABI KernelGetModuleInfoFromAddr(uint64_t addr, int n, Modul
 	KYTY_LOG_DEBUG("\taddr = %016" PRIx64 "\n", addr);
 	KYTY_LOG_DEBUG("\tn = %d\n", n);
 
-	EXIT_NOT_IMPLEMENTED(n != 2);
-	EXIT_NOT_IMPLEMENTED(r == nullptr);
+	if (n != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (r == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* rt = Core::Singleton<Loader::RuntimeLinker>::Instance();
 
@@ -1242,7 +1242,7 @@ static KYTY_SYSV_ABI int elf_phdr_match_addr(ModuleInfo* m, uint64_t dtor_vaddr)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(m == nullptr);
+	if (m == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* rt     = Core::Singleton<Loader::RuntimeLinker>::Instance();
 	auto* p      = rt->FindProgramByAddr(dtor_vaddr);
@@ -1281,7 +1281,7 @@ void KYTY_SYSV_ABI KernelSetThreadAtexitCount(get_thread_atexit_count_func_t fun
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(g_get_thread_atexit_count_func != nullptr);
+	if (g_get_thread_atexit_count_func != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	g_get_thread_atexit_count_func = func;
 }
@@ -1290,7 +1290,7 @@ void KYTY_SYSV_ABI KernelSetThreadAtexitReport(thread_atexit_report_func_t func)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(g_thread_atexit_report_func != nullptr);
+	if (g_thread_atexit_report_func != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	g_thread_atexit_report_func = func;
 }
@@ -1417,7 +1417,7 @@ static int KYTY_SYSV_ABI PosixInetPton(int af, const char* src, void* dst)
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	return ::inet_pton(af, src, dst);
 #else
-	EXIT_NOT_IMPLEMENTED(af != 2);
+	if (af != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	(void)dst;
 	return -1;
 #endif

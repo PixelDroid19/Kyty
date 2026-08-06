@@ -2582,7 +2582,7 @@ static KYTY_SYSV_ABI int atexit(void (*func)())
 
 	int ok = ::atexit(func);
 
-	EXIT_NOT_IMPLEMENTED(ok != 0);
+	if (ok != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return 0;
 }

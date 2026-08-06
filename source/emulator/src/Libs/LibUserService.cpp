@@ -44,7 +44,7 @@ static KYTY_SYSV_ABI int UserServiceGetInitialUser(int* user_id)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(user_id == nullptr);
+	if (user_id == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*user_id = 1;
 
@@ -55,7 +55,7 @@ static KYTY_SYSV_ABI int UserServiceGetEvent(SceUserServiceEvent* event)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(event == nullptr);
+	if (event == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	static bool logged_in = false;
 
@@ -74,7 +74,7 @@ static KYTY_SYSV_ABI int UserServiceGetLoginUserIdList(UserServiceLoginUserIdLis
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(user_id_list == nullptr);
+	if (user_id_list == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	user_id_list->user_id[0] = 1;
 	user_id_list->user_id[1] = -1;
@@ -86,12 +86,12 @@ static KYTY_SYSV_ABI int UserServiceGetLoginUserIdList(UserServiceLoginUserIdLis
 
 static KYTY_SYSV_ABI int UserServiceGetUserName(int user_id, char* name, size_t size)
 {
-	EXIT_NOT_IMPLEMENTED(user_id != 1);
-	EXIT_NOT_IMPLEMENTED(size < 5);
+	if (user_id != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (size < 5) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int s = snprintf(name, size, "%s", "Kyty");
 
-	EXIT_NOT_IMPLEMENTED(static_cast<size_t>(s) >= size);
+	if (static_cast<size_t>(s) >= size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return OK;
 }

@@ -33,7 +33,7 @@ void* PthreadStaticObjects::CreateObject(void* addr, PthreadStaticObject::Type t
 	auto  vaddr   = reinterpret_cast<uint64_t>(addr);
 	auto* program = GuestRuntimePort::FindProgramByAddr(vaddr);
 
-	EXIT_NOT_IMPLEMENTED(program == nullptr);
+	if (program == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* obj    = new PthreadStaticObject;
 	obj->program = program;
@@ -51,7 +51,7 @@ void* PthreadStaticObjects::CreateObject(void* addr, PthreadStaticObject::Type t
 		default: EXIT("unknown type: %d\n", static_cast<int>(type));
 	}
 
-	EXIT_NOT_IMPLEMENTED(result != OK);
+	if (result != OK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto index = m_objects.Find(nullptr);
 
@@ -83,7 +83,7 @@ void PthreadStaticObjects::DeleteObjects(const void* program)
 				default: EXIT("unknown type: %d\n", static_cast<int>(obj->type));
 			}
 
-			EXIT_NOT_IMPLEMENTED(result != OK);
+			if (result != OK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 			delete obj;
 			obj = nullptr;

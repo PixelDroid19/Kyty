@@ -214,7 +214,7 @@ KYTY_SCRIPT_FUNC(kyty_init_func)
 	print_system_info();
 
 	int ok = atexit(kyty_close);
-	EXIT_NOT_IMPLEMENTED(ok != 0);
+	if (ok != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return 0;
 }

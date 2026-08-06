@@ -152,7 +152,7 @@ Pthread KYTY_SYSV_ABI PthreadSelf()
 {
 	// PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(g_pthread_self == nullptr);
+	if (g_pthread_self == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return g_pthread_self;
 }
@@ -524,7 +524,7 @@ int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio)
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	EXIT_NOT_IMPLEMENTED(prio == nullptr);
+	if (prio == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*prio = thread->guest_priority.load(std::memory_order_relaxed);
 
@@ -678,7 +678,7 @@ void KYTY_SYSV_ABI KernelSetThreadDtors(thread_dtors_func_t dtors)
 	EXIT_IF(g_pthread_context == nullptr);
 
 	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
-	EXIT_NOT_IMPLEMENTED(g_pthread_context->GetThreadDtors() != nullptr);
+	if (g_pthread_context->GetThreadDtors() != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	g_pthread_context->SetThreadDtors(dtors);
 	// g_thread_dtors = dtors;

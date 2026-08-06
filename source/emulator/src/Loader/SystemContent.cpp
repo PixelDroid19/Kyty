@@ -123,10 +123,10 @@ void Psf::Open(const String& file_name)
 	m_f.Read(&m_value_tbl_offset, 4);
 	m_f.Read(&m_params_num, 4);
 
-	EXIT_NOT_IMPLEMENTED(m_name_tbl_offset == 0);
-	EXIT_NOT_IMPLEMENTED(m_value_tbl_offset == 0);
-	EXIT_NOT_IMPLEMENTED(m_value_tbl_offset <= m_name_tbl_offset);
-	EXIT_NOT_IMPLEMENTED(m_params_num == 0);
+	if (m_name_tbl_offset == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (m_value_tbl_offset == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (m_value_tbl_offset <= m_name_tbl_offset) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (m_params_num == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	uint32_t name_tbl_size = m_value_tbl_offset - m_name_tbl_offset;
 

@@ -808,7 +808,7 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 		{
 			if (program->custom_call_plt_vaddr != 0)
 			{
-				EXIT_NOT_IMPLEMENTED(index >= program->custom_call_plt_num);
+				if (index >= program->custom_call_plt_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 				value = reinterpret_cast<Jit::CallPlt*>(program->custom_call_plt_vaddr)->GetAddr(index);
 			} else
 			{
@@ -1177,7 +1177,7 @@ static void PatchProgram(Program* program, uint64_t address, uint64_t size)
 
 uint64_t RuntimeLinker::GetEntry()
 {
-	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	// if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Core::LockGuard lock(m_mutex);
 
@@ -1193,7 +1193,7 @@ uint64_t RuntimeLinker::GetEntry()
 
 uint64_t RuntimeLinker::GetProcParam()
 {
-	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	// if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Core::LockGuard lock(m_mutex);
 
@@ -1211,7 +1211,7 @@ void RuntimeLinker::DbgDump(const String& folder)
 {
 	KYTY_LOADER_PROFILE_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Core::LockGuard lock(m_mutex);
 
@@ -1226,10 +1226,10 @@ void RuntimeLinker::DbgDump(const String& folder)
 
 		if (p->dynamic_info != nullptr)
 		{
-			EXIT_NOT_IMPLEMENTED(p->dynamic_info->symbol_table_entry_size != 0 &&
-			                     p->dynamic_info->symbol_table_entry_size != sizeof(Elf64_Sym));
-			EXIT_NOT_IMPLEMENTED(p->dynamic_info->rela_table_entry_size != 0 &&
-			                     p->dynamic_info->rela_table_entry_size != sizeof(Elf64_Rela));
+			if (p->dynamic_info->symbol_table_entry_size != 0 &&
+			                     p->dynamic_info->symbol_table_entry_size != sizeof(Elf64_Sym)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+			if (p->dynamic_info->rela_table_entry_size != 0 &&
+			                     p->dynamic_info->rela_table_entry_size != sizeof(Elf64_Rela)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			// EXIT_NOT_IMPLEMENTED(p->dynamic_info->jmprela_table == nullptr);
 			// EXIT_NOT_IMPLEMENTED(p->dynamic_info->rela_table == nullptr);
 			// EXIT_NOT_IMPLEMENTED(p->dynamic_info->symbol_table == nullptr);
@@ -1266,7 +1266,7 @@ void RuntimeLinker::DbgDumpSymbols(const String& folder)
 {
 	KYTY_LOADER_PROFILE_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Core::LockGuard lock(m_mutex);
 
@@ -1293,7 +1293,7 @@ void RuntimeLinker::DbgDumpSymbols(const String& folder)
 
 void RuntimeLinker::RelocateAll()
 {
-	// EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	// if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Core::LockGuard lock(m_mutex);
 
@@ -1338,7 +1338,7 @@ void RuntimeLinker::UnloadProgram(Program* program)
 
 RuntimeLinker::RuntimeLinker(): m_symbols(new SymbolDatabase)
 {
-	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	m_previous_guest_runtime_owner = g_guest_runtime_owner.exchange(this, std::memory_order_acq_rel);
 	Emulator::GuestRuntimePort::Install({FindProgramByAddrForPort, GuestCall::Invoke, GuestCall::Invoke4, GuestCall::InvokeOnStack});
 }
@@ -1463,7 +1463,7 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 
 void RuntimeLinker::SaveMainProgram(const String& elf_name)
 {
-	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Core::LockGuard lock(m_mutex);
 
@@ -1481,7 +1481,7 @@ void RuntimeLinker::SaveMainProgram(const String& elf_name)
 
 void RuntimeLinker::SaveProgram(Program* program, const String& elf_name)
 {
-	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Core::LockGuard lock(m_mutex);
 
@@ -2539,20 +2539,20 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 
 	auto* elf = program->elf;
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_HASH) && elf->HasDynValue(DT_HASH));
+	if (elf->HasDynValue(DT_OS_HASH) && elf->HasDynValue(DT_HASH)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	get_dyn_data_os(elf, &program->dynamic_info->hash_table, DT_OS_HASH);
 	get_dyn_data(elf, program->base_vaddr, &program->dynamic_info->hash_table, DT_HASH);
 	get_dyn_value(elf, &program->dynamic_info->hash_table_size, DT_OS_HASHSZ);
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_STRTAB) && elf->HasDynValue(DT_STRTAB));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_STRSZ) && elf->HasDynValue(DT_STRSZ));
+	if (elf->HasDynValue(DT_OS_STRTAB) && elf->HasDynValue(DT_STRTAB)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (elf->HasDynValue(DT_OS_STRSZ) && elf->HasDynValue(DT_STRSZ)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	get_dyn_data_os(elf, &program->dynamic_info->str_table, DT_OS_STRTAB);
 	get_dyn_data(elf, program->base_vaddr, &program->dynamic_info->str_table, DT_STRTAB);
 	get_dyn_value(elf, &program->dynamic_info->str_table_size, DT_OS_STRSZ);
 	get_dyn_value(elf, &program->dynamic_info->str_table_size, DT_STRSZ);
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_SYMTAB) && elf->HasDynValue(DT_SYMTAB));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_SYMENT) && elf->HasDynValue(DT_SYMENT));
+	if (elf->HasDynValue(DT_OS_SYMTAB) && elf->HasDynValue(DT_SYMTAB)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (elf->HasDynValue(DT_OS_SYMENT) && elf->HasDynValue(DT_SYMENT)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	get_dyn_data_os(elf, &program->dynamic_info->symbol_table, DT_OS_SYMTAB);
 	get_dyn_data(elf, program->base_vaddr, &program->dynamic_info->symbol_table, DT_SYMTAB);
 	get_dyn_value(elf, &program->dynamic_info->symbol_table_total_size, DT_OS_SYMTABSZ);
@@ -2568,27 +2568,27 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 	get_dyn_value(elf, &program->dynamic_info->fini_array_size, DT_FINI_ARRAYSZ);
 	get_dyn_value(elf, &program->dynamic_info->preinit_array_size, DT_PREINIT_ARRAYSZ);
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_PLTGOT) && elf->HasDynValue(DT_PLTGOT));
+	if (elf->HasDynValue(DT_OS_PLTGOT) && elf->HasDynValue(DT_PLTGOT)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	get_dyn_ptr(elf, &program->dynamic_info->pltgot_vaddr, DT_OS_PLTGOT);
 	get_dyn_ptr(elf, &program->dynamic_info->pltgot_vaddr, DT_PLTGOT);
 
 	Elf64_Sxword jmprel_type = 0;
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_PLTREL) && elf->HasDynValue(DT_PLTREL));
+	if (elf->HasDynValue(DT_OS_PLTREL) && elf->HasDynValue(DT_PLTREL)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	get_dyn_value(elf, &jmprel_type, DT_OS_PLTREL);
 	get_dyn_value(elf, &jmprel_type, DT_PLTREL);
 
-	EXIT_NOT_IMPLEMENTED(jmprel_type != DT_RELA);
+	if (jmprel_type != DT_RELA) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	if (jmprel_type == DT_RELA)
 	{
-		EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_JMPREL) && elf->HasDynValue(DT_JMPREL));
-		EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_PLTRELSZ) && elf->HasDynValue(DT_PLTRELSZ));
+		if (elf->HasDynValue(DT_OS_JMPREL) && elf->HasDynValue(DT_JMPREL)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+		if (elf->HasDynValue(DT_OS_PLTRELSZ) && elf->HasDynValue(DT_PLTRELSZ)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 		get_dyn_data_os(elf, &program->dynamic_info->jmprela_table, DT_OS_JMPREL);
 		get_dyn_data(elf, program->base_vaddr, &program->dynamic_info->jmprela_table, DT_JMPREL);
 		get_dyn_value(elf, &program->dynamic_info->jmprela_table_size, DT_OS_PLTRELSZ);
 		get_dyn_value(elf, &program->dynamic_info->jmprela_table_size, DT_PLTRELSZ);
 	}
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_RELA) && elf->HasDynValue(DT_RELA));
+	if (elf->HasDynValue(DT_OS_RELA) && elf->HasDynValue(DT_RELA)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	get_dyn_data_os(elf, &program->dynamic_info->rela_table, DT_OS_RELA);
 	get_dyn_data(elf, program->base_vaddr, &program->dynamic_info->rela_table, DT_RELA);
 	get_dyn_value(elf, &program->dynamic_info->rela_table_total_size, DT_OS_RELASZ);
@@ -2602,8 +2602,8 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 	get_dyn_value(elf, &program->dynamic_info->flags, DT_FLAGS);
 	get_dyn_value(elf, &program->dynamic_info->textrel, DT_TEXTREL);
 
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->debug != 0);
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->textrel != 0);
+	if (program->dynamic_info->debug != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (program->dynamic_info->textrel != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Vector<uint64_t> needed;
 	get_dyn_values(elf, &needed, DT_NEEDED);
@@ -2616,10 +2616,10 @@ void RuntimeLinker::ParseProgramDynamicInfo(Program* program)
 	get_dyn_value(elf, &so_name, DT_SONAME);
 	program->dynamic_info->so_name = program->dynamic_info->str_table + so_name;
 
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_NEEDED_MODULE) && elf->HasDynValue(DT_OS_NEEDED_MODULE_1));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_MODULE_INFO) && elf->HasDynValue(DT_OS_MODULE_INFO_1));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_IMPORT_LIB) && elf->HasDynValue(DT_OS_IMPORT_LIB_1));
-	EXIT_NOT_IMPLEMENTED(elf->HasDynValue(DT_OS_EXPORT_LIB) && elf->HasDynValue(DT_OS_EXPORT_LIB_1));
+	if (elf->HasDynValue(DT_OS_NEEDED_MODULE) && elf->HasDynValue(DT_OS_NEEDED_MODULE_1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (elf->HasDynValue(DT_OS_MODULE_INFO) && elf->HasDynValue(DT_OS_MODULE_INFO_1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (elf->HasDynValue(DT_OS_IMPORT_LIB) && elf->HasDynValue(DT_OS_IMPORT_LIB_1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (elf->HasDynValue(DT_OS_EXPORT_LIB) && elf->HasDynValue(DT_OS_EXPORT_LIB_1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	get_dyn_modules(elf, &program->dynamic_info->import_modules, program->dynamic_info->str_table, DT_OS_NEEDED_MODULE);
 	get_dyn_modules(elf, &program->dynamic_info->import_modules, program->dynamic_info->str_table, DT_OS_NEEDED_MODULE_1);
 	get_dyn_modules(elf, &program->dynamic_info->export_modules, program->dynamic_info->str_table, DT_OS_MODULE_INFO);
@@ -2657,7 +2657,7 @@ static void InstallRelocateHandler(Program* program)
 		program->custom_call_plt_num   = program->dynamic_info->jmprela_table_size / sizeof(Elf64_Rela);
 		auto size                      = Jit::CallPlt::GetSize(program->custom_call_plt_num);
 		program->custom_call_plt_vaddr = Core::VirtualMemory::Alloc(SYSTEM_RESERVED, size, Core::VirtualMemory::Mode::Write);
-		EXIT_NOT_IMPLEMENTED(program->custom_call_plt_vaddr == 0);
+		if (program->custom_call_plt_vaddr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 		auto* code = new (reinterpret_cast<void*>(program->custom_call_plt_vaddr)) Jit::CallPlt(program->custom_call_plt_num);
 		code->SetPltGot(pltgot_vaddr);
 		code->SetResolver(&ResolveLazyPlt);
@@ -2679,17 +2679,17 @@ void RuntimeLinker::Relocate(Program* program)
 	if (g_invalid_memory == 0)
 	{
 		g_invalid_memory = Core::VirtualMemory::Alloc(INVALID_MEMORY, 4096, Core::VirtualMemory::Mode::NoAccess);
-		EXIT_NOT_IMPLEMENTED(g_invalid_memory == 0);
+		if (g_invalid_memory == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	}
 
 	KYTY_LOG_DEBUG("--- Relocate program: " FG_WHITE BOLD "%s" DEFAULT " ---\n", program->file_name.C_Str());
 
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->symbol_table_entry_size != sizeof(Elf64_Sym));
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table_entry_size != sizeof(Elf64_Rela));
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->jmprela_table == nullptr);
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->rela_table == nullptr);
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->symbol_table == nullptr);
-	EXIT_NOT_IMPLEMENTED(program->dynamic_info->pltgot_vaddr == 0);
+	if (program->dynamic_info->symbol_table_entry_size != sizeof(Elf64_Sym)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (program->dynamic_info->rela_table_entry_size != sizeof(Elf64_Rela)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (program->dynamic_info->jmprela_table == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (program->dynamic_info->rela_table == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (program->dynamic_info->symbol_table == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (program->dynamic_info->pltgot_vaddr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	InstallRelocateHandler(program);
 

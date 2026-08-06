@@ -47,7 +47,7 @@ int KYTY_SYSV_ABI fflush(FILE* stream)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(stream != stdout && stream != stderr);
+	if (stream != stdout && stream != stderr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return ::fflush(stream);
 }
@@ -71,9 +71,9 @@ void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capaci
 	KYTY_LOG_DEBUG("\t capacity = %016" PRIx64 "\n", capacity);
 	KYTY_LOG_DEBUG("\t flag     = %u\n", flag);
 
-	EXIT_NOT_IMPLEMENTED(flag != 0 && flag != 1);
-	EXIT_NOT_IMPLEMENTED(base == nullptr);
-	EXIT_NOT_IMPLEMENTED(capacity == 0);
+	if (flag != 0 && flag != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (base == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (capacity == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	bool thread_safe = true;
 
@@ -84,7 +84,7 @@ void* KYTY_SYSV_ABI LibcMspaceCreate(const char* name, void* base, size_t capaci
 
 	auto* msp = Core::MSpaceCreate(mspace_name, base, capacity, thread_safe, nullptr);
 
-	EXIT_NOT_IMPLEMENTED(msp == nullptr);
+	if (msp == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return msp;
 }

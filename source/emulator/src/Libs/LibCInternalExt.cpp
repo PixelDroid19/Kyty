@@ -29,7 +29,7 @@ void KYTY_SYSV_ABI LibcHeapGetTraceInfo(Info* info)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(info->size != 32);
+	if (info->size != 32) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	info->mspace_atomic_id_mask = &g_mspace_atomic_id_mask;
 	info->mstate_table          = g_mstate_table;

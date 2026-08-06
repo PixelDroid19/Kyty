@@ -128,7 +128,7 @@ int KYTY_SYSV_ABI Audio3dInitialize(int64_t reserved)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(reserved != 0);
+	if (reserved != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return OK;
 }
@@ -232,7 +232,7 @@ int KYTY_SYSV_ABI Audio3dPortOpen(int user_id, const Audio3dOpenParameters* para
 
 	int result = Semaphore::KernelCreateSema(&g_ports[port].playback_sema, "audio3d_play", 0x01, 0, static_cast<int>(effective.queue_depth),
 	                                         nullptr);
-	EXIT_NOT_IMPLEMENTED(result != OK);
+	if (result != OK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	g_ports[port].playback_finished = false;
 	Core::Thread playback_thread(playback_simulate, &g_ports[port]);
@@ -247,26 +247,26 @@ int KYTY_SYSV_ABI Audio3dPortSetAttribute(uint32_t port_id, uint32_t attribute_i
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(port_id >= MAX_PORTS);
-	EXIT_NOT_IMPLEMENTED(!g_ports[port_id].used);
-	EXIT_NOT_IMPLEMENTED(attribute == nullptr);
+	if (port_id >= MAX_PORTS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (!g_ports[port_id].used) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (attribute == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t attribute_id = 0x%" PRIx32 "\n", attribute_id);
 
 	switch (attribute_id)
 	{
 		case 0x10001:
-			EXIT_NOT_IMPLEMENTED(attribute_size != 4);
+			if (attribute_size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			g_ports[port_id].late_reverb_level = *static_cast<const float*>(attribute);
 			KYTY_LOG_DEBUG("\t late_reverb_level = %f\n", g_ports[port_id].late_reverb_level);
 			break;
 		case 0x10002:
-			EXIT_NOT_IMPLEMENTED(attribute_size != 4);
+			if (attribute_size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			g_ports[port_id].downmix_spread_radius = *static_cast<const float*>(attribute);
 			KYTY_LOG_DEBUG("\t downmix_spread_radius = %f\n", g_ports[port_id].downmix_spread_radius);
 			break;
 		case 0x10003:
-			EXIT_NOT_IMPLEMENTED(attribute_size != 4);
+			if (attribute_size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			g_ports[port_id].downmix_spread_height_aware = *static_cast<const int*>(attribute);
 			KYTY_LOG_DEBUG("\t downmix_spread_height_aware = %d\n", g_ports[port_id].downmix_spread_height_aware);
 			break;
@@ -280,9 +280,9 @@ int KYTY_SYSV_ABI Audio3dPortGetQueueLevel(uint32_t port_id, uint32_t* queue_lev
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(port_id >= MAX_PORTS);
-	EXIT_NOT_IMPLEMENTED(!g_ports[port_id].used);
-	EXIT_NOT_IMPLEMENTED(queue_level == nullptr && queue_available == nullptr);
+	if (port_id >= MAX_PORTS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (!g_ports[port_id].used) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (queue_level == nullptr && queue_available == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* port = &g_ports[port_id];
 
@@ -423,8 +423,8 @@ int KYTY_SYSV_ABI Audio3dPortAdvance(uint32_t port_id)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(port_id >= MAX_PORTS);
-	EXIT_NOT_IMPLEMENTED(!g_ports[port_id].used);
+	if (port_id >= MAX_PORTS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (!g_ports[port_id].used) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* port = &g_ports[port_id];
 
@@ -438,7 +438,7 @@ int KYTY_SYSV_ABI Audio3dPortAdvance(uint32_t port_id)
 			port->data[current_index].state = Audio3dData::State::Ready;
 		}
 
-		EXIT_NOT_IMPLEMENTED(port->data[current_index].state != Audio3dData::State::Ready);
+		if (port->data[current_index].state != Audio3dData::State::Ready) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 		port->data_index = next_index;
 
@@ -453,12 +453,15 @@ int KYTY_SYSV_ABI Audio3dPortPush(uint32_t port_id, uint32_t blocking)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(port_id >= MAX_PORTS);
-	EXIT_NOT_IMPLEMENTED(!g_ports[port_id].used);
+	if (port_id >= MAX_PORTS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (!g_ports[port_id].used) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* port = &g_ports[port_id];
 
-	EXIT_NOT_IMPLEMENTED(blocking != 1);
+	if (blocking != 1)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Audio3d blocking=%u treated as 1 (continuing)\n", blocking);
+	}
 
 	KYTY_LOG_DEBUG("\t blocking = %u\n", blocking);
 

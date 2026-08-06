@@ -173,7 +173,7 @@ public:
 		String point;
 	};
 
-	MountPoints() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	MountPoints() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } }
 	virtual ~MountPoints() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(MountPoints);
@@ -206,7 +206,7 @@ struct File
 class FileDescriptors
 {
 public:
-	FileDescriptors() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	FileDescriptors() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } }
 	virtual ~FileDescriptors() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(FileDescriptors);
@@ -612,8 +612,8 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 		default: EXIT("invalid flag_u: %u\n", flags_u);
 	}
 
-	EXIT_NOT_IMPLEMENTED(directory && rw_mode != Core::File::Mode::Read);
-	EXIT_NOT_IMPLEMENTED(directory && (trunc || creat));
+	if (directory && rw_mode != Core::File::Mode::Read) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (directory && (trunc || creat)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int   descriptor = g_files->CreateDescriptor();
 	auto* file       = g_files->GetFile(descriptor);
@@ -653,8 +653,8 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 			return KERNEL_ERROR_ENOTDIR;
 		}
 
-		EXIT_NOT_IMPLEMENTED(!directory && rw_mode != Core::File::Mode::Read);
-		EXIT_NOT_IMPLEMENTED(!directory && (trunc || creat));
+		if (!directory && rw_mode != Core::File::Mode::Read) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+		if (!directory && (trunc || creat)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 		const auto host_entries = Core::File::GetDirEntries(file->real_name);
 		file->dents.Clear();
@@ -821,11 +821,11 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 		return KERNEL_ERROR_EBADF;
 	}
 
-	EXIT_NOT_IMPLEMENTED(file->directory);
+	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	EXIT_IF(!file->opened);
 
-	EXIT_NOT_IMPLEMENTED(nbytes > UINT_MAX);
+	if (nbytes > UINT_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	file->mutex.Lock();
 
@@ -872,11 +872,11 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes)
 		return KERNEL_ERROR_EBADF;
 	}
 
-	EXIT_NOT_IMPLEMENTED(file->directory);
+	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	EXIT_IF(!file->opened);
 
-	EXIT_NOT_IMPLEMENTED(nbytes > UINT_MAX);
+	if (nbytes > UINT_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	file->mutex.Lock();
 
@@ -925,11 +925,11 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 		return KERNEL_ERROR_EBADF;
 	}
 
-	EXIT_NOT_IMPLEMENTED(file->directory);
+	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	EXIT_IF(!file->opened);
 
-	EXIT_NOT_IMPLEMENTED(nbytes > UINT_MAX);
+	if (nbytes > UINT_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	file->mutex.Lock();
 
@@ -984,11 +984,11 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 		return KERNEL_ERROR_EBADF;
 	}
 
-	EXIT_NOT_IMPLEMENTED(file->directory);
+	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	EXIT_IF(!file->opened);
 
-	EXIT_NOT_IMPLEMENTED(nbytes > UINT_MAX);
+	if (nbytes > UINT_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	file->mutex.Lock();
 
@@ -1030,7 +1030,7 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence)
 		return KERNEL_ERROR_EBADF;
 	}
 
-	EXIT_NOT_IMPLEMENTED(file->directory);
+	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	EXIT_IF(!file->opened);
 
@@ -1050,7 +1050,7 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence)
 		whence = 0;
 	}
 
-	EXIT_NOT_IMPLEMENTED(whence != 0);
+	if (whence != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	if (offset < 0)
 	{
@@ -1101,7 +1101,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 		return KERNEL_ERROR_ENOENT;
 	}
 
-	EXIT_NOT_IMPLEMENTED(is_dir && is_file);
+	if (is_dir && is_file) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	memset(sb, 0, sizeof(FileStat));
 

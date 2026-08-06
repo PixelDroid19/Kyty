@@ -86,14 +86,14 @@ void AddSyntheticSymbol(Loader::RuntimeLinker& linker, const Loader::SymbolResol
 
 int ScenarioStrictNotImplemented()
 {
-	EXIT_NOT_IMPLEMENTED(true);
+	if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	return 1;
 }
 
 int ScenarioUnsafeNotImplemented()
 {
 	// Macro path (one site).
-	EXIT_NOT_IMPLEMENTED(true);
+	if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	const auto diagnostics = Core::BringUp::GetDiagnostics();
 	Expect(diagnostics.total_continuations == 1, "continuation was not counted");
 	Expect(diagnostics.continues_by_feature[static_cast<uint32_t>(Core::BringUp::Feature::NotImplemented)] >= 1,

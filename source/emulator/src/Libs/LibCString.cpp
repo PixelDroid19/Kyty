@@ -97,7 +97,7 @@ KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 {
 	if (character > 0x7f)
 	{
-		EXIT_NOT_IMPLEMENTED(character > 0x7f);
+		if (character > 0x7f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 		return 0;
 	}
 
@@ -106,7 +106,7 @@ KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 	// change guest control flow without an established ABI contract.
 	if (character_class != 2)
 	{
-		EXIT_NOT_IMPLEMENTED(character_class != 2);
+		if (character_class != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 		return 0;
 	}
 
@@ -118,7 +118,7 @@ KYTY_SYSV_ABI int c_Wctombx(char* dst, uint32_t character, std::mbstate_t* /*sta
 	{
 		return 0;
 	}
-	EXIT_NOT_IMPLEMENTED(character > 0x7f);
+	if (character > 0x7f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	dst[0] = static_cast<char>(character);
 	return 1;
 }
@@ -133,7 +133,7 @@ KYTY_SYSV_ABI int c_Mbtowcx(uint16_t* dst, const char* src, size_t count, std::m
 		return -2;
 	}
 	const auto ch = static_cast<uint8_t>(src[0]);
-	EXIT_NOT_IMPLEMENTED(ch > 0x7f);
+	if (ch > 0x7f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	if (dst != nullptr)
 	{
 		*dst = ch;

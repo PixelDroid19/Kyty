@@ -22,7 +22,7 @@ int KYTY_SYSV_ABI PthreadRwlockDestroy(PthreadRwlock* rwlock)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
+	if (*rwlock == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_rwlock_destroy(&(*rwlock)->p);
 
@@ -95,7 +95,7 @@ int KYTY_SYSV_ABI PthreadRwlockRdlock(PthreadRwlock* rwlock)
 		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
-	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
+	if (*rwlock == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_rwlock_rdlock(&(*rwlock)->p);
 
@@ -125,7 +125,7 @@ int KYTY_SYSV_ABI PthreadRwlockTimedrdlock(PthreadRwlock* rwlock, KernelUseconds
 		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
-	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
+	if (*rwlock == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 #ifdef __APPLE__
 	timespec timeout {};
@@ -167,7 +167,7 @@ int KYTY_SYSV_ABI PthreadRwlockTimedwrlock(PthreadRwlock* rwlock, KernelUseconds
 		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
-	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
+	if (*rwlock == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 #ifdef __APPLE__
 	timespec timeout {};
@@ -209,7 +209,7 @@ int KYTY_SYSV_ABI PthreadRwlockTryrdlock(PthreadRwlock* rwlock)
 		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
-	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
+	if (*rwlock == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_rwlock_tryrdlock(&(*rwlock)->p);
 
@@ -240,7 +240,7 @@ int KYTY_SYSV_ABI PthreadRwlockTrywrlock(PthreadRwlock* rwlock)
 		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
-	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
+	if (*rwlock == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_rwlock_trywrlock(&(*rwlock)->p);
 
@@ -279,7 +279,7 @@ int KYTY_SYSV_ABI PthreadRwlockUnlock(PthreadRwlock* rwlock)
 		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
-	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
+	if (*rwlock == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_rwlock_unlock(&(*rwlock)->p);
 
@@ -318,7 +318,7 @@ int KYTY_SYSV_ABI PthreadRwlockWrlock(PthreadRwlock* rwlock)
 		rwlock = static_cast<PthreadRwlock*>(so->CreateObject(rwlock, PthreadStaticObject::Type::Rwlock));
 	}
 
-	EXIT_NOT_IMPLEMENTED(*rwlock == nullptr);
+	if (*rwlock == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_rwlock_wrlock(&(*rwlock)->p);
 
@@ -342,7 +342,7 @@ int KYTY_SYSV_ABI PthreadRwlockattrDestroy(PthreadRwlockattr* attr)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	EXIT_NOT_IMPLEMENTED(*attr == nullptr);
+	if (*attr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_rwlockattr_destroy(&(*attr)->p);
 

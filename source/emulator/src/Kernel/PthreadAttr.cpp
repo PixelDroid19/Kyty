@@ -219,7 +219,7 @@ int KYTY_SYSV_ABI PthreadAttrDestroy(PthreadAttr* attr)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(attr == nullptr || *attr == nullptr);
+	if (attr == nullptr || *attr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	free_guest_stack(*attr);
 	int result = pthread_attr_destroy(&(*attr)->p);

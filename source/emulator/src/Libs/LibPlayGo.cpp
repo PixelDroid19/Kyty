@@ -65,7 +65,7 @@ int KYTY_SYSV_ABI PlayGoInitialize(const PlayGoInitParams* init)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(init == nullptr);
+	if (init == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t buf_addr = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(init->buf_addr));
 	KYTY_LOG_DEBUG("\t buf_size = %" PRIu32 "\n", init->buf_size);
@@ -85,8 +85,8 @@ int KYTY_SYSV_ABI PlayGoOpen(int* out_handle, const void* param)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(out_handle == nullptr);
-	EXIT_NOT_IMPLEMENTED(param != nullptr);
+	if (out_handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (param != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*out_handle = 1;
 
@@ -103,7 +103,7 @@ int KYTY_SYSV_ABI PlayGoClose(int handle)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	return OK;
 }
@@ -114,11 +114,11 @@ int KYTY_SYSV_ABI PlayGoGetLocus(int handle, const uint16_t* chunk_ids, uint32_t
 
 	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 
-	EXIT_NOT_IMPLEMENTED(handle != 1);
-	EXIT_NOT_IMPLEMENTED(chunk_ids == nullptr);
-	EXIT_NOT_IMPLEMENTED(out_loci == nullptr);
+	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (chunk_ids == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (out_loci == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	// EXIT_NOT_IMPLEMENTED(number_of_entries != 1);
-	EXIT_NOT_IMPLEMENTED(g_chunks_num == 0);
+	if (g_chunks_num == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	for (uint32_t i = 0; i < number_of_entries; i++)
 	{

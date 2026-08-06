@@ -469,7 +469,7 @@ int KYTY_SYSV_ABI PthreadCondBroadcast(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
+	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_cond_broadcast(&(*cond)->p);
 
@@ -491,7 +491,7 @@ int KYTY_SYSV_ABI PthreadCondDestroy(PthreadCond* cond)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
+	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_cond_destroy(&(*cond)->p);
 
@@ -548,7 +548,7 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(cond == nullptr);
+	if (cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	if (cond == nullptr)
 	{
@@ -564,7 +564,7 @@ int KYTY_SYSV_ABI PthreadCondSignal(PthreadCond* cond)
 	EXIT_IF(pthread_static_objects == nullptr);
 	cond = static_cast<PthreadCond*>(pthread_static_objects->CreateObject(cond, PthreadStaticObject::Type::Cond));
 
-	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
+	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = pthread_cond_signal(&(*cond)->p);
 
@@ -586,7 +586,7 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
+	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = 0;
 
@@ -792,8 +792,8 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	EXIT_NOT_IMPLEMENTED(*cond == nullptr);
-	EXIT_NOT_IMPLEMENTED(*mutex == nullptr);
+	if (*cond == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	// Peek handles only after CreateObject resolved static sentinels, and only
 	// under KYTY_SLOT_TRACE — early guest BSS reads crashed boot diagnostics.

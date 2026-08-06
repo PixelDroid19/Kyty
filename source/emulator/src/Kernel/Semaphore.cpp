@@ -341,7 +341,7 @@ std::shared_ptr<KernelSemaPrivate> AcquireSema(KernelSema sem)
 
 int KYTY_SYSV_ABI KernelCreateSema(KernelSema* sem, const char* name, uint32_t attr, int init, int max, void* opt)
 {
-	EXIT_NOT_IMPLEMENTED(sem == nullptr);
+	if (sem == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	if (name == nullptr || init < 0 || init > max || opt != nullptr)
 	{

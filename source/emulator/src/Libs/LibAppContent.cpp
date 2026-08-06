@@ -53,8 +53,8 @@ int KYTY_SYSV_ABI AppContentInitialize(const AppContentInitParam* init_param, Ap
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(init_param == nullptr);
-	EXIT_NOT_IMPLEMENTED(boot_param == nullptr);
+	if (init_param == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (boot_param == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	boot_param->attr = 0;
 
@@ -66,7 +66,7 @@ int KYTY_SYSV_ABI AppContentGetAddcontInfoList(uint32_t service_label, AppConten
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(hit_num == nullptr);
+	if (hit_num == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t service_label = %u\n", service_label);
 	KYTY_LOG_DEBUG("\t list_num      = %u\n", list_num);
@@ -80,7 +80,7 @@ int KYTY_SYSV_ABI AppContentAppParamGetInt(uint32_t param_id, int32_t* value)
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(value == nullptr);
+	if (value == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	*value     = 0;
 	bool found = false;

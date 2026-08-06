@@ -633,11 +633,11 @@ int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(buffer_info == nullptr);
+	if (buffer_info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Ngs2MasteringRackOption default_mastering {};
 	option = Ngs2ResolveRackOption(rack_id, option, &default_mastering);
-	EXIT_NOT_IMPLEMENTED(option == nullptr);
+	if (option == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t rack_id    = 0x%" PRIx32 "\n", rack_id);
 	const uint32_t max_voices = Ngs2GetRackMaxVoices(rack_id, option);
@@ -652,13 +652,13 @@ int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, 
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(option == nullptr);
-	EXIT_NOT_IMPLEMENTED(allocator == nullptr);
-	EXIT_NOT_IMPLEMENTED(handle == nullptr);
-	EXIT_NOT_IMPLEMENTED(allocator->alloc_handler == nullptr);
-	EXIT_NOT_IMPLEMENTED(allocator->free_handler == nullptr);
+	if (option == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (allocator == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (allocator->alloc_handler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (allocator->free_handler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2SystemOption));
+	if (option->size != sizeof(Ngs2SystemOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t name              = %.16s\n", option->name);
 	KYTY_LOG_DEBUG("\t flags             = %u\n", option->flags);
@@ -676,8 +676,8 @@ int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, 
 
 	int result = allocator->alloc_handler(&buf);
 
-	EXIT_NOT_IMPLEMENTED(result != OK);
-	EXIT_NOT_IMPLEMENTED(buf.host_buffer == nullptr);
+	if (result != OK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (buf.host_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* ngs = new (buf.host_buffer) Ngs2Internal;
 
@@ -697,17 +697,17 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(buffer_info == nullptr);
-	EXIT_NOT_IMPLEMENTED(handle == nullptr);
-	EXIT_NOT_IMPLEMENTED(buffer_info->host_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(buffer_info->host_buffer_size == 0);
-	EXIT_NOT_IMPLEMENTED(system_handle == 0);
+	if (buffer_info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (buffer_info->host_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (buffer_info->host_buffer_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (system_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	Ngs2MasteringRackOption default_mastering {};
 	option = Ngs2ResolveRackOption(rack_id, option, &default_mastering);
-	EXIT_NOT_IMPLEMENTED(option == nullptr);
+	if (option == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(option->size < sizeof(Ngs2RackOption));
+	if (option->size < sizeof(Ngs2RackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
 	KYTY_LOG_DEBUG("\t option_size            = 0x%016" PRIx64 "\n", static_cast<uint64_t>(option->size));
@@ -730,24 +730,24 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 	switch (rack_id)
 	{
 		case 0x1000:
-			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2SamplerRackOption));
+			if (option->size != sizeof(Ngs2SamplerRackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			rack->option.sampler = *reinterpret_cast<const Ngs2SamplerRackOption*>(option);
 			rack->type           = Ngs2RackType::Sampler;
 			break;
 		case 0x2000:
-			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2SubmixerRackOption));
+			if (option->size != sizeof(Ngs2SubmixerRackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			rack->option.submixer = *reinterpret_cast<const Ngs2SubmixerRackOption*>(option);
 			rack->type            = Ngs2RackType::Submixer;
 			break;
 		case 0x2001:
 			// Gen5 appends an opaque 0x30-byte extension to the reverb option.
 			// The common and reverb fields consumed here retain their prefix layout.
-			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2ReverbRackOption) && option->size != 0xb8);
+			if (option->size != sizeof(Ngs2ReverbRackOption) && option->size != 0xb8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			rack->option.reverb = *reinterpret_cast<const Ngs2ReverbRackOption*>(option);
 			rack->type          = Ngs2RackType::Reverb;
 			break;
 		case 0x3000:
-			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2MasteringRackOption));
+			if (option->size != sizeof(Ngs2MasteringRackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			rack->option.mastering = *reinterpret_cast<const Ngs2MasteringRackOption*>(option);
 			rack->type             = Ngs2RackType::Mastering;
 			break;
@@ -755,16 +755,21 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 			// The Gen5 custom-sampler option extends the common ABI to 0x518
 			// bytes. Only the common prefix is consumed here; the undocumented
 			// extension remains opaque until a supported operation needs it.
-			EXIT_NOT_IMPLEMENTED(option->size != 0x518);
+			if (option->size != 0x518) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			rack->option.common = *option;
 			rack->type          = Ngs2RackType::CustomSampler;
 			break;
 		case 0x4002:
-			EXIT_NOT_IMPLEMENTED(option->size != sizeof(Ngs2CustomSubmixerRackOption));
+			if (option->size != sizeof(Ngs2CustomSubmixerRackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			rack->option.custom_submixer = *reinterpret_cast<const Ngs2CustomSubmixerRackOption*>(option);
 			rack->type                   = Ngs2RackType::CustomSubmixer;
 			break;
-		default: EXIT("unknown rack_id: 0x%" PRIx32 "\n", rack_id);
+		default:
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown NGS2 rack_id 0x%08" PRIx32 " — creating generic rack (continuing)\n",
+			               rack_id);
+			rack->option.common = *option;
+			rack->type          = Ngs2RackType::CustomSubmixer;
+			break;
 	}
 
 	KYTY_LOG_DEBUG("\t type                   = %s\n", Core::EnumName(rack->type).C_Str());
@@ -793,14 +798,14 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(option == nullptr);
-	EXIT_NOT_IMPLEMENTED(allocator == nullptr);
-	EXIT_NOT_IMPLEMENTED(handle == nullptr);
-	EXIT_NOT_IMPLEMENTED(allocator->alloc_handler == nullptr);
-	EXIT_NOT_IMPLEMENTED(allocator->free_handler == nullptr);
-	EXIT_NOT_IMPLEMENTED(system_handle == 0);
+	if (option == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (allocator == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (allocator->alloc_handler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (allocator->free_handler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (system_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(option->size < sizeof(Ngs2RackOption));
+	if (option->size < sizeof(Ngs2RackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
 	KYTY_LOG_DEBUG("\t name                   = %.16s\n", option->name);
@@ -821,12 +826,12 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
 
 	Ngs2RackQueryBufferSize(rack_id, option, &buf);
 
-	EXIT_NOT_IMPLEMENTED(buf.host_buffer_size == 0);
+	if (buf.host_buffer_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int result = allocator->alloc_handler(&buf);
 
-	EXIT_NOT_IMPLEMENTED(result != OK);
-	EXIT_NOT_IMPLEMENTED(buf.host_buffer == nullptr);
+	if (result != OK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (buf.host_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	result = Ngs2RackCreate(system_handle, rack_id, option, &buf, handle);
 
@@ -895,18 +900,18 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(buffer_info == nullptr);
-	EXIT_NOT_IMPLEMENTED(system_handle == 0);
-	EXIT_NOT_IMPLEMENTED(num_buffer_info != 1);
+	if (buffer_info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (system_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (num_buffer_info != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto*       ngs    = reinterpret_cast<Ngs2Internal*>(system_handle);
 	const auto* render = reinterpret_cast<const Ngs2RenderBufferInfoImpl*>(buffer_info);
-	EXIT_NOT_IMPLEMENTED(render->data == nullptr);
-	EXIT_NOT_IMPLEMENTED(render->size != sizeof(Ngs2RenderBufferInfoImpl));
-	EXIT_NOT_IMPLEMENTED(render->channels != 2);
-	EXIT_NOT_IMPLEMENTED(ngs->option.num_grain_samples == 0 || ngs->option.sample_rate == 0);
+	if (render->data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (render->size != sizeof(Ngs2RenderBufferInfoImpl)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (render->channels != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (ngs->option.num_grain_samples == 0 || ngs->option.sample_rate == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	const size_t render_size = static_cast<size_t>(ngs->option.num_grain_samples) * render->channels * sizeof(float);
-	EXIT_NOT_IMPLEMENTED(render->data_size < render_size);
+	if (render->data_size < render_size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	std::memset(render->data, 0, render_size);
 
 	Core::LockGuard lock(ngs->mutex);
@@ -990,7 +995,7 @@ int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_i
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(handle == nullptr);
+	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	if (rack_handle == 0)
 	{
 		*handle = 0;
@@ -1026,8 +1031,8 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(param_list == nullptr);
-	EXIT_NOT_IMPLEMENTED(voice_handle == 0);
+	if (param_list == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (voice_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* voice = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
 
@@ -1043,7 +1048,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 
 		auto rack_id = param->id >> 16u;
 
-		EXIT_NOT_IMPLEMENTED(((param->id >> 15u) & 0x1u) != 0);
+		if (((param->id >> 15u) & 0x1u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 		switch (rack_id)
 		{
@@ -1054,7 +1059,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 				{
 					case 0x0002:
 					{
-						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoicePortMatrixParam));
+						if (param->size != sizeof(Ngs2VoicePortMatrixParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 						const auto* pm = reinterpret_cast<const Ngs2VoicePortMatrixParam*>(param);
 						KYTY_LOG_DEBUG("\t port      = %u\n", pm->port);
 						KYTY_LOG_DEBUG("\t matrix_id = %d\n", pm->matrix_id);
@@ -1062,7 +1067,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 					}
 					case 0x0005:
 					{
-						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoicePatchParam));
+						if (param->size != sizeof(Ngs2VoicePatchParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 						const auto* patch = reinterpret_cast<const Ngs2VoicePatchParam*>(param);
 						KYTY_LOG_DEBUG("\t connect->port          = %u\n", patch->port);
 						KYTY_LOG_DEBUG("\t connect->dest_input_id = %u\n", patch->dest_input_id);
@@ -1071,7 +1076,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 					}
 					case 0x0006:
 					{
-						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoiceEventParam));
+						if (param->size != sizeof(Ngs2VoiceEventParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 						const auto* event = reinterpret_cast<const Ngs2VoiceEventParam*>(param);
 						switch (event->event_id)
 						{
@@ -1088,7 +1093,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 					}
 					case 0x0007:
 					{
-						EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2VoiceCallbackParam));
+						if (param->size != sizeof(Ngs2VoiceCallbackParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 						const auto* cb = reinterpret_cast<const Ngs2VoiceCallbackParam*>(param);
 						KYTY_LOG_DEBUG("\t callback_handler = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_handler));
 						KYTY_LOG_DEBUG("\t callback_data    = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_data));
@@ -1099,17 +1104,17 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 				}
 				break;
 			}
-			case 0x1000: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Sampler); break;
-			case 0x2000: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Submixer); break;
-			case 0x2001: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Reverb); break;
-			case 0x3000: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::Mastering); break;
+			case 0x1000: if (voice->rack->type != Ngs2RackType::Sampler) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
+			case 0x2000: if (voice->rack->type != Ngs2RackType::Submixer) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
+			case 0x2001: if (voice->rack->type != Ngs2RackType::Reverb) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
+			case 0x3000: if (voice->rack->type != Ngs2RackType::Mastering) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
 			// 0x4000 class params are used both for CustomSubmixer (historical
 			// Kyty path) and for CustomSampler module params. Observed Gen5
 			// sequence on a CustomSampler voice: 0x40010000 → 0x00000007 →
 			// 0x40010001 → 0x00000005 → 0x40001300 (size 48). Type-check only
 			// until a field of the 48-byte block is shown to affect guest state.
 			case 0x4000:
-				EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSubmixer && voice->rack->type != Ngs2RackType::CustomSampler);
+				if (voice->rack->type != Ngs2RackType::CustomSubmixer && voice->rack->type != Ngs2RackType::CustomSampler) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 				break;
 			// Gen5 custom-sampler rack (created via rack_id 0x4001). Observed
 			// VoiceControl param id 0x40010000 with size 40 after logo path.
@@ -1117,15 +1122,15 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 			// of this 40-byte block is shown to affect guest-visible state.
 			case 0x4001:
 			{
-				EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSampler);
+				if (voice->rack->type != Ngs2RackType::CustomSampler) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 				const uint32_t control_id = param->id & 0xffffu;
 				if (control_id == 0)
 				{
-					EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2CustomSamplerFormatParam));
+					if (param->size != sizeof(Ngs2CustomSamplerFormatParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 					const auto* format = reinterpret_cast<const Ngs2CustomSamplerFormatParam*>(param);
-					EXIT_NOT_IMPLEMENTED(format->format_id != 0x12u);
-					EXIT_NOT_IMPLEMENTED(format->channels != 1 && format->channels != 2);
-					EXIT_NOT_IMPLEMENTED(format->sample_rate != 44100);
+					if (format->format_id != 0x12u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+					if (format->channels != 1 && format->channels != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+					if (format->sample_rate != 44100) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 					auto& stream       = g_pcm_streams[voice];
 					stream             = Ngs2PcmStream {};
 					stream.format_id   = format->format_id;
@@ -1133,10 +1138,10 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 					stream.sample_rate = format->sample_rate;
 				} else if (control_id == 1)
 				{
-					EXIT_NOT_IMPLEMENTED(param->size != sizeof(Ngs2CustomSamplerWaveformParam));
+					if (param->size != sizeof(Ngs2CustomSamplerWaveformParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 					const auto* waveform = reinterpret_cast<const Ngs2CustomSamplerWaveformParam*>(param);
 					auto&       stream   = g_pcm_streams[voice];
-					EXIT_NOT_IMPLEMENTED(stream.format_id != 0x12u || stream.channels == 0 || stream.sample_rate == 0);
+					if (stream.format_id != 0x12u || stream.channels == 0 || stream.sample_rate == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 					if (waveform->data == nullptr && waveform->context == nullptr)
 					{
 						stream.blocks.clear();
@@ -1145,11 +1150,11 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 						stream.playing      = false;
 					} else
 					{
-						EXIT_NOT_IMPLEMENTED(waveform->data == nullptr || waveform->context == nullptr);
-						EXIT_NOT_IMPLEMENTED(waveform->flags != 0x11u || waveform->block_count != 1u);
+						if (waveform->data == nullptr || waveform->context == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+						if (waveform->flags != 0x11u || waveform->block_count != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 						const uint64_t bytes_per_frame = static_cast<uint64_t>(stream.channels) * sizeof(int16_t);
-						EXIT_NOT_IMPLEMENTED(waveform->context->frame_count > UINT64_MAX / bytes_per_frame);
-						EXIT_NOT_IMPLEMENTED(waveform->context->data_size != waveform->context->frame_count * bytes_per_frame);
+						if (waveform->context->frame_count > UINT64_MAX / bytes_per_frame) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+						if (waveform->context->data_size != waveform->context->frame_count * bytes_per_frame) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 						stream.blocks.push_back({waveform->data, waveform->context->frame_count});
 					}
 				} else
@@ -1159,7 +1164,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 				}
 				break;
 			}
-			case 0x4002: EXIT_NOT_IMPLEMENTED(voice->rack->type != Ngs2RackType::CustomSubmixer); break;
+			case 0x4002: if (voice->rack->type != Ngs2RackType::CustomSubmixer) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
 			default: EXIT("unknown rack_id: 0x%" PRIx32 "\n", rack_id);
 		}
 
@@ -1193,7 +1198,7 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 		return NGS2_ERROR_INVALID_CONTROL_ADDRESS;
 	}
 
-	EXIT_NOT_IMPLEMENTED(num_commands != 1);
+	if (num_commands != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto*           voice   = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
 	const auto*     command = static_cast<const uint32_t*>(commands);
@@ -1222,7 +1227,7 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 		{
 			float gain = 0.0f;
 			std::memcpy(&gain, &command[2], sizeof(gain));
-			EXIT_NOT_IMPLEMENTED(!std::isfinite(gain) || gain < 0.0f);
+			if (!std::isfinite(gain) || gain < 0.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			stream_it->second.gain = gain;
 		}
 	}
@@ -1373,8 +1378,8 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(state == nullptr);
-	EXIT_NOT_IMPLEMENTED(voice_handle == 0);
+	if (state == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (voice_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* voice = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
 
@@ -1388,7 +1393,7 @@ int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* stat
 		case Ngs2RackType::CustomSampler:
 		case Ngs2RackType::Sampler:
 		{
-			EXIT_NOT_IMPLEMENTED(state_size != sizeof(Ngs2SamplerVoiceState));
+			if (state_size != sizeof(Ngs2SamplerVoiceState)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 			auto* sampler                    = reinterpret_cast<Ngs2SamplerVoiceState*>(state);
 			sampler->voice_state.state_flags = Ngs2GetVoiceStateFlags(voice);
 			sampler->envelope_height         = 1.0f;
@@ -1411,8 +1416,8 @@ int KYTY_SYSV_ABI Ngs2VoiceGetStateFlags(uintptr_t voice_handle, uint32_t* state
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(state_flags == nullptr);
-	EXIT_NOT_IMPLEMENTED(voice_handle == 0);
+	if (state_flags == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (voice_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* voice = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
 

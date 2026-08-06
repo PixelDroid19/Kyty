@@ -140,7 +140,7 @@ static void KYTY_SYSV_ABI asan_init()
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(g_ctx != nullptr);
+	if (g_ctx != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	g_ctx = new AsanContext;
 

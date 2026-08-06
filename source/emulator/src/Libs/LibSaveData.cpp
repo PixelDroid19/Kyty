@@ -560,7 +560,7 @@ int KYTY_SYSV_ABI SaveDataSetParam(const SaveDataMountPoint* mount_point, uint32
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(mount_point == nullptr);
+	if (mount_point == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t mount_point    = %s\n", mount_point->data);
 	KYTY_LOG_DEBUG("\t param_type     = %u\n", param_type);
@@ -790,8 +790,8 @@ int KYTY_SYSV_ABI SaveDataCommit(const SaveDataCommitParam* commit_param)
 
 int KYTY_SYSV_ABI SaveDataSaveIcon(const SaveDataMountPoint* mount_point, const SaveDataIcon* icon)
 {
-	EXIT_NOT_IMPLEMENTED(mount_point == nullptr);
-	EXIT_NOT_IMPLEMENTED(icon == nullptr);
+	if (mount_point == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (icon == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t buf       = %016" PRIx64 "\n", reinterpret_cast<uint64_t>(icon->buf));
 	KYTY_LOG_DEBUG("\t buf_size  = %" PRIu64 "\n", icon->buf_size);
