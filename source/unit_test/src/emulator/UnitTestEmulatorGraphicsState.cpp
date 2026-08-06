@@ -1247,16 +1247,22 @@ TEST(EmulatorGraphicsState, BlitInitializesUndefinedSource)
 	EXPECT_FALSE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL));
 }
 
-TEST(EmulatorGraphicsState, MapsColorExportComponents)
+TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)
 {
-	EXPECT_EQ(ShaderColorExportSourceComponent(0, 0), 0u);
-	EXPECT_EQ(ShaderColorExportSourceComponent(0, 3), 3u);
-	EXPECT_EQ(ShaderColorExportSourceComponent(1, 0), 2u);
-	EXPECT_EQ(ShaderColorExportSourceComponent(1, 3), 3u);
-	EXPECT_EQ(ShaderColorExportSourceComponent(2, 0), 3u);
-	EXPECT_EQ(ShaderColorExportSourceComponent(2, 3), 0u);
-	EXPECT_EQ(ShaderColorExportSourceComponent(3, 0), 3u);
-	EXPECT_EQ(ShaderColorExportSourceComponent(3, 3), 2u);
+	for (uint32_t channel_order = 0; channel_order < 4; channel_order++)
+	{
+		for (uint32_t component = 0; component < 4; component++)
+		{
+			EXPECT_EQ(ShaderColorExportSourceComponent(channel_order, component), component);
+		}
+	}
+}
+
+TEST(EmulatorGraphicsState, ResolvesObservedTwoChannelFloatRenderTarget)
+{
+	const auto format = ResolveRenderTextureFormat(0x5u, 0x7u, 0x0u);
+	EXPECT_EQ(format.format, RenderTextureFormat::R16G16Sfloat);
+	EXPECT_EQ(format.bytes_per_element, 4u);
 }
 
 TEST(EmulatorGraphicsState, DecodesGenericScissorHalves)
@@ -1410,8 +1416,8 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(75), 16u);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 133), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 173), VK_FORMAT_BC3_UNORM_BLOCK);
-	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 56), VK_FORMAT_UNDEFINED);
-	EXPECT_FALSE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, 56));
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_TRUE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, 56));
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(173), 16u);
 	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(173, VK_FORMAT_BC3_UNORM_BLOCK));
 	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(173, VK_FORMAT_R32G32B32A32_UINT));

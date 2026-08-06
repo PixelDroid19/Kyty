@@ -191,18 +191,6 @@ static bool spirv_uses_mbcnt(const ShaderCode& code)
 	       code.HasAnyOf({ShaderInstructionType::VMbcntLoU32B32, ShaderInstructionType::VMbcntHiU32B32});
 }
 
-static bool spirv_uses_image_predication(const ShaderCode& code)
-{
-	for (const auto& inst: code.GetInstructions())
-	{
-		if (IsImageInstruction(inst) && inst.dst.type == ShaderOperandType::Vgpr)
-		{
-			return true;
-		}
-	}
-	return false;
-}
-
 static bool spirv_uses_buffer_atomics(const ShaderCode& code)
 {
 	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd});
@@ -290,7 +278,7 @@ static bool spirv_uses_wave_branch_vote(const ShaderCode& code)
 static bool spirv_uses_subgroup_invocation(const ShaderCode& code)
 {
 	return spirv_uses_dpp(code) || spirv_uses_buffer_descriptor_addressing(code) || spirv_uses_readfirstlane(code) ||
-	       spirv_uses_lane_exchange(code) || spirv_uses_mbcnt(code) || spirv_uses_image_predication(code);
+	       spirv_uses_lane_exchange(code) || spirv_uses_mbcnt(code);
 }
 
 void Spirv::WriteHeader()

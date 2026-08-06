@@ -189,16 +189,11 @@ uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t outpu
 	EXIT_NOT_IMPLEMENTED(channel_order > 3);
 	EXIT_NOT_IMPLEMENTED(output_component > 3);
 
-	// CB_COLORn_INFO.COMP_SWAP selects the component order consumed by the
-	// export instruction. Keep the mapping in one place so the SPIR-V emitter
-	// and Vulkan attachment format cannot silently disagree.
-	constexpr uint8_t kSourceComponents[4][4] = {
-	    {0, 1, 2, 3}, // RGBA
-	    {2, 1, 0, 3}, // BGRA
-	    {3, 2, 1, 0}, // ABGR
-	    {3, 0, 1, 2}, // ARGB
-	};
-	return kSourceComponents[channel_order][output_component];
+	// The attachment VkFormat and image view own physical component order.
+	// Shader exports remain logical RGBA; applying COMP_SWAP here as well would
+	// swap the same components twice in render-to-texture feedback passes.
+	(void)channel_order;
+	return output_component;
 }
 
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)

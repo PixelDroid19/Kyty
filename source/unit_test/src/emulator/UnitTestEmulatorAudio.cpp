@@ -18,6 +18,15 @@ UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
 
+TEST(EmulatorAudio, AudioOut2UserCreateUsesTwoArgumentPointerSizedHandleAbi)
+{
+	using ExpectedCreate = int(KYTY_SYSV_ABI*)(uint32_t, uintptr_t*);
+	using ExpectedDestroy = int(KYTY_SYSV_ABI*)(uintptr_t);
+
+	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2UserCreate), ExpectedCreate>));
+	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2UserDestroy), ExpectedDestroy>));
+}
+
 TEST(EmulatorAudio, OpensDecoderThroughCanonicalNamespaceWithoutPrivateMedia)
 {
 	std::string error;

@@ -193,6 +193,10 @@ struct ModuleStartDescriptor
 // C++ module constructors that call operator new during startup.
 Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules);
 
+// Native service modules consume the platform module-start descriptor when
+// the caller does not provide explicit arguments.
+[[nodiscard]] bool LoaderModuleUsesNativeStartParam(const String& file_name);
+
 // Decode the captured GNU EH-frame header form (version 1, pcrel+sdata4).
 // readable_end is the exclusive bound of the mapped readable range.
 bool LoaderDecodeEhFrameHeader(const uint8_t* header, size_t header_size, uint64_t header_addr, uint64_t readable_end,

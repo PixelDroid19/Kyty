@@ -56,8 +56,8 @@ int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port);
 int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr);
 // sceAudioOut2PortGetState (NID gatEUKG+Ea4): 0x20-byte guest state blob.
 int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out);
-int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* user_out);
-int KYTY_SYSV_ABI AudioOut2UserDestroy(int32_t user);
+int KYTY_SYSV_ABI AudioOut2UserCreate(uint32_t user_id, uintptr_t* user_out);
+int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user);
 
 } // namespace AudioOut2
 

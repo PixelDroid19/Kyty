@@ -3068,6 +3068,11 @@ TEST(EmulatorGraphicsPackets, ParsesAndMaterializesImageSampleDmaskA)
 
 	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_1"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_Function_float %temp_v4float %uint_3"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint %exec_lo"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%image_exec_active_0 = OpINotEqual %bool %image_exec_value_0 %uint_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("BuiltIn SubgroupLocalInvocationId"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%image_exec_lane_"), Core::STRING8_INVALID_INDEX);
 }
 
 // Captured Gen5 MIMG-NSA image_sample instructions. The third dword supplies

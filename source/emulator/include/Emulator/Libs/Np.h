@@ -120,6 +120,8 @@ int KYTY_SYSV_ABI CreateContext(int32_t* context, int32_t user_id, uint32_t serv
 int KYTY_SYSV_ABI CreateHandle(int32_t* handle);
 int KYTY_SYSV_ABI RegisterContext(int32_t context, int32_t handle, uint64_t options);
 int KYTY_SYSV_ABI RegisterUnlockCallback(void* callback, void* userdata);
+int KYTY_SYSV_ABI GetGameInfo(int32_t context, int32_t handle, void* details, void* data);
+int KYTY_SYSV_ABI GetTrophyInfo(int32_t context, int32_t handle, int32_t trophy_id, void* details, void* data);
 
 } // namespace Kyty::Libs::NpTrophy2
 

@@ -19,6 +19,7 @@ enum class RenderTextureFormat : uint64_t
 	B8G8R8A8Unorm,
 	B8G8R8A8Srgb,
 	R16Sfloat,
+	R16G16Sfloat,
 	R32Sfloat,
 	B10G11R11Ufloat,
 	R16G16B16A16Unorm,

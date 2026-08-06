@@ -619,11 +619,10 @@ int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out)
 }
 
 // sceAudioOut2UserCreate (NID xywYcRB7nbQ)
-int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* user_out)
+int KYTY_SYSV_ABI AudioOut2UserCreate(uint32_t user_id, uintptr_t* user_out)
 {
 	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t user_id  = %d\n", user_id);
-	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
+	KYTY_LOG_DEBUG("\t user_id  = %u\n", user_id);
 	KYTY_LOG_DEBUG("\t user_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_out));
 	if (user_out == nullptr)
 	{
@@ -636,22 +635,22 @@ int KYTY_SYSV_ABI AudioOut2UserCreate(int user_id, const void* param, int32_t* u
 	{
 		return LibKernel::KERNEL_ERROR_EFAULT;
 	}
-	const int32_t id = AllocUser(user_id);
+	const int32_t id = AllocUser(static_cast<int>(user_id));
 	if (id == 0)
 	{
 		return LibKernel::KERNEL_ERROR_ENOMEM;
 	}
-	*user_out = id;
+	*user_out = static_cast<uintptr_t>(id);
 	KYTY_LOG_DEBUG("\t user     = %d\n", id);
 	return OK;
 }
 
 // sceAudioOut2UserDestroy (NID IaZXJ9M79uo)
-int KYTY_SYSV_ABI AudioOut2UserDestroy(int32_t user)
+int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user)
 {
 	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t user = %d\n", user);
-	if (user < 1 || user > kMaxUsers || !g_users[user - 1].used)
+	KYTY_LOG_DEBUG("\t user = 0x%016" PRIxPTR "\n", user);
+	if (user < 1 || user > static_cast<uintptr_t>(kMaxUsers) || !g_users[user - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}

@@ -3,6 +3,8 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include "Kyty/Core/VirtualMemory.h"
+
 #include <atomic>
 #include <cstring>
 
@@ -72,24 +74,42 @@ int KYTY_SYSV_ABI UnregisterUnlockCallback(void* /*callback*/)
 	return OK;
 }
 
-int KYTY_SYSV_ABI GetGameInfo(int32_t context, void* game_info)
+namespace {
+
+constexpr uint64_t kGameDetailsSize   = 152;
+constexpr uint64_t kGameDataSize      = 24;
+constexpr uint64_t kTrophyDetailsSize = 1312;
+constexpr uint64_t kTrophyDataSize    = 32;
+
+bool IsMappedOutput(void* output, uint64_t size)
 {
-	if (context <= 0 || game_info == nullptr)
+	return output != nullptr && Core::VirtualMemory::IsRangeReadable(reinterpret_cast<uint64_t>(output), size);
+}
+
+} // namespace
+
+int KYTY_SYSV_ABI GetGameInfo(int32_t context, int32_t handle, void* details, void* data)
+{
+	if (context <= 0 || handle <= 0 || !IsMappedOutput(details, kGameDetailsSize) || !IsMappedOutput(data, kGameDataSize))
 	{
 		return error_invalid_argument;
 	}
-	std::memset(game_info, 0, 0x40);
+	std::memset(details, 0, kGameDetailsSize);
+	std::memset(data, 0, kGameDataSize);
 	return OK;
 }
 
-int KYTY_SYSV_ABI GetTrophyInfo(int32_t context, int32_t trophy_id, void* trophy_info)
+int KYTY_SYSV_ABI GetTrophyInfo(int32_t context, int32_t handle, int32_t trophy_id, void* details, void* data)
 {
-	if (context <= 0 || trophy_info == nullptr)
+	if (context <= 0 || handle <= 0 || trophy_id < 0 || !IsMappedOutput(details, kTrophyDetailsSize) ||
+	    !IsMappedOutput(data, kTrophyDataSize))
 	{
 		return error_invalid_argument;
 	}
-	(void)trophy_id;
-	std::memset(trophy_info, 0, 0x80);
+	std::memset(details, 0, kTrophyDetailsSize);
+	std::memset(data, 0, kTrophyDataSize);
+	std::memcpy(details, &trophy_id, sizeof(trophy_id));
+	std::memcpy(data, &trophy_id, sizeof(trophy_id));
 	return OK;
 }
 

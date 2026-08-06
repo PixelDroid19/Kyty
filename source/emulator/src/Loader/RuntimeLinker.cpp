@@ -301,6 +301,13 @@ struct NativeModuleStartParam
 
 static const NativeModuleStartParam g_native_module_start_param {0x10u, 0x200u, 0};
 
+bool LoaderModuleUsesNativeStartParam(const String& file_name)
+{
+	const String name = file_name.FilenameWithoutDirectory();
+	return name.EqualNoCase(U"PSN.prx") || name.EqualNoCase(U"PSNCore.prx") || name.EqualNoCase(U"PSNCommon.prx") ||
+	       name.EqualNoCase(U"SaveData.prx") || name.EqualNoCase(U"PS5EntitlementsPlugin.prx");
+}
+
 static bool NeedsNativeModuleStartParam(const Program* program)
 {
 	if (program == nullptr)
@@ -308,9 +315,7 @@ static bool NeedsNativeModuleStartParam(const Program* program)
 		return false;
 	}
 
-	const String name = program->file_name.FilenameWithoutDirectory();
-	return name.EqualNoCase(U"PSN.prx") || name.EqualNoCase(U"PSNCore.prx") || name.EqualNoCase(U"PSNCommon.prx") ||
-	       name.EqualNoCase(U"SaveData.prx");
+	return LoaderModuleUsesNativeStartParam(program->file_name);
 }
 
 static void NormalizeModuleStartArguments(const Program* program, size_t* args, const void** argp)

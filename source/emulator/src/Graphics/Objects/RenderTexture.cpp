@@ -30,6 +30,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R32Sfloat, 4};
 	}
+	if (format == 0x5u && channel_type == 0x7u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R16G16Sfloat, 4};
+	}
 	if (format == 0x6u && channel_type == 0x7u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::B10G11R11Ufloat, 4};
@@ -242,6 +246,7 @@ static VkFormat resolve_render_texture_format(uint64_t format)
 		case RenderTextureFormat::B8G8R8A8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
 		case RenderTextureFormat::B8G8R8A8Srgb: return VK_FORMAT_B8G8R8A8_SRGB;
 		case RenderTextureFormat::R16Sfloat: return VK_FORMAT_R16_SFLOAT;
+		case RenderTextureFormat::R16G16Sfloat: return VK_FORMAT_R16G16_SFLOAT;
 		case RenderTextureFormat::R32Sfloat: return VK_FORMAT_R32_SFLOAT;
 		case RenderTextureFormat::B10G11R11Ufloat: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
 		case RenderTextureFormat::R16G16B16A16Unorm: return VK_FORMAT_R16G16B16A16_UNORM;

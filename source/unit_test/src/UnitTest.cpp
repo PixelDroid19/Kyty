@@ -31,6 +31,7 @@ UT_LINK(EmulatorLibCTime);
 UT_LINK(EmulatorGraphicsPackets);
 UT_LINK(EmulatorKernelProcess);
 UT_LINK(EmulatorNp);
+UT_LINK(EmulatorNpTrophy2);
 UT_LINK(EmulatorLibcPrintf);
 UT_LINK(EmulatorLibcMemalign);
 UT_LINK(EmulatorLibcCxaDynamicCast);

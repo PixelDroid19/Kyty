@@ -428,17 +428,8 @@ String8 GuardImageDestinationStores(const String8& source, const ShaderInstructi
 
 	const std::string suffix = std::to_string(index);
 	const std::string prefix =
-	    "        %image_exec_lane_" + suffix + " = OpLoad %uint %gl_SubgroupInvocationID\n" +
-	    "        %image_exec_lane_lt32_" + suffix + " = OpULessThan %bool %image_exec_lane_" + suffix + " %uint_32\n" +
-	    "        %image_exec_lane_mod_" + suffix + " = OpBitwiseAnd %uint %image_exec_lane_" + suffix + " %uint_31\n" +
-	    "        %image_exec_word_lo_" + suffix + " = OpLoad %uint %exec_lo\n" +
-	    "        %image_exec_word_hi_" + suffix + " = OpLoad %uint %exec_hi\n" +
-	    "        %image_exec_word_" + suffix + " = OpSelect %uint %image_exec_lane_lt32_" + suffix +
-	    " %image_exec_word_lo_" + suffix + " %image_exec_word_hi_" + suffix + "\n" +
-	    "        %image_exec_bit_" + suffix + " = OpShiftLeftLogical %uint %uint_1 %image_exec_lane_mod_" + suffix + "\n" +
-	    "        %image_exec_masked_" + suffix + " = OpBitwiseAnd %uint %image_exec_word_" + suffix +
-	    " %image_exec_bit_" + suffix + "\n" +
-	    "        %image_exec_active_" + suffix + " = OpINotEqual %bool %image_exec_masked_" + suffix + " %uint_0\n";
+	    "        %image_exec_value_" + suffix + " = OpLoad %uint %exec_lo\n" +
+	    "        %image_exec_active_" + suffix + " = OpINotEqual %bool %image_exec_value_" + suffix + " %uint_0\n";
 	return String8((prefix + output).c_str());
 }
 

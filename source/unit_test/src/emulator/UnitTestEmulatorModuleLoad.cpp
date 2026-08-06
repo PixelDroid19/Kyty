@@ -467,6 +467,16 @@ TEST(EmulatorModuleLoad, BuildPlanRejectsExtensionOnlyAdjacentJunk)
 	EXPECT_STREQ(plan.diag.rejections[0], "reject not_shared_elf sce_module/libc.prx");
 }
 
+TEST(EmulatorModuleLoad, RecognizesNativeServiceModuleStartContract)
+{
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"/system/common/lib/PSN.prx"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCore.prx"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"PSNCommon.prx"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"SaveData.prx"));
+	EXPECT_TRUE(LoaderModuleUsesNativeStartParam(U"Media/Plugins/PS5EntitlementsPlugin.prx"));
+	EXPECT_FALSE(LoaderModuleUsesNativeStartParam(U"Media/Plugins/UnrelatedPlugin.prx"));
+}
+
 TEST(EmulatorModuleLoad, ResolvePrefersLoadedModuleExportOverHleForSameIdentity)
 {
 	RuntimeLinker rt;
@@ -1008,4 +1018,3 @@ TEST(EmulatorModuleLoad, LibkernelReadAliasReadsRegularFileDescriptor)
 UT_END();
 
 #endif // KYTY_EMU_ENABLED
-
