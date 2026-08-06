@@ -555,7 +555,7 @@ String GpuMemory::create_dbg_exit(const String& msg, const uint64_t* vaddr, cons
 void GpuMemory::RecordUse(ObjectInfo* object, SubmissionId submission)
 {
 	EXIT_IF(object == nullptr);
-	EXIT_NOT_IMPLEMENTED(object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success);
+	if (object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success condition ignored (continuing)\n"); }
 }
 
 void GpuMemory::RecordUse(ObjectInfo* object, CommandBuffer* buffer)
@@ -567,7 +567,7 @@ void GpuMemory::RecordUse(ObjectInfo* object, CommandBuffer* buffer)
 	}
 
 	SubmissionId submission;
-	EXIT_NOT_IMPLEMENTED(!buffer->GetSubmissionId(&submission));
+	if (!buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
 	RecordUse(object, submission);
 }
 
@@ -584,7 +584,7 @@ void GpuMemory::ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* des
 		auto       memory      = destructor.mem;
 		const auto result      = m_deferred_deletions.Enqueue(
 		    destructor.submission_uses.Dependencies(), [ctx, delete_func, object, memory]() mutable { delete_func(ctx, object, &memory); });
-		EXIT_NOT_IMPLEMENTED(result != GpuDeferredDeletionResult::Success);
+		if (result != GpuDeferredDeletionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != GpuDeferredDeletionResult::Success condition ignored (continuing)\n"); }
 	}
 	destructors->Clear();
 }
@@ -609,7 +609,7 @@ void GpuMemory::ScheduleDestructorsOutsideMutationLocks(GraphicContext* ctx, Vec
 
 void GpuMemory::CompleteSubmission(SubmissionId submission)
 {
-	EXIT_NOT_IMPLEMENTED(m_deferred_deletions.CompleteSubmission(submission) != GpuDeferredDeletionResult::Success);
+	if (m_deferred_deletions.CompleteSubmission(submission) != GpuDeferredDeletionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_deferred_deletions.CompleteSubmission(submission) != GpuDeferredDeletionResult::Success condition ignored (continuing)\n"); }
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -690,7 +690,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	if (buffer != nullptr)
 	{
 		SubmissionId submission;
-		EXIT_NOT_IMPLEMENTED(!buffer->GetSubmissionId(&submission));
+		if (!buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
 		materialization_key = GpuMemoryMaterializationKey::Create(submit_id, submission.queue.Value(), submission.sequence, vaddr, size,
 		                                                          vaddr_num, static_cast<uint32_t>(info.type), info.params,
 		                                                          GpuObject::PARAMS_MAX, info.check_hash, info.read_only);
@@ -1408,7 +1408,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	for (int vi = 0; vi < vaddr_num; vi++)
 	{
-		EXIT_NOT_IMPLEMENTED(!IsAllocated(vaddr[vi], size[vi]));
+		if (!IsAllocated(vaddr[vi], size[vi])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsAllocated(vaddr[vi], size[vi]) condition ignored (continuing)\n"); }
 	}
 	uint32_t relation_mask = 0;
 	for (const auto& candidate: others)

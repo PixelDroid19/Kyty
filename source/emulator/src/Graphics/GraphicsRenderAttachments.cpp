@@ -114,9 +114,9 @@ void GraphicsRenderDepthStencilBarrier(VkCommandBuffer vk_buffer, VulkanImage* i
 		VkSampleLocationsInfoEXT sample_location_info {};
 		if (custom_sample_locations)
 		{
-			EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsEnabled(depth_image->last_sample_locations));
-			EXIT_NOT_IMPLEMENTED(
-			    !VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations, sample_location_values, &sample_location_info));
+			if (!VulkanSampleLocationsEnabled(depth_image->last_sample_locations)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanSampleLocationsEnabled(depth_image->last_sample_locations) condition ignored (continuing)\n"); }
+			if (
+			    !VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations, sample_location_values, &sample_location_info)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations, sample_lo condition ignored (continuing)\n"); }
 		}
 
 		VkImageMemoryBarrier image_memory_barrier {};
@@ -303,10 +303,10 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 		r->samples = decode_guest_sample_count(z.z_info.num_samples);
 		if (ps5)
 		{
-			EXIT_NOT_IMPLEMENTED(!depth_extent.valid);
+			if (!depth_extent.valid) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !depth_extent.valid condition ignored (continuing)\n"); }
 			bool size_found = TileGetDepthSize(depth_extent.width, depth_extent.height, 0, z.z_info.format, effective_stencil, htile, true, true,
 			                                   &stencil_size, &htile_size, &depth_size);
-			EXIT_NOT_IMPLEMENTED(!size_found);
+			if (!size_found) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !size_found condition ignored (continuing)\n"); }
 		} else
 		{
 			uint32_t size  = 0;
@@ -327,7 +327,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 				depth_size.align = neo ? 65536 : 32768;
 			} else
 			{
-				EXIT_NOT_IMPLEMENTED(depth_size.size != size);
+				if (depth_size.size != size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth_size.size != size condition ignored (continuing)\n"); }
 			}
 		}
 	}
@@ -359,7 +359,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 	r->depth_bounds_test_enable = dc.depth_bounds_enable;
 	r->depth_min_bounds         = 0.0f;
 	r->depth_max_bounds         = 0.0f;
-	EXIT_NOT_IMPLEMENTED(r->depth_bounds_test_enable);
+	if (r->depth_bounds_test_enable) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->depth_bounds_test_enable condition ignored (continuing)\n"); }
 
 	r->stencil_clear_enable = rc.stencil_clear_enable;
 	r->stencil_clear_value  = hw.GetStencilClearValue();
@@ -408,9 +408,9 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 		// must observe the same image allocation and its accumulated contents.
 		r->sampled = true;
 
-		EXIT_NOT_IMPLEMENTED(z.z_info.tile_mode_index != 0 && r->depth_tile_swizzle != 0);
-		EXIT_NOT_IMPLEMENTED(r->stencil_tile_swizzle != 0);
-		EXIT_NOT_IMPLEMENTED(r->htile_tile_swizzle != 0);
+		if (z.z_info.tile_mode_index != 0 && r->depth_tile_swizzle != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: z.z_info.tile_mode_index != 0 && r->depth_tile_swizzle != 0 condition ignored (continuing)\n"); }
+		if (r->stencil_tile_swizzle != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->stencil_tile_swizzle != 0 condition ignored (continuing)\n"); }
+		if (r->htile_tile_swizzle != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->htile_tile_swizzle != 0 condition ignored (continuing)\n"); }
 
 		r->vaddr_num = 0;
 
@@ -435,7 +435,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r)
 			r->vaddr_num++;
 		}
 
-		EXIT_NOT_IMPLEMENTED(r->vaddr_num == 0);
+		if (r->vaddr_num == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vaddr_num == 0 condition ignored (continuing)\n"); }
 		r->update_compression_state = ((cc.mode == 0 && cc.op == 0xCC) || (dc.z_enable || dc.z_write_enable));
 		r->compressed_after_draw    = htile && !decompress;
 	}
@@ -462,11 +462,11 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	                                            sample_locations_compatible);
 	r->vulkan_buffer = static_cast<DepthStencilVulkanImage*>(
 	    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, r->vaddr, r->size, r->vaddr_num, vulkan_buffer_info));
-	EXIT_NOT_IMPLEMENTED(r->vulkan_buffer == nullptr);
+	if (r->vulkan_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->vulkan_buffer == nullptr condition ignored (continuing)\n"); }
 	if (sample_locations_compatible && !r->vulkan_buffer->sample_locations_compatible)
 	{
 		KYTY_LOG_DEBUG( "KYTY_GRAPHICS: depth image was created without custom sample-location compatibility\n");
-		EXIT_NOT_IMPLEMENTED(!r->vulkan_buffer->sample_locations_compatible);
+		if (!r->vulkan_buffer->sample_locations_compatible) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !r->vulkan_buffer->sample_locations_compatible condition ignored (continuing)\n"); }
 	}
 
 	if (r->htile && DepthMetaConsumeClear(r->htile_buffer_vaddr))
@@ -531,7 +531,7 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		} else
 		{
 			attachment.pitch = TileAlign64KBPitch(attachment.width, rt_bpp);
-			EXIT_NOT_IMPLEMENTED(attachment.pitch == 0u);
+			if (attachment.pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.pitch == 0u condition ignored (continuing)\n"); }
 		}
 
 		Graphics::TileSizeAlign size32 {};
@@ -586,20 +586,20 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 	} else
 	{
 		// Display buffers can also be HDR 16:16:16:16 float (0xC, UE4 titles).
-		EXIT_NOT_IMPLEMENTED(!((rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type == 0x0) &&
+		if (!((rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type == 0x0) &&
 		                        (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x1)) ||
 		                       (rt.info.format == 0xc && rt.info.channel_type == 0x7 &&
-		                        (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x1 || rt.info.channel_order == 0x2))));
+		                        (rt.info.channel_order == 0x0 || rt.info.channel_order == 0x1 || rt.info.channel_order == 0x2)))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !((rt.info.format == 0xa && (rt.info.channel_type == 0x6 || rt.info.channel_type condition ignored (continuing)\n"); }
 
 		// Display buffer (single swapchain target only).
-		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
-		EXIT_NOT_IMPLEMENTED(attachment.samples != VK_SAMPLE_COUNT_1_BIT);
+		if (r->targets_num != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->targets_num != 1 condition ignored (continuing)\n"); }
+		if (attachment.samples != VK_SAMPLE_COUNT_1_BIT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.samples != VK_SAMPLE_COUNT_1_BIT condition ignored (continuing)\n"); }
 		// HDR display: the render-target tiling (tile 0x1b) and the display
 		// tiling (doubled 4bpp table) sizes legitimately differ; the display
 		// buffer is the authoritative backing, so only the pitch must match.
 		const bool hdr_display = (render_format.format == RenderTextureFormat::R16G16B16A16Sfloat);
-		EXIT_NOT_IMPLEMENTED(!hdr_display && video_image.buffer_size != attachment.size);
-		EXIT_NOT_IMPLEMENTED(video_image.buffer_pitch != attachment.pitch);
+		if (!hdr_display && video_image.buffer_size != attachment.size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !hdr_display && video_image.buffer_size != attachment.size condition ignored (continuing)\n"); }
+		if (video_image.buffer_pitch != attachment.pitch) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: video_image.buffer_pitch != attachment.pitch condition ignored (continuing)\n"); }
 		attachment.type                 = RenderColorType::DisplayBuffer;
 		attachment.base_addr            = rt.base.addr;
 		attachment.existing_video_image = video_image.image;
@@ -614,8 +614,8 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 static void CopyRenderColorSlot(RenderColorInfo* dst, uint32_t dst_slot, const RenderColorInfo& src)
 {
 	EXIT_IF(dst == nullptr);
-	EXIT_NOT_IMPLEMENTED(dst_slot >= RenderColorInfo::TARGETS_MAX);
-	EXIT_NOT_IMPLEMENTED(!RenderColorSlotConfigured(src, 0));
+	if (dst_slot >= RenderColorInfo::TARGETS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_slot >= RenderColorInfo::TARGETS_MAX condition ignored (continuing)\n"); }
+	if (!RenderColorSlotConfigured(src, 0)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !RenderColorSlotConfigured(src, 0) condition ignored (continuing)\n"); }
 
 	dst->attachment[dst_slot] = src.attachment[0];
 	dst->targets_num          = std::max(dst->targets_num, dst_slot + 1);
@@ -651,17 +651,17 @@ void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, Rende
 		}
 		if (current.attachment[0].type == RenderColorType::DisplayBuffer)
 		{
-			EXIT_NOT_IMPLEMENTED(RenderColorHasActiveTarget(*r) || slot != 0);
+			if (RenderColorHasActiveTarget(*r) || slot != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: RenderColorHasActiveTarget(*r) || slot != 0 condition ignored (continuing)\n"); }
 		} else
 		{
-			EXIT_NOT_IMPLEMENTED(current.attachment[0].type != RenderColorType::RenderTexture);
+			if (current.attachment[0].type != RenderColorType::RenderTexture) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: current.attachment[0].type != RenderColorType::RenderTexture condition ignored (continuing)\n"); }
 		}
 		CopyRenderColorSlot(r, slot, current);
 	}
 
 	if (r->attachment[0].type == RenderColorType::DisplayBuffer)
 	{
-		EXIT_NOT_IMPLEMENTED(r->targets_num != 1);
+		if (r->targets_num != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->targets_num != 1 condition ignored (continuing)\n"); }
 	}
 }
 
@@ -684,19 +684,19 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		if (attachment.type == RenderColorType::DisplayBuffer)
 		{
 			const auto video_image = VideoOut::VideoOutGetImageForSubmission(attachment.base_addr, buffer);
-			EXIT_NOT_IMPLEMENTED(video_image.image != attachment.existing_video_image);
+			if (video_image.image != attachment.existing_video_image) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: video_image.image != attachment.existing_video_image condition ignored (continuing)\n"); }
 			attachment.vulkan_buffer = video_image.image;
-			EXIT_NOT_IMPLEMENTED(attachment.vulkan_buffer == nullptr || attachment.vulkan_buffer->samples != attachment.samples);
+			if (attachment.vulkan_buffer == nullptr || attachment.vulkan_buffer->samples != attachment.samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.vulkan_buffer == nullptr || attachment.vulkan_buffer->samples != attachment.samples condition ignored (continuing)\n"); }
 			continue;
 		}
 
-		EXIT_NOT_IMPLEMENTED(attachment.type != RenderColorType::RenderTexture);
+		if (attachment.type != RenderColorType::RenderTexture) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.type != RenderColorType::RenderTexture condition ignored (continuing)\n"); }
 		RenderTextureObject vulkan_buffer_info(attachment.render_texture_format, attachment.width, attachment.height, attachment.tile,
 		                                      attachment.neo, attachment.pitch, attachment.write_back,
 		                                      static_cast<uint32_t>(attachment.samples));
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
-		EXIT_NOT_IMPLEMENTED(buffer_vulkan == nullptr);
+		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
 		attachment.vulkan_buffer = buffer_vulkan;
 	}
 }
@@ -751,7 +751,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	}
 
 	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
-	EXIT_NOT_IMPLEMENTED(hw.GetColorControl().op != 0xCC);
+	if (hw.GetColorControl().op != 0xCC) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: hw.GetColorControl().op != 0xCC condition ignored (continuing)\n"); }
 
 	RenderColorInfo source {};
 	RenderColorInfo destination {};
@@ -779,8 +779,8 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 		}
 		return true;
 	}
-	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, source_rt, &source));
-	EXIT_NOT_IMPLEMENTED(!DescribeRenderColorSlotInfo(buffer, destination_rt, &destination));
+	if (!DescribeRenderColorSlotInfo(buffer, source_rt, &source)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !DescribeRenderColorSlotInfo(buffer, source_rt, &source) condition ignored (continuing)\n"); }
+	if (!DescribeRenderColorSlotInfo(buffer, destination_rt, &destination)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !DescribeRenderColorSlotInfo(buffer, destination_rt, &destination) condition ignored (continuing)\n"); }
 	if (std::getenv("KYTY_DUMP_COLOR_RESOLVE") != nullptr)
 	{
 		static uint32_t describe_logs = 0;
@@ -798,15 +798,15 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 			             static_cast<uint32_t>(dst.samples), static_cast<uint32_t>(dst.render_texture_format));
 		}
 	}
-	EXIT_NOT_IMPLEMENTED(source.attachment[0].type != RenderColorType::RenderTexture ||
-	                     destination.attachment[0].type != RenderColorType::RenderTexture);
+	if (source.attachment[0].type != RenderColorType::RenderTexture ||
+	                     destination.attachment[0].type != RenderColorType::RenderTexture) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source.attachment[0].type != RenderColorType::RenderTexture || condition ignored (continuing)\n"); }
 
 	MaterializeRenderColorInfo(submit_id, buffer, &source);
 	MaterializeRenderColorInfo(submit_id, buffer, &destination);
 
 	auto* src = source.attachment[0].vulkan_buffer;
 	auto* dst = destination.attachment[0].vulkan_buffer;
-	EXIT_NOT_IMPLEMENTED(src == nullptr || dst == nullptr);
+	if (src == nullptr || dst == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src == nullptr || dst == nullptr condition ignored (continuing)\n"); }
 	if (std::getenv("KYTY_DUMP_DRAW") != nullptr)
 	{
 		static uint32_t logs = 0;
@@ -828,12 +828,12 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 		return true;
 	}
 
-	EXIT_NOT_IMPLEMENTED(src->samples == VK_SAMPLE_COUNT_1_BIT);
-	EXIT_NOT_IMPLEMENTED(dst->samples != VK_SAMPLE_COUNT_1_BIT);
-	EXIT_NOT_IMPLEMENTED(src->format != dst->format);
-	EXIT_NOT_IMPLEMENTED(src->GetGuestExtent().width != dst->GetGuestExtent().width ||
-	                     src->GetGuestExtent().height != dst->GetGuestExtent().height);
-	EXIT_NOT_IMPLEMENTED(src->extent.width != dst->extent.width || src->extent.height != dst->extent.height);
+	if (src->samples == VK_SAMPLE_COUNT_1_BIT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->samples == VK_SAMPLE_COUNT_1_BIT condition ignored (continuing)\n"); }
+	if (dst->samples != VK_SAMPLE_COUNT_1_BIT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst->samples != VK_SAMPLE_COUNT_1_BIT condition ignored (continuing)\n"); }
+	if (src->format != dst->format) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->format != dst->format condition ignored (continuing)\n"); }
+	if (src->GetGuestExtent().width != dst->GetGuestExtent().width ||
+	                     src->GetGuestExtent().height != dst->GetGuestExtent().height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->GetGuestExtent().width != dst->GetGuestExtent().width || condition ignored (continuing)\n"); }
+	if (src->extent.width != dst->extent.width || src->extent.height != dst->extent.height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->extent.width != dst->extent.width || src->extent.height != dst->extent.height condition ignored (continuing)\n"); }
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 	TransitionColorImage(vk_buffer, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,

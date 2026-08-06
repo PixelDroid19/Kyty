@@ -389,7 +389,7 @@ static void eop_event_delete_func(Kernel::EventQueue::KernelEqueue eq, Kernel::E
 {
 	EXIT_IF(event == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_NOT_IMPLEMENTED(event->event.filter != Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
+	if (event->event.filter != Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event->event.filter != Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS condition ignored (continuing)\n"); }
 	// Only EOP-class ids are tracked for TriggerEopEvent; other graphics ids
 	// are passive registrations until a producer is wired.
 	if (IsGraphicsEopEventId(static_cast<int>(event->event.ident)))

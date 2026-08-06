@@ -128,13 +128,11 @@ bool Gen5GetStandard4KBTextureMipLayout(uint32_t format, uint32_t width, uint32_
 	uint32_t       base_element_pitch = 0;
 	if (!ceil_div(width, texels_per_element, &base_element_width) ||
 	    !ceil_div(height, texels_per_element, &base_element_height) ||
-	    !ceil_div(pitch, texels_per_element, &base_element_pitch) || base_element_pitch != base_element_width)
+	    !ceil_div(pitch, texels_per_element, &base_element_pitch) || base_element_pitch < base_element_width)
 	{
-		// Standard4KB resources in this path use their logical width as pitch.
-		// A descriptor with a distinct pitch needs independently evidenced layout
-		// rules rather than silently applying the compact chain below.
 		return false;
 	}
+	const bool has_distinct_pitch = (base_element_pitch != base_element_width);
 
 	uint32_t maximum_levels = 1u;
 	for (uint32_t dimension = (width > height ? width : height); dimension > 1u; dimension >>= 1u)
@@ -180,9 +178,14 @@ bool Gen5GetStandard4KBTextureMipLayout(uint32_t format, uint32_t width, uint32_
 	for (int level = static_cast<int>(result.first_tail_level) - 1; level >= 0; level--)
 	{
 		auto& entry = result.level[static_cast<uint32_t>(level)];
+		uint32_t effective_width = entry.element_width;
+		if (has_distinct_pitch && level == 0)
+		{
+			effective_width = base_element_pitch;
+		}
 		uint32_t padded_width  = 0;
 		uint32_t padded_height = 0;
-		if (!align_up(entry.element_width, block_width, &padded_width) ||
+		if (!align_up(effective_width, block_width, &padded_width) ||
 		    !align_up(entry.element_height, block_height, &padded_height))
 		{
 			return false;

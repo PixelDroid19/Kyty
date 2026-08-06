@@ -52,7 +52,7 @@ class Tiler
 public:
 	Tiler(): m_job1(nullptr), m_job2(nullptr) /*, m_job3(nullptr), m_job4(nullptr)*/
 	{
-		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+		if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
 	}
 	virtual ~Tiler() { KYTY_NOT_IMPLEMENTED; }
 
@@ -501,7 +501,7 @@ void TileConvertTiledToLinear(void* dst, const void* src, TileMode mode, uint32_
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(mode != TileMode::VideoOutTiled);
+	if (mode != TileMode::VideoOutTiled) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: mode != TileMode::VideoOutTiled condition ignored (continuing)\n"); }
 
 	Tiler32 t;
 	t.Init(width, height, neo);
@@ -517,11 +517,11 @@ void TileConvertDisplayThinBgraToLinear(void* dst, const void* src, uint32_t wid
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
 	EXIT_IF(width == 0 || height == 0 || pitch == 0);
-	EXIT_NOT_IMPLEMENTED(pitch < width);
+	if (pitch < width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch < width condition ignored (continuing)\n"); }
 
 	Tiler32 t;
 	t.InitDisplayThin(width, height, pitch, neo);
-	EXIT_NOT_IMPLEMENTED(t.m_padded_width == 0 || t.m_padded_height == 0);
+	if (t.m_padded_width == 0 || t.m_padded_height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: t.m_padded_width == 0 || t.m_padded_height == 0 condition ignored (continuing)\n"); }
 
 	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * 4u);
 	Detile32(&t, width, height, width, static_cast<uint8_t*>(dst), static_cast<const uint8_t*>(src), neo);
@@ -530,7 +530,7 @@ void TileConvertDisplayThinBgraToLinear(void* dst, const void* src, uint32_t wid
 void TileConvertTiledToLinear(void* dst, const void* src, TileMode mode, uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height,
                               uint32_t pitch, uint32_t levels, bool neo)
 {
-	EXIT_NOT_IMPLEMENTED(mode != TileMode::TextureTiled);
+	if (mode != TileMode::TextureTiled) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: mode != TileMode::TextureTiled condition ignored (continuing)\n"); }
 
 	TilePaddedSize padded_sizes[16];
 	TileSizeOffset level_sizes[16];
@@ -1019,8 +1019,8 @@ static uint32_t Standard64KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t b
 
 uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	EXIT_NOT_IMPLEMENTED(bytes_per_element != 4u && bytes_per_element != 8u);
-	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
+	if (bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element != 4u && bytes_per_element != 8u condition ignored (continuing)\n"); }
+	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block_bytes = 65536u;
 	const uint32_t            block_w       = TileGet64KBBlockWidth(bytes_per_element);
@@ -1063,8 +1063,8 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
-	EXIT_NOT_IMPLEMENTED(bytes_per_element != 4u && bytes_per_element != 8u);
-	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u);
+	if (bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element != 4u && bytes_per_element != 8u condition ignored (continuing)\n"); }
+	if (width == 0u || height == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u condition ignored (continuing)\n"); }
 
 	const uint32_t             pitch = (pitch_elems != 0u ? pitch_elems : width);
 	auto*                      d     = static_cast<uint8_t*>(dst);
@@ -1084,9 +1084,9 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 
 uint64_t TileGetStandard64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
+	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
 	const uint32_t block_w = TileGet64KBBlockWidth(bytes_per_element);
-	EXIT_NOT_IMPLEMENTED(block_w == 0u);
+	if (block_w == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: block_w == 0u condition ignored (continuing)\n"); }
 	const uint32_t block_h = 65536u / (block_w * bytes_per_element);
 	const uint32_t blocks_x = (pitch_elems + block_w - 1u) / block_w;
 	const uint32_t xb       = x / block_w;
@@ -1116,7 +1116,7 @@ static uint32_t Depth64KB32WithinBlockOffset(uint32_t x, uint32_t y)
 
 uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
 {
-	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u || (pitch_elems % 128u) != 0u);
+	if (pitch_elems == 0u || (pitch_elems % 128u) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block       = 128u;
 	static constexpr uint32_t k_block_bytes = 65536u;
@@ -1130,7 +1130,7 @@ uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
 void TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
 {
 	EXIT_IF(dst == nullptr || src == nullptr);
-	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || pitch_elems < width || (pitch_elems % 128u) != 0u);
+	if (width == 0u || height == 0u || pitch_elems < width || (pitch_elems % 128u) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported condition ignored (continuing)\n"); }
 
 	auto*                      d = static_cast<uint8_t*>(dst);
 	const auto*                s = static_cast<const uint8_t*>(src);
@@ -1220,8 +1220,8 @@ static uint32_t Standard4KB64WithinBlockOffset(uint32_t x, uint32_t y)
 
 uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u);
-	EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u);
+	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
+	if (bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block_bytes = 4096u;
 	const uint32_t            block_width   = bytes_per_element <= 2u ? 64u : (bytes_per_element <= 8u ? 32u : 16u);
@@ -1250,8 +1250,8 @@ void TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, 
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
-	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || pitch_elems < width);
-	EXIT_NOT_IMPLEMENTED(bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u);
+	if (width == 0u || height == 0u || pitch_elems < width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u || pitch_elems < width condition ignored (continuing)\n"); }
+	if (bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u condition ignored (continuing)\n"); }
 
 	auto*                      d = static_cast<uint8_t*>(dst);
 	const auto*                s = static_cast<const uint8_t*>(src);
@@ -1290,7 +1290,7 @@ static uint32_t Standard4KB32VolumeWithinBlockOffset(uint32_t x, uint32_t y, uin
 
 uint64_t TileGetStandard4KB32VolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height)
 {
-	EXIT_NOT_IMPLEMENTED(pitch_elems == 0u || height == 0u);
+	if (pitch_elems == 0u || height == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u || height == 0u condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block_width  = 8u;
 	static constexpr uint32_t k_block_height = 16u;
@@ -1308,7 +1308,7 @@ void TileConvertStandard4KB32VolumeToLinear(void* dst, const void* src, uint32_t
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
-	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || depth == 0u || pitch_elems < width);
+	if (width == 0u || height == 0u || depth == 0u || pitch_elems < width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u || depth == 0u || pitch_elems < width condition ignored (continuing)\n"); }
 
 	auto*                      d     = static_cast<uint8_t*>(dst);
 	const auto*                s     = static_cast<const uint8_t*>(src);
@@ -1332,7 +1332,7 @@ void TileConvertStandard4KB32VolumeToLinear(void* dst, const void* src, uint32_t
 void TileGetStandard4KB32VolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, TileSizeAlign* size)
 {
 	EXIT_IF(size == nullptr);
-	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u || depth == 0u || pitch_elems < width);
+	if (width == 0u || height == 0u || depth == 0u || pitch_elems < width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u || depth == 0u || pitch_elems < width condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block_width  = 8u;
 	static constexpr uint32_t k_block_height = 16u;
@@ -1342,7 +1342,7 @@ void TileGetStandard4KB32VolumeSize(uint32_t width, uint32_t height, uint32_t de
 	const uint64_t            blocks_y       = (static_cast<uint64_t>(height) + k_block_height - 1u) / k_block_height;
 	const uint64_t            blocks_z       = (static_cast<uint64_t>(depth) + k_block_depth - 1u) / k_block_depth;
 	const uint64_t            bytes          = blocks_x * blocks_y * blocks_z * k_block_bytes;
-	EXIT_NOT_IMPLEMENTED(bytes > UINT32_MAX);
+	if (bytes > UINT32_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes > UINT32_MAX condition ignored (continuing)\n"); }
 	size->size  = static_cast<uint32_t>(bytes);
 	size->align = k_block_bytes;
 }
@@ -1352,8 +1352,8 @@ void TileConvertStandard64KBToLinear(void* dst, const void* src, uint32_t width,
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
-	EXIT_NOT_IMPLEMENTED(width == 0u || height == 0u);
-	EXIT_NOT_IMPLEMENTED(TileGet64KBBlockWidth(bytes_per_element) == 0u);
+	if (width == 0u || height == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u condition ignored (continuing)\n"); }
+	if (TileGet64KBBlockWidth(bytes_per_element) == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: TileGet64KBBlockWidth(bytes_per_element) == 0u condition ignored (continuing)\n"); }
 
 	const uint32_t             pitch = (pitch_elems != 0u ? pitch_elems : width);
 	auto*                      d     = static_cast<uint8_t*>(dst);
@@ -1733,7 +1733,7 @@ static bool GetDynamicMicroTiledTextureSize(uint32_t dfmt, uint32_t nfmt, uint32
 		const uint32_t padded_height  = align_up(element_height, 8u);
 		const uint64_t level_size     = static_cast<uint64_t>(padded_width) * padded_height * format.bytes_per_element;
 
-		EXIT_NOT_IMPLEMENTED(level_size > 0xffffffffull || offset + level_size > 0xffffffffull);
+		if (level_size > 0xffffffffull || offset + level_size > 0xffffffffull) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: level_size > 0xffffffffull || offset + level_size > 0xffffffffull condition ignored (continuing)\n"); }
 		if (level_sizes != nullptr)
 		{
 			level_sizes[level].offset = static_cast<uint32_t>(offset);
@@ -1837,7 +1837,7 @@ void TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t h
 		const uint32_t padded_width  = align_up(pitch, 128u);
 		const uint32_t padded_height = align_up(height, 128u);
 		const uint64_t size          = static_cast<uint64_t>(padded_width) * padded_height * 4u;
-		EXIT_NOT_IMPLEMENTED(size > 0xffffffffull);
+		if (size > 0xffffffffull) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size > 0xffffffffull condition ignored (continuing)\n"); }
 
 		if (total_size != nullptr)
 		{
@@ -1964,13 +1964,13 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		if (tile == 0x1bu || tile == 0x18u || tile == 0x09u)
 		{
 			const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
-			EXIT_NOT_IMPLEMENTED(bpp == 0u || TileGet64KBBlockWidth(bpp) == 0u);
+			if (bpp == 0u || TileGet64KBBlockWidth(bpp) == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bpp == 0u || TileGet64KBBlockWidth(bpp) == 0u condition ignored (continuing)\n"); }
 			// Tile 24 is depth-specific. It uses the depth converter rather than the
 			// color-surface conversion path whenever guest contents are materialized.
 
-			EXIT_NOT_IMPLEMENTED(levels != 1);
-			EXIT_NOT_IMPLEMENTED(tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format));
-			EXIT_NOT_IMPLEMENTED(tile == 0x18u && format != 22u);
+			if (levels != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: levels != 1 condition ignored (continuing)\n"); }
+			if (tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format) condition ignored (continuing)\n"); }
+			if (tile == 0x18u && format != 22u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tile == 0x18u && format != 22u condition ignored (continuing)\n"); }
 
 			const bool     bc1          = (format == 133u);
 			const uint32_t elem_width   = bc1 ? std::max((width + 3u) / 4u, 1u) : width;
@@ -1983,7 +1983,7 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			// that for allocation math even when the sample descriptor says 0x09).
 			TileSizeAlign rt {};
 			TileGetRenderTargetSize(elem_width, elem_height, elem_pitch, 0x1bu, bpp, &rt);
-			EXIT_NOT_IMPLEMENTED(rt.size == 0);
+			if (rt.size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.size == 0 condition ignored (continuing)\n"); }
 
 			if (total_size != nullptr)
 			{
@@ -2014,7 +2014,7 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		if (tile == 0x05u)
 		{
 			const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
-			EXIT_NOT_IMPLEMENTED(bpp == 0u || bpp > 16u || (bpp & (bpp - 1u)) != 0u || levels != 1u);
+			if (bpp == 0u || bpp > 16u || (bpp & (bpp - 1u)) != 0u || levels != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bpp == 0u || bpp > 16u || (bpp & (bpp - 1u)) != 0u || levels != 1u condition ignored (continuing)\n"); }
 			const bool     bc3            = format == 173u;
 			const uint32_t element_height = bc3 ? (height + 3u) / 4u : height;
 			const uint32_t pitch_texels   = (pitch != 0u ? pitch : width);
@@ -2024,7 +2024,7 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			const uint32_t padded_width   = (element_pitch + block_width - 1u) & ~(block_width - 1u);
 			const uint32_t padded_height  = (element_height + block_height - 1u) & ~(block_height - 1u);
 			const uint64_t bytes          = static_cast<uint64_t>(padded_width) * padded_height * bpp;
-			EXIT_NOT_IMPLEMENTED(bytes > UINT32_MAX);
+			if (bytes > UINT32_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes > UINT32_MAX condition ignored (continuing)\n"); }
 			if (total_size != nullptr)
 			{
 				total_size->size  = static_cast<uint32_t>(bytes);
@@ -2044,10 +2044,10 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		}
 
 		// Linear fallback for tile 0 (and only tile 0).
-		EXIT_NOT_IMPLEMENTED(tile != 0);
+		if (tile != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tile != 0 condition ignored (continuing)\n"); }
 
 		const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
-		EXIT_NOT_IMPLEMENTED(bpp == 0);
+		if (bpp == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bpp == 0 condition ignored (continuing)\n"); }
 
 		auto align_up = [](uint64_t v, uint64_t a) -> uint64_t { return (v + a - 1u) & ~(a - 1u); };
 

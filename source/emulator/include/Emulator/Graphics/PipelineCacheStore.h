@@ -27,7 +27,7 @@ struct PipelineCacheHeaderV1
 
 [[nodiscard]] constexpr size_t PipelineCacheStoreMaxBytes()
 {
-	return 64u * 1024u * 1024u;
+	return 128u * 1024u * 1024u;
 }
 
 [[nodiscard]] constexpr size_t PipelineCacheStoreSessionWriteBudgetBytes()

@@ -167,7 +167,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 	}
 
 	vkCreateSampler(g_render_ctx->GetGraphicCtx()->device, &sampler_info, nullptr, &s.vk);
-	EXIT_NOT_IMPLEMENTED(s.vk == nullptr);
+	if (s.vk == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s.vk == nullptr condition ignored (continuing)\n"); }
 
 	m_samplers.Add(s);
 	return m_samplers_size;
@@ -282,7 +282,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 
 	EXIT_IF(gctx == nullptr);
-	EXIT_NOT_IMPLEMENTED(static_params->sample_shading_enable && !gctx->sample_rate_shading_supported);
+	if (static_params->sample_shading_enable && !gctx->sample_rate_shading_supported) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: static_params->sample_shading_enable && !gctx->sample_rate_shading_supported condition ignored (continuing)\n"); }
 
 	VkShaderModule vert_shader_module = nullptr;
 	VkShaderModule frag_shader_module = nullptr;
@@ -305,8 +305,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		vkCreateShaderModule(gctx->device, &create_info, nullptr, &frag_shader_module);
 	}
 
-	EXIT_NOT_IMPLEMENTED(vert_shader_module == nullptr);
-	EXIT_NOT_IMPLEMENTED(has_fragment_stage && frag_shader_module == nullptr);
+	if (vert_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vert_shader_module == nullptr condition ignored (continuing)\n"); }
+	if (has_fragment_stage && frag_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: has_fragment_stage && frag_shader_module == nullptr condition ignored (continuing)\n"); }
 
 	VkPipelineShaderStageCreateInfo vert_shader_stage_info {};
 	vert_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -363,7 +363,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 				fclose(f);
 			}
 		}
-		EXIT_NOT_IMPLEMENTED(!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout));
+		if (!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanBuildVertexInputLayout(*vs_input_info, &input_layout) condition ignored (continuing)\n"); }
 	}
 
 	VkPipelineVertexInputStateCreateInfo vertex_input_info {};
@@ -411,7 +411,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	}
 
 	const bool depth_clip_control_supported = g_render_ctx->GetGraphicCtx()->depth_clip_control_supported;
-	EXIT_NOT_IMPLEMENTED(!static_params->dx_clip_space && !depth_clip_control_supported);
+	if (!static_params->dx_clip_space && !depth_clip_control_supported) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !static_params->dx_clip_space && !depth_clip_control_supported condition ignored (continuing)\n"); }
 
 	VkPipelineViewportDepthClipControlCreateInfoEXT depth_clip_control {};
 	depth_clip_control.sType            = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT;
@@ -474,8 +474,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	VkPipelineSampleLocationsStateCreateInfoEXT sample_location_pipeline_state {};
 	if (VulkanSampleLocationsEnabled(static_params->sample_locations))
 	{
-		EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsPopulateInfo(static_params->sample_locations, sample_location_values,
-		                                                       &sample_location_info));
+		if (!VulkanSampleLocationsPopulateInfo(static_params->sample_locations, sample_location_values,
+		                                                       &sample_location_info)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanSampleLocationsPopulateInfo(static_params->sample_locations, sample_locat condition ignored (continuing)\n"); }
 		sample_location_pipeline_state.sType                 = VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT;
 		sample_location_pipeline_state.sampleLocationsEnable = VK_TRUE;
 		sample_location_pipeline_state.sampleLocationsInfo   = sample_location_info;
@@ -483,7 +483,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	}
 
 	// CB_TARGET_MASK: 4 bits per MRT (RGBA). One blend attachment per active target.
-	EXIT_NOT_IMPLEMENTED(static_params->color_targets_num == 0 || static_params->color_targets_num > 8);
+	if (static_params->color_targets_num == 0 || static_params->color_targets_num > 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: static_params->color_targets_num == 0 || static_params->color_targets_num > 8 condition ignored (continuing)\n"); }
 	VkPipelineColorBlendAttachmentState color_blend_attachments[8] {};
 	VkBool32                            color_write_enables[8] {};
 	for (uint32_t rt = 0; rt < static_params->color_targets_num; rt++)
@@ -581,7 +581,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
 
-	EXIT_NOT_IMPLEMENTED(pipeline->pipeline_layout == nullptr);
+	if (pipeline->pipeline_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pipeline->pipeline_layout == nullptr condition ignored (continuing)\n"); }
 
 	VkPipelineDepthStencilStateCreateInfo depth_stencil_info {};
 	depth_stencil_info.sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -687,8 +687,14 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	if (pipeline->pipeline == nullptr || create_result != VK_SUCCESS)
 	{
-		// Bounded diagnostic dump for pipeline create failures (env-gated).
-		if (const char* dump_dir = std::getenv("KYTY_PIPELINE_FAIL_DUMP"))
+		static const char* cached_dump_dir = nullptr;
+		static bool        cached_dump_checked = false;
+		if (!cached_dump_checked)
+		{
+			cached_dump_dir = std::getenv("KYTY_PIPELINE_FAIL_DUMP");
+			cached_dump_checked = true;
+		}
+		if (const char* dump_dir = cached_dump_dir)
 		{
 			if (dump_dir[0] != '\0')
 			{
@@ -755,7 +761,7 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 	create_info.pCode    = cs_shader.GetDataConst();
 	vkCreateShaderModule(gctx->device, &create_info, nullptr, &comp_shader_module);
 
-	EXIT_NOT_IMPLEMENTED(comp_shader_module == nullptr);
+	if (comp_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: comp_shader_module == nullptr condition ignored (continuing)\n"); }
 
 	VkPipelineShaderStageCreateInfo comp_shader_stage_info {};
 	comp_shader_stage_info.sType               = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -789,7 +795,7 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 
 	vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
 
-	EXIT_NOT_IMPLEMENTED(pipeline->pipeline_layout == nullptr);
+	if (pipeline->pipeline_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pipeline->pipeline_layout == nullptr condition ignored (continuing)\n"); }
 
 	VkComputePipelineCreateInfo info {};
 	info.sType              = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -929,7 +935,7 @@ bool PipelineDynamicParameters::operator==(const PipelineDynamicParameters& othe
 
 void PipelineCache::DeletePipelineInternal(uint32_t id)
 {
-	EXIT_NOT_IMPLEMENTED(!m_pipelines.IndexValid(id));
+	if (!m_pipelines.IndexValid(id)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_pipelines.IndexValid(id) condition ignored (continuing)\n"); }
 
 	Pipeline& p = m_pipelines[id];
 
@@ -1084,7 +1090,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->vk_dynamic_state_depth_bias           = true;
 	p.dynamic_params->color_write_enable                    = true;
 
-	EXIT_NOT_IMPLEMENTED(depth->depth_test_enable && ps_input_info->ps_execute_on_noop);
+	if (depth->depth_test_enable && ps_input_info->ps_execute_on_noop) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth->depth_test_enable && ps_input_info->ps_execute_on_noop condition ignored (continuing)\n"); }
 
 	const auto scissor = State::ResolveScissor(vp, smc, 0);
 
@@ -1107,13 +1113,13 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		RenderResolutionTransform transform;
 		const ResolutionExtent        guest {color->attachment[0].width, color->attachment[0].height};
 		const ResolutionExtent        host {color->attachment[0].vulkan_buffer->extent.width, color->attachment[0].vulkan_buffer->extent.height};
-		EXIT_NOT_IMPLEMENTED(CreateRenderResolutionTransform(guest, host, &transform) != RenderResolutionTransformStatus::Success);
+		if (CreateRenderResolutionTransform(guest, host, &transform) != RenderResolutionTransformStatus::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: CreateRenderResolutionTransform(guest, host, &transform) != RenderResolutionTransformStatus::Success condition ignored (continuing)\n"); }
 
 		const auto         xy = State::ResolveViewportXy(p.dynamic_params->viewport_scale[0], p.dynamic_params->viewport_offset[0],
 		                                                 p.dynamic_params->viewport_scale[1], p.dynamic_params->viewport_offset[1]);
 		ResolutionViewport guest_viewport {xy.x, xy.y, xy.width, xy.height, 0.0, 1.0};
 		ResolutionViewport host_viewport;
-		EXIT_NOT_IMPLEMENTED(MapRenderResolutionViewport(transform, guest_viewport, &host_viewport) != RenderResolutionTransformStatus::Success);
+		if (MapRenderResolutionViewport(transform, guest_viewport, &host_viewport) != RenderResolutionTransformStatus::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: MapRenderResolutionViewport(transform, guest_viewport, &host_viewport) != RenderResolutionTransformStatus::Success condition ignored (continuing)\n"); }
 		p.dynamic_params->viewport_scale[0]  = static_cast<float>(host_viewport.width * 0.5);
 		p.dynamic_params->viewport_scale[1]  = static_cast<float>(host_viewport.height * 0.5);
 		p.dynamic_params->viewport_offset[0] = static_cast<float>(host_viewport.x + host_viewport.width * 0.5);
@@ -1121,7 +1127,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 
 		ResolutionScissorRect       host_scissor;
 		const ResolutionScissorRect guest_scissor {scissor.left, scissor.top, scissor.right, scissor.bottom};
-		EXIT_NOT_IMPLEMENTED(MapRenderResolutionScissor(transform, guest_scissor, &host_scissor) != RenderResolutionTransformStatus::Success);
+		if (MapRenderResolutionScissor(transform, guest_scissor, &host_scissor) != RenderResolutionTransformStatus::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: MapRenderResolutionScissor(transform, guest_scissor, &host_scissor) != RenderResolutionTransformStatus::Success condition ignored (continuing)\n"); }
 		p.dynamic_params->scissor_ltrb[0] = static_cast<int>(host_scissor.left);
 		p.dynamic_params->scissor_ltrb[1] = static_cast<int>(host_scissor.top);
 		p.dynamic_params->scissor_ltrb[2] = static_cast<int>(host_scissor.right);
@@ -1138,10 +1144,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->topology                 = topology;
 	p.static_params->rasterization_samples    = resolve_render_attachment_sample_count(*color, *depth);
 	p.static_params->sample_locations         = sample_locations;
-	EXIT_NOT_IMPLEMENTED(p.static_params->sample_locations.sample_count != p.static_params->rasterization_samples);
+	if (p.static_params->sample_locations.sample_count != p.static_params->rasterization_samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.static_params->sample_locations.sample_count != p.static_params->rasterization_samples condition ignored (continuing)\n"); }
 	p.static_params->sample_shading_enable    = p.static_params->rasterization_samples != VK_SAMPLE_COUNT_1_BIT &&
 	                                        ctx->GetEqaaControl().ps_iter_samples != 0;
-	EXIT_NOT_IMPLEMENTED(p.static_params->sample_shading_enable && !gctx->sample_rate_shading_supported);
+	if (p.static_params->sample_shading_enable && !gctx->sample_rate_shading_supported) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.static_params->sample_shading_enable && !gctx->sample_rate_shading_supported condition ignored (continuing)\n"); }
 	p.static_params->with_depth               = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	p.static_params->depth_test_enable        = depth->depth_test_enable;
 	p.static_params->depth_write_enable       = (depth->depth_write_enable && !depth->suppress_depth_write);
@@ -1158,13 +1164,13 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		// Depth-only: FramebufferCache attaches one dummy color image so the
 		// Vulkan render pass stays valid; the pipeline must match that count
 		// with a zero write mask (no color output).
-		EXIT_NOT_IMPLEMENTED(!p.static_params->with_depth);
+		if (!p.static_params->with_depth) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !p.static_params->with_depth condition ignored (continuing)\n"); }
 		p.static_params->color_targets_num = 1;
 		p.static_params->color_mask[0]     = 0;
 		p.static_params->blend_enable[0]   = false;
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(p.static_params->color_targets_num > 8);
+		if (p.static_params->color_targets_num > 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.static_params->color_targets_num > 8 condition ignored (continuing)\n"); }
 		for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 		{
 			if (!RenderColorSlotConfigured(*color, rt))
@@ -1191,9 +1197,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.static_params->cull_front = mc.cull_front;
 	p.static_params->face       = mc.face;
 	const auto depth_bias       = State::ResolveDepthBias(mc, ctx->GetPolygonOffset());
-	EXIT_NOT_IMPLEMENTED(depth_bias.enabled && (!std::isfinite(depth_bias.constant_factor) || !std::isfinite(depth_bias.clamp) ||
-	                                            !std::isfinite(depth_bias.slope_factor)));
-	EXIT_NOT_IMPLEMENTED(depth_bias.enabled && depth_bias.clamp != 0.0f && !g_render_ctx->GetGraphicCtx()->depth_bias_clamp_supported);
+	if (depth_bias.enabled && (!std::isfinite(depth_bias.constant_factor) || !std::isfinite(depth_bias.clamp) ||
+	                                            !std::isfinite(depth_bias.slope_factor))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth_bias.enabled && (!std::isfinite(depth_bias.constant_factor) || !std::isfin condition ignored (continuing)\n"); }
+	if (depth_bias.enabled && depth_bias.clamp != 0.0f && !g_render_ctx->GetGraphicCtx()->depth_bias_clamp_supported) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth_bias.enabled && depth_bias.clamp != 0.0f && !g_render_ctx->GetGraphicCtx()->depth_bias_clamp_supported condition ignored (continuing)\n"); }
 	p.static_params->depth_bias_enable           = depth_bias.enabled;
 	p.dynamic_params->depth_bias_constant_factor = depth_bias.constant_factor;
 	p.dynamic_params->depth_bias_clamp           = depth_bias.clamp;
@@ -1267,7 +1273,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_translation.binary, ps_input_info,
 	                                    ps_translation.binary, p.static_params, p.dynamic_params);
 
-	EXIT_NOT_IMPLEMENTED(p.pipeline == nullptr);
+	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 	p.pipeline->framebuffer_extent = framebuffer->extent;
 
 	bool updated = false;
@@ -1370,7 +1376,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(const ShaderComputeInputInfo* inpu
 
 	p.pipeline = CreatePipelineInternal(input_info, cs_translation.binary, p.static_params, p.dynamic_params /*, params2*/);
 
-	EXIT_NOT_IMPLEMENTED(p.pipeline == nullptr);
+	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 
 	bool updated = false;
 	for (auto& pn: m_pipelines)

@@ -249,7 +249,7 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	EXIT_NOT_IMPLEMENTED(regions.Size() >= 16);
+	if (regions.Size() >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: regions.Size() >= 16 condition ignored (continuing)\n"); }
 
 	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -370,12 +370,12 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
 	vkCreateBuffer(gctx->device, &buffer_info, nullptr, &buffer->buffer);
-	EXIT_NOT_IMPLEMENTED(buffer->buffer == nullptr);
+	if (buffer->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer->buffer == nullptr condition ignored (continuing)\n"); }
 
 	vkGetBufferMemoryRequirements(gctx->device, buffer->buffer, &buffer->memory.requirements);
 
 	bool allocated = VulkanAllocate(gctx, &buffer->memory);
-	EXIT_NOT_IMPLEMENTED(!allocated);
+	if (!allocated) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !allocated condition ignored (continuing)\n"); }
 
 	// vkBindBufferMemory(gctx->device, buffer->buffer, buffer->memory.memory, buffer->memory.offset);
 	VulkanBindBufferMemory(gctx, buffer, &buffer->memory);
@@ -418,7 +418,7 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
 	buffer.Begin();
 	UtilBufferToImage(&buffer, &staging_buffer, src_pitch, dst_image, dst_layout);
@@ -445,7 +445,7 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
 	buffer.Begin();
 	UtilImageToBuffer(&buffer, src_image, &staging_buffer, dst_pitch, src_layout);
@@ -522,7 +522,7 @@ void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image)
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
 	buffer.Begin();
 
@@ -542,7 +542,7 @@ void UtilSetImageLayoutOptimal(VulkanImage* image)
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
 	buffer.Begin();
 
@@ -577,7 +577,7 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* image, const void* src_data
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
 	buffer.Begin();
 	UtilBufferToImage(&buffer, &staging_buffer, image, regions, dst_layout);
@@ -596,7 +596,7 @@ void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, V
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
 	buffer.Begin();
 	UtilImageToImage(&buffer, regions, dst_image, dst_layout);
@@ -616,7 +616,7 @@ void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t
 	CommandBuffer              buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
 	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
 

@@ -269,7 +269,7 @@ ColorTargetLayout ResolveColorTargetLayout(uint32_t mask)
 ColorTargetLayout ResolveColorTargetLayout(uint32_t mask, uint32_t configured_target_count)
 {
 	ColorTargetLayout layout {};
-	EXIT_NOT_IMPLEMENTED(configured_target_count > ColorTargetLayout::kMaxTargets);
+	if (configured_target_count > ColorTargetLayout::kMaxTargets) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: configured_target_count > ColorTargetLayout::kMaxTargets condition ignored (continuing)\n"); }
 	if (mask == 0)
 	{
 		return layout;
@@ -305,7 +305,7 @@ ColorTargetLayout ResolveColorTargetLayout(uint32_t mask, uint32_t configured_ta
 
 uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index)
 {
-	EXIT_NOT_IMPLEMENTED(target_index >= ColorTargetLayout::kMaxTargets);
+	if (target_index >= ColorTargetLayout::kMaxTargets) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: target_index >= ColorTargetLayout::kMaxTargets condition ignored (continuing)\n"); }
 	const uint32_t shift = target_index * 4u;
 	return static_cast<uint8_t>(((target_mask >> shift) & (shader_mask >> shift)) & 0xFu);
 }

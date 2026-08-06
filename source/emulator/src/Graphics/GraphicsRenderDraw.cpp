@@ -813,7 +813,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		KYTY_LOG_DEBUG("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 		KYTY_LOG_DEBUG("\t type                = 0x%08" PRIx32 "\n", type);
 
-		EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
+		if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
 		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, index_type_and_size, index_addr);
 		return;
 	}
@@ -833,7 +833,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	hw_print(*ctx);
 	hw_check(*ctx);
 
-	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
+	if (ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000 condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("GraphicsRenderDrawIndex():Parameters:\n");
 	KYTY_LOG_DEBUG("\t index_type_and_size = 0x%08" PRIx32 "\n", index_type_and_size);
@@ -855,11 +855,11 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 			index_type = VK_INDEX_TYPE_UINT32;
 			index_size = 4 * static_cast<uint64_t>(index_count);
 			break;
-		default: EXIT_NOT_IMPLEMENTED(index_type_and_size != 0 && index_type_and_size != 1);
+		default: if (index_type_and_size != 0 && index_type_and_size != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index_type_and_size != 0 && index_type_and_size != 1 condition ignored (continuing)\n"); }
 	}
 
-	EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
-	EXIT_NOT_IMPLEMENTED(type != 1);
+	if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
+	if (type != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type != 1 condition ignored (continuing)\n"); }
 
 	RenderDepthInfo depth_info;
 	RenderColorInfo color_info;
@@ -916,8 +916,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
-	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(framebuffer->render_pass == nullptr);
+	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
+	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
@@ -950,7 +950,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		indices = static_cast<VulkanBuffer*>(
 		    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
 	}
-	EXIT_NOT_IMPLEMENTED(indices == nullptr);
+	if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
 
 	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
 
@@ -1006,7 +1006,7 @@ static bool GraphicsRenderDepthStencilCopyClearSource(CommandBuffer* buffer, Ren
 
 	RenderColorInfo no_color;
 	auto* source_framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&no_color, source);
-	EXIT_NOT_IMPLEMENTED(source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr);
+	if (source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 	buffer->BeginRenderPass(source_framebuffer, &no_color, source, &sample_locations);
 	buffer->EndRenderPass();
 	return true;
@@ -1094,20 +1094,20 @@ void GraphicsRenderDepthStencilCopySetDrawArea(const HW::Context& context, bool 
 	RenderResolutionTransform transform {};
 	const ResolutionExtent         guest_resolution {guest_extent.width, guest_extent.height};
 	const ResolutionExtent         host_resolution {host_extent.width, host_extent.height};
-	EXIT_NOT_IMPLEMENTED(CreateRenderResolutionTransform(guest_resolution, host_resolution, &transform) !=
-	                     RenderResolutionTransformStatus::Success);
+	if (CreateRenderResolutionTransform(guest_resolution, host_resolution, &transform) !=
+	                     RenderResolutionTransformStatus::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: CreateRenderResolutionTransform(guest_resolution, host_resolution, &transform) ! condition ignored (continuing)\n"); }
 
 	const ResolutionViewport guest_viewport {guest_xy.x, guest_xy.y, guest_xy.width, guest_xy.height, guest_depth.min_depth,
 	                                         guest_depth.max_depth};
 	ResolutionViewport host_viewport {};
-	EXIT_NOT_IMPLEMENTED(MapRenderResolutionViewport(transform, guest_viewport, &host_viewport) != RenderResolutionTransformStatus::Success);
+	if (MapRenderResolutionViewport(transform, guest_viewport, &host_viewport) != RenderResolutionTransformStatus::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: MapRenderResolutionViewport(transform, guest_viewport, &host_viewport) != RenderResolutionTransformStatus::Success condition ignored (continuing)\n"); }
 
 	const ResolutionScissorRect guest_scissor_rect {guest_scissor.left, guest_scissor.top, guest_scissor.right, guest_scissor.bottom};
 	ResolutionScissorRect host_scissor {};
-	EXIT_NOT_IMPLEMENTED(MapRenderResolutionScissor(transform, guest_scissor_rect, &host_scissor) != RenderResolutionTransformStatus::Success);
-	EXIT_NOT_IMPLEMENTED(host_scissor.left < 0 || host_scissor.top < 0 || host_scissor.right < host_scissor.left ||
+	if (MapRenderResolutionScissor(transform, guest_scissor_rect, &host_scissor) != RenderResolutionTransformStatus::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: MapRenderResolutionScissor(transform, guest_scissor_rect, &host_scissor) != RenderResolutionTransformStatus::Success condition ignored (continuing)\n"); }
+	if (host_scissor.left < 0 || host_scissor.top < 0 || host_scissor.right < host_scissor.left ||
 	                     host_scissor.bottom < host_scissor.top || static_cast<uint64_t>(host_scissor.right) > host_extent.width ||
-	                     static_cast<uint64_t>(host_scissor.bottom) > host_extent.height);
+	                     static_cast<uint64_t>(host_scissor.bottom) > host_extent.height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: host_scissor.left < 0 || host_scissor.top < 0 || host_scissor.right < host_sciss condition ignored (continuing)\n"); }
 
 	request->viewport.x        = static_cast<float>(host_viewport.x);
 	request->viewport.y        = static_cast<float>(host_viewport.y);
@@ -1169,7 +1169,7 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	EXIT_IF(guest_geometry && guest_vertex_input == nullptr);
 
 	auto* source = source_info->vulkan_buffer;
-	EXIT_NOT_IMPLEMENTED(source == nullptr || source->samples != sample_locations.sample_count);
+	if (source == nullptr || source->samples != sample_locations.sample_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source == nullptr || source->samples != sample_locations.sample_count condition ignored (continuing)\n"); }
 
 	RenderDepthInfo draw_depth = *source_info;
 	if (apply_clear)
@@ -1181,7 +1181,7 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 
 	RenderColorInfo no_color;
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&no_color, &draw_depth);
-	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr || framebuffer->render_pass == nullptr);
+	if (framebuffer == nullptr || framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr || framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
 	DepthStencilCopyRequest request {};
 	request.mode                    = DepthStencilCopyMode::DepthStencilOnly;
@@ -1222,7 +1222,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 
 	// Rect-list copies synthesize full-target geometry. Guest draws retain the
 	// vertex stage so the expansion covers exactly the guest pixels.
-	EXIT_NOT_IMPLEMENTED(!render_control.depth_copy || !render_control.stencil_copy);
+	if (!render_control.depth_copy || !render_control.stencil_copy) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !render_control.depth_copy || !render_control.stencil_copy condition ignored (continuing)\n"); }
 	VulkanSampleLocationState sample_locations {};
 	aa_check_for_attachment_samples(*ctx, depth_info.samples, &sample_locations);
 	const bool stencil_test_required = depth_info.stencil_test_enable;
@@ -1256,7 +1256,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	{
 		KYTY_LOG_DEBUG( "KYTY_GRAPHICS: unsupported depth-stencil-copy primitive=%u count=%u\n", ucfg->GetPrimType(),
 		             index_count);
-		EXIT_NOT_IMPLEMENTED(!static_rect_list && !guest_geometry);
+		if (!static_rect_list && !guest_geometry) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !static_rect_list && !guest_geometry condition ignored (continuing)\n"); }
 	}
 	ShaderVertexInputInfo        guest_vertex_input {};
 	ShaderId                     guest_vertex_id {};
@@ -1280,7 +1280,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 				index_size = 4 * static_cast<uint64_t>(index_count);
 				break;
 			default:
-				EXIT_NOT_IMPLEMENTED(index_type_and_size != 0 && index_type_and_size != 1);
+				if (index_type_and_size != 0 && index_type_and_size != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index_type_and_size != 0 && index_type_and_size != 1 condition ignored (continuing)\n"); }
 		}
 		const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
 		indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
@@ -1289,7 +1289,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 			indices = static_cast<VulkanBuffer*>(
 			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, index_addr_u64, index_size, IndexBufferGpuObject()));
 		}
-		EXIT_NOT_IMPLEMENTED(indices == nullptr);
+		if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
 	}
 	if (guest_geometry)
 	{
@@ -1318,14 +1318,14 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 			    return ShaderRecompileVS(vertex_code, &guest_vertex_input);
 		    });
 		DebugStatsRecordShaderTranslationCache(guest_vertex_translation.hit, guest_vertex_translation.evicted);
-		EXIT_NOT_IMPLEMENTED(guest_vertex_translation.binary.IsEmpty());
+		if (guest_vertex_translation.binary.IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: guest_vertex_translation.binary.IsEmpty() condition ignored (continuing)\n"); }
 
 		if (ShaderBindRequiresDescriptorSet(guest_vertex_input.bind))
 		{
-			EXIT_NOT_IMPLEMENTED(guest_vertex_input.bind.descriptor_set_slot != 0);
+			if (guest_vertex_input.bind.descriptor_set_slot != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: guest_vertex_input.bind.descriptor_set_slot != 0 condition ignored (continuing)\n"); }
 			guest_vertex_stage.descriptor_set_layout =
 			    g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(DescriptorCache::Stage::Vertex, guest_vertex_input.bind);
-			EXIT_NOT_IMPLEMENTED(guest_vertex_stage.descriptor_set_layout == nullptr);
+			if (guest_vertex_stage.descriptor_set_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: guest_vertex_stage.descriptor_set_layout == nullptr condition ignored (continuing)\n"); }
 		}
 
 		const auto& mode = ctx->GetModeControl();
@@ -1362,9 +1362,9 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &copy_shader_usage);
 	RequireSupportedRenderResolutionPlan(resolution);
 
-	EXIT_NOT_IMPLEMENTED(depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT);
-	EXIT_NOT_IMPLEMENTED(color_info.targets_num != 1);
-	EXIT_NOT_IMPLEMENTED(depth_info.samples != color_info.attachment[0].samples || sample_locations.sample_count != depth_info.samples);
+	if (depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth_info.format != VK_FORMAT_D32_SFLOAT_S8_UINT condition ignored (continuing)\n"); }
+	if (color_info.targets_num != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: color_info.targets_num != 1 condition ignored (continuing)\n"); }
+	if (depth_info.samples != color_info.attachment[0].samples || sample_locations.sample_count != depth_info.samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth_info.samples != color_info.attachment[0].samples || sample_locations.sample_count != depth_info.samples condition ignored (continuing)\n"); }
 
 	MaterializeRenderDepthInfo(submit_id, buffer, &depth_info,
 	                           resolution.classification == ResolutionClassification::Scaled ? resolution.host_extent.width : 0,
@@ -1375,8 +1375,8 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 
 	auto* source = depth_info.vulkan_buffer;
 	auto* target = color_info.attachment[0].vulkan_buffer;
-	EXIT_NOT_IMPLEMENTED(source == nullptr || target == nullptr);
-	EXIT_NOT_IMPLEMENTED(source->format != VK_FORMAT_D32_SFLOAT_S8_UINT);
+	if (source == nullptr || target == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source == nullptr || target == nullptr condition ignored (continuing)\n"); }
+	if (source->format != VK_FORMAT_D32_SFLOAT_S8_UINT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->format != VK_FORMAT_D32_SFLOAT_S8_UINT condition ignored (continuing)\n"); }
 	const bool supported_target_format = target->format == VK_FORMAT_R8G8B8A8_UNORM || target->format == VK_FORMAT_B8G8R8A8_UNORM ||
 	                                     target->format == VK_FORMAT_R8G8B8A8_SRGB || target->format == VK_FORMAT_B8G8R8A8_SRGB;
 	if (!supported_target_format)
@@ -1384,13 +1384,13 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		KYTY_LOG_DEBUG( "KYTY_GRAPHICS: unsupported depth-stencil-copy target format=%d render-format=%u width=%u height=%u\n",
 		             static_cast<int>(target->format), static_cast<unsigned>(color_info.attachment[0].render_texture_format), target->extent.width,
 		             target->extent.height);
-		EXIT_NOT_IMPLEMENTED(!supported_target_format);
+		if (!supported_target_format) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !supported_target_format condition ignored (continuing)\n"); }
 	}
-	EXIT_NOT_IMPLEMENTED(source->samples != target->samples || source->samples != sample_locations.sample_count);
+	if (source->samples != target->samples || source->samples != sample_locations.sample_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->samples != target->samples || source->samples != sample_locations.sample_count condition ignored (continuing)\n"); }
 	const auto source_guest = source->GetGuestExtent();
 	const auto target_guest = target->GetGuestExtent();
-	EXIT_NOT_IMPLEMENTED(source_guest.width != target_guest.width || source_guest.height != target_guest.height);
-	EXIT_NOT_IMPLEMENTED(source->memory.unique_id == target->memory.unique_id);
+	if (source_guest.width != target_guest.width || source_guest.height != target_guest.height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_guest.width != target_guest.width || source_guest.height != target_guest.height condition ignored (continuing)\n"); }
+	if (source->memory.unique_id == target->memory.unique_id) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->memory.unique_id == target->memory.unique_id condition ignored (continuing)\n"); }
 
 	RenderDepthInfo source_setup = depth_info;
 	// A deferred depth/stencil clear initializes the complete sampled source
@@ -1399,7 +1399,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 	GraphicsRenderDepthStencilBarrier(vk_buffer, source);
-	EXIT_NOT_IMPLEMENTED(source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	if (source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL condition ignored (continuing)\n"); }
 
 	RenderDepthInfo no_depth;
 	RenderDepthInfo copy_depth = source_setup;
@@ -1416,7 +1416,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		// Vulkan can sample an attached depth plane only while that attachment is
 		// read-only. A preceding clear has already materialized the source, so the
 		// copy phase preserves the guest comparison without another depth write.
-		EXIT_NOT_IMPLEMENTED(source->extent.width != target->extent.width || source->extent.height != target->extent.height);
+		if (source->extent.width != target->extent.width || source->extent.height != target->extent.height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->extent.width != target->extent.width || source->extent.height != target->extent.height condition ignored (continuing)\n"); }
 		copy_depth.depth_clear_enable   = false;
 		copy_depth.stencil_clear_enable = false;
 		copy_depth.depth_write_enable   = false;
@@ -1426,7 +1426,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(
 	    &color_info, depth_attachment, (depth_attachment == &copy_depth ? DepthStencilAttachmentAccess::ReadOnly
 	                                                                       : DepthStencilAttachmentAccess::Writable));
-	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr || framebuffer->render_pass == nullptr);
+	if (framebuffer == nullptr || framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr || framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
 	DepthStencilCopyRequest request {};
 	request.mode             = DepthStencilCopyMode::ExpandToColor;
@@ -1548,8 +1548,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		KYTY_LOG_DEBUG("\t index_count         = 0x%08" PRIx32 "\n", index_count);
 		KYTY_LOG_DEBUG("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 
-		EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
-		EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
+		if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
+		if (ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000 condition ignored (continuing)\n"); }
 
 		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr);
 		return;
@@ -1574,8 +1574,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	KYTY_LOG_DEBUG("\t index_count         = 0x%08" PRIx32 "\n", index_count);
 	KYTY_LOG_DEBUG("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 
-	EXIT_NOT_IMPLEMENTED(!AutoDrawModifierSupported(draw_modifier));
-	EXIT_NOT_IMPLEMENTED(ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000);
+	if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
+	if (ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000 condition ignored (continuing)\n"); }
 
 	RenderDepthInfo depth_info;
 	RenderColorInfo color_info;
@@ -1656,8 +1656,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
-	EXIT_NOT_IMPLEMENTED(framebuffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(framebuffer->render_pass == nullptr);
+	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
+	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
@@ -1758,7 +1758,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	constexpr uint32_t DISPATCH_KNOWN_BITS            = DISPATCH_COMPUTE_SHADER_EN | DISPATCH_PARTIAL_TG_EN | DISPATCH_FORCE_START_AT_000 |
 	                                                    DISPATCH_USE_THREAD_DIMENSIONS | DISPATCH_ORDER_MODE;
 
-	EXIT_NOT_IMPLEMENTED((mode & ~DISPATCH_KNOWN_BITS) != 0);
+	if ((mode & ~DISPATCH_KNOWN_BITS) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (mode & ~DISPATCH_KNOWN_BITS) != 0 condition ignored (continuing)\n"); }
 
 	const auto& cs_regs = sh_ctx->GetCs();
 	const auto& sh_regs = ctx->GetShaderRegisters();
@@ -1768,7 +1768,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		const uint32_t lx = cs_regs.cs_regs.num_thread_x;
 		const uint32_t ly = cs_regs.cs_regs.num_thread_y;
 		const uint32_t lz = cs_regs.cs_regs.num_thread_z;
-		EXIT_NOT_IMPLEMENTED(lx == 0 || ly == 0 || lz == 0);
+		if (lx == 0 || ly == 0 || lz == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: lx == 0 || ly == 0 || lz == 0 condition ignored (continuing)\n"); }
 		thread_group_x = (thread_group_x + lx - 1) / lx;
 		thread_group_y = (thread_group_y + ly - 1) / ly;
 		thread_group_z = (thread_group_z + lz - 1) / lz;

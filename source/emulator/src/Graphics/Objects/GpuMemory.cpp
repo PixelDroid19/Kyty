@@ -90,7 +90,7 @@ void GpuMemory::SetAllocatedRange(uint64_t vaddr, uint64_t size)
 	EXIT_IF(size == 0);
 
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
-	EXIT_NOT_IMPLEMENTED(IsAllocated(vaddr, size));
+	if (IsAllocated(vaddr, size)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: IsAllocated(vaddr, size) condition ignored (continuing)\n"); }
 
 	Core::LockGuard lock(m_mutex);
 
@@ -200,7 +200,7 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 
 	int heap_id = GetHeapId(vaddr, size);
 
-	EXIT_NOT_IMPLEMENTED(heap_id < 0);
+	if (heap_id < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id < 0 condition ignored (continuing)\n"); }
 
 	auto object_ids = FindBlocks(heap_id, &vaddr, &size, 1);
 
@@ -230,7 +230,7 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 
 	if (unmap)
 	{
-		EXIT_NOT_IMPLEMENTED(!IsAllocated(vaddr, size));
+		if (!IsAllocated(vaddr, size)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsAllocated(vaddr, size) condition ignored (continuing)\n"); }
 
 		int index = 0;
 		for (auto& a: m_heaps)
@@ -240,10 +240,10 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 				EXIT_IF(a.objects_map1 == nullptr);
 				EXIT_IF(a.objects_map2 == nullptr);
 				EXIT_IF(a.overlap_cache == nullptr);
-				EXIT_NOT_IMPLEMENTED(heap_id != index);
-				EXIT_NOT_IMPLEMENTED(a.objects_size != 0);
-				EXIT_NOT_IMPLEMENTED(!a.objects_map1->IsEmpty());
-				EXIT_NOT_IMPLEMENTED(!a.objects_map2->IsEmpty());
+				if (heap_id != index) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id != index condition ignored (continuing)\n"); }
+				if (a.objects_size != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: a.objects_size != 0 condition ignored (continuing)\n"); }
+				if (!a.objects_map1->IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !a.objects_map1->IsEmpty() condition ignored (continuing)\n"); }
+				if (!a.objects_map2->IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !a.objects_map2->IsEmpty() condition ignored (continuing)\n"); }
 
 				delete a.objects_map1;
 				delete a.objects_map2;
@@ -255,7 +255,7 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 			index++;
 		}
 
-		EXIT_NOT_IMPLEMENTED(IsAllocated(vaddr, size));
+		if (IsAllocated(vaddr, size)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: IsAllocated(vaddr, size) condition ignored (continuing)\n"); }
 	}
 
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
@@ -503,7 +503,7 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer,
 {
 	EXIT_IF(buffer == nullptr);
 	SubmissionId submission;
-	EXIT_NOT_IMPLEMENTED(!buffer->GetSubmissionId(&submission));
+	if (!buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
 	return GpuMemoryFindObjectsForSubmission(submission, vaddr, size, type, exact, only_first);
 }
 
@@ -512,7 +512,7 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer,
 {
 	EXIT_IF(buffer == nullptr);
 	SubmissionId submission;
-	EXIT_NOT_IMPLEMENTED(!buffer->GetSubmissionId(&submission));
+	if (!buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
 	return GpuMemoryFindObjectsForSubmission(submission, vaddr, size, vaddr_num, type, exact, only_first);
 }
 

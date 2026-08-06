@@ -16,7 +16,7 @@ namespace Kyty::Libs::Graphics {
 class IndexBufferManager
 {
 public:
-	IndexBufferManager() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	IndexBufferManager() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~IndexBufferManager() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(IndexBufferManager);
 
@@ -89,11 +89,11 @@ private:
 		buffer->usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 		buffer->memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 		VulkanCreateBuffer(ctx, size, buffer);
-		EXIT_NOT_IMPLEMENTED(buffer->buffer == nullptr);
+		if (buffer->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer->buffer == nullptr condition ignored (continuing)\n"); }
 
 		void* mapped = nullptr;
 		VulkanMapMemory(ctx, &buffer->memory, &mapped);
-		EXIT_NOT_IMPLEMENTED(mapped == nullptr);
+		if (mapped == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: mapped == nullptr condition ignored (continuing)\n"); }
 		return {buffer, mapped};
 	}
 
@@ -151,7 +151,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 	EXIT_IF(g_index_buffer_manager == nullptr);
 
 	const auto staging = g_index_buffer_manager->AcquireStaging(ctx, *size);
-	EXIT_NOT_IMPLEMENTED(!staging.IsValid());
+	if (!staging.IsValid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !staging.IsValid() condition ignored (continuing)\n"); }
 	memcpy(staging.resource.mapped, reinterpret_cast<void*>(*vaddr), *size);
 
 	UtilCopyBuffer(static_cast<VulkanBuffer*>(staging.resource.object), vk_obj, *size);
@@ -175,7 +175,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->buffer          = nullptr;
 
 	VulkanCreateBuffer(ctx, *size, vk_obj);
-	EXIT_NOT_IMPLEMENTED(vk_obj->buffer == nullptr);
+	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 

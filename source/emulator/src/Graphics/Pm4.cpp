@@ -205,8 +205,8 @@ void DumpPm4PacketStream(Core::File* file, uint32_t* cmd_buffer, uint32_t start_
 			break;
 		}
 
-		EXIT_NOT_IMPLEMENTED(dw < 2);
-		EXIT_NOT_IMPLEMENTED(dw > num_dw);
+		if (dw < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 2 condition ignored (continuing)\n"); }
+		if (dw > num_dw) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw > num_dw condition ignored (continuing)\n"); }
 
 		auto cmd_id = *cmd++;
 

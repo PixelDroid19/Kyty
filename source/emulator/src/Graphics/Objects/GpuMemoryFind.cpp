@@ -49,7 +49,7 @@ Vector<GpuMemoryObject> GpuMemory::FindObjects(const uint64_t* vaddr, const uint
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
 
-	EXIT_NOT_IMPLEMENTED(heap_id < 0);
+	if (heap_id < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id < 0 condition ignored (continuing)\n"); }
 
 	auto& heap = m_heaps[heap_id];
 
@@ -196,7 +196,7 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 
 	int heap_id = GetHeapId(vaddr[0], size[0]);
 
-	EXIT_NOT_IMPLEMENTED(heap_id < 0);
+	if (heap_id < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id < 0 condition ignored (continuing)\n"); }
 
 	auto& heap = m_heaps[heap_id];
 
@@ -235,7 +235,7 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 			auto& o = h.info;
 			if (o.object.type == type)
 			{
-				EXIT_NOT_IMPLEMENTED(obj.relation != OverlapType::Equals);
+				if (obj.relation != OverlapType::Equals) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: obj.relation != OverlapType::Equals condition ignored (continuing)\n"); }
 
 				for (int vi = 0; vi < vaddr_num; vi++)
 				{

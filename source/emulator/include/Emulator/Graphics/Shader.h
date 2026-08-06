@@ -613,6 +613,7 @@ enum Format : uint64_t
 	PrimVsrc0OffOffOffDone              = FormatDefine({Prim, S0, Off, Off, Off, Done}),
 	Saddr                               = FormatDefine({S0A2}),
 	SdstSbaseSoffset                    = FormatDefine({D, S0A2, S1}),
+	Sdst16SbaseSoffset                  = FormatDefine({DA16, S0A2, S1}),
 	Sdst16SvSoffset                     = FormatDefine({DA16, S0A4, S1}),
 	Sdst2Ssrc02                         = FormatDefine({DA2, S0A2}),
 	Sdst2Ssrc02Ssrc1                    = FormatDefine({DA2, S0A2, S1}),

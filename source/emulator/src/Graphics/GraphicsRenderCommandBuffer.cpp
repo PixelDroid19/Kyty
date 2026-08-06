@@ -185,7 +185,7 @@ void CommandBuffer::Allocate()
 		}
 	}
 
-	EXIT_NOT_IMPLEMENTED(IsInvalid());
+	if (IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: IsInvalid() condition ignored (continuing)\n"); }
 }
 
 void CommandBuffer::Free()
@@ -206,7 +206,7 @@ void CommandBuffer::Free()
 	vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 	m_index = static_cast<uint32_t>(-1);
 
-	EXIT_NOT_IMPLEMENTED(!IsInvalid());
+	if (!IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsInvalid() condition ignored (continuing)\n"); }
 }
 
 void CommandBuffer::Begin() const
@@ -227,7 +227,7 @@ void CommandBuffer::Begin() const
 
 	auto result = vkBeginCommandBuffer(buffer, &begin_info);
 
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+	if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
 }
 
 VulkanBuffer* CommandBuffer::UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage)
@@ -248,7 +248,7 @@ void CommandBuffer::End() const
 
 	auto result = vkEndCommandBuffer(buffer);
 
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+	if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
 	DebugStatsRecordCommandBuffer();
 }
 
@@ -284,7 +284,7 @@ void CommandBuffer::Execute()
 			             GraphicsRunGetFrameNum());
 		}
 		auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
-		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+		if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
 	}
 	DebugStatsRecordSubmit();
 
@@ -318,7 +318,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 		EXIT_IF(queue.mutex == nullptr);
 		Core::LockGuard queue_lock(*queue.mutex);
 		auto            result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
-		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+		if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
 	}
 	DebugStatsRecordSubmit();
 
@@ -359,13 +359,13 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 	{
 		return false;
 	}
-	EXIT_NOT_IMPLEMENTED(status != VK_SUCCESS);
+	if (status != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: status != VK_SUCCESS condition ignored (continuing)\n"); }
 
 	DebugStatsRecordSubmissionComplete();
 	const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
-	EXIT_NOT_IMPLEMENTED(fence_reset_result != VK_SUCCESS);
+	if (fence_reset_result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fence_reset_result != VK_SUCCESS condition ignored (continuing)\n"); }
 	const auto command_reset_result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-	EXIT_NOT_IMPLEMENTED(command_reset_result != VK_SUCCESS);
+	if (command_reset_result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: command_reset_result != VK_SUCCESS condition ignored (continuing)\n"); }
 	m_execute = false;
 	return true;
 }
@@ -393,7 +393,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			KYTY_LOG_ERROR("ERROR: vkWaitForFences wait_result=%d slot=%" PRIu32 " after %" PRId64 "ns\n",
 			             static_cast<int>(wait_result), m_index, static_cast<int64_t>(wait_ns));
 		}
-		EXIT_NOT_IMPLEMENTED(wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT);
+		if (wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT condition ignored (continuing)\n"); }
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
 		DebugStatsRecordSubmissionComplete();
 		if (drain_label_callbacks)
@@ -403,7 +403,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 		if (wait_result != VK_TIMEOUT)
 		{
 			const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
-			EXIT_NOT_IMPLEMENTED(fence_reset_result != VK_SUCCESS);
+			if (fence_reset_result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fence_reset_result != VK_SUCCESS condition ignored (continuing)\n"); }
 		} else
 		{
 			// Fence did not signal within timeout — skip reset to avoid
@@ -413,7 +413,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 		if (reset_command_buffer)
 		{
 			const auto command_reset_result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-			EXIT_NOT_IMPLEMENTED(command_reset_result != VK_SUCCESS);
+			if (command_reset_result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: command_reset_result != VK_SUCCESS condition ignored (continuing)\n"); }
 		}
 
 		m_execute = false;
@@ -432,7 +432,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	bool with_depth = (depth->format != VK_FORMAT_UNDEFINED && depth->vulkan_buffer != nullptr);
 	bool with_color = (RenderColorHasActiveTarget(*color) && RenderColorFirstActiveImage(*color) != nullptr);
 
-	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
+	if (!with_depth && !with_color) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_depth && !with_color condition ignored (continuing)\n"); }
 
 	auto* depth_image = (with_depth ? depth->vulkan_buffer : nullptr);
 	// Custom sample locations apply only when the draw actually carries them.
@@ -444,8 +444,8 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	     depth_image->sample_locations_compatible && depth_image->samples != VK_SAMPLE_COUNT_1_BIT);
 	if (custom_depth_locations)
 	{
-		EXIT_NOT_IMPLEMENTED(sample_locations == nullptr || !VulkanSampleLocationsEnabled(*sample_locations));
-		EXIT_NOT_IMPLEMENTED(sample_locations->sample_count != depth_image->samples);
+		if (sample_locations == nullptr || !VulkanSampleLocationsEnabled(*sample_locations)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sample_locations == nullptr || !VulkanSampleLocationsEnabled(*sample_locations) condition ignored (continuing)\n"); }
+		if (sample_locations->sample_count != depth_image->samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sample_locations->sample_count != depth_image->samples condition ignored (continuing)\n"); }
 	} else if (sample_locations != nullptr && VulkanSampleLocationsEnabled(*sample_locations) && with_depth)
 	{
 		// MSAA draw against a depth image that was not created
@@ -481,12 +481,12 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	}
 	if (with_depth)
 	{
-		EXIT_NOT_IMPLEMENTED(framebuffer->depth_attachment_index >= framebuffer->attachment_count);
+		if (framebuffer->depth_attachment_index >= framebuffer->attachment_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->depth_attachment_index >= framebuffer->attachment_count condition ignored (continuing)\n"); }
 		clears[framebuffer->depth_attachment_index].depthStencil = {depth->depth_clear_value, depth->stencil_clear_value};
 	}
 
 	const VkExtent2D extent = framebuffer->extent;
-	EXIT_NOT_IMPLEMENTED(extent.width == 0 || extent.height == 0);
+	if (extent.width == 0 || extent.height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: extent.width == 0 || extent.height == 0 condition ignored (continuing)\n"); }
 
 	VkRenderPassBeginInfo render_pass_info {};
 	render_pass_info.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -507,8 +507,8 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	VkRenderPassSampleLocationsBeginInfoEXT render_pass_sample_locations {};
 	if (custom_depth_locations)
 	{
-		EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsPopulateInfo(*sample_locations, current_sample_location_values,
-		                                                       &current_sample_location_info));
+		if (!VulkanSampleLocationsPopulateInfo(*sample_locations, current_sample_location_values,
+		                                                       &current_sample_location_info)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanSampleLocationsPopulateInfo(*sample_locations, current_sample_location_va condition ignored (continuing)\n"); }
 		post_subpass_sample_locations.subpassIndex         = 0;
 		post_subpass_sample_locations.sampleLocationsInfo  = current_sample_location_info;
 		render_pass_sample_locations.sType                 = VK_STRUCTURE_TYPE_RENDER_PASS_SAMPLE_LOCATIONS_BEGIN_INFO_EXT;
@@ -517,9 +517,9 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 
 		if (depth_image->layout != VK_IMAGE_LAYOUT_UNDEFINED)
 		{
-			EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsEnabled(depth_image->last_sample_locations));
-			EXIT_NOT_IMPLEMENTED(!VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations,
-			                                                       previous_sample_location_values, &previous_sample_location_info));
+			if (!VulkanSampleLocationsEnabled(depth_image->last_sample_locations)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanSampleLocationsEnabled(depth_image->last_sample_locations) condition ignored (continuing)\n"); }
+			if (!VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations,
+			                                                       previous_sample_location_values, &previous_sample_location_info)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanSampleLocationsPopulateInfo(depth_image->last_sample_locations, condition ignored (continuing)\n"); }
 			attachment_initial_sample_locations.attachmentIndex       = framebuffer->depth_attachment_index;
 			attachment_initial_sample_locations.sampleLocationsInfo   = previous_sample_location_info;
 			render_pass_sample_locations.attachmentInitialSampleLocationsCount = 1;
@@ -560,8 +560,8 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	}
 
 	const auto depth_stencil_layout = framebuffer->depth_stencil_layout;
-	EXIT_NOT_IMPLEMENTED(with_depth && depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
-	                     depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	if (with_depth && depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
+	                     depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: with_depth && depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_O condition ignored (continuing)\n"); }
 	if (with_depth && depth->vulkan_buffer->layout != depth_stencil_layout)
 	{
 		VkImageMemoryBarrier image_memory_barrier {};

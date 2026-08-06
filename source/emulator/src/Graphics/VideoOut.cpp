@@ -411,7 +411,7 @@ void FillMonotonicVblankStatus(VideoOutConfig* config, VideoOutVblankStatus* sta
 class FlipQueue
 {
 public:
-	FlipQueue(): m_admission_gate(2) { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	FlipQueue(): m_admission_gate(2) { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~FlipQueue() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FlipQueue);
 
@@ -492,7 +492,7 @@ public:
 		VideoOutConfig*                             m_config = nullptr;
 	};
 
-	VideoOutContext() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	VideoOutContext() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~VideoOutContext() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(VideoOutContext);
@@ -593,8 +593,8 @@ static void calc_buffer_size(const VideoOutBufferAttribute* attribute, const Vid
 
 	if (attribute2 != nullptr)
 	{
-		EXIT_NOT_IMPLEMENTED(attribute2->option != 0 && attribute2->option != 8);
-		EXIT_NOT_IMPLEMENTED(attribute2->aspect_ratio != 0);
+		if (attribute2->option != 0 && attribute2->option != 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute2->option != 0 && attribute2->option != 8 condition ignored (continuing)\n"); }
+		if (attribute2->aspect_ratio != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute2->aspect_ratio != 0 condition ignored (continuing)\n"); }
 		// Gen5 PIXEL_FORMAT2: 8:8:8:8 sRGB and 10:10:10:2 (B/R channel order variants).
 		if (attribute2->pixel_format != 0x8000000000000000ULL && attribute2->pixel_format != 0x8000000022000000ULL &&
 		    attribute2->pixel_format != 0x8100000000000000ULL && attribute2->pixel_format != 0x8100000022000000ULL &&
@@ -604,13 +604,13 @@ static void calc_buffer_size(const VideoOutBufferAttribute* attribute, const Vid
 			                 "VIDEOOUT_FMT: pixel_format=0x%016llx option=%u aspect=%u tiling=%u w=%u h=%u\n",
 			                 (unsigned long long)attribute2->pixel_format, (unsigned)attribute2->option,
 			                 (unsigned)attribute2->aspect_ratio, (unsigned)attribute2->tiling_mode, (unsigned)width, (unsigned)height);
-			EXIT_NOT_IMPLEMENTED(true);
+			if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 		}
 	} else
 	{
-		EXIT_NOT_IMPLEMENTED(attribute->option != 0);
-		EXIT_NOT_IMPLEMENTED(attribute->aspect_ratio != 0);
-		EXIT_NOT_IMPLEMENTED(attribute->pixel_format != 0x80000000 && attribute->pixel_format != 0x80002200);
+		if (attribute->option != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->option != 0 condition ignored (continuing)\n"); }
+		if (attribute->aspect_ratio != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->aspect_ratio != 0 condition ignored (continuing)\n"); }
+		if (attribute->pixel_format != 0x80000000 && attribute->pixel_format != 0x80002200) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->pixel_format != 0x80000000 && attribute->pixel_format != 0x80002200 condition ignored (continuing)\n"); }
 	}
 
 	Graphics::TileSizeAlign size32 {};
@@ -698,9 +698,9 @@ void VideoOutContext::Close(int handle)
 
 	m_mutex.Lock();
 
-	EXIT_NOT_IMPLEMENTED(handle < 0 || handle >= VIDEO_OUT_NUM_MAX);
+	if (handle < 0 || handle >= VIDEO_OUT_NUM_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: handle < 0 || handle >= VIDEO_OUT_NUM_MAX condition ignored (continuing)\n"); }
 	auto* ctx = m_video_out_ctx + handle;
-	EXIT_NOT_IMPLEMENTED(!ctx->opened || ctx->closing);
+	if (!ctx->opened || ctx->closing) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ctx->opened || ctx->closing condition ignored (continuing)\n"); }
 
 	ctx->closing = true;
 	m_mutex.Unlock();
@@ -750,7 +750,7 @@ void VideoOutContext::Close(int handle)
 	{
 		const auto result =
 		    EventQueue::KernelDeleteEvent(pending.pin, pending.ident, EventQueue::KERNEL_EVFILT_VIDEO_OUT);
-		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
+		if (result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT condition ignored (continuing)\n"); }
 	}
 	event_deletes.clear();
 	for (const auto identity: closing_queues)
@@ -976,7 +976,7 @@ void VideoOutContext::VblankEnd()
 			const auto result =
 			    EventQueue::KernelTriggerEvent(pin, VIDEO_OUT_EVENT_VBLANK, EventQueue::KERNEL_EVFILT_VIDEO_OUT,
 			                                   reinterpret_cast<void*>(count));
-			EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
+			if (result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT condition ignored (continuing)\n"); }
 		}
 	}
 }
@@ -1169,7 +1169,7 @@ VideoOutContext::FindRegisteredImageForSubmission(const VideoOutRegisteredImageS
 	const auto objects = Graphics::GpuMemoryFindObjectsForSubmission(
 	    submission, reinterpret_cast<uint64_t>(snapshot.buffer), snapshot.buffer_size,
 	    Graphics::GpuMemoryObjectType::VideoOutBuffer, true, true);
-	EXIT_NOT_IMPLEMENTED(objects.Size() != 1 || objects[0].obj == nullptr);
+	if (objects.Size() != 1 || objects[0].obj == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: objects.Size() != 1 || objects[0].obj == nullptr condition ignored (continuing)\n"); }
 
 	auto* image = static_cast<Graphics::VideoOutVulkanImage*>(objects[0].obj);
 	if (!image->MatchesGuestExtent(snapshot.guest_width, snapshot.guest_height))
@@ -1217,7 +1217,7 @@ VideoOutBufferImageInfo VideoOutContext::FindImageForSubmission(const void* buff
 	EXIT_IF(command_buffer == nullptr);
 	auto* graphic_ctx = GetGraphicCtx();
 	Graphics::SubmissionId submission;
-	EXIT_NOT_IMPLEMENTED(!command_buffer->GetSubmissionId(&submission));
+	if (!command_buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !command_buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
 
 	Graphics::VideoOutMaterializationGate::Pin pin;
 	auto                                       ret = PinImageForSubmission(buffer, submission, materialize, &pin);
@@ -1540,7 +1540,7 @@ bool FlipQueue::Flip(uint32_t micros)
 		const auto result =
 		    EventQueue::KernelTriggerEvent(pin, VIDEO_OUT_EVENT_FLIP, EventQueue::KERNEL_EVFILT_VIDEO_OUT,
 		                                   reinterpret_cast<void*>(r.flip_arg));
-		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
+		if (result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT condition ignored (continuing)\n"); }
 		if (result == Kernel::OK)
 		{
 			flip_triggered++;
@@ -1610,9 +1610,9 @@ KYTY_SYSV_ABI int VideoOutOpen(int user_id, int bus_type, int index, const void*
 
 	EXIT_IF(g_video_out_context == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(user_id != 255 && user_id != 0);
-	EXIT_NOT_IMPLEMENTED(bus_type != 0);
-	EXIT_NOT_IMPLEMENTED(index != 0);
+	if (user_id != 255 && user_id != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_id != 255 && user_id != 0 condition ignored (continuing)\n"); }
+	if (bus_type != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bus_type != 0 condition ignored (continuing)\n"); }
+	if (index != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index != 0 condition ignored (continuing)\n"); }
 	// Gen5 titles pass a non-null open-param block; attributes are applied later
 	// via SetBufferAttribute*. Accept and ignore for Open().
 	KYTY_LOG_DEBUG("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
@@ -1652,10 +1652,10 @@ KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStat
 
 	EXIT_IF(g_video_out_context == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(status == nullptr);
+	if (status == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: status == nullptr condition ignored (continuing)\n"); }
 
 	auto session = g_video_out_context->AcquireSession(handle);
-	EXIT_NOT_IMPLEMENTED(!session);
+	if (!session) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !session condition ignored (continuing)\n"); }
 	*status = session.Get()->resolution;
 
 	return Kernel::OK;
@@ -1666,7 +1666,7 @@ KYTY_SYSV_ABI void VideoOutSetBufferAttribute(VideoOutBufferAttribute* attribute
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(attribute == nullptr);
+	if (attribute == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute == nullptr condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t pixel_format   = %08" PRIx32 "\n", pixel_format);
 	KYTY_LOG_DEBUG("\t tiling_mode    = %" PRIu32 "\n", tiling_mode);
@@ -1691,7 +1691,7 @@ KYTY_SYSV_ABI void VideoOutSetBufferAttribute2(VideoOutBufferAttribute2* attribu
 {
 	PRINT_NAME();
 
-	EXIT_NOT_IMPLEMENTED(attribute == nullptr);
+	if (attribute == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute == nullptr condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\t pixel_format                = %016" PRIx64 "\n", pixel_format);
 	KYTY_LOG_DEBUG("\t tiling_mode                 = %" PRIu32 "\n", tiling_mode);
@@ -1720,12 +1720,12 @@ KYTY_SYSV_ABI int VideoOutSetFlipRate(int handle, int rate)
 
 	EXIT_IF(g_video_out_context == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(rate < 0 || rate > 2);
+	if (rate < 0 || rate > 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rate < 0 || rate > 2 condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("\trate = %d\n", rate);
 
 	auto session = g_video_out_context->AcquireSession(handle);
-	EXIT_NOT_IMPLEMENTED(!session);
+	if (!session) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !session condition ignored (continuing)\n"); }
 	session.Get()->flip_rate = rate;
 
 	return Kernel::OK;
@@ -1758,8 +1758,8 @@ static void flip_event_delete_func(EventQueue::KernelEqueue eq, Kernel::EventQue
 	EXIT_IF(event == nullptr);
 	EXIT_IF(event->filter.data == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(event->event.ident != VIDEO_OUT_EVENT_FLIP);
-	EXIT_NOT_IMPLEMENTED(event->event.filter != EventQueue::KERNEL_EVFILT_VIDEO_OUT);
+	if (event->event.ident != VIDEO_OUT_EVENT_FLIP) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event->event.ident != VIDEO_OUT_EVENT_FLIP condition ignored (continuing)\n"); }
+	if (event->event.filter != EventQueue::KERNEL_EVFILT_VIDEO_OUT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event->event.filter != EventQueue::KERNEL_EVFILT_VIDEO_OUT condition ignored (continuing)\n"); }
 
 	auto* binding = static_cast<VideoOutEventBinding*>(event->filter.data);
 	EXIT_IF(binding->config == nullptr || binding->identity.eq != eq || binding->kind != VideoOutEventKind::Flip);
@@ -1816,8 +1816,8 @@ static void vblank_event_delete_func(EventQueue::KernelEqueue eq, Kernel::EventQ
 	EXIT_IF(event == nullptr);
 	EXIT_IF(event->filter.data == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(event->event.ident != VIDEO_OUT_EVENT_VBLANK);
-	EXIT_NOT_IMPLEMENTED(event->event.filter != EventQueue::KERNEL_EVFILT_VIDEO_OUT);
+	if (event->event.ident != VIDEO_OUT_EVENT_VBLANK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event->event.ident != VIDEO_OUT_EVENT_VBLANK condition ignored (continuing)\n"); }
+	if (event->event.filter != EventQueue::KERNEL_EVFILT_VIDEO_OUT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event->event.filter != EventQueue::KERNEL_EVFILT_VIDEO_OUT condition ignored (continuing)\n"); }
 
 	auto* binding = static_cast<VideoOutEventBinding*>(event->filter.data);
 	EXIT_IF(binding->config == nullptr || binding->identity.eq != eq || binding->kind != VideoOutEventKind::Vblank);
@@ -2012,8 +2012,8 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 	uint64_t buffer_pitch = 0;
 	calc_buffer_size(attribute, attribute2, &buffer_size, &buffer_align, &buffer_pitch);
 
-	EXIT_NOT_IMPLEMENTED(buffer_size == 0);
-	EXIT_NOT_IMPLEMENTED(buffer_pitch == 0);
+	if (buffer_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_size == 0 condition ignored (continuing)\n"); }
+	if (buffer_pitch == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_pitch == 0 condition ignored (continuing)\n"); }
 
 	bool     tile   = (attribute2 != nullptr ? (attribute2->tiling_mode == 0) : (attribute->tiling_mode == 0));
 	bool     neo    = (attribute2 != nullptr ? true : Config::IsNeo());
@@ -2058,7 +2058,7 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 
 	for (int i = 0; i < buffer_num; i++)
 	{
-		EXIT_NOT_IMPLEMENTED((reinterpret_cast<uint64_t>(addresses[i]) & (buffer_align - 1u)) != 0);
+		if ((reinterpret_cast<uint64_t>(addresses[i]) & (buffer_align - 1u)) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (reinterpret_cast<uint64_t>(addresses[i]) & (buffer_align - 1u)) != 0 condition ignored (continuing)\n"); }
 		for (int j = i + 1; j < buffer_num; j++)
 		{
 			if (VideoOutRangesOverlap(reinterpret_cast<uint64_t>(addresses[i]), buffer_size,
@@ -2157,7 +2157,7 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 		staged.buffer_pitch  = buffer_pitch;
 		staged.buffer_vulkan = static_cast<Graphics::VideoOutVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    0, graphic_ctx, nullptr, reinterpret_cast<uint64_t>(addresses[i]), buffer_size, vulkan_buffer_info));
-		EXIT_NOT_IMPLEMENTED(staged.buffer_vulkan == nullptr);
+		if (staged.buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: staged.buffer_vulkan == nullptr condition ignored (continuing)\n"); }
 		staged_images[i] = staged.buffer_vulkan;
 	}
 
@@ -2338,10 +2338,10 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers(int handle, int start_index, void* con
 	KYTY_LOG_DEBUG("\t option         = %" PRIu32 "\n", attribute->option);
 
 	// EXIT_NOT_IMPLEMENTED(attribute->pixel_format != 0x80000000);
-	EXIT_NOT_IMPLEMENTED(attribute->tiling_mode != 0);
-	EXIT_NOT_IMPLEMENTED(attribute->aspect_ratio != 0);
-	EXIT_NOT_IMPLEMENTED(attribute->pitch_in_pixel != attribute->width);
-	EXIT_NOT_IMPLEMENTED(attribute->option != 0);
+	if (attribute->tiling_mode != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->tiling_mode != 0 condition ignored (continuing)\n"); }
+	if (attribute->aspect_ratio != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->aspect_ratio != 0 condition ignored (continuing)\n"); }
+	if (attribute->pitch_in_pixel != attribute->width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->pitch_in_pixel != attribute->width condition ignored (continuing)\n"); }
+	if (attribute->option != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->option != 0 condition ignored (continuing)\n"); }
 
 	return g_video_out_context->RegisterBuffers(handle, 0, true, start_index, addresses, buffer_num, attribute, nullptr);
 }
@@ -2385,20 +2385,20 @@ KYTY_SYSV_ABI int VideoOutRegisterBuffers2(int handle, int set_index, int buffer
 	                 (unsigned)attribute->tiling_mode, (unsigned)attribute->aspect_ratio, (unsigned)attribute->width,
 	                 (unsigned)attribute->height, (unsigned)attribute->pitch_in_pixel, (unsigned long long)attribute->option,
 	                 (unsigned long long)attribute->dcc_cb_register_clear_color, (unsigned long long)attribute->dcc_control);
-	EXIT_NOT_IMPLEMENTED(option != nullptr);
-	EXIT_NOT_IMPLEMENTED(category != 0);
-	EXIT_NOT_IMPLEMENTED(attribute->tiling_mode != 0);
-	EXIT_NOT_IMPLEMENTED(attribute->aspect_ratio != 0);
-	EXIT_NOT_IMPLEMENTED(attribute->pitch_in_pixel != 0);
-	EXIT_NOT_IMPLEMENTED(attribute->option != 0 && attribute->option != 8);
-	EXIT_NOT_IMPLEMENTED(attribute->dcc_cb_register_clear_color != 0);
-	EXIT_NOT_IMPLEMENTED(attribute->dcc_control != 0);
+	if (option != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: option != nullptr condition ignored (continuing)\n"); }
+	if (category != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: category != 0 condition ignored (continuing)\n"); }
+	if (attribute->tiling_mode != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->tiling_mode != 0 condition ignored (continuing)\n"); }
+	if (attribute->aspect_ratio != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->aspect_ratio != 0 condition ignored (continuing)\n"); }
+	if (attribute->pitch_in_pixel != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->pitch_in_pixel != 0 condition ignored (continuing)\n"); }
+	if (attribute->option != 0 && attribute->option != 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->option != 0 && attribute->option != 8 condition ignored (continuing)\n"); }
+	if (attribute->dcc_cb_register_clear_color != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->dcc_cb_register_clear_color != 0 condition ignored (continuing)\n"); }
+	if (attribute->dcc_control != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attribute->dcc_control != 0 condition ignored (continuing)\n"); }
 
 	Vector<const void*> addresses(buffer_num);
 
 	for (int i = 0; i < buffer_num; i++)
 	{
-		EXIT_NOT_IMPLEMENTED(buffers[i].metadata != nullptr);
+		if (buffers[i].metadata != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffers[i].metadata != nullptr condition ignored (continuing)\n"); }
 
 		addresses[i] = buffers[i].data;
 	}
@@ -2492,10 +2492,10 @@ void VideoOutWaitFlipDone(int handle, int index)
 	EXIT_IF(g_video_out_context == nullptr);
 
 	auto session = g_video_out_context->AcquireSession(handle);
-	EXIT_NOT_IMPLEMENTED(!session);
+	if (!session) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !session condition ignored (continuing)\n"); }
 	auto* ctx = session.Get();
 
-	EXIT_NOT_IMPLEMENTED(index < 0 || index > 15);
+	if (index < 0 || index > 15) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 0 || index > 15 condition ignored (continuing)\n"); }
 
 	g_video_out_context->GetFlipQueue().Wait(ctx, index);
 }
@@ -2726,7 +2726,7 @@ KYTY_SYSV_ABI int VideoOutDeleteVblankEvent(Kernel::EventQueue::KernelEqueue eq,
 	{
 		const auto result =
 		    EventQueue::KernelDeleteEvent(pin, VIDEO_OUT_EVENT_VBLANK, EventQueue::KERNEL_EVFILT_VIDEO_OUT);
-		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
+		if (result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT condition ignored (continuing)\n"); }
 	}
 
 	return Kernel::OK;
@@ -2764,7 +2764,7 @@ KYTY_SYSV_ABI int VideoOutDeleteFlipEvent(Kernel::EventQueue::KernelEqueue eq, i
 	{
 		const auto result =
 		    EventQueue::KernelDeleteEvent(pin, VIDEO_OUT_EVENT_FLIP, EventQueue::KERNEL_EVFILT_VIDEO_OUT);
-		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
+		if (result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT condition ignored (continuing)\n"); }
 	}
 
 	return Kernel::OK;

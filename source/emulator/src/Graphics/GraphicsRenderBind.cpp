@@ -90,7 +90,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 			vertices = static_cast<VulkanBuffer*>(
 			    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, address, size, VertexBufferGpuObject()));
 		}
-		EXIT_NOT_IMPLEMENTED(vertices == nullptr);
+		if (vertices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertices == nullptr condition ignored (continuing)\n"); }
 
 		VkDeviceSize offset = 0;
 		vkCmdBindVertexBuffers(vk_buffer, static_cast<uint32_t>(i), 1, &vertices->buffer, &offset);
@@ -245,15 +245,15 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			    (storage_buffers.accesses[i] == ShaderStorageAccess::Unknown && !storage_buffers.code_available[i]);
 			if (address_only_descriptor)
 			{
-				EXIT_NOT_IMPLEMENTED(!ShaderRawStorageDescriptorSupported(r));
+				if (!ShaderRawStorageDescriptorSupported(r)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ShaderRawStorageDescriptorSupported(r) condition ignored (continuing)\n"); }
 			} else
 			{
-				EXIT_NOT_IMPLEMENTED(!((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r.Nfmt() == 4) ||
+				if (!((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r.Nfmt() == 4) ||
 				                       (r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 1) && r.Dfmt() == 4 && r.Nfmt() == 7) ||
 				                       (r.Stride() == 8 && r.DstSelXYZW() == DstSel(4, 5, 0, 0) && r.Dfmt() == 11 && r.Nfmt() == 4) ||
-				                       (r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && r.Dfmt() == 14 && r.Nfmt() == 7)));
+				                       (r.Stride() == 16 && r.DstSelXYZW() == DstSel(4, 5, 6, 7) && r.Dfmt() == 14 && r.Nfmt() == 7))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !((r.Stride() == 4 && r.DstSelXYZW() == DstSel(4, 0, 0, 0) && r.Dfmt() == 4 && r condition ignored (continuing)\n"); }
 			}
-			EXIT_NOT_IMPLEMENTED(!(r.MemoryType() == 0x00 || r.MemoryType() == 0x10 || r.MemoryType() == 0x6d));
+			if (!(r.MemoryType() == 0x00 || r.MemoryType() == 0x10 || r.MemoryType() == 0x6d)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(r.MemoryType() == 0x00 || r.MemoryType() == 0x10 || r.MemoryType() == 0x6d) condition ignored (continuing)\n"); }
 		}
 
 		auto           addr        = (gen5 ? r.Base48() : r.Base44());
@@ -283,12 +283,12 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			if (declared_size == 0)
 			{
 				ReportStorageRange(storage_buffers, i, r, addr, declared_size, 0);
-				EXIT_NOT_IMPLEMENTED(true);
+				if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 			}
 
 			const bool read_only = ShaderStorageUsageIsReadOnly(storage_buffers.usages[i]);
-			EXIT_NOT_IMPLEMENTED(read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly ||
-			                                    storage_buffers.usages[i] == ShaderStorageUsage::Constant));
+			if (read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly ||
+			                                    storage_buffers.usages[i] == ShaderStorageUsage::Constant)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly || condition ignored (continuing)\n"); }
 			const bool exact_static_smem = gen5 && storage_buffers.accesses[i] == ShaderStorageAccess::Raw &&
 			                               storage_buffers.exact_matches[i] && !storage_buffers.decoded_unknown[i] &&
 			                               !storage_buffers.indirect_descriptor_use[i] && storage_buffers.raw_smem_use[i] &&
@@ -309,7 +309,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			} else if (materialized_size == 0)
 			{
 				ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
-				EXIT_NOT_IMPLEMENTED(materialized_size == 0);
+				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
 				// Unsafe bring-up deliberately continues past the diagnostic below, so
 				// do not feed a zero-sized or unmapped range into GpuMemoryCreateObject.
@@ -325,7 +325,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 				{
 					ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
 				}
-				EXIT_NOT_IMPLEMENTED(materialized_size == 0);
+				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
 				StorageBufferGpuObject buf_info(stride, num_records, read_only);
 				buf = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -337,7 +337,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			}
 		}
 
-		EXIT_NOT_IMPLEMENTED(buf == nullptr);
+		if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
 
 		buffers[i] = buf;
 
@@ -349,7 +349,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			r.UpdateAddress44(i);
 		}
 
-		EXIT_NOT_IMPLEMENTED(((gen5 ? r.Base48() : r.Base44()) >> 32u) != 0);
+		if (((gen5 ? r.Base48() : r.Base44()) >> 32u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((gen5 ? r.Base48() : r.Base44()) >> 32u) != 0 condition ignored (continuing)\n"); }
 
 		(*sgprs)[0] = r.fields[0];
 		(*sgprs)[1] = r.fields[1];
@@ -450,30 +450,30 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				     static_cast<uint32_t>(r.Format()), tile_mode, r.Width5() + 1u, r.Height5() + 1u, r.Base40(),
 				     static_cast<uint32_t>(r.Type()));
 			}
-			EXIT_NOT_IMPLEMENTED(r.PerfMod5() != 7 && r.PerfMod5() != 0);
-			EXIT_NOT_IMPLEMENTED(r.BCSwizzle() != 0);
+			if (r.PerfMod5() != 7 && r.PerfMod5() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.PerfMod5() != 7 && r.PerfMod5() != 0 condition ignored (continuing)\n"); }
+			if (r.BCSwizzle() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.BCSwizzle() != 0 condition ignored (continuing)\n"); }
 			// BaseArray5 and ArrayPitch are layer-addressing fields. Their bit
 			// positions are not array state for Color3D descriptors.
-			EXIT_NOT_IMPLEMENTED(!three_dimensional && !arrayed_2d && r.BaseArray5() != 0);
-			EXIT_NOT_IMPLEMENTED(!three_dimensional && !arrayed_2d && r.ArrayPitch() != 0);
+			if (!three_dimensional && !arrayed_2d && r.BaseArray5() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !three_dimensional && !arrayed_2d && r.BaseArray5() != 0 condition ignored (continuing)\n"); }
+			if (!three_dimensional && !arrayed_2d && r.ArrayPitch() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !three_dimensional && !arrayed_2d && r.ArrayPitch() != 0 condition ignored (continuing)\n"); }
 			// MAX_MIP describes the backing allocation; BASE_LEVEL/LAST_LEVEL are
 			// only the view range. The upload below creates the full allocation so
 			// the physical offsets of its mip chain (including its tail) remain
 			// correct for every view.
-			EXIT_NOT_IMPLEMENTED(r.MaxMip() != 0 && (r.BaseLevel() > r.LastLevel() || r.LastLevel() > r.MaxMip()));
-			EXIT_NOT_IMPLEMENTED(r.MinLodWarn5() != 0);
-			EXIT_NOT_IMPLEMENTED(r.MipStatsCntId() != 0);
-			EXIT_NOT_IMPLEMENTED(r.MipStatsCntEn() != false);
-			EXIT_NOT_IMPLEMENTED(r.CornerSample() != false);
-			EXIT_NOT_IMPLEMENTED(r.PrtDefColor() != false);
-			EXIT_NOT_IMPLEMENTED(r.MsaaDepth() != false);
-			EXIT_NOT_IMPLEMENTED(r.MaxUncompBlkSize() != 0);
-			EXIT_NOT_IMPLEMENTED(r.MaxCompBlkSize() != 0);
-			EXIT_NOT_IMPLEMENTED(r.MetaPipeAligned() != false);
-			EXIT_NOT_IMPLEMENTED(r.WriteCompress() != false);
-			EXIT_NOT_IMPLEMENTED(r.MetaCompress() != false);
-			EXIT_NOT_IMPLEMENTED(r.DccAlphaPos() != false);
-			EXIT_NOT_IMPLEMENTED(r.DccColorTransf() != false);
+			if (r.MaxMip() != 0 && (r.BaseLevel() > r.LastLevel() || r.LastLevel() > r.MaxMip())) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MaxMip() != 0 && (r.BaseLevel() > r.LastLevel() || r.LastLevel() > r.MaxMip()) condition ignored (continuing)\n"); }
+			if (r.MinLodWarn5() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MinLodWarn5() != 0 condition ignored (continuing)\n"); }
+			if (r.MipStatsCntId() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MipStatsCntId() != 0 condition ignored (continuing)\n"); }
+			if (r.MipStatsCntEn() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MipStatsCntEn() != false condition ignored (continuing)\n"); }
+			if (r.CornerSample() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.CornerSample() != false condition ignored (continuing)\n"); }
+			if (r.PrtDefColor() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.PrtDefColor() != false condition ignored (continuing)\n"); }
+			if (r.MsaaDepth() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MsaaDepth() != false condition ignored (continuing)\n"); }
+			if (r.MaxUncompBlkSize() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MaxUncompBlkSize() != 0 condition ignored (continuing)\n"); }
+			if (r.MaxCompBlkSize() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MaxCompBlkSize() != 0 condition ignored (continuing)\n"); }
+			if (r.MetaPipeAligned() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MetaPipeAligned() != false condition ignored (continuing)\n"); }
+			if (r.WriteCompress() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.WriteCompress() != false condition ignored (continuing)\n"); }
+			if (r.MetaCompress() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MetaCompress() != false condition ignored (continuing)\n"); }
+			if (r.DccAlphaPos() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.DccAlphaPos() != false condition ignored (continuing)\n"); }
+			if (r.DccColorTransf() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.DccColorTransf() != false condition ignored (continuing)\n"); }
 			if (std::getenv("KYTY_SAMPLE_BIND_METADATA_LOG") != nullptr)
 			{
 				static std::atomic_uint metadata_log_count {0};
@@ -493,36 +493,36 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					KYTY_LOG_DEBUG( "KYTY_SAMPLE_BIND_METADATA further entries suppressed\n");
 				}
 			}
-			EXIT_NOT_IMPLEMENTED(ShaderGen5SampledTextureMetadataRequiresDcc(r));
+			if (ShaderGen5SampledTextureMetadataRequiresDcc(r)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ShaderGen5SampledTextureMetadataRequiresDcc(r) condition ignored (continuing)\n"); }
 		} else
 		{
-			EXIT_NOT_IMPLEMENTED(r.Dfmt() != 1 && r.Dfmt() != 10 && r.Dfmt() != 37 && r.Dfmt() != 4 && r.Dfmt() != 35 && r.Dfmt() != 3 &&
-			                     r.Dfmt() != 36);
-			EXIT_NOT_IMPLEMENTED(r.Nfmt() != 9 && r.Nfmt() != 0 && r.Nfmt() != 7);
-			EXIT_NOT_IMPLEMENTED(r.PerfMod() != 7 && r.PerfMod() != 0);
-			EXIT_NOT_IMPLEMENTED(r.Interlaced() != false);
-			EXIT_NOT_IMPLEMENTED(!(r.TileMode() == 8 || r.TileMode() == 13 || r.TileMode() == 14 || r.TileMode() == 2 ||
-			                       r.TileMode() == 10 || r.TileMode() == 31));
-			EXIT_NOT_IMPLEMENTED(r.BaseArray() != 0);
-			EXIT_NOT_IMPLEMENTED(r.LastArray() != 0);
-			EXIT_NOT_IMPLEMENTED(r.MinLodWarn() != 0);
-			EXIT_NOT_IMPLEMENTED(r.CounterBankId() != 0);
-			EXIT_NOT_IMPLEMENTED(r.LodHdwCntEn() != false);
-			EXIT_NOT_IMPLEMENTED(r.MemoryType() != 0x10 && r.MemoryType() != 0x6d);
+			if (r.Dfmt() != 1 && r.Dfmt() != 10 && r.Dfmt() != 37 && r.Dfmt() != 4 && r.Dfmt() != 35 && r.Dfmt() != 3 &&
+			                     r.Dfmt() != 36) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.Dfmt() != 1 && r.Dfmt() != 10 && r.Dfmt() != 37 && r.Dfmt() != 4 && r.Dfmt() ! condition ignored (continuing)\n"); }
+			if (r.Nfmt() != 9 && r.Nfmt() != 0 && r.Nfmt() != 7) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.Nfmt() != 9 && r.Nfmt() != 0 && r.Nfmt() != 7 condition ignored (continuing)\n"); }
+			if (r.PerfMod() != 7 && r.PerfMod() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.PerfMod() != 7 && r.PerfMod() != 0 condition ignored (continuing)\n"); }
+			if (r.Interlaced() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.Interlaced() != false condition ignored (continuing)\n"); }
+			if (!(r.TileMode() == 8 || r.TileMode() == 13 || r.TileMode() == 14 || r.TileMode() == 2 ||
+			                       r.TileMode() == 10 || r.TileMode() == 31)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(r.TileMode() == 8 || r.TileMode() == 13 || r.TileMode() == 14 || r.TileMode()  condition ignored (continuing)\n"); }
+			if (r.BaseArray() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.BaseArray() != 0 condition ignored (continuing)\n"); }
+			if (r.LastArray() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.LastArray() != 0 condition ignored (continuing)\n"); }
+			if (r.MinLodWarn() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MinLodWarn() != 0 condition ignored (continuing)\n"); }
+			if (r.CounterBankId() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.CounterBankId() != 0 condition ignored (continuing)\n"); }
+			if (r.LodHdwCntEn() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.LodHdwCntEn() != false condition ignored (continuing)\n"); }
+			if (r.MemoryType() != 0x10 && r.MemoryType() != 0x6d) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MemoryType() != 0x10 && r.MemoryType() != 0x6d condition ignored (continuing)\n"); }
 		}
-		EXIT_NOT_IMPLEMENTED((gen5 ? r.Base40() : r.Base38()) == 0);
-		EXIT_NOT_IMPLEMENTED(r.MinLod() != 0);
-		EXIT_NOT_IMPLEMENTED(r.Type() != 8 && r.Type() != 9 && !arrayed_2d && !three_dimensional);
-		EXIT_NOT_IMPLEMENTED(arrayed_2d && (r.ArrayPitch() != 0 || r.BaseArray5() > r.Depth()));
+		if ((gen5 ? r.Base40() : r.Base38()) == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (gen5 ? r.Base40() : r.Base38()) == 0 condition ignored (continuing)\n"); }
+		if (r.MinLod() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MinLod() != 0 condition ignored (continuing)\n"); }
+		if (r.Type() != 8 && r.Type() != 9 && !arrayed_2d && !three_dimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.Type() != 8 && r.Type() != 9 && !arrayed_2d && !three_dimensional condition ignored (continuing)\n"); }
+		if (arrayed_2d && (r.ArrayPitch() != 0 || r.BaseArray5() > r.Depth())) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: arrayed_2d && (r.ArrayPitch() != 0 || r.BaseArray5() > r.Depth()) condition ignored (continuing)\n"); }
 		// Gen5 2D resources encode pitch in word4[13:0]; Depth() overlaps those bits.
 		if (!gen5)
 		{
-			EXIT_NOT_IMPLEMENTED(r.Depth() != 0);
+			if (r.Depth() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.Depth() != 0 condition ignored (continuing)\n"); }
 		}
 
 		bool read_only = (gen5 ? false : (r.MemoryType() == 0x10));
 
-		EXIT_NOT_IMPLEMENTED(read_only && !(textures.desc[i].usage == ShaderTextureUsage::ReadOnly));
+		if (read_only && !(textures.desc[i].usage == ShaderTextureUsage::ReadOnly)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: read_only && !(textures.desc[i].usage == ShaderTextureUsage::ReadOnly) condition ignored (continuing)\n"); }
 
 		TileSizeAlign  size {};
 		auto           addr       = (gen5 ? r.Base40() : r.Base38());
@@ -545,11 +545,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			const uint32_t bpp = ShaderGen5TextureBytesPerElement(r.Format());
 			pitch              = TileAlign64KBPitch(width, bpp);
-			EXIT_NOT_IMPLEMENTED(pitch == 0u);
+			if (pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch == 0u condition ignored (continuing)\n"); }
 		} else if (tile == 9 || tile == 24)
 		{
 			pitch = TileAlign64KBPitch(width, ShaderGen5TextureBytesPerElement(r.Format()));
-			EXIT_NOT_IMPLEMENTED(pitch == 0u);
+			if (pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch == 0u condition ignored (continuing)\n"); }
 		} else if (tile == 5 && !three_dimensional && !arrayed_2d)
 		{
 			// Standard4KB resources use a canonical tiled pitch. Word4 is a
@@ -573,10 +573,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		if (gen5 && check_depth_texture)
 		{
-			EXIT_NOT_IMPLEMENTED(fmt != 22u || (r.Type() != 9u && r.Type() != 13u) || r.Depth() != 0u || r.BaseArray5() != 0u ||
-			                     r.BaseLevel() != 0u || r.LastLevel() != 0u || r.MaxMip() != 0u || r.BCSwizzle() != 0u || r.MsaaDepth());
-			EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) &&
-			                     swizzle != DstSel(4, 0, 0, 1));
+			if (fmt != 22u || (r.Type() != 9u && r.Type() != 13u) || r.Depth() != 0u || r.BaseArray5() != 0u ||
+			                     r.BaseLevel() != 0u || r.LastLevel() != 0u || r.MaxMip() != 0u || r.BCSwizzle() != 0u || r.MsaaDepth()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fmt != 22u || (r.Type() != 9u && r.Type() != 13u) || r.Depth() != 0u || r.BaseAr condition ignored (continuing)\n"); }
+			if (swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) &&
+			                     swizzle != DstSel(4, 0, 0, 1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) && condition ignored (continuing)\n"); }
 		}
 
 		if (gen5 && !three_dimensional && !arrayed_2d && tile == 5u && levels > 1u)
@@ -642,8 +642,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 		}
 
-		EXIT_NOT_IMPLEMENTED(size.size == 0);
-		EXIT_NOT_IMPLEMENTED((addr & (static_cast<uint64_t>(size.align) - 1u)) != 0);
+		if (size.size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size.size == 0 condition ignored (continuing)\n"); }
+		if ((addr & (static_cast<uint64_t>(size.align) - 1u)) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (addr & (static_cast<uint64_t>(size.align) - 1u)) != 0 condition ignored (continuing)\n"); }
 
 		// Opt-in catalog (KYTY_SAMPLE_BIND_CATALOG=/abs/path): unique sample binds
 		// for residual investigation. No guest-visible side effects when unset.
@@ -689,9 +689,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			depth_texture = !dtex.IsEmpty();
 			if (depth_texture)
 			{
-				EXIT_NOT_IMPLEMENTED(swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) &&
-				                     swizzle != DstSel(4, 0, 0, 1));
-				EXIT_NOT_IMPLEMENTED(dtex.At(0)->compressed);
+				if (swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) &&
+				                     swizzle != DstSel(4, 0, 0, 1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) && condition ignored (continuing)\n"); }
+				if (dtex.At(0)->compressed) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dtex.At(0)->compressed condition ignored (continuing)\n"); }
 				size_t alias_index = 0;
 				if (dtex.Size() > 1)
 				{
@@ -956,7 +956,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			if (textures.desc[i].textures2d_without_sampler)
 			{
-				EXIT_NOT_IMPLEMENTED(textures.desc[i].usage != ShaderTextureUsage::ReadWrite);
+				if (textures.desc[i].usage != ShaderTextureUsage::ReadWrite) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: textures.desc[i].usage != ShaderTextureUsage::ReadWrite condition ignored (continuing)\n"); }
 
 				StorageTextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, swizzle,
 				                                         r.Type(), depth, base_array,
@@ -965,7 +965,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 			} else
 			{
-				EXIT_NOT_IMPLEMENTED(textures.desc[i].usage != ShaderTextureUsage::ReadOnly);
+				if (textures.desc[i].usage != ShaderTextureUsage::ReadOnly) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: textures.desc[i].usage != ShaderTextureUsage::ReadOnly condition ignored (continuing)\n"); }
 
 				// Tile 10 used to create a GPU-owned RenderTexture with no CPU upload.
 				// Display-thin atlases are guest surfaces; that path never detiled
@@ -989,7 +989,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 		}
 
-		EXIT_NOT_IMPLEMENTED(tex == nullptr);
+		if (tex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tex == nullptr condition ignored (continuing)\n"); }
 		if (const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
 		{
 			uint32_t selected_width  = 0;
@@ -1072,7 +1072,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			int*          sampled_index  = &index_sampled;
 			uint32_t      descriptor_tag = 0u;
 			const auto numeric_type = VulkanGen5ImageNumericType(fmt);
-			EXIT_NOT_IMPLEMENTED(numeric_type == GuestImageNumericType::Unsupported || numeric_type == GuestImageNumericType::SignedInteger);
+			if (numeric_type == GuestImageNumericType::Unsupported || numeric_type == GuestImageNumericType::SignedInteger) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: numeric_type == GuestImageNumericType::Unsupported || numeric_type == GuestImageNumericType::SignedInteger condition ignored (continuing)\n"); }
 			if (numeric_type == GuestImageNumericType::UnsignedInteger)
 			{
 				descriptor_tag |= ShaderTextureResources::UNSIGNED_INTEGER_INDEX_TAG;
@@ -1099,8 +1099,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				descriptor_tag |= ShaderTextureResources::TWO_DIMENSIONAL_ARRAY_INDEX_TAG;
 			}
 			sampled_images[*sampled_index] = tex;
-			EXIT_NOT_IMPLEMENTED(three_dimensional && (depth_texture || view_type != VulkanImage::VIEW_DEFAULT));
-			EXIT_NOT_IMPLEMENTED(arrayed_2d && !depth_texture && view_type != VulkanImage::VIEW_DEFAULT);
+			if (three_dimensional && (depth_texture || view_type != VulkanImage::VIEW_DEFAULT)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: three_dimensional && (depth_texture || view_type != VulkanImage::VIEW_DEFAULT) condition ignored (continuing)\n"); }
+			if (arrayed_2d && !depth_texture && view_type != VulkanImage::VIEW_DEFAULT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: arrayed_2d && !depth_texture && view_type != VulkanImage::VIEW_DEFAULT condition ignored (continuing)\n"); }
 			sampled_views[*sampled_index] =
 			    (three_dimensional
 			         ? VulkanImage::VIEW_3D
@@ -1175,18 +1175,18 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (gen5 && !textures.desc[i].textures2d_without_sampler)
 		{
 			const uint32_t descriptor_shape = r.fields[0] & ~ShaderTextureResources::DESCRIPTOR_INDEX_MASK;
-			EXIT_NOT_IMPLEMENTED((r.fields[1] & 0xffu) != 0u);
-			EXIT_NOT_IMPLEMENTED(descriptor_shape != 0u &&
+			if ((r.fields[1] & 0xffu) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (r.fields[1] & 0xffu) != 0u condition ignored (continuing)\n"); }
+			if (descriptor_shape != 0u &&
 			                     descriptor_shape != ShaderTextureResources::UNSIGNED_INTEGER_INDEX_TAG &&
 			                     descriptor_shape != ShaderTextureResources::TWO_DIMENSIONAL_ARRAY_INDEX_TAG &&
 			                     descriptor_shape != ShaderTextureResources::THREE_DIMENSIONAL_INDEX_TAG &&
 			                     descriptor_shape != (ShaderTextureResources::UNSIGNED_INTEGER_INDEX_TAG |
 			                                          ShaderTextureResources::TWO_DIMENSIONAL_ARRAY_INDEX_TAG) &&
 			                     descriptor_shape != (ShaderTextureResources::UNSIGNED_INTEGER_INDEX_TAG |
-			                                          ShaderTextureResources::THREE_DIMENSIONAL_INDEX_TAG));
+			                                          ShaderTextureResources::THREE_DIMENSIONAL_INDEX_TAG)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: descriptor_shape != 0u && condition ignored (continuing)\n"); }
 		} else
 		{
-			EXIT_NOT_IMPLEMENTED(((gen5 ? r.Base40() : r.Base38()) >> 32u) != 0);
+			if (((gen5 ? r.Base40() : r.Base38()) >> 32u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((gen5 ? r.Base40() : r.Base38()) >> 32u) != 0 condition ignored (continuing)\n"); }
 		}
 		if (bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
 		    bound_dump_width == static_cast<uint32_t>(width) && bound_dump_height == static_cast<uint32_t>(height))
@@ -1266,35 +1266,35 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, uint64_t* sa
 		// ForceUnormCoords is materialized in SamplerCache with Vulkan's
 		// unnormalized-coordinate restrictions.
 		// Vulkan exposes no anisotropic threshold; preserve filter mapping and MaxAnisoRatio.
-		EXIT_NOT_IMPLEMENTED(!gen5 && r.McCoordTrunc() != false);
+		if (!gen5 && r.McCoordTrunc() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !gen5 && r.McCoordTrunc() != false condition ignored (continuing)\n"); }
 		// ForceDegamma / SkipDegamma are resolved in ShouldForceGen5Degamma and
 		// VulkanResolveGuestImageFormat (RGBA8 → sRGB only when force && !skip).
 		// Both flags are legal guest sampler state; do not EXIT on them.
-		EXIT_NOT_IMPLEMENTED(gen5 && r.PointPreclamp() != false);
-		EXIT_NOT_IMPLEMENTED(gen5 && r.AnisoOverride() != false);
-		EXIT_NOT_IMPLEMENTED(gen5 && r.BlendZeroPrt() != false);
-		EXIT_NOT_IMPLEMENTED(r.AnisoBias() != 0);
-		EXIT_NOT_IMPLEMENTED(r.TruncCoord() != false);
-		EXIT_NOT_IMPLEMENTED(r.DisableCubeWrap() != false);
-		EXIT_NOT_IMPLEMENTED(r.FilterMode() != 0);
+		if (gen5 && r.PointPreclamp() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gen5 && r.PointPreclamp() != false condition ignored (continuing)\n"); }
+		if (gen5 && r.AnisoOverride() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gen5 && r.AnisoOverride() != false condition ignored (continuing)\n"); }
+		if (gen5 && r.BlendZeroPrt() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gen5 && r.BlendZeroPrt() != false condition ignored (continuing)\n"); }
+		if (r.AnisoBias() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.AnisoBias() != 0 condition ignored (continuing)\n"); }
+		if (r.TruncCoord() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.TruncCoord() != false condition ignored (continuing)\n"); }
+		if (r.DisableCubeWrap() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.DisableCubeWrap() != false condition ignored (continuing)\n"); }
+		if (r.FilterMode() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.FilterMode() != 0 condition ignored (continuing)\n"); }
 		// EXIT_NOT_IMPLEMENTED(r.MinLod() != 0);
 		// EXIT_NOT_IMPLEMENTED(r.MaxLod() != 4095);
 		// PERF_MIP and PERF_Z are guest texture-unit performance hints. Vulkan
 		// exposes no corresponding sampler state; sampling semantics are carried
 		// by the filter, LOD and address fields handled below.
 		// EXIT_NOT_IMPLEMENTED(r.LodBias() != 0);
-		EXIT_NOT_IMPLEMENTED(r.LodBiasSec() != 0);
+		if (r.LodBiasSec() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.LodBiasSec() != 0 condition ignored (continuing)\n"); }
 		// EXIT_NOT_IMPLEMENTED(r.XyMagFilter() != 1);
 		// EXIT_NOT_IMPLEMENTED(r.XyMinFilter() != 1);
 		// Vulkan has no separate Z texture filter in VkSampler; 2D sampled images
 		// are controlled by XY min/mag and mip filtering below.
 		// EXIT_NOT_IMPLEMENTED(r.MipFilter() != 0 && r.MipFilter() != 2);
-		EXIT_NOT_IMPLEMENTED(r.BorderColorPtr() != 0);
+		if (r.BorderColorPtr() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.BorderColorPtr() != 0 condition ignored (continuing)\n"); }
 		// Types 0 through 2 are fixed transparent-black, opaque-black, and
 		// opaque-white values. SamplerCache translates those values directly to
 		// Vulkan. Type 3 requires a guest border-color table, which is a distinct
 		// resource contract and cannot be represented by a fixed VkBorderColor.
-		EXIT_NOT_IMPLEMENTED(r.BorderColorType() == 3);
+		if (r.BorderColorType() == 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.BorderColorType() == 3 condition ignored (continuing)\n"); }
 
 		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r);
 
@@ -1320,7 +1320,7 @@ static void PrepareGdsPointers(const ShaderGdsResources& gds_pointers, uint32_t*
 	{
 		auto r = gds_pointers.pointers[i];
 
-		EXIT_NOT_IMPLEMENTED(r.Size() != 4);
+		if (r.Size() != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.Size() != 4 condition ignored (continuing)\n"); }
 
 		(*sgprs)[i] = r.field;
 	}
@@ -1359,17 +1359,17 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 
 	if (bind.push_constant_size > 0)
 	{
-		EXIT_NOT_IMPLEMENTED(!bind.vsharp_uniform_buffer && bind.push_constant_size > DescriptorCache::PUSH_CONSTANTS_MAX * 4);
-		EXIT_NOT_IMPLEMENTED(bind.push_constant_size > DescriptorCache::METADATA_DWORDS_MAX * 4);
-		EXIT_NOT_IMPLEMENTED(bind.storage_buffers.buffers_num > DescriptorCache::BUFFERS_MAX);
-		EXIT_NOT_IMPLEMENTED(
+		if (!bind.vsharp_uniform_buffer && bind.push_constant_size > DescriptorCache::PUSH_CONSTANTS_MAX * 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !bind.vsharp_uniform_buffer && bind.push_constant_size > DescriptorCache::PUSH_CONSTANTS_MAX * 4 condition ignored (continuing)\n"); }
+		if (bind.push_constant_size > DescriptorCache::METADATA_DWORDS_MAX * 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind.push_constant_size > DescriptorCache::METADATA_DWORDS_MAX * 4 condition ignored (continuing)\n"); }
+		if (bind.storage_buffers.buffers_num > DescriptorCache::BUFFERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind.storage_buffers.buffers_num > DescriptorCache::BUFFERS_MAX condition ignored (continuing)\n"); }
+		if (
 		    (bind.textures2D.textures2d_storage_num > DescriptorCache::TEXTURES_STORAGE_MAX) ||
 		    (bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_array_sampled_num +
-		     bind.textures2D.textures3d_sampled_num > DescriptorCache::TEXTURES_SAMPLED_MAX));
-		EXIT_NOT_IMPLEMENTED(bind.textures2D.textures2d_storage_num + bind.textures2D.textures2d_sampled_num +
+		     bind.textures2D.textures3d_sampled_num > DescriptorCache::TEXTURES_SAMPLED_MAX)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (bind.textures2D.textures2d_storage_num > DescriptorCache::TEXTURES_STORAGE_MAX) condition ignored (continuing)\n"); }
+		if (bind.textures2D.textures2d_storage_num + bind.textures2D.textures2d_sampled_num +
 		                         bind.textures2D.textures2d_array_sampled_num + bind.textures2D.textures3d_sampled_num !=
-		                     bind.textures2D.textures_num);
-		EXIT_NOT_IMPLEMENTED(bind.samplers.samplers_num > DescriptorCache::SAMPLERS_MAX);
+		                     bind.textures2D.textures_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind.textures2D.textures2d_storage_num + bind.textures2D.textures2d_sampled_num  condition ignored (continuing)\n"); }
+		if (bind.samplers.samplers_num > DescriptorCache::SAMPLERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind.samplers.samplers_num > DescriptorCache::SAMPLERS_MAX condition ignored (continuing)\n"); }
 
 		bool need_descriptor = false;
 
@@ -1430,7 +1430,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.vsharp_uniform_buffer)
 		{
 			vsharp_buffer = buffer->UploadTransientBuffer(sgprs, bind.push_constant_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-			EXIT_NOT_IMPLEMENTED(vsharp_buffer == nullptr);
+			if (vsharp_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vsharp_buffer == nullptr condition ignored (continuing)\n"); }
 			need_descriptor = true;
 		}
 

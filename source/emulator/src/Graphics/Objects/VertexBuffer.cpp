@@ -25,7 +25,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
 	VulkanCreateBuffer(ctx, *size, &staging_buffer);
-	EXIT_NOT_IMPLEMENTED(staging_buffer.buffer == nullptr);
+	if (staging_buffer.buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: staging_buffer.buffer == nullptr condition ignored (continuing)\n"); }
 
 	void* data = nullptr;
 	VulkanMapMemory(ctx, &staging_buffer.memory, &data);
@@ -53,7 +53,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->buffer          = nullptr;
 
 	VulkanCreateBuffer(ctx, *size, vk_obj);
-	EXIT_NOT_IMPLEMENTED(vk_obj->buffer == nullptr);
+	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 

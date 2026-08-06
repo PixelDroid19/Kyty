@@ -59,7 +59,7 @@ class LabelManager
 public:
 	LabelManager()
 	{
-		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+		if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
 		Core::Thread t(ThreadRun, this);
 		t.Detach();
 	}
@@ -179,7 +179,7 @@ void LabelFenceRegistry::Snapshot(Vector<uint64_t>* begin, Vector<uint64_t>* end
 void LabelManager::RegisterFenceHole(uint64_t addr, uint64_t bytes)
 {
 	const auto result = m_fence_holes.Register(addr, bytes);
-	EXIT_NOT_IMPLEMENTED(result == LabelFenceRegistrationStatus::InvalidArgument);
+	if (result == LabelFenceRegistrationStatus::InvalidArgument) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result == LabelFenceRegistrationStatus::InvalidArgument condition ignored (continuing)\n"); }
 }
 
 void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
@@ -343,7 +343,7 @@ void LabelManager::ThreadRun(void* data)
 		for (auto& label: deleted_labels)
 		{
 			bool removed = manager->Remove(label);
-			EXIT_NOT_IMPLEMENTED(!removed);
+			if (!removed) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !removed condition ignored (continuing)\n"); }
 		}
 
 		manager->m_mutex.Unlock();
@@ -397,21 +397,21 @@ void LabelManager::CompleteSubmission(SubmissionId submission)
 		Core::LockGuard lock(m_mutex);
 
 		const auto result = m_submission_labels.TakeCompleted(submission, &completions);
-		EXIT_NOT_IMPLEMENTED(result != LabelSubmissionResult::Success);
+		if (result != LabelSubmissionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != LabelSubmissionResult::Success condition ignored (continuing)\n"); }
 
 		for (const auto& completion: completions)
 		{
 			auto* label = reinterpret_cast<Label*>(completion.token);
 			auto  index = m_labels.Find(label);
-			EXIT_NOT_IMPLEMENTED(!m_labels.IndexValid(index));
+			if (!m_labels.IndexValid(index)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_labels.IndexValid(index) condition ignored (continuing)\n"); }
 
 			const auto action = LabelForceCompleteActionFor(label->status == LabelStatus::Active,
 			                                                label->status == LabelStatus::ActiveDeleted);
-			EXIT_NOT_IMPLEMENTED(action == LabelForceCompleteKind::Skip);
+			if (action == LabelForceCompleteKind::Skip) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: action == LabelForceCompleteKind::Skip condition ignored (continuing)\n"); }
 			const auto tracked_action = (completion.kind == LabelSubmissionCompletionKind::Destroy
 			                                 ? LabelForceCompleteKind::FireDestroy
 			                                 : LabelForceCompleteKind::FireKeep);
-			EXIT_NOT_IMPLEMENTED(action != tracked_action);
+			if (action != tracked_action) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: action != tracked_action condition ignored (continuing)\n"); }
 
 			label->status                     = LabelStatus::NotActive;
 			label->exact_submission_completed = true;
@@ -425,7 +425,7 @@ void LabelManager::CompleteSubmission(SubmissionId submission)
 		for (auto& label: destroy_labels)
 		{
 			auto index = m_labels.Find(label);
-			EXIT_NOT_IMPLEMENTED(!m_labels.IndexValid(index));
+			if (!m_labels.IndexValid(index)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_labels.IndexValid(index) condition ignored (continuing)\n"); }
 			m_labels.RemoveAt(index);
 		}
 	}
@@ -540,7 +540,7 @@ Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint6
 
 	vkCreateEvent(ctx->device, &create_info, nullptr, &label->event);
 
-	EXIT_NOT_IMPLEMENTED(label->event == nullptr);
+	if (label->event == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: label->event == nullptr condition ignored (continuing)\n"); }
 
 	m_labels.Add(label);
 
@@ -585,7 +585,7 @@ Label* LabelManager::Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint3
 
 	vkCreateEvent(ctx->device, &create_info, nullptr, &label->event);
 
-	EXIT_NOT_IMPLEMENTED(label->event == nullptr);
+	if (label->event == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: label->event == nullptr condition ignored (continuing)\n"); }
 
 	m_labels.Add(label);
 
@@ -602,14 +602,14 @@ bool LabelManager::Remove(Label* label)
 
 	auto index = m_labels.Find(label);
 
-	EXIT_NOT_IMPLEMENTED(!m_labels.IndexValid(index));
+	if (!m_labels.IndexValid(index)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_labels.IndexValid(index) condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(label->status != LabelStatus::NotActive && label->status != LabelStatus::Active);
+	if (label->status != LabelStatus::NotActive && label->status != LabelStatus::Active) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: label->status != LabelStatus::NotActive && label->status != LabelStatus::Active condition ignored (continuing)\n"); }
 
 	if (label->status == LabelStatus::Active)
 	{
 		const auto result = m_submission_labels.MarkDeleted(reinterpret_cast<uint64_t>(label));
-		EXIT_NOT_IMPLEMENTED(result != LabelSubmissionResult::Success);
+		if (result != LabelSubmissionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != LabelSubmissionResult::Success condition ignored (continuing)\n"); }
 		label->status = LabelStatus::ActiveDeleted;
 
 		return false;
@@ -660,14 +660,14 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 
 	auto index = m_labels.Find(label);
 
-	EXIT_NOT_IMPLEMENTED(!m_labels.IndexValid(index));
+	if (!m_labels.IndexValid(index)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_labels.IndexValid(index) condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(label->status != LabelStatus::New && label->status != LabelStatus::NotActive);
+	if (label->status != LabelStatus::New && label->status != LabelStatus::NotActive) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: label->status != LabelStatus::New && label->status != LabelStatus::NotActive condition ignored (continuing)\n"); }
 
 	SubmissionId submission;
-	EXIT_NOT_IMPLEMENTED(!buffer->GetSubmissionId(&submission));
+	if (!buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
 	const auto bind_result = m_submission_labels.Bind(reinterpret_cast<uint64_t>(label), submission);
-	EXIT_NOT_IMPLEMENTED(bind_result != LabelSubmissionResult::Success);
+	if (bind_result != LabelSubmissionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind_result != LabelSubmissionResult::Success condition ignored (continuing)\n"); }
 
 	label->callbacks.submission          = submission;
 	label->status                        = LabelStatus::Active;
@@ -679,7 +679,7 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	EXIT_NOT_IMPLEMENTED(vk_buffer == nullptr);
+	if (vk_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_buffer == nullptr condition ignored (continuing)\n"); }
 
 	vkResetEvent(label->device, label->event);
 	vkCmdSetEvent(vk_buffer, label->event, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);

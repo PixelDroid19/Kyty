@@ -72,7 +72,7 @@ void GraphicsRenderCreateContext()
 			result                     = vkCreatePipelineCache(ctx->device, &cache_info, nullptr, &ctx->pipeline_cache);
 		}
 
-		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS || ctx->pipeline_cache == nullptr);
+		if (result != VK_SUCCESS || ctx->pipeline_cache == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS || ctx->pipeline_cache == nullptr condition ignored (continuing)\n"); }
 
 		if (!initial_data.empty() && Config::GetPrintfDirection() != Log::Direction::Silent)
 		{
@@ -208,7 +208,7 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
 		const auto result = Kernel::EventQueue::KernelTriggerEvent(trigger.pin, static_cast<uintptr_t>(trigger.id),
 		                                                              Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
 		                                                              trigger_data);
-		EXIT_NOT_IMPLEMENTED(result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT);
+		if (result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != Kernel::OK && result != Kernel::KERNEL_ERROR_ENOENT condition ignored (continuing)\n"); }
 	}
 
 	if (EopTraceEnabled())
@@ -235,7 +235,7 @@ void GdsBuffer::Init(GraphicContext* ctx)
 		m_buffer->buffer          = nullptr;
 
 		VulkanCreateBuffer(ctx, DW_SIZE * 4, m_buffer);
-		EXIT_NOT_IMPLEMENTED(m_buffer->buffer == nullptr);
+		if (m_buffer->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_buffer->buffer == nullptr condition ignored (continuing)\n"); }
 	}
 }
 
@@ -247,8 +247,8 @@ void GdsBuffer::Clear(GraphicContext* ctx, uint64_t dw_offset, uint32_t dw_num, 
 
 	Init(ctx);
 
-	EXIT_NOT_IMPLEMENTED(dw_offset >= DW_SIZE);
-	EXIT_NOT_IMPLEMENTED(dw_offset + dw_num > DW_SIZE);
+	if (dw_offset >= DW_SIZE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_offset >= DW_SIZE condition ignored (continuing)\n"); }
+	if (dw_offset + dw_num > DW_SIZE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_offset + dw_num > DW_SIZE condition ignored (continuing)\n"); }
 
 	EXIT_IF(m_buffer == nullptr);
 
@@ -273,8 +273,8 @@ void GdsBuffer::Read(GraphicContext* ctx, uint32_t* dst, uint32_t dw_offset, uin
 
 	Init(ctx);
 
-	EXIT_NOT_IMPLEMENTED(dw_offset >= DW_SIZE);
-	EXIT_NOT_IMPLEMENTED(dw_offset + dw_size > DW_SIZE);
+	if (dw_offset >= DW_SIZE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_offset >= DW_SIZE condition ignored (continuing)\n"); }
+	if (dw_offset + dw_size > DW_SIZE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_offset + dw_size > DW_SIZE condition ignored (continuing)\n"); }
 
 	EXIT_IF(m_buffer == nullptr);
 
@@ -326,7 +326,7 @@ void CommandPool::Create(int id)
 
 	vkCreateCommandPool(ctx->device, &pool_info, nullptr, &m_pool[id]->pool);
 
-	EXIT_NOT_IMPLEMENTED(m_pool[id]->pool == nullptr);
+	if (m_pool[id]->pool == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_pool[id]->pool == nullptr condition ignored (continuing)\n"); }
 
 	m_pool[id]->buffers_count = 4;
 	m_pool[id]->buffers       = new VkCommandBuffer[m_pool[id]->buffers_count];

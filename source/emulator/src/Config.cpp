@@ -15,7 +15,7 @@ struct Config
 	RenderResolutionMode   render_resolution_mode      = RenderResolutionMode::Fixed;
 	uint32_t               render_resolution_width     = 1280;
 	uint32_t               render_resolution_height    = 720;
-	PresentationFilter     presentation_filter         = PresentationFilter::Linear;
+	PresentationFilter     presentation_filter         = PresentationFilter::Nearest;
 	bool                   neo                         = true;
 	GuestPlatform          guest_platform              = GuestPlatform::Unknown;
 	bool                   vulkan_validation_enabled   = false;

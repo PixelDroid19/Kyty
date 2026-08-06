@@ -410,7 +410,7 @@ private:
 class GraphicsRing
 {
 public:
-	GraphicsRing(): m_job1("Thread_Gfx_Draw"), m_job2("Thread_Gfx_Const") { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	GraphicsRing(): m_job1("Thread_Gfx_Draw"), m_job2("Thread_Gfx_Const") { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~GraphicsRing() { KYTY_NOT_IMPLEMENTED; }
 
 	KYTY_CLASS_NO_COPY(GraphicsRing);
@@ -559,7 +559,7 @@ class Gpu
 public:
 	Gpu()
 	{
-		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+		if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
 		Init();
 	}
 	virtual ~Gpu() { KYTY_NOT_IMPLEMENTED; }

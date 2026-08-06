@@ -71,7 +71,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		}
 	}
 	const bool depth_stencil_read_only = (with_depth && depth_stencil_access == DepthStencilAttachmentAccess::ReadOnly);
-	EXIT_NOT_IMPLEMENTED(depth_stencil_read_only && (depth->depth_clear_enable || depth->stencil_clear_enable));
+	if (depth_stencil_read_only && (depth->depth_clear_enable || depth->stencil_clear_enable)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth_stencil_read_only && (depth->depth_clear_enable || depth->stencil_clear_enable) condition ignored (continuing)\n"); }
 	const auto attachment_samples = resolve_render_attachment_sample_count(*color, *depth);
 
 	for (auto& f: m_framebuffers)
@@ -107,7 +107,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	EXIT_IF(gctx == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(!with_depth && !with_color);
+	if (!with_depth && !with_color) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_depth && !with_color condition ignored (continuing)\n"); }
 
 	VulkanImage* vulkan_buffer =
 	    (with_color ? RenderColorFirstActiveImage(*color)
@@ -129,7 +129,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		}
 		const auto* color_attachment = with_color ? &color->attachment[slot] : nullptr;
 		auto*       image            = with_color ? color_attachment->vulkan_buffer : vulkan_buffer;
-		EXIT_NOT_IMPLEMENTED(image->samples != attachment_samples);
+		if (image->samples != attachment_samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: image->samples != attachment_samples condition ignored (continuing)\n"); }
 		framebuffer_extent = IntersectFramebufferAttachmentExtent(framebuffer_extent, image);
 		const auto load_ops       = ResolveColorAttachmentLoadOps(image->layout, with_color ? color_attachment->cmask_fast_clear_enable : false,
 		                                                          with_color ? color_attachment->clear_word0 : 0u,
@@ -198,11 +198,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	framebuffer->render_pass_id = ++seq;
 
-	EXIT_NOT_IMPLEMENTED(framebuffer->render_pass == nullptr);
+	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
 	if (with_depth)
 	{
-		EXIT_NOT_IMPLEMENTED(depth->vulkan_buffer->samples != attachment_samples);
+		if (depth->vulkan_buffer->samples != attachment_samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth->vulkan_buffer->samples != attachment_samples condition ignored (continuing)\n"); }
 		framebuffer_extent = IntersectFramebufferAttachmentExtent(framebuffer_extent, depth->vulkan_buffer);
 		views[attachment_count] = depth->vulkan_buffer->image_view[VulkanImage::VIEW_DEFAULT];
 	}
@@ -214,7 +214,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	framebuffer_info.renderPass      = framebuffer->render_pass;
 	framebuffer_info.attachmentCount = attachment_count + (with_depth ? 1u : 0u);
 	framebuffer_info.pAttachments    = views;
-	EXIT_NOT_IMPLEMENTED(framebuffer_extent.width == 0 || framebuffer_extent.height == 0);
+	if (framebuffer_extent.width == 0 || framebuffer_extent.height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer_extent.width == 0 || framebuffer_extent.height == 0 condition ignored (continuing)\n"); }
 	framebuffer->extent.width  = framebuffer_extent.width;
 	framebuffer->extent.height = framebuffer_extent.height;
 	framebuffer_info.width     = framebuffer->extent.width;
@@ -223,7 +223,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 
 	vkCreateFramebuffer(gctx->device, &framebuffer_info, nullptr, &framebuffer->framebuffer);
 
-	EXIT_NOT_IMPLEMENTED(framebuffer->framebuffer == nullptr);
+	if (framebuffer->framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->framebuffer == nullptr condition ignored (continuing)\n"); }
 
 	Framebuffer fnew;
 	fnew.framebuffer = framebuffer;
@@ -372,12 +372,12 @@ VideoOutVulkanImage* FramebufferCache::CreateDummyBuffer(VkFormat format, uint32
 	vk_obj->host_extent_selected    = true;
 
 	VulkanMemory mem;
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, &mem));
+	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, &mem)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, &mem) condition ignored (continuing)\n"); }
 
 	VulkanImageViewDescriptor view_descriptor {};
 	view_descriptor.image  = vk_obj->image;
 	view_descriptor.format = vk_obj->format;
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]));
+	if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]) condition ignored (continuing)\n"); }
 
 	UtilSetImageLayoutOptimal(vk_obj);
 

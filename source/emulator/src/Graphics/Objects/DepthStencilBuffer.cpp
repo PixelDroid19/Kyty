@@ -42,11 +42,11 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	bool sample_locations_compatible = (usage & 0x2u) != 0;
 	auto samples = static_cast<VkSampleCountFlagBits>(params[DepthStencilBufferObject::PARAM_SAMPLES]);
 
-	EXIT_NOT_IMPLEMENTED(pixel_format == VK_FORMAT_UNDEFINED);
-	EXIT_NOT_IMPLEMENTED(guest_width == 0);
-	EXIT_NOT_IMPLEMENTED(guest_height == 0);
-	EXIT_NOT_IMPLEMENTED(host_width == 0);
-	EXIT_NOT_IMPLEMENTED(host_height == 0);
+	if (pixel_format == VK_FORMAT_UNDEFINED) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pixel_format == VK_FORMAT_UNDEFINED condition ignored (continuing)\n"); }
+	if (guest_width == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: guest_width == 0 condition ignored (continuing)\n"); }
+	if (guest_height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: guest_height == 0 condition ignored (continuing)\n"); }
+	if (host_width == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: host_width == 0 condition ignored (continuing)\n"); }
+	if (host_height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: host_height == 0 condition ignored (continuing)\n"); }
 
 	VulkanResolutionAttachmentRequest capability_request {};
 	capability_request.extent       = {static_cast<uint32_t>(host_width), static_cast<uint32_t>(host_height)};
@@ -56,8 +56,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	capability_request.flags        = (sample_locations_compatible ? VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT : 0);
 	capability_request.sample_count = samples;
 	const auto capability            = EvaluateVulkanResolutionAttachment(ctx, capability_request);
-	EXIT_NOT_IMPLEMENTED(capability.status != VulkanRenderResolutionCapabilityStatus::Success ||
-	                     capability.decision.status != RenderResolutionImageCapabilityStatus::Supported);
+	if (capability.status != VulkanRenderResolutionCapabilityStatus::Success ||
+	                     capability.decision.status != RenderResolutionImageCapabilityStatus::Supported) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: capability.status != VulkanRenderResolutionCapabilityStatus::Success || condition ignored (continuing)\n"); }
 
 	auto* vk_obj = new DepthStencilVulkanImage;
 
@@ -86,7 +86,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	image_descriptor.usage = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
 	                                                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | (sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0));
 	const auto image_info  = VulkanBuildImageCreateInfo(image_descriptor);
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem));
+	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem) condition ignored (continuing)\n"); }
 
 	// EXIT_NOT_IMPLEMENTED(mem->requirements.size > *size);
 
@@ -96,23 +96,23 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	view_descriptor.image       = vk_obj->image;
 	view_descriptor.format      = vk_obj->format;
 	view_descriptor.aspect_mask = DepthFormatAspectMask(vk_obj->format);
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]));
+	if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEFAULT]) condition ignored (continuing)\n"); }
 
 	view_descriptor.components  = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R};
 	view_descriptor.aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]));
+	if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]) condition ignored (continuing)\n"); }
 	view_descriptor.view_type   = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
 	view_descriptor.layer_count = 1;
-	EXIT_NOT_IMPLEMENTED(
-	    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY]));
+	if (
+	    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[V condition ignored (continuing)\n"); }
 
 	if (DepthFormatHasStencil(vk_obj->format))
 	{
 		view_descriptor.components  = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
 		                               VK_COMPONENT_SWIZZLE_IDENTITY};
 		view_descriptor.aspect_mask = VK_IMAGE_ASPECT_STENCIL_BIT;
-		EXIT_NOT_IMPLEMENTED(
-		    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_STENCIL_TEXTURE]));
+		if (
+		    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_STENCIL_TEXTURE])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[V condition ignored (continuing)\n"); }
 	}
 
 	// First bind of an HTILE depth target: pending Vulkan clear. Leave layout

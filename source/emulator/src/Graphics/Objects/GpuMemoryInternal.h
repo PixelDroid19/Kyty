@@ -216,7 +216,7 @@ class GpuMemory
 public:
 	GpuMemory()
 	{
-		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+		if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
 		DbgInit();
 	}
 	virtual ~GpuMemory() { KYTY_NOT_IMPLEMENTED; }
@@ -414,7 +414,7 @@ public:
 		uint64_t user_data = 0;
 	};
 
-	GpuResources() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	GpuResources() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~GpuResources() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(GpuResources);
 

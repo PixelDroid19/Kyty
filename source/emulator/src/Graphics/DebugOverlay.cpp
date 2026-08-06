@@ -35,7 +35,7 @@ uint32_t           g_image_count      = 0;
 	const char* v = std::getenv("KYTY_HUD");
 	if (v == nullptr)
 	{
-		return true;
+		return false;
 	}
 	return !(v[0] == '0' && v[1] == '\0');
 }

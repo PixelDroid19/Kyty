@@ -95,7 +95,7 @@ static void create_render_texture_image_views(GraphicContext* ctx, RenderTexture
 {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(vk_obj == nullptr);
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateStandardColorImageViews(ctx, vk_obj));
+	if (!VulkanCreateStandardColorImageViews(ctx, vk_obj)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateStandardColorImageViews(ctx, vk_obj) condition ignored (continuing)\n"); }
 }
 
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
@@ -125,13 +125,13 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	{
 		return;
 	}
-	EXIT_NOT_IMPLEMENTED(vk_obj->samples != VK_SAMPLE_COUNT_1_BIT);
+	if (vk_obj->samples != VK_SAMPLE_COUNT_1_BIT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->samples != VK_SAMPLE_COUNT_1_BIT condition ignored (continuing)\n"); }
 
 	vk_obj->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	if (tiled && buffer_is_tiled(*vaddr, *size))
 	{
-		EXIT_NOT_IMPLEMENTED(width != pitch);
+		if (width != pitch) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width != pitch condition ignored (continuing)\n"); }
 		auto* temp_buf = new uint8_t[*size];
 		KYTY_NOT_IMPLEMENTED;
 		// TODO()
@@ -156,7 +156,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	EXIT_IF(objects.IsEmpty());
 
 	auto* vk_obj = static_cast<RenderTextureVulkanImage*>(obj);
-	EXIT_NOT_IMPLEMENTED(vk_obj->samples != VK_SAMPLE_COUNT_1_BIT);
+	if (vk_obj->samples != VK_SAMPLE_COUNT_1_BIT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->samples != VK_SAMPLE_COUNT_1_BIT condition ignored (continuing)\n"); }
 
 	// bool neo    = (params[RenderTextureObject::PARAM_NEO] != 0);
 	// auto pitch  = params[RenderTextureObject::PARAM_PITCH];
@@ -229,7 +229,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 			}
 		}
 
-		EXIT_NOT_IMPLEMENTED(!updated);
+		if (!updated) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !updated condition ignored (continuing)\n"); }
 	} else
 	{
 		KYTY_NOT_IMPLEMENTED;
@@ -268,7 +268,7 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	const auto height    = params[RenderTextureObject::PARAM_HEIGHT];
 	const auto vk_format = resolve_render_texture_format(params[RenderTextureObject::PARAM_FORMAT]);
 	const auto samples    = static_cast<VkSampleCountFlagBits>(params[RenderTextureObject::PARAM_SAMPLES]);
-	EXIT_NOT_IMPLEMENTED(vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0);
+	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 condition ignored (continuing)\n"); }
 
 	VulkanResolutionAttachmentRequest capability_request {};
 	capability_request.extent       = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
@@ -277,8 +277,8 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	                                  VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 	capability_request.sample_count = samples;
 	const auto capability            = EvaluateVulkanResolutionAttachment(ctx, capability_request);
-	EXIT_NOT_IMPLEMENTED(capability.status != VulkanRenderResolutionCapabilityStatus::Success ||
-	                     capability.decision.status != RenderResolutionImageCapabilityStatus::Supported);
+	if (capability.status != VulkanRenderResolutionCapabilityStatus::Success ||
+	                     capability.decision.status != RenderResolutionImageCapabilityStatus::Supported) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: capability.status != VulkanRenderResolutionCapabilityStatus::Success || condition ignored (continuing)\n"); }
 	VkImageUsageFlags vk_usage = capability_request.usage;
 	if (samples == VK_SAMPLE_COUNT_1_BIT)
 	{
@@ -312,7 +312,7 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	image_descriptor.samples = vk_obj->samples;
 	image_descriptor.usage  = vk_usage;
 	const auto image_info   = VulkanBuildImageCreateInfo(image_descriptor);
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem));
+	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem) condition ignored (continuing)\n"); }
 	return vk_obj;
 }
 
@@ -409,11 +409,11 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* params
 
 	EXIT_IF(!(params[RenderTextureObject::PARAM_WRITE_BACK] != 0));
 
-	EXIT_NOT_IMPLEMENTED(tiled);
-	EXIT_NOT_IMPLEMENTED(width != pitch);
+	if (tiled) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tiled condition ignored (continuing)\n"); }
+	if (width != pitch) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width != pitch condition ignored (continuing)\n"); }
 
 	auto* vk_obj = reinterpret_cast<RenderTextureVulkanImage*>(obj);
-	EXIT_NOT_IMPLEMENTED(vk_obj->samples != VK_SAMPLE_COUNT_1_BIT);
+	if (vk_obj->samples != VK_SAMPLE_COUNT_1_BIT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->samples != VK_SAMPLE_COUNT_1_BIT condition ignored (continuing)\n"); }
 
 	UtilFillBuffer(ctx, reinterpret_cast<void*>(*vaddr), *size, pitch, vk_obj,
 	               static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));

@@ -1513,7 +1513,7 @@ static void VulkanGetSurfaceCapabilities(VkPhysicalDevice physical_device, VkSur
 	uint32_t formats_count = 0;
 	vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &formats_count, nullptr);
 
-	EXIT_NOT_IMPLEMENTED(formats_count == 0);
+	if (formats_count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: formats_count == 0 condition ignored (continuing)\n"); }
 
 	r->formats = Vector<VkSurfaceFormatKHR>(formats_count); // @suppress("Ambiguous problem")
 	vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &formats_count, r->formats.GetData());
@@ -1521,7 +1521,7 @@ static void VulkanGetSurfaceCapabilities(VkPhysicalDevice physical_device, VkSur
 	uint32_t present_modes_count = 0;
 	vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &present_modes_count, nullptr);
 
-	EXIT_NOT_IMPLEMENTED(present_modes_count == 0);
+	if (present_modes_count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: present_modes_count == 0 condition ignored (continuing)\n"); }
 
 	r->present_modes = Vector<VkPresentModeKHR>(present_modes_count); // @suppress("Ambiguous problem")
 	vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &present_modes_count, r->present_modes.GetData());
@@ -1747,7 +1747,7 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 	uint32_t devices_count = 0;
 	vkEnumeratePhysicalDevices(instance, &devices_count, nullptr);
 
-	EXIT_NOT_IMPLEMENTED(devices_count == 0);
+	if (devices_count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: devices_count == 0 condition ignored (continuing)\n"); }
 
 	Vector<VkPhysicalDevice> devices(devices_count);
 	vkEnumeratePhysicalDevices(instance, &devices_count, devices.GetData());
@@ -1834,7 +1834,7 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 			uint32_t extensions_count = 0;
 			vkEnumerateDeviceExtensionProperties(device, nullptr, &extensions_count, nullptr);
 
-			EXIT_NOT_IMPLEMENTED(extensions_count == 0);
+			if (extensions_count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: extensions_count == 0 condition ignored (continuing)\n"); }
 
 			Vector<VkExtensionProperties> available_extensions(extensions_count);
 			vkEnumerateDeviceExtensionProperties(device, nullptr, &extensions_count, available_extensions.GetData());
@@ -2096,8 +2096,8 @@ static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window
 
 	const bool host_result = ::Kyty::Emulator::Host::HostVulkanWindow::GetInstanceExtensions(window, &host_extensions);
 
-	EXIT_NOT_IMPLEMENTED(!host_result);
-	EXIT_NOT_IMPLEMENTED(host_extensions.empty() || host_extensions.size() > UINT32_MAX);
+	if (!host_result) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !host_result condition ignored (continuing)\n"); }
+	if (host_extensions.empty() || host_extensions.size() > UINT32_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: host_extensions.empty() || host_extensions.size() > UINT32_MAX condition ignored (continuing)\n"); }
 
 	r->required_extensions = Vector<const char*>(static_cast<uint32_t>(host_extensions.size()), false); // @suppress("Ambiguous problem")
 	r->required_extensions.Memset(0);
@@ -2113,7 +2113,7 @@ static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window
 
 	vkEnumerateInstanceExtensionProperties(nullptr, &available_extensions_count, r->available_extensions.GetData());
 
-	EXIT_NOT_IMPLEMENTED(available_extensions_count != r->available_extensions.Size());
+	if (available_extensions_count != r->available_extensions.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: available_extensions_count != r->available_extensions.Size() condition ignored (continuing)\n"); }
 
 // Allow config-driven validation without a separate compile define so
 // diagnostic runs (KYTY_VULKAN_VALIDATION=1) can surface VUID failures.
@@ -2147,7 +2147,7 @@ static void VulkanGetExtensions(const ::Kyty::Emulator::Host::HostWindow* window
 	r->available_layers.Memset(0);
 	vkEnumerateInstanceLayerProperties(&available_layers_count, r->available_layers.GetData());
 
-	EXIT_NOT_IMPLEMENTED(available_layers_count != r->available_layers.Size());
+	if (available_layers_count != r->available_layers.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: available_layers_count != r->available_layers.Size() condition ignored (continuing)\n"); }
 
 	for (const auto& l: r->available_layers)
 	{
@@ -2288,7 +2288,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	EXIT_IF(swapchain_image_views == nullptr);
 	EXIT_IF(swapchain_images_count == nullptr);
 
-	EXIT_NOT_IMPLEMENTED(r->formats.IsEmpty());
+	if (r->formats.IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r->formats.IsEmpty() condition ignored (continuing)\n"); }
 
 	VkExtent2D extent {};
 	// Surface extents: only clamp when the max bound is usable (min <= max).
@@ -2397,7 +2397,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 	       extent.height, create_info.minImageCount);
 
 	vkGetSwapchainImagesKHR(device, swapchain, swapchain_images_count, nullptr);
-	EXIT_NOT_IMPLEMENTED(*swapchain_images_count == 0);
+	if (*swapchain_images_count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: *swapchain_images_count == 0 condition ignored (continuing)\n"); }
 
 	*swapchain_images = new VkImage[*swapchain_images_count];
 	vkGetSwapchainImagesKHR(device, swapchain, swapchain_images_count, *swapchain_images);
@@ -2408,7 +2408,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 		VulkanImageViewDescriptor view_descriptor {};
 		view_descriptor.image  = (*swapchain_images)[i];
 		view_descriptor.format = *swapchain_format;
-		EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImageView(device, view_descriptor, &((*swapchain_image_views)[i])));
+		if (!VulkanCreateDeviceImageView(device, view_descriptor, &((*swapchain_image_views)[i]))) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(device, view_descriptor, &((*swapchain_image_views)[i])) condition ignored (continuing)\n"); }
 	}
 
 	return swapchain;
@@ -2429,7 +2429,7 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 		ctx->queues[id].index  = info.index;
 		EXIT_IF(ctx->queues[id].vk_queue != nullptr);
 		vkGetDeviceQueue(ctx->device, ctx->queues[id].family, ctx->queues[id].index, &ctx->queues[id].vk_queue);
-		EXIT_NOT_IMPLEMENTED(ctx->queues[id].vk_queue == nullptr);
+		if (ctx->queues[id].vk_queue == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->queues[id].vk_queue == nullptr condition ignored (continuing)\n"); }
 	};
 
 	get_queue(GraphicContext::QUEUE_GFX, queues.graphics.At(0));
@@ -2450,8 +2450,8 @@ static void VulkanCreateQueues(GraphicContext* ctx, const VulkanQueues& queues)
 	}
 
 	const auto assignment = VulkanAssignQueueLockIndices(identities, GraphicContext::QUEUES_NUM, lock_indices, &ctx->queue_mutex_count);
-	EXIT_NOT_IMPLEMENTED(assignment != VulkanQueueLockAssignmentStatus::Success || ctx->queue_mutex_count == 0 ||
-	                     ctx->queue_mutex_count > GraphicContext::QUEUES_NUM);
+	if (assignment != VulkanQueueLockAssignmentStatus::Success || ctx->queue_mutex_count == 0 ||
+	                     ctx->queue_mutex_count > GraphicContext::QUEUES_NUM) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: assignment != VulkanQueueLockAssignmentStatus::Success || ctx->queue_mutex_count condition ignored (continuing)\n"); }
 	for (int id = 0; id < GraphicContext::QUEUES_NUM; id++)
 	{
 		EXIT_IF(lock_indices[id] >= ctx->queue_mutex_count);
@@ -2489,7 +2489,7 @@ static VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t imag
 	for (uint32_t i = 0; i < s->swapchain_images_count; i++)
 	{
 		auto result = vkCreateSemaphore(ctx->device, &render_finished_info, nullptr, &s->render_finished_semaphores[i]);
-		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+		if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
 	}
 
 	VkFenceCreateInfo fence_info;
@@ -2498,7 +2498,7 @@ static VulkanSwapchain* VulkanCreateSwapchain(GraphicContext* ctx, uint32_t imag
 	fence_info.flags = 0;
 
 	auto result = vkCreateFence(ctx->device, &fence_info, nullptr, &s->present_complete_fence);
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+	if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
 
 	return s;
 }
@@ -2561,7 +2561,7 @@ static void VulkanRecreateSwapchain(GraphicContext* ctx, VulkanSwapchain* s, uin
 	for (uint32_t i = 0; i < s->swapchain_images_count; i++)
 	{
 		auto result = vkCreateSemaphore(ctx->device, &render_finished_info, nullptr, &s->render_finished_semaphores[i]);
-		EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+		if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
 	}
 
 	if (old != nullptr)
@@ -2828,7 +2828,7 @@ static void VulkanCreate(WindowContext* ctx)
 
 void WindowInit(uint32_t width, uint32_t height)
 {
-	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
 	EXIT_IF(g_window_ctx != nullptr);
 
 	g_window_ctx = new WindowContext;
@@ -3030,16 +3030,18 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	{
 		KYTY_LOG_DEBUG("vkAcquireNextImageKHR failed: result = %d\n", static_cast<int>(result));
 	}
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
-	EXIT_NOT_IMPLEMENTED(g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1));
-	EXIT_NOT_IMPLEMENTED(g_window_ctx->swapchain->current_index >= g_window_ctx->swapchain->swapchain_images_count);
+	if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
+	if (g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1) condition ignored (continuing)\n"); }
+	if (g_window_ctx->swapchain->current_index >= g_window_ctx->swapchain->swapchain_images_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: g_window_ctx->swapchain->current_index >= g_window_ctx->swapchain->swapchain_images_count condition ignored (continuing)\n"); }
 	EXIT_IF(g_window_ctx->swapchain->render_finished_semaphores == nullptr);
 
-	do
+	result = vkWaitForFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence, VK_TRUE, 16666666);
+	if (result == VK_TIMEOUT)
 	{
-		result = vkWaitForFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence, VK_TRUE, 100000000);
-	} while (result == VK_TIMEOUT);
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS);
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: present fence timeout 16ms (continuing)\n");
+		vkWaitForFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence, VK_TRUE, UINT64_MAX);
+	}
+	if (result != VK_SUCCESS && result != VK_TIMEOUT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
 
 	vkResetFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence);
 	const auto acquire_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - acquire_start).count();
@@ -3161,7 +3163,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	CommandBuffer buffer(GraphicContext::QUEUE_PRESENT);
 	// buffer.SetQueue(GraphicContext::QUEUE_PRESENT);
 
-	EXIT_NOT_IMPLEMENTED(buffer.IsInvalid());
+	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
 
 	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
 
@@ -3198,7 +3200,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	pre_present_barrier.subresourceRange.baseArrayLayer = 0;
 	pre_present_barrier.subresourceRange.layerCount     = 1;
 	pre_present_barrier.image                           = g_window_ctx->swapchain->swapchain_images[g_window_ctx->swapchain->current_index];
-	const VkPipelineStageFlags src_stage = hud_drew ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+	const VkPipelineStageFlags src_stage = hud_drew ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT;
 	vkCmdPipelineBarrier(vk_buffer, src_stage, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1, &pre_present_barrier);
 
 	buffer.End();

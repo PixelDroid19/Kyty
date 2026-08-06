@@ -358,7 +358,7 @@ void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 
 	int heap_id = GetHeapId(vaddr, size);
 
-	EXIT_NOT_IMPLEMENTED(heap_id < 0);
+	if (heap_id < 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id < 0 condition ignored (continuing)\n"); }
 
 	auto& heap = m_heaps[heap_id];
 

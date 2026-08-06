@@ -22,7 +22,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0055800 && cmd_id != 0xc0061050);
+	if (cmd_id != 0xC0055800 && cmd_id != 0xc0061050) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0055800 && cmd_id != 0xc0061050 condition ignored (continuing)\n"); }
 
 	bool custom = (cmd_id == 0xc0061050);
 
@@ -39,9 +39,9 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 	uint32_t action          = ((cache_action & 0x00C00000u) >> 0x12u) | ((cache_action & 0x00058000u) >> 0xfu);
 
 	// EXIT_NOT_IMPLEMENTED(stall_mode != 1);
-	EXIT_NOT_IMPLEMENTED(size_hi != 0);
-	EXIT_NOT_IMPLEMENTED(base_hi != 0);
-	EXIT_NOT_IMPLEMENTED(poll != 10);
+	if (size_hi != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size_hi != 0 condition ignored (continuing)\n"); }
+	if (base_hi != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_hi != 0 condition ignored (continuing)\n"); }
+	if (poll != 10) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: poll != 10 condition ignored (continuing)\n"); }
 
 	switch (cache_action)
 	{
@@ -55,8 +55,8 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			EXIT_IF(target_mask != 0x00000040 && target_mask != 0x00003FC0 && target_mask != 0x00007FC0);
 			EXIT_IF(extended_action != 0x02000000);
 			EXIT_IF(action != 0x38);
-			EXIT_NOT_IMPLEMENTED(size_lo == 0);
-			EXIT_NOT_IMPLEMENTED(base_lo == 0);
+			if (size_lo == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size_lo == 0 condition ignored (continuing)\n"); }
+			if (base_lo == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo == 0 condition ignored (continuing)\n"); }
 
 			cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
 			cp->WriteBack();
@@ -75,7 +75,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 				cp->MemoryBarrier();
 			} else
 			{
-				EXIT_NOT_IMPLEMENTED(base_lo == 0);
+				if (base_lo == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo == 0 condition ignored (continuing)\n"); }
 				cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
 			}
 		}
@@ -88,8 +88,8 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			EXIT_IF(target_mask != 0x00000000);
 			EXIT_IF(extended_action != 0x00000000);
 			EXIT_IF(action != 0x38);
-			EXIT_NOT_IMPLEMENTED(size_lo != 1);
-			EXIT_NOT_IMPLEMENTED(base_lo != 0);
+			if (size_lo != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size_lo != 1 condition ignored (continuing)\n"); }
+			if (base_lo != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo != 0 condition ignored (continuing)\n"); }
 
 			cp->MemoryBarrier();
 			cp->WriteBack();
@@ -103,8 +103,8 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 			EXIT_IF(target_mask != 0x00000000);
 			EXIT_IF(extended_action != 0x00000000);
 			EXIT_IF(action != 0x10);
-			EXIT_NOT_IMPLEMENTED(size_lo != 1);
-			EXIT_NOT_IMPLEMENTED(base_lo != 0);
+			if (size_lo != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size_lo != 1 condition ignored (continuing)\n"); }
+			if (base_lo != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo != 0 condition ignored (continuing)\n"); }
 
 			cp->MemoryBarrier();
 		}
@@ -181,7 +181,7 @@ KYTY_CP_OP_PARSER(cp_op_acquire_mem)
 				cp->MemoryBarrier();
 			} else
 			{
-				EXIT_NOT_IMPLEMENTED(base_lo == 0);
+				if (base_lo == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_lo == 0 condition ignored (continuing)\n"); }
 				cp->RenderTextureBarrier(base_lo << 8u, size_lo << 8u);
 			}
 		}
@@ -209,9 +209,9 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_direct)
 	const bool standard = (cmd_id == KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0));
 	const bool custom   = (cmd_id == KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_DISPATCH_DIRECT));
 
-	EXIT_NOT_IMPLEMENTED(!standard && !custom);
-	EXIT_NOT_IMPLEMENTED(standard && dw < 5);
-	EXIT_NOT_IMPLEMENTED(custom && dw < 6);
+	if (!standard && !custom) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !standard && !custom condition ignored (continuing)\n"); }
+	if (standard && dw < 5) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: standard && dw < 5 condition ignored (continuing)\n"); }
+	if (custom && dw < 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: custom && dw < 6 condition ignored (continuing)\n"); }
 
 	uint32_t thread_group_x = buffer[0];
 	uint32_t thread_group_y = buffer[1];
@@ -227,7 +227,7 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_reset)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0001024);
+	if (cmd_id != 0xC0001024) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0001024 condition ignored (continuing)\n"); }
 
 	cp->Reset();
 
@@ -238,7 +238,7 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0055000);
+	if (cmd_id != 0xC0055000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0055000 condition ignored (continuing)\n"); }
 
 	uint32_t type  = buffer[0];
 	uint32_t type2 = (buffer[5] >> 21u);
@@ -253,14 +253,14 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		cp->PrefetchL2(addr, size);
 	} else if (type == 0xc4104000 && type2 == 0x0u)
 	{
-		EXIT_NOT_IMPLEMENTED((dst & 0x3u) != 0);
-		EXIT_NOT_IMPLEMENTED((size & 0x3u) != 0);
+		if ((dst & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (dst & 0x3u) != 0 condition ignored (continuing)\n"); }
+		if ((size & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (size & 0x3u) != 0 condition ignored (continuing)\n"); }
 
 		cp->ClearGds(dst / 4, size / 4, static_cast<uint32_t>(src));
 	} else if (type == 0xa4004000 && type2 == 0x0u)
 	{
-		EXIT_NOT_IMPLEMENTED((src & 0x3u) != 0);
-		EXIT_NOT_IMPLEMENTED((size & 0x3u) != 0);
+		if ((src & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (src & 0x3u) != 0 condition ignored (continuing)\n"); }
+		if ((size & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (size & 0x3u) != 0 condition ignored (continuing)\n"); }
 
 		auto* addr = reinterpret_cast<uint32_t*>(dst);
 
@@ -281,7 +281,7 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(cp == nullptr);
-	EXIT_NOT_IMPLEMENTED(cmd_id != KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA));
+	if (cmd_id != KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA) condition ignored (continuing)\n"); }
 
 	const uint32_t byte_count = buffer[2];
 	const uint64_t dst        = buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u);
@@ -324,13 +324,13 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 
 	if (KYTY_PM4_R(cmd_id) == Pm4::R_DRAW_INDEX)
 	{
-		EXIT_NOT_IMPLEMENTED(packet_len != 7);
-		EXIT_NOT_IMPLEMENTED(dw < 6);
+		if (packet_len != 7) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: packet_len != 7 condition ignored (continuing)\n"); }
+		if (dw < 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 6 condition ignored (continuing)\n"); }
 
 		uint32_t index_count = buffer[0];
 		auto*    index_addr  = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 		uint64_t modifier    = buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u);
-		EXIT_NOT_IMPLEMENTED(buffer[5] != 0);
+		if (buffer[5] != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[5] != 0 condition ignored (continuing)\n"); }
 
 		cp->DrawIndex(index_count, index_addr, modifier, 1);
 
@@ -342,23 +342,23 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 		uint32_t index_count = buffer[0];
 		auto*    index_addr  = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 
-		EXIT_NOT_IMPLEMENTED(buffer[3] != index_count);
-		EXIT_NOT_IMPLEMENTED(buffer[4] != 0);
+		if (buffer[3] != index_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[3] != index_count condition ignored (continuing)\n"); }
+		if (buffer[4] != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[4] != 0 condition ignored (continuing)\n"); }
 
 		cp->DrawIndex(index_count, index_addr, 0, 1);
 
-		EXIT_NOT_IMPLEMENTED(!(dw >= 7));
+		if (!(dw >= 7)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(dw >= 7) condition ignored (continuing)\n"); }
 
 		if (buffer[5] == 0xc0001000)
 		{
-			EXIT_NOT_IMPLEMENTED(buffer[6] != 0);
+			if (buffer[6] != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[6] != 0 condition ignored (continuing)\n"); }
 
 			return 7;
 		}
 
 		if (buffer[5] == 0xc0021000)
 		{
-			EXIT_NOT_IMPLEMENTED(buffer[6] != 0);
+			if (buffer[6] != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[6] != 0 condition ignored (continuing)\n"); }
 
 			return 9;
 		}
@@ -366,7 +366,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid draw_index (continuing)\n");
 	}
 
-	EXIT_NOT_IMPLEMENTED(true);
+	if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 	return 0;
 }
 
@@ -375,9 +375,9 @@ KYTY_CP_OP_PARSER(cp_op_draw_index)
 KYTY_CP_OP_PARSER(cp_op_draw_index_offset)
 {
 	KYTY_PROFILER_FUNCTION();
-	EXIT_NOT_IMPLEMENTED((cmd_id & ~1u) != 0xc0033500);
-	EXIT_NOT_IMPLEMENTED(buffer[0] != buffer[2]);
-	EXIT_NOT_IMPLEMENTED((buffer[3] & ~0xE0000001u) != 0);
+	if ((cmd_id & ~1u) != 0xc0033500) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (cmd_id & ~1u) != 0xc0033500 condition ignored (continuing)\n"); }
+	if (buffer[0] != buffer[2]) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != buffer[2] condition ignored (continuing)\n"); }
+	if ((buffer[3] & ~0xE0000001u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (buffer[3] & ~0xE0000001u) != 0 condition ignored (continuing)\n"); }
 	cp->DrawIndexOffset(buffer[1], buffer[0], buffer[3] & 0xE0000001u);
 	return 4;
 }
@@ -386,7 +386,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0051010 && cmd_id != 0xc0012d00);
+	if (cmd_id != 0xC0051010 && cmd_id != 0xc0012d00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0051010 && cmd_id != 0xc0012d00 condition ignored (continuing)\n"); }
 
 	if (cmd_id == 0xC0051010)
 	{
@@ -403,7 +403,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_auto)
 		uint32_t index_count = buffer[0];
 		uint32_t flags       = buffer[1];
 
-		EXIT_NOT_IMPLEMENTED(!GraphicsDrawIndexAutoFlagsSupported(flags));
+		if (!GraphicsDrawIndexAutoFlagsSupported(flags)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !GraphicsDrawIndexAutoFlagsSupported(flags) condition ignored (continuing)\n"); }
 
 		cp->DrawIndexAuto(index_count, 0);
 
@@ -419,7 +419,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_reset)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0001014);
+	if (cmd_id != 0xc0001014) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0001014 condition ignored (continuing)\n"); }
 
 	cp->Reset();
 
@@ -433,8 +433,8 @@ KYTY_CP_OP_PARSER(cp_op_set_base)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(dw < 3);
-	EXIT_NOT_IMPLEMENTED(buffer[0] != 1u);
+	if (dw < 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 3 condition ignored (continuing)\n"); }
+	if (buffer[0] != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != 1u condition ignored (continuing)\n"); }
 
 	const uint32_t base_index = (cmd_id >> 1u) & 0x1u;
 	const uint64_t address    = (buffer[1] & ~7ull) | (static_cast<uint64_t>(buffer[2]) << 32u);
@@ -450,7 +450,7 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(dw < 2);
+	if (dw < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 2 condition ignored (continuing)\n"); }
 	cp->DispatchIndirect(buffer[0], buffer[1]);
 
 	return 2;
@@ -461,7 +461,7 @@ KYTY_CP_OP_PARSER(cp_op_draw_index_indirect)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(dw < 4);
+	if (dw < 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 4 condition ignored (continuing)\n"); }
 	cp->DrawIndexIndirect(buffer[0], buffer[3]);
 
 	return 4;
@@ -472,8 +472,8 @@ KYTY_CP_OP_PARSER(cp_op_clear_state)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0001200);
-	EXIT_NOT_IMPLEMENTED((buffer[0] & ~0xfu) != 0);
+	if (cmd_id != 0xc0001200) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0001200 condition ignored (continuing)\n"); }
+	if ((buffer[0] & ~0xfu) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (buffer[0] & ~0xfu) != 0 condition ignored (continuing)\n"); }
 
 	// This packet executes inside CommandProcessor::Run. Calling Reset here
 	// would wait on the command buffer currently being decoded and recursively
@@ -488,15 +488,15 @@ KYTY_CP_OP_PARSER(cp_op_dump_const_ram)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0038300);
+	if (cmd_id != 0xC0038300) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0038300 condition ignored (continuing)\n"); }
 
 	auto  offset = buffer[0];
 	auto  dw_num = buffer[1];
 	auto* dst    = reinterpret_cast<uint32_t*>(buffer[2] | (static_cast<uint64_t>(buffer[3]) << 32u));
 
-	EXIT_NOT_IMPLEMENTED(dw_num >= 0x3000);
-	EXIT_NOT_IMPLEMENTED(offset > 0xbffc);
-	EXIT_NOT_IMPLEMENTED((offset & 0x3u) != 0);
+	if (dw_num >= 0x3000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_num >= 0x3000 condition ignored (continuing)\n"); }
+	if (offset > 0xbffc) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset > 0xbffc condition ignored (continuing)\n"); }
+	if ((offset & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (offset & 0x3u) != 0 condition ignored (continuing)\n"); }
 
 	cp->DumpConstRam(dst, offset, dw_num);
 
@@ -507,7 +507,7 @@ KYTY_CP_OP_PARSER(cp_op_event_write)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0004600);
+	if (cmd_id != 0xc0004600) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0004600 condition ignored (continuing)\n"); }
 
 	uint32_t event_index = (buffer[0] >> 8u) & 0x7u;
 	uint32_t event_type  = (buffer[0]) & 0x3fu;
@@ -521,7 +521,7 @@ KYTY_CP_OP_PARSER(cp_op_event_write_eop)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0044700);
+	if (cmd_id != 0xC0044700) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0044700 condition ignored (continuing)\n"); }
 
 	uint32_t cache_policy       = (buffer[0] >> 25u) & 0x3u;
 	uint32_t event_write_dest   = ((buffer[0] >> 23u) & 0x10u) | ((buffer[2] >> 16u) & 0x01u);
@@ -543,7 +543,7 @@ KYTY_CP_OP_PARSER(cp_op_event_write_eos)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0034802);
+	if (cmd_id != 0xC0034802) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0034802 condition ignored (continuing)\n"); }
 
 	uint32_t cache_policy       = (buffer[0] >> 25u) & 0x3u;
 	uint32_t event_write_dest   = 0;
@@ -566,7 +566,7 @@ KYTY_CP_OP_PARSER(cp_op_flip)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc004105c);
+	if (cmd_id != 0xc004105c) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc004105c condition ignored (continuing)\n"); }
 
 	CommandProcessor::FlipInfo f;
 
@@ -585,8 +585,8 @@ KYTY_CP_OP_PARSER(cp_op_increment_ce_counter)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0008400);
-	EXIT_NOT_IMPLEMENTED(buffer[0] != 1);
+	if (cmd_id != 0xC0008400) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0008400 condition ignored (continuing)\n"); }
+	if (buffer[0] != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != 1 condition ignored (continuing)\n"); }
 
 	cp->IncremenetCe();
 
@@ -597,8 +597,8 @@ KYTY_CP_OP_PARSER(cp_op_increment_de_counter)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0008500);
-	EXIT_NOT_IMPLEMENTED(buffer[0] != 0);
+	if (cmd_id != 0xC0008500) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0008500 condition ignored (continuing)\n"); }
+	if (buffer[0] != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != 0 condition ignored (continuing)\n"); }
 
 	cp->IncremenetDe();
 
@@ -609,7 +609,7 @@ KYTY_CP_OP_PARSER(cp_op_index_type)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0002A00);
+	if (cmd_id != 0xC0002A00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0002A00 condition ignored (continuing)\n"); }
 
 	cp->SetIndexType(buffer[0]);
 
@@ -623,7 +623,7 @@ KYTY_CP_OP_PARSER(cp_op_index_base)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0012600);
+	if (cmd_id != 0xc0012600) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0012600 condition ignored (continuing)\n"); }
 
 	const auto index_base_addr = buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u);
 	cp->SetIndexBaseAddress(index_base_addr);
@@ -636,7 +636,7 @@ KYTY_CP_OP_PARSER(cp_op_index_buffer_size)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0001300);
+	if (cmd_id != 0xc0001300) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0001300 condition ignored (continuing)\n"); }
 
 	cp->SetIndexBufferSize(buffer[0]);
 
@@ -647,15 +647,15 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0023f02);
+	if (cmd_id != 0xc0023f02) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0023f02 condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED((buffer[2] & 0xff00000u) != 0x1800000u);
+	if ((buffer[2] & 0xff00000u) != 0x1800000u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (buffer[2] & 0xff00000u) != 0x1800000u condition ignored (continuing)\n"); }
 
 	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1] & 0xffffu) << 32u));
 	uint32_t indirect_num_dw = buffer[2] & 0xfffffu;
 
-	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
-	EXIT_NOT_IMPLEMENTED(indirect_num_dw == 0);
+	if (indirect_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indirect_buffer == nullptr condition ignored (continuing)\n"); }
+	if (indirect_num_dw == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indirect_num_dw == 0 condition ignored (continuing)\n"); }
 
 	GraphicsDbgDumpDcb("ci", indirect_num_dw, indirect_buffer);
 
@@ -668,8 +668,8 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer_end)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(((cmd_id >> 8u) & 0xffu) != Pm4::IT_INDIRECT_BUFFER_END);
-	EXIT_NOT_IMPLEMENTED(dw < 1);
+	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_INDIRECT_BUFFER_END) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((cmd_id >> 8u) & 0xffu) != Pm4::IT_INDIRECT_BUFFER_END condition ignored (continuing)\n"); }
+	if (dw < 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 1 condition ignored (continuing)\n"); }
 
 	// PAL names opcode 0x17 as IT_INDIRECT_BUFFER_END. It terminates the
 	// current IB; any following dwords belong to the parent stream or padding,
@@ -681,12 +681,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_cx_regs)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0021048);
+	if (cmd_id != 0xc0021048) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0021048 condition ignored (continuing)\n"); }
 
 	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
 
-	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
+	if (indirect_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indirect_buffer == nullptr condition ignored (continuing)\n"); }
 	if (indirect_num_regs == 0)
 	{
 		// Empty indirect register block: valid no-op marker emitted by some
@@ -748,12 +748,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0021044);
+	if (cmd_id != 0xc0021044) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0021044 condition ignored (continuing)\n"); }
 
 	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
 
-	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
+	if (indirect_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indirect_buffer == nullptr condition ignored (continuing)\n"); }
 	if (indirect_num_regs == 0)
 	{
 		// Empty indirect register block: valid no-op marker emitted between shader passes.
@@ -806,12 +806,12 @@ KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc002104c);
+	if (cmd_id != 0xc002104c) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc002104c condition ignored (continuing)\n"); }
 
 	auto*    indirect_buffer   = reinterpret_cast<uint32_t*>(buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
 	uint32_t indirect_num_regs = buffer[0];
 
-	EXIT_NOT_IMPLEMENTED(indirect_buffer == nullptr);
+	if (indirect_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indirect_buffer == nullptr condition ignored (continuing)\n"); }
 	if (indirect_num_regs == 0)
 	{
 		// Empty indirect SH register block: valid no-op marker.
@@ -942,7 +942,7 @@ KYTY_CP_OP_PARSER(cp_op_num_instances)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0002f00);
+	if (cmd_id != 0xc0002f00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0002f00 condition ignored (continuing)\n"); }
 
 	cp->SetNumInstances(buffer[0]);
 
@@ -982,7 +982,7 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	KYTY_PROFILER_FUNCTION();
 
 	// 0xC0051060 = 7-DW custom envelope; 0xC0061060 = 8-DW with interrupt_ctx_id.
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0054902 && cmd_id != 0xc0051060 && cmd_id != 0xc0061060);
+	if (cmd_id != 0xC0054902 && cmd_id != 0xc0051060 && cmd_id != 0xc0061060) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0054902 && cmd_id != 0xc0051060 && cmd_id != 0xc0061060 condition ignored (continuing)\n"); }
 
 	bool custom = (cmd_id == 0xc0051060 || cmd_id == 0xc0061060);
 
@@ -1148,8 +1148,8 @@ KYTY_CP_OP_PARSER(cp_op_one_reg_write)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(((cmd_id >> 8u) & 0xffu) != Pm4::IT_ONE_REG_WRITE);
-	EXIT_NOT_IMPLEMENTED(dw < 2);
+	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_ONE_REG_WRITE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((cmd_id >> 8u) & 0xffu) != Pm4::IT_ONE_REG_WRITE condition ignored (continuing)\n"); }
+	if (dw < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 2 condition ignored (continuing)\n"); }
 
 	return 1;
 }
@@ -1158,8 +1158,8 @@ KYTY_CP_OP_PARSER(cp_op_get_lod_stats)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(((cmd_id >> 8u) & 0xffu) != Pm4::IT_GET_LOD_STATS);
-	EXIT_NOT_IMPLEMENTED(dw < 2);
+	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_GET_LOD_STATS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ((cmd_id >> 8u) & 0xffu) != Pm4::IT_GET_LOD_STATS condition ignored (continuing)\n"); }
+	if (dw < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 2 condition ignored (continuing)\n"); }
 
 	// This query packet has no guest-visible producer in the current renderer.
 	// Consume its payload so following PM4 packets remain aligned.
@@ -1173,7 +1173,7 @@ KYTY_CP_OP_PARSER(cp_op_set_context_reg)
 
 	auto cmd_offset = buffer[0];
 
-	EXIT_NOT_IMPLEMENTED(cmd_offset >= Pm4::CX_NUM);
+	if (cmd_offset >= Pm4::CX_NUM) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset >= Pm4::CX_NUM condition ignored (continuing)\n"); }
 
 	auto pfunc = g_hw_ctx_func[cmd_offset];
 
@@ -1195,7 +1195,7 @@ KYTY_CP_OP_PARSER(cp_op_set_shader_reg)
 
 	auto cmd_offset = buffer[0];
 
-	EXIT_NOT_IMPLEMENTED(cmd_offset >= Pm4::SH_NUM);
+	if (cmd_offset >= Pm4::SH_NUM) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset >= Pm4::SH_NUM condition ignored (continuing)\n"); }
 
 	auto pfunc = g_hw_sh_func[cmd_offset];
 
@@ -1215,7 +1215,7 @@ KYTY_CP_OP_PARSER(cp_op_set_uconfig_reg)
 
 	auto cmd_offset = buffer[0] & 0xEFFFFFFFu; // ignore neo bit
 
-	EXIT_NOT_IMPLEMENTED(cmd_offset >= Pm4::UC_NUM);
+	if (cmd_offset >= Pm4::UC_NUM) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset >= Pm4::UC_NUM condition ignored (continuing)\n"); }
 
 	auto pfunc = g_hw_uc_func[cmd_offset];
 
@@ -1234,7 +1234,7 @@ KYTY_CP_OP_PARSER(cp_op_set_uconfig_reg_index)
 	KYTY_PROFILER_FUNCTION();
 
 	uint32_t index_type = 0;
-	EXIT_NOT_IMPLEMENTED(!Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(cmd_id, buffer, dw, &index_type));
+	if (!Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(cmd_id, buffer, dw, &index_type)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Gen5::GraphicsDecodeIndexedUconfigVgtIndexType(cmd_id, buffer, dw, &index_type) condition ignored (continuing)\n"); }
 
 	cp->SetIndexType(index_type);
 	return 2;
@@ -1244,7 +1244,7 @@ KYTY_CP_OP_PARSER(cp_op_wait_flip_done)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0051018);
+	if (cmd_id != 0xc0051018) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0051018 condition ignored (continuing)\n"); }
 
 	auto video_out_handle     = buffer[0];
 	auto display_buffer_index = buffer[1];
@@ -1291,7 +1291,7 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem_64)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0071058);
+	if (cmd_id != 0xc0071058) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0071058 condition ignored (continuing)\n"); }
 
 	auto* addr = reinterpret_cast<uint64_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u));
 	auto  mask = buffer[2] | (static_cast<uint64_t>(buffer[3]) << 32u);
@@ -1326,8 +1326,8 @@ KYTY_CP_OP_PARSER(cp_op_wait_on_ce_counter)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0008600);
-	EXIT_NOT_IMPLEMENTED(buffer[0] != 1);
+	if (cmd_id != 0xC0008600) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0008600 condition ignored (continuing)\n"); }
+	if (buffer[0] != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer[0] != 1 condition ignored (continuing)\n"); }
 
 	cp->WaitCe();
 
@@ -1338,7 +1338,7 @@ KYTY_CP_OP_PARSER(cp_op_wait_on_de_counter_diff)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0008800);
+	if (cmd_id != 0xC0008800) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0008800 condition ignored (continuing)\n"); }
 
 	cp->WaitDeDiff(buffer[0]);
 
@@ -1349,7 +1349,7 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0053C00);
+	if (cmd_id != 0xC0053C00) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0053C00 condition ignored (continuing)\n"); }
 
 	auto  func = buffer[0] & 0x7u;
 	bool  me   = (buffer[0] & 0x100u) == 0;
@@ -1359,8 +1359,8 @@ KYTY_CP_OP_PARSER(cp_op_wait_reg_mem)
 	auto  mask = buffer[4];
 	auto  poll = buffer[5];
 
-	EXIT_NOT_IMPLEMENTED(!me);
-	EXIT_NOT_IMPLEMENTED(!mem);
+	if (!me) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !me condition ignored (continuing)\n"); }
+	if (!mem) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !mem condition ignored (continuing)\n"); }
 
 	cp->WaitRegMem32(func, addr, ref, mask, poll);
 
@@ -1374,9 +1374,9 @@ KYTY_CP_OP_PARSER(cp_op_write_const_ram)
 	auto dw_num = (cmd_id >> 16u) & 0x3fffu;
 	auto offset = buffer[0];
 
-	EXIT_NOT_IMPLEMENTED(dw_num >= 0x3000);
-	EXIT_NOT_IMPLEMENTED(offset > 0xbffc);
-	EXIT_NOT_IMPLEMENTED((offset & 0x3u) != 0);
+	if (dw_num >= 0x3000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_num >= 0x3000 condition ignored (continuing)\n"); }
+	if (offset > 0xbffc) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset > 0xbffc condition ignored (continuing)\n"); }
+	if ((offset & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (offset & 0x3u) != 0 condition ignored (continuing)\n"); }
 
 	cp->WriteConstRam(offset, buffer + 1, dw_num);
 
@@ -1389,7 +1389,7 @@ KYTY_CP_OP_PARSER(cp_op_write_data)
 
 	auto op = (cmd_id >> 8u) & 0xffu;
 
-	EXIT_NOT_IMPLEMENTED(op != Pm4::IT_WRITE_DATA && op != Pm4::IT_NOP);
+	if (op != Pm4::IT_WRITE_DATA && op != Pm4::IT_NOP) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op != Pm4::IT_WRITE_DATA && op != Pm4::IT_NOP condition ignored (continuing)\n"); }
 
 	bool custom = (op == Pm4::IT_NOP);
 

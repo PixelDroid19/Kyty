@@ -58,7 +58,7 @@ Gpu* g_gpu = nullptr;
 
 void GraphicsRunInit()
 {
-	EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+	if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
 
 	EXIT_IF(g_gpu != nullptr);
 
@@ -90,16 +90,16 @@ void Gpu::SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_
 
 uint32_t Gpu::MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw, uint32_t* read_ptr_addr)
 {
-	EXIT_NOT_IMPLEMENTED(ring_addr == nullptr);
-	EXIT_NOT_IMPLEMENTED(ring_size_dw == 0);
-	EXIT_NOT_IMPLEMENTED(read_ptr_addr == nullptr);
+	if (ring_addr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ring_addr == nullptr condition ignored (continuing)\n"); }
+	if (ring_size_dw == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ring_size_dw == 0 condition ignored (continuing)\n"); }
+	if (read_ptr_addr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: read_ptr_addr == nullptr condition ignored (continuing)\n"); }
 
 	return m_submission_admission_gate.RunAdmitted(
 	    [&]
 	    {
 		    auto v = pipe_id * 8 + queue_id;
 
-		    EXIT_NOT_IMPLEMENTED(v >= 64);
+		    if (v >= 64) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v >= 64 condition ignored (continuing)\n"); }
 
 		    //	for (int i = 0; i < 8; i++)
 		    //	{
@@ -123,11 +123,11 @@ void Gpu::Unmap(uint32_t ring_id)
 	m_submission_admission_gate.RunAdmitted(
 	    [&]
 	    {
-		    EXIT_NOT_IMPLEMENTED(ring_id < 1 || ring_id > 64);
+		    if (ring_id < 1 || ring_id > 64) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ring_id < 1 || ring_id > 64 condition ignored (continuing)\n"); }
 
 		    auto* ring = GetRing(ring_id);
 
-		    EXIT_NOT_IMPLEMENTED(!ring->IsActive());
+		    if (!ring->IsActive()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ring->IsActive() condition ignored (continuing)\n"); }
 
 		    ring->SetActive(false);
 	    });
@@ -138,12 +138,12 @@ void Gpu::DingDong(uint32_t ring_id, uint32_t offset_dw)
 	m_submission_admission_gate.RunAdmitted(
 	    [&]
 	    {
-		    EXIT_NOT_IMPLEMENTED(ring_id < 1 || ring_id > 64);
-		    EXIT_NOT_IMPLEMENTED(offset_dw == 0);
+		    if (ring_id < 1 || ring_id > 64) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ring_id < 1 || ring_id > 64 condition ignored (continuing)\n"); }
+		    if (offset_dw == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset_dw == 0 condition ignored (continuing)\n"); }
 
 		    auto* ring = GetRing(ring_id);
 
-		    EXIT_NOT_IMPLEMENTED(!ring->IsActive());
+		    if (!ring->IsActive()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ring->IsActive() condition ignored (continuing)\n"); }
 
 		    ring->DingDong(offset_dw);
 	    });
@@ -360,7 +360,7 @@ SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_complete
 
 	const uint32_t submitted_slot = static_cast<uint32_t>(m_current_buffer);
 	SubmissionId   submitted_id;
-	EXIT_NOT_IMPLEMENTED(!m_buffer[submitted_slot]->GetSubmissionId(&submitted_id));
+	if (!m_buffer[submitted_slot]->GetSubmissionId(&submitted_id)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_buffer[submitted_slot]->GetSubmissionId(&submitted_id) condition ignored (continuing)\n"); }
 	m_buffer[submitted_slot]->End();
 	m_buffer[submitted_slot]->Execute();
 	require_submission_success(m_submission_slots.MarkSubmitted(submitted_slot), "MarkSubmitted", m_queue, submitted_slot);
@@ -373,7 +373,7 @@ SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_complete
 	if (m_buffer[recording_slot]->IsExecute())
 	{
 		SubmissionId slot_owner;
-		EXIT_NOT_IMPLEMENTED(!m_buffer[recording_slot]->GetSubmissionId(&slot_owner));
+		if (!m_buffer[recording_slot]->GetSubmissionId(&slot_owner)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_buffer[recording_slot]->GetSubmissionId(&slot_owner) condition ignored (continuing)\n"); }
 		CompleteSubmittedThroughLocked(slot_owner, latest_completed);
 	}
 
@@ -536,7 +536,7 @@ void CommandProcessor::BufferWait()
 		EXIT_IF(m_buffer[m_current_buffer]->IsExecute());
 		SubmissionId recording;
 		uint32_t     recording_slot = 0;
-		EXIT_NOT_IMPLEMENTED(!m_buffer[m_current_buffer]->GetSubmissionId(&recording));
+		if (!m_buffer[m_current_buffer]->GetSubmissionId(&recording)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_buffer[m_current_buffer]->GetSubmissionId(&recording) condition ignored (continuing)\n"); }
 		require_submission_success(m_submission_slots.FindSlot(recording, &recording_slot), "FindSlot", m_queue,
 		                           static_cast<uint32_t>(m_current_buffer));
 		EXIT_IF(recording_slot != static_cast<uint32_t>(m_current_buffer));
@@ -670,8 +670,8 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	                                              m_buffer[m_current_buffer] != nullptr &&
 	                                              m_buffer[m_current_buffer]->GetSubmissionId(&current_submission);
 	const bool           producer_is_current_submission = has_current_submission && dependency.producer == current_submission;
-	EXIT_NOT_IMPLEMENTED(producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
-	                     producer != GpuSubmissionResult::ProducerNotFound);
+	if (producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
+	                     producer != GpuSubmissionResult::ProducerNotFound) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::Pro condition ignored (continuing)\n"); }
 	// Submit the command buffer before resolving the dependency so pending EOP
 	// labels become visible to the completion publisher.  A matching producer
 	// is already ordered by the submission graph; keep that path in the current
@@ -727,8 +727,8 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	                                              m_buffer[m_current_buffer] != nullptr &&
 	                                              m_buffer[m_current_buffer]->GetSubmissionId(&current_submission);
 	const bool           producer_is_current_submission = has_current_submission && dependency.producer == current_submission;
-	EXIT_NOT_IMPLEMENTED(producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
-	                     producer != GpuSubmissionResult::ProducerNotFound);
+	if (producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
+	                     producer != GpuSubmissionResult::ProducerNotFound) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::Pro condition ignored (continuing)\n"); }
 	// Keep a matching producer in the current decode for render-pass continuity;
 	// suspend only when the tracker cannot prove that the current value will
 	// satisfy this wait.
@@ -1423,7 +1423,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			break;
 		}
 
-		EXIT_NOT_IMPLEMENTED(dw > num_dw);
+		if (dw > num_dw) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw > num_dw condition ignored (continuing)\n"); }
 
 		auto cmd_id = *cmd++;
 		dw -= 1;
@@ -1482,7 +1482,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		const uint32_t special_packet_dwords = Pm4::Pm4SpecialType3PacketDwords(cmd_id);
 		if (special_packet_dwords != 0u)
 		{
-			EXIT_NOT_IMPLEMENTED(remaining_including_header < special_packet_dwords);
+			if (remaining_including_header < special_packet_dwords) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: remaining_including_header < special_packet_dwords condition ignored (continuing)\n"); }
 		} else if (KYTY_PM4_LEN(cmd_id) > remaining_including_header)
 		{
 			if (dw < 1)
@@ -1495,7 +1495,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			continue;
 		}
 
-		EXIT_NOT_IMPLEMENTED(dw < 1);
+		if (dw < 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 1 condition ignored (continuing)\n"); }
 
 		auto op = (cmd_id >> 8u) & 0xffu;
 
@@ -1506,7 +1506,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			const auto* packet_start = cmd - 1;
 			if (Config::IsNextGen() && Pm4::Pm4Gen5OpaquePairPrecedesWaitFlipDone(packet_start, remaining_including_header))
 			{
-				EXIT_NOT_IMPLEMENTED(dw < 1);
+				if (dw < 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 1 condition ignored (continuing)\n"); }
 				cmd += 1;
 				dw -= 1;
 				continue;
@@ -1599,7 +1599,7 @@ void CommandProcessor::SetIndirectArgsBaseAddress(uint32_t base_index, uint64_t 
 	{
 		case 0: m_draw_indirect_args_base_addr = address; break;
 		case 1: m_dispatch_indirect_args_base_addr = address; break;
-		default: EXIT_NOT_IMPLEMENTED(true); break;
+		default: if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); } break;
 	}
 
 	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
@@ -1619,7 +1619,7 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances)
 
 	m_num_instances = num_instances;
 
-	EXIT_NOT_IMPLEMENTED(m_num_instances != 1);
+	if (m_num_instances != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_num_instances != 1 condition ignored (continuing)\n"); }
 }
 
 void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
@@ -1651,8 +1651,8 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-	EXIT_NOT_IMPLEMENTED(m_index_base_addr == 0);
-	EXIT_NOT_IMPLEMENTED((flags & ~0xE0000001u) != 0);
+	if (m_index_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_index_base_addr == 0 condition ignored (continuing)\n"); }
+	if ((flags & ~0xE0000001u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (flags & ~0xE0000001u) != 0 condition ignored (continuing)\n"); }
 
 	uint32_t index_bytes = 0;
 	switch (m_index_type_and_size)
@@ -1681,9 +1681,9 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
-	EXIT_NOT_IMPLEMENTED(m_index_base_addr == 0);
-	EXIT_NOT_IMPLEMENTED((initiator & ~0x20u) != 2u);
+	if (m_draw_indirect_args_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_draw_indirect_args_base_addr == 0 condition ignored (continuing)\n"); }
+	if (m_index_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_index_base_addr == 0 condition ignored (continuing)\n"); }
+	if ((initiator & ~0x20u) != 2u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (initiator & ~0x20u) != 2u condition ignored (continuing)\n"); }
 
 	DrawIndexedIndirectArgs args {};
 	memcpy(&args, reinterpret_cast<const void*>(m_draw_indirect_args_base_addr + data_offset), sizeof(args));
@@ -1710,7 +1710,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 		case 0: index_bytes = 2; break;
 		case 1: index_bytes = 4; break;
 		case 2: index_bytes = 1; break;
-		default: EXIT_NOT_IMPLEMENTED(true); break;
+		default: if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); } break;
 	}
 
 	const uint32_t index_count =
@@ -1758,7 +1758,7 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-	EXIT_NOT_IMPLEMENTED(m_dispatch_indirect_args_base_addr == 0);
+	if (m_dispatch_indirect_args_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_dispatch_indirect_args_base_addr == 0 condition ignored (continuing)\n"); }
 
 	DispatchIndirectArgs args {};
 	memcpy(&args, reinterpret_cast<const void*>(m_dispatch_indirect_args_base_addr + data_offset), sizeof(args));
@@ -1858,7 +1858,7 @@ void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-		EXIT_NOT_IMPLEMENTED(!m_buffer[m_current_buffer]->GetSubmissionId(&submission));
+		if (!m_buffer[m_current_buffer]->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_buffer[m_current_buffer]->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
 	}
 	BufferFlush();
 	g_gpu->WaitSubmission(submission);
@@ -1888,9 +1888,9 @@ void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_
 		KYTY_LOG_DEBUG("\t value               = 0x%08" PRIx32 "\n", value);
 	}
 
-	EXIT_NOT_IMPLEMENTED(cache_policy != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(event_write_dest != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(interrupt_selector != 0x0);
+	if (cache_policy != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cache_policy != 0x00000000 condition ignored (continuing)\n"); }
+	if (event_write_dest != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event_write_dest != 0x00000000 condition ignored (continuing)\n"); }
+	if (interrupt_selector != 0x0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: interrupt_selector != 0x0 condition ignored (continuing)\n"); }
 
 	if (event_write_source == 0x00000002 && eop_event_type == 0x0000002f && cache_action == 0x00000000 && event_index == 0x00000006)
 	{
@@ -1930,8 +1930,8 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		KYTY_LOG_DEBUG("\t value               = 0x%016" PRIx64 "\n", value);
 	}
 
-	EXIT_NOT_IMPLEMENTED(cache_policy != 0x00000000);
-	EXIT_NOT_IMPLEMENTED(event_write_dest != 0x00000000);
+	if (cache_policy != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cache_policy != 0x00000000 condition ignored (continuing)\n"); }
+	if (event_write_dest != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event_write_dest != 0x00000000 condition ignored (continuing)\n"); }
 
 	bool     with_interrupt = false;
 	bool     source64       = (event_write_source == 0x02);

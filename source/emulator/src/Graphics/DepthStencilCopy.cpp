@@ -192,8 +192,8 @@ constexpr uint32_t kDepthStencilCopyCentroidSelectionFlag = 0x100u;
 uint32_t DepthStencilCopySampleCount(const VulkanSampleLocationState& sample_locations)
 {
 	const auto sample_count = static_cast<uint32_t>(sample_locations.sample_count);
-	EXIT_NOT_IMPLEMENTED(sample_count != 1u && sample_count != 2u && sample_count != 4u && sample_count != 8u &&
-	                     sample_count != 16u);
+	if (sample_count != 1u && sample_count != 2u && sample_count != 4u && sample_count != 8u &&
+	                     sample_count != 16u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sample_count != 1u && sample_count != 2u && sample_count != 4u && sample_count ! condition ignored (continuing)\n"); }
 	return sample_count;
 }
 
@@ -206,13 +206,13 @@ VkShaderModule CreateShaderModule(VkDevice device, const uint32_t* words, size_t
 
 	VkShaderModule module = nullptr;
 	const auto      result = vkCreateShaderModule(device, &create_info, nullptr, &module);
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS || module == nullptr);
+	if (result != VK_SUCCESS || module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS || module == nullptr condition ignored (continuing)\n"); }
 	return module;
 }
 
 VkColorComponentFlags ResolveDepthStencilCopyColorWriteMask(uint8_t mask)
 {
-	EXIT_NOT_IMPLEMENTED((mask & ~0x0fu) != 0 || mask == 0);
+	if ((mask & ~0x0fu) != 0 || mask == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (mask & ~0x0fu) != 0 || mask == 0 condition ignored (continuing)\n"); }
 
 	VkColorComponentFlags flags = 0;
 	if ((mask & 0x1u) != 0)
@@ -276,7 +276,7 @@ void DepthStencilCopyRenderer::Initialize(GraphicContext* context)
 
 	if (m_device != nullptr)
 	{
-		EXIT_NOT_IMPLEMENTED(m_device != context->device);
+		if (m_device != context->device) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_device != context->device condition ignored (continuing)\n"); }
 		return;
 	}
 
@@ -299,15 +299,15 @@ void DepthStencilCopyRenderer::Initialize(GraphicContext* context)
 	sampler_info.maxLod                  = 0.0f;
 	sampler_info.borderColor             = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
 	sampler_info.unnormalizedCoordinates = VK_FALSE;
-	EXIT_NOT_IMPLEMENTED(vkCreateSampler(m_device, &sampler_info, nullptr, &m_sampler) != VK_SUCCESS || m_sampler == nullptr);
+	if (vkCreateSampler(m_device, &sampler_info, nullptr, &m_sampler) != VK_SUCCESS || m_sampler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vkCreateSampler(m_device, &sampler_info, nullptr, &m_sampler) != VK_SUCCESS || m_sampler == nullptr condition ignored (continuing)\n"); }
 
 	VkDescriptorSetLayoutCreateInfo empty_descriptor_layout_info {};
 	empty_descriptor_layout_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 	empty_descriptor_layout_info.bindingCount = 0;
 	empty_descriptor_layout_info.pBindings    = nullptr;
-	EXIT_NOT_IMPLEMENTED(vkCreateDescriptorSetLayout(m_device, &empty_descriptor_layout_info, nullptr,
+	if (vkCreateDescriptorSetLayout(m_device, &empty_descriptor_layout_info, nullptr,
 	                                                 &m_empty_descriptor_set_layout) != VK_SUCCESS ||
-	                     m_empty_descriptor_set_layout == nullptr);
+	                     m_empty_descriptor_set_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vkCreateDescriptorSetLayout(m_device, &empty_descriptor_layout_info, nullptr, condition ignored (continuing)\n"); }
 
 	VkDescriptorSetLayoutBinding bindings[2] {};
 	for (uint32_t binding = 0; binding < 2; binding++)
@@ -323,9 +323,9 @@ void DepthStencilCopyRenderer::Initialize(GraphicContext* context)
 	descriptor_layout_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 	descriptor_layout_info.bindingCount = 2;
 	descriptor_layout_info.pBindings    = bindings;
-	EXIT_NOT_IMPLEMENTED(vkCreateDescriptorSetLayout(m_device, &descriptor_layout_info, nullptr, &m_source_descriptor_set_layout) !=
+	if (vkCreateDescriptorSetLayout(m_device, &descriptor_layout_info, nullptr, &m_source_descriptor_set_layout) !=
 	                         VK_SUCCESS ||
-	                     m_source_descriptor_set_layout == nullptr);
+	                     m_source_descriptor_set_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vkCreateDescriptorSetLayout(m_device, &descriptor_layout_info, nullptr, &m_sourc condition ignored (continuing)\n"); }
 
 	VkDescriptorPoolSize pool_size {};
 	pool_size.type            = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -337,15 +337,15 @@ void DepthStencilCopyRenderer::Initialize(GraphicContext* context)
 	descriptor_pool_info.maxSets       = static_cast<uint32_t>(kMaxSourceDescriptors);
 	descriptor_pool_info.poolSizeCount = 1;
 	descriptor_pool_info.pPoolSizes    = &pool_size;
-	EXIT_NOT_IMPLEMENTED(vkCreateDescriptorPool(m_device, &descriptor_pool_info, nullptr, &m_descriptor_pool) != VK_SUCCESS ||
-	                     m_descriptor_pool == nullptr);
+	if (vkCreateDescriptorPool(m_device, &descriptor_pool_info, nullptr, &m_descriptor_pool) != VK_SUCCESS ||
+	                     m_descriptor_pool == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vkCreateDescriptorPool(m_device, &descriptor_pool_info, nullptr, &m_descriptor_p condition ignored (continuing)\n"); }
 }
 
 VkDescriptorSet DepthStencilCopyRenderer::GetSourceDescriptor(DepthStencilVulkanImage* source)
 {
 	EXIT_IF(source == nullptr);
-	EXIT_NOT_IMPLEMENTED(source->image_view[VulkanImage::VIEW_DEPTH_TEXTURE] == nullptr ||
-	                     source->image_view[VulkanImage::VIEW_STENCIL_TEXTURE] == nullptr);
+	if (source->image_view[VulkanImage::VIEW_DEPTH_TEXTURE] == nullptr ||
+	                     source->image_view[VulkanImage::VIEW_STENCIL_TEXTURE] == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source->image_view[VulkanImage::VIEW_DEPTH_TEXTURE] == nullptr || condition ignored (continuing)\n"); }
 
 	for (const auto& entry: m_sources)
 	{
@@ -355,7 +355,7 @@ VkDescriptorSet DepthStencilCopyRenderer::GetSourceDescriptor(DepthStencilVulkan
 		}
 	}
 
-	EXIT_NOT_IMPLEMENTED(m_sources.size() >= kMaxSourceDescriptors);
+	if (m_sources.size() >= kMaxSourceDescriptors) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_sources.size() >= kMaxSourceDescriptors condition ignored (continuing)\n"); }
 
 	VkDescriptorSetAllocateInfo allocation_info {};
 	allocation_info.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -364,7 +364,7 @@ VkDescriptorSet DepthStencilCopyRenderer::GetSourceDescriptor(DepthStencilVulkan
 	allocation_info.pSetLayouts        = &m_source_descriptor_set_layout;
 
 	VkDescriptorSet descriptor = nullptr;
-	EXIT_NOT_IMPLEMENTED(vkAllocateDescriptorSets(m_device, &allocation_info, &descriptor) != VK_SUCCESS || descriptor == nullptr);
+	if (vkAllocateDescriptorSets(m_device, &allocation_info, &descriptor) != VK_SUCCESS || descriptor == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vkAllocateDescriptorSets(m_device, &allocation_info, &descriptor) != VK_SUCCESS || descriptor == nullptr condition ignored (continuing)\n"); }
 
 	VkDescriptorImageInfo image_infos[2] {};
 	image_infos[0].sampler     = m_sampler;
@@ -395,14 +395,14 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 {
 	EXIT_IF(context == nullptr || request.render_pass == nullptr || request.render_pass_id == 0);
 	const bool expand_to_color = (request.mode == DepthStencilCopyMode::ExpandToColor);
-	EXIT_NOT_IMPLEMENTED(request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly);
-	EXIT_NOT_IMPLEMENTED(expand_to_color && ((request.color_write_mask & ~0x0fu) != 0 || request.color_write_mask == 0));
-	EXIT_NOT_IMPLEMENTED(!expand_to_color && (request.color_write_mask != 0 || request.source != nullptr));
+	if (request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly condition ignored (continuing)\n"); }
+	if (expand_to_color && ((request.color_write_mask & ~0x0fu) != 0 || request.color_write_mask == 0)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: expand_to_color && ((request.color_write_mask & ~0x0fu) != 0 || request.color_write_mask == 0) condition ignored (continuing)\n"); }
+	if (!expand_to_color && (request.color_write_mask != 0 || request.source != nullptr)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !expand_to_color && (request.color_write_mask != 0 || request.source != nullptr) condition ignored (continuing)\n"); }
 	const auto sample_count = DepthStencilCopySampleCount(request.sample_locations);
 	const bool source_multisampled = (expand_to_color && sample_count != 1u);
-	EXIT_NOT_IMPLEMENTED(expand_to_color &&
-	                     (request.source == nullptr || request.source->samples != request.sample_locations.sample_count));
-	EXIT_NOT_IMPLEMENTED(source_multisampled && !request.copy_centroid && request.copy_sample >= sample_count);
+	if (expand_to_color &&
+	                     (request.source == nullptr || request.source->samples != request.sample_locations.sample_count)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: expand_to_color && condition ignored (continuing)\n"); }
+	if (source_multisampled && !request.copy_centroid && request.copy_sample >= sample_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_multisampled && !request.copy_centroid && request.copy_sample >= sample_count condition ignored (continuing)\n"); }
 
 	const auto* vertex_stage = request.vertex_stage;
 	const bool  guest_vertex_stage = (vertex_stage != nullptr);
@@ -411,10 +411,10 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 
 	if (guest_vertex_stage)
 	{
-		EXIT_NOT_IMPLEMENTED(vertex_stage->input == nullptr || vertex_bind == nullptr || vertex_stage->shader_id == nullptr ||
-		                     vertex_stage->shader_words == nullptr || vertex_stage->shader_word_count == 0);
-		EXIT_NOT_IMPLEMENTED(vertex_requires_descriptor != (vertex_stage->descriptor_set_layout != nullptr));
-		EXIT_NOT_IMPLEMENTED(vertex_requires_descriptor && vertex_bind->descriptor_set_slot != 0);
+		if (vertex_stage->input == nullptr || vertex_bind == nullptr || vertex_stage->shader_id == nullptr ||
+		                     vertex_stage->shader_words == nullptr || vertex_stage->shader_word_count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertex_stage->input == nullptr || vertex_bind == nullptr || vertex_stage->shader condition ignored (continuing)\n"); }
+		if (vertex_requires_descriptor != (vertex_stage->descriptor_set_layout != nullptr)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertex_requires_descriptor != (vertex_stage->descriptor_set_layout != nullptr) condition ignored (continuing)\n"); }
+		if (vertex_requires_descriptor && vertex_bind->descriptor_set_slot != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vertex_requires_descriptor && vertex_bind->descriptor_set_slot != 0 condition ignored (continuing)\n"); }
 	}
 
 	for (auto& entry: m_pipelines)
@@ -470,7 +470,7 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	VulkanVertexInputLayout vertex_input_layout {};
 	if (guest_vertex_stage)
 	{
-		EXIT_NOT_IMPLEMENTED(!VulkanBuildVertexInputLayout(*vertex_stage->input, &vertex_input_layout));
+		if (!VulkanBuildVertexInputLayout(*vertex_stage->input, &vertex_input_layout)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanBuildVertexInputLayout(*vertex_stage->input, &vertex_input_layout) condition ignored (continuing)\n"); }
 	}
 
 	VkPipelineVertexInputStateCreateInfo vertex_input_info {};
@@ -488,7 +488,7 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	input_assembly_info.primitiveRestartEnable = VK_FALSE;
 
 	const bool dx_clip_space = (!guest_vertex_stage || vertex_stage->dx_clip_space);
-	EXIT_NOT_IMPLEMENTED(!dx_clip_space && !context->depth_clip_control_supported);
+	if (!dx_clip_space && !context->depth_clip_control_supported) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !dx_clip_space && !context->depth_clip_control_supported condition ignored (continuing)\n"); }
 
 	VkPipelineViewportDepthClipControlCreateInfoEXT depth_clip_control {};
 	depth_clip_control.sType            = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT;
@@ -533,8 +533,8 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	VkPipelineSampleLocationsStateCreateInfoEXT sample_location_pipeline_state {};
 	if (VulkanSampleLocationsEnabled(request.sample_locations))
 	{
-		EXIT_NOT_IMPLEMENTED(
-		    !VulkanSampleLocationsPopulateInfo(request.sample_locations, sample_location_values, &sample_location_info));
+		if (
+		    !VulkanSampleLocationsPopulateInfo(request.sample_locations, sample_location_values, &sample_location_info)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanSampleLocationsPopulateInfo(request.sample_locations, sample_location_val condition ignored (continuing)\n"); }
 		sample_location_pipeline_state.sType                 = VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT;
 		sample_location_pipeline_state.sampleLocationsEnable = VK_TRUE;
 		sample_location_pipeline_state.sampleLocationsInfo   = sample_location_info;
@@ -605,8 +605,8 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	pipeline_layout_info.pPushConstantRanges    = (push_constant_range_count > 0 ? push_constant_ranges : nullptr);
 
 	VkPipelineLayout pipeline_layout = nullptr;
-	EXIT_NOT_IMPLEMENTED(vkCreatePipelineLayout(m_device, &pipeline_layout_info, nullptr, &pipeline_layout) != VK_SUCCESS ||
-	                     pipeline_layout == nullptr);
+	if (vkCreatePipelineLayout(m_device, &pipeline_layout_info, nullptr, &pipeline_layout) != VK_SUCCESS ||
+	                     pipeline_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vkCreatePipelineLayout(m_device, &pipeline_layout_info, nullptr, &pipeline_layou condition ignored (continuing)\n"); }
 
 	VkGraphicsPipelineCreateInfo pipeline_info {};
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -631,7 +631,7 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 		vkDestroyShaderModule(m_device, fragment_module, nullptr);
 	}
 	vkDestroyShaderModule(m_device, vertex_module, nullptr);
-	EXIT_NOT_IMPLEMENTED(result != VK_SUCCESS || pipeline == nullptr);
+	if (result != VK_SUCCESS || pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS || pipeline == nullptr condition ignored (continuing)\n"); }
 
 	RenderPipeline entry {};
 	entry.render_pass_id              = request.render_pass_id;
@@ -677,17 +677,17 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 DepthStencilCopyPreparedDraw DepthStencilCopyRenderer::PrepareDraw(GraphicContext* context, const DepthStencilCopyRequest& request)
 {
 	EXIT_IF(context == nullptr || request.render_pass == nullptr);
-	EXIT_NOT_IMPLEMENTED(request.extent.width == 0 || request.extent.height == 0);
-	EXIT_NOT_IMPLEMENTED(request.viewport.width <= 0.0f || request.viewport.height == 0.0f);
+	if (request.extent.width == 0 || request.extent.height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: request.extent.width == 0 || request.extent.height == 0 condition ignored (continuing)\n"); }
+	if (request.viewport.width <= 0.0f || request.viewport.height == 0.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: request.viewport.width <= 0.0f || request.viewport.height == 0.0f condition ignored (continuing)\n"); }
 	const bool expand_to_color = (request.mode == DepthStencilCopyMode::ExpandToColor);
-	EXIT_NOT_IMPLEMENTED(request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly);
-	EXIT_NOT_IMPLEMENTED(expand_to_color && request.source == nullptr);
-	EXIT_NOT_IMPLEMENTED(!expand_to_color && request.source != nullptr);
-	EXIT_NOT_IMPLEMENTED(expand_to_color && request.source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	if (request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: request.mode != DepthStencilCopyMode::ExpandToColor && request.mode != DepthStencilCopyMode::DepthStencilOnly condition ignored (continuing)\n"); }
+	if (expand_to_color && request.source == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: expand_to_color && request.source == nullptr condition ignored (continuing)\n"); }
+	if (!expand_to_color && request.source != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !expand_to_color && request.source != nullptr condition ignored (continuing)\n"); }
+	if (expand_to_color && request.source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: expand_to_color && request.source->layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL condition ignored (continuing)\n"); }
 	const auto sample_count = DepthStencilCopySampleCount(request.sample_locations);
 	const bool source_multisampled = (expand_to_color && request.source->samples != VK_SAMPLE_COUNT_1_BIT);
-	EXIT_NOT_IMPLEMENTED(expand_to_color && request.source->samples != request.sample_locations.sample_count);
-	EXIT_NOT_IMPLEMENTED(source_multisampled && !request.copy_centroid && request.copy_sample >= sample_count);
+	if (expand_to_color && request.source->samples != request.sample_locations.sample_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: expand_to_color && request.source->samples != request.sample_locations.sample_count condition ignored (continuing)\n"); }
+	if (source_multisampled && !request.copy_centroid && request.copy_sample >= sample_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_multisampled && !request.copy_centroid && request.copy_sample >= sample_count condition ignored (continuing)\n"); }
 
 	Initialize(context);
 	auto*      pipeline   = GetRenderPipeline(context, request);
@@ -741,7 +741,7 @@ void DepthStencilCopyRenderer::ReleaseSource(GraphicContext* context, uint64_t s
 	{
 		if (it->source_id == source_id)
 		{
-			EXIT_NOT_IMPLEMENTED(vkFreeDescriptorSets(m_device, m_descriptor_pool, 1, &it->descriptor) != VK_SUCCESS);
+			if (vkFreeDescriptorSets(m_device, m_descriptor_pool, 1, &it->descriptor) != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vkFreeDescriptorSets(m_device, m_descriptor_pool, 1, &it->descriptor) != VK_SUCCESS condition ignored (continuing)\n"); }
 			m_sources.erase(it);
 			return;
 		}

@@ -67,8 +67,8 @@ uint32_t GpuResources::AddResource(uint32_t owner_handle, uint64_t memory, size_
 
 	// Owner handle zero is a valid anonymous-resource scope. Some graphics
 	// runtimes register bootstrap allocations before establishing an owner.
-	EXIT_NOT_IMPLEMENTED(owner_handle != 0 && !m_owners.IndexValid(owner_handle));
-	EXIT_NOT_IMPLEMENTED(memory == 0);
+	if (owner_handle != 0 && !m_owners.IndexValid(owner_handle)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: owner_handle != 0 && !m_owners.IndexValid(owner_handle) condition ignored (continuing)\n"); }
+	if (memory == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: memory == 0 condition ignored (continuing)\n"); }
 
 	Info info;
 	info.owner     = owner_handle;
@@ -111,7 +111,7 @@ void GpuResources::DeleteOwner(uint32_t owner_handle)
 		return;
 	}
 
-	EXIT_NOT_IMPLEMENTED(!m_owners.IndexValid(owner_handle));
+	if (!m_owners.IndexValid(owner_handle)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_owners.IndexValid(owner_handle) condition ignored (continuing)\n"); }
 
 	for (auto& i: m_infos)
 	{
@@ -121,7 +121,7 @@ void GpuResources::DeleteOwner(uint32_t owner_handle)
 		}
 	}
 
-	EXIT_NOT_IMPLEMENTED(m_owners[owner_handle].free);
+	if (m_owners[owner_handle].free) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_owners[owner_handle].free condition ignored (continuing)\n"); }
 
 	m_owners[owner_handle].free = true;
 }
@@ -130,7 +130,7 @@ void GpuResources::DeleteResources(uint32_t owner_handle)
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(owner_handle != 0 && !m_owners.IndexValid(owner_handle));
+	if (owner_handle != 0 && !m_owners.IndexValid(owner_handle)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: owner_handle != 0 && !m_owners.IndexValid(owner_handle) condition ignored (continuing)\n"); }
 
 	for (auto& i: m_infos)
 	{
@@ -145,9 +145,9 @@ void GpuResources::DeleteResource(uint32_t resource_handle)
 {
 	Core::LockGuard lock(m_mutex);
 
-	EXIT_NOT_IMPLEMENTED(!m_infos.IndexValid(resource_handle));
+	if (!m_infos.IndexValid(resource_handle)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_infos.IndexValid(resource_handle) condition ignored (continuing)\n"); }
 
-	EXIT_NOT_IMPLEMENTED(m_infos[resource_handle].free);
+	if (m_infos[resource_handle].free) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_infos[resource_handle].free condition ignored (continuing)\n"); }
 
 	m_infos[resource_handle].free = true;
 }

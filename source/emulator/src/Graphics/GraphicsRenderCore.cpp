@@ -91,7 +91,7 @@ VulkanImage* RenderColorFirstActiveImage(const RenderColorInfo& color)
 VkSampleCountFlagBits decode_guest_sample_count(uint32_t encoded)
 {
 	VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
-	EXIT_NOT_IMPLEMENTED(encoded > 6u || !VulkanDecodeLog2SampleCount(static_cast<uint8_t>(encoded), &samples));
+	if (encoded > 6u || !VulkanDecodeLog2SampleCount(static_cast<uint8_t>(encoded), &samples)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: encoded > 6u || !VulkanDecodeLog2SampleCount(static_cast<uint8_t>(encoded), &samples) condition ignored (continuing)\n"); }
 	return samples;
 }
 
@@ -99,7 +99,7 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 {
 	const bool with_color = RenderColorHasActiveTarget(color);
 	const bool with_depth = depth.format != VK_FORMAT_UNDEFINED;
-	EXIT_NOT_IMPLEMENTED(!with_color && !with_depth);
+	if (!with_color && !with_depth) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_color && !with_depth condition ignored (continuing)\n"); }
 
 	const auto* first_color = RenderColorFirstConfiguredAttachment(color);
 	const auto  samples     = with_color ? first_color->samples : depth.samples;
@@ -107,7 +107,7 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 	{
 		if (RenderColorSlotConfigured(color, slot))
 		{
-			EXIT_NOT_IMPLEMENTED(color.attachment[slot].samples != samples);
+			if (color.attachment[slot].samples != samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: color.attachment[slot].samples != samples condition ignored (continuing)\n"); }
 		}
 	}
 	if (with_color && with_depth && samples != depth.samples)
@@ -119,7 +119,7 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 		             static_cast<uint32_t>(first_color->render_texture_format), static_cast<uint32_t>(samples), depth.depth_buffer_vaddr,
 		             depth.width, depth.height, static_cast<uint32_t>(depth.format), static_cast<uint32_t>(depth.samples),
 		             depth.depth_test_enable ? 1u : 0u, depth.depth_write_enable ? 1u : 0u);
-		EXIT_NOT_IMPLEMENTED(samples != depth.samples);
+		if (samples != depth.samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: samples != depth.samples condition ignored (continuing)\n"); }
 	}
 	return samples;
 }
@@ -127,7 +127,7 @@ VkSampleCountFlagBits resolve_render_attachment_sample_count(const RenderColorIn
 VkExtent2D IntersectFramebufferAttachmentExtent(VkExtent2D current, const VulkanImage* attachment)
 {
 	EXIT_IF(attachment == nullptr);
-	EXIT_NOT_IMPLEMENTED(attachment->extent.width == 0 || attachment->extent.height == 0);
+	if (attachment->extent.width == 0 || attachment->extent.height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment->extent.width == 0 || attachment->extent.height == 0 condition ignored (continuing)\n"); }
 	return {std::min(current.width, attachment->extent.width), std::min(current.height, attachment->extent.height)};
 }
 

@@ -147,7 +147,7 @@ static void upload_guest_contents(GraphicContext* ctx, VideoOutVulkanImage* vk_o
 
 	if (vk_obj->tiled && buffer_is_tiled(vk_obj->guest_vaddr, vk_obj->guest_size))
 	{
-		EXIT_NOT_IMPLEMENTED(vk_obj->guest_extent.width != vk_obj->guest_pitch);
+		if (vk_obj->guest_extent.width != vk_obj->guest_pitch) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->guest_extent.width != vk_obj->guest_pitch condition ignored (continuing)\n"); }
 		auto* temp_buf = new uint8_t[vk_obj->guest_size];
 		TileConvertTiledToLinear(temp_buf, reinterpret_cast<void*>(vk_obj->guest_vaddr), TileMode::VideoOutTiled,
 		                         vk_obj->guest_extent.width, vk_obj->guest_extent.height, vk_obj->neo);
@@ -316,7 +316,7 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	image_descriptor.usage          = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 	                                                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
 	const auto image_info           = VulkanBuildImageCreateInfo(image_descriptor);
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateDeviceImage(ctx, image_info, vk_obj, &vk_obj->memory));
+	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, &vk_obj->memory)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, &vk_obj->memory) condition ignored (continuing)\n"); }
 
 	KYTY_LOG_DEBUG("VideoOutBufferObject::Materialize()\n");
 	KYTY_LOG_DEBUG("\t memory size = %" PRIu64 "\n", vk_obj->memory.requirements.size);
@@ -326,7 +326,7 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 
 	upload_guest_contents(ctx, vk_obj);
 
-	EXIT_NOT_IMPLEMENTED(!VulkanCreateStandardColorImageViews(ctx, vk_obj));
+	if (!VulkanCreateStandardColorImageViews(ctx, vk_obj)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateStandardColorImageViews(ctx, vk_obj) condition ignored (continuing)\n"); }
 }
 
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
@@ -362,8 +362,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto height       = params[VideoOutBufferObject::PARAM_HEIGHT];
 
 	// EXIT_NOT_IMPLEMENTED(pixel_format != 0x80000000);
-	EXIT_NOT_IMPLEMENTED(width == 0);
-	EXIT_NOT_IMPLEMENTED(height == 0);
+	if (width == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0 condition ignored (continuing)\n"); }
+	if (height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: height == 0 condition ignored (continuing)\n"); }
 
 	auto* vk_obj = new VideoOutVulkanImage;
 

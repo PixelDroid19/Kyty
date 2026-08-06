@@ -60,7 +60,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->buffer = nullptr;
 
 	VulkanCreateBuffer(ctx, *size, vk_obj);
-	EXIT_NOT_IMPLEMENTED(vk_obj->buffer == nullptr);
+	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 

@@ -826,7 +826,7 @@ static void graphics_init_jmp_tables_sh_indirect()
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC2] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{ decode_compute_pgm_rsrc2(cp->GetShCtx()->CsRegs(), value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_RESOURCE_LIMITS] = [](KYTY_HW_SH_INDIRECT_ARGS)
-	{ EXIT_NOT_IMPLEMENTED(!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1)); };
+	{ if (!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1) condition ignored (continuing)\n"); } };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3]     = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->CsRegs().rsrc3 = value; };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_SHADER_CHKSUM] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{

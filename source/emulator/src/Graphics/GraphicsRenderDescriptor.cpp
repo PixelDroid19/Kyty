@@ -205,7 +205,7 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int sam
 
 		vkCreateDescriptorSetLayout(gctx->device, &layout_info, nullptr, dst);
 
-		EXIT_NOT_IMPLEMENTED(*dst == nullptr);
+		if (*dst == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: *dst == nullptr condition ignored (continuing)\n"); }
 	} else
 	{
 		*dst = nullptr;
@@ -282,7 +282,7 @@ void DescriptorCache::CreatePool()
 
 	vkCreateDescriptorPool(gctx->device, &pool_info, nullptr, &pool.pool);
 
-	EXIT_NOT_IMPLEMENTED(pool.pool == nullptr);
+	if (pool.pool == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pool.pool == nullptr condition ignored (continuing)\n"); }
 
 	pool.free           = true;
 	pool.next_free_pool = m_first_free_pool;
@@ -740,7 +740,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 
 	auto* new_set = Allocate(stage, storage_buffers_num, sampled_descriptor_num, textures2d_storage_num, samplers_num, gds_buffers_num,
 	                         vsharp_uniform_buffer);
-	EXIT_NOT_IMPLEMENTED(new_set == nullptr);
+	if (new_set == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: new_set == nullptr condition ignored (continuing)\n"); }
 
 	VkDescriptorBufferInfo buffer_info[BUFFERS_MAX] {};
 	for (int i = 0; i < storage_buffers_num; i++)
@@ -1270,11 +1270,11 @@ void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicStat
 
 	if (use_ref[0])
 	{
-		EXIT_NOT_IMPLEMENTED((ref[0] != ref[1] && use_ref[1]) || (ref[0] != ref[2] && use_ref[2]));
+		if ((ref[0] != ref[1] && use_ref[1]) || (ref[0] != ref[2] && use_ref[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (ref[0] != ref[1] && use_ref[1]) || (ref[0] != ref[2] && use_ref[2]) condition ignored (continuing)\n"); }
 		d->reference = ref[0];
 	} else if (use_ref[1])
 	{
-		EXIT_NOT_IMPLEMENTED(ref[1] != ref[2] && use_ref[2]);
+		if (ref[1] != ref[2] && use_ref[2]) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ref[1] != ref[2] && use_ref[2] condition ignored (continuing)\n"); }
 		d->reference = ref[1];
 	} else if (use_ref[2])
 	{

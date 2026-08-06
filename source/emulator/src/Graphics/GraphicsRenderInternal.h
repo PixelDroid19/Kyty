@@ -174,7 +174,7 @@ struct VulkanPipeline
 class PipelineCache
 {
 public:
-	PipelineCache() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	PipelineCache() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~PipelineCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(PipelineCache);
 
@@ -247,7 +247,7 @@ public:
 	                                            ShaderSamplerResources::RES_MAX * 4 + 4 + ShaderDirectSgprsResources::SGPRS_MAX;
 	static constexpr int GDS_BUFFER_MAX       = 1;
 
-	DescriptorCache() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	DescriptorCache() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~DescriptorCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(DescriptorCache);
 
@@ -341,7 +341,7 @@ private:
 class SamplerCache
 {
 public:
-	SamplerCache() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	SamplerCache() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~SamplerCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
@@ -383,7 +383,7 @@ enum class DepthStencilAttachmentAccess
 class FramebufferCache
 {
 public:
-	FramebufferCache() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	FramebufferCache() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~FramebufferCache() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FramebufferCache);
 
@@ -416,7 +416,7 @@ private:
 class GdsBuffer
 {
 public:
-	GdsBuffer() { EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread()); }
+	GdsBuffer() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
 	virtual ~GdsBuffer() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(GdsBuffer);
 
@@ -440,10 +440,10 @@ public:
 	RenderContext()
 	    : m_pipeline_cache(new PipelineCache), m_descriptor_cache(new DescriptorCache), m_framebuffer_cache(new FramebufferCache),
 	      m_sampler_cache(new SamplerCache),
-	      m_shader_translation_cache(new ShaderTranslationCache(2048, &SpirvBinaryCacheDefaultStore(), Config::ShaderValidationEnabled())),
+	      m_shader_translation_cache(new ShaderTranslationCache(16384, &SpirvBinaryCacheDefaultStore(), Config::ShaderValidationEnabled())),
 	      m_gds_buffer(new GdsBuffer)
 	{
-		EXIT_NOT_IMPLEMENTED(!Core::Thread::IsMainThread());
+		if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
 	}
 	virtual ~RenderContext() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(RenderContext);

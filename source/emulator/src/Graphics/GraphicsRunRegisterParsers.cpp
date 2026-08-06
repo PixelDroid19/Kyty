@@ -19,8 +19,8 @@ namespace Kyty::Libs::Graphics {
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_aa_config)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_AA_CONFIG);
+	if (cmd_id != 0xc0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SC_AA_CONFIG) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SC_AA_CONFIG condition ignored (continuing)\n"); }
 
 	trace_aa_register_write("direct", "PA_SC_AA_CONFIG", buffer[0]);
 	HW::AaConfig r;
@@ -37,8 +37,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_aa_config)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_aa_sample_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0106900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0);
+	if (cmd_id != 0xc0106900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0106900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SC_AA_SAMPLE_LOCS_PIXEL_X0Y0_0 condition ignored (continuing)\n"); }
 
 	uint32_t count = 1;
 
@@ -63,8 +63,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_aa_sample_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_blend_color)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0046900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::CB_BLEND_RED);
+	if (cmd_id != 0xc0046900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0046900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::CB_BLEND_RED) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::CB_BLEND_RED condition ignored (continuing)\n"); }
 
 	HW::BlendColor r;
 
@@ -80,7 +80,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_blend_color)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_blend_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
 
 	uint32_t param = (cmd_offset - Pm4::CB_BLEND0_CONTROL) / 1;
 
@@ -91,8 +91,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_blend_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_clip_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_CL_CLIP_CNTL);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_CL_CLIP_CNTL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_CL_CLIP_CNTL condition ignored (continuing)\n"); }
 
 	HW::ClipControl r;
 
@@ -129,8 +129,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_clip_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::CB_COLOR_CONTROL);
+	if (cmd_id != 0xc0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::CB_COLOR_CONTROL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::CB_COLOR_CONTROL condition ignored (continuing)\n"); }
 
 	trace_aa_register_write("direct", "CB_COLOR_CONTROL", buffer[0]);
 	HW::ColorControl r;
@@ -145,7 +145,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_color_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_color_info)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0016900);
+	if (cmd_id != 0xc0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0016900 condition ignored (continuing)\n"); }
 
 	uint32_t param = (cmd_offset - Pm4::CB_COLOR0_INFO) / 15;
 	cp->GetCtx()->SetColorInfo(param, State::DecodeColorInfo(buffer[0], Config::IsNextGen()));
@@ -155,8 +155,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_color_info)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_clear)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_DEPTH_CLEAR);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_DEPTH_CLEAR) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_DEPTH_CLEAR condition ignored (continuing)\n"); }
 
 	cp->GetCtx()->SetDepthClearValue(*reinterpret_cast<const float*>(buffer));
 
@@ -165,8 +165,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_clear)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_DEPTH_CONTROL);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_DEPTH_CONTROL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_DEPTH_CONTROL condition ignored (continuing)\n"); }
 
 	State::SetDepthControl(*cp->GetCtx(), buffer[0]);
 
@@ -175,7 +175,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_depth_render_target)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_Z_INFO);
+	if (cmd_offset != Pm4::DB_Z_INFO) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_Z_INFO condition ignored (continuing)\n"); }
 
 	uint32_t count = 1;
 
@@ -251,8 +251,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_depth_render_target)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_eqaa_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_EQAA);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_EQAA) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_EQAA condition ignored (continuing)\n"); }
 
 	trace_aa_register_write("direct", "DB_EQAA", buffer[0]);
 	HW::EqaaControl r;
@@ -273,8 +273,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_eqaa_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_generic_scissor)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0026900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_GENERIC_SCISSOR_TL);
+	if (cmd_id != 0xC0026900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0026900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SC_GENERIC_SCISSOR_TL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SC_GENERIC_SCISSOR_TL condition ignored (continuing)\n"); }
 
 	State::SetGenericScissorTl(*cp->GetCtx(), buffer[0]);
 	State::SetGenericScissorBr(*cp->GetCtx(), buffer[1]);
@@ -284,8 +284,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_generic_scissor)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_guard_bands)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0046900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_CL_GB_VERT_CLIP_ADJ);
+	if (cmd_id != 0xC0046900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0046900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_CL_GB_VERT_CLIP_ADJ) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_CL_GB_VERT_CLIP_ADJ condition ignored (continuing)\n"); }
 
 	auto vert_clip    = *reinterpret_cast<const float*>(&buffer[0]); // PA_CL_GB_VERT_CLIP_ADJ
 	auto vert_discard = *reinterpret_cast<const float*>(&buffer[1]); // PA_CL_GB_VERT_DISC_ADJ
@@ -299,8 +299,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_guard_bands)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_hardware_screen_offset)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SU_HARDWARE_SCREEN_OFFSET);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SU_HARDWARE_SCREEN_OFFSET) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SU_HARDWARE_SCREEN_OFFSET condition ignored (continuing)\n"); }
 
 	// uint32_t x = static_cast<uint16_t>(buffer[0] & 0xffffu);
 	// uint32_t y = static_cast<uint16_t>((buffer[0] >> 16u) & 0xffffu);
@@ -315,16 +315,16 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_hardware_screen_offset)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_window_offset)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_WINDOW_OFFSET);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SC_WINDOW_OFFSET) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SC_WINDOW_OFFSET condition ignored (continuing)\n"); }
 	State::SetWindowOffset(*cp->GetCtx(), buffer[0]);
 	return 1;
 }
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_line_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SU_LINE_CNTL);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SU_LINE_CNTL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SU_LINE_CNTL condition ignored (continuing)\n"); }
 
 	auto line_width = KYTY_PM4_GET(buffer[0], PA_SU_LINE_CNTL, WIDTH);
 
@@ -341,8 +341,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_line_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_mode_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SU_SC_MODE_CNTL);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SU_SC_MODE_CNTL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SU_SC_MODE_CNTL condition ignored (continuing)\n"); }
 
 	State::SetModeControl(*cp->GetCtx(), buffer[0]);
 
@@ -352,8 +352,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_mode_control)
 KYTY_HW_CTX_PARSER(hw_ctx_set_polygon_offset)
 {
 	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
-	EXIT_NOT_IMPLEMENTED(count == 0);
-	EXIT_NOT_IMPLEMENTED(cmd_offset < Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL || cmd_offset + count > Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET + 1u);
+	if (count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: count == 0 condition ignored (continuing)\n"); }
+	if (cmd_offset < Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL || cmd_offset + count > Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET + 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset < Pm4::PA_SU_POLY_OFFSET_DB_FMT_CNTL || cmd_offset + count > Pm4::PA_SU_POLY_OFFSET_BACK_OFFSET + 1u condition ignored (continuing)\n"); }
 
 	for (uint32_t i = 0; i < count; i++)
 	{
@@ -365,12 +365,12 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_polygon_offset)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_ps_input)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::SPI_PS_INPUT_CNTL_0);
+	if (cmd_offset != Pm4::SPI_PS_INPUT_CNTL_0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::SPI_PS_INPUT_CNTL_0 condition ignored (continuing)\n"); }
 
 	uint32_t count = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(count == 0);
-	EXIT_NOT_IMPLEMENTED(count > 32);
+	if (count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: count == 0 condition ignored (continuing)\n"); }
+	if (count > 32) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: count > 32 condition ignored (continuing)\n"); }
 
 	static const bool dump_ps_input_writes = std::getenv("KYTY_DUMP_PS_INPUT_WRITES") != nullptr;
 	for (uint32_t i = 0; i < count; i++)
@@ -387,8 +387,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_ps_input)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_render_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_RENDER_CONTROL);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_RENDER_CONTROL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_RENDER_CONTROL condition ignored (continuing)\n"); }
 
 	State::SetRenderControl(*cp->GetCtx(), buffer[0]);
 
@@ -397,7 +397,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_render_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_render_target)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC00E6900 && cmd_id != 0xC00B6900);
+	if (cmd_id != 0xC00E6900 && cmd_id != 0xC00B6900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC00E6900 && cmd_id != 0xC00B6900 condition ignored (continuing)\n"); }
 
 	uint32_t slot = (cmd_offset - Pm4::CB_COLOR0_BASE) / 15;
 
@@ -510,8 +510,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_render_target)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_render_target_mask)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::CB_TARGET_MASK);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::CB_TARGET_MASK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::CB_TARGET_MASK condition ignored (continuing)\n"); }
 
 	cp->GetCtx()->SetRenderTargetMask(*buffer);
 
@@ -520,8 +520,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_render_target_mask)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_scan_mode_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_MODE_CNTL_0);
+	if (cmd_id != 0xc0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SC_MODE_CNTL_0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SC_MODE_CNTL_0 condition ignored (continuing)\n"); }
 
 	trace_aa_register_write("direct", "PA_SC_MODE_CNTL_0", buffer[0]);
 	HW::ScanModeControl r;
@@ -537,8 +537,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_scan_mode_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_screen_scissor)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0026900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_SC_SCREEN_SCISSOR_TL);
+	if (cmd_id != 0xC0026900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0026900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_SC_SCREEN_SCISSOR_TL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_SC_SCREEN_SCISSOR_TL condition ignored (continuing)\n"); }
 
 	int left   = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(buffer[0], PA_SC_SCREEN_SCISSOR_TL, TL_X)));
 	int top    = static_cast<int16_t>(static_cast<uint16_t>(KYTY_PM4_GET(buffer[0], PA_SC_SCREEN_SCISSOR_TL, TL_Y)));
@@ -552,8 +552,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_screen_scissor)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_shader_stages)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::VGT_SHADER_STAGES_EN);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::VGT_SHADER_STAGES_EN) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::VGT_SHADER_STAGES_EN condition ignored (continuing)\n"); }
 
 	cp->GetCtx()->SetShaderStages(buffer[0]);
 
@@ -562,8 +562,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_shader_stages)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_clear)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_STENCIL_CLEAR);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_STENCIL_CLEAR) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_STENCIL_CLEAR condition ignored (continuing)\n"); }
 
 	cp->GetCtx()->SetStencilClearValue(KYTY_PM4_GET(buffer[0], DB_STENCIL_CLEAR, CLEAR));
 
@@ -572,8 +572,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_clear)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_STENCIL_CONTROL);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_STENCIL_CONTROL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_STENCIL_CONTROL condition ignored (continuing)\n"); }
 
 	State::SetStencilControl(*cp->GetCtx(), buffer[0]);
 
@@ -582,8 +582,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_info)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_STENCIL_INFO);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_STENCIL_INFO) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_STENCIL_INFO condition ignored (continuing)\n"); }
 	cp->GetCtx()->SetDepthStencilInfo(State::DecodeDepthStencilInfo(buffer[0]));
 
 	return 1;
@@ -591,8 +591,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_info)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_mask)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0026900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::DB_STENCILREFMASK);
+	if (cmd_id != 0xc0026900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0026900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::DB_STENCILREFMASK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::DB_STENCILREFMASK condition ignored (continuing)\n"); }
 
 	State::SetStencilRefMask(*cp->GetCtx(), buffer[0]);
 	State::SetStencilRefMaskBf(*cp->GetCtx(), buffer[1]);
@@ -603,13 +603,13 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_stencil_mask)
 KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_scale_offset)
 {
 	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
-	EXIT_NOT_IMPLEMENTED(count == 0 || count > 6);
-	EXIT_NOT_IMPLEMENTED(cmd_offset < Pm4::PA_CL_VPORT_XSCALE || cmd_offset > Pm4::PA_CL_VPORT_ZOFFSET_15);
+	if (count == 0 || count > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: count == 0 || count > 6 condition ignored (continuing)\n"); }
+	if (cmd_offset < Pm4::PA_CL_VPORT_XSCALE || cmd_offset > Pm4::PA_CL_VPORT_ZOFFSET_15) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset < Pm4::PA_CL_VPORT_XSCALE || cmd_offset > Pm4::PA_CL_VPORT_ZOFFSET_15 condition ignored (continuing)\n"); }
 
 	const uint32_t relative  = cmd_offset - Pm4::PA_CL_VPORT_XSCALE;
 	const uint32_t viewport  = relative / 6;
 	const uint32_t component = relative % 6;
-	EXIT_NOT_IMPLEMENTED(component + count > 6);
+	if (component + count > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: component + count > 6 condition ignored (continuing)\n"); }
 
 	for (uint32_t i = 0; i < count; i++)
 	{
@@ -632,7 +632,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_scale_offset)
 KYTY_HW_CTX_PARSER(hw_ctx_ignore)
 {
 	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
-	EXIT_NOT_IMPLEMENTED(count == 0);
+	if (count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: count == 0 condition ignored (continuing)\n"); }
 	(void)cp;
 	(void)cmd_offset;
 	(void)buffer;
@@ -641,8 +641,8 @@ KYTY_HW_CTX_PARSER(hw_ctx_ignore)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_transform_control)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0016900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::PA_CL_VTE_CNTL);
+	if (cmd_id != 0xC0016900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0016900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::PA_CL_VTE_CNTL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::PA_CL_VTE_CNTL condition ignored (continuing)\n"); }
 
 	cp->GetCtx()->SetViewportTransformControl(*buffer);
 
@@ -651,11 +651,11 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_transform_control)
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_z)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0026900);
+	if (cmd_id != 0xC0026900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0026900 condition ignored (continuing)\n"); }
 
 	uint32_t param = (cmd_offset - Pm4::PA_SC_VPORT_ZMIN_0) / 2;
 
-	EXIT_NOT_IMPLEMENTED(param != 0);
+	if (param != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: param != 0 condition ignored (continuing)\n"); }
 
 	cp->GetCtx()->SetViewportZ(param, *reinterpret_cast<const float*>(buffer), *reinterpret_cast<const float*>(buffer + 1));
 
@@ -664,7 +664,7 @@ KYTY_HW_CTX_PARSER(hw_ctx_set_viewport_z)
 
 KYTY_HW_SH_PARSER(hw_sh_set_cs_shader)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC017101C);
+	if (cmd_id != 0xC017101C) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC017101C condition ignored (continuing)\n"); }
 
 	auto shader_modifier = buffer[0];
 
@@ -686,7 +686,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_shader)
 KYTY_HW_SH_PARSER(hw_sh_set_cs_pgm)
 {
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::COMPUTE_PGM_LO || reg_num != 2);
+	if (cmd_offset != Pm4::COMPUTE_PGM_LO || reg_num != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::COMPUTE_PGM_LO || reg_num != 2 condition ignored (continuing)\n"); }
 
 	auto& r     = cp->GetShCtx()->CsRegs();
 	r.data_addr = (static_cast<uint64_t>(buffer[0]) << 8u) | (static_cast<uint64_t>(buffer[1]) << 40u);
@@ -744,20 +744,20 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_num_thread)
 KYTY_HW_SH_PARSER(hw_sh_set_cs_resource_limits)
 {
 	const auto reg_num = (cmd_id >> 16u) & 0x3fffu;
-	EXIT_NOT_IMPLEMENTED(!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, buffer, reg_num));
+	if (!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, buffer, reg_num)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, buffer, reg_num) condition ignored (continuing)\n"); }
 
 	return reg_num;
 }
 
 KYTY_HW_SH_PARSER(hw_sh_set_cs_user_sgpr)
 {
-	EXIT_NOT_IMPLEMENTED(!(cmd_offset >= Pm4::COMPUTE_USER_DATA_0 && cmd_offset <= Pm4::COMPUTE_USER_DATA_15));
+	if (!(cmd_offset >= Pm4::COMPUTE_USER_DATA_0 && cmd_offset <= Pm4::COMPUTE_USER_DATA_15)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(cmd_offset >= Pm4::COMPUTE_USER_DATA_0 && cmd_offset <= Pm4::COMPUTE_USER_DATA_15) condition ignored (continuing)\n"); }
 
 	uint32_t slot = (cmd_offset - Pm4::COMPUTE_USER_DATA_0) / 1;
 
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(!HW::UserSgprInfo::WriteRangeValid(slot, reg_num));
+	if (!HW::UserSgprInfo::WriteRangeValid(slot, reg_num)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !HW::UserSgprInfo::WriteRangeValid(slot, reg_num) condition ignored (continuing)\n"); }
 
 	for (uint32_t i = 0; i < reg_num; i++)
 	{
@@ -770,7 +770,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_user_sgpr)
 
 KYTY_HW_SH_PARSER(hw_sh_set_ps_embedded)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0261038);
+	if (cmd_id != 0xc0261038) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0261038 condition ignored (continuing)\n"); }
 
 	auto id = buffer[0];
 
@@ -781,7 +781,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_ps_embedded)
 
 KYTY_HW_SH_PARSER(hw_sh_set_ps_shader)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0261008);
+	if (cmd_id != 0xC0261008) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0261008 condition ignored (continuing)\n"); }
 
 	// HW::PsStageRegisters r {};
 	HW::PsShaderResource1 r1;
@@ -854,13 +854,13 @@ KYTY_HW_SH_PARSER(hw_sh_set_ps_shader)
 
 KYTY_HW_SH_PARSER(hw_sh_set_ps_user_sgpr)
 {
-	EXIT_NOT_IMPLEMENTED(!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_PS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_PS_31));
+	if (!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_PS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_PS_31)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_PS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_PS_31) condition ignored (continuing)\n"); }
 
 	uint32_t slot = (cmd_offset - Pm4::SPI_SHADER_USER_DATA_PS_0) / 1;
 
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(!HW::UserSgprInfo::WriteRangeValid(slot, reg_num));
+	if (!HW::UserSgprInfo::WriteRangeValid(slot, reg_num)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !HW::UserSgprInfo::WriteRangeValid(slot, reg_num) condition ignored (continuing)\n"); }
 
 	for (uint32_t i = 0; i < reg_num; i++)
 	{
@@ -873,7 +873,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_ps_user_sgpr)
 
 KYTY_HW_SH_PARSER(hw_sh_set_vs_embedded)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc01b1034);
+	if (cmd_id != 0xc01b1034) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc01b1034 condition ignored (continuing)\n"); }
 
 	auto shader_modifier = buffer[0];
 	auto id              = buffer[1];
@@ -885,7 +885,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_embedded)
 
 KYTY_HW_SH_PARSER(hw_sh_set_vs_shader)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC01B1004);
+	if (cmd_id != 0xC01B1004) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC01B1004 condition ignored (continuing)\n"); }
 
 	auto shader_modifier = buffer[0];
 
@@ -938,13 +938,13 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_shader)
 
 KYTY_HW_SH_PARSER(hw_sh_set_vs_user_sgpr)
 {
-	EXIT_NOT_IMPLEMENTED(!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_VS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_VS_15));
+	if (!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_VS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_VS_15)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_VS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_VS_15) condition ignored (continuing)\n"); }
 
 	uint32_t slot = (cmd_offset - Pm4::SPI_SHADER_USER_DATA_VS_0) / 1;
 
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(!HW::UserSgprInfo::WriteRangeValid(slot, reg_num));
+	if (!HW::UserSgprInfo::WriteRangeValid(slot, reg_num)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !HW::UserSgprInfo::WriteRangeValid(slot, reg_num) condition ignored (continuing)\n"); }
 
 	for (uint32_t i = 0; i < reg_num; i++)
 	{
@@ -957,13 +957,13 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_user_sgpr)
 
 KYTY_HW_SH_PARSER(hw_sh_set_gs_user_sgpr)
 {
-	EXIT_NOT_IMPLEMENTED(!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_GS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_GS_15));
+	if (!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_GS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_GS_15)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_GS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_GS_15) condition ignored (continuing)\n"); }
 
 	uint32_t slot = (cmd_offset - Pm4::SPI_SHADER_USER_DATA_GS_0) / 1;
 
 	auto reg_num = (cmd_id >> 16u) & 0x3fffu;
 
-	EXIT_NOT_IMPLEMENTED(!HW::UserSgprInfo::WriteRangeValid(slot, reg_num));
+	if (!HW::UserSgprInfo::WriteRangeValid(slot, reg_num)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !HW::UserSgprInfo::WriteRangeValid(slot, reg_num) condition ignored (continuing)\n"); }
 
 	for (uint32_t i = 0; i < reg_num; i++)
 	{
@@ -976,7 +976,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_gs_user_sgpr)
 
 KYTY_HW_SH_PARSER(hw_sh_update_ps_shader)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc0261040);
+	if (cmd_id != 0xc0261040) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0261040 condition ignored (continuing)\n"); }
 
 	HW::PsShaderResource1 r1;
 	HW::PsShaderResource2 r2;
@@ -1014,7 +1014,7 @@ KYTY_HW_SH_PARSER(hw_sh_update_ps_shader)
 
 KYTY_HW_SH_PARSER(hw_sh_update_vs_shader)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xc01b103c);
+	if (cmd_id != 0xc01b103c) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc01b103c condition ignored (continuing)\n"); }
 
 	auto shader_modifier = buffer[0];
 
@@ -1051,8 +1051,8 @@ KYTY_HW_SH_PARSER(hw_sh_update_vs_shader)
 
 KYTY_HW_UC_PARSER(hw_uc_set_primitive_type)
 {
-	EXIT_NOT_IMPLEMENTED(cmd_id != 0xC0017900);
-	EXIT_NOT_IMPLEMENTED(cmd_offset != Pm4::VGT_PRIMITIVE_TYPE);
+	if (cmd_id != 0xC0017900) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0017900 condition ignored (continuing)\n"); }
+	if (cmd_offset != Pm4::VGT_PRIMITIVE_TYPE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_offset != Pm4::VGT_PRIMITIVE_TYPE condition ignored (continuing)\n"); }
 
 	uint32_t prim_type = KYTY_PM4_GET(buffer[0], VGT_PRIMITIVE_TYPE, PRIM_TYPE);
 
