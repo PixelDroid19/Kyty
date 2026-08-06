@@ -531,4 +531,9 @@ TEST(EmulatorGpuSubmissionCoordinator, TransientLabelsLeaveNoOwnershipAfterExact
 	}
 }
 
+TEST(EmulatorGpuSubmissionCoordinator, CommandProcessorSubmissionSlotCountIsEight)
+{
+	EXPECT_EQ(CommandProcessorSubmissionSlots::SlotCount, 8u);
+}
+
 UT_END();
