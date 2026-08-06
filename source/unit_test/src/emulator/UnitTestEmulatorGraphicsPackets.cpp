@@ -4464,6 +4464,64 @@ TEST(EmulatorGraphicsPackets, ParsesExpTarget0x26AsParam6)
 	EXPECT_EQ(0x20 + 6, 0x26);
 }
 
+TEST(EmulatorGraphicsPackets, ParsesExpTarget0x27AsParam7)
+{
+	const uint32_t word0    = (0x3eu << 26u) | (0x27u << 4u) | 0xfu;
+	const uint32_t word1    = 0x03020100u;
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::Exp);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3);
+	EXPECT_EQ(inst.src_num, 4);
+	EXPECT_EQ(0x20 + 7, 0x27);
+}
+
+TEST(EmulatorGraphicsPackets, Param7ExportGeneratesStoreAndInterface)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction export_param {};
+	export_param.type    = ShaderInstructionType::Exp;
+	export_param.format  = ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3;
+	export_param.src_num = 4;
+	for (int component = 0; component < 4; component++)
+	{
+		export_param.src[component].type        = ShaderOperandType::Vgpr;
+		export_param.src[component].register_id = component;
+		export_param.src[component].size        = 1;
+	}
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(export_param);
+
+	ShaderVertexInputInfo input {};
+	const auto            source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+
+	EXPECT_NE(source.FindIndex("%param7"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpDecorate %param7 Location 7"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%param7 = OpVariable %_ptr_Output_v4float Output"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %param7"), Core::STRING8_INVALID_INDEX);
+}
+
 // Captured post-detile PS: user_sgpr_num=30, eud=12, type5@0x1c, samplers at
 // 0x18 (direct), 0x20 and 0x24 (EUD). EUD virtual base is user_sgpr_num
 // rounded up to a multiple of 4 (30 → 32); api index uses the extended

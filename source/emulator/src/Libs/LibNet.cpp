@@ -9,6 +9,9 @@
 
 #include <cinttypes>
 #include <cstddef>
+#include <cstring>
+#include <algorithm>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -606,12 +609,31 @@ constexpr int HTTP2_ERROR_BEFORE_SEND  = static_cast<int>(0x817b1065u);
 constexpr int HTTP2_ERROR_TIMEOUT      = static_cast<int>(0x817b1068u);
 constexpr int HTTP2_ERROR_NULL_POINTER = static_cast<int>(0x817b1225u);
 
+struct Http2Options
+{
+	bool     auth_enabled {};
+	bool     auto_redirect {};
+	bool     inflate_gzip {};
+	uint32_t ssl_options {};
+	uint32_t resolve_timeout_us {};
+	uint32_t connect_timeout_us {};
+	uint32_t connection_wait_timeout_us {};
+	uint32_t send_timeout_us {};
+	uint32_t recv_timeout_us {};
+	uint32_t timeout_us {};
+	void*    ssl_callback {};
+	void*    ssl_callback_arg {};
+	void*    redirect_callback {};
+	void*    redirect_callback_arg {};
+};
+
 struct Http2Context
 {
 	int    libnet_mem_id {};
 	int    libssl_ctx_id {};
 	size_t pool_size {};
 	int    max_concurrent_requests {};
+	Http2Options options {};
 };
 
 struct Http2Template
@@ -620,6 +642,7 @@ struct Http2Template
 	std::string user_agent;
 	int         http_version {};
 	bool        auto_proxy_configuration {};
+	Http2Options options {};
 };
 
 struct Http2Request
@@ -631,6 +654,12 @@ struct Http2Request
 	int         send_result = HTTP2_ERROR_BEFORE_SEND;
 	int         async_result = HTTP2_ERROR_BEFORE_SEND;
 	int         async_event {};
+	int         status_code {};
+	bool        aborted {};
+	std::string response_headers;
+	std::vector<uint8_t> response_body;
+	size_t      read_offset {};
+	Http2Options options {};
 	struct Header
 	{
 		std::string name;
@@ -661,6 +690,23 @@ struct Http2Registry
 };
 
 Http2Registry g_http2_registry;
+
+static Http2Options* FindOptions(int id)
+{
+	if (auto request = g_http2_registry.requests.find(id); request != g_http2_registry.requests.end())
+	{
+		return &request->second.options;
+	}
+	if (auto request_template = g_http2_registry.templates.find(id); request_template != g_http2_registry.templates.end())
+	{
+		return &request_template->second.options;
+	}
+	if (auto context = g_http2_registry.contexts.find(id); context != g_http2_registry.contexts.end())
+	{
+		return &context->second.options;
+	}
+	return nullptr;
+}
 
 } // namespace
 
@@ -781,6 +827,199 @@ static int KYTY_SYSV_ABI Http2SetRequestContentLength(int request_id, uint64_t c
 	return 0;
 }
 
+static int KYTY_SYSV_ABI Http2SetAuthEnabled(int id, int enabled)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t id      = %d\n", id);
+	KYTY_LOG_DEBUG("\t enabled = %d\n", enabled);
+
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+
+	options->auth_enabled = enabled != 0;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2CookieFlush()
+{
+	PRINT_NAME();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2DeleteTemplate(int template_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	if (g_http2_registry.templates.find(template_id) == g_http2_registry.templates.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	for (auto request = g_http2_registry.requests.begin(); request != g_http2_registry.requests.end();)
+	{
+		request = request->second.template_id == template_id ? g_http2_registry.requests.erase(request) : std::next(request);
+	}
+	g_http2_registry.templates.erase(template_id);
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2Term(int context_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	if (g_http2_registry.contexts.find(context_id) == g_http2_registry.contexts.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	for (auto request = g_http2_registry.requests.begin(); request != g_http2_registry.requests.end();)
+	{
+		const auto template_id = request->second.template_id;
+		const auto template_it = g_http2_registry.templates.find(template_id);
+		request = template_it != g_http2_registry.templates.end() && template_it->second.context_id == context_id
+		              ? g_http2_registry.requests.erase(request)
+		              : std::next(request);
+	}
+	for (auto request_template = g_http2_registry.templates.begin(); request_template != g_http2_registry.templates.end();)
+	{
+		request_template = request_template->second.context_id == context_id
+		                      ? g_http2_registry.templates.erase(request_template)
+		                      : std::next(request_template);
+	}
+	g_http2_registry.contexts.erase(context_id);
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SetAutoRedirect(int id, int enabled)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	options->auto_redirect = enabled != 0;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SetInflateGzipEnabled(int id, int enabled)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	options->inflate_gzip = enabled != 0;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SslEnableOption(int id, uint32_t flags)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	options->ssl_options |= flags;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SslDisableOption(int id, uint32_t flags)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	options->ssl_options &= ~flags;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SetRedirectCallback(int id, void* callback, void* callback_arg)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	options->redirect_callback     = callback;
+	options->redirect_callback_arg = callback_arg;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SetSslCallback(int id, void* callback, void* callback_arg)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	options->ssl_callback     = callback;
+	options->ssl_callback_arg = callback_arg;
+	return 0;
+}
+
+static int SetHttp2Timeout(int id, uint32_t value, uint32_t Http2Options::*field)
+{
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto*           options = FindOptions(id);
+	if (options == nullptr)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	options->*field = value;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2SetConnectTimeout(int id, uint32_t value)
+{
+	PRINT_NAME();
+	return SetHttp2Timeout(id, value, &Http2Options::connect_timeout_us);
+}
+
+static int KYTY_SYSV_ABI Http2SetConnectionWaitTimeout(int id, uint32_t value)
+{
+	PRINT_NAME();
+	return SetHttp2Timeout(id, value, &Http2Options::connection_wait_timeout_us);
+}
+
+static int KYTY_SYSV_ABI Http2SetResolveTimeout(int id, uint32_t value)
+{
+	PRINT_NAME();
+	return SetHttp2Timeout(id, value, &Http2Options::resolve_timeout_us);
+}
+
+static int KYTY_SYSV_ABI Http2SetTimeout(int id, uint32_t value)
+{
+	PRINT_NAME();
+	return SetHttp2Timeout(id, value, &Http2Options::timeout_us);
+}
+
+static int KYTY_SYSV_ABI Http2SetSendTimeout(int id, uint32_t value)
+{
+	PRINT_NAME();
+	return SetHttp2Timeout(id, value, &Http2Options::send_timeout_us);
+}
+
+static int KYTY_SYSV_ABI Http2SetRecvTimeout(int id, uint32_t value)
+{
+	PRINT_NAME();
+	return SetHttp2Timeout(id, value, &Http2Options::recv_timeout_us);
+}
+
 static int KYTY_SYSV_ABI Http2SendRequest(int request_id, const void* post_data, size_t size)
 {
 	PRINT_NAME();
@@ -856,16 +1095,193 @@ static int KYTY_SYSV_ABI Http2WaitAsync(int request_id, Http2AsyncResult* result
 	return 0;
 }
 
+static int KYTY_SYSV_ABI Http2AbortRequest(int request_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	request->second.aborted      = true;
+	request->second.send_result  = HTTP2_ERROR_TIMEOUT;
+	request->second.async_result = HTTP2_ERROR_TIMEOUT;
+	request->second.async_event  = 1;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2GetStatusCode(int request_id, int* status_code)
+{
+	if (status_code == nullptr)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+	*status_code = 0;
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	if (request->second.send_result != 0)
+	{
+		return request->second.send_result;
+	}
+	*status_code = request->second.status_code;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2GetResponseContentLength(int request_id, int* result, uint64_t* content_length)
+{
+	if (result == nullptr || content_length == nullptr)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+	*result         = 0;
+	*content_length = 0;
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	if (request->second.send_result != 0)
+	{
+		*result = -1;
+		return request->second.send_result;
+	}
+	*content_length = request->second.response_body.size();
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2GetAllResponseHeaders(int request_id, char** headers, size_t* header_size)
+{
+	if (headers == nullptr || header_size == nullptr)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+	*headers     = nullptr;
+	*header_size = 0;
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	if (request->second.send_result != 0)
+	{
+		return request->second.send_result;
+	}
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2ReadData(int request_id, void* data, size_t size)
+{
+	if (data == nullptr && size != 0u)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	if (request->second.send_result != 0)
+	{
+		return request->second.send_result;
+	}
+	const auto remaining = request->second.read_offset < request->second.response_body.size()
+	                           ? request->second.response_body.size() - request->second.read_offset
+	                           : 0;
+	const auto to_copy = std::min(size, remaining);
+	if (to_copy != 0)
+	{
+		std::memcpy(data, request->second.response_body.data() + request->second.read_offset, to_copy);
+		request->second.read_offset += to_copy;
+	}
+	return static_cast<int>(to_copy);
+}
+
+static int KYTY_SYSV_ABI Http2ReadDataAsync(int request_id, void* data, size_t size, void* kqueue_option, void* option)
+{
+	(void) kqueue_option;
+	(void) option;
+	if (data == nullptr && size != 0u)
+	{
+		return HTTP2_ERROR_NULL_POINTER;
+	}
+	std::lock_guard lock(g_http2_registry.mutex);
+	auto            request = g_http2_registry.requests.find(request_id);
+	if (request == g_http2_registry.requests.end())
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	if (request->second.send_result != 0)
+	{
+		request->second.async_result = request->second.send_result;
+		request->second.async_event  = 1;
+		return 0;
+	}
+	const auto remaining = request->second.read_offset < request->second.response_body.size()
+	                           ? request->second.response_body.size() - request->second.read_offset
+	                           : 0;
+	const auto to_copy = std::min(size, remaining);
+	if (to_copy != 0)
+	{
+		std::memcpy(data, request->second.response_body.data() + request->second.read_offset, to_copy);
+		request->second.read_offset += to_copy;
+	}
+	request->second.async_result = static_cast<int>(to_copy);
+	request->second.async_event  = 1;
+	return 0;
+}
+
+static int KYTY_SYSV_ABI Http2DeleteRequest(int request_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_http2_registry.mutex);
+	if (g_http2_registry.requests.erase(request_id) == 0)
+	{
+		return HTTP2_ERROR_INVALID_ID;
+	}
+	return 0;
+}
+
 LIB_DEFINE(InitNet_1_Http2)
 {
 	LIB_FUNC("3JCe3lCbQ8A", LibHttp2::Http2Init);
+	LIB_FUNC("YiBUtz-pGkc", LibHttp2::Http2Term);
 	LIB_FUNC("+wCt7fCijgk", LibHttp2::Http2CreateTemplate);
+	LIB_FUNC("pDom5-078DA", LibHttp2::Http2DeleteTemplate);
 	LIB_FUNC("mmyOCxQMVYQ", LibHttp2::Http2CreateRequestWithUrl);
 	LIB_FUNC("nrPfOE8TQu0", LibHttp2::Http2AddRequestHeader);
 	LIB_FUNC("FSAFOzi0FpM", LibHttp2::Http2SetRequestContentLength);
+	LIB_FUNC("jjFahkBPCYs", LibHttp2::Http2SetAuthEnabled);
+	LIB_FUNC("5VlQSzXW-SQ", LibHttp2::Http2CookieFlush);
+	LIB_FUNC("b9AvoIaOuHI", LibHttp2::Http2SetAutoRedirect);
+	LIB_FUNC("uRosf8GQbHQ", LibHttp2::Http2SetInflateGzipEnabled);
+	LIB_FUNC("B37SruheQ5Y", LibHttp2::Http2SslDisableOption);
+	LIB_FUNC("EWcwMpbr5F8", LibHttp2::Http2SslEnableOption);
+	LIB_FUNC("BJgi0CH7al4", LibHttp2::Http2SetRedirectCallback);
+	LIB_FUNC("izvHhqgDt44", LibHttp2::Http2SetRecvTimeout);
+	LIB_FUNC("XPtW45xiLHk", LibHttp2::Http2SetSendTimeout);
+	LIB_FUNC("-HIO4VT87v8", LibHttp2::Http2SetConnectTimeout);
+	LIB_FUNC("n8hMLe31OPA", LibHttp2::Http2SetConnectionWaitTimeout);
+	LIB_FUNC("ACjtE27aErY", LibHttp2::Http2SetResolveTimeout);
+	LIB_FUNC("VYMxTcBqSE0", LibHttp2::Http2SetTimeout);
+	LIB_FUNC("YrWX+DhPHQY", LibHttp2::Http2SetSslCallback);
+	LIB_FUNC("IZ-qjhRqvjk", LibHttp2::Http2AbortRequest);
 	LIB_FUNC("rbqZig38AT8", LibHttp2::Http2SendRequest);
 	LIB_FUNC("A+NVAFu4eCg", LibHttp2::Http2SendRequestAsync);
 	LIB_FUNC("MOp-AUhdfi8", LibHttp2::Http2WaitAsync);
+	LIB_FUNC("9XYJwCf3lEA", LibHttp2::Http2GetStatusCode);
+	LIB_FUNC("o0DBQpFE13o", LibHttp2::Http2GetResponseContentLength);
+	LIB_FUNC("-rdXUi2XW90", LibHttp2::Http2GetAllResponseHeaders);
+	LIB_FUNC("QygCNNmbGss", LibHttp2::Http2ReadData);
+	LIB_FUNC("bGN-6zbo7ms", LibHttp2::Http2ReadDataAsync);
+	LIB_FUNC("c8D9qIjo8EY", LibHttp2::Http2DeleteRequest);
 }
 
 } // namespace LibHttp2

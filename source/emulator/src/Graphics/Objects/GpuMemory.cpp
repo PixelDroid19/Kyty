@@ -213,12 +213,19 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 			case OverlapType::Equals:
 			case OverlapType::IsContainedWithin:
 			case OverlapType::Crosses: RequireDetachable(ctx, heap_id, obj.object_id, &destructors, "range_free"); break;
+			// The stored object is the parent of the range being released.  It
+			// remains live because freeing a child view must not destroy its
+			// backing allocation.
+			case OverlapType::Contains: break;
 			default: GpuMemoryDbgDump(); EXIT("unknown obj.relation: %s\n", Core::EnumName(obj.relation).C_Str());
 		}
 	}
 	for (const auto& obj: object_ids)
 	{
-		destructors.Add(Free(heap_id, obj.object_id));
+		if (obj.relation != OverlapType::Contains)
+		{
+			destructors.Add(Free(heap_id, obj.object_id));
+		}
 	}
 
 	if (unmap)

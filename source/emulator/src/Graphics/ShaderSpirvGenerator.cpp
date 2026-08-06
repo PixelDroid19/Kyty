@@ -76,6 +76,7 @@ static int ResolveVertexParameterCount(const ShaderCode& code, const ShaderVerte
 			case ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3: required = 5; break;
 			case ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3: required = 6; break;
 			case ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3: required = 7; break;
+			case ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3: required = 8; break;
 			default: break;
 		}
 		if (required > count)

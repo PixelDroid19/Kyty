@@ -148,6 +148,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Param4Vsrc0Vsrc1Vsrc2Vsrc3: return "Param4Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3: return "Param5Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3: return "Param6Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3: return "Param7Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done: return "Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done"; break;
 		case ShaderInstructionFormat::PrimVsrc0OffOffOffDone: return "PrimVsrc0OffOffOffDone"; break;
 		case ShaderInstructionFormat::Saddr: return "Saddr"; break;
@@ -295,6 +296,7 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Param4: s = "param4"; break;
 			case ShaderInstructionFormat::Param5: s = "param5"; break;
 			case ShaderInstructionFormat::Param6: s = "param6"; break;
+			case ShaderInstructionFormat::Param7: s = "param7"; break;
 			case ShaderInstructionFormat::Mrt0: s = "mrt_color0"; break;
 			case ShaderInstructionFormat::Mrt1: s = "mrt_color1"; break;
 			case ShaderInstructionFormat::Mrt2: s = "mrt_color2"; break;
