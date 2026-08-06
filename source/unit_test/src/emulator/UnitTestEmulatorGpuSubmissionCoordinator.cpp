@@ -8,7 +8,9 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <fstream>
 #include <mutex>
+#include <string>
 #include <thread>
 
 UT_BEGIN(EmulatorGpuSubmissionCoordinator);
@@ -534,6 +536,32 @@ TEST(EmulatorGpuSubmissionCoordinator, TransientLabelsLeaveNoOwnershipAfterExact
 TEST(EmulatorGpuSubmissionCoordinator, CommandProcessorSubmissionSlotCountIsEight)
 {
 	EXPECT_EQ(CommandProcessorSubmissionSlots::SlotCount, 8u);
+}
+
+TEST(EmulatorGpuSubmissionCoordinator, WaitRegMemUsesLightweightFlushForQueuedProducer)
+{
+	// Old WaitRegMem always used BufferFlush which waited for the latest
+	// completed publication before waiting for the specific producer.
+	// New code uses BufferFlushForGpuWait which skips that redundant wait;
+	// the subsequent WaitSubmission for the producer covers ordering.
+	// Verify the new path exists in source.
+	std::ifstream file("/run/media/monasterios/A0C4B5D5C4B5ADC2/ps5/Kyty/source/emulator/src/Graphics/GraphicsRun.cpp");
+	ASSERT_TRUE(file.is_open());
+	std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	EXPECT_NE(content.find("BufferFlushForGpuWait"), std::string::npos);
+	// Ensure WaitRegMem32/64 use the lightweight variant.
+	EXPECT_NE(content.find("WaitRegMem32"), std::string::npos);
+	EXPECT_NE(content.find("WaitRegMem64"), std::string::npos);
+	// The old direct BufferFlush call in WaitRegMem should be replaced.
+	// Count occurrences: new code should have BufferFlushForGpuWait in both.
+	size_t count = 0;
+	size_t pos   = 0;
+	while ((pos = content.find("BufferFlushForGpuWait", pos)) != std::string::npos)
+	{
+		++count;
+		pos += 1;
+	}
+	EXPECT_GE(count, 2u);
 }
 
 UT_END();

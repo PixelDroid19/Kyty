@@ -353,6 +353,7 @@ private:
 	SubmissionId         SubmitCurrentLocked(SubmissionId* latest_completed);
 	void                 PublishCompletedSubmissions();
 	void                 WaitUntilPublishedUnlessReentrant(SubmissionId submission);
+	SubmissionId         BufferFlushForGpuWait();
 
 	struct Counter
 	{

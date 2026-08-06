@@ -349,6 +349,20 @@ SubmissionId CommandProcessor::BufferFlush()
 	return submitted;
 }
 
+SubmissionId CommandProcessor::BufferFlushForGpuWait()
+{
+	SubmissionId latest_completed;
+	SubmissionId submitted;
+
+	{
+		Core::LockGuard lock(m_mutex);
+		submitted = SubmitCurrentLocked(&latest_completed);
+	}
+
+	PublishCompletedSubmissions();
+	return submitted;
+}
+
 SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_completed)
 {
 	EXIT_IF(latest_completed == nullptr);
@@ -677,7 +691,10 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	// is already ordered by the submission graph; keep that path in the current
 	// decode so render-pass continuity is preserved.  Unknown or mismatched
 	// producers use a real DCB suspension instead of a CPU poll.
-	BufferFlush();
+	// When the awaited producer is already queued, avoid the redundant
+	// publication wait for the latest completed submission; the subsequent
+	// WaitSubmission for the specific producer covers the needed ordering.
+	BufferFlushForGpuWait();
 	if (producer == GpuSubmissionResult::Success)
 	{
 		TraceWait("wait32_producer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask,
@@ -732,7 +749,9 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// Keep a matching producer in the current decode for render-pass continuity;
 	// suspend only when the tracker cannot prove that the current value will
 	// satisfy this wait.
-	BufferFlush();
+	// Avoid the redundant publication wait for the latest completed submission;
+	// the subsequent WaitSubmission for the specific producer covers ordering.
+	BufferFlushForGpuWait();
 	if (producer == GpuSubmissionResult::Success)
 	{
 		TraceWait("wait64_producer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask,
