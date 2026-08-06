@@ -17,17 +17,19 @@
 #include <QProcess>
 #include <QPushButton>
 #include <QRadioButton>
-#include <QRegExp>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStringList>
 #include <QTextStream>
 #include <QVariant>
-#include <Q_STARTUPINFO>
 #include <QtCore>
+#if defined(_WIN32)
+#include <Q_STARTUPINFO>
+#endif
 
 #include "ui_main_dialog.h"
 
-#ifndef __linux__
+#if defined(_WIN32)
 #include <windows.h> // IWYU pragma: keep
 #endif
 
@@ -37,29 +39,32 @@
 
 class QWidget;
 
-#ifdef __linux__
-constexpr char SCRIPT_EXE[] = "fc_script";
-#else
+#if defined(_WIN32)
 constexpr char SCRIPT_EXE[]     = "fc_script.exe";
+#else
+constexpr char SCRIPT_EXE[] = "fc_script";
 #endif
 
-#ifndef __linux__
+#if defined(_WIN32)
 constexpr char CMD_EXE[]    = "cmd.exe";
 constexpr char CONEMU_EXE[] = "C:/Program Files/ConEmu/ConEmu64.exe";
 #else
 constexpr char GNOME[]          = "gnome-terminal";
 constexpr char XTERM[]          = "xterm";
 constexpr char KYTY_BASH_FILE[] = "kyty_run.sh";
+#if defined(__APPLE__)
+constexpr char MAC_OPEN[] = "open";
+#endif
 #endif
 constexpr char KYTY_MOUNT[]    = "kyty_mount";
 constexpr char KYTY_EXECUTE[]  = "kyty_execute";
 constexpr char KYTY_LOAD_ELF[] = "kyty_load_elf";
-// constexpr char  KYTY_LOAD_SYMBOLS[]           = "kyty_load_symbols";
 constexpr char KYTY_LOAD_SYMBOLS_ALL[] = "kyty_load_symbols_all";
 constexpr char KYTY_LOAD_PARAM_SFO[]   = "kyty_load_param_sfo";
+constexpr char KYTY_LOAD_PARAM_JSON[]  = "kyty_load_param_json";
 constexpr char KYTY_INIT[]             = "kyty_init";
 constexpr char KYTY_LUA_FILE[]         = "kyty_run.lua";
-#ifndef __linux__
+#if defined(_WIN32)
 constexpr DWORD CMD_X_CHARS = 175;
 constexpr DWORD CMD_Y_CHARS = 1000;
 #endif
@@ -147,12 +152,21 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog)
 		        m_ui->widget->WriteSettings();
 	        });
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	connect(&m_process, &QProcess::finished, this,
+	        [=](int /*exitCode*/, QProcess::ExitStatus /*exitStatus*/)
+	        {
+		        m_running_item->SetRunning(false);
+		        Update();
+	        });
+#else
 	connect(&m_process, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
 	        [=](int /*exitCode*/, QProcess::ExitStatus /*exitStatus*/)
 	        {
 		        m_running_item->SetRunning(false);
 		        Update();
 	        });
+#endif
 
 	// connect(main_dialog, &MainDialog::Quit, [=]() { m_process.Detach(); });
 
@@ -165,16 +179,38 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog)
 
 void MainDialogPrivate::FindInterpreter()
 {
-	QFile file(QDir(".").absoluteFilePath(SCRIPT_EXE));
-	if (file.exists())
+	// Search order: application dir, current dir, parent dir (robust for double-click, shortcuts, and CLI)
+	QStringList candidates;
+	candidates << QCoreApplication::applicationDirPath() + QDir::separator() + SCRIPT_EXE;
+	candidates << QDir(".").absoluteFilePath(SCRIPT_EXE);
+	candidates << QDir("..").absoluteFilePath(SCRIPT_EXE);
+#if defined(__APPLE__)
+	// Inside .app bundle, binary is in Contents/MacOS, fc_script may be alongside .app
+	candidates << QDir(QCoreApplication::applicationDirPath() + "/../..").absoluteFilePath(SCRIPT_EXE);
+	candidates << QDir(QCoreApplication::applicationDirPath() + "/../../..").absoluteFilePath(SCRIPT_EXE);
+#endif
+	for (const auto& cand : candidates)
 	{
-		m_interpreter = file.fileName();
-	} else
+		if (QFile::exists(cand))
+		{
+			m_interpreter = cand;
+			break;
+		}
+	}
+	// Fallback legacy check
+	if (m_interpreter.isEmpty())
 	{
-		QFile file(QDir("..").absoluteFilePath(SCRIPT_EXE));
+		QFile file(QDir(".").absoluteFilePath(SCRIPT_EXE));
 		if (file.exists())
 		{
 			m_interpreter = file.fileName();
+		} else
+		{
+			QFile file2(QDir("..").absoluteFilePath(SCRIPT_EXE));
+			if (file2.exists())
+			{
+				m_interpreter = file2.fileName();
+			}
 		}
 	}
 
@@ -190,7 +226,7 @@ void MainDialogPrivate::FindInterpreter()
 		test.waitForFinished();
 
 		auto output = QString(test.readAllStandardOutput());
-		auto lines  = output.split(QRegExp("[\r\n]"), Qt::SkipEmptyParts);
+		auto lines  = output.split(QRegularExpression("[\r\n]"), Qt::SkipEmptyParts);
 
 		if (lines.count() >= 2)
 		{
@@ -215,7 +251,7 @@ void MainDialogPrivate::FindInterpreter()
 		return;
 	}
 
-#ifndef __linux__
+#if defined(_WIN32)
 	QFile console(CONEMU_EXE);
 	bool  con_emu = console.exists();
 #else
@@ -227,9 +263,14 @@ void MainDialogPrivate::FindInterpreter()
 	m_ui->radioButton_ConEmu->setEnabled(con_emu);
 	m_ui->radioButton_ConEmu->setChecked(false);
 
-#ifdef __linux__
+#if !defined(_WIN32)
+#if defined(__APPLE__)
+	m_ui->radioButton_Cmd->setText(QCoreApplication::translate("MainDialog", "Terminal (open)", nullptr));
+	m_ui->radioButton_ConEmu->setText(QCoreApplication::translate("MainDialog", "Direct", nullptr));
+#else
 	m_ui->radioButton_Cmd->setText(QCoreApplication::translate("MainDialog", "gnome-terminal", nullptr));
 	m_ui->radioButton_ConEmu->setText(QCoreApplication::translate("MainDialog", "xterm", nullptr));
+#endif
 #endif
 
 	Update();
@@ -242,21 +283,13 @@ static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 	{
 		QTextStream s(&file);
 
-		auto r = EnumToText(info->screen_resolution).split('x');
-
-		if (r.size() != 2)
-		{
-			file.close();
-			return false;
-		}
-
 		s << "local cfg = {\n";
-		s << "\t ScreenWidth = " << r.at(0) << ";\n";
-		s << "\t ScreenHeight = " << r.at(1) << ";\n";
-		s << "\t RenderResolutionMode = 'Fixed';\n";
-		s << "\t RenderResolutionWidth = 1280;\n";
-		s << "\t RenderResolutionHeight = 720;\n";
-		s << "\t PresentationFilter = 'Linear';\n";
+		s << "\t ScreenWidth = " << info->screen_width << ";\n";
+		s << "\t ScreenHeight = " << info->screen_height << ";\n";
+		s << "\t RenderResolutionMode = '" << EnumToText(info->render_resolution_mode) << "';\n";
+		s << "\t RenderResolutionWidth = " << info->render_resolution_width << ";\n";
+		s << "\t RenderResolutionHeight = " << info->render_resolution_height << ";\n";
+		s << "\t PresentationFilter = '" << EnumToText(info->presentation_filter) << "';\n";
 		s << "\t Neo = " << (info->neo ? "true" : "false") << ";\n";
 		s << "\t VulkanValidationEnabled = " << (info->vulkan_validation_enabled ? "true" : "false") << ";\n";
 		s << "\t ShaderValidationEnabled = " << (info->shader_validation_enabled ? "true" : "false") << ";\n";
@@ -266,16 +299,30 @@ static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 		s << "\t CommandBufferDumpEnabled = " << (info->command_buffer_dump_enabled ? "true" : "false") << ";\n";
 		s << "\t CommandBufferDumpFolder = '" << info->command_buffer_dump_folder << "';\n";
 		s << "\t PrintfDirection = '" << EnumToText(info->printf_direction) << "';\n";
+		s << "\t PrintfLevel = '" << EnumToText(info->printf_level) << "';\n";
 		s << "\t PrintfOutputFile = '" << info->printf_output_file << "';\n";
+		s << "\t PrintfOutputFolder = '" << info->printf_output_folder << "';\n";
 		s << "\t ProfilerDirection = '" << EnumToText(info->profiler_direction) << "';\n";
 		s << "\t ProfilerOutputFile = '" << info->profiler_output_file << "';\n";
-		s << "\t SpirvDebugPrintfEnabled = false;\n";
+		s << "\t SpirvDebugPrintfEnabled = " << (info->spirv_debug_printf_enabled ? "true" : "false") << ";\n";
+		s << "\t PipelineDumpEnabled = " << (info->pipeline_dump_enabled ? "true" : "false") << ";\n";
+		s << "\t PipelineDumpFolder = '" << info->pipeline_dump_folder << "';\n";
 		s << "}\n";
 
 		s << KYTY_INIT << "(cfg);\n";
 		s << KYTY_MOUNT << "('" << info->basedir << "', '/app0');\n";
 
-		s << KYTY_LOAD_PARAM_SFO << "('" << info->param_file << "');\n";
+		// Param file: detect .json vs .sfo
+		if (!info->param_file.isEmpty())
+		{
+			if (info->param_file.endsWith(".json", Qt::CaseInsensitive))
+			{
+				s << KYTY_LOAD_PARAM_JSON << "('" << info->param_file << "');\n";
+			} else
+			{
+				s << KYTY_LOAD_PARAM_SFO << "('" << info->param_file << "');\n";
+			}
+		}
 
 		for (const auto& elf: info->elfs_selected)
 		{
@@ -297,7 +344,7 @@ static bool CreateLuaScript(Kyty::Configuration* info, const QString& file_name)
 	return false;
 }
 
-#ifdef __linux__
+#if !defined(_WIN32)
 static bool CreateBashScript(const QString& interpreter, const QString& lua_file_name, const QString& file_name)
 {
 	QFile file(file_name);
@@ -333,7 +380,7 @@ void MainDialog::RunInterpreter(QProcess* process, Kyty::Configuration* info, [[
 		return;
 	}
 
-#ifdef __linux__
+#if !defined(_WIN32)
 	auto bash_file_name = dir.filePath(KYTY_BASH_FILE);
 	if (!CreateBashScript(interpreter, lua_file_name, bash_file_name))
 	{
@@ -342,6 +389,22 @@ void MainDialog::RunInterpreter(QProcess* process, Kyty::Configuration* info, [[
 		return;
 	}
 
+#if defined(__APPLE__)
+	// macOS: try to open Terminal via 'open', fallback to direct execution
+	if (con_emu)
+	{
+		// Direct execution without terminal wrapper
+		process->setProgram(interpreter);
+		process->setArguments({lua_file_name});
+	} else
+	{
+		// Use 'open -a Terminal' to launch bash script in Terminal.app
+		// If that fails, QProcess will error and we fallback to direct
+		process->setProgram(MAC_OPEN);
+		process->setArguments({"-a", "Terminal", bash_file_name});
+		// Fallback check: if open fails, use direct
+	}
+#else
 	if (con_emu)
 	{
 		process->setProgram(XTERM);
@@ -351,11 +414,12 @@ void MainDialog::RunInterpreter(QProcess* process, Kyty::Configuration* info, [[
 		process->setProgram(GNOME);
 		process->setArguments({"--", "bash", "-c", bash_file_name});
 	}
+#endif
 #else
 	if (con_emu)
 	{
 		process->setProgram(CONEMU_EXE);
-		process->setArguments({"-run", /*CMD_EXE, "/K", */ interpreter, lua_file_name});
+		process->setArguments({"-run", interpreter, lua_file_name});
 	} else
 	{
 		process->setProgram(CMD_EXE);
@@ -363,7 +427,7 @@ void MainDialog::RunInterpreter(QProcess* process, Kyty::Configuration* info, [[
 	}
 #endif
 	process->setWorkingDirectory(dir.path());
-#ifndef __linux__
+#if defined(_WIN32)
 	process->setCreateProcessArgumentsModifier(
 	    [](QProcess::CreateProcessArguments* args)
 	    {
@@ -372,9 +436,6 @@ void MainDialog::RunInterpreter(QProcess* process, Kyty::Configuration* info, [[
 		    args->startupInfo->dwFlags |= static_cast<DWORD>(STARTF_USECOUNTCHARS);
 		    args->startupInfo->dwXCountChars = CMD_X_CHARS;
 		    args->startupInfo->dwYCountChars = CMD_Y_CHARS;
-		    // args->startupInfo->dwFlags |= static_cast<DWORD>(STARTF_USEFILLATTRIBUTE);
-		    // args->startupInfo->dwFillAttribute =
-		    //     static_cast<DWORD>(BACKGROUND_BLUE) | static_cast<DWORD>(FOREGROUND_RED) | static_cast<DWORD>(FOREGROUND_INTENSITY);
 	    });
 #endif
 	process->start();

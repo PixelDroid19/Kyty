@@ -24,6 +24,7 @@
 #include <QPicture>
 #include <QPushButton>
 #include <QSettings>
+#include <QSpinBox>
 #include <QStringList>
 #include <QVariant>
 
@@ -69,6 +70,8 @@ ConfigurationEditDialog::ConfigurationEditDialog(Kyty::Configuration* info, Conf
 	        {
 		        auto log = TextToEnum<Kyty::Configuration::LogDirection>(text);
 		        m_ui->lineEdit_printf_file->setEnabled(log == Kyty::Configuration::LogDirection::File);
+		        m_ui->lineEdit_printf_folder->setEnabled(log == Kyty::Configuration::LogDirection::Directory);
+		        m_ui->comboBox_printf_level->setEnabled(log != Kyty::Configuration::LogDirection::Silent);
 	        });
 	connect(m_ui->comboBox_profiler_direction, &QComboBox::currentTextChanged,
 	        [=](const QString& text)
@@ -77,12 +80,24 @@ ConfigurationEditDialog::ConfigurationEditDialog(Kyty::Configuration* info, Conf
 		        m_ui->lineEdit_profiler_file->setEnabled(log == Kyty::Configuration::ProfilerDirection::File ||
 		                                                 log == Kyty::Configuration::ProfilerDirection::FileAndNetwork);
 	        });
+	connect(m_ui->checkBox_pipeline_dump, &QCheckBox::toggled, [=](bool flag) { m_ui->lineEdit_pipeline_dump_folder->setEnabled(flag); });
+	connect(m_ui->comboBox_render_resolution_mode, &QComboBox::currentTextChanged,
+	        [=](const QString& text)
+	        {
+		        auto mode = TextToEnum<Kyty::Configuration::RenderResolutionMode>(text);
+		        bool fixed = (mode == Kyty::Configuration::RenderResolutionMode::Fixed);
+		        m_ui->spinBox_render_width->setEnabled(fixed);
+		        m_ui->spinBox_render_height->setEnabled(fixed);
+	        });
 	connect(m_ui->base_directory_lineedit, &QLineEdit::textChanged, this, &ConfigurationEditDialog::scan_elfs);
 	connect(m_ui->param_file_lineedit, &QLineEdit::textChanged, this, &ConfigurationEditDialog::load_param_sfo);
 	connect(m_ui->listWidget_elfs, &QListWidget::itemChanged, this, &ChangeColor);
-	// connect(m_ui->listWidget_libs, &QListWidget::itemChanged, this, &ChangeColor);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	connect(&m_process, &QProcess::finished, this, [=](int, QProcess::ExitStatus) { m_ui->test_button->setEnabled(true); });
+#else
 	connect(&m_process, static_cast<void (QProcess::*)(int, QProcess::ExitStatus)>(&QProcess::finished),
 	        [=](int /*exitCode*/, QProcess::ExitStatus /*exitStatus*/) { m_ui->test_button->setEnabled(true); });
+#endif
 
 	layout()->setSizeConstraint(QLayout::SetFixedSize);
 
@@ -96,7 +111,6 @@ ConfigurationEditDialog::ConfigurationEditDialog(Kyty::Configuration* info, Conf
 
 	Init();
 
-	// scan_libs();
 	scan_elfs();
 	load_param_sfo();
 }
@@ -149,19 +163,45 @@ void ConfigurationEditDialog::Init()
 	m_ui->name_lineedit->setText(m_info->name);
 	m_ui->base_directory_lineedit->setText(m_info->basedir);
 	m_ui->param_file_lineedit->setText(m_info->param_file);
-	ListInit(m_ui->comboBox_screen_resolution, m_info->screen_resolution);
+	m_ui->spinBox_screen_width->setValue(m_info->screen_width);
+	m_ui->spinBox_screen_height->setValue(m_info->screen_height);
+	ListInit(m_ui->comboBox_render_resolution_mode, m_info->render_resolution_mode);
+	m_ui->spinBox_render_width->setValue(m_info->render_resolution_width);
+	m_ui->spinBox_render_height->setValue(m_info->render_resolution_height);
+	ListInit(m_ui->comboBox_presentation_filter, m_info->presentation_filter);
 	m_ui->checkBox_neo->setChecked(m_info->neo);
 	m_ui->checkBox_shader_validation->setChecked(m_info->shader_validation_enabled);
 	m_ui->checkBox_vulkan_validation->setChecked(m_info->vulkan_validation_enabled);
 	ListInit(m_ui->comboBox_shader_optimization_type, m_info->shader_optimization_type);
 	ListInit(m_ui->comboBox_shader_log_direction, m_info->shader_log_direction);
 	m_ui->lineEdit_shader_log_folder->setText(m_info->shader_log_folder);
+	m_ui->lineEdit_shader_log_folder->setEnabled(m_info->shader_log_direction == Kyty::Configuration::ShaderLogDirection::File);
 	m_ui->checkBox_cmd_dump->setChecked(m_info->command_buffer_dump_enabled);
 	m_ui->lineEdit_cmd_dump_folder->setText(m_info->command_buffer_dump_folder);
+	m_ui->lineEdit_cmd_dump_folder->setEnabled(m_info->command_buffer_dump_enabled);
 	ListInit(m_ui->comboBox_printf_direction, m_info->printf_direction);
+	ListInit(m_ui->comboBox_printf_level, m_info->printf_level);
 	m_ui->lineEdit_printf_file->setText(m_info->printf_output_file);
+	m_ui->lineEdit_printf_folder->setText(m_info->printf_output_folder);
+	{
+		auto dir = m_info->printf_direction;
+		m_ui->lineEdit_printf_file->setEnabled(dir == Kyty::Configuration::LogDirection::File);
+		m_ui->lineEdit_printf_folder->setEnabled(dir == Kyty::Configuration::LogDirection::Directory);
+		m_ui->comboBox_printf_level->setEnabled(dir != Kyty::Configuration::LogDirection::Silent);
+	}
 	ListInit(m_ui->comboBox_profiler_direction, m_info->profiler_direction);
 	m_ui->lineEdit_profiler_file->setText(m_info->profiler_output_file);
+	m_ui->lineEdit_profiler_file->setEnabled(m_info->profiler_direction == Kyty::Configuration::ProfilerDirection::File ||
+	                                         m_info->profiler_direction == Kyty::Configuration::ProfilerDirection::FileAndNetwork);
+	m_ui->checkBox_spirv_debug->setChecked(m_info->spirv_debug_printf_enabled);
+	m_ui->checkBox_pipeline_dump->setChecked(m_info->pipeline_dump_enabled);
+	m_ui->lineEdit_pipeline_dump_folder->setText(m_info->pipeline_dump_folder);
+	m_ui->lineEdit_pipeline_dump_folder->setEnabled(m_info->pipeline_dump_enabled);
+	{
+		bool fixed = (m_info->render_resolution_mode == Kyty::Configuration::RenderResolutionMode::Fixed);
+		m_ui->spinBox_render_width->setEnabled(fixed);
+		m_ui->spinBox_render_height->setEnabled(fixed);
+	}
 }
 
 void ConfigurationEditDialog::SetTitle(const QString& str)
@@ -199,7 +239,12 @@ static void UpdateInfo(Kyty::Configuration* info, Ui::ConfigurationEditDialog* u
 	info->name                      = ui->name_lineedit->text();
 	info->basedir                   = ui->base_directory_lineedit->text();
 	info->param_file                = ui->param_file_lineedit->text();
-	info->screen_resolution         = TextToEnum<Kyty::Configuration::Resolution>(ui->comboBox_screen_resolution->currentText());
+	info->screen_width              = ui->spinBox_screen_width->value();
+	info->screen_height             = ui->spinBox_screen_height->value();
+	info->render_resolution_mode    = TextToEnum<Kyty::Configuration::RenderResolutionMode>(ui->comboBox_render_resolution_mode->currentText());
+	info->render_resolution_width   = ui->spinBox_render_width->value();
+	info->render_resolution_height  = ui->spinBox_render_height->value();
+	info->presentation_filter       = TextToEnum<Kyty::Configuration::PresentationFilter>(ui->comboBox_presentation_filter->currentText());
 	info->neo                       = ui->checkBox_neo->isChecked();
 	info->vulkan_validation_enabled = ui->checkBox_vulkan_validation->isChecked();
 	info->shader_validation_enabled = ui->checkBox_shader_validation->isChecked();
@@ -210,28 +255,16 @@ static void UpdateInfo(Kyty::Configuration* info, Ui::ConfigurationEditDialog* u
 	info->command_buffer_dump_enabled = ui->checkBox_cmd_dump->isChecked();
 	info->command_buffer_dump_folder  = ui->lineEdit_cmd_dump_folder->text();
 	info->printf_direction            = TextToEnum<Kyty::Configuration::LogDirection>(ui->comboBox_printf_direction->currentText());
+	info->printf_level                = TextToEnum<Kyty::Configuration::LogLevel>(ui->comboBox_printf_level->currentText());
 	info->printf_output_file          = ui->lineEdit_printf_file->text();
+	info->printf_output_folder        = ui->lineEdit_printf_folder->text();
 	info->profiler_direction          = TextToEnum<Kyty::Configuration::ProfilerDirection>(ui->comboBox_profiler_direction->currentText());
 	info->profiler_output_file        = ui->lineEdit_profiler_file->text();
-
-	info->elfs.clear();
-	info->elfs_selected.clear();
-	int libs_count = ui->listWidget_elfs->count();
-	for (int i = 0; i < libs_count; i++)
-	{
-		auto* item = ui->listWidget_elfs->item(i);
-		if ((item->flags() & Qt::ItemIsEnabled) != 0)
-		{
-			info->elfs << item->text();
-			if (item->checkState() == Qt::Checked)
-			{
-				info->elfs_selected << item->text();
-			}
-		}
-	}
+	info->spirv_debug_printf_enabled  = ui->checkBox_spirv_debug->isChecked();
+	info->pipeline_dump_enabled       = ui->checkBox_pipeline_dump->isChecked();
+	info->pipeline_dump_folder        = ui->lineEdit_pipeline_dump_folder->text();
 
 	UpdateList(&info->elfs, &info->elfs_selected, ui->listWidget_elfs);
-	// UpdateList(&info->libs, &info->libs_selected, ui->listWidget_libs);
 }
 
 void ConfigurationEditDialog::update_info()
@@ -249,6 +282,13 @@ void ConfigurationEditDialog::save()
 	if (MandatoryLineEdit::FindEmpty(this))
 	{
 		QMessageBox::critical(this, tr("Save failed"), tr("Please fill all mandatory fields"));
+		return;
+	}
+
+	if (m_ui->spinBox_screen_width->value() <= 0 || m_ui->spinBox_screen_height->value() <= 0 ||
+	    m_ui->spinBox_render_width->value() <= 0 || m_ui->spinBox_render_height->value() <= 0)
+	{
+		QMessageBox::critical(this, tr("Save failed"), tr("Resolution extents must be > 0"));
 		return;
 	}
 
@@ -279,7 +319,8 @@ void ConfigurationEditDialog::browse_param_file()
 		text = m_ui->base_directory_lineedit->text();
 	}
 
-	QString file = QFileDialog::getOpenFileName(this, tr("Select param.sfo"), text.isEmpty() ? g_last_base_dir : text, "param.sfo");
+	QString file = QFileDialog::getOpenFileName(this, tr("Select param.sfo / param.json"), text.isEmpty() ? g_last_base_dir : text,
+	                                            tr("Param files (param.sfo param.json);;All files (*)"));
 
 	if (!file.isEmpty())
 	{
@@ -307,8 +348,6 @@ void ConfigurationEditDialog::scan_elfs()
 
 	m_ui->listWidget_elfs->clear();
 
-	// int selected_num = 0;
-
 	for (const auto& elf: m_info->elfs)
 	{
 		bool not_enabled = !elfs.contains(elf);
@@ -325,8 +364,6 @@ void ConfigurationEditDialog::scan_elfs()
 		{
 			item->setCheckState(selected ? Qt::Checked : Qt::Unchecked);
 		}
-
-		// selected_num += (selected ? 1 : 0);
 	}
 
 	for (const auto& elf: elfs)
@@ -343,47 +380,6 @@ void ConfigurationEditDialog::scan_elfs()
 
 	m_ui->test_button->setEnabled(m_process.state() == QProcess::NotRunning && dir_exists);
 }
-
-// void ConfigurationEditDialog::scan_libs()
-//{
-//	QStringList libs = KYTY_LIBS;
-//
-//	m_ui->listWidget_libs->clear();
-//
-//	// int selected_num = 0;
-//
-//	for (const auto& lib: m_info->libs)
-//	{
-//		bool not_enabled = !libs.contains(lib);
-//		bool selected    = m_info->libs_selected.contains(lib);
-//
-//		auto* item = new QListWidgetItem(lib, m_ui->listWidget_libs);
-//		item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-//
-//		if (not_enabled)
-//		{
-//			item->setCheckState(Qt::Unchecked);
-//			item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
-//		} else
-//		{
-//			item->setCheckState(selected ? Qt::Checked : Qt::Unchecked);
-//		}
-//
-//		// selected_num += (selected ? 1 : 0);
-//	}
-//
-//	for (const auto& lib: libs)
-//	{
-//		if (!m_info->libs.contains(lib))
-//		{
-//			auto* item = new QListWidgetItem(lib, m_ui->listWidget_libs);
-//			item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-//			item->setCheckState(Qt::Unchecked);
-//		}
-//	}
-//
-//	m_ui->listWidget_libs->sortItems();
-// }
 
 void ConfigurationEditDialog::load_param_sfo()
 {
@@ -414,7 +410,7 @@ void ConfigurationEditDialog::load_param_sfo()
 			auto* item1 = new QTableWidgetItem(m.first);
 			item1->setFlags(item1->flags() ^ Qt::ItemIsEditable);
 			auto* item2 = new QTableWidgetItem(
-			    m.second.type() == QVariant::UInt ? QString("0x%1").arg(m.second.toUInt(), 8, 16, QLatin1Char('0')) : m.second.toString());
+			    m.second.typeId() == QMetaType::UInt ? QString("0x%1").arg(m.second.toUInt(), 8, 16, QLatin1Char('0')) : m.second.toString());
 			item2->setFlags(item2->flags() ^ Qt::ItemIsEditable);
 			if (index % 2 != 0)
 			{
@@ -452,7 +448,6 @@ void ConfigurationEditDialog::clear()
 	m_info = old_info;
 
 	scan_elfs();
-	// scan_libs();
 	load_param_sfo();
 }
 

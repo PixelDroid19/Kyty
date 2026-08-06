@@ -6,8 +6,8 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>837</width>
-    <height>818</height>
+    <width>960</width>
+    <height>1020</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -245,7 +245,33 @@
                 <string>Command buffer dump</string>
                </property>
                <property name="checked">
-                <bool>true</bool>
+                <bool>false</bool>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="0">
+              <widget class="QCheckBox" name="checkBox_spirv_debug">
+               <property name="toolTip">
+                <string>Enable SPIR-V debug printf</string>
+               </property>
+               <property name="text">
+                <string>SPIR-V debug printf</string>
+               </property>
+               <property name="checked">
+                <bool>false</bool>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="1">
+              <widget class="QCheckBox" name="checkBox_pipeline_dump">
+               <property name="toolTip">
+                <string>Dump graphics pipelines</string>
+               </property>
+               <property name="text">
+                <string>Pipeline dump</string>
+               </property>
+               <property name="checked">
+                <bool>false</bool>
                </property>
               </widget>
              </item>
@@ -268,53 +294,167 @@
           <item row="1" column="0">
            <widget class="QLabel" name="label_16">
             <property name="text">
-             <string>Screen resoultion:</string>
+             <string>Screen width:</string>
             </property>
            </widget>
           </item>
           <item row="1" column="1">
-           <widget class="QComboBox" name="comboBox_screen_resolution">
-            <property name="toolTip">
-             <string>Window resolution</string>
+           <layout class="QHBoxLayout" name="horizontalLayout_screen">
+            <item>
+             <widget class="QSpinBox" name="spinBox_screen_width">
+              <property name="toolTip">
+               <string>Host window width</string>
+              </property>
+              <property name="minimum">
+               <number>320</number>
+              </property>
+              <property name="maximum">
+               <number>8192</number>
+              </property>
+              <property name="value">
+               <number>1280</number>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="label_x1">
+              <property name="text">
+               <string>x</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QSpinBox" name="spinBox_screen_height">
+              <property name="toolTip">
+               <string>Host window height</string>
+              </property>
+              <property name="minimum">
+               <number>240</number>
+              </property>
+              <property name="maximum">
+               <number>8192</number>
+              </property>
+              <property name="value">
+               <number>720</number>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="label_render_mode">
+            <property name="text">
+             <string>Render resolution mode:</string>
             </property>
            </widget>
           </item>
-          <item row="2" column="0">
+          <item row="2" column="1">
+           <widget class="QComboBox" name="comboBox_render_resolution_mode">
+            <property name="toolTip">
+             <string>Fixed or Native render resolution</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="label_render_res">
+            <property name="text">
+             <string>Render resolution:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <layout class="QHBoxLayout" name="horizontalLayout_render">
+            <item>
+             <widget class="QSpinBox" name="spinBox_render_width">
+              <property name="toolTip">
+               <string>Fixed render target width</string>
+              </property>
+              <property name="minimum">
+               <number>320</number>
+              </property>
+              <property name="maximum">
+               <number>8192</number>
+              </property>
+              <property name="value">
+               <number>1280</number>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="label_x2">
+              <property name="text">
+               <string>x</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QSpinBox" name="spinBox_render_height">
+              <property name="toolTip">
+               <string>Fixed render target height</string>
+              </property>
+              <property name="minimum">
+               <number>240</number>
+              </property>
+              <property name="maximum">
+               <number>8192</number>
+              </property>
+              <property name="value">
+               <number>720</number>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item row="4" column="0">
+           <widget class="QLabel" name="label_presentation">
+            <property name="text">
+             <string>Presentation filter:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="1">
+           <widget class="QComboBox" name="comboBox_presentation_filter">
+            <property name="toolTip">
+             <string>Linear or Nearest presentation scaling</string>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="0">
            <widget class="QLabel" name="label_20">
             <property name="text">
              <string>Shader optimization type:</string>
             </property>
            </widget>
           </item>
-          <item row="2" column="1">
+          <item row="5" column="1">
            <widget class="QComboBox" name="comboBox_shader_optimization_type">
             <property name="toolTip">
              <string>Optimize shaders for code size or performance</string>
             </property>
            </widget>
           </item>
-          <item row="3" column="0">
+          <item row="6" column="0">
            <widget class="QLabel" name="label_21">
             <property name="text">
              <string>Shader log direction:</string>
             </property>
            </widget>
           </item>
-          <item row="3" column="1">
+          <item row="6" column="1">
            <widget class="QComboBox" name="comboBox_shader_log_direction">
             <property name="toolTip">
              <string>Dump shaders to file or console window. If enabled may decrease emulator performance</string>
             </property>
            </widget>
           </item>
-          <item row="4" column="0">
+          <item row="7" column="0">
            <widget class="QLabel" name="label_22">
             <property name="text">
              <string>Shader log folder:</string>
             </property>
            </widget>
           </item>
-          <item row="4" column="1">
+          <item row="7" column="1">
            <widget class="MandatoryLineEdit" name="lineEdit_shader_log_folder">
             <property name="toolTip">
              <string>Specify directory to dump shaders</string>
@@ -324,14 +464,14 @@
             </property>
            </widget>
           </item>
-          <item row="5" column="0">
+          <item row="8" column="0">
            <widget class="QLabel" name="label_24">
             <property name="text">
              <string>Command buffer dump folder:</string>
             </property>
            </widget>
           </item>
-          <item row="5" column="1">
+          <item row="8" column="1">
            <widget class="MandatoryLineEdit" name="lineEdit_cmd_dump_folder">
             <property name="toolTip">
              <string>Specify directory to dump command buffers</string>
@@ -341,59 +481,90 @@
             </property>
            </widget>
           </item>
-          <item row="6" column="0">
+          <item row="9" column="0">
            <widget class="QLabel" name="label_25">
             <property name="text">
              <string>Printf direction:</string>
             </property>
            </widget>
           </item>
-          <item row="6" column="1">
+          <item row="9" column="1">
            <widget class="QComboBox" name="comboBox_printf_direction">
             <property name="toolTip">
              <string>Print logs to file or console window. If enabled may decrease emulator performance</string>
             </property>
            </widget>
           </item>
-          <item row="7" column="0">
+          <item row="10" column="0">
+           <widget class="QLabel" name="label_printf_level">
+            <property name="text">
+             <string>Printf level:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="10" column="1">
+           <widget class="QComboBox" name="comboBox_printf_level">
+            <property name="toolTip">
+             <string>Minimum log severity: Debug, Info, Warn, Error</string>
+            </property>
+           </widget>
+          </item>
+          <item row="11" column="0">
            <widget class="QLabel" name="label_26">
             <property name="text">
              <string>Printf output file:</string>
             </property>
            </widget>
           </item>
-          <item row="7" column="1">
+          <item row="11" column="1">
            <widget class="MandatoryLineEdit" name="lineEdit_printf_file">
             <property name="toolTip">
-             <string>Specify file to dump logs</string>
+             <string>Specify file to dump logs (single file mode)</string>
             </property>
             <property name="clearButtonEnabled">
              <bool>true</bool>
             </property>
            </widget>
           </item>
-          <item row="8" column="0">
+          <item row="12" column="0">
+           <widget class="QLabel" name="label_printf_folder">
+            <property name="text">
+             <string>Printf output folder:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="12" column="1">
+           <widget class="QLineEdit" name="lineEdit_printf_folder">
+            <property name="toolTip">
+             <string>Directory for per-thread log files (Directory mode)</string>
+            </property>
+            <property name="clearButtonEnabled">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="13" column="0">
            <widget class="QLabel" name="label_27">
             <property name="text">
              <string>Profiler direction:</string>
             </property>
            </widget>
           </item>
-          <item row="8" column="1">
+          <item row="13" column="1">
            <widget class="QComboBox" name="comboBox_profiler_direction">
             <property name="toolTip">
              <string>Enable/disable profiler. If enabled may decrease emulator performance</string>
             </property>
            </widget>
           </item>
-          <item row="9" column="0">
+          <item row="14" column="0">
            <widget class="QLabel" name="label_28">
             <property name="text">
              <string>Profiler output file:</string>
             </property>
            </widget>
           </item>
-          <item row="9" column="1">
+          <item row="14" column="1">
            <widget class="MandatoryLineEdit" name="lineEdit_profiler_file">
             <property name="toolTip">
              <string>Specify file to dump profiler info</string>
@@ -403,7 +574,24 @@
             </property>
            </widget>
           </item>
-          <item row="11" column="0" colspan="2">
+          <item row="15" column="0">
+           <widget class="QLabel" name="label_pipeline_folder">
+            <property name="text">
+             <string>Pipeline dump folder:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="15" column="1">
+           <widget class="QLineEdit" name="lineEdit_pipeline_dump_folder">
+            <property name="toolTip">
+             <string>Directory to dump graphics pipelines (when Pipeline dump enabled)</string>
+            </property>
+            <property name="clearButtonEnabled">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="16" column="0" colspan="2">
            <layout class="QHBoxLayout" name="horizontalLayout_2">
             <item>
              <spacer name="horizontalSpacer_3">
