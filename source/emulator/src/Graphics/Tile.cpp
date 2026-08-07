@@ -1245,6 +1245,17 @@ uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems
 	return TileGetStandard4KBOffset(x, y, pitch_elems, 4u);
 }
 
+uint32_t TileGetStandard4KBContiguousElements(uint32_t x, uint32_t bytes_per_element)
+{
+	if (bytes_per_element == 0u || bytes_per_element > 16u || !IsPowerOfTwo(bytes_per_element))
+	{
+		return 1u;
+	}
+
+	const uint32_t elements_per_run = 16u / bytes_per_element;
+	return elements_per_run - (x % elements_per_run);
+}
+
 void TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
                                     uint32_t bytes_per_element)
 {
@@ -1258,11 +1269,13 @@ void TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, 
 	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * bytes_per_element);
 	for (uint32_t y = 0; y < height; y++)
 	{
-		for (uint32_t x = 0; x < width; x++)
+		for (uint32_t x = 0; x < width;)
 		{
+			const uint32_t run = std::min(TileGetStandard4KBContiguousElements(x, bytes_per_element), width - x);
 			const uint64_t tiled  = TileGetStandard4KBOffset(x, y, pitch_elems, bytes_per_element);
 			const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bytes_per_element;
-			std::memcpy(d + linear, s + tiled, bytes_per_element);
+			std::memcpy(d + linear, s + tiled, static_cast<size_t>(run) * bytes_per_element);
+			x += run;
 		}
 	}
 }

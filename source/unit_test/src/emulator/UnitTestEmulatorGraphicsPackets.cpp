@@ -4838,6 +4838,30 @@ TEST(EmulatorGraphicsPackets, MatchesAddrLibStandard4Kb16BitSwizzleEquation)
 	EXPECT_EQ(TileGetStandard4KBOffset(32, 0, 64, 2), 0x800u);
 }
 
+TEST(EmulatorGraphicsPackets, GroupsOnlyContiguousStandard4KbElements)
+{
+	constexpr uint32_t k_pitch = 128u;
+	for (const uint32_t bytes_per_element: {1u, 2u, 4u, 8u, 16u})
+	{
+		for (uint32_t y = 0; y < 64u; ++y)
+		{
+			for (uint32_t x = 0; x < k_pitch;)
+			{
+				const uint32_t run = TileGetStandard4KBContiguousElements(x, bytes_per_element);
+				ASSERT_GT(run, 0u);
+				ASSERT_LE(x + run, k_pitch);
+				const uint64_t first = TileGetStandard4KBOffset(x, y, k_pitch, bytes_per_element);
+				for (uint32_t i = 1; i < run; ++i)
+				{
+					EXPECT_EQ(TileGetStandard4KBOffset(x + i, y, k_pitch, bytes_per_element),
+					          first + static_cast<uint64_t>(i) * bytes_per_element);
+				}
+				x += run;
+			}
+		}
+	}
+}
+
 TEST(EmulatorGraphicsPackets, SizesGen5Standard4Kb8BitVideoTextures)
 {
 	TileSizeAlign  size {};
