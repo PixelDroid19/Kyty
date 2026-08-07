@@ -265,6 +265,11 @@ only) without a process-killing structural EXIT on recent captures.
 
 Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 
+- Gen5 hint-less direct-memory mappings use the guest user-address window with
+  a monotonic placement cursor, and physical releases accept fully covered
+  subranges or contiguous allocation spans. Focused split/coalescing tests pass;
+  a strict 60-second bounded run ended only at its timeout with a 4.6 GiB host
+  peak instead of the earlier 8 GiB cgroup termination at 36.7 seconds.
 - GpuMemory multi-parent alias policies (Texture/Storage/Vertex/RenderTexture
   relations as captured; inverse or unobserved relations stay strict).
 - GpuMemory: multi-parent VertexBuffer with surface link + peer VB reclaim;

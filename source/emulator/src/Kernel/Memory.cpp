@@ -204,6 +204,10 @@ public:
 	[[nodiscard]] const Vector<MappedBlock>& GetMappedBlocks() const { return m_mapped; }
 
 private:
+	static constexpr uint64_t kNextGenAutoMapBegin = 0x2000000000ull;
+	static constexpr uint64_t kNextGenAutoMapEnd   = 0x40000000000ull;
+	[[nodiscard]] bool IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len) const;
+
 	// Gen5 releases the physical reservation independently from its virtual mapping.
 	// KernelMunmap owns the mapping and host/GPU cleanup lifecycle.
 	// SharedBacking maps keep re-used physical ranges byte-coherent across aliases.
@@ -212,6 +216,7 @@ private:
 	std::vector<MemoryProtectionBlock> m_protections;
 	Core::Mutex                        m_mutex;
 	VirtualMemory::SharedBacking*      m_backing = nullptr;
+	uint64_t                           m_next_gen_auto_map_cursor = kNextGenAutoMapBegin;
 };
 
 class FlexibleMemory
@@ -611,47 +616,89 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 	return true;
 }
 
-bool PhysicalMemory::Release(uint64_t start, size_t len)
+bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len) const
 {
-	Core::LockGuard lock(m_mutex);
-
-	uint32_t index = 0;
-	for (auto& b: m_allocated)
+	if (len == 0 || start > std::numeric_limits<uint64_t>::max() - len)
 	{
-		if (start == b.start_addr && len == b.size)
-		{
-			m_allocated.RemoveAt(index);
-
-			for (auto& mapped: m_mapped)
-			{
-				if (mapped.phys_addr < start + len && mapped.phys_addr + mapped.map_size > start)
-				{
-					mapped.physical_released = true;
-				}
-			}
-
-			// Reclaim host RAM only when no live map still covers this physical
-			// range. Gen5 may release the reservation while a mapping remains;
-			// Unmap performs the discard in that case.
-			bool still_mapped = false;
-			for (const auto& mapped: m_mapped)
-			{
-				if (mapped.phys_addr < start + len && mapped.phys_addr + mapped.map_size > start)
-				{
-					still_mapped = true;
-					break;
-				}
-			}
-			if (!still_mapped)
-			{
-				(void)VirtualMemory::DiscardSharedBackingRange(m_backing, start, len);
-			}
-			return true;
-		}
-		index++;
+		return false;
 	}
 
+	const uint64_t end    = start + len;
+	uint64_t       cursor = start;
+	for (const auto& block: m_allocated)
+	{
+		const uint64_t block_end = block.start_addr + block.size;
+		if (block_end <= cursor)
+		{
+			continue;
+		}
+		if (block.start_addr > cursor)
+		{
+			return false;
+		}
+		cursor = std::min(end, block_end);
+		if (cursor == end)
+		{
+			return true;
+		}
+	}
 	return false;
+}
+
+bool PhysicalMemory::Release(uint64_t start, size_t len)
+{
+	if (len == 0 || start > std::numeric_limits<uint64_t>::max() - len)
+	{
+		return false;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	if (!IsAllocatedRangeCoveredUnlocked(start, len))
+	{
+		return false;
+	}
+	const uint64_t end = start + len;
+
+	Vector<AllocatedBlock> remaining;
+	for (const auto& block: m_allocated)
+	{
+		const uint64_t block_end = block.start_addr + block.size;
+		if (block_end <= start || block.start_addr >= end)
+		{
+			remaining.Add(block);
+			continue;
+		}
+		if (block.start_addr < start)
+		{
+			auto left = block;
+			left.size = start - block.start_addr;
+			remaining.Add(left);
+		}
+		if (block_end > end)
+		{
+			auto right       = block;
+			right.start_addr = end;
+			right.size       = block_end - end;
+			remaining.Add(right);
+		}
+	}
+	m_allocated = std::move(remaining);
+
+	for (auto& mapped: m_mapped)
+	{
+		if (mapped.phys_addr < end && mapped.phys_addr + mapped.map_size > start)
+		{
+			mapped.physical_released = true;
+		}
+	}
+
+	const bool still_mapped = std::any_of(m_mapped.begin(), m_mapped.end(), [start, end](const MappedBlock& mapped)
+	                                      { return mapped.phys_addr < end && mapped.phys_addr + mapped.map_size > start; });
+	if (!still_mapped)
+	{
+		(void)VirtualMemory::DiscardSharedBackingRange(m_backing, start, len);
+	}
+	return true;
 }
 
 bool PhysicalMemory::FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings)
@@ -662,17 +709,16 @@ bool PhysicalMemory::FindMappingsForPhysicalRelease(uint64_t start, size_t len, 
 	}
 
 	Core::LockGuard lock(m_mutex);
-	const bool      allocation_exists = std::any_of(m_allocated.begin(), m_allocated.end(), [start, len](const AllocatedBlock& block)
-	                                                { return block.start_addr == start && block.size == len; });
-	if (!allocation_exists)
+	if (!IsAllocatedRangeCoveredUnlocked(start, len))
 	{
 		return false;
 	}
+	const uint64_t end = start + len;
 
 	mappings->Clear();
 	for (const auto& mapping: m_mapped)
 	{
-		if (mapping.phys_addr < start + len && start < mapping.phys_addr + mapping.map_size)
+		if (mapping.phys_addr < end && start < mapping.phys_addr + mapping.map_size)
 		{
 			mappings->Add(mapping);
 		}
@@ -877,7 +923,35 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 		}
 	} else
 	{
-		map_vaddr = VirtualMemory::MapSharedAligned(m_backing, vaddr, phys_addr, map_size, mode, alignment);
+		const bool automatic_next_gen_map = Config::IsNextGen() && vaddr == 0;
+		uint64_t   map_hint               = vaddr;
+		if (automatic_next_gen_map)
+		{
+			if (!get_aligned_pos(m_next_gen_auto_map_cursor, alignment, &map_hint) || map_hint >= kNextGenAutoMapEnd ||
+			    map_size > kNextGenAutoMapEnd - map_hint)
+			{
+				map_hint = kNextGenAutoMapBegin;
+			}
+		}
+
+		map_vaddr = VirtualMemory::MapSharedAligned(m_backing, map_hint, phys_addr, map_size, mode, alignment);
+		if (automatic_next_gen_map && map_vaddr == 0 && map_hint != kNextGenAutoMapBegin)
+		{
+			map_vaddr = VirtualMemory::MapSharedAligned(m_backing, kNextGenAutoMapBegin, phys_addr, map_size, mode, alignment);
+		}
+		if (automatic_next_gen_map && map_vaddr != 0)
+		{
+			const uint64_t map_end = map_vaddr + map_size;
+			if (map_vaddr < kNextGenAutoMapBegin || map_vaddr >= kNextGenAutoMapEnd || map_end < map_vaddr ||
+			    map_end > kNextGenAutoMapEnd)
+			{
+				EXIT_IF(!VirtualMemory::Free(map_vaddr));
+				map_vaddr = 0;
+			} else if (map_end > m_next_gen_auto_map_cursor)
+			{
+				m_next_gen_auto_map_cursor = map_end;
+			}
+		}
 	}
 
 	if (map_vaddr == 0)

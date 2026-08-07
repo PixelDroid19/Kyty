@@ -240,6 +240,33 @@ TEST(EmulatorKernelMemory, DirectMemorySizeTracksGuestGeneration)
 	Config::SetNextGen(false);
 }
 
+TEST(EmulatorKernelMemory, AutomaticDirectMapUsesPs5UserAddressRange)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t   kSize           = 0x10000;
+	constexpr uint64_t kGuestUserBegin = 0x2000000000ull;
+	constexpr uint64_t kGuestUserEnd   = 0x40000000000ull;
+
+	int64_t physical_address = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kSize, kSize, 12, &physical_address), OK);
+
+	void*     mapping    = nullptr;
+	const int map_result = KernelMapDirectMemory(&mapping, kSize, 0x02, 0, physical_address, kSize);
+	EXPECT_EQ(map_result, OK);
+	if (map_result == OK)
+	{
+		const auto address = reinterpret_cast<uint64_t>(mapping);
+		EXPECT_GE(address, kGuestUserBegin);
+		EXPECT_LT(address, kGuestUserEnd);
+		EXPECT_EQ(KernelMunmap(address, kSize), OK);
+	}
+
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+	Config::SetNextGen(false);
+}
+
 TEST(EmulatorKernelMemory, VirtualQueryReportsReservedRangeAsUncommitted)
 {
 	EnsureMemorySubsystemInitialized();
@@ -374,6 +401,56 @@ TEST(EmulatorKernelMemory, DirectMemoryAllocationReusesAlignedGapInsideSearchWin
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(replacement, kSize), OK);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(last, kSize), OK);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(first, kSize), OK);
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, DirectMemoryReleaseSplitsAnAllocatedRange)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t  kSize = 0x4000;
+	constexpr int64_t kBase = 0x350000000;
+	int64_t           allocation = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, 3 * kSize, kSize, 12, &allocation), OK);
+	ASSERT_EQ(allocation, kBase);
+
+	const int64_t middle = allocation + static_cast<int64_t>(kSize);
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(middle, kSize), OK);
+
+	int64_t replacement = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, kSize, kSize, 12, &replacement), OK);
+	EXPECT_EQ(replacement, middle);
+
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(allocation, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(replacement, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(allocation + 2 * static_cast<int64_t>(kSize), kSize), OK);
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, DirectMemoryReleaseAcceptsAContiguousAllocationSpan)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t  kSize = 0x4000;
+	constexpr int64_t kBase = 0x360000000;
+	int64_t           first = 0;
+	int64_t           second = 0;
+	int64_t           third = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, kSize, kSize, 12, &first), OK);
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, kSize, kSize, 12, &second), OK);
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, kSize, kSize, 12, &third), OK);
+	ASSERT_EQ(first, kBase);
+	ASSERT_EQ(second, kBase + static_cast<int64_t>(kSize));
+	ASSERT_EQ(third, kBase + 2 * static_cast<int64_t>(kSize));
+
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(first, 3 * kSize), OK);
+
+	int64_t coalesced = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, 3 * kSize, kSize, 12, &coalesced), OK);
+	EXPECT_EQ(coalesced, first);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(coalesced, 3 * kSize), OK);
 	Config::SetNextGen(false);
 }
 

@@ -159,12 +159,11 @@ static bool try_align_up(uintptr_t addr, uint64_t alignment, uintptr_t* result)
 
 // GpuMemory page ids pack vaddr>>14 into a uint32, so guest addresses must fit
 // below 2^46. Linux free mmap commonly returns ~0x7f... which is outside that
-// window and aborts on the first GPU-backed VideoOut registration. Keep free
-// guest placements in a low window modeled after Windows SYSTEM_MANAGED, below
-// the typical eboot base at 0x9_0000_0000.
-static constexpr uint64_t kGuestVaMax  = (1ull << 46) - 1ull;
+// window and aborts on the first GPU-backed VideoOut registration. Keep guest
+// placements inside an explicit window while allowing high user-space hints.
+static constexpr uint64_t  kGuestVaMax  = (1ull << 46) - 1ull;
 static constexpr uintptr_t kGuestHeapLo = 0x0000040000ull;
-static constexpr uintptr_t kGuestHeapHi = 0x0800000000ull;
+static constexpr uintptr_t kGuestHeapHi = 0x40000000000ull;
 
 static bool guest_va_compatible(uint64_t addr, uint64_t size)
 {
