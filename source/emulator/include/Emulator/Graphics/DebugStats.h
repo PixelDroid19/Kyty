@@ -163,6 +163,15 @@ struct DebugStatsSnapshot
 	uint32_t present_src_layout = 0; // VkImageLayout as uint
 };
 
+enum class DebugStatsWaitRegMemClass: uint8_t
+{
+	Satisfied,
+	CurrentProducer,
+	QueuedProducer,
+	ProducerMismatch,
+	ProducerNotFound
+};
+
 // Bounded temporal correlation captured at a slow VideoOut flip. These deltas
 // identify work observed between adjacent flips; they do not establish that
 // any recorded operation caused the slow frame.
@@ -224,6 +233,12 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t wait_reg_mem          = 0;
 	uint64_t wait_reg_mem_ns       = 0;
 	uint64_t wait_reg_mem_max_ns   = 0;
+	uint64_t wait_reg_mem_satisfied        = 0;
+	uint64_t wait_reg_mem_current_producer = 0;
+	uint64_t wait_reg_mem_queued_producer  = 0;
+	uint64_t wait_reg_mem_producer_mismatch  = 0;
+	uint64_t wait_reg_mem_producer_not_found = 0;
+	uint64_t wait_reg_mem_suspended          = 0;
 	uint64_t wait_flip_done        = 0;
 	uint64_t wait_flip_done_ns     = 0;
 	uint64_t wait_flip_done_max_ns = 0;
@@ -345,6 +360,8 @@ void DebugStatsRecordFenceWait(uint64_t elapsed_ns);
 void DebugStatsRecordAcquire(uint64_t elapsed_ns);
 void DebugStatsRecordPresent(uint64_t elapsed_ns);
 void DebugStatsRecordWaitRegMem(uint64_t elapsed_ns);
+void DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass wait_class);
+void DebugStatsRecordWaitRegMemSuspended();
 void DebugStatsRecordWaitFlipDone(uint64_t elapsed_ns);
 void DebugStatsRecordHash(uint64_t bytes, uint64_t elapsed_ns);
 void DebugStatsRecordDetile(uint64_t bytes, uint64_t elapsed_ns);

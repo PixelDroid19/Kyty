@@ -1036,6 +1036,12 @@ std::string BuildDiagnosticsResult(const Core::BringUp::Config& config, const Co
 	    static_cast<unsigned long long>(performance.shader_translation_cache_evictions),
 	    static_cast<unsigned long long>(performance.live_objects), performance.fps, performance.frame_time_ms);
 	out += performance_json;
+	out += ",\"wait_reg_mem_satisfied\":" + std::to_string(performance.wait_reg_mem_satisfied);
+	out += ",\"wait_reg_mem_current_producer\":" + std::to_string(performance.wait_reg_mem_current_producer);
+	out += ",\"wait_reg_mem_queued_producer\":" + std::to_string(performance.wait_reg_mem_queued_producer);
+	out += ",\"wait_reg_mem_producer_mismatch\":" + std::to_string(performance.wait_reg_mem_producer_mismatch);
+	out += ",\"wait_reg_mem_producer_not_found\":" + std::to_string(performance.wait_reg_mem_producer_not_found);
+	out += ",\"wait_reg_mem_suspended\":" + std::to_string(performance.wait_reg_mem_suspended);
 	out += ',';
 	AppendRenderResolutionPerformanceJson(Libs::Graphics::RenderResolutionGetSnapshot(), &out);
 	out += ',';

@@ -230,6 +230,16 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	DebugStatsRecordAcquire(300000);
 	DebugStatsRecordPresent(200000);
 	DebugStatsRecordWaitRegMem(400000);
+	DebugStatsRecordWaitRegMem(0);
+	DebugStatsRecordWaitRegMem(0);
+	DebugStatsRecordWaitRegMem(0);
+	DebugStatsRecordWaitRegMem(0);
+	DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::Satisfied);
+	DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::CurrentProducer);
+	DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::QueuedProducer);
+	DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::ProducerMismatch);
+	DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::ProducerNotFound);
+	DebugStatsRecordWaitRegMemSuspended();
 	DebugStatsRecordWaitFlipDone(500000);
 	DebugStatsRecordSubmissionComplete();
 
@@ -251,9 +261,15 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(first.presents, 1u);
 	EXPECT_EQ(first.present_ns, 200000u);
 	EXPECT_EQ(first.present_max_ns, 200000u);
-	EXPECT_EQ(first.wait_reg_mem, 1u);
+	EXPECT_EQ(first.wait_reg_mem, 5u);
 	EXPECT_EQ(first.wait_reg_mem_ns, 400000u);
 	EXPECT_EQ(first.wait_reg_mem_max_ns, 400000u);
+	EXPECT_EQ(first.wait_reg_mem_satisfied, 1u);
+	EXPECT_EQ(first.wait_reg_mem_current_producer, 1u);
+	EXPECT_EQ(first.wait_reg_mem_queued_producer, 1u);
+	EXPECT_EQ(first.wait_reg_mem_producer_mismatch, 1u);
+	EXPECT_EQ(first.wait_reg_mem_producer_not_found, 1u);
+	EXPECT_EQ(first.wait_reg_mem_suspended, 1u);
 	EXPECT_EQ(first.wait_flip_done, 1u);
 	EXPECT_EQ(first.wait_flip_done_ns, 500000u);
 	EXPECT_EQ(first.wait_flip_done_max_ns, 500000u);
@@ -286,6 +302,12 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(second.wait_reg_mem, 0u);
 	EXPECT_EQ(second.wait_reg_mem_ns, 0u);
 	EXPECT_EQ(second.wait_reg_mem_max_ns, 0u);
+	EXPECT_EQ(second.wait_reg_mem_satisfied, 0u);
+	EXPECT_EQ(second.wait_reg_mem_current_producer, 0u);
+	EXPECT_EQ(second.wait_reg_mem_queued_producer, 0u);
+	EXPECT_EQ(second.wait_reg_mem_producer_mismatch, 0u);
+	EXPECT_EQ(second.wait_reg_mem_producer_not_found, 0u);
+	EXPECT_EQ(second.wait_reg_mem_suspended, 0u);
 	EXPECT_EQ(second.wait_flip_done, 0u);
 	EXPECT_EQ(second.wait_flip_done_ns, 0u);
 	EXPECT_EQ(second.wait_flip_done_max_ns, 0u);

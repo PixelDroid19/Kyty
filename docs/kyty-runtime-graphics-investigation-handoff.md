@@ -1,6 +1,6 @@
 # Kyty Gen5 runtime graphics investigation handoff
 
-Updated: 2026-07-21
+Updated: 2026-08-06
 
 Status: the runtime advances into sustained gameplay-era presentation without
 a process-killing error. The opaque black sprite/prop rectangles are absent
@@ -338,12 +338,16 @@ against the same correct gameplay capture.
   while opaque early-Z shaders retain it.
 - Temporary MRT, descriptor, and frame-selection instrumentation was removed
   before the semantic commit.
-- Eliding the CPU fence wait for a `WAIT_REG_MEM` whose newest producer was in
-  the just-flushed submission was tested as a performance hypothesis. A
-  capture-enabled strict run then stopped on `VideoOut` buffer
-  `invalid_index`; the experiment is rejected because the fence also protects
-  presentation-buffer lifetime. Keep the fence until that lifetime contract
-  is redesigned with an independent completion proof.
+- Eliding the submit/fence boundary for a `WAIT_REG_MEM` whose newest producer
+  was still in the current recording was tested as a performance hypothesis.
+  A bounded baseline classified 24,604 waits: 13,374 were already satisfied
+  and all remaining 11,230 had a producer in the current submission; no queued,
+  mismatched, unknown, or suspended waits were observed. Continuing the
+  recording without publishing those callbacks stopped on `VideoOut` buffer
+  `invalid_index`. The experiment is rejected: same-queue GPU order alone does
+  not publish the host completion state needed by presentation. Keep the
+  boundary until GPU execution and callback publication have independent
+  completion proofs.
 
 ## Validation gate for the next change
 

@@ -41,6 +41,12 @@ std::atomic<uint64_t> g_present_max_ns {0};
 std::atomic<uint64_t> g_wait_reg_mem {0};
 std::atomic<uint64_t> g_wait_reg_mem_ns {0};
 std::atomic<uint64_t> g_wait_reg_mem_max_ns {0};
+std::atomic<uint64_t> g_wait_reg_mem_satisfied {0};
+std::atomic<uint64_t> g_wait_reg_mem_current_producer {0};
+std::atomic<uint64_t> g_wait_reg_mem_queued_producer {0};
+std::atomic<uint64_t> g_wait_reg_mem_producer_mismatch {0};
+std::atomic<uint64_t> g_wait_reg_mem_producer_not_found {0};
+std::atomic<uint64_t> g_wait_reg_mem_suspended {0};
 std::atomic<uint64_t> g_wait_flip_done {0};
 std::atomic<uint64_t> g_wait_flip_done_ns {0};
 std::atomic<uint64_t> g_wait_flip_done_max_ns {0};
@@ -237,6 +243,12 @@ struct PerformanceBaseline
 	uint64_t present_ns        = 0;
 	uint64_t wait_reg_mem      = 0;
 	uint64_t wait_reg_mem_ns   = 0;
+	uint64_t wait_reg_mem_satisfied          = 0;
+	uint64_t wait_reg_mem_current_producer   = 0;
+	uint64_t wait_reg_mem_queued_producer    = 0;
+	uint64_t wait_reg_mem_producer_mismatch  = 0;
+	uint64_t wait_reg_mem_producer_not_found = 0;
+	uint64_t wait_reg_mem_suspended          = 0;
 	uint64_t wait_flip_done    = 0;
 	uint64_t wait_flip_done_ns = 0;
 };
@@ -608,6 +620,12 @@ void DebugStatsInit()
 	g_wait_reg_mem.store(0, std::memory_order_relaxed);
 	g_wait_reg_mem_ns.store(0, std::memory_order_relaxed);
 	g_wait_reg_mem_max_ns.store(0, std::memory_order_relaxed);
+	g_wait_reg_mem_satisfied.store(0, std::memory_order_relaxed);
+	g_wait_reg_mem_current_producer.store(0, std::memory_order_relaxed);
+	g_wait_reg_mem_queued_producer.store(0, std::memory_order_relaxed);
+	g_wait_reg_mem_producer_mismatch.store(0, std::memory_order_relaxed);
+	g_wait_reg_mem_producer_not_found.store(0, std::memory_order_relaxed);
+	g_wait_reg_mem_suspended.store(0, std::memory_order_relaxed);
 	g_wait_flip_done.store(0, std::memory_order_relaxed);
 	g_wait_flip_done_ns.store(0, std::memory_order_relaxed);
 	g_wait_flip_done_max_ns.store(0, std::memory_order_relaxed);
@@ -846,6 +864,29 @@ void DebugStatsRecordPresent(uint64_t elapsed_ns)
 void DebugStatsRecordWaitRegMem(uint64_t elapsed_ns)
 {
 	RecordTimed(&g_wait_reg_mem, &g_wait_reg_mem_ns, &g_wait_reg_mem_max_ns, elapsed_ns);
+}
+
+void DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass wait_class)
+{
+	switch (wait_class)
+	{
+		case DebugStatsWaitRegMemClass::Satisfied: g_wait_reg_mem_satisfied.fetch_add(1, std::memory_order_relaxed); break;
+		case DebugStatsWaitRegMemClass::CurrentProducer:
+			g_wait_reg_mem_current_producer.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case DebugStatsWaitRegMemClass::QueuedProducer: g_wait_reg_mem_queued_producer.fetch_add(1, std::memory_order_relaxed); break;
+		case DebugStatsWaitRegMemClass::ProducerMismatch:
+			g_wait_reg_mem_producer_mismatch.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case DebugStatsWaitRegMemClass::ProducerNotFound:
+			g_wait_reg_mem_producer_not_found.fetch_add(1, std::memory_order_relaxed);
+			break;
+	}
+}
+
+void DebugStatsRecordWaitRegMemSuspended()
+{
+	g_wait_reg_mem_suspended.fetch_add(1, std::memory_order_relaxed);
 }
 
 void DebugStatsRecordWaitFlipDone(uint64_t elapsed_ns)
@@ -1169,6 +1210,12 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	const uint64_t present_ns        = g_present_ns.load(std::memory_order_relaxed);
 	const uint64_t wait_reg_mem      = g_wait_reg_mem.load(std::memory_order_relaxed);
 	const uint64_t wait_reg_mem_ns   = g_wait_reg_mem_ns.load(std::memory_order_relaxed);
+	const uint64_t wait_reg_mem_satisfied          = g_wait_reg_mem_satisfied.load(std::memory_order_relaxed);
+	const uint64_t wait_reg_mem_current_producer   = g_wait_reg_mem_current_producer.load(std::memory_order_relaxed);
+	const uint64_t wait_reg_mem_queued_producer    = g_wait_reg_mem_queued_producer.load(std::memory_order_relaxed);
+	const uint64_t wait_reg_mem_producer_mismatch  = g_wait_reg_mem_producer_mismatch.load(std::memory_order_relaxed);
+	const uint64_t wait_reg_mem_producer_not_found = g_wait_reg_mem_producer_not_found.load(std::memory_order_relaxed);
+	const uint64_t wait_reg_mem_suspended          = g_wait_reg_mem_suspended.load(std::memory_order_relaxed);
 	const uint64_t wait_flip_done    = g_wait_flip_done.load(std::memory_order_relaxed);
 	const uint64_t wait_flip_done_ns = g_wait_flip_done_ns.load(std::memory_order_relaxed);
 
@@ -1210,6 +1257,15 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.wait_reg_mem_ns = wait_reg_mem_ns - g_performance_baseline.wait_reg_mem_ns;
 	snapshot.wait_reg_mem_max_ns =
 	    reset ? g_wait_reg_mem_max_ns.exchange(0, std::memory_order_relaxed) : g_wait_reg_mem_max_ns.load(std::memory_order_relaxed);
+	snapshot.wait_reg_mem_satisfied = wait_reg_mem_satisfied - g_performance_baseline.wait_reg_mem_satisfied;
+	snapshot.wait_reg_mem_current_producer =
+	    wait_reg_mem_current_producer - g_performance_baseline.wait_reg_mem_current_producer;
+	snapshot.wait_reg_mem_queued_producer = wait_reg_mem_queued_producer - g_performance_baseline.wait_reg_mem_queued_producer;
+	snapshot.wait_reg_mem_producer_mismatch =
+	    wait_reg_mem_producer_mismatch - g_performance_baseline.wait_reg_mem_producer_mismatch;
+	snapshot.wait_reg_mem_producer_not_found =
+	    wait_reg_mem_producer_not_found - g_performance_baseline.wait_reg_mem_producer_not_found;
+	snapshot.wait_reg_mem_suspended = wait_reg_mem_suspended - g_performance_baseline.wait_reg_mem_suspended;
 	snapshot.wait_flip_done    = wait_flip_done - g_performance_baseline.wait_flip_done;
 	snapshot.wait_flip_done_ns = wait_flip_done_ns - g_performance_baseline.wait_flip_done_ns;
 	snapshot.wait_flip_done_max_ns =
@@ -1371,10 +1427,33 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 
 	if (reset)
 	{
-		g_performance_baseline = {now_ms,          draws,          dispatches,       alloc_bytes,     free_bytes, creates,
-		                          frees,           flips,          buffer_flushes,   command_buffers, submits,    fence_waits,
-		                          fence_wait_ns,   acquires,       acquire_ns,       presents,        present_ns, wait_reg_mem,
-		                          wait_reg_mem_ns, wait_flip_done, wait_flip_done_ns};
+		g_performance_baseline = {now_ms,
+		                          draws,
+		                          dispatches,
+		                          alloc_bytes,
+		                          free_bytes,
+		                          creates,
+		                          frees,
+		                          flips,
+		                          buffer_flushes,
+		                          command_buffers,
+		                          submits,
+		                          fence_waits,
+		                          fence_wait_ns,
+		                          acquires,
+		                          acquire_ns,
+		                          presents,
+		                          present_ns,
+		                          wait_reg_mem,
+		                          wait_reg_mem_ns,
+		                          wait_reg_mem_satisfied,
+		                          wait_reg_mem_current_producer,
+		                          wait_reg_mem_queued_producer,
+		                          wait_reg_mem_producer_mismatch,
+		                          wait_reg_mem_producer_not_found,
+		                          wait_reg_mem_suspended,
+		                          wait_flip_done,
+		                          wait_flip_done_ns};
 	}
 	return snapshot;
 }

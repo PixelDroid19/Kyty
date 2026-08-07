@@ -673,6 +673,7 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	TraceWait("wait32_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 	if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 	{
+		DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::Satisfied);
 		TraceWait("wait32_satisfied", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 		return;
 	}
@@ -684,12 +685,21 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	                                              m_buffer[m_current_buffer] != nullptr &&
 	                                              m_buffer[m_current_buffer]->GetSubmissionId(&current_submission);
 	const bool           producer_is_current_submission = has_current_submission && dependency.producer == current_submission;
+	if (producer == GpuSubmissionResult::Success)
+	{
+		DebugStatsRecordWaitRegMemClass(producer_is_current_submission ? DebugStatsWaitRegMemClass::CurrentProducer
+		                                                                 : DebugStatsWaitRegMemClass::QueuedProducer);
+	} else if (producer == GpuSubmissionResult::ProducerValueMismatch)
+	{
+		DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::ProducerMismatch);
+	} else if (producer == GpuSubmissionResult::ProducerNotFound)
+	{
+		DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::ProducerNotFound);
+	}
 	if (producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
 	                     producer != GpuSubmissionResult::ProducerNotFound) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::Pro condition ignored (continuing)\n"); }
 	// Submit the command buffer before resolving the dependency so pending EOP
-	// labels become visible to the completion publisher.  A matching producer
-	// is already ordered by the submission graph; keep that path in the current
-	// decode so render-pass continuity is preserved.  Unknown or mismatched
+	// labels and completion callbacks become visible. Unknown or mismatched
 	// producers use a real DCB suspension instead of a CPU poll.
 	// When the awaited producer is already queued, avoid the redundant
 	// publication wait for the latest completed submission; the subsequent
@@ -711,6 +721,7 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 			return;
 		}
 	}
+	DebugStatsRecordWaitRegMemSuspended();
 	TraceWait("wait32_suspended", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 	RequestSuspendedWait(addr, sizeof(uint32_t), func, ref, mask);
 	return;
@@ -733,6 +744,7 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	TraceWait("wait64_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 	if (GraphicsWaitRegMemCompare(func, *addr, ref, mask))
 	{
+		DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::Satisfied);
 		TraceWait("wait64_satisfied", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 		return;
 	}
@@ -744,11 +756,21 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	                                              m_buffer[m_current_buffer] != nullptr &&
 	                                              m_buffer[m_current_buffer]->GetSubmissionId(&current_submission);
 	const bool           producer_is_current_submission = has_current_submission && dependency.producer == current_submission;
+	if (producer == GpuSubmissionResult::Success)
+	{
+		DebugStatsRecordWaitRegMemClass(producer_is_current_submission ? DebugStatsWaitRegMemClass::CurrentProducer
+		                                                                 : DebugStatsWaitRegMemClass::QueuedProducer);
+	} else if (producer == GpuSubmissionResult::ProducerValueMismatch)
+	{
+		DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::ProducerMismatch);
+	} else if (producer == GpuSubmissionResult::ProducerNotFound)
+	{
+		DebugStatsRecordWaitRegMemClass(DebugStatsWaitRegMemClass::ProducerNotFound);
+	}
 	if (producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::ProducerValueMismatch &&
 	                     producer != GpuSubmissionResult::ProducerNotFound) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: producer != GpuSubmissionResult::Success && producer != GpuSubmissionResult::Pro condition ignored (continuing)\n"); }
-	// Keep a matching producer in the current decode for render-pass continuity;
-	// suspend only when the tracker cannot prove that the current value will
-	// satisfy this wait.
+	// Submit before resolving the dependency so completion callbacks publish in
+	// exact submission order. Suspend only when no matching producer is proven.
 	// Avoid the redundant publication wait for the latest completed submission;
 	// the subsequent WaitSubmission for the specific producer covers ordering.
 	BufferFlushForGpuWait();
@@ -762,6 +784,7 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 			return;
 		}
 	}
+	DebugStatsRecordWaitRegMemSuspended();
 	TraceWait("wait64_suspended", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask, m_sumbit_id);
 	RequestSuspendedWait(addr, sizeof(uint64_t), func, ref, mask);
 	return;

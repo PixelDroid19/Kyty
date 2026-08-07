@@ -256,6 +256,13 @@ std::string PerformanceResult(bool reset)
 	              static_cast<unsigned long long>(stats.shader_translation_cache_evictions),
 	              static_cast<unsigned long long>(stats.live_objects), stats.fps, stats.frame_time_ms);
 	std::string out(buf);
+	out += "\"wait_reg_mem_satisfied\":" + std::to_string(stats.wait_reg_mem_satisfied);
+	out += ",\"wait_reg_mem_current_producer\":" + std::to_string(stats.wait_reg_mem_current_producer);
+	out += ",\"wait_reg_mem_queued_producer\":" + std::to_string(stats.wait_reg_mem_queued_producer);
+	out += ",\"wait_reg_mem_producer_mismatch\":" + std::to_string(stats.wait_reg_mem_producer_mismatch);
+	out += ",\"wait_reg_mem_producer_not_found\":" + std::to_string(stats.wait_reg_mem_producer_not_found);
+	out += ",\"wait_reg_mem_suspended\":" + std::to_string(stats.wait_reg_mem_suspended);
+	out += ',';
 	out += "\"present_source\":{\"width\":";
 	out += std::to_string(stats.present_src_w);
 	out += ",\"height\":";

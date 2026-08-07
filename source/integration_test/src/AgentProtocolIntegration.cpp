@@ -82,6 +82,11 @@ int ScenarioProtocolVersionConsistent()
 	Expect(diag_body.find("\"acquire_max_ns\"") != std::string::npos, "performance has bounded acquire timing");
 	Expect(diag_body.find("\"present_max_ns\"") != std::string::npos, "performance has bounded present timing");
 	Expect(diag_body.find("\"wait_reg_mem_max_ns\"") != std::string::npos, "performance has bounded WaitRegMem timing");
+	Expect(diag_body.find("\"wait_reg_mem_current_producer\"") != std::string::npos,
+	       "performance classifies current-buffer WaitRegMem producers");
+	Expect(diag_body.find("\"wait_reg_mem_queued_producer\"") != std::string::npos,
+	       "performance classifies queued WaitRegMem producers");
+	Expect(diag_body.find("\"wait_reg_mem_suspended\"") != std::string::npos, "performance counts suspended WaitRegMem barriers");
 	Expect(diag_body.find("\"wait_flip_done_max_ns\"") != std::string::npos, "performance has bounded WaitFlipDone timing");
 	Expect(diag_body.find("\"in_flight_current\"") != std::string::npos, "performance has current submissions in flight");
 	Expect(diag_body.find("\"in_flight_max\"") != std::string::npos, "performance has bounded peak submissions in flight");
