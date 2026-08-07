@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/RuntimeLinker.h"
@@ -309,6 +310,8 @@ std::string PerformanceResult(bool reset)
 	out += std::to_string(stats.present_dst_h);
 	out += "},";
 	AppendRenderResolutionPerformanceJson(Libs::Graphics::RenderResolutionGetSnapshot(), &out);
+	out += ',';
+	AppendKernelMemoryPerformanceJson(Kernel::Memory::KernelGetMemorySnapshot(), &out);
 	out += ',';
 	AppendGpuMemoryPerformanceJson(stats, &out);
 	out += ',';

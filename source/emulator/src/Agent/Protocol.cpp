@@ -6,6 +6,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/RenderResolutionCoordinator.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Validation/DomainValidators.h"
 
 #include <cctype>
@@ -753,6 +754,22 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		*out += '}';
 	}
 	*out += "]}}";
+}
+
+void AppendKernelMemoryPerformanceJson(const Kernel::Memory::KernelMemorySnapshot& memory, std::string* out)
+{
+	EXIT_IF(out == nullptr);
+
+	*out += "\"kernel_memory\":{\"direct_allocated_bytes\":" + std::to_string(memory.direct_allocated_bytes);
+	*out += ",\"direct_mapped_bytes\":" + std::to_string(memory.direct_mapped_bytes);
+	*out += ",\"direct_unique_mapped_bytes\":" + std::to_string(memory.direct_unique_mapped_bytes);
+	*out += ",\"direct_released_mapped_bytes\":" + std::to_string(memory.direct_released_mapped_bytes);
+	*out += ",\"direct_allocation_count\":" + std::to_string(memory.direct_allocation_count);
+	*out += ",\"direct_mapping_count\":" + std::to_string(memory.direct_mapping_count);
+	*out += ",\"direct_released_mapping_count\":" + std::to_string(memory.direct_released_mapping_count);
+	*out += ",\"flexible_mapped_bytes\":" + std::to_string(memory.flexible_mapped_bytes);
+	*out += ",\"flexible_mapping_count\":" + std::to_string(memory.flexible_mapping_count);
+	*out += '}';
 }
 
 void AppendSlowFramePerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out)

@@ -20,6 +20,10 @@ struct DebugStatsPerformanceSnapshot;
 struct RenderResolutionSnapshot;
 } // namespace Kyty::Libs::Graphics
 
+namespace Kyty::Kernel::Memory {
+struct KernelMemorySnapshot;
+} // namespace Kyty::Kernel::Memory
+
 namespace Kyty::Emulator::Agent {
 
 enum class Tool
@@ -82,6 +86,7 @@ bool ArgsGetU32(const std::string& args_json, const char* key, uint32_t* out);
 bool ArgsGetBool(const std::string& args_json, const char* key, bool* out);
 
 void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out);
+void AppendKernelMemoryPerformanceJson(const Kernel::Memory::KernelMemorySnapshot& memory, std::string* out);
 void AppendSlowFramePerformanceJson(const Libs::Graphics::DebugStatsPerformanceSnapshot& performance, std::string* out);
 void AppendRenderResolutionPerformanceJson(const Libs::Graphics::RenderResolutionSnapshot& resolution, std::string* out);
 

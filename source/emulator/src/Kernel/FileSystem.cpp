@@ -18,8 +18,11 @@
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <sys/stat.h>
 #include <unordered_map>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -36,13 +39,6 @@ constexpr uint8_t kStandardDescriptorMask = (1u << DESCRIPTOR_MIN) - 1u;
 // Guest standard descriptors are logical handles. Their lifecycle must not
 // affect the emulator process streams that provide diagnostics and input.
 static std::atomic_uint8_t g_standard_descriptors {kStandardDescriptorMask};
-
-// PS5 SSD files report a non-zero st_flags indicating hardware async-read
-// capability. Unity (and other engines) check this field to decide whether
-// APR (Async Parallel Read) is usable. A zero value causes the engine to
-// reject the file for APR and fall back to synchronous I/O — or log
-// "not considered suitable for apr reads flags:0x0".
-constexpr uint32_t kPs5StFlagsAprCapable = 0x00000001u;
 
 // ---------------------------------------------------------------------------
 // Guest-writable sandbox
@@ -197,7 +193,6 @@ struct File
 	std::atomic_bool             opened;
 	std::atomic_bool             directory;
 	std::atomic_uint32_t         status_flags {0};
-	std::atomic_uint32_t         ref_count {1};
 	Core::Mutex                  mutex;
 	Vector<Core::File::DirEntry> dents;
 	uint32_t                     dents_index;
@@ -206,6 +201,8 @@ struct File
 class FileDescriptors
 {
 public:
+	using FileHandle = std::shared_ptr<File>;
+
 	FileDescriptors() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } }
 	virtual ~FileDescriptors() { KYTY_NOT_IMPLEMENTED; }
 
@@ -215,16 +212,15 @@ public:
 	void  DeleteDescriptor(int d);
 	int   DupDescriptor(int old_d);
 	int   Dup2Descriptor(int old_d, int new_d);
-	File* GetFile(int d);
-	File* GetFile(const String& real_name);
+	FileHandle GetFile(int d);
+	FileHandle GetFile(const String& real_name);
 	void  CloseAll();
 
 private:
-	void  ReleaseFile(File* file);
 	void  EnsureDescriptorCapacity(uint32_t index);
 
-	Vector<File*> m_files;
-	Core::Mutex   m_mutex;
+	std::vector<FileHandle> m_files;
+	Core::Mutex             m_mutex;
 };
 
 static MountPoints*     g_mount_points = nullptr;
@@ -243,55 +239,29 @@ int FileDescriptors::CreateDescriptor()
 {
 	Core::LockGuard lock(m_mutex);
 
-	auto* file      = new File {};
+	auto file       = std::make_shared<File>();
 	file->opened    = false;
 	file->directory = false;
-	file->ref_count = 1;
 
-	int files_num = static_cast<int>(m_files.Size());
+	int files_num = static_cast<int>(m_files.size());
 	for (int index = 0; index < files_num; index++)
 	{
-		if (m_files.At(index) == nullptr)
+		if (m_files[static_cast<size_t>(index)] == nullptr)
 		{
-			m_files[index] = file;
+			m_files[static_cast<size_t>(index)] = file;
 			return index + DESCRIPTOR_MIN;
 		}
 	}
 
-	m_files.Add(file);
-	return static_cast<int>(m_files.Size()) + DESCRIPTOR_MIN - 1;
-}
-
-void FileDescriptors::ReleaseFile(File* file)
-{
-	if (file == nullptr)
-	{
-		return;
-	}
-
-	const uint32_t remaining = file->ref_count.fetch_sub(1, std::memory_order_acq_rel) - 1;
-	if (remaining > 0)
-	{
-		return;
-	}
-
-	if (file->opened || !file->f.IsInvalid())
-	{
-		if (!file->directory)
-		{
-			file->f.Close();
-		}
-		file->opened = false;
-	}
-
-	delete file;
+	m_files.push_back(std::move(file));
+	return static_cast<int>(m_files.size()) + DESCRIPTOR_MIN - 1;
 }
 
 void FileDescriptors::EnsureDescriptorCapacity(uint32_t index)
 {
-	while (m_files.Size() <= index)
+	while (m_files.size() <= index)
 	{
-		m_files.Add(nullptr);
+		m_files.emplace_back();
 	}
 }
 
@@ -301,12 +271,9 @@ void FileDescriptors::DeleteDescriptor(int d)
 
 	auto index = static_cast<uint32_t>(d - DESCRIPTOR_MIN);
 
-	EXIT_IF(!m_files.IndexValid(index));
-	EXIT_IF(m_files.At(index) == nullptr);
-
-	auto* file = m_files.At(index);
-	m_files[index] = nullptr;
-	ReleaseFile(file);
+	EXIT_IF(index >= m_files.size());
+	EXIT_IF(m_files[index] == nullptr);
+	m_files[index].reset();
 }
 
 int FileDescriptors::DupDescriptor(int old_d)
@@ -319,22 +286,22 @@ int FileDescriptors::DupDescriptor(int old_d)
 	}
 
 	const auto old_index = static_cast<uint32_t>(old_d - DESCRIPTOR_MIN);
-	if (!m_files.IndexValid(old_index))
+	if (old_index >= m_files.size())
 	{
 		return KERNEL_ERROR_EBADF;
 	}
 
-	auto* file = m_files.At(old_index);
+	auto file = m_files[old_index];
 	if (file == nullptr || !file->opened)
 	{
 		return KERNEL_ERROR_EBADF;
 	}
 
 	int new_fd = -1;
-	const int  files_num = static_cast<int>(m_files.Size());
+	const int  files_num = static_cast<int>(m_files.size());
 	for (int index = 0; index < files_num; index++)
 	{
-		if (m_files.At(static_cast<uint32_t>(index)) == nullptr)
+		if (m_files[static_cast<size_t>(index)] == nullptr)
 		{
 			new_fd = index + DESCRIPTOR_MIN;
 			m_files[static_cast<uint32_t>(index)] = file;
@@ -344,11 +311,9 @@ int FileDescriptors::DupDescriptor(int old_d)
 
 	if (new_fd < 0)
 	{
-		m_files.Add(file);
-		new_fd = static_cast<int>(m_files.Size()) + DESCRIPTOR_MIN - 1;
+		m_files.push_back(file);
+		new_fd = static_cast<int>(m_files.size()) + DESCRIPTOR_MIN - 1;
 	}
-
-	file->ref_count.fetch_add(1, std::memory_order_relaxed);
 	return new_fd;
 }
 
@@ -362,12 +327,12 @@ int FileDescriptors::Dup2Descriptor(int old_d, int new_d)
 	}
 
 	const auto old_index = static_cast<uint32_t>(old_d - DESCRIPTOR_MIN);
-	if (!m_files.IndexValid(old_index))
+	if (old_index >= m_files.size())
 	{
 		return KERNEL_ERROR_EBADF;
 	}
 
-	auto* source = m_files.At(old_index);
+	auto source = m_files[old_index];
 	if (source == nullptr || !source->opened)
 	{
 		return KERNEL_ERROR_EBADF;
@@ -381,19 +346,11 @@ int FileDescriptors::Dup2Descriptor(int old_d, int new_d)
 	const auto new_index = static_cast<uint32_t>(new_d - DESCRIPTOR_MIN);
 	EnsureDescriptorCapacity(new_index);
 
-	auto* existing = m_files.At(new_index);
-	if (existing != nullptr && existing != source)
-	{
-		m_files[new_index] = nullptr;
-		ReleaseFile(existing);
-	}
-
-	source->ref_count.fetch_add(1, std::memory_order_relaxed);
 	m_files[new_index] = source;
 	return new_d;
 }
 
-File* FileDescriptors::GetFile(int d)
+FileDescriptors::FileHandle FileDescriptors::GetFile(int d)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -404,19 +361,19 @@ File* FileDescriptors::GetFile(int d)
 
 	auto index = static_cast<uint32_t>(d - DESCRIPTOR_MIN);
 
-	if (!m_files.IndexValid(index))
+	if (index >= m_files.size())
 	{
 		return nullptr;
 	}
 
-	return m_files.At(index);
+	return m_files[index];
 }
 
-File* FileDescriptors::GetFile(const String& real_name)
+FileDescriptors::FileHandle FileDescriptors::GetFile(const String& real_name)
 {
 	Core::LockGuard lock(m_mutex);
 
-	for (auto* f: m_files)
+	for (const auto& f: m_files)
 	{
 		if (f != nullptr && f->real_name == real_name)
 		{
@@ -433,13 +390,9 @@ void FileDescriptors::CloseAll()
 
 	for (auto& f: m_files)
 	{
-		if (f != nullptr && f->opened)
-		{
-			f->f.Close();
-			delete f;
-			f = nullptr;
-		}
+		f.reset();
 	}
+	m_files.clear();
 }
 
 void MountPoints::Mount(const String& folder, const String& point)
@@ -616,7 +569,7 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 	if (directory && (trunc || creat)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int   descriptor = g_files->CreateDescriptor();
-	auto* file       = g_files->GetFile(descriptor);
+	auto file        = g_files->GetFile(descriptor);
 
 	EXIT_IF(file == nullptr || file->opened || file->directory);
 
@@ -762,7 +715,7 @@ int KYTY_SYSV_ABI KernelClose(int d)
 
 	EXIT_IF(g_files == nullptr);
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 
 	if (file == nullptr)
 	{
@@ -770,13 +723,6 @@ int KYTY_SYSV_ABI KernelClose(int d)
 	}
 
 	EXIT_IF(!file->opened);
-
-	if (!file->directory)
-	{
-		file->f.Close();
-	}
-
-	file->opened = false;
 
 	KYTY_LOG_DEBUG("\tClose: " FG_WHITE BOLD "%s" DEFAULT "\n", file->real_name.C_Str());
 
@@ -798,6 +744,44 @@ bool KernelIsStandardDescriptorOpen(int d)
 	return (g_standard_descriptors.load(std::memory_order_acquire) & descriptor_bit) != 0;
 }
 
+static uint64_t ReadFileToCompletion(Core::File& file, void* buffer, size_t size)
+{
+	auto*    out   = static_cast<uint8_t*>(buffer);
+	uint64_t total = 0;
+	while (total < size)
+	{
+		const uint64_t remaining = static_cast<uint64_t>(size) - total;
+		const uint32_t request   = remaining > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(remaining);
+		uint32_t       current   = 0;
+		file.Read(out + total, request, &current);
+		total += current;
+		if (current < request)
+		{
+			break;
+		}
+	}
+	return total;
+}
+
+static uint64_t WriteFileToCompletion(Core::File& file, const void* buffer, size_t size)
+{
+	const auto* input = static_cast<const uint8_t*>(buffer);
+	uint64_t    total = 0;
+	while (total < size)
+	{
+		const uint64_t remaining = static_cast<uint64_t>(size) - total;
+		const uint32_t request   = remaining > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(remaining);
+		uint32_t       current   = 0;
+		file.Write(input + total, request, &current);
+		total += current;
+		if (current < request)
+		{
+			break;
+		}
+	}
+	return total;
+}
+
 int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 {
 	PRINT_NAME();
@@ -809,40 +793,43 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 		return KERNEL_ERROR_EPERM;
 	}
 
-	if (buf == nullptr)
+	if (buf == nullptr && nbytes != 0)
 	{
 		return KERNEL_ERROR_EFAULT;
 	}
+	if (nbytes > static_cast<size_t>(INT64_MAX))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 
 	if (file == nullptr)
 	{
 		return KERNEL_ERROR_EBADF;
 	}
 
-	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	EXIT_IF(!file->opened);
-
-	if (nbytes > UINT_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	file->mutex.Lock();
-
-	bool     is_invalid = file->f.IsInvalid();
-	uint32_t bytes_read = 0;
-	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
-
-	file->mutex.Unlock();
-	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
-
-	if (is_invalid)
+	if (file->directory)
 	{
-		KYTY_LOG_DEBUG("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return KERNEL_ERROR_EISDIR;
+	}
+	if (!file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
 	}
 
-	KYTY_LOG_DEBUG("\tRead %u bytes from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, file->real_name.C_Str());
+	uint64_t bytes_read = 0;
+	{
+		Core::LockGuard lock(file->mutex);
+		if (file->f.IsInvalid())
+		{
+			return KERNEL_ERROR_EIO;
+		}
+		bytes_read = ReadFileToCompletion(file->f, buf, nbytes);
+	}
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
+
+	KYTY_LOG_DEBUG("\tRead %" PRIu64 " bytes from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, file->real_name.C_Str());
 
 	FsTrace("read", file->name.C_Str(), static_cast<int64_t>(nbytes), bytes_read);
 
@@ -860,39 +847,42 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes)
 		return KERNEL_ERROR_EPERM;
 	}
 
-	if (buf == nullptr)
+	if (buf == nullptr && nbytes != 0)
 	{
 		return KERNEL_ERROR_EFAULT;
 	}
+	if (nbytes > static_cast<size_t>(INT64_MAX))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 
 	if (file == nullptr)
 	{
 		return KERNEL_ERROR_EBADF;
 	}
 
-	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	EXIT_IF(!file->opened);
-
-	if (nbytes > UINT_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	file->mutex.Lock();
-
-	bool     is_invalid    = file->f.IsInvalid();
-	uint32_t bytes_written = 0;
-	file->f.Write(buf, static_cast<uint32_t>(nbytes), &bytes_written);
-
-	file->mutex.Unlock();
-
-	if (is_invalid)
+	if (file->directory)
 	{
-		KYTY_LOG_DEBUG("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return KERNEL_ERROR_EISDIR;
+	}
+	if (!file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
 	}
 
-	KYTY_LOG_DEBUG("\tWrite %u bytes to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, file->real_name.C_Str());
+	uint64_t bytes_written = 0;
+	{
+		Core::LockGuard lock(file->mutex);
+		if (file->f.IsInvalid())
+		{
+			return KERNEL_ERROR_EIO;
+		}
+		bytes_written = WriteFileToCompletion(file->f, buf, nbytes);
+	}
+
+	KYTY_LOG_DEBUG("\tWrite %" PRIu64 " bytes to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, file->real_name.C_Str());
 
 	return bytes_written;
 }
@@ -908,7 +898,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 		return KERNEL_ERROR_EPERM;
 	}
 
-	if (buf == nullptr)
+	if (buf == nullptr && nbytes != 0)
 	{
 		return KERNEL_ERROR_EFAULT;
 	}
@@ -917,39 +907,50 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	if (nbytes > static_cast<size_t>(INT64_MAX))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 
 	if (file == nullptr)
 	{
 		return KERNEL_ERROR_EBADF;
 	}
 
-	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	EXIT_IF(!file->opened);
-
-	if (nbytes > UINT_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	file->mutex.Lock();
-
-	bool     is_invalid = file->f.IsInvalid();
-	auto     pos        = file->f.Tell();
-	uint32_t bytes_read = 0;
-	file->f.Seek(offset);
-	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
-	file->f.Seek(pos);
-
-	file->mutex.Unlock();
-	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
-
-	if (is_invalid)
+	if (file->directory)
 	{
-		KYTY_LOG_DEBUG("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return KERNEL_ERROR_EISDIR;
+	}
+	if (!file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
 	}
 
-	KYTY_LOG_DEBUG("\tRead %u bytes (pos = %" PRId64 ") from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, offset, file->real_name.C_Str());
+	uint64_t bytes_read = 0;
+	{
+		Core::LockGuard lock(file->mutex);
+		if (file->f.IsInvalid())
+		{
+			return KERNEL_ERROR_EIO;
+		}
+		const uint64_t position = file->f.Tell();
+		if (!file->f.Seek(static_cast<uint64_t>(offset)))
+		{
+			(void)file->f.Seek(position);
+			return KERNEL_ERROR_EINVAL;
+		}
+		bytes_read = ReadFileToCompletion(file->f, buf, nbytes);
+		if (!file->f.Seek(position))
+		{
+			return KERNEL_ERROR_EIO;
+		}
+	}
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
+
+	KYTY_LOG_DEBUG("\tRead %" PRIu64 " bytes (pos = %" PRId64 ") from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, offset,
+	               file->real_name.C_Str());
 
 	FsTrace("pread", file->name.C_Str(), offset, bytes_read);
 
@@ -967,7 +968,7 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 		return KERNEL_ERROR_EPERM;
 	}
 
-	if (buf == nullptr)
+	if (buf == nullptr && nbytes != 0)
 	{
 		return KERNEL_ERROR_EFAULT;
 	}
@@ -976,38 +977,49 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	if (nbytes > static_cast<size_t>(INT64_MAX))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 
 	if (file == nullptr)
 	{
 		return KERNEL_ERROR_EBADF;
 	}
 
-	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	EXIT_IF(!file->opened);
-
-	if (nbytes > UINT_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	file->mutex.Lock();
-
-	bool     is_invalid    = file->f.IsInvalid();
-	auto     pos           = file->f.Tell();
-	uint32_t bytes_written = 0;
-	file->f.Seek(offset);
-	file->f.Write(buf, static_cast<uint32_t>(nbytes), &bytes_written);
-	file->f.Seek(pos);
-
-	file->mutex.Unlock();
-
-	if (is_invalid)
+	if (file->directory)
 	{
-		KYTY_LOG_DEBUG("\tfile is invalid\n");
-		return KERNEL_ERROR_EIO;
+		return KERNEL_ERROR_EISDIR;
+	}
+	if (!file->opened)
+	{
+		return KERNEL_ERROR_EBADF;
 	}
 
-	KYTY_LOG_DEBUG("\tWrite %u bytes (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, offset, file->real_name.C_Str());
+	uint64_t bytes_written = 0;
+	{
+		Core::LockGuard lock(file->mutex);
+		if (file->f.IsInvalid())
+		{
+			return KERNEL_ERROR_EIO;
+		}
+		const uint64_t position = file->f.Tell();
+		if (!file->f.Seek(static_cast<uint64_t>(offset)))
+		{
+			(void)file->f.Seek(position);
+			return KERNEL_ERROR_EINVAL;
+		}
+		bytes_written = WriteFileToCompletion(file->f, buf, nbytes);
+		if (!file->f.Seek(position))
+		{
+			return KERNEL_ERROR_EIO;
+		}
+	}
+
+	KYTY_LOG_DEBUG("\tWrite %" PRIu64 " bytes (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, offset,
+	               file->real_name.C_Str());
 
 	return bytes_written;
 }
@@ -1023,56 +1035,79 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence)
 		return KERNEL_ERROR_EPERM;
 	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 
 	if (file == nullptr)
 	{
 		return KERNEL_ERROR_EBADF;
 	}
 
-	if (file->directory) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	EXIT_IF(!file->opened);
-
-	file->mutex.Lock();
-
-	bool is_invalid = file->f.IsInvalid();
-
-	if (whence == 1)
+	if (file->directory)
 	{
-		offset = static_cast<int64_t>(file->f.Tell()) + offset;
-		whence = 0;
+		return KERNEL_ERROR_EISDIR;
 	}
-
-	if (whence == 2)
+	if (!file->opened)
 	{
-		offset = static_cast<int64_t>(file->f.Size()) + offset;
-		whence = 0;
+		return KERNEL_ERROR_EBADF;
 	}
-
-	if (whence != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	if (offset < 0)
+	if (whence < 0 || whence > 2)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	file->f.Seek(offset);
-	auto pos = static_cast<int64_t>(file->f.Tell());
-
-	EXIT_IF(pos != offset);
-
-	file->mutex.Unlock();
-
-	if (is_invalid)
+	Core::LockGuard lock(file->mutex);
+	if (file->f.IsInvalid())
 	{
-		KYTY_LOG_DEBUG("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
 	}
 
-	KYTY_LOG_DEBUG("\tLseek (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", offset, file->real_name.C_Str());
+	uint64_t base = 0;
+	if (whence == 1)
+	{
+		base = file->f.Tell();
+	} else if (whence == 2)
+	{
+		base = file->f.Size();
+	}
 
-	return pos;
+	uint64_t target = 0;
+	if (whence == 0)
+	{
+		if (offset < 0)
+		{
+			return KERNEL_ERROR_EINVAL;
+		}
+		target = static_cast<uint64_t>(offset);
+	} else if (offset < 0)
+	{
+		const uint64_t magnitude = static_cast<uint64_t>(-(offset + 1)) + 1u;
+		if (magnitude > base)
+		{
+			return KERNEL_ERROR_EINVAL;
+		}
+		target = base - magnitude;
+	} else
+	{
+		const uint64_t delta = static_cast<uint64_t>(offset);
+		if (delta > std::numeric_limits<uint64_t>::max() - base)
+		{
+			return KERNEL_ERROR_EINVAL;
+		}
+		target = base + delta;
+	}
+
+	if (target > static_cast<uint64_t>(INT64_MAX) || !file->f.Seek(target))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+	const uint64_t position = file->f.Tell();
+	if (position != target)
+	{
+		return KERNEL_ERROR_EIO;
+	}
+
+	KYTY_LOG_DEBUG("\tLseek (pos = %" PRIu64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", position, file->real_name.C_Str());
+	return static_cast<int64_t>(position);
 }
 
 int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
@@ -1106,7 +1141,7 @@ int KYTY_SYSV_ABI KernelStat(const char* path, FileStat* sb)
 	memset(sb, 0, sizeof(FileStat));
 
 	sb->st_mode = 0000777u | (is_dir ? 0040000u : 0100000u);
-	sb->st_flags = is_dir ? 0u : kPs5StFlagsAprCapable;
+	sb->st_flags = 0;
 
 	Core::DateTime at;
 	Core::DateTime wt;
@@ -1149,7 +1184,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 		return KERNEL_ERROR_EFAULT;
 	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 
 	if (file == nullptr)
 	{
@@ -1179,14 +1214,14 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 #endif
 		sb->st_size = static_cast<int64_t>(host_stat.st_size);
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		sb->st_flags       = ((host_stat.st_mode & _S_IFMT) == _S_IFREG) ? kPs5StFlagsAprCapable : 0u;
+		sb->st_flags       = 0;
 		sb->st_blksize     = 512;
 		sb->st_blocks      = (sb->st_size + 511) / 512;
 		sb->st_atim.tv_sec = static_cast<int64_t>(host_stat.st_atime);
 		sb->st_mtim.tv_sec = static_cast<int64_t>(host_stat.st_mtime);
 		sb->st_ctim.tv_sec = static_cast<int64_t>(host_stat.st_ctime);
 #else
-		sb->st_flags        = S_ISREG(host_stat.st_mode) ? kPs5StFlagsAprCapable : 0u;
+		sb->st_flags        = 0;
 		sb->st_blocks       = static_cast<int64_t>(host_stat.st_blocks);
 		sb->st_blksize      = static_cast<uint32_t>(host_stat.st_blksize);
 		sb->st_atim.tv_sec  = static_cast<int64_t>(host_stat.st_atim.tv_sec);
@@ -1207,7 +1242,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 	memset(sb, 0, sizeof(FileStat));
 
 	sb->st_mode = 0000777u | (file->directory ? 0040000u : 0100000u);
-	sb->st_flags = file->directory ? 0u : kPs5StFlagsAprCapable;
+	sb->st_flags = 0;
 
 	Core::DateTime at;
 	Core::DateTime wt;
@@ -1262,7 +1297,7 @@ int KYTY_SYSV_ABI KernelFtruncate(int d, int64_t length)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 	if (file == nullptr || !file->opened)
 	{
 		return KERNEL_ERROR_EBADF;
@@ -1287,7 +1322,7 @@ int KYTY_SYSV_ABI KernelFcntl(int d, int command, int64_t argument)
 	PRINT_NAME();
 
 	EXIT_IF(g_files == nullptr);
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 	if (file == nullptr || !file->opened)
 	{
 		return KERNEL_ERROR_EBADF;
@@ -1325,7 +1360,7 @@ int KYTY_SYSV_ABI KernelGetReadAvailability(int d, uint64_t* available)
 		return KERNEL_ERROR_EBADF;
 	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 	if (file == nullptr || !file->opened)
 	{
 		return KERNEL_ERROR_EBADF;
@@ -1361,7 +1396,7 @@ int KYTY_SYSV_ABI KernelGetWriteAvailability(int d, bool* available)
 		return KERNEL_ERROR_EBADF;
 	}
 
-	auto* file = g_files->GetFile(d);
+	auto file = g_files->GetFile(d);
 	if (file == nullptr || !file->opened)
 	{
 		return KERNEL_ERROR_EBADF;
@@ -1468,7 +1503,7 @@ int KYTY_SYSV_ABI KernelGetdirentries(int fd, char* buf, int nbytes, int64_t* ba
 		return KERNEL_ERROR_EFAULT;
 	}
 
-	auto* file = g_files->GetFile(fd);
+	auto file = g_files->GetFile(fd);
 
 	if (file == nullptr)
 	{
@@ -2250,7 +2285,7 @@ int KYTY_SYSV_ABI KernelAprGetFileStat(uint32_t file_id, FileStat* st)
 	}
 	memset(st, 0, sizeof(FileStat));
 	st->st_mode    = 0000777u | 0100000u;
-	st->st_flags   = kPs5StFlagsAprCapable;
+	st->st_flags   = 0;
 	st->st_size    = static_cast<int64_t>(Core::File::Size(host_path));
 	st->st_blksize = 512;
 	st->st_blocks  = (st->st_size + 511) / 512;

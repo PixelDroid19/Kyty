@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Kyty/UnitTest.h"
 
 #include <atomic>
@@ -747,6 +748,41 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	EXPECT_NE(json.find(R"("hash_tracked_changed":2)"), std::string::npos);
 	EXPECT_NE(json.find(R"("hash_fallback_unchanged":3)"), std::string::npos);
 	EXPECT_EQ(json.find("PPSA"), std::string::npos);
+}
+
+TEST(AgentTools, KernelMemoryPerformanceJsonReportsBoundedAggregateState)
+{
+	Kernel::Memory::KernelMemorySnapshot snapshot {};
+	snapshot.direct_allocated_bytes        = 101;
+	snapshot.direct_mapped_bytes           = 202;
+	snapshot.direct_unique_mapped_bytes    = 203;
+	snapshot.direct_released_mapped_bytes  = 303;
+	snapshot.direct_allocation_count       = 4;
+	snapshot.direct_mapping_count          = 5;
+	snapshot.direct_released_mapping_count = 6;
+	snapshot.flexible_mapped_bytes         = 404;
+	snapshot.flexible_mapping_count        = 7;
+
+	std::string json;
+	AppendKernelMemoryPerformanceJson(snapshot, &json);
+
+	EXPECT_EQ(json,
+	          R"("kernel_memory":{"direct_allocated_bytes":101,"direct_mapped_bytes":202,"direct_unique_mapped_bytes":203,"direct_released_mapped_bytes":303,"direct_allocation_count":4,"direct_mapping_count":5,"direct_released_mapping_count":6,"flexible_mapped_bytes":404,"flexible_mapping_count":7})");
+	EXPECT_EQ(json.find("address"), std::string::npos);
+}
+
+TEST(AgentTools, PerfSnapshotIncludesKernelMemoryAggregate)
+{
+	Request request {};
+	request.id        = 11;
+	request.kind      = Tool::PerfSnapshot;
+	request.tool      = "perf_snapshot";
+	request.args_json = R"({"reset":false})";
+
+	const std::string response = Internal::DispatchRequest(request);
+	EXPECT_NE(response.find(R"("ok":true)"), std::string::npos);
+	EXPECT_NE(response.find(R"("kernel_memory":{"direct_allocated_bytes":)"), std::string::npos);
+	EXPECT_NE(response.find(R"("flexible_mapping_count":)"), std::string::npos);
 }
 
 TEST(AgentTools, GpuMemorySlowCreateRecordsOnlyBoundedDetailedEvents)

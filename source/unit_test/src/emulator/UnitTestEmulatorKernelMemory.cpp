@@ -349,6 +349,34 @@ TEST(EmulatorKernelMemory, DirectMemoryAllocationFindsAFreeEarlierRange)
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(upper_addr, kSize), OK);
 }
 
+TEST(EmulatorKernelMemory, DirectMemoryAllocationReusesAlignedGapInsideSearchWindow)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t  kSize = 0x10000;
+	constexpr int64_t kBase = 0x330000000;
+	int64_t           first = 0;
+	int64_t           middle = 0;
+	int64_t           last = 0;
+	int64_t           replacement = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, kSize, kSize, 12, &first), OK);
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, kSize, kSize, 12, &middle), OK);
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, kSize, kSize, 12, &last), OK);
+	ASSERT_EQ(first, kBase);
+	ASSERT_EQ(middle, kBase + static_cast<int64_t>(kSize));
+	ASSERT_EQ(last, kBase + 2 * static_cast<int64_t>(kSize));
+
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(middle, kSize), OK);
+	ASSERT_EQ(KernelAllocateDirectMemory(kBase, kBase + 3 * kSize, kSize, kSize, 12, &replacement), OK);
+	EXPECT_EQ(replacement, middle);
+
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(replacement, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(last, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(first, kSize), OK);
+	Config::SetNextGen(false);
+}
+
 TEST(EmulatorKernelMemory, DirectMemoryQueryCoalescesAdjacentAllocationsOfTheSameType)
 {
 	EnsureMemorySubsystemInitialized();
@@ -382,7 +410,7 @@ TEST(EmulatorKernelMemory, DirectMemoryQueryCoalescesAdjacentAllocationsOfTheSam
 	Config::SetNextGen(false);
 }
 
-TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
+TEST(EmulatorKernelMemory, ReleaseDirectMemoryInvalidatesVirtualMappings)
 {
 	EnsureMemorySubsystemInitialized();
 	Config::SetNextGen(true);
@@ -414,20 +442,87 @@ TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
 	DirectMemoryInfo info {};
 	EXPECT_EQ(KernelDirectMemoryQuery(physical_address, 0, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EACCES);
 
-	mapping_start = nullptr;
-	mapping_end   = nullptr;
-	protection    = 0;
-	const int query_after_release = KernelQueryMemoryProtection(mapping, &mapping_start, &mapping_end, &protection);
-	EXPECT_EQ(query_after_release, OK);
-	if (query_after_release == OK)
-	{
-		EXPECT_EQ(mapping_start, mapping);
-		EXPECT_EQ(mapping_end, static_cast<uint8_t*>(mapping) + kSize - 1);
-		EXPECT_EQ(protection, 0x02);
-		EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(mapping), kSize), OK);
-		EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
-	}
+	EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
 	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, MemorySnapshotDropsDirectMappingsOnRelease)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t  kSize        = 0x10000;
+	constexpr int64_t kSearchStart = 0x310000000;
+	const auto        before       = KernelGetMemorySnapshot();
+
+	int64_t physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchStart + kSize, kSize, kSize, 12, &physical_address), OK);
+	const auto after_allocate = KernelGetMemorySnapshot();
+	EXPECT_EQ(after_allocate.direct_allocated_bytes, before.direct_allocated_bytes + kSize);
+	EXPECT_EQ(after_allocate.direct_allocation_count, before.direct_allocation_count + 1);
+	EXPECT_EQ(after_allocate.direct_mapped_bytes, before.direct_mapped_bytes);
+
+	void* mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+	const auto after_map = KernelGetMemorySnapshot();
+	EXPECT_EQ(after_map.direct_mapped_bytes, before.direct_mapped_bytes + kSize);
+	EXPECT_EQ(after_map.direct_mapping_count, before.direct_mapping_count + 1);
+	EXPECT_EQ(after_map.direct_released_mapped_bytes, before.direct_released_mapped_bytes);
+
+	ASSERT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+	const auto after_release = KernelGetMemorySnapshot();
+	EXPECT_EQ(after_release.direct_allocated_bytes, before.direct_allocated_bytes);
+	EXPECT_EQ(after_release.direct_allocation_count, before.direct_allocation_count);
+	EXPECT_EQ(after_release.direct_mapped_bytes, before.direct_mapped_bytes);
+	EXPECT_EQ(after_release.direct_mapping_count, before.direct_mapping_count);
+	EXPECT_EQ(after_release.direct_released_mapped_bytes, before.direct_released_mapped_bytes);
+	EXPECT_EQ(after_release.direct_released_mapping_count, before.direct_released_mapping_count);
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, MemorySnapshotCountsAliasedPhysicalRangeOnce)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t  kSize        = 0x10000;
+	constexpr int64_t kSearchStart = 0x320000000;
+	const auto        before       = KernelGetMemorySnapshot();
+
+	int64_t physical_address = 0;
+	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchStart + kSize, kSize, kSize, 12, &physical_address), OK);
+	void* first_mapping = nullptr;
+	void* second_mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&first_mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+	ASSERT_EQ(KernelMapDirectMemory(&second_mapping, kSize, 0x02, 0, physical_address, kSize), OK);
+
+	const auto aliased = KernelGetMemorySnapshot();
+	EXPECT_EQ(aliased.direct_mapped_bytes, before.direct_mapped_bytes + 2 * kSize);
+	EXPECT_EQ(aliased.direct_unique_mapped_bytes, before.direct_unique_mapped_bytes + kSize);
+
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(second_mapping), kSize), OK);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(first_mapping), kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, MemorySnapshotTracksFlexibleMappingLifetime)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kSize  = 0x10000;
+	const auto       before = KernelGetMemorySnapshot();
+	void*            mapping = nullptr;
+	ASSERT_EQ(KernelMapNamedFlexibleMemory(&mapping, kSize, 0x03, 0, "snapshot"), OK);
+
+	const auto after_map = KernelGetMemorySnapshot();
+	EXPECT_EQ(after_map.flexible_mapped_bytes, before.flexible_mapped_bytes + kSize);
+	EXPECT_EQ(after_map.flexible_mapping_count, before.flexible_mapping_count + 1);
+
+	ASSERT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(mapping), kSize), OK);
+	const auto after_unmap = KernelGetMemorySnapshot();
+	EXPECT_EQ(after_unmap.flexible_mapped_bytes, before.flexible_mapped_bytes);
+	EXPECT_EQ(after_unmap.flexible_mapping_count, before.flexible_mapping_count);
 }
 
 TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalRelease)
@@ -447,7 +542,7 @@ TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalReleas
 	ASSERT_NE(mapping, nullptr);
 	static_cast<uint8_t*>(mapping)[0] = 0x5a;
 	ASSERT_EQ(KernelCheckedReleaseDirectMemory(first_physical_address, kSize), OK);
-	EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), OK);
+	EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
 
 	int64_t second_physical_address = 0;
 	ASSERT_EQ(KernelAllocateDirectMemory(kSecondPhys, kSecondPhys + kSize, kSize, kSize, 12, &second_physical_address), OK);
@@ -467,7 +562,7 @@ TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalReleas
 	Config::SetNextGen(false);
 }
 
-TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
+TEST(EmulatorKernelMemory, ReusedDirectMemoryDoesNotRetainReleasedContents)
 {
 	EnsureMemorySubsystemInitialized();
 	Config::SetNextGen(true);
@@ -492,26 +587,13 @@ TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
 	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchEnd, kSize, kSize, 12, &second_physical_address), OK);
 	ASSERT_EQ(second_physical_address, first_physical_address);
 
-	void* second_mapping = nullptr;
-	ASSERT_EQ(KernelMapDirectMemory(&second_mapping, kSize, 0x02, 0, second_physical_address, kSize), OK);
-	ASSERT_NE(second_mapping, nullptr);
-	ASSERT_NE(second_mapping, first_mapping);
-	auto* second_bytes = static_cast<uint8_t*>(second_mapping);
+	EXPECT_EQ(KernelQueryMemoryProtection(first_mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
 
-	EXPECT_EQ(second_bytes[0], 0x5a);
-	EXPECT_EQ(second_bytes[1], 0xc3);
-	second_bytes[2] = 0x7e;
-	EXPECT_EQ(first_bytes[2], 0x7e);
-
-	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(second_mapping), kSize), OK);
-	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(first_mapping), kSize), OK);
-
-	void* remapped_at_first_address = first_mapping;
-	const int remap_result = KernelMapDirectMemory(&remapped_at_first_address, kSize, 0x07, 0x10, second_physical_address, kSize);
+	void* second_mapping = first_mapping;
+	const int remap_result = KernelMapDirectMemory(&second_mapping, kSize, 0x07, 0x10, second_physical_address, kSize);
 	#if defined(__APPLE__)
 	// macOS can reject an executable writable MAP_SHARED view even when the
-	// requested address is free. Keep alias coherence covered above and make
-	// the host policy explicit instead of replacing a mapping unsafely.
+	// requested address is free. Keep the host policy explicit.
 	if (remap_result == LibKernel::KERNEL_ERROR_EBUSY)
 	{
 		ASSERT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
@@ -519,9 +601,11 @@ TEST(EmulatorKernelMemory, ReusedDirectMemoryKeepsVirtualAliasesCoherent)
 	}
 	#endif
 	ASSERT_EQ(remap_result, OK);
-	ASSERT_EQ(remapped_at_first_address, first_mapping);
-	EXPECT_EQ(static_cast<uint8_t*>(remapped_at_first_address)[2], 0x7e);
-	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(remapped_at_first_address), kSize), OK);
+	ASSERT_EQ(second_mapping, first_mapping);
+	auto* second_bytes = static_cast<uint8_t*>(second_mapping);
+	EXPECT_EQ(second_bytes[0], 0u);
+	EXPECT_EQ(second_bytes[1], 0u);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(second_mapping), kSize), OK);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
 	Config::SetNextGen(false);
 }
@@ -807,9 +891,14 @@ TEST(EmulatorKernelMemory, ResolvesShareV1ExportsForGen5Boot)
 	}
 }
 
-// Ampr measure APIs return fixed command-record sizes (0x30 / 0x30 / 0x20).
+// AMPR measure APIs match the compact command-stream records consumed at submit.
 TEST(EmulatorKernelMemory, AmprMeasureCommandSizesMatchRecordLayout)
 {
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libAmpr_1", &symbols));
 
@@ -819,8 +908,8 @@ TEST(EmulatorKernelMemory, AmprMeasureCommandSizesMatchRecordLayout)
 		uint64_t    size;
 	};
 	const Case cases[] = {
-	    {"vWU-odnS+fU", 0x30u},
-	    {"sSAUCCU1dv4", 0x30u},
+	    {"vWU-odnS+fU", 0x14u},
+	    {"sSAUCCU1dv4", 0x20u},
 	    {"C+IEj+BsAFM", 0x20u},
 	};
 
@@ -836,16 +925,34 @@ TEST(EmulatorKernelMemory, AmprMeasureCommandSizesMatchRecordLayout)
 		query.type                 = Loader::SymbolType::Func;
 		const auto* rec            = symbols.Find(query);
 		ASSERT_NE(rec, nullptr) << c.nid;
-		using measure_fn_t = uint64_t (*)();
+		using measure_fn_t = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 		auto* fn           = reinterpret_cast<measure_fn_t>(static_cast<uintptr_t>(rec->vaddr));
 		ASSERT_NE(fn, nullptr);
-		EXPECT_EQ(fn(), c.size) << c.nid;
+		EXPECT_EQ(fn(0, 0x100000, 0x1000, 0, 0, 0), c.size) << c.nid;
 	}
+
+	Loader::SymbolResolve read_query {};
+	read_query.name                 = U"vWU-odnS+fU";
+	read_query.library              = U"Ampr";
+	read_query.library_version      = 1;
+	read_query.module               = U"Ampr";
+	read_query.module_version_major = 1;
+	read_query.module_version_minor = 1;
+	read_query.type                 = Loader::SymbolType::Func;
+	const auto* read_rec            = symbols.Find(read_query);
+	ASSERT_NE(read_rec, nullptr);
+	using read_measure_fn_t = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t);
+	auto* read_measure      = reinterpret_cast<read_measure_fn_t>(static_cast<uintptr_t>(read_rec->vaddr));
+	EXPECT_EQ(read_measure(0, 0x100000, 0x1000, UINT64_C(0x100000000)), 0x18u);
 }
 
-// Constructor writes a 0x28-byte header: self, data, size, aux0, aux1.
-TEST(EmulatorKernelMemory, AmprCommandBufferConstructorWritesHeader)
+TEST(EmulatorKernelMemory, AmprCommandBufferLifecycleUsesCompactHeader)
 {
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libAmpr_1", &symbols));
 
@@ -857,23 +964,39 @@ TEST(EmulatorKernelMemory, AmprCommandBufferConstructorWritesHeader)
 	query.module_version_major = 1;
 	query.module_version_minor = 1;
 	query.type                 = Loader::SymbolType::Func;
-	const auto* rec            = symbols.Find(query);
-	ASSERT_NE(rec, nullptr);
+	const auto* ctor_rec       = symbols.Find(query);
+	ASSERT_NE(ctor_rec, nullptr);
+	query.name                 = U"N-FSPA4S3nI";
+	const auto* set_buffer_rec = symbols.Find(query);
+	ASSERT_NE(set_buffer_rec, nullptr);
 
-	using ctor_fn_t = uint64_t (*)(void*, void*, uint64_t);
-	auto* ctor      = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(rec->vaddr));
+	using ctor_fn_t       = int (*)(void*);
+	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
+	auto* ctor            = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(ctor_rec->vaddr));
+	auto* set_buffer      = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(set_buffer_rec->vaddr));
 
 	alignas(8) uint8_t cmd_mem[0x28] {};
 	alignas(8) uint8_t data_mem[64] {};
-	const uint64_t ret = ctor(cmd_mem, data_mem, 64);
-	EXPECT_EQ(ret, reinterpret_cast<uint64_t>(cmd_mem));
-	uint64_t self = 0;
+	std::memset(cmd_mem, 0xff, sizeof(cmd_mem));
+	EXPECT_EQ(ctor(cmd_mem), OK);
+	for (uint32_t i = 0; i < 0x18; ++i)
+	{
+		EXPECT_EQ(cmd_mem[i], 0u);
+	}
+	EXPECT_EQ(set_buffer(cmd_mem, data_mem, sizeof(data_mem)), OK);
+	uint32_t type = 1;
+	uint32_t offset = 1;
+	int32_t  count = 1;
+	uint32_t size = 0;
 	uint64_t data = 0;
-	uint64_t size = 0;
-	std::memcpy(&self, cmd_mem + 0x00, 8);
-	std::memcpy(&data, cmd_mem + 0x08, 8);
-	std::memcpy(&size, cmd_mem + 0x10, 8);
-	EXPECT_EQ(self, reinterpret_cast<uint64_t>(cmd_mem));
+	std::memcpy(&type, cmd_mem + 0x00, sizeof(type));
+	std::memcpy(&offset, cmd_mem + 0x04, sizeof(offset));
+	std::memcpy(&count, cmd_mem + 0x08, sizeof(count));
+	std::memcpy(&size, cmd_mem + 0x0c, sizeof(size));
+	std::memcpy(&data, cmd_mem + 0x10, sizeof(data));
+	EXPECT_EQ(type, 0u);
+	EXPECT_EQ(offset, 0u);
+	EXPECT_EQ(count, 0);
 	EXPECT_EQ(data, reinterpret_cast<uint64_t>(data_mem));
 	EXPECT_EQ(size, 64u);
 }

@@ -15,6 +15,7 @@
 #include "Kyty/UnitTest.h"
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -125,8 +126,8 @@ void EnsureKernelProcessSubsystems()
 	if (!Config::IsInitialized())
 	{
 		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 	if (!Kernel::PthreadIsInitialized())
 	{
 		Kernel::PthreadSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
@@ -763,9 +764,9 @@ TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 {
 	EnsureKernelProcessSubsystems();
 
-	uint64_t fake_cmd = 0x1111;
+	alignas(8) uint8_t fake_cmd[0x18] {};
 	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(nullptr, 1, nullptr, 2, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(&fake_cmd, 1, &fake_cmd, 2, &fake_cmd), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(fake_cmd, 1, fake_cmd, 2, fake_cmd), OK);
 }
 
 TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
@@ -786,6 +787,10 @@ TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
 	const auto* ctor_rec       = symbols.Find(query);
 	ASSERT_NE(ctor_rec, nullptr);
 
+	query.name            = U"N-FSPA4S3nI";
+	const auto* set_buffer_rec = symbols.Find(query);
+	ASSERT_NE(set_buffer_rec, nullptr);
+
 	query.name            = U"o67gODLFpls";
 	const auto* event_rec = symbols.Find(query);
 	ASSERT_NE(event_rec, nullptr);
@@ -794,16 +799,19 @@ TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
 	const auto* reset_rec = symbols.Find(query);
 	ASSERT_NE(reset_rec, nullptr);
 
-	using ctor_fn_t   = uint64_t (*)(void*, void*, uint64_t);
+	using ctor_fn_t   = int (*)(void*);
+	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
 	using event_fn_t  = int (*)(void*, void*, uint64_t, uint64_t, uint64_t);
 	using reset_fn_t  = int (*)(void*);
 	auto* ctor        = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(ctor_rec->vaddr));
+	auto* set_buffer  = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(set_buffer_rec->vaddr));
 	auto* add_event   = reinterpret_cast<event_fn_t>(static_cast<uintptr_t>(event_rec->vaddr));
 	auto* reset       = reinterpret_cast<reset_fn_t>(static_cast<uintptr_t>(reset_rec->vaddr));
 
 	alignas(8) uint8_t cmd[0x28] {};
 	alignas(8) uint8_t stream[0x80] {};
-	ASSERT_EQ(ctor(cmd, stream, sizeof(stream)), reinterpret_cast<uint64_t>(cmd));
+	ASSERT_EQ(ctor(cmd), OK);
+	ASSERT_EQ(set_buffer(cmd, stream, sizeof(stream)), OK);
 
 	KernelEqueue eq = nullptr;
 	ASSERT_EQ(KernelCreateEqueue(&eq, "ampr-submit-test"), OK);
@@ -842,16 +850,94 @@ TEST(EmulatorKernelProcess, AprSubmitGetIdAndWaitRoundTrip)
 {
 	EnsureKernelProcessSubsystems();
 
-	uint64_t fake_cmd = 0x2222;
+	alignas(8) uint8_t fake_cmd[0x18] {};
 	uint32_t sub_id   = 0;
 	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(nullptr, 1, &sub_id), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(&fake_cmd, 1, &sub_id), OK);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(fake_cmd, 1, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(fake_cmd, 1, &sub_id), OK);
 	EXPECT_NE(sub_id, 0u);
 	EXPECT_EQ(Kernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
 	// Second wait on completed id is soft-OK (eager builders).
 	EXPECT_EQ(Kernel::FileSystem::KernelAprWaitCommandBuffer(sub_id), OK);
 	EXPECT_EQ(Kernel::FileSystem::KernelAprWaitCommandBuffer(0), LibKernel::KERNEL_ERROR_EINVAL);
+}
+
+TEST(EmulatorKernelProcess, AprReadAndCompletionExecuteAtSubmitInRecordOrder)
+{
+	EnsureFileSystemSubsystem();
+
+	const String root = U"/tmp/kyty_ampr_deferred_read_test/";
+	ASSERT_TRUE(Core::File::CreateDirectories(root));
+	const String host_file = root + U"payload.bin";
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(host_file));
+		const std::array<uint8_t, 6> source = {0x10, 0x21, 0x32, 0x43, 0x54, 0x65};
+		uint32_t written = 0;
+		file.Write(source.data(), static_cast<uint32_t>(source.size()), &written);
+		ASSERT_EQ(written, source.size());
+	}
+	Kernel::FileSystem::Mount(root, U"/app0/");
+	const char* paths[] = {"/app0/payload.bin"};
+	uint32_t file_id = 0;
+	ASSERT_EQ(Kernel::FileSystem::KernelAprResolveFilepathsToIds(paths, 1, &file_id), OK);
+	Kernel::FileSystem::FileStat apr_stat {};
+	ASSERT_EQ(Kernel::FileSystem::KernelAprGetFileStat(file_id, &apr_stat), OK);
+	EXPECT_EQ(apr_stat.st_flags, 0u);
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libAmpr_1", &symbols));
+	auto resolve = [&symbols](const char* nid) -> uint64_t {
+		Loader::SymbolResolve query {};
+		query.name                 = String::FromUtf8(nid);
+		query.library              = U"Ampr";
+		query.library_version      = 1;
+		query.module               = U"Ampr";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Func;
+		const auto* rec            = symbols.Find(query);
+		return rec != nullptr ? rec->vaddr : 0;
+	};
+
+	using ctor_fn_t       = int (*)(void*);
+	using set_buffer_fn_t = int (*)(void*, void*, uint32_t);
+	using read_fn_t       = int (*)(void*, uint64_t, uint64_t, uint32_t, void*, uint64_t, uint64_t);
+	using write_fn_t      = int (*)(void*, uint64_t*, uint64_t);
+	auto* ctor            = reinterpret_cast<ctor_fn_t>(static_cast<uintptr_t>(resolve("8aI7R7WaOlc")));
+	auto* set_buffer      = reinterpret_cast<set_buffer_fn_t>(static_cast<uintptr_t>(resolve("N-FSPA4S3nI")));
+	auto* read_file       = reinterpret_cast<read_fn_t>(static_cast<uintptr_t>(resolve("mQ16-QdKv7k")));
+	auto* write_address   = reinterpret_cast<write_fn_t>(static_cast<uintptr_t>(resolve("sJXyWHjP-F8")));
+	ASSERT_NE(ctor, nullptr);
+	ASSERT_NE(set_buffer, nullptr);
+	ASSERT_NE(read_file, nullptr);
+	ASSERT_NE(write_address, nullptr);
+
+	alignas(8) std::array<uint8_t, 0x28> command {};
+	alignas(8) std::array<uint8_t, 0x80> stream {};
+	std::array<uint8_t, 4> destination = {0xcc, 0xcc, 0xcc, 0xcc};
+	uint64_t completion = 0;
+	ASSERT_EQ(ctor(command.data()), OK);
+	ASSERT_EQ(set_buffer(command.data(), stream.data(), static_cast<uint32_t>(stream.size())), OK);
+	ASSERT_EQ(read_file(command.data(), 0, 0, file_id, destination.data(), destination.size(), 1), OK);
+	ASSERT_EQ(write_address(command.data(), &completion, UINT64_C(0xfeedface)), OK);
+	EXPECT_EQ(destination, (std::array<uint8_t, 4> {0xcc, 0xcc, 0xcc, 0xcc}));
+	EXPECT_EQ(completion, 0u);
+	EXPECT_EQ(stream[0], 0x17u);
+	uint32_t offset = 0;
+	int32_t count = 0;
+	std::memcpy(&offset, command.data() + 0x04, sizeof(offset));
+	std::memcpy(&count, command.data() + 0x08, sizeof(count));
+	EXPECT_EQ(offset, 0x34u);
+	EXPECT_EQ(count, 2);
+
+	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(command.data(), 1, nullptr, 0, nullptr), OK);
+	EXPECT_EQ(destination, (std::array<uint8_t, 4> {0x21, 0x32, 0x43, 0x54}));
+	EXPECT_EQ(completion, UINT64_C(0xfeedface));
+
+	Kernel::FileSystem::Umount(U"/app0/");
+	EXPECT_TRUE(Core::File::DeleteFile(host_file));
+	EXPECT_TRUE(Core::File::DeleteDirectory(root));
 }
 
 // Gen5 NID IafI2PxcPnQ — null mutex is EINVAL at the HLE boundary.
@@ -1184,6 +1270,56 @@ TEST(EmulatorKernelProcess, GuestEntropyDeviceIsReadOnly)
 	EXPECT_EQ(FileSystem::KernelRead(fd, bytes, sizeof(bytes)), static_cast<int64_t>(sizeof(bytes)));
 	EXPECT_EQ(FileSystem::KernelClose(fd), ::OK);
 	EXPECT_EQ(FileSystem::KernelOpen("/dev/urandom", 1, 0), KERNEL_ERROR_EACCES);
+}
+
+TEST(EmulatorKernelProcess, DuplicatedFileDescriptorKeepsSharedOffsetAndLifetime)
+{
+	using namespace LibKernel;
+	using namespace Kernel::FileSystem;
+
+	EnsureFileSystemSubsystem();
+	const String root      = U"/tmp/kyty_file_descriptor_test/";
+	const String host_file = root + U"payload.bin";
+	ASSERT_TRUE(Core::File::CreateDirectories(root));
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(host_file));
+		const std::array<uint8_t, 8> source = {0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87};
+		uint32_t written = 0;
+		file.Write(source.data(), static_cast<uint32_t>(source.size()), &written);
+		ASSERT_EQ(written, source.size());
+	}
+	Mount(root, U"/app0/");
+
+	const int original = KernelOpen("/app0/payload.bin", 0, 0);
+	ASSERT_GE(original, 3);
+	const int duplicate = KernelDup(original);
+	ASSERT_GE(duplicate, 3);
+	ASSERT_NE(duplicate, original);
+	FileStat path_stat {};
+	ASSERT_EQ(KernelStat("/app0/payload.bin", &path_stat), OK);
+	EXPECT_EQ(path_stat.st_flags, 0u);
+	FileStat descriptor_stat {};
+	ASSERT_EQ(KernelFstat(duplicate, &descriptor_stat), OK);
+	EXPECT_EQ(descriptor_stat.st_flags, 0u);
+	ASSERT_EQ(KernelClose(original), OK);
+
+	ASSERT_EQ(KernelLseek(duplicate, 2, 0), 2);
+	std::array<uint8_t, 3> positioned {};
+	ASSERT_EQ(KernelPread(duplicate, positioned.data(), positioned.size(), 1), static_cast<int64_t>(positioned.size()));
+	EXPECT_EQ(positioned, (std::array<uint8_t, 3> {0x21, 0x32, 0x43}));
+	EXPECT_EQ(KernelLseek(duplicate, 0, 1), 2);
+	EXPECT_EQ(KernelLseek(duplicate, -3, 1), KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(KernelLseek(duplicate, 0, 1), 2);
+
+	std::array<uint8_t, 2> sequential {};
+	ASSERT_EQ(KernelRead(duplicate, sequential.data(), sequential.size()), static_cast<int64_t>(sequential.size()));
+	EXPECT_EQ(sequential, (std::array<uint8_t, 2> {0x32, 0x43}));
+	EXPECT_EQ(KernelClose(duplicate), OK);
+
+	Umount(U"/app0/");
+	EXPECT_TRUE(Core::File::DeleteFile(host_file));
+	EXPECT_TRUE(Core::File::DeleteDirectory(root));
 }
 
 // Gen5 Posix_v1 semaphore: init/post/wait/destroy round-trip on guest layout.

@@ -27,6 +27,21 @@ using callback_func_t = void (*)(uintptr_t addr, size_t size);
 
 void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func);
 
+struct KernelMemorySnapshot
+{
+	uint64_t direct_allocated_bytes        = 0;
+	uint64_t direct_mapped_bytes           = 0;
+	uint64_t direct_unique_mapped_bytes    = 0;
+	uint64_t direct_released_mapped_bytes  = 0;
+	uint64_t direct_allocation_count       = 0;
+	uint64_t direct_mapping_count          = 0;
+	uint64_t direct_released_mapping_count = 0;
+	uint64_t flexible_mapped_bytes         = 0;
+	uint64_t flexible_mapping_count        = 0;
+};
+
+[[nodiscard]] KernelMemorySnapshot KernelGetMemorySnapshot();
+
 // Decode Orbis/PS5 mprotect/mmap protection bits into host VirtualMemory mode
 // and KernelGpuMappingAccessMode. Returns false for unsupported prot values.
 bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode);

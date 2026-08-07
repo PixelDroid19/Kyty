@@ -196,6 +196,7 @@ public:
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	uint64_t TotalAllocatedBytes();
+	void     FillSnapshot(KernelMemorySnapshot* snapshot);
 	bool     FindLargestAvailableSpan(uint64_t search_start, uint64_t search_end, uint64_t alignment, uint64_t* span_start,
 	                                  uint64_t* span_length);
 
@@ -239,6 +240,7 @@ public:
 
 	static uint64_t Size() { return static_cast<uint64_t>(448) * 1024 * 1024; }
 	uint64_t        Available();
+	void            FillSnapshot(KernelMemorySnapshot* snapshot);
 
 	bool                            Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode);
 	bool                            ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
@@ -524,6 +526,20 @@ void RegisterCallbacks(callback_func_t alloc_func, callback_func_t free_func)
 	g_flexible_memory->GetMutex().Unlock();
 }
 
+KernelMemorySnapshot KernelGetMemorySnapshot()
+{
+	KernelMemorySnapshot snapshot {};
+	if (g_physical_memory != nullptr)
+	{
+		g_physical_memory->FillSnapshot(&snapshot);
+	}
+	if (g_flexible_memory != nullptr)
+	{
+		g_flexible_memory->FillSnapshot(&snapshot);
+	}
+	return snapshot;
+}
+
 bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out,
                            int memory_type)
 {
@@ -546,11 +562,9 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 		return false;
 	}
 
-	// Direct-memory callers repeatedly request large contiguous heaps from the
-	// same search window. Keep each window append-only so smaller allocations do
-	// not fragment the only remaining range for a later heap. Blocks outside the
-	// requested window must not advance this cursor: they are unrelated physical
-	// ranges and previously made valid lower-window requests fail.
+	// Walk the sorted allocations and choose the first aligned free span inside
+	// the caller's search window. Released ranges must become reusable; otherwise
+	// a long-running guest exhausts the physical pool despite having large holes.
 	for (const auto& block: m_allocated)
 	{
 		if (block.size > std::numeric_limits<uint64_t>::max() - block.start_addr)
@@ -559,13 +573,27 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 		}
 
 		const uint64_t block_end = block.start_addr + block.size;
-		if (block_end > search_start && block.start_addr < search_end)
+		if (block_end <= candidate)
 		{
-			candidate = std::max(candidate, block_end);
+			continue;
+		}
+		if (block.start_addr >= search_end)
+		{
+			break;
+		}
+		if (candidate < block.start_addr && len <= block.start_addr - candidate)
+		{
+			break;
+		}
+
+		candidate = std::max(candidate, block_end);
+		if (!get_aligned_pos(candidate, alignment, &candidate) || candidate > search_end - len)
+		{
+			return false;
 		}
 	}
 
-	if (!get_aligned_pos(candidate, alignment, &candidate) || candidate > search_end - len)
+	if (candidate > search_end - len)
 	{
 		return false;
 	}
@@ -685,6 +713,56 @@ uint64_t PhysicalMemory::TotalAllocatedBytes()
 		used = std::min(Size(), used + block.size);
 	}
 	return used;
+}
+
+void PhysicalMemory::FillSnapshot(KernelMemorySnapshot* snapshot)
+{
+	EXIT_IF(snapshot == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+	struct PhysicalRange
+	{
+		uint64_t start = 0;
+		uint64_t end   = 0;
+	};
+	std::vector<PhysicalRange> mapped_ranges;
+	mapped_ranges.reserve(m_mapped.Size());
+	for (const auto& block: m_allocated)
+	{
+		snapshot->direct_allocated_bytes += block.size;
+		snapshot->direct_allocation_count++;
+	}
+	for (const auto& mapping: m_mapped)
+	{
+		snapshot->direct_mapped_bytes += mapping.map_size;
+		snapshot->direct_mapping_count++;
+		mapped_ranges.push_back({mapping.phys_addr, mapping.phys_addr + mapping.map_size});
+		if (mapping.physical_released)
+		{
+			snapshot->direct_released_mapped_bytes += mapping.map_size;
+			snapshot->direct_released_mapping_count++;
+		}
+	}
+	std::sort(mapped_ranges.begin(), mapped_ranges.end(),
+	          [](const PhysicalRange& left, const PhysicalRange& right) { return left.start < right.start; });
+	if (!mapped_ranges.empty())
+	{
+		uint64_t range_start = mapped_ranges.front().start;
+		uint64_t range_end   = mapped_ranges.front().end;
+		for (const auto& range: mapped_ranges)
+		{
+			if (range.start > range_end)
+			{
+				snapshot->direct_unique_mapped_bytes += range_end - range_start;
+				range_start = range.start;
+				range_end   = range.end;
+			} else
+			{
+				range_end = std::max(range_end, range.end);
+			}
+		}
+		snapshot->direct_unique_mapped_bytes += range_end - range_start;
+	}
 }
 
 bool PhysicalMemory::FindLargestAvailableSpan(uint64_t search_start, uint64_t search_end, uint64_t alignment, uint64_t* span_start,
@@ -1165,6 +1243,15 @@ uint64_t FlexibleMemory::Available()
 	return Size() - m_allocated_total;
 }
 
+void FlexibleMemory::FillSnapshot(KernelMemorySnapshot* snapshot)
+{
+	EXIT_IF(snapshot == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+	snapshot->flexible_mapped_bytes  = m_allocated_total;
+	snapshot->flexible_mapping_count = m_allocated.Size();
+}
+
 int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name)
 {
 	PRINT_NAME();
@@ -1591,20 +1678,17 @@ static int release_direct_memory(int64_t start, size_t len)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (!Config::IsNextGen())
+	Vector<PhysicalMemory::MappedBlock> mappings;
+	if (!g_physical_memory->FindMappingsForPhysicalRelease(static_cast<uint64_t>(start), len, &mappings))
 	{
-		Vector<PhysicalMemory::MappedBlock> mappings;
-		if (!g_physical_memory->FindMappingsForPhysicalRelease(static_cast<uint64_t>(start), len, &mappings))
+		return KERNEL_ERROR_ENOENT;
+	}
+	for (const auto& mapping: mappings)
+	{
+		const int unmap_result = KernelMunmap(mapping.map_vaddr, mapping.map_size);
+		if (unmap_result != OK)
 		{
-			return KERNEL_ERROR_ENOENT;
-		}
-		for (const auto& mapping: mappings)
-		{
-			const int unmap_result = KernelMunmap(mapping.map_vaddr, mapping.map_size);
-			if (unmap_result != OK)
-			{
-				return unmap_result;
-			}
+			return unmap_result;
 		}
 	}
 

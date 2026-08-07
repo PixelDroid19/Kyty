@@ -14,8 +14,8 @@ namespace Kyty::Kernel::AmprPort {
 using SubmitCommandBufferFunction = int (*)(void* command_buffer, uintptr_t submit_ident);
 
 // The HLE Ampr implementation installs its completion provider when the
-// library is registered. Kernel APR calls use the no-op fallback until then,
-// preserving the old eager-submit behavior without importing the HLE domain.
+// library is registered. Kernel APR calls use a validation-only fallback until
+// then so the kernel layer does not import the HLE domain.
 void Install(SubmitCommandBufferFunction provider) noexcept;
 
 [[nodiscard]] int SubmitCommandBuffer(void* command_buffer, uintptr_t submit_ident) noexcept;
