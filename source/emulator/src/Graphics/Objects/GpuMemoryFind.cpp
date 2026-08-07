@@ -112,6 +112,11 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 	}
 
 	Core::LockGuard lock(m_mutex);
+	const auto query = GpuMemoryRangeQueryKey::Create(vaddr, size, vaddr_num, false);
+	if (m_overlap_snapshot_cache.Lookup(query, out))
+	{
+		return true;
+	}
 
 	const auto ranges_overlap = [](uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
 	{ return a <= b ? b - a < a_size : a - b < b_size; };
@@ -133,6 +138,7 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 	}
 	if (!intersects_allocated_range)
 	{
+		m_overlap_snapshot_cache.Store(query, *out);
 		return true;
 	}
 
@@ -178,6 +184,7 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 		}
 	}
 
+	m_overlap_snapshot_cache.Store(query, *out);
 	return true;
 }
 
@@ -338,6 +345,7 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 
 	auto& heap = m_heaps[heap_id];
 	EXIT_IF(heap.overlap_cache == nullptr);
+	m_overlap_snapshot_cache.Invalidate();
 
 	Block nb {};
 	nb.vaddr_num = vaddr_num;
@@ -358,6 +366,7 @@ void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)
 {
 	auto& heap = m_heaps[heap_id];
 	EXIT_IF(heap.overlap_cache == nullptr);
+	m_overlap_snapshot_cache.Invalidate();
 
 	for (int vi = 0; vi < b->vaddr_num; vi++)
 	{

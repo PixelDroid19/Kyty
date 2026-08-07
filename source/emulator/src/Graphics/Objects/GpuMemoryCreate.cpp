@@ -674,6 +674,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			h.objects_map2  = new GpuMap2;
 			h.overlap_cache = new OverlapQueryCache;
 			m_heaps.Add(h);
+			m_allocated_validation_cache.Invalidate();
+			m_allocated_prefix_cache.Invalidate();
+			m_overlap_snapshot_cache.Invalidate();
 		}
 		heap_id = GetHeapId(vaddr[0], size[0]);
 	}
@@ -711,7 +714,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				o.use_num++;
 				o.use_last_frame = m_current_frame;
-				o.read_only      = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+				const bool previous_read_only = o.read_only;
+				o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+				if (o.read_only != previous_read_only) { m_overlap_snapshot_cache.Invalidate(); }
 				o.in_use         = true;
 				o.check_hash     = info.check_hash;
 				RecordUse(&o, buffer);
@@ -761,7 +766,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 			o.use_num++;
 			o.use_last_frame = m_current_frame;
-			o.read_only      = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+			const bool previous_read_only = o.read_only;
+			o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+			if (o.read_only != previous_read_only) { m_overlap_snapshot_cache.Invalidate(); }
 			o.in_use         = true;
 			o.check_hash     = info.check_hash;
 			RecordUse(&o, buffer);
@@ -801,7 +808,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 			o.use_num++;
 			o.use_last_frame = m_current_frame;
-			o.read_only      = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+			const bool previous_read_only = o.read_only;
+			o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+			if (o.read_only != previous_read_only) { m_overlap_snapshot_cache.Invalidate(); }
 			o.in_use         = true;
 			o.check_hash     = info.check_hash;
 			RecordUse(&o, buffer);

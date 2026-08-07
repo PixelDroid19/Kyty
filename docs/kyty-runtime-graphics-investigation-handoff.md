@@ -498,3 +498,34 @@ with frame p50/p95/p99 of 35/38/39 ms, a 40.239 ms maximum, and no frame above
 36/40/46 ms p50/p95/p99 and eight frames above 50 ms. These measurements
 validate removal of the startup pause and preservation of rendering; they do
 not establish a universal FPS result across titles or hosts.
+
+## GPU range-query cache performance phase
+
+Lightweight command-processor timings isolated a CPU bottleneck before Vulkan
+command emission. In a Silent 30-present window, draw processing consumed
+1.449 s and resource binding consumed 1.407 s. The binding time split into
+609 ms preparing storage buffers, 350 ms preparing index buffers, 324 ms
+preparing vertex buffers, and 121 ms preparing textures. Pipeline lookup,
+render-target materialization, command emission, and the render-context mutex
+were not material contributors in that window.
+
+The three dominant paths repeated the same allocated-range, prefix, and
+overlap queries for stable guest addresses. Per-heap overlap results were
+already memoized, but every query still scanned the global heap list before it
+could reach that cache. `GpuMemory` now keeps bounded, exact-key caches for
+allocated-range validation, allocated prefixes, and aggregate overlap
+snapshots. Heap topology changes invalidate the allocation caches. Object
+range creation/deletion and a read-only-to-writable use transition invalidate
+the overlap cache. Full-key comparison preserves correctness under hash
+collisions, and all cache access remains serialized by the existing object
+graph mutex.
+
+At the same 400-present reset point, the post-change 30-present sample reduced
+resource-binding time from 1.808 ms per draw to 0.826 ms per draw, a 54.3%
+reduction. The sample completed 33 presents in 581 ms and used 2.74 GiB at its
+peak, versus 30 presents in 2.097 s and 3.82 GiB for the pre-change sample.
+Those windows executed different draw counts, so the present cadence is
+progress evidence rather than a gameplay or universal 60 FPS claim. A bounded
+native capture after the change preserved a complete, correctly shaped logo;
+the longer title/menu checkpoint and gameplay input route remain to be
+revalidated.

@@ -102,6 +102,9 @@ void GpuMemory::SetAllocatedRange(uint64_t vaddr, uint64_t size)
 	h.overlap_cache = new OverlapQueryCache;
 
 	m_heaps.Add(h);
+	m_allocated_validation_cache.Invalidate();
+	m_allocated_prefix_cache.Invalidate();
+	m_overlap_snapshot_cache.Invalidate();
 }
 
 bool GpuMemory::IsAllocated(uint64_t vaddr, uint64_t size)
@@ -124,6 +127,13 @@ GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRange(uint64_t vaddr,
 	}
 
 	Core::LockGuard lock(m_mutex);
+	const uint64_t query_size = size;
+	const auto     query      = GpuMemoryRangeQueryKey::Create(&vaddr, &query_size, 1, false);
+	GpuMemoryRangeValidationStatus cached {};
+	if (m_allocated_validation_cache.Lookup(query, &cached))
+	{
+		return cached;
+	}
 	for (const auto& heap: m_heaps)
 	{
 		if (vaddr < heap.range.vaddr)
@@ -133,9 +143,11 @@ GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRange(uint64_t vaddr,
 		const uint64_t offset = vaddr - heap.range.vaddr;
 		if (offset < heap.range.size && size <= heap.range.size - offset)
 		{
+			m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Valid);
 			return GpuMemoryRangeValidationStatus::Valid;
 		}
 	}
+	m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Unallocated);
 	return GpuMemoryRangeValidationStatus::Unallocated;
 }
 
@@ -147,6 +159,13 @@ uint64_t GpuMemory::GetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_siz
 	}
 
 	Core::LockGuard lock(m_mutex);
+	const uint64_t query_size = maximum_size;
+	const auto     query      = GpuMemoryRangeQueryKey::Create(&vaddr, &query_size, 1, false);
+	uint64_t       cached     = 0;
+	if (m_allocated_prefix_cache.Lookup(query, &cached))
+	{
+		return cached;
+	}
 	for (const auto& heap: m_heaps)
 	{
 		if (vaddr < heap.range.vaddr)
@@ -159,8 +178,11 @@ uint64_t GpuMemory::GetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_siz
 			continue;
 		}
 		const uint64_t available = heap.range.size - offset;
-		return available < maximum_size ? available : maximum_size;
+		const uint64_t prefix    = available < maximum_size ? available : maximum_size;
+		m_allocated_prefix_cache.Store(query, prefix);
+		return prefix;
 	}
+	m_allocated_prefix_cache.Store(query, 0);
 	return 0;
 }
 
@@ -250,6 +272,9 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 				delete a.overlap_cache;
 
 				m_heaps.RemoveAt(index);
+				m_allocated_validation_cache.Invalidate();
+				m_allocated_prefix_cache.Invalidate();
+				m_overlap_snapshot_cache.Invalidate();
 				break;
 			}
 			index++;

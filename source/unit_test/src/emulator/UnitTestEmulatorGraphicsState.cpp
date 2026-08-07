@@ -677,6 +677,41 @@ TEST(EmulatorGraphicsState, GpuMemoryValidatesTheCompleteAllocatedGuestRangeRead
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(UINT64_MAX - 3, 8), GpuMemoryRangeValidationStatus::InvalidArgument);
 }
 
+TEST(EmulatorGraphicsState, GpuMemoryRangeCachesInvalidateOnHeapAndObjectMutation)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	const uint64_t heap_base = 0x0000005102000000ull;
+	const uint64_t heap_size = 0x20000ull;
+	const uint64_t obj_addr  = heap_base + 0x4000ull;
+	const uint64_t obj_size  = 0x1000ull;
+
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(obj_addr, obj_size), GpuMemoryRangeValidationStatus::Unallocated);
+	EXPECT_EQ(GpuMemoryGetAllocatedRangePrefix(obj_addr, obj_size), 0u);
+
+	GpuMemorySetAllocatedRange(heap_base, heap_size);
+	EXPECT_EQ(GpuMemoryValidateAllocatedRange(obj_addr, obj_size), GpuMemoryRangeValidationStatus::Valid);
+	EXPECT_EQ(GpuMemoryGetAllocatedRangePrefix(obj_addr, obj_size), obj_size);
+
+	GpuMemoryOverlapSnapshot snapshot;
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&obj_addr, &obj_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 0u);
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&obj_addr, &obj_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 0u);
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&obj_addr, &obj_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 1u);
+	EXPECT_EQ(snapshot.exact_count, 1u);
+
+	GpuMemoryFree(&ctx, obj_addr, obj_size);
+	ASSERT_TRUE(GpuMemoryQueryOverlaps(&obj_addr, &obj_size, 1, &snapshot));
+	EXPECT_EQ(snapshot.total_count, 0u);
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryFindForSubmissionDefersDeletionUntilCompletion)
 {
 	EnsureGpuMemoryForTests();

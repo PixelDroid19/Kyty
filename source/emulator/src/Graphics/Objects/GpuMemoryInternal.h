@@ -311,6 +311,9 @@ private:
 	};
 
 	using MaterializationCache = GpuMemoryMaterializationCache<Materialization, 2048>;
+	using AllocatedValidationCache = GpuMemoryRangeQueryCache<GpuMemoryRangeValidationStatus, 4096>;
+	using AllocatedPrefixCache     = GpuMemoryRangeQueryCache<uint64_t, 4096>;
+	using OverlapSnapshotCache     = GpuMemoryRangeQueryCache<GpuMemoryOverlapSnapshot, 4096>;
 
 	struct Block
 	{
@@ -392,6 +395,9 @@ private:
 	uint32_t m_transient_creates_since_retirement = 0;
 
 	MaterializationCache m_materialization_cache;
+	AllocatedValidationCache m_allocated_validation_cache;
+	AllocatedPrefixCache     m_allocated_prefix_cache;
+	OverlapSnapshotCache     m_overlap_snapshot_cache;
 
 	GpuDeferredDeletionQueue m_deferred_deletions;
 
