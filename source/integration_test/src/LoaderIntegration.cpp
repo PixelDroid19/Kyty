@@ -238,24 +238,24 @@ int ScenarioMultiModuleStableOrder()
 	const auto plan1 = Loader::ModuleLoadPlanning::BuildPlan(primary, true);
 	const auto plan2 = Loader::ModuleLoadPlanning::BuildPlan(primary, true);
 	Expect(plan1.valid && plan2.valid, "plans valid");
-	Expect(plan1.count == 5, "primary + 4 valid adjacent");
-	Expect(plan1.diag.adjacent_count == 4, "four adjacent");
+	Expect(plan1.count == 6, "primary + 5 valid adjacent");
+	Expect(plan1.diag.adjacent_count == 5, "five adjacent");
 	Expect(plan1.diag.rejection_count >= 1, "bad.prx rejected");
 	// Deterministic order of adjacent: a_mod before z_mod.
 	Expect(std::strcmp(plan1.entries[1].relative_key, "Media/Modules/media_mod.prx") == 0, "first adjacent media_mod");
 	Expect(std::strcmp(plan1.entries[2].relative_key, "Media/Plugins/libfmod.prx") == 0, "second adjacent fmod");
-	Expect(std::strcmp(plan1.entries[3].relative_key, "sce_module/a_mod.prx") == 0, "third adjacent a_mod");
-	Expect(std::strcmp(plan1.entries[4].relative_key, "sce_module/z_mod.prx") == 0, "fourth adjacent z_mod");
+	Expect(std::strcmp(plan1.entries[3].relative_key, "Media/Plugins/plugin_mod.prx") == 0, "third adjacent package plugin");
+	Expect(std::strcmp(plan1.entries[4].relative_key, "sce_module/a_mod.prx") == 0, "fourth adjacent a_mod");
+	Expect(std::strcmp(plan1.entries[5].relative_key, "sce_module/z_mod.prx") == 0, "fifth adjacent z_mod");
 	Expect(plan1.count == plan2.count, "stable count");
 	for (uint32_t i = 0; i < plan1.count; ++i)
 	{
 		Expect(std::strcmp(plan1.entries[i].relative_key, plan2.entries[i].relative_key) == 0, "stable order across two BuildPlan runs");
 	}
-	// Loose PRX outside supported dirs and non-prelinked package plugins must never appear.
+	// Loose PRX outside supported directories must never appear.
 	for (uint32_t i = 0; i < plan1.count; ++i)
 	{
 		Expect(std::strstr(plan1.entries[i].relative_key, "loose") == nullptr, "loose prx not planned");
-		Expect(std::strstr(plan1.entries[i].relative_key, "plugin_mod") == nullptr, "non-prelinked plugin not planned");
 	}
 	return 0;
 }
@@ -694,6 +694,52 @@ int ScenarioApplyExportConflictRollback()
 	return 0;
 }
 
+// Package plugins are optional providers. If a newly loaded plugin duplicates
+// an export from an accepted module, reject only that candidate and preserve
+// the already committed batch.
+int ScenarioPluginExportConflictSkipsCandidate()
+{
+	Loader::RuntimeLinker linker;
+	const uint32_t        baseline = linker.LoadedProgramCount();
+
+	Loader::Program* accepted =
+	    Loader::RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&linker, U"sce_module/accepted.prx");
+	Loader::Program* plugin =
+	    Loader::RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&linker, U"Media/Plugins/optional.prx");
+	Expect(accepted != nullptr && plugin != nullptr, "accepted module and optional plugin attached");
+
+	Loader::SymbolResolve sr {};
+	sr.name                 = U"sharedNid";
+	sr.library              = U"libShared";
+	sr.library_version      = 1;
+	sr.module               = U"modShared";
+	sr.module_version_major = 1;
+	sr.module_version_minor = 0;
+	sr.type                 = Loader::SymbolType::Func;
+	accepted->export_symbols->Add(sr, 0x100);
+	plugin->export_symbols->Add(sr, 0x200);
+
+	Loader::Program* batch[2] = {accepted, plugin};
+	Loader::ModuleLoadPlanDiagnostics diag {};
+	const int committed = Loader::ModuleLifecycleCoordinator::CommitAdjacentBatchOrRollback(&linker, batch, 2, &diag);
+
+	Expect(committed == 1, "plugin conflict keeps the accepted batch member");
+	Expect(batch[0] == accepted && batch[1] == nullptr, "only the conflicting plugin is removed from the batch");
+	Expect(linker.LoadedProgramCount() == baseline + 1, "only the accepted module remains loaded");
+	Expect(diag.applied_count == 1, "applied count retains the accepted module");
+	Expect(diag.export_conflict_count >= 1, "plugin collision is recorded");
+	bool saw_skip = false;
+	for (uint32_t i = 0; i < diag.rejection_count; ++i)
+	{
+		if (std::strstr(diag.rejections[i], "apply_skipped_plugin_export_conflict") != nullptr)
+		{
+			saw_skip = true;
+		}
+	}
+	Expect(saw_skip, "plugin conflict records a candidate-only rejection");
+	return 0;
+}
+
 int ScenarioDiscoveryCapacityRejectsWholePlan()
 {
 	const Core::String root    = MakeTempPackageRoot();
@@ -884,6 +930,10 @@ int main(int argc, char** argv)
 	if (scenario == "apply_export_conflict_rollback")
 	{
 		return ScenarioApplyExportConflictRollback();
+	}
+	if (scenario == "plugin_export_conflict_skips_candidate")
+	{
+		return ScenarioPluginExportConflictSkipsCandidate();
 	}
 	if (scenario == "discovery_capacity_rejects_whole_plan")
 	{

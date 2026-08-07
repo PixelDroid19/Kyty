@@ -314,12 +314,14 @@ TEST(EmulatorModuleLoad, BuildPlanTreatsMediaPluginsAsApplicationRuntimeSidecars
 	const auto plan = ModuleLoadPlanning::BuildPlan(temp.root + U"eboot.bin", true);
 
 	ASSERT_TRUE(plan.valid) << plan.error;
-	ASSERT_EQ(plan.count, 3u);
-	EXPECT_EQ(plan.diag.adjacent_count, 2u);
+	ASSERT_EQ(plan.count, 4u);
+	EXPECT_EQ(plan.diag.adjacent_count, 3u);
 	EXPECT_STREQ(plan.entries[1].relative_key, "Media/Plugins/libfmod.prx");
 	EXPECT_STREQ(plan.entries[2].relative_key, "Media/Plugins/libfmodstudio.prx");
+	EXPECT_STREQ(plan.entries[3].relative_key, "Media/Plugins/plugin_two.prx");
 	EXPECT_EQ(plan.entries[1].role, ModulePlanRole::PackageSidecar);
 	EXPECT_EQ(plan.entries[2].role, ModulePlanRole::PackageSidecar);
+	EXPECT_EQ(plan.entries[3].role, ModulePlanRole::PackageSidecar);
 	EXPECT_TRUE(ModuleLoadPlanning::RequiresFullPackageBootstrap(plan));
 }
 

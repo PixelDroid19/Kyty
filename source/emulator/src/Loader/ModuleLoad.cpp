@@ -325,17 +325,6 @@ bool IsSupportedPackageSubdir(const char* relative_subdir)
 	       std::strcmp(relative_subdir, "Media/Plugins/") == 0;
 }
 
-bool IsPrelinkedRuntimePlugin(const String& name)
-{
-	// Unity titles resolve optional native plugins through sceKernelLoadStartModule
-	// and il2cpp P/Invoke. Discover only known runtime plugins; modules a title does
-	// not ship remain absent and are not added to the load plan.
-	return name == U"libfmod.prx" || name == U"libfmodstudio.prx" || //
-	       name == U"AkSoundEngine.prx" || name == U"AkMotion.prx" || name == U"AkVorbisHwAccelerator.prx" || //
-	       name == U"PSN.prx" || name == U"PSNCore.prx" || name == U"PSNCommon.prx" || name == U"SaveData.prx" || //
-	       name == U"CommonDialog.prx";
-}
-
 DiscoveryResult DiscoverAdjacentCandidates(const String& package_root_host, String* out_host_paths, String* out_relative_keys,
                                            uint32_t capacity)
 {
@@ -376,10 +365,6 @@ DiscoveryResult DiscoverAdjacentCandidates(const String& package_root_host, Stri
 				continue;
 			}
 			if (!HasAdjacentExtension(name))
-			{
-				continue;
-			}
-			if (std::strcmp(sub, "Media/Plugins/") == 0 && !IsPrelinkedRuntimePlugin(name))
 			{
 				continue;
 			}
@@ -702,6 +687,12 @@ String ProgramLabel(const ProgramExportSnapshot& program)
 	return program.file_name.FilenameWithoutDirectory();
 }
 
+bool IsPackagePlugin(const Program& program)
+{
+	return program.file_name.StartsWith(U"Media/Plugins/") || program.file_name.ContainsStr(U"/Media/Plugins/") ||
+	       program.file_name.ContainsStr(U"\\Media\\Plugins\\");
+}
+
 bool IsLexicallyFirst(const String& first, const String& second)
 {
 	const auto first_utf8  = first.utf8_str();
@@ -871,6 +862,16 @@ int CommitAdjacentBatchOrRollback(RuntimeLinker* rt, Program** batch, uint32_t b
 	(void)ScanNewProgramConflicts(rt, newly->unique_id, diag, &inter_module);
 	if (inter_module)
 	{
+		if (IsPackagePlugin(*newly))
+		{
+			KYTY_LOG_WARN("KYTY_LOADER: package plugin export conflict; skipping candidate\n");
+			PushRejection(diag, "apply_skipped_plugin_export_conflict");
+			ProgramLoader::Unload(rt, newly);
+			batch[batch_count - 1] = nullptr;
+			diag->applied_count    = batch_count - 1;
+			PublishDiagnostics(*diag);
+			return static_cast<int>(batch_count - 1);
+		}
 		KYTY_LOG_WARN("KYTY_LOADER: inter-module export conflict; rolling back adjacent batch (%u)\n", batch_count);
 		PushRejection(diag, "apply_aborted_export_conflict");
 		RollbackAdjacentBatch(rt, batch, batch_count);
@@ -959,7 +960,6 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 			PublishDiagnostics(diag);
 			return 0;
 		}
-		Emulator::Agent::Lifecycle::EmitModuleLoaded(plan.entries[i].relative_key);
 		p->fail_if_global_not_resolved = false;
 		if (batch_count < kModuleLoadPlanMaxEntries)
 		{
@@ -967,10 +967,17 @@ int ApplyPlanAfterHle(RuntimeLinker* rt, const ModuleLoadPlan& plan)
 		}
 
 		// Conflict scan + possible full-batch rollback (shared with tests).
-		if (CommitAdjacentBatchOrRollback(rt, batch, batch_count, &diag) == 0)
+		const int committed = CommitAdjacentBatchOrRollback(rt, batch, batch_count, &diag);
+		if (batch[batch_count - 1] == nullptr)
+		{
+			--batch_count;
+			continue;
+		}
+		if (committed == 0)
 		{
 			return 0;
 		}
+		Emulator::Agent::Lifecycle::EmitModuleLoaded(plan.entries[i].relative_key);
 	}
 
 	diag.applied_count = batch_count;
