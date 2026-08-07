@@ -174,6 +174,23 @@ TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationCacheDistinguishesParamete
 	EXPECT_FALSE(cache.Lookup(key, &value));
 }
 
+TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationCacheAcceptsTheCompleteGpuObjectParameterSet)
+{
+	GpuMemoryMaterializationCache<int, 8> cache;
+
+	const uint64_t address[] = {0x280000u};
+	const uint64_t size[]    = {0x2000u};
+	const uint64_t params[]  = {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u};
+	const auto key = GpuMemoryMaterializationKey::Create(3u, 1u, 7u, address, size, 1, 5u, params, 11, true, true);
+
+	EXPECT_TRUE(key.Valid());
+	cache.Store(key, 17);
+
+	int value = 0;
+	ASSERT_TRUE(cache.Lookup(key, &value));
+	EXPECT_EQ(value, 17);
+}
+
 TEST(EmulatorGpuMemoryRangeQueryCache, MaterializationRangeInvalidationKeepsDisjointGpuUses)
 {
 	GpuMemoryMaterializationCache<int, 8> cache;

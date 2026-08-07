@@ -290,6 +290,11 @@ std::string PerformanceResult(bool reset)
 	out += ",\"draw_descriptor_sampler_max_ns\":" + std::to_string(stats.draw_descriptor_sampler_max_ns);
 	out += ",\"draw_descriptor_finalize_ns\":" + std::to_string(stats.draw_descriptor_finalize_ns);
 	out += ",\"draw_descriptor_finalize_max_ns\":" + std::to_string(stats.draw_descriptor_finalize_max_ns);
+	out += ",\"transient_buffer_probes\":" + std::to_string(stats.transient_buffer_probes);
+	out += ",\"transient_buffer_hits\":" + std::to_string(stats.transient_buffer_hits);
+	out += ",\"transient_buffer_validate_ns\":" + std::to_string(stats.transient_buffer_validate_ns);
+	out += ",\"transient_buffer_overlap_ns\":" + std::to_string(stats.transient_buffer_overlap_ns);
+	out += ",\"transient_buffer_upload_ns\":" + std::to_string(stats.transient_buffer_upload_ns);
 	out += ',';
 	out += "\"wait_reg_mem_satisfied\":" + std::to_string(stats.wait_reg_mem_satisfied);
 	out += ",\"wait_reg_mem_current_producer\":" + std::to_string(stats.wait_reg_mem_current_producer);

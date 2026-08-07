@@ -64,26 +64,39 @@ static uint64_t BindingStageElapsedNs(BindingStageClock::time_point start)
 // vertex/storage/texture/sampler preparation and descriptor bind
 
 VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t addr, uint64_t size, bool read_only,
-                                                      VkBufferUsageFlags usage)
+                                               VkBufferUsageFlags usage)
 {
 	if (buffer == nullptr || !read_only || size == 0u || size > 0x1000u)
 	{
 		return nullptr;
 	}
 
-	const bool               allocated = GpuMemoryValidateAllocatedRange(addr, size) == GpuMemoryRangeValidationStatus::Valid;
+	const auto               validate_start = BindingStageClock::now();
+	const bool               allocated      = GpuMemoryValidateAllocatedRange(addr, size) == GpuMemoryRangeValidationStatus::Valid;
+	const uint64_t           validate_ns    = BindingStageElapsedNs(validate_start);
 	GpuMemoryOverlapSnapshot overlaps {};
-	const bool               overlap_query_ok      = allocated && GpuMemoryQueryOverlaps(&addr, &size, 1, &overlaps);
-	const bool               overlap_snapshot_safe = overlap_query_ok && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps);
+	uint64_t                 overlap_ns       = 0;
+	bool                     overlap_query_ok = false;
+	if (allocated)
+	{
+		const auto overlap_start = BindingStageClock::now();
+		overlap_query_ok         = GpuMemoryQueryOverlaps(&addr, &size, 1, &overlaps);
+		overlap_ns               = BindingStageElapsedNs(overlap_start);
+	}
+	const bool overlap_snapshot_safe = overlap_query_ok && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps);
 	if (!GpuMemoryCanUseTransientReadOnlyBuffer(read_only, size, allocated, overlap_snapshot_safe))
 	{
+		DebugStatsRecordTransientBufferProbe(validate_ns, overlap_ns, 0, false);
 		return nullptr;
 	}
-	return buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), size, usage);
+	const auto     upload_start = BindingStageClock::now();
+	auto*          result       = buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), size, usage);
+	const uint64_t upload_ns    = BindingStageElapsedNs(upload_start);
+	DebugStatsRecordTransientBufferProbe(validate_ns, overlap_ns, upload_ns, result != nullptr);
+	return result;
 }
 
-void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer,
-                              const ShaderVertexInputInfo& input)
+void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input)
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 

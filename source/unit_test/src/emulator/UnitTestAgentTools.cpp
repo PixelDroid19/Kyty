@@ -238,6 +238,8 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	DebugStatsRecordDrawDescriptorTexture(100000);
 	DebugStatsRecordDrawDescriptorSampler(110000);
 	DebugStatsRecordDrawDescriptorFinalize(120000);
+	DebugStatsRecordTransientBufferProbe(1000, 2000, 3000, true);
+	DebugStatsRecordTransientBufferProbe(4000, 5000, 0, false);
 	DebugStatsRecordSubmit();
 	DebugStatsRecordSubmit();
 	DebugStatsRecordFenceWait(250000);
@@ -288,6 +290,11 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(first.draw_descriptor_texture_ns, 100000u);
 	EXPECT_EQ(first.draw_descriptor_sampler_ns, 110000u);
 	EXPECT_EQ(first.draw_descriptor_finalize_ns, 120000u);
+	EXPECT_EQ(first.transient_buffer_probes, 2u);
+	EXPECT_EQ(first.transient_buffer_hits, 1u);
+	EXPECT_EQ(first.transient_buffer_validate_ns, 5000u);
+	EXPECT_EQ(first.transient_buffer_overlap_ns, 7000u);
+	EXPECT_EQ(first.transient_buffer_upload_ns, 3000u);
 	EXPECT_EQ(first.submits, 2u);
 	EXPECT_EQ(first.fence_waits, 2u);
 	EXPECT_EQ(first.fence_wait_ns, 1000000u);
@@ -347,6 +354,11 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(second.draw_descriptor_texture_ns, 0u);
 	EXPECT_EQ(second.draw_descriptor_sampler_ns, 0u);
 	EXPECT_EQ(second.draw_descriptor_finalize_ns, 0u);
+	EXPECT_EQ(second.transient_buffer_probes, 0u);
+	EXPECT_EQ(second.transient_buffer_hits, 0u);
+	EXPECT_EQ(second.transient_buffer_validate_ns, 0u);
+	EXPECT_EQ(second.transient_buffer_overlap_ns, 0u);
+	EXPECT_EQ(second.transient_buffer_upload_ns, 0u);
 	EXPECT_EQ(second.submits, 0u);
 	EXPECT_EQ(second.fence_waits, 0u);
 	EXPECT_EQ(second.fence_wait_ns, 0u);

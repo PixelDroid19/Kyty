@@ -92,13 +92,18 @@ TimedMetric g_draw_state_setup;
 TimedMetric g_draw_materialization;
 TimedMetric g_draw_pipeline_setup;
 TimedMetric g_draw_resource_binding;
-TimedMetric g_draw_command_emission;
-TimedMetric g_draw_vertex_buffer_binding;
-TimedMetric g_draw_index_buffer_binding;
-TimedMetric g_draw_descriptor_storage;
-TimedMetric g_draw_descriptor_texture;
-TimedMetric g_draw_descriptor_sampler;
-TimedMetric g_draw_descriptor_finalize;
+TimedMetric           g_draw_command_emission;
+TimedMetric           g_draw_vertex_buffer_binding;
+TimedMetric           g_draw_index_buffer_binding;
+TimedMetric           g_draw_descriptor_storage;
+TimedMetric           g_draw_descriptor_texture;
+TimedMetric           g_draw_descriptor_sampler;
+TimedMetric           g_draw_descriptor_finalize;
+std::atomic<uint64_t> g_transient_buffer_probes {0};
+std::atomic<uint64_t> g_transient_buffer_hits {0};
+std::atomic<uint64_t> g_transient_buffer_validate_ns {0};
+std::atomic<uint64_t> g_transient_buffer_overlap_ns {0};
+std::atomic<uint64_t> g_transient_buffer_upload_ns {0};
 
 struct LookupMetric
 {
@@ -686,6 +691,11 @@ void DebugStatsInit()
 	ResetTimed(&g_draw_descriptor_texture);
 	ResetTimed(&g_draw_descriptor_sampler);
 	ResetTimed(&g_draw_descriptor_finalize);
+	g_transient_buffer_probes.store(0, std::memory_order_relaxed);
+	g_transient_buffer_hits.store(0, std::memory_order_relaxed);
+	g_transient_buffer_validate_ns.store(0, std::memory_order_relaxed);
+	g_transient_buffer_overlap_ns.store(0, std::memory_order_relaxed);
+	g_transient_buffer_upload_ns.store(0, std::memory_order_relaxed);
 	ResetLookup(&g_gfx_pipeline_lookup);
 	ResetLookup(&g_compute_pipeline_lookup);
 	g_pipeline_evictions.store(0, std::memory_order_relaxed);
@@ -934,6 +944,18 @@ void DebugStatsRecordDrawDescriptorSampler(uint64_t elapsed_ns)
 void DebugStatsRecordDrawDescriptorFinalize(uint64_t elapsed_ns)
 {
 	RecordTimed(&g_draw_descriptor_finalize, elapsed_ns);
+}
+
+void DebugStatsRecordTransientBufferProbe(uint64_t validate_ns, uint64_t overlap_ns, uint64_t upload_ns, bool accepted)
+{
+	g_transient_buffer_probes.fetch_add(1, std::memory_order_relaxed);
+	if (accepted)
+	{
+		g_transient_buffer_hits.fetch_add(1, std::memory_order_relaxed);
+	}
+	g_transient_buffer_validate_ns.fetch_add(validate_ns, std::memory_order_relaxed);
+	g_transient_buffer_overlap_ns.fetch_add(overlap_ns, std::memory_order_relaxed);
+	g_transient_buffer_upload_ns.fetch_add(upload_ns, std::memory_order_relaxed);
 }
 
 void DebugStatsRecordSubmit()
@@ -1452,14 +1474,17 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	take_draw_stage(g_draw_pipeline_setup, &snapshot.draw_pipeline_setup_ns, &snapshot.draw_pipeline_setup_max_ns);
 	take_draw_stage(g_draw_resource_binding, &snapshot.draw_resource_binding_ns, &snapshot.draw_resource_binding_max_ns);
 	take_draw_stage(g_draw_command_emission, &snapshot.draw_command_emission_ns, &snapshot.draw_command_emission_max_ns);
-	take_draw_stage(g_draw_vertex_buffer_binding, &snapshot.draw_vertex_buffer_binding_ns,
-	                &snapshot.draw_vertex_buffer_binding_max_ns);
-	take_draw_stage(g_draw_index_buffer_binding, &snapshot.draw_index_buffer_binding_ns,
-	                &snapshot.draw_index_buffer_binding_max_ns);
+	take_draw_stage(g_draw_vertex_buffer_binding, &snapshot.draw_vertex_buffer_binding_ns, &snapshot.draw_vertex_buffer_binding_max_ns);
+	take_draw_stage(g_draw_index_buffer_binding, &snapshot.draw_index_buffer_binding_ns, &snapshot.draw_index_buffer_binding_max_ns);
 	take_draw_stage(g_draw_descriptor_storage, &snapshot.draw_descriptor_storage_ns, &snapshot.draw_descriptor_storage_max_ns);
 	take_draw_stage(g_draw_descriptor_texture, &snapshot.draw_descriptor_texture_ns, &snapshot.draw_descriptor_texture_max_ns);
 	take_draw_stage(g_draw_descriptor_sampler, &snapshot.draw_descriptor_sampler_ns, &snapshot.draw_descriptor_sampler_max_ns);
 	take_draw_stage(g_draw_descriptor_finalize, &snapshot.draw_descriptor_finalize_ns, &snapshot.draw_descriptor_finalize_max_ns);
+	snapshot.transient_buffer_probes      = take_window(g_transient_buffer_probes);
+	snapshot.transient_buffer_hits        = take_window(g_transient_buffer_hits);
+	snapshot.transient_buffer_validate_ns = take_window(g_transient_buffer_validate_ns);
+	snapshot.transient_buffer_overlap_ns  = take_window(g_transient_buffer_overlap_ns);
+	snapshot.transient_buffer_upload_ns   = take_window(g_transient_buffer_upload_ns);
 	take_lookup(g_gfx_pipeline_lookup, &snapshot.gfx_pipeline_lookup_hits, &snapshot.gfx_pipeline_lookup_misses,
 	            &snapshot.gfx_pipeline_lookup_ns, &snapshot.gfx_pipeline_lookup_max_ns);
 	take_lookup(g_compute_pipeline_lookup, &snapshot.compute_pipeline_lookup_hits, &snapshot.compute_pipeline_lookup_misses,

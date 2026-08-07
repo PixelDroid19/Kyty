@@ -37,6 +37,9 @@
 
 namespace Kyty::Libs::Graphics {
 
+static_assert(GpuObject::PARAMS_MAX == GpuMemoryMaterializationKey::MaxParams,
+              "materialization keys must cover every GPU object parameter");
+
 void GpuMemory::Link(int heap_id, int id1, int id2, OverlapType rel, GpuMemoryScenario scenario)
 {
 	OverlapType other_rel = GpuMemoryReverseOverlap(rel);
@@ -688,6 +691,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	}
 
 	auto& heap = m_heaps[heap_id];
+	const auto invalidate_overlap_snapshots = [this](const Block& block)
+	{
+		for (int vi = 0; vi < block.vaddr_num; ++vi)
+		{
+			m_overlap_snapshot_cache.InvalidateRange(block.vaddr[vi], block.size[vi]);
+		}
+	};
 
 	GpuMemoryMaterializationKey materialization_key;
 	if (buffer != nullptr)
@@ -716,7 +726,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				o.use_last_frame = m_current_frame;
 				const bool previous_read_only = o.read_only;
 				o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
-				if (o.read_only != previous_read_only) { m_overlap_snapshot_cache.Invalidate(); }
+				if (o.read_only != previous_read_only) { invalidate_overlap_snapshots(h.block); }
 				o.in_use         = true;
 				o.check_hash     = info.check_hash;
 				RecordUse(&o, buffer);
@@ -768,7 +778,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			o.use_last_frame = m_current_frame;
 			const bool previous_read_only = o.read_only;
 			o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
-			if (o.read_only != previous_read_only) { m_overlap_snapshot_cache.Invalidate(); }
+			if (o.read_only != previous_read_only) { invalidate_overlap_snapshots(h.block); }
 			o.in_use         = true;
 			o.check_hash     = info.check_hash;
 			RecordUse(&o, buffer);
@@ -810,7 +820,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			o.use_last_frame = m_current_frame;
 			const bool previous_read_only = o.read_only;
 			o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
-			if (o.read_only != previous_read_only) { m_overlap_snapshot_cache.Invalidate(); }
+			if (o.read_only != previous_read_only) { invalidate_overlap_snapshots(h.block); }
 			o.in_use         = true;
 			o.check_hash     = info.check_hash;
 			RecordUse(&o, buffer);

@@ -120,19 +120,23 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 
 	const auto ranges_overlap = [](uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
 	{ return a <= b ? b - a < a_size : a - b < b_size; };
-	bool intersects_allocated_range = false;
-	for (const auto& heap: m_heaps)
+	const auto intersects_heap = [&](const Heap& heap)
 	{
-		for (int i = 0; i < vaddr_num; i++)
+		for (int i = 0; i < vaddr_num; ++i)
 		{
 			if (ranges_overlap(vaddr[i], size[i], heap.range.vaddr, heap.range.size))
 			{
-				intersects_allocated_range = true;
-				break;
+				return true;
 			}
 		}
-		if (intersects_allocated_range)
+		return false;
+	};
+	bool intersects_allocated_range = false;
+	for (const auto& heap: m_heaps)
+	{
+		if (intersects_heap(heap))
 		{
+			intersects_allocated_range = true;
 			break;
 		}
 	}
@@ -145,6 +149,10 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 	for (uint32_t heap_id = 0; heap_id < m_heaps.Size(); heap_id++)
 	{
 		const auto& heap    = m_heaps[heap_id];
+		if (!intersects_heap(heap))
+		{
+			continue;
+		}
 		const auto  objects = FindBlocks(static_cast<int>(heap_id), vaddr, size, vaddr_num);
 		for (const auto& object: objects)
 		{
@@ -345,13 +353,13 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 
 	auto& heap = m_heaps[heap_id];
 	EXIT_IF(heap.overlap_cache == nullptr);
-	m_overlap_snapshot_cache.Invalidate();
 
 	Block nb {};
 	nb.vaddr_num = vaddr_num;
 	for (int vi = 0; vi < vaddr_num; vi++)
 	{
 		m_materialization_cache.InvalidateRange(vaddr[vi], size[vi]);
+		m_overlap_snapshot_cache.InvalidateRange(vaddr[vi], size[vi]);
 		heap.overlap_cache->InvalidateRange(vaddr[vi], size[vi]);
 		nb.vaddr[vi] = vaddr[vi];
 		nb.size[vi]  = size[vi];
@@ -366,11 +374,11 @@ void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)
 {
 	auto& heap = m_heaps[heap_id];
 	EXIT_IF(heap.overlap_cache == nullptr);
-	m_overlap_snapshot_cache.Invalidate();
 
 	for (int vi = 0; vi < b->vaddr_num; vi++)
 	{
 		m_materialization_cache.InvalidateRange(b->vaddr[vi], b->size[vi]);
+		m_overlap_snapshot_cache.InvalidateRange(b->vaddr[vi], b->size[vi]);
 		heap.overlap_cache->InvalidateRange(b->vaddr[vi], b->size[vi]);
 		heap.objects_size -= b->size[vi];
 		heap.objects_map1->Erase(b->vaddr[vi], obj_id);

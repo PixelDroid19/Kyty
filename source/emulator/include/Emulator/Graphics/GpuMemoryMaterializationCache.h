@@ -13,7 +13,7 @@ class GpuMemoryMaterializationKey final
 {
 public:
 	static constexpr int MaxRanges = 3;
-	static constexpr int MaxParams = 10;
+	static constexpr int MaxParams = 11;
 
 	[[nodiscard]] static GpuMemoryMaterializationKey Create(uint64_t guest_submit, uint32_t host_queue, uint64_t host_sequence,
 	                                                       const uint64_t* address, const uint64_t* size, int range_count,
