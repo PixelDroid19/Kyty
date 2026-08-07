@@ -2029,6 +2029,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread)
 	// These NIDs are also imported with the libkernel identity. Register the
 	// established Posix ABI explicitly instead of weakening exact resolution.
 	LIB_FUNC("iGjsr1WAtI0", Posix::pthread_rwlock_rdlock);
+	LIB_FUNC("sIlRvQqsN2Y", Posix::pthread_rwlock_wrlock);
 	LIB_FUNC("EgmLo6EWgso", Posix::pthread_rwlock_unlock);
 	LIB_FUNC("+L98PIbGttk", Kernel::PthreadRwlockUnlock);
 	LIB_FUNC("mqdNorrB+gI", Kernel::PthreadRwlockWrlock);

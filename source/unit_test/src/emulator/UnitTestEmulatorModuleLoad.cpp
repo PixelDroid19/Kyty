@@ -937,6 +937,19 @@ TEST(EmulatorModuleLoad, RwlockUnlockRegistersExactKernelAndPosixIdentities)
 	EXPECT_EQ(kernel_unlock->vaddr, posix_unlock->vaddr);
 }
 
+TEST(EmulatorModuleLoad, RwlockWriteLockRegistersExactKernelAndPosixIdentities)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+
+	const auto* kernel_wrlock = symbols.Find(LibkernelFunc(u"sIlRvQqsN2Y"));
+	const auto* posix_wrlock  = symbols.Find(PosixFunc(u"sIlRvQqsN2Y"));
+
+	ASSERT_NE(kernel_wrlock, nullptr);
+	ASSERT_NE(posix_wrlock, nullptr);
+	EXPECT_EQ(kernel_wrlock->vaddr, posix_wrlock->vaddr);
+}
+
 TEST(EmulatorModuleLoad, PosixRegistersRwlockInitWithExactIdentity)
 {
 	SymbolDatabase symbols;
