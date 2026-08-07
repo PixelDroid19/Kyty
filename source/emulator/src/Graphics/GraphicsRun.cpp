@@ -1446,6 +1446,7 @@ bool ComputeRing::IsActive()
 void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data)
 {
 	KYTY_PROFILER_BLOCK("CommandProcessor::Run");
+	const ScopedDebugStatsTimer run_timer(DebugStatsRecordCommandProcessorRun);
 	const uint32_t* const previous_run_begin = m_active_run_begin;
 	const uint32_t* const previous_run_end   = m_active_run_end;
 	m_active_run_begin                       = data;
@@ -1666,6 +1667,7 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances)
 
 void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
 {
+	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
@@ -1690,6 +1692,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
 {
+	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
@@ -1711,6 +1714,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 
 void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
 {
+	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	struct DrawIndexedIndirectArgs
 	{
 		uint32_t index_count_per_instance;
@@ -1780,6 +1784,7 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
 {
+	const ScopedDebugStatsTimer dispatch_timer(DebugStatsRecordDispatchProcessor);
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
@@ -1790,6 +1795,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 
 void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 {
+	const ScopedDebugStatsTimer dispatch_timer(DebugStatsRecordDispatchProcessor);
 	struct DispatchIndirectArgs
 	{
 		uint32_t thread_group_x;
@@ -1838,6 +1844,7 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
 {
+	const ScopedDebugStatsTimer draw_timer(DebugStatsRecordDrawProcessor);
 	Core::LockGuard lock(m_mutex);
 
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);

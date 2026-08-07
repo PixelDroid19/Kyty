@@ -34,6 +34,7 @@
 #include "Emulator/Profiler.h"
 
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
@@ -46,6 +47,17 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+namespace {
+
+using DrawStageClock = std::chrono::steady_clock;
+
+uint64_t DrawStageElapsedNs(DrawStageClock::time_point start)
+{
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DrawStageClock::now() - start).count());
+}
+
+} // namespace
 
 // DrawIndex, DrawIndexAuto, DispatchDirect, depth-stencil copy
 
@@ -734,7 +746,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		return;
 	}
 
+	const auto render_lock_start = DrawStageClock::now();
 	Core::LockGuard lock(g_render_ctx->GetMutex());
+	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
+	const auto state_setup_start = DrawStageClock::now();
 	if (!DrawHasValidVertexShader(*sh_ctx) || ShouldSkipUnsupportedGeShader(*ctx, *ucfg, *sh_ctx))
 	{
 		MaybeDumpIndexDrawSkip("invalid-vs-or-ge", index_count, draw_modifier, type);
@@ -902,6 +917,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
+	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
+	const auto materialization_start = DrawStageClock::now();
 	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
@@ -913,7 +930,9 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	// Guest depth size 0 can materialize as 1x1 while color is full-screen; drop it
 	// before framebuffer/pipeline creation so Xe does not hang on illegal FB extent.
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
+	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
+	const auto pipeline_setup_start = DrawStageClock::now();
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
@@ -928,14 +947,18 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
+	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
+	const auto resource_binding_start = DrawStageClock::now();
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
 
 	SetDynamicParams(vk_buffer, pipeline);
 
+	const auto vertex_buffer_binding_start = DrawStageClock::now();
 	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info);
+	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
@@ -944,6 +967,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
 
 	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
+	const auto     index_buffer_binding_start = DrawStageClock::now();
 	VulkanBuffer*  indices = TryUploadTransientReadOnlyBuffer(buffer, index_addr_u64, index_size, true, VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
 	if (indices == nullptr)
 	{
@@ -953,7 +977,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	if (indices == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indices == nullptr condition ignored (continuing)\n"); }
 
 	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
+	DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
+	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 
+	const auto command_emission_start = DrawStageClock::now();
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
 	const int32_t vertex_offset = ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info);
 
@@ -992,6 +1019,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	InvalidateMemoryObject(color_info);
 	InvalidateMemoryObject(depth_info);
+	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
 }
 
 static bool GraphicsRenderDepthStencilCopyClearSource(CommandBuffer* buffer, RenderDepthInfo* source,
@@ -1493,7 +1521,10 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		return;
 	}
 
+	const auto render_lock_start = DrawStageClock::now();
 	Core::LockGuard lock(g_render_ctx->GetMutex());
+	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
+	const auto state_setup_start = DrawStageClock::now();
 	if (!DrawHasValidVertexShader(*sh_ctx) || ShouldSkipUnsupportedGeShader(*ctx, *ucfg, *sh_ctx))
 	{
 		return;
@@ -1642,6 +1673,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
+	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
+	const auto materialization_start = DrawStageClock::now();
 	const auto& materialization_resolution = !RenderColorHasActiveTarget(color_info) ? depth_only_resolution : resolution;
 	MaterializeRenderDepthInfo(
 	    submit_id, buffer, &depth_info,
@@ -1653,7 +1686,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	// Guest depth size 0 can materialize as 1x1 while color is full-screen; drop it
 	// before framebuffer/pipeline creation so Xe does not hang on illegal FB extent.
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
+	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
+	const auto pipeline_setup_start = DrawStageClock::now();
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
 
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
@@ -1667,21 +1702,27 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
+	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
 
 	// EXIT_NOT_IMPLEMENTED(vs_input_info.buffers_num > 1);
 
+	const auto resource_binding_start = DrawStageClock::now();
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
 
 	SetDynamicParams(vk_buffer, pipeline);
 
+	const auto vertex_buffer_binding_start = DrawStageClock::now();
 	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info);
+	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
 	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 
+	const auto command_emission_start = DrawStageClock::now();
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
 	const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, vs_input_info));
 	bool           clear_only   = false;
@@ -1725,6 +1766,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	InvalidateMemoryObject(color_info);
 	InvalidateMemoryObject(depth_info);
+	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
 }
 
 void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,

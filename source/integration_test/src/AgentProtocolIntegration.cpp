@@ -79,6 +79,17 @@ int ScenarioProtocolVersionConsistent()
 	Expect(diag_body.find("\"performance\"") != std::string::npos, "diagnostics has bounded performance snapshot");
 	Expect(diag_body.find("\"render_resolution\"") != std::string::npos, "performance has render resolution state");
 	Expect(diag_body.find("\"command_buffers\"") != std::string::npos, "performance has command buffer count");
+	Expect(diag_body.find("\"command_processor_run_max_ns\"") != std::string::npos,
+	       "performance has bounded command processor timing");
+	Expect(diag_body.find("\"draw_processor_max_ns\"") != std::string::npos, "performance has bounded draw processor timing");
+	Expect(diag_body.find("\"dispatch_processor_max_ns\"") != std::string::npos,
+	       "performance has bounded dispatch processor timing");
+	Expect(diag_body.find("\"draw_render_lock_wait_max_ns\"") != std::string::npos,
+	       "performance has bounded draw lock timing");
+	Expect(diag_body.find("\"draw_command_emission_max_ns\"") != std::string::npos,
+	       "performance has bounded draw command timing");
+	Expect(diag_body.find("\"draw_descriptor_texture_max_ns\"") != std::string::npos,
+	       "performance has bounded draw descriptor timing");
 	Expect(diag_body.find("\"acquire_max_ns\"") != std::string::npos, "performance has bounded acquire timing");
 	Expect(diag_body.find("\"present_max_ns\"") != std::string::npos, "performance has bounded present timing");
 	Expect(diag_body.find("\"wait_reg_mem_max_ns\"") != std::string::npos, "performance has bounded WaitRegMem timing");

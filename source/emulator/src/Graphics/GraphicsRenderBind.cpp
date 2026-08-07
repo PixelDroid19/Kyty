@@ -9,6 +9,7 @@
 
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
@@ -39,6 +40,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
+#include <chrono>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -51,6 +53,13 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+using BindingStageClock = std::chrono::steady_clock;
+
+static uint64_t BindingStageElapsedNs(BindingStageClock::time_point start)
+{
+	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(BindingStageClock::now() - start).count());
+}
 
 // vertex/storage/texture/sampler preparation and descriptor bind
 
@@ -1359,6 +1368,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 
 	if (bind.push_constant_size > 0)
 	{
+		const bool record_draw_timing = pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS;
 		if (!bind.vsharp_uniform_buffer && bind.push_constant_size > DescriptorCache::PUSH_CONSTANTS_MAX * 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !bind.vsharp_uniform_buffer && bind.push_constant_size > DescriptorCache::PUSH_CONSTANTS_MAX * 4 condition ignored (continuing)\n"); }
 		if (bind.push_constant_size > DescriptorCache::METADATA_DWORDS_MAX * 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind.push_constant_size > DescriptorCache::METADATA_DWORDS_MAX * 4 condition ignored (continuing)\n"); }
 		if (bind.storage_buffers.buffers_num > DescriptorCache::BUFFERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind.storage_buffers.buffers_num > DescriptorCache::BUFFERS_MAX condition ignored (continuing)\n"); }
@@ -1398,23 +1408,30 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 
 		if (bind.storage_buffers.buffers_num > 0)
 		{
+			const auto stage_start = BindingStageClock::now();
 			PrepareStorageBuffers(submit_id, buffer, bind.storage_buffers, storage_buffers, &sgprs_ptr);
+			if (record_draw_timing) { DebugStatsRecordDrawDescriptorStorage(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}
 		if (bind.textures2D.textures_num > 0)
 		{
+			const auto stage_start = BindingStageClock::now();
 			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
 			                textures2d_sampled_view, textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
 			                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
 			                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
 			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr);
+			if (record_draw_timing) { DebugStatsRecordDrawDescriptorTexture(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}
 		if (bind.samplers.samplers_num > 0)
 		{
+			const auto stage_start = BindingStageClock::now();
 			PrepareSamplers(bind.samplers, samplers, &sgprs_ptr);
+			if (record_draw_timing) { DebugStatsRecordDrawDescriptorSampler(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}
+		const auto finalize_start = BindingStageClock::now();
 		if (bind.gds_pointers.pointers_num > 0)
 		{
 			PrepareGdsPointers(bind.gds_pointers, &sgprs_ptr);
@@ -1553,6 +1570,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		{
 			vkCmdPushConstants(vk_buffer, layout, vk_stage, bind.push_constant_offset, bind.push_constant_size, sgprs);
 		}
+		if (record_draw_timing) { DebugStatsRecordDrawDescriptorFinalize(BindingStageElapsedNs(finalize_start)); }
 	}
 }
 

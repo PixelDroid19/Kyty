@@ -84,6 +84,22 @@ struct TimedMetric
 	std::atomic<uint64_t> max_ns {0};
 };
 
+TimedMetric g_command_processor_run;
+TimedMetric g_draw_processor;
+TimedMetric g_dispatch_processor;
+TimedMetric g_draw_render_lock_wait;
+TimedMetric g_draw_state_setup;
+TimedMetric g_draw_materialization;
+TimedMetric g_draw_pipeline_setup;
+TimedMetric g_draw_resource_binding;
+TimedMetric g_draw_command_emission;
+TimedMetric g_draw_vertex_buffer_binding;
+TimedMetric g_draw_index_buffer_binding;
+TimedMetric g_draw_descriptor_storage;
+TimedMetric g_draw_descriptor_texture;
+TimedMetric g_draw_descriptor_sampler;
+TimedMetric g_draw_descriptor_finalize;
+
 struct LookupMetric
 {
 	std::atomic<uint64_t> hits {0};
@@ -655,6 +671,21 @@ void DebugStatsInit()
 	g_writeback_bytes.store(0, std::memory_order_relaxed);
 	g_writeback_ns.store(0, std::memory_order_relaxed);
 	g_writeback_max_ns.store(0, std::memory_order_relaxed);
+	ResetTimed(&g_command_processor_run);
+	ResetTimed(&g_draw_processor);
+	ResetTimed(&g_dispatch_processor);
+	ResetTimed(&g_draw_render_lock_wait);
+	ResetTimed(&g_draw_state_setup);
+	ResetTimed(&g_draw_materialization);
+	ResetTimed(&g_draw_pipeline_setup);
+	ResetTimed(&g_draw_resource_binding);
+	ResetTimed(&g_draw_command_emission);
+	ResetTimed(&g_draw_vertex_buffer_binding);
+	ResetTimed(&g_draw_index_buffer_binding);
+	ResetTimed(&g_draw_descriptor_storage);
+	ResetTimed(&g_draw_descriptor_texture);
+	ResetTimed(&g_draw_descriptor_sampler);
+	ResetTimed(&g_draw_descriptor_finalize);
 	ResetLookup(&g_gfx_pipeline_lookup);
 	ResetLookup(&g_compute_pipeline_lookup);
 	g_pipeline_evictions.store(0, std::memory_order_relaxed);
@@ -828,6 +859,81 @@ void DebugStatsRecordBufferFlush()
 void DebugStatsRecordCommandBuffer()
 {
 	g_command_buffers.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordCommandProcessorRun(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_command_processor_run, elapsed_ns);
+}
+
+void DebugStatsRecordDrawProcessor(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_processor, elapsed_ns);
+}
+
+void DebugStatsRecordDispatchProcessor(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_dispatch_processor, elapsed_ns);
+}
+
+void DebugStatsRecordDrawRenderLockWait(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_render_lock_wait, elapsed_ns);
+}
+
+void DebugStatsRecordDrawStateSetup(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_state_setup, elapsed_ns);
+}
+
+void DebugStatsRecordDrawMaterialization(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_materialization, elapsed_ns);
+}
+
+void DebugStatsRecordDrawPipelineSetup(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_pipeline_setup, elapsed_ns);
+}
+
+void DebugStatsRecordDrawResourceBinding(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_resource_binding, elapsed_ns);
+}
+
+void DebugStatsRecordDrawCommandEmission(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_command_emission, elapsed_ns);
+}
+
+void DebugStatsRecordDrawVertexBufferBinding(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_vertex_buffer_binding, elapsed_ns);
+}
+
+void DebugStatsRecordDrawIndexBufferBinding(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_index_buffer_binding, elapsed_ns);
+}
+
+void DebugStatsRecordDrawDescriptorStorage(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_descriptor_storage, elapsed_ns);
+}
+
+void DebugStatsRecordDrawDescriptorTexture(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_descriptor_texture, elapsed_ns);
+}
+
+void DebugStatsRecordDrawDescriptorSampler(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_descriptor_sampler, elapsed_ns);
+}
+
+void DebugStatsRecordDrawDescriptorFinalize(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_draw_descriptor_finalize, elapsed_ns);
 }
 
 void DebugStatsRecordSubmit()
@@ -1331,6 +1437,29 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		*total_ns = take_window(metric.total_ns);
 		*max_ns   = take_window(metric.max_ns);
 	};
+	take_timed(g_command_processor_run, &snapshot.command_processor_runs, &snapshot.command_processor_run_ns,
+	           &snapshot.command_processor_run_max_ns);
+	take_timed(g_draw_processor, &snapshot.draw_processor_calls, &snapshot.draw_processor_ns, &snapshot.draw_processor_max_ns);
+	take_timed(g_dispatch_processor, &snapshot.dispatch_processor_calls, &snapshot.dispatch_processor_ns,
+	           &snapshot.dispatch_processor_max_ns);
+	auto take_draw_stage = [&take_timed](TimedMetric& metric, uint64_t* total_ns, uint64_t* max_ns) {
+		uint64_t ignored_count = 0;
+		take_timed(metric, &ignored_count, total_ns, max_ns);
+	};
+	take_draw_stage(g_draw_render_lock_wait, &snapshot.draw_render_lock_wait_ns, &snapshot.draw_render_lock_wait_max_ns);
+	take_draw_stage(g_draw_state_setup, &snapshot.draw_state_setup_ns, &snapshot.draw_state_setup_max_ns);
+	take_draw_stage(g_draw_materialization, &snapshot.draw_materialization_ns, &snapshot.draw_materialization_max_ns);
+	take_draw_stage(g_draw_pipeline_setup, &snapshot.draw_pipeline_setup_ns, &snapshot.draw_pipeline_setup_max_ns);
+	take_draw_stage(g_draw_resource_binding, &snapshot.draw_resource_binding_ns, &snapshot.draw_resource_binding_max_ns);
+	take_draw_stage(g_draw_command_emission, &snapshot.draw_command_emission_ns, &snapshot.draw_command_emission_max_ns);
+	take_draw_stage(g_draw_vertex_buffer_binding, &snapshot.draw_vertex_buffer_binding_ns,
+	                &snapshot.draw_vertex_buffer_binding_max_ns);
+	take_draw_stage(g_draw_index_buffer_binding, &snapshot.draw_index_buffer_binding_ns,
+	                &snapshot.draw_index_buffer_binding_max_ns);
+	take_draw_stage(g_draw_descriptor_storage, &snapshot.draw_descriptor_storage_ns, &snapshot.draw_descriptor_storage_max_ns);
+	take_draw_stage(g_draw_descriptor_texture, &snapshot.draw_descriptor_texture_ns, &snapshot.draw_descriptor_texture_max_ns);
+	take_draw_stage(g_draw_descriptor_sampler, &snapshot.draw_descriptor_sampler_ns, &snapshot.draw_descriptor_sampler_max_ns);
+	take_draw_stage(g_draw_descriptor_finalize, &snapshot.draw_descriptor_finalize_ns, &snapshot.draw_descriptor_finalize_max_ns);
 	take_lookup(g_gfx_pipeline_lookup, &snapshot.gfx_pipeline_lookup_hits, &snapshot.gfx_pipeline_lookup_misses,
 	            &snapshot.gfx_pipeline_lookup_ns, &snapshot.gfx_pipeline_lookup_max_ns);
 	take_lookup(g_compute_pipeline_lookup, &snapshot.compute_pipeline_lookup_hits, &snapshot.compute_pipeline_lookup_misses,
