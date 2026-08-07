@@ -79,9 +79,34 @@ TEST(CoreMemoryAlloc, ReallocatesUntrackedSystemBlocks)
 	Core::mem_free(memory);
 }
 
+TEST(CoreMemoryAlloc, HeapBlocksRemainSelfDescribingWithoutTheTracker)
+{
+	Core::mem_tracker_enable();
+	if (Core::mem_tracker_enabled())
+	{
+		return;
+	}
+
+	auto* memory = static_cast<uint8_t*>(Core::mem_alloc(32));
+	ASSERT_NE(memory, nullptr);
+	for (uint8_t index = 0; index < 32; ++index)
+	{
+		memory[index] = static_cast<uint8_t>(index + 1);
+	}
+
+	memory = static_cast<uint8_t*>(Core::mem_realloc(memory, 80));
+	ASSERT_NE(memory, nullptr);
+	for (uint8_t index = 0; index < 32; ++index)
+	{
+		EXPECT_EQ(memory[index], static_cast<uint8_t>(index + 1));
+	}
+	Core::mem_free(memory);
+}
+
 TEST(CoreMemoryAlloc, TrackerSuspendScopeKeepsBootstrapAllocationsOutOfTracker)
 {
 	Core::mem_tracker_enable();
+	const bool tracker_enabled = Core::mem_tracker_enabled();
 	Core::MemStats before {};
 	Core::mem_get_stat(&before);
 
@@ -99,7 +124,7 @@ TEST(CoreMemoryAlloc, TrackerSuspendScopeKeepsBootstrapAllocationsOutOfTracker)
 
 	ASSERT_NE(memory, nullptr);
 	EXPECT_FALSE(Core::mem_tracker_suspended());
-	EXPECT_FALSE(Core::mem_check(memory));
+	EXPECT_EQ(Core::mem_check(memory), !tracker_enabled);
 	Core::mem_free(memory);
 
 	Core::MemStats after {};
@@ -110,6 +135,8 @@ TEST(CoreMemoryAlloc, TrackerSuspendScopeKeepsBootstrapAllocationsOutOfTracker)
 
 TEST(CoreMemoryAlloc, GuestDomainRoutesAllOperationsToTheSystemAllocator)
 {
+	Core::mem_tracker_enable();
+	const bool tracker_enabled = Core::mem_tracker_enabled();
 	// Outside a guest domain the query is false and the tracker owns allocations.
 	EXPECT_FALSE(Core::mem_guest_thread_is_active());
 
@@ -126,7 +153,7 @@ TEST(CoreMemoryAlloc, GuestDomainRoutesAllOperationsToTheSystemAllocator)
 	{
 		memory[index] = index;
 	}
-	EXPECT_FALSE(Core::mem_check(memory));
+	EXPECT_EQ(Core::mem_check(memory), !tracker_enabled);
 
 	memory = static_cast<uint8_t*>(Core::mem_realloc(memory, 96));
 	ASSERT_NE(memory, nullptr);
@@ -134,7 +161,7 @@ TEST(CoreMemoryAlloc, GuestDomainRoutesAllOperationsToTheSystemAllocator)
 	{
 		EXPECT_EQ(memory[index], index);
 	}
-	EXPECT_FALSE(Core::mem_check(memory));
+	EXPECT_EQ(Core::mem_check(memory), !tracker_enabled);
 
 	Core::mem_free(memory);
 
@@ -146,13 +173,20 @@ TEST(CoreMemoryAlloc, TrackedBlockFreesCorrectlyInsideGuestDomain)
 {
 	// Allocated outside a guest domain, so the debug tracker owns the block.
 	Core::mem_tracker_enable();
+	const bool tracker_enabled = Core::mem_tracker_enabled();
 	Core::MemStats before {};
 	Core::mem_get_stat(&before);
 	auto* memory = static_cast<uint8_t*>(Core::mem_alloc(64));
 	ASSERT_NE(memory, nullptr);
 	Core::MemStats allocated {};
 	Core::mem_get_stat(&allocated);
-	ASSERT_EQ(allocated.blocks_num, before.blocks_num + 1);
+	if (tracker_enabled)
+	{
+		ASSERT_EQ(allocated.blocks_num, before.blocks_num + 1);
+	} else
+	{
+		ASSERT_EQ(allocated.blocks_num, before.blocks_num);
+	}
 	for (uint8_t index = 0; index < 64; ++index)
 	{
 		memory[index] = index;

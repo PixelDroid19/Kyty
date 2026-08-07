@@ -21,7 +21,7 @@
 
 namespace Kyty::Core {
 
-#if !defined(KYTY_FINAL) && !defined(KYTY_SHARED_DLL)
+#if !defined(NDEBUG) && !defined(KYTY_FINAL) && !defined(KYTY_SHARED_DLL)
 #define MEM_TRACKER
 #endif
 
@@ -62,6 +62,7 @@ static std::atomic<uint32_t>                   g_mem_tracker_suspend_count {0};
 enum class MemBlockDomain : uint32_t
 {
 	System,
+	Heap,
 	Tracked
 };
 
@@ -440,7 +441,8 @@ void* mem_alloc(size_t size)
 	auto* base = static_cast<MemBlockHeader*>(sys_heap_alloc(g_default_heap, sizeof(MemBlockHeader) + size + PATTERN_SIZE * PATTERNS_NUM));
 	void* ptr  = (base != nullptr ? base + 1 : nullptr);
 #else
-	void* ptr = sys_heap_alloc(g_default_heap, size);
+	auto* base = static_cast<MemBlockHeader*>(sys_heap_alloc(g_default_heap, sizeof(MemBlockHeader) + size));
+	void* ptr  = (base != nullptr ? base + 1 : nullptr);
 #endif
 
 	if (ptr == nullptr)
@@ -469,7 +471,8 @@ void* mem_alloc(size_t size)
 	g_total_allocated += size;
 
 	KYTY_MDBG("- mem_alloc -", ptr);
-
+#else
+	mem_block_init(base, MemBlockDomain::Heap);
 #endif
 
 	return mem_alloc_check_alignment(ptr);
@@ -496,8 +499,21 @@ void* mem_realloc(void* ptr, size_t size)
 	{
 		return mem_alloc_check_alignment(mem_system_realloc(ptr, size));
 	}
+	if (header->domain == MemBlockDomain::Heap)
+	{
+		MemLock lock;
+		auto*   base = static_cast<MemBlockHeader*>(
+		    sys_heap_realloc(g_default_heap, header, sizeof(MemBlockHeader) + size));
+		if (base == nullptr)
+		{
+			EXIT("mem_realloc(): can't alloc %" PRIu64 " bytes\n", uint64_t(size));
+		}
+		mem_block_init(base, MemBlockDomain::Heap);
+		return mem_alloc_check_alignment(base + 1);
+	}
 	EXIT_IF(header->domain != MemBlockDomain::Tracked);
 
+#ifdef MEM_TRACKER
 #if defined(MEM_TRACKER) && defined(__APPLE__)
 	if (g_mem_recursion_state.IsOwnedBy(mem_current_thread_token()))
 	{
@@ -506,7 +522,6 @@ void* mem_realloc(void* ptr, size_t size)
 #endif
 	MemLock lock;
 
-#ifdef MEM_TRACKER
 	DebugStack stack;
 	DebugStack::Trace(&stack);
 
@@ -519,22 +534,16 @@ void* mem_realloc(void* ptr, size_t size)
 	{
 		EXIT("tracked allocation is missing from the tracker\n");
 	}
-#endif
 
-#ifdef MEM_TRACKER
 	auto* base2 =
 	    static_cast<MemBlockHeader*>(sys_heap_realloc(g_default_heap, header, sizeof(MemBlockHeader) + size + PATTERN_SIZE * PATTERNS_NUM));
 	void* ptr2 = (base2 != nullptr ? base2 + 1 : nullptr);
-#else
-	void* ptr2 = sys_heap_realloc(g_default_heap, ptr, size);
-#endif
 
 	if (ptr2 == nullptr)
 	{
 		EXIT("mem_realloc(): can't alloc %" PRIu64 " bytes\n", uint64_t(size));
 	}
 
-#ifdef MEM_TRACKER
 	mem_block_init(base2, MemBlockDomain::Tracked);
 
 	if (ptr != nullptr)
@@ -591,11 +600,12 @@ void* mem_realloc(void* ptr, size_t size)
 
 	KYTY_MDBG("- mem_realloc old -", ptr);
 	KYTY_MDBG("- mem_realloc new -", ptr2);
-#endif
-
-	// g_mem_cs->Leave();
 
 	return mem_alloc_check_alignment(ptr2);
+#else
+	EXIT("tracked allocation is unavailable in this build\n");
+	return nullptr;
+#endif
 }
 
 void mem_free(void* ptr)
@@ -614,8 +624,16 @@ void mem_free(void* ptr)
 		mem_system_free(ptr);
 		return;
 	}
+	if (header->domain == MemBlockDomain::Heap)
+	{
+		MemLock lock;
+		header->magic = 0;
+		sys_heap_free(g_default_heap, header);
+		return;
+	}
 	EXIT_IF(header->domain != MemBlockDomain::Tracked);
 
+#ifdef MEM_TRACKER
 #if defined(MEM_TRACKER) && defined(__APPLE__)
 	if (g_mem_recursion_state.IsOwnedBy(mem_current_thread_token()))
 	{
@@ -624,7 +642,6 @@ void mem_free(void* ptr)
 #endif
 	MemLock lock;
 
-#ifdef MEM_TRACKER
 	MemBlockInfoT* const* info = g_mem_map->Find(reinterpret_cast<uintptr_t>(ptr));
 
 	if (info != nullptr)
@@ -640,22 +657,17 @@ void mem_free(void* ptr)
 		std::free(*info);
 		g_mem_map->Remove(reinterpret_cast<uintptr_t>(ptr));
 		// printf("heap_free: %x\n", uintptr_t(ptr));
-#endif
 
-#ifdef MEM_TRACKER
 		header->magic = 0;
 		sys_heap_free(g_default_heap, header);
-#else
-	sys_heap_free(g_default_heap, ptr);
-#endif
-
-#ifdef MEM_TRACKER
 	} else
 	{
 		EXIT("tracked allocation is missing from the tracker\n");
 	}
 
 	KYTY_MDBG("- mem_free -", ptr);
+#else
+	EXIT("tracked allocation is unavailable in this build\n");
 #endif
 }
 
