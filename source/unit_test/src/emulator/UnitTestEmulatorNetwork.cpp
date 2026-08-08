@@ -122,6 +122,32 @@ TEST(EmulatorNetwork, NetEpollCreateDestroyRoundTrip)
 	EXPECT_LT(NetEpollDestroy(epoll_id), 0);
 }
 
+TEST(EmulatorNetwork, NetEpollControlRoundTripKeepsRegistrationState)
+{
+	using namespace Libs::Network::Net;
+
+	struct Event
+	{
+		uint32_t events;
+		uint32_t reserved;
+		uint64_t ident;
+		uint64_t data;
+	};
+
+	const int socket_id = NetSocket("test-epoll-socket", 2, 2, 17);
+	ASSERT_GT(socket_id, 0);
+	const int epoll_id = NetEpollCreate("test-epoll-control", 0);
+	ASSERT_GT(epoll_id, 0);
+
+	Event event {1u, 0u, 0x1234u, 0x5678u};
+	EXPECT_EQ(NetEpollControl(epoll_id, 1, socket_id, &event), 0);
+	event.events = 5u;
+	EXPECT_EQ(NetEpollControl(epoll_id, 2, socket_id, &event), 0);
+	EXPECT_EQ(NetEpollControl(epoll_id, 3, socket_id, nullptr), 0);
+	EXPECT_EQ(NetEpollDestroy(epoll_id), 0);
+	EXPECT_EQ(NetSocketClose(socket_id), 0);
+}
+
 TEST(EmulatorNetwork, NetResolverRejectsNullInputs)
 {
 	using namespace Libs::Network::Net;

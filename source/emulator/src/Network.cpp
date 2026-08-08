@@ -1487,54 +1487,15 @@ struct NetEpollRegistration
 
 constexpr int kEpollIdBase = 0x1000000;
 
-std::mutex                             g_epoll_mutex;
-std::vector<NetEpollState>             g_epoll_states;
-std::unordered_map<int, int>           g_epoll_id_to_slot;
-std::unordered_map<int, int>           g_epoll_slot_to_id;
-std::unordered_map<int, NetEpollRegistration> g_epoll_registrations;
+std::mutex                                            g_epoll_mutex;
+std::vector<NetEpollState>                            g_epoll_states;
+std::unordered_map<int, int>                          g_epoll_id_to_slot;
+std::unordered_map<uint64_t, NetEpollRegistration>    g_epoll_registrations;
 
-int AllocateEpollId()
+[[nodiscard]] uint64_t EpollRegistrationKey(int epoll_id, int socket_id) noexcept
 {
-	std::lock_guard lock(g_epoll_mutex);
-	for (size_t slot = 0; slot < g_epoll_states.size(); slot++)
-	{
-		if (!g_epoll_states[slot].used)
-		{
-			g_epoll_states[slot].used = true;
-			const int id               = kEpollIdBase + static_cast<int>(slot);
-			g_epoll_id_to_slot[id]     = static_cast<int>(slot);
-			g_epoll_slot_to_id[static_cast<int>(slot)] = id;
-			return id;
-		}
-	}
-	const int id = kEpollIdBase + static_cast<int>(g_epoll_states.size());
-	g_epoll_states.push_back({});
-	g_epoll_states.back().used = true;
-	g_epoll_id_to_slot[id]     = static_cast<int>(g_epoll_states.size()) - 1;
-	g_epoll_slot_to_id[static_cast<int>(g_epoll_states.size()) - 1] = id;
-	return id;
-}
-
-void ReleaseEpollId(int id)
-{
-	std::lock_guard lock(g_epoll_mutex);
-	const auto      it = g_epoll_id_to_slot.find(id);
-	if (it == g_epoll_id_to_slot.end())
-	{
-		return;
-	}
-	const int slot = it->second;
-	if (slot >= 0 && slot < static_cast<int>(g_epoll_states.size()))
-	{
-		g_epoll_states[static_cast<size_t>(slot)].used = false;
-		if (g_epoll_states[static_cast<size_t>(slot)].host_fd >= 0)
-		{
-			::close(g_epoll_states[static_cast<size_t>(slot)].host_fd);
-			g_epoll_states[static_cast<size_t>(slot)].host_fd = -1;
-		}
-	}
-	g_epoll_slot_to_id.erase(slot);
-	g_epoll_id_to_slot.erase(id);
+	return (static_cast<uint64_t>(static_cast<uint32_t>(epoll_id)) << 32u) |
+	       static_cast<uint64_t>(static_cast<uint32_t>(socket_id));
 }
 
 } // namespace
@@ -1558,10 +1519,23 @@ int KYTY_SYSV_ABI NetEpollCreate(const char* name, int flags)
 	}
 	{
 		std::lock_guard lock(g_epoll_mutex);
-		const int       id   = kEpollIdBase + static_cast<int>(g_epoll_states.size());
-		g_epoll_states.push_back({host_fd, true});
-		g_epoll_id_to_slot[id]     = static_cast<int>(g_epoll_states.size()) - 1;
-		g_epoll_slot_to_id[static_cast<int>(g_epoll_states.size()) - 1] = id;
+		int slot = -1;
+		for (size_t i = 0; i < g_epoll_states.size(); ++i)
+		{
+			if (!g_epoll_states[i].used)
+			{
+				slot = static_cast<int>(i);
+				break;
+			}
+		}
+		if (slot < 0)
+		{
+			slot = static_cast<int>(g_epoll_states.size());
+			g_epoll_states.push_back({});
+		}
+		g_epoll_states[static_cast<size_t>(slot)] = {host_fd, true};
+		const int id = kEpollIdBase + slot;
+		g_epoll_id_to_slot[id] = slot;
 		return id;
 	}
 #else
@@ -1574,31 +1548,26 @@ int KYTY_SYSV_ABI NetEpollDestroy(int epoll_id)
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t epoll_id = %d\n", epoll_id);
 
-	{
-		std::lock_guard lock(g_epoll_mutex);
-		const auto      it = g_epoll_id_to_slot.find(epoll_id);
-		if (it == g_epoll_id_to_slot.end())
-		{
-			return NET_ERROR_EBADF;
-		}
-		const int slot = it->second;
-		if (slot >= 0 && slot < static_cast<int>(g_epoll_states.size()))
-		{
-			g_epoll_states[static_cast<size_t>(slot)].used = false;
-			if (g_epoll_states[static_cast<size_t>(slot)].host_fd >= 0)
-			{
-				::close(g_epoll_states[static_cast<size_t>(slot)].host_fd);
-				g_epoll_states[static_cast<size_t>(slot)].host_fd = -1;
-			}
-		}
-		g_epoll_slot_to_id.erase(slot);
-		g_epoll_id_to_slot.erase(epoll_id);
-	}
-
 	std::lock_guard lock(g_epoll_mutex);
+	const auto      state_it = g_epoll_id_to_slot.find(epoll_id);
+	if (state_it == g_epoll_id_to_slot.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+	const int slot = state_it->second;
+	if (slot >= 0 && slot < static_cast<int>(g_epoll_states.size()))
+	{
+		g_epoll_states[static_cast<size_t>(slot)].used = false;
+		if (g_epoll_states[static_cast<size_t>(slot)].host_fd >= 0)
+		{
+			::close(g_epoll_states[static_cast<size_t>(slot)].host_fd);
+			g_epoll_states[static_cast<size_t>(slot)].host_fd = -1;
+		}
+	}
+	g_epoll_id_to_slot.erase(state_it);
 	for (auto it = g_epoll_registrations.begin(); it != g_epoll_registrations.end();)
 	{
-		if ((it->first >> 16) == epoll_id)
+		if ((it->first >> 32u) == static_cast<uint64_t>(static_cast<uint32_t>(epoll_id)))
 		{
 			it = g_epoll_registrations.erase(it);
 		} else
@@ -1653,48 +1622,54 @@ int KYTY_SYSV_ABI NetEpollControl(int epoll_id, int operation, int socket_id, co
 #endif
 	}
 
-	int slot = -1;
-	{
-		std::lock_guard lock(g_epoll_mutex);
-		const auto      it = g_epoll_id_to_slot.find(epoll_id);
-		if (it == g_epoll_id_to_slot.end())
-		{
-			return NET_ERROR_EBADF;
-		}
-		slot = it->second;
-	}
-	if (slot < 0 || slot >= static_cast<int>(g_epoll_states.size()))
-	{
-		return NET_ERROR_EBADF;
-	}
-
-	const int host_epoll_fd = g_epoll_states[static_cast<size_t>(slot)].host_fd;
-	if (host_epoll_fd < 0)
-	{
-		return NET_ERROR_EBADF;
-	}
-
 #if KYTY_NET_HOST_POSIX
 	epoll_event host_event {};
-	const int   key = (epoll_id << 16) | (socket_id & 0xffff);
+	const uint64_t key            = EpollRegistrationKey(epoll_id, socket_id);
+	NetEpollRegistration registration {};
+	int host_operation = 0;
 
 	if (operation == NET_EPOLL_CTL_ADD || operation == NET_EPOLL_CTL_MOD)
 	{
 		const auto* guest_event = static_cast<const NetEpollEventGuest*>(event);
 		host_event.events       = guest_event->events;
 		host_event.data.fd      = socket_id;
-
-		std::lock_guard lock(g_epoll_mutex);
-		g_epoll_registrations[key] = NetEpollRegistration {guest_event->ident, guest_event->data};
-	} else
+		registration = NetEpollRegistration {guest_event->ident, guest_event->data};
+	}
+	switch (operation)
 	{
-		std::lock_guard lock(g_epoll_mutex);
-		g_epoll_registrations.erase(key);
+		case NET_EPOLL_CTL_ADD: host_operation = EPOLL_CTL_ADD; break;
+		case NET_EPOLL_CTL_MOD: host_operation = EPOLL_CTL_MOD; break;
+		case NET_EPOLL_CTL_DEL: host_operation = EPOLL_CTL_DEL; break;
+		default: return NET_ERROR_EINVAL;
 	}
 
-	if (::epoll_ctl(host_epoll_fd, operation, host_fd, &host_event) != 0)
+	std::lock_guard lock(g_epoll_mutex);
+	const auto      state_it = g_epoll_id_to_slot.find(epoll_id);
+	if (state_it == g_epoll_id_to_slot.end())
+	{
+		return NET_ERROR_EBADF;
+	}
+	const int slot = state_it->second;
+	if (slot < 0 || slot >= static_cast<int>(g_epoll_states.size()))
+	{
+		return NET_ERROR_EBADF;
+	}
+	const int host_epoll_fd = g_epoll_states[static_cast<size_t>(slot)].host_fd;
+	if (host_epoll_fd < 0)
+	{
+		return NET_ERROR_EBADF;
+	}
+	if (::epoll_ctl(host_epoll_fd, host_operation, host_fd,
+	                operation == NET_EPOLL_CTL_DEL ? nullptr : &host_event) != 0)
 	{
 		return HostErrnoToNet(errno);
+	}
+	if (operation == NET_EPOLL_CTL_DEL)
+	{
+		g_epoll_registrations.erase(key);
+	} else
+	{
+		g_epoll_registrations[key] = registration;
 	}
 	return OK;
 #else
@@ -1719,7 +1694,7 @@ int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int t
 		return NET_ERROR_EINVAL;
 	}
 
-	int slot = -1;
+	int host_epoll_fd = -1;
 	{
 		std::lock_guard lock(g_epoll_mutex);
 		const auto      it = g_epoll_id_to_slot.find(epoll_id);
@@ -1727,14 +1702,13 @@ int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int t
 		{
 			return NET_ERROR_EBADF;
 		}
-		slot = it->second;
+		const int slot = it->second;
+		if (slot < 0 || slot >= static_cast<int>(g_epoll_states.size()))
+		{
+			return NET_ERROR_EBADF;
+		}
+		host_epoll_fd = g_epoll_states[static_cast<size_t>(slot)].host_fd;
 	}
-	if (slot < 0 || slot >= static_cast<int>(g_epoll_states.size()))
-	{
-		return NET_ERROR_EBADF;
-	}
-
-	const int host_epoll_fd = g_epoll_states[static_cast<size_t>(slot)].host_fd;
 	if (host_epoll_fd < 0)
 	{
 		return NET_ERROR_EBADF;
@@ -1753,7 +1727,7 @@ int KYTY_SYSV_ABI NetEpollWait(int epoll_id, void* events, int max_events, int t
 	for (int i = 0; i < result; i++)
 	{
 		const int socket_id = host_events[static_cast<size_t>(i)].data.fd;
-		const int key       = (epoll_id << 16) | (socket_id & 0xffff);
+		const uint64_t key  = EpollRegistrationKey(epoll_id, socket_id);
 		NetEpollRegistration registration {};
 		{
 			std::lock_guard lock(g_epoll_mutex);

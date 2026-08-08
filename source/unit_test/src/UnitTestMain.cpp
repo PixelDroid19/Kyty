@@ -9,6 +9,8 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Emulator.h"
+#include "Emulator/Config.h"
+#include "Emulator/Log.h"
 
 #include <cstdio>
 
@@ -33,6 +35,8 @@ int main(int argc, char* argv[])
 	auto* math      = Kyty::Math::MathSubsystem::Instance();
 	auto* sdl       = Kyty::Core::SDLSubsystem::Instance();
 	auto* threads   = Kyty::Core::ThreadsSubsystem::Instance();
+	auto* config    = Kyty::Config::ConfigSubsystem::Instance();
+	auto* log       = Kyty::Log::LogSubsystem::Instance();
 	auto* emulator  = Kyty::Emulator::EmulatorSubsystem::Instance();
 	auto* unit_test = Kyty::UnitTest::UnitTestSubsystem::Instance();
 
@@ -41,6 +45,8 @@ int main(int argc, char* argv[])
 	subsystems.Add(math, {core});
 	subsystems.Add(sdl, {core});
 	subsystems.Add(threads, {core, sdl});
+	subsystems.Add(config, {core});
+	subsystems.Add(log, {core, config, threads});
 	subsystems.Add(emulator, {core, scripts});
 	subsystems.Add(unit_test, {core});
 
