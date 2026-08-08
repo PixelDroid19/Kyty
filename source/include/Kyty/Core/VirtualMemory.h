@@ -201,10 +201,11 @@ void SetGuestTrace(int steps);
 // instruction pointer of the running thread; locates spinning guest loops.
 void StartGuestProfiler();
 
-// Flexible-memory demand paging (macOS): register a reserved range, then map its
-// pages lazily from the fault handler on first write. TryDemandMap returns true if
-// vaddr fell in a registered range and its page was mapped (retry the instruction).
-void RegisterDemandRange(uint64_t addr, uint64_t size);
+// POSIX demand paging for reserved guest ranges. Consumed and released subranges
+// must be unregistered before another owner can use the same virtual address.
+// TryDemandMap returns true when the faulting page was materialized.
+bool RegisterDemandRange(uint64_t addr, uint64_t size);
+bool UnregisterDemandRange(uint64_t addr, uint64_t size);
 bool TryDemandMap(uint64_t vaddr);
 
 // Configure an optional fixed-path native crash report. The path is copied

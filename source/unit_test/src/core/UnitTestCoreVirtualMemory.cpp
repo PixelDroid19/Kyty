@@ -229,7 +229,7 @@ TEST(CoreVirtualMemory, DemandMapUsesHostPageSize)
 	const uint64_t address = Alloc(0, page_size, Mode::NoAccess);
 	ASSERT_NE(address, 0u);
 
-	RegisterDemandRange(address, page_size);
+	ASSERT_TRUE(RegisterDemandRange(address, page_size));
 	ASSERT_TRUE(TryDemandMap(address + page_size - 1u));
 
 	auto* bytes = reinterpret_cast<uint8_t*>(address);
@@ -237,6 +237,53 @@ TEST(CoreVirtualMemory, DemandMapUsesHostPageSize)
 	bytes[page_size - 1u] = 0xc3;
 	EXPECT_EQ(bytes[0], 0x5a);
 	EXPECT_EQ(bytes[page_size - 1u], 0xc3);
+	EXPECT_TRUE(UnregisterDemandRange(address, page_size));
+	ASSERT_TRUE(Free(address));
+#endif
+}
+
+TEST(CoreVirtualMemory, DemandRangeRegistrySupportsMoreThanSixtyFourLiveReservations)
+{
+#if defined(_WIN32)
+	GTEST_SKIP() << "demand paging signal path is POSIX-only";
+#else
+	const uint64_t page_size = GetPageSize();
+	ASSERT_GT(page_size, 0u);
+	constexpr uint64_t kRangeCount = 512;
+	constexpr uint64_t kStridePages = 2;
+	const uint64_t address = Alloc(0, page_size * kRangeCount * kStridePages, Mode::NoAccess);
+	ASSERT_NE(address, 0u);
+
+	for (uint64_t i = 0; i < kRangeCount; ++i)
+	{
+		ASSERT_TRUE(RegisterDemandRange(address + i * page_size * kStridePages, page_size));
+	}
+	EXPECT_TRUE(TryDemandMap(address + (kRangeCount - 1u) * page_size * kStridePages));
+	for (uint64_t i = 0; i < kRangeCount; ++i)
+	{
+		EXPECT_TRUE(UnregisterDemandRange(address + i * page_size * kStridePages, page_size));
+	}
+	ASSERT_TRUE(Free(address));
+#endif
+}
+
+TEST(CoreVirtualMemory, DemandRangeRegistryRemovesConsumedSubranges)
+{
+#if defined(_WIN32)
+	GTEST_SKIP() << "demand paging signal path is POSIX-only";
+#else
+	const uint64_t page_size = GetPageSize();
+	ASSERT_GT(page_size, 0u);
+	const uint64_t address = Alloc(0, page_size * 4u, Mode::NoAccess);
+	ASSERT_NE(address, 0u);
+
+	ASSERT_TRUE(RegisterDemandRange(address, page_size * 4u));
+	ASSERT_TRUE(UnregisterDemandRange(address + page_size, page_size * 2u));
+	EXPECT_TRUE(TryDemandMap(address));
+	EXPECT_FALSE(TryDemandMap(address + page_size));
+	EXPECT_TRUE(TryDemandMap(address + page_size * 3u));
+	EXPECT_TRUE(UnregisterDemandRange(address, page_size));
+	EXPECT_TRUE(UnregisterDemandRange(address + page_size * 3u, page_size));
 	ASSERT_TRUE(Free(address));
 #endif
 }

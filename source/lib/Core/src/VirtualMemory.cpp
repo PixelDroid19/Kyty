@@ -24,7 +24,11 @@
 #include <windows.h> // IWYU pragma: keep
 #endif
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdlib>
+#include <mutex>
 
 #ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
 #include <csignal>
@@ -624,51 +628,215 @@ static void kyty_sigtrap_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 // Demand-paged ranges: flexible-memory regions the guest reserves but that
 // are backed lazily. On a write fault inside one, the touched page is mapped RW
 // (zero-filled) and the faulting instruction retried — mirroring PS5 flexible memory.
-struct DemandRange
+struct DemandRangeValue
 {
 	uint64_t addr = 0;
 	uint64_t size = 0;
 };
-static DemandRange g_demand_ranges[64];
-static int         g_demand_count = 0;
+
+struct PublishedDemandRange
+{
+	std::atomic<uint64_t> sequence {0};
+	std::atomic<uint64_t> addr {0};
+	std::atomic<uint64_t> size {0};
+};
+
+static_assert(std::atomic<uint64_t>::is_always_lock_free,
+              "demand-range publication must remain signal-safe on supported 64-bit hosts");
+
+static constexpr size_t kDemandRangeCapacity = 4096;
+static std::array<PublishedDemandRange, kDemandRangeCapacity> g_demand_ranges;
+static std::array<DemandRangeValue, kDemandRangeCapacity + 1u> g_demand_current;
+static std::array<DemandRangeValue, kDemandRangeCapacity + 1u> g_demand_updated;
+static std::atomic<size_t>                                     g_demand_range_count {0};
+static std::mutex                                             g_demand_writer_mutex;
 // The demand mapper runs from a signal handler, so it cannot query the host
 // page size there. Populate this before the first guest write fault.
-static uint64_t g_demand_page_size = 0;
+static std::atomic<uint64_t> g_demand_page_size {0};
+
+static bool ValidDemandRange(uint64_t addr, uint64_t size) noexcept
+{
+	return size != 0 && addr <= UINT64_MAX - size;
+}
+
+static DemandRangeValue ReadDemandRange(const PublishedDemandRange& published) noexcept
+{
+	for (uint32_t attempt = 0; attempt < 2; ++attempt)
+	{
+		const uint64_t first = published.sequence.load(std::memory_order_acquire);
+		if ((first & 1u) != 0)
+		{
+			return {};
+		}
+		const DemandRangeValue value {published.addr.load(std::memory_order_relaxed), published.size.load(std::memory_order_relaxed)};
+		const uint64_t second = published.sequence.load(std::memory_order_acquire);
+		if (first == second)
+		{
+			return value;
+		}
+	}
+	return {};
+}
+
+static void PublishDemandRange(PublishedDemandRange* published, const DemandRangeValue& value) noexcept
+{
+	const uint64_t sequence = published->sequence.load(std::memory_order_relaxed);
+	published->sequence.store(sequence + 1u, std::memory_order_release);
+	published->addr.store(value.addr, std::memory_order_relaxed);
+	published->size.store(value.size, std::memory_order_relaxed);
+	published->sequence.store(sequence + 2u, std::memory_order_release);
+}
+
+static size_t CollectDemandRanges(std::array<DemandRangeValue, kDemandRangeCapacity + 1u>* values) noexcept
+{
+	size_t count = 0;
+	const size_t published_count = std::min(g_demand_range_count.load(std::memory_order_acquire), g_demand_ranges.size());
+	for (size_t i = 0; i < published_count; ++i)
+	{
+		const DemandRangeValue value = ReadDemandRange(g_demand_ranges[i]);
+		if (value.size != 0 && count < values->size())
+		{
+			(*values)[count++] = value;
+		}
+	}
+	return count;
+}
+
+static void PublishDemandRanges(const std::array<DemandRangeValue, kDemandRangeCapacity + 1u>& values, size_t count) noexcept
+{
+	const size_t previous_count = std::min(g_demand_range_count.load(std::memory_order_relaxed), g_demand_ranges.size());
+	const size_t publish_count  = std::max(previous_count, count);
+	for (size_t i = 0; i < publish_count; ++i)
+	{
+		PublishDemandRange(&g_demand_ranges[i], i < count ? values[i] : DemandRangeValue {});
+	}
+	g_demand_range_count.store(count, std::memory_order_release);
+}
 
 static void EnsureDemandPageSize() noexcept
 {
-	if (g_demand_page_size == 0u)
+	if (g_demand_page_size.load(std::memory_order_acquire) == 0u)
 	{
 		const uint64_t page_size = sys_virtual_get_page_size();
 		if (page_size != 0u && (page_size & (page_size - 1u)) == 0u)
 		{
-			g_demand_page_size = page_size;
+			g_demand_page_size.store(page_size, std::memory_order_release);
 		}
 	}
 }
 
-void RegisterDemandRange(uint64_t addr, uint64_t size)
+bool RegisterDemandRange(uint64_t addr, uint64_t size)
 {
-	EnsureDemandPageSize();
-	if (g_demand_count < 64)
+	if (!ValidDemandRange(addr, size))
 	{
-		g_demand_ranges[g_demand_count].addr = addr;
-		g_demand_ranges[g_demand_count].size = size;
-		g_demand_count++;
+		return false;
 	}
+	EnsureDemandPageSize();
+	if (g_demand_page_size.load(std::memory_order_acquire) == 0u)
+	{
+		return false;
+	}
+
+	std::lock_guard lock(g_demand_writer_mutex);
+	size_t count = CollectDemandRanges(&g_demand_current);
+	g_demand_current[count++] = {addr, size};
+	std::sort(g_demand_current.begin(), g_demand_current.begin() + count,
+	          [](const DemandRangeValue& left, const DemandRangeValue& right) { return left.addr < right.addr; });
+
+	size_t merged_count = 0;
+	for (size_t i = 0; i < count; ++i)
+	{
+		if (merged_count == 0)
+		{
+			g_demand_current[merged_count++] = g_demand_current[i];
+			continue;
+		}
+		auto& previous = g_demand_current[merged_count - 1u];
+		const uint64_t previous_end = previous.addr + previous.size;
+		const uint64_t range_end = g_demand_current[i].addr + g_demand_current[i].size;
+		if (g_demand_current[i].addr <= previous_end)
+		{
+			previous.size = std::max(previous_end, range_end) - previous.addr;
+		} else
+		{
+			g_demand_current[merged_count++] = g_demand_current[i];
+		}
+	}
+	if (merged_count > kDemandRangeCapacity)
+	{
+		return false;
+	}
+	PublishDemandRanges(g_demand_current, merged_count);
+	return true;
+}
+
+bool UnregisterDemandRange(uint64_t addr, uint64_t size)
+{
+	if (!ValidDemandRange(addr, size))
+	{
+		return false;
+	}
+
+	const uint64_t remove_end = addr + size;
+	std::lock_guard lock(g_demand_writer_mutex);
+	const size_t count = CollectDemandRanges(&g_demand_current);
+	uint64_t covered_end = addr;
+	for (size_t i = 0; i < count && covered_end < remove_end; ++i)
+	{
+		const uint64_t range_end = g_demand_current[i].addr + g_demand_current[i].size;
+		if (range_end <= covered_end)
+		{
+			continue;
+		}
+		if (g_demand_current[i].addr > covered_end)
+		{
+			break;
+		}
+		covered_end = std::min(remove_end, range_end);
+	}
+	if (covered_end != remove_end)
+	{
+		return false;
+	}
+	size_t updated_count = 0;
+	for (size_t i = 0; i < count; ++i)
+	{
+		const uint64_t range_end = g_demand_current[i].addr + g_demand_current[i].size;
+		if (range_end <= addr || g_demand_current[i].addr >= remove_end)
+		{
+			g_demand_updated[updated_count++] = g_demand_current[i];
+			continue;
+		}
+		if (g_demand_current[i].addr < addr)
+		{
+			g_demand_updated[updated_count++] = {g_demand_current[i].addr, addr - g_demand_current[i].addr};
+		}
+		if (range_end > remove_end)
+		{
+			g_demand_updated[updated_count++] = {remove_end, range_end - remove_end};
+		}
+	}
+	if (updated_count > kDemandRangeCapacity)
+	{
+		return false;
+	}
+	PublishDemandRanges(g_demand_updated, updated_count);
+	return true;
 }
 
 static bool try_demand_map(uint64_t vaddr)
 {
-	const uint64_t page_size = g_demand_page_size;
+	const uint64_t page_size = g_demand_page_size.load(std::memory_order_acquire);
 	if (page_size == 0u)
 	{
 		return false;
 	}
 
-	for (int i = 0; i < g_demand_count; i++)
+	const size_t range_count = std::min(g_demand_range_count.load(std::memory_order_acquire), g_demand_ranges.size());
+	for (size_t i = 0; i < range_count; ++i)
 	{
-		if (vaddr >= g_demand_ranges[i].addr && vaddr < g_demand_ranges[i].addr + g_demand_ranges[i].size)
+		const DemandRangeValue range = ReadDemandRange(g_demand_ranges[i]);
+		if (range.size != 0 && vaddr >= range.addr && vaddr - range.addr < range.size)
 		{
 			// Raw mmap only: this runs in a signal handler, so it must avoid the
 			// allocator bookkeeping (std::map insert -> malloc) that would dead-lock.
@@ -1269,7 +1437,15 @@ void FatalFault(uint64_t vaddr, uint64_t rip)
 }
 
 #if !defined(KYTY_HAS_SIGNAL_EXCEPTIONS)
-void RegisterDemandRange(uint64_t, uint64_t) {}
+bool RegisterDemandRange(uint64_t, uint64_t)
+{
+	return true;
+}
+
+bool UnregisterDemandRange(uint64_t, uint64_t)
+{
+	return true;
+}
 
 bool TryDemandMap(uint64_t)
 {
