@@ -290,17 +290,20 @@ TEST(CoreVirtualMemory, DemandRangeRegistryRemovesConsumedSubranges)
 
 TEST(CoreVirtualMemory, SignalDiagnosticsConfigurationUsesPresenceSemantics)
 {
-	const auto disabled = MakeSignalDiagnosticsConfig(nullptr, nullptr);
+	const auto disabled = MakeSignalDiagnosticsConfig(nullptr, nullptr, nullptr);
 	EXPECT_FALSE(disabled.skip_ud2);
 	EXPECT_FALSE(disabled.fault_log);
+	EXPECT_FALSE(disabled.crash_memory);
 
-	const auto enabled = MakeSignalDiagnosticsConfig("0", "");
+	const auto enabled = MakeSignalDiagnosticsConfig("0", "", "0");
 	EXPECT_TRUE(enabled.skip_ud2);
 	EXPECT_TRUE(enabled.fault_log);
+	EXPECT_TRUE(enabled.crash_memory);
 
-	const auto partial = MakeSignalDiagnosticsConfig("1", nullptr);
+	const auto partial = MakeSignalDiagnosticsConfig("1", nullptr, nullptr);
 	EXPECT_TRUE(partial.skip_ud2);
 	EXPECT_FALSE(partial.fault_log);
+	EXPECT_FALSE(partial.crash_memory);
 }
 
 TEST(CoreVirtualMemory, PosixFatalReportCapturesSignalContext)
@@ -336,6 +339,54 @@ TEST(CoreVirtualMemory, PosixFatalReportCapturesSignalContext)
 	EXPECT_EQ(json.find("\"rsp\":\"0x0000000000000000\""), std::string::npos);
 	EXPECT_EQ(json.find("\"rip\":\"0x0000000000000000\""), std::string::npos);
 	EXPECT_EQ(json.find("\"stack\":[]"), std::string::npos);
+	(void)std::remove(report_path);
+#endif
+}
+
+TEST(CoreVirtualMemory, FatalReportKeepsOneKilobyteGuestStackWindow)
+{
+	EXPECT_GE(ExceptionHandler::ExceptionInfo::StackCapacity, 128u);
+	EXPECT_GE(ExceptionHandler::ExceptionInfo::MemoryWindowCapacity, 1u);
+	EXPECT_GE(ExceptionHandler::ExceptionInfo::MemoryWindowSize, 32u);
+}
+
+TEST(CoreVirtualMemory, FatalReportSerializesMemoryWindows)
+{
+#if defined(_WIN32)
+	GTEST_SKIP() << "POSIX child-process coverage";
+#else
+	char report_path[128] = {};
+	std::snprintf(report_path, sizeof(report_path), "/tmp/kyty-fault-memory-%ld.json", static_cast<long>(::getpid()));
+	(void)std::remove(report_path);
+
+	const pid_t child = ::fork();
+	ASSERT_GE(child, 0);
+	if (child == 0)
+	{
+		ConfigureFatalFaultReport(report_path);
+		ExceptionHandler::ExceptionInfo info {};
+		info.type                       = ExceptionHandler::ExceptionType::AccessViolation;
+		info.stack[0]                   = 0x1234u;
+		info.stack_count                = 1;
+		info.memory_windows[0].address  = 0x2000u;
+		info.memory_windows[0].bytes[0] = 0xdeu;
+		info.memory_windows[0].bytes[1] = 0xadu;
+		info.memory_windows[0].size     = 2;
+		info.memory_window_count        = 1;
+		FatalFault(&info);
+	}
+
+	int status = 0;
+	ASSERT_EQ(::waitpid(child, &status, 0), child);
+	ASSERT_TRUE(WIFEXITED(status));
+	ASSERT_EQ(WEXITSTATUS(status), 139);
+
+	std::ifstream report(report_path);
+	ASSERT_TRUE(report.good());
+	const std::string json((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+	EXPECT_NE(json.find("\"stack\":[\"0x0000000000001234\"]"), std::string::npos);
+	EXPECT_NE(json.find("\"memory_windows\":[{\"address\":\"0x0000000000002000\""), std::string::npos);
+	EXPECT_NE(json.find("\"bytes\":\"dead\""), std::string::npos);
 	(void)std::remove(report_path);
 #endif
 }

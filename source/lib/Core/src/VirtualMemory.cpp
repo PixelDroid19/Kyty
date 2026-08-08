@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <mutex>
 
@@ -40,7 +41,6 @@
 #include <unistd.h>
 #include <ucontext.h>
 #include <cstdio>
-#include <cstdint>
 #include <cstdlib>
 #endif
 
@@ -99,6 +99,18 @@ void AppendHexJson(char* buffer, size_t capacity, size_t* offset, uint64_t value
 	AppendText(buffer, capacity, offset, "\"");
 }
 
+void AppendBytesHex(char* buffer, size_t capacity, size_t* offset, const uint8_t* bytes, uint32_t count) noexcept
+{
+	static constexpr char kHex[] = "0123456789abcdef";
+	AppendText(buffer, capacity, offset, "\"");
+	for (uint32_t i = 0; i < count && *offset + 2 < capacity; ++i)
+	{
+		buffer[(*offset)++] = kHex[bytes[i] >> 4u];
+		buffer[(*offset)++] = kHex[bytes[i] & 0x0fu];
+	}
+	AppendText(buffer, capacity, offset, "\"");
+}
+
 const char* AccessName(ExceptionHandler::AccessViolationType type) noexcept
 {
 	switch (type)
@@ -116,11 +128,10 @@ void WriteCrashReport(const ExceptionHandler::ExceptionInfo& info) noexcept
 	{
 		return;
 	}
-	char   json[4096] = {};
-	size_t size       = 0;
+	char   json[16384] = {};
+	size_t size        = 0;
 	AppendText(json, sizeof(json), &size, "{\"schema\":\"kyty_crash_context_v1\",\"type\":\"");
-	AppendText(json, sizeof(json), &size,
-	           info.type == ExceptionHandler::ExceptionType::AccessViolation ? "access_violation" : "unknown");
+	AppendText(json, sizeof(json), &size, info.type == ExceptionHandler::ExceptionType::AccessViolation ? "access_violation" : "unknown");
 	AppendText(json, sizeof(json), &size, "\",\"access\":\"");
 	AppendText(json, sizeof(json), &size, AccessName(info.access_violation_type));
 	AppendText(json, sizeof(json), &size, "\",\"exception_code\":");
@@ -130,10 +141,10 @@ void WriteCrashReport(const ExceptionHandler::ExceptionInfo& info) noexcept
 	AppendText(json, sizeof(json), &size, ",\"rip\":");
 	AppendHexJson(json, sizeof(json), &size, info.exception_address);
 	AppendText(json, sizeof(json), &size, ",\"registers\":{");
-	static constexpr const char* names[] = {"rsp", "rbp", "rflags", "rax", "rbx", "rcx", "rdx", "rsi", "rdi",
-	                                        "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"};
-	const uint64_t values[] = {info.rsp, info.rbp, info.rflags, info.rax, info.rbx, info.rcx, info.rdx, info.rsi, info.rdi,
-	                           info.r8, info.r9, info.r10, info.r11, info.r12, info.r13, info.r14, info.r15};
+	static constexpr const char* names[]  = {"rsp", "rbp", "rflags", "rax", "rbx", "rcx", "rdx", "rsi", "rdi",
+	                                         "r8",  "r9",  "r10",    "r11", "r12", "r13", "r14", "r15"};
+	const uint64_t               values[] = {info.rsp, info.rbp, info.rflags, info.rax, info.rbx, info.rcx, info.rdx, info.rsi, info.rdi,
+	                                         info.r8,  info.r9,  info.r10,    info.r11, info.r12, info.r13, info.r14, info.r15};
 	for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); ++i)
 	{
 		if (i != 0)
@@ -146,7 +157,9 @@ void WriteCrashReport(const ExceptionHandler::ExceptionInfo& info) noexcept
 		AppendHexJson(json, sizeof(json), &size, values[i]);
 	}
 	AppendText(json, sizeof(json), &size, "},\"stack\":[");
-	const uint32_t stack_count = info.stack_count > 16u ? 16u : info.stack_count;
+	const uint32_t stack_count = info.stack_count > ExceptionHandler::ExceptionInfo::StackCapacity
+	                                 ? ExceptionHandler::ExceptionInfo::StackCapacity
+	                                 : info.stack_count;
 	for (uint32_t i = 0; i < stack_count; ++i)
 	{
 		if (i != 0u)
@@ -154,6 +167,28 @@ void WriteCrashReport(const ExceptionHandler::ExceptionInfo& info) noexcept
 			AppendText(json, sizeof(json), &size, ",");
 		}
 		AppendHexJson(json, sizeof(json), &size, info.stack[i]);
+	}
+	AppendText(json, sizeof(json), &size, "],\"memory_windows\":[");
+	const uint32_t memory_window_count = info.memory_window_count > ExceptionHandler::ExceptionInfo::MemoryWindowCapacity
+	                                         ? ExceptionHandler::ExceptionInfo::MemoryWindowCapacity
+	                                         : info.memory_window_count;
+	for (uint32_t i = 0; i < memory_window_count; ++i)
+	{
+		if (i != 0u)
+		{
+			AppendText(json, sizeof(json), &size, ",");
+		}
+		const auto&    window = info.memory_windows[i];
+		const uint32_t count  = window.size > ExceptionHandler::ExceptionInfo::MemoryWindowSize
+		                            ? ExceptionHandler::ExceptionInfo::MemoryWindowSize
+		                            : window.size;
+		AppendText(json, sizeof(json), &size, "{\"address\":");
+		AppendHexJson(json, sizeof(json), &size, window.address);
+		AppendText(json, sizeof(json), &size, ",\"size\":");
+		AppendHexJson(json, sizeof(json), &size, count);
+		AppendText(json, sizeof(json), &size, ",\"bytes\":");
+		AppendBytesHex(json, sizeof(json), &size, window.bytes, count);
+		AppendText(json, sizeof(json), &size, "}");
 	}
 	AppendText(json, sizeof(json), &size, "]}\n");
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -174,6 +209,41 @@ void WriteCrashReport(const ExceptionHandler::ExceptionInfo& info) noexcept
 #endif
 }
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+void CaptureCrashStack(uint64_t stack_address, ExceptionHandler::ExceptionInfo* info) noexcept
+{
+	if (info == nullptr || stack_address < 0x1000u)
+	{
+		return;
+	}
+
+	MEMORY_BASIC_INFORMATION region {};
+	if (VirtualQuery(reinterpret_cast<const void*>(stack_address), &region, sizeof(region)) == 0 || region.State != MEM_COMMIT ||
+	    (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+	{
+		return;
+	}
+
+	const auto region_base = reinterpret_cast<uintptr_t>(region.BaseAddress);
+	if (region_base > UINTPTR_MAX - region.RegionSize)
+	{
+		return;
+	}
+	const auto region_end = region_base + region.RegionSize;
+	if (stack_address >= region_end)
+	{
+		return;
+	}
+
+	const SIZE_T requested = static_cast<SIZE_T>(
+	    std::min<uint64_t>(sizeof(info->stack), static_cast<uint64_t>(region_end - static_cast<uintptr_t>(stack_address))));
+	SIZE_T bytes_read = 0;
+	(void)ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(stack_address), info->stack, requested, &bytes_read);
+	info->stack_count =
+	    static_cast<uint32_t>(std::min<SIZE_T>(bytes_read / sizeof(info->stack[0]), ExceptionHandler::ExceptionInfo::StackCapacity));
+}
+#endif
+
 } // namespace
 
 void ConfigureFatalFaultReport(const char* path) noexcept
@@ -191,11 +261,12 @@ void ConfigureFatalFaultReport(const char* path) noexcept
 	g_crash_report_path[g_crash_report_path_size] = '\0';
 }
 
-SignalDiagnosticsConfig MakeSignalDiagnosticsConfig(const char* skip_ud2, const char* fault_log) noexcept
+SignalDiagnosticsConfig MakeSignalDiagnosticsConfig(const char* skip_ud2, const char* fault_log, const char* crash_memory) noexcept
 {
 	SignalDiagnosticsConfig config {};
-	config.skip_ud2 = skip_ud2 != nullptr;
-	config.fault_log = fault_log != nullptr;
+	config.skip_ud2     = skip_ud2 != nullptr;
+	config.fault_log    = fault_log != nullptr;
+	config.crash_memory = crash_memory != nullptr;
 	return config;
 }
 
@@ -279,15 +350,7 @@ public:
 		info.r13               = context->R13;
 		info.r14               = context->R14;
 		info.r15               = context->R15;
-		if (context->Rsp >= 0x1000u)
-		{
-			const auto* stack = reinterpret_cast<const uint64_t*>(context->Rsp);
-			for (uint32_t i = 0; i < 16u; ++i)
-			{
-				info.stack[i] = stack[i];
-			}
-			info.stack_count = 16;
-		}
+		CaptureCrashStack(context->Rsp, &info);
 		info.exception_win_code = exception_record->ExceptionCode;
 
 		auto* p = *static_cast<ExceptionHandlerPrivate**>(dispatcher_context->HandlerData);
@@ -344,8 +407,9 @@ public:
 
 ExceptionHandler::handler_func_t ExceptionHandlerPrivate::g_vec_func = nullptr;
 
-static volatile sig_atomic_t g_signal_skip_ud2  = 0;
-static volatile sig_atomic_t g_signal_fault_log = 0;
+static volatile sig_atomic_t g_signal_skip_ud2     = 0;
+static volatile sig_atomic_t g_signal_fault_log    = 0;
+static volatile sig_atomic_t g_signal_crash_memory = 0;
 static volatile sig_atomic_t g_signal_extrq_reported = 0;
 
 // Guest ELF images are placed at 0x900000000 + n*0x10000000 (see RuntimeLinker
@@ -362,9 +426,11 @@ static inline bool IsGuestCodeAddress(uint64_t rip) noexcept
 
 static void LoadSignalDiagnosticsConfigFromEnvironment() noexcept
 {
-	const auto config = MakeSignalDiagnosticsConfig(getenv("KYTY_SKIP_UD2"), getenv("KYTY_FAULT_LOG"));
-	g_signal_skip_ud2  = config.skip_ud2 ? 1 : 0;
-	g_signal_fault_log = config.fault_log ? 1 : 0;
+	const auto config =
+	    MakeSignalDiagnosticsConfig(getenv("KYTY_SKIP_UD2"), getenv("KYTY_FAULT_LOG"), getenv("KYTY_CRASH_MEMORY"));
+	g_signal_skip_ud2     = config.skip_ud2 ? 1 : 0;
+	g_signal_fault_log    = config.fault_log ? 1 : 0;
+	g_signal_crash_memory = config.crash_memory ? 1 : 0;
 }
 
 // Platform register accessors for POSIX ucontext. The exception contract keeps
@@ -1271,7 +1337,7 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 				return;
 			}
 		}
-	#endif
+#endif
 		sigsafe_fault("SIGILL", rip, 0);
 		sigsafe_fault("ILL-RAXRBX", uc_get_rax(uc), uc_get_rbx(uc));
 		sigsafe_fault("ILL-RCXRDX", uc_get_rcx(uc), uc_get_rdx(uc));
@@ -1288,25 +1354,26 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 
 	ExceptionHandler::ExceptionInfo einfo {};
 
-	einfo.type              = ExceptionHandler::ExceptionType::AccessViolation;
-	einfo.exception_address = uc_get_rip(uc);
-	einfo.rbp               = uc_get_rbp(uc);
-	einfo.rsp               = uc_get_rsp(uc);
-	einfo.rflags            = uc_get_rflags(uc);
-	einfo.rax               = uc_get_rax(uc);
-	einfo.rbx               = uc_get_rbx(uc);
-	einfo.rcx               = uc_get_rcx(uc);
-	einfo.rdx               = uc_get_rdx(uc);
-	einfo.rsi               = uc_get_rsi(uc);
-	einfo.rdi               = uc_get_rdi(uc);
-	einfo.r8                = uc_get_r8(uc);
-	einfo.r9                = uc_get_r9(uc);
-	einfo.r10               = uc_get_r10(uc);
-	einfo.r11               = uc_get_r11(uc);
-	einfo.r12               = uc_get_r12(uc);
-	einfo.r13               = uc_get_r13(uc);
-	einfo.r14               = uc_get_r14(uc);
-	einfo.r15               = uc_get_r15(uc);
+	einfo.type               = ExceptionHandler::ExceptionType::AccessViolation;
+	einfo.exception_win_code = static_cast<uint32_t>(info->si_code);
+	einfo.exception_address  = uc_get_rip(uc);
+	einfo.rbp                = uc_get_rbp(uc);
+	einfo.rsp                = uc_get_rsp(uc);
+	einfo.rflags             = uc_get_rflags(uc);
+	einfo.rax                = uc_get_rax(uc);
+	einfo.rbx                = uc_get_rbx(uc);
+	einfo.rcx                = uc_get_rcx(uc);
+	einfo.rdx                = uc_get_rdx(uc);
+	einfo.rsi                = uc_get_rsi(uc);
+	einfo.rdi                = uc_get_rdi(uc);
+	einfo.r8                 = uc_get_r8(uc);
+	einfo.r9                 = uc_get_r9(uc);
+	einfo.r10                = uc_get_r10(uc);
+	einfo.r11                = uc_get_r11(uc);
+	einfo.r12                = uc_get_r12(uc);
+	einfo.r13                = uc_get_r13(uc);
+	einfo.r14                = uc_get_r14(uc);
+	einfo.r15                = uc_get_r15(uc);
 	if (einfo.rsp >= 0x10000u)
 	{
 		// The guest stack may point at an unmapped or partially-mapped region
@@ -1314,9 +1381,9 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		// buffer, or an unmapped page). Dereferencing it directly inside the
 		// signal handler would double-fault. Read it fault-safe instead so a
 		// capture attempt can never replace the original fault with a crash.
-		uint64_t buffer[16] = {};
-		struct iovec local  = {buffer, sizeof(buffer)};
-		struct iovec remote = {reinterpret_cast<void*>(einfo.rsp), sizeof(buffer)};
+		uint64_t      buffer[ExceptionHandler::ExceptionInfo::StackCapacity] = {};
+		struct iovec  local                                                  = {buffer, sizeof(buffer)};
+		struct iovec  remote                                                 = {reinterpret_cast<void*>(einfo.rsp), sizeof(buffer)};
 		const ssize_t got = syscall(SYS_process_vm_readv, getpid(), &local, 1UL, &remote, 1UL, 0UL);
 		if (got > 0)
 		{
@@ -1326,6 +1393,52 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 				einfo.stack[i] = buffer[i];
 			}
 			einfo.stack_count = count;
+		}
+	}
+	if (g_signal_crash_memory != 0 && einfo.stack_count != 0)
+	{
+		constexpr uint64_t kGuestDataAddressEnd = 0x40000000000ull;
+		constexpr uint64_t kStackExclusion      = 0x100000ull;
+		const uint64_t     stack_low            = einfo.rsp > kStackExclusion ? einfo.rsp - kStackExclusion : 0;
+		const uint64_t     stack_high           = einfo.rsp <= UINT64_MAX - kStackExclusion ? einfo.rsp + kStackExclusion : UINT64_MAX;
+
+		for (uint32_t i = einfo.stack_count; i != 0 && einfo.memory_window_count < ExceptionHandler::ExceptionInfo::MemoryWindowCapacity;
+		     --i)
+		{
+			const uint64_t candidate = einfo.stack[i - 1u];
+			if (candidate < 0x10000ull || candidate >= kGuestDataAddressEnd || (candidate >= stack_low && candidate < stack_high) ||
+			    IsGuestCodeAddress(candidate))
+			{
+				continue;
+			}
+			const uint64_t start     = candidate >= 16u ? candidate - 16u : candidate;
+			bool           duplicate = false;
+			for (uint32_t j = 0; j < einfo.memory_window_count; ++j)
+			{
+				const auto&    existing     = einfo.memory_windows[j];
+				const uint64_t existing_end = existing.address + existing.size;
+				if (start >= existing.address && start < existing_end)
+				{
+					duplicate = true;
+					break;
+				}
+			}
+			if (duplicate)
+			{
+				continue;
+			}
+
+			auto&         window = einfo.memory_windows[einfo.memory_window_count];
+			struct iovec  local  = {window.bytes, ExceptionHandler::ExceptionInfo::MemoryWindowSize};
+			struct iovec  remote = {reinterpret_cast<void*>(start), ExceptionHandler::ExceptionInfo::MemoryWindowSize};
+			const ssize_t got    = syscall(SYS_process_vm_readv, getpid(), &local, 1UL, &remote, 1UL, 0UL);
+			if (got <= 0)
+			{
+				continue;
+			}
+			window.address = start;
+			window.size    = static_cast<uint32_t>(got);
+			++einfo.memory_window_count;
 		}
 	}
 
@@ -1563,15 +1676,7 @@ static LONG WINAPI ExceptionFilter(PEXCEPTION_POINTERS exception)
 	info.r13               = exception->ContextRecord->R13;
 	info.r14               = exception->ContextRecord->R14;
 	info.r15               = exception->ContextRecord->R15;
-	if (exception->ContextRecord->Rsp >= 0x1000u)
-	{
-		const auto* stack = reinterpret_cast<const uint64_t*>(exception->ContextRecord->Rsp);
-		for (uint32_t i = 0; i < 16u; ++i)
-		{
-			info.stack[i] = stack[i];
-		}
-		info.stack_count = 16;
-	}
+	CaptureCrashStack(exception->ContextRecord->Rsp, &info);
 	info.exception_win_code = exception_record->ExceptionCode;
 
 	ExceptionHandlerPrivate::g_vec_func(&info);

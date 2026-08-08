@@ -17,13 +17,14 @@ namespace VirtualMemory {
 
 struct SignalDiagnosticsConfig
 {
-	bool skip_ud2 = false;
-	bool fault_log = false;
+	bool skip_ud2     = false;
+	bool fault_log    = false;
+	bool crash_memory = false;
 };
 
 // Environment diagnostics are enabled by variable presence, including an
 // empty value. Callers load the environment outside signal handlers.
-SignalDiagnosticsConfig MakeSignalDiagnosticsConfig(const char* skip_ud2, const char* fault_log) noexcept;
+SignalDiagnosticsConfig MakeSignalDiagnosticsConfig(const char* skip_ud2, const char* fault_log, const char* crash_memory = nullptr) noexcept;
 
 class ExceptionHandlerPrivate;
 
@@ -46,6 +47,17 @@ public:
 
 	struct ExceptionInfo
 	{
+		static constexpr uint32_t StackCapacity        = 128;
+		static constexpr uint32_t MemoryWindowCapacity = 24;
+		static constexpr uint32_t MemoryWindowSize     = 64;
+
+		struct MemoryWindow
+		{
+			uint64_t address                 = 0;
+			uint8_t  bytes[MemoryWindowSize] = {};
+			uint32_t size                    = 0;
+		};
+
 		ExceptionType       type                   = ExceptionType::Unknown;
 		AccessViolationType access_violation_type  = AccessViolationType::Unknown;
 		uint64_t            access_violation_vaddr = 0;
@@ -67,9 +79,11 @@ public:
 		uint64_t            r13                    = 0;
 		uint64_t            r14                    = 0;
 		uint64_t            r15                    = 0;
-		uint64_t            stack[16]              = {};
-		uint32_t            stack_count             = 0;
-		uint32_t            exception_win_code     = 0;
+		uint64_t            stack[StackCapacity]   = {};
+		MemoryWindow        memory_windows[MemoryWindowCapacity] = {};
+		uint32_t            stack_count                         = 0;
+		uint32_t            memory_window_count                 = 0;
+		uint32_t            exception_win_code                  = 0;
 	};
 
 	using handler_func_t = void (*)(const ExceptionInfo*);
