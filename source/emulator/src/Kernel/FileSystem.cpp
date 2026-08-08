@@ -818,6 +818,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 		return KERNEL_ERROR_EBADF;
 	}
 
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), nbytes);
 	uint64_t bytes_read = 0;
 	{
 		Core::LockGuard lock(file->mutex);
@@ -827,8 +828,6 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 		}
 		bytes_read = ReadFileToCompletion(file->f, buf, nbytes);
 	}
-	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
-
 	KYTY_LOG_DEBUG("\tRead %" PRIu64 " bytes from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, file->real_name.C_Str());
 
 	FsTrace("read", file->name.C_Str(), static_cast<int64_t>(nbytes), bytes_read);
@@ -928,6 +927,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 		return KERNEL_ERROR_EBADF;
 	}
 
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), nbytes);
 	uint64_t bytes_read = 0;
 	{
 		Core::LockGuard lock(file->mutex);
@@ -947,8 +947,6 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 			return KERNEL_ERROR_EIO;
 		}
 	}
-	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), bytes_read);
-
 	KYTY_LOG_DEBUG("\tRead %" PRIu64 " bytes (pos = %" PRId64 ") from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, offset,
 	               file->real_name.C_Str());
 

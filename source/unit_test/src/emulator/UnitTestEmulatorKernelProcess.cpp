@@ -7,11 +7,13 @@
 #include "Emulator/Kernel/Semaphore.h"
 #include "Emulator/Config.h"
 #include "Emulator/PresentationStats.h"
+#include "Emulator/VideoFrameMemory.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/PosixSemaphore.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
 #include <atomic>
@@ -22,6 +24,7 @@
 #include <future>
 #include <string>
 #include <thread>
+#include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <unistd.h>
@@ -143,6 +146,19 @@ void EnsureFileSystemSubsystem()
 		Kernel::FileSystem::FileSystemSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 		initialized = true;
 	}
+}
+
+bool     g_host_write_made_writable = false;
+uint32_t g_host_write_prepare_count = 0;
+
+void IgnoreLinearFrame(uint64_t /*base*/, size_t /*size*/, uint32_t /*row_pitch_bytes*/) {}
+
+void IgnoreUnregisterFrame(uint64_t /*base*/) {}
+
+void MakeHostWriteDestinationWritable(uint64_t base, uint64_t size)
+{
+	g_host_write_prepare_count++;
+	g_host_write_made_writable = Core::VirtualMemory::Protect(base, size, Core::VirtualMemory::Mode::ReadWrite);
 }
 
 void* KYTY_SYSV_ABI HoldPthreadUntilReleased(void* arg)
@@ -1318,6 +1334,59 @@ TEST(EmulatorKernelProcess, DuplicatedFileDescriptorKeepsSharedOffsetAndLifetime
 	EXPECT_EQ(KernelClose(duplicate), OK);
 
 	Umount(U"/app0/");
+	EXPECT_TRUE(Core::File::DeleteFile(host_file));
+	EXPECT_TRUE(Core::File::DeleteDirectory(root));
+}
+
+TEST(EmulatorKernelProcess, PositionedReadPreparesProtectedGuestDestinationBeforeHostIo)
+{
+	using namespace LibKernel;
+	using namespace Kernel::FileSystem;
+
+	EnsureFileSystemSubsystem();
+	constexpr size_t kReadSize = 64u * 1024u;
+	const String     root      = U"/tmp/kyty_file_host_write_test/";
+	const String     host_file = root + U"payload.bin";
+	ASSERT_TRUE(Core::File::CreateDirectories(root));
+	std::vector<uint8_t> source(kReadSize);
+	for (size_t i = 0; i < source.size(); i++)
+	{
+		source[i] = static_cast<uint8_t>((i * 37u + 11u) & 0xffu);
+	}
+	{
+		Core::File file;
+		ASSERT_TRUE(file.Create(host_file));
+		uint32_t written = 0;
+		file.Write(source.data(), static_cast<uint32_t>(source.size()), &written);
+		ASSERT_EQ(written, source.size());
+	}
+	Mount(root, U"/host-write/");
+
+	const int fd = KernelOpen("/host-write/payload.bin", 0, 0);
+	ASSERT_GE(fd, 3);
+	const uint64_t destination = Core::VirtualMemory::Alloc(0, kReadSize, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(destination, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::Protect(destination, kReadSize, Core::VirtualMemory::Mode::Read));
+
+	g_host_write_made_writable = false;
+	g_host_write_prepare_count = 0;
+	const Emulator::VideoFrameMemory::Callbacks callbacks {&IgnoreLinearFrame, &IgnoreUnregisterFrame,
+	                                                       &MakeHostWriteDestinationWritable};
+	ASSERT_TRUE(Emulator::VideoFrameMemory::InstallCallbacks(callbacks));
+	const int64_t read = KernelPread(fd, reinterpret_cast<void*>(destination), kReadSize, 0);
+
+	EXPECT_EQ(g_host_write_prepare_count, 1u);
+	EXPECT_TRUE(g_host_write_made_writable);
+	EXPECT_EQ(read, static_cast<int64_t>(kReadSize));
+	if (read == static_cast<int64_t>(kReadSize))
+	{
+		EXPECT_EQ(std::memcmp(reinterpret_cast<const void*>(destination), source.data(), source.size()), 0);
+	}
+
+	EXPECT_TRUE(Emulator::VideoFrameMemory::InstallCallbacks({}));
+	EXPECT_EQ(KernelClose(fd), OK);
+	EXPECT_TRUE(Core::VirtualMemory::Free(destination));
+	Umount(U"/host-write/");
 	EXPECT_TRUE(Core::File::DeleteFile(host_file));
 	EXPECT_TRUE(Core::File::DeleteDirectory(root));
 }
