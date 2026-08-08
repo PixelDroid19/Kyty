@@ -1446,6 +1446,11 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 14), VK_FORMAT_R8G8_UNORM);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 20), VK_FORMAT_R32_UINT);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(20), 4u);
+	EXPECT_TRUE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Sampled, 29));
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 29), VK_FORMAT_R16G16_SFLOAT);
+	EXPECT_EQ(VulkanGen5ImageNumericType(29), GuestImageNumericType::FloatingPoint);
+	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(29), 4u);
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(29, VK_FORMAT_R16G16_SFLOAT));
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 71), VK_FORMAT_R16G16B16A16_SFLOAT);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 75), VK_FORMAT_R32G32B32A32_UINT);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(75), 16u);

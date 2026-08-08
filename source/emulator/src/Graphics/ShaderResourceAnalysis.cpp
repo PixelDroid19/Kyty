@@ -207,6 +207,7 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 		case 7: return 2;    // UFMT_16_UNORM
 		case 20: return 4;   // UFMT_32_UINT
 		case 22: return 4;   // UFMT_32_FLOAT
+		case 29: return 4;   // UFMT_16_16_FLOAT
 		case 13: return 2;   // UFMT_16_FLOAT
 		case 14: return 2;   // UFMT_8_8_UNORM
 		case 36: return 4;   // UFMT_10_11_11_FLOAT
