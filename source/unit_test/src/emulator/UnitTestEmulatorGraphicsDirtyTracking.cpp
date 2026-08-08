@@ -19,6 +19,7 @@ using Kyty::Core::VirtualMemory::GetPageSize;
 using Kyty::Core::VirtualMemory::MapSharedAligned;
 using Kyty::Core::VirtualMemory::Mode;
 using Kyty::Libs::Graphics::GpuDirtyPageProtectionOps;
+using Kyty::Libs::Graphics::GpuDirtyPageTableIndex;
 using Kyty::Libs::Graphics::GpuDirtyPageTracker;
 using Kyty::Libs::Graphics::GpuDirtyProtectionState;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateHandlesFault;
@@ -35,11 +36,13 @@ TEST(EmulatorGraphicsDirtyTracking, ArmingWindowIsHandledAsTrackerFault)
 	EXPECT_FALSE(GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState::Writable));
 	EXPECT_FALSE(GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState::Capturing));
 	EXPECT_TRUE(GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState::Arming));
+	EXPECT_TRUE(GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState::ArmingRollback));
 	EXPECT_TRUE(GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState::Armed));
 	EXPECT_TRUE(GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState::Disarming));
 	EXPECT_TRUE(GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState::Writable));
 	EXPECT_FALSE(GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState::Capturing));
 	EXPECT_FALSE(GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState::Arming));
+	EXPECT_TRUE(GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState::ArmingRollback));
 	EXPECT_FALSE(GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState::Armed));
 	EXPECT_FALSE(GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState::Disarming));
 	EXPECT_TRUE(GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState::Retired));
@@ -87,11 +90,12 @@ struct FakeProtection
 	std::vector<uint32_t>       original_tokens;
 	std::vector<uint32_t>       signal_safe_tokens;
 	std::vector<ProtectionCall> calls;
-	GpuDirtyPageTracker*        tracker           = nullptr;
-	uintptr_t                   fault_address     = 0;
-	uintptr_t                   fault_before_capture_address = 0;
+	GpuDirtyPageTracker*        tracker                       = nullptr;
+	uintptr_t                   fault_address                 = 0;
+	bool                        fault_result                  = false;
+	uintptr_t                   fault_before_capture_address  = 0;
 	uintptr_t                   notify_before_capture_address = 0;
-	uint32_t                    signal_safe_calls = 0;
+	uint32_t                    signal_safe_calls             = 0;
 	std::atomic<bool>           fail_next_protect {false};
 	std::atomic<bool>           block_next_protect {false};
 	std::atomic<bool>           protect_entered {false};
@@ -118,10 +122,10 @@ struct FakeProtection
 
 	static bool RemoveWrite(void* context, uintptr_t address, size_t size, uint32_t restore_token) noexcept
 	{
-		auto* self = static_cast<FakeProtection*>(context);
+		auto*        self  = static_cast<FakeProtection*>(context);
 		const size_t first = (address - self->base) / self->page_size;
-		const auto bits = static_cast<uint32_t>(self->original_modes[first]) & ~static_cast<uint32_t>(Mode::Write);
-		const Mode mode = static_cast<Mode>(bits == 0u ? static_cast<uint32_t>(Mode::Read) : bits);
+		const auto   bits  = static_cast<uint32_t>(self->original_modes[first]) & ~static_cast<uint32_t>(Mode::Write);
+		const Mode   mode  = static_cast<Mode>(bits == 0u ? static_cast<uint32_t>(Mode::Read) : bits);
 		self->calls.push_back({address, size, mode, restore_token});
 		if (self->block_next_protect.exchange(false))
 		{
@@ -143,7 +147,7 @@ struct FakeProtection
 		{
 			const uintptr_t fault = self->fault_address;
 			self->fault_address   = 0;
-			(void)self->tracker->HandleWriteFault(fault);
+			self->fault_result    = self->tracker->HandleWriteFault(fault);
 		}
 		return !fail;
 	}
@@ -318,6 +322,34 @@ TEST(EmulatorGraphicsDirtyTracking, FaultAndRearmAdvanceGeneration)
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+TEST(EmulatorGraphicsDirtyTracking, TombstoneProbeFindsExistingArmedPageBeforeReuse)
+{
+	Mapping mapping(2);
+	ASSERT_NE(mapping.address, 0u);
+	constexpr size_t kPageTableMask = (1u << 18u) - 1u;
+	const size_t     target_slot    = GpuDirtyPageTableIndex(mapping.address, kPageTableMask);
+	const uintptr_t  mapping_end    = mapping.address + mapping.size;
+	uintptr_t        tombstone_page = GetPageSize();
+	while (GpuDirtyPageTableIndex(tombstone_page, kPageTableMask) != target_slot ||
+	       (tombstone_page >= mapping.address && tombstone_page < mapping_end))
+	{
+		tombstone_page += GetPageSize();
+	}
+
+	FakeProtection      protection {mapping.address, GetPageSize(), {Mode::ReadWrite, Mode::ReadWrite}};
+	GpuDirtyPageTracker tracker(protection.Ops());
+	protection.tracker = &tracker;
+	ASSERT_TRUE(tracker.RegisterRange(tombstone_page, GetPageSize()));
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, GetPageSize()));
+	ASSERT_TRUE(tracker.UnregisterRange(tombstone_page, GetPageSize()));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, GetPageSize()));
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, GetPageSize()));
+}
+
 TEST(EmulatorGraphicsDirtyTracking, RearmCoalescesContiguousPagesWithUniformOriginalMode)
 {
 	Mapping mapping(4);
@@ -409,6 +441,24 @@ TEST(EmulatorGraphicsDirtyTracking, WriteFaultRestoresCapturedNativeProtection)
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+TEST(EmulatorGraphicsDirtyTracking, QueuedSiblingFaultAfterRestoreRemainsHandled)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	FakeProtection      protection {mapping.address, GetPageSize(), {Mode::ReadWrite}};
+	GpuDirtyPageTracker tracker(protection.Ops());
+	protection.tracker = &tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+
+	ASSERT_TRUE(tracker.HandleWriteFault(mapping.address));
+	const uint32_t restores_after_first_fault = protection.signal_safe_calls;
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
+	EXPECT_EQ(protection.signal_safe_calls, restores_after_first_fault + 1u);
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
 TEST(EmulatorGraphicsDirtyTracking, FirstArmPublishesNativeProtectionBeforeWriteCanFault)
 {
 	Mapping mapping(1);
@@ -416,7 +466,7 @@ TEST(EmulatorGraphicsDirtyTracking, FirstArmPublishesNativeProtectionBeforeWrite
 	FakeProtection protection {mapping.address, GetPageSize(), {Mode::ExecuteReadWrite}};
 	protection.original_tokens = {0x407u};
 	GpuDirtyPageTracker tracker(protection.Ops());
-	protection.tracker = &tracker;
+	protection.tracker                      = &tracker;
 	protection.fault_before_capture_address = mapping.address;
 	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
 
@@ -511,7 +561,7 @@ TEST(EmulatorGraphicsDirtyTracking, FaultDuringBatchedProtectKeepsOnlyRacedPageW
 	ASSERT_EQ(protection.calls.size(), 1u);
 	EXPECT_EQ(protection.signal_safe_calls, 2u);
 	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address));
-	EXPECT_FALSE(tracker.HandleWriteFault(mapping.address + GetPageSize()));
+	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address + GetPageSize()));
 	EXPECT_TRUE(tracker.HandleWriteFault(mapping.address + GetPageSize() * 2u));
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
@@ -578,6 +628,36 @@ TEST(EmulatorGraphicsDirtyTracking, RearmRestoresWriteAfterConcurrentDisarmingCo
 	EXPECT_TRUE(write_result);
 	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
 	EXPECT_EQ(protection.current_modes[1], Mode::Read);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, FaultInArmingRollbackWindowRestoresWritablePage)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	FakeProtection      protection(mapping.address, GetPageSize(), {Mode::ReadWrite});
+	GpuDirtyPageTracker tracker(protection.Ops());
+	protection.tracker = &tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.HandleWriteFault(mapping.address));
+
+	protection.block_next_protect.store(true);
+	protection.fault_address = mapping.address;
+	bool        rearm_result = false;
+	std::thread rearm([&] { rearm_result = tracker.Rearm(mapping.address, mapping.size); });
+	while (!protection.protect_entered.load())
+	{
+		std::this_thread::yield();
+	}
+	ASSERT_TRUE(tracker.NotifyWrite(mapping.address, 1u));
+	ASSERT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	protection.release_protect.store(true);
+	rearm.join();
+
+	EXPECT_TRUE(rearm_result);
+	EXPECT_TRUE(protection.fault_result);
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 

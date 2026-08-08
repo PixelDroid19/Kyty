@@ -22,10 +22,20 @@ enum class GpuDirtyProtectionState : uint32_t
 	Writable,
 	Capturing,
 	Arming,
+	ArmingRollback,
 	Armed,
 	Disarming,
 	Retired
 };
+
+[[nodiscard]] constexpr size_t GpuDirtyPageTableIndex(uintptr_t page, size_t mask) noexcept
+{
+	page >>= 12u;
+	page ^= page >> 33u;
+	page *= static_cast<uintptr_t>(0xff51afd7ed558ccdULL);
+	page ^= page >> 33u;
+	return static_cast<size_t>(page) & mask;
+}
 
 [[nodiscard]] constexpr bool GpuDirtyProtectionStateHandlesFault(GpuDirtyProtectionState state)
 {
@@ -34,10 +44,11 @@ enum class GpuDirtyProtectionState : uint32_t
 
 [[nodiscard]] constexpr bool GpuDirtyProtectionStateNeedsArmingRollback(GpuDirtyProtectionState observed)
 {
-	// If a writer completed while Rearm was entering mprotect, the page may
-	// have become read-only after that writer published Writable. A concurrent
-	// final unregister can likewise publish Retired after restoring the page.
-	return observed == GpuDirtyProtectionState::Writable || observed == GpuDirtyProtectionState::Retired;
+	// If a writer completes while Rearm is entering mprotect, the delayed
+	// protection can still make the page read-only. A concurrent final
+	// unregister can likewise publish Retired before the protection commits.
+	return observed == GpuDirtyProtectionState::Writable || observed == GpuDirtyProtectionState::ArmingRollback ||
+	       observed == GpuDirtyProtectionState::Retired;
 }
 
 [[nodiscard]] constexpr bool GpuDirtyTrackingEnabledForProcess(const char* disable_value, bool fault_handler_ready)

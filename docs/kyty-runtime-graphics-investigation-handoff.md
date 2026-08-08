@@ -442,6 +442,22 @@ reported no structured error. During that window the process wrote about
 1.07 MB to disk and the bounded persistent Vulkan cache remained 1.1 MB; the
 tracker itself writes no texture data to disk.
 
+Two later intermittent `SEGV_ACCERR` write faults exposed distinct signal-order
+windows in the default tracker path. First, a host writer could restore a page
+while a concurrent arming transaction had not yet committed its native
+read-only protection; publishing `Writable` before that transaction finished
+left a short state/protection mismatch. The tracker now preserves an explicit
+arming-rollback state until the delayed protection is restored. Second, two
+guest workers could fault on the same read-only page before either signal
+handler completed. The first handler restored the captured writable mode, but
+the already-queued sibling delivery entered after the state became `Writable`
+and was treated as a real guest fault. Active coverage with a captured writable
+native mode now accepts that stale delivery and reapplies the restore token.
+Deterministic tests cover both orderings. A subsequent strict Release+Silent
+route exceeded 10,400 presents, reached the new-game transition, and produced
+no crash report. Sampled menu/transition status ranged from about 32 to 48 FPS;
+that run did not yet prove controllable gameplay or a 60 FPS target.
+
 A later long interactive run exposed a separate presentation freeze after more
 than 80,000 frames. A debugger capture stopped at the first bounded
 `WaitRegMem64` timeout and preserved the command stream. The wait expected
