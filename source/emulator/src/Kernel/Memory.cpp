@@ -279,6 +279,7 @@ public:
 		Core::LockGuard lock(m_mutex);
 		for (const auto& block: m_blocks)
 		{
+			(void)VirtualMemory::UnregisterDemandRange(block.addr, block.size);
 			VirtualMemory::Free(block.addr);
 		}
 	}
@@ -289,6 +290,10 @@ public:
 
 	bool Add(uint64_t addr, uint64_t size)
 	{
+		if (size == 0 || addr > std::numeric_limits<uint64_t>::max() - size)
+		{
+			return false;
+		}
 		Core::LockGuard lock(m_mutex);
 		for (const auto& block: m_blocks)
 		{
@@ -296,6 +301,10 @@ public:
 			{
 				return false;
 			}
+		}
+		if (!VirtualMemory::RegisterDemandRange(addr, size))
+		{
+			return false;
 		}
 		m_blocks.Add(Block {addr, size});
 		return true;
@@ -329,8 +338,13 @@ public:
 			const auto& block = m_blocks[index];
 			if (block.addr == addr && block.size == size)
 			{
+				if (!VirtualMemory::UnregisterDemandRange(addr, size))
+				{
+					return false;
+				}
 				if (!VirtualMemory::Free(addr))
 				{
+					EXIT_IF(!VirtualMemory::RegisterDemandRange(addr, size));
 					return false;
 				}
 				m_blocks.RemoveAt(index);
@@ -367,8 +381,13 @@ public:
 			{
 				continue;
 			}
+			if (!VirtualMemory::UnregisterDemandRange(addr, size))
+			{
+				return false;
+			}
 			if (!mapper())
 			{
+				EXIT_IF(!VirtualMemory::RegisterDemandRange(addr, size));
 				return false;
 			}
 			SplitConsumedBlock(index, block, addr, size);
@@ -396,8 +415,13 @@ public:
 			const uint64_t prefix_size = addr - block.addr;
 			const uint64_t suffix_addr = addr + size;
 			const uint64_t suffix_size = block.size - prefix_size - size;
+			if (!VirtualMemory::UnregisterDemandRange(addr, size))
+			{
+				return false;
+			}
 			if (!VirtualMemory::Free(block.addr))
 			{
+				EXIT_IF(!VirtualMemory::RegisterDemandRange(addr, size));
 				return false;
 			}
 			m_blocks.RemoveAt(index);
@@ -415,6 +439,7 @@ public:
 					EXIT_IF(!VirtualMemory::Free(suffix_addr));
 				}
 				EXIT_IF(!VirtualMemory::ReserveFixed(block.addr, block.size));
+				EXIT_IF(!VirtualMemory::RegisterDemandRange(addr, size));
 				m_blocks.Add(block);
 				return false;
 			}
@@ -1528,13 +1553,6 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 		VirtualMemory::Free(reserved_addr);
 		return KERNEL_ERROR_EBUSY;
 	}
-
-	// Reserved VA is PROT_NONE until mapped. Titles (and the application heap)
-	// may touch pages before an explicit MapFlexible/MapDirect; demand-map the
-	// host page on first fault — same contract as RegisterDemandRange for
-	// flexible memory (see VirtualMemory::TryDemandMap).
-	VirtualMemory::RegisterDemandRange(reserved_addr, len);
-
 	*addr_in_out = reinterpret_cast<void*>(reserved_addr);
 	KYTY_LOG_DEBUG("\t in_addr  = 0x%016" PRIx64 "\n", requested_addr);
 	KYTY_LOG_DEBUG("\t out_addr = 0x%016" PRIx64 "\n", reserved_addr);

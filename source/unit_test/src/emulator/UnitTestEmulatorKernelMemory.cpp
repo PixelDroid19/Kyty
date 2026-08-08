@@ -10,6 +10,7 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 #include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
 #include <array>
@@ -334,6 +335,8 @@ TEST(EmulatorKernelMemory, FixedDirectMapConsumesPrefixOfLargerReservation)
 	{
 		ASSERT_EQ(mapping, reservation);
 		static_cast<uint8_t*>(mapping)[0] = 0x5a;
+		EXPECT_FALSE(Core::VirtualMemory::TryDemandMap(reservation_base));
+		EXPECT_EQ(static_cast<uint8_t*>(mapping)[0], 0x5a);
 
 		VirtualQueryInfo mapped_info {};
 		ASSERT_EQ(KernelVirtualQuery(mapping, 0, &mapped_info, sizeof(mapped_info)), OK);
@@ -347,6 +350,7 @@ TEST(EmulatorKernelMemory, FixedDirectMapConsumesPrefixOfLargerReservation)
 		EXPECT_EQ(suffix_info.start, reservation_base + kMappingSize);
 		EXPECT_EQ(suffix_info.end, reservation_base + kReservationSize);
 		EXPECT_EQ(suffix_info.is_committed, 0u);
+		EXPECT_TRUE(Core::VirtualMemory::TryDemandMap(reservation_base + kMappingSize));
 
 		EXPECT_EQ(KernelMunmap(reservation_base, kMappingSize), OK);
 		EXPECT_EQ(KernelMunmap(reservation_base + kMappingSize, kReservationSize - kMappingSize), OK);
@@ -791,6 +795,9 @@ TEST(EmulatorKernelMemory, FixedFlexibleMapPreservesReservationSuffix)
 	void* mapping = reservation;
 	ASSERT_EQ(KernelMapNamedFlexibleMemory(&mapping, kMappingSize, 0x03, 0x10, "fixed-flexible"), OK);
 	ASSERT_EQ(mapping, reservation);
+	static_cast<uint8_t*>(mapping)[0] = 0xc3;
+	EXPECT_FALSE(Core::VirtualMemory::TryDemandMap(reservation_base));
+	EXPECT_EQ(static_cast<uint8_t*>(mapping)[0], 0xc3);
 
 	VirtualQueryInfo mapped_info {};
 	ASSERT_EQ(KernelVirtualQuery(mapping, 0, &mapped_info, sizeof(mapped_info)), OK);
@@ -807,6 +814,7 @@ TEST(EmulatorKernelMemory, FixedFlexibleMapPreservesReservationSuffix)
 	EXPECT_EQ(suffix_info.start, reservation_base + kMappingSize);
 	EXPECT_EQ(suffix_info.end, reservation_base + kReservationSize);
 	EXPECT_EQ(suffix_info.is_committed, 0u);
+	EXPECT_TRUE(Core::VirtualMemory::TryDemandMap(reservation_base + kMappingSize));
 
 	EXPECT_EQ(KernelMunmap(reservation_base, kMappingSize), OK);
 	EXPECT_EQ(KernelMunmap(reservation_base + kMappingSize, kReservationSize - kMappingSize), OK);
