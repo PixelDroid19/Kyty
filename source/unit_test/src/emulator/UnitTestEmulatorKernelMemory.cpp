@@ -106,17 +106,20 @@ struct GpuMappingLifecycleTestState
 	enum class Event : uint8_t
 	{
 		Register,
+		Invalidate,
 		Release,
 		Complete,
 	};
 
-	std::array<Event, 3> events {};
-	uint32_t             event_count    = 0;
-	uint64_t             register_vaddr = 0;
-	uint64_t             register_size  = 0;
-	uint64_t             release_vaddr  = 0;
-	uint64_t             release_size   = 0;
-	GpuMappingLifecyclePort* lifecycle = nullptr;
+	std::array<Event, 4>     events {};
+	uint32_t                 event_count      = 0;
+	uint64_t                 register_vaddr   = 0;
+	uint64_t                 register_size    = 0;
+	uint64_t                 invalidate_vaddr = 0;
+	uint64_t                 invalidate_size  = 0;
+	uint64_t                 release_vaddr    = 0;
+	uint64_t                 release_size     = 0;
+	GpuMappingLifecyclePort* lifecycle        = nullptr;
 
 	void Record(Event event)
 	{
@@ -126,19 +129,28 @@ struct GpuMappingLifecycleTestState
 
 	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size)
 	{
-		auto* state            = static_cast<GpuMappingLifecycleTestState*>(context);
-		state->register_vaddr  = vaddr;
-		state->register_size   = size;
+		auto* state           = static_cast<GpuMappingLifecycleTestState*>(context);
+		state->register_vaddr = vaddr;
+		state->register_size  = size;
 		state->Record(Event::Register);
 	}
 
 	static bool ReleaseRange(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* data)
 	{
-		auto* state           = static_cast<GpuMappingLifecycleTestState*>(context);
-		state->release_vaddr  = vaddr;
-		state->release_size   = size;
+		auto* state          = static_cast<GpuMappingLifecycleTestState*>(context);
+		state->release_vaddr = vaddr;
+		state->release_size  = size;
 		state->Record(Event::Release);
 		return completion(data);
+	}
+
+	static bool InvalidateRange(void* context, uint64_t vaddr, uint64_t size)
+	{
+		auto* state             = static_cast<GpuMappingLifecycleTestState*>(context);
+		state->invalidate_vaddr = vaddr;
+		state->invalidate_size  = size;
+		state->Record(Event::Invalidate);
+		return true;
 	}
 
 	static bool Complete(void* data)
@@ -174,26 +186,32 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	EXPECT_FALSE(lifecycle.Install(partial));
 	EXPECT_FALSE(lifecycle.IsInstalled());
 	EXPECT_FALSE(lifecycle.RegisterRange(0x100000u, 0x4000u));
+	EXPECT_FALSE(lifecycle.InvalidateRange(0x100000u, 0x4000u));
 	EXPECT_FALSE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, nullptr));
 
 	GpuMappingLifecycleTestState state {};
 	GpuMappingLifecycleCallbacks callbacks {};
-	callbacks.context        = &state;
-	callbacks.register_range = GpuMappingLifecycleTestState::RegisterRange;
-	callbacks.release_range  = GpuMappingLifecycleTestState::ReleaseRange;
+	callbacks.context          = &state;
+	callbacks.register_range   = GpuMappingLifecycleTestState::RegisterRange;
+	callbacks.invalidate_range = GpuMappingLifecycleTestState::InvalidateRange;
+	callbacks.release_range    = GpuMappingLifecycleTestState::ReleaseRange;
 	ASSERT_TRUE(lifecycle.Install(callbacks));
 
 	ASSERT_TRUE(lifecycle.RegisterRange(0x100000u, 0x4000u));
+	ASSERT_TRUE(lifecycle.InvalidateRange(0x100000u, 0x4000u));
 	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
 
 	EXPECT_EQ(state.register_vaddr, 0x100000u);
 	EXPECT_EQ(state.register_size, 0x4000u);
+	EXPECT_EQ(state.invalidate_vaddr, 0x100000u);
+	EXPECT_EQ(state.invalidate_size, 0x4000u);
 	EXPECT_EQ(state.release_vaddr, 0x100000u);
 	EXPECT_EQ(state.release_size, 0x4000u);
-	ASSERT_EQ(state.event_count, 3u);
+	ASSERT_EQ(state.event_count, 4u);
 	EXPECT_EQ(state.events[0], GpuMappingLifecycleTestState::Event::Register);
-	EXPECT_EQ(state.events[1], GpuMappingLifecycleTestState::Event::Release);
-	EXPECT_EQ(state.events[2], GpuMappingLifecycleTestState::Event::Complete);
+	EXPECT_EQ(state.events[1], GpuMappingLifecycleTestState::Event::Invalidate);
+	EXPECT_EQ(state.events[2], GpuMappingLifecycleTestState::Event::Release);
+	EXPECT_EQ(state.events[3], GpuMappingLifecycleTestState::Event::Complete);
 
 	EXPECT_FALSE(lifecycle.Install(callbacks));
 }
@@ -204,9 +222,10 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortAllowsAdapterReentrancy)
 	GpuMappingLifecycleTestState state {};
 	state.lifecycle = &lifecycle;
 	GpuMappingLifecycleCallbacks callbacks {};
-	callbacks.context        = &state;
-	callbacks.register_range = GpuMappingLifecycleTestState::RegisterRange;
-	callbacks.release_range  = GpuMappingLifecycleTestState::ReentrantReleaseRange;
+	callbacks.context          = &state;
+	callbacks.register_range   = GpuMappingLifecycleTestState::RegisterRange;
+	callbacks.invalidate_range = GpuMappingLifecycleTestState::InvalidateRange;
+	callbacks.release_range    = GpuMappingLifecycleTestState::ReentrantReleaseRange;
 	ASSERT_TRUE(lifecycle.Install(callbacks));
 
 	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
@@ -491,7 +510,7 @@ TEST(EmulatorKernelMemory, DirectMemoryQueryCoalescesAdjacentAllocationsOfTheSam
 	Config::SetNextGen(false);
 }
 
-TEST(EmulatorKernelMemory, ReleaseDirectMemoryInvalidatesVirtualMappings)
+TEST(EmulatorKernelMemory, ReleaseDirectMemoryKeepsVirtualMappingUntilMunmap)
 {
 	EnsureMemorySubsystemInitialized();
 	Config::SetNextGen(true);
@@ -523,11 +542,19 @@ TEST(EmulatorKernelMemory, ReleaseDirectMemoryInvalidatesVirtualMappings)
 	DirectMemoryInfo info {};
 	EXPECT_EQ(KernelDirectMemoryQuery(physical_address, 0, &info, sizeof(info)), LibKernel::KERNEL_ERROR_EACCES);
 
+	mapping_start = nullptr;
+	mapping_end   = nullptr;
+	protection    = 0;
+	ASSERT_EQ(KernelQueryMemoryProtection(mapping, &mapping_start, &mapping_end, &protection), OK);
+	EXPECT_EQ(mapping_start, mapping);
+	EXPECT_EQ(mapping_end, static_cast<uint8_t*>(mapping) + kSize - 1);
+	EXPECT_EQ(protection, 0x02);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(mapping), kSize), OK);
 	EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
 	Config::SetNextGen(false);
 }
 
-TEST(EmulatorKernelMemory, MemorySnapshotDropsDirectMappingsOnRelease)
+TEST(EmulatorKernelMemory, MemorySnapshotTracksReleasedDirectMappingsUntilMunmap)
 {
 	EnsureMemorySubsystemInitialized();
 	Config::SetNextGen(true);
@@ -554,10 +581,17 @@ TEST(EmulatorKernelMemory, MemorySnapshotDropsDirectMappingsOnRelease)
 	const auto after_release = KernelGetMemorySnapshot();
 	EXPECT_EQ(after_release.direct_allocated_bytes, before.direct_allocated_bytes);
 	EXPECT_EQ(after_release.direct_allocation_count, before.direct_allocation_count);
-	EXPECT_EQ(after_release.direct_mapped_bytes, before.direct_mapped_bytes);
-	EXPECT_EQ(after_release.direct_mapping_count, before.direct_mapping_count);
-	EXPECT_EQ(after_release.direct_released_mapped_bytes, before.direct_released_mapped_bytes);
-	EXPECT_EQ(after_release.direct_released_mapping_count, before.direct_released_mapping_count);
+	EXPECT_EQ(after_release.direct_mapped_bytes, before.direct_mapped_bytes + kSize);
+	EXPECT_EQ(after_release.direct_mapping_count, before.direct_mapping_count + 1);
+	EXPECT_EQ(after_release.direct_released_mapped_bytes, before.direct_released_mapped_bytes + kSize);
+	EXPECT_EQ(after_release.direct_released_mapping_count, before.direct_released_mapping_count + 1);
+
+	ASSERT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(mapping), kSize), OK);
+	const auto after_unmap = KernelGetMemorySnapshot();
+	EXPECT_EQ(after_unmap.direct_mapped_bytes, before.direct_mapped_bytes);
+	EXPECT_EQ(after_unmap.direct_mapping_count, before.direct_mapping_count);
+	EXPECT_EQ(after_unmap.direct_released_mapped_bytes, before.direct_released_mapped_bytes);
+	EXPECT_EQ(after_unmap.direct_released_mapping_count, before.direct_released_mapping_count);
 	Config::SetNextGen(false);
 }
 
@@ -623,7 +657,7 @@ TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalReleas
 	ASSERT_NE(mapping, nullptr);
 	static_cast<uint8_t*>(mapping)[0] = 0x5a;
 	ASSERT_EQ(KernelCheckedReleaseDirectMemory(first_physical_address, kSize), OK);
-	EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
+	EXPECT_EQ(KernelQueryMemoryProtection(mapping, nullptr, nullptr, nullptr), OK);
 
 	int64_t second_physical_address = 0;
 	ASSERT_EQ(KernelAllocateDirectMemory(kSecondPhys, kSecondPhys + kSize, kSize, kSize, 12, &second_physical_address), OK);
@@ -643,7 +677,7 @@ TEST(EmulatorKernelMemory, FixedDirectMapReplacesOwnedMappingAfterPhysicalReleas
 	Config::SetNextGen(false);
 }
 
-TEST(EmulatorKernelMemory, ReusedDirectMemoryDoesNotRetainReleasedContents)
+TEST(EmulatorKernelMemory, ReusedDirectMemoryStartsZeroedAndKeepsVirtualAliasesCoherent)
 {
 	EnsureMemorySubsystemInitialized();
 	Config::SetNextGen(true);
@@ -668,10 +702,12 @@ TEST(EmulatorKernelMemory, ReusedDirectMemoryDoesNotRetainReleasedContents)
 	ASSERT_EQ(KernelAllocateDirectMemory(kSearchStart, kSearchEnd, kSize, kSize, 12, &second_physical_address), OK);
 	ASSERT_EQ(second_physical_address, first_physical_address);
 
-	EXPECT_EQ(KernelQueryMemoryProtection(first_mapping, nullptr, nullptr, nullptr), LibKernel::KERNEL_ERROR_EACCES);
+	EXPECT_EQ(KernelQueryMemoryProtection(first_mapping, nullptr, nullptr, nullptr), OK);
+	EXPECT_EQ(first_bytes[0], 0u);
+	EXPECT_EQ(first_bytes[1], 0u);
 
-	void* second_mapping = first_mapping;
-	const int remap_result = KernelMapDirectMemory(&second_mapping, kSize, 0x07, 0x10, second_physical_address, kSize);
+	void* second_mapping = nullptr;
+	const int remap_result = KernelMapDirectMemory(&second_mapping, kSize, 0x07, 0, second_physical_address, kSize);
 	#if defined(__APPLE__)
 	// macOS can reject an executable writable MAP_SHARED view even when the
 	// requested address is free. Keep the host policy explicit.
@@ -682,11 +718,15 @@ TEST(EmulatorKernelMemory, ReusedDirectMemoryDoesNotRetainReleasedContents)
 	}
 	#endif
 	ASSERT_EQ(remap_result, OK);
-	ASSERT_EQ(second_mapping, first_mapping);
+	ASSERT_NE(second_mapping, nullptr);
+	ASSERT_NE(second_mapping, first_mapping);
 	auto* second_bytes = static_cast<uint8_t*>(second_mapping);
 	EXPECT_EQ(second_bytes[0], 0u);
 	EXPECT_EQ(second_bytes[1], 0u);
+	second_bytes[2] = 0x7e;
+	EXPECT_EQ(first_bytes[2], 0x7e);
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(second_mapping), kSize), OK);
+	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(first_mapping), kSize), OK);
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(second_physical_address, kSize), OK);
 	Config::SetNextGen(false);
 }

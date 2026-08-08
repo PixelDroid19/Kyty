@@ -627,6 +627,14 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 	{
 		return false;
 	}
+	// A physical range can be released while virtual aliases still reference the
+	// shared backing. Reusing that range starts a new allocation lifetime, which
+	// must not expose bytes retained by the previous owner. Discard before
+	// publishing the allocation; all aliases then observe the same fresh pages.
+	if (!VirtualMemory::DiscardSharedBackingRange(m_backing, candidate, len))
+	{
+		return false;
+	}
 
 	AllocatedBlock block {};
 	block.size        = len;
@@ -1775,12 +1783,43 @@ static int release_direct_memory(int64_t start, size_t len)
 	{
 		return KERNEL_ERROR_ENOENT;
 	}
-	for (const auto& mapping: mappings)
+
+	if (!Config::IsNextGen())
 	{
-		const int unmap_result = KernelMunmap(mapping.map_vaddr, mapping.map_size);
-		if (unmap_result != OK)
+		for (const auto& mapping: mappings)
 		{
-			return unmap_result;
+			const int unmap_result = KernelMunmap(mapping.map_vaddr, mapping.map_size);
+			if (unmap_result != OK)
+			{
+				return unmap_result;
+			}
+		}
+	} else
+	{
+		// Ending a physical allocation lifetime does not remove its guest VA, but
+		// resources backed by the old contents must be detached before the range can
+		// be reused. Keep this transaction outside PhysicalMemory's lock because the
+		// graphics adapter drains queues and may query Kernel mappings.
+		bool needs_gpu_invalidation = false;
+		for (const auto& mapping: mappings)
+		{
+			if (mapping.unmap_pending)
+			{
+				return KERNEL_ERROR_EBUSY;
+			}
+			needs_gpu_invalidation = needs_gpu_invalidation || mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess;
+		}
+		if (needs_gpu_invalidation && !GetGpuMappingLifecyclePort().IsInstalled())
+		{
+			return KERNEL_ERROR_EBUSY;
+		}
+		for (const auto& mapping: mappings)
+		{
+			if (mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess &&
+			    !GetGpuMappingLifecyclePort().InvalidateRange(mapping.map_vaddr, mapping.map_size))
+			{
+				return KERNEL_ERROR_EBUSY;
+			}
 		}
 	}
 

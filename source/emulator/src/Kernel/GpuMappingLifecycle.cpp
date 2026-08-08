@@ -17,13 +17,13 @@ bool IsRepresentableRange(uint64_t vaddr, uint64_t size)
 
 bool GpuMappingLifecyclePort::Install(const GpuMappingLifecycleCallbacks& callbacks)
 {
-	if (callbacks.register_range == nullptr || callbacks.release_range == nullptr)
+	if (callbacks.register_range == nullptr || callbacks.invalidate_range == nullptr || callbacks.release_range == nullptr)
 	{
 		return false;
 	}
 
 	std::lock_guard<std::mutex> lock(m_mutex);
-	if (m_callbacks.register_range != nullptr || m_callbacks.release_range != nullptr)
+	if (m_callbacks.register_range != nullptr || m_callbacks.invalidate_range != nullptr || m_callbacks.release_range != nullptr)
 	{
 		return false;
 	}
@@ -34,7 +34,7 @@ bool GpuMappingLifecyclePort::Install(const GpuMappingLifecycleCallbacks& callba
 bool GpuMappingLifecyclePort::IsInstalled() const
 {
 	std::lock_guard<std::mutex> lock(m_mutex);
-	return m_callbacks.register_range != nullptr && m_callbacks.release_range != nullptr;
+	return m_callbacks.register_range != nullptr && m_callbacks.invalidate_range != nullptr && m_callbacks.release_range != nullptr;
 }
 
 bool GpuMappingLifecyclePort::RegisterRange(uint64_t vaddr, uint64_t size)
@@ -55,6 +55,25 @@ bool GpuMappingLifecyclePort::RegisterRange(uint64_t vaddr, uint64_t size)
 	}
 	callbacks.register_range(callbacks.context, vaddr, size);
 	return true;
+}
+
+bool GpuMappingLifecyclePort::InvalidateRange(uint64_t vaddr, uint64_t size)
+{
+	if (!IsRepresentableRange(vaddr, size))
+	{
+		return false;
+	}
+
+	GpuMappingLifecycleCallbacks callbacks {};
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (m_callbacks.register_range == nullptr || m_callbacks.invalidate_range == nullptr || m_callbacks.release_range == nullptr)
+		{
+			return false;
+		}
+		callbacks = m_callbacks;
+	}
+	return callbacks.invalidate_range(callbacks.context, vaddr, size);
 }
 
 bool GpuMappingLifecyclePort::ReleaseRange(uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion,

@@ -37,6 +37,13 @@ constexpr int VADDR_BLOCKS_MAX = GPU_MEMORY_RANGE_SET_MAX;
 
 using OverlapType = GpuMemoryOverlapType;
 
+enum class GpuMemoryRangeReleaseMode : uint8_t
+{
+	ObjectsOnly,
+	PhysicalLifetime,
+	Unmap,
+};
+
 constexpr uint32_t GpuMemoryStatsTypeIndex(GpuMemoryObjectType type)
 {
 	return static_cast<uint32_t>(type) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
@@ -226,7 +233,7 @@ public:
 	GpuMemoryRangeValidationStatus ValidateAllocatedRange(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] uint64_t         GetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size);
 	void                           SetAllocatedRange(uint64_t vaddr, uint64_t size);
-	void                           Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool unmap);
+	void                           Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemoryRangeReleaseMode mode);
 
 	void* CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size,
 	                   int vaddr_num, const GpuObject& info);

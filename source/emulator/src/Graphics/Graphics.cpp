@@ -55,6 +55,12 @@ struct GpuMappingReleaseTransaction
 	void*                            completion_data = nullptr;
 };
 
+struct GpuMappingInvalidationTransaction
+{
+	uint64_t vaddr = 0;
+	uint64_t size  = 0;
+};
+
 void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size)
 {
 	(void)context;
@@ -76,6 +82,35 @@ bool GraphicsCompleteGpuMappingRelease(void* data)
 		    return transaction->completion(transaction->completion_data);
 	    },
 	    transaction);
+}
+
+bool GraphicsCompleteGpuMappingInvalidation(void* data)
+{
+	EXIT_IF(data == nullptr);
+
+	auto* transaction = static_cast<GpuMappingInvalidationTransaction*>(data);
+	return VideoOut::VideoOutRunBufferUnmapTransaction(
+	    transaction->vaddr, transaction->size,
+	    [](void* action_data)
+	    {
+		    EXIT_IF(action_data == nullptr);
+		    auto* transaction = static_cast<GpuMappingInvalidationTransaction*>(action_data);
+		    GpuMemoryInvalidateMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+		    return true;
+	    },
+	    transaction);
+}
+
+bool GraphicsInvalidateGpuMappingRange(void* context, uint64_t vaddr, uint64_t size)
+{
+	(void)context;
+	if (vaddr == 0 || size == 0 || vaddr > std::numeric_limits<uint64_t>::max() - size)
+	{
+		return false;
+	}
+
+	GpuMappingInvalidationTransaction transaction {vaddr, size};
+	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingInvalidation, &transaction);
 }
 
 bool GraphicsReleaseGpuMappingRange(void* context, uint64_t vaddr, uint64_t size,
@@ -151,6 +186,7 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	const Kernel::Memory::GpuMappingLifecycleCallbacks gpu_mapping_lifecycle_callbacks {
 	    nullptr,
 	    GraphicsRegisterGpuMappingRange,
+	    GraphicsInvalidateGpuMappingRange,
 	    GraphicsReleaseGpuMappingRange,
 	};
 	EXIT_IF(!Kernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));

@@ -113,27 +113,39 @@ int ReserveVirtualRangeContract()
 
 struct GpuMappingPortProbe
 {
-	uint64_t register_vaddr = 0;
-	uint64_t register_size  = 0;
-	uint64_t release_vaddr  = 0;
-	uint64_t release_size   = 0;
-	uint32_t register_count = 0;
-	uint32_t release_count  = 0;
+	uint64_t register_vaddr   = 0;
+	uint64_t register_size    = 0;
+	uint64_t invalidate_vaddr = 0;
+	uint64_t invalidate_size  = 0;
+	uint64_t release_vaddr    = 0;
+	uint64_t release_size     = 0;
+	uint32_t register_count   = 0;
+	uint32_t invalidate_count = 0;
+	uint32_t release_count    = 0;
 
 	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size)
 	{
-		auto* probe            = static_cast<GpuMappingPortProbe*>(context);
-		probe->register_vaddr  = vaddr;
-		probe->register_size   = size;
+		auto* probe           = static_cast<GpuMappingPortProbe*>(context);
+		probe->register_vaddr = vaddr;
+		probe->register_size  = size;
 		probe->register_count += 1;
 	}
 
-	static bool ReleaseRange(void* context, uint64_t vaddr, uint64_t size,
-	                         Kernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
+	static bool InvalidateRange(void* context, uint64_t vaddr, uint64_t size)
 	{
-		auto* probe           = static_cast<GpuMappingPortProbe*>(context);
-		probe->release_vaddr  = vaddr;
-		probe->release_size   = size;
+		auto* probe             = static_cast<GpuMappingPortProbe*>(context);
+		probe->invalidate_vaddr = vaddr;
+		probe->invalidate_size  = size;
+		probe->invalidate_count += 1;
+		return true;
+	}
+
+	static bool ReleaseRange(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingCompletion completion,
+	                         void* completion_data)
+	{
+		auto* probe          = static_cast<GpuMappingPortProbe*>(context);
+		probe->release_vaddr = vaddr;
+		probe->release_size  = size;
 		probe->release_count += 1;
 		return completion(completion_data);
 	}
@@ -149,8 +161,7 @@ int GpuMappingLifecycleContract()
 	size_t available_before = 0;
 	Expect(KernelAvailableFlexibleMemorySize(&available_before) == 0, "must query flexible availability before GPU map");
 	void* missing_port_mapping = nullptr;
-	Expect(KernelMapNamedFlexibleMemory(&missing_port_mapping, kSize, 0x11, 0, "gpu-port-missing") ==
-	           Libs::LibKernel::KERNEL_ERROR_EBUSY,
+	Expect(KernelMapNamedFlexibleMemory(&missing_port_mapping, kSize, 0x11, 0, "gpu-port-missing") == Libs::LibKernel::KERNEL_ERROR_EBUSY,
 	       "GPU-visible map must reject an uninstalled lifecycle port before allocation");
 	Expect(missing_port_mapping == nullptr, "rejected GPU-visible map must not publish a mapping");
 	size_t available_after = 0;
@@ -159,9 +170,10 @@ int GpuMappingLifecycleContract()
 
 	GpuMappingPortProbe          probe {};
 	GpuMappingLifecycleCallbacks callbacks {};
-	callbacks.context        = &probe;
-	callbacks.register_range = GpuMappingPortProbe::RegisterRange;
-	callbacks.release_range  = GpuMappingPortProbe::ReleaseRange;
+	callbacks.context          = &probe;
+	callbacks.register_range   = GpuMappingPortProbe::RegisterRange;
+	callbacks.invalidate_range = GpuMappingPortProbe::InvalidateRange;
+	callbacks.release_range    = GpuMappingPortProbe::ReleaseRange;
 	Expect(port.Install(callbacks), "complete GPU mapping lifecycle port must install");
 
 	void* mapping = nullptr;
@@ -176,6 +188,25 @@ int GpuMappingLifecycleContract()
 	Expect(probe.release_count == 1, "GPU-visible unmap must release exactly once through the lifecycle port");
 	Expect(probe.release_vaddr == reinterpret_cast<uint64_t>(mapping) && probe.release_size == kSize,
 	       "GPU-visible unmap must release its exact range");
+
+	Config::SetNextGen(true);
+	int64_t physical = 0;
+	Expect(KernelAllocateMainDirectMemory(kSize, kSize, 12, &physical) == 0,
+	       "direct allocation must succeed for physical lifetime validation");
+	void* direct_mapping = nullptr;
+	Expect(KernelMapDirectMemory(&direct_mapping, kSize, 0x12, 0, physical, kSize) == 0 && direct_mapping != nullptr,
+	       "GPU-visible direct mapping must succeed");
+	Expect(KernelCheckedReleaseDirectMemory(physical, kSize) == 0,
+	       "physical lifetime release must succeed without removing its mapping");
+	Expect(probe.invalidate_count == 1, "physical lifetime release must invalidate GPU resources exactly once");
+	Expect(probe.invalidate_vaddr == reinterpret_cast<uint64_t>(direct_mapping) && probe.invalidate_size == kSize,
+	       "physical lifetime release must invalidate the owner mapping");
+	Expect(KernelQueryMemoryProtection(direct_mapping, nullptr, nullptr, nullptr) == 0,
+	       "physical lifetime release must preserve the guest virtual mapping");
+	Expect(KernelMunmap(reinterpret_cast<uint64_t>(direct_mapping), kSize) == 0,
+	       "released direct mapping must remain explicitly unmapable");
+	Expect(probe.release_count == 2, "explicit direct unmap must use the mapping release transaction");
+	Config::SetNextGen(false);
 	return 0;
 }
 

@@ -713,6 +713,7 @@ void                                         GpuMemoryFree(GraphicContext* ctx, 
 // Requires GraphicsRunWithQuiescedSubmissions to own the admission gate. The
 // guest VA must remain mapped until this call has written back and detached
 // every resource in the range.
+void  GpuMemoryInvalidateMappedRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void  GpuMemoryFreeMappedRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void* GpuMemoryCreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size,
                             const GpuObject& info);

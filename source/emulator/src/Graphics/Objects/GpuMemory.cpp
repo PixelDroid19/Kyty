@@ -201,15 +201,14 @@ int GpuMemory::GetHeapId(uint64_t vaddr, uint64_t size)
 	return -1;
 }
 
-void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool unmap)
+void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemoryRangeReleaseMode mode)
 {
 	KYTY_PROFILER_BLOCK("GpuMemory::Free", profiler::colors::Green300);
 
-	if (unmap)
+	if (mode != GpuMemoryRangeReleaseMode::ObjectsOnly)
 	{
-		// KernelMunmap holds the GPU admission gate and drains every queue before
-		// entering this teardown. Do not wait again here: the gate must remain
-		// owned continuously through write-back, detach, and host VA release.
+		// The caller owns the GPU admission gate and has drained every queue.
+		// Publish completed GPU writes before detaching resources from the range.
 		WriteBackAllCompleted(ctx);
 	}
 
@@ -250,7 +249,7 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, bool un
 		}
 	}
 
-	if (unmap)
+	if (mode == GpuMemoryRangeReleaseMode::Unmap)
 	{
 		if (!IsAllocated(vaddr, size)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsAllocated(vaddr, size) condition ignored (continuing)\n"); }
 
@@ -462,7 +461,16 @@ void GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 	EXIT_IF(g_gpu_memory == nullptr);
 	EXIT_IF(ctx == nullptr);
 
-	g_gpu_memory->Free(ctx, vaddr, size, false);
+	g_gpu_memory->Free(ctx, vaddr, size, GpuMemoryRangeReleaseMode::ObjectsOnly);
+}
+
+void GpuMemoryInvalidateMappedRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(ctx == nullptr);
+
+	g_gpu_memory->Free(ctx, vaddr, size, GpuMemoryRangeReleaseMode::PhysicalLifetime);
+	LabelReleaseMappedRange(vaddr, size);
 }
 
 void GpuMemoryFreeMappedRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
@@ -470,7 +478,7 @@ void GpuMemoryFreeMappedRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint6
 	EXIT_IF(g_gpu_memory == nullptr);
 	EXIT_IF(ctx == nullptr);
 
-	g_gpu_memory->Free(ctx, vaddr, size, true);
+	g_gpu_memory->Free(ctx, vaddr, size, GpuMemoryRangeReleaseMode::Unmap);
 	LabelReleaseMappedRange(vaddr, size);
 }
 

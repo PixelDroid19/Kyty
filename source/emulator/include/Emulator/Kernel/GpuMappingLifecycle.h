@@ -22,16 +22,18 @@ enum class KernelGpuMappingAccessMode : uint8_t
 	ReadWrite,
 };
 
-using KernelGpuMappingCompletion = bool (*)(void*);
-using KernelGpuMappingRegisterRange = void (*)(void* context, uint64_t vaddr, uint64_t size);
-using KernelGpuMappingReleaseRange = bool (*)(void* context, uint64_t vaddr, uint64_t size,
-                                              KernelGpuMappingCompletion completion, void* completion_data);
+using KernelGpuMappingCompletion      = bool (*)(void*);
+using KernelGpuMappingRegisterRange   = void (*)(void* context, uint64_t vaddr, uint64_t size);
+using KernelGpuMappingInvalidateRange = bool (*)(void* context, uint64_t vaddr, uint64_t size);
+using KernelGpuMappingReleaseRange    = bool (*)(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion,
+                                                 void* completion_data);
 
 struct GpuMappingLifecycleCallbacks
 {
-	void*                         context        = nullptr;
-	KernelGpuMappingRegisterRange register_range = nullptr;
-	KernelGpuMappingReleaseRange  release_range  = nullptr;
+	void*                           context          = nullptr;
+	KernelGpuMappingRegisterRange   register_range   = nullptr;
+	KernelGpuMappingInvalidateRange invalidate_range = nullptr;
+	KernelGpuMappingReleaseRange    release_range    = nullptr;
 };
 
 // A complete callback bundle is installed once and remains process-lifetime.
@@ -46,6 +48,7 @@ public:
 	[[nodiscard]] bool IsInstalled() const;
 
 	[[nodiscard]] bool RegisterRange(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool InvalidateRange(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool ReleaseRange(uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* completion_data);
 
 private:
