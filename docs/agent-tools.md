@@ -74,6 +74,20 @@ pairs.
 `score` only analyzes the most recent native capture; it does not accept a
 caller-supplied path.
 
+Fatal host faults can write a bounded JSON context by setting
+`KYTY_CRASH_REPORT` to an absolute scratch path. When only `KYTY_CAPTURE_DIR`
+is set, the runtime uses `crash-context.json` inside that directory. The report
+contains registers and up to 128 stack words. Setting `KYTY_CRASH_MEMORY=1`
+also captures at most 24 fault-safe 64-byte windows around plausible guest-data
+pointers found on the stack on supported POSIX hosts. Memory windows are
+disabled by default, may contain guest data, and must never be committed.
+
+After a fatal exit, inspect the bounded report through the local CLI:
+
+```text
+kyty_agent crash-context --path /absolute/scratch/crash-context.json
+```
+
 `wait_event` returns `event_cursor_lost` when `--after-seq` predates the
 bounded retained event history; reacquire a fresh snapshot before waiting.
 

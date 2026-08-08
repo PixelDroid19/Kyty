@@ -1,13 +1,12 @@
 # Kyty Gen5 runtime graphics investigation handoff
 
-Updated: 2026-08-06
+Updated: 2026-08-08
 
-Status: the runtime advances into sustained gameplay-era presentation without
-a process-killing error. The opaque black sprite/prop rectangles are absent
-after correcting pixel-kill depth ordering. A persistent, device-qualified
-Vulkan pipeline cache now removes most repeated driver pipeline compilation
-cost across runs. Full playability acceptance and sustained-FPS optimization
-remain open.
+Status: the runtime advances into controllable gameplay without a
+process-killing error. The opaque black sprite/prop rectangles are absent after
+correcting pixel-kill depth ordering. A persistent, device-qualified Vulkan
+pipeline cache removes most repeated driver pipeline compilation cost across
+runs. Full playability acceptance and stable 60 FPS remain open.
 
 This document intentionally excludes private workload names, identifiers,
 paths, binaries, screenshots, shader hashes, and raw logs. Keep those only in
@@ -15,7 +14,7 @@ ignored scratch and address the workload through `$KYTY_GUEST_ROOT`.
 
 ## Verified advances
 
-The current graphics branch contains four isolated, tested changes:
+The current graphics path retains these foundational isolated, tested changes:
 
 | Commit | Contract | Verification |
 | --- | --- | --- |
@@ -24,12 +23,13 @@ The current graphics branch contains four isolated, tested changes:
 | `9cc21524` | Preserve discard semantics for null MRT0–3 export tails | Focused shader/SPIR-V test plus strict runtime |
 | `9b026e53` | Keep pixel-kill shaders on late Vulkan depth commit while retaining early fragment tests for opaque shaders | Red/green SPIR-V test plus gameplay-era native capture |
 
-On the exact tracked branch state, Linux Release passed 205 focused
-GraphicsPackets/GraphicsState tests. The earlier strict Release+Silent baseline
-without `KYTY_BRINGUP_*`, automatic input, or permissive fallbacks exceeded
-2,300 presents. New gameplay-era visual captures used automatic Cross only to
-reach the scene and therefore are discovery evidence, not input acceptance.
-No structured EXIT, host fault, or Vulkan device loss was observed.
+On the current branch, Linux Release passes 193 GraphicsPackets tests plus the
+targeted GraphicsState contracts changed in the latest phases. The latest
+recorded strict Release+Silent route, without `KYTY_BRINGUP_*` or permissive
+fallbacks, exceeded 24,000 presents and used bounded diagnostic controller
+input to exercise sustained movement in gameplay. That route proves the
+runtime and input frontier, not formal input acceptance. No structured EXIT,
+host fault, or Vulkan device loss was observed.
 
 The historical horizontal stripes and the later opaque sprite/prop rectangles
 are absent in the post-fix native capture. Background, props, character,
@@ -313,14 +313,14 @@ The fix omits `EarlyFragmentTests` when `shader_kill_enable` is active, allowing
 Vulkan depth commit after fragment discard. Opaque shaders keep the existing
 early-fragment path.
 
-The current performance frontier is separate from graphics correctness. A
-Release+Silent gameplay sample showed roughly 6 FPS after warm-up even though
-the menu exceeded 100 FPS. Read-only probes attributed approximately
-105–122 ms/s to full-range memory hashing and 140–180 ms/s to immediate
-submit/fence waits; neither alone explains the remaining frame time. Pipeline
-miss bursts explain severe transient freezes, while persistent low FPS still
-requires producer-level work in shader reuse, GPU memory tracking, command
-submission, and resource upload. Change one contract at a time and compare
+The current performance frontier is separate from graphics correctness. The
+latest Release+Silent reset window covered 601 gameplay frames and reported
+41.688 FPS with p50/p95/p99 frame times of 27/35/40 ms, a 52.140 ms maximum,
+and one frame above 50 ms. Command processing consumed 12.357 s, submit/fence
+waits 8.167 s, and `WAIT_REG_MEM` 7.197 s in that window; these nested timings
+must not be added together. The remaining gap to stable 60 FPS still requires
+producer-level work in command submission, synchronization, GPU memory
+tracking, and resource binding. Change one contract at a time and compare
 against the same correct gameplay capture.
 
 ## Evidence and exclusions
@@ -345,8 +345,10 @@ against the same correct gameplay capture.
   and all remaining 11,230 had a producer in the current submission; no queued,
   mismatched, unknown, or suspended waits were observed. Continuing the
   recording without publishing those callbacks stopped on `VideoOut` buffer
-  `invalid_index`. The experiment is rejected: same-queue GPU order alone does
-  not publish the host completion state needed by presentation. Keep the
+  `invalid_index`. Submitting the command buffer but omitting the host
+  completion wait failed at the same presentation contract, so queue order
+  without callback publication is also rejected. Same-queue GPU order alone
+  does not publish the host completion state needed by presentation. Keep the
   boundary until GPU execution and callback publication have independent
   completion proofs.
 
@@ -546,3 +548,30 @@ progress evidence rather than a gameplay or universal 60 FPS claim. A bounded
 native capture after the change preserved a complete, correctly shaped logo;
 the longer title/menu checkpoint and gameplay input route remain to be
 revalidated.
+
+## Atomic transient-buffer eligibility phase
+
+Small read-only vertex and index views previously acquired the object-graph
+mutex twice: once to validate the allocated guest range and once to copy and
+classify an aggregate overlap snapshot. The hot path now performs exact
+allocation validation and overlap classification under one mutex acquisition.
+Cache hits borrow the immutable snapshot only while that mutex is held; misses
+populate and classify it without releasing the lock. Range containment remains
+strict, so a span that merely crosses either edge of an allocated heap is
+rejected. Existing heap/object mutation paths continue to invalidate the
+bounded validation and overlap caches.
+
+Focused tests cover empty, read-only, writable, freed, oversized, zero-sized,
+and partially allocated ranges, plus cache invalidation after object mutation.
+A strict Release+Silent route then reached the menu, selection screen,
+introduction, and controllable gameplay with healthy native captures and no
+runtime error. Sustained directional input was consumed for 180 presentations.
+
+The earlier 601-frame gameplay sample spent 1.568 s across 221,766 transient
+eligibility probes (7.07 us/probe, 2.61 ms/frame). The final atomic sample spent
+700.057 ms across 191,755 probes (3.65 us/probe, 1.16 ms/frame). It also
+reported 1.655 s of resource binding across 37,467 draws, versus 5.382 s across
+43,589 draws in the earlier window. The scenes and draw counts differed, so
+the normalized counters demonstrate a lower hot-path cost while the FPS
+difference remains progress evidence rather than a universal performance
+claim.

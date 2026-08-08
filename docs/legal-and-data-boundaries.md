@@ -33,6 +33,11 @@ Use untracked paths only:
 Matrix and playable scripts emit **sanitized** JSON summaries; raw child logs
 stay in scratch.
 
+Fatal-fault `crash-context.json` files are raw diagnostic evidence. Optional
+memory windows can contain bounded guest bytes even though tracked summaries
+are sanitized. Keep crash contexts outside Git and share only the minimum
+redacted fields needed to reproduce a contract.
+
 ## Third-party toolkits
 
 Patterns may be inspired by external agent kits (e.g. evidence manifests,

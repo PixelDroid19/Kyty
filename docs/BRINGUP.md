@@ -256,12 +256,15 @@ When switching private fixtures (or adding a second root):
 
 The local reference workload reaches Vulkan device creation, guest engine
 startup, Gen5 shader creation, indexed draws, VideoOut submission, repeated
-swapchain presentation, logos, a recognizable menu, Play / mode selection
-(discovery auto-input is not acceptance), loading-card presentation, and a deep
-post-Play GPU/HLE chain under **strict** flags (no `KYTY_BRINGUP_*`). Linux
-Release+Silent dual-strict has sustained
-**gameplay-era frames** for 90–180 s (~11–13 FPS Silent, AUTO_CROSS discovery
-only) without a process-killing structural EXIT on recent captures.
+swapchain presentation, logos, a recognizable menu, Play / mode selection,
+loading-card presentation, and controllable gameplay under **strict** flags
+(no `KYTY_BRINGUP_*`). The latest Linux Release+Silent validation used bounded
+diagnostic controller input to traverse the menus, held a direction for 180
+presentations in gameplay, produced a healthy native capture, and reported no
+runtime error. A reset 601-frame gameplay window reported 41.688 FPS with
+p50/p95/p99 frame times of 27/35/40 ms and one frame above 50 ms. Diagnostic
+input proves the runtime frontier and control path, but is not formal
+playability acceptance.
 
 Recent strict bring-up (evidence-backed, focused tests where noted) includes:
 
@@ -314,7 +317,7 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
   register/shader contracts from earlier cycles.
 
 **First strict fail on current HEAD (always re-capture):** none observed in the
-latest Linux Release+Silent strict run through more than 2,300 presents.
+latest Linux Release+Silent strict run through more than 24,000 presents.
 `ds_read2_b32` is implemented and covered by focused parser/SPIR-V tests.
 Treat the next structured EXIT, host fault, or earlier regression on a fresh
 capture as the process unit of work.
@@ -325,9 +328,10 @@ null MRT discard-tail, and pixel-kill late-depth fixes. The rectangle producer
 was Vulkan `EarlyFragmentTests` committing depth before an existing `OpKill`
 in a guest `EarlyZThenLateZ` shader. A gameplay-era native discovery capture
 shows coherent background, props, character, lighting, and transparency.
-Because that capture used `KYTY_AUTO_CROSS` only to reach the scene, acceptance
-still requires a repeatable real-input run, movement/action, stable
-presentation, and validation-clean output.
+The latest strict diagnostic route additionally exercised sustained directional
+movement and stable presentation with healthy output. Formal acceptance still
+requires a repeatable non-diagnostic controller run, an action beyond movement,
+and validation-clean output.
 
 `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms waits, no observed Set in earlier
 captures) remains a **later** suspected synchronization symptom: do not fake
@@ -388,35 +392,38 @@ or logs into tracked files or commit messages.
 
 ```text
 You are a senior emulator/runtime engineer working inside the Kyty repository.
-Your mission is to advance the strict PS5 runtime from the current menu frontier
-to a genuinely playable frame, then freeze that frontier and only afterward
-perform carefully bounded modularization. Correctness, evidence, portability,
-and preservation of working behavior outrank speed or line-count reduction.
+Your mission is to advance the strict PS5 runtime from the current controllable
+gameplay frontier to stable, validated playability, then freeze that frontier
+and only afterward perform carefully bounded modularization. Correctness,
+evidence, portability, and preservation of working behavior outrank speed or
+line-count reduction.
 
 CURRENT FRONTIER
 
 - Build works on Linux (`_build_linux`) and macOS (`_build_macos`); use the host
   you are on. Prefer Release + `PrintfDirection=Silent` for wall-clock.
 - Vulkan device/swapchain, Gen5 shaders, indexed draws, VideoOut flips, logos,
-  recognizable menu, Play/mode transitions (AUTO_CROSS is discovery only),
-  loading-card pixels, and deep post-Play GPU/HLE into gameplay-era frames are
-  exercised under strict flags. Silent gameplay-era FPS ~11–13 on the reference
-  Linux host is not acceptance; never compare to Console logging.
+  recognizable menu, Play/mode transitions, loading-card pixels, and
+  controllable gameplay are exercised under strict flags. A reset 601-frame
+  Release+Silent gameplay window reported 41.688 FPS with p50/p95/p99 frame
+  times of 27/35/40 ms. Diagnostic controller input reached and moved through
+  that scene; this proves the frontier, not formal acceptance or stable 60 FPS.
 - In tree (do not regress): GpuMemory multi-parent (VB reclaim + surface link;
   Texture mixed parents; IndexBuffer-in-Texture link; WriteBack parent
   classify); GPU-owned RT layout preserve on Update; tile-27 size+4bpp detile;
-  Gen5 EUD type-5; formats 14/56/71; multi-RT CB_SHADER_MASK; EXP Param5/6 +
+  Gen5 EUD type-5; formats 14/29/56/71; multi-RT CB_SHADER_MASK; EXP Param5/6 +
   multi-MRT; structured SPIR-V loops; `v_cvt_i32_f32`; SDWA; SMEM dual-offset +
   variable SBuffer; image_sample dmasks 0x2/0x4/0xb; `ds_read2_b32`; null MRT
   discard tails; kill-enabled `EarlyZThenLateZ` late depth commit; NGS2
   extended max_voices.
 - **First strict fail (re-capture on HEAD):** none observed through more than
-  2,300 presents in the latest Linux Release+Silent strict run. The next
+  24,000 presents in the latest Linux Release+Silent strict run. The next
   structured EXIT or host fault is the process unit of work.
 - **Visual frontier:** horizontal stripes and opaque sprite/prop rectangles are
-  absent in a gameplay-era native discovery capture after `9b026e53`.
-  `KYTY_AUTO_CROSS` was used only to reach that scene, so re-prove it with real
-  press/release edges before claiming correctly rendered playability.
+  absent in a gameplay-era native capture. A bounded diagnostic route consumed
+  sustained directional input for 180 presentations. Formal acceptance still
+  requires a repeatable non-diagnostic controller route, one action beyond
+  movement, stable presentation, and validation-clean output.
 - **Later symptom only:** `ThreadFlag` bit `0x1` (mode `0x21`, 40 ms) with no
   observed Set. Never fabricate the signal. EventFlag live-handle registry
   (garbage → ESRCH) is not Set. Trace the producer after earlier GPU/shader
@@ -424,9 +431,11 @@ CURRENT FRONTIER
 
 IMMEDIATE OBJECTIVE AND SUCCESS CONDITION
 
-Advance the strict post-Play path to a **controllable, correctly rendered**
-gameplay scene without diagnostics or fabricated success. Process survival and
-HUD-only correctness are not playability.
+Advance the strict post-Play path to **stable, correctly rendered 60 FPS
+gameplay** without diagnostics or fabricated success. Formal acceptance must
+use a real controller route, exercise movement plus another action, and remain
+validation-clean. Process survival, diagnostic input, and HUD-only correctness
+are not playability.
 
 If dual-strict shows a process EXIT, that is first priority (GpuMemory, shader,
 format, HLE). If the process survives but the world is wrong, treat that as the
@@ -790,6 +799,13 @@ Using them is a configuration error.
 Other diagnostics (unchanged, still not acceptance modes):
 
 - `KYTY_FAULT_LOG=1`: signal-safe fault diagnostics.
+- `KYTY_CRASH_REPORT=/absolute/path.json`: writes the bounded fatal-fault JSON
+  report. `KYTY_CAPTURE_DIR` supplies `crash-context.json` by default when an
+  explicit report path is absent.
+- `KYTY_CRASH_MEMORY=1`: on supported POSIX hosts, adds at most 24 fault-safe
+  64-byte windows around plausible guest-data pointers found on the captured
+  stack. It is disabled by default and its output may contain guest data; keep
+  the report in untracked scratch.
 - `KYTY_TRACE_LIBC=1`: targeted single-step tracing.
 - `KYTY_SKIP_UD2=1`: skips a guest trap for diagnostics; invalidates normal
   execution. **Not** part of the bring-up policy.
