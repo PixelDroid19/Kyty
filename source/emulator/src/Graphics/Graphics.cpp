@@ -989,23 +989,63 @@ struct CommandBuffer
 			KYTY_LOG_DEBUG("\t reserved_dw = %" PRIu32 "\n", reserved_dw);
 	}
 
+	[[nodiscard]] KYTY_SYSV_ABI bool IsValid() const
+	{
+		const auto bottom_addr = reinterpret_cast<uintptr_t>(bottom);
+		const auto top_addr    = reinterpret_cast<uintptr_t>(top);
+		const auto up_addr     = reinterpret_cast<uintptr_t>(cursor_up);
+		const auto down_addr   = reinterpret_cast<uintptr_t>(cursor_down);
+
+		if (bottom_addr == 0 || (bottom_addr | top_addr | up_addr | down_addr) % alignof(uint32_t) != 0 || bottom_addr > up_addr ||
+		    up_addr > down_addr || down_addr > top_addr)
+		{
+			return false;
+		}
+
+		const auto available_bytes = down_addr - up_addr;
+		const auto available_dw    = available_bytes / sizeof(uint32_t);
+		if (available_dw > std::numeric_limits<uint32_t>::max() || reserved_dw > available_dw)
+		{
+			return false;
+		}
+		return true;
+	}
+
 	[[nodiscard]] KYTY_SYSV_ABI uint32_t GetAvailableSizeDW() const
 	{
-		auto available = static_cast<uint32_t>(cursor_down - cursor_up);
-		return std::max(available, reserved_dw) - reserved_dw;
+		if (!IsValid())
+		{
+			return 0;
+		}
+		const auto up_addr      = reinterpret_cast<uintptr_t>(cursor_up);
+		const auto down_addr    = reinterpret_cast<uintptr_t>(cursor_down);
+		const auto available_dw = (down_addr - up_addr) / sizeof(uint32_t);
+		return static_cast<uint32_t>(available_dw) - reserved_dw;
 	}
 
 	KYTY_SYSV_ABI bool ReserveDW(uint32_t num_dw)
 	{
+		if (num_dw == 0 || !IsValid())
+		{
+			return false;
+		}
+
 		uint32_t remaining = GetAvailableSizeDW();
 		if (num_dw > remaining)
 		{
+			if (callback == nullptr || reserved_dw > std::numeric_limits<uint32_t>::max() - num_dw)
+			{
+				return false;
+			}
 			bool result = callback(this, num_dw + reserved_dw, user_data);
 			if (!result)
 			{
 				return false;
 			}
-			if (!(GetAvailableSizeDW() >= num_dw)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(GetAvailableSizeDW() >= num_dw) condition ignored (continuing)\n"); }
+			if (!IsValid() || GetAvailableSizeDW() < num_dw)
+			{
+				return false;
+			}
 		}
 		return true;
 	}
@@ -1016,8 +1056,9 @@ struct CommandBuffer
 		{
 			return nullptr;
 		}
-		auto* ret_ptr = cursor_up;
-		cursor_up += size_dw;
+		auto*      ret_ptr = cursor_up;
+		const auto next     = reinterpret_cast<uintptr_t>(cursor_up) + static_cast<uintptr_t>(size_dw) * sizeof(uint32_t);
+		cursor_up           = reinterpret_cast<uint32_t*>(next);
 		return ret_ptr;
 	}
 };
@@ -2844,13 +2885,16 @@ uint32_t KYTY_SYSV_ABI GraphicsGetDataPacketSizeDw(const uint32_t* cmd)
 }
 
 // sceAgcDmaDataPatchSetDstAddressOrOffset (NID IxYiarKlXxM).
-// R_DMA_DATA layout: +0 header, +16/+20 destination address lo/hi.
 int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetDstAddressOrOffset(uint32_t* cmd, uint64_t destination_address)
 {
 	PRINT_NAME();
 			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " dst = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), destination_address);
 
-	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
+	if (cmd == nullptr)
+	{
+		return Kernel::KERNEL_ERROR_EINVAL;
+	}
+	if (!GraphicsIsHardwareDmaDataPacket(cmd[0]) && !GraphicsIsCustomDmaDataPacket(cmd[0]))
 	{
 		return Kernel::KERNEL_ERROR_EINVAL;
 	}
@@ -2865,12 +2909,22 @@ int KYTY_SYSV_ABI GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(uint32
 	PRINT_NAME();
 			KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " src = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), source_value);
 
-	if (cmd == nullptr || !GraphicsIsCustomDmaDataPacket(cmd[0]))
+	if (cmd == nullptr)
 	{
 		return Kernel::KERNEL_ERROR_EINVAL;
 	}
-	cmd[6] = static_cast<uint32_t>(source_value & 0xffffffffu);
-	cmd[7] = static_cast<uint32_t>((source_value >> 32u) & 0xffffffffu);
+	if (GraphicsIsHardwareDmaDataPacket(cmd[0]))
+	{
+		cmd[2] = static_cast<uint32_t>(source_value & 0xffffffffu);
+		cmd[3] = static_cast<uint32_t>((source_value >> 32u) & 0xffffffffu);
+	} else if (GraphicsIsCustomDmaDataPacket(cmd[0]))
+	{
+		cmd[6] = static_cast<uint32_t>(source_value & 0xffffffffu);
+		cmd[7] = static_cast<uint32_t>((source_value >> 32u) & 0xffffffffu);
+	} else
+	{
+		return Kernel::KERNEL_ERROR_EINVAL;
+	}
 	return OK;
 }
 
@@ -3107,7 +3161,7 @@ uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize()
 // sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w).
 uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize()
 {
-	return 8u * sizeof(uint32_t);
+	return 7u * sizeof(uint32_t);
 }
 
 int KYTY_SYSV_ABI GraphicsAgcDriverUnknownKRzWekV120()
@@ -3127,22 +3181,26 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbSetShRegisterRangeDirect(CommandBuffer* buf, u
 			KYTY_LOG_DEBUG("\t values     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(values));
 			KYTY_LOG_DEBUG("\t num_values = %" PRIu32 "\n", num_values);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr || num_values > 0x3fffu)
+	{
+		return nullptr;
+	}
 	if (num_values == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: num_values == 0 condition ignored (continuing)\n"); }
 	if (offset == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset == 0 condition ignored (continuing)\n"); }
 	if (offset > 0x3ffu) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset > 0x3ffu condition ignored (continuing)\n"); }
 
-	
-	auto* marker = buf->AllocateDW(2);
+	auto* storage = buf->AllocateDW(num_values + 4u);
+	if (storage == nullptr)
+	{
+		return nullptr;
+	}
+	auto* marker = storage;
 	marker[0]    = KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO);
 	marker[1]    = 0x6875000d;
 
-	auto* cmd = buf->AllocateDW(num_values + 2);
-
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
-
-	cmd[0] = KYTY_PM4(num_values + 2, Pm4::IT_SET_SH_REG, 0u);
-	cmd[1] = offset;
+	auto* cmd = storage + 2;
+	cmd[0]    = KYTY_PM4(num_values + 2, Pm4::IT_SET_SH_REG, 0u);
+	cmd[1]    = offset;
 
 	if (values == nullptr)
 	{
@@ -3198,18 +3256,16 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbDispatch(CommandBuffer* buf, uint32_t group_x,
 		return nullptr;
 	}
 
-	auto* cmd = buf->AllocateDW(6);
+	auto* cmd = buf->AllocateDW(5);
 	if (cmd == nullptr)
 	{
 		return nullptr;
 	}
 
-	cmd[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_DISPATCH_DIRECT);
-	cmd[1] = group_x;
-	cmd[2] = group_y;
-	cmd[3] = group_z;
-	cmd[4] = modifier;
-	cmd[5] = 0;
+	if (GraphicsEncodeDispatch(cmd, 5, group_x, group_y, group_z, modifier) != 5u)
+	{
+		return nullptr;
+	}
 
 	return cmd;
 }
@@ -3232,7 +3288,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 			KYTY_LOG_DEBUG("\t interrupt        = 0x%02" PRIx8 "\n", interrupt);
 			KYTY_LOG_DEBUG("\t interrupt_ctx_id = %" PRIu32 "\n", interrupt_ctx_id);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 	// dst: 0 = memory, 1 = TC_L2 (Gen5 AGC).
 	if (dst > 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst > 1 condition ignored (continuing)\n"); }
 	// data_sel: 0 = no destination write (barrier/flush only), 1 = 32-bit
@@ -3254,7 +3313,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsCbReleaseMem(CommandBuffer* buf, uint8_t action,
 	
 	auto* cmd = buf->AllocateDW(8);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_RELEASE_MEM);
 	cmd[1] = action | (static_cast<uint32_t>(cache_policy) << 8u);
@@ -3277,13 +3339,19 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbResetQueue(CommandBuffer* buf, uint32_t op, u
 
 	// Gen5 sce::Agc::DrawCommandBuffer::resetQueue: 12-bit op mask and a small
 	// state selector. Emit IT_CLEAR_STATE with the low 4 bits of state.
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 	if ((op & ~0xfffu) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (op & ~0xfffu) != 0 condition ignored (continuing)\n"); }
 
 	
 	auto* cmd = buf->AllocateDW(2);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_CLEAR_STATE, 0u);
 	cmd[1] = state & 0xfu;
@@ -3298,12 +3366,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitUntilSafeForRendering(CommandBuffer* buf,
 			KYTY_LOG_DEBUG("\t video_out_handle     = %" PRIu32 "\n", video_out_handle);
 			KYTY_LOG_DEBUG("\t display_buffer_index = %" PRIu32 "\n", display_buffer_index);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	
 	auto* cmd = buf->AllocateDW(7);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE);
 	cmd[1] = video_out_handle;
@@ -3447,12 +3521,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegisterDirect(CommandBuffer* buf, Shade
 {
 	PRINT_NAME();
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	
 	auto* cmd = buf->AllocateDW(3);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(3, Pm4::IT_SET_SH_REG, 0u);
 	cmd[1] = reg.offset;
@@ -3465,12 +3545,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegisterDirect(CommandBuffer* buf, Shade
 {
 	PRINT_NAME();
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	
 	auto* cmd = buf->AllocateDW(3);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(3, Pm4::IT_SET_CONTEXT_REG, 0u);
 	cmd[1] = reg.offset;
@@ -3483,12 +3569,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegisterDirect(CommandBuffer* buf, Shade
 {
 	PRINT_NAME();
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	
 	auto* cmd = buf->AllocateDW(3);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(3, Pm4::IT_SET_UCONFIG_REG, 0u);
 	cmd[1] = reg.offset;
@@ -3512,7 +3604,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetCxRegistersIndirect(CommandBuffer* buf, co
 	
 	auto* cmd = buf->AllocateDW(4);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	auto vaddr = reinterpret_cast<uint64_t>(regs);
 
@@ -3539,7 +3634,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetShRegistersIndirect(CommandBuffer* buf, co
 	
 	auto* cmd = buf->AllocateDW(4);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	auto vaddr = reinterpret_cast<uint64_t>(regs);
 
@@ -3566,7 +3664,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetUcRegistersIndirect(CommandBuffer* buf, co
 	
 	auto* cmd = buf->AllocateDW(4);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	auto vaddr = reinterpret_cast<uint64_t>(regs);
 
@@ -3585,13 +3686,19 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexSize(CommandBuffer* buf, uint8_t inde
 			KYTY_LOG_DEBUG("\t index_size   = 0x%" PRIx8 "\n", index_size);
 			KYTY_LOG_DEBUG("\t cache_policy = 0x%" PRIx8 "\n", cache_policy);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 	if (cache_policy != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cache_policy != 0 condition ignored (continuing)\n"); }
 
 	
 	auto* cmd = buf->AllocateDW(2);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_INDEX_TYPE, 0u);
 	cmd[1] = index_size;
@@ -3614,13 +3721,19 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexAuto(CommandBuffer* buf, uint32_t in
 			KYTY_LOG_DEBUG("\t index_count = 0x%" PRIx32 "\n", index_count);
 			KYTY_LOG_DEBUG("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 	if (!draw_index_auto_modifier_supported(modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !draw_index_auto_modifier_supported(modifier) condition ignored (continuing)\n"); }
 
 	
 	auto* cmd = buf->AllocateDW(7);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX_AUTO);
 	cmd[1] = index_count;
@@ -3659,12 +3772,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexOffset(CommandBuffer* buf, uint32_t 
 			KYTY_LOG_DEBUG("\t index_count  = 0x%" PRIx32 "\n", index_count);
 			KYTY_LOG_DEBUG("\t flags        = 0x%" PRIx32 "\n", flags);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	
 	auto* cmd = buf->AllocateDW(5);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(5, Pm4::IT_DRAW_INDEX_OFFSET_2, 0u);
 	cmd[1] = index_count;
@@ -3683,13 +3802,19 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_
 			KYTY_LOG_DEBUG("\t index_addr  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
 			KYTY_LOG_DEBUG("\t modifier    = 0x%016" PRIx64 "\n", modifier);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 	if (!draw_index_auto_modifier_supported(modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !draw_index_auto_modifier_supported(modifier) condition ignored (continuing)\n"); }
 
 	
 	auto* cmd = buf->AllocateDW(7);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	auto addr = reinterpret_cast<uint64_t>(index_addr);
 
@@ -3711,14 +3836,20 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 			KYTY_LOG_DEBUG("\t event_type = 0x%02" PRIx8 "\n", event_type);
 			KYTY_LOG_DEBUG("\t address    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 	if (address != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address != nullptr condition ignored (continuing)\n"); }
 	if (event_type > 0x3fu) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event_type > 0x3fu condition ignored (continuing)\n"); }
 
 	
 	auto* cmd = buf->AllocateDW(2);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	uint32_t event_index = 0;
 
@@ -3732,22 +3863,28 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf)
 {
 	// GNM/AGC stallCommandBufferParser: fixed EVENT_WRITE CS partial flush (0x07).
 	PRINT_NAME();
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
-		auto* cmd = buf->AllocateDW(2);
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+	auto* cmd = buf->AllocateDW(2);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 	constexpr uint32_t kCsPartialFlush = 0x07u;
 	cmd[0]                             = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
 	cmd[1]                             = kCsPartialFlush;
 	return cmd;
 }
 
-uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy, uint8_t source,
-                                           uint64_t destination_address, uint8_t source_cache_policy, uint8_t control4,
-                                           uint64_t source_address, uint32_t byte_count, uint8_t control7, uint8_t control8,
-                                           uint8_t control9)
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t engine, uint8_t destination,
+                                           uint8_t destination_cache_policy, uint64_t destination_address, uint8_t source,
+                                           uint8_t source_cache_policy, uint64_t source_address, uint32_t byte_count,
+                                           uint8_t wait_for_previous, uint8_t write_confirm, uint8_t block_engine)
 {
-	// sceAgcDcbDmaData / sceAgcAcbDmaData custom R_DMA_DATA packet layout.
 	PRINT_NAME();
+			KYTY_LOG_DEBUG("\t engine                   = 0x%02" PRIx8 "\n", engine);
 			KYTY_LOG_DEBUG("\t destination              = 0x%02" PRIx8 "\n", destination);
 			KYTY_LOG_DEBUG("\t destination_cache_policy = 0x%02" PRIx8 "\n", destination_cache_policy);
 			KYTY_LOG_DEBUG("\t source                   = 0x%02" PRIx8 "\n", source);
@@ -3756,24 +3893,43 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destinati
 			KYTY_LOG_DEBUG("\t source_address           = 0x%016" PRIx64 "\n", source_address);
 			KYTY_LOG_DEBUG("\t byte_count               = %" PRIu32 "\n", byte_count);
 
-	if (buf == nullptr || byte_count == 0 || (byte_count & 3u) != 0)
+	const bool source_is_valid = source <= 0x0fu || source == 0x14u || source == 0x24u || source == 0x64u;
+	if (buf == nullptr || engine > 1u || destination > 0x0fu || destination_cache_policy > 3u || !source_is_valid ||
+	    source_cache_policy > 3u || byte_count == 0 || byte_count > 0x03ffffffu || (byte_count & 3u) != 0 ||
+	    wait_for_previous > 1u || write_confirm > 1u || block_engine > 1u)
 	{
 		return nullptr;
 	}
 
-		auto* cmd = buf->AllocateDW(8);
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	uint64_t encoded_source_address = source_address;
+	switch (source)
+	{
+		case 0x14u: encoded_source_address = engine == 1u ? 0x30148u : 0x30174u; break;
+		case 0x24u: encoded_source_address = engine == 1u ? 0x30150u : 0x3017cu; break;
+		case 0x64u: encoded_source_address = engine == 1u ? 0x30158u : 0x30184u; break;
+		default: break;
+	}
 
-	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
-	cmd[1] = static_cast<uint32_t>(destination) | (static_cast<uint32_t>(destination_cache_policy) << 8u) |
-	         (static_cast<uint32_t>(source) << 16u) | (static_cast<uint32_t>(source_cache_policy) << 24u);
-	cmd[2] = static_cast<uint32_t>(control4) | (static_cast<uint32_t>(control7) << 8u) | (static_cast<uint32_t>(control8) << 16u) |
-	         (static_cast<uint32_t>(control9) << 24u);
-	cmd[3] = byte_count;
+	auto* cmd = buf->AllocateDW(7);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	cmd[0] = KYTY_PM4(7, Pm4::IT_DMA_DATA, 0u);
+	cmd[1] = (static_cast<uint32_t>(engine) & 0x1u) | ((static_cast<uint32_t>(source_cache_policy) & 0x3u) << 13u) |
+	         ((static_cast<uint32_t>(destination) & 0x3u) << 20u) |
+	         ((static_cast<uint32_t>(destination_cache_policy) & 0x3u) << 25u) |
+	         ((static_cast<uint32_t>(source) & 0x3u) << 29u) | ((static_cast<uint32_t>(block_engine) & 0x1u) << 31u);
+	cmd[2] = static_cast<uint32_t>(encoded_source_address & 0xffffffffu);
+	cmd[3] = static_cast<uint32_t>((encoded_source_address >> 32u) & 0xffffffffu);
 	cmd[4] = static_cast<uint32_t>(destination_address & 0xffffffffu);
 	cmd[5] = static_cast<uint32_t>((destination_address >> 32u) & 0xffffffffu);
-	cmd[6] = static_cast<uint32_t>(source_address & 0xffffffffu);
-	cmd[7] = static_cast<uint32_t>((source_address >> 32u) & 0xffffffffu);
+	cmd[6] = (byte_count & 0x03ffffffu) | ((static_cast<uint32_t>(source) & 0x4u) << 24u) |
+	         ((static_cast<uint32_t>(destination) & 0x4u) << 25u) | ((static_cast<uint32_t>(source) & 0x8u) << 25u) |
+	         ((static_cast<uint32_t>(destination) & 0x8u) << 26u) |
+	         ((static_cast<uint32_t>(wait_for_previous) & 0x1u) << 30u) |
+	         ((static_cast<uint32_t>(write_confirm) & 0x1u) << 31u);
 	return cmd;
 }
 
@@ -3792,7 +3948,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	bool no_size = (static_cast<int64_t>(size_bytes) == -1);
 	auto vaddr   = reinterpret_cast<uint64_t>(base);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 	// AGC ver 10 issues ACQUIRE_MEM (GCR cache ops) with finer-than-256B granularity;
 	// the PM4 encoding is size>>8 / addr>>8, so sub-256B bits are dropped. That is
 	// acceptable for our coherency model — warn instead of aborting.
@@ -3811,7 +3970,10 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	
 	auto* cmd = buf->AllocateDW(8);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_ACQUIRE_MEM);
 	cmd[1] = (static_cast<uint32_t>(engine) << 31u) | cb_db_op;
@@ -3988,16 +4150,20 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, ui
 			KYTY_LOG_DEBUG("\t increment         = 0x%02" PRIx8 "\n", increment);
 			KYTY_LOG_DEBUG("\t write_confirm     = 0x%02" PRIx8 "\n", write_confirm);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
-	if ((4 + num_dwords - 2u) > 0x3fffu) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (4 + num_dwords - 2u) > 0x3fffu condition ignored (continuing)\n"); }
-	if (data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr || data == nullptr || num_dwords == 0 || num_dwords > 0x3ffdu)
+	{
+		return nullptr;
+	}
 	// address_or_offset may be 0: Gen5 reserves the packet then patches the
 	// destination with GraphicsWriteDataPatchSetAddressOrOffset before submit.
 
 	
 	auto* cmd = buf->AllocateDW(4 + num_dwords);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(4 + num_dwords, Pm4::IT_NOP, Pm4::R_WRITE_DATA);
 	cmd[1] = dst | (static_cast<uint32_t>(cache_policy) << 8u) | (static_cast<uint32_t>(increment) << 16u) |
@@ -4306,12 +4472,18 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetFlip(CommandBuffer* buf, uint32_t video_ou
 			KYTY_LOG_DEBUG("\t flip_mode            = %" PRIu32 "\n", flip_mode);
 			KYTY_LOG_DEBUG("\t flip_arg             = %" PRId64 "\n", flip_arg);
 
-	if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
 
 	
 	auto* cmd = buf->AllocateDW(6);
 
-	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
 
 	cmd[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_FLIP);
 	cmd[1] = video_out_handle;

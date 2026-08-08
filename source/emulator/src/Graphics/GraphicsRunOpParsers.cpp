@@ -238,37 +238,99 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xC0055000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xC0055000 condition ignored (continuing)\n"); }
-
-	uint32_t type  = buffer[0];
-	uint32_t type2 = (buffer[5] >> 21u);
-	uint64_t src   = (buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u));
-	uint64_t dst   = (buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u));
-	uint32_t size  = buffer[5] & 0x1fffffu;
-
-	if (type == 0x60000000 && dst == 0x0003022C && type2 == 0x141u)
+	GraphicsHardwareDmaData packet {};
+	if (!GraphicsDecodeHardwareDmaData(cmd_id, buffer, dw, &packet))
 	{
-		auto* addr = reinterpret_cast<void*>(src);
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: malformed DMA_DATA packet ignored\n");
+		return 6;
+	}
 
-		cp->PrefetchL2(addr, size);
-	} else if (type == 0xc4104000 && type2 == 0x0u)
+	// Reference-clock prefetch packets use a fixed destination register rather
+	// than a memory or GDS endpoint.
+	if (buffer[0] == 0x60000000u && packet.destination_address == 0x0003022cu && (buffer[5] >> 21u) == 0x141u)
 	{
-		if ((dst & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (dst & 0x3u) != 0 condition ignored (continuing)\n"); }
-		if ((size & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (size & 0x3u) != 0 condition ignored (continuing)\n"); }
+		cp->PrefetchL2(reinterpret_cast<void*>(packet.source_address), buffer[5] & 0x1fffffu);
+		return 6;
+	}
 
-		cp->ClearGds(dst / 4, size / 4, static_cast<uint32_t>(src));
-	} else if (type == 0xa4004000 && type2 == 0x0u)
+	if (packet.byte_count == 0 || (packet.byte_count & 3u) != 0)
 	{
-		if ((src & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (src & 0x3u) != 0 condition ignored (continuing)\n"); }
-		if ((size & 0x3u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (size & 0x3u) != 0 condition ignored (continuing)\n"); }
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA byte count ignored\n");
+		return 6;
+	}
 
-		auto* addr = reinterpret_cast<uint32_t*>(dst);
+	const bool destination_is_memory = packet.destination == 0u || packet.destination == 3u;
+	const bool destination_is_gds    = packet.destination == 1u;
+	const bool source_is_memory      = packet.source == 0u || packet.source == 3u;
+	const bool source_is_gds         = packet.source == 1u;
+	const bool source_is_immediate   = packet.source == 2u;
+	if ((!destination_is_memory && !destination_is_gds) || (!source_is_memory && !source_is_gds && !source_is_immediate))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported DMA_DATA selector ignored\n");
+		return 6;
+	}
 
-		cp->ReadGds(addr, src / 4, size / 4);
+	constexpr uint64_t kGdsSizeBytes   = 0x3000u * sizeof(uint32_t);
+	auto               valid_gds_range = [&](uint64_t offset)
+	{ return (offset & 3u) == 0u && offset <= kGdsSizeBytes && packet.byte_count <= kGdsSizeBytes - offset; };
+	if (destination_is_gds && !valid_gds_range(packet.destination_address))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA GDS destination ignored\n");
+		return 6;
+	}
+	if (source_is_gds && !valid_gds_range(packet.source_address))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA GDS source ignored\n");
+		return 6;
+	}
+
+	if (destination_is_gds)
+	{
+		if (source_is_immediate)
+		{
+			cp->ClearGds(packet.destination_address / 4u, packet.byte_count / 4u, static_cast<uint32_t>(packet.source_address));
+		} else
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: DMA_DATA copy into GDS is not supported\n");
+		}
+		return 6;
+	}
+
+	if (GpuMemoryValidateAllocatedRange(packet.destination_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA destination ignored\n");
+		return 6;
+	}
+	GpuMemoryNotifyHostWrite(packet.destination_address, packet.byte_count);
+
+	if (source_is_immediate)
+	{
+		const uint32_t value = static_cast<uint32_t>(packet.source_address);
+		auto*          dst   = reinterpret_cast<uint8_t*>(packet.destination_address);
+		for (uint32_t offset = 0; offset < packet.byte_count; offset += sizeof(value))
+		{
+			memcpy(dst + offset, &value, sizeof(value));
+		}
+	} else if (source_is_gds)
+	{
+		if ((packet.destination_address & 3u) != 0u)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unaligned DMA_DATA GDS read destination ignored\n");
+			return 6;
+		}
+		cp->ReadGds(reinterpret_cast<uint32_t*>(packet.destination_address), static_cast<uint32_t>(packet.source_address / 4u),
+		            packet.byte_count / 4u);
 	} else
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown DMA (continuing)\n");
+		if (GpuMemoryValidateAllocatedRange(packet.source_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA source ignored\n");
+			return 6;
+		}
+		memmove(reinterpret_cast<void*>(packet.destination_address), reinterpret_cast<const void*>(packet.source_address),
+		        packet.byte_count);
 	}
+	GraphicsRenderMemoryFlush(packet.destination_address, packet.byte_count);
 
 	return 6;
 }

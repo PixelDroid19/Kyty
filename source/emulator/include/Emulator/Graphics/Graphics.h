@@ -186,7 +186,7 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetDst(uint32_t* cmd, uintptr_t arg1);
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset);
 // sceAgcDcbStallCommandBufferParserGetSize (NID +u6dKSLWM2o): fixed 2-dword packet.
 uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize();
-// sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w): fixed 8-dword packet.
+// sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w): fixed 7-dword packet.
 uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize();
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
 int KYTY_SYSV_ABI   GraphicsAgcDriverUnknownKRzWekV120();
@@ -239,11 +239,11 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_
 uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address);
 // sceAgcDcbStallCommandBufferParser: fixed EVENT_WRITE with CS partial flush (0x07).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf);
-// sceAgcDcbDmaData / sceAgcAcbDmaData: encode custom R_DMA_DATA packet for host copy.
-uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy, uint8_t source,
-                                           uint64_t destination_address, uint8_t source_cache_policy, uint8_t control4,
-                                           uint64_t source_address, uint32_t byte_count, uint8_t control7, uint8_t control8,
-                                           uint8_t control9);
+// sceAgcDcbDmaData / sceAgcAcbDmaData: encode the hardware IT_DMA_DATA packet.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t engine, uint8_t destination,
+                                           uint8_t destination_cache_policy, uint64_t destination_address, uint8_t source,
+                                           uint8_t source_cache_policy, uint64_t source_address, uint32_t byte_count,
+                                           uint8_t wait_for_previous, uint8_t write_confirm, uint8_t block_engine);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,

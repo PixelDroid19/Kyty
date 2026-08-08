@@ -295,6 +295,56 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return op == 0x10u && r == 0x19u && len >= 8u;
 }
 
+[[nodiscard]] inline bool GraphicsIsHardwareDmaDataPacket(uint32_t header)
+{
+	if ((header >> 30u) != 3u)
+	{
+		return false;
+	}
+	const uint32_t op  = (header >> 8u) & 0xffu;
+	const uint32_t len = ((header >> 16u) & 0x3fffu) + 2u;
+	return op == 0x50u && len == 7u;
+}
+
+struct GraphicsHardwareDmaData
+{
+	uint64_t source_address           = 0;
+	uint64_t destination_address      = 0;
+	uint32_t byte_count               = 0;
+	uint8_t  engine                   = 0;
+	uint8_t  source                   = 0;
+	uint8_t  source_cache_policy      = 0;
+	uint8_t  destination              = 0;
+	uint8_t  destination_cache_policy = 0;
+	uint8_t  wait_for_previous        = 0;
+	uint8_t  write_confirm            = 0;
+	uint8_t  block_engine             = 0;
+};
+
+[[nodiscard]] inline bool GraphicsDecodeHardwareDmaData(uint32_t header, const uint32_t* body, uint32_t body_dwords,
+                                                        GraphicsHardwareDmaData* out)
+{
+	if (!GraphicsIsHardwareDmaDataPacket(header) || body == nullptr || body_dwords < 6u || out == nullptr)
+	{
+		return false;
+	}
+
+	const uint32_t control   = body[0];
+	const uint32_t control2  = body[5];
+	out->source_address      = body[1] | (static_cast<uint64_t>(body[2]) << 32u);
+	out->destination_address = body[3] | (static_cast<uint64_t>(body[4]) << 32u);
+	out->byte_count          = control2 & 0x03ffffffu;
+	out->engine              = static_cast<uint8_t>(control & 0x1u);
+	out->source_cache_policy = static_cast<uint8_t>((control >> 13u) & 0x3u);
+	out->destination         = static_cast<uint8_t>(((control >> 20u) & 0x3u) | ((control2 >> 25u) & 0x4u) | ((control2 >> 26u) & 0x8u));
+	out->destination_cache_policy = static_cast<uint8_t>((control >> 25u) & 0x3u);
+	out->source            = static_cast<uint8_t>(((control >> 29u) & 0x3u) | ((control2 >> 24u) & 0x4u) | ((control2 >> 25u) & 0x8u));
+	out->block_engine      = static_cast<uint8_t>((control >> 31u) & 0x1u);
+	out->wait_for_previous = static_cast<uint8_t>((control2 >> 30u) & 0x1u);
+	out->write_confirm     = static_cast<uint8_t>((control2 >> 31u) & 0x1u);
+	return true;
+}
+
 enum class GraphicsWaitRegMemForm : uint8_t
 {
 	None = 0,

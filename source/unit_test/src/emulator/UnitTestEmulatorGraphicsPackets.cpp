@@ -28,6 +28,62 @@ UT_BEGIN(EmulatorGraphicsPackets);
 
 using namespace Libs::Graphics;
 
+namespace {
+
+struct TestCommandBuffer
+{
+	using Callback = KYTY_SYSV_ABI bool (*)(Gen5::CommandBuffer*, uint32_t, void*);
+
+	uint32_t* bottom      = nullptr;
+	uint32_t* top         = nullptr;
+	uint32_t* cursor_up   = nullptr;
+	uint32_t* cursor_down = nullptr;
+	Callback  callback    = nullptr;
+	void*     user_data   = nullptr;
+	uint32_t  reserved_dw = 0;
+	uint32_t  pad         = 0;
+};
+
+static_assert(offsetof(TestCommandBuffer, callback) == 0x20);
+static_assert(offsetof(TestCommandBuffer, user_data) == 0x28);
+static_assert(offsetof(TestCommandBuffer, reserved_dw) == 0x30);
+
+struct CommandBufferRefillState
+{
+	uint32_t* begin             = nullptr;
+	uint32_t* end               = nullptr;
+	uint32_t  expected_need_dw  = 0;
+	uint32_t  calls             = 0;
+	bool      leave_invalid     = false;
+};
+
+bool KYTY_SYSV_ABI TestCommandBufferRefill(Gen5::CommandBuffer* opaque, uint32_t need_dw, void* user_data)
+{
+	auto* dcb   = reinterpret_cast<TestCommandBuffer*>(opaque);
+	auto* state = static_cast<CommandBufferRefillState*>(user_data);
+	state->calls++;
+	EXPECT_EQ(need_dw, state->expected_need_dw);
+
+	dcb->cursor_up   = state->begin;
+	dcb->cursor_down = state->end;
+	if (state->leave_invalid)
+	{
+		dcb->reserved_dw = 0x40000000u;
+	}
+	return true;
+}
+
+void InitCommandBufferTestRuntime()
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+}
+
+} // namespace
+
 TEST(EmulatorGraphicsPackets, EncodesContiguousShRegisters)
 {
 	const ShaderRegister registers[] = {{0x20cu, 0x11111111u}, {0x20du, 0x22222222u}};
@@ -66,6 +122,115 @@ TEST(EmulatorGraphicsPackets, EncodesDispatch)
 	EXPECT_EQ(command[2], 3u);
 	EXPECT_EQ(command[3], 4u);
 	EXPECT_EQ(command[4], 0x41u);
+}
+
+TEST(EmulatorGraphicsPackets, CbDispatchMatchesItsReportedHardwarePacketSize)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	struct AlignasCommandBuffer
+	{
+		uint32_t* bottom      = nullptr;
+		uint32_t* top         = nullptr;
+		uint32_t* cursor_up   = nullptr;
+		uint32_t* cursor_down = nullptr;
+		void*     callback    = nullptr;
+		void*     user_data   = nullptr;
+		uint32_t  reserved_dw = 0;
+		uint32_t  pad         = 0;
+	};
+
+	uint32_t             storage[8] = {};
+	AlignasCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 8;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 8;
+
+	uint32_t* cmd = Gen5::GraphicsCbDispatch(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 2u, 3u, 4u, 0u);
+	ASSERT_NE(cmd, nullptr);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_DISPATCH_DIRECT, 0u));
+	EXPECT_EQ(cmd[1], 2u);
+	EXPECT_EQ(cmd[2], 3u);
+	EXPECT_EQ(cmd[3], 4u);
+	EXPECT_EQ(cmd[4], 0x41u);
+}
+
+TEST(EmulatorGraphicsPackets, RefillsCommandBufferBeforeWritingDrawPacket)
+{
+	InitCommandBufferTestRuntime();
+
+	uint32_t storage[16] = {};
+	TestCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 4;
+	cb.reserved_dw = 2;
+
+	CommandBufferRefillState state {storage, storage + 16, 9u, 0u, false};
+	cb.callback  = TestCommandBufferRefill;
+	cb.user_data = &state;
+
+	uint32_t* cmd = Gen5::GraphicsDcbDrawIndex(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u,
+	                                           reinterpret_cast<void*>(0x12345678u), 0u);
+	ASSERT_EQ(cmd, storage);
+	EXPECT_EQ(state.calls, 1u);
+	EXPECT_EQ(cb.cursor_up, storage + 7);
+	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_NOP, Pm4::R_DRAW_INDEX));
+}
+
+TEST(EmulatorGraphicsPackets, RejectsInvalidCommandBufferAfterSuccessfulRefillCallback)
+{
+	InitCommandBufferTestRuntime();
+
+	uint32_t storage[16];
+	std::memset(storage, 0xa5, sizeof(storage));
+
+	TestCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage;
+	cb.cursor_down = storage + 2;
+
+	CommandBufferRefillState state {storage, storage + 16, 7u, 0u, true};
+	cb.callback  = TestCommandBufferRefill;
+	cb.user_data = &state;
+
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndex(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u,
+	                                     reinterpret_cast<void*>(0x12345678u), 0u),
+	          nullptr);
+	EXPECT_EQ(state.calls, 1u);
+	for (const auto value: storage)
+	{
+		EXPECT_EQ(value, 0xa5a5a5a5u);
+	}
+}
+
+TEST(EmulatorGraphicsPackets, RejectsInvalidCommandBufferBeforeCallingRefillCallback)
+{
+	InitCommandBufferTestRuntime();
+
+	uint32_t storage[16] = {};
+	TestCommandBuffer cb {};
+	cb.bottom      = storage;
+	cb.top         = storage + 16;
+	cb.cursor_up   = storage + 8;
+	cb.cursor_down = storage + 4;
+
+	CommandBufferRefillState state {storage, storage + 16, 7u, 0u, false};
+	cb.callback  = TestCommandBufferRefill;
+	cb.user_data = &state;
+
+	EXPECT_EQ(Gen5::GraphicsDcbDrawIndex(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 3u,
+	                                     reinterpret_cast<void*>(0x12345678u), 0u),
+	          nullptr);
+	EXPECT_EQ(state.calls, 0u);
 }
 
 TEST(EmulatorGraphicsPackets, TreatsZeroPm4DwordAsSinglePadding)
@@ -1210,7 +1375,7 @@ TEST(EmulatorGraphicsPackets, PatchesWriteDataControlBytes)
 TEST(EmulatorGraphicsPackets, ReportsDcbStallAndDmaDataPacketSizes)
 {
 	EXPECT_EQ(Gen5::GraphicsDcbStallCommandBufferParserGetSize(), 8u);
-	EXPECT_EQ(Gen5::GraphicsDcbDmaDataGetSize(), 32u);
+	EXPECT_EQ(Gen5::GraphicsDcbDmaDataGetSize(), 28u);
 }
 
 // Observed post-Play: guest encodes WaitMem/ReleaseMem with a placeholder then
@@ -4730,6 +4895,8 @@ TEST(EmulatorGraphicsPackets, WaitRegMemAndDmaDataPatchFieldOffsets)
 
 	const uint32_t dma = KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA);
 	EXPECT_TRUE(GraphicsIsCustomDmaDataPacket(dma));
+	EXPECT_FALSE(GraphicsIsHardwareDmaDataPacket(dma));
+	EXPECT_TRUE(GraphicsIsHardwareDmaDataPacket(KYTY_PM4(7, Pm4::IT_DMA_DATA, 0u)));
 	EXPECT_FALSE(GraphicsIsCustomDmaDataPacket(wait64));
 }
 
@@ -4748,6 +4915,15 @@ TEST(EmulatorGraphicsPackets, PatchesDmaDataDestinationAndWaitRegMemAddress)
 	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(dma, 0x0000000123456789ull), 0);
 	EXPECT_EQ(dma[4], 0x23456789u);
 	EXPECT_EQ(dma[5], 0x00000001u);
+
+	uint32_t hardware_dma[7] = {};
+	hardware_dma[0]          = KYTY_PM4(7, Pm4::IT_DMA_DATA, 0u);
+	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(hardware_dma, 0x0000000234567890ull), 0);
+	EXPECT_EQ(hardware_dma[4], 0x34567890u);
+	EXPECT_EQ(hardware_dma[5], 0x00000002u);
+	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetSrcAddressOrOffsetOrImmediate(hardware_dma, 0x0000000312345678ull), 0);
+	EXPECT_EQ(hardware_dma[2], 0x12345678u);
+	EXPECT_EQ(hardware_dma[3], 0x00000003u);
 	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(nullptr, 0), Libs::LibKernel::KERNEL_ERROR_EINVAL);
 	uint32_t not_dma[2] = {KYTY_PM4(2, Pm4::IT_NOP, Pm4::R_ZERO), 0};
 	EXPECT_EQ(Gen5::GraphicsAgcDmaDataPatchSetDstAddressOrOffset(not_dma, 1), Libs::LibKernel::KERNEL_ERROR_EINVAL);
@@ -5039,8 +5215,8 @@ TEST(EmulatorGraphicsPackets, DecodesCbNopBodyWithoutSideEffects)
 	EXPECT_EQ(Pm4::Pm4Type3NopBodyDwords(0u), 0u);
 }
 
-// sceAgcDcbDmaData / sceAgcAcbDmaData: encode IT_NOP + R_DMA_DATA.
-TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
+// sceAgcDcbDmaData / sceAgcAcbDmaData: encode the seven-dword hardware packet.
+TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataHardwarePacket)
 {
 	struct AlignasCommandBuffer
 	{
@@ -5069,19 +5245,35 @@ TEST(EmulatorGraphicsPackets, EncodesDcbDmaDataCustomPacket)
 
 	const uint64_t dst = 0x0000000120000000ull;
 	const uint64_t src = 0x0000000130000000ull;
-	uint32_t*      cmd = Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 64, 0, 0, 0);
+	uint32_t*      cmd = Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1, 0, 2, dst, 0, 1, src, 64, 1, 1, 0);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], KYTY_PM4(8, Pm4::IT_NOP, Pm4::R_DMA_DATA));
-	EXPECT_EQ(cmd[1], 0x00000004u);
-	EXPECT_EQ(cmd[2], 0u);
-	EXPECT_EQ(cmd[3], 64u);
+	EXPECT_EQ(cb.cursor_up, storage + 7);
+	EXPECT_EQ(cmd[0], KYTY_PM4(7, Pm4::IT_DMA_DATA, 0u));
+	EXPECT_EQ(cmd[1], 0x04002001u);
+	EXPECT_EQ(cmd[2], 0x30000000u);
+	EXPECT_EQ(cmd[3], 0x00000001u);
 	EXPECT_EQ(cmd[4], 0x20000000u);
 	EXPECT_EQ(cmd[5], 0x00000001u);
-	EXPECT_EQ(cmd[6], 0x30000000u);
-	EXPECT_EQ(cmd[7], 0x00000001u);
+	EXPECT_EQ(cmd[6], 0xc0000040u);
+
+	GraphicsHardwareDmaData decoded {};
+	ASSERT_TRUE(GraphicsDecodeHardwareDmaData(cmd[0], cmd + 1, 6u, &decoded));
+	EXPECT_EQ(decoded.engine, 1u);
+	EXPECT_EQ(decoded.destination, 0u);
+	EXPECT_EQ(decoded.destination_cache_policy, 2u);
+	EXPECT_EQ(decoded.destination_address, dst);
+	EXPECT_EQ(decoded.source, 0u);
+	EXPECT_EQ(decoded.source_cache_policy, 1u);
+	EXPECT_EQ(decoded.source_address, src);
+	EXPECT_EQ(decoded.byte_count, 64u);
+	EXPECT_EQ(decoded.wait_for_previous, 1u);
+	EXPECT_EQ(decoded.write_confirm, 1u);
+	EXPECT_EQ(decoded.block_engine, 0u);
 
 	// Invalid byte_count must not allocate.
-	EXPECT_EQ(Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 4, 0, 0, dst, 0, 0, src, 3, 0, 0, 0), nullptr);
+	EXPECT_EQ(Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1, 0, 2, dst, 0, 1, src, 3, 1, 1, 0), nullptr);
+	EXPECT_EQ(Gen5::GraphicsDcbDmaData(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 1, 0, 2, dst, 0x80, 1, src, 64, 1, 1, 0),
+	          nullptr);
 }
 
 // IT_INDEX_BASE (0x26) / IT_INDEX_BUFFER_SIZE (0x13): DCB encoders must emit the
