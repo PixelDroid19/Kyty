@@ -1088,11 +1088,7 @@ int GameController::ReadStates(ControllerState* states, int states_num, bool* fl
 
 	if (m_connected)
 	{
-		if (m_states_num == 0)
-		{
-			ret_num   = 1;
-			states[0] = m_last_state;
-		} else
+		if (m_states_num != 0)
 		{
 			for (uint32_t i = 0; i < m_states_num; i++)
 			{
@@ -1109,6 +1105,16 @@ int GameController::ReadStates(ControllerState* states, int states_num, bool* fl
 				}
 			}
 		}
+	}
+
+	// The history queue contains transitions, not the controller's continued
+	// reports. Once it is drained, return one fresh copy of the current state so
+	// a stationary controller remains observable to polling guests.
+	if (ret_num == 0)
+	{
+		states[0]      = GetLastState();
+		states[0].time = Kernel::KernelGetProcessTime();
+		ret_num        = 1;
 	}
 
 	return ret_num;
@@ -1527,17 +1533,12 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 
 	int             connected_count = 0;
 	bool            connected       = false;
-	ControllerState states[64];
+	ControllerState states[64] {};
 
 	int ret_num = g_controller->ReadStates(states, num, &connected, &connected_count);
 	PadScriptState scripted {};
 	const bool script_active = g_pad_script.Sample(&scripted);
 	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
-
-	if (!connected)
-	{
-		ret_num = 1;
-	}
 
 	for (int i = 0; i < ret_num; i++)
 	{

@@ -24,6 +24,16 @@ diagnostic agent overlay. It reports a connected pad while active, so titles
 that gate their startup screens on controller presence follow the same path as
 an attached device. It does not alter graphics, timing, or game memory.
 
+## Continuous polling contract
+
+`scePadRead` keeps transition history bounded, but exhausting that history does
+not make a connected, stationary pad disappear. A valid poll returns one fresh
+copy of the current report when no transition remains, including an updated
+timestamp. Scripted and agent input is merged into that report, so a held axis
+continues to reach the guest without requiring a new SDL event. The focused
+`EmulatorPad.PadReadReturnsCurrentStateAfterHistoryIsDrained` test protects this
+contract.
+
 `scripts/input/reach_first_gameplay.pad` is an integration route for the long
 opening/tutorial flow used to reproduce the first playable room. It is a
 diagnostic route, not a compatibility claim: visual or gameplay acceptance

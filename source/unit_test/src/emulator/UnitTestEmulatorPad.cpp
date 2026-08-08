@@ -167,4 +167,27 @@ TEST(EmulatorPad, KeyboardAxesAreReturnedByPadReadState)
 	ControllerAxis(CONTROLLER_KEYBOARD_ID, Axis::LeftY, 128);
 }
 
+TEST(EmulatorPad, PadReadReturnsCurrentStateAfterHistoryIsDrained)
+{
+	EnsurePadSubsystems();
+
+	ASSERT_EQ(PadInit(), 0);
+	ASSERT_EQ(PadOpen(1, 0, 0, nullptr), 1);
+
+	// Consume every queued host transition first. A subsequent read still needs
+	// to return the current report so a stationary controller remains pollable.
+	ControllerAxis(CONTROLLER_KEYBOARD_ID, Axis::LeftX, 128);
+	alignas(uint64_t) std::array<uint8_t, 64 * 256> history {};
+	ASSERT_GE(PadRead(1, reinterpret_cast<PadData*>(history.data()), 64), 1);
+
+	AgentPadClear();
+	AgentPadSetAxis(Axis::LeftX, 200);
+
+	alignas(uint64_t) std::array<uint8_t, 256> current {};
+	ASSERT_EQ(PadRead(1, reinterpret_cast<PadData*>(current.data()), 1), 1);
+	EXPECT_EQ(current[sizeof(uint32_t)], 200u);
+
+	AgentPadClear();
+}
+
 UT_END();
