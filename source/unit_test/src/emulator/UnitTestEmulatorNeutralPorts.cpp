@@ -1,12 +1,16 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Loader/GuestProgramName.h"
+#include "Emulator/Log.h"
 #include "Emulator/Ports/AudioPausePort.h"
 #include "Emulator/Ports/ControllerInputPort.h"
 #include "Emulator/PresentationStats.h"
 #include "Emulator/VideoFrameMemory.h"
 
+#include <atomic>
 #include <cstdint>
+#include <thread>
+#include <vector>
 
 UT_BEGIN(EmulatorNeutralPorts);
 
@@ -100,6 +104,51 @@ bool TestPresentationQuery(void* /*context*/, Kyty::Emulator::PresentationStats:
 }
 
 } // namespace
+
+TEST(EmulatorNeutralPorts, LogDirectionSupportsConcurrentReaders)
+{
+	ASSERT_EQ(Kyty::Log::GetDirection(), Kyty::Log::Direction::Silent);
+
+	std::atomic_bool start {false};
+	std::atomic_bool stop {false};
+	std::atomic_bool invalid_direction {false};
+	std::vector<std::thread> readers;
+	for (uint32_t i = 0; i < 2u; ++i)
+	{
+		readers.emplace_back(
+		    [&]
+		    {
+			    while (!start.load(std::memory_order_acquire))
+			    {
+				    std::this_thread::yield();
+			    }
+			    while (!stop.load(std::memory_order_acquire))
+			    {
+				    const auto direction = Kyty::Log::GetDirection();
+				    if (direction != Kyty::Log::Direction::Silent && direction != Kyty::Log::Direction::Console)
+				    {
+					    invalid_direction.store(true, std::memory_order_release);
+				    }
+				    (void)Kyty::Log::IsColoredPrintf();
+			    }
+		    });
+	}
+
+	start.store(true, std::memory_order_release);
+	for (uint32_t i = 0; i < 256u; ++i)
+	{
+		Kyty::Log::SetDirection(Kyty::Log::Direction::Console);
+		Kyty::Log::SetDirection(Kyty::Log::Direction::Silent);
+	}
+	stop.store(true, std::memory_order_release);
+	for (auto& reader: readers)
+	{
+		reader.join();
+	}
+
+	EXPECT_FALSE(invalid_direction.load(std::memory_order_acquire));
+	EXPECT_EQ(Kyty::Log::GetDirection(), Kyty::Log::Direction::Silent);
+}
 
 TEST(EmulatorNeutralPorts, ControllerInputPortDeliversInstalledCallbacks)
 {

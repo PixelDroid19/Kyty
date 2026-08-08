@@ -27,9 +27,9 @@ namespace Log {
 
 static bool                     g_log_initialized    = false;
 static Core::Mutex*             g_mutex              = nullptr;
-static Direction                g_dir                = Direction::Silent;
+static std::atomic<Direction>   g_dir {Direction::Silent};
 static Core::File*              g_file               = nullptr;
-static bool                     g_colored_printf     = false;
+static std::atomic_bool         g_colored_printf {false};
 static thread_local Core::File* g_thread_local_file  = nullptr;
 static Vector<Core::File*>*     g_thread_local_files = nullptr;
 // Minimum severity that is emitted. Stored as an int so the hot-path gate is a
@@ -67,7 +67,7 @@ static bool EnableVTMode()
 
 bool IsColoredPrintf()
 {
-	return g_colored_printf;
+	return g_colored_printf.load(std::memory_order_acquire);
 }
 
 String RemoveColors(const String& str)
@@ -97,15 +97,17 @@ static void Close()
 {
 	if (g_log_initialized)
 	{
+		g_dir.store(Direction::Silent, std::memory_order_release);
+		g_colored_printf.store(false, std::memory_order_release);
 		g_mutex->Lock();
-		if (g_dir == Direction::File && g_file != nullptr)
+		if (g_file != nullptr)
 		{
 			g_file->Flush();
 			g_file->Close();
 			delete g_file;
 			g_file = nullptr;
 		}
-		if (g_dir == Direction::Directory && !g_thread_local_files->IsEmpty())
+		if (g_thread_local_files != nullptr && !g_thread_local_files->IsEmpty())
 		{
 			for (auto* file: *g_thread_local_files)
 			{
@@ -123,8 +125,9 @@ void LogSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	if (!g_log_initialized)
 	{
-		g_mutex           = new Core::Mutex;
-		g_log_initialized = true;
+		g_mutex              = new Core::Mutex;
+		g_thread_local_files = new Vector<Core::File*>;
+		g_log_initialized    = true;
 	}
 
 	auto dir = Config::GetPrintfDirection();
@@ -139,8 +142,6 @@ void LogSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	// KYTY_LOG_DEBUG diagnostics (shader dumps, command processor traces) in
 	// the console, mirroring verbose modes in other emulators.
 	SetMinLevel(Config::GetPrintfLevel());
-
-	g_thread_local_files = new Vector<Core::File*>;
 }
 
 void LogSubsystem::UnexpectedShutdown([[maybe_unused]] Core::SubsystemsList* parent)
@@ -158,50 +159,59 @@ void SetDirection(Direction dir)
 	EXIT_IF(!Log::g_log_initialized);
 	EXIT_IF(!Core::Thread::IsMainThread());
 
+	bool colored_printf = false;
 	if (dir == Direction::Console)
 	{
-		g_colored_printf = EnableVTMode();
+		colored_printf = EnableVTMode();
 
-		if (!g_colored_printf)
+		if (!colored_printf)
 		{
 			::printf("Colored printf is not supported\n");
 		}
-	} else
-	{
-		g_colored_printf = false;
 	}
 
-	g_dir = dir;
+	g_colored_printf.store(colored_printf, std::memory_order_release);
+	g_dir.store(dir, std::memory_order_release);
 }
 
 Direction GetDirection()
 {
 	EXIT_IF(!Log::g_log_initialized);
 
-	return g_dir;
+	return g_dir.load(std::memory_order_acquire);
 }
 
 void SetOutputFile(const String& file_name, Core::File::Encoding enc)
 {
 	EXIT_IF(!Log::g_log_initialized);
 	EXIT_IF(!Core::Thread::IsMainThread());
-	EXIT_IF(Log::g_dir != Log::Direction::File);
-	EXIT_IF(Log::g_file != nullptr);
+	EXIT_IF(Log::g_dir.load(std::memory_order_acquire) != Log::Direction::File);
 
-	g_file = new Core::File;
-	g_file->Create(file_name);
-	g_file_log_bytes  = 0;
-	g_file_log_capped = false;
-
-	if (g_file->IsInvalid())
+	auto* file = new Core::File;
+	file->Create(file_name);
+	if (file->IsInvalid())
 	{
 		::printf("Can't create log file: %s\n", file_name.C_Str());
-		delete g_file;
-		g_file = nullptr;
+		delete file;
 	} else
 	{
-		g_file->SetEncoding(enc);
-		g_file->WriteBOM();
+		file->SetEncoding(enc);
+		file->WriteBOM();
+
+		Core::File* previous_file = nullptr;
+		g_mutex->Lock();
+		previous_file     = g_file;
+		g_file            = file;
+		g_file_log_bytes  = 0;
+		g_file_log_capped = false;
+		g_mutex->Unlock();
+
+		if (previous_file != nullptr)
+		{
+			previous_file->Flush();
+			previous_file->Close();
+			delete previous_file;
+		}
 	}
 }
 
@@ -212,7 +222,7 @@ bool FileLogAllowsWrite(uint64_t add_bytes)
 	{
 		return false;
 	}
-	if (g_file_log_bytes + add_bytes > g_file_log_max_bytes)
+	if (add_bytes > g_file_log_max_bytes - g_file_log_bytes)
 	{
 		g_file_log_capped = true;
 		const char* msg = "\n[kyty] log file soft-cap reached (32 MiB); further File logging suppressed\n";
@@ -228,28 +238,36 @@ bool FileLogAllowsWrite(uint64_t add_bytes)
 void SetOutputThreadLocalFile(const String& file_name, Core::File::Encoding enc)
 {
 	EXIT_IF(!Log::g_log_initialized);
-	EXIT_IF(Log::g_dir != Log::Direction::Directory);
+	EXIT_IF(Log::g_dir.load(std::memory_order_acquire) != Log::Direction::Directory);
 	EXIT_IF(Log::g_thread_local_file != nullptr);
 	EXIT_IF(g_thread_local_files == nullptr);
 
 	Core::File::CreateDirectories(file_name.DirectoryWithoutFilename());
 
-	g_thread_local_file = new Core::File;
-	g_thread_local_file->Create(file_name);
+	auto* file = new Core::File;
+	file->Create(file_name);
 
-	if (g_thread_local_file->IsInvalid())
+	if (file->IsInvalid())
 	{
 		::printf("Can't create log file: %s\n", file_name.C_Str());
-		delete g_thread_local_file;
-		g_thread_local_file = nullptr;
+		delete file;
+		return;
 	} else
 	{
-		g_thread_local_file->SetEncoding(enc);
-		g_thread_local_file->WriteBOM();
+		file->SetEncoding(enc);
+		file->WriteBOM();
 	}
 
 	g_mutex->Lock();
-	g_thread_local_files->Add(g_thread_local_file);
+	if (g_dir.load(std::memory_order_acquire) != Direction::Directory || g_thread_local_files == nullptr)
+	{
+		g_mutex->Unlock();
+		file->Close();
+		delete file;
+		return;
+	}
+	g_thread_local_file = file;
+	g_thread_local_files->Add(file);
 	g_mutex->Unlock();
 }
 
@@ -280,7 +298,8 @@ void Emit(Log::Level level, const char* format, va_list args)
 		return;
 	}
 
-	if (Log::g_dir == Log::Direction::Silent)
+	const auto direction = Log::g_dir.load(std::memory_order_acquire);
+	if (direction == Log::Direction::Silent)
 	{
 		return;
 	}
@@ -290,34 +309,36 @@ void Emit(Log::Level level, const char* format, va_list args)
 	String s;
 	s.Printf(format, args);
 
-	if (!Log::g_colored_printf)
+	if (!Log::g_colored_printf.load(std::memory_order_acquire))
 	{
 		s = Log::RemoveColors(s);
 	}
 
-	if (Log::g_dir == Log::Direction::Console)
+	if (direction == Log::Direction::Console)
 	{
 		Log::g_mutex->Lock();
 		::printf("%s", s.C_Str());
 		Log::g_mutex->Unlock();
-	} else if (Log::g_dir == Log::Direction::File && Log::g_file != nullptr)
+	} else if (direction == Log::Direction::File)
 	{
 		Log::g_mutex->Lock();
-		if (Log::FileLogAllowsWrite(static_cast<uint64_t>(s.Size())))
+		if (Log::g_file != nullptr && Log::FileLogAllowsWrite(static_cast<uint64_t>(s.Size())))
 		{
 			Log::g_file->Write(s);
 		}
 		Log::g_mutex->Unlock();
-	} else if (Log::g_dir == Log::Direction::Directory)
+	} else if (direction == Log::Direction::Directory)
 	{
 		if (Log::g_thread_local_file == nullptr)
 		{
 			Log::CreateThreadLocalFile();
 		}
-		if (Log::g_thread_local_file != nullptr)
+		Log::g_mutex->Lock();
+		if (Log::g_dir.load(std::memory_order_acquire) == Log::Direction::Directory && Log::g_thread_local_file != nullptr)
 		{
 			Log::g_thread_local_file->Write(s);
 		}
+		Log::g_mutex->Unlock();
 	}
 }
 
