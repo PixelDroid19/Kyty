@@ -627,6 +627,7 @@ static int ExecuteRead(const PendingAction& action)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
+	Emulator::VideoFrameMemory::NotifyHostWrite(action.destination, action.size);
 	uint64_t total = 0;
 	auto*    dest  = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(action.destination));
 	while (total < action.size)
@@ -641,10 +642,6 @@ static int ExecuteRead(const PendingAction& action)
 		}
 		total += read;
 	}
-	if (total != 0)
-	{
-		Emulator::VideoFrameMemory::NotifyHostWrite(action.destination, total);
-	}
 	return OK;
 }
 
@@ -654,9 +651,9 @@ static int ExecuteAction(const PendingAction& action, uintptr_t submit_ident)
 	{
 		case PendingActionKind::ReadFile: return ExecuteRead(action);
 		case PendingActionKind::WriteAddress:
+			Emulator::VideoFrameMemory::NotifyHostWrite(action.address, sizeof(action.value));
 			std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(action.address)), &action.value, sizeof(action.value));
 			std::atomic_thread_fence(std::memory_order_release);
-			Emulator::VideoFrameMemory::NotifyHostWrite(action.address, sizeof(action.value));
 			return OK;
 		case PendingActionKind::KernelEvent:
 		{

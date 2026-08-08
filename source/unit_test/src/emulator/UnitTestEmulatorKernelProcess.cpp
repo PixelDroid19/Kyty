@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <future>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -158,7 +159,22 @@ void IgnoreUnregisterFrame(uint64_t /*base*/) {}
 void MakeHostWriteDestinationWritable(uint64_t base, uint64_t size)
 {
 	g_host_write_prepare_count++;
-	g_host_write_made_writable = Core::VirtualMemory::Protect(base, size, Core::VirtualMemory::Mode::ReadWrite);
+	const uint64_t page_size = Core::VirtualMemory::GetPageSize();
+	if (base == 0 || size == 0 || page_size == 0 || base > std::numeric_limits<uint64_t>::max() - size)
+	{
+		g_host_write_made_writable = false;
+		return;
+	}
+	const uint64_t end = base + size;
+	if (end > std::numeric_limits<uint64_t>::max() - (page_size - 1u))
+	{
+		g_host_write_made_writable = false;
+		return;
+	}
+	const uint64_t aligned_base = base - (base % page_size);
+	const uint64_t aligned_end  = ((end + page_size - 1u) / page_size) * page_size;
+	g_host_write_made_writable =
+	    Core::VirtualMemory::Protect(aligned_base, aligned_end - aligned_base, Core::VirtualMemory::Mode::ReadWrite);
 }
 
 void* KYTY_SYSV_ABI HoldPthreadUntilReleased(void* arg)
@@ -931,14 +947,20 @@ TEST(EmulatorKernelProcess, AprReadAndCompletionExecuteAtSubmitInRecordOrder)
 
 	alignas(8) std::array<uint8_t, 0x28> command {};
 	alignas(8) std::array<uint8_t, 0x80> stream {};
-	std::array<uint8_t, 4> destination = {0xcc, 0xcc, 0xcc, 0xcc};
-	uint64_t completion = 0;
+	const uint64_t page_size = Core::VirtualMemory::GetPageSize();
+	const uint64_t protected_writes =
+	    Core::VirtualMemory::Alloc(0, page_size * 2u, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(protected_writes, 0u);
+	auto* destination = reinterpret_cast<uint8_t*>(protected_writes);
+	auto* completion  = reinterpret_cast<uint64_t*>(protected_writes + page_size);
+	std::memset(destination, 0xcc, 4u);
+	*completion = 0;
 	ASSERT_EQ(ctor(command.data()), OK);
 	ASSERT_EQ(set_buffer(command.data(), stream.data(), static_cast<uint32_t>(stream.size())), OK);
-	ASSERT_EQ(read_file(command.data(), 0, 0, file_id, destination.data(), destination.size(), 1), OK);
-	ASSERT_EQ(write_address(command.data(), &completion, UINT64_C(0xfeedface)), OK);
-	EXPECT_EQ(destination, (std::array<uint8_t, 4> {0xcc, 0xcc, 0xcc, 0xcc}));
-	EXPECT_EQ(completion, 0u);
+	ASSERT_EQ(read_file(command.data(), 0, 0, file_id, destination, 4u, 1), OK);
+	ASSERT_EQ(write_address(command.data(), completion, UINT64_C(0xfeedface)), OK);
+	EXPECT_EQ(std::memcmp(destination, (std::array<uint8_t, 4> {0xcc, 0xcc, 0xcc, 0xcc}).data(), 4u), 0);
+	EXPECT_EQ(*completion, 0u);
 	EXPECT_EQ(stream[0], 0x17u);
 	uint32_t offset = 0;
 	int32_t count = 0;
@@ -947,9 +969,20 @@ TEST(EmulatorKernelProcess, AprReadAndCompletionExecuteAtSubmitInRecordOrder)
 	EXPECT_EQ(offset, 0x34u);
 	EXPECT_EQ(count, 2);
 
-	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(command.data(), 1, nullptr, 0, nullptr), OK);
-	EXPECT_EQ(destination, (std::array<uint8_t, 4> {0x21, 0x32, 0x43, 0x54}));
-	EXPECT_EQ(completion, UINT64_C(0xfeedface));
+	ASSERT_TRUE(Core::VirtualMemory::Protect(protected_writes, page_size * 2u, Core::VirtualMemory::Mode::Read));
+	g_host_write_made_writable = false;
+	g_host_write_prepare_count = 0;
+	const Emulator::VideoFrameMemory::Callbacks callbacks {&IgnoreLinearFrame, &IgnoreUnregisterFrame,
+	                                                       &MakeHostWriteDestinationWritable};
+	ASSERT_TRUE(Emulator::VideoFrameMemory::InstallCallbacks(callbacks));
+	const int submit_result = Kernel::FileSystem::KernelAprSubmitCommandBuffer(command.data(), 1, nullptr, 0, nullptr);
+	EXPECT_EQ(submit_result, OK);
+	EXPECT_EQ(g_host_write_prepare_count, 2u);
+	EXPECT_TRUE(g_host_write_made_writable);
+	EXPECT_EQ(std::memcmp(destination, (std::array<uint8_t, 4> {0x21, 0x32, 0x43, 0x54}).data(), 4u), 0);
+	EXPECT_EQ(*completion, UINT64_C(0xfeedface));
+	EXPECT_TRUE(Emulator::VideoFrameMemory::InstallCallbacks({}));
+	EXPECT_TRUE(Core::VirtualMemory::Free(protected_writes));
 
 	Kernel::FileSystem::Umount(U"/app0/");
 	EXPECT_TRUE(Core::File::DeleteFile(host_file));

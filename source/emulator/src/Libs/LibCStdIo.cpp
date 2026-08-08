@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -33,9 +34,13 @@ KYTY_SYSV_ABI int c_fclose(FILE* f)
 
 KYTY_SYSV_ABI size_t c_fread(void* p, size_t sz, size_t n, FILE* f)
 {
-	const size_t result = ::fread(p, sz, n, f);
-	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(p), result * sz);
-	return result;
+	if (f == nullptr || (p == nullptr && sz != 0 && n != 0) || (sz != 0 && n > std::numeric_limits<size_t>::max() / sz))
+	{
+		return 0;
+	}
+	const size_t requested = sz * n;
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(p), requested);
+	return ::fread(p, sz, n, f);
 }
 
 // Gen5 libc_v1 fgets — NID KdP-nULpuGw.
@@ -45,12 +50,8 @@ KYTY_SYSV_ABI char* c_fgets(char* s, int n, FILE* f)
 	{
 		return nullptr;
 	}
-	char* result = ::fgets(s, n, f);
-	if (result != nullptr)
-	{
-		Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(s), std::strlen(s) + 1);
-	}
-	return result;
+	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(s), static_cast<size_t>(n));
+	return ::fgets(s, n, f);
 }
 
 KYTY_SYSV_ABI size_t c_fwrite(const void* p, size_t sz, size_t n, FILE* f)

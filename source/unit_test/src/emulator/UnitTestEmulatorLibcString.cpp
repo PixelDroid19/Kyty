@@ -1,10 +1,14 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/VideoFrameMemory.h"
 #include "Emulator/Libs/VaContext.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 
 // HLE bodies live in LibCString.cpp; declare the tested surface here so the
@@ -13,9 +17,67 @@ namespace Kyty::Libs::LibC {
 int c_strcasecmp(const char* a, const char* b);
 int c_strncasecmp(const char* a, const char* b, size_t count);
 int c_vsnprintf(char* s, size_t n, const char* fmt, Kyty::Libs::VaList* ap);
+size_t c_fread(void* ptr, size_t size, size_t count, FILE* stream);
+char* c_fgets(char* buffer, int size, FILE* stream);
 } // namespace Kyty::Libs::LibC
 
 UT_BEGIN(EmulatorLibcString);
+
+namespace {
+
+uint32_t g_stdio_prepare_count = 0;
+bool     g_stdio_made_writable = false;
+
+void IgnoreLinearFrame(uint64_t /*base*/, size_t /*size*/, uint32_t /*row_pitch_bytes*/) {}
+
+void IgnoreUnregisterFrame(uint64_t /*base*/) {}
+
+void PrepareStdioDestination(uint64_t base, uint64_t /*size*/)
+{
+	g_stdio_prepare_count++;
+	g_stdio_made_writable = Core::VirtualMemory::Protect(base, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+}
+
+} // namespace
+
+TEST(EmulatorLibcString, StdioReadsPrepareProtectedGuestDestinations)
+{
+	using namespace Kyty::Libs::LibC;
+
+	FILE* file = std::tmpfile();
+	ASSERT_NE(file, nullptr);
+	const char source[] = "abc\n";
+	ASSERT_EQ(std::fwrite(source, 1, sizeof(source) - 1u, file), sizeof(source) - 1u);
+	std::rewind(file);
+
+	const uint64_t page_size  = Core::VirtualMemory::GetPageSize();
+	const uint64_t destination = Core::VirtualMemory::Alloc(0, page_size, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(destination, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::Protect(destination, page_size, Core::VirtualMemory::Mode::Read));
+
+	g_stdio_prepare_count = 0;
+	g_stdio_made_writable = false;
+	const Emulator::VideoFrameMemory::Callbacks callbacks {&IgnoreLinearFrame, &IgnoreUnregisterFrame, &PrepareStdioDestination};
+	ASSERT_TRUE(Emulator::VideoFrameMemory::InstallCallbacks(callbacks));
+	EXPECT_EQ(c_fread(reinterpret_cast<void*>(destination), 1, sizeof(source) - 1u, file), sizeof(source) - 1u);
+	EXPECT_EQ(std::memcmp(reinterpret_cast<const void*>(destination), source, sizeof(source) - 1u), 0);
+	EXPECT_EQ(g_stdio_prepare_count, 1u);
+	EXPECT_TRUE(g_stdio_made_writable);
+
+	std::rewind(file);
+	ASSERT_TRUE(Core::VirtualMemory::Protect(destination, page_size, Core::VirtualMemory::Mode::Read));
+	g_stdio_made_writable = false;
+	EXPECT_NE(c_fgets(reinterpret_cast<char*>(destination), static_cast<int>(sizeof(source)), file), nullptr);
+	EXPECT_STREQ(reinterpret_cast<const char*>(destination), source);
+	EXPECT_EQ(g_stdio_prepare_count, 2u);
+	EXPECT_TRUE(g_stdio_made_writable);
+
+	EXPECT_EQ(c_fread(reinterpret_cast<void*>(destination), std::numeric_limits<size_t>::max(), 2u, file), 0u);
+	EXPECT_EQ(g_stdio_prepare_count, 2u);
+	EXPECT_TRUE(Emulator::VideoFrameMemory::InstallCallbacks({}));
+	EXPECT_TRUE(Core::VirtualMemory::Free(destination));
+	EXPECT_EQ(std::fclose(file), 0);
+}
 
 // strcasecmp (NID AV6ipCNa4Rw): ASCII case-insensitive comparison with the C
 // contract (negative/zero/positive on the first differing folded byte).
