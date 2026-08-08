@@ -57,9 +57,9 @@ _build_linux/fc_script '{kyty_run_tests()}' \
   --gtest_filter='EmulatorGraphicsPackets.*:EmulatorGraphicsState.*'
 ```
 
-The expected result at this handoff is 205 passing tests. A runtime change is
-accepted only when the focused tests pass and a strict re-run either preserves
-the gameplay-era checkpoint or advances the first failure.
+Every test selected by the focused filters must pass. A runtime change is
+accepted only when those tests pass and a strict re-run either preserves the
+gameplay-era checkpoint or advances the first failure.
 
 ## Problem-to-solution guide
 
@@ -74,6 +74,7 @@ the gameplay-era checkpoint or advances the first failure.
 | First-use shader persistence pauses the render path | Every new SPIR-V entry scanned the cache directory and performed write, flush, and rename synchronously on the compiling thread | Queue immutable entries to one bounded writer, coalesce duplicate identities, and keep persistence best-effort without invalidating the in-memory shader | Queue saturation/drain tests, cold/warm restart, and strict visual regression |
 | Frame histogram reports hundreds of multi-second frames while presents advance | Every sample used `1000 / averaged_fps`; one slow FPS window was therefore copied into many fast frames | Record the monotonic delta between consecutive frame-loop timestamps and retain FPS only as a rate metric | Red/green interval test plus strict cold/warm runtime pair |
 | Reload exits while a sampled texture overlaps live color/depth aliases | The texture crosses the color RT/storage pair and the depth metadata plane, but the mixed-parent policy did not recognize the exact DepthStencil relation | Link only the captured `DepthStencilBuffer Crosses Texture` metadata alias; materialize the image from the existing color surface | Exact policy test plus input-driven strict runtime beyond the former exit |
+| Structured `!create_all_the_same` exit for a tiny storage view | The incoming `StorageBuffer` was contained by both a live `Texture` and a read-only `IndexBuffer`; the mixed-parent classifier handled the texture but not the index role | Link only the evidenced `IndexBuffer Contains StorageBuffer` relation and require every mixed parent to pass the shared classifier independently | Red/green policy test plus strict runtime beyond the former exit and a healthy gameplay-era capture |
 | Scene reached only with automatic Cross input | Input automation bypasses the real press/release acceptance contract | Do not change graphics or synthesize completion. Re-run with real keyboard/controller edges and treat inability to reach gameplay as a separate input/synchronization frontier | Pending real-input acceptance |
 
 ### Pipeline compilation hitches across restarts

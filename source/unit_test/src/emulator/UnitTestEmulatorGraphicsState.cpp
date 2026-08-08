@@ -2910,6 +2910,18 @@ TEST(EmulatorGraphicsState, AllowsMixedTextureVertexStorageParents)
 	                                              GpuMemoryObjectType::StorageBuffer));
 }
 
+TEST(EmulatorGraphicsState, AllowsMixedTextureIndexStorageParents)
+{
+	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                        GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
+	                                        GpuMemoryObjectType::StorageBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	                                         GpuMemoryObjectType::StorageBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
+	                                         GpuMemoryObjectType::Texture));
+}
+
 // Captured dual-strict post-RT layout fix: Texture Contains IndexBuffer 0xe4.
 TEST(EmulatorGraphicsState, AllowsIndexContainedInTextureSurface)
 {

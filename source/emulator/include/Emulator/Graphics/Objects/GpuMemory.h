@@ -236,6 +236,17 @@ inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type,
 	       relation == GpuMemoryOverlapType::Contains;
 }
 
+// A small storage view may address bytes already exposed through a larger
+// index allocation. Keep both bindings and let the existing alias links carry
+// write-back invalidation between them. Only the captured containment direction
+// is accepted; other range relationships remain strict.
+inline bool GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                             GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::IndexBuffer && relation == GpuMemoryOverlapType::Contains &&
+	       incoming_type == GpuMemoryObjectType::StorageBuffer;
+}
+
 // Incoming VertexBuffer fully or partially covered by an existing storage,
 // color-target, or depth-target allocation (captured: VB Contained in
 // StorageBuffer + RenderTexture that share the same guest range).
@@ -471,6 +482,18 @@ inline bool GpuMemoryAllowsStorageSurfaceShare(GpuMemoryObjectType existing_type
 	}
 	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
 	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
+}
+
+// Classify one parent in a multi-parent StorageBuffer topology. Every parent
+// must independently support the exact role and overlap relation before the
+// new view is linked.
+inline bool GpuMemoryAllowsStorageParent(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                         GpuMemoryObjectType incoming_type)
+{
+	return GpuMemoryAllowsTextureStorageAlias(existing_type, relation, incoming_type) ||
+	       GpuMemoryAllowsVertexStorageShare(existing_type, relation, incoming_type) ||
+	       GpuMemoryAllowsIndexStorageShare(existing_type, relation, incoming_type) ||
+	       GpuMemoryAllowsStorageSurfaceShare(existing_type, relation, incoming_type);
 }
 
 // WriteBack (GPU -> CPU) hash bookkeeping for aliased objects.

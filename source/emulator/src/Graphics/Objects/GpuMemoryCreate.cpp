@@ -862,6 +862,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				{
 					create_from_objects = true;
 				}
+			} else if (GpuMemoryAllowsIndexStorageShare(o.object.type, obj.relation, info.type))
+			{
+				overlap = true;
 			} else if (GpuMemoryAllowsTextureContainedInSurface(o.object.type, obj.relation, info.type))
 			{
 				// Incoming Texture under a live RT/ST/SB/Texture surface: link and,
@@ -1019,10 +1022,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
-			// Multi-parent StorageBuffer where every parent is either an observed
-			// Texture↔Storage alias, VertexBuffer storage-share, or surface share
-			// (including IsContainedWithin). create_all_the_same rejects mixed
-			// parent types; this policy links them.
+			// Multi-parent StorageBuffer where every parent independently supports
+			// the exact role and overlap relation. create_all_the_same rejects mixed
+			// parent types; this policy links validated mixed parents.
 			bool multi_mixed_storage_alias = (info.type == GpuMemoryObjectType::StorageBuffer && !others.IsEmpty());
 			if (multi_mixed_storage_alias)
 			{
@@ -1030,11 +1032,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				{
 					const auto& h = heap.objects[obj.object_id];
 					EXIT_IF(h.free);
-					const auto& o             = h.info;
-					const bool  texture_alias = GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type);
-					const bool  vertex_share  = GpuMemoryAllowsVertexStorageShare(o.object.type, obj.relation, info.type);
-					const bool  surface_share = GpuMemoryAllowsStorageSurfaceShare(o.object.type, obj.relation, info.type);
-					if (!texture_alias && !vertex_share && !surface_share)
+					const auto& o = h.info;
+					if (!GpuMemoryAllowsStorageParent(o.object.type, obj.relation, info.type))
 					{
 						multi_mixed_storage_alias = false;
 						break;
