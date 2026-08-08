@@ -53,6 +53,7 @@ class StrictEnvTests(unittest.TestCase):
             self.assertNotIn(k, env)
         self.assertEqual(runner.find_forbidden_environment_keys(env), [])
         self.assertEqual(env["KYTY_PRINTF_DIRECTION"], "Silent")
+        self.assertEqual(env["KYTY_CRASH_REPORT"], str(Path(td) / "crash-context.json"))
 
 
 class ProfileLoadTests(unittest.TestCase):
@@ -371,28 +372,40 @@ class PadSequenceTests(unittest.TestCase):
         self.assertTrue(reg.can_start_pad_sequence(True, 1, "interactive", True, 5.0, 10.0, 5.0))
 
     def test_post_input_wait_can_use_bounded_settle_when_loading_label_is_missed(self) -> None:
-        seen, ready = reg.advance_post_input_wait(False, False, "interactive", 119, 5.0, 120, 5.0)
-        self.assertFalse(seen)
+        state = reg.PostInputWaitState()
+        ready = reg.advance_post_input_wait(state, False, "interactive", 100, 0.0, 120, 5.0)
         self.assertFalse(ready)
 
-        seen, ready = reg.advance_post_input_wait(False, seen, "interactive", 120, 4.9, 120, 5.0)
-        self.assertFalse(seen)
+        ready = reg.advance_post_input_wait(state, False, "interactive", 219, 5.0, 120, 5.0)
         self.assertFalse(ready)
 
-        seen, ready = reg.advance_post_input_wait(False, seen, "interactive", 120, 5.0, 120, 5.0)
-        self.assertFalse(seen)
+        ready = reg.advance_post_input_wait(state, False, "interactive", 220, 5.0, 120, 5.0)
         self.assertTrue(ready)
 
     def test_post_input_wait_honors_optional_loading_transition(self) -> None:
-        seen, ready = reg.advance_post_input_wait(True, False, "interactive", 200, 10.0, 120, 5.0)
+        state = reg.PostInputWaitState()
+        ready = reg.advance_post_input_wait(state, True, "interactive", 200, 10.0, 120, 5.0)
         self.assertFalse(ready)
 
-        seen, ready = reg.advance_post_input_wait(True, seen, "loading", 201, 10.1, 120, 5.0)
-        self.assertTrue(seen)
+        ready = reg.advance_post_input_wait(state, True, "loading", 201, 10.1, 120, 5.0)
+        self.assertTrue(state.loading_seen)
         self.assertFalse(ready)
 
-        seen, ready = reg.advance_post_input_wait(True, seen, "interactive", 202, 10.2, 120, 5.0)
+        ready = reg.advance_post_input_wait(state, True, "interactive", 202, 10.2, 120, 5.0)
+        self.assertFalse(ready)
+
+        ready = reg.advance_post_input_wait(state, True, "interactive", 321, 15.2, 120, 5.0)
+        self.assertFalse(ready)
+
+        ready = reg.advance_post_input_wait(state, True, "interactive", 322, 15.2, 120, 5.0)
         self.assertTrue(ready)
+
+    def test_post_input_wait_resets_stability_if_loading_returns(self) -> None:
+        state = reg.PostInputWaitState(loading_seen=True)
+        self.assertFalse(reg.advance_post_input_wait(state, True, "interactive", 100, 1.0, 10, 2.0))
+        self.assertFalse(reg.advance_post_input_wait(state, True, "loading", 109, 2.9, 10, 2.0))
+        self.assertFalse(reg.advance_post_input_wait(state, True, "interactive", 110, 3.0, 10, 2.0))
+        self.assertTrue(reg.advance_post_input_wait(state, True, "interactive", 120, 5.0, 10, 2.0))
 
 
 class CompareWiringTests(unittest.TestCase):

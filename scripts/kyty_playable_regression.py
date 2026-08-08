@@ -113,7 +113,7 @@ def build_playable_environment(
     capture_directory: Path,
 ) -> dict[str, str]:
     """Build the strict playable child policy on shared runner primitives."""
-    return build_child_environment(
+    env = build_child_environment(
         base,
         guest_root=guest_root,
         agent_socket=agent_socket,
@@ -126,6 +126,8 @@ def build_playable_environment(
         ),
         default_values={"KYTY_NATIVE_CAPTURE_MAX_EDGE": "1280"},
     )
+    env["KYTY_CRASH_REPORT"] = str(capture_directory.parent / "crash-context.json")
+    return env
 
 
 def agent_sock_path(run_id: str) -> Path:
@@ -214,6 +216,13 @@ class GateResult:
     name: str
     passed: bool
     detail: str = ""
+
+
+@dataclass
+class PostInputWaitState:
+    loading_seen: bool = False
+    interactive_since: Optional[float] = None
+    interactive_start_present: Optional[int] = None
 
 
 @dataclass
@@ -358,18 +367,32 @@ def deliver_pad_sequence(
 
 
 def advance_post_input_wait(
+    state: PostInputWaitState,
     require_loading_transition: bool,
-    loading_seen: bool,
     phase: str,
-    present_delta: int,
-    elapsed_s: float,
+    present: int,
+    now: float,
     min_present_delta: int,
     min_settle_s: float,
-) -> tuple[bool, bool]:
-    loading_seen = loading_seen or phase == "loading"
-    loading_ok = loading_seen or not require_loading_transition
-    settled = present_delta >= min_present_delta and elapsed_s >= min_settle_s
-    return loading_seen, loading_ok and settled and phase == "interactive"
+) -> bool:
+    if phase == "loading":
+        state.loading_seen = True
+        state.interactive_since = None
+        state.interactive_start_present = None
+        return False
+
+    if phase != "interactive" or (require_loading_transition and not state.loading_seen):
+        state.interactive_since = None
+        state.interactive_start_present = None
+        return False
+
+    if state.interactive_since is None or state.interactive_start_present is None:
+        state.interactive_since = now
+        state.interactive_start_present = present
+
+    present_delta = max(0, present - state.interactive_start_present)
+    elapsed_s = max(0.0, now - state.interactive_since)
+    return present_delta >= min_present_delta and elapsed_s >= min_settle_s
 
 
 def can_start_pad_sequence(
@@ -627,10 +650,8 @@ def run_session(
     require_loading_transition = bool(post_input_config.get("require_loading_transition", True))
     post_input_min_present_delta = int(post_input_config.get("min_present_delta") or 240)
     post_input_min_settle_s = float(post_input_config.get("min_settle_s") or 15)
-    post_input_loading_seen = False
+    post_input_wait = PostInputWaitState()
     post_input_ready = False
-    post_input_start_present: Optional[int] = None
-    post_input_started_at: Optional[float] = None
     interactive_since: Optional[float] = None
 
     try:
@@ -701,29 +722,45 @@ def run_session(
                     present_at_stable_start = present
 
                 if phase_input_done and not post_input_ready:
-                    present_since_input = max(0, present - int(post_input_start_present or present))
-                    elapsed_since_input = max(0.0, now - float(post_input_started_at or now))
-                    was_loading_seen = post_input_loading_seen
-                    post_input_loading_seen, post_input_ready = advance_post_input_wait(
+                    was_loading_seen = post_input_wait.loading_seen
+                    post_input_ready = advance_post_input_wait(
+                        post_input_wait,
                         require_loading_transition,
-                        post_input_loading_seen,
                         phase,
-                        present_since_input,
-                        elapsed_since_input,
+                        present,
+                        now,
                         post_input_min_present_delta,
                         post_input_min_settle_s,
                     )
-                    if post_input_loading_seen and not was_loading_seen:
+                    if post_input_wait.loading_seen and not was_loading_seen:
                         notes.append("post_input_loading_seen")
                         report.timeline.append({"t": round(elapsed, 3), "event": "post_input_loading"})
                     if post_input_ready:
+                        stable_present_delta = max(
+                            0,
+                            present
+                            - int(
+                                post_input_wait.interactive_start_present
+                                if post_input_wait.interactive_start_present is not None
+                                else present
+                            ),
+                        )
+                        stable_settle_s = max(
+                            0.0,
+                            now
+                            - float(
+                                post_input_wait.interactive_since
+                                if post_input_wait.interactive_since is not None
+                                else now
+                            ),
+                        )
                         notes.append("post_input_interactive")
                         report.timeline.append(
                             {
                                 "t": round(elapsed, 3),
                                 "event": "post_input_interactive",
-                                "present_delta": present_since_input,
-                                "settle_s": round(elapsed_since_input, 3),
+                                "present_delta": stable_present_delta,
+                                "settle_s": round(stable_settle_s, 3),
                             }
                         )
             elif not phase_input_done:
@@ -802,8 +839,19 @@ def run_session(
                     if fresh_code == 0:
                         status = extract_result(fresh_obj)
                         input_after = pad_counters(status)
-                        if str(status.get("phase") or "") == "loading":
-                            post_input_loading_seen = True
+                        fresh_now = time.monotonic()
+                        fresh_phase = str(status.get("phase") or "")
+                        was_loading_seen = post_input_wait.loading_seen
+                        post_input_ready = advance_post_input_wait(
+                            post_input_wait,
+                            require_loading_transition,
+                            fresh_phase,
+                            int(status.get("present") or 0),
+                            fresh_now,
+                            post_input_min_present_delta,
+                            post_input_min_settle_s,
+                        )
+                        if post_input_wait.loading_seen and not was_loading_seen:
                             notes.append("post_input_loading_seen")
                             report.timeline.append(
                                 {
@@ -814,8 +862,6 @@ def run_session(
                     else:
                         input_sequence_ok = False
                         notes.append("post_input_status_failed")
-                    post_input_start_present = int(status.get("present") or 0)
-                    post_input_started_at = time.monotonic()
                     phase_input_done = True
                     notes.append("input_sequence_done")
 
