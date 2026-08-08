@@ -18,6 +18,7 @@
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
+#include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
@@ -113,6 +114,13 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 
 	Core::LockGuard lock(m_mutex);
 	const auto query = GpuMemoryRangeQueryKey::Create(vaddr, size, vaddr_num, false);
+	return QueryOverlapsLocked(vaddr, size, vaddr_num, query, out);
+}
+
+bool GpuMemory::QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+	                                const GpuMemoryRangeQueryKey& query, GpuMemoryOverlapSnapshot* out)
+{
+	*out = GpuMemoryOverlapSnapshot {};
 	if (m_overlap_snapshot_cache.Lookup(query, out))
 	{
 		return true;
@@ -194,6 +202,27 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 
 	m_overlap_snapshot_cache.Store(query, *out);
 	return true;
+}
+
+bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size)
+{
+	if (!GpuMemoryCanUseTransientReadOnlyBuffer(true, size, true, true) || vaddr > UINT64_MAX - (size - 1u))
+	{
+		return false;
+	}
+
+	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
+	Core::LockGuard lock(m_mutex);
+	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	{
+		return false;
+	}
+	if (const auto* cached = m_overlap_snapshot_cache.BorrowLookup(query); cached != nullptr)
+	{
+		return GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*cached);
+	}
+	GpuMemoryOverlapSnapshot overlaps {};
+	return QueryOverlapsLocked(&vaddr, &size, 1, query, &overlaps) && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps);
 }
 
 void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type)

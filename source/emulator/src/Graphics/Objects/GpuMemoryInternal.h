@@ -243,6 +243,7 @@ public:
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
+	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size);
 
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
@@ -377,6 +378,10 @@ private:
 	void  DeleteBlock(Block* b, int heap_id, int obj_id);
 	void  Link(int heap_id, int id1, int id2, OverlapType rel, GpuMemoryScenario scenario);
 	int   GetHeapId(uint64_t vaddr, uint64_t size);
+	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
+	                                                            const GpuMemoryRangeQueryKey& query);
+	bool QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+	                         const GpuMemoryRangeQueryKey& query, GpuMemoryOverlapSnapshot* out);
 
 	// Update (CPU -> GPU)
 	void Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors = nullptr);

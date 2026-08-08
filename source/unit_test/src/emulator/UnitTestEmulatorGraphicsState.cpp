@@ -1250,6 +1250,38 @@ TEST(EmulatorGraphicsState, UsesTransientBuffersOnlyForSmallSafeReadOnlyViews)
 	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, true, false));
 }
 
+TEST(EmulatorGraphicsState, TransientSnapshotEligibilityTracksGpuObjectMutations)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	const uint64_t heap_base = 0x0000005103000000ull;
+	const uint64_t heap_size = 0x20000ull;
+	const uint64_t obj_addr  = heap_base + 0x4000ull;
+	const uint64_t obj_size  = 0x1000ull;
+
+	GpuMemorySetAllocatedRange(heap_base, heap_size);
+	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(heap_base - 8u, 16u));
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(heap_base + heap_size - 8u, 16u));
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
+	GpuMemoryFree(&ctx, obj_addr, obj_size);
+	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
+
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, obj_addr, obj_size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, false)),
+	          nullptr);
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
+	GpuMemoryFree(&ctx, obj_addr, obj_size);
+
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, 0));
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, 0x1001u));
+}
+
 TEST(EmulatorGraphicsState, VertexAndIndexBuffersDeclareReadOnlyGpuUse)
 {
 	EXPECT_TRUE(VertexBufferGpuObject().read_only);

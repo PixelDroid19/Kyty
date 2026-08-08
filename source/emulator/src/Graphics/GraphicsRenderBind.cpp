@@ -71,28 +71,18 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 		return nullptr;
 	}
 
-	const auto               validate_start = BindingStageClock::now();
-	const bool               allocated      = GpuMemoryValidateAllocatedRange(addr, size) == GpuMemoryRangeValidationStatus::Valid;
-	const uint64_t           validate_ns    = BindingStageElapsedNs(validate_start);
-	GpuMemoryOverlapSnapshot overlaps {};
-	uint64_t                 overlap_ns       = 0;
-	bool                     overlap_query_ok = false;
-	if (allocated)
+	const auto query_start = BindingStageClock::now();
+	const bool eligible    = GpuMemoryCanSnapshotReadOnlyBuffer(addr, size);
+	const auto query_ns    = BindingStageElapsedNs(query_start);
+	if (!eligible)
 	{
-		const auto overlap_start = BindingStageClock::now();
-		overlap_query_ok         = GpuMemoryQueryOverlaps(&addr, &size, 1, &overlaps);
-		overlap_ns               = BindingStageElapsedNs(overlap_start);
-	}
-	const bool overlap_snapshot_safe = overlap_query_ok && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps);
-	if (!GpuMemoryCanUseTransientReadOnlyBuffer(read_only, size, allocated, overlap_snapshot_safe))
-	{
-		DebugStatsRecordTransientBufferProbe(validate_ns, overlap_ns, 0, false);
+		DebugStatsRecordTransientBufferProbe(0, query_ns, 0, false);
 		return nullptr;
 	}
 	const auto     upload_start = BindingStageClock::now();
 	auto*          result       = buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), size, usage);
 	const uint64_t upload_ns    = BindingStageElapsedNs(upload_start);
-	DebugStatsRecordTransientBufferProbe(validate_ns, overlap_ns, upload_ns, result != nullptr);
+	DebugStatsRecordTransientBufferProbe(0, query_ns, upload_ns, result != nullptr);
 	return result;
 }
 

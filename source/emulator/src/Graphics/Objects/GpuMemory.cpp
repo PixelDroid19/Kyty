@@ -129,6 +129,12 @@ GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRange(uint64_t vaddr,
 	Core::LockGuard lock(m_mutex);
 	const uint64_t query_size = size;
 	const auto     query      = GpuMemoryRangeQueryKey::Create(&vaddr, &query_size, 1, false);
+	return ValidateAllocatedRangeLocked(vaddr, size, query);
+}
+
+GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
+	                                                                    const GpuMemoryRangeQueryKey& query)
+{
 	GpuMemoryRangeValidationStatus cached {};
 	if (m_allocated_validation_cache.Lookup(query, &cached))
 	{
@@ -454,6 +460,11 @@ uint64_t GpuMemoryGetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_size)
 		return 0;
 	}
 	return g_gpu_memory->GetAllocatedRangePrefix(vaddr, maximum_size);
+}
+
+bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->CanSnapshotReadOnlyBuffer(vaddr, size);
 }
 
 void GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
