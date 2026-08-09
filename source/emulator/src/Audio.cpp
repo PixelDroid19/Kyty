@@ -19,6 +19,7 @@
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -305,6 +306,7 @@ constexpr int32_t  kMaxContexts         = 8;
 constexpr int32_t  kMaxPorts            = 32;
 constexpr int32_t  kMaxUsers            = 8;
 constexpr uint64_t kDefaultContextBytes = 0x10000;
+constexpr size_t   kContextParamBytes   = 0x40;
 constexpr uint32_t kDefaultQueueDepth   = 4;
 constexpr uint32_t kDefaultGrain        = 256;
 constexpr uint32_t kDefaultSampleRate   = 48000;
@@ -464,6 +466,20 @@ static bool CopyToGuest(void* destination, const void* source, size_t size)
 	       Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
 }
 
+static bool ReadSupportedContextParam(const void* param)
+{
+	std::array<uint64_t, kContextParamBytes / sizeof(uint64_t)> words {};
+	if (!CopyFromGuest(words.data(), param, sizeof(words)))
+	{
+		return false;
+	}
+	// Live Gen5 call-site evidence establishes this 0x40-byte profile. Keep the
+	// remainder zero and reject other layouts until they are independently
+	// measured instead of guessing their workspace contract.
+	return words[0] == 0x0000008000000012ull && words[1] == 0x0000000100000000ull && words[2] == 0x0000000100000100ull &&
+	       std::all_of(words.begin() + 3, words.end(), [](uint64_t word) { return word == 0; });
+}
+
 static bool CalculatePcmGrainBytes(uint32_t grain, uint32_t channels, uint32_t sample_bytes, size_t* bytes_out)
 {
 	if (bytes_out == nullptr || grain == 0 || channels == 0 || sample_bytes == 0)
@@ -611,10 +627,10 @@ int KYTY_SYSV_ABI AudioOut2ContextResetParam(void* param)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
-	// This output block has no size argument and no measured field layout.
-	// Reject both null and non-null forms without touching guest memory.
-	(void)param;
-	return LibKernel::KERNEL_ERROR_EINVAL;
+	// The observed ABI provides a writable 0x40-byte parameter block, then the
+	// caller fills its fields before QueryMemory. No default bytes are currently
+	// evidenced, so preserve the block while validating the complete range.
+	return IsGuestWritableRange(param, kContextParamBytes) ? OK : LibKernel::KERNEL_ERROR_EINVAL;
 }
 
 // sceAudioOut2ContextQueryMemory (NID pDmme7Bgm6E)
@@ -623,11 +639,12 @@ int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 	KYTY_LOG_DEBUG("\t size_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size_out));
-	// The size depends on the unmeasured ContextParam layout. Returning a host
-	// default would make guest allocation decisions from invented ABI data.
-	(void)param;
-	(void)size_out;
-	return LibKernel::KERNEL_ERROR_EINVAL;
+	if (!ReadSupportedContextParam(param))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	const uint64_t required_size = kDefaultContextBytes;
+	return CopyToGuest(size_out, &required_size, sizeof(required_size)) ? OK : LibKernel::KERNEL_ERROR_EINVAL;
 }
 
 // sceAudioOut2ContextCreate (NID 0x6o1VVAYSY)
@@ -638,21 +655,33 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	KYTY_LOG_DEBUG("\t buffer     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
 	KYTY_LOG_DEBUG("\t size       = 0x%016" PRIx64 "\n", size);
 	KYTY_LOG_DEBUG("\t handle_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handle_out));
-	// The required ContextParam and workspace semantics are unmeasured. Do not
-	// create a public context from a null/default interpretation either.
-	(void)param;
-	(void)buffer;
-	(void)size;
-	(void)handle_out;
-	return LibKernel::KERNEL_ERROR_EINVAL;
+	if (!ReadSupportedContextParam(param) || size != kDefaultContextBytes || !IsGuestWritableRange(buffer, static_cast<size_t>(size)) ||
+	    !IsGuestWritableRange(handle_out, sizeof(*handle_out)))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	std::lock_guard lock(g_audio_out2_mutex);
+	const int32_t   id = AllocContextLocked();
+	if (id == 0)
+	{
+		return LibKernel::KERNEL_ERROR_ENOMEM;
+	}
+	g_contexts[id - 1].buffer = buffer;
+	g_contexts[id - 1].size   = size;
+	if (!CopyToGuest(handle_out, &id, sizeof(id)))
+	{
+		g_contexts[id - 1] = ContextSlot {};
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	return OK;
 }
 
 namespace HostStateTest {
 
 int CreateContext()
 {
-	// C++ test seam only. This bypasses no guest ABI: the exported
-	// AudioOut2ContextCreate remains a strict unsupported operation.
+	// C++ test seam for host-state failure and concurrency coverage.
 	std::lock_guard lock(g_audio_out2_mutex);
 	return AllocContextLocked();
 }

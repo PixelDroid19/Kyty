@@ -134,7 +134,7 @@ TEST(EmulatorAudio, AudioInCloseReleasesTheHostInputSlot)
 	subsystem->Destroy(Core::SubsystemsList::Instance());
 }
 
-TEST(EmulatorAudio, AudioOut2ContextOperationsRejectUnmeasuredLayoutsWithoutWrites)
+TEST(EmulatorAudio, AudioOut2ContextLifecycleAcceptsObservedGen5Profile)
 {
 	if (!Config::IsInitialized())
 	{
@@ -142,36 +142,42 @@ TEST(EmulatorAudio, AudioOut2ContextOperationsRejectUnmeasuredLayoutsWithoutWrit
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	GuestReadableBlock context_param_storage(64);
-	GuestReadableBlock context_workspace(64);
+	constexpr size_t     kContextParamBytes = 0x40;
+	constexpr size_t     kContextBytes      = 0x10000;
+	GuestReadableBlock   context_param_storage(kContextParamBytes);
+	GuestReadableBlock   context_workspace(kContextBytes);
 	GuestValue<uint64_t> memory_size_storage;
-	GuestValue<int32_t> context_storage;
+	GuestValue<int32_t>  context_storage;
 	ASSERT_TRUE(context_param_storage.IsValid());
 	ASSERT_TRUE(context_workspace.IsValid());
 	ASSERT_TRUE(memory_size_storage.IsValid());
 	ASSERT_TRUE(context_storage.IsValid());
-	std::memset(context_param_storage.Data(), 0xa5, 64);
-	std::memset(context_workspace.Data(), 0xa5, 64);
+	std::memset(context_param_storage.Data(), 0, kContextParamBytes);
+	std::memset(context_workspace.Data(), 0xa5, kContextBytes);
 	*memory_size_storage.Data() = UINT64_MAX;
 	*context_storage.Data()     = INT32_MAX;
 
 	auto* context_param = context_param_storage.Data();
 	EXPECT_EQ(AudioOut2::AudioOut2ContextResetParam(nullptr), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(AudioOut2::AudioOut2ContextResetParam(context_param), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	ASSERT_EQ(AudioOut2::AudioOut2ContextResetParam(context_param), 0);
+	const uint64_t observed_profile[] = {0x0000008000000012ull, 0x0000000100000000ull, 0x0000000100000100ull};
+	std::memcpy(context_param, observed_profile, sizeof(observed_profile));
 	EXPECT_EQ(AudioOut2::AudioOut2ContextQueryMemory(nullptr, memory_size_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(AudioOut2::AudioOut2ContextQueryMemory(context_param, memory_size_storage.Data()),
+	ASSERT_EQ(AudioOut2::AudioOut2ContextQueryMemory(context_param, memory_size_storage.Data()), 0);
+	EXPECT_EQ(*memory_size_storage.Data(), kContextBytes);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(nullptr, context_workspace.Data(), kContextBytes, context_storage.Data()),
 	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(nullptr, context_workspace.Data(), 64, context_storage.Data()),
+	EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(context_param, context_workspace.Data(), kContextBytes - 1, context_storage.Data()),
 	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(context_param, context_workspace.Data(), 64, context_storage.Data()),
-	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
-	EXPECT_EQ(*memory_size_storage.Data(), UINT64_MAX);
-	EXPECT_EQ(*context_storage.Data(), INT32_MAX);
-	for (size_t i = 0; i < 64; ++i)
+	ASSERT_EQ(AudioOut2::AudioOut2ContextCreate(context_param, context_workspace.Data(), kContextBytes, context_storage.Data()), 0);
+	EXPECT_GT(*context_storage.Data(), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(*context_storage.Data()), 0);
+	for (size_t i = sizeof(observed_profile); i < kContextParamBytes; ++i)
 	{
-		EXPECT_EQ(static_cast<uint8_t*>(context_param_storage.Data())[i], 0xa5);
-		EXPECT_EQ(static_cast<uint8_t*>(context_workspace.Data())[i], 0xa5);
+		EXPECT_EQ(static_cast<uint8_t*>(context_param_storage.Data())[i], 0);
 	}
+	EXPECT_TRUE(std::all_of(static_cast<uint8_t*>(context_workspace.Data()),
+	                        static_cast<uint8_t*>(context_workspace.Data()) + kContextBytes, [](uint8_t value) { return value == 0xa5; }));
 }
 
 TEST(EmulatorAudio, AudioOut2HostStatePushPreservesPcmQueueAndSinkAcrossFailure)
