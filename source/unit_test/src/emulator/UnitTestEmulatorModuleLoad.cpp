@@ -830,6 +830,13 @@ TEST(EmulatorModuleLoad, LseekRegistersExactKernelAndPosixIdentities)
 	EXPECT_EQ(kernel_lseek->vaddr, posix_lseek->vaddr);
 }
 
+TEST(EmulatorModuleLoad, PosixRegistersSendtoForGen5Libkernel)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libkernel_1", &symbols));
+	EXPECT_NE(symbols.Find(PosixFunc(u"oBr313PppNE")), nullptr);
+}
+
 TEST(EmulatorModuleLoad, Json2InitializerRegistersExactJsonModuleIdentity)
 {
 	SymbolDatabase symbols;

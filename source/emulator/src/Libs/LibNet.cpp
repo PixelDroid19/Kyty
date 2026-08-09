@@ -243,6 +243,7 @@ LIB_DEFINE(InitNet_1_NpManager)
 	LIB_FUNC("2rsFmlGWleQ", NpManager::NpCheckNpAvailability);
 	LIB_FUNC("uqcPJLWL08M", NpManager::NpPollAsync);
 	LIB_FUNC("eQH7nWPcAgc", NpManager::NpGetState);
+	LIB_FUNC("Oad3rvY-NJQ", NpManager::NpHasSignedUp);
 }
 
 } // namespace LibNpManager

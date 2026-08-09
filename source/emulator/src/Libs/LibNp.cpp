@@ -82,6 +82,16 @@ int KYTY_SYSV_ABI Initialize(const void* parameters)
 	return (parameters != nullptr ? OK : error_invalid_argument);
 }
 
+// sceNpUniversalDataSystemGetMemoryStat — NID su7jW3VDDb4. The output layout
+// and size are not established by repository evidence, and this ABI provides
+// no caller buffer length. Reject it until the guest contract is known instead
+// of writing a fabricated empty structure.
+int KYTY_SYSV_ABI GetMemoryStat(void* stat)
+{
+	(void)stat;
+	return error_invalid_argument;
+}
+
 int KYTY_SYSV_ABI CreateContext(int32_t* context)
 {
 	if (context != nullptr)
@@ -180,7 +190,7 @@ int KYTY_SYSV_ABI EventPropertyObjectSetString(EventPropertyObject* properties, 
 	            : error_invalid_argument);
 }
 
-// Observed Astro after PlayGo: (properties, key*, value=null, value_ptr*).
+// Observed guest call: (properties, key*, value=null, value_ptr*).
 // Null value allocates a new host array written through value_ptr.
 int KYTY_SYSV_ABI EventPropertyObjectSetArray(EventPropertyObject* properties, const char* key, const EventPropertyArray* value,
                                               EventPropertyArray** value_ptr)
@@ -306,7 +316,7 @@ LIB_DEFINE(InitNpUniversalDataSystem_1)
 	LIB_FUNC("kKUH0Viib3c", DestroyEventPropertyObject);
 	LIB_FUNC("YE4dbtbz6OE", EventPropertyObjectSetInt32);
 	LIB_FUNC("MfDb+4Nln64", EventPropertyObjectSetString);
-	// Gen5 analytics arrays (Astro after PlayGo).
+	// Gen5 analytics arrays.
 	LIB_FUNC("Wxbg5x3pTXA", EventPropertyObjectSetArray);
 	LIB_FUNC("Hm7qubT3b70", CreateEventPropertyArray);
 	LIB_FUNC("W-0xwY0ZMjw", DestroyEventPropertyArray);
@@ -317,6 +327,7 @@ LIB_DEFINE(InitNpUniversalDataSystem_1)
 	LIB_FUNC("Qo9qR7v5zO4", EventPropertyArraySetUInt64);
 	LIB_FUNC("CzkKf7ahIyU", PostEvent);
 	LIB_FUNC("wG+84pnNIuo", DestroyEvent);
+	LIB_FUNC("su7jW3VDDb4", GetMemoryStat);
 }
 
 } // namespace Kyty::Libs::NpUniversalDataSystem
@@ -333,9 +344,30 @@ int KYTY_SYSV_ABI Initialize()
 	return OK;
 }
 
+// sceNpGameIntentTerminate — NID 0HBYxYAjmf0.
+int KYTY_SYSV_ABI Terminate()
+{
+	g_initialized.store(false, std::memory_order_release);
+	return OK;
+}
+
+// sceNpGameIntentReceiveIntent — NID jEIXUAr9XE8. The receive-intent output
+// layout and size are not established by repository evidence, and the ABI has
+// no caller buffer length. Reject the incomplete contract without writing a
+// fabricated empty intent.
+static constexpr int np_game_intent_error_invalid_argument = static_cast<int32_t>(0x80553804u);
+
+int KYTY_SYSV_ABI ReceiveIntent(void* out)
+{
+	(void)out;
+	return np_game_intent_error_invalid_argument;
+}
+
 LIB_DEFINE(InitNpGameIntent_1)
 {
 	LIB_FUNC("m87BHxt-H60", Initialize);
+	LIB_FUNC("0HBYxYAjmf0", Terminate);
+	LIB_FUNC("jEIXUAr9XE8", ReceiveIntent);
 }
 
 } // namespace Kyty::Libs::NpGameIntent
