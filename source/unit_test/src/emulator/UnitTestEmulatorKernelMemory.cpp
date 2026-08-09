@@ -1496,6 +1496,39 @@ TEST(EmulatorKernelMemory, SyncOnAddressWakeReleasesMatchingWaiter)
 	EXPECT_EQ(result, OK);
 }
 
+TEST(EmulatorKernelMemory, SyncOnAddressZeroWakeCountReleasesAllMatchingWaiters)
+{
+	using namespace Kernel::SyncOnAddress;
+	EnsureMemorySubsystemInitialized();
+
+	alignas(uint32_t) uint32_t value   = 0;
+	const uint32_t             timeout = 500000;
+	std::atomic_int            ready {0};
+	std::atomic_int            first_result {INT32_MIN};
+	std::atomic_int            second_result {INT32_MIN};
+
+	auto wait = [&](std::atomic_int* result)
+	{
+		ready.fetch_add(1, std::memory_order_release);
+		result->store(KernelSyncOnAddressWait(reinterpret_cast<uint64_t>(&value), 0, &timeout, 0), std::memory_order_release);
+	};
+
+	std::thread first(wait, &first_result);
+	std::thread second(wait, &second_result);
+	while (ready.load(std::memory_order_acquire) != 2)
+	{
+		std::this_thread::yield();
+	}
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+
+	EXPECT_EQ(KernelSyncOnAddressWake(reinterpret_cast<uint64_t>(&value), 0), OK);
+	first.join();
+	second.join();
+
+	EXPECT_EQ(first_result.load(std::memory_order_acquire), OK);
+	EXPECT_EQ(second_result.load(std::memory_order_acquire), OK);
+}
+
 // Live EventFlag registry: Wait/Set/Delete on garbage handles must return
 // ESRCH without dereferencing (Linux VibrationTrackThread poison pointer).
 // Create/Wait/Set/Delete on a real flag exercises the shipped registry path.
