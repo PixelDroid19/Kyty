@@ -1282,8 +1282,8 @@ TEST(EmulatorKernelMemory, ResolvesKernelNanosleepExport)
 	EXPECT_EQ(nanosleep(&invalid, nullptr), LibKernel::KERNEL_ERROR_EINVAL);
 }
 
-// Gen5 AudioOut2_v1 / AudioOut_v1.1: core context lifecycle exports resolve and
-// ContextQueryMemory writes a non-zero host workspace size.
+// Gen5 AudioOut2_v1 / AudioOut_v1.1: core context lifecycle exports resolve,
+// but unmeasured context layouts reject without writing guest storage.
 TEST(EmulatorKernelMemory, ResolvesAudioOut2ContextLifecycle)
 {
 	Loader::SymbolDatabase symbols;
@@ -1329,19 +1329,30 @@ TEST(EmulatorKernelMemory, ResolvesAudioOut2ContextLifecycle)
 	const auto* qmem_rec         = symbols.Find(qmem_q);
 	ASSERT_NE(qmem_rec, nullptr);
 	using qmem_fn_t = int (*)(const void*, uint64_t*);
-	uint64_t size   = 0;
-	EXPECT_EQ(reinterpret_cast<qmem_fn_t>(static_cast<uintptr_t>(qmem_rec->vaddr))(nullptr, &size), 0);
-	EXPECT_GT(size, 0u);
+	GuestWritableBlock size_block(sizeof(uint64_t));
+	ASSERT_TRUE(size_block.IsValid());
+	auto* size = size_block.Data<uint64_t>();
+	*size      = 0x1122334455667788ull;
+	EXPECT_EQ(reinterpret_cast<qmem_fn_t>(static_cast<uintptr_t>(qmem_rec->vaddr))(nullptr, size),
+	          LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(*size, 0x1122334455667788ull);
 
 	Loader::SymbolResolve create_q = init_q;
 	create_q.name                  = U"0x6o1VVAYSY";
 	const auto* create_rec         = symbols.Find(create_q);
 	ASSERT_NE(create_rec, nullptr);
 	using create_fn_t = int (*)(const void*, void*, uint64_t, int32_t*);
-	alignas(8) uint8_t buf[64] {};
-	int32_t            handle = 0;
-	EXPECT_EQ(reinterpret_cast<create_fn_t>(static_cast<uintptr_t>(create_rec->vaddr))(nullptr, buf, sizeof(buf), &handle), 0);
-	EXPECT_GT(handle, 0);
+	GuestWritableBlock workspace(64);
+	GuestWritableBlock handle_block(sizeof(int32_t));
+	ASSERT_TRUE(workspace.IsValid());
+	ASSERT_TRUE(handle_block.IsValid());
+	std::memset(workspace.Data<void>(), 0x5a, 64);
+	auto* handle = handle_block.Data<int32_t>();
+	*handle      = 0x12345678;
+	EXPECT_EQ(reinterpret_cast<create_fn_t>(static_cast<uintptr_t>(create_rec->vaddr))(
+	              nullptr, workspace.Data<void>(), 64, handle),
+	          LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(*handle, 0x12345678);
 }
 
 // Residual Ampr NIDs from second-title boot resolve under libAmpr_1.

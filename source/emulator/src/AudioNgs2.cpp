@@ -1,21 +1,26 @@
 #include "Emulator/Audio.h"
 
 #include "Kyty/Core/DbgAssert.h"
-#include "Kyty/Core/MagicEnum.h"
-#include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Log.h"
 
+#include <array>
 #include <cmath>
+#include <condition_variable>
 #include <cinttypes>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <new>
+#include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -130,16 +135,6 @@ struct Ngs2CustomSubmixerRackOption
 	uint32_t             max_inputs   = 0;
 };
 
-union Ngs2RackOptionUnion
-{
-	Ngs2RackOption               common;
-	Ngs2SamplerRackOption        sampler;
-	Ngs2MasteringRackOption      mastering;
-	Ngs2SubmixerRackOption       submixer;
-	Ngs2ReverbRackOption         reverb;
-	Ngs2CustomSubmixerRackOption custom_submixer;
-};
-
 struct Ngs2ContextBufferInfo
 {
 	void*     host_buffer      = nullptr;
@@ -147,23 +142,16 @@ struct Ngs2ContextBufferInfo
 	uintptr_t reserved[5]      = {};
 	uintptr_t user_data        = 0;
 };
+static_assert(sizeof(Ngs2ContextBufferInfo) == 64);
 
 using Ngs2BufferAllocHandler = int32_t KYTY_SYSV_ABI (*)(Ngs2ContextBufferInfo*);
-using Ngs2BufferFreeHandler  = int32_t  KYTY_SYSV_ABI (*)(Ngs2ContextBufferInfo*);
+using Ngs2BufferFreeHandler  = int32_t KYTY_SYSV_ABI (*)(Ngs2ContextBufferInfo*);
 
 struct Ngs2BufferAllocator
 {
 	Ngs2BufferAllocHandler alloc_handler = nullptr;
 	Ngs2BufferFreeHandler  free_handler  = nullptr;
 	uintptr_t              user_data     = 0;
-};
-
-struct Ngs2Internal
-{
-	Ngs2SystemOption    option;
-	Ngs2BufferAllocator allocator;
-	Ngs2Internal*       next = nullptr;
-	Core::Mutex         mutex;
 };
 
 enum class Ngs2RackType
@@ -174,15 +162,6 @@ enum class Ngs2RackType
 	Reverb,
 	CustomSampler,
 	CustomSubmixer,
-};
-
-struct Ngs2RackInternal
-{
-	Ngs2Internal*       ngs  = nullptr;
-	Ngs2RackInternal*   next = nullptr;
-	Ngs2RackType        type = Ngs2RackType::Sampler;
-	Ngs2RackOptionUnion option;
-	Ngs2BufferAllocator allocator;
 };
 
 enum class Ngs2VoicePlayState
@@ -204,40 +183,13 @@ enum class Ngs2VoicePlayEvent
 	Kill
 };
 
-struct Ngs2VoiceInternal
-{
-	Ngs2VoicePlayEvent event           = Ngs2VoicePlayEvent::None;
-	Ngs2VoicePlayState state           = Ngs2VoicePlayState::Empty;
-	Ngs2RackInternal*  rack            = nullptr;
-	uint32_t           last_command[3] = {};
-	// Render ticks spent in Playing (approximate natural end for short voices).
-	uint32_t play_ticks = 0;
-};
-
-struct Ngs2PcmBlock
-{
-	const int16_t* samples = nullptr;
-	uint64_t       frames  = 0;
-};
-
-struct Ngs2PcmStream
-{
-	uint32_t                  format_id   = 0;
-	uint32_t                  channels    = 0;
-	uint32_t                  sample_rate = 0;
-	float                     gain        = 1.0f;
-	bool                      playing     = false;
-	std::vector<Ngs2PcmBlock> blocks;
-	size_t                    block_index  = 0;
-	double                    source_frame = 0.0;
-};
-
 struct Ngs2VoiceParamHeader
 {
 	uint16_t size;
 	int16_t  next;
 	uint32_t id;
 };
+static_assert(sizeof(Ngs2VoiceParamHeader) == 8);
 
 struct Ngs2CustomSamplerFormatParam
 {
@@ -278,41 +230,6 @@ struct Ngs2RenderBufferInfoImpl
 };
 static_assert(sizeof(Ngs2RenderBufferInfoImpl) == 24);
 
-struct Ngs2VoiceEventParam
-{
-	Ngs2VoiceParamHeader header;
-	uint32_t             event_id;
-};
-
-struct Ngs2VoicePatchParam
-{
-	Ngs2VoiceParamHeader header;
-	uint32_t             port;
-	uint32_t             dest_input_id;
-	uintptr_t            dest_handle;
-};
-
-struct Ngs2VoicePortMatrixParam
-{
-	Ngs2VoiceParamHeader header;
-	uint32_t             port;
-	int32_t              matrix_id;
-};
-
-// Common voice-control param id 0x0007. Layout matches the PS4 NGS2
-// VoiceCallback parameter block (header + handler + data + flags + reserved).
-// Observed at the Gen5 frontier with size 32 immediately after a custom-sampler
-// class param (0x40010000). Handler invocation is not performed until a
-// guest-visible dependency on the callback is evidenced.
-struct Ngs2VoiceCallbackParam
-{
-	Ngs2VoiceParamHeader header;
-	uintptr_t            callback_handler;
-	uintptr_t            callback_data;
-	uint32_t             flags;
-	uint32_t             reserved;
-};
-
 struct Ngs2VoiceState
 {
 	uint32_t state_flags;
@@ -329,58 +246,306 @@ struct Ngs2SamplerVoiceState
 	uint64_t       user_data;
 	const void*    waveform_data;
 };
+static_assert(sizeof(Ngs2SamplerVoiceState) == 48);
 
-static Ngs2Internal*                                         g_ngs_list   = nullptr;
-static Ngs2RackInternal*                                     g_racks_list = nullptr;
-static std::unordered_map<Ngs2VoiceInternal*, Ngs2PcmStream> g_pcm_streams;
+namespace {
 
-static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceInternal* voice)
+constexpr int32_t kNgs2InvalidOut           = static_cast<int32_t>(0x804a0053u);
+constexpr int32_t kNgs2InvalidOption        = static_cast<int32_t>(0x804a0081u);
+constexpr int32_t kNgs2InvalidSystem        = static_cast<int32_t>(0x804a0201u);
+constexpr int32_t kNgs2InvalidBufferInfo    = static_cast<int32_t>(0x804a0206u);
+constexpr int32_t kNgs2InvalidBufferAddress = static_cast<int32_t>(0x804a0207u);
+constexpr int32_t kNgs2InvalidBufferSize    = static_cast<int32_t>(0x804a0209u);
+constexpr int32_t kNgs2InvalidRack          = static_cast<int32_t>(0x804a0261u);
+constexpr int32_t kNgs2InvalidVoice         = static_cast<int32_t>(0x804a0300u);
+constexpr int32_t kNgs2InvalidControl       = static_cast<int32_t>(0x804a0309u);
+
+constexpr uint32_t kNgs2DefaultMaxGrainSamples = 512;
+constexpr uint32_t kNgs2DefaultGrainSamples    = 256;
+constexpr uint32_t kNgs2DefaultSampleRate      = 48000;
+constexpr uint32_t kNgs2MaxGrainSamples        = 8192;
+constexpr uint32_t kNgs2MaxRackVoices          = 256;
+constexpr size_t   kNgs2MaxRackOptionBytes     = 0x518;
+
+// Workspaces are guest ABI identities only. These opaque slots are never
+// dereferenced or populated by HLE state; all mutable state lives in host
+// records below.
+constexpr size_t kNgs2SystemWorkspaceBytes      = sizeof(uintptr_t);
+constexpr size_t kNgs2RackWorkspaceHeaderBytes  = sizeof(uintptr_t);
+constexpr size_t kNgs2VoiceWorkspaceSlotBytes   = sizeof(uintptr_t);
+
+static bool Ngs2CopyFromGuest(void* destination, const void* source, size_t size)
 {
-	EXIT_IF(voice == nullptr);
-	switch (voice->state)
+	return destination != nullptr && source != nullptr && size != 0 &&
+	       Core::VirtualMemory::CopyFromGuest(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
+}
+
+static bool Ngs2CopyToGuest(void* destination, const void* source, size_t size)
+{
+	return destination != nullptr && source != nullptr && size != 0 &&
+	       Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
+}
+
+template <typename T> static bool Ngs2ReadGuest(T* destination, const T* source)
+{
+	return Ngs2CopyFromGuest(destination, source, sizeof(T));
+}
+
+template <typename T> static bool Ngs2WriteGuest(T* destination, const T& source)
+{
+	return Ngs2CopyToGuest(destination, &source, sizeof(T));
+}
+
+static bool Ngs2IsGuestWritable(const void* pointer, size_t size)
+{
+	return pointer != nullptr && size != 0 &&
+	       Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(pointer), static_cast<uint64_t>(size));
+}
+
+static bool Ngs2CalculatePcmBytes(uint64_t frames, uint32_t channels, size_t* bytes_out)
+{
+	if (bytes_out == nullptr || frames == 0 || channels == 0)
+	{
+		return false;
+	}
+	constexpr size_t kBytesPerSample = sizeof(int16_t);
+	if (channels > std::numeric_limits<size_t>::max() / kBytesPerSample)
+	{
+		return false;
+	}
+	const size_t bytes_per_frame = static_cast<size_t>(channels) * kBytesPerSample;
+	if (frames > std::numeric_limits<size_t>::max() / bytes_per_frame)
+	{
+		return false;
+	}
+	*bytes_out = static_cast<size_t>(frames) * bytes_per_frame;
+	return true;
+}
+
+static bool Ngs2CalculateRackWorkspaceSize(uint32_t max_voices, size_t* size_out)
+{
+	if (size_out == nullptr || max_voices > kNgs2MaxRackVoices ||
+	    max_voices > (std::numeric_limits<size_t>::max() - kNgs2RackWorkspaceHeaderBytes) / kNgs2VoiceWorkspaceSlotBytes)
+	{
+		return false;
+	}
+	*size_out = kNgs2RackWorkspaceHeaderBytes + static_cast<size_t>(max_voices) * kNgs2VoiceWorkspaceSlotBytes;
+	return true;
+}
+
+static bool Ngs2SnapshotSystemOption(const Ngs2SystemOption* option, Ngs2SystemOption* snapshot)
+{
+	if (snapshot == nullptr)
+	{
+		return false;
+	}
+	*snapshot = {};
+	if (option == nullptr)
+	{
+		snapshot->size              = sizeof(*snapshot);
+		snapshot->max_grain_samples = kNgs2DefaultMaxGrainSamples;
+		snapshot->num_grain_samples = kNgs2DefaultGrainSamples;
+		snapshot->sample_rate       = kNgs2DefaultSampleRate;
+		return true;
+	}
+	if (!Ngs2ReadGuest(snapshot, option) || snapshot->size != sizeof(*snapshot))
+	{
+		return false;
+	}
+	return snapshot->max_grain_samples != 0 && snapshot->max_grain_samples <= kNgs2MaxGrainSamples &&
+	       snapshot->num_grain_samples != 0 && snapshot->num_grain_samples <= snapshot->max_grain_samples &&
+	       snapshot->num_grain_samples <= kNgs2MaxGrainSamples && snapshot->sample_rate == kNgs2DefaultSampleRate;
+}
+
+static bool Ngs2SupportedRackOptionSize(uint32_t rack_id, size_t size)
+{
+	switch (rack_id)
+	{
+		case 0x1000: return size == sizeof(Ngs2SamplerRackOption);
+		case 0x2000: return size == sizeof(Ngs2SubmixerRackOption);
+		case 0x2001: return size == sizeof(Ngs2ReverbRackOption) || size == 0xb8;
+		case 0x3000: return size == sizeof(Ngs2MasteringRackOption);
+		case 0x4001: return size == 0x518;
+		case 0x4002: return size == sizeof(Ngs2CustomSubmixerRackOption);
+		default: return false;
+	}
+}
+
+static bool Ngs2RackTypeFromId(uint32_t rack_id, Ngs2RackType* type_out)
+{
+	if (type_out == nullptr)
+	{
+		return false;
+	}
+	switch (rack_id)
+	{
+		case 0x1000: *type_out = Ngs2RackType::Sampler; return true;
+		case 0x2000: *type_out = Ngs2RackType::Submixer; return true;
+		case 0x2001: *type_out = Ngs2RackType::Reverb; return true;
+		case 0x3000: *type_out = Ngs2RackType::Mastering; return true;
+		case 0x4001: *type_out = Ngs2RackType::CustomSampler; return true;
+		case 0x4002: *type_out = Ngs2RackType::CustomSubmixer; return true;
+		default: return false;
+	}
+}
+
+struct Ngs2RackConfig
+{
+	Ngs2RackType                              type = Ngs2RackType::Sampler;
+	uint32_t                                  max_voices = 0;
+	size_t                                    option_size = 0;
+	std::array<uint8_t, kNgs2MaxRackOptionBytes> option_bytes {};
+};
+
+static bool Ngs2MakeDefaultRackConfig(uint32_t rack_id, Ngs2RackConfig* config)
+{
+	if (config == nullptr || rack_id != 0x3000)
+	{
+		return false;
+	}
+	Ngs2MasteringRackOption option {};
+	option.rack_option.size       = sizeof(option);
+	option.rack_option.max_voices = 1;
+	config->type                  = Ngs2RackType::Mastering;
+	config->max_voices            = 1;
+	config->option_size           = sizeof(option);
+	std::memcpy(config->option_bytes.data(), &option, sizeof(option));
+	return true;
+}
+
+static bool Ngs2SnapshotRackConfig(uint32_t rack_id, const Ngs2RackOption* option, Ngs2RackConfig* config)
+{
+	if (config == nullptr)
+	{
+		return false;
+	}
+	*config = {};
+	if (option == nullptr)
+	{
+		return Ngs2MakeDefaultRackConfig(rack_id, config);
+	}
+
+	size_t option_size = 0;
+	if (!Ngs2CopyFromGuest(&option_size, option, sizeof(option_size)) || !Ngs2SupportedRackOptionSize(rack_id, option_size) ||
+	    option_size > config->option_bytes.size() || !Ngs2CopyFromGuest(config->option_bytes.data(), option, option_size) ||
+	    !Ngs2RackTypeFromId(rack_id, &config->type))
+	{
+		return false;
+	}
+
+	uint32_t max_voices = 0;
+	if (option_size >= 0xb0)
+	{
+		std::memcpy(&max_voices, config->option_bytes.data() + 0x50, sizeof(max_voices));
+	}
+	if (max_voices == 0)
+	{
+		std::memcpy(&max_voices, config->option_bytes.data() + offsetof(Ngs2RackOption, max_voices), sizeof(max_voices));
+	}
+	if (max_voices > kNgs2MaxRackVoices)
+	{
+		return false;
+	}
+	config->max_voices = max_voices;
+	config->option_size = option_size;
+	return true;
+}
+
+struct Ngs2PcmStream
+{
+	uint32_t             format_id   = 0;
+	uint32_t             channels    = 0;
+	uint32_t             sample_rate = 0;
+	float                gain        = 1.0f;
+	bool                 playing     = false;
+	std::vector<int16_t> samples;
+	uint64_t             frame_count  = 0;
+	double               source_frame = 0.0;
+};
+
+struct Ngs2SystemRecord;
+struct Ngs2RackRecord;
+struct Ngs2VoiceRecord;
+
+struct Ngs2SystemRecord
+{
+	std::recursive_mutex                                           state_mutex;
+	Ngs2SystemOption                                               option {};
+	uintptr_t                                                      workspace = 0;
+	size_t                                                         workspace_size = 0;
+	std::unordered_map<uintptr_t, std::shared_ptr<Ngs2RackRecord>> racks;
+};
+
+struct Ngs2RackRecord
+{
+	std::shared_ptr<Ngs2SystemRecord>                   system;
+	uintptr_t                                            workspace = 0;
+	size_t                                               workspace_size = 0;
+	Ngs2RackType                                         type = Ngs2RackType::Sampler;
+	uint32_t                                             max_voices = 0;
+	size_t                                               option_size = 0;
+	std::array<uint8_t, kNgs2MaxRackOptionBytes>        option_snapshot {};
+	std::vector<std::shared_ptr<Ngs2VoiceRecord>>       voices;
+};
+
+struct Ngs2VoiceRecord
+{
+	std::shared_ptr<Ngs2SystemRecord> system;
+	std::weak_ptr<Ngs2RackRecord>     rack;
+	uintptr_t                          handle = 0;
+	uint32_t                           voice_id = 0;
+	Ngs2VoicePlayEvent                 event = Ngs2VoicePlayEvent::None;
+	Ngs2VoicePlayState                 state = Ngs2VoicePlayState::Empty;
+	uint32_t                           last_command[3] = {};
+	uint32_t                           play_ticks = 0;
+	Ngs2PcmStream                      stream;
+};
+
+static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceRecord& voice)
+{
+	switch (voice.state)
 	{
 		case Ngs2VoicePlayState::Empty: return 0;
 		case Ngs2VoicePlayState::Playing: return 0x3;
 		case Ngs2VoicePlayState::Paused: return 0x5;
 		case Ngs2VoicePlayState::Stopped: return 0xb;
 	}
-	EXIT("unknown voice state\n");
 	return 0;
 }
 
-static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, float* output, uint32_t output_frames, uint32_t output_channels, uint32_t output_rate)
+static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, float* output, uint32_t output_frames, uint32_t output_channels,
+	                            uint32_t output_rate)
 {
-	EXIT_IF(stream == nullptr || output == nullptr);
-	EXIT_IF(stream->channels != 1 && stream->channels != 2);
-	EXIT_IF(output_channels != 2 || stream->sample_rate == 0 || output_rate == 0);
+	if (stream == nullptr || output == nullptr || (stream->channels != 1 && stream->channels != 2) || output_channels != 2 ||
+	    stream->sample_rate == 0 || output_rate == 0 || stream->frame_count == 0)
+	{
+		return false;
+	}
+	size_t expected_bytes = 0;
+	if (!Ngs2CalculatePcmBytes(stream->frame_count, stream->channels, &expected_bytes) ||
+	    stream->samples.size() != expected_bytes / sizeof(int16_t))
+	{
+		return false;
+	}
 
 	const double step = static_cast<double>(stream->sample_rate) / static_cast<double>(output_rate);
-	for (uint32_t frame = 0; frame < output_frames; frame++)
+	for (uint32_t frame = 0; frame < output_frames; ++frame)
 	{
-		while (stream->block_index < stream->blocks.size() &&
-		       stream->source_frame >= static_cast<double>(stream->blocks[stream->block_index].frames))
-		{
-			stream->source_frame -= static_cast<double>(stream->blocks[stream->block_index].frames);
-			stream->block_index++;
-		}
-		if (stream->block_index >= stream->blocks.size())
+		if (stream->source_frame >= static_cast<double>(stream->frame_count))
 		{
 			stream->playing = false;
 			return false;
 		}
-
-		const auto& block      = stream->blocks[stream->block_index];
 		const auto  index      = static_cast<uint64_t>(stream->source_frame);
 		const float fraction   = static_cast<float>(stream->source_frame - static_cast<double>(index));
-		const auto  next_index = (index + 1 < block.frames ? index + 1 : index);
-		for (uint32_t channel = 0; channel < 2; channel++)
+		const auto  next_index = index + 1 < stream->frame_count ? index + 1 : index;
+		for (uint32_t channel = 0; channel < output_channels; ++channel)
 		{
-			const uint32_t source_channel = (stream->channels == 1 ? 0 : channel);
-			const float    current        = static_cast<float>(block.samples[index * stream->channels + source_channel]) / 32768.0f;
-			const float    next           = static_cast<float>(block.samples[next_index * stream->channels + source_channel]) / 32768.0f;
-			const float    sample         = (current + (next - current) * fraction) * stream->gain;
-			float&         dest           = output[frame * output_channels + channel];
-			dest += sample;
+			const uint32_t source_channel = stream->channels == 1 ? 0 : channel;
+			const float current = static_cast<float>(stream->samples[index * stream->channels + source_channel]) / 32768.0f;
+			const float next = static_cast<float>(stream->samples[next_index * stream->channels + source_channel]) / 32768.0f;
+			float&      dest = output[frame * output_channels + channel];
+			dest += (current + (next - current) * fraction) * stream->gain;
 			if (dest > 1.0f)
 			{
 				dest = 1.0f;
@@ -394,402 +559,835 @@ static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, float* output, uint32_t outp
 	return true;
 }
 
-static const Ngs2RackOption* Ngs2ResolveRackOption(uint32_t rack_id, const Ngs2RackOption* option,
-                                                   Ngs2MasteringRackOption* default_mastering)
+enum class Ngs2ObjectKind: uint8_t
 {
-	if (option != nullptr)
-	{
-		return option;
-	}
-	if (rack_id != 0x3000 || default_mastering == nullptr)
-	{
-		return nullptr;
-	}
+	System,
+	Rack,
+	Voice
+};
 
-	default_mastering->rack_option.size       = sizeof(Ngs2MasteringRackOption);
-	default_mastering->rack_option.max_voices = 1;
-	return &default_mastering->rack_option;
+struct Ngs2LeaseIdentity
+{
+	Ngs2ObjectKind kind = Ngs2ObjectKind::System;
+	uintptr_t      handle = 0;
+	uint64_t       generation = 0;
+
+	[[nodiscard]] explicit operator bool() const { return handle != 0 && generation != 0; }
+};
+
+template <typename T> struct Ngs2RegistryEntry
+{
+	std::shared_ptr<T> record;
+	uint64_t           generation = 0;
+	uint32_t           pins = 0;
+	bool               closing = false;
+};
+
+std::mutex                                                          g_ngs_registry_mutex;
+std::condition_variable                                             g_ngs_registry_changed;
+std::unordered_map<uintptr_t, Ngs2RegistryEntry<Ngs2SystemRecord>> g_ngs_systems;
+std::unordered_map<uintptr_t, Ngs2RegistryEntry<Ngs2RackRecord>>   g_ngs_racks;
+std::unordered_map<uintptr_t, Ngs2RegistryEntry<Ngs2VoiceRecord>>  g_ngs_voices;
+uint64_t                                                            g_ngs_next_generation = 1;
+
+static uint64_t Ngs2NextGenerationLocked()
+{
+	const uint64_t generation = g_ngs_next_generation++;
+	if (g_ngs_next_generation == 0)
+	{
+		g_ngs_next_generation = 1;
+	}
+	return generation;
 }
 
-static uint32_t Ngs2GetRackMaxVoices(uint32_t rack_id, const Ngs2RackOption* option)
+static void Ngs2ReleaseLease(Ngs2LeaseIdentity identity)
 {
-	EXIT_IF(option == nullptr);
-
-	// Gen5 rack options may insert a 0x30-byte extension after `size` before the
-	// common name/flags/max_voices fields. The base Ngs2RackOption is 0x80 bytes
-	// on this ABI; any option->size >= 0xb0 (0x80+0x30) is treated as extended.
-	// Observed: custom sampler 0x4001 size 0x518 → max_voices at +0x50 = 256;
-	// reverb 0x2001 size 0xb8 → same offset (standard option->max_voices is 0).
-	const bool extended = (option->size >= 0xb0u);
-	if (extended)
+	if (!identity)
 	{
-		uint32_t max_voices = 0;
-		memcpy(&max_voices, reinterpret_cast<const uint8_t*>(option) + 0x50, sizeof(max_voices));
-		if (max_voices != 0)
+		return;
+	}
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto release = [&](auto& records)
+	{
+		auto found = records.find(identity.handle);
+		EXIT_IF(found == records.end() || found->second.generation != identity.generation || found->second.pins == 0);
+		found->second.pins--;
+		if (found->second.pins == 0)
 		{
-			return max_voices;
+			g_ngs_registry_changed.notify_all();
+		}
+	};
+	switch (identity.kind)
+	{
+		case Ngs2ObjectKind::System: release(g_ngs_systems); break;
+		case Ngs2ObjectKind::Rack: release(g_ngs_racks); break;
+		case Ngs2ObjectKind::Voice: release(g_ngs_voices); break;
+	}
+}
+
+template <typename T> class Ngs2Lease
+{
+public:
+	Ngs2Lease() = default;
+	Ngs2Lease(std::shared_ptr<T> record, Ngs2LeaseIdentity identity): m_record(std::move(record)), m_identity(identity) {}
+	Ngs2Lease(Ngs2Lease&& other) noexcept: m_record(std::move(other.m_record)), m_identity(other.m_identity)
+	{
+		other.m_identity = {};
+	}
+	Ngs2Lease& operator=(Ngs2Lease&& other) noexcept
+	{
+		if (this != &other)
+		{
+			Reset();
+			m_record         = std::move(other.m_record);
+			m_identity       = other.m_identity;
+			other.m_identity = {};
+		}
+		return *this;
+	}
+	~Ngs2Lease() { Reset(); }
+
+	Ngs2Lease(const Ngs2Lease&)            = delete;
+	Ngs2Lease& operator=(const Ngs2Lease&) = delete;
+
+	[[nodiscard]] explicit operator bool() const { return m_record != nullptr && static_cast<bool>(m_identity); }
+	[[nodiscard]] T* operator->() const { return m_record.get(); }
+	[[nodiscard]] T* Get() const { return m_record.get(); }
+	[[nodiscard]] const std::shared_ptr<T>& Shared() const { return m_record; }
+	[[nodiscard]] const Ngs2LeaseIdentity& Identity() const { return m_identity; }
+
+	void Reset()
+	{
+		if (m_identity)
+		{
+			const auto identity = m_identity;
+			m_identity          = {};
+			Ngs2ReleaseLease(identity);
+			m_record.reset();
 		}
 	}
 
-	// Fallback: classic prefix layout (max_voices at +0x20 after size+name+flags+grain).
-	(void)rack_id;
-	return option->max_voices;
+	// A destroy path removes its own registry entry after waiting for every
+	// other pin. It must disarm the owner lease before its destructor runs.
+	void Disarm() { m_identity = {}; }
+
+private:
+	std::shared_ptr<T> m_record;
+	Ngs2LeaseIdentity  m_identity {};
+};
+
+using Ngs2SystemLease = Ngs2Lease<Ngs2SystemRecord>;
+using Ngs2RackLease   = Ngs2Lease<Ngs2RackRecord>;
+using Ngs2VoiceLease  = Ngs2Lease<Ngs2VoiceRecord>;
+
+static Ngs2SystemLease Ngs2AcquireSystem(uintptr_t handle)
+{
+	if (handle == 0)
+	{
+		return {};
+	}
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto found = g_ngs_systems.find(handle);
+	if (found == g_ngs_systems.end() || found->second.closing || found->second.pins == UINT32_MAX)
+	{
+		return {};
+	}
+	found->second.pins++;
+	return {found->second.record, {Ngs2ObjectKind::System, handle, found->second.generation}};
 }
+
+static Ngs2RackLease Ngs2AcquireRack(uintptr_t handle)
+{
+	if (handle == 0)
+	{
+		return {};
+	}
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto found = g_ngs_racks.find(handle);
+	if (found == g_ngs_racks.end() || found->second.closing || found->second.pins == UINT32_MAX)
+	{
+		return {};
+	}
+	found->second.pins++;
+	return {found->second.record, {Ngs2ObjectKind::Rack, handle, found->second.generation}};
+}
+
+static Ngs2VoiceLease Ngs2AcquireVoice(uintptr_t handle)
+{
+	if (handle == 0)
+	{
+		return {};
+	}
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto found = g_ngs_voices.find(handle);
+	if (found == g_ngs_voices.end() || found->second.closing || found->second.pins == UINT32_MAX)
+	{
+		return {};
+	}
+	found->second.pins++;
+	return {found->second.record, {Ngs2ObjectKind::Voice, handle, found->second.generation}};
+}
+
+// Creation first reserves an entry as closing, writes its guest output, then
+// activates it. A guessed workspace handle can therefore never race a partly
+// initialized host record into public use.
+static bool Ngs2ReserveSystem(uintptr_t handle, const std::shared_ptr<Ngs2SystemRecord>& record)
+{
+	std::lock_guard lock(g_ngs_registry_mutex);
+	if (handle == 0 || record == nullptr || g_ngs_systems.find(handle) != g_ngs_systems.end())
+	{
+		return false;
+	}
+	g_ngs_systems.emplace(handle, Ngs2RegistryEntry<Ngs2SystemRecord> {record, Ngs2NextGenerationLocked(), 0, true});
+	return true;
+}
+
+static bool Ngs2ActivateSystem(uintptr_t handle, const std::shared_ptr<Ngs2SystemRecord>& record)
+{
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto found = g_ngs_systems.find(handle);
+	if (found == g_ngs_systems.end() || found->second.record.get() != record.get() || !found->second.closing)
+	{
+		return false;
+	}
+	found->second.closing = false;
+	g_ngs_registry_changed.notify_all();
+	return true;
+}
+
+static void Ngs2CancelSystemReservation(uintptr_t handle, const std::shared_ptr<Ngs2SystemRecord>& record)
+{
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto found = g_ngs_systems.find(handle);
+	if (found != g_ngs_systems.end() && found->second.record.get() == record.get() && found->second.closing && found->second.pins == 0)
+	{
+		g_ngs_systems.erase(found);
+		g_ngs_registry_changed.notify_all();
+	}
+}
+
+static bool Ngs2ReserveRack(const Ngs2SystemLease& system, const std::shared_ptr<Ngs2RackRecord>& rack)
+{
+	if (!system || rack == nullptr)
+	{
+		return false;
+	}
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto active_system = g_ngs_systems.find(system.Identity().handle);
+	if (active_system == g_ngs_systems.end() || active_system->second.record.get() != system.Get() ||
+	    active_system->second.generation != system.Identity().generation || active_system->second.closing ||
+	    g_ngs_racks.find(rack->workspace) != g_ngs_racks.end())
+	{
+		return false;
+	}
+	for (const auto& voice: rack->voices)
+	{
+		if (voice == nullptr || g_ngs_voices.find(voice->handle) != g_ngs_voices.end())
+		{
+			return false;
+		}
+	}
+	g_ngs_racks.emplace(rack->workspace, Ngs2RegistryEntry<Ngs2RackRecord> {rack, Ngs2NextGenerationLocked(), 0, true});
+	for (const auto& voice: rack->voices)
+	{
+		g_ngs_voices.emplace(voice->handle, Ngs2RegistryEntry<Ngs2VoiceRecord> {voice, Ngs2NextGenerationLocked(), 0, true});
+	}
+	return true;
+}
+
+static bool Ngs2ActivateRack(const Ngs2SystemLease& system, const std::shared_ptr<Ngs2RackRecord>& rack)
+{
+	if (!system || rack == nullptr)
+	{
+		return false;
+	}
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto active_system = g_ngs_systems.find(system.Identity().handle);
+	auto rack_entry    = g_ngs_racks.find(rack->workspace);
+	if (active_system == g_ngs_systems.end() || active_system->second.record.get() != system.Get() ||
+	    active_system->second.generation != system.Identity().generation || active_system->second.closing ||
+	    rack_entry == g_ngs_racks.end() || rack_entry->second.record.get() != rack.get() || !rack_entry->second.closing)
+	{
+		return false;
+	}
+	for (const auto& voice: rack->voices)
+	{
+		auto voice_entry = g_ngs_voices.find(voice->handle);
+		if (voice_entry == g_ngs_voices.end() || voice_entry->second.record.get() != voice.get() || !voice_entry->second.closing)
+		{
+			return false;
+		}
+	}
+	rack_entry->second.closing = false;
+	for (const auto& voice: rack->voices)
+	{
+		g_ngs_voices.find(voice->handle)->second.closing = false;
+	}
+	g_ngs_registry_changed.notify_all();
+	return true;
+}
+
+static void Ngs2CancelRackReservation(const std::shared_ptr<Ngs2RackRecord>& rack)
+{
+	if (rack == nullptr)
+	{
+		return;
+	}
+	std::lock_guard lock(g_ngs_registry_mutex);
+	for (const auto& voice: rack->voices)
+	{
+		auto found = g_ngs_voices.find(voice->handle);
+		if (found != g_ngs_voices.end() && found->second.record.get() == voice.get() && found->second.closing && found->second.pins == 0)
+		{
+			g_ngs_voices.erase(found);
+		}
+	}
+	auto rack_entry = g_ngs_racks.find(rack->workspace);
+	if (rack_entry != g_ngs_racks.end() && rack_entry->second.record.get() == rack.get() && rack_entry->second.closing &&
+	    rack_entry->second.pins == 0)
+	{
+		g_ngs_racks.erase(rack_entry);
+	}
+	g_ngs_registry_changed.notify_all();
+}
+
+// A destroy owner holds one private pin. The condition variable waits for all
+// other leases without a registry lock ever being held under a system lock.
+static Ngs2SystemLease Ngs2BeginSystemDestroy(uintptr_t handle)
+{
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto found = g_ngs_systems.find(handle);
+	if (found == g_ngs_systems.end() || found->second.closing || found->second.pins == UINT32_MAX)
+	{
+		return {};
+	}
+	found->second.closing = true;
+	found->second.pins++;
+	auto system = found->second.record;
+	for (auto& [unused_handle, entry]: g_ngs_racks)
+	{
+		(void)unused_handle;
+		if (entry.record->system.get() == system.get())
+		{
+			entry.closing = true;
+		}
+	}
+	for (auto& [unused_handle, entry]: g_ngs_voices)
+	{
+		(void)unused_handle;
+		if (entry.record->system.get() == system.get())
+		{
+			entry.closing = true;
+		}
+	}
+	return {std::move(system), {Ngs2ObjectKind::System, handle, found->second.generation}};
+}
+
+static void Ngs2WaitAndEraseSystem(Ngs2SystemLease* owner)
+{
+	if (owner == nullptr || !*owner)
+	{
+		return;
+	}
+	const auto system = owner->Shared();
+	const auto handle = owner->Identity().handle;
+	std::unique_lock lock(g_ngs_registry_mutex);
+	g_ngs_registry_changed.wait(lock,
+	                            [&]
+	                            {
+				auto system_entry = g_ngs_systems.find(handle);
+				if (system_entry == g_ngs_systems.end() || system_entry->second.record.get() != system.get() ||
+				    system_entry->second.pins != 1)
+				{
+					return false;
+				}
+				for (const auto& [unused_handle, entry]: g_ngs_racks)
+				{
+					(void)unused_handle;
+					if (entry.record->system.get() == system.get() && entry.pins != 0)
+					{
+						return false;
+					}
+				}
+				for (const auto& [unused_handle, entry]: g_ngs_voices)
+				{
+					(void)unused_handle;
+					if (entry.record->system.get() == system.get() && entry.pins != 0)
+					{
+						return false;
+					}
+				}
+				return true;
+			});
+	for (auto it = g_ngs_voices.begin(); it != g_ngs_voices.end();)
+	{
+		if (it->second.record->system.get() == system.get())
+		{
+			it = g_ngs_voices.erase(it);
+		} else
+		{
+			++it;
+		}
+	}
+	for (auto it = g_ngs_racks.begin(); it != g_ngs_racks.end();)
+	{
+		if (it->second.record->system.get() == system.get())
+		{
+			it = g_ngs_racks.erase(it);
+		} else
+		{
+			++it;
+		}
+	}
+	g_ngs_systems.erase(handle);
+	owner->Disarm();
+	g_ngs_registry_changed.notify_all();
+}
+
+static Ngs2RackLease Ngs2BeginRackDestroy(uintptr_t handle)
+{
+	std::lock_guard lock(g_ngs_registry_mutex);
+	auto found = g_ngs_racks.find(handle);
+	if (found == g_ngs_racks.end() || found->second.closing || found->second.pins == UINT32_MAX)
+	{
+		return {};
+	}
+	auto rack          = found->second.record;
+	auto system_entry  = g_ngs_systems.find(rack->system->workspace);
+	if (system_entry == g_ngs_systems.end() || system_entry->second.record.get() != rack->system.get() || system_entry->second.closing)
+	{
+		return {};
+	}
+	found->second.closing = true;
+	found->second.pins++;
+	for (auto& [unused_handle, entry]: g_ngs_voices)
+	{
+		(void)unused_handle;
+		auto voice_rack = entry.record->rack.lock();
+		if (voice_rack.get() == rack.get())
+		{
+			entry.closing = true;
+		}
+	}
+	return {std::move(rack), {Ngs2ObjectKind::Rack, handle, found->second.generation}};
+}
+
+static void Ngs2WaitAndEraseRack(Ngs2RackLease* owner)
+{
+	if (owner == nullptr || !*owner)
+	{
+		return;
+	}
+	const auto rack   = owner->Shared();
+	const auto handle = owner->Identity().handle;
+	std::unique_lock lock(g_ngs_registry_mutex);
+	g_ngs_registry_changed.wait(lock,
+	                            [&]
+	                            {
+				auto rack_entry = g_ngs_racks.find(handle);
+				if (rack_entry == g_ngs_racks.end() || rack_entry->second.record.get() != rack.get() || rack_entry->second.pins != 1)
+				{
+					return false;
+				}
+				for (const auto& [unused_handle, entry]: g_ngs_voices)
+				{
+					(void)unused_handle;
+					auto voice_rack = entry.record->rack.lock();
+					if (voice_rack.get() == rack.get() && entry.pins != 0)
+					{
+						return false;
+					}
+				}
+				return true;
+			});
+	for (auto it = g_ngs_voices.begin(); it != g_ngs_voices.end();)
+	{
+		auto voice_rack = it->second.record->rack.lock();
+		if (voice_rack.get() == rack.get())
+		{
+			it = g_ngs_voices.erase(it);
+		} else
+		{
+			++it;
+		}
+	}
+	g_ngs_racks.erase(handle);
+	owner->Disarm();
+	g_ngs_registry_changed.notify_all();
+}
+
+static bool Ngs2MakeVoiceHandle(const Ngs2RackRecord& rack, uint32_t voice_id, uintptr_t* handle_out)
+{
+	if (handle_out == nullptr || voice_id >= rack.max_voices ||
+	    voice_id > (std::numeric_limits<size_t>::max() - kNgs2RackWorkspaceHeaderBytes) / kNgs2VoiceWorkspaceSlotBytes)
+	{
+		return false;
+	}
+	const size_t offset = kNgs2RackWorkspaceHeaderBytes + static_cast<size_t>(voice_id) * kNgs2VoiceWorkspaceSlotBytes;
+	if (offset > rack.workspace_size || kNgs2VoiceWorkspaceSlotBytes > rack.workspace_size - offset ||
+	    rack.workspace > std::numeric_limits<uintptr_t>::max() - offset)
+	{
+		return false;
+	}
+	*handle_out = rack.workspace + offset;
+	return true;
+}
+
+class Ngs2HeldSystemLock
+{
+public:
+	explicit Ngs2HeldSystemLock(Ngs2SystemLease&& lease): m_lease(std::move(lease)), m_state_lock(m_lease->state_mutex) {}
+
+private:
+	// Destruction reverses this order: state lock first, then the pinned lease.
+	Ngs2SystemLease                         m_lease;
+	std::unique_lock<std::recursive_mutex> m_state_lock;
+};
+
+thread_local std::unordered_map<uintptr_t, std::unique_ptr<Ngs2HeldSystemLock>> g_ngs_thread_locks;
+
+static void Ngs2ApplyVoiceEvent(Ngs2VoiceRecord* voice)
+{
+	if (voice == nullptr)
+	{
+		return;
+	}
+	switch (voice->event)
+	{
+		case Ngs2VoicePlayEvent::None:
+			if (voice->state == Ngs2VoicePlayState::Stopped)
+			{
+				voice->state = Ngs2VoicePlayState::Empty;
+			}
+			break;
+		case Ngs2VoicePlayEvent::Play:
+			if (voice->state == Ngs2VoicePlayState::Empty)
+			{
+				voice->state      = Ngs2VoicePlayState::Playing;
+				voice->play_ticks = 0;
+			}
+			break;
+		case Ngs2VoicePlayEvent::Pause:
+			if (voice->state == Ngs2VoicePlayState::Playing)
+			{
+				voice->state = Ngs2VoicePlayState::Paused;
+			}
+			break;
+		case Ngs2VoicePlayEvent::Resume:
+			if (voice->state == Ngs2VoicePlayState::Paused)
+			{
+				voice->state = Ngs2VoicePlayState::Playing;
+			}
+			break;
+		case Ngs2VoicePlayEvent::Stop:
+			if (voice->state == Ngs2VoicePlayState::Playing)
+			{
+				voice->state = Ngs2VoicePlayState::Stopped;
+			}
+			break;
+		case Ngs2VoicePlayEvent::StopImm:
+		case Ngs2VoicePlayEvent::Kill: voice->state = Ngs2VoicePlayState::Empty; break;
+	}
+	voice->event = Ngs2VoicePlayEvent::None;
+}
+
+} // namespace
 
 int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2ContextBufferInfo* buffer_info)
 {
 	PRINT_NAME();
 
-	constexpr int32_t NGS2_ERROR_INVALID_OUT_ADDRESS = static_cast<int32_t>(0x804a0053u);
-	constexpr int32_t NGS2_ERROR_INVALID_OPTION_SIZE = static_cast<int32_t>(0x804a0081u);
-
-	if (buffer_info == nullptr)
+	Ngs2SystemOption system_option {};
+	if (!Ngs2SnapshotSystemOption(option, &system_option))
 	{
-		return NGS2_ERROR_INVALID_OUT_ADDRESS;
+		return kNgs2InvalidOption;
 	}
-	if (option != nullptr && option->size != sizeof(Ngs2SystemOption))
+	Ngs2ContextBufferInfo output {};
+	if (!Ngs2ReadGuest(&output, buffer_info))
 	{
-		return NGS2_ERROR_INVALID_OPTION_SIZE;
+		return kNgs2InvalidOut;
 	}
-
-	buffer_info->host_buffer      = nullptr;
-	buffer_info->host_buffer_size = sizeof(Ngs2Internal);
-	for (auto& value: buffer_info->reserved)
+	output.host_buffer      = nullptr;
+	output.host_buffer_size = kNgs2SystemWorkspaceBytes;
+	for (auto& reserved: output.reserved)
 	{
-		value = 0;
+		reserved = 0;
 	}
-
-	return OK;
+	return Ngs2WriteGuest(buffer_info, output) ? OK : kNgs2InvalidOut;
 }
 
 int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption* option, const Ngs2ContextBufferInfo* buffer_info, uintptr_t* handle)
 {
 	PRINT_NAME();
 
-	constexpr int32_t NGS2_ERROR_INVALID_OUT_ADDRESS    = static_cast<int32_t>(0x804a0053u);
-	constexpr int32_t NGS2_ERROR_INVALID_OPTION_SIZE    = static_cast<int32_t>(0x804a0081u);
-	constexpr int32_t NGS2_ERROR_INVALID_BUFFER_INFO    = static_cast<int32_t>(0x804a0206u);
-	constexpr int32_t NGS2_ERROR_INVALID_BUFFER_ADDRESS = static_cast<int32_t>(0x804a0207u);
-	constexpr int32_t NGS2_ERROR_INVALID_BUFFER_SIZE    = static_cast<int32_t>(0x804a0209u);
-
-	if (buffer_info == nullptr)
+	Ngs2ContextBufferInfo info {};
+	if (!Ngs2ReadGuest(&info, buffer_info))
 	{
-		return NGS2_ERROR_INVALID_BUFFER_INFO;
+		return kNgs2InvalidBufferInfo;
 	}
-	if (handle == nullptr)
+	if (handle == nullptr || !Ngs2IsGuestWritable(handle, sizeof(*handle)))
 	{
-		return NGS2_ERROR_INVALID_OUT_ADDRESS;
+		return kNgs2InvalidOut;
 	}
-	if (option != nullptr && option->size != sizeof(Ngs2SystemOption))
+	Ngs2SystemOption system_option {};
+	if (!Ngs2SnapshotSystemOption(option, &system_option))
 	{
-		return NGS2_ERROR_INVALID_OPTION_SIZE;
+		return kNgs2InvalidOption;
 	}
-	if (buffer_info->host_buffer == nullptr)
+	if (info.host_buffer == nullptr || !Ngs2IsGuestWritable(info.host_buffer, kNgs2SystemWorkspaceBytes))
 	{
-		return NGS2_ERROR_INVALID_BUFFER_ADDRESS;
+		return kNgs2InvalidBufferAddress;
 	}
-	if (buffer_info->host_buffer_size < sizeof(Ngs2Internal))
+	if (info.host_buffer_size < kNgs2SystemWorkspaceBytes)
 	{
-		return NGS2_ERROR_INVALID_BUFFER_SIZE;
+		return kNgs2InvalidBufferSize;
 	}
 
-	auto* ngs = new (buffer_info->host_buffer) Ngs2Internal;
-	if (option != nullptr)
+	const uintptr_t public_handle = reinterpret_cast<uintptr_t>(info.host_buffer);
+	auto system                 = std::make_shared<Ngs2SystemRecord>();
+	system->option              = system_option;
+	system->workspace           = public_handle;
+	system->workspace_size      = kNgs2SystemWorkspaceBytes;
+	if (!Ngs2ReserveSystem(public_handle, system))
 	{
-		ngs->option = *option;
-	} else
-	{
-		ngs->option.size              = sizeof(Ngs2SystemOption);
-		ngs->option.max_grain_samples = 512;
-		ngs->option.num_grain_samples = 256;
-		ngs->option.sample_rate       = 48000;
+		return kNgs2InvalidBufferAddress;
 	}
-
-	ngs->next  = g_ngs_list;
-	g_ngs_list = ngs;
-	*handle    = reinterpret_cast<uintptr_t>(ngs);
-
+	if (!Ngs2WriteGuest(handle, public_handle))
+	{
+		Ngs2CancelSystemReservation(public_handle, system);
+		return kNgs2InvalidOut;
+	}
+	if (!Ngs2ActivateSystem(public_handle, system))
+	{
+		Ngs2CancelSystemReservation(public_handle, system);
+		return kNgs2InvalidSystem;
+	}
 	return OK;
-}
-
-static bool Ngs2ValidateSystem(uintptr_t system_handle, Ngs2Internal** out_ngs)
-{
-	if (system_handle == 0 || out_ngs == nullptr)
-	{
-		return false;
-	}
-	auto* ngs = reinterpret_cast<Ngs2Internal*>(system_handle);
-	for (auto* it = g_ngs_list; it != nullptr; it = it->next)
-	{
-		if (it == ngs)
-		{
-			*out_ngs = ngs;
-			return true;
-		}
-	}
-	return false;
 }
 
 int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle)
 {
 	PRINT_NAME();
-	Ngs2Internal* ngs = nullptr;
-	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	if (g_ngs_thread_locks.find(system_handle) != g_ngs_thread_locks.end())
 	{
-		return static_cast<int32_t>(0x804a0201u);
+		return kNgs2InvalidSystem;
 	}
-	Core::LockGuard lock(ngs->mutex);
-	auto**          link = &g_racks_list;
-	while (*link != nullptr)
+	auto system = Ngs2BeginSystemDestroy(system_handle);
+	if (!system)
 	{
-		if ((*link)->ngs == ngs)
-		{
-			auto* rack   = *link;
-			*link        = rack->next;
-			auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
-			for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
-			{
-				g_pcm_streams.erase(voices + i);
-			}
-			rack->~Ngs2RackInternal();
-			continue;
-		}
-		link = &(*link)->next;
+		return kNgs2InvalidSystem;
 	}
-	auto** sys_link = &g_ngs_list;
-	while (*sys_link != nullptr && *sys_link != ngs)
-	{
-		sys_link = &(*sys_link)->next;
-	}
-	if (*sys_link != nullptr)
-	{
-		*sys_link = ngs->next;
-	}
-	ngs->~Ngs2Internal();
+	auto record = system.Shared();
+	Ngs2WaitAndEraseSystem(&system);
+	std::lock_guard lock(record->state_mutex);
+	record->racks.clear();
 	return OK;
 }
 
 int KYTY_SYSV_ABI Ngs2SystemLock(uintptr_t system_handle)
 {
 	PRINT_NAME();
-	Ngs2Internal* ngs = nullptr;
-	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	if (g_ngs_thread_locks.find(system_handle) != g_ngs_thread_locks.end())
 	{
-		return static_cast<int32_t>(0x804a0201u);
+		return kNgs2InvalidSystem;
 	}
-	ngs->mutex.Lock();
+	auto system = Ngs2AcquireSystem(system_handle);
+	if (!system)
+	{
+		return kNgs2InvalidSystem;
+	}
+	auto held = std::unique_ptr<Ngs2HeldSystemLock>(new (std::nothrow) Ngs2HeldSystemLock(std::move(system)));
+	if (held == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_ENOMEM;
+	}
+	g_ngs_thread_locks.emplace(system_handle, std::move(held));
 	return OK;
 }
 
 int KYTY_SYSV_ABI Ngs2SystemUnlock(uintptr_t system_handle)
 {
 	PRINT_NAME();
-	Ngs2Internal* ngs = nullptr;
-	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	auto found = g_ngs_thread_locks.find(system_handle);
+	if (found == g_ngs_thread_locks.end())
 	{
-		return static_cast<int32_t>(0x804a0201u);
+		return kNgs2InvalidSystem;
 	}
-	ngs->mutex.Unlock();
+	g_ngs_thread_locks.erase(found);
 	return OK;
 }
 
 int KYTY_SYSV_ABI Ngs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t grain_samples)
 {
 	PRINT_NAME();
-	Ngs2Internal* ngs = nullptr;
-	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	auto system = Ngs2AcquireSystem(system_handle);
+	if (!system)
 	{
-		return static_cast<int32_t>(0x804a0201u);
+		return kNgs2InvalidSystem;
 	}
-	if (grain_samples > 0 && grain_samples <= 8192)
+	std::lock_guard lock(system->state_mutex);
+	if (grain_samples == 0 || grain_samples > system->option.max_grain_samples || grain_samples > kNgs2MaxGrainSamples)
 	{
-		ngs->option.num_grain_samples = grain_samples;
+		return kNgs2InvalidControl;
 	}
+	system->option.num_grain_samples = grain_samples;
 	return OK;
 }
 
 int KYTY_SYSV_ABI Ngs2SystemSetSampleRate(uintptr_t system_handle, uint32_t sample_rate)
 {
 	PRINT_NAME();
-	Ngs2Internal* ngs = nullptr;
-	if (!Ngs2ValidateSystem(system_handle, &ngs))
+	auto system = Ngs2AcquireSystem(system_handle);
+	if (!system)
 	{
-		return static_cast<int32_t>(0x804a0201u);
+		return kNgs2InvalidSystem;
 	}
-	if (sample_rate > 0)
+	if (sample_rate != kNgs2DefaultSampleRate)
 	{
-		ngs->option.sample_rate = sample_rate;
+		return kNgs2InvalidControl;
 	}
+	std::lock_guard lock(system->state_mutex);
+	system->option.sample_rate = sample_rate;
 	return OK;
 }
 
-int KYTY_SYSV_ABI Ngs2PanInit(void* /*pan_param*/)
+int KYTY_SYSV_ABI Ngs2PanInit(void* pan_param)
 {
 	PRINT_NAME();
-	return OK;
+	(void)pan_param;
+	return kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info)
 {
 	PRINT_NAME();
 
-	if (buffer_info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	Ngs2MasteringRackOption default_mastering {};
-	option = Ngs2ResolveRackOption(rack_id, option, &default_mastering);
-	if (option == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t rack_id    = 0x%" PRIx32 "\n", rack_id);
-	const uint32_t max_voices = Ngs2GetRackMaxVoices(rack_id, option);
-	KYTY_LOG_DEBUG("\t max_voices = %u\n", max_voices);
-
-	buffer_info->host_buffer_size = sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal) * max_voices;
-
-	return OK;
+	Ngs2ContextBufferInfo output {};
+	if (!Ngs2ReadGuest(&output, buffer_info))
+	{
+		return kNgs2InvalidOut;
+	}
+	Ngs2RackConfig config {};
+	if (!Ngs2SnapshotRackConfig(rack_id, option, &config))
+	{
+		return kNgs2InvalidOption;
+	}
+	size_t workspace_size = 0;
+	if (!Ngs2CalculateRackWorkspaceSize(config.max_voices, &workspace_size))
+	{
+		return kNgs2InvalidOption;
+	}
+	output.host_buffer_size = workspace_size;
+	return Ngs2WriteGuest(buffer_info, output) ? OK : kNgs2InvalidOut;
 }
 
-int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, const Ngs2BufferAllocator* allocator, uintptr_t* handle)
+int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, const Ngs2BufferAllocator* allocator,
+                                                 uintptr_t* handle)
 {
 	PRINT_NAME();
-
-	if (option == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (allocator == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (allocator->alloc_handler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (allocator->free_handler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	if (option->size != sizeof(Ngs2SystemOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t name              = %.16s\n", option->name);
-	KYTY_LOG_DEBUG("\t flags             = %u\n", option->flags);
-	KYTY_LOG_DEBUG("\t max_grain_samples = %u\n", option->max_grain_samples);
-	KYTY_LOG_DEBUG("\t num_grain_samples = %u\n", option->num_grain_samples);
-	KYTY_LOG_DEBUG("\t sample_rate       = %u\n", option->sample_rate);
-	KYTY_LOG_DEBUG("\t alloc_handler     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->alloc_handler));
-	KYTY_LOG_DEBUG("\t free_handler      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->free_handler));
-	KYTY_LOG_DEBUG("\t user_data         = 0x%016" PRIx64 "\n", static_cast<uint64_t>(allocator->user_data));
-
-	Ngs2ContextBufferInfo buf {};
-	buf.host_buffer      = nullptr;
-	buf.host_buffer_size = sizeof(Ngs2Internal);
-	buf.user_data        = allocator->user_data;
-
-	int result = allocator->alloc_handler(&buf);
-
-	if (result != OK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (buf.host_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	auto* ngs = new (buf.host_buffer) Ngs2Internal;
-
-	ngs->option    = *option;
-	ngs->allocator = *allocator;
-
-	ngs->next  = g_ngs_list;
-	g_ngs_list = ngs;
-
-	*handle = reinterpret_cast<uintptr_t>(ngs);
-
-	return OK;
+	(void)option;
+	(void)allocator;
+	(void)handle;
+	// Allocator function-pointer invocation/lifetime is not established.
+	return kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, const Ngs2RackOption* option,
-                                 const Ngs2ContextBufferInfo* buffer_info, uintptr_t* handle)
+	                                 const Ngs2ContextBufferInfo* buffer_info, uintptr_t* handle)
 {
 	PRINT_NAME();
 
-	if (buffer_info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (buffer_info->host_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (buffer_info->host_buffer_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (system_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	Ngs2MasteringRackOption default_mastering {};
-	option = Ngs2ResolveRackOption(rack_id, option, &default_mastering);
-	if (option == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	if (option->size < sizeof(Ngs2RackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
-	KYTY_LOG_DEBUG("\t option_size            = 0x%016" PRIx64 "\n", static_cast<uint64_t>(option->size));
-	KYTY_LOG_DEBUG("\t name                   = %.16s\n", option->name);
-	KYTY_LOG_DEBUG("\t flags                  = %u\n", option->flags);
-	KYTY_LOG_DEBUG("\t max_grain_samples      = %u\n", option->max_grain_samples);
-	KYTY_LOG_DEBUG("\t max_voices             = %u\n", option->max_voices);
-	KYTY_LOG_DEBUG("\t max_input_delay_blocks = %u\n", option->max_input_delay_blocks);
-	KYTY_LOG_DEBUG("\t max_matrices           = %u\n", option->max_matrices);
-	KYTY_LOG_DEBUG("\t max_ports              = %u\n", option->max_ports);
-	KYTY_LOG_DEBUG("\t host_buffer            = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer_info->host_buffer));
-	KYTY_LOG_DEBUG("\t host_buffer_size      = 0x%016" PRIx64 "\n", static_cast<uint64_t>(buffer_info->host_buffer_size));
-
-	auto* ngs    = reinterpret_cast<Ngs2Internal*>(system_handle);
-	auto* rack   = static_cast<Ngs2RackInternal*>(buffer_info->host_buffer);
-	auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
-
-	Core::LockGuard lock(ngs->mutex);
-
-	switch (rack_id)
+	Ngs2ContextBufferInfo info {};
+	if (!Ngs2ReadGuest(&info, buffer_info))
 	{
-		case 0x1000:
-			if (option->size != sizeof(Ngs2SamplerRackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-			rack->option.sampler = *reinterpret_cast<const Ngs2SamplerRackOption*>(option);
-			rack->type           = Ngs2RackType::Sampler;
-			break;
-		case 0x2000:
-			if (option->size != sizeof(Ngs2SubmixerRackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-			rack->option.submixer = *reinterpret_cast<const Ngs2SubmixerRackOption*>(option);
-			rack->type            = Ngs2RackType::Submixer;
-			break;
-		case 0x2001:
-			// Gen5 appends an opaque 0x30-byte extension to the reverb option.
-			// The common and reverb fields consumed here retain their prefix layout.
-			if (option->size != sizeof(Ngs2ReverbRackOption) && option->size != 0xb8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-			rack->option.reverb = *reinterpret_cast<const Ngs2ReverbRackOption*>(option);
-			rack->type          = Ngs2RackType::Reverb;
-			break;
-		case 0x3000:
-			if (option->size != sizeof(Ngs2MasteringRackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-			rack->option.mastering = *reinterpret_cast<const Ngs2MasteringRackOption*>(option);
-			rack->type             = Ngs2RackType::Mastering;
-			break;
-		case 0x4001:
-			// The Gen5 custom-sampler option extends the common ABI to 0x518
-			// bytes. Only the common prefix is consumed here; the undocumented
-			// extension remains opaque until a supported operation needs it.
-			if (option->size != 0x518) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-			rack->option.common = *option;
-			rack->type          = Ngs2RackType::CustomSampler;
-			break;
-		case 0x4002:
-			if (option->size != sizeof(Ngs2CustomSubmixerRackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-			rack->option.custom_submixer = *reinterpret_cast<const Ngs2CustomSubmixerRackOption*>(option);
-			rack->type                   = Ngs2RackType::CustomSubmixer;
-			break;
-		default:
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown NGS2 rack_id 0x%08" PRIx32 " — creating generic rack (continuing)\n",
-			               rack_id);
-			rack->option.common = *option;
-			rack->type          = Ngs2RackType::CustomSubmixer;
-			break;
+		return kNgs2InvalidBufferInfo;
+	}
+	if (handle == nullptr || !Ngs2IsGuestWritable(handle, sizeof(*handle)))
+	{
+		return kNgs2InvalidOut;
+	}
+	auto system = Ngs2AcquireSystem(system_handle);
+	if (!system)
+	{
+		return kNgs2InvalidSystem;
+	}
+	Ngs2RackConfig config {};
+	if (!Ngs2SnapshotRackConfig(rack_id, option, &config))
+	{
+		return kNgs2InvalidOption;
+	}
+	size_t workspace_size = 0;
+	if (!Ngs2CalculateRackWorkspaceSize(config.max_voices, &workspace_size))
+	{
+		return kNgs2InvalidOption;
+	}
+	if (info.host_buffer == nullptr || !Ngs2IsGuestWritable(info.host_buffer, workspace_size))
+	{
+		return kNgs2InvalidBufferAddress;
+	}
+	if (info.host_buffer_size < workspace_size)
+	{
+		return kNgs2InvalidBufferSize;
 	}
 
-	KYTY_LOG_DEBUG("\t type                   = %s\n", Core::EnumName(rack->type).C_Str());
+	auto rack             = std::make_shared<Ngs2RackRecord>();
+	rack->system          = system.Shared();
+	rack->workspace       = reinterpret_cast<uintptr_t>(info.host_buffer);
+	rack->workspace_size  = workspace_size;
+	rack->type            = config.type;
+	rack->max_voices      = config.max_voices;
+	rack->option_size     = config.option_size;
+	rack->option_snapshot = config.option_bytes;
+	rack->voices.reserve(config.max_voices);
 
-	rack->allocator                = Ngs2BufferAllocator();
-	rack->ngs                      = ngs;
-	rack->option.common.max_voices = Ngs2GetRackMaxVoices(rack_id, option);
-
-	rack->next   = g_racks_list;
-	g_racks_list = rack;
-
-	for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
+	for (uint32_t voice_id = 0; voice_id < config.max_voices; ++voice_id)
 	{
-		voices[i].rack  = rack;
-		voices[i].event = Ngs2VoicePlayEvent::None;
-		voices[i].state = Ngs2VoicePlayState::Empty;
+		uintptr_t voice_handle = 0;
+		if (!Ngs2MakeVoiceHandle(*rack, voice_id, &voice_handle))
+		{
+			return kNgs2InvalidBufferSize;
+		}
+		auto voice      = std::make_shared<Ngs2VoiceRecord>();
+		voice->system   = system.Shared();
+		voice->rack     = rack;
+		voice->handle   = voice_handle;
+		voice->voice_id = voice_id;
+		rack->voices.push_back(std::move(voice));
 	}
 
-	*handle = reinterpret_cast<uintptr_t>(rack);
+	// The system lease stays pinned while this host record is linked. No
+	// registry lock is held while taking the per-system state lock.
+	{
+		std::lock_guard lock(system->state_mutex);
+		auto [unused, inserted] = system->racks.emplace(rack->workspace, rack);
+		(void)unused;
+		if (!inserted)
+		{
+			return kNgs2InvalidBufferAddress;
+		}
+	}
+	if (!Ngs2ReserveRack(system, rack))
+	{
+		std::lock_guard lock(system->state_mutex);
+		system->racks.erase(rack->workspace);
+		return kNgs2InvalidSystem;
+	}
 
+	const uintptr_t public_handle = rack->workspace;
+	if (!Ngs2WriteGuest(handle, public_handle))
+	{
+		Ngs2CancelRackReservation(rack);
+		std::lock_guard lock(system->state_mutex);
+		system->racks.erase(rack->workspace);
+		return kNgs2InvalidOut;
+	}
+	if (!Ngs2ActivateRack(system, rack))
+	{
+		Ngs2CancelRackReservation(rack);
+		std::lock_guard lock(system->state_mutex);
+		system->racks.erase(rack->workspace);
+		return kNgs2InvalidSystem;
+	}
 	return OK;
 }
 
@@ -797,101 +1395,43 @@ int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t 
                                               const Ngs2BufferAllocator* allocator, uintptr_t* handle)
 {
 	PRINT_NAME();
-
-	if (option == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (allocator == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (allocator->alloc_handler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (allocator->free_handler == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (system_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	if (option->size < sizeof(Ngs2RackOption)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t rack_id                = 0x%" PRIx32 "\n", rack_id);
-	KYTY_LOG_DEBUG("\t name                   = %.16s\n", option->name);
-	KYTY_LOG_DEBUG("\t flags                  = %u\n", option->flags);
-	KYTY_LOG_DEBUG("\t max_grain_samples      = %u\n", option->max_grain_samples);
-	KYTY_LOG_DEBUG("\t max_voices             = %u\n", option->max_voices);
-	KYTY_LOG_DEBUG("\t max_input_delay_blocks = %u\n", option->max_input_delay_blocks);
-	KYTY_LOG_DEBUG("\t max_matrices           = %u\n", option->max_matrices);
-	KYTY_LOG_DEBUG("\t max_ports              = %u\n", option->max_ports);
-	KYTY_LOG_DEBUG("\t alloc_handler          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->alloc_handler));
-	KYTY_LOG_DEBUG("\t free_handler           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(allocator->free_handler));
-	KYTY_LOG_DEBUG("\t user_data              = 0x%016" PRIx64 "\n", static_cast<uint64_t>(allocator->user_data));
-
-	Ngs2ContextBufferInfo buf {};
-	buf.host_buffer      = nullptr;
-	buf.host_buffer_size = 0;
-	buf.user_data        = allocator->user_data;
-
-	Ngs2RackQueryBufferSize(rack_id, option, &buf);
-
-	if (buf.host_buffer_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	int result = allocator->alloc_handler(&buf);
-
-	if (result != OK) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (buf.host_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	result = Ngs2RackCreate(system_handle, rack_id, option, &buf, handle);
-
-	if (result == OK)
-	{
-		auto* rack      = static_cast<Ngs2RackInternal*>(buf.host_buffer);
-		rack->allocator = *allocator;
-	}
-
-	return result;
+	(void)system_handle;
+	(void)rack_id;
+	(void)option;
+	(void)allocator;
+	(void)handle;
+	return kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* buffer_info)
 {
 	PRINT_NAME();
-
-	if (rack_handle == 0)
+	if (buffer_info != nullptr && !Ngs2IsGuestWritable(buffer_info, sizeof(*buffer_info)))
 	{
-		return static_cast<int32_t>(0x804a0261u);
+		return kNgs2InvalidOut;
+	}
+	auto rack = Ngs2BeginRackDestroy(rack_handle);
+	if (!rack)
+	{
+		return kNgs2InvalidRack;
+	}
+	auto record = rack.Shared();
+	{
+		std::lock_guard lock(record->system->state_mutex);
+		auto found = record->system->racks.find(record->workspace);
+		if (found != record->system->racks.end() && found->second.get() == record.get())
+		{
+			record->system->racks.erase(found);
+		}
 	}
 
-	auto* rack = reinterpret_cast<Ngs2RackInternal*>(rack_handle);
-	auto* ngs  = rack->ngs;
-	EXIT_IF(ngs == nullptr);
-
-	Ngs2ContextBufferInfo released {};
-	released.host_buffer      = rack;
-	released.host_buffer_size = sizeof(Ngs2RackInternal) + sizeof(Ngs2VoiceInternal) * rack->option.common.max_voices;
-	released.user_data        = rack->allocator.user_data;
-	const auto allocator      = rack->allocator;
-
+	Ngs2ContextBufferInfo output {};
+	output.host_buffer      = reinterpret_cast<void*>(record->workspace);
+	output.host_buffer_size = record->workspace_size;
+	Ngs2WaitAndEraseRack(&rack);
+	if (buffer_info != nullptr && !Ngs2WriteGuest(buffer_info, output))
 	{
-		Core::LockGuard lock(ngs->mutex);
-
-		auto** link = &g_racks_list;
-		while (*link != nullptr && *link != rack)
-		{
-			link = &(*link)->next;
-		}
-		if (*link == nullptr)
-		{
-			return static_cast<int32_t>(0x804a0261u);
-		}
-		*link = rack->next;
-
-		auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
-		for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
-		{
-			g_pcm_streams.erase(voices + i);
-		}
-		rack->~Ngs2RackInternal();
-	}
-
-	if (allocator.free_handler != nullptr)
-	{
-		return allocator.free_handler(&released);
-	}
-	if (buffer_info != nullptr)
-	{
-		*buffer_info = released;
+		return kNgs2InvalidOut;
 	}
 	return OK;
 }
@@ -899,534 +1439,358 @@ int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* 
 int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBufferInfo* buffer_info, uint32_t num_buffer_info)
 {
 	PRINT_NAME();
-
-	if (buffer_info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (system_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (num_buffer_info != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	auto*       ngs    = reinterpret_cast<Ngs2Internal*>(system_handle);
-	const auto* render = reinterpret_cast<const Ngs2RenderBufferInfoImpl*>(buffer_info);
-	if (render->data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (render->size != sizeof(Ngs2RenderBufferInfoImpl)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (render->channels != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (ngs->option.num_grain_samples == 0 || ngs->option.sample_rate == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	const size_t render_size = static_cast<size_t>(ngs->option.num_grain_samples) * render->channels * sizeof(float);
-	if (render->data_size < render_size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	std::memset(render->data, 0, render_size);
-
-	Core::LockGuard lock(ngs->mutex);
-
-	for (auto* rack = g_racks_list; rack != nullptr; rack = rack->next)
+	auto system = Ngs2AcquireSystem(system_handle);
+	if (!system)
 	{
-		if (rack->ngs == ngs)
+		return kNgs2InvalidSystem;
+	}
+	if (buffer_info == nullptr || num_buffer_info != 1)
+	{
+		return kNgs2InvalidBufferInfo;
+	}
+	Ngs2RenderBufferInfoImpl render {};
+	if (!Ngs2CopyFromGuest(&render, buffer_info, sizeof(render)))
+	{
+		return kNgs2InvalidBufferInfo;
+	}
+	if (render.data == nullptr)
+	{
+		return kNgs2InvalidBufferAddress;
+	}
+	if (render.size != sizeof(render) || render.channels != 2)
+	{
+		return kNgs2InvalidBufferInfo;
+	}
+
+	uint32_t           grain = 0;
+	std::vector<float> mixed;
+	{
+		std::lock_guard lock(system->state_mutex);
+		grain = system->option.num_grain_samples;
+		if (grain == 0 || grain > system->option.max_grain_samples || grain > kNgs2MaxGrainSamples)
 		{
-			auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack + 1);
+			return kNgs2InvalidControl;
+		}
+		const size_t render_size = static_cast<size_t>(grain) * 2u * sizeof(float);
+		if (render.data_size < render_size)
+		{
+			return kNgs2InvalidBufferSize;
+		}
+		if (!Ngs2IsGuestWritable(render.data, render_size))
+		{
+			return kNgs2InvalidBufferAddress;
+		}
 
-			for (uint32_t i = 0; i < rack->option.common.max_voices; i++)
+		mixed.assign(static_cast<size_t>(grain) * 2u, 0.0f);
+		for (const auto& [unused_workspace, rack]: system->racks)
+		{
+			(void)unused_workspace;
+			for (const auto& voice: rack->voices)
 			{
-				auto& voice = voices[i];
-				switch (voice.event)
+				Ngs2ApplyVoiceEvent(voice.get());
+				if (voice->state == Ngs2VoicePlayState::Playing && voice->stream.playing)
 				{
-					case Ngs2VoicePlayEvent::None:
-						// Keep Playing until a Stop event or natural end (below). Only
-						// advance Stopped → Empty when idle so callers that poll state
-						// still observe a finished voice.
-						if (voice.state == Ngs2VoicePlayState::Stopped)
-						{
-							voice.state = Ngs2VoicePlayState::Empty;
-						}
-						break;
-					case Ngs2VoicePlayEvent::Play:
-						if (voice.state == Ngs2VoicePlayState::Empty)
-						{
-							voice.state      = Ngs2VoicePlayState::Playing;
-							voice.play_ticks = 0;
-						}
-						break;
-					case Ngs2VoicePlayEvent::Pause:
-						if (voice.state == Ngs2VoicePlayState::Playing)
-						{
-							voice.state = Ngs2VoicePlayState::Paused;
-						}
-						break;
-					case Ngs2VoicePlayEvent::Resume:
-						if (voice.state == Ngs2VoicePlayState::Paused)
-						{
-							voice.state = Ngs2VoicePlayState::Playing;
-						}
-						break;
-					case Ngs2VoicePlayEvent::Stop:
-						if (voice.state == Ngs2VoicePlayState::Playing)
-						{
-							voice.state = Ngs2VoicePlayState::Stopped;
-						}
-						break;
-					case Ngs2VoicePlayEvent::StopImm:
-					case Ngs2VoicePlayEvent::Kill: voice.state = Ngs2VoicePlayState::Empty; break;
-				}
-				voice.event = Ngs2VoicePlayEvent::None;
-
-				auto stream_it = g_pcm_streams.find(&voice);
-				if (voice.state == Ngs2VoicePlayState::Playing && stream_it != g_pcm_streams.end() && stream_it->second.playing)
-				{
-					if (!Ngs2MixPcmStream(&stream_it->second, render->data, ngs->option.num_grain_samples, render->channels,
-					                      ngs->option.sample_rate))
+					if (!Ngs2MixPcmStream(&voice->stream, mixed.data(), grain, 2, system->option.sample_rate))
 					{
-						voice.state = Ngs2VoicePlayState::Stopped;
-					}
-				} else if (voice.state == Ngs2VoicePlayState::Playing && stream_it == g_pcm_streams.end())
-				{
-					// Preserve state timing for rack types whose PCM contract is still opaque.
-					voice.play_ticks++;
-					if (voice.play_ticks >= 400)
-					{
-						voice.state      = Ngs2VoicePlayState::Stopped;
-						voice.play_ticks = 0;
+						voice->state = Ngs2VoicePlayState::Stopped;
 					}
 				}
 			}
 		}
 	}
 
-	return OK;
+	return Ngs2CopyToGuest(render.data, mixed.data(), mixed.size() * sizeof(float)) ? OK : kNgs2InvalidBufferAddress;
 }
 
 int KYTY_SYSV_ABI Ngs2RackGetVoiceHandle(uintptr_t rack_handle, uint32_t voice_id, uintptr_t* handle)
 {
 	PRINT_NAME();
-
-	if (handle == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (rack_handle == 0)
+	if (handle == nullptr || !Ngs2IsGuestWritable(handle, sizeof(*handle)))
 	{
-		*handle = 0;
-		return static_cast<int32_t>(0x804a0261u);
+		return kNgs2InvalidOut;
 	}
-
-	KYTY_LOG_DEBUG("\t voice_id = %u\n", voice_id);
-
-	auto* rack   = reinterpret_cast<Ngs2RackInternal*>(rack_handle);
-	auto* voices = reinterpret_cast<Ngs2VoiceInternal*>(rack_handle + sizeof(Ngs2RackInternal));
-
-	const uint32_t max_voices = rack->option.common.max_voices;
-	KYTY_LOG_DEBUG("\t max_voices = %u\n", max_voices);
-
-	// Ordinary invalid index is a guest error, not an emulator invariant break.
-	// Captured: reverb rack 0x2001 extended option size 0xb8 → max_voices 16 at
-	// +0x50; GetVoiceHandle for voice_id in [0,15] must succeed after Create.
-	if (max_voices == 0 || voice_id >= max_voices)
+	auto rack = Ngs2AcquireRack(rack_handle);
+	if (!rack)
 	{
-		*handle = 0;
-		return static_cast<int32_t>(0x804a0300u); // SCE_NGS2_ERROR_INVALID_VOICE_HANDLE
+		const uintptr_t invalid_handle = 0;
+		return Ngs2WriteGuest(handle, invalid_handle) ? kNgs2InvalidRack : kNgs2InvalidOut;
 	}
-
-	EXIT_IF(voices[voice_id].rack != rack);
-
-	*handle = reinterpret_cast<uintptr_t>(voices + voice_id);
-
-	return OK;
+	std::lock_guard lock(rack->system->state_mutex);
+	if (voice_id >= rack->max_voices || voice_id >= rack->voices.size())
+	{
+		const uintptr_t invalid_handle = 0;
+		return Ngs2WriteGuest(handle, invalid_handle) ? kNgs2InvalidVoice : kNgs2InvalidOut;
+	}
+	return Ngs2WriteGuest(handle, rack->voices[voice_id]->handle) ? OK : kNgs2InvalidOut;
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamHeader* param_list)
 {
 	PRINT_NAME();
-
-	if (param_list == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (voice_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	auto* voice = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
-
-	Core::LockGuard lock(voice->rack->ngs->mutex);
-
-	const auto* param = param_list;
-
-	for (;;)
+	Ngs2VoiceParamHeader header {};
+	if (!Ngs2ReadGuest(&header, param_list) || header.next != 0)
 	{
-		KYTY_LOG_DEBUG("\t id   = 0x%08" PRIx32 "\n", param->id);
-		KYTY_LOG_DEBUG("\t size = %" PRIu16 "\n", param->size);
-		KYTY_LOG_DEBUG("\t next = %" PRId16 "\n", param->next);
-
-		auto rack_id = param->id >> 16u;
-
-		if (((param->id >> 15u) & 0x1u) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-		switch (rack_id)
-		{
-			case 0x0000:
-			{
-				auto cid = param->id & 0x7fffu;
-				switch (cid)
-				{
-					case 0x0002:
-					{
-						if (param->size != sizeof(Ngs2VoicePortMatrixParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-						const auto* pm = reinterpret_cast<const Ngs2VoicePortMatrixParam*>(param);
-						KYTY_LOG_DEBUG("\t port      = %u\n", pm->port);
-						KYTY_LOG_DEBUG("\t matrix_id = %d\n", pm->matrix_id);
-						break;
-					}
-					case 0x0005:
-					{
-						if (param->size != sizeof(Ngs2VoicePatchParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-						const auto* patch = reinterpret_cast<const Ngs2VoicePatchParam*>(param);
-						KYTY_LOG_DEBUG("\t connect->port          = %u\n", patch->port);
-						KYTY_LOG_DEBUG("\t connect->dest_input_id = %u\n", patch->dest_input_id);
-						KYTY_LOG_DEBUG("\t connect->dest_handle   = 0x%016" PRIx64 "\n", patch->dest_handle);
-						break;
-					}
-					case 0x0006:
-					{
-						if (param->size != sizeof(Ngs2VoiceEventParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-						const auto* event = reinterpret_cast<const Ngs2VoiceEventParam*>(param);
-						switch (event->event_id)
-						{
-							case 0: voice->event = Ngs2VoicePlayEvent::Play; break;
-							case 1: voice->event = Ngs2VoicePlayEvent::Stop; break;
-							case 2: voice->event = Ngs2VoicePlayEvent::StopImm; break;
-							case 3: voice->event = Ngs2VoicePlayEvent::Kill; break;
-							case 4: voice->event = Ngs2VoicePlayEvent::Pause; break;
-							case 5: voice->event = Ngs2VoicePlayEvent::Resume; break;
-							default: EXIT("unknown event_id: 0x%08" PRIx32 "\n", event->event_id);
-						}
-						KYTY_LOG_DEBUG("\t event = %u\n", event->event_id);
-						break;
-					}
-					case 0x0007:
-					{
-						if (param->size != sizeof(Ngs2VoiceCallbackParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-						const auto* cb = reinterpret_cast<const Ngs2VoiceCallbackParam*>(param);
-						KYTY_LOG_DEBUG("\t callback_handler = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_handler));
-						KYTY_LOG_DEBUG("\t callback_data    = 0x%016" PRIx64 "\n", static_cast<uint64_t>(cb->callback_data));
-						KYTY_LOG_DEBUG("\t flags            = 0x%08" PRIx32 "\n", cb->flags);
-						break;
-					}
-					default: EXIT("unknown id: 0x%04" PRIx32 "\n", cid);
-				}
-				break;
-			}
-			case 0x1000: if (voice->rack->type != Ngs2RackType::Sampler) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
-			case 0x2000: if (voice->rack->type != Ngs2RackType::Submixer) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
-			case 0x2001: if (voice->rack->type != Ngs2RackType::Reverb) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
-			case 0x3000: if (voice->rack->type != Ngs2RackType::Mastering) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
-			// 0x4000 class params are used both for CustomSubmixer (historical
-			// Kyty path) and for CustomSampler module params. Observed Gen5
-			// sequence on a CustomSampler voice: 0x40010000 → 0x00000007 →
-			// 0x40010001 → 0x00000005 → 0x40001300 (size 48). Type-check only
-			// until a field of the 48-byte block is shown to affect guest state.
-			case 0x4000:
-				if (voice->rack->type != Ngs2RackType::CustomSubmixer && voice->rack->type != Ngs2RackType::CustomSampler) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-				break;
-			// Gen5 custom-sampler rack (created via rack_id 0x4001). Observed
-			// VoiceControl param id 0x40010000 with size 40 after logo path.
-			// Accept like other rack-class ids: type-check only until a field
-			// of this 40-byte block is shown to affect guest-visible state.
-			case 0x4001:
-			{
-				if (voice->rack->type != Ngs2RackType::CustomSampler) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-				const uint32_t control_id = param->id & 0xffffu;
-				if (control_id == 0)
-				{
-					if (param->size != sizeof(Ngs2CustomSamplerFormatParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-					const auto* format = reinterpret_cast<const Ngs2CustomSamplerFormatParam*>(param);
-					if (format->format_id != 0x12u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-					if (format->channels != 1 && format->channels != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-					if (format->sample_rate != 44100) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-					auto& stream       = g_pcm_streams[voice];
-					stream             = Ngs2PcmStream {};
-					stream.format_id   = format->format_id;
-					stream.channels    = format->channels;
-					stream.sample_rate = format->sample_rate;
-				} else if (control_id == 1)
-				{
-					if (param->size != sizeof(Ngs2CustomSamplerWaveformParam)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-					const auto* waveform = reinterpret_cast<const Ngs2CustomSamplerWaveformParam*>(param);
-					auto&       stream   = g_pcm_streams[voice];
-					if (stream.format_id != 0x12u || stream.channels == 0 || stream.sample_rate == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-					if (waveform->data == nullptr && waveform->context == nullptr)
-					{
-						stream.blocks.clear();
-						stream.block_index  = 0;
-						stream.source_frame = 0.0;
-						stream.playing      = false;
-					} else
-					{
-						if (waveform->data == nullptr || waveform->context == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-						if (waveform->flags != 0x11u || waveform->block_count != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-						const uint64_t bytes_per_frame = static_cast<uint64_t>(stream.channels) * sizeof(int16_t);
-						if (waveform->context->frame_count > UINT64_MAX / bytes_per_frame) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-						if (waveform->context->data_size != waveform->context->frame_count * bytes_per_frame) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-						stream.blocks.push_back({waveform->data, waveform->context->frame_count});
-					}
-				} else
-				{
-					// Other module controls retain their established opaque handling until
-					// a guest-visible effect identifies their contract.
-				}
-				break;
-			}
-			case 0x4002: if (voice->rack->type != Ngs2RackType::CustomSubmixer) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); } break;
-			default: EXIT("unknown rack_id: 0x%" PRIx32 "\n", rack_id);
-		}
-
-		if (param->next == 0)
-		{
-			break;
-		}
-		param = reinterpret_cast<const Ngs2VoiceParamHeader*>(reinterpret_cast<uintptr_t>(param) + param->next);
+		return kNgs2InvalidControl;
+	}
+	auto voice = Ngs2AcquireVoice(voice_handle);
+	if (!voice)
+	{
+		return kNgs2InvalidVoice;
+	}
+	std::lock_guard lock(voice->system->state_mutex);
+	auto rack = voice->rack.lock();
+	if (rack == nullptr || rack->type != Ngs2RackType::CustomSampler)
+	{
+		return kNgs2InvalidControl;
 	}
 
-	return OK;
+	if (header.id == 0x40010000u)
+	{
+		Ngs2CustomSamplerFormatParam format {};
+		if (header.size != sizeof(format) || !Ngs2ReadGuest(&format, reinterpret_cast<const Ngs2CustomSamplerFormatParam*>(param_list)) ||
+		    format.header.next != 0 || format.header.id != header.id || format.format_id != 0x12u ||
+		    (format.channels != 1 && format.channels != 2) || format.sample_rate != 44100u)
+		{
+			return kNgs2InvalidControl;
+		}
+		voice->stream             = {};
+		voice->stream.format_id   = format.format_id;
+		voice->stream.channels    = format.channels;
+		voice->stream.sample_rate = format.sample_rate;
+		return OK;
+	}
+
+	if (header.id == 0x40010001u)
+	{
+		Ngs2CustomSamplerWaveformParam waveform {};
+		if (header.size != sizeof(waveform) || !Ngs2ReadGuest(&waveform, reinterpret_cast<const Ngs2CustomSamplerWaveformParam*>(param_list)) ||
+		    waveform.header.next != 0 || waveform.header.id != header.id || waveform.data == nullptr || waveform.context == nullptr ||
+		    waveform.flags != 0x11u || waveform.block_count != 1u || voice->stream.format_id != 0x12u ||
+		    (voice->stream.channels != 1 && voice->stream.channels != 2) || voice->stream.sample_rate != 44100u)
+		{
+			return kNgs2InvalidControl;
+		}
+
+		Ngs2CustomSamplerWaveformContext context {};
+		if (!Ngs2ReadGuest(&context, waveform.context) || context.offset_frames != 0 || context.frame_count == 0 ||
+		    context.frame_count > voice->system->option.max_grain_samples || context.frame_count > kNgs2MaxGrainSamples)
+		{
+			return kNgs2InvalidControl;
+		}
+		size_t pcm_bytes = 0;
+		if (!Ngs2CalculatePcmBytes(context.frame_count, voice->stream.channels, &pcm_bytes) || context.data_size != pcm_bytes)
+		{
+			return kNgs2InvalidControl;
+		}
+		std::vector<int16_t> samples(pcm_bytes / sizeof(int16_t));
+		if (!Ngs2CopyFromGuest(samples.data(), waveform.data, pcm_bytes))
+		{
+			return kNgs2InvalidControl;
+		}
+		voice->stream.samples      = std::move(samples);
+		voice->stream.frame_count  = context.frame_count;
+		voice->stream.source_frame = 0.0;
+		voice->stream.playing      = false;
+		return OK;
+	}
+
+	return kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* commands, uint32_t num_commands)
 {
 	PRINT_NAME();
-
-	constexpr int32_t NGS2_ERROR_INVALID_VOICE_HANDLE    = static_cast<int32_t>(0x804a0300u);
-	constexpr int32_t NGS2_ERROR_INVALID_CONTROL_ADDRESS = static_cast<int32_t>(0x804a0309u);
-
-	if (voice_handle == 0)
+	if (num_commands != 1 || commands == nullptr)
 	{
-		return NGS2_ERROR_INVALID_VOICE_HANDLE;
+		return kNgs2InvalidControl;
 	}
-	if (num_commands == 0)
+	std::array<uint32_t, 3> command {};
+	if (!Ngs2CopyFromGuest(command.data(), commands, sizeof(command)))
 	{
-		return OK;
+		return kNgs2InvalidControl;
 	}
-	if (commands == nullptr)
+	auto voice = Ngs2AcquireVoice(voice_handle);
+	if (!voice)
 	{
-		return NGS2_ERROR_INVALID_CONTROL_ADDRESS;
+		return kNgs2InvalidVoice;
 	}
-
-	if (num_commands != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	auto*           voice   = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
-	const auto*     command = static_cast<const uint32_t*>(commands);
-	Core::LockGuard lock(voice->rack->ngs->mutex);
-	for (int i = 0; i < 3; i++)
+	std::lock_guard lock(voice->system->state_mutex);
+	auto rack = voice->rack.lock();
+	if (rack == nullptr || rack->type != Ngs2RackType::CustomSampler)
+	{
+		return kNgs2InvalidControl;
+	}
+	for (size_t i = 0; i < command.size(); ++i)
 	{
 		voice->last_command[i] = command[i];
 	}
-	if (voice->rack->type == Ngs2RackType::CustomSampler)
+	if (command[0] == 2u && command[1] == 0x400u)
 	{
-		auto stream_it = g_pcm_streams.find(voice);
-		if (command[0] == 2u && command[1] == 0x400u && stream_it != g_pcm_streams.end())
+		if (command[2] == 1u)
 		{
-			if (command[2] == 1u)
+			if (voice->stream.format_id != 0x12u || voice->stream.samples.empty() || voice->stream.frame_count == 0)
 			{
-				voice->event              = Ngs2VoicePlayEvent::Play;
-				stream_it->second.playing = true;
-			} else if (command[2] == 8u)
-			{
-				voice->event                   = Ngs2VoicePlayEvent::StopImm;
-				stream_it->second.playing      = false;
-				stream_it->second.block_index  = 0;
-				stream_it->second.source_frame = 0.0;
+				return kNgs2InvalidControl;
 			}
-		} else if (command[0] == 6u && command[1] == 0x100u && stream_it != g_pcm_streams.end())
-		{
-			float gain = 0.0f;
-			std::memcpy(&gain, &command[2], sizeof(gain));
-			if (!std::isfinite(gain) || gain < 0.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-			stream_it->second.gain = gain;
+			voice->event          = Ngs2VoicePlayEvent::Play;
+			voice->stream.playing = true;
+			return OK;
 		}
+		if (command[2] == 8u)
+		{
+			voice->event              = Ngs2VoicePlayEvent::StopImm;
+			voice->stream.playing      = false;
+			voice->stream.source_frame = 0.0;
+			return OK;
+		}
+		return kNgs2InvalidControl;
 	}
-
-	KYTY_LOG_DEBUG("\t command = {%08" PRIx32 ", %08" PRIx32 ", %08" PRIx32 "}\n", voice->last_command[0], voice->last_command[1],
-	       voice->last_command[2]);
-	return OK;
+	if (command[0] == 6u && command[1] == 0x100u)
+	{
+		float gain = 0.0f;
+		std::memcpy(&gain, &command[2], sizeof(gain));
+		if (!std::isfinite(gain) || gain < 0.0f)
+		{
+			return kNgs2InvalidControl;
+		}
+		voice->stream.gain = gain;
+		return OK;
+	}
+	return kNgs2InvalidControl;
 }
-
-// Layout from PS4 NGS2 geom headers (vector = 3 floats; see OrbisNgs2Geom*Param).
-struct Ngs2GeomVector
-{
-	float x = 0;
-	float y = 0;
-	float z = 0;
-};
-struct Ngs2GeomCone
-{
-	float inner_level = 0;
-	float inner_angle = 0;
-	float outer_level = 0;
-	float outer_angle = 0;
-};
-struct Ngs2GeomRolloff
-{
-	uint32_t model              = 0;
-	float    max_distance       = 0;
-	float    rolloff_factor     = 0;
-	float    reference_distance = 0;
-};
-struct Ngs2GeomListenerParam
-{
-	Ngs2GeomVector position {};
-	Ngs2GeomVector orient_front {};
-	Ngs2GeomVector orient_up {};
-	Ngs2GeomVector velocity {};
-	float          sound_speed = 0;
-	uint32_t       reserved[2] = {};
-};
-struct Ngs2GeomSourceParam
-{
-	Ngs2GeomVector  position {};
-	Ngs2GeomVector  velocity {};
-	Ngs2GeomVector  direction {};
-	Ngs2GeomCone    cone {};
-	Ngs2GeomRolloff rolloff {};
-	float           doppler_factor = 0;
-	float           fbw_level      = 0;
-	float           lfe_level      = 0;
-	float           max_level      = 0;
-	float           min_level      = 0;
-	float           radius         = 0;
-	uint32_t        num_speakers   = 0;
-	uint32_t        matrix_format  = 0;
-	uint32_t        reserved[2]    = {};
-};
-struct Ngs2GeomListenerWork
-{
-	float          matrix[4][4] = {};
-	Ngs2GeomVector velocity {};
-	float          sound_speed = 0;
-	uint32_t       coordinate  = 0;
-	uint32_t       reserved[3] = {};
-};
 
 int KYTY_SYSV_ABI Ngs2GeomResetSourceParam(void* out_source_param)
 {
 	PRINT_NAME();
-
-	// Sony reset: zero then set identity-ish defaults for a non-spatialised source.
-	if (out_source_param != nullptr)
-	{
-		auto* p                       = static_cast<Ngs2GeomSourceParam*>(out_source_param);
-		*p                            = Ngs2GeomSourceParam {};
-		p->cone.inner_level           = 1.0f;
-		p->cone.outer_level           = 1.0f;
-		p->cone.outer_angle           = 3.14159265f; // 180 deg — omnidirectional default
-		p->rolloff.max_distance       = 1000.0f;
-		p->rolloff.rolloff_factor     = 1.0f;
-		p->rolloff.reference_distance = 1.0f;
-		p->doppler_factor             = 1.0f;
-		p->fbw_level                  = 1.0f;
-		p->lfe_level                  = 1.0f;
-		p->max_level                  = 1.0f;
-		p->min_level                  = 0.0f;
-		p->radius                     = 0.0f;
-		p->num_speakers               = 2;
-	}
-	return OK;
+	(void)out_source_param;
+	return kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2GeomResetListenerParam(void* out_listener_param)
 {
 	PRINT_NAME();
-
-	if (out_listener_param != nullptr)
-	{
-		auto* p           = static_cast<Ngs2GeomListenerParam*>(out_listener_param);
-		*p                = Ngs2GeomListenerParam {};
-		p->orient_front.z = -1.0f; // look down -Z
-		p->orient_up.y    = 1.0f;
-		p->sound_speed    = 340.0f;
-	}
-	return OK;
+	(void)out_listener_param;
+	return kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2GeomCalcListener(const void* listener_param, void* out_work, uint32_t flags)
 {
 	PRINT_NAME();
-
-	KYTY_LOG_DEBUG("\t flags = %u\n", flags);
-	if (out_work != nullptr)
-	{
-		auto* w = static_cast<Ngs2GeomListenerWork*>(out_work);
-		*w      = Ngs2GeomListenerWork {};
-		// Identity 4x4
-		w->matrix[0][0] = w->matrix[1][1] = w->matrix[2][2] = w->matrix[3][3] = 1.0f;
-		if (listener_param != nullptr)
-		{
-			const auto* p  = static_cast<const Ngs2GeomListenerParam*>(listener_param);
-			w->velocity    = p->velocity;
-			w->sound_speed = p->sound_speed;
-		} else
-		{
-			w->sound_speed = 340.0f;
-		}
-	}
-	return OK;
+	(void)listener_param;
+	(void)out_work;
+	(void)flags;
+	return kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2GeomApply(const void* listener_work, const void* source_param, void* out_attrib, uint32_t flags)
 {
 	PRINT_NAME();
-
-	KYTY_LOG_DEBUG("\t flags = %u\n", flags);
 	(void)listener_work;
 	(void)source_param;
-	if (out_attrib != nullptr)
-	{
-		// Attribute is large (level matrix); zero the first 8 floats of levels + pitch.
-		std::memset(out_attrib, 0, 4 + 8 * 8 * 4);
-		*static_cast<float*>(out_attrib) = 1.0f; // pitchRatio
-	}
-	return OK;
+	(void)out_attrib;
+	(void)flags;
+	return kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* state, size_t state_size)
 {
 	PRINT_NAME();
-
-	if (state == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (voice_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	auto* voice = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
-
-	Core::LockGuard lock(voice->rack->ngs->mutex);
-
-	switch (voice->rack->type)
+	auto voice = Ngs2AcquireVoice(voice_handle);
+	if (!voice)
 	{
-		// Gen5 CustomSampler (rack 0x4001) GetState was observed with state_size 48,
-		// matching the standard Sampler voice-state block on this ABI. Fill the
-		// same fields; do not invent the larger PS4 custom-state layout (80).
-		case Ngs2RackType::CustomSampler:
-		case Ngs2RackType::Sampler:
-		{
-			if (state_size != sizeof(Ngs2SamplerVoiceState)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-			auto* sampler                    = reinterpret_cast<Ngs2SamplerVoiceState*>(state);
-			sampler->voice_state.state_flags = Ngs2GetVoiceStateFlags(voice);
-			sampler->envelope_height         = 1.0f;
-			sampler->peak_height             = 0.0f;
-			sampler->reserved                = 0;
-			sampler->num_decoded_samples     = 0;
-			sampler->decoded_data_size       = 0;
-			sampler->user_data               = 0;
-			sampler->waveform_data           = nullptr;
-			KYTY_LOG_DEBUG("\t state_flags = %u\n", sampler->voice_state.state_flags);
-			break;
-		}
-		default: EXIT("unknown type: %s\n", Core::EnumName(voice->rack->type).C_Str());
+		return kNgs2InvalidVoice;
 	}
-
-	return OK;
+	if (state == nullptr || state_size != sizeof(Ngs2SamplerVoiceState) || !Ngs2IsGuestWritable(state, state_size))
+	{
+		return kNgs2InvalidControl;
+	}
+	Ngs2SamplerVoiceState output {};
+	{
+		std::lock_guard lock(voice->system->state_mutex);
+		auto rack = voice->rack.lock();
+		if (rack == nullptr || (rack->type != Ngs2RackType::CustomSampler && rack->type != Ngs2RackType::Sampler))
+		{
+			return kNgs2InvalidControl;
+		}
+		output.voice_state.state_flags = Ngs2GetVoiceStateFlags(*voice.Get());
+	}
+	return Ngs2CopyToGuest(state, &output, sizeof(output)) ? OK : kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2VoiceGetStateFlags(uintptr_t voice_handle, uint32_t* state_flags)
 {
 	PRINT_NAME();
+	auto voice = Ngs2AcquireVoice(voice_handle);
+	if (!voice)
+	{
+		return kNgs2InvalidVoice;
+	}
+	if (state_flags == nullptr || !Ngs2IsGuestWritable(state_flags, sizeof(*state_flags)))
+	{
+		return kNgs2InvalidControl;
+	}
+	uint32_t output = 0;
+	{
+		std::lock_guard lock(voice->system->state_mutex);
+		output = Ngs2GetVoiceStateFlags(*voice.Get());
+	}
+	return Ngs2WriteGuest(state_flags, output) ? OK : kNgs2InvalidControl;
+}
 
-	if (state_flags == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (voice_handle == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+int KYTY_SYSV_ABI Ngs2RackGetInfo(uintptr_t rack_handle, void* out_info, size_t info_size)
+{
+	PRINT_NAME();
+	auto rack = Ngs2AcquireRack(rack_handle);
+	if (!rack)
+	{
+		return kNgs2InvalidRack;
+	}
+	(void)out_info;
+	(void)info_size;
+	// The output layout and size relation remain unmeasured. In particular, do
+	// not memset a guest-provided size; that would turn an unknown ABI into a
+	// guest-controlled write primitive.
+	return kNgs2InvalidControl;
+}
 
-	auto* voice = reinterpret_cast<Ngs2VoiceInternal*>(voice_handle);
+int KYTY_SYSV_ABI Ngs2VoiceGetPortInfo(uintptr_t voice_handle, uint32_t port, void* out_info, size_t out_info_size)
+{
+	PRINT_NAME();
+	auto voice = Ngs2AcquireVoice(voice_handle);
+	if (!voice)
+	{
+		return kNgs2InvalidVoice;
+	}
+	(void)port;
+	(void)out_info;
+	(void)out_info_size;
+	return kNgs2InvalidControl;
+}
 
-	Core::LockGuard lock(voice->rack->ngs->mutex);
+int KYTY_SYSV_ABI Ngs2VoiceQueryInfo(uintptr_t voice_handle, uint32_t query_type, const void* param, void* out_info)
+{
+	PRINT_NAME();
+	auto voice = Ngs2AcquireVoice(voice_handle);
+	if (!voice)
+	{
+		return kNgs2InvalidVoice;
+	}
+	(void)query_type;
+	(void)param;
+	(void)out_info;
+	return kNgs2InvalidControl;
+}
 
-	*state_flags = Ngs2GetVoiceStateFlags(voice);
-	KYTY_LOG_DEBUG("\t state_flags = %u\n", *state_flags);
-
-	return OK;
+int KYTY_SYSV_ABI Ngs2PanGetVolumeMatrix(void* work, const void* params, uint32_t num_params, uint32_t matrix_format,
+	                                         float* out_volume_matrix)
+{
+	PRINT_NAME();
+	(void)work;
+	(void)params;
+	(void)num_params;
+	(void)matrix_format;
+	(void)out_volume_matrix;
+	return kNgs2InvalidControl;
 }
 
 } // namespace Ngs2

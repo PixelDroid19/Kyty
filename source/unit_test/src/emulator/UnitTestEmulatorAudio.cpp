@@ -1,11 +1,17 @@
 #include "Kyty/UnitTest.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Audio.h"
 #include "Emulator/AudioVideoBackend.h"
 #include "Emulator/AudioPcm.h"
 #include "Emulator/Config.h"
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
+#include "SDL.h"
+
+#include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <cstdlib>
 #include <chrono>
@@ -18,6 +24,54 @@ UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
 
+namespace {
+
+class GuestReadableBlock
+{
+public:
+	explicit GuestReadableBlock(size_t size):
+	    m_size(size), m_address(Core::VirtualMemory::Alloc(0, size, Core::VirtualMemory::Mode::ReadWrite))
+	{
+	}
+	~GuestReadableBlock()
+	{
+		if (m_address != 0)
+		{
+			(void)Core::VirtualMemory::Free(m_address);
+		}
+	}
+
+	GuestReadableBlock(const GuestReadableBlock&)            = delete;
+	GuestReadableBlock& operator=(const GuestReadableBlock&) = delete;
+
+	[[nodiscard]] bool IsValid() const { return m_address != 0; }
+	[[nodiscard]] void* Data() const { return reinterpret_cast<void*>(m_address); }
+	[[nodiscard]] bool Protect(Core::VirtualMemory::Mode mode) const
+	{
+		return m_address != 0 && m_size != 0 && Core::VirtualMemory::Protect(m_address, m_size, mode);
+	}
+	void               Release() { m_address = 0; }
+
+private:
+	size_t   m_size    = 0;
+	uint64_t m_address = 0;
+};
+
+template <typename T>
+class GuestValue
+{
+public:
+	GuestValue(): m_storage(sizeof(T)) {}
+
+	[[nodiscard]] bool IsValid() const { return m_storage.IsValid(); }
+	[[nodiscard]] T*   Data() const { return static_cast<T*>(m_storage.Data()); }
+
+private:
+	GuestReadableBlock m_storage;
+};
+
+} // namespace
+
 TEST(EmulatorAudio, AudioOut2UserCreateUsesTwoArgumentPointerSizedHandleAbi)
 {
 	using ExpectedCreate = int(KYTY_SYSV_ABI*)(uint32_t, uintptr_t*);
@@ -25,6 +79,419 @@ TEST(EmulatorAudio, AudioOut2UserCreateUsesTwoArgumentPointerSizedHandleAbi)
 
 	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2UserCreate), ExpectedCreate>));
 	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2UserDestroy), ExpectedDestroy>));
+}
+
+TEST(EmulatorAudio, AudioOut2UserCreateRejectsReadOnlyOutputWithoutWriting)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EXIT(
+	    {
+		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		GuestReadableBlock output_storage(sizeof(uintptr_t));
+		if (!output_storage.IsValid())
+		{
+			std::_Exit(2);
+		}
+		*static_cast<uintptr_t*>(output_storage.Data()) = UINTPTR_MAX;
+		if (!output_storage.Protect(Core::VirtualMemory::Mode::Read))
+		{
+			std::_Exit(3);
+		}
+		const int result = AudioOut2::AudioOut2UserCreate(255, static_cast<uintptr_t*>(output_storage.Data()));
+		std::_Exit(result == Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL ? 0 : 4);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorAudio, AudioInCloseReleasesTheHostInputSlot)
+{
+	// The HLE owns the guest-visible handle, while HostAudio owns the slot.
+	// A second close is therefore the observable regression boundary.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	EXPECT_EQ(SDL_setenv("SDL_AUDIODRIVER", "dummy", 0), 0);
+
+	auto* subsystem = AudioSubsystem::Instance();
+	subsystem->Destroy(Core::SubsystemsList::Instance());
+	subsystem->Init(Core::SubsystemsList::Instance());
+
+	const int handle = AudioIn::AudioInOpen(255, 1, 0, 256, 48'000, 2);
+	EXPECT_GT(handle, 0);
+	if (handle > 0)
+	{
+		EXPECT_EQ(AudioIn::AudioInClose(handle), 0);
+		EXPECT_EQ(AudioIn::AudioInClose(handle), AUDIO_IN_ERROR_INVALID_HANDLE);
+	}
+
+	subsystem->Destroy(Core::SubsystemsList::Instance());
+}
+
+TEST(EmulatorAudio, AudioOut2ContextOperationsRejectUnmeasuredLayoutsWithoutWrites)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock context_param_storage(64);
+	GuestReadableBlock context_workspace(64);
+	GuestValue<uint64_t> memory_size_storage;
+	GuestValue<int32_t> context_storage;
+	ASSERT_TRUE(context_param_storage.IsValid());
+	ASSERT_TRUE(context_workspace.IsValid());
+	ASSERT_TRUE(memory_size_storage.IsValid());
+	ASSERT_TRUE(context_storage.IsValid());
+	std::memset(context_param_storage.Data(), 0xa5, 64);
+	std::memset(context_workspace.Data(), 0xa5, 64);
+	*memory_size_storage.Data() = UINT64_MAX;
+	*context_storage.Data()     = INT32_MAX;
+
+	auto* context_param = context_param_storage.Data();
+	EXPECT_EQ(AudioOut2::AudioOut2ContextResetParam(nullptr), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextResetParam(context_param), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextQueryMemory(nullptr, memory_size_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextQueryMemory(context_param, memory_size_storage.Data()),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(nullptr, context_workspace.Data(), 64, context_storage.Data()),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(context_param, context_workspace.Data(), 64, context_storage.Data()),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(*memory_size_storage.Data(), UINT64_MAX);
+	EXPECT_EQ(*context_storage.Data(), INT32_MAX);
+	for (size_t i = 0; i < 64; ++i)
+	{
+		EXPECT_EQ(static_cast<uint8_t*>(context_param_storage.Data())[i], 0xa5);
+		EXPECT_EQ(static_cast<uint8_t*>(context_workspace.Data())[i], 0xa5);
+	}
+}
+
+TEST(EmulatorAudio, AudioOut2HostStatePushPreservesPcmQueueAndSinkAcrossFailure)
+{
+	// Host-state regression only: ContextCreate itself is intentionally not a
+	// supported guest contract until its parameter/workspace ABI is evidenced.
+	using ExpectedPush = int(KYTY_SYSV_ABI*)(int32_t, uint32_t);
+	using ExpectedSetAttr = int(KYTY_SYSV_ABI*)(int32_t, const void*, uint32_t);
+	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2ContextPush), ExpectedPush>));
+	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2PortSetAttributes), ExpectedSetAttr>));
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	EXPECT_EQ(SDL_setenv("SDL_AUDIODRIVER", "dummy", 1), 0);
+
+	auto* subsystem = AudioSubsystem::Instance();
+	subsystem->Destroy(Core::SubsystemsList::Instance());
+	subsystem->Init(Core::SubsystemsList::Instance());
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	const int32_t context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(context, 0);
+
+	// MAIN port, float stereo (data_format 0x200).
+	GuestReadableBlock port_param_storage(16);
+	ASSERT_TRUE(port_param_storage.IsValid());
+	auto* port_param = static_cast<uint8_t*>(port_param_storage.Data());
+	*reinterpret_cast<uint16_t*>(port_param + 0)  = 0;      // type MAIN
+	*reinterpret_cast<uint32_t*>(port_param + 4)  = 0x200u; // f32 stereo
+	*reinterpret_cast<uint32_t*>(port_param + 8)  = 48000u;
+	*reinterpret_cast<uint32_t*>(port_param + 12) = 0;
+	GuestValue<int32_t> port_storage;
+	ASSERT_TRUE(port_storage.IsValid());
+	*port_storage.Data() = 0;
+	ASSERT_EQ(AudioOut2::AudioOut2PortCreate(context, port_param, port_storage.Data()), 0);
+	const int32_t port = *port_storage.Data();
+	ASSERT_GT(port, 0);
+
+	GuestReadableBlock state_storage(0x20);
+	ASSERT_TRUE(state_storage.IsValid());
+	auto* state = static_cast<uint8_t*>(state_storage.Data());
+	ASSERT_EQ(AudioOut2::AudioOut2PortGetState(port, state), 0);
+	EXPECT_EQ(state[2], 2u); // channels
+
+	constexpr uint32_t kGrain = 256;
+	GuestReadableBlock pcm_storage(sizeof(float) * kGrain * 2 + sizeof(uintptr_t) + 0x18);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* guest_bytes = static_cast<uint8_t*>(pcm_storage.Data());
+	auto* grain       = reinterpret_cast<float*>(guest_bytes);
+	for (uint32_t i = 0; i < kGrain * 2; i++)
+	{
+		grain[i] = 0.25f;
+	}
+	auto* pcm_ptr = reinterpret_cast<uintptr_t*>(guest_bytes + sizeof(float) * kGrain * 2);
+	*pcm_ptr      = reinterpret_cast<uintptr_t>(grain);
+
+	// Attribute entry: {u32 id=0, u32 pad, void* value, size_t value_size=8}
+	// value points at a qword that holds the PCM address (double-indirect).
+	auto* attr = guest_bytes + sizeof(float) * kGrain * 2 + sizeof(uintptr_t);
+	std::memset(attr, 0, 0x18);
+	*reinterpret_cast<uint32_t*>(attr + 0)  = 0;
+	*reinterpret_cast<uint64_t*>(attr + 8)  = reinterpret_cast<uint64_t>(pcm_ptr);
+	*reinterpret_cast<uint64_t*>(attr + 16) = sizeof(*pcm_ptr);
+	ASSERT_EQ(AudioOut2::AudioOut2PortSetAttributes(port, attr, 1), 0);
+
+	AudioOut2::HostStateTest::FailNextSubmit();
+	// A failed enqueue must leave the published PCM, queue accounting and the
+	// already-open sink available for the next retry.
+	EXPECT_EQ(AudioOut2::AudioOut2ContextPush(context, 0), AUDIO_OUT_ERROR_INVALID_PORT);
+	const int sink_after_failure = AudioOut2::HostStateTest::GetContextSinkHandle(context);
+	EXPECT_GT(sink_after_failure, 0);
+
+	GuestValue<uint32_t> used_storage;
+	GuestValue<uint32_t> available_storage;
+	ASSERT_TRUE(used_storage.IsValid());
+	ASSERT_TRUE(available_storage.IsValid());
+	ASSERT_EQ(AudioOut2::AudioOut2ContextGetQueueLevel(context, used_storage.Data(), available_storage.Data()), 0);
+	EXPECT_EQ(*used_storage.Data(), 0u);
+	EXPECT_EQ(*available_storage.Data(), 4u);
+
+	ASSERT_EQ(AudioOut2::AudioOut2ContextPush(context, 0), 0);
+	EXPECT_EQ(AudioOut2::HostStateTest::GetContextSinkHandle(context), sink_after_failure);
+	ASSERT_EQ(AudioOut2::AudioOut2ContextGetQueueLevel(context, used_storage.Data(), available_storage.Data()), 0);
+	EXPECT_EQ(*used_storage.Data(), 1u);
+	EXPECT_EQ(*available_storage.Data(), 3u);
+
+	ASSERT_EQ(AudioOut2::AudioOut2PortDestroy(port), 0);
+	ASSERT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+	subsystem->Destroy(Core::SubsystemsList::Instance());
+}
+
+TEST(EmulatorAudio, AudioOut2PortCreateRejectsUnsupportedDataFormat)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	const int32_t context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(context, 0);
+
+	GuestReadableBlock port_param_storage(16);
+	ASSERT_TRUE(port_param_storage.IsValid());
+	auto* port_param = static_cast<uint8_t*>(port_param_storage.Data());
+	*reinterpret_cast<uint32_t*>(port_param + 4) = 0x202u; // two channels, unsupported sample type 2
+	GuestValue<int32_t> port_storage;
+	ASSERT_TRUE(port_storage.IsValid());
+	*port_storage.Data() = 0;
+	EXPECT_EQ(AudioOut2::AudioOut2PortCreate(context, port_param, port_storage.Data()), AUDIO_OUT_ERROR_INVALID_FORMAT);
+	EXPECT_EQ(*port_storage.Data(), 0);
+	*reinterpret_cast<uint32_t*>(port_param + 4) = 0x300u; // three channels are not an evidenced AudioOut layout
+	EXPECT_EQ(AudioOut2::AudioOut2PortCreate(context, port_param, port_storage.Data()), AUDIO_OUT_ERROR_INVALID_FORMAT);
+	EXPECT_EQ(*port_storage.Data(), 0);
+
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+}
+
+TEST(EmulatorAudio, AudioOut2PortCreateRejectsUnknownContext)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	GuestReadableBlock port_param_storage(16);
+	ASSERT_TRUE(port_param_storage.IsValid());
+	auto* port_param = static_cast<uint8_t*>(port_param_storage.Data());
+	*reinterpret_cast<uint32_t*>(port_param + 4) = 0x200u;
+	GuestValue<int32_t> port_storage;
+	ASSERT_TRUE(port_storage.IsValid());
+	*port_storage.Data() = 0;
+	EXPECT_EQ(AudioOut2::AudioOut2PortCreate(16, port_param, port_storage.Data()), AUDIO_OUT_ERROR_INVALID_PORT);
+	EXPECT_EQ(*port_storage.Data(), 0);
+}
+
+TEST(EmulatorAudio, AudioOut2RejectsUnreadablePortBlocks)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	const int32_t context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(context, 0);
+
+	GuestValue<int32_t> port_storage;
+	ASSERT_TRUE(port_storage.IsValid());
+	*port_storage.Data() = 0;
+	EXPECT_EQ(AudioOut2::AudioOut2PortCreate(context, reinterpret_cast<const void*>(uintptr_t {1}), port_storage.Data()),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	GuestReadableBlock port_param_storage(16);
+	ASSERT_TRUE(port_param_storage.IsValid());
+	auto* port_param = static_cast<uint8_t*>(port_param_storage.Data());
+	*reinterpret_cast<uint32_t*>(port_param + 4) = 0x200u;
+	ASSERT_EQ(AudioOut2::AudioOut2PortCreate(context, port_param, port_storage.Data()), 0);
+	const int32_t port = *port_storage.Data();
+	EXPECT_EQ(AudioOut2::AudioOut2PortGetState(port, reinterpret_cast<void*>(uintptr_t {1})),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	EXPECT_EQ(AudioOut2::AudioOut2PortDestroy(port), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+}
+
+TEST(EmulatorAudio, AudioOut2RejectsUnreadableOutputBlocks)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextQueryMemory(nullptr, reinterpret_cast<uint64_t*>(uintptr_t {1})),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	GuestReadableBlock context_workspace(64);
+	ASSERT_TRUE(context_workspace.IsValid());
+	EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(nullptr, context_workspace.Data(), 64,
+	                                             reinterpret_cast<int32_t*>(uintptr_t {1})),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	const int32_t context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(context, 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextGetQueueLevel(context, reinterpret_cast<uint32_t*>(uintptr_t {1}), nullptr),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	GuestReadableBlock port_param_storage(16);
+	ASSERT_TRUE(port_param_storage.IsValid());
+	auto* port_param = static_cast<uint8_t*>(port_param_storage.Data());
+	*reinterpret_cast<uint32_t*>(port_param + 4) = 0x200u;
+	EXPECT_EQ(AudioOut2::AudioOut2PortCreate(context, port_param, reinterpret_cast<int32_t*>(uintptr_t {1})),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioOut2::AudioOut2UserCreate(255, reinterpret_cast<uintptr_t*>(uintptr_t {1})),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+}
+
+TEST(EmulatorAudio, AudioOut2NonBlockingPushReportsFullQueue)
+{
+	// Host-state regression only: public ContextCreate remains intentionally
+	// unsupported until its guest ABI is measured.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	const int32_t context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(context, 0);
+	AudioOut2::HostStateTest::FillContextQueue(context);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextPush(context, 0), AUDIO_OUT_ERROR_PORT_FULL);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+}
+
+TEST(EmulatorAudio, AudioOut2PortSetAttributesRejectsMalformedPcmPointerEntry)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	const int32_t context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(context, 0);
+
+	GuestReadableBlock port_param_storage(16);
+	ASSERT_TRUE(port_param_storage.IsValid());
+	auto* port_param = static_cast<uint8_t*>(port_param_storage.Data());
+	*reinterpret_cast<uint32_t*>(port_param + 4) = 0x200u;
+	GuestValue<int32_t> port_storage;
+	ASSERT_TRUE(port_storage.IsValid());
+	ASSERT_EQ(AudioOut2::AudioOut2PortCreate(context, port_param, port_storage.Data()), 0);
+	const int32_t port = *port_storage.Data();
+
+	GuestReadableBlock attr_storage(sizeof(uintptr_t) + 0x18);
+	ASSERT_TRUE(attr_storage.IsValid());
+	auto* attr_bytes = static_cast<uint8_t*>(attr_storage.Data());
+	auto* pcm_ptr    = reinterpret_cast<uintptr_t*>(attr_bytes);
+	*pcm_ptr         = 1;
+	auto* attr = attr_bytes + sizeof(*pcm_ptr);
+	std::memset(attr, 0, 0x18);
+	*reinterpret_cast<uint32_t*>(attr + 0)  = 0;
+	*reinterpret_cast<uint64_t*>(attr + 8)  = reinterpret_cast<uint64_t>(pcm_ptr);
+	*reinterpret_cast<uint64_t*>(attr + 16) = sizeof(*pcm_ptr);
+	EXPECT_EQ(AudioOut2::AudioOut2PortSetAttributes(port, attr, 1), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	EXPECT_EQ(AudioOut2::AudioOut2PortDestroy(port), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+}
+
+TEST(EmulatorAudio, AudioOut2PortSetAttributesRejectsOversizedEntryCount)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	const int32_t context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(context, 0);
+
+	GuestReadableBlock port_param_storage(16);
+	ASSERT_TRUE(port_param_storage.IsValid());
+	auto* port_param = static_cast<uint8_t*>(port_param_storage.Data());
+	*reinterpret_cast<uint32_t*>(port_param + 4) = 0x200u;
+	GuestValue<int32_t> port_storage;
+	ASSERT_TRUE(port_storage.IsValid());
+	ASSERT_EQ(AudioOut2::AudioOut2PortCreate(context, port_param, port_storage.Data()), 0);
+	const int32_t port = *port_storage.Data();
+
+	GuestReadableBlock attrs_storage(33 * 0x18);
+	ASSERT_TRUE(attrs_storage.IsValid());
+	auto* attrs = static_cast<uint8_t*>(attrs_storage.Data());
+	std::memset(attrs, 0, 33 * 0x18);
+	EXPECT_EQ(AudioOut2::AudioOut2PortSetAttributes(port, attrs, 33), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	EXPECT_EQ(AudioOut2::AudioOut2PortDestroy(port), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+}
+
+TEST(EmulatorAudio, AudioOut2PushRejectsContextRecreatedWhileBlocking)
+{
+	// Host-state regression only: this exercises the close/recreate race without
+	// widening the intentionally unsupported public ContextCreate contract.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	const int32_t first_context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(first_context, 0);
+	AudioOut2::HostStateTest::FillContextQueue(first_context);
+
+	std::atomic<int> blocking_result {0};
+	std::thread blocker([&] { blocking_result.store(AudioOut2::AudioOut2ContextPush(first_context, 1)); });
+	std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+	ASSERT_EQ(AudioOut2::AudioOut2ContextDestroy(first_context), 0);
+	const int32_t replacement_context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(replacement_context, 0);
+	EXPECT_EQ(replacement_context, first_context);
+
+	blocker.join();
+	EXPECT_EQ(blocking_result.load(), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(replacement_context), 0);
 }
 
 TEST(EmulatorAudio, OpensDecoderThroughCanonicalNamespaceWithoutPrivateMedia)
@@ -451,10 +918,12 @@ TEST(EmulatorAudio, QueriesDefaultNgs2SystemBufferContract)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	alignas(uint64_t) uint64_t raw_info[8];
-	for (auto& value: raw_info)
+	GuestReadableBlock info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(info_storage.IsValid());
+	auto* raw_info = static_cast<uint64_t*>(info_storage.Data());
+	for (size_t i = 0; i < 8; i++)
 	{
-		value = UINT64_MAX;
+		raw_info[i] = UINT64_MAX;
 	}
 
 	auto* info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info);
@@ -470,22 +939,493 @@ TEST(EmulatorAudio, QueriesDefaultNgs2SystemBufferContract)
 	EXPECT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, nullptr), static_cast<int32_t>(0x804a0053u));
 }
 
-TEST(EmulatorAudio, CreatesNgs2SystemInProvidedBuffer)
+TEST(EmulatorAudio, Ngs2QueryRejectsReadOnlyOutputWithoutWriting)
 {
-	alignas(uint64_t) uint64_t raw_info[8] = {};
-	auto*                      info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info);
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EXIT(
+	    {
+		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		GuestReadableBlock output_storage(sizeof(uint64_t) * 8);
+		if (!output_storage.IsValid())
+		{
+			std::_Exit(2);
+		}
+		std::memset(output_storage.Data(), 0xa5, sizeof(uint64_t) * 8);
+		if (!output_storage.Protect(Core::VirtualMemory::Mode::Read))
+		{
+			std::_Exit(3);
+		}
+		const int result = Ngs2::Ngs2SystemQueryBufferSize(
+		    nullptr, static_cast<Ngs2::Ngs2ContextBufferInfo*>(output_storage.Data()));
+		std::_Exit(result == static_cast<int32_t>(0x804a0053u) ? 0 : 4);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorAudio, Ngs2SystemCreateRejectsOversizedGrainWithoutUsingWorkspace)
+{
+	constexpr auto kInvalidOption = static_cast<int32_t>(0x804a0081u);
+	constexpr auto kSentinel      = UINTPTR_MAX;
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock option_storage(64);
+	GuestReadableBlock info_storage(sizeof(uint64_t) * 8);
+	GuestReadableBlock workspace_storage(0x1000);
+	GuestValue<uintptr_t> handle_storage;
+	ASSERT_TRUE(option_storage.IsValid());
+	ASSERT_TRUE(info_storage.IsValid());
+	ASSERT_TRUE(workspace_storage.IsValid());
+	ASSERT_TRUE(handle_storage.IsValid());
+
+	auto* option = static_cast<uint8_t*>(option_storage.Data());
+	std::memset(option, 0, 64);
+	*reinterpret_cast<size_t*>(option + 0)     = 64;
+	*reinterpret_cast<uint32_t*>(option + 28)  = 8192;
+	*reinterpret_cast<uint32_t*>(option + 32)  = 8193;
+	*reinterpret_cast<uint32_t*>(option + 36)  = 48000;
+
+	auto* workspace = static_cast<uint8_t*>(workspace_storage.Data());
+	std::memset(workspace, 0xa5, 0x1000);
+	auto* info = static_cast<uint64_t*>(info_storage.Data());
+	std::memset(info, 0, sizeof(uint64_t) * 8);
+	info[0]                  = reinterpret_cast<uintptr_t>(workspace_storage.Data());
+	info[1]                  = 0x1000;
+	*handle_storage.Data()   = kSentinel;
+
+	EXPECT_EQ(Ngs2::Ngs2SystemCreate(reinterpret_cast<const Ngs2::Ngs2SystemOption*>(option),
+	                                 reinterpret_cast<const Ngs2::Ngs2ContextBufferInfo*>(info), handle_storage.Data()),
+	          kInvalidOption);
+	EXPECT_EQ(*handle_storage.Data(), kSentinel);
+	for (size_t i = 0; i < 0x1000; ++i)
+	{
+		EXPECT_EQ(workspace[i], 0xa5);
+	}
+}
+
+TEST(EmulatorAudio, RejectsNgs2SamplerRackQueryWithoutAnEvidencedOption)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(info_storage.IsValid());
+	auto* raw_info = static_cast<uint64_t*>(info_storage.Data());
+	std::memset(raw_info, 0, sizeof(uint64_t) * 8);
+	auto* info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info);
+
+	raw_info[0] = UINT64_MAX;
+	raw_info[1] = UINT64_MAX;
+	EXPECT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x1000u, nullptr, info), static_cast<int32_t>(0x804a0081u));
+	EXPECT_EQ(raw_info[0], UINT64_MAX);
+	EXPECT_EQ(raw_info[1], UINT64_MAX);
+	EXPECT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x1000u, reinterpret_cast<const Ngs2::Ngs2RackOption*>(uintptr_t {1}), info),
+	          static_cast<int32_t>(0x804a0081u));
+	EXPECT_EQ(raw_info[0], UINT64_MAX);
+	EXPECT_EQ(raw_info[1], UINT64_MAX);
+}
+
+TEST(EmulatorAudio, Ngs2RejectsUnreadableDescriptorAndHandleBlocks)
+{
+	constexpr auto kInvalidOut = static_cast<int32_t>(0x804a0053u);
+	GuestValue<uintptr_t> handle_storage;
+	ASSERT_TRUE(handle_storage.IsValid());
+	*handle_storage.Data() = UINTPTR_MAX;
+
+	EXPECT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(uintptr_t {1})),
+	          kInvalidOut);
+	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, reinterpret_cast<const Ngs2::Ngs2ContextBufferInfo*>(uintptr_t {1}),
+	                                  handle_storage.Data()),
+	          static_cast<int32_t>(0x804a0206u));
+	EXPECT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(uintptr_t {1}),
+	                                         reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(uintptr_t {1})),
+	          kInvalidOut);
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(0, 0, reinterpret_cast<uintptr_t*>(uintptr_t {1})), kInvalidOut);
+	EXPECT_EQ(*handle_storage.Data(), UINTPTR_MAX);
+}
+
+TEST(EmulatorAudio, Ngs2PanOperationsRejectUnmeasuredContracts)
+{
+	uint32_t params[4] = {};
+	float    matrix[2] = {-1.0f, -1.0f};
+
+	EXPECT_EQ(Ngs2::Ngs2PanGetVolumeMatrix(nullptr, nullptr, 0, 0, nullptr), static_cast<int32_t>(0x804a0309u));
+	EXPECT_EQ(Ngs2::Ngs2PanGetVolumeMatrix(nullptr, params, 1, 0, matrix), static_cast<int32_t>(0x804a0309u));
+	EXPECT_FLOAT_EQ(matrix[0], -1.0f);
+	EXPECT_FLOAT_EQ(matrix[1], -1.0f);
+	EXPECT_EQ(Ngs2::Ngs2PanInit(nullptr), static_cast<int32_t>(0x804a0309u));
+}
+
+TEST(EmulatorAudio, Ngs2RejectsUnmeasuredAllocatorAndGeometryContractsWithoutWrites)
+{
+	constexpr auto kUnsupported = static_cast<int32_t>(0x804a0309u);
+	GuestValue<uintptr_t> handle_storage;
+	ASSERT_TRUE(handle_storage.IsValid());
+	*handle_storage.Data() = UINTPTR_MAX;
+	uint8_t        output[256];
+	std::memset(output, 0xa5, sizeof(output));
+
+	EXPECT_EQ(Ngs2::Ngs2SystemCreateWithAllocator(reinterpret_cast<const Ngs2::Ngs2SystemOption*>(uintptr_t {1}),
+	                                               reinterpret_cast<const Ngs2::Ngs2BufferAllocator*>(uintptr_t {1}), handle_storage.Data()),
+	          kUnsupported);
+	EXPECT_EQ(*handle_storage.Data(), UINTPTR_MAX);
+	EXPECT_EQ(Ngs2::Ngs2RackCreateWithAllocator(1, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(uintptr_t {1}),
+	                                             reinterpret_cast<const Ngs2::Ngs2BufferAllocator*>(uintptr_t {1}), handle_storage.Data()),
+	          kUnsupported);
+	EXPECT_EQ(*handle_storage.Data(), UINTPTR_MAX);
+
+	EXPECT_EQ(Ngs2::Ngs2GeomResetSourceParam(output), kUnsupported);
+	EXPECT_EQ(Ngs2::Ngs2GeomResetListenerParam(output), kUnsupported);
+	EXPECT_EQ(Ngs2::Ngs2GeomCalcListener(output, output, 0), kUnsupported);
+	EXPECT_EQ(Ngs2::Ngs2GeomApply(output, output, output, 0), kUnsupported);
+	for (const auto value: output)
+	{
+		EXPECT_EQ(value, 0xa5);
+	}
+}
+
+TEST(EmulatorAudio, Ngs2InfoQueriesRejectMissingHandles)
+{
+	uint8_t info[32] = {};
+
+	EXPECT_EQ(Ngs2::Ngs2RackGetInfo(0, info, sizeof(info)), static_cast<int32_t>(0x804a0261u));
+	EXPECT_EQ(Ngs2::Ngs2VoiceGetPortInfo(0, 0, info, sizeof(info)), static_cast<int32_t>(0x804a0300u));
+	EXPECT_EQ(Ngs2::Ngs2VoiceQueryInfo(0, 0, nullptr, info), static_cast<int32_t>(0x804a0300u));
+}
+
+TEST(EmulatorAudio, Ngs2RackGetInfoRejectsAnUnmeasuredLayoutWithoutWriting)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock system_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(system_info_storage.IsValid());
+	auto* raw_system_info = static_cast<uint64_t*>(system_info_storage.Data());
+	std::memset(raw_system_info, 0, sizeof(uint64_t) * 8);
+	auto* system_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_system_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, system_info), 0);
+	GuestReadableBlock system_storage(raw_system_info[1]);
+	ASSERT_TRUE(system_storage.IsValid());
+	raw_system_info[0] = reinterpret_cast<uintptr_t>(system_storage.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, system_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
+
+	GuestReadableBlock option_storage(0x518);
+	ASSERT_TRUE(option_storage.IsValid());
+	auto* raw_option                                = static_cast<uint8_t*>(option_storage.Data());
+	*reinterpret_cast<size_t*>(raw_option)          = 0x518;
+	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 1;
+	GuestReadableBlock rack_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(rack_info_storage.IsValid());
+	auto* raw_rack_info = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
+	GuestReadableBlock rack_storage(raw_rack_info[1]);
+	ASSERT_TRUE(rack_storage.IsValid());
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.Data());
+	GuestValue<uintptr_t> rack_handle_storage;
+	ASSERT_TRUE(rack_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info,
+	                               rack_handle_storage.Data()),
+	          0);
+	const uintptr_t rack = *rack_handle_storage.Data();
+
+	GuestReadableBlock info_storage(1);
+	ASSERT_TRUE(info_storage.IsValid());
+	auto* info = static_cast<uint8_t*>(info_storage.Data());
+	info[0]    = 0xa5;
+	EXPECT_EQ(Ngs2::Ngs2RackGetInfo(rack, info, 1), static_cast<int32_t>(0x804a0309u));
+	EXPECT_EQ(info[0], 0xa5);
+
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, nullptr), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
+}
+
+TEST(EmulatorAudio, Ngs2SystemRenderRejectsInvalidBuffers)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock system_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(system_info_storage.IsValid());
+	auto* raw_system_info = static_cast<uint64_t*>(system_info_storage.Data());
+	std::memset(raw_system_info, 0, sizeof(uint64_t) * 8);
+	auto* system_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_system_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, system_info), 0);
+
+	GuestReadableBlock system_storage(raw_system_info[1]);
+	ASSERT_TRUE(system_storage.IsValid());
+	raw_system_info[0] = reinterpret_cast<uintptr_t>(system_storage.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, system_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
+
+	GuestReadableBlock render_storage(sizeof(uint64_t) * 3);
+	ASSERT_TRUE(render_storage.IsValid());
+	auto* render_info = static_cast<uint64_t*>(render_storage.Data());
+	render_info[0]    = 0;
+	render_info[1]    = 0;
+	render_info[2]    = (uint64_t {2} << 32u) | 24u;
+	EXPECT_EQ(Ngs2::Ngs2SystemRender(system, nullptr, 1), static_cast<int32_t>(0x804a0206u));
+	EXPECT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 0),
+	          static_cast<int32_t>(0x804a0206u));
+	EXPECT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1),
+	          static_cast<int32_t>(0x804a0207u));
+
+	alignas(uint64_t) float output[2] = {};
+	render_info[0] = reinterpret_cast<uintptr_t>(output);
+	render_info[1] = sizeof(output);
+	render_info[2] = (uint64_t {2} << 32u) | 24u;
+	EXPECT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1),
+	          static_cast<int32_t>(0x804a0209u));
+
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
+}
+
+TEST(EmulatorAudio, Ngs2SystemRenderRejectsMultipleBuffersWithoutWritingThem)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock system_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(system_info_storage.IsValid());
+	auto* raw_system_info = static_cast<uint64_t*>(system_info_storage.Data());
+	std::memset(raw_system_info, 0, sizeof(uint64_t) * 8);
+	auto* system_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_system_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, system_info), 0);
+	GuestReadableBlock system_storage(raw_system_info[1]);
+	ASSERT_TRUE(system_storage.IsValid());
+	raw_system_info[0] = reinterpret_cast<uintptr_t>(system_storage.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, system_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
+
+	constexpr size_t   kGrainBytes = 256 * 2 * sizeof(float);
+	GuestReadableBlock guest_storage(kGrainBytes * 2 + sizeof(uint64_t) * 6);
+	ASSERT_TRUE(guest_storage.IsValid());
+	auto* bytes   = static_cast<uint8_t*>(guest_storage.Data());
+	auto* output0 = reinterpret_cast<float*>(bytes);
+	auto* output1 = reinterpret_cast<float*>(bytes + kGrainBytes);
+	std::fill_n(output0, 256 * 2, 0.25f);
+	std::fill_n(output1, 256 * 2, 0.5f);
+	auto* render_infos = reinterpret_cast<uint64_t*>(bytes + kGrainBytes * 2);
+	render_infos[0]    = reinterpret_cast<uintptr_t>(output0);
+	render_infos[1]    = kGrainBytes;
+	render_infos[2]    = (uint64_t {2} << 32u) | 24u;
+	render_infos[3]    = reinterpret_cast<uintptr_t>(output1);
+	render_infos[4]    = kGrainBytes;
+	render_infos[5]    = (uint64_t {2} << 32u) | 24u;
+
+	EXPECT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_infos), 2),
+	          static_cast<int32_t>(0x804a0206u));
+	EXPECT_FLOAT_EQ(output0[0], 0.25f);
+	EXPECT_FLOAT_EQ(output1[0], 0.5f);
+
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
+}
+
+TEST(EmulatorAudio, Ngs2ConcurrentDestroyRenderAndWorkspaceHandleReuse)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(info_storage.IsValid());
+	auto* info_words = static_cast<uint64_t*>(info_storage.Data());
+	std::memset(info_words, 0, sizeof(uint64_t) * 8);
+	auto* info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(info_words);
 	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, info), 0);
 
-	std::unique_ptr<uint8_t[]> storage(new uint8_t[raw_info[1]]);
-	raw_info[0]      = reinterpret_cast<uintptr_t>(storage.get());
-	uintptr_t handle = 0;
+	GuestReadableBlock system_workspace(info_words[1]);
+	ASSERT_TRUE(system_workspace.IsValid());
+	info_words[0] = reinterpret_cast<uintptr_t>(system_workspace.Data());
+	GuestValue<uintptr_t> handle_storage;
+	ASSERT_TRUE(handle_storage.IsValid());
 
-	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, info, &handle), 0);
-	EXPECT_EQ(handle, reinterpret_cast<uintptr_t>(storage.get()));
-	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, nullptr, &handle), static_cast<int32_t>(0x804a0206u));
+	GuestReadableBlock render_storage(sizeof(float) * 256 * 2 + sizeof(uint64_t) * 3);
+	ASSERT_TRUE(render_storage.IsValid());
+	auto* output = static_cast<float*>(render_storage.Data());
+	auto* render_info = reinterpret_cast<uint64_t*>(output + 256 * 2);
+	render_info[0]    = reinterpret_cast<uintptr_t>(output);
+	render_info[1]    = sizeof(float) * 256 * 2;
+	render_info[2]    = (uint64_t {2} << 32u) | 24u;
+
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, info, handle_storage.Data()), 0);
+	const uintptr_t first_handle = *handle_storage.Data();
+	ASSERT_NE(first_handle, 0u);
+	GuestReadableBlock rack_option_storage(0x518);
+	ASSERT_TRUE(rack_option_storage.IsValid());
+	auto* rack_option = static_cast<uint8_t*>(rack_option_storage.Data());
+	std::memset(rack_option, 0, 0x518);
+	*reinterpret_cast<size_t*>(rack_option)          = 0x518;
+	*reinterpret_cast<uint32_t*>(rack_option + 0x50) = 1;
+	GuestReadableBlock rack_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(rack_info_storage.IsValid());
+	auto* rack_info_words = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(rack_info_words, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(rack_info_words);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(rack_option), rack_info), 0);
+	GuestReadableBlock rack_workspace(rack_info_words[1]);
+	ASSERT_TRUE(rack_workspace.IsValid());
+	rack_info_words[0] = reinterpret_cast<uintptr_t>(rack_workspace.Data());
+	GuestValue<uintptr_t> rack_handle_storage;
+	ASSERT_TRUE(rack_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(first_handle, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(rack_option), rack_info,
+	                               rack_handle_storage.Data()),
+	          0);
+	const uintptr_t first_rack_handle = *rack_handle_storage.Data();
+
+	std::atomic_bool start {false};
+	std::atomic<int> render_result {Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL};
+	std::thread render_thread([&]
+	                          {
+			while (!start.load(std::memory_order_acquire))
+			{
+				std::this_thread::yield();
+			}
+			int result = 0;
+			for (uint32_t i = 0; i < 64; ++i)
+			{
+				result = Ngs2::Ngs2SystemRender(first_handle, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1);
+				if (result != 0)
+				{
+					break;
+				}
+			}
+			render_result.store(result, std::memory_order_release);
+	                          });
+	start.store(true, std::memory_order_release);
+	const int destroy_result = Ngs2::Ngs2SystemDestroy(first_handle);
+	render_thread.join();
+	ASSERT_EQ(destroy_result, 0);
+	EXPECT_TRUE(render_result.load(std::memory_order_acquire) == 0 ||
+	            render_result.load(std::memory_order_acquire) == static_cast<int32_t>(0x804a0201u));
+	EXPECT_EQ(Ngs2::Ngs2SystemRender(first_handle, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1),
+	          static_cast<int32_t>(0x804a0201u));
+	GuestValue<uintptr_t> old_voice_output;
+	ASSERT_TRUE(old_voice_output.IsValid());
+	*old_voice_output.Data() = UINTPTR_MAX;
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(first_rack_handle, 0, old_voice_output.Data()), static_cast<int32_t>(0x804a0261u));
+	EXPECT_EQ(*old_voice_output.Data(), 0u);
+
+	// Reuse the identical guest workspace. The registry must attach a fresh
+	// generation rather than reviving state held by the destroyed system.
+	*handle_storage.Data() = 0;
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, info, handle_storage.Data()), 0);
+	EXPECT_EQ(*handle_storage.Data(), first_handle);
+	EXPECT_EQ(Ngs2::Ngs2SystemRender(*handle_storage.Data(), reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(*handle_storage.Data(), 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(rack_option), rack_info,
+	                               rack_handle_storage.Data()),
+	          0);
+	EXPECT_EQ(*rack_handle_storage.Data(), first_rack_handle);
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(*rack_handle_storage.Data(), nullptr), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(*handle_storage.Data()), 0);
+}
+
+TEST(EmulatorAudio, CreatesNgs2SystemInProvidedBuffer)
+{
+	GuestReadableBlock info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(info_storage.IsValid());
+	auto* raw_info = static_cast<uint64_t*>(info_storage.Data());
+	std::memset(raw_info, 0, sizeof(uint64_t) * 8);
+	auto* info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, info), 0);
+
+	GuestReadableBlock storage(raw_info[1]);
+	ASSERT_TRUE(storage.IsValid());
+	raw_info[0]      = reinterpret_cast<uintptr_t>(storage.Data());
+	GuestValue<uintptr_t> handle_storage;
+	ASSERT_TRUE(handle_storage.IsValid());
+
+	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, info, handle_storage.Data()), 0);
+	EXPECT_EQ(*handle_storage.Data(), reinterpret_cast<uintptr_t>(storage.Data()));
+	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, nullptr, handle_storage.Data()), static_cast<int32_t>(0x804a0206u));
 	EXPECT_EQ(Ngs2::Ngs2SystemCreate(nullptr, info, nullptr), static_cast<int32_t>(0x804a0053u));
 
-	storage.release();
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(*handle_storage.Data()), 0);
+}
+
+TEST(EmulatorAudio, Ngs2CreationKeepsGuestWorkspacesOpaque)
+{
+	GuestReadableBlock system_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(system_info_storage.IsValid());
+	auto* system_info_words = static_cast<uint64_t*>(system_info_storage.Data());
+	std::memset(system_info_words, 0, sizeof(uint64_t) * 8);
+	auto* system_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(system_info_words);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, system_info), 0);
+
+	GuestReadableBlock system_workspace(system_info_words[1]);
+	ASSERT_TRUE(system_workspace.IsValid());
+	auto* system_bytes = static_cast<uint8_t*>(system_workspace.Data());
+	std::memset(system_bytes, 0xa5, system_info_words[1]);
+	system_info_words[0] = reinterpret_cast<uintptr_t>(system_workspace.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, system_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
+	for (size_t i = 0; i < system_info_words[1]; ++i)
+	{
+		EXPECT_EQ(system_bytes[i], 0xa5);
+	}
+
+	GuestReadableBlock option_storage(0x518);
+	ASSERT_TRUE(option_storage.IsValid());
+	auto* option = static_cast<uint8_t*>(option_storage.Data());
+	*reinterpret_cast<size_t*>(option)          = 0x518;
+	*reinterpret_cast<uint32_t*>(option + 0x50) = 1;
+	GuestReadableBlock rack_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(rack_info_storage.IsValid());
+	auto* rack_info_words = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(rack_info_words, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(rack_info_words);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(option), rack_info), 0);
+
+	GuestReadableBlock rack_workspace(rack_info_words[1]);
+	ASSERT_TRUE(rack_workspace.IsValid());
+	auto* rack_bytes = static_cast<uint8_t*>(rack_workspace.Data());
+	std::memset(rack_bytes, 0xa5, rack_info_words[1]);
+	rack_info_words[0] = reinterpret_cast<uintptr_t>(rack_workspace.Data());
+	GuestValue<uintptr_t> rack_handle_storage;
+	ASSERT_TRUE(rack_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(option), rack_info,
+	                               rack_handle_storage.Data()),
+	          0);
+	const uintptr_t rack = *rack_handle_storage.Data();
+	for (size_t i = 0; i < rack_info_words[1]; ++i)
+	{
+		EXPECT_EQ(rack_bytes[i], 0xa5);
+	}
+
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, nullptr), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
 }
 
 TEST(EmulatorAudio, RejectsNullNgs2RackHandle)
@@ -496,9 +1436,11 @@ TEST(EmulatorAudio, RejectsNullNgs2RackHandle)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	uintptr_t voice_handle = UINTPTR_MAX;
-	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(0, 0, &voice_handle), static_cast<int32_t>(0x804a0261u));
-	EXPECT_EQ(voice_handle, 0u);
+	GuestValue<uintptr_t> voice_handle_storage;
+	ASSERT_TRUE(voice_handle_storage.IsValid());
+	*voice_handle_storage.Data() = UINTPTR_MAX;
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(0, 0, voice_handle_storage.Data()), static_cast<int32_t>(0x804a0261u));
+	EXPECT_EQ(*voice_handle_storage.Data(), 0u);
 }
 
 TEST(EmulatorAudio, ReadsGen5CustomRackVoiceCountFromCommonOptionBlock)
@@ -509,10 +1451,14 @@ TEST(EmulatorAudio, ReadsGen5CustomRackVoiceCountFromCommonOptionBlock)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	alignas(uint64_t) uint8_t raw_option_one[0x518]     = {};
-	alignas(uint64_t) uint8_t raw_option_two[0x518]     = {};
-	*reinterpret_cast<size_t*>(raw_option_one)          = sizeof(raw_option_one);
-	*reinterpret_cast<size_t*>(raw_option_two)          = sizeof(raw_option_two);
+	GuestReadableBlock option_one_storage(0x518);
+	GuestReadableBlock option_two_storage(0x518);
+	ASSERT_TRUE(option_one_storage.IsValid());
+	ASSERT_TRUE(option_two_storage.IsValid());
+	auto* raw_option_one = static_cast<uint8_t*>(option_one_storage.Data());
+	auto* raw_option_two = static_cast<uint8_t*>(option_two_storage.Data());
+	*reinterpret_cast<size_t*>(raw_option_one)          = 0x518;
+	*reinterpret_cast<size_t*>(raw_option_two)          = 0x518;
 	*reinterpret_cast<uint32_t*>(raw_option_one + 0x50) = 1;
 	*reinterpret_cast<uint32_t*>(raw_option_two + 0x50) = 2;
 
@@ -520,10 +1466,16 @@ TEST(EmulatorAudio, ReadsGen5CustomRackVoiceCountFromCommonOptionBlock)
 	*reinterpret_cast<uint32_t*>(raw_option_one + 0xb8) = 7;
 	*reinterpret_cast<uint32_t*>(raw_option_two + 0xb8) = 7;
 
-	alignas(uint64_t) uint64_t raw_info_one[8] = {};
-	alignas(uint64_t) uint64_t raw_info_two[8] = {};
-	auto*                      info_one        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info_one);
-	auto*                      info_two        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info_two);
+	GuestReadableBlock info_one_storage(sizeof(uint64_t) * 8);
+	GuestReadableBlock info_two_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(info_one_storage.IsValid());
+	ASSERT_TRUE(info_two_storage.IsValid());
+	auto* raw_info_one = static_cast<uint64_t*>(info_one_storage.Data());
+	auto* raw_info_two = static_cast<uint64_t*>(info_two_storage.Data());
+	std::memset(raw_info_one, 0, sizeof(uint64_t) * 8);
+	std::memset(raw_info_two, 0, sizeof(uint64_t) * 8);
+	auto* info_one = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info_one);
+	auto* info_two = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info_two);
 
 	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option_one), info_one), 0);
 	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option_two), info_two), 0);
@@ -541,48 +1493,68 @@ TEST(EmulatorAudio, ReadsGen5ExtendedReverbRackVoiceCountAndHandles)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	alignas(uint64_t) uint64_t raw_sys_info[8] = {};
-	auto*                      sys_info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
+	GuestReadableBlock sys_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(sys_info_storage.IsValid());
+	auto* raw_sys_info = static_cast<uint64_t*>(sys_info_storage.Data());
+	std::memset(raw_sys_info, 0, sizeof(uint64_t) * 8);
+	auto* sys_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
 	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, sys_info), 0);
-	std::unique_ptr<uint8_t[]> sys_storage(new uint8_t[raw_sys_info[1]]);
-	raw_sys_info[0]  = reinterpret_cast<uintptr_t>(sys_storage.get());
-	uintptr_t system = 0;
-	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, &system), 0);
+	GuestReadableBlock sys_storage(raw_sys_info[1]);
+	ASSERT_TRUE(sys_storage.IsValid());
+	raw_sys_info[0] = reinterpret_cast<uintptr_t>(sys_storage.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
 
 	// Classic max_voices at +0x20 left 0; extended field at +0x50 is the real count.
-	alignas(uint64_t) uint8_t raw_option[0xb8]      = {};
-	*reinterpret_cast<size_t*>(raw_option)          = sizeof(raw_option);
+	GuestReadableBlock option_storage(0xb8);
+	ASSERT_TRUE(option_storage.IsValid());
+	auto* raw_option = static_cast<uint8_t*>(option_storage.Data());
+	*reinterpret_cast<size_t*>(raw_option)          = 0xb8;
 	*reinterpret_cast<uint32_t*>(raw_option + 0x20) = 0;
 	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 16;
 
-	alignas(uint64_t) uint64_t raw_rack_info[8] = {};
-	auto*                      rack_info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	GuestReadableBlock rack_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(rack_info_storage.IsValid());
+	auto* raw_rack_info = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
 	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x2001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
 	// Must allocate room for 16 voices, not zero.
 	EXPECT_GT(raw_rack_info[1], sizeof(void*) * 8u);
 
-	std::unique_ptr<uint8_t[]> rack_storage(new uint8_t[raw_rack_info[1]]);
-	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.get());
-	uintptr_t rack   = 0;
-	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x2001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info, &rack), 0);
+	GuestReadableBlock rack_storage(raw_rack_info[1]);
+	ASSERT_TRUE(rack_storage.IsValid());
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.Data());
+	GuestValue<uintptr_t> rack_handle_storage;
+	ASSERT_TRUE(rack_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x2001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info,
+	                               rack_handle_storage.Data()),
+	          0);
+	const uintptr_t rack = *rack_handle_storage.Data();
 
-	uintptr_t voice0  = 0;
-	uintptr_t voice15 = 0;
-	uintptr_t voice16 = UINTPTR_MAX;
-	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, &voice0), 0);
-	EXPECT_NE(voice0, 0u);
-	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 15, &voice15), 0);
-	EXPECT_NE(voice15, 0u);
-	EXPECT_NE(voice15, voice0);
+	GuestValue<uintptr_t> voice0_storage;
+	GuestValue<uintptr_t> voice15_storage;
+	GuestValue<uintptr_t> voice16_storage;
+	ASSERT_TRUE(voice0_storage.IsValid());
+	ASSERT_TRUE(voice15_storage.IsValid());
+	ASSERT_TRUE(voice16_storage.IsValid());
+	*voice16_storage.Data() = UINTPTR_MAX;
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, voice0_storage.Data()), 0);
+	EXPECT_NE(*voice0_storage.Data(), 0u);
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 15, voice15_storage.Data()), 0);
+	EXPECT_NE(*voice15_storage.Data(), 0u);
+	EXPECT_NE(*voice15_storage.Data(), *voice0_storage.Data());
 	// Out of range is a guest error, not a process exit.
-	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 16, &voice16), static_cast<int32_t>(0x804a0300u));
-	EXPECT_EQ(voice16, 0u);
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 16, voice16_storage.Data()), static_cast<int32_t>(0x804a0300u));
+	EXPECT_EQ(*voice16_storage.Data(), 0u);
 
-	sys_storage.release();
-	rack_storage.release();
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, nullptr), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
 }
 
-TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
+TEST(EmulatorAudio, AcceptsOnlyEvidencedCustomSamplerControls)
 {
 	if (!Config::IsInitialized())
 	{
@@ -591,34 +1563,54 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	// System buffer.
-	alignas(uint64_t) uint64_t raw_sys_info[8] = {};
-	auto*                      sys_info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
+	GuestReadableBlock sys_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(sys_info_storage.IsValid());
+	auto* raw_sys_info = static_cast<uint64_t*>(sys_info_storage.Data());
+	std::memset(raw_sys_info, 0, sizeof(uint64_t) * 8);
+	auto* sys_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
 	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, sys_info), 0);
-	std::unique_ptr<uint8_t[]> sys_storage(new uint8_t[raw_sys_info[1]]);
-	raw_sys_info[0]  = reinterpret_cast<uintptr_t>(sys_storage.get());
-	uintptr_t system = 0;
-	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, &system), 0);
+	GuestReadableBlock sys_storage(raw_sys_info[1]);
+	ASSERT_TRUE(sys_storage.IsValid());
+	raw_sys_info[0] = reinterpret_cast<uintptr_t>(sys_storage.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
 
 	// Gen5 custom-sampler rack option (0x518) with max_voices at offset 0x50.
-	alignas(uint64_t) uint8_t raw_option[0x518]     = {};
-	*reinterpret_cast<size_t*>(raw_option)          = sizeof(raw_option);
+	GuestReadableBlock option_storage(0x518);
+	ASSERT_TRUE(option_storage.IsValid());
+	auto* raw_option = static_cast<uint8_t*>(option_storage.Data());
+	*reinterpret_cast<size_t*>(raw_option)          = 0x518;
 	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 1;
 
-	alignas(uint64_t) uint64_t raw_rack_info[8] = {};
-	auto*                      rack_info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	GuestReadableBlock rack_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(rack_info_storage.IsValid());
+	auto* raw_rack_info = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
 	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
-	std::unique_ptr<uint8_t[]> rack_storage(new uint8_t[raw_rack_info[1]]);
-	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.get());
-	uintptr_t rack   = 0;
-	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info, &rack), 0);
+	GuestReadableBlock rack_storage(raw_rack_info[1]);
+	ASSERT_TRUE(rack_storage.IsValid());
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.Data());
+	GuestValue<uintptr_t> rack_handle_storage;
+	ASSERT_TRUE(rack_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info,
+	                               rack_handle_storage.Data()),
+	          0);
+	const uintptr_t rack = *rack_handle_storage.Data();
 
-	uintptr_t voice = 0;
-	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, &voice), 0);
+	GuestValue<uintptr_t> voice_handle_storage;
+	ASSERT_TRUE(voice_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, voice_handle_storage.Data()), 0);
+	const uintptr_t voice = *voice_handle_storage.Data();
 	ASSERT_NE(voice, 0u);
 
 	// Observed frontier param: id 0x40010000 (rack class 0x4001), size 40, next 0.
 	// Layout matches Ngs2VoiceParamHeader: size, next, id — then opaque payload.
-	alignas(uint64_t) uint8_t param_blob[40]      = {};
+	GuestReadableBlock format_storage(40);
+	ASSERT_TRUE(format_storage.IsValid());
+	auto* param_blob = static_cast<uint8_t*>(format_storage.Data());
 	*reinterpret_cast<uint16_t*>(param_blob + 0)  = 40;
 	*reinterpret_cast<int16_t*>(param_blob + 2)   = 0;
 	*reinterpret_cast<uint32_t*>(param_blob + 4)  = 0x40010000u;
@@ -627,52 +1619,59 @@ TEST(EmulatorAudio, AcceptsCustomSamplerVoiceControlParamClass)
 	*reinterpret_cast<uint32_t*>(param_blob + 16) = 44100;
 
 	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(param_blob)), 0);
+	EXPECT_EQ(Ngs2::Ngs2VoiceRunCommands(voice, nullptr, 0), static_cast<int32_t>(0x804a0309u));
 
-	// Common param id 0x0007: VoiceCallback block, size 32 (header + handler +
-	// data + flags + reserved). Observed immediately after 0x40010000 at frontier.
-	alignas(uint64_t) uint8_t callback_blob[32]     = {};
+	// The callback class was observed, but no guest callback lifetime or dispatch
+	// contract is available, so it cannot be accepted as a no-op.
+	GuestReadableBlock callback_storage(32);
+	ASSERT_TRUE(callback_storage.IsValid());
+	auto* callback_blob = static_cast<uint8_t*>(callback_storage.Data());
 	*reinterpret_cast<uint16_t*>(callback_blob + 0) = 32;
 	*reinterpret_cast<int16_t*>(callback_blob + 2)  = 0;
 	*reinterpret_cast<uint32_t*>(callback_blob + 4) = 0x00000007u;
-	// Non-null opaque handler/data addresses; HLE accepts registration without
-	// inventing host-side invocation of a guest callback.
 	*reinterpret_cast<uintptr_t*>(callback_blob + 8)  = static_cast<uintptr_t>(0x1000);
 	*reinterpret_cast<uintptr_t*>(callback_blob + 16) = static_cast<uintptr_t>(0x2000);
 	*reinterpret_cast<uint32_t*>(callback_blob + 24)  = 0x3u;
 
-	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(callback_blob)), 0);
+	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(callback_blob)),
+	          static_cast<int32_t>(0x804a0309u));
 
-	// Observed 0x4000-class module param (id 0x40001300, size 48) on CustomSampler.
-	alignas(uint64_t) uint8_t custom_module_blob[48]     = {};
+	// The class was observed, but its guest-visible effect remains unmeasured.
+	GuestReadableBlock custom_module_storage(48);
+	ASSERT_TRUE(custom_module_storage.IsValid());
+	auto* custom_module_blob = static_cast<uint8_t*>(custom_module_storage.Data());
 	*reinterpret_cast<uint16_t*>(custom_module_blob + 0) = 48;
 	*reinterpret_cast<int16_t*>(custom_module_blob + 2)  = 0;
 	*reinterpret_cast<uint32_t*>(custom_module_blob + 4) = 0x40001300u;
-	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(custom_module_blob)), 0);
+	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(custom_module_blob)),
+	          static_cast<int32_t>(0x804a0309u));
 
-	// Additional custom-sampler module controls remain opaque until their
-	// guest-visible effect is captured; accepting the class must not abort.
-	alignas(uint64_t) uint8_t opaque_sampler_blob[8]      = {};
-	*reinterpret_cast<uint16_t*>(opaque_sampler_blob + 0) = sizeof(opaque_sampler_blob);
+	// Additional custom-sampler module controls are rejected until their
+	// guest-visible semantics are captured.
+	GuestReadableBlock opaque_sampler_storage(8);
+	ASSERT_TRUE(opaque_sampler_storage.IsValid());
+	auto* opaque_sampler_blob = static_cast<uint8_t*>(opaque_sampler_storage.Data());
+	*reinterpret_cast<uint16_t*>(opaque_sampler_blob + 0) = 8;
 	*reinterpret_cast<uint32_t*>(opaque_sampler_blob + 4) = 0x40010005u;
-	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(opaque_sampler_blob)), 0);
+	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(opaque_sampler_blob)),
+	          static_cast<int32_t>(0x804a0309u));
 
 	// Observed GetState size 48 for CustomSampler (same block as Sampler, not 80).
-	alignas(uint64_t) uint8_t state_blob[48] = {};
-	for (auto& b: state_blob)
-	{
-		b = 0xa5;
-	}
-	EXPECT_EQ(Ngs2::Ngs2VoiceGetState(voice, reinterpret_cast<Ngs2::Ngs2VoiceState*>(state_blob), sizeof(state_blob)), 0);
+	GuestReadableBlock state_storage(48 + sizeof(uint32_t));
+	ASSERT_TRUE(state_storage.IsValid());
+	auto* state_blob = static_cast<uint8_t*>(state_storage.Data());
+	std::memset(state_blob, 0xa5, 48);
+	EXPECT_EQ(Ngs2::Ngs2VoiceGetState(voice, reinterpret_cast<Ngs2::Ngs2VoiceState*>(state_blob), 48), 0);
 	// state_flags at offset 0 should be written (Empty → 0).
 	EXPECT_EQ(*reinterpret_cast<uint32_t*>(state_blob), 0u);
 
-	uint32_t state_flags = UINT32_MAX;
-	EXPECT_EQ(Ngs2::Ngs2VoiceGetStateFlags(voice, &state_flags), 0);
-	EXPECT_EQ(state_flags, 0u);
+	auto* state_flags = reinterpret_cast<uint32_t*>(state_blob + 48);
+	*state_flags      = UINT32_MAX;
+	EXPECT_EQ(Ngs2::Ngs2VoiceGetStateFlags(voice, state_flags), 0);
+	EXPECT_EQ(*state_flags, 0u);
 
-	// Keep buffers alive for the process-global NGS lists used by HLE.
-	sys_storage.release();
-	rack_storage.release();
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, nullptr), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
 }
 
 TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
@@ -683,44 +1682,73 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	alignas(uint64_t) uint64_t raw_sys_info[8] = {};
-	auto*                      sys_info        = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
+	GuestReadableBlock sys_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(sys_info_storage.IsValid());
+	auto* raw_sys_info = static_cast<uint64_t*>(sys_info_storage.Data());
+	std::memset(raw_sys_info, 0, sizeof(uint64_t) * 8);
+	auto* sys_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
 	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, sys_info), 0);
-	std::unique_ptr<uint8_t[]> sys_storage(new uint8_t[raw_sys_info[1]]);
-	raw_sys_info[0]  = reinterpret_cast<uintptr_t>(sys_storage.get());
-	uintptr_t system = 0;
-	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, &system), 0);
+	GuestReadableBlock sys_storage(raw_sys_info[1]);
+	ASSERT_TRUE(sys_storage.IsValid());
+	raw_sys_info[0] = reinterpret_cast<uintptr_t>(sys_storage.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
 
-	alignas(uint64_t) uint8_t raw_option[0x518]     = {};
-	*reinterpret_cast<size_t*>(raw_option)          = sizeof(raw_option);
+	GuestReadableBlock option_storage(0x518);
+	ASSERT_TRUE(option_storage.IsValid());
+	auto* raw_option = static_cast<uint8_t*>(option_storage.Data());
+	*reinterpret_cast<size_t*>(raw_option)          = 0x518;
 	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 1;
-	alignas(uint64_t) uint64_t raw_rack_info[8]     = {};
-	auto*                      rack_info            = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	GuestReadableBlock rack_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(rack_info_storage.IsValid());
+	auto* raw_rack_info = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
 	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
-	std::unique_ptr<uint8_t[]> rack_storage(new uint8_t[raw_rack_info[1]]);
-	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.get());
-	uintptr_t rack   = 0;
-	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info, &rack), 0);
-	uintptr_t voice = 0;
-	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, &voice), 0);
+	GuestReadableBlock rack_storage(raw_rack_info[1]);
+	ASSERT_TRUE(rack_storage.IsValid());
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.Data());
+	GuestValue<uintptr_t> rack_handle_storage;
+	ASSERT_TRUE(rack_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info,
+	                               rack_handle_storage.Data()),
+	          0);
+	const uintptr_t rack = *rack_handle_storage.Data();
+	GuestValue<uintptr_t> voice_handle_storage;
+	ASSERT_TRUE(voice_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, voice_handle_storage.Data()), 0);
+	const uintptr_t voice = *voice_handle_storage.Data();
 
-	alignas(uint64_t) uint8_t format_param[40]      = {};
-	*reinterpret_cast<uint16_t*>(format_param + 0)  = sizeof(format_param);
+	GuestReadableBlock format_storage(40);
+	ASSERT_TRUE(format_storage.IsValid());
+	auto* format_param = static_cast<uint8_t*>(format_storage.Data());
+	*reinterpret_cast<uint16_t*>(format_param + 0)  = 40;
 	*reinterpret_cast<uint32_t*>(format_param + 4)  = 0x40010000u;
 	*reinterpret_cast<uint32_t*>(format_param + 8)  = 0x12u;
 	*reinterpret_cast<uint32_t*>(format_param + 12) = 1;
 	*reinterpret_cast<uint32_t*>(format_param + 16) = 44100;
 	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(format_param)), 0);
 
-	constexpr uint64_t        kSourceFrames = 512;
-	alignas(uint64_t) int16_t source[kSourceFrames];
-	for (auto& sample: source)
+	constexpr uint64_t kSourceFrames = 512;
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * kSourceFrames + sizeof(uint64_t) * 5);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* source = static_cast<int16_t*>(pcm_storage.Data());
+	for (uint64_t i = 0; i < kSourceFrames; i++)
 	{
-		sample = 16384;
+		source[i] = 16384;
 	}
-	alignas(uint64_t) uint64_t waveform_context[5]     = {0, sizeof(source), 0, kSourceFrames, 0};
-	alignas(uint64_t) uint8_t  waveform_param[32]      = {};
-	*reinterpret_cast<uint16_t*>(waveform_param + 0)   = sizeof(waveform_param);
+	auto* waveform_context = reinterpret_cast<uint64_t*>(source + kSourceFrames);
+	waveform_context[0]    = 0;
+	waveform_context[1]    = sizeof(int16_t) * kSourceFrames;
+	waveform_context[2]    = 0;
+	waveform_context[3]    = kSourceFrames;
+	waveform_context[4]    = 0;
+	GuestReadableBlock waveform_param_storage(32);
+	ASSERT_TRUE(waveform_param_storage.IsValid());
+	auto* waveform_param = static_cast<uint8_t*>(waveform_param_storage.Data());
+	*reinterpret_cast<uint16_t*>(waveform_param + 0)   = 32;
 	*reinterpret_cast<uint32_t*>(waveform_param + 4)   = 0x40010001u;
 	*reinterpret_cast<uintptr_t*>(waveform_param + 8)  = reinterpret_cast<uintptr_t>(source);
 	*reinterpret_cast<uint32_t*>(waveform_param + 16)  = 0x11u;
@@ -728,27 +1756,124 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 	*reinterpret_cast<uintptr_t*>(waveform_param + 24) = reinterpret_cast<uintptr_t>(waveform_context);
 	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(waveform_param)), 0);
 
-	const uint32_t play_command[3] = {2, 0x400, 1};
+	// VoiceControl must snapshot the evidenced PCM block. The guest may reuse
+	// its source memory before the later render call.
+	std::fill_n(source, kSourceFrames, int16_t {0});
+
+	GuestReadableBlock command_storage(sizeof(uint32_t) * 3);
+	ASSERT_TRUE(command_storage.IsValid());
+	auto* play_command = static_cast<uint32_t*>(command_storage.Data());
+	play_command[0]    = 2;
+	play_command[1]    = 0x400;
+	play_command[2]    = 1;
 	ASSERT_EQ(Ngs2::Ngs2VoiceRunCommands(voice, play_command, 1), 0);
 
-	alignas(uint64_t) float    output[256 * 2] = {};
-	alignas(uint64_t) uint64_t render_info[3]  = {reinterpret_cast<uintptr_t>(output), sizeof(output), (uint64_t {2} << 32u) | 24u};
+	GuestReadableBlock render_storage(sizeof(float) * 256 * 2 + sizeof(uint64_t) * 3);
+	ASSERT_TRUE(render_storage.IsValid());
+	auto* output = static_cast<float*>(render_storage.Data());
+	auto* render_info = reinterpret_cast<uint64_t*>(output + 256 * 2);
+	render_info[0]    = reinterpret_cast<uintptr_t>(output);
+	render_info[1]    = sizeof(float) * 256 * 2;
+	render_info[2]    = (uint64_t {2} << 32u) | 24u;
 	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
 	EXPECT_NE(output[0], 0.0f);
 	EXPECT_FLOAT_EQ(output[0], output[1]);
 
-	alignas(uint64_t) uint64_t destroyed_rack_info[8] = {};
+	GuestReadableBlock destroyed_rack_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(destroyed_rack_info_storage.IsValid());
+	auto* destroyed_rack_info = static_cast<uint64_t*>(destroyed_rack_info_storage.Data());
+	std::memset(destroyed_rack_info, 0, sizeof(uint64_t) * 8);
 	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(destroyed_rack_info)), 0);
 	EXPECT_EQ(destroyed_rack_info[0], rack);
 	EXPECT_EQ(destroyed_rack_info[1], raw_rack_info[1]);
 
-	std::fill(std::begin(output), std::end(output), 1.0f);
+	std::fill_n(output, 256 * 2, 1.0f);
 	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_info), 1), 0);
 	EXPECT_FLOAT_EQ(output[0], 0.0f);
 	EXPECT_FLOAT_EQ(output[1], 0.0f);
 
-	sys_storage.release();
-	rack_storage.release();
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
+}
+
+TEST(EmulatorAudio, Ngs2CustomSamplerRejectsUnreadablePcmRange)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock sys_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(sys_info_storage.IsValid());
+	auto* raw_sys_info = static_cast<uint64_t*>(sys_info_storage.Data());
+	std::memset(raw_sys_info, 0, sizeof(uint64_t) * 8);
+	auto* sys_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, sys_info), 0);
+	GuestReadableBlock sys_storage(raw_sys_info[1]);
+	ASSERT_TRUE(sys_storage.IsValid());
+	raw_sys_info[0] = reinterpret_cast<uintptr_t>(sys_storage.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
+
+	GuestReadableBlock option_storage(0x518);
+	ASSERT_TRUE(option_storage.IsValid());
+	auto* raw_option = static_cast<uint8_t*>(option_storage.Data());
+	*reinterpret_cast<size_t*>(raw_option)          = 0x518;
+	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 1;
+	GuestReadableBlock rack_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(rack_info_storage.IsValid());
+	auto* raw_rack_info = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
+	GuestReadableBlock rack_storage(raw_rack_info[1]);
+	ASSERT_TRUE(rack_storage.IsValid());
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.Data());
+	GuestValue<uintptr_t> rack_handle_storage;
+	ASSERT_TRUE(rack_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info,
+	                               rack_handle_storage.Data()),
+	          0);
+	const uintptr_t rack = *rack_handle_storage.Data();
+	GuestValue<uintptr_t> voice_handle_storage;
+	ASSERT_TRUE(voice_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, voice_handle_storage.Data()), 0);
+	const uintptr_t voice = *voice_handle_storage.Data();
+
+	GuestReadableBlock format_storage(40);
+	ASSERT_TRUE(format_storage.IsValid());
+	auto* format_param = static_cast<uint8_t*>(format_storage.Data());
+	*reinterpret_cast<uint16_t*>(format_param + 0)  = 40;
+	*reinterpret_cast<uint32_t*>(format_param + 4)  = 0x40010000u;
+	*reinterpret_cast<uint32_t*>(format_param + 8)  = 0x12u;
+	*reinterpret_cast<uint32_t*>(format_param + 12) = 1;
+	*reinterpret_cast<uint32_t*>(format_param + 16) = 44100;
+	ASSERT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(format_param)), 0);
+
+	GuestReadableBlock waveform_context_storage(sizeof(uint64_t) * 5);
+	ASSERT_TRUE(waveform_context_storage.IsValid());
+	auto* waveform_context = static_cast<uint64_t*>(waveform_context_storage.Data());
+	waveform_context[0]    = 0;
+	waveform_context[1]    = sizeof(int16_t);
+	waveform_context[2]    = 0;
+	waveform_context[3]    = 1;
+	waveform_context[4]    = 0;
+	GuestReadableBlock waveform_param_storage(32);
+	ASSERT_TRUE(waveform_param_storage.IsValid());
+	auto* waveform_param = static_cast<uint8_t*>(waveform_param_storage.Data());
+	*reinterpret_cast<uint16_t*>(waveform_param + 0)   = 32;
+	*reinterpret_cast<uint32_t*>(waveform_param + 4)   = 0x40010001u;
+	*reinterpret_cast<uintptr_t*>(waveform_param + 8)  = 1;
+	*reinterpret_cast<uint32_t*>(waveform_param + 16)  = 0x11u;
+	*reinterpret_cast<uint32_t*>(waveform_param + 20)  = 1u;
+	*reinterpret_cast<uintptr_t*>(waveform_param + 24) = reinterpret_cast<uintptr_t>(waveform_context);
+	EXPECT_EQ(Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(waveform_param)),
+	          static_cast<int32_t>(0x804a0309u));
+
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, nullptr), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
 }
 
 TEST(EmulatorAudio, AvPlayerInitExReturnsZeroAndPopulatesHandle)

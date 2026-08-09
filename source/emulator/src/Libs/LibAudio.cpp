@@ -63,6 +63,7 @@ LIB_DEFINE(InitAudio_1_AudioIn)
 {
 	LIB_FUNC("5NE8Sjc7VC8", AudioIn::AudioInOpen);
 	LIB_FUNC("LozEOU8+anM", AudioIn::AudioInInput);
+	LIB_FUNC("Jh6WbHhnI68", AudioIn::AudioInClose);
 }
 
 } // namespace LibAudioIn
@@ -209,6 +210,10 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 	LIB_FUNC("AbYvTOZ8Pts", Ngs2::Ngs2VoiceRunCommands);
 	LIB_FUNC("-TOuuAQ-buE", Ngs2::Ngs2VoiceGetState);
 	LIB_FUNC("rEh728kXk3w", Ngs2::Ngs2VoiceGetStateFlags);
+	LIB_FUNC("M4LYATRhRUE", Ngs2::Ngs2RackGetInfo);
+	LIB_FUNC("WCayTgob7-o", Ngs2::Ngs2VoiceGetPortInfo);
+	LIB_FUNC("9eic4AmjGVI", Ngs2::Ngs2VoiceQueryInfo);
+	LIB_FUNC("gbMKV+8Enuo", Ngs2::Ngs2PanGetVolumeMatrix);
 	LIB_FUNC("i0VnXM-C9fc", Ngs2::Ngs2SystemRender);
 	LIB_FUNC("u-WrYDaJA3k", Ngs2::Ngs2SystemDestroy);
 	LIB_FUNC("gThZqM5PYlQ", Ngs2::Ngs2SystemLock);

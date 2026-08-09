@@ -49,15 +49,28 @@ int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_
 int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64_t size, int32_t* handle_out);
 int KYTY_SYSV_ABI AudioOut2ContextDestroy(int32_t handle);
 int KYTY_SYSV_ABI AudioOut2ContextAdvance(int32_t handle);
-int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, const void* data);
+// blocking is a flag (0/1), not a PCM pointer. PCM is published earlier via
+// PortSetAttributes(attribute id 0) and flushed on Push.
+int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking);
 int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(int32_t handle, uint32_t* used, uint32_t* available);
 int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_t* port_out);
 int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port);
-int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr);
+// attrs is an array of {u32 id, u32 pad, void* value, size_t value_size} entries
+// (0x18 stride). count is the number of entries.
+int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attrs, uint32_t count);
 // sceAudioOut2PortGetState (NID gatEUKG+Ea4): 0x20-byte guest state blob.
 int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out);
 int KYTY_SYSV_ABI AudioOut2UserCreate(uint32_t user_id, uintptr_t* user_out);
 int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user);
+
+// C++-only unit-test seam for host-state regression coverage. It is not a
+// guest export and must not be used to infer an AudioOut2 ContextCreate ABI.
+namespace HostStateTest {
+int CreateContext();
+void FailNextSubmit();
+int  GetContextSinkHandle(int context);
+void FillContextQueue(int context);
+}
 
 } // namespace AudioOut2
 
@@ -65,6 +78,7 @@ namespace AudioIn {
 
 int KYTY_SYSV_ABI AudioInOpen(int user_id, uint32_t type, uint32_t index, uint32_t len, uint32_t freq, uint32_t param);
 int KYTY_SYSV_ABI AudioInInput(int handle, void* dest);
+int KYTY_SYSV_ABI AudioInClose(int handle);
 
 } // namespace AudioIn
 
@@ -450,6 +464,11 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* commands, uint32_t num_commands);
 int KYTY_SYSV_ABI Ngs2VoiceGetState(uintptr_t voice_handle, Ngs2VoiceState* state, size_t state_size);
 int KYTY_SYSV_ABI Ngs2VoiceGetStateFlags(uintptr_t voice_handle, uint32_t* state_flags);
+int KYTY_SYSV_ABI Ngs2RackGetInfo(uintptr_t rack_handle, void* out_info, size_t info_size);
+int KYTY_SYSV_ABI Ngs2VoiceGetPortInfo(uintptr_t voice_handle, uint32_t port, void* out_info, size_t out_info_size);
+int KYTY_SYSV_ABI Ngs2VoiceQueryInfo(uintptr_t voice_handle, uint32_t query_type, const void* param, void* out_info);
+int KYTY_SYSV_ABI Ngs2PanGetVolumeMatrix(void* work, const void* params, uint32_t num_params, uint32_t matrix_format,
+                                         float* out_volume_matrix);
 int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBufferInfo* buffer_info, uint32_t num_buffer_info);
 int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle);
 int KYTY_SYSV_ABI Ngs2SystemLock(uintptr_t system_handle);

@@ -8,6 +8,7 @@
 #include "Kyty/Core/MagicEnum.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Memory.h"
@@ -19,11 +20,15 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <cinttypes>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -294,26 +299,49 @@ namespace AudioOut2 {
 LIB_NAME("AudioOut2", "AudioOut");
 
 // Host-side AudioOut2 object table. Guest receives opaque positive handles.
-// Layout/API reimplemented from public export names (SCE NID encoding) and
-// observed Gen5 import/call order; no third-party implementation code copied.
+// Contracts reimplemented from public Gen5 export names and live-observed
+// parameter layouts and call order: PortSetAttributes → Advance → Push.
 constexpr int32_t  kMaxContexts         = 8;
-constexpr int32_t  kMaxPorts            = 16;
+constexpr int32_t  kMaxPorts            = 32;
 constexpr int32_t  kMaxUsers            = 8;
-constexpr uint64_t kDefaultContextBytes = 0x10000; // host workspace until layout is measured
+constexpr uint64_t kDefaultContextBytes = 0x10000;
 constexpr uint32_t kDefaultQueueDepth   = 4;
+constexpr uint32_t kDefaultGrain        = 256;
+constexpr uint32_t kDefaultSampleRate   = 48000;
+// Port flag bit 1 reserves ~20 dB of digital headroom for platform mastering;
+// restore it at the host boundary so MAIN beds are not 10× quieter.
+constexpr uint32_t kPortFlag20DbHeadroom = 1u << 1;
+constexpr float    kHeadroomGain         = 10.0f;
+// AudioOut2 attribute entry: {u32 id, u32 pad, void* value, size_t value_size}.
+constexpr size_t kAttributeStride = 0x18;
+// data_format bits 0..6: 0 = f32, 1 = s16; bits 8..15: channel count.
+constexpr uint32_t kDataFormatTypeMask = 0x7fu;
 
 struct ContextSlot
 {
-	bool     used       = false;
-	void*    buffer     = nullptr;
-	uint64_t size       = 0;
-	uint32_t queue_used = 0;
+	bool     used        = false;
+	uint64_t generation  = 0;
+	void*    buffer      = nullptr;
+	uint64_t size        = 0;
+	uint32_t queue_used  = 0;
+	uint32_t queue_depth = kDefaultQueueDepth;
+	uint32_t grain       = kDefaultGrain;
+	uint32_t sample_rate = kDefaultSampleRate;
+	// Host MAIN sink for this context (HostAudio handle as int; 0 = none).
+	int host_handle = 0;
 };
 
 struct PortSlot
 {
-	bool    used    = false;
-	int32_t context = 0;
+	bool     used         = false;
+	int32_t  context      = 0;
+	uint16_t type         = 0; // 0 = MAIN speaker bed
+	uint32_t data_format  = 0x200; // f32 stereo default
+	uint32_t sample_rate  = kDefaultSampleRate;
+	uint32_t flags        = 0;
+	// Current grain published by attribute id 0. It is copied out of guest
+	// memory before publication so Push never retains a guest pointer.
+	std::vector<uint8_t> pcm;
 	// PortGetState fields (0x20-byte guest state blob).
 	uint16_t output   = 0x01;
 	uint8_t  channels = 2;
@@ -330,22 +358,31 @@ static ContextSlot g_contexts[kMaxContexts];
 static PortSlot    g_ports[kMaxPorts];
 static UserSlot    g_users[kMaxUsers];
 static bool        g_audio_out2_ready = false;
+static std::mutex  g_audio_out2_mutex;
+static uint64_t    g_next_context_generation = 1;
+// C++-only host-state regression control; never registered as a guest export.
+static std::atomic_bool g_audio_out2_fail_next_submit {false};
 
-static int32_t AllocContext()
+static int32_t AllocContextLocked()
 {
 	for (int32_t i = 0; i < kMaxContexts; i++)
 	{
 		if (!g_contexts[i].used)
 		{
-			g_contexts[i]      = ContextSlot {};
-			g_contexts[i].used = true;
+			g_contexts[i]            = ContextSlot {};
+			g_contexts[i].used       = true;
+			g_contexts[i].generation = g_next_context_generation++;
+			if (g_next_context_generation == 0)
+			{
+				g_next_context_generation = 1;
+			}
 			return i + 1; // guest handles are 1-based
 		}
 	}
 	return 0;
 }
 
-static int32_t AllocPort(int32_t context)
+static int32_t AllocPortLocked(int32_t context)
 {
 	for (int32_t i = 0; i < kMaxPorts; i++)
 	{
@@ -360,7 +397,7 @@ static int32_t AllocPort(int32_t context)
 	return 0;
 }
 
-static int32_t AllocUser(int user_id)
+static int32_t AllocUserLocked(int user_id)
 {
 	for (int32_t i = 0; i < kMaxUsers; i++)
 	{
@@ -375,31 +412,209 @@ static int32_t AllocUser(int user_id)
 	return 0;
 }
 
+static bool DecodeDataFormat(uint32_t data_format, uint32_t* channels_out, uint32_t* sample_bytes_out, bool* is_float_out)
+{
+	if (channels_out == nullptr || sample_bytes_out == nullptr || is_float_out == nullptr)
+	{
+		return false;
+	}
+	uint32_t channels = (data_format >> 8u) & 0xffu;
+	if (channels == 0)
+	{
+		channels = 2;
+	}
+	// AudioOut's established host path covers only the documented channel
+	// layouts. Do not silently fold an unmeasured layout into stereo.
+	if (channels != 1 && channels != 2 && channels != 8)
+	{
+		return false;
+	}
+	const uint32_t data_type = data_format & kDataFormatTypeMask;
+	if (data_type == 0)
+	{
+		*is_float_out     = true;
+		*sample_bytes_out = 4;
+	} else if (data_type == 1)
+	{
+		*is_float_out     = false;
+		*sample_bytes_out = 2;
+	} else
+	{
+		return false;
+	}
+	*channels_out = channels;
+	return true;
+}
+
+static bool IsGuestWritableRange(const void* pointer, size_t size)
+{
+	return pointer != nullptr && size != 0 &&
+	       Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(pointer), static_cast<uint64_t>(size));
+}
+
+static bool CopyFromGuest(void* destination, const void* source, size_t size)
+{
+	return destination != nullptr && source != nullptr && size != 0 &&
+	       Core::VirtualMemory::CopyFromGuest(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
+}
+
+static bool CopyToGuest(void* destination, const void* source, size_t size)
+{
+	return destination != nullptr && source != nullptr && size != 0 &&
+	       Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
+}
+
+static bool CalculatePcmGrainBytes(uint32_t grain, uint32_t channels, uint32_t sample_bytes, size_t* bytes_out)
+{
+	if (bytes_out == nullptr || grain == 0 || channels == 0 || sample_bytes == 0)
+	{
+		return false;
+	}
+	constexpr size_t max_size = std::numeric_limits<size_t>::max();
+	if (channels > max_size / sample_bytes)
+	{
+		return false;
+	}
+	const size_t frame_bytes = static_cast<size_t>(channels) * sample_bytes;
+	if (grain > max_size / frame_bytes)
+	{
+		return false;
+	}
+	*bytes_out = static_cast<size_t>(grain) * frame_bytes;
+	return true;
+}
+
+static float ReadNormalizedSample(const uint8_t* frame, uint32_t channel, uint32_t sample_bytes, bool is_float)
+{
+	const uint8_t* sample = frame + static_cast<size_t>(channel) * sample_bytes;
+	if (is_float)
+	{
+		float value = 0.0f;
+		std::memcpy(&value, sample, sizeof(value));
+		return std::isfinite(value) ? value : 0.0f;
+	}
+	int16_t value = 0;
+	std::memcpy(&value, sample, sizeof(value));
+	return static_cast<float>(value) * (1.0f / 32768.0f);
+}
+
+// Fold one source frame into stereo L/R. Identity for mono/stereo; first-pair
+// plus centre bleed for wider beds (MAIN only; object/aux ports stay unmixed).
+static void MixFrameToStereo(const uint8_t* frame, uint32_t channels, uint32_t sample_bytes, bool is_float, float gain,
+                             float* left, float* right)
+{
+	if (channels == 1)
+	{
+		const float m = ReadNormalizedSample(frame, 0, sample_bytes, is_float) * gain;
+		*left += m;
+		*right += m;
+		return;
+	}
+	const float fl = ReadNormalizedSample(frame, 0, sample_bytes, is_float) * gain;
+	const float fr = ReadNormalizedSample(frame, 1, sample_bytes, is_float) * gain;
+	*left += fl;
+	*right += fr;
+	if (channels >= 3)
+	{
+		const float centre = ReadNormalizedSample(frame, 2, sample_bytes, is_float) * gain * 0.70710678f;
+		*left += centre;
+		*right += centre;
+	}
+	if (channels >= 6)
+	{
+		// 5.1-ish: LFE / surrounds contribute gently so wide beds are not lost.
+		const float lfe = ReadNormalizedSample(frame, 3, sample_bytes, is_float) * gain * 0.5f;
+		*left += lfe;
+		*right += lfe;
+		const float sl = ReadNormalizedSample(frame, 4, sample_bytes, is_float) * gain * 0.70710678f;
+		const float sr = ReadNormalizedSample(frame, 5, sample_bytes, is_float) * gain * 0.70710678f;
+		*left += sl;
+		*right += sr;
+	}
+}
+
+static bool EnsureHostSinkLocked(ContextSlot* ctx)
+{
+	if (ctx == nullptr)
+	{
+		return false;
+	}
+	if (ctx->host_handle != 0)
+	{
+		return true;
+	}
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr)
+	{
+		return false;
+	}
+	// Type 0 is the primary output and opens the host output device.
+	const auto id = audio->AudioOutOpen(0, ctx->grain, ctx->sample_rate, HostAudio::Format::FloatStereo);
+	if (!id.IsValid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 4, "AudioOut2: host sink open failed (grain=%u rate=%u)\n", ctx->grain,
+		               ctx->sample_rate);
+		return false;
+	}
+	ctx->host_handle = id.ToInt();
+	KYTY_LOG_DEBUG("\t AudioOut2 host sink handle = %d\n", ctx->host_handle);
+	return true;
+}
+
+static void CloseHostSinkLocked(ContextSlot* ctx)
+{
+	if (ctx == nullptr || ctx->host_handle == 0)
+	{
+		return;
+	}
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio != nullptr)
+	{
+		audio->AudioOutClose(HostAudio::Id(ctx->host_handle));
+	}
+	ctx->host_handle = 0;
+}
+
+static bool SubmitMixedGrain(int host_handle, const float* mix, uint32_t frames)
+{
+	if (host_handle == 0 || mix == nullptr || frames == 0)
+	{
+		return false;
+	}
+	if (g_audio_out2_fail_next_submit.exchange(false, std::memory_order_acq_rel))
+	{
+		return false;
+	}
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr)
+	{
+		return false;
+	}
+	HostAudio::OutputParam params[1];
+	params[0].handle = HostAudio::Id(host_handle);
+	params[0].data   = mix;
+	uint32_t samples = 0;
+	return audio->AudioOutOutputs(params, 1, &samples);
+}
+
 // sceAudioOut2Initialize (NID g2tViFIohHE)
 int KYTY_SYSV_ABI AudioOut2Initialize()
 {
 	PRINT_NAME();
+	std::lock_guard lock(g_audio_out2_mutex);
 	g_audio_out2_ready = true;
 	return OK;
 }
 
 // sceAudioOut2ContextResetParam (NID t5YrizufpQc)
-// Guest passes a context-param blob; official ResetParam fills defaults.
-// Without a measured sizeof(param), leave memory unchanged and succeed so the
-// title can write its own fields after the call (observed boot pattern).
 int KYTY_SYSV_ABI AudioOut2ContextResetParam(void* param)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t param = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
-	if (param == nullptr)
-	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
-	}
-	// Peek leading size-like field if present (common SCE param header).
-	uint64_t leading = 0;
-	std::memcpy(&leading, param, sizeof(leading));
-	KYTY_LOG_DEBUG("\t leading = 0x%016" PRIx64 "\n", leading);
-	return OK;
+	// This output block has no size argument and no measured field layout.
+	// Reject both null and non-null forms without touching guest memory.
+	(void)param;
+	return LibKernel::KERNEL_ERROR_EINVAL;
 }
 
 // sceAudioOut2ContextQueryMemory (NID pDmme7Bgm6E)
@@ -408,12 +623,11 @@ int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 	KYTY_LOG_DEBUG("\t size_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size_out));
-	if (size_out == nullptr)
-	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
-	}
-	*size_out = kDefaultContextBytes;
-	return OK;
+	// The size depends on the unmeasured ContextParam layout. Returning a host
+	// default would make guest allocation decisions from invented ABI data.
+	(void)param;
+	(void)size_out;
+	return LibKernel::KERNEL_ERROR_EINVAL;
 }
 
 // sceAudioOut2ContextCreate (NID 0x6o1VVAYSY)
@@ -424,44 +638,82 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	KYTY_LOG_DEBUG("\t buffer     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
 	KYTY_LOG_DEBUG("\t size       = 0x%016" PRIx64 "\n", size);
 	KYTY_LOG_DEBUG("\t handle_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handle_out));
-	if (handle_out == nullptr)
-	{
-		return LibKernel::KERNEL_ERROR_EINVAL;
-	}
-	if (!g_audio_out2_ready)
-	{
-		KYTY_LOG_DEBUG("\t note: ContextCreate before Initialize\n");
-	}
-	const int32_t id = AllocContext();
-	if (id == 0)
-	{
-		return LibKernel::KERNEL_ERROR_ENOMEM;
-	}
-	g_contexts[id - 1].buffer = buffer;
-	g_contexts[id - 1].size   = size;
-	*handle_out               = id;
-	KYTY_LOG_DEBUG("\t handle     = %d\n", id);
-	return OK;
+	// The required ContextParam and workspace semantics are unmeasured. Do not
+	// create a public context from a null/default interpretation either.
+	(void)param;
+	(void)buffer;
+	(void)size;
+	(void)handle_out;
+	return LibKernel::KERNEL_ERROR_EINVAL;
 }
+
+namespace HostStateTest {
+
+int CreateContext()
+{
+	// C++ test seam only. This bypasses no guest ABI: the exported
+	// AudioOut2ContextCreate remains a strict unsupported operation.
+	std::lock_guard lock(g_audio_out2_mutex);
+	return AllocContextLocked();
+}
+
+void FailNextSubmit()
+{
+	g_audio_out2_fail_next_submit.store(true, std::memory_order_release);
+}
+
+int GetContextSinkHandle(int context)
+{
+	std::lock_guard lock(g_audio_out2_mutex);
+	if (context < 1 || context > kMaxContexts || !g_contexts[context - 1].used)
+	{
+		return 0;
+	}
+	return g_contexts[context - 1].host_handle;
+}
+
+void FillContextQueue(int context)
+{
+	std::lock_guard lock(g_audio_out2_mutex);
+	if (context < 1 || context > kMaxContexts || !g_contexts[context - 1].used)
+	{
+		return;
+	}
+	auto& ctx      = g_contexts[context - 1];
+	ctx.queue_used = ctx.queue_depth != 0 ? ctx.queue_depth : kDefaultQueueDepth;
+}
+
+} // namespace HostStateTest
 
 // sceAudioOut2ContextDestroy (NID on6ZH7Abo10)
 int KYTY_SYSV_ABI AudioOut2ContextDestroy(int32_t handle)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
+	std::lock_guard lock(g_audio_out2_mutex);
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	CloseHostSinkLocked(&g_contexts[handle - 1]);
+	for (auto& port: g_ports)
+	{
+		if (port.used && port.context == handle)
+		{
+			port = PortSlot {};
+		}
 	}
 	g_contexts[handle - 1] = ContextSlot {};
 	return OK;
 }
 
 // sceAudioOut2ContextAdvance (NID PE2zHMqLSHs)
+// Updates the public queue clock; PCM submission lives in ContextPush.
 int KYTY_SYSV_ABI AudioOut2ContextAdvance(int32_t handle)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
+	std::lock_guard lock(g_audio_out2_mutex);
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -474,19 +726,106 @@ int KYTY_SYSV_ABI AudioOut2ContextAdvance(int32_t handle)
 }
 
 // sceAudioOut2ContextPush (NID aII9h5nli9U)
-int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, const void* data)
+// ABI: (ctx, blocking). Mix MAIN ports' published PCM grains into a stereo bed
+// and deliver through HostAudio. Second argument is a blocking flag, not data.
+int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 {
 	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
-	KYTY_LOG_DEBUG("\t data   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(data));
+	KYTY_LOG_DEBUG("\t handle = %d blocking = %u\n", handle, blocking);
+
+	if (blocking > 1)
+	{
+		return AUDIO_OUT_ERROR_INVALID_FLAG;
+	}
+
+	std::unique_lock lock(g_audio_out2_mutex);
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	if (g_contexts[handle - 1].queue_used < kDefaultQueueDepth)
+	auto& ctx = g_contexts[handle - 1];
+	const uint64_t context_generation = ctx.generation;
+	const uint32_t grain = (ctx.grain >= 64 && ctx.grain <= 4096) ? ctx.grain : kDefaultGrain;
+	const uint32_t sample_rate = ctx.sample_rate != 0 ? ctx.sample_rate : kDefaultSampleRate;
+	const uint32_t queue_depth = ctx.queue_depth != 0 ? ctx.queue_depth : kDefaultQueueDepth;
+
+	// Blocking-when-full: wait one grain when the emulated queue is saturated.
+	while (ctx.queue_used >= queue_depth)
 	{
-		g_contexts[handle - 1].queue_used++;
+		if (blocking == 0)
+		{
+			return AUDIO_OUT_ERROR_PORT_FULL;
+		}
+		lock.unlock();
+		const auto ns = std::chrono::nanoseconds(static_cast<int64_t>(grain) * 1'000'000'000LL /
+		                                         static_cast<int64_t>(sample_rate));
+		std::this_thread::sleep_for(ns);
+		lock.lock();
+		if (!ctx.used || ctx.generation != context_generation)
+		{
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+		if (ctx.queue_used > 0)
+		{
+			ctx.queue_used--;
+		}
 	}
+
+	std::vector<float> mix(static_cast<size_t>(grain) * 2u, 0.0f);
+	std::vector<PortSlot*> consumed_ports;
+
+	for (auto& port: g_ports)
+	{
+		if (!port.used || port.context != handle || port.pcm.empty())
+		{
+			continue;
+		}
+		// Only MAIN (type 0) drives the host speakers. Aux/personal/object
+		// ports stay unmixed until their routing contracts are evidenced.
+		if (port.type != 0)
+		{
+			continue;
+		}
+		uint32_t channels     = 0;
+		uint32_t sample_bytes = 0;
+		bool     is_float     = false;
+		if (!DecodeDataFormat(port.data_format, &channels, &sample_bytes, &is_float))
+		{
+			return AUDIO_OUT_ERROR_INVALID_FORMAT;
+		}
+		size_t grain_bytes = 0;
+		if (!CalculatePcmGrainBytes(grain, channels, sample_bytes, &grain_bytes) || port.pcm.size() != grain_bytes)
+		{
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+		const float  gain        = (port.flags & kPortFlag20DbHeadroom) != 0 ? kHeadroomGain : 1.0f;
+		const auto*  base        = port.pcm.data();
+		const size_t frame_bytes = static_cast<size_t>(channels) * sample_bytes;
+		for (uint32_t frame = 0; frame < grain; frame++)
+		{
+			const uint8_t* src = base + static_cast<size_t>(frame) * frame_bytes;
+			MixFrameToStereo(src, channels, sample_bytes, is_float, gain, &mix[frame * 2u], &mix[frame * 2u + 1u]);
+		}
+		consumed_ports.push_back(&port);
+	}
+
+	if (consumed_ports.empty())
+	{
+		return OK;
+	}
+	// Keeping the context lock through submission prevents close/recreate from
+	// rebinding this grain to a recycled sink handle.
+	if (!EnsureHostSinkLocked(&ctx) || !SubmitMixedGrain(ctx.host_handle, mix.data(), grain))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "AudioOut2: host submit failed for ctx %d\n", handle);
+		return AUDIO_OUT_ERROR_INVALID_PORT;
+	}
+	for (auto* port: consumed_ports)
+	{
+		port->pcm.clear();
+	}
+	ctx.queue_used++;
+
 	return OK;
 }
 
@@ -497,46 +836,98 @@ int KYTY_SYSV_ABI AudioOut2ContextGetQueueLevel(int32_t handle, uint32_t* used, 
 	KYTY_LOG_DEBUG("\t handle    = %d\n", handle);
 	KYTY_LOG_DEBUG("\t used      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(used));
 	KYTY_LOG_DEBUG("\t available = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(available));
+	if ((used != nullptr && !IsGuestWritableRange(used, sizeof(*used))) ||
+	    (available != nullptr && !IsGuestWritableRange(available, sizeof(*available))))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	std::lock_guard lock(g_audio_out2_mutex);
 	if (handle < 1 || handle > kMaxContexts || !g_contexts[handle - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	const uint32_t q = g_contexts[handle - 1].queue_used;
-	if (used != nullptr)
+	const auto&    ctx = g_contexts[handle - 1];
+	const uint32_t q   = ctx.queue_used;
+	const uint32_t depth = ctx.queue_depth != 0 ? ctx.queue_depth : kDefaultQueueDepth;
+	const uint32_t available_value = (q < depth) ? (depth - q) : 0;
+	if ((used != nullptr && !CopyToGuest(used, &q, sizeof(q))) ||
+	    (available != nullptr && !CopyToGuest(available, &available_value, sizeof(available_value))))
 	{
-		*used = q;
-	}
-	if (available != nullptr)
-	{
-		*available = (q < kDefaultQueueDepth) ? (kDefaultQueueDepth - q) : 0;
+		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	return OK;
 }
 
 // sceAudioOut2PortCreate (NID JK2wamZPzwM)
+// portParam: u16 type @0, u16 pad @2, u32 data_format @4, u32 sample_rate @8, u32 flags @0xc.
 int KYTY_SYSV_ABI AudioOut2PortCreate(int32_t context, const void* param, int32_t* port_out)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t context  = %d\n", context);
 	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 	KYTY_LOG_DEBUG("\t port_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(port_out));
-	if (port_out == nullptr)
+	if (port_out == nullptr || !IsGuestWritableRange(port_out, sizeof(*port_out)))
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
+
+	uint16_t type        = 0;
+	uint32_t data_format = 0x200;
+	uint32_t sample_rate = kDefaultSampleRate;
+	uint32_t flags       = 0;
+	if (param != nullptr)
+	{
+		constexpr size_t kPortParamSize = 0x10;
+		uint8_t          param_bytes[kPortParamSize] {};
+		if (!CopyFromGuest(param_bytes, param, sizeof(param_bytes)))
+		{
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+		std::memcpy(&type, param_bytes + 0, sizeof(type));
+		std::memcpy(&data_format, param_bytes + 4, sizeof(data_format));
+		uint32_t freq = 0;
+		std::memcpy(&freq, param_bytes + 8, sizeof(freq));
+		if (freq >= 8000 && freq <= 192000)
+		{
+			sample_rate = freq;
+		}
+		std::memcpy(&flags, param_bytes + 12, sizeof(flags));
+	}
+
+	uint32_t channels     = 2;
+	uint32_t sample_bytes = 4;
+	bool     is_float     = true;
+	if (!DecodeDataFormat(data_format, &channels, &sample_bytes, &is_float))
+	{
+		return AUDIO_OUT_ERROR_INVALID_FORMAT;
+	}
+
+	std::lock_guard lock(g_audio_out2_mutex);
 	if (context < 1 || context > kMaxContexts || !g_contexts[context - 1].used)
 	{
-		// Some titles create a port before a host-tracked context handle is
-		// established; still allocate so boot can continue with evidence.
-		KYTY_LOG_DEBUG("\t note: PortCreate with unknown context\n");
+		return AUDIO_OUT_ERROR_INVALID_PORT;
 	}
-	const int32_t id = AllocPort(context);
+	const int32_t id = AllocPortLocked(context);
 	if (id == 0)
 	{
 		return LibKernel::KERNEL_ERROR_ENOMEM;
 	}
-	*port_out = id;
-	KYTY_LOG_DEBUG("\t port     = %d\n", id);
+	auto& port        = g_ports[id - 1];
+	port.type         = type;
+	port.data_format  = data_format;
+	port.sample_rate  = sample_rate;
+	port.flags        = flags;
+	port.channels     = static_cast<uint8_t>(std::min<uint32_t>(channels, 255));
+	port.output       = 0x01;
+	port.status       = -1;
+	port.pcm.clear();
+	if (!CopyToGuest(port_out, &id, sizeof(id)))
+	{
+		port = PortSlot {};
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	KYTY_LOG_DEBUG("\t port=%d type=0x%x format=0x%x rate=%u flags=0x%x ch=%u\n", id, type, data_format,
+	               sample_rate, flags, channels);
 	return OK;
 }
 
@@ -545,6 +936,7 @@ int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t port = %d\n", port);
+	std::lock_guard lock(g_audio_out2_mutex);
 	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -554,38 +946,88 @@ int KYTY_SYSV_ABI AudioOut2PortDestroy(int32_t port)
 }
 
 // sceAudioOut2PortSetAttributes (NID 8XTArSPyWHk)
-// attr points at tagged entries { int32 id; int32 pad; uint64 value; } (16 B).
-// When attr is a single opaque pointer from older call sites, treat as no-op success.
-int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attr)
+// Attribute id 0 = per-grain PCM pointer. value points at a guest qword that
+// holds the address of the interleaved grain (double-indirect).
+int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attrs, uint32_t count)
 {
 	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t port = %d\n", port);
-	KYTY_LOG_DEBUG("\t attr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(attr));
+	KYTY_LOG_DEBUG("\t port  = %d\n", port);
+	KYTY_LOG_DEBUG("\t attrs = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(attrs));
+	KYTY_LOG_DEBUG("\t count = %u\n", count);
+
+	if (count == 0)
+	{
+		std::lock_guard lock(g_audio_out2_mutex);
+		if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used)
+		{
+			return LibKernel::KERNEL_ERROR_EINVAL;
+		}
+		auto& p = g_ports[port - 1];
+		p.status = 0; // configured / ready
+		return OK;
+	}
+	constexpr uint32_t kMaxAttributeEntries = 32;
+	if (attrs == nullptr || count != 1 || count > kMaxAttributeEntries || count > std::numeric_limits<size_t>::max() / kAttributeStride)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	const size_t attrs_size = static_cast<size_t>(count) * kAttributeStride;
+	std::vector<uint8_t> attrs_snapshot(attrs_size);
+	if (!CopyFromGuest(attrs_snapshot.data(), attrs, attrs_snapshot.size()))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	std::lock_guard lock(g_audio_out2_mutex);
 	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	// Successful SetAttributes clears the previous "unset" status so GetState
-	// reports a ready port.
-	g_ports[port - 1].status = 0;
-	if (attr != nullptr)
+	auto& p = g_ports[port - 1];
+	if (p.context < 1 || p.context > kMaxContexts || !g_contexts[p.context - 1].used)
 	{
-		// Best-effort first entry: id at +0, value at +8.
-		const auto*   words        = static_cast<const uint32_t*>(attr);
-		const int32_t attribute_id = static_cast<int32_t>(words[0]);
-		uint64_t      value        = 0;
-		std::memcpy(&value, static_cast<const uint8_t*>(attr) + 8, sizeof(value));
-		auto& p = g_ports[port - 1];
-		switch (attribute_id)
-		{
-			case 0:
-			case 1: p.output = static_cast<uint16_t>(value); break;
-			case 2: p.channels = static_cast<uint8_t>(value); break;
-			case 3:
-			case 4: p.status = static_cast<int16_t>(value); break;
-			default: break;
-		}
+		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
+
+	const auto* entry = attrs_snapshot.data();
+	uint32_t    id    = 0;
+	uint64_t    vptr  = 0;
+	uint64_t    vsize = 0;
+	std::memcpy(&id, entry + 0, sizeof(id));
+	std::memcpy(&vptr, entry + 8, sizeof(vptr));
+	std::memcpy(&vsize, entry + 16, sizeof(vsize));
+
+	if (id != 0 || vsize != sizeof(uintptr_t) || vptr == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	uintptr_t pcm_address = 0;
+	if (!CopyFromGuest(&pcm_address, reinterpret_cast<const void*>(static_cast<uintptr_t>(vptr)), sizeof(pcm_address)) ||
+	    pcm_address == 0)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	uint32_t channels     = 0;
+	uint32_t sample_bytes = 0;
+	bool     is_float     = false;
+	if (!DecodeDataFormat(p.data_format, &channels, &sample_bytes, &is_float))
+	{
+		return AUDIO_OUT_ERROR_INVALID_FORMAT;
+	}
+	size_t grain_bytes = 0;
+	if (!CalculatePcmGrainBytes(g_contexts[p.context - 1].grain, channels, sample_bytes, &grain_bytes))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	std::vector<uint8_t> pcm_snapshot(grain_bytes);
+	if (!CopyFromGuest(pcm_snapshot.data(), reinterpret_cast<const void*>(pcm_address), pcm_snapshot.size()))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	p.pcm = std::move(pcm_snapshot);
+	KYTY_LOG_DEBUG("\t copied pcm grain = 0x%016" PRIxPTR "\n", pcm_address);
+	p.status = 0; // configured / ready
 	return OK;
 }
 
@@ -595,27 +1037,31 @@ int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out)
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t port      = %d\n", port);
 	KYTY_LOG_DEBUG("\t state_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(state_out));
-	if (port < 1 || port > kMaxPorts || !g_ports[port - 1].used || state_out == nullptr)
+	constexpr size_t kPortStateSize = 0x20;
+	if (port < 1 || port > kMaxPorts || state_out == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	constexpr size_t kPortStateSize = 0x20;
-	void*            start          = nullptr;
-	void*            end            = nullptr;
-	if (Kernel::Memory::KernelQueryMemoryProtection(state_out, &start, &end, nullptr) != OK ||
-	    reinterpret_cast<uintptr_t>(state_out) > reinterpret_cast<uintptr_t>(end) - kPortStateSize + 1)
+	if (!IsGuestWritableRange(state_out, kPortStateSize))
 	{
-		return LibKernel::KERNEL_ERROR_EFAULT;
+		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	const auto& p = g_ports[port - 1];
-	uint8_t     blob[kPortStateSize] {};
+	std::lock_guard lock(g_audio_out2_mutex);
+	if (!g_ports[port - 1].used)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	// Fixed 0x20-byte connected-port state.
+	const auto&      p              = g_ports[port - 1];
+	uint8_t          blob[kPortStateSize] {};
 	blob[0] = static_cast<uint8_t>(p.output & 0xffu);
 	blob[1] = static_cast<uint8_t>((p.output >> 8) & 0xffu);
 	blob[2] = p.channels;
-	blob[4] = static_cast<uint8_t>(static_cast<uint16_t>(p.status) & 0xffu);
-	blob[5] = static_cast<uint8_t>((static_cast<uint16_t>(p.status) >> 8) & 0xffu);
-	std::memcpy(state_out, blob, kPortStateSize);
-	return OK;
+	// Volume field: -1 means N/A for MAIN (observed Gen5 convention).
+	const int16_t volume = -1;
+	blob[4]              = static_cast<uint8_t>(static_cast<uint16_t>(volume) & 0xffu);
+	blob[5]              = static_cast<uint8_t>((static_cast<uint16_t>(volume) >> 8) & 0xffu);
+	return CopyToGuest(state_out, blob, sizeof(blob)) ? OK : LibKernel::KERNEL_ERROR_EINVAL;
 }
 
 // sceAudioOut2UserCreate (NID xywYcRB7nbQ)
@@ -624,23 +1070,22 @@ int KYTY_SYSV_ABI AudioOut2UserCreate(uint32_t user_id, uintptr_t* user_out)
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t user_id  = %u\n", user_id);
 	KYTY_LOG_DEBUG("\t user_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user_out));
-	if (user_out == nullptr)
+	if (user_out == nullptr || !IsGuestWritableRange(user_out, sizeof(*user_out)))
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	void* output_start = nullptr;
-	void* output_end   = nullptr;
-	if (Kernel::Memory::KernelQueryMemoryProtection(user_out, &output_start, &output_end, nullptr) != OK ||
-	    reinterpret_cast<uintptr_t>(user_out) > reinterpret_cast<uintptr_t>(output_end) - sizeof(*user_out) + 1)
-	{
-		return LibKernel::KERNEL_ERROR_EFAULT;
-	}
-	const int32_t id = AllocUser(static_cast<int>(user_id));
+	std::lock_guard lock(g_audio_out2_mutex);
+	const int32_t   id = AllocUserLocked(static_cast<int>(user_id));
 	if (id == 0)
 	{
 		return LibKernel::KERNEL_ERROR_ENOMEM;
 	}
-	*user_out = static_cast<uintptr_t>(id);
+	const uintptr_t user = static_cast<uintptr_t>(id);
+	if (!CopyToGuest(user_out, &user, sizeof(user)))
+	{
+		g_users[id - 1] = UserSlot {};
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 	KYTY_LOG_DEBUG("\t user     = %d\n", id);
 	return OK;
 }
@@ -650,6 +1095,7 @@ int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t user = 0x%016" PRIxPTR "\n", user);
+	std::lock_guard lock(g_audio_out2_mutex);
 	if (user < 1 || user > static_cast<uintptr_t>(kMaxUsers) || !g_users[user - 1].used)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -710,7 +1156,10 @@ int KYTY_SYSV_ABI AudioInInput(int handle, void* dest)
 {
 	PRINT_NAME();
 
-	if (dest == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (dest == nullptr)
+	{
+		return AUDIO_IN_ERROR_INVALID_POINTER;
+	}
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr || !audio->AudioInValid(HostAudio::Id(handle)))
@@ -719,6 +1168,22 @@ int KYTY_SYSV_ABI AudioInInput(int handle, void* dest)
 	}
 
 	return static_cast<int>(audio->AudioInInput(HostAudio::Id(handle), dest));
+}
+
+// sceAudioInClose (NID Jh6WbHhnI68).
+int KYTY_SYSV_ABI AudioInClose(int handle)
+{
+	PRINT_NAME();
+
+	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
+
+	auto audio = std::atomic_load(&g_host_audio);
+	if (audio == nullptr || !audio->AudioInClose(HostAudio::Id(handle)))
+	{
+		return AUDIO_IN_ERROR_INVALID_HANDLE;
+	}
+
+	return OK;
 }
 
 } // namespace AudioIn
