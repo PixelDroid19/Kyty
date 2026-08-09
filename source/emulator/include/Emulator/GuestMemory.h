@@ -38,6 +38,7 @@ public:
 	[[nodiscard]] bool Install(const Callbacks& callbacks);
 	[[nodiscard]] bool QueryMappedRange(uint64_t address, uint64_t size, MappedRange* out) const noexcept;
 	[[nodiscard]] int  QueryProtection(void* address, void** start, void** end, int* protection) const noexcept;
+	[[nodiscard]] bool IsInstalled() const noexcept;
 
 private:
 	static bool AreComplete(const Callbacks& callbacks) noexcept;

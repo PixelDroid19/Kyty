@@ -316,6 +316,8 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Dmask9: s = "dmask:0x9"; break;
 			case ShaderInstructionFormat::DmaskA: s = "dmask:0xa"; break;
 			case ShaderInstructionFormat::DmaskB: s = "dmask:0xb"; break;
+			case ShaderInstructionFormat::DmaskC: s = "dmask:0xc"; break;
+			case ShaderInstructionFormat::DmaskD: s = "dmask:0xd"; break;
 			case ShaderInstructionFormat::DmaskF: s = "dmask:0xf"; break;
 			case ShaderInstructionFormat::Gds: s = "gds"; break;
 			case ShaderInstructionFormat::MimgDmask: s = String8::FromPrintf("dmask:0x%x", inst.mimg_dmask); break;

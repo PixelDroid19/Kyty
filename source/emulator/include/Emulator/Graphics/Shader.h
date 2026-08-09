@@ -87,6 +87,8 @@ enum class ShaderInstructionType : uint32_t
 	ImageSampleL,
 	ImageSampleLz,
 	ImageSampleLzO,
+	ImageSampleB,
+	ImageSampleDrefLz,
 	ImageStore,
 	ImageStoreMip,
 	SAddcU32,
@@ -563,6 +565,8 @@ enum FormatByte : uint64_t
 	Dmask4, // dmask:0x4 (B channel only)
 	Dmask2, // dmask:0x2 (G channel only)
 	DmaskB, // dmask:0xb (R+G+A, three components)
+	DmaskC, // dmask:0xc (B+A, two components)
+	DmaskD, // dmask:0xd (R+B+A, three components)
 	Gds,    // gds
 	DA,     // operand_array_to_str(inst.dst, inst.dst.size)
 	MimgDmask, // dmask carried by ShaderInstruction::mimg_dmask
@@ -640,15 +644,43 @@ enum Format : uint64_t
 	Vdata2Vaddr3StSsDmask5              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask5}),
 	Vdata2Vaddr3StSsDmask9              = FormatDefine({DA2, S0A3, S1A8, S2A4, Dmask9}),
 	Vdata2Vaddr3StSsDmaskA              = FormatDefine({DA2, S0A3, S1A8, S2A4, DmaskA}),
+	Vdata2Vaddr3StSsDmaskC              = FormatDefine({DA2, S0A3, S1A8, S2A4, DmaskC}),
 	Vdata2VaddrSvSoffsIdxen             = FormatDefine({DA2, S0, S1A4, S2, Idxen}),
 	Vdata2VaddrSvSoffsIdxenFloat2       = FormatDefine({DA2, S0, S1A4, S2, Idxen, Float2}),
 	Vdata3Vaddr3StSsDmask7              = FormatDefine({DA3, S0A3, S1A8, S2A4, Dmask7}),
 	Vdata3Vaddr3StSsDmaskB              = FormatDefine({DA3, S0A3, S1A8, S2A4, DmaskB}),
+	Vdata3Vaddr3StSsDmaskD              = FormatDefine({DA3, S0A3, S1A8, S2A4, DmaskD}),
 	Vdata3Vaddr4StSsDmask7              = FormatDefine({DA3, S0A4, S1A8, S2A4, Dmask7}),
 	Vdata3VaddrSvSoffsIdxen             = FormatDefine({DA3, S0, S1A4, S2, Idxen}),
 	Vdata4Vaddr2SvSoffsOffenIdxenFloat4 = FormatDefine({DA4, S0A2, S1A4, S2, Offen, Idxen, Float4}),
 	Vdata4Vaddr3StDmaskF                = FormatDefine({DA4, S0A3, S1A8, DmaskF}),
 	Vdata4Vaddr3StSsDmaskF              = FormatDefine({DA4, S0A3, S1A8, S2A4, DmaskF}),
+	Vdata4Vaddr2StSsDmaskF              = FormatDefine({DA4, S0A2, S1A8, S2A4, DmaskF}),
+
+	Vdata1Vaddr2StSsDmask1                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask1}),
+	Vdata1Vaddr2StSsDmask2                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask2}),
+	Vdata2Vaddr2StSsDmask3                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask3}),
+	Vdata1Vaddr2StSsDmask4                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask4}),
+	Vdata2Vaddr2StSsDmask5                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask5}),
+	Vdata3Vaddr2StSsDmask7                  = FormatDefine({DA3, S0A2, S1A8, S2A4, Dmask7}),
+	Vdata1Vaddr2StSsDmask8                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask8}),
+	Vdata2Vaddr2StSsDmask9                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask9}),
+	Vdata2Vaddr2StSsDmaskA                  = FormatDefine({DA2, S0A2, S1A8, S2A4, DmaskA}),
+	Vdata3Vaddr2StSsDmaskB                  = FormatDefine({DA3, S0A2, S1A8, S2A4, DmaskB}),
+	Vdata2Vaddr2StSsDmaskC                  = FormatDefine({DA2, S0A2, S1A8, S2A4, DmaskC}),
+	Vdata3Vaddr2StSsDmaskD                  = FormatDefine({DA3, S0A2, S1A8, S2A4, DmaskD}),
+	Vdata1Vaddr4StSsDmask1                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask1}),
+	Vdata1Vaddr4StSsDmask2                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask2}),
+	Vdata2Vaddr4StSsDmask3                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask3}),
+	Vdata1Vaddr4StSsDmask4                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask4}),
+	Vdata2Vaddr4StSsDmask5                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask5}),
+	Vdata1Vaddr4StSsDmask8                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask8}),
+	Vdata2Vaddr4StSsDmask9                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask9}),
+	Vdata2Vaddr4StSsDmaskA                  = FormatDefine({DA2, S0A4, S1A8, S2A4, DmaskA}),
+	Vdata3Vaddr4StSsDmaskB                  = FormatDefine({DA3, S0A4, S1A8, S2A4, DmaskB}),
+	Vdata2Vaddr4StSsDmaskC                  = FormatDefine({DA2, S0A4, S1A8, S2A4, DmaskC}),
+	Vdata3Vaddr4StSsDmaskD                  = FormatDefine({DA3, S0A4, S1A8, S2A4, DmaskD}),
+	Vdata4Vaddr4StSsDmaskF                  = FormatDefine({DA4, S0A4, S1A8, S2A4, DmaskF}),
 	Vdata4Vaddr4StDmaskF                = FormatDefine({DA4, S0A4, S1A8, DmaskF}),
 	// image_gather4 returns four values from the selected component. The MIMG
 	// component mask selects that component; it does not alter result width.
@@ -933,7 +965,8 @@ uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t t
 // Color3D has a separate volume layout and must not be validated as an array.
 constexpr bool ShaderGen5TextureTypeUsesArrayAddressing(uint8_t type)
 {
-	return type == 13u;
+	// 13 = 2D array; 11 = cube (six faces addressed like layers).
+	return type == 13u || type == 11u;
 }
 
 // Sampled-image descriptor arrays have a static SPIR-V view type. Classify

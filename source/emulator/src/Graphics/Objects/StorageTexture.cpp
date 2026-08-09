@@ -87,7 +87,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	auto       base_array        = params[StorageTextureObject::PARAM_BASE_ARRAY];
 	bool       neo               = Config::IsNeo();
 	const bool three_dimensional = resource_type == 10u;
-	const bool arrayed_2d        = resource_type == 13u;
+	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
 	const bool depth64kb32       = fmt == 22u && tile == 24u;
 	const bool skip_seed         = params[StorageTextureObject::PARAM_SKIP_SEED] != 0;
 
@@ -336,8 +336,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto       pitch             = params[StorageTextureObject::PARAM_PITCH];
 	auto       tile              = params[StorageTextureObject::PARAM_TILE];
 	const bool three_dimensional = resource_type == 10u;
-	const bool arrayed_2d        = resource_type == 13u;
-	if (resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_type != 8u && resource_type != 9u && resource_type != 13u && !three_dimensional condition ignored (continuing)\n"); }
+	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
+	if (resource_type != 8u && resource_type != 9u && !arrayed_2d && !three_dimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported storage texture resource type (continuing)\n"); }
 
 	if (base_level != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_level != 0 condition ignored (continuing)\n"); }
 

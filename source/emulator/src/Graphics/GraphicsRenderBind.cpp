@@ -44,7 +44,6 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <mutex>
 #include <set>
 #include <string>
 
@@ -323,14 +322,8 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 				ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
-				// Unsafe bring-up deliberately continues past the diagnostic below, so
-				// do not feed a zero-sized or unmapped range into GpuMemoryCreateObject.
-				// A zero-filled SSBO is the same safe carrier used for proven raw OOB
-				// accesses and keeps the command stream alive without dereferencing the
-				// invalid guest address. Strict mode still halts in EXIT_NOT_IMPLEMENTED.
-				static constexpr uint32_t kInvalidStorageDescriptorCarrier = 0;
-				buf = buffer->UploadTransientBuffer(&kInvalidStorageDescriptorCarrier, sizeof(kInvalidStorageDescriptorCarrier),
-				                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				EXIT("storage buffer range is not materialized: index=%d addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", i,
+				     addr, requested_size);
 			} else
 			{
 				if (materialized_size != requested_size)
@@ -349,7 +342,9 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			}
 		}
 
-		if (buf == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buf == nullptr condition ignored (continuing)\n"); }
+		// Descriptor writes require a real VkBuffer. Only proven empty/OOB
+		// descriptors receive a zero carrier; all materialization failures stay strict.
+		EXIT_IF(buf == nullptr || buf->buffer == nullptr);
 
 		buffers[i] = buf;
 
@@ -1044,7 +1039,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
 		    bound_dump_width == static_cast<uint32_t>(width) && bound_dump_height == static_cast<uint32_t>(height))
 		{
-			UtilDumpVulkanImageRgba8Png(g_render_ctx->GetGraphicCtx(), tex, "/tmp/kyty-dump-bound-sample", "bound");
+			char dump_tag[96];
+			std::snprintf(dump_tag, sizeof(dump_tag), "bound-addr%012" PRIx64 "-guestfmt%u-hostfmt%u-type%u", static_cast<uint64_t>(addr),
+			              fmt, static_cast<uint32_t>(tex->format), static_cast<uint32_t>(tex->type));
+			UtilDumpVulkanImageRgba8Png(g_render_ctx->GetGraphicCtx(), tex, "/tmp/kyty-dump-bound-sample", dump_tag);
 		}
 
 		if (render_texture)
@@ -1386,7 +1384,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 
 		bool need_descriptor = false;
 
-		VulkanBuffer* storage_buffers[DescriptorCache::BUFFERS_MAX];
+		VulkanBuffer* storage_buffers[DescriptorCache::BUFFERS_MAX] = {};
 		VulkanImage*  textures2d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
 		int           textures2d_sampled_view[DescriptorCache::TEXTURES_SAMPLED_MAX];
 		VulkanImage*  textures2d_array_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
@@ -1449,8 +1447,22 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		EXIT_IF(bind.push_constant_size != (sgprs_ptr - sgprs) * 4);
 		if (bind.vsharp_uniform_buffer)
 		{
+			// Spill path for push constants > PORTABLE_PUSH_CONSTANT_BYTES. Must
+			// produce a real VkBuffer; DescriptorCache EXIT_IFs on null vsharp.
 			vsharp_buffer = buffer->UploadTransientBuffer(sgprs, bind.push_constant_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-			if (vsharp_buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vsharp_buffer == nullptr condition ignored (continuing)\n"); }
+			if (vsharp_buffer == nullptr)
+			{
+				// Transient pool exhausted even after larger-entry reuse. Prefer a
+				// second attempt with STORAGE|UNIFORM so a free multi-usage slab can
+				// serve (still host-visible). If that also fails, hard-fail with size
+				// so the next session can raise MaxEntries rather than null-deref.
+				vsharp_buffer = buffer->UploadTransientBuffer(sgprs, bind.push_constant_size,
+				                                              VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			}
+			if (vsharp_buffer == nullptr)
+			{
+				EXIT("vsharp uniform spill failed: push_constant_size=%u (transient pool exhausted)\n", bind.push_constant_size);
+			}
 			need_descriptor = true;
 		}
 

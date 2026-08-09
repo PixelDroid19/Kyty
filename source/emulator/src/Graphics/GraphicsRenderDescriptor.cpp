@@ -745,6 +745,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	VkDescriptorBufferInfo buffer_info[BUFFERS_MAX] {};
 	for (int i = 0; i < storage_buffers_num; i++)
 	{
+		// PrepareStorageBuffers must always materialize a carrier (including empty OOB
+		// and null V#). A null entry here is a host bug, not a guest layout.
+		EXIT_IF(storage_buffers[i] == nullptr || storage_buffers[i]->buffer == nullptr);
 		buffer_info[i].buffer = storage_buffers[i]->buffer;
 		buffer_info[i].offset = 0;
 		buffer_info[i].range  = VK_WHOLE_SIZE;

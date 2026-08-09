@@ -49,26 +49,49 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 	{
 		return 0;
 	}
-	if (std::getenv("KYTY_DUMP_HASH_RANGE") != nullptr)
+	// GPU-only guest mappings are not host-readable; hashing them faults. Once
+	// the guest-memory boundary is installed, every GpuMemory range must resolve
+	// through it. Unit tests construct host-only fixtures before that boundary is
+	// installed and retain the historical direct-hash path.
 	{
-		static std::atomic_uint dump_count {0};
-		const unsigned         ordinal = dump_count.fetch_add(1, std::memory_order_relaxed);
-		if (ordinal < 128u)
+		auto&                              guest_memory = Emulator::GuestMemory::GetPort();
+		Emulator::GuestMemory::MappedRange mapped {};
+		const uint64_t                     addr = reinterpret_cast<uint64_t>(buf);
+		if (guest_memory.IsInstalled())
 		{
-			Emulator::GuestMemory::MappedRange mapped {};
-			const bool mapped_range = Emulator::GuestMemory::GetPort().QueryMappedRange(reinterpret_cast<uint64_t>(buf), size, &mapped);
-			void*      protection_start = nullptr;
-			void*      protection_end   = nullptr;
-			int        protection       = 0;
-			const int  protection_result = Emulator::GuestMemory::GetPort().QueryProtection(const_cast<uint8_t*>(buf), &protection_start,
-			                                                                                &protection_end, &protection);
-			KYTY_LOG_DEBUG(
-			             "KYTY_DUMP_HASH_RANGE ordinal=%u type=%u buf=0x%012" PRIx64 " size=0x%012" PRIx64
-			             " mapped=%u base=0x%012" PRIx64 " map_size=0x%012" PRIx64 " protection_result=%d start=0x%012" PRIx64
-			             " end=0x%012" PRIx64 " prot=0x%x\n",
-			             ordinal, static_cast<unsigned>(type), reinterpret_cast<uint64_t>(buf), size, mapped_range ? 1u : 0u,
-			             mapped.base, mapped.size, protection_result, reinterpret_cast<uint64_t>(protection_start),
-			             reinterpret_cast<uint64_t>(protection_end), protection);
+			const bool range_known = guest_memory.QueryMappedRange(addr, size, &mapped);
+			if (!range_known)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: GpuMemoryCalcHash skipping unmapped guest range type=%u buf=0x%012" PRIx64
+				               " size=0x%012" PRIx64 "\n",
+				               static_cast<unsigned>(type), addr, size);
+				return 0;
+			}
+			const bool covered = mapped.base != 0 && mapped.size != 0 && size <= mapped.size && addr >= mapped.base &&
+			                     addr - mapped.base <= mapped.size - size;
+			if (!covered)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: GpuMemoryCalcHash skipping incompletely mapped range type=%u buf=0x%012" PRIx64
+				               " size=0x%012" PRIx64 "\n",
+				               static_cast<unsigned>(type), addr, size);
+				return 0;
+			}
+
+			void* protection_start = nullptr;
+			void* protection_end   = nullptr;
+			int   protection       = 0;
+			const int protection_result =
+			    guest_memory.QueryProtection(const_cast<uint8_t*>(buf), &protection_start, &protection_end, &protection);
+			if (protection_result != 0 || (protection & 0x3) == 0)
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: GpuMemoryCalcHash skipping non-CPU-readable range type=%u buf=0x%012" PRIx64
+				               " size=0x%012" PRIx64 " prot=0x%x result=%d\n",
+				               static_cast<unsigned>(type), addr, size, protection, protection_result);
+				return 0;
+			}
 		}
 	}
 	const auto start   = std::chrono::steady_clock::now();
@@ -257,7 +280,11 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemo
 
 	if (mode == GpuMemoryRangeReleaseMode::Unmap)
 	{
-		if (!IsAllocated(vaddr, size)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsAllocated(vaddr, size) condition ignored (continuing)\n"); }
+		// Already holding m_mutex — avoid IsAllocated's recursive re-lock.
+		if (GetHeapId(vaddr, size) < 0)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsAllocated(vaddr, size) condition ignored (continuing)\n");
+		}
 
 		int index = 0;
 		for (auto& a: m_heaps)
@@ -285,7 +312,10 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemo
 			index++;
 		}
 
-		if (IsAllocated(vaddr, size)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: IsAllocated(vaddr, size) condition ignored (continuing)\n"); }
+		if (GetHeapId(vaddr, size) >= 0)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: IsAllocated(vaddr, size) condition ignored (continuing)\n");
+		}
 	}
 
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);

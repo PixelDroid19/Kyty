@@ -11,11 +11,19 @@
 
 namespace Kyty::Libs::Graphics {
 
+enum class VulkanVertexInputNumericClass : uint8_t
+{
+	Float,
+	Uint,
+	Sint,
+};
+
 struct VulkanVertexInputFormat
 {
-	uint8_t  unified_format  = 0;
-	VkFormat format          = VK_FORMAT_UNDEFINED;
-	uint32_t component_count = 0;
+	uint8_t                       unified_format  = 0;
+	VkFormat                      format          = VK_FORMAT_UNDEFINED;
+	uint32_t                      component_count = 0;
+	VulkanVertexInputNumericClass numeric_class   = VulkanVertexInputNumericClass::Float;
 };
 
 // Resolve Gen5 descriptors and attribute encodings through one renderer-owned

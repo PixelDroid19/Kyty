@@ -236,15 +236,20 @@ inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type,
 	       relation == GpuMemoryOverlapType::Contains;
 }
 
-// A small storage view may address bytes already exposed through a larger
-// index allocation. Keep both bindings and let the existing alias links carry
-// write-back invalidation between them. Only the captured containment direction
-// is accepted; other range relationships remain strict.
+// IndexBuffer ↔ StorageBuffer alias (same relations as VertexStorageShare):
+//   - Contains: larger IB covers a small storage view
+//   - IsContainedWithin: larger StorageBuffer covers smaller mesh IBs
+//   - Crosses: partial overlap with read-only storage views
+// Keep both bindings; write-back invalidation walks the alias links.
 inline bool GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                              GpuMemoryObjectType incoming_type)
 {
-	return existing_type == GpuMemoryObjectType::IndexBuffer && relation == GpuMemoryOverlapType::Contains &&
-	       incoming_type == GpuMemoryObjectType::StorageBuffer;
+	if (existing_type != GpuMemoryObjectType::IndexBuffer || incoming_type != GpuMemoryObjectType::StorageBuffer)
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::IsContainedWithin ||
+	       relation == GpuMemoryOverlapType::Crosses;
 }
 
 // Incoming VertexBuffer fully or partially covered by an existing storage,
@@ -408,6 +413,20 @@ inline bool GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType existing_type, 
 	       (relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals);
 }
 
+// Incoming Texture overlapping an existing IndexBuffer. Keep the index view
+// linked; do not reclaim it when materializing the larger texture. Inverse of
+// GpuMemoryAllowsIndexContainedInSurface (existing surface, incoming IB).
+// Relations are existing-relative-to-query: IsContainedWithin when the IB
+// sits inside the texture, Crosses for partial contact, Contains when a larger
+// IB fully covers a smaller texture view.
+inline bool GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                  GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::IndexBuffer && incoming_type == GpuMemoryObjectType::Texture &&
+	       (relation == GpuMemoryOverlapType::IsContainedWithin || relation == GpuMemoryOverlapType::Crosses ||
+	        relation == GpuMemoryOverlapType::Contains);
+}
+
 // Incoming RenderTexture sharing guest memory with existing surfaces or partial
 // VertexBuffers. Supported multi-parent forms:
 //   - StorageBuffer Equals + StorageBuffer Contains + RenderTexture Contains
@@ -460,6 +479,42 @@ inline bool GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType existi
 	                     existing_type == GpuMemoryObjectType::VertexBuffer;
 	return surface && (relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Contains ||
 	                   relation == GpuMemoryOverlapType::IsContainedWithin || relation == GpuMemoryOverlapType::Equals);
+}
+
+// A writable storage view with pending GPU work cannot be reclaimed while a
+// later command buffer is still being recorded. Keep the depth view linked;
+// the storage completion callback publishes the guest bytes and invalidates
+// the linked depth object before its next use (standard WriteBack parent walk).
+// Type/relation policy only — pair with GpuMemoryHasPendingWritableWriteBack.
+inline bool GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                           GpuMemoryObjectType incoming_type)
+{
+	if (existing_type != GpuMemoryObjectType::StorageBuffer || incoming_type != GpuMemoryObjectType::DepthStencilBuffer)
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
+}
+
+// Runtime gate for an in-flight writable object that still owns unpublished
+// GPU content. Used with PendingDepthStencilStorageAlias so create reclaim
+// cannot detach the storage view before its completion callback.
+[[nodiscard]] inline bool GpuMemoryHasPendingWritableWriteBack(bool in_use, bool read_only, bool has_write_back_func,
+                                                               bool dependencies_complete)
+{
+	return in_use && has_write_back_func && !read_only && !dependencies_complete;
+}
+
+// Combined create-time decision: link pending StorageBuffer under an incoming
+// DepthStencilBuffer instead of reclaiming it.
+[[nodiscard]] inline bool GpuMemoryShouldLinkPendingDepthStencilStorage(GpuMemoryObjectType existing_type,
+                                                                       GpuMemoryOverlapType relation,
+                                                                       GpuMemoryObjectType incoming_type, bool in_use, bool read_only,
+                                                                       bool has_write_back_func, bool dependencies_complete)
+{
+	return GpuMemoryAllowsPendingDepthStencilStorageAlias(existing_type, relation, incoming_type) &&
+	       GpuMemoryHasPendingWritableWriteBack(in_use, read_only, has_write_back_func, dependencies_complete);
 }
 
 // Incoming StorageBuffer overlapping existing color/depth surfaces (not only

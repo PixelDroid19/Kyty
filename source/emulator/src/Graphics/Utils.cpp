@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Host/Png.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
@@ -472,8 +473,10 @@ bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const 
 	{
 		return false;
 	}
-	if (image->format != VK_FORMAT_R8G8B8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_UNORM && image->format != VK_FORMAT_B8G8R8A8_SRGB &&
-	    image->format != VK_FORMAT_B8G8R8A8_UNORM)
+	const bool rgba8 = image->format == VK_FORMAT_R8G8B8A8_SRGB || image->format == VK_FORMAT_R8G8B8A8_UNORM;
+	const bool bgra8 = image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM;
+	const bool rgba16_sfloat = image->format == VK_FORMAT_R16G16B16A16_SFLOAT;
+	if (!rgba8 && !bgra8 && !rgba16_sfloat)
 	{
 		return false;
 	}
@@ -491,24 +494,26 @@ bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const 
 		return false;
 	}
 
-	const uint64_t       bytes = static_cast<uint64_t>(w) * h * 4u;
+	const uint64_t       bytes_per_pixel = rgba16_sfloat ? 8u : 4u;
+	const uint64_t       bytes           = static_cast<uint64_t>(w) * h * bytes_per_pixel;
 	std::vector<uint8_t> pixels(static_cast<size_t>(bytes));
 	UtilFillBuffer(ctx, pixels.data(), bytes, w, image, static_cast<uint64_t>(image->layout));
+
+	std::vector<uint8_t> rgba;
+	const auto format = rgba16_sfloat ? Emulator::Host::HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat :
+	                    bgra8 ? Emulator::Host::HostCaptureImagePixelFormat::Bgra8 :
+	                            Emulator::Host::HostCaptureImagePixelFormat::Rgba8;
+	if (!Emulator::Host::HostCaptureImageCodecNormalizeRgba8({pixels.data(), {w, h}, static_cast<uint64_t>(w) * bytes_per_pixel, format},
+	                                                        &rgba))
+	{
+		return false;
+	}
 
 	char path[256];
 	std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu.png", path_prefix, (tag != nullptr ? tag : "img"), w, h,
 	              static_cast<unsigned long long>(image->memory.unique_id));
 
-	const bool swap_red_blue = (image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM);
-	if (swap_red_blue)
-	{
-		for (uint64_t pixel = 0; pixel < static_cast<uint64_t>(w) * h; pixel++)
-		{
-			auto* p = pixels.data() + pixel * 4u;
-			std::swap(p[0], p[2]);
-		}
-	}
-	if (!UtilWriteRgba8Png(path, pixels.data(), w, h, w))
+	if (!UtilWriteRgba8Png(path, rgba.data(), w, h, w))
 	{
 		return false;
 	}

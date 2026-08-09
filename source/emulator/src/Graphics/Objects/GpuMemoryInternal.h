@@ -14,6 +14,9 @@
 //
 // Texture↔StorageTexture Equals alias policy lives in GpuMemory.h
 // (GpuMemoryAllowsTextureStorageAlias) and is applied in GpuMemoryCreate.cpp.
+// Pending StorageBuffer↔DepthStencil create-time link uses
+// GpuMemoryShouldLinkPendingDepthStencilStorage; WriteBack invalidates the
+// linked depth parent through the ordinary parent walk.
 
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 

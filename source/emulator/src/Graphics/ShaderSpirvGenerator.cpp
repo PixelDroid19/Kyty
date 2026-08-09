@@ -5,6 +5,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Log.h"
 
 #include <cstdlib>
@@ -372,7 +373,9 @@ void Spirv::WriteHeader()
 		if (m_bind->textures2D.textures2d_sampled_num > 0)
 		{
 			vars.Add("%textures2D_S");
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			// U-named descriptors are consumed by the uint image_load/sample
+			// paths, which run for mixed and uint-only shaders alike.
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				vars.Add("%textures2D_U");
 			}
@@ -380,7 +383,7 @@ void Spirv::WriteHeader()
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
 			vars.Add("%textures2DA_S");
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				vars.Add("%textures2DA_U");
 			}
@@ -388,7 +391,7 @@ void Spirv::WriteHeader()
 		if (m_bind->textures2D.textures3d_sampled_num > 0)
 		{
 			vars.Add("%textures3D_S");
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				vars.Add("%textures3D_U");
 			}
@@ -714,7 +717,7 @@ void Spirv::WriteAnnotations()
 			m_source += String8(textures_annotations_s)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_sampled_index));
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				m_source += String8(textures_annotations_u)
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -726,7 +729,7 @@ void Spirv::WriteAnnotations()
 			m_source += String8(textures_annotations_s_array)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_sampled_array_index));
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				m_source += String8(textures_annotations_u_array)
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -738,7 +741,7 @@ void Spirv::WriteAnnotations()
 			m_source += String8(textures_annotations_s_3d)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_sampled_3d_index));
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				m_source += String8(textures_annotations_u_3d)
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
@@ -801,6 +804,8 @@ void Spirv::WriteTypes()
                  %undef_v2uint = OpUndef %v2uint
                %_ptr_Input_int = OpTypePointer Input %int
               %_ptr_Input_uint = OpTypePointer Input %uint
+            %_ptr_Input_v2uint = OpTypePointer Input %v2uint
+            %_ptr_Input_v4uint = OpTypePointer Input %v4uint
              %_ptr_Input_float = OpTypePointer Input %float
            %_ptr_Input_v2float = OpTypePointer Input %v2float
            %_ptr_Input_v3float = OpTypePointer Input %v3float
@@ -1035,7 +1040,7 @@ static const char* textures_loaded_types = R"(
 			                .ReplaceStr("<image_scalar>", image_scalar)
 			                .ReplaceStr("<image_dimension>", image_dimension)
 			                .ReplaceStr("<arrayed>", "0");
-			if (mixed_sampled_image_types)
+			if (mixed_sampled_image_types || uint_images)
 			{
 				m_source += String8(textures_sampled_uint_types)
 				                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_sampled_num));
@@ -1046,7 +1051,7 @@ static const char* textures_loaded_types = R"(
 			m_source += String8(textures_sampled_types_array)
 			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_array_sampled_num))
 			                .ReplaceStr("<image_scalar>", image_scalar);
-			if (mixed_sampled_image_types)
+			if (mixed_sampled_image_types || uint_images)
 			{
 				m_source += String8(textures_sampled_uint_types_array)
 				                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_array_sampled_num));
@@ -1057,7 +1062,7 @@ static const char* textures_loaded_types = R"(
 			m_source += String8(textures_sampled_types_3d)
 			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures3d_sampled_num))
 			                .ReplaceStr("<image_scalar>", image_scalar);
-			if (mixed_sampled_image_types)
+			if (mixed_sampled_image_types || uint_images)
 			{
 				m_source += String8(textures_sampled_uint_types_3d)
 				                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures3d_sampled_num));
@@ -1163,7 +1168,7 @@ void Spirv::WriteGlobalVariables()
 		{
 			vars.Add(String8::FromPrintf("%%textures2D_S = OpVariable %%_ptr_UniformConstant__arr_ImageS_uint_%d UniformConstant",
 			                             m_bind->textures2D.textures2d_sampled_num));
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				vars.Add(String8::FromPrintf("%%textures2D_U = OpVariable %%_ptr_UniformConstant__arr_ImageU_uint_%d UniformConstant",
 				                             m_bind->textures2D.textures2d_sampled_num));
@@ -1173,7 +1178,7 @@ void Spirv::WriteGlobalVariables()
 		{
 			vars.Add(String8::FromPrintf("%%textures2DA_S = OpVariable %%_ptr_UniformConstant__arr_ImageSA_uint_%d UniformConstant",
 			                             m_bind->textures2D.textures2d_array_sampled_num));
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				vars.Add(String8::FromPrintf("%%textures2DA_U = OpVariable %%_ptr_UniformConstant__arr_ImageUA_uint_%d UniformConstant",
 				                             m_bind->textures2D.textures2d_array_sampled_num));
@@ -1183,7 +1188,7 @@ void Spirv::WriteGlobalVariables()
 		{
 			vars.Add(String8::FromPrintf("%%textures3D_S = OpVariable %%_ptr_UniformConstant__arr_ImageS3D_uint_%d UniformConstant",
 			                             m_bind->textures2D.textures3d_sampled_num));
-			if (UsesMixedSampledImageNumericTypes(m_bind))
+			if (UsesMixedSampledImageNumericTypes(m_bind) || UsesUnsignedIntegerImages(m_bind))
 			{
 				vars.Add(String8::FromPrintf("%%textures3D_U = OpVariable %%_ptr_UniformConstant__arr_ImageU3D_uint_%d UniformConstant",
 				                             m_bind->textures2D.textures3d_sampled_num));
@@ -1244,16 +1249,17 @@ void Spirv::WriteGlobalVariables()
 			{
 				for (int i = 0; i < m_vs_input_info->resources_num; i++)
 				{
-					switch (m_vs_input_info->resources_dst[i].registers_num)
+					const auto format = VulkanResolveGen5VertexInputFormat(m_vs_input_info->resources[i].Format());
+					const bool uint_input = format.numeric_class == VulkanVertexInputNumericClass::Uint;
+					const int width = m_vs_input_info->resources_dst[i].registers_num;
+					if (width < 1 || width > 4)
 					{
-						case 1: vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_float Input", i)); break;
-						case 2: vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v2float Input", i)); break;
-						case 3: vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v3float Input", i)); break;
-						case 4: vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_v4float Input", i)); break;
-						default:
-							KYTY_LOG_DEBUG("WARNING: invalid registers_num %d in shader (continuing)\n", m_vs_input_info->resources_dst[i].registers_num);
-							break;
+						KYTY_LOG_DEBUG("WARNING: invalid registers_num %d in shader (continuing)\n", width);
+						continue;
 					}
+					const String8 type = width == 1 ? String8(uint_input ? "uint" : "float")
+					                                : String8::FromPrintf("v%d%s", width, uint_input ? "uint" : "float");
+					vars.Add(String8::FromPrintf("%%attr%d = OpVariable %%_ptr_Input_%s Input", i, type.c_str()));
 				}
 			}
 			for (int i = 0; i < ResolveVertexParameterCount(m_code, m_vs_input_info); i++)

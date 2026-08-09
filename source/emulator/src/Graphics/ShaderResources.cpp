@@ -90,7 +90,8 @@ static bool Gen5SharpIsImageDescriptor(int offset_dw, int user_sgpr_num, const H
 {
 	const uint32_t word3 = Gen5SharpUserSgprDword(offset_dw + 3, user_sgpr_num, user_sgpr, extended_buffer);
 	const uint8_t  type  = static_cast<uint8_t>((word3 >> 28u) & 0xFu);
-	return type == 8u || type == 9u || type == 10u || type == 13u;
+	// 8/9/10 = 1D/2D/3D; 11 = cube (faces as layers); 13 = 2D array.
+	return type == 8u || type == 9u || type == 10u || type == 11u || type == 13u;
 }
 
 bool Gen5SharpUseTextureDescriptor(bool size_flag, int offset_dw, int user_sgpr_num, const HW::UserSgprInfo& user_sgpr,
@@ -257,13 +258,10 @@ static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, con
 	{
 		resource.fields[field] = extended_buffer[offset_dw + field];
 	}
-	// The existing scalar descriptor path owns null-descriptor lowering. This
-	// path materializes only a concrete V# whose S_LOAD result is consumed.
-	if ((resource.fields[0] == 0u && resource.fields[1] == 0u && resource.fields[2] == 0u && resource.fields[3] == 0u) ||
-	    (resource.Base48() == 0u && resource.NumRecords() == 0u))
-	{
-		return false;
-	}
+	// Null EUD slots are common (unused sharp left zeroed). Static metadata rejects
+	// them and lowers S_BUFFER via zero_sbuffer. Dynamic S_LOAD consumers still need
+	// a mapping so the S_LOAD rewrites and the later AlwaysOutOfBounds path register
+	// zero_sbuffer for the destination; PrepareStorageBuffers binds an empty carrier.
 
 	int storage_index = -1;
 	for (int index = 0; index < resources.buffers_num; ++index)
@@ -280,15 +278,15 @@ static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, con
 		{
 			return false;
 		}
-		storage_index                          = resources.buffers_num++;
-		resources.buffers[storage_index]       = resource;
-		resources.usages[storage_index]        = ShaderStorageUsage::ReadOnly;
-		resources.sources[storage_index]       = ShaderStorageBindingSource::DynamicScalarLoad;
-		resources.slots[storage_index]         = offset_dw;
+		storage_index                           = resources.buffers_num++;
+		resources.buffers[storage_index]        = resource;
+		resources.usages[storage_index]         = ShaderStorageUsage::ReadOnly;
+		resources.sources[storage_index]        = ShaderStorageBindingSource::DynamicScalarLoad;
+		resources.slots[storage_index]          = offset_dw;
 		resources.start_register[storage_index] = sload.dst.register_id;
-		resources.extended[storage_index]      = false;
-		resources.dynamic_sload[storage_index] = true;
-		*added_resource                        = true;
+		resources.extended[storage_index]       = false;
+		resources.dynamic_sload[storage_index]  = true;
+		*added_resource                         = true;
 	}
 
 	return ShaderAddDynamicSLoadMapping(&bind->dynamic_sloads, ShaderDynamicSLoadResourceKind::StorageBuffer, storage_index, sload,
@@ -376,9 +374,11 @@ static bool ShaderAddDynamicSamplerResource(ShaderBindResources* bind, const Sha
 
 static bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
 {
+	// Keep in sync with ShaderInstructionReadsImageResource sample ops that take S#.
 	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageSample ||
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
-	       type == ShaderInstructionType::ImageSampleLzO;
+	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleB ||
+	       type == ShaderInstructionType::ImageSampleDrefLz;
 }
 
 struct ShaderDynamicSLoadUse
@@ -465,7 +465,13 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		}
 
 		int offset_dw = 0;
-		if (!ShaderTryGetDwordOffset(sload.src[1], &offset_dw) || offset_dw < 0 || offset_dw + dword_count > static_cast<int>(eud_size_dw))
+		if (!ShaderTryGetDwordOffset(sload.src[1], &offset_dw) || offset_dw < 0)
+		{
+			continue;
+		}
+		// offset_dw is the EUD table index (byte_offset/4). Metadata eud_size_dw is a
+		// lower bound — same overrun policy as ShaderGen5EudSpanAllowed (api = 16+idx).
+		if (!ShaderGen5EudSpanAllowed(16 + offset_dw, dword_count, eud_size_dw))
 		{
 			continue;
 		}
@@ -547,8 +553,11 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		}
 		if (!added_mapping)
 		{
-			EXIT("unable to materialize dynamic descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d\n", sload.pc, offset_dw,
-			     dword_count);
+			EXIT("unable to materialize dynamic descriptor: pc=0x%08" PRIx32 " offset_dw=%d dwords=%d kind=%u "
+			     "storage=%d textures=%d samplers=%d mappings=%d eud_dw=%u\n",
+			     sload.pc, offset_dw, dword_count, static_cast<unsigned>(use.kind), bind->storage_buffers.buffers_num,
+			     bind->textures2D.textures_num, bind->samplers.samplers_num, bind->dynamic_sloads.mappings_num,
+			     static_cast<unsigned>(eud_size_dw));
 		}
 	}
 }

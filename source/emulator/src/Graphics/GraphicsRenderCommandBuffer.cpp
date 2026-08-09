@@ -80,19 +80,36 @@ public:
 	{
 		EXIT_IF(ctx == nullptr || data == nullptr || size == 0u || usage == 0u);
 
-		Entry*   entry         = nullptr;
-		uint32_t usage_entries = 0;
+		Entry*   entry              = nullptr;
+		Entry*   larger_unused      = nullptr;
+		uint32_t usage_entries      = 0;
 		for (auto* candidate: m_entries)
 		{
 			if (candidate->usage == usage)
 			{
 				usage_entries++;
 			}
-			if (!candidate->used && candidate->size == size && candidate->usage == usage)
+			if (candidate->used || candidate->usage != usage || candidate->size < size)
+			{
+				continue;
+			}
+			// Prefer exact size; fall back to the smallest free entry that fits.
+			// Descriptor writes use an explicit range (not the full VkBuffer size),
+			// so a larger free slab is valid. V# spill UBOs can otherwise fail
+			// when many distinct sizes fragment MaxEntriesPerUsage=512.
+			if (candidate->size == size)
 			{
 				entry = candidate;
 				break;
 			}
+			if (larger_unused == nullptr || candidate->size < larger_unused->size)
+			{
+				larger_unused = candidate;
+			}
+		}
+		if (entry == nullptr)
+		{
+			entry = larger_unused;
 		}
 
 		if (entry == nullptr)

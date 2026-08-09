@@ -211,7 +211,8 @@ bool ShaderInstructionReadsImageResource(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::ImageGetResinfo || type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageLoad || type == ShaderInstructionType::ImageSample ||
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
-	       type == ShaderInstructionType::ImageSampleLzO;
+	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleB ||
+	       type == ShaderInstructionType::ImageSampleDrefLz;
 }
 
 bool ShaderInstructionWritesImageResource(ShaderInstructionType type)

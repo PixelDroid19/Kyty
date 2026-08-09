@@ -4,6 +4,7 @@
 #include "ShaderSpirvTemplates.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 
 #include <cstdlib>
@@ -3984,10 +3985,21 @@ KYTY_RECOMPILER_FUNC(Recompile_Fetch)
 		EXIT_IF(attrib_id < 0 || attrib_id >= input_info->resources_num || attrib_id >= ShaderVertexInputInfo::RES_MAX);
 
 		const auto& r = input_info->resources_dst[attrib_id];
+		const auto format = VulkanResolveGen5VertexInputFormat(input_info->resources[attrib_id].Format());
 
 		if (inst.dst.size < 1 || inst.dst.size > 4 || r.registers_num < inst.dst.size || r.registers_num > 4)
 		{
 			KYTY_LOG_DEBUG("WARNING: invalid embedded fetch width in shader (continuing)\n");
+		}
+
+		if (format.numeric_class == VulkanVertexInputNumericClass::Uint)
+		{
+			EXIT_IF(format.component_count != 1 || r.registers_num != 1 || inst.dst.size != 1);
+			*dst_source += String8::FromPrintf("%%tfetch_uint_%u = OpLoad %%uint %%attr%d\n"
+			                                  "%%tfetch_uint_bits_%u = OpBitcast %%float %%tfetch_uint_%u\n"
+			                                  "OpStore %%v%d %%tfetch_uint_bits_%u\n",
+			                                  index, attrib_id, index, index, inst.dst.register_id, index);
+			return true;
 		}
 
 		if (r.registers_num > inst.dst.size)

@@ -2953,8 +2953,23 @@ TEST(EmulatorGraphicsState, AllowsMixedTextureIndexStorageParents)
 	                                        GpuMemoryObjectType::StorageBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
 	                                        GpuMemoryObjectType::StorageBuffer));
-	EXPECT_FALSE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
-	                                         GpuMemoryObjectType::StorageBuffer));
+	// A larger StorageBuffer may contain smaller mesh IndexBuffers.
+	EXPECT_TRUE(GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                             GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                        GpuMemoryObjectType::StorageBuffer));
+	// A StorageBuffer may cross an IndexBuffer and other read-only storage views.
+	EXPECT_TRUE(GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	                                             GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	                                        GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
+	                                        GpuMemoryObjectType::StorageBuffer));
+	// Mixed multi-parent set: Texture Contains + VB IsContainedWithin + IB IsContainedWithin.
+	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                        GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::IsContainedWithin,
+	                                        GpuMemoryObjectType::StorageBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
 	                                         GpuMemoryObjectType::Texture));
 }
@@ -3063,6 +3078,45 @@ TEST(EmulatorGraphicsState, ReclaimsSingleSurfaceForDepthStencilReuse)
 	                                                       GpuMemoryObjectType::Texture));
 }
 
+TEST(EmulatorGraphicsState, LinksPendingStorageBeforeDepthStencilReuse)
+{
+	// Type/relation policy accepts every observed StorageBuffer↔DepthStencil form.
+	EXPECT_TRUE(GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
+	                                                           GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Equals,
+	                                                           GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Contains,
+	                                                           GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType::StorageBuffer,
+	                                                           GpuMemoryOverlapType::IsContainedWithin,
+	                                                           GpuMemoryObjectType::DepthStencilBuffer));
+	// Wrong roles never alias as pending storage under depth.
+	EXPECT_FALSE(GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Crosses,
+	                                                            GpuMemoryObjectType::DepthStencilBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
+	                                                            GpuMemoryObjectType::RenderTexture));
+	EXPECT_FALSE(GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType::DepthStencilBuffer,
+	                                                            GpuMemoryOverlapType::Crosses, GpuMemoryObjectType::StorageBuffer));
+
+	// Runtime gate: only in-flight writable write-back keeps the storage peer.
+	EXPECT_TRUE(GpuMemoryHasPendingWritableWriteBack(true, false, true, false));
+	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(true, false, true, true));  // deps complete → reclaim
+	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(true, true, true, false));  // read-only
+	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(false, false, true, false)); // not in use
+	EXPECT_FALSE(GpuMemoryHasPendingWritableWriteBack(true, false, false, false)); // no write-back
+
+	// Combined create decision mirrors CreateObject single- and multi-parent paths.
+	EXPECT_TRUE(GpuMemoryShouldLinkPendingDepthStencilStorage(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
+	                                                          GpuMemoryObjectType::DepthStencilBuffer, true, false, true, false));
+	EXPECT_FALSE(GpuMemoryShouldLinkPendingDepthStencilStorage(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
+	                                                           GpuMemoryObjectType::DepthStencilBuffer, true, false, true, true));
+	// Completed storage still reclaims under the ordinary depth-surface policy.
+	EXPECT_TRUE(GpuMemoryAllowsDepthStencilReclaimSurface(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
+	                                                      GpuMemoryObjectType::DepthStencilBuffer));
+	// Depth parents of storage write-back are never skipped by GPU-owned RT policy.
+	EXPECT_FALSE(GpuMemorySkipWriteBackParentInvalidate(GpuMemoryObjectType::DepthStencilBuffer, nullptr));
+}
+
 // Captured: StorageBuffer with RT+SB Crosses and IsContainedWithin parents.
 // Also dual-strict after VOP1 SDWA: SB 0x8000 Crosses DepthStencilBuffer.
 TEST(EmulatorGraphicsState, AllowsStorageSurfaceShareWithContainedWithin)
@@ -3111,6 +3165,28 @@ TEST(EmulatorGraphicsState, AllowsTextureMixedReclaimAndSurfaceParents)
 	                                                 GpuMemoryObjectType::Texture));
 	EXPECT_FALSE(
 	    GpuMemoryAllowsTextureLinkVertex(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses, GpuMemoryObjectType::Texture));
+}
+
+TEST(EmulatorGraphicsState, LinksExistingIndexViewsIntoIncomingTexture)
+{
+	EXPECT_TRUE(GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer,
+	                                                  GpuMemoryOverlapType::IsContainedWithin,
+	                                                  GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	                                                  GpuMemoryObjectType::Texture));
+	EXPECT_TRUE(GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
+	                                                  GpuMemoryObjectType::Texture));
+	// Inverse create direction (existing Texture, incoming IB) is a separate policy.
+	EXPECT_TRUE(GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
+	                                                   GpuMemoryObjectType::IndexBuffer));
+	EXPECT_FALSE(GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType::VertexBuffer,
+	                                                   GpuMemoryOverlapType::IsContainedWithin,
+	                                                   GpuMemoryObjectType::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer,
+	                                                   GpuMemoryOverlapType::IsContainedWithin,
+	                                                   GpuMemoryObjectType::RenderTexture));
+	EXPECT_FALSE(GpuMemoryAllowsTextureLinkIndexBuffer(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Equals,
+	                                                   GpuMemoryObjectType::Texture));
 }
 
 // Captured multi-parent SB write-back always links GPU-owned tiled RTs
@@ -3993,6 +4069,103 @@ TEST(EmulatorGraphicsState, ResolveDepthTargetExtentNextGenInvalidSize)
 	target.size.valid = false;
 	const auto extent = State::ResolveDepthTargetExtent(target, true);
 	EXPECT_FALSE(extent.valid);
+}
+
+// Captured failure: S_LOAD_DWORDX4 from EUD @offset_dw=40 of a null V#, then
+// S_BUFFER_LOAD of that destination. Materialization must not EXIT; it registers
+// a dynamic mapping so AlwaysOutOfBounds lowers consumers through zero_sbuffer.
+TEST(EmulatorGraphicsState, DynamicSLoadNullEudStorageMaterializesWithoutExit)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+
+	ShaderInstruction sload {};
+	sload.pc                      = 0x8;
+	sload.type                    = ShaderInstructionType::SLoadDwordx4;
+	sload.format                  = ShaderInstructionFormat::Sdst4SbaseSoffset;
+	sload.dst.type                = ShaderOperandType::Sgpr;
+	sload.dst.register_id         = 4;
+	sload.dst.size                = 4;
+	sload.src_num                 = 2;
+	sload.src[0].type             = ShaderOperandType::Sgpr;
+	sload.src[0].register_id      = 0; // type-5 EUD pointer
+	sload.src[0].size             = 2;
+	sload.src[1].type             = ShaderOperandType::IntegerInlineConstant;
+	sload.src[1].constant.u       = 160u; // offset_dw = 40
+	code.GetInstructions().Add(sload);
+
+	ShaderInstruction sbuf {};
+	sbuf.pc                      = 0x10;
+	sbuf.type                    = ShaderInstructionType::SBufferLoadDwordx4;
+	sbuf.format                  = ShaderInstructionFormat::Sdst4SvSoffset;
+	sbuf.dst.type                = ShaderOperandType::Sgpr;
+	sbuf.dst.register_id         = 8;
+	sbuf.dst.size                = 4;
+	sbuf.src_num                 = 2;
+	sbuf.src[0].type             = ShaderOperandType::Sgpr;
+	sbuf.src[0].register_id      = 4;
+	sbuf.src[0].size             = 4;
+	sbuf.src[1].type             = ShaderOperandType::IntegerInlineConstant;
+	sbuf.src[1].constant.u       = 0;
+	code.GetInstructions().Add(sbuf);
+
+	ShaderInstruction end {};
+	end.pc   = 0x18;
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(end);
+
+	// Null V# at EUD dword 40 (guest leaves unused slots zeroed).
+	alignas(16) uint32_t eud[64] = {};
+
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 16; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	const uint64_t eud_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(eud));
+	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
+	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
+
+	// Type-5 direct resource is the EUD pointer at SGPR 0.
+	uint16_t direct_offsets[6];
+	for (int i = 0; i < 6; i++)
+	{
+		direct_offsets[i] = 0xffffu;
+	}
+	direct_offsets[5] = 0;
+
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.eud_size_dw            = 48;
+	user_data.srt_size_dw            = 0;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+
+	ASSERT_TRUE(bind.extended.used);
+	EXPECT_EQ(bind.extended.start_register, 0);
+	ASSERT_GE(bind.storage_buffers.buffers_num, 1);
+	EXPECT_TRUE(bind.storage_buffers.dynamic_sload[0]);
+	ASSERT_GE(bind.dynamic_sloads.mappings_num, 1);
+	EXPECT_EQ(bind.dynamic_sloads.offset_dw[0], 40);
+	EXPECT_EQ(bind.dynamic_sloads.destination_register[0], 4);
+	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::StorageBuffer);
+	// Null NumRecords → zero_sbuffer lowering for S_BUFFER consumers of s[4:7].
+	bool zero_dst = false;
+	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
+	{
+		zero_dst = zero_dst || bind.zero_sbuffer_resources.start_register[i] == 4;
+	}
+	EXPECT_TRUE(zero_dst);
 }
 
 

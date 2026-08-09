@@ -1045,7 +1045,6 @@ RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, Rende
 	    BuildRenderHostToGuestScale({guest.width, guest.height}, {snapshot.target_extent.width, snapshot.target_extent.height}, &scale) ==
 	    RenderResolutionShaderScaleStatus::Success;
 	auto decision = RenderResolutionEvaluatePlan(input);
-
 	VideoOutHostExtentState existing_image_state {};
 	EXIT_IF(!VideoOutBufferGetHostExtentState(display_attachment.existing_video_image, &existing_image_state));
 	if (existing_image_state.selected)

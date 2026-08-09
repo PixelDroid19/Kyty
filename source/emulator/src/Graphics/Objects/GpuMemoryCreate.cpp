@@ -759,6 +759,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	bool delete_all          = false;
 	bool create_from_objects = false;
 	Vector<int> selective_reclaim_ids;
+	Vector<int> depth_stencil_reclaim_ids;
 
 	GpuMemoryScenario scenario = GpuMemoryScenario::Common;
 
@@ -890,6 +891,23 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// guest bytes. Keep both for every explicitly supported overlap,
 				// including Equals exposed by resident index backing reuse.
 				overlap = true;
+			} else if (GpuMemoryAllowsTextureLinkVertex(o.object.type, obj.relation, info.type) ||
+			           GpuMemoryAllowsTextureLinkIndexBuffer(o.object.type, obj.relation, info.type))
+			{
+				// Incoming Texture over a larger VertexBuffer (Contains/Equals) or an
+				// existing IndexBuffer. Link both views.
+				overlap = true;
+			} else if (GpuMemoryAllowsTextureReclaimVertex(o.object.type, obj.relation, info.type))
+			{
+				// Large Texture superseding partial VertexBuffers in its range.
+				delete_all = true;
+			} else if (GpuMemoryShouldLinkPendingDepthStencilStorage(
+			               o.object.type, obj.relation, info.type, o.in_use, o.read_only, o.write_back_func != nullptr,
+			               m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies())))
+			{
+				// Queue order keeps the old storage use before the new depth use. The
+				// completion callback owns publication and invalidates linked depth.
+				overlap = true;
 			} else if (GpuMemoryAllowsStorageSurfaceShare(o.object.type, obj.relation, info.type))
 			{
 				// Single-parent RT/DS/Texture/SB share with an incoming StorageBuffer
@@ -915,15 +933,6 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						overlap = true;
 						break;
 					}
-					// Observed Gen5 alias: Texture 0x100 created at the base of an
-					// active VertexBuffer 0x580 (relation Contains). Keep both views
-					// linked rather than deleting the heavily-used vertex buffer.
-					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::Texture):
-					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Equals, GpuMemoryObjectType::Texture):
-					{
-						overlap = true;
-						break;
-					}
 					case ObjectsRelation(GpuMemoryObjectType::DepthStencilBuffer, OverlapType::Contains,
 					                     GpuMemoryObjectType::DepthStencilBuffer):
 					case ObjectsRelation(GpuMemoryObjectType::IndexBuffer, OverlapType::Crosses, GpuMemoryObjectType::IndexBuffer):
@@ -943,29 +952,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					// Existing VertexBuffer fully contains a new StorageBuffer view
 					// (relation Contains). Reclaim the vertex object so the storage
 					// view owns the range; multi-parent path links instead when a
-					// Texture alias coexists.
+					// Texture alias coexists. Peer Texture overlaps are handled by
+					// GpuMemoryAllowsTextureContainedInSurface above (link, not reclaim).
 					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Contains, GpuMemoryObjectType::StorageBuffer):
-						// Large Texture superseding VertexBuffers that live inside its
-					// address range (observed 1 MiB texture over multiple VBs).
-					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
-					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::Texture):
-					case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::Crosses, GpuMemoryObjectType::Texture):
-					case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::Contains, GpuMemoryObjectType::Texture):
-					case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
 					{
 						delete_all = true;
-						break;
-					}
-					// Covered by GpuMemoryAllowsTextureStorageAlias above; keep cases
-					// for explicit documentation of both bind orders.
-					case ObjectsRelation(GpuMemoryObjectType::StorageTexture, OverlapType::Equals, GpuMemoryObjectType::Texture):
-					case ObjectsRelation(GpuMemoryObjectType::Texture, OverlapType::Equals, GpuMemoryObjectType::StorageTexture):
-					{
-						overlap = true;
-						if (info.type == GpuMemoryObjectType::Texture)
-						{
-							create_from_objects = true;
-						}
 						break;
 					}
 					default:
@@ -1206,6 +1197,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					{
 						continue;
 					}
+					if (GpuMemoryAllowsTextureLinkIndexBuffer(o.object.type, obj.relation, info.type))
+					{
+						continue;
+					}
 					multi_texture_mixed = false;
 					break;
 				}
@@ -1225,6 +1220,17 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						EXIT_IF(storage == nullptr || storage->guest_addr != htile_addr || storage->guest_size != htile_size);
 						storage->depth_meta_addr = htile_addr;
 					}
+					const auto& parent_info               = parent.info;
+					// Pending writable storage stays linked; completed storage and
+					// other reclaimable surfaces are freed below.
+					const bool pending_storage_write_back = GpuMemoryShouldLinkPendingDepthStencilStorage(
+					    parent_info.object.type, obj.relation, info.type, parent_info.in_use, parent_info.read_only,
+					    parent_info.write_back_func != nullptr,
+					    m_deferred_deletions.AreDependenciesComplete(parent_info.submission_uses.Dependencies()));
+					if (!pending_storage_write_back)
+					{
+						depth_stencil_reclaim_ids.Add(obj.object_id);
+					}
 				}
 			}
 
@@ -1232,9 +1238,37 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			    multi_render_target_alias)
 			{
 				overlap = true;
-			} else if (multi_texture_reclaim || multi_depth_stencil_reclaim)
+			} else if (multi_texture_reclaim)
 			{
 				delete_all = true;
+			} else if (multi_depth_stencil_reclaim)
+			{
+				if (depth_stencil_reclaim_ids.Size() == others.Size())
+				{
+					delete_all = true;
+				} else
+				{
+					Vector<OverlappedBlock> keep;
+					for (const auto& obj: others)
+					{
+						bool reclaim = false;
+						for (int id: depth_stencil_reclaim_ids)
+						{
+							if (id == obj.object_id)
+							{
+								reclaim = true;
+								break;
+							}
+						}
+						if (!reclaim)
+						{
+							keep.Add(obj);
+						}
+					}
+					selective_reclaim_ids = depth_stencil_reclaim_ids;
+					others                  = keep;
+					overlap                 = true;
+				}
 			} else if (multi_texture_mixed)
 			{
 				// Drop reclaimed VBs from the link set; free them after create.
@@ -1424,9 +1458,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		}
 	}
 
+	// Already holding m_mutex — do not call IsAllocated (it re-locks).
 	for (int vi = 0; vi < vaddr_num; vi++)
 	{
-		if (!IsAllocated(vaddr[vi], size[vi])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsAllocated(vaddr[vi], size[vi]) condition ignored (continuing)\n"); }
+		if (GetHeapId(vaddr[vi], size[vi]) < 0)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsAllocated(vaddr[vi], size[vi]) condition ignored (continuing)\n");
+		}
 	}
 	uint32_t relation_mask = 0;
 	for (const auto& candidate: others)

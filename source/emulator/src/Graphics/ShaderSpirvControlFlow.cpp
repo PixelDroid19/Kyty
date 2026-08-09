@@ -378,9 +378,22 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		const uint32_t join_pc = ScJoinFindReconvergence(code, label.GetDst(), next_inst.pc);
 		if (join_pc != 0)
 		{
-			switch_case       = true;
-			switch_merge      = ScJoinMergeName(join_pc, inst.pc);
-			switch_empty_case = (join_pc == label.GetDst());
+			// A mid-loop exit edge references its reconvergence under the guest
+			// label name, not sc_join_*: ScJoinCollectSources excludes loop-exit
+			// edges, so WriteLabel never materializes an sc_join alias for them.
+			// Without this, the OpSelectionMerge target dangles (spirv-as:
+			// "forward referenced IDs have not been defined").
+			if (ScJoinIsLoopExitEdge(code, inst))
+			{
+				switch_case       = true;
+				switch_merge      = label.ToString();
+				switch_empty_case = (join_pc == label.GetDst());
+			} else
+			{
+				switch_case       = true;
+				switch_merge      = ScJoinMergeName(join_pc, inst.pc);
+				switch_empty_case = (join_pc == label.GetDst());
+			}
 		}
 	}
 

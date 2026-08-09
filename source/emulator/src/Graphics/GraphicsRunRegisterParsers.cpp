@@ -812,7 +812,7 @@ KYTY_HW_SH_PARSER(hw_sh_set_ps_shader)
 	                            (KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR_MSB) << 5u);
 	r2.wave_cnt_en            = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, WAVE_CNT_EN);
 	r2.extra_lds_size         = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, EXTRA_LDS_SIZE);
-	r2.raster_ordered_shading = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, LOAD_INTRAWAVE_COLLISION);
+	r2.raster_ordered_shading = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, RASTER_ORDERED_SHADING);
 	r2.shared_vgprs           = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, SHARED_VGPR_CNT);
 
 	cp->GetCtx()->SetShaderZFormat(buffer[4]);
@@ -999,7 +999,7 @@ KYTY_HW_SH_PARSER(hw_sh_update_ps_shader)
 	                            (KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR_MSB) << 5u);
 	r2.wave_cnt_en            = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, WAVE_CNT_EN);
 	r2.extra_lds_size         = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, EXTRA_LDS_SIZE);
-	r2.raster_ordered_shading = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, LOAD_INTRAWAVE_COLLISION);
+	r2.raster_ordered_shading = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, RASTER_ORDERED_SHADING);
 	r2.shared_vgprs           = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, SHARED_VGPR_CNT);
 
 	cp->GetCtx()->SetShaderZFormat(buffer[4]);

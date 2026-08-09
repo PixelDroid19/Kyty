@@ -214,6 +214,20 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 					inst.dst.size = 3;
 					break;
 				}
+				case 0xc:
+				{
+					// ISA dmask 0xc = B+A (2 compact result components).
+					inst.format   = ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskC;
+					inst.dst.size = 2;
+					break;
+				}
+				case 0xd:
+				{
+					// ISA dmask 0xd = R+B+A (3 compact result components).
+					inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskD;
+					inst.dst.size = 3;
+					break;
+				}
 				case 0xf:
 				{
 					inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
@@ -244,7 +258,115 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				default: break;
 			}
 			break;
-		case 0x25: KYTY_NI("image_sample_b"); break;
+		case 0x25:
+		{
+			// image_sample_b: the ISA orders the address as {bias}{body}; the
+			// bias is the first VGPR and the remaining lanes are coordinates.
+			inst.type        = ShaderInstructionType::ImageSampleB;
+			inst.src[1].size = 8;
+			inst.src[2].size = 4;
+			uint32_t sample_b_addr = 4;
+			switch (dim)
+			{
+				case 0: sample_b_addr = 2; break; // 1D: bias, x
+				case 1: sample_b_addr = 3; break; // 2D: bias, x, y
+				case 2: sample_b_addr = 4; break; // 3D: bias, x, y, z
+				case 3: sample_b_addr = 4; break; // cube: bias, x, y, face_id
+				case 4: sample_b_addr = 3; break; // 1D array: bias, x, slice
+				case 5: sample_b_addr = 4; break; // 2D array: bias, x, y, slice
+				case 6: sample_b_addr = 3; break; // 2D MSAA: bias, x, y
+				case 7: sample_b_addr = 4; break; // 2D MSAA array: bias, x, y, slice
+				default: break;
+			}
+			inst.src[0].size = sample_b_addr;
+			if (nsa != 0)
+			{
+				inst.mimg_address_num = sample_b_addr;
+			}
+			inst.mimg_dmask = static_cast<uint8_t>(dmask);
+			switch (dmask)
+			{
+				case 0x1:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask1 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1);
+					inst.dst.size = 1;
+					break;
+				}
+				case 0x2:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask2 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask2 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2);
+					inst.dst.size = 1;
+					break;
+				}
+				case 0x3:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmask3 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmask3 : ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3);
+					inst.dst.size = 2;
+					break;
+				}
+				case 0x4:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask4 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask4 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask4);
+					inst.dst.size = 1;
+					break;
+				}
+				case 0x5:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmask5 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmask5 : ShaderInstructionFormat::Vdata2Vaddr3StSsDmask5);
+					inst.dst.size = 2;
+					break;
+				}
+				case 0x7:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata3Vaddr2StSsDmask7 : ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7);
+					inst.dst.size = 3;
+					break;
+				}
+				case 0x8:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask8 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask8 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask8);
+					inst.dst.size = 1;
+					break;
+				}
+				case 0x9:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmask9 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmask9 : ShaderInstructionFormat::Vdata2Vaddr3StSsDmask9);
+					inst.dst.size = 2;
+					break;
+				}
+				case 0xa:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmaskA : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmaskA : ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskA);
+					inst.dst.size = 2;
+					break;
+				}
+				case 0xb:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata3Vaddr4StSsDmaskB : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata3Vaddr2StSsDmaskB : ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB);
+					inst.dst.size = 3;
+					break;
+				}
+				case 0xc:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmaskC : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmaskC : ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskC);
+					inst.dst.size = 2;
+					break;
+				}
+				case 0xd:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata3Vaddr4StSsDmaskD : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata3Vaddr2StSsDmaskD : ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskD);
+					inst.dst.size = 3;
+					break;
+				}
+				case 0xf:
+				{
+					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata4Vaddr4StSsDmaskF : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata4Vaddr2StSsDmaskF : ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
+					inst.dst.size = 4;
+					break;
+				}
+			}
+			break;
+		}
 		case 0x26: KYTY_NI("image_sample_b_cl"); break;
 		case 0x27:
 			inst.type        = ShaderInstructionType::ImageSampleLz;
@@ -299,7 +421,42 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x2C: KYTY_NI("image_sample_c_l"); break;
 		case 0x2D: KYTY_NI("image_sample_c_b"); break;
 		case 0x2E: KYTY_NI("image_sample_c_b_cl"); break;
-		case 0x2F: KYTY_NI("image_sample_c_lz"); break;
+		case 0x2F:
+		{
+			// image_sample_c_lz: PCF depth-compare sample from level 0.
+			// RDNA address order is {z-compare}{coords}; result is a scalar.
+			if (dmask != 0x1)
+			{
+				EXIT("image_sample_c_lz requires scalar dmask 0x1: dmask=0x%x pc=0x%08" PRIx32 "\n", dmask, pc);
+			}
+			inst.type        = ShaderInstructionType::ImageSampleDrefLz;
+			inst.src[1].size = 8;
+			inst.src[2].size = 4;
+			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+			uint32_t sample_c_addr = 4;
+			switch (dim)
+			{
+				case 0: sample_c_addr = 2; break; // 1D: dref, x
+				case 1: sample_c_addr = 3; break; // 2D: dref, x, y
+				case 2: sample_c_addr = 4; break; // 3D: dref, x, y, z
+				case 3: sample_c_addr = 4; break; // cube: dref, x, y, face_id
+				case 4: sample_c_addr = 3; break; // 1D array: dref, x, slice
+				case 5: sample_c_addr = 4; break; // 2D array: dref, x, y, slice
+				case 6: sample_c_addr = 3; break; // 2D MSAA: dref, x, y
+				case 7: sample_c_addr = 4; break; // 2D MSAA array: dref, x, y, slice
+				default: break;
+			}
+			inst.src[0].size = sample_c_addr;
+			if (nsa != 0)
+			{
+				inst.mimg_address_num = sample_c_addr;
+			}
+			inst.format   = (sample_c_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1
+			                                     : (sample_c_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask1
+			                                                            : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1));
+			inst.dst.size = 1;
+			break;
+		}
 		case 0x30: KYTY_NI("image_sample_o"); break;
 		case 0x31: KYTY_NI("image_sample_cl_o"); break;
 		case 0x32: KYTY_NI("image_sample_d_o"); break;

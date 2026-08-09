@@ -126,8 +126,12 @@ bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usa
 
 		switch (descriptor.texture.Type())
 		{
+			// Gen5 type 8 is Color1D. It shares the flat sampled-2D descriptor array:
+			// binding materializes height=1 and sample emitters use the 2D view type.
+			case 8u:
 			case 9u: has_flat = true; break;
 			case 10u: break;
+			case 11u: has_arrayed = true; break; // cube: face index as layer
 			case 13u: has_arrayed = true; break;
 			default: EXIT("unsupported 2D image type: type=%u usage=%u\n", descriptor.texture.Type(),
 			              static_cast<unsigned>(usage));
@@ -165,29 +169,70 @@ bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst)
 	{
 		return true;
 	}
+	// Bias and PCF sample lower through the shared typed sample emitter, which
+	// already classifies the bound descriptor as flat/array/volume.
+	if (inst.type == ShaderInstructionType::ImageSampleB || inst.type == ShaderInstructionType::ImageSampleDrefLz)
+	{
+		return true;
+	}
 	return inst.type == ShaderInstructionType::ImageSample &&
 	       (inst.format == ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1 ||
-	        inst.format == ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3);
+	        inst.format == ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3 ||
+	        inst.format == ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskC ||
+	        inst.format == ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7 ||
+	        inst.format == ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskD ||
+	        inst.format == ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
 }
 
-static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index, const ShaderBindResources* bind,
+static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index, const ShaderInstruction& inst, const Spirv* spirv,
                                             const SpirvValue& x, const SpirvValue& y, const SpirvValue& array_layer,
                                             const SpirvValue& texture, const SpirvValue& sampler,
-                                            const SpirvValue* destinations, uint32_t destination_num)
+                                            const SpirvValue* destinations, uint32_t destination_num,
+                                            const uint32_t* components = nullptr, const SpirvValue* bias = nullptr)
 {
-	if (dst_source == nullptr || bind == nullptr || destinations == nullptr || destination_num == 0 || destination_num > 4)
+	if (dst_source == nullptr || spirv == nullptr || destinations == nullptr || destination_num == 0 || destination_num > 4)
 	{
 		return false;
 	}
 
-	const bool has_flat = bind->textures2D.textures2d_sampled_num > 0;
-	const bool has_array = bind->textures2D.textures2d_array_sampled_num > 0;
-	if (!has_array || bind->textures2D.textures3d_sampled_num > 0)
+	const auto* bind = spirv->GetBindInfo();
+	if (bind == nullptr)
+	{
+		return false;
+	}
+	const auto* vs_info = spirv->GetVsInputInfo();
+	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+	const int   descriptor_index = FindImageSampledTextureDescriptor(inst, *bind, user_data_register_base);
+	if (descriptor_index < 0)
+	{
+		return false;
+	}
+	const auto shape = ShaderGen5SampledTextureShapeForType(bind->textures2D.desc[descriptor_index].texture.Type());
+	const int sampled_num =
+	    (shape == ShaderGen5SampledTextureShape::TwoDimensional ? bind->textures2D.textures2d_sampled_num :
+	                                                               (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ?
+	                                                                    bind->textures2D.textures2d_array_sampled_num :
+	                                                                    bind->textures2D.textures3d_sampled_num));
+	if (sampled_num <= 0)
 	{
 		return false;
 	}
 
 	const auto index_string = String8::FromPrintf("%u", index);
+	static const char* flat_text = R"(
+%image_sample_descriptor_raw_<index> = OpLoad %uint %<texture>
+%image_sample_descriptor_<index> = OpBitwiseAnd %uint %image_sample_descriptor_raw_<index> %uint_0x1fffffff
+%image_sample_sampler_index_<index> = OpLoad %uint %<sampler>
+%image_sample_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_sampler_index_<index>
+%image_sample_sampler_<index> = OpLoad %Sampler %image_sample_sampler_ptr_<index>
+%image_sample_x_<index> = OpLoad %float %<x>
+%image_sample_y_<index> = OpLoad %float %<y>
+%image_sample_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %image_sample_descriptor_<index>
+%image_sample_image_<index> = OpLoad %ImageS %image_sample_image_ptr_<index>
+%image_sampled_image_<index> = OpSampledImage %SampledImage %image_sample_image_<index> %image_sample_sampler_<index>
+%image_sample_coord_<index> = OpCompositeConstruct %v2float %image_sample_x_<index> %image_sample_y_<index>
+%image_sample_value_<index> = OpImageSampleImplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index><bias_operand>
+)";
 	static const char* array_text = R"(
 %image_sample_descriptor_raw_<index> = OpLoad %uint %<texture>
 %image_sample_descriptor_<index> = OpBitwiseAnd %uint %image_sample_descriptor_raw_<index> %uint_0x1fffffff
@@ -201,12 +246,10 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 %image_sample_image_<index> = OpLoad %ImageSA %image_sample_image_ptr_<index>
 %image_sampled_image_<index> = OpSampledImage %SampledImageA %image_sample_image_<index> %image_sample_sampler_<index>
 %image_sample_coord_<index> = OpCompositeConstruct %v3float %image_sample_x_<index> %image_sample_y_<index> %image_sample_layer_<index>
-%image_sample_value_<index> = OpImageSampleImplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index>
+%image_sample_value_<index> = OpImageSampleImplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index><bias_operand>
 )";
-	static const char* mixed_text = R"(
+	static const char* volume_text = R"(
 %image_sample_descriptor_raw_<index> = OpLoad %uint %<texture>
-%image_sample_array_tag_<index> = OpBitwiseAnd %uint %image_sample_descriptor_raw_<index> %uint_0x40000000
-%image_sample_is_array_<index> = OpINotEqual %bool %image_sample_array_tag_<index> %uint_0
 %image_sample_descriptor_<index> = OpBitwiseAnd %uint %image_sample_descriptor_raw_<index> %uint_0x1fffffff
 %image_sample_sampler_index_<index> = OpLoad %uint %<sampler>
 %image_sample_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_sampler_index_<index>
@@ -214,36 +257,42 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 %image_sample_x_<index> = OpLoad %float %<x>
 %image_sample_y_<index> = OpLoad %float %<y>
 %image_sample_layer_<index> = OpLoad %float %<array_layer>
-OpSelectionMerge %image_sample_merge_<index> None
-OpBranchConditional %image_sample_is_array_<index> %image_sample_array_<index> %image_sample_flat_<index>
-%image_sample_flat_<index> = OpLabel
-%image_sample_flat_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %image_sample_descriptor_<index>
-%image_sample_flat_image_<index> = OpLoad %ImageS %image_sample_flat_ptr_<index>
-%image_sample_flat_sampled_<index> = OpSampledImage %SampledImage %image_sample_flat_image_<index> %image_sample_sampler_<index>
-%image_sample_flat_coord_<index> = OpCompositeConstruct %v2float %image_sample_x_<index> %image_sample_y_<index>
-%image_sample_flat_value_<index> = OpImageSampleImplicitLod %v4float %image_sample_flat_sampled_<index> %image_sample_flat_coord_<index>
-OpBranch %image_sample_merge_<index>
-%image_sample_array_<index> = OpLabel
-%image_sample_array_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageSA %textures2DA_S %image_sample_descriptor_<index>
-%image_sample_array_image_<index> = OpLoad %ImageSA %image_sample_array_ptr_<index>
-%image_sample_array_sampled_<index> = OpSampledImage %SampledImageA %image_sample_array_image_<index> %image_sample_sampler_<index>
-%image_sample_array_coord_<index> = OpCompositeConstruct %v3float %image_sample_x_<index> %image_sample_y_<index> %image_sample_layer_<index>
-%image_sample_array_value_<index> = OpImageSampleImplicitLod %v4float %image_sample_array_sampled_<index> %image_sample_array_coord_<index>
-OpBranch %image_sample_merge_<index>
-%image_sample_merge_<index> = OpLabel
-%image_sample_value_<index> = OpPhi %v4float %image_sample_flat_value_<index> %image_sample_flat_<index> %image_sample_array_value_<index> %image_sample_array_<index>
+%image_sample_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S %image_sample_descriptor_<index>
+%image_sample_image_<index> = OpLoad %ImageS3D %image_sample_image_ptr_<index>
+%image_sampled_image_<index> = OpSampledImage %SampledImage3D %image_sample_image_<index> %image_sample_sampler_<index>
+%image_sample_coord_<index> = OpCompositeConstruct %v3float %image_sample_x_<index> %image_sample_y_<index> %image_sample_layer_<index>
+%image_sample_value_<index> = OpImageSampleImplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index><bias_operand>
 )";
 
-	String8 source = String8(has_flat ? mixed_text : array_text)
+	const String8 bias_operand = (bias != nullptr)
+	                                  ? String8::FromPrintf(" Bias %%image_sample_bias_%s", index_string.c_str())
+	                                  : String8();
+
+	// SPIR-V requires the bias value to be defined before the sample consumes it.
+	String8 bias_source;
+	if (bias != nullptr)
+	{
+		bias_source = String8(R"(
+%image_sample_bias_<index> = OpLoad %float %<bias>
+)")
+		                  .ReplaceStr("<index>", index_string)
+		                  .ReplaceStr("<bias>", bias->value);
+	}
+
+	const char* sample_text = (shape == ShaderGen5SampledTextureShape::TwoDimensional ? flat_text :
+	                           (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ? array_text : volume_text));
+	String8 source = bias_source + String8(sample_text)
 	                     .ReplaceStr("<index>", index_string)
 	                     .ReplaceStr("<texture>", texture.value)
 	                     .ReplaceStr("<sampler>", sampler.value)
 	                     .ReplaceStr("<x>", x.value)
 	                     .ReplaceStr("<y>", y.value)
-	                     .ReplaceStr("<array_layer>", array_layer.value);
+	                     .ReplaceStr("<array_layer>", array_layer.value)
+	                     .ReplaceStr("<bias_operand>", bias_operand);
 	for (uint32_t component = 0; component < destination_num; component++)
 	{
-		const auto component_string = String8::FromPrintf("%u", component);
+		const uint32_t source_component = (components != nullptr ? components[component] : component);
+		const auto component_string = String8::FromPrintf("%u", source_component);
 		source += String8(R"(
 %image_sample_component_<index>_<component> = OpCompositeExtract %float %image_sample_value_<index> <component>
 OpStore %<destination> %image_sample_component_<index>_<component>
@@ -325,6 +374,8 @@ bool IsImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageSampleL:
 		case ShaderInstructionType::ImageSampleLz:
 		case ShaderInstructionType::ImageSampleLzO:
+		case ShaderInstructionType::ImageSampleB:
+		case ShaderInstructionType::ImageSampleDrefLz:
 		case ShaderInstructionType::ImageStore:
 		case ShaderInstructionType::ImageStoreMip: return true;
 		default: return false;
@@ -341,7 +392,9 @@ bool IsSampledImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageSample:
 		case ShaderInstructionType::ImageSampleL:
 		case ShaderInstructionType::ImageSampleLz:
-		case ShaderInstructionType::ImageSampleLzO: return true;
+		case ShaderInstructionType::ImageSampleLzO:
+		case ShaderInstructionType::ImageSampleB:
+		case ShaderInstructionType::ImageSampleDrefLz: return true;
 		default: return false;
 	}
 }
@@ -448,14 +501,15 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask1)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
-		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
-		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
-		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (dst_value0.type != SpirvType::Float || src0_value0.type != SpirvType::Float || src1_value0.type != SpirvType::Uint ||
+		    src2_value0.type != SpirvType::Uint)
+		{
+			return false;
+		}
 		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
 		{
 			const SpirvValue destinations[] = {dst_value0};
-			return EmitTypedImageSampleImplicitLod(dst_source, index, bind_info, src0_value0, src0_value1, src0_value2,
+			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
 			                                      src1_value0, src2_value0, destinations, 1);
 		}
 
@@ -511,10 +565,11 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask2)
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
-		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
-		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
-		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
-		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (dst_value0.type != SpirvType::Float || src0_value0.type != SpirvType::Float || src1_value0.type != SpirvType::Uint ||
+		    src2_value0.type != SpirvType::Uint)
+		{
+			return false;
+		}
 		// dmask 0x2 → sample and keep G (component 1).
 		static const char* text = R"(
          %t24_<index> = OpLoad %uint %<src1_value0>
@@ -687,7 +742,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmask3)
 		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
 		{
 			const SpirvValue destinations[] = {dst_value0, dst_value1};
-			return EmitTypedImageSampleImplicitLod(dst_source, index, bind_info, src0_value0, src0_value1, src0_value2,
+			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
 			                                      src1_value0, src2_value0, destinations, 2);
 		}
 
@@ -905,13 +960,82 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmaskA)
 	return false;
 }
 
+// dmask 0xc -> B+A, stored compactly into vdata[0:1].
+KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmaskC)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+
+	if (bind_info != nullptr &&
+	    (bind_info->textures2D.textures2d_sampled_num > 0 || bind_info->textures2D.textures2d_array_sampled_num > 0) &&
+	    bind_info->samplers.samplers_num > 0)
+	{
+		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
+		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
+		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
+		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
+
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
+		{
+			const uint32_t components[]  = {2, 3};
+			const SpirvValue destinations[] = {dst_value0, dst_value1};
+			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			                                      src1_value0, src2_value0, destinations, 2, components);
+		}
+
+		// dmask 0xc -> B+A: sample and keep components 2 and 3.
+		static const char* text = R"(
+         %t24_<index> = OpLoad %uint %<src1_value0>
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %t24_<index>
+         %t27_<index> = OpLoad %ImageS %t26_<index>
+         %t33_<index> = OpLoad %uint %<src2_value0>
+         %t35_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %t33_<index>
+         %t36_<index> = OpLoad %Sampler %t35_<index>
+         %t38_<index> = OpSampledImage %SampledImage %t27_<index> %t36_<index>
+         %t39_<index> = OpLoad %float %<src0_value0>
+         %t40_<index> = OpLoad %float %<src0_value1>
+         %t42_<index> = OpCompositeConstruct %v2float %t39_<index> %t40_<index>
+         %t43_<index> = OpImageSampleImplicitLod %v4float %t38_<index> %t42_<index>
+               OpStore %temp_v4float %t43_<index>
+         %t46_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_2
+         %t47_<index> = OpLoad %float %t46_<index>
+               OpStore %<dst_value0> %t47_<index>
+         %t54_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_3
+         %t55_<index> = OpLoad %float %t54_<index>
+               OpStore %<dst_value1> %t55_<index>
+)";
+		*dst_source += String8(text)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<src0_value0>", src0_value0.value)
+		                   .ReplaceStr("<src0_value1>", src0_value1.value)
+		                   .ReplaceStr("<src0_value2>", src0_value2.value)
+		                   .ReplaceStr("<src1_value0>", src1_value0.value)
+		                   .ReplaceStr("<src2_value0>", src2_value0.value)
+		                   .ReplaceStr("<dst_value0>", dst_value0.value)
+		                   .ReplaceStr("<dst_value1>", dst_value1.value);
+
+		return true;
+	}
+
+	return false;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmask7)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
 	// const auto& bind_params = spirv->GetBindParams();
 
-	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
+	if (bind_info != nullptr &&
+	    (bind_info->textures2D.textures2d_sampled_num > 0 || bind_info->textures2D.textures2d_array_sampled_num > 0) &&
+	    bind_info->samplers.samplers_num > 0)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -926,6 +1050,12 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmask7)
 		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
 		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
+		{
+			const SpirvValue destinations[] = {dst_value0, dst_value1, dst_value2};
+			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			                                      src1_value0, src2_value0, destinations, 3);
+		}
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -1009,6 +1139,78 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmaskB)
          %t47_<index> = OpLoad %float %t46_<index>
                OpStore %<dst_value0> %t47_<index>
          %t50_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_1
+         %t51_<index> = OpLoad %float %t50_<index>
+               OpStore %<dst_value1> %t51_<index>
+         %t54_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_3
+         %t55_<index> = OpLoad %float %t54_<index>
+               OpStore %<dst_value2> %t55_<index>
+)";
+		*dst_source += String8(text)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<src0_value0>", src0_value0.value)
+		                   .ReplaceStr("<src0_value1>", src0_value1.value)
+		                   .ReplaceStr("<src0_value2>", src0_value2.value)
+		                   .ReplaceStr("<src1_value0>", src1_value0.value)
+		                   .ReplaceStr("<src2_value0>", src2_value0.value)
+		                   .ReplaceStr("<dst_value0>", dst_value0.value)
+		                   .ReplaceStr("<dst_value1>", dst_value1.value)
+		                   .ReplaceStr("<dst_value2>", dst_value2.value);
+
+		return true;
+	}
+
+	return false;
+}
+
+// dmask 0xd -> R+B+A, stored compactly into vdata[0:2].
+KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmaskD)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+
+	if (bind_info != nullptr &&
+	    (bind_info->textures2D.textures2d_sampled_num > 0 || bind_info->textures2D.textures2d_array_sampled_num > 0) &&
+	    bind_info->samplers.samplers_num > 0)
+	{
+		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
+		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
+		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
+		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
+		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
+
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
+		{
+			const uint32_t components[]  = {0, 2, 3};
+			const SpirvValue destinations[] = {dst_value0, dst_value1, dst_value2};
+			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			                                      src1_value0, src2_value0, destinations, 3, components);
+		}
+
+		// dmask 0xd -> R+B+A: sample and keep components 0, 2 and 3.
+		static const char* text = R"(
+         %t24_<index> = OpLoad %uint %<src1_value0>
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %t24_<index>
+         %t27_<index> = OpLoad %ImageS %t26_<index>
+         %t33_<index> = OpLoad %uint %<src2_value0>
+         %t35_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %t33_<index>
+         %t36_<index> = OpLoad %Sampler %t35_<index>
+         %t38_<index> = OpSampledImage %SampledImage %t27_<index> %t36_<index>
+         %t39_<index> = OpLoad %float %<src0_value0>
+         %t40_<index> = OpLoad %float %<src0_value1>
+         %t42_<index> = OpCompositeConstruct %v2float %t39_<index> %t40_<index>
+         %t43_<index> = OpImageSampleImplicitLod %v4float %t38_<index> %t42_<index>
+               OpStore %temp_v4float %t43_<index>
+         %t46_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_0
+         %t47_<index> = OpLoad %float %t46_<index>
+               OpStore %<dst_value0> %t47_<index>
+         %t50_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_2
          %t51_<index> = OpLoad %float %t50_<index>
                OpStore %<dst_value1> %t51_<index>
          %t54_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_3
@@ -1362,7 +1564,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 	const auto* bind_info = spirv->GetBindInfo();
 	// const auto& bind_params = spirv->GetBindParams();
 
-	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
+	if (bind_info != nullptr &&
+	    (bind_info->textures2D.textures2d_sampled_num > 0 || bind_info->textures2D.textures2d_array_sampled_num > 0) &&
+	    bind_info->samplers.samplers_num > 0)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -1378,6 +1582,12 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
 		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
 		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
+		{
+			const SpirvValue destinations[] = {dst_value0, dst_value1, dst_value2, dst_value3};
+			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			                                      src1_value0, src2_value0, destinations, 4);
+		}
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -1434,7 +1644,83 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 	return false;
 }
 
-// image_sample_lz dmask 0xf: same as image_sample RGBA but LOD forced to 0.
+// image_sample_b: RDNA address is {bias}{coords}. One multi-format emitter
+// keeps compact dmask stores and routes through the typed sample path
+// (descriptor shape selects flat / array / volume).
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleB_Vdata4Vaddr3StSsDmaskF)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+	// 1 = 2D (bias,x,y); 3 = cube (bias,x,y,face); 5 = 2D array (bias,x,y,slice).
+	// Cube faces materialize as array layers (resource type 11).
+	if (inst.mimg_dimension != 1 && inst.mimg_dimension != 3 && inst.mimg_dimension != 5)
+	{
+		return false;
+	}
+
+	if (bind_info == nullptr || bind_info->samplers.samplers_num <= 0 ||
+	    (bind_info->textures2D.textures2d_sampled_num <= 0 && bind_info->textures2D.textures2d_array_sampled_num <= 0 &&
+	     bind_info->textures2D.textures3d_sampled_num <= 0))
+	{
+		return false;
+	}
+
+	uint32_t components[4] = {};
+	int      num           = 0;
+	switch (inst.mimg_dmask)
+	{
+		case 0x1: components[num++] = 0; break;
+		case 0x2: components[num++] = 1; break;
+		case 0x3: components[num++] = 0; components[num++] = 1; break;
+		case 0x4: components[num++] = 2; break;
+		case 0x5: components[num++] = 0; components[num++] = 2; break;
+		case 0x7: components[num++] = 0; components[num++] = 1; components[num++] = 2; break;
+		case 0x8: components[num++] = 3; break;
+		case 0x9: components[num++] = 0; components[num++] = 3; break;
+		case 0xa: components[num++] = 1; components[num++] = 3; break;
+		case 0xb: components[num++] = 0; components[num++] = 1; components[num++] = 3; break;
+		case 0xc: components[num++] = 2; components[num++] = 3; break;
+		case 0xd: components[num++] = 0; components[num++] = 2; components[num++] = 3; break;
+		case 0xf: components[num++] = 0; components[num++] = 1; components[num++] = 2; components[num++] = 3; break;
+		default: EXIT("image_sample_b unsupported dmask: 0x%x\n", inst.mimg_dmask);
+	}
+
+	SpirvValue dst_value[4];
+	for (int i = 0; i < num; i++)
+	{
+		dst_value[i] = operand_variable_to_str(inst.dst, i);
+	}
+	// Address: [0]=bias, [1]=x, [2]=y, [3]=layer/face when present.
+	const auto src0_bias   = mimg_address_to_str(inst, 0);
+	const auto src0_x      = mimg_address_to_str(inst, 1);
+	const auto src0_y      = mimg_address_to_str(inst, 2);
+	const auto src0_layer  = (inst.mimg_dimension == 3 || inst.mimg_dimension == 5) ? mimg_address_to_str(inst, 3) : src0_y;
+	auto       src1_value0 = operand_variable_to_str(inst.src[1], 0);
+	auto       src2_value0 = operand_variable_to_str(inst.src[2], 0);
+
+	if (dst_value[0].type != SpirvType::Float)
+	{
+		return false;
+	}
+	if (src0_bias.type != SpirvType::Float || src0_x.type != SpirvType::Float || src0_y.type != SpirvType::Float)
+	{
+		return false;
+	}
+	if (src1_value0.type != SpirvType::Uint || src2_value0.type != SpirvType::Uint)
+	{
+		return false;
+	}
+	return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_x, src0_y, src0_layer, src1_value0, src2_value0,
+	                                       dst_value, static_cast<uint32_t>(num), components, &src0_bias);
+}
+
+// Dref sampling requires comparison-enabled Vulkan samplers. Descriptor binding
+// currently creates regular samplers, so use the generator's strict error path.
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
+{
+	return false;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 {
 	const auto& inst      = code.GetInstructions().At(index);

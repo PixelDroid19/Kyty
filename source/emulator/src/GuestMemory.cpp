@@ -37,6 +37,11 @@ int Port::QueryProtection(void* address, void** start, void** end, int* protecti
 	return callbacks != nullptr && callbacks->query_protection != nullptr ? callbacks->query_protection(address, start, end, protection) : -1;
 }
 
+bool Port::IsInstalled() const noexcept
+{
+	return m_callbacks.load(std::memory_order_acquire) != nullptr;
+}
+
 Port& GetPort()
 {
 	static Port port;

@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
+#include "Emulator/Graphics/VulkanVertexInputLayout.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
@@ -276,12 +277,18 @@ TEST(EmulatorGraphicsPackets, AcceptsObservedFullTargetBarrierInvalidations)
 TEST(EmulatorGraphicsPackets, RejectsByteMisalignedRawStorage)
 {
 	ShaderBufferResource resource {};
-	resource.fields[1] = 1u << 16u;
+	// Stride 3 is non-zero and not DWORD-aligned — not a valid raw record.
+	resource.fields[1] = 3u << 16u;
 	resource.fields[2] = 24576u;
 	resource.fields[3] = (5u << 12u) | DstSel(4, 0, 0, 0);
 
 	EXPECT_FALSE(ShaderRawStorageDescriptorSupported(resource));
 	EXPECT_FALSE(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw));
+
+	// Stride 1 is the byte-addressed raw form (index * 1 + offset).
+	resource.fields[1] = 1u << 16u;
+	EXPECT_TRUE(ShaderRawStorageDescriptorSupported(resource));
+	EXPECT_TRUE(ShaderGen5StorageDescriptorSupported(resource, ShaderStorageAccess::Raw));
 
 	resource.fields[1] = 4u << 16u;
 	resource.fields[2] = 24577u;
@@ -1206,6 +1213,9 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(77).format, VK_FORMAT_R32G32B32A32_SFLOAT);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(56).format, VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(20).format, VK_FORMAT_R32_UINT);
+	// Gen5 format 29 is R16G16_SFLOAT (shared with image sample path); used for UVs.
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).format, VK_FORMAT_R16G16_SFLOAT);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).component_count, 2u);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).component_count, 0u);
 
@@ -1215,6 +1225,51 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(10, 0).format, VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(0, 0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_TRUE(ShaderIsGen5SingleComponent32BitBufferFormat(22));
+}
+
+// Interleaved mesh stream: position f32x3 + normal h16x4 + UV h16x2 in one stride-24 VB.
+// Without format 29 the whole Vulkan vertex input layout fails and 3D draws go black.
+TEST(EmulatorGraphicsPackets, BuildsInterleavedPosNormUvVertexLayoutWithFormat29)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	ShaderVertexInputInfo input {};
+	input.resources_num = 3;
+	input.buffers_num   = 1;
+
+	auto& buffer      = input.buffers[0];
+	buffer.stride     = 24;
+	buffer.attr_num   = 3;
+	buffer.attr_indices[0] = 0;
+	buffer.attr_indices[1] = 1;
+	buffer.attr_indices[2] = 2;
+	buffer.attr_offsets[0] = 0;
+	buffer.attr_offsets[1] = 12;
+	buffer.attr_offsets[2] = 20;
+
+	// format in bits [18:12], dst_sel in low 12 bits (see ShaderBufferResource::Format/DstSel*).
+	input.resources[0].fields[3] = (74u << 12u) | DstSel(4, 5, 6, 1); // R32G32B32_SFLOAT -> 4 VGPRs (w=1)
+	input.resources_dst[0]       = {9, 4};
+	input.resources[1].fields[3] = (71u << 12u) | DstSel(4, 5, 6, 7); // R16G16B16A16_SFLOAT -> 3 VGPRs
+	input.resources_dst[1]       = {13, 3};
+	input.resources[2].fields[3] = (29u << 12u) | DstSel(4, 5, 0, 1); // R16G16_SFLOAT UV -> 2 VGPRs
+	input.resources_dst[2]       = {16, 2};
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	EXPECT_EQ(layout.binding_count, 1u);
+	EXPECT_EQ(layout.attribute_count, 3u);
+	EXPECT_EQ(layout.bindings[0].stride, 24u);
+	EXPECT_EQ(layout.attributes[0].format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(layout.attributes[0].offset, 0u);
+	EXPECT_EQ(layout.attributes[1].format, VK_FORMAT_R16G16B16A16_SFLOAT);
+	EXPECT_EQ(layout.attributes[1].offset, 12u);
+	EXPECT_EQ(layout.attributes[2].format, VK_FORMAT_R16G16_SFLOAT);
+	EXPECT_EQ(layout.attributes[2].offset, 20u);
 }
 
 TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
@@ -2946,6 +3001,63 @@ TEST(EmulatorGraphicsPackets, ResolvesGsFrontImageSampleLzFromPhysicalUserData)
 	EXPECT_NE(source.FindIndex("OpImageSampleExplicitLod"), Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, ResolvesImplicitSampleShapeFromMixedDescriptorSet)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction sample {};
+	sample.type           = ShaderInstructionType::ImageSample;
+	sample.format         = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
+	sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 16, .size = 8};
+	sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 40, .size = 4};
+	sample.src_num        = 3;
+	sample.mimg_dimension = 2;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderInstruction nop {};
+	nop.type   = ShaderInstructionType::VNop;
+	nop.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(sample);
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	input.bind.push_constant_size                         = 176;
+	input.bind.textures2D.textures_num                    = 5;
+	input.bind.textures2D.textures2d_sampled_num          = 2;
+	input.bind.textures2D.textures2d_array_sampled_num    = 2;
+	input.bind.textures2D.textures3d_sampled_num          = 1;
+	const uint8_t descriptor_types[]                      = {11u, 11u, 10u, 9u, 9u};
+	for (int descriptor = 0; descriptor < 5; ++descriptor)
+	{
+		input.bind.textures2D.desc[descriptor].start_register    = descriptor * 8;
+		input.bind.textures2D.desc[descriptor].usage             = ShaderTextureUsage::ReadOnly;
+		input.bind.textures2D.desc[descriptor].texture.fields[1] = 20u << 20u;
+		input.bind.textures2D.desc[descriptor].texture.fields[3] = static_cast<uint32_t>(descriptor_types[descriptor]) << 28u;
+	}
+	input.bind.samplers.samplers_num      = 1;
+	input.bind.samplers.start_register[0] = 40;
+	ShaderCalcBindingIndices(&input.bind);
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpSampledImage %SampledImage3D"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpSampledImage %SampledImageA"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, ParsesImageSampleLWithExplicitLod)
 {
 	const uint32_t word0    = (0x3cu << 26u) | (0x24u << 18u) | (0xfu << 8u);
@@ -2967,6 +3079,236 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleLWithExplicitLod)
 	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
 	EXPECT_EQ(code.GetInstructions().At(0).src[0].size, 3);
 	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 4);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesImageSampleBAddressContract)
+{
+	// image_sample_b op 0x25: address is {bias}{coords}. DIM selects body size.
+	const uint32_t common = (0x3cu << 26u) | (0x25u << 18u) | (0xfu << 8u);
+	const uint32_t dmask_c = (0x3cu << 26u) | (0x25u << 18u) | (0xcu << 8u) | (1u << 3u); // 2D, dmask B+A
+	const uint32_t dim_2d_arr = common | (5u << 3u);                                     // 2D array: bias+x+y+slice
+	const uint32_t shader[] = {common | (1u << 3u), 0u, common, 0u, dmask_c, 0u, dim_2d_arr, 0u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 5u);
+	const auto& dim_2d = code.GetInstructions().At(0);
+	EXPECT_EQ(dim_2d.type, ShaderInstructionType::ImageSampleB);
+	EXPECT_EQ(dim_2d.mimg_dimension, 1);
+	EXPECT_EQ(dim_2d.src[0].size, 3);
+	EXPECT_EQ(dim_2d.format, ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
+	EXPECT_EQ(dim_2d.mimg_dmask, 0xf);
+
+	const auto& dim_1d = code.GetInstructions().At(1);
+	EXPECT_EQ(dim_1d.type, ShaderInstructionType::ImageSampleB);
+	EXPECT_EQ(dim_1d.mimg_dimension, 0);
+	EXPECT_EQ(dim_1d.src[0].size, 2);
+	EXPECT_EQ(dim_1d.format, ShaderInstructionFormat::Vdata4Vaddr2StSsDmaskF);
+	EXPECT_EQ(dim_1d.mimg_dmask, 0xf);
+
+	const auto& sample_b_dmask_c = code.GetInstructions().At(2);
+	EXPECT_EQ(sample_b_dmask_c.type, ShaderInstructionType::ImageSampleB);
+	EXPECT_EQ(sample_b_dmask_c.mimg_dimension, 1);
+	EXPECT_EQ(sample_b_dmask_c.src[0].size, 3);
+	EXPECT_EQ(sample_b_dmask_c.format, ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskC);
+	EXPECT_EQ(sample_b_dmask_c.mimg_dmask, 0xc);
+	EXPECT_EQ(sample_b_dmask_c.dst.size, 2);
+
+	const auto& sample_b_array = code.GetInstructions().At(3);
+	EXPECT_EQ(sample_b_array.type, ShaderInstructionType::ImageSampleB);
+	EXPECT_EQ(sample_b_array.mimg_dimension, 5);
+	EXPECT_EQ(sample_b_array.src[0].size, 4);
+	EXPECT_EQ(sample_b_array.format, ShaderInstructionFormat::Vdata4Vaddr4StSsDmaskF);
+	EXPECT_EQ(sample_b_array.mimg_dmask, 0xf);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesImageSampleDrefLzAddressContract)
+{
+	// image_sample_c_lz op 0x2f: address is {z-compare}{coords}.
+	const uint32_t common = (0x3cu << 26u) | (0x2fu << 18u) | (0x1u << 8u);
+	const uint32_t shader[] = {common | (1u << 3u), 0u, common | (5u << 3u), 0u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	const auto& dref_2d = code.GetInstructions().At(0);
+	EXPECT_EQ(dref_2d.type, ShaderInstructionType::ImageSampleDrefLz);
+	EXPECT_EQ(dref_2d.mimg_dimension, 1);
+	EXPECT_EQ(dref_2d.src[0].size, 3);
+	EXPECT_EQ(dref_2d.format, ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1);
+	EXPECT_EQ(dref_2d.mimg_dmask, 0x1);
+	EXPECT_EQ(dref_2d.dst.size, 1);
+
+	const auto& dref_array = code.GetInstructions().At(1);
+	EXPECT_EQ(dref_array.type, ShaderInstructionType::ImageSampleDrefLz);
+	EXPECT_EQ(dref_array.mimg_dimension, 5);
+	EXPECT_EQ(dref_array.src[0].size, 4);
+	EXPECT_EQ(dref_array.format, ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1);
+	EXPECT_EQ(dref_array.mimg_dmask, 0x1);
+}
+
+TEST(EmulatorGraphicsPackets, ParsesImageSampleDmaskCAndD)
+{
+	// ISA image_sample dmasks 0xc (B+A) and 0xd (R+B+A).
+	const uint32_t enc      = 0x3cu << 26u;
+	const uint32_t dmask_c  = enc | (0x20u << 18u) | (0xcu << 8u);
+	const uint32_t dmask_d  = enc | (0x20u << 18u) | (0xdu << 8u);
+	const uint32_t shader[] = {dmask_c, 0u, dmask_d, 0u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+
+	ASSERT_EQ(code.GetInstructions().Size(), 3u);
+	EXPECT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::ImageSample);
+	EXPECT_EQ(code.GetInstructions().At(0).format, ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskC);
+	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 2);
+	EXPECT_EQ(code.GetInstructions().At(1).type, ShaderInstructionType::ImageSample);
+	EXPECT_EQ(code.GetInstructions().At(1).format, ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskD);
+	EXPECT_EQ(code.GetInstructions().At(1).dst.size, 3);
+}
+
+TEST(EmulatorGraphicsPackets, MaterializesImageSampleBWithBias)
+{
+	// SPIR-V must emit Bias operand and keep dmask 0xc as components 2 and 3.
+	ShaderInstruction sample {};
+	sample.type           = ShaderInstructionType::ImageSampleB;
+	sample.format         = ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskC;
+	sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 2};
+	sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+	sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 4};
+	sample.src_num        = 3;
+	sample.mimg_dimension = 1;
+	sample.mimg_dmask     = 0xc;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderInstruction nop {};
+	nop.type   = ShaderInstructionType::VNop;
+	nop.format = ShaderInstructionFormat::Empty;
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(sample);
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	input.bind.push_constant_size                   = 48;
+	input.bind.textures2D.textures_num              = 1;
+	input.bind.textures2D.textures2d_sampled_num    = 1;
+	input.bind.textures2D.desc[0].start_register    = 8;
+	input.bind.textures2D.desc[0].usage             = ShaderTextureUsage::ReadOnly;
+	input.bind.textures2D.desc[0].texture.fields[1] = 22u << 20u; // R32_SFLOAT
+	input.bind.textures2D.desc[0].texture.fields[3] = 9u << 28u;  // 2D
+	input.bind.samplers.samplers_num                = 1;
+	input.bind.samplers.start_register[0]           = 20;
+	ShaderCalcBindingIndices(&input.bind);
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_NE(source.FindIndex("OpImageSampleImplicitLod"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("Bias"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpCompositeExtract %float %image_sample_value_0 2"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpCompositeExtract %float %image_sample_value_0 3"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, RejectsImageSampleDrefLzWithoutCompareSamplerBinding)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto expect_rejected = [](uint8_t dimension, uint8_t descriptor_type, int flat_sampled_num, int array_sampled_num)
+	{
+		auto generate_rejected_shader = [&]()
+		{
+			const bool arrayed = dimension != 1u;
+
+			ShaderInstruction sample {};
+			sample.type           = ShaderInstructionType::ImageSampleDrefLz;
+			sample.format         = arrayed ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1;
+			sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+			sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = (arrayed ? 4 : 3)};
+			sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+			sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 4};
+			sample.src_num        = 3;
+			sample.mimg_dimension = dimension;
+			sample.mimg_dmask     = 0x1;
+
+			ShaderInstruction end {};
+			end.type   = ShaderInstructionType::SEndpgm;
+			end.format = ShaderInstructionFormat::Empty;
+			ShaderInstruction nop {};
+			nop.type   = ShaderInstructionType::VNop;
+			nop.format = ShaderInstructionFormat::Empty;
+
+			ShaderCode code;
+			code.SetType(ShaderType::Pixel);
+			code.GetInstructions().Add(sample);
+			code.GetInstructions().Add(nop);
+			code.GetInstructions().Add(end);
+
+			ShaderPixelInputInfo input {};
+			input.bind.push_constant_size                      = 48;
+			input.bind.textures2D.textures_num                 = 1;
+			input.bind.textures2D.textures2d_sampled_num       = flat_sampled_num;
+			input.bind.textures2D.textures2d_array_sampled_num = array_sampled_num;
+			input.bind.textures2D.desc[0].start_register       = 8;
+			input.bind.textures2D.desc[0].usage                = ShaderTextureUsage::ReadOnly;
+			input.bind.textures2D.desc[0].texture.fields[1]    = 22u << 20u; // R32_SFLOAT
+			input.bind.textures2D.desc[0].texture.fields[3]    = static_cast<uint32_t>(descriptor_type) << 28u;
+			input.bind.samplers.samplers_num                    = 1;
+			input.bind.samplers.start_register[0]               = 20;
+			ShaderCalcBindingIndices(&input.bind);
+
+			(void)SpirvGenerateSource(code, nullptr, &input, nullptr);
+		};
+		EXPECT_DEATH(generate_rejected_shader(), "");
+	};
+
+	// Dref instructions require the bound sampler to have comparison enabled.
+	// The current sampler binding selects regular sampling for every descriptor,
+	// so reject each shape until that operation reaches VkSamplerCreateInfo.
+	expect_rejected(1u, 9u, 1, 0);  // 2D
+	expect_rejected(5u, 13u, 0, 1); // 2D array
+	expect_rejected(3u, 11u, 0, 1); // cube faces use the arrayed descriptor path
 }
 
 TEST(EmulatorGraphicsPackets, SizesDynamicDisplayThinBgraSurface)
@@ -3448,6 +3790,49 @@ TEST(EmulatorGraphicsPackets, MaterializesFetchAttribSLoadDwordAndX2)
 	EXPECT_NE(source.FindIndex("0xa1b2c301"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("0xa1b2c302"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("0xa1b2c303"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, EmbeddedUintVertexInputMatchesVulkanNumericType)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction fetch {};
+	fetch.type               = ShaderInstructionType::FetchX;
+	fetch.format             = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	fetch.dst.type           = ShaderOperandType::Vgpr;
+	fetch.dst.register_id    = 0;
+	fetch.dst.size           = 1;
+	fetch.src[0].type        = ShaderOperandType::Vgpr;
+	fetch.src[0].register_id = 4;
+	fetch.src[0].size        = 1;
+	fetch.src[1].type        = ShaderOperandType::Sgpr;
+	fetch.src[1].register_id = 0;
+	fetch.src[1].size        = 4;
+	fetch.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	fetch.src[2].constant.i  = 0;
+	fetch.src_num            = 3;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(fetch);
+
+	ShaderVertexInputInfo input {};
+	input.fetch_embedded                  = true;
+	input.resources_num                   = 1;
+	input.resources[0].fields[3]          = 20u << 12u; // R32_UINT
+	input.resources_dst[0].register_start = 0;
+	input.resources_dst[0].registers_num  = 1;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+	EXPECT_NE(source.FindIndex("%attr0 = OpVariable %_ptr_Input_uint Input"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint %attr0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBitcast %float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%attr0 = OpVariable %_ptr_Input_float Input"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, EmbeddedFetchMayConsumePrefixOfWiderVertexAttribute)
