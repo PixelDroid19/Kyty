@@ -396,6 +396,21 @@ VkSampler SamplerCache::GetSampler(uint64_t id)
 	return nullptr;
 }
 
+void SamplerCache::DeleteAllForTesting(GraphicContext* ctx)
+{
+	EXIT_IF(ctx == nullptr || ctx->device == VK_NULL_HANDLE);
+	Core::LockGuard lock(m_mutex);
+	for (auto& sampler: m_samplers)
+	{
+		if (sampler.vk != VK_NULL_HANDLE)
+		{
+			vkDestroySampler(ctx->device, sampler.vk, nullptr);
+			sampler.vk = VK_NULL_HANDLE;
+		}
+	}
+	m_samplers.Clear();
+}
+
 
 } // namespace Kyty::Libs::Graphics
 

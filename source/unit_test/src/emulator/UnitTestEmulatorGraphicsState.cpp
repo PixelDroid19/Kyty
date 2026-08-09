@@ -3983,7 +3983,28 @@ TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)
 	using namespace Kyty::Libs::Graphics::State;
 	const auto comparison = ResolveSamplerComparison(4, ImageSampleOperation::Regular);
 	EXPECT_FALSE(comparison.enabled);
-	EXPECT_EQ(comparison.function, 4);
+	EXPECT_EQ(comparison.function, SamplerCompareOp::Greater);
+}
+
+TEST(EmulatorGraphicsState, ResolvesDepthReferenceSamplerComparison)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	constexpr SamplerCompareOp expected[] = {
+	    SamplerCompareOp::Never,          SamplerCompareOp::Less,   SamplerCompareOp::Equal,
+	    SamplerCompareOp::LessOrEqual,    SamplerCompareOp::Greater, SamplerCompareOp::NotEqual,
+	    SamplerCompareOp::GreaterOrEqual, SamplerCompareOp::Always,
+	};
+
+	for (uint8_t function = 0; function < 8; ++function)
+	{
+		const auto depth = ResolveSamplerComparison(function, ImageSampleOperation::DepthReference);
+		EXPECT_TRUE(depth.enabled);
+		EXPECT_EQ(depth.function, expected[function]);
+
+		const auto regular = ResolveSamplerComparison(function, ImageSampleOperation::Regular);
+		EXPECT_FALSE(regular.enabled);
+		EXPECT_EQ(regular.function, expected[function]);
+	}
 }
 
 TEST(EmulatorGraphicsState, UnnormalizedSamplerCoordinatesUseVulkanCompatiblePolicy)

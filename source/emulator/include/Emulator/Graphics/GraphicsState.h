@@ -200,10 +200,22 @@ enum class SamplerAddressMode
 	ClampToBorder,
 };
 
+enum class SamplerCompareOp
+{
+	Never,
+	Less,
+	Equal,
+	LessOrEqual,
+	Greater,
+	NotEqual,
+	GreaterOrEqual,
+	Always,
+};
+
 struct SamplerComparison
 {
-	bool    enabled  = false;
-	uint8_t function = 0;
+	bool             enabled  = false;
+	SamplerCompareOp function = SamplerCompareOp::Never;
 };
 
 struct UnnormalizedSamplerPolicy
@@ -217,6 +229,7 @@ struct UnnormalizedSamplerPolicy
 };
 
 [[nodiscard]] SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp);
+[[nodiscard]] SamplerCompareOp    ResolveSamplerCompareOp(uint8_t depth_compare_function);
 // Vulkan requires sampler comparison state to agree with the SPIR-V image instruction.
 [[nodiscard]] SamplerComparison         ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);
 [[nodiscard]] UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates);

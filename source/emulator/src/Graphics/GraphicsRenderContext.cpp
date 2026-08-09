@@ -85,6 +85,7 @@ bool GraphicsRenderUnbindContextForTesting(GraphicContext* ctx)
 	// still live. Only then clear the global binding so no later code can retain
 	// a pointer to a destroyed test context.
 	g_command_pool.DeleteAllForTesting();
+	g_render_ctx->GetSamplerCache()->DeleteAllForTesting(ctx);
 	g_render_ctx->SetGraphicCtx(nullptr);
 	g_test_bound_graphic_context = nullptr;
 	return true;

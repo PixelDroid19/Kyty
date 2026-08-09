@@ -346,12 +346,14 @@ public:
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
 	VkSampler GetSampler(uint64_t id);
-	uint64_t  GetSamplerId(const ShaderSamplerResource& r);
+	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation);
+	void      DeleteAllForTesting(GraphicContext* ctx);
 
 private:
 	struct Sampler
 	{
 		ShaderSamplerResource r;
+		State::ImageSampleOperation operation {};
 		VkSampler             vk = nullptr;
 	};
 

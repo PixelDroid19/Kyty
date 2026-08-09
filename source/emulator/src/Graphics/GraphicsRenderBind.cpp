@@ -1306,7 +1306,11 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, uint64_t* sa
 		// resource contract and cannot be represented by a fixed VkBorderColor.
 		if (r.BorderColorType() == 3) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.BorderColorType() == 3 condition ignored (continuing)\n"); }
 
-		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r);
+		if (samplers.operations[i] == State::ImageSampleOperation::Mixed)
+		{
+			EXIT("unsupported sampler binding: index=%d operation=mixed\n", i);
+		}
+		sampler_ids[i] = g_render_ctx->GetSamplerCache()->GetSamplerId(r, samplers.operations[i]);
 
 		r.UpdateIndex(i);
 

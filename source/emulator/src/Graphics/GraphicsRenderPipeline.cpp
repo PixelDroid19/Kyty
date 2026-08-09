@@ -61,21 +61,27 @@ bool VertexInputLayoutLogEnabled()
 
 // SamplerCache::GetSamplerId, PipelineCache, CreatePipelineInternal
 
-uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
+uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation)
 {
+	if (operation == State::ImageSampleOperation::Mixed)
+	{
+		EXIT("unsupported sampler contract: operation=mixed\n");
+	}
 	Core::LockGuard lock(m_mutex);
 	uint32_t        m_samplers_size = m_samplers.Size();
 	for (uint32_t i = 0; i < m_samplers_size; i++)
 	{
 		const auto& s = m_samplers.At(i);
-		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] && s.r.fields[3] == r.fields[3])
+		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] &&
+		    s.r.fields[3] == r.fields[3] && s.operation == operation)
 		{
 			return i;
 		}
 	}
 	Sampler s;
-	s.r  = r;
-	s.vk = nullptr;
+	s.r         = r;
+	s.operation = operation;
+	s.vk        = nullptr;
 
 	bool  aniso       = false;
 	float aniso_ratio = 1.0f;
@@ -108,8 +114,28 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 	}
 
 	VkSamplerCreateInfo sampler_info {};
-	const auto          sampler_comparison  = State::ResolveSamplerComparison(r.DepthCompareFunc(), State::ImageSampleOperation::Regular);
+	const auto          sampler_comparison  = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
 	const auto          unnormalized_policy = State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords());
+	if (sampler_comparison.enabled && unnormalized_policy.disable_comparison)
+	{
+		EXIT("unsupported sampler contract: operation=%u unnormalized=1\n", static_cast<uint32_t>(operation));
+	}
+
+	auto get_compare_op = [](State::SamplerCompareOp compare)
+	{
+		switch (compare)
+		{
+			case State::SamplerCompareOp::Never: return VK_COMPARE_OP_NEVER;
+			case State::SamplerCompareOp::Less: return VK_COMPARE_OP_LESS;
+			case State::SamplerCompareOp::Equal: return VK_COMPARE_OP_EQUAL;
+			case State::SamplerCompareOp::LessOrEqual: return VK_COMPARE_OP_LESS_OR_EQUAL;
+			case State::SamplerCompareOp::Greater: return VK_COMPARE_OP_GREATER;
+			case State::SamplerCompareOp::NotEqual: return VK_COMPARE_OP_NOT_EQUAL;
+			case State::SamplerCompareOp::GreaterOrEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+			case State::SamplerCompareOp::Always: return VK_COMPARE_OP_ALWAYS;
+		}
+		return VK_COMPARE_OP_NEVER;
+	};
 
 	auto get_warp = [](uint8_t clamp)
 	{
@@ -147,7 +173,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
 	sampler_info.maxAnisotropy           = aniso_ratio;
 	sampler_info.compareEnable           = sampler_comparison.enabled ? VK_TRUE : VK_FALSE;
-	sampler_info.compareOp               = static_cast<VkCompareOp>(sampler_comparison.function);
+	sampler_info.compareOp               = get_compare_op(sampler_comparison.function);
 	sampler_info.minLod                  = min_lod;
 	sampler_info.maxLod                  = max_lod;
 	sampler_info.borderColor             = border;

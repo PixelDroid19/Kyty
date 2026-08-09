@@ -10,6 +10,8 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+
+#include "../../emulator/src/Graphics/GraphicsRenderInternal.h"
 #include "Emulator/Log.h"
 
 #include "spirv-tools/libspirv.hpp"
@@ -1382,11 +1384,117 @@ void InitializeGraphicsConfig()
 	Kyty::Config::SetNextGen(true);
 }
 
+class VulkanSamplerContext
+{
+public:
+	~VulkanSamplerContext()
+	{
+		if (bound)
+		{
+			Expect(GraphicsRenderUnbindContextForTesting(&context), "sampler test context must unbind");
+		}
+		if (context.device != VK_NULL_HANDLE)
+		{
+			vkDestroyDevice(context.device, nullptr);
+		}
+		if (context.instance != VK_NULL_HANDLE)
+		{
+			vkDestroyInstance(context.instance, nullptr);
+		}
+	}
+
+	[[nodiscard]] bool Initialize()
+	{
+		VkApplicationInfo application {};
+		application.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+		application.apiVersion = VK_API_VERSION_1_0;
+		VkInstanceCreateInfo instance_info {};
+		instance_info.sType            = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+		instance_info.pApplicationInfo = &application;
+		if (vkCreateInstance(&instance_info, nullptr, &context.instance) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		uint32_t physical_count = 0;
+		if (vkEnumeratePhysicalDevices(context.instance, &physical_count, nullptr) != VK_SUCCESS || physical_count == 0)
+		{
+			return false;
+		}
+		std::vector<VkPhysicalDevice> physical_devices(physical_count);
+		if (vkEnumeratePhysicalDevices(context.instance, &physical_count, physical_devices.data()) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		for (const auto physical: physical_devices)
+		{
+			uint32_t family_count = 0;
+			vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, nullptr);
+			std::vector<VkQueueFamilyProperties> families(family_count);
+			vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, families.data());
+			for (uint32_t family = 0; family < family_count; ++family)
+			{
+				if (families[family].queueCount == 0 || (families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0)
+				{
+					continue;
+				}
+				constexpr float priority = 1.0f;
+				VkDeviceQueueCreateInfo queue_info {};
+				queue_info.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+				queue_info.queueFamilyIndex = family;
+				queue_info.queueCount       = 1;
+				queue_info.pQueuePriorities = &priority;
+				VkDeviceCreateInfo device_info {};
+				device_info.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+				device_info.queueCreateInfoCount = 1;
+				device_info.pQueueCreateInfos    = &queue_info;
+				if (vkCreateDevice(physical, &device_info, nullptr, &context.device) != VK_SUCCESS)
+				{
+					continue;
+				}
+
+				VkQueue queue = VK_NULL_HANDLE;
+				vkGetDeviceQueue(context.device, family, 0, &queue);
+				context.physical_device                              = physical;
+				context.queues[GraphicContext::QUEUE_UTIL].vk_queue = queue;
+				context.queues[GraphicContext::QUEUE_UTIL].family   = family;
+				context.queues[GraphicContext::QUEUE_UTIL].index    = 0;
+				context.queues[GraphicContext::QUEUE_UTIL].mutex    = &context.queue_mutexes[0];
+				context.queue_mutex_count                           = 1;
+				bound = GraphicsRenderBindContextForTesting(&context);
+				return bound;
+			}
+		}
+		return false;
+	}
+
+	GraphicContext context {};
+
+private:
+	bool bound = false;
+};
+
+void VerifyComparisonSamplerCacheIdentity()
+{
+	VulkanSamplerContext vulkan;
+	Expect(vulkan.Initialize(), "Vulkan sampler context must initialize");
+	ShaderSamplerResource descriptor {};
+	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular);
+	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference);
+	const auto depth_reused = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference);
+	Expect(regular != depth, "regular and depth-reference samplers must not alias");
+	Expect(depth == depth_reused, "identical depth-reference samplers must reuse the cache entry");
+	Expect(g_render_ctx->GetSamplerCache()->GetSampler(regular) != VK_NULL_HANDLE, "regular sampler must be created");
+	Expect(g_render_ctx->GetSamplerCache()->GetSampler(depth) != VK_NULL_HANDLE, "comparison sampler must be created");
+}
+
 } // namespace
 
 int main()
 {
 	InitializeGraphicsConfig();
+	VerifyComparisonSamplerCacheIdentity();
 	VerifyStencilFrontier();
 	VerifyStorageFrontier();
 	VerifyStorageRange();

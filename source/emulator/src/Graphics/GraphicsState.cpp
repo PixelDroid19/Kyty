@@ -368,7 +368,24 @@ SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp)
 
 SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation)
 {
-	return {operation == ImageSampleOperation::DepthReference, depth_compare_function};
+	return {operation == ImageSampleOperation::DepthReference, ResolveSamplerCompareOp(depth_compare_function)};
+}
+
+SamplerCompareOp ResolveSamplerCompareOp(uint8_t depth_compare_function)
+{
+	switch (depth_compare_function)
+	{
+		case 0: return SamplerCompareOp::Never;
+		case 1: return SamplerCompareOp::Less;
+		case 2: return SamplerCompareOp::Equal;
+		case 3: return SamplerCompareOp::LessOrEqual;
+		case 4: return SamplerCompareOp::Greater;
+		case 5: return SamplerCompareOp::NotEqual;
+		case 6: return SamplerCompareOp::GreaterOrEqual;
+		case 7: return SamplerCompareOp::Always;
+		default: EXIT("unknown sampler depth compare function: %u\n", depth_compare_function);
+	}
+	return SamplerCompareOp::Never;
 }
 
 UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates)
