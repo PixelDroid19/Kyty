@@ -4,6 +4,7 @@
 #include "ShaderSpirvTemplates.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Log.h"
 
@@ -90,6 +91,38 @@ static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, cons
 		if (index < 0 || index >= bind.textures2D.textures_num ||
 		                     bind.textures2D.desc[index].usage != ShaderTextureUsage::ReadOnly) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 0 || index >= bind.textures2D.textures_num || condition ignored (continuing)\n"); }
 		return index;
+	}
+	return -1;
+}
+
+static int FindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
+{
+	if (inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].size != 4)
+	{
+		return -1;
+	}
+	const int sampler_register = inst.src[2].register_id;
+	for (int i = 0; i < bind.samplers.samplers_num; ++i)
+	{
+		if (!bind.samplers.dynamic_sload[i] && bind.samplers.start_register[i] + user_data_register_base == sampler_register)
+		{
+			return i;
+		}
+	}
+
+	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
+	{
+		if (bind.dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::Sampler ||
+		    bind.dynamic_sloads.destination_register[mapping] != sampler_register ||
+		    inst.pc <= bind.dynamic_sloads.instruction_pc[mapping] || inst.pc > bind.dynamic_sloads.last_consumer_pc[mapping])
+		{
+			continue;
+		}
+		const int index = bind.dynamic_sloads.resource_index[mapping];
+		if (index >= 0 && index < bind.samplers.samplers_num)
+		{
+			return index;
+		}
 	}
 	return -1;
 }
@@ -1714,11 +1747,104 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleB_Vdata4Vaddr3StSsDmaskF)
 	                                       dst_value, static_cast<uint32_t>(num), components, &src0_bias);
 }
 
-// Dref sampling requires comparison-enabled Vulkan samplers. Descriptor binding
-// currently creates regular samplers, so use the generator's strict error path.
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 {
-	return false;
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+	if (bind_info == nullptr || inst.mimg_dmask != 0x1 || inst.dst.size != 1)
+	{
+		return false;
+	}
+
+	const auto* vs_info = spirv->GetVsInputInfo();
+	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+	const int   texture_index = FindImageSampledTextureDescriptor(inst, *bind_info, user_data_register_base);
+	const int   sampler_index = FindImageSamplerDescriptor(inst, *bind_info, user_data_register_base);
+	if (texture_index < 0 || sampler_index < 0 ||
+	    bind_info->samplers.operations[sampler_index] != State::ImageSampleOperation::DepthReference)
+	{
+		return false;
+	}
+
+	const auto shape   = ShaderGen5SampledTextureShapeForType(bind_info->textures2D.desc[texture_index].texture.Type());
+	const bool flat    = shape == ShaderGen5SampledTextureShape::TwoDimensional;
+	const bool arrayed = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	if ((!flat && !arrayed) || (flat && inst.mimg_dimension != 1u) ||
+	    (arrayed && inst.mimg_dimension != 3u && inst.mimg_dimension != 5u))
+	{
+		return false;
+	}
+	if ((flat && bind_info->textures2D.textures2d_sampled_num <= 0) ||
+	    (arrayed && bind_info->textures2D.textures2d_array_sampled_num <= 0))
+	{
+		return false;
+	}
+
+	const uint32_t address_num = flat ? 3u : 4u;
+	if (inst.src[0].size != static_cast<int>(address_num) ||
+	    (inst.mimg_address_num != 0 && inst.mimg_address_num < static_cast<int>(address_num)))
+	{
+		return false;
+	}
+
+	const auto dst_value     = operand_variable_to_str(inst.dst);
+	const auto dref_value    = mimg_address_to_str(inst, 0);
+	const auto x_value       = mimg_address_to_str(inst, 1);
+	const auto y_value       = mimg_address_to_str(inst, 2);
+	const auto layer_value   = arrayed ? mimg_address_to_str(inst, 3) : y_value;
+	const auto texture_value = operand_variable_to_str(inst.src[1], 0);
+	const auto sampler_value = operand_variable_to_str(inst.src[2], 0);
+	if (dst_value.type != SpirvType::Float || dref_value.type != SpirvType::Float || x_value.type != SpirvType::Float ||
+	    y_value.type != SpirvType::Float || (arrayed && layer_value.type != SpirvType::Float) ||
+	    texture_value.type != SpirvType::Uint || sampler_value.type != SpirvType::Uint)
+	{
+		return false;
+	}
+
+	static const char* flat_text = R"(
+%image_dref_texture_raw_<index> = OpLoad %uint %<texture>
+%image_dref_texture_<index> = OpBitwiseAnd %uint %image_dref_texture_raw_<index> %uint_0x1fffffff
+%image_dref_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %image_dref_texture_<index>
+%image_dref_image_<index> = OpLoad %ImageS %image_dref_image_ptr_<index>
+%image_dref_sampler_index_<index> = OpLoad %uint %<sampler>
+%image_dref_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_dref_sampler_index_<index>
+%image_dref_sampler_<index> = OpLoad %Sampler %image_dref_sampler_ptr_<index>
+%image_dref_sampled_<index> = OpSampledImage %SampledImage %image_dref_image_<index> %image_dref_sampler_<index>
+%image_dref_reference_<index> = OpLoad %float %<dref>
+%image_dref_x_<index> = OpLoad %float %<x>
+%image_dref_y_<index> = OpLoad %float %<y>
+%image_dref_coordinate_<index> = OpCompositeConstruct %v2float %image_dref_x_<index> %image_dref_y_<index>
+%image_dref_result_<index> = OpImageSampleDrefExplicitLod %float %image_dref_sampled_<index> %image_dref_coordinate_<index> %image_dref_reference_<index> Lod %float_0_000000
+OpStore %<destination> %image_dref_result_<index>
+)";
+	static const char* array_text = R"(
+%image_dref_texture_raw_<index> = OpLoad %uint %<texture>
+%image_dref_texture_<index> = OpBitwiseAnd %uint %image_dref_texture_raw_<index> %uint_0x1fffffff
+%image_dref_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageSA %textures2DA_S %image_dref_texture_<index>
+%image_dref_image_<index> = OpLoad %ImageSA %image_dref_image_ptr_<index>
+%image_dref_sampler_index_<index> = OpLoad %uint %<sampler>
+%image_dref_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_dref_sampler_index_<index>
+%image_dref_sampler_<index> = OpLoad %Sampler %image_dref_sampler_ptr_<index>
+%image_dref_sampled_<index> = OpSampledImage %SampledImageA %image_dref_image_<index> %image_dref_sampler_<index>
+%image_dref_reference_<index> = OpLoad %float %<dref>
+%image_dref_x_<index> = OpLoad %float %<x>
+%image_dref_y_<index> = OpLoad %float %<y>
+%image_dref_layer_<index> = OpLoad %float %<layer>
+%image_dref_coordinate_<index> = OpCompositeConstruct %v3float %image_dref_x_<index> %image_dref_y_<index> %image_dref_layer_<index>
+%image_dref_result_<index> = OpImageSampleDrefExplicitLod %float %image_dref_sampled_<index> %image_dref_coordinate_<index> %image_dref_reference_<index> Lod %float_0_000000
+OpStore %<destination> %image_dref_result_<index>
+)";
+
+	*dst_source += String8(flat ? flat_text : array_text)
+	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                   .ReplaceStr("<texture>", texture_value.value)
+	                   .ReplaceStr("<sampler>", sampler_value.value)
+	                   .ReplaceStr("<dref>", dref_value.value)
+	                   .ReplaceStr("<x>", x_value.value)
+	                   .ReplaceStr("<y>", y_value.value)
+	                   .ReplaceStr("<layer>", layer_value.value)
+	                   .ReplaceStr("<destination>", dst_value.value);
+	return true;
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)

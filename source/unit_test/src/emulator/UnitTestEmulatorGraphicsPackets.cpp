@@ -3247,7 +3247,9 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleBWithBias)
 	EXPECT_NE(source.FindIndex("OpCompositeExtract %float %image_sample_value_0 3"), Core::STRING8_INVALID_INDEX);
 }
 
-TEST(EmulatorGraphicsPackets, RejectsImageSampleDrefLzWithoutCompareSamplerBinding)
+static Core::String8 GenerateImageSampleDrefLzFixture(uint8_t dimension, uint8_t descriptor_type, int flat_sampled_num,
+                                                      int array_sampled_num, int volume_sampled_num,
+                                                      State::ImageSampleOperation operation, uint8_t dmask = 0x1)
 {
 	if (!Config::IsInitialized())
 	{
@@ -3256,60 +3258,81 @@ TEST(EmulatorGraphicsPackets, RejectsImageSampleDrefLzWithoutCompareSamplerBindi
 	Config::SetNextGen(true);
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	auto expect_rejected = [](uint8_t dimension, uint8_t descriptor_type, int flat_sampled_num, int array_sampled_num)
+	const bool has_layer = dimension == 2u || dimension == 3u || dimension == 5u || dimension == 7u;
+	ShaderInstruction sample {};
+	sample.type           = ShaderInstructionType::ImageSampleDrefLz;
+	sample.format         = has_layer ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1
+	                                  : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1;
+	sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = (has_layer ? 4 : 3)};
+	sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+	sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 4};
+	sample.src_num        = 3;
+	sample.mimg_dimension = dimension;
+	sample.mimg_dmask     = dmask;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderInstruction nop {};
+	nop.type   = ShaderInstructionType::VNop;
+	nop.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(sample);
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	input.bind.push_constant_size                      = 48;
+	input.bind.textures2D.textures_num                 = 1;
+	input.bind.textures2D.textures2d_sampled_num       = flat_sampled_num;
+	input.bind.textures2D.textures2d_array_sampled_num = array_sampled_num;
+	input.bind.textures2D.textures3d_sampled_num       = volume_sampled_num;
+	input.bind.textures2D.desc[0].start_register       = 8;
+	input.bind.textures2D.desc[0].usage                = ShaderTextureUsage::ReadOnly;
+	input.bind.textures2D.desc[0].texture.fields[1]    = 22u << 20u; // R32_SFLOAT
+	input.bind.textures2D.desc[0].texture.fields[3]    = static_cast<uint32_t>(descriptor_type) << 28u;
+	input.bind.samplers.samplers_num                   = 1;
+	input.bind.samplers.start_register[0]              = 20;
+	input.bind.samplers.operations[0]                  = operation;
+	ShaderCalcBindingIndices(&input.bind);
+
+	return SpirvGenerateSource(code, nullptr, &input, nullptr);
+}
+
+TEST(EmulatorGraphicsPackets, MaterializesImageSampleDrefLzForDepthReferenceSamplers)
+{
+	auto expect_materialized = [](uint8_t dimension, uint8_t descriptor_type, int flat_sampled_num, int array_sampled_num,
+	                              const char* coordinate_type)
 	{
-		auto generate_rejected_shader = [&]()
-		{
-			const bool arrayed = dimension != 1u;
-
-			ShaderInstruction sample {};
-			sample.type           = ShaderInstructionType::ImageSampleDrefLz;
-			sample.format         = arrayed ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1;
-			sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
-			sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = (arrayed ? 4 : 3)};
-			sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
-			sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 4};
-			sample.src_num        = 3;
-			sample.mimg_dimension = dimension;
-			sample.mimg_dmask     = 0x1;
-
-			ShaderInstruction end {};
-			end.type   = ShaderInstructionType::SEndpgm;
-			end.format = ShaderInstructionFormat::Empty;
-			ShaderInstruction nop {};
-			nop.type   = ShaderInstructionType::VNop;
-			nop.format = ShaderInstructionFormat::Empty;
-
-			ShaderCode code;
-			code.SetType(ShaderType::Pixel);
-			code.GetInstructions().Add(sample);
-			code.GetInstructions().Add(nop);
-			code.GetInstructions().Add(end);
-
-			ShaderPixelInputInfo input {};
-			input.bind.push_constant_size                      = 48;
-			input.bind.textures2D.textures_num                 = 1;
-			input.bind.textures2D.textures2d_sampled_num       = flat_sampled_num;
-			input.bind.textures2D.textures2d_array_sampled_num = array_sampled_num;
-			input.bind.textures2D.desc[0].start_register       = 8;
-			input.bind.textures2D.desc[0].usage                = ShaderTextureUsage::ReadOnly;
-			input.bind.textures2D.desc[0].texture.fields[1]    = 22u << 20u; // R32_SFLOAT
-			input.bind.textures2D.desc[0].texture.fields[3]    = static_cast<uint32_t>(descriptor_type) << 28u;
-			input.bind.samplers.samplers_num                    = 1;
-			input.bind.samplers.start_register[0]               = 20;
-			ShaderCalcBindingIndices(&input.bind);
-
-			(void)SpirvGenerateSource(code, nullptr, &input, nullptr);
-		};
-		EXPECT_DEATH(generate_rejected_shader(), "");
+		EXPECT_EXIT(
+		    {
+			    const auto source = GenerateImageSampleDrefLzFixture(dimension, descriptor_type, flat_sampled_num,
+			                                                         array_sampled_num, 0,
+			                                                         State::ImageSampleOperation::DepthReference);
+			    const bool valid = source.FindIndex("OpImageSampleDrefExplicitLod %float") != Core::STRING8_INVALID_INDEX &&
+			                       source.FindIndex("Lod %float_0_000000") != Core::STRING8_INVALID_INDEX &&
+			                       source.FindIndex(coordinate_type) != Core::STRING8_INVALID_INDEX;
+			    std::_Exit(valid ? 0 : 2);
+		    },
+		    ::testing::ExitedWithCode(0), "");
 	};
 
-	// Dref instructions require the bound sampler to have comparison enabled.
-	// The current sampler binding selects regular sampling for every descriptor,
-	// so reject each shape until that operation reaches VkSamplerCreateInfo.
-	expect_rejected(1u, 9u, 1, 0);  // 2D
-	expect_rejected(5u, 13u, 0, 1); // 2D array
-	expect_rejected(3u, 11u, 0, 1); // cube faces use the arrayed descriptor path
+	expect_materialized(1u, 9u, 1, 0, "OpCompositeConstruct %v2float");
+	expect_materialized(5u, 13u, 0, 1, "OpCompositeConstruct %v3float");
+	expect_materialized(3u, 11u, 0, 1, "OpCompositeConstruct %v3float");
+}
+
+TEST(EmulatorGraphicsPackets, RejectsInvalidImageSampleDrefLzContracts)
+{
+	EXPECT_DEATH(
+	    (void)GenerateImageSampleDrefLzFixture(1u, 9u, 1, 0, 0, State::ImageSampleOperation::Regular), "");
+	EXPECT_DEATH(
+	    (void)GenerateImageSampleDrefLzFixture(1u, 9u, 1, 0, 0, State::ImageSampleOperation::DepthReference, 0x2), "");
+	EXPECT_DEATH(
+	    (void)GenerateImageSampleDrefLzFixture(2u, 10u, 0, 0, 1, State::ImageSampleOperation::DepthReference), "");
 }
 
 TEST(EmulatorGraphicsPackets, SizesDynamicDisplayThinBgraSurface)

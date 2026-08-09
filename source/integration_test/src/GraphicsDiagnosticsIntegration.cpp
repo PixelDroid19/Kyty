@@ -1330,6 +1330,72 @@ void VerifyGen5ImageSampleLzDmask1()
 	       "dmask 1 does not extract component G");
 }
 
+Kyty::Core::String8 GenerateGen5DepthReferenceSample(uint8_t dimension, uint8_t descriptor_type, int flat_sampled_num,
+                                                     int array_sampled_num)
+{
+	const bool arrayed = dimension != 1u;
+	ShaderInstruction sample {};
+	sample.type           = ShaderInstructionType::ImageSampleDrefLz;
+	sample.format         = arrayed ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1
+	                                : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1;
+	sample.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	sample.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = arrayed ? 4 : 3};
+	sample.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+	sample.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 4};
+	sample.src_num        = 3;
+	sample.mimg_dimension = dimension;
+	sample.mimg_dmask     = 0x1;
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderInstruction nop {};
+	nop.type   = ShaderInstructionType::VNop;
+	nop.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(sample);
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	input.bind.push_constant_size                      = 48;
+	input.bind.textures2D.textures_num                 = 1;
+	input.bind.textures2D.textures2d_sampled_num       = flat_sampled_num;
+	input.bind.textures2D.textures2d_array_sampled_num = array_sampled_num;
+	input.bind.textures2D.desc[0].start_register       = 8;
+	input.bind.textures2D.desc[0].usage                = ShaderTextureUsage::ReadOnly;
+	input.bind.textures2D.desc[0].texture.fields[1]    = 22u << 20u;
+	input.bind.textures2D.desc[0].texture.fields[3]    = static_cast<uint32_t>(descriptor_type) << 28u;
+	input.bind.samplers.samplers_num                   = 1;
+	input.bind.samplers.start_register[0]              = 20;
+	input.bind.samplers.operations[0]                  = State::ImageSampleOperation::DepthReference;
+	ShaderCalcBindingIndices(&input.bind);
+	return SpirvGenerateSource(code, nullptr, &input, nullptr);
+}
+
+void VerifyGen5DepthReferenceSample()
+{
+	const auto flat = GenerateGen5DepthReferenceSample(1u, 9u, 1, 0);
+	Expect(flat.FindIndex("OpImageSampleDrefExplicitLod %float") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "2D depth-reference sample uses the comparison instruction");
+	Expect(flat.FindIndex("OpCompositeConstruct %v2float") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "2D depth-reference sample uses two coordinates");
+	ExpectValidSpirv(flat, "2D depth-reference sample emits valid SPIR-V");
+
+	const auto arrayed = GenerateGen5DepthReferenceSample(5u, 13u, 0, 1);
+	Expect(arrayed.FindIndex("OpImageSampleDrefExplicitLod %float") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "array depth-reference sample uses the comparison instruction");
+	Expect(arrayed.FindIndex("OpCompositeConstruct %v3float") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "array depth-reference sample includes the layer coordinate");
+	ExpectValidSpirv(arrayed, "array depth-reference sample emits valid SPIR-V");
+
+	const auto cube = GenerateGen5DepthReferenceSample(3u, 11u, 0, 1);
+	Expect(cube.FindIndex("OpCompositeConstruct %v3float") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "cube depth-reference sample includes the face coordinate");
+	ExpectValidSpirv(cube, "cube depth-reference sample emits valid SPIR-V");
+}
+
 ShaderCode ParseGen5SAndn1SaveexecB64()
 {
 	// Captured Gen5 SOP1 s_andn1_saveexec_b64 at PC 0xaac.
@@ -1523,6 +1589,7 @@ int main()
 	VerifyGen5ReciprocalIFlagExceptionalInputs();
 	VerifyGen5ImageSampleLzDmask3();
 	VerifyGen5ImageSampleLzDmask1();
+	VerifyGen5DepthReferenceSample();
 	VerifyGen5SAndn1SaveexecB64();
 	return 0;
 }
