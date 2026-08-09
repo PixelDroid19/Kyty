@@ -1063,22 +1063,18 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
-	if (bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element != 4u && bytes_per_element != 8u condition ignored (continuing)\n"); }
-	if (width == 0u || height == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u condition ignored (continuing)\n"); }
-
-	const uint32_t             pitch = (pitch_elems != 0u ? pitch_elems : width);
-	auto*                      d     = static_cast<uint8_t*>(dst);
-	const auto*                s     = static_cast<const uint8_t*>(src);
-	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * bytes_per_element);
-
-	for (uint32_t y = 0; y < height; y++)
+	TileDetileRequest request {};
+	request.dst               = dst;
+	request.src               = src;
+	request.width             = width;
+	request.height            = height;
+	request.pitch_elems       = pitch_elems;
+	request.dst_pitch_elems   = width;
+	request.bytes_per_element = bytes_per_element;
+	request.layout            = TileDetileLayout::Sw64kRx;
+	if (!TileDetile(request))
 	{
-		for (uint32_t x = 0; x < width; x++)
-		{
-			const uint64_t tiled  = TileGetSw64kRxOffset(x, y, pitch, bytes_per_element);
-			const uint64_t linear = (static_cast<uint64_t>(y) * width + x) * bytes_per_element;
-			std::memcpy(d + linear, s + tiled, bytes_per_element);
-		}
+		EXIT("TileConvertSw64kRxToLinear unsupported request\n");
 	}
 }
 
@@ -1130,21 +1126,18 @@ uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
 void TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
 {
 	EXIT_IF(dst == nullptr || src == nullptr);
-	if (width == 0u || height == 0u || pitch_elems < width || (pitch_elems % 128u) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported condition ignored (continuing)\n"); }
-
-	auto*                      d = static_cast<uint8_t*>(dst);
-	const auto*                s = static_cast<const uint8_t*>(src);
-	static constexpr uint32_t  k_bytes_per_element = 4u;
-	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile,
-	                                       static_cast<uint64_t>(width) * height * k_bytes_per_element);
-	for (uint32_t y = 0; y < height; ++y)
+	TileDetileRequest request {};
+	request.dst               = dst;
+	request.src               = src;
+	request.width             = width;
+	request.height            = height;
+	request.pitch_elems       = pitch_elems;
+	request.dst_pitch_elems   = width;
+	request.bytes_per_element = 4u;
+	request.layout            = TileDetileLayout::Depth64KB32;
+	if (!TileDetile(request))
 	{
-		for (uint32_t x = 0; x < width; ++x)
-		{
-			const uint64_t tiled  = TileGetDepth64KB32Offset(x, y, pitch_elems);
-			const uint64_t linear = (static_cast<uint64_t>(y) * width + x) * k_bytes_per_element;
-			std::memcpy(d + linear, s + tiled, k_bytes_per_element);
-		}
+		EXIT("TileConvertDepth64KB32ToLinear unsupported request\n");
 	}
 }
 
@@ -1256,27 +1249,52 @@ uint32_t TileGetStandard4KBContiguousElements(uint32_t x, uint32_t bytes_per_ele
 	return elements_per_run - (x % elements_per_run);
 }
 
+bool TileGetBc1BufferCopyLayout(uint32_t width_texels, uint32_t height_texels, uint32_t pitch_texels,
+                                TileBc1BufferCopyLayout* layout)
+{
+	if (layout == nullptr || width_texels == 0u || height_texels == 0u)
+	{
+		return false;
+	}
+	const uint32_t resolved_pitch = pitch_texels != 0u ? pitch_texels : width_texels;
+	if (resolved_pitch < width_texels)
+	{
+		return false;
+	}
+
+	const uint32_t copy_width_blocks  = width_texels / 4u + (width_texels % 4u == 0u ? 0u : 1u);
+	const uint32_t copy_height_blocks = height_texels / 4u + (height_texels % 4u == 0u ? 0u : 1u);
+	const uint32_t row_pitch_blocks   = resolved_pitch / 4u + (resolved_pitch % 4u == 0u ? 0u : 1u);
+	if (row_pitch_blocks > UINT32_MAX / 4u)
+	{
+		return false;
+	}
+
+	layout->copy_width_blocks        = copy_width_blocks;
+	layout->copy_height_blocks       = copy_height_blocks;
+	layout->row_pitch_blocks         = row_pitch_blocks;
+	layout->buffer_row_length_texels = row_pitch_blocks * 4u;
+	return true;
+}
+
 void TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
                                     uint32_t bytes_per_element)
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
-	if (width == 0u || height == 0u || pitch_elems < width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u || pitch_elems < width condition ignored (continuing)\n"); }
-	if (bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || bytes_per_element > 16u || (bytes_per_element & (bytes_per_element - 1u)) != 0u condition ignored (continuing)\n"); }
-
-	auto*                      d = static_cast<uint8_t*>(dst);
-	const auto*                s = static_cast<const uint8_t*>(src);
-	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * bytes_per_element);
-	for (uint32_t y = 0; y < height; y++)
+	// Destination pitch follows the previous host contract: pitch_elems rows.
+	TileDetileRequest request {};
+	request.dst               = dst;
+	request.src               = src;
+	request.width             = width;
+	request.height            = height;
+	request.pitch_elems       = pitch_elems;
+	request.dst_pitch_elems   = pitch_elems;
+	request.bytes_per_element = bytes_per_element;
+	request.layout            = TileDetileLayout::Standard4KB;
+	if (!TileDetile(request))
 	{
-		for (uint32_t x = 0; x < width;)
-		{
-			const uint32_t run = std::min(TileGetStandard4KBContiguousElements(x, bytes_per_element), width - x);
-			const uint64_t tiled  = TileGetStandard4KBOffset(x, y, pitch_elems, bytes_per_element);
-			const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bytes_per_element;
-			std::memcpy(d + linear, s + tiled, static_cast<size_t>(run) * bytes_per_element);
-			x += run;
-		}
+		EXIT("TileConvertStandard4KBToLinear unsupported request\n");
 	}
 }
 
@@ -1365,22 +1383,18 @@ void TileConvertStandard64KBToLinear(void* dst, const void* src, uint32_t width,
 {
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(src == nullptr);
-	if (width == 0u || height == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u condition ignored (continuing)\n"); }
-	if (TileGet64KBBlockWidth(bytes_per_element) == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: TileGet64KBBlockWidth(bytes_per_element) == 0u condition ignored (continuing)\n"); }
-
-	const uint32_t             pitch = (pitch_elems != 0u ? pitch_elems : width);
-	auto*                      d     = static_cast<uint8_t*>(dst);
-	const auto*                s     = static_cast<const uint8_t*>(src);
-	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * bytes_per_element);
-
-	for (uint32_t y = 0; y < height; y++)
+	TileDetileRequest request {};
+	request.dst               = dst;
+	request.src               = src;
+	request.width             = width;
+	request.height            = height;
+	request.pitch_elems       = pitch_elems;
+	request.dst_pitch_elems   = width;
+	request.bytes_per_element = bytes_per_element;
+	request.layout            = TileDetileLayout::Standard64KB;
+	if (!TileDetile(request))
 	{
-		for (uint32_t x = 0; x < width; x++)
-		{
-			const uint64_t tiled  = TileGetStandard64KBOffset(x, y, pitch, bytes_per_element);
-			const uint64_t linear = (static_cast<uint64_t>(y) * width + x) * bytes_per_element;
-			std::memcpy(d + linear, s + tiled, bytes_per_element);
-		}
+		EXIT("TileConvertStandard64KBToLinear unsupported request\n");
 	}
 }
 

@@ -114,11 +114,28 @@ struct TileDetileRequest
 	uint32_t         dst_pitch_elems   = 0; // linear row pitch in elements
 	uint32_t         bytes_per_element = 0;
 	TileDetileLayout layout            = TileDetileLayout::Sw64kRx;
-	// Guest tiled allocation size. A nonzero value is a hard source-read limit.
-	// Zero is retained only for legacy host wrappers whose containing allocation
-	// was validated by the caller.
+	// Guest tiled allocation size. A nonzero value is a hard source-read limit
+	// for every detile path; GPU paths require it. Zero is retained only for
+	// legacy host wrappers whose containing allocation was validated by the caller.
 	uint64_t         src_bytes         = 0;
 };
+
+// Exact buffer-to-image row contract for BC1's 4x4, 8-byte blocks. Vulkan
+// expresses bufferRowLength in texels even though the detiler operates on
+// blocks, so callers use buffer_row_length_texels for VkBufferImageCopy.
+struct TileBc1BufferCopyLayout
+{
+	uint32_t copy_width_blocks        = 0;
+	uint32_t copy_height_blocks       = 0;
+	uint32_t row_pitch_blocks         = 0;
+	uint32_t buffer_row_length_texels = 0;
+};
+
+// pitch_texels of zero selects the image width. Rejects a pitch smaller than
+// width and any value whose four-texel block rounding cannot fit Vulkan's
+// uint32 bufferRowLength field.
+[[nodiscard]] bool TileGetBc1BufferCopyLayout(uint32_t width_texels, uint32_t height_texels, uint32_t pitch_texels,
+                                               TileBc1BufferCopyLayout* layout);
 
 // True when layout, dimensions, arithmetic, and any supplied source range are valid.
 [[nodiscard]] bool TileDetileIsSupported(const TileDetileRequest& request);
@@ -129,6 +146,94 @@ struct TileDetileRequest
 // Workgroup-structured host path (same math as the GPU compute kernel).
 // Used for golden equality against reference without requiring a Vulkan device.
 [[nodiscard]] bool TileDetileComputeStyle(const TileDetileRequest& request);
+
+// Regression-only selector for the production CPU dispatcher. This lets the
+// Standard4KB test prove the contiguous-copy branch is selected without adding
+// counters or synchronization to the texture hot path.
+enum class TileDetileProductionPath : uint32_t
+{
+	Unsupported,
+	ComputeStyle,
+	Standard4KBContiguous,
+};
+
+[[nodiscard]] TileDetileProductionPath TileDetileGetProductionPathForTesting(const TileDetileRequest& request);
+
+struct GraphicContext;
+struct VulkanImage;
+
+// Describes how a detiled element grid is copied into a Vulkan image. The
+// element grid is expressed in blocks for compressed formats, while Vulkan
+// buffer-copy dimensions remain texels.
+struct TileGpuDetileImageCopy
+{
+	// Zero selects Vulkan's tightly packed image extent; compressed extents are
+	// rounded to complete elements internally.
+	uint32_t buffer_row_length_texels = 0;
+	uint32_t copy_width_texels        = 0;
+	uint32_t copy_height_texels       = 0;
+	uint32_t texels_per_element_x     = 1;
+	uint32_t texels_per_element_y     = 1;
+};
+
+// GPU detile is diagnostic-only. Production texture upload remains on the
+// validated CPU detile path until an asynchronous GPU integration has its own
+// performance and lifetime evidence.
+enum class TileGpuDetileStatus : uint32_t
+{
+	Success,
+	InvalidRequest,
+	ContextUnavailable,
+	ContextBusy,
+	ContextMismatch,
+	DeviceUnsupported,
+	DiagnosticCapacityExceeded,
+	ResourceUnavailable,
+	UploadFailed,
+	ReadbackFailed,
+	SubmitFailed,
+	FenceTimeout,
+	FenceFailed,
+	ImagePathUnsupported,
+};
+
+// Deterministic unit-test seam for diagnostic-session failure paths. Runtime
+// code must leave this at None.
+enum class TileGpuDetileTestFault : uint32_t
+{
+	None,
+	CreateFence,
+	AllocateMemory,
+	ResetFence,
+	WaitTimeout,
+	ReleaseTimeout,
+};
+
+void TileGpuDetileSetTestFaultForTesting(TileGpuDetileTestFault fault);
+
+// Validates element-grid to texel-grid conversion before a diagnostic GPU
+// submission. This has no Vulkan-device side effects.
+[[nodiscard]] bool TileGpuDetileImageCopyIsSupported(const TileDetileRequest& request, const TileGpuDetileImageCopy& copy,
+                                                     uint32_t image_width_texels, uint32_t image_height_texels);
+
+// GPU compute detile into host memory for diagnostic/golden comparison only.
+// request.src and request.dst must be set. A timeout leaves the context-owned
+// session in flight; it is not freed or reused until its fence completes. The
+// prospective sum of retained tiled and linear capacities is capped at 16 MiB
+// and returns DiagnosticCapacityExceeded before any capacity expansion.
+[[nodiscard]] TileGpuDetileStatus TileGpuDetile(GraphicContext* ctx, const TileDetileRequest& request);
+
+// GPU-to-image integration is deliberately unsupported at present. The
+// function validates its block/texel contract then returns
+// ImagePathUnsupported without creating Vulkan resources; callers must not
+// substitute it for CPU detile/upload.
+[[nodiscard]] TileGpuDetileStatus TileGpuDetileToImage(GraphicContext* ctx, const TileDetileRequest& request, VulkanImage* dst_image,
+                                                       const TileGpuDetileImageCopy& copy, uint64_t dst_layout);
+
+// Lifecycle owners call this before replacing a live GraphicContext. It waits
+// for a bounded interval for a submitted diagnostic session, then returns
+// false and retains its Vulkan objects rather than freeing them while live.
+[[nodiscard]] bool TileGpuDetileReleaseContext(GraphicContext* ctx);
 
 } // namespace Kyty::Libs::Graphics
 

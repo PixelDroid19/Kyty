@@ -274,7 +274,35 @@ void DetileWorkgroupRange(uint8_t* dst, const uint8_t* src, uint32_t y0, uint32_
 	}
 }
 
-bool RunDetile(const TileDetileRequest& request, bool reference, bool compute_style)
+// Standard4KB has short contiguous swizzle runs. Keep this production path
+// separate from the generic workgroup dispatch so texture uploads retain the
+// established memcpy specialization while the compute-style path remains
+// available for cross-checking the common layout dispatcher.
+void DetileStandard4KBContiguousRange(uint8_t* dst, const uint8_t* src, uint32_t width, uint32_t height, uint32_t pitch,
+                                      uint32_t dst_pitch, uint32_t bytes_per_element)
+{
+	for (uint32_t y = 0; y < height; ++y)
+	{
+		for (uint32_t x = 0; x < width;)
+		{
+			const uint32_t available = TileGetStandard4KBContiguousElements(x, bytes_per_element);
+			const uint32_t remaining = width - x;
+			const uint32_t run       = available < remaining ? available : remaining;
+			const uint64_t tiled     = TileGetStandard4KBOffset(x, y, pitch, bytes_per_element);
+			const uint64_t linear    = (static_cast<uint64_t>(y) * dst_pitch + x) * bytes_per_element;
+			std::memcpy(dst + linear, src + tiled, static_cast<size_t>(run) * bytes_per_element);
+			x += run;
+		}
+	}
+}
+
+TileDetileProductionPath GetProductionPathUnchecked(const TileDetileRequest& request)
+{
+	return request.layout == TileDetileLayout::Standard4KB ? TileDetileProductionPath::Standard4KBContiguous :
+	                                                        TileDetileProductionPath::ComputeStyle;
+}
+
+bool RunDetile(const TileDetileRequest& request, bool reference, bool compute_style, bool standard4kb_contiguous)
 {
 	if (!TileDetileIsSupported(request))
 	{
@@ -303,6 +331,11 @@ bool RunDetile(const TileDetileRequest& request, bool reference, bool compute_st
 	if (reference)
 	{
 		DetileScalarRange(dst, src, 0, request.height, request.width, pitch, dst_pitch, request.bytes_per_element, offset_fn);
+		return true;
+	}
+	if (standard4kb_contiguous && GetProductionPathUnchecked(request) == TileDetileProductionPath::Standard4KBContiguous)
+	{
+		DetileStandard4KBContiguousRange(dst, src, request.width, request.height, pitch, dst_pitch, request.bytes_per_element);
 		return true;
 	}
 	if (compute_style)
@@ -342,18 +375,28 @@ bool TileDetileIsSupported(const TileDetileRequest& request)
 
 bool TileDetileReference(const TileDetileRequest& request)
 {
-	return RunDetile(request, /*reference=*/true, /*compute_style=*/false);
+	return RunDetile(request, /*reference=*/true, /*compute_style=*/false, /*standard4kb_contiguous=*/false);
 }
 
 bool TileDetile(const TileDetileRequest& request)
 {
-	// Production prefers compute-style workgroups: same result, better locality.
-	return RunDetile(request, /*reference=*/false, /*compute_style=*/true);
+	// Production retains the Standard4KB contiguous-run specialization; every
+	// other layout follows the validated compute-style dispatcher.
+	return RunDetile(request, /*reference=*/false, /*compute_style=*/true, /*standard4kb_contiguous=*/true);
 }
 
 bool TileDetileComputeStyle(const TileDetileRequest& request)
 {
-	return RunDetile(request, /*reference=*/false, /*compute_style=*/true);
+	return RunDetile(request, /*reference=*/false, /*compute_style=*/true, /*standard4kb_contiguous=*/false);
+}
+
+TileDetileProductionPath TileDetileGetProductionPathForTesting(const TileDetileRequest& request)
+{
+	if (!TileDetileIsSupported(request) || request.dst == nullptr)
+	{
+		return TileDetileProductionPath::Unsupported;
+	}
+	return GetProductionPathUnchecked(request);
 }
 
 } // namespace Kyty::Libs::Graphics

@@ -1,0 +1,262 @@
+#version 450
+// Gen5 detile compute kernel. Offset math must stay identical to Tile.cpp:
+// TileGetSw64kRxOffset / TileGetStandard64KBOffset / TileGetDepth64KB32Offset /
+// TileGetStandard4KBOffset. local_size matches TileDetileComputeStyle (8x8).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly buffer SrcBuffer
+{
+	uint src[];
+};
+
+layout(std430, binding = 1) writeonly buffer DstBuffer
+{
+	uint dst[];
+};
+
+layout(push_constant) uniform PushConstants
+{
+	uint width;
+	uint height;
+	uint pitch_elems;
+	uint dst_pitch_elems;
+	uint bytes_per_element;
+	uint layout_kind; // 0 Sw64kRx, 1 Standard64KB, 2 Standard4KB, 3 Depth64KB32
+	uint src_u32_count;
+	uint dst_u32_count;
+}
+pc;
+
+uint block_width_64kb(uint bpe)
+{
+	if (bpe == 1u || bpe == 2u)
+	{
+		return 256u;
+	}
+	if (bpe == 4u || bpe == 8u)
+	{
+		return 128u;
+	}
+	if (bpe == 16u)
+	{
+		return 64u;
+	}
+	return 0u;
+}
+
+uint sw64k_rx_within(uint x, uint y, uint bpe)
+{
+	uint offset = 0u;
+	if (bpe == 4u)
+	{
+		offset ^= (y << 3u) & 0x0008u;
+		offset ^= (y << 4u) & 0x0020u;
+		offset ^= (y << 5u) & 0x0f80u;
+		offset ^= (y << 9u) & 0x1000u;
+		offset ^= (y << 8u) & 0x4000u;
+		offset ^= (x << 2u) & 0x0004u;
+		offset ^= (x << 3u) & 0x0010u;
+		offset ^= (x << 4u) & 0x0440u;
+		offset ^= (x << 5u) & 0x0300u;
+		offset ^= (x << 6u) & 0x0800u;
+		offset ^= (x << 9u) & 0xa000u;
+		return offset;
+	}
+	// 8 BPE
+	offset ^= (y << 4u) & 0x0010u;
+	offset ^= (y << 6u) & 0x0080u;
+	offset ^= (y << 5u) & 0x0f00u;
+	offset ^= (y << 10u) & 0x5000u;
+	offset ^= (x << 3u) & 0x0008u;
+	offset ^= (x << 4u) & 0x0460u;
+	offset ^= (x << 5u) & 0x0300u;
+	offset ^= (x << 6u) & 0x0800u;
+	offset ^= (x << 10u) & 0x2000u;
+	offset ^= (x << 9u) & 0x8000u;
+	return offset;
+}
+
+uint standard64_within(uint x, uint y, uint bpe)
+{
+	uint offset = 0u;
+	if (bpe == 4u)
+	{
+		offset ^= (x << 2u) & 0x000cu;
+		offset ^= (x << 5u) & 0x0080u;
+		offset ^= (x << 6u) & 0x0200u;
+		offset ^= (x << 7u) & 0x0800u;
+		offset ^= (x << 8u) & 0x2000u;
+		offset ^= (x << 9u) & 0x8000u;
+		offset ^= (y << 4u) & 0x0070u;
+		offset ^= (y << 5u) & 0x0100u;
+		offset ^= (y << 6u) & 0x0400u;
+		offset ^= (y << 7u) & 0x1000u;
+		offset ^= (y << 8u) & 0x4000u;
+		return offset;
+	}
+	if (bpe == 8u)
+	{
+		offset ^= (x << 3u) & 0x0008u;
+		offset ^= (x << 5u) & 0x00c0u;
+		offset ^= (x << 6u) & 0x0200u;
+		offset ^= (x << 7u) & 0x0800u;
+		offset ^= (x << 8u) & 0x2000u;
+		offset ^= (x << 9u) & 0x8000u;
+		offset ^= (y << 4u) & 0x0030u;
+		offset ^= (y << 6u) & 0x0100u;
+		offset ^= (y << 7u) & 0x0400u;
+		offset ^= (y << 8u) & 0x1000u;
+		offset ^= (y << 9u) & 0x4000u;
+		return offset;
+	}
+	if (bpe == 1u)
+	{
+		offset ^= x & 0x000fu;
+		offset ^= (x << 5u) & 0x0200u;
+		offset ^= (x << 6u) & 0x0800u;
+		offset ^= (x << 7u) & 0x2000u;
+		offset ^= (x << 8u) & 0x8000u;
+		offset ^= (y << 4u) & 0x01f0u;
+		offset ^= (y << 5u) & 0x0400u;
+		offset ^= (y << 6u) & 0x1000u;
+		offset ^= (y << 7u) & 0x4000u;
+		return offset;
+	}
+	if (bpe == 2u)
+	{
+		offset ^= (x << 1u) & 0x000eu;
+		offset ^= (x << 4u) & 0x0080u;
+		offset ^= (x << 5u) & 0x0200u;
+		offset ^= (x << 6u) & 0x0800u;
+		offset ^= (x << 7u) & 0x2000u;
+		offset ^= (x << 8u) & 0x8000u;
+		offset ^= (y << 4u) & 0x0070u;
+		offset ^= (y << 5u) & 0x0100u;
+		offset ^= (y << 6u) & 0x0400u;
+		offset ^= (y << 7u) & 0x1000u;
+		offset ^= (y << 8u) & 0x4000u;
+		return offset;
+	}
+	// 16 BPE
+	offset ^= (x << 6u) & 0x00c0u;
+	offset ^= (x << 7u) & 0x0200u;
+	offset ^= (x << 8u) & 0x0800u;
+	offset ^= (x << 9u) & 0x2000u;
+	offset ^= (x << 10u) & 0x8000u;
+	offset ^= (y << 4u) & 0x0030u;
+	offset ^= (y << 6u) & 0x0100u;
+	offset ^= (y << 7u) & 0x0400u;
+	offset ^= (y << 8u) & 0x1000u;
+	offset ^= (y << 9u) & 0x4000u;
+	return offset;
+}
+
+uint depth64_within(uint x, uint y)
+{
+	uint x_offset = 0u;
+	x_offset ^= (x << 2u) & 0x0004u;
+	x_offset ^= (x << 3u) & 0x0010u;
+	x_offset ^= (x << 4u) & 0x0440u;
+	x_offset ^= (x << 5u) & 0x0300u;
+	x_offset ^= (x << 6u) & 0x0800u;
+	x_offset ^= (x << 9u) & 0xa000u;
+	uint y_offset = 0u;
+	y_offset ^= (y << 3u) & 0x0008u;
+	y_offset ^= (y << 4u) & 0x0020u;
+	y_offset ^= (y << 5u) & 0x0f80u;
+	y_offset ^= (y << 9u) & 0x1000u;
+	y_offset ^= (y << 8u) & 0x4000u;
+	return x_offset ^ y_offset;
+}
+
+// Tile.cpp Standard4KB32WithinBlockOffset (4 BPE, SW_4K_S).
+uint standard4kb_within_4(uint x, uint y)
+{
+	uint offset = 0u;
+	offset ^= (y << 4u) & 0x070u;
+	offset ^= (y << 5u) & 0x100u;
+	offset ^= (y << 6u) & 0x400u;
+	offset ^= (x << 2u) & 0x00cu;
+	offset ^= (x << 5u) & 0x080u;
+	offset ^= (x << 6u) & 0x200u;
+	offset ^= (x << 7u) & 0x800u;
+	return offset;
+}
+
+uint tiled_byte_offset(uint x, uint y)
+{
+	uint bpe   = pc.bytes_per_element;
+	uint pitch = pc.pitch_elems;
+	// 0 = Sw64kRx
+	if (pc.layout_kind == 0u)
+	{
+		uint block_w  = 128u;
+		uint block_h  = (bpe == 8u) ? 64u : 128u;
+		uint blocks_x = (pitch + block_w - 1u) / block_w;
+		uint xb       = x / block_w;
+		uint yb       = y / block_h;
+		uint blk_idx  = yb * blocks_x + xb;
+		return blk_idx * 65536u + sw64k_rx_within(x % block_w, y % block_h, bpe);
+	}
+	// 1 = Standard64KB
+	if (pc.layout_kind == 1u)
+	{
+		uint block_w  = block_width_64kb(bpe);
+		uint block_h  = 65536u / (block_w * bpe);
+		uint blocks_x = (pitch + block_w - 1u) / block_w;
+		uint xb       = x / block_w;
+		uint yb       = y / block_h;
+		uint blk_idx  = yb * blocks_x + xb;
+		return blk_idx * 65536u + standard64_within(x % block_w, y % block_h, bpe);
+	}
+	// 3 = Depth64KB32 (pitch must be multiple of 128 on host)
+	if (pc.layout_kind == 3u)
+	{
+		uint block_w  = 128u;
+		uint blocks_x = pitch / block_w;
+		uint xb       = x / block_w;
+		uint yb       = y / block_w;
+		uint blk_idx  = yb * blocks_x + xb;
+		return blk_idx * 65536u + depth64_within(x % block_w, y % block_w);
+	}
+	// 2 = Standard4KB, 4 BPE only (block 32x32)
+	uint block_w  = 32u;
+	uint block_h  = 32u;
+	uint blocks_x = (pitch + block_w - 1u) / block_w;
+	uint xb       = x / block_w;
+	uint yb       = y / block_h;
+	uint blk_idx  = yb * blocks_x + xb;
+	return blk_idx * 4096u + standard4kb_within_4(x % block_w, y % block_h);
+}
+
+void main()
+{
+	uint x = gl_GlobalInvocationID.x;
+	uint y = gl_GlobalInvocationID.y;
+	if (x >= pc.width || y >= pc.height)
+	{
+		return;
+	}
+
+	uint bpe         = pc.bytes_per_element;
+	uint tiled_bytes = tiled_byte_offset(x, y);
+	uint linear_bytes = (y * pc.dst_pitch_elems + x) * bpe;
+	uint tiled_u32    = tiled_bytes / 4u;
+	uint linear_u32   = linear_bytes / 4u;
+	uint words        = bpe / 4u;
+	if (words == 0u)
+	{
+		// Sub-dword elements: host path only.
+		return;
+	}
+	if (tiled_u32 > pc.src_u32_count || words > pc.src_u32_count - tiled_u32 || linear_u32 > pc.dst_u32_count ||
+	    words > pc.dst_u32_count - linear_u32)
+	{
+		return;
+	}
+	for (uint i = 0u; i < words; ++i)
+	{
+		dst[linear_u32 + i] = src[tiled_u32 + i];
+	}
+}

@@ -624,6 +624,11 @@ public:
 		return m_pool[id];
 	}
 
+	// Unit-test renderer contexts own no production submissions. Expose their
+	// pool teardown only through this private renderer header so a test can
+	// release every command buffer before it destroys its VkDevice.
+	void DeleteAllForTesting() { DeleteAll(); }
+
 private:
 	void Create(int id);
 	void DeleteAll();
@@ -643,6 +648,12 @@ struct PrimitiveDrawPlan
 
 extern RenderContext*           g_render_ctx;
 extern thread_local CommandPool g_command_pool;
+
+// Test-only context ownership seam. It binds a caller-owned GraphicContext to
+// the private renderer globals and unbinds it only after all thread-local
+// command-pool resources have been destroyed. Do not use from runtime paths.
+[[nodiscard]] bool GraphicsRenderBindContextForTesting(GraphicContext* ctx);
+[[nodiscard]] bool GraphicsRenderUnbindContextForTesting(GraphicContext* ctx);
 
 
 // --- Dump globals (Core) ---

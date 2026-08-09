@@ -70,6 +70,8 @@ struct VulkanQueueInfo
 	VkQueue      vk_queue = nullptr;
 };
 
+struct GpuDetileContext;
+
 struct GraphicContext
 {
 	static constexpr int QUEUES_NUM          = 11;
@@ -88,10 +90,14 @@ struct GraphicContext
 	VkDebugUtilsMessengerEXT debug_messenger = nullptr;
 	VkPhysicalDevice         physical_device = nullptr;
 	VkDevice                 device          = nullptr;
-	VkPipelineCache          pipeline_cache   = nullptr;
+	VkPipelineCache          pipeline_cache  = nullptr;
 	VulkanQueueInfo          queues[QUEUES_NUM];
 	Core::Mutex              queue_mutexes[QUEUES_NUM];
 	uint32_t                 queue_mutex_count = 0;
+	// Diagnostic compute detile owns Vulkan objects through this exact context;
+	// it is never cached only by a raw VkDevice handle.
+	Core::Mutex       gpu_detile_mutex;
+	GpuDetileContext* gpu_detile_context = nullptr;
 
 	// VK_EXT_color_write_enable is unavailable on some drivers (notably MoltenVK
 	// on Apple Silicon). When false, color write masking falls back to being

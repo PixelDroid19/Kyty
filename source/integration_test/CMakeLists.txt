@@ -569,6 +569,22 @@ add_test(
 )
 set_tests_properties(KytyGraphicsTables.DerivedOutputsMatch PROPERTIES TIMEOUT 15)
 
+# The normal build consumes the checked-in SPIR-V include and intentionally
+# does not require shader tools. When a developer or CI host has both tools,
+# expose exact source/blob validation through CTest instead.
+find_program(KYTY_GEN5_DETILE_GLSLC NAMES glslc)
+find_program(KYTY_GEN5_DETILE_SPIRV_VAL NAMES spirv-val)
+if(KYTY_GEN5_DETILE_GLSLC AND KYTY_GEN5_DETILE_SPIRV_VAL)
+	add_test(
+		NAME KytyGen5DetileShader.CheckedInSpirv
+		COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/../scripts/check_gen5_detile_shader.py" --check
+			--compiler "${KYTY_GEN5_DETILE_GLSLC}" --validator "${KYTY_GEN5_DETILE_SPIRV_VAL}"
+	)
+	set_tests_properties(KytyGen5DetileShader.CheckedInSpirv PROPERTIES TIMEOUT 30)
+else()
+	message(STATUS "Gen5 detile shader CTest disabled: glslc and/or spirv-val not found")
+endif()
+
 add_test(
 	NAME KytyArchitectureBoundaryIntegration.Repository
 	COMMAND $<TARGET_FILE:kyty_architecture_boundary_integration>

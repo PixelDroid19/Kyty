@@ -11,6 +11,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -38,6 +39,11 @@ namespace Kyty::Libs::Graphics {
 
 // GraphicsRenderInit/CreateContext, RenderContext EOP, GdsBuffer, CommandPool
 
+// The renderer itself has process-lifetime ownership, matching
+// GraphicsRenderInit(). This records only the caller-owned binding installed
+// by the private unit-test seam below.
+static GraphicContext* g_test_bound_graphic_context = nullptr;
+
 void GraphicsRenderInit()
 {
 	EXIT_IF(g_render_ctx != nullptr);
@@ -45,11 +51,60 @@ void GraphicsRenderInit()
 	g_render_ctx = new RenderContext;
 }
 
+bool GraphicsRenderBindContextForTesting(GraphicContext* ctx)
+{
+	if (ctx == nullptr || ctx->device == VK_NULL_HANDLE || ctx->queues[GraphicContext::QUEUE_UTIL].vk_queue == VK_NULL_HANDLE ||
+	    ctx->queues[GraphicContext::QUEUE_UTIL].mutex == nullptr || ctx->queues[GraphicContext::QUEUE_UTIL].family == UINT32_MAX)
+	{
+		return false;
+	}
+	if (g_render_ctx == nullptr)
+	{
+		g_render_ctx = new RenderContext;
+	}
+	if (g_test_bound_graphic_context != nullptr && g_test_bound_graphic_context != ctx)
+	{
+		return false;
+	}
+	if (g_render_ctx->GetGraphicCtx() != nullptr && g_render_ctx->GetGraphicCtx() != ctx)
+	{
+		return false;
+	}
+	g_render_ctx->SetGraphicCtx(ctx);
+	g_test_bound_graphic_context = ctx;
+	return true;
+}
+
+bool GraphicsRenderUnbindContextForTesting(GraphicContext* ctx)
+{
+	if (ctx == nullptr || g_render_ctx == nullptr || g_test_bound_graphic_context != ctx || g_render_ctx->GetGraphicCtx() != ctx)
+	{
+		return false;
+	}
+	// Delete command pools while the caller-owned context and VkDevice are
+	// still live. Only then clear the global binding so no later code can retain
+	// a pointer to a destroyed test context.
+	g_command_pool.DeleteAllForTesting();
+	g_render_ctx->SetGraphicCtx(nullptr);
+	g_test_bound_graphic_context = nullptr;
+	return true;
+}
+
 void GraphicsRenderCreateContext()
 {
 	EXIT_IF(g_render_ctx == nullptr);
 
-	auto* ctx = WindowGetGraphicContext();
+	auto* ctx          = WindowGetGraphicContext();
+	auto* previous_ctx = g_render_ctx->GetGraphicCtx();
+	if (previous_ctx != nullptr && previous_ctx != ctx && !TileGpuDetileReleaseContext(previous_ctx))
+	{
+		// A diagnostic fence timeout must not free objects still in use or turn
+		// into a process-wide exit. Keep the owned context installed; a later
+		// lifecycle call can release it after its bounded wait succeeds.
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: deferring graphics context replacement while diagnostic detile work remains in flight\n");
+		return;
+	}
 	g_render_ctx->SetGraphicCtx(ctx);
 
 	if (ctx != nullptr && ctx->device != nullptr && ctx->pipeline_cache == nullptr)
