@@ -189,6 +189,7 @@ enum class ImageSampleOperation
 {
 	Regular,
 	DepthReference,
+	Mixed,
 };
 
 enum class SamplerAddressMode

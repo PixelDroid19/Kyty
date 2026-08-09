@@ -1747,6 +1747,64 @@ TEST(EmulatorGraphicsState, Gen5DirectImageSampleBindsTextureAndSampler)
 	EXPECT_EQ(bind.textures2D.desc[0].usage, ShaderTextureUsage::ReadOnly);
 	ASSERT_EQ(bind.samplers.samplers_num, 1);
 	EXPECT_EQ(bind.samplers.start_register[0], 8);
+	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::Regular);
+}
+
+TEST(EmulatorGraphicsState, ClassifiesSamplerOperationFromDirectConsumers)
+{
+	ShaderInstruction regular {};
+	regular.type    = ShaderInstructionType::ImageSampleLz;
+	regular.src[2]  = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 4};
+	regular.src_num = 3;
+
+	ShaderInstruction depth_reference = regular;
+	depth_reference.type = ShaderInstructionType::ImageSampleDrefLz;
+
+	ShaderCode regular_code;
+	regular_code.GetInstructions().Add(regular);
+	EXPECT_EQ(AnalyzeShaderSamplerOperation(regular_code, 20), State::ImageSampleOperation::Regular);
+
+	ShaderCode depth_reference_code;
+	depth_reference_code.GetInstructions().Add(depth_reference);
+	EXPECT_EQ(AnalyzeShaderSamplerOperation(depth_reference_code, 20), State::ImageSampleOperation::DepthReference);
+
+	ShaderCode mixed_code;
+	mixed_code.GetInstructions().Add(regular);
+	mixed_code.GetInstructions().Add(depth_reference);
+	EXPECT_EQ(AnalyzeShaderSamplerOperation(mixed_code, 20), State::ImageSampleOperation::Mixed);
+}
+
+TEST(EmulatorGraphicsState, ClassifiesDirectDepthReferenceSamplerBinding)
+{
+	ShaderInstruction depth_reference {};
+	depth_reference.type    = ShaderInstructionType::ImageSampleDrefLz;
+	depth_reference.src[1]  = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
+	depth_reference.src[2]  = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+	depth_reference.src_num = 3;
+
+	ShaderCode code;
+	code.GetInstructions().Add(depth_reference);
+
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 12; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	user_sgpr.value[3] = 9u << 28u;
+
+	uint16_t       direct_offsets[2] = {0xffffu, 0u};
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 2;
+	user_data.srt_size_dw            = 4;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 12, &code);
+
+	ASSERT_EQ(bind.samplers.samplers_num, 1);
+	EXPECT_EQ(bind.samplers.start_register[0], 8);
+	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::DepthReference);
 }
 
 TEST(EmulatorGraphicsState, Gen5DirectSgprsAllowFullUserWindow)
@@ -4069,6 +4127,75 @@ TEST(EmulatorGraphicsState, ResolveDepthTargetExtentNextGenInvalidSize)
 	target.size.valid = false;
 	const auto extent = State::ResolveDepthTargetExtent(target, true);
 	EXPECT_FALSE(extent.valid);
+}
+
+TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceSamplerBinding)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction sload {};
+	sload.pc                 = 0x8;
+	sload.type               = ShaderInstructionType::SLoadDwordx4;
+	sload.dst                = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 4};
+	sload.src[0]             = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	sload.src[1].type        = ShaderOperandType::IntegerInlineConstant;
+	sload.src[1].constant.u  = 160u;
+	sload.src_num            = 2;
+
+	ShaderInstruction depth_reference {};
+	depth_reference.pc       = 0x10;
+	depth_reference.type     = ShaderInstructionType::ImageSampleDrefLz;
+	depth_reference.src[1]   = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+	depth_reference.src[2]   = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 4};
+	depth_reference.src_num  = 3;
+
+	ShaderInstruction end {};
+	end.pc   = 0x18;
+	end.type = ShaderInstructionType::SEndpgm;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(sload);
+	code.GetInstructions().Add(depth_reference);
+	code.GetInstructions().Add(end);
+
+	alignas(16) uint32_t eud[64] = {};
+	HW::UserSgprInfo     user_sgpr {};
+	for (int i = 0; i < 16; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	const uint64_t eud_ptr = reinterpret_cast<uintptr_t>(eud);
+	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
+	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
+
+	uint16_t direct_offsets[6];
+	for (auto& offset: direct_offsets)
+	{
+		offset = 0xffffu;
+	}
+	direct_offsets[5] = 0;
+
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.eud_size_dw            = 48;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+
+	ASSERT_EQ(bind.samplers.samplers_num, 1);
+	EXPECT_TRUE(bind.samplers.dynamic_sload[0]);
+	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::DepthReference);
+	ASSERT_EQ(bind.dynamic_sloads.mappings_num, 1);
+	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::Sampler);
+	EXPECT_EQ(bind.dynamic_sloads.destination_register[0], 4);
 }
 
 // Captured failure: S_LOAD_DWORDX4 from EUD @offset_dw=40 of a null V#, then

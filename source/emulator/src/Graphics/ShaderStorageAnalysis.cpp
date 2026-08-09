@@ -220,6 +220,58 @@ bool ShaderInstructionWritesImageResource(ShaderInstructionType type)
 	return type == ShaderInstructionType::ImageStore || type == ShaderInstructionType::ImageStoreMip;
 }
 
+bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageSample ||
+	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
+	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleB ||
+	       type == ShaderInstructionType::ImageSampleDrefLz;
+}
+
+State::ImageSampleOperation ShaderInstructionSamplerOperation(ShaderInstructionType type)
+{
+	EXIT_IF(!ShaderInstructionUsesImageSampler(type));
+	return type == ShaderInstructionType::ImageSampleDrefLz ? State::ImageSampleOperation::DepthReference
+	                                                       : State::ImageSampleOperation::Regular;
+}
+
+ShaderSamplerOperationEvidence AnalyzeShaderSamplerOperationEvidence(const ShaderCode& code, int start_register)
+{
+	constexpr int descriptor_registers = 4;
+	const auto    live_descriptor_words = ShaderGetMetadataSgprLiveness(code, start_register, descriptor_registers);
+
+	ShaderSamplerOperationEvidence evidence {};
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		const auto& inst = code.GetInstructions().At(index);
+		if (!ShaderInstructionUsesImageSampler(inst.type) || inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr ||
+		    inst.src[2].register_id != start_register || inst.src[2].size != descriptor_registers)
+		{
+			continue;
+		}
+		if (!live_descriptor_words.empty() && live_descriptor_words[index] != 0x0fu)
+		{
+			continue;
+		}
+
+		const auto operation = ShaderInstructionSamplerOperation(inst.type);
+		if (!evidence.found)
+		{
+			evidence.operation = operation;
+			evidence.found     = true;
+		} else if (evidence.operation != operation)
+		{
+			evidence.operation = State::ImageSampleOperation::Mixed;
+		}
+	}
+	return evidence;
+}
+
+State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register)
+{
+	return AnalyzeShaderSamplerOperationEvidence(code, start_register).operation;
+}
+
 ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int start_register)
 {
 	constexpr int     descriptor_registers = 4;
@@ -400,9 +452,7 @@ ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int sta
 		}
 		result.reads = result.reads || read;
 
-		const bool sampled = inst.type == ShaderInstructionType::ImageGather4 || inst.type == ShaderInstructionType::ImageSample ||
-		                     inst.type == ShaderInstructionType::ImageSampleL || inst.type == ShaderInstructionType::ImageSampleLz ||
-		                     inst.type == ShaderInstructionType::ImageSampleLzO;
+		const bool sampled = ShaderInstructionUsesImageSampler(inst.type);
 		if (sampled && inst.src_num >= 3 && inst.src[2].type == ShaderOperandType::Sgpr && inst.src[2].size == 4)
 		{
 			if (result.sampler_register >= 0 && result.sampler_register != inst.src[2].register_id)

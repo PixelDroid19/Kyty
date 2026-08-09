@@ -7,6 +7,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Pm4.h"
@@ -4918,6 +4919,27 @@ TEST(EmulatorGraphicsPackets, PixelShaderIdentityIncludesHostToGuestCoordinateSc
 
 	EXPECT_NE(native_id, scaled_x_id);
 	EXPECT_NE(scaled_x_id, scaled_y_id);
+}
+
+TEST(EmulatorGraphicsPackets, PixelShaderIdentityIncludesSamplerOperation)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	HW::PixelShaderInfo regs {};
+	regs.ps_regs.chksum = 0x0123456789abcdefu;
+
+	ShaderPixelInputInfo regular {};
+	regular.bind.samplers.samplers_num  = 1;
+	regular.bind.samplers.operations[0] = State::ImageSampleOperation::Regular;
+
+	auto depth_reference = regular;
+	depth_reference.bind.samplers.operations[0] = State::ImageSampleOperation::DepthReference;
+
+	EXPECT_NE(ShaderGetIdPS(&regs, &regular), ShaderGetIdPS(&regs, &depth_reference));
 }
 
 TEST(EmulatorGraphicsPackets, VertexShaderIdentityIncludesGen5FetchRegistersAndProlog)

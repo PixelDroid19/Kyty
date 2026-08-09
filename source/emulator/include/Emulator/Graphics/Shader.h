@@ -24,6 +24,10 @@ struct UserSgprInfo;
 enum class UserSgprType;
 } // namespace HW
 
+namespace State {
+enum class ImageSampleOperation;
+} // namespace State
+
 enum class ShaderType
 {
 	Unknown,
@@ -1394,6 +1398,7 @@ struct ShaderZeroSBufferResources
                                                                              bool indirect_descriptor_use);
 [[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
 [[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register);
+[[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 
 struct ShaderTextureDescriptor
@@ -1447,6 +1452,7 @@ struct ShaderSamplerResources
 	static constexpr int RES_MAX = 16;
 
 	ShaderSamplerResource samplers[RES_MAX];
+	State::ImageSampleOperation operations[RES_MAX] = {};
 	int                   slots[RES_MAX]          = {0};
 	int                   start_register[RES_MAX] = {0};
 	bool                  extended[RES_MAX]       = {};

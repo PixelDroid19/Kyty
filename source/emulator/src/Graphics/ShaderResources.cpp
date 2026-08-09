@@ -334,7 +334,8 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 }
 
 static bool ShaderAddDynamicSamplerResource(ShaderBindResources* bind, const ShaderInstruction& sload, int offset_dw,
-	                                         uint32_t last_consumer_pc, const HW::UserSgprInfo& user_sgpr,
+	                                         uint32_t last_consumer_pc, State::ImageSampleOperation operation,
+	                                         const HW::UserSgprInfo& user_sgpr,
 	                                         const uint32_t* extended_buffer, bool* added_resource)
 {
 	EXIT_IF(bind == nullptr || extended_buffer == nullptr || added_resource == nullptr);
@@ -350,7 +351,7 @@ static bool ShaderAddDynamicSamplerResource(ShaderBindResources* bind, const Sha
 	int sampler_index = -1;
 	for (int index = 0; index < bind->samplers.samplers_num; ++index)
 	{
-		if (ShaderSamplerResourcesEqual(bind->samplers.samplers[index], resource))
+		if (ShaderSamplerResourcesEqual(bind->samplers.samplers[index], resource) && bind->samplers.operations[index] == operation)
 		{
 			sampler_index = index;
 			break;
@@ -364,6 +365,7 @@ static bool ShaderAddDynamicSamplerResource(ShaderBindResources* bind, const Sha
 		}
 		sampler_index = bind->samplers.samplers_num;
 		ShaderGetSampler(&bind->samplers, nullptr, offset_dw + 16, offset_dw, user_sgpr, extended_buffer);
+		bind->samplers.operations[sampler_index]    = operation;
 		bind->samplers.dynamic_sload[sampler_index] = true;
 		*added_resource                             = true;
 	}
@@ -372,22 +374,14 @@ static bool ShaderAddDynamicSamplerResource(ShaderBindResources* bind, const Sha
 	                                    offset_dw, 4, last_consumer_pc);
 }
 
-static bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
-{
-	// Keep in sync with ShaderInstructionReadsImageResource sample ops that take S#.
-	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageSample ||
-	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
-	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleB ||
-	       type == ShaderInstructionType::ImageSampleDrefLz;
-}
-
 struct ShaderDynamicSLoadUse
 {
 	ShaderDynamicSLoadResourceKind kind              = ShaderDynamicSLoadResourceKind::StorageBuffer;
 	ShaderTextureUsage             texture_usage     = ShaderTextureUsage::Unknown;
-	uint32_t                       last_consumer_pc = 0;
-	bool                           found             = false;
-	bool                           valid             = true;
+	State::ImageSampleOperation sampler_operation = State::ImageSampleOperation::Regular;
+	uint32_t                    last_consumer_pc   = 0;
+	bool                        found              = false;
+	bool                        valid              = true;
 };
 
 static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, const ShaderInstruction& sload,
@@ -414,8 +408,9 @@ static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, con
 		if (ShaderInstructionUsesImageSampler(inst.type) && inst.src_num >= 3 && inst.src[2].type == ShaderOperandType::Sgpr &&
 		    inst.src[2].register_id == destination && inst.src[2].size == 4)
 		{
-			use->kind          = ShaderDynamicSLoadResourceKind::Sampler;
-			use->texture_usage = ShaderTextureUsage::Unknown;
+			use->kind              = ShaderDynamicSLoadResourceKind::Sampler;
+			use->texture_usage     = ShaderTextureUsage::Unknown;
+			use->sampler_operation = ShaderInstructionSamplerOperation(inst.type);
 			return true;
 		}
 	}
@@ -494,8 +489,14 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 					use.valid = false;
 					break;
 				}
-				use.kind             = next_use.kind;
-				use.texture_usage    = next_use.texture_usage;
+				const auto sampler_operation =
+				    use.found && use.kind == ShaderDynamicSLoadResourceKind::Sampler &&
+				            use.sampler_operation != next_use.sampler_operation
+				        ? State::ImageSampleOperation::Mixed
+				        : next_use.sampler_operation;
+				use.kind              = next_use.kind;
+				use.texture_usage     = next_use.texture_usage;
+				use.sampler_operation = sampler_operation;
 				use.last_consumer_pc = next.pc;
 				use.found            = true;
 			}
@@ -543,7 +544,8 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 				}
 				break;
 			case ShaderDynamicSLoadResourceKind::Sampler:
-				added_mapping = ShaderAddDynamicSamplerResource(bind, sload, offset_dw, use.last_consumer_pc, user_sgpr,
+				added_mapping = ShaderAddDynamicSamplerResource(bind, sload, offset_dw, use.last_consumer_pc,
+				                                                 use.sampler_operation, user_sgpr,
 				                                                 extended_buffer, &added_resource);
 				if (added_resource)
 				{

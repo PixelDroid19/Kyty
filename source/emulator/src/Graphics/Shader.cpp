@@ -1594,6 +1594,26 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 		}
 	}
+	if (code != nullptr)
+	{
+		for (int i = 0; i < bind->samplers.samplers_num; ++i)
+		{
+			if (bind->samplers.dynamic_sload[i])
+			{
+				continue;
+			}
+			const int binding_register = bind->samplers.extended[i]
+			                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (bind->samplers.start_register[i] - 16)
+			                                 : bind->samplers.start_register[i];
+			auto evidence = AnalyzeShaderSamplerOperationEvidence(*code, binding_register + user_data_register_base);
+			if (!evidence.found && user_data_register_base != 0)
+			{
+				evidence = AnalyzeShaderSamplerOperationEvidence(*code, binding_register);
+			}
+			bind->samplers.operations[i] = evidence.operation;
+		}
+	}
+
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
 }
 
@@ -2836,6 +2856,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(bind.samplers.start_register[i]);
 		ret->ids.Add(static_cast<uint32_t>(bind.samplers.extended[i]));
 		ret->ids.Add(static_cast<uint32_t>(bind.samplers.dynamic_sload[i]));
+		ret->ids.Add(static_cast<uint32_t>(bind.samplers.operations[i]));
 	}
 
 	ret->ids.Add(bind.gds_pointers.pointers_num);
