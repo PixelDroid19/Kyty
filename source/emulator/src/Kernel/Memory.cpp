@@ -1640,7 +1640,7 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 	} else if (g_reserved_memory != nullptr)
 	{
 		// Reserved NoAccess ranges never enter the GPU lifetime graph.
-		result = g_reserved_memory->Unmap(vaddr, len);
+		result = g_reserved_memory->Consume(vaddr, len);
 	}
 
 	if (!result)
@@ -2470,7 +2470,9 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	}
 
 	VirtualMemory::Mode old_mode {};
-	const bool          ok = VirtualMemory::Protect(aligned_vaddr, aligned_len, mode, &old_mode);
+	// The guest-only transition validates ownership and applies host protection
+	// under one VM transaction, so a Free()/reuse cannot interleave here.
+	const bool          ok = VirtualMemory::ProtectGuest(aligned_vaddr, aligned_len, mode, &old_mode);
 	if (!ok)
 	{
 		return KERNEL_ERROR_ENOENT;
@@ -2500,8 +2502,8 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(mapping_addr, mapping_size));
 		} else if (registration_action == KernelGpuMappingRegistrationAction::RegisterProtectedRange)
 		{
-			// Preserve the pre-lifecycle behavior for valid external regions
-			// that are not owned by PhysicalMemory or FlexibleMemory.
+			// Guest-owned mappings outside the physical/flexible records still
+			// need lifecycle registration after their guest protection changes.
 			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(aligned_vaddr, aligned_len));
 		}
 	}

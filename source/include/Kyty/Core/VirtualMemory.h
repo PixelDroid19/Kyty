@@ -160,9 +160,24 @@ uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uin
                                    uint64_t alignment);
 bool           Free(uint64_t address);
 bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
+// Guest-only protection transition. Ownership validation, the host operation,
+// and protection tracking are one transaction with Free() and guest copies.
+bool           ProtectGuest(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
+// Returns true only when every byte belongs to a mapping created through
+// Kyty's guest virtual-memory map family. Host mappings are never guest-owned.
+bool           IsRangeGuestOwned(uint64_t address, uint64_t size);
 // Returns true only when every byte belongs to a committed mapping whose host
-// protection permits reads. It does not probe memory or install a fault guard.
+// protection permits reads. The range must also be guest-owned. It does not
+// probe memory or install a fault guard.
 bool           IsRangeReadable(uint64_t address, uint64_t size);
+// Returns true only when every byte belongs to a committed mapping whose host
+// protection permits writes. The range must also be guest-owned. It does not
+// probe memory or install a fault guard.
+bool           IsRangeWritable(uint64_t address, uint64_t size);
+// Copy while holding the virtual-memory tracker lock across range validation
+// and the copy. This serializes the transfer with Free() and Protect().
+bool           CopyFromGuest(void* destination, uint64_t source, uint64_t size);
+bool           CopyToGuest(uint64_t destination, const void* source, uint64_t size);
 enum class ProtectionChangeStatus : uint32_t
 {
 	Success,

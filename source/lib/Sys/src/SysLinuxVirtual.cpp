@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 #include <fcntl.h>
 #include <limits>
 #include <map>
@@ -64,6 +65,16 @@ struct ProtectionRange
 // page turns a normal map or mprotect into an unbounded host-side operation.
 static std::map<uintptr_t, ProtectionRange>* g_protects = nullptr;
 
+struct GuestMappingRange
+{
+	uintptr_t end = 0;
+};
+
+// This is deliberately independent from protection metadata. Host mprotect()
+// can be used by internal runtime code, but it must never turn an arbitrary
+// host mapping into a guest buffer accepted by HLE entry points.
+static std::map<uintptr_t, GuestMappingRange>* g_guest_mappings = nullptr;
+
 struct SharedBacking
 {
 	int      fd   = -1;
@@ -96,6 +107,7 @@ void sys_virtual_init()
 
 	g_allocs   = new std::map<uintptr_t, size_t>;
 	g_protects = new std::map<uintptr_t, ProtectionRange>;
+	g_guest_mappings = new std::map<uintptr_t, GuestMappingRange>;
 	g_guest_map_cursor  = 0;
 	g_shared_map_cursor = 0;
 
@@ -245,6 +257,110 @@ static const ProtectionRange* find_protection_range(uintptr_t page)
 	return page < it->second.end_page ? &it->second : nullptr;
 }
 
+static bool range_has_protection_locked(uintptr_t page_start, uintptr_t page_end, int required_protection)
+{
+	for (uintptr_t page = page_start; page < page_end;)
+	{
+		const auto* protection = find_protection_range(page);
+		if (protection == nullptr || (protection->protect & required_protection) != required_protection)
+		{
+			return false;
+		}
+		page = std::min(protection->end_page, page_end);
+	}
+	return true;
+}
+
+static bool get_guest_mapping_end(uintptr_t address, uint64_t size, uintptr_t* end)
+{
+	if (end == nullptr || size == 0 || size > UINTPTR_MAX - address)
+	{
+		return false;
+	}
+	*end = address + static_cast<uintptr_t>(size);
+	return true;
+}
+
+static void split_guest_mapping_range_locked(uintptr_t address)
+{
+	auto it = g_guest_mappings->upper_bound(address);
+	if (it == g_guest_mappings->begin())
+	{
+		return;
+	}
+	--it;
+	if (it->first >= address || it->second.end <= address)
+	{
+		return;
+	}
+
+	const GuestMappingRange right {it->second.end};
+	it->second.end = address;
+	g_guest_mappings->emplace(address, right);
+}
+
+static bool range_is_guest_owned_locked(uintptr_t address, uint64_t size)
+{
+	uintptr_t end = 0;
+	if (!get_guest_mapping_end(address, size, &end))
+	{
+		return false;
+	}
+
+	for (uintptr_t cursor = address; cursor < end;)
+	{
+		auto it = g_guest_mappings->upper_bound(cursor);
+		if (it == g_guest_mappings->begin())
+		{
+			return false;
+		}
+		--it;
+		if (it->first > cursor || it->second.end <= cursor)
+		{
+			return false;
+		}
+		cursor = std::min(it->second.end, end);
+	}
+	return true;
+}
+
+static bool assign_guest_mapping_range_locked(uintptr_t address, uint64_t size)
+{
+	uintptr_t end = 0;
+	if (!get_guest_mapping_end(address, size, &end))
+	{
+		return false;
+	}
+
+	split_guest_mapping_range_locked(address);
+	split_guest_mapping_range_locked(end);
+	auto it = g_guest_mappings->lower_bound(address);
+	while (it != g_guest_mappings->end() && it->first < end)
+	{
+		it = g_guest_mappings->erase(it);
+	}
+	g_guest_mappings->emplace(address, GuestMappingRange {end});
+	return true;
+}
+
+static bool erase_guest_mapping_range_locked(uintptr_t address, uint64_t size)
+{
+	uintptr_t end = 0;
+	if (!get_guest_mapping_end(address, size, &end) || !range_is_guest_owned_locked(address, size))
+	{
+		return false;
+	}
+
+	split_guest_mapping_range_locked(address);
+	split_guest_mapping_range_locked(end);
+	auto it = g_guest_mappings->lower_bound(address);
+	while (it != g_guest_mappings->end() && it->first < end)
+	{
+		it = g_guest_mappings->erase(it);
+	}
+	return true;
+}
+
 static void assign_protection_range(uintptr_t page_start, uintptr_t page_end, int protect)
 {
 	if (page_start >= page_end)
@@ -330,6 +446,7 @@ static void track_alloc(uintptr_t ret_addr, uint64_t size, int protect)
 	pthread_mutex_lock(&g_virtual_mutex);
 	(*g_allocs)[ret_addr] = size;
 	assign_protection_range(page_start, page_end, protect);
+	EXIT_IF(!assign_guest_mapping_range_locked(ret_addr, size));
 	pthread_mutex_unlock(&g_virtual_mutex);
 }
 
@@ -1058,6 +1175,7 @@ bool sys_virtual_map_shared_fixed_replacing_owned_reservation(void* backing, uin
 		(*g_allocs)[end] = owner_end - end;
 	}
 	assign_protection_range(page_start, page_end, get_protection_flag(mode));
+	EXIT_IF(!assign_guest_mapping_range_locked(addr, size));
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return true;
 }
@@ -1202,6 +1320,7 @@ bool sys_virtual_alloc_fixed_replacing_owned_reservation(uint64_t address, uint6
 		(*g_allocs)[end] = owner_end - end;
 	}
 	assign_protection_range(page_start, page_end, protect);
+	EXIT_IF(!assign_guest_mapping_range_locked(addr, size));
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return true;
 }
@@ -1209,7 +1328,6 @@ bool sys_virtual_alloc_fixed_replacing_owned_reservation(uint64_t address, uint6
 bool sys_virtual_free(uint64_t address)
 {
 	EXIT_IF(g_allocs == nullptr);
-	size_t size = 0;
 
 	const uint64_t page_size = sys_virtual_get_page_size();
 	if (page_size == 0)
@@ -1219,14 +1337,21 @@ bool sys_virtual_free(uint64_t address)
 	auto addr = static_cast<uintptr_t>(address / page_size * page_size);
 
 	pthread_mutex_lock(&g_virtual_mutex);
-	if (auto s = g_allocs->find(addr); s != g_allocs->end())
+	const auto allocation = g_allocs->find(addr);
+	if (allocation == g_allocs->end())
 	{
-		size = s->second;
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
 	}
-	pthread_mutex_unlock(&g_virtual_mutex);
-
+	const size_t size = allocation->second;
 	if (size == 0)
 	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	if (!range_is_guest_owned_locked(addr, size))
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
 		return false;
 	}
 
@@ -1235,9 +1360,9 @@ bool sys_virtual_free(uint64_t address)
 		uintptr_t page_start = 0;
 		uintptr_t page_end   = 0;
 		EXIT_IF(!get_host_page_range(addr, size, &page_start, &page_end));
-		pthread_mutex_lock(&g_virtual_mutex);
 		g_allocs->erase(addr);
 		erase_protection_range(page_start, page_end);
+		(void)erase_guest_mapping_range_locked(addr, size);
 		if (g_guest_map_cursor > addr)
 		{
 			g_guest_map_cursor = addr;
@@ -1246,10 +1371,12 @@ bool sys_virtual_free(uint64_t address)
 		return true;
 	}
 
+	pthread_mutex_unlock(&g_virtual_mutex);
 	return false;
 }
 
-bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode)
+static bool protect_range_locked(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode,
+                                 bool guest_only)
 {
 	auto addr = static_cast<uintptr_t>(address);
 	uintptr_t page_start = 0;
@@ -1259,12 +1386,22 @@ bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mo
 		return false;
 	}
 
-	pthread_mutex_lock(&g_virtual_mutex);
+	const bool guest_owned = range_is_guest_owned_locked(addr, size);
+	if (guest_only && !guest_owned)
+	{
+		return false;
+	}
 	if (old_mode != nullptr)
 	{
-		if (const auto* protection = find_protection_range(page_start); protection != nullptr)
+		if (guest_owned)
 		{
-			*old_mode = get_protection_flag(protection->protect);
+			if (const auto* protection = find_protection_range(page_start); protection != nullptr)
+			{
+				*old_mode = get_protection_flag(protection->protect);
+			} else
+			{
+				*old_mode = VirtualMemory::Mode::NoAccess;
+			}
 		} else
 		{
 			*old_mode = VirtualMemory::Mode::NoAccess;
@@ -1273,12 +1410,39 @@ bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mo
 	const uint64_t page_size = sys_virtual_get_page_size();
 	if (mprotect(reinterpret_cast<void*>(page_start * page_size), (page_end - page_start) * page_size, get_protection_flag(mode)) == 0)
 	{
-		assign_protection_range(page_start, page_end, get_protection_flag(mode));
-		pthread_mutex_unlock(&g_virtual_mutex);
+		// Protect remains available to internal host users, but only a range
+		// already owned by the guest registry may update guest protection state.
+		if (guest_owned)
+		{
+			assign_protection_range(page_start, page_end, get_protection_flag(mode));
+		}
 		return true;
 	}
-	pthread_mutex_unlock(&g_virtual_mutex);
 	return false;
+}
+
+bool sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode)
+{
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool result = protect_range_locked(address, size, mode, old_mode, false);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return result;
+}
+
+bool sys_virtual_protect_guest(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode)
+{
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool result = protect_range_locked(address, size, mode, old_mode, true);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return result;
+}
+
+bool sys_virtual_is_range_guest_owned(uint64_t address, uint64_t size)
+{
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool owned = range_is_guest_owned_locked(static_cast<uintptr_t>(address), size);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return owned;
 }
 
 bool sys_virtual_is_range_readable(uint64_t address, uint64_t size)
@@ -1291,16 +1455,68 @@ bool sys_virtual_is_range_readable(uint64_t address, uint64_t size)
 	}
 
 	pthread_mutex_lock(&g_virtual_mutex);
-	for (uintptr_t page = page_start; page < page_end;)
+	const bool readable = range_is_guest_owned_locked(static_cast<uintptr_t>(address), size) &&
+	                      range_has_protection_locked(page_start, page_end, PROT_READ);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return readable;
+}
+
+bool sys_virtual_is_range_writable(uint64_t address, uint64_t size)
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (!get_host_page_range(static_cast<uintptr_t>(address), size, &page_start, &page_end))
 	{
-		const auto* protection = find_protection_range(page);
-		if (protection == nullptr || (protection->protect & PROT_READ) == 0)
-		{
-			pthread_mutex_unlock(&g_virtual_mutex);
-			return false;
-		}
-		page = std::min(protection->end_page, page_end);
+		return false;
 	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool writable = range_is_guest_owned_locked(static_cast<uintptr_t>(address), size) &&
+	                      range_has_protection_locked(page_start, page_end, PROT_WRITE);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return writable;
+}
+
+bool sys_virtual_copy_from_guest(void* destination, uint64_t source, uint64_t size)
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (destination == nullptr || size > std::numeric_limits<size_t>::max() ||
+	    !get_host_page_range(static_cast<uintptr_t>(source), size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	if (!range_is_guest_owned_locked(static_cast<uintptr_t>(source), size) ||
+	    !range_has_protection_locked(page_start, page_end, PROT_READ))
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	std::memcpy(destination, reinterpret_cast<const void*>(static_cast<uintptr_t>(source)), static_cast<size_t>(size));
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+bool sys_virtual_copy_to_guest(uint64_t destination, const void* source, uint64_t size)
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (source == nullptr || size > std::numeric_limits<size_t>::max() ||
+	    !get_host_page_range(static_cast<uintptr_t>(destination), size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	if (!range_is_guest_owned_locked(static_cast<uintptr_t>(destination), size) ||
+	    !range_has_protection_locked(page_start, page_end, PROT_WRITE))
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(destination)), source, static_cast<size_t>(size));
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return true;
 }

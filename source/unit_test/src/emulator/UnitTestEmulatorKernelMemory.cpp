@@ -21,6 +21,10 @@
 #include <mutex>
 #include <thread>
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+#include <sys/mman.h>
+#endif
+
 UT_BEGIN(EmulatorKernelMemory);
 
 using namespace Libs;
@@ -47,6 +51,28 @@ static void EnsureMemorySubsystemInitialized()
 		memory_inited = true;
 	}
 }
+
+class GuestWritableBlock
+{
+public:
+	explicit GuestWritableBlock(size_t size): m_address(Core::VirtualMemory::Alloc(0, size, Core::VirtualMemory::Mode::ReadWrite)) {}
+	~GuestWritableBlock()
+	{
+		if (m_address != 0)
+		{
+			(void)Core::VirtualMemory::Free(m_address);
+		}
+	}
+
+	GuestWritableBlock(const GuestWritableBlock&)            = delete;
+	GuestWritableBlock& operator=(const GuestWritableBlock&) = delete;
+
+	[[nodiscard]] bool IsValid() const { return m_address != 0; }
+	template <typename T> [[nodiscard]] T* Data() const { return reinterpret_cast<T*>(m_address); }
+
+private:
+	uint64_t m_address = 0;
+};
 
 TEST(EmulatorKernelMemory, GpuUnmapGateKeepsAdmissionsClosedThroughHostUnmap)
 {
@@ -306,6 +332,32 @@ TEST(EmulatorKernelMemory, VirtualQueryReportsReservedRangeAsUncommitted)
 	EXPECT_EQ(info.is_committed, 0u);
 
 	EXPECT_EQ(KernelMunmap(reinterpret_cast<uint64_t>(address), kSize), OK);
+}
+
+TEST(EmulatorKernelMemory, MunmapSplitsReservedVirtualRange)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kSize     = 0x10000;
+	constexpr size_t kPageSize = 0x4000;
+	void*            address   = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&address, kSize, 0, kPageSize), OK);
+	ASSERT_NE(address, nullptr);
+	const auto base = reinterpret_cast<uint64_t>(address);
+
+	ASSERT_EQ(KernelMunmap(base + kPageSize, kPageSize), OK);
+
+	VirtualQueryInfo prefix {};
+	VirtualQueryInfo suffix {};
+	EXPECT_EQ(KernelVirtualQuery(reinterpret_cast<void*>(base), 0, &prefix, sizeof(prefix)), OK);
+	EXPECT_EQ(prefix.start, base);
+	EXPECT_EQ(prefix.end, base + kPageSize);
+	EXPECT_EQ(KernelVirtualQuery(reinterpret_cast<void*>(base + 2 * kPageSize), 0, &suffix, sizeof(suffix)), OK);
+	EXPECT_EQ(suffix.start, base + 2 * kPageSize);
+	EXPECT_EQ(suffix.end, base + kSize);
+
+	EXPECT_EQ(KernelMunmap(base, kPageSize), OK);
+	EXPECT_EQ(KernelMunmap(base + 2 * kPageSize, kSize - 2 * kPageSize), OK);
 }
 
 TEST(EmulatorKernelMemory, FixedDirectMapCommitsOwnedReservation)
@@ -822,6 +874,23 @@ TEST(EmulatorKernelMemory, GuestMemoryValidationReturnsKernelErrors)
 	          LibKernel::KERNEL_ERROR_ENOENT);
 }
 
+TEST(EmulatorKernelMemory, MprotectRejectsUnmanagedHostMapping)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX || defined(__APPLE__)
+	GTEST_SKIP() << "raw mmap ownership regression is Linux-specific";
+#else
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t kGuestPage = 0x4000;
+	auto* const external = static_cast<uint8_t*>(
+	    ::mmap(nullptr, kGuestPage, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+	ASSERT_NE(reinterpret_cast<void*>(external), MAP_FAILED);
+	EXPECT_FALSE(Core::VirtualMemory::IsRangeGuestOwned(reinterpret_cast<uint64_t>(external), kGuestPage));
+	EXPECT_EQ(KernelMprotect(external, kGuestPage, 0x03), LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(::munmap(external, kGuestPage), 0);
+#endif
+}
+
 TEST(EmulatorKernelMemory, FixedFlexibleMapPreservesReservationSuffix)
 {
 	EnsureMemorySubsystemInitialized();
@@ -941,6 +1010,50 @@ TEST(EmulatorKernelMemory, DecodesGen5MprotectProtectionFamily)
 	EXPECT_EQ(gpu, KernelGpuMappingAccessMode::Write);
 
 	EXPECT_FALSE(KernelDecodeMprotectProt(0x99, &mode, &gpu));
+}
+
+TEST(EmulatorKernelMemory, V8ReleasePagesMprotectTail)
+{
+	EnsureMemorySubsystemInitialized();
+
+	// Reproduce V8 BoundedPageAllocator::ReleasePages tail SetPermissions(NoAccess)
+	//  base 0x1000000000 size 0x40000 new_size 0x24000 tail 0x1c000
+	constexpr size_t kReservationSize = 0x40000;
+	constexpr size_t kKeepSize        = 0x24000;
+	constexpr size_t kTailSize        = kReservationSize - kKeepSize;
+	void* reservation = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&reservation, kReservationSize, 0, 0x4000), OK);
+	ASSERT_NE(reservation, nullptr);
+	const auto base = reinterpret_cast<uint64_t>(reservation);
+
+	// Simulate V8 allocating the reservation as flexible RW (typical for page allocator)
+	void* mapping = reservation;
+	ASSERT_EQ(KernelMapNamedFlexibleMemory(&mapping, kReservationSize, 0x03, 0x10, "v8-release-test"), OK);
+	ASSERT_EQ(mapping, reservation);
+
+	// Tail should be releasable via mprotect NoAccess (0x0)
+	const auto tail = base + kKeepSize;
+	ASSERT_EQ(KernelMprotect(reinterpret_cast<void*>(tail), kTailSize, 0x00), OK);
+
+	// Verify protection slices
+	GuestWritableBlock start_storage(sizeof(void*));
+	GuestWritableBlock end_storage(sizeof(void*));
+	GuestWritableBlock prot_storage(sizeof(int));
+	ASSERT_TRUE(start_storage.IsValid());
+	ASSERT_TRUE(end_storage.IsValid());
+	ASSERT_TRUE(prot_storage.IsValid());
+	ASSERT_EQ(KernelQueryMemoryProtection(reinterpret_cast<void*>(base), start_storage.Data<void*>(), end_storage.Data<void*>(),
+	                                      prot_storage.Data<int>()),
+	          OK);
+	EXPECT_EQ(*prot_storage.Data<int>(), 0x03);
+	ASSERT_EQ(KernelQueryMemoryProtection(reinterpret_cast<void*>(tail), start_storage.Data<void*>(), end_storage.Data<void*>(),
+	                                      prot_storage.Data<int>()),
+	          OK);
+	EXPECT_EQ(*prot_storage.Data<int>(), 0x00);
+
+	// Cleanup: unmap keep + tail Opt: tail is NoAccess but still part of flexible mapping, so whole unmap should work via Munmap?
+	// Our current Flexible unmap requires exact size, so unmap whole reservation via Munmap? It will be Consume for reserved? For flexible, we need exact.
+	EXPECT_EQ(KernelMunmap(base, kReservationSize), OK);
 }
 
 TEST(EmulatorKernelMemory, GpuVisibleMprotectMarksContainingMappingUntilUnmap)

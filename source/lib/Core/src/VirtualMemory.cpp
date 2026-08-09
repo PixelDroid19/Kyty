@@ -1941,9 +1941,34 @@ bool Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 	return sys_virtual_protect(address, size, mode, old_mode);
 }
 
+bool ProtectGuest(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
+{
+	return sys_virtual_protect_guest(address, size, mode, old_mode);
+}
+
+bool IsRangeGuestOwned(uint64_t address, uint64_t size)
+{
+	return sys_virtual_is_range_guest_owned(address, size);
+}
+
 bool IsRangeReadable(uint64_t address, uint64_t size)
 {
 	return sys_virtual_is_range_readable(address, size);
+}
+
+bool IsRangeWritable(uint64_t address, uint64_t size)
+{
+	return sys_virtual_is_range_writable(address, size);
+}
+
+bool CopyFromGuest(void* destination, uint64_t source, uint64_t size)
+{
+	return destination != nullptr && sys_virtual_copy_from_guest(destination, source, size);
+}
+
+bool CopyToGuest(uint64_t destination, const void* source, uint64_t size)
+{
+	return source != nullptr && sys_virtual_copy_to_guest(destination, source, size);
 }
 
 ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,

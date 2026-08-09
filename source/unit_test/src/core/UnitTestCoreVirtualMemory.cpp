@@ -1,17 +1,23 @@
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <array>
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <thread>
 
 #if !defined(_WIN32)
 #include <csignal>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+#include <sys/mman.h>
 #endif
 
 UT_BEGIN(CoreVirtualMemory);
@@ -81,6 +87,295 @@ TEST(CoreVirtualMemory, UniformLargeRangeUsesOneProtectionTransition)
 	EXPECT_EQ(change.applied_bytes, size);
 	EXPECT_TRUE(RestoreProtection(capture.runs[0].address, capture.runs[0].size, capture.runs[0].restore_token));
 	EXPECT_TRUE(Free(address));
+}
+
+TEST(CoreVirtualMemory, GuestCopiesRespectWritableRangesAcrossPages)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t address = Alloc(0, page_size * 2u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+
+	constexpr size_t kCopySize = 16;
+	std::array<uint8_t, kCopySize> input {};
+	for (size_t i = 0; i < input.size(); ++i)
+	{
+		input[i] = static_cast<uint8_t>(0x40u + i);
+	}
+	const uint64_t cross_page = address + page_size - 8u;
+	EXPECT_TRUE(IsRangeGuestOwned(cross_page, input.size()));
+	EXPECT_TRUE(IsRangeReadable(cross_page, input.size()));
+	EXPECT_TRUE(IsRangeWritable(cross_page, input.size()));
+	ASSERT_TRUE(CopyToGuest(cross_page, input.data(), input.size()));
+
+	std::array<uint8_t, kCopySize> output {};
+	ASSERT_TRUE(CopyFromGuest(output.data(), cross_page, output.size()));
+	EXPECT_EQ(output, input);
+
+	ASSERT_TRUE(Protect(address + page_size, page_size, Mode::Read));
+	EXPECT_TRUE(IsRangeReadable(cross_page, input.size()));
+	EXPECT_FALSE(IsRangeWritable(cross_page, input.size()));
+	EXPECT_FALSE(CopyToGuest(cross_page, input.data(), input.size()));
+	EXPECT_TRUE(CopyFromGuest(output.data(), cross_page, output.size()));
+	EXPECT_EQ(output, input);
+
+	EXPECT_TRUE(Free(address));
+}
+
+TEST(CoreVirtualMemory, GuestOwnershipTracksSplitReservationAndCrossPageCopy)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t reservation = Reserve(0, page_size * 4u);
+	ASSERT_NE(reservation, 0u);
+	EXPECT_TRUE(IsRangeGuestOwned(reservation, page_size * 4u));
+	EXPECT_FALSE(IsRangeReadable(reservation, page_size));
+
+	ASSERT_TRUE(AllocFixedReplacingOwnedReservation(reservation + page_size, page_size * 2u, Mode::ReadWrite));
+	const uint64_t cross_page = reservation + page_size * 2u - 8u;
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	std::array<uint8_t, 16> output {};
+	EXPECT_TRUE(IsRangeGuestOwned(cross_page, input.size()));
+	EXPECT_TRUE(CopyToGuest(cross_page, input.data(), input.size()));
+	EXPECT_TRUE(CopyFromGuest(output.data(), cross_page, output.size()));
+	EXPECT_EQ(output, input);
+
+	ASSERT_TRUE(Free(reservation + page_size));
+	EXPECT_FALSE(IsRangeGuestOwned(cross_page, input.size()));
+	EXPECT_FALSE(CopyToGuest(cross_page, input.data(), input.size()));
+#if defined(_WIN32)
+	ASSERT_TRUE(Free(reservation));
+#else
+	ASSERT_TRUE(Free(reservation));
+	ASSERT_TRUE(Free(reservation + page_size * 3u));
+#endif
+}
+
+TEST(CoreVirtualMemory, ExternalMmapProtectDoesNotAuthorizeGuestAccess)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX || defined(__APPLE__)
+	GTEST_SKIP() << "raw mmap ownership regression is Linux-specific";
+#else
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	auto* const external = static_cast<uint8_t*>(
+	    ::mmap(nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+	ASSERT_NE(reinterpret_cast<void*>(external), MAP_FAILED);
+
+	const uint64_t address = reinterpret_cast<uint64_t>(external);
+	uint8_t        input   = 0x5a;
+	uint8_t        output  = 0;
+	EXPECT_FALSE(IsRangeGuestOwned(address, 1));
+	EXPECT_FALSE(IsRangeReadable(address, 1));
+	EXPECT_FALSE(IsRangeWritable(address, 1));
+	EXPECT_FALSE(CopyToGuest(address, &input, sizeof(input)));
+	EXPECT_FALSE(CopyFromGuest(&output, address, sizeof(output)));
+
+	// Internal host users may still change their own mapping's protection, but
+	// that operation must not add it to the guest ownership registry.
+	ASSERT_TRUE(Protect(address, page_size, Mode::Read));
+	EXPECT_FALSE(IsRangeGuestOwned(address, 1));
+	EXPECT_FALSE(IsRangeReadable(address, 1));
+	ASSERT_TRUE(Protect(address, page_size, Mode::ReadWrite));
+	EXPECT_FALSE(IsRangeWritable(address, 1));
+
+	EXPECT_EQ(::munmap(external, page_size), 0);
+#endif
+}
+
+TEST(CoreVirtualMemory, HostHeapAndStackAreNotGuestOwned)
+{
+#if !defined(_WIN32)
+	GTEST_SKIP() << "Windows VirtualQuery ownership regression";
+#else
+	std::array<uint8_t, 16> stack {};
+	auto* const heap = new uint8_t[stack.size()] {};
+	ASSERT_NE(heap, nullptr);
+	uint8_t input  = 0x5a;
+	uint8_t output = 0;
+	for (const auto* address: {stack.data(), heap})
+	{
+		const uint64_t value = reinterpret_cast<uint64_t>(address);
+		EXPECT_FALSE(IsRangeGuestOwned(value, stack.size()));
+		EXPECT_FALSE(IsRangeReadable(value, stack.size()));
+		EXPECT_FALSE(IsRangeWritable(value, stack.size()));
+		EXPECT_FALSE(CopyFromGuest(&output, value, sizeof(output)));
+		EXPECT_FALSE(CopyToGuest(value, &input, sizeof(input)));
+	}
+	delete[] heap;
+#endif
+}
+
+TEST(CoreVirtualMemory, GuestCopiesSerializeWithProtectAndFree)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t address = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+
+	constexpr size_t kCopySize = 64;
+	std::array<uint8_t, kCopySize> input {};
+	input.fill(0x5a);
+	std::atomic<bool>     started {false};
+	std::atomic<bool>     stop {false};
+	std::atomic<uint32_t> copies {0};
+	std::thread copier([&]() {
+		std::array<uint8_t, kCopySize> output {};
+		started.store(true, std::memory_order_release);
+		while (!stop.load(std::memory_order_acquire))
+		{
+			if (CopyToGuest(address, input.data(), input.size()))
+			{
+				(void)CopyFromGuest(output.data(), address, output.size());
+			}
+			copies.fetch_add(1, std::memory_order_relaxed);
+			std::this_thread::yield();
+		}
+	});
+
+	while (!started.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	for (uint32_t i = 0; i < 32; ++i)
+	{
+		EXPECT_TRUE(ProtectGuest(address, page_size, Mode::Read));
+		EXPECT_FALSE(CopyToGuest(address, input.data(), input.size()));
+		EXPECT_TRUE(ProtectGuest(address, page_size, Mode::ReadWrite));
+	}
+
+	const bool freed = Free(address);
+	stop.store(true, std::memory_order_release);
+	copier.join();
+	EXPECT_TRUE(freed);
+	EXPECT_GT(copies.load(std::memory_order_relaxed), 0u);
+	if (freed)
+	{
+		std::array<uint8_t, kCopySize> output {};
+		EXPECT_FALSE(CopyFromGuest(output.data(), address, output.size()));
+	}
+}
+
+TEST(CoreVirtualMemory, ProtectGuestRejectsConcurrentFreedAndReusedHostRange)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX || defined(__APPLE__) || !defined(MAP_FIXED_NOREPLACE)
+	GTEST_SKIP() << "fixed non-replacing mmap reuse regression is Linux-specific";
+#else
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t address = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+
+	std::atomic<bool>     started {false};
+	std::atomic<bool>     reused {false};
+	std::atomic<bool>     stop {false};
+	std::atomic<uint32_t> rejected_after_reuse {0};
+	std::thread protector([&]() {
+		started.store(true, std::memory_order_release);
+		while (!stop.load(std::memory_order_acquire))
+		{
+			const bool protected_range = ProtectGuest(address, page_size, Mode::ReadWrite);
+			if (reused.load(std::memory_order_acquire) && !protected_range)
+			{
+				rejected_after_reuse.fetch_add(1, std::memory_order_relaxed);
+			}
+			std::this_thread::yield();
+		}
+	});
+
+	while (!started.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	if (!Free(address))
+	{
+		stop.store(true, std::memory_order_release);
+		protector.join();
+		FAIL() << "guest mapping could not be released";
+	}
+	auto* const external = ::mmap(reinterpret_cast<void*>(address), page_size, PROT_READ,
+	                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+	if (external != reinterpret_cast<void*>(address))
+	{
+		stop.store(true, std::memory_order_release);
+		protector.join();
+		if (external != MAP_FAILED)
+		{
+			EXPECT_EQ(::munmap(external, page_size), 0);
+		}
+		FAIL() << "host mapping did not reuse the released guest address";
+	}
+	reused.store(true, std::memory_order_release);
+
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+	while (rejected_after_reuse.load(std::memory_order_relaxed) == 0 && std::chrono::steady_clock::now() < deadline)
+	{
+		std::this_thread::yield();
+	}
+	stop.store(true, std::memory_order_release);
+	protector.join();
+	EXPECT_GT(rejected_after_reuse.load(std::memory_order_relaxed), 0u);
+	EXPECT_FALSE(IsRangeGuestOwned(address, page_size));
+	EXPECT_EQ(::munmap(external, page_size), 0);
+#endif
+}
+
+TEST(CoreVirtualMemory, FixedMapFreeKeepsOwnershipCoherent)
+{
+#if !defined(_WIN32)
+	GTEST_SKIP() << "fixed-map lifecycle regression is Windows-specific";
+#else
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t address = Reserve(0, page_size * 2u);
+	ASSERT_NE(address, 0u);
+	ASSERT_TRUE(AllocFixedReplacingOwnedReservation(address, page_size, Mode::ReadWrite));
+
+	std::atomic<bool>     started {false};
+	std::atomic<bool>     stop {false};
+	std::atomic<uint32_t> rejected {0};
+	std::thread protector([&]() {
+		started.store(true, std::memory_order_release);
+		while (!stop.load(std::memory_order_acquire))
+		{
+			if (!ProtectGuest(address, page_size, Mode::ReadWrite))
+			{
+				rejected.fetch_add(1, std::memory_order_relaxed);
+			}
+			std::this_thread::yield();
+		}
+	});
+
+	while (!started.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	if (!Free(address))
+	{
+		stop.store(true, std::memory_order_release);
+		protector.join();
+		FAIL() << "fixed guest mapping could not be freed";
+	}
+	EXPECT_FALSE(IsRangeGuestOwned(address, page_size));
+	const auto rejection_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+	while (rejected.load(std::memory_order_relaxed) == 0 && std::chrono::steady_clock::now() < rejection_deadline)
+	{
+		std::this_thread::yield();
+	}
+	if (!ReserveFixed(address, page_size))
+	{
+		stop.store(true, std::memory_order_release);
+		protector.join();
+		FAIL() << "owned reservation could not be republished";
+	}
+	EXPECT_TRUE(IsRangeGuestOwned(address, page_size));
+
+	stop.store(true, std::memory_order_release);
+	protector.join();
+	EXPECT_GT(rejected.load(std::memory_order_relaxed), 0u);
+	EXPECT_TRUE(Free(address));
+#endif
 }
 
 // Shared host backing must keep alias views byte-coherent: a write through one
