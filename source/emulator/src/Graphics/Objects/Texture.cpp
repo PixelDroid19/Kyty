@@ -590,28 +590,33 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// Pitch-strided linear rows (host tiler contract). Tight y*width packing
 			// is only equivalent when pitch_elems == width.
 			const uint64_t linear_bytes = static_cast<uint64_t>(pitch_elems) * copy_height * bpp;
-			auto*          temp_buf     = new uint8_t[linear_bytes];
-			std::memset(temp_buf, 0, static_cast<size_t>(linear_bytes));
-			{
-				const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(copy_width) * copy_height * bpp);
-				auto*                      d = temp_buf;
-				const auto*                s = reinterpret_cast<const uint8_t*>(*vaddr);
-				for (uint32_t y = 0; y < copy_height; y++)
-				{
-					for (uint32_t x = 0; x < copy_width; x++)
-					{
-						const uint64_t tiled = (tile == 9) ? TileGetStandard64KBOffset(x, y, pitch_elems, bpp) :
-						                                         TileGetSw64kRxOffset(x, y, pitch_elems, bpp);
-						const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bpp;
-						std::memcpy(d + linear, s + tiled, bpp);
-					}
-				}
-			}
-			regions[0].offset = 0;
+			regions[0].offset           = 0;
 			// bufferRowLength is in texels (BC block width accounted by the caller).
 			regions[0].pitch  = pitch_texels;
 			regions[0].width  = static_cast<uint32_t>(width);
 			regions[0].height = static_cast<uint32_t>(height);
+
+			TileDetileRequest detile {};
+			detile.src               = reinterpret_cast<const void*>(*vaddr);
+			detile.width             = copy_width;
+			detile.height            = copy_height;
+			detile.pitch_elems       = pitch_elems;
+			detile.dst_pitch_elems   = pitch_elems;
+			detile.bytes_per_element = bpp;
+			detile.layout            = (tile == 9) ? TileDetileLayout::Standard64KB : TileDetileLayout::Sw64kRx;
+			detile.src_bytes         = *size;
+
+			// Keep texture creation on the established host detile/upload path. A
+			// synchronous compute submission here would create and wait for a Vulkan
+			// session per texture, serializing the render path during gameplay.
+			auto* temp_buf = new uint8_t[linear_bytes];
+			std::memset(temp_buf, 0, static_cast<size_t>(linear_bytes));
+			detile.dst = temp_buf;
+			if (!TileDetile(detile))
+			{
+				delete[] temp_buf;
+				EXIT("Gen5 sample detile failed for tile=%u bpp=%u\n", static_cast<unsigned>(tile), bpp);
+			}
 			if (skip_guest && inspect_skipped_guest && bpp == 4u)
 			{
 				for (uint64_t pixel = 0; pixel < linear_bytes / 4u; ++pixel)
