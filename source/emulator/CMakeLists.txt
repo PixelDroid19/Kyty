@@ -109,6 +109,7 @@ target_sources(emulator PRIVATE
 	include/Emulator/Libs/ProcessEnvironment.h
 )
 add_dependencies(emulator KytyBuildInfo)
+add_dependencies(kyty_graphics KytyBuildInfo)
 
 # Fail at configure time if a future glob or explicit source entry collapses
 # a domain back into the wrong archive.
