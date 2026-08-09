@@ -1,9 +1,44 @@
 # Blasphemous 2: renderer bring-up notes
 
-This note records the two renderer contracts corrected while bringing the
-opening sequence up to the first interactive screens. It is intentionally
-limited to integration evidence; a startup window or a single capture is not
-treated as proof of gameplay compatibility.
+This note records the general renderer and HLE contracts corrected while
+bringing the strict path through the opening sequence and into the first
+playable room. A startup window, advancing presents, or a single non-flat
+capture is not treated as proof of gameplay compatibility.
+
+## Post-logo black-screen root cause
+
+The guest continued drawing and presenting after the logos, but the native
+capture was flat black. The resource trace showed Gen5 format `56` reaching a
+storage-image descriptor. Sampled format `56` already resolved to
+`VK_FORMAT_R8G8B8A8_UNORM` (or SRGB with degamma), while its storage lookup
+returned `VK_FORMAT_UNDEFINED`. The centralized table now resolves storage
+format `56` to `VK_FORMAT_R8G8B8A8_UNORM`; the public support query and format
+result are covered by `EmulatorGraphicsState.Gen5SampledRgba8FormatUsesUnormByDefault`.
+
+The same transition also requires the two-argument, pointer-sized
+`sceAudioOut2UserCreate(uint32_t, uintptr_t*)` ABI. Reading a nonexistent third
+argument or writing a 32-bit handle caused the audio user initialization to
+target the wrong guest address. A compile-time function-type assertion and
+mapped-output tests protect that ABI.
+
+### AudioOut2 context lifecycle regression
+
+A later hardening pass reintroduced the same visible symptom by rejecting
+`ContextResetParam`, `ContextQueryMemory`, and `ContextCreate`
+unconditionally. A debugger trace established the complete call chain:
+
+- `ResetParam` receives a writable `0x40`-byte block and must return success
+  without overwriting it before the caller fills the fields;
+- the supported profile queries a `0x10000`-byte workspace; and
+- `ContextCreate` receives that mapped workspace and publishes a 32-bit
+  context handle.
+
+The failing guest branch tests the negative return from `ResetParam` and skips
+both later calls, leaving the post-logo frame black. The HLE now validates the
+full guest ranges, accepts only the measured profile and exact workspace size,
+copies outputs through the guest-memory boundary, and keeps unknown layouts
+strict. The focused regression exercises Reset, QueryMemory, Create, and
+Destroy as one lifecycle.
 
 ## Color-control modes
 
@@ -80,6 +115,9 @@ _build_linux/agent/kyty_agent --endpoint "$KYTY_AGENT_ENDPOINT" last-error
 ```
 
 The corrected path must keep presenting, produce a non-black native capture,
-and report no `not_implemented` or `device_lost` event. The exploratory input
-route continues through the title and tutorial; complete gameplay evidence
-requires the later route window and a changing captured scene.
+and report no `not_implemented` or `device_lost` event. The current strict
+integration run reached the first playable room, produced a healthy native
+capture, consumed two explicit 180-presentation directional holds, and showed
+the player changing position. The input route is diagnostic evidence of the
+runtime/control frontier; longer compatibility and stability coverage remains
+separate from this bounded bring-up result.
