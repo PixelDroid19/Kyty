@@ -76,6 +76,7 @@ public:
 	void SetHostPaused(bool paused);
 
 	Id       AudioInOpen(uint32_t type, uint32_t samples_num, uint32_t freq, Format format);
+	bool     AudioInClose(Id handle);
 	bool     AudioInValid(Id handle);
 	uint32_t AudioInInput(Id handle, void* dest);
 

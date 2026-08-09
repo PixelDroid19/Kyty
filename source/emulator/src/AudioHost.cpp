@@ -441,6 +441,17 @@ HostAudio::Id HostAudio::AudioInOpen(uint32_t type, uint32_t samples_num, uint32
 	return Id::Invalid();
 }
 
+bool HostAudio::AudioInClose(Id handle)
+{
+	std::lock_guard lock(m_impl->mutex);
+	if (m_impl->shutting_down || !Impl::IsValid(m_impl->in_ports, handle))
+	{
+		return false;
+	}
+	m_impl->in_ports[handle.GetId()] = Impl::PortIn {};
+	return true;
+}
+
 bool HostAudio::AudioInValid(Id handle)
 {
 	std::lock_guard lock(m_impl->mutex);

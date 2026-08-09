@@ -172,6 +172,26 @@ bool FractionalInputPacing()
 	       Check(elapsed < std::chrono::milliseconds(100), "input grain pacing accumulated excessive delay");
 }
 
+bool InputPortLifecycle()
+{
+	auto audio = CreateAudio();
+	if (audio == nullptr)
+	{
+		return false;
+	}
+	for (int iteration = 0; iteration < HostAudio::IN_PORTS_MAX * 2; ++iteration)
+	{
+		auto port = audio->AudioInOpen(0, 256, 48'000, HostAudio::Format::Signed16bitStereo);
+		if (!Check(port.IsValid(), "input port slots were exhausted after close") ||
+		    !Check(audio->AudioInClose(port), "could not close the input port") ||
+		    !Check(!audio->AudioInValid(port), "closed input port remained valid"))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool RejectsInvalidPacing()
 {
 	auto audio = CreateAudio();
@@ -247,7 +267,7 @@ int main(int argc, char** argv)
 		return 125;
 	}
 	if (!HostClockContract() || !PeriodicIntervalContract() || !GrainPacing() || !FractionalOutputPacing() || !FractionalInputPacing() ||
-	    !RejectsInvalidPacing() || !CloseWhileProducerSleeps())
+	    !InputPortLifecycle() || !RejectsInvalidPacing() || !CloseWhileProducerSleeps())
 	{
 		std::remove(output_path);
 		return 1;
