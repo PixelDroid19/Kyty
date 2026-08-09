@@ -65,6 +65,13 @@ int KYTY_SYSV_ABI pthread_setcancelstate(int state, int* old_state)
 	return POSIX_PTHREAD_CALL(Kernel::PthreadSetcancelstate(state, old_state));
 }
 
+int KYTY_SYSV_ABI pthread_setcanceltype(int type, int* old_type)
+{
+	PRINT_NAME();
+
+	return POSIX_PTHREAD_CALL(Kernel::PthreadSetcanceltype(type, old_type));
+}
+
 int KYTY_SYSV_ABI pthread_setprio(Kernel::Pthread thread, int prio)
 {
 	PRINT_NAME();
@@ -367,7 +374,7 @@ int KYTY_SYSV_ABI pthread_mutexattr_destroy(Kernel::PthreadMutexattr* attr)
 	return POSIX_PTHREAD_CALL(Kernel::PthreadMutexattrDestroy(attr));
 }
 
-// Gen5 Posix_v1 pthread_attr_* NIDs (Astro after package path bring-up).
+// Gen5 Posix_v1 pthread_attr_* NIDs.
 int KYTY_SYSV_ABI pthread_attr_init(Kernel::PthreadAttr* attr)
 {
 	PRINT_NAME();

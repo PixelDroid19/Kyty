@@ -57,8 +57,9 @@ namespace PresentationStats = Kyty::Emulator::PresentationStats;
 namespace GuestRuntimePort  = ::Kyty::Emulator::GuestRuntimePort;
 
 
-thread_local Pthread g_pthread_self    = nullptr;
-PThreadContext*      g_pthread_context = nullptr;
+thread_local Pthread g_pthread_self                   = nullptr;
+thread_local bool    g_pthread_key_destructors_active = false;
+PThreadContext*      g_pthread_context                = nullptr;
 
 static void FreeDetachedThreads(void* /*arg*/)
 {
@@ -206,19 +207,25 @@ static void cleanup_thread(void* arg)
 
 	auto thread_dtors = g_pthread_context->GetThreadDtors();
 	auto host_thread_dtors = g_pthread_context->GetHostThreadDtors();
+	EXIT_IF(thread->attr == nullptr || thread->attr->stack_addr == nullptr || thread->attr->stack_size == 0);
+	auto* stack_top =
+	    reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(thread->attr->stack_addr) + thread->attr->stack_size) &
+	                            ~static_cast<uintptr_t>(0xf));
 
 	if (host_thread_dtors != nullptr)
 	{
-		EXIT_IF(thread->attr == nullptr || thread->attr->stack_addr == nullptr || thread->attr->stack_size == 0);
-		auto* stack_top =
-		    reinterpret_cast<void*>((reinterpret_cast<uintptr_t>(thread->attr->stack_addr) + thread->attr->stack_size) &
-		                            ~static_cast<uintptr_t>(0xf));
 		host_thread_dtors(stack_top);
 	}
 	if (thread_dtors != nullptr)
 	{
 		thread_dtors();
 	}
+
+	// POSIX key destructors belong to the exiting thread. They can re-register
+	// values for up to DESTRUCTOR_ITERATIONS passes and may still use guest TLS.
+	// Keep both the guest stack and the TLS image live until all callbacks finish.
+	g_pthread_context->GetPthreadKeys()->Destruct(thread->unique_id, stack_top);
+	GuestRuntimePort::ReleaseThreadDynamicTls(thread->unique_id);
 
 	Core::mem_guest_thread_leave();
 
@@ -276,6 +283,11 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 	{
 		attr = g_pthread_context->GetDefaultAttr();
 	}
+	if (attr == nullptr || *attr == nullptr || !IsValidGuestSchedPolicy((*attr)->policy) ||
+	    !IsValidGuestPriority((*attr)->priority))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	PRINT_NAME_ENABLE(false);
 
@@ -301,7 +313,8 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr, pthrea
 		(*thread)->detached    = (*attr)->detached;
 		(*thread)->started     = false;
 		(*thread)->unique_id   = -1;
-		(*thread)->guest_priority.store(700, std::memory_order_relaxed);
+		(*thread)->guest_policy.store((*thread)->attr->policy, std::memory_order_relaxed);
+		(*thread)->guest_priority.store((*thread)->attr->priority, std::memory_order_relaxed);
 		(*thread)->guest_stack_base = 0;
 		(*thread)->guest_stack_size = 0;
 
@@ -370,15 +383,8 @@ int KYTY_SYSV_ABI PthreadDetach(Pthread thread)
 	return OK;
 }
 
-int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value)
+static int pthread_join_internal(Pthread thread, void** value)
 {
-	PRINT_NAME();
-
-	if (thread == nullptr)
-	{
-		return KERNEL_ERROR_EINVAL;
-	}
-
 	int result = pthread_join(thread->p, value);
 
 	if (PRINT_NAME_ENABLED)
@@ -386,27 +392,14 @@ int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value)
 		KYTY_LOG_DEBUG("\tthread join: %s, %d\n", thread->name.C_Str(), result);
 	}
 
-	int id = thread->unique_id;
-
 	if (result == 0)
 	{
 		free_guest_stack(thread->attr);
 		thread->guest_stack_base = 0;
 		thread->guest_stack_size = 0;
+		thread->almost_done      = false;
+		thread->free             = true;
 	}
-
-	thread->almost_done = false;
-	thread->free        = true;
-
-	// Key destructors may still touch guest TLS / allocator state. Run them
-	// before releasing the TLS image.
-	g_pthread_context->GetPthreadKeys()->Destruct(id);
-
-	// Do not DeleteTlss(id) here. Gen5 titles (and FNA/Mono-style runtimes) can
-	// keep freelist control blocks at TP-0x158 alive across threads; freeing the
-	// image at join turns those slots into use-after-free (observed begin/end
-	// patterns 0x1fffffffe / TCB self-pointer). TLS blocks are released with the
-	// process / RuntimeLinker teardown instead.
 
 	switch (result)
 	{
@@ -416,6 +409,28 @@ int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value)
 		case EOPNOTSUPP: return KERNEL_ERROR_EOPNOTSUPP;
 		default: return KERNEL_ERROR_EINVAL;
 	}
+}
+
+int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value)
+{
+	PRINT_NAME();
+
+	if (thread == nullptr || thread->detached.load(std::memory_order_acquire))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	return pthread_join_internal(thread, value);
+}
+
+int PthreadReapDetached(Pthread thread)
+{
+	if (thread == nullptr || !thread->detached.load(std::memory_order_acquire))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	return pthread_join_internal(thread, nullptr);
 }
 
 int KYTY_SYSV_ABI PthreadCancel(Pthread thread)
@@ -463,25 +478,30 @@ int KYTY_SYSV_ABI PthreadSetcancelstate(int state, int* old_state)
 	{
 		case 0: pstate = PTHREAD_CANCEL_ENABLE; break;
 		case 1: pstate = PTHREAD_CANCEL_DISABLE; break;
-		default: EXIT("unknown state: %d", state);
+		default: return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_setcancelstate(pstate, old_state);
+	int host_old_state = PTHREAD_CANCEL_DISABLE;
+	int result         = pthread_setcancelstate(pstate, old_state != nullptr ? &host_old_state : nullptr);
 
 	KYTY_LOG_DEBUG("\tthread setcancelstate: %d\n", result);
 
-	switch (*old_state)
+	if (result != 0)
 	{
-		case PTHREAD_CANCEL_ENABLE: *old_state = 0; break;
-		case PTHREAD_CANCEL_DISABLE: *old_state = 1; break;
-		default: EXIT("unknown old_state: %d", *old_state);
+		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (result == 0)
+	if (old_state == nullptr)
 	{
 		return OK;
 	}
-	return KERNEL_ERROR_EINVAL;
+
+	switch (host_old_state)
+	{
+		case PTHREAD_CANCEL_ENABLE: *old_state = 0; return OK;
+		case PTHREAD_CANCEL_DISABLE: *old_state = 1; return OK;
+		default: return KERNEL_ERROR_EINVAL;
+	}
 }
 
 int KYTY_SYSV_ABI PthreadSetcanceltype(int type, int* old_type)
@@ -494,25 +514,30 @@ int KYTY_SYSV_ABI PthreadSetcanceltype(int type, int* old_type)
 	{
 		case 0: ptype = PTHREAD_CANCEL_DEFERRED; break;
 		case 2: ptype = PTHREAD_CANCEL_ASYNCHRONOUS; break;
-		default: EXIT("unknown type: %d", type);
+		default: return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_setcanceltype(ptype, old_type);
+	int host_old_type = PTHREAD_CANCEL_DEFERRED;
+	int result        = pthread_setcanceltype(ptype, old_type != nullptr ? &host_old_type : nullptr);
 
 	KYTY_LOG_DEBUG("\tthread setcanceltype: %d\n", result);
 
-	switch (*old_type)
+	if (result != 0)
 	{
-		case PTHREAD_CANCEL_DEFERRED: *old_type = 0; break;
-		case PTHREAD_CANCEL_ASYNCHRONOUS: *old_type = 2; break;
-		default: EXIT("unknown type: %d", *old_type);
+		return KERNEL_ERROR_EINVAL;
 	}
 
-	if (result == 0)
+	if (old_type == nullptr)
 	{
 		return OK;
 	}
-	return KERNEL_ERROR_EINVAL;
+
+	switch (host_old_type)
+	{
+		case PTHREAD_CANCEL_DEFERRED: *old_type = 0; return OK;
+		case PTHREAD_CANCEL_ASYNCHRONOUS: *old_type = 2; return OK;
+		default: return KERNEL_ERROR_EINVAL;
+	}
 }
 
 int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio)
@@ -524,7 +549,10 @@ int KYTY_SYSV_ABI PthreadGetprio(Pthread thread, int* prio)
 		return KERNEL_ERROR_ESRCH;
 	}
 
-	if (prio == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (prio == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	*prio = thread->guest_priority.load(std::memory_order_relaxed);
 
@@ -540,6 +568,10 @@ int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio)
 	if (thread == nullptr)
 	{
 		return KERNEL_ERROR_ESRCH;
+	}
+	if (!IsValidGuestPriority(prio))
+	{
+		return KERNEL_ERROR_EINVAL;
 	}
 
 	thread->guest_priority.store(prio, std::memory_order_relaxed);
@@ -629,16 +661,10 @@ int KYTY_SYSV_ABI PthreadGetschedparam(Pthread thread, int* policy, KernelSchedP
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	sched_param host_param {};
-	int         host_policy = 0;
-	const int   result      = pthread_getschedparam(thread->p, &host_policy, &host_param);
-	if (result != 0)
-	{
-		return KERNEL_ERROR_EINVAL;
-	}
-
-	*policy        = host_policy;
-	param->sched_priority = host_param.sched_priority;
+	// Guest scheduler values are part of the guest ABI. Passing them to the
+	// host scheduler makes results privilege- and platform-dependent.
+	*policy               = thread->guest_policy.load(std::memory_order_relaxed);
+	param->sched_priority = thread->guest_priority.load(std::memory_order_relaxed);
 	return OK;
 }
 
@@ -650,11 +676,14 @@ int KYTY_SYSV_ABI PthreadSetschedparam(Pthread thread, int policy, const KernelS
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	if (!IsValidGuestSchedPolicy(policy) || !IsValidGuestPriority(param->sched_priority))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
-	sched_param host_param {};
-	host_param.sched_priority = param->sched_priority;
-	const int result = pthread_setschedparam(thread->p, policy, &host_param);
-	return (result == 0 ? OK : KERNEL_ERROR_EINVAL);
+	thread->guest_policy.store(policy, std::memory_order_relaxed);
+	thread->guest_priority.store(param->sched_priority, std::memory_order_relaxed);
+	return OK;
 }
 
 void KYTY_SYSV_ABI PthreadYield()

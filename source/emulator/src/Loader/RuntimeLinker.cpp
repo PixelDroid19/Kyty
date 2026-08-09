@@ -27,6 +27,7 @@
 #include "Emulator/Validation/DomainValidators.h"
 #include "Emulator/Log.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -42,20 +43,102 @@ namespace Kyty::Loader {
 
 namespace {
 
-std::atomic<RuntimeLinker*> g_guest_runtime_owner {nullptr};
-
-Emulator::GuestRuntimePort::ProgramHandle FindProgramByAddrForPort(uint64_t vaddr)
-{
-	auto* runtime = g_guest_runtime_owner.load(std::memory_order_acquire);
-	return runtime != nullptr ? runtime->FindProgramByAddr(vaddr) : nullptr;
-}
+Core::Mutex   g_guest_runtime_owner_mutex;
+Core::CondVar g_guest_runtime_owner_drained;
+RuntimeLinker* g_guest_runtime_owner = nullptr;
+void (*g_current_runtime_acquire_hook)(void*) = nullptr;
+void* g_current_runtime_acquire_hook_context  = nullptr;
+void (*g_current_runtime_unpublished_hook)(void*) = nullptr;
+void* g_current_runtime_unpublished_hook_context  = nullptr;
 
 } // namespace
 
-static bool IsHleOwnedRuntimeSymbol(const String& name)
+RuntimeLinker* RuntimeLinker::AcquireCurrentRuntimeForUse()
 {
-	return name == U"J3edELK4FvM" || name == U"3GPpjQdAMTw" || name == U"9rAeANT2tyE" || name == U"2emaaluWzUw" ||
-	       name == U"DiGVep5yB5w" || name == U"Ujf3KzMvRmI";
+	RuntimeLinker* runtime = nullptr;
+	void (*hook)(void*)    = nullptr;
+	void* hook_context     = nullptr;
+
+	g_guest_runtime_owner_mutex.Lock();
+	if (g_guest_runtime_owner != nullptr && g_guest_runtime_owner->m_current_runtime_published)
+	{
+		runtime = g_guest_runtime_owner;
+		runtime->m_current_runtime_use_count++;
+		hook         = g_current_runtime_acquire_hook;
+		hook_context = g_current_runtime_acquire_hook_context;
+	}
+	g_guest_runtime_owner_mutex.Unlock();
+
+	if (runtime != nullptr && hook != nullptr)
+	{
+		hook(hook_context);
+	}
+
+	return runtime;
+}
+
+void RuntimeLinker::ReleaseCurrentRuntimeForUse(RuntimeLinker* runtime)
+{
+	if (runtime == nullptr)
+	{
+		return;
+	}
+
+	g_guest_runtime_owner_mutex.Lock();
+	EXIT_IF(runtime->m_current_runtime_use_count == 0);
+	runtime->m_current_runtime_use_count--;
+	if (runtime->m_current_runtime_use_count == 0)
+	{
+		g_guest_runtime_owner_drained.SignalAll();
+	}
+	g_guest_runtime_owner_mutex.Unlock();
+}
+
+const void* RuntimeLinker::FindProgramByAddrForPort(uint64_t vaddr)
+{
+	auto* runtime = AcquireCurrentRuntimeForUse();
+	if (runtime == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* program = runtime->FindProgramByAddr(vaddr);
+	ReleaseCurrentRuntimeForUse(runtime);
+	return program;
+}
+
+void RuntimeLinker::SetCurrentRuntimeAcquireHookForTesting(void (*hook)(void*), void* context)
+{
+	Core::LockGuard lock(g_guest_runtime_owner_mutex);
+	g_current_runtime_acquire_hook         = hook;
+	g_current_runtime_acquire_hook_context = context;
+}
+
+void RuntimeLinker::SetCurrentRuntimeUnpublishedHookForTesting(void (*hook)(void*), void* context)
+{
+	Core::LockGuard lock(g_guest_runtime_owner_mutex);
+	g_current_runtime_unpublished_hook         = hook;
+	g_current_runtime_unpublished_hook_context = context;
+}
+
+bool RuntimeLinker::IsCurrentRuntimeForTesting(const RuntimeLinker* runtime)
+{
+	Core::LockGuard lock(g_guest_runtime_owner_mutex);
+	return g_guest_runtime_owner == runtime;
+}
+
+static bool IsHleOwnedRuntimeSymbol(const String& name, SymbolType type)
+{
+	if (type == SymbolType::Func)
+	{
+		return name == U"J3edELK4FvM" || name == U"3GPpjQdAMTw" || name == U"9rAeANT2tyE" || name == U"2emaaluWzUw" ||
+		       name == U"DiGVep5yB5w" || name == U"Ujf3KzMvRmI";
+	}
+
+	// This libc global is the HLE CRT bootstrap state. It must remain the HLE
+	// object when a guest libc shim exports the same identity; ordinary Objects
+	// (including C++ locale/RTTI providers) retain guest-export precedence.
+	return type == SymbolType::Object && name == U"P330P3dFF68";
 }
 
 Vector<uint32_t> LoaderBuildModuleStartOrder(const Vector<ModuleStartDescriptor>& modules)
@@ -772,6 +855,61 @@ static RelocationInfo GetRelocationInfo(Elf64_Rela* r, Program* program)
 	return ret;
 }
 
+static const Elf64_Rela* FindTpoff64Relocation(const Elf64_Rela* records, uint64_t size)
+{
+	if (records == nullptr)
+	{
+		return nullptr;
+	}
+
+	const uint64_t count = size / sizeof(Elf64_Rela);
+	for (uint64_t index = 0; index < count; index++)
+	{
+		if (records[index].GetType() == R_X86_64_TPOFF64)
+		{
+			return &records[index];
+		}
+	}
+
+	return nullptr;
+}
+
+bool LoaderHasLateDynamicTlsTpoff64(const Program* program)
+{
+	if (program == nullptr || !program->tls.dynamic || program->dynamic_info == nullptr)
+	{
+		return false;
+	}
+
+	const auto* dynamic_info = program->dynamic_info;
+	return FindTpoff64Relocation(dynamic_info->rela_table, dynamic_info->rela_table_total_size) != nullptr ||
+	       FindTpoff64Relocation(dynamic_info->jmprela_table, dynamic_info->jmprela_table_size) != nullptr;
+}
+
+void RuntimeLinker::ValidateLateDynamicTlsRelocations(const Program* program)
+{
+	if (!LoaderHasLateDynamicTlsTpoff64(program))
+	{
+		return;
+	}
+
+	const auto* dynamic_info = program->dynamic_info;
+	const auto* relocation = FindTpoff64Relocation(dynamic_info->rela_table, dynamic_info->rela_table_total_size);
+	if (relocation == nullptr)
+	{
+		relocation = FindTpoff64Relocation(dynamic_info->jmprela_table, dynamic_info->jmprela_table_size);
+	}
+
+	if (relocation != nullptr)
+	{
+		// R_X86_64_TPOFF64 encodes a local-exec address relative to the frozen
+		// static TLS block. A late-loaded module has only per-thread dynamic TLS,
+		// so reject this unsupported ABI combination before relocation writes.
+		EXIT("late-loaded dynamic TLS module uses unsupported R_X86_64_TPOFF64: module=%s relocation=0x%016" PRIx64 "\n",
+		     program->file_name.C_Str(), relocation->r_offset);
+	}
+}
+
 static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmprela_table)
 {
 	KYTY_LOADER_PROFILE_FUNCTION();
@@ -804,6 +942,21 @@ static void relocate(uint32_t index, Elf64_Rela* r, Program* program, bool jmpre
 		if (ri.type == SymbolType::Object && weak)
 		{
 			value = g_invalid_memory;
+			// Diagnostic: weak Object imports land on the NoAccess sentinel at
+			// INVALID_MEMORY (0x840000000). Titles that later dereference the
+			// sentinel crash with FAULTR at 0x8400000xx — log the NID once so
+			// the missing HLE Object can be registered (see LibC classic locale).
+			if (const char* weak_obj_log = std::getenv("KYTY_LOG_WEAK_OBJECTS");
+			    weak_obj_log != nullptr && weak_obj_log[0] != '\0')
+			{
+				static std::atomic_uint32_t weak_object_log_count {0};
+				if (weak_object_log_count.fetch_add(1, std::memory_order_relaxed) < 256u)
+				{
+					// stderr so Silent PrintfDirection still captures names for diagnosis.
+					std::fprintf(stderr, "weak Object -> INVALID_MEMORY: %s bind=%s from=%s\n", ri.name.C_Str(),
+					             Core::EnumName(ri.bind).C_Str(), ri.dbg_name.C_Str());
+				}
+			}
 		} else if (ri.type == SymbolType::Func && jmprela_table)
 		{
 			if (program->custom_call_plt_vaddr != 0)
@@ -1339,17 +1492,61 @@ void RuntimeLinker::UnloadProgram(Program* program)
 RuntimeLinker::RuntimeLinker(): m_symbols(new SymbolDatabase)
 {
 	if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	m_previous_guest_runtime_owner = g_guest_runtime_owner.exchange(this, std::memory_order_acq_rel);
-	Emulator::GuestRuntimePort::Install({FindProgramByAddrForPort, GuestCall::Invoke, GuestCall::Invoke4, GuestCall::InvokeOnStack});
+	Core::LockGuard lock(g_guest_runtime_owner_mutex);
+	m_previous_guest_runtime_owner = g_guest_runtime_owner;
+	m_current_runtime_published    = true;
+	g_guest_runtime_owner          = this;
+	Emulator::GuestRuntimePort::Install(
+	    {FindProgramByAddrForPort, GuestCall::Invoke, GuestCall::Invoke4, GuestCall::InvokeOnStack, ReleaseCurrentThreadDynamicTls});
 }
 
 RuntimeLinker::~RuntimeLinker()
 {
-	Clear();
-	RuntimeLinker* expected = this;
-	if (g_guest_runtime_owner.compare_exchange_strong(expected, m_previous_guest_runtime_owner, std::memory_order_acq_rel))
+	bool was_current_runtime = false;
+	void (*unpublished_hook)(void*) = nullptr;
+	void* unpublished_hook_context = nullptr;
 	{
-		if (m_previous_guest_runtime_owner == nullptr)
+		g_guest_runtime_owner_mutex.Lock();
+		m_current_runtime_published = false;
+		if (g_guest_runtime_owner == this)
+		{
+			// Stop new leases before Clear() mutates linker/TLS state, then wait
+			// until every acquired cleanup or port lookup has released this owner.
+			g_guest_runtime_owner = m_previous_guest_runtime_owner;
+			was_current_runtime   = true;
+		} else
+		{
+			// A nested linker can outlive an older one in focused tooling/tests.
+			// Remove this retiring owner from its predecessor chain so a later
+			// teardown cannot republish a dangling raw pointer.
+			for (auto* owner = g_guest_runtime_owner; owner != nullptr; owner = owner->m_previous_guest_runtime_owner)
+			{
+				if (owner->m_previous_guest_runtime_owner == this)
+				{
+					owner->m_previous_guest_runtime_owner = m_previous_guest_runtime_owner;
+					break;
+				}
+			}
+		}
+		while (m_current_runtime_use_count != 0)
+		{
+			g_guest_runtime_owner_drained.Wait(&g_guest_runtime_owner_mutex);
+		}
+		unpublished_hook         = g_current_runtime_unpublished_hook;
+		unpublished_hook_context = g_current_runtime_unpublished_hook_context;
+		g_guest_runtime_owner_mutex.Unlock();
+	}
+
+	if (unpublished_hook != nullptr)
+	{
+		unpublished_hook(unpublished_hook_context);
+	}
+
+	Clear();
+	if (was_current_runtime)
+	{
+		Core::LockGuard lock(g_guest_runtime_owner_mutex);
+		if (g_guest_runtime_owner == nullptr)
 		{
 			Emulator::GuestRuntimePort::Install({});
 		}
@@ -1436,6 +1633,7 @@ Program* RuntimeLinker::LoadProgram(const String& elf_name)
 		}
 		LoadProgramToMemory(program);
 		ParseProgramDynamicInfo(program);
+		ValidateLateDynamicTlsRelocations(program);
 		CreateSymbolDatabase(program);
 	} else
 	{
@@ -1622,6 +1820,18 @@ void RuntimeLinker::Clear()
 			delete allocation;
 		}
 		m_static_tlss.Clear();
+
+		FOR_HASH (m_dynamic_tlss)
+		{
+			auto* per_thread = m_dynamic_tlss.Value();
+			FOR_HASH (*per_thread)
+			{
+				delete[] per_thread->Value();
+			}
+			per_thread->Clear();
+			delete per_thread;
+		}
+		m_dynamic_tlss.Clear();
 	}
 
 	for (auto* p: m_programs)
@@ -1702,7 +1912,7 @@ void RuntimeLinker::Resolve(const String& name, SymbolType type, Program* progra
 	// Some runtime symbols have process-wide host state or synchronization
 	// contracts. When both a guest export and HLE implementation exist, keep
 	// those imports on the HLE side of the ABI boundary.
-	const bool prefer_hle_runtime = hle_record != nullptr && IsHleOwnedRuntimeSymbol(resolve.name);
+	const bool prefer_hle_runtime = hle_record != nullptr && IsHleOwnedRuntimeSymbol(resolve.name, resolve.type);
 	const SymbolRecord* record =
 	    prefer_hle_runtime ? hle_record : (export_record != nullptr ? export_record : hle_record);
 
@@ -2288,6 +2498,38 @@ uint8_t* RuntimeLinker::GetStaticTlsThreadPointerLocked()
 	return thread_pointer;
 }
 
+uint8_t* RuntimeLinker::GetDynamicTlsThreadAddrLocked(Program* program, uint64_t offset)
+{
+	EXIT_IF(program == nullptr || program->rt == nullptr);
+	EXIT_IF(program->tls.image_size == 0);
+	EXIT_IF(offset > program->tls.image_size);
+
+	// Callers hold m_mutex while resolving the program. The TLS mutex owns both
+	// static and dynamic per-thread allocations, including cleanup on thread exit.
+	Core::LockGuard tls_lock(m_static_tls_mutex);
+
+	const int thread_id = Core::Thread::GetThreadIdUnique();
+
+	auto*& per_thread_map = m_dynamic_tlss.GetOrPutDef(program->tls.module_id, nullptr);
+	if (per_thread_map == nullptr)
+	{
+		per_thread_map = new Core::Hashmap<int, uint8_t*>;
+	}
+	auto&  per_thread = *per_thread_map;
+	auto*  buffer     = per_thread.GetOrPutDef(thread_id, nullptr);
+	if (buffer == nullptr)
+	{
+		buffer = new uint8_t[program->tls.image_size];
+		LoaderInitializeThreadTlsImage(buffer, program->tls.image_size,
+		                               reinterpret_cast<const uint8_t*>(program->tls.image_vaddr), program->tls.init_size);
+		LoaderPrepareThreadTlsImage(buffer, program->tls.image_size, program->tls.image_vaddr, program->base_vaddr, program->base_size,
+		                            TlsGuestRead64, nullptr);
+		per_thread.Put(thread_id, buffer);
+	}
+
+	return buffer + offset;
+}
+
 uint8_t* RuntimeLinker::TlsGetAddr(Program* program)
 {
 	EXIT_IF(program == nullptr || program->rt == nullptr || program->tls.image_size == 0 || program->tls.static_offset == 0);
@@ -2319,6 +2561,11 @@ uint8_t* RuntimeLinker::TlsGetAddr(uint64_t module_id, uint64_t offset)
 	EXIT_IF(program == nullptr);
 	EXIT_IF(offset > program->tls.image_size);
 
+	if (program->tls.dynamic)
+	{
+		return rt->GetDynamicTlsThreadAddrLocked(program, offset);
+	}
+
 	auto* thread_pointer = rt->GetStaticTlsThreadPointerLocked();
 	return thread_pointer - program->tls.static_offset + offset;
 }
@@ -2332,6 +2579,22 @@ void RuntimeLinker::DeleteStaticTlsAllocation(int thread_id)
 		delete[] allocation->base;
 		delete allocation;
 		m_static_tlss.Remove(thread_id);
+	}
+}
+
+
+void RuntimeLinker::DeleteDynamicTlsAllocation(int thread_id)
+{
+	Core::LockGuard tls_lock(m_static_tls_mutex);
+	FOR_HASH (m_dynamic_tlss)
+	{
+		auto* per_thread = m_dynamic_tlss.Value();
+		auto* buffer     = per_thread->Get(thread_id, nullptr);
+		if (buffer != nullptr)
+		{
+			delete[] buffer;
+			per_thread->Remove(thread_id);
+		}
 	}
 }
 
@@ -2460,27 +2723,35 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 			EXIT_IF(phdr[i].p_vaddr >= program->base_size);
 			EXIT_IF(phdr[i].p_filesz > phdr[i].p_memsz);
 
+			program->tls.image_vaddr = phdr[i].p_vaddr + program->base_vaddr;
+			program->tls.image_size  = phdr[i].p_memsz;
+			program->tls.init_size   = phdr[i].p_filesz;
+			program->tls.module_id   = g_next_tls_module_id++;
+
+			Core::LockGuard tls_lock(program->rt->m_static_tls_mutex);
+
+			// A shared module whose TLS arrives after threads already
+			// materialized static TLS blocks must not move those blocks:
+			// guest code may cache TLS-derived pointers (thread contexts,
+			// arenas) and the real system keeps dlopen'd TLS in per-thread
+			// dynamic buffers. Register this module as dynamic and leave the
+			// static area frozen.
+			if (program->rt->m_static_tlss.Size() != 0)
 			{
-				Core::LockGuard tls_lock(program->rt->m_static_tls_mutex);
-				if (program->rt->m_static_tlss.Size() != 0)
-				{
-					EXIT("static TLS module loaded after thread materialization: %s\n", program->file_name.C_Str());
-				}
+				program->tls.dynamic       = true;
+				program->tls.static_offset = 0;
+			} else
+			{
+				const uint64_t alignment = std::max<uint64_t>(phdr[i].p_align, 16);
+				EXIT_IF((alignment & (alignment - 1)) != 0);
+				EXIT_IF(program->rt->m_static_tls_size > std::numeric_limits<uint64_t>::max() - phdr[i].p_memsz);
+
+				const uint64_t tls_end = program->rt->m_static_tls_size + phdr[i].p_memsz;
+				EXIT_IF(tls_end > std::numeric_limits<uint64_t>::max() - (alignment - 1));
+
+				program->tls.static_offset     = (tls_end + alignment - 1) & ~(alignment - 1);
+				program->rt->m_static_tls_size = program->tls.static_offset;
 			}
-
-			const uint64_t alignment = std::max<uint64_t>(phdr[i].p_align, 16);
-			EXIT_IF((alignment & (alignment - 1)) != 0);
-			EXIT_IF(program->rt->m_static_tls_size > std::numeric_limits<uint64_t>::max() - phdr[i].p_memsz);
-
-			const uint64_t tls_end = program->rt->m_static_tls_size + phdr[i].p_memsz;
-			EXIT_IF(tls_end > std::numeric_limits<uint64_t>::max() - (alignment - 1));
-
-			program->tls.image_vaddr   = phdr[i].p_vaddr + program->base_vaddr;
-			program->tls.image_size    = phdr[i].p_memsz;
-			program->tls.init_size     = phdr[i].p_filesz;
-			program->tls.static_offset = (tls_end + alignment - 1) & ~(alignment - 1);
-			program->tls.module_id     = g_next_tls_module_id++;
-			program->rt->m_static_tls_size = program->tls.static_offset;
 
 			KYTY_LOG_DEBUG("tls addr = 0x%016" PRIx64 "\n", program->tls.image_vaddr);
 			KYTY_LOG_DEBUG("tls init   = %" PRIu64 "\n", program->tls.init_size);
@@ -2508,6 +2779,22 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 
 void RuntimeLinker::DeleteProgram(Program* p)
 {
+	if (p->rt != nullptr && p->tls.module_id != 0)
+	{
+		Core::LockGuard tls_lock(p->rt->m_static_tls_mutex);
+		auto* per_thread = p->rt->m_dynamic_tlss.Get(p->tls.module_id, nullptr);
+		if (per_thread != nullptr)
+		{
+			FOR_HASH (*per_thread)
+			{
+				delete[] per_thread->Value();
+			}
+			per_thread->Clear();
+			delete per_thread;
+			p->rt->m_dynamic_tlss.Remove(p->tls.module_id);
+		}
+	}
+
 	if (p->base_vaddr != 0 || p->base_size != 0)
 	{
 		Core::VirtualMemory::Free(p->base_vaddr);
@@ -2847,6 +3134,25 @@ void RuntimeLinker::DeleteTlss(int thread_id)
 {
 	Core::LockGuard lock(m_mutex);
 	DeleteStaticTlsAllocation(thread_id);
+	DeleteDynamicTlsAllocation(thread_id);
+}
+
+void RuntimeLinker::ReleaseCurrentThreadDynamicTls(int thread_id)
+{
+	auto* runtime = AcquireCurrentRuntimeForUse();
+	if (runtime == nullptr)
+	{
+		return;
+	}
+
+	// Keep the same lock order as TLS resolution: linker state first, then the
+	// per-thread TLS maps. The acquired owner lease pins runtime lifetime until
+	// cleanup has finished and is released below.
+	{
+		Core::LockGuard lock(runtime->m_mutex);
+		runtime->DeleteDynamicTlsAllocation(thread_id);
+	}
+	ReleaseCurrentRuntimeForUse(runtime);
 }
 
 } // namespace Kyty::Loader

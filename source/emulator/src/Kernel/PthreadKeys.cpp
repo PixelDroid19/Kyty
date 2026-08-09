@@ -1,10 +1,25 @@
 #include "PthreadInternal.h"
 
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Errors.h"
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Kernel {
+
+class ScopedPthreadKeyDestructorPass
+{
+public:
+	ScopedPthreadKeyDestructorPass()
+	{
+		EXIT_IF(g_pthread_key_destructors_active);
+		g_pthread_key_destructors_active = true;
+	}
+
+	~ScopedPthreadKeyDestructorPass() { g_pthread_key_destructors_active = false; }
+
+	KYTY_CLASS_NO_COPY(ScopedPthreadKeyDestructorPass);
+};
 
 bool PthreadKeys::Create(int* key, pthread_key_destructor_func_t destructor)
 {
@@ -43,9 +58,20 @@ bool PthreadKeys::Delete(int key)
 	return true;
 }
 
-void PthreadKeys::Destruct(int thread_id)
+void PthreadKeys::Destruct(int thread_id, void* guest_stack_top)
 {
-	Core::LockGuard lock(m_mutex);
+	if (g_pthread_key_destructors_active)
+	{
+		// A destructor may legitimately call PthreadExit, which runs this
+		// cleanup handler again. It must not recurse through callbacks, but the
+		// retiring thread's maps still need reclamation before that exit finishes.
+		Core::LockGuard lock(m_mutex);
+		EraseSpecificValuesForThreadLocked(thread_id);
+		return;
+	}
+	EXIT_IF(guest_stack_top == nullptr);
+
+	ScopedPthreadKeyDestructorPass destructor_pass;
 
 	struct CallInfo
 	{
@@ -57,15 +83,22 @@ void PthreadKeys::Destruct(int thread_id)
 	{
 		Vector<CallInfo> delete_list;
 
-		for (auto& key: m_keys)
 		{
-			if (key.used && key.destructor != nullptr)
+			Core::LockGuard lock(m_mutex);
+
+			for (auto& key: m_keys)
 			{
-				for (auto& v: key.specific_values)
+				if (key.used && key.destructor != nullptr)
 				{
-					if (v.thread_id == thread_id && v.data != nullptr)
+					for (auto& v: key.specific_values)
 					{
-						delete_list.Add(CallInfo({key.destructor, v.data}));
+						if (v.thread_id == thread_id && v.data != nullptr)
+						{
+							delete_list.Add(CallInfo({key.destructor, v.data}));
+							// POSIX permits another destructor pass only if this callback
+							// stores a non-null value again.
+							v.data = nullptr;
+						}
 					}
 				}
 			}
@@ -73,14 +106,55 @@ void PthreadKeys::Destruct(int thread_id)
 
 		if (delete_list.IsEmpty())
 		{
-			return;
+			break;
 		}
 
 		for (auto& d: delete_list)
 		{
-			d.destructor(d.data);
+			// Destructors are guest callbacks. Invoke them on the retiring guest
+			// stack so ABI stack-relative state and the exiting pthread identity
+			// remain valid across all four POSIX destructor passes.
+			(void)::Kyty::Emulator::GuestRuntimePort::InvokeOnStack(reinterpret_cast<uint64_t>(d.destructor),
+			                                                        reinterpret_cast<uint64_t>(d.data), 0, 0, guest_stack_top);
 		}
 	}
+
+	Core::LockGuard lock(m_mutex);
+	EraseSpecificValuesForThreadLocked(thread_id);
+}
+
+void PthreadKeys::EraseSpecificValuesForThreadLocked(int thread_id)
+{
+	// A nullptr value does not schedule another callback, but its map entry is
+	// still per-thread state. Remove every entry for this retired thread after
+	// the final pass so repeated workers cannot accumulate stale key records.
+	for (auto& key: m_keys)
+	{
+		for (uint32_t index = key.specific_values.Size(); index > 0; index--)
+		{
+			if (key.specific_values.At(index - 1).thread_id == thread_id)
+			{
+				key.specific_values.RemoveAt(index - 1);
+			}
+		}
+	}
+}
+
+uint32_t PthreadKeys::CountSpecificValuesForThread(int thread_id)
+{
+	Core::LockGuard lock(m_mutex);
+	uint32_t        count = 0;
+	for (const auto& key: m_keys)
+	{
+		for (const auto& value: key.specific_values)
+		{
+			if (value.thread_id == thread_id)
+			{
+				count++;
+			}
+		}
+	}
+	return count;
 }
 
 bool PthreadKeys::Set(int key, int thread_id, void* data)

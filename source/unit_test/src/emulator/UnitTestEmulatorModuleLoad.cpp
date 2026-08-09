@@ -1,7 +1,9 @@
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/RuntimeLinker.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Dialog.h"
@@ -11,8 +13,13 @@
 #include "Kyty/Core/File.h"
 #include "Kyty/UnitTest.h"
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -25,6 +32,35 @@ public:
 	static Program* AttachSyntheticExportModule(RuntimeLinker* rt, const Core::String& file_name)
 	{
 		return rt->AttachSyntheticExportModule(file_name);
+	}
+
+	static uint8_t* GetDynamicTls(RuntimeLinker* rt, Program* program)
+	{
+		Core::LockGuard lock(rt->m_mutex);
+		return rt->GetDynamicTlsThreadAddrLocked(program, 0);
+	}
+
+	static uint32_t DynamicTlsAllocationCount(RuntimeLinker* rt, uint64_t module_id)
+	{
+		Core::LockGuard lock(rt->m_mutex);
+		Core::LockGuard tls_lock(rt->m_static_tls_mutex);
+		auto* per_thread = rt->m_dynamic_tlss.Get(module_id, nullptr);
+		return per_thread != nullptr ? per_thread->Size() : 0;
+	}
+
+	static void SetCurrentRuntimeAcquireHook(void (*hook)(void*), void* context)
+	{
+		RuntimeLinker::SetCurrentRuntimeAcquireHookForTesting(hook, context);
+	}
+
+	static void SetCurrentRuntimeUnpublishedHook(void (*hook)(void*), void* context)
+	{
+		RuntimeLinker::SetCurrentRuntimeUnpublishedHookForTesting(hook, context);
+	}
+
+	static bool IsCurrentRuntime(const RuntimeLinker* runtime)
+	{
+		return RuntimeLinker::IsCurrentRuntimeForTesting(runtime);
 	}
 };
 
@@ -120,6 +156,13 @@ SymbolResolve LibcFunc(const char16_t* nid)
 	sr.module_version_major = 1;
 	sr.module_version_minor = 1;
 	sr.type                 = SymbolType::Func;
+	return sr;
+}
+
+SymbolResolve LibcObject(const char16_t* nid)
+{
+	SymbolResolve sr = LibcFunc(nid);
+	sr.type          = SymbolType::Object;
 	return sr;
 }
 
@@ -230,6 +273,61 @@ void EnsureFileSystemSubsystem()
 		Kyty::Kernel::FileSystem::FileSystemSubsystem::Instance()->Init(Kyty::Core::SubsystemsList::Instance());
 		initialized = true;
 	}
+}
+
+void EnsurePthreadSubsystem()
+{
+	if (!Kyty::Kernel::PthreadIsInitialized())
+	{
+		Kyty::Kernel::PthreadSubsystem::Instance()->Init(Kyty::Core::SubsystemsList::Instance());
+	}
+}
+
+uint64_t KYTY_SYSV_ABI InvokeHostPthreadEntryOnStack(uint64_t target, uint64_t arg0, uint64_t /*arg1*/, uint64_t /*arg2*/,
+                                                      void* /*stack_top*/)
+{
+	auto* entry = reinterpret_cast<Kyty::Kernel::pthread_entry_func_t>(target);
+	return reinterpret_cast<uint64_t>(entry(reinterpret_cast<void*>(arg0)));
+}
+
+struct DynamicTlsWorkerContext
+{
+	RuntimeLinker*   runtime = nullptr;
+	Program*         program = nullptr;
+	std::atomic_int  initial_value {-1};
+	std::atomic_bool touched {false};
+};
+
+void* KYTY_SYSV_ABI TouchDynamicTlsWorker(void* arg)
+{
+	auto* context = static_cast<DynamicTlsWorkerContext*>(arg);
+	auto* tls     = RuntimeLinkerIntegrationAccess::GetDynamicTls(context->runtime, context->program);
+	context->initial_value.store(tls[0], std::memory_order_release);
+	tls[0] = 0x7f;
+	context->touched.store(true, std::memory_order_release);
+	return nullptr;
+}
+
+struct PausedRuntimeCleanupAcquire
+{
+	std::mutex              mutex;
+	std::condition_variable state_changed;
+	bool                    acquired = false;
+	bool                    release  = false;
+};
+
+void PauseRuntimeCleanupAcquire(void* context)
+{
+	auto* pause = static_cast<PausedRuntimeCleanupAcquire*>(context);
+	std::unique_lock<std::mutex> lock(pause->mutex);
+	pause->acquired = true;
+	pause->state_changed.notify_all();
+	pause->state_changed.wait(lock, [pause] { return pause->release; });
+}
+
+uint64_t KYTY_SYSV_ABI RuntimeProviderProbe(uint64_t arg0, uint64_t arg1, uint64_t arg2)
+{
+	return arg0 + arg1 + arg2;
 }
 
 } // namespace
@@ -519,6 +617,182 @@ TEST(EmulatorModuleLoad, ResolvePrefersHleMemalignOverUninitializedGuestLibcHeap
 
 	EXPECT_EQ(out.vaddr, 0x11110000u);
 	EXPECT_FALSE(bind_self);
+}
+
+TEST(EmulatorModuleLoad, ResolvePrefersHleLibcNeedFlagObjectOverGuestShim)
+{
+	EnsureFileSystemSubsystem();
+	RuntimeLinker rt;
+	const auto    sr = LibcObject(u"P330P3dFF68");
+	rt.Symbols()->Add(sr, 0x11110000, U"hle_libc_need_flag");
+
+	Program* importer = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&rt, U"/tmp/eboot.bin");
+	AddLibcImportIds(importer);
+
+	Program* libc = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&rt, U"/tmp/sce_module/libc.prx");
+	AddLibcExportIds(libc);
+	libc->export_symbols->Add(sr, 0x22220000, U"guest_libc_need_flag_shim");
+
+	SymbolRecord out {};
+	bool         bind_self = true;
+	rt.Resolve(U"P330P3dFF68#libc-lib-id#libc-mod-id", SymbolType::Object, importer, &out, &bind_self);
+
+	EXPECT_EQ(out.vaddr, 0x11110000u);
+	EXPECT_FALSE(bind_self);
+}
+
+TEST(EmulatorModuleLoad, DetectsLateDynamicTpoff64WithoutFatalValidation)
+{
+	Elf64_Rela relocation {};
+	relocation.r_offset = 0x40;
+	relocation.r_info   = R_X86_64_TPOFF64;
+
+	DynamicInfo dynamic_info {};
+	dynamic_info.rela_table            = &relocation;
+	dynamic_info.rela_table_total_size = sizeof(relocation);
+
+	Program program {};
+	program.file_name    = U"/tmp/late_tls.prx";
+	program.dynamic_info = &dynamic_info;
+	program.tls.dynamic  = true;
+
+	EXPECT_TRUE(LoaderHasLateDynamicTlsTpoff64(&program));
+
+	program.tls.dynamic = false;
+	EXPECT_FALSE(LoaderHasLateDynamicTlsTpoff64(&program));
+
+	program.tls.dynamic = true;
+	relocation.r_info   = R_X86_64_DTPOFF64;
+	EXPECT_FALSE(LoaderHasLateDynamicTlsTpoff64(&program));
+}
+
+TEST(EmulatorModuleLoad, WorkerExitReclaimsLateDynamicTlsImages)
+{
+	EnsureFileSystemSubsystem();
+	EnsurePthreadSubsystem();
+	RuntimeLinker runtime;
+	Kyty::Emulator::GuestRuntimePort::Install(
+	    {nullptr, nullptr, nullptr, InvokeHostPthreadEntryOnStack, RuntimeLinker::ReleaseCurrentThreadDynamicTls});
+
+	Program* const program = RuntimeLinkerIntegrationAccess::AttachSyntheticExportModule(&runtime, U"/tmp/late_tls.prx");
+	ASSERT_NE(program, nullptr);
+	program->tls.dynamic    = true;
+	program->tls.module_id  = 0x1234;
+	program->tls.image_size = 16;
+
+	for (int worker = 0; worker < 2; worker++)
+	{
+		DynamicTlsWorkerContext context {&runtime, program};
+		Kyty::Kernel::Pthread  thread = nullptr;
+		ASSERT_EQ(Kyty::Kernel::PthreadCreate(&thread, nullptr, TouchDynamicTlsWorker, &context, "late-tls-worker"), OK);
+		ASSERT_NE(thread, nullptr);
+		EXPECT_EQ(Kyty::Kernel::PthreadJoin(thread, nullptr), OK);
+		EXPECT_TRUE(context.touched.load(std::memory_order_acquire));
+		EXPECT_EQ(context.initial_value.load(std::memory_order_acquire), 0);
+		EXPECT_EQ(RuntimeLinkerIntegrationAccess::DynamicTlsAllocationCount(&runtime, program->tls.module_id), 0u);
+	}
+}
+
+TEST(EmulatorModuleLoad, RuntimeCleanupLeasePinsOwnerThroughTeardown)
+{
+	EnsureFileSystemSubsystem();
+	auto* runtime = new RuntimeLinker;
+
+	PausedRuntimeCleanupAcquire pause {};
+	RuntimeLinkerIntegrationAccess::SetCurrentRuntimeAcquireHook(PauseRuntimeCleanupAcquire, &pause);
+
+	std::atomic_bool cleanup_returned {false};
+	std::atomic_bool teardown_returned {false};
+	std::thread cleanup([&] {
+		RuntimeLinker::ReleaseCurrentThreadDynamicTls(0x1234);
+		cleanup_returned.store(true, std::memory_order_release);
+	});
+
+	bool acquired = false;
+	{
+		std::unique_lock<std::mutex> lock(pause.mutex);
+		acquired = pause.state_changed.wait_for(lock, std::chrono::seconds(5), [&pause] { return pause.acquired; });
+	}
+	if (!acquired)
+	{
+		{
+			std::lock_guard<std::mutex> lock(pause.mutex);
+			pause.release = true;
+		}
+		pause.state_changed.notify_all();
+		cleanup.join();
+		RuntimeLinkerIntegrationAccess::SetCurrentRuntimeAcquireHook(nullptr, nullptr);
+		delete runtime;
+		EXPECT_TRUE(acquired);
+		return;
+	}
+
+	std::thread teardown([&] {
+		delete runtime;
+		teardown_returned.store(true, std::memory_order_release);
+	});
+
+	for (int attempts = 0; attempts < 10000 && RuntimeLinkerIntegrationAccess::IsCurrentRuntime(runtime); attempts++)
+	{
+		std::this_thread::yield();
+	}
+	EXPECT_FALSE(RuntimeLinkerIntegrationAccess::IsCurrentRuntime(runtime));
+	EXPECT_FALSE(teardown_returned.load(std::memory_order_acquire));
+
+	{
+		std::lock_guard<std::mutex> lock(pause.mutex);
+		pause.release = true;
+	}
+	pause.state_changed.notify_all();
+	cleanup.join();
+	teardown.join();
+
+	EXPECT_TRUE(cleanup_returned.load(std::memory_order_acquire));
+	EXPECT_TRUE(teardown_returned.load(std::memory_order_acquire));
+	RuntimeLinkerIntegrationAccess::SetCurrentRuntimeAcquireHook(nullptr, nullptr);
+}
+
+TEST(EmulatorModuleLoad, RuntimeProviderSurvivesRetiringOwnerAfterSuccessorPublishes)
+{
+	EnsureFileSystemSubsystem();
+	auto* retiring = new RuntimeLinker;
+
+	PausedRuntimeCleanupAcquire pause {};
+	RuntimeLinkerIntegrationAccess::SetCurrentRuntimeUnpublishedHook(PauseRuntimeCleanupAcquire, &pause);
+
+	std::thread teardown([&] { delete retiring; });
+
+	bool unpublished = false;
+	{
+		std::unique_lock<std::mutex> lock(pause.mutex);
+		unpublished = pause.state_changed.wait_for(lock, std::chrono::seconds(5), [&pause] { return pause.acquired; });
+	}
+	if (!unpublished)
+	{
+		{
+			std::lock_guard<std::mutex> lock(pause.mutex);
+			pause.release = true;
+		}
+		pause.state_changed.notify_all();
+		teardown.join();
+		RuntimeLinkerIntegrationAccess::SetCurrentRuntimeUnpublishedHook(nullptr, nullptr);
+		EXPECT_TRUE(unpublished);
+		return;
+	}
+
+	RuntimeLinker successor;
+	EXPECT_TRUE(RuntimeLinkerIntegrationAccess::IsCurrentRuntime(&successor));
+
+	{
+		std::lock_guard<std::mutex> lock(pause.mutex);
+		pause.release = true;
+	}
+	pause.state_changed.notify_all();
+	teardown.join();
+	RuntimeLinkerIntegrationAccess::SetCurrentRuntimeUnpublishedHook(nullptr, nullptr);
+
+	EXPECT_TRUE(RuntimeLinkerIntegrationAccess::IsCurrentRuntime(&successor));
+	EXPECT_EQ(Kyty::Emulator::GuestRuntimePort::Invoke(reinterpret_cast<uint64_t>(RuntimeProviderProbe), 1u, 2u, 3u), 6u);
 }
 
 TEST(EmulatorModuleLoad, ResolvePrefersHlePs5UtilThreadContextRequestOverGuestShim)

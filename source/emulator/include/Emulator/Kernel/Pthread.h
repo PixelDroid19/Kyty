@@ -227,7 +227,7 @@ void SlotTraceDumpBlockedCondWaiters();
 namespace Kyty::Libs::Posix {
 
 int KYTY_SYSV_ABI   getpid();
-// Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4 (Astro after AudioOut2 residual).
+// Gen5 Posix_v1 pthread_self — NID EotR8a3ASf4.
 Kernel::Pthread KYTY_SYSV_ABI pthread_self();
 int KYTY_SYSV_ABI   pthread_create(Kernel::Pthread* thread, const Kernel::PthreadAttr* attr, Kernel::pthread_entry_func_t entry,
                                    void* arg);
@@ -235,6 +235,7 @@ int KYTY_SYSV_ABI   pthread_create_name_np(Kernel::Pthread* thread, const Kernel
                                            Kernel::pthread_entry_func_t entry, void* arg, const char* name);
 int KYTY_SYSV_ABI   pthread_equal(Kernel::Pthread thread1, Kernel::Pthread thread2);
 int KYTY_SYSV_ABI   pthread_setcancelstate(int state, int* old_state);
+int KYTY_SYSV_ABI   pthread_setcanceltype(int type, int* old_type);
 int KYTY_SYSV_ABI   pthread_setprio(Kernel::Pthread thread, int prio);
 int KYTY_SYSV_ABI   pthread_join(Kernel::Pthread thread, void** value);
 // Gen5 Posix_v1 thread control (+U1R4WtXvoc detach after attr setup).
@@ -280,7 +281,7 @@ int KYTY_SYSV_ABI   pthread_mutex_init(Kernel::PthreadMutex* mutex, const Kernel
 int KYTY_SYSV_ABI   pthread_mutexattr_init(Kernel::PthreadMutexattr* attr);
 int KYTY_SYSV_ABI   pthread_mutexattr_settype(Kernel::PthreadMutexattr* attr, int type);
 int KYTY_SYSV_ABI   pthread_mutexattr_destroy(Kernel::PthreadMutexattr* attr);
-// Gen5 Posix_v1 pthread_attr_* (Astro after package path bring-up).
+// Gen5 Posix_v1 pthread_attr_*.
 int KYTY_SYSV_ABI pthread_attr_init(Kernel::PthreadAttr* attr);
 int KYTY_SYSV_ABI pthread_attr_destroy(Kernel::PthreadAttr* attr);
 int KYTY_SYSV_ABI pthread_attr_getstack(const Kernel::PthreadAttr* attr, void** stack_addr, size_t* stack_size);

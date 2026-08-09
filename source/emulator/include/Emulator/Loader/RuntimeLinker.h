@@ -59,6 +59,11 @@ struct ThreadLocalStorage
 	uint64_t handler_vaddr = 0;
 	uint64_t module_id     = 0;
 	uint64_t static_offset = 0;
+	// Late-loaded shared module whose PT_TLS arrived after threads already
+	// materialized static TLS blocks. Its image lives in per-thread dynamic
+	// buffers instead of the static area, so existing TLS-relative guest
+	// pointers (for example a cached thread context) keep their addresses.
+	bool     dynamic       = false;
 };
 
 struct StaticTlsAllocation
@@ -243,6 +248,10 @@ public:
 	void StartAllModulesOnStack(void* stack_top);
 	void StopAllModules();
 	void DeleteTlss(int thread_id);
+	// Worker cleanup must not release the static TLS/TCB allocation while guest
+	// teardown can still reference it. This only releases late-module TLS
+	// images owned by the active runtime, if one is installed.
+	static void ReleaseCurrentThreadDynamicTls(int thread_id);
 
 	void Resolve(const String& name, SymbolType type, Program* program, SymbolRecord* out_info, bool* bind_self = nullptr);
 	[[nodiscard]] MissingImportDiagnostics GetMissingImportDiagnostics() const;
@@ -282,12 +291,21 @@ private:
 
 	static void LoadProgramToMemory(Program* program);
 	static void ParseProgramDynamicInfo(Program* program);
+	static void ValidateLateDynamicTlsRelocations(const Program* program);
 	static void CreateSymbolDatabase(Program* program);
 	static void Relocate(Program* program);
 	static void DeleteProgram(Program* program);
 	static void SetupTlsHandler(Program* program);
+	static const void* FindProgramByAddrForPort(uint64_t vaddr);
+	static RuntimeLinker* AcquireCurrentRuntimeForUse();
+	static void ReleaseCurrentRuntimeForUse(RuntimeLinker* runtime);
+	static void SetCurrentRuntimeAcquireHookForTesting(void (*hook)(void*), void* context);
+	static void SetCurrentRuntimeUnpublishedHookForTesting(void (*hook)(void*), void* context);
+	static bool IsCurrentRuntimeForTesting(const RuntimeLinker* runtime);
 	uint8_t*   GetStaticTlsThreadPointerLocked();
+	uint8_t*   GetDynamicTlsThreadAddrLocked(Program* program, uint64_t offset);
 	void       DeleteStaticTlsAllocation(int thread_id);
+	void       DeleteDynamicTlsAllocation(int thread_id);
 
 	Program* FindProgram(const ModuleId& m, const LibraryId& l);
 
@@ -300,9 +318,13 @@ private:
 	std::atomic<uint32_t>                  m_relocation_depth {0};
 	uint64_t                               m_static_tls_size     = 0;
 	Core::Hashmap<int, StaticTlsAllocation*> m_static_tlss;
-	Core::Mutex                            m_static_tls_mutex;
+	// module_id -> thread_id -> per-thread image buffer for dynamic TLS modules.
+	Core::Hashmap<uint64_t, Core::Hashmap<int, uint8_t*>*> m_dynamic_tlss;
+	Core::Mutex                                          m_static_tls_mutex;
 	Core::Mutex                            m_mutex;
 	RuntimeLinker*                         m_previous_guest_runtime_owner = nullptr;
+	uint32_t                               m_current_runtime_use_count    = 0;
+	bool                                   m_current_runtime_published    = false;
 };
 
 // Rewrite PS5 TLS-call sites that encode three 0x66 prefixes before E8
@@ -324,6 +346,11 @@ uint64_t LoaderPatchTlsFsBaseLoads(uint8_t* code, uint64_t size, uint64_t handle
 // TPOFF64 writes the negative static offset from the thread pointer.
 uint64_t LoaderTlsRelocationValue(uint32_t relocation_type, uint64_t module_id, uint64_t symbol_offset, int64_t addend,
                                   uint64_t static_tls_size);
+
+// True when a late dynamic-TLS module contains a local-exec relocation that
+// cannot be represented by its per-thread dynamic TLS image. This predicate is
+// nonfatal so parser and unit-test paths can validate the rejection safely.
+bool LoaderHasLateDynamicTlsTpoff64(const Program* program);
 
 // Initialize a per-thread PT_TLS image. Only the file-backed prefix is copied;
 // the remaining memory image is TLS BSS and must start at zero.

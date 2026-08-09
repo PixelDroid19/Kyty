@@ -124,7 +124,9 @@ void PthreadPool::FreeDetachedThreads()
 	{
 		if (p->detached && p->almost_done && !p->free)
 		{
-			PthreadJoin(p, nullptr);
+			// Guest join must reject a detached thread; the pool owns the separate
+			// host join used only to reclaim a completed detached worker.
+			PthreadReapDetached(p);
 		}
 	}
 }

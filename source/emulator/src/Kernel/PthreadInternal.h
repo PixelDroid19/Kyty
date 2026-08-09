@@ -31,6 +31,22 @@ constexpr size_t PTHREAD_STACK_EXTRA     = 0x100000;
 constexpr size_t HOST_PTHREAD_STACK_MIN  = 0x100000;
 constexpr size_t MAIN_GUEST_STACK_MIN    = 64ull * 1024ull * 1024ull;
 
+constexpr int GUEST_SCHED_OTHER = 0;
+constexpr int GUEST_SCHED_FIFO  = 1;
+constexpr int GUEST_SCHED_RR    = 3;
+constexpr int GUEST_PRIO_MIN    = 256;
+constexpr int GUEST_PRIO_MAX    = 767;
+
+constexpr bool IsValidGuestSchedPolicy(int policy)
+{
+	return policy == GUEST_SCHED_OTHER || policy == GUEST_SCHED_FIFO || policy == GUEST_SCHED_RR;
+}
+
+constexpr bool IsValidGuestPriority(int priority)
+{
+	return priority >= GUEST_PRIO_MIN && priority <= GUEST_PRIO_MAX;
+}
+
 struct PthreadMutexPrivate
 {
 	uint8_t         reserved[256];
@@ -60,8 +76,9 @@ struct PthreadAttrPrivate
 	bool           stack_owned = false;
 	uint64_t       stack_map_addr = 0;
 	size_t         stack_map_size = 0;
-	int            policy;
-	bool           detached;
+	int            priority = 700;
+	int            policy   = GUEST_SCHED_FIFO;
+	bool           detached = false;
 	pthread_attr_t p;
 };
 
@@ -78,6 +95,7 @@ struct PthreadPrivate
 	std::atomic_bool     detached;
 	std::atomic_bool     almost_done;
 	std::atomic_bool     free;
+	std::atomic_int      guest_policy {1};
 	std::atomic_int      guest_priority {700};
 	uint64_t             guest_stack_base = 0;
 	uint64_t             guest_stack_size = 0;
@@ -152,7 +170,8 @@ public:
 
 	bool Create(int* key, pthread_key_destructor_func_t destructor);
 	bool Delete(int key);
-	void Destruct(int thread_id);
+	void Destruct(int thread_id, void* guest_stack_top);
+	[[nodiscard]] uint32_t CountSpecificValuesForThread(int thread_id);
 	bool Set(int key, int thread_id, void* data);
 	bool Get(int key, int thread_id, void** data);
 
@@ -172,6 +191,8 @@ private:
 
 	Core::Mutex m_mutex;
 	Key         m_keys[KEYS_MAX];
+
+	void EraseSpecificValuesForThreadLocked(int thread_id);
 };
 
 class PthreadPool
@@ -235,6 +256,7 @@ private:
 };
 
 extern thread_local Pthread g_pthread_self;
+extern thread_local bool    g_pthread_key_destructors_active;
 extern PThreadContext*      g_pthread_context;
 
 bool relative_usec_to_absolute_timespec(KernelClockid clock_id, KernelUseconds usec, timespec* deadline);
@@ -245,6 +267,7 @@ int  create_guest_stack(PthreadAttr attr);
 void free_guest_stack(PthreadAttr attr);
 int  pthread_attr_copy(PthreadAttr* dst, const PthreadAttr* src);
 void pthread_attr_dbg_print(const PthreadAttr* src);
+int  PthreadReapDetached(Pthread thread);
 
 #ifdef __APPLE__
 void usec_to_timespec(struct timespec* ts, KernelUseconds usec);

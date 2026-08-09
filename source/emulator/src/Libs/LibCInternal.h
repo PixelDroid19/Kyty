@@ -27,6 +27,7 @@ namespace LibC {
 extern uint32_t g_need_flag;
 
 using execute_once_callback_t = KYTY_SYSV_ABI int (*)(void*, void*, void**);
+using cxa_destructor_func_t  = KYTY_SYSV_ABI void (*)(void*);
 
 int  c_thread_sync_result(int result);
 void collect_host_malloc_stats(Core::MSpaceSize* out);
@@ -73,9 +74,9 @@ int  KYTY_SYSV_ABI c_mtx_current_owns(Kernel::PthreadMutex* mutex);
 
 int  KYTY_SYSV_ABI c_execute_once(int* flag, execute_once_callback_t callback, void* context);
 int  KYTY_SYSV_ABI c_vsnprintf(char* s, size_t n, const char* fmt, VaList* ap);
-int  cxa_atexit(void (*func)(void*), void* arg, void* d);
-void cxa_finalize(void* d);
-int  KYTY_SYSV_ABI c_cxa_thread_atexit(void (*dtor)(void*), void* obj, void* dso_handle);
+int  KYTY_SYSV_ABI cxa_atexit(cxa_destructor_func_t func, void* arg, void* d);
+void KYTY_SYSV_ABI cxa_finalize(void* d);
+int  KYTY_SYSV_ABI c_cxa_thread_atexit(cxa_destructor_func_t dtor, void* obj, void* dso_handle);
 
 // stdio guest shims — host FILE* remains opaque to the guest and mounted paths
 // are translated by the isolated implementation in LibCStdIo.cpp.

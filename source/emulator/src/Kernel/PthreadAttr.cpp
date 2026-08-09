@@ -178,6 +178,10 @@ void pthread_attr_dbg_print(const PthreadAttr* src)
 int KYTY_SYSV_ABI PthreadAttrInit(PthreadAttr* attr)
 {
 	PRINT_NAME();
+	if (attr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	*attr = new PthreadAttrPrivate {};
 
@@ -219,7 +223,10 @@ int KYTY_SYSV_ABI PthreadAttrDestroy(PthreadAttr* attr)
 {
 	PRINT_NAME();
 
-	if (attr == nullptr || *attr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (attr == nullptr || *attr == nullptr)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
 	free_guest_stack(*attr);
 	int result = pthread_attr_destroy(&(*attr)->p);
@@ -248,6 +255,13 @@ int KYTY_SYSV_ABI PthreadAttrGet(Pthread thread, PthreadAttr* attr)
 	{
 		return copy_result;
 	}
+
+	// The copied creation template is not authoritative after a live thread
+	// changes its guest scheduling parameters. Host pthread policy stays
+	// deliberately neutral, so report the guest ABI state here as well as via
+	// PthreadGetschedparam/PthreadGetprio.
+	(*attr)->policy   = thread->guest_policy.load(std::memory_order_relaxed);
+	(*attr)->priority = thread->guest_priority.load(std::memory_order_relaxed);
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	// pthread attributes are queried by IL2CPP while registering conservative
@@ -364,24 +378,8 @@ int KYTY_SYSV_ABI PthreadAttrGetschedparam(const PthreadAttr* attr, KernelSchedP
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_attr_getschedparam(&(*attr)->p, param);
-
-	if (param->sched_priority <= -2)
-	{
-		param->sched_priority = 767;
-	} else if (param->sched_priority >= +2)
-	{
-		param->sched_priority = 256;
-	} else
-	{
-		param->sched_priority = 700;
-	}
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	param->sched_priority = (*attr)->priority;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrGetschedpolicy(const PthreadAttr* attr, int* policy)
@@ -393,21 +391,8 @@ int KYTY_SYSV_ABI PthreadAttrGetschedpolicy(const PthreadAttr* attr, int* policy
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_attr_getschedpolicy(&(*attr)->p, policy);
-
-	switch (*policy)
-	{
-		case SCHED_OTHER: *policy = (*attr)->policy; break;
-		case SCHED_FIFO: *policy = 1; break;
-		case SCHED_RR: *policy = 3; break;
-		default: EXIT("unknown policy: %d\n", *policy);
-	}
-
-	if (result == 0)
-	{
-		return OK;
-	}
-	return KERNEL_ERROR_EINVAL;
+	*policy = (*attr)->policy;
+	return OK;
 }
 
 int KYTY_SYSV_ABI PthreadAttrGetstack(const PthreadAttr* __restrict attr, void** __restrict stack_addr, size_t* __restrict stack_size)
@@ -541,16 +526,22 @@ int KYTY_SYSV_ABI PthreadAttrSetschedparam(PthreadAttr* attr, const KernelSchedP
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
+	if (!IsValidGuestPriority(param->sched_priority))
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
-	// PS5 guest priorities span a wide numeric range (observed Thread.cpp
-	// clamps to roughly 256..767). Host Linux SCHED_OTHER only accepts
-	// sched_priority 0 — mapping guest lows/highs to ±2 returns EINVAL and
-	// the game asserts (int $0x41, "ret == 0" / scePthreadAttrSetschedparam).
-	// Apply a host-valid param and always succeed for a well-formed guest call.
-	KernelSchedParam pparam {};
-	pparam.sched_priority = 0;
-	(void)pthread_attr_setschedparam(&(*attr)->p, &pparam);
+	// Guest priorities are observed in [256, 767]. Keep the host attribute at
+	// the valid SCHED_OTHER priority of zero; it must not normalize the guest
+	// ABI value reported by pthread_attr_getschedparam.
+	KernelSchedParam host_param {};
+	host_param.sched_priority = 0;
+	if (pthread_attr_setschedparam(&(*attr)->p, &host_param) != 0)
+	{
+		return KERNEL_ERROR_EINVAL;
+	}
 
+	(*attr)->priority = param->sched_priority;
 	return OK;
 }
 
@@ -562,16 +553,16 @@ int KYTY_SYSV_ABI PthreadAttrSetschedpolicy(PthreadAttr* attr, int policy)
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-
-	// winpthreads supports only SCHED_OTHER policy
-	int ppolicy = SCHED_OTHER;
-
-	(*attr)->policy = policy;
-
-	int result = pthread_attr_setschedpolicy(&(*attr)->p, ppolicy);
-
-	if (result == 0)
+	if (!IsValidGuestSchedPolicy(policy))
 	{
+		return KERNEL_ERROR_EINVAL;
+	}
+
+	// Keep host scheduling unprivileged and platform-neutral. The guest policy
+	// remains in the attribute and is copied into the thread's guest state.
+	if (pthread_attr_setschedpolicy(&(*attr)->p, SCHED_OTHER) == 0)
+	{
+		(*attr)->policy = policy;
 		return OK;
 	}
 	return KERNEL_ERROR_EINVAL;

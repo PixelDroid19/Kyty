@@ -1,20 +1,31 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/CxxLocale.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/ProcessEnvironment.h"
 #include "Emulator/Libs/VaContext.h"
+#include "Emulator/Loader/GuestCall.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include "../../../emulator/src/Kernel/PthreadInternal.h"
+
+#include <atomic>
+#include <array>
 #include <cstdio>
 #include <cmath>
 #include <clocale>
+#include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <mutex>
+#include <thread>
+#include <utility>
+#include <vector>
 
 UT_BEGIN(EmulatorLibcCxxLocale);
 
@@ -45,6 +56,183 @@ void EnsurePthread()
 }
 
 using ExecuteOnceCallback = KYTY_SYSV_ABI int (*)(void*, void*, void**);
+using CxaDestructor       = KYTY_SYSV_ABI void (*)(void*);
+using CxaAtexit           = KYTY_SYSV_ABI int (*)(CxaDestructor, void*, void*);
+using CxaFinalize         = KYTY_SYSV_ABI void (*)(void*);
+
+struct TestIstreambuf
+{
+	void**      vtable = nullptr;
+	const char* current = nullptr;
+};
+
+int KYTY_SYSV_ABI TestIstreamUnderflow(TestIstreambuf* self)
+{
+	return self != nullptr && self->current != nullptr && *self->current != '\0' ? static_cast<unsigned char>(*self->current) : -1;
+}
+
+int KYTY_SYSV_ABI TestIstreamUflow(TestIstreambuf* self)
+{
+	const int result = TestIstreamUnderflow(self);
+	if (result >= 0)
+	{
+		++self->current;
+	}
+	return result;
+}
+
+void* KYTY_SYSV_ABI CompleteDetachedThread(void* arg)
+{
+	auto* complete = static_cast<std::atomic_bool*>(arg);
+	complete->store(true, std::memory_order_release);
+	return nullptr;
+}
+
+void* KYTY_SYSV_ABI HoldPthreadUntilReleased(void* arg)
+{
+	auto* release = static_cast<std::atomic_bool*>(arg);
+	while (!release->load(std::memory_order_acquire)) {}
+	return nullptr;
+}
+
+struct PthreadKeyEntryContext
+{
+	Kernel::PthreadKey key        = -1;
+	void*              value      = nullptr;
+	std::atomic_int    set_result = Libs::LibKernel::KERNEL_ERROR_EINVAL;
+	std::atomic_int    reregister_result = Libs::LibKernel::KERNEL_ERROR_EINVAL;
+	std::atomic_int    worker_thread_id {-1};
+	std::atomic_int    destructor_thread_id {-1};
+	std::atomic_uintptr_t destructor_rsp {0};
+	bool               reregister_in_destructor = false;
+};
+
+std::atomic_int* g_pthread_key_destructor_calls = nullptr;
+PthreadKeyEntryContext* g_pthread_key_destructor_context = nullptr;
+
+class ScopedPthreadKeyDestructorCounter
+{
+public:
+	explicit ScopedPthreadKeyDestructorCounter(std::atomic_int* counter, PthreadKeyEntryContext* context = nullptr)
+	{
+		g_pthread_key_destructor_calls   = counter;
+		g_pthread_key_destructor_context = context;
+	}
+	~ScopedPthreadKeyDestructorCounter()
+	{
+		g_pthread_key_destructor_context = nullptr;
+		g_pthread_key_destructor_calls   = nullptr;
+	}
+
+	KYTY_CLASS_NO_COPY(ScopedPthreadKeyDestructorCounter);
+};
+
+void KYTY_SYSV_ABI CountPthreadKeyDestructor(void* /*value*/)
+{
+	if (g_pthread_key_destructor_calls != nullptr)
+	{
+		const int count = g_pthread_key_destructor_calls->fetch_add(1, std::memory_order_relaxed) + 1;
+		if (g_pthread_key_destructor_context != nullptr)
+		{
+			uintptr_t rsp = 0;
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+			asm volatile("movq %%rsp, %0" : "=r"(rsp));
+#endif
+			g_pthread_key_destructor_context->destructor_rsp.store(rsp, std::memory_order_release);
+			g_pthread_key_destructor_context->destructor_thread_id.store(Kernel::PthreadGetthreadid(),
+			                                                            std::memory_order_release);
+		}
+		if (g_pthread_key_destructor_context != nullptr && g_pthread_key_destructor_context->reregister_in_destructor &&
+		    count < 4)
+		{
+			g_pthread_key_destructor_context->reregister_result.store(
+			    Kernel::PthreadSetspecific(g_pthread_key_destructor_context->key, g_pthread_key_destructor_context->value),
+			    std::memory_order_release);
+		}
+	}
+}
+
+struct CxaCallbackContext
+{
+	std::vector<int>* events             = nullptr;
+	std::mutex*       events_mutex       = nullptr;
+	int               value              = 0;
+	CxaAtexit         atexit             = nullptr;
+	CxaFinalize       finalize            = nullptr;
+	CxaCallbackContext* reentrant_context = nullptr;
+	void*             reentrant_dso      = nullptr;
+	std::atomic_bool  reentered {false};
+};
+
+void KYTY_SYSV_ABI RecordCxaDestructor(void* arg)
+{
+	auto* context = static_cast<CxaCallbackContext*>(arg);
+	if (context == nullptr)
+	{
+		return;
+	}
+
+	{
+		std::lock_guard lock(*context->events_mutex);
+		context->events->push_back(context->value);
+	}
+
+	if (context->reentrant_context != nullptr && !context->reentered.exchange(true, std::memory_order_acq_rel))
+	{
+		(void)context->atexit(RecordCxaDestructor, context->reentrant_context, context->reentrant_dso);
+		context->finalize(context->reentrant_dso);
+	}
+}
+
+struct CxaCountContext
+{
+	std::atomic_int* count = nullptr;
+};
+
+void KYTY_SYSV_ABI CountCxaDestructor(void* arg)
+{
+	auto* context = static_cast<CxaCountContext*>(arg);
+	if (context != nullptr && context->count != nullptr)
+	{
+		context->count->fetch_add(1, std::memory_order_relaxed);
+	}
+}
+
+void* KYTY_SYSV_ABI SetPthreadKeySpecific(void* arg)
+{
+	auto* context = static_cast<PthreadKeyEntryContext*>(arg);
+	context->worker_thread_id.store(Kernel::PthreadGetthreadid(), std::memory_order_release);
+	context->set_result.store(Kernel::PthreadSetspecific(context->key, context->value), std::memory_order_release);
+	return nullptr;
+}
+
+uint64_t KYTY_SYSV_ABI InvokeHostPthreadEntryOnStack(uint64_t target, uint64_t arg0, uint64_t /*arg1*/, uint64_t /*arg2*/,
+                                                      void* /*stack_top*/)
+{
+	auto* entry = reinterpret_cast<Kernel::pthread_entry_func_t>(target);
+	return reinterpret_cast<uint64_t>(entry(reinterpret_cast<void*>(arg0)));
+}
+
+class ScopedPthreadEntryInvoker
+{
+public:
+	ScopedPthreadEntryInvoker() { Emulator::GuestRuntimePort::Install({nullptr, nullptr, nullptr, InvokeHostPthreadEntryOnStack}); }
+	~ScopedPthreadEntryInvoker() { Emulator::GuestRuntimePort::Install({}); }
+
+	KYTY_CLASS_NO_COPY(ScopedPthreadEntryInvoker);
+};
+
+class ScopedPthreadGuestCallInvoker
+{
+public:
+	ScopedPthreadGuestCallInvoker()
+	{
+		Emulator::GuestRuntimePort::Install({nullptr, nullptr, nullptr, Loader::GuestCall::InvokeOnStack});
+	}
+	~ScopedPthreadGuestCallInvoker() { Emulator::GuestRuntimePort::Install({}); }
+
+	KYTY_CLASS_NO_COPY(ScopedPthreadGuestCallInvoker);
+};
 
 struct ExecuteOnceContext
 {
@@ -76,6 +264,18 @@ const Loader::SymbolRecord* ResolveLibcFunction(Loader::SymbolDatabase* symbols,
 	query.module_version_minor = 1;
 	query.type                 = Loader::SymbolType::Func;
 	return symbols->FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+}
+
+std::pair<CxaAtexit, CxaFinalize> ResolveCxaFunctions()
+{
+	Loader::SymbolDatabase symbols;
+	EXPECT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* atexit_record   = ResolveLibcFunction(&symbols, u"tsvEmnenz48");
+	const auto* finalize_record = ResolveLibcFunction(&symbols, u"H2e8t5ScQGc");
+	EXPECT_NE(atexit_record, nullptr);
+	EXPECT_NE(finalize_record, nullptr);
+	return {atexit_record != nullptr ? reinterpret_cast<CxaAtexit>(atexit_record->vaddr) : nullptr,
+	        finalize_record != nullptr ? reinterpret_cast<CxaFinalize>(finalize_record->vaddr) : nullptr};
 }
 
 } // namespace
@@ -829,6 +1029,505 @@ TEST(EmulatorLibcCxxLocale, ResolvesBadCastCompleteDestructor)
 	using Destructor = KYTY_SYSV_ABI void (*)(void*);
 	auto* fn          = reinterpret_cast<Destructor>(rec->vaddr);
 	fn(nullptr);
+}
+
+TEST(EmulatorLibcCxxLocale, CxaFinalizeNullRunsAllRegisteredDsosInReverseOrder)
+{
+	EnsureLog();
+	const auto [atexit, finalize] = ResolveCxaFunctions();
+	ASSERT_NE(atexit, nullptr);
+	ASSERT_NE(finalize, nullptr);
+	finalize(nullptr);
+
+	int              dso_a = 0;
+	int              dso_b = 0;
+	std::vector<int> events;
+	std::mutex       events_mutex;
+	CxaCallbackContext first {&events, &events_mutex, 1};
+	CxaCallbackContext second {&events, &events_mutex, 2};
+	CxaCallbackContext third {&events, &events_mutex, 3};
+
+	ASSERT_EQ(atexit(RecordCxaDestructor, &first, &dso_a), 0);
+	ASSERT_EQ(atexit(RecordCxaDestructor, &second, &dso_b), 0);
+	ASSERT_EQ(atexit(RecordCxaDestructor, &third, &dso_a), 0);
+	finalize(nullptr);
+	EXPECT_EQ(events, (std::vector<int> {3, 2, 1}));
+
+	// Claimed callbacks stay cleared on subsequent all-DSO finalization.
+	finalize(nullptr);
+	EXPECT_EQ(events, (std::vector<int> {3, 2, 1}));
+}
+
+TEST(EmulatorLibcCxxLocale, CxaFinalizeFiltersDsoWithoutSkippingRemainingCallbacks)
+{
+	EnsureLog();
+	const auto [atexit, finalize] = ResolveCxaFunctions();
+	ASSERT_NE(atexit, nullptr);
+	ASSERT_NE(finalize, nullptr);
+	finalize(nullptr);
+
+	int              dso_a = 0;
+	int              dso_b = 0;
+	std::vector<int> events;
+	std::mutex       events_mutex;
+	CxaCallbackContext first {&events, &events_mutex, 1};
+	CxaCallbackContext second {&events, &events_mutex, 2};
+	CxaCallbackContext third {&events, &events_mutex, 3};
+
+	ASSERT_EQ(atexit(RecordCxaDestructor, &first, &dso_a), 0);
+	ASSERT_EQ(atexit(RecordCxaDestructor, &second, &dso_b), 0);
+	ASSERT_EQ(atexit(RecordCxaDestructor, &third, &dso_a), 0);
+	finalize(&dso_a);
+	EXPECT_EQ(events, (std::vector<int> {3, 1}));
+
+	finalize(nullptr);
+	EXPECT_EQ(events, (std::vector<int> {3, 1, 2}));
+}
+
+TEST(EmulatorLibcCxxLocale, CxaFinalizeAllowsDestructorReentry)
+{
+	EnsureLog();
+	const auto [atexit, finalize] = ResolveCxaFunctions();
+	ASSERT_NE(atexit, nullptr);
+	ASSERT_NE(finalize, nullptr);
+	finalize(nullptr);
+
+	int              dso_a = 0;
+	int              dso_b = 0;
+	std::vector<int> events;
+	std::mutex       events_mutex;
+	CxaCallbackContext nested {&events, &events_mutex, 3};
+	CxaCallbackContext first {&events, &events_mutex, 1};
+	CxaCallbackContext reentrant {&events, &events_mutex, 2, atexit, finalize, &nested, &dso_b};
+
+	ASSERT_EQ(atexit(RecordCxaDestructor, &first, &dso_a), 0);
+	ASSERT_EQ(atexit(RecordCxaDestructor, &reentrant, &dso_a), 0);
+	finalize(&dso_a);
+	EXPECT_TRUE(reentrant.reentered.load(std::memory_order_acquire));
+	EXPECT_EQ(events, (std::vector<int> {2, 3, 1}));
+}
+
+TEST(EmulatorLibcCxxLocale, CxaAtexitSynchronizesConcurrentRegistration)
+{
+	EnsureLog();
+	const auto [atexit, finalize] = ResolveCxaFunctions();
+	ASSERT_NE(atexit, nullptr);
+	ASSERT_NE(finalize, nullptr);
+	finalize(nullptr);
+
+	int              dso = 0;
+	std::atomic_int  callbacks {0};
+	std::atomic_int  registration_failures {0};
+	CxaCountContext  context {&callbacks};
+	constexpr int    worker_count       = 8;
+	constexpr int    registrations_each = 32;
+	std::vector<std::thread> workers;
+	workers.reserve(worker_count);
+	for (int worker = 0; worker < worker_count; worker++)
+	{
+		workers.emplace_back([&] {
+			for (int registration = 0; registration < registrations_each; registration++)
+			{
+				if (atexit(CountCxaDestructor, &context, &dso) != 0)
+				{
+					registration_failures.fetch_add(1, std::memory_order_relaxed);
+				}
+			}
+		});
+	}
+	for (auto& worker: workers)
+	{
+		worker.join();
+	}
+
+	EXPECT_EQ(registration_failures.load(std::memory_order_relaxed), 0);
+	finalize(&dso);
+	EXPECT_EQ(callbacks.load(std::memory_order_relaxed), worker_count * registrations_each);
+	finalize(&dso);
+	EXPECT_EQ(callbacks.load(std::memory_order_relaxed), worker_count * registrations_each);
+}
+
+TEST(EmulatorLibcCxxLocale, CtypeCaseTablesInitializeSafelyUnderConcurrentFirstUse)
+{
+	EnsureLog();
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* upper_record = ResolveLibcFunction(&symbols, u"rcQCUr0EaRU");
+	const auto* lower_record = ResolveLibcFunction(&symbols, u"1uJgoVq3bQU");
+	ASSERT_NE(upper_record, nullptr);
+	ASSERT_NE(lower_record, nullptr);
+	using GetCaseTable = KYTY_SYSV_ABI const short* (*)();
+	auto* upper = reinterpret_cast<GetCaseTable>(upper_record->vaddr);
+	auto* lower = reinterpret_cast<GetCaseTable>(lower_record->vaddr);
+
+	constexpr size_t worker_count = 16;
+	std::array<const short*, worker_count> uppers {};
+	std::array<const short*, worker_count> lowers {};
+	std::atomic_size_t                     ready {0};
+	std::atomic_bool                       start {false};
+	std::vector<std::thread>               workers;
+	workers.reserve(worker_count);
+	for (size_t worker = 0; worker < worker_count; worker++)
+	{
+		workers.emplace_back([&, worker] {
+			ready.fetch_add(1, std::memory_order_release);
+			while (!start.load(std::memory_order_acquire))
+			{
+				std::this_thread::yield();
+			}
+			uppers[worker] = upper();
+			lowers[worker] = lower();
+		});
+	}
+	while (ready.load(std::memory_order_acquire) != worker_count)
+	{
+		std::this_thread::yield();
+	}
+	start.store(true, std::memory_order_release);
+	for (auto& worker: workers)
+	{
+		worker.join();
+	}
+
+	for (size_t worker = 0; worker < worker_count; worker++)
+	{
+		EXPECT_EQ(uppers[worker], uppers[0]);
+		EXPECT_EQ(lowers[worker], lowers[0]);
+	}
+	EXPECT_EQ(uppers[0][-1], 0);
+	EXPECT_EQ(lowers[0][-1], 0);
+	EXPECT_EQ(uppers[0][static_cast<unsigned char>('a')], 'A');
+	EXPECT_EQ(lowers[0][static_cast<unsigned char>('A')], 'a');
+}
+
+// Regression: FAULTR at INVALID_MEMORY+0x20 because weak objects
+// _ZTIi / _ZTIv / _ZTV num_get<char> were unresolved sentinels.
+TEST(EmulatorLibcCxxLocale, ThrdDetachRejectsGuestJoinWhileInternalReaperOwnsCollection)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"L7f7zYwBvZA");
+	ASSERT_NE(rec, nullptr);
+	using ThrdDetach = int(KYTY_SYSV_ABI*)(Kernel::Pthread);
+	auto* detach = reinterpret_cast<ThrdDetach>(rec->vaddr);
+
+	ScopedPthreadEntryInvoker entry_invoker;
+	std::atomic_bool complete {false};
+	Kernel::Pthread  thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, CompleteDetachedThread, &complete, "detach-abi-test"), OK);
+	ASSERT_NE(thread, nullptr);
+	EXPECT_EQ(detach(thread), 0);
+	EXPECT_NE(detach(nullptr), 0);
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	while (!complete.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+}
+
+TEST(EmulatorLibcCxxLocale, PthreadSetcanceltypeRejectsInvalidGuestType)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	EXPECT_EQ(Kernel::PthreadSetcanceltype(-1, nullptr), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Libs::Posix::pthread_setcanceltype(-1, nullptr), Libs::Posix::POSIX_EINVAL);
+}
+
+TEST(EmulatorLibcCxxLocale, PthreadSetcancelstateRejectsInvalidAndAllowsNullOldState)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	EXPECT_EQ(Kernel::PthreadSetcancelstate(-1, nullptr), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::PthreadSetcancelstate(1, nullptr), OK);
+	int old_state = -1;
+	EXPECT_EQ(Kernel::PthreadSetcancelstate(0, &old_state), OK);
+	EXPECT_EQ(old_state, 1);
+	EXPECT_EQ(Kernel::PthreadSetcancelstate(1, nullptr), OK);
+}
+
+TEST(EmulatorLibcCxxLocale, PthreadSchedparamKeepsGuestPolicyAndPriority)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	ScopedPthreadEntryInvoker entry_invoker;
+	std::atomic_bool release {false};
+	Kernel::Pthread  thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, nullptr, HoldPthreadUntilReleased, &release, "schedparam-abi-test"), OK);
+	ASSERT_NE(thread, nullptr);
+
+	int                      policy = -1;
+	Kernel::KernelSchedParam reported {};
+	EXPECT_EQ(Kernel::PthreadGetschedparam(thread, &policy, &reported), OK);
+	EXPECT_EQ(policy, 1);
+	EXPECT_EQ(reported.sched_priority, 700);
+
+	Kernel::KernelSchedParam param {};
+	param.sched_priority = 767;
+	EXPECT_EQ(Kernel::PthreadSetschedparam(thread, 3, &param), OK);
+	EXPECT_EQ(Kernel::PthreadGetschedparam(thread, &policy, &reported), OK);
+	EXPECT_EQ(policy, 3);
+	EXPECT_EQ(reported.sched_priority, 767);
+	Kernel::PthreadAttr live_attr = nullptr;
+	ASSERT_EQ(Kernel::PthreadAttrInit(&live_attr), OK);
+	ASSERT_EQ(Kernel::PthreadAttrGet(thread, &live_attr), OK);
+	EXPECT_EQ(Kernel::PthreadAttrGetschedpolicy(&live_attr, &policy), OK);
+	EXPECT_EQ(policy, 3);
+	EXPECT_EQ(Kernel::PthreadAttrGetschedparam(&live_attr, &reported), OK);
+	EXPECT_EQ(reported.sched_priority, 767);
+
+	EXPECT_EQ(Kernel::PthreadSetprio(thread, 700), OK);
+	int priority = -1;
+	EXPECT_EQ(Kernel::PthreadGetprio(thread, &priority), OK);
+	EXPECT_EQ(priority, 700);
+	ASSERT_EQ(Kernel::PthreadAttrGet(thread, &live_attr), OK);
+	EXPECT_EQ(Kernel::PthreadAttrGetschedpolicy(&live_attr, &policy), OK);
+	EXPECT_EQ(policy, 3);
+	EXPECT_EQ(Kernel::PthreadAttrGetschedparam(&live_attr, &reported), OK);
+	EXPECT_EQ(reported.sched_priority, 700);
+
+	param.sched_priority = 700;
+	EXPECT_EQ(Kernel::PthreadSetschedparam(thread, 2, &param), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::PthreadGetschedparam(thread, &policy, &reported), OK);
+	EXPECT_EQ(policy, 3);
+	EXPECT_EQ(reported.sched_priority, 700);
+
+	param.sched_priority = 255;
+	EXPECT_EQ(Kernel::PthreadSetschedparam(thread, 1, &param), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::PthreadSetprio(thread, 768), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::PthreadGetschedparam(thread, &policy, &reported), OK);
+	EXPECT_EQ(policy, 3);
+	EXPECT_EQ(reported.sched_priority, 700);
+
+	release.store(true, std::memory_order_release);
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(Kernel::PthreadAttrDestroy(&live_attr), OK);
+}
+
+TEST(EmulatorLibcCxxLocale, PthreadAttrSchedparamPreservesGuestValues)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	Kernel::PthreadAttr attr = nullptr;
+	ASSERT_EQ(Kernel::PthreadAttrInit(&attr), OK);
+	ASSERT_NE(attr, nullptr);
+
+	Kernel::KernelSchedParam param {};
+	param.sched_priority = 256;
+	EXPECT_EQ(Kernel::PthreadAttrSetschedparam(&attr, &param), OK);
+	EXPECT_EQ(Kernel::PthreadAttrSetschedpolicy(&attr, 3), OK);
+
+	int                      policy = -1;
+	Kernel::KernelSchedParam reported {};
+	EXPECT_EQ(Kernel::PthreadAttrGetschedparam(&attr, &reported), OK);
+	EXPECT_EQ(reported.sched_priority, 256);
+	EXPECT_EQ(Kernel::PthreadAttrGetschedpolicy(&attr, &policy), OK);
+	EXPECT_EQ(policy, 3);
+
+	param.sched_priority = 255;
+	EXPECT_EQ(Kernel::PthreadAttrSetschedparam(&attr, &param), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::PthreadAttrSetschedpolicy(&attr, 2), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(Kernel::PthreadAttrGetschedparam(&attr, &reported), OK);
+	EXPECT_EQ(reported.sched_priority, 256);
+	EXPECT_EQ(Kernel::PthreadAttrGetschedpolicy(&attr, &policy), OK);
+	EXPECT_EQ(policy, 3);
+
+	ScopedPthreadEntryInvoker entry_invoker;
+	std::atomic_bool          release {false};
+	Kernel::Pthread           thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, &attr, HoldPthreadUntilReleased, &release, "attr-schedparam-abi-test"), OK);
+	ASSERT_NE(thread, nullptr);
+	EXPECT_EQ(Kernel::PthreadGetschedparam(thread, &policy, &reported), OK);
+	EXPECT_EQ(policy, 3);
+	EXPECT_EQ(reported.sched_priority, 256);
+
+	release.store(true, std::memory_order_release);
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(Kernel::PthreadAttrDestroy(&attr), OK);
+}
+
+TEST(EmulatorLibcCxxLocale, PthreadKeyDestructorRunsFourPassesOnExitingThread)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	ScopedPthreadGuestCallInvoker guest_call_invoker;
+	std::atomic_int           destructor_calls {0};
+
+	Kernel::PthreadKey key = -1;
+	ASSERT_EQ(Kernel::PthreadKeyCreate(&key, CountPthreadKeyDestructor), OK);
+
+	PthreadKeyEntryContext context {};
+	context.key   = key;
+	context.value = &context;
+	context.reregister_in_destructor = true;
+	ScopedPthreadKeyDestructorCounter destructor_counter(&destructor_calls, &context);
+
+	std::vector<uint8_t> guest_stack(0x8000);
+	Kernel::PthreadAttr   attr = nullptr;
+	ASSERT_EQ(Kernel::PthreadAttrInit(&attr), OK);
+	ASSERT_EQ(Kernel::PthreadAttrSetstack(&attr, guest_stack.data(), guest_stack.size()), OK);
+
+	Kernel::Pthread thread = nullptr;
+	ASSERT_EQ(Kernel::PthreadCreate(&thread, &attr, SetPthreadKeySpecific, &context, "key-destructor-test"), OK);
+	ASSERT_NE(thread, nullptr);
+	EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+	EXPECT_EQ(context.set_result.load(std::memory_order_acquire), OK);
+	EXPECT_EQ(destructor_calls.load(std::memory_order_relaxed), 4);
+	EXPECT_EQ(context.reregister_result.load(std::memory_order_acquire), OK);
+	EXPECT_EQ(context.destructor_thread_id.load(std::memory_order_acquire),
+	          context.worker_thread_id.load(std::memory_order_acquire));
+	const auto stack_base = reinterpret_cast<uintptr_t>(guest_stack.data());
+	const auto stack_end  = stack_base + guest_stack.size();
+	const auto destructor_rsp = context.destructor_rsp.load(std::memory_order_acquire);
+	EXPECT_GE(destructor_rsp, stack_base);
+	EXPECT_LT(destructor_rsp, stack_end);
+	ASSERT_NE(Kernel::g_pthread_context, nullptr);
+	EXPECT_EQ(Kernel::g_pthread_context->GetPthreadKeys()->CountSpecificValuesForThread(
+	              context.worker_thread_id.load(std::memory_order_acquire)),
+	          0u);
+	EXPECT_EQ(Kernel::PthreadAttrDestroy(&attr), OK);
+	EXPECT_EQ(Kernel::PthreadKeyDelete(key), OK);
+}
+
+TEST(EmulatorLibcCxxLocale, PthreadKeyDestructReclaimsRetiredThreadEntries)
+{
+	EnsureLog();
+	EnsurePthread();
+
+	ScopedPthreadGuestCallInvoker guest_call_invoker;
+	Kernel::PthreadKey            key = -1;
+	ASSERT_EQ(Kernel::PthreadKeyCreate(&key, CountPthreadKeyDestructor), OK);
+
+	std::vector<uint8_t> guest_stack(0x8000);
+	Kernel::PthreadAttr   attr = nullptr;
+	ASSERT_EQ(Kernel::PthreadAttrInit(&attr), OK);
+	ASSERT_EQ(Kernel::PthreadAttrSetstack(&attr, guest_stack.data(), guest_stack.size()), OK);
+
+	for (int worker = 0; worker < 3; worker++)
+	{
+		PthreadKeyEntryContext context {};
+		context.key   = key;
+		context.value = (worker == 1 ? nullptr : &context);
+		std::atomic_int destructor_calls {0};
+		ScopedPthreadKeyDestructorCounter destructor_counter(&destructor_calls, &context);
+
+		Kernel::Pthread thread = nullptr;
+		ASSERT_EQ(Kernel::PthreadCreate(&thread, &attr, SetPthreadKeySpecific, &context, "key-retire-test"), OK);
+		ASSERT_NE(thread, nullptr);
+		EXPECT_EQ(Kernel::PthreadJoin(thread, nullptr), OK);
+		EXPECT_EQ(context.set_result.load(std::memory_order_acquire), OK);
+		EXPECT_EQ(destructor_calls.load(std::memory_order_relaxed), worker == 1 ? 0 : 1);
+		ASSERT_NE(Kernel::g_pthread_context, nullptr);
+		EXPECT_EQ(Kernel::g_pthread_context->GetPthreadKeys()->CountSpecificValuesForThread(
+		              context.worker_thread_id.load(std::memory_order_acquire)),
+		          0u);
+	}
+
+	EXPECT_EQ(Kernel::PthreadAttrDestroy(&attr), OK);
+	EXPECT_EQ(Kernel::PthreadKeyDelete(key), OK);
+}
+
+TEST(EmulatorLibcCxxLocale, NumGetParsesUnsignedLongLongAndLeavesDelimiter)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	Loader::SymbolResolve query {};
+	query.name                 = U"KfcTPbeaOqg";
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Loader::SymbolType::Object;
+	const auto* rec = symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	ASSERT_NE(rec, nullptr);
+
+	void* stream_vtable[9] {};
+	stream_vtable[7] = reinterpret_cast<void*>(&TestIstreamUnderflow);
+	stream_vtable[8] = reinterpret_cast<void*>(&TestIstreamUflow);
+	const char input[] = "100%";
+	TestIstreambuf stream {stream_vtable, input};
+	struct Iterator
+	{
+		void*         streambuf;
+		std::uint64_t failed;
+	};
+	struct Ios
+	{
+		std::byte      reserved[0x18];
+		std::uint32_t flags;
+		std::int32_t  precision;
+		std::int32_t  width;
+	} ios {};
+
+	auto** vtable_object = reinterpret_cast<void**>(rec->vaddr);
+	using DoGet = Iterator(KYTY_SYSV_ABI*)(const void*, Iterator, Iterator, void*, std::uint32_t*, std::uint64_t*);
+	auto* do_get = reinterpret_cast<DoGet>(vtable_object[13]);
+	ASSERT_NE(do_get, nullptr);
+	std::uint32_t state = 0;
+	std::uint64_t value = 0;
+	Iterator first {&stream, 0};
+	Iterator last {nullptr, 1};
+	const Iterator result = do_get(vtable_object, first, last, &ios, &state, &value);
+
+	EXPECT_EQ(result.streambuf, &stream);
+	EXPECT_EQ(result.failed, 0u);
+	EXPECT_EQ(state, 0u);
+	EXPECT_EQ(value, 100u);
+	EXPECT_EQ(*stream.current, '%');
+}
+
+TEST(EmulatorLibcCxxLocale, ResolvesFundamentalTypeinfoAndNumGetVtable)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	auto resolve_obj = [&](const char16_t* nid) -> const Loader::SymbolRecord*
+	{
+		Loader::SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = U"libc";
+		query.library_version      = 1;
+		query.module               = U"libc";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = Loader::SymbolType::Object;
+		return symbols.FindByCanonicalName(Loader::SymbolDatabase::GenerateName(query));
+	};
+
+	const auto* ti_int   = resolve_obj(u"St4apgcBNfo"); // _ZTIi
+	const auto* ti_void  = resolve_obj(u"JrUnjJ-PCTg"); // _ZTIv
+	const auto* num_get  = resolve_obj(u"KfcTPbeaOqg"); // _ZTV num_get<char>
+	ASSERT_NE(ti_int, nullptr);
+	ASSERT_NE(ti_void, nullptr);
+	ASSERT_NE(num_get, nullptr);
+	ASSERT_NE(ti_int->vaddr, 0u);
+	ASSERT_NE(ti_void->vaddr, 0u);
+	ASSERT_NE(num_get->vaddr, 0u);
+	// Must not be the NoAccess weak-Object sentinel page.
+	constexpr uint64_t kInvalidMemorySentinel = 0x840000000ull;
+	EXPECT_NE(ti_int->vaddr, kInvalidMemorySentinel);
+	EXPECT_NE(ti_void->vaddr, kInvalidMemorySentinel);
+	EXPECT_NE(num_get->vaddr, kInvalidMemorySentinel);
+	// First typeinfo field is a vtable pointer — must be a readable host address.
+	const auto* int_words = reinterpret_cast<const void* const*>(ti_int->vaddr);
+	EXPECT_NE(int_words[0], nullptr);
+	const auto* void_words = reinterpret_cast<const void* const*>(ti_void->vaddr);
+	EXPECT_NE(void_words[0], nullptr);
+	const auto* num_get_words = reinterpret_cast<const void* const*>(num_get->vaddr);
+	// vtable object: [0]=offset-to-top, [1]=typeinfo*
+	EXPECT_NE(num_get_words[1], nullptr);
 }
 
 TEST(EmulatorLibcCxxLocale, NothrowNewOverloadsResolveAndUseLibcAllocationOwnership)

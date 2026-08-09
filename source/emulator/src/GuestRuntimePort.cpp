@@ -27,10 +27,13 @@ uint64_t KYTY_SYSV_ABI FallbackInvokeOnStack(uint64_t /*target*/, uint64_t /*arg
 	return 0;
 }
 
+void FallbackReleaseThreadDynamicTls(int /*thread_id*/) {}
+
 std::atomic<FindProgramByAddrFunction> g_find_program_by_addr {FallbackFindProgramByAddr};
 std::atomic<InvokeFunction>            g_invoke {FallbackInvoke};
 std::atomic<Invoke4Function>           g_invoke4 {FallbackInvoke4};
 std::atomic<InvokeOnStackFunction>     g_invoke_on_stack {FallbackInvokeOnStack};
+std::atomic<ReleaseThreadDynamicTlsFunction> g_release_thread_dynamic_tls {FallbackReleaseThreadDynamicTls};
 
 } // namespace
 
@@ -42,6 +45,9 @@ void Install(const Provider& provider) noexcept
 	g_invoke4.store(provider.invoke4 != nullptr ? provider.invoke4 : FallbackInvoke4, std::memory_order_release);
 	g_invoke_on_stack.store(provider.invoke_on_stack != nullptr ? provider.invoke_on_stack : FallbackInvokeOnStack,
 	                        std::memory_order_release);
+	g_release_thread_dynamic_tls.store(provider.release_thread_dynamic_tls != nullptr ? provider.release_thread_dynamic_tls :
+	                                                                            FallbackReleaseThreadDynamicTls,
+	                                   std::memory_order_release);
 }
 
 ProgramHandle FindProgramByAddr(uint64_t vaddr) noexcept
@@ -62,6 +68,11 @@ uint64_t Invoke4(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, u
 uint64_t InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, void* stack_top) noexcept
 {
 	return g_invoke_on_stack.load(std::memory_order_acquire)(target, arg0, arg1, arg2, stack_top);
+}
+
+void ReleaseThreadDynamicTls(int thread_id) noexcept
+{
+	g_release_thread_dynamic_tls.load(std::memory_order_acquire)(thread_id);
 }
 
 } // namespace Kyty::Emulator::GuestRuntimePort

@@ -40,6 +40,7 @@
 #include <ctime>
 #include <cwchar>
 #include <mutex>
+#include <limits>
 #include <setjmp.h>
 #include <string>
 #include <strings.h>
@@ -123,8 +124,6 @@ using Time::GuestToHostTm;
 // Keep both LibC and LibcInternal objects in sync.
 uint32_t g_need_flag = 1;
 
-using cxa_destructor_func_t = void (*)(void*);
-
 struct CxaDestructor
 {
 	cxa_destructor_func_t destructor_func;
@@ -136,6 +135,12 @@ struct CContext
 {
 	Core::List<CxaDestructor> cxa;
 };
+
+// __cxa_atexit may be reached by independently scheduled guest modules. Keep
+// registration and claim state together, but never retain this lock while a
+// guest destructor runs: destructors are allowed to register/finalize more
+// callbacks themselves.
+std::mutex g_cxa_mutex;
 
 static KYTY_SYSV_ABI void exit(int code)
 {
@@ -527,39 +532,46 @@ static KYTY_SYSV_ABI const char* const* c_Getptimes()
 {
 	return g_c_locale_times.data();
 }
-static KYTY_SYSV_ABI const short* c_Getptoupper()
+
+static const std::array<short, 384>& c_Getptoupper_table()
 {
-	static short table[384];
-	static bool  init = false;
-	if (!init)
-	{
+	static const std::array<short, 384> table = [] {
+		std::array<short, 384> values {};
 		for (int c = -1; c < 256; c++)
 		{
-			table[c + 1] = (c >= 0) ? static_cast<short>(::toupper(c)) : 0;
+			values[c + 1] = (c >= 0) ? static_cast<short>(::toupper(c)) : 0;
 		}
-		init = true;
-	}
-	return table + 1;
+		return values;
+	}();
+	return table;
+}
+
+static const std::array<short, 384>& c_Getptolower_table()
+{
+	static const std::array<short, 384> table = [] {
+		std::array<short, 384> values {};
+		for (int c = -1; c < 256; c++)
+		{
+			values[c + 1] = (c >= 0) ? static_cast<short>(::tolower(c)) : 0;
+		}
+		return values;
+	}();
+	return table;
+}
+
+static KYTY_SYSV_ABI const short* c_Getptoupper()
+{
+	return c_Getptoupper_table().data() + 1;
 }
 
 // Gen5 libc_v1 _Getptolower — NID 1uJgoVq3bQU. Same table contract as
-// _Getptoupper: short[384] centered so index 0 is EOF (-1). Dreaming Sarah's
+// _Getptoupper: short[384] centered so index 0 is EOF (-1). A guest
 // Construct VFS lowercases asset names with:
 //   table = _Getptolower();  dest[i] = (uint8_t)table[(unsigned char)src[i]];
 // Returning a non-table pointer corrupted "data.js" and the project parse hit EOF.
 static KYTY_SYSV_ABI const short* c_Getptolower()
 {
-	static short table[384];
-	static bool  init = false;
-	if (!init)
-	{
-		for (int c = -1; c < 256; c++)
-		{
-			table[c + 1] = (c >= 0) ? static_cast<short>(::tolower(c)) : 0;
-		}
-		init = true;
-	}
-	return table + 1;
+	return c_Getptolower_table().data() + 1;
 }
 
 static KYTY_SYSV_ABI std::mbstate_t* c_Getpmbstate()
@@ -605,7 +617,7 @@ static KYTY_SYSV_ABI int c_snprintf_s(VA_ARGS)
 }
 
 // Gen5 libc_v1 NID NC4MSB+BRQg — same SysV shape as snprintf(buf, n, fmt, ...),
-// but Astro ObjectDefinition path-building checks `r == 0` after the call (errno_t
+// but guest ObjectDefinition path-building checks `r == 0` after the call (errno_t
 // style: 0 success, non-zero failure). Standard snprintf returns the written
 // length, which falsely trips that assert for any non-empty format result.
 //
@@ -818,7 +830,7 @@ static KYTY_SYSV_ABI unsigned long c_strtoul(const char* s, char** e, int b)
 {
 	return ::strtoul(s, e, b);
 }
-// Gen5 libc_v1 strtoull — NID 5OqszGpy7Mg (Astro after TLS context factory).
+// Gen5 libc_v1 strtoull — NID 5OqszGpy7Mg.
 static KYTY_SYSV_ABI unsigned long long c_strtoull(const char* s, char** e, int b)
 {
 	return ::strtoull(s, e, b);
@@ -989,7 +1001,7 @@ KYTY_SYSV_ABI int c_execute_once(int* flag, execute_once_callback_t callback, vo
 
 struct ThreadAtexitEntry
 {
-	void (*destructor)(void*);
+	cxa_destructor_func_t destructor;
 	void* object;
 	void* dso_handle;
 };
@@ -1020,7 +1032,7 @@ static void run_thread_atexit_destructors(void* guest_stack_top)
 	g_running_thread_atexit = false;
 }
 
-KYTY_SYSV_ABI int c_cxa_thread_atexit(void (*dtor)(void*), void* obj, void* dso_handle)
+KYTY_SYSV_ABI int c_cxa_thread_atexit(cxa_destructor_func_t dtor, void* obj, void* dso_handle)
 {
 	if (dtor == nullptr)
 	{
@@ -1284,8 +1296,8 @@ static KYTY_SYSV_ABI const char* c_error_exception_what(const SceErrorExceptionL
 	return reinterpret_cast<const char*>(self->shared_message) + sizeof(uint32_t);
 }
 
-// Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Captured Dreaming Sarah after
-// Construct JSON load: rdi=src, rsi/rdx=type_info ("17ConditionOrAction" /
+// Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Observed at a guest JSON-load
+// call site: rdi=src, rsi/rdx=type_info ("17ConditionOrAction" /
 // "6Action"), rcx=src2dst (0 = unique base at offset 0). type_info vtables often
 // point at the unresolved-object sentinel, so only src2dst arithmetic runs.
 static KYTY_SYSV_ABI void* cxa_dynamic_cast(void* src, const void* /*src_type*/, const void* /*dst_type*/, int64_t src2dst)
@@ -1293,7 +1305,7 @@ static KYTY_SYSV_ABI void* cxa_dynamic_cast(void* src, const void* /*src_type*/,
 	return CxaDynamicCastApply(src, src2dst);
 }
 
-// --- C++ locale / RTTI objects (Dreaming Sarah Construct string path) --------
+// --- C++ locale / RTTI objects (guest Construct string path) -----------------
 // Quiet boot AV: mov (%r12),%rdi with r12 = INVALID_MEMORY because weak Object
 // Qoo175Ig+-k (_ZSt21_sceLibcClassicLocale) was never registered. The guest
 // loads Locimp* from the locale, then looks up ctype<char> by id.
@@ -1460,8 +1472,8 @@ static void* g_function_type_info_vtable[8]           = {reinterpret_cast<void*>
 static void* g_exception_vtable[8]           = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
                                                 reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
 
-// Exception / iostream RTTI Objects imported by case_dreaming_sarah eboot
-// (libc_v1). NIDs from eboot import table; names from public symbol catalogs.
+// Exception / iostream RTTI Objects imported by a guest libc_v1 module.
+// NIDs come from the import table; names come from public symbol catalogs.
 // Vtable slots are no-ops; type_info uses Itanium __si layout (base null for now).
 #define KYTY_CXX_NOOP_VTBL                                                                                                                 \
 	{                                                                                                                                      \
@@ -1500,6 +1512,9 @@ static const char g_ti_name_bad_array_new_length[] = "St20bad_array_new_length";
 static const char g_ti_name_ios_base[]          = "St8ios_base";
 static const char g_ti_name_ios_failure[]       = "NSt8ios_base7failureE";
 static const char g_ti_name_num_put_char[]      = "St7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE";
+// Fundamental Itanium typeinfo names used by the guest C++ ABI.
+static const char g_ti_name_int[]  = "i";
+static const char g_ti_name_void[] = "v";
 
 static CxxSiTypeInfoLayout g_typeinfo_exception {g_si_class_type_info_vtable, g_ti_name_exception, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_domain_error {g_si_class_type_info_vtable, g_ti_name_domain_error, nullptr};
@@ -1523,6 +1538,129 @@ static CxxSiTypeInfoLayout g_typeinfo_bad_array_new_length {
 static CxxSiTypeInfoLayout g_typeinfo_ios_base {g_si_class_type_info_vtable, g_ti_name_ios_base, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_ios_failure {g_si_class_type_info_vtable, g_ti_name_ios_failure, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_num_put_char {g_si_class_type_info_vtable, g_ti_name_num_put_char, nullptr};
+// Fundamental type_info objects (class_type_info vtable + short name).
+static CxxTypeInfoLayout g_typeinfo_int {g_class_type_info_vtable, g_ti_name_int};
+static CxxTypeInfoLayout g_typeinfo_void {g_class_type_info_vtable, g_ti_name_void};
+static const char g_ti_name_num_get_char[] = "St7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE";
+static CxxSiTypeInfoLayout g_typeinfo_num_get_char {g_si_class_type_info_vtable, g_ti_name_num_get_char, nullptr};
+
+struct CxxFacetBase;
+static KYTY_SYSV_ABI void c_facet_dtor(CxxFacetBase* self);
+static KYTY_SYSV_ABI void c_facet_deleting_dtor(CxxFacetBase* self);
+static KYTY_SYSV_ABI void c_facet_incref(CxxFacetBase* self);
+static KYTY_SYSV_ABI CxxFacetBase* c_facet_decref(CxxFacetBase* self);
+
+struct CxxIstreamIterator
+{
+	void*         streambuf;
+	std::uint64_t failed;
+};
+
+static_assert(sizeof(CxxIstreamIterator) == 16);
+
+using CxxIstreamRead = int(KYTY_SYSV_ABI*)(void*);
+
+static int CxxIstreamPeek(const CxxIstreamIterator& iterator)
+{
+	if (iterator.failed != 0 || iterator.streambuf == nullptr)
+	{
+		return -1;
+	}
+	auto*** object = reinterpret_cast<void***>(iterator.streambuf);
+	return (*object != nullptr && (*object)[7] != nullptr)
+	           ? reinterpret_cast<CxxIstreamRead>((*object)[7])(iterator.streambuf)
+	           : -1;
+}
+
+static int CxxIstreamAdvance(CxxIstreamIterator* iterator)
+{
+	if (iterator == nullptr || iterator->failed != 0 || iterator->streambuf == nullptr)
+	{
+		return -1;
+	}
+	auto*** object = reinterpret_cast<void***>(iterator->streambuf);
+	if (*object == nullptr || (*object)[8] == nullptr)
+	{
+		iterator->failed = 1;
+		return -1;
+	}
+	return reinterpret_cast<CxxIstreamRead>((*object)[8])(iterator->streambuf);
+}
+
+static KYTY_SYSV_ABI CxxIstreamIterator c_num_get_unimplemented(const CxxFacetBase* /*self*/, CxxIstreamIterator iterator,
+                                                                 CxxIstreamIterator /*last*/, void* /*ios_base*/,
+                                                                 std::uint32_t* /*state*/, void* /*value*/)
+{
+	EXIT("unsupported std::num_get<char> overload invoked\n");
+	return iterator;
+}
+
+static KYTY_SYSV_ABI CxxIstreamIterator c_num_get_do_get_ulong_long(const CxxFacetBase* /*self*/, CxxIstreamIterator iterator,
+                                                                    CxxIstreamIterator /*last*/, void* /*ios_base*/,
+                                                                    std::uint32_t* state, std::uint64_t* value)
+{
+	constexpr std::uint32_t kEofBit  = 0x1;
+	constexpr std::uint32_t kFailBit = 0x2;
+	if (state == nullptr || value == nullptr)
+	{
+		if (state != nullptr) { *state |= kFailBit; }
+		return iterator;
+	}
+
+	std::uint64_t parsed = 0;
+	bool          any    = false;
+	bool          overflow = false;
+	for (;;)
+	{
+		const int current = CxxIstreamPeek(iterator);
+		if (current < 0)
+		{
+			*state |= kEofBit;
+			break;
+		}
+		if (current < '0' || current > '9')
+		{
+			break;
+		}
+
+		any = true;
+		const std::uint64_t digit = static_cast<std::uint64_t>(current - '0');
+		if (parsed > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u)
+		{
+			overflow = true;
+		} else if (!overflow)
+		{
+			parsed = parsed * 10u + digit;
+		}
+		(void)CxxIstreamAdvance(&iterator);
+	}
+
+	if (!any || overflow)
+	{
+		*state |= kFailBit;
+	}
+	*value = overflow ? std::numeric_limits<std::uint64_t>::max() : parsed;
+	return iterator;
+}
+
+static void* g_num_get_char_vtable[] = {
+    nullptr,
+    &g_typeinfo_num_get_char,
+    reinterpret_cast<void*>(&c_facet_dtor),
+    reinterpret_cast<void*>(&c_facet_deleting_dtor),
+    reinterpret_cast<void*>(&c_facet_incref),
+    reinterpret_cast<void*>(&c_facet_decref),
+    reinterpret_cast<void*>(&c_num_get_unimplemented),
+    reinterpret_cast<void*>(&c_num_get_unimplemented),
+    reinterpret_cast<void*>(&c_num_get_unimplemented),
+    reinterpret_cast<void*>(&c_num_get_unimplemented),
+    reinterpret_cast<void*>(&c_num_get_unimplemented),
+    reinterpret_cast<void*>(&c_num_get_unimplemented),
+    reinterpret_cast<void*>(&c_num_get_unimplemented),
+    reinterpret_cast<void*>(&c_num_get_do_get_ulong_long),
+};
+
+static_assert(std::size(g_num_get_char_vtable) == 14);
 
 struct alignas(8) CxxFacetBase
 {
@@ -2411,7 +2549,7 @@ static KYTY_SYSV_ABI void c_exception_doraise(const void* /*self*/) {}
 
 // std::uncaught_exception() — returns non-zero while an exception is active.
 // Full EH is not implemented; report "no active exception" so destructors that
-// probe this during Construct string/locale work continue (Dreaming Sarah).
+// probe this during Construct string/locale work continue.
 static KYTY_SYSV_ABI int c_uncaught_exception()
 {
 	return 0;
@@ -2604,7 +2742,7 @@ static KYTY_SYSV_ABI int puts(const char* s)
 }
 
 // Gen5 libc_v1 putchar — NID m5wN+SwZOR4. Observed with ch=0x0a (newline)
-// on the Astro boot path after Posix semaphores.
+// after Posix semaphore setup.
 static KYTY_SYSV_ABI int c_putchar(int ch)
 {
 	return GetPrintfStdFunc()("%c", ch);
@@ -2628,18 +2766,20 @@ static KYTY_SYSV_ABI void catchReturnFromMain(int status)
 	KYTY_LOG_DEBUG("return from main = %d\n", status);
 }
 
-KYTY_SYSV_ABI int cxa_atexit(void (*func)(void*), void* arg, void* d)
+KYTY_SYSV_ABI int cxa_atexit(cxa_destructor_func_t func, void* arg, void* d)
 {
 	PRINT_NAME();
-
-	auto* cc = Core::Singleton<CContext>::Instance();
 
 	CxaDestructor c {};
 	c.destructor_func   = func;
 	c.destructor_object = arg;
 	c.module_id         = d;
 
-	cc->cxa.Add(c);
+	{
+		std::lock_guard lock(g_cxa_mutex);
+		auto* cc = Core::Singleton<CContext>::Instance();
+		cc->cxa.Add(c);
+	}
 
 	return 0;
 }
@@ -2648,17 +2788,105 @@ void KYTY_SYSV_ABI cxa_finalize(void* d)
 {
 	PRINT_NAME();
 
-	auto* cc = Core::Singleton<CContext>::Instance();
+	std::vector<CxaDestructor> callbacks;
 
-	FOR_LIST_R(i, cc->cxa)
 	{
-		auto& c = cc->cxa[i];
-		if (c.module_id == d && c.destructor_func != nullptr)
+		std::lock_guard lock(g_cxa_mutex);
+		auto* cc = Core::Singleton<CContext>::Instance();
+		FOR_LIST_R(i, cc->cxa)
 		{
-			c.destructor_func(c.destructor_object);
-			c.destructor_func = nullptr;
+			auto& c = cc->cxa[i];
+			if ((d == nullptr || c.module_id == d) && c.destructor_func != nullptr)
+			{
+				// Claim before invoking so re-entry cannot call this record twice.
+				callbacks.push_back(c);
+				c.destructor_func = nullptr;
+			}
 		}
 	}
+
+	for (const auto& c: callbacks)
+	{
+		c.destructor_func(c.destructor_object);
+	}
+}
+
+// Gen5 libc_v1 wcscpy — NID FM5NPnLqBc8. Wide characters are uint16_t on the
+// guest ABI (same as c_vswprintf).
+static KYTY_SYSV_ABI uint16_t* c_wcscpy(uint16_t* dst, const uint16_t* src)
+{
+	if (dst == nullptr || src == nullptr)
+	{
+		return nullptr;
+	}
+	uint16_t* d = dst;
+	while ((*d++ = *src++) != 0) {}
+	return dst;
+}
+
+// Gen5 libc_v1 vprintf — NID GMpvxPFW924 (same contract as LibcInternal::vprintf).
+static KYTY_SYSV_ABI int c_vprintf(const char* str, VaList* c)
+{
+	PRINT_NAME();
+
+	return GetVprintfFunc()(str, c);
+}
+
+// Gen5 libc_v1 swprintf — NID nJz16JE1txM. Same narrow-format path as
+// c_vswprintf.
+static KYTY_SYSV_ABI int c_swprintf(VA_ARGS)
+{
+	VA_CONTEXT(ctx);
+	uint16_t*       out         = VaArg_ptr<uint16_t>(&ctx.va_list);
+	size_t          out_count   = VaArg_size_t(&ctx.va_list);
+	const uint16_t* wide_format = VaArg_ptr<const uint16_t>(&ctx.va_list);
+	return c_vswprintf(out, out_count, wide_format, &ctx.va_list);
+}
+
+static KYTY_SYSV_ABI float c_frexpf(float value, int* exp)
+{
+	if (exp == nullptr)
+	{
+		return 0.0f;
+	}
+	return std::frexpf(value, exp);
+}
+
+static KYTY_SYSV_ABI float c_remainderf(float x, float y)
+{
+	return std::remainderf(x, y);
+}
+
+// Gen5 libc_v1 _Thrd_detach — NID L7f7zYwBvZA. POSIX thrd semantics: returns
+// the errno-style result of pthread_detach (0 success).
+static KYTY_SYSV_ABI int c_thrd_detach(Kernel::Pthread thread)
+{
+	if (thread == nullptr)
+	{
+		return Posix::POSIX_EINVAL;
+	}
+	const int result = Kernel::PthreadDetach(thread);
+	return result == OK ? 0 : Posix::POSIX_EINVAL;
+}
+
+// Gen5 libc_v1 _Assert — NID -QgqOT5u2Vk. A real assert failure: report and
+// stop structurally.
+static KYTY_SYSV_ABI void c_assert(const char* msg, const char* file, int line)
+{
+	EXIT("_Assert failed: %s (%s:%d)\n", msg != nullptr ? msg : "?", file != nullptr ? file : "?", line);
+}
+
+// Gen5 libc_v1 _ZSt16_Throw_Cpp_errori — NID W0j6vCxh9Pc. C++ exceptions
+// cannot unwind through the HLE boundary; report structurally like __cxa_throw.
+static KYTY_SYSV_ABI void c_throw_cpp_error(int err)
+{
+	EXIT("std::_Throw_Cpp_error(%d)\n", err);
+}
+
+// Gen5 libc_v1 _ZSt9terminatev — NID qYhnoevd9bI.
+static KYTY_SYSV_ABI void c_terminate()
+{
+	EXIT("std::terminate called\n");
 }
 
 } // namespace LibC
@@ -2687,7 +2915,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
 	LIB_FUNC("k04jLXu3+Ic", LibcInternal::LibcMspaceMallocStatsFast);
 
-	// C++ locale / RTTI objects — Dreaming Sarah (Qoo175Ig+-k → classic locale).
+	// C++ locale / RTTI objects (Qoo175Ig+-k → classic locale).
 	// dynlib: _ZSt21_sceLibcClassicLocale, ctype<char>::id, locale::id::_Id_cnt,
 	// __class_type_info / __si_class_type_info / __vmi_class_type_info vtables.
 	LIB_OBJECT_ALIASES(&LibC::g_sce_classic_locale, "Qoo175Ig+-k", "Mcrl2crhxu0");
@@ -2773,6 +3001,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("AJsqpbcCiwY", LibC::g_ios_base_vtable);
 	LIB_OBJECT("yLE5H3058Ao", LibC::g_ios_failure_vtable);
 	LIB_OBJECT("1kZFcktOm+s", LibC::g_num_put_char_vtable);
+	// Fundamental RTTI objects.
+	LIB_OBJECT("St4apgcBNfo", &LibC::g_typeinfo_int);       // _ZTIi
+	LIB_OBJECT("JrUnjJ-PCTg", &LibC::g_typeinfo_void);      // _ZTIv
+	LIB_OBJECT("KfcTPbeaOqg", LibC::g_num_get_char_vtable); // _ZTV std::num_get<char>
 	LIB_OBJECT("OwfBD-2nhJQ", LibC::g_time_put_char_vtable);
 	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
 	LIB_OBJECT("wiR+rIcbnlc", LibC::g_fpz);
@@ -2834,7 +3066,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("hcuQgD53UxM", LibC::libc_printf);
 	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);
 	LIB_FUNC("YQ0navp+YIc", LibC::puts);
-	// Gen5 putchar — NID m5wN+SwZOR4 (hard-abort after Posix sem on Astro).
+	// Gen5 putchar — NID m5wN+SwZOR4.
 	LIB_FUNC("m5wN+SwZOR4", LibC::c_putchar);
 	// Captured Gen5 after DirNameSearch/strtol: rdi=formatted log line
 	// with trailing CR/LF, rsi=stream-like pointer — fputs ABI.
@@ -2877,11 +3109,11 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("7Xl257M4VNI", LibC::c_pthread_equal);
 	LIB_FUNC("mqQMh1zPPT8", LibC::c_fstat);
 	LIB_FUNC("Q3VBxCXhUHs", LibC::c_memcpy);
-	// Gen5 second memcpy NID — Dreaming Sarah std::string SSO short-assign path
+	// Gen5 second memcpy NID — C++ std::string SSO short-assign path
 	// after __cxa_dynamic_cast (Construct Action setup): (dst, src, n=1..).
 	LIB_FUNC("Noj9PsJrsa8", LibC::c_memcpy);
 	LIB_FUNC("NFLs+dRJGNg", LibC::c_memcpy_s);
-	// Gen5 libc_v1 memmove_s — B59+zQQCcbU after TLS factory / strtoull on Astro.
+	// Gen5 libc_v1 memmove_s — B59+zQQCcbU after TLS factory / strtoull.
 	LIB_FUNC("B59+zQQCcbU", LibC::c_memmove_s);
 	LIB_FUNC("8zTFvBIAIN8", LibC::c_memset);
 	LIB_FUNC("h8GwqPFbu6I", LibC::c_memset_s);
@@ -2919,7 +3151,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("z+P+xCnWLBk", LibC::cxx_delete);               // operator delete(void*)
 	LIB_FUNC("lYDzBVE5mZs", LibC::cxx_delete_sized);         // operator delete(void*, size_t)
 	LIB_FUNC("nwujzxOPXzQ", LibC::cxx_delete_sized_aligned); // operator delete(void*, size_t, align_val_t)
-	// Gen5 libc_v1 C++ EH — Dreaming Sarah throw path after flip/init.
+	// Gen5 libc_v1 C++ EH — guest throw path after initialization.
 	// vkuuLfhnSZI: __cxa_throw (rdi=obj, rsi=typeinfo, rdx=dtor; ud2 after).
 	LIB_FUNC("vkuuLfhnSZI", LibC::cxa_throw);
 	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);         // operator new[](size_t)
@@ -2964,14 +3196,14 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("vU9svJtEnWc", LibC::c_setw);
 	LIB_FUNC("j9LU8GsuEGw", LibC::c_time_put_put);
 	LIB_FUNC("rcQCUr0EaRU", LibC::c_Getptoupper);
-	// Gen5 _Getptolower — Dreaming Sarah VFS path lowercasing after ~INDEX.
+	// Gen5 _Getptolower — guest VFS path lowercasing after ~INDEX.
 	LIB_FUNC("1uJgoVq3bQU", LibC::c_Getptolower);
 
 	// stdio
 	LIB_FUNC("xeYO4u7uyJ0", LibC::c_fopen);
 	LIB_FUNC("uodLYyUip20", LibC::c_fclose);
 	LIB_FUNC("lbB+UlZqVG0", LibC::c_fread);
-	// Gen5 fgets — NID KdP-nULpuGw (next hard-abort after asctime on Astro).
+	// Gen5 fgets — NID KdP-nULpuGw.
 	LIB_FUNC("KdP-nULpuGw", LibC::c_fgets);
 	LIB_FUNC("MpxhMh8QFro", LibC::c_fwrite);
 	LIB_FUNC("QMFyLoqNxIg", LibC::c_setvbuf);
@@ -2989,11 +3221,11 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 safe format — NID NC4MSB+BRQg. SysV matches snprintf, but
 	// return is 0 on success (ObjectDefinition path builder asserts r == 0).
 	LIB_FUNC("NC4MSB+BRQg", LibC::c_snprintf_errno);
-	// Gen5 vsprintf_s — NID +qitMEbkSWk (hard-abort after fgets on Astro).
+	// Gen5 vsprintf_s — NID +qitMEbkSWk.
 	LIB_FUNC("+qitMEbkSWk", LibC::c_vsprintf_s);
 	LIB_FUNC("Q2V+iqvjgC0", LibC::c_vsnprintf); // vsnprintf (Gen5 libc_v1)
 	LIB_FUNC("tcVi5SivF7Q", LibC::c_sprintf);
-	// Gen5 sprintf_s — NID xEszJVGpybs (hard-abort after Fiber init on Astro).
+	// Gen5 sprintf_s — NID xEszJVGpybs.
 	LIB_FUNC("xEszJVGpybs", LibC::c_sprintf_s);
 	LIB_FUNC("fffwELXNVFA", LibC::c_fprintf);
 	LIB_FUNC("pDBDcY6uLSA", LibC::c_vfprintf);
@@ -3013,10 +3245,10 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 strtof — xENtRue8dpI after APR stream wrap (levels.xml path).
 	LIB_FUNC("xENtRue8dpI", LibC::c_strtof);
 	LIB_FUNC("mXlxhmLNMPg", LibC::c_strtol);
-	// Gen5 strtoul: Kyty maps QxmSHBCuKTk / zlfEH8FmyUA; Dreaming Sarah
+	// Gen5 strtoul: Kyty maps QxmSHBCuKTk / zlfEH8FmyUA; a guest
 	// Construct parser also hits VOBg+iNwB-4 (rdi=nptr, rsi=endptr, rdx=10).
 	LIB_FUNC_ALIASES(LibC::c_strtoul, "QxmSHBCuKTk", "zlfEH8FmyUA", "VOBg+iNwB-4");
-	// Gen5 libc_v1 strtoull — 5OqszGpy7Mg after TLS context factory on Astro.
+	// Gen5 libc_v1 strtoull — 5OqszGpy7Mg after TLS context factory.
 	LIB_FUNC("5OqszGpy7Mg", LibC::c_strtoull);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
@@ -3063,14 +3295,14 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("jMB7EFyu30Y", LibC::c_sincos);
 	// math (float)
 	LIB_FUNC("1D0H2KNjshE", LibC::c_powf);
-	// Gen5 libc_v1 __isnanf — lA94ZgT+vMM after Posix pthread_self on Astro.
+	// Gen5 libc_v1 __isnanf — lA94ZgT+vMM after Posix pthread_self.
 	LIB_FUNC("lA94ZgT+vMM", LibC::c_isnanf);
-	// Gen5 isfinite(double) — Dreaming Sarah after strtod in project parse.
+	// Gen5 isfinite(double) — used after strtod in a project parse.
 	LIB_FUNC("dhK16CKwhQg", LibC::c_isfinite);
-	// Gen5 isnan(double) — Dreaming Sarah layout coord checks after
+	// Gen5 isnan(double) — guest layout coordinate checks after
 	// vcvttsd2si; return 0 continues (non-zero rejects).
 	LIB_FUNC("GfxAp9Xyiqs", LibC::c_isnan);
-	// Gen5 libc_v1 float math (Astro after usleep; NIDs from name→NID hash).
+	// Gen5 libc_v1 float math (NIDs from name→NID hash).
 	LIB_FUNC("Q4rRL34CEeE", LibC::c_sinf);
 	LIB_FUNC("-P6FNMzk2Kc", LibC::c_cosf);
 	// Gen5 libc_v1 float math after Posix detach (name→NID; '/' stored as '-').
@@ -3083,6 +3315,18 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("iz2shAGFIxc", LibC::c_hypotf);
 	LIB_FUNC("Vo8rvWtZw3g", LibC::c_truncf);
 	LIB_FUNC("DDHG1a6+3q0", LibC::c_roundf);
+	// Gen5 libc_v1 float remainder/frexp variants (name→NID).
+	LIB_FUNC("eS+MVq+Lltw", LibC::c_remainderf);
+	LIB_FUNC("aaDMGGkXFxo", LibC::c_frexpf);
+	// Gen5 libc_v1 wide-string and varargs exports.
+	LIB_FUNC("FM5NPnLqBc8", LibC::c_wcscpy);
+	LIB_FUNC("GMpvxPFW924", LibC::c_vprintf);
+	LIB_FUNC("nJz16JE1txM", LibC::c_swprintf);
+	// Gen5 libc_v1 thread detach + C++ runtime error paths.
+	LIB_FUNC("L7f7zYwBvZA", LibC::c_thrd_detach);
+	LIB_FUNC("-QgqOT5u2Vk", LibC::c_assert);
+	LIB_FUNC("W0j6vCxh9Pc", LibC::c_throw_cpp_error);
+	LIB_FUNC("qYhnoevd9bI", LibC::c_terminate);
 	LIB_FUNC("lhpd6Wk6ccs", LibC::c_log10f); // next Unpatched after sinf
 	LIB_FUNC("RQXLbdT2lc4", LibC::c_logf);
 	LIB_FUNC("Q+xU11-h0xQ", LibC::c_sqrtf);
@@ -3101,7 +3345,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("2emaaluWzUw", LibC::c_cxa_guard_abort);
 	LIB_FUNC("BKSCW2bCACA", LibC::c_cxa_thread_atexit);
 	LIB_FUNC("Z2tTVqGDPGQ", LibC::c_cxa_thread_atexit);
-	// Gen5 __cxa_dynamic_cast — Dreaming Sarah Construct ConditionOrAction→Action.
+	// Gen5 __cxa_dynamic_cast — guest Construct ConditionOrAction→Action.
 	LIB_FUNC("hMAe+TWS9mQ", LibC::cxa_dynamic_cast);
 	LIB_FUNC("ozMAr28BwSY", LibC::c_Xout_of_range);
 	LIB_FUNC("tQIo+GIPklo", LibC::c_Xlength_error);
