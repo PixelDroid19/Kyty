@@ -216,7 +216,8 @@ static bool ShaderSamplerResourcesEqual(const ShaderSamplerResource& first, cons
 }
 
 static bool ShaderAddDynamicSLoadMapping(ShaderDynamicSLoadMappings* mappings, ShaderDynamicSLoadResourceKind kind, int resource_index,
-	                                      const ShaderInstruction& sload, int offset_dw, int dword_count, uint32_t last_consumer_pc)
+	                                      const ShaderInstruction& sload, int offset_dw, int dword_count, uint32_t last_consumer_pc,
+	                                      bool raw_vmem_oob_guarded)
 {
 	EXIT_IF(mappings == nullptr);
 	if (sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != dword_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != dword_count condition ignored (continuing)\n"); }
@@ -225,7 +226,8 @@ static bool ShaderAddDynamicSLoadMapping(ShaderDynamicSLoadMappings* mappings, S
 		if (mappings->instruction_pc[mapping] == sload.pc)
 		{
 			return mappings->kind[mapping] == kind && mappings->resource_index[mapping] == resource_index &&
-			       mappings->offset_dw[mapping] == offset_dw && mappings->dword_count[mapping] == dword_count;
+			       mappings->offset_dw[mapping] == offset_dw && mappings->dword_count[mapping] == dword_count &&
+			       mappings->raw_vmem_oob_guarded[mapping] == raw_vmem_oob_guarded;
 		}
 	}
 	if (mappings->mappings_num >= ShaderDynamicSLoadMappings::MAPPINGS_MAX)
@@ -241,11 +243,13 @@ static bool ShaderAddDynamicSLoadMapping(ShaderDynamicSLoadMappings* mappings, S
 	mappings->offset_dw[mapping]            = offset_dw;
 	mappings->dword_count[mapping]          = dword_count;
 	mappings->last_consumer_pc[mapping]     = last_consumer_pc;
+	mappings->raw_vmem_oob_guarded[mapping] = raw_vmem_oob_guarded;
 	return true;
 }
 
 static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, const ShaderInstruction& sload, int offset_dw,
-	                                               uint32_t last_consumer_pc, const uint32_t* extended_buffer, bool* added_resource)
+	                                               uint32_t last_consumer_pc, bool raw_vmem_oob_guarded,
+	                                               const uint32_t* extended_buffer, bool* added_resource)
 {
 	EXIT_IF(bind == nullptr || extended_buffer == nullptr || added_resource == nullptr);
 	if (sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4 condition ignored (continuing)\n"); }
@@ -290,12 +294,13 @@ static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, con
 	}
 
 	return ShaderAddDynamicSLoadMapping(&bind->dynamic_sloads, ShaderDynamicSLoadResourceKind::StorageBuffer, storage_index, sload,
-	                                    offset_dw, 4, last_consumer_pc);
+	                                    offset_dw, 4, last_consumer_pc, raw_vmem_oob_guarded);
 }
 
 static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const ShaderInstruction& sload, int offset_dw,
 	                                         uint32_t last_consumer_pc, ShaderTextureUsage usage,
 	                                         State::ImageSampleOperation operation,
+	                                         ShaderGen5SampledTextureShape sampled_shape, bool sampled_shape_known,
 	                                         const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer,
 	                                         bool* added_resource)
 {
@@ -312,8 +317,11 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 	int texture_index = -1;
 	for (int index = 0; index < bind->textures2D.textures_num; ++index)
 	{
-		if (bind->textures2D.desc[index].usage == usage && bind->textures2D.desc[index].sample_operation == operation &&
-		    ShaderTextureResourcesEqual(bind->textures2D.desc[index].texture, resource))
+		const auto& descriptor = bind->textures2D.desc[index];
+		const bool  shape_matches = usage != ShaderTextureUsage::ReadOnly || !sampled_shape_known ||
+		                            ShaderResolvedSampledTextureShape(descriptor) == sampled_shape;
+		if (shape_matches && descriptor.usage == usage && descriptor.sample_operation == operation &&
+		    ShaderTextureResourcesEqual(descriptor.texture, resource))
 		{
 			texture_index = index;
 			break;
@@ -329,11 +337,16 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 		ShaderGetTextureBuffer(&bind->textures2D, nullptr, offset_dw + 16, offset_dw, usage, user_sgpr, extended_buffer);
 		bind->textures2D.desc[texture_index].sample_operation = operation;
 		bind->textures2D.desc[texture_index].dynamic_sload = true;
-		*added_resource                                    = true;
+		if (usage == ShaderTextureUsage::ReadOnly && sampled_shape_known)
+		{
+			bind->textures2D.desc[texture_index].sampled_shape                  = sampled_shape;
+			bind->textures2D.desc[texture_index].sampled_shape_from_instruction = true;
+		}
+		*added_resource = true;
 	}
 
 	return ShaderAddDynamicSLoadMapping(&bind->dynamic_sloads, ShaderDynamicSLoadResourceKind::Texture, texture_index, sload,
-	                                    offset_dw, 8, last_consumer_pc);
+	                                    offset_dw, 8, last_consumer_pc, false);
 }
 
 static bool ShaderAddDynamicSamplerResource(ShaderBindResources* bind, const ShaderInstruction& sload, int offset_dw,
@@ -374,7 +387,7 @@ static bool ShaderAddDynamicSamplerResource(ShaderBindResources* bind, const Sha
 	}
 
 	return ShaderAddDynamicSLoadMapping(&bind->dynamic_sloads, ShaderDynamicSLoadResourceKind::Sampler, sampler_index, sload,
-	                                    offset_dw, 4, last_consumer_pc);
+	                                    offset_dw, 4, last_consumer_pc, false);
 }
 
 struct ShaderDynamicSLoadUse
@@ -382,10 +395,41 @@ struct ShaderDynamicSLoadUse
 	ShaderDynamicSLoadResourceKind kind              = ShaderDynamicSLoadResourceKind::StorageBuffer;
 	ShaderTextureUsage             texture_usage     = ShaderTextureUsage::Unknown;
 	State::ImageSampleOperation sampler_operation = State::ImageSampleOperation::Regular;
+	ShaderGen5SampledTextureShape sampled_shape = ShaderGen5SampledTextureShape::TwoDimensional;
 	uint32_t                    last_consumer_pc   = 0;
+	bool                        raw_vmem_oob_guarded = false;
+	bool                        sampled_shape_known = false;
 	bool                        found              = false;
 	bool                        valid              = true;
 };
+
+static bool ShaderInstructionUsesVectorBufferDescriptor(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::BufferLoadUbyte:
+		case ShaderInstructionType::BufferLoadDword:
+		case ShaderInstructionType::BufferLoadDwordx2:
+		case ShaderInstructionType::BufferLoadDwordx3:
+		case ShaderInstructionType::BufferLoadDwordx4:
+		case ShaderInstructionType::BufferLoadFormatX:
+		case ShaderInstructionType::BufferLoadFormatXy:
+		case ShaderInstructionType::BufferLoadFormatXyz:
+		case ShaderInstructionType::BufferLoadFormatXyzw:
+		case ShaderInstructionType::BufferStoreDword:
+		case ShaderInstructionType::BufferStoreDwordx2:
+		case ShaderInstructionType::BufferStoreDwordx3:
+		case ShaderInstructionType::BufferStoreDwordx4:
+		case ShaderInstructionType::BufferStoreFormatX:
+		case ShaderInstructionType::BufferStoreFormatXy:
+		case ShaderInstructionType::BufferStoreFormatXyzw:
+		case ShaderInstructionType::BufferAtomicAdd:
+		case ShaderInstructionType::TBufferLoadFormatX:
+		case ShaderInstructionType::TBufferLoadFormatXy:
+		case ShaderInstructionType::TBufferLoadFormatXyzw: return true;
+		default: return false;
+	}
+}
 
 static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, const ShaderInstruction& sload,
 	                                           ShaderDynamicSLoadUse* use)
@@ -408,6 +452,21 @@ static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, con
 			use->texture_usage = ShaderTextureUsage::Unknown;
 			return true;
 		}
+		if (ShaderInstructionUsesVectorBufferDescriptor(inst.type) && inst.src_num >= 2 &&
+		    inst.src[1].type == ShaderOperandType::Sgpr && inst.src[1].register_id == destination && inst.src[1].size == 4)
+		{
+			for (int source = 0; source < inst.src_num; ++source)
+			{
+				if (source != 1 && ShaderOperandOverlapsSgprRange(inst.src[source], destination, 4))
+				{
+					return false;
+				}
+			}
+			use->kind                   = ShaderDynamicSLoadResourceKind::StorageBuffer;
+			use->texture_usage          = ShaderTextureUsage::Unknown;
+			use->raw_vmem_oob_guarded = true;
+			return true;
+		}
 		if (ShaderInstructionUsesImageSampler(inst.type) && inst.src_num >= 3 && inst.src[2].type == ShaderOperandType::Sgpr &&
 		    inst.src[2].register_id == destination && inst.src[2].size == 4)
 		{
@@ -427,6 +486,8 @@ static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, con
 			use->sampler_operation = ShaderInstructionUsesImageSampler(inst.type)
 			                             ? ShaderInstructionSamplerOperation(inst.type)
 			                             : State::ImageSampleOperation::Regular;
+			use->sampled_shape_known =
+			    ShaderGen5SampledTextureShapeForMimgDimension(inst.mimg_dimension, &use->sampled_shape);
 			return true;
 		}
 		if (ShaderInstructionWritesImageResource(inst.type))
@@ -495,6 +556,12 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 					use.valid = false;
 					break;
 				}
+				if (use.found && use.sampled_shape_known && next_use.sampled_shape_known &&
+				    use.sampled_shape != next_use.sampled_shape)
+				{
+					use.valid = false;
+					break;
+				}
 				const bool operation_sensitive =
 				    use.kind == ShaderDynamicSLoadResourceKind::Sampler ||
 				    (use.kind == ShaderDynamicSLoadResourceKind::Texture && use.texture_usage == ShaderTextureUsage::ReadOnly);
@@ -506,8 +573,14 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 				use.kind              = next_use.kind;
 				use.texture_usage     = next_use.texture_usage;
 				use.sampler_operation = sampler_operation;
-				use.last_consumer_pc = next.pc;
-				use.found            = true;
+				if (next_use.sampled_shape_known)
+				{
+					use.sampled_shape       = next_use.sampled_shape;
+					use.sampled_shape_known = true;
+				}
+				use.last_consumer_pc   = next.pc;
+				use.raw_vmem_oob_guarded = use.raw_vmem_oob_guarded || next_use.raw_vmem_oob_guarded;
+				use.found              = true;
 			}
 			else if (ShaderInstructionReadsSgprRange(next, sload.dst.register_id, dword_count))
 			{
@@ -531,7 +604,8 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		switch (use.kind)
 		{
 			case ShaderDynamicSLoadResourceKind::StorageBuffer:
-				added_mapping = ShaderAddDynamicScalarStorageResource(bind, sload, offset_dw, use.last_consumer_pc, extended_buffer,
+				added_mapping = ShaderAddDynamicScalarStorageResource(bind, sload, offset_dw, use.last_consumer_pc,
+				                                                      use.raw_vmem_oob_guarded, extended_buffer,
 				                                                      &added_resource);
 				if (added_resource)
 				{
@@ -540,7 +614,7 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 				break;
 			case ShaderDynamicSLoadResourceKind::Texture:
 				added_mapping = ShaderAddDynamicTextureResource(bind, sload, offset_dw, use.last_consumer_pc, use.texture_usage,
-				                                                use.sampler_operation,
+				                                                use.sampler_operation, use.sampled_shape, use.sampled_shape_known,
 				                                                 user_sgpr, extended_buffer, &added_resource);
 				if (added_resource)
 				{

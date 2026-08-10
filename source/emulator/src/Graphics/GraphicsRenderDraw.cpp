@@ -57,6 +57,31 @@ uint64_t DrawStageElapsedNs(DrawStageClock::time_point start)
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DrawStageClock::now() - start).count());
 }
 
+bool DispatchTextureExtentMatches(const ShaderComputeInputInfo& input, const char* specification)
+{
+	if (specification == nullptr || specification[0] == '\0')
+	{
+		return true;
+	}
+
+	uint32_t width  = 0;
+	uint32_t height = 0;
+	if (std::sscanf(specification, "%ux%u", &width, &height) != 2 || width == 0u || height == 0u)
+	{
+		return false;
+	}
+
+	for (int index = 0; index < input.bind.textures2D.textures_num; ++index)
+	{
+		const auto& texture = input.bind.textures2D.desc[index].texture;
+		if (texture.Width5() + 1u == width && texture.Height5() + 1u == height)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 } // namespace
 
 // DrawIndex, DrawIndexAuto, DispatchDirect, depth-stencil copy
@@ -114,7 +139,7 @@ static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_i
 			continue;
 		}
 
-		const auto shape = ShaderGen5SampledTextureShapeForType(descriptor.texture.Type());
+		const auto shape = ShaderResolvedSampledTextureShape(descriptor);
 		const uint64_t width  = static_cast<uint64_t>(descriptor.texture.Width5()) + 1u;
 		const uint64_t height = static_cast<uint64_t>(descriptor.texture.Height5()) + 1u;
 		const uint64_t depth  = shape == ShaderGen5SampledTextureShape::TwoDimensional ? 1u :
@@ -279,7 +304,7 @@ static void MaybeDumpPixelShaderTextureBytes(uint64_t shader_id, int index, cons
 		const size_t written = std::fwrite(reinterpret_cast<const void*>(static_cast<uintptr_t>(source_addr)), 1,
 		                                   static_cast<size_t>(level.tiled_size), file);
 		std::fclose(file);
-		KYTY_LOG_DEBUG(
+		KYTY_LOG_INFO(
 		             "KYTY_DUMP_PS_BYTES index=%d path=%s allocation=0x%012" PRIx64 " level=%u offset=%u bytes=%u complete=%u\n",
 		             index, file_path, address, base_level, level.tiled_offset, level.tiled_size,
 		             written == level.tiled_size ? 1u : 0u);
@@ -712,7 +737,7 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 		if (logs < 16u)
 		{
 			++logs;
-			KYTY_LOG_DEBUG(
+			KYTY_LOG_INFO(
 			             "KYTY_GRAPHICS: skip unsupported GE draw stages=0x%08" PRIx32 " es=0x%012" PRIx64
 			             " gs=0x%012" PRIx64 " max_vert=0x%08" PRIx32 " out_prim=0x%08" PRIx32
 			             " ge_ngg=0x%08" PRIx32 " max_out=0x%08" PRIx32 "\n",
@@ -1845,14 +1870,23 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		}
 	}
 	static const char* dump_dispatch = std::getenv("KYTY_DUMP_DISPATCH");
-	const char*        dump_cs_addr  = std::getenv("KYTY_DUMP_CS_ADDR");
-	bool               selected_cs   = false;
-	if (dump_cs_addr != nullptr && dump_cs_addr[0] != '\0')
+	const char*        dump_cs_id    = std::getenv("KYTY_DUMP_CS_ID");
+	const char*        dump_texture  = std::getenv("KYTY_DUMP_CS_TEXTURE");
+	bool               selected_cs   = true;
+	bool               selector_used = false;
+	if (dump_cs_id != nullptr && dump_cs_id[0] != '\0')
 	{
+		selector_used       = true;
 		char*      end      = nullptr;
-		const auto selected = std::strtoull(dump_cs_addr, &end, 0);
-		selected_cs         = end != dump_cs_addr && *end == '\0' && selected == cs_regs.cs_regs.data_addr;
+		const auto selected = std::strtoull(dump_cs_id, &end, 16);
+		selected_cs         = end != dump_cs_id && *end == '\0' && selected == cs_regs.cs_regs.chksum;
 	}
+	if (dump_texture != nullptr && dump_texture[0] != '\0')
+	{
+		selector_used = true;
+		selected_cs   = selected_cs && DispatchTextureExtentMatches(input_info, dump_texture);
+	}
+	selected_cs = selector_used && selected_cs;
 	static uint32_t    dispatch_logs = 0;
 	uint32_t           dispatch_limit = 256u;
 	if (const char* env_limit = std::getenv("KYTY_DUMP_DISPATCH_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
@@ -1867,7 +1901,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	    (selected_cs || GraphicsRunGetFrameNum() <= 5 || std::strcmp(dump_dispatch, "all") == 0))
 	{
 		++dispatch_logs;
-		KYTY_LOG_DEBUG(
+		KYTY_LOG_WARN(
 		             "KYTY_DUMP_DISPATCH frame=%d shader=0x%012" PRIx64 " groups=%ux%ux%u local=%ux%ux%u mode=0x%x "
 		             "storage=%d textures=%d direct=%d\n",
 		             GraphicsRunGetFrameNum(), cs_regs.cs_regs.data_addr, thread_group_x, thread_group_y, thread_group_z,
@@ -1877,7 +1911,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		for (int i = 0; i < input_info.bind.storage_buffers.buffers_num; ++i)
 		{
 			const auto& resource = input_info.bind.storage_buffers.buffers[i];
-			KYTY_LOG_DEBUG(
+			KYTY_LOG_WARN(
 			             "  storage[%d] reg=%d slot=%d usage=%u access=%u addr=0x%012" PRIx64
 			             " stride=%u records=%u fmt=%u dstsel=0x%03" PRIx32 " add_tid=%u fields=%08x,%08x,%08x,%08x\n",
 			             i, input_info.bind.storage_buffers.start_register[i], input_info.bind.storage_buffers.slots[i],
@@ -1888,18 +1922,18 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 			if (resource.Base48() != 0u && resource.Stride() == 16u && resource.NumRecords() <= 16u)
 			{
 				const auto* words = reinterpret_cast<const uint32_t*>(resource.Base48());
-				KYTY_LOG_DEBUG( "    words=");
+				KYTY_LOG_WARN("    words=");
 				for (uint32_t word = 0; word < resource.NumRecords() * 4u; ++word)
 				{
-					KYTY_LOG_DEBUG( "%s%08x", word == 0u ? "" : ",", words[word]);
+					KYTY_LOG_WARN("%s%08x", word == 0u ? "" : ",", words[word]);
 				}
-				KYTY_LOG_DEBUG( "\n");
+				KYTY_LOG_WARN("\n");
 			}
 		}
 		for (int i = 0; i < input_info.bind.textures2D.textures_num; ++i)
 		{
 			const auto& texture = input_info.bind.textures2D.desc[i].texture;
-			KYTY_LOG_DEBUG(
+			KYTY_LOG_WARN(
 			             "  texture[%d] reg=%d slot=%d usage=%u addr=0x%012" PRIx64
 			             " fmt=%u tile=%u size=%ux%u type=%u fields=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
 			             i, input_info.bind.textures2D.desc[i].start_register, input_info.bind.textures2D.desc[i].slot,
@@ -1910,7 +1944,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		}
 		for (int i = 0; i < input_info.bind.direct_sgprs.sgprs_num; ++i)
 		{
-			KYTY_LOG_DEBUG( "  direct[%d] reg=%d value=0x%08x\n", i, input_info.bind.direct_sgprs.start_register[i],
+			KYTY_LOG_WARN("  direct[%d] reg=%d value=0x%08x\n", i, input_info.bind.direct_sgprs.start_register[i],
 			             input_info.bind.direct_sgprs.sgprs[i].field);
 		}
 	}

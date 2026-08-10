@@ -653,7 +653,9 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	DebugStatsRecordGpuMemoryCreate(4, DebugStatsGpuMemoryCreateOutcome::NewStandalone, 400);
 	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500);
 	DebugStatsRecordGpuMemoryCreate(6, DebugStatsGpuMemoryCreateOutcome::NewFromObjects, 600);
-	DebugStatsRecordGpuMemoryCreate(7, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700);
+	DebugStatsGpuMemorySlowCreateRecord copied_reclaim;
+	copied_reclaim.create_from_objects = true;
+	DebugStatsRecordGpuMemoryCreate(7, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700, &copied_reclaim);
 	DebugStatsRecordGpuMemoryFree(7);
 	DebugStatsRecordGpuMemoryWriteBack(5, 4096, 250);
 	DebugStatsRecordGpuMemoryHash(6, 8192, 300);
@@ -678,6 +680,7 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	EXPECT_EQ(first.gpu_memory_types[5].new_linked, 1u);
 	EXPECT_EQ(first.gpu_memory_types[6].new_from_objects, 1u);
 	EXPECT_EQ(first.gpu_memory_types[7].reclaim_new, 1u);
+	EXPECT_EQ(first.gpu_memory_types[7].created_from_objects, 1u);
 	EXPECT_EQ(first.gpu_memory_types[7].logical_free, 1u);
 	EXPECT_EQ(first.gpu_memory_types[7].live, 0u);
 	EXPECT_EQ(first.gpu_memory_types[5].writeback_calls, 1u);
@@ -701,6 +704,7 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 		EXPECT_EQ(first.gpu_memory_types[i].new_standalone, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].new_linked, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].new_from_objects, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].created_from_objects, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].reclaim_new, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].logical_free, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].live, 0u);
@@ -719,6 +723,7 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 		EXPECT_EQ(empty.gpu_memory_types[i].new_standalone, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].new_linked, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].new_from_objects, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].created_from_objects, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].reclaim_new, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].logical_free, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].live, first.gpu_memory_types[i].live);
@@ -737,6 +742,7 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	snapshot.gpu_memory_create_ns                   = 300;
 	snapshot.gpu_memory_create_max_ns               = 200;
 	snapshot.gpu_memory_types[3].reclaim_new        = 1;
+	snapshot.gpu_memory_types[3].created_from_objects = 2;
 	snapshot.gpu_memory_types[3].logical_free       = 1;
 	snapshot.gpu_memory_types[3].live               = 7;
 	snapshot.gpu_memory_types[4].fast_reuse         = 9;
@@ -753,6 +759,7 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 
 	EXPECT_NE(json.find(R"("gpu_memory":{"create_calls":2,"create_ns":300,"create_max_ns":200)"), std::string::npos);
 	EXPECT_NE(json.find(R"("type":"index_buffer")"), std::string::npos);
+	EXPECT_NE(json.find(R"("created_from_objects":2)"), std::string::npos);
 	EXPECT_NE(json.find(R"("reclaim_new":1,"logical_free":1,"live":7)"), std::string::npos);
 	EXPECT_NE(json.find(R"("type":"vertex_buffer","cached_reuse":11,"fast_reuse":9)"), std::string::npos);
 	EXPECT_NE(json.find(R"("writeback_calls":3,"writeback_bytes":8192)"), std::string::npos);

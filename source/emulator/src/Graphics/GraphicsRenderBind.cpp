@@ -465,9 +465,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 	for (int i = 0; i < textures.textures_num; i++)
 	{
 		auto       r                 = textures.desc[i].texture;
-		const auto sampled_shape = ShaderGen5SampledTextureShapeForType(r.Type());
+		const auto sampled_shape = ShaderResolvedSampledTextureShape(textures.desc[i]);
 		const bool arrayed_2d = gen5 && sampled_shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
 		const bool three_dimensional = gen5 && sampled_shape == ShaderGen5SampledTextureShape::ThreeDimensional;
+		const uint8_t host_resource_type = gen5 ? ShaderGen5HostSampledTextureType(r.Type(), sampled_shape) : r.Type();
 
 		if (gen5)
 		{
@@ -884,12 +885,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			// guest memory (opaque-black wall/prop quads). Same format+extent
 			// ranking as the RT path so float UAV parents do not paint cyan sprites.
 			bool storage_texture = false;
-			if (!render_texture && gen5)
-			{
-				auto stex = FindStorageTexture(buffer, addr, size.size, true);
-				if (stex.IsEmpty())
+				if (!render_texture && gen5)
 				{
-					stex = FindStorageTexture(buffer, addr, size.size, false);
+					auto stex = FindStorageTexture(buffer, addr, size.size, true);
+					// A storage write needs the exact backing range because its array
+					// view can expose layers absent from a smaller overlapping image.
+					// Sampled descriptors may still reuse a containing GPU-owned image.
+					if (stex.IsEmpty() && !textures.desc[i].textures2d_without_sampler)
+					{
+						stex = FindStorageTexture(buffer, addr, size.size, false);
 				}
 				if (!stex.IsEmpty())
 				{
@@ -1019,7 +1023,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				}
 				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
 				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, view_swizzle,
-				                                  force_degamma, skip_guest, r.Type(), depth, base_array);
+				                                  force_degamma, skip_guest, host_resource_type, depth, base_array);
 				tex = static_cast<TextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 			}
@@ -1087,7 +1091,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			              fmt, static_cast<uint32_t>(tex->format), static_cast<uint32_t>(tex->type));
 			UtilDumpVulkanImageRgba8Png(g_render_ctx->GetGraphicCtx(), tex, "/tmp/kyty-dump-bound-sample", dump_tag);
 		}
-
 		if (render_texture)
 		{
 			catalog_sample("rt");
@@ -1109,7 +1112,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			images_storage[index_storage] = tex;
 			images_storage_view[index_storage] =
-			    (three_dimensional ? VulkanImage::VIEW_3D : (arrayed_2d ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_DEFAULT));
+			    (three_dimensional ? VulkanImage::VIEW_3D : (arrayed_2d ? VulkanImage::VIEW_STORAGE_ARRAY : VulkanImage::VIEW_DEFAULT));
 			if (gen5)
 			{
 				r.UpdateAddress40(index_storage);
@@ -1252,7 +1255,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			             (three_dimensional ? index_sampled_3d : (arrayed_2d ? index_sampled_array : index_sampled)) - 1, r.fields[0], r.fields[1], r.fields[2], r.fields[3],
 			             r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
 		}
-
 		(*sgprs)[0] = r.fields[0];
 		(*sgprs)[1] = r.fields[1];
 		(*sgprs)[2] = r.fields[2];

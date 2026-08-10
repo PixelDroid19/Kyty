@@ -240,21 +240,35 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x21: KYTY_NI("image_sample_cl"); break;
 		case 0x22: KYTY_NI("image_sample_d"); break;
 		case 0x23: KYTY_NI("image_sample_d_cl"); break;
-		case 0x24:
-			inst.type        = ShaderInstructionType::ImageSampleL;
-			inst.src[0].size = 3;
-			inst.src[1].size = 8;
-			inst.src[2].size = 4;
+			case 0x24:
+				inst.type        = ShaderInstructionType::ImageSampleL;
+				inst.src[0].size = (dim == 3u ? 4 : 3);
+				inst.src[1].size = 8;
+				inst.src[2].size = 4;
+				inst.mimg_dmask  = static_cast<uint8_t>(dmask);
 			switch (dmask)
 			{
-				case 0x7:
-					inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7;
-					inst.dst.size = 3;
-					break;
-				case 0xf:
-					inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
-					inst.dst.size = 4;
-					break;
+					case 0x7:
+						inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7;
+						if (dim == 3u)
+						{
+							inst.format = ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7;
+						}
+						inst.dst.size = 3;
+						break;
+					case 0xb:
+						inst.format = dim == 3u ? ShaderInstructionFormat::Vdata3Vaddr4StSsDmaskB
+						                         : ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB;
+						inst.dst.size = 3;
+						break;
+					case 0xf:
+						inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
+						if (dim == 3u)
+						{
+							inst.format = ShaderInstructionFormat::Vdata4Vaddr4StSsDmaskF;
+						}
+						inst.dst.size = 4;
+						break;
 				default: break;
 			}
 			break;

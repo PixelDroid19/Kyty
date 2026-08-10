@@ -683,6 +683,23 @@ static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int st
 	resources->start_register[resources->buffers_num++] = start_register;
 }
 
+static void ApplyDirectImageShape(const ShaderDirectImageUse& image, ShaderTextureDescriptor* descriptor)
+{
+	EXIT_IF(descriptor == nullptr);
+	if (image.sampled_shape_conflict)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: sampled image resource uses multiple MIMG dimensions; descriptor shape retained\n");
+		return;
+	}
+	if (!image.sampled_shape_known)
+	{
+		return;
+	}
+	descriptor->sampled_shape                  = image.sampled_shape;
+	descriptor->sampled_shape_from_instruction = true;
+}
+
 void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, int start_index, int slot, ShaderTextureUsage usage,
                                    const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer)
 {
@@ -728,6 +745,7 @@ void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, in
 	info->desc[index].texture.fields[5] = (extended ? extended_buffer[start_index - 16 + 5] : user_sgpr.value[start_index + 5]);
 	info->desc[index].texture.fields[6] = (extended ? extended_buffer[start_index - 16 + 6] : user_sgpr.value[start_index + 6]);
 	info->desc[index].texture.fields[7] = (extended ? extended_buffer[start_index - 16 + 7] : user_sgpr.value[start_index + 7]);
+	info->desc[index].sampled_shape = ShaderGen5SampledTextureShapeForType(info->desc[index].texture.Type());
 
 	if (usage == ShaderTextureUsage::ReadWrite)
 	{
@@ -869,15 +887,30 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	bind->textures2D.textures3d_sampled_uint_num       = 0;
 	if (Config::IsNextGen())
 	{
+		bind->textures2D.textures2d_sampled_num       = 0;
+		bind->textures2D.textures2d_array_sampled_num = 0;
+		bind->textures2D.textures3d_sampled_num       = 0;
 		for (int i = 0; i < bind->textures2D.textures_num; ++i)
 		{
 			const auto& descriptor = bind->textures2D.desc[i];
-			if (descriptor.usage != ShaderTextureUsage::ReadOnly ||
-			    VulkanGen5ImageNumericType(descriptor.texture.Format()) != GuestImageNumericType::UnsignedInteger)
+			if (descriptor.usage != ShaderTextureUsage::ReadOnly)
 			{
 				continue;
 			}
-			switch (ShaderGen5SampledTextureShapeForType(descriptor.texture.Type()))
+			const auto shape = ShaderResolvedSampledTextureShape(descriptor);
+			switch (shape)
+			{
+				case ShaderGen5SampledTextureShape::TwoDimensional: bind->textures2D.textures2d_sampled_num++; break;
+				case ShaderGen5SampledTextureShape::TwoDimensionalArray:
+					bind->textures2D.textures2d_array_sampled_num++;
+					break;
+				case ShaderGen5SampledTextureShape::ThreeDimensional: bind->textures2D.textures3d_sampled_num++; break;
+			}
+			if (VulkanGen5ImageNumericType(descriptor.texture.Format()) != GuestImageNumericType::UnsignedInteger)
+			{
+				continue;
+			}
+			switch (shape)
 			{
 				case ShaderGen5SampledTextureShape::TwoDimensional: bind->textures2D.textures2d_sampled_uint_num++; break;
 				case ShaderGen5SampledTextureShape::TwoDimensionalArray:
@@ -1566,7 +1599,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		auto exact_evidence = code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base) : ShaderStorageUseEvidence {};
 		if (has_dynamic_sload)
 		{
-			// Each mapping is proven to reach an S_BUFFER_LOAD before a clobber.
+			// Each mapping is proven to reach one descriptor consumer before a clobber.
 			// Merge that local raw-use proof with any independent static use of the
 			// same physical descriptor instead of assigning a synthetic entry state.
 			if (exact_evidence.access == ShaderStorageAccess::Unknown)
@@ -1576,8 +1609,21 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			{
 				exact_evidence.access = ShaderStorageAccess::Mixed;
 			}
-			exact_evidence.raw_smem_use = true;
-			exact_evidence.raw_smem_dynamic_offset = true;
+			for (int mapping = 0; mapping < bind->dynamic_sloads.mappings_num; ++mapping)
+			{
+				if (bind->dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::StorageBuffer ||
+				    bind->dynamic_sloads.resource_index[mapping] != i)
+				{
+					continue;
+				}
+				if (bind->dynamic_sloads.raw_vmem_oob_guarded[mapping])
+				{
+					exact_evidence.raw_vmem_oob_guarded = true;
+					continue;
+				}
+				exact_evidence.raw_smem_use            = true;
+				exact_evidence.raw_smem_dynamic_offset = true;
+			}
 		}
 		const auto exact = exact_evidence.access;
 		ShaderStorageUseEvidence unbased_evidence {};
@@ -1643,6 +1689,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			if (image.texture != ShaderTextureUsage::Unknown)
 			{
 				descriptor.sample_operation = image.sample_operation;
+				ApplyDirectImageShape(image, &descriptor);
 			}
 		}
 		for (int i = 0; i < bind->samplers.samplers_num; ++i)
@@ -2823,6 +2870,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.offset_dw[mapping]));
 		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.dword_count[mapping]));
 		ret->ids.Add(bind.dynamic_sloads.last_consumer_pc[mapping]);
+		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.raw_vmem_oob_guarded[mapping]));
 	}
 
 	ret->ids.Add(bind.zero_sbuffer_resources.buffers_num);
@@ -2868,6 +2916,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].extended));
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].dynamic_sload));
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].usage));
+		ret->ids.Add(static_cast<uint32_t>(ShaderResolvedSampledTextureShape(bind.textures2D.desc[i])));
 	}
 
 	ret->ids.Add(bind.samplers.samplers_num);

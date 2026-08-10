@@ -122,6 +122,7 @@ struct DebugStatsGpuMemoryTypeSnapshot
 	uint64_t new_standalone   = 0;
 	uint64_t new_linked       = 0;
 	uint64_t new_from_objects = 0;
+	uint64_t created_from_objects = 0;
 	uint64_t reclaim_new      = 0;
 	uint64_t logical_free     = 0;
 	uint64_t live             = 0;

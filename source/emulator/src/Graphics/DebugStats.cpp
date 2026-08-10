@@ -192,6 +192,7 @@ struct GpuMemoryTypeMetric
 	std::atomic<uint64_t> new_standalone {0};
 	std::atomic<uint64_t> new_linked {0};
 	std::atomic<uint64_t> new_from_objects {0};
+	std::atomic<uint64_t> created_from_objects {0};
 	std::atomic<uint64_t> reclaim_new {0};
 	std::atomic<uint64_t> logical_free {0};
 	std::atomic<uint64_t> live {0};
@@ -754,6 +755,7 @@ void DebugStatsInit()
 		type.new_standalone.store(0, std::memory_order_relaxed);
 		type.new_linked.store(0, std::memory_order_relaxed);
 		type.new_from_objects.store(0, std::memory_order_relaxed);
+		type.created_from_objects.store(0, std::memory_order_relaxed);
 		type.reclaim_new.store(0, std::memory_order_relaxed);
 		type.logical_free.store(0, std::memory_order_relaxed);
 		type.live.store(0, std::memory_order_relaxed);
@@ -1145,6 +1147,10 @@ void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCre
 		g_slow_frame_totals.gpu_memory_create_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
 	}
 	auto& type = g_gpu_memory_types[type_index];
+	if (detail != nullptr && detail->create_from_objects)
+	{
+		type.created_from_objects.fetch_add(1, std::memory_order_relaxed);
+	}
 	switch (outcome)
 	{
 		case DebugStatsGpuMemoryCreateOutcome::CachedReuse: type.cached_reuse.fetch_add(1, std::memory_order_relaxed); break;
@@ -1540,6 +1546,7 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		dst.new_standalone   = take_window(src.new_standalone);
 		dst.new_linked       = take_window(src.new_linked);
 		dst.new_from_objects = take_window(src.new_from_objects);
+		dst.created_from_objects = take_window(src.created_from_objects);
 		dst.reclaim_new      = take_window(src.reclaim_new);
 		dst.logical_free     = take_window(src.logical_free);
 		dst.live             = src.live.load(std::memory_order_relaxed);

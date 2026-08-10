@@ -375,6 +375,15 @@ String8 ShaderCode::DbgInstructionToStr(const ShaderInstruction& inst)
 
 	ret += String8::FromPrintf("%-20s [%-30s] ", name.c_str(), format.c_str());
 	ret += dbg_fmt_print(inst);
+	if (inst.mimg_address_num > 0)
+	{
+		ret += String8::FromPrintf(" dim:%u nsa:", static_cast<unsigned>(inst.mimg_dimension));
+		for (int address = 0; address < inst.mimg_address_num; ++address)
+		{
+			ret += (address == 0 ? "" : ",");
+			ret += operand_to_str(inst.mimg_address[address]);
+		}
+	}
 
 	return ret;
 }

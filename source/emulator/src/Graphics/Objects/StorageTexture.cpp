@@ -23,11 +23,28 @@
 
 namespace Kyty::Libs::Graphics {
 
-static VkImageUsageFlags get_usage()
+bool StorageTextureGetArrayViewRanges(uint32_t depth, uint32_t base_array, StorageTextureArrayViewRange* sampled,
+                                      StorageTextureArrayViewRange* storage)
+{
+	if (sampled == nullptr || storage == nullptr)
+	{
+		return false;
+	}
+	if (depth == 0u || base_array >= depth)
+	{
+		return false;
+	}
+
+	*sampled = {0u, depth};
+	*storage = {base_array, depth - base_array};
+	return true;
+}
+
+VkImageUsageFlags StorageTextureGetImageUsage()
 {
 	VkImageUsageFlags vk_usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
-	vk_usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+	vk_usage |= VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
 
 	return vk_usage;
 }
@@ -47,8 +64,7 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 	{
 		return DstSel(4, 5, 6, 7);
 	}
-	if (IsR32SingleComponentStorageFormat(fmt) &&
-	    (swizzle == DstSel(4, 0, 0, 1) || swizzle == DstSel(4, 0, 0, 0)))
+	if (IsR32SingleComponentStorageFormat(fmt) && (swizzle == DstSel(4, 0, 0, 1) || swizzle == DstSel(4, 0, 0, 0)))
 	{
 		return DstSel(4, 5, 6, 7);
 	}
@@ -101,7 +117,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_GENERAL;
 
-	if (levels >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: levels >= 16 condition ignored (continuing)\n"); }
+	if (levels >= 16)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: levels >= 16 condition ignored (continuing)\n");
+	}
 	if (three_dimensional)
 	{
 		Gen5TextureVolumeLayout volume_layout {};
@@ -143,16 +162,24 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	}
 	if (depth64kb32)
 	{
-		const bool one_2d_layer = (resource_type == 9u && depth == 0u && base_array == 0u) ||
-		                          (arrayed_2d && depth == 1u && base_array == 0u);
-		if (!one_2d_layer || levels != 1u || pitch < width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !one_2d_layer || levels != 1u || pitch < width condition ignored (continuing)\n"); }
+		const bool one_2d_layer =
+		    (resource_type == 9u && depth == 0u && base_array == 0u) || (arrayed_2d && depth == 1u && base_array == 0u);
+		if (!one_2d_layer || levels != 1u || pitch < width)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !one_2d_layer || levels != 1u || pitch < width condition ignored (continuing)\n");
+		}
 
 		TileSizeAlign tiled_size {};
 		TileGetTextureSize2(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-		                    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &tiled_size,
-		                    nullptr, nullptr);
+		                    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &tiled_size, nullptr,
+		                    nullptr);
 		const uint64_t linear_bytes = width * height * 4u;
-		if (tiled_size.size != *size || linear_bytes == 0u || linear_bytes > *size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tiled_size.size != *size || linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n"); }
+		if (tiled_size.size != *size || linear_bytes == 0u || linear_bytes > *size)
+		{
+			KYTY_LOG_LIMIT(
+			    Log::Level::Warn, 8,
+			    "WARNING: tiled_size.size != *size || linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n");
+		}
 
 		std::vector<uint8_t> linear(static_cast<size_t>(linear_bytes));
 		TileConvertDepth64KB32ToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
@@ -170,15 +197,28 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	if (arrayed_2d)
 	{
 		Gen5TextureArrayLayout array_layout {};
-		if (!Gen5GetTextureArrayLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
-		                                                static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
-		                                                static_cast<uint32_t>(levels), static_cast<uint32_t>(tile),
-		                                                static_cast<uint32_t>(depth), &array_layout)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Gen5GetTextureArrayLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(wid condition ignored (continuing)\n"); }
-		if (!Gen5ValidateTextureArrayUpload(array_layout, static_cast<uint32_t>(base_array), *size)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Gen5ValidateTextureArrayUpload(array_layout, static_cast<uint32_t>(base_array), *size) condition ignored (continuing)\n"); }
+		if (!Gen5GetTextureArrayLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+		                               static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile),
+		                               static_cast<uint32_t>(depth), &array_layout))
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "WARNING: !Gen5GetTextureArrayLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(wid condition ignored "
+			               "(continuing)\n");
+		}
+		if (!Gen5ValidateTextureArrayUpload(array_layout, static_cast<uint32_t>(base_array), *size))
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "WARNING: !Gen5ValidateTextureArrayUpload(array_layout, static_cast<uint32_t>(base_array), *size) condition "
+			               "ignored (continuing)\n");
+		}
 
 		std::vector<uint8_t> linear(static_cast<size_t>(array_layout.linear_size));
-		if (!Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size,
-		                                             array_layout)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const voi condition ignored (continuing)\n"); }
+		if (!Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, array_layout))
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "WARNING: !Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const voi condition ignored "
+			               "(continuing)\n");
+		}
 
 		Vector<BufferImageCopy> regions(static_cast<int>(array_layout.layers));
 		for (uint32_t layer = 0; layer < array_layout.layers; ++layer)
@@ -199,9 +239,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	// 27 kRenderTarget SW64k. Reject anything outside that set with values.
 	if (tile != 0 && tile != 5 && tile != 8 && tile != 9 && tile != 13 && tile != 27)
 	{
-		EXIT("unsupported storage texture tile: tile=%" PRIu64 " format=%" PRIu64 " dfmt=%" PRIu64 " nfmt=%" PRIu64
-		     " width=%" PRIu64 " height=%" PRIu64 " pitch=%" PRIu64 " levels=%" PRIu64 " type=%" PRIu64
-		     " size=%" PRIu64 "\n",
+		EXIT("unsupported storage texture tile: tile=%" PRIu64 " format=%" PRIu64 " dfmt=%" PRIu64 " nfmt=%" PRIu64 " width=%" PRIu64
+		     " height=%" PRIu64 " pitch=%" PRIu64 " levels=%" PRIu64 " type=%" PRIu64 " size=%" PRIu64 "\n",
 		     tile, fmt, dfmt, nfmt, width, height, pitch, levels, resource_type, *size);
 	}
 
@@ -224,7 +263,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	Vector<BufferImageCopy> regions(levels);
 	for (uint32_t i = 0; i < levels; i++)
 	{
-		if (level_sizes[i].size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: level_sizes[i].size == 0 condition ignored (continuing)\n"); }
+		if (level_sizes[i].size == 0)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: level_sizes[i].size == 0 condition ignored (continuing)\n");
+		}
 
 		auto mipmap_offset = UtilCalcMipmapOffset(i, width, height);
 
@@ -253,7 +295,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	if (tile == 13)
 	{
 		// EXIT_NOT_IMPLEMENTED(pitch != width);
-		if (fmt != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fmt != 0 condition ignored (continuing)\n"); }
+		if (fmt != 0)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fmt != 0 condition ignored (continuing)\n");
+		}
 		auto* temp_buf = new uint8_t[*size];
 		TileConvertTiledToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), TileMode::TextureTiled, dfmt, nfmt, width, height, pitch,
 		                         levels, neo);
@@ -262,9 +307,15 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	} else if (tile == 5)
 	{
 		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-		if (bytes_per_element == 0u || levels != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || levels != 1u condition ignored (continuing)\n"); }
+		if (bytes_per_element == 0u || levels != 1u)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || levels != 1u condition ignored (continuing)\n");
+		}
 		const uint64_t linear_bytes = static_cast<uint64_t>(pitch) * height * bytes_per_element;
-		if (linear_bytes == 0u || linear_bytes > *size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n"); }
+		if (linear_bytes == 0u || linear_bytes > *size)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n");
+		}
 		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
 		TileConvertStandard4KBToLinear(temp_buf, reinterpret_cast<void*>(*vaddr), width, height, pitch, bytes_per_element);
 		regions[0].offset = 0;
@@ -279,20 +330,25 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// the host storage image. Multi-mip and block-compressed storage writes
 		// are not part of this path yet.
 		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-		if (bytes_per_element == 0u || levels != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || levels != 1u condition ignored (continuing)\n"); }
+		if (bytes_per_element == 0u || levels != 1u)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || levels != 1u condition ignored (continuing)\n");
+		}
 		const uint32_t pitch_elems  = (pitch != 0u ? static_cast<uint32_t>(pitch) : static_cast<uint32_t>(width));
 		const uint64_t linear_bytes = static_cast<uint64_t>(pitch_elems) * height * bytes_per_element;
-		if (linear_bytes == 0u || linear_bytes > *size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n"); }
-		auto*       temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
+		if (linear_bytes == 0u || linear_bytes > *size)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n");
+		}
+		auto* temp_buf = new uint8_t[static_cast<size_t>(linear_bytes)];
 		std::memset(temp_buf, 0, static_cast<size_t>(linear_bytes));
 		const auto* src = reinterpret_cast<const uint8_t*>(*vaddr);
 		for (uint32_t y = 0; y < static_cast<uint32_t>(height); y++)
 		{
 			for (uint32_t x = 0; x < static_cast<uint32_t>(width); x++)
 			{
-				const uint64_t tiled =
-				    (tile == 9) ? TileGetStandard64KBOffset(x, y, pitch_elems, bytes_per_element) :
-				                  TileGetSw64kRxOffset(x, y, pitch_elems, bytes_per_element);
+				const uint64_t tiled  = (tile == 9) ? TileGetStandard64KBOffset(x, y, pitch_elems, bytes_per_element)
+				                                    : TileGetSw64kRxOffset(x, y, pitch_elems, bytes_per_element);
 				const uint64_t linear = (static_cast<uint64_t>(y) * pitch_elems + x) * bytes_per_element;
 				std::memcpy(temp_buf + linear, src + tiled, bytes_per_element);
 			}
@@ -337,11 +393,17 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto       tile              = params[StorageTextureObject::PARAM_TILE];
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
-	if (resource_type != 8u && resource_type != 9u && !arrayed_2d && !three_dimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported storage texture resource type (continuing)\n"); }
+	if (resource_type != 8u && resource_type != 9u && !arrayed_2d && !three_dimensional)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported storage texture resource type (continuing)\n");
+	}
 
-	if (base_level != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_level != 0 condition ignored (continuing)\n"); }
+	if (base_level != 0)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_level != 0 condition ignored (continuing)\n");
+	}
 
-	VkImageUsageFlags vk_usage = get_usage();
+	VkImageUsageFlags vk_usage = StorageTextureGetImageUsage();
 
 	VkComponentMapping components {};
 	EXIT_IF(!VulkanDecodeComponentMapping(static_cast<uint32_t>(swizzle), &components));
@@ -351,17 +413,28 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	if (pixel_format == VK_FORMAT_UNDEFINED)
 	{
-		EXIT("unsupported storage texture format: format=%" PRIu64 " dfmt=%" PRIu64 " nfmt=%" PRIu64 " tile=%" PRIu64
-		     " width=%" PRIu64 " height=%" PRIu64 " pitch=%" PRIu64 " levels=%" PRIu64
-		     " type=%" PRIu64 " depth=%" PRIu64 " base_array=%" PRIu64 " swizzle=0x%03" PRIx64
-		     " base=0x%012" PRIx64 " size=%" PRIu64 "\n",
-		     fmt, dfmt, nfmt, tile, width, height, pitch, levels, resource_type, depth, base_array,
-		     static_cast<uint64_t>(swizzle), *vaddr, *size);
+		EXIT("unsupported storage texture format: format=%" PRIu64 " dfmt=%" PRIu64 " nfmt=%" PRIu64 " tile=%" PRIu64 " width=%" PRIu64
+		     " height=%" PRIu64 " pitch=%" PRIu64 " levels=%" PRIu64 " type=%" PRIu64 " depth=%" PRIu64 " base_array=%" PRIu64
+		     " swizzle=0x%03" PRIx64 " base=0x%012" PRIx64 " size=%" PRIu64 "\n",
+		     fmt, dfmt, nfmt, tile, width, height, pitch, levels, resource_type, depth, base_array, static_cast<uint64_t>(swizzle), *vaddr,
+		     *size);
 	}
-	if (width == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0 condition ignored (continuing)\n"); }
-	if (height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: height == 0 condition ignored (continuing)\n"); }
-	if (three_dimensional && depth == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: three_dimensional && depth == 0u condition ignored (continuing)\n"); }
-	if (arrayed_2d && (depth == 0u || base_array >= depth)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: arrayed_2d && (depth == 0u || base_array >= depth) condition ignored (continuing)\n"); }
+	if (width == 0)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0 condition ignored (continuing)\n");
+	}
+	if (height == 0)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: height == 0 condition ignored (continuing)\n");
+	}
+	if (three_dimensional && depth == 0u)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: three_dimensional && depth == 0u condition ignored (continuing)\n");
+	}
+	if (arrayed_2d && (depth == 0u || base_array >= depth))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: arrayed_2d && (depth == 0u || base_array >= depth) condition ignored (continuing)\n");
+	}
 
 	auto real_height = ((levels > 1) ? height + (height > 1 ? height / 2 : 1) : height);
 
@@ -401,6 +474,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->format     = image_info.format;
 	vk_obj->image      = nullptr;
 	vk_obj->layout     = image_info.initialLayout;
+	vk_obj->array_layers = image_descriptor.array_layers;
+	vk_obj->guest_vaddr = *vaddr;
 	vk_obj->guest_size = *size;
 
 	for (auto& view: vk_obj->image_view)
@@ -408,7 +483,11 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		view = nullptr;
 	}
 
-	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem) condition ignored (continuing)\n"); }
+	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem) condition ignored (continuing)\n");
+	}
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 
@@ -419,16 +498,108 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	view_descriptor.components  = components;
 	view_descriptor.level_count = VK_REMAINING_MIP_LEVELS;
 	const int view_index        = (three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT);
-	if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[view_index])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[view_index]) condition ignored (continuing)\n"); }
+	if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[view_index]))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[view_index]) condition "
+		               "ignored (continuing)\n");
+	}
 	if (!three_dimensional)
 	{
 		view_descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-		view_descriptor.base_array_layer = arrayed_2d ? static_cast<uint32_t>(base_array) : 0u;
-		view_descriptor.layer_count      = arrayed_2d ? static_cast<uint32_t>(depth - base_array) : 1u;
-		if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]) condition ignored (continuing)\n"); }
+		view_descriptor.base_array_layer = 0u;
+		view_descriptor.layer_count      = arrayed_2d ? static_cast<uint32_t>(depth) : 1u;
+		if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_ARRAY]))
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, "
+				               "&vk_obj->image_view[VulkanImage::VIEW_ARRAY]) condition ignored (continuing)\n");
+		}
+
+		if (arrayed_2d)
+		{
+			StorageTextureArrayViewRange sampled;
+			StorageTextureArrayViewRange storage;
+			EXIT_IF(!StorageTextureGetArrayViewRanges(static_cast<uint32_t>(depth), static_cast<uint32_t>(base_array), &sampled,
+			                                              &storage));
+			view_descriptor.base_array_layer = storage.base_array_layer;
+			view_descriptor.layer_count      = storage.layer_count;
+			if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor,
+			                                 &vk_obj->image_view[VulkanImage::VIEW_STORAGE_ARRAY]))
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, "
+				               "&vk_obj->image_view[VulkanImage::VIEW_STORAGE_ARRAY]) condition ignored (continuing)\n");
+			}
+		}
 	}
 
 	return vk_obj;
+}
+
+static StorageTextureVulkanImage* FindStorageTextureGrowthSource(const Vector<GpuMemoryObject>& objects,
+                                                                 const Gen5TextureArrayLayout&  layout)
+{
+	StorageTextureVulkanImage* source = nullptr;
+	for (const auto& object: objects)
+	{
+		if (object.type != GpuMemoryObjectType::StorageTexture || object.obj == nullptr)
+		{
+			continue;
+		}
+		auto* candidate = static_cast<StorageTextureVulkanImage*>(object.obj);
+		if (!candidate->MatchesGuestExtent(layout.width, layout.height) || candidate->guest_size == 0u ||
+		    candidate->guest_size >= layout.tiled_size || candidate->guest_size % layout.tiled_slice.size != 0u)
+		{
+			continue;
+		}
+		if (source == nullptr || candidate->guest_size > source->guest_size)
+		{
+			source = candidate;
+		}
+	}
+	return source;
+}
+
+static void* create_from_objects_func(GraphicContext* ctx, CommandBuffer* buffer, const uint64_t* params, GpuMemoryScenario scenario,
+                                      const Vector<GpuMemoryObject>& objects, VulkanMemory* mem)
+{
+	EXIT_IF(ctx == nullptr || buffer == nullptr || params == nullptr || mem == nullptr);
+	EXIT_IF(scenario != GpuMemoryScenario::Common);
+	const auto format = static_cast<uint32_t>((params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu);
+	const auto width  = static_cast<uint32_t>(params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u);
+	const auto height = static_cast<uint32_t>(params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu);
+	const auto pitch  = static_cast<uint32_t>(params[StorageTextureObject::PARAM_PITCH]);
+	const auto levels = static_cast<uint32_t>(params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu);
+	const auto tile   = static_cast<uint32_t>(params[StorageTextureObject::PARAM_TILE]);
+	const auto layers = static_cast<uint32_t>(params[StorageTextureObject::PARAM_DEPTH]);
+
+	Gen5TextureArrayLayout layout {};
+	EXIT_IF(!Gen5GetTextureArrayLayout(format, width, height, pitch, levels, tile, layers, &layout));
+	auto* source = FindStorageTextureGrowthSource(objects, layout);
+	EXIT_IF(source == nullptr);
+
+	uint64_t guest_address = source->guest_vaddr;
+	uint64_t guest_size    = layout.tiled_size;
+	auto*    destination   = static_cast<StorageTextureVulkanImage*>(create_func(ctx, params, &guest_address, &guest_size, 1, mem));
+	EXIT_IF(destination == nullptr || destination->format != source->format);
+
+	const auto prefix_layers = static_cast<uint32_t>(source->guest_size / layout.tiled_slice.size);
+	EXIT_IF(prefix_layers == 0u || prefix_layers >= layout.layers);
+
+	Vector<ImageImageCopy> regions(1);
+	regions[0].src_image   = source;
+	regions[0].src_level   = 0;
+	regions[0].dst_level   = 0;
+	regions[0].width       = layout.width;
+	regions[0].height      = layout.height;
+	regions[0].src_x       = 0;
+	regions[0].src_y       = 0;
+	regions[0].dst_x       = 0;
+	regions[0].dst_y       = 0;
+	regions[0].layer_count = prefix_layers;
+	UtilImageToImage(buffer, regions, destination, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+	return destination;
 }
 
 static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* mem)
@@ -474,9 +645,55 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 	        params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY] && params[PARAM_SKIP_SEED] == other[PARAM_SKIP_SEED]);
 }
 
+bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)
+{
+	if (existing == nullptr || incoming == nullptr)
+	{
+		return false;
+	}
+	const auto existing_type = existing[StorageTextureObject::PARAM_RESOURCE_TYPE];
+	const auto incoming_type = incoming[StorageTextureObject::PARAM_RESOURCE_TYPE];
+	const bool arrayed_2d    = incoming_type == 11u || incoming_type == 13u;
+	if (!arrayed_2d || existing_type != incoming_type)
+	{
+		return false;
+	}
+	if ((incoming[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) != 1u)
+	{
+		return false;
+	}
+
+	const auto existing_depth = existing[StorageTextureObject::PARAM_DEPTH];
+	const auto incoming_depth = incoming[StorageTextureObject::PARAM_DEPTH];
+	const auto incoming_base  = incoming[StorageTextureObject::PARAM_BASE_ARRAY];
+	if (existing_depth == 0u || incoming_depth <= existing_depth || incoming_base > existing_depth)
+	{
+		return false;
+	}
+
+	const auto existing_fmt = static_cast<uint32_t>((existing[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu);
+	const auto incoming_fmt = static_cast<uint32_t>((incoming[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu);
+	if (existing[StorageTextureObject::PARAM_FORMAT] != incoming[StorageTextureObject::PARAM_FORMAT] ||
+	    existing[StorageTextureObject::PARAM_PITCH] != incoming[StorageTextureObject::PARAM_PITCH] ||
+	    existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT] ||
+	    existing[StorageTextureObject::PARAM_LEVELS] != incoming[StorageTextureObject::PARAM_LEVELS] ||
+	    existing[StorageTextureObject::PARAM_TILE] != incoming[StorageTextureObject::PARAM_TILE] ||
+	    existing[StorageTextureObject::PARAM_NEO] != incoming[StorageTextureObject::PARAM_NEO])
+	{
+		return false;
+	}
+	return NormalizeStorageTextureSwizzle(existing_fmt, existing[StorageTextureObject::PARAM_SWIZZLE]) ==
+	       NormalizeStorageTextureSwizzle(incoming_fmt, incoming[StorageTextureObject::PARAM_SWIZZLE]);
+}
+
 GpuObject::create_func_t StorageTextureObject::GetCreateFunc() const
 {
 	return create_func;
+}
+
+GpuObject::create_from_objects_func_t StorageTextureObject::GetCreateFromObjectsFunc() const
+{
+	return create_from_objects_func;
 }
 
 GpuObject::delete_func_t StorageTextureObject::GetDeleteFunc() const

@@ -1937,10 +1937,13 @@ void Spirv::WriteInstructions()
 
 		if (!ok)
 		{
-			KYTY_LOG_DEBUG( "SHADER_EMIT_MISSING full format=0x%016" PRIx64 " type=%u pc=0x%08" PRIx32 "\n",
-			             static_cast<uint64_t>(inst.format), static_cast<unsigned>(inst.type), inst.pc);
-			EXIT("shader emitter missing: stage=%u instruction=%u format=%u pc=0x%08" PRIx32 "\n",
-			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<unsigned>(inst.format), inst.pc);
+			const int sampled_2d    = m_bind == nullptr ? 0 : m_bind->textures2D.textures2d_sampled_num;
+			const int sampled_array = m_bind == nullptr ? 0 : m_bind->textures2D.textures2d_array_sampled_num;
+			const int sampled_3d    = m_bind == nullptr ? 0 : m_bind->textures2D.textures3d_sampled_num;
+			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
+			     " sampled=%d/%d/%d\n",
+			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc,
+			     sampled_2d, sampled_array, sampled_3d);
 		}
 		if (IsImageInstruction(inst))
 		{

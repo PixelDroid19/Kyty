@@ -1,5 +1,3 @@
-#include "GpuMemoryInternal.h"
-
 #include "Kyty/Core/Database.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Hashmap.h"
@@ -19,9 +17,12 @@
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Window.h"
-#include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
+#include "Emulator/Profiler.h"
+
+#include "GpuMemoryInternal.h"
 
 #include <algorithm>
 #include <atomic>
@@ -202,7 +203,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			if (changed)
 			{
 				KYTY_LOG_DEBUG("Update (CPU -> GPU): type = %s, vaddr = 0x%016" PRIx64 ", size = 0x%016" PRIx64 "\n",
-				       Core::EnumName(o.object.type).C_Str(), h.block.vaddr[vi], h.block.size[vi]);
+				               Core::EnumName(o.object.type).C_Str(), h.block.vaddr[vi], h.block.size[vi]);
 				need_update = true;
 			}
 		}
@@ -319,7 +320,7 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 	int                    reusable_index_id   = -1;
 	uint64_t               reusable_index_size = UINT64_MAX;
 	*covered_reuse                             = false;
-	*stale_reuse_id                           = -1;
+	*stale_reuse_id                            = -1;
 
 	for (const auto& obj: others)
 	{
@@ -558,7 +559,12 @@ String GpuMemory::create_dbg_exit(const String& msg, const uint64_t* vaddr, cons
 void GpuMemory::RecordUse(ObjectInfo* object, SubmissionId submission)
 {
 	EXIT_IF(object == nullptr);
-	if (object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success condition ignored (continuing)\n"); }
+	if (object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success condition ignored "
+		               "(continuing)\n");
+	}
 }
 
 void GpuMemory::RecordUse(ObjectInfo* object, CommandBuffer* buffer)
@@ -570,7 +576,10 @@ void GpuMemory::RecordUse(ObjectInfo* object, CommandBuffer* buffer)
 	}
 
 	SubmissionId submission;
-	if (!buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
+	if (!buffer->GetSubmissionId(&submission))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n");
+	}
 	RecordUse(object, submission);
 }
 
@@ -587,7 +596,10 @@ void GpuMemory::ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* des
 		auto       memory      = destructor.mem;
 		const auto result      = m_deferred_deletions.Enqueue(
 		    destructor.submission_uses.Dependencies(), [ctx, delete_func, object, memory]() mutable { delete_func(ctx, object, &memory); });
-		if (result != GpuDeferredDeletionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != GpuDeferredDeletionResult::Success condition ignored (continuing)\n"); }
+		if (result != GpuDeferredDeletionResult::Success)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != GpuDeferredDeletionResult::Success condition ignored (continuing)\n");
+		}
 	}
 	destructors->Clear();
 }
@@ -612,7 +624,12 @@ void GpuMemory::ScheduleDestructorsOutsideMutationLocks(GraphicContext* ctx, Vec
 
 void GpuMemory::CompleteSubmission(SubmissionId submission)
 {
-	if (m_deferred_deletions.CompleteSubmission(submission) != GpuDeferredDeletionResult::Success) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_deferred_deletions.CompleteSubmission(submission) != GpuDeferredDeletionResult::Success condition ignored (continuing)\n"); }
+	if (m_deferred_deletions.CompleteSubmission(submission) != GpuDeferredDeletionResult::Success)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: m_deferred_deletions.CompleteSubmission(submission) != GpuDeferredDeletionResult::Success condition "
+		               "ignored (continuing)\n");
+	}
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -690,7 +707,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		EXIT("%s\n", create_dbg_exit(U"unallocated gpu object range", vaddr, size, vaddr_num, no_parents, info.type).C_Str());
 	}
 
-	auto& heap = m_heaps[heap_id];
+	auto&      heap                         = m_heaps[heap_id];
 	const auto invalidate_overlap_snapshots = [this](const Block& block)
 	{
 		for (int vi = 0; vi < block.vaddr_num; ++vi)
@@ -703,7 +720,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	if (buffer != nullptr)
 	{
 		SubmissionId submission;
-		if (!buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
+		if (!buffer->GetSubmissionId(&submission))
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n");
+		}
 		materialization_key = GpuMemoryMaterializationKey::Create(submit_id, submission.queue.Value(), submission.sequence, vaddr, size,
 		                                                          vaddr_num, static_cast<uint32_t>(info.type), info.params,
 		                                                          GpuObject::PARAMS_MAX, info.check_hash, info.read_only);
@@ -723,12 +743,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			    info.Equal(o.params) && same_callbacks)
 			{
 				o.use_num++;
-				o.use_last_frame = m_current_frame;
+				o.use_last_frame              = m_current_frame;
 				const bool previous_read_only = o.read_only;
-				o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
-				if (o.read_only != previous_read_only) { invalidate_overlap_snapshots(h.block); }
-				o.in_use         = true;
-				o.check_hash     = info.check_hash;
+				o.read_only                   = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+				if (o.read_only != previous_read_only)
+				{
+					invalidate_overlap_snapshots(h.block);
+				}
+				o.in_use     = true;
+				o.check_hash = info.check_hash;
 				RecordUse(&o, buffer);
 				finish_classification();
 				create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::CachedReuse);
@@ -755,11 +778,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		                                                                    info.GetDeleteFunc(), info.GetUpdateFunc()});
 	};
 
-	bool overlap             = false;
-	bool delete_all          = false;
-	bool create_from_objects = false;
+	bool        overlap             = false;
+	bool        delete_all          = false;
+	bool        create_from_objects = false;
 	Vector<int> selective_reclaim_ids;
 	Vector<int> depth_stencil_reclaim_ids;
+	Vector<int> retire_after_copy_ids;
 
 	GpuMemoryScenario scenario = GpuMemoryScenario::Common;
 
@@ -776,12 +800,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			Update(submit_id, ctx, heap_id, fast_id, &destructors);
 
 			o.use_num++;
-			o.use_last_frame = m_current_frame;
+			o.use_last_frame              = m_current_frame;
 			const bool previous_read_only = o.read_only;
-			o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
-			if (o.read_only != previous_read_only) { invalidate_overlap_snapshots(h.block); }
-			o.in_use         = true;
-			o.check_hash     = info.check_hash;
+			o.read_only                   = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+			if (o.read_only != previous_read_only)
+			{
+				invalidate_overlap_snapshots(h.block);
+			}
+			o.in_use     = true;
+			o.check_hash = info.check_hash;
 			RecordUse(&o, buffer);
 
 			void* const result = o.object.obj;
@@ -796,8 +823,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	if (!others.IsEmpty())
 	{
-		int  existing_id   = -1;
-		bool covered_reuse = false;
+		int  existing_id    = -1;
+		bool covered_reuse  = false;
 		int  stale_reuse_id = -1;
 		if (create_existing(others, info, heap_id, vaddr, size, vaddr_num, &existing_id, &covered_reuse, &stale_reuse_id))
 		{
@@ -818,12 +845,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			Update(submit_id, ctx, heap_id, existing_id, &destructors);
 
 			o.use_num++;
-			o.use_last_frame = m_current_frame;
+			o.use_last_frame              = m_current_frame;
 			const bool previous_read_only = o.read_only;
-			o.read_only                  = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
-			if (o.read_only != previous_read_only) { invalidate_overlap_snapshots(h.block); }
-			o.in_use         = true;
-			o.check_hash     = info.check_hash;
+			o.read_only                   = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
+			if (o.read_only != previous_read_only)
+			{
+				invalidate_overlap_snapshots(h.block);
+			}
+			o.in_use     = true;
+			o.check_hash = info.check_hash;
 			RecordUse(&o, buffer);
 
 			void* const result = o.object.obj;
@@ -852,6 +882,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// Equals: same guest range re-registered as StorageBuffer (captured
 				// post-menu). RO share: partial overlapping RO views.
 				overlap = true;
+			} else if (buffer != nullptr && o.object.type == GpuMemoryObjectType::StorageTexture &&
+			           info.type == GpuMemoryObjectType::StorageTexture && obj.relation == OverlapType::IsContainedWithin &&
+			           h.block.vaddr_num == 1 && vaddr_num == 1 && h.block.vaddr[0] == vaddr[0] && h.block.size[0] < size[0] &&
+			           h.others.IsEmpty() && StorageTextureCanCopyGrowingBacking(o.params, info.params))
+			{
+				create_from_objects = true;
+				retire_after_copy_ids.Add(obj.object_id);
 			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
 			{
 				// Texture↔StorageBuffer partial shares and Texture↔StorageTexture
@@ -974,6 +1011,29 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			// crossing a neighbor 0x70). The single-overlap path already allows
 			// each share; require every parent to be an RO StorageBuffer that
 			// shares safely before treating the multi-overlap as linkable.
+			Vector<int> storage_growth_ids;
+			bool        multi_storage_growth = buffer != nullptr && info.type == GpuMemoryObjectType::StorageTexture && !others.IsEmpty();
+			if (multi_storage_growth)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& h = heap.objects[obj.object_id];
+					EXIT_IF(h.free);
+					const auto& o          = h.info;
+					const bool  compatible = o.object.type == GpuMemoryObjectType::StorageTexture &&
+					                         obj.relation == OverlapType::IsContainedWithin && h.block.vaddr_num == 1 && vaddr_num == 1 &&
+					                         h.block.vaddr[0] == vaddr[0] && h.block.size[0] < size[0] && h.others.IsEmpty() &&
+					                         StorageTextureCanCopyGrowingBacking(o.params, info.params);
+					if (!compatible)
+					{
+						multi_storage_growth = false;
+						storage_growth_ids.Clear();
+						break;
+					}
+					storage_growth_ids.Add(obj.object_id);
+				}
+			}
+
 			bool multi_ro_storage_share = (info.type == GpuMemoryObjectType::StorageBuffer && info.read_only);
 			if (multi_ro_storage_share)
 			{
@@ -1220,7 +1280,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						EXIT_IF(storage == nullptr || storage->guest_addr != htile_addr || storage->guest_size != htile_size);
 						storage->depth_meta_addr = htile_addr;
 					}
-					const auto& parent_info               = parent.info;
+					const auto& parent_info = parent.info;
 					// Pending writable storage stays linked; completed storage and
 					// other reclaimable surfaces are freed below.
 					const bool pending_storage_write_back = GpuMemoryShouldLinkPendingDepthStencilStorage(
@@ -1234,8 +1294,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
-			if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_vertex_in_surface ||
-			    multi_render_target_alias)
+			if (multi_storage_growth)
+			{
+				create_from_objects   = true;
+				retire_after_copy_ids = storage_growth_ids;
+			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_vertex_in_surface ||
+			           multi_render_target_alias)
 			{
 				overlap = true;
 			} else if (multi_texture_reclaim)
@@ -1266,8 +1330,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						}
 					}
 					selective_reclaim_ids = depth_stencil_reclaim_ids;
-					others                  = keep;
-					overlap                 = true;
+					others                = keep;
+					overlap               = true;
 				}
 			} else if (multi_texture_mixed)
 			{
@@ -1336,8 +1400,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						}
 					}
 					selective_reclaim_ids = vertex_reclaim_vertex_ids;
-					others                     = keep;
-					overlap                    = true;
+					others                = keep;
+					overlap               = true;
 				}
 			} else if (multi_index_mixed)
 			{
@@ -1368,8 +1432,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						}
 					}
 					selective_reclaim_ids = index_reclaim_index_ids;
-					others                     = keep;
-					overlap                    = true;
+					others                = keep;
+					overlap               = true;
 				}
 			} else if (create_generate_mips(others, info.type, heap_id))
 			{
@@ -1390,19 +1454,19 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					// Typed dump: create_all_the_same fails on mixed parent types
 					// even when every relation is the same (observed multi-parent
 					// StorageBuffer with two Contains parents of different kinds).
-					KYTY_LOG_DEBUG( "GpuMemory !create_all_the_same: new type=%s parents=%u\n", Core::EnumName(info.type).C_Str(),
-					             static_cast<unsigned>(others.Size()));
+					KYTY_LOG_DEBUG("GpuMemory !create_all_the_same: new type=%s parents=%u\n", Core::EnumName(info.type).C_Str(),
+					               static_cast<unsigned>(others.Size()));
 					for (int vi = 0; vi < vaddr_num; vi++)
 					{
-						KYTY_LOG_DEBUG( "  new range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vi, vaddr[vi], size[vi]);
+						KYTY_LOG_DEBUG("  new range[%d]: vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", vi, vaddr[vi], size[vi]);
 					}
 					for (const auto& d: others)
 					{
 						const auto& oh = heap.objects[d.object_id];
 						const auto& oi = oh.info;
-						KYTY_LOG_DEBUG( "  parent id=%d type=%s rel=%s read_only=%d vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
-						             d.object_id, Core::EnumName(oi.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
-						             oi.read_only ? 1 : 0, oh.block.vaddr[0], oh.block.size[0]);
+						KYTY_LOG_DEBUG("  parent id=%d type=%s rel=%s read_only=%d vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
+						               d.object_id, Core::EnumName(oi.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
+						               oi.read_only ? 1 : 0, oh.block.vaddr[0], oh.block.size[0]);
 					}
 					EXIT("%s\n", create_dbg_exit(U"!create_all_the_same", vaddr, size, vaddr_num, others, info.type).C_Str());
 				}
@@ -1435,7 +1499,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	EXIT_IF(delete_all && overlap);
 
-	const bool reclaimed_existing = delete_all || !selective_reclaim_ids.IsEmpty();
+	const bool reclaimed_existing = delete_all || !selective_reclaim_ids.IsEmpty() || !retire_after_copy_ids.IsEmpty();
 	if (delete_all)
 	{
 		for (const auto& obj: others)
@@ -1475,7 +1539,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			relation_mask |= 1u << relation;
 		}
 	}
-	const uint32_t reclaimed_count = delete_all ? others.Size() : static_cast<uint32_t>(selective_reclaim_ids.Size());
+	const uint32_t reclaimed_count =
+	    delete_all ? others.Size() : static_cast<uint32_t>(selective_reclaim_ids.Size() + retire_after_copy_ids.Size());
 	finish_classification(others.Size(), relation_mask, reclaimed_count, create_from_objects);
 
 	ObjectInfo o {};
@@ -1619,6 +1684,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		{
 			Link(heap_id, index, obj.object_id, obj.relation, scenario);
 		}
+	}
+	for (int id: retire_after_copy_ids)
+	{
+		destructors.Add(Free(heap_id, id));
 	}
 
 	if (info.check_hash)

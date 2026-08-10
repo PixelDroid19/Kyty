@@ -428,6 +428,43 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 	        raw_smem_dynamic_offset};
 }
 
+bool ShaderGen5SampledTextureShapeForMimgDimension(uint8_t dimension, ShaderGen5SampledTextureShape* shape)
+{
+	if (shape == nullptr)
+	{
+		return false;
+	}
+
+	switch (dimension)
+	{
+		case 0u:
+		case 1u:
+		case 6u: *shape = ShaderGen5SampledTextureShape::TwoDimensional; return true;
+		case 2u: *shape = ShaderGen5SampledTextureShape::ThreeDimensional; return true;
+		case 3u:
+		case 4u:
+		case 5u:
+		case 7u: *shape = ShaderGen5SampledTextureShape::TwoDimensionalArray; return true;
+		default: return false;
+	}
+}
+
+static void RecordMimgSampledShape(const ShaderInstruction& inst, ShaderDirectImageUse* result)
+{
+	ShaderGen5SampledTextureShape shape {};
+	if (result == nullptr || !ShaderGen5SampledTextureShapeForMimgDimension(inst.mimg_dimension, &shape))
+	{
+		return;
+	}
+	if (!result->sampled_shape_known)
+	{
+		result->sampled_shape       = shape;
+		result->sampled_shape_known = true;
+		return;
+	}
+	result->sampled_shape_conflict = result->sampled_shape != shape;
+}
+
 ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register)
 {
 	ShaderDirectImageUse result;
@@ -451,6 +488,10 @@ ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int sta
 			result.texture = ShaderTextureUsage::ReadOnly;
 		}
 		result.reads = result.reads || read;
+		if (read)
+		{
+			RecordMimgSampledShape(inst, &result);
+		}
 
 		const bool sampled = ShaderInstructionUsesImageSampler(inst.type);
 		if (sampled && inst.src_num >= 3 && inst.src[2].type == ShaderOperandType::Sgpr && inst.src[2].size == 4)

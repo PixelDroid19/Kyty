@@ -34,6 +34,64 @@
 
 namespace Kyty::Libs::Graphics {
 
+uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format)
+{
+	if (format != 56u && format != 71u && format != 133u)
+	{
+		return 0u;
+	}
+	return ShaderGen5TextureBytesPerElement(format);
+}
+
+bool TextureGetSurfaceCopyArrayRange(uint8_t resource_type, uint32_t depth, uint32_t base_array, uint32_t levels,
+                                     uint32_t source_layers, TextureSurfaceCopyArrayRange* range)
+{
+	if (range == nullptr || (resource_type != 11u && resource_type != 13u))
+	{
+		return false;
+	}
+	if (levels != 1u || depth == 0u || base_array >= depth || source_layers < depth)
+	{
+		return false;
+	}
+
+	*range = {base_array, depth - base_array};
+	return true;
+}
+
+static bool ConfigureArraySurfaceCopy(const uint64_t* params, const StorageTextureVulkanImage* source,
+	                                  Vector<ImageImageCopy>* regions)
+{
+	if (params == nullptr || source == nullptr || regions == nullptr)
+	{
+		return false;
+	}
+	const auto resource_info = params[TextureObject::PARAM_RESOURCE_INFO];
+	const auto resource_type = TextureObject::GetResourceType(resource_info);
+	if (resource_type != 11u && resource_type != 13u)
+	{
+		return true;
+	}
+	if (regions->Size() != 1u)
+	{
+		return false;
+	}
+
+	TextureSurfaceCopyArrayRange range;
+	if (!TextureGetSurfaceCopyArrayRange(resource_type, TextureObject::GetResourceDepth(resource_info),
+	                                     TextureObject::GetResourceBaseArray(resource_info),
+	                                     static_cast<uint32_t>(params[TextureObject::PARAM_LEVELS]), source->array_layers, &range))
+	{
+		return false;
+	}
+
+	auto& region            = (*regions)[0];
+	region.src_array_layer  = range.base_array_layer;
+	region.dst_array_layer  = range.base_array_layer;
+	region.layer_count      = range.layer_count;
+	return true;
+}
+
 static VkImageUsageFlags get_usage()
 {
 	VkImageUsageFlags vk_usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -593,18 +651,19 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// Tiled sample texture: detile into tightly packed linear rows then
 			// upload. Render-target aliases still prefer FindRenderTexture
 			// before create; this path covers pure CPU-backed sample textures.
-			// tile 27 = kRenderTarget layout; tile 9 = kStandard64KB (RGBA8).
+			// tile 27 = kRenderTarget layout; tile 9 = kStandard64KB
+			// (RGBA8/RGBA16F package data).
 			// BC1 (fmt 133) detiles compressed 4x4 blocks as 8-byte elements on
 			// tile 27 only.
-			// SKIPPED: tile == 9 && fmt != 56
-			if (tile == 9 && fmt != 56)
+			// SKIPPED: tile == 9 && fmt != 56 && fmt != 71
+			if (tile == 9 && fmt != 56 && fmt != 71)
 			{
-				KYTY_LOG_DEBUG("WARNING: skipped check: tile == 9 && fmt != 56\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: tile == 9 && fmt != 56 && fmt != 71\n");
 			}
-			// SKIPPED: fmt != 56 && fmt != 133
-			if (fmt != 56 && fmt != 133)
+			// SKIPPED: fmt != 56 && fmt != 71 && fmt != 133
+			if (fmt != 56 && fmt != 71 && fmt != 133)
 			{
-				KYTY_LOG_DEBUG("WARNING: skipped check: fmt != 56 && fmt != 133\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: fmt != 56 && fmt != 71 && fmt != 133\n");
 			}
 			// SKIPPED: levels != 1
 			if (levels != 1)
@@ -612,6 +671,12 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				KYTY_LOG_DEBUG("WARNING: skipped check: levels != 1\n");
 			}
 			const bool bc1 = (fmt == 133u);
+			const uint32_t bpp = TextureGetGen5TiledSampleBytesPerElement(fmt);
+			if (bpp == 0u)
+			{
+				EXIT("unsupported Gen5 tiled sample format: tile=%u fmt=%u\n", static_cast<unsigned>(tile),
+				     static_cast<unsigned>(fmt));
+			}
 			// SKIPPED: bc1 && tile != 27
 			if (bc1 && tile != 27)
 			{
@@ -632,7 +697,6 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				EXIT("Gen5 BC1 sample texture has an invalid block-row copy layout: width=%u height=%u pitch=%u\n", width_texels,
 				     height_texels, pitch_texels);
 			}
-			const uint32_t bpp                  = (bc1 ? 8u : 4u);
 			const uint32_t copy_width           = (bc1 ? bc1_copy.copy_width_blocks : width_texels);
 			const uint32_t copy_height          = (bc1 ? bc1_copy.copy_height_blocks : height_texels);
 			const uint32_t pitch_elems          = (bc1 ? bc1_copy.row_pitch_blocks : pitch_texels);
@@ -1132,6 +1196,11 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		UtilFillImage(ctx, regions, vk_obj, static_cast<uint64_t>(vk_layout));
 	} else
 	{
+		if (objects.Size() == 1u && objects.At(0).type == GpuMemoryObjectType::StorageTexture &&
+		    !ConfigureArraySurfaceCopy(params, static_cast<StorageTextureVulkanImage*>(objects.At(0).obj), &regions))
+		{
+			return;
+		}
 		UtilImageToImage(buffer, regions, vk_obj, static_cast<uint64_t>(vk_layout));
 	}
 }
@@ -1196,6 +1265,7 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	vk_obj->format = image_info.format;
 	vk_obj->image  = nullptr;
 	vk_obj->layout = image_info.initialLayout;
+	vk_obj->array_layers = image_descriptor.array_layers;
 	for (auto& view: vk_obj->image_view)
 	{
 		view = nullptr;

@@ -6,6 +6,8 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
+#include <vulkan/vulkan_core.h>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -13,13 +15,13 @@ namespace Kyty::Libs::Graphics {
 class StorageTextureObject: public GpuObject
 {
 public:
-	static constexpr int PARAM_FORMAT       = 0;
-	static constexpr int PARAM_PITCH        = 1;
-	static constexpr int PARAM_WIDTH_HEIGHT = 2;
-	static constexpr int PARAM_LEVELS       = 3;
-	static constexpr int PARAM_TILE         = 4;
-	static constexpr int PARAM_NEO          = 5;
-	static constexpr int PARAM_SWIZZLE      = 6;
+	static constexpr int PARAM_FORMAT        = 0;
+	static constexpr int PARAM_PITCH         = 1;
+	static constexpr int PARAM_WIDTH_HEIGHT  = 2;
+	static constexpr int PARAM_LEVELS        = 3;
+	static constexpr int PARAM_TILE          = 4;
+	static constexpr int PARAM_NEO           = 5;
+	static constexpr int PARAM_SWIZZLE       = 6;
 	static constexpr int PARAM_RESOURCE_TYPE = 7;
 	static constexpr int PARAM_DEPTH         = 8;
 	static constexpr int PARAM_BASE_ARRAY    = 9;
@@ -29,29 +31,42 @@ public:
 	                     uint32_t levels, uint32_t tile, bool neo, uint32_t swizzle, uint8_t resource_type = 9u, uint32_t depth = 1u,
 	                     uint32_t base_array = 0u, bool skip_seed = false)
 	{
-		params[PARAM_FORMAT]       = (static_cast<uint64_t>(fmt) << 16u) | (static_cast<uint64_t>(dfmt) << 8u) | nfmt;
-		params[PARAM_PITCH]        = pitch;
-		params[PARAM_WIDTH_HEIGHT] = (static_cast<uint64_t>(width) << 32u) | height;
-		params[PARAM_LEVELS]       = (static_cast<uint64_t>(base_level) << 32u) | levels;
-		params[PARAM_TILE]         = tile;
-		params[PARAM_NEO]          = neo ? 1 : 0;
-		params[PARAM_SWIZZLE]      = swizzle;
+		params[PARAM_FORMAT]        = (static_cast<uint64_t>(fmt) << 16u) | (static_cast<uint64_t>(dfmt) << 8u) | nfmt;
+		params[PARAM_PITCH]         = pitch;
+		params[PARAM_WIDTH_HEIGHT]  = (static_cast<uint64_t>(width) << 32u) | height;
+		params[PARAM_LEVELS]        = (static_cast<uint64_t>(base_level) << 32u) | levels;
+		params[PARAM_TILE]          = tile;
+		params[PARAM_NEO]           = neo ? 1 : 0;
+		params[PARAM_SWIZZLE]       = swizzle;
 		params[PARAM_RESOURCE_TYPE] = resource_type;
 		params[PARAM_DEPTH]         = depth;
 		params[PARAM_BASE_ARRAY]    = base_array;
 		params[PARAM_SKIP_SEED]     = skip_seed ? 1u : 0u;
-		check_hash                 = true;
-		type                       = Graphics::GpuMemoryObjectType::StorageTexture;
+		check_hash                  = true;
+		type                        = Graphics::GpuMemoryObjectType::StorageTexture;
 	}
 
 	bool Equal(const uint64_t* other) const override;
 
 	[[nodiscard]] create_func_t              GetCreateFunc() const override;
-	[[nodiscard]] create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; };
+	[[nodiscard]] create_from_objects_func_t GetCreateFromObjectsFunc() const override;
 	[[nodiscard]] write_back_func_t          GetWriteBackFunc() const override { return nullptr; };
 	[[nodiscard]] delete_func_t              GetDeleteFunc() const override;
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
+
+[[nodiscard]] bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
+[[nodiscard]] VkImageUsageFlags StorageTextureGetImageUsage();
+
+struct StorageTextureArrayViewRange
+{
+	uint32_t base_array_layer = 0;
+	uint32_t layer_count      = 0;
+};
+
+[[nodiscard]] bool StorageTextureGetArrayViewRanges(uint32_t depth, uint32_t base_array,
+                                                    StorageTextureArrayViewRange* sampled,
+                                                    StorageTextureArrayViewRange* storage);
 
 } // namespace Kyty::Libs::Graphics
 

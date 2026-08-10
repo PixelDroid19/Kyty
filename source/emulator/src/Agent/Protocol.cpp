@@ -683,6 +683,7 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		*out += ",\"new_standalone\":" + std::to_string(type.new_standalone);
 		*out += ",\"new_linked\":" + std::to_string(type.new_linked);
 		*out += ",\"new_from_objects\":" + std::to_string(type.new_from_objects);
+		*out += ",\"created_from_objects\":" + std::to_string(type.created_from_objects);
 		*out += ",\"reclaim_new\":" + std::to_string(type.reclaim_new);
 		*out += ",\"logical_free\":" + std::to_string(type.logical_free);
 		*out += ",\"live\":" + std::to_string(type.live);

@@ -125,7 +125,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // are GPU intermediates (also appear as path=rt); CPU detile of those pages is
 // always wrong even when FindRenderTexture misses on the first bind. BC1 (ufmt
 // 133) package textures may still detile from guest when uncovered.
-// Tile 9 (kStandard64KB) remains package-RGBA8 when uncovered.
+// Tile 9 (kStandard64KB) remains package RGBA8/RGBA16F when uncovered.
 [[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt, bool live_color_surface_covers)
 {
 	if (tile == 0u)
@@ -143,7 +143,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	}
 	if (tile == 9u)
 	{
-		return ufmt == 56u;
+		return ufmt == 56u || ufmt == 71u;
 	}
 	return true;
 }
@@ -713,12 +713,16 @@ struct ImageImageCopy
 	int          src_y;
 	int          dst_x;
 	int          dst_y;
+	uint32_t     src_array_layer = 0;
+	uint32_t     dst_array_layer = 0;
+	uint32_t     layer_count     = 1;
 };
 
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanImage* dst_image, const Vector<BufferImageCopy>& regions,
                        uint64_t dst_layout);
-void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout);
+void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,
+                       uint32_t src_array_layer = 0);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
@@ -726,12 +730,14 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, const Vector<BufferImageCopy>& regions,
                    uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
-void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout);
+void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout,
+                    uint32_t src_array_layer = 0);
 // Write tightly or strided RGBA8 rows as a top-down PNG. Native capture uses
 // this path so graphics diagnostics and agent artifacts share one portable
 // image format.
 bool UtilWriteRgba8Png(const char* path, const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t row_pitch_pixels);
-bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag);
+bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag,
+                                 uint32_t src_array_layer = 0);
 void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t size);
 void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image);
 void UtilSetImageLayoutOptimal(VulkanImage* image);

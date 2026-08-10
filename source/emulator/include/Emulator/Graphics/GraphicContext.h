@@ -159,7 +159,7 @@ enum class VulkanImageType
 
 struct VulkanImage
 {
-	static constexpr int VIEW_MAX                   = 8;
+	static constexpr int VIEW_MAX                   = 9;
 	static constexpr int VIEW_DEFAULT       = 0;
 	static constexpr int VIEW_BGRA          = 1;
 	static constexpr int VIEW_DEPTH_TEXTURE = 2;
@@ -168,6 +168,7 @@ struct VulkanImage
 	static constexpr int VIEW_3D             = 5;
 	static constexpr int VIEW_STENCIL_TEXTURE = 6;
 	static constexpr int VIEW_DEPTH_TEXTURE_ARRAY = 7;
+	static constexpr int VIEW_STORAGE_ARRAY       = 8;
 
 	explicit VulkanImage(VulkanImageType type): type(type) {}
 
@@ -204,6 +205,7 @@ struct VulkanImage
 	VkImageUsageFlags      usage                = 0;
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkSampleCountFlagBits  samples               = VK_SAMPLE_COUNT_1_BIT;
+	uint32_t               array_layers          = 1;
 	Graphics::VulkanMemory memory;
 	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.
 	uint64_t               guest_size           = 0;
@@ -239,6 +241,7 @@ struct TextureVulkanImage: public VulkanImage
 struct StorageTextureVulkanImage: public VulkanImage
 {
 	StorageTextureVulkanImage(): VulkanImage(VulkanImageType::StorageTexture) {}
+	uint64_t guest_vaddr = 0;
 };
 
 struct RenderTextureVulkanImage: public VulkanImage

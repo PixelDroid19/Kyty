@@ -996,6 +996,20 @@ constexpr ShaderGen5SampledTextureShape ShaderGen5SampledTextureShapeForType(uin
 	return ShaderGen5SampledTextureShape::TwoDimensional;
 }
 
+[[nodiscard]] bool ShaderGen5SampledTextureShapeForMimgDimension(uint8_t dimension,
+                                                                 ShaderGen5SampledTextureShape* shape);
+
+constexpr uint8_t ShaderGen5HostSampledTextureType(uint8_t guest_type, ShaderGen5SampledTextureShape shape)
+{
+	switch (shape)
+	{
+		case ShaderGen5SampledTextureShape::TwoDimensional: return guest_type == 8u ? 8u : 9u;
+		case ShaderGen5SampledTextureShape::TwoDimensionalArray: return 13u;
+		case ShaderGen5SampledTextureShape::ThreeDimensional: return 10u;
+	}
+	return guest_type;
+}
+
 enum class ShaderSampledImageViewKind : uint8_t
 {
 	Missing,
@@ -1333,6 +1347,7 @@ struct ShaderDynamicSLoadMappings
 	int                            offset_dw[MAPPINGS_MAX]            = {};
 	int                            dword_count[MAPPINGS_MAX]          = {};
 	uint32_t                       last_consumer_pc[MAPPINGS_MAX]     = {};
+	bool                           raw_vmem_oob_guarded[MAPPINGS_MAX] = {};
 	int                            mappings_num                        = 0;
 };
 
@@ -1347,9 +1362,12 @@ struct ShaderDirectImageUse
 {
 	ShaderTextureUsage          texture          = ShaderTextureUsage::Unknown;
 	State::ImageSampleOperation sample_operation {};
+	ShaderGen5SampledTextureShape sampled_shape  = ShaderGen5SampledTextureShape::TwoDimensional;
 	int                         sampler_register = -1;
 	bool                        reads            = false;
 	bool                        writes           = false;
+	bool                        sampled_shape_known    = false;
+	bool                        sampled_shape_conflict = false;
 };
 
 struct ShaderStorageResources
@@ -1428,16 +1446,24 @@ struct ShaderTextureDescriptor
 	ShaderTextureResource texture;
 	ShaderTextureUsage    usage                      = ShaderTextureUsage::Unknown;
 	State::ImageSampleOperation sample_operation {};
+	ShaderGen5SampledTextureShape sampled_shape = ShaderGen5SampledTextureShape::TwoDimensional;
 	int                   slot                       = 0;
 	int                   start_register             = 0;
 	bool                  extended                   = false;
 	bool                  dynamic_sload              = false;
 	bool                  textures2d_without_sampler = false;
+	bool                  sampled_shape_from_instruction = false;
 	// Set only for a compute storage image whose shader has an image store and
 	// no image read for this descriptor. The dispatch still has to prove full
 	// coverage before the backing upload can be omitted.
 	bool                  storage_image_write_only   = false;
 };
+
+constexpr ShaderGen5SampledTextureShape ShaderResolvedSampledTextureShape(const ShaderTextureDescriptor& descriptor)
+{
+	return descriptor.sampled_shape_from_instruction ? descriptor.sampled_shape
+	                                                 : ShaderGen5SampledTextureShapeForType(descriptor.texture.Type());
+}
 
 struct ShaderTextureResources
 {

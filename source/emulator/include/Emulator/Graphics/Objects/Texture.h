@@ -75,6 +75,18 @@ public:
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
 
+struct TextureSurfaceCopyArrayRange
+{
+	uint32_t base_array_layer = 0;
+	uint32_t layer_count      = 0;
+};
+
+[[nodiscard]] uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format);
+
+[[nodiscard]] bool TextureGetSurfaceCopyArrayRange(uint8_t resource_type, uint32_t depth, uint32_t base_array,
+                                                   uint32_t levels, uint32_t source_layers,
+                                                   TextureSurfaceCopyArrayRange* range);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

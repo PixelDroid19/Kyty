@@ -63,6 +63,7 @@ struct ImageSampleLzPlan
 {
 	ShaderGen5SampledTextureShape shape;
 	uint32_t                      coordinate_num;
+	bool                          cube_coordinates;
 };
 
 static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
@@ -132,8 +133,10 @@ static ImageSampleLzPlan PlanImageSampleLz(const ShaderInstruction& inst, const 
 	const int descriptor_index = FindImageSampledTextureDescriptor(inst, bind, user_data_register_base);
 	if (descriptor_index >= 0)
 	{
-		const auto shape = ShaderGen5SampledTextureShapeForType(bind.textures2D.desc[descriptor_index].texture.Type());
-		return {shape, shape == ShaderGen5SampledTextureShape::TwoDimensional ? 2u : 3u};
+		const auto& descriptor  = bind.textures2D.desc[descriptor_index];
+		const auto texture_type = descriptor.texture.Type();
+		const auto shape        = ShaderResolvedSampledTextureShape(descriptor);
+		return {shape, shape == ShaderGen5SampledTextureShape::TwoDimensional ? 2u : 3u, inst.mimg_dimension == 3u};
 	}
 
 	EXIT("image_sample_lz has no sampled descriptor: srsrc=s%d pc=0x%08" PRIx32 "\n", inst.src[1].register_id, inst.pc);
@@ -157,17 +160,11 @@ bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usa
 			continue;
 		}
 
-		switch (descriptor.texture.Type())
+		switch (ShaderResolvedSampledTextureShape(descriptor))
 		{
-			// Gen5 type 8 is Color1D. It shares the flat sampled-2D descriptor array:
-			// binding materializes height=1 and sample emitters use the 2D view type.
-			case 8u:
-			case 9u: has_flat = true; break;
-			case 10u: break;
-			case 11u: has_arrayed = true; break; // cube: face index as layer
-			case 13u: has_arrayed = true; break;
-			default: EXIT("unsupported 2D image type: type=%u usage=%u\n", descriptor.texture.Type(),
-			              static_cast<unsigned>(usage));
+			case ShaderGen5SampledTextureShape::TwoDimensional: has_flat = true; break;
+			case ShaderGen5SampledTextureShape::TwoDimensionalArray: has_arrayed = true; break;
+			case ShaderGen5SampledTextureShape::ThreeDimensional: break;
 		}
 	}
 
@@ -208,6 +205,10 @@ bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst)
 	{
 		return true;
 	}
+	if (inst.type == ShaderInstructionType::ImageSampleL && inst.mimg_dimension == 3u)
+	{
+		return true;
+	}
 	return inst.type == ShaderInstructionType::ImageSample &&
 	       (inst.format == ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1 ||
 	        inst.format == ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3 ||
@@ -215,6 +216,34 @@ bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst)
 	        inst.format == ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7 ||
 	        inst.format == ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskD ||
 	        inst.format == ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
+}
+
+static String8 EmitImageSampleCoordinateLoads(uint32_t index, const SpirvValue& x, const SpirvValue& y, bool cube_coordinates)
+{
+	const auto index_string = String8::FromPrintf("%u", index);
+	if (!cube_coordinates)
+	{
+		return String8(R"(
+%image_sample_x_<index> = OpLoad %float %<x>
+%image_sample_y_<index> = OpLoad %float %<y>
+)")
+		    .ReplaceStr("<index>", index_string)
+		    .ReplaceStr("<x>", x.value)
+		    .ReplaceStr("<y>", y.value);
+	}
+
+	// Cube MIMG coordinates use a [1, 2] face-local window. A 2D-array Vulkan
+	// view expects normalized [0, 1] coordinates, while the third component is
+	// already the face index. Shift only the two normalized components.
+	return String8(R"(
+%image_sample_x_raw_<index> = OpLoad %float %<x>
+%image_sample_y_raw_<index> = OpLoad %float %<y>
+%image_sample_x_<index> = OpFSub %float %image_sample_x_raw_<index> %float_1_000000
+%image_sample_y_<index> = OpFSub %float %image_sample_y_raw_<index> %float_1_000000
+)")
+	    .ReplaceStr("<index>", index_string)
+	    .ReplaceStr("<x>", x.value)
+	    .ReplaceStr("<y>", y.value);
 }
 
 static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index, const ShaderInstruction& inst, const Spirv* spirv,
@@ -240,7 +269,10 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 	{
 		return false;
 	}
-	const auto shape = ShaderGen5SampledTextureShapeForType(bind->textures2D.desc[descriptor_index].texture.Type());
+	const auto& descriptor     = bind->textures2D.desc[descriptor_index];
+	const auto texture_type    = descriptor.texture.Type();
+	const auto shape           = ShaderResolvedSampledTextureShape(descriptor);
+	const bool cube_coordinates = inst.mimg_dimension == 3u;
 	const int sampled_num =
 	    (shape == ShaderGen5SampledTextureShape::TwoDimensional ? bind->textures2D.textures2d_sampled_num :
 	                                                               (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ?
@@ -258,8 +290,6 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 %image_sample_sampler_index_<index> = OpLoad %uint %<sampler>
 %image_sample_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_sampler_index_<index>
 %image_sample_sampler_<index> = OpLoad %Sampler %image_sample_sampler_ptr_<index>
-%image_sample_x_<index> = OpLoad %float %<x>
-%image_sample_y_<index> = OpLoad %float %<y>
 %image_sample_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %image_sample_descriptor_<index>
 %image_sample_image_<index> = OpLoad %ImageS %image_sample_image_ptr_<index>
 %image_sampled_image_<index> = OpSampledImage %SampledImage %image_sample_image_<index> %image_sample_sampler_<index>
@@ -272,8 +302,6 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 %image_sample_sampler_index_<index> = OpLoad %uint %<sampler>
 %image_sample_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_sampler_index_<index>
 %image_sample_sampler_<index> = OpLoad %Sampler %image_sample_sampler_ptr_<index>
-%image_sample_x_<index> = OpLoad %float %<x>
-%image_sample_y_<index> = OpLoad %float %<y>
 %image_sample_layer_<index> = OpLoad %float %<array_layer>
 %image_sample_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageSA %textures2DA_S %image_sample_descriptor_<index>
 %image_sample_image_<index> = OpLoad %ImageSA %image_sample_image_ptr_<index>
@@ -287,8 +315,6 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 %image_sample_sampler_index_<index> = OpLoad %uint %<sampler>
 %image_sample_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_sampler_index_<index>
 %image_sample_sampler_<index> = OpLoad %Sampler %image_sample_sampler_ptr_<index>
-%image_sample_x_<index> = OpLoad %float %<x>
-%image_sample_y_<index> = OpLoad %float %<y>
 %image_sample_layer_<index> = OpLoad %float %<array_layer>
 %image_sample_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S %image_sample_descriptor_<index>
 %image_sample_image_<index> = OpLoad %ImageS3D %image_sample_image_ptr_<index>
@@ -314,7 +340,7 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 
 	const char* sample_text = (shape == ShaderGen5SampledTextureShape::TwoDimensional ? flat_text :
 	                           (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ? array_text : volume_text));
-	String8 source = bias_source + String8(sample_text)
+	String8 source = bias_source + EmitImageSampleCoordinateLoads(index, x, y, cube_coordinates) + String8(sample_text)
 	                     .ReplaceStr("<index>", index_string)
 	                     .ReplaceStr("<texture>", texture.value)
 	                     .ReplaceStr("<sampler>", sampler.value)
@@ -1319,9 +1345,7 @@ static bool RecompileImageSampleLzScalar(uint32_t component, KYTY_RECOMPILER_ARG
 %image_sample_lz_scalar_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_lz_scalar_sampler_<index>
 %image_sample_lz_scalar_sampler_value_<index> = OpLoad %Sampler %image_sample_lz_scalar_sampler_ptr_<index>
 %image_sample_lz_scalar_sampled_<index> = OpSampledImage %SampledImage %image_sample_lz_scalar_image_<index> %image_sample_lz_scalar_sampler_value_<index>
-%image_sample_lz_scalar_x_<index> = OpLoad %float %<x>
-%image_sample_lz_scalar_y_<index> = OpLoad %float %<y>
-%image_sample_lz_scalar_coordinate_<index> = OpCompositeConstruct %v2float %image_sample_lz_scalar_x_<index> %image_sample_lz_scalar_y_<index>
+%image_sample_lz_scalar_coordinate_<index> = OpCompositeConstruct %v2float %image_sample_x_<index> %image_sample_y_<index>
 %image_sample_lz_scalar_value_<index> = OpImageSampleExplicitLod %v4float %image_sample_lz_scalar_sampled_<index> %image_sample_lz_scalar_coordinate_<index> Lod %float_0_000000
 %image_sample_lz_scalar_component_<index> = OpCompositeExtract %float %image_sample_lz_scalar_value_<index> <component>
 OpStore %<dst> %image_sample_lz_scalar_component_<index>
@@ -1332,13 +1356,11 @@ OpStore %<dst> %image_sample_lz_scalar_component_<index>
 %image_sample_lz_scalar_sampler_<index> = OpLoad %uint %<sampler>
 %image_sample_lz_scalar_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_lz_scalar_sampler_<index>
 %image_sample_lz_scalar_sampler_value_<index> = OpLoad %Sampler %image_sample_lz_scalar_sampler_ptr_<index>
-%image_sample_lz_scalar_x_<index> = OpLoad %float %<x>
-%image_sample_lz_scalar_y_<index> = OpLoad %float %<y>
 %image_sample_lz_scalar_z_<index> = OpLoad %float %<z>
 %image_sample_lz_scalar_texture_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageSA %textures2DA_S %image_sample_lz_scalar_descriptor_<index>
 %image_sample_lz_scalar_image_<index> = OpLoad %ImageSA %image_sample_lz_scalar_texture_ptr_<index>
 %image_sample_lz_scalar_sampled_<index> = OpSampledImage %SampledImageA %image_sample_lz_scalar_image_<index> %image_sample_lz_scalar_sampler_value_<index>
-%image_sample_lz_scalar_coordinate_<index> = OpCompositeConstruct %v3float %image_sample_lz_scalar_x_<index> %image_sample_lz_scalar_y_<index> %image_sample_lz_scalar_z_<index>
+%image_sample_lz_scalar_coordinate_<index> = OpCompositeConstruct %v3float %image_sample_x_<index> %image_sample_y_<index> %image_sample_lz_scalar_z_<index>
 %image_sample_lz_scalar_value_<index> = OpImageSampleExplicitLod %v4float %image_sample_lz_scalar_sampled_<index> %image_sample_lz_scalar_coordinate_<index> Lod %float_0_000000
 %image_sample_lz_scalar_component_<index> = OpCompositeExtract %float %image_sample_lz_scalar_value_<index> <component>
 OpStore %<dst> %image_sample_lz_scalar_component_<index>
@@ -1349,20 +1371,18 @@ OpStore %<dst> %image_sample_lz_scalar_component_<index>
 %image_sample_lz_scalar_sampler_<index> = OpLoad %uint %<sampler>
 %image_sample_lz_scalar_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_lz_scalar_sampler_<index>
 %image_sample_lz_scalar_sampler_value_<index> = OpLoad %Sampler %image_sample_lz_scalar_sampler_ptr_<index>
-%image_sample_lz_scalar_x_<index> = OpLoad %float %<x>
-%image_sample_lz_scalar_y_<index> = OpLoad %float %<y>
 %image_sample_lz_scalar_z_<index> = OpLoad %float %<z>
 %image_sample_lz_scalar_texture_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S %image_sample_lz_scalar_descriptor_<index>
 %image_sample_lz_scalar_image_<index> = OpLoad %ImageS3D %image_sample_lz_scalar_texture_ptr_<index>
 %image_sample_lz_scalar_sampled_<index> = OpSampledImage %SampledImage3D %image_sample_lz_scalar_image_<index> %image_sample_lz_scalar_sampler_value_<index>
-%image_sample_lz_scalar_coordinate_<index> = OpCompositeConstruct %v3float %image_sample_lz_scalar_x_<index> %image_sample_lz_scalar_y_<index> %image_sample_lz_scalar_z_<index>
+%image_sample_lz_scalar_coordinate_<index> = OpCompositeConstruct %v3float %image_sample_x_<index> %image_sample_y_<index> %image_sample_lz_scalar_z_<index>
 %image_sample_lz_scalar_value_<index> = OpImageSampleExplicitLod %v4float %image_sample_lz_scalar_sampled_<index> %image_sample_lz_scalar_coordinate_<index> Lod %float_0_000000
 %image_sample_lz_scalar_component_<index> = OpCompositeExtract %float %image_sample_lz_scalar_value_<index> <component>
 OpStore %<dst> %image_sample_lz_scalar_component_<index>
 )";
 	const char* text = (shape == ShaderGen5SampledTextureShape::TwoDimensional ? flat_text :
 	                    (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ? array_text : volume_text));
-	*dst_source += String8(text)
+	*dst_source += EmitImageSampleCoordinateLoads(index, x, y, plan.cube_coordinates) + String8(text)
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<component>", String8::FromPrintf("%u", component))
 	                   .ReplaceStr("<texture>", texture.value)
@@ -1766,7 +1786,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 		return false;
 	}
 
-	const auto shape   = ShaderGen5SampledTextureShapeForType(bind_info->textures2D.desc[texture_index].texture.Type());
+	const auto shape   = ShaderResolvedSampledTextureShape(bind_info->textures2D.desc[texture_index]);
 	const bool flat    = shape == ShaderGen5SampledTextureShape::TwoDimensional;
 	const bool arrayed = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
 	if ((!flat && !arrayed) || (flat && inst.mimg_dimension != 1u) ||
@@ -1913,10 +1933,106 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 	return false;
 }
 
+static bool RecompileCubeImageSampleL(uint32_t destination_num, KYTY_RECOMPILER_ARGS)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.mimg_dimension != 3u || destination_num == 0 || destination_num > 4)
+	{
+		return false;
+	}
+
+	const auto* bind = spirv->GetBindInfo();
+	if (bind == nullptr || bind->textures2D.textures2d_array_sampled_num <= 0 || bind->samplers.samplers_num <= 0)
+	{
+		return false;
+	}
+
+	const auto x       = mimg_address_to_str(inst, 0);
+	const auto y       = mimg_address_to_str(inst, 1);
+	const auto layer   = mimg_address_to_str(inst, 2);
+	const auto lod     = mimg_address_to_str(inst, 3);
+	const auto texture = operand_variable_to_str(inst.src[1], 0);
+	const auto sampler = operand_variable_to_str(inst.src[2], 0);
+	if (x.type != SpirvType::Float || y.type != SpirvType::Float || layer.type != SpirvType::Float ||
+	    lod.type != SpirvType::Float || texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint)
+	{
+		return false;
+	}
+
+	SpirvValue destinations[4];
+	for (uint32_t component = 0; component < destination_num; ++component)
+	{
+		destinations[component] = operand_variable_to_str(inst.dst, static_cast<int>(component));
+		if (destinations[component].type != SpirvType::Float)
+		{
+			return false;
+		}
+	}
+
+	const auto index_string = String8::FromPrintf("%u", index);
+	String8    source = String8(R"(
+%image_sample_l_descriptor_raw_<index> = OpLoad %uint %<texture>
+%image_sample_l_descriptor_<index> = OpBitwiseAnd %uint %image_sample_l_descriptor_raw_<index> %uint_0x1fffffff
+%image_sample_l_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageSA %textures2DA_S %image_sample_l_descriptor_<index>
+%image_sample_l_image_<index> = OpLoad %ImageSA %image_sample_l_image_ptr_<index>
+%image_sample_l_sampler_index_<index> = OpLoad %uint %<sampler>
+%image_sample_l_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_sample_l_sampler_index_<index>
+%image_sample_l_sampler_<index> = OpLoad %Sampler %image_sample_l_sampler_ptr_<index>
+%image_sample_l_sampled_<index> = OpSampledImage %SampledImageA %image_sample_l_image_<index> %image_sample_l_sampler_<index>
+%image_sample_l_x_raw_<index> = OpLoad %float %<x>
+%image_sample_l_y_raw_<index> = OpLoad %float %<y>
+%image_sample_l_layer_<index> = OpLoad %float %<layer>
+%image_sample_l_lod_<index> = OpLoad %float %<lod>
+%image_sample_l_x_<index> = OpFSub %float %image_sample_l_x_raw_<index> %float_1_000000
+%image_sample_l_y_<index> = OpFSub %float %image_sample_l_y_raw_<index> %float_1_000000
+%image_sample_l_coordinate_<index> = OpCompositeConstruct %v3float %image_sample_l_x_<index> %image_sample_l_y_<index> %image_sample_l_layer_<index>
+%image_sample_l_value_<index> = OpImageSampleExplicitLod %v4float %image_sample_l_sampled_<index> %image_sample_l_coordinate_<index> Lod %image_sample_l_lod_<index>
+)")
+	                         .ReplaceStr("<index>", index_string)
+	                         .ReplaceStr("<texture>", texture.value)
+	                         .ReplaceStr("<sampler>", sampler.value)
+	                         .ReplaceStr("<x>", x.value)
+	                         .ReplaceStr("<y>", y.value)
+	                         .ReplaceStr("<layer>", layer.value)
+	                         .ReplaceStr("<lod>", lod.value);
+
+	uint32_t destination = 0;
+	for (uint32_t component = 0; component < 4u; ++component)
+	{
+		if ((inst.mimg_dmask & (1u << component)) == 0u)
+		{
+			continue;
+		}
+		if (destination >= destination_num)
+		{
+			return false;
+		}
+		source += String8(R"(
+%image_sample_l_component_<index>_<component> = OpCompositeExtract %float %image_sample_l_value_<index> <component>
+OpStore %<destination> %image_sample_l_component_<index>_<component>
+)")
+		              .ReplaceStr("<index>", index_string)
+		              .ReplaceStr("<component>", String8::FromPrintf("%u", component))
+		              .ReplaceStr("<destination>", destinations[destination].value);
+		++destination;
+	}
+	if (destination != destination_num)
+	{
+		return false;
+	}
+
+	*dst_source += source;
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_Vdata4Vaddr3StSsDmaskF)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (inst.mimg_dimension == 3u)
+	{
+		return RecompileCubeImageSampleL(4, index, code, dst_source, spirv, param, scc_check);
+	}
 
 	if (bind_info == nullptr || bind_info->textures2D.textures2d_sampled_num <= 0 || bind_info->samplers.samplers_num <= 0)
 	{
@@ -2044,6 +2160,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (inst.mimg_dimension == 3u)
+	{
+		return RecompileCubeImageSampleL(3, index, code, dst_source, spirv, param, scc_check);
+	}
 	if (bind_info == nullptr || bind_info->textures2D.textures2d_sampled_num <= 0 || bind_info->samplers.samplers_num <= 0)
 	{
 		return false;
@@ -2877,18 +2997,23 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
                OpBranch %image_store_merge_<index>
          %image_store_merge_<index> = OpLabel
 )";
-		const auto src0_value2 = mimg_address_to_str(inst, 2);
-		const String8 index_string = String8::FromPrintf("%u", index);
+		const auto    src0_value2    = mimg_address_to_str(inst, 2);
+		const String8 index_string   = String8::FromPrintf("%u", index);
+		const bool    array_window_2d = arrayed && inst.mimg_dimension == 1u;
+		const bool    load_third_coordinate = (arrayed || three_dimensional) && !array_window_2d;
 		const String8 array_coordinate_load =
-		    ((arrayed || three_dimensional) ? String8("         %t72_<index> = OpLoad %float %<src0_value2>\n         %t721_<index> = OpBitcast %uint %t72_<index>\n")
-		                   .ReplaceStr("<index>", index_string)
-		                   .ReplaceStr("<src0_value2>", src0_value2.value) :
-		               String8(""));
+		    (load_third_coordinate ? String8("         %t72_<index> = OpLoad %float %<src0_value2>\n         %t721_<index> = OpBitcast %uint %t72_<index>\n")
+		                                 .ReplaceStr("<index>", index_string)
+		                                 .ReplaceStr("<src0_value2>", src0_value2.value) :
+		                             String8(""));
+		const String8 array_coordinate_value =
+		    ((arrayed || three_dimensional) ? (array_window_2d ? String8(" %uint_0") : String8::FromPrintf(" %%t721_%u", index)) :
+		                                       String8(""));
 		*dst_source += String8(text)
 		                   .ReplaceStr("<array_coordinate_load>", array_coordinate_load)
 		                   .ReplaceStr("<coordinate_type>", (arrayed || three_dimensional) ? "v3uint" : "v2uint")
 		                   .ReplaceStr("<extent_type>", (arrayed || three_dimensional) ? "v3int" : "v2int")
-		                   .ReplaceStr("<array_coordinate_value>", (arrayed || three_dimensional) ? String8::FromPrintf(" %%t721_%u", index) : String8(""))
+		                   .ReplaceStr("<array_coordinate_value>", array_coordinate_value)
 		                   .ReplaceStr("<image_vector>", uint_images ? "v4uint" : "v4float")
 		                   .ReplaceStr("<component_loads>", component_loads)
 		                   .ReplaceStr("<component_values>", component_values)
