@@ -1264,6 +1264,60 @@ static void null_page_zero_dest_reg(ucontext_t* uc, const uint8_t* code) noexcep
 	}
 }
 
+static void capture_posix_signal_stack(ExceptionHandler::ExceptionInfo* info) noexcept
+{
+	if (info == nullptr || info->rsp < 0x10000u)
+	{
+		return;
+	}
+
+	uint64_t     buffer[ExceptionHandler::ExceptionInfo::StackCapacity] = {};
+	struct iovec local                                                  = {buffer, sizeof(buffer)};
+	struct iovec remote                                                 = {reinterpret_cast<void*>(info->rsp), sizeof(buffer)};
+	const ssize_t got = syscall(SYS_process_vm_readv, getpid(), &local, 1UL, &remote, 1UL, 0UL);
+	if (got <= 0)
+	{
+		return;
+	}
+
+	const auto count = static_cast<uint32_t>(static_cast<size_t>(got) / sizeof(uint64_t));
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		info->stack[i] = buffer[i];
+	}
+	info->stack_count = count;
+}
+
+static ExceptionHandler::ExceptionInfo capture_posix_signal_context(ucontext_t* uc) noexcept
+{
+	ExceptionHandler::ExceptionInfo info {};
+	if (uc == nullptr)
+	{
+		return info;
+	}
+
+	info.exception_address = uc_get_rip(uc);
+	info.rbp               = uc_get_rbp(uc);
+	info.rsp               = uc_get_rsp(uc);
+	info.rflags            = uc_get_rflags(uc);
+	info.rax               = uc_get_rax(uc);
+	info.rbx               = uc_get_rbx(uc);
+	info.rcx               = uc_get_rcx(uc);
+	info.rdx               = uc_get_rdx(uc);
+	info.rsi               = uc_get_rsi(uc);
+	info.rdi               = uc_get_rdi(uc);
+	info.r8                = uc_get_r8(uc);
+	info.r9                = uc_get_r9(uc);
+	info.r10               = uc_get_r10(uc);
+	info.r11               = uc_get_r11(uc);
+	info.r12               = uc_get_r12(uc);
+	info.r13               = uc_get_r13(uc);
+	info.r14               = uc_get_r14(uc);
+	info.r15               = uc_get_r15(uc);
+	capture_posix_signal_stack(&info);
+	return info;
+}
+
 // Attempt to handle a null-page data fault by skipping the faulting instruction.
 // Returns true if the instruction was decoded and skipped.
 static bool try_skip_null_page_fault(ucontext_t* uc, uint64_t fault_addr, bool is_write) noexcept
@@ -1347,54 +1401,17 @@ static void kyty_posix_signal_handler(int sig, siginfo_t* info, void* ucontext)
 		sigsafe_fault("ILL-R10R11", uc_get_r10(uc), uc_get_r11(uc));
 		sigsafe_fault("ILL-R12R13", uc_get_r12(uc), uc_get_r13(uc));
 		sigsafe_fault("ILL-R14R15", uc_get_r14(uc), uc_get_r15(uc));
+		auto crash_info                = capture_posix_signal_context(uc);
+		crash_info.exception_win_code = static_cast<uint32_t>(SIGILL);
+		WriteCrashReport(crash_info);
 		// Returning would retry the same unsupported guest instruction forever.
 		// Keep strict runs bounded and preserve the first-failure evidence.
 		::_Exit(132);
 	}
 
-	ExceptionHandler::ExceptionInfo einfo {};
-
+	auto einfo = capture_posix_signal_context(uc);
 	einfo.type               = ExceptionHandler::ExceptionType::AccessViolation;
 	einfo.exception_win_code = static_cast<uint32_t>(info->si_code);
-	einfo.exception_address  = uc_get_rip(uc);
-	einfo.rbp                = uc_get_rbp(uc);
-	einfo.rsp                = uc_get_rsp(uc);
-	einfo.rflags             = uc_get_rflags(uc);
-	einfo.rax                = uc_get_rax(uc);
-	einfo.rbx                = uc_get_rbx(uc);
-	einfo.rcx                = uc_get_rcx(uc);
-	einfo.rdx                = uc_get_rdx(uc);
-	einfo.rsi                = uc_get_rsi(uc);
-	einfo.rdi                = uc_get_rdi(uc);
-	einfo.r8                 = uc_get_r8(uc);
-	einfo.r9                 = uc_get_r9(uc);
-	einfo.r10                = uc_get_r10(uc);
-	einfo.r11                = uc_get_r11(uc);
-	einfo.r12                = uc_get_r12(uc);
-	einfo.r13                = uc_get_r13(uc);
-	einfo.r14                = uc_get_r14(uc);
-	einfo.r15                = uc_get_r15(uc);
-	if (einfo.rsp >= 0x10000u)
-	{
-		// The guest stack may point at an unmapped or partially-mapped region
-		// (the fault that brought us here can be a bad RSP, a recycled command
-		// buffer, or an unmapped page). Dereferencing it directly inside the
-		// signal handler would double-fault. Read it fault-safe instead so a
-		// capture attempt can never replace the original fault with a crash.
-		uint64_t      buffer[ExceptionHandler::ExceptionInfo::StackCapacity] = {};
-		struct iovec  local                                                  = {buffer, sizeof(buffer)};
-		struct iovec  remote                                                 = {reinterpret_cast<void*>(einfo.rsp), sizeof(buffer)};
-		const ssize_t got = syscall(SYS_process_vm_readv, getpid(), &local, 1UL, &remote, 1UL, 0UL);
-		if (got > 0)
-		{
-			const auto count = static_cast<uint32_t>(static_cast<size_t>(got) / sizeof(uint64_t));
-			for (uint32_t i = 0; i < count; ++i)
-			{
-				einfo.stack[i] = buffer[i];
-			}
-			einfo.stack_count = count;
-		}
-	}
 	if (g_signal_crash_memory != 0 && einfo.stack_count != 0)
 	{
 		constexpr uint64_t kGuestDataAddressEnd = 0x40000000000ull;
