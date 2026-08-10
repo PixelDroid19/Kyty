@@ -647,6 +647,69 @@ TEST(EmulatorNetwork, NetOutputBuffersRejectNonGuestRanges)
 #endif
 }
 
+TEST(EmulatorNetwork, NetLoopbackDatagramAndPeerLifecycle)
+{
+#if KYTY_PLATFORM != KYTY_PLATFORM_LINUX
+	GTEST_SKIP() << "host socket integration is Linux-specific";
+#else
+	using namespace Libs::Network::Net;
+
+	const uint64_t guest_storage = AllocateGuestPage();
+	ASSERT_NE(guest_storage, 0u);
+	auto* const guest_bytes = reinterpret_cast<uint8_t*>(guest_storage);
+
+	StoreGuestSockaddr(guest_bytes, 0);
+	const int receiver = NetSocket("network-loopback-receiver", 2, 2, 17);
+	ASSERT_GT(receiver, 0);
+	ASSERT_EQ(NetBind(receiver, guest_bytes, 8), 0);
+	auto* const receiver_name = guest_bytes + 16;
+	auto* const receiver_name_len = reinterpret_cast<int*>(guest_bytes + 32);
+	*receiver_name_len = 8;
+	ASSERT_EQ(NetGetsockname(receiver, receiver_name, receiver_name_len), 0);
+	ASSERT_EQ(NetFcntl(receiver, 4, 0x0004), 0);
+	EXPECT_EQ(NetFcntl(receiver, 3, 0), 0x0006);
+	EXPECT_EQ(NetRecvfrom(receiver, guest_bytes + 64, 1, 0, nullptr, nullptr), Kyty::Libs::Network::NET_ERROR_EAGAIN);
+
+	uint16_t sender_port = 0;
+	const int sender = CreateLoopbackSocket(SOCK_DGRAM, &sender_port);
+	ASSERT_GE(sender, 0);
+	sockaddr_in destination {};
+	destination.sin_family      = AF_INET;
+	destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	destination.sin_port        = htons(LoadGuestSockaddrPort(receiver_name));
+	constexpr char packet[] = "menu";
+	ASSERT_EQ(::sendto(sender, packet, sizeof(packet), 0, reinterpret_cast<sockaddr*>(&destination), sizeof(destination)),
+	          static_cast<ssize_t>(sizeof(packet)));
+	auto* const peer = guest_bytes + 96;
+	auto* const peer_len = reinterpret_cast<uint32_t*>(guest_bytes + 112);
+	*peer_len = 8;
+	ASSERT_EQ(NetRecvfrom(receiver, guest_bytes + 64, sizeof(packet), 0, peer, peer_len), static_cast<int64_t>(sizeof(packet)));
+	EXPECT_EQ(std::memcmp(guest_bytes + 64, packet, sizeof(packet)), 0);
+	EXPECT_EQ(LoadGuestSockaddrPort(peer), sender_port);
+	EXPECT_EQ(NetSocketClose(receiver), 0);
+	EXPECT_EQ(::close(sender), 0);
+
+	uint16_t listener_port = 0;
+	const int listener = CreateLoopbackSocket(SOCK_STREAM, &listener_port);
+	ASSERT_GE(listener, 0);
+	ASSERT_EQ(::listen(listener, 1), 0);
+	StoreGuestSockaddr(guest_bytes, listener_port);
+	const int client = NetSocket("network-loopback-client", 2, 1, 6);
+	ASSERT_GT(client, 0);
+	ASSERT_EQ(NetConnect(client, guest_bytes, 8), 0);
+	const int accepted = ::accept(listener, nullptr, nullptr);
+	ASSERT_GE(accepted, 0);
+	*peer_len = 8;
+	ASSERT_EQ(NetGetpeername(client, peer, peer_len), 0);
+	EXPECT_EQ(LoadGuestSockaddrPort(peer), listener_port);
+	EXPECT_EQ(NetShutdown(client, 2), 0);
+	EXPECT_EQ(NetSocketClose(client), 0);
+	EXPECT_EQ(::close(accepted), 0);
+	EXPECT_EQ(::close(listener), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_storage));
+#endif
+}
+
 TEST(EmulatorNetwork, NetEpollDestroyCancelsWaiterBeforeRecreate)
 {
 #if !KYTY_NETWORK_TEST_HOST_EPOLL

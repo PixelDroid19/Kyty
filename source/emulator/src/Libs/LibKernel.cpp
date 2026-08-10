@@ -1388,7 +1388,17 @@ static int64_t KYTY_SYSV_ABI PosixFstat(int fd, Kernel::FileSystem::FileStat* st
 
 static int KYTY_SYSV_ABI PosixFcntl(int fd, int command, int64_t argument)
 {
-	return POSIX_CALL(Kernel::FileSystem::KernelFcntl(fd, command, argument));
+	if (Network::Net::NetIsSocket(fd))
+	{
+		const int result = Network::Net::NetFcntl(fd, command, argument);
+		if (result < 0)
+		{
+			*Posix::GetErrorAddr() = Network::NetToPosix(result);
+			return -1;
+		}
+		return result;
+	}
+	return POSIX_N_CALL(Kernel::FileSystem::KernelFcntl(fd, command, argument));
 }
 
 static int KYTY_SYSV_ABI PosixFtruncate(int fd, int64_t length)
@@ -1469,6 +1479,11 @@ static int KYTY_SYSV_ABI PosixAccept(int id, void* addr, int* len)
 	return result;
 }
 
+static int KYTY_SYSV_ABI PosixShutdown(int id, int how)
+{
+	return POSIX_NET_CALL(Network::Net::NetShutdown(id, how));
+}
+
 static int KYTY_SYSV_ABI PosixSetsockopt(int id, int level, int option, const void* value, int value_len)
 {
 	return POSIX_NET_CALL(Network::Net::NetSetsockopt(id, level, option, value, value_len));
@@ -1512,6 +1527,11 @@ static int KYTY_SYSV_ABI PosixGetsockname(int id, void* addr, int* len)
 	return POSIX_NET_CALL(Network::Net::NetGetsockname(id, addr, len));
 }
 
+static int KYTY_SYSV_ABI PosixGetpeername(int id, void* addr, uint32_t* len)
+{
+	return POSIX_NET_CALL(Network::Net::NetGetpeername(id, addr, len));
+}
+
 static int KYTY_SYSV_ABI PosixGetsockopt(int id, int level, int option, void* value, int* value_len)
 {
 	return POSIX_NET_CALL(Network::Net::NetGetsockopt(id, level, option, value, value_len));
@@ -1519,15 +1539,13 @@ static int KYTY_SYSV_ABI PosixGetsockopt(int id, int level, int option, void* va
 
 static int64_t KYTY_SYSV_ABI PosixRecvfrom(int socket, void* buffer, uint64_t length, int flags, void* address, uint32_t* address_len)
 {
-	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t socket      = %d\n", socket);
-	KYTY_LOG_DEBUG("\t buffer      = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
-	KYTY_LOG_DEBUG("\t length      = %" PRIu64 "\n", length);
-	KYTY_LOG_DEBUG("\t flags       = %d\n", flags);
-	KYTY_LOG_DEBUG("\t address     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address));
-	KYTY_LOG_DEBUG("\t address_len = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(address_len));
-	*Posix::GetErrorAddr() = Posix::POSIX_ENOSYS;
-	return -1;
+	const auto result = Network::Net::NetRecvfrom(socket, buffer, length, flags, address, address_len);
+	if (result < 0)
+	{
+		*Posix::GetErrorAddr() = Network::NetToPosix(static_cast<int>(result));
+		return -1;
+	}
+	return result;
 }
 
 static int KYTY_SYSV_ABI PosixSendmsg(int socket, const void* message, int flags)
@@ -1840,7 +1858,9 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	LIB_FUNC("XVL8So3QJUk", LibKernel::PosixConnect);
 	LIB_FUNC("pxnCmagrtao", LibKernel::PosixListen);
 	LIB_FUNC("3e+4Iv7IJ8U", LibKernel::PosixAccept);
+	LIB_FUNC("TUuiYS2kE8s", LibKernel::PosixShutdown);
 	LIB_FUNC("RenI1lL1WFk", LibKernel::PosixGetsockname);
+	LIB_FUNC("TXFFFiNldU8", LibKernel::PosixGetpeername);
 	LIB_FUNC("6O8EwYOgH9Y", LibKernel::PosixGetsockopt);
 	LIB_FUNC("lUk6wrGXyMw", LibKernel::PosixRecvfrom);
 	LIB_FUNC("aNeavPDNKzA", LibKernel::PosixSendmsg);
