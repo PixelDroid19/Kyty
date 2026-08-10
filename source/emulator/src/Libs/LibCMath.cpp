@@ -23,6 +23,10 @@ KYTY_SYSV_ABI double c_tan(double x)
 {
 	return ::tan(x);
 }
+KYTY_SYSV_ABI double c_tanh(double x)
+{
+	return std::tanh(x);
+}
 KYTY_SYSV_ABI double c_asin(double x)
 {
 	return ::asin(x);

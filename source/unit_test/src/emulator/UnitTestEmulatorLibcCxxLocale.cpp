@@ -533,6 +533,22 @@ TEST(EmulatorLibcCxxLocale, CeilDoubleMatchesLibcContract)
 	EXPECT_DOUBLE_EQ(ceil_fn(2.0), 2.0);
 }
 
+TEST(EmulatorLibcCxxLocale, TanhDoubleMatchesLibcContract)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"JM4EBvWT9rc");
+	ASSERT_NE(rec, nullptr);
+	using Tanh = KYTY_SYSV_ABI double (*)(double value);
+	auto* tanh_fn = reinterpret_cast<Tanh>(rec->vaddr);
+
+	EXPECT_DOUBLE_EQ(tanh_fn(0.0), 0.0);
+	EXPECT_DOUBLE_EQ(tanh_fn(0.5), std::tanh(0.5));
+}
+
 TEST(EmulatorLibcCxxLocale, Udivti3DividesGuestUnsigned128BitValues)
 {
 	EnsureLog();

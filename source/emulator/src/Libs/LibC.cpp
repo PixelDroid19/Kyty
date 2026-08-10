@@ -3273,6 +3273,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("H8ya2H00jbI", LibC::c_sin);
 	LIB_FUNC("2WE3BTYVwKM", LibC::c_cos);
 	LIB_FUNC("T7uyNqP7vQA", LibC::c_tan);
+	LIB_FUNC("JM4EBvWT9rc", LibC::c_tanh);
 	LIB_FUNC("7Ly52zaL44Q", LibC::c_asin);
 	LIB_FUNC("JBcgYuW8lPU", LibC::c_acos);
 	LIB_FUNC("OXmauLdQ8kY", LibC::c_atan);

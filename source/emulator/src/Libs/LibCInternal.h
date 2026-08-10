@@ -143,6 +143,7 @@ size_t             KYTY_SYSV_ABI c_strnlen(const char* value, size_t count);
 KYTY_SYSV_ABI double c_sin(double x);
 KYTY_SYSV_ABI double c_cos(double x);
 KYTY_SYSV_ABI double c_tan(double x);
+KYTY_SYSV_ABI double c_tanh(double x);
 KYTY_SYSV_ABI double c_asin(double x);
 KYTY_SYSV_ABI double c_acos(double x);
 KYTY_SYSV_ABI double c_atan(double x);
