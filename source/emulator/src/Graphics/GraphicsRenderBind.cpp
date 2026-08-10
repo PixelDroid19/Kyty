@@ -85,7 +85,8 @@ VulkanBuffer* TryUploadTransientReadOnlyBuffer(CommandBuffer* buffer, uint64_t a
 	return result;
 }
 
-void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input)
+void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
+	                   uint32_t required_records)
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
@@ -93,7 +94,8 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 	{
 		const auto& buffer_info = input.buffers[i];
 		const uint64_t address  = buffer_info.addr;
-		const uint64_t size     = ShaderBufferByteSize(buffer_info.stride, buffer_info.num_records);
+		const uint32_t records  = required_records == 0 ? buffer_info.num_records : std::min(buffer_info.num_records, required_records);
+		const uint64_t size     = ShaderBufferByteSize(buffer_info.stride, records);
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
 		if (vertices == nullptr)

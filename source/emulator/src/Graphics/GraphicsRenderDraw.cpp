@@ -57,6 +57,56 @@ uint64_t DrawStageElapsedNs(DrawStageClock::time_point start)
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DrawStageClock::now() - start).count());
 }
 
+uint32_t ResolveLinearVertexRecords(int32_t first_vertex, uint32_t vertex_count)
+{
+	if (first_vertex < 0 || vertex_count == 0)
+	{
+		return 0;
+	}
+	const uint64_t records = static_cast<uint64_t>(first_vertex) + vertex_count;
+	return records <= UINT32_MAX ? static_cast<uint32_t>(records) : 0;
+}
+
+uint32_t ResolveIndexedVertexRecords(const void* index_addr, uint32_t index_count, VkIndexType index_type, int32_t vertex_offset)
+{
+	if (index_addr == nullptr || index_count == 0)
+	{
+		return 0;
+	}
+
+	const uint32_t element_size = index_type == VK_INDEX_TYPE_UINT16 ? 2u : (index_type == VK_INDEX_TYPE_UINT32 ? 4u : 0u);
+	if (element_size == 0 || index_count > UINT64_MAX / element_size)
+	{
+		return 0;
+	}
+	const uint64_t byte_count = static_cast<uint64_t>(index_count) * element_size;
+	constexpr uint64_t MaxIndexScanBytes = 16u * 1024u * 1024u;
+	const uint64_t address = reinterpret_cast<uint64_t>(index_addr);
+	if (byte_count > MaxIndexScanBytes || GpuMemoryGetAllocatedRangePrefix(address, byte_count) != byte_count)
+	{
+		return 0;
+	}
+
+	const auto* bytes = static_cast<const uint8_t*>(index_addr);
+	uint32_t    minimum = UINT32_MAX;
+	uint32_t    maximum = 0;
+	for (uint32_t index = 0; index < index_count; ++index)
+	{
+		uint32_t value = 0;
+		std::memcpy(&value, bytes + static_cast<uint64_t>(index) * element_size, element_size);
+		minimum = std::min(minimum, value);
+		maximum = std::max(maximum, value);
+	}
+
+	const int64_t first = static_cast<int64_t>(minimum) + vertex_offset;
+	const int64_t last  = static_cast<int64_t>(maximum) + vertex_offset;
+	if (first < 0 || last < 0 || last >= UINT32_MAX)
+	{
+		return 0;
+	}
+	return static_cast<uint32_t>(last) + 1u;
+}
+
 bool DispatchTextureExtentMatches(const ShaderComputeInputInfo& input, const char* specification)
 {
 	if (specification == nullptr || specification[0] == '\0')
@@ -981,8 +1031,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	const auto vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info);
+	const int32_t  vertex_offset = ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info);
+	const uint32_t vertex_records = ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
+	const auto     vertex_buffer_binding_start = DrawStageClock::now();
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_records);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
@@ -1007,8 +1059,6 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	const auto command_emission_start = DrawStageClock::now();
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
-	const int32_t vertex_offset = ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info);
-
 	if (primitive_plan.chunked)
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
@@ -1192,7 +1242,7 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 	{
 		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input->bind,
 		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
-		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input);
+		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, 0);
 		if (index_buffer != nullptr)
 		{
 			vkCmdBindIndexBuffer(vk_buffer, index_buffer->buffer, 0, index_type);
@@ -1736,8 +1786,11 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	const auto vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info);
+	const int32_t  resolved_first_vertex = ShaderResolveVertexOffset(0, vs_input_info);
+	const uint32_t actual_vertex_count   = primitive_plan.chunked ? index_count : primitive_plan.draw_count;
+	const uint32_t vertex_records        = ResolveLinearVertexRecords(resolved_first_vertex, actual_vertex_count);
+	const auto     vertex_buffer_binding_start = DrawStageClock::now();
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_records);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
@@ -1749,7 +1802,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	const auto command_emission_start = DrawStageClock::now();
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
-	const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, vs_input_info));
+	const uint32_t first_vertex = static_cast<uint32_t>(resolved_first_vertex);
 	bool           clear_only   = false;
 	if (const char* ab = std::getenv("KYTY_AB_CLEAR_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
 	{
