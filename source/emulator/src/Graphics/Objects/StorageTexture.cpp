@@ -64,6 +64,10 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 	{
 		return DstSel(4, 5, 6, 7);
 	}
+	if (fmt == 1u && swizzle == DstSel(4, 0, 0, 1))
+	{
+		return DstSel(4, 5, 6, 7);
+	}
 	if (IsR32SingleComponentStorageFormat(fmt) && (swizzle == DstSel(4, 0, 0, 1) || swizzle == DstSel(4, 0, 0, 0)))
 	{
 		return DstSel(4, 5, 6, 7);

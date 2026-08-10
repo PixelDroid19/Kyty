@@ -1187,11 +1187,15 @@ TEST(EmulatorGraphicsState, StorageTextureBackingIdentityNormalizesTypedStorageS
 	const StorageTextureObject r8_video_guest(0u, 0u, 5u, 64u, 64u, 64u, 0u, 1u, 5u, false, DstSel(6, 5, 4, 7));
 	const StorageTextureObject rg8_video_identity(0u, 0u, 14u, 64u, 64u, 64u, 0u, 1u, 5u, false, DstSel(4, 5, 6, 7));
 	const StorageTextureObject rg8_video_guest(0u, 0u, 14u, 64u, 64u, 64u, 0u, 1u, 5u, false, DstSel(5, 4, 0, 1));
+	const StorageTextureObject r8_compute_identity(0u, 0u, 1u, 64u, 64u, 64u, 0u, 1u, 9u, false, DstSel(4, 5, 6, 7));
+	const StorageTextureObject r8_compute_guest(0u, 0u, 1u, 64u, 64u, 64u, 0u, 1u, 9u, false, DstSel(4, 0, 0, 1));
 
 	EXPECT_TRUE(r8_video_identity.Equal(r8_video_guest.params));
 	EXPECT_TRUE(r8_video_guest.Equal(r8_video_identity.params));
 	EXPECT_TRUE(rg8_video_identity.Equal(rg8_video_guest.params));
 	EXPECT_TRUE(rg8_video_guest.Equal(rg8_video_identity.params));
+	EXPECT_TRUE(r8_compute_identity.Equal(r8_compute_guest.params));
+	EXPECT_TRUE(r8_compute_guest.Equal(r8_compute_identity.params));
 }
 
 TEST(EmulatorGraphicsState, StorageTextureBackingIdentityKeepsDistinctViewFamilies)
@@ -1521,6 +1525,8 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 {
 	EXPECT_TRUE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Sampled, 1));
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 1), VK_FORMAT_R8_UNORM);
+	EXPECT_TRUE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, 1));
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 1), VK_FORMAT_R8_UNORM);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(1), 1u);
 	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(1, VK_FORMAT_R8_UNORM));
 	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(1, VK_FORMAT_R8_UINT));

@@ -37,7 +37,7 @@ constexpr std::array LEGACY_IMAGE_FORMATS = {
 };
 
 constexpr std::array GEN5_IMAGE_FORMATS = {
-    Gen5ImageFormat {1, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
+    Gen5ImageFormat {1, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {5, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {7, VK_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {13, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
