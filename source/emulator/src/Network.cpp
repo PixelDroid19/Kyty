@@ -926,7 +926,10 @@ struct SocketState
 
 using SocketStatePtr = std::shared_ptr<SocketState>;
 
-static std::atomic<int> g_next_socket_id {1};
+constexpr int kSocketDescriptorFirst = 128;
+constexpr int kSocketDescriptorLimit = 256;
+
+static int g_next_socket_id = kSocketDescriptorFirst;
 static std::mutex g_sockets_mutex;
 static std::unordered_map<int, SocketStatePtr> g_sockets;
 
@@ -934,6 +937,27 @@ constexpr uint64_t kMaxIpv4UdpPayload  = 65'507; // IPv4 payload: 65,535 - 20-by
 constexpr size_t   kSocketIoChunkSize  = 64u * 1024u;
 constexpr int      kMaxEpollEvents     = 1024;
 constexpr int      kMaxSocketInfoSize  = 64 * 1024;
+
+static int RegisterSocketState(SocketStatePtr state)
+{
+	if (state == nullptr)
+	{
+		return -1;
+	}
+
+	std::lock_guard lock(g_sockets_mutex);
+	for (int attempt = kSocketDescriptorFirst; attempt < kSocketDescriptorLimit; ++attempt)
+	{
+		const int id     = g_next_socket_id;
+		g_next_socket_id = id + 1 == kSocketDescriptorLimit ? kSocketDescriptorFirst : id + 1;
+		if (g_sockets.find(id) == g_sockets.end())
+		{
+			g_sockets.emplace(id, std::move(state));
+			return id;
+		}
+	}
+	return -1;
+}
 
 #if KYTY_NET_HOST_EPOLL
 static void PurgeSocketFromEpolls(int socket_id, int host_socket_fd);
@@ -1294,12 +1318,16 @@ int KYTY_SYSV_ABI NetSocket(const char* name, int family, int type, int protocol
 	(void)protocol;
 #endif
 
-	const int id = g_next_socket_id.fetch_add(1, std::memory_order_relaxed);
+	const int id = RegisterSocketState(state);
+	if (id >= 0)
 	{
-		std::lock_guard lock(g_sockets_mutex);
-		g_sockets[id] = std::move(state);
+		return id;
 	}
-	return id;
+#if KYTY_NET_HOST_POSIX
+	(void)::close(state->host_fd);
+	state->host_fd = -1;
+#endif
+	return NET_ERROR_ENFILE;
 }
 
 int KYTY_SYSV_ABI NetSocketClose(int id)
@@ -1540,12 +1568,16 @@ int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
 	(void)max_len;
 #endif
 
-	const int accepted = g_next_socket_id.fetch_add(1, std::memory_order_relaxed);
+	const int accepted = RegisterSocketState(accepted_state);
+	if (accepted >= 0)
 	{
-		std::lock_guard lock(g_sockets_mutex);
-		g_sockets[accepted] = std::move(accepted_state);
+		return accepted;
 	}
-	return accepted;
+#if KYTY_NET_HOST_POSIX
+	(void)::close(accepted_state->host_fd);
+	accepted_state->host_fd = -1;
+#endif
+	return NET_ERROR_ENFILE;
 }
 
 int KYTY_SYSV_ABI NetShutdown(int id, int how)

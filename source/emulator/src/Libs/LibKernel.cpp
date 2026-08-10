@@ -381,6 +381,10 @@ static int KYTY_SYSV_ABI open(const char* path, int flags, int mode)
 
 static int KYTY_SYSV_ABI close(int d)
 {
+	if (Network::Net::NetIsSocket(d))
+	{
+		return POSIX_NET_CALL(Network::Net::NetSocketClose(d));
+	}
 	return POSIX_CALL(Kernel::FileSystem::KernelClose(d));
 }
 
