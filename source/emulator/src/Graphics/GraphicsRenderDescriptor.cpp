@@ -1284,7 +1284,7 @@ void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicStat
 		d->reference = ref[2];
 	} else
 	{
-		d->reference = 0;
+		d->reference = testval;
 	}
 }
 
