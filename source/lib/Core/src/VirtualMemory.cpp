@@ -1963,6 +1963,19 @@ bool ProtectGuest(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 	return sys_virtual_protect_guest(address, size, mode, old_mode);
 }
 
+bool DecommitGuestRange(uint64_t address, uint64_t size)
+{
+	if (address == 0 || size == 0 || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+#if defined(__linux__) && !defined(__APPLE__)
+	return sys_virtual_decommit_guest_range(address, size);
+#else
+	return false;
+#endif
+}
+
 bool IsRangeGuestOwned(uint64_t address, uint64_t size)
 {
 	return sys_virtual_is_range_guest_owned(address, size);

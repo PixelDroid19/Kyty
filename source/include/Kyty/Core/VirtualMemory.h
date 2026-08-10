@@ -163,6 +163,9 @@ bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mod
 // Guest-only protection transition. Ownership validation, the host operation,
 // and protection tracking are one transaction with Free() and guest copies.
 bool           ProtectGuest(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
+// Turn a committed guest-owned interval back into a NoAccess reservation.
+// Linux supports partial intervals; other hosts fail without changing state.
+bool           DecommitGuestRange(uint64_t address, uint64_t size);
 // Returns true only when every byte belongs to a mapping created through
 // Kyty's guest virtual-memory map family. Host mappings are never guest-owned.
 bool           IsRangeGuestOwned(uint64_t address, uint64_t size);

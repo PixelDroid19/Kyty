@@ -1437,6 +1437,80 @@ bool sys_virtual_protect_guest(uint64_t address, uint64_t size, VirtualMemory::M
 	return result;
 }
 
+bool sys_virtual_decommit_guest_range(uint64_t address, uint64_t size)
+{
+	EXIT_IF(g_allocs == nullptr);
+	if (address == 0 || size == 0 || address > UINTPTR_MAX - size)
+	{
+		return false;
+	}
+
+	const auto addr = static_cast<uintptr_t>(address);
+	const auto end  = addr + static_cast<uintptr_t>(size);
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (!get_host_page_range(addr, size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	const auto fail = []
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	};
+	if (!range_is_guest_owned_locked(addr, size))
+	{
+		return fail();
+	}
+
+	auto owner = g_allocs->upper_bound(addr);
+	if (owner == g_allocs->begin())
+	{
+		return fail();
+	}
+	--owner;
+	const uintptr_t owner_addr = owner->first;
+	const size_t    owner_size = owner->second;
+	const auto*     protection = find_protection_range(page_start);
+	if (addr < owner_addr || owner_size > UINTPTR_MAX - owner_addr || end > owner_addr + owner_size || protection == nullptr ||
+	    protection->end_page < page_end)
+	{
+		return fail();
+	}
+
+	// Replace only the validated guest-owned interval. Prefix and suffix keep
+	// their original mappings and tracking entries.
+#ifdef __APPLE__
+	constexpr int kDecommitFlags = MAP_FIXED | MAP_PRIVATE | MAP_ANON;
+#else
+	constexpr int kDecommitFlags = MAP_FIXED | MAP_PRIVATE | MAP_ANON | MAP_NORESERVE;
+#endif
+	// NOLINTNEXTLINE
+	void* ptr = mmap(reinterpret_cast<void*>(addr), size, PROT_NONE, kDecommitFlags, -1, 0);
+	if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
+	{
+		return fail();
+	}
+
+	g_allocs->erase(owner);
+	if (owner_addr < addr)
+	{
+		(*g_allocs)[owner_addr] = addr - owner_addr;
+	}
+	(*g_allocs)[addr] = size;
+	const uintptr_t owner_end = owner_addr + owner_size;
+	if (end < owner_end)
+	{
+		(*g_allocs)[end] = owner_end - end;
+	}
+	assign_protection_range(page_start, page_end, PROT_NONE);
+	EXIT_IF(!assign_guest_mapping_range_locked(addr, size));
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
 bool sys_virtual_is_range_guest_owned(uint64_t address, uint64_t size)
 {
 	pthread_mutex_lock(&g_virtual_mutex);
