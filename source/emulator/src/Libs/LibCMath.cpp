@@ -131,6 +131,32 @@ KYTY_SYSV_ABI int c_isinf(double x)
 {
 	return std::isinf(x) ? 1 : 0;
 }
+KYTY_SYSV_ABI int c_signbit(double x)
+{
+	return std::signbit(x) ? 1 : 0;
+}
+KYTY_SYSV_ABI int c_fpclassifyd(double x)
+{
+	const int category = std::fpclassify(x);
+	if (category == FP_INFINITE)
+	{
+		return 0x01;
+	}
+	if (category == FP_NAN)
+	{
+		return 0x02;
+	}
+	if (category == FP_NORMAL)
+	{
+		return 0x04;
+	}
+	if (category == FP_SUBNORMAL)
+	{
+		return 0x08;
+	}
+	EXIT_IF(category != FP_ZERO);
+	return 0x10;
+}
 // Gen5 libc_v1 sinf — NID Q4rRL34CEeE (Astro after usleep).
 KYTY_SYSV_ABI float c_sinf(float x)
 {

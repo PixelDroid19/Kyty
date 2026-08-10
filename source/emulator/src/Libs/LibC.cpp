@@ -1740,6 +1740,20 @@ static KYTY_SYSV_ABI CxxIosSmanipInt c_setw(int width)
 	return CxxIosSmanipInt {&c_setw_apply, width};
 }
 
+static KYTY_SYSV_ABI void c_setprecision_apply(CxxIosBaseLayout* ios, int precision)
+{
+	if (ios == nullptr)
+	{
+		return;
+	}
+	ios->precision = precision;
+}
+
+static KYTY_SYSV_ABI CxxIosSmanipInt c_setprecision(int precision)
+{
+	return CxxIosSmanipInt {&c_setprecision_apply, precision};
+}
+
 static KYTY_SYSV_ABI void c_facet_dtor(CxxFacetBase* /*self*/) {}
 
 static KYTY_SYSV_ABI void c_facet_deleting_dtor(CxxFacetBase* self)
@@ -3194,6 +3208,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("sUP1hBaouOw", LibC::c_Getpctype);
 	LIB_FUNC("8xXiEPby8h8", LibC::c_Getptimes);
 	LIB_FUNC("vU9svJtEnWc", LibC::c_setw);
+	LIB_FUNC("1h8hFQghR7w", LibC::c_setprecision);
 	LIB_FUNC("j9LU8GsuEGw", LibC::c_time_put_put);
 	LIB_FUNC("rcQCUr0EaRU", LibC::c_Getptoupper);
 	// Gen5 _Getptolower — guest VFS path lowercasing after ~INDEX.
@@ -3307,6 +3322,10 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("GfxAp9Xyiqs", LibC::c_isnan);
 	// Gen5 libc_v1 __isinf — double in xmm0, integer predicate in eax.
 	LIB_FUNC("V02oFv+-JzA", LibC::c_isinf);
+	// Gen5 libc_v1 __signbit — standard double predicate ABI.
+	LIB_FUNC("Rw4J-22tu1U", LibC::c_signbit);
+	// Gen5 libc_v1 __fpclassifyd — translate host categories to guest values.
+	LIB_FUNC("qlWiRfOJx1A", LibC::c_fpclassifyd);
 	// Gen5 libc_v1 float math (NIDs from name→NID hash).
 	LIB_FUNC("Q4rRL34CEeE", LibC::c_sinf);
 	LIB_FUNC("-P6FNMzk2Kc", LibC::c_cosf);

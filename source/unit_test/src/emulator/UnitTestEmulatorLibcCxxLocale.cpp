@@ -549,6 +549,81 @@ TEST(EmulatorLibcCxxLocale, TanhDoubleMatchesLibcContract)
 	EXPECT_DOUBLE_EQ(tanh_fn(0.5), std::tanh(0.5));
 }
 
+TEST(EmulatorLibcCxxLocale, SignbitDoubleMatchesLibcContract)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"Rw4J-22tu1U");
+	ASSERT_NE(rec, nullptr);
+	using Signbit = KYTY_SYSV_ABI int (*)(double value);
+	auto* signbit_fn = reinterpret_cast<Signbit>(rec->vaddr);
+
+	EXPECT_EQ(signbit_fn(1.0), 0);
+	EXPECT_NE(signbit_fn(-1.0), 0);
+	EXPECT_EQ(signbit_fn(0.0), 0);
+	EXPECT_NE(signbit_fn(-0.0), 0);
+	const double negative_nan = std::copysign(std::numeric_limits<double>::quiet_NaN(), -1.0);
+	EXPECT_NE(signbit_fn(negative_nan), 0);
+}
+
+TEST(EmulatorLibcCxxLocale, FpclassifyDoubleUsesGuestCategoryValues)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"qlWiRfOJx1A");
+	ASSERT_NE(rec, nullptr);
+	using Fpclassify = KYTY_SYSV_ABI int (*)(double value);
+	auto* fpclassify_fn = reinterpret_cast<Fpclassify>(rec->vaddr);
+
+	EXPECT_EQ(fpclassify_fn(std::numeric_limits<double>::infinity()), 0x01);
+	EXPECT_EQ(fpclassify_fn(std::numeric_limits<double>::quiet_NaN()), 0x02);
+	EXPECT_EQ(fpclassify_fn(1.0), 0x04);
+	EXPECT_EQ(fpclassify_fn(std::numeric_limits<double>::denorm_min()), 0x08);
+	EXPECT_EQ(fpclassify_fn(0.0), 0x10);
+}
+
+TEST(EmulatorLibcCxxLocale, SetprecisionReturnsGuestIosManipulator)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"1h8hFQghR7w");
+	ASSERT_NE(rec, nullptr);
+
+	struct Ios
+	{
+		std::byte reserved[0x18];
+		uint32_t flags;
+		int32_t precision;
+		int32_t width;
+	};
+	using Apply = KYTY_SYSV_ABI void (*)(Ios* ios, int value);
+	struct Manipulator
+	{
+		Apply apply;
+		int arg;
+	};
+	using Setprecision = KYTY_SYSV_ABI Manipulator (*)(int value);
+	auto* setprecision_fn = reinterpret_cast<Setprecision>(rec->vaddr);
+
+	const Manipulator manipulator = setprecision_fn(7);
+	ASSERT_NE(manipulator.apply, nullptr);
+	EXPECT_EQ(manipulator.arg, 7);
+	Ios ios {};
+	ios.precision = 2;
+	ios.width = 9;
+	manipulator.apply(&ios, manipulator.arg);
+	EXPECT_EQ(ios.precision, 7);
+	EXPECT_EQ(ios.width, 9);
+}
+
 TEST(EmulatorLibcCxxLocale, Udivti3DividesGuestUnsigned128BitValues)
 {
 	EnsureLog();

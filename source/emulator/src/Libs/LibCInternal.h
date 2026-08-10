@@ -168,6 +168,8 @@ KYTY_SYSV_ABI int c_isfinitef(float x);
 KYTY_SYSV_ABI int c_isfinite(double x);
 KYTY_SYSV_ABI int c_isnan(double x);
 KYTY_SYSV_ABI int c_isinf(double x);
+KYTY_SYSV_ABI int c_signbit(double x);
+KYTY_SYSV_ABI int c_fpclassifyd(double x);
 KYTY_SYSV_ABI float c_sinf(float x);
 KYTY_SYSV_ABI float c_cosf(float x);
 KYTY_SYSV_ABI float c_tanf(float x);
