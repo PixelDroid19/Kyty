@@ -455,9 +455,17 @@ ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int sta
 		const bool sampled = ShaderInstructionUsesImageSampler(inst.type);
 		if (sampled && inst.src_num >= 3 && inst.src[2].type == ShaderOperandType::Sgpr && inst.src[2].size == 4)
 		{
+			const auto operation = ShaderInstructionSamplerOperation(inst.type);
 			if (result.sampler_register >= 0 && result.sampler_register != inst.src[2].register_id)
 			{
 				KYTY_LOG_DEBUG("WARNING: direct image resource uses multiple sampler ranges (continuing)\n");
+			}
+			if (result.sampler_register >= 0 && result.sample_operation != operation)
+			{
+				result.sample_operation = State::ImageSampleOperation::Mixed;
+			} else if (result.sampler_register < 0)
+			{
+				result.sample_operation = operation;
 			}
 			result.sampler_register = inst.src[2].register_id;
 		}

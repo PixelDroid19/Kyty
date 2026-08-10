@@ -996,6 +996,27 @@ constexpr ShaderGen5SampledTextureShape ShaderGen5SampledTextureShapeForType(uin
 	return ShaderGen5SampledTextureShape::TwoDimensional;
 }
 
+enum class ShaderSampledImageViewKind : uint8_t
+{
+	Missing,
+	Color2D,
+	Color2DArray,
+	Color3D,
+	Depth2D,
+	Depth2DArray,
+};
+
+struct ShaderSampledImageViewDecision
+{
+	bool                       compatible = false;
+	ShaderSampledImageViewKind view       = ShaderSampledImageViewKind::Missing;
+};
+
+[[nodiscard]] ShaderSampledImageViewDecision ResolveDepthReferenceImageView(State::ImageSampleOperation operation,
+                                                                            ShaderGen5SampledTextureShape shape,
+                                                                            bool floating_point,
+                                                                            ShaderSampledImageViewKind resolved_view);
+
 inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 {
 	return (swizzle >> (channel * 3u)) & 0x7u;
@@ -1324,10 +1345,11 @@ enum class ShaderTextureUsage
 
 struct ShaderDirectImageUse
 {
-	ShaderTextureUsage texture          = ShaderTextureUsage::Unknown;
-	int                sampler_register = -1;
-	bool               reads            = false;
-	bool               writes           = false;
+	ShaderTextureUsage          texture          = ShaderTextureUsage::Unknown;
+	State::ImageSampleOperation sample_operation {};
+	int                         sampler_register = -1;
+	bool                        reads            = false;
+	bool                        writes           = false;
 };
 
 struct ShaderStorageResources
@@ -1405,6 +1427,7 @@ struct ShaderTextureDescriptor
 {
 	ShaderTextureResource texture;
 	ShaderTextureUsage    usage                      = ShaderTextureUsage::Unknown;
+	State::ImageSampleOperation sample_operation {};
 	int                   slot                       = 0;
 	int                   start_register             = 0;
 	bool                  extended                   = false;

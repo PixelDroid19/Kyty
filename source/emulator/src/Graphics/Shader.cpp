@@ -10,6 +10,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
@@ -43,6 +44,34 @@
 namespace Kyty::Libs::Graphics {
 
 static RenderResolutionShaderUsageCache g_shader_resolution_usage_cache(512);
+
+ShaderSampledImageViewDecision ResolveDepthReferenceImageView(State::ImageSampleOperation operation,
+                                                              ShaderGen5SampledTextureShape shape, bool floating_point,
+                                                              ShaderSampledImageViewKind resolved_view)
+{
+	if (operation == State::ImageSampleOperation::Mixed)
+	{
+		return {false, resolved_view};
+	}
+	if (operation == State::ImageSampleOperation::Regular)
+	{
+		const bool compatible =
+		    (shape == ShaderGen5SampledTextureShape::TwoDimensional &&
+		     (resolved_view == ShaderSampledImageViewKind::Color2D || resolved_view == ShaderSampledImageViewKind::Depth2D)) ||
+		    (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray &&
+		     (resolved_view == ShaderSampledImageViewKind::Color2DArray || resolved_view == ShaderSampledImageViewKind::Depth2DArray)) ||
+		    (shape == ShaderGen5SampledTextureShape::ThreeDimensional && resolved_view == ShaderSampledImageViewKind::Color3D);
+		return {compatible, resolved_view};
+	}
+	if (!floating_point)
+	{
+		return {false, resolved_view};
+	}
+	const bool compatible =
+	    (shape == ShaderGen5SampledTextureShape::TwoDimensional && resolved_view == ShaderSampledImageViewKind::Depth2D) ||
+	    (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray && resolved_view == ShaderSampledImageViewKind::Depth2DArray);
+	return {compatible, resolved_view};
+}
 
 
 void RecordShaderInputAnalysis(uint64_t elapsed_ns)
@@ -1596,6 +1625,26 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	}
 	if (code != nullptr)
 	{
+		for (int i = 0; i < bind->textures2D.textures_num; ++i)
+		{
+			auto& descriptor = bind->textures2D.desc[i];
+			if (descriptor.dynamic_sload || descriptor.usage != ShaderTextureUsage::ReadOnly)
+			{
+				continue;
+			}
+			const int binding_register = descriptor.extended
+			                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (descriptor.start_register - 16)
+			                                 : descriptor.start_register;
+			auto image = AnalyzeShaderDirectImageUse(*code, binding_register + user_data_register_base);
+			if (image.texture == ShaderTextureUsage::Unknown && user_data_register_base != 0)
+			{
+				image = AnalyzeShaderDirectImageUse(*code, binding_register);
+			}
+			if (image.texture != ShaderTextureUsage::Unknown)
+			{
+				descriptor.sample_operation = image.sample_operation;
+			}
+		}
 		for (int i = 0; i < bind->samplers.samplers_num; ++i)
 		{
 			if (bind->samplers.dynamic_sload[i])

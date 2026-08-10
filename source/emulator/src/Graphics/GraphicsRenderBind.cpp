@@ -379,6 +379,26 @@ static bool ShouldForceGen5Degamma(const ShaderSamplerResources& samplers, int s
 	return sampler.ForceDegamma() && !sampler.SkipDegamma();
 }
 
+static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage* image, bool depth, bool arrayed,
+	                                                            bool three_dimensional)
+{
+	if (image == nullptr)
+	{
+		return ShaderSampledImageViewKind::Missing;
+	}
+	if (!depth)
+	{
+		return three_dimensional ? ShaderSampledImageViewKind::Color3D
+		                         : (arrayed ? ShaderSampledImageViewKind::Color2DArray : ShaderSampledImageViewKind::Color2D);
+	}
+	const int depth_view = arrayed ? VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY : VulkanImage::VIEW_DEPTH_TEXTURE;
+	if (image->image_view[depth_view] == VK_NULL_HANDLE)
+	{
+		return ShaderSampledImageViewKind::Missing;
+	}
+	return arrayed ? ShaderSampledImageViewKind::Depth2DArray : ShaderSampledImageViewKind::Depth2D;
+}
+
 static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const ShaderTextureResources& textures,
                             const ShaderSamplerResources& samplers, VulkanImage** images_sampled, VulkanImage** images_storage,
                             int* images_sampled_view, VulkanImage** images_sampled_array, int* images_sampled_array_view,
@@ -997,6 +1017,20 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 
 		if (tex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tex == nullptr condition ignored (continuing)\n"); }
+		if (!textures.desc[i].textures2d_without_sampler &&
+		    textures.desc[i].sample_operation != State::ImageSampleOperation::Regular)
+		{
+			const auto resolved_view = ResolveBoundSampledImageView(tex, depth_texture, arrayed_2d, three_dimensional);
+			const auto numeric_type = VulkanGen5ImageNumericType(fmt);
+			const auto decision = ResolveDepthReferenceImageView(
+			    textures.desc[i].sample_operation, sampled_shape, numeric_type == GuestImageNumericType::FloatingPoint, resolved_view);
+			if (!decision.compatible)
+			{
+				EXIT("unsupported depth-reference image binding: operation=%u shape=%u numeric=%u view=%u format=%u tile=%u\n",
+				     static_cast<uint32_t>(textures.desc[i].sample_operation), static_cast<uint32_t>(sampled_shape),
+				     static_cast<uint32_t>(numeric_type), static_cast<uint32_t>(resolved_view), fmt, tile);
+			}
+		}
 		if (const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
 		{
 			uint32_t selected_width  = 0;

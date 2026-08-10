@@ -1802,6 +1802,8 @@ TEST(EmulatorGraphicsState, ClassifiesDirectDepthReferenceSamplerBinding)
 	ShaderBindResources bind {};
 	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 12, &code);
 
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	EXPECT_EQ(bind.textures2D.desc[0].sample_operation, State::ImageSampleOperation::DepthReference);
 	ASSERT_EQ(bind.samplers.samplers_num, 1);
 	EXPECT_EQ(bind.samplers.start_register[0], 8);
 	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::DepthReference);
@@ -4007,6 +4009,37 @@ TEST(EmulatorGraphicsState, ResolvesDepthReferenceSamplerComparison)
 	}
 }
 
+TEST(EmulatorGraphicsState, ResolvesDepthReferenceImageViewCompatibility)
+{
+	using State::ImageSampleOperation;
+	using View = ShaderSampledImageViewKind;
+
+	EXPECT_TRUE(ResolveDepthReferenceImageView(ImageSampleOperation::DepthReference,
+	                                           ShaderGen5SampledTextureShape::TwoDimensional, true, View::Depth2D)
+	                .compatible);
+	EXPECT_TRUE(ResolveDepthReferenceImageView(ImageSampleOperation::DepthReference,
+	                                           ShaderGen5SampledTextureShape::TwoDimensionalArray, true, View::Depth2DArray)
+	                .compatible);
+	EXPECT_FALSE(ResolveDepthReferenceImageView(ImageSampleOperation::DepthReference,
+	                                            ShaderGen5SampledTextureShape::TwoDimensional, true, View::Color2D)
+	                 .compatible);
+	EXPECT_FALSE(ResolveDepthReferenceImageView(ImageSampleOperation::DepthReference,
+	                                            ShaderGen5SampledTextureShape::TwoDimensional, false, View::Depth2D)
+	                 .compatible);
+	EXPECT_FALSE(ResolveDepthReferenceImageView(ImageSampleOperation::DepthReference,
+	                                            ShaderGen5SampledTextureShape::ThreeDimensional, true, View::Color3D)
+	                 .compatible);
+	EXPECT_FALSE(ResolveDepthReferenceImageView(ImageSampleOperation::DepthReference,
+	                                            ShaderGen5SampledTextureShape::TwoDimensionalArray, true, View::Missing)
+	                 .compatible);
+	EXPECT_FALSE(ResolveDepthReferenceImageView(ImageSampleOperation::Mixed,
+	                                            ShaderGen5SampledTextureShape::TwoDimensional, true, View::Depth2D)
+	                 .compatible);
+	EXPECT_TRUE(ResolveDepthReferenceImageView(ImageSampleOperation::Regular,
+	                                          ShaderGen5SampledTextureShape::TwoDimensional, true, View::Color2D)
+	                .compatible);
+}
+
 TEST(EmulatorGraphicsState, UnnormalizedSamplerCoordinatesUseVulkanCompatiblePolicy)
 {
 	using namespace Kyty::Libs::Graphics::State;
@@ -4217,6 +4250,88 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceSamplerBinding)
 	ASSERT_EQ(bind.dynamic_sloads.mappings_num, 1);
 	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::Sampler);
 	EXPECT_EQ(bind.dynamic_sloads.destination_register[0], 4);
+}
+
+TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBindings)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction texture_load {};
+	texture_load.pc                = 0x8;
+	texture_load.type              = ShaderInstructionType::SLoadDwordx8;
+	texture_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+	texture_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	texture_load.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+	texture_load.src[1].constant.u = 128u;
+	texture_load.src_num           = 2;
+
+	ShaderInstruction sampler_load {};
+	sampler_load.pc                = 0x10;
+	sampler_load.type              = ShaderInstructionType::SLoadDwordx4;
+	sampler_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 4};
+	sampler_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	sampler_load.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+	sampler_load.src[1].constant.u = 160u;
+	sampler_load.src_num           = 2;
+
+	ShaderInstruction depth_reference {};
+	depth_reference.pc             = 0x18;
+	depth_reference.type           = ShaderInstructionType::ImageSampleDrefLz;
+	depth_reference.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+	depth_reference.src[2]         = {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 4};
+	depth_reference.src_num        = 3;
+
+	ShaderInstruction end {};
+	end.pc   = 0x20;
+	end.type = ShaderInstructionType::SEndpgm;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(texture_load);
+	code.GetInstructions().Add(sampler_load);
+	code.GetInstructions().Add(depth_reference);
+	code.GetInstructions().Add(end);
+
+	alignas(16) uint32_t eud[64] = {};
+	eud[33]                       = 22u << 20u;
+	eud[35]                       = 9u << 28u;
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 16; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	const uint64_t eud_ptr = reinterpret_cast<uintptr_t>(eud);
+	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
+	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
+
+	uint16_t direct_offsets[6];
+	for (auto& offset: direct_offsets)
+	{
+		offset = 0xffffu;
+	}
+	direct_offsets[5] = 0;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.eud_size_dw            = 48;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	EXPECT_TRUE(bind.textures2D.desc[0].dynamic_sload);
+	EXPECT_EQ(bind.textures2D.desc[0].sample_operation, State::ImageSampleOperation::DepthReference);
+	ASSERT_EQ(bind.samplers.samplers_num, 1);
+	EXPECT_TRUE(bind.samplers.dynamic_sload[0]);
+	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::DepthReference);
+	ASSERT_EQ(bind.dynamic_sloads.mappings_num, 2);
+	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::Texture);
+	EXPECT_EQ(bind.dynamic_sloads.kind[1], ShaderDynamicSLoadResourceKind::Sampler);
 }
 
 // Captured failure: S_LOAD_DWORDX4 from EUD @offset_dw=40 of a null V#, then

@@ -295,6 +295,7 @@ static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, con
 
 static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const ShaderInstruction& sload, int offset_dw,
 	                                         uint32_t last_consumer_pc, ShaderTextureUsage usage,
+	                                         State::ImageSampleOperation operation,
 	                                         const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer,
 	                                         bool* added_resource)
 {
@@ -311,7 +312,8 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 	int texture_index = -1;
 	for (int index = 0; index < bind->textures2D.textures_num; ++index)
 	{
-		if (bind->textures2D.desc[index].usage == usage && ShaderTextureResourcesEqual(bind->textures2D.desc[index].texture, resource))
+		if (bind->textures2D.desc[index].usage == usage && bind->textures2D.desc[index].sample_operation == operation &&
+		    ShaderTextureResourcesEqual(bind->textures2D.desc[index].texture, resource))
 		{
 			texture_index = index;
 			break;
@@ -325,6 +327,7 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 		}
 		texture_index = bind->textures2D.textures_num;
 		ShaderGetTextureBuffer(&bind->textures2D, nullptr, offset_dw + 16, offset_dw, usage, user_sgpr, extended_buffer);
+		bind->textures2D.desc[texture_index].sample_operation = operation;
 		bind->textures2D.desc[texture_index].dynamic_sload = true;
 		*added_resource                                    = true;
 	}
@@ -419,8 +422,11 @@ static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, con
 	{
 		if (ShaderInstructionReadsImageResource(inst.type))
 		{
-			use->kind          = ShaderDynamicSLoadResourceKind::Texture;
-			use->texture_usage = ShaderTextureUsage::ReadOnly;
+			use->kind              = ShaderDynamicSLoadResourceKind::Texture;
+			use->texture_usage     = ShaderTextureUsage::ReadOnly;
+			use->sampler_operation = ShaderInstructionUsesImageSampler(inst.type)
+			                             ? ShaderInstructionSamplerOperation(inst.type)
+			                             : State::ImageSampleOperation::Regular;
 			return true;
 		}
 		if (ShaderInstructionWritesImageResource(inst.type))
@@ -489,8 +495,11 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 					use.valid = false;
 					break;
 				}
+				const bool operation_sensitive =
+				    use.kind == ShaderDynamicSLoadResourceKind::Sampler ||
+				    (use.kind == ShaderDynamicSLoadResourceKind::Texture && use.texture_usage == ShaderTextureUsage::ReadOnly);
 				const auto sampler_operation =
-				    use.found && use.kind == ShaderDynamicSLoadResourceKind::Sampler &&
+				    use.found && operation_sensitive &&
 				            use.sampler_operation != next_use.sampler_operation
 				        ? State::ImageSampleOperation::Mixed
 				        : next_use.sampler_operation;
@@ -531,6 +540,7 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 				break;
 			case ShaderDynamicSLoadResourceKind::Texture:
 				added_mapping = ShaderAddDynamicTextureResource(bind, sload, offset_dw, use.last_consumer_pc, use.texture_usage,
+				                                                use.sampler_operation,
 				                                                 user_sgpr, extended_buffer, &added_resource);
 				if (added_resource)
 				{

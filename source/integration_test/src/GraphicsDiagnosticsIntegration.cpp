@@ -1541,6 +1541,214 @@ private:
 	bool bound = false;
 };
 
+bool FindDepthSampleMemoryType(VkPhysicalDevice physical_device, uint32_t type_bits, uint32_t* type_index)
+{
+	if (physical_device == VK_NULL_HANDLE || type_index == nullptr)
+	{
+		return false;
+	}
+	VkPhysicalDeviceMemoryProperties properties {};
+	vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
+	for (uint32_t index = 0; index < properties.memoryTypeCount; ++index)
+	{
+		if ((type_bits & (1u << index)) != 0u &&
+		    (properties.memoryTypes[index].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0u)
+		{
+			*type_index = index;
+			return true;
+		}
+	}
+	return false;
+}
+
+class VulkanDepthSample
+{
+public:
+	explicit VulkanDepthSample(GraphicContext* context): m_context(context) {}
+	~VulkanDepthSample()
+	{
+		if (m_context == nullptr || m_context->device == VK_NULL_HANDLE)
+		{
+			return;
+		}
+		if (view != VK_NULL_HANDLE)
+		{
+			vkDestroyImageView(m_context->device, view, nullptr);
+		}
+		if (image != VK_NULL_HANDLE)
+		{
+			vkDestroyImage(m_context->device, image, nullptr);
+		}
+		if (memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(m_context->device, memory, nullptr);
+		}
+	}
+
+	[[nodiscard]] bool Create()
+	{
+		if (m_context == nullptr || m_context->device == VK_NULL_HANDLE || m_context->physical_device == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+		VkFormatProperties format_properties {};
+		vkGetPhysicalDeviceFormatProperties(m_context->physical_device, VK_FORMAT_D32_SFLOAT, &format_properties);
+		constexpr VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+		if ((format_properties.optimalTilingFeatures & required) != required)
+		{
+			return false;
+		}
+
+		VkImageCreateInfo image_info {};
+		image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		image_info.imageType     = VK_IMAGE_TYPE_2D;
+		image_info.format        = VK_FORMAT_D32_SFLOAT;
+		image_info.extent        = {4u, 4u, 1u};
+		image_info.mipLevels     = 1;
+		image_info.arrayLayers   = 1;
+		image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+		image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+		image_info.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+		image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+		image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if (vkCreateImage(m_context->device, &image_info, nullptr, &image) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkMemoryRequirements requirements {};
+		vkGetImageMemoryRequirements(m_context->device, image, &requirements);
+		uint32_t memory_type = 0;
+		if (!FindDepthSampleMemoryType(m_context->physical_device, requirements.memoryTypeBits, &memory_type))
+		{
+			return false;
+		}
+		VkMemoryAllocateInfo memory_info {};
+		memory_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memory_info.allocationSize  = requirements.size;
+		memory_info.memoryTypeIndex = memory_type;
+		if (vkAllocateMemory(m_context->device, &memory_info, nullptr, &memory) != VK_SUCCESS)
+		{
+			return false;
+		}
+		if (vkBindImageMemory(m_context->device, image, memory, 0) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkImageViewCreateInfo view_info {};
+		view_info.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		view_info.image                           = image;
+		view_info.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+		view_info.format                          = VK_FORMAT_D32_SFLOAT;
+		view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+		view_info.subresourceRange.baseMipLevel   = 0;
+		view_info.subresourceRange.levelCount     = 1;
+		view_info.subresourceRange.baseArrayLayer = 0;
+		view_info.subresourceRange.layerCount     = 1;
+		return vkCreateImageView(m_context->device, &view_info, nullptr, &view) == VK_SUCCESS;
+	}
+
+	VkImageView view = VK_NULL_HANDLE;
+
+private:
+	GraphicContext* m_context = nullptr;
+	VkImage         image     = VK_NULL_HANDLE;
+	VkDeviceMemory  memory    = VK_NULL_HANDLE;
+};
+
+class VulkanDepthDescriptorBinding
+{
+public:
+	explicit VulkanDepthDescriptorBinding(VkDevice device): m_device(device) {}
+	~VulkanDepthDescriptorBinding()
+	{
+		if (pool != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorPool(m_device, pool, nullptr);
+		}
+		if (layout != VK_NULL_HANDLE)
+		{
+			vkDestroyDescriptorSetLayout(m_device, layout, nullptr);
+		}
+	}
+
+	[[nodiscard]] bool Create(VkImageView depth_view, VkSampler comparison_sampler)
+	{
+		if (m_device == VK_NULL_HANDLE || depth_view == VK_NULL_HANDLE || comparison_sampler == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+		VkDescriptorSetLayoutBinding bindings[2] {};
+		bindings[0].binding         = 0;
+		bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		bindings[0].descriptorCount = 1;
+		bindings[0].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+		bindings[1].binding         = 1;
+		bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+		bindings[1].descriptorCount = 1;
+		bindings[1].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+		VkDescriptorSetLayoutCreateInfo layout_info {};
+		layout_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		layout_info.bindingCount = 2;
+		layout_info.pBindings    = bindings;
+		if (vkCreateDescriptorSetLayout(m_device, &layout_info, nullptr, &layout) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkDescriptorPoolSize pool_sizes[2] {};
+		pool_sizes[0] = {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1};
+		pool_sizes[1] = {VK_DESCRIPTOR_TYPE_SAMPLER, 1};
+		VkDescriptorPoolCreateInfo pool_info {};
+		pool_info.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		pool_info.maxSets       = 1;
+		pool_info.poolSizeCount = 2;
+		pool_info.pPoolSizes    = pool_sizes;
+		if (vkCreateDescriptorPool(m_device, &pool_info, nullptr, &pool) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkDescriptorSetAllocateInfo allocation {};
+		allocation.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		allocation.descriptorPool     = pool;
+		allocation.descriptorSetCount = 1;
+		allocation.pSetLayouts        = &layout;
+		if (vkAllocateDescriptorSets(m_device, &allocation, &set) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkDescriptorImageInfo image_info {};
+		image_info.imageView   = depth_view;
+		image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		VkDescriptorImageInfo sampler_info {};
+		sampler_info.sampler = comparison_sampler;
+		VkWriteDescriptorSet writes[2] {};
+		writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[0].dstSet          = set;
+		writes[0].dstBinding      = 0;
+		writes[0].descriptorCount = 1;
+		writes[0].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		writes[0].pImageInfo      = &image_info;
+		writes[1].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		writes[1].dstSet          = set;
+		writes[1].dstBinding      = 1;
+		writes[1].descriptorCount = 1;
+		writes[1].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+		writes[1].pImageInfo      = &sampler_info;
+		vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+		return true;
+	}
+
+private:
+	VkDevice              m_device = VK_NULL_HANDLE;
+	VkDescriptorSetLayout layout   = VK_NULL_HANDLE;
+	VkDescriptorPool      pool     = VK_NULL_HANDLE;
+	VkDescriptorSet       set      = VK_NULL_HANDLE;
+};
+
 void VerifyComparisonSamplerCacheIdentity()
 {
 	VulkanSamplerContext vulkan;
@@ -1552,7 +1760,13 @@ void VerifyComparisonSamplerCacheIdentity()
 	Expect(regular != depth, "regular and depth-reference samplers must not alias");
 	Expect(depth == depth_reused, "identical depth-reference samplers must reuse the cache entry");
 	Expect(g_render_ctx->GetSamplerCache()->GetSampler(regular) != VK_NULL_HANDLE, "regular sampler must be created");
-	Expect(g_render_ctx->GetSamplerCache()->GetSampler(depth) != VK_NULL_HANDLE, "comparison sampler must be created");
+	const auto comparison_sampler = g_render_ctx->GetSamplerCache()->GetSampler(depth);
+	Expect(comparison_sampler != VK_NULL_HANDLE, "comparison sampler must be created");
+
+	VulkanDepthSample depth_sample(&vulkan.context);
+	Expect(depth_sample.Create(), "sampled depth image and depth-aspect view must be created");
+	VulkanDepthDescriptorBinding binding(vulkan.context.device);
+	Expect(binding.Create(depth_sample.view, comparison_sampler), "depth view and comparison sampler descriptor update must succeed");
 }
 
 } // namespace
