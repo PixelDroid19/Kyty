@@ -1674,6 +1674,41 @@ TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescript
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
 }
 
+TEST(EmulatorGraphicsState, Gen5CodeAvailablePrunesUnusedDirectStorageDescriptor)
+{
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 4; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+
+	ShaderBufferResource descriptor {};
+	descriptor.fields[0] = 0x00100000u;
+	descriptor.fields[1] = 16u << 16u;
+	descriptor.fields[2] = 64u;
+	descriptor.fields[3] = DstSel(4, 5, 6, 7) | (75u << 12u);
+	for (int i = 0; i < 4; ++i)
+	{
+		user_sgpr.value[i] = descriptor.fields[i];
+	}
+
+	ShaderInstruction end {};
+	end.type = ShaderInstructionType::SEndpgm;
+	ShaderCode code;
+	code.GetInstructions().Add(end);
+
+	uint16_t       direct_offsets[1] = {0};
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 1;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 4, &code);
+
+	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+}
+
 TEST(EmulatorGraphicsState, RawStorageDescriptorRequiresNonZeroDwordStride)
 {
 	ShaderBufferResource raw {};

@@ -322,8 +322,17 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 				ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
-				EXIT("storage buffer range is not materialized: index=%d addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n", i,
-				     addr, requested_size);
+				EXIT("storage buffer range is not materialized: index=%d addr=0x%016" PRIx64 " size=0x%016" PRIx64
+				     " access=%u source=%u reason=%u code=%d exact=%d indirect=%d raw_vmem_oob=%d raw_smem=%d"
+				     " raw_tbuffer=%d sgpr=%d slot=%d usage=%u stride=%u words=%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32
+				     ":%08" PRIx32 "\n",
+				     i, addr, requested_size, static_cast<uint32_t>(storage_buffers.accesses[i]),
+				     static_cast<uint32_t>(storage_buffers.sources[i]), static_cast<uint32_t>(storage_buffers.unknown_reasons[i]),
+				     storage_buffers.code_available[i] ? 1 : 0, storage_buffers.exact_matches[i] ? 1 : 0,
+				     storage_buffers.indirect_descriptor_use[i] ? 1 : 0, storage_buffers.raw_vmem_oob_guarded[i] ? 1 : 0,
+				     storage_buffers.raw_smem_use[i] ? 1 : 0, storage_buffers.raw_tbuffer_use[i] ? 1 : 0,
+				     storage_buffers.start_register[i], storage_buffers.slots[i], static_cast<uint32_t>(storage_buffers.usages[i]),
+				     stride, r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
 			} else
 			{
 				if (materialized_size != requested_size)
