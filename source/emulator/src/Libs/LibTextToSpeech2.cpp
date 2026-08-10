@@ -2,6 +2,8 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include "Kyty/Core/VirtualMemory.h"
+
 #include <atomic>
 
 #ifdef KYTY_EMU_ENABLED
@@ -43,15 +45,40 @@ static int KYTY_SYSV_ABI Open(const OpenParameters* parameters)
 {
 	PRINT_NAME();
 
-	if (parameters == nullptr || !g_initialized.load(std::memory_order_acquire))
+	if (!g_initialized.load(std::memory_order_acquire))
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 
-	const uint64_t configuration = static_cast<uint64_t>(parameters->configuration) |
-	                               (static_cast<uint64_t>(parameters->flags) << 32u);
+	OpenParameters copied {};
+	if (parameters == nullptr ||
+	    !Core::VirtualMemory::CopyFromGuest(&copied, reinterpret_cast<uint64_t>(parameters), sizeof(copied)))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	const uint64_t configuration = static_cast<uint64_t>(copied.configuration) |
+	                               (static_cast<uint64_t>(copied.flags) << 32u);
 	g_open_configuration.store(configuration, std::memory_order_release);
 	g_open.store(true, std::memory_order_release);
+
+	return OK;
+}
+
+static int KYTY_SYSV_ABI GetSpeechStatus(int32_t* status)
+{
+	PRINT_NAME();
+
+	if (!g_initialized.load(std::memory_order_acquire) || !g_open.load(std::memory_order_acquire))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	constexpr int32_t idle = 0;
+	if (status == nullptr || !Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(status), &idle, sizeof(idle)))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
 
 	return OK;
 }
@@ -76,6 +103,7 @@ LIB_DEFINE(InitTextToSpeech2_1)
 	LIB_FUNC("SoWHuVW0gpU", TextToSpeech2::Terminate);
 	LIB_FUNC("X0HZNbSiqyg", TextToSpeech2::Open);
 	LIB_FUNC("2jiIxUmcsGo", TextToSpeech2::Cancel);
+	LIB_FUNC("08JSg9p6bgQ", TextToSpeech2::GetSpeechStatus);
 }
 
 } // namespace Kyty::Libs
