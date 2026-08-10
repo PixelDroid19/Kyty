@@ -181,6 +181,7 @@ KYTY_SYSV_ABI float c_fmodf(float x, float y);
 KYTY_SYSV_ABI float c_hypotf(float x, float y);
 KYTY_SYSV_ABI float c_truncf(float x);
 KYTY_SYSV_ABI float c_roundf(float x);
+KYTY_SYSV_ABI int64_t c_lroundf(float x);
 KYTY_SYSV_ABI float c_log10f(float x);
 KYTY_SYSV_ABI float c_logf(float x);
 KYTY_SYSV_ABI float c_sqrtf(float x);

@@ -254,6 +254,13 @@ int KYTY_SYSV_ABI ExecuteOnceCallbackImpl(void* first, void* context, void** res
 	return state->succeed ? 1 : 0;
 }
 
+int KYTY_SYSV_ABI CompareInts(const void* key, const void* element)
+{
+	const int lhs = *static_cast<const int*>(key);
+	const int rhs = *static_cast<const int*>(element);
+	return (lhs > rhs) - (lhs < rhs);
+}
+
 const Loader::SymbolRecord* ResolveLibcFunction(Loader::SymbolDatabase* symbols, const char16_t* nid)
 {
 	Loader::SymbolResolve query {};
@@ -622,6 +629,43 @@ TEST(EmulatorLibcCxxLocale, SetprecisionReturnsGuestIosManipulator)
 	manipulator.apply(&ios, manipulator.arg);
 	EXPECT_EQ(ios.precision, 7);
 	EXPECT_EQ(ios.width, 9);
+}
+
+TEST(EmulatorLibcCxxLocale, LroundfReturnsGuestLongValues)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"C6gWCWJKM+U");
+	ASSERT_NE(rec, nullptr);
+	using Lroundf = KYTY_SYSV_ABI int64_t (*)(float value);
+	auto* lroundf_fn = reinterpret_cast<Lroundf>(rec->vaddr);
+
+	EXPECT_EQ(lroundf_fn(2.49f), 2);
+	EXPECT_EQ(lroundf_fn(2.5f), 3);
+	EXPECT_EQ(lroundf_fn(-2.5f), -3);
+	EXPECT_EQ(lroundf_fn(16'777'216.0f), 16'777'216);
+}
+
+TEST(EmulatorLibcCxxLocale, BsearchReturnsMatchingGuestElement)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"NesIgTmfF0Q");
+	ASSERT_NE(rec, nullptr);
+	using Bsearch = KYTY_SYSV_ABI void* (*)(const void* key, const void* base, size_t count, size_t size,
+	                                      int(KYTY_SYSV_ABI* compare)(const void*, const void*));
+	auto* bsearch_fn = reinterpret_cast<Bsearch>(rec->vaddr);
+
+	const int values[] = {-9, -1, 0, 4, 20};
+	int key = 4;
+	EXPECT_EQ(bsearch_fn(&key, values, std::size(values), sizeof(values[0]), CompareInts), &values[3]);
+	key = 3;
+	EXPECT_EQ(bsearch_fn(&key, values, std::size(values), sizeof(values[0]), CompareInts), nullptr);
+	EXPECT_EQ(bsearch_fn(&key, values, 0, sizeof(values[0]), CompareInts), nullptr);
 }
 
 TEST(EmulatorLibcCxxLocale, Udivti3DividesGuestUnsigned128BitValues)

@@ -862,6 +862,38 @@ static KYTY_SYSV_ABI void c_qsort(void* base, size_t n, size_t sz, int(KYTY_SYSV
 	::qsort(base, n, sz, reinterpret_cast<int (*)(const void*, const void*)>(cmp));
 #endif
 }
+
+static KYTY_SYSV_ABI void* c_bsearch(const void* key, const void* base, size_t count, size_t size,
+                                     int(KYTY_SYSV_ABI* compare)(const void*, const void*))
+{
+	if (base == nullptr || compare == nullptr || count == 0 || size == 0 || count > std::numeric_limits<size_t>::max() / size)
+	{
+		return nullptr;
+	}
+
+	const auto* bytes = static_cast<const uint8_t*>(base);
+	size_t first = 0;
+	while (count != 0)
+	{
+		const size_t half = count / 2;
+		const size_t middle = first + half;
+		const void* element = bytes + middle * size;
+		const int relation = compare(key, element);
+		if (relation == 0)
+		{
+			return const_cast<void*>(element);
+		}
+		if (relation < 0)
+		{
+			count = half;
+			continue;
+		}
+		first = middle + 1;
+		count -= half + 1;
+	}
+
+	return nullptr;
+}
 static KYTY_SYSV_ABI void c_abort()
 {
 	KYTY_LOG_ERROR("libc::abort() called by guest\n");
@@ -3267,6 +3299,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("5OqszGpy7Mg", LibC::c_strtoull);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
+	LIB_FUNC("NesIgTmfF0Q", LibC::c_bsearch);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
 	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
 	// Gen5 libc_v1 rand — Nmtr628eA3A observed early; cpCOXWMgha0 after Fiber/thread bring-up.
@@ -3339,6 +3372,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("iz2shAGFIxc", LibC::c_hypotf);
 	LIB_FUNC("Vo8rvWtZw3g", LibC::c_truncf);
 	LIB_FUNC("DDHG1a6+3q0", LibC::c_roundf);
+	LIB_FUNC("C6gWCWJKM+U", LibC::c_lroundf);
 	// Gen5 libc_v1 float remainder/frexp variants (name→NID).
 	LIB_FUNC("eS+MVq+Lltw", LibC::c_remainderf);
 	LIB_FUNC("aaDMGGkXFxo", LibC::c_frexpf);

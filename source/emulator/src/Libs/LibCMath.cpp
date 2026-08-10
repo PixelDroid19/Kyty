@@ -204,6 +204,10 @@ KYTY_SYSV_ABI float c_roundf(float x)
 {
 	return ::roundf(x);
 }
+KYTY_SYSV_ABI int64_t c_lroundf(float x)
+{
+	return static_cast<int64_t>(std::llround(x));
+}
 KYTY_SYSV_ABI float c_log10f(float x)
 {
 	return ::log10f(x);
