@@ -163,6 +163,7 @@ KYTY_SYSV_ABI double c_frexp(double x, int* e);
 KYTY_SYSV_ABI void c_sincos(double x, double* s, double* c);
 KYTY_SYSV_ABI float c_powf(float x, float y);
 KYTY_SYSV_ABI int c_isnanf(float x);
+KYTY_SYSV_ABI int c_isfinitef(float x);
 KYTY_SYSV_ABI int c_isfinite(double x);
 KYTY_SYSV_ABI int c_isnan(double x);
 KYTY_SYSV_ABI int c_isinf(double x);

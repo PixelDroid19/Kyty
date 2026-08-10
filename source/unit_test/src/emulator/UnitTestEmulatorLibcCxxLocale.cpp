@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -329,6 +330,30 @@ TEST(EmulatorLibcCxxLocale, SetlocaleExposesTheStandardLocaleContract)
 	const char* current = setlocale(LC_ALL, nullptr);
 	ASSERT_NE(current, nullptr);
 	EXPECT_NE(current[0], '\0');
+}
+
+TEST(EmulatorLibcCxxLocale, FloatingPointPredicatesUseTheirGuestAbis)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* record = ResolveLibcFunction(&symbols, u"Q8pvJimUWis");
+	ASSERT_NE(record, nullptr);
+	using Isfinitef = KYTY_SYSV_ABI int (*)(float value);
+	auto* isfinitef = reinterpret_cast<Isfinitef>(record->vaddr);
+
+	EXPECT_NE(isfinitef(1.0f), 0);
+	EXPECT_EQ(isfinitef(std::numeric_limits<float>::infinity()), 0);
+	EXPECT_EQ(isfinitef(std::numeric_limits<float>::quiet_NaN()), 0);
+
+	const auto* isinf_record = ResolveLibcFunction(&symbols, u"V02oFv+-JzA");
+	ASSERT_NE(isinf_record, nullptr);
+	using Isinf = KYTY_SYSV_ABI int (*)(double value);
+	auto* isinf = reinterpret_cast<Isinf>(isinf_record->vaddr);
+
+	EXPECT_EQ(isinf(1.0), 0);
+	EXPECT_NE(isinf(std::numeric_limits<double>::infinity()), 0);
+	EXPECT_EQ(isinf(std::numeric_limits<double>::quiet_NaN()), 0);
 }
 
 TEST(EmulatorLibcCxxLocale, MtxInitUsesGuestPthreadStorage)
