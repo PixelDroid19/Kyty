@@ -96,6 +96,58 @@ static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, cons
 	return -1;
 }
 
+static int FindImageStorageTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
+{
+	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8)
+	{
+		return -1;
+	}
+
+	const int texture_register = inst.src[1].register_id;
+	for (int index = 0; index < bind.textures2D.textures_num; ++index)
+	{
+		const auto& descriptor = bind.textures2D.desc[index];
+		if (descriptor.usage == ShaderTextureUsage::ReadWrite && !descriptor.dynamic_sload &&
+		    descriptor.start_register + user_data_register_base == texture_register)
+		{
+			return index;
+		}
+	}
+
+	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
+	{
+		if (bind.dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::Texture ||
+		    bind.dynamic_sloads.destination_register[mapping] != texture_register ||
+		    inst.pc <= bind.dynamic_sloads.instruction_pc[mapping] || inst.pc > bind.dynamic_sloads.last_consumer_pc[mapping])
+		{
+			continue;
+		}
+
+		const int index = bind.dynamic_sloads.resource_index[mapping];
+		if (index >= 0 && index < bind.textures2D.textures_num && bind.textures2D.desc[index].usage == ShaderTextureUsage::ReadWrite)
+		{
+			return index;
+		}
+	}
+	return -1;
+}
+
+static int ResolveStorageTextureArrayIndex(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
+{
+	const int descriptor_index = FindImageStorageTextureDescriptor(inst, bind, user_data_register_base);
+	if (descriptor_index < 0)
+	{
+		return -1;
+	}
+
+	int storage_index = 0;
+	for (int index = 0; index < descriptor_index; ++index)
+	{
+		storage_index += bind.textures2D.desc[index].usage == ShaderTextureUsage::ReadWrite ? 1 : 0;
+	}
+	return storage_index < bind.textures2D.textures2d_storage_num ? storage_index : -1;
+}
+
 static int FindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
 {
 	if (inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].size != 4)
@@ -133,9 +185,8 @@ static ImageSampleLzPlan PlanImageSampleLz(const ShaderInstruction& inst, const 
 	const int descriptor_index = FindImageSampledTextureDescriptor(inst, bind, user_data_register_base);
 	if (descriptor_index >= 0)
 	{
-		const auto& descriptor  = bind.textures2D.desc[descriptor_index];
-		const auto texture_type = descriptor.texture.Type();
-		const auto shape        = ShaderResolvedSampledTextureShape(descriptor);
+		const auto& descriptor = bind.textures2D.desc[descriptor_index];
+		const auto  shape      = ShaderResolvedSampledTextureShape(descriptor);
 		return {shape, shape == ShaderGen5SampledTextureShape::TwoDimensional ? 2u : 3u, inst.mimg_dimension == 3u};
 	}
 
@@ -269,15 +320,14 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 	{
 		return false;
 	}
-	const auto& descriptor     = bind->textures2D.desc[descriptor_index];
-	const auto texture_type    = descriptor.texture.Type();
-	const auto shape           = ShaderResolvedSampledTextureShape(descriptor);
-	const bool cube_coordinates = inst.mimg_dimension == 3u;
-	const int sampled_num =
-	    (shape == ShaderGen5SampledTextureShape::TwoDimensional ? bind->textures2D.textures2d_sampled_num :
-	                                                               (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ?
-	                                                                    bind->textures2D.textures2d_array_sampled_num :
-	                                                                    bind->textures2D.textures3d_sampled_num));
+	const auto& descriptor       = bind->textures2D.desc[descriptor_index];
+	const auto  shape            = ShaderResolvedSampledTextureShape(descriptor);
+	const bool  cube_coordinates = inst.mimg_dimension == 3u;
+	const int   sampled_num =
+	    (shape == ShaderGen5SampledTextureShape::TwoDimensional
+	         ? bind->textures2D.textures2d_sampled_num
+	         : (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ? bind->textures2D.textures2d_array_sampled_num
+	                                                                        : bind->textures2D.textures3d_sampled_num));
 	if (sampled_num <= 0)
 	{
 		return false;
@@ -2919,16 +2969,27 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_storage_num > 0)
 	{
-		const bool arrayed = UsesArrayed2dImages(bind_info, ShaderTextureUsage::ReadWrite);
-		const bool three_dimensional = UsesThreeDimensionalImages(bind_info);
-		const bool uint_images        = UsesUnsignedIntegerImages(bind_info);
-		const auto src0_value0        = mimg_address_to_str(inst, 0);
-		const auto src0_value1        = mimg_address_to_str(inst, 1);
-		const auto src1_value0        = operand_variable_to_str(inst.src[1], 0);
-		const auto zero_component     = uint_images ? spirv->GetConstantUint(0u) : spirv->GetConstantFloat(0.0f);
+		const auto* vs_info                 = spirv->GetVsInputInfo();
+		const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+		const int   storage_index           = ResolveStorageTextureArrayIndex(inst, *bind_info, user_data_register_base);
+		if (storage_index < 0)
+		{
+			return false;
+		}
+		const auto storage_index_constant = spirv->GetConstantUint(static_cast<uint32_t>(storage_index));
+		if (storage_index_constant.StartsWith("unknown_"))
+		{
+			return false;
+		}
 
-		if (src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float || src1_value0.type != SpirvType::Uint ||
-		    zero_component.StartsWith("unknown_"))
+		const bool arrayed           = UsesArrayed2dImages(bind_info, ShaderTextureUsage::ReadWrite);
+		const bool three_dimensional = UsesThreeDimensionalImages(bind_info);
+		const bool uint_images       = UsesUnsignedIntegerImages(bind_info);
+		const auto src0_value0       = mimg_address_to_str(inst, 0);
+		const auto src0_value1       = mimg_address_to_str(inst, 1);
+		const auto zero_component    = uint_images ? spirv->GetConstantUint(0u) : spirv->GetConstantFloat(0.0f);
+
+		if (src0_value0.type != SpirvType::Float || src0_value1.type != SpirvType::Float || zero_component.StartsWith("unknown_"))
 		{
 			return false;
 		}
@@ -2975,9 +3036,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 			                                          index, component, previous.c_str(), index, component);
 		}
 
-		static const char* text = R"(
-         %t24_<index> = OpLoad %uint %<src1_value0>
-         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %t24_<index>
+		static const char* text                  = R"(
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %<storage_index>
          %t27_<index> = OpLoad %ImageL %t26_<index>
          %t67_<index> = OpLoad %float %<src0_value0>
          %t69_<index> = OpBitcast %uint %t67_<index>
@@ -3020,9 +3080,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 		                   .ReplaceStr("<coordinate_bounds>", coordinate_bounds)
 		                   .ReplaceStr("<last_coordinate>", String8::FromPrintf("%u", coordinate_count - 1u))
 		                   .ReplaceStr("<index>", index_string)
+		                   .ReplaceStr("<storage_index>", storage_index_constant)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
-		                   .ReplaceStr("<src0_value1>", src0_value1.value)
-		                   .ReplaceStr("<src1_value0>", src1_value0.value);
+		                   .ReplaceStr("<src0_value1>", src0_value1.value);
 
 		return true;
 	}
@@ -3038,6 +3098,19 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_storage_num > 0)
 	{
+		const auto* vs_info                 = spirv->GetVsInputInfo();
+		const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+		const int   storage_index           = ResolveStorageTextureArrayIndex(inst, *bind_info, user_data_register_base);
+		if (storage_index < 0)
+		{
+			return false;
+		}
+		const auto storage_index_constant = spirv->GetConstantUint(static_cast<uint32_t>(storage_index));
+		if (storage_index_constant.StartsWith("unknown_"))
+		{
+			return false;
+		}
+
 		auto dst_value0 = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1 = operand_variable_to_str(inst.dst, 1);
 		auto dst_value2 = operand_variable_to_str(inst.dst, 2);
@@ -3047,12 +3120,16 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 		auto src0_value1 = mimg_address_to_str(inst, 1);
 		auto src0_value2 = mimg_address_to_str(inst, 2);
 
-		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src1_value2 = operand_variable_to_str(inst.src[1], 2);
 
-		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
-		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
-		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (dst_value0.type != SpirvType::Float)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n");
+		}
+		if (src0_value0.type != SpirvType::Float)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n");
+		}
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
@@ -3060,15 +3137,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 		// TODO() convert SRGB -> LINEAR if SRGB format was replaced with UNORM
 
 		static const char* text = R"(
-         %t24_<index> = OpLoad %uint %<src1_value0>
-         %t25_<index> = OpLoad %uint %<src1_value2>
+		 %t25_<index> = OpLoad %uint %<src1_value2>
 		%t143_<index> = OpShiftRightLogical %uint %t25_<index> %uint_0
         %t145_<index> = OpBitwiseAnd %uint %t143_<index> %uint_0x00003fff
         %t146_<index> = OpIAdd %uint %t145_<index> %uint_1
         %t149_<index> = OpShiftRightLogical %uint %t25_<index> %uint_14
         %t150_<index> = OpBitwiseAnd %uint %t149_<index> %uint_0x00003fff
         %t151_<index> = OpIAdd %uint %t150_<index> %uint_1
-         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %t24_<index>
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %<storage_index>
          %t27_<index> = OpLoad %ImageL %t26_<index>
          %t67_<index> = OpLoad %float %<src0_value0>
          %t69_<index> = OpBitcast %uint %t67_<index>
@@ -3088,10 +3164,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<storage_index>", storage_index_constant)
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<src0_value1>", src0_value1.value)
 		                   .ReplaceStr("<src0_value2>", src0_value2.value)
-		                   .ReplaceStr("<src1_value0>", src1_value0.value)
 		                   .ReplaceStr("<src1_value2>", src1_value2.value)
 		                   .ReplaceStr("<dst_value0>", dst_value0.value)
 		                   .ReplaceStr("<dst_value1>", dst_value1.value)

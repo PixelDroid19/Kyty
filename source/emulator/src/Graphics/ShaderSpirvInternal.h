@@ -153,7 +153,7 @@ public:
 			}
 
 			const int resource_index = dynamic_sloads.resource_index[mapping];
-			const int resource_field = offset - first_dword;
+			const int resource_field = dynamic_sloads.resource_field_offset[mapping] + offset - first_dword;
 			switch (dynamic_sloads.kind[mapping])
 			{
 				case ShaderDynamicSLoadResourceKind::StorageBuffer:

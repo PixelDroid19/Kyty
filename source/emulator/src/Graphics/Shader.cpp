@@ -2157,10 +2157,11 @@ static void ShaderDbgDumpResources(const ShaderBindResources& bind)
 	}
 	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
 	{
-		KYTY_LOG_DEBUG("\t DynamicSLoad %d: kind=%u resource=%d dst=%d pc=%08" PRIx32 " offset_dw=%d dwords=%d last_consumer=%08" PRIx32 "\n",
+		KYTY_LOG_DEBUG("\t DynamicSLoad %d: kind=%u resource=%d dst=%d pc=%08" PRIx32 " offset_dw=%d dwords=%d field=%d last_consumer=%08" PRIx32 "\n",
 		       mapping, static_cast<unsigned>(bind.dynamic_sloads.kind[mapping]), bind.dynamic_sloads.resource_index[mapping],
 		       bind.dynamic_sloads.destination_register[mapping], bind.dynamic_sloads.instruction_pc[mapping],
 		       bind.dynamic_sloads.offset_dw[mapping], bind.dynamic_sloads.dword_count[mapping],
+		       bind.dynamic_sloads.resource_field_offset[mapping],
 		       bind.dynamic_sloads.last_consumer_pc[mapping]);
 	}
 
@@ -2869,6 +2870,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(bind.dynamic_sloads.instruction_pc[mapping]);
 		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.offset_dw[mapping]));
 		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.dword_count[mapping]));
+		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.resource_field_offset[mapping]));
 		ret->ids.Add(bind.dynamic_sloads.last_consumer_pc[mapping]);
 		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.raw_vmem_oob_guarded[mapping]));
 	}

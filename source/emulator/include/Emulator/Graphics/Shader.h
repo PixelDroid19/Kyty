@@ -1346,6 +1346,7 @@ struct ShaderDynamicSLoadMappings
 	uint32_t                       instruction_pc[MAPPINGS_MAX]       = {};
 	int                            offset_dw[MAPPINGS_MAX]            = {};
 	int                            dword_count[MAPPINGS_MAX]          = {};
+	int                            resource_field_offset[MAPPINGS_MAX] = {};
 	uint32_t                       last_consumer_pc[MAPPINGS_MAX]     = {};
 	bool                           raw_vmem_oob_guarded[MAPPINGS_MAX] = {};
 	int                            mappings_num                        = 0;

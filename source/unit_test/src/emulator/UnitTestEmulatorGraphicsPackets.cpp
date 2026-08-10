@@ -3670,6 +3670,8 @@ TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinate
 	EXPECT_NE(source.FindIndex("OpBitcast %float"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpBitcast %uint"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpImageWrite"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %uint_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %t24_1"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%t73_1 = OpCompositeConstruct %v3uint %t69_1 %t71_1 %uint_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%t72_1 = OpLoad %float %v14"), Core::STRING8_INVALID_INDEX);
 
