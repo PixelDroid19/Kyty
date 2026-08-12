@@ -310,6 +310,23 @@ uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32
 	return static_cast<uint8_t>(((target_mask >> shift) & (shader_mask >> shift)) & 0xFu);
 }
 
+bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth)
+{
+	if ((target_mask & shader.m_cbShaderMask) != 0 || depth.z_enable || depth.stencil_enable || shader.shader_z_format != 0)
+	{
+		return true;
+	}
+	for (const auto output_mode: shader.target_output_mode)
+	{
+		if (output_mode != 0)
+		{
+			return true;
+		}
+	}
+	const auto& control = shader.db_shader_control;
+	return control.shader_kill_enable || control.shader_z_export_enable || control.shader_execute_on_noop || control.other_bits != 0;
+}
+
 Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found)
 {
 	if (exact_render_target_found)

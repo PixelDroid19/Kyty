@@ -2212,6 +2212,107 @@ TEST(EmulatorGraphicsState, RequiresAnActiveDepthStencilOperationForTargetBindin
 	EXPECT_FALSE(usage.depth_write_enable);
 }
 
+TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
+{
+	HW::ShaderRegisters shader {};
+	HW::DepthControl    depth {};
+
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, depth));
+
+	shader.m_cbShaderMask = 0x0fu;
+	EXPECT_FALSE(State::PixelShaderStageRequired(0, shader, depth));
+	EXPECT_TRUE(State::PixelShaderStageRequired(0x0fu, shader, depth));
+
+	shader                    = {};
+	shader.target_output_mode[0] = 4u;
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+
+	shader                 = {};
+	shader.shader_z_format = 1u;
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+
+	shader                 = {};
+	depth.z_enable         = true;
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+
+	depth                  = {};
+	depth.stencil_enable   = true;
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+
+	depth                                      = {};
+	shader.db_shader_control.shader_kill_enable = true;
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+
+	shader.db_shader_control                       = {};
+	shader.db_shader_control.shader_z_export_enable = true;
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+
+	shader.db_shader_control                        = {};
+	shader.db_shader_control.shader_execute_on_noop = true;
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+
+	shader.db_shader_control            = {};
+	shader.db_shader_control.other_bits = 1u;
+	EXPECT_TRUE(State::PixelShaderStageRequired(0, shader, depth));
+}
+
+TEST(EmulatorGraphicsState, RejectsUnsafeNoopPixelElision)
+{
+	ShaderCode code;
+	EXPECT_FALSE(ShaderPreventsNoopPixelElision(code));
+
+	for (const auto type: {ShaderInstructionType::Unknown, ShaderInstructionType::SSetpcB64, ShaderInstructionType::SSwappcB64,
+	                       ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferAtomicXor,
+	                       ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
+	                       ShaderInstructionType::DsWriteB32, ShaderInstructionType::DsAppend})
+	{
+		ShaderInstruction instruction {};
+		instruction.type = type;
+		code.GetInstructions().Add(instruction);
+		EXPECT_TRUE(ShaderPreventsNoopPixelElision(code));
+		code.GetInstructions().Clear();
+	}
+
+	// MUBUF/MTBUF parser fallbacks use SBarrier for opcodes whose exact IR is
+	// not implemented, including known stores and atomics. Treat it as opaque.
+	ShaderInstruction opaque {};
+	opaque.type = ShaderInstructionType::SBarrier;
+	code.GetInstructions().Add(opaque);
+	EXPECT_TRUE(ShaderPreventsNoopPixelElision(code));
+	code.GetInstructions().Clear();
+
+	ShaderOperand exec {};
+	exec.type = ShaderOperandType::ExecLo;
+	exec.size = 2;
+	ShaderOperand zero {};
+	zero.type       = ShaderOperandType::IntegerInlineConstant;
+	zero.constant.i = 0;
+	zero.size       = 2;
+	ShaderInstruction clear_exec {};
+	clear_exec.type       = ShaderInstructionType::SMovB64;
+	clear_exec.format     = ShaderInstructionFormat::Sdst2Ssrc02;
+	clear_exec.dst        = exec;
+	clear_exec.src[0]     = zero;
+	clear_exec.src_num    = 1;
+	ShaderInstruction discard {};
+	discard.pc      = 4;
+	discard.type    = ShaderInstructionType::Exp;
+	discard.format  = ShaderInstructionFormat::Mrt3OffOffComprVmDone;
+	ShaderInstruction end {};
+	end.pc   = 12;
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(clear_exec);
+	code.GetInstructions().Add(discard);
+	code.GetInstructions().Add(end);
+	EXPECT_TRUE(ShaderPreventsNoopPixelElision(code));
+	code.GetInstructions().Clear();
+
+	ShaderInstruction load {};
+	load.type = ShaderInstructionType::SBufferLoadDwordx16;
+	code.GetInstructions().Add(load);
+	EXPECT_FALSE(ShaderPreventsNoopPixelElision(code));
+}
+
 TEST(EmulatorGraphicsState, IgnoresMetadataOnlyStencilControlWithoutStencilPlane)
 {
 	HW::DepthRenderTarget target {};

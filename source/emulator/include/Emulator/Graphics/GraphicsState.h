@@ -169,6 +169,10 @@ struct ColorTargetLayout
 // CB_TARGET_MASK admits a render-target channel and CB_SHADER_MASK admits the
 // corresponding pixel-shader export. Vulkan must receive their intersection.
 [[nodiscard]] uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index);
+// A no-export pixel shader can still be required for depth/stencil, discard, or explicit memory effects.
+// The latter are verified from decoded shader code before disabling the stage.
+[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader,
+                                            const HW::DepthControl& depth);
 
 // A sampled surface may reuse a render target or storage texture when
 // FindRenderTexture / FindStorageTexture found a live object (Equals, non-exact

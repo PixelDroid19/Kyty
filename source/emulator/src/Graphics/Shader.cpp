@@ -1012,6 +1012,41 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 	return usage;
 }
 
+bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
+{
+	bool prevents = false;
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		if (IsDiscardInstruction(code.GetInstructions(), index))
+		{
+			prevents = true;
+			break;
+		}
+	}
+
+	// Unsupported MUBUF/MTBUF loads and stores currently retain their packet
+	// position as SBarrier. Fail closed until the parser preserves their exact
+	// read/write opcode; this intentionally sacrifices elision, never effects.
+	prevents = prevents || code.HasAnyOf({ShaderInstructionType::Unknown, ShaderInstructionType::SBarrier, ShaderInstructionType::SSendmsg,
+	                                      ShaderInstructionType::SSetpcB64, ShaderInstructionType::SSwappcB64,
+	                      ShaderInstructionType::BufferAtomicAdd, ShaderInstructionType::BufferAtomicAnd,
+	                      ShaderInstructionType::BufferAtomicOr, ShaderInstructionType::BufferAtomicSmax,
+	                      ShaderInstructionType::BufferAtomicSmin, ShaderInstructionType::BufferAtomicSub,
+	                      ShaderInstructionType::BufferAtomicUmax, ShaderInstructionType::BufferAtomicUmin,
+	                      ShaderInstructionType::BufferAtomicXor, ShaderInstructionType::BufferStoreDword,
+	                      ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
+	                      ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX,
+	                      ShaderInstructionType::BufferStoreFormatXy, ShaderInstructionType::BufferStoreFormatXyzw,
+	                      ShaderInstructionType::DsAppend, ShaderInstructionType::DsConsume, ShaderInstructionType::DsAddU32,
+	                      ShaderInstructionType::DsAndB32, ShaderInstructionType::DsDecU32, ShaderInstructionType::DsIncU32,
+	                      ShaderInstructionType::DsMaxI32, ShaderInstructionType::DsMaxU32, ShaderInstructionType::DsMinI32,
+	                      ShaderInstructionType::DsMinU32, ShaderInstructionType::DsOrB32, ShaderInstructionType::DsRsubU32,
+	                      ShaderInstructionType::DsSubU32, ShaderInstructionType::DsXorB32, ShaderInstructionType::DsWriteB32,
+	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip});
+
+	return prevents;
+}
+
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
@@ -1934,7 +1969,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 }
 
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
-                          ShaderPixelInputInfo* ps_info)
+                          ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2014,6 +2049,11 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;
 		ps_info->required_subgroup_size    = ShaderPixelRequiredSubgroupSize(*analysis.code, ps_wave32);
+		if (allow_noop_stage_disable && !ShaderPreventsNoopPixelElision(*analysis.code))
+		{
+			ps_info->stage_enabled = false;
+			return;
+		}
 		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get(), 0,
 		                  false);
 	} else
