@@ -513,6 +513,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	    {pixels.data(), {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}, width * 4u,
 	     hdr_capture ? Emulator::Host::HostCaptureImagePixelFormat::Rgba8 : capture_pixel_format},
 	    ctx->native_capture.max_edge, image_path);
+	GraphicsPeekRememberedSceneTargets(&ctx->graphic_ctx);
 	if (codec_result.downscale_fallback)
 	{
 		KYTY_LOG_WARN("KYTY_CAPTURE_WARN subsystem=frame_capture operation=downscale frame=%d kept_full=1\n", frame);

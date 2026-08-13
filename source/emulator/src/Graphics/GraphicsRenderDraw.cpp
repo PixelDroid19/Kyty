@@ -33,6 +33,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -1041,8 +1042,74 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 
+	uint32_t declared_vertex_records = 0;
+	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
+	{
+		declared_vertex_records = std::max(declared_vertex_records, vs_input_info.buffers[buffer_index].num_records);
+	}
+	const auto guest_vp_xy = State::ResolveViewportXy(ctx->GetScreenViewport().viewports[0].xscale,
+	                                                  ctx->GetScreenViewport().viewports[0].xoffset,
+	                                                  ctx->GetScreenViewport().viewports[0].yscale,
+	                                                  ctx->GetScreenViewport().viewports[0].yoffset);
+	const auto guest_vp_z = State::ResolveViewportDepth(
+	    ctx->GetScreenViewport().viewports[0].zscale, ctx->GetScreenViewport().viewports[0].zoffset,
+	    ctx->GetClipControl().dx_clip_space, g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported,
+	    ctx->GetScreenViewport().viewports[0].zmin, ctx->GetScreenViewport().viewports[0].zmax);
+	const DrawMaterialTraceContext material_trace {.ps_checksum = sh_ctx->GetPs().ps_regs.chksum,
+	                                               .ps_addr = sh_ctx->GetPs().ps_regs.data_addr,
+	                                               .vs_checksum = sh_ctx->GetVs().gs_regs.chksum,
+	                                               .vs_addr = sh_ctx->GetVs().vs_regs.data_addr != 0
+	                                                              ? sh_ctx->GetVs().vs_regs.data_addr
+	                                                              : sh_ctx->GetVs().es_regs.data_addr,
+	                                               .vs_export_count = vs_input_info.export_count,
+	                                               .indexed = true,
+	                                               .primitive_type = ucfg->GetPrimType(),
+	                                               .guest_count = index_count,
+	                                               .index_type = index_type_and_size,
+	                                               .index_addr = reinterpret_cast<uint64_t>(index_addr),
+	                                               .index_size = index_size,
+	                                               .vertex_offset = vertex_offset,
+	                                               .required_vertex_records = vertex_records,
+	                                               .vertex_input = &vs_input_info,
+	                                               .color = &color_info,
+	                                               .depth = &depth_info,
+	                                               .declared_vertex_records = declared_vertex_records,
+	                                               .target_mask = ctx->GetRenderTargetMask(),
+	                                               .blend_enable = ctx->GetBlendControl(0).enable ? 1u : 0u,
+	                                               .blend_src = ctx->GetBlendControl(0).color_srcblend,
+	                                               .blend_op = ctx->GetBlendControl(0).color_comb_fcn,
+	                                               .blend_dst = ctx->GetBlendControl(0).color_destblend,
+	                                               .blend_bypass = ctx->GetRenderTarget(0).info.blend_bypass ? 1u : 0u,
+	                                               .color_mask = State::ResolveColorWriteAgainstDepth(
+	                                                   State::ResolveColorWriteMask(ctx->GetRenderTargetMask(),
+	                                                                                ctx->GetShaderRegisters().m_cbShaderMask, 0),
+	                                                   ctx->GetDepthControl().color_writes_on_depth_pass_disable,
+	                                                   ctx->GetDepthControl().color_writes_on_depth_fail_enable),
+	                                               .color_on_depth_fail =
+	                                                   ctx->GetDepthControl().color_writes_on_depth_fail_enable ? 1u : 0u,
+	                                               .color_off_depth_pass =
+	                                                   ctx->GetDepthControl().color_writes_on_depth_pass_disable ? 1u : 0u,
+	                                               .cull_front = ctx->GetModeControl().cull_front ? 1u : 0u,
+	                                               .cull_back = ctx->GetModeControl().cull_back ? 1u : 0u,
+	                                               .face = ctx->GetModeControl().face ? 1u : 0u,
+	                                               .vp_x = guest_vp_xy.x,
+	                                               .vp_y = guest_vp_xy.y,
+	                                               .vp_width = guest_vp_xy.width,
+	                                               .vp_height = guest_vp_xy.height,
+	                                               .vp_zmin = guest_vp_z.min_depth,
+	                                               .vp_zmax = guest_vp_z.max_depth,
+	                                               .dx_clip = ctx->GetClipControl().dx_clip_space ? 1u : 0u,
+	                                               .ps_input_num = ps_input_info.input_num,
+	                                               .interpolators = {ps_input_info.interpolator_settings[0],
+	                                                                 ps_input_info.interpolator_settings[1],
+	                                                                 ps_input_info.interpolator_settings[2],
+	                                                                 ps_input_info.interpolator_settings[3],
+	                                                                 ps_input_info.interpolator_settings[4],
+	                                                                 ps_input_info.interpolator_settings[5],
+	                                                                 ps_input_info.interpolator_settings[6],
+	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace);
 
 	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
 	const auto     index_buffer_binding_start = DrawStageClock::now();
@@ -1235,7 +1302,6 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 	EXIT_IF(index_buffer != nullptr && !guest_geometry);
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-	buffer->BeginRenderPass(framebuffer, color, depth, &request.sample_locations);
 	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
 	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
 	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
@@ -1247,6 +1313,15 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 		if (index_buffer != nullptr)
 		{
 			vkCmdBindIndexBuffer(vk_buffer, index_buffer->buffer, 0, index_type);
+		}
+	}
+	// Guest descriptor preparation can materialize sampled resources with
+	// transfer/compute commands. Finish it before entering render-pass scope.
+	buffer->BeginRenderPass(framebuffer, color, depth, &request.sample_locations);
+	if (guest_geometry)
+	{
+		if (index_buffer != nullptr)
+		{
 			vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, vertex_offset, 0);
 		} else
 		{
@@ -1798,8 +1873,74 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 
+	uint32_t declared_vertex_records = 0;
+	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
+	{
+		declared_vertex_records = std::max(declared_vertex_records, vs_input_info.buffers[buffer_index].num_records);
+	}
+	const auto guest_vp_xy = State::ResolveViewportXy(ctx->GetScreenViewport().viewports[0].xscale,
+	                                                  ctx->GetScreenViewport().viewports[0].xoffset,
+	                                                  ctx->GetScreenViewport().viewports[0].yscale,
+	                                                  ctx->GetScreenViewport().viewports[0].yoffset);
+	const auto guest_vp_z = State::ResolveViewportDepth(
+	    ctx->GetScreenViewport().viewports[0].zscale, ctx->GetScreenViewport().viewports[0].zoffset,
+	    ctx->GetClipControl().dx_clip_space, g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported,
+	    ctx->GetScreenViewport().viewports[0].zmin, ctx->GetScreenViewport().viewports[0].zmax);
+	const DrawMaterialTraceContext material_trace {.ps_checksum = sh_ctx->GetPs().ps_regs.chksum,
+	                                               .ps_addr = sh_ctx->GetPs().ps_regs.data_addr,
+	                                               .vs_checksum = sh_ctx->GetVs().gs_regs.chksum,
+	                                               .vs_addr = sh_ctx->GetVs().vs_regs.data_addr != 0
+	                                                              ? sh_ctx->GetVs().vs_regs.data_addr
+	                                                              : sh_ctx->GetVs().es_regs.data_addr,
+	                                               .vs_export_count = vs_input_info.export_count,
+	                                               .indexed = false,
+	                                               .primitive_type = ucfg->GetPrimType(),
+	                                               .guest_count = index_count,
+	                                               .index_type = 0,
+	                                               .index_addr = 0,
+	                                               .index_size = 0,
+	                                               .vertex_offset = resolved_first_vertex,
+	                                               .required_vertex_records = vertex_records,
+	                                               .vertex_input = &vs_input_info,
+	                                               .color = &color_info,
+	                                               .depth = &depth_info,
+	                                               .declared_vertex_records = declared_vertex_records,
+	                                               .target_mask = ctx->GetRenderTargetMask(),
+	                                               .blend_enable = ctx->GetBlendControl(0).enable ? 1u : 0u,
+	                                               .blend_src = ctx->GetBlendControl(0).color_srcblend,
+	                                               .blend_op = ctx->GetBlendControl(0).color_comb_fcn,
+	                                               .blend_dst = ctx->GetBlendControl(0).color_destblend,
+	                                               .blend_bypass = ctx->GetRenderTarget(0).info.blend_bypass ? 1u : 0u,
+	                                               .color_mask = State::ResolveColorWriteAgainstDepth(
+	                                                   State::ResolveColorWriteMask(ctx->GetRenderTargetMask(),
+	                                                                                ctx->GetShaderRegisters().m_cbShaderMask, 0),
+	                                                   ctx->GetDepthControl().color_writes_on_depth_pass_disable,
+	                                                   ctx->GetDepthControl().color_writes_on_depth_fail_enable),
+	                                               .color_on_depth_fail =
+	                                                   ctx->GetDepthControl().color_writes_on_depth_fail_enable ? 1u : 0u,
+	                                               .color_off_depth_pass =
+	                                                   ctx->GetDepthControl().color_writes_on_depth_pass_disable ? 1u : 0u,
+	                                               .cull_front = ctx->GetModeControl().cull_front ? 1u : 0u,
+	                                               .cull_back = ctx->GetModeControl().cull_back ? 1u : 0u,
+	                                               .face = ctx->GetModeControl().face ? 1u : 0u,
+	                                               .vp_x = guest_vp_xy.x,
+	                                               .vp_y = guest_vp_xy.y,
+	                                               .vp_width = guest_vp_xy.width,
+	                                               .vp_height = guest_vp_xy.height,
+	                                               .vp_zmin = guest_vp_z.min_depth,
+	                                               .vp_zmax = guest_vp_z.max_depth,
+	                                               .dx_clip = ctx->GetClipControl().dx_clip_space ? 1u : 0u,
+	                                               .ps_input_num = ps_input_info.input_num,
+	                                               .interpolators = {ps_input_info.interpolator_settings[0],
+	                                                                 ps_input_info.interpolator_settings[1],
+	                                                                 ps_input_info.interpolator_settings[2],
+	                                                                 ps_input_info.interpolator_settings[3],
+	                                                                 ps_input_info.interpolator_settings[4],
+	                                                                 ps_input_info.interpolator_settings[5],
+	                                                                 ps_input_info.interpolator_settings[6],
+	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace);
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 
 	const auto command_emission_start = DrawStageClock::now();

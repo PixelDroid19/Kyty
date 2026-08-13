@@ -233,7 +233,7 @@ inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type,
 		return false;
 	}
 	return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
-	       relation == GpuMemoryOverlapType::Contains;
+	       relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals;
 }
 
 // IndexBuffer ↔ StorageBuffer alias (same relations as VertexStorageShare):
@@ -653,6 +653,55 @@ struct GpuMemoryObject
 	GpuMemoryObjectType type = GpuMemoryObjectType::Invalid;
 	void*               obj  = nullptr;
 };
+
+enum class GpuMemoryDepthD16Source : uint8_t
+{
+	Unsupported,
+	Guest,
+	StorageBuffer,
+};
+
+[[nodiscard]] inline GpuMemoryDepthD16Source GpuMemoryClassifyDepthD16Source(const GpuMemoryOverlapSnapshot& snapshot)
+{
+	if (snapshot.total_count == 0u)
+	{
+		return GpuMemoryDepthD16Source::Guest;
+	}
+	if (snapshot.truncated || snapshot.total_count > 2u || snapshot.entry_count != snapshot.total_count)
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	const GpuMemoryOverlapEntry* texture = nullptr;
+	const GpuMemoryOverlapEntry* storage = nullptr;
+	for (uint32_t index = 0; index < snapshot.entry_count; ++index)
+	{
+		const auto& entry = snapshot.entries[index];
+		if (entry.count != 1u)
+		{
+			return GpuMemoryDepthD16Source::Unsupported;
+		}
+		if (entry.type == GpuMemoryObjectType::Texture && entry.relation == GpuMemoryOverlapType::Equals && entry.exact &&
+		    texture == nullptr)
+		{
+			texture = &entry;
+		} else if (entry.type == GpuMemoryObjectType::StorageBuffer &&
+		           (entry.relation == GpuMemoryOverlapType::Contains || entry.relation == GpuMemoryOverlapType::Equals) &&
+		           storage == nullptr)
+		{
+			storage = &entry;
+		} else
+		{
+			return GpuMemoryDepthD16Source::Unsupported;
+		}
+	}
+	if (storage != nullptr)
+	{
+		return storage->all_read_only ? GpuMemoryDepthD16Source::Guest : GpuMemoryDepthD16Source::StorageBuffer;
+	}
+	return texture != nullptr && snapshot.total_count == 1u && snapshot.exact_count == 1u
+	           ? GpuMemoryDepthD16Source::Guest
+	           : GpuMemoryDepthD16Source::Unsupported;
+}
 
 enum class GpuMemoryMutationAction : uint8_t
 {

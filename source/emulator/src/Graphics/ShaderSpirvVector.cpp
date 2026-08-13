@@ -2850,8 +2850,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeIdF32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
-// v_cubema_f32 returns the cube-map major-axis scale: 2 * max(abs(x),
-// abs(y), abs(z)). It shares the same three-source VOP3 form as v_cubetc.
+// v_cubema_f32 returns 2.0 times the signed major axis, using the same
+// dominant-axis order as v_cubeid / v_cubesc / v_cubetc.
 KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -2879,8 +2879,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
         %abs1_<index> = OpExtInst %float %GLSL_std_450 FAbs %t1_<index>
         %abs2_<index> = OpExtInst %float %GLSL_std_450 FAbs %t2_<index>
       %maxxy_<index> = OpExtInst %float %GLSL_std_450 FMax %abs0_<index> %abs1_<index>
-       %maxxyz_<index> = OpExtInst %float %GLSL_std_450 FMax %abs2_<index> %maxxy_<index>
-         %t_<index> = OpFMul %float %float_2_000000 %maxxyz_<index>
+       %zmax_<index> = OpFOrdGreaterThanEqual %bool %abs2_<index> %maxxy_<index>
+        %yge_<index> = OpFOrdGreaterThanEqual %bool %abs1_<index> %abs0_<index>
+       %xyaxis_<index> = OpSelect %float %yge_<index> %t1_<index> %t0_<index>
+       %axis_<index> = OpSelect %float %zmax_<index> %t2_<index> %xyaxis_<index>
+         %t_<index> = OpFMul %float %float_2_000000 %axis_<index>
   %exec_lo_u_<index> = OpLoad %uint %exec_lo
   %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
     %dst_old_<index> = OpLoad %float %<dst>

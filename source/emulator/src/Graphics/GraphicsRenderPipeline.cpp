@@ -61,7 +61,7 @@ bool VertexInputLayoutLogEnabled()
 
 // SamplerCache::GetSamplerId, PipelineCache, CreatePipelineInternal
 
-uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation)
+uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized)
 {
 	if (operation == State::ImageSampleOperation::Mixed)
 	{
@@ -73,15 +73,16 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	{
 		const auto& s = m_samplers.At(i);
 		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] &&
-		    s.r.fields[3] == r.fields[3] && s.operation == operation)
+		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized)
 		{
 			return i;
 		}
 	}
 	Sampler s;
-	s.r         = r;
-	s.operation = operation;
-	s.vk        = nullptr;
+	s.r                   = r;
+	s.operation           = operation;
+	s.allow_unnormalized  = allow_unnormalized;
+	s.vk                  = nullptr;
 
 	bool  aniso       = false;
 	float aniso_ratio = 1.0f;
@@ -104,18 +105,15 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 		}
 	}
 
-	auto  mip_filter = r.MipFilter();
-	float min_lod    = 0.0f;
-	float max_lod    = 0.0f;
-	if (mip_filter != 0)
-	{
-		min_lod = static_cast<float>(r.MinLod()) / 256.0f;
-		max_lod = static_cast<float>(r.MaxLod()) / 256.0f;
-	}
+	auto              mip_filter = r.MipFilter();
+	const auto        lod_range  = State::ResolveSamplerLodRange(r.MinLod(), r.MaxLod(), r.LodBias(), mip_filter);
+	const float       min_lod    = lod_range.min_lod;
+	const float       max_lod    = lod_range.max_lod;
 
 	VkSamplerCreateInfo sampler_info {};
 	const auto          sampler_comparison  = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
-	const auto          unnormalized_policy = State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords());
+	const auto          unnormalized_policy =
+	    State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords(), allow_unnormalized);
 	if (sampler_comparison.enabled && unnormalized_policy.disable_comparison)
 	{
 		EXIT("unsupported sampler contract: operation=%u unnormalized=1\n", static_cast<uint32_t>(operation));
@@ -169,7 +167,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	sampler_info.addressModeU            = get_warp(r.ClampX());
 	sampler_info.addressModeV            = get_warp(r.ClampY());
 	sampler_info.addressModeW            = get_warp(r.ClampZ());
-	sampler_info.mipLodBias              = static_cast<float>(static_cast<int16_t>((r.LodBias() ^ 0x2000u) - 0x2000u)) / 256.0f;
+	sampler_info.mipLodBias              = lod_range.lod_bias;
 	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
 	sampler_info.maxAnisotropy           = aniso_ratio;
 	sampler_info.compareEnable           = sampler_comparison.enabled ? VK_TRUE : VK_FALSE;
@@ -177,7 +175,7 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	sampler_info.minLod                  = min_lod;
 	sampler_info.maxLod                  = max_lod;
 	sampler_info.borderColor             = border;
-	sampler_info.unnormalizedCoordinates = (r.ForceUnormCoords() ? VK_TRUE : VK_FALSE);
+	sampler_info.unnormalizedCoordinates = (unnormalized_policy.enabled ? VK_TRUE : VK_FALSE);
 	if (unnormalized_policy.enabled)
 	{
 		sampler_info.addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -1206,8 +1204,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 				continue;
 			}
 			const auto& blend                         = ctx->GetBlendControl(rt);
-			p.static_params->color_mask[rt]           =
-			    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), sh_regs.m_cbShaderMask, rt);
+			p.static_params->color_mask[rt]           = State::ResolveColorWriteAgainstDepth(
+			    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), sh_regs.m_cbShaderMask, rt),
+			    ctx->GetDepthControl().color_writes_on_depth_pass_disable,
+			    ctx->GetDepthControl().color_writes_on_depth_fail_enable);
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
 			p.static_params->color_destblend[rt]      = blend.color_destblend;

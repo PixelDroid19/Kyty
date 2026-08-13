@@ -72,9 +72,9 @@ uint64_t OffsetStandard4KB(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_
 	return TileGetStandard4KBOffset(x, y, pitch_elems, bytes_per_element);
 }
 
-uint64_t OffsetDepth64KB32(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t /*bytes_per_element*/)
+uint64_t OffsetDepth64KB(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	return TileGetDepth64KB32Offset(x, y, pitch_elems);
+	return TileGetDepth64KBOffset(x, y, pitch_elems, bytes_per_element);
 }
 
 bool LayoutBpeSupported(TileDetileLayout layout, uint32_t bytes_per_element)
@@ -92,9 +92,9 @@ bool LayoutBpeSupported(TileDetileLayout layout, uint32_t bytes_per_element)
 		const bool power_of_two = (bytes_per_element & (bytes_per_element - 1u)) == 0u;
 		return bytes_per_element >= 1u && bytes_per_element <= 16u && power_of_two;
 	}
-	if (layout == TileDetileLayout::Depth64KB32)
+	if (layout == TileDetileLayout::Depth64KB)
 	{
-		return bytes_per_element == 4u;
+		return bytes_per_element == 2u || bytes_per_element == 4u;
 	}
 	return false;
 }
@@ -113,9 +113,9 @@ TileOffsetFn ResolveOffsetFn(TileDetileLayout layout)
 	{
 		return OffsetStandard4KB;
 	}
-	if (layout == TileDetileLayout::Depth64KB32)
+	if (layout == TileDetileLayout::Depth64KB)
 	{
-		return OffsetDepth64KB32;
+		return OffsetDepth64KB;
 	}
 	return nullptr;
 }
@@ -160,15 +160,16 @@ bool CalculateRequiredSourceBytes(const TileDetileRequest& request, uint64_t* by
 		return CanRoundUpU32(pitch, block_width) &&
 		       CalculateBlockGridBytes(pitch, request.height, block_width, block_height, k_4kb_block_bytes, bytes);
 	}
-	if (request.layout == TileDetileLayout::Depth64KB32)
+	if (request.layout == TileDetileLayout::Depth64KB)
 	{
-		if ((pitch % 128u) != 0u)
+		const uint32_t block_width = request.bytes_per_element == 2u ? 256u : 128u;
+		if ((pitch % block_width) != 0u)
 		{
 			return false;
 		}
 		uint64_t blocks_y = 0;
 		uint64_t blocks   = 0;
-		return DivideRoundUp(request.height, 128u, &blocks_y) && CheckedMultiply(pitch / 128u, blocks_y, &blocks) &&
+		return DivideRoundUp(request.height, 128u, &blocks_y) && CheckedMultiply(pitch / block_width, blocks_y, &blocks) &&
 		       CheckedMultiply(blocks, k_64kb_block_bytes, bytes);
 	}
 	return false;
@@ -354,8 +355,8 @@ bool RunDetile(const TileDetileRequest& request, bool reference, bool compute_st
 				DetileWorkgroupRange<OffsetStandard4KB>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
 				                                            request.bytes_per_element);
 				break;
-			case TileDetileLayout::Depth64KB32:
-				DetileWorkgroupRange<OffsetDepth64KB32>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
+			case TileDetileLayout::Depth64KB:
+				DetileWorkgroupRange<OffsetDepth64KB>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
 				                                           request.bytes_per_element);
 				break;
 			default: return false;

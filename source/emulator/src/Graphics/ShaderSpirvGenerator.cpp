@@ -380,6 +380,10 @@ void Spirv::WriteHeader()
 				vars.Add("%textures2D_U");
 			}
 		}
+		if (m_bind->textures2D.textures2d_sampled_depth_num > 0)
+		{
+			vars.Add("%textures2D_SD");
+		}
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
 			vars.Add("%textures2DA_S");
@@ -645,6 +649,10 @@ void Spirv::WriteAnnotations()
        OpDecorate %textures2D_S DescriptorSet <DescriptorSet>
        OpDecorate %textures2D_S Binding <BindingIndex>
 )";
+	static const char* textures_annotations_s_depth = R"(
+       OpDecorate %textures2D_SD DescriptorSet <DescriptorSet>
+       OpDecorate %textures2D_SD Binding <BindingIndex>
+)";
 	static const char* textures_annotations_s_3d = R"(
        OpDecorate %textures3D_S DescriptorSet <DescriptorSet>
        OpDecorate %textures3D_S Binding <BindingIndex>
@@ -723,6 +731,12 @@ void Spirv::WriteAnnotations()
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 				                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_sampled_uint_index));
 			}
+		}
+		if (m_bind->textures2D.textures2d_sampled_depth_num > 0)
+		{
+			m_source += String8(textures_annotations_s_depth)
+			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
+			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_sampled_depth_index));
 		}
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
@@ -844,6 +858,7 @@ void Spirv::WriteTypes()
      %function_buffer_load_store_float4 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
  %function_tbuffer_load_store_format_x = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
 %function_tbuffer_load_store_format_xy = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
+%function_tbuffer_load_store_format_xyz = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
@@ -929,6 +944,14 @@ static const char* textures_sampled_types = R"(
 %_ptr_UniformConstant__arr_ImageS_uint_<buffers_num> = OpTypePointer UniformConstant %_arr_ImageS_uint_<buffers_num>
                         %_ptr_UniformConstant_ImageS = OpTypePointer UniformConstant %ImageS
                                        %SampledImage = OpTypeSampledImage %ImageS
+)";
+	static const char* textures_sampled_types_depth = R"(
+                                            %ImageSD = OpTypeImage %<image_scalar> 2D 1 0 0 1 Unknown
+                   %textures2D_SD_uint_<buffers_num> = OpConstant %uint <buffers_num>
+                    %_arr_ImageSD_uint_<buffers_num> = OpTypeArray %ImageSD %textures2D_SD_uint_<buffers_num>
+%_ptr_UniformConstant__arr_ImageSD_uint_<buffers_num> = OpTypePointer UniformConstant %_arr_ImageSD_uint_<buffers_num>
+                       %_ptr_UniformConstant_ImageSD = OpTypePointer UniformConstant %ImageSD
+                                      %SampledImageD = OpTypeSampledImage %ImageSD
 )";
 
 static const char* textures_sampled_types_3d = R"(
@@ -1045,6 +1068,12 @@ static const char* textures_loaded_types = R"(
 				m_source += String8(textures_sampled_uint_types)
 				                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_sampled_num));
 			}
+		}
+		if (m_bind->textures2D.textures2d_sampled_depth_num > 0)
+		{
+			m_source += String8(textures_sampled_types_depth)
+			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_sampled_depth_num))
+			                .ReplaceStr("<image_scalar>", "float");
 		}
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
@@ -1173,6 +1202,11 @@ void Spirv::WriteGlobalVariables()
 				vars.Add(String8::FromPrintf("%%textures2D_U = OpVariable %%_ptr_UniformConstant__arr_ImageU_uint_%d UniformConstant",
 				                             m_bind->textures2D.textures2d_sampled_num));
 			}
+		}
+		if (m_bind->textures2D.textures2d_sampled_depth_num > 0)
+		{
+			vars.Add(String8::FromPrintf("%%textures2D_SD = OpVariable %%_ptr_UniformConstant__arr_ImageSD_uint_%d UniformConstant",
+			                             m_bind->textures2D.textures2d_sampled_depth_num));
 		}
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
@@ -1516,10 +1550,10 @@ void Spirv::WriteLocalVariables()
 			bool extended  = m_bind->storage_buffers.extended[i];
 
 			EXIT_IF(buffer_index + i >= static_cast<int>(m_bind->push_constant_size) / 16);
-			if (m_bind->storage_buffers.dynamic_sload[i])
+			if (m_bind->storage_buffers.dynamic_sload[i] || start_reg < 0)
 			{
-				// The S_LOAD instruction below supplies these four fields. Writing
-				// them here would erase the descriptor's instruction-local lifetime.
+				// Dynamic S_LOAD and vertex-stream SSBOs have no user-SGPR home.
+				// Writing them here would clobber live scalars (start_reg < 0).
 				continue;
 			}
 
@@ -1855,7 +1889,10 @@ void Spirv::DetectFetch()
 					}
 					if (resource < 0)
 					{
+						// No attribute-table semantic: keep BufferLoadFormat and
+						// address through the live V# / vertex-stream SSBO.
 						KYTY_LOG_DEBUG("WARNING: vertex fetch semantic missing input resource (continuing)\n");
+						break;
 					}
 
 					load_instructions.Add({inst, resource});
@@ -2083,6 +2120,7 @@ void Spirv::WriteFunctions()
 	{
 		m_source += TBUFFER_LOAD_FORMAT_X;
 		m_source += TBUFFER_LOAD_FORMAT_XY;
+		m_source += TBUFFER_LOAD_FORMAT_XYZ;
 		m_source += TBUFFER_LOAD_FORMAT_XYZW;
 	}
 
@@ -2191,13 +2229,34 @@ void Spirv::FindConstants()
 			AddConstantUint(m_vs_input_info->fetch_attrib_data[i]);
 		}
 	}
+	if (m_vs_input_info != nullptr)
+	{
+		for (int i = 0; i < m_vs_input_info->buffers_num; i++)
+		{
+			const auto& stream = m_vs_input_info->buffers[i];
+			AddConstantUint(static_cast<uint32_t>(stream.addr));
+			AddConstantUint(stream.stride);
+			AddConstantUint(stream.num_records);
+			if (stream.storage_slot >= 0)
+			{
+				AddConstantInt(stream.storage_slot);
+				AddConstantUint(static_cast<uint32_t>(stream.storage_slot));
+			}
+		}
+		if (m_bind != nullptr)
+		{
+			AddConstantUint(static_cast<uint32_t>(m_bind->storage_buffers.buffers_num));
+		}
+	}
 	if (m_vs_input_info != nullptr || m_ps_input_info != nullptr || m_cs_input_info != nullptr)
 	{
 		AddConstantInt(12);
 		AddConstantInt(16);
 		AddConstantInt(31);
+		AddConstantInt(29);
 		AddConstantInt(36);
 		AddConstantInt(39);
+		AddConstantInt(71);
 		AddConstantInt(75);
 		AddConstantInt(76);
 		AddConstantInt(77);

@@ -33,6 +33,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_BufferAtomic_XXX_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferAtomicOr,      ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {"OpAtomicOr"}},
     {Recompile_BufferAtomic_XXX_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferAtomicXor,     ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {"OpAtomicXor"}},
     {Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen,   ShaderInstructionType::BufferLoadFormatX,    ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
+    {Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen,  ShaderInstructionType::BufferLoadFormatXy,   ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen,        {""}},
+    {Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen, ShaderInstructionType::BufferLoadFormatXyz,  ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferStoreDword,     ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferStoreDword,     ShaderInstructionFormat::Vdata1VaddrSvSoffsOffen,        {""}},

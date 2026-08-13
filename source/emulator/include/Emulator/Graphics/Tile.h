@@ -69,8 +69,12 @@ void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint
 uint64_t TileGetStandard64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
 void     TileConvertStandard64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
                                          uint32_t bytes_per_element);
-// Gen5 depth tile mode 24 stores 32-bit depth samples in 64 KiB Z-order blocks.
-// This is distinct from render-target tile mode 27 despite identical block size.
+// Gen5 depth tile mode 24 stores 16- or 32-bit depth samples in 64 KiB
+// Z-order blocks. This is distinct from render-target tile mode 27 despite
+// identical block size.
+uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
+void     TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
+                                      uint32_t bytes_per_element);
 uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);
 void     TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems);
 // Gen5 kStandard4KB (tile mode 5) 32bpp surfaces. The layout is used by
@@ -101,7 +105,7 @@ enum class TileDetileLayout : uint32_t
 	Sw64kRx,      // tile mode 27 / kRenderTarget (4 or 8 BPE)
 	Standard64KB, // tile mode 9  (1/2/4/8/16 BPE)
 	Standard4KB,  // tile mode 5  (power-of-two BPE <= 16)
-	Depth64KB32,  // tile mode 24 (fixed 4 BPE)
+	Depth64KB,    // tile mode 24 (2 or 4 BPE)
 };
 
 struct TileDetileRequest
@@ -160,6 +164,8 @@ enum class TileDetileProductionPath : uint32_t
 [[nodiscard]] TileDetileProductionPath TileDetileGetProductionPathForTesting(const TileDetileRequest& request);
 
 struct GraphicContext;
+class CommandBuffer;
+struct VulkanBuffer;
 struct VulkanImage;
 
 // Describes how a detiled element grid is copied into a Vulkan image. The
@@ -229,6 +235,20 @@ void TileGpuDetileSetTestFaultForTesting(TileGpuDetileTestFault fault);
 // substitute it for CPU detile/upload.
 [[nodiscard]] TileGpuDetileStatus TileGpuDetileToImage(GraphicContext* ctx, const TileDetileRequest& request, VulkanImage* dst_image,
                                                        const TileGpuDetileImageCopy& copy, uint64_t dst_layout);
+
+// Side-effect-free validation for the production D16 inline path. source_range
+// is the complete VkBuffer range; source_offset selects the tiled surface.
+[[nodiscard]] bool TileGpuDetileDepthD16InlineIsSupported(uint64_t source_offset, uint64_t source_range, uint32_t width,
+	                                                       uint32_t height, uint32_t pitch_elems,
+	                                                       uint64_t* required_source_bytes = nullptr,
+	                                                       uint64_t* linear_bytes = nullptr);
+
+// Records D16 Depth64KB detile and depth-image upload in the caller's active
+// graphics command buffer. It never submits, waits, or reads guest memory.
+[[nodiscard]] TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuffer* command_buffer,
+	                                                          const VulkanBuffer* source_buffer, uint64_t source_offset,
+	                                                          uint64_t source_range, VulkanImage* dst_image, uint32_t width,
+	                                                          uint32_t height, uint32_t pitch_elems);
 
 // Lifecycle owners call this before replacing a live GraphicContext. It waits
 // for a bounded interval for a submitted diagnostic session, then returns

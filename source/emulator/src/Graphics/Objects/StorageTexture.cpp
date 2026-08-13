@@ -216,25 +216,43 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			               "ignored (continuing)\n");
 		}
 
-		std::vector<uint8_t> linear(static_cast<size_t>(array_layout.linear_size));
-		if (!Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, array_layout))
+		std::vector<uint8_t> slice(static_cast<size_t>(array_layout.linear_slice_size));
+		uint32_t             layer_region_count = 0;
+		if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, 0u, nullptr, 0u, &layer_region_count) ||
+		    layer_region_count == 0u)
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-			               "WARNING: !Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const voi condition ignored "
-			               "(continuing)\n");
+			               "WARNING: !Gen5FillTextureArrayLayerUploadRegions(array_layout, 0u, nullptr, 0u, &layer_region_count) "
+			               "condition ignored (continuing)\n");
 		}
-
-		Vector<BufferImageCopy> regions(static_cast<int>(array_layout.layers));
+		std::vector<Gen5TextureArrayUploadRegion> upload_regions(static_cast<size_t>(layer_region_count));
+		Vector<BufferImageCopy>                   regions(static_cast<int>(layer_region_count));
 		for (uint32_t layer = 0; layer < array_layout.layers; ++layer)
 		{
-			regions[layer].offset          = static_cast<uint32_t>(layer * array_layout.linear_slice_size);
-			regions[layer].pitch           = array_layout.host_pitch;
-			regions[layer].width           = array_layout.width;
-			regions[layer].height          = array_layout.height;
-			regions[layer].dst_level       = 0;
-			regions[layer].dst_array_layer = layer;
+			if (!Gen5DetileTextureArrayLayer(slice.data(), slice.size(), reinterpret_cast<const void*>(*vaddr), *size, array_layout,
+			                                 layer))
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: !Gen5DetileTextureArrayLayer(...) condition ignored (continuing)\n");
+			}
+			uint32_t filled = layer_region_count;
+			if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, layer, upload_regions.data(), layer_region_count, &filled))
+			{
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: !Gen5FillTextureArrayLayerUploadRegions(...) condition ignored (continuing)\n");
+			}
+			for (uint32_t region_index = 0; region_index < layer_region_count; ++region_index)
+			{
+				const auto& upload                    = upload_regions[region_index];
+				regions[region_index].offset          = static_cast<uint32_t>(upload.offset);
+				regions[region_index].pitch           = upload.pitch_texels;
+				regions[region_index].width           = upload.width;
+				regions[region_index].height          = upload.height;
+				regions[region_index].dst_level       = upload.dst_level;
+				regions[region_index].dst_array_layer = upload.dst_array_layer;
+			}
+			UtilFillImage(ctx, vk_obj, slice.data(), slice.size(), regions, static_cast<uint64_t>(vk_layout));
 		}
-		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
 		return;
 	}
 

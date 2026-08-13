@@ -903,6 +903,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (GpuMemoryAllowsIndexStorageShare(o.object.type, obj.relation, info.type))
 			{
 				overlap = true;
+			} else if (GpuMemoryAllowsVertexStorageShare(o.object.type, obj.relation, info.type) &&
+			           obj.relation == OverlapType::Equals)
+			{
+				// Same guest range as a live VertexBuffer: Fetch keeps the VB,
+				// untagged MUBUF addresses the stream as a raw SSBO.
+				overlap = true;
 			} else if (GpuMemoryAllowsTextureContainedInSurface(o.object.type, obj.relation, info.type))
 			{
 				// Incoming Texture under a live RT/ST/SB/Texture surface: link and,
@@ -1065,7 +1071,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					// Texture Contains). Crosses/IsContainedWithin already covered.
 					if (o.object.type != GpuMemoryObjectType::VertexBuffer ||
 					    (obj.relation != OverlapType::Crosses && obj.relation != OverlapType::IsContainedWithin &&
-					     obj.relation != OverlapType::Contains))
+					     obj.relation != OverlapType::Contains && obj.relation != OverlapType::Equals))
 					{
 						multi_vertex_storage_alias = false;
 						break;

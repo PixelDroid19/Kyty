@@ -4,6 +4,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -310,6 +311,18 @@ uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32
 	return static_cast<uint8_t>(((target_mask >> shift) & (shader_mask >> shift)) & 0xFu);
 }
 
+uint8_t ResolveColorWriteAgainstDepth(uint8_t channel_mask, bool disable_color_on_depth_pass, bool enable_color_on_depth_fail)
+{
+	// Depth-pass color off and depth-fail color off: the draw updates Z/stencil
+	// only. Keep the channel mask when fail-writes are enabled — Vulkan cannot
+	// express "color only on depth fail" as a static mask.
+	if (disable_color_on_depth_pass && !enable_color_on_depth_fail)
+	{
+		return 0;
+	}
+	return channel_mask;
+}
+
 bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth)
 {
 	if ((target_mask & shader.m_cbShaderMask) != 0 || depth.z_enable || depth.stencil_enable || shader.shader_z_format != 0)
@@ -338,7 +351,8 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	// detiled is decided only by Gen5SampleMayGuestUploadTiled — one behavior:
 	//
 	// tile 27 (kRenderTarget):
-	//   - ufmt 133 (BC1): GuestMemoryTexture; MayGuestUpload may detile package data
+	//   - BC1 family (133 / guest 169 UNORM / 170 SRGB): GuestMemoryTexture;
+	//     MayGuestUpload may detile package data
 	//   - ufmt 56 (RGBA8): GuestMemoryTexture; MayGuestUpload always false (skip_guest
 	//     transparent clear — never detile GPU intermediates)
 	//   - ufmt 71 (RGBA16F): requires live RT (Unsupported without alias)
@@ -347,7 +361,7 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	// Unsupported = no Texture object and no live alias → structured EXIT.
 	if (tile == 27u)
 	{
-		if (fmt == 56u || fmt == 133u)
+		if (fmt == 56u || ::Kyty::Libs::Graphics::Gen5IsBc1PackageFormat(fmt))
 		{
 			return Gen5SampleBacking::GuestMemoryTexture;
 		}
@@ -405,9 +419,11 @@ SamplerCompareOp ResolveSamplerCompareOp(uint8_t depth_compare_function)
 	return SamplerCompareOp::Never;
 }
 
-UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates)
+UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates, bool view_allows_unnormalized)
 {
-	if (!force_unnormalized_coordinates)
+	// Vulkan forbids unnormalizedCoordinates with cube, 2D-array, and 3D views.
+	// A guest S# ForceUnorm bit on those samples must stay normalized.
+	if (!force_unnormalized_coordinates || !view_allows_unnormalized)
 	{
 		return {};
 	}
@@ -417,6 +433,20 @@ UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormaliz
 	        .disable_anisotropy = true,
 	        .disable_comparison = true,
 	        .reset_lod_bias     = true};
+}
+
+SamplerLodRange ResolveSamplerLodRange(uint16_t min_lod_u48, uint16_t max_lod_u48, uint16_t lod_bias_bits, uint8_t mip_filter)
+{
+	SamplerLodRange range {};
+	const int32_t   bias_signed = static_cast<int32_t>(static_cast<uint32_t>(lod_bias_bits & 0x3FFFu) ^ 0x2000u) - 0x2000;
+	range.lod_bias               = static_cast<float>(bias_signed) / 256.0f;
+	if (mip_filter == 0u)
+	{
+		return range;
+	}
+	range.min_lod = static_cast<float>(min_lod_u48) / 256.0f;
+	range.max_lod = static_cast<float>(max_lod_u48) / 256.0f;
+	return range;
 }
 
 void SetGenericScissorTl(HW::Context& context, uint32_t value)

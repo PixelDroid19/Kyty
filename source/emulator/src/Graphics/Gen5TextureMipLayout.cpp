@@ -149,6 +149,7 @@ bool Gen5GetStandard4KBTextureMipLayout(uint32_t format, uint32_t width, uint32_
 	result.texels_per_element_x = texels_per_element;
 	result.texels_per_element_y = texels_per_element;
 	result.levels                = levels;
+	result.first_tail_level      = levels;
 
 	for (uint32_t level = 0; level < levels; level++)
 	{
@@ -303,6 +304,11 @@ bool Gen5DetileStandard4KBTextureMipChain(void* dst, uint64_t dst_size, const vo
 				                  (static_cast<size_t>(entry.tail_y + y) * block_width + entry.tail_x) * layout.bytes_per_element;
 				std::memcpy(level_output + static_cast<size_t>(y) * row_bytes, row, row_bytes);
 			}
+		} else if (entry.tiled_pitch == entry.element_width)
+		{
+			// Compact host rows already match the tiled pitch; detile in place.
+			TileConvertStandard4KBToLinear(level_output, input + entry.tiled_offset, entry.element_width, entry.element_height,
+			                              entry.tiled_pitch, layout.bytes_per_element);
 		} else
 		{
 			const uint64_t temporary_size = static_cast<uint64_t>(entry.tiled_pitch) * entry.element_height * layout.bytes_per_element;

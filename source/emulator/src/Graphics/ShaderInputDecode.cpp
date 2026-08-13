@@ -295,18 +295,26 @@ void ShaderParseAttrib(ShaderVertexInputInfo* info, const ShaderSemantic* input_
 		{
 			const auto     input_format    = VulkanResolveGen5VertexAttribInputFormat(static_cast<uint16_t>(format));
 			const uint32_t component_count = input_format.component_count;
-			if (input_format.format == VK_FORMAT_UNDEFINED || component_count == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: input_format.format == VK_FORMAT_UNDEFINED || component_count == 0 condition ignored (continuing)\n"); }
-			if (size == 0 || size > 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size == 0 || size > 4 condition ignored (continuing)\n"); }
-			uint32_t swizzle = DstSel(4, 0, 0, 1);
-			switch (component_count)
+			if (input_format.format == VK_FORMAT_UNDEFINED || component_count == 0)
 			{
-				case 2: swizzle = DstSel(4, 5, 0, 1); break;
-				case 3: swizzle = DstSel(4, 5, 6, 1); break;
-				case 4: swizzle = DstSel(4, 5, 6, 7); break;
-				default: break;
+				// Keep the V# format/DST_SEL. Overwriting with unified 0 makes
+				// VulkanBuildVertexInputLayout reject a live RGB32F stream.
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+				               "WARNING: unknown vertex attrib format 0x%x; keeping buffer format\n", format);
+			} else
+			{
+				if (size == 0 || size > 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: size == 0 || size > 4 condition ignored (continuing)\n"); }
+				uint32_t swizzle = DstSel(4, 0, 0, 1);
+				switch (component_count)
+				{
+					case 2: swizzle = DstSel(4, 5, 0, 1); break;
+					case 3: swizzle = DstSel(4, 5, 6, 1); break;
+					case 4: swizzle = DstSel(4, 5, 6, 7); break;
+					default: break;
+				}
+				r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) |
+				              (static_cast<uint32_t>(input_format.unified_format) << 12u) | swizzle;
 			}
-			r.fields[3] = (r.fields[3] & ~((0x7fu << 12u) | 0xfffu)) |
-			              (static_cast<uint32_t>(input_format.unified_format) << 12u) | swizzle;
 			// The semantic controls the shader input width; the backing format
 			// controls storage and descriptor swizzles. Either may have more
 			// components: shaders can ignore stored components or consume the

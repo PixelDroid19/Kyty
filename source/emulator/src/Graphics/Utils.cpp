@@ -174,6 +174,24 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
+void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image,
+	                        uint64_t dst_layout)
+{
+	EXIT_IF(buffer == nullptr || src_buffer == nullptr || src_buffer->buffer == nullptr || dst_image == nullptr ||
+	        dst_image->image == nullptr);
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, UtilGetImageUploadSourceLayout(dst_image),
+	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	VkBufferImageCopy region {};
+	region.bufferRowLength             = src_pitch != dst_image->extent.width ? src_pitch : 0u;
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	region.imageSubresource.layerCount = 1u;
+	region.imageExtent                 = {dst_image->extent.width, dst_image->extent.height, 1u};
+	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	                 static_cast<VkImageLayout>(dst_layout));
+}
+
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,
                        uint32_t src_array_layer)
 {
@@ -203,6 +221,22 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
 
 	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                 static_cast<VkImageLayout>(src_layout));
+}
+
+static void UtilImageDepthToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch,
+                                   uint64_t src_layout)
+{
+	EXIT_IF(dst_buffer == nullptr || dst_buffer->buffer == nullptr || src_image == nullptr || src_image->image == nullptr);
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	VkBufferImageCopy region {};
+	region.bufferRowLength                 = (dst_pitch != src_image->extent.width ? dst_pitch : 0);
+	region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+	region.imageSubresource.layerCount     = 1;
+	region.imageExtent                     = {src_image->extent.width, src_image->extent.height, 1};
+	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
+	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 static_cast<VkImageLayout>(src_layout));
 }
 
@@ -444,6 +478,28 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 	VulkanDeleteBuffer(ctx, &staging_buffer);
 }
 
+void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
+	                    uint64_t dst_layout)
+{
+	EXIT_IF(ctx == nullptr || dst_image == nullptr || src_data == nullptr);
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+	VulkanBuffer staging_buffer {};
+	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VulkanCreateBuffer(ctx, size, &staging_buffer);
+	void* data = nullptr;
+	VulkanMapMemory(ctx, &staging_buffer.memory, &data);
+	std::memcpy(data, src_data, size);
+	VulkanUnmapMemory(ctx, &staging_buffer.memory);
+	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
+	buffer.Begin();
+	UtilBufferToDepthImage(&buffer, &staging_buffer, src_pitch, dst_image, dst_layout);
+	buffer.End();
+	buffer.Execute();
+	buffer.WaitForFence();
+	VulkanDeleteBuffer(ctx, &staging_buffer);
+}
+
 void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout,
                     uint32_t src_array_layer)
 {
@@ -477,6 +533,32 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 	std::memcpy(dst_data, data, size);
 	VulkanUnmapMemory(ctx, &staging_buffer.memory);
 
+	VulkanDeleteBuffer(ctx, &staging_buffer);
+}
+
+void UtilFillDepthBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image,
+                         uint64_t src_layout)
+{
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(ctx == nullptr || src_image == nullptr || dst_data == nullptr);
+	VulkanBuffer staging_buffer {};
+	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VulkanCreateBuffer(ctx, size, &staging_buffer);
+	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
+	buffer.Begin();
+	UtilImageDepthToBuffer(&buffer, src_image, &staging_buffer, dst_pitch, src_layout);
+	buffer.End();
+	buffer.Execute();
+	buffer.WaitForFence();
+	void* data = nullptr;
+	VulkanMapMemory(ctx, &staging_buffer.memory, &data);
+	std::memcpy(dst_data, data, size);
+	VulkanUnmapMemory(ctx, &staging_buffer.memory);
 	VulkanDeleteBuffer(ctx, &staging_buffer);
 }
 

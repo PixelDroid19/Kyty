@@ -72,7 +72,8 @@ class TransientBufferPool
 		void*        mapped = nullptr;
 		uint64_t     size   = 0;
 		uint32_t     usage  = 0;
-		bool         used   = false;
+		bool         used    = false;
+		bool         scratch = false;
 	};
 
 public:
@@ -85,6 +86,10 @@ public:
 		uint32_t usage_entries      = 0;
 		for (auto* candidate: m_entries)
 		{
+			if (candidate->scratch)
+			{
+				continue;
+			}
 			if (candidate->usage == usage)
 			{
 				usage_entries++;
@@ -135,6 +140,54 @@ public:
 		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
 		entry->used = true;
+		return &entry->buffer;
+	}
+
+	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage)
+	{
+		if (ctx == nullptr || size == 0u || usage == 0u)
+		{
+			return nullptr;
+		}
+		Entry*   best          = nullptr;
+		uint32_t usage_entries = 0;
+		for (auto* candidate: m_entries)
+		{
+			if (candidate->usage == usage)
+			{
+				usage_entries++;
+			}
+			if (candidate->scratch && candidate->usage == usage && candidate->size >= size &&
+			    (best == nullptr || candidate->size < best->size))
+			{
+				best = candidate;
+			}
+		}
+		if (best != nullptr)
+		{
+			return &best->buffer;
+		}
+		if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size))
+		{
+			return nullptr;
+		}
+		auto* entry                   = new Entry;
+		entry->size                   = size;
+		entry->usage                  = usage;
+		entry->scratch                = true;
+		entry->buffer.usage           = usage;
+		entry->buffer.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
+		                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+		VulkanCreateBuffer(ctx, size, &entry->buffer);
+		VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
+		if (entry->mapped == nullptr)
+		{
+			VulkanDeleteBuffer(ctx, &entry->buffer);
+			delete entry;
+			return nullptr;
+		}
+		m_entries.push_back(entry);
+		m_total_bytes += size;
 		return &entry->buffer;
 	}
 
@@ -255,6 +308,16 @@ VulkanBuffer* CommandBuffer::UploadTransientBuffer(const void* data, uint64_t si
 		m_transient_buffers = new TransientBufferPool;
 	}
 	return m_transient_buffers->Upload(g_render_ctx->GetGraphicCtx(), data, size, usage);
+}
+
+VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint32_t usage)
+{
+	EXIT_IF(IsInvalid());
+	if (m_transient_buffers == nullptr)
+	{
+		m_transient_buffers = new TransientBufferPool;
+	}
+	return m_transient_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage);
 }
 
 void CommandBuffer::End() const
@@ -579,7 +642,11 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	const auto depth_stencil_layout = framebuffer->depth_stencil_layout;
 	if (with_depth && depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
 	                     depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: with_depth && depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_O condition ignored (continuing)\n"); }
-	if (with_depth && depth->vulkan_buffer->layout != depth_stencil_layout)
+	// Transition to the render-pass initial layout, not the subpass layout.
+	// First-use CLEAR keeps UNDEFINED so vkCmdBeginRenderPass can discard+clear;
+	// a pre-pass UNDEFINED→ATTACHMENT would define nothing and then LOAD garbage.
+	if (with_depth && framebuffer->depth_initial_layout != VK_IMAGE_LAYOUT_UNDEFINED &&
+	    depth->vulkan_buffer->layout != framebuffer->depth_initial_layout)
 	{
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -591,7 +658,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		         ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT
 		         : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 		image_memory_barrier.oldLayout                       = depth->vulkan_buffer->layout;
-		image_memory_barrier.newLayout                       = depth_stencil_layout;
+		image_memory_barrier.newLayout                       = framebuffer->depth_initial_layout;
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image                           = depth->vulkan_buffer->image;

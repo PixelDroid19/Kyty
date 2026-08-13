@@ -1265,6 +1265,9 @@ TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(56u), 4u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(71u), 8u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(133u), 8u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(169u), 8u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(170u), 8u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(179u), 0u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(22u), 0u);
 }
 
@@ -1391,6 +1394,17 @@ TEST(EmulatorGraphicsState, ResolvesObservedTwoChannelFloatRenderTarget)
 	const auto format = ResolveRenderTextureFormat(0x5u, 0x7u, 0x0u);
 	EXPECT_EQ(format.format, RenderTextureFormat::R16G16Sfloat);
 	EXPECT_EQ(format.bytes_per_element, 4u);
+}
+
+TEST(EmulatorGraphicsState, ResolvesPackedFloatRenderTargetsToB10G11R11)
+{
+	const auto ten_eleven = ResolveRenderTextureFormat(0x6u, 0x7u, 0x0u);
+	EXPECT_EQ(ten_eleven.format, RenderTextureFormat::B10G11R11Ufloat);
+	EXPECT_EQ(ten_eleven.bytes_per_element, 4u);
+
+	const auto eleven_eleven = ResolveRenderTextureFormat(0x7u, 0x7u, 0x0u);
+	EXPECT_EQ(eleven_eleven.format, RenderTextureFormat::B10G11R11Ufloat);
+	EXPECT_EQ(eleven_eleven.bytes_per_element, 4u);
 }
 
 TEST(EmulatorGraphicsState, DecodesGenericScissorHalves)
@@ -1874,6 +1888,13 @@ TEST(EmulatorGraphicsState, ClassifiesSamplerOperationFromDirectConsumers)
 
 TEST(EmulatorGraphicsState, ClassifiesDirectDepthReferenceSamplerBinding)
 {
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
 	ShaderInstruction depth_reference {};
 	depth_reference.type    = ShaderInstructionType::ImageSampleDrefLz;
 	depth_reference.src[1]  = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 8};
@@ -1905,6 +1926,10 @@ TEST(EmulatorGraphicsState, ClassifiesDirectDepthReferenceSamplerBinding)
 	ASSERT_EQ(bind.samplers.samplers_num, 1);
 	EXPECT_EQ(bind.samplers.start_register[0], 8);
 	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::DepthReference);
+	ShaderCalcBindingIndices(&bind);
+	EXPECT_EQ(bind.textures2D.textures2d_sampled_depth_num, 1);
+	EXPECT_EQ(bind.textures2D.textures2d_sampled_num, 0);
+	EXPECT_GE(bind.textures2D.binding_sampled_depth_index, 0);
 }
 
 TEST(EmulatorGraphicsState, Gen5DirectSgprsAllowFullUserWindow)
@@ -2212,6 +2237,14 @@ TEST(EmulatorGraphicsState, RequiresAnActiveDepthStencilOperationForTargetBindin
 	EXPECT_FALSE(usage.depth_write_enable);
 }
 
+TEST(EmulatorGraphicsState, DepthPassCanSuppressColorWrites)
+{
+	EXPECT_EQ(State::ResolveColorWriteAgainstDepth(0x0fu, false, false), 0x0fu);
+	EXPECT_EQ(State::ResolveColorWriteAgainstDepth(0x07u, false, true), 0x07u);
+	EXPECT_EQ(State::ResolveColorWriteAgainstDepth(0x0fu, true, false), 0u);
+	EXPECT_EQ(State::ResolveColorWriteAgainstDepth(0x0fu, true, true), 0x0fu);
+}
+
 TEST(EmulatorGraphicsState, RequiresPixelShaderOnlyForObservableFragmentWork)
 {
 	HW::ShaderRegisters shader {};
@@ -2434,6 +2467,12 @@ TEST(EmulatorGraphicsState, DepthAttachmentLoadOpsClearWhenGuestDepthClear)
 	EXPECT_EQ(load.depth_load, VK_ATTACHMENT_LOAD_OP_LOAD);
 	EXPECT_EQ(load.stencil_load, VK_ATTACHMENT_LOAD_OP_LOAD);
 	EXPECT_EQ(load.initial_layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+	// First GPU-owned use: no prior contents. LOAD of UNDEFINED is host garbage.
+	auto first_use = ResolveDepthAttachmentLoadOps(VK_FORMAT_D16_UNORM, false, false, VK_IMAGE_LAYOUT_UNDEFINED);
+	EXPECT_EQ(first_use.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(first_use.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+	EXPECT_EQ(first_use.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
 }
 
 TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
@@ -2919,6 +2958,14 @@ TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledTile27ByFormat)
 	// BC1 package textures may detile when no live surface covers the range.
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 133u, false));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 133u, true));
+	// Live RDNA2 T# BC1 is ufmt 169 (UNORM) / 170 (SRGB), same 8-byte family.
+	EXPECT_TRUE(Gen5IsBc1PackageFormat(169u));
+	EXPECT_TRUE(Gen5IsBc1PackageFormat(170u));
+	EXPECT_FALSE(Gen5IsBc1PackageFormat(179u));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 169u, false));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 170u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 169u, true));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 179u, false));
 	// Tile 9 package RGBA8/RGBA16F when uncovered only.
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 56u, false));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 56u, true));
@@ -3196,6 +3243,8 @@ TEST(EmulatorGraphicsState, AllowsMixedTextureVertexStorageParents)
 	EXPECT_TRUE(GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Contains,
 	                                              GpuMemoryObjectType::StorageBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Crosses,
+	                                              GpuMemoryObjectType::StorageBuffer));
+	EXPECT_TRUE(GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType::VertexBuffer, GpuMemoryOverlapType::Equals,
 	                                              GpuMemoryObjectType::StorageBuffer));
 	EXPECT_FALSE(GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType::Texture, GpuMemoryOverlapType::Contains,
 	                                               GpuMemoryObjectType::StorageBuffer));
@@ -4117,6 +4166,9 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(169, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(170, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(179, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 9, false), Gen5SampleBacking::GuestMemoryTexture);
@@ -4149,6 +4201,9 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingAndUploadPolicyAreConsistent)
 	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 133u, false));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 133u, true));
+	EXPECT_EQ(ResolveGen5SampleBacking(169, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 169u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 169u, true));
 
 	// With live RT alias, Resolve prefers ExactRenderTarget; upload never detiles.
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 27, true), Gen5SampleBacking::ExactRenderTarget);
@@ -4178,7 +4233,11 @@ TEST(EmulatorGraphicsState, Gen5SampledFormatsPreserveFloatAndUnormContracts)
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 13, false), VK_FORMAT_R16_SFLOAT);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 14, false), VK_FORMAT_R8G8_UNORM);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 133, false), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
-	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 133, true), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 133, true), VK_FORMAT_BC1_RGBA_SRGB_BLOCK);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 169, false), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 169, true), VK_FORMAT_BC1_RGBA_SRGB_BLOCK);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 173, false), VK_FORMAT_BC3_UNORM_BLOCK);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 173, true), VK_FORMAT_BC3_SRGB_BLOCK);
 }
 
 TEST(EmulatorGraphicsState, RegularImageSamplingDisablesSamplerComparison)
@@ -4207,6 +4266,17 @@ TEST(EmulatorGraphicsState, ResolvesDepthReferenceSamplerComparison)
 		EXPECT_FALSE(regular.enabled);
 		EXPECT_EQ(regular.function, expected[function]);
 	}
+}
+
+TEST(EmulatorGraphicsState, DecodesGen5ArrayPitchFromResourceWord5)
+{
+	ShaderTextureResource resource {};
+	EXPECT_EQ(resource.ArrayPitch(), 0u);
+	resource.fields[5] = 0x7u;
+	EXPECT_EQ(resource.ArrayPitch(), 0x7u);
+	resource.fields[5] = (11u << 4u) | 0x2u;
+	EXPECT_EQ(resource.ArrayPitch(), 0x2u);
+	EXPECT_EQ(resource.MaxMip(), 11u);
 }
 
 TEST(EmulatorGraphicsState, ResolvesDepthReferenceImageViewCompatibility)
@@ -4240,6 +4310,97 @@ TEST(EmulatorGraphicsState, ResolvesDepthReferenceImageViewCompatibility)
 	        .compatible);
 }
 
+TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5Depth16Samples)
+{
+	const auto accepts = [](uint32_t format = 7u, uint32_t type = 9u, uint32_t depth = 0u, uint32_t base_array = 0u,
+	                        uint32_t base_level = 0u, uint32_t last_level = 0u, uint32_t max_mip = 0u, uint32_t bc_swizzle = 0u,
+	                        uint32_t swizzle = 0x924u, bool msaa = false, bool metadata = false, uint64_t address = 0x4d7d0000u,
+	                        uint32_t width = 2048u, uint32_t height = 1024u, uint32_t pitch = 2048u,
+	                        uint64_t size = 4194304u, State::ImageSampleOperation operation = State::ImageSampleOperation::DepthReference)
+	{
+		return State::CanMaterializeGen5Depth16Sample(format, 24u, type, depth, base_array, base_level, last_level, max_mip,
+		                                                   bc_swizzle, swizzle, msaa, metadata, address, width, height, pitch, size,
+		                                                   operation);
+	};
+	EXPECT_TRUE(accepts());
+	EXPECT_TRUE(accepts(7u, 8u));
+	EXPECT_FALSE(accepts(22u));
+	EXPECT_FALSE(accepts(7u, 13u));
+	EXPECT_FALSE(accepts(7u, 9u, 1u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 1u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 1u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 1u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 1u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 1u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x124u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, true));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, true));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0100u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0000u,
+	                     2000u, 1000u, 2000u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0000u,
+	                     2048u, 1024u, 2048u, 4194303u));
+	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0000u,
+	                     2048u, 1024u, 2048u, 4194304u, State::ImageSampleOperation::Regular));
+}
+
+TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)
+{
+	GpuMemoryOverlapSnapshot empty {};
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(empty), GpuMemoryDepthD16Source::Guest);
+
+	GpuMemoryOverlapSnapshot texture {};
+	texture.total_count             = 1u;
+	texture.exact_count             = 1u;
+	texture.entry_count             = 1u;
+	texture.entries[0].type         = GpuMemoryObjectType::Texture;
+	texture.entries[0].relation     = GpuMemoryOverlapType::Equals;
+	texture.entries[0].count        = 1u;
+	texture.entries[0].exact        = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(texture), GpuMemoryDepthD16Source::Guest);
+
+	auto depth = texture;
+	depth.entries[0].type = GpuMemoryObjectType::DepthStencilBuffer;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(depth), GpuMemoryDepthD16Source::Unsupported);
+	auto storage = texture;
+	storage.entries[0].type = GpuMemoryObjectType::StorageTexture;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(storage), GpuMemoryDepthD16Source::Unsupported);
+	auto contains = texture;
+	contains.exact_count = 0u;
+	contains.entries[0].type = GpuMemoryObjectType::StorageBuffer;
+	contains.entries[0].relation = GpuMemoryOverlapType::Contains;
+	contains.entries[0].exact = false;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(contains), GpuMemoryDepthD16Source::StorageBuffer);
+	contains.entries[0].all_read_only = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(contains), GpuMemoryDepthD16Source::Guest);
+	auto exact_storage = contains;
+	exact_storage.exact_count = 1u;
+	exact_storage.entries[0].relation = GpuMemoryOverlapType::Equals;
+	exact_storage.entries[0].exact = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(exact_storage), GpuMemoryDepthD16Source::Guest);
+	exact_storage.entries[0].all_read_only = false;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(exact_storage), GpuMemoryDepthD16Source::StorageBuffer);
+	auto materialized = contains;
+	materialized.total_count = 2u;
+	materialized.exact_count = 1u;
+	materialized.entry_count = 2u;
+	materialized.entries[1] = texture.entries[0];
+	materialized.entries[0].all_read_only = false;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized), GpuMemoryDepthD16Source::StorageBuffer);
+	auto duplicate_storage = materialized;
+	duplicate_storage.entries[1] = duplicate_storage.entries[0];
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(duplicate_storage), GpuMemoryDepthD16Source::Unsupported);
+	materialized.total_count = 3u;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized), GpuMemoryDepthD16Source::Unsupported);
+	auto multiple = texture;
+	multiple.total_count = 2u;
+	multiple.entries[0].count = 2u;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(multiple), GpuMemoryDepthD16Source::Unsupported);
+	auto truncated = texture;
+	truncated.truncated = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(truncated), GpuMemoryDepthD16Source::Unsupported);
+}
+
 TEST(EmulatorGraphicsState, UnnormalizedSamplerCoordinatesUseVulkanCompatiblePolicy)
 {
 	using namespace Kyty::Libs::Graphics::State;
@@ -4250,6 +4411,30 @@ TEST(EmulatorGraphicsState, UnnormalizedSamplerCoordinatesUseVulkanCompatiblePol
 	EXPECT_TRUE(policy.disable_anisotropy);
 	EXPECT_TRUE(policy.disable_comparison);
 	EXPECT_TRUE(policy.reset_lod_bias);
+
+	// Cube / 2D-array / 3D views cannot use unnormalizedCoordinates.
+	const auto arrayed = ResolveUnnormalizedSamplerPolicy(true, false);
+	EXPECT_FALSE(arrayed.enabled);
+	EXPECT_FALSE(ResolveUnnormalizedSamplerPolicy(false, false).enabled);
+}
+
+TEST(EmulatorGraphicsState, ResolvesSamplerLodRangeFromSSharpFixedPoint)
+{
+	using namespace Kyty::Libs::Graphics::State;
+	const auto none = ResolveSamplerLodRange(0u, 4095u, 0u, 0u);
+	EXPECT_FLOAT_EQ(none.min_lod, 0.0f);
+	EXPECT_FLOAT_EQ(none.max_lod, 0.0f);
+	EXPECT_FLOAT_EQ(none.lod_bias, 0.0f);
+
+	const auto point = ResolveSamplerLodRange(0u, 4095u, 0u, 1u);
+	EXPECT_FLOAT_EQ(point.min_lod, 0.0f);
+	EXPECT_NEAR(point.max_lod, 4095.0f / 256.0f, 1.0e-6f);
+	EXPECT_FLOAT_EQ(point.lod_bias, 0.0f);
+
+	const auto minus_one = ResolveSamplerLodRange(0u, 256u, 0x3FFFu, 2u);
+	EXPECT_FLOAT_EQ(minus_one.min_lod, 0.0f);
+	EXPECT_FLOAT_EQ(minus_one.max_lod, 1.0f);
+	EXPECT_NEAR(minus_one.lod_bias, -1.0f / 256.0f, 1.0e-6f);
 }
 
 // GraphicsInit must publish API version and feature-flag words into the guest

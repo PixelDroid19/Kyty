@@ -80,6 +80,9 @@ public:
 		return true;
 	}
 	VulkanBuffer* UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage);
+	// Reusable scratch for commands recorded in this buffer. Callers must order
+	// write/read/write hazards explicitly; lifetime extends through its fence.
+	VulkanBuffer* AllocateTransientScratchBuffer(uint64_t size, uint32_t usage);
 
 private:
 	VulkanCommandPool* m_pool    = nullptr;
@@ -136,6 +139,8 @@ void GraphicsRenderMemoryFlush(uint64_t vaddr, uint64_t size);
 
 // Scratch: dump remembered KYTY_DUMP_RT color targets (paired with VideoOut frame dumps).
 void GraphicsDumpRememberedRts(GraphicContext* ctx, const char* path_prefix);
+// Opt-in TRACE: one-shot B10G11R11 + depth pixel stats after a present capture.
+void GraphicsPeekRememberedSceneTargets(GraphicContext* ctx);
 
 void DeleteFramebuffer(VideoOutVulkanImage* image);
 void DeleteFramebuffer(DepthStencilVulkanImage* image);

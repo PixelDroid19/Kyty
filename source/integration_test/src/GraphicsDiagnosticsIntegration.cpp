@@ -1370,6 +1370,7 @@ Kyty::Core::String8 GenerateGen5DepthReferenceSample(uint8_t dimension, uint8_t 
 	input.bind.samplers.samplers_num                   = 1;
 	input.bind.samplers.start_register[0]              = 20;
 	input.bind.samplers.operations[0]                  = State::ImageSampleOperation::DepthReference;
+	input.bind.samplers.samplers[0].fields[0]          = 6u << 12u;
 	ShaderCalcBindingIndices(&input.bind);
 	return SpirvGenerateSource(code, nullptr, &input, nullptr);
 }
@@ -1377,15 +1378,21 @@ Kyty::Core::String8 GenerateGen5DepthReferenceSample(uint8_t dimension, uint8_t 
 void VerifyGen5DepthReferenceSample()
 {
 	const auto flat = GenerateGen5DepthReferenceSample(1u, 9u, 1, 0);
-	Expect(flat.FindIndex("OpImageSampleDrefExplicitLod %float") != Kyty::Core::STRING8_INVALID_INDEX,
-	       "2D depth-reference sample uses the comparison instruction");
+	Expect(flat.FindIndex("OpImageSampleExplicitLod %v4float") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "2D SAMPLE_C samples LOD 0 as a regular image");
+	Expect(flat.FindIndex("OpFOrdGreaterThanEqual %bool") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "2D SAMPLE_C applies S# DEPTH_COMPARE_FUNC in ALU");
+	Expect(flat.FindIndex("OpImageSampleDrefExplicitLod") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "2D SAMPLE_C does not use Vulkan Dref sampling");
 	Expect(flat.FindIndex("OpCompositeConstruct %v2float") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "2D depth-reference sample uses two coordinates");
 	ExpectValidSpirv(flat, "2D depth-reference sample emits valid SPIR-V");
 
 	const auto arrayed = GenerateGen5DepthReferenceSample(5u, 13u, 0, 1);
-	Expect(arrayed.FindIndex("OpImageSampleDrefExplicitLod %float") != Kyty::Core::STRING8_INVALID_INDEX,
-	       "array depth-reference sample uses the comparison instruction");
+	Expect(arrayed.FindIndex("OpImageSampleExplicitLod %v4float") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "array SAMPLE_C samples LOD 0 as a regular image");
+	Expect(arrayed.FindIndex("OpFOrdGreaterThanEqual %bool") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "array SAMPLE_C applies S# DEPTH_COMPARE_FUNC in ALU");
 	Expect(arrayed.FindIndex("OpCompositeConstruct %v3float") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "array depth-reference sample includes the layer coordinate");
 	ExpectValidSpirv(arrayed, "array depth-reference sample emits valid SPIR-V");

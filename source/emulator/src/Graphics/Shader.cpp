@@ -32,6 +32,8 @@
 #include <climits>
 #include <cinttypes>
 #include <cstdlib>
+#include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -388,6 +390,109 @@ static std::unordered_map<uint64_t, ShaderMappedData>* g_shader_map       = null
 static std::mutex                                      g_shader_map_mutex;
 static std::unordered_map<uint64_t, int32_t>*          g_vertex_offset_sgpr_map = nullptr;
 static std::unordered_map<uint64_t, uint64_t>*         g_shader_continuations  = nullptr;
+static std::unordered_map<uint64_t, std::shared_ptr<ShaderCode>>* g_vs_isa_cache = nullptr;
+static std::mutex                                      g_vs_isa_cache_mutex;
+
+static std::shared_ptr<ShaderCode> GetCachedParsedVsIsa(uint64_t shader_addr, uint32_t hash0, uint32_t crc32)
+{
+	if (shader_addr == 0 || g_vs_isa_cache == nullptr)
+	{
+		return nullptr;
+	}
+	std::lock_guard<std::mutex> lock(g_vs_isa_cache_mutex);
+	if (auto cached = g_vs_isa_cache->find(shader_addr); cached != g_vs_isa_cache->end())
+	{
+		return cached->second;
+	}
+	if (g_vs_isa_cache->size() >= 256u)
+	{
+		g_vs_isa_cache->clear();
+	}
+	auto code = std::make_shared<ShaderCode>();
+	code->SetType(ShaderType::Vertex);
+	code->SetHash0(hash0);
+	code->SetCrc32(crc32);
+	ShaderParse(reinterpret_cast<const uint32_t*>(shader_addr), code.get());
+	ShaderProbeWrite("vs", *code, nullptr, nullptr);
+	g_vs_isa_cache->emplace(shader_addr, code);
+	return code;
+}
+
+static bool NggCapturedBufferQuad(const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, int start)
+{
+	const int captured = std::min(std::min(std::max(user_sgpr_num, 0), static_cast<int>(user_sgpr.count)),
+	                              HW::UserSgprInfo::SGPRS_MAX);
+	if (start < 0 || start + 4 > captured)
+	{
+		return false;
+	}
+	bool typed = true;
+	for (int i = 0; i < 4; ++i)
+	{
+		const auto type = user_sgpr.type[start + i];
+		if (type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region)
+		{
+			typed = false;
+		}
+	}
+	const uint32_t word0 = user_sgpr.value[start];
+	const uint32_t word1 = user_sgpr.value[start + 1];
+	const uint32_t word2 = user_sgpr.value[start + 2];
+	const uint32_t word3 = user_sgpr.value[start + 3];
+	const bool     untyped_buffer = ((word0 | word1 | word2 | word3) != 0u) && (((word3 >> 28u) & 0xfu) < 8u);
+	return typed || untyped_buffer;
+}
+
+// AGC metadata lists NGG constant V# sharps at the shader scalar register
+// (s8+). Hardware user-data slot 0 is that register minus 8. Rebase only when
+// the ISA actually SBUFFERs that scalar and the captured user-data quad looks
+// like a buffer — same contract as the measured NGG constant-sharp rebase.
+static void RebaseNggConstantSharps(ShaderUserData* user_data, const ShaderCode* code, const HW::UserSgprInfo& user_sgpr,
+                                    int user_sgpr_num)
+{
+	if (user_data == nullptr || code == nullptr || user_data->sharp_resource_offset[3] == nullptr)
+	{
+		return;
+	}
+	constexpr int kNggScalarBase = 8;
+	bool          used[108]      = {};
+	for (const auto& inst: code->GetInstructions())
+	{
+		if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr)
+		{
+			continue;
+		}
+		const int reg = inst.src[0].register_id;
+		if (reg >= 0 && reg < 108)
+		{
+			used[reg] = true;
+		}
+	}
+	for (uint16_t slot = 0; slot < user_data->sharp_resource_count[3]; ++slot)
+	{
+		auto& sharp = user_data->sharp_resource_offset[3][slot];
+		if (sharp.offset_dw == 0x7fff || sharp.size != 1)
+		{
+			continue;
+		}
+		const int scalar = static_cast<int>(sharp.offset_dw);
+		const int captured = std::min(std::min(std::max(user_sgpr_num, 0), static_cast<int>(user_sgpr.count)),
+		                              HW::UserSgprInfo::SGPRS_MAX);
+		// Metadata that already names a captured user-data slot (offset <
+		// captured) is left alone. Only scalar registers past that window
+		// are NGG-encoded (s8 + slot) and need the minus-eight rebase.
+		if (scalar < captured || scalar < kNggScalarBase || scalar >= 108 || !used[scalar])
+		{
+			continue;
+		}
+		const int hardware_slot = scalar - kNggScalarBase;
+		if (!NggCapturedBufferQuad(user_sgpr, user_sgpr_num, hardware_slot))
+		{
+			continue;
+		}
+		sharp.offset_dw = static_cast<uint16_t>(hardware_slot);
+	}
+}
 
 void ShaderInit()
 {
@@ -396,6 +501,7 @@ void ShaderInit()
 	g_shader_map             = new std::unordered_map<uint64_t, ShaderMappedData>();
 	g_vertex_offset_sgpr_map = new std::unordered_map<uint64_t, int32_t>();
 	g_shader_continuations   = new std::unordered_map<uint64_t, uint64_t>();
+	g_vs_isa_cache           = new std::unordered_map<uint64_t, std::shared_ptr<ShaderCode>>();
 }
 
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
@@ -888,6 +994,7 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	if (Config::IsNextGen())
 	{
 		bind->textures2D.textures2d_sampled_num       = 0;
+		bind->textures2D.textures2d_sampled_depth_num = 0;
 		bind->textures2D.textures2d_array_sampled_num = 0;
 		bind->textures2D.textures3d_sampled_num       = 0;
 		for (int i = 0; i < bind->textures2D.textures_num; ++i)
@@ -900,7 +1007,15 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 			const auto shape = ShaderResolvedSampledTextureShape(descriptor);
 			switch (shape)
 			{
-				case ShaderGen5SampledTextureShape::TwoDimensional: bind->textures2D.textures2d_sampled_num++; break;
+				case ShaderGen5SampledTextureShape::TwoDimensional:
+					if (descriptor.sample_operation == State::ImageSampleOperation::DepthReference)
+					{
+						bind->textures2D.textures2d_sampled_depth_num++;
+					} else
+					{
+						bind->textures2D.textures2d_sampled_num++;
+					}
+					break;
 				case ShaderGen5SampledTextureShape::TwoDimensionalArray:
 					bind->textures2D.textures2d_array_sampled_num++;
 					break;
@@ -940,6 +1055,9 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 		bind->textures2D.binding_sampled_uint_index = binding_index++;
 		bind->textures2D.binding_sampled_array_uint_index = binding_index++;
 		bind->textures2D.binding_sampled_3d_uint_index = binding_index++;
+		// Append depth-compare 2D after the existing shape slots so cached
+		// SPIR-V binding numbers stay stable.
+		bind->textures2D.binding_sampled_depth_index = binding_index++;
 
 		bind->push_constant_size += bind->textures2D.textures_num * 32;
 	}
@@ -1855,8 +1973,29 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 		// The fused ES-to-GS front reserves s0..s7 for NGG system state. API
 		// user-data index zero is therefore addressed as s8 by the shader.
+		// PS/CS already pass the decoded ISA so instruction-stream S#/V#
+		// loads are bound; VS used to pass nullptr and dropped reused
+		// constant buffers (measured: skybox projection at s[16:19]).
 		constexpr int kGen5GsFrontUserDataBase = 8;
-		ShaderParseUsage2(data.user_data, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
+		const auto vs_isa = GetCachedParsedVsIsa(shader_addr, (regs->gs_regs.chksum >> 32u) & 0xffffffffu,
+		                                         regs->gs_regs.chksum & 0xffffffffu);
+		ShaderUserData  rebased_user {};
+		ShaderSharp     sharp_copy[32] = {};
+		const ShaderUserData* usage_user = data.user_data;
+		if (data.user_data != nullptr && vs_isa != nullptr && data.user_data->sharp_resource_count[3] > 0 &&
+		    data.user_data->sharp_resource_count[3] <= 32u && data.user_data->sharp_resource_offset[3] != nullptr)
+		{
+			rebased_user = *data.user_data;
+			std::memcpy(sharp_copy, data.user_data->sharp_resource_offset[3],
+			            static_cast<size_t>(data.user_data->sharp_resource_count[3]) * sizeof(ShaderSharp));
+			rebased_user.sharp_resource_offset[3] = sharp_copy;
+			RebaseNggConstantSharps(&rebased_user, vs_isa.get(), user_sgpr, static_cast<int>(user_sgpr_num));
+			usage_user = &rebased_user;
+		}
+		// Do not pass the ISA into ParseUsage2 here: the instruction-stream
+		// fallback AddZeroSBufferResource on a reused s[16:19] V# zeros the
+		// projection CBV. Rebase the metadata sharp table instead.
+		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
 		                  kGen5GsFrontUserDataBase);
 	} else
 	{
@@ -1915,16 +2054,17 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 		ShaderParseAttrib(info, data.input_semantics, data.num_input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info, ps5);
+		ShaderAppendVertexStreamStorage(info);
 
 		constexpr uint32_t user_data_base = 8;
 		auto               cached         = g_vertex_offset_sgpr_map->find(shader_addr);
 		if (cached == g_vertex_offset_sgpr_map->end())
 		{
-			ShaderCode code;
-			code.SetType(ShaderType::Vertex);
-			ShaderParse(reinterpret_cast<const uint32_t*>(shader_addr), &code);
-			const int32_t detected = ShaderDetectVertexOffsetSgpr(code, user_data_base, user_sgpr_num);
-			cached                 = g_vertex_offset_sgpr_map->insert({shader_addr, detected}).first;
+			const auto vs_isa = GetCachedParsedVsIsa(shader_addr, (regs->gs_regs.chksum >> 32u) & 0xffffffffu,
+			                                         regs->gs_regs.chksum & 0xffffffffu);
+			const int32_t detected =
+			    vs_isa != nullptr ? ShaderDetectVertexOffsetSgpr(*vs_isa, user_data_base, user_sgpr_num) : -1;
+			cached = g_vertex_offset_sgpr_map->insert({shader_addr, detected}).first;
 		}
 		info->vertex_offset_sgpr = cached->second;
 		if (info->vertex_offset_sgpr >= static_cast<int32_t>(user_data_base))
@@ -2992,6 +3132,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		// ret->ids.Add(r.MipFilter());
 		// ret->ids.Add(r.BorderColorPtr());
 		// ret->ids.Add(r.BorderColorType());
+		ret->ids.Add(bind.samplers.samplers[i].DepthCompareFunc());
 		ret->ids.Add(bind.samplers.slots[i]);
 		ret->ids.Add(bind.samplers.start_register[i]);
 		ret->ids.Add(static_cast<uint32_t>(bind.samplers.extended[i]));

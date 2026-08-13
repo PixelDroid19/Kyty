@@ -167,14 +167,105 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
 		offset_id = make_id(offset_name);
 	}
 
+	// desc0 is a rewritten slot only when it is strictly less than the bound
+	// SSBO count. A live V# keeps the 48-bit guest base in that word; using
+	// it as buf[i] is an OOB index and loses the device. Start from the slot
+	// path or zero, overlay a stream span, then clamp again.
+	String8     live_resolve;
+	String8     addr_value = String8::FromPrintf("%%buf_addr_%s", tag.c_str());
+	String8     slot_value = String8::FromPrintf("%%buf_addr_desc0_%s", tag.c_str());
+	const auto* vs_input   = spirv->GetVsInputInfo();
+	const auto* bind_info  = spirv->GetBindInfo();
+	if (vs_input != nullptr && vs_input->fetch_embedded && bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
+	{
+		const auto bound_id = spirv->GetConstantUint(static_cast<uint32_t>(bind_info->storage_buffers.buffers_num));
+		if (bound_id != "unknown_uint_constant")
+		{
+			const char* vsharp_ptr = bind_info->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint";
+			live_resolve           = String8(R"(
+        %buf_addr_is_slot_<tag> = OpULessThan %bool %buf_addr_desc0_<tag> %<bound>
+        %buf_addr_slot_0_<tag> = OpSelect %uint %buf_addr_is_slot_<tag> %buf_addr_desc0_<tag> %uint_0
+        %buf_addr_off_0_<tag> = OpSelect %uint %buf_addr_is_slot_<tag> %buf_addr_<tag> %uint_0
+)")
+			                  .ReplaceStr("<tag>", tag)
+			                  .ReplaceStr("<bound>", bound_id);
+			String8 slot_name = String8::FromPrintf("buf_addr_slot_0_%s", tag.c_str());
+			String8 off_name  = String8::FromPrintf("buf_addr_off_0_%s", tag.c_str());
+			int     span_i    = 0;
+			for (int i = 0; i < vs_input->buffers_num; i++)
+			{
+				const auto& stream = vs_input->buffers[i];
+				if (stream.storage_slot < 0)
+				{
+					continue;
+				}
+				const auto slot_const = spirv->GetConstantInt(stream.storage_slot);
+				const auto slot_u     = spirv->GetConstantUint(static_cast<uint32_t>(stream.storage_slot));
+				if (slot_const == "unknown_int_constant" || slot_u == "unknown_uint_constant")
+				{
+					continue;
+				}
+				const auto next_slot = String8::FromPrintf("buf_addr_slot_%d_%s", span_i + 1, tag.c_str());
+				const auto next_off  = String8::FromPrintf("buf_addr_off_%d_%s", span_i + 1, tag.c_str());
+				const auto span      = String8::FromPrintf("%d", span_i);
+				live_resolve += String8(R"(
+        %buf_addr_bptr_<tag>_<span> = OpAccessChain %<vsharp_ptr> %vsharp %int_0 %<slot_idx> %int_0
+        %buf_addr_base_<tag>_<span> = OpLoad %uint %buf_addr_bptr_<tag>_<span>
+        %buf_addr_sptr_<tag>_<span> = OpAccessChain %<vsharp_ptr> %vsharp %int_0 %<slot_idx> %int_1
+        %buf_addr_w1_<tag>_<span> = OpLoad %uint %buf_addr_sptr_<tag>_<span>
+        %buf_addr_sh_<tag>_<span> = OpShiftRightLogical %uint %buf_addr_w1_<tag>_<span> %uint_16
+        %buf_addr_stride_<tag>_<span> = OpBitwiseAnd %uint %buf_addr_sh_<tag>_<span> %uint_0x00003fff
+        %buf_addr_rptr_<tag>_<span> = OpAccessChain %<vsharp_ptr> %vsharp %int_0 %<slot_idx> %int_2
+        %buf_addr_recs_<tag>_<span> = OpLoad %uint %buf_addr_rptr_<tag>_<span>
+        %buf_addr_bytes_<tag>_<span> = OpIMul %uint %buf_addr_stride_<tag>_<span> %buf_addr_recs_<tag>_<span>
+        %buf_addr_rel_<tag>_<span> = OpISub %uint %buf_addr_desc0_<tag> %buf_addr_base_<tag>_<span>
+        %buf_addr_in_<tag>_<span> = OpULessThan %bool %buf_addr_rel_<tag>_<span> %buf_addr_bytes_<tag>_<span>
+        %buf_addr_ge_<tag>_<span> = OpUGreaterThanEqual %bool %buf_addr_desc0_<tag> %buf_addr_base_<tag>_<span>
+        %buf_addr_hi_<tag>_<span> = OpBitwiseAnd %uint %buf_addr_desc1_<tag> %uint_0x0000ffff
+        %buf_addr_vhi_<tag>_<span> = OpBitwiseAnd %uint %buf_addr_w1_<tag>_<span> %uint_0x0000ffff
+        %buf_addr_hieq_<tag>_<span> = OpIEqual %bool %buf_addr_hi_<tag>_<span> %buf_addr_vhi_<tag>_<span>
+        %buf_addr_range_<tag>_<span> = OpLogicalAnd %bool %buf_addr_ge_<tag>_<span> %buf_addr_in_<tag>_<span>
+        %buf_addr_live_<tag>_<span> = OpLogicalAnd %bool %buf_addr_range_<tag>_<span> %buf_addr_hieq_<tag>_<span>
+        %buf_addr_sum_<tag>_<span> = OpIAdd %uint %buf_addr_rel_<tag>_<span> %buf_addr_<tag>
+        %<next_slot> = OpSelect %uint %buf_addr_live_<tag>_<span> %<slot_u> %<prev_slot>
+        %<next_off> = OpSelect %uint %buf_addr_live_<tag>_<span> %buf_addr_sum_<tag>_<span> %<prev_off>
+)")
+				                    .ReplaceStr("<tag>", tag)
+				                    .ReplaceStr("<span>", span)
+				                    .ReplaceStr("<vsharp_ptr>", vsharp_ptr)
+				                    .ReplaceStr("<slot_idx>", slot_const)
+				                    .ReplaceStr("<slot_u>", slot_u)
+				                    .ReplaceStr("<next_slot>", next_slot)
+				                    .ReplaceStr("<next_off>", next_off)
+				                    .ReplaceStr("<prev_slot>", slot_name)
+				                    .ReplaceStr("<prev_off>", off_name);
+				slot_name = next_slot;
+				off_name  = next_off;
+				++span_i;
+			}
+			live_resolve += String8(R"(
+        %buf_addr_clamp_<tag> = OpULessThan %bool %<prev_slot> %<bound>
+        %buf_addr_slot_c_<tag> = OpSelect %uint %buf_addr_clamp_<tag> %<prev_slot> %uint_0
+        %buf_addr_off_c_<tag> = OpSelect %uint %buf_addr_clamp_<tag> %<prev_off> %uint_0
+)")
+			                    .ReplaceStr("<tag>", tag)
+			                    .ReplaceStr("<bound>", bound_id)
+			                    .ReplaceStr("<prev_slot>", slot_name)
+			                    .ReplaceStr("<prev_off>", off_name);
+			addr_value = String8::FromPrintf("%%buf_addr_off_c_%s", tag.c_str());
+			slot_value = String8::FromPrintf("%%buf_addr_slot_c_%s", tag.c_str());
+		}
+	}
+
 	static const char* text = R"(
         %buf_addr_desc0_<tag> = OpLoad %uint %<desc0>
         %buf_addr_desc1_<tag> = OpLoad %uint %<desc1>
         %buf_addr_desc3_<tag> = OpLoad %uint %<desc3>
 <range_guard>
         %buf_addr_<tag> = OpFunctionCall %uint %buffer_raw_address <index_value> <offset_value> <soffset_value> %buf_addr_desc1_<tag> %buf_addr_desc3_<tag>
-        %buf_addr_i_<tag> = OpBitcast %int %buf_addr_<tag>
-        %buf_addr_buffer_i_<tag> = OpBitcast %int %buf_addr_desc0_<tag>
+<live_resolve>
+        %buf_addr_i_<tag> = OpBitcast %int <addr_value>
+        %buf_addr_buffer_i_<tag> = OpBitcast %int <slot_value>
                OpStore %temp_int_1 %int_0
                OpStore %temp_int_2 %buf_addr_i_<tag>
                OpStore %temp_int_3 %int_0
@@ -207,6 +298,9 @@ static bool emit_buffer_address_setup(Spirv* spirv, const ShaderInstruction& ins
 	                     .ReplaceStr("<desc1>", descriptor1.value)
 	                     .ReplaceStr("<desc3>", descriptor3.value)
 	                     .ReplaceStr("<range_guard>", range_guard)
+	                     .ReplaceStr("<live_resolve>", live_resolve)
+	                     .ReplaceStr("<addr_value>", addr_value)
+	                     .ReplaceStr("<slot_value>", slot_value)
 	                     .ReplaceStr("<index_value>", index_id)
 	                     .ReplaceStr("<offset_value>", offset_id)
 	                     .ReplaceStr("<soffset_value>", make_id(scalar_offset_name));
@@ -1034,6 +1128,31 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 	}
 
 	return false;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num <= 0 || !Config::IsNextGen())
+	{
+		return false;
+	}
+	return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xy", 2, dst_source);
+}
+
+// buffer_load_format_xyz: Gen5 unified format 74 is R32G32B32_SFLOAT. The
+// xyzw helper rejects 74 (it only allows 75-77 / 119), so RGB32F vertex
+// streams that are not remapped to Fetch must use this 3-component path.
+KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num <= 0 || !Config::IsNextGen())
+	{
+		return false;
+	}
+	return emit_gen5_mubuf_format_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyz", 3, dst_source);
 }
 
 // buffer_load_format_xyzw v[0:3], v4, s[0:3], 0, idxen — same addressing as

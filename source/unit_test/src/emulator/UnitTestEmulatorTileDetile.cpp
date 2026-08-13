@@ -52,7 +52,7 @@ void FillTiledFromLinear(std::vector<uint8_t>* tiled, const std::vector<uint8_t>
 		{
 			return TileGetStandard4KBOffset(x, y, pitch, bpp);
 		}
-		return TileGetDepth64KB32Offset(x, y, pitch);
+		return TileGetDepth64KBOffset(x, y, pitch, bpp);
 	};
 
 	for (uint32_t y = 0; y < height; ++y)
@@ -645,7 +645,50 @@ TEST(EmulatorTileDetile, Depth64KB32ProductionMatchesReference)
 	constexpr uint32_t k_bpp = 4u;
 	constexpr uint32_t pitch = 128u;
 	const uint64_t     tiled = 65536u;
-	ExpectDetilePathsMatch(k_w, k_h, pitch, k_bpp, TileDetileLayout::Depth64KB32, tiled);
+	ExpectDetilePathsMatch(k_w, k_h, pitch, k_bpp, TileDetileLayout::Depth64KB, tiled);
+}
+
+TEST(EmulatorTileDetile, Depth64KB16ProductionMatchesIndependentReference)
+{
+	constexpr uint32_t width       = 257u;
+	constexpr uint32_t height      = 129u;
+	constexpr uint32_t pitch       = 512u;
+	constexpr uint32_t bpe         = 2u;
+	constexpr uint64_t tiled_bytes = 4u * 65536u;
+	std::vector<uint8_t> linear(static_cast<size_t>(width) * height * bpe);
+	std::vector<uint8_t> tiled(tiled_bytes, 0u);
+	for (uint32_t y = 0; y < height; ++y)
+	{
+		for (uint32_t x = 0; x < width; ++x)
+		{
+			const uint16_t value = static_cast<uint16_t>((x * 131u + y * 17u) & 0xffffu);
+			const uint64_t block = static_cast<uint64_t>(y / 128u) * (pitch / 256u) + x / 256u;
+			const uint32_t lx = x % 256u;
+			const uint32_t ly = y % 128u;
+			uint32_t within = ((lx << 1u) & 0x0002u) ^ ((lx << 2u) & 0x0008u) ^ ((lx << 3u) & 0x0020u) ^
+			                  ((lx << 4u) & 0x0480u) ^ ((lx << 5u) & 0x0300u) ^ ((lx << 6u) & 0x0800u) ^
+			                  ((lx << 7u) & 0x2000u) ^ ((lx << 8u) & 0x8000u) ^ ((ly << 2u) & 0x0004u) ^
+			                  ((ly << 3u) & 0x0010u) ^ ((ly << 4u) & 0x0040u) ^ ((ly << 5u) & 0x0f00u) ^
+			                  ((ly << 8u) & 0x5000u);
+			const uint64_t tiled_offset  = block * 65536u + within;
+			const uint64_t linear_offset = (static_cast<uint64_t>(y) * width + x) * bpe;
+			ASSERT_LE(tiled_offset + bpe, tiled.size());
+			std::memcpy(tiled.data() + tiled_offset, &value, bpe);
+			std::memcpy(linear.data() + linear_offset, &value, bpe);
+		}
+	}
+
+	std::vector<uint8_t> reference(linear.size(), 0u);
+	std::vector<uint8_t> production(linear.size(), 0u);
+	const auto ref = MakeRequest(reference.data(), tiled.data(), width, height, pitch, width, bpe, TileDetileLayout::Depth64KB,
+	                             tiled_bytes);
+	const auto prod = MakeRequest(production.data(), tiled.data(), width, height, pitch, width, bpe, TileDetileLayout::Depth64KB,
+	                              tiled_bytes);
+	ASSERT_TRUE(TileDetileIsSupported(ref));
+	ASSERT_TRUE(TileDetileReference(ref));
+	ASSERT_TRUE(TileDetile(prod));
+	EXPECT_EQ(reference, linear);
+	EXPECT_EQ(production, linear);
 }
 
 TEST(EmulatorTileDetile, RejectsUnsupportedRequests)
@@ -1096,6 +1139,27 @@ TEST(EmulatorTileDetile, RejectsTruncatedAndOverflowingBufferRanges)
 	EXPECT_FALSE(TileDetileIsSupported(overflow));
 }
 
+TEST(EmulatorTileDetile, ValidatesBoundedInlineDepthD16Ranges)
+{
+	uint64_t required = 0;
+	uint64_t linear   = 0;
+	EXPECT_TRUE(TileGpuDetileDepthD16InlineIsSupported(0u, 65536u, 1u, 1u, 256u, &required, &linear));
+	EXPECT_EQ(required, 65536u);
+	EXPECT_EQ(linear, 2u);
+
+	EXPECT_TRUE(TileGpuDetileDepthD16InlineIsSupported(0x10000u, 0x50000u, 257u, 129u, 512u, &required, &linear));
+	EXPECT_EQ(required, 4u * 65536u);
+	EXPECT_EQ(linear, 257u * 129u * 2u);
+
+	EXPECT_FALSE(TileGpuDetileDepthD16InlineIsSupported(2u, 65538u, 1u, 1u, 256u));
+	EXPECT_FALSE(TileGpuDetileDepthD16InlineIsSupported(0u, 65537u, 1u, 1u, 256u));
+	EXPECT_FALSE(TileGpuDetileDepthD16InlineIsSupported(0u, 65535u, 1u, 1u, 256u));
+	EXPECT_FALSE(TileGpuDetileDepthD16InlineIsSupported(0u, 65536u, 257u, 1u, 256u));
+	EXPECT_FALSE(TileGpuDetileDepthD16InlineIsSupported(0u, 65536u, 1u, 1u, 255u));
+	EXPECT_FALSE(TileGpuDetileDepthD16InlineIsSupported(UINT64_MAX - 3u, UINT64_MAX, 1u, 1u, 256u));
+	EXPECT_FALSE(TileGpuDetileDepthD16InlineIsSupported(0u, 64u * 1024u * 1024u, 512u, 32769u, 512u));
+}
+
 TEST(EmulatorTileDetile, ConvertWrappersMatchReference)
 {
 	constexpr uint32_t k_w   = 64u;
@@ -1167,11 +1231,578 @@ TEST(EmulatorTileDetile, AcceptsStandard4KBBc7ArrayWithMips)
 	EXPECT_FALSE(Gen5ValidateTextureArrayUpload(small, 0u, small.tiled_size - 1u));
 }
 
+TEST(EmulatorTileDetile, SizesSingleMipStandard4KBBcArraysInBlocks)
+{
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(169u, 65u, 67u, 72u, 1u, 5u, 2u, &layout));
+	EXPECT_EQ(layout.tiled_slice.size, 8192u);
+	EXPECT_EQ(layout.tiled_size, 16384u);
+	EXPECT_EQ(layout.linear_slice_size, 17u * 17u * 8u);
+	EXPECT_EQ(layout.linear_size, 2u * 17u * 17u * 8u);
+	ASSERT_TRUE(layout.has_mip_layout);
+	const auto& level = layout.mip_layout.level[0];
+	ASSERT_EQ(level.element_width, 17u);
+	ASSERT_EQ(level.element_height, 17u);
+	ASSERT_EQ(level.tiled_pitch, 32u);
+
+	std::vector<uint8_t> expected(static_cast<size_t>(layout.linear_size));
+	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0u);
+	for (uint32_t layer = 0; layer < layout.layers; ++layer)
+	{
+		for (uint32_t y = 0; y < level.element_height; ++y)
+		{
+			for (uint32_t x = 0; x < level.element_width; ++x)
+			{
+				std::array<uint8_t, 8> block {};
+				for (uint32_t byte = 0; byte < block.size(); ++byte)
+				{
+					block[byte] = static_cast<uint8_t>(layer * 101u + y * 17u + x * 3u + byte);
+				}
+				const uint64_t tiled_offset = static_cast<uint64_t>(layer) * layout.tiled_slice.size +
+				                              TileGetStandard4KBOffset(x, y, level.tiled_pitch, 8u);
+				const uint64_t linear_offset = static_cast<uint64_t>(layer) * layout.linear_slice_size +
+				                               (static_cast<uint64_t>(y) * level.element_width + x) * 8u;
+				ASSERT_LE(tiled_offset + block.size(), tiled.size());
+				ASSERT_LE(linear_offset + block.size(), expected.size());
+				std::memcpy(tiled.data() + tiled_offset, block.data(), block.size());
+				std::memcpy(expected.data() + linear_offset, block.data(), block.size());
+			}
+		}
+	}
+	std::vector<uint8_t> actual(expected.size(), 0u);
+	ASSERT_TRUE(Gen5DetileTextureArray(actual.data(), actual.size(), tiled.data(), tiled.size(), layout));
+	EXPECT_EQ(actual, expected);
+}
+
 TEST(EmulatorTileDetile, RejectsMultiMipArrayOnNonStandard4KBTiles)
 {
 	Gen5TextureArrayLayout layout {};
 	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 9u, 2u, &layout));
 	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 27u, 2u, &layout));
+}
+
+TEST(EmulatorTileDetile, LayoutsBc6hCubeStandard4KBWithMipTail)
+{
+	constexpr uint32_t k_format = 179u; // BC6H UFLOAT
+	constexpr uint32_t k_width  = 2048u;
+	constexpr uint32_t k_height = 2048u;
+	constexpr uint32_t k_levels = 12u;
+	constexpr uint32_t k_layers = 6u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, k_width, k_height, k_width, k_levels, 5u, k_layers, &layout));
+	ASSERT_TRUE(layout.has_mip_layout);
+	EXPECT_EQ(layout.bytes_per_element, 16u);
+	EXPECT_EQ(layout.mip_layout.texels_per_element_x, 4u);
+	EXPECT_EQ(layout.layers, k_layers);
+	EXPECT_EQ(layout.levels, k_levels);
+	EXPECT_EQ(layout.mip_layout.first_tail_level, 6u);
+	EXPECT_FALSE(layout.mip_layout.level[0].in_mip_tail);
+	EXPECT_TRUE(layout.mip_layout.level[6].in_mip_tail);
+	EXPECT_EQ(layout.mip_layout.level[6].tiled_offset, 0u);
+	EXPECT_EQ(layout.mip_layout.level[6].tiled_size, 4096u);
+	EXPECT_GT(layout.mip_layout.level[0].tiled_offset, 0u);
+	EXPECT_EQ(layout.tiled_size, static_cast<uint64_t>(layout.tiled_slice.size) * k_layers);
+	EXPECT_EQ(layout.linear_size, layout.linear_slice_size * k_layers);
+	EXPECT_LE(layout.tiled_size, static_cast<uint64_t>(UINT32_MAX));
+	const uint64_t guest_size = layout.tiled_size;
+	EXPECT_TRUE(Gen5ValidateTextureArrayUpload(layout, 0u, guest_size));
+	EXPECT_FALSE(Gen5ValidateTextureArrayUpload(layout, 0u, 0u));
+	EXPECT_FALSE(Gen5ValidateTextureArrayUpload(layout, 0u, guest_size - 1u));
+	EXPECT_FALSE(Gen5ValidateTextureArrayUpload(layout, k_layers, guest_size));
+}
+
+TEST(EmulatorTileDetile, DetilesBc6hCubeArraySliceAndTail)
+{
+	constexpr uint32_t k_format = 179u;
+	constexpr uint32_t k_width  = 64u;
+	constexpr uint32_t k_height = 64u;
+	constexpr uint32_t k_levels = 7u;
+	constexpr uint32_t k_layers = 6u;
+	constexpr uint32_t k_bpe    = 16u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, k_width, k_height, k_width, k_levels, 5u, k_layers, &layout));
+	ASSERT_TRUE(layout.has_mip_layout);
+	ASSERT_EQ(layout.mip_layout.first_tail_level, 1u);
+	ASSERT_FALSE(layout.mip_layout.level[0].in_mip_tail);
+	ASSERT_TRUE(layout.mip_layout.level[1].in_mip_tail);
+
+	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0u);
+	std::vector<uint8_t> expected(static_cast<size_t>(layout.linear_size), 0u);
+
+	const auto plant = [&](uint32_t layer, uint32_t level, uint32_t elem_x, uint32_t elem_y, uint8_t tag)
+	{
+		const auto& entry = layout.mip_layout.level[level];
+		std::array<uint8_t, k_bpe> block {};
+		for (uint32_t byte = 0; byte < k_bpe; ++byte)
+		{
+			block[byte] = static_cast<uint8_t>(tag + byte);
+		}
+		const uint32_t tiled_x = entry.in_mip_tail ? entry.tail_x + elem_x : elem_x;
+		const uint32_t tiled_y = entry.in_mip_tail ? entry.tail_y + elem_y : elem_y;
+		const uint32_t tiled_pitch = entry.in_mip_tail ? 16u : entry.tiled_pitch;
+		const uint64_t tiled_offset = static_cast<uint64_t>(layer) * layout.tiled_slice.size + entry.tiled_offset +
+		                              TileGetStandard4KBOffset(tiled_x, tiled_y, tiled_pitch, k_bpe);
+		const uint64_t linear_offset = static_cast<uint64_t>(layer) * layout.linear_slice_size + entry.linear_offset +
+		                               (static_cast<uint64_t>(elem_y) * entry.element_width + elem_x) * k_bpe;
+		ASSERT_LE(tiled_offset + k_bpe, tiled.size());
+		ASSERT_LE(linear_offset + k_bpe, expected.size());
+		std::memcpy(tiled.data() + tiled_offset, block.data(), block.size());
+		std::memcpy(expected.data() + linear_offset, block.data(), block.size());
+	};
+
+	plant(0u, 0u, 0u, 0u, 0x10u);
+	plant(5u, 0u, 1u, 0u, 0x40u);
+	plant(2u, 1u, 0u, 0u, 0x80u);
+
+	std::vector<uint8_t> actual(expected.size(), 0u);
+	ASSERT_TRUE(Gen5DetileTextureArray(actual.data(), actual.size(), tiled.data(), tiled.size(), layout));
+	EXPECT_EQ(actual, expected);
+	EXPECT_TRUE(Gen5ValidateTextureArrayUpload(layout, 0u, layout.tiled_size));
+}
+
+TEST(EmulatorTileDetile, BuildsBc6hCubeUploadRegionsInTexels)
+{
+	constexpr uint32_t k_format = 179u;
+	constexpr uint32_t k_width  = 2048u;
+	constexpr uint32_t k_height = 2048u;
+	constexpr uint32_t k_levels = 12u;
+	constexpr uint32_t k_layers = 6u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, k_width, k_height, k_width, k_levels, 5u, k_layers, &layout));
+	ASSERT_TRUE(layout.has_mip_layout);
+
+	uint32_t region_count = 0;
+	ASSERT_TRUE(Gen5FillTextureArrayUploadRegions(layout, nullptr, 0u, &region_count));
+	EXPECT_EQ(region_count, k_layers * k_levels);
+
+	std::vector<Gen5TextureArrayUploadRegion> regions(static_cast<size_t>(region_count));
+	ASSERT_TRUE(Gen5FillTextureArrayUploadRegions(layout, regions.data(), region_count, &region_count));
+	ASSERT_EQ(region_count, k_layers * k_levels);
+
+	const auto& mip0 = regions[0];
+	EXPECT_EQ(mip0.offset, 0u);
+	EXPECT_EQ(mip0.pitch_texels, k_width);
+	EXPECT_EQ(mip0.width, k_width);
+	EXPECT_EQ(mip0.height, k_height);
+	EXPECT_EQ(mip0.dst_level, 0u);
+	EXPECT_EQ(mip0.dst_array_layer, 0u);
+
+	const uint32_t last_index = (k_layers - 1u) * k_levels;
+	EXPECT_EQ(regions[last_index].offset, static_cast<uint64_t>(k_layers - 1u) * layout.linear_slice_size);
+	EXPECT_EQ(regions[last_index].dst_array_layer, k_layers - 1u);
+	EXPECT_EQ(regions[last_index].dst_level, 0u);
+	EXPECT_EQ(regions[last_index].pitch_texels, k_width);
+
+	const auto& one_by_one = regions[k_levels - 1u];
+	EXPECT_EQ(one_by_one.dst_level, k_levels - 1u);
+	EXPECT_EQ(one_by_one.width, 1u);
+	EXPECT_EQ(one_by_one.height, 1u);
+	EXPECT_EQ(one_by_one.pitch_texels, 4u);
+	EXPECT_LE(one_by_one.offset, static_cast<uint64_t>(UINT32_MAX));
+}
+
+TEST(EmulatorTileDetile, StreamsArrayDetilePerLayerWithoutFullLinearStaging)
+{
+	constexpr uint32_t k_format = 181u;
+	constexpr uint32_t k_width  = 64u;
+	constexpr uint32_t k_height = 64u;
+	constexpr uint32_t k_levels = 7u;
+	constexpr uint32_t k_layers = 6u;
+	constexpr uint32_t k_bpe    = 16u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, k_width, k_height, k_width, k_levels, 5u, k_layers, &layout));
+	ASSERT_GT(layout.linear_size, layout.linear_slice_size);
+
+	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0u);
+	const auto plant = [&](uint32_t layer, uint32_t level, uint8_t tag)
+	{
+		const auto& entry = layout.mip_layout.level[level];
+		std::array<uint8_t, k_bpe> block {};
+		block[0] = tag;
+		const uint32_t tiled_x     = entry.in_mip_tail ? entry.tail_x : 0u;
+		const uint32_t tiled_y     = entry.in_mip_tail ? entry.tail_y : 0u;
+		const uint32_t tiled_pitch = entry.in_mip_tail ? 16u : entry.tiled_pitch;
+		const uint64_t tiled_offset = static_cast<uint64_t>(layer) * layout.tiled_slice.size + entry.tiled_offset +
+		                              TileGetStandard4KBOffset(tiled_x, tiled_y, tiled_pitch, k_bpe);
+		ASSERT_LE(tiled_offset + k_bpe, tiled.size());
+		std::memcpy(tiled.data() + tiled_offset, block.data(), block.size());
+	};
+	plant(0u, 0u, 0x21u);
+	plant(5u, 0u, 0x45u);
+	plant(2u, 1u, 0x67u);
+
+	std::vector<uint8_t> full(static_cast<size_t>(layout.linear_size), 0u);
+	ASSERT_TRUE(Gen5DetileTextureArray(full.data(), full.size(), tiled.data(), tiled.size(), layout));
+
+	std::vector<uint8_t> slice(static_cast<size_t>(layout.linear_slice_size), 0u);
+	EXPECT_LT(slice.size(), full.size());
+	for (uint32_t layer = 0; layer < k_layers; ++layer)
+	{
+		ASSERT_TRUE(Gen5DetileTextureArrayLayer(slice.data(), slice.size(), tiled.data(), tiled.size(), layout, layer));
+		EXPECT_EQ(std::memcmp(slice.data(), full.data() + static_cast<size_t>(layer) * layout.linear_slice_size,
+		                      static_cast<size_t>(layout.linear_slice_size)),
+		          0);
+
+		uint32_t layer_regions = 0;
+		ASSERT_TRUE(Gen5FillTextureArrayLayerUploadRegions(layout, layer, nullptr, 0u, &layer_regions));
+		EXPECT_EQ(layer_regions, k_levels);
+		std::vector<Gen5TextureArrayUploadRegion> regions(static_cast<size_t>(layer_regions));
+		ASSERT_TRUE(Gen5FillTextureArrayLayerUploadRegions(layout, layer, regions.data(), layer_regions, &layer_regions));
+		EXPECT_EQ(regions[0].offset, 0u);
+		EXPECT_EQ(regions[0].dst_array_layer, layer);
+		EXPECT_EQ(regions[0].dst_level, 0u);
+		EXPECT_LT(regions[0].offset + layout.mip_layout.level[0].linear_size, layout.linear_size);
+	}
+
+	EXPECT_FALSE(Gen5DetileTextureArrayLayer(slice.data(), slice.size(), tiled.data(), tiled.size(), layout, k_layers));
+	EXPECT_FALSE(Gen5DetileTextureArrayLayer(slice.data(), slice.size() - 1u, tiled.data(), tiled.size(), layout, 0u));
+}
+
+TEST(EmulatorTileDetile, LastMipOfStreamedBc7CubeKeepsPlantedBlock)
+{
+	constexpr uint32_t k_format = 181u;
+	constexpr uint32_t k_width  = 64u;
+	constexpr uint32_t k_height = 64u;
+	constexpr uint32_t k_levels = 7u;
+	constexpr uint32_t k_layers = 6u;
+	constexpr uint32_t k_bpe    = 16u;
+	constexpr uint32_t k_last   = k_levels - 1u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, k_width, k_height, k_width, k_levels, 5u, k_layers, &layout));
+	ASSERT_TRUE(layout.has_mip_layout);
+	EXPECT_EQ(layout.mip_layout.level[k_last].width, 1u);
+	EXPECT_EQ(layout.mip_layout.level[k_last].height, 1u);
+
+	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0u);
+	const auto plant = [&](uint32_t layer, uint8_t tag)
+	{
+		const auto& entry = layout.mip_layout.level[k_last];
+		std::array<uint8_t, k_bpe> block {};
+		block[0] = tag;
+		const uint32_t tiled_x     = entry.in_mip_tail ? entry.tail_x : 0u;
+		const uint32_t tiled_y     = entry.in_mip_tail ? entry.tail_y : 0u;
+		const uint32_t tiled_pitch = entry.in_mip_tail ? 16u : entry.tiled_pitch;
+		const uint64_t tiled_offset = static_cast<uint64_t>(layer) * layout.tiled_slice.size + entry.tiled_offset +
+		                              TileGetStandard4KBOffset(tiled_x, tiled_y, tiled_pitch, k_bpe);
+		ASSERT_LE(tiled_offset + k_bpe, tiled.size());
+		std::memcpy(tiled.data() + tiled_offset, block.data(), block.size());
+	};
+	plant(0u, 0xA1u);
+	plant(5u, 0xB2u);
+
+	std::vector<uint8_t> slice(static_cast<size_t>(layout.linear_slice_size), 0u);
+	ASSERT_TRUE(Gen5DetileTextureArrayLayer(slice.data(), slice.size(), tiled.data(), tiled.size(), layout, 0u));
+	EXPECT_EQ(slice[layout.mip_layout.level[k_last].linear_offset], 0xA1u);
+	ASSERT_TRUE(Gen5DetileTextureArrayLayer(slice.data(), slice.size(), tiled.data(), tiled.size(), layout, 5u));
+	EXPECT_EQ(slice[layout.mip_layout.level[k_last].linear_offset], 0xB2u);
+
+	uint32_t region_count = 0;
+	ASSERT_TRUE(Gen5FillTextureArrayLayerUploadRegions(layout, 0u, nullptr, 0u, &region_count));
+	ASSERT_EQ(region_count, k_levels);
+	std::vector<Gen5TextureArrayUploadRegion> regions(static_cast<size_t>(region_count));
+	ASSERT_TRUE(Gen5FillTextureArrayLayerUploadRegions(layout, 0u, regions.data(), region_count, &region_count));
+	EXPECT_EQ(regions[k_last].dst_level, k_last);
+	EXPECT_EQ(regions[k_last].width, 1u);
+	EXPECT_EQ(regions[k_last].height, 1u);
+	EXPECT_EQ(regions[k_last].offset, layout.mip_layout.level[k_last].linear_offset);
+}
+
+TEST(EmulatorTileDetile, DepthOnlyD16ShadowPassKeepsWritableAttachment)
+{
+	// Census: target_mask=0, color_targets=0, D16 2048x1024, depth_write=1.
+	// Sanitize must not drop that attachment just because there is no color.
+	RenderColorInfo           color {};
+	RenderDepthInfo           depth {};
+	DepthStencilVulkanImage   image;
+	image.SetNativeExtent(2048u, 1024u);
+	depth.format             = VK_FORMAT_D16_UNORM;
+	depth.vulkan_buffer      = &image;
+	depth.width              = 2048u;
+	depth.height             = 1024u;
+	depth.depth_test_enable  = true;
+	depth.depth_write_enable = true;
+
+	SanitizeRenderDepthAgainstColor(&color, &depth);
+	EXPECT_EQ(depth.format, VK_FORMAT_D16_UNORM);
+	EXPECT_EQ(depth.vulkan_buffer, &image);
+	EXPECT_TRUE(depth.depth_write_enable);
+	EXPECT_TRUE(depth.depth_test_enable);
+}
+
+TEST(EmulatorTileDetile, CompressedHostMipCountStopsAtFourTexelBlock)
+{
+	EXPECT_EQ(Gen5CompressedHostMipCount(1024u, 1024u, 11u), 9u);
+	EXPECT_EQ(Gen5CompressedHostMipCount(8u, 8u, 4u), 2u);
+	EXPECT_EQ(Gen5CompressedHostMipCount(4u, 4u, 3u), 1u);
+	EXPECT_EQ(Gen5CompressedHostMipCount(512u, 512u, 1u), 1u);
+	EXPECT_EQ(Gen5CompressedHostMipCount(0u, 0u, 4u), 1u);
+}
+
+TEST(EmulatorTileDetile, Standard4KBBc1WorldAlbedoMipChainMatchesGuestSize)
+{
+	// World-material BC1 1024² last_level=10 (11 levels) uploaded at 700416 bytes.
+	// Implicit LOD on that chain is what minifies distant surfaces; a mismatched
+	// tiled size would leave high mips unwritten and wash the scene gray/black.
+	constexpr uint32_t k_format = 169u;
+	constexpr uint32_t k_extent = 1024u;
+	constexpr uint32_t k_levels = 11u;
+	constexpr uint64_t k_guest  = 700416u;
+
+	Gen5TextureMipLayout mip {};
+	ASSERT_TRUE(Gen5GetStandard4KBTextureMipLayout(k_format, k_extent, k_extent, k_extent, k_levels, &mip));
+	EXPECT_EQ(mip.levels, k_levels);
+	EXPECT_EQ(static_cast<uint64_t>(mip.tiled.size), k_guest);
+	uint32_t covered = 0;
+	for (uint32_t level = 0; level < k_levels; ++level)
+	{
+		EXPECT_GT(mip.level[level].width, 0u);
+		EXPECT_GT(mip.level[level].linear_size, 0u);
+		const uint64_t end = static_cast<uint64_t>(mip.level[level].linear_offset) + mip.level[level].linear_size;
+		EXPECT_LE(end, mip.linear_size);
+		++covered;
+	}
+	EXPECT_EQ(covered, k_levels);
+}
+
+TEST(EmulatorTileDetile, ParsesDrawPsTraceCensusAndExactChecksum)
+{
+	DrawPsTraceConfig config {};
+	ASSERT_TRUE(ParseDrawPsTraceConfig(nullptr, nullptr, &config));
+	EXPECT_FALSE(config.enabled);
+	EXPECT_FALSE(config.census);
+
+	ASSERT_TRUE(ParseDrawPsTraceConfig("2100099068cc5c23", "8", &config));
+	EXPECT_TRUE(config.enabled);
+	EXPECT_FALSE(config.census);
+	EXPECT_EQ(config.checksum, 0x2100099068cc5c23ull);
+	EXPECT_EQ(config.limit, 8u);
+
+	ASSERT_TRUE(ParseDrawPsTraceConfig("*", "99", &config));
+	EXPECT_TRUE(config.enabled);
+	EXPECT_TRUE(config.census);
+	EXPECT_EQ(config.limit, 32u);
+
+	ASSERT_TRUE(ParseDrawPsTraceConfig("all", "0", &config));
+	EXPECT_TRUE(config.enabled);
+	EXPECT_TRUE(config.census);
+	EXPECT_EQ(config.limit, 1u);
+
+	ASSERT_TRUE(ParseDrawPsTraceConfig("not-hex", nullptr, &config));
+	EXPECT_FALSE(config.enabled);
+
+	ASSERT_TRUE(ParseDrawPsTraceConfig("210007008f216aeb,21000870488b957d,21000700b1844274", "16", &config));
+	EXPECT_TRUE(config.enabled);
+	EXPECT_FALSE(config.census);
+	EXPECT_EQ(config.checksum_count, 3);
+	EXPECT_EQ(config.checksum, 0x210007008f216aebull);
+	EXPECT_EQ(config.checksums[1], 0x21000870488b957dull);
+	EXPECT_EQ(config.checksums[2], 0x21000700b1844274ull);
+	EXPECT_TRUE(DrawPsTraceChecksumMatch(config, 0x210007008f216aebull));
+	EXPECT_TRUE(DrawPsTraceChecksumMatch(config, 0x21000700b1844274ull));
+	EXPECT_FALSE(DrawPsTraceChecksumMatch(config, 0x210005b0766a27a5ull));
+	EXPECT_EQ(config.limit, 16u);
+}
+
+TEST(EmulatorTileDetile, ResolvesCubeSampleBindAndFarSkyDepthCoverage)
+{
+	const auto flat = ResolveCubeSampleBind(9u, VulkanImage::VIEW_DEFAULT);
+	EXPECT_FALSE(flat.is_cube);
+	EXPECT_FALSE(flat.uses_array_view);
+	EXPECT_FALSE(flat.st_window_unbias);
+	EXPECT_FALSE(flat.face_as_layer);
+
+	const auto cube = ResolveCubeSampleBind(11u, VulkanImage::VIEW_ARRAY);
+	EXPECT_TRUE(cube.is_cube);
+	EXPECT_TRUE(cube.uses_array_view);
+	EXPECT_TRUE(cube.st_window_unbias);
+	EXPECT_TRUE(cube.face_as_layer);
+
+	const auto wrong_view = ResolveCubeSampleBind(11u, VulkanImage::VIEW_DEFAULT);
+	EXPECT_TRUE(wrong_view.is_cube);
+	EXPECT_FALSE(wrong_view.uses_array_view);
+	EXPECT_TRUE(wrong_view.face_as_layer);
+
+	const auto sky = ResolveCubeDrawDepthCoverage(true, false, false, static_cast<uint32_t>(VK_COMPARE_OP_GREATER_OR_EQUAL));
+	EXPECT_TRUE(sky.far_sky_can_pass_empty);
+	const auto shadowed = ResolveCubeDrawDepthCoverage(true, true, false, static_cast<uint32_t>(VK_COMPARE_OP_GREATER_OR_EQUAL));
+	EXPECT_FALSE(shadowed.far_sky_can_pass_empty);
+}
+
+TEST(EmulatorTileDetile, UnnormalizedSamplerAllowanceIsPerSamplerView)
+{
+	EXPECT_TRUE(SamplerViewAllowsUnnormalized(ShaderGen5SampledTextureShape::TwoDimensional));
+	EXPECT_FALSE(SamplerViewAllowsUnnormalized(ShaderGen5SampledTextureShape::TwoDimensionalArray));
+	EXPECT_FALSE(SamplerViewAllowsUnnormalized(ShaderGen5SampledTextureShape::ThreeDimensional));
+
+	ShaderTextureResources textures {};
+	textures.textures_num = 2;
+	textures.desc[0].usage                           = ShaderTextureUsage::ReadOnly;
+	textures.desc[0].slot                            = 0;
+	textures.desc[0].sampled_shape                   = ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	textures.desc[0].sampled_shape_from_instruction  = true;
+	textures.desc[1].usage                           = ShaderTextureUsage::ReadOnly;
+	textures.desc[1].slot                            = 1;
+	textures.desc[1].sampled_shape                   = ShaderGen5SampledTextureShape::TwoDimensional;
+	textures.desc[1].sampled_shape_from_instruction  = true;
+
+	// A cubemap in the same draw must not disable ForceUnorm on the 2D Dref sampler.
+	EXPECT_FALSE(BindSamplerAllowsUnnormalized(textures, 0));
+	EXPECT_TRUE(BindSamplerAllowsUnnormalized(textures, 1));
+
+	ShaderTextureResources cube_only {};
+	cube_only.textures_num = 1;
+	cube_only.desc[0].usage                          = ShaderTextureUsage::ReadOnly;
+	cube_only.desc[0].slot                           = 0;
+	cube_only.desc[0].sampled_shape                  = ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	cube_only.desc[0].sampled_shape_from_instruction = true;
+	EXPECT_FALSE(BindSamplerAllowsUnnormalized(cube_only, 0));
+	EXPECT_FALSE(BindSamplerAllowsUnnormalized(cube_only, 1));
+
+	ShaderTextureResources flat_only {};
+	flat_only.textures_num = 2;
+	flat_only.desc[0].usage                          = ShaderTextureUsage::ReadOnly;
+	flat_only.desc[0].slot                           = 0;
+	flat_only.desc[0].sampled_shape_from_instruction = true;
+	flat_only.desc[1].usage                          = ShaderTextureUsage::ReadOnly;
+	flat_only.desc[1].slot                           = 1;
+	flat_only.desc[1].sampled_shape_from_instruction = true;
+	EXPECT_TRUE(BindSamplerAllowsUnnormalized(flat_only, 0));
+	EXPECT_TRUE(BindSamplerAllowsUnnormalized(flat_only, 1));
+}
+
+TEST(EmulatorTileDetile, ClassifiesBc6hUfloatModeBitsFromPublicSpec)
+{
+	uint8_t mode0[16] {};
+	EXPECT_EQ(Gen5Bc6hUfloatMode(mode0, 16u), 0u);
+	EXPECT_TRUE(Gen5Bc6hUfloatModeIsDefined(0u));
+
+	uint8_t mode10[16] {};
+	mode10[0] = 0x03u; // bits4:0 = 00011
+	EXPECT_EQ(Gen5Bc6hUfloatMode(mode10, 16u), 10u);
+
+	uint8_t mode11[16] {};
+	mode11[0] = 0x07u; // bits4:0 = 00111
+	EXPECT_EQ(Gen5Bc6hUfloatMode(mode11, 16u), 11u);
+
+	uint8_t reserved[16] {};
+	reserved[0] = 0x13u; // bits4:0 = 10011
+	EXPECT_EQ(Gen5Bc6hUfloatMode(reserved, 16u), 0xFFu);
+	EXPECT_FALSE(Gen5Bc6hUfloatModeIsDefined(0xFFu));
+	EXPECT_EQ(Gen5Bc6hUfloatMode(mode10, 8u), 0xFFu);
+}
+
+TEST(EmulatorTileDetile, PreservesBc6hCubeFaceModesAfterStandard4KBDetile)
+{
+	constexpr uint32_t k_format = 179u;
+	constexpr uint32_t k_width  = 64u;
+	constexpr uint32_t k_height = 64u;
+	constexpr uint32_t k_levels = 7u;
+	constexpr uint32_t k_layers = 6u;
+	constexpr uint32_t k_bpe    = 16u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, k_width, k_height, k_width, k_levels, 5u, k_layers, &layout));
+	ASSERT_TRUE(layout.has_mip_layout);
+	ASSERT_FALSE(layout.mip_layout.level[0].in_mip_tail);
+	const auto& mip0 = layout.mip_layout.level[0];
+
+	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0u);
+	const auto plant_face = [&](uint32_t layer, uint8_t mode_byte)
+	{
+		for (uint32_t y = 0; y < mip0.element_height; ++y)
+		{
+			for (uint32_t x = 0; x < mip0.element_width; ++x)
+			{
+				const uint64_t tiled_offset = static_cast<uint64_t>(layer) * layout.tiled_slice.size + mip0.tiled_offset +
+				                              TileGetStandard4KBOffset(x, y, mip0.tiled_pitch, k_bpe);
+				ASSERT_LE(tiled_offset + k_bpe, tiled.size());
+				tiled[static_cast<size_t>(tiled_offset)] = mode_byte;
+				for (uint32_t byte = 1; byte < k_bpe; ++byte)
+				{
+					tiled[static_cast<size_t>(tiled_offset + byte)] = static_cast<uint8_t>(0xA0u + byte);
+				}
+			}
+		}
+	};
+	plant_face(0u, 0x03u); // defined mode 10
+	plant_face(5u, 0x07u); // defined mode 11
+
+	std::vector<uint8_t> linear(static_cast<size_t>(layout.linear_size), 0xFFu);
+	ASSERT_TRUE(Gen5DetileTextureArray(linear.data(), linear.size(), tiled.data(), tiled.size(), layout));
+
+	const uint64_t face0 = 0u;
+	const uint64_t face1 = layout.linear_slice_size;
+	const uint64_t face5 = static_cast<uint64_t>(5u) * layout.linear_slice_size;
+	EXPECT_EQ(Gen5Bc6hUfloatMode(linear.data() + face0 + mip0.linear_offset, 16u), 10u);
+	EXPECT_EQ(Gen5Bc6hUfloatMode(linear.data() + face5 + mip0.linear_offset, 16u), 11u);
+	EXPECT_EQ(Gen5CountDefinedBc6hUfloatBlocks(linear.data(), linear.size(), face0 + mip0.linear_offset, mip0.element_width,
+	                                          mip0.element_height, k_bpe),
+	          mip0.element_width * mip0.element_height);
+	EXPECT_EQ(Gen5CountDefinedBc6hUfloatBlocks(linear.data(), linear.size(), face5 + mip0.linear_offset, mip0.element_width,
+	                                          mip0.element_height, k_bpe),
+	          mip0.element_width * mip0.element_height);
+	// Unplanted face 1 stays zero-filled (mode 0), not mixed with face 0/5 headers.
+	EXPECT_EQ(linear[static_cast<size_t>(face1 + mip0.linear_offset)], 0u);
+	EXPECT_EQ(Gen5Bc6hUfloatMode(linear.data() + face1 + mip0.linear_offset, 16u), 0u);
+	EXPECT_NE(linear[static_cast<size_t>(face0 + mip0.linear_offset)], linear[static_cast<size_t>(face5 + mip0.linear_offset)]);
+}
+
+TEST(EmulatorTileDetile, ClassifiesZeroBc6hAsMode0AndZeroBc7AsInvalid)
+{
+	uint8_t zero[16] {};
+	EXPECT_EQ(Gen5Bc6hUfloatMode(zero, 16u), 0u);
+	EXPECT_TRUE(Gen5Bc6hUfloatModeIsDefined(0u));
+	EXPECT_EQ(Gen5Bc7Mode(zero, 16u), 0xFFu);
+	EXPECT_FALSE(Gen5Bc7ModeIsDefined(0xFFu));
+
+	uint8_t bc7_mode0[16] {};
+	bc7_mode0[0] = 0x01u;
+	EXPECT_EQ(Gen5Bc7Mode(bc7_mode0, 16u), 0u);
+	EXPECT_TRUE(Gen5Bc7ModeIsDefined(0u));
+
+	uint8_t bc7_mode3[16] {};
+	bc7_mode3[0] = 0x08u;
+	EXPECT_EQ(Gen5Bc7Mode(bc7_mode3, 16u), 3u);
+}
+
+TEST(EmulatorTileDetile, ClassifiesDetiledCubeFaceContentAfterUploadPath)
+{
+	constexpr uint32_t k_format = 179u;
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, 64u, 64u, 64u, 7u, 5u, 6u, &layout));
+	std::vector<uint8_t> linear(static_cast<size_t>(layout.linear_size), 0u);
+
+	Gen5DetiledCubeFaceStats empty {};
+	ASSERT_TRUE(Gen5ClassifyDetiledCubeFace(linear.data(), linear.size(), layout, 0u, 179u, 16u, &empty));
+	EXPECT_EQ(empty.sampled_blocks, 16u);
+	EXPECT_EQ(empty.nonzero_bytes, 0u);
+	EXPECT_EQ(empty.first_mode, 0u);
+	EXPECT_EQ(empty.defined_modes, 16u);
+	EXPECT_EQ(empty.reserved_modes, 0u);
+
+	Gen5DetiledCubeFaceStats empty_bc7 {};
+	ASSERT_TRUE(Gen5ClassifyDetiledCubeFace(linear.data(), linear.size(), layout, 0u, 181u, 16u, &empty_bc7));
+	EXPECT_EQ(empty_bc7.nonzero_bytes, 0u);
+	EXPECT_EQ(empty_bc7.first_mode, 0xFFu);
+	EXPECT_EQ(empty_bc7.defined_modes, 0u);
+	EXPECT_EQ(empty_bc7.reserved_modes, 16u);
+
+	const auto& mip0 = layout.mip_layout.level[0];
+	linear[mip0.linear_offset] = 0x03u;
+	linear[mip0.linear_offset + 1u] = 0xABu;
+	Gen5DetiledCubeFaceStats planted {};
+	ASSERT_TRUE(Gen5ClassifyDetiledCubeFace(linear.data(), linear.size(), layout, 0u, 179u, 8u, &planted));
+	EXPECT_EQ(planted.sampled_blocks, 8u);
+	EXPECT_EQ(planted.first_mode, 10u);
+	EXPECT_GT(planted.nonzero_bytes, 0u);
+	EXPECT_EQ(planted.first_block[0], 0x03u);
+	EXPECT_EQ(planted.first_block[1], 0xABu);
+	EXPECT_FALSE(Gen5ClassifyDetiledCubeFace(linear.data(), linear.size(), layout, 0u, 56u, 8u, &planted));
 }
 
 UT_END();

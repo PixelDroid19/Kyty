@@ -126,6 +126,13 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // always wrong even when FindRenderTexture misses on the first bind. BC1 (ufmt
 // 133) package textures may still detile from guest when uncovered.
 // Tile 9 (kStandard64KB) remains package RGBA8/RGBA16F when uncovered.
+// Guest T# BC1 is RDNA2 ufmt 169 (UNORM) / 170 (SRGB). Catalog 133 is the
+// same 8-byte 4x4 block family used by older tile-27 package fixtures.
+[[nodiscard]] inline bool Gen5IsBc1PackageFormat(uint32_t ufmt)
+{
+	return ufmt == 133u || ufmt == 169u || ufmt == 170u;
+}
+
 [[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt, bool live_color_surface_covers)
 {
 	if (tile == 0u)
@@ -139,7 +146,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	if (tile == 27u)
 	{
 		// Only BC1 package data may detile kRenderTarget layout from guest.
-		return ufmt == 133u;
+		return Gen5IsBc1PackageFormat(ufmt);
 	}
 	if (tile == 9u)
 	{
@@ -534,25 +541,34 @@ struct DepthAttachmentLoadOps
 // Guest HTILE/register clears map to attachment loadOp CLEAR. No invented color CLEAR0.
 // When not clearing, LOAD OPTIMAL preserves prior DS contents. Depth-only CLEAR uses
 // UNDEFINED init, so stencil cannot LOAD in that pass (DONT_CARE unless stencil clears).
-[[nodiscard]] inline DepthAttachmentLoadOps ResolveDepthAttachmentLoadOps(VkFormat format, bool depth_clear, bool stencil_clear)
+// First GPU-owned use (tracked UNDEFINED) has no prior contents: the depth object
+// never uploads guest bytes. LOAD then samples undefined host pixels (often ~1).
+// Reverse-Z GEQUAL against ~1 fails almost every SAMPLE_C. Treat UNDEFINED like
+// a LOAD with no prior contents: CLEAR. The clear value is DB_DEPTH_CLEAR
+// (0 by default = zeroed guest memory / reverse-Z far).
+[[nodiscard]] inline DepthAttachmentLoadOps ResolveDepthAttachmentLoadOps(
+    VkFormat format, bool depth_clear, bool stencil_clear,
+    VkImageLayout tracked_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
 {
 	DepthAttachmentLoadOps ops {};
 	const bool             has_stencil = DepthFormatHasStencil(format);
-	ops.depth_load                     = depth_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+	const bool             first_use   = tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED;
+	const bool             clear_depth = depth_clear || first_use;
+	ops.depth_load                     = clear_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
 	if (!has_stencil)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	} else if (stencil_clear)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	} else if (depth_clear)
+	} else if (clear_depth)
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	} else
 	{
 		ops.stencil_load = VK_ATTACHMENT_LOAD_OP_LOAD;
 	}
-	ops.initial_layout = (depth_clear || stencil_clear) ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	ops.initial_layout = (clear_depth || stencil_clear) ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 	return ops;
 }
 
@@ -719,6 +735,8 @@ struct ImageImageCopy
 };
 
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image, uint64_t dst_layout);
+void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image,
+                            uint64_t dst_layout);
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanImage* dst_image, const Vector<BufferImageCopy>& regions,
                        uint64_t dst_layout);
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,
@@ -727,11 +745,15 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
                    uint64_t dst_layout);
+void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
+                        uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, const Vector<BufferImageCopy>& regions,
                    uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout,
                     uint32_t src_array_layer = 0);
+void UtilFillDepthBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image,
+                         uint64_t src_layout);
 // Write tightly or strided RGBA8 rows as a top-down PNG. Native capture uses
 // this path so graphics diagnostics and agent artifacts share one portable
 // image format.

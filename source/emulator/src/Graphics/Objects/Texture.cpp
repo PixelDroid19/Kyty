@@ -36,11 +36,20 @@ namespace Kyty::Libs::Graphics {
 
 uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format)
 {
-	if (format != 56u && format != 71u && format != 133u)
+	if (format != 56u && format != 71u && !Gen5IsBc1PackageFormat(format))
 	{
 		return 0u;
 	}
 	return ShaderGen5TextureBytesPerElement(format);
+}
+
+static uint32_t resolve_host_mip_count(uint16_t fmt, uint32_t width, uint32_t height, uint32_t guest_levels)
+{
+	if (!ShaderGen5TextureIsBlockCompressed(fmt))
+	{
+		return guest_levels;
+	}
+	return Gen5CompressedHostMipCount(width, height, guest_levels);
 }
 
 bool TextureGetSurfaceCopyArrayRange(uint8_t resource_type, uint32_t depth, uint32_t base_array, uint32_t levels,
@@ -111,6 +120,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num != 1);
 
 	auto* vk_obj = static_cast<TextureVulkanImage*>(obj);
+	vk_obj->guest_size = *size;
 
 	auto       tile              = params[TextureObject::PARAM_TILE];
 	auto       fmt               = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
@@ -126,10 +136,19 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	auto       base_array        = TextureObject::GetResourceBaseArray(resource_info);
 	bool       neo               = Config::IsNeo();
 	const bool skip_guest        = params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0;
+	const bool depth_view        = params[TextureObject::PARAM_DEPTH_VIEW] != 0;
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
 
 	VkImageLayout vk_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	// A writable StorageBuffer parent owns the authoritative D16 tile bytes.
+	// The renderer records its detile and upload in the active graphics command
+	// buffer immediately after creation; do not clear or read stale guest bytes
+	// through the private utility queue here.
+	if (skip_guest && depth_view)
+	{
+		return;
+	}
 
 	// SKIPPED: levels >= 16
 	if (levels >= 16)
@@ -193,47 +212,116 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			     array_layout.tiled_size, array_layout.layers, array_layout.levels);
 		}
 
-		std::vector<uint8_t> linear(static_cast<size_t>(array_layout.linear_size));
-		if (!Gen5DetileTextureArray(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, array_layout))
+		// Stream one layer at a time. A 4096^2 x6 BC7 cube is ~128 MiB linear;
+		// allocating every face plus a padded mip0 temp stalls the load path.
+		std::vector<uint8_t> slice(static_cast<size_t>(array_layout.linear_slice_size));
+		uint32_t             layer_region_count = 0;
+		if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, 0u, nullptr, 0u, &layer_region_count) ||
+		    layer_region_count == 0u)
 		{
-			EXIT("Gen5 2D-array detile failed: format=%u layers=%u levels=%u tile=%u\n", static_cast<unsigned>(fmt),
-			     array_layout.layers, array_layout.levels, array_layout.tile);
+			EXIT("Gen5 2D-array layer upload regions are invalid: layers=%u levels=%u\n", array_layout.layers, array_layout.levels);
 		}
+		std::vector<Gen5TextureArrayUploadRegion> upload_regions(static_cast<size_t>(layer_region_count));
+		Vector<BufferImageCopy>                   regions(static_cast<int>(layer_region_count));
 
-		const uint32_t region_count = array_layout.layers * array_layout.levels;
-		Vector<BufferImageCopy> regions(static_cast<int>(region_count));
-		uint32_t                region_index = 0;
-		for (uint32_t layer = 0; layer < array_layout.layers; ++layer)
+		const bool cube_trace_wanted = (std::getenv("KYTY_TRACE_CUBE_CONTENT") != nullptr &&
+		                                std::getenv("KYTY_TRACE_CUBE_CONTENT")[0] != '\0' && array_layout.layers >= 6u &&
+		                                (fmt == 179u || fmt == 181u));
+		uint32_t                 cube_trace_ordinal = 0;
+		bool                     cube_trace_active  = false;
+		Gen5DetiledCubeFaceStats cube_face0 {};
+		Gen5DetiledCubeFaceStats cube_face5 {};
+		bool                     cube_ok0 = false;
+		bool                     cube_ok5 = false;
+		if (cube_trace_wanted)
 		{
-			const uint64_t layer_base = static_cast<uint64_t>(layer) * array_layout.linear_slice_size;
-			if (array_layout.has_mip_layout)
+			static std::atomic_uint32_t cube_trace_count {0};
+			uint32_t                    cube_limit = 32u;
+			if (const char* limit = std::getenv("KYTY_TRACE_CUBE_CONTENT_LIMIT"); limit != nullptr && limit[0] != '\0')
 			{
-				for (uint32_t level = 0; level < array_layout.levels; ++level)
+				char* end = nullptr;
+				const unsigned long parsed = std::strtoul(limit, &end, 10);
+				if (end != limit && *end == '\0')
 				{
-					const auto&    level_layout = array_layout.mip_layout.level[level];
-					const uint64_t row_pitch =
-					    static_cast<uint64_t>(level_layout.element_width) * array_layout.mip_layout.texels_per_element_x;
-					regions[region_index].offset          = static_cast<uint32_t>(layer_base + level_layout.linear_offset);
-					regions[region_index].pitch           = static_cast<uint32_t>(row_pitch);
-					regions[region_index].width           = level_layout.width;
-					regions[region_index].height          = level_layout.height;
-					regions[region_index].dst_level       = level;
-					regions[region_index].dst_array_layer = layer;
-					region_index++;
+					cube_limit = std::clamp(static_cast<uint32_t>(parsed), 1u, 32u);
 				}
 			}
-			else
-			{
-				regions[region_index].offset          = static_cast<uint32_t>(layer_base);
-				regions[region_index].pitch           = array_layout.host_pitch;
-				regions[region_index].width           = array_layout.width;
-				regions[region_index].height          = array_layout.height;
-				regions[region_index].dst_level       = 0;
-				regions[region_index].dst_array_layer = layer;
-				region_index++;
-			}
+			cube_trace_ordinal = cube_trace_count.fetch_add(1, std::memory_order_relaxed);
+			cube_trace_active  = cube_trace_ordinal < cube_limit;
 		}
-		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+
+		for (uint32_t layer = 0; layer < array_layout.layers; ++layer)
+		{
+			if (!Gen5DetileTextureArrayLayer(slice.data(), slice.size(), reinterpret_cast<const void*>(*vaddr), *size, array_layout,
+			                                 layer))
+			{
+				EXIT("Gen5 2D-array layer detile failed: format=%u layer=%u layers=%u levels=%u tile=%u\n",
+				     static_cast<unsigned>(fmt), layer, array_layout.layers, array_layout.levels, array_layout.tile);
+			}
+			if (cube_trace_active && (layer == 0u || layer == 5u))
+			{
+				Gen5DetiledCubeFaceStats* stats = (layer == 0u ? &cube_face0 : &cube_face5);
+				const bool ok = Gen5ClassifyDetiledCubeFace(slice.data(), slice.size(), array_layout, 0u,
+				                                            static_cast<uint32_t>(fmt), 16u, stats);
+				if (layer == 0u)
+				{
+					cube_ok0 = ok;
+				} else
+				{
+					cube_ok5 = ok;
+				}
+			}
+			uint32_t filled = layer_region_count;
+			if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, layer, upload_regions.data(), layer_region_count, &filled) ||
+			    filled != layer_region_count)
+			{
+				EXIT("Gen5 2D-array layer upload region fill failed: layer=%u layers=%u levels=%u\n", layer, array_layout.layers,
+				     array_layout.levels);
+			}
+			for (uint32_t region_index = 0; region_index < layer_region_count; ++region_index)
+			{
+				const auto& upload                    = upload_regions[region_index];
+				regions[region_index].offset          = static_cast<uint32_t>(upload.offset);
+				regions[region_index].pitch           = upload.pitch_texels;
+				regions[region_index].width           = upload.width;
+				regions[region_index].height          = upload.height;
+				regions[region_index].dst_level       = upload.dst_level;
+				regions[region_index].dst_array_layer = upload.dst_array_layer;
+				regions[region_index].dst_x           = 0;
+				regions[region_index].dst_y           = 0;
+				regions[region_index].dst_z           = 0;
+				regions[region_index].depth           = 1u;
+			}
+			UtilFillImage(ctx, vk_obj, slice.data(), slice.size(), regions, static_cast<uint64_t>(vk_layout));
+		}
+
+		if (cube_trace_active)
+		{
+			FILE* out = stderr;
+			if (const char* path = std::getenv("KYTY_TRACE_CUBE_CONTENT_LOG"); path != nullptr && path[0] != '\0')
+			{
+				static FILE* file = std::fopen(path, "w");
+				if (file != nullptr)
+				{
+					out = file;
+				}
+			}
+			std::fprintf(out,
+			             "KYTY_TRACE_CUBE_CONTENT ordinal=%u fmt=%u tile=%u layers=%u levels=%u guest_size=%" PRIu64
+			             " linear_size=%" PRIu64 " addr=0x%012" PRIx64
+			             " face0_ok=%u face0_blocks=%u face0_nonzero=%u face0_defined=%u face0_reserved=%u face0_mode=%u"
+			             " face0_hdr=%02x%02x%02x%02x"
+			             " face5_ok=%u face5_blocks=%u face5_nonzero=%u face5_defined=%u face5_reserved=%u face5_mode=%u"
+			             " face5_hdr=%02x%02x%02x%02x\n",
+			             cube_trace_ordinal, static_cast<unsigned>(fmt), array_layout.tile, array_layout.layers, array_layout.levels,
+			             *size, array_layout.linear_size, *vaddr, cube_ok0 ? 1u : 0u, cube_face0.sampled_blocks,
+			             cube_face0.nonzero_bytes, cube_face0.defined_modes, cube_face0.reserved_modes, cube_face0.first_mode,
+			             cube_face0.first_block[0], cube_face0.first_block[1], cube_face0.first_block[2], cube_face0.first_block[3],
+			             cube_ok5 ? 1u : 0u, cube_face5.sampled_blocks, cube_face5.nonzero_bytes, cube_face5.defined_modes,
+			             cube_face5.reserved_modes, cube_face5.first_mode, cube_face5.first_block[0], cube_face5.first_block[1],
+			             cube_face5.first_block[2], cube_face5.first_block[3]);
+			std::fflush(out);
+		}
 		return;
 	}
 	if (fmt != 0u && tile == 5u && levels > 1u)
@@ -283,8 +371,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			}
 		}
 
-		Vector<BufferImageCopy> regions(static_cast<int>(levels));
-		for (uint32_t level = 0; level < levels; level++)
+		const uint32_t          host_levels = resolve_host_mip_count(static_cast<uint16_t>(fmt), static_cast<uint32_t>(width),
+		                                                    static_cast<uint32_t>(height), levels);
+		Vector<BufferImageCopy> regions(static_cast<int>(host_levels));
+		for (uint32_t level = 0; level < host_levels; level++)
 		{
 			const auto&    level_layout = mip_layout.level[level];
 			const uint64_t row_pitch    = static_cast<uint64_t>(level_layout.element_width) * mip_layout.texels_per_element_x;
@@ -635,17 +725,29 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			UtilFillImage(ctx, vk_obj, temp_buf.data(), linear_bytes, regions, static_cast<uint64_t>(vk_layout));
 		} else if (tile == 24)
 		{
-			if (fmt != 22u || levels != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fmt != 22u || levels != 1u condition ignored (continuing)\n"); }
-			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * 4u;
+			const uint32_t bytes_per_element = depth_view ? 2u : 4u;
+			if ((depth_view && fmt != 7u) || (!depth_view && fmt != 22u) || levels != 1u)
+			{
+				EXIT("unsupported depth tile upload: format=%u levels=%u depth_view=%u\n", static_cast<unsigned>(fmt),
+				     static_cast<unsigned>(levels), depth_view ? 1u : 0u);
+			}
+			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * bytes_per_element;
 			if (linear_bytes == 0u || linear_bytes > *size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n"); }
 			std::vector<uint8_t> linear(static_cast<size_t>(linear_bytes));
-			TileConvertDepth64KB32ToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
-			                               static_cast<uint32_t>(height), static_cast<uint32_t>(pitch));
-			regions[0].offset = 0;
-			regions[0].width  = static_cast<uint32_t>(width);
-			regions[0].height = static_cast<uint32_t>(height);
-			regions[0].pitch  = static_cast<uint32_t>(width);
-			UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+			TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
+			                            static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
+			if (depth_view)
+			{
+				UtilFillDepthImage(ctx, vk_obj, linear.data(), linear.size(), static_cast<uint32_t>(width),
+				                   static_cast<uint64_t>(vk_layout));
+			} else
+			{
+				regions[0].offset = 0;
+				regions[0].width  = static_cast<uint32_t>(width);
+				regions[0].height = static_cast<uint32_t>(height);
+				regions[0].pitch  = static_cast<uint32_t>(width);
+				UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+			}
 		} else if (tile == 27 || tile == 9)
 		{
 			// Tiled sample texture: detile into tightly packed linear rows then
@@ -653,24 +755,24 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// before create; this path covers pure CPU-backed sample textures.
 			// tile 27 = kRenderTarget layout; tile 9 = kStandard64KB
 			// (RGBA8/RGBA16F package data).
-			// BC1 (fmt 133) detiles compressed 4x4 blocks as 8-byte elements on
-			// tile 27 only.
+			// BC1 (catalog 133 / guest 169 UNORM / 170 SRGB) detiles compressed
+			// 4x4 blocks as 8-byte elements on tile 27 only.
 			// SKIPPED: tile == 9 && fmt != 56 && fmt != 71
 			if (tile == 9 && fmt != 56 && fmt != 71)
 			{
 				KYTY_LOG_DEBUG("WARNING: skipped check: tile == 9 && fmt != 56 && fmt != 71\n");
 			}
-			// SKIPPED: fmt != 56 && fmt != 71 && fmt != 133
-			if (fmt != 56 && fmt != 71 && fmt != 133)
+			// SKIPPED: fmt != 56 && fmt != 71 && !Gen5IsBc1PackageFormat(fmt)
+			if (fmt != 56 && fmt != 71 && !Gen5IsBc1PackageFormat(static_cast<uint32_t>(fmt)))
 			{
-				KYTY_LOG_DEBUG("WARNING: skipped check: fmt != 56 && fmt != 71 && fmt != 133\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: fmt != 56 && fmt != 71 && !Gen5IsBc1PackageFormat(fmt)\n");
 			}
 			// SKIPPED: levels != 1
 			if (levels != 1)
 			{
 				KYTY_LOG_DEBUG("WARNING: skipped check: levels != 1\n");
 			}
-			const bool bc1 = (fmt == 133u);
+			const bool bc1 = Gen5IsBc1PackageFormat(static_cast<uint32_t>(fmt));
 			const uint32_t bpp = TextureGetGen5TiledSampleBytesPerElement(fmt);
 			if (bpp == 0u)
 			{
@@ -1213,6 +1315,7 @@ struct TextureImageViewConfiguration
 	uint32_t           depth             = 1;
 	bool               three_dimensional = false;
 	bool               arrayed_2d        = false;
+	bool               depth_view        = false;
 };
 
 static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint64_t* params, VulkanMemory* mem,
@@ -1225,7 +1328,8 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	const auto nfmt          = static_cast<uint8_t>(params[TextureObject::PARAM_FORMAT] & 0xffu);
 	const auto width         = static_cast<uint32_t>(params[TextureObject::PARAM_WIDTH_HEIGHT] >> 32u);
 	const auto height        = static_cast<uint32_t>(params[TextureObject::PARAM_WIDTH_HEIGHT]);
-	const auto levels        = static_cast<uint32_t>(params[TextureObject::PARAM_LEVELS]);
+	const auto guest_levels  = static_cast<uint32_t>(params[TextureObject::PARAM_LEVELS]);
+	const auto levels        = resolve_host_mip_count(fmt, width, height, guest_levels);
 	const auto resource_info = params[TextureObject::PARAM_RESOURCE_INFO];
 	const auto resource_type = TextureObject::GetResourceType(resource_info);
 	const auto force_degamma = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0;
@@ -1235,6 +1339,7 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	view_config->base_array        = TextureObject::GetResourceBaseArray(resource_info);
 	view_config->three_dimensional = resource_type == 10u;
 	view_config->arrayed_2d        = resource_type == 13u || resource_type == 11u;
+	view_config->depth_view        = params[TextureObject::PARAM_DEPTH_VIEW] != 0u;
 
 	if (resource_type != 8u && resource_type != 9u && !view_config->arrayed_2d && !view_config->three_dimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_type != 8u && resource_type != 9u && !view_config->arrayed_2d && !view_config->three_dimensional condition ignored (continuing)\n"); }
 	if (width == 0 || height == 0 || levels == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0 || height == 0 || levels == 0 condition ignored (continuing)\n"); }
@@ -1243,7 +1348,8 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	if (
 	    !VulkanDecodeComponentMapping(static_cast<uint32_t>(params[TextureObject::PARAM_SWIZZLE]), &view_config->components)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanDecodeComponentMapping(static_cast<uint32_t>(params[TextureObject::PARAM_ condition ignored (continuing)\n"); }
 
-	const auto pixel_format = VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, dfmt, nfmt, fmt, force_degamma);
+	const auto pixel_format = view_config->depth_view ? VK_FORMAT_D16_UNORM :
+	                                                  VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, dfmt, nfmt, fmt, force_degamma);
 	if (pixel_format == VK_FORMAT_UNDEFINED) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pixel_format == VK_FORMAT_UNDEFINED condition ignored (continuing)\n"); }
 
 	VulkanImageDescriptor image_descriptor {};
@@ -1252,7 +1358,7 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	image_descriptor.mip_levels   = levels;
 	image_descriptor.array_layers = view_config->arrayed_2d ? view_config->depth : 1u;
 	image_descriptor.format       = pixel_format;
-	image_descriptor.usage        = get_usage();
+	image_descriptor.usage        = get_usage() | (view_config->depth_view ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : 0u);
 	auto image_info               = VulkanBuildImageCreateInfo(image_descriptor);
 
 	if (!VulkanImageFormatSupported(ctx, image_info))
@@ -1283,6 +1389,16 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 	descriptor.components     = config.components;
 	descriptor.base_mip_level = config.base_level;
 	descriptor.level_count    = VK_REMAINING_MIP_LEVELS;
+	if (config.depth_view)
+	{
+		descriptor.components  = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_R};
+		descriptor.aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
+		if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]))
+		{
+			EXIT("failed to create D16 sampled-depth image view\n");
+		}
+		return;
+	}
 
 	const int view_index = config.three_dimensional ? VulkanImage::VIEW_3D : VulkanImage::VIEW_DEFAULT;
 	if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[view_index])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[view_index]) condition ignored (continuing)\n"); }
@@ -1353,7 +1469,8 @@ bool TextureObject::Equal(const uint64_t* other) const
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && params[PARAM_LEVELS] == other[PARAM_LEVELS] &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
 	        params[PARAM_SWIZZLE] == other[PARAM_SWIZZLE] && params[PARAM_FORCE_DEGAMMA] == other[PARAM_FORCE_DEGAMMA] &&
-	        params[PARAM_SKIP_GUEST_UPLOAD] == other[PARAM_SKIP_GUEST_UPLOAD] && params[PARAM_RESOURCE_INFO] == other[PARAM_RESOURCE_INFO]);
+	        params[PARAM_SKIP_GUEST_UPLOAD] == other[PARAM_SKIP_GUEST_UPLOAD] && params[PARAM_RESOURCE_INFO] == other[PARAM_RESOURCE_INFO] &&
+	        params[PARAM_DEPTH_VIEW] == other[PARAM_DEPTH_VIEW]);
 }
 
 GpuObject::create_func_t TextureObject::GetCreateFunc() const
@@ -1363,7 +1480,7 @@ GpuObject::create_func_t TextureObject::GetCreateFunc() const
 
 GpuObject::create_from_objects_func_t TextureObject::GetCreateFromObjectsFunc() const
 {
-	return create2_func;
+	return params[PARAM_DEPTH_VIEW] != 0u ? nullptr : create2_func;
 }
 
 GpuObject::delete_func_t TextureObject::GetDeleteFunc() const

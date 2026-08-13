@@ -1091,8 +1091,27 @@ uint64_t TileGetStandard64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems,
 	return (blk_idx * 65536u) + Standard64KBWithinBlockOffset(x % block_w, y % block_h, bytes_per_element);
 }
 
-static uint32_t Depth64KB32WithinBlockOffset(uint32_t x, uint32_t y)
+static uint32_t Depth64KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
 {
+	if (bytes_per_element == 2u)
+	{
+		uint32_t offset = 0;
+		offset ^= (x << 1u) & 0x0002u;
+		offset ^= (x << 2u) & 0x0008u;
+		offset ^= (x << 3u) & 0x0020u;
+		offset ^= (x << 4u) & 0x0480u;
+		offset ^= (x << 5u) & 0x0300u;
+		offset ^= (x << 6u) & 0x0800u;
+		offset ^= (x << 7u) & 0x2000u;
+		offset ^= (x << 8u) & 0x8000u;
+		offset ^= (y << 2u) & 0x0004u;
+		offset ^= (y << 3u) & 0x0010u;
+		offset ^= (y << 4u) & 0x0040u;
+		offset ^= (y << 5u) & 0x0f00u;
+		offset ^= (y << 8u) & 0x5000u;
+		return offset;
+	}
+	EXIT_IF(bytes_per_element != 4u);
 	uint32_t x_offset = 0;
 	x_offset ^= (x << 2u) & 0x0004u;
 	x_offset ^= (x << 3u) & 0x0010u;
@@ -1110,20 +1129,24 @@ static uint32_t Depth64KB32WithinBlockOffset(uint32_t x, uint32_t y)
 	return x_offset ^ y_offset;
 }
 
-uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
+uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	if (pitch_elems == 0u || (pitch_elems % 128u) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported condition ignored (continuing)\n"); }
+	EXIT_IF(bytes_per_element != 2u && bytes_per_element != 4u);
+	const uint32_t block_width = bytes_per_element == 2u ? 256u : 128u;
+	if (pitch_elems == 0u || (pitch_elems % block_width) != 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported condition ignored (continuing)\n"); }
 
-	static constexpr uint32_t k_block       = 128u;
+	static constexpr uint32_t k_block_height = 128u;
 	static constexpr uint32_t k_block_bytes = 65536u;
-	const uint32_t            blocks_x      = pitch_elems / k_block;
-	const uint32_t            xb            = x / k_block;
-	const uint32_t            yb            = y / k_block;
+	const uint32_t            blocks_x      = pitch_elems / block_width;
+	const uint32_t            xb            = x / block_width;
+	const uint32_t            yb            = y / k_block_height;
 	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
-	return (block_index * k_block_bytes) + Depth64KB32WithinBlockOffset(x % k_block, y % k_block);
+	return (block_index * k_block_bytes) +
+	       Depth64KBWithinBlockOffset(x % block_width, y % k_block_height, bytes_per_element);
 }
 
-void TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
+void TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
+	                              uint32_t bytes_per_element)
 {
 	EXIT_IF(dst == nullptr || src == nullptr);
 	TileDetileRequest request {};
@@ -1133,12 +1156,22 @@ void TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, 
 	request.height            = height;
 	request.pitch_elems       = pitch_elems;
 	request.dst_pitch_elems   = width;
-	request.bytes_per_element = 4u;
-	request.layout            = TileDetileLayout::Depth64KB32;
+	request.bytes_per_element = bytes_per_element;
+	request.layout            = TileDetileLayout::Depth64KB;
 	if (!TileDetile(request))
 	{
-		EXIT("TileConvertDepth64KB32ToLinear unsupported request\n");
+		EXIT("TileConvertDepth64KBToLinear unsupported request\n");
 	}
+}
+
+uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
+{
+	return TileGetDepth64KBOffset(x, y, pitch_elems, 4u);
+}
+
+void TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
+{
+	TileConvertDepth64KBToLinear(dst, src, width, height, pitch_elems, 4u);
 }
 
 static uint32_t Standard4KB32WithinBlockOffset(uint32_t x, uint32_t y)
@@ -1997,7 +2030,10 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 
 			if (levels != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: levels != 1 condition ignored (continuing)\n"); }
 			if (tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format) condition ignored (continuing)\n"); }
-			if (tile == 0x18u && format != 22u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tile == 0x18u && format != 22u condition ignored (continuing)\n"); }
+			if (tile == 0x18u && format != 7u && format != 22u)
+			{
+				EXIT("unsupported Gen5 depth tile format: tile=%u format=%u\n", tile, format);
+			}
 
 			const bool     bc1          = (format == 133u);
 			const uint32_t elem_width   = bc1 ? std::max((width + 3u) / 4u, 1u) : width;
@@ -2040,18 +2076,20 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// fit the documented one-level block geometry.
 		if (tile == 0x05u)
 		{
-			const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
+			const uint32_t bpp              = ShaderGen5TextureBytesPerElement(format);
+			const bool     block_compressed = ShaderGen5TextureIsBlockCompressed(format);
 			if (bpp == 0u || bpp > 16u || (bpp & (bpp - 1u)) != 0u || levels != 1u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bpp == 0u || bpp > 16u || (bpp & (bpp - 1u)) != 0u || levels != 1u condition ignored (continuing)\n"); }
-			const bool     bc3            = format == 173u;
-			const uint32_t element_height = bc3 ? (height + 3u) / 4u : height;
-			const uint32_t pitch_texels   = (pitch != 0u ? pitch : width);
-			const uint32_t element_pitch  = bc3 ? (pitch_texels + 3u) / 4u : pitch_texels;
-			const uint32_t block_width    = bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u);
-			const uint32_t block_height   = bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u);
-			const uint32_t padded_width   = (element_pitch + block_width - 1u) & ~(block_width - 1u);
-			const uint32_t padded_height  = (element_height + block_height - 1u) & ~(block_height - 1u);
+			const uint64_t texels_per_element = block_compressed ? 4u : 1u;
+			const uint64_t element_height = (static_cast<uint64_t>(height) + texels_per_element - 1u) / texels_per_element;
+			const uint64_t pitch_texels   = (pitch != 0u ? pitch : width);
+			const uint64_t element_pitch  = (pitch_texels + texels_per_element - 1u) / texels_per_element;
+			const uint64_t block_width    = bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u);
+			const uint64_t block_height   = bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u);
+			const uint64_t padded_width   = (element_pitch + block_width - 1u) & ~(block_width - 1u);
+			const uint64_t padded_height  = (element_height + block_height - 1u) & ~(block_height - 1u);
 			const uint64_t bytes          = static_cast<uint64_t>(padded_width) * padded_height * bpp;
-			if (bytes > UINT32_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes > UINT32_MAX condition ignored (continuing)\n"); }
+			EXIT_IF(bytes == 0u || bytes > UINT32_MAX || padded_width > UINT32_MAX / texels_per_element ||
+			        padded_height > UINT32_MAX / texels_per_element);
 			if (total_size != nullptr)
 			{
 				total_size->size  = static_cast<uint32_t>(bytes);
@@ -2064,8 +2102,8 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			}
 			if (padded_size != nullptr)
 			{
-				padded_size[0].width  = bc3 ? padded_width * 4u : padded_width;
-				padded_size[0].height = bc3 ? padded_height * 4u : padded_height;
+				padded_size[0].width  = static_cast<uint32_t>(padded_width * texels_per_element);
+				padded_size[0].height = static_cast<uint32_t>(padded_height * texels_per_element);
 			}
 			return;
 		}

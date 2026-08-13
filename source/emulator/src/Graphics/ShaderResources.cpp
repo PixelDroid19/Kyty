@@ -915,6 +915,57 @@ void ShaderPruneUnusedMetadataStorage(const ShaderCode& code, ShaderStorageResou
 	ExcludeUnusedMetadataStorage(resources);
 }
 
+void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info)
+{
+	if (info == nullptr || !info->fetch_embedded || info->buffers_num <= 0)
+	{
+		return;
+	}
+
+	auto& storage = info->bind.storage_buffers;
+	for (int i = 0; i < info->buffers_num; i++)
+	{
+		auto& stream = info->buffers[i];
+		stream.storage_slot = -1;
+		if (stream.addr == 0 || stream.stride == 0 || stream.num_records == 0)
+		{
+			continue;
+		}
+		bool already = false;
+		for (int existing = 0; existing < storage.buffers_num; existing++)
+		{
+			// Reuse only a stream-style SSBO. Regular storage rewrites word0
+			// to the slot index, so its vsharp base is no longer the guest V#.
+			if (storage.buffers[existing].Base48() == stream.addr && storage.start_register[existing] < 0)
+			{
+				stream.storage_slot = existing;
+				already             = true;
+				break;
+			}
+		}
+		if (already || storage.buffers_num >= ShaderStorageResources::BUFFERS_MAX)
+		{
+			continue;
+		}
+
+		const int index = storage.buffers_num;
+		ShaderBufferResource resource {};
+		resource.UpdateAddress48(stream.addr);
+		resource.fields[1] = (resource.fields[1] & 0x0000ffffu) | (static_cast<uint32_t>(stream.stride & 0x3fffu) << 16u);
+		resource.fields[2] = stream.num_records;
+
+		storage.buffers[index]          = resource;
+		storage.usages[index]           = ShaderStorageUsage::ReadOnly;
+		storage.accesses[index]         = ShaderStorageAccess::Raw;
+		storage.sources[index]          = ShaderStorageBindingSource::DirectResource;
+		storage.raw_tbuffer_use[index]  = true;
+		storage.slots[index]            = index;
+		storage.start_register[index]   = -1;
+		storage.buffers_num++;
+		stream.storage_slot = index;
+	}
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

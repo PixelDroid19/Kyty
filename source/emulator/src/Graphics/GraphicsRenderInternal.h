@@ -46,8 +46,11 @@
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Kernel/EventQueue.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -258,7 +261,8 @@ public:
 	void                 Free(VulkanDescriptorSet* set);
 
 	VulkanDescriptorSet* GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
-	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_array_sampled,
+	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
+	                                   const int* textures2d_sampled_depth_view, VulkanImage** textures2d_array_sampled,
 	                                   const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
 	                                   const int* textures3d_sampled_view, VulkanImage** textures2d_sampled_uint,
 	                                   const int* textures2d_sampled_uint_view, VulkanImage** textures2d_array_sampled_uint,
@@ -281,6 +285,9 @@ private:
 		int                  textures2d_sampled_num                        = 0;
 		uint64_t             textures2d_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
 		uint8_t              textures2d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
+		int                  textures2d_sampled_depth_num                        = 0;
+		uint64_t             textures2d_sampled_depth_id[TEXTURES_SAMPLED_MAX]   = {};
+		uint8_t              textures2d_sampled_depth_view[TEXTURES_SAMPLED_MAX] = {};
 		int                  textures2d_array_sampled_num                        = 0;
 		uint64_t             textures2d_array_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
 		uint8_t              textures2d_array_sampled_view[TEXTURES_SAMPLED_MAX] = {};
@@ -346,7 +353,7 @@ public:
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
 	VkSampler GetSampler(uint64_t id);
-	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation);
+	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized = true);
 	void      DeleteAllForTesting(GraphicContext* ctx);
 
 private:
@@ -354,6 +361,7 @@ private:
 	{
 		ShaderSamplerResource r;
 		State::ImageSampleOperation operation {};
+		bool                  allow_unnormalized = true;
 		VkSampler             vk = nullptr;
 	};
 
@@ -372,6 +380,8 @@ struct VulkanFramebuffer
 	uint32_t                  depth_attachment_index            = VK_ATTACHMENT_UNUSED;
 	VkAttachmentLoadOp        color_load_op[TARGETS_MAX]        = {};
 	VkImageLayout             color_initial_layout[TARGETS_MAX] = {};
+	VkAttachmentLoadOp        depth_load_op                     = VK_ATTACHMENT_LOAD_OP_LOAD;
+	VkImageLayout             depth_initial_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkImageLayout             depth_stencil_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkExtent2D                 extent                            = {};
 };
@@ -408,6 +418,8 @@ private:
 		bool               depth_stencil_read_only = false;
 		VkAttachmentLoadOp color_load_op[8]        = {};
 		VkImageLayout      color_initial_layout[8] = {};
+		VkAttachmentLoadOp depth_load_op           = VK_ATTACHMENT_LOAD_OP_LOAD;
+		VkImageLayout      depth_initial_layout    = VK_IMAGE_LAYOUT_UNDEFINED;
 	};
 
 	Core::Mutex                  m_mutex;
@@ -605,6 +617,221 @@ struct RenderColorInfo
 	RenderColorAttachmentInfo attachment[TARGETS_MAX] {};
 };
 
+// Opt-in PS bind probe. KYTY_TRACE_DRAW_PS is a hex checksum, a comma-separated
+// list of up to four checksums, or "*" / "all" for a unique-checksum census.
+// Limit is always clamped to [1, 32].
+struct DrawPsTraceConfig
+{
+	bool     enabled         = false;
+	bool     census          = false;
+	uint64_t checksum        = 0;
+	uint64_t checksums[4]    = {};
+	int      checksum_count  = 0;
+	uint32_t limit           = 32;
+};
+
+[[nodiscard]] inline bool DrawPsTraceChecksumMatch(const DrawPsTraceConfig& config, uint64_t checksum)
+{
+	if (config.census)
+	{
+		return true;
+	}
+	for (int i = 0; i < config.checksum_count && i < 4; ++i)
+	{
+		if (config.checksums[i] == checksum)
+		{
+			return true;
+		}
+	}
+	return config.checksum_count == 0 && config.checksum != 0 && config.checksum == checksum;
+}
+
+[[nodiscard]] inline bool ParseDrawPsTraceConfig(const char* value, const char* limit, DrawPsTraceConfig* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+	out->limit = 32u;
+	if (value == nullptr || value[0] == '\0')
+	{
+		return true;
+	}
+	if (std::strcmp(value, "*") == 0 || std::strcmp(value, "all") == 0 || std::strcmp(value, "ALL") == 0)
+	{
+		out->enabled = true;
+		out->census  = true;
+	}
+	else
+	{
+		const char* cursor = value;
+		while (*cursor != '\0' && out->checksum_count < 4)
+		{
+			char* end = nullptr;
+			const uint64_t checksum = std::strtoull(cursor, &end, 16);
+			if (end == cursor || (*end != '\0' && *end != ','))
+			{
+				*out       = {};
+				out->limit = 32u;
+				return true;
+			}
+			out->checksums[out->checksum_count++] = checksum;
+			cursor                                = (*end == ',') ? end + 1 : end;
+		}
+		if (out->checksum_count == 0)
+		{
+			return true;
+		}
+		out->enabled  = true;
+		out->checksum = out->checksums[0];
+	}
+	if (limit != nullptr && limit[0] != '\0')
+	{
+		char* limit_end = nullptr;
+		const unsigned long parsed = std::strtoul(limit, &limit_end, 10);
+		if (limit_end != limit && *limit_end == '\0')
+		{
+			out->limit = std::clamp(static_cast<uint32_t>(parsed), 1u, 32u);
+		}
+	}
+	return true;
+}
+
+// Guest type 11 cubemaps are sampled as a 2D array. Sampler ops use the
+// RDNA2 [1,2] ST window (unbias by 1) and face_id as the array layer.
+struct CubeSampleBind
+{
+	bool is_cube         = false;
+	bool uses_array_view = false;
+	bool st_window_unbias = false;
+	bool face_as_layer   = false;
+};
+
+[[nodiscard]] inline CubeSampleBind ResolveCubeSampleBind(uint8_t guest_type, int view)
+{
+	CubeSampleBind bind {};
+	if (guest_type != 11u)
+	{
+		return bind;
+	}
+	bind.is_cube          = true;
+	bind.uses_array_view  = view == VulkanImage::VIEW_ARRAY;
+	bind.st_window_unbias = true;
+	bind.face_as_layer    = true;
+	return bind;
+}
+
+// Skybox-style coverage: depth test on, no depth write, GEQUAL. Against a
+// reverse-Z far of 0 the far sky (z≈0) can pass empty pixels.
+struct CubeDrawDepthCoverage
+{
+	bool     test_enable            = false;
+	bool     write_enable           = false;
+	bool     clear_enable           = false;
+	uint32_t compare_op             = 0;
+	bool     far_sky_can_pass_empty = false;
+};
+
+[[nodiscard]] inline CubeDrawDepthCoverage ResolveCubeDrawDepthCoverage(bool test_enable, bool write_enable, bool clear_enable,
+                                                                        uint32_t compare_op)
+{
+	CubeDrawDepthCoverage coverage {};
+	coverage.test_enable            = test_enable;
+	coverage.write_enable           = write_enable;
+	coverage.clear_enable           = clear_enable;
+	coverage.compare_op             = compare_op;
+	coverage.far_sky_can_pass_empty = test_enable && !write_enable && compare_op == static_cast<uint32_t>(VK_COMPARE_OP_GREATER_OR_EQUAL);
+	return coverage;
+}
+
+// Vulkan forbids unnormalizedCoordinates on cube, 2D-array, and 3D views.
+// The restriction is per sampler/view pair: a 2D Dref sampler in the same
+// draw as a cubemap may still take ForceUnorm.
+[[nodiscard]] inline bool SamplerViewAllowsUnnormalized(ShaderGen5SampledTextureShape shape)
+{
+	return shape == ShaderGen5SampledTextureShape::TwoDimensional;
+}
+
+[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+{
+	bool matched = false;
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		const auto& descriptor = textures.desc[i];
+		if (descriptor.usage != ShaderTextureUsage::ReadOnly || descriptor.slot != sampler_slot)
+		{
+			continue;
+		}
+		matched = true;
+		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
+		{
+			return false;
+		}
+	}
+	if (matched)
+	{
+		return true;
+	}
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		const auto& descriptor = textures.desc[i];
+		if (descriptor.usage != ShaderTextureUsage::ReadOnly)
+		{
+			continue;
+		}
+		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// Draw-local context for an opt-in, bounded material-binding diagnostic.
+// BindDescriptors only borrows these pointers for the duration of the call.
+struct DrawMaterialTraceContext
+{
+	uint64_t                     ps_checksum             = 0;
+	uint64_t                     ps_addr                 = 0;
+	uint64_t                     vs_checksum             = 0;
+	uint64_t                     vs_addr                 = 0;
+	int                          vs_export_count         = 0;
+	bool                         indexed                 = false;
+	uint32_t                     primitive_type          = 0;
+	uint32_t                     guest_count             = 0;
+	uint32_t                     index_type              = 0;
+	uint64_t                     index_addr              = 0;
+	uint64_t                     index_size              = 0;
+	int32_t                      vertex_offset           = 0;
+	uint32_t                     required_vertex_records = 0;
+	const ShaderVertexInputInfo* vertex_input            = nullptr;
+	const RenderColorInfo*       color                   = nullptr;
+	const RenderDepthInfo*       depth                   = nullptr;
+	uint32_t                     declared_vertex_records = 0;
+	uint32_t                     target_mask             = 0;
+	uint32_t                     blend_enable            = 0;
+	uint32_t                     blend_src               = 0;
+	uint32_t                     blend_op                = 0;
+	uint32_t                     blend_dst               = 0;
+	uint32_t                     blend_bypass            = 0;
+	uint32_t                     color_mask              = 0;
+	uint32_t                     color_on_depth_fail     = 0;
+	uint32_t                     color_off_depth_pass    = 0;
+	uint32_t                     cull_front              = 0;
+	uint32_t                     cull_back               = 0;
+	uint32_t                     face                    = 0;
+	float                        vp_x                    = 0.0f;
+	float                        vp_y                    = 0.0f;
+	float                        vp_width                = 0.0f;
+	float                        vp_height               = 0.0f;
+	float                        vp_zmin                 = 0.0f;
+	float                        vp_zmax                 = 1.0f;
+	uint32_t                     dx_clip                 = 0;
+	uint32_t                     ps_input_num            = 0;
+	uint32_t                     interpolators[8]        = {};
+};
+
 class CommandPool
 {
 public:
@@ -661,6 +888,7 @@ extern thread_local CommandPool g_command_pool;
 // --- Dump globals (Core) ---
 constexpr uint32_t k_dump_rt_slots = 4;
 extern VulkanImage* g_dump_rt_images[k_dump_rt_slots];
+extern VulkanImage* g_dump_depth_image;
 extern uint32_t     g_dump_rt_count;
 extern VulkanImage* g_dump_bc3_image;
 extern VulkanImage* g_dump_bc3_compute_source;
@@ -733,7 +961,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 	                   uint32_t required_records);
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                     uint32_t storage_seed_skip_mask = 0);
+                     uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr);
 void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
 
 

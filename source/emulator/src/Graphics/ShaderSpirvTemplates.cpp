@@ -929,7 +929,8 @@ const char TBUFFER_LOAD_FORMAT_X[] = R"(
 )";
 
 const char TBUFFER_LOAD_FORMAT_XY[] = R"(
-; Load the two 32-bit components of legacy 32_32_FLOAT / RDNA2 unified format 64.
+; Load two components. Unified format 29 is R16G16_SFLOAT (one dword, unpack
+; half2). Format 64 / everything else is two 32-bit floats.
 %tbuffer_load_format_xy = OpFunction %void None %function_tbuffer_load_store_format_xy
 %tbuf_l_f_xy_1 = OpFunctionParameter %_ptr_Function_float
 %tbuf_l_f_xy_2 = OpFunctionParameter %_ptr_Function_float
@@ -946,6 +947,21 @@ const char TBUFFER_LOAD_FORMAT_XY[] = R"(
 %tbuf_l_f_xy_13 = OpIAdd %int %tbuf_l_f_xy_9 %tbuf_l_f_xy_12
 %tbuf_l_f_xy_14 = OpSDiv %int %tbuf_l_f_xy_13 %int_4
 %tbuf_l_f_xy_15 = OpLoad %int %tbuf_l_f_xy_6
+%tbuf_l_f_xy_fmt = OpLoad %int %tbuf_l_f_xy_7
+%tbuf_l_f_xy_is29 = OpIEqual %bool %tbuf_l_f_xy_fmt %int_29
+OpSelectionMerge %tbuf_l_f_xy_merge None
+OpBranchConditional %tbuf_l_f_xy_is29 %tbuf_l_f_xy_f16 %tbuf_l_f_xy_f32
+%tbuf_l_f_xy_f16 = OpLabel
+%tbuf_l_f_xy_16h = OpAccessChain %_ptr_StorageBuffer_float %buf %tbuf_l_f_xy_15 %int_0 %tbuf_l_f_xy_14
+%tbuf_l_f_xy_17h = OpLoad %float %tbuf_l_f_xy_16h
+%tbuf_l_f_xy_bits = OpBitcast %uint %tbuf_l_f_xy_17h
+%tbuf_l_f_xy_halfs = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %tbuf_l_f_xy_bits
+%tbuf_l_f_xy_hx = OpCompositeExtract %float %tbuf_l_f_xy_halfs 0
+%tbuf_l_f_xy_hy = OpCompositeExtract %float %tbuf_l_f_xy_halfs 1
+OpStore %tbuf_l_f_xy_1 %tbuf_l_f_xy_hx
+OpStore %tbuf_l_f_xy_2 %tbuf_l_f_xy_hy
+OpBranch %tbuf_l_f_xy_merge
+%tbuf_l_f_xy_f32 = OpLabel
 %tbuf_l_f_xy_16 = OpAccessChain %_ptr_StorageBuffer_float %buf %tbuf_l_f_xy_15 %int_0 %tbuf_l_f_xy_14
 %tbuf_l_f_xy_17 = OpLoad %float %tbuf_l_f_xy_16
 OpStore %tbuf_l_f_xy_1 %tbuf_l_f_xy_17
@@ -953,6 +969,68 @@ OpStore %tbuf_l_f_xy_1 %tbuf_l_f_xy_17
 %tbuf_l_f_xy_19 = OpAccessChain %_ptr_StorageBuffer_float %buf %tbuf_l_f_xy_15 %int_0 %tbuf_l_f_xy_18
 %tbuf_l_f_xy_20 = OpLoad %float %tbuf_l_f_xy_19
 OpStore %tbuf_l_f_xy_2 %tbuf_l_f_xy_20
+OpBranch %tbuf_l_f_xy_merge
+%tbuf_l_f_xy_merge = OpLabel
+OpReturn
+OpFunctionEnd
+)";
+
+const char TBUFFER_LOAD_FORMAT_XYZ[] = R"(
+; Load three components. Unified format 71 is R16G16B16A16_SFLOAT (two dwords,
+; unpack half4 and keep xyz). Format 74 is R32G32B32_SFLOAT (three dwords).
+; tbuffer_load_format_xyzw only accepts 75-77/119, so RGB32F must not go there.
+%tbuffer_load_format_xyz = OpFunction %void None %function_tbuffer_load_store_format_xyz
+%tbuf_l_f_xyz_1 = OpFunctionParameter %_ptr_Function_float
+%tbuf_l_f_xyz_2 = OpFunctionParameter %_ptr_Function_float
+%tbuf_l_f_xyz_3 = OpFunctionParameter %_ptr_Function_float
+%tbuf_l_f_xyz_4 = OpFunctionParameter %_ptr_Function_int
+%tbuf_l_f_xyz_5 = OpFunctionParameter %_ptr_Function_int
+%tbuf_l_f_xyz_6 = OpFunctionParameter %_ptr_Function_int
+%tbuf_l_f_xyz_7 = OpFunctionParameter %_ptr_Function_int
+%tbuf_l_f_xyz_8 = OpFunctionParameter %_ptr_Function_int
+%tbuf_l_f_xyz_9 = OpLabel
+%tbuf_l_f_xyz_10 = OpLoad %int %tbuf_l_f_xyz_5
+%tbuf_l_f_xyz_11 = OpLoad %int %tbuf_l_f_xyz_4
+%tbuf_l_f_xyz_12 = OpLoad %int %tbuf_l_f_xyz_6
+%tbuf_l_f_xyz_13 = OpIMul %int %tbuf_l_f_xyz_11 %tbuf_l_f_xyz_12
+%tbuf_l_f_xyz_14 = OpIAdd %int %tbuf_l_f_xyz_10 %tbuf_l_f_xyz_13
+%tbuf_l_f_xyz_15 = OpSDiv %int %tbuf_l_f_xyz_14 %int_4
+%tbuf_l_f_xyz_16 = OpLoad %int %tbuf_l_f_xyz_7
+%tbuf_l_f_xyz_fmt = OpLoad %int %tbuf_l_f_xyz_8
+%tbuf_l_f_xyz_is71 = OpIEqual %bool %tbuf_l_f_xyz_fmt %int_71
+OpSelectionMerge %tbuf_l_f_xyz_merge None
+OpBranchConditional %tbuf_l_f_xyz_is71 %tbuf_l_f_xyz_f16 %tbuf_l_f_xyz_f32
+%tbuf_l_f_xyz_f16 = OpLabel
+%tbuf_l_f_xyz_17h = OpAccessChain %_ptr_StorageBuffer_float %buf %tbuf_l_f_xyz_16 %int_0 %tbuf_l_f_xyz_15
+%tbuf_l_f_xyz_18h = OpLoad %float %tbuf_l_f_xyz_17h
+%tbuf_l_f_xyz_b0 = OpBitcast %uint %tbuf_l_f_xyz_18h
+%tbuf_l_f_xyz_h01 = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %tbuf_l_f_xyz_b0
+%tbuf_l_f_xyz_19h = OpIAdd %int %tbuf_l_f_xyz_15 %int_1
+%tbuf_l_f_xyz_20h = OpAccessChain %_ptr_StorageBuffer_float %buf %tbuf_l_f_xyz_16 %int_0 %tbuf_l_f_xyz_19h
+%tbuf_l_f_xyz_21h = OpLoad %float %tbuf_l_f_xyz_20h
+%tbuf_l_f_xyz_b1 = OpBitcast %uint %tbuf_l_f_xyz_21h
+%tbuf_l_f_xyz_h23 = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %tbuf_l_f_xyz_b1
+%tbuf_l_f_xyz_hx = OpCompositeExtract %float %tbuf_l_f_xyz_h01 0
+%tbuf_l_f_xyz_hy = OpCompositeExtract %float %tbuf_l_f_xyz_h01 1
+%tbuf_l_f_xyz_hz = OpCompositeExtract %float %tbuf_l_f_xyz_h23 0
+OpStore %tbuf_l_f_xyz_1 %tbuf_l_f_xyz_hx
+OpStore %tbuf_l_f_xyz_2 %tbuf_l_f_xyz_hy
+OpStore %tbuf_l_f_xyz_3 %tbuf_l_f_xyz_hz
+OpBranch %tbuf_l_f_xyz_merge
+%tbuf_l_f_xyz_f32 = OpLabel
+%tbuf_l_f_xyz_17 = OpAccessChain %_ptr_StorageBuffer_float %buf %tbuf_l_f_xyz_16 %int_0 %tbuf_l_f_xyz_15
+%tbuf_l_f_xyz_18 = OpLoad %float %tbuf_l_f_xyz_17
+OpStore %tbuf_l_f_xyz_1 %tbuf_l_f_xyz_18
+%tbuf_l_f_xyz_19 = OpIAdd %int %tbuf_l_f_xyz_15 %int_1
+%tbuf_l_f_xyz_20 = OpAccessChain %_ptr_StorageBuffer_float %buf %tbuf_l_f_xyz_16 %int_0 %tbuf_l_f_xyz_19
+%tbuf_l_f_xyz_21 = OpLoad %float %tbuf_l_f_xyz_20
+OpStore %tbuf_l_f_xyz_2 %tbuf_l_f_xyz_21
+%tbuf_l_f_xyz_22 = OpIAdd %int %tbuf_l_f_xyz_15 %int_2
+%tbuf_l_f_xyz_23 = OpAccessChain %_ptr_StorageBuffer_float %buf %tbuf_l_f_xyz_16 %int_0 %tbuf_l_f_xyz_22
+%tbuf_l_f_xyz_24 = OpLoad %float %tbuf_l_f_xyz_23
+OpStore %tbuf_l_f_xyz_3 %tbuf_l_f_xyz_24
+OpBranch %tbuf_l_f_xyz_merge
+%tbuf_l_f_xyz_merge = OpLabel
 OpReturn
 OpFunctionEnd
 )";

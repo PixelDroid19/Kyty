@@ -34,7 +34,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R16G16Sfloat, 4};
 	}
-	if (format == 0x6u && channel_type == 0x7u && channel_order == 0x0u)
+	// CB data formats 6 (10_11_11) and 7 (11_11_10) with FLOAT both pack into
+	// the same 32-bit 10/11/11 layout. Vulkan's only colour-attachable match is
+	// B10G11R11_UFLOAT_PACK32.
+	if ((format == 0x6u || format == 0x7u) && channel_type == 0x7u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::B10G11R11Ufloat, 4};
 	}

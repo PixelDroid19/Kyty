@@ -1255,6 +1255,9 @@ struct ShaderVertexInputBuffer
 	int      attr_num               = 0;
 	int      attr_indices[ATTR_MAX] = {0};
 	uint32_t attr_offsets[ATTR_MAX] = {0};
+	// SSBO slot in bind.storage_buffers when this stream backs untagged MUBUF
+	// format-loads. -1 means the stream is Fetch-only.
+	int      storage_slot           = -1;
 };
 
 struct ShaderVertexDestination
@@ -1482,6 +1485,7 @@ struct ShaderTextureResources
 	ShaderTextureDescriptor desc[RES_MAX];
 	int                     textures_num             = 0;
 	int                     textures2d_sampled_num   = 0;
+	int                     textures2d_sampled_depth_num = 0;
 	int                     textures2d_array_sampled_num = 0;
 	int                     textures3d_sampled_num   = 0;
 	int                     textures2d_sampled_uint_num = 0;
@@ -1489,6 +1493,7 @@ struct ShaderTextureResources
 	int                     textures3d_sampled_uint_num = 0;
 	int                     textures2d_storage_num   = 0;
 	int                     binding_sampled_index    = 0;
+	int                     binding_sampled_depth_index = -1;
 	int                     binding_sampled_array_index = -1;
 	int                     binding_sampled_3d_index = -1;
 	int                     binding_sampled_uint_index = -1;
@@ -1612,6 +1617,84 @@ struct ShaderVertexInputInfo
 	bool     gs_prolog                  = false;
 	bool     input_resources_valid      = true;
 };
+
+// Bind each merged vertex stream as a ReadOnly raw SSBO so untagged MUBUF
+// format-loads can address through the live V# base instead of Fetch-remapping
+// onto semantic 0. start_register stays negative so bind-time UpdateAddress48
+// leaves the guest base in the descriptor word.
+void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info);
+
+// Remap an embedded MUBUF format-load to resources[i] only when the V# was
+// tracked as a buffer whose attrib_id came from the attribute table. A default
+// attrib_id of 0 (untagged SGPR) would otherwise match the position semantic
+// and bind UV/normal fetches to world XYZ.
+[[nodiscard]] inline int ShaderResolveEmbeddedFetchResource(bool resource_is_tracked_buffer, bool attrib_chain_valid, int attrib_id,
+                                                            const ShaderVertexDestination* destinations, int resource_count)
+{
+	if (!resource_is_tracked_buffer || !attrib_chain_valid || destinations == nullptr || attrib_id < 0 || resource_count <= 0)
+	{
+		return -1;
+	}
+	const int count = resource_count < ShaderVertexInputInfo::RES_MAX ? resource_count : ShaderVertexInputInfo::RES_MAX;
+	for (int i = 0; i < count; i++)
+	{
+		if (destinations[i].semantic == attrib_id)
+		{
+			return i;
+		}
+	}
+	return -1;
+};
+
+struct ShaderGen5MubufStreamSpan
+{
+	uint64_t guest_base = 0;
+	uint64_t guest_size = 0;
+	uint32_t slot       = 0;
+};
+
+// desc0 is either a bind-time slot (< bound_slots) or a live 48-bit V# base.
+// raw_byte_offset is the descriptor addressing result (index*stride+imm+soffset).
+[[nodiscard]] inline bool ShaderResolveGen5MubufLiveAddress(uint64_t desc0, uint32_t raw_byte_offset, uint32_t bound_slots,
+                                                           const ShaderGen5MubufStreamSpan* spans, uint32_t span_count,
+                                                           uint32_t* out_slot, uint32_t* out_byte_offset)
+{
+	if (out_slot == nullptr || out_byte_offset == nullptr)
+	{
+		return false;
+	}
+	if (desc0 < static_cast<uint64_t>(bound_slots))
+	{
+		*out_slot        = static_cast<uint32_t>(desc0);
+		*out_byte_offset = raw_byte_offset;
+		return true;
+	}
+	if (spans == nullptr)
+	{
+		return false;
+	}
+	for (uint32_t i = 0; i < span_count; i++)
+	{
+		if (spans[i].guest_size == 0 || desc0 < spans[i].guest_base)
+		{
+			continue;
+		}
+		const uint64_t rel = desc0 - spans[i].guest_base;
+		if (rel >= spans[i].guest_size)
+		{
+			continue;
+		}
+		const uint64_t total = rel + static_cast<uint64_t>(raw_byte_offset);
+		if (total > 0xffffffffull)
+		{
+			return false;
+		}
+		*out_slot        = spans[i].slot;
+		*out_byte_offset = static_cast<uint32_t>(total);
+		return true;
+	}
+	return false;
+}
 
 struct ShaderComputeInputInfo
 {

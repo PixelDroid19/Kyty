@@ -32,6 +32,11 @@ namespace Kyty::Libs::Graphics {
 
 // DescriptorCache, DeleteFramebuffer/Descriptor, stencil + Find* helpers
 
+static bool IsDepthSampledView(int view)
+{
+	return view == VulkanImage::VIEW_DEPTH_TEXTURE || view == VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY;
+}
+
 static void create_layout(GraphicContext* gctx, int storage_buffers_num, int sampled_descriptor_num, int textures2d_storage_num,
                           int samplers_num, int gds_buffers_num, bool vsharp_uniform_buffer, VkShaderStageFlags stage,
                           VkDescriptorSetLayout* dst)
@@ -46,7 +51,7 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int sam
 
 	ShaderCalcBindingIndices(&tmp);
 
-	constexpr uint32_t B_MAX = 12;
+	constexpr uint32_t B_MAX = 13;
 
 	VkDescriptorSetLayoutBinding ubo_layout_binding[B_MAX] = {};
 
@@ -65,6 +70,17 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int sam
 	{
 		EXIT_IF(binding_num >= B_MAX);
 		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_index;
+		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
+		ubo_layout_binding[binding_num].stageFlags         = stage;
+		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
+		binding_num++;
+	}
+
+	if (sampled_descriptor_num > 0)
+	{
+		EXIT_IF(binding_num >= B_MAX);
+		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_depth_index;
 		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
 		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
 		ubo_layout_binding[binding_num].stageFlags         = stage;
@@ -174,7 +190,7 @@ static void create_layout(GraphicContext* gctx, int storage_buffers_num, int sam
 		}
 		if (tmp.textures2D.textures_num > 0)
 		{
-			vsharp_binding = tmp.textures2D.binding_sampled_3d_uint_index + 1;
+			vsharp_binding = tmp.textures2D.binding_sampled_depth_index + 1;
 		}
 		if (samplers_num > 0)
 		{
@@ -262,7 +278,7 @@ void DescriptorCache::CreatePool()
 	pool_size[0].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	pool_size[0].descriptorCount = max_sets * (BUFFERS_MAX + GDS_BUFFER_MAX);
 	pool_size[1].type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-	pool_size[1].descriptorCount = max_sets * TEXTURES_SAMPLED_MAX * 6;
+	pool_size[1].descriptorCount = max_sets * TEXTURES_SAMPLED_MAX * 7;
 	pool_size[2].type            = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 	pool_size[2].descriptorCount = max_sets * TEXTURES_STORAGE_MAX;
 	pool_size[3].type            = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -386,6 +402,7 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	hash += Core::hash8(static_cast<uint8_t>(s.stage));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.storage_buffers_num));
 	hash += Core::hash8(static_cast<uint8_t>(s.textures2d_sampled_num));
+	hash ^= Core::hash8(static_cast<uint8_t>(s.textures2d_sampled_depth_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.textures3d_sampled_num));
 	hash += Core::hash8(static_cast<uint8_t>(s.textures2d_array_sampled_num));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.textures2d_sampled_uint_num));
@@ -402,6 +419,11 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	{
 		hash ^= Core::hash64(s.textures2d_sampled_id[i]);
 		hash += Core::hash8(s.textures2d_sampled_view[i]);
+	}
+	for (int i = 0; i < s.textures2d_sampled_depth_num; i++)
+	{
+		hash += Core::hash64(s.textures2d_sampled_depth_id[i]);
+		hash ^= Core::hash8(s.textures2d_sampled_depth_view[i]);
 	}
 	for (int i = 0; i < s.textures2d_array_sampled_num; i++)
 	{
@@ -461,6 +483,7 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 
 			if (set.set != nullptr && set.stage == s.stage && set.storage_buffers_num == s.storage_buffers_num &&
 			    set.textures2d_sampled_num == s.textures2d_sampled_num &&
+			    set.textures2d_sampled_depth_num == s.textures2d_sampled_depth_num &&
 			    set.textures2d_array_sampled_num == s.textures2d_array_sampled_num &&
 			    set.textures2d_storage_num == s.textures2d_storage_num && set.textures3d_sampled_num == s.textures3d_sampled_num &&
 			    set.textures2d_sampled_uint_num == s.textures2d_sampled_uint_num &&
@@ -484,6 +507,18 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 					{
 						if (s.textures2d_sampled_id[i] != set.textures2d_sampled_id[i] ||
 						    s.textures2d_sampled_view[i] != set.textures2d_sampled_view[i])
+						{
+							match = false;
+							break;
+						}
+					}
+				}
+				if (match)
+				{
+					for (int i = 0; i < s.textures2d_sampled_depth_num; i++)
+					{
+						if (s.textures2d_sampled_depth_id[i] != set.textures2d_sampled_depth_id[i] ||
+						    s.textures2d_sampled_depth_view[i] != set.textures2d_sampled_depth_view[i])
 						{
 							match = false;
 							break;
@@ -601,7 +636,8 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
-                                                    const int* textures2d_sampled_view, VulkanImage** textures2d_array_sampled,
+                                                    const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
+                                                    const int* textures2d_sampled_depth_view, VulkanImage** textures2d_array_sampled,
                                                     const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
 	                                                const int* textures3d_sampled_view, VulkanImage** textures2d_sampled_uint,
 	                                                const int* textures2d_sampled_uint_view,
@@ -615,8 +651,8 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	KYTY_PROFILER_BLOCK("DescriptorCache::GetDescriptor::search");
 
 	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
-	const int  sampled_total = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_array_sampled_num +
-	                          bind.textures2D.textures3d_sampled_num;
+	const int  sampled_total = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_sampled_depth_num +
+	                          bind.textures2D.textures2d_array_sampled_num + bind.textures2D.textures3d_sampled_num;
 	const int  sampled_uint_total = bind.textures2D.textures2d_sampled_uint_num + bind.textures2D.textures2d_array_sampled_uint_num +
 	                               bind.textures2D.textures3d_sampled_uint_num;
 	const bool split_numeric_types = sampled_uint_total > 0 && sampled_uint_total < sampled_total;
@@ -666,6 +702,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	nset.set                    = nullptr;
 	nset.storage_buffers_num    = storage_buffers_num;
 	nset.textures2d_sampled_num = textures2d_sampled_num;
+	nset.textures2d_sampled_depth_num = bind.textures2D.textures2d_sampled_depth_num;
 	nset.textures2d_array_sampled_num = textures2d_array_sampled_num;
 	nset.textures3d_sampled_num = textures3d_sampled_num;
 	nset.textures2d_sampled_uint_num = textures2d_sampled_uint_num;
@@ -684,6 +721,11 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		nset.textures2d_sampled_id[i]   = textures2d_sampled[i]->memory.unique_id;
 		nset.textures2d_sampled_view[i] = static_cast<uint8_t>(textures2d_sampled_view[i]);
+	}
+	for (int i = 0; i < nset.textures2d_sampled_depth_num; i++)
+	{
+		nset.textures2d_sampled_depth_id[i]   = textures2d_sampled_depth[i]->memory.unique_id;
+		nset.textures2d_sampled_depth_view[i] = static_cast<uint8_t>(textures2d_sampled_depth_view[i]);
 	}
 	for (int i = 0; i < textures2d_array_sampled_num; i++)
 	{
@@ -758,9 +800,17 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		texture2d_sampled_info[i].sampler   = nullptr;
 		texture2d_sampled_info[i].imageView = textures2d_sampled[i]->image_view[textures2d_sampled_view[i]];
-		texture2d_sampled_info[i].imageLayout =
-		    (textures2d_sampled[i]->type == VulkanImageType::DepthStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-		                                                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		texture2d_sampled_info[i].imageLayout = IsDepthSampledView(textures2d_sampled_view[i])
+		                                             ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                             : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	}
+
+	VkDescriptorImageInfo texture2d_sampled_depth_info[TEXTURES_SAMPLED_MAX] {};
+	for (int i = 0; i < nset.textures2d_sampled_depth_num; i++)
+	{
+		texture2d_sampled_depth_info[i].sampler     = nullptr;
+		texture2d_sampled_depth_info[i].imageView   = textures2d_sampled_depth[i]->image_view[textures2d_sampled_depth_view[i]];
+		texture2d_sampled_depth_info[i].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 	}
 
 	VkDescriptorImageInfo texture2d_array_sampled_info[TEXTURES_SAMPLED_MAX] {};
@@ -768,9 +818,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		texture2d_array_sampled_info[i].sampler   = nullptr;
 		texture2d_array_sampled_info[i].imageView = textures2d_array_sampled[i]->image_view[textures2d_array_sampled_view[i]];
-		texture2d_array_sampled_info[i].imageLayout =
-		    (textures2d_array_sampled[i]->type == VulkanImageType::DepthStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-		                                                                        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		texture2d_array_sampled_info[i].imageLayout = IsDepthSampledView(textures2d_array_sampled_view[i])
+		                                                   ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                                   : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
 	VkDescriptorImageInfo texture2d_storage_info[TEXTURES_STORAGE_MAX] {};
@@ -810,9 +860,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		texture2d_sampled_uint_info[i].sampler   = nullptr;
 		texture2d_sampled_uint_info[i].imageView = textures2d_sampled_uint[i]->image_view[textures2d_sampled_uint_view[i]];
-		texture2d_sampled_uint_info[i].imageLayout =
-		    (textures2d_sampled_uint[i]->type == VulkanImageType::DepthStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-		                                                                       : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		texture2d_sampled_uint_info[i].imageLayout = IsDepthSampledView(textures2d_sampled_uint_view[i])
+		                                                  ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
 	VkDescriptorImageInfo texture2d_array_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
@@ -821,9 +871,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		texture2d_array_sampled_uint_info[i].sampler   = nullptr;
 		texture2d_array_sampled_uint_info[i].imageView =
 		    textures2d_array_sampled_uint[i]->image_view[textures2d_array_sampled_uint_view[i]];
-		texture2d_array_sampled_uint_info[i].imageLayout =
-		    (textures2d_array_sampled_uint[i]->type == VulkanImageType::DepthStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-		                                                                             : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+		texture2d_array_sampled_uint_info[i].imageLayout = IsDepthSampledView(textures2d_array_sampled_uint_view[i])
+		                                                        ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                                        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
 	VkDescriptorImageInfo texture3d_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
@@ -844,7 +894,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 
 	uint32_t binding_num = 0;
 
-	constexpr uint32_t B_MAX = 12;
+	constexpr uint32_t B_MAX = 13;
 
 	VkWriteDescriptorSet descriptor_write[B_MAX] = {};
 
@@ -876,6 +926,22 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		descriptor_write[binding_num].descriptorCount  = textures2d_sampled_num;
 		descriptor_write[binding_num].pBufferInfo      = nullptr;
 		descriptor_write[binding_num].pImageInfo       = texture2d_sampled_info;
+		descriptor_write[binding_num].pTexelBufferView = nullptr;
+		binding_num++;
+	}
+
+	if (nset.textures2d_sampled_depth_num > 0)
+	{
+		EXIT_IF(binding_num >= B_MAX);
+		descriptor_write[binding_num].sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		descriptor_write[binding_num].pNext            = nullptr;
+		descriptor_write[binding_num].dstSet           = new_set->set;
+		descriptor_write[binding_num].dstBinding       = bind.textures2D.binding_sampled_depth_index;
+		descriptor_write[binding_num].dstArrayElement  = 0;
+		descriptor_write[binding_num].descriptorType   = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		descriptor_write[binding_num].descriptorCount  = nset.textures2d_sampled_depth_num;
+		descriptor_write[binding_num].pBufferInfo      = nullptr;
+		descriptor_write[binding_num].pImageInfo       = texture2d_sampled_depth_info;
 		descriptor_write[binding_num].pTexelBufferView = nullptr;
 		binding_num++;
 	}
@@ -1153,8 +1219,8 @@ void DescriptorCache::FreeDescriptor(VulkanImage* image)
 VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind)
 {
 	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
-	int        textures2d_sampled_num = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_array_sampled_num +
-	                                   bind.textures2D.textures3d_sampled_num;
+	int        textures2d_sampled_num = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_sampled_depth_num +
+	                                   bind.textures2D.textures2d_array_sampled_num + bind.textures2D.textures3d_sampled_num;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
 	int        gds_buffers_num        = bind.gds_pointers.pointers_num;

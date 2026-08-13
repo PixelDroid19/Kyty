@@ -70,6 +70,13 @@ VulkanVertexInputFormat VulkanResolveGen5VertexAttribInputFormat(uint16_t format
 			return {entry.guest_format, entry.vulkan_format, entry.component_count, entry.numeric_class};
 		}
 	}
+	// Live attrib words also store the unified guest format id in the same
+	// 9-bit field (74 = RGB32F, 64 = RG32F, 29 = RG16F). Fall back before
+	// treating the encoding as unknown.
+	if (format <= 0xffu)
+	{
+		return VulkanResolveGen5VertexInputFormat(static_cast<uint8_t>(format));
+	}
 	return {};
 }
 

@@ -357,7 +357,7 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 %image_sample_image_<index> = OpLoad %ImageSA %image_sample_image_ptr_<index>
 %image_sampled_image_<index> = OpSampledImage %SampledImageA %image_sample_image_<index> %image_sample_sampler_<index>
 %image_sample_coord_<index> = OpCompositeConstruct %v3float %image_sample_x_<index> %image_sample_y_<index> %image_sample_layer_<index>
-%image_sample_value_<index> = OpImageSampleImplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index><bias_operand>
+%image_sample_value_<index> = <array_sample_op>
 )";
 	static const char* volume_text = R"(
 %image_sample_descriptor_raw_<index> = OpLoad %uint %<texture>
@@ -390,7 +390,17 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 
 	const char* sample_text = (shape == ShaderGen5SampledTextureShape::TwoDimensional ? flat_text :
 	                           (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ? array_text : volume_text));
+	// Cube faces are 2D-array layers. Implicit LOD uses ddx/ddy of that
+	// layer, which jumps at face seams and on clipped sky-filling
+	// triangles, so the sample collapses to an empty high mip. Pin lod 0.
+	const bool cube_array_implicit =
+	    cube_coordinates && shape == ShaderGen5SampledTextureShape::TwoDimensionalArray && bias == nullptr;
+	const char* array_sample_op =
+	    cube_array_implicit
+	        ? "OpImageSampleExplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index> Lod %float_0_000000"
+	        : "OpImageSampleImplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index><bias_operand>";
 	String8 source = bias_source + EmitImageSampleCoordinateLoads(index, x, y, cube_coordinates) + String8(sample_text)
+	                     .ReplaceStr("<array_sample_op>", array_sample_op)
 	                     .ReplaceStr("<index>", index_string)
 	                     .ReplaceStr("<texture>", texture.value)
 	                     .ReplaceStr("<sampler>", sampler.value)
@@ -1817,6 +1827,36 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleB_Vdata4Vaddr3StSsDmaskF)
 	                                       dst_value, static_cast<uint32_t>(num), components, &src0_bias);
 }
 
+// IMAGE_SAMPLE_C_LZ samples LOD 0 and applies S# DEPTH_COMPARE_FUNC(ref, texel).
+// Vulkan Dref sampling needs a comparison sampler plus Depth=1; this title binds
+// SAMPLE_C with a Regular S# (compareEnable off) and GEQUAL (6), so the hardware
+// compare is done in ALU. Never hardcode LEQUAL: S# encodes 0..7.
+static String8 EmitImageSampleCLzCompare(uint32_t index, uint8_t compare_func)
+{
+	const auto index_string = String8::FromPrintf("%u", index);
+	const char* compare_op  = nullptr;
+	switch (compare_func)
+	{
+		case 0: return String8("%image_dref_result_<index> = OpFMul %float %float_0_000000 %float_1_000000\n")
+		            .ReplaceStr("<index>", index_string);
+		case 1: compare_op = "OpFOrdLessThan"; break;
+		case 2: compare_op = "OpFOrdEqual"; break;
+		case 3: compare_op = "OpFOrdLessThanEqual"; break;
+		case 4: compare_op = "OpFOrdGreaterThan"; break;
+		case 5: compare_op = "OpFOrdNotEqual"; break;
+		case 6: compare_op = "OpFOrdGreaterThanEqual"; break;
+		case 7: return String8("%image_dref_result_<index> = OpFAdd %float %float_1_000000 %float_0_000000\n")
+		            .ReplaceStr("<index>", index_string);
+		default: return {};
+	}
+	return String8(R"(
+%image_dref_passes_<index> = <compare_op> %bool %image_dref_reference_<index> %image_dref_texel_<index>
+%image_dref_result_<index> = OpSelect %float %image_dref_passes_<index> %float_1_000000 %float_0_000000
+)")
+	    .ReplaceStr("<index>", index_string)
+	    .ReplaceStr("<compare_op>", compare_op);
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -1830,21 +1870,26 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
 	const int   texture_index = FindImageSampledTextureDescriptor(inst, *bind_info, user_data_register_base);
 	const int   sampler_index = FindImageSamplerDescriptor(inst, *bind_info, user_data_register_base);
-	if (texture_index < 0 || sampler_index < 0 ||
-	    bind_info->samplers.operations[sampler_index] != State::ImageSampleOperation::DepthReference)
+	// The MIMG opcode is the sample-compare; S# operation may stay Regular when
+	// the same sampler words are also used without SAMPLE_C, or when SGPR
+	// liveness hides the Dref use. The compare function still lives in S#.
+	if (texture_index < 0 || sampler_index < 0)
 	{
 		return false;
 	}
 
-	const auto shape   = ShaderResolvedSampledTextureShape(bind_info->textures2D.desc[texture_index]);
+	const auto& descriptor = bind_info->textures2D.desc[texture_index];
+	const auto shape   = ShaderResolvedSampledTextureShape(descriptor);
 	const bool flat    = shape == ShaderGen5SampledTextureShape::TwoDimensional;
 	const bool arrayed = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	const bool depth_sampled = flat && descriptor.sample_operation == State::ImageSampleOperation::DepthReference;
 	if ((!flat && !arrayed) || (flat && inst.mimg_dimension != 1u) ||
 	    (arrayed && inst.mimg_dimension != 3u && inst.mimg_dimension != 5u))
 	{
 		return false;
 	}
-	if ((flat && bind_info->textures2D.textures2d_sampled_num <= 0) ||
+	if ((depth_sampled && bind_info->textures2D.textures2d_sampled_depth_num <= 0) ||
+	    (flat && !depth_sampled && bind_info->textures2D.textures2d_sampled_num <= 0) ||
 	    (arrayed && bind_info->textures2D.textures2d_array_sampled_num <= 0))
 	{
 		return false;
@@ -1871,6 +1916,13 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 		return false;
 	}
 
+	const uint8_t compare_func = bind_info->samplers.samplers[sampler_index].DepthCompareFunc();
+	const String8 compare_text = EmitImageSampleCLzCompare(index, compare_func);
+	if (compare_text.IsEmpty())
+	{
+		return false;
+	}
+
 	static const char* flat_text = R"(
 %image_dref_texture_raw_<index> = OpLoad %uint %<texture>
 %image_dref_texture_<index> = OpBitwiseAnd %uint %image_dref_texture_raw_<index> %uint_0x1fffffff
@@ -1884,8 +1936,24 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 %image_dref_x_<index> = OpLoad %float %<x>
 %image_dref_y_<index> = OpLoad %float %<y>
 %image_dref_coordinate_<index> = OpCompositeConstruct %v2float %image_dref_x_<index> %image_dref_y_<index>
-%image_dref_result_<index> = OpImageSampleDrefExplicitLod %float %image_dref_sampled_<index> %image_dref_coordinate_<index> %image_dref_reference_<index> Lod %float_0_000000
-OpStore %<destination> %image_dref_result_<index>
+%image_dref_sample_<index> = OpImageSampleExplicitLod %v4float %image_dref_sampled_<index> %image_dref_coordinate_<index> Lod %float_0_000000
+%image_dref_texel_<index> = OpCompositeExtract %float %image_dref_sample_<index> 0
+)";
+	static const char* flat_depth_text = R"(
+%image_dref_texture_raw_<index> = OpLoad %uint %<texture>
+%image_dref_texture_<index> = OpBitwiseAnd %uint %image_dref_texture_raw_<index> %uint_0x1fffffff
+%image_dref_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageSD %textures2D_SD %image_dref_texture_<index>
+%image_dref_image_<index> = OpLoad %ImageSD %image_dref_image_ptr_<index>
+%image_dref_sampler_index_<index> = OpLoad %uint %<sampler>
+%image_dref_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_dref_sampler_index_<index>
+%image_dref_sampler_<index> = OpLoad %Sampler %image_dref_sampler_ptr_<index>
+%image_dref_sampled_<index> = OpSampledImage %SampledImageD %image_dref_image_<index> %image_dref_sampler_<index>
+%image_dref_reference_<index> = OpLoad %float %<dref>
+%image_dref_x_<index> = OpLoad %float %<x>
+%image_dref_y_<index> = OpLoad %float %<y>
+%image_dref_coordinate_<index> = OpCompositeConstruct %v2float %image_dref_x_<index> %image_dref_y_<index>
+%image_dref_sample_<index> = OpImageSampleExplicitLod %v4float %image_dref_sampled_<index> %image_dref_coordinate_<index> Lod %float_0_000000
+%image_dref_texel_<index> = OpCompositeExtract %float %image_dref_sample_<index> 0
 )";
 	static const char* array_text = R"(
 %image_dref_texture_raw_<index> = OpLoad %uint %<texture>
@@ -1901,18 +1969,21 @@ OpStore %<destination> %image_dref_result_<index>
 %image_dref_y_<index> = OpLoad %float %<y>
 %image_dref_layer_<index> = OpLoad %float %<layer>
 %image_dref_coordinate_<index> = OpCompositeConstruct %v3float %image_dref_x_<index> %image_dref_y_<index> %image_dref_layer_<index>
-%image_dref_result_<index> = OpImageSampleDrefExplicitLod %float %image_dref_sampled_<index> %image_dref_coordinate_<index> %image_dref_reference_<index> Lod %float_0_000000
-OpStore %<destination> %image_dref_result_<index>
+%image_dref_sample_<index> = OpImageSampleExplicitLod %v4float %image_dref_sampled_<index> %image_dref_coordinate_<index> Lod %float_0_000000
+%image_dref_texel_<index> = OpCompositeExtract %float %image_dref_sample_<index> 0
 )";
 
-	*dst_source += String8(flat ? flat_text : array_text)
+	*dst_source += String8(depth_sampled ? flat_depth_text : (flat ? flat_text : array_text))
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<texture>", texture_value.value)
 	                   .ReplaceStr("<sampler>", sampler_value.value)
 	                   .ReplaceStr("<dref>", dref_value.value)
 	                   .ReplaceStr("<x>", x_value.value)
 	                   .ReplaceStr("<y>", y_value.value)
-	                   .ReplaceStr("<layer>", layer_value.value)
+	                   .ReplaceStr("<layer>", layer_value.value);
+	*dst_source += compare_text;
+	*dst_source += String8("OpStore %<destination> %image_dref_result_<index>\n")
+	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<destination>", dst_value.value);
 	return true;
 }

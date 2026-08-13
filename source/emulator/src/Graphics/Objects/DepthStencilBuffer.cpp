@@ -115,9 +115,9 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		    !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[VulkanImage::VIEW_STENCIL_TEXTURE])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[V condition ignored (continuing)\n"); }
 	}
 
-	// First bind of an HTILE depth target: pending Vulkan clear. Leave layout
-	// UNDEFINED so FindRenderDepthInfo → loadOp CLEAR can discard+clear. Non-HTILE
-	// still transitions to ATTACHMENT once.
+	// Leave layout UNDEFINED until the first render pass. A layout-only
+	// transition to ATTACHMENT does not define pixels; a later LOAD then
+	// reads host garbage. ResolveDepthAttachmentLoadOps CLEARs first use.
 	if (htile)
 	{
 		const uint64_t htile_addr = params[DepthStencilBufferObject::PARAM_HTILE_ADDR];
@@ -125,9 +125,6 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		{
 			DepthMetaMarkClear(htile_addr);
 		}
-	} else
-	{
-		UtilSetDepthLayoutOptimal(vk_obj);
 	}
 
 	return vk_obj;

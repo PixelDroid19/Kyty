@@ -520,6 +520,32 @@ TEST(EmulatorGraphicsPackets, ParsesGen5CubemaF32)
 	EXPECT_EQ(instruction.src_num, 3);
 }
 
+TEST(EmulatorGraphicsPackets, MaterializesCubeMaAsSignedTwiceMajorAxis)
+{
+	const uint32_t word0    = (0x35u << 26u) | (0x147u << 16u) | 3u;
+	const uint32_t word1    = 257u | (258u << 9u) | (259u << 18u);
+	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+	ASSERT_EQ(code.GetInstructions().At(0).type, ShaderInstructionType::VCubeMaF32);
+
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	const auto source           = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_EQ(source.FindIndex("%maxxyz_"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%axis_0 = OpSelect %float %zmax_0 %t2_0 %xyaxis_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpFMul %float %float_2_000000 %axis_0"), Core::STRING8_INVALID_INDEX);
+}
+
 // VOP2 SDWA with SRC0_NEG (bit 20 of SDWA control). Captured post-Play path
 // hits EXIT_NOT_IMPLEMENTED(src0_neg != 0) until negate is wired like VOP3.
 TEST(EmulatorGraphicsPackets, ParsesVop2SdwaSrc0Negate)
@@ -1220,6 +1246,16 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).format, VK_FORMAT_UNDEFINED);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(0).component_count, 0u);
 
+	// Attrib words store either a 9-bit encoded id (0x12a) or the unified
+	// guest format (74/64/29). Both must resolve; 74/64 are the live stride-48
+	// position/UV ids.
+	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(0x12a).format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(74).format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(74).component_count, 3u);
+	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(64).format, VK_FORMAT_R32G32_SFLOAT);
+	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(29).format, VK_FORMAT_R16G16_SFLOAT);
+	EXPECT_EQ(VulkanResolveGen5VertexAttribInputFormat(0).format, VK_FORMAT_UNDEFINED);
+
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(14, 7).format, VK_FORMAT_R32G32B32A32_SFLOAT);
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(13, 7).component_count, 3u);
 	EXPECT_EQ(VulkanResolveLegacyVertexInputFormat(11, 7).format, VK_FORMAT_R32G32_SFLOAT);
@@ -1271,6 +1307,95 @@ TEST(EmulatorGraphicsPackets, BuildsInterleavedPosNormUvVertexLayoutWithFormat29
 	EXPECT_EQ(layout.attributes[1].offset, 12u);
 	EXPECT_EQ(layout.attributes[2].format, VK_FORMAT_R16G16_SFLOAT);
 	EXPECT_EQ(layout.attributes[2].offset, 20u);
+}
+
+// Captured Gen5 world mesh: stride 48, pos RGB32F at 0 (4 VGPR, identity
+// DST_SEL 0xFAC), normal RGB32F at 12, UV RG32F at 40. Hardware treats a
+// missing W source as 1, so DST_SEL W=7 on a 3-component format is the same
+// as W=1. Rejecting identity swizzle drops the whole vertex layout.
+TEST(EmulatorGraphicsPackets, BuildsStride48Rgb32IdentityDstSelVertexLayout)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	ShaderVertexInputInfo input {};
+	input.resources_num = 3;
+	input.buffers_num   = 1;
+
+	auto& buffer           = input.buffers[0];
+	buffer.stride          = 48;
+	buffer.attr_num        = 3;
+	buffer.attr_indices[0] = 0;
+	buffer.attr_indices[1] = 1;
+	buffer.attr_indices[2] = 2;
+	buffer.attr_offsets[0] = 0;
+	buffer.attr_offsets[1] = 12;
+	buffer.attr_offsets[2] = 40;
+
+	input.resources[0].fields[3] = (74u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[0]       = {0, 4};
+	input.resources[1].fields[3] = (74u << 12u) | DstSel(4, 5, 6);
+	input.resources_dst[1]       = {1, 3};
+	input.resources[2].fields[3] = (64u << 12u) | DstSel(4, 5);
+	input.resources_dst[2]       = {3, 2};
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	EXPECT_EQ(layout.binding_count, 1u);
+	EXPECT_EQ(layout.attribute_count, 3u);
+	EXPECT_EQ(layout.bindings[0].stride, 48u);
+	EXPECT_EQ(layout.attributes[0].format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(layout.attributes[0].offset, 0u);
+	EXPECT_EQ(layout.attributes[1].format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(layout.attributes[1].offset, 12u);
+	EXPECT_EQ(layout.attributes[2].format, VK_FORMAT_R32G32_SFLOAT);
+	EXPECT_EQ(layout.attributes[2].offset, 40u);
+}
+
+// Census stride-32 world draws (3 attributes) use the same identity V#
+// DST_SEL 0xFAC as stride-48. A 2-component UV loaded into 4 VGPRs must
+// keep the layout: missing Z=0 and W=1.
+TEST(EmulatorGraphicsPackets, BuildsStride32IdentityDstSelTwoComponentVertexLayout)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	ShaderVertexInputInfo input {};
+	input.resources_num = 3;
+	input.buffers_num   = 1;
+
+	auto& buffer           = input.buffers[0];
+	buffer.stride          = 32;
+	buffer.attr_num        = 3;
+	buffer.attr_indices[0] = 0;
+	buffer.attr_indices[1] = 1;
+	buffer.attr_indices[2] = 2;
+	buffer.attr_offsets[0] = 0;
+	buffer.attr_offsets[1] = 12;
+	buffer.attr_offsets[2] = 24;
+
+	input.resources[0].fields[3] = (74u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[0]       = {0, 4};
+	input.resources[1].fields[3] = (74u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[1]       = {4, 4};
+	input.resources[2].fields[3] = (64u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[2]       = {8, 4};
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	EXPECT_EQ(layout.binding_count, 1u);
+	EXPECT_EQ(layout.attribute_count, 3u);
+	EXPECT_EQ(layout.bindings[0].stride, 32u);
+	EXPECT_EQ(layout.attributes[0].format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(layout.attributes[1].format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(layout.attributes[2].format, VK_FORMAT_R32G32_SFLOAT);
+	EXPECT_EQ(layout.attributes[2].offset, 24u);
 }
 
 TEST(EmulatorGraphicsPackets, AllowsRegionScalarsOnlyInsideSrtRange)
@@ -3451,11 +3576,13 @@ static Core::String8 GenerateImageSampleDrefLzFixture(uint8_t dimension, uint8_t
 	input.bind.textures2D.textures3d_sampled_num       = volume_sampled_num;
 	input.bind.textures2D.desc[0].start_register       = 8;
 	input.bind.textures2D.desc[0].usage                = ShaderTextureUsage::ReadOnly;
+	input.bind.textures2D.desc[0].sample_operation     = operation;
 	input.bind.textures2D.desc[0].texture.fields[1]    = 22u << 20u; // R32_SFLOAT
 	input.bind.textures2D.desc[0].texture.fields[3]    = static_cast<uint32_t>(descriptor_type) << 28u;
 	input.bind.samplers.samplers_num                   = 1;
 	input.bind.samplers.start_register[0]              = 20;
 	input.bind.samplers.operations[0]                  = operation;
+	input.bind.samplers.samplers[0].fields[0]          = 6u << 12u;
 	ShaderCalcBindingIndices(&input.bind);
 
 	return SpirvGenerateSource(code, nullptr, &input, nullptr);
@@ -3471,9 +3598,14 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleDrefLzForDepthReferenceSamp
 			    const auto source = GenerateImageSampleDrefLzFixture(dimension, descriptor_type, flat_sampled_num,
 			                                                         array_sampled_num, 0,
 			                                                         State::ImageSampleOperation::DepthReference);
-			    const bool valid = source.FindIndex("OpImageSampleDrefExplicitLod %float") != Core::STRING8_INVALID_INDEX &&
+			    const bool valid = source.FindIndex("OpImageSampleExplicitLod %v4float") != Core::STRING8_INVALID_INDEX &&
+			                       source.FindIndex("OpFOrdGreaterThanEqual %bool") != Core::STRING8_INVALID_INDEX &&
+			                       source.FindIndex("OpImageSampleDrefExplicitLod") == Core::STRING8_INVALID_INDEX &&
 			                       source.FindIndex("Lod %float_0_000000") != Core::STRING8_INVALID_INDEX &&
-			                       source.FindIndex(coordinate_type) != Core::STRING8_INVALID_INDEX;
+			                       source.FindIndex(coordinate_type) != Core::STRING8_INVALID_INDEX &&
+			                       (dimension != 1u ||
+			                        source.FindIndex("%ImageSD = OpTypeImage %float 2D 1 0 0 1 Unknown") !=
+			                            Core::STRING8_INVALID_INDEX);
 			    std::_Exit(valid ? 0 : 2);
 		    },
 		    ::testing::ExitedWithCode(0), "");
@@ -3486,8 +3618,15 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleDrefLzForDepthReferenceSamp
 
 TEST(EmulatorGraphicsPackets, RejectsInvalidImageSampleDrefLzContracts)
 {
-	EXPECT_DEATH(
-	    (void)GenerateImageSampleDrefLzFixture(1u, 9u, 1, 0, 0, State::ImageSampleOperation::Regular), "");
+	EXPECT_EXIT(
+	    {
+		    const auto source =
+		        GenerateImageSampleDrefLzFixture(1u, 9u, 1, 0, 0, State::ImageSampleOperation::Regular);
+		    const bool valid = source.FindIndex("OpImageSampleExplicitLod %v4float") != Core::STRING8_INVALID_INDEX &&
+		                       source.FindIndex("OpFOrdGreaterThanEqual %bool") != Core::STRING8_INVALID_INDEX;
+		    std::_Exit(valid ? 0 : 2);
+	    },
+	    ::testing::ExitedWithCode(0), "");
 	EXPECT_DEATH(
 	    (void)GenerateImageSampleDrefLzFixture(1u, 9u, 1, 0, 0, State::ImageSampleOperation::DepthReference, 0x2), "");
 	EXPECT_DEATH(
@@ -4099,6 +4238,57 @@ TEST(EmulatorGraphicsPackets, EmbeddedFetchMayConsumePrefixOfWiderVertexAttribut
 	EXPECT_NE(source.FindIndex("OpStore %v1"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpStore %v2"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("OpStore %v3"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, EmbeddedFetchDoesNotRemapUntaggedBufferLoadToPositionSemantic)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderVertexInputInfo input {};
+	input.fetch_embedded                  = true;
+	input.gs_prolog                       = true;
+	input.resources_num                   = 3;
+	input.resources_dst[0].semantic       = 0;
+	input.resources_dst[0].register_start = 0;
+	input.resources_dst[0].registers_num  = 4;
+	input.resources_dst[1].semantic       = 1;
+	input.resources_dst[1].register_start = 4;
+	input.resources_dst[1].registers_num  = 3;
+	input.resources_dst[2].semantic       = 3;
+	input.resources_dst[2].register_start = 8;
+	input.resources_dst[2].registers_num  = 2;
+	input.resources[0].fields[3]          = 74u << 12u;
+	input.resources[1].fields[3]          = 71u << 12u;
+	input.resources[2].fields[3]          = 29u << 12u;
+	input.bind.storage_buffers.buffers_num       = 1;
+	input.bind.storage_buffers.start_register[0] = 0;
+	input.bind.storage_buffers.usages[0]         = ShaderStorageUsage::ReadOnly;
+	input.bind.push_constant_size                = 256;
+
+	EXPECT_EQ(ShaderResolveEmbeddedFetchResource(false, false, 0, input.resources_dst, 3), -1);
+	EXPECT_EQ(ShaderResolveEmbeddedFetchResource(true, false, 0, input.resources_dst, 3), -1);
+	EXPECT_EQ(ShaderResolveEmbeddedFetchResource(true, true, 0, input.resources_dst, 3), 0);
+	EXPECT_EQ(ShaderResolveEmbeddedFetchResource(true, true, 3, input.resources_dst, 3), 2);
+
+	// Live V#: rewritten slot stays a slot; a guest base maps through the span.
+	const ShaderGen5MubufStreamSpan spans[] = {{0x100000000ull, 1024u, 3u}};
+	uint32_t                        slot    = 0;
+	uint32_t                        off     = 0;
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(1, 24, 2, spans, 1, &slot, &off));
+	EXPECT_EQ(slot, 1u);
+	EXPECT_EQ(off, 24u);
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x100000000ull, 16, 2, spans, 1, &slot, &off));
+	EXPECT_EQ(slot, 3u);
+	EXPECT_EQ(off, 16u);
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x100000010ull, 8, 2, spans, 1, &slot, &off));
+	EXPECT_EQ(slot, 3u);
+	EXPECT_EQ(off, 24u);
+	EXPECT_FALSE(ShaderResolveGen5MubufLiveAddress(0x200000000ull, 0, 2, spans, 1, &slot, &off));
 }
 
 // Gen5 SMEM: s_buffer_load_dwordx8 s[32:39], s[8:11], 0; s_nop; s_endpgm
@@ -5723,6 +5913,25 @@ TEST(EmulatorGraphicsPackets, SizesGen5Standard4KbBc3Textures)
 	EXPECT_EQ(size.align, 4096u);
 	EXPECT_EQ(padded.width, 128u);
 	EXPECT_EQ(padded.height, 128u);
+}
+
+TEST(EmulatorGraphicsPackets, SizesAllGen5Standard4KbBlockCompressedTexturesInBlocks)
+{
+	TileSizeAlign  bc1_size {};
+	TilePaddedSize bc1_padded {};
+	TileGetTextureSize2(169u, 1024u, 1024u, 1024u, 1u, 5u, &bc1_size, nullptr, &bc1_padded);
+	EXPECT_EQ(bc1_size.size, 512u * 1024u);
+	EXPECT_EQ(bc1_size.align, 4096u);
+	EXPECT_EQ(bc1_padded.width, 1024u);
+	EXPECT_EQ(bc1_padded.height, 1024u);
+
+	TileSizeAlign  bc7_size {};
+	TilePaddedSize bc7_padded {};
+	TileGetTextureSize2(181u, 4096u, 4096u, 4096u, 1u, 5u, &bc7_size, nullptr, &bc7_padded);
+	EXPECT_EQ(bc7_size.size, 16u * 1024u * 1024u);
+	EXPECT_EQ(bc7_size.align, 4096u);
+	EXPECT_EQ(bc7_padded.width, 4096u);
+	EXPECT_EQ(bc7_padded.height, 4096u);
 }
 
 TEST(EmulatorGraphicsPackets, EncodesCbNopAsFullType3Packet)
