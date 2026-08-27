@@ -3899,6 +3899,95 @@ TEST(EmulatorGraphicsPackets, MaterializesArrayedGen5ImageLoadAndStoreCoordinate
 	          Core::STRING8_INVALID_INDEX);
 }
 
+TEST(EmulatorGraphicsPackets, DynamicSplitStorageImageShadowsStaticBinding)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto make_nop = [](uint32_t pc)
+	{
+		ShaderInstruction inst {};
+		inst.pc                = pc;
+		inst.type              = ShaderInstructionType::SInstPrefetch;
+		inst.format            = ShaderInstructionFormat::Imm;
+		inst.src_num           = 1;
+		inst.src[0].type       = ShaderOperandType::LiteralConstant;
+		inst.src[0].constant.u = 0;
+		return inst;
+	};
+
+	ShaderInstruction store {};
+	store.type           = ShaderInstructionType::ImageStore;
+	store.format         = ShaderInstructionFormat::Vdata4Vaddr3StDmaskF;
+	store.pc             = 8u;
+	store.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	store.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	store.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+	store.src_num        = 2;
+	store.mimg_dimension = 1;
+
+	ShaderInstruction end {};
+	end.pc     = 12u;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(make_nop(0u));
+	code.GetInstructions().Add(make_nop(4u));
+	code.GetInstructions().Add(store);
+	code.GetInstructions().Add(end);
+
+	ShaderComputeInputInfo input {};
+	input.threads_num[0]                         = 1;
+	input.threads_num[1]                         = 1;
+	input.threads_num[2]                         = 1;
+	input.bind.push_constant_size                = 64;
+	input.bind.textures2D.textures_num           = 2;
+	input.bind.textures2D.textures2d_storage_num = 2;
+	for (int index = 0; index < 2; ++index)
+	{
+		auto& descriptor                      = input.bind.textures2D.desc[index];
+		descriptor.start_register             = 8;
+		descriptor.usage                      = ShaderTextureUsage::ReadWrite;
+		descriptor.textures2d_without_sampler = true;
+		descriptor.texture.fields[1]          = 20u << 20u;
+		descriptor.texture.fields[3]          = 13u << 28u;
+	}
+	input.bind.textures2D.desc[0].texture.fields[0] = 0x00010000u;
+	input.bind.textures2D.desc[1].texture.fields[0] = 0x00020000u;
+	input.bind.textures2D.desc[1].slot              = 40;
+	input.bind.textures2D.desc[1].dynamic_sload     = true;
+
+	auto& mappings                    = input.bind.dynamic_sloads;
+	mappings.mappings_num             = 2;
+	mappings.kind[0]                  = ShaderDynamicSLoadResourceKind::Texture;
+	mappings.resource_index[0]        = 1;
+	mappings.destination_register[0]  = 8;
+	mappings.instruction_pc[0]        = 0u;
+	mappings.offset_dw[0]             = 40;
+	mappings.dword_count[0]           = 4;
+	mappings.resource_field_offset[0] = 0;
+	mappings.last_consumer_pc[0]      = store.pc;
+	mappings.kind[1]                  = ShaderDynamicSLoadResourceKind::Texture;
+	mappings.resource_index[1]        = 1;
+	mappings.destination_register[1]  = 12;
+	mappings.instruction_pc[1]        = 4u;
+	mappings.offset_dw[1]             = 44;
+	mappings.dword_count[1]           = 4;
+	mappings.resource_field_offset[1] = 4;
+	mappings.last_consumer_pc[1]      = store.pc;
+
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+
+	EXPECT_NE(source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %uint_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %uint_0"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, DerivesSampledImageShapeFromMimgDimension)
 {
 	ShaderInstruction load {};
