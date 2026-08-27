@@ -314,7 +314,7 @@ inline bool GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType existing_type, 
 		return false;
 	}
 	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::IsContainedWithin ||
-	       relation == GpuMemoryOverlapType::Crosses;
+	       relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Equals;
 }
 
 // Incoming VertexBuffer fully or partially covered by an existing storage,

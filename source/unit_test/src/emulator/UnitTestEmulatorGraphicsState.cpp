@@ -3871,6 +3871,9 @@ TEST(EmulatorGraphicsState, AllowsMixedTextureIndexStorageParents)
 	// A StorageBuffer may cross an IndexBuffer and other read-only storage views.
 	EXPECT_TRUE(GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
 	                                             GpuMemoryObjectType::StorageBuffer));
+	// Exact IB/storage views are independent bindings over the same guest bytes.
+	EXPECT_TRUE(GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Equals,
+	                                             GpuMemoryObjectType::StorageBuffer));
 	EXPECT_TRUE(
 	    GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses, GpuMemoryObjectType::StorageBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
