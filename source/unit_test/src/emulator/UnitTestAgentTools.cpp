@@ -1361,6 +1361,7 @@ TEST(AgentTools, AgentPadTapIsReleasePressReleaseOnGuestSamples)
 	using Kyty::Libs::Controller::AgentPadGetReadStats;
 	using Kyty::Libs::Controller::AgentPadScheduleTap;
 	using Kyty::Libs::Controller::AgentPadReadStats;
+	using Kyty::Libs::Controller::kAgentPadTapPressSamples;
 	using Kyty::Libs::Controller::PAD_BUTTON_CROSS;
 
 	AgentPadClear();
@@ -1375,9 +1376,15 @@ TEST(AgentTools, AgentPadTapIsReleasePressReleaseOnGuestSamples)
 	AgentPadApplyReadStateSample(&sample);
 	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
 
-	sample = 0;
-	AgentPadApplyReadStateSample(&sample);
-	EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+	for (uint32_t press = 0; press < kAgentPadTapPressSamples; ++press)
+	{
+		sample = 0;
+		AgentPadApplyReadStateSample(&sample);
+		EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+		AgentPadGetReadStats(&stats);
+		EXPECT_EQ(stats.delivered_taps, 1u);
+		EXPECT_TRUE(stats.tap_pending);
+	}
 
 	sample = 0;
 	AgentPadApplyReadStateSample(&sample);
@@ -1392,6 +1399,34 @@ TEST(AgentTools, AgentPadTapIsReleasePressReleaseOnGuestSamples)
 	sample = 0;
 	AgentPadApplyReadStateSample(&sample); // release
 	EXPECT_EQ(sample & PAD_BUTTON_CROSS, 0u);
+	AgentPadClear();
+}
+
+TEST(AgentTools, AgentPadTapPressIsVisibleOnFirstReadOfPairedPoll)
+{
+	using Kyty::Libs::Controller::AgentPadApplyReadStateSample;
+	using Kyty::Libs::Controller::AgentPadClear;
+	using Kyty::Libs::Controller::AgentPadScheduleTap;
+	using Kyty::Libs::Controller::PAD_BUTTON_CROSS;
+
+	// A paired-poll consumer that compares consecutive first-of-pair samples
+	// must observe 0 then CROSS. A one-sample press would be visible only on the
+	// second read of the first pair.
+	AgentPadClear();
+	ASSERT_TRUE(AgentPadScheduleTap(PAD_BUTTON_CROSS));
+
+	uint32_t first_of_pair = 0;
+	AgentPadApplyReadStateSample(&first_of_pair);
+	EXPECT_EQ(first_of_pair & PAD_BUTTON_CROSS, 0u);
+
+	uint32_t second_of_pair = 0;
+	AgentPadApplyReadStateSample(&second_of_pair);
+	EXPECT_EQ(second_of_pair & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+
+	first_of_pair = 0;
+	AgentPadApplyReadStateSample(&first_of_pair);
+	EXPECT_EQ(first_of_pair & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+
 	AgentPadClear();
 }
 

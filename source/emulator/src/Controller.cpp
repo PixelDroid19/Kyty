@@ -192,6 +192,7 @@ struct AgentPadOverlay
 	bool        axis_set[static_cast<int>(Axis::AxisMax)]       = {};
 	TapPhase    tap_phase                                       = TapPhase::None;
 	uint32_t    tap_button                                      = 0;
+	uint32_t    tap_press_samples                               = 0;
 	uint64_t    read_state_samples                               = 0;
 	uint64_t    read_samples                                     = 0;
 	uint64_t    delivered_taps                                   = 0;
@@ -575,15 +576,26 @@ static void AgentPadApplyToButtonsAndAxes(bool advance_tap, uint32_t* buttons, u
 			tap_bits = 0;
 			if (advance_tap)
 			{
-				g_agent_pad.tap_phase = AgentPadOverlay::TapPhase::Pressed;
+				g_agent_pad.tap_phase         = AgentPadOverlay::TapPhase::Pressed;
+				g_agent_pad.tap_press_samples = 0;
 			}
 			break;
 		case AgentPadOverlay::TapPhase::Pressed:
 			tap_bits = g_agent_pad.tap_button;
 			if (advance_tap)
 			{
-				g_agent_pad.tap_phase = AgentPadOverlay::TapPhase::ReleaseAfterPress;
-				++g_agent_pad.delivered_taps;
+				if (g_agent_pad.tap_press_samples != std::numeric_limits<uint32_t>::max())
+				{
+					++g_agent_pad.tap_press_samples;
+				}
+				if (g_agent_pad.tap_press_samples == 1u)
+				{
+					++g_agent_pad.delivered_taps;
+				}
+				if (g_agent_pad.tap_press_samples >= kAgentPadTapPressSamples)
+				{
+					g_agent_pad.tap_phase = AgentPadOverlay::TapPhase::ReleaseAfterPress;
+				}
 			}
 			break;
 		case AgentPadOverlay::TapPhase::ReleaseAfterPress:
@@ -838,8 +850,9 @@ bool AgentPadScheduleTap(uint32_t button)
 	// The pulse is release/press/release at guest sample boundaries. A host
 	// wall-clock sleep cannot guarantee an edge reaches a title that polls more
 	// than once per frame.
-	g_agent_pad.tap_button = button;
-	g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::ReleaseBeforePress;
+	g_agent_pad.tap_button        = button;
+	g_agent_pad.tap_phase         = AgentPadOverlay::TapPhase::ReleaseBeforePress;
+	g_agent_pad.tap_press_samples = 0;
 	return true;
 }
 
@@ -941,8 +954,9 @@ AgentPadPresentResult AgentPadOnPresent(uint64_t present)
 			continue;
 		}
 
-		g_agent_pad.tap_button = scheduled.button;
-		g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::ReleaseBeforePress;
+		g_agent_pad.tap_button        = scheduled.button;
+		g_agent_pad.tap_phase         = AgentPadOverlay::TapPhase::ReleaseBeforePress;
+		g_agent_pad.tap_press_samples = 0;
 		++result.started;
 		if (result.started_target_present == 0)
 		{
@@ -978,8 +992,9 @@ void AgentPadClear()
 {
 	Core::LockGuard lock(g_agent_pad.mutex);
 	g_agent_pad.buttons = 0;
-	g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::None;
-	g_agent_pad.tap_button = 0;
+	g_agent_pad.tap_phase         = AgentPadOverlay::TapPhase::None;
+	g_agent_pad.tap_button        = 0;
+	g_agent_pad.tap_press_samples = 0;
 	g_agent_pad.scheduled_tap_count = 0;
 	for (int i = 0; i < static_cast<int>(Axis::AxisMax); ++i)
 	{
