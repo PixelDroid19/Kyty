@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <vulkan/vk_enum_string_helper.h>
@@ -115,6 +116,79 @@ bool GpuMemory::QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int v
 	Core::LockGuard lock(m_mutex);
 	const auto query = GpuMemoryRangeQueryKey::Create(vaddr, size, vaddr_num, false);
 	return QueryOverlapsLocked(vaddr, size, vaddr_num, query, out);
+}
+
+bool GpuMemory::QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = GpuMemoryRangeProvenance {};
+	if (vaddr == 0 || size == 0 || vaddr > UINT64_MAX - (size - 1u))
+	{
+		return false;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	const int       heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0)
+	{
+		return false;
+	}
+	auto& heap = m_heaps[heap_id];
+	// A draw-selected trace must stay cheap even when guest ranges have an
+	// unexpectedly dense alias topology. False-positive bucket candidates are
+	// bounded separately from the 16 returned real overlaps.
+	constexpr uint32_t kMaxPages      = 64;
+	constexpr uint32_t kMaxCandidates = 64;
+	const bool complete = heap.objects_map2->VisitCandidatesBounded(
+	    vaddr, size, kMaxPages, kMaxCandidates,
+	    [&](int object_id)
+	    {
+		    const auto& stored = heap.objects[object_id];
+		    if (stored.free)
+		    {
+			    return true;
+		    }
+		    const auto relation = GpuMemoryClassifyRangeSets(stored.block.vaddr, stored.block.size, stored.block.vaddr_num, &vaddr,
+			                                                   &size, 1, false);
+		    if (relation == OverlapType::None)
+		    {
+			    return true;
+		    }
+		    if (out->total_count != UINT32_MAX)
+		    {
+			    out->total_count++;
+		    }
+		    if (out->entry_count == GpuMemoryRangeProvenance::ENTRIES_MAX)
+		    {
+			    return false;
+		    }
+		EXIT_IF(stored.free);
+		const auto& info  = stored.info;
+		auto&       entry = out->entries[out->entry_count++];
+		entry.type                  = info.object.type;
+		entry.relation              = relation;
+		entry.heap_id               = heap_id;
+		entry.object_id             = object_id;
+		entry.logical_generation    = info.logical_generation;
+		entry.backing_generation    = info.backing_generation;
+		entry.content_sequence      = info.content_sequence;
+		entry.content_origin        = info.content_origin;
+		entry.submit_id             = info.submit_id;
+		entry.cpu_update_time       = info.cpu_update_time;
+		entry.gpu_update_time       = info.gpu_update_time;
+		entry.read_only             = info.read_only;
+		entry.in_use                = info.in_use;
+		entry.write_back_capable    = info.write_back_func != nullptr && !info.read_only;
+		entry.dependencies_complete = m_deferred_deletions.AreDependenciesComplete(info.submission_uses.Dependencies());
+		entry.check_hash            = info.check_hash;
+		entry.dirty_registered      = info.dirty_registered;
+		    return true;
+	    });
+	out->truncated = !complete;
+	return true;
 }
 
 bool GpuMemory::QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
@@ -223,6 +297,167 @@ bool GpuMemory::CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size)
 	}
 	GpuMemoryOverlapSnapshot overlaps {};
 	return QueryOverlapsLocked(&vaddr, &size, 1, query, &overlaps) && GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps);
+}
+
+bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns)
+{
+	const auto validation_start = std::chrono::steady_clock::now();
+	const auto finish_validation = [&]()
+	{
+		if (validation_ns != nullptr)
+		{
+			*validation_ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - validation_start).count());
+		}
+	};
+	if (copy_ns != nullptr)
+	{
+		*copy_ns = 0u;
+	}
+	if (dst == nullptr || !GpuMemoryCanUseTransientReadOnlyBuffer(true, size, true, true) || vaddr > UINT64_MAX - (size - 1u))
+	{
+		finish_validation();
+		return false;
+	}
+
+	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	{
+		finish_validation();
+		return false;
+	}
+	if (const auto* cached = m_overlap_snapshot_cache.BorrowLookup(query); cached != nullptr)
+	{
+		if (!GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*cached))
+		{
+			finish_validation();
+			return false;
+		}
+	} else
+	{
+		GpuMemoryOverlapSnapshot overlaps {};
+		if (!QueryOverlapsLocked(&vaddr, &size, 1, query, &overlaps) || !GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps))
+		{
+			finish_validation();
+			return false;
+		}
+	}
+	auto& dirty_tracker = GpuDirtyPageTracker::Instance();
+	if (!dirty_tracker.RegisterRange(vaddr, size))
+	{
+		finish_validation();
+		return false;
+	}
+	const auto dirty_read = dirty_tracker.BeginRead(vaddr, size);
+	if (!dirty_read.tracked)
+	{
+		(void)dirty_tracker.UnregisterRange(vaddr, size);
+		finish_validation();
+		return false;
+	}
+
+	finish_validation();
+	const auto copy_start = std::chrono::steady_clock::now();
+	std::memcpy(dst, reinterpret_cast<const void*>(vaddr), static_cast<size_t>(size));
+	const bool stable_copy = dirty_tracker.ReadObservationIsStable(vaddr, size, dirty_read);
+	if (copy_ns != nullptr)
+	{
+		*copy_ns = static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - copy_start).count());
+	}
+	(void)dirty_tracker.UnregisterRange(vaddr, size);
+	return stable_copy;
+}
+
+bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
+	                                          uint64_t* validation_ns, uint64_t* compare_ns)
+{
+	const auto validation_start = std::chrono::steady_clock::now();
+	const auto finish_validation = [&]()
+	{
+		if (validation_ns != nullptr)
+		{
+			*validation_ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - validation_start).count());
+		}
+	};
+	if (matches == nullptr)
+	{
+		return false;
+	}
+	*matches = false;
+	if (validation_ns != nullptr)
+	{
+		*validation_ns = 0u;
+	}
+	if (compare_ns != nullptr)
+	{
+		*compare_ns = 0u;
+	}
+	if (snapshot == nullptr || !GpuMemoryCanUseTransientReadOnlyBuffer(true, size, true, true) ||
+	    vaddr > UINT64_MAX - (size - 1u))
+	{
+		finish_validation();
+		return false;
+	}
+
+	const auto      query = GpuMemoryRangeQueryKey::Create(&vaddr, &size, 1, false);
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	if (ValidateAllocatedRangeLocked(vaddr, size, query) != GpuMemoryRangeValidationStatus::Valid)
+	{
+		finish_validation();
+		return false;
+	}
+	if (const auto* cached = m_overlap_snapshot_cache.BorrowLookup(query); cached != nullptr)
+	{
+		if (!GpuMemoryOverlapsAllowTransientReadOnlyBuffer(*cached))
+		{
+			finish_validation();
+			return false;
+		}
+	} else
+	{
+		GpuMemoryOverlapSnapshot overlaps {};
+		if (!QueryOverlapsLocked(&vaddr, &size, 1, query, &overlaps) || !GpuMemoryOverlapsAllowTransientReadOnlyBuffer(overlaps))
+		{
+			finish_validation();
+			return false;
+		}
+	}
+	auto& dirty_tracker = GpuDirtyPageTracker::Instance();
+	if (!dirty_tracker.RegisterRange(vaddr, size))
+	{
+		finish_validation();
+		return false;
+	}
+	const auto dirty_read = dirty_tracker.BeginRead(vaddr, size);
+	if (!dirty_read.tracked)
+	{
+		(void)dirty_tracker.UnregisterRange(vaddr, size);
+		finish_validation();
+		return false;
+	}
+
+	finish_validation();
+	const auto compare_start = std::chrono::steady_clock::now();
+	*matches = std::memcmp(reinterpret_cast<const void*>(vaddr), snapshot, static_cast<size_t>(size)) == 0;
+	const bool stable_compare = dirty_tracker.ReadObservationIsStable(vaddr, size, dirty_read);
+	if (compare_ns != nullptr)
+	{
+		*compare_ns = static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compare_start).count());
+	}
+	if (!stable_compare)
+	{
+		(void)dirty_tracker.UnregisterRange(vaddr, size);
+		*matches = false;
+		return false;
+	}
+	(void)dirty_tracker.UnregisterRange(vaddr, size);
+	return true;
 }
 
 void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type)

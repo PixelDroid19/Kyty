@@ -1,5 +1,7 @@
 #include "Kyty/UnitTest.h"
 
+#include "Kyty/Core/VirtualMemory.h"
+
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -53,6 +55,205 @@ UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
 
+TEST(EmulatorGraphicsState, FailedQueueSubmitCannotPublishCommandBuffer)
+{
+	bool normal_published    = false;
+	bool semaphore_published = false;
+	bool success_published   = false;
+
+	EXPECT_EQ(VulkanCallAndPublishOnSuccess([&] { return VK_ERROR_DEVICE_LOST; }, [&] { normal_published = true; }),
+	          VK_ERROR_DEVICE_LOST);
+	EXPECT_FALSE(normal_published);
+	EXPECT_EQ(VulkanCallAndPublishOnSuccess([&] { return VK_ERROR_OUT_OF_HOST_MEMORY; }, [&] { semaphore_published = true; }),
+	          VK_ERROR_OUT_OF_HOST_MEMORY);
+	EXPECT_FALSE(semaphore_published);
+	EXPECT_EQ(VulkanCallAndPublishOnSuccess([&] { return VK_SUCCESS; }, [&] { success_published = true; }), VK_SUCCESS);
+	EXPECT_TRUE(success_published);
+}
+
+TEST(EmulatorGraphicsState, IncompleteFenceCannotPublishSubmissionCompletion)
+{
+	bool timeout_published     = false;
+	bool not_ready_published   = false;
+	bool device_lost_published = false;
+	bool success_published     = false;
+
+	EXPECT_EQ(VulkanCallAndPublishOnSuccess([&] { return VK_TIMEOUT; }, [&] { timeout_published = true; }), VK_TIMEOUT);
+	EXPECT_FALSE(timeout_published);
+	EXPECT_EQ(VulkanCallAndPublishOnSuccess([&] { return VK_NOT_READY; }, [&] { not_ready_published = true; }), VK_NOT_READY);
+	EXPECT_FALSE(not_ready_published);
+	EXPECT_EQ(VulkanCallAndPublishOnSuccess([&] { return VK_ERROR_DEVICE_LOST; }, [&] { device_lost_published = true; }),
+	          VK_ERROR_DEVICE_LOST);
+	EXPECT_FALSE(device_lost_published);
+	EXPECT_EQ(VulkanCallAndPublishOnSuccess([&] { return VK_SUCCESS; }, [&] { success_published = true; }), VK_SUCCESS);
+	EXPECT_TRUE(success_published);
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitTrailKeepsEightNewestAttempts)
+{
+	VulkanSubmitAttemptTrail trail;
+	for (uint32_t i = 1; i <= 10; ++i)
+	{
+		VulkanSubmitAttempt attempt {};
+		attempt.queue             = i;
+		attempt.command_buffer_slot = i + 10u;
+		const uint64_t id = trail.Begin(attempt);
+		if (i != 10u)
+		{
+			EXPECT_TRUE(trail.Finish(id, VK_SUCCESS));
+		}
+	}
+
+	const auto snapshot = trail.Snapshot();
+	ASSERT_EQ(snapshot.count, 8u);
+	EXPECT_EQ(snapshot.dropped, 2u);
+	EXPECT_EQ(snapshot.entries[0].attempt, 3u);
+	EXPECT_EQ(snapshot.entries[0].queue, 3u);
+	EXPECT_EQ(snapshot.entries[0].command_buffer_slot, 13u);
+	EXPECT_TRUE(snapshot.entries[0].completed);
+	EXPECT_EQ(snapshot.entries[7].attempt, 10u);
+	EXPECT_EQ(snapshot.entries[7].queue, 10u);
+	EXPECT_EQ(snapshot.entries[7].command_buffer_slot, 20u);
+	EXPECT_FALSE(snapshot.entries[7].completed);
+	EXPECT_FALSE(trail.Finish(2u, VK_ERROR_DEVICE_LOST));
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitTrailNeverEvictsInFlightAttempt)
+{
+	VulkanSubmitAttemptTrail trail;
+	uint64_t                 attempts[8] {};
+	for (uint32_t i = 0; i < 8u; ++i)
+	{
+		VulkanSubmitAttempt attempt {};
+		attempt.queue = i;
+		attempts[i]   = trail.Begin(attempt);
+		ASSERT_NE(attempts[i], 0u);
+	}
+
+	VulkanSubmitAttempt overflow {};
+	overflow.queue = 9u;
+	EXPECT_EQ(trail.Begin(overflow), 0u);
+	EXPECT_FALSE(trail.Finish(0u, VK_ERROR_DEVICE_LOST));
+	EXPECT_TRUE(trail.Finish(attempts[0], VK_ERROR_DEVICE_LOST));
+
+	const auto snapshot = trail.Snapshot();
+	ASSERT_EQ(snapshot.count, 8u);
+	EXPECT_EQ(snapshot.dropped, 1u);
+	EXPECT_EQ(snapshot.entries[0].attempt, attempts[0]);
+	EXPECT_TRUE(snapshot.entries[0].completed);
+	EXPECT_EQ(snapshot.entries[0].result, VK_ERROR_DEVICE_LOST);
+	EXPECT_EQ(snapshot.entries[7].attempt, attempts[7]);
+	EXPECT_FALSE(snapshot.entries[7].completed);
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitTrailPreservesUntrackedFailureContext)
+{
+	VulkanSubmitAttemptTrail trail;
+	for (uint32_t i = 0; i < 8u; ++i)
+	{
+		VulkanSubmitAttempt in_flight {};
+		in_flight.queue = i;
+		ASSERT_NE(trail.Begin(in_flight), 0u);
+	}
+
+	VulkanSubmitAttempt overflow {};
+	overflow.kind                     = VulkanSubmitKind::SemaphoreCommandBuffer;
+	overflow.queue                    = 9u;
+	overflow.command_buffer_slot      = 11u;
+	overflow.host_submission_sequence = 13u;
+	overflow.guest_submit             = 15u;
+	overflow.frame                    = 17;
+	overflow.pm4_op                   = 19u;
+	overflow.pm4_dw                   = 21u;
+	overflow.signals_semaphore        = true;
+	VulkanSubmitAttempt observed {};
+
+	EXPECT_EQ(VulkanTraceSubmitAttempt(&trail, overflow, [] { return VK_ERROR_DEVICE_LOST; }, &observed),
+	          VK_ERROR_DEVICE_LOST);
+	EXPECT_EQ(observed.attempt, 0u);
+	EXPECT_EQ(observed.kind, overflow.kind);
+	EXPECT_EQ(observed.queue, overflow.queue);
+	EXPECT_EQ(observed.command_buffer_slot, overflow.command_buffer_slot);
+	EXPECT_EQ(observed.host_submission_sequence, overflow.host_submission_sequence);
+	EXPECT_EQ(observed.guest_submit, overflow.guest_submit);
+	EXPECT_EQ(observed.frame, overflow.frame);
+	EXPECT_EQ(observed.pm4_op, overflow.pm4_op);
+	EXPECT_EQ(observed.pm4_dw, overflow.pm4_dw);
+	EXPECT_TRUE(observed.signals_semaphore);
+	EXPECT_TRUE(observed.completed);
+	EXPECT_EQ(observed.result, VK_ERROR_DEVICE_LOST);
+
+	const auto snapshot = trail.Snapshot();
+	EXPECT_EQ(snapshot.count, 8u);
+	EXPECT_EQ(snapshot.dropped, 1u);
+}
+
+TEST(EmulatorGraphicsState, DisabledVulkanSubmitTrailUsesDirectOperationPath)
+{
+	bool                operation_called = false;
+	VulkanSubmitAttempt observed {};
+	observed.queue = 99u;
+	EXPECT_EQ(VulkanTraceSubmitAttempt(nullptr, {},
+	                                   [&]
+	                                   {
+		                                   operation_called = true;
+		                                   return VK_SUCCESS;
+	                                   },
+	                                   &observed),
+	          VK_SUCCESS);
+	EXPECT_TRUE(operation_called);
+	EXPECT_EQ(observed.queue, 99u);
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitTrailLatchesOnlyFirstFailure)
+{
+	VulkanSubmitAttemptTrail trail;
+	VulkanSubmitAttemptSnapshot snapshot;
+	EXPECT_FALSE(trail.LatchDeviceLost(VK_TIMEOUT, &snapshot));
+	EXPECT_TRUE(trail.LatchDeviceLost(VK_ERROR_DEVICE_LOST, &snapshot));
+	EXPECT_FALSE(trail.LatchDeviceLost(VK_ERROR_DEVICE_LOST, &snapshot));
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitTrailJoinsAttemptWithDriverResult)
+{
+	VulkanSubmitAttemptTrail trail;
+	VulkanSubmitAttempt      attempt {};
+	attempt.kind                     = VulkanSubmitKind::SemaphoreCommandBuffer;
+	attempt.queue                    = 8u;
+	attempt.command_buffer_slot      = 2u;
+	attempt.host_submission_sequence = 37u;
+	attempt.guest_submit             = 41u;
+	attempt.frame                    = 43;
+	attempt.pm4_op                   = 0x2du;
+	attempt.pm4_dw                   = 47u;
+	attempt.signals_semaphore        = true;
+
+	bool operation_called = false;
+	EXPECT_EQ(VulkanTraceSubmitAttempt(&trail, attempt,
+	                                   [&]
+	                                   {
+		                                   operation_called = true;
+		                                   return VK_ERROR_DEVICE_LOST;
+	                                   }),
+	          VK_ERROR_DEVICE_LOST);
+	EXPECT_TRUE(operation_called);
+
+	const auto snapshot = trail.Snapshot();
+	ASSERT_EQ(snapshot.count, 1u);
+	EXPECT_EQ(snapshot.entries[0].attempt, 1u);
+	EXPECT_EQ(snapshot.entries[0].kind, VulkanSubmitKind::SemaphoreCommandBuffer);
+	EXPECT_EQ(snapshot.entries[0].queue, 8u);
+	EXPECT_EQ(snapshot.entries[0].command_buffer_slot, 2u);
+	EXPECT_EQ(snapshot.entries[0].host_submission_sequence, 37u);
+	EXPECT_EQ(snapshot.entries[0].guest_submit, 41u);
+	EXPECT_EQ(snapshot.entries[0].frame, 43);
+	EXPECT_EQ(snapshot.entries[0].pm4_op, 0x2du);
+	EXPECT_EQ(snapshot.entries[0].pm4_dw, 47u);
+	EXPECT_TRUE(snapshot.entries[0].signals_semaphore);
+	EXPECT_TRUE(snapshot.entries[0].completed);
+	EXPECT_EQ(snapshot.entries[0].result, VK_ERROR_DEVICE_LOST);
+}
+
 namespace {
 
 class ScopedSpirvCacheDirectory final
@@ -90,6 +291,7 @@ void PauseSpirvCacheWrite(void* opaque)
 }
 
 int                     g_test_gpu_object_deletes      = 0;
+int                     g_read_only_writeback_calls    = 0;
 int                     g_versioned_gpu_object_creates = 0;
 int                     g_versioned_gpu_object_updates = 0;
 int                     g_versioned_gpu_object_deletes = 0;
@@ -107,11 +309,13 @@ bool                    g_versioned_gpu_object_release_second = false;
 
 struct TestGpuObject: public GpuObject
 {
-	explicit TestGpuObject(GpuMemoryObjectType object_type = GpuMemoryObjectType::StorageBuffer, bool is_read_only = false)
+	explicit TestGpuObject(GpuMemoryObjectType object_type = GpuMemoryObjectType::StorageBuffer, bool is_read_only = false,
+	                       bool hashes_guest_memory = false)
 	{
-		type      = object_type;
-		params[0] = 0x53544f5241474555ull ^ static_cast<uint64_t>(object_type);
-		read_only = is_read_only;
+		type       = object_type;
+		params[0]  = 0x53544f5241474555ull ^ static_cast<uint64_t>(object_type);
+		read_only  = is_read_only;
+		check_hash = hashes_guest_memory;
 	}
 
 	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
@@ -137,6 +341,64 @@ struct TestGpuObject: public GpuObject
 	}
 
 	update_func_t GetUpdateFunc() const override { return nullptr; }
+};
+
+struct ReadOnlyWriteBackTestGpuObject final: public TestGpuObject
+{
+	ReadOnlyWriteBackTestGpuObject(): TestGpuObject(GpuMemoryObjectType::StorageBuffer, true) {}
+
+	write_back_func_t GetWriteBackFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* /*obj*/, const uint64_t* /*vaddr*/,
+		          const uint64_t* /*size*/, int /*vaddr_num*/) -> GpuWritebackResult
+		{
+			g_read_only_writeback_calls++;
+			return {};
+		};
+	}
+};
+
+struct HtileFlushTestGpuObject: public GpuObject
+{
+	HtileFlushTestGpuObject()
+	{
+		type       = GpuMemoryObjectType::StorageBuffer;
+		params[0]  = 0x4854494c45464c55ull;
+		check_hash = true;
+		read_only  = false;
+	}
+
+	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
+
+	create_func_t GetCreateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
+		          VulkanMemory* /*mem*/) -> void*
+		{
+			if (vaddr == nullptr || size == nullptr || vaddr_num != 1)
+			{
+				return nullptr;
+			}
+			auto* storage      = new StorageVulkanBuffer;
+			storage->guest_addr = vaddr[0];
+			storage->guest_size = size[0];
+			return storage;
+		};
+	}
+
+	create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; }
+	write_back_func_t          GetWriteBackFunc() const override { return nullptr; }
+
+	delete_func_t GetDeleteFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, void* obj, VulkanMemory* /*mem*/) { delete static_cast<StorageVulkanBuffer*>(obj); };
+	}
+
+	update_func_t GetUpdateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* /*obj*/, const uint64_t* /*vaddr*/,
+		          const uint64_t* /*size*/, int /*vaddr_num*/) {};
+	}
 };
 
 struct VersionedTestBacking
@@ -946,6 +1208,12 @@ TEST(EmulatorGraphicsState, GpuMemoryRetirementBudgetKeepsUpWithTransientCreatio
 	EXPECT_EQ(GpuMemoryRetirementBatchLimit(128), 256u);
 	EXPECT_EQ(GpuMemoryRetirementBatchLimit(500), 1000u);
 	EXPECT_EQ(GpuMemoryRetirementBatchLimit(1500), 2048u);
+	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, true, false));
+	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::VertexBuffer, true, false));
+	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::IndexBuffer, true, false));
+	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, false, false));
+	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, true, true));
+	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::RenderTexture, true, false));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryCoveredIndexReusePreservesOneBackingAndVersionsSafely)
@@ -1161,6 +1429,251 @@ TEST(EmulatorGraphicsState, GpuMemoryOverlapQueryIsBoundedAndReadOnly)
 	EXPECT_EQ(g_test_gpu_object_deletes, 2);
 }
 
+TEST(EmulatorGraphicsState, GpuMemoryClassifiesTransitiveLinkedStorageTopology)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext     ctx {};
+	constexpr uint64_t heap_size = 0x1000ull;
+	auto*              guest     = new uint8_t[heap_size] {};
+	const uint64_t     base      = reinterpret_cast<uint64_t>(guest);
+	const uint32_t stats_index =
+	    static_cast<uint32_t>(GpuMemoryObjectType::StorageBuffer) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
+	GpuMemorySetAllocatedRange(base, heap_size);
+
+	const auto before = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base + 0x100u, 0x100u,
+	                                TestGpuObject(GpuMemoryObjectType::RenderTexture)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, base + 0x180u, 0x100u,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	// This view overlaps only the first StorageBuffer directly. Classification
+	// must still discover the RenderTexture through the existing alias graph.
+	ASSERT_NE(GpuMemoryCreateObject(3, &ctx, nullptr, base + 0x260u, 0x80u,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+
+	ASSERT_NE(GpuMemoryCreateObject(4, &ctx, nullptr, base + 0x500u, 0x100u,
+	                                TestGpuObject(GpuMemoryObjectType::VertexBuffer, true)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(5, &ctx, nullptr, base + 0x500u, 0x100u,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+
+	const auto after = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(after.gpu_memory_types[stats_index].new_linked, before.gpu_memory_types[stats_index].new_linked + 3u);
+	EXPECT_EQ(after.gpu_memory_types[stats_index].linked_surface_connected,
+	          before.gpu_memory_types[stats_index].linked_surface_connected + 2u);
+	EXPECT_EQ(after.gpu_memory_types[stats_index].linked_buffer_only_read_only,
+	          before.gpu_memory_types[stats_index].linked_buffer_only_read_only + 1u);
+	EXPECT_EQ(after.gpu_memory_types[stats_index].linked_mutable_or_other,
+	          before.gpu_memory_types[stats_index].linked_mutable_or_other);
+	EXPECT_EQ(after.gpu_memory_types[stats_index].linked_traversal_truncated,
+	          before.gpu_memory_types[stats_index].linked_traversal_truncated);
+
+	GpuMemoryFree(&ctx, base, heap_size);
+	delete[] guest;
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryBoundsLinkedStorageTopologyTraversal)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext      ctx {};
+	constexpr uint64_t  heap_size    = 0x4000ull;
+	constexpr uint32_t  parent_count = 129u;
+	constexpr uint64_t  parent_size  = 0x10ull;
+	constexpr uint64_t  parent_stride = 0x20ull;
+	auto*               guest         = new uint8_t[heap_size] {};
+	const uint64_t      base          = reinterpret_cast<uint64_t>(guest);
+	const uint64_t      first_parent  = base + 0x100u;
+	const uint64_t      combined_size = (parent_count - 1u) * parent_stride + parent_size;
+	const uint32_t stats_index =
+	    static_cast<uint32_t>(GpuMemoryObjectType::StorageBuffer) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
+	GpuMemorySetAllocatedRange(base, heap_size);
+
+	for (uint32_t i = 0; i < parent_count; ++i)
+	{
+		ASSERT_NE(GpuMemoryCreateObject(i + 1u, &ctx, nullptr, first_parent + i * parent_stride, parent_size,
+		                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+		          nullptr);
+	}
+
+	const auto before = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_NE(GpuMemoryCreateObject(parent_count + 1u, &ctx, nullptr, first_parent, combined_size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	const auto after = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(after.gpu_memory_types[stats_index].new_linked, before.gpu_memory_types[stats_index].new_linked + 1u);
+	EXPECT_EQ(after.gpu_memory_types[stats_index].linked_traversal_truncated,
+	          before.gpu_memory_types[stats_index].linked_traversal_truncated + 1u);
+
+	GpuMemoryFree(&ctx, base, heap_size);
+	delete[] guest;
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryClassifiesMutableLinksButNotReclaimedObjects)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext     ctx {};
+	constexpr uint64_t heap_size = 0x1000ull;
+	auto*              guest     = new uint8_t[heap_size] {};
+	const uint64_t     base      = reinterpret_cast<uint64_t>(guest);
+	const uint32_t stats_index =
+	    static_cast<uint32_t>(GpuMemoryObjectType::StorageBuffer) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
+	GpuMemorySetAllocatedRange(base, heap_size);
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base + 0x100u, 0x80u,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, base + 0x200u, 0x80u,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	const auto before_mutable = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_NE(GpuMemoryCreateObject(3, &ctx, nullptr, base + 0x140u, 0x100u,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, false)),
+	          nullptr);
+	const auto after_mutable = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(after_mutable.gpu_memory_types[stats_index].new_linked,
+	          before_mutable.gpu_memory_types[stats_index].new_linked + 1u);
+	EXPECT_EQ(after_mutable.gpu_memory_types[stats_index].linked_mutable_or_other,
+	          before_mutable.gpu_memory_types[stats_index].linked_mutable_or_other + 1u);
+
+	ASSERT_NE(GpuMemoryCreateObject(4, &ctx, nullptr, base + 0x500u, 0x100u,
+	                                TestGpuObject(GpuMemoryObjectType::VertexBuffer, true)),
+	          nullptr);
+	const auto before_reclaim = DebugStatsGetPerformanceSnapshot(false);
+	ASSERT_NE(GpuMemoryCreateObject(5, &ctx, nullptr, base + 0x540u, 0x80u,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	const auto after_reclaim = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(after_reclaim.gpu_memory_types[stats_index].reclaim_new,
+	          before_reclaim.gpu_memory_types[stats_index].reclaim_new + 1u);
+	EXPECT_EQ(after_reclaim.gpu_memory_types[stats_index].new_linked,
+	          before_reclaim.gpu_memory_types[stats_index].new_linked);
+	EXPECT_EQ(after_reclaim.gpu_memory_types[stats_index].linked_buffer_only_read_only,
+	          before_reclaim.gpu_memory_types[stats_index].linked_buffer_only_read_only);
+	EXPECT_EQ(after_reclaim.gpu_memory_types[stats_index].linked_surface_connected,
+	          before_reclaim.gpu_memory_types[stats_index].linked_surface_connected);
+	EXPECT_EQ(after_reclaim.gpu_memory_types[stats_index].linked_mutable_or_other,
+	          before_reclaim.gpu_memory_types[stats_index].linked_mutable_or_other);
+	EXPECT_EQ(after_reclaim.gpu_memory_types[stats_index].linked_traversal_truncated,
+	          before_reclaim.gpu_memory_types[stats_index].linked_traversal_truncated);
+
+	GpuMemoryFree(&ctx, base, heap_size);
+	delete[] guest;
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryRetiresOnlyCompleteReadOnlyBufferComponents)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext     ctx {};
+	constexpr uint64_t heap_size = 0x1000ull;
+	auto*              guest     = new uint8_t[heap_size] {};
+	const uint64_t     base      = reinterpret_cast<uint64_t>(guest);
+	const uint64_t     address   = base + 0x100u;
+	constexpr uint64_t size      = 0x100u;
+	GpuMemorySetAllocatedRange(base, heap_size);
+	g_test_gpu_object_deletes   = 0;
+	g_read_only_writeback_calls = 0;
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, address, size,
+	                                TestGpuObject(GpuMemoryObjectType::VertexBuffer, true)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, address, size,
+	                                ReadOnlyWriteBackTestGpuObject()),
+	          nullptr);
+
+	const auto before = DebugStatsGetPerformanceSnapshot(false);
+	for (uint32_t i = 0; i < 150u; ++i)
+	{
+		GpuMemoryFrameDone(&ctx);
+	}
+	const auto after = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(g_test_gpu_object_deletes, 2);
+	EXPECT_EQ(g_read_only_writeback_calls, 0);
+	EXPECT_EQ(after.gpu_memory_types[4].logical_free, before.gpu_memory_types[4].logical_free + 1u);
+	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free + 1u);
+
+	GpuMemoryFree(&ctx, base, heap_size);
+	delete[] guest;
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryKeepsTruncatedLinkedBufferComponents)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext      ctx {};
+	constexpr uint64_t  heap_size     = 0x4000ull;
+	constexpr uint32_t  parent_count  = 129u;
+	constexpr uint64_t  parent_size   = 0x10ull;
+	constexpr uint64_t  parent_stride = 0x20ull;
+	auto*               guest          = new uint8_t[heap_size] {};
+	const uint64_t      base           = reinterpret_cast<uint64_t>(guest);
+	const uint64_t      first_parent   = base + 0x100u;
+	const uint64_t      combined_size  = (parent_count - 1u) * parent_stride + parent_size;
+	GpuMemorySetAllocatedRange(base, heap_size);
+	g_test_gpu_object_deletes = 0;
+
+	for (uint32_t i = 0; i < parent_count; ++i)
+	{
+		ASSERT_NE(GpuMemoryCreateObject(i + 1u, &ctx, nullptr, first_parent + i * parent_stride, parent_size,
+		                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+		          nullptr);
+	}
+	ASSERT_NE(GpuMemoryCreateObject(parent_count + 1u, &ctx, nullptr, first_parent, combined_size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+
+	const auto before = DebugStatsGetPerformanceSnapshot(false);
+	for (uint32_t i = 0; i < 150u; ++i)
+	{
+		GpuMemoryFrameDone(&ctx);
+	}
+	const auto after = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(g_test_gpu_object_deletes, 0);
+	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free);
+
+	GpuMemoryFree(&ctx, base, heap_size);
+	delete[] guest;
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryKeepsSurfaceConnectedLinkedBufferComponents)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext     ctx {};
+	constexpr uint64_t heap_size = 0x1000ull;
+	auto*              guest     = new uint8_t[heap_size] {};
+	const uint64_t     base      = reinterpret_cast<uint64_t>(guest);
+	const uint64_t     address   = base + 0x100u;
+	constexpr uint64_t size      = 0x100u;
+	GpuMemorySetAllocatedRange(base, heap_size);
+	g_test_gpu_object_deletes = 0;
+
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, address, size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, address, size,
+	                                TestGpuObject(GpuMemoryObjectType::RenderTexture, true)),
+	          nullptr);
+
+	const auto before = DebugStatsGetPerformanceSnapshot(false);
+	for (uint32_t i = 0; i < 150u; ++i)
+	{
+		GpuMemoryFrameDone(&ctx);
+	}
+	const auto after = DebugStatsGetPerformanceSnapshot(false);
+	EXPECT_EQ(g_test_gpu_object_deletes, 0);
+	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free);
+
+	GpuMemoryFree(&ctx, base, heap_size);
+	delete[] guest;
+}
+
 TEST(EmulatorGraphicsState, StorageBufferBackingIdentityIgnoresViewShape)
 {
 	const StorageBufferGpuObject dword_view(4, 16, true);
@@ -1306,12 +1819,15 @@ TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
 	EXPECT_FALSE(GpuMemoryOverlapsAllowTransientReadOnlyBuffer(truncated));
 }
 
-TEST(EmulatorGraphicsState, UsesTransientBuffersOnlyForSmallSafeReadOnlyViews)
+TEST(EmulatorGraphicsState, UsesTransientBuffersOnlyForBoundedSafeReadOnlyViews)
 {
 	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, true, true));
 	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x1000u, true, true));
+	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 512u * 1024u, true, true));
+	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 1u * 1024u * 1024u, true, true));
+	EXPECT_TRUE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 4u * 1024u * 1024u, true, true));
 	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(false, 0x80u, true, false));
-	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x1001u, true, false));
+	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 4u * 1024u * 1024u + 1u, true, true));
 	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, false, false));
 	EXPECT_FALSE(GpuMemoryCanUseTransientReadOnlyBuffer(true, 0x80u, true, false));
 }
@@ -1321,18 +1837,39 @@ TEST(EmulatorGraphicsState, TransientSnapshotEligibilityTracksGpuObjectMutations
 	EnsureGpuMemoryForTests();
 
 	GraphicContext ctx {};
-	const uint64_t heap_base = 0x0000005103000000ull;
-	const uint64_t heap_size = 0x20000ull;
+	const uint64_t heap_size = 0x800000ull;
+	const uint64_t heap_base = Core::VirtualMemory::Alloc(0, heap_size, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(heap_base, 0u);
 	const uint64_t obj_addr  = heap_base + 0x4000ull;
 	const uint64_t obj_size  = 0x1000ull;
+	const uint64_t large_addr = heap_base + 0x40000ull;
+	const uint64_t large_size = 4u * 1024u * 1024u;
 
 	GpuMemorySetAllocatedRange(heap_base, heap_size);
 	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
+	auto* source = reinterpret_cast<uint8_t*>(obj_addr);
+	for (uint32_t i = 0; i < 16u; ++i)
+	{
+		source[i] = static_cast<uint8_t>(0xa0u + i);
+	}
+	uint8_t captured[16] = {};
+	bool    snapshot_matches = false;
+	// Allocation and read-only overlap eligibility are insufficient: a snapshot
+	// must fail closed until a hash-tracked GPU object owns the range.
+	EXPECT_FALSE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
+	EXPECT_FALSE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true, true)),
+	          nullptr);
+	// The unit harness has no runtime fault handler, so its process tracker is
+	// intentionally disabled and snapshot reads remain fail-closed.
+	EXPECT_FALSE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
+	EXPECT_FALSE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
+	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(large_addr, large_size));
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(large_addr, large_size + 1u));
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(heap_base - 8u, 16u));
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(heap_base + heap_size - 8u, 16u));
 
-	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size, TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
-	          nullptr);
 	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
 	GpuMemoryFree(&ctx, obj_addr, obj_size);
 	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
@@ -1340,25 +1877,66 @@ TEST(EmulatorGraphicsState, TransientSnapshotEligibilityTracksGpuObjectMutations
 	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, obj_addr, obj_size, TestGpuObject(GpuMemoryObjectType::StorageBuffer, false)),
 	          nullptr);
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, obj_size));
+	EXPECT_FALSE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
+	EXPECT_FALSE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
 	GpuMemoryFree(&ctx, obj_addr, obj_size);
 
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, 0));
-	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, 0x1001u));
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(obj_addr, large_size + 1u));
 }
 
 TEST(EmulatorGraphicsState, VertexAndIndexBuffersDeclareReadOnlyGpuUse)
 {
 	EXPECT_TRUE(VertexBufferGpuObject().read_only);
+	EXPECT_TRUE(VertexBufferGpuObject().check_hash);
 	EXPECT_TRUE(IndexBufferGpuObject().read_only);
+	EXPECT_TRUE(IndexBufferGpuObject().check_hash);
 }
 
 TEST(EmulatorGraphicsState, TransientBufferPoolReservesCapacityPerUsage)
 {
-	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 512u, 0u, 0x80u));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(512u, 512u, 0u, 0x80u));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 1536u, 0u, 0x80u));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 16u * 1024u * 1024u, 0x80u));
-	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 0u, 0u));
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 512u, 0u, 0x80u,
+	                                                    GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(512u, 512u, 0u, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 1536u, 0u, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 15u * 1024u * 1024u, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Snapshot));
+	EXPECT_TRUE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 15u * 1024u * 1024u, 0x80u,
+	                                                    GpuMemoryTransientBufferAllocationClass::Critical));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 16u * 1024u * 1024u, 0x80u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Critical));
+	EXPECT_FALSE(GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, 0u, 0u,
+	                                                     GpuMemoryTransientBufferAllocationClass::Critical));
+}
+
+TEST(EmulatorGraphicsState, TransientBufferReuseTracksLogicalDescriptorRangeAndTail)
+{
+	VulkanBuffer buffer;
+	buffer.memory.unique_id = 7u;
+	buffer.descriptor_range = 512u * 1024u;
+	const auto large_key    = buffer.DescriptorKey();
+
+	buffer.descriptor_range = 0x1000u;
+	const auto small_key    = buffer.DescriptorKey();
+	EXPECT_NE(large_key, small_key);
+	EXPECT_EQ(large_key.unique_id, small_key.unique_id);
+	EXPECT_EQ(GpuMemoryTransientBufferTailBytes(512u * 1024u, 0x1000u), 508u * 1024u);
+	EXPECT_EQ(GpuMemoryTransientBufferTailBytes(0x1000u, 0x1000u), 0u);
+}
+
+TEST(EmulatorGraphicsState, DescriptorBufferReferenceFindsStorageAndVsharpRanges)
+{
+	const VulkanBufferDescriptorKey storage[] = {{3u, 0x80u}, {5u, 0x1000u}};
+	const VulkanBufferDescriptorKey vsharp_small {7u, 0x80u};
+	const VulkanBufferDescriptorKey vsharp_large {7u, 0x80000u};
+
+	EXPECT_TRUE(VulkanDescriptorReferencesBuffer(storage, 2, false, {}, 3u));
+	EXPECT_TRUE(VulkanDescriptorReferencesBuffer(storage, 2, true, vsharp_small, 7u));
+	EXPECT_TRUE(VulkanDescriptorReferencesBuffer(storage, 2, true, vsharp_large, 7u));
+	EXPECT_FALSE(VulkanDescriptorReferencesBuffer(storage, 2, false, vsharp_small, 7u));
+	EXPECT_FALSE(VulkanDescriptorReferencesBuffer(storage, 2, true, vsharp_small, 11u));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryAccumulatesWriteIntentUntilWriteBack)
@@ -2468,11 +3046,35 @@ TEST(EmulatorGraphicsState, DepthAttachmentLoadOpsClearWhenGuestDepthClear)
 	EXPECT_EQ(load.stencil_load, VK_ATTACHMENT_LOAD_OP_LOAD);
 	EXPECT_EQ(load.initial_layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
+	auto stencil_only = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, false, true);
+	EXPECT_EQ(stencil_only.depth_load, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(stencil_only.stencil_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(stencil_only.initial_layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+	auto stencil_flag_without_stencil = ResolveDepthAttachmentLoadOps(VK_FORMAT_D16_UNORM, false, true);
+	EXPECT_EQ(stencil_flag_without_stencil.depth_load, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(stencil_flag_without_stencil.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
+	EXPECT_EQ(stencil_flag_without_stencil.initial_layout, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+
+	auto first_use_with_stencil_clear = ResolveDepthAttachmentLoadOps(VK_FORMAT_D32_SFLOAT_S8_UINT, false, true,
+	                                                                 VK_IMAGE_LAYOUT_UNDEFINED);
+	EXPECT_EQ(first_use_with_stencil_clear.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(first_use_with_stencil_clear.stencil_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(first_use_with_stencil_clear.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+
 	// First GPU-owned use: no prior contents. LOAD of UNDEFINED is host garbage.
 	auto first_use = ResolveDepthAttachmentLoadOps(VK_FORMAT_D16_UNORM, false, false, VK_IMAGE_LAYOUT_UNDEFINED);
 	EXPECT_EQ(first_use.depth_load, VK_ATTACHMENT_LOAD_OP_CLEAR);
 	EXPECT_EQ(first_use.stencil_load, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
 	EXPECT_EQ(first_use.initial_layout, VK_IMAGE_LAYOUT_UNDEFINED);
+}
+
+TEST(EmulatorGraphicsState, DepthTransferTransitionsAllFormatAspects)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_EQ(DepthFormatAspectMask(VK_FORMAT_D32_SFLOAT), VkImageAspectFlags {VK_IMAGE_ASPECT_DEPTH_BIT});
+	EXPECT_EQ(DepthFormatAspectMask(VK_FORMAT_D32_SFLOAT_S8_UINT),
+	          VkImageAspectFlags {VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT});
 }
 
 TEST(EmulatorGraphicsState, ResolvesSharedVideoOutExportsForGen5Module)
@@ -4138,6 +4740,83 @@ TEST(EmulatorGraphicsState, ConsumesTrackedHtileClearOnce)
 	EXPECT_FALSE(DepthMetaConsumeClear(address));
 }
 
+TEST(EmulatorGraphicsState, RepeatedIdenticalHtileWriteRearmsConsumedClear)
+{
+	constexpr uint64_t address = 0x12346000u;
+	uint32_t clear_words[8];
+	for (auto& word: clear_words)
+	{
+		word = 0xfffffff0u;
+	}
+
+	EXPECT_TRUE(DepthMetaObserveStorageWrite(address, clear_words, sizeof(clear_words)));
+	EXPECT_TRUE(DepthMetaConsumeClear(address));
+
+	// Merely reusing an unchanged buffer does not observe another guest write.
+	EXPECT_FALSE(DepthMetaConsumeClear(address));
+
+	// A later observed write is a new clear event even when bytes are identical.
+	EXPECT_TRUE(DepthMetaObserveStorageWrite(address, clear_words, sizeof(clear_words)));
+	EXPECT_TRUE(DepthMetaConsumeClear(address));
+
+	// The CP may fill HTILE in multiple writes; the post-write flush can cover
+	// only part of the exact storage while the complete backing is clear.
+	EXPECT_TRUE(DepthMetaObserveStorageFlush(address, sizeof(clear_words), address, sizeof(clear_words), clear_words, address + 4u,
+	                                        sizeof(clear_words) - 4u));
+	EXPECT_TRUE(DepthMetaConsumeClear(address));
+	EXPECT_FALSE(DepthMetaObserveStorageFlush(address, sizeof(clear_words), address, sizeof(clear_words) - 4u, clear_words, address,
+	                                         sizeof(clear_words)));
+	EXPECT_FALSE(DepthMetaObserveStorageFlush(address, sizeof(clear_words), address, sizeof(clear_words), clear_words,
+	                                         address + sizeof(clear_words), 4u));
+	EXPECT_FALSE(DepthMetaConsumeClear(address));
+	EXPECT_FALSE(DepthMetaObserveStorageFlush(address, sizeof(clear_words), address, sizeof(clear_words), clear_words, address, 0u));
+	EXPECT_FALSE(DepthMetaObserveStorageFlush(address, sizeof(clear_words), address, sizeof(clear_words), clear_words,
+	                                         UINT64_MAX - 1u, 4u));
+	EXPECT_FALSE(DepthMetaObserveStorageFlush(UINT64_MAX - 1u, 4u, UINT64_MAX - 1u, 4u, clear_words, UINT64_MAX - 1u, 4u));
+	EXPECT_FALSE(DepthMetaObserveStorageFlush(address, sizeof(clear_words), address, sizeof(clear_words), nullptr, address,
+	                                         sizeof(clear_words)));
+}
+
+TEST(EmulatorGraphicsState, GpuMemoryFlushRearmsIdenticalHtileClear)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	static std::array<uint32_t, 1024> clear_words {};
+	clear_words.fill(0u);
+	for (uint32_t i = 0; i < 8; ++i)
+	{
+		clear_words[i] = 0xfffffff0u;
+	}
+	const uint64_t address = reinterpret_cast<uint64_t>(clear_words.data());
+	const uint64_t size    = sizeof(uint32_t) * 8u;
+
+	GpuMemorySetAllocatedRange(address, sizeof(uint32_t) * 1024u);
+	auto* storage = static_cast<StorageVulkanBuffer*>(GpuMemoryCreateObject(1, &ctx, nullptr, address, size, HtileFlushTestGpuObject()));
+	ASSERT_NE(storage, nullptr);
+	storage->depth_meta_addr = address;
+	storage->depth_meta_size = size;
+
+	DepthMetaMarkClear(address);
+	ASSERT_TRUE(DepthMetaConsumeClear(address));
+	ASSERT_FALSE(DepthMetaConsumeClear(address));
+
+	// The complete backing is still the clear pattern. A partial CP flush must
+	// publish a new clear event before hash-equal Update returns early.
+	GpuMemoryFlush(&ctx, address + sizeof(uint32_t), size - sizeof(uint32_t));
+	EXPECT_TRUE(DepthMetaConsumeClear(address));
+
+	// An adjacent flush must not touch this storage object.
+	GpuMemoryFlush(&ctx, address + size, sizeof(uint32_t));
+	EXPECT_FALSE(DepthMetaConsumeClear(address));
+
+	clear_words[3] = 0xffffffffu;
+	GpuMemoryFlush(&ctx, address, size);
+	EXPECT_FALSE(DepthMetaConsumeClear(address));
+
+	GpuMemoryFree(&ctx, address, size);
+}
+
 TEST(EmulatorGraphicsState, HtilePendingClearDoesNotSuppressDepthWrite)
 {
 	auto actions = State::ResolveDepthClearActions(false, true);
@@ -4302,12 +4981,56 @@ TEST(EmulatorGraphicsState, ResolvesDepthReferenceImageViewCompatibility)
 	EXPECT_FALSE(ResolveDepthReferenceImageView(ImageSampleOperation::DepthReference, ShaderGen5SampledTextureShape::TwoDimensionalArray,
 	                                            true, View::Missing)
 	                 .compatible);
-	EXPECT_FALSE(
+	EXPECT_TRUE(
+	    ResolveDepthReferenceImageView(ImageSampleOperation::Mixed, ShaderGen5SampledTextureShape::TwoDimensional, true, View::Color2D)
+	        .compatible);
+	EXPECT_TRUE(
 	    ResolveDepthReferenceImageView(ImageSampleOperation::Mixed, ShaderGen5SampledTextureShape::TwoDimensional, true, View::Depth2D)
 	        .compatible);
+	EXPECT_FALSE(
+	    ResolveDepthReferenceImageView(ImageSampleOperation::Mixed, ShaderGen5SampledTextureShape::ThreeDimensional, true, View::Color3D)
+	        .compatible);
+	EXPECT_FALSE(
+	    ResolveDepthReferenceImageView(ImageSampleOperation::Mixed, ShaderGen5SampledTextureShape::TwoDimensional, false, View::Color2D)
+	        .compatible);
+	EXPECT_FALSE(ResolveDepthReferenceImageView(ImageSampleOperation::Mixed,
+	                                            ShaderGen5SampledTextureShape::TwoDimensionalArray, false, View::Color2DArray)
+	                 .compatible);
 	EXPECT_TRUE(
 	    ResolveDepthReferenceImageView(ImageSampleOperation::Regular, ShaderGen5SampledTextureShape::TwoDimensional, true, View::Color2D)
 	        .compatible);
+	EXPECT_TRUE(
+	    ResolveDepthReferenceImageView(ImageSampleOperation::Regular, ShaderGen5SampledTextureShape::ThreeDimensional, false, View::Color3D)
+	        .compatible);
+}
+
+TEST(EmulatorGraphicsState, PreservesOnlyPureDepthReferenceHostSampler)
+{
+	using namespace Kyty::Libs::Graphics::State;
+
+	ShaderTextureResources textures {};
+	textures.textures_num                  = 1;
+	textures.desc[0].usage                 = ShaderTextureUsage::ReadOnly;
+	textures.desc[0].sample_operation      = ImageSampleOperation::DepthReference;
+	textures.desc[0].slot                  = 1;
+	textures.desc[0].sampled_shape         = ShaderGen5SampledTextureShape::TwoDimensional;
+	textures.desc[0].sampled_shape_from_instruction = true;
+	ShaderSamplerResources samplers {};
+	samplers.samplers_num  = 1;
+	samplers.operations[0] = ImageSampleOperation::DepthReference;
+	samplers.slots[0]      = 1;
+
+	EXPECT_TRUE(ShaderSamplerDepthComparisonEligible(textures, samplers, 0));
+	EXPECT_EQ(ResolveSamplerBindingOperation(ImageSampleOperation::DepthReference, true), ImageSampleOperation::DepthReference);
+	EXPECT_EQ(ResolveSamplerBindingOperation(ImageSampleOperation::Regular, true), ImageSampleOperation::Regular);
+	EXPECT_EQ(ResolveSamplerBindingOperation(ImageSampleOperation::Mixed, true), ImageSampleOperation::Regular);
+
+	textures.desc[0].sampled_shape = ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	EXPECT_FALSE(ShaderSamplerDepthComparisonEligible(textures, samplers, 0));
+	textures.desc[0].sampled_shape = ShaderGen5SampledTextureShape::TwoDimensional;
+	samplers.samplers[0].fields[0] |= 1u << 15u;
+	EXPECT_FALSE(ShaderSamplerDepthComparisonEligible(textures, samplers, 0));
+	EXPECT_EQ(ResolveSamplerBindingOperation(ImageSampleOperation::DepthReference, false), ImageSampleOperation::Regular);
 }
 
 TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5Depth16Samples)

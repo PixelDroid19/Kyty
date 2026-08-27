@@ -111,6 +111,10 @@ std::vector<uint8_t> ModuleIdentity(const ShaderModuleKey& key, bool validation_
 	AppendU32(&canonical, key.debug_printf_enabled ? 1u : 0u);
 	AppendU32(&canonical, key.translator_version);
 	AppendU32(&canonical, validation_enabled ? 1u : 0u);
+	if (key.diagnostic_identity != 0)
+	{
+		AppendU64(&canonical, key.diagnostic_identity);
+	}
 	return canonical;
 }
 

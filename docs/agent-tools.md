@@ -74,6 +74,43 @@ pairs.
 `score` only analyzes the most recent native capture; it does not accept a
 caller-supplied path.
 
+Render-target lifetime diagnostics can be armed from a visually confirmed
+native capture instead of an unstable presentation number. Set
+`KYTY_TRACE_RT_LIFETIME_AFTER_CAPTURE=N` with the lifetime trace, where `N` is
+a strict positive decimal ordinal. The gate opens only after the Nth newer
+successful agent/manual capture and affects render activity beginning with the
+following frame. Automatic, trigger-file, failed, timed-out, and superseded
+captures do not advance the ordinal. A pending explicit request takes priority
+over automatic first/interval policy and retains exact request ownership until
+publication. Combine this gate with `KYTY_TRACE_RT_LIFETIME_COLOR_FORMAT` to
+select one Vulkan color format without relying on a process-specific guest
+address. Both controls are diagnostic-only and disabled by default.
+
+For a scene whose timing is not repeatable, start the process with both
+`KYTY_TRACE_RT_LIFETIME=1` and
+`KYTY_AGENT_TRACE_RT_LIFETIME_ARM=1`, visually confirm the damaged scene with
+an explicit native capture, and then issue:
+
+```text
+kyty_agent trace-rt-lifetime-arm
+```
+
+The response confirms only that one request is pending. The render thread
+consumes it atomically on subsequent eligible activity and opens the existing
+bounded lifetime trace; `ARM`, `WRITE`, `PASS_BEGIN`, `SAMPLE`, and
+`SAMPLE_ATTACHMENT_ALIAS` records remain the actual evidence. Repeated requests
+fail after the gate is pending or open, and the state resets only with the
+process. The command does not expose or mutate render targets, guest memory, or
+host paths. Optional capture-ordinal and minimum-present gates remain
+conjunctive; omit them when the explicit command itself is the scene fence.
+
+Color and depth lifetime selectors are separate diagnostic modes. Do not set a
+color address/format selector together with a depth address/extent/format
+selector: the render thread rejects that combination and
+`trace-rt-lifetime-arm` reports `trace_disabled`. For a visually correlated
+depth investigation, use the native capture only to confirm the scene, then arm
+a process started with the depth selector alone.
+
 Fatal host faults can write a bounded JSON context by setting
 `KYTY_CRASH_REPORT` to an absolute scratch path. When only `KYTY_CAPTURE_DIR`
 is set, the runtime uses `crash-context.json` inside that directory. The report
@@ -95,10 +132,23 @@ Controller automation is explicitly diagnostic input:
 
 ```text
 kyty_agent pad tap cross
+kyty_agent pad tap cross --at-present 8000 --repeat 2 --present-delta 40
 kyty_agent pad hold right --delta 120 --timeout-ms 10000
 kyty_agent pad axis left_x 255
 kyty_agent pad clear
 ```
+
+`pad tap --at-present` commits one bounded local schedule (at most eight
+targets) before its response is returned; closing or losing that request socket
+does not cancel it. `at-present` is an absolute future presentation count,
+`repeat` defaults to one, and a repeated tap requires a positive
+`--present-delta`. The presentation path starts the existing
+release → press → release FSM immediately after it records the exact target
+present, so `delivered_taps` advances only when the guest samples the press.
+If a target is missed, its button is held, or the prior FSM is still pending,
+that target is cancelled rather than delayed; `status.pad` exposes
+`scheduled_taps`, `next_target_present`, and `cancelled_scheduled_taps`.
+`pad clear` and emulator shutdown empty the pending schedule.
 
 It is evidence for reaching and exercising a runtime frontier, not by itself a
 gameplay compatibility claim.
@@ -106,7 +156,7 @@ gameplay compatibility claim.
 ## Stable behavior
 
 - Protocol and payload limits are versioned in
-  `source/include/Kyty/Agent/WireContract.h`.
+  `source/include/Kyty/Agent/WireContract.h` (protocol version 8).
 - Exit `0` means the requested tool completed successfully.
 - Exit `1` means a tool or health check reported failure.
 - Exit `125` means invalid usage or unavailable transport.

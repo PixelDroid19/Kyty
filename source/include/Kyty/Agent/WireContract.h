@@ -6,7 +6,7 @@
 
 namespace Kyty::Agent {
 
-inline constexpr uint32_t kProtocolVersion = 6u;
+inline constexpr uint32_t kProtocolVersion = 8u;
 inline constexpr size_t   kRequestLineMax  = 4096u;
 inline constexpr size_t   kResponseLineMax = 262144u;
 

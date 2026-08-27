@@ -120,7 +120,7 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 			    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-			image_memory_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			image_memory_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 			dest_stages                        = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
@@ -229,14 +229,15 @@ static void UtilImageDepthToBuffer(CommandBuffer* buffer, VulkanImage* src_image
 {
 	EXIT_IF(dst_buffer == nullptr || dst_buffer->buffer == nullptr || src_image == nullptr || src_image->image == nullptr);
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	const auto transition_aspects = DepthFormatAspectMask(src_image->format);
+	set_image_layout(vk_buffer, src_image, 0, 1, transition_aspects, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	VkBufferImageCopy region {};
 	region.bufferRowLength                 = (dst_pitch != src_image->extent.width ? dst_pitch : 0);
 	region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
 	region.imageSubresource.layerCount     = 1;
 	region.imageExtent                     = {src_image->extent.width, src_image->extent.height, 1};
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
-	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	set_image_layout(vk_buffer, src_image, 0, 1, transition_aspects, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 static_cast<VkImageLayout>(src_layout));
 }
 
@@ -408,6 +409,7 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 	buffer_info.size        = size;
 	buffer_info.usage       = buffer->usage;
 	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	buffer->descriptor_range = size;
 
 	vkCreateBuffer(gctx->device, &buffer_info, nullptr, &buffer->buffer);
 	if (buffer->buffer == nullptr)
@@ -438,7 +440,8 @@ void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer)
 
 	vkDestroyBuffer(gctx->device, buffer->buffer, nullptr);
 	VulkanFree(gctx, &buffer->memory);
-	buffer->buffer = nullptr;
+	buffer->buffer           = nullptr;
+	buffer->descriptor_range = 0;
 }
 
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,

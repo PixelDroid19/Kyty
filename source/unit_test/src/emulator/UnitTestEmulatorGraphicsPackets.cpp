@@ -23,7 +23,9 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 UT_BEGIN(EmulatorGraphicsPackets);
@@ -31,6 +33,24 @@ UT_BEGIN(EmulatorGraphicsPackets);
 using namespace Libs::Graphics;
 
 namespace {
+
+void TestSetEnvironment(const char* name, const char* value)
+{
+#if defined(_WIN32)
+	_putenv_s(name, value);
+#else
+	::setenv(name, value, 1);
+#endif
+}
+
+void TestUnsetEnvironment(const char* name)
+{
+#if defined(_WIN32)
+	_putenv_s(name, "");
+#else
+	::unsetenv(name);
+#endif
+}
 
 struct TestCommandBuffer
 {
@@ -727,12 +747,22 @@ TEST(EmulatorGraphicsPackets, ResolvesEmbeddedVertexOffsetFromUserSgpr)
 	input.vertex_offset_sgpr  = 11;
 	input.vertex_offset_value = 24;
 
-	EXPECT_EQ(ShaderResolveVertexOffset(0, input), 24);
-	EXPECT_EQ(ShaderResolveVertexOffset(7, input), 7);
+	int32_t resolved = 0;
+	EXPECT_TRUE(ShaderResolveVertexOffset(0, input, &resolved));
+	EXPECT_EQ(resolved, 24);
+	EXPECT_TRUE(ShaderResolveVertexOffset(7, input, &resolved));
+	EXPECT_EQ(resolved, 7);
+	EXPECT_TRUE(ShaderResolveVertexOffset(0, input, &resolved, -4));
+	EXPECT_EQ(resolved, 20);
+	EXPECT_TRUE(ShaderResolveVertexOffset(7, input, &resolved, 5));
+	EXPECT_EQ(resolved, 12);
+	EXPECT_FALSE(ShaderResolveVertexOffset(0x7fffffffu, input, &resolved, 1));
+	EXPECT_FALSE(ShaderResolveVertexOffset(0x80000000u, input, &resolved, -1));
 
 	input.fetch_external = false;
 	input.fetch_embedded = true;
-	EXPECT_EQ(ShaderResolveVertexOffset(0, input), 0);
+	EXPECT_TRUE(ShaderResolveVertexOffset(0, input, &resolved));
+	EXPECT_EQ(resolved, 0);
 }
 
 TEST(EmulatorGraphicsPackets, DetectsExternalFetchVertexOffset)
@@ -811,9 +841,10 @@ TEST(EmulatorGraphicsPackets, ParsesBufferStoreFormatXyzw)
 // optional descriptor swizzle, while S_OFFSET is added after that transform.
 TEST(EmulatorGraphicsPackets, MubufImmediateOffsetStaysSeparateFromSoffset)
 {
-	// op=0x0E buffer_load_dwordx4, idxen=1, offset=56, soffset=inline 0 (128),
-	// srsrc=2 → s[8:11], vdata=v30, vaddr=v43; s_nop then s_endpgm.
-	const uint32_t word0    = (0x38u << 26u) | (0x0Eu << 18u) | (1u << 13u) | 56u;
+	// op=0x0E buffer_load_dwordx4, idxen=1, offen=1, offset=56,
+	// soffset=inline 0 (128), srsrc=2 → s[8:11], vdata=v30,
+	// vaddr=[v43 index, v44 byte offset]; s_nop then s_endpgm.
+	const uint32_t word0    = (0x38u << 26u) | (0x0Eu << 18u) | (1u << 13u) | (1u << 12u) | 56u;
 	const uint32_t word1    = (128u << 24u) | (2u << 16u) | (30u << 8u) | 43u;
 	const uint32_t shader[] = {word0, word1, 0xbf800000u, 0xbf810000u};
 
@@ -835,7 +866,7 @@ TEST(EmulatorGraphicsPackets, MubufImmediateOffsetStaysSeparateFromSoffset)
 	EXPECT_EQ(instruction.src[2].constant.u, 0u);
 	EXPECT_EQ(instruction.buffer_imm_offset, 56u);
 	EXPECT_TRUE(instruction.buffer_idxen);
-	EXPECT_FALSE(instruction.buffer_offen);
+	EXPECT_TRUE(instruction.buffer_offen);
 
 	ShaderComputeInputInfo input {};
 	input.threads_num[0]                         = 1;
@@ -851,8 +882,24 @@ TEST(EmulatorGraphicsPackets, MubufImmediateOffsetStaysSeparateFromSoffset)
 	EXPECT_NE(source.FindIndex("%buffer_raw_address = OpFunction"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpFunctionCall %uint %buffer_raw_address"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("%uint_56 = OpConstant %uint 56"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("%buf_addr_index_0_0 %uint_56"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%tbuf_addr_index_0_0 = OpLoad %float %v43"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%tbuf_addr_voffset_0_0 = OpLoad %float %v44"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buffer_raw_address %buf_addr_index_0_0 %buf_addr_offset_0_0 %buf_addr_soffset_0_0"),
+	          Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("%buf_addr_index_0_0 uint_56"), Core::STRING8_INVALID_INDEX);
+
+	// OFFEN without IDXEN still uses the sole VADDR component (lane 0).
+	const uint32_t offen_word0    = (0x38u << 26u) | (0x0Eu << 18u) | (1u << 12u) | 56u;
+	const uint32_t offen_shader[] = {offen_word0, word1, 0xbf800000u, 0xbf810000u};
+	ShaderCode     offen_code;
+	offen_code.SetType(ShaderType::Compute);
+	ShaderParse(offen_shader, &offen_code);
+	ASSERT_GE(offen_code.GetInstructions().Size(), 1u);
+	EXPECT_FALSE(offen_code.GetInstructions().At(0).buffer_idxen);
+	EXPECT_TRUE(offen_code.GetInstructions().At(0).buffer_offen);
+	const auto offen_source = SpirvGenerateSource(offen_code, nullptr, nullptr, &input);
+	EXPECT_NE(offen_source.FindIndex("%tbuf_addr_voffset_0_0 = OpLoad %float %v43"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(offen_source.FindIndex("%tbuf_addr_voffset_0_0 = OpLoad %float %v44"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, MtbufImmediateOffsetIsPreservedForAddressing)
@@ -3529,11 +3576,34 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleBWithBias)
 	EXPECT_NE(source.FindIndex("Bias"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpCompositeExtract %float %image_sample_value_0 2"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpCompositeExtract %float %image_sample_value_0 3"), Core::STRING8_INVALID_INDEX);
+
+	auto lod_input                                      = input;
+	lod_input.fragment_tap.enabled                     = true;
+	lod_input.fragment_tap.select_ordinal              = true;
+	lod_input.fragment_tap.query_lod_visualization     = true;
+	lod_input.fragment_tap.selector                    = 0;
+	const auto lod_source = SpirvGenerateSource(code, nullptr, &lod_input, nullptr);
+	EXPECT_NE(lod_source.FindIndex("OpImageQueryLod %v2float %image_sampled_image_0 %image_sample_coord_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(lod_source.FindIndex("OpImageQueryLevels %int %image_sample_image_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(lod_source.FindIndex("OpStore %fs_tap_0 %image_sample_lod_reaches_last_vis_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(lod_source.FindIndex("OpStore %fs_tap_1 %image_sample_lod_reaches_missing_0_vis_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(lod_source.FindIndex("OpStore %fs_tap_2 %image_sample_lod_reaches_missing_1_vis_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(lod_source.FindIndex("OpStore %fs_tap_3 %float_1_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(lod_source.FindIndex("%image_sample_lod_biased_0 = OpFAdd %float %image_sample_lod_relative_0 "
+	                              "%image_sample_bias_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(lod_source.FindIndex("%image_sample_lod_reaches_missing_0_0 = OpFOrdGreaterThanEqual %bool "
+	                              "%image_sample_lod_biased_0 %image_sample_lod_levels_f_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(lod_source.FindIndex("%fs_tap_value_0 = OpLoad"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(ShaderRecompilePS(code, &lod_input).IsEmpty());
 }
 
 static Core::String8 GenerateImageSampleDrefLzFixture(uint8_t dimension, uint8_t descriptor_type, int flat_sampled_num,
                                                       int array_sampled_num, int volume_sampled_num,
-                                                      State::ImageSampleOperation operation, uint8_t dmask = 0x1)
+                                                      State::ImageSampleOperation operation, uint8_t dmask = 0x1,
+                                                      bool force_unnormalized = false)
 {
 	if (!Config::IsInitialized())
 	{
@@ -3572,6 +3642,8 @@ static Core::String8 GenerateImageSampleDrefLzFixture(uint8_t dimension, uint8_t
 	input.bind.push_constant_size                      = 48;
 	input.bind.textures2D.textures_num                 = 1;
 	input.bind.textures2D.textures2d_sampled_num       = flat_sampled_num;
+	input.bind.textures2D.textures2d_sampled_depth_num =
+	    operation == State::ImageSampleOperation::DepthReference ? flat_sampled_num : 0;
 	input.bind.textures2D.textures2d_array_sampled_num = array_sampled_num;
 	input.bind.textures2D.textures3d_sampled_num       = volume_sampled_num;
 	input.bind.textures2D.desc[0].start_register       = 8;
@@ -3582,7 +3654,7 @@ static Core::String8 GenerateImageSampleDrefLzFixture(uint8_t dimension, uint8_t
 	input.bind.samplers.samplers_num                   = 1;
 	input.bind.samplers.start_register[0]              = 20;
 	input.bind.samplers.operations[0]                  = operation;
-	input.bind.samplers.samplers[0].fields[0]          = 6u << 12u;
+	input.bind.samplers.samplers[0].fields[0]          = (6u << 12u) | (force_unnormalized ? 1u << 15u : 0u);
 	ShaderCalcBindingIndices(&input.bind);
 
 	return SpirvGenerateSource(code, nullptr, &input, nullptr);
@@ -3591,16 +3663,21 @@ static Core::String8 GenerateImageSampleDrefLzFixture(uint8_t dimension, uint8_t
 TEST(EmulatorGraphicsPackets, MaterializesImageSampleDrefLzForDepthReferenceSamplers)
 {
 	auto expect_materialized = [](uint8_t dimension, uint8_t descriptor_type, int flat_sampled_num, int array_sampled_num,
-	                              const char* coordinate_type)
+	                              const char* coordinate_type, bool force_unnormalized = false)
 	{
 		EXPECT_EXIT(
 		    {
 			    const auto source = GenerateImageSampleDrefLzFixture(dimension, descriptor_type, flat_sampled_num,
 			                                                         array_sampled_num, 0,
-			                                                         State::ImageSampleOperation::DepthReference);
-			    const bool valid = source.FindIndex("OpImageSampleExplicitLod %v4float") != Core::STRING8_INVALID_INDEX &&
-			                       source.FindIndex("OpFOrdGreaterThanEqual %bool") != Core::STRING8_INVALID_INDEX &&
-			                       source.FindIndex("OpImageSampleDrefExplicitLod") == Core::STRING8_INVALID_INDEX &&
+			                                                         State::ImageSampleOperation::DepthReference, 0x1,
+			                                                         force_unnormalized);
+			    const bool pure_depth = dimension == 1u && !force_unnormalized;
+			    const bool dref_matches =
+			        (source.FindIndex("OpImageSampleDrefExplicitLod %float") != Core::STRING8_INVALID_INDEX) == pure_depth;
+			    const bool manual_matches =
+			        (source.FindIndex("OpImageSampleExplicitLod %v4float") != Core::STRING8_INVALID_INDEX) == !pure_depth &&
+			        (source.FindIndex("OpFOrdGreaterThanEqual %bool") != Core::STRING8_INVALID_INDEX) == !pure_depth;
+			    const bool valid = dref_matches && manual_matches &&
 			                       source.FindIndex("Lod %float_0_000000") != Core::STRING8_INVALID_INDEX &&
 			                       source.FindIndex(coordinate_type) != Core::STRING8_INVALID_INDEX &&
 			                       (dimension != 1u ||
@@ -3614,6 +3691,7 @@ TEST(EmulatorGraphicsPackets, MaterializesImageSampleDrefLzForDepthReferenceSamp
 	expect_materialized(1u, 9u, 1, 0, "OpCompositeConstruct %v2float");
 	expect_materialized(5u, 13u, 0, 1, "OpCompositeConstruct %v3float");
 	expect_materialized(3u, 11u, 0, 1, "OpCompositeConstruct %v3float");
+	expect_materialized(1u, 9u, 1, 0, "OpCompositeConstruct %v2float", true);
 }
 
 TEST(EmulatorGraphicsPackets, RejectsInvalidImageSampleDrefLzContracts)
@@ -4279,16 +4357,168 @@ TEST(EmulatorGraphicsPackets, EmbeddedFetchDoesNotRemapUntaggedBufferLoadToPosit
 	const ShaderGen5MubufStreamSpan spans[] = {{0x100000000ull, 1024u, 3u}};
 	uint32_t                        slot    = 0;
 	uint32_t                        off     = 0;
-	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(1, 24, 2, spans, 1, &slot, &off));
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(1, 24, 4, 2, spans, 1, &slot, &off));
 	EXPECT_EQ(slot, 1u);
 	EXPECT_EQ(off, 24u);
-	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x100000000ull, 16, 2, spans, 1, &slot, &off));
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x100000000ull, 16, 4, 2, spans, 1, &slot, &off));
 	EXPECT_EQ(slot, 3u);
 	EXPECT_EQ(off, 16u);
-	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x100000010ull, 8, 2, spans, 1, &slot, &off));
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x100000010ull, 8, 4, 2, spans, 1, &slot, &off));
 	EXPECT_EQ(slot, 3u);
 	EXPECT_EQ(off, 24u);
-	EXPECT_FALSE(ShaderResolveGen5MubufLiveAddress(0x200000000ull, 0, 2, spans, 1, &slot, &off));
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x1000003e8ull, 23, 1, 2, spans, 1, &slot, &off));
+	EXPECT_EQ(slot, 3u);
+	EXPECT_EQ(off, 1023u);
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x1000003e8ull, 20, 4, 2, spans, 1, &slot, &off));
+	EXPECT_EQ(off, 1020u);
+	EXPECT_FALSE(ShaderResolveGen5MubufLiveAddress(0x1000003e8ull, 20, 5, 2, spans, 1, &slot, &off));
+	EXPECT_FALSE(ShaderResolveGen5MubufLiveAddress(0x1000003e8ull, 24, 1, 2, spans, 1, &slot, &off));
+	EXPECT_FALSE(ShaderResolveGen5MubufLiveAddress(0x200000000ull, 0, 4, 2, spans, 1, &slot, &off));
+	EXPECT_FALSE(ShaderResolveGen5MubufLiveAddress(0x100000000ull, 0, 0, 2, spans, 1, &slot, &off));
+
+	const ShaderGen5MubufStreamSpan crossing_span[] = {{0x00000000ffffff00ull, 1024u, 4u}};
+	EXPECT_TRUE(ShaderResolveGen5MubufLiveAddress(0x0000000100000010ull, 8, 4, 2, crossing_span, 1, &slot, &off));
+	EXPECT_EQ(slot, 4u);
+	EXPECT_EQ(off, 0x118u);
+	EXPECT_FALSE(ShaderResolveGen5MubufLiveAddress(0x0000000200000010ull, 8, 4, 2, crossing_span, 1, &slot, &off));
+}
+
+TEST(EmulatorGraphicsPackets, Gen5StreamSentinelDoesNotHideDirectSgprs)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction end {};
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderInstruction nop {};
+	nop.type   = ShaderInstructionType::VNop;
+	nop.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(nop);
+	code.GetInstructions().Add(end);
+
+	ShaderVertexInputInfo input {};
+	input.gs_prolog                                   = true;
+	input.bind.storage_buffers.buffers_num            = 1;
+	input.bind.storage_buffers.start_register[0]      = -1;
+	input.bind.storage_buffers.usages[0]              = ShaderStorageUsage::ReadOnly;
+	input.bind.direct_sgprs.sgprs_num                 = 4;
+	input.bind.direct_sgprs.start_register[0]         = 0;
+	input.bind.direct_sgprs.start_register[1]         = 1;
+	input.bind.direct_sgprs.start_register[2]         = 2;
+	input.bind.direct_sgprs.start_register[3]         = 3;
+	input.bind.push_constant_size                     = 32;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+	EXPECT_NE(source.FindIndex("OpStore %s8"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s9"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s10"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s11"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, Gen5LiveBufferAtomicUsesResolvedStorageSlot)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction atomic {};
+	atomic.type               = ShaderInstructionType::BufferAtomicAdd;
+	atomic.format             = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	atomic.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	atomic.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 1, .size = 1};
+	atomic.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 4};
+	atomic.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	atomic.src[2].constant.u  = 0;
+	atomic.src_num            = 3;
+	atomic.buffer_idxen       = true;
+	ShaderInstruction format_load = atomic;
+	format_load.type               = ShaderInstructionType::BufferLoadFormatXyz;
+	format_load.format             = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen;
+	format_load.dst                 = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 3};
+	ShaderInstruction format_load_xy = atomic;
+	format_load_xy.type               = ShaderInstructionType::BufferLoadFormatXy;
+	format_load_xy.format             = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen;
+	format_load_xy.dst                 = {.type = ShaderOperandType::Vgpr, .register_id = 7, .size = 2};
+	ShaderInstruction format_store = atomic;
+	format_store.type               = ShaderInstructionType::BufferStoreFormatXyzw;
+	format_store.format             = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+	format_store.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 9, .size = 4};
+	ShaderInstruction raw_load = atomic;
+	raw_load.type               = ShaderInstructionType::BufferLoadDwordx4;
+	raw_load.format             = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+	raw_load.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 13, .size = 4};
+	ShaderInstruction raw_store = atomic;
+	raw_store.type               = ShaderInstructionType::BufferStoreDwordx4;
+	raw_store.format             = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+	raw_store.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 17, .size = 4};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(atomic);
+	code.GetInstructions().Add(format_load);
+	code.GetInstructions().Add(format_load_xy);
+	code.GetInstructions().Add(format_store);
+	code.GetInstructions().Add(raw_load);
+	code.GetInstructions().Add(raw_store);
+
+	ShaderVertexInputInfo input {};
+	input.fetch_embedded                              = true;
+	input.buffers_num                                = 1;
+	input.buffers[0].storage_slot                    = 0;
+	input.bind.storage_buffers.buffers_num           = 1;
+	input.bind.storage_buffers.start_register[0]     = 0;
+	input.bind.storage_buffers.usages[0]             = ShaderStorageUsage::ReadWrite;
+	input.bind.push_constant_size                    = 16;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+	EXPECT_NE(source.FindIndex("%gen5_atomic_ptr_0_0 = OpAccessChain %_ptr_StorageBuffer_uint %buf_uint %buf_addr_slot_c_0_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%gen5_atomic_ptr_0_0 = OpAccessChain %_ptr_StorageBuffer_uint %buf_uint %buf_addr_desc0_0_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_atomic_word_0_0 = OpShiftRightLogical %uint %buf_addr_off_c_0_0 %uint_2"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%gen5_atomic_word_0_0 = OpShiftRightLogical %uint %buf_addr_0_0 %uint_2"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_0_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_0_0_0 %uint_4"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_valid_c_0_0 = OpLogicalAnd %bool"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_same_page_forward_0_0_0 = OpLogicalAnd %bool"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_next_page_forward_0_0_0 = OpLogicalAnd %bool"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_contiguous_0_0_0 = OpLogicalOr %bool"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%buf_addr_hieq_0_0_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_access_final_0_0 = OpLogicalAnd %bool %buf_addr_access_enabled_0_0 %buf_addr_valid_c_0_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_1_0 = OpSelect %uint %buf_addr_packed_1_0 %uint_8 %uint_12"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBranchConditional %buf_addr_valid_c_1_0 %gen5_mubuf_load_then_1_0 %gen5_mubuf_load_oob_1_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_access_size_2_0 = OpSelect %uint %buf_addr_packed_2_0 %uint_4 %uint_8"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_3_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_3_0_0 %uint_16"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_mubuf_store_enabled_3_0 = OpLogicalAnd %bool %gen5_mubuf_store_active_3_0 %buf_addr_valid_c_3_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_4_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_4_0_0 %uint_16"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_bytes_enough_5_0_0 = OpUGreaterThanEqual %bool %buf_addr_bytes_5_0_0 %uint_16"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%gen5_raw_store_off_5_1 = OpIAdd %uint %buf_addr_off_c_5_0 %uint_4"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%buf_addr_is_slot_5_4"), Core::STRING8_INVALID_INDEX);
+
+	const auto binary = ShaderRecompileVS(code, &input);
+	EXPECT_FALSE(binary.IsEmpty());
 }
 
 // Gen5 SMEM: s_buffer_load_dwordx8 s[32:39], s[8:11], 0; s_nop; s_endpgm
@@ -5098,6 +5328,95 @@ TEST(EmulatorGraphicsPackets, CompressedMrtExportReadsPackedHalfFromUintShadow)
 	EXPECT_EQ(source.FindIndex("%t6_2 = OpLoad %float %v5"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpLoad %uint %v4_packed_half"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpLoad %uint %v5_packed_half"), Core::STRING8_INVALID_INDEX);
+
+	const char*       previous_tap       = std::getenv("KYTY_FS_TAP");
+	const bool        had_previous_tap   = previous_tap != nullptr;
+	const std::string previous_tap_value = had_previous_tap ? previous_tap : "";
+	const char*       previous_signed       = std::getenv("KYTY_FS_TAP_SIGNED");
+	const bool        had_previous_signed   = previous_signed != nullptr;
+	const std::string previous_signed_value = had_previous_signed ? previous_signed : "";
+	TestSetEnvironment("KYTY_FS_TAP", "0000000000000000:@0");
+	TestSetEnvironment("KYTY_FS_TAP_SIGNED", "1");
+	input.fragment_tap = ShaderResolveFragmentTapConfig(0, true, 1u);
+	const auto tapped_source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	auto       draw_scoped_input = input;
+	draw_scoped_input.fragment_tap.enabled     = false;
+	draw_scoped_input.fragment_tap.draw_scoped = true;
+	const auto untapped_draw_source = SpirvGenerateSource(code, nullptr, &draw_scoped_input, nullptr);
+	draw_scoped_input.fragment_tap = input.fragment_tap;
+	draw_scoped_input.fragment_tap.draw_scoped = true;
+	const auto selected_draw_source = SpirvGenerateSource(code, nullptr, &draw_scoped_input, nullptr);
+	HW::PixelShaderInfo tap_regs {};
+	tap_regs.ps_regs.chksum = 0;
+	auto normal_draw_input = input;
+	normal_draw_input.fragment_tap.enabled     = false;
+	normal_draw_input.fragment_tap.draw_scoped = true;
+	EXPECT_NE(ShaderGetIdPS(&tap_regs, &normal_draw_input), ShaderGetIdPS(&tap_regs, &draw_scoped_input));
+
+	ShaderCode sparse_code;
+	sparse_code.SetType(ShaderType::Pixel);
+	ShaderInstruction sparse_value;
+	sparse_value.pc      = 0;
+	sparse_value.type    = ShaderInstructionType::VAddF32;
+	sparse_value.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	sparse_value.dst     = vgpr(27);
+	sparse_value.src[0]  = vgpr(2);
+	sparse_value.src[1]  = vgpr(3);
+	sparse_value.src_num = 2;
+	ShaderInstruction sparse_future_value;
+	sparse_future_value.pc      = 4;
+	sparse_future_value.type    = ShaderInstructionType::VAddF32;
+	sparse_future_value.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	sparse_future_value.dst     = vgpr(28);
+	sparse_future_value.src[0]  = vgpr(2);
+	sparse_future_value.src[1]  = vgpr(3);
+	sparse_future_value.src_num = 2;
+	ShaderInstruction sparse_export;
+	sparse_export.pc      = 8;
+	sparse_export.type    = ShaderInstructionType::Exp;
+	sparse_export.format  = ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone;
+	sparse_export.src[0]  = vgpr(27);
+	sparse_export.src[1]  = vgpr(27);
+	sparse_export.src[2]  = vgpr(27);
+	sparse_export.src[3]  = vgpr(27);
+	sparse_export.src_num = 4;
+	sparse_code.GetInstructions().Add(sparse_value);
+	sparse_code.GetInstructions().Add(sparse_future_value);
+	sparse_code.GetInstructions().Add(sparse_export);
+	ShaderPixelInputInfo sparse_input {};
+	sparse_input.target_output_mode[0] = 4;
+	sparse_input.fragment_tap           = input.fragment_tap;
+	const auto sparse_source = SpirvGenerateSource(sparse_code, nullptr, &sparse_input, nullptr);
+	const auto sparse_binary = ShaderRecompilePS(sparse_code, &sparse_input);
+	if (had_previous_tap)
+	{
+		TestSetEnvironment("KYTY_FS_TAP", previous_tap_value.c_str());
+	} else
+	{
+		TestUnsetEnvironment("KYTY_FS_TAP");
+	}
+	if (had_previous_signed)
+	{
+		TestSetEnvironment("KYTY_FS_TAP_SIGNED", previous_signed_value.c_str());
+	} else
+	{
+		TestUnsetEnvironment("KYTY_FS_TAP_SIGNED");
+	}
+	EXPECT_NE(tapped_source.FindIndex("%fs_tap_0 = OpVariable"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(untapped_draw_source.FindIndex("%fs_tap_0 = OpVariable"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(selected_draw_source.FindIndex("%fs_tap_0 = OpVariable"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(tapped_source.FindIndex("%fs_tap_signed_0 = OpExtInst %float %GLSL_std_450 Fma %fs_tap_value_0 %float_0_500000 "
+	                                  "%float_0_500000"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(tapped_source.FindIndex("OpStore %fs_tap_0 %fs_tap_signed_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(tapped_source.FindIndex("%fs_tap_out_0_2 = OpLoad"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v28"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v29"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(sparse_source.FindIndex("OpLoad %float %v30"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(sparse_source.FindIndex("OpStore %fs_tap_1 %float_0_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(sparse_source.FindIndex("OpStore %fs_tap_2 %float_0_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(sparse_source.FindIndex("OpStore %fs_tap_3 %float_0_000000"), Core::STRING8_INVALID_INDEX);
+	EXPECT_FALSE(sparse_binary.IsEmpty());
 }
 
 // Compressed MRT export must branch on EXEC and OpKill when inactive so dead
@@ -5197,6 +5516,81 @@ TEST(EmulatorGraphicsPackets, VcmpxPreservesVccAndOnlyNarrowsExec)
 	EXPECT_NE(source.FindIndex("OpStore %exec_hi %uint_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("OpStore %vcc_lo %tmasked_0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("OpStore %vcc_hi %uint_0"), Core::STRING8_INVALID_INDEX);
+}
+
+TEST(EmulatorGraphicsPackets, VMinMaxF32UseRdna2NanSelection)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto vgpr = [](int reg)
+	{
+		ShaderOperand op {};
+		op.type        = ShaderOperandType::Vgpr;
+		op.register_id = reg;
+		op.size        = 1;
+		return op;
+	};
+
+	ShaderInstruction min;
+	min.pc      = 0;
+	min.type    = ShaderInstructionType::VMinF32;
+	min.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	min.dst     = vgpr(2);
+	min.src[0]  = vgpr(0);
+	min.src[1]  = vgpr(1);
+	min.src_num = 2;
+
+	ShaderInstruction max = min;
+	max.pc                 = 4;
+	max.type               = ShaderInstructionType::VMaxF32;
+	max.dst                = vgpr(3);
+
+	ShaderInstruction end;
+	end.pc     = 8;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(min);
+	code.GetInstructions().Add(max);
+	code.GetInstructions().Add(end);
+
+	ShaderPixelInputInfo input {};
+	const auto           source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_NE(source.FindIndex("%minmax_lhs_nan_0 = OpIsNan %bool %t0_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%minmax_rhs_nan_0 = OpIsNan %bool %t1_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%minmax_rhs_number_0 = OpSelect %float %minmax_rhs_nan_0 %t0_0 %minmax_numeric_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%t_0 = OpSelect %float %minmax_lhs_nan_0 %t1_0 %minmax_rhs_number_0"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%minmax_lhs_nan_1 = OpIsNan %bool %t0_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%minmax_rhs_nan_1 = OpIsNan %bool %t1_1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%minmax_numeric_1 = OpExtInst %float %GLSL_std_450 FMax %t0_1 %t1_1"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%minmax_rhs_number_1 = OpSelect %float %minmax_rhs_nan_1 %t0_1 %minmax_numeric_1"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%t_1 = OpSelect %float %minmax_lhs_nan_1 %t1_1 %minmax_rhs_number_1"),
+	          Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%minmax_numeric_0 = OpExtInst %float %GLSL_std_450 FMin %t0_0 %t1_0"),
+	          Core::STRING8_INVALID_INDEX);
+
+	constexpr uint32_t lhs_number = 0x3f800000u;
+	constexpr uint32_t rhs_number = 0x40000000u;
+	constexpr uint32_t lhs_nan    = 0x7fc12345u;
+	constexpr uint32_t rhs_nan    = 0x7fa54321u;
+	constexpr uint32_t negative_zero = 0x80000000u;
+	EXPECT_EQ(ShaderSelectRdna2MinMaxResultBits(false, true, lhs_number, rhs_nan, rhs_number), lhs_number);
+	EXPECT_EQ(ShaderSelectRdna2MinMaxResultBits(true, false, lhs_nan, rhs_number, lhs_number), rhs_number);
+	EXPECT_EQ(ShaderSelectRdna2MinMaxResultBits(true, true, lhs_nan, rhs_nan, lhs_number), rhs_nan);
+	EXPECT_EQ(ShaderSelectRdna2MinMaxResultBits(false, true, negative_zero, rhs_nan, rhs_number), negative_zero);
+	EXPECT_EQ(ShaderSelectRdna2MinMaxResultBits(true, false, lhs_nan, negative_zero, rhs_number), negative_zero);
+	EXPECT_FALSE(ShaderRecompilePS(code, &input).IsEmpty());
 }
 
 TEST(EmulatorGraphicsPackets, NullMrt3ExportAfterExecZeroKillsFragment)
@@ -5349,7 +5743,41 @@ TEST(EmulatorGraphicsPackets, PixelShaderIdentityIncludesSamplerOperation)
 	auto depth_reference = regular;
 	depth_reference.bind.samplers.operations[0] = State::ImageSampleOperation::DepthReference;
 
+	auto force_unorm = depth_reference;
+	force_unorm.bind.samplers.samplers[0].fields[0] |= 1u << 15u;
+
 	EXPECT_NE(ShaderGetIdPS(&regs, &regular), ShaderGetIdPS(&regs, &depth_reference));
+	EXPECT_NE(ShaderGetIdPS(&regs, &depth_reference), ShaderGetIdPS(&regs, &force_unorm));
+}
+
+TEST(EmulatorGraphicsPackets, PixelShaderIdentityIncludesTextureSampleOperation)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	HW::PixelShaderInfo regs {};
+	regs.ps_regs.chksum = 0x0123456789abcdefu;
+
+	ShaderPixelInputInfo regular {};
+	regular.bind.textures2D.textures_num             = 1;
+	regular.bind.textures2D.desc[0].sample_operation = State::ImageSampleOperation::Regular;
+
+	auto depth_reference = regular;
+	depth_reference.bind.textures2D.desc[0].sample_operation = State::ImageSampleOperation::DepthReference;
+
+	auto mixed = regular;
+	mixed.bind.textures2D.desc[0].sample_operation = State::ImageSampleOperation::Mixed;
+
+	const auto regular_id         = ShaderGetIdPS(&regs, &regular);
+	const auto depth_reference_id = ShaderGetIdPS(&regs, &depth_reference);
+	const auto mixed_id           = ShaderGetIdPS(&regs, &mixed);
+
+	EXPECT_NE(regular_id, depth_reference_id);
+	EXPECT_NE(regular_id, mixed_id);
+	EXPECT_NE(depth_reference_id, mixed_id);
 }
 
 TEST(EmulatorGraphicsPackets, VertexShaderIdentityIncludesGen5FetchRegistersAndProlog)

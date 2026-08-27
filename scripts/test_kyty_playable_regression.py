@@ -317,6 +317,50 @@ class PadSequenceTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(tap_times, [0.0, 1.0, 2.0])
 
+    def test_sequence_observes_loading_during_inter_tap_settle(self) -> None:
+        now = [0.0]
+        observed_phases: list[str] = []
+        post_input = reg.PostInputWaitState()
+
+        def call(_sock: Path, tool: str, _args: dict[str, object], timeout: float):
+            del timeout
+            if tool == "status":
+                phase = "loading" if now[0] >= 0.25 else "interactive"
+                return 0, {
+                    "ok": True,
+                    "result": {
+                        "phase": phase,
+                        "present": int(now[0] * 100),
+                        "pad": {"tap_pending": False},
+                    },
+                }
+            return 0, {"ok": True}
+
+        ok, _events = reg.deliver_pad_sequence(
+            Path("/tmp/test.sock"),
+            [
+                {"tool": "pad_tap", "button": "cross"},
+                {"tool": "pad_tap", "button": "cross"},
+            ],
+            call=call,
+            pause=lambda seconds: now.__setitem__(0, now[0] + seconds),
+            clock=lambda: now[0],
+            inter_tap_settle_s=0.5,
+            status_observer=lambda status: (
+                observed_phases.append(str(status.get("phase") or "")),
+                reg.record_input_phase_observation(post_input, str(status.get("phase") or "")),
+            ),
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("loading", observed_phases)
+        self.assertTrue(post_input.loading_seen)
+        self.assertIsNone(post_input.interactive_since)
+        self.assertIsNone(post_input.interactive_start_present)
+        self.assertFalse(
+            reg.advance_post_input_wait(post_input, True, "interactive", 1000, now[0], 240, 15.0)
+        )
+
     def test_sequence_clears_even_when_a_tap_fails(self) -> None:
         calls: list[str] = []
 

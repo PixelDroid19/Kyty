@@ -41,6 +41,12 @@ namespace Kyty::Libs::Graphics {
 GpuMemory*    g_gpu_memory    = nullptr;
 GpuResources* g_gpu_resources = nullptr;
 
+uint64_t GpuMemory::NextContentSequence()
+{
+	EXIT_IF(m_content_sequence == UINT64_MAX);
+	return ++m_content_sequence;
+}
+
 uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t size)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -497,6 +503,18 @@ bool GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size)
 	return g_gpu_memory != nullptr && g_gpu_memory->CanSnapshotReadOnlyBuffer(vaddr, size);
 }
 
+bool GpuMemoryCaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns, uint64_t* copy_ns)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->CaptureSnapshotReadOnlyBuffer(vaddr, size, dst, validation_ns, copy_ns);
+}
+
+bool GpuMemoryCompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
+	                                        uint64_t* validation_ns, uint64_t* compare_ns)
+{
+	return g_gpu_memory != nullptr &&
+	       g_gpu_memory->CompareSnapshotReadOnlyBuffer(vaddr, size, snapshot, matches, validation_ns, compare_ns);
+}
+
 void GpuMemoryFree(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
@@ -601,6 +619,16 @@ bool GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vad
 	return g_gpu_memory != nullptr && g_gpu_memory->QueryOverlaps(vaddr, size, vaddr_num, out);
 }
 
+bool GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = GpuMemoryRangeProvenance {};
+	return g_gpu_memory != nullptr && g_gpu_memory->QueryRangeProvenance(vaddr, size, out);
+}
+
 void GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
@@ -645,11 +673,17 @@ void GpuMemoryFlushAll(GraphicContext* ctx)
 	g_gpu_memory->FlushAll(ctx);
 }
 
-void GpuMemoryFrameDone()
+void GpuMemoryFrameDone(GraphicContext* ctx)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
+	EXIT_IF(ctx == nullptr);
 
-	g_gpu_memory->FrameDone(WindowGetGraphicContext());
+	g_gpu_memory->FrameDone(ctx);
+}
+
+void GpuMemoryFrameDone()
+{
+	GpuMemoryFrameDone(WindowGetGraphicContext());
 }
 
 void GpuMemoryWriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission)

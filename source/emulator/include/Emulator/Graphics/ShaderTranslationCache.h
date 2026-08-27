@@ -15,7 +15,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kShaderTranslatorVersion = 27;
+inline constexpr uint32_t kShaderTranslatorVersion = 34;
 
 class SpirvBinaryCacheStore;
 
@@ -33,11 +33,12 @@ struct ShaderModuleKey
 	Config::ShaderOptimizationType optimization       = Config::ShaderOptimizationType::None;
 	bool                           next_gen            = false;
 	bool                           debug_printf_enabled = false;
+	uint64_t                       diagnostic_identity = 0;
 	uint32_t                       translator_version = kShaderTranslatorVersion;
 
 	[[nodiscard]] static ShaderModuleKey Create(const ShaderId& shader_id, ShaderModuleStage stage,
 	                                            Config::ShaderOptimizationType optimization, bool next_gen,
-	                                            bool debug_printf_enabled = false);
+	                                            bool debug_printf_enabled = false, uint64_t diagnostic_identity = 0);
 	[[nodiscard]] bool operator==(const ShaderModuleKey& other) const;
 	[[nodiscard]] bool operator!=(const ShaderModuleKey& other) const { return !(*this == other); }
 };

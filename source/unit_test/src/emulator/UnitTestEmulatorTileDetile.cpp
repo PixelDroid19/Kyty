@@ -1,5 +1,6 @@
 #include "Kyty/UnitTest.h"
 
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Graphics/DebugStats.h"
@@ -1532,6 +1533,29 @@ TEST(EmulatorTileDetile, DepthOnlyD16ShadowPassKeepsWritableAttachment)
 	EXPECT_EQ(depth.vulkan_buffer, &image);
 	EXPECT_TRUE(depth.depth_write_enable);
 	EXPECT_TRUE(depth.depth_test_enable);
+}
+
+TEST(EmulatorTileDetile, DrawMaterialTraceDecodesFloat2Uv)
+{
+	const uint64_t guest_address =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(guest_address, 0u);
+
+	auto* uv = reinterpret_cast<float*>(guest_address);
+	uv[0]    = 0.125f;
+	uv[1]    = -3.5f;
+
+	float    values[4] = {};
+	uint32_t components = 0;
+	uint32_t bytes      = 0;
+	const bool decoded  = DecodeDrawMaterialTraceVertexAttribute(guest_address, 64u, values, &components, &bytes);
+
+	EXPECT_TRUE(decoded);
+	EXPECT_EQ(components, 2u);
+	EXPECT_EQ(bytes, 8u);
+	EXPECT_FLOAT_EQ(values[0], uv[0]);
+	EXPECT_FLOAT_EQ(values[1], uv[1]);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_address));
 }
 
 TEST(EmulatorTileDetile, CompressedHostMipCountStopsAtFourTexelBlock)

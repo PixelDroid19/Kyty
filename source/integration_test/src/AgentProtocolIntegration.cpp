@@ -145,9 +145,11 @@ int ScenarioProtocolVersionConsistent()
 	const auto bring_pos = diag_body.find("\"bring_up\"");
 	const auto ring_pos  = diag_body.find("\"event_ring\"");
 	Expect(bring_pos != std::string::npos && ring_pos != std::string::npos && ring_pos > bring_pos, "event_ring after bring_up");
-	Expect(Kyty::Agent::kProtocolVersion == 6u, "live constant is 6");
-	Expect(ParseTool("perf_snapshot") == Tool::PerfSnapshot, "perf_snapshot is part of protocol v6");
-	Expect(ParseTool("debug_snapshot") == Tool::DebugSnapshot, "debug_snapshot is part of protocol v6");
+	Expect(Kyty::Agent::kProtocolVersion == 8u, "live constant is 8");
+	Expect(ParseTool("perf_snapshot") == Tool::PerfSnapshot, "perf_snapshot remains part of protocol v8");
+	Expect(ParseTool("debug_snapshot") == Tool::DebugSnapshot, "debug_snapshot remains part of protocol v8");
+	Expect(ParseTool("trace_rt_lifetime_arm") == Tool::TraceRtLifetimeArm,
+	       "explicit render-target lifetime arming is part of protocol v8");
 	std::printf("PROTOCOL_VERSION=%u\n", Kyty::Agent::kProtocolVersion);
 	return 0;
 }

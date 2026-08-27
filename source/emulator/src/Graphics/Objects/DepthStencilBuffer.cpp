@@ -4,7 +4,6 @@
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
-#include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
@@ -116,16 +115,9 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	}
 
 	// Leave layout UNDEFINED until the first render pass. A layout-only
-	// transition to ATTACHMENT does not define pixels; a later LOAD then
-	// reads host garbage. ResolveDepthAttachmentLoadOps CLEARs first use.
-	if (htile)
-	{
-		const uint64_t htile_addr = params[DepthStencilBufferObject::PARAM_HTILE_ADDR];
-		if (htile_addr != 0)
-		{
-			DepthMetaMarkClear(htile_addr);
-		}
-	}
+	// transition to ATTACHMENT does not define pixels; a later LOAD then reads
+	// host garbage. ResolveDepthAttachmentLoadOps CLEARs first use, so image
+	// creation must not fabricate a guest HTILE clear event.
 
 	return vk_obj;
 }

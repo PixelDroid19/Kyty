@@ -103,6 +103,35 @@ public:
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
 	[[nodiscard]] bool           CanLoadPackedHalfForExport(int export_index, ShaderOperand op) const;
+	[[nodiscard]] bool UsesVertexClipProbe() const
+	{
+		return m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->clip_probe.enabled;
+	}
+	[[nodiscard]] bool UsesPixelInput0Probe() const
+	{
+		return m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->input0_probe.enabled &&
+		       (m_ps_input_info->input0_probe.kind == ShaderPixelProbeKind::Input0 ||
+		        m_ps_input_info->input0_probe.kind == ShaderPixelProbeKind::None);
+	}
+	[[nodiscard]] bool UsesPixelSampleProbe() const
+	{
+		return m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->input0_probe.enabled &&
+		       m_ps_input_info->input0_probe.kind == ShaderPixelProbeKind::SampleResult;
+	}
+	[[nodiscard]] bool UsesSparsePixelSampleProbe() const
+	{
+		return UsesPixelSampleProbe() && m_ps_input_info->input0_probe.sparse_subgroup;
+	}
+	[[nodiscard]] bool UsesPixelMrtProbe() const
+	{
+		return m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->input0_probe.enabled &&
+		       m_ps_input_info->input0_probe.kind == ShaderPixelProbeKind::FinalMrtResult;
+	}
+	[[nodiscard]] bool UsesGraphicsProbeStorage() const
+	{
+		return UsesVertexClipProbe() || UsesPixelInput0Probe() || UsesPixelSampleProbe() || UsesPixelMrtProbe();
+	}
+	[[nodiscard]] uint32_t GetGraphicsProbeDescriptorSet() const;
 
 	void                                       SetVsInputInfo(const ShaderVertexInputInfo* input_info) { m_vs_input_info = input_info; }
 	[[nodiscard]] const ShaderVertexInputInfo* GetVsInputInfo() const { return m_vs_input_info; }
@@ -112,6 +141,19 @@ public:
 
 	void                                      SetPsInputInfo(const ShaderPixelInputInfo* input_info) { m_ps_input_info = input_info; }
 	[[nodiscard]] const ShaderPixelInputInfo* GetPsInputInfo() const { return m_ps_input_info; }
+	[[nodiscard]] bool IsDx10ClampEnabled() const
+	{
+		return (m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->dx10_clamp) ||
+		       (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->dx10_clamp);
+	}
+	[[nodiscard]] bool IsIeeeModeEnabled() const
+	{
+		return (m_code.GetType() == ShaderType::Vertex && m_vs_input_info != nullptr && m_vs_input_info->ieee_mode) ||
+		       (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && m_ps_input_info->ieee_mode);
+	}
+
+	[[nodiscard]] bool EmitPixelRgbaProbe(String8* dst_source, uint32_t index, const String8& value_id,
+	                                      const char* symbol_prefix, bool include_frag_coord = false) const;
 
 	[[nodiscard]] const ShaderBindResources* GetBindInfo() const { return m_bind; }
 	//[[nodiscard]] const ShaderBindParameters& GetBindParams() const { return m_bind_params; }
@@ -258,7 +300,8 @@ bool operand_is_constant(ShaderOperand op);
 bool operand_is_variable(ShaderOperand op);
 bool operand_covers_vgpr(ShaderOperand op, int reg);
 bool instruction_writes_vgpr(const ShaderInstruction& inst, int reg);
-bool FragmentTapSelection(const ShaderCode& code, uint32_t* pc, int* first_register);
+bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register);
+bool FragmentTapQueryLodSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t instruction_index);
 String8 packed_half_shadow_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op, int shift);

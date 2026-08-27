@@ -51,7 +51,8 @@ extern const char SCC_EXEC_NZ_2[];
 extern const char SCC_OVERFLOW_ADD_1[];
 extern const char SCC_OVERFLOW_SUB_1[];
 extern const char SCC_CARRY_1[];
-extern const char CLAMP[];
+extern const char CLAMP_DX10[];
+extern const char CLAMP_PASSTHROUGH[];
 extern const char MULTIPLY[];
 
 } // namespace Kyty::Libs::Graphics

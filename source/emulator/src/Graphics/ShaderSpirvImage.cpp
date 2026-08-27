@@ -297,6 +297,207 @@ static String8 EmitImageSampleCoordinateLoads(uint32_t index, const SpirvValue& 
 	    .ReplaceStr("<y>", y.value);
 }
 
+static bool PixelInput0ProbeSelectsFirstSampleB(const Spirv* spirv, uint32_t instruction_index)
+{
+	if (spirv == nullptr || !spirv->UsesPixelInput0Probe())
+	{
+		return false;
+	}
+	const auto& code = spirv->GetCode();
+	if (instruction_index >= code.GetInstructions().Size() ||
+	    code.GetInstructions().At(instruction_index).type != ShaderInstructionType::ImageSampleB)
+	{
+		return false;
+	}
+	for (uint32_t index = 0; index < instruction_index; ++index)
+	{
+		if (code.GetInstructions().At(index).type == ShaderInstructionType::ImageSampleB)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool PixelSampleProbeSelectsImageSampleB(const Spirv* spirv, uint32_t instruction_index)
+{
+	if (spirv == nullptr || !spirv->UsesPixelSampleProbe())
+	{
+		return false;
+	}
+	const auto* input = spirv->GetPsInputInfo();
+	const auto& code  = spirv->GetCode();
+	if (input == nullptr || instruction_index >= code.GetInstructions().Size() ||
+	    code.GetInstructions().At(instruction_index).type != ShaderInstructionType::ImageSampleB)
+	{
+		return false;
+	}
+	return instruction_index == input->input0_probe.sample_ordinal;
+}
+
+bool Spirv::EmitPixelRgbaProbe(String8* dst_source, uint32_t index, const String8& value_id, const char* symbol_prefix,
+	                           bool include_frag_coord) const
+{
+	if (dst_source == nullptr || value_id.IsEmpty() || symbol_prefix == nullptr || symbol_prefix[0] == '\0')
+	{
+		return false;
+	}
+	const auto scope     = GetConstantUint(1u);
+	const auto semantics = GetConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
+	const auto one       = GetConstantUint(1u);
+	const auto zero_uint = GetConstantUint(0u);
+	const auto sign_mask = GetConstantUint(0x80000000u);
+	if (scope == "unknown_uint_constant" || semantics == "unknown_uint_constant" || one == "unknown_uint_constant" ||
+	    zero_uint == "unknown_uint_constant" || sign_mask == "unknown_uint_constant")
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+%pixel_sample_probe_count_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_37
+%pixel_sample_probe_count_prior_<index> = OpAtomicIAdd %uint %pixel_sample_probe_count_ptr_<index> %<scope> %<semantics> %<one>
+%pixel_sample_probe_r_<index> = OpCompositeExtract %float <value_id> 0
+%pixel_sample_probe_g_<index> = OpCompositeExtract %float <value_id> 1
+%pixel_sample_probe_b_<index> = OpCompositeExtract %float <value_id> 2
+%pixel_sample_probe_a_<index> = OpCompositeExtract %float <value_id> 3
+%pixel_sample_probe_r_nan_<index> = OpIsNan %bool %pixel_sample_probe_r_<index>
+%pixel_sample_probe_g_nan_<index> = OpIsNan %bool %pixel_sample_probe_g_<index>
+%pixel_sample_probe_b_nan_<index> = OpIsNan %bool %pixel_sample_probe_b_<index>
+%pixel_sample_probe_a_nan_<index> = OpIsNan %bool %pixel_sample_probe_a_<index>
+%pixel_sample_probe_r_inf_<index> = OpIsInf %bool %pixel_sample_probe_r_<index>
+%pixel_sample_probe_g_inf_<index> = OpIsInf %bool %pixel_sample_probe_g_<index>
+%pixel_sample_probe_b_inf_<index> = OpIsInf %bool %pixel_sample_probe_b_<index>
+%pixel_sample_probe_a_inf_<index> = OpIsInf %bool %pixel_sample_probe_a_<index>
+%pixel_sample_probe_nan_rg_<index> = OpLogicalOr %bool %pixel_sample_probe_r_nan_<index> %pixel_sample_probe_g_nan_<index>
+%pixel_sample_probe_nan_ba_<index> = OpLogicalOr %bool %pixel_sample_probe_b_nan_<index> %pixel_sample_probe_a_nan_<index>
+%pixel_sample_probe_nan_<index> = OpLogicalOr %bool %pixel_sample_probe_nan_rg_<index> %pixel_sample_probe_nan_ba_<index>
+%pixel_sample_probe_inf_rg_<index> = OpLogicalOr %bool %pixel_sample_probe_r_inf_<index> %pixel_sample_probe_g_inf_<index>
+%pixel_sample_probe_inf_ba_<index> = OpLogicalOr %bool %pixel_sample_probe_b_inf_<index> %pixel_sample_probe_a_inf_<index>
+%pixel_sample_probe_inf_<index> = OpLogicalOr %bool %pixel_sample_probe_inf_rg_<index> %pixel_sample_probe_inf_ba_<index>
+%pixel_sample_probe_invalid_<index> = OpLogicalOr %bool %pixel_sample_probe_nan_<index> %pixel_sample_probe_inf_<index>
+               OpSelectionMerge %pixel_sample_probe_merge_<index> None
+               OpBranchConditional %pixel_sample_probe_invalid_<index> %pixel_sample_probe_invalid_block_<index> %pixel_sample_probe_finite_block_<index>
+%pixel_sample_probe_invalid_block_<index> = OpLabel
+%pixel_sample_probe_nonfinite_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_38
+%pixel_sample_probe_nonfinite_prior_<index> = OpAtomicIAdd %uint %pixel_sample_probe_nonfinite_ptr_<index> %<scope> %<semantics> %<one>
+               OpBranch %pixel_sample_probe_merge_<index>
+%pixel_sample_probe_finite_block_<index> = OpLabel
+%pixel_sample_probe_r_bits_<index> = OpBitcast %uint %pixel_sample_probe_r_<index>
+%pixel_sample_probe_r_sign_<index> = OpBitwiseAnd %uint %pixel_sample_probe_r_bits_<index> %<sign_mask>
+%pixel_sample_probe_r_negative_<index> = OpINotEqual %bool %pixel_sample_probe_r_sign_<index> %<zero_uint>
+%pixel_sample_probe_r_inverted_<index> = OpNot %uint %pixel_sample_probe_r_bits_<index>
+%pixel_sample_probe_r_positive_<index> = OpBitwiseXor %uint %pixel_sample_probe_r_bits_<index> %<sign_mask>
+%pixel_sample_probe_r_ordered_<index> = OpSelect %uint %pixel_sample_probe_r_negative_<index> %pixel_sample_probe_r_inverted_<index> %pixel_sample_probe_r_positive_<index>
+%pixel_sample_probe_min_r_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_39
+%pixel_sample_probe_min_r_prior_<index> = OpAtomicUMin %uint %pixel_sample_probe_min_r_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_r_ordered_<index>
+%pixel_sample_probe_max_r_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_40
+%pixel_sample_probe_max_r_prior_<index> = OpAtomicUMax %uint %pixel_sample_probe_max_r_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_r_ordered_<index>
+%pixel_sample_probe_g_bits_<index> = OpBitcast %uint %pixel_sample_probe_g_<index>
+%pixel_sample_probe_g_sign_<index> = OpBitwiseAnd %uint %pixel_sample_probe_g_bits_<index> %<sign_mask>
+%pixel_sample_probe_g_negative_<index> = OpINotEqual %bool %pixel_sample_probe_g_sign_<index> %<zero_uint>
+%pixel_sample_probe_g_inverted_<index> = OpNot %uint %pixel_sample_probe_g_bits_<index>
+%pixel_sample_probe_g_positive_<index> = OpBitwiseXor %uint %pixel_sample_probe_g_bits_<index> %<sign_mask>
+%pixel_sample_probe_g_ordered_<index> = OpSelect %uint %pixel_sample_probe_g_negative_<index> %pixel_sample_probe_g_inverted_<index> %pixel_sample_probe_g_positive_<index>
+%pixel_sample_probe_min_g_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_41
+%pixel_sample_probe_min_g_prior_<index> = OpAtomicUMin %uint %pixel_sample_probe_min_g_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_g_ordered_<index>
+%pixel_sample_probe_max_g_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_42
+%pixel_sample_probe_max_g_prior_<index> = OpAtomicUMax %uint %pixel_sample_probe_max_g_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_g_ordered_<index>
+%pixel_sample_probe_b_bits_<index> = OpBitcast %uint %pixel_sample_probe_b_<index>
+%pixel_sample_probe_b_sign_<index> = OpBitwiseAnd %uint %pixel_sample_probe_b_bits_<index> %<sign_mask>
+%pixel_sample_probe_b_negative_<index> = OpINotEqual %bool %pixel_sample_probe_b_sign_<index> %<zero_uint>
+%pixel_sample_probe_b_inverted_<index> = OpNot %uint %pixel_sample_probe_b_bits_<index>
+%pixel_sample_probe_b_positive_<index> = OpBitwiseXor %uint %pixel_sample_probe_b_bits_<index> %<sign_mask>
+%pixel_sample_probe_b_ordered_<index> = OpSelect %uint %pixel_sample_probe_b_negative_<index> %pixel_sample_probe_b_inverted_<index> %pixel_sample_probe_b_positive_<index>
+%pixel_sample_probe_min_b_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_43
+%pixel_sample_probe_min_b_prior_<index> = OpAtomicUMin %uint %pixel_sample_probe_min_b_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_b_ordered_<index>
+%pixel_sample_probe_max_b_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_44
+%pixel_sample_probe_max_b_prior_<index> = OpAtomicUMax %uint %pixel_sample_probe_max_b_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_b_ordered_<index>
+%pixel_sample_probe_a_bits_<index> = OpBitcast %uint %pixel_sample_probe_a_<index>
+%pixel_sample_probe_a_sign_<index> = OpBitwiseAnd %uint %pixel_sample_probe_a_bits_<index> %<sign_mask>
+%pixel_sample_probe_a_negative_<index> = OpINotEqual %bool %pixel_sample_probe_a_sign_<index> %<zero_uint>
+%pixel_sample_probe_a_inverted_<index> = OpNot %uint %pixel_sample_probe_a_bits_<index>
+%pixel_sample_probe_a_positive_<index> = OpBitwiseXor %uint %pixel_sample_probe_a_bits_<index> %<sign_mask>
+%pixel_sample_probe_a_ordered_<index> = OpSelect %uint %pixel_sample_probe_a_negative_<index> %pixel_sample_probe_a_inverted_<index> %pixel_sample_probe_a_positive_<index>
+%pixel_sample_probe_min_a_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_45
+%pixel_sample_probe_min_a_prior_<index> = OpAtomicUMin %uint %pixel_sample_probe_min_a_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_a_ordered_<index>
+%pixel_sample_probe_max_a_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_46
+%pixel_sample_probe_max_a_prior_<index> = OpAtomicUMax %uint %pixel_sample_probe_max_a_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_a_ordered_<index>
+               OpBranch %pixel_sample_probe_merge_<index>
+%pixel_sample_probe_merge_<index> = OpLabel
+)";
+	const auto index_string = String8::FromPrintf("%u", index);
+	auto       record       = String8(text)
+	                        .ReplaceStr("pixel_sample_probe", symbol_prefix)
+	                        .ReplaceStr("<value_id>", value_id)
+	                        .ReplaceStr("<index>", index_string)
+	                        .ReplaceStr("<scope>", scope)
+	                        .ReplaceStr("<semantics>", semantics)
+	                        .ReplaceStr("<one>", one)
+	                        .ReplaceStr("<zero_uint>", zero_uint)
+	                        .ReplaceStr("<sign_mask>", sign_mask);
+	if (include_frag_coord)
+	{
+		static const char* coverage_text = R"(
+%pixel_sample_probe_frag_coord_<index> = OpLoad %v4float %gl_FragCoord
+%pixel_sample_probe_frag_x_<index> = OpCompositeExtract %float %pixel_sample_probe_frag_coord_<index> 0
+%pixel_sample_probe_frag_y_<index> = OpCompositeExtract %float %pixel_sample_probe_frag_coord_<index> 1
+%pixel_sample_probe_frag_x_bits_<index> = OpBitcast %uint %pixel_sample_probe_frag_x_<index>
+%pixel_sample_probe_frag_x_sign_<index> = OpBitwiseAnd %uint %pixel_sample_probe_frag_x_bits_<index> %<sign_mask>
+%pixel_sample_probe_frag_x_negative_<index> = OpINotEqual %bool %pixel_sample_probe_frag_x_sign_<index> %<zero_uint>
+%pixel_sample_probe_frag_x_inverted_<index> = OpNot %uint %pixel_sample_probe_frag_x_bits_<index>
+%pixel_sample_probe_frag_x_positive_<index> = OpBitwiseXor %uint %pixel_sample_probe_frag_x_bits_<index> %<sign_mask>
+%pixel_sample_probe_frag_x_ordered_<index> = OpSelect %uint %pixel_sample_probe_frag_x_negative_<index> %pixel_sample_probe_frag_x_inverted_<index> %pixel_sample_probe_frag_x_positive_<index>
+%pixel_sample_probe_min_x_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_47
+%pixel_sample_probe_min_x_prior_<index> = OpAtomicUMin %uint %pixel_sample_probe_min_x_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_frag_x_ordered_<index>
+%pixel_sample_probe_max_x_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_48
+%pixel_sample_probe_max_x_prior_<index> = OpAtomicUMax %uint %pixel_sample_probe_max_x_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_frag_x_ordered_<index>
+%pixel_sample_probe_frag_y_bits_<index> = OpBitcast %uint %pixel_sample_probe_frag_y_<index>
+%pixel_sample_probe_frag_y_sign_<index> = OpBitwiseAnd %uint %pixel_sample_probe_frag_y_bits_<index> %<sign_mask>
+%pixel_sample_probe_frag_y_negative_<index> = OpINotEqual %bool %pixel_sample_probe_frag_y_sign_<index> %<zero_uint>
+%pixel_sample_probe_frag_y_inverted_<index> = OpNot %uint %pixel_sample_probe_frag_y_bits_<index>
+%pixel_sample_probe_frag_y_positive_<index> = OpBitwiseXor %uint %pixel_sample_probe_frag_y_bits_<index> %<sign_mask>
+%pixel_sample_probe_frag_y_ordered_<index> = OpSelect %uint %pixel_sample_probe_frag_y_negative_<index> %pixel_sample_probe_frag_y_inverted_<index> %pixel_sample_probe_frag_y_positive_<index>
+%pixel_sample_probe_min_y_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_49
+%pixel_sample_probe_min_y_prior_<index> = OpAtomicUMin %uint %pixel_sample_probe_min_y_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_frag_y_ordered_<index>
+%pixel_sample_probe_max_y_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_50
+%pixel_sample_probe_max_y_prior_<index> = OpAtomicUMax %uint %pixel_sample_probe_max_y_ptr_<index> %<scope> %<semantics> %pixel_sample_probe_frag_y_ordered_<index>
+)";
+		record += String8(coverage_text)
+		              .ReplaceStr("pixel_sample_probe", symbol_prefix)
+		              .ReplaceStr("<index>", index_string)
+		              .ReplaceStr("<scope>", scope)
+		              .ReplaceStr("<semantics>", semantics)
+		              .ReplaceStr("<zero_uint>", zero_uint)
+		              .ReplaceStr("<sign_mask>", sign_mask);
+	}
+	if (!UsesSparsePixelSampleProbe())
+	{
+		*dst_source = record;
+		return true;
+	}
+
+	const auto subgroup_scope = GetConstantUint(3u);
+	if (subgroup_scope == "unknown_uint_constant")
+	{
+		return false;
+	}
+	static const char* sparse_text = R"(
+%<prefix>_elect_<index> = OpGroupNonUniformElect %bool %<subgroup_scope>
+               OpSelectionMerge %<prefix>_elect_merge_<index> None
+               OpBranchConditional %<prefix>_elect_<index> %<prefix>_elect_record_<index> %<prefix>_elect_merge_<index>
+%<prefix>_elect_record_<index> = OpLabel
+<record>
+               OpBranch %<prefix>_elect_merge_<index>
+%<prefix>_elect_merge_<index> = OpLabel
+)";
+	*dst_source = String8(sparse_text)
+	                  .ReplaceStr("<prefix>", symbol_prefix)
+	                  .ReplaceStr("<index>", index_string)
+	                  .ReplaceStr("<subgroup_scope>", subgroup_scope)
+	                  .ReplaceStr("<record>", record);
+	return true;
+}
+
 static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index, const ShaderInstruction& inst, const Spirv* spirv,
                                             const SpirvValue& x, const SpirvValue& y, const SpirvValue& array_layer,
                                             const SpirvValue& texture, const SpirvValue& sampler,
@@ -332,6 +533,11 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 	{
 		return false;
 	}
+	const auto* ps_info = spirv->GetPsInputInfo();
+	const bool  query_lod_tap = bias != nullptr && ps_info != nullptr &&
+	                           FragmentTapQueryLodSelection(spirv->GetCode(), ps_info->fragment_tap, index);
+	const bool input0_probe = PixelInput0ProbeSelectsFirstSampleB(spirv, index);
+	const bool sample_probe = PixelSampleProbeSelectsImageSampleB(spirv, index);
 
 	const auto index_string = String8::FromPrintf("%u", index);
 	static const char* flat_text = R"(
@@ -388,6 +594,68 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 		                  .ReplaceStr("<bias>", bias->value);
 	}
 
+	String8 input0_probe_source;
+	if (input0_probe)
+	{
+		const auto scope     = spirv->GetConstantUint(1u);
+		const auto semantics = spirv->GetConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
+		const auto one       = spirv->GetConstantUint(1u);
+		const auto zero_uint = spirv->GetConstantUint(0u);
+		const auto sign_mask = spirv->GetConstantUint(0x80000000u);
+		if (scope == "unknown_uint_constant" || semantics == "unknown_uint_constant" || one == "unknown_uint_constant" ||
+		    zero_uint == "unknown_uint_constant" || sign_mask == "unknown_uint_constant")
+		{
+			return false;
+		}
+		static const char* input0_probe_text = R"(
+%pixel_input0_probe_count_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_16
+%pixel_input0_probe_count_prior_<index> = OpAtomicIAdd %uint %pixel_input0_probe_count_ptr_<index> %<scope> %<semantics> %<one>
+%pixel_input0_probe_x_nan_<index> = OpIsNan %bool %image_sample_x_<index>
+%pixel_input0_probe_y_nan_<index> = OpIsNan %bool %image_sample_y_<index>
+%pixel_input0_probe_x_inf_<index> = OpIsInf %bool %image_sample_x_<index>
+%pixel_input0_probe_y_inf_<index> = OpIsInf %bool %image_sample_y_<index>
+%pixel_input0_probe_nan_<index> = OpLogicalOr %bool %pixel_input0_probe_x_nan_<index> %pixel_input0_probe_y_nan_<index>
+%pixel_input0_probe_inf_<index> = OpLogicalOr %bool %pixel_input0_probe_x_inf_<index> %pixel_input0_probe_y_inf_<index>
+%pixel_input0_probe_invalid_<index> = OpLogicalOr %bool %pixel_input0_probe_nan_<index> %pixel_input0_probe_inf_<index>
+               OpSelectionMerge %pixel_input0_probe_merge_<index> None
+               OpBranchConditional %pixel_input0_probe_invalid_<index> %pixel_input0_probe_invalid_block_<index> %pixel_input0_probe_finite_block_<index>
+%pixel_input0_probe_invalid_block_<index> = OpLabel
+%pixel_input0_probe_nonfinite_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_17
+%pixel_input0_probe_nonfinite_prior_<index> = OpAtomicIAdd %uint %pixel_input0_probe_nonfinite_ptr_<index> %<scope> %<semantics> %<one>
+               OpBranch %pixel_input0_probe_merge_<index>
+%pixel_input0_probe_finite_block_<index> = OpLabel
+%pixel_input0_probe_x_bits_<index> = OpBitcast %uint %image_sample_x_<index>
+%pixel_input0_probe_x_sign_<index> = OpBitwiseAnd %uint %pixel_input0_probe_x_bits_<index> %<sign_mask>
+%pixel_input0_probe_x_negative_<index> = OpINotEqual %bool %pixel_input0_probe_x_sign_<index> %<zero_uint>
+%pixel_input0_probe_x_inverted_<index> = OpNot %uint %pixel_input0_probe_x_bits_<index>
+%pixel_input0_probe_x_positive_<index> = OpBitwiseXor %uint %pixel_input0_probe_x_bits_<index> %<sign_mask>
+%pixel_input0_probe_x_ordered_<index> = OpSelect %uint %pixel_input0_probe_x_negative_<index> %pixel_input0_probe_x_inverted_<index> %pixel_input0_probe_x_positive_<index>
+%pixel_input0_probe_y_bits_<index> = OpBitcast %uint %image_sample_y_<index>
+%pixel_input0_probe_y_sign_<index> = OpBitwiseAnd %uint %pixel_input0_probe_y_bits_<index> %<sign_mask>
+%pixel_input0_probe_y_negative_<index> = OpINotEqual %bool %pixel_input0_probe_y_sign_<index> %<zero_uint>
+%pixel_input0_probe_y_inverted_<index> = OpNot %uint %pixel_input0_probe_y_bits_<index>
+%pixel_input0_probe_y_positive_<index> = OpBitwiseXor %uint %pixel_input0_probe_y_bits_<index> %<sign_mask>
+%pixel_input0_probe_y_ordered_<index> = OpSelect %uint %pixel_input0_probe_y_negative_<index> %pixel_input0_probe_y_inverted_<index> %pixel_input0_probe_y_positive_<index>
+%pixel_input0_probe_min_x_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_18
+%pixel_input0_probe_min_x_prior_<index> = OpAtomicUMin %uint %pixel_input0_probe_min_x_ptr_<index> %<scope> %<semantics> %pixel_input0_probe_x_ordered_<index>
+%pixel_input0_probe_max_x_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_19
+%pixel_input0_probe_max_x_prior_<index> = OpAtomicUMax %uint %pixel_input0_probe_max_x_ptr_<index> %<scope> %<semantics> %pixel_input0_probe_x_ordered_<index>
+%pixel_input0_probe_min_y_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_20
+%pixel_input0_probe_min_y_prior_<index> = OpAtomicUMin %uint %pixel_input0_probe_min_y_ptr_<index> %<scope> %<semantics> %pixel_input0_probe_y_ordered_<index>
+%pixel_input0_probe_max_y_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_21
+%pixel_input0_probe_max_y_prior_<index> = OpAtomicUMax %uint %pixel_input0_probe_max_y_ptr_<index> %<scope> %<semantics> %pixel_input0_probe_y_ordered_<index>
+               OpBranch %pixel_input0_probe_merge_<index>
+%pixel_input0_probe_merge_<index> = OpLabel
+)";
+		input0_probe_source = String8(input0_probe_text)
+		                          .ReplaceStr("<index>", index_string)
+		                          .ReplaceStr("<scope>", scope)
+		                          .ReplaceStr("<semantics>", semantics)
+		                          .ReplaceStr("<one>", one)
+		                          .ReplaceStr("<zero_uint>", zero_uint)
+		                          .ReplaceStr("<sign_mask>", sign_mask);
+	}
+
 	const char* sample_text = (shape == ShaderGen5SampledTextureShape::TwoDimensional ? flat_text :
 	                           (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray ? array_text : volume_text));
 	// Cube faces are 2D-array layers. Implicit LOD uses ddx/ddy of that
@@ -399,7 +667,7 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 	    cube_array_implicit
 	        ? "OpImageSampleExplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index> Lod %float_0_000000"
 	        : "OpImageSampleImplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index><bias_operand>";
-	String8 source = bias_source + EmitImageSampleCoordinateLoads(index, x, y, cube_coordinates) + String8(sample_text)
+	String8 source = bias_source + EmitImageSampleCoordinateLoads(index, x, y, cube_coordinates) + input0_probe_source + String8(sample_text)
 	                     .ReplaceStr("<array_sample_op>", array_sample_op)
 	                     .ReplaceStr("<index>", index_string)
 	                     .ReplaceStr("<texture>", texture.value)
@@ -408,6 +676,16 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 	                     .ReplaceStr("<y>", y.value)
 	                     .ReplaceStr("<array_layer>", array_layer.value)
 	                     .ReplaceStr("<bias_operand>", bias_operand);
+	if (sample_probe)
+	{
+		String8 sample_probe_source;
+		if (!spirv->EmitPixelRgbaProbe(&sample_probe_source, index,
+		                              String8::FromPrintf("%%image_sample_value_%u", index), "pixel_sample_probe"))
+		{
+			return false;
+		}
+		source += sample_probe_source;
+	}
 	for (uint32_t component = 0; component < destination_num; component++)
 	{
 		const uint32_t source_component = (components != nullptr ? components[component] : component);
@@ -419,6 +697,40 @@ OpStore %<destination> %image_sample_component_<index>_<component>
 		              .ReplaceStr("<index>", index_string)
 		              .ReplaceStr("<component>", component_string)
 		              .ReplaceStr("<destination>", destinations[component].value);
+	}
+	if (query_lod_tap)
+	{
+		const bool array_shape = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
+		if (array_shape)
+		{
+			source += String8(R"(
+%image_sample_lod_coord_<index> = OpCompositeConstruct %v2float %image_sample_x_<index> %image_sample_y_<index>
+)")
+			              .ReplaceStr("<index>", index_string);
+		}
+		const String8 query_coord = array_shape ? String8("%image_sample_lod_coord_<index>") :
+		                                               String8("%image_sample_coord_<index>");
+		source += String8(R"(
+%image_sample_lod_query_<index> = OpImageQueryLod %v2float %image_sampled_image_<index> <query_coord>
+%image_sample_lod_relative_<index> = OpCompositeExtract %float %image_sample_lod_query_<index> 1
+%image_sample_lod_biased_<index> = OpFAdd %float %image_sample_lod_relative_<index> %image_sample_bias_<index>
+%image_sample_lod_levels_i_<index> = OpImageQueryLevels %int %image_sample_image_<index>
+%image_sample_lod_levels_f_<index> = OpConvertSToF %float %image_sample_lod_levels_i_<index>
+%image_sample_lod_last_f_<index> = OpFSub %float %image_sample_lod_levels_f_<index> %float_1_000000
+%image_sample_lod_after_missing_f_<index> = OpFAdd %float %image_sample_lod_levels_f_<index> %float_1_000000
+%image_sample_lod_reaches_last_<index> = OpFOrdGreaterThanEqual %bool %image_sample_lod_biased_<index> %image_sample_lod_last_f_<index>
+%image_sample_lod_reaches_missing_0_<index> = OpFOrdGreaterThanEqual %bool %image_sample_lod_biased_<index> %image_sample_lod_levels_f_<index>
+%image_sample_lod_reaches_missing_1_<index> = OpFOrdGreaterThanEqual %bool %image_sample_lod_biased_<index> %image_sample_lod_after_missing_f_<index>
+%image_sample_lod_reaches_last_vis_<index> = OpSelect %float %image_sample_lod_reaches_last_<index> %float_1_000000 %float_0_000000
+%image_sample_lod_reaches_missing_0_vis_<index> = OpSelect %float %image_sample_lod_reaches_missing_0_<index> %float_1_000000 %float_0_000000
+%image_sample_lod_reaches_missing_1_vis_<index> = OpSelect %float %image_sample_lod_reaches_missing_1_<index> %float_1_000000 %float_0_000000
+OpStore %fs_tap_0 %image_sample_lod_reaches_last_vis_<index>
+OpStore %fs_tap_1 %image_sample_lod_reaches_missing_0_vis_<index>
+OpStore %fs_tap_2 %image_sample_lod_reaches_missing_1_vis_<index>
+OpStore %fs_tap_3 %float_1_000000
+)")
+		              .ReplaceStr("<index>", index_string)
+		              .ReplaceStr("<query_coord>", query_coord.ReplaceStr("<index>", index_string));
 	}
 	*dst_source += source;
 	return true;
@@ -1828,9 +2140,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleB_Vdata4Vaddr3StSsDmaskF)
 }
 
 // IMAGE_SAMPLE_C_LZ samples LOD 0 and applies S# DEPTH_COMPARE_FUNC(ref, texel).
-// Vulkan Dref sampling needs a comparison sampler plus Depth=1; this title binds
-// SAMPLE_C with a Regular S# (compareEnable off) and GEQUAL (6), so the hardware
-// compare is done in ALU. Never hardcode LEQUAL: S# encodes 0..7.
+// Pure DepthReference bindings use Vulkan Dref so linear filtering performs
+// compare-before-filter PCF. Mixed/color bindings retain the explicit sample
+// and ALU comparison. Never hardcode LEQUAL: S# encodes 0..7.
 static String8 EmitImageSampleCLzCompare(uint32_t index, uint8_t compare_func)
 {
 	const auto index_string = String8::FromPrintf("%u", index);
@@ -1870,9 +2182,6 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
 	const int   texture_index = FindImageSampledTextureDescriptor(inst, *bind_info, user_data_register_base);
 	const int   sampler_index = FindImageSamplerDescriptor(inst, *bind_info, user_data_register_base);
-	// The MIMG opcode is the sample-compare; S# operation may stay Regular when
-	// the same sampler words are also used without SAMPLE_C, or when SGPR
-	// liveness hides the Dref use. The compare function still lives in S#.
 	if (texture_index < 0 || sampler_index < 0)
 	{
 		return false;
@@ -1882,14 +2191,16 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 	const auto shape   = ShaderResolvedSampledTextureShape(descriptor);
 	const bool flat    = shape == ShaderGen5SampledTextureShape::TwoDimensional;
 	const bool arrayed = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
-	const bool depth_sampled = flat && descriptor.sample_operation == State::ImageSampleOperation::DepthReference;
+	const bool depth_view = flat && descriptor.sample_operation == State::ImageSampleOperation::DepthReference;
+	const bool comparison_sampled =
+	    depth_view && ShaderSamplerDepthComparisonEligible(bind_info->textures2D, bind_info->samplers, sampler_index);
 	if ((!flat && !arrayed) || (flat && inst.mimg_dimension != 1u) ||
 	    (arrayed && inst.mimg_dimension != 3u && inst.mimg_dimension != 5u))
 	{
 		return false;
 	}
-	if ((depth_sampled && bind_info->textures2D.textures2d_sampled_depth_num <= 0) ||
-	    (flat && !depth_sampled && bind_info->textures2D.textures2d_sampled_num <= 0) ||
+	if ((depth_view && bind_info->textures2D.textures2d_sampled_depth_num <= 0) ||
+	    (flat && !depth_view && bind_info->textures2D.textures2d_sampled_num <= 0) ||
 	    (arrayed && bind_info->textures2D.textures2d_array_sampled_num <= 0))
 	{
 		return false;
@@ -1955,6 +2266,21 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 %image_dref_sample_<index> = OpImageSampleExplicitLod %v4float %image_dref_sampled_<index> %image_dref_coordinate_<index> Lod %float_0_000000
 %image_dref_texel_<index> = OpCompositeExtract %float %image_dref_sample_<index> 0
 )";
+	static const char* flat_depth_comparison_text = R"(
+%image_dref_texture_raw_<index> = OpLoad %uint %<texture>
+%image_dref_texture_<index> = OpBitwiseAnd %uint %image_dref_texture_raw_<index> %uint_0x1fffffff
+%image_dref_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageSD %textures2D_SD %image_dref_texture_<index>
+%image_dref_image_<index> = OpLoad %ImageSD %image_dref_image_ptr_<index>
+%image_dref_sampler_index_<index> = OpLoad %uint %<sampler>
+%image_dref_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %image_dref_sampler_index_<index>
+%image_dref_sampler_<index> = OpLoad %Sampler %image_dref_sampler_ptr_<index>
+%image_dref_sampled_<index> = OpSampledImage %SampledImageD %image_dref_image_<index> %image_dref_sampler_<index>
+%image_dref_reference_<index> = OpLoad %float %<dref>
+%image_dref_x_<index> = OpLoad %float %<x>
+%image_dref_y_<index> = OpLoad %float %<y>
+%image_dref_coordinate_<index> = OpCompositeConstruct %v2float %image_dref_x_<index> %image_dref_y_<index>
+%image_dref_result_<index> = OpImageSampleDrefExplicitLod %float %image_dref_sampled_<index> %image_dref_coordinate_<index> %image_dref_reference_<index> Lod %float_0_000000
+)";
 	static const char* array_text = R"(
 %image_dref_texture_raw_<index> = OpLoad %uint %<texture>
 %image_dref_texture_<index> = OpBitwiseAnd %uint %image_dref_texture_raw_<index> %uint_0x1fffffff
@@ -1973,7 +2299,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 %image_dref_texel_<index> = OpCompositeExtract %float %image_dref_sample_<index> 0
 )";
 
-	*dst_source += String8(depth_sampled ? flat_depth_text : (flat ? flat_text : array_text))
+	const char* sample_text = comparison_sampled ? flat_depth_comparison_text : (depth_view ? flat_depth_text : (flat ? flat_text : array_text));
+	*dst_source += String8(sample_text)
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<texture>", texture_value.value)
 	                   .ReplaceStr("<sampler>", sampler_value.value)
@@ -1981,7 +2308,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 	                   .ReplaceStr("<x>", x_value.value)
 	                   .ReplaceStr("<y>", y_value.value)
 	                   .ReplaceStr("<layer>", layer_value.value);
-	*dst_source += compare_text;
+	if (!comparison_sampled)
+	{
+		*dst_source += compare_text;
+	}
 	*dst_source += String8("OpStore %<destination> %image_dref_result_<index>\n")
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<destination>", dst_value.value);

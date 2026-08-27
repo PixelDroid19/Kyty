@@ -14,6 +14,7 @@
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuMemoryMaterializationCache.h"
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
+#include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
@@ -37,6 +38,79 @@
 
 namespace Kyty::Libs::Graphics {
 
+bool GpuMemory::CollectRetireableLinkedBufferComponent(int heap_id, int object_id, uint64_t retire_after_frames,
+                                                       uint32_t* scan_budget, Vector<int>* component)
+{
+	constexpr uint32_t kMaxNodes = 64u;
+	constexpr uint32_t kMaxEdges = 128u;
+	EXIT_IF(scan_budget == nullptr || component == nullptr);
+	component->Clear();
+	if (heap_id < 0 || static_cast<uint32_t>(heap_id) >= m_heaps.Size() || object_id < 0 ||
+	    static_cast<uint32_t>(object_id) >= m_heaps[heap_id].objects.Size() || *scan_budget == 0u)
+	{
+		return false;
+	}
+
+	auto&    heap           = m_heaps[heap_id];
+	uint32_t next           = 0;
+	uint32_t examined_edges = 0;
+	const auto enqueue = [&](int candidate)
+	{
+		if (candidate < 0 || static_cast<uint32_t>(candidate) >= heap.objects.Size())
+		{
+			return false;
+		}
+		for (int existing: *component)
+		{
+			if (existing == candidate)
+			{
+				return true;
+			}
+		}
+		if (component->Size() >= kMaxNodes)
+		{
+			return false;
+		}
+		component->Add(candidate);
+		return true;
+	};
+
+	if (!enqueue(object_id))
+	{
+		return false;
+	}
+	while (next < component->Size())
+	{
+		if (*scan_budget == 0u)
+		{
+			return false;
+		}
+		(*scan_budget)--;
+		const auto& h = heap.objects[component->At(next++)];
+		if (h.free || h.scenario != GpuMemoryScenario::Common ||
+		    !GpuMemoryCanRetireLinkedBufferMember(h.info.object.type, h.info.read_only, h.info.depth_meta_bound) ||
+		    m_current_frame - h.info.use_last_frame < retire_after_frames ||
+		    !m_deferred_deletions.AreDependenciesComplete(h.info.submission_uses.Dependencies()))
+		{
+			return false;
+		}
+		for (const auto& link: h.others)
+		{
+			if (*scan_budget == 0u || examined_edges >= kMaxEdges)
+			{
+				return false;
+			}
+			(*scan_budget)--;
+			examined_edges++;
+			if (!enqueue(link.object_id))
+			{
+				return false;
+			}
+		}
+	}
+	return !component->IsEmpty();
+}
+
 void GpuMemory::FrameDone(GraphicContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);
@@ -56,6 +130,7 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 	const uint32_t retire_batch_limit    = GpuMemoryRetirementBatchLimit(m_transient_creates_since_retirement);
 	m_transient_creates_since_retirement = 0;
 	uint32_t retired                     = 0;
+	uint32_t linked_scan_budget           = 2048u;
 	int      heap_id                     = 0;
 	for (auto& heap: m_heaps)
 	{
@@ -66,8 +141,24 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 			{
 				break;
 			}
-			if (h.free || h.scenario != GpuMemoryScenario::Common || !h.others.IsEmpty())
+			if (h.free || h.scenario != GpuMemoryScenario::Common)
 			{
+				object_id++;
+				continue;
+			}
+			if (!h.others.IsEmpty())
+			{
+				Vector<int> component;
+				if (h.info.object.type == GpuMemoryObjectType::StorageBuffer &&
+				    CollectRetireableLinkedBufferComponent(heap_id, object_id, kRetireAfterFrames, &linked_scan_budget, &component) &&
+				    component.Size() <= retire_batch_limit - retired)
+				{
+					for (int component_id: component)
+					{
+						destructors.Add(Free(heap_id, component_id));
+					}
+					retired += component.Size();
+				}
 				object_id++;
 				continue;
 			}
@@ -168,7 +259,20 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 		o.in_use = false;
 		return;
 	}
-	o.cpu_update_time = GpuMemoryGetCurrentTime();
+	const uint64_t content_sequence = NextContentSequence();
+	o.cpu_update_time               = GpuMemoryGetCurrentTime();
+	o.content_origin                = GpuMemoryContentOrigin::GpuWriteBack;
+	o.content_sequence              = content_sequence;
+	const auto history_kind = o.object.type == GpuMemoryObjectType::StorageBuffer
+	                              ? GpuWriteHistoryKind::StorageWriteBack
+	                              : (o.object.type == GpuMemoryObjectType::RenderTexture
+	                                     ? GpuWriteHistoryKind::RenderTargetWriteBack
+	                                     : GpuWriteHistoryKind::OtherWriteBack);
+	for (int vi = 0; vi < block.vaddr_num; ++vi)
+	{
+		GpuWriteHistoryRecord(history_kind, block.vaddr[vi], block.size[vi], o.submit_id,
+		                     static_cast<uint32_t>(o.object.type), content_sequence);
+	}
 
 	// Invalidate or propagate each parent according to its relation.
 	// GPU-owned tiled RTs cannot be reconstructed from guest bytes.
@@ -185,8 +289,10 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 		{
 			continue;
 		}
-		o2.cpu_update_time = o.cpu_update_time;
-		o2.submit_id       = 0;
+		o2.cpu_update_time  = o.cpu_update_time;
+		o2.submit_id        = 0;
+		o2.content_origin   = GpuMemoryContentOrigin::AliasInvalidation;
+		o2.content_sequence = content_sequence;
 		for (int vi = 0; vi < parent.block.vaddr_num; vi++)
 		{
 			o2.hash[vi] = 0;
@@ -371,6 +477,17 @@ void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 	{
 		auto& h = heap.objects[obj.object_id];
 		EXIT_IF(h.free);
+		// A flush is the observed CPU/CP write event. Publish linked HTILE
+		// semantics before Update can discard byte-identical content by hash.
+		if (h.info.object.type == GpuMemoryObjectType::StorageBuffer && h.block.vaddr_num == 1)
+		{
+			const auto* storage = static_cast<const StorageVulkanBuffer*>(h.info.object.obj);
+			if (storage != nullptr)
+			{
+				(void)DepthMetaObserveStorageFlush(h.block.vaddr[0], h.block.size[0], storage->depth_meta_addr,
+				                                   storage->depth_meta_size, reinterpret_cast<const void*>(h.block.vaddr[0]), vaddr, size);
+			}
+		}
 
 		Update(UINT64_MAX, ctx, heap_id, obj.object_id, &destructors);
 	}

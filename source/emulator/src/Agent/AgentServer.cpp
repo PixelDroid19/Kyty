@@ -11,6 +11,7 @@
 #include "Emulator/Agent/StallWatch.h"
 #include "Emulator/Controller.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Memory.h"
@@ -43,6 +44,25 @@ std::atomic<bool> g_stop {false};
 Core::Thread*     g_thread = nullptr;
 Kyty::Agent::LocalTransport::Listener g_listener {};
 std::atomic<bool> g_client_busy {false};
+
+void HandleScheduledPadPresent(uint64_t present)
+{
+	const auto scheduled_tap = Libs::Controller::AgentPadOnPresent(present);
+	if (scheduled_tap.started != 0)
+	{
+		char message[96];
+		std::snprintf(message, sizeof(message), "present=%llu targets=%u",
+		              static_cast<unsigned long long>(scheduled_tap.started_target_present), scheduled_tap.started);
+		EventRing::Instance().Push(EventKind::Input, "pad_tap_started", message);
+	}
+	if (scheduled_tap.cancelled != 0)
+	{
+		char message[96];
+		std::snprintf(message, sizeof(message), "present=%llu targets=%u",
+		              static_cast<unsigned long long>(scheduled_tap.cancelled_target_present), scheduled_tap.cancelled);
+		EventRing::Instance().Push(EventKind::Input, "pad_tap_cancelled", message);
+	}
+}
 uint64_t          g_start_ms = 0;
 std::string       g_last_capture_path;
 
@@ -65,9 +85,10 @@ std::string HelpResult()
 	              "{\"tool\":\"last_error\"},"
 	              "{\"tool\":\"capture\",\"args\":{\"timeout_ms\":10000,\"score\":true}},"
 	              "{\"tool\":\"score\"},"
+	              "{\"tool\":\"trace_rt_lifetime_arm\"},"
 	              "{\"tool\":\"pad_down\",\"args\":{\"button\":\"cross\"}},"
 	              "{\"tool\":\"pad_up\",\"args\":{\"button\":\"cross\"}},"
-	              "{\"tool\":\"pad_tap\",\"args\":{\"button\":\"cross\"}},"
+	              "{\"tool\":\"pad_tap\",\"args\":{\"button\":\"cross\",\"at_present\":8000,\"repeat\":2,\"present_delta\":40}},"
 	              "{\"tool\":\"pad_axis\",\"args\":{\"axis\":\"left_x\",\"value\":128}},"
 	              "{\"tool\":\"pad_clear\"},"
 	              "{\"tool\":\"wait_present\",\"args\":{\"min\":1,\"delta\":20,\"timeout_ms\":15000}},"
@@ -80,6 +101,7 @@ std::string HelpResult()
 	              "],"
 	              "\"capabilities\":{\"transport\":\"local_only\",\"bounded_responses\":true,\"debug_snapshot\":true,"
 	              "\"event_sequence_filter\":true,\"event_code_filter\":true,\"controller_input\":true,"
+	              "\"scheduled_present_taps\":true,\"explicit_rt_lifetime_arm\":true,"
 	              "\"live_execution_control\":false,\"guest_memory_access\":false,\"host_path_access\":false,"
 	              "\"host_command_execution\":false}"
 	              "}",
@@ -97,6 +119,8 @@ std::string StatusResult()
 	Libs::Controller::AgentPadGetState(&buttons, axes);
 	Libs::Controller::AgentPadReadStats read_stats {};
 	Libs::Controller::AgentPadGetReadStats(&read_stats);
+	Libs::Controller::AgentPadScheduledTapStats scheduled_taps {};
+	Libs::Controller::AgentPadGetScheduledTapStats(&scheduled_taps);
 
 	const PhaseHint phase      = ClassifyPhaseHint(stats.graphic_ready, stats.present, stats.fps, stats.ms_since_present, PhaseHintArgs {});
 	const char*     phase_name = PhaseHintName(phase);
@@ -119,7 +143,8 @@ std::string StatusResult()
 	              "\"graphic_ready\":%s,\"build_revision\":%s,\"build_dirty\":%s,\"diagnostic_input\":true,"
 	              "\"event_ring\":{\"capacity\":%u,\"size\":%llu,\"next_seq\":%llu,\"dropped\":%llu,\"overflowed\":%s},"
 	              "\"pad\":{\"buttons\":%u,\"left_x\":%u,\"left_y\":%u,\"right_x\":%u,\"right_y\":%u,\"l2\":%u,\"r2\":%u,"
-	              "\"guest_read_state_samples\":%llu,\"guest_read_samples\":%llu,\"delivered_taps\":%llu,\"tap_pending\":%s}}",
+	              "\"guest_read_state_samples\":%llu,\"guest_read_samples\":%llu,\"delivered_taps\":%llu,\"scheduled_taps\":%u,"
+	              "\"next_target_present\":%llu,\"cancelled_scheduled_taps\":%llu,\"tap_pending\":%s}}",
 	              Kyty::Agent::kProtocolVersion, stats.frame, static_cast<unsigned long long>(stats.present), stats.fps,
 	              static_cast<unsigned long long>(stats.ms_since_present), static_cast<unsigned long long>(stats.ms_since_frame),
 	              JsonString(phase_name).c_str(), JsonString(frontier).c_str(), stats.capture_ready ? "true" : "false",
@@ -130,7 +155,8 @@ std::string StatusResult()
 	              static_cast<unsigned>(axes[2]), static_cast<unsigned>(axes[3]), static_cast<unsigned>(axes[4]),
 	              static_cast<unsigned>(axes[5]), static_cast<unsigned long long>(read_stats.read_state_samples),
 	              static_cast<unsigned long long>(read_stats.read_samples), static_cast<unsigned long long>(read_stats.delivered_taps),
-	              read_stats.tap_pending ? "true" : "false");
+	              scheduled_taps.scheduled_taps, static_cast<unsigned long long>(scheduled_taps.next_target_present),
+	              static_cast<unsigned long long>(scheduled_taps.cancelled_scheduled_taps), read_stats.tap_pending ? "true" : "false");
 	return std::string(buf);
 }
 
@@ -292,9 +318,19 @@ std::string PerformanceResult(bool reset)
 	out += ",\"draw_descriptor_finalize_max_ns\":" + std::to_string(stats.draw_descriptor_finalize_max_ns);
 	out += ",\"transient_buffer_probes\":" + std::to_string(stats.transient_buffer_probes);
 	out += ",\"transient_buffer_hits\":" + std::to_string(stats.transient_buffer_hits);
+	out += ",\"transient_buffer_reuses\":" + std::to_string(stats.transient_buffer_reuses);
 	out += ",\"transient_buffer_validate_ns\":" + std::to_string(stats.transient_buffer_validate_ns);
 	out += ",\"transient_buffer_overlap_ns\":" + std::to_string(stats.transient_buffer_overlap_ns);
+	out += ",\"transient_buffer_compare_ns\":" + std::to_string(stats.transient_buffer_compare_ns);
 	out += ",\"transient_buffer_upload_ns\":" + std::to_string(stats.transient_buffer_upload_ns);
+	out += ",\"stable_buffer_create_attempts\":" + std::to_string(stats.stable_buffer_create_attempts);
+	out += ",\"stable_buffer_create_captures\":" + std::to_string(stats.stable_buffer_create_captures);
+	out += ",\"stable_buffer_create_bytes\":" + std::to_string(stats.stable_buffer_create_bytes);
+	out += ",\"stable_buffer_create_fallbacks\":" + std::to_string(stats.stable_buffer_create_fallbacks);
+	out += ",\"stable_buffer_update_attempts\":" + std::to_string(stats.stable_buffer_update_attempts);
+	out += ",\"stable_buffer_update_captures\":" + std::to_string(stats.stable_buffer_update_captures);
+	out += ",\"stable_buffer_update_bytes\":" + std::to_string(stats.stable_buffer_update_bytes);
+	out += ",\"stable_buffer_update_deferrals\":" + std::to_string(stats.stable_buffer_update_deferrals);
 	out += ',';
 	out += "\"wait_reg_mem_satisfied\":" + std::to_string(stats.wait_reg_mem_satisfied);
 	out += ",\"wait_reg_mem_current_producer\":" + std::to_string(stats.wait_reg_mem_current_producer);
@@ -451,13 +487,18 @@ std::string PadStateResult()
 	Libs::Controller::AgentPadGetState(&buttons, axes);
 	Libs::Controller::AgentPadReadStats read_stats {};
 	Libs::Controller::AgentPadGetReadStats(&read_stats);
-	char buf[384];
+	Libs::Controller::AgentPadScheduledTapStats scheduled_taps {};
+	Libs::Controller::AgentPadGetScheduledTapStats(&scheduled_taps);
+	char buf[512];
 	std::snprintf(buf, sizeof(buf),
 	              "{\"diagnostic_input\":true,\"buttons\":%u,\"left_x\":%u,\"left_y\":%u,\"right_x\":%u,\"right_y\":%u,\"l2\":%u,\"r2\":%u,"
-	              "\"delivered_taps\":%llu,\"tap_pending\":%s}",
+	              "\"delivered_taps\":%llu,\"scheduled_taps\":%u,\"next_target_present\":%llu,\"cancelled_scheduled_taps\":%llu,"
+	              "\"tap_pending\":%s}",
 	              buttons, static_cast<unsigned>(axes[0]), static_cast<unsigned>(axes[1]), static_cast<unsigned>(axes[2]),
 	              static_cast<unsigned>(axes[3]), static_cast<unsigned>(axes[4]), static_cast<unsigned>(axes[5]),
-	              static_cast<unsigned long long>(read_stats.delivered_taps), read_stats.tap_pending ? "true" : "false");
+	              static_cast<unsigned long long>(read_stats.delivered_taps), scheduled_taps.scheduled_taps,
+	              static_cast<unsigned long long>(scheduled_taps.next_target_present),
+	              static_cast<unsigned long long>(scheduled_taps.cancelled_scheduled_taps), read_stats.tap_pending ? "true" : "false");
 	return std::string(buf);
 }
 
@@ -729,8 +770,44 @@ std::string HandleScore(const Request& req)
 	return FormatOk(req.id, body);
 }
 
+std::string HandleTraceRtLifetimeArm(const Request& req)
+{
+	if (!ArgsHaveOnlyKeys(req.args_json, nullptr, 0))
+	{
+		return FormatErr(req.id, "invalid_args", "trace_rt_lifetime_arm does not accept arguments");
+	}
+	using ArmResult = Libs::Graphics::RenderTargetLifetimeTraceArmResult;
+	switch (Libs::Graphics::GraphicsRequestRenderTargetLifetimeTraceArm())
+	{
+		case ArmResult::Armed:
+			EventRing::Instance().Push(EventKind::Info, "rt_lifetime_arm_requested",
+			                           "accepted; pending render-thread consumption");
+			return FormatOk(req.id, "{\"accepted\":true,\"pending\":true,\"one_shot\":true}");
+		case ArmResult::NotReady:
+			return FormatErr(req.id, "not_ready", "the render thread has not initialized lifetime tracing yet");
+		case ArmResult::TraceDisabled:
+			return FormatErr(req.id, "trace_disabled", "KYTY_TRACE_RT_LIFETIME=1 is required at process start");
+		case ArmResult::AgentArmDisabled:
+			return FormatErr(req.id, "agent_arm_disabled",
+			                 "KYTY_AGENT_TRACE_RT_LIFETIME_ARM=1 is required at process start");
+		case ArmResult::AlreadyPending:
+			return FormatErr(req.id, "already_pending", "a lifetime trace arm request is already pending");
+		case ArmResult::AlreadyOpen:
+			return FormatErr(req.id, "already_open", "the one-shot lifetime trace gate is already open");
+		default: return FormatErr(req.id, "internal_error", "unknown lifetime trace arm result");
+	}
+}
+
 std::string HandlePadButton(const Request& req)
 {
+	static constexpr const char* button_only_keys[] = {"button"};
+	static constexpr const char* scheduled_keys[]   = {"button", "at_present", "repeat", "present_delta"};
+	const bool scheduled_request = req.kind == Tool::PadTap && ArgsHasKey(req.args_json, "at_present");
+	if (!ArgsHaveOnlyKeys(req.args_json, scheduled_request ? scheduled_keys : button_only_keys,
+	                      scheduled_request ? std::size(scheduled_keys) : std::size(button_only_keys)))
+	{
+		return FormatErr(req.id, "invalid_args", "pad request contains an unknown or duplicate argument");
+	}
 	std::string button_name;
 	if (!ArgsGetString(req.args_json, "button", &button_name))
 	{
@@ -748,11 +825,74 @@ std::string HandlePadButton(const Request& req)
 		EventRing::Instance().Push(EventKind::Input, down ? "pad_down" : "pad_up", button_name.c_str());
 		return FormatOk(req.id, PadStateResult());
 	}
-	if (!Libs::Controller::AgentPadScheduleTap(button))
+	const bool has_at_present    = ArgsHasKey(req.args_json, "at_present");
+	const bool has_repeat        = ArgsHasKey(req.args_json, "repeat");
+	const bool has_present_delta = ArgsHasKey(req.args_json, "present_delta");
+	if (!has_at_present)
 	{
-		return FormatErr(req.id, "tap_pending", "a tap is already pending or the button is held");
+		if (has_repeat || has_present_delta)
+		{
+			return FormatErr(req.id, "invalid_args", "repeat and present_delta require at_present");
+		}
+		if (!Libs::Controller::AgentPadScheduleTap(button))
+		{
+			return FormatErr(req.id, "tap_pending", "a tap is already pending or the button is held");
+		}
+		EventRing::Instance().Push(EventKind::Input, "pad_tap", button_name.c_str());
+		return FormatOk(req.id, PadStateResult());
 	}
-	EventRing::Instance().Push(EventKind::Input, "pad_tap", button_name.c_str());
+
+	uint64_t at_present    = 0;
+	uint32_t repeat        = 1;
+	uint64_t present_delta = 0;
+	if (!ArgsGetU64(req.args_json, "at_present", &at_present) || at_present == 0)
+	{
+		return FormatErr(req.id, "invalid_args", "at_present must be a positive unsigned integer");
+	}
+	if (has_repeat &&
+	    (!ArgsGetU32(req.args_json, "repeat", &repeat) || repeat == 0 || repeat > Libs::Controller::kAgentPadScheduledTapMax))
+	{
+		return FormatErr(req.id, "invalid_args", "repeat must be an unsigned integer in the bounded schedule range");
+	}
+	if (has_present_delta && !ArgsGetU64(req.args_json, "present_delta", &present_delta))
+	{
+		return FormatErr(req.id, "invalid_args", "present_delta must be an unsigned integer");
+	}
+	if (repeat > 1 && (!has_present_delta || present_delta == 0))
+	{
+		return FormatErr(req.id, "invalid_args", "present_delta must be positive when repeat is greater than one");
+	}
+
+	const auto schedule_result = Libs::Controller::AgentPadScheduleTaps(button, at_present, repeat, present_delta);
+	if (schedule_result == Libs::Controller::AgentPadScheduleResult::Invalid)
+	{
+		return FormatErr(req.id, "invalid_args", "scheduled present targets overflow or are invalid");
+	}
+	if (schedule_result == Libs::Controller::AgentPadScheduleResult::NotFuture)
+	{
+		return FormatErr(req.id, "invalid_args", "at_present must be a future present");
+	}
+	if (schedule_result == Libs::Controller::AgentPadScheduleResult::ButtonHeld)
+	{
+		return FormatErr(req.id, "pad_held", "the scheduled button is held");
+	}
+	if (schedule_result == Libs::Controller::AgentPadScheduleResult::TapPending)
+	{
+		return FormatErr(req.id, "tap_pending", "a tap is already pending");
+	}
+	if (schedule_result == Libs::Controller::AgentPadScheduleResult::QueueFull)
+	{
+		return FormatErr(req.id, "schedule_full", "scheduled tap queue is full");
+	}
+	if (schedule_result == Libs::Controller::AgentPadScheduleResult::TargetConflict)
+	{
+		return FormatErr(req.id, "schedule_conflict", "a tap is already scheduled for that present");
+	}
+
+	char event_message[128];
+	std::snprintf(event_message, sizeof(event_message), "button=%s at_present=%llu repeat=%u present_delta=%llu", button_name.c_str(),
+	              static_cast<unsigned long long>(at_present), repeat, static_cast<unsigned long long>(present_delta));
+	EventRing::Instance().Push(EventKind::Input, "pad_tap_scheduled", event_message);
 	return FormatOk(req.id, PadStateResult());
 }
 
@@ -1053,6 +1193,7 @@ static constexpr HandlerEntry kHandlers[] = {
     {Tool::SyncWaits, HandleSyncWaits}, {Tool::Threads, HandleThreads},
     {Tool::Events, HandleEvents},       {Tool::LastError, HandleLastError},
     {Tool::Capture, HandleCapture},     {Tool::Score, HandleScore},
+    {Tool::TraceRtLifetimeArm, HandleTraceRtLifetimeArm},
     {Tool::PadDown, HandlePadDown},     {Tool::PadUp, HandlePadUp},
     {Tool::PadTap, HandlePadTap},       {Tool::PadAxis, HandlePadAxis},
     {Tool::PadClear, HandlePadClear},   {Tool::WaitPresent, HandleWaitPresent},
@@ -1195,6 +1336,12 @@ bool StartFromEnv()
 		return false;
 	}
 
+	Libs::Graphics::WindowSetPresentCallback(HandleScheduledPadPresent);
+	Libs::Graphics::WindowPresentStats present_stats {};
+	if (Libs::Graphics::WindowGetPresentStats(&present_stats))
+	{
+		Libs::Controller::AgentPadUpdatePresentWatermark(present_stats.present);
+	}
 	g_thread = new Core::Thread(ServerThread, nullptr);
 	g_active.store(true);
 	EventRing::Instance().Push(EventKind::Info, "agent_start", Kyty::Agent::LocalTransport::EndpointKind());
@@ -1208,6 +1355,7 @@ void Stop()
 	{
 		return;
 	}
+	Libs::Graphics::WindowSetPresentCallback(nullptr);
 	g_stop.store(true);
 	Kyty::Agent::LocalTransport::Interrupt(&g_listener);
 	if (g_thread != nullptr)

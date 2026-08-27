@@ -3,6 +3,7 @@
 #include "Kyty/Core/BringUp.h"
 
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Pm4.h"
@@ -331,6 +332,7 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		        packet.byte_count);
 	}
 	GraphicsRenderMemoryFlush(packet.destination_address, packet.byte_count);
+	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaData, packet.destination_address, packet.byte_count, 0u, 0u, 0u);
 
 	return 6;
 }
@@ -364,6 +366,7 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 		GpuMemoryNotifyHostWrite(dst, byte_count);
 		memset(reinterpret_cast<void*>(dst), 0, byte_count);
 		GraphicsRenderMemoryFlush(dst, byte_count);
+		GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaDataCustom, dst, byte_count, 0u, 0u, 0u);
 		return 7;
 	}
 
@@ -375,6 +378,7 @@ KYTY_CP_OP_PARSER(cp_op_custom_dma_data)
 	GpuMemoryNotifyHostWrite(dst, byte_count);
 	memcpy(reinterpret_cast<void*>(dst), reinterpret_cast<const void*>(src), byte_count);
 	GraphicsRenderMemoryFlush(dst, byte_count);
+	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaDataCustom, dst, byte_count, 0u, 0u, 0u);
 	return 7;
 }
 
@@ -569,14 +573,25 @@ KYTY_CP_OP_PARSER(cp_op_event_write)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc0004600) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0004600 condition ignored (continuing)\n"); }
+	const uint32_t packet_dw = KYTY_PM4_LEN(cmd_id);
+	if (((cmd_id >> 8u) & 0xffu) != Pm4::IT_EVENT_WRITE || (packet_dw != 2u && packet_dw != 4u))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: malformed EVENT_WRITE packet (continuing)\n");
+		return packet_dw > 0u ? packet_dw - 1u : 0u;
+	}
 
 	uint32_t event_index = (buffer[0] >> 8u) & 0x7u;
 	uint32_t event_type  = (buffer[0]) & 0x3fu;
+	uint64_t event_address = 0;
 
-	cp->TriggerEvent(event_type, event_index);
+	if (packet_dw == 4u)
+	{
+		event_address = buffer[1] | (static_cast<uint64_t>(buffer[2]) << 32u);
+	}
 
-	return 1;
+	cp->TriggerEvent(event_type, event_index, event_address);
+
+	return packet_dw - 1u;
 }
 
 KYTY_CP_OP_PARSER(cp_op_event_write_eop)

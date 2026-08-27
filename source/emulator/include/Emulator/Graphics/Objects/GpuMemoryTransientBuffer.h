@@ -7,10 +7,25 @@
 
 namespace Kyty::Libs::Graphics {
 
-// Small immutable buffer views commonly come from guest command rings and
-// receive a new address every frame. They are snapshots, not persistent GPU
-// resources. Surface aliases, writable buffers, large ranges, and incomplete
-// overlap snapshots stay on the authoritative GpuMemory path.
+constexpr uint64_t kGpuMemoryMaxTransientReadOnlyBytes = 4u * 1024u * 1024u;
+constexpr uint64_t kGpuMemoryTransientBufferPoolMaxBytes = 16u * 1024u * 1024u;
+constexpr uint64_t kGpuMemoryTransientBufferCriticalReserveBytes = 1u * 1024u * 1024u;
+
+static_assert(kGpuMemoryTransientBufferCriticalReserveBytes < kGpuMemoryTransientBufferPoolMaxBytes);
+static_assert(kGpuMemoryMaxTransientReadOnlyBytes <=
+              kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes);
+
+enum class GpuMemoryTransientBufferAllocationClass: uint8_t
+{
+	Snapshot,
+	Critical,
+};
+
+// Bounded immutable buffer views commonly come from guest command rings and
+// receive a new address every frame. They are snapshots owned by one command
+// buffer, not persistent GPU resources. Surface aliases, writable buffers,
+// oversized ranges, and incomplete overlap snapshots stay on the authoritative
+// GpuMemory path.
 [[nodiscard]] inline bool GpuMemoryOverlapsAllowTransientReadOnlyBuffer(const GpuMemoryOverlapSnapshot& overlaps)
 {
 	if (overlaps.truncated || overlaps.entry_count > GpuMemoryOverlapSnapshot::ENTRIES_MAX)
@@ -37,18 +52,25 @@ namespace Kyty::Libs::Graphics {
 [[nodiscard]] constexpr bool GpuMemoryCanUseTransientReadOnlyBuffer(bool read_only, uint64_t size, bool allocated,
                                                                    bool overlap_snapshot_safe)
 {
-	constexpr uint64_t MaxTransientBytes = 0x1000u;
-	return read_only && size != 0u && size <= MaxTransientBytes && allocated && overlap_snapshot_safe;
+	return read_only && size != 0u && size <= kGpuMemoryMaxTransientReadOnlyBytes && allocated && overlap_snapshot_safe;
 }
 
 [[nodiscard]] constexpr bool GpuMemoryTransientBufferPoolCanAllocate(uint32_t usage_entries, uint32_t total_entries,
-                                                                    uint64_t total_bytes, uint64_t size)
+	                                                                    uint64_t total_bytes, uint64_t size,
+	                                                                    GpuMemoryTransientBufferAllocationClass allocation_class)
 {
 	constexpr uint32_t MaxEntriesPerUsage = 512u;
 	constexpr uint32_t MaxEntries         = MaxEntriesPerUsage * 3u;
-	constexpr uint64_t MaxBytes           = 16u * 1024u * 1024u;
-	return size != 0u && usage_entries < MaxEntriesPerUsage && total_entries < MaxEntries && total_bytes < MaxBytes &&
-	       size <= MaxBytes - total_bytes;
+	const uint64_t max_bytes = allocation_class == GpuMemoryTransientBufferAllocationClass::Snapshot
+	                               ? kGpuMemoryTransientBufferPoolMaxBytes - kGpuMemoryTransientBufferCriticalReserveBytes
+	                               : kGpuMemoryTransientBufferPoolMaxBytes;
+	return size != 0u && usage_entries < MaxEntriesPerUsage && total_entries < MaxEntries && total_bytes < max_bytes &&
+	       size <= max_bytes - total_bytes;
+}
+
+[[nodiscard]] constexpr uint64_t GpuMemoryTransientBufferTailBytes(uint64_t capacity, uint64_t logical_size)
+{
+	return logical_size <= capacity ? capacity - logical_size : 0u;
 }
 
 } // namespace Kyty::Libs::Graphics

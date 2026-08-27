@@ -172,6 +172,12 @@ static GameController* g_controller = nullptr;
 
 struct AgentPadOverlay
 {
+	struct ScheduledTap
+	{
+		uint64_t target_present = 0;
+		uint32_t button         = 0;
+	};
+
 	enum class TapPhase: uint8_t
 	{
 		None,
@@ -189,6 +195,12 @@ struct AgentPadOverlay
 	uint64_t    read_state_samples                               = 0;
 	uint64_t    read_samples                                     = 0;
 	uint64_t    delivered_taps                                   = 0;
+	ScheduledTap scheduled_taps[kAgentPadScheduledTapMax]        = {};
+	uint32_t    scheduled_tap_count                              = 0;
+	uint64_t    cancelled_scheduled_taps                         = 0;
+	// Updated by the post-RecordPresent hook under this same mutex, so target
+	// validation cannot race an already-recorded present.
+	uint64_t    last_present                                     = 0;
 };
 
 static AgentPadOverlay g_agent_pad;
@@ -831,12 +843,144 @@ bool AgentPadScheduleTap(uint32_t button)
 	return true;
 }
 
+AgentPadScheduleResult AgentPadScheduleTaps(uint32_t button, uint64_t at_present, uint32_t repeat,
+                                             uint64_t present_delta)
+{
+	if (button == 0 || at_present == 0 || repeat == 0 || repeat > kAgentPadScheduledTapMax ||
+	    (repeat > 1 && present_delta == 0))
+	{
+		return AgentPadScheduleResult::Invalid;
+	}
+
+	uint64_t targets[kAgentPadScheduledTapMax] {};
+	targets[0] = at_present;
+	for (uint32_t i = 1; i < repeat; ++i)
+	{
+		if (targets[i - 1] > std::numeric_limits<uint64_t>::max() - present_delta)
+		{
+			return AgentPadScheduleResult::Invalid;
+		}
+		targets[i] = targets[i - 1] + present_delta;
+	}
+
+	Core::LockGuard lock(g_agent_pad.mutex);
+	if (at_present <= g_agent_pad.last_present)
+	{
+		return AgentPadScheduleResult::NotFuture;
+	}
+	if ((g_agent_pad.buttons & button) != 0)
+	{
+		return AgentPadScheduleResult::ButtonHeld;
+	}
+	if (g_agent_pad.tap_phase != AgentPadOverlay::TapPhase::None)
+	{
+		return AgentPadScheduleResult::TapPending;
+	}
+	if (g_agent_pad.scheduled_tap_count > kAgentPadScheduledTapMax - repeat)
+	{
+		return AgentPadScheduleResult::QueueFull;
+	}
+	for (uint32_t existing = 0; existing < g_agent_pad.scheduled_tap_count; ++existing)
+	{
+		for (uint32_t added = 0; added < repeat; ++added)
+		{
+			if (g_agent_pad.scheduled_taps[existing].target_present == targets[added])
+			{
+				return AgentPadScheduleResult::TargetConflict;
+			}
+		}
+	}
+
+	for (uint32_t i = 0; i < repeat; ++i)
+	{
+		uint32_t insert = g_agent_pad.scheduled_tap_count;
+		while (insert > 0 && g_agent_pad.scheduled_taps[insert - 1].target_present > targets[i])
+		{
+			g_agent_pad.scheduled_taps[insert] = g_agent_pad.scheduled_taps[insert - 1];
+			--insert;
+		}
+		g_agent_pad.scheduled_taps[insert] = {targets[i], button};
+		++g_agent_pad.scheduled_tap_count;
+	}
+	return AgentPadScheduleResult::Scheduled;
+}
+
+AgentPadPresentResult AgentPadOnPresent(uint64_t present)
+{
+	AgentPadPresentResult result {};
+	Core::LockGuard        lock(g_agent_pad.mutex);
+	if (present > g_agent_pad.last_present)
+	{
+		g_agent_pad.last_present = present;
+	}
+
+	// Exact means exact: a missed target is cancelled, never shifted to a later
+	// presentation. The same applies when a prior release/press/release pulse
+	// has not completed by a subsequent target.
+	while (g_agent_pad.scheduled_tap_count != 0 && g_agent_pad.scheduled_taps[0].target_present <= present)
+	{
+		const auto scheduled = g_agent_pad.scheduled_taps[0];
+		for (uint32_t i = 1; i < g_agent_pad.scheduled_tap_count; ++i)
+		{
+			g_agent_pad.scheduled_taps[i - 1] = g_agent_pad.scheduled_taps[i];
+		}
+		--g_agent_pad.scheduled_tap_count;
+
+		if (scheduled.target_present != present || g_agent_pad.tap_phase != AgentPadOverlay::TapPhase::None ||
+		    (g_agent_pad.buttons & scheduled.button) != 0)
+		{
+			++result.cancelled;
+			if (result.cancelled_target_present == 0)
+			{
+				result.cancelled_target_present = scheduled.target_present;
+			}
+			if (g_agent_pad.cancelled_scheduled_taps != std::numeric_limits<uint64_t>::max())
+			{
+				++g_agent_pad.cancelled_scheduled_taps;
+			}
+			continue;
+		}
+
+		g_agent_pad.tap_button = scheduled.button;
+		g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::ReleaseBeforePress;
+		++result.started;
+		if (result.started_target_present == 0)
+		{
+			result.started_target_present = scheduled.target_present;
+		}
+	}
+
+	return result;
+}
+
+void AgentPadUpdatePresentWatermark(uint64_t present)
+{
+	Core::LockGuard lock(g_agent_pad.mutex);
+	if (present > g_agent_pad.last_present)
+	{
+		g_agent_pad.last_present = present;
+	}
+}
+
+void AgentPadGetScheduledTapStats(AgentPadScheduledTapStats* out)
+{
+	if (out == nullptr)
+	{
+		return;
+	}
+	Core::LockGuard lock(g_agent_pad.mutex);
+	out->scheduled_taps           = g_agent_pad.scheduled_tap_count;
+	out->next_target_present      = g_agent_pad.scheduled_tap_count != 0 ? g_agent_pad.scheduled_taps[0].target_present : 0;
+	out->cancelled_scheduled_taps = g_agent_pad.cancelled_scheduled_taps;
+}
+
 void AgentPadClear()
 {
 	Core::LockGuard lock(g_agent_pad.mutex);
 	g_agent_pad.buttons = 0;
 	g_agent_pad.tap_phase  = AgentPadOverlay::TapPhase::None;
 	g_agent_pad.tap_button = 0;
+	g_agent_pad.scheduled_tap_count = 0;
 	for (int i = 0; i < static_cast<int>(Axis::AxisMax); ++i)
 	{
 		g_agent_pad.axis_set[i] = false;

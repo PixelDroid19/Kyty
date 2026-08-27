@@ -268,8 +268,18 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VXorB32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpBitwiseXor %uint %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VAddF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpFAdd %float %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMacF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpExtInst %float %GLSL_std_450 Fma %t0_<index> %t1_<index> %tdst_<index>"}},
-    {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMaxF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpExtInst %float %GLSL_std_450 FMax %t0_<index> %t1_<index>"}},
-    {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMinF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpExtInst %float %GLSL_std_450 FMin %t0_<index> %t1_<index>"}},
+    {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMaxF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
+     {R"(%minmax_lhs_nan_<index> = OpIsNan %bool %t0_<index>
+%minmax_rhs_nan_<index> = OpIsNan %bool %t1_<index>
+%minmax_numeric_<index> = OpExtInst %float %GLSL_std_450 FMax %t0_<index> %t1_<index>
+%minmax_rhs_number_<index> = OpSelect %float %minmax_rhs_nan_<index> %t0_<index> %minmax_numeric_<index>
+%t_<index> = OpSelect %float %minmax_lhs_nan_<index> %t1_<index> %minmax_rhs_number_<index>)"}},
+    {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMinF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
+     {R"(%minmax_lhs_nan_<index> = OpIsNan %bool %t0_<index>
+%minmax_rhs_nan_<index> = OpIsNan %bool %t1_<index>
+%minmax_numeric_<index> = OpExtInst %float %GLSL_std_450 FMin %t0_<index> %t1_<index>
+%minmax_rhs_number_<index> = OpSelect %float %minmax_rhs_nan_<index> %t0_<index> %minmax_numeric_<index>
+%t_<index> = OpSelect %float %minmax_lhs_nan_<index> %t1_<index> %minmax_rhs_number_<index>)"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMulF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpFMul %float %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VSubF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpFSub %float %t0_<index> %t1_<index>"}},
     {Recompile_VF16_XXX_VdstVsrc0Vsrc1,            ShaderInstructionType::VAddF16,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpFAdd %float %hf0_<index> %hf1_<index>"}},

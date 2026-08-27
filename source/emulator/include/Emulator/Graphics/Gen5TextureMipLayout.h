@@ -41,21 +41,22 @@ struct Gen5TextureMipLayout
 	Gen5TextureMipLevelLayout level[16] {};
 };
 
-// Block-compressed Vulkan copies require a 4×4 texel block. Host images
-// therefore stop at the last mip whose both dimensions are still at least 4;
-// smaller guest levels clamp there instead of emitting 1×1/2×2 copies.
+// Current containment policy stops at the last mip whose dimensions are at
+// least one complete 4×4 block. Vulkan permits a whole 2×2/1×1 compressed mip
+// at the subresource edge, but retaining those guest levels has not passed the
+// current strict runtime performance gate.
 [[nodiscard]] constexpr uint32_t Gen5CompressedHostMipCount(uint32_t width, uint32_t height, uint32_t guest_levels)
 {
 	if (guest_levels == 0u)
 	{
 		return 0u;
 	}
-	uint32_t count = 1u;
+	uint32_t count      = 1u;
 	uint32_t mip_width  = width;
 	uint32_t mip_height = height;
 	while (count < guest_levels && mip_width >= 8u && mip_height >= 8u)
 	{
-		mip_width  >>= 1u;
+		mip_width >>= 1u;
 		mip_height >>= 1u;
 		++count;
 	}

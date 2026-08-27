@@ -4,6 +4,7 @@
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
 #include "GraphicsRenderInternal.h"
@@ -610,6 +611,7 @@ TileGpuDetileStatus RecycleCompletedSubmission(GraphicContext* ctx, GpuDetileCon
 	}
 	if (status != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_fence_status", status);
 		return TileGpuDetileStatus::FenceFailed;
 	}
 	// The fence is signaled, so no GPU work can still reference the session.
@@ -662,15 +664,19 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 	}
 	// Reset command state before recording. The fence remains signaled until
 	// immediately before vkQueueSubmit so a failed record never loses its state.
-	if (vkResetCommandBuffer(state->command_buffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT) != VK_SUCCESS)
+	const auto command_reset_result = vkResetCommandBuffer(state->command_buffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	if (command_reset_result != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_command_reset", command_reset_result);
 		return TileGpuDetileStatus::SubmitFailed;
 	}
 
 	VkCommandBufferBeginInfo begin_info {};
 	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	if (vkBeginCommandBuffer(state->command_buffer, &begin_info) != VK_SUCCESS)
+	const auto begin_result = vkBeginCommandBuffer(state->command_buffer, &begin_info);
+	if (begin_result != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_command_begin", begin_result);
 		return TileGpuDetileStatus::SubmitFailed;
 	}
 
@@ -689,8 +695,10 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 	vkCmdPushConstants(state->command_buffer, state->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 	vkCmdDispatch(state->command_buffer, groups_x, groups_y, 1);
 	RecordHostReadbackBarrier(state->command_buffer);
-	if (vkEndCommandBuffer(state->command_buffer) != VK_SUCCESS)
+	const auto end_result = vkEndCommandBuffer(state->command_buffer);
+	if (end_result != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_command_end", end_result);
 		return TileGpuDetileStatus::SubmitFailed;
 	}
 
@@ -698,14 +706,30 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 	submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submit_info.commandBufferCount = 1;
 	submit_info.pCommandBuffers    = &state->command_buffer;
+	auto* trail = VulkanSubmitFaultTraceTrail();
+	VulkanSubmitAttempt attempt {};
+	VulkanSubmitAttempt observed {};
+	if (trail != nullptr)
+	{
+		attempt.kind                = VulkanSubmitKind::TileDetile;
+		attempt.queue               = static_cast<uint32_t>(GraphicContext::QUEUE_GFX);
+		attempt.command_buffer_slot = UINT32_MAX;
+		attempt.frame               = GraphicsRunGetFrameNum();
+	}
 	{
 		Core::LockGuard queue_lock(*state->queue_mutex);
-		if (HasTestFault(TileGpuDetileTestFault::ResetFence) || vkResetFences(ctx->device, 1, &state->fence) != VK_SUCCESS)
+		const auto reset_result =
+		    HasTestFault(TileGpuDetileTestFault::ResetFence) ? VK_ERROR_OUT_OF_HOST_MEMORY : vkResetFences(ctx->device, 1, &state->fence);
+		if (reset_result != VK_SUCCESS)
 		{
+			VulkanSubmitFaultReport("tile_detile_fence_reset", reset_result);
 			return TileGpuDetileStatus::FenceFailed;
 		}
-		if (vkQueueSubmit(state->queue, 1, &submit_info, state->fence) != VK_SUCCESS)
+		const auto submit_result = VulkanTraceSubmitAttempt(
+		    trail, attempt, [&] { return vkQueueSubmit(state->queue, 1, &submit_info, state->fence); }, &observed);
+		if (submit_result != VK_SUCCESS)
 		{
+			VulkanSubmitFaultReport("tile_detile_submit", submit_result, trail != nullptr ? &observed : nullptr);
 			return TileGpuDetileStatus::SubmitFailed;
 		}
 	}
@@ -722,6 +746,7 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 	}
 	if (wait != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_fence_wait", wait);
 		return TileGpuDetileStatus::FenceFailed;
 	}
 	state->in_flight = false;
@@ -1055,6 +1080,7 @@ bool TileGpuDetileReleaseContext(GraphicContext* ctx)
 		const auto wait = vkWaitForFences(ctx->device, 1, &state->fence, VK_TRUE, k_release_fence_timeout_ns);
 		if (wait != VK_SUCCESS)
 		{
+			VulkanSubmitFaultReport("tile_detile_release_wait", wait);
 			return false;
 		}
 		state->in_flight = false;

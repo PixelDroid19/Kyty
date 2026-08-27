@@ -38,6 +38,8 @@ namespace Kyty::Libs::Graphics {
 
 constexpr int VADDR_BLOCKS_MAX = GPU_MEMORY_RANGE_SET_MAX;
 
+enum class DebugStatsGpuMemoryLinkedTopology: uint8_t;
+
 using OverlapType = GpuMemoryOverlapType;
 
 enum class GpuMemoryRangeReleaseMode : uint8_t
@@ -194,6 +196,53 @@ public:
 		return ret;
 	}
 
+	// Diagnostic-only candidate walk. Both the address buckets and unique
+	// candidates are capped so an opt-in trace cannot enumerate an arbitrary
+	// alias graph or populate the shared overlap cache. Returning false means
+	// the caller must report a truncated point-in-time result.
+	template <typename Visitor>
+	[[nodiscard]] bool VisitCandidatesBounded(uint64_t vaddr, uint64_t size, uint32_t max_pages, uint32_t max_candidates,
+	                                          Visitor&& visitor) const
+	{
+		EXIT_IF(size == 0 || max_pages == 0 || max_candidates == 0);
+		const auto first_page = CalcPageId(vaddr);
+		const auto last_page  = CalcPageId(vaddr + size - 1);
+		EXIT_IF(last_page < first_page);
+
+		Vector<int> visited;
+		uint32_t    page_count = 0;
+		auto        page       = first_page;
+		for (;;)
+		{
+			if (page_count == max_pages)
+			{
+				return false;
+			}
+			page_count++;
+			for (int id: m_map.Get(page))
+			{
+				if (visited.Contains(id))
+				{
+					continue;
+				}
+				if (visited.Size() == max_candidates)
+				{
+					return false;
+				}
+				visited.Add(id);
+				if (!visitor(id))
+				{
+					return false;
+				}
+			}
+			if (page == last_page)
+			{
+				return true;
+			}
+			page++;
+		}
+	}
+
 	[[nodiscard]] bool IsEmpty() const
 	{
 		int num = 0;
@@ -246,7 +295,12 @@ public:
 	Vector<GpuMemoryObject> FindObjects(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool exact,
 	                                    bool only_first, const SubmissionId* submission = nullptr);
 	bool                    QueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
+	bool                    QueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
 	bool                    CanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size);
+	bool                    CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst, uint64_t* validation_ns,
+	                                                      uint64_t* copy_ns);
+	bool                    CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot, bool* matches,
+	                                                      uint64_t* validation_ns, uint64_t* compare_ns);
 
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
@@ -290,7 +344,10 @@ private:
 		bool                         read_only                          = false;
 		bool                         check_hash                         = false;
 		bool                         dirty_registered                   = false;
+		bool                         depth_meta_bound                   = false;
 		uint64_t                     dirty_generation[VADDR_BLOCKS_MAX] = {};
+		uint64_t                     content_sequence                  = 0;
+		GpuMemoryContentOrigin       content_origin                    = GpuMemoryContentOrigin::Unknown;
 		GpuSubmissionHighWater       submission_uses;
 		// Incarnation of the host Vulkan backing, not a content revision.
 		// In-place uploads retain it; an atomic COW swap advances it.
@@ -372,7 +429,8 @@ private:
 	void RecordUse(ObjectInfo* object, CommandBuffer* buffer);
 	void ScheduleDestructors(GraphicContext* ctx, Vector<Destructor>* destructors);
 	void ScheduleDestructorsOutsideMutationLocks(GraphicContext* ctx, Vector<Destructor>* destructors);
-	void VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors);
+	void VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors,
+	                    const uint64_t* source_vaddr = nullptr);
 
 	Vector<OverlappedBlock> FindBlocks(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num, bool only_first = false);
 	bool  FindFast(int heap_id, const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryObjectType type, bool only_first,
@@ -380,6 +438,11 @@ private:
 	Block CreateBlock(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, int heap_id, int obj_id);
 	void  DeleteBlock(Block* b, int heap_id, int obj_id);
 	void  Link(int heap_id, int id1, int id2, OverlapType rel, GpuMemoryScenario scenario);
+	[[nodiscard]] uint64_t NextContentSequence();
+	[[nodiscard]] bool CollectRetireableLinkedBufferComponent(int heap_id, int object_id, uint64_t retire_after_frames,
+	                                                          uint32_t* scan_budget, Vector<int>* component);
+	[[nodiscard]] DebugStatsGpuMemoryLinkedTopology ClassifyLinkedStorageTopology(
+	    int heap_id, const Vector<OverlappedBlock>& parents, const GpuObject& incoming) const;
 	int   GetHeapId(uint64_t vaddr, uint64_t size);
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
@@ -407,6 +470,7 @@ private:
 	Vector<Heap> m_heaps;
 
 	uint64_t m_current_frame                      = 0;
+	uint64_t m_content_sequence                   = 0;
 	uint32_t m_transient_creates_since_retirement = 0;
 
 	MaterializationCache m_materialization_cache;

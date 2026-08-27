@@ -32,10 +32,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 	memcpy(data, reinterpret_cast<void*>(*vaddr), *size);
 	vk_obj->writeback_cache.Reset(data, *size);
 	// HTILE clears often arrive through GpuMemory Update before the world draw.
-	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
-	{
-		DepthMetaMarkClear(vk_obj->depth_meta_addr);
-	}
+	(void)DepthMetaObserveStorageWrite(vk_obj->depth_meta_addr, data, *size);
 	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
 	VulkanUnmapMemory(ctx, &vk_obj->memory);
 }
@@ -77,16 +74,6 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	EXIT_IF(vk_obj->buffer == nullptr);
 	EXIT_IF(ctx == nullptr);
 
-	if (vk_obj->depth_meta_addr != 0)
-	{
-		void* data = nullptr;
-		VulkanMapMemory(ctx, &vk_obj->memory, &data);
-		if (DepthMetaIsClearPattern(data, vk_obj->guest_size))
-		{
-			DepthMetaMarkClear(vk_obj->depth_meta_addr);
-		}
-		VulkanUnmapMemory(ctx, &vk_obj->memory);
-	}
 	VulkanDeleteBuffer(ctx, vk_obj);
 
 	delete vk_obj;
@@ -115,7 +102,11 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 	    LabelWriteBackCopy(reinterpret_cast<void*>(*vaddr), data, *size, &vk_obj->writeback_cache);
 	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
 	{
-		DepthMetaMarkClear(vk_obj->depth_meta_addr);
+		DepthMetaPatternSnapshot pattern {};
+		if (DepthMetaInspectPattern(data, *size, &pattern))
+		{
+			DepthMetaMarkClear(vk_obj->depth_meta_addr, DepthMetaClearSource::StorageWriteback, &pattern, *size);
+		}
 	}
 	KYTY_PROFILER_END_BLOCK;
 

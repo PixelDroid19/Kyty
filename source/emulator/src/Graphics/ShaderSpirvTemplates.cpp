@@ -1673,9 +1673,19 @@ const char SCC_CARRY_1[] = R"(
         OpStore %scc %carry_<index>
 )";
 
-const char CLAMP[] = R"(
+const char CLAMP_DX10[] = R"(
 		%c197_<index> = OpLoad %float %<dst>
-        %c200_<index> = OpExtInst %float %GLSL_std_450 FClamp %c197_<index> %float_0_000000 %float_1_000000
+		%dx10_clamp_nan_<index> = OpIsNan %bool %c197_<index>
+		%dx10_clamp_numeric_<index> = OpExtInst %float %GLSL_std_450 FClamp %c197_<index> %float_0_000000 %float_1_000000
+		%c200_<index> = OpSelect %float %dx10_clamp_nan_<index> %float_0_000000 %dx10_clamp_numeric_<index>
+               OpStore %<dst> %c200_<index>
+)";
+
+const char CLAMP_PASSTHROUGH[] = R"(
+		%c197_<index> = OpLoad %float %<dst>
+		%dx10_clamp_nan_<index> = OpIsNan %bool %c197_<index>
+		%dx10_clamp_numeric_<index> = OpExtInst %float %GLSL_std_450 FClamp %c197_<index> %float_0_000000 %float_1_000000
+		%c200_<index> = OpSelect %float %dx10_clamp_nan_<index> %c197_<index> %dx10_clamp_numeric_<index>
                OpStore %<dst> %c200_<index>
 )";
 

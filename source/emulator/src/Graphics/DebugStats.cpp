@@ -101,9 +101,19 @@ TimedMetric           g_draw_descriptor_sampler;
 TimedMetric           g_draw_descriptor_finalize;
 std::atomic<uint64_t> g_transient_buffer_probes {0};
 std::atomic<uint64_t> g_transient_buffer_hits {0};
+std::atomic<uint64_t> g_transient_buffer_reuses {0};
 std::atomic<uint64_t> g_transient_buffer_validate_ns {0};
 std::atomic<uint64_t> g_transient_buffer_overlap_ns {0};
+std::atomic<uint64_t> g_transient_buffer_compare_ns {0};
 std::atomic<uint64_t> g_transient_buffer_upload_ns {0};
+std::atomic<uint64_t> g_stable_buffer_create_attempts {0};
+std::atomic<uint64_t> g_stable_buffer_create_captures {0};
+std::atomic<uint64_t> g_stable_buffer_create_bytes {0};
+std::atomic<uint64_t> g_stable_buffer_create_fallbacks {0};
+std::atomic<uint64_t> g_stable_buffer_update_attempts {0};
+std::atomic<uint64_t> g_stable_buffer_update_captures {0};
+std::atomic<uint64_t> g_stable_buffer_update_bytes {0};
+std::atomic<uint64_t> g_stable_buffer_update_deferrals {0};
 
 struct LookupMetric
 {
@@ -190,12 +200,15 @@ struct GpuMemoryTypeMetric
 	std::atomic<uint64_t> exact_reuse {0};
 	std::atomic<uint64_t> covered_reuse {0};
 	std::atomic<uint64_t> new_standalone {0};
-	std::atomic<uint64_t> new_linked {0};
 	std::atomic<uint64_t> new_from_objects {0};
 	std::atomic<uint64_t> created_from_objects {0};
 	std::atomic<uint64_t> reclaim_new {0};
 	std::atomic<uint64_t> logical_free {0};
 	std::atomic<uint64_t> live {0};
+	std::atomic<uint64_t> linked_buffer_only_read_only {0};
+	std::atomic<uint64_t> linked_surface_connected {0};
+	std::atomic<uint64_t> linked_mutable_or_other {0};
+	std::atomic<uint64_t> linked_traversal_truncated {0};
 	std::atomic<uint64_t> writeback_calls {0};
 	std::atomic<uint64_t> writeback_bytes {0};
 	std::atomic<uint64_t> writeback_ns {0};
@@ -587,7 +600,7 @@ DebugStatsGpuMemoryCreateTrace::~DebugStatsGpuMemoryCreateTrace()
 	{
 		const auto elapsed =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - m_start).count();
-		DebugStatsRecordGpuMemoryCreate(m_type_index, m_outcome, static_cast<uint64_t>(elapsed), &m_record);
+		DebugStatsRecordGpuMemoryCreate(m_type_index, m_outcome, static_cast<uint64_t>(elapsed), &m_record, m_linked_topology);
 	}
 }
 
@@ -603,6 +616,11 @@ void DebugStatsGpuMemoryCreateTrace::SetClassification(uint32_t candidates, uint
 	m_record.overlap_relation_mask = relation_mask;
 	m_record.reclaimed_objects     = reclaimed;
 	m_record.create_from_objects   = create_from_objects;
+}
+
+void DebugStatsGpuMemoryCreateTrace::SetLinkedTopology(DebugStatsGpuMemoryLinkedTopology topology)
+{
+	m_linked_topology = topology;
 }
 
 void DebugStatsGpuMemoryCreateTrace::Complete(DebugStatsGpuMemoryCreateOutcome outcome)
@@ -694,9 +712,19 @@ void DebugStatsInit()
 	ResetTimed(&g_draw_descriptor_finalize);
 	g_transient_buffer_probes.store(0, std::memory_order_relaxed);
 	g_transient_buffer_hits.store(0, std::memory_order_relaxed);
+	g_transient_buffer_reuses.store(0, std::memory_order_relaxed);
 	g_transient_buffer_validate_ns.store(0, std::memory_order_relaxed);
 	g_transient_buffer_overlap_ns.store(0, std::memory_order_relaxed);
+	g_transient_buffer_compare_ns.store(0, std::memory_order_relaxed);
 	g_transient_buffer_upload_ns.store(0, std::memory_order_relaxed);
+	g_stable_buffer_create_attempts.store(0, std::memory_order_relaxed);
+	g_stable_buffer_create_captures.store(0, std::memory_order_relaxed);
+	g_stable_buffer_create_bytes.store(0, std::memory_order_relaxed);
+	g_stable_buffer_create_fallbacks.store(0, std::memory_order_relaxed);
+	g_stable_buffer_update_attempts.store(0, std::memory_order_relaxed);
+	g_stable_buffer_update_captures.store(0, std::memory_order_relaxed);
+	g_stable_buffer_update_bytes.store(0, std::memory_order_relaxed);
+	g_stable_buffer_update_deferrals.store(0, std::memory_order_relaxed);
 	ResetLookup(&g_gfx_pipeline_lookup);
 	ResetLookup(&g_compute_pipeline_lookup);
 	g_pipeline_evictions.store(0, std::memory_order_relaxed);
@@ -753,12 +781,15 @@ void DebugStatsInit()
 		type.exact_reuse.store(0, std::memory_order_relaxed);
 		type.covered_reuse.store(0, std::memory_order_relaxed);
 		type.new_standalone.store(0, std::memory_order_relaxed);
-		type.new_linked.store(0, std::memory_order_relaxed);
 		type.new_from_objects.store(0, std::memory_order_relaxed);
 		type.created_from_objects.store(0, std::memory_order_relaxed);
 		type.reclaim_new.store(0, std::memory_order_relaxed);
 		type.logical_free.store(0, std::memory_order_relaxed);
 		type.live.store(0, std::memory_order_relaxed);
+		type.linked_buffer_only_read_only.store(0, std::memory_order_relaxed);
+		type.linked_surface_connected.store(0, std::memory_order_relaxed);
+		type.linked_mutable_or_other.store(0, std::memory_order_relaxed);
+		type.linked_traversal_truncated.store(0, std::memory_order_relaxed);
 		type.writeback_calls.store(0, std::memory_order_relaxed);
 		type.writeback_bytes.store(0, std::memory_order_relaxed);
 		type.writeback_ns.store(0, std::memory_order_relaxed);
@@ -948,16 +979,39 @@ void DebugStatsRecordDrawDescriptorFinalize(uint64_t elapsed_ns)
 	RecordTimed(&g_draw_descriptor_finalize, elapsed_ns);
 }
 
-void DebugStatsRecordTransientBufferProbe(uint64_t validate_ns, uint64_t overlap_ns, uint64_t upload_ns, bool accepted)
+void DebugStatsRecordTransientBufferProbe(uint64_t validate_ns, uint64_t overlap_ns, uint64_t upload_ns, bool accepted, bool reused,
+	                                      uint64_t compare_ns)
 {
 	g_transient_buffer_probes.fetch_add(1, std::memory_order_relaxed);
 	if (accepted)
 	{
 		g_transient_buffer_hits.fetch_add(1, std::memory_order_relaxed);
 	}
+	if (reused)
+	{
+		g_transient_buffer_reuses.fetch_add(1, std::memory_order_relaxed);
+	}
 	g_transient_buffer_validate_ns.fetch_add(validate_ns, std::memory_order_relaxed);
 	g_transient_buffer_overlap_ns.fetch_add(overlap_ns, std::memory_order_relaxed);
+	g_transient_buffer_compare_ns.fetch_add(compare_ns, std::memory_order_relaxed);
 	g_transient_buffer_upload_ns.fetch_add(upload_ns, std::memory_order_relaxed);
+}
+
+void DebugStatsRecordStableBufferSource(bool create, uint64_t bytes, bool accepted)
+{
+	auto& attempts = create ? g_stable_buffer_create_attempts : g_stable_buffer_update_attempts;
+	auto& captures = create ? g_stable_buffer_create_captures : g_stable_buffer_update_captures;
+	auto& captured_bytes = create ? g_stable_buffer_create_bytes : g_stable_buffer_update_bytes;
+	auto& rejected = create ? g_stable_buffer_create_fallbacks : g_stable_buffer_update_deferrals;
+	attempts.fetch_add(1, std::memory_order_relaxed);
+	if (accepted)
+	{
+		captures.fetch_add(1, std::memory_order_relaxed);
+		captured_bytes.fetch_add(bytes, std::memory_order_relaxed);
+	} else
+	{
+		rejected.fetch_add(1, std::memory_order_relaxed);
+	}
 }
 
 void DebugStatsRecordSubmit()
@@ -1133,7 +1187,8 @@ void DebugStatsRecordShaderTranslationCache(bool hit, bool evicted)
 }
 
 void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCreateOutcome outcome, uint64_t elapsed_ns,
-	                                 const DebugStatsGpuMemorySlowCreateRecord* detail)
+	                                 const DebugStatsGpuMemorySlowCreateRecord* detail,
+	                                 DebugStatsGpuMemoryLinkedTopology linked_topology)
 {
 	if (type_index >= kDebugStatsGpuMemoryTypeCount)
 	{
@@ -1162,7 +1217,21 @@ void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCre
 			type.live.fetch_add(1, std::memory_order_relaxed);
 			break;
 		case DebugStatsGpuMemoryCreateOutcome::NewLinked:
-			type.new_linked.fetch_add(1, std::memory_order_relaxed);
+			switch (linked_topology)
+			{
+				case DebugStatsGpuMemoryLinkedTopology::BufferOnlyReadOnly:
+					type.linked_buffer_only_read_only.fetch_add(1, std::memory_order_relaxed);
+					break;
+				case DebugStatsGpuMemoryLinkedTopology::SurfaceConnected:
+					type.linked_surface_connected.fetch_add(1, std::memory_order_relaxed);
+					break;
+				case DebugStatsGpuMemoryLinkedTopology::MutableOrOther:
+					type.linked_mutable_or_other.fetch_add(1, std::memory_order_relaxed);
+					break;
+				case DebugStatsGpuMemoryLinkedTopology::TraversalTruncated:
+					type.linked_traversal_truncated.fetch_add(1, std::memory_order_relaxed);
+					break;
+			}
 			type.live.fetch_add(1, std::memory_order_relaxed);
 			break;
 		case DebugStatsGpuMemoryCreateOutcome::NewFromObjects:
@@ -1488,9 +1557,19 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	take_draw_stage(g_draw_descriptor_finalize, &snapshot.draw_descriptor_finalize_ns, &snapshot.draw_descriptor_finalize_max_ns);
 	snapshot.transient_buffer_probes      = take_window(g_transient_buffer_probes);
 	snapshot.transient_buffer_hits        = take_window(g_transient_buffer_hits);
+	snapshot.transient_buffer_reuses      = take_window(g_transient_buffer_reuses);
 	snapshot.transient_buffer_validate_ns = take_window(g_transient_buffer_validate_ns);
 	snapshot.transient_buffer_overlap_ns  = take_window(g_transient_buffer_overlap_ns);
+	snapshot.transient_buffer_compare_ns  = take_window(g_transient_buffer_compare_ns);
 	snapshot.transient_buffer_upload_ns   = take_window(g_transient_buffer_upload_ns);
+	snapshot.stable_buffer_create_attempts  = take_window(g_stable_buffer_create_attempts);
+	snapshot.stable_buffer_create_captures  = take_window(g_stable_buffer_create_captures);
+	snapshot.stable_buffer_create_bytes     = take_window(g_stable_buffer_create_bytes);
+	snapshot.stable_buffer_create_fallbacks = take_window(g_stable_buffer_create_fallbacks);
+	snapshot.stable_buffer_update_attempts  = take_window(g_stable_buffer_update_attempts);
+	snapshot.stable_buffer_update_captures  = take_window(g_stable_buffer_update_captures);
+	snapshot.stable_buffer_update_bytes     = take_window(g_stable_buffer_update_bytes);
+	snapshot.stable_buffer_update_deferrals = take_window(g_stable_buffer_update_deferrals);
 	take_lookup(g_gfx_pipeline_lookup, &snapshot.gfx_pipeline_lookup_hits, &snapshot.gfx_pipeline_lookup_misses,
 	            &snapshot.gfx_pipeline_lookup_ns, &snapshot.gfx_pipeline_lookup_max_ns);
 	take_lookup(g_compute_pipeline_lookup, &snapshot.compute_pipeline_lookup_hits, &snapshot.compute_pipeline_lookup_misses,
@@ -1544,12 +1623,17 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 		dst.exact_reuse      = take_window(src.exact_reuse);
 		dst.covered_reuse    = take_window(src.covered_reuse);
 		dst.new_standalone   = take_window(src.new_standalone);
-		dst.new_linked       = take_window(src.new_linked);
 		dst.new_from_objects = take_window(src.new_from_objects);
 		dst.created_from_objects = take_window(src.created_from_objects);
 		dst.reclaim_new      = take_window(src.reclaim_new);
 		dst.logical_free     = take_window(src.logical_free);
 		dst.live             = src.live.load(std::memory_order_relaxed);
+		dst.linked_buffer_only_read_only = take_window(src.linked_buffer_only_read_only);
+		dst.linked_surface_connected      = take_window(src.linked_surface_connected);
+		dst.linked_mutable_or_other       = take_window(src.linked_mutable_or_other);
+		dst.linked_traversal_truncated    = take_window(src.linked_traversal_truncated);
+		dst.new_linked = dst.linked_buffer_only_read_only + dst.linked_surface_connected + dst.linked_mutable_or_other +
+		                 dst.linked_traversal_truncated;
 		dst.writeback_calls  = take_window(src.writeback_calls);
 		dst.writeback_bytes  = take_window(src.writeback_bytes);
 		dst.writeback_ns     = take_window(src.writeback_ns);

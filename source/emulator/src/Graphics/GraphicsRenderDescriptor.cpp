@@ -413,7 +413,8 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	hash ^= Core::hash8(static_cast<uint8_t>(s.gds_buffers_num));
 	for (int i = 0; i < s.storage_buffers_num; i++)
 	{
-		hash += Core::hash64(s.storage_buffers_id[i]);
+		hash += Core::hash64(s.storage_buffers[i].unique_id);
+		hash ^= Core::hash64(s.storage_buffers[i].range);
 	}
 	for (int i = 0; i < s.textures2d_sampled_num; i++)
 	{
@@ -466,7 +467,8 @@ uint32_t DescriptorCache::CalcHash(const Set& s)
 	hash ^= Core::hash8(static_cast<uint8_t>(s.vsharp_uniform_buffer));
 	if (s.vsharp_uniform_buffer)
 	{
-		hash += Core::hash64(s.vsharp_uniform_buffer_id);
+		hash += Core::hash64(s.vsharp_uniform_buffer_key.unique_id);
+		hash ^= Core::hash64(s.vsharp_uniform_buffer_key.range);
 	}
 	return hash;
 }
@@ -495,7 +497,7 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 				bool match = true;
 				for (int i = 0; i < s.storage_buffers_num; i++)
 				{
-					if (match && s.storage_buffers_id[i] != set.storage_buffers_id[i])
+					if (match && s.storage_buffers[i] != set.storage_buffers[i])
 					{
 						match = false;
 						break;
@@ -620,7 +622,7 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 					}
 				}
 				if (match && (s.vsharp_uniform_buffer != set.vsharp_uniform_buffer ||
-				              (s.vsharp_uniform_buffer && s.vsharp_uniform_buffer_id != set.vsharp_uniform_buffer_id)))
+			              (s.vsharp_uniform_buffer && s.vsharp_uniform_buffer_key != set.vsharp_uniform_buffer_key)))
 				{
 					match = false;
 				}
@@ -715,7 +717,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	nset.stage                  = stage;
 	for (int i = 0; i < storage_buffers_num; i++)
 	{
-		nset.storage_buffers_id[i] = storage_buffers[i] != nullptr ? storage_buffers[i]->memory.unique_id : 0u;
+		nset.storage_buffers[i] = storage_buffers[i] != nullptr ? storage_buffers[i]->DescriptorKey() : VulkanBufferDescriptorKey {};
 	}
 	for (int i = 0; i < textures2d_sampled_num; i++)
 	{
@@ -767,7 +769,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	}
 	if (vsharp_uniform_buffer)
 	{
-		nset.vsharp_uniform_buffer_id = vsharp_buffer->memory.unique_id;
+		nset.vsharp_uniform_buffer_key = vsharp_buffer->DescriptorKey();
 	}
 	nset.hash = CalcHash(nset);
 
@@ -792,7 +794,8 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		EXIT_IF(storage_buffers[i] == nullptr || storage_buffers[i]->buffer == nullptr);
 		buffer_info[i].buffer = storage_buffers[i]->buffer;
 		buffer_info[i].offset = 0;
-		buffer_info[i].range  = VK_WHOLE_SIZE;
+		EXIT_IF(storage_buffers[i]->descriptor_range == 0u);
+		buffer_info[i].range  = storage_buffers[i]->descriptor_range;
 	}
 
 	VkDescriptorImageInfo texture2d_sampled_info[TEXTURES_SAMPLED_MAX] {};
@@ -887,9 +890,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	VkDescriptorBufferInfo vsharp_buffer_info {};
 	if (vsharp_uniform_buffer)
 	{
+		EXIT_IF(vsharp_buffer->descriptor_range != bind.push_constant_size);
 		vsharp_buffer_info.buffer = vsharp_buffer->buffer;
 		vsharp_buffer_info.offset = 0;
-		vsharp_buffer_info.range  = bind.push_constant_size;
+		vsharp_buffer_info.range  = vsharp_buffer->descriptor_range;
 	}
 
 	uint32_t binding_num = 0;
@@ -1128,24 +1132,19 @@ void DescriptorCache::FreeDescriptor(VulkanBuffer* buffer)
 	int index = 0;
 	for (auto& set: m_sets)
 	{
-		if (set.set != nullptr)
+		if (set.set != nullptr &&
+		    VulkanDescriptorReferencesBuffer(set.storage_buffers, set.storage_buffers_num, set.vsharp_uniform_buffer,
+		                                     set.vsharp_uniform_buffer_key, buffer->memory.unique_id))
 		{
-			for (int i = 0; i < set.storage_buffers_num; i++)
+			Free(set.set);
+			set.set           = nullptr;
+			set.next_free_set = m_first_free_set;
+			m_first_free_set  = index;
+			auto& ids         = m_sets_map[set.hash];
+			ids.Remove(index);
+			if (ids.IsEmpty())
 			{
-				if (set.storage_buffers_id[i] == buffer->memory.unique_id)
-				{
-					Free(set.set);
-					set.set           = nullptr;
-					set.next_free_set = m_first_free_set;
-					m_first_free_set  = index;
-					auto& ids         = m_sets_map[set.hash];
-					ids.Remove(index);
-					if (ids.IsEmpty())
-					{
-						m_sets_map.Remove(set.hash);
-					}
-					break;
-				}
+				m_sets_map.Remove(set.hash);
 			}
 		}
 		index++;

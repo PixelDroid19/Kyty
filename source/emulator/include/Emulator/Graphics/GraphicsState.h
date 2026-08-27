@@ -74,6 +74,40 @@ struct ViewportDepthRange
 	float max_depth = 1.0f;
 };
 
+struct DepthClipState
+{
+	bool depth_clip_enable  = true;
+	bool depth_clamp_enable = false;
+	bool exact              = true;
+};
+
+// Vulkan can represent only paired near/far Z clipping. Preserve the guest's
+// enabled state exactly; if either plane is disabled, use the extension or the
+// core depth-clamp fallback to disable paired host Z clipping. An asymmetric
+// guest request remains an approximation because Vulkan cannot retain just one
+// of the two Z clip planes.
+[[nodiscard]] inline DepthClipState ResolveDepthClipState(const HW::ClipControl& clip_control,
+	                                                       bool depth_clip_extension_supported,
+	                                                       bool depth_clamp_supported)
+{
+	const bool guest_depth_clip_enable = clip_control.IsZClipEnabled();
+	const bool symmetric_guest_state   = clip_control.min_z_clip_disable == clip_control.max_z_clip_disable;
+	if (guest_depth_clip_enable)
+	{
+		return {};
+	}
+	if (depth_clip_extension_supported)
+	{
+		return {.depth_clip_enable = false, .depth_clamp_enable = false, .exact = symmetric_guest_state};
+	}
+	if (depth_clamp_supported)
+	{
+		return {.depth_clip_enable = false, .depth_clamp_enable = true, .exact = symmetric_guest_state};
+	}
+	// Core clipping is the only valid host state when neither capability exists.
+	return {.depth_clip_enable = true, .depth_clamp_enable = false, .exact = false};
+}
+
 struct ViewportXy
 {
 	float x      = 0.0f;
@@ -200,6 +234,17 @@ enum class ImageSampleOperation
 	DepthReference,
 	Mixed,
 };
+
+// Pure SAMPLE_C_LZ depth consumers use a Vulkan comparison sampler so linear
+// filtering preserves PCF's compare-before-filter order. Mixed consumers must
+// remain non-comparison samplers because the same binding is also sampled as
+// ordinary color data.
+[[nodiscard]] constexpr ImageSampleOperation ResolveSamplerBindingOperation(ImageSampleOperation operation,
+                                                                             bool comparison_eligible)
+{
+	return operation == ImageSampleOperation::DepthReference && comparison_eligible ? ImageSampleOperation::DepthReference
+	                                                                                : ImageSampleOperation::Regular;
+}
 
 [[nodiscard]] constexpr bool CanMaterializeGen5Depth16Sample(
     uint32_t format, uint32_t tile, uint32_t resource_type, uint32_t depth, uint32_t base_array, uint32_t base_level,

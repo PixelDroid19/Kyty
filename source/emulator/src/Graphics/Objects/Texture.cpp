@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -50,6 +51,47 @@ static uint32_t resolve_host_mip_count(uint16_t fmt, uint32_t width, uint32_t he
 		return guest_levels;
 	}
 	return Gen5CompressedHostMipCount(width, height, guest_levels);
+}
+
+bool TextureBlockDumpSpecMatches(const char* spec, uint32_t width, uint32_t height, uint64_t vaddr)
+{
+	if (spec == nullptr || spec[0] == '\0')
+	{
+		return false;
+	}
+
+	const char* const end = spec + std::strlen(spec);
+	uint32_t          requested_width = 0;
+	auto [cursor, width_error] = std::from_chars(spec, end, requested_width, 10);
+	if (width_error != std::errc {} || cursor == spec || cursor == end || *cursor != 'x')
+	{
+		return false;
+	}
+
+	uint32_t requested_height = 0;
+	const char* height_begin = cursor + 1;
+	auto [suffix, height_error] = std::from_chars(height_begin, end, requested_height, 10);
+	if (height_error != std::errc {} || suffix == height_begin || requested_width != width || requested_height != height)
+	{
+		return false;
+	}
+	if (suffix == end)
+	{
+		return true;
+	}
+	if (*suffix != '@')
+	{
+		return false;
+	}
+
+	const char* address_begin = suffix + 1;
+	if (end - address_begin >= 2 && address_begin[0] == '0' && (address_begin[1] == 'x' || address_begin[1] == 'X'))
+	{
+		address_begin += 2;
+	}
+	uint64_t requested_address = 0;
+	auto [address_end, address_error] = std::from_chars(address_begin, end, requested_address, 16);
+	return address_error == std::errc {} && address_end == end && address_end != address_begin && requested_address == vaddr;
 }
 
 bool TextureGetSurfaceCopyArrayRange(uint8_t resource_type, uint32_t depth, uint32_t base_array, uint32_t levels,
@@ -327,46 +369,72 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	if (fmt != 0u && tile == 5u && levels > 1u)
 	{
 		Gen5TextureMipLayout mip_layout {};
-		if (!Gen5GetStandard4KBTextureMipLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
-		                                                         static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
-		                                                         static_cast<uint32_t>(levels), &mip_layout)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Gen5GetStandard4KBTextureMipLayout(static_cast<uint32_t>(fmt), static_cast<uint condition ignored (continuing)\n"); }
+		const bool mip_layout_ok = Gen5GetStandard4KBTextureMipLayout(
+		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
+		    static_cast<uint32_t>(levels), &mip_layout);
+		if (!mip_layout_ok) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Gen5 mip layout failed (continuing)\n"); }
 		if (*size != mip_layout.tiled.size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: *size != mip_layout.tiled.size condition ignored (continuing)\n"); }
 
 		std::vector<uint8_t> linear(static_cast<size_t>(mip_layout.linear_size));
-		if (
-		    !Gen5DetileStandard4KBTextureMipChain(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, mip_layout)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Gen5DetileStandard4KBTextureMipChain(linear.data(), linear.size(), reinterpret_ condition ignored (continuing)\n"); }
+		const bool mip_detile_ok = mip_layout_ok && Gen5DetileStandard4KBTextureMipChain(
+		                                                linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, mip_layout);
+		if (!mip_detile_ok) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Gen5 mip detile failed (continuing)\n"); }
 
-		const char* block_dump_spec   = std::getenv("KYTY_DUMP_TILED_BLOCKS");
-		uint32_t    block_dump_width  = 0;
-		uint32_t    block_dump_height = 0;
-		const bool  block_dump_matches = ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt)) &&
-		                                 block_dump_spec != nullptr &&
-		                                 (std::sscanf(block_dump_spec, "%ux%u", &block_dump_width, &block_dump_height) != 2 ||
-		                                  (block_dump_width == width && block_dump_height == height));
+		const char* block_dump_spec = std::getenv("KYTY_DUMP_TILED_BLOCKS");
+		const bool  block_dump_matches = mip_detile_ok && ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt)) &&
+		                                 TextureBlockDumpSpecMatches(block_dump_spec, static_cast<uint32_t>(width),
+		                                                             static_cast<uint32_t>(height), *vaddr);
 		if (block_dump_matches)
 		{
-			const auto& level = mip_layout.level[0];
-			if (static_cast<uint64_t>(level.linear_offset) + level.linear_size > linear.size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: static_cast<uint64_t>(level.linear_offset) + level.linear_size > linear.size() condition ignored (continuing)\n"); }
-			const auto* bytes = linear.data() + level.linear_offset;
-			uint64_t    hash  = 1469598103934665603ull;
-			for (uint32_t i = 0; i < level.linear_size; ++i)
+			// Diagnostic files retain every logical guest level, including levels
+			// that the current host-image containment policy does not expose.
+			const uint32_t dump_levels = mip_layout.levels;
+			uint64_t level_hashes[16] = {};
+			uint64_t chain_hash       = 1469598103934665603ull;
+			bool     dump_valid        = dump_levels <= 16u;
+			if (!dump_valid)
 			{
-				hash = (hash ^ bytes[i]) * 1099511628211ull;
+				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: BC mip dump exceeds layout capacity (continuing)\n");
+			}
+			for (uint32_t level_index = 0; dump_valid && level_index < dump_levels; ++level_index)
+			{
+				const auto& level = mip_layout.level[level_index];
+				if (static_cast<uint64_t>(level.linear_offset) + level.linear_size > linear.size())
+				{
+					KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: BC mip dump span exceeds detiled chain (continuing)\n");
+					dump_valid = false;
+					break;
+				}
+				const auto* bytes = linear.data() + level.linear_offset;
+				uint64_t    hash  = 1469598103934665603ull;
+				for (uint32_t i = 0; i < level.linear_size; ++i)
+				{
+					hash = (hash ^ bytes[i]) * 1099511628211ull;
+				}
+				level_hashes[level_index] = hash;
+				chain_hash = (chain_hash ^ hash) * 1099511628211ull;
 			}
 			static std::set<uint64_t> dumped_mip_blocks;
-			const uint64_t dump_key = *vaddr ^ (static_cast<uint64_t>(width) << 32u) ^ height ^ hash;
-			if (dumped_mip_blocks.size() < 32u && dumped_mip_blocks.insert(dump_key).second)
+			const uint64_t dump_key = *vaddr ^ (static_cast<uint64_t>(width) << 32u) ^ height ^ chain_hash;
+			if (dump_valid && dumped_mip_blocks.size() < 32u && dumped_mip_blocks.insert(dump_key).second)
 			{
-				char path[192];
-				std::snprintf(path, sizeof(path), "/tmp/kyty-bc-mip0-%ux%u-%012" PRIx64 "-%016" PRIx64 ".bin",
-				              static_cast<uint32_t>(width), static_cast<uint32_t>(height), *vaddr, hash);
-				if (FILE* file = std::fopen(path, "wb"); file != nullptr)
+				for (uint32_t level_index = 0; level_index < dump_levels; ++level_index)
 				{
-					const size_t written = std::fwrite(bytes, 1, level.linear_size, file);
-					std::fclose(file);
-					KYTY_LOG_DEBUG(
-					             "KYTY_DUMP_TILED_BLOCKS_FILE path=%s bytes=%zu complete=%u level=0 elem=%ux%u hash=%016" PRIx64 "\n",
-					             path, written, written == level.linear_size ? 1u : 0u, level.element_width, level.element_height, hash);
+					const auto& level = mip_layout.level[level_index];
+					const auto* bytes = linear.data() + level.linear_offset;
+					char        path[192];
+					std::snprintf(path, sizeof(path), "/tmp/kyty-bc-mip%u-%ux%u-%012" PRIx64 "-%016" PRIx64 ".bin",
+					              level_index, static_cast<uint32_t>(width), static_cast<uint32_t>(height), *vaddr,
+					              level_hashes[level_index]);
+					if (FILE* file = std::fopen(path, "wb"); file != nullptr)
+					{
+						const size_t written = std::fwrite(bytes, 1, level.linear_size, file);
+						std::fclose(file);
+						KYTY_LOG_DEBUG(
+						    "KYTY_DUMP_TILED_BLOCKS_FILE path=%s bytes=%zu complete=%u level=%u elem=%ux%u hash=%016" PRIx64 "\n",
+						    path, written, written == level.linear_size ? 1u : 0u, level_index, level.element_width,
+						    level.element_height, level_hashes[level_index]);
+					}
 				}
 			}
 		}
@@ -666,12 +734,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			TileConvertStandard4KBToLinear(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch,
 			                               bytes_per_element);
 			const char* block_dump_spec = std::getenv("KYTY_DUMP_TILED_BLOCKS");
-			uint32_t    block_dump_width = 0;
-			uint32_t    block_dump_height = 0;
-			const bool  block_dump_matches =
-			    block_compressed && block_dump_spec != nullptr &&
-			    (std::sscanf(block_dump_spec, "%ux%u", &block_dump_width, &block_dump_height) != 2 ||
-			     (block_dump_width == width && block_dump_height == height));
+			const bool  block_dump_matches = block_compressed &&
+			                                 TextureBlockDumpSpecMatches(block_dump_spec, static_cast<uint32_t>(width),
+			                                                             static_cast<uint32_t>(height), *vaddr);
 			if (block_dump_matches)
 			{
 				const auto* guest           = reinterpret_cast<const uint8_t*>(*vaddr);

@@ -66,6 +66,45 @@ bool AgentPadAxisFromName(const char* name, Axis* out_axis);
 void AgentPadSetButton(uint32_t button, bool down);
 void AgentPadSetAxis(Axis axis, uint8_t value);
 bool AgentPadScheduleTap(uint32_t button);
+
+// Present-addressed diagnostic taps are intentionally small and local. A
+// successful schedule is retained by the emulator, not by the request socket.
+inline constexpr uint32_t kAgentPadScheduledTapMax = 8u;
+
+enum class AgentPadScheduleResult: uint8_t
+{
+	Scheduled,
+	Invalid,
+	NotFuture,
+	ButtonHeld,
+	TapPending,
+	QueueFull,
+	TargetConflict,
+};
+
+struct AgentPadScheduledTapStats
+{
+	uint32_t scheduled_taps           = 0;
+	uint64_t next_target_present      = 0;
+	uint64_t cancelled_scheduled_taps = 0;
+};
+
+struct AgentPadPresentResult
+{
+	uint32_t started                  = 0;
+	uint32_t cancelled                = 0;
+	uint64_t started_target_present   = 0;
+	uint64_t cancelled_target_present = 0;
+};
+
+// Atomically validates against the latest real present and adds repeat exact
+// targets: at_present + N * present_delta. Targets are fired only by
+// AgentPadOnPresent(), never by wall-clock time.
+AgentPadScheduleResult AgentPadScheduleTaps(uint32_t button, uint64_t at_present, uint32_t repeat,
+                                             uint64_t present_delta);
+AgentPadPresentResult  AgentPadOnPresent(uint64_t present);
+void                   AgentPadUpdatePresentWatermark(uint64_t present);
+void                   AgentPadGetScheduledTapStats(AgentPadScheduledTapStats* out);
 void AgentPadClear();
 void AgentPadGetState(uint32_t* buttons, uint8_t* axes);
 

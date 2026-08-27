@@ -293,6 +293,7 @@ def deliver_pad_sequence(
     deadline: Optional[float] = None,
     clock: Any = time.monotonic,
     inter_tap_settle_s: float = 0.0,
+    status_observer: Any = None,
 ) -> tuple[bool, list[dict[str, Any]]]:
     events: list[dict[str, Any]] = []
     success = True
@@ -335,7 +336,10 @@ def deliver_pad_sequence(
                     if status_code != 0:
                         success = False
                         break
-                    if not pad_counters(extract_result(status_obj))["tap_pending"]:
+                    observed_status = extract_result(status_obj)
+                    if status_observer is not None:
+                        status_observer(observed_status)
+                    if not pad_counters(observed_status)["tap_pending"]:
                         tap_completed = True
                         break
                     wait_s = (
@@ -353,7 +357,15 @@ def deliver_pad_sequence(
                     if action_deadline is not None:
                         settle_until = min(settle_until, action_deadline)
                     while clock() < settle_until:
-                        pause(min(0.05, settle_until - clock()))
+                        pause(min(0.25, settle_until - clock()))
+                        status_code, status_obj = call(sock, "status", {}, timeout=action_timeout(2.0))
+                        if status_code != 0:
+                            success = False
+                            break
+                        if status_observer is not None:
+                            status_observer(extract_result(status_obj))
+                    if not success:
+                        break
                     if action_deadline is not None and clock() >= action_deadline:
                         success = False
                         break
@@ -393,6 +405,23 @@ def advance_post_input_wait(
     present_delta = max(0, present - state.interactive_start_present)
     elapsed_s = max(0.0, now - state.interactive_since)
     return present_delta >= min_present_delta and elapsed_s >= min_settle_s
+
+
+def record_input_phase_observation(state: PostInputWaitState, phase: str) -> bool:
+    """Record a phase seen while the input sequence is still in progress.
+
+    Inter-tap observations may prove that the guest entered loading, but they
+    must not start the post-input interactive settle window before the final
+    input has been delivered.
+    """
+    if phase != "loading":
+        return False
+
+    newly_seen = not state.loading_seen
+    state.loading_seen = True
+    state.interactive_since = None
+    state.interactive_start_present = None
+    return newly_seen
 
 
 def can_start_pad_sequence(
@@ -822,11 +851,25 @@ def run_session(
                     interactive_since = None
                 else:
                     input_before = pad_counters(pre_input_status)
+
+                    def observe_input_status(observed_status: dict[str, Any]) -> None:
+                        observed_phase = str(observed_status.get("phase") or "")
+                        observed_now = time.monotonic()
+                        if record_input_phase_observation(post_input_wait, observed_phase):
+                            notes.append("post_input_loading_seen")
+                            report.timeline.append(
+                                {
+                                    "t": round(observed_now - started, 3),
+                                    "event": "post_input_loading",
+                                }
+                            )
+
                     input_sequence_ok, input_events = deliver_pad_sequence(
                         sock,
                         profile.get("pad_sequence") or [],
                         deadline=min(deadline_total, time.monotonic() + input_s),
                         inter_tap_settle_s=inter_tap_settle_s,
+                        status_observer=observe_input_status,
                     )
                     for event in input_events:
                         report.timeline.append(

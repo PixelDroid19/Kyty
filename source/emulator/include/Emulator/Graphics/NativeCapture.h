@@ -24,6 +24,42 @@ enum class NativeCaptureMilestone
 	Manual,
 };
 
+[[nodiscard]] constexpr bool NativeCapturePublishesManualGate(NativeCaptureMilestone milestone, bool ok,
+	                                                           uint64_t request_id)
+{
+	return milestone == NativeCaptureMilestone::Manual && ok && request_id != 0;
+}
+
+[[nodiscard]] constexpr NativeCaptureMilestone NativeCaptureSelectMilestone(bool manual_pending, bool first_due,
+	                                                                         bool interval_due, bool trigger_due)
+{
+	if (manual_pending)
+	{
+		return NativeCaptureMilestone::Manual;
+	}
+	if (first_due)
+	{
+		return NativeCaptureMilestone::FirstPresent;
+	}
+	if (interval_due)
+	{
+		return NativeCaptureMilestone::Interval;
+	}
+	return trigger_due ? NativeCaptureMilestone::Manual : NativeCaptureMilestone::None;
+}
+
+[[nodiscard]] constexpr uint64_t NativeCaptureSelectedManualRequestId(NativeCaptureMilestone milestone,
+	                                                                   bool manual_pending, uint64_t request_id)
+{
+	return milestone == NativeCaptureMilestone::Manual && manual_pending ? request_id : 0u;
+}
+
+[[nodiscard]] constexpr bool NativeCaptureOwnsManualRequest(uint64_t selected_request_id, bool manual_pending,
+	                                                         uint64_t current_request_id)
+{
+	return selected_request_id != 0u && manual_pending && selected_request_id == current_request_id;
+}
+
 // Window owns presentation and Vulkan lifetime; this controller owns the
 // capture policy, counters, and request/result synchronization. Keeping the
 // mutable capture state here prevents WindowContext from becoming another

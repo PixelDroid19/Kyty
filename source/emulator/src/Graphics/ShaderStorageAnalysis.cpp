@@ -272,6 +272,403 @@ State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code
 	return AnalyzeShaderSamplerOperationEvidence(code, start_register).operation;
 }
 
+namespace {
+
+constexpr int      k_meta_fill_descriptor_words = 4;
+constexpr uint32_t k_meta_fill_workgroup_shift  = 6;
+constexpr uint32_t k_meta_fill_semantic_instruction_count = 9;
+
+bool MetaFillOperandIsPlain(const ShaderOperand& operand)
+{
+	return operand.swizzle == 6 && !operand.dpp && !operand.absolute && !operand.negate && !operand.clamp &&
+	       operand.multiplier == 1.0f;
+}
+
+bool MetaFillOperandIsVgpr(const ShaderOperand& operand, int register_id)
+{
+	return operand.type == ShaderOperandType::Vgpr && operand.register_id == register_id && operand.size == 1 &&
+	       MetaFillOperandIsPlain(operand);
+}
+
+bool MetaFillOperandIsSgpr(const ShaderOperand& operand, int register_id, int registers_num)
+{
+	return operand.type == ShaderOperandType::Sgpr && operand.register_id == register_id && operand.size == registers_num &&
+	       MetaFillOperandIsPlain(operand);
+}
+
+bool MetaFillOperandIsVccLo(const ShaderOperand& operand)
+{
+	return operand.type == ShaderOperandType::VccLo && operand.size >= 1 && MetaFillOperandIsPlain(operand);
+}
+
+bool MetaFillOperandIsImmediate(const ShaderOperand& operand, uint32_t value)
+{
+	return (operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant) &&
+	       operand.size == 0 && operand.constant.u == value && MetaFillOperandIsPlain(operand);
+}
+
+bool MetaFillOperandIsZeroSoffset(const ShaderOperand& operand)
+{
+	return (operand.type == ShaderOperandType::Null && MetaFillOperandIsPlain(operand)) ||
+	       MetaFillOperandIsImmediate(operand, 0);
+}
+
+bool MetaFillScalarOffsetIs(const ShaderInstruction& inst, uint32_t expected_offset)
+{
+	if (inst.src_num < 2 ||
+	    (inst.src[1].type != ShaderOperandType::IntegerInlineConstant && inst.src[1].type != ShaderOperandType::LiteralConstant) ||
+	    inst.src[1].size != 0 || !MetaFillOperandIsPlain(inst.src[1]))
+	{
+		return false;
+	}
+
+	const int64_t offset = static_cast<int64_t>(inst.src[1].constant.i) + static_cast<int64_t>(inst.smem_imm_offset);
+	return offset == static_cast<int64_t>(expected_offset);
+}
+
+bool MetaFillDescriptorRangesOverlap(int lhs_start, int rhs_start)
+{
+	const int64_t lhs_end = static_cast<int64_t>(lhs_start) + k_meta_fill_descriptor_words;
+	const int64_t rhs_end = static_cast<int64_t>(rhs_start) + k_meta_fill_descriptor_words;
+	return static_cast<int64_t>(lhs_start) < rhs_end && static_cast<int64_t>(rhs_start) < lhs_end;
+}
+
+bool MetaFillDescriptorStartsAreDistinct(int source_start_register, int destination_start_register, int parameter_start_register)
+{
+	return source_start_register >= 0 && destination_start_register >= 0 && parameter_start_register >= 0 &&
+	       !MetaFillDescriptorRangesOverlap(source_start_register, destination_start_register) &&
+	       !MetaFillDescriptorRangesOverlap(source_start_register, parameter_start_register) &&
+	       !MetaFillDescriptorRangesOverlap(destination_start_register, parameter_start_register);
+}
+
+bool MetaFillOperandOverlapsTrackedDescriptor(const ShaderOperand& operand, int source_start_register,
+	                                          int destination_start_register, int parameter_start_register)
+{
+	return ShaderOperandOverlapsSgprRange(operand, source_start_register, k_meta_fill_descriptor_words) ||
+	       ShaderOperandOverlapsSgprRange(operand, destination_start_register, k_meta_fill_descriptor_words) ||
+	       ShaderOperandOverlapsSgprRange(operand, parameter_start_register, k_meta_fill_descriptor_words);
+}
+
+bool MetaFillInstructionUsesOnlyExpectedDescriptor(const ShaderInstruction& inst, int expected_source_index,
+	                                               int expected_start_register, int source_start_register,
+	                                               int destination_start_register, int parameter_start_register)
+{
+	if (inst.src_num < 0 || inst.src_num > 4 || inst.mimg_address_num < 0 || inst.mimg_address_num > 13)
+	{
+		return false;
+	}
+
+	for (int source_index = 0; source_index < inst.src_num; ++source_index)
+	{
+		const auto& operand = inst.src[source_index];
+		if (!MetaFillOperandOverlapsTrackedDescriptor(operand, source_start_register, destination_start_register,
+		                                             parameter_start_register))
+		{
+			continue;
+		}
+		if (source_index != expected_source_index ||
+		    !MetaFillOperandIsSgpr(operand, expected_start_register, k_meta_fill_descriptor_words))
+		{
+			return false;
+		}
+	}
+
+	for (int address_index = 0; address_index < inst.mimg_address_num; ++address_index)
+	{
+		if (MetaFillOperandOverlapsTrackedDescriptor(inst.mimg_address[address_index], source_start_register,
+		                                            destination_start_register, parameter_start_register))
+		{
+			return false;
+		}
+	}
+
+	return !MetaFillOperandOverlapsTrackedDescriptor(inst.dst, source_start_register, destination_start_register,
+	                                                parameter_start_register) &&
+	       !MetaFillOperandOverlapsTrackedDescriptor(inst.dst2, source_start_register, destination_start_register,
+	                                                parameter_start_register);
+}
+
+bool MetaFillInstructionHasBitwiseXor(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::BufferAtomicXor:
+		case ShaderInstructionType::DsXorB32:
+		case ShaderInstructionType::SXnorSaveexecB64:
+		case ShaderInstructionType::SXorSaveexecB64:
+		case ShaderInstructionType::SXnorB32:
+		case ShaderInstructionType::SXorB32:
+		case ShaderInstructionType::SXnorB64:
+		case ShaderInstructionType::SXorB64:
+		case ShaderInstructionType::VXnorB32:
+		case ShaderInstructionType::VXorB32: return true;
+		default: return false;
+	}
+}
+
+bool MetaFillInstructionIsPadding(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::SWaitcnt || type == ShaderInstructionType::SInstPrefetch;
+}
+
+bool MetaFillHasWaitBetween(const Vector<ShaderInstruction>& instructions, uint32_t before_index, uint32_t after_index)
+{
+	if (before_index >= after_index || after_index > instructions.Size())
+	{
+		return false;
+	}
+	for (uint32_t index = before_index + 1; index < after_index; ++index)
+	{
+		if (instructions.At(index).type == ShaderInstructionType::SWaitcnt)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool MetaFillMatchesLinearIndex(const ShaderInstruction& inst, int* index_register, int* workgroup_register)
+{
+	if (index_register == nullptr || workgroup_register == nullptr || inst.type != ShaderInstructionType::VLshlAddU32 ||
+	    inst.src_num != 3 || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 ||
+	    inst.dst.register_id != 0 || !MetaFillOperandIsPlain(inst.dst) ||
+	    !MetaFillOperandIsSgpr(inst.src[0], inst.src[0].register_id, 1) ||
+	    !MetaFillOperandIsImmediate(inst.src[1], k_meta_fill_workgroup_shift) ||
+	    !MetaFillOperandIsVgpr(inst.src[2], 0))
+	{
+		return false;
+	}
+
+	*index_register     = inst.dst.register_id;
+	*workgroup_register = inst.src[0].register_id;
+	return true;
+}
+
+bool MetaFillMatchesParameterLoad(const ShaderInstruction& inst, int parameter_start_register, uint32_t offset)
+{
+	return inst.type == ShaderInstructionType::SBufferLoadDword && inst.format == ShaderInstructionFormat::SdstSvSoffset &&
+	       inst.src_num == 2 && MetaFillOperandIsVccLo(inst.dst) &&
+	       MetaFillOperandIsSgpr(inst.src[0], parameter_start_register, k_meta_fill_descriptor_words) &&
+	       MetaFillScalarOffsetIs(inst, offset);
+}
+
+bool MetaFillMatchesBoundsCompare(const ShaderInstruction& inst, int index_register)
+{
+	return inst.type == ShaderInstructionType::VCmpxGtU32 && inst.src_num == 2 && MetaFillOperandIsVccLo(inst.dst) &&
+	       MetaFillOperandIsVccLo(inst.src[0]) && MetaFillOperandIsVgpr(inst.src[1], index_register);
+}
+
+bool MetaFillFindBranchEnd(const Vector<ShaderInstruction>& instructions, uint32_t branch_index, uint32_t* end_index)
+{
+	if (end_index == nullptr || branch_index >= instructions.Size())
+	{
+		return false;
+	}
+
+	const auto& branch = instructions.At(branch_index);
+	if (branch.type != ShaderInstructionType::SCbranchExecz || branch.format != ShaderInstructionFormat::Label || branch.src_num != 1 ||
+	    branch.src[0].type != ShaderOperandType::LiteralConstant || branch.src[0].size != 0 ||
+	    !MetaFillOperandIsPlain(branch.src[0]))
+	{
+		return false;
+	}
+
+	const int64_t target_pc = static_cast<int64_t>(branch.pc) + 4 + static_cast<int64_t>(branch.src[0].constant.i);
+	if (target_pc <= static_cast<int64_t>(branch.pc) || target_pc > UINT32_MAX)
+	{
+		return false;
+	}
+
+	uint32_t target_count = 0;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		if (instructions.At(index).pc == static_cast<uint32_t>(target_pc))
+		{
+			*end_index = index;
+			target_count++;
+		}
+	}
+	return target_count == 1 && instructions.At(*end_index).type == ShaderInstructionType::SEndpgm;
+}
+
+bool MetaFillMatchesMaskAnd(const ShaderInstruction& inst, int index_register, int* value_register)
+{
+	if (value_register == nullptr || inst.type != ShaderInstructionType::VAndB32 || inst.src_num != 2 ||
+	    inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || !MetaFillOperandIsPlain(inst.dst) ||
+	    !MetaFillOperandIsVccLo(inst.src[0]) || !MetaFillOperandIsVgpr(inst.src[1], index_register))
+	{
+		return false;
+	}
+
+	*value_register = inst.dst.register_id;
+	return true;
+}
+
+bool MetaFillMatchesSourceLoad(const ShaderInstruction& inst, int source_start_register, int value_register)
+{
+	return inst.type == ShaderInstructionType::BufferLoadFormatX &&
+	       inst.format == ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen && inst.src_num == 3 &&
+	       inst.buffer_idxen && !inst.buffer_offen && !inst.buffer_return_old_value && inst.buffer_imm_offset == 0 &&
+	       MetaFillOperandIsVgpr(inst.dst, value_register) && MetaFillOperandIsVgpr(inst.src[0], value_register) &&
+	       MetaFillOperandIsSgpr(inst.src[1], source_start_register, k_meta_fill_descriptor_words) &&
+	       MetaFillOperandIsZeroSoffset(inst.src[2]);
+}
+
+bool MetaFillMatchesDestinationStore(const ShaderInstruction& inst, int destination_start_register, int index_register,
+	                                 int value_register)
+{
+	return inst.type == ShaderInstructionType::BufferStoreFormatX &&
+	       inst.format == ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen && inst.src_num == 3 &&
+	       inst.buffer_idxen && !inst.buffer_offen && !inst.buffer_return_old_value && inst.buffer_imm_offset == 0 &&
+	       MetaFillOperandIsVgpr(inst.dst, value_register) && MetaFillOperandIsVgpr(inst.src[0], index_register) &&
+	       MetaFillOperandIsSgpr(inst.src[1], destination_start_register, k_meta_fill_descriptor_words) &&
+	       MetaFillOperandIsZeroSoffset(inst.src[2]);
+}
+
+} // namespace
+
+ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& code, int source_start_register,
+	                                                        int destination_start_register, int parameter_start_register)
+{
+	ShaderComputeMetaFillEvidence result {};
+	if (!MetaFillDescriptorStartsAreDistinct(source_start_register, destination_start_register, parameter_start_register))
+	{
+		return result;
+	}
+
+	result.source_start_register      = source_start_register;
+	result.destination_start_register = destination_start_register;
+	result.parameter_start_register   = parameter_start_register;
+	result.compute_shader             = code.GetType() == ShaderType::Compute;
+	result.no_unknown_instructions    = true;
+	result.no_bitwise_xor             = true;
+	result.descriptor_uses_valid      = true;
+
+	const auto& instructions = code.GetInstructions();
+	for (const auto& inst: instructions)
+	{
+		result.no_unknown_instructions = result.no_unknown_instructions && inst.type != ShaderInstructionType::Unknown;
+		result.no_bitwise_xor          = result.no_bitwise_xor && !MetaFillInstructionHasBitwiseXor(inst.type);
+	}
+	if (!result.compute_shader || !result.no_unknown_instructions || !result.no_bitwise_xor || instructions.Size() == 0)
+	{
+		return result;
+	}
+
+	uint32_t semantic_indices[k_meta_fill_semantic_instruction_count] = {};
+	uint32_t semantic_count                                            = 0;
+	for (uint32_t instruction_index = 0; instruction_index < instructions.Size(); ++instruction_index)
+	{
+		const auto& inst = instructions.At(instruction_index);
+		if (MetaFillInstructionIsPadding(inst.type))
+		{
+			continue;
+		}
+		if (semantic_count == k_meta_fill_semantic_instruction_count)
+		{
+			return result;
+		}
+		semantic_indices[semantic_count++] = instruction_index;
+	}
+	if (semantic_count != k_meta_fill_semantic_instruction_count)
+	{
+		return result;
+	}
+
+	for (uint32_t semantic_index = 0; semantic_index < semantic_count; ++semantic_index)
+	{
+		int expected_source_index  = -1;
+		int expected_start_register = -1;
+		switch (semantic_index)
+		{
+			case 1:
+			case 4:
+				expected_source_index  = 0;
+				expected_start_register = parameter_start_register;
+				break;
+			case 6:
+				expected_source_index  = 1;
+				expected_start_register = source_start_register;
+				break;
+			case 7:
+				expected_source_index  = 1;
+				expected_start_register = destination_start_register;
+				break;
+			default: break;
+		}
+		if (!MetaFillInstructionUsesOnlyExpectedDescriptor(instructions.At(semantic_indices[semantic_index]), expected_source_index,
+		                                                expected_start_register, source_start_register, destination_start_register,
+		                                                parameter_start_register))
+		{
+			result.descriptor_uses_valid = false;
+			return result;
+		}
+	}
+
+	int index_register     = -1;
+	int value_register     = -1;
+	int workgroup_register = -1;
+	if (!MetaFillMatchesLinearIndex(instructions.At(semantic_indices[0]), &index_register, &workgroup_register))
+	{
+		return result;
+	}
+	result.workgroup_register = workgroup_register;
+	result.workgroup_shift    = k_meta_fill_workgroup_shift;
+	result.linear_index_valid = true;
+
+	if (!MetaFillMatchesParameterLoad(instructions.At(semantic_indices[1]), parameter_start_register, 0) ||
+	    !MetaFillHasWaitBetween(instructions, semantic_indices[1], semantic_indices[2]) ||
+	    !MetaFillMatchesBoundsCompare(instructions.At(semantic_indices[2]), index_register))
+	{
+		return result;
+	}
+
+	uint32_t branch_end_index = 0;
+	if (!MetaFillFindBranchEnd(instructions, semantic_indices[3], &branch_end_index) || branch_end_index != semantic_indices[8])
+	{
+		return result;
+	}
+	result.bounds_guard_valid = true;
+
+	if (!MetaFillMatchesParameterLoad(instructions.At(semantic_indices[4]), parameter_start_register,
+	                                 static_cast<uint32_t>(sizeof(uint32_t))) ||
+	    !MetaFillHasWaitBetween(instructions, semantic_indices[4], semantic_indices[5]) ||
+	    !MetaFillMatchesMaskAnd(instructions.At(semantic_indices[5]), index_register, &value_register))
+	{
+		return result;
+	}
+	result.parameter_loads_valid = true;
+	result.source_mask_valid     = true;
+
+	if (!MetaFillMatchesSourceLoad(instructions.At(semantic_indices[6]), source_start_register, value_register) ||
+	    !MetaFillHasWaitBetween(instructions, semantic_indices[6], semantic_indices[7]))
+	{
+		return result;
+	}
+	result.source_load_valid = true;
+
+	if (!MetaFillMatchesDestinationStore(instructions.At(semantic_indices[7]), destination_start_register, index_register,
+	                                     value_register))
+	{
+		return result;
+	}
+	result.destination_store_valid = true;
+
+	const auto& end = instructions.At(semantic_indices[8]);
+	if (end.type != ShaderInstructionType::SEndpgm || end.format != ShaderInstructionFormat::Empty || end.src_num != 0 ||
+	    semantic_indices[8] + 1 != instructions.Size())
+	{
+		return result;
+	}
+	result.control_flow_valid = true;
+
+	result.valid = result.compute_shader && result.linear_index_valid &&
+	               result.parameter_loads_valid && result.bounds_guard_valid && result.source_mask_valid &&
+	               result.source_load_valid && result.destination_store_valid && result.descriptor_uses_valid &&
+	               result.no_unknown_instructions && result.no_bitwise_xor && result.control_flow_valid;
+	return result;
+}
+
 ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int start_register)
 {
 	constexpr int     descriptor_registers = 4;

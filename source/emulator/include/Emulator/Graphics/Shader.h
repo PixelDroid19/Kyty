@@ -9,6 +9,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/RenderResolutionShaderScale.h"
+#include "Emulator/Graphics/VertexClipProbe.h"
 
 #include <algorithm>
 #ifdef KYTY_EMU_ENABLED
@@ -937,6 +938,7 @@ private:
 // scalar/constant compare operands are accepted, and any EXEC/VCC mutation
 // between the compare and branch invalidates it.
 [[nodiscard]] bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_index);
+[[nodiscard]] bool ShaderReadfirstlaneCanUseUniformCopy(const ShaderCode& code, uint32_t instruction_index);
 
 struct ShaderId
 {
@@ -1328,6 +1330,31 @@ struct ShaderStorageUseEvidence
 	bool                raw_smem_dynamic_offset = false;
 };
 
+// Structural evidence for one narrowly defined compute metadata-fill family.
+// `valid` establishes only the decoded instruction/dataflow proof below; the
+// caller still has to validate the live descriptors, parameter/source words,
+// allocation generations, and dispatch coverage before assigning semantics.
+struct ShaderComputeMetaFillEvidence
+{
+	int      source_start_register      = -1;
+	int      destination_start_register = -1;
+	int      parameter_start_register   = -1;
+	int      workgroup_register         = -1;
+	uint32_t workgroup_shift            = 0;
+	bool     compute_shader             = false;
+	bool     linear_index_valid         = false;
+	bool     parameter_loads_valid      = false;
+	bool     bounds_guard_valid         = false;
+	bool     source_mask_valid          = false;
+	bool     source_load_valid          = false;
+	bool     destination_store_valid    = false;
+	bool     descriptor_uses_valid      = false;
+	bool     no_unknown_instructions    = false;
+	bool     no_bitwise_xor             = false;
+	bool     control_flow_valid         = false;
+	bool     valid                      = false;
+};
+
 // Dynamic S_LOAD descriptors identify a physical binding without extending
 // the lifetime of the temporary SGPR result. A shader can load the same
 // descriptor into several temporary SGPR ranges, so every mapping is keyed by
@@ -1441,6 +1468,8 @@ struct ShaderZeroSBufferResources
                                                                              ShaderStorageAccess unbased_match, bool decoded_unknown,
                                                                              bool indirect_descriptor_use);
 [[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
+[[nodiscard]] ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& code, int source_start_register,
+	                                                                      int destination_start_register, int parameter_start_register);
 [[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register);
 [[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
@@ -1515,6 +1544,12 @@ struct ShaderSamplerResources
 	int                   samplers_num            = 0;
 	int                   binding_index           = 0;
 };
+
+// One Vulkan sampler is shared by every sampled image carrying its slot. It is
+// comparison-safe only when all matching uses are normalized, pure 2D depth
+// references; otherwise every use must stay on the regular/manual path.
+[[nodiscard]] bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures,
+                                                        const ShaderSamplerResources& samplers, int sampler_index);
 
 struct ShaderGdsResources
 {
@@ -1616,6 +1651,13 @@ struct ShaderVertexInputInfo
 	bool     fetch_inline               = false;
 	bool     gs_prolog                  = false;
 	bool     input_resources_valid      = true;
+	uint8_t  float_mode                 = 0;
+	bool     dx10_clamp                 = false;
+	bool     ieee_mode                  = false;
+	// Immutable diagnostic selection resolved at the draw boundary. The host
+	// descriptor set is assigned by the renderer after both stages are known.
+	ShaderVertexClipProbeConfig clip_probe;
+	uint32_t                     clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
 };
 
 // Bind each merged vertex stream as a ReadOnly raw SSBO so untagged MUBUF
@@ -1653,13 +1695,27 @@ struct ShaderGen5MubufStreamSpan
 	uint32_t slot       = 0;
 };
 
+// RDNA2 default-mode f32 min/max select a numeric operand when exactly one
+// input is NaN. When both are NaN the RHS payload is preserved. The ordinary
+// numeric min/max result is supplied separately so this policy does not invent
+// signed-zero ordering or other arithmetic semantics.
+[[nodiscard]] constexpr uint32_t ShaderSelectRdna2MinMaxResultBits(bool lhs_nan, bool rhs_nan, uint32_t lhs_bits,
+                                                                  uint32_t rhs_bits, uint32_t numeric_bits)
+{
+	const uint32_t rhs_number = rhs_nan ? lhs_bits : numeric_bits;
+	return lhs_nan ? rhs_bits : rhs_number;
+}
+
 // desc0 is either a bind-time slot (< bound_slots) or a live 48-bit V# base.
 // raw_byte_offset is the descriptor addressing result (index*stride+imm+soffset).
-[[nodiscard]] inline bool ShaderResolveGen5MubufLiveAddress(uint64_t desc0, uint32_t raw_byte_offset, uint32_t bound_slots,
+// access_size_bytes is the complete load/store/atomic width, not merely the
+// first byte touched by the instruction.
+[[nodiscard]] inline bool ShaderResolveGen5MubufLiveAddress(uint64_t desc0, uint32_t raw_byte_offset,
+                                                           uint32_t access_size_bytes, uint32_t bound_slots,
                                                            const ShaderGen5MubufStreamSpan* spans, uint32_t span_count,
                                                            uint32_t* out_slot, uint32_t* out_byte_offset)
 {
-	if (out_slot == nullptr || out_byte_offset == nullptr)
+	if (out_slot == nullptr || out_byte_offset == nullptr || access_size_bytes == 0)
 	{
 		return false;
 	}
@@ -1684,10 +1740,15 @@ struct ShaderGen5MubufStreamSpan
 		{
 			continue;
 		}
-		const uint64_t total = rel + static_cast<uint64_t>(raw_byte_offset);
-		if (total > 0xffffffffull)
+		if (rel > UINT64_MAX - static_cast<uint64_t>(raw_byte_offset))
 		{
-			return false;
+			continue;
+		}
+		const uint64_t total = rel + static_cast<uint64_t>(raw_byte_offset);
+		if (total >= spans[i].guest_size || total > 0xffffffffull ||
+		    static_cast<uint64_t>(access_size_bytes) > spans[i].guest_size - total)
+		{
+			continue;
 		}
 		*out_slot        = spans[i].slot;
 		*out_byte_offset = static_cast<uint32_t>(total);
@@ -1704,6 +1765,7 @@ struct ShaderComputeInputInfo
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
 	uint32_t            storage_image_write_only_mask = 0;
+	ShaderComputeMetaFillEvidence meta_fill;
 	ShaderBindResources bind;
 };
 
@@ -1711,6 +1773,17 @@ struct ShaderComputeInputInfo
 {
 	return static_cast<uint32_t>(granulated_lds_size) * 128u;
 }
+
+struct ShaderFragmentTapConfig
+{
+	bool     enabled              = false;
+	bool     draw_scoped          = false;
+	bool     select_ordinal       = false;
+	bool     signed_visualization = false;
+	bool     query_lod_visualization = false;
+	uint32_t selector             = 0;
+	uint64_t diagnostic_identity  = 0;
+};
 
 struct ShaderPixelInputInfo
 {
@@ -1728,11 +1801,22 @@ struct ShaderPixelInputInfo
 	bool                   ps_pixel_kill_enable      = false;
 	bool                   ps_early_z                = false;
 	bool                   ps_execute_on_noop        = false;
+	uint8_t                float_mode                = 0;
+	bool                   dx10_clamp                = false;
+	bool                   ieee_mode                 = false;
+	// Immutable diagnostic configuration resolved once at the draw boundary.
+	ShaderFragmentTapConfig fragment_tap;
+	// Immutable host-only aggregate selection resolved at the draw boundary.
+	// The renderer assigns the descriptor set only after both stage layouts are known.
+	ShaderPixelInput0ProbeConfig input0_probe;
+	uint32_t                     input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
 	// Non-zero when the translated fragment program uses guest-wave operations
 	// whose exact width must be available in the host Vulkan subgroup.
 	uint32_t               required_subgroup_size    = 0;
 	ShaderBindResources    bind;
 };
+
+[[nodiscard]] ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count);
 
 enum class ShaderPixelInterpolatorSource
 {
@@ -1886,7 +1970,8 @@ uint64_t ShaderLookupContinuation(uint64_t front_code_addr);
 
 void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count);
-[[nodiscard]] int32_t ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info);
+[[nodiscard]] bool    ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info,
+	                                             int32_t* resolved_offset, int32_t vertex_offset_add = 0);
 [[nodiscard]] bool    ShaderPreventsNoopPixelElision(const ShaderCode& code);
 ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
 bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
@@ -1903,6 +1988,11 @@ ShaderId         ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderCo
 ShaderCode       ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh);
 ShaderCode       ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh);
 ShaderCode       ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh);
+[[nodiscard]] bool ShaderPixelSampleProbeMatchesInstruction(const ShaderCode& code,
+	                                                            const ShaderPixelInput0ProbeConfig& config);
+[[nodiscard]] bool ShaderPixelMrtProbeMatchesInstruction(const ShaderCode& code,
+	                                                         const ShaderPixelInputInfo& input_info,
+	                                                         const ShaderPixelInput0ProbeConfig& config);
 Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInputInfo* input_info);
 Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInputInfo* input_info);
 Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeInputInfo* input_info);

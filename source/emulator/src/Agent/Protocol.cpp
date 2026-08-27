@@ -150,6 +150,7 @@ Tool ParseTool(const char* name) noexcept
 	    {"last_error", Tool::LastError},
 	    {"capture", Tool::Capture},
 	    {"score", Tool::Score},
+	    {"trace_rt_lifetime_arm", Tool::TraceRtLifetimeArm},
 	    {"pad_down", Tool::PadDown},
 	    {"pad_up", Tool::PadUp},
 	    {"pad_tap", Tool::PadTap},
@@ -687,6 +688,10 @@ void AppendGpuMemoryPerformanceJson(const Libs::Graphics::DebugStatsPerformanceS
 		*out += ",\"reclaim_new\":" + std::to_string(type.reclaim_new);
 		*out += ",\"logical_free\":" + std::to_string(type.logical_free);
 		*out += ",\"live\":" + std::to_string(type.live);
+		*out += ",\"linked_buffer_only_read_only\":" + std::to_string(type.linked_buffer_only_read_only);
+		*out += ",\"linked_surface_connected\":" + std::to_string(type.linked_surface_connected);
+		*out += ",\"linked_mutable_or_other\":" + std::to_string(type.linked_mutable_or_other);
+		*out += ",\"linked_traversal_truncated\":" + std::to_string(type.linked_traversal_truncated);
 		*out += ",\"writeback_calls\":" + std::to_string(type.writeback_calls);
 		*out += ",\"writeback_bytes\":" + std::to_string(type.writeback_bytes);
 		*out += ",\"writeback_ns\":" + std::to_string(type.writeback_ns);
@@ -1320,6 +1325,73 @@ bool ArgsHasKey(const std::string& args_json, const char* key)
 {
 	const char* value = nullptr;
 	return FindObjectField(args_json.c_str(), key, &value);
+}
+
+bool ArgsHaveOnlyKeys(const std::string& args_json, const char* const* allowed_keys, size_t allowed_count)
+{
+	if (allowed_keys == nullptr && allowed_count != 0)
+	{
+		return false;
+	}
+	const char* cursor = SkipWs(args_json.c_str());
+	if (cursor == nullptr || *cursor != '{')
+	{
+		return false;
+	}
+	++cursor;
+	bool seen[8] {};
+	if (allowed_count > std::size(seen))
+	{
+		return false;
+	}
+	for (;;)
+	{
+		cursor = SkipWs(cursor);
+		if (*cursor == '}')
+		{
+			return SkipWs(cursor + 1)[0] == '\0';
+		}
+		std::string key;
+		const char* end = nullptr;
+		if (!ParseStringValue(cursor, &key, &end))
+		{
+			return false;
+		}
+		size_t allowed_index = allowed_count;
+		for (size_t i = 0; i < allowed_count; ++i)
+		{
+			if (allowed_keys[i] != nullptr && key == allowed_keys[i])
+			{
+				allowed_index = i;
+				break;
+			}
+		}
+		if (allowed_index == allowed_count || seen[allowed_index])
+		{
+			return false;
+		}
+		seen[allowed_index] = true;
+		cursor              = SkipWs(end);
+		if (*cursor != ':')
+		{
+			return false;
+		}
+		++cursor;
+		if (!SkipJsonValue(&cursor, 0))
+		{
+			return false;
+		}
+		cursor = SkipWs(cursor);
+		if (*cursor == ',')
+		{
+			++cursor;
+			continue;
+		}
+		if (*cursor != '}')
+		{
+			return false;
+		}
+	}
 }
 
 bool ArgsGetU64(const std::string& args_json, const char* key, uint64_t* out)

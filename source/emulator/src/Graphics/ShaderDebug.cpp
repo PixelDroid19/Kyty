@@ -384,6 +384,10 @@ String8 ShaderCode::DbgInstructionToStr(const ShaderInstruction& inst)
 			ret += operand_to_str(inst.mimg_address[address]);
 		}
 	}
+	if (inst.type == ShaderInstructionType::Exp)
+	{
+		ret += String8::FromPrintf(" en:0x%x", static_cast<unsigned>(inst.exp_enable_mask));
+	}
 
 	return ret;
 }

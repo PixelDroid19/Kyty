@@ -86,14 +86,14 @@ void AddSyntheticSymbol(Loader::RuntimeLinker& linker, const Loader::SymbolResol
 
 int ScenarioStrictNotImplemented()
 {
-	if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	EXIT_NOT_IMPLEMENTED(true);
 	return 1;
 }
 
 int ScenarioUnsafeNotImplemented()
 {
 	// Macro path (one site).
-	if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	EXIT_NOT_IMPLEMENTED(true);
 	const auto diagnostics = Core::BringUp::GetDiagnostics();
 	Expect(diagnostics.total_continuations == 1, "continuation was not counted");
 	Expect(diagnostics.continues_by_feature[static_cast<uint32_t>(Core::BringUp::Feature::NotImplemented)] >= 1,
@@ -468,7 +468,7 @@ int ScenarioAgentDiagnostics()
 	const auto imports     = Loader::RuntimeLinker::GetGlobalMissingImportDiagnostics();
 	const auto load_plan   = Loader::ModuleLifecycleCoordinator::GetDiagnostics();
 	const std::string result = Kyty::Emulator::Agent::BuildDiagnosticsResult(config, diagnostics, imports, load_plan);
-	Expect(result.find("\"protocol_version\":6") != std::string::npos, "protocol version 6");
+	Expect(result.find("\"protocol_version\":8") != std::string::npos, "protocol version 8");
 	Expect(result.find("\"mode\":\"unsafe\"") != std::string::npos, "mode unsafe");
 	Expect(result.find("\"not_implemented\"") != std::string::npos, "enabled features list");
 	Expect(result.find("\"enabled_subsystems\"") != std::string::npos, "enabled subsystems field");

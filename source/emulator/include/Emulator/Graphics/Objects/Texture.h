@@ -85,6 +85,8 @@ struct TextureSurfaceCopyArrayRange
 
 [[nodiscard]] uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format);
 
+[[nodiscard]] bool TextureBlockDumpSpecMatches(const char* spec, uint32_t width, uint32_t height, uint64_t vaddr);
+
 [[nodiscard]] bool TextureGetSurfaceCopyArrayRange(uint8_t resource_type, uint32_t depth, uint32_t base_array,
                                                    uint32_t levels, uint32_t source_layers,
                                                    TextureSurfaceCopyArrayRange* range);
