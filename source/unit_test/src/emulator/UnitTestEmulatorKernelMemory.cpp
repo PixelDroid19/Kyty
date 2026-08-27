@@ -433,6 +433,46 @@ TEST(EmulatorKernelMemory, FixedDirectMapConsumesPrefixOfLargerReservation)
 	Config::SetNextGen(false);
 }
 
+TEST(EmulatorKernelMemory, ReservingDirectMappingTailDecommitsIt)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+
+	constexpr size_t kMappingSize = 0x40000;
+	constexpr size_t kKeepSize    = 0x24000;
+	constexpr size_t kTailSize    = kMappingSize - kKeepSize;
+	void*            reservation  = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&reservation, kMappingSize, 0, 0x4000), OK);
+	const auto base = reinterpret_cast<uint64_t>(reservation);
+
+	int64_t physical_address = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kMappingSize, 0x4000, 12, &physical_address), OK);
+	ASSERT_EQ(KernelMapDirectMemory(&reservation, kMappingSize, 0x02, 0x10, physical_address, 0x4000), OK);
+
+	void* tail = reinterpret_cast<void*>(base + kKeepSize);
+	ASSERT_EQ(KernelReserveVirtualRange(&tail, kTailSize, 0x400010, 0), OK);
+	EXPECT_EQ(tail, reinterpret_cast<void*>(base + kKeepSize));
+
+	VirtualQueryInfo prefix_info {};
+	VirtualQueryInfo tail_info {};
+	ASSERT_EQ(KernelVirtualQuery(reinterpret_cast<void*>(base), 0, &prefix_info, sizeof(prefix_info)), OK);
+	ASSERT_EQ(KernelVirtualQuery(tail, 0, &tail_info, sizeof(tail_info)), OK);
+	EXPECT_EQ(prefix_info.start, base);
+	EXPECT_EQ(prefix_info.end, base + kKeepSize);
+	EXPECT_EQ(prefix_info.is_direct, 1u);
+	EXPECT_EQ(prefix_info.is_committed, 1u);
+	EXPECT_EQ(tail_info.start, base + kKeepSize);
+	EXPECT_EQ(tail_info.end, base + kMappingSize);
+	EXPECT_EQ(tail_info.is_direct, 0u);
+	EXPECT_EQ(tail_info.is_committed, 0u);
+
+	ASSERT_EQ(KernelReleaseDirectMemory(physical_address + static_cast<int64_t>(kKeepSize), kTailSize), OK);
+	EXPECT_EQ(KernelMunmap(base, kKeepSize), OK);
+	EXPECT_EQ(KernelMunmap(base + kKeepSize, kTailSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kKeepSize), OK);
+	Config::SetNextGen(false);
+}
+
 TEST(EmulatorKernelMemory, DirectMemoryAllocationFindsAFreeEarlierRange)
 {
 	EnsureMemorySubsystemInitialized();

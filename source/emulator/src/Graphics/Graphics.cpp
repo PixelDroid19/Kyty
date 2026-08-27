@@ -3840,21 +3840,33 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_
 	{
 		return nullptr;
 	}
-	if (address != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address != nullptr condition ignored (continuing)\n"); }
 	if (event_type > 0x3fu) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: event_type > 0x3fu condition ignored (continuing)\n"); }
 
-	
-	auto* cmd = buf->AllocateDW(2);
+	const bool addressed = address != nullptr && event_type == 0x39u;
+	if (address != nullptr && !addressed)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address supplied for an event without an addressed packet form (continuing)\n");
+	}
+
+	auto* cmd = buf->AllocateDW(addressed ? 4u : 2u);
 
 	if (cmd == nullptr)
 	{
 		return nullptr;
 	}
 
-	uint32_t event_index = 0;
+	if (addressed)
+	{
+		const auto addr = reinterpret_cast<uint64_t>(address);
+		cmd[0]          = KYTY_PM4(4, Pm4::IT_EVENT_WRITE, 0u);
+		cmd[1]          = 0x100u | event_type;
+		cmd[2]          = static_cast<uint32_t>(addr & 0xfffffff8u);
+		cmd[3]          = static_cast<uint32_t>(addr >> 32u);
+		return cmd;
+	}
 
 	cmd[0] = KYTY_PM4(2, Pm4::IT_EVENT_WRITE, 0u);
-	cmd[1] = (event_index << 8u) | event_type;
+	cmd[1] = event_type;
 
 	return cmd;
 }

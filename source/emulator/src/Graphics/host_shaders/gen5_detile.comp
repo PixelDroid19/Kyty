@@ -1,19 +1,15 @@
 #version 450
 // Gen5 detile compute kernel. Offset math must stay identical to Tile.cpp:
-// TileGetSw64kRxOffset / TileGetStandard64KBOffset / TileGetDepth64KB32Offset /
+// TileGetSw64kRxOffset / TileGetStandard64KBOffset / TileGetDepth64KBOffset /
 // TileGetStandard4KBOffset. local_size matches TileDetileComputeStyle (8x8).
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-layout(std430, binding = 0) readonly buffer SrcBuffer
+layout(std430, binding = 0) buffer DetileBuffer
 {
-	uint src[];
-};
-
-layout(std430, binding = 1) writeonly buffer DstBuffer
-{
-	uint dst[];
-};
+	uint words[];
+}
+buffers[2];
 
 layout(push_constant) uniform PushConstants
 {
@@ -25,6 +21,7 @@ layout(push_constant) uniform PushConstants
 	uint layout_kind; // 0 Sw64kRx, 1 Standard64KB, 2 Standard4KB, 3 Depth64KB32
 	uint src_u32_count;
 	uint dst_u32_count;
+	uint src_byte_offset;
 }
 pc;
 
@@ -152,8 +149,26 @@ uint standard64_within(uint x, uint y, uint bpe)
 	return offset;
 }
 
-uint depth64_within(uint x, uint y)
+uint depth64_within(uint x, uint y, uint bpe)
 {
+	if (bpe == 2u)
+	{
+		uint offset = 0u;
+		offset ^= (x << 1u) & 0x0002u;
+		offset ^= (x << 2u) & 0x0008u;
+		offset ^= (x << 3u) & 0x0020u;
+		offset ^= (x << 4u) & 0x0480u;
+		offset ^= (x << 5u) & 0x0300u;
+		offset ^= (x << 6u) & 0x0800u;
+		offset ^= (x << 7u) & 0x2000u;
+		offset ^= (x << 8u) & 0x8000u;
+		offset ^= (y << 2u) & 0x0004u;
+		offset ^= (y << 3u) & 0x0010u;
+		offset ^= (y << 4u) & 0x0040u;
+		offset ^= (y << 5u) & 0x0f00u;
+		offset ^= (y << 8u) & 0x5000u;
+		return offset;
+	}
 	uint x_offset = 0u;
 	x_offset ^= (x << 2u) & 0x0004u;
 	x_offset ^= (x << 3u) & 0x0010u;
@@ -210,15 +225,16 @@ uint tiled_byte_offset(uint x, uint y)
 		uint blk_idx  = yb * blocks_x + xb;
 		return blk_idx * 65536u + standard64_within(x % block_w, y % block_h, bpe);
 	}
-	// 3 = Depth64KB32 (pitch must be multiple of 128 on host)
+	// 3 = Depth64KB (D16 block 256x128, D32 block 128x128)
 	if (pc.layout_kind == 3u)
 	{
-		uint block_w  = 128u;
+		uint block_w  = (bpe == 2u) ? 256u : 128u;
+		uint block_h  = 128u;
 		uint blocks_x = pitch / block_w;
 		uint xb       = x / block_w;
-		uint yb       = y / block_w;
+		uint yb       = y / block_h;
 		uint blk_idx  = yb * blocks_x + xb;
-		return blk_idx * 65536u + depth64_within(x % block_w, y % block_w);
+		return blk_idx * 65536u + depth64_within(x % block_w, y % block_h, bpe);
 	}
 	// 2 = Standard4KB, 4 BPE only (block 32x32)
 	uint block_w  = 32u;
@@ -240,16 +256,22 @@ void main()
 	}
 
 	uint bpe         = pc.bytes_per_element;
-	uint tiled_bytes = tiled_byte_offset(x, y);
+	uint tiled_bytes = pc.src_byte_offset + tiled_byte_offset(x, y);
 	uint linear_bytes = (y * pc.dst_pitch_elems + x) * bpe;
 	uint tiled_u32    = tiled_bytes / 4u;
 	uint linear_u32   = linear_bytes / 4u;
-	uint words        = bpe / 4u;
-	if (words == 0u)
+	if (bpe == 2u)
 	{
-		// Sub-dword elements: host path only.
+		if (tiled_u32 >= pc.src_u32_count || linear_u32 >= pc.dst_u32_count)
+		{
+			return;
+		}
+		uint source_word = buffers[0].words[tiled_u32];
+		uint value       = (source_word >> ((tiled_bytes & 2u) * 8u)) & 0xffffu;
+		atomicOr(buffers[1].words[linear_u32], value << ((linear_bytes & 2u) * 8u));
 		return;
 	}
+	uint words        = bpe / 4u;
 	if (tiled_u32 > pc.src_u32_count || words > pc.src_u32_count - tiled_u32 || linear_u32 > pc.dst_u32_count ||
 	    words > pc.dst_u32_count - linear_u32)
 	{
@@ -257,6 +279,6 @@ void main()
 	}
 	for (uint i = 0u; i < words; ++i)
 	{
-		dst[linear_u32 + i] = src[tiled_u32 + i];
+		buffers[1].words[linear_u32 + i] = buffers[0].words[tiled_u32 + i];
 	}
 }

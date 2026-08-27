@@ -5,8 +5,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <thread>
 
 UT_BEGIN(EmulatorShaderTranslationCache);
@@ -14,6 +16,24 @@ UT_BEGIN(EmulatorShaderTranslationCache);
 using namespace Libs::Graphics;
 
 namespace {
+
+void TestSetEnvironment(const char* name, const char* value)
+{
+#if defined(_WIN32)
+	_putenv_s(name, value);
+#else
+	::setenv(name, value, 1);
+#endif
+}
+
+void TestUnsetEnvironment(const char* name)
+{
+#if defined(_WIN32)
+	_putenv_s(name, "");
+#else
+	::unsetenv(name);
+#endif
+}
 
 class ScopedShaderModuleCacheDirectory final
 {
@@ -64,6 +84,99 @@ TEST(EmulatorShaderTranslationCache, KeyTracksOnlyExactTranslationInputs)
 	auto debug = base;
 	debug.debug_printf_enabled = !base.debug_printf_enabled;
 	EXPECT_NE(base, debug);
+
+	const char* previous_tap       = std::getenv("KYTY_FS_TAP");
+	const bool  had_previous_tap   = previous_tap != nullptr;
+	const std::string previous_value = had_previous_tap ? previous_tap : "";
+	const char* previous_signed       = std::getenv("KYTY_FS_TAP_SIGNED");
+	const bool  had_previous_signed   = previous_signed != nullptr;
+	const std::string previous_signed_value = had_previous_signed ? previous_signed : "";
+	const char* previous_draw       = std::getenv("KYTY_FS_TAP_DRAW");
+	const bool  had_previous_draw   = previous_draw != nullptr;
+	const std::string previous_draw_value = had_previous_draw ? previous_draw : "";
+	const char*       previous_lod       = std::getenv("KYTY_FS_TAP_LOD");
+	const bool        had_previous_lod   = previous_lod != nullptr;
+	const std::string previous_lod_value = had_previous_lod ? previous_lod : "";
+	TestUnsetEnvironment("KYTY_FS_TAP");
+	TestUnsetEnvironment("KYTY_FS_TAP_SIGNED");
+	TestUnsetEnvironment("KYTY_FS_TAP_DRAW");
+	TestUnsetEnvironment("KYTY_FS_TAP_LOD");
+	const auto no_tap = ShaderResolveFragmentTapConfig(0x0000000100000002ull, true, 15366u);
+	const auto untapped =
+	    ShaderModuleKey::Create(id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true);
+	TestSetEnvironment("KYTY_FS_TAP", "0000000100000002:0");
+	const auto unscoped_draw = ShaderResolveFragmentTapConfig(0x0000000100000002ull, true, 15366u);
+	TestSetEnvironment("KYTY_FS_TAP_DRAW", "indexed:15366");
+	const auto selected_draw = ShaderResolveFragmentTapConfig(0x0000000100000002ull, true, 15366u);
+	const auto wrong_count   = ShaderResolveFragmentTapConfig(0x0000000100000002ull, true, 15365u);
+	const auto wrong_kind    = ShaderResolveFragmentTapConfig(0x0000000100000002ull, false, 15366u);
+	const auto wrong_shader  = ShaderResolveFragmentTapConfig(0x0000000300000004ull, true, 15366u);
+	TestSetEnvironment("KYTY_FS_TAP_DRAW", "auto:15366");
+	const auto selected_auto = ShaderResolveFragmentTapConfig(0x0000000100000002ull, false, 15366u);
+	TestSetEnvironment("KYTY_FS_TAP_DRAW", "indexed:15366");
+	const auto tapped =
+	    ShaderModuleKey::Create(id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true, false,
+	                            selected_draw.diagnostic_identity);
+	TestSetEnvironment("KYTY_FS_TAP_SIGNED", "1");
+	const auto signed_config = ShaderResolveFragmentTapConfig(0x0000000100000002ull, true, 15366u);
+	const auto signed_tapped =
+	    ShaderModuleKey::Create(id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true, false,
+	                            signed_config.diagnostic_identity);
+	TestUnsetEnvironment("KYTY_FS_TAP_SIGNED");
+	TestSetEnvironment("KYTY_FS_TAP_LOD", "1");
+	const auto lod_config = ShaderResolveFragmentTapConfig(0x0000000100000002ull, true, 15366u);
+	const auto lod_tapped =
+	    ShaderModuleKey::Create(id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true, false,
+	                            lod_config.diagnostic_identity);
+	if (had_previous_tap)
+	{
+		TestSetEnvironment("KYTY_FS_TAP", previous_value.c_str());
+	} else
+	{
+		TestUnsetEnvironment("KYTY_FS_TAP");
+	}
+	if (had_previous_signed)
+	{
+		TestSetEnvironment("KYTY_FS_TAP_SIGNED", previous_signed_value.c_str());
+	} else
+	{
+		TestUnsetEnvironment("KYTY_FS_TAP_SIGNED");
+	}
+	if (had_previous_draw)
+	{
+		TestSetEnvironment("KYTY_FS_TAP_DRAW", previous_draw_value.c_str());
+	} else
+	{
+		TestUnsetEnvironment("KYTY_FS_TAP_DRAW");
+	}
+	if (had_previous_lod)
+	{
+		TestSetEnvironment("KYTY_FS_TAP_LOD", previous_lod_value.c_str());
+	} else
+	{
+		TestUnsetEnvironment("KYTY_FS_TAP_LOD");
+	}
+	EXPECT_FALSE(no_tap.enabled);
+	EXPECT_TRUE(unscoped_draw.enabled);
+	EXPECT_FALSE(unscoped_draw.draw_scoped);
+	EXPECT_TRUE(selected_draw.enabled);
+	EXPECT_TRUE(selected_draw.draw_scoped);
+	EXPECT_FALSE(wrong_count.enabled);
+	EXPECT_TRUE(wrong_count.draw_scoped);
+	EXPECT_FALSE(wrong_kind.enabled);
+	EXPECT_TRUE(wrong_kind.draw_scoped);
+	EXPECT_FALSE(wrong_shader.enabled);
+	EXPECT_FALSE(wrong_shader.draw_scoped);
+	EXPECT_TRUE(selected_auto.enabled);
+	EXPECT_TRUE(selected_auto.draw_scoped);
+	EXPECT_TRUE(signed_config.signed_visualization);
+	EXPECT_TRUE(lod_config.query_lod_visualization);
+	EXPECT_NE(untapped, tapped);
+	EXPECT_NE(tapped, signed_tapped);
+	EXPECT_NE(tapped, lod_tapped);
+	EXPECT_EQ(tapped.diagnostic_identity, 0x8000000000000000ull);
+	EXPECT_EQ(signed_tapped.diagnostic_identity, 0xa000000000000000ull);
+	EXPECT_EQ(lod_tapped.diagnostic_identity, 0x9800000000000000ull);
 }
 
 TEST(EmulatorShaderTranslationCache, ExactMissCompilesOnceAndHitDoesNotInvokeCompiler)
@@ -93,27 +206,56 @@ TEST(EmulatorShaderTranslationCache, ExactMissCompilesOnceAndHitDoesNotInvokeCom
 TEST(EmulatorShaderTranslationCache, PersistentModuleHitSkipsCompilerAcrossCacheInstances)
 {
 	ScopedShaderModuleCacheDirectory directory;
-	SpirvBinaryCacheStore            store(directory.path);
-	const auto key =
-	    ShaderModuleKey::Create(TestShaderId(11, 22, 33), ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true);
+	const char*       previous_tap       = std::getenv("KYTY_FS_TAP");
+	const bool        had_previous_tap   = previous_tap != nullptr;
+	const std::string previous_tap_value = had_previous_tap ? previous_tap : "";
+	TestUnsetEnvironment("KYTY_FS_TAP");
+	const auto id = TestShaderId(11, 22, 33);
+	const auto normal_key =
+	    ShaderModuleKey::Create(id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true);
 	std::atomic<uint32_t> compiles {0};
 	auto compiler = [&]
 	{
-		compiles.fetch_add(1);
-		return Vector<uint32_t> {0x07230203u, 0x00010500u, 0u, 4u, 0u};
+		const auto serial = compiles.fetch_add(1) + 1u;
+		return Vector<uint32_t> {0x07230203u, 0x00010500u, serial, 4u, 0u};
 	};
 
 	{
+		SpirvBinaryCacheStore store(directory.path);
 		ShaderTranslationCache cold_cache(16, &store, false);
-		EXPECT_FALSE(cold_cache.GetOrCompile(key, compiler).hit);
+		EXPECT_FALSE(cold_cache.GetOrCompile(normal_key, compiler).hit);
+		store.Drain();
 	}
+	TestSetEnvironment("KYTY_FS_TAP", "0000000b00000016:0");
+	const auto tapped_config = ShaderResolveFragmentTapConfig(0x0000000b00000016ull, true, 1u);
+	const auto tapped_key =
+	    ShaderModuleKey::Create(id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true, false,
+	                            tapped_config.diagnostic_identity);
+	EXPECT_NE(normal_key, tapped_key);
 	{
-		ShaderTranslationCache warm_cache(16, &store, false);
-		const auto             warm = warm_cache.GetOrCompile(key, compiler);
-		EXPECT_TRUE(warm.hit);
-		EXPECT_EQ(warm.binary, (Vector<uint32_t> {0x07230203u, 0x00010500u, 0u, 4u, 0u}));
+		SpirvBinaryCacheStore store(directory.path);
+		ShaderTranslationCache tapped_cache(16, &store, false);
+		const auto             tapped = tapped_cache.GetOrCompile(tapped_key, compiler);
+		EXPECT_FALSE(tapped.hit);
+		EXPECT_EQ(tapped.binary, (Vector<uint32_t> {0x07230203u, 0x00010500u, 2u, 4u, 0u}));
+		store.Drain();
 	}
-	EXPECT_EQ(compiles.load(), 1u);
+	TestUnsetEnvironment("KYTY_FS_TAP");
+	{
+		SpirvBinaryCacheStore store(directory.path);
+		ShaderTranslationCache warm_cache(16, &store, false);
+		const auto             warm = warm_cache.GetOrCompile(normal_key, compiler);
+		EXPECT_TRUE(warm.hit);
+		EXPECT_EQ(warm.binary, (Vector<uint32_t> {0x07230203u, 0x00010500u, 1u, 4u, 0u}));
+	}
+	if (had_previous_tap)
+	{
+		TestSetEnvironment("KYTY_FS_TAP", previous_tap_value.c_str());
+	} else
+	{
+		TestUnsetEnvironment("KYTY_FS_TAP");
+	}
+	EXPECT_EQ(compiles.load(), 2u);
 }
 
 TEST(EmulatorShaderTranslationCache, DebugPrintfModulesRemainSessionLocal)
@@ -261,6 +403,17 @@ TEST(EmulatorShaderTranslationCache, TranslatorVersionInvalidatesEntry)
 	key.translator_version++;
 	EXPECT_FALSE(cache.GetOrCompile(key, compiler).hit);
 	EXPECT_EQ(compiles, 2u);
+}
+
+TEST(EmulatorShaderTranslationCache, Gen5StreamSgprSemanticsInvalidateVersion29)
+{
+	const auto current = ShaderModuleKey::Create(TestShaderId(17, 18, 19), ShaderModuleStage::Vertex,
+	                                             Config::ShaderOptimizationType::Performance, true);
+	auto legacy = current;
+	legacy.translator_version = 29;
+
+	EXPECT_GT(current.translator_version, legacy.translator_version);
+	EXPECT_NE(current, legacy);
 }
 
 TEST(EmulatorShaderTranslationCache, FullCacheWaitsForCompilingEntryBeforeEviction)

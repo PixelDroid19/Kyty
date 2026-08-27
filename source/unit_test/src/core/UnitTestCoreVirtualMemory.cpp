@@ -638,6 +638,44 @@ TEST(CoreVirtualMemory, PosixFatalReportCapturesSignalContext)
 #endif
 }
 
+TEST(CoreVirtualMemory, PosixIllegalInstructionReportCapturesSignalContext)
+{
+#if defined(_WIN32)
+	GTEST_SKIP() << "POSIX signal-context coverage";
+#else
+	char report_path[128] = {};
+	std::snprintf(report_path, sizeof(report_path), "/tmp/kyty-ill-context-%ld.json", static_cast<long>(::getpid()));
+	(void)std::remove(report_path);
+
+	const pid_t child = ::fork();
+	ASSERT_GE(child, 0);
+	if (child == 0)
+	{
+		ConfigureFatalFaultReport(report_path);
+		if (!ExceptionHandler::InstallVectored(FatalFromSignal))
+		{
+			::_Exit(126);
+		}
+		(void)::raise(SIGILL);
+		::_Exit(127);
+	}
+
+	int status = 0;
+	ASSERT_EQ(::waitpid(child, &status, 0), child);
+	ASSERT_TRUE(WIFEXITED(status));
+	ASSERT_EQ(WEXITSTATUS(status), 132);
+
+	std::ifstream report(report_path);
+	ASSERT_TRUE(report.good());
+	const std::string json((std::istreambuf_iterator<char>(report)), std::istreambuf_iterator<char>());
+	EXPECT_NE(json.find("\"exception_code\":\"0x0000000000000004\""), std::string::npos);
+	EXPECT_EQ(json.find("\"rsp\":\"0x0000000000000000\""), std::string::npos);
+	EXPECT_EQ(json.find("\"rip\":\"0x0000000000000000\""), std::string::npos);
+	EXPECT_EQ(json.find("\"stack\":[]"), std::string::npos);
+	(void)std::remove(report_path);
+#endif
+}
+
 TEST(CoreVirtualMemory, FatalReportKeepsOneKilobyteGuestStackWindow)
 {
 	EXPECT_GE(ExceptionHandler::ExceptionInfo::StackCapacity, 128u);

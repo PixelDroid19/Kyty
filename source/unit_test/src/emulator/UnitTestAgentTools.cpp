@@ -238,7 +238,7 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	DebugStatsRecordDrawDescriptorTexture(100000);
 	DebugStatsRecordDrawDescriptorSampler(110000);
 	DebugStatsRecordDrawDescriptorFinalize(120000);
-	DebugStatsRecordTransientBufferProbe(1000, 2000, 3000, true);
+	DebugStatsRecordTransientBufferProbe(1000, 2000, 3000, true, true, 6000);
 	DebugStatsRecordTransientBufferProbe(4000, 5000, 0, false);
 	DebugStatsRecordSubmit();
 	DebugStatsRecordSubmit();
@@ -292,8 +292,10 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(first.draw_descriptor_finalize_ns, 120000u);
 	EXPECT_EQ(first.transient_buffer_probes, 2u);
 	EXPECT_EQ(first.transient_buffer_hits, 1u);
+	EXPECT_EQ(first.transient_buffer_reuses, 1u);
 	EXPECT_EQ(first.transient_buffer_validate_ns, 5000u);
 	EXPECT_EQ(first.transient_buffer_overlap_ns, 7000u);
+	EXPECT_EQ(first.transient_buffer_compare_ns, 6000u);
 	EXPECT_EQ(first.transient_buffer_upload_ns, 3000u);
 	EXPECT_EQ(first.submits, 2u);
 	EXPECT_EQ(first.fence_waits, 2u);
@@ -356,8 +358,10 @@ TEST(AgentTools, PerformanceSnapshotResetUsesIndependentBaseline)
 	EXPECT_EQ(second.draw_descriptor_finalize_ns, 0u);
 	EXPECT_EQ(second.transient_buffer_probes, 0u);
 	EXPECT_EQ(second.transient_buffer_hits, 0u);
+	EXPECT_EQ(second.transient_buffer_reuses, 0u);
 	EXPECT_EQ(second.transient_buffer_validate_ns, 0u);
 	EXPECT_EQ(second.transient_buffer_overlap_ns, 0u);
+	EXPECT_EQ(second.transient_buffer_compare_ns, 0u);
 	EXPECT_EQ(second.transient_buffer_upload_ns, 0u);
 	EXPECT_EQ(second.submits, 0u);
 	EXPECT_EQ(second.fence_waits, 0u);
@@ -651,9 +655,18 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	DebugStatsRecordGpuMemoryCreate(2, DebugStatsGpuMemoryCreateOutcome::ExactReuse, 200);
 	DebugStatsRecordGpuMemoryCreate(3, DebugStatsGpuMemoryCreateOutcome::CoveredReuse, 300);
 	DebugStatsRecordGpuMemoryCreate(4, DebugStatsGpuMemoryCreateOutcome::NewStandalone, 400);
-	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500);
+	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500, nullptr,
+	                                DebugStatsGpuMemoryLinkedTopology::BufferOnlyReadOnly);
+	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500, nullptr,
+	                                DebugStatsGpuMemoryLinkedTopology::SurfaceConnected);
+	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500, nullptr,
+	                                DebugStatsGpuMemoryLinkedTopology::MutableOrOther);
+	DebugStatsRecordGpuMemoryCreate(5, DebugStatsGpuMemoryCreateOutcome::NewLinked, 500, nullptr,
+	                                DebugStatsGpuMemoryLinkedTopology::TraversalTruncated);
 	DebugStatsRecordGpuMemoryCreate(6, DebugStatsGpuMemoryCreateOutcome::NewFromObjects, 600);
-	DebugStatsRecordGpuMemoryCreate(7, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700);
+	DebugStatsGpuMemorySlowCreateRecord copied_reclaim;
+	copied_reclaim.create_from_objects = true;
+	DebugStatsRecordGpuMemoryCreate(7, DebugStatsGpuMemoryCreateOutcome::ReclaimNew, 700, &copied_reclaim);
 	DebugStatsRecordGpuMemoryFree(7);
 	DebugStatsRecordGpuMemoryWriteBack(5, 4096, 250);
 	DebugStatsRecordGpuMemoryHash(6, 8192, 300);
@@ -667,17 +680,26 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 	EXPECT_EQ(peek.gpu_memory_types[6].hash_max_ns, 300u);
 
 	const DebugStatsPerformanceSnapshot first = DebugStatsGetPerformanceSnapshot(true);
-	EXPECT_EQ(first.gpu_memory_create_calls, 8u);
-	EXPECT_EQ(first.gpu_memory_create_ns, 2850u);
+	EXPECT_EQ(first.gpu_memory_create_calls, 11u);
+	EXPECT_EQ(first.gpu_memory_create_ns, 4350u);
 	EXPECT_EQ(first.gpu_memory_create_max_ns, 700u);
 	EXPECT_EQ(first.gpu_memory_types[0].cached_reuse, 1u);
 	EXPECT_EQ(first.gpu_memory_types[1].fast_reuse, 1u);
 	EXPECT_EQ(first.gpu_memory_types[2].exact_reuse, 1u);
 	EXPECT_EQ(first.gpu_memory_types[3].covered_reuse, 1u);
 	EXPECT_EQ(first.gpu_memory_types[4].new_standalone, 1u);
-	EXPECT_EQ(first.gpu_memory_types[5].new_linked, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].new_linked, 4u);
+	EXPECT_EQ(first.gpu_memory_types[5].linked_buffer_only_read_only, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].linked_surface_connected, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].linked_mutable_or_other, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].linked_traversal_truncated, 1u);
+	EXPECT_EQ(first.gpu_memory_types[5].new_linked,
+	          first.gpu_memory_types[5].linked_buffer_only_read_only +
+	              first.gpu_memory_types[5].linked_surface_connected + first.gpu_memory_types[5].linked_mutable_or_other +
+	              first.gpu_memory_types[5].linked_traversal_truncated);
 	EXPECT_EQ(first.gpu_memory_types[6].new_from_objects, 1u);
 	EXPECT_EQ(first.gpu_memory_types[7].reclaim_new, 1u);
+	EXPECT_EQ(first.gpu_memory_types[7].created_from_objects, 1u);
 	EXPECT_EQ(first.gpu_memory_types[7].logical_free, 1u);
 	EXPECT_EQ(first.gpu_memory_types[7].live, 0u);
 	EXPECT_EQ(first.gpu_memory_types[5].writeback_calls, 1u);
@@ -701,6 +723,7 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 		EXPECT_EQ(first.gpu_memory_types[i].new_standalone, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].new_linked, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].new_from_objects, 0u);
+		EXPECT_EQ(first.gpu_memory_types[i].created_from_objects, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].reclaim_new, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].logical_free, 0u);
 		EXPECT_EQ(first.gpu_memory_types[i].live, 0u);
@@ -718,7 +741,16 @@ TEST(AgentTools, GpuMemoryTelemetryRecordsOneBoundedOutcomePerCreateCall)
 		EXPECT_EQ(empty.gpu_memory_types[i].covered_reuse, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].new_standalone, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].new_linked, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].linked_buffer_only_read_only, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].linked_surface_connected, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].linked_mutable_or_other, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].linked_traversal_truncated, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].new_linked,
+		          empty.gpu_memory_types[i].linked_buffer_only_read_only + empty.gpu_memory_types[i].linked_surface_connected +
+		              empty.gpu_memory_types[i].linked_mutable_or_other +
+		              empty.gpu_memory_types[i].linked_traversal_truncated);
 		EXPECT_EQ(empty.gpu_memory_types[i].new_from_objects, 0u);
+		EXPECT_EQ(empty.gpu_memory_types[i].created_from_objects, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].reclaim_new, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].logical_free, 0u);
 		EXPECT_EQ(empty.gpu_memory_types[i].live, first.gpu_memory_types[i].live);
@@ -737,8 +769,13 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 	snapshot.gpu_memory_create_ns                   = 300;
 	snapshot.gpu_memory_create_max_ns               = 200;
 	snapshot.gpu_memory_types[3].reclaim_new        = 1;
+	snapshot.gpu_memory_types[3].created_from_objects = 2;
 	snapshot.gpu_memory_types[3].logical_free       = 1;
 	snapshot.gpu_memory_types[3].live               = 7;
+	snapshot.gpu_memory_types[3].linked_buffer_only_read_only = 3;
+	snapshot.gpu_memory_types[3].linked_surface_connected      = 4;
+	snapshot.gpu_memory_types[3].linked_mutable_or_other       = 5;
+	snapshot.gpu_memory_types[3].linked_traversal_truncated    = 6;
 	snapshot.gpu_memory_types[4].fast_reuse         = 9;
 	snapshot.gpu_memory_types[4].cached_reuse       = 11;
 	snapshot.gpu_memory_types[4].writeback_calls    = 3;
@@ -753,7 +790,10 @@ TEST(AgentTools, GpuMemoryPerformanceJsonUsesTheSharedStableSchema)
 
 	EXPECT_NE(json.find(R"("gpu_memory":{"create_calls":2,"create_ns":300,"create_max_ns":200)"), std::string::npos);
 	EXPECT_NE(json.find(R"("type":"index_buffer")"), std::string::npos);
+	EXPECT_NE(json.find(R"("created_from_objects":2)"), std::string::npos);
 	EXPECT_NE(json.find(R"("reclaim_new":1,"logical_free":1,"live":7)"), std::string::npos);
+	EXPECT_NE(json.find(R"("linked_buffer_only_read_only":3,"linked_surface_connected":4)"), std::string::npos);
+	EXPECT_NE(json.find(R"("linked_mutable_or_other":5,"linked_traversal_truncated":6)"), std::string::npos);
 	EXPECT_NE(json.find(R"("type":"vertex_buffer","cached_reuse":11,"fast_reuse":9)"), std::string::npos);
 	EXPECT_NE(json.find(R"("writeback_calls":3,"writeback_bytes":8192)"), std::string::npos);
 	EXPECT_NE(json.find(R"("hash_calls":5,"hash_bytes":16384)"), std::string::npos);

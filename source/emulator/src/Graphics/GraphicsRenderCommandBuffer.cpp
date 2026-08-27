@@ -39,6 +39,80 @@ namespace Kyty::Libs::Graphics {
 
 // CommandBuffer methods + TransientBufferPool
 
+namespace {
+
+VulkanSubmitAttemptTrail g_submit_fault_trail;
+
+const char* VulkanSubmitKindName(VulkanSubmitKind kind)
+{
+	switch (kind)
+	{
+		case VulkanSubmitKind::CommandBuffer: return "command_buffer";
+		case VulkanSubmitKind::SemaphoreCommandBuffer: return "semaphore_command_buffer";
+		case VulkanSubmitKind::TileDetile: return "tile_detile";
+	}
+	return "unknown";
+}
+
+} // namespace
+
+bool VulkanSubmitFaultTraceEnabled()
+{
+	static const bool enabled = []
+	{
+		const char* value = std::getenv("KYTY_SUBMIT_FAULT_TRACE");
+		return value != nullptr && value[0] == '1' && value[1] == '\0';
+	}();
+	return enabled;
+}
+
+VulkanSubmitAttemptTrail* VulkanSubmitFaultTraceTrail()
+{
+	return VulkanSubmitFaultTraceEnabled() ? &g_submit_fault_trail : nullptr;
+}
+
+void VulkanSubmitFaultReport(const char* stage, VkResult result, const VulkanSubmitAttempt* immediate)
+{
+	auto* trail = VulkanSubmitFaultTraceTrail();
+	if (trail == nullptr)
+	{
+		return;
+	}
+	VulkanSubmitAttemptSnapshot snapshot;
+	if (!trail->LatchDeviceLost(result, &snapshot))
+	{
+		return;
+	}
+
+	if (immediate != nullptr)
+	{
+		KYTY_LOG_ERROR(
+		    "KYTY_SUBMIT_FAULT stage=%s result=%d count=%" PRIu32 " dropped=%" PRIu64
+		    " immediate_tracked=%d immediate_kind=%s immediate_queue=%" PRIu32 " immediate_slot=%" PRIu32
+		    " immediate_host_sequence=%" PRIu64 " immediate_guest_submit=%" PRIu64 " immediate_frame=%" PRId32
+		    " immediate_pm4_op=%" PRIu32 " immediate_pm4_dw=%" PRIu32 " immediate_semaphore=%d\n",
+		    stage != nullptr ? stage : "unknown", static_cast<int>(result), snapshot.count, snapshot.dropped,
+		    immediate->attempt != 0u ? 1 : 0, VulkanSubmitKindName(immediate->kind), immediate->queue,
+		    immediate->command_buffer_slot, immediate->host_submission_sequence, immediate->guest_submit, immediate->frame,
+		    immediate->pm4_op, immediate->pm4_dw, immediate->signals_semaphore ? 1 : 0);
+	} else
+	{
+		KYTY_LOG_ERROR("KYTY_SUBMIT_FAULT stage=%s result=%d count=%" PRIu32 " dropped=%" PRIu64 "\n",
+		               stage != nullptr ? stage : "unknown", static_cast<int>(result), snapshot.count, snapshot.dropped);
+	}
+	for (uint32_t i = 0; i < snapshot.count; ++i)
+	{
+		const auto& entry = snapshot.entries[i];
+		KYTY_LOG_ERROR(
+		    "KYTY_SUBMIT_FAULT_ENTRY attempt=%" PRIu64 " kind=%s queue=%" PRIu32 " slot=%" PRIu32
+		    " host_sequence=%" PRIu64 " guest_submit=%" PRIu64 " frame=%" PRId32 " pm4_op=%" PRIu32 " pm4_dw=%" PRIu32
+		    " semaphore=%d completed=%d result=%d\n",
+		    entry.attempt, VulkanSubmitKindName(entry.kind), entry.queue, entry.command_buffer_slot,
+		    entry.host_submission_sequence, entry.guest_submit, entry.frame, entry.pm4_op, entry.pm4_dw,
+		    entry.signals_semaphore ? 1 : 0, entry.completed ? 1 : 0, static_cast<int>(entry.result));
+	}
+}
+
 struct ImageTransitionSource
 {
 	VkPipelineStageFlags stages = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
@@ -72,19 +146,213 @@ class TransientBufferPool
 		void*        mapped = nullptr;
 		uint64_t     size   = 0;
 		uint32_t     usage  = 0;
-		bool         used   = false;
+		bool         used    = false;
+		bool         scratch = false;
+		bool         snapshot_valid = false;
+		uint64_t     snapshot_vaddr = 0;
+		uint64_t     snapshot_size  = 0;
 	};
 
 public:
-	VulkanBuffer* Upload(GraphicContext* ctx, const void* data, uint64_t size, uint32_t usage)
+	VulkanBuffer* Upload(GraphicContext* ctx, const void* data, uint64_t size, uint32_t usage,
+	                     GpuMemoryTransientBufferAllocationClass allocation_class)
 	{
 		EXIT_IF(ctx == nullptr || data == nullptr || size == 0u || usage == 0u);
+		auto* entry = Acquire(ctx, size, usage, allocation_class, true, nullptr);
+		if (entry == nullptr)
+		{
+			return nullptr;
+		}
 
+		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+		entry->snapshot_valid = false;
+		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
+		Commit(entry, size);
+		return &entry->buffer;
+	}
+
+	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
+	                      uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
+	{
+		EXIT_IF(ctx == nullptr || validation_ns == nullptr || upload_ns == nullptr || compare_ns == nullptr || reused == nullptr);
+		*validation_ns = 0u;
+		*upload_ns     = 0u;
+		*compare_ns    = 0u;
+		*reused        = false;
+		if (!GpuMemoryCanUseTransientReadOnlyBuffer(true, size, true, true) || usage == 0u)
+		{
+			return nullptr;
+		}
+
+		const auto capture_start = std::chrono::steady_clock::now();
+		const auto finish_upload_time = [&]()
+		{
+			const auto total_ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - capture_start).count());
+			const uint64_t excluded_ns = *validation_ns > UINT64_MAX - *compare_ns ? UINT64_MAX : *validation_ns + *compare_ns;
+			*upload_ns = total_ns > excluded_ns ? total_ns - excluded_ns : 0u;
+		};
+		Entry*     previous      = nullptr;
+		for (auto it = m_entries.rbegin(); it != m_entries.rend(); ++it)
+		{
+			auto* candidate = *it;
+			if (candidate->used && !candidate->scratch && candidate->snapshot_valid && candidate->usage == usage &&
+			    candidate->snapshot_vaddr == vaddr && candidate->snapshot_size == size)
+			{
+				previous = candidate;
+				break;
+			}
+		}
+		if (previous != nullptr)
+		{
+			bool     matches             = false;
+			uint64_t reuse_validation_ns = 0u;
+			if (!GpuMemoryCompareSnapshotReadOnlyBuffer(vaddr, size, previous->mapped, &matches, &reuse_validation_ns, compare_ns))
+			{
+				*validation_ns += reuse_validation_ns;
+				return nullptr;
+			}
+			*validation_ns += reuse_validation_ns;
+			if (matches)
+			{
+				previous->buffer.descriptor_range = size;
+				*reused                           = true;
+				return &previous->buffer;
+			}
+		}
+		bool       created       = false;
+		auto*      entry = Acquire(ctx, size, usage, GpuMemoryTransientBufferAllocationClass::Snapshot, false, nullptr);
+		if (entry == nullptr)
+		{
+			const auto preflight_start = std::chrono::steady_clock::now();
+			const bool eligible        = GpuMemoryCanSnapshotReadOnlyBuffer(vaddr, size);
+			*validation_ns += static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - preflight_start).count());
+			if (!eligible)
+			{
+				finish_upload_time();
+				return nullptr;
+			}
+			entry = Acquire(ctx, size, usage, GpuMemoryTransientBufferAllocationClass::Snapshot, true, &created);
+		}
+		if (entry == nullptr)
+		{
+			finish_upload_time();
+			return nullptr;
+		}
+
+		uint64_t atomic_validation_ns = 0u;
+		uint64_t copy_ns              = 0u;
+		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr, size, entry->mapped, &atomic_validation_ns, &copy_ns))
+		{
+			*validation_ns += atomic_validation_ns;
+			finish_upload_time();
+			if (created)
+			{
+				DiscardNew(ctx, entry);
+			}
+			return nullptr;
+		}
+		*validation_ns += atomic_validation_ns;
+		DebugStatsRecordUpload(size, copy_ns);
+		entry->snapshot_valid = true;
+		entry->snapshot_vaddr = vaddr;
+		entry->snapshot_size  = size;
+		Commit(entry, size);
+		finish_upload_time();
+		return &entry->buffer;
+	}
+
+	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage)
+	{
+		if (ctx == nullptr || size == 0u || usage == 0u)
+		{
+			return nullptr;
+		}
+		Entry*   best          = nullptr;
+		uint32_t usage_entries = 0;
+		for (auto* candidate: m_entries)
+		{
+			if (candidate->usage == usage)
+			{
+				usage_entries++;
+			}
+			if (candidate->scratch && candidate->usage == usage && candidate->size >= size &&
+			    (best == nullptr || candidate->size < best->size))
+			{
+				best = candidate;
+			}
+		}
+		if (best != nullptr)
+		{
+			best->buffer.descriptor_range = size;
+			return &best->buffer;
+		}
+		if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size,
+		                                               GpuMemoryTransientBufferAllocationClass::Critical))
+		{
+			return nullptr;
+		}
+		auto* entry                   = new Entry;
+		entry->size                   = size;
+		entry->usage                  = usage;
+		entry->scratch                = true;
+		entry->buffer.usage           = usage;
+		entry->buffer.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
+		                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+		VulkanCreateBuffer(ctx, size, &entry->buffer);
+		VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
+		if (entry->mapped == nullptr)
+		{
+			VulkanDeleteBuffer(ctx, &entry->buffer);
+			delete entry;
+			return nullptr;
+		}
+		m_entries.push_back(entry);
+		m_total_bytes += size;
+		return &entry->buffer;
+	}
+
+	void Reset()
+	{
+		for (auto* entry: m_entries)
+		{
+			entry->used = false;
+		}
+	}
+
+	void Destroy(GraphicContext* ctx)
+	{
+		EXIT_IF(ctx == nullptr);
+		for (auto* entry: m_entries)
+		{
+			EXIT_IF(entry == nullptr || entry->mapped == nullptr);
+			VulkanUnmapMemory(ctx, &entry->buffer.memory);
+			entry->mapped = nullptr;
+			VulkanDeleteBuffer(ctx, &entry->buffer);
+			delete entry;
+		}
+		m_entries.clear();
+		m_total_bytes = 0;
+	}
+
+private:
+	Entry* Acquire(GraphicContext* ctx, uint64_t size, uint32_t usage, GpuMemoryTransientBufferAllocationClass allocation_class,
+	               bool allow_create, bool* created)
+	{
+		if (created != nullptr)
+		{
+			*created = false;
+		}
 		Entry*   entry              = nullptr;
 		Entry*   larger_unused      = nullptr;
 		uint32_t usage_entries      = 0;
 		for (auto* candidate: m_entries)
 		{
+			if (candidate->scratch)
+			{
+				continue;
+			}
 			if (candidate->usage == usage)
 			{
 				usage_entries++;
@@ -114,7 +382,12 @@ public:
 
 		if (entry == nullptr)
 		{
-			if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size))
+			if (!allow_create)
+			{
+				return nullptr;
+			}
+			if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size,
+			                                                   allocation_class))
 			{
 				return nullptr;
 			}
@@ -130,38 +403,38 @@ public:
 			EXIT_IF(entry->mapped == nullptr);
 			m_entries.push_back(entry);
 			m_total_bytes += size;
+			if (created != nullptr)
+			{
+				*created = true;
+			}
 		}
+		return entry;
+	}
 
-		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
-		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
+	void DiscardNew(GraphicContext* ctx, Entry* entry)
+	{
+		EXIT_IF(ctx == nullptr || entry == nullptr || entry->used || m_entries.empty() || m_entries.back() != entry ||
+		        m_total_bytes < entry->size);
+		m_entries.pop_back();
+		m_total_bytes -= entry->size;
+		VulkanUnmapMemory(ctx, &entry->buffer.memory);
+		entry->mapped = nullptr;
+		VulkanDeleteBuffer(ctx, &entry->buffer);
+		delete entry;
+	}
+
+	static void Commit(Entry* entry, uint64_t size)
+	{
+		EXIT_IF(entry == nullptr || entry->mapped == nullptr || size == 0u || size > entry->size);
+		const uint64_t tail_bytes = GpuMemoryTransientBufferTailBytes(entry->size, size);
+		if (tail_bytes != 0u)
+		{
+			std::memset(static_cast<uint8_t*>(entry->mapped) + size, 0, static_cast<size_t>(tail_bytes));
+		}
+		entry->buffer.descriptor_range = size;
 		entry->used = true;
-		return &entry->buffer;
 	}
 
-	void Reset()
-	{
-		for (auto* entry: m_entries)
-		{
-			entry->used = false;
-		}
-	}
-
-	void Destroy(GraphicContext* ctx)
-	{
-		EXIT_IF(ctx == nullptr);
-		for (auto* entry: m_entries)
-		{
-			EXIT_IF(entry == nullptr || entry->mapped == nullptr);
-			VulkanUnmapMemory(ctx, &entry->buffer.memory);
-			entry->mapped = nullptr;
-			VulkanDeleteBuffer(ctx, &entry->buffer);
-			delete entry;
-		}
-		m_entries.clear();
-		m_total_bytes = 0;
-	}
-
-private:
 	std::vector<Entry*> m_entries;
 	uint64_t            m_total_bytes = 0;
 };
@@ -196,7 +469,13 @@ void CommandBuffer::Allocate()
 		if (!m_pool->busy[i])
 		{
 			m_pool->busy[i] = true;
-			vkResetCommandBuffer(m_pool->buffers[i], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+			const auto reset_result = vkResetCommandBuffer(m_pool->buffers[i], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+			if (reset_result != VK_SUCCESS)
+			{
+				VulkanSubmitFaultReport("command_buffer_allocate_reset", reset_result);
+				EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(reset_result), m_queue,
+				     i);
+			}
 			m_index = i;
 			break;
 		}
@@ -218,9 +497,21 @@ void CommandBuffer::Free()
 		delete m_transient_buffers;
 		m_transient_buffers = nullptr;
 	}
+	if (m_transient_scratch_buffers != nullptr)
+	{
+		m_transient_scratch_buffers->Destroy(g_render_ctx->GetGraphicCtx());
+		delete m_transient_scratch_buffers;
+		m_transient_scratch_buffers = nullptr;
+	}
 
 	m_pool->busy[m_index] = false;
-	vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	const auto reset_result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	if (reset_result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("command_buffer_free_reset", reset_result);
+		EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(reset_result), m_queue,
+		     m_index);
+	}
 	m_index = static_cast<uint32_t>(-1);
 
 	if (!IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !IsInvalid() condition ignored (continuing)\n"); }
@@ -233,6 +524,10 @@ void CommandBuffer::Begin() const
 	{
 		m_transient_buffers->Reset();
 	}
+	if (m_transient_scratch_buffers != nullptr)
+	{
+		m_transient_scratch_buffers->Reset();
+	}
 
 	auto* buffer = m_pool->buffers[m_index];
 
@@ -242,9 +537,12 @@ void CommandBuffer::Begin() const
 	begin_info.flags            = 0;
 	begin_info.pInheritanceInfo = nullptr;
 
-	auto result = vkBeginCommandBuffer(buffer, &begin_info);
-
-	if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
+	const auto result = vkBeginCommandBuffer(buffer, &begin_info);
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("command_buffer_begin", result);
+		EXIT("vkBeginCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(result), m_queue, m_index);
+	}
 }
 
 VulkanBuffer* CommandBuffer::UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage)
@@ -254,7 +552,29 @@ VulkanBuffer* CommandBuffer::UploadTransientBuffer(const void* data, uint64_t si
 	{
 		m_transient_buffers = new TransientBufferPool;
 	}
-	return m_transient_buffers->Upload(g_render_ctx->GetGraphicCtx(), data, size, usage);
+	return m_transient_buffers->Upload(g_render_ctx->GetGraphicCtx(), data, size, usage,
+	                                   GpuMemoryTransientBufferAllocationClass::Critical);
+}
+
+VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
+	                                                         uint64_t* upload_ns, uint64_t* compare_ns, bool* reused)
+{
+	EXIT_IF(IsInvalid());
+	if (m_transient_buffers == nullptr)
+	{
+		m_transient_buffers = new TransientBufferPool;
+	}
+	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, usage, validation_ns, upload_ns, compare_ns, reused);
+}
+
+VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint32_t usage)
+{
+	EXIT_IF(IsInvalid());
+	if (m_transient_scratch_buffers == nullptr)
+	{
+		m_transient_scratch_buffers = new TransientBufferPool;
+	}
+	return m_transient_scratch_buffers->Scratch(g_render_ctx->GetGraphicCtx(), size, usage);
 }
 
 void CommandBuffer::End() const
@@ -263,10 +583,28 @@ void CommandBuffer::End() const
 
 	auto* buffer = m_pool->buffers[m_index];
 
-	auto result = vkEndCommandBuffer(buffer);
-
-	if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
+	const auto result = vkEndCommandBuffer(buffer);
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("command_buffer_end", result);
+		EXIT("vkEndCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(result), m_queue, m_index);
+	}
 	DebugStatsRecordCommandBuffer();
+}
+
+VulkanSubmitAttempt CommandBuffer::MakeSubmitAttempt(VulkanSubmitKind kind, bool signals_semaphore) const
+{
+	VulkanSubmitAttempt attempt;
+	attempt.kind                     = kind;
+	attempt.host_submission_sequence = m_has_submission ? m_submission.sequence : 0u;
+	attempt.guest_submit             = m_guest_submit;
+	attempt.queue                    = static_cast<uint32_t>(m_queue);
+	attempt.command_buffer_slot      = m_index;
+	attempt.frame                    = GraphicsRunGetFrameNum();
+	attempt.pm4_op                   = m_pm4_op;
+	attempt.pm4_dw                   = m_pm4_dw;
+	attempt.signals_semaphore        = signals_semaphore;
+	return attempt;
 }
 
 void CommandBuffer::Execute()
@@ -289,23 +627,35 @@ void CommandBuffer::Execute()
 
 	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
 
-	const auto& queue = g_render_ctx->GetGraphicCtx()->queues[m_queue];
-
+	const auto& queue    = g_render_ctx->GetGraphicCtx()->queues[m_queue];
+	auto*       trail    = VulkanSubmitFaultTraceTrail();
+	const auto  sequence = m_has_submission ? m_submission.sequence : 0u;
+	VulkanSubmitAttempt attempt {};
+	VulkanSubmitAttempt observed {};
+	if (trail != nullptr)
 	{
-		EXIT_IF(queue.mutex == nullptr);
-		Core::LockGuard queue_lock(*queue.mutex);
-		// Bounded submit ring for DEVICE_LOST triage (slot that later fails wait).
-		if (const char* submit_log = std::getenv("KYTY_SUBMIT_LOG"); submit_log != nullptr && submit_log[0] != '\0')
-		{
-			KYTY_LOG_DEBUG( "KYTY_SUBMIT slot=%" PRIu32 " queue=%d fence=%p frame=%d\n", m_index, m_queue, static_cast<void*>(fence),
-			             GraphicsRunGetFrameNum());
-		}
-		auto result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
-		if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
+		attempt = MakeSubmitAttempt(VulkanSubmitKind::CommandBuffer, false);
 	}
-	DebugStatsRecordSubmit();
 
-	m_execute = true;
+	const VkResult result = VulkanCallAndPublishOnSuccess(
+	    [&]() -> VkResult
+	    {
+		    EXIT_IF(queue.mutex == nullptr);
+		    Core::LockGuard queue_lock(*queue.mutex);
+		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
+		                                    &observed);
+	    },
+	    [&]
+	    {
+		    DebugStatsRecordSubmit();
+		    m_execute = true;
+	    });
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("queue_submit", result, trail != nullptr ? &observed : nullptr);
+		EXIT("vkQueueSubmit failed: result=%d queue=%d slot=%" PRIu32 " sequence=%" PRIu64 "\n", static_cast<int>(result),
+		     m_queue, m_index, sequence);
+	}
 }
 
 void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
@@ -329,17 +679,35 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 
 	EXIT_IF(m_queue < 0 || m_queue >= GraphicContext::QUEUES_NUM);
 
-	const auto& queue = g_render_ctx->GetGraphicCtx()->queues[m_queue];
-
+	const auto& queue    = g_render_ctx->GetGraphicCtx()->queues[m_queue];
+	auto*       trail    = VulkanSubmitFaultTraceTrail();
+	const auto  sequence = m_has_submission ? m_submission.sequence : 0u;
+	VulkanSubmitAttempt attempt {};
+	VulkanSubmitAttempt observed {};
+	if (trail != nullptr)
 	{
-		EXIT_IF(queue.mutex == nullptr);
-		Core::LockGuard queue_lock(*queue.mutex);
-		auto            result = vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence);
-		if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
+		attempt = MakeSubmitAttempt(VulkanSubmitKind::SemaphoreCommandBuffer, true);
 	}
-	DebugStatsRecordSubmit();
 
-	m_execute = true;
+	const VkResult result = VulkanCallAndPublishOnSuccess(
+	    [&]() -> VkResult
+	    {
+		    EXIT_IF(queue.mutex == nullptr);
+		    Core::LockGuard queue_lock(*queue.mutex);
+		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
+		                                    &observed);
+	    },
+	    [&]
+	    {
+		    DebugStatsRecordSubmit();
+		    m_execute = true;
+	    });
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("queue_submit_semaphore", result, trail != nullptr ? &observed : nullptr);
+		EXIT("vkQueueSubmit failed: result=%d queue=%d slot=%" PRIu32 " sequence=%" PRIu64 "\n", static_cast<int>(result),
+		     m_queue, m_index, sequence);
+	}
 }
 
 void CommandBuffer::WaitForFence()
@@ -370,20 +738,39 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 		return true;
 	}
 
-	auto*      device = g_render_ctx->GetGraphicCtx()->device;
-	const auto status = vkGetFenceStatus(device, m_pool->fences[m_index]);
+	auto* device = g_render_ctx->GetGraphicCtx()->device;
+	const auto status = VulkanCallAndPublishOnSuccess(
+	    [&] { return vkGetFenceStatus(device, m_pool->fences[m_index]); },
+	    [&]
+	    {
+		    DebugStatsRecordSubmissionComplete();
+		    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
+		    const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
+		    if (fence_reset_result != VK_SUCCESS)
+		    {
+			    VulkanSubmitFaultReport("fence_status_reset", fence_reset_result);
+			    EXIT("vkResetFences failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(fence_reset_result), m_queue,
+			         m_index);
+		    }
+		    const auto command_reset_result =
+		        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+		    if (command_reset_result != VK_SUCCESS)
+		    {
+			    VulkanSubmitFaultReport("fence_status_command_reset", command_reset_result);
+			    EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(command_reset_result),
+			         m_queue, m_index);
+		    }
+		    m_execute = false;
+	    });
 	if (status == VK_NOT_READY)
 	{
 		return false;
 	}
-	if (status != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: status != VK_SUCCESS condition ignored (continuing)\n"); }
-
-	DebugStatsRecordSubmissionComplete();
-	const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
-	if (fence_reset_result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fence_reset_result != VK_SUCCESS condition ignored (continuing)\n"); }
-	const auto command_reset_result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-	if (command_reset_result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: command_reset_result != VK_SUCCESS condition ignored (continuing)\n"); }
-	m_execute = false;
+	if (status != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("fence_status", status);
+		EXIT("vkGetFenceStatus failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(status), m_queue, m_index);
+	}
 	return true;
 }
 
@@ -395,45 +782,47 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 	{
 		auto* device = g_render_ctx->GetGraphicCtx()->device;
 
-		const auto wait_start  = std::chrono::steady_clock::now();
-		const auto wait_result = vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE,
-		                                         10000000000ULL); // 10s bounded timeout to prevent GPU pipeline freeze
+		const auto wait_start = std::chrono::steady_clock::now();
+		const auto wait_result = VulkanCallAndPublishOnSuccess(
+		    [&]
+		    { return vkWaitForFences(device, 1, &m_pool->fences[m_index], VK_TRUE, 10000000000ULL); },
+		    [&]
+		    {
+			    DebugStatsRecordSubmissionComplete();
+			    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
+			    if (drain_label_callbacks)
+			    {
+				    LabelDrainCompleted();
+			    }
+			    const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
+			    if (fence_reset_result != VK_SUCCESS)
+			    {
+				    VulkanSubmitFaultReport("fence_wait_reset", fence_reset_result);
+				    EXIT("vkResetFences failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(fence_reset_result),
+				         m_queue, m_index);
+			    }
+			    if (reset_command_buffer)
+			    {
+				    const auto command_reset_result =
+				        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+				    if (command_reset_result != VK_SUCCESS)
+				    {
+					    VulkanSubmitFaultReport("fence_wait_command_reset", command_reset_result);
+					    EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n",
+					         static_cast<int>(command_reset_result), m_queue, m_index);
+				    }
+			    }
+			    m_execute = false;
+		    });
 		const auto wait_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - wait_start).count();
-		if (wait_result == VK_TIMEOUT)
-		{
-			KYTY_LOG_DEBUG("WARNING: vkWaitForFences timeout on slot %" PRIu32 " after %" PRId64 "ns (fence may still signal)\n", m_index,
-			       static_cast<int64_t>(wait_ns));
-		}
-		if (wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT)
-		{
-			// Bounded diagnostic: classify device-lost vs other fence failures.
-			KYTY_LOG_ERROR("ERROR: vkWaitForFences wait_result=%d slot=%" PRIu32 " after %" PRId64 "ns\n",
-			             static_cast<int>(wait_result), m_index, static_cast<int64_t>(wait_ns));
-		}
-		if (wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: wait_result != VK_SUCCESS && wait_result != VK_TIMEOUT condition ignored (continuing)\n"); }
 		DebugStatsRecordFenceWait(static_cast<uint64_t>(wait_ns));
-		DebugStatsRecordSubmissionComplete();
-		if (drain_label_callbacks)
+		if (wait_result != VK_SUCCESS)
 		{
-			LabelDrainCompleted();
+			const uint64_t sequence = m_has_submission ? m_submission.sequence : 0u;
+			VulkanSubmitFaultReport("fence_wait", wait_result);
+			EXIT("vkWaitForFences failed: result=%d queue=%d slot=%" PRIu32 " sequence=%" PRIu64 " after=%" PRId64 "ns\n",
+			     static_cast<int>(wait_result), m_queue, m_index, sequence, static_cast<int64_t>(wait_ns));
 		}
-		if (wait_result != VK_TIMEOUT)
-		{
-			const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
-			if (fence_reset_result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: fence_reset_result != VK_SUCCESS condition ignored (continuing)\n"); }
-		} else
-		{
-			// Fence did not signal within timeout — skip reset to avoid
-			// VK_ERROR_DEVICE_LOST.  The fence slot will be reclaimed on
-			// the next successful WaitForFence pass for this slot.
-		}
-		if (reset_command_buffer)
-		{
-			const auto command_reset_result = vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
-			if (command_reset_result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: command_reset_result != VK_SUCCESS condition ignored (continuing)\n"); }
-		}
-
-		m_execute = false;
 	}
 }
 
@@ -515,6 +904,10 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	render_pass_info.clearValueCount   = framebuffer->attachment_count;
 	render_pass_info.pClearValues      = clears;
 
+	// Draw-side lifetime events cannot observe a clear-only render pass. Record
+	// the contract before barriers mutate the emulator-side image layout.
+	TraceRenderTargetLifetimePassBegin(m_guest_submit, *color, *framebuffer);
+
 	VkSampleLocationEXT current_sample_location_values[kVulkanSampleLocationMaxCount] = {};
 	VkSampleLocationEXT previous_sample_location_values[kVulkanSampleLocationMaxCount] = {};
 	VkSampleLocationsInfoEXT current_sample_location_info {};
@@ -579,7 +972,11 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	const auto depth_stencil_layout = framebuffer->depth_stencil_layout;
 	if (with_depth && depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL &&
 	                     depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: with_depth && depth_stencil_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_O condition ignored (continuing)\n"); }
-	if (with_depth && depth->vulkan_buffer->layout != depth_stencil_layout)
+	// Transition to the render-pass initial layout, not the subpass layout.
+	// First-use CLEAR keeps UNDEFINED so vkCmdBeginRenderPass can discard+clear;
+	// a pre-pass UNDEFINED→ATTACHMENT would define nothing and then LOAD garbage.
+	if (with_depth && framebuffer->depth_initial_layout != VK_IMAGE_LAYOUT_UNDEFINED &&
+	    depth->vulkan_buffer->layout != framebuffer->depth_initial_layout)
 	{
 		VkImageMemoryBarrier image_memory_barrier {};
 		image_memory_barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -591,7 +988,7 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 		         ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT
 		         : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
 		image_memory_barrier.oldLayout                       = depth->vulkan_buffer->layout;
-		image_memory_barrier.newLayout                       = depth_stencil_layout;
+		image_memory_barrier.newLayout                       = framebuffer->depth_initial_layout;
 		image_memory_barrier.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 		image_memory_barrier.image                           = depth->vulkan_buffer->image;

@@ -92,8 +92,9 @@ public:
 	[[nodiscard]] bool UnregisterRange(uintptr_t address, size_t size) noexcept;
 
 	// Protect the covered pages read-only before a CPU->GPU read. BeginRead
-	// captures the generation owned by that read transaction; callers must not
-	// replace it with a later snapshot after hashing or uploading.
+	// publishes an observation only when the generation stays unchanged while
+	// PrepareForRead arms protection. This does not make the following copy
+	// atomic: callers must validate the same observation again after reading.
 	[[nodiscard]] GpuDirtyReadObservation BeginRead(uintptr_t address, size_t size) noexcept;
 	[[nodiscard]] bool                    PrepareForRead(uintptr_t address, size_t size) noexcept;
 	[[nodiscard]] bool                    Rearm(uintptr_t address, size_t size) noexcept;
@@ -107,6 +108,8 @@ public:
 
 	[[nodiscard]] uint64_t             SnapshotGeneration(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] bool                 ChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept;
+	[[nodiscard]] bool                 ReadObservationIsStable(uintptr_t address, size_t size,
+	                                                          const GpuDirtyReadObservation& observation) const noexcept;
 	[[nodiscard]] bool                 Enabled() const noexcept;
 	[[nodiscard]] GpuDirtyTrackingMode Mode(uintptr_t address, size_t size) const noexcept;
 

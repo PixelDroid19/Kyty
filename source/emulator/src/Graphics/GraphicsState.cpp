@@ -4,6 +4,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Graphics/Utils.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -310,6 +311,35 @@ uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32
 	return static_cast<uint8_t>(((target_mask >> shift) & (shader_mask >> shift)) & 0xFu);
 }
 
+uint8_t ResolveColorWriteAgainstDepth(uint8_t channel_mask, bool disable_color_on_depth_pass, bool enable_color_on_depth_fail)
+{
+	// Depth-pass color off and depth-fail color off: the draw updates Z/stencil
+	// only. Keep the channel mask when fail-writes are enabled — Vulkan cannot
+	// express "color only on depth fail" as a static mask.
+	if (disable_color_on_depth_pass && !enable_color_on_depth_fail)
+	{
+		return 0;
+	}
+	return channel_mask;
+}
+
+bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth)
+{
+	if ((target_mask & shader.m_cbShaderMask) != 0 || depth.z_enable || depth.stencil_enable || shader.shader_z_format != 0)
+	{
+		return true;
+	}
+	for (const auto output_mode: shader.target_output_mode)
+	{
+		if (output_mode != 0)
+		{
+			return true;
+		}
+	}
+	const auto& control = shader.db_shader_control;
+	return control.shader_kill_enable || control.shader_z_export_enable || control.shader_execute_on_noop || control.other_bits != 0;
+}
+
 Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exact_render_target_found)
 {
 	if (exact_render_target_found)
@@ -321,16 +351,17 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	// detiled is decided only by Gen5SampleMayGuestUploadTiled — one behavior:
 	//
 	// tile 27 (kRenderTarget):
-	//   - ufmt 133 (BC1): GuestMemoryTexture; MayGuestUpload may detile package data
+	//   - BC1 family (133 / guest 169 UNORM / 170 SRGB): GuestMemoryTexture;
+	//     MayGuestUpload may detile package data
 	//   - ufmt 56 (RGBA8): GuestMemoryTexture; MayGuestUpload always false (skip_guest
 	//     transparent clear — never detile GPU intermediates)
 	//   - ufmt 71 (RGBA16F): requires live RT (Unsupported without alias)
-	// tile 9 (kStandard64KB): ufmt 56 only; MayGuestUpload when uncovered
+	// tile 9 (kStandard64KB): ufmt 56/71; MayGuestUpload when uncovered
 	//
 	// Unsupported = no Texture object and no live alias → structured EXIT.
 	if (tile == 27u)
 	{
-		if (fmt == 56u || fmt == 133u)
+		if (fmt == 56u || ::Kyty::Libs::Graphics::Gen5IsBc1PackageFormat(fmt))
 		{
 			return Gen5SampleBacking::GuestMemoryTexture;
 		}
@@ -338,7 +369,7 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	}
 	if (tile == 9u)
 	{
-		if (fmt == 56u)
+		if (fmt == 56u || fmt == 71u)
 		{
 			return Gen5SampleBacking::GuestMemoryTexture;
 		}
@@ -368,12 +399,31 @@ SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp)
 
 SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation)
 {
-	return {operation == ImageSampleOperation::DepthReference, depth_compare_function};
+	return {operation == ImageSampleOperation::DepthReference, ResolveSamplerCompareOp(depth_compare_function)};
 }
 
-UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates)
+SamplerCompareOp ResolveSamplerCompareOp(uint8_t depth_compare_function)
 {
-	if (!force_unnormalized_coordinates)
+	switch (depth_compare_function)
+	{
+		case 0: return SamplerCompareOp::Never;
+		case 1: return SamplerCompareOp::Less;
+		case 2: return SamplerCompareOp::Equal;
+		case 3: return SamplerCompareOp::LessOrEqual;
+		case 4: return SamplerCompareOp::Greater;
+		case 5: return SamplerCompareOp::NotEqual;
+		case 6: return SamplerCompareOp::GreaterOrEqual;
+		case 7: return SamplerCompareOp::Always;
+		default: EXIT("unknown sampler depth compare function: %u\n", depth_compare_function);
+	}
+	return SamplerCompareOp::Never;
+}
+
+UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates, bool view_allows_unnormalized)
+{
+	// Vulkan forbids unnormalizedCoordinates with cube, 2D-array, and 3D views.
+	// A guest S# ForceUnorm bit on those samples must stay normalized.
+	if (!force_unnormalized_coordinates || !view_allows_unnormalized)
 	{
 		return {};
 	}
@@ -383,6 +433,20 @@ UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormaliz
 	        .disable_anisotropy = true,
 	        .disable_comparison = true,
 	        .reset_lod_bias     = true};
+}
+
+SamplerLodRange ResolveSamplerLodRange(uint16_t min_lod_u48, uint16_t max_lod_u48, uint16_t lod_bias_bits, uint8_t mip_filter)
+{
+	SamplerLodRange range {};
+	const int32_t   bias_signed = static_cast<int32_t>(static_cast<uint32_t>(lod_bias_bits & 0x3FFFu) ^ 0x2000u) - 0x2000;
+	range.lod_bias               = static_cast<float>(bias_signed) / 256.0f;
+	if (mip_filter == 0u)
+	{
+		return range;
+	}
+	range.min_lod = static_cast<float>(min_lod_u48) / 256.0f;
+	range.max_lod = static_cast<float>(max_lod_u48) / 256.0f;
+	return range;
 }
 
 void SetGenericScissorTl(HW::Context& context, uint32_t value)

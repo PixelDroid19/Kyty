@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
@@ -33,6 +34,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -57,13 +59,250 @@ uint64_t DrawStageElapsedNs(DrawStageClock::time_point start)
 	return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(DrawStageClock::now() - start).count());
 }
 
+struct VertexRecordRequirement
+{
+	uint32_t records = 0;
+	bool     valid   = true;
+};
+
+VertexRecordRequirement ResolveLinearVertexRecords(int32_t first_vertex, uint32_t vertex_count)
+{
+	if (vertex_count == 0)
+	{
+		return {};
+	}
+	if (first_vertex < 0)
+	{
+		return {.valid = false};
+	}
+	const uint64_t records = static_cast<uint64_t>(first_vertex) + vertex_count;
+	return records <= UINT32_MAX ? VertexRecordRequirement {.records = static_cast<uint32_t>(records)}
+	                             : VertexRecordRequirement {.valid = false};
+}
+
+VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint32_t index_count, VkIndexType index_type,
+	                                                  int32_t vertex_offset)
+{
+	if (index_addr == nullptr || index_count == 0)
+	{
+		return {};
+	}
+
+	const uint32_t element_size = index_type == VK_INDEX_TYPE_UINT16 ? 2u : (index_type == VK_INDEX_TYPE_UINT32 ? 4u : 0u);
+	if (element_size == 0 || index_count > UINT64_MAX / element_size)
+	{
+		return {.valid = false};
+	}
+	const uint64_t byte_count = static_cast<uint64_t>(index_count) * element_size;
+	constexpr uint64_t MaxIndexScanBytes = 16u * 1024u * 1024u;
+	const uint64_t address = reinterpret_cast<uint64_t>(index_addr);
+	if (byte_count > MaxIndexScanBytes || GpuMemoryGetAllocatedRangePrefix(address, byte_count) != byte_count)
+	{
+		return {};
+	}
+
+	const auto* bytes = static_cast<const uint8_t*>(index_addr);
+	uint32_t    minimum = UINT32_MAX;
+	uint32_t    maximum = 0;
+	for (uint32_t index = 0; index < index_count; ++index)
+	{
+		uint32_t value = 0;
+		std::memcpy(&value, bytes + static_cast<uint64_t>(index) * element_size, element_size);
+		minimum = std::min(minimum, value);
+		maximum = std::max(maximum, value);
+	}
+
+	const int64_t first = static_cast<int64_t>(minimum) + vertex_offset;
+	const int64_t last  = static_cast<int64_t>(maximum) + vertex_offset;
+	if (first < 0 || last < 0 || last >= UINT32_MAX)
+	{
+		return {.valid = false};
+	}
+	return {.records = static_cast<uint32_t>(last) + 1u};
+}
+
+uint32_t ResolveVertexClipProbeDescriptorSet(const ShaderVertexInputInfo& vs_input_info,
+	                                           const ShaderPixelInputInfo& ps_input_info)
+{
+	uint32_t descriptor_set = 0;
+	if (ShaderBindRequiresDescriptorSet(vs_input_info.bind))
+	{
+		EXIT_IF(vs_input_info.bind.descriptor_set_slot != descriptor_set);
+		descriptor_set++;
+	}
+	if (ShaderBindRequiresDescriptorSet(ps_input_info.bind))
+	{
+		EXIT_IF(ps_input_info.bind.descriptor_set_slot != descriptor_set);
+		descriptor_set++;
+	}
+	EXIT_IF(descriptor_set > 2u);
+	return descriptor_set;
+}
+
+void ValidatePixelProbeSelection(const HW::PixelShaderInfo& pixel_shader_info, const HW::ShaderRegisters& shader_regs,
+	                              ShaderVertexInputInfo* vs_input_info, ShaderPixelInputInfo* ps_input_info)
+{
+	EXIT_IF(vs_input_info == nullptr || ps_input_info == nullptr);
+	const auto kind = ps_input_info->input0_probe.kind;
+	if (!ps_input_info->input0_probe.enabled ||
+	    (kind != ShaderPixelProbeKind::SampleResult && kind != ShaderPixelProbeKind::FinalMrtResult))
+	{
+		return;
+	}
+	const uint64_t present = static_cast<uint64_t>(std::max(0, WindowGetPresentedFrameNum()));
+	if (!VertexClipProbeStagesCanReserveAtPresent(vs_input_info->clip_probe, ps_input_info->input0_probe, present))
+	{
+		return;
+	}
+
+	// Validate once at the candidate one-shot draw, before the host descriptor is
+	// added to either stage. A bad ordinal leaves the ordinary PS untouched.
+	const auto code = ShaderParsePS(&pixel_shader_info, &shader_regs);
+	const bool valid_instruction = kind == ShaderPixelProbeKind::SampleResult
+	                                   ? ShaderPixelSampleProbeMatchesInstruction(code, ps_input_info->input0_probe)
+	                                   : ShaderPixelMrtProbeMatchesInstruction(code, *ps_input_info,
+	                                                                          ps_input_info->input0_probe);
+	if (!VertexClipProbeValidatePairedPixelInstruction(
+	        valid_instruction, &vs_input_info->clip_probe, &ps_input_info->input0_probe))
+	{
+		vs_input_info->clip_probe_descriptor_set   = kVertexClipProbeInvalidDescriptorSet;
+		ps_input_info->input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	}
+}
+
+VertexClipProbeRenderer* ReserveVertexClipProbe(CommandBuffer* buffer, ShaderVertexInputInfo* vs_input_info,
+	                                             ShaderPixelInputInfo* ps_input_info, uint64_t checksum, uint64_t pixel_checksum,
+	                                             bool indexed, uint32_t guest_count, const RenderDepthInfo& depth_info,
+	                                             const RenderColorInfo& color_info, const VulkanFramebuffer& framebuffer)
+{
+	EXIT_IF(buffer == nullptr || vs_input_info == nullptr || ps_input_info == nullptr || g_render_ctx == nullptr);
+	const uint64_t present = static_cast<uint64_t>(std::max(0, WindowGetPresentedFrameNum()));
+	const bool vertex_probe_selected = vs_input_info->clip_probe.enabled;
+	const bool pixel_probe_selected  = ps_input_info->input0_probe.enabled;
+	if (!VertexClipProbeStagesCanReserveAtPresent(vs_input_info->clip_probe, ps_input_info->input0_probe, present))
+	{
+		// Both stages share one process-wide lifecycle and raw buffer. Do not let
+		// an earlier stage consume the one-shot before its selected peer reaches
+		// its own threshold; the effective combined threshold is the maximum.
+		vs_input_info->clip_probe                 = {};
+		vs_input_info->clip_probe_descriptor_set  = kVertexClipProbeInvalidDescriptorSet;
+		ps_input_info->input0_probe                = {};
+		ps_input_info->input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+		return nullptr;
+	}
+	if (!vertex_probe_selected)
+	{
+		vs_input_info->clip_probe                = {};
+		vs_input_info->clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	}
+	if (!pixel_probe_selected)
+	{
+		ps_input_info->input0_probe                = {};
+		ps_input_info->input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	}
+	const bool vertex_probe_enabled = vs_input_info->clip_probe.enabled;
+	const bool pixel_probe_enabled  = ps_input_info->input0_probe.enabled;
+	EXIT_IF(pixel_probe_enabled && !ps_input_info->stage_enabled);
+	if (!vertex_probe_enabled && !pixel_probe_enabled)
+	{
+		return nullptr;
+	}
+
+	const uint32_t descriptor_set = ResolveVertexClipProbeDescriptorSet(*vs_input_info, *ps_input_info);
+	const uint64_t vertex_diagnostic_identity = VertexClipProbeDiagnosticIdentity(descriptor_set);
+	const uint64_t pixel_diagnostic_identity =
+	    ps_input_info->input0_probe.kind == ShaderPixelProbeKind::SampleResult
+	        ? PixelSampleProbeDiagnosticIdentity(descriptor_set, ps_input_info->input0_probe.sample_ordinal,
+	                                             ps_input_info->input0_probe.sparse_subgroup)
+	        : ps_input_info->input0_probe.kind == ShaderPixelProbeKind::FinalMrtResult
+	              ? PixelMrtProbeDiagnosticIdentity(descriptor_set, ps_input_info->input0_probe.mrt_target,
+	                                                ps_input_info->input0_probe.export_ordinal)
+	              : VertexClipProbeDiagnosticIdentity(descriptor_set);
+	EXIT_IF(vertex_diagnostic_identity == 0 || pixel_diagnostic_identity == 0 ||
+	        (vertex_probe_enabled && !vs_input_info->clip_probe.draw_scoped) ||
+	        (pixel_probe_enabled && (!ps_input_info->input0_probe.draw_scoped ||
+	                                 ps_input_info->input0_probe.kind == ShaderPixelProbeKind::None)));
+	if (vertex_probe_enabled)
+	{
+		vs_input_info->clip_probe_descriptor_set      = descriptor_set;
+		vs_input_info->clip_probe.diagnostic_identity = vertex_diagnostic_identity;
+	}
+	if (pixel_probe_enabled)
+	{
+		ps_input_info->input0_probe_descriptor_set      = descriptor_set;
+		ps_input_info->input0_probe.diagnostic_identity = pixel_diagnostic_identity;
+	}
+
+	auto* probe_renderer = g_render_ctx->GetVertexClipProbeRenderer();
+	EXIT_IF(probe_renderer == nullptr);
+	const uint32_t pixel_probe_ordinal = ps_input_info->input0_probe.kind == ShaderPixelProbeKind::FinalMrtResult
+	                                         ? ps_input_info->input0_probe.export_ordinal
+	                                         : ps_input_info->input0_probe.sample_ordinal;
+	const uint32_t attachment_target = ps_input_info->input0_probe.mrt_target;
+	const VkAttachmentLoadOp attachment_load_op = attachment_target < VulkanFramebuffer::TARGETS_MAX
+	                                                  ? framebuffer.color_load_op[attachment_target]
+	                                                  : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	const VkImageLayout attachment_initial_layout = attachment_target < VulkanFramebuffer::TARGETS_MAX
+	                                                    ? framebuffer.color_initial_layout[attachment_target]
+	                                                    : VK_IMAGE_LAYOUT_UNDEFINED;
+	if (!probe_renderer->Reserve(g_render_ctx->GetGraphicCtx(), buffer, checksum, indexed, guest_count, descriptor_set,
+	                            pixel_checksum, vertex_probe_enabled, pixel_probe_enabled, true,
+	                            depth_info.depth_test_enable, depth_info.stencil_test_enable,
+	                            depth_info.depth_bounds_test_enable, ps_input_info->input0_probe.kind,
+	                            pixel_probe_ordinal, ps_input_info->input0_probe.match_ordinal,
+	                            ps_input_info->input0_probe.mrt_target, ps_input_info->input0_probe.sparse_subgroup,
+	                            ps_input_info->input0_probe.attachment_readback,
+	                            ps_input_info->input0_probe.attachment_min_invocations, &color_info, attachment_load_op,
+	                            attachment_initial_layout))
+	{
+		// A completed or already-reserved process-wide diagnostic must remain an
+		// ordinary draw before any shader/pipeline identity is observed.
+		vs_input_info->clip_probe                = {};
+		vs_input_info->clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+		ps_input_info->input0_probe                = {};
+		ps_input_info->input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+		return nullptr;
+	}
+	if (pixel_probe_enabled && ps_input_info->input0_probe.kind == ShaderPixelProbeKind::FinalMrtResult)
+	{
+		TraceRenderTargetLifetimeSelectProbeColor(color_info, attachment_target, pixel_probe_ordinal);
+	}
+	return probe_renderer;
+}
+
+bool DispatchTextureExtentMatches(const ShaderComputeInputInfo& input, const char* specification)
+{
+	if (specification == nullptr || specification[0] == '\0')
+	{
+		return true;
+	}
+
+	uint32_t width  = 0;
+	uint32_t height = 0;
+	if (std::sscanf(specification, "%ux%u", &width, &height) != 2 || width == 0u || height == 0u)
+	{
+		return false;
+	}
+
+	for (int index = 0; index < input.bind.textures2D.textures_num; ++index)
+	{
+		const auto& texture = input.bind.textures2D.desc[index].texture;
+		if (texture.Width5() + 1u == width && texture.Height5() + 1u == height)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 } // namespace
 
 // DrawIndex, DrawIndexAuto, DispatchDirect, depth-stencil copy
 
 void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
                                            HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
-                                           const void* index_addr);
+	                                       const void* index_addr, uint32_t instance_count, int32_t vertex_offset_add,
+	                                       uint32_t first_instance);
 static bool vertex_shader_is_disabled(HW::Shader* sh_ctx)
 {
 	if (const auto& vs = sh_ctx->GetVs();
@@ -114,7 +353,7 @@ static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_i
 			continue;
 		}
 
-		const auto shape = ShaderGen5SampledTextureShapeForType(descriptor.texture.Type());
+		const auto shape = ShaderResolvedSampledTextureShape(descriptor);
 		const uint64_t width  = static_cast<uint64_t>(descriptor.texture.Width5()) + 1u;
 		const uint64_t height = static_cast<uint64_t>(descriptor.texture.Height5()) + 1u;
 		const uint64_t depth  = shape == ShaderGen5SampledTextureShape::TwoDimensional ? 1u :
@@ -279,7 +518,7 @@ static void MaybeDumpPixelShaderTextureBytes(uint64_t shader_id, int index, cons
 		const size_t written = std::fwrite(reinterpret_cast<const void*>(static_cast<uintptr_t>(source_addr)), 1,
 		                                   static_cast<size_t>(level.tiled_size), file);
 		std::fclose(file);
-		KYTY_LOG_DEBUG(
+		KYTY_LOG_INFO(
 		             "KYTY_DUMP_PS_BYTES index=%d path=%s allocation=0x%012" PRIx64 " level=%u offset=%u bytes=%u complete=%u\n",
 		             index, file_path, address, base_level, level.tiled_offset, level.tiled_size,
 		             written == level.tiled_size ? 1u : 0u);
@@ -712,7 +951,7 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 		if (logs < 16u)
 		{
 			++logs;
-			KYTY_LOG_DEBUG(
+			KYTY_LOG_INFO(
 			             "KYTY_GRAPHICS: skip unsupported GE draw stages=0x%08" PRIx32 " es=0x%012" PRIx64
 			             " gs=0x%012" PRIx64 " max_vert=0x%08" PRIx32 " out_prim=0x%08" PRIx32
 			             " ge_ngg=0x%08" PRIx32 " max_out=0x%08" PRIx32 "\n",
@@ -726,7 +965,7 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
-                             uint32_t type)
+                             uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -829,7 +1068,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		KYTY_LOG_DEBUG("\t type                = 0x%08" PRIx32 "\n", type);
 
 		if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
-		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, index_type_and_size, index_addr);
+		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, index_type_and_size, index_addr,
+		                                      instance_count, vertex_offset_add, first_instance);
 		return;
 	}
 
@@ -856,6 +1096,9 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	KYTY_LOG_DEBUG("\t index_addr          = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(index_addr));
 	KYTY_LOG_DEBUG("\t draw_modifier       = 0x%016" PRIx64 "\n", draw_modifier);
 	KYTY_LOG_DEBUG("\t type                = 0x%08" PRIx32 "\n", type);
+	KYTY_LOG_DEBUG("\t instance_count      = 0x%08" PRIx32 "\n", instance_count);
+	KYTY_LOG_DEBUG("\t vertex_offset_add   = 0x%08" PRIx32 "\n", static_cast<uint32_t>(vertex_offset_add));
+	KYTY_LOG_DEBUG("\t first_instance      = 0x%08" PRIx32 "\n", first_instance);
 
 	VkIndexType index_type = VK_INDEX_TYPE_UINT16;
 	uint64_t    index_size = 0;
@@ -893,6 +1136,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
+	if (ShaderVertexClipProbeEligible(Config::IsNextGen(), sh_ctx->GetVs().vs_embedded))
+	{
+		vs_input_info.clip_probe = ShaderResolveVertexClipProbeConfig(sh_ctx->GetVs().gs_regs.chksum, true, index_count);
+	}
 	if (!vs_input_info.input_resources_valid)
 	{
 		MaybeDumpIndexDrawSkip("invalid-vs-resources", index_count, draw_modifier, type);
@@ -914,7 +1161,15 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	MaybeDumpPrimitiveDrawPlan("indexed", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, true, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
-	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
+	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), ctx->GetShaderRegisters(), ctx->GetDepthControl());
+	ShaderGetInputInfoPS(&sh_ctx->GetPs(), &ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info, !ps_required);
+	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count);
+	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), sh_ctx->GetPs().ps_embedded))
+	{
+		ps_input_info.input0_probe =
+		    ShaderResolvePixelProbeConfig(sh_ctx->GetPs().ps_regs.chksum, true, index_count, ps_input_info.stage_enabled);
+	}
+	ValidatePixelProbeSelection(sh_ctx->GetPs(), ctx->GetShaderRegisters(), &vs_input_info, &ps_input_info);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
 	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
@@ -940,11 +1195,35 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
+	int32_t vertex_offset = 0;
+	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info, &vertex_offset, vertex_offset_add))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indexed vertex offset is outside int32 range; draw skipped\n");
+		return;
+	}
+	const auto vertex_requirement = ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset);
+	if (!vertex_requirement.valid)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: indexed vertex range is invalid; draw skipped\n");
+		return;
+	}
+	const uint32_t vertex_records = vertex_requirement.records;
+
 	MaybeDumpIndexDrawReady(color_info, depth_info, *ctx, *sh_ctx, vs_input_info, ps_input_info, index_count, index_type_and_size,
 	                        draw_modifier, type, ucfg->GetPrimType());
 	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, index_type_and_size, true,
 	                static_cast<uint32_t>(draw_modifier));
 
+	auto* vertex_clip_probe = ReserveVertexClipProbe(buffer, &vs_input_info, &ps_input_info, sh_ctx->GetVs().gs_regs.chksum,
+	                                                sh_ctx->GetPs().ps_regs.chksum, true, index_count, depth_info, color_info,
+	                                                *framebuffer);
+	if (vertex_clip_probe != nullptr && ps_input_info.input0_probe.kind == ShaderPixelProbeKind::FinalMrtResult)
+	{
+		TraceRenderTargetLifetimeProbeDepthAttempt(
+		    submit_id, sh_ctx->GetPs().ps_regs.chksum, sh_ctx->GetVs().gs_regs.chksum, true, index_count,
+		    ps_input_info.input0_probe.match_ordinal, ps_input_info.input0_probe.mrt_target,
+		    ps_input_info.input0_probe.export_ordinal, depth_info, *framebuffer, *ctx, sample_locations);
+	}
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
@@ -956,15 +1235,97 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	const auto vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info);
+	const auto     vertex_buffer_binding_start = DrawStageClock::now();
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_records);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 
+	uint32_t declared_vertex_records = 0;
+	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
+	{
+		declared_vertex_records = std::max(declared_vertex_records, vs_input_info.buffers[buffer_index].num_records);
+	}
+	const auto guest_vp_xy = State::ResolveViewportXy(ctx->GetScreenViewport().viewports[0].xscale,
+	                                                  ctx->GetScreenViewport().viewports[0].xoffset,
+	                                                  ctx->GetScreenViewport().viewports[0].yscale,
+	                                                  ctx->GetScreenViewport().viewports[0].yoffset);
+	const auto guest_vp_z = State::ResolveViewportDepth(
+	    ctx->GetScreenViewport().viewports[0].zscale, ctx->GetScreenViewport().viewports[0].zoffset,
+	    ctx->GetClipControl().dx_clip_space, g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported,
+	    ctx->GetScreenViewport().viewports[0].zmin, ctx->GetScreenViewport().viewports[0].zmax);
+	const DrawMaterialTraceContext material_trace {.ps_checksum = sh_ctx->GetPs().ps_regs.chksum,
+	                                               .ps_addr = sh_ctx->GetPs().ps_regs.data_addr,
+	                                               .ps_in_control = ctx->GetShaderRegisters().ps_in_control,
+	                                               .ps_required_subgroup = ps_input_info.required_subgroup_size,
+	                                               .vs_checksum = sh_ctx->GetVs().gs_regs.chksum,
+	                                               .vs_addr = sh_ctx->GetVs().vs_regs.data_addr != 0
+	                                                              ? sh_ctx->GetVs().vs_regs.data_addr
+	                                                              : sh_ctx->GetVs().es_regs.data_addr,
+	                                               .vs_export_count = vs_input_info.export_count,
+	                                               .vertex_float_mode = vs_input_info.gs_prolog
+	                                                                        ? sh_ctx->GetVs().gs_regs.rsrc1.float_mode
+	                                                                        : sh_ctx->GetVs().vs_regs.rsrc1.float_mode,
+	                                               .vertex_dx10_clamp = vs_input_info.gs_prolog
+	                                                                         ? sh_ctx->GetVs().gs_regs.rsrc1.dx10_clamp
+	                                                                         : sh_ctx->GetVs().vs_regs.rsrc1.dx10_clamp,
+	                                               .vertex_ieee_mode = vs_input_info.gs_prolog
+	                                                                      ? sh_ctx->GetVs().gs_regs.rsrc1.ieee_mode
+	                                                                      : sh_ctx->GetVs().vs_regs.rsrc1.ieee_mode,
+	                                               .indexed = true,
+	                                               .primitive_type = ucfg->GetPrimType(),
+	                                               .guest_count = index_count,
+	                                               .index_type = index_type_and_size,
+	                                               .index_addr = reinterpret_cast<uint64_t>(index_addr),
+	                                               .index_size = index_size,
+	                                               .vertex_offset = vertex_offset,
+	                                               .instance_count = instance_count,
+	                                               .first_instance = first_instance,
+	                                               .required_vertex_records = vertex_records,
+	                                               .vertex_input = &vs_input_info,
+	                                               .color = &color_info,
+	                                               .depth = &depth_info,
+	                                               .hardware = ctx,
+	                                               .framebuffer = framebuffer,
+	                                               .declared_vertex_records = declared_vertex_records,
+	                                               .target_mask = ctx->GetRenderTargetMask(),
+	                                               .blend_enable = ctx->GetBlendControl(0).enable ? 1u : 0u,
+	                                               .blend_src = ctx->GetBlendControl(0).color_srcblend,
+	                                               .blend_op = ctx->GetBlendControl(0).color_comb_fcn,
+	                                               .blend_dst = ctx->GetBlendControl(0).color_destblend,
+	                                               .blend_bypass = ctx->GetRenderTarget(0).info.blend_bypass ? 1u : 0u,
+	                                               .color_mask = State::ResolveColorWriteAgainstDepth(
+	                                                   State::ResolveColorWriteMask(ctx->GetRenderTargetMask(),
+	                                                                                ctx->GetShaderRegisters().m_cbShaderMask, 0),
+	                                                   ctx->GetDepthControl().color_writes_on_depth_pass_disable,
+	                                                   ctx->GetDepthControl().color_writes_on_depth_fail_enable),
+	                                               .color_on_depth_fail =
+	                                                   ctx->GetDepthControl().color_writes_on_depth_fail_enable ? 1u : 0u,
+	                                               .color_off_depth_pass =
+	                                                   ctx->GetDepthControl().color_writes_on_depth_pass_disable ? 1u : 0u,
+	                                               .cull_front = ctx->GetModeControl().cull_front ? 1u : 0u,
+	                                               .cull_back = ctx->GetModeControl().cull_back ? 1u : 0u,
+	                                               .face = ctx->GetModeControl().face ? 1u : 0u,
+	                                               .vp_x = guest_vp_xy.x,
+	                                               .vp_y = guest_vp_xy.y,
+	                                               .vp_width = guest_vp_xy.width,
+	                                               .vp_height = guest_vp_xy.height,
+	                                               .vp_zmin = guest_vp_z.min_depth,
+	                                               .vp_zmax = guest_vp_z.max_depth,
+	                                               .dx_clip = ctx->GetClipControl().dx_clip_space ? 1u : 0u,
+	                                               .ps_input_num = ps_input_info.input_num,
+	                                               .interpolators = {ps_input_info.interpolator_settings[0],
+	                                                                 ps_input_info.interpolator_settings[1],
+	                                                                 ps_input_info.interpolator_settings[2],
+	                                                                 ps_input_info.interpolator_settings[3],
+	                                                                 ps_input_info.interpolator_settings[4],
+	                                                                 ps_input_info.interpolator_settings[5],
+	                                                                 ps_input_info.interpolator_settings[6],
+	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace);
+	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 
 	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
 	const auto     index_buffer_binding_start = DrawStageClock::now();
@@ -981,23 +1342,38 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 
 	const auto command_emission_start = DrawStageClock::now();
+	if (vertex_clip_probe != nullptr)
+	{
+		vertex_clip_probe->Arm(buffer, pipeline->pipeline_layout);
+		vertex_clip_probe->CaptureAttachmentBeforePass(buffer);
+	}
 	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
-	const int32_t vertex_offset = ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info);
-
+	if (vertex_clip_probe != nullptr)
+	{
+		vertex_clip_probe->BeginDepthPassQuery(buffer);
+	}
 	if (primitive_plan.chunked)
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			vkCmdDrawIndexed(vk_buffer, primitive_plan.chunk_count, 1, i, vertex_offset, 0);
+			vkCmdDrawIndexed(vk_buffer, primitive_plan.chunk_count, instance_count, i, vertex_offset, first_instance);
 			DebugStatsRecordDraw();
 		}
 	} else
 	{
-		vkCmdDrawIndexed(vk_buffer, primitive_plan.draw_count, 1, 0, vertex_offset, 0);
+		vkCmdDrawIndexed(vk_buffer, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
 		DebugStatsRecordDraw();
+	}
+	if (vertex_clip_probe != nullptr)
+	{
+		vertex_clip_probe->EndDepthPassQuery(buffer);
 	}
 
 	buffer->EndRenderPass();
+	if (vertex_clip_probe != nullptr)
+	{
+		vertex_clip_probe->Finish(buffer);
+	}
 
 	// Explicit attachment-write → later shader/attachment-read dependency across the
 	// render-pass boundary. Without this, hosts can hang when the next draw samples
@@ -1008,7 +1384,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		memory_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 		memory_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-		                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+		                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
 		                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
@@ -1022,7 +1398,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
 }
 
-static bool GraphicsRenderDepthStencilCopyClearSource(CommandBuffer* buffer, RenderDepthInfo* source,
+static bool GraphicsRenderDepthStencilCopyClearSource(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* source,
                                                        const VulkanSampleLocationState& sample_locations)
 {
 	EXIT_IF(buffer == nullptr || source == nullptr);
@@ -1035,6 +1411,7 @@ static bool GraphicsRenderDepthStencilCopyClearSource(CommandBuffer* buffer, Ren
 	RenderColorInfo no_color;
 	auto* source_framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&no_color, source);
 	if (source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: source_framebuffer == nullptr || source_framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
+	TraceRenderTargetLifetimeDepthClearPass(submit_id, *source, *source_framebuffer);
 	buffer->BeginRenderPass(source_framebuffer, &no_color, source, &sample_locations);
 	buffer->EndRenderPass();
 	return true;
@@ -1152,14 +1529,14 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 	                                                   RenderColorInfo* color, RenderDepthInfo* depth,
 	                                                   const DepthStencilCopyRequest& request, bool guest_geometry, bool static_rect_list,
 	                                                   const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count,
-	                                                   VulkanBuffer* index_buffer, VkIndexType index_type, int32_t vertex_offset)
+	                                                   VulkanBuffer* index_buffer, VkIndexType index_type, int32_t vertex_offset,
+	                                                   uint32_t vertex_records, uint32_t instance_count, uint32_t first_instance)
 {
 	EXIT_IF(buffer == nullptr || framebuffer == nullptr || color == nullptr || depth == nullptr);
 	EXIT_IF(guest_geometry && guest_vertex_input == nullptr);
 	EXIT_IF(index_buffer != nullptr && !guest_geometry);
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
-	buffer->BeginRenderPass(framebuffer, color, depth, &request.sample_locations);
 	auto* depth_stencil_copy_renderer = g_render_ctx->GetDepthStencilCopyRenderer();
 	const auto draw = depth_stencil_copy_renderer->PrepareDraw(g_render_ctx->GetGraphicCtx(), request);
 	depth_stencil_copy_renderer->BindPreparedDraw(vk_buffer, draw);
@@ -1167,15 +1544,25 @@ void GraphicsRenderDepthStencilCopyIssueDraw(uint64_t submit_id, CommandBuffer* 
 	{
 		BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, draw.pipeline_layout, guest_vertex_input->bind,
 		                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
-		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input);
+		BindVertexBuffers(submit_id, buffer, vk_buffer, *guest_vertex_input, vertex_records);
 		if (index_buffer != nullptr)
 		{
 			vkCmdBindIndexBuffer(vk_buffer, index_buffer->buffer, 0, index_type);
-			vkCmdDrawIndexed(vk_buffer, index_count, 1, 0, vertex_offset, 0);
+		}
+	}
+	// Guest descriptor preparation can materialize sampled resources with
+	// transfer/compute commands. Finish it before entering render-pass scope.
+	TraceRenderTargetLifetimeDepthClearPass(submit_id, *depth, *framebuffer);
+	buffer->BeginRenderPass(framebuffer, color, depth, &request.sample_locations);
+	if (guest_geometry)
+	{
+		if (index_buffer != nullptr)
+		{
+			vkCmdDrawIndexed(vk_buffer, index_count, instance_count, 0, vertex_offset, first_instance);
 		} else
 		{
 			const uint32_t first_vertex = static_cast<uint32_t>(vertex_offset);
-			vkCmdDraw(vk_buffer, index_count, 1, first_vertex, 0);
+			vkCmdDraw(vk_buffer, index_count, instance_count, first_vertex, first_instance);
 		}
 	} else
 	{
@@ -1191,7 +1578,7 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	const VulkanSampleLocationState& sample_locations, bool apply_clear,
 	bool effective_depth_write, bool guest_geometry, bool static_rect_list, const DepthStencilCopyVertexStage* vertex_stage,
 	const ShaderVertexInputInfo* guest_vertex_input, uint32_t index_count, VulkanBuffer* index_buffer, VkIndexType index_type,
-	int32_t vertex_offset)
+	int32_t vertex_offset, uint32_t vertex_records, uint32_t instance_count, uint32_t first_instance)
 {
 	EXIT_IF(buffer == nullptr || source_info == nullptr);
 	EXIT_IF(guest_geometry && guest_vertex_input == nullptr);
@@ -1202,7 +1589,7 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	RenderDepthInfo draw_depth = *source_info;
 	if (apply_clear)
 	{
-		GraphicsRenderDepthStencilCopyClearSource(buffer, &draw_depth, sample_locations);
+		GraphicsRenderDepthStencilCopyClearSource(submit_id, buffer, &draw_depth, sample_locations);
 	}
 	draw_depth.depth_clear_enable   = false;
 	draw_depth.stencil_clear_enable = false;
@@ -1225,14 +1612,16 @@ void GraphicsRenderDepthStencilCopyWriteDepthStencil(
 	const auto source_guest = source->GetGuestExtent();
 	GraphicsRenderDepthStencilCopySetDrawArea(context, guest_geometry, source_guest, source->extent, &request);
 	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &no_color, &draw_depth, request, guest_geometry, static_rect_list,
-	                                        guest_vertex_input, index_count, index_buffer, index_type, vertex_offset);
+	                                        guest_vertex_input, index_count, index_buffer, index_type, vertex_offset, vertex_records,
+	                                        instance_count, first_instance);
 
 	InvalidateMemoryObject(draw_depth);
 }
 
 void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg,
                                            HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
-                                           const void* index_addr)
+	                                       const void* index_addr, uint32_t instance_count, int32_t vertex_offset_add,
+	                                       uint32_t first_instance)
 {
 	EXIT_IF(buffer == nullptr || ctx == nullptr || ucfg == nullptr || sh_ctx == nullptr);
 
@@ -1274,7 +1663,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		MaterializeRenderDepthInfo(submit_id, buffer, &depth_info, 0, 0, &sample_locations);
 
 		RenderDepthInfo source_setup = depth_info;
-		if (GraphicsRenderDepthStencilCopyClearSource(buffer, &source_setup, sample_locations))
+		if (GraphicsRenderDepthStencilCopyClearSource(submit_id, buffer, &source_setup, sample_locations))
 		{
 			InvalidateMemoryObject(source_setup);
 		}
@@ -1294,6 +1683,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	VulkanBuffer*                indices               = nullptr;
 	VkIndexType                  index_type            = VK_INDEX_TYPE_UINT16;
 	int32_t                      vertex_offset         = 0;
+	uint32_t                     vertex_records        = 0;
 	if (indexed_draw)
 	{
 		uint64_t index_size = 0;
@@ -1369,7 +1759,21 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		guest_vertex_stage.face             = mode.face;
 		guest_vertex_stage.dx_clip_space    = ctx->GetClipControl().dx_clip_space;
 		request_vertex_stage                 = &guest_vertex_stage;
-		vertex_offset                        = ShaderResolveVertexOffset(indexed_draw ? ucfg->GetIndexOffset() : 0, guest_vertex_input);
+		if (!ShaderResolveVertexOffset(indexed_draw ? ucfg->GetIndexOffset() : 0, guest_vertex_input, &vertex_offset,
+		                               vertex_offset_add))
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth/stencil copy vertex offset is outside int32 range; draw skipped\n");
+			return;
+		}
+		const auto vertex_requirement = indexed_draw
+		                                    ? ResolveIndexedVertexRecords(index_addr, index_count, index_type, vertex_offset)
+		                                    : ResolveLinearVertexRecords(vertex_offset, index_count);
+		if (!vertex_requirement.valid)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth/stencil copy vertex range is invalid; draw skipped\n");
+			return;
+		}
+		vertex_records = vertex_requirement.records;
 	}
 
 	if (!color_expansion_enabled)
@@ -1378,7 +1782,8 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		GraphicsRenderDepthStencilCopyWriteDepthStencil(
 		    submit_id, buffer, *ctx, &depth_info, sample_locations, true, effective_depth_write, guest_geometry, static_rect_list,
 		    request_vertex_stage,
-		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset);
+		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset, vertex_records,
+		    instance_count, first_instance);
 		return;
 	}
 
@@ -1423,7 +1828,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	RenderDepthInfo source_setup = depth_info;
 	// A deferred depth/stencil clear initializes the complete sampled source
 	// plane independently of the geometry used for the color expansion.
-	const bool source_modified = GraphicsRenderDepthStencilCopyClearSource(buffer, &source_setup, sample_locations);
+	const bool source_modified = GraphicsRenderDepthStencilCopyClearSource(submit_id, buffer, &source_setup, sample_locations);
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 	GraphicsRenderDepthStencilBarrier(vk_buffer, source);
@@ -1474,7 +1879,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 	GraphicsRenderDepthStencilCopySetDrawArea(*ctx, guest_geometry, target_guest, target->extent, &request);
 	GraphicsRenderDepthStencilCopyIssueDraw(submit_id, buffer, framebuffer, &color_info, depth_attachment, request,
 	                                        guest_geometry, static_rect_list, (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices,
-	                                        index_type, vertex_offset);
+	                                        index_type, vertex_offset, vertex_records, instance_count, first_instance);
 
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), color_info);
 	InvalidateMemoryObject(color_info);
@@ -1486,7 +1891,8 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		    submit_id, buffer, *ctx, &source_setup, sample_locations, false, effective_depth_write, guest_geometry,
 		    static_rect_list,
 		    request_vertex_stage,
-		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset);
+		    (guest_geometry ? &guest_vertex_input : nullptr), index_count, indices, index_type, vertex_offset, vertex_records,
+		    instance_count, first_instance);
 	} else if (source_modified)
 	{
 		InvalidateMemoryObject(source_setup);
@@ -1503,7 +1909,7 @@ bool AutoDrawModifierSupported(uint64_t draw_modifier)
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-                                 uint32_t index_count, uint64_t draw_modifier)
+	                             uint32_t index_count, uint64_t draw_modifier, uint32_t instance_count)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1582,7 +1988,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		if (!AutoDrawModifierSupported(draw_modifier)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !AutoDrawModifierSupported(draw_modifier) condition ignored (continuing)\n"); }
 		if (ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ctx->GetShaderStages() != 0 && ctx->GetShaderStages() != 0x02002000 condition ignored (continuing)\n"); }
 
-		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr);
+		GraphicsRenderDepthStencilCopy(submit_id, buffer, ctx, ucfg, sh_ctx, index_count, UINT32_MAX, nullptr, instance_count, 0, 0);
 		return;
 	}
 
@@ -1649,6 +2055,10 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	ShaderVertexInputInfo vs_input_info;
 	ShaderGetInputInfoVS(&vertex_shader_info, &shader_regs, &vs_input_info);
+	if (ShaderVertexClipProbeEligible(Config::IsNextGen(), vertex_shader_info.vs_embedded))
+	{
+		vs_input_info.clip_probe = ShaderResolveVertexClipProbeConfig(vertex_shader_info.gs_regs.chksum, false, index_count);
+	}
 	if (!vs_input_info.input_resources_valid)
 	{
 		MaybeDumpAutoDrawSkip("invalid-vs-resources", index_count, draw_modifier);
@@ -1670,7 +2080,15 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	MaybeDumpPrimitiveDrawPlan("auto", ucfg->GetPrimType(), index_count, vs_input_info.buffers_num, false, primitive_plan);
 
 	ShaderPixelInputInfo ps_input_info;
-	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info);
+	const bool ps_required = State::PixelShaderStageRequired(ctx->GetRenderTargetMask(), shader_regs, ctx->GetDepthControl());
+	ShaderGetInputInfoPS(&pixel_shader_info, &shader_regs, &vs_input_info, &ps_input_info, !ps_required);
+	ps_input_info.fragment_tap = ShaderResolveFragmentTapConfig(pixel_shader_info.ps_regs.chksum, false, index_count);
+	if (ShaderPixelInput0ProbeEligible(Config::IsNextGen(), pixel_shader_info.ps_embedded))
+	{
+		ps_input_info.input0_probe = ShaderResolvePixelProbeConfig(pixel_shader_info.ps_regs.chksum, false, index_count,
+		                                                          ps_input_info.stage_enabled);
+	}
+	ValidatePixelProbeSelection(pixel_shader_info, shader_regs, &vs_input_info, &ps_input_info);
 	const auto resolution = PrepareDisplayResolutionCohort(buffer, &color_info, depth_info, &ps_input_info);
 	RequireSupportedRenderResolutionPlan(resolution);
 	DebugStatsRecordDrawStateSetup(DrawStageElapsedNs(state_setup_start));
@@ -1696,10 +2114,53 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
+	int32_t resolved_first_vertex = 0;
+	if (!ShaderResolveVertexOffset(0, vs_input_info, &resolved_first_vertex))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: auto-draw vertex offset is outside int32 range; draw skipped\n");
+		return;
+	}
+	const uint32_t actual_vertex_count = primitive_plan.chunked ? index_count : primitive_plan.draw_count;
+	const auto     vertex_requirement  = ResolveLinearVertexRecords(resolved_first_vertex, actual_vertex_count);
+	if (!vertex_requirement.valid)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: auto-draw vertex range is invalid; draw skipped\n");
+		return;
+	}
+	const uint32_t vertex_records = vertex_requirement.records;
+
+	bool clear_only = false;
+	if (const char* ab = std::getenv("KYTY_AB_CLEAR_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
+	{
+		char*      end        = nullptr;
+		const auto clear_addr = std::strtoull(ab, &end, 0);
+		const auto* target    = RenderColorFirstConfiguredAttachment(color_info);
+		clear_only            = end != ab && target != nullptr && clear_addr == target->base_addr;
+	}
+	if ((vs_input_info.clip_probe.enabled || ps_input_info.input0_probe.enabled) && clear_only)
+	{
+		// Preserve the existing clear-only render-pass path, but never let its
+		// no-draw branch consume the process-wide selected probe reservation.
+		vs_input_info.clip_probe                = {};
+		vs_input_info.clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+		ps_input_info.input0_probe                = {};
+		ps_input_info.input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	}
+
 	MaybeDumpAutoDrawReady(color_info, depth_info, *ctx, *sh_ctx, vs_input_info, ps_input_info, index_count, ucfg->GetPrimType());
 	MaybeDumpUiDraw(color_info, vs_input_info, ps_input_info, *ctx, *ucfg, index_count, 0xffffffffu, false,
 	                static_cast<uint32_t>(draw_modifier));
 
+	auto* vertex_clip_probe = ReserveVertexClipProbe(buffer, &vs_input_info, &ps_input_info, vertex_shader_info.gs_regs.chksum,
+	                                                pixel_shader_info.ps_regs.chksum, false, index_count, depth_info, color_info,
+	                                                *framebuffer);
+	if (vertex_clip_probe != nullptr && ps_input_info.input0_probe.kind == ShaderPixelProbeKind::FinalMrtResult)
+	{
+		TraceRenderTargetLifetimeProbeDepthAttempt(
+		    submit_id, pixel_shader_info.ps_regs.chksum, vertex_shader_info.gs_regs.chksum, false, index_count,
+		    ps_input_info.input0_probe.match_ordinal, ps_input_info.input0_probe.mrt_target,
+		    ps_input_info.input0_probe.export_ordinal, depth_info, *framebuffer, *ctx, sample_locations);
+	}
 	auto* pipeline = g_render_ctx->GetPipelineCache()->CreatePipeline(framebuffer, &color_info, &depth_info, &vs_input_info, ctx, sh_ctx,
 	                                                                  &ps_input_info, primitive_plan.topology, sample_locations);
 	DebugStatsRecordDrawPipelineSetup(DrawStageElapsedNs(pipeline_setup_start));
@@ -1711,43 +2172,134 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	const auto vertex_buffer_binding_start = DrawStageClock::now();
-	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info);
+	const auto     vertex_buffer_binding_start = DrawStageClock::now();
+	BindVertexBuffers(submit_id, buffer, vk_buffer, vs_input_info, vertex_records);
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
 	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 
+	uint32_t declared_vertex_records = 0;
+	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
+	{
+		declared_vertex_records = std::max(declared_vertex_records, vs_input_info.buffers[buffer_index].num_records);
+	}
+	const auto guest_vp_xy = State::ResolveViewportXy(ctx->GetScreenViewport().viewports[0].xscale,
+	                                                  ctx->GetScreenViewport().viewports[0].xoffset,
+	                                                  ctx->GetScreenViewport().viewports[0].yscale,
+	                                                  ctx->GetScreenViewport().viewports[0].yoffset);
+	const auto guest_vp_z = State::ResolveViewportDepth(
+	    ctx->GetScreenViewport().viewports[0].zscale, ctx->GetScreenViewport().viewports[0].zoffset,
+	    ctx->GetClipControl().dx_clip_space, g_render_ctx->GetGraphicCtx()->depth_range_unrestricted_supported,
+	    ctx->GetScreenViewport().viewports[0].zmin, ctx->GetScreenViewport().viewports[0].zmax);
+	const DrawMaterialTraceContext material_trace {.ps_checksum = sh_ctx->GetPs().ps_regs.chksum,
+	                                               .ps_addr = sh_ctx->GetPs().ps_regs.data_addr,
+	                                               .ps_in_control = ctx->GetShaderRegisters().ps_in_control,
+	                                               .ps_required_subgroup = ps_input_info.required_subgroup_size,
+	                                               .vs_checksum = sh_ctx->GetVs().gs_regs.chksum,
+	                                               .vs_addr = sh_ctx->GetVs().vs_regs.data_addr != 0
+	                                                              ? sh_ctx->GetVs().vs_regs.data_addr
+	                                                              : sh_ctx->GetVs().es_regs.data_addr,
+	                                               .vs_export_count = vs_input_info.export_count,
+	                                               .vertex_float_mode = vs_input_info.gs_prolog
+	                                                                        ? sh_ctx->GetVs().gs_regs.rsrc1.float_mode
+	                                                                        : sh_ctx->GetVs().vs_regs.rsrc1.float_mode,
+	                                               .vertex_dx10_clamp = vs_input_info.gs_prolog
+	                                                                         ? sh_ctx->GetVs().gs_regs.rsrc1.dx10_clamp
+	                                                                         : sh_ctx->GetVs().vs_regs.rsrc1.dx10_clamp,
+	                                               .vertex_ieee_mode = vs_input_info.gs_prolog
+	                                                                      ? sh_ctx->GetVs().gs_regs.rsrc1.ieee_mode
+	                                                                      : sh_ctx->GetVs().vs_regs.rsrc1.ieee_mode,
+	                                               .indexed = false,
+	                                               .primitive_type = ucfg->GetPrimType(),
+	                                               .guest_count = index_count,
+	                                               .index_type = 0,
+	                                               .index_addr = 0,
+	                                               .index_size = 0,
+	                                               .vertex_offset = resolved_first_vertex,
+	                                               .instance_count = instance_count,
+	                                               .first_instance = 0,
+	                                               .required_vertex_records = vertex_records,
+	                                               .vertex_input = &vs_input_info,
+	                                               .color = &color_info,
+	                                               .depth = &depth_info,
+	                                               .hardware = ctx,
+	                                               .framebuffer = framebuffer,
+	                                               .declared_vertex_records = declared_vertex_records,
+	                                               .target_mask = ctx->GetRenderTargetMask(),
+	                                               .blend_enable = ctx->GetBlendControl(0).enable ? 1u : 0u,
+	                                               .blend_src = ctx->GetBlendControl(0).color_srcblend,
+	                                               .blend_op = ctx->GetBlendControl(0).color_comb_fcn,
+	                                               .blend_dst = ctx->GetBlendControl(0).color_destblend,
+	                                               .blend_bypass = ctx->GetRenderTarget(0).info.blend_bypass ? 1u : 0u,
+	                                               .color_mask = State::ResolveColorWriteAgainstDepth(
+	                                                   State::ResolveColorWriteMask(ctx->GetRenderTargetMask(),
+	                                                                                ctx->GetShaderRegisters().m_cbShaderMask, 0),
+	                                                   ctx->GetDepthControl().color_writes_on_depth_pass_disable,
+	                                                   ctx->GetDepthControl().color_writes_on_depth_fail_enable),
+	                                               .color_on_depth_fail =
+	                                                   ctx->GetDepthControl().color_writes_on_depth_fail_enable ? 1u : 0u,
+	                                               .color_off_depth_pass =
+	                                                   ctx->GetDepthControl().color_writes_on_depth_pass_disable ? 1u : 0u,
+	                                               .cull_front = ctx->GetModeControl().cull_front ? 1u : 0u,
+	                                               .cull_back = ctx->GetModeControl().cull_back ? 1u : 0u,
+	                                               .face = ctx->GetModeControl().face ? 1u : 0u,
+	                                               .vp_x = guest_vp_xy.x,
+	                                               .vp_y = guest_vp_xy.y,
+	                                               .vp_width = guest_vp_xy.width,
+	                                               .vp_height = guest_vp_xy.height,
+	                                               .vp_zmin = guest_vp_z.min_depth,
+	                                               .vp_zmax = guest_vp_z.max_depth,
+	                                               .dx_clip = ctx->GetClipControl().dx_clip_space ? 1u : 0u,
+	                                               .ps_input_num = ps_input_info.input_num,
+	                                               .interpolators = {ps_input_info.interpolator_settings[0],
+	                                                                 ps_input_info.interpolator_settings[1],
+	                                                                 ps_input_info.interpolator_settings[2],
+	                                                                 ps_input_info.interpolator_settings[3],
+	                                                                 ps_input_info.interpolator_settings[4],
+	                                                                 ps_input_info.interpolator_settings[5],
+	                                                                 ps_input_info.interpolator_settings[6],
+	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace);
+	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 
 	const auto command_emission_start = DrawStageClock::now();
-	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
-	const uint32_t first_vertex = static_cast<uint32_t>(ShaderResolveVertexOffset(0, vs_input_info));
-	bool           clear_only   = false;
-	if (const char* ab = std::getenv("KYTY_AB_CLEAR_ONLY_AUTO_RT_ADDR"); ab != nullptr && ab[0] != '\0')
+	if (vertex_clip_probe != nullptr)
 	{
-		char*      end        = nullptr;
-		const auto clear_addr = std::strtoull(ab, &end, 0);
-		const auto* target    = RenderColorFirstConfiguredAttachment(color_info);
-		clear_only            = end != ab && target != nullptr && clear_addr == target->base_addr;
+		vertex_clip_probe->Arm(buffer, pipeline->pipeline_layout);
+		vertex_clip_probe->CaptureAttachmentBeforePass(buffer);
 	}
+	buffer->BeginRenderPass(framebuffer, &color_info, &depth_info, &sample_locations);
+	if (vertex_clip_probe != nullptr)
+	{
+		vertex_clip_probe->BeginDepthPassQuery(buffer);
+	}
+	const uint32_t first_vertex = static_cast<uint32_t>(resolved_first_vertex);
 
 	if (!clear_only && primitive_plan.chunked)
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
-			vkCmdDraw(vk_buffer, primitive_plan.chunk_count, 1, first_vertex + i, 0);
+			vkCmdDraw(vk_buffer, primitive_plan.chunk_count, instance_count, first_vertex + i, 0);
 			DebugStatsRecordDraw();
 		}
 	} else if (!clear_only)
 	{
-		vkCmdDraw(vk_buffer, primitive_plan.draw_count, 1, first_vertex, 0);
+		vkCmdDraw(vk_buffer, primitive_plan.draw_count, instance_count, first_vertex, 0);
 		DebugStatsRecordDraw();
+	}
+	if (vertex_clip_probe != nullptr)
+	{
+		vertex_clip_probe->EndDepthPassQuery(buffer);
 	}
 
 	buffer->EndRenderPass();
+	if (vertex_clip_probe != nullptr)
+	{
+		vertex_clip_probe->Finish(buffer);
+	}
 
 	if (vk_buffer != nullptr)
 	{
@@ -1755,7 +2307,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 		memory_barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 		memory_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 		memory_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
-		                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+		                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
 		                     VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
 		                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
@@ -1767,6 +2319,121 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	InvalidateMemoryObject(color_info);
 	InvalidateMemoryObject(depth_info);
 	DebugStatsRecordDrawCommandEmission(DrawStageElapsedNs(command_emission_start));
+}
+
+static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderComputeInputInfo& input, uint32_t thread_group_x,
+                                           uint32_t thread_group_y, uint32_t thread_group_z)
+{
+	const auto& evidence = input.meta_fill;
+	const auto& buffers  = input.bind.storage_buffers;
+	if (!evidence.valid || buffers.buffers_num != 3 || input.bind.textures2D.textures_num != 0 ||
+	    input.bind.samplers.samplers_num != 0 || input.bind.gds_pointers.pointers_num != 0 ||
+	    evidence.workgroup_register != input.workgroup_register || evidence.workgroup_shift != 6u ||
+	    input.threads_num[0] != 64u || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
+	    !input.group_id[0] || input.group_id[1] || input.group_id[2] || input.thread_ids_num != 1 ||
+	    thread_group_x == 0u || thread_group_y != 1u || thread_group_z != 1u)
+	{
+		return false;
+	}
+
+	const auto find_binding = [&](int start_register)
+	{
+		int match = -1;
+		for (int i = 0; i < buffers.buffers_num; ++i)
+		{
+			if (buffers.start_register[i] != start_register)
+			{
+				continue;
+			}
+			if (match != -1)
+			{
+				return -1;
+			}
+			match = i;
+		}
+		return match;
+	};
+	const int source_index      = find_binding(evidence.source_start_register);
+	const int destination_index = find_binding(evidence.destination_start_register);
+	const int parameter_index   = find_binding(evidence.parameter_start_register);
+	if (source_index < 0 || destination_index < 0 || parameter_index < 0 || source_index == destination_index ||
+	    source_index == parameter_index || destination_index == parameter_index)
+	{
+		return false;
+	}
+
+	const auto& source      = buffers.buffers[source_index];
+	const auto& destination = buffers.buffers[destination_index];
+	const auto& parameters  = buffers.buffers[parameter_index];
+	const auto binding_is_exact = [&](int index, ShaderStorageAccess access, bool read_only)
+	{
+		return buffers.accesses[index] == access && buffers.sources[index] == ShaderStorageBindingSource::MetadataSharp &&
+		       buffers.code_available[index] && buffers.exact_matches[index] && !buffers.unbased_matches[index] &&
+		       !buffers.decoded_unknown[index] && !buffers.indirect_descriptor_use[index] &&
+		       ShaderStorageUsageIsReadOnly(buffers.usages[index]) == read_only;
+	};
+	if (!binding_is_exact(source_index, ShaderStorageAccess::Typed, true) ||
+	    !binding_is_exact(destination_index, ShaderStorageAccess::Typed, false) ||
+	    !binding_is_exact(parameter_index, ShaderStorageAccess::Raw, true) || source.Base48() == 0u ||
+	    destination.Base48() == 0u || parameters.Base48() == 0u || source.Stride() != sizeof(uint32_t) ||
+	    source.NumRecords() != 1u || destination.Stride() != sizeof(uint32_t) || destination.NumRecords() == 0u ||
+	    parameters.Stride() != 4u * sizeof(uint32_t) || parameters.NumRecords() != 1u ||
+	    source.Format() != destination.Format() || source.DstSelXYZW() != destination.DstSelXYZW() ||
+	    source.SwizzleEnabled() || destination.SwizzleEnabled() || source.IndexStride() != 0u ||
+	    destination.IndexStride() != 0u || source.AddTid() || destination.AddTid())
+	{
+		return false;
+	}
+
+	const uint64_t invocation_count = static_cast<uint64_t>(thread_group_x) * input.threads_num[0];
+	if (invocation_count != destination.NumRecords())
+	{
+		return false;
+	}
+
+	uint32_t source_word = 0;
+	uint32_t parameter_words[4] {};
+	if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(source.Base48(), sizeof(source_word), &source_word) ||
+	    !GpuMemoryCaptureSnapshotReadOnlyBuffer(parameters.Base48(), sizeof(parameter_words), parameter_words) ||
+	    parameter_words[0] != destination.NumRecords() || parameter_words[1] != 0u)
+	{
+		return false;
+	}
+
+	const uint64_t destination_size = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
+	GpuMemoryRangeProvenance provenance {};
+	if (destination_size == 0u || !GpuMemoryQueryRangeProvenance(destination.Base48(), destination_size, &provenance) ||
+	    provenance.truncated)
+	{
+		return false;
+	}
+	const GpuMemoryRangeProvenanceEntry* storage = nullptr;
+	for (uint32_t i = 0; i < provenance.entry_count; ++i)
+	{
+		const auto& entry = provenance.entries[i];
+		if (entry.type != GpuMemoryObjectType::StorageBuffer || entry.relation != GpuMemoryOverlapType::Equals || entry.read_only)
+		{
+			continue;
+		}
+		if (storage != nullptr)
+		{
+			return false;
+		}
+		storage = &entry;
+	}
+	if (storage == nullptr || !storage->in_use || !storage->write_back_capable || storage->logical_generation == 0u ||
+	    storage->backing_generation == 0u || storage->submit_id > submit_id)
+	{
+		return false;
+	}
+
+	DepthMetaStorageIdentity identity {};
+	identity.address                     = destination.Base48();
+	identity.size                        = destination_size;
+	identity.logical_generation          = storage->logical_generation;
+	identity.backing_generation          = storage->backing_generation;
+	identity.producer_or_consumer_submit = submit_id;
+	return DepthMetaPublishComputeFill(identity, source_word);
 }
 
 void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
@@ -1845,14 +2512,23 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		}
 	}
 	static const char* dump_dispatch = std::getenv("KYTY_DUMP_DISPATCH");
-	const char*        dump_cs_addr  = std::getenv("KYTY_DUMP_CS_ADDR");
-	bool               selected_cs   = false;
-	if (dump_cs_addr != nullptr && dump_cs_addr[0] != '\0')
+	const char*        dump_cs_id    = std::getenv("KYTY_DUMP_CS_ID");
+	const char*        dump_texture  = std::getenv("KYTY_DUMP_CS_TEXTURE");
+	bool               selected_cs   = true;
+	bool               selector_used = false;
+	if (dump_cs_id != nullptr && dump_cs_id[0] != '\0')
 	{
+		selector_used       = true;
 		char*      end      = nullptr;
-		const auto selected = std::strtoull(dump_cs_addr, &end, 0);
-		selected_cs         = end != dump_cs_addr && *end == '\0' && selected == cs_regs.cs_regs.data_addr;
+		const auto selected = std::strtoull(dump_cs_id, &end, 16);
+		selected_cs         = end != dump_cs_id && *end == '\0' && selected == cs_regs.cs_regs.chksum;
 	}
+	if (dump_texture != nullptr && dump_texture[0] != '\0')
+	{
+		selector_used = true;
+		selected_cs   = selected_cs && DispatchTextureExtentMatches(input_info, dump_texture);
+	}
+	selected_cs = selector_used && selected_cs;
 	static uint32_t    dispatch_logs = 0;
 	uint32_t           dispatch_limit = 256u;
 	if (const char* env_limit = std::getenv("KYTY_DUMP_DISPATCH_LIMIT"); env_limit != nullptr && env_limit[0] != '\0')
@@ -1867,7 +2543,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	    (selected_cs || GraphicsRunGetFrameNum() <= 5 || std::strcmp(dump_dispatch, "all") == 0))
 	{
 		++dispatch_logs;
-		KYTY_LOG_DEBUG(
+		KYTY_LOG_WARN(
 		             "KYTY_DUMP_DISPATCH frame=%d shader=0x%012" PRIx64 " groups=%ux%ux%u local=%ux%ux%u mode=0x%x "
 		             "storage=%d textures=%d direct=%d\n",
 		             GraphicsRunGetFrameNum(), cs_regs.cs_regs.data_addr, thread_group_x, thread_group_y, thread_group_z,
@@ -1877,7 +2553,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		for (int i = 0; i < input_info.bind.storage_buffers.buffers_num; ++i)
 		{
 			const auto& resource = input_info.bind.storage_buffers.buffers[i];
-			KYTY_LOG_DEBUG(
+			KYTY_LOG_WARN(
 			             "  storage[%d] reg=%d slot=%d usage=%u access=%u addr=0x%012" PRIx64
 			             " stride=%u records=%u fmt=%u dstsel=0x%03" PRIx32 " add_tid=%u fields=%08x,%08x,%08x,%08x\n",
 			             i, input_info.bind.storage_buffers.start_register[i], input_info.bind.storage_buffers.slots[i],
@@ -1888,18 +2564,18 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 			if (resource.Base48() != 0u && resource.Stride() == 16u && resource.NumRecords() <= 16u)
 			{
 				const auto* words = reinterpret_cast<const uint32_t*>(resource.Base48());
-				KYTY_LOG_DEBUG( "    words=");
+				KYTY_LOG_WARN("    words=");
 				for (uint32_t word = 0; word < resource.NumRecords() * 4u; ++word)
 				{
-					KYTY_LOG_DEBUG( "%s%08x", word == 0u ? "" : ",", words[word]);
+					KYTY_LOG_WARN("%s%08x", word == 0u ? "" : ",", words[word]);
 				}
-				KYTY_LOG_DEBUG( "\n");
+				KYTY_LOG_WARN("\n");
 			}
 		}
 		for (int i = 0; i < input_info.bind.textures2D.textures_num; ++i)
 		{
 			const auto& texture = input_info.bind.textures2D.desc[i].texture;
-			KYTY_LOG_DEBUG(
+			KYTY_LOG_WARN(
 			             "  texture[%d] reg=%d slot=%d usage=%u addr=0x%012" PRIx64
 			             " fmt=%u tile=%u size=%ux%u type=%u fields=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
 			             i, input_info.bind.textures2D.desc[i].start_register, input_info.bind.textures2D.desc[i].slot,
@@ -1910,7 +2586,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		}
 		for (int i = 0; i < input_info.bind.direct_sgprs.sgprs_num; ++i)
 		{
-			KYTY_LOG_DEBUG( "  direct[%d] reg=%d value=0x%08x\n", i, input_info.bind.direct_sgprs.start_register[i],
+			KYTY_LOG_WARN("  direct[%d] reg=%d value=0x%08x\n", i, input_info.bind.direct_sgprs.start_register[i],
 			             input_info.bind.direct_sgprs.sgprs[i].field);
 		}
 	}
@@ -1925,7 +2601,8 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 
 	const uint32_t storage_seed_skip_mask = ResolveStorageSeedSkipMask(input_info, thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
-	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask);
+	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr);
+	(void)TryPublishComputeDepthMetaFill(submit_id, input_info, thread_group_x, thread_group_y, thread_group_z);
 
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 	DebugStatsRecordDispatch();

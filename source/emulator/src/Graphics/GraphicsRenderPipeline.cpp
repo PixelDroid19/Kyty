@@ -61,21 +61,28 @@ bool VertexInputLayoutLogEnabled()
 
 // SamplerCache::GetSamplerId, PipelineCache, CreatePipelineInternal
 
-uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
+uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized)
 {
+	if (operation == State::ImageSampleOperation::Mixed)
+	{
+		EXIT("unsupported sampler contract: operation=mixed\n");
+	}
 	Core::LockGuard lock(m_mutex);
 	uint32_t        m_samplers_size = m_samplers.Size();
 	for (uint32_t i = 0; i < m_samplers_size; i++)
 	{
 		const auto& s = m_samplers.At(i);
-		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] && s.r.fields[3] == r.fields[3])
+		if (s.r.fields[0] == r.fields[0] && s.r.fields[1] == r.fields[1] && s.r.fields[2] == r.fields[2] &&
+		    s.r.fields[3] == r.fields[3] && s.operation == operation && s.allow_unnormalized == allow_unnormalized)
 		{
 			return i;
 		}
 	}
 	Sampler s;
-	s.r  = r;
-	s.vk = nullptr;
+	s.r                   = r;
+	s.operation           = operation;
+	s.allow_unnormalized  = allow_unnormalized;
+	s.vk                  = nullptr;
 
 	bool  aniso       = false;
 	float aniso_ratio = 1.0f;
@@ -98,18 +105,35 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 		}
 	}
 
-	auto  mip_filter = r.MipFilter();
-	float min_lod    = 0.0f;
-	float max_lod    = 0.0f;
-	if (mip_filter != 0)
-	{
-		min_lod = static_cast<float>(r.MinLod()) / 256.0f;
-		max_lod = static_cast<float>(r.MaxLod()) / 256.0f;
-	}
+	auto              mip_filter = r.MipFilter();
+	const auto        lod_range  = State::ResolveSamplerLodRange(r.MinLod(), r.MaxLod(), r.LodBias(), mip_filter);
+	const float       min_lod    = lod_range.min_lod;
+	const float       max_lod    = lod_range.max_lod;
 
 	VkSamplerCreateInfo sampler_info {};
-	const auto          sampler_comparison  = State::ResolveSamplerComparison(r.DepthCompareFunc(), State::ImageSampleOperation::Regular);
-	const auto          unnormalized_policy = State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords());
+	const auto          sampler_comparison  = State::ResolveSamplerComparison(r.DepthCompareFunc(), operation);
+	const auto          unnormalized_policy =
+	    State::ResolveUnnormalizedSamplerPolicy(r.ForceUnormCoords(), allow_unnormalized);
+	if (sampler_comparison.enabled && unnormalized_policy.disable_comparison)
+	{
+		EXIT("unsupported sampler contract: operation=%u unnormalized=1\n", static_cast<uint32_t>(operation));
+	}
+
+	auto get_compare_op = [](State::SamplerCompareOp compare)
+	{
+		switch (compare)
+		{
+			case State::SamplerCompareOp::Never: return VK_COMPARE_OP_NEVER;
+			case State::SamplerCompareOp::Less: return VK_COMPARE_OP_LESS;
+			case State::SamplerCompareOp::Equal: return VK_COMPARE_OP_EQUAL;
+			case State::SamplerCompareOp::LessOrEqual: return VK_COMPARE_OP_LESS_OR_EQUAL;
+			case State::SamplerCompareOp::Greater: return VK_COMPARE_OP_GREATER;
+			case State::SamplerCompareOp::NotEqual: return VK_COMPARE_OP_NOT_EQUAL;
+			case State::SamplerCompareOp::GreaterOrEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+			case State::SamplerCompareOp::Always: return VK_COMPARE_OP_ALWAYS;
+		}
+		return VK_COMPARE_OP_NEVER;
+	};
 
 	auto get_warp = [](uint8_t clamp)
 	{
@@ -143,15 +167,15 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r)
 	sampler_info.addressModeU            = get_warp(r.ClampX());
 	sampler_info.addressModeV            = get_warp(r.ClampY());
 	sampler_info.addressModeW            = get_warp(r.ClampZ());
-	sampler_info.mipLodBias              = static_cast<float>(static_cast<int16_t>((r.LodBias() ^ 0x2000u) - 0x2000u)) / 256.0f;
+	sampler_info.mipLodBias              = lod_range.lod_bias;
 	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
 	sampler_info.maxAnisotropy           = aniso_ratio;
 	sampler_info.compareEnable           = sampler_comparison.enabled ? VK_TRUE : VK_FALSE;
-	sampler_info.compareOp               = static_cast<VkCompareOp>(sampler_comparison.function);
+	sampler_info.compareOp               = get_compare_op(sampler_comparison.function);
 	sampler_info.minLod                  = min_lod;
 	sampler_info.maxLod                  = max_lod;
 	sampler_info.borderColor             = border;
-	sampler_info.unnormalizedCoordinates = (r.ForceUnormCoords() ? VK_TRUE : VK_FALSE);
+	sampler_info.unnormalizedCoordinates = (unnormalized_policy.enabled ? VK_TRUE : VK_FALSE);
 	if (unnormalized_policy.enabled)
 	{
 		sampler_info.addressModeU     = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -433,21 +457,19 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkFrontFace front_face = (static_params->face ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
-	bool depth_clip_supported = g_render_ctx->GetGraphicCtx()->depth_clip_enable_supported;
+	const bool depth_clip_supported = g_render_ctx->GetGraphicCtx()->depth_clip_enable_supported;
 
 	VkPipelineRasterizationDepthClipStateCreateInfoEXT clip_ext {};
 	clip_ext.sType           = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_DEPTH_CLIP_STATE_CREATE_INFO_EXT;
 	clip_ext.pNext           = nullptr;
 	clip_ext.flags           = 0;
-	clip_ext.depthClipEnable = VK_FALSE;
+	clip_ext.depthClipEnable = (static_params->depth_clip_enable ? VK_TRUE : VK_FALSE);
 
 	VkPipelineRasterizationStateCreateInfo rasterizer {};
 	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	// Without VK_EXT_depth_clip_enable, emulate depthClipEnable=FALSE via the core
-	// depthClampEnable (their behaviours are complementary).
 	rasterizer.pNext                   = (depth_clip_supported ? &clip_ext : nullptr);
 	rasterizer.flags                   = 0;
-	rasterizer.depthClampEnable        = (depth_clip_supported ? VK_FALSE : VK_TRUE);
+	rasterizer.depthClampEnable        = (static_params->depth_clamp_enable ? VK_TRUE : VK_FALSE);
 	rasterizer.rasterizerDiscardEnable = VK_FALSE;
 	rasterizer.polygonMode             = VK_POLYGON_MODE_FILL;
 	rasterizer.cullMode                = cull_mode;
@@ -557,7 +579,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		color_blending.blendConstants[3] = dynamic_params->blend_color_alpha;
 	}
 
-	VkDescriptorSetLayout set_layouts[2]  = {};
+	VkDescriptorSetLayout set_layouts[3]  = {};
 	uint32_t              set_layouts_num = 0;
 
 	VkPushConstantRange push_constant_info[2];
@@ -567,6 +589,19 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	             /*additional_params->vs_bind,*/ VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
 	CreateLayout(set_layouts, &set_layouts_num, push_constant_info, &push_constant_info_num, ps_input_info->bind,
 	             /*additional_params->ps_bind,*/ VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel);
+	if (vs_input_info->clip_probe.enabled || ps_input_info->input0_probe.enabled)
+	{
+		const uint32_t descriptor_set = vs_input_info->clip_probe.enabled ? vs_input_info->clip_probe_descriptor_set
+		                                                               : ps_input_info->input0_probe_descriptor_set;
+		EXIT_IF((vs_input_info->clip_probe.enabled &&
+		         (!vs_input_info->clip_probe.draw_scoped || vs_input_info->clip_probe_descriptor_set != descriptor_set)) ||
+		        (ps_input_info->input0_probe.enabled &&
+		         (!ps_input_info->input0_probe.draw_scoped || ps_input_info->input0_probe_descriptor_set != descriptor_set)) ||
+		        descriptor_set == kVertexClipProbeInvalidDescriptorSet || descriptor_set != set_layouts_num || set_layouts_num >= 3u);
+		auto* vertex_clip_probe = g_render_ctx->GetVertexClipProbeRenderer();
+		EXIT_IF(vertex_clip_probe == nullptr || vertex_clip_probe->GetDescriptorSetLayout() == VK_NULL_HANDLE);
+		set_layouts[set_layouts_num++] = vertex_clip_probe->GetDescriptorSetLayout();
+	}
 
 	VkPipelineLayoutCreateInfo pipeline_layout_info {};
 	pipeline_layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1102,7 +1137,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	p.dynamic_params->viewport_offset[2] = vp.viewports[0].zoffset;
 	p.dynamic_params->viewport_depth_clamp[0] = vp.viewports[0].zmin;
 	p.dynamic_params->viewport_depth_clamp[1] = vp.viewports[0].zmax;
-	p.static_params->dx_clip_space            = ctx->GetClipControl().dx_clip_space;
+	const auto& clip_control                  = ctx->GetClipControl();
+	p.static_params->dx_clip_space            = clip_control.dx_clip_space;
+	const auto depth_clip_state =
+	    State::ResolveDepthClipState(clip_control, gctx->depth_clip_enable_supported, gctx->depth_clamp_supported);
+	p.static_params->depth_clip_enable  = depth_clip_state.depth_clip_enable;
+	p.static_params->depth_clamp_enable = depth_clip_state.depth_clamp_enable;
 	p.dynamic_params->scissor_ltrb[0]    = scissor.left;
 	p.dynamic_params->scissor_ltrb[1]    = scissor.top;
 	p.dynamic_params->scissor_ltrb[2]    = scissor.right;
@@ -1180,8 +1220,10 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 				continue;
 			}
 			const auto& blend                         = ctx->GetBlendControl(rt);
-			p.static_params->color_mask[rt]           =
-			    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), sh_regs.m_cbShaderMask, rt);
+			p.static_params->color_mask[rt]           = State::ResolveColorWriteAgainstDepth(
+			    State::ResolveColorWriteMask(ctx->GetRenderTargetMask(), sh_regs.m_cbShaderMask, rt),
+			    ctx->GetDepthControl().color_writes_on_depth_pass_disable,
+			    ctx->GetDepthControl().color_writes_on_depth_fail_enable);
 			p.static_params->color_srcblend[rt]       = blend.color_srcblend;
 			p.static_params->color_comb_fcn[rt]       = blend.color_comb_fcn;
 			p.static_params->color_destblend[rt]      = blend.color_destblend;
@@ -1239,7 +1281,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	const bool next_gen     = Config::IsNextGen();
 	const bool debug_printf = Config::SpirvDebugPrintfEnabled();
 	const auto vs_translation =
-	    translation_cache->GetOrCompile(ShaderModuleKey::Create(vs_id, ShaderModuleStage::Vertex, optimization, next_gen, debug_printf),
+	    translation_cache->GetOrCompile(ShaderModuleKey::Create(vs_id, ShaderModuleStage::Vertex, optimization, next_gen, debug_printf,
+	                                                           vs_input_info->clip_probe.diagnostic_identity),
 	                                    [&]
 	                                    {
 		                                    auto vs_code = ShaderParseVS(&vs_regs, &sh_regs);
@@ -1250,7 +1293,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	if (ps_input_info->stage_enabled)
 	{
 		ps_translation =
-		    translation_cache->GetOrCompile(ShaderModuleKey::Create(ps_id, ShaderModuleStage::Pixel, optimization, next_gen, debug_printf),
+		    translation_cache->GetOrCompile(ShaderModuleKey::Create(ps_id, ShaderModuleStage::Pixel, optimization, next_gen,
+		                                                           debug_printf, ps_input_info->fragment_tap.diagnostic_identity ^
+		                                                                             ps_input_info->input0_probe.diagnostic_identity),
 		                                    [&]
 		                                    {
 			                                    auto ps_code = ShaderParsePS(&ps_regs, &sh_regs);

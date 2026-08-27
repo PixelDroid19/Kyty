@@ -74,6 +74,40 @@ struct ViewportDepthRange
 	float max_depth = 1.0f;
 };
 
+struct DepthClipState
+{
+	bool depth_clip_enable  = true;
+	bool depth_clamp_enable = false;
+	bool exact              = true;
+};
+
+// Vulkan can represent only paired near/far Z clipping. Preserve the guest's
+// enabled state exactly; if either plane is disabled, use the extension or the
+// core depth-clamp fallback to disable paired host Z clipping. An asymmetric
+// guest request remains an approximation because Vulkan cannot retain just one
+// of the two Z clip planes.
+[[nodiscard]] inline DepthClipState ResolveDepthClipState(const HW::ClipControl& clip_control,
+	                                                       bool depth_clip_extension_supported,
+	                                                       bool depth_clamp_supported)
+{
+	const bool guest_depth_clip_enable = clip_control.IsZClipEnabled();
+	const bool symmetric_guest_state   = clip_control.min_z_clip_disable == clip_control.max_z_clip_disable;
+	if (guest_depth_clip_enable)
+	{
+		return {};
+	}
+	if (depth_clip_extension_supported)
+	{
+		return {.depth_clip_enable = false, .depth_clamp_enable = false, .exact = symmetric_guest_state};
+	}
+	if (depth_clamp_supported)
+	{
+		return {.depth_clip_enable = false, .depth_clamp_enable = true, .exact = symmetric_guest_state};
+	}
+	// Core clipping is the only valid host state when neither capability exists.
+	return {.depth_clip_enable = true, .depth_clamp_enable = false, .exact = false};
+}
+
 struct ViewportXy
 {
 	float x      = 0.0f;
@@ -169,6 +203,15 @@ struct ColorTargetLayout
 // CB_TARGET_MASK admits a render-target channel and CB_SHADER_MASK admits the
 // corresponding pixel-shader export. Vulkan must receive their intersection.
 [[nodiscard]] uint8_t ResolveColorWriteMask(uint32_t target_mask, uint32_t shader_mask, uint32_t target_index);
+// DB_DEPTH_CONTROL can suppress color on a depth pass (Z-only update) or allow
+// color on a depth fail. A later untextured draw that shares the previous
+// mesh and depth would otherwise replace the textured color.
+[[nodiscard]] uint8_t ResolveColorWriteAgainstDepth(uint8_t channel_mask, bool disable_color_on_depth_pass,
+                                                    bool enable_color_on_depth_fail);
+// A no-export pixel shader can still be required for depth/stencil, discard, or explicit memory effects.
+// The latter are verified from decoded shader code before disabling the stage.
+[[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader,
+                                            const HW::DepthControl& depth);
 
 // A sampled surface may reuse a render target or storage texture when
 // FindRenderTexture / FindStorageTexture found a live object (Equals, non-exact
@@ -189,7 +232,38 @@ enum class ImageSampleOperation
 {
 	Regular,
 	DepthReference,
+	Mixed,
 };
+
+// Pure SAMPLE_C_LZ depth consumers use a Vulkan comparison sampler so linear
+// filtering preserves PCF's compare-before-filter order. Mixed consumers must
+// remain non-comparison samplers because the same binding is also sampled as
+// ordinary color data.
+[[nodiscard]] constexpr ImageSampleOperation ResolveSamplerBindingOperation(ImageSampleOperation operation,
+                                                                             bool comparison_eligible)
+{
+	return operation == ImageSampleOperation::DepthReference && comparison_eligible ? ImageSampleOperation::DepthReference
+	                                                                                : ImageSampleOperation::Regular;
+}
+
+[[nodiscard]] constexpr bool CanMaterializeGen5Depth16Sample(
+    uint32_t format, uint32_t tile, uint32_t resource_type, uint32_t depth, uint32_t base_array, uint32_t base_level,
+    uint32_t last_level, uint32_t max_mip, uint32_t bc_swizzle, uint32_t swizzle, bool msaa, bool has_metadata,
+    uint64_t address, uint32_t width, uint32_t height, uint32_t pitch, uint64_t source_size, ImageSampleOperation operation)
+{
+	const bool supported_swizzle = swizzle == 0x924u || swizzle == 0x004u || swizzle == 0x204u;
+	if (format != 7u || tile != 24u || (resource_type != 8u && resource_type != 9u) || depth != 0u || base_array != 0u || base_level != 0u ||
+	    last_level != 0u || max_mip != 0u || bc_swizzle != 0u || !supported_swizzle || msaa || has_metadata ||
+	    operation != ImageSampleOperation::DepthReference || address == 0u || (address & 0xffffu) != 0u ||
+	    width == 0u || height == 0u || pitch < width || (pitch % 256u) != 0u)
+	{
+		return false;
+	}
+	const uint64_t blocks_x = pitch / 256u;
+	const uint64_t blocks_y = (static_cast<uint64_t>(height) + 127u) / 128u;
+	return blocks_x <= UINT64_MAX / blocks_y && blocks_x * blocks_y <= UINT64_MAX / 65536u &&
+	       source_size >= blocks_x * blocks_y * 65536u;
+}
 
 enum class SamplerAddressMode
 {
@@ -199,10 +273,22 @@ enum class SamplerAddressMode
 	ClampToBorder,
 };
 
+enum class SamplerCompareOp
+{
+	Never,
+	Less,
+	Equal,
+	LessOrEqual,
+	Greater,
+	NotEqual,
+	GreaterOrEqual,
+	Always,
+};
+
 struct SamplerComparison
 {
-	bool    enabled  = false;
-	uint8_t function = 0;
+	bool             enabled  = false;
+	SamplerCompareOp function = SamplerCompareOp::Never;
 };
 
 struct UnnormalizedSamplerPolicy
@@ -216,9 +302,23 @@ struct UnnormalizedSamplerPolicy
 };
 
 [[nodiscard]] SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp);
+[[nodiscard]] SamplerCompareOp    ResolveSamplerCompareOp(uint8_t depth_compare_function);
 // Vulkan requires sampler comparison state to agree with the SPIR-V image instruction.
 [[nodiscard]] SamplerComparison         ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);
-[[nodiscard]] UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates);
+[[nodiscard]] UnnormalizedSamplerPolicy ResolveUnnormalizedSamplerPolicy(bool force_unnormalized_coordinates,
+                                                                        bool view_allows_unnormalized = true);
+
+// S# MIN/MAX_LOD are u4.8. LOD_BIAS is 14-bit s6.8 (bits [13:0]).
+// MIP_FILTER 0 disables mipmapping and pins the sampler to lod 0.
+struct SamplerLodRange
+{
+	float min_lod  = 0.0f;
+	float max_lod  = 0.0f;
+	float lod_bias = 0.0f;
+};
+
+[[nodiscard]] SamplerLodRange ResolveSamplerLodRange(uint16_t min_lod_u48, uint16_t max_lod_u48, uint16_t lod_bias_bits,
+                                                     uint8_t mip_filter);
 
 } // namespace Kyty::Libs::Graphics::State
 

@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GpuSubmissionPublicationGate.h"
+#include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -306,6 +307,7 @@ void CommandProcessor::Reset()
 	m_index_buffer_size   = 0;
 	m_index_base_addr     = 0;
 	m_user_data_marker    = HW::UserSgprType::Unknown;
+	m_synthetic_occlusion_counter = 0;
 
 	std::memset(m_const_ram, 0, sizeof(m_const_ram));
 }
@@ -330,6 +332,8 @@ void CommandProcessor::BufferInit()
 		require_submission_success(m_submission_slots.BeginRecording(static_cast<uint32_t>(m_current_buffer), &submission, nullptr),
 		                           "BeginRecording", m_queue, static_cast<uint32_t>(m_current_buffer));
 		m_buffer[m_current_buffer]->SetSubmissionId(submission);
+		m_last_pm4_op = 0;
+		m_last_pm4_dw = 0;
 		m_buffer[m_current_buffer]->Begin();
 	}
 }
@@ -375,6 +379,10 @@ SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_complete
 	const uint32_t submitted_slot = static_cast<uint32_t>(m_current_buffer);
 	SubmissionId   submitted_id;
 	if (!m_buffer[submitted_slot]->GetSubmissionId(&submitted_id)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_buffer[submitted_slot]->GetSubmissionId(&submitted_id) condition ignored (continuing)\n"); }
+	if (VulkanSubmitFaultTraceEnabled())
+	{
+		m_buffer[submitted_slot]->SetSubmitFaultContext(m_sumbit_id, m_last_pm4_op, m_last_pm4_dw);
+	}
 	m_buffer[submitted_slot]->End();
 	m_buffer[submitted_slot]->Execute();
 	require_submission_success(m_submission_slots.MarkSubmitted(submitted_slot), "MarkSubmitted", m_queue, submitted_slot);
@@ -396,6 +404,8 @@ SubmissionId CommandProcessor::SubmitCurrentLocked(SubmissionId* latest_complete
 	                           recording_slot);
 	m_current_buffer = static_cast<int>(recording_slot);
 	m_buffer[recording_slot]->SetSubmissionId(recording_id);
+	m_last_pm4_op = 0;
+	m_last_pm4_dw = 0;
 	m_buffer[recording_slot]->Begin();
 	return submitted_id;
 }
@@ -654,6 +664,8 @@ void CommandProcessor::DumpConstRam(uint32_t* dst, uint32_t offset, uint32_t dw_
 	memcpy(dst, m_const_ram + offset / 4, static_cast<size_t>(dw_num) * 4);
 
 	GraphicsRenderMemoryFlush(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
+	GpuWriteHistoryRecord(GpuWriteHistoryKind::ConstRamDump, reinterpret_cast<uint64_t>(dst),
+	                     static_cast<uint64_t>(dw_num) * 4u, m_sumbit_id, 0u, 0u);
 }
 
 void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll)
@@ -871,6 +883,8 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	memcpy(dst, src, static_cast<size_t>(dw_num) * 4);
 
 	GraphicsRenderMemoryFlush(reinterpret_cast<uint64_t>(dst), static_cast<size_t>(dw_num) * 4);
+	GpuWriteHistoryRecord(GpuWriteHistoryKind::WriteData, reinterpret_cast<uint64_t>(dst),
+	                     static_cast<uint64_t>(dw_num) * 4u, m_sumbit_id, 0u, 0u);
 }
 
 void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
@@ -1451,6 +1465,7 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 	const uint32_t* const previous_run_end   = m_active_run_end;
 	m_active_run_begin                       = data;
 	m_active_run_end                         = data != nullptr ? data + num_dw : nullptr;
+	const bool submit_fault_trace            = VulkanSubmitFaultTraceEnabled();
 
 	if (source_data != nullptr && num_dw > 0)
 	{
@@ -1541,6 +1556,11 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 		if (dw < 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 1 condition ignored (continuing)\n"); }
 
 		auto op = (cmd_id >> 8u) & 0xffu;
+		if (submit_fault_trace)
+		{
+			m_last_pm4_op = op;
+			m_last_pm4_dw = num_dw - dw - 1u;
+		}
 
 		auto pfunc = g_cp_op_func[op];
 
@@ -1661,8 +1681,6 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances)
 	}
 
 	m_num_instances = num_instances;
-
-	if (m_num_instances != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_num_instances != 1 condition ignored (continuing)\n"); }
 }
 
 void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, uint64_t draw_modifier, uint32_t type)
@@ -1687,7 +1705,7 @@ void CommandProcessor::DrawIndex(uint32_t index_count, const void* index_addr, u
 	}
 
 	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
-	                        index_addr, draw_modifier, type);
+	                        index_addr, draw_modifier, type, m_num_instances, 0, 0);
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count, uint32_t flags)
@@ -1709,7 +1727,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 
 	auto* index_addr = reinterpret_cast<void*>(m_index_base_addr + static_cast<uint64_t>(index_offset) * index_bytes);
 	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
-	                        index_addr, flags, 1);
+	                        index_addr, flags, 1, m_num_instances, 0, 0);
 }
 
 void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiator)
@@ -1766,20 +1784,23 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 
 	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
 	{
+		const int32_t base_vertex_location = static_cast<int32_t>(args.base_vertex_location);
 		static uint32_t logs = 0;
 		if (logs < 64u)
 		{
 			++logs;
 			KYTY_LOG_DEBUG(
-			             "KYTY_DUMP_INDIRECT draw_index offset=0x%08" PRIx32 " count=%u instances=%u start_index=%u base_vertex=%u "
+			             "KYTY_DUMP_INDIRECT draw_index offset=0x%08" PRIx32 " count=%u instances=%u start_index=%u base_vertex=%" PRId32 " "
 			             "first_instance=%u initiator=0x%08" PRIx32 "\n",
-			             data_offset, index_count, args.instance_count, args.start_index_location, args.base_vertex_location,
+			             data_offset, index_count, args.instance_count, args.start_index_location, base_vertex_location,
 			             args.start_instance_location, initiator);
 		}
 	}
 
+	m_num_instances = args.instance_count;
 	GraphicsRenderDrawIndex(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, m_index_type_and_size, index_count,
-	                        index_addr, 0, 1);
+	                        index_addr, 0, 1, args.instance_count, static_cast<int32_t>(args.base_vertex_location),
+	                        args.start_instance_location);
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
@@ -1882,7 +1903,8 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 		}
 	}
 
-	GraphicsRenderDrawIndexAuto(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier);
+	GraphicsRenderDrawIndexAuto(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_ucfg, &m_sh_ctx, index_count, draw_modifier,
+	                            m_num_instances);
 }
 
 void CommandProcessor::ClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value)
@@ -2107,7 +2129,7 @@ void CommandProcessor::DepthStencilBarrier(uint64_t vaddr, uint64_t size)
 	GraphicsRenderDepthStencilBarrier(m_buffer[m_current_buffer], vaddr, size);
 }
 
-void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
+void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address)
 {
 	Core::LockGuard lock(m_mutex);
 
@@ -2116,6 +2138,7 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
 		KYTY_LOG_DEBUG("CommandProcessor::TriggerEvent()\n");
 		KYTY_LOG_DEBUG("\t event_type  = 0x%08" PRIx32 "\n", event_type);
 		KYTY_LOG_DEBUG("\t event_index = 0x%08" PRIx32 "\n", event_index);
+		KYTY_LOG_DEBUG("\t address     = 0x%016" PRIx64 "\n", event_address);
 	}
 
 	if ((event_type == 0x00000016 || event_type == 0x00000031) && event_index == 0x00000007)
@@ -2140,6 +2163,31 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index)
 	{
 		// CS_PARTIAL_FLUSH — wait for outstanding compute work. Treat as a barrier.
 		MemoryBarrier();
+	} else if (event_type == 0x00000039 && event_index == 0x00000001)
+	{
+		// Until host occlusion queries are implemented, publish an always-visible
+		// result. The guest layout is one interleaved begin/end pair per DB; bit
+		// 63 marks each sampled counter ready.
+		constexpr uint64_t ready_bit       = 1ull << 63u;
+		constexpr uint64_t counter_mask    = ready_bit - 1u;
+		constexpr uint64_t result_span     = 31u * sizeof(uint64_t);
+		if ((event_address & 0x7u) != 0u ||
+		    GpuMemoryValidateAllocatedRange(event_address, result_span) != GpuMemoryRangeValidationStatus::Valid)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid occlusion result address (continuing)\n");
+			return;
+		}
+
+		GpuMemoryNotifyHostWrite(event_address, result_span);
+		auto*      results = reinterpret_cast<volatile uint64_t*>(event_address);
+		const auto value   = ready_bit | m_synthetic_occlusion_counter;
+		for (uint32_t db = 0; db < 16u; db++)
+		{
+			results[db * 2u] = value;
+		}
+		GraphicsRenderMemoryFlush(event_address, result_span);
+		GpuWriteHistoryRecord(GpuWriteHistoryKind::EventWrite, event_address, result_span, m_sumbit_id, 0u, 0u);
+		m_synthetic_occlusion_counter = (m_synthetic_occlusion_counter + 1u) & counter_mask;
 	} else
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown event type (continuing)\n");

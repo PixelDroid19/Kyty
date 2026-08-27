@@ -23,6 +23,10 @@ KYTY_SYSV_ABI double c_tan(double x)
 {
 	return ::tan(x);
 }
+KYTY_SYSV_ABI double c_tanh(double x)
+{
+	return std::tanh(x);
+}
 KYTY_SYSV_ABI double c_asin(double x)
 {
 	return ::asin(x);
@@ -107,6 +111,11 @@ KYTY_SYSV_ABI int c_isnanf(float x)
 {
 	return std::isnan(x) ? 1 : 0;
 }
+// Gen5 libc_v1 __isfinitef — float in xmm0, integer predicate in eax.
+KYTY_SYSV_ABI int c_isfinitef(float x)
+{
+	return std::isfinite(x) ? 1 : 0;
+}
 // Gen5 libc_v1 isfinite(double) — NID dhK16CKwhQg. Dreaming Sarah Construct
 // number parser after strtod: store double, call, test %eax; non-zero keeps value.
 // xmm0 = value; return non-zero when finite.
@@ -121,6 +130,32 @@ KYTY_SYSV_ABI int c_isnan(double x)
 KYTY_SYSV_ABI int c_isinf(double x)
 {
 	return std::isinf(x) ? 1 : 0;
+}
+KYTY_SYSV_ABI int c_signbit(double x)
+{
+	return std::signbit(x) ? 1 : 0;
+}
+KYTY_SYSV_ABI int c_fpclassifyd(double x)
+{
+	const int category = std::fpclassify(x);
+	if (category == FP_INFINITE)
+	{
+		return 0x01;
+	}
+	if (category == FP_NAN)
+	{
+		return 0x02;
+	}
+	if (category == FP_NORMAL)
+	{
+		return 0x04;
+	}
+	if (category == FP_SUBNORMAL)
+	{
+		return 0x08;
+	}
+	EXIT_IF(category != FP_ZERO);
+	return 0x10;
 }
 // Gen5 libc_v1 sinf — NID Q4rRL34CEeE (Astro after usleep).
 KYTY_SYSV_ABI float c_sinf(float x)
@@ -168,6 +203,10 @@ KYTY_SYSV_ABI float c_truncf(float x)
 KYTY_SYSV_ABI float c_roundf(float x)
 {
 	return ::roundf(x);
+}
+KYTY_SYSV_ABI int64_t c_lroundf(float x)
+{
+	return static_cast<int64_t>(std::llround(x));
 }
 KYTY_SYSV_ABI float c_log10f(float x)
 {

@@ -288,7 +288,7 @@ public:
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
 	void DispatchIndirect(uint32_t data_offset, uint32_t mode);
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);
-	void TriggerEvent(uint32_t event_type, uint32_t event_index);
+	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);
 
 	void                           SetUserDataMarker(HW::UserSgprType type) { m_user_data_marker = type; }
 	[[nodiscard]] HW::UserSgprType GetUserDataMarker() const { return m_user_data_marker; }
@@ -388,11 +388,14 @@ private:
 	uint32_t m_const_ram[0x3000] = {0};
 
 	FlipInfo m_flip;
-	bool     m_flip_issued                = false;
-	bool     m_completion_callback_issued = false;
-	uint64_t m_sumbit_id                  = 0;
-	const uint32_t* m_active_run_begin    = nullptr;
-	const uint32_t* m_active_run_end      = nullptr;
+	bool     m_flip_issued                 = false;
+	bool     m_completion_callback_issued  = false;
+	uint64_t m_sumbit_id                   = 0;
+	uint64_t m_synthetic_occlusion_counter = 0;
+	uint32_t m_last_pm4_op                 = 0;
+	uint32_t m_last_pm4_dw                 = 0;
+	const uint32_t* m_active_run_begin     = nullptr;
+	const uint32_t* m_active_run_end       = nullptr;
 	bool            m_suspend_run_requested = false;
 	bool            m_suspended_run_valid   = false;
 	SuspendedRun    m_suspended_run;

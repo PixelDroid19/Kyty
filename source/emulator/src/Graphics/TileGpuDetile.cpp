@@ -3,6 +3,11 @@
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/Utils.h"
+#include "GraphicsRenderInternal.h"
 
 #include <atomic>
 #include <cstring>
@@ -56,6 +61,7 @@ struct DetilePushConstants
 	uint32_t layout_kind       = 0;
 	uint32_t src_u32_count     = 0;
 	uint32_t dst_u32_count     = 0;
+	uint32_t src_byte_offset   = 0;
 };
 
 constexpr uint64_t k_max_shader_byte_range = std::numeric_limits<uint32_t>::max();
@@ -115,7 +121,7 @@ uint32_t LayoutKind(TileDetileLayout layout)
 		case TileDetileLayout::Sw64kRx: return 0u;
 		case TileDetileLayout::Standard64KB: return 1u;
 		case TileDetileLayout::Standard4KB: return 2u;
-		case TileDetileLayout::Depth64KB32: return 3u;
+		case TileDetileLayout::Depth64KB: return 3u;
 		default: return UINT32_MAX;
 	}
 }
@@ -134,7 +140,7 @@ bool GpuLayoutSupported(const TileDetileRequest& request)
 		case TileDetileLayout::Standard64KB:
 			return request.bytes_per_element == 4u || request.bytes_per_element == 8u || request.bytes_per_element == 16u;
 		case TileDetileLayout::Standard4KB: return request.bytes_per_element == 4u;
-		case TileDetileLayout::Depth64KB32: return request.bytes_per_element == 4u;
+		case TileDetileLayout::Depth64KB: return request.bytes_per_element == 4u;
 		default: return false;
 	}
 }
@@ -447,17 +453,14 @@ bool CreateGpuDetileResources(GraphicContext* ctx, GpuDetileContext* state)
 		return false;
 	}
 
-	VkDescriptorSetLayoutBinding bindings[2] {};
-	for (uint32_t binding = 0; binding < 2u; ++binding)
-	{
-		bindings[binding].binding         = binding;
-		bindings[binding].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		bindings[binding].descriptorCount = 1;
-		bindings[binding].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
-	}
+	VkDescriptorSetLayoutBinding bindings[1] {};
+	bindings[0].binding         = 0;
+	bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	bindings[0].descriptorCount = 2;
+	bindings[0].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
 	VkDescriptorSetLayoutCreateInfo set_layout_info {};
 	set_layout_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	set_layout_info.bindingCount = 2;
+	set_layout_info.bindingCount = 1;
 	set_layout_info.pBindings    = bindings;
 	if (vkCreateDescriptorSetLayout(ctx->device, &set_layout_info, nullptr, &state->set_layout) != VK_SUCCESS ||
 	    state->set_layout == VK_NULL_HANDLE)
@@ -608,6 +611,7 @@ TileGpuDetileStatus RecycleCompletedSubmission(GraphicContext* ctx, GpuDetileCon
 	}
 	if (status != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_fence_status", status);
 		return TileGpuDetileStatus::FenceFailed;
 	}
 	// The fence is signaled, so no GPU work can still reference the session.
@@ -618,23 +622,19 @@ TileGpuDetileStatus RecycleCompletedSubmission(GraphicContext* ctx, GpuDetileCon
 
 void WriteBufferDescriptors(const GpuDetileContext& state, uint64_t tiled_bytes, uint64_t linear_bytes)
 {
-	VkDescriptorBufferInfo tiled_info {};
-	tiled_info.buffer = state.tiled.buffer;
-	tiled_info.range  = tiled_bytes;
-	VkDescriptorBufferInfo linear_info {};
-	linear_info.buffer = state.linear.buffer;
-	linear_info.range  = linear_bytes;
-	VkWriteDescriptorSet writes[2] {};
-	for (uint32_t binding = 0; binding < 2u; ++binding)
-	{
-		writes[binding].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		writes[binding].dstSet          = state.descriptor_set;
-		writes[binding].dstBinding      = binding;
-		writes[binding].descriptorCount = 1;
-		writes[binding].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		writes[binding].pBufferInfo     = binding == 0u ? &tiled_info : &linear_info;
-	}
-	vkUpdateDescriptorSets(state.device, 2, writes, 0, nullptr);
+	VkDescriptorBufferInfo infos[2] {};
+	infos[0].buffer = state.tiled.buffer;
+	infos[0].range  = tiled_bytes;
+	infos[1].buffer = state.linear.buffer;
+	infos[1].range  = linear_bytes;
+	VkWriteDescriptorSet write {};
+	write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	write.dstSet          = state.descriptor_set;
+	write.dstBinding      = 0;
+	write.descriptorCount = 2;
+	write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	write.pBufferInfo     = infos;
+	vkUpdateDescriptorSets(state.device, 1, &write, 0, nullptr);
 }
 
 void RecordHostReadbackBarrier(VkCommandBuffer command_buffer)
@@ -664,15 +664,19 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 	}
 	// Reset command state before recording. The fence remains signaled until
 	// immediately before vkQueueSubmit so a failed record never loses its state.
-	if (vkResetCommandBuffer(state->command_buffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT) != VK_SUCCESS)
+	const auto command_reset_result = vkResetCommandBuffer(state->command_buffer, VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
+	if (command_reset_result != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_command_reset", command_reset_result);
 		return TileGpuDetileStatus::SubmitFailed;
 	}
 
 	VkCommandBufferBeginInfo begin_info {};
 	begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-	if (vkBeginCommandBuffer(state->command_buffer, &begin_info) != VK_SUCCESS)
+	const auto begin_result = vkBeginCommandBuffer(state->command_buffer, &begin_info);
+	if (begin_result != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_command_begin", begin_result);
 		return TileGpuDetileStatus::SubmitFailed;
 	}
 
@@ -691,8 +695,10 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 	vkCmdPushConstants(state->command_buffer, state->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
 	vkCmdDispatch(state->command_buffer, groups_x, groups_y, 1);
 	RecordHostReadbackBarrier(state->command_buffer);
-	if (vkEndCommandBuffer(state->command_buffer) != VK_SUCCESS)
+	const auto end_result = vkEndCommandBuffer(state->command_buffer);
+	if (end_result != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_command_end", end_result);
 		return TileGpuDetileStatus::SubmitFailed;
 	}
 
@@ -700,14 +706,30 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 	submit_info.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 	submit_info.commandBufferCount = 1;
 	submit_info.pCommandBuffers    = &state->command_buffer;
+	auto* trail = VulkanSubmitFaultTraceTrail();
+	VulkanSubmitAttempt attempt {};
+	VulkanSubmitAttempt observed {};
+	if (trail != nullptr)
+	{
+		attempt.kind                = VulkanSubmitKind::TileDetile;
+		attempt.queue               = static_cast<uint32_t>(GraphicContext::QUEUE_GFX);
+		attempt.command_buffer_slot = UINT32_MAX;
+		attempt.frame               = GraphicsRunGetFrameNum();
+	}
 	{
 		Core::LockGuard queue_lock(*state->queue_mutex);
-		if (HasTestFault(TileGpuDetileTestFault::ResetFence) || vkResetFences(ctx->device, 1, &state->fence) != VK_SUCCESS)
+		const auto reset_result =
+		    HasTestFault(TileGpuDetileTestFault::ResetFence) ? VK_ERROR_OUT_OF_HOST_MEMORY : vkResetFences(ctx->device, 1, &state->fence);
+		if (reset_result != VK_SUCCESS)
 		{
+			VulkanSubmitFaultReport("tile_detile_fence_reset", reset_result);
 			return TileGpuDetileStatus::FenceFailed;
 		}
-		if (vkQueueSubmit(state->queue, 1, &submit_info, state->fence) != VK_SUCCESS)
+		const auto submit_result = VulkanTraceSubmitAttempt(
+		    trail, attempt, [&] { return vkQueueSubmit(state->queue, 1, &submit_info, state->fence); }, &observed);
+		if (submit_result != VK_SUCCESS)
 		{
+			VulkanSubmitFaultReport("tile_detile_submit", submit_result, trail != nullptr ? &observed : nullptr);
 			return TileGpuDetileStatus::SubmitFailed;
 		}
 	}
@@ -724,6 +746,7 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 	}
 	if (wait != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("tile_detile_fence_wait", wait);
 		return TileGpuDetileStatus::FenceFailed;
 	}
 	state->in_flight = false;
@@ -794,6 +817,37 @@ bool TileGpuDetileImageCopyIsSupported(const TileDetileRequest& request, const T
 	return copy.buffer_row_length_texels == row_length_texels && (copy.buffer_row_length_texels % copy.texels_per_element_x) == 0u;
 }
 
+bool TileGpuDetileDepthD16InlineIsSupported(uint64_t source_offset, uint64_t source_range, uint32_t width, uint32_t height,
+	                                        uint32_t pitch_elems, uint64_t* required_source_bytes, uint64_t* linear_bytes)
+{
+	uint64_t blocks_y = 0;
+	uint64_t required = 0;
+	uint64_t linear   = 0;
+	if (source_range == 0u || (source_range % 4u) != 0u || width == 0u || height == 0u || pitch_elems < width ||
+	    (pitch_elems % 256u) != 0u || !CheckedAdd(height, 127u, &blocks_y))
+	{
+		return false;
+	}
+	blocks_y /= 128u;
+	if (!CheckedMultiply(pitch_elems / 256u, blocks_y, &required) || !CheckedMultiply(required, 65536u, &required) ||
+	    !CheckedMultiply(width, height, &linear) || !CheckedMultiply(linear, 2u, &linear) || required == 0u || linear == 0u ||
+	    required > k_max_diagnostic_session_bytes || linear > k_max_diagnostic_session_bytes || source_offset > source_range ||
+	    required > source_range - source_offset || (source_offset % 4u) != 0u || source_offset > UINT32_MAX ||
+	    source_range > k_max_shader_byte_range || linear > k_max_shader_byte_range)
+	{
+		return false;
+	}
+	if (required_source_bytes != nullptr)
+	{
+		*required_source_bytes = required;
+	}
+	if (linear_bytes != nullptr)
+	{
+		*linear_bytes = linear;
+	}
+	return true;
+}
+
 void TileGpuDetileSetTestFaultForTesting(TileGpuDetileTestFault fault)
 {
 	g_test_fault.store(fault, std::memory_order_relaxed);
@@ -827,7 +881,7 @@ TileGpuDetileStatus TileGpuDetile(GraphicContext* ctx, const TileDetileRequest& 
 		return TileGpuDetileStatus::DeviceUnsupported;
 	}
 
-	Core::LockGuard   lock(ctx->gpu_detile_mutex);
+	Core::LockGuard lock(ctx->gpu_detile_mutex);
 	GpuDetileContext* state  = nullptr;
 	auto              status = GetGpuDetileContext(ctx, &state);
 	if (status != TileGpuDetileStatus::Success)
@@ -887,6 +941,116 @@ TileGpuDetileStatus TileGpuDetileToImage(GraphicContext* ctx, const TileDetileRe
 	return TileGpuDetileStatus::ImagePathUnsupported;
 }
 
+TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuffer* command_buffer,
+	                                            const VulkanBuffer* source_buffer, uint64_t source_offset,
+	                                            uint64_t source_range, VulkanImage* dst_image, uint32_t width,
+	                                            uint32_t height, uint32_t pitch_elems)
+{
+	uint64_t required_source = 0;
+	uint64_t linear_bytes    = 0;
+	if (!TileGpuDetileDepthD16InlineIsSupported(source_offset, source_range, width, height, pitch_elems, &required_source,
+	                                           &linear_bytes) ||
+	    command_buffer == nullptr || command_buffer->IsInvalid() || source_buffer == nullptr || source_buffer->buffer == VK_NULL_HANDLE ||
+	    (source_buffer->usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) == 0u || dst_image == nullptr ||
+	    dst_image->image == VK_NULL_HANDLE || dst_image->format != VK_FORMAT_D16_UNORM || dst_image->extent.width != width ||
+	    dst_image->extent.height != height || (dst_image->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
+	{
+		return TileGpuDetileStatus::InvalidRequest;
+	}
+	if (ctx == nullptr || ctx->device == VK_NULL_HANDLE || ctx->physical_device == VK_NULL_HANDLE)
+	{
+		return TileGpuDetileStatus::ContextUnavailable;
+	}
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
+	if (source_range > properties.limits.maxStorageBufferRange || linear_bytes > properties.limits.maxStorageBufferRange ||
+	    properties.limits.maxComputeWorkGroupSize[0] < 8u || properties.limits.maxComputeWorkGroupSize[1] < 8u ||
+	    properties.limits.maxComputeWorkGroupInvocations < 64u)
+	{
+		return TileGpuDetileStatus::DeviceUnsupported;
+	}
+	const uint32_t groups_x = width / 8u + (width % 8u == 0u ? 0u : 1u);
+	const uint32_t groups_y = height / 8u + (height % 8u == 0u ? 0u : 1u);
+	if (groups_x > properties.limits.maxComputeWorkGroupCount[0] || groups_y > properties.limits.maxComputeWorkGroupCount[1])
+	{
+		return TileGpuDetileStatus::DeviceUnsupported;
+	}
+	const uint64_t scratch_bytes = (linear_bytes + 3u) & ~3ull;
+	auto* scratch = command_buffer->AllocateTransientScratchBuffer(
+	    scratch_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	if (scratch == nullptr || scratch->buffer == VK_NULL_HANDLE)
+	{
+		return TileGpuDetileStatus::ResourceUnavailable;
+	}
+
+	Core::LockGuard lock(ctx->gpu_detile_mutex);
+	GpuDetileContext* state = nullptr;
+	auto status = GetGpuDetileContext(ctx, &state);
+	if (status != TileGpuDetileStatus::Success || state == nullptr || !state->resources_ready)
+	{
+		return status;
+	}
+
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num = 2;
+	ShaderCalcBindingIndices(&bind);
+	VulkanBuffer* descriptor_buffers[2]                                    = {const_cast<VulkanBuffer*>(source_buffer), scratch};
+	VulkanImage*  no_images[DescriptorCache::TEXTURES_SAMPLED_MAX]          = {};
+	int           no_views[DescriptorCache::TEXTURES_SAMPLED_MAX]           = {};
+	VulkanImage*  no_storage_images[DescriptorCache::TEXTURES_STORAGE_MAX]  = {};
+	int           no_storage_views[DescriptorCache::TEXTURES_STORAGE_MAX]   = {};
+	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
+	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
+	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
+	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
+	    no_samplers, no_gds, nullptr, bind);
+	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
+	{
+		return TileGpuDetileStatus::ResourceUnavailable;
+	}
+
+	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	// The command buffer deliberately reuses one bounded scratch allocation.
+	// Complete any earlier shader/copy reads before the next transfer clear.
+	VkMemoryBarrier before_clear {};
+	before_clear.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	before_clear.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+	before_clear.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &before_clear, 0u,
+	                     nullptr, 0u, nullptr);
+	vkCmdFillBuffer(vk_buffer, scratch->buffer, 0u, scratch_bytes, 0u);
+	VkMemoryBarrier before_compute {};
+	before_compute.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	before_compute.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	before_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u, 1u,
+	                     &before_compute, 0u, nullptr, 0u, nullptr);
+
+	DetilePushConstants push {};
+	push.width             = width;
+	push.height            = height;
+	push.pitch_elems       = pitch_elems;
+	push.dst_pitch_elems   = width;
+	push.bytes_per_element = 2u;
+	push.layout_kind       = LayoutKind(TileDetileLayout::Depth64KB);
+	push.src_u32_count     = static_cast<uint32_t>(source_range / 4u);
+	push.dst_u32_count     = static_cast<uint32_t>(scratch_bytes / 4u);
+	push.src_byte_offset   = static_cast<uint32_t>(source_offset);
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, state->pipeline);
+	vkCmdBindDescriptorSets(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, state->pipeline_layout, 0u, 1u, &descriptor->set, 0u, nullptr);
+	vkCmdPushConstants(vk_buffer, state->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
+	vkCmdDispatch(vk_buffer, groups_x, groups_y, 1u);
+	VkMemoryBarrier before_copy {};
+	before_copy.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	before_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	before_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &before_copy, 0u,
+	                     nullptr, 0u, nullptr);
+	UtilBufferToDepthImage(command_buffer, scratch, width, dst_image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
+	return TileGpuDetileStatus::Success;
+}
+
 bool TileGpuDetileReleaseContext(GraphicContext* ctx)
 {
 	if (ctx == nullptr)
@@ -916,6 +1080,7 @@ bool TileGpuDetileReleaseContext(GraphicContext* ctx)
 		const auto wait = vkWaitForFences(ctx->device, 1, &state->fence, VK_TRUE, k_release_fence_timeout_ns);
 		if (wait != VK_SUCCESS)
 		{
+			VulkanSubmitFaultReport("tile_detile_release_wait", wait);
 			return false;
 		}
 		state->in_flight = false;

@@ -862,6 +862,38 @@ static KYTY_SYSV_ABI void c_qsort(void* base, size_t n, size_t sz, int(KYTY_SYSV
 	::qsort(base, n, sz, reinterpret_cast<int (*)(const void*, const void*)>(cmp));
 #endif
 }
+
+static KYTY_SYSV_ABI void* c_bsearch(const void* key, const void* base, size_t count, size_t size,
+                                     int(KYTY_SYSV_ABI* compare)(const void*, const void*))
+{
+	if (base == nullptr || compare == nullptr || count == 0 || size == 0 || count > std::numeric_limits<size_t>::max() / size)
+	{
+		return nullptr;
+	}
+
+	const auto* bytes = static_cast<const uint8_t*>(base);
+	size_t first = 0;
+	while (count != 0)
+	{
+		const size_t half = count / 2;
+		const size_t middle = first + half;
+		const void* element = bytes + middle * size;
+		const int relation = compare(key, element);
+		if (relation == 0)
+		{
+			return const_cast<void*>(element);
+		}
+		if (relation < 0)
+		{
+			count = half;
+			continue;
+		}
+		first = middle + 1;
+		count -= half + 1;
+	}
+
+	return nullptr;
+}
 static KYTY_SYSV_ABI void c_abort()
 {
 	KYTY_LOG_ERROR("libc::abort() called by guest\n");
@@ -1738,6 +1770,20 @@ static KYTY_SYSV_ABI void c_setw_apply(CxxIosBaseLayout* ios, int width)
 static KYTY_SYSV_ABI CxxIosSmanipInt c_setw(int width)
 {
 	return CxxIosSmanipInt {&c_setw_apply, width};
+}
+
+static KYTY_SYSV_ABI void c_setprecision_apply(CxxIosBaseLayout* ios, int precision)
+{
+	if (ios == nullptr)
+	{
+		return;
+	}
+	ios->precision = precision;
+}
+
+static KYTY_SYSV_ABI CxxIosSmanipInt c_setprecision(int precision)
+{
+	return CxxIosSmanipInt {&c_setprecision_apply, precision};
 }
 
 static KYTY_SYSV_ABI void c_facet_dtor(CxxFacetBase* /*self*/) {}
@@ -3194,6 +3240,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("sUP1hBaouOw", LibC::c_Getpctype);
 	LIB_FUNC("8xXiEPby8h8", LibC::c_Getptimes);
 	LIB_FUNC("vU9svJtEnWc", LibC::c_setw);
+	LIB_FUNC("1h8hFQghR7w", LibC::c_setprecision);
 	LIB_FUNC("j9LU8GsuEGw", LibC::c_time_put_put);
 	LIB_FUNC("rcQCUr0EaRU", LibC::c_Getptoupper);
 	// Gen5 _Getptolower — guest VFS path lowercasing after ~INDEX.
@@ -3252,6 +3299,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("5OqszGpy7Mg", LibC::c_strtoull);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
 	LIB_FUNC("AEJdIVZTEmo", LibC::c_qsort);
+	LIB_FUNC("NesIgTmfF0Q", LibC::c_bsearch);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
 	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
 	// Gen5 libc_v1 rand — Nmtr628eA3A observed early; cpCOXWMgha0 after Fiber/thread bring-up.
@@ -3273,6 +3321,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("H8ya2H00jbI", LibC::c_sin);
 	LIB_FUNC("2WE3BTYVwKM", LibC::c_cos);
 	LIB_FUNC("T7uyNqP7vQA", LibC::c_tan);
+	LIB_FUNC("JM4EBvWT9rc", LibC::c_tanh);
 	LIB_FUNC("7Ly52zaL44Q", LibC::c_asin);
 	LIB_FUNC("JBcgYuW8lPU", LibC::c_acos);
 	LIB_FUNC("OXmauLdQ8kY", LibC::c_atan);
@@ -3297,11 +3346,19 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("1D0H2KNjshE", LibC::c_powf);
 	// Gen5 libc_v1 __isnanf — lA94ZgT+vMM after Posix pthread_self.
 	LIB_FUNC("lA94ZgT+vMM", LibC::c_isnanf);
+	// Gen5 libc_v1 __isfinitef — name-to-NID hash and float predicate ABI.
+	LIB_FUNC("Q8pvJimUWis", LibC::c_isfinitef);
 	// Gen5 isfinite(double) — used after strtod in a project parse.
 	LIB_FUNC("dhK16CKwhQg", LibC::c_isfinite);
 	// Gen5 isnan(double) — guest layout coordinate checks after
 	// vcvttsd2si; return 0 continues (non-zero rejects).
 	LIB_FUNC("GfxAp9Xyiqs", LibC::c_isnan);
+	// Gen5 libc_v1 __isinf — double in xmm0, integer predicate in eax.
+	LIB_FUNC("V02oFv+-JzA", LibC::c_isinf);
+	// Gen5 libc_v1 __signbit — standard double predicate ABI.
+	LIB_FUNC("Rw4J-22tu1U", LibC::c_signbit);
+	// Gen5 libc_v1 __fpclassifyd — translate host categories to guest values.
+	LIB_FUNC("qlWiRfOJx1A", LibC::c_fpclassifyd);
 	// Gen5 libc_v1 float math (NIDs from name→NID hash).
 	LIB_FUNC("Q4rRL34CEeE", LibC::c_sinf);
 	LIB_FUNC("-P6FNMzk2Kc", LibC::c_cosf);
@@ -3315,6 +3372,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("iz2shAGFIxc", LibC::c_hypotf);
 	LIB_FUNC("Vo8rvWtZw3g", LibC::c_truncf);
 	LIB_FUNC("DDHG1a6+3q0", LibC::c_roundf);
+	LIB_FUNC("C6gWCWJKM+U", LibC::c_lroundf);
 	// Gen5 libc_v1 float remainder/frexp variants (name→NID).
 	LIB_FUNC("eS+MVq+Lltw", LibC::c_remainderf);
 	LIB_FUNC("aaDMGGkXFxo", LibC::c_frexpf);

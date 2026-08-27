@@ -146,7 +146,11 @@ bool UsesNativeLaneExchange(const ShaderCode& code)
 		switch (inst.type)
 		{
 			case ShaderInstructionType::VReadfirstlaneB32:
-				return true;
+				if (!ShaderReadfirstlaneCanUseUniformCopy(code, index))
+				{
+					return true;
+				}
+				break;
 			case ShaderInstructionType::VReadlaneB32:
 			{
 				int register_id = 0;

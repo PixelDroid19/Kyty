@@ -716,23 +716,16 @@ TEST(EmulatorKernelProcess, UnsupportedPosixMessageApisReturnEnosys)
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libkernel_1", &symbols));
 
-	const auto* recvfrom_record  = symbols.Find(PosixNativeFunc(u"lUk6wrGXyMw"));
-	ASSERT_NE(recvfrom_record, nullptr);
 	const auto* sendmsg_record   = symbols.Find(PosixNativeFunc(u"aNeavPDNKzA"));
 	ASSERT_NE(sendmsg_record, nullptr);
 	const auto* recvmsg_record   = symbols.Find(PosixNativeFunc(u"hI7oVeOluPM"));
 	ASSERT_NE(recvmsg_record, nullptr);
-	EXPECT_EQ(symbols.Find(KernelNativeFunc(u"lUk6wrGXyMw")), nullptr);
 
-	using recvfrom_fn_t = KYTY_SYSV_ABI int64_t (*)(int, void*, uint64_t, int, void*, uint32_t*);
 	using sendmsg_fn_t  = KYTY_SYSV_ABI int (*)(int, const void*, int);
 	using recvmsg_fn_t  = KYTY_SYSV_ABI int64_t (*)(int, void*, int);
-	auto* recvfrom_fn   = reinterpret_cast<recvfrom_fn_t>(static_cast<uintptr_t>(recvfrom_record->vaddr));
 	auto* sendmsg_fn    = reinterpret_cast<sendmsg_fn_t>(static_cast<uintptr_t>(sendmsg_record->vaddr));
 	auto* recvmsg_fn    = reinterpret_cast<recvmsg_fn_t>(static_cast<uintptr_t>(recvmsg_record->vaddr));
 
-	EXPECT_EQ(recvfrom_fn(-1, nullptr, 0, 0, nullptr, nullptr), -1);
-	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_ENOSYS);
 	EXPECT_EQ(sendmsg_fn(-1, nullptr, 0), -1);
 	EXPECT_EQ(*Posix::GetErrorAddr(), Posix::POSIX_ENOSYS);
 	EXPECT_EQ(recvmsg_fn(-1, nullptr, 0), -1);

@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <limits>
@@ -171,6 +172,7 @@ void SanitizeRenderDepthAgainstColor(RenderColorInfo* color, RenderDepthInfo* de
 // Latest 1280x720 color targets (for KYTY_DUMP_RT paired with VideoOut frame dumps).
 VulkanImage*       g_dump_rt_images[k_dump_rt_slots] {};
 uint32_t           g_dump_rt_count                = 0;
+VulkanImage*       g_dump_depth_image             = nullptr;
 VulkanImage*       g_dump_bc3_image               = nullptr;
 VulkanImage*       g_dump_bc3_compute_source      = nullptr;
 VulkanImage*       g_dump_bc3_compute_destination = nullptr;
@@ -200,6 +202,175 @@ static void RememberDumpRt(VulkanImage* img)
 		}
 		g_dump_rt_images[k_dump_rt_slots - 1] = img;
 	}
+}
+
+static float DecodeUnsignedFloatBits(uint32_t bits, uint32_t mantissa_bits, uint32_t exponent_bits)
+{
+	const uint32_t mantissa_mask = (1u << mantissa_bits) - 1u;
+	const uint32_t exponent_mask = (1u << exponent_bits) - 1u;
+	const uint32_t mantissa      = bits & mantissa_mask;
+	const uint32_t exponent      = (bits >> mantissa_bits) & exponent_mask;
+	const int      bias          = static_cast<int>(exponent_mask >> 1u);
+	if (exponent == 0u)
+	{
+		return std::ldexp(static_cast<float>(mantissa), 1 - bias - static_cast<int>(mantissa_bits));
+	}
+	if (exponent == exponent_mask)
+	{
+		return mantissa == 0u ? std::numeric_limits<float>::infinity() : std::numeric_limits<float>::quiet_NaN();
+	}
+	return std::ldexp(static_cast<float>(mantissa | (1u << mantissa_bits)),
+	                  static_cast<int>(exponent) - bias - static_cast<int>(mantissa_bits));
+}
+
+static void DecodeB10G11R11(uint32_t packed, float* r, float* g, float* b)
+{
+	*r = DecodeUnsignedFloatBits(packed & 0x7ffu, 6u, 5u);
+	*g = DecodeUnsignedFloatBits((packed >> 11u) & 0x7ffu, 6u, 5u);
+	*b = DecodeUnsignedFloatBits((packed >> 22u) & 0x3ffu, 5u, 5u);
+}
+
+void GraphicsPeekRememberedSceneTargets(GraphicContext* ctx)
+{
+	// Full-screen HDR/depth readback is a separate opt-in. Binding it to
+	// KYTY_TRACE_DRAW_PS raced native capture (layout tracker EXIT at
+	// Utils.cpp:37) and allocated two 1920×1080 buffers on every present≥3840.
+	const char* trace = std::getenv("KYTY_TRACE_SCENE_PEEK");
+	if (ctx == nullptr || trace == nullptr || trace[0] == '\0')
+	{
+		return;
+	}
+	if (WindowGetPresentedFrameNum() < 3840)
+	{
+		return;
+	}
+	static uint32_t peeks = 0;
+	if (peeks >= 2u)
+	{
+		return;
+	}
+	FILE* out = stderr;
+	if (const char* path = std::getenv("KYTY_TRACE_DRAW_PS_LOG"); path != nullptr && path[0] != '\0')
+	{
+		char scene_path[512];
+		std::snprintf(scene_path, sizeof(scene_path), "%s.scene", path);
+		if (FILE* opened = std::fopen(scene_path, "a"); opened != nullptr)
+		{
+			out = opened;
+		}
+	}
+	std::fprintf(out, "KYTY_TRACE_SCENE_PEEK_BEGIN present=%d rts=%u depth=%u\n", WindowGetPresentedFrameNum(), g_dump_rt_count,
+	             g_dump_depth_image != nullptr ? 1u : 0u);
+	VulkanImage* hdr = nullptr;
+	for (uint32_t i = 0; i < g_dump_rt_count; ++i)
+	{
+		VulkanImage* img = g_dump_rt_images[i];
+		if (img != nullptr && img->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && img->extent.width == 1920u &&
+		    img->extent.height == 1080u)
+		{
+			hdr = img;
+		}
+	}
+	if (hdr != nullptr && hdr->image != nullptr)
+	{
+		const uint32_t w     = hdr->extent.width;
+		const uint32_t h     = hdr->extent.height;
+		const uint64_t bytes = static_cast<uint64_t>(w) * h * 4u;
+		std::vector<uint32_t> pixels(static_cast<size_t>(w) * h);
+		UtilFillBuffer(ctx, pixels.data(), bytes, w, hdr, static_cast<uint64_t>(hdr->layout));
+		uint32_t nonzero = 0;
+		uint32_t first_x = 0;
+		uint32_t first_y = 0;
+		uint32_t first_p = 0;
+		float    max_c   = 0.0f;
+		for (uint32_t i = 0; i < static_cast<uint32_t>(pixels.size()); ++i)
+		{
+			const uint32_t packed = pixels[i];
+			if (packed != 0u)
+			{
+				++nonzero;
+				if (first_p == 0u)
+				{
+					first_p = packed;
+					first_x = i % w;
+					first_y = i / w;
+				}
+			}
+			float r = 0.0f;
+			float g = 0.0f;
+			float b = 0.0f;
+			DecodeB10G11R11(packed, &r, &g, &b);
+			max_c = std::max(max_c, std::max(r, std::max(g, b)));
+		}
+		const uint32_t samples_xy[5][2] = {{w / 2u, h / 8u}, {w / 2u, h / 4u}, {w / 2u, h / 2u}, {w / 8u, h / 2u}, {w * 7u / 8u, h / 2u}};
+		float fr = 0.0f;
+		float fg = 0.0f;
+		float fb = 0.0f;
+		DecodeB10G11R11(first_p, &fr, &fg, &fb);
+		std::fprintf(out,
+		             "KYTY_TRACE_SCENE_HDR present=%d id=%" PRIu64 " layout=%u pixels=%u nonzero=%u maxc=%.5g first=%u,%u packed=0x%08x r=%.5g g=%.5g b=%.5g\n",
+		             WindowGetPresentedFrameNum(), hdr->memory.unique_id, static_cast<uint32_t>(hdr->layout), w * h, nonzero,
+		             static_cast<double>(max_c), first_x, first_y, first_p, static_cast<double>(fr), static_cast<double>(fg),
+		             static_cast<double>(fb));
+		for (const auto& xy: samples_xy)
+		{
+			const uint32_t packed = pixels[static_cast<size_t>(xy[1]) * w + xy[0]];
+			float          r      = 0.0f;
+			float          g      = 0.0f;
+			float          b      = 0.0f;
+			DecodeB10G11R11(packed, &r, &g, &b);
+			std::fprintf(out, "KYTY_TRACE_SCENE_HDR_PX x=%u y=%u packed=0x%08x r=%.5g g=%.5g b=%.5g\n", xy[0], xy[1], packed,
+			             static_cast<double>(r), static_cast<double>(g), static_cast<double>(b));
+		}
+	}
+	else
+	{
+		std::fprintf(out, "KYTY_TRACE_SCENE_HDR present=%d missing=1\n", WindowGetPresentedFrameNum());
+	}
+	if (g_dump_depth_image != nullptr && g_dump_depth_image->image != nullptr)
+	{
+		const uint32_t w     = g_dump_depth_image->extent.width;
+		const uint32_t h     = g_dump_depth_image->extent.height;
+		const uint64_t bytes = static_cast<uint64_t>(w) * h * 4u;
+		if (w == 1920u && h == 1080u)
+		{
+			std::vector<float> depth(static_cast<size_t>(w) * h);
+			UtilFillDepthBuffer(ctx, depth.data(), bytes, w, g_dump_depth_image, static_cast<uint64_t>(g_dump_depth_image->layout));
+			uint32_t near_n = 0;
+			uint32_t far_n  = 0;
+			float    min_z  = 1.0f;
+			float    max_z  = 0.0f;
+			for (float z: depth)
+			{
+				min_z = std::min(min_z, z);
+				max_z = std::max(max_z, z);
+				if (z >= 0.9f)
+				{
+					++near_n;
+				}
+				if (z <= 0.05f)
+				{
+					++far_n;
+				}
+			}
+			std::fprintf(out,
+			             "KYTY_TRACE_SCENE_DEPTH present=%d id=%" PRIu64 " layout=%u fmt=%u pixels=%u far=%u near=%u minz=%.5g maxz=%.5g\n",
+			             WindowGetPresentedFrameNum(), g_dump_depth_image->memory.unique_id,
+			             static_cast<uint32_t>(g_dump_depth_image->layout), static_cast<uint32_t>(g_dump_depth_image->format), w * h,
+			             far_n, near_n, static_cast<double>(min_z), static_cast<double>(max_z));
+			const uint32_t samples_xy[5][2] = {{w / 2u, h / 8u}, {w / 2u, h / 4u}, {w / 2u, h / 2u}, {w / 8u, h / 2u}, {w * 7u / 8u, h / 2u}};
+			for (const auto& xy: samples_xy)
+			{
+				const float z = depth[static_cast<size_t>(xy[1]) * w + xy[0]];
+				std::fprintf(out, "KYTY_TRACE_SCENE_DEPTH_PX x=%u y=%u z=%.5g\n", xy[0], xy[1], static_cast<double>(z));
+			}
+		}
+	}
+	if (out != stderr)
+	{
+		std::fclose(out);
+	}
+	++peeks;
 }
 
 void GraphicsDumpRememberedRts(GraphicContext* ctx, const char* prefix)
@@ -539,24 +710,35 @@ void MaybeDumpUiDraw(const RenderColorInfo& color, const ShaderVertexInputInfo& 
 void MaybeDumpColorTargets(GraphicContext* ctx, const RenderColorInfo& color)
 {
 	static const char* spec = std::getenv("KYTY_DUMP_RT");
-	if (spec == nullptr || spec[0] == '\0' || ctx == nullptr)
+	const char*        trace = std::getenv("KYTY_TRACE_DRAW_PS");
+	if (ctx == nullptr)
 	{
 		return;
 	}
 	uint32_t want_w = 0;
 	uint32_t want_h = 0;
-	if (std::sscanf(spec, "%ux%u", &want_w, &want_h) != 2 || want_w == 0 || want_h == 0)
+	const bool dump_spec = spec != nullptr && spec[0] != '\0' && std::sscanf(spec, "%ux%u", &want_w, &want_h) == 2 && want_w != 0 &&
+	                       want_h != 0;
+	const bool trace_hdr = trace != nullptr && trace[0] != '\0';
+	if (!dump_spec && !trace_hdr)
 	{
 		return;
 	}
 	for (uint32_t slot = 0; slot < color.targets_num; slot++)
 	{
 		VulkanImage* img = color.attachment[slot].vulkan_buffer;
-		if (img == nullptr || img->extent.width != want_w || img->extent.height != want_h)
+		if (img == nullptr)
 		{
 			continue;
 		}
-		RememberDumpRt(img);
+		if (dump_spec && img->extent.width == want_w && img->extent.height == want_h)
+		{
+			RememberDumpRt(img);
+		}
+		if (trace_hdr && img->format == VK_FORMAT_B10G11R11_UFLOAT_PACK32 && img->extent.width == 1920u && img->extent.height == 1080u)
+		{
+			RememberDumpRt(img);
+		}
 	}
 }
 

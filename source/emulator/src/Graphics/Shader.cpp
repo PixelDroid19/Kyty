@@ -10,6 +10,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
@@ -31,6 +32,8 @@
 #include <climits>
 #include <cinttypes>
 #include <cstdlib>
+#include <cstring>
+#include <memory>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -43,6 +46,89 @@
 namespace Kyty::Libs::Graphics {
 
 static RenderResolutionShaderUsageCache g_shader_resolution_usage_cache(512);
+
+bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures, const ShaderSamplerResources& samplers,
+                                          int sampler_index)
+{
+	if (sampler_index < 0 || sampler_index >= samplers.samplers_num ||
+	    samplers.operations[sampler_index] != State::ImageSampleOperation::DepthReference ||
+	    samplers.samplers[sampler_index].ForceUnormCoords())
+	{
+		return false;
+	}
+
+	const auto eligible = [](const ShaderTextureDescriptor& descriptor)
+	{
+		return descriptor.usage == ShaderTextureUsage::ReadOnly &&
+		       descriptor.sample_operation == State::ImageSampleOperation::DepthReference &&
+		       ShaderResolvedSampledTextureShape(descriptor) == ShaderGen5SampledTextureShape::TwoDimensional;
+	};
+
+	bool matched = false;
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		const auto& descriptor = textures.desc[i];
+		if (descriptor.usage != ShaderTextureUsage::ReadOnly || descriptor.slot != samplers.slots[sampler_index])
+		{
+			continue;
+		}
+		matched = true;
+		if (!eligible(descriptor))
+		{
+			return false;
+		}
+	}
+	if (matched)
+	{
+		return true;
+	}
+
+	// Dynamic/legacy metadata may not preserve pair slots. Without an exact
+	// match, require every sampled descriptor in the bind to be compatible.
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		if (textures.desc[i].usage == ShaderTextureUsage::ReadOnly && !eligible(textures.desc[i]))
+		{
+			return false;
+		}
+		matched = matched || textures.desc[i].usage == ShaderTextureUsage::ReadOnly;
+	}
+	return matched;
+}
+
+ShaderSampledImageViewDecision ResolveDepthReferenceImageView(State::ImageSampleOperation operation,
+                                                              ShaderGen5SampledTextureShape shape, bool floating_point,
+                                                              ShaderSampledImageViewKind resolved_view)
+{
+	if (operation == State::ImageSampleOperation::Regular)
+	{
+		const bool compatible =
+		    (shape == ShaderGen5SampledTextureShape::TwoDimensional &&
+		     (resolved_view == ShaderSampledImageViewKind::Color2D || resolved_view == ShaderSampledImageViewKind::Depth2D)) ||
+		    (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray &&
+		     (resolved_view == ShaderSampledImageViewKind::Color2DArray || resolved_view == ShaderSampledImageViewKind::Depth2DArray)) ||
+		    (shape == ShaderGen5SampledTextureShape::ThreeDimensional && resolved_view == ShaderSampledImageViewKind::Color3D);
+		return {compatible, resolved_view};
+	}
+	if (operation == State::ImageSampleOperation::Mixed)
+	{
+		const bool compatible =
+		    floating_point &&
+		    ((shape == ShaderGen5SampledTextureShape::TwoDimensional &&
+		      (resolved_view == ShaderSampledImageViewKind::Color2D || resolved_view == ShaderSampledImageViewKind::Depth2D)) ||
+		     (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray &&
+		      (resolved_view == ShaderSampledImageViewKind::Color2DArray || resolved_view == ShaderSampledImageViewKind::Depth2DArray)));
+		return {compatible, resolved_view};
+	}
+	if (!floating_point)
+	{
+		return {false, resolved_view};
+	}
+	const bool compatible =
+	    (shape == ShaderGen5SampledTextureShape::TwoDimensional && resolved_view == ShaderSampledImageViewKind::Depth2D) ||
+	    (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray && resolved_view == ShaderSampledImageViewKind::Depth2DArray);
+	return {compatible, resolved_view};
+}
 
 
 void RecordShaderInputAnalysis(uint64_t elapsed_ns)
@@ -61,7 +147,42 @@ static bool ShaderIsVccCompare(ShaderInstructionType type)
 	return (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpEqF32) &&
 	        value <= static_cast<uint32_t>(ShaderInstructionType::VCmpTU32)) ||
 	       (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
-	        value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxNeU32));
+	        value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32));
+}
+
+static bool ShaderInstructionTypeChangesExec(ShaderInstructionType type)
+{
+	const auto value = static_cast<uint32_t>(type);
+	if (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
+	    value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32))
+	{
+		return true;
+	}
+	switch (type)
+	{
+		case ShaderInstructionType::SAndSaveexecB64:
+		case ShaderInstructionType::SAndn1SaveexecB64:
+		case ShaderInstructionType::SAndn2SaveexecB64:
+		case ShaderInstructionType::SNandSaveexecB64:
+		case ShaderInstructionType::SNorSaveexecB64:
+		case ShaderInstructionType::SOrSaveexecB64:
+		case ShaderInstructionType::SOrn2SaveexecB64:
+		case ShaderInstructionType::SXnorSaveexecB64:
+		case ShaderInstructionType::SXorSaveexecB64:
+		case ShaderInstructionType::VCmpxEqI16:
+		case ShaderInstructionType::VCmpxEqU16:
+		case ShaderInstructionType::VCmpxGeI16:
+		case ShaderInstructionType::VCmpxGeU16:
+		case ShaderInstructionType::VCmpxGtI16:
+		case ShaderInstructionType::VCmpxGtU16:
+		case ShaderInstructionType::VCmpxLeI16:
+		case ShaderInstructionType::VCmpxLeU16:
+		case ShaderInstructionType::VCmpxNeI16:
+		case ShaderInstructionType::VCmpxNeU16:
+		case ShaderInstructionType::VCmpxLtI16:
+		case ShaderInstructionType::VCmpxLtU16: return true;
+		default: return false;
+	}
 }
 
 static bool ShaderIsWaveScalarOperand(const ShaderOperand& operand)
@@ -76,9 +197,6 @@ static bool ShaderIsWaveScalarOperand(const ShaderOperand& operand)
 		case ShaderOperandType::LiteralConstant:
 		case ShaderOperandType::IntegerInlineConstant:
 		case ShaderOperandType::FloatInlineConstant:
-		case ShaderOperandType::VccLo:
-		case ShaderOperandType::VccHi:
-		case ShaderOperandType::VccZ:
 		case ShaderOperandType::Sgpr:
 		case ShaderOperandType::Scc:
 		case ShaderOperandType::M0: return true;
@@ -94,12 +212,16 @@ static bool ShaderInstructionWritesVcc(const ShaderInstruction& inst)
 
 static bool ShaderInstructionWritesVgpr(const ShaderInstruction& inst, int register_id)
 {
-	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.register_id != register_id)
+	const auto covers = [register_id](const ShaderOperand& dst)
 	{
-		return false;
-	}
-
-	return inst.dst.size <= 1;
+		if (dst.type != ShaderOperandType::Vgpr || register_id < dst.register_id)
+		{
+			return false;
+		}
+		const int size = std::max(dst.size, 1);
+		return register_id - dst.register_id < size;
+	};
+	return covers(inst.dst) || covers(inst.dst2);
 }
 
 static bool ShaderInstructionIsPureLaneAlu(const ShaderInstruction& inst)
@@ -194,17 +316,104 @@ static bool ShaderInstructionWritesExec(const ShaderInstruction& inst)
 {
 	return inst.dst.type == ShaderOperandType::ExecLo || inst.dst.type == ShaderOperandType::ExecHi ||
 	       inst.dst.type == ShaderOperandType::ExecZ || inst.dst2.type == ShaderOperandType::ExecLo ||
-	       inst.dst2.type == ShaderOperandType::ExecHi || inst.dst2.type == ShaderOperandType::ExecZ;
+	       inst.dst2.type == ShaderOperandType::ExecHi || inst.dst2.type == ShaderOperandType::ExecZ ||
+	       ShaderInstructionTypeChangesExec(inst.type);
 }
 
-static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOperand& operand, uint32_t use_index,
-	                                   uint32_t depth)
+static bool ShaderInstructionIsNoopExecWrite(const ShaderInstruction& inst)
 {
-	if (ShaderIsWaveScalarOperand(operand))
+	return inst.type == ShaderInstructionType::SWqmB64 && inst.dst.type == ShaderOperandType::ExecLo && inst.src_num >= 1 &&
+	       inst.src[0].type == ShaderOperandType::ExecLo;
+}
+
+static bool ShaderInstructionIsControlFlowBoundary(const ShaderInstruction& inst)
+{
+	switch (inst.type)
+	{
+		case ShaderInstructionType::SBranch:
+		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchScc0:
+		case ShaderInstructionType::SCbranchScc1:
+		case ShaderInstructionType::SCbranchVccz:
+		case ShaderInstructionType::SCbranchVccnz:
+		case ShaderInstructionType::SSetpcB64:
+		case ShaderInstructionType::SSwappcB64:
+		case ShaderInstructionType::SEndpgm: return true;
+		default: return false;
+	}
+}
+
+static bool ShaderOperandWritesVccWord(const ShaderOperand& dst, ShaderOperandType word)
+{
+	if (word == ShaderOperandType::VccLo)
+	{
+		return dst.type == ShaderOperandType::VccLo;
+	}
+	if (word == ShaderOperandType::VccHi)
+	{
+		return dst.type == ShaderOperandType::VccHi || (dst.type == ShaderOperandType::VccLo && dst.size >= 2);
+	}
+	return word == ShaderOperandType::VccZ && dst.type == ShaderOperandType::VccZ;
+}
+
+static bool ShaderInstructionWritesVccWord(const ShaderInstruction& inst, ShaderOperandType word)
+{
+	return ShaderOperandWritesVccWord(inst.dst, word) || ShaderOperandWritesVccWord(inst.dst2, word);
+}
+
+static bool ShaderExecRemainsInitial(const ShaderCode& code, uint32_t use_index)
+{
+	if (use_index > code.GetInstructions().Size())
+	{
+		return false;
+	}
+	for (uint32_t index = 0; index < use_index; ++index)
+	{
+		const auto& inst = code.GetInstructions().At(index);
+		if (ShaderInstructionWritesExec(inst) && !ShaderInstructionIsNoopExecWrite(inst))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool ShaderRangeHasIncomingEdge(const ShaderCode& code, uint32_t definition_index, uint32_t use_index)
+{
+	if (definition_index >= use_index || use_index >= code.GetInstructions().Size())
 	{
 		return true;
 	}
-	if (operand.type != ShaderOperandType::Vgpr || depth >= 32 || use_index > code.GetInstructions().Size())
+
+	const uint32_t definition_pc = code.GetInstructions().At(definition_index).pc;
+	const uint32_t use_pc        = code.GetInstructions().At(use_index).pc;
+	const auto     enters_range  = [definition_pc, use_pc](const ShaderLabel& label)
+	{
+		return !label.IsDisabled() && label.GetDst() > definition_pc && label.GetDst() <= use_pc;
+	};
+	for (const auto& label: code.GetLabels())
+	{
+		if (enters_range(label))
+		{
+			return true;
+		}
+	}
+	for (const auto& label: code.GetIndirectLabels())
+	{
+		if (enters_range(label))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOperand& operand, uint32_t use_index, uint32_t depth);
+
+static bool ShaderVccWordIsWaveUniform(const ShaderCode& code, ShaderOperandType word, uint32_t use_index, uint32_t depth)
+{
+	if (depth >= 32 || use_index > code.GetInstructions().Size() ||
+	    (word != ShaderOperandType::VccLo && word != ShaderOperandType::VccHi && word != ShaderOperandType::VccZ))
 	{
 		return false;
 	}
@@ -212,12 +421,75 @@ static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOpera
 	for (int index = static_cast<int>(use_index) - 1; index >= 0; --index)
 	{
 		const auto& definition = code.GetInstructions().At(static_cast<uint32_t>(index));
+		if (ShaderInstructionIsControlFlowBoundary(definition))
+		{
+			return false;
+		}
+		if (!ShaderInstructionWritesVccWord(definition, word))
+		{
+			continue;
+		}
+		// Only the scalar select chain observed in the material shader is admitted.
+		// Vector compares and unknown VCC writers remain lane-dependent.
+		if (definition.type != ShaderInstructionType::SCselectB32 || definition.src_num != 2 || definition.dst.size > 1)
+		{
+			return false;
+		}
+		if (ShaderRangeHasIncomingEdge(code, static_cast<uint32_t>(index), use_index))
+		{
+			return false;
+		}
+		for (int source = 0; source < definition.src_num; ++source)
+		{
+			if (!ShaderOperandIsWaveUniform(code, definition.src[source], static_cast<uint32_t>(index), depth + 1))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	return false;
+}
+
+static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOperand& operand, uint32_t use_index,
+	                                   uint32_t depth)
+{
+	if (operand.dpp || depth >= 32 || use_index > code.GetInstructions().Size())
+	{
+		return false;
+	}
+	if (operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::VccHi ||
+	    operand.type == ShaderOperandType::VccZ)
+	{
+		return ShaderVccWordIsWaveUniform(code, operand.type, use_index, depth + 1);
+	}
+	if (ShaderIsWaveScalarOperand(operand))
+	{
+		return true;
+	}
+	if (operand.type != ShaderOperandType::Vgpr)
+	{
+		return false;
+	}
+
+	for (int index = static_cast<int>(use_index) - 1; index >= 0; --index)
+	{
+		const auto& definition = code.GetInstructions().At(static_cast<uint32_t>(index));
+		if (ShaderInstructionIsControlFlowBoundary(definition))
+		{
+			return false;
+		}
 		if (!ShaderInstructionWritesVgpr(definition, operand.register_id))
 		{
 			continue;
 		}
 
 		if (!ShaderInstructionIsPureLaneAlu(definition))
+		{
+			return false;
+		}
+		if (ShaderRangeHasIncomingEdge(code, static_cast<uint32_t>(index), use_index))
 		{
 			return false;
 		}
@@ -243,6 +515,19 @@ static bool ShaderOperandIsWaveUniform(const ShaderCode& code, const ShaderOpera
 	return false;
 }
 
+bool ShaderReadfirstlaneCanUseUniformCopy(const ShaderCode& code, uint32_t instruction_index)
+{
+	if (instruction_index >= code.GetInstructions().Size())
+	{
+		return false;
+	}
+
+	const auto& inst = code.GetInstructions().At(instruction_index);
+	return inst.type == ShaderInstructionType::VReadfirstlaneB32 && inst.src_num >= 1 &&
+	       ShaderExecRemainsInitial(code, instruction_index) &&
+	       ShaderOperandIsWaveUniform(code, inst.src[0], instruction_index, 0);
+}
+
 bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_index)
 {
 	if (instruction_index >= code.GetInstructions().Size())
@@ -260,6 +545,10 @@ bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_i
 	for (int index = static_cast<int>(instruction_index) - 1; index >= 0; --index)
 	{
 		const auto& inst = code.GetInstructions().At(static_cast<uint32_t>(index));
+		if (ShaderInstructionIsControlFlowBoundary(inst))
+		{
+			return false;
+		}
 		if (ShaderInstructionWritesExec(inst))
 		{
 			return false;
@@ -281,10 +570,7 @@ bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_i
 	}
 
 	const auto& compare = code.GetInstructions().At(static_cast<uint32_t>(compare_index));
-	const auto compare_value = static_cast<uint32_t>(compare.type);
-	const bool changes_exec = compare_value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
-	                          compare_value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxNeU32);
-	if (changes_exec || compare.src_num < 2)
+	if (ShaderInstructionTypeChangesExec(compare.type) || compare.src_num < 2)
 	{
 		return false;
 	}
@@ -359,6 +645,109 @@ static std::unordered_map<uint64_t, ShaderMappedData>* g_shader_map       = null
 static std::mutex                                      g_shader_map_mutex;
 static std::unordered_map<uint64_t, int32_t>*          g_vertex_offset_sgpr_map = nullptr;
 static std::unordered_map<uint64_t, uint64_t>*         g_shader_continuations  = nullptr;
+static std::unordered_map<uint64_t, std::shared_ptr<ShaderCode>>* g_vs_isa_cache = nullptr;
+static std::mutex                                      g_vs_isa_cache_mutex;
+
+static std::shared_ptr<ShaderCode> GetCachedParsedVsIsa(uint64_t shader_addr, uint32_t hash0, uint32_t crc32)
+{
+	if (shader_addr == 0 || g_vs_isa_cache == nullptr)
+	{
+		return nullptr;
+	}
+	std::lock_guard<std::mutex> lock(g_vs_isa_cache_mutex);
+	if (auto cached = g_vs_isa_cache->find(shader_addr); cached != g_vs_isa_cache->end())
+	{
+		return cached->second;
+	}
+	if (g_vs_isa_cache->size() >= 256u)
+	{
+		g_vs_isa_cache->clear();
+	}
+	auto code = std::make_shared<ShaderCode>();
+	code->SetType(ShaderType::Vertex);
+	code->SetHash0(hash0);
+	code->SetCrc32(crc32);
+	ShaderParse(reinterpret_cast<const uint32_t*>(shader_addr), code.get());
+	ShaderProbeWrite("vs", *code, nullptr, nullptr);
+	g_vs_isa_cache->emplace(shader_addr, code);
+	return code;
+}
+
+static bool NggCapturedBufferQuad(const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, int start)
+{
+	const int captured = std::min(std::min(std::max(user_sgpr_num, 0), static_cast<int>(user_sgpr.count)),
+	                              HW::UserSgprInfo::SGPRS_MAX);
+	if (start < 0 || start + 4 > captured)
+	{
+		return false;
+	}
+	bool typed = true;
+	for (int i = 0; i < 4; ++i)
+	{
+		const auto type = user_sgpr.type[start + i];
+		if (type != HW::UserSgprType::Vsharp && type != HW::UserSgprType::Region)
+		{
+			typed = false;
+		}
+	}
+	const uint32_t word0 = user_sgpr.value[start];
+	const uint32_t word1 = user_sgpr.value[start + 1];
+	const uint32_t word2 = user_sgpr.value[start + 2];
+	const uint32_t word3 = user_sgpr.value[start + 3];
+	const bool     untyped_buffer = ((word0 | word1 | word2 | word3) != 0u) && (((word3 >> 28u) & 0xfu) < 8u);
+	return typed || untyped_buffer;
+}
+
+// AGC metadata lists NGG constant V# sharps at the shader scalar register
+// (s8+). Hardware user-data slot 0 is that register minus 8. Rebase only when
+// the ISA actually SBUFFERs that scalar and the captured user-data quad looks
+// like a buffer — same contract as the measured NGG constant-sharp rebase.
+static void RebaseNggConstantSharps(ShaderUserData* user_data, const ShaderCode* code, const HW::UserSgprInfo& user_sgpr,
+                                    int user_sgpr_num)
+{
+	if (user_data == nullptr || code == nullptr || user_data->sharp_resource_offset[3] == nullptr)
+	{
+		return;
+	}
+	constexpr int kNggScalarBase = 8;
+	bool          used[108]      = {};
+	for (const auto& inst: code->GetInstructions())
+	{
+		if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr)
+		{
+			continue;
+		}
+		const int reg = inst.src[0].register_id;
+		if (reg >= 0 && reg < 108)
+		{
+			used[reg] = true;
+		}
+	}
+	for (uint16_t slot = 0; slot < user_data->sharp_resource_count[3]; ++slot)
+	{
+		auto& sharp = user_data->sharp_resource_offset[3][slot];
+		if (sharp.offset_dw == 0x7fff || sharp.size != 1)
+		{
+			continue;
+		}
+		const int scalar = static_cast<int>(sharp.offset_dw);
+		const int captured = std::min(std::min(std::max(user_sgpr_num, 0), static_cast<int>(user_sgpr.count)),
+		                              HW::UserSgprInfo::SGPRS_MAX);
+		// Metadata that already names a captured user-data slot (offset <
+		// captured) is left alone. Only scalar registers past that window
+		// are NGG-encoded (s8 + slot) and need the minus-eight rebase.
+		if (scalar < captured || scalar < kNggScalarBase || scalar >= 108 || !used[scalar])
+		{
+			continue;
+		}
+		const int hardware_slot = scalar - kNggScalarBase;
+		if (!NggCapturedBufferQuad(user_sgpr, user_sgpr_num, hardware_slot))
+		{
+			continue;
+		}
+		sharp.offset_dw = static_cast<uint16_t>(hardware_slot);
+	}
+}
 
 void ShaderInit()
 {
@@ -367,6 +756,7 @@ void ShaderInit()
 	g_shader_map             = new std::unordered_map<uint64_t, ShaderMappedData>();
 	g_vertex_offset_sgpr_map = new std::unordered_map<uint64_t, int32_t>();
 	g_shader_continuations   = new std::unordered_map<uint64_t, uint64_t>();
+	g_vs_isa_cache           = new std::unordered_map<uint64_t, std::shared_ptr<ShaderCode>>();
 }
 
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
@@ -654,6 +1044,23 @@ static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int st
 	resources->start_register[resources->buffers_num++] = start_register;
 }
 
+static void ApplyDirectImageShape(const ShaderDirectImageUse& image, ShaderTextureDescriptor* descriptor)
+{
+	EXIT_IF(descriptor == nullptr);
+	if (image.sampled_shape_conflict)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: sampled image resource uses multiple MIMG dimensions; descriptor shape retained\n");
+		return;
+	}
+	if (!image.sampled_shape_known)
+	{
+		return;
+	}
+	descriptor->sampled_shape                  = image.sampled_shape;
+	descriptor->sampled_shape_from_instruction = true;
+}
+
 void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, int start_index, int slot, ShaderTextureUsage usage,
                                    const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer)
 {
@@ -699,6 +1106,7 @@ void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, in
 	info->desc[index].texture.fields[5] = (extended ? extended_buffer[start_index - 16 + 5] : user_sgpr.value[start_index + 5]);
 	info->desc[index].texture.fields[6] = (extended ? extended_buffer[start_index - 16 + 6] : user_sgpr.value[start_index + 6]);
 	info->desc[index].texture.fields[7] = (extended ? extended_buffer[start_index - 16 + 7] : user_sgpr.value[start_index + 7]);
+	info->desc[index].sampled_shape = ShaderGen5SampledTextureShapeForType(info->desc[index].texture.Type());
 
 	if (usage == ShaderTextureUsage::ReadWrite)
 	{
@@ -840,15 +1248,39 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	bind->textures2D.textures3d_sampled_uint_num       = 0;
 	if (Config::IsNextGen())
 	{
+		bind->textures2D.textures2d_sampled_num       = 0;
+		bind->textures2D.textures2d_sampled_depth_num = 0;
+		bind->textures2D.textures2d_array_sampled_num = 0;
+		bind->textures2D.textures3d_sampled_num       = 0;
 		for (int i = 0; i < bind->textures2D.textures_num; ++i)
 		{
 			const auto& descriptor = bind->textures2D.desc[i];
-			if (descriptor.usage != ShaderTextureUsage::ReadOnly ||
-			    VulkanGen5ImageNumericType(descriptor.texture.Format()) != GuestImageNumericType::UnsignedInteger)
+			if (descriptor.usage != ShaderTextureUsage::ReadOnly)
 			{
 				continue;
 			}
-			switch (ShaderGen5SampledTextureShapeForType(descriptor.texture.Type()))
+			const auto shape = ShaderResolvedSampledTextureShape(descriptor);
+			switch (shape)
+			{
+				case ShaderGen5SampledTextureShape::TwoDimensional:
+					if (descriptor.sample_operation == State::ImageSampleOperation::DepthReference)
+					{
+						bind->textures2D.textures2d_sampled_depth_num++;
+					} else
+					{
+						bind->textures2D.textures2d_sampled_num++;
+					}
+					break;
+				case ShaderGen5SampledTextureShape::TwoDimensionalArray:
+					bind->textures2D.textures2d_array_sampled_num++;
+					break;
+				case ShaderGen5SampledTextureShape::ThreeDimensional: bind->textures2D.textures3d_sampled_num++; break;
+			}
+			if (VulkanGen5ImageNumericType(descriptor.texture.Format()) != GuestImageNumericType::UnsignedInteger)
+			{
+				continue;
+			}
+			switch (shape)
 			{
 				case ShaderGen5SampledTextureShape::TwoDimensional: bind->textures2D.textures2d_sampled_uint_num++; break;
 				case ShaderGen5SampledTextureShape::TwoDimensionalArray:
@@ -878,6 +1310,9 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 		bind->textures2D.binding_sampled_uint_index = binding_index++;
 		bind->textures2D.binding_sampled_array_uint_index = binding_index++;
 		bind->textures2D.binding_sampled_3d_uint_index = binding_index++;
+		// Append depth-compare 2D after the existing shape slots so cached
+		// SPIR-V binding numbers stay stable.
+		bind->textures2D.binding_sampled_depth_index = binding_index++;
 
 		bind->push_constant_size += bind->textures2D.textures_num * 32;
 	}
@@ -948,6 +1383,41 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 	}
 
 	return usage;
+}
+
+bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
+{
+	bool prevents = false;
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		if (IsDiscardInstruction(code.GetInstructions(), index))
+		{
+			prevents = true;
+			break;
+		}
+	}
+
+	// Unsupported MUBUF/MTBUF loads and stores currently retain their packet
+	// position as SBarrier. Fail closed until the parser preserves their exact
+	// read/write opcode; this intentionally sacrifices elision, never effects.
+	prevents = prevents || code.HasAnyOf({ShaderInstructionType::Unknown, ShaderInstructionType::SBarrier, ShaderInstructionType::SSendmsg,
+	                                      ShaderInstructionType::SSetpcB64, ShaderInstructionType::SSwappcB64,
+	                      ShaderInstructionType::BufferAtomicAdd, ShaderInstructionType::BufferAtomicAnd,
+	                      ShaderInstructionType::BufferAtomicOr, ShaderInstructionType::BufferAtomicSmax,
+	                      ShaderInstructionType::BufferAtomicSmin, ShaderInstructionType::BufferAtomicSub,
+	                      ShaderInstructionType::BufferAtomicUmax, ShaderInstructionType::BufferAtomicUmin,
+	                      ShaderInstructionType::BufferAtomicXor, ShaderInstructionType::BufferStoreDword,
+	                      ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
+	                      ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX,
+	                      ShaderInstructionType::BufferStoreFormatXy, ShaderInstructionType::BufferStoreFormatXyzw,
+	                      ShaderInstructionType::DsAppend, ShaderInstructionType::DsConsume, ShaderInstructionType::DsAddU32,
+	                      ShaderInstructionType::DsAndB32, ShaderInstructionType::DsDecU32, ShaderInstructionType::DsIncU32,
+	                      ShaderInstructionType::DsMaxI32, ShaderInstructionType::DsMaxU32, ShaderInstructionType::DsMinI32,
+	                      ShaderInstructionType::DsMinU32, ShaderInstructionType::DsOrB32, ShaderInstructionType::DsRsubU32,
+	                      ShaderInstructionType::DsSubU32, ShaderInstructionType::DsXorB32, ShaderInstructionType::DsWriteB32,
+	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip});
+
+	return prevents;
 }
 
 
@@ -1537,7 +2007,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		auto exact_evidence = code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base) : ShaderStorageUseEvidence {};
 		if (has_dynamic_sload)
 		{
-			// Each mapping is proven to reach an S_BUFFER_LOAD before a clobber.
+			// Each mapping is proven to reach one descriptor consumer before a clobber.
 			// Merge that local raw-use proof with any independent static use of the
 			// same physical descriptor instead of assigning a synthetic entry state.
 			if (exact_evidence.access == ShaderStorageAccess::Unknown)
@@ -1547,8 +2017,21 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			{
 				exact_evidence.access = ShaderStorageAccess::Mixed;
 			}
-			exact_evidence.raw_smem_use = true;
-			exact_evidence.raw_smem_dynamic_offset = true;
+			for (int mapping = 0; mapping < bind->dynamic_sloads.mappings_num; ++mapping)
+			{
+				if (bind->dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::StorageBuffer ||
+				    bind->dynamic_sloads.resource_index[mapping] != i)
+				{
+					continue;
+				}
+				if (bind->dynamic_sloads.raw_vmem_oob_guarded[mapping])
+				{
+					exact_evidence.raw_vmem_oob_guarded = true;
+					continue;
+				}
+				exact_evidence.raw_smem_use            = true;
+				exact_evidence.raw_smem_dynamic_offset = true;
+			}
 		}
 		const auto exact = exact_evidence.access;
 		ShaderStorageUseEvidence unbased_evidence {};
@@ -1594,6 +2077,47 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 		}
 	}
+	if (code != nullptr)
+	{
+		for (int i = 0; i < bind->textures2D.textures_num; ++i)
+		{
+			auto& descriptor = bind->textures2D.desc[i];
+			if (descriptor.dynamic_sload || descriptor.usage != ShaderTextureUsage::ReadOnly)
+			{
+				continue;
+			}
+			const int binding_register = descriptor.extended
+			                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (descriptor.start_register - 16)
+			                                 : descriptor.start_register;
+			auto image = AnalyzeShaderDirectImageUse(*code, binding_register + user_data_register_base);
+			if (image.texture == ShaderTextureUsage::Unknown && user_data_register_base != 0)
+			{
+				image = AnalyzeShaderDirectImageUse(*code, binding_register);
+			}
+			if (image.texture != ShaderTextureUsage::Unknown)
+			{
+				descriptor.sample_operation = image.sample_operation;
+				ApplyDirectImageShape(image, &descriptor);
+			}
+		}
+		for (int i = 0; i < bind->samplers.samplers_num; ++i)
+		{
+			if (bind->samplers.dynamic_sload[i])
+			{
+				continue;
+			}
+			const int binding_register = bind->samplers.extended[i]
+			                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (bind->samplers.start_register[i] - 16)
+			                                 : bind->samplers.start_register[i];
+			auto evidence = AnalyzeShaderSamplerOperationEvidence(*code, binding_register + user_data_register_base);
+			if (!evidence.found && user_data_register_base != 0)
+			{
+				evidence = AnalyzeShaderSamplerOperationEvidence(*code, binding_register);
+			}
+			bind->samplers.operations[i] = evidence.operation;
+		}
+	}
+
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
 }
 
@@ -1646,17 +2170,30 @@ int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_
 	return candidate;
 }
 
-int32_t ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info)
+bool ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info, int32_t* resolved_offset,
+	                            int32_t vertex_offset_add)
 {
+	if (resolved_offset == nullptr)
+	{
+		return false;
+	}
+
+	int32_t base = 0;
 	if (index_offset != 0)
 	{
-		return static_cast<int32_t>(index_offset);
-	}
-	if (!input_info.fetch_external || input_info.vertex_offset_sgpr < 0)
+		base = static_cast<int32_t>(index_offset);
+	} else if (input_info.fetch_external && input_info.vertex_offset_sgpr >= 0)
 	{
-		return 0;
+		base = static_cast<int32_t>(input_info.vertex_offset_value);
 	}
-	return static_cast<int32_t>(input_info.vertex_offset_value);
+
+	const int64_t resolved = static_cast<int64_t>(base) + vertex_offset_add;
+	if (resolved < INT32_MIN || resolved > INT32_MAX)
+	{
+		return false;
+	}
+	*resolved_offset = static_cast<int32_t>(resolved);
+	return true;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -1671,6 +2208,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 	info->bind.push_constant_offset = 0;
 	info->bind.push_constant_size   = 0;
 	info->bind.descriptor_set_slot  = 0;
+	info->clip_probe                = {};
+	info->clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	info->float_mode                = 0;
+	info->dx10_clamp                = false;
+	info->ieee_mode                 = false;
 
 	if (regs->vs_embedded)
 	{
@@ -1681,6 +2223,9 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 	bool gs_instead_of_vs =
 	    (regs->vs_regs.data_addr == 0 && regs->gs_regs.data_addr == 0 && regs->es_regs.data_addr != 0 && regs->gs_regs.chksum != 0);
+	info->float_mode = gs_instead_of_vs ? regs->gs_regs.rsrc1.float_mode : regs->vs_regs.rsrc1.float_mode;
+	info->dx10_clamp = gs_instead_of_vs ? regs->gs_regs.rsrc1.dx10_clamp : regs->vs_regs.rsrc1.dx10_clamp;
+	info->ieee_mode  = gs_instead_of_vs ? regs->gs_regs.rsrc1.ieee_mode : regs->vs_regs.rsrc1.ieee_mode;
 
 	uint64_t                shader_addr   = (gs_instead_of_vs ? regs->es_regs.data_addr : regs->vs_regs.data_addr);
 	const HW::UserSgprInfo& user_sgpr     = (gs_instead_of_vs ? regs->gs_user_sgpr : regs->vs_user_sgpr);
@@ -1704,8 +2249,29 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 		// The fused ES-to-GS front reserves s0..s7 for NGG system state. API
 		// user-data index zero is therefore addressed as s8 by the shader.
+		// PS/CS already pass the decoded ISA so instruction-stream S#/V#
+		// loads are bound; VS used to pass nullptr and dropped reused
+		// constant buffers (measured: skybox projection at s[16:19]).
 		constexpr int kGen5GsFrontUserDataBase = 8;
-		ShaderParseUsage2(data.user_data, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
+		const auto vs_isa = GetCachedParsedVsIsa(shader_addr, (regs->gs_regs.chksum >> 32u) & 0xffffffffu,
+		                                         regs->gs_regs.chksum & 0xffffffffu);
+		ShaderUserData  rebased_user {};
+		ShaderSharp     sharp_copy[32] = {};
+		const ShaderUserData* usage_user = data.user_data;
+		if (data.user_data != nullptr && vs_isa != nullptr && data.user_data->sharp_resource_count[3] > 0 &&
+		    data.user_data->sharp_resource_count[3] <= 32u && data.user_data->sharp_resource_offset[3] != nullptr)
+		{
+			rebased_user = *data.user_data;
+			std::memcpy(sharp_copy, data.user_data->sharp_resource_offset[3],
+			            static_cast<size_t>(data.user_data->sharp_resource_count[3]) * sizeof(ShaderSharp));
+			rebased_user.sharp_resource_offset[3] = sharp_copy;
+			RebaseNggConstantSharps(&rebased_user, vs_isa.get(), user_sgpr, static_cast<int>(user_sgpr_num));
+			usage_user = &rebased_user;
+		}
+		// Do not pass the ISA into ParseUsage2 here: the instruction-stream
+		// fallback AddZeroSBufferResource on a reused s[16:19] V# zeros the
+		// projection CBV. Rebase the metadata sharp table instead.
+		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
 		                  kGen5GsFrontUserDataBase);
 	} else
 	{
@@ -1764,16 +2330,17 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 		ShaderParseAttrib(info, data.input_semantics, data.num_input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info, ps5);
+		ShaderAppendVertexStreamStorage(info);
 
 		constexpr uint32_t user_data_base = 8;
 		auto               cached         = g_vertex_offset_sgpr_map->find(shader_addr);
 		if (cached == g_vertex_offset_sgpr_map->end())
 		{
-			ShaderCode code;
-			code.SetType(ShaderType::Vertex);
-			ShaderParse(reinterpret_cast<const uint32_t*>(shader_addr), &code);
-			const int32_t detected = ShaderDetectVertexOffsetSgpr(code, user_data_base, user_sgpr_num);
-			cached                 = g_vertex_offset_sgpr_map->insert({shader_addr, detected}).first;
+			const auto vs_isa = GetCachedParsedVsIsa(shader_addr, (regs->gs_regs.chksum >> 32u) & 0xffffffffu,
+			                                         regs->gs_regs.chksum & 0xffffffffu);
+			const int32_t detected =
+			    vs_isa != nullptr ? ShaderDetectVertexOffsetSgpr(*vs_isa, user_data_base, user_sgpr_num) : -1;
+			cached = g_vertex_offset_sgpr_map->insert({shader_addr, detected}).first;
 		}
 		info->vertex_offset_sgpr = cached->second;
 		if (info->vertex_offset_sgpr >= static_cast<int32_t>(user_data_base))
@@ -1818,7 +2385,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 }
 
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
-                          ShaderPixelInputInfo* ps_info)
+                          ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -1828,6 +2395,9 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	EXIT_IF(sh == nullptr);
 
 	*ps_info = {};
+	ps_info->float_mode = regs->ps_regs.rsrc1.float_mode;
+	ps_info->dx10_clamp = regs->ps_regs.rsrc1.dx10_clamp;
+	ps_info->ieee_mode  = regs->ps_regs.rsrc1.ieee_mode;
 	if (!regs->ps_embedded && regs->ps_regs.data_addr == 0)
 	{
 		ps_info->stage_enabled = false;
@@ -1898,6 +2468,11 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;
 		ps_info->required_subgroup_size    = ShaderPixelRequiredSubgroupSize(*analysis.code, ps_wave32);
+		if (allow_noop_stage_disable && !ShaderPreventsNoopPixelElision(*analysis.code))
+		{
+			ps_info->stage_enabled = false;
+			return;
+		}
 		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get(), 0,
 		                  false);
 	} else
@@ -1921,6 +2496,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	EXIT_IF(regs == nullptr);
 
 	info->bind           = {};
+	info->meta_fill      = {};
 	info->threads_num[0] = regs->cs_regs.num_thread_x;
 	info->threads_num[1] = regs->cs_regs.num_thread_y;
 	info->threads_num[2] = regs->cs_regs.num_thread_z;
@@ -1956,6 +2532,44 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		const auto user_sgpr_num =
 		    ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count, data.user_data->eud_size_dw);
 		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false);
+		if (code.HasAnyOf({ShaderInstructionType::VLshlAddU32, ShaderInstructionType::VCmpxGtU32,
+		                   ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferStoreFormatX}))
+		{
+			for (int destination = 0; destination < info->bind.storage_buffers.buffers_num && !info->meta_fill.valid; ++destination)
+			{
+				if (info->bind.storage_buffers.usages[destination] != ShaderStorageUsage::ReadWrite ||
+				    info->bind.storage_buffers.accesses[destination] != ShaderStorageAccess::Typed)
+				{
+					continue;
+				}
+				for (int source = 0; source < info->bind.storage_buffers.buffers_num && !info->meta_fill.valid; ++source)
+				{
+					if (source == destination || !ShaderStorageUsageIsReadOnly(info->bind.storage_buffers.usages[source]) ||
+					    info->bind.storage_buffers.accesses[source] != ShaderStorageAccess::Typed)
+					{
+						continue;
+					}
+					for (int parameters = 0; parameters < info->bind.storage_buffers.buffers_num; ++parameters)
+					{
+						if (parameters == source || parameters == destination ||
+						    !ShaderStorageUsageIsReadOnly(info->bind.storage_buffers.usages[parameters]) ||
+						    info->bind.storage_buffers.accesses[parameters] != ShaderStorageAccess::Raw)
+						{
+							continue;
+						}
+						auto evidence = AnalyzeShaderComputeMetaFill(
+						    code, info->bind.storage_buffers.start_register[source],
+						    info->bind.storage_buffers.start_register[destination],
+						    info->bind.storage_buffers.start_register[parameters]);
+						if (evidence.valid)
+						{
+							info->meta_fill = evidence;
+							break;
+						}
+					}
+				}
+			}
+		}
 		for (int i = 0; i < info->bind.textures2D.textures_num; ++i)
 		{
 			auto& descriptor = info->bind.textures2D.desc[i];
@@ -2041,10 +2655,11 @@ static void ShaderDbgDumpResources(const ShaderBindResources& bind)
 	}
 	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
 	{
-		KYTY_LOG_DEBUG("\t DynamicSLoad %d: kind=%u resource=%d dst=%d pc=%08" PRIx32 " offset_dw=%d dwords=%d last_consumer=%08" PRIx32 "\n",
+		KYTY_LOG_DEBUG("\t DynamicSLoad %d: kind=%u resource=%d dst=%d pc=%08" PRIx32 " offset_dw=%d dwords=%d field=%d last_consumer=%08" PRIx32 "\n",
 		       mapping, static_cast<unsigned>(bind.dynamic_sloads.kind[mapping]), bind.dynamic_sloads.resource_index[mapping],
 		       bind.dynamic_sloads.destination_register[mapping], bind.dynamic_sloads.instruction_pc[mapping],
 		       bind.dynamic_sloads.offset_dw[mapping], bind.dynamic_sloads.dword_count[mapping],
+		       bind.dynamic_sloads.resource_field_offset[mapping],
 		       bind.dynamic_sloads.last_consumer_pc[mapping]);
 	}
 
@@ -2381,6 +2996,7 @@ Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInp
 
 	if (code.IsVsEmbedded())
 	{
+		EXIT_IF(input_info != nullptr && input_info->clip_probe.enabled);
 		source = SpirvGetEmbeddedVs(code.GetVsEmbeddedId());
 	} else
 	{
@@ -2753,7 +3369,9 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(bind.dynamic_sloads.instruction_pc[mapping]);
 		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.offset_dw[mapping]));
 		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.dword_count[mapping]));
+		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.resource_field_offset[mapping]));
 		ret->ids.Add(bind.dynamic_sloads.last_consumer_pc[mapping]);
+		ret->ids.Add(static_cast<uint32_t>(bind.dynamic_sloads.raw_vmem_oob_guarded[mapping]));
 	}
 
 	ret->ids.Add(bind.zero_sbuffer_resources.buffers_num);
@@ -2799,13 +3417,15 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].extended));
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].dynamic_sload));
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].usage));
+		ret->ids.Add(static_cast<uint32_t>(ShaderResolvedSampledTextureShape(bind.textures2D.desc[i])));
+		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].sample_operation));
 	}
 
 	ret->ids.Add(bind.samplers.samplers_num);
 
 	for (int i = 0; i < bind.samplers.samplers_num; i++)
 	{
-		// const auto& r = bind.samplers.samplers[i];
+		const auto& r = bind.samplers.samplers[i];
 
 		// ret->ids.Add(r.ClampX());
 		// ret->ids.Add(r.ClampY());
@@ -2832,10 +3452,13 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		// ret->ids.Add(r.MipFilter());
 		// ret->ids.Add(r.BorderColorPtr());
 		// ret->ids.Add(r.BorderColorType());
+		ret->ids.Add(r.DepthCompareFunc());
+		ret->ids.Add(static_cast<uint32_t>(r.ForceUnormCoords()));
 		ret->ids.Add(bind.samplers.slots[i]);
 		ret->ids.Add(bind.samplers.start_register[i]);
 		ret->ids.Add(static_cast<uint32_t>(bind.samplers.extended[i]));
 		ret->ids.Add(static_cast<uint32_t>(bind.samplers.dynamic_sload[i]));
+		ret->ids.Add(static_cast<uint32_t>(bind.samplers.operations[i]));
 	}
 
 	ret->ids.Add(bind.gds_pointers.pointers_num);
@@ -2869,6 +3492,7 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 
 	if (regs->vs_embedded)
 	{
+		EXIT_IF(input_info != nullptr && input_info->clip_probe.enabled);
 		ret.ids.Add(regs->vs_embedded_id);
 		return ret;
 	}
@@ -2906,6 +3530,9 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_embedded));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
 	ret.ids.Add(static_cast<uint32_t>(input_info->gs_prolog));
+	ret.ids.Add(input_info->float_mode);
+	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_reg));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_buffer_reg));
 	ret.ids.Add(input_info->resources_num);
@@ -2957,6 +3584,17 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 	}
 
 	ShaderGetBindIds(&ret, input_info->bind);
+	if (input_info->clip_probe.draw_scoped && input_info->clip_probe.enabled)
+	{
+		const uint32_t descriptor_set = input_info->clip_probe_descriptor_set;
+		const uint64_t diagnostic_identity = VertexClipProbeDiagnosticIdentity(descriptor_set);
+		EXIT_IF(descriptor_set == kVertexClipProbeInvalidDescriptorSet || descriptor_set > 2u || diagnostic_identity == 0 ||
+		        input_info->clip_probe.diagnostic_identity != diagnostic_identity);
+		ret.ids.Add(0x56435031u); // VCP1
+		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity));
+		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
+		ret.ids.Add(descriptor_set);
+	}
 
 	return ret;
 }
@@ -3011,6 +3649,9 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
+	ret.ids.Add(input_info->float_mode);
+	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
 
 	// The export declarations and component order are part of the generated
 	// SPIR-V interface. They must distinguish pipelines that use the same guest
@@ -3027,8 +3668,151 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	}
 
 	ShaderGetBindIds(&ret, input_info->bind);
+	if (input_info->fragment_tap.draw_scoped && input_info->fragment_tap.enabled)
+	{
+		ret.ids.Add(0x46535444u); // FSTD: fragment tap selected draw variant.
+	}
+	if (input_info->input0_probe.draw_scoped && input_info->input0_probe.enabled)
+	{
+		const uint32_t descriptor_set = input_info->input0_probe_descriptor_set;
+		const bool sample_result = input_info->input0_probe.kind == ShaderPixelProbeKind::SampleResult;
+		const bool mrt_result    = input_info->input0_probe.kind == ShaderPixelProbeKind::FinalMrtResult;
+		const uint64_t diagnostic_identity = sample_result
+		                                         ? PixelSampleProbeDiagnosticIdentity(
+		                                               descriptor_set, input_info->input0_probe.sample_ordinal,
+		                                               input_info->input0_probe.sparse_subgroup)
+		                                     : mrt_result
+		                                         ? PixelMrtProbeDiagnosticIdentity(descriptor_set,
+		                                                                           input_info->input0_probe.mrt_target,
+		                                                                           input_info->input0_probe.export_ordinal)
+		                                         : VertexClipProbeDiagnosticIdentity(descriptor_set);
+		EXIT_IF(descriptor_set == kVertexClipProbeInvalidDescriptorSet || descriptor_set > 2u || diagnostic_identity == 0 ||
+		        input_info->input0_probe.diagnostic_identity != diagnostic_identity);
+		ret.ids.Add(sample_result ? 0x50535031u : (mrt_result ? 0x504d5231u : 0x50493031u)); // PSP1 / PMR1 / PI01.
+		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity));
+		ret.ids.Add(static_cast<uint32_t>(diagnostic_identity >> 32u));
+		ret.ids.Add(descriptor_set);
+		if (sample_result)
+		{
+			ret.ids.Add(input_info->input0_probe.sample_ordinal);
+			ret.ids.Add(input_info->input0_probe.sparse_subgroup ? 1u : 0u);
+		}
+		if (mrt_result)
+		{
+			ret.ids.Add(input_info->input0_probe.mrt_target);
+			ret.ids.Add(input_info->input0_probe.export_ordinal);
+		}
+	}
 
 	return ret;
+}
+
+bool ShaderPixelMrtProbeMatchesInstruction(const ShaderCode& code, const ShaderPixelInputInfo& input_info,
+	                                         const ShaderPixelInput0ProbeConfig& config)
+{
+	if (!config.enabled || config.kind != ShaderPixelProbeKind::FinalMrtResult || config.mrt_target > 3u ||
+	    code.GetType() != ShaderType::Pixel || config.export_ordinal >= code.GetInstructions().Size())
+	{
+		return false;
+	}
+	const auto& inst = code.GetInstructions().At(config.export_ordinal);
+	if (inst.type != ShaderInstructionType::Exp || inst.exp_enable_mask == 0u)
+	{
+		return false;
+	}
+	uint32_t target = 4u;
+	using namespace ShaderInstructionFormat;
+	switch (inst.format)
+	{
+		case Mrt0Vsrc0Vsrc1ComprVmDone:
+		case Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone: target = 0u; break;
+		case Mrt1Vsrc0Vsrc1ComprVm:
+		case Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 1u; break;
+		case Mrt2Vsrc0Vsrc1ComprVm:
+		case Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 2u; break;
+		case Mrt3Vsrc0Vsrc1ComprVm:
+		case Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 3u; break;
+		default: return false;
+	}
+	return target == config.mrt_target && input_info.target_output_mode[target] != 0u;
+}
+
+bool ShaderPixelSampleProbeMatchesInstruction(const ShaderCode& code, const ShaderPixelInput0ProbeConfig& config)
+{
+	if (!config.enabled || config.kind != ShaderPixelProbeKind::SampleResult || code.GetType() != ShaderType::Pixel)
+	{
+		return false;
+	}
+	return config.sample_ordinal < code.GetInstructions().Size() &&
+	       code.GetInstructions().At(config.sample_ordinal).type == ShaderInstructionType::ImageSampleB;
+}
+
+ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count)
+{
+	const char* tap_selector = std::getenv("KYTY_FS_TAP");
+	if (tap_selector == nullptr || tap_selector[0] == '\0')
+	{
+		return {};
+	}
+	char*          shader_end = nullptr;
+	const uint64_t shader_id  = std::strtoull(tap_selector, &shader_end, 16);
+	if (shader_end == tap_selector || *shader_end != ':' || shader_id != code_id)
+	{
+		return {};
+	}
+
+	const bool  select_ordinal = shader_end[1] == '@';
+	const char* selector_value = shader_end + (select_ordinal ? 2 : 1);
+	char*       selector_end   = nullptr;
+	const uint64_t selector    = std::strtoull(selector_value, &selector_end, 0);
+	if (selector_end == selector_value || *selector_end != '\0' || selector > UINT32_MAX)
+	{
+		return {};
+	}
+	const char* signed_mode = std::getenv("KYTY_FS_TAP_SIGNED");
+	const bool  signed_tap  = signed_mode != nullptr && signed_mode[0] == '1' && signed_mode[1] == '\0';
+	const char* lod_mode    = std::getenv("KYTY_FS_TAP_LOD");
+	const bool  lod_tap     = lod_mode != nullptr && lod_mode[0] == '1' && lod_mode[1] == '\0';
+	// Keep the mode bit plus an encoding-revision bit so persisted modules from
+	// the superseded numeric visualization cannot satisfy the threshold tap.
+	const uint64_t lod_identity = lod_tap ? 0x1800000000000000ull : 0ull;
+
+	ShaderFragmentTapConfig result;
+	result.enabled              = true;
+	result.select_ordinal       = select_ordinal;
+	result.signed_visualization = signed_tap;
+	result.query_lod_visualization = lod_tap;
+	result.selector             = static_cast<uint32_t>(selector);
+	result.diagnostic_identity  = 0x8000000000000000ull | (select_ordinal ? 0x4000000000000000ull : 0ull) |
+	                              (signed_tap ? 0x2000000000000000ull : 0ull) | lod_identity | selector;
+
+	const char* draw_selector = std::getenv("KYTY_FS_TAP_DRAW");
+	if (draw_selector == nullptr || draw_selector[0] == '\0')
+	{
+		return result;
+	}
+	result.draw_scoped         = true;
+	result.enabled             = false;
+	result.diagnostic_identity = 0;
+	const char* kind = indexed ? "indexed:" : "auto:";
+	const size_t kind_size = std::strlen(kind);
+	if (std::strncmp(draw_selector, kind, kind_size) != 0)
+	{
+		return result;
+	}
+	char*          count_end = nullptr;
+	const uint64_t count     = std::strtoull(draw_selector + kind_size, &count_end, 0);
+	if (count_end == draw_selector + kind_size || *count_end != '\0' || count > UINT32_MAX)
+	{
+		return result;
+	}
+	result.enabled = static_cast<uint32_t>(count) == guest_count;
+	if (result.enabled)
+	{
+		result.diagnostic_identity = 0x8000000000000000ull | (select_ordinal ? 0x4000000000000000ull : 0ull) |
+		                             (signed_tap ? 0x2000000000000000ull : 0ull) | lod_identity | selector;
+	}
+	return result;
 }
 
 ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInputInfo* input_info)

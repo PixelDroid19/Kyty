@@ -35,7 +35,7 @@
 
 #include <algorithm>
 #include <cinttypes>
-#include <cstdio>
+#include <cmath>
 #include <cstdlib>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -45,6 +45,86 @@
 namespace Kyty::Libs::Graphics {
 
 // barriers, describe/materialize color/depth, resolution cohort
+
+static bool ResolveDepthMetaStorageIdentity(uint64_t submit_id, const RenderDepthInfo& depth,
+                                            DepthMetaStorageIdentity* identity)
+{
+	if (identity == nullptr || depth.htile_buffer_vaddr == 0u || depth.htile_buffer_size == 0u)
+	{
+		return false;
+	}
+	*identity = {};
+	GpuMemoryRangeProvenance provenance {};
+	if (!GpuMemoryQueryRangeProvenance(depth.htile_buffer_vaddr, depth.htile_buffer_size, &provenance) ||
+	    provenance.truncated)
+	{
+		return false;
+	}
+
+	const GpuMemoryRangeProvenanceEntry* selected = nullptr;
+	for (uint32_t i = 0; i < provenance.entry_count; ++i)
+	{
+		const auto& entry = provenance.entries[i];
+		if (entry.type != GpuMemoryObjectType::StorageBuffer || entry.relation != GpuMemoryOverlapType::Equals ||
+		    entry.read_only)
+		{
+			continue;
+		}
+		if (selected != nullptr)
+		{
+			return false;
+		}
+		selected = &entry;
+	}
+	if (selected == nullptr)
+	{
+		return false;
+	}
+
+	identity->address                     = depth.htile_buffer_vaddr;
+	identity->size                        = depth.htile_buffer_size;
+	identity->logical_generation          = selected->logical_generation;
+	identity->backing_generation          = selected->backing_generation;
+	identity->producer_or_consumer_submit = submit_id;
+	return true;
+}
+
+static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& depth, DepthMetaClearEvent* event)
+{
+	DepthMetaTraceSnapshot snapshot {};
+	if (!DepthMetaQueryTraceState(depth.htile_buffer_vaddr, &snapshot) || !snapshot.pending)
+	{
+		return false;
+	}
+	if (snapshot.pending_event.source != DepthMetaClearSource::ComputeMetadataFill)
+	{
+		return DepthMetaConsumeClear(depth.htile_buffer_vaddr, event);
+	}
+
+	DepthMetaStorageIdentity identity {};
+	if (!ResolveDepthMetaStorageIdentity(submit_id, depth, &identity))
+	{
+		return false;
+	}
+	// Clearing either aspect of a combined D32S8 image starts the render pass
+	// from UNDEFINED. Only translate the captured zero-fill family when the
+	// guest also initializes stencil in the same first use; otherwise Vulkan
+	// could discard a stencil plane whose metadata semantics are not modeled.
+	if (depth.format != VK_FORMAT_D32_SFLOAT_S8_UINT || depth.samples != VK_SAMPLE_COUNT_1_BIT ||
+	    snapshot.pending_event.pattern.kind != DepthMetaPatternKind::UniformZero ||
+	    snapshot.pending_event.pattern.first_word != 0u || depth.depth_clear_value != 0.0f ||
+	    std::signbit(depth.depth_clear_value) || !depth.stencil_clear_enable || depth.stencil_clear_value != 0u)
+	{
+		(void)DepthMetaDiscardComputeFill(identity, snapshot.pending_event.sequence);
+		return false;
+	}
+
+	if (!DepthMetaConsumeClear(identity, event))
+	{
+		return false;
+	}
+	return event != nullptr;
+}
 
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer)
 {
@@ -452,7 +532,6 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	{
 		return;
 	}
-
 	host_width  = host_width == 0 ? r->width : host_width;
 	host_height = host_height == 0 ? r->height : host_height;
 	const bool sample_locations_compatible =
@@ -469,7 +548,8 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		if (!r->vulkan_buffer->sample_locations_compatible) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !r->vulkan_buffer->sample_locations_compatible condition ignored (continuing)\n"); }
 	}
 
-	if (r->htile && DepthMetaConsumeClear(r->htile_buffer_vaddr))
+	DepthMetaClearEvent meta_clear_event {};
+	if (r->htile && ConsumeDepthMetaClear(submit_id, *r, &meta_clear_event))
 	{
 		const auto clear_actions = State::ResolveDepthClearActions(r->depth_clear_enable, true);
 		r->depth_clear_enable    = clear_actions.vulkan_clear;
@@ -851,6 +931,7 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	region.dstOffset                     = {0, 0, 0};
 	region.extent                        = {src->extent.width, src->extent.height, 1};
 
+	TraceRenderTargetLifetimeResolve(submit_id, source, destination);
 	vkCmdResolveImage(vk_buffer, src->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst->image,
 	                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 	MaybeDumpColorTargets(g_render_ctx->GetGraphicCtx(), destination);

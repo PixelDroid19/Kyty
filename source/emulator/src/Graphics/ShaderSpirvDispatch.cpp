@@ -33,6 +33,8 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_BufferAtomic_XXX_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferAtomicOr,      ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {"OpAtomicOr"}},
     {Recompile_BufferAtomic_XXX_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferAtomicXor,     ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {"OpAtomicXor"}},
     {Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen,   ShaderInstructionType::BufferLoadFormatX,    ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
+    {Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen,  ShaderInstructionType::BufferLoadFormatXy,   ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen,        {""}},
+    {Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen, ShaderInstructionType::BufferLoadFormatXyz,  ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferStoreDword,     ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen,        {""}},
     {Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen,    ShaderInstructionType::BufferStoreDword,     ShaderInstructionFormat::Vdata1VaddrSvSoffsOffen,        {""}},
@@ -108,6 +110,9 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 	{Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF,         {""}},
 	{Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7,         {""}},
 	{Recompile_ImageSampleL_Vdata4Vaddr3StSsDmaskF,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF,         {""}},
+	{Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7,         {""}},
+	{Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata3Vaddr4StSsDmaskB,         {""}},
+	{Recompile_ImageSampleL_Vdata4Vaddr3StSsDmaskF,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata4Vaddr4StSsDmaskF,         {""}},
     {Recompile_ImageSampleLz_Vdata1Vaddr3StSsDmask1,       ShaderInstructionType::ImageSampleLz,       ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1,         {""}},
     {Recompile_ImageSampleLz_Vdata1Vaddr3StSsDmask2,       ShaderInstructionType::ImageSampleLz,       ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2,         {""}},
     {Recompile_ImageSampleLz_Vdata1Vaddr3StSsDmask8,       ShaderInstructionType::ImageSampleLz,       ShaderInstructionFormat::Vdata1Vaddr3StSsDmask8,         {""}},
@@ -263,8 +268,18 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V_XXX_B32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VXorB32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpBitwiseXor %uint %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VAddF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpFAdd %float %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMacF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpExtInst %float %GLSL_std_450 Fma %t0_<index> %t1_<index> %tdst_<index>"}},
-    {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMaxF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpExtInst %float %GLSL_std_450 FMax %t0_<index> %t1_<index>"}},
-    {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMinF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpExtInst %float %GLSL_std_450 FMin %t0_<index> %t1_<index>"}},
+    {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMaxF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
+     {R"(%minmax_lhs_nan_<index> = OpIsNan %bool %t0_<index>
+%minmax_rhs_nan_<index> = OpIsNan %bool %t1_<index>
+%minmax_numeric_<index> = OpExtInst %float %GLSL_std_450 FMax %t0_<index> %t1_<index>
+%minmax_rhs_number_<index> = OpSelect %float %minmax_rhs_nan_<index> %t0_<index> %minmax_numeric_<index>
+%t_<index> = OpSelect %float %minmax_lhs_nan_<index> %t1_<index> %minmax_rhs_number_<index>)"}},
+    {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMinF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
+     {R"(%minmax_lhs_nan_<index> = OpIsNan %bool %t0_<index>
+%minmax_rhs_nan_<index> = OpIsNan %bool %t1_<index>
+%minmax_numeric_<index> = OpExtInst %float %GLSL_std_450 FMin %t0_<index> %t1_<index>
+%minmax_rhs_number_<index> = OpSelect %float %minmax_rhs_nan_<index> %t0_<index> %minmax_numeric_<index>
+%t_<index> = OpSelect %float %minmax_lhs_nan_<index> %t1_<index> %minmax_rhs_number_<index>)"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VMulF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpFMul %float %t0_<index> %t1_<index>"}},
     {Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::VSubF32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpFSub %float %t0_<index> %t1_<index>"}},
     {Recompile_VF16_XXX_VdstVsrc0Vsrc1,            ShaderInstructionType::VAddF16,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%t_<index> = OpFAdd %float %hf0_<index> %hf1_<index>"}},

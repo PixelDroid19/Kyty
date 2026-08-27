@@ -474,11 +474,17 @@ void GpuDirtyPageTracker::MarkPageWrite(PageEntry* page) noexcept
 GpuDirtyReadObservation GpuDirtyPageTracker::BeginRead(uintptr_t address, size_t size) noexcept
 {
 	GpuDirtyReadObservation observation;
+	const uint64_t          generation_before = SnapshotGeneration(address, size);
 	if (!PrepareForRead(address, size))
 	{
 		return observation;
 	}
-	observation.generation = SnapshotGeneration(address, size);
+	const uint64_t generation_after = SnapshotGeneration(address, size);
+	if (generation_after != generation_before)
+	{
+		return observation;
+	}
+	observation.generation = generation_before;
 	observation.tracked    = true;
 	return observation;
 }
@@ -1115,6 +1121,12 @@ bool GpuDirtyPageTracker::ChangedSince(uintptr_t address, size_t size, uint64_t 
 		}
 	}
 	return !found;
+}
+
+bool GpuDirtyPageTracker::ReadObservationIsStable(uintptr_t address, size_t size,
+	                                               const GpuDirtyReadObservation& observation) const noexcept
+{
+	return observation.tracked && !ChangedSince(address, size, observation.generation);
 }
 
 bool GpuDirtyPageTracker::Enabled() const noexcept

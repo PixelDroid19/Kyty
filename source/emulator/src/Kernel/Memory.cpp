@@ -107,6 +107,33 @@ static bool apply_protection_blocks(std::vector<MemoryProtectionBlock>* blocks, 
 	return true;
 }
 
+static void remove_protection_blocks(std::vector<MemoryProtectionBlock>* blocks, uint64_t address, uint64_t size)
+{
+	EXIT_IF(blocks == nullptr || !is_representable_range(address, size));
+
+	const uint64_t end = address + size;
+	std::vector<MemoryProtectionBlock> updated;
+	updated.reserve(blocks->size() + 1);
+	for (const auto& block: *blocks)
+	{
+		const uint64_t block_end = block.address + block.size;
+		if (block.address >= end || block_end <= address)
+		{
+			updated.push_back(block);
+			continue;
+		}
+		if (block.address < address)
+		{
+			updated.push_back({block.address, address - block.address, block.prot, block.mode});
+		}
+		if (end < block_end)
+		{
+			updated.push_back({end, block_end - end, block.prot, block.mode});
+		}
+	}
+	*blocks = std::move(updated);
+}
+
 KernelGpuMappingPromotionStatus KernelPromoteGpuMappingRange(uint64_t mapping_addr, uint64_t mapping_size, uint64_t protected_addr,
                                                              uint64_t protected_size, KernelGpuMappingAccessMode requested_mode,
                                                              KernelGpuMappingAccessMode* cleanup_mode)
@@ -189,6 +216,7 @@ public:
 	             uint64_t alignment, bool fixed, bool replace_owned_reservation, bool* physical_range_valid);
 	bool     ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
 	bool     CompleteUnmap(uint64_t vaddr, uint64_t size);
+	bool     DecommitRange(uint64_t vaddr, uint64_t size);
 	bool     ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
 	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode, uint64_t* mapping_addr,
 	                                                uint64_t* mapping_size);
@@ -304,6 +332,35 @@ public:
 		}
 		if (!VirtualMemory::RegisterDemandRange(addr, size))
 		{
+			return false;
+		}
+		m_blocks.Add(Block {addr, size});
+		return true;
+	}
+
+	template <typename Decommit>
+	bool AddFromMapping(uint64_t addr, uint64_t size, Decommit&& decommit)
+	{
+		if (size == 0 || addr > std::numeric_limits<uint64_t>::max() - size)
+		{
+			return false;
+		}
+
+		Core::LockGuard lock(m_mutex);
+		for (const auto& block: m_blocks)
+		{
+			if (addr < block.addr + block.size && block.addr < addr + size)
+			{
+				return false;
+			}
+		}
+		if (!VirtualMemory::RegisterDemandRange(addr, size))
+		{
+			return false;
+		}
+		if (!decommit())
+		{
+			EXIT_IF(!VirtualMemory::UnregisterDemandRange(addr, size));
 			return false;
 		}
 		m_blocks.Add(Block {addr, size});
@@ -1112,6 +1169,54 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 	return false;
 }
 
+bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
+{
+	if (!is_representable_range(vaddr, size))
+	{
+		return false;
+	}
+
+	Core::LockGuard lock(m_mutex);
+	for (uint32_t index = 0; index < m_mapped.Size(); index++)
+	{
+		const auto mapping = m_mapped[index];
+		if (vaddr < mapping.map_vaddr || size > mapping.map_size || vaddr - mapping.map_vaddr > mapping.map_size - size)
+		{
+			continue;
+		}
+		if (mapping.unmap_pending || mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess)
+		{
+			return false;
+		}
+		if (!VirtualMemory::DecommitGuestRange(vaddr, size))
+		{
+			return false;
+		}
+
+		m_mapped.RemoveAt(index);
+		const uint64_t prefix_size = vaddr - mapping.map_vaddr;
+		const uint64_t end         = vaddr + size;
+		const uint64_t mapping_end = mapping.map_vaddr + mapping.map_size;
+		if (prefix_size != 0)
+		{
+			auto prefix     = mapping;
+			prefix.map_size = prefix_size;
+			m_mapped.Add(prefix);
+		}
+		if (end < mapping_end)
+		{
+			auto suffix      = mapping;
+			suffix.phys_addr += end - mapping.map_vaddr;
+			suffix.map_vaddr = end;
+			suffix.map_size  = mapping_end - end;
+			m_mapped.Add(suffix);
+		}
+		remove_protection_blocks(&m_protections, vaddr, size);
+		return true;
+	}
+	return false;
+}
+
 bool PhysicalMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode)
 {
 	Core::LockGuard lock(m_mutex);
@@ -1527,6 +1632,7 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	}
 
 	EXIT_IF(g_reserved_memory == nullptr);
+	EXIT_IF(g_physical_memory == nullptr);
 
 	const uint64_t requested_addr = reinterpret_cast<uint64_t>(*addr_in_out);
 	const bool     fixed          = (flags & kFixed) != 0;
@@ -1537,7 +1643,12 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	}
 
 	uint64_t reserved_addr = 0;
-	if (fixed)
+	const bool decommitted = fixed && g_reserved_memory->AddFromMapping(
+	                                      requested_addr, len, [&] { return g_physical_memory->DecommitRange(requested_addr, len); });
+	if (decommitted)
+	{
+		reserved_addr = requested_addr;
+	} else if (fixed)
 	{
 		reserved_addr = VirtualMemory::ReserveFixed(requested_addr, len) ? requested_addr : 0;
 	} else
@@ -1556,7 +1667,7 @@ int KYTY_SYSV_ABI KernelReserveVirtualRange(void** addr_in_out, uint64_t len, in
 	{
 		return fixed ? KERNEL_ERROR_EBUSY : KERNEL_ERROR_ENOMEM;
 	}
-	if (!g_reserved_memory->Add(reserved_addr, len))
+	if (!decommitted && !g_reserved_memory->Add(reserved_addr, len))
 	{
 		VirtualMemory::Free(reserved_addr);
 		return KERNEL_ERROR_EBUSY;

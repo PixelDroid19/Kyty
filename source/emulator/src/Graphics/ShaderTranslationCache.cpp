@@ -15,7 +15,7 @@
 namespace Kyty::Libs::Graphics {
 
 ShaderModuleKey ShaderModuleKey::Create(const ShaderId& shader_id, ShaderModuleStage stage, Config::ShaderOptimizationType optimization,
-                                        bool next_gen, bool debug_printf_enabled)
+	                                    bool next_gen, bool debug_printf_enabled, uint64_t diagnostic_identity)
 {
 	ShaderModuleKey key;
 	key.shader_id          = shader_id;
@@ -23,6 +23,7 @@ ShaderModuleKey ShaderModuleKey::Create(const ShaderId& shader_id, ShaderModuleS
 	key.optimization       = optimization;
 	key.next_gen           = next_gen;
 	key.debug_printf_enabled = debug_printf_enabled;
+	key.diagnostic_identity = (stage == ShaderModuleStage::Vertex || stage == ShaderModuleStage::Pixel) ? diagnostic_identity : 0;
 	key.translator_version = kShaderTranslatorVersion;
 	return key;
 }
@@ -30,7 +31,8 @@ ShaderModuleKey ShaderModuleKey::Create(const ShaderId& shader_id, ShaderModuleS
 bool ShaderModuleKey::operator==(const ShaderModuleKey& other) const
 {
 	return shader_id == other.shader_id && stage == other.stage && optimization == other.optimization && next_gen == other.next_gen &&
-	       debug_printf_enabled == other.debug_printf_enabled && translator_version == other.translator_version;
+	       debug_printf_enabled == other.debug_printf_enabled && diagnostic_identity == other.diagnostic_identity &&
+	       translator_version == other.translator_version;
 }
 
 namespace {
@@ -54,6 +56,8 @@ struct ShaderModuleKeyHash
 		hash = HashCombine(hash, static_cast<size_t>(key.optimization));
 		hash = HashCombine(hash, key.next_gen ? 1u : 0u);
 		hash = HashCombine(hash, key.debug_printf_enabled ? 1u : 0u);
+		hash = HashCombine(hash, static_cast<size_t>(key.diagnostic_identity));
+		hash = HashCombine(hash, static_cast<size_t>(key.diagnostic_identity >> 32u));
 		return HashCombine(hash, key.translator_version);
 	}
 };

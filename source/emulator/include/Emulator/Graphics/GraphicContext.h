@@ -104,9 +104,11 @@ struct GraphicContext
 	// baked into the pipeline instead of set as dynamic state.
 	bool color_write_enable_supported = true;
 
-	// VK_EXT_depth_clip_enable is likewise absent on MoltenVK. When false, the
-	// intended "depth clip disabled" state is emulated with core depthClampEnable.
+	// VK_EXT_depth_clip_enable is likewise absent on MoltenVK.
 	bool depth_clip_enable_supported = true;
+	// Core depthClamp is optional. It is the fallback for a guest request to
+	// disable paired Z clipping only when the extension above is unavailable.
+	bool depth_clamp_supported = false;
 
 	// VK_EXT_depth_clip_control selects Vulkan clip Z in [-W,+W] (OpenGL) vs [0,+W]
 	// (DX). When false, OpenGL guest clip space cannot be expressed natively.
@@ -159,7 +161,7 @@ enum class VulkanImageType
 
 struct VulkanImage
 {
-	static constexpr int VIEW_MAX                   = 8;
+	static constexpr int VIEW_MAX                   = 9;
 	static constexpr int VIEW_DEFAULT       = 0;
 	static constexpr int VIEW_BGRA          = 1;
 	static constexpr int VIEW_DEPTH_TEXTURE = 2;
@@ -168,6 +170,7 @@ struct VulkanImage
 	static constexpr int VIEW_3D             = 5;
 	static constexpr int VIEW_STENCIL_TEXTURE = 6;
 	static constexpr int VIEW_DEPTH_TEXTURE_ARRAY = 7;
+	static constexpr int VIEW_STORAGE_ARRAY       = 8;
 
 	explicit VulkanImage(VulkanImageType type): type(type) {}
 
@@ -204,6 +207,7 @@ struct VulkanImage
 	VkImageUsageFlags      usage                = 0;
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkSampleCountFlagBits  samples               = VK_SAMPLE_COUNT_1_BIT;
+	uint32_t               array_layers          = 1;
 	Graphics::VulkanMemory memory;
 	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.
 	uint64_t               guest_size           = 0;
@@ -239,6 +243,7 @@ struct TextureVulkanImage: public VulkanImage
 struct StorageTextureVulkanImage: public VulkanImage
 {
 	StorageTextureVulkanImage(): VulkanImage(VulkanImageType::StorageTexture) {}
+	uint64_t guest_vaddr = 0;
 };
 
 struct RenderTextureVulkanImage: public VulkanImage
@@ -246,11 +251,41 @@ struct RenderTextureVulkanImage: public VulkanImage
 	RenderTextureVulkanImage(): VulkanImage(VulkanImageType::RenderTexture) {}
 };
 
+struct VulkanBufferDescriptorKey
+{
+	uint64_t unique_id = 0;
+	uint64_t range     = 0;
+
+	[[nodiscard]] bool operator==(const VulkanBufferDescriptorKey& other) const
+	{
+		return unique_id == other.unique_id && range == other.range;
+	}
+	[[nodiscard]] bool operator!=(const VulkanBufferDescriptorKey& other) const { return !(*this == other); }
+};
+
+[[nodiscard]] inline bool VulkanDescriptorReferencesBuffer(const VulkanBufferDescriptorKey* storage_buffers,
+                                                            int storage_buffers_num, bool vsharp_uniform_buffer,
+                                                            const VulkanBufferDescriptorKey& vsharp_uniform_buffer_key,
+                                                            uint64_t unique_id)
+{
+	for (int i = 0; i < storage_buffers_num; i++)
+	{
+		if (storage_buffers[i].unique_id == unique_id)
+		{
+			return true;
+		}
+	}
+	return vsharp_uniform_buffer && vsharp_uniform_buffer_key.unique_id == unique_id;
+}
+
 struct VulkanBuffer
 {
 	VkBuffer           buffer = nullptr;
 	VulkanMemory       memory;
 	VkBufferUsageFlags usage = 0;
+	uint64_t           descriptor_range = 0;
+
+	[[nodiscard]] VulkanBufferDescriptorKey DescriptorKey() const { return {memory.unique_id, descriptor_range}; }
 };
 
 struct StorageVulkanBuffer: public VulkanBuffer
@@ -258,6 +293,7 @@ struct StorageVulkanBuffer: public VulkanBuffer
 	uint64_t              guest_addr      = 0;
 	uint64_t              guest_size      = 0;
 	uint64_t              depth_meta_addr = 0;
+	uint64_t              depth_meta_size = 0;
 	GpuWritebackPageCache writeback_cache;
 };
 

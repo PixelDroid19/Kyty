@@ -42,6 +42,7 @@ bool     sys_virtual_free(uint64_t address);
 bool     sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode = nullptr);
 bool     sys_virtual_protect_guest(uint64_t address, uint64_t size, VirtualMemory::Mode mode,
                                    VirtualMemory::Mode* old_mode = nullptr);
+bool     sys_virtual_decommit_guest_range(uint64_t address, uint64_t size);
 bool     sys_virtual_is_range_guest_owned(uint64_t address, uint64_t size);
 bool     sys_virtual_is_range_readable(uint64_t address, uint64_t size);
 bool     sys_virtual_is_range_writable(uint64_t address, uint64_t size);

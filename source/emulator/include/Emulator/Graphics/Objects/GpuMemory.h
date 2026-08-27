@@ -64,6 +64,14 @@ enum class GpuMemoryObjectType : uint64_t
 	Max
 };
 
+[[nodiscard]] inline bool GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType type, bool read_only,
+                                                               bool depth_meta_bound)
+{
+	const bool buffer_type = type == GpuMemoryObjectType::StorageBuffer || type == GpuMemoryObjectType::VertexBuffer ||
+	                         type == GpuMemoryObjectType::IndexBuffer;
+	return buffer_type && read_only && !depth_meta_bound;
+}
+
 enum class GpuMemoryScenario
 {
 	Common,
@@ -96,6 +104,63 @@ struct GpuMemoryOverlapSnapshot
 	uint32_t              total_count = 0;
 	uint32_t              exact_count = 0;
 	bool                  truncated   = false;
+};
+
+enum class GpuMemoryContentOrigin : uint8_t
+{
+	Unknown,
+	CpuUpload,
+	GpuWriteBack,
+	AliasInvalidation,
+	GpuAliasMaterialization,
+};
+
+[[nodiscard]] inline GpuMemoryContentOrigin GpuMemoryCreationContentOrigin(GpuMemoryObjectType type, bool create_from_objects,
+                                                                          bool fell_back_to_cpu)
+{
+	if (create_from_objects && !fell_back_to_cpu)
+	{
+		return GpuMemoryContentOrigin::GpuAliasMaterialization;
+	}
+	const bool guest_uploaded = type == GpuMemoryObjectType::IndexBuffer || type == GpuMemoryObjectType::VertexBuffer ||
+	                            type == GpuMemoryObjectType::StorageBuffer || type == GpuMemoryObjectType::Texture;
+	return guest_uploaded ? GpuMemoryContentOrigin::CpuUpload : GpuMemoryContentOrigin::Unknown;
+}
+
+// Opt-in draw diagnostics use this bounded, point-in-time view. The sequence
+// orders tracked content transitions within one process; it is not a guest
+// fence or a substitute for submission dependencies.
+struct GpuMemoryRangeProvenanceEntry
+{
+	GpuMemoryObjectType    type                  = GpuMemoryObjectType::Invalid;
+	GpuMemoryOverlapType   relation              = GpuMemoryOverlapType::None;
+	int32_t                heap_id               = -1;
+	int32_t                object_id             = -1;
+	uint64_t               logical_generation    = 0;
+	uint64_t               backing_generation    = 0;
+	uint64_t               content_sequence      = 0;
+	GpuMemoryContentOrigin content_origin        = GpuMemoryContentOrigin::Unknown;
+	uint64_t               submit_id             = 0;
+	uint64_t               cpu_update_time        = 0;
+	uint64_t               gpu_update_time        = 0;
+	bool                   read_only              = false;
+	bool                   in_use                 = false;
+	bool                   write_back_capable     = false;
+	bool                   dependencies_complete = false;
+	bool                   check_hash             = false;
+	bool                   dirty_registered       = false;
+};
+
+struct GpuMemoryRangeProvenance
+{
+	static constexpr uint32_t ENTRIES_MAX = 16;
+
+	GpuMemoryRangeProvenanceEntry entries[ENTRIES_MAX] {};
+	uint32_t                      entry_count = 0;
+	// Exact only when truncated is false. Otherwise this is the number of
+	// matching live objects observed before the bounded scan stopped.
+	uint32_t                      total_count = 0;
+	bool                          truncated   = false;
 };
 
 // Non-exact FindObjects relations for sample→RT aliasing.
@@ -233,7 +298,7 @@ inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type,
 		return false;
 	}
 	return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
-	       relation == GpuMemoryOverlapType::Contains;
+	       relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Equals;
 }
 
 // IndexBuffer ↔ StorageBuffer alias (same relations as VertexStorageShare):
@@ -450,6 +515,13 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 	{
 		return relation == GpuMemoryOverlapType::Equals;
 	}
+	// A render target allocation can cover an index view that was bound
+	// earlier. Preserve both typed views for the observed full containment;
+	// partial/index-equal forms remain unsupported until captured.
+	if (existing_type == GpuMemoryObjectType::IndexBuffer)
+	{
+		return relation == GpuMemoryOverlapType::IsContainedWithin;
+	}
 	if (existing_type == GpuMemoryObjectType::StorageBuffer || existing_type == GpuMemoryObjectType::RenderTexture ||
 	    existing_type == GpuMemoryObjectType::Texture || existing_type == GpuMemoryObjectType::StorageTexture)
 	{
@@ -654,6 +726,55 @@ struct GpuMemoryObject
 	void*               obj  = nullptr;
 };
 
+enum class GpuMemoryDepthD16Source : uint8_t
+{
+	Unsupported,
+	Guest,
+	StorageBuffer,
+};
+
+[[nodiscard]] inline GpuMemoryDepthD16Source GpuMemoryClassifyDepthD16Source(const GpuMemoryOverlapSnapshot& snapshot)
+{
+	if (snapshot.total_count == 0u)
+	{
+		return GpuMemoryDepthD16Source::Guest;
+	}
+	if (snapshot.truncated || snapshot.total_count > 2u || snapshot.entry_count != snapshot.total_count)
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	const GpuMemoryOverlapEntry* texture = nullptr;
+	const GpuMemoryOverlapEntry* storage = nullptr;
+	for (uint32_t index = 0; index < snapshot.entry_count; ++index)
+	{
+		const auto& entry = snapshot.entries[index];
+		if (entry.count != 1u)
+		{
+			return GpuMemoryDepthD16Source::Unsupported;
+		}
+		if (entry.type == GpuMemoryObjectType::Texture && entry.relation == GpuMemoryOverlapType::Equals && entry.exact &&
+		    texture == nullptr)
+		{
+			texture = &entry;
+		} else if (entry.type == GpuMemoryObjectType::StorageBuffer &&
+		           (entry.relation == GpuMemoryOverlapType::Contains || entry.relation == GpuMemoryOverlapType::Equals) &&
+		           storage == nullptr)
+		{
+			storage = &entry;
+		} else
+		{
+			return GpuMemoryDepthD16Source::Unsupported;
+		}
+	}
+	if (storage != nullptr)
+	{
+		return storage->all_read_only ? GpuMemoryDepthD16Source::Guest : GpuMemoryDepthD16Source::StorageBuffer;
+	}
+	return texture != nullptr && snapshot.total_count == 1u && snapshot.exact_count == 1u
+	           ? GpuMemoryDepthD16Source::Guest
+	           : GpuMemoryDepthD16Source::Unsupported;
+}
+
 enum class GpuMemoryMutationAction : uint8_t
 {
 	None,
@@ -778,6 +899,7 @@ void  GpuMemoryResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr_
 void  GpuMemoryDbgDump();
 void  GpuMemoryFlush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 void  GpuMemoryFlushAll(GraphicContext* ctx);
+void  GpuMemoryFrameDone(GraphicContext* ctx);
 void  GpuMemoryFrameDone();
 void  GpuMemoryWriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 void  GpuMemoryCompleteSubmission(SubmissionId submission);
@@ -805,9 +927,21 @@ Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer,
 Vector<GpuMemoryObject> GpuMemoryFindObjectsForSubmission(CommandBuffer* buffer, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
                                                           GpuMemoryObjectType type, bool exact, bool only_first);
 bool                    GpuMemoryQueryOverlaps(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, GpuMemoryOverlapSnapshot* out);
-// Atomically validates a small allocated range and classifies its cached GPU
-// overlaps for an immutable per-submission buffer snapshot.
+bool                    GpuMemoryQueryRangeProvenance(uint64_t vaddr, uint64_t size, GpuMemoryRangeProvenance* out);
+// Validates a bounded allocated range and classifies its cached GPU overlaps.
+// Capture/compare additionally require dirty-page tracking and reject a read
+// if a CPU/HLE writer changes the range during that transaction.
 bool                    GpuMemoryCanSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size);
+bool                    GpuMemoryCaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, void* dst,
+                                                                uint64_t* validation_ns = nullptr,
+                                                                uint64_t* copy_ns       = nullptr);
+// Validates the same immutable-snapshot contract and compares current guest
+// bytes with an existing command-buffer-owned snapshot. A successful call
+// reports eligibility separately from byte equality so changed content falls
+// through to a fresh capture. Concurrent CPU/HLE writes fail closed.
+bool                    GpuMemoryCompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, const void* snapshot,
+                                                                bool* matches, uint64_t* validation_ns = nullptr,
+                                                                uint64_t* compare_ns = nullptr);
 
 inline bool GpuMemoryCanShareReadOnlyStorageViews(uint64_t existing_addr, uint64_t existing_size, bool existing_read_only,
                                                   uint64_t incoming_addr, uint64_t incoming_size, bool incoming_read_only)

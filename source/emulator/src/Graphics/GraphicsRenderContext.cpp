@@ -81,10 +81,17 @@ bool GraphicsRenderUnbindContextForTesting(GraphicContext* ctx)
 	{
 		return false;
 	}
-	// Delete command pools while the caller-owned context and VkDevice are
-	// still live. Only then clear the global binding so no later code can retain
-	// a pointer to a destroyed test context.
+	// Preflight the dedicated probe first. A false return means it is still
+	// reserved, recording, or fence-pending, so leave every pool and the bound
+	// context untouched for the caller to complete safely.
+	if (!g_render_ctx->GetVertexClipProbeRenderer()->Done(ctx))
+	{
+		return false;
+	}
+	// The caller-owned VkDevice remains live throughout pool/sampler teardown;
+	// only then clear the global binding.
 	g_command_pool.DeleteAllForTesting();
+	g_render_ctx->GetSamplerCache()->DeleteAllForTesting(ctx);
 	g_render_ctx->SetGraphicCtx(nullptr);
 	g_test_bound_graphic_context = nullptr;
 	return true;
@@ -96,14 +103,25 @@ void GraphicsRenderCreateContext()
 
 	auto* ctx          = WindowGetGraphicContext();
 	auto* previous_ctx = g_render_ctx->GetGraphicCtx();
-	if (previous_ctx != nullptr && previous_ctx != ctx && !TileGpuDetileReleaseContext(previous_ctx))
+	if (previous_ctx != nullptr && previous_ctx != ctx)
 	{
-		// A diagnostic fence timeout must not free objects still in use or turn
-		// into a process-wide exit. Keep the owned context installed; a later
-		// lifecycle call can release it after its bounded wait succeeds.
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-		               "WARNING: deferring graphics context replacement while diagnostic detile work remains in flight\n");
-		return;
+		if (!g_render_ctx->GetVertexClipProbeRenderer()->Done(previous_ctx))
+		{
+			// A selected probe may still be tied to the old VkDevice. Preserve the
+			// context until its exact command-buffer fence has completed.
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "WARNING: deferring graphics context replacement while vertex clip probe work remains in flight\n");
+			return;
+		}
+		if (!TileGpuDetileReleaseContext(previous_ctx))
+		{
+			// A diagnostic fence timeout must not free objects still in use or turn
+			// into a process-wide exit. Keep the owned context installed; a later
+			// lifecycle call can release it after its bounded wait succeeds.
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+			               "WARNING: deferring graphics context replacement while diagnostic detile work remains in flight\n");
+			return;
+		}
 	}
 	g_render_ctx->SetGraphicCtx(ctx);
 

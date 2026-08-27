@@ -46,8 +46,12 @@
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Kernel/EventQueue.h"
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -66,6 +70,7 @@ inline bool IsGraphicsEopEventId(int id)
 
 struct Label;
 struct RenderDepthInfo;
+struct RenderColorInfo;
 
 struct VulkanDescriptor
 {
@@ -122,6 +127,8 @@ struct PipelineStaticParameters
 	bool                       blend_enable[8]         = {};
 	bool                       blend_bypass[8]         = {};
 	bool                       dx_clip_space           = false;
+	bool                       depth_clip_enable       = true;
+	bool                       depth_clamp_enable      = false;
 
 	bool operator==(const PipelineStaticParameters& other) const;
 };
@@ -258,7 +265,8 @@ public:
 	void                 Free(VulkanDescriptorSet* set);
 
 	VulkanDescriptorSet* GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
-	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_array_sampled,
+	                                   const int* textures2d_sampled_view, VulkanImage** textures2d_sampled_depth,
+	                                   const int* textures2d_sampled_depth_view, VulkanImage** textures2d_array_sampled,
 	                                   const int* textures2d_array_sampled_view, VulkanImage** textures3d_sampled,
 	                                   const int* textures3d_sampled_view, VulkanImage** textures2d_sampled_uint,
 	                                   const int* textures2d_sampled_uint_view, VulkanImage** textures2d_array_sampled_uint,
@@ -277,10 +285,13 @@ private:
 		uint32_t             hash                                          = 0;
 		Stage                stage                                         = Stage::Unknown;
 		int                  storage_buffers_num                           = 0;
-		uint64_t             storage_buffers_id[BUFFERS_MAX]               = {};
+		VulkanBufferDescriptorKey storage_buffers[BUFFERS_MAX]             = {};
 		int                  textures2d_sampled_num                        = 0;
 		uint64_t             textures2d_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
 		uint8_t              textures2d_sampled_view[TEXTURES_SAMPLED_MAX] = {};
+		int                  textures2d_sampled_depth_num                        = 0;
+		uint64_t             textures2d_sampled_depth_id[TEXTURES_SAMPLED_MAX]   = {};
+		uint8_t              textures2d_sampled_depth_view[TEXTURES_SAMPLED_MAX] = {};
 		int                  textures2d_array_sampled_num                        = 0;
 		uint64_t             textures2d_array_sampled_id[TEXTURES_SAMPLED_MAX]   = {};
 		uint8_t              textures2d_array_sampled_view[TEXTURES_SAMPLED_MAX] = {};
@@ -304,7 +315,7 @@ private:
 		int                  gds_buffers_num                               = 0;
 		uint64_t             gds_buffers_id[GDS_BUFFER_MAX]                = {};
 		bool                 vsharp_uniform_buffer                         = false;
-		uint64_t             vsharp_uniform_buffer_id                      = 0;
+		VulkanBufferDescriptorKey vsharp_uniform_buffer_key                = {};
 	};
 
 	struct Pool
@@ -346,12 +357,15 @@ public:
 	KYTY_CLASS_NO_COPY(SamplerCache);
 
 	VkSampler GetSampler(uint64_t id);
-	uint64_t  GetSamplerId(const ShaderSamplerResource& r);
+	uint64_t  GetSamplerId(const ShaderSamplerResource& r, State::ImageSampleOperation operation, bool allow_unnormalized = true);
+	void      DeleteAllForTesting(GraphicContext* ctx);
 
 private:
 	struct Sampler
 	{
 		ShaderSamplerResource r;
+		State::ImageSampleOperation operation {};
+		bool                  allow_unnormalized = true;
 		VkSampler             vk = nullptr;
 	};
 
@@ -370,6 +384,8 @@ struct VulkanFramebuffer
 	uint32_t                  depth_attachment_index            = VK_ATTACHMENT_UNUSED;
 	VkAttachmentLoadOp        color_load_op[TARGETS_MAX]        = {};
 	VkImageLayout             color_initial_layout[TARGETS_MAX] = {};
+	VkAttachmentLoadOp        depth_load_op                     = VK_ATTACHMENT_LOAD_OP_LOAD;
+	VkImageLayout             depth_initial_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkImageLayout             depth_stencil_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkExtent2D                 extent                            = {};
 };
@@ -406,6 +422,8 @@ private:
 		bool               depth_stencil_read_only = false;
 		VkAttachmentLoadOp color_load_op[8]        = {};
 		VkImageLayout      color_initial_layout[8] = {};
+		VkAttachmentLoadOp depth_load_op           = VK_ATTACHMENT_LOAD_OP_LOAD;
+		VkImageLayout      depth_initial_layout    = VK_IMAGE_LAYOUT_UNDEFINED;
 	};
 
 	Core::Mutex                  m_mutex;
@@ -434,6 +452,99 @@ private:
 	VulkanBuffer* m_buffer = nullptr;
 };
 
+class VertexClipProbeRenderer
+{
+public:
+	VertexClipProbeRenderer() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
+	virtual ~VertexClipProbeRenderer() = default;
+	KYTY_CLASS_NO_COPY(VertexClipProbeRenderer);
+
+	[[nodiscard]] bool Init(GraphicContext* ctx);
+	// Test contexts own their VkDevice. Refuse teardown while the selected draw
+	// has not completed its exact command-buffer fence.
+	[[nodiscard]] bool Done(GraphicContext* ctx);
+	[[nodiscard]] bool Reserve(GraphicContext* ctx, CommandBuffer* buffer, uint64_t checksum, bool indexed,
+	                           uint32_t guest_count, uint32_t descriptor_set, uint64_t pixel_checksum = 0,
+	                           bool vertex_probe_enabled = true, bool pixel_probe_enabled = false,
+	                           bool fixed_test_state_known = false, bool depth_test_enabled = false,
+	                           bool stencil_test_enabled = false, bool depth_bounds_test_enabled = false,
+	                           ShaderPixelProbeKind pixel_probe_kind = ShaderPixelProbeKind::None,
+	                           uint32_t pixel_probe_ordinal = 0, uint32_t match_ordinal = 0,
+	                           uint32_t pixel_probe_target = 0, bool pixel_probe_sparse = false,
+	                           bool pixel_probe_attachment_readback = false,
+	                           uint32_t pixel_probe_attachment_min_invocations = 1u,
+	                           const RenderColorInfo* attachment_color = nullptr,
+	                           VkAttachmentLoadOp attachment_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+	                           VkImageLayout attachment_initial_layout = VK_IMAGE_LAYOUT_UNDEFINED);
+	void               Arm(CommandBuffer* buffer, VkPipelineLayout pipeline_layout);
+	void               CaptureAttachmentBeforePass(CommandBuffer* buffer);
+	void               BeginDepthPassQuery(CommandBuffer* buffer);
+	void               EndDepthPassQuery(CommandBuffer* buffer);
+	void               Finish(CommandBuffer* buffer);
+	void               Complete(CommandBuffer* buffer);
+
+	[[nodiscard]] VkDescriptorSetLayout GetDescriptorSetLayout() const { return m_descriptor_set_layout; }
+
+private:
+	struct PendingDraw
+	{
+		CommandBuffer* buffer         = nullptr;
+		uint64_t       checksum       = 0;
+		uint64_t       pixel_checksum = 0;
+		bool           indexed        = false;
+		bool           vertex_probe_enabled = false;
+		bool           pixel_probe_enabled  = false;
+		ShaderPixelProbeKind pixel_probe_kind = ShaderPixelProbeKind::None;
+		uint32_t       pixel_probe_ordinal = 0;
+		uint32_t       pixel_probe_target  = 0;
+		uint32_t       match_ordinal       = 0;
+		bool           pixel_probe_sparse  = false;
+		bool           attachment_readback_requested = false;
+		uint32_t       attachment_min_invocations     = 1u;
+		bool           attachment_before_recorded    = false;
+		bool           attachment_readback_recorded  = false;
+		VertexClipProbeAttachmentStatus attachment_readback_status = VertexClipProbeAttachmentStatus::TargetUnavailable;
+		VertexClipProbeAttachmentStatus attachment_delta_status    = VertexClipProbeAttachmentStatus::InvalidData;
+		VulkanImage*                    attachment_readback_image  = nullptr;
+		uint64_t                        attachment_guest_addr      = 0;
+		VertexClipProbeAttachmentFormat attachment_readback_format = VertexClipProbeAttachmentFormat::Unsupported;
+		VkAttachmentLoadOp               attachment_load_op        = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		VkImageLayout                    attachment_initial_layout  = VK_IMAGE_LAYOUT_UNDEFINED;
+		uint32_t                         attachment_readback_width  = 0;
+		uint32_t                         attachment_readback_height = 0;
+		uint64_t                         attachment_readback_bytes  = 0;
+		bool           depth_query_active   = false;
+		bool           depth_query_recorded = false;
+		bool           fixed_test_state_known = false;
+		bool           depth_test_enabled     = false;
+		bool           stencil_test_enabled   = false;
+		bool           depth_bounds_test_enabled = false;
+		uint32_t       guest_count    = 0;
+		uint32_t       descriptor_set = kVertexClipProbeInvalidDescriptorSet;
+	};
+
+	static constexpr uint64_t kRawStatsBytes = sizeof(VertexClipProbeRawStats);
+
+	[[nodiscard]] bool InitLocked(GraphicContext* ctx);
+	void               DoneLocked(GraphicContext* ctx);
+	void               InitializeRawStatsLocked();
+	void               LogCompletedRawStatsLocked(const VertexClipProbeRawStats& stats);
+	void               LogCompletedAttachmentReadbackLocked(const VertexClipProbeRawStats& stats);
+
+	Core::Mutex              m_mutex;
+	VertexClipProbeLifecycle m_lifecycle;
+	GraphicContext*          m_context               = nullptr;
+	VulkanBuffer             m_raw_stats_buffer;
+	VulkanBuffer             m_attachment_before_readback_buffer;
+	VulkanBuffer             m_attachment_readback_buffer;
+	uint32_t                 m_attachment_empty_retries = 0;
+	VkDescriptorSetLayout    m_descriptor_set_layout = nullptr;
+	VkDescriptorPool         m_descriptor_pool       = nullptr;
+	VkDescriptorSet          m_descriptor_set        = nullptr;
+	VkQueryPool              m_depth_pass_query_pool = VK_NULL_HANDLE;
+	PendingDraw              m_pending_draw;
+};
+
 class RenderContext
 {
 public:
@@ -441,7 +552,7 @@ public:
 	    : m_pipeline_cache(new PipelineCache), m_descriptor_cache(new DescriptorCache), m_framebuffer_cache(new FramebufferCache),
 	      m_sampler_cache(new SamplerCache),
 	      m_shader_translation_cache(new ShaderTranslationCache(16384, &SpirvBinaryCacheDefaultStore(), Config::ShaderValidationEnabled())),
-	      m_gds_buffer(new GdsBuffer)
+	      m_gds_buffer(new GdsBuffer), m_vertex_clip_probe_renderer(new VertexClipProbeRenderer)
 	{
 		if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); }
 	}
@@ -458,6 +569,7 @@ public:
 	SamplerCache*           GetSamplerCache() { return m_sampler_cache; }
 	ShaderTranslationCache* GetShaderTranslationCache() { return m_shader_translation_cache; }
 	GdsBuffer*              GetGdsBuffer() { return m_gds_buffer; }
+	VertexClipProbeRenderer* GetVertexClipProbeRenderer() { return m_vertex_clip_probe_renderer; }
 	DepthStencilCopyRenderer* GetDepthStencilCopyRenderer()
 	{
 		if (m_depth_stencil_copy_renderer == nullptr)
@@ -515,6 +627,7 @@ private:
 	ShaderTranslationCache* m_shader_translation_cache = nullptr;
 	GraphicContext*         m_graphic_ctx              = nullptr;
 	GdsBuffer*              m_gds_buffer               = nullptr;
+	VertexClipProbeRenderer* m_vertex_clip_probe_renderer = nullptr;
 	DepthStencilCopyRenderer* m_depth_stencil_copy_renderer = nullptr;
 
 	Core::Mutex                m_eop_registration_mutex;
@@ -603,6 +716,682 @@ struct RenderColorInfo
 	RenderColorAttachmentInfo attachment[TARGETS_MAX] {};
 };
 
+// Opt-in PS bind probe. KYTY_TRACE_DRAW_PS is a hex checksum, a comma-separated
+// list of up to four checksums, or "*" / "all" for a unique-checksum census.
+// Limit is always clamped to [1, 32].
+struct DrawPsTraceConfig
+{
+	bool     enabled         = false;
+	bool     census          = false;
+	uint64_t checksum        = 0;
+	uint64_t checksums[4]    = {};
+	int      checksum_count  = 0;
+	uint32_t limit           = 32;
+};
+
+struct RenderTargetLifetimeDepthFilter
+{
+	bool     enabled                  = false;
+	bool     address_enabled          = false;
+	uint64_t depth_buffer_vaddr       = 0;
+	bool     extent_enabled           = false;
+	uint32_t width                    = 0;
+	uint32_t height                   = 0;
+	bool     format_enabled           = false;
+	uint32_t format                   = 0;
+};
+
+struct RenderTargetLifetimeColorAddressFilter
+{
+	bool     enabled   = false;
+	uint64_t base_addr = 0;
+};
+
+struct RenderTargetLifetimeColorFormatFilter
+{
+	bool     enabled = false;
+	uint32_t format  = 0;
+};
+
+enum class RenderTargetLifetimeAgentArmState: uint8_t
+{
+	Disabled,
+	Idle,
+	Pending,
+	Open,
+};
+
+enum class RenderTargetLifetimeAgentArmRequestResult: uint8_t
+{
+	Armed,
+	Disabled,
+	AlreadyPending,
+	AlreadyOpen,
+};
+
+// Called by the render path before publishing any lifetime trace activity.
+// Tests may invoke the same production initialization boundary in a
+// process-isolated diagnostics scenario.
+void GraphicsInitializeRenderTargetLifetimeTraceOnRenderThread();
+
+[[nodiscard]] inline RenderTargetLifetimeAgentArmRequestResult RenderTargetLifetimeAgentArmRequest(
+	std::atomic<RenderTargetLifetimeAgentArmState>* state)
+{
+	if (state == nullptr)
+	{
+		return RenderTargetLifetimeAgentArmRequestResult::Disabled;
+	}
+	auto expected = RenderTargetLifetimeAgentArmState::Idle;
+	if (state->compare_exchange_strong(expected, RenderTargetLifetimeAgentArmState::Pending,
+	                                   std::memory_order_acq_rel, std::memory_order_acquire))
+	{
+		return RenderTargetLifetimeAgentArmRequestResult::Armed;
+	}
+	switch (expected)
+	{
+		case RenderTargetLifetimeAgentArmState::Pending:
+			return RenderTargetLifetimeAgentArmRequestResult::AlreadyPending;
+		case RenderTargetLifetimeAgentArmState::Open:
+			return RenderTargetLifetimeAgentArmRequestResult::AlreadyOpen;
+		case RenderTargetLifetimeAgentArmState::Disabled:
+		case RenderTargetLifetimeAgentArmState::Idle:
+		default: return RenderTargetLifetimeAgentArmRequestResult::Disabled;
+	}
+}
+
+[[nodiscard]] inline bool RenderTargetLifetimeAgentArmGateOpen(
+	std::atomic<RenderTargetLifetimeAgentArmState>* state, bool render_eligible)
+{
+	if (state == nullptr)
+	{
+		return true;
+	}
+	auto current = state->load(std::memory_order_acquire);
+	if (current == RenderTargetLifetimeAgentArmState::Disabled || current == RenderTargetLifetimeAgentArmState::Open)
+	{
+		return true;
+	}
+	if (current != RenderTargetLifetimeAgentArmState::Pending || !render_eligible)
+	{
+		return false;
+	}
+	if (state->compare_exchange_strong(current, RenderTargetLifetimeAgentArmState::Open,
+	                                   std::memory_order_acq_rel, std::memory_order_acquire))
+	{
+		return true;
+	}
+	return current == RenderTargetLifetimeAgentArmState::Open;
+}
+
+[[nodiscard]] inline bool ParseRenderTargetLifetimeColorAddressFilter(const char* address,
+	                                                                      RenderTargetLifetimeColorAddressFilter* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+	if (address == nullptr || address[0] == '\0')
+	{
+		return true;
+	}
+	const char* cursor = address;
+	uint32_t    base   = 10u;
+	if (cursor[0] == '0' && (cursor[1] == 'x' || cursor[1] == 'X'))
+	{
+		base = 16u;
+		cursor += 2;
+	}
+	if (cursor[0] == '\0')
+	{
+		return false;
+	}
+	uint64_t parsed = 0;
+	for (; *cursor != '\0'; ++cursor)
+	{
+		uint32_t digit = 0;
+		if (*cursor >= '0' && *cursor <= '9')
+		{
+			digit = static_cast<uint32_t>(*cursor - '0');
+		} else if (base == 16u && *cursor >= 'a' && *cursor <= 'f')
+		{
+			digit = static_cast<uint32_t>(*cursor - 'a') + 10u;
+		} else if (base == 16u && *cursor >= 'A' && *cursor <= 'F')
+		{
+			digit = static_cast<uint32_t>(*cursor - 'A') + 10u;
+		} else
+		{
+			return false;
+		}
+		if (digit >= base || parsed > (UINT64_MAX - digit) / base)
+		{
+			return false;
+		}
+		parsed = parsed * base + digit;
+	}
+	if (parsed == 0)
+	{
+		return false;
+	}
+	out->enabled   = true;
+	out->base_addr = parsed;
+	return true;
+}
+
+[[nodiscard]] inline bool RenderTargetLifetimeColorAddressFilterMatches(
+	const RenderTargetLifetimeColorAddressFilter& filter, uint64_t base_addr)
+{
+	return !filter.enabled || filter.base_addr == base_addr;
+}
+
+[[nodiscard]] inline bool ParseRenderTargetLifetimeColorFormatFilter(const char* format,
+	                                                                  RenderTargetLifetimeColorFormatFilter* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+	if (format == nullptr || format[0] == '\0')
+	{
+		return true;
+	}
+	const char* cursor = format;
+	uint32_t    base   = 10u;
+	if (cursor[0] == '0' && (cursor[1] == 'x' || cursor[1] == 'X'))
+	{
+		base = 16u;
+		cursor += 2;
+	}
+	if (cursor[0] == '\0')
+	{
+		return false;
+	}
+	uint64_t parsed = 0;
+	for (; *cursor != '\0'; ++cursor)
+	{
+		uint32_t digit = 0;
+		if (*cursor >= '0' && *cursor <= '9')
+		{
+			digit = static_cast<uint32_t>(*cursor - '0');
+		} else if (base == 16u && *cursor >= 'a' && *cursor <= 'f')
+		{
+			digit = static_cast<uint32_t>(*cursor - 'a') + 10u;
+		} else if (base == 16u && *cursor >= 'A' && *cursor <= 'F')
+		{
+			digit = static_cast<uint32_t>(*cursor - 'A') + 10u;
+		} else
+		{
+			return false;
+		}
+		if (digit >= base || parsed > (UINT32_MAX - digit) / base)
+		{
+			return false;
+		}
+		parsed = parsed * base + digit;
+	}
+	if (parsed == 0)
+	{
+		return false;
+	}
+	out->enabled = true;
+	out->format  = static_cast<uint32_t>(parsed);
+	return true;
+}
+
+[[nodiscard]] inline bool RenderTargetLifetimeColorFormatFilterMatches(
+	const RenderTargetLifetimeColorFormatFilter& filter, uint32_t format)
+{
+	return !filter.enabled || filter.format == format;
+}
+
+[[nodiscard]] inline bool RenderTargetLifetimeColorSelectorEnabled(
+	const RenderTargetLifetimeColorAddressFilter& address_filter,
+	const RenderTargetLifetimeColorFormatFilter& format_filter)
+{
+	return address_filter.enabled || format_filter.enabled;
+}
+
+[[nodiscard]] inline bool RenderTargetLifetimeColorSelectorMatches(
+	const RenderTargetLifetimeColorAddressFilter& address_filter,
+	const RenderTargetLifetimeColorFormatFilter& format_filter, uint64_t base_addr, uint32_t format)
+{
+	return RenderTargetLifetimeColorAddressFilterMatches(address_filter, base_addr) &&
+	       RenderTargetLifetimeColorFormatFilterMatches(format_filter, format);
+}
+
+[[nodiscard]] inline bool RenderTargetLifetimeTraceSelectorsCompatible(
+	const RenderTargetLifetimeDepthFilter& depth_filter,
+	const RenderTargetLifetimeColorAddressFilter& color_address_filter,
+	const RenderTargetLifetimeColorFormatFilter& color_format_filter, bool probe_color_target)
+{
+	const bool color_selector = RenderTargetLifetimeColorSelectorEnabled(color_address_filter, color_format_filter);
+	return !(probe_color_target && color_selector) && !(depth_filter.enabled && (color_selector || probe_color_target));
+}
+
+[[nodiscard]] inline bool ParseRenderTargetLifetimeAfterCapture(const char* value, uint32_t* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = 0;
+	if (value == nullptr || value[0] == '\0')
+	{
+		return true;
+	}
+	if (value[0] < '1' || value[0] > '9')
+	{
+		return false;
+	}
+	uint64_t parsed = 0;
+	for (const char* cursor = value; *cursor != '\0'; ++cursor)
+	{
+		if (*cursor < '0' || *cursor > '9')
+		{
+			return false;
+		}
+		const uint32_t digit = static_cast<uint32_t>(*cursor - '0');
+		if (parsed > (UINT32_MAX - digit) / 10u)
+		{
+			return false;
+		}
+		parsed = parsed * 10u + digit;
+	}
+	*out = static_cast<uint32_t>(parsed);
+	return true;
+}
+
+[[nodiscard]] constexpr bool RenderTargetLifetimeAfterCaptureEligible(uint32_t ordinal, uint64_t baseline_capture_count,
+	                                                                   uint64_t successful_capture_count)
+{
+	return ordinal == 0u || (successful_capture_count >= baseline_capture_count &&
+	                         successful_capture_count - baseline_capture_count >= ordinal);
+}
+
+[[nodiscard]] inline bool ParseRenderTargetLifetimeDepthFilter(const char* address, const char* extent, const char* format,
+	                                                             RenderTargetLifetimeDepthFilter* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+	RenderTargetLifetimeDepthFilter result {};
+	if (address != nullptr && address[0] != '\0')
+	{
+		const char* cursor = address;
+		if (cursor[0] == '0' && (cursor[1] == 'x' || cursor[1] == 'X'))
+		{
+			cursor += 2;
+		}
+		if (cursor[0] == '\0')
+		{
+			return false;
+		}
+		uint64_t parsed = 0;
+		for (; *cursor != '\0'; ++cursor)
+		{
+			uint32_t digit = 0;
+			if (*cursor >= '0' && *cursor <= '9')
+			{
+				digit = static_cast<uint32_t>(*cursor - '0');
+			} else if (*cursor >= 'a' && *cursor <= 'f')
+			{
+				digit = static_cast<uint32_t>(*cursor - 'a') + 10u;
+			} else if (*cursor >= 'A' && *cursor <= 'F')
+			{
+				digit = static_cast<uint32_t>(*cursor - 'A') + 10u;
+			} else
+			{
+				return false;
+			}
+			if (parsed > (UINT64_MAX - digit) / 16u)
+			{
+				return false;
+			}
+			parsed = parsed * 16u + digit;
+		}
+		if (parsed == 0)
+		{
+			return false;
+		}
+		result.address_enabled    = true;
+		result.depth_buffer_vaddr = parsed;
+	}
+	if (extent != nullptr && extent[0] != '\0')
+	{
+		const char* cursor = extent;
+		uint32_t    values[2] {};
+		for (int i = 0; i < 2; ++i)
+		{
+			if (*cursor < '1' || *cursor > '9')
+			{
+				return false;
+			}
+			uint64_t parsed = 0;
+			for (; *cursor >= '0' && *cursor <= '9'; ++cursor)
+			{
+				const uint32_t digit = static_cast<uint32_t>(*cursor - '0');
+				if (parsed > (UINT32_MAX - digit) / 10u)
+				{
+					return false;
+				}
+				parsed = parsed * 10u + digit;
+			}
+			values[i] = static_cast<uint32_t>(parsed);
+			if (i == 0 && *cursor++ != 'x')
+			{
+				return false;
+			}
+		}
+		if (*cursor != '\0')
+		{
+			return false;
+		}
+		result.extent_enabled = true;
+		result.width          = values[0];
+		result.height         = values[1];
+	}
+	if (format != nullptr && format[0] != '\0')
+	{
+		uint64_t parsed = 0;
+		for (const char* cursor = format; *cursor != '\0'; ++cursor)
+		{
+			if ((*cursor < '0' || *cursor > '9') || (cursor == format && *cursor == '0'))
+			{
+				return false;
+			}
+			const uint32_t digit = static_cast<uint32_t>(*cursor - '0');
+			if (parsed > (UINT32_MAX - digit) / 10u)
+			{
+				return false;
+			}
+			parsed = parsed * 10u + digit;
+		}
+		result.format_enabled = true;
+		result.format         = static_cast<uint32_t>(parsed);
+	}
+	result.enabled = result.address_enabled || result.extent_enabled || result.format_enabled;
+	*out           = result;
+	return true;
+}
+
+[[nodiscard]] inline bool RenderTargetLifetimeDepthFilterMatches(const RenderTargetLifetimeDepthFilter& filter,
+	                                                                uint64_t depth_buffer_vaddr, uint32_t width, uint32_t height,
+	                                                                uint32_t format)
+{
+	return (!filter.address_enabled || filter.depth_buffer_vaddr == depth_buffer_vaddr) &&
+	       (!filter.extent_enabled || (filter.width == width && filter.height == height)) &&
+	       (!filter.format_enabled || filter.format == format);
+}
+
+struct RenderTargetLifetimeDepthAddressTraceState
+{
+	uint64_t guest_addr    = 0;
+	uint64_t host_id       = 0;
+	int      armed_present = -1;
+};
+
+struct RenderTargetLifetimeDepthAddressArmTransition
+{
+	bool accepted    = false;
+	bool newly_armed = false;
+	bool remapped    = false;
+};
+
+[[nodiscard]] inline RenderTargetLifetimeDepthAddressArmTransition RenderTargetLifetimeDepthAddressTraceArm(
+	const RenderTargetLifetimeDepthFilter& filter, uint64_t depth_buffer_vaddr, uint32_t width, uint32_t height, uint32_t format,
+	uint64_t host_id, int present,
+	RenderTargetLifetimeDepthAddressTraceState* state)
+{
+	RenderTargetLifetimeDepthAddressArmTransition result {};
+	if (state == nullptr || depth_buffer_vaddr == 0 || host_id == 0 ||
+	    !RenderTargetLifetimeDepthFilterMatches(filter, depth_buffer_vaddr, width, height, format))
+	{
+		return result;
+	}
+	result.accepted    = true;
+	result.newly_armed = state->guest_addr == 0 && state->host_id == 0;
+	result.remapped    = !result.newly_armed &&
+	                  (state->guest_addr != depth_buffer_vaddr || state->host_id != host_id);
+	if (result.newly_armed || result.remapped)
+	{
+		state->guest_addr    = depth_buffer_vaddr;
+		state->host_id       = host_id;
+		state->armed_present = present;
+	}
+	return result;
+}
+
+[[nodiscard]] inline bool RenderTargetLifetimeDepthAddressTraceUseEligible(
+	const RenderTargetLifetimeDepthFilter& filter, uint64_t depth_buffer_vaddr, uint32_t width, uint32_t height, uint32_t format,
+	uint64_t host_id, int present,
+	const RenderTargetLifetimeDepthAddressTraceState& state)
+{
+	return RenderTargetLifetimeDepthFilterMatches(filter, depth_buffer_vaddr, width, height, format) &&
+	       state.guest_addr == depth_buffer_vaddr && state.host_id == host_id && present > state.armed_present;
+}
+
+[[nodiscard]] constexpr uint32_t DrawMaterialTraceVertexAttributeByteSize(uint32_t format)
+{
+	return format == 74u ? 12u : ((format == 64u || format == 71u) ? 8u : (format == 29u ? 4u : 0u));
+}
+
+bool DecodeDrawMaterialTraceVertexAttribute(uint64_t address, uint32_t format, float* values, uint32_t* components,
+                                            uint32_t* bytes);
+
+[[nodiscard]] inline bool DrawPsTraceChecksumMatch(const DrawPsTraceConfig& config, uint64_t checksum)
+{
+	if (config.census)
+	{
+		return true;
+	}
+	for (int i = 0; i < config.checksum_count && i < 4; ++i)
+	{
+		if (config.checksums[i] == checksum)
+		{
+			return true;
+		}
+	}
+	return config.checksum_count == 0 && config.checksum != 0 && config.checksum == checksum;
+}
+
+[[nodiscard]] inline bool ParseDrawPsTraceConfig(const char* value, const char* limit, DrawPsTraceConfig* out)
+{
+	if (out == nullptr)
+	{
+		return false;
+	}
+	*out = {};
+	out->limit = 32u;
+	if (value == nullptr || value[0] == '\0')
+	{
+		return true;
+	}
+	if (std::strcmp(value, "*") == 0 || std::strcmp(value, "all") == 0 || std::strcmp(value, "ALL") == 0)
+	{
+		out->enabled = true;
+		out->census  = true;
+	}
+	else
+	{
+		const char* cursor = value;
+		while (*cursor != '\0' && out->checksum_count < 4)
+		{
+			char* end = nullptr;
+			const uint64_t checksum = std::strtoull(cursor, &end, 16);
+			if (end == cursor || (*end != '\0' && *end != ','))
+			{
+				*out       = {};
+				out->limit = 32u;
+				return true;
+			}
+			out->checksums[out->checksum_count++] = checksum;
+			cursor                                = (*end == ',') ? end + 1 : end;
+		}
+		if (out->checksum_count == 0)
+		{
+			return true;
+		}
+		out->enabled  = true;
+		out->checksum = out->checksums[0];
+	}
+	if (limit != nullptr && limit[0] != '\0')
+	{
+		char* limit_end = nullptr;
+		const unsigned long parsed = std::strtoul(limit, &limit_end, 10);
+		if (limit_end != limit && *limit_end == '\0')
+		{
+			out->limit = std::clamp(static_cast<uint32_t>(parsed), 1u, 32u);
+		}
+	}
+	return true;
+}
+
+// Guest type 11 cubemaps are sampled as a 2D array. Sampler ops use the
+// RDNA2 [1,2] ST window (unbias by 1) and face_id as the array layer.
+struct CubeSampleBind
+{
+	bool is_cube         = false;
+	bool uses_array_view = false;
+	bool st_window_unbias = false;
+	bool face_as_layer   = false;
+};
+
+[[nodiscard]] inline CubeSampleBind ResolveCubeSampleBind(uint8_t guest_type, int view)
+{
+	CubeSampleBind bind {};
+	if (guest_type != 11u)
+	{
+		return bind;
+	}
+	bind.is_cube          = true;
+	bind.uses_array_view  = view == VulkanImage::VIEW_ARRAY;
+	bind.st_window_unbias = true;
+	bind.face_as_layer    = true;
+	return bind;
+}
+
+// Skybox-style coverage: depth test on, no depth write, GEQUAL. Against a
+// reverse-Z far of 0 the far sky (z≈0) can pass empty pixels.
+struct CubeDrawDepthCoverage
+{
+	bool     test_enable            = false;
+	bool     write_enable           = false;
+	bool     clear_enable           = false;
+	uint32_t compare_op             = 0;
+	bool     far_sky_can_pass_empty = false;
+};
+
+[[nodiscard]] inline CubeDrawDepthCoverage ResolveCubeDrawDepthCoverage(bool test_enable, bool write_enable, bool clear_enable,
+                                                                        uint32_t compare_op)
+{
+	CubeDrawDepthCoverage coverage {};
+	coverage.test_enable            = test_enable;
+	coverage.write_enable           = write_enable;
+	coverage.clear_enable           = clear_enable;
+	coverage.compare_op             = compare_op;
+	coverage.far_sky_can_pass_empty = test_enable && !write_enable && compare_op == static_cast<uint32_t>(VK_COMPARE_OP_GREATER_OR_EQUAL);
+	return coverage;
+}
+
+// Vulkan forbids unnormalizedCoordinates on cube, 2D-array, and 3D views.
+// The restriction is per sampler/view pair: a 2D Dref sampler in the same
+// draw as a cubemap may still take ForceUnorm.
+[[nodiscard]] inline bool SamplerViewAllowsUnnormalized(ShaderGen5SampledTextureShape shape)
+{
+	return shape == ShaderGen5SampledTextureShape::TwoDimensional;
+}
+
+[[nodiscard]] inline bool BindSamplerAllowsUnnormalized(const ShaderTextureResources& textures, int sampler_slot)
+{
+	bool matched = false;
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		const auto& descriptor = textures.desc[i];
+		if (descriptor.usage != ShaderTextureUsage::ReadOnly || descriptor.slot != sampler_slot)
+		{
+			continue;
+		}
+		matched = true;
+		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
+		{
+			return false;
+		}
+	}
+	if (matched)
+	{
+		return true;
+	}
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		const auto& descriptor = textures.desc[i];
+		if (descriptor.usage != ShaderTextureUsage::ReadOnly)
+		{
+			continue;
+		}
+		if (!SamplerViewAllowsUnnormalized(ShaderResolvedSampledTextureShape(descriptor)))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+// Draw-local context for an opt-in, bounded material-binding diagnostic.
+// BindDescriptors only borrows these pointers for the duration of the call.
+struct DrawMaterialTraceContext
+{
+	uint64_t                     ps_checksum             = 0;
+	uint64_t                     ps_addr                 = 0;
+	uint32_t                     ps_in_control           = 0;
+	uint32_t                     ps_required_subgroup    = 0;
+	uint64_t                     vs_checksum             = 0;
+	uint64_t                     vs_addr                 = 0;
+	int                          vs_export_count         = 0;
+	uint8_t                      vertex_float_mode       = 0;
+	bool                         vertex_dx10_clamp       = false;
+	bool                         vertex_ieee_mode        = false;
+	bool                         indexed                 = false;
+	uint32_t                     primitive_type          = 0;
+	uint32_t                     guest_count             = 0;
+	uint32_t                     index_type              = 0;
+	uint64_t                     index_addr              = 0;
+	uint64_t                     index_size              = 0;
+	int32_t                      vertex_offset           = 0;
+	uint32_t                     instance_count          = 1;
+	uint32_t                     first_instance          = 0;
+	uint32_t                     required_vertex_records = 0;
+	const ShaderVertexInputInfo* vertex_input            = nullptr;
+	const RenderColorInfo*       color                   = nullptr;
+	const RenderDepthInfo*       depth                   = nullptr;
+	const HW::Context*           hardware                = nullptr;
+	const VulkanFramebuffer*     framebuffer             = nullptr;
+	uint32_t                     declared_vertex_records = 0;
+	uint32_t                     target_mask             = 0;
+	uint32_t                     blend_enable            = 0;
+	uint32_t                     blend_src               = 0;
+	uint32_t                     blend_op                = 0;
+	uint32_t                     blend_dst               = 0;
+	uint32_t                     blend_bypass            = 0;
+	uint32_t                     color_mask              = 0;
+	uint32_t                     color_on_depth_fail     = 0;
+	uint32_t                     color_off_depth_pass    = 0;
+	uint32_t                     cull_front              = 0;
+	uint32_t                     cull_back               = 0;
+	uint32_t                     face                    = 0;
+	float                        vp_x                    = 0.0f;
+	float                        vp_y                    = 0.0f;
+	float                        vp_width                = 0.0f;
+	float                        vp_height               = 0.0f;
+	float                        vp_zmin                 = 0.0f;
+	float                        vp_zmax                 = 1.0f;
+	uint32_t                     dx_clip                 = 0;
+	uint32_t                     ps_input_num            = 0;
+	uint32_t                     interpolators[8]        = {};
+};
+
 class CommandPool
 {
 public:
@@ -659,6 +1448,7 @@ extern thread_local CommandPool g_command_pool;
 // --- Dump globals (Core) ---
 constexpr uint32_t k_dump_rt_slots = 4;
 extern VulkanImage* g_dump_rt_images[k_dump_rt_slots];
+extern VulkanImage* g_dump_depth_image;
 extern uint32_t     g_dump_rt_count;
 extern VulkanImage* g_dump_bc3_image;
 extern VulkanImage* g_dump_bc3_compute_source;
@@ -727,10 +1517,22 @@ void CommitMaterializedRenderResolutionPlan(const RenderResolutionPlan& decision
                                             const RenderDepthInfo& depth);
 
 // --- Bind ---
-void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input);
+void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffer vk_buffer, const ShaderVertexInputInfo& input,
+	                   uint32_t required_records);
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                     uint32_t storage_seed_skip_mask = 0);
+                     uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr);
+void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
+void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
+	                                    const VulkanFramebuffer& framebuffer);
+void TraceRenderTargetLifetimeSelectProbeColor(const RenderColorInfo& color, uint32_t slot, uint32_t ordinal);
+void TraceRenderTargetLifetimeProbeDepthAttempt(
+    uint64_t submit_id, uint64_t ps_checksum, uint64_t vs_checksum, bool indexed, uint32_t guest_count,
+    uint32_t match_ordinal, uint32_t mrt_target, uint32_t export_ordinal, const RenderDepthInfo& depth,
+    const VulkanFramebuffer& framebuffer, const HW::Context& hardware, const VulkanSampleLocationState& sample_locations);
+void TraceRenderTargetLifetimeDepthClearPass(uint64_t submit_id, const RenderDepthInfo& depth,
+	                                         const VulkanFramebuffer& framebuffer);
+void TraceRenderTargetLifetimeResolve(uint64_t submit_id, const RenderColorInfo& source, const RenderColorInfo& destination);
 void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
 
 
@@ -740,7 +1542,8 @@ void MaybeDumpPrimitiveDrawPlan(const char* path, uint32_t primitive_type, uint3
                                 const PrimitiveDrawPlan& plan);
 bool AutoDrawModifierSupported(uint64_t draw_modifier);
 void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
-                                    uint32_t index_count, uint32_t index_type_and_size, const void* index_addr);
+	                                uint32_t index_count, uint32_t index_type_and_size, const void* index_addr,
+	                                uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance);
 
 } // namespace Kyty::Libs::Graphics
 

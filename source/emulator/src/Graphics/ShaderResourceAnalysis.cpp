@@ -120,7 +120,9 @@ ShaderStorageAccessEvidence ResolveShaderStorageAccessEvidence(bool code_availab
 	{
 		return {ShaderStorageAccess::Unknown, ShaderStorageUnknownReason::RegisterBaseMismatch, true, false, true};
 	}
-	if (source == ShaderStorageBindingSource::MetadataSharp && !decoded_unknown && !indirect_descriptor_use)
+	const bool unreferenced_metadata = source == ShaderStorageBindingSource::MetadataSharp && !decoded_unknown &&
+	                                   !indirect_descriptor_use;
+	if (unreferenced_metadata)
 	{
 		return {ShaderStorageAccess::UnusedMetadata, ShaderStorageUnknownReason::None, true, false, false};
 	}

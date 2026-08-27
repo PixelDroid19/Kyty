@@ -49,6 +49,11 @@ bool WindowGetPresentStats(WindowPresentStats* out);
 // Lock-free presented-frame counter for submission-thread diagnostics.
 void WindowPublishPresentedFrameNum(int frame_num);
 int  WindowGetPresentedFrameNum();
+uint64_t WindowGetSuccessfulManualCaptureCount();
+using WindowPresentCallback = void (*)(uint64_t present);
+// Composition-root callback invoked immediately after the real present
+// counter advances. Graphics never depends on the callback owner.
+void WindowSetPresentCallback(WindowPresentCallback callback);
 bool WindowRequestNativeCapture(uint64_t* out_request_id, WindowNativeCaptureResult* error_out);
 bool WindowWaitNativeCapture(uint64_t request_id, uint32_t timeout_ms, WindowNativeCaptureResult* out);
 

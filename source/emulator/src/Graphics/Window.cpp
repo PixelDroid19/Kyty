@@ -11,7 +11,6 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
-#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Audio.h"
 #include "Emulator/Config.h"
 #include "Emulator/Ports/AudioPausePort.h"
@@ -67,6 +66,8 @@ constexpr float FPS_UPDATE_TIME    = 0.25f;
 // Lock-free mirror of the presented-frame counter. Submission-thread tooling
 // needs the frame index without touching window state owned by the UI thread.
 static std::atomic<int> g_presented_frame_num {0};
+static std::atomic<uint64_t> g_successful_manual_capture_count {0};
+static std::atomic<WindowPresentCallback> g_present_callback {nullptr};
 
 void WindowPublishPresentedFrameNum(int frame_num)
 {
@@ -76,6 +77,16 @@ void WindowPublishPresentedFrameNum(int frame_num)
 int WindowGetPresentedFrameNum()
 {
 	return g_presented_frame_num.load(std::memory_order_relaxed);
+}
+
+uint64_t WindowGetSuccessfulManualCaptureCount()
+{
+	return g_successful_manual_capture_count.load(std::memory_order_acquire);
+}
+
+void WindowSetPresentCallback(WindowPresentCallback callback)
+{
+	g_present_callback.store(callback, std::memory_order_release);
 }
 
 // KYTY_HLE_TRACE_FRAMES=first-last turns the HLE call log on for a bounded
@@ -321,32 +332,25 @@ static NativeCaptureMilestone NativeCaptureNext(WindowContext* ctx)
 		return NativeCaptureMilestone::None;
 	}
 
-	if (ctx->native_capture.first_pending && WindowSteadyMs() >= ctx->native_capture.first_probe_after_ms)
-	{
-		return NativeCaptureMilestone::FirstPresent;
-	}
-
+	const bool first_due = ctx->native_capture.first_pending && WindowSteadyMs() >= ctx->native_capture.first_probe_after_ms;
 	const auto next_present = ctx->native_capture.present_count + 1;
-	if (ctx->native_capture.every_present != 0 && next_present % ctx->native_capture.every_present == 0)
-	{
-		return NativeCaptureMilestone::Interval;
-	}
-
+	const bool interval_due =
+	    ctx->native_capture.every_present != 0 && next_present % ctx->native_capture.every_present == 0;
+	bool trigger_due = false;
 	if (!ctx->native_capture.trigger_file.empty())
 	{
 		std::error_code error;
 		if (std::filesystem::exists(ctx->native_capture.trigger_file, error) && !error)
 		{
-			return NativeCaptureMilestone::Manual;
+			trigger_due = true;
 		}
 	}
-
-	if (ctx->native_capture.manual_pending)
+	const bool manual_pending = [&]()
 	{
-		return NativeCaptureMilestone::Manual;
-	}
-
-	return NativeCaptureMilestone::None;
+		Core::LockGuard lock(ctx->native_capture.result_mutex);
+		return ctx->native_capture.manual_pending;
+	}();
+	return NativeCaptureSelectMilestone(manual_pending, first_due, interval_due, trigger_due);
 }
 
 static const char* NativeCaptureMilestoneName(NativeCaptureMilestone milestone)
@@ -361,17 +365,24 @@ static const char* NativeCaptureMilestoneName(NativeCaptureMilestone milestone)
 	return "none";
 }
 
-static void NativeCapturePublishResult(WindowContext* ctx, bool ok, const char* path, const char* milestone, const char* format,
-                                       uint32_t width, uint32_t height, int frame, const char* error_code, const char* error_message)
+static void NativeCapturePublishResult(WindowContext* ctx, bool ok, const char* path, NativeCaptureMilestone milestone,
+	                                   uint64_t selected_request_id, const char* format, uint32_t width, uint32_t height,
+	                                   int frame, const char* error_code, const char* error_message)
 {
 	EXIT_IF(ctx == nullptr);
+	const char* milestone_name = NativeCaptureMilestoneName(milestone);
 
 	Core::LockGuard lock(ctx->native_capture.result_mutex);
+	if (!NativeCaptureOwnsManualRequest(selected_request_id, ctx->native_capture.manual_pending,
+	                                    ctx->native_capture.request_id))
+	{
+		return;
+	}
 	ctx->native_capture.manual_pending     = false;
-	ctx->native_capture.completed_id       = ctx->native_capture.request_id;
+	ctx->native_capture.completed_id       = selected_request_id;
 	ctx->native_capture.last_ok            = ok;
 	ctx->native_capture.last_path          = path != nullptr ? path : "";
-	ctx->native_capture.last_milestone     = milestone != nullptr ? milestone : "none";
+	ctx->native_capture.last_milestone     = milestone_name;
 	ctx->native_capture.last_format        = format != nullptr ? format : "";
 	ctx->native_capture.last_width         = width;
 	ctx->native_capture.last_height        = height;
@@ -379,6 +390,10 @@ static void NativeCapturePublishResult(WindowContext* ctx, bool ok, const char* 
 	ctx->native_capture.last_present       = ctx->native_capture.present_count;
 	ctx->native_capture.last_error_code    = error_code != nullptr ? error_code : "";
 	ctx->native_capture.last_error_message = error_message != nullptr ? error_message : "";
+	if (NativeCapturePublishesManualGate(milestone, ok, selected_request_id))
+	{
+		g_successful_manual_capture_count.fetch_add(1u, std::memory_order_release);
+	}
 	ctx->native_capture.result_cv.Signal();
 
 	if (ok)
@@ -398,11 +413,13 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	EXIT_IF(image == nullptr);
 	EXIT_IF(milestone == NativeCaptureMilestone::None);
 
-	const bool agent_waiting = [&]()
+	const uint64_t selected_request_id = [&]()
 	{
 		Core::LockGuard lock(ctx->native_capture.result_mutex);
-		return ctx->native_capture.manual_pending || ctx->native_capture.request_id > ctx->native_capture.completed_id;
+		return NativeCaptureSelectedManualRequestId(milestone, ctx->native_capture.manual_pending,
+		                                           ctx->native_capture.request_id);
 	}();
+	const bool agent_waiting = selected_request_id != 0u;
 
 	if (milestone == NativeCaptureMilestone::Manual && !ctx->native_capture.trigger_file.empty())
 	{
@@ -421,7 +438,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		             NativeCaptureFormatName(image->format));
 		if (agent_waiting)
 		{
-			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			NativeCapturePublishResult(ctx, false, nullptr, milestone, selected_request_id, NativeCaptureFormatName(image->format),
 			                           0, 0, frame, "unsupported_format", "native capture requires B8G8R8A8_SRGB or R8G8B8A8_SRGB");
 		}
 		return;
@@ -438,7 +455,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=validate_extent frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
 		{
-			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			NativeCapturePublishResult(ctx, false, nullptr, milestone, selected_request_id, NativeCaptureFormatName(image->format),
 			                           0, 0, frame, "invalid_extent", "native capture extent is invalid");
 		}
 		return;
@@ -464,7 +481,8 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 			KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=convert_image frame=%d recoverable=0\n", frame);
 			if (agent_waiting)
 			{
-				NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+				NativeCapturePublishResult(ctx, false, nullptr, milestone, selected_request_id,
+				                           NativeCaptureFormatName(image->format),
 				                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "convert_image",
 				                           "failed to normalize native capture image");
 			}
@@ -501,7 +519,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=create_directory frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
 		{
-			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			NativeCapturePublishResult(ctx, false, nullptr, milestone, selected_request_id, NativeCaptureFormatName(image->format),
 			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame, "create_directory",
 			                           "failed to create capture directory");
 		}
@@ -513,6 +531,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	    {pixels.data(), {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}, width * 4u,
 	     hdr_capture ? Emulator::Host::HostCaptureImagePixelFormat::Rgba8 : capture_pixel_format},
 	    ctx->native_capture.max_edge, image_path);
+	GraphicsPeekRememberedSceneTargets(&ctx->graphic_ctx);
 	if (codec_result.downscale_fallback)
 	{
 		KYTY_LOG_WARN("KYTY_CAPTURE_WARN subsystem=frame_capture operation=downscale frame=%d kept_full=1\n", frame);
@@ -524,7 +543,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		             create_surface ? "create_surface" : "save_image", frame);
 		if (agent_waiting)
 		{
-			NativeCapturePublishResult(ctx, false, nullptr, NativeCaptureMilestoneName(milestone), NativeCaptureFormatName(image->format),
+			NativeCapturePublishResult(ctx, false, nullptr, milestone, selected_request_id, NativeCaptureFormatName(image->format),
 			                           static_cast<uint32_t>(width), static_cast<uint32_t>(height), frame,
 			                           create_surface ? "create_surface" : "save_image",
 			                           create_surface ? "SDL_CreateRGBSurfaceFrom failed" : "failed to write native capture PNG");
@@ -557,7 +576,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=save_metadata frame=%d recoverable=0\n", frame);
 		if (agent_waiting)
 		{
-			NativeCapturePublishResult(ctx, false, image_path.string().c_str(), NativeCaptureMilestoneName(milestone),
+			NativeCapturePublishResult(ctx, false, image_path.string().c_str(), milestone, selected_request_id,
 			                           NativeCaptureFormatName(image->format), out_width, out_height, frame, "save_metadata",
 			                           "failed to write capture metadata");
 		}
@@ -571,7 +590,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 
 	if (agent_waiting)
 	{
-		NativeCapturePublishResult(ctx, true, image_path.string().c_str(), NativeCaptureMilestoneName(milestone),
+		NativeCapturePublishResult(ctx, true, image_path.string().c_str(), milestone, selected_request_id,
 		                           NativeCaptureFormatName(image->format), out_width, out_height, frame, nullptr, nullptr);
 	}
 }
@@ -2008,7 +2027,8 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 
 static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VulkanExtensions* r,
                                    const VulkanQueues& queues, const Vector<const char*>& device_extensions,
-                                   bool color_write_enable_supported, bool depth_clip_control_supported)
+                                   bool color_write_enable_supported, bool depth_clip_enable_supported,
+                                   bool depth_clip_control_supported)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -2049,9 +2069,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
 	device_features.depthBiasClamp    = supported_features.depthBiasClamp;
 	device_features.sampleRateShading = supported_features.sampleRateShading;
-	// Needed for the depthClipEnable=FALSE fallback when VK_EXT_depth_clip_enable
-	// is unavailable (MoltenVK).
-	device_features.depthClamp = VK_TRUE;
+	device_features.depthClamp = supported_features.depthClamp;
 	// device_features.shaderImageGatherExtended = VK_TRUE;
 
 	VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control_ext {};
@@ -2059,16 +2077,36 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	depth_clip_control_ext.pNext            = nullptr;
 	depth_clip_control_ext.depthClipControl = VK_TRUE;
 
+	VkPhysicalDeviceDepthClipEnableFeaturesEXT depth_clip_enable_ext {};
+	depth_clip_enable_ext.sType           = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT;
+	depth_clip_enable_ext.pNext           = nullptr;
+	depth_clip_enable_ext.depthClipEnable = VK_TRUE;
+
 	VkPhysicalDeviceColorWriteEnableFeaturesEXT color_write_ext {};
 	color_write_ext.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COLOR_WRITE_ENABLE_FEATURES_EXT;
-	color_write_ext.pNext            = (depth_clip_control_supported ? &depth_clip_control_ext : nullptr);
+	color_write_ext.pNext            = nullptr;
 	color_write_ext.colorWriteEnable = VK_TRUE;
+
+	void* device_feature_chain = nullptr;
+	if (depth_clip_control_supported)
+	{
+		depth_clip_control_ext.pNext = device_feature_chain;
+		device_feature_chain         = &depth_clip_control_ext;
+	}
+	if (depth_clip_enable_supported)
+	{
+		depth_clip_enable_ext.pNext = device_feature_chain;
+		device_feature_chain        = &depth_clip_enable_ext;
+	}
+	if (color_write_enable_supported)
+	{
+		color_write_ext.pNext = device_feature_chain;
+		device_feature_chain  = &color_write_ext;
+	}
 
 	VkDeviceCreateInfo create_info {};
 	create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-	create_info.pNext =
-	    (color_write_enable_supported ? static_cast<const void*>(&color_write_ext)
-	                                  : (depth_clip_control_supported ? static_cast<const void*>(&depth_clip_control_ext) : nullptr));
+	create_info.pNext                   = device_feature_chain;
 	create_info.flags                   = 0;
 	create_info.pQueueCreateInfos       = queue_create_info.GetDataConst();
 	create_info.queueCreateInfoCount    = queue_create_info_num;
@@ -2718,21 +2756,55 @@ static void VulkanCreate(WindowContext* ctx)
 			}
 		};
 
-		ctx->graphic_ctx.color_write_enable_supported = has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
+		VkPhysicalDeviceColorWriteEnableFeaturesEXT color_write_enable {};
+		color_write_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COLOR_WRITE_ENABLE_FEATURES_EXT;
+		VkPhysicalDeviceDepthClipEnableFeaturesEXT depth_clip_enable {};
+		depth_clip_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT;
+		VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control {};
+		depth_clip_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
+
+		void* query_chain = nullptr;
+		if (has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME))
+		{
+			color_write_enable.pNext = query_chain;
+			query_chain              = &color_write_enable;
+		}
+		if (has_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME))
+		{
+			depth_clip_enable.pNext = query_chain;
+			query_chain             = &depth_clip_enable;
+		}
+		if (has_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME))
+		{
+			depth_clip_control.pNext = query_chain;
+			query_chain              = &depth_clip_control;
+		}
+		VkPhysicalDeviceFeatures2 available_features {};
+		available_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		available_features.pNext = query_chain;
+		vkGetPhysicalDeviceFeatures2(ctx->graphic_ctx.physical_device, &available_features);
+		ctx->graphic_ctx.depth_clamp_supported = available_features.features.depthClamp == VK_TRUE;
+
+		ctx->graphic_ctx.color_write_enable_supported =
+		    has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME) && color_write_enable.colorWriteEnable == VK_TRUE;
 		if (!ctx->graphic_ctx.color_write_enable_supported)
 		{
 			drop_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME);
 			KYTY_LOG_DEBUG("VK_EXT_color_write_enable absent: baking color write mask into pipelines\n");
 		}
 
-		ctx->graphic_ctx.depth_clip_enable_supported = has_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
+		ctx->graphic_ctx.depth_clip_enable_supported =
+		    has_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME) && depth_clip_enable.depthClipEnable == VK_TRUE;
 		if (!ctx->graphic_ctx.depth_clip_enable_supported)
 		{
 			drop_ext(VK_EXT_DEPTH_CLIP_ENABLE_EXTENSION_NAME);
-			KYTY_LOG_DEBUG("VK_EXT_depth_clip_enable absent: using depthClampEnable fallback\n");
+			KYTY_LOG_DEBUG(ctx->graphic_ctx.depth_clamp_supported
+			                   ? "VK_EXT_depth_clip_enable absent: using depthClamp fallback\n"
+			                   : "VK_EXT_depth_clip_enable and depthClamp absent: retaining core depth clipping\n");
 		}
 
-		ctx->graphic_ctx.depth_clip_control_supported = has_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
+		ctx->graphic_ctx.depth_clip_control_supported =
+		    has_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME) && depth_clip_control.depthClipControl == VK_TRUE;
 		if (!ctx->graphic_ctx.depth_clip_control_supported)
 		{
 			drop_ext(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
@@ -2814,7 +2886,8 @@ static void VulkanCreate(WindowContext* ctx)
 
 	ctx->graphic_ctx.device =
 	    VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions,
-	                       ctx->graphic_ctx.color_write_enable_supported, ctx->graphic_ctx.depth_clip_control_supported);
+	                       ctx->graphic_ctx.color_write_enable_supported, ctx->graphic_ctx.depth_clip_enable_supported,
+	                       ctx->graphic_ctx.depth_clip_control_supported);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
 		EXIT("Could not create device");
@@ -2832,6 +2905,7 @@ void WindowInit(uint32_t width, uint32_t height)
 	EXIT_IF(g_window_ctx != nullptr);
 
 	g_window_ctx = new WindowContext;
+	g_successful_manual_capture_count.store(0, std::memory_order_release);
 
 	g_window_ctx->graphic_ctx.screen_width  = width;
 	g_window_ctx->graphic_ctx.screen_height = height;
@@ -2982,6 +3056,7 @@ void WindowUpdateTitle()
 void WindowDrawBuffer(VideoOutVulkanImage* image)
 {
 	KYTY_PROFILER_FUNCTION();
+	constexpr uint64_t host_wait_timeout_ns = 10000000000ULL;
 
 	EXIT_IF(image == nullptr);
 	EXIT_IF(g_window_ctx == nullptr);
@@ -3007,7 +3082,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	g_window_ctx->swapchain->current_index = static_cast<uint32_t>(-1);
 
 	const auto acquire_start = std::chrono::steady_clock::now();
-	auto       result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, UINT64_MAX,
+	auto       result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, host_wait_timeout_ns,
 	                                          nullptr, g_window_ctx->swapchain->present_complete_fence,
 	                                          &g_window_ctx->swapchain->current_index);
 
@@ -3016,7 +3091,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 		KYTY_LOG_DEBUG("vkAcquireNextImageKHR: result = %d, recreating swapchain\n", static_cast<int>(result));
 		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
 		g_window_ctx->swapchain->current_index = static_cast<uint32_t>(-1);
-		result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, UINT64_MAX, nullptr,
+		result = vkAcquireNextImageKHR(g_window_ctx->graphic_ctx.device, g_window_ctx->swapchain->swapchain, host_wait_timeout_ns, nullptr,
 		                               g_window_ctx->swapchain->present_complete_fence, &g_window_ctx->swapchain->current_index);
 	}
 
@@ -3028,22 +3103,31 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 
 	if (result != VK_SUCCESS)
 	{
-		KYTY_LOG_DEBUG("vkAcquireNextImageKHR failed: result = %d\n", static_cast<int>(result));
+		VulkanSubmitFaultReport("acquire", result);
+		EXIT("vkAcquireNextImageKHR failed: result=%d\n", static_cast<int>(result));
 	}
-	if (result != VK_SUCCESS) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
-	if (g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1) condition ignored (continuing)\n"); }
-	if (g_window_ctx->swapchain->current_index >= g_window_ctx->swapchain->swapchain_images_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: g_window_ctx->swapchain->current_index >= g_window_ctx->swapchain->swapchain_images_count condition ignored (continuing)\n"); }
+	EXIT_IF(g_window_ctx->swapchain->current_index == static_cast<uint32_t>(-1));
+	EXIT_IF(g_window_ctx->swapchain->current_index >= g_window_ctx->swapchain->swapchain_images_count);
 	EXIT_IF(g_window_ctx->swapchain->render_finished_semaphores == nullptr);
 
 	result = vkWaitForFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence, VK_TRUE, 16666666);
 	if (result == VK_TIMEOUT)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: present fence timeout 16ms (continuing)\n");
-		vkWaitForFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence, VK_TRUE, UINT64_MAX);
+		result = vkWaitForFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence, VK_TRUE,
+		                         host_wait_timeout_ns);
 	}
-	if (result != VK_SUCCESS && result != VK_TIMEOUT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result != VK_SUCCESS condition ignored (continuing)\n"); }
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("acquire_fence_wait", result);
+		EXIT("present acquire fence failed: result=%d\n", static_cast<int>(result));
+	}
 
-	vkResetFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence);
+	result = vkResetFences(g_window_ctx->graphic_ctx.device, 1, &g_window_ctx->swapchain->present_complete_fence);
+	if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("acquire_fence_reset", result);
+		EXIT("present acquire fence reset failed: result=%d\n", static_cast<int>(result));
+	}
 	const auto acquire_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - acquire_start).count();
 	DebugStatsRecordAcquire(static_cast<uint64_t>(acquire_ns));
 
@@ -3232,12 +3316,17 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
 	} else if (result != VK_SUCCESS)
 	{
+		VulkanSubmitFaultReport("present", result);
 		EXIT("vkQueuePresentKHR failed: result=%d\n", static_cast<int>(result));
 	}
 	const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
 	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
 
 	g_window_ctx->native_capture.RecordPresent(WindowSteadyMs());
+	if (const auto callback = g_present_callback.load(std::memory_order_acquire); callback != nullptr)
+	{
+		callback(g_window_ctx->native_capture.present_count);
+	}
 	// Agent observation only — does not wake guest waits or change present path.
 	if (g_window_ctx->native_capture.present_count == 1)
 	{

@@ -1,5 +1,7 @@
 #include "Kyty/UnitTest.h"
+#include "Kyty/Core/VirtualMemory.h"
 
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
 
@@ -80,6 +82,48 @@ TEST(EmulatorSymbolDatabase, AudioOut2RegistersOnlyIdentifiedExports)
 	{
 		EXPECT_EQ(symbols.Find(ResolveFor(nid, Loader::SymbolType::Func, U"AudioOut2", U"AudioOut")), nullptr);
 	}
+}
+
+TEST(EmulatorSymbolDatabase, TextToSpeechStatusUsesGuestOutputContract)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libSceTextToSpeech2_1", &symbols));
+
+	const auto* record = symbols.FindByNid(U"08JSg9p6bgQ", Loader::SymbolType::Func);
+	ASSERT_NE(record, nullptr);
+	const auto* initialize_record = symbols.FindByNid(U"UOjiprYwVNw", Loader::SymbolType::Func);
+	const auto* open_record = symbols.FindByNid(U"X0HZNbSiqyg", Loader::SymbolType::Func);
+	const auto* terminate_record = symbols.FindByNid(U"SoWHuVW0gpU", Loader::SymbolType::Func);
+	ASSERT_NE(initialize_record, nullptr);
+	ASSERT_NE(open_record, nullptr);
+	ASSERT_NE(terminate_record, nullptr);
+	using GetSpeechStatus = KYTY_SYSV_ABI int (*)(int32_t* status);
+	using Initialize = KYTY_SYSV_ABI int (*)();
+	using Open = KYTY_SYSV_ABI int (*)(const uint32_t* parameters);
+	using Terminate = KYTY_SYSV_ABI int (*)();
+	auto* get_speech_status = reinterpret_cast<GetSpeechStatus>(record->vaddr);
+	auto* initialize = reinterpret_cast<Initialize>(initialize_record->vaddr);
+	auto* open = reinterpret_cast<Open>(open_record->vaddr);
+	auto* terminate = reinterpret_cast<Terminate>(terminate_record->vaddr);
+
+	const uint64_t address = Core::VirtualMemory::Alloc(0, 0x1000, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	auto* status = reinterpret_cast<int32_t*>(address);
+	auto* parameters = reinterpret_cast<uint32_t*>(address + sizeof(int32_t));
+	parameters[0] = 0;
+	parameters[1] = 0;
+	ASSERT_EQ(initialize(), 0);
+	ASSERT_EQ(open(parameters), 0);
+	*status = -1;
+	EXPECT_EQ(get_speech_status(status), 0);
+	EXPECT_EQ(*status, 0);
+	EXPECT_EQ(get_speech_status(nullptr), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	*status = -1;
+	ASSERT_TRUE(Core::VirtualMemory::ProtectGuest(address, 0x1000, Core::VirtualMemory::Mode::Read));
+	EXPECT_EQ(get_speech_status(status), Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(*status, -1);
+	ASSERT_EQ(terminate(), 0);
+	EXPECT_TRUE(Core::VirtualMemory::Free(address));
 }
 
 TEST(EmulatorSymbolDatabase, AddAliasesRegistersEveryNidWithOneHandler)

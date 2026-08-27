@@ -9,8 +9,8 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Host/CaptureImageCodec.h"
 #include "Emulator/Host/Png.h"
-#include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
+#include "Emulator/Profiler.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -120,7 +120,7 @@ static void set_image_layout(VkCommandBuffer buffer, VulkanImage* dst_image, uin
 			    VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
-			image_memory_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+			image_memory_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 			dest_stages                        = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
 			break;
 		case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
@@ -174,12 +174,32 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
-void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout)
+void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image,
+	                        uint64_t dst_layout)
+{
+	EXIT_IF(buffer == nullptr || src_buffer == nullptr || src_buffer->buffer == nullptr || dst_image == nullptr ||
+	        dst_image->image == nullptr);
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, UtilGetImageUploadSourceLayout(dst_image),
+	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+	VkBufferImageCopy region {};
+	region.bufferRowLength             = src_pitch != dst_image->extent.width ? src_pitch : 0u;
+	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	region.imageSubresource.layerCount = 1u;
+	region.imageExtent                 = {dst_image->extent.width, dst_image->extent.height, 1u};
+	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
+	set_image_layout(vk_buffer, dst_image, 0, 1, VK_IMAGE_ASPECT_DEPTH_BIT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	                 static_cast<VkImageLayout>(dst_layout));
+}
+
+void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,
+                       uint32_t src_array_layer)
 {
 	EXIT_IF(dst_buffer == nullptr);
 	EXIT_IF(dst_buffer->buffer == nullptr);
 	EXIT_IF(src_image == nullptr);
 	EXIT_IF(src_image->image == nullptr);
+	EXIT_IF(src_array_layer >= src_image->array_layers);
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
@@ -192,7 +212,7 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 
 	region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 	region.imageSubresource.mipLevel       = 0;
-	region.imageSubresource.baseArrayLayer = 0;
+	region.imageSubresource.baseArrayLayer = src_array_layer;
 	region.imageSubresource.layerCount     = 1;
 
 	region.imageOffset = {0, 0, 0};
@@ -201,6 +221,23 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
 
 	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                 static_cast<VkImageLayout>(src_layout));
+}
+
+static void UtilImageDepthToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch,
+                                   uint64_t src_layout)
+{
+	EXIT_IF(dst_buffer == nullptr || dst_buffer->buffer == nullptr || src_image == nullptr || src_image->image == nullptr);
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	const auto transition_aspects = DepthFormatAspectMask(src_image->format);
+	set_image_layout(vk_buffer, src_image, 0, 1, transition_aspects, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	VkBufferImageCopy region {};
+	region.bufferRowLength                 = (dst_pitch != src_image->extent.width ? dst_pitch : 0);
+	region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+	region.imageSubresource.layerCount     = 1;
+	region.imageExtent                     = {src_image->extent.width, src_image->extent.height, 1};
+	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
+	set_image_layout(vk_buffer, src_image, 0, 1, transition_aspects, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 static_cast<VkImageLayout>(src_layout));
 }
 
@@ -221,7 +258,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 	uint32_t index = 0;
 	for (const auto& r: regions)
 	{
-		auto& copy = copies[index];
+		auto& copy                           = copies[index];
 		copy.bufferOffset                    = r.offset;
 		copy.bufferRowLength                 = (r.width != r.pitch ? r.pitch : 0);
 		copy.bufferImageHeight               = (r.depth != 1u ? r.height : 0);
@@ -250,7 +287,10 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
-	if (regions.Size() >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: regions.Size() >= 16 condition ignored (continuing)\n"); }
+	if (regions.Size() >= 16)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: regions.Size() >= 16 condition ignored (continuing)\n");
+	}
 
 	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -263,13 +303,13 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 
 		region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 		region.srcSubresource.mipLevel       = r.src_level;
-		region.srcSubresource.baseArrayLayer = 0;
-		region.srcSubresource.layerCount     = 1;
+		region.srcSubresource.baseArrayLayer = r.src_array_layer;
+		region.srcSubresource.layerCount     = r.layer_count;
 		region.srcOffset                     = {r.src_x, r.src_y, 0};
 		region.dstSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 		region.dstSubresource.mipLevel       = r.dst_level;
-		region.dstSubresource.baseArrayLayer = 0;
-		region.dstSubresource.layerCount     = 1;
+		region.dstSubresource.baseArrayLayer = r.dst_array_layer;
+		region.dstSubresource.layerCount     = r.layer_count;
 		region.dstOffset                     = {r.dst_x, r.dst_y, 0};
 		region.extent                        = {r.width, r.height, 1};
 
@@ -369,14 +409,21 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 	buffer_info.size        = size;
 	buffer_info.usage       = buffer->usage;
 	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+	buffer->descriptor_range = size;
 
 	vkCreateBuffer(gctx->device, &buffer_info, nullptr, &buffer->buffer);
-	if (buffer->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer->buffer == nullptr condition ignored (continuing)\n"); }
+	if (buffer->buffer == nullptr)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer->buffer == nullptr condition ignored (continuing)\n");
+	}
 
 	vkGetBufferMemoryRequirements(gctx->device, buffer->buffer, &buffer->memory.requirements);
 
 	bool allocated = VulkanAllocate(gctx, &buffer->memory);
-	if (!allocated) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !allocated condition ignored (continuing)\n"); }
+	if (!allocated)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !allocated condition ignored (continuing)\n");
+	}
 
 	// vkBindBufferMemory(gctx->device, buffer->buffer, buffer->memory.memory, buffer->memory.offset);
 	VulkanBindBufferMemory(gctx, buffer, &buffer->memory);
@@ -393,7 +440,8 @@ void VulkanDeleteBuffer(GraphicContext* gctx, VulkanBuffer* buffer)
 
 	vkDestroyBuffer(gctx->device, buffer->buffer, nullptr);
 	VulkanFree(gctx, &buffer->memory);
-	buffer->buffer = nullptr;
+	buffer->buffer           = nullptr;
+	buffer->descriptor_range = 0;
 }
 
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
@@ -419,7 +467,10 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
 
 	buffer.Begin();
 	UtilBufferToImage(&buffer, &staging_buffer, src_pitch, dst_image, dst_layout);
@@ -430,7 +481,30 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 	VulkanDeleteBuffer(ctx, &staging_buffer);
 }
 
-void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout)
+void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
+	                    uint64_t dst_layout)
+{
+	EXIT_IF(ctx == nullptr || dst_image == nullptr || src_data == nullptr);
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
+	VulkanBuffer staging_buffer {};
+	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VulkanCreateBuffer(ctx, size, &staging_buffer);
+	void* data = nullptr;
+	VulkanMapMemory(ctx, &staging_buffer.memory, &data);
+	std::memcpy(data, src_data, size);
+	VulkanUnmapMemory(ctx, &staging_buffer.memory);
+	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
+	buffer.Begin();
+	UtilBufferToDepthImage(&buffer, &staging_buffer, src_pitch, dst_image, dst_layout);
+	buffer.End();
+	buffer.Execute();
+	buffer.WaitForFence();
+	VulkanDeleteBuffer(ctx, &staging_buffer);
+}
+
+void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image, uint64_t src_layout,
+                    uint32_t src_array_layer)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -446,10 +520,13 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
 
 	buffer.Begin();
-	UtilImageToBuffer(&buffer, src_image, &staging_buffer, dst_pitch, src_layout);
+	UtilImageToBuffer(&buffer, src_image, &staging_buffer, dst_pitch, src_layout, src_array_layer);
 	buffer.End();
 	buffer.Execute();
 	buffer.WaitForFence();
@@ -462,19 +539,47 @@ void UtilFillBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t
 	VulkanDeleteBuffer(ctx, &staging_buffer);
 }
 
+void UtilFillDepthBuffer(GraphicContext* ctx, void* dst_data, uint64_t size, uint32_t dst_pitch, VulkanImage* src_image,
+                         uint64_t src_layout)
+{
+	KYTY_PROFILER_FUNCTION();
+	EXIT_IF(ctx == nullptr || src_image == nullptr || dst_data == nullptr);
+	VulkanBuffer staging_buffer {};
+	staging_buffer.usage           = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	staging_buffer.memory.property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VulkanCreateBuffer(ctx, size, &staging_buffer);
+	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
+	buffer.Begin();
+	UtilImageDepthToBuffer(&buffer, src_image, &staging_buffer, dst_pitch, src_layout);
+	buffer.End();
+	buffer.Execute();
+	buffer.WaitForFence();
+	void* data = nullptr;
+	VulkanMapMemory(ctx, &staging_buffer.memory, &data);
+	std::memcpy(dst_data, data, size);
+	VulkanUnmapMemory(ctx, &staging_buffer.memory);
+	VulkanDeleteBuffer(ctx, &staging_buffer);
+}
+
 bool UtilWriteRgba8Png(const char* path, const uint8_t* pixels, uint32_t width, uint32_t height, uint32_t row_pitch_pixels)
 {
 	return Kyty::Emulator::Host::WriteRgba8Png(path, pixels, width, height, row_pitch_pixels);
 }
 
-bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag)
+bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const char* path_prefix, const char* tag,
+                                 uint32_t src_array_layer)
 {
-	if (ctx == nullptr || image == nullptr || image->image == nullptr || path_prefix == nullptr || path_prefix[0] == '\0')
+	if (ctx == nullptr || image == nullptr || image->image == nullptr || path_prefix == nullptr || path_prefix[0] == '\0' ||
+	    src_array_layer >= image->array_layers)
 	{
 		return false;
 	}
-	const bool rgba8 = image->format == VK_FORMAT_R8G8B8A8_SRGB || image->format == VK_FORMAT_R8G8B8A8_UNORM;
-	const bool bgra8 = image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM;
+	const bool rgba8         = image->format == VK_FORMAT_R8G8B8A8_SRGB || image->format == VK_FORMAT_R8G8B8A8_UNORM;
+	const bool bgra8         = image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM;
 	const bool rgba16_sfloat = image->format == VK_FORMAT_R16G16B16A16_SFLOAT;
 	if (!rgba8 && !bgra8 && !rgba16_sfloat)
 	{
@@ -488,7 +593,8 @@ bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const 
 	}
 	static std::set<std::string> dumped;
 	char                         key_buf[320];
-	std::snprintf(key_buf, sizeof(key_buf), "%s|%llu|%ux%u", path_prefix, static_cast<unsigned long long>(image->memory.unique_id), w, h);
+	std::snprintf(key_buf, sizeof(key_buf), "%s|%llu|%ux%u|%u", path_prefix,
+	              static_cast<unsigned long long>(image->memory.unique_id), w, h, src_array_layer);
 	if (!dumped.insert(key_buf).second || dumped.size() > 64u)
 	{
 		return false;
@@ -497,28 +603,28 @@ bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const 
 	const uint64_t       bytes_per_pixel = rgba16_sfloat ? 8u : 4u;
 	const uint64_t       bytes           = static_cast<uint64_t>(w) * h * bytes_per_pixel;
 	std::vector<uint8_t> pixels(static_cast<size_t>(bytes));
-	UtilFillBuffer(ctx, pixels.data(), bytes, w, image, static_cast<uint64_t>(image->layout));
+	UtilFillBuffer(ctx, pixels.data(), bytes, w, image, static_cast<uint64_t>(image->layout), src_array_layer);
 
 	std::vector<uint8_t> rgba;
-	const auto format = rgba16_sfloat ? Emulator::Host::HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat :
-	                    bgra8 ? Emulator::Host::HostCaptureImagePixelFormat::Bgra8 :
-	                            Emulator::Host::HostCaptureImagePixelFormat::Rgba8;
+	const auto           format = rgba16_sfloat ? Emulator::Host::HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat
+	                              : bgra8       ? Emulator::Host::HostCaptureImagePixelFormat::Bgra8
+	                                            : Emulator::Host::HostCaptureImagePixelFormat::Rgba8;
 	if (!Emulator::Host::HostCaptureImageCodecNormalizeRgba8({pixels.data(), {w, h}, static_cast<uint64_t>(w) * bytes_per_pixel, format},
-	                                                        &rgba))
+	                                                         &rgba))
 	{
 		return false;
 	}
 
 	char path[256];
-	std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu.png", path_prefix, (tag != nullptr ? tag : "img"), w, h,
-	              static_cast<unsigned long long>(image->memory.unique_id));
+	std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu-layer%u.png", path_prefix, (tag != nullptr ? tag : "img"), w, h,
+	              static_cast<unsigned long long>(image->memory.unique_id), src_array_layer);
 
 	if (!UtilWriteRgba8Png(path, rgba.data(), w, h, w))
 	{
 		return false;
 	}
-	KYTY_LOG_DEBUG( "KYTY_DUMP_VK_IMAGE wrote %s layout=%u fmt=%d\n", path, static_cast<unsigned>(image->layout),
-	             static_cast<int>(image->format));
+	KYTY_LOG_DEBUG("KYTY_DUMP_VK_IMAGE wrote %s layout=%u fmt=%d\n", path, static_cast<unsigned>(image->layout),
+	               static_cast<int>(image->format));
 	return true;
 }
 
@@ -527,7 +633,10 @@ void UtilSetDepthLayoutOptimal(DepthStencilVulkanImage* image)
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
 
 	buffer.Begin();
 
@@ -547,7 +656,10 @@ void UtilSetImageLayoutOptimal(VulkanImage* image)
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
 
 	buffer.Begin();
 
@@ -582,7 +694,10 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* image, const void* src_data
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
 
 	buffer.Begin();
 	UtilBufferToImage(&buffer, &staging_buffer, image, regions, dst_layout);
@@ -601,7 +716,10 @@ void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, V
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
 
 	buffer.Begin();
 	UtilImageToImage(&buffer, regions, dst_image, dst_layout);
@@ -621,7 +739,10 @@ void UtilCopyBuffer(VulkanBuffer* src_buffer, VulkanBuffer* dst_buffer, uint64_t
 	CommandBuffer              buffer(GraphicContext::QUEUE_UTIL);
 	// buffer.SetQueue(GraphicContext::QUEUE_UTIL);
 
-	if (buffer.IsInvalid()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n"); }
+	if (buffer.IsInvalid())
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer.IsInvalid() condition ignored (continuing)\n");
+	}
 
 	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
 

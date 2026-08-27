@@ -514,7 +514,8 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	VkPipelineRasterizationStateCreateInfo rasterization_info {};
 	rasterization_info.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rasterization_info.pNext                   = (context->depth_clip_enable_supported ? &depth_clip_state : nullptr);
-	rasterization_info.depthClampEnable        = (context->depth_clip_enable_supported ? VK_FALSE : VK_TRUE);
+	rasterization_info.depthClampEnable        =
+	    (!context->depth_clip_enable_supported && context->depth_clamp_supported ? VK_TRUE : VK_FALSE);
 	rasterization_info.rasterizerDiscardEnable = VK_FALSE;
 	rasterization_info.polygonMode             = VK_POLYGON_MODE_FILL;
 	rasterization_info.cullMode                = cull_mode;

@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -253,6 +254,13 @@ int KYTY_SYSV_ABI ExecuteOnceCallbackImpl(void* first, void* context, void** res
 	return state->succeed ? 1 : 0;
 }
 
+int KYTY_SYSV_ABI CompareInts(const void* key, const void* element)
+{
+	const int lhs = *static_cast<const int*>(key);
+	const int rhs = *static_cast<const int*>(element);
+	return (lhs > rhs) - (lhs < rhs);
+}
+
 const Loader::SymbolRecord* ResolveLibcFunction(Loader::SymbolDatabase* symbols, const char16_t* nid)
 {
 	Loader::SymbolResolve query {};
@@ -329,6 +337,30 @@ TEST(EmulatorLibcCxxLocale, SetlocaleExposesTheStandardLocaleContract)
 	const char* current = setlocale(LC_ALL, nullptr);
 	ASSERT_NE(current, nullptr);
 	EXPECT_NE(current[0], '\0');
+}
+
+TEST(EmulatorLibcCxxLocale, FloatingPointPredicatesUseTheirGuestAbis)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* record = ResolveLibcFunction(&symbols, u"Q8pvJimUWis");
+	ASSERT_NE(record, nullptr);
+	using Isfinitef = KYTY_SYSV_ABI int (*)(float value);
+	auto* isfinitef = reinterpret_cast<Isfinitef>(record->vaddr);
+
+	EXPECT_NE(isfinitef(1.0f), 0);
+	EXPECT_EQ(isfinitef(std::numeric_limits<float>::infinity()), 0);
+	EXPECT_EQ(isfinitef(std::numeric_limits<float>::quiet_NaN()), 0);
+
+	const auto* isinf_record = ResolveLibcFunction(&symbols, u"V02oFv+-JzA");
+	ASSERT_NE(isinf_record, nullptr);
+	using Isinf = KYTY_SYSV_ABI int (*)(double value);
+	auto* isinf = reinterpret_cast<Isinf>(isinf_record->vaddr);
+
+	EXPECT_EQ(isinf(1.0), 0);
+	EXPECT_NE(isinf(std::numeric_limits<double>::infinity()), 0);
+	EXPECT_EQ(isinf(std::numeric_limits<double>::quiet_NaN()), 0);
 }
 
 TEST(EmulatorLibcCxxLocale, MtxInitUsesGuestPthreadStorage)
@@ -506,6 +538,134 @@ TEST(EmulatorLibcCxxLocale, CeilDoubleMatchesLibcContract)
 	EXPECT_DOUBLE_EQ(ceil_fn(1.1), 2.0);
 	EXPECT_DOUBLE_EQ(ceil_fn(-1.1), -1.0);
 	EXPECT_DOUBLE_EQ(ceil_fn(2.0), 2.0);
+}
+
+TEST(EmulatorLibcCxxLocale, TanhDoubleMatchesLibcContract)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"JM4EBvWT9rc");
+	ASSERT_NE(rec, nullptr);
+	using Tanh = KYTY_SYSV_ABI double (*)(double value);
+	auto* tanh_fn = reinterpret_cast<Tanh>(rec->vaddr);
+
+	EXPECT_DOUBLE_EQ(tanh_fn(0.0), 0.0);
+	EXPECT_DOUBLE_EQ(tanh_fn(0.5), std::tanh(0.5));
+}
+
+TEST(EmulatorLibcCxxLocale, SignbitDoubleMatchesLibcContract)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"Rw4J-22tu1U");
+	ASSERT_NE(rec, nullptr);
+	using Signbit = KYTY_SYSV_ABI int (*)(double value);
+	auto* signbit_fn = reinterpret_cast<Signbit>(rec->vaddr);
+
+	EXPECT_EQ(signbit_fn(1.0), 0);
+	EXPECT_NE(signbit_fn(-1.0), 0);
+	EXPECT_EQ(signbit_fn(0.0), 0);
+	EXPECT_NE(signbit_fn(-0.0), 0);
+	const double negative_nan = std::copysign(std::numeric_limits<double>::quiet_NaN(), -1.0);
+	EXPECT_NE(signbit_fn(negative_nan), 0);
+}
+
+TEST(EmulatorLibcCxxLocale, FpclassifyDoubleUsesGuestCategoryValues)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+
+	const auto* rec = ResolveLibcFunction(&symbols, u"qlWiRfOJx1A");
+	ASSERT_NE(rec, nullptr);
+	using Fpclassify = KYTY_SYSV_ABI int (*)(double value);
+	auto* fpclassify_fn = reinterpret_cast<Fpclassify>(rec->vaddr);
+
+	EXPECT_EQ(fpclassify_fn(std::numeric_limits<double>::infinity()), 0x01);
+	EXPECT_EQ(fpclassify_fn(std::numeric_limits<double>::quiet_NaN()), 0x02);
+	EXPECT_EQ(fpclassify_fn(1.0), 0x04);
+	EXPECT_EQ(fpclassify_fn(std::numeric_limits<double>::denorm_min()), 0x08);
+	EXPECT_EQ(fpclassify_fn(0.0), 0x10);
+}
+
+TEST(EmulatorLibcCxxLocale, SetprecisionReturnsGuestIosManipulator)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"1h8hFQghR7w");
+	ASSERT_NE(rec, nullptr);
+
+	struct Ios
+	{
+		std::byte reserved[0x18];
+		uint32_t flags;
+		int32_t precision;
+		int32_t width;
+	};
+	using Apply = KYTY_SYSV_ABI void (*)(Ios* ios, int value);
+	struct Manipulator
+	{
+		Apply apply;
+		int arg;
+	};
+	using Setprecision = KYTY_SYSV_ABI Manipulator (*)(int value);
+	auto* setprecision_fn = reinterpret_cast<Setprecision>(rec->vaddr);
+
+	const Manipulator manipulator = setprecision_fn(7);
+	ASSERT_NE(manipulator.apply, nullptr);
+	EXPECT_EQ(manipulator.arg, 7);
+	Ios ios {};
+	ios.precision = 2;
+	ios.width = 9;
+	manipulator.apply(&ios, manipulator.arg);
+	EXPECT_EQ(ios.precision, 7);
+	EXPECT_EQ(ios.width, 9);
+}
+
+TEST(EmulatorLibcCxxLocale, LroundfReturnsGuestLongValues)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"C6gWCWJKM+U");
+	ASSERT_NE(rec, nullptr);
+	using Lroundf = KYTY_SYSV_ABI int64_t (*)(float value);
+	auto* lroundf_fn = reinterpret_cast<Lroundf>(rec->vaddr);
+
+	EXPECT_EQ(lroundf_fn(2.49f), 2);
+	EXPECT_EQ(lroundf_fn(2.5f), 3);
+	EXPECT_EQ(lroundf_fn(-2.5f), -3);
+	EXPECT_EQ(lroundf_fn(16'777'216.0f), 16'777'216);
+}
+
+TEST(EmulatorLibcCxxLocale, BsearchReturnsMatchingGuestElement)
+{
+	EnsureLog();
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"NesIgTmfF0Q");
+	ASSERT_NE(rec, nullptr);
+	using Bsearch = KYTY_SYSV_ABI void* (*)(const void* key, const void* base, size_t count, size_t size,
+	                                      int(KYTY_SYSV_ABI* compare)(const void*, const void*));
+	auto* bsearch_fn = reinterpret_cast<Bsearch>(rec->vaddr);
+
+	const int values[] = {-9, -1, 0, 4, 20};
+	int key = 4;
+	EXPECT_EQ(bsearch_fn(&key, values, std::size(values), sizeof(values[0]), CompareInts), &values[3]);
+	key = 3;
+	EXPECT_EQ(bsearch_fn(&key, values, std::size(values), sizeof(values[0]), CompareInts), nullptr);
+	EXPECT_EQ(bsearch_fn(&key, values, 0, sizeof(values[0]), CompareInts), nullptr);
 }
 
 TEST(EmulatorLibcCxxLocale, Udivti3DividesGuestUnsigned128BitValues)

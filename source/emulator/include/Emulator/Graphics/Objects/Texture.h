@@ -26,6 +26,7 @@ public:
 	// (GPU-owned range under a live color surface that is not bindable).
 	static constexpr int PARAM_SKIP_GUEST_UPLOAD = 8;
 	static constexpr int PARAM_RESOURCE_INFO     = 9;
+	static constexpr int PARAM_DEPTH_VIEW        = 10;
 
 	static constexpr uint64_t PackResourceInfo(uint8_t resource_type, uint32_t depth, uint32_t base_array = 0u)
 	{
@@ -50,7 +51,7 @@ public:
 
 	TextureObject(uint8_t dfmt, uint8_t nfmt, uint16_t fmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t base_level,
 	              uint32_t levels, uint32_t tile, bool neo, uint32_t swizzle, bool force_degamma, bool skip_guest_upload = false,
-	              uint8_t resource_type = 9u, uint32_t depth = 1u, uint32_t base_array = 0u)
+	              uint8_t resource_type = 9u, uint32_t depth = 1u, uint32_t base_array = 0u, bool depth_view = false)
 	{
 		params[PARAM_FORMAT]            = (static_cast<uint64_t>(fmt) << 16u) | (static_cast<uint64_t>(dfmt) << 8u) | nfmt;
 		params[PARAM_PITCH]             = pitch;
@@ -62,6 +63,7 @@ public:
 		params[PARAM_FORCE_DEGAMMA]      = force_degamma ? 1 : 0;
 		params[PARAM_SKIP_GUEST_UPLOAD] = skip_guest_upload ? 1 : 0;
 		params[PARAM_RESOURCE_INFO]     = PackResourceInfo(resource_type, depth, base_array);
+		params[PARAM_DEPTH_VIEW]        = depth_view ? 1u : 0u;
 		check_hash                      = Gen5SampleTextureUsesHashRefresh(fmt);
 		type                            = Graphics::GpuMemoryObjectType::Texture;
 	}
@@ -74,6 +76,20 @@ public:
 	[[nodiscard]] delete_func_t              GetDeleteFunc() const override;
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
+
+struct TextureSurfaceCopyArrayRange
+{
+	uint32_t base_array_layer = 0;
+	uint32_t layer_count      = 0;
+};
+
+[[nodiscard]] uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format);
+
+[[nodiscard]] bool TextureBlockDumpSpecMatches(const char* spec, uint32_t width, uint32_t height, uint64_t vaddr);
+
+[[nodiscard]] bool TextureGetSurfaceCopyArrayRange(uint8_t resource_type, uint32_t depth, uint32_t base_array,
+                                                   uint32_t levels, uint32_t source_layers,
+                                                   TextureSurfaceCopyArrayRange* range);
 
 } // namespace Kyty::Libs::Graphics
 

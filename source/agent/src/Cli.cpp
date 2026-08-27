@@ -37,7 +37,9 @@ void PrintUsage()
 	                     "  kyty_agent --endpoint ENDPOINT snapshot [--events N] [--after-seq N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT capture [--timeout-ms N] [--no-score]\n"
 	                     "  kyty_agent --endpoint ENDPOINT score\n"
-	                     "  kyty_agent --endpoint ENDPOINT pad down|up|tap BUTTON\n"
+	                     "  kyty_agent --endpoint ENDPOINT trace-rt-lifetime-arm\n"
+	                     "  kyty_agent --endpoint ENDPOINT pad down|up BUTTON\n"
+	                     "  kyty_agent --endpoint ENDPOINT pad tap BUTTON [--at-present N [--repeat R --present-delta D]]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad hold BUTTON --delta N [--timeout-ms N]\n"
 	                     "  kyty_agent --endpoint ENDPOINT pad axis AXIS VALUE|clear\n"
 	                     "  kyty_agent --endpoint ENDPOINT wait-ready [--timeout-ms N]\n"
@@ -550,6 +552,15 @@ int Main(int argc, char** argv)
 		}
 		return Call(endpoint, "{\"id\":1,\"tool\":\"score\",\"args\":{}}");
 	}
+	if (std::strcmp(cmd, "trace-rt-lifetime-arm") == 0)
+	{
+		if (i != argc)
+		{
+			std::fprintf(stderr, "kyty_agent: trace-rt-lifetime-arm does not accept arguments\n");
+			return 125;
+		}
+		return Call(endpoint, "{\"id\":1,\"tool\":\"trace_rt_lifetime_arm\",\"args\":{}}");
+	}
 	if (std::strcmp(cmd, "pad") == 0)
 	{
 		if (i >= argc)
@@ -646,20 +657,74 @@ int Main(int argc, char** argv)
 				return 125;
 			}
 			const char* button = argv[i++];
+			if (std::strcmp(action, "tap") == 0)
+			{
+				uint64_t at_present         = 0;
+				uint64_t repeat             = 1;
+				uint64_t present_delta      = 0;
+				bool     have_at_present    = false;
+				bool     have_repeat        = false;
+				bool     have_present_delta = false;
+				for (; i < argc; ++i)
+				{
+					const char* flag = argv[i];
+					if (std::strcmp(flag, "--at-present") == 0 || std::strcmp(flag, "--repeat") == 0 ||
+					    std::strcmp(flag, "--present-delta") == 0)
+					{
+						const char* value = RequireArg(argc, argv, &i, flag);
+						uint64_t*  target = nullptr;
+						bool*      seen   = nullptr;
+						if (std::strcmp(flag, "--at-present") == 0)
+						{
+							target = &at_present;
+							seen   = &have_at_present;
+						} else if (std::strcmp(flag, "--repeat") == 0)
+						{
+							target = &repeat;
+							seen   = &have_repeat;
+						} else
+						{
+							target = &present_delta;
+							seen   = &have_present_delta;
+						}
+						if (value == nullptr || *seen || !ParseDecimalUnsigned(value, target))
+						{
+							std::fprintf(stderr, "kyty_agent: %s requires one unsigned decimal integer\n", flag);
+							return 125;
+						}
+						*seen = true;
+						continue;
+					}
+					std::fprintf(stderr, "kyty_agent: unknown pad tap flag %s\n", flag);
+					return 125;
+				}
+				if (!have_at_present)
+				{
+					if (have_repeat || have_present_delta)
+					{
+						std::fprintf(stderr, "kyty_agent: --repeat and --present-delta require --at-present\n");
+						return 125;
+					}
+					return Call(endpoint,
+					            "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"" + JsonEscape(button) + "\"}}");
+				}
+				if (at_present == 0 || repeat == 0 || (repeat > 1 && (!have_present_delta || present_delta == 0)))
+				{
+					std::fprintf(stderr, "kyty_agent: scheduled tap requires future --at-present, --repeat >= 1, and positive --present-delta for repeats\n");
+					return 125;
+				}
+				return Call(endpoint, "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"" + JsonEscape(button) +
+				                          "\",\"at_present\":" + std::to_string(at_present) + ",\"repeat\":" + std::to_string(repeat) +
+				                          ",\"present_delta\":" + std::to_string(present_delta) + "}}");
+			}
 			if (i != argc)
 			{
 				std::fprintf(stderr, "kyty_agent: unexpected pad argument %s\n", argv[i]);
 				return 125;
 			}
 			char req[256];
-			if (std::strcmp(action, "tap") == 0)
-			{
-				std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_tap\",\"args\":{\"button\":\"%s\"}}", JsonEscape(button).c_str());
-			} else
-			{
-				std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_%s\",\"args\":{\"button\":\"%s\"}}", action,
-				              JsonEscape(button).c_str());
-			}
+			std::snprintf(req, sizeof(req), "{\"id\":1,\"tool\":\"pad_%s\",\"args\":{\"button\":\"%s\"}}", action,
+			              JsonEscape(button).c_str());
 			return Call(endpoint, req);
 		}
 		std::fprintf(stderr, "kyty_agent: unknown pad action %s\n", action);

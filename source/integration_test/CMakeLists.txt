@@ -126,6 +126,87 @@ set_tests_properties(KytyGraphicsDiagnosticsIntegration.SerializationAndBounds P
 	TIMEOUT 120
 )
 
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.EventWrite
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --event-write-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.EventWrite PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.RenderTargetIndexAlias
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --render-target-index-alias-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.RenderTargetIndexAlias PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.VertexClipProbe
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --vertex-clip-probe-contract-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.VertexClipProbe PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.VertexClipProbeBlocking
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --vertex-clip-probe-blocking-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.VertexClipProbeBlocking PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.VertexClipProbeNonblocking
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --vertex-clip-probe-nonblocking-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.VertexClipProbeNonblocking PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.VertexClipProbeDepthQuery
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --vertex-clip-probe-depth-query-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.VertexClipProbeDepthQuery PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.VertexClipProbeDepthBounds
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --vertex-clip-probe-depth-bounds-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.VertexClipProbeDepthBounds PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.VertexClipProbeColorOnly
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --vertex-clip-probe-color-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.VertexClipProbeColorOnly PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.HostNanRasterBaseline
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --host-nan-raster-baseline-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.HostNanRasterBaseline PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
 add_executable(kyty_libc_wide_integration
 	src/LibcWideIntegration.cpp
 )

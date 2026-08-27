@@ -3,6 +3,7 @@
 
 #include "Emulator/Graphics/Shader.h"
 
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 
 #include "ShaderDebugInternal.h"
@@ -13,6 +14,16 @@ namespace Kyty::Libs::Graphics {
 [[nodiscard]] bool ShaderInstructionHasStaticBranchTarget(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionReadsImageResource(ShaderInstructionType type);
 [[nodiscard]] bool ShaderInstructionWritesImageResource(ShaderInstructionType type);
+[[nodiscard]] bool ShaderInstructionUsesImageSampler(ShaderInstructionType type);
+[[nodiscard]] State::ImageSampleOperation ShaderInstructionSamplerOperation(ShaderInstructionType type);
+
+struct ShaderSamplerOperationEvidence
+{
+	State::ImageSampleOperation operation = State::ImageSampleOperation::Regular;
+	bool                        found     = false;
+};
+
+[[nodiscard]] ShaderSamplerOperationEvidence AnalyzeShaderSamplerOperationEvidence(const ShaderCode& code, int start_register);
 
 void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, int start_index, int slot, ShaderTextureUsage usage,
                             const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer);

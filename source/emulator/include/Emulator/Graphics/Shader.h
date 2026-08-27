@@ -9,6 +9,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/RenderResolutionShaderScale.h"
+#include "Emulator/Graphics/VertexClipProbe.h"
 
 #include <algorithm>
 #ifdef KYTY_EMU_ENABLED
@@ -23,6 +24,10 @@ struct ShaderRegisters;
 struct UserSgprInfo;
 enum class UserSgprType;
 } // namespace HW
+
+namespace State {
+enum class ImageSampleOperation;
+} // namespace State
 
 enum class ShaderType
 {
@@ -933,6 +938,7 @@ private:
 // scalar/constant compare operands are accepted, and any EXEC/VCC mutation
 // between the compare and branch invalidates it.
 [[nodiscard]] bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_index);
+[[nodiscard]] bool ShaderReadfirstlaneCanUseUniformCopy(const ShaderCode& code, uint32_t instruction_index);
 
 struct ShaderId
 {
@@ -991,6 +997,41 @@ constexpr ShaderGen5SampledTextureShape ShaderGen5SampledTextureShapeForType(uin
 	}
 	return ShaderGen5SampledTextureShape::TwoDimensional;
 }
+
+[[nodiscard]] bool ShaderGen5SampledTextureShapeForMimgDimension(uint8_t dimension,
+                                                                 ShaderGen5SampledTextureShape* shape);
+
+constexpr uint8_t ShaderGen5HostSampledTextureType(uint8_t guest_type, ShaderGen5SampledTextureShape shape)
+{
+	switch (shape)
+	{
+		case ShaderGen5SampledTextureShape::TwoDimensional: return guest_type == 8u ? 8u : 9u;
+		case ShaderGen5SampledTextureShape::TwoDimensionalArray: return 13u;
+		case ShaderGen5SampledTextureShape::ThreeDimensional: return 10u;
+	}
+	return guest_type;
+}
+
+enum class ShaderSampledImageViewKind : uint8_t
+{
+	Missing,
+	Color2D,
+	Color2DArray,
+	Color3D,
+	Depth2D,
+	Depth2DArray,
+};
+
+struct ShaderSampledImageViewDecision
+{
+	bool                       compatible = false;
+	ShaderSampledImageViewKind view       = ShaderSampledImageViewKind::Missing;
+};
+
+[[nodiscard]] ShaderSampledImageViewDecision ResolveDepthReferenceImageView(State::ImageSampleOperation operation,
+                                                                            ShaderGen5SampledTextureShape shape,
+                                                                            bool floating_point,
+                                                                            ShaderSampledImageViewKind resolved_view);
 
 inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 {
@@ -1216,6 +1257,9 @@ struct ShaderVertexInputBuffer
 	int      attr_num               = 0;
 	int      attr_indices[ATTR_MAX] = {0};
 	uint32_t attr_offsets[ATTR_MAX] = {0};
+	// SSBO slot in bind.storage_buffers when this stream backs untagged MUBUF
+	// format-loads. -1 means the stream is Fetch-only.
+	int      storage_slot           = -1;
 };
 
 struct ShaderVertexDestination
@@ -1286,6 +1330,31 @@ struct ShaderStorageUseEvidence
 	bool                raw_smem_dynamic_offset = false;
 };
 
+// Structural evidence for one narrowly defined compute metadata-fill family.
+// `valid` establishes only the decoded instruction/dataflow proof below; the
+// caller still has to validate the live descriptors, parameter/source words,
+// allocation generations, and dispatch coverage before assigning semantics.
+struct ShaderComputeMetaFillEvidence
+{
+	int      source_start_register      = -1;
+	int      destination_start_register = -1;
+	int      parameter_start_register   = -1;
+	int      workgroup_register         = -1;
+	uint32_t workgroup_shift            = 0;
+	bool     compute_shader             = false;
+	bool     linear_index_valid         = false;
+	bool     parameter_loads_valid      = false;
+	bool     bounds_guard_valid         = false;
+	bool     source_mask_valid          = false;
+	bool     source_load_valid          = false;
+	bool     destination_store_valid    = false;
+	bool     descriptor_uses_valid      = false;
+	bool     no_unknown_instructions    = false;
+	bool     no_bitwise_xor             = false;
+	bool     control_flow_valid         = false;
+	bool     valid                      = false;
+};
+
 // Dynamic S_LOAD descriptors identify a physical binding without extending
 // the lifetime of the temporary SGPR result. A shader can load the same
 // descriptor into several temporary SGPR ranges, so every mapping is keyed by
@@ -1307,7 +1376,9 @@ struct ShaderDynamicSLoadMappings
 	uint32_t                       instruction_pc[MAPPINGS_MAX]       = {};
 	int                            offset_dw[MAPPINGS_MAX]            = {};
 	int                            dword_count[MAPPINGS_MAX]          = {};
+	int                            resource_field_offset[MAPPINGS_MAX] = {};
 	uint32_t                       last_consumer_pc[MAPPINGS_MAX]     = {};
+	bool                           raw_vmem_oob_guarded[MAPPINGS_MAX] = {};
 	int                            mappings_num                        = 0;
 };
 
@@ -1320,10 +1391,14 @@ enum class ShaderTextureUsage
 
 struct ShaderDirectImageUse
 {
-	ShaderTextureUsage texture          = ShaderTextureUsage::Unknown;
-	int                sampler_register = -1;
-	bool               reads            = false;
-	bool               writes           = false;
+	ShaderTextureUsage          texture          = ShaderTextureUsage::Unknown;
+	State::ImageSampleOperation sample_operation {};
+	ShaderGen5SampledTextureShape sampled_shape  = ShaderGen5SampledTextureShape::TwoDimensional;
+	int                         sampler_register = -1;
+	bool                        reads            = false;
+	bool                        writes           = false;
+	bool                        sampled_shape_known    = false;
+	bool                        sampled_shape_conflict = false;
 };
 
 struct ShaderStorageResources
@@ -1393,23 +1468,35 @@ struct ShaderZeroSBufferResources
                                                                              ShaderStorageAccess unbased_match, bool decoded_unknown,
                                                                              bool indirect_descriptor_use);
 [[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
+[[nodiscard]] ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& code, int source_start_register,
+	                                                                      int destination_start_register, int parameter_start_register);
 [[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register);
+[[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 
 struct ShaderTextureDescriptor
 {
 	ShaderTextureResource texture;
 	ShaderTextureUsage    usage                      = ShaderTextureUsage::Unknown;
+	State::ImageSampleOperation sample_operation {};
+	ShaderGen5SampledTextureShape sampled_shape = ShaderGen5SampledTextureShape::TwoDimensional;
 	int                   slot                       = 0;
 	int                   start_register             = 0;
 	bool                  extended                   = false;
 	bool                  dynamic_sload              = false;
 	bool                  textures2d_without_sampler = false;
+	bool                  sampled_shape_from_instruction = false;
 	// Set only for a compute storage image whose shader has an image store and
 	// no image read for this descriptor. The dispatch still has to prove full
 	// coverage before the backing upload can be omitted.
 	bool                  storage_image_write_only   = false;
 };
+
+constexpr ShaderGen5SampledTextureShape ShaderResolvedSampledTextureShape(const ShaderTextureDescriptor& descriptor)
+{
+	return descriptor.sampled_shape_from_instruction ? descriptor.sampled_shape
+	                                                 : ShaderGen5SampledTextureShapeForType(descriptor.texture.Type());
+}
 
 struct ShaderTextureResources
 {
@@ -1427,6 +1514,7 @@ struct ShaderTextureResources
 	ShaderTextureDescriptor desc[RES_MAX];
 	int                     textures_num             = 0;
 	int                     textures2d_sampled_num   = 0;
+	int                     textures2d_sampled_depth_num = 0;
 	int                     textures2d_array_sampled_num = 0;
 	int                     textures3d_sampled_num   = 0;
 	int                     textures2d_sampled_uint_num = 0;
@@ -1434,6 +1522,7 @@ struct ShaderTextureResources
 	int                     textures3d_sampled_uint_num = 0;
 	int                     textures2d_storage_num   = 0;
 	int                     binding_sampled_index    = 0;
+	int                     binding_sampled_depth_index = -1;
 	int                     binding_sampled_array_index = -1;
 	int                     binding_sampled_3d_index = -1;
 	int                     binding_sampled_uint_index = -1;
@@ -1447,6 +1536,7 @@ struct ShaderSamplerResources
 	static constexpr int RES_MAX = 16;
 
 	ShaderSamplerResource samplers[RES_MAX];
+	State::ImageSampleOperation operations[RES_MAX] = {};
 	int                   slots[RES_MAX]          = {0};
 	int                   start_register[RES_MAX] = {0};
 	bool                  extended[RES_MAX]       = {};
@@ -1454,6 +1544,12 @@ struct ShaderSamplerResources
 	int                   samplers_num            = 0;
 	int                   binding_index           = 0;
 };
+
+// One Vulkan sampler is shared by every sampled image carrying its slot. It is
+// comparison-safe only when all matching uses are normalized, pure 2D depth
+// references; otherwise every use must stay on the regular/manual path.
+[[nodiscard]] bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures,
+                                                        const ShaderSamplerResources& samplers, int sampler_index);
 
 struct ShaderGdsResources
 {
@@ -1555,7 +1651,111 @@ struct ShaderVertexInputInfo
 	bool     fetch_inline               = false;
 	bool     gs_prolog                  = false;
 	bool     input_resources_valid      = true;
+	uint8_t  float_mode                 = 0;
+	bool     dx10_clamp                 = false;
+	bool     ieee_mode                  = false;
+	// Immutable diagnostic selection resolved at the draw boundary. The host
+	// descriptor set is assigned by the renderer after both stages are known.
+	ShaderVertexClipProbeConfig clip_probe;
+	uint32_t                     clip_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
 };
+
+// Bind each merged vertex stream as a ReadOnly raw SSBO so untagged MUBUF
+// format-loads can address through the live V# base instead of Fetch-remapping
+// onto semantic 0. start_register stays negative so bind-time UpdateAddress48
+// leaves the guest base in the descriptor word.
+void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info);
+
+// Remap an embedded MUBUF format-load to resources[i] only when the V# was
+// tracked as a buffer whose attrib_id came from the attribute table. A default
+// attrib_id of 0 (untagged SGPR) would otherwise match the position semantic
+// and bind UV/normal fetches to world XYZ.
+[[nodiscard]] inline int ShaderResolveEmbeddedFetchResource(bool resource_is_tracked_buffer, bool attrib_chain_valid, int attrib_id,
+                                                            const ShaderVertexDestination* destinations, int resource_count)
+{
+	if (!resource_is_tracked_buffer || !attrib_chain_valid || destinations == nullptr || attrib_id < 0 || resource_count <= 0)
+	{
+		return -1;
+	}
+	const int count = resource_count < ShaderVertexInputInfo::RES_MAX ? resource_count : ShaderVertexInputInfo::RES_MAX;
+	for (int i = 0; i < count; i++)
+	{
+		if (destinations[i].semantic == attrib_id)
+		{
+			return i;
+		}
+	}
+	return -1;
+};
+
+struct ShaderGen5MubufStreamSpan
+{
+	uint64_t guest_base = 0;
+	uint64_t guest_size = 0;
+	uint32_t slot       = 0;
+};
+
+// RDNA2 default-mode f32 min/max select a numeric operand when exactly one
+// input is NaN. When both are NaN the RHS payload is preserved. The ordinary
+// numeric min/max result is supplied separately so this policy does not invent
+// signed-zero ordering or other arithmetic semantics.
+[[nodiscard]] constexpr uint32_t ShaderSelectRdna2MinMaxResultBits(bool lhs_nan, bool rhs_nan, uint32_t lhs_bits,
+                                                                  uint32_t rhs_bits, uint32_t numeric_bits)
+{
+	const uint32_t rhs_number = rhs_nan ? lhs_bits : numeric_bits;
+	return lhs_nan ? rhs_bits : rhs_number;
+}
+
+// desc0 is either a bind-time slot (< bound_slots) or a live 48-bit V# base.
+// raw_byte_offset is the descriptor addressing result (index*stride+imm+soffset).
+// access_size_bytes is the complete load/store/atomic width, not merely the
+// first byte touched by the instruction.
+[[nodiscard]] inline bool ShaderResolveGen5MubufLiveAddress(uint64_t desc0, uint32_t raw_byte_offset,
+                                                           uint32_t access_size_bytes, uint32_t bound_slots,
+                                                           const ShaderGen5MubufStreamSpan* spans, uint32_t span_count,
+                                                           uint32_t* out_slot, uint32_t* out_byte_offset)
+{
+	if (out_slot == nullptr || out_byte_offset == nullptr || access_size_bytes == 0)
+	{
+		return false;
+	}
+	if (desc0 < static_cast<uint64_t>(bound_slots))
+	{
+		*out_slot        = static_cast<uint32_t>(desc0);
+		*out_byte_offset = raw_byte_offset;
+		return true;
+	}
+	if (spans == nullptr)
+	{
+		return false;
+	}
+	for (uint32_t i = 0; i < span_count; i++)
+	{
+		if (spans[i].guest_size == 0 || desc0 < spans[i].guest_base)
+		{
+			continue;
+		}
+		const uint64_t rel = desc0 - spans[i].guest_base;
+		if (rel >= spans[i].guest_size)
+		{
+			continue;
+		}
+		if (rel > UINT64_MAX - static_cast<uint64_t>(raw_byte_offset))
+		{
+			continue;
+		}
+		const uint64_t total = rel + static_cast<uint64_t>(raw_byte_offset);
+		if (total >= spans[i].guest_size || total > 0xffffffffull ||
+		    static_cast<uint64_t>(access_size_bytes) > spans[i].guest_size - total)
+		{
+			continue;
+		}
+		*out_slot        = spans[i].slot;
+		*out_byte_offset = static_cast<uint32_t>(total);
+		return true;
+	}
+	return false;
+}
 
 struct ShaderComputeInputInfo
 {
@@ -1565,6 +1765,7 @@ struct ShaderComputeInputInfo
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
 	uint32_t            storage_image_write_only_mask = 0;
+	ShaderComputeMetaFillEvidence meta_fill;
 	ShaderBindResources bind;
 };
 
@@ -1572,6 +1773,17 @@ struct ShaderComputeInputInfo
 {
 	return static_cast<uint32_t>(granulated_lds_size) * 128u;
 }
+
+struct ShaderFragmentTapConfig
+{
+	bool     enabled              = false;
+	bool     draw_scoped          = false;
+	bool     select_ordinal       = false;
+	bool     signed_visualization = false;
+	bool     query_lod_visualization = false;
+	uint32_t selector             = 0;
+	uint64_t diagnostic_identity  = 0;
+};
 
 struct ShaderPixelInputInfo
 {
@@ -1589,11 +1801,22 @@ struct ShaderPixelInputInfo
 	bool                   ps_pixel_kill_enable      = false;
 	bool                   ps_early_z                = false;
 	bool                   ps_execute_on_noop        = false;
+	uint8_t                float_mode                = 0;
+	bool                   dx10_clamp                = false;
+	bool                   ieee_mode                 = false;
+	// Immutable diagnostic configuration resolved once at the draw boundary.
+	ShaderFragmentTapConfig fragment_tap;
+	// Immutable host-only aggregate selection resolved at the draw boundary.
+	// The renderer assigns the descriptor set only after both stage layouts are known.
+	ShaderPixelInput0ProbeConfig input0_probe;
+	uint32_t                     input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
 	// Non-zero when the translated fragment program uses guest-wave operations
 	// whose exact width must be available in the host Vulkan subgroup.
 	uint32_t               required_subgroup_size    = 0;
 	ShaderBindResources    bind;
 };
+
+[[nodiscard]] ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count);
 
 enum class ShaderPixelInterpolatorSource
 {
@@ -1747,12 +1970,14 @@ uint64_t ShaderLookupContinuation(uint64_t front_code_addr);
 
 void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count);
-[[nodiscard]] int32_t ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info);
+[[nodiscard]] bool    ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info,
+	                                             int32_t* resolved_offset, int32_t vertex_offset_add = 0);
+[[nodiscard]] bool    ShaderPreventsNoopPixelElision(const ShaderCode& code);
 ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
 bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
 void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
-                                      ShaderPixelInputInfo* ps_info);
+                                      ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderComputeInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderVertexInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info);
@@ -1763,6 +1988,11 @@ ShaderId         ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderCo
 ShaderCode       ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh);
 ShaderCode       ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh);
 ShaderCode       ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh);
+[[nodiscard]] bool ShaderPixelSampleProbeMatchesInstruction(const ShaderCode& code,
+	                                                            const ShaderPixelInput0ProbeConfig& config);
+[[nodiscard]] bool ShaderPixelMrtProbeMatchesInstruction(const ShaderCode& code,
+	                                                         const ShaderPixelInputInfo& input_info,
+	                                                         const ShaderPixelInput0ProbeConfig& config);
 Vector<uint32_t> ShaderRecompileVS(const ShaderCode& code, const ShaderVertexInputInfo* input_info);
 Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInputInfo* input_info);
 Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeInputInfo* input_info);

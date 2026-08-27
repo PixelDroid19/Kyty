@@ -30,6 +30,14 @@ enum class DebugStatsGpuMemoryCreateOutcome
 	ReclaimNew
 };
 
+enum class DebugStatsGpuMemoryLinkedTopology: uint8_t
+{
+	BufferOnlyReadOnly,
+	SurfaceConnected,
+	MutableOrOther,
+	TraversalTruncated,
+};
+
 // Bounded host-only diagnostics for one CreateObject operation. No guest
 // addresses or object identifiers are retained.
 struct DebugStatsGpuMemorySlowCreateRecord
@@ -100,6 +108,7 @@ public:
 
 	void AddPhase(DebugStatsGpuMemoryCreatePhase phase, uint64_t elapsed_ns, uint64_t bytes = 0);
 	void SetClassification(uint32_t candidates, uint32_t relation_mask, uint32_t reclaimed, bool create_from_objects);
+	void SetLinkedTopology(DebugStatsGpuMemoryLinkedTopology topology);
 	void Complete(DebugStatsGpuMemoryCreateOutcome outcome);
 
 	static void AddCurrentPhase(DebugStatsGpuMemoryCreatePhase phase, uint64_t elapsed_ns, uint64_t bytes = 0);
@@ -110,6 +119,7 @@ private:
 	std::chrono::steady_clock::time_point m_start;
 	uint32_t                             m_type_index = 0;
 	DebugStatsGpuMemoryCreateOutcome     m_outcome    = DebugStatsGpuMemoryCreateOutcome::FastReuse;
+	DebugStatsGpuMemoryLinkedTopology    m_linked_topology = DebugStatsGpuMemoryLinkedTopology::MutableOrOther;
 	bool                                 m_completed  = false;
 };
 
@@ -122,9 +132,14 @@ struct DebugStatsGpuMemoryTypeSnapshot
 	uint64_t new_standalone   = 0;
 	uint64_t new_linked       = 0;
 	uint64_t new_from_objects = 0;
+	uint64_t created_from_objects = 0;
 	uint64_t reclaim_new      = 0;
 	uint64_t logical_free     = 0;
 	uint64_t live             = 0;
+	uint64_t linked_buffer_only_read_only = 0;
+	uint64_t linked_surface_connected      = 0;
+	uint64_t linked_mutable_or_other       = 0;
+	uint64_t linked_traversal_truncated    = 0;
 	uint64_t writeback_calls  = 0;
 	uint64_t writeback_bytes  = 0;
 	uint64_t writeback_ns     = 0;
@@ -250,9 +265,19 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t                    draw_descriptor_finalize_max_ns   = 0;
 	uint64_t                    transient_buffer_probes           = 0;
 	uint64_t                    transient_buffer_hits             = 0;
+	uint64_t                    transient_buffer_reuses           = 0;
 	uint64_t                    transient_buffer_validate_ns      = 0;
 	uint64_t                    transient_buffer_overlap_ns       = 0;
+	uint64_t                    transient_buffer_compare_ns       = 0;
 	uint64_t                    transient_buffer_upload_ns        = 0;
+	uint64_t                    stable_buffer_create_attempts     = 0;
+	uint64_t                    stable_buffer_create_captures     = 0;
+	uint64_t                    stable_buffer_create_bytes        = 0;
+	uint64_t                    stable_buffer_create_fallbacks    = 0;
+	uint64_t                    stable_buffer_update_attempts     = 0;
+	uint64_t                    stable_buffer_update_captures     = 0;
+	uint64_t                    stable_buffer_update_bytes        = 0;
+	uint64_t                    stable_buffer_update_deferrals    = 0;
 	uint64_t                    submits                           = 0;
 	uint64_t                    fence_waits                       = 0;
 	uint64_t                    fence_wait_ns                     = 0;
@@ -407,7 +432,9 @@ void DebugStatsRecordDrawDescriptorStorage(uint64_t elapsed_ns);
 void DebugStatsRecordDrawDescriptorTexture(uint64_t elapsed_ns);
 void DebugStatsRecordDrawDescriptorSampler(uint64_t elapsed_ns);
 void DebugStatsRecordDrawDescriptorFinalize(uint64_t elapsed_ns);
-void DebugStatsRecordTransientBufferProbe(uint64_t validate_ns, uint64_t overlap_ns, uint64_t upload_ns, bool accepted);
+void DebugStatsRecordTransientBufferProbe(uint64_t validate_ns, uint64_t overlap_ns, uint64_t upload_ns, bool accepted,
+	                                      bool reused = false, uint64_t compare_ns = 0);
+void DebugStatsRecordStableBufferSource(bool create, uint64_t bytes, bool accepted);
 void DebugStatsRecordSubmit();
 void DebugStatsRecordSubmissionComplete();
 void DebugStatsRecordFenceWait(uint64_t elapsed_ns);
@@ -432,7 +459,9 @@ void DebugStatsRecordSpirvCompile(uint64_t elapsed_ns);
 void DebugStatsRecordVkPipelineCreate(DebugStatsPipelineKind kind, uint64_t elapsed_ns);
 void DebugStatsRecordShaderTranslationCache(bool hit, bool evicted);
 void DebugStatsRecordGpuMemoryCreate(uint32_t type_index, DebugStatsGpuMemoryCreateOutcome outcome, uint64_t elapsed_ns,
-	                                 const DebugStatsGpuMemorySlowCreateRecord* detail = nullptr);
+	                                 const DebugStatsGpuMemorySlowCreateRecord* detail = nullptr,
+	                                 DebugStatsGpuMemoryLinkedTopology linked_topology =
+	                                     DebugStatsGpuMemoryLinkedTopology::MutableOrOther);
 void DebugStatsRecordGpuMemoryFree(uint32_t type_index);
 void DebugStatsRecordGpuMemoryWriteBack(uint32_t type_index, uint64_t bytes, uint64_t elapsed_ns);
 void DebugStatsRecordGpuMemoryHash(uint32_t type_index, uint64_t bytes, uint64_t elapsed_ns);

@@ -14,6 +14,15 @@
 
 namespace Kyty::Libs::Graphics {
 
+static const char* FloatClampModifier(const Spirv* spirv, bool instruction_clamp)
+{
+	if (!instruction_clamp || spirv == nullptr || spirv->IsIeeeModeEnabled())
+	{
+		return "";
+	}
+	return spirv->IsDx10ClampEnabled() ? CLAMP_DX10 : CLAMP_PASSTHROUGH;
+}
+
 static uint32_t null_mrt_target(ShaderInstructionFormat::Format format)
 {
 	switch (format)
@@ -32,6 +41,18 @@ static uint32_t null_mrt_target(ShaderInstructionFormat::Format format)
 // so the recompiled shader must not store a color for it. The matching
 // CB_SHADER_MASK nibble already clears the Vulkan color write mask.
 constexpr uint8_t kColorExportModeZero = 0;
+
+static bool PixelMrtProbeSelectsExport(const Spirv* spirv, uint32_t instruction_index, uint32_t target)
+{
+	if (spirv == nullptr || !spirv->UsesPixelMrtProbe())
+	{
+		return false;
+	}
+	const auto* input = spirv->GetPsInputInfo();
+	return input != nullptr && input->input0_probe.mrt_target == target &&
+	       ShaderPixelMrtProbeMatchesInstruction(spirv->GetCode(), *input, input->input0_probe) &&
+	       input->input0_probe.export_ordinal == instruction_index;
+}
 
 // exec=0; EXP MRTn null/done; endpgm. The target number does not change the
 // discard semantics.
@@ -156,6 +177,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
          %t10_<index> = OpCompositeExtract %float %t8_<index> 1
 		 <tap_load>
 		 <export_value>
+		 <mrt_probe>
 		       OpStore %<mrt> %t11_<index>
                OpBranch %exp_merge_<index>
          %exp_merge_<index> = OpLabel
@@ -173,7 +195,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	}
 	uint32_t tap_pc = 0;
 	int      tap_register = 0;
-	const bool fragment_tap = FragmentTapSelection(code, &tap_pc, &tap_register);
+	const bool fragment_tap = FragmentTapSelection(code, info->fragment_tap, &tap_pc, &tap_register);
 	const String8 tap_load = fragment_tap
 	                             ? String8("%fs_tap_out_0_<index> = OpLoad %float %fs_tap_0\n"
 	                                       "         %fs_tap_out_1_<index> = OpLoad %float %fs_tap_1\n"
@@ -188,9 +210,16 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	              .ReplaceStr("<index>", index_str)
 	        : String8::FromPrintf("%%t11_<index> = OpCompositeConstruct %%v4float %%%s_<index> %%%s_<index> %%%s_<index> %%%s_<index>",
 	                              source_names[component0], source_names[component1], source_names[component2], source_names[component3]);
+	String8 mrt_probe;
+	if (PixelMrtProbeSelectsExport(spirv, index, static_cast<uint32_t>(mrt)) &&
+	    !spirv->EmitPixelRgbaProbe(&mrt_probe, index, String8::FromPrintf("%%t11_%u", index), "pixel_mrt_probe", true))
+	{
+		return false;
+	}
 
 	*dst_source += String8(text)
 	                   .ReplaceStr("<export_value>", export_value)
+	                   .ReplaceStr("<mrt_probe>", mrt_probe)
 	                   .ReplaceStr("<index>", index_str)
 	                   .ReplaceStr("<load_src0>", load_src0)
 	                   .ReplaceStr("<load_src1>", load_src1)
@@ -254,6 +283,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 		 %t2_<index> = OpLoad %float %<src2>
 		 %t3_<index> = OpLoad %float %<src3>
 		 <export_value>
+		 <mrt_probe>
 		       OpStore %<mrt> %t11_<index>
                OpBranch %exp_merge_<index>
          %exp_merge_<index> = OpLabel
@@ -266,9 +296,16 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 	const String8      export_value =
 	    String8::FromPrintf("%%t11_<index> = OpCompositeConstruct %%v4float %%%s_<index> %%%s_<index> %%%s_<index> %%%s_<index>",
 	                        source_names[component0], source_names[component1], source_names[component2], source_names[component3]);
+	String8 mrt_probe;
+	if (PixelMrtProbeSelectsExport(spirv, index, static_cast<uint32_t>(mrt)) &&
+	    !spirv->EmitPixelRgbaProbe(&mrt_probe, index, String8::FromPrintf("%%t11_%u", index), "pixel_mrt_probe", true))
+	{
+		return false;
+	}
 
 	*dst_source += String8(text)
 	                   .ReplaceStr("<export_value>", export_value)
+	                   .ReplaceStr("<mrt_probe>", mrt_probe)
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<src0>", src0_value.value)
 	                   .ReplaceStr("<src1>", src1_value.value)
@@ -314,6 +351,70 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3)
 	                   .ReplaceStr("<src3>", src3_value.value)
 	                   .ReplaceStr("<param>", param[0]);
 
+	if (spirv->UsesVertexClipProbe() && inst.format == ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3 &&
+	    (inst.exp_enable_mask & 0x03u) == 0x03u)
+	{
+		const auto scope     = spirv->GetConstantUint(1u);
+		const auto semantics = spirv->GetConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
+		const auto one       = spirv->GetConstantUint(1u);
+		const auto zero_uint = spirv->GetConstantUint(0u);
+		const auto sign_mask = spirv->GetConstantUint(0x80000000u);
+		if (scope == "unknown_uint_constant" || semantics == "unknown_uint_constant" || one == "unknown_uint_constant" ||
+		    zero_uint == "unknown_uint_constant" || sign_mask == "unknown_uint_constant")
+		{
+			return false;
+		}
+
+		static const char* vertex_param0_probe = R"(
+%vertex_param0_probe_exports_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_10
+%vertex_param0_probe_exports_prior_<index> = OpAtomicIAdd %uint %vertex_param0_probe_exports_ptr_<index> %<scope> %<semantics> %<one>
+%vertex_param0_probe_x_nan_<index> = OpIsNan %bool %t0_<index>
+%vertex_param0_probe_y_nan_<index> = OpIsNan %bool %t1_<index>
+%vertex_param0_probe_x_inf_<index> = OpIsInf %bool %t0_<index>
+%vertex_param0_probe_y_inf_<index> = OpIsInf %bool %t1_<index>
+%vertex_param0_probe_nan_<index> = OpLogicalOr %bool %vertex_param0_probe_x_nan_<index> %vertex_param0_probe_y_nan_<index>
+%vertex_param0_probe_inf_<index> = OpLogicalOr %bool %vertex_param0_probe_x_inf_<index> %vertex_param0_probe_y_inf_<index>
+%vertex_param0_probe_invalid_<index> = OpLogicalOr %bool %vertex_param0_probe_nan_<index> %vertex_param0_probe_inf_<index>
+               OpSelectionMerge %vertex_param0_probe_merge_<index> None
+               OpBranchConditional %vertex_param0_probe_invalid_<index> %vertex_param0_probe_invalid_block_<index> %vertex_param0_probe_finite_block_<index>
+%vertex_param0_probe_invalid_block_<index> = OpLabel
+%vertex_param0_probe_nonfinite_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_11
+%vertex_param0_probe_nonfinite_prior_<index> = OpAtomicIAdd %uint %vertex_param0_probe_nonfinite_ptr_<index> %<scope> %<semantics> %<one>
+               OpBranch %vertex_param0_probe_merge_<index>
+%vertex_param0_probe_finite_block_<index> = OpLabel
+%vertex_param0_probe_x_bits_<index> = OpBitcast %uint %t0_<index>
+%vertex_param0_probe_x_sign_<index> = OpBitwiseAnd %uint %vertex_param0_probe_x_bits_<index> %<sign_mask>
+%vertex_param0_probe_x_negative_<index> = OpINotEqual %bool %vertex_param0_probe_x_sign_<index> %<zero_uint>
+%vertex_param0_probe_x_inverted_<index> = OpNot %uint %vertex_param0_probe_x_bits_<index>
+%vertex_param0_probe_x_positive_<index> = OpBitwiseXor %uint %vertex_param0_probe_x_bits_<index> %<sign_mask>
+%vertex_param0_probe_x_ordered_<index> = OpSelect %uint %vertex_param0_probe_x_negative_<index> %vertex_param0_probe_x_inverted_<index> %vertex_param0_probe_x_positive_<index>
+%vertex_param0_probe_y_bits_<index> = OpBitcast %uint %t1_<index>
+%vertex_param0_probe_y_sign_<index> = OpBitwiseAnd %uint %vertex_param0_probe_y_bits_<index> %<sign_mask>
+%vertex_param0_probe_y_negative_<index> = OpINotEqual %bool %vertex_param0_probe_y_sign_<index> %<zero_uint>
+%vertex_param0_probe_y_inverted_<index> = OpNot %uint %vertex_param0_probe_y_bits_<index>
+%vertex_param0_probe_y_positive_<index> = OpBitwiseXor %uint %vertex_param0_probe_y_bits_<index> %<sign_mask>
+%vertex_param0_probe_y_ordered_<index> = OpSelect %uint %vertex_param0_probe_y_negative_<index> %vertex_param0_probe_y_inverted_<index> %vertex_param0_probe_y_positive_<index>
+%vertex_param0_probe_min_x_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_12
+%vertex_param0_probe_min_x_prior_<index> = OpAtomicUMin %uint %vertex_param0_probe_min_x_ptr_<index> %<scope> %<semantics> %vertex_param0_probe_x_ordered_<index>
+%vertex_param0_probe_max_x_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_13
+%vertex_param0_probe_max_x_prior_<index> = OpAtomicUMax %uint %vertex_param0_probe_max_x_ptr_<index> %<scope> %<semantics> %vertex_param0_probe_x_ordered_<index>
+%vertex_param0_probe_min_y_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_14
+%vertex_param0_probe_min_y_prior_<index> = OpAtomicUMin %uint %vertex_param0_probe_min_y_ptr_<index> %<scope> %<semantics> %vertex_param0_probe_y_ordered_<index>
+%vertex_param0_probe_max_y_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_15
+%vertex_param0_probe_max_y_prior_<index> = OpAtomicUMax %uint %vertex_param0_probe_max_y_ptr_<index> %<scope> %<semantics> %vertex_param0_probe_y_ordered_<index>
+               OpBranch %vertex_param0_probe_merge_<index>
+%vertex_param0_probe_merge_<index> = OpLabel
+)";
+
+		*dst_source += String8(vertex_param0_probe)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<scope>", scope)
+		                   .ReplaceStr("<semantics>", semantics)
+		                   .ReplaceStr("<one>", one)
+		                   .ReplaceStr("<zero_uint>", zero_uint)
+		                   .ReplaceStr("<sign_mask>", sign_mask);
+	}
+
 	return true;
 }
 
@@ -344,12 +445,197 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
                OpStore %t5_<index> %t4_<index>
 )";
 
+	const auto index_str = String8::FromPrintf("%u", index);
 	*dst_source += String8(text)
-	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                   .ReplaceStr("<index>", index_str)
 	                   .ReplaceStr("<src0>", src0_value.value)
 	                   .ReplaceStr("<src1>", src1_value.value)
 	                   .ReplaceStr("<src2>", src2_value.value)
 	                   .ReplaceStr("<src3>", src3_value.value);
+
+	if (spirv->UsesVertexClipProbe())
+	{
+		const auto scope      = spirv->GetConstantUint(1u);
+		const auto semantics  = spirv->GetConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
+		const auto one        = spirv->GetConstantUint(1u);
+		const auto zero_uint                                = spirv->GetConstantUint(0u);
+		const auto sign_mask                                = spirv->GetConstantUint(0x80000000u);
+		const auto zero_float                               = spirv->GetConstantFloat(0.0f);
+		const auto clip_w_nonpositive_member                = spirv->GetConstantInt(31);
+		const auto clip_xy_outside_member                   = spirv->GetConstantInt(32);
+		const auto clip_z_outside_zero_to_one_member        = spirv->GetConstantInt(33);
+		const auto clip_inside_zero_to_one_member           = spirv->GetConstantInt(34);
+		const auto clip_z_outside_negative_one_to_one_member = spirv->GetConstantInt(35);
+		const auto clip_inside_negative_one_to_one_member    = spirv->GetConstantInt(36);
+		if (scope == "unknown_uint_constant" || semantics == "unknown_uint_constant" || one == "unknown_uint_constant" ||
+		    zero_uint == "unknown_uint_constant" || sign_mask == "unknown_uint_constant" ||
+		    zero_float == "unknown_float_constant" || clip_w_nonpositive_member == "unknown_int_constant" ||
+		    clip_xy_outside_member == "unknown_int_constant" ||
+		    clip_z_outside_zero_to_one_member == "unknown_int_constant" ||
+		    clip_inside_zero_to_one_member == "unknown_int_constant" ||
+		    clip_z_outside_negative_one_to_one_member == "unknown_int_constant" ||
+		    clip_inside_negative_one_to_one_member == "unknown_int_constant")
+		{
+			return false;
+		}
+
+		static const char* vertex_clip_probe = R"(
+%vertex_clip_probe_x_<index> = OpCompositeExtract %float %t4_<index> 0
+%vertex_clip_probe_y_<index> = OpCompositeExtract %float %t4_<index> 1
+%vertex_clip_probe_z_<index> = OpCompositeExtract %float %t4_<index> 2
+%vertex_clip_probe_w_<index> = OpCompositeExtract %float %t4_<index> 3
+%vertex_clip_probe_invocations_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_0
+%vertex_clip_probe_invocations_prior_<index> = OpAtomicIAdd %uint %vertex_clip_probe_invocations_ptr_<index> %<scope> %<semantics> %<one>
+%vertex_clip_probe_x_nan_<index> = OpIsNan %bool %vertex_clip_probe_x_<index>
+%vertex_clip_probe_y_nan_<index> = OpIsNan %bool %vertex_clip_probe_y_<index>
+%vertex_clip_probe_z_nan_<index> = OpIsNan %bool %vertex_clip_probe_z_<index>
+%vertex_clip_probe_w_nan_<index> = OpIsNan %bool %vertex_clip_probe_w_<index>
+%vertex_clip_probe_x_inf_<index> = OpIsInf %bool %vertex_clip_probe_x_<index>
+%vertex_clip_probe_y_inf_<index> = OpIsInf %bool %vertex_clip_probe_y_<index>
+%vertex_clip_probe_z_inf_<index> = OpIsInf %bool %vertex_clip_probe_z_<index>
+%vertex_clip_probe_w_inf_<index> = OpIsInf %bool %vertex_clip_probe_w_<index>
+%vertex_clip_probe_nan_xy_<index> = OpLogicalOr %bool %vertex_clip_probe_x_nan_<index> %vertex_clip_probe_y_nan_<index>
+%vertex_clip_probe_nan_zw_<index> = OpLogicalOr %bool %vertex_clip_probe_z_nan_<index> %vertex_clip_probe_w_nan_<index>
+%vertex_clip_probe_nan_<index> = OpLogicalOr %bool %vertex_clip_probe_nan_xy_<index> %vertex_clip_probe_nan_zw_<index>
+%vertex_clip_probe_inf_xy_<index> = OpLogicalOr %bool %vertex_clip_probe_x_inf_<index> %vertex_clip_probe_y_inf_<index>
+%vertex_clip_probe_inf_zw_<index> = OpLogicalOr %bool %vertex_clip_probe_z_inf_<index> %vertex_clip_probe_w_inf_<index>
+%vertex_clip_probe_inf_<index> = OpLogicalOr %bool %vertex_clip_probe_inf_xy_<index> %vertex_clip_probe_inf_zw_<index>
+%vertex_clip_probe_raw_invalid_<index> = OpLogicalOr %bool %vertex_clip_probe_nan_<index> %vertex_clip_probe_inf_<index>
+               OpSelectionMerge %vertex_clip_probe_raw_merge_<index> None
+               OpBranchConditional %vertex_clip_probe_raw_invalid_<index> %vertex_clip_probe_raw_invalid_block_<index> %vertex_clip_probe_raw_finite_block_<index>
+%vertex_clip_probe_raw_invalid_block_<index> = OpLabel
+%vertex_clip_probe_nonfinite_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_1
+%vertex_clip_probe_nonfinite_prior_<index> = OpAtomicIAdd %uint %vertex_clip_probe_nonfinite_ptr_<index> %<scope> %<semantics> %<one>
+               OpBranch %vertex_clip_probe_raw_merge_<index>
+%vertex_clip_probe_raw_finite_block_<index> = OpLabel
+%vertex_clip_probe_w_nonpositive_<index> = OpFOrdLessThanEqual %bool %vertex_clip_probe_w_<index> %<zero_float>
+               OpSelectionMerge %vertex_clip_probe_w_class_merge_<index> None
+               OpBranchConditional %vertex_clip_probe_w_nonpositive_<index> %vertex_clip_probe_w_nonpositive_block_<index> %vertex_clip_probe_w_positive_block_<index>
+%vertex_clip_probe_w_nonpositive_block_<index> = OpLabel
+%vertex_clip_probe_w_nonpositive_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %<clip_w_nonpositive_member>
+%vertex_clip_probe_w_nonpositive_prior_<index> = OpAtomicIAdd %uint %vertex_clip_probe_w_nonpositive_ptr_<index> %<scope> %<semantics> %<one>
+               OpBranch %vertex_clip_probe_w_class_merge_<index>
+%vertex_clip_probe_w_positive_block_<index> = OpLabel
+%vertex_clip_probe_neg_w_<index> = OpFNegate %float %vertex_clip_probe_w_<index>
+%vertex_clip_probe_x_inside_low_<index> = OpFOrdGreaterThanEqual %bool %vertex_clip_probe_x_<index> %vertex_clip_probe_neg_w_<index>
+%vertex_clip_probe_x_inside_high_<index> = OpFOrdLessThanEqual %bool %vertex_clip_probe_x_<index> %vertex_clip_probe_w_<index>
+%vertex_clip_probe_x_inside_<index> = OpLogicalAnd %bool %vertex_clip_probe_x_inside_low_<index> %vertex_clip_probe_x_inside_high_<index>
+%vertex_clip_probe_y_inside_low_<index> = OpFOrdGreaterThanEqual %bool %vertex_clip_probe_y_<index> %vertex_clip_probe_neg_w_<index>
+%vertex_clip_probe_y_inside_high_<index> = OpFOrdLessThanEqual %bool %vertex_clip_probe_y_<index> %vertex_clip_probe_w_<index>
+%vertex_clip_probe_y_inside_<index> = OpLogicalAnd %bool %vertex_clip_probe_y_inside_low_<index> %vertex_clip_probe_y_inside_high_<index>
+%vertex_clip_probe_xy_inside_<index> = OpLogicalAnd %bool %vertex_clip_probe_x_inside_<index> %vertex_clip_probe_y_inside_<index>
+%vertex_clip_probe_xy_outside_<index> = OpLogicalNot %bool %vertex_clip_probe_xy_inside_<index>
+%vertex_clip_probe_z01_inside_low_<index> = OpFOrdGreaterThanEqual %bool %vertex_clip_probe_z_<index> %<zero_float>
+%vertex_clip_probe_z01_inside_high_<index> = OpFOrdLessThanEqual %bool %vertex_clip_probe_z_<index> %vertex_clip_probe_w_<index>
+%vertex_clip_probe_z01_inside_<index> = OpLogicalAnd %bool %vertex_clip_probe_z01_inside_low_<index> %vertex_clip_probe_z01_inside_high_<index>
+%vertex_clip_probe_z01_outside_<index> = OpLogicalNot %bool %vertex_clip_probe_z01_inside_<index>
+%vertex_clip_probe_z01_outside_class_<index> = OpLogicalAnd %bool %vertex_clip_probe_xy_inside_<index> %vertex_clip_probe_z01_outside_<index>
+%vertex_clip_probe_inside01_class_<index> = OpLogicalAnd %bool %vertex_clip_probe_xy_inside_<index> %vertex_clip_probe_z01_inside_<index>
+%vertex_clip_probe_zn11_inside_low_<index> = OpFOrdGreaterThanEqual %bool %vertex_clip_probe_z_<index> %vertex_clip_probe_neg_w_<index>
+%vertex_clip_probe_zn11_inside_high_<index> = OpFOrdLessThanEqual %bool %vertex_clip_probe_z_<index> %vertex_clip_probe_w_<index>
+%vertex_clip_probe_zn11_inside_<index> = OpLogicalAnd %bool %vertex_clip_probe_zn11_inside_low_<index> %vertex_clip_probe_zn11_inside_high_<index>
+%vertex_clip_probe_zn11_outside_<index> = OpLogicalNot %bool %vertex_clip_probe_zn11_inside_<index>
+%vertex_clip_probe_zn11_outside_class_<index> = OpLogicalAnd %bool %vertex_clip_probe_xy_inside_<index> %vertex_clip_probe_zn11_outside_<index>
+%vertex_clip_probe_insiden11_class_<index> = OpLogicalAnd %bool %vertex_clip_probe_xy_inside_<index> %vertex_clip_probe_zn11_inside_<index>
+%vertex_clip_probe_xy_outside_value_<index> = OpSelect %uint %vertex_clip_probe_xy_outside_<index> %<one> %<zero_uint>
+%vertex_clip_probe_z01_outside_value_<index> = OpSelect %uint %vertex_clip_probe_z01_outside_class_<index> %<one> %<zero_uint>
+%vertex_clip_probe_inside01_value_<index> = OpSelect %uint %vertex_clip_probe_inside01_class_<index> %<one> %<zero_uint>
+%vertex_clip_probe_zn11_outside_value_<index> = OpSelect %uint %vertex_clip_probe_zn11_outside_class_<index> %<one> %<zero_uint>
+%vertex_clip_probe_insiden11_value_<index> = OpSelect %uint %vertex_clip_probe_insiden11_class_<index> %<one> %<zero_uint>
+%vertex_clip_probe_xy_outside_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %<clip_xy_outside_member>
+%vertex_clip_probe_xy_outside_prior_<index> = OpAtomicIAdd %uint %vertex_clip_probe_xy_outside_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_xy_outside_value_<index>
+%vertex_clip_probe_z01_outside_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %<clip_z_outside_zero_to_one_member>
+%vertex_clip_probe_z01_outside_prior_<index> = OpAtomicIAdd %uint %vertex_clip_probe_z01_outside_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_z01_outside_value_<index>
+%vertex_clip_probe_inside01_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %<clip_inside_zero_to_one_member>
+%vertex_clip_probe_inside01_prior_<index> = OpAtomicIAdd %uint %vertex_clip_probe_inside01_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_inside01_value_<index>
+%vertex_clip_probe_zn11_outside_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %<clip_z_outside_negative_one_to_one_member>
+%vertex_clip_probe_zn11_outside_prior_<index> = OpAtomicIAdd %uint %vertex_clip_probe_zn11_outside_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_zn11_outside_value_<index>
+%vertex_clip_probe_insiden11_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %<clip_inside_negative_one_to_one_member>
+%vertex_clip_probe_insiden11_prior_<index> = OpAtomicIAdd %uint %vertex_clip_probe_insiden11_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_insiden11_value_<index>
+%vertex_clip_probe_x_over_w_<index> = OpFDiv %float %vertex_clip_probe_x_<index> %vertex_clip_probe_w_<index>
+%vertex_clip_probe_y_over_w_<index> = OpFDiv %float %vertex_clip_probe_y_<index> %vertex_clip_probe_w_<index>
+%vertex_clip_probe_z_over_w_<index> = OpFDiv %float %vertex_clip_probe_z_<index> %vertex_clip_probe_w_<index>
+%vertex_clip_probe_x_over_w_nan_<index> = OpIsNan %bool %vertex_clip_probe_x_over_w_<index>
+%vertex_clip_probe_y_over_w_nan_<index> = OpIsNan %bool %vertex_clip_probe_y_over_w_<index>
+%vertex_clip_probe_z_over_w_nan_<index> = OpIsNan %bool %vertex_clip_probe_z_over_w_<index>
+%vertex_clip_probe_x_over_w_inf_<index> = OpIsInf %bool %vertex_clip_probe_x_over_w_<index>
+%vertex_clip_probe_y_over_w_inf_<index> = OpIsInf %bool %vertex_clip_probe_y_over_w_<index>
+%vertex_clip_probe_z_over_w_inf_<index> = OpIsInf %bool %vertex_clip_probe_z_over_w_<index>
+%vertex_clip_probe_ratio_nan_xy_<index> = OpLogicalOr %bool %vertex_clip_probe_x_over_w_nan_<index> %vertex_clip_probe_y_over_w_nan_<index>
+%vertex_clip_probe_ratio_nan_<index> = OpLogicalOr %bool %vertex_clip_probe_ratio_nan_xy_<index> %vertex_clip_probe_z_over_w_nan_<index>
+%vertex_clip_probe_ratio_inf_xy_<index> = OpLogicalOr %bool %vertex_clip_probe_x_over_w_inf_<index> %vertex_clip_probe_y_over_w_inf_<index>
+%vertex_clip_probe_ratio_inf_<index> = OpLogicalOr %bool %vertex_clip_probe_ratio_inf_xy_<index> %vertex_clip_probe_z_over_w_inf_<index>
+%vertex_clip_probe_ratio_invalid_<index> = OpLogicalOr %bool %vertex_clip_probe_ratio_nan_<index> %vertex_clip_probe_ratio_inf_<index>
+               OpSelectionMerge %vertex_clip_probe_ratio_merge_<index> None
+               OpBranchConditional %vertex_clip_probe_ratio_invalid_<index> %vertex_clip_probe_ratio_invalid_block_<index> %vertex_clip_probe_ratio_finite_block_<index>
+%vertex_clip_probe_ratio_invalid_block_<index> = OpLabel
+               OpBranch %vertex_clip_probe_ratio_merge_<index>
+%vertex_clip_probe_ratio_finite_block_<index> = OpLabel
+%vertex_clip_probe_w_bits_<index> = OpBitcast %uint %vertex_clip_probe_w_<index>
+%vertex_clip_probe_w_sign_<index> = OpBitwiseAnd %uint %vertex_clip_probe_w_bits_<index> %<sign_mask>
+%vertex_clip_probe_w_negative_<index> = OpINotEqual %bool %vertex_clip_probe_w_sign_<index> %<zero_uint>
+%vertex_clip_probe_w_inverted_<index> = OpNot %uint %vertex_clip_probe_w_bits_<index>
+%vertex_clip_probe_w_positive_<index> = OpBitwiseXor %uint %vertex_clip_probe_w_bits_<index> %<sign_mask>
+%vertex_clip_probe_w_ordered_<index> = OpSelect %uint %vertex_clip_probe_w_negative_<index> %vertex_clip_probe_w_inverted_<index> %vertex_clip_probe_w_positive_<index>
+%vertex_clip_probe_x_over_w_bits_<index> = OpBitcast %uint %vertex_clip_probe_x_over_w_<index>
+%vertex_clip_probe_x_over_w_sign_<index> = OpBitwiseAnd %uint %vertex_clip_probe_x_over_w_bits_<index> %<sign_mask>
+%vertex_clip_probe_x_over_w_negative_<index> = OpINotEqual %bool %vertex_clip_probe_x_over_w_sign_<index> %<zero_uint>
+%vertex_clip_probe_x_over_w_inverted_<index> = OpNot %uint %vertex_clip_probe_x_over_w_bits_<index>
+%vertex_clip_probe_x_over_w_positive_<index> = OpBitwiseXor %uint %vertex_clip_probe_x_over_w_bits_<index> %<sign_mask>
+%vertex_clip_probe_x_over_w_ordered_<index> = OpSelect %uint %vertex_clip_probe_x_over_w_negative_<index> %vertex_clip_probe_x_over_w_inverted_<index> %vertex_clip_probe_x_over_w_positive_<index>
+%vertex_clip_probe_y_over_w_bits_<index> = OpBitcast %uint %vertex_clip_probe_y_over_w_<index>
+%vertex_clip_probe_y_over_w_sign_<index> = OpBitwiseAnd %uint %vertex_clip_probe_y_over_w_bits_<index> %<sign_mask>
+%vertex_clip_probe_y_over_w_negative_<index> = OpINotEqual %bool %vertex_clip_probe_y_over_w_sign_<index> %<zero_uint>
+%vertex_clip_probe_y_over_w_inverted_<index> = OpNot %uint %vertex_clip_probe_y_over_w_bits_<index>
+%vertex_clip_probe_y_over_w_positive_<index> = OpBitwiseXor %uint %vertex_clip_probe_y_over_w_bits_<index> %<sign_mask>
+%vertex_clip_probe_y_over_w_ordered_<index> = OpSelect %uint %vertex_clip_probe_y_over_w_negative_<index> %vertex_clip_probe_y_over_w_inverted_<index> %vertex_clip_probe_y_over_w_positive_<index>
+%vertex_clip_probe_z_over_w_bits_<index> = OpBitcast %uint %vertex_clip_probe_z_over_w_<index>
+%vertex_clip_probe_z_over_w_sign_<index> = OpBitwiseAnd %uint %vertex_clip_probe_z_over_w_bits_<index> %<sign_mask>
+%vertex_clip_probe_z_over_w_negative_<index> = OpINotEqual %bool %vertex_clip_probe_z_over_w_sign_<index> %<zero_uint>
+%vertex_clip_probe_z_over_w_inverted_<index> = OpNot %uint %vertex_clip_probe_z_over_w_bits_<index>
+%vertex_clip_probe_z_over_w_positive_<index> = OpBitwiseXor %uint %vertex_clip_probe_z_over_w_bits_<index> %<sign_mask>
+%vertex_clip_probe_z_over_w_ordered_<index> = OpSelect %uint %vertex_clip_probe_z_over_w_negative_<index> %vertex_clip_probe_z_over_w_inverted_<index> %vertex_clip_probe_z_over_w_positive_<index>
+%vertex_clip_probe_min_w_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_2
+%vertex_clip_probe_min_w_prior_<index> = OpAtomicUMin %uint %vertex_clip_probe_min_w_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_w_ordered_<index>
+%vertex_clip_probe_max_w_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_3
+%vertex_clip_probe_max_w_prior_<index> = OpAtomicUMax %uint %vertex_clip_probe_max_w_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_w_ordered_<index>
+%vertex_clip_probe_min_x_over_w_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_4
+%vertex_clip_probe_min_x_over_w_prior_<index> = OpAtomicUMin %uint %vertex_clip_probe_min_x_over_w_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_x_over_w_ordered_<index>
+%vertex_clip_probe_max_x_over_w_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_5
+%vertex_clip_probe_max_x_over_w_prior_<index> = OpAtomicUMax %uint %vertex_clip_probe_max_x_over_w_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_x_over_w_ordered_<index>
+%vertex_clip_probe_min_y_over_w_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_6
+%vertex_clip_probe_min_y_over_w_prior_<index> = OpAtomicUMin %uint %vertex_clip_probe_min_y_over_w_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_y_over_w_ordered_<index>
+%vertex_clip_probe_max_y_over_w_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_7
+%vertex_clip_probe_max_y_over_w_prior_<index> = OpAtomicUMax %uint %vertex_clip_probe_max_y_over_w_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_y_over_w_ordered_<index>
+%vertex_clip_probe_min_z_over_w_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_8
+%vertex_clip_probe_min_z_over_w_prior_<index> = OpAtomicUMin %uint %vertex_clip_probe_min_z_over_w_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_z_over_w_ordered_<index>
+%vertex_clip_probe_max_z_over_w_ptr_<index> = OpAccessChain %_ptr_StorageBuffer_uint %vertex_clip_probe %int_9
+%vertex_clip_probe_max_z_over_w_prior_<index> = OpAtomicUMax %uint %vertex_clip_probe_max_z_over_w_ptr_<index> %<scope> %<semantics> %vertex_clip_probe_z_over_w_ordered_<index>
+               OpBranch %vertex_clip_probe_ratio_merge_<index>
+%vertex_clip_probe_ratio_merge_<index> = OpLabel
+               OpBranch %vertex_clip_probe_w_class_merge_<index>
+%vertex_clip_probe_w_class_merge_<index> = OpLabel
+               OpBranch %vertex_clip_probe_raw_merge_<index>
+%vertex_clip_probe_raw_merge_<index> = OpLabel
+)";
+
+		*dst_source += String8(vertex_clip_probe)
+		                   .ReplaceStr("<index>", index_str)
+		                   .ReplaceStr("<scope>", scope)
+		                   .ReplaceStr("<semantics>", semantics)
+		                   .ReplaceStr("<one>", one)
+		                   .ReplaceStr("<zero_uint>", zero_uint)
+		                   .ReplaceStr("<sign_mask>", sign_mask)
+		                   .ReplaceStr("<zero_float>", zero_float)
+		                   .ReplaceStr("<clip_w_nonpositive_member>", clip_w_nonpositive_member)
+		                   .ReplaceStr("<clip_xy_outside_member>", clip_xy_outside_member)
+		                   .ReplaceStr("<clip_z_outside_zero_to_one_member>", clip_z_outside_zero_to_one_member)
+		                   .ReplaceStr("<clip_inside_zero_to_one_member>", clip_inside_zero_to_one_member)
+		                   .ReplaceStr("<clip_z_outside_negative_one_to_one_member>",
+		                               clip_z_outside_negative_one_to_one_member)
+		                   .ReplaceStr("<clip_inside_negative_one_to_one_member>",
+		                               clip_inside_negative_one_to_one_member);
+	}
 
 	return true;
 }
@@ -2558,7 +2844,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_VdstVsrc0Vsrc1Vsrc2)
 	                   .ReplaceStr("<multiply>", (inst.dst.multiplier != 1.0f
 	                                                  ? String8(MULTIPLY).ReplaceStr("<mul>", spirv->GetConstantFloat(inst.dst.multiplier))
 	                                                  : ""))
-	                   .ReplaceStr("<clamp>", (inst.dst.clamp ? CLAMP : ""))
+	                   .ReplaceStr("<clamp>", FloatClampModifier(spirv, inst.dst.clamp))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
@@ -2631,7 +2917,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VDot2cF32F16_VdstVsrc0Vsrc1Vsrc2)
 	                   .ReplaceStr("<multiply>", (inst.dst.multiplier != 1.0f
 	                                                  ? String8(MULTIPLY).ReplaceStr("<mul>", spirv->GetConstantFloat(inst.dst.multiplier))
 	                                                  : ""))
-	                   .ReplaceStr("<clamp>", (inst.dst.clamp ? CLAMP : ""))
+	                   .ReplaceStr("<clamp>", FloatClampModifier(spirv, inst.dst.clamp))
 	                   .ReplaceStr("<index>", index_str);
 
 	return true;
@@ -2850,8 +3136,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeIdF32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
-// v_cubema_f32 returns the cube-map major-axis scale: 2 * max(abs(x),
-// abs(y), abs(z)). It shares the same three-source VOP3 form as v_cubetc.
+// v_cubema_f32 returns 2.0 times the signed major axis, using the same
+// dominant-axis order as v_cubeid / v_cubesc / v_cubetc.
 KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -2879,8 +3165,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
         %abs1_<index> = OpExtInst %float %GLSL_std_450 FAbs %t1_<index>
         %abs2_<index> = OpExtInst %float %GLSL_std_450 FAbs %t2_<index>
       %maxxy_<index> = OpExtInst %float %GLSL_std_450 FMax %abs0_<index> %abs1_<index>
-       %maxxyz_<index> = OpExtInst %float %GLSL_std_450 FMax %abs2_<index> %maxxy_<index>
-         %t_<index> = OpFMul %float %float_2_000000 %maxxyz_<index>
+       %zmax_<index> = OpFOrdGreaterThanEqual %bool %abs2_<index> %maxxy_<index>
+        %yge_<index> = OpFOrdGreaterThanEqual %bool %abs1_<index> %abs0_<index>
+       %xyaxis_<index> = OpSelect %float %yge_<index> %t1_<index> %t0_<index>
+       %axis_<index> = OpSelect %float %zmax_<index> %t2_<index> %xyaxis_<index>
+         %t_<index> = OpFMul %float %float_2_000000 %axis_<index>
   %exec_lo_u_<index> = OpLoad %uint %exec_lo
   %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
     %dst_old_<index> = OpLoad %float %<dst>
@@ -3051,6 +3340,18 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
+	}
+	if (ShaderReadfirstlaneCanUseUniformCopy(code, index))
+	{
+		static const char* uniform_text = R"(
+        <load0>
+               OpStore %<dst> %t0_<index>
+)";
+		*dst_source += String8(uniform_text)
+		                   .ReplaceStr("<load0>", load0)
+		                   .ReplaceStr("<dst>", dst_value.value)
+		                   .ReplaceStr("<index>", index_str);
+		return true;
 	}
 
 	static const char* text = R"(
@@ -3336,7 +3637,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1)
 	                   .ReplaceStr("<multiply>", (inst.dst.multiplier != 1.0f
 	                                                  ? String8(MULTIPLY).ReplaceStr("<mul>", spirv->GetConstantFloat(inst.dst.multiplier))
 	                                                  : ""))
-	                   .ReplaceStr("<clamp>", (inst.dst.clamp ? CLAMP : ""))
+	                   .ReplaceStr("<clamp>", FloatClampModifier(spirv, inst.dst.clamp))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
@@ -3393,7 +3694,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0)
 	                   .ReplaceStr("<multiply>", (inst.dst.multiplier != 1.0f
 	                                                  ? String8(MULTIPLY).ReplaceStr("<mul>", spirv->GetConstantFloat(inst.dst.multiplier))
 	                                                  : ""))
-	                   .ReplaceStr("<clamp>", (inst.dst.clamp ? CLAMP : ""))
+	                   .ReplaceStr("<clamp>", FloatClampModifier(spirv, inst.dst.clamp))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<param0>", param[0])

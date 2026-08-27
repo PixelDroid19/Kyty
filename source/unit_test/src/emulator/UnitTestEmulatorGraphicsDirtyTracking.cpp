@@ -778,12 +778,52 @@ TEST(EmulatorGraphicsDirtyTracking, ReadObservationDoesNotAcknowledgeConcurrentW
 	const auto observation = tracker.BeginRead(mapping.address, mapping.size);
 	ASSERT_TRUE(observation.tracked);
 	EXPECT_FALSE(tracker.ChangedSince(mapping.address, mapping.size, observation.generation));
+	EXPECT_TRUE(tracker.ReadObservationIsStable(mapping.address, mapping.size, observation));
 
 	ASSERT_TRUE(tracker.NotifyWrite(mapping.address, 1u));
 	const uint64_t after_write = tracker.SnapshotGeneration(mapping.address, mapping.size);
 	EXPECT_GT(after_write, observation.generation);
 	EXPECT_TRUE(tracker.ChangedSince(mapping.address, mapping.size, observation.generation));
+	EXPECT_FALSE(tracker.ReadObservationIsStable(mapping.address, mapping.size, observation));
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, ReadObservationFailsClosedWhenWriteStartsWhileArming)
+{
+	{
+		Mapping mapping(1);
+		ASSERT_NE(mapping.address, 0u);
+		FakeProtection      protection {mapping.address, GetPageSize(), {Mode::ReadWrite}};
+		GpuDirtyPageTracker tracker(protection.Ops());
+		protection.tracker                       = &tracker;
+		protection.notify_before_capture_address = mapping.address;
+		ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+
+		const auto raced = tracker.BeginRead(mapping.address, mapping.size);
+		EXPECT_FALSE(raced.tracked);
+		EXPECT_FALSE(tracker.ReadObservationIsStable(mapping.address, mapping.size, raced));
+
+		// The injected writer has completed its tracker transaction. A later arm
+		// with no writer in its window can establish a fresh stable observation.
+		const auto stable = tracker.BeginRead(mapping.address, mapping.size);
+		ASSERT_TRUE(stable.tracked);
+		EXPECT_TRUE(tracker.ReadObservationIsStable(mapping.address, mapping.size, stable));
+		EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+	}
+	{
+		Mapping mapping(1);
+		ASSERT_NE(mapping.address, 0u);
+		FakeProtection      protection {mapping.address, GetPageSize(), {Mode::ReadWrite}};
+		GpuDirtyPageTracker tracker(protection.Ops());
+		protection.tracker                     = &tracker;
+		protection.fault_before_capture_address = mapping.address;
+		ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+
+		const auto raced = tracker.BeginRead(mapping.address, mapping.size);
+		EXPECT_FALSE(raced.tracked);
+		EXPECT_FALSE(tracker.ReadObservationIsStable(mapping.address, mapping.size, raced));
+		EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+	}
 }
 
 TEST(EmulatorGraphicsDirtyTracking, UnregisterRetainsLateWritableFaultEvidence)

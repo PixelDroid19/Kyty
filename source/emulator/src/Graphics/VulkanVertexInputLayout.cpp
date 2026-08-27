@@ -59,24 +59,36 @@ bool VulkanBuildVertexInputLayout(const ShaderVertexInputInfo& input, VulkanVert
 					}
 					break;
 				case 2:
-					if ((format.component_count == 1 && resource.DstSelXY() != DstSel(4, 0)) ||
+					// Identity XY (4,5) on a 1-component format selects missing Y=0.
+					if ((format.component_count == 1 && resource.DstSelXY() != DstSel(4, 0) &&
+					     resource.DstSelXY() != DstSel(4, 5)) ||
 					    (format.component_count >= 2 && resource.DstSelXY() != DstSel(4, 5)))
 					{
 						return false;
 					}
 					break;
 				case 3:
-					if ((format.component_count == 1 && resource.DstSelXYZ() != DstSel(4, 0, 0)) ||
-					    (format.component_count == 2 && resource.DstSelXYZ() != DstSel(4, 5, 0)) ||
+					// Identity XYZ (4,5,6) on a 1/2-component format selects
+					// missing Z=0, same as the explicit 0 constant.
+					if ((format.component_count == 1 && resource.DstSelXYZ() != DstSel(4, 0, 0) &&
+					     resource.DstSelXYZ() != DstSel(4, 5, 6)) ||
+					    (format.component_count == 2 && resource.DstSelXYZ() != DstSel(4, 5, 0) &&
+					     resource.DstSelXYZ() != DstSel(4, 5, 6)) ||
 					    (format.component_count >= 3 && resource.DstSelXYZ() != DstSel(4, 5, 6)))
 					{
 						return false;
 					}
 					break;
 				case 4:
-					if ((format.component_count == 1 && resource.DstSelXYZW() != DstSel(4, 0, 0, 1)) ||
-					    (format.component_count == 2 && resource.DstSelXYZW() != DstSel(4, 5, 0, 1)) ||
-					    (format.component_count == 3 && resource.DstSelXYZW() != DstSel(4, 5, 6, 1)) ||
+					// Identity DST_SEL 0xFAC=(4,5,6,7). Hardware fills missing
+					// channels (0 for Y/Z, 1 for W on float), so identity is
+					// the same as the explicit constant forms.
+					if ((format.component_count == 1 && resource.DstSelXYZW() != DstSel(4, 0, 0, 1) &&
+					     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
+					    (format.component_count == 2 && resource.DstSelXYZW() != DstSel(4, 5, 0, 1) &&
+					     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
+					    (format.component_count == 3 && resource.DstSelXYZW() != DstSel(4, 5, 6, 1) &&
+					     resource.DstSelXYZW() != DstSel(4, 5, 6, 7)) ||
 					    (format.component_count == 4 && resource.DstSelXYZW() != DstSel(4, 5, 6, 7)))
 					{
 						return false;

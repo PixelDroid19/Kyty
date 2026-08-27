@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Log.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
@@ -15,51 +16,45 @@
 
 namespace Kyty::Libs::Graphics {
 
-bool FragmentTapSelection(const ShaderCode& code, uint32_t* pc, int* first_register)
+bool FragmentTapSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t* pc, int* first_register)
 {
-	if (pc == nullptr || first_register == nullptr || code.GetType() != ShaderType::Pixel)
-	{
-		return false;
-	}
-	const char* selector = std::getenv("KYTY_FS_TAP");
-	if (selector == nullptr || selector[0] == '\0')
-	{
-		return false;
-	}
-	char*          id_end = nullptr;
-	const uint64_t id     = std::strtoull(selector, &id_end, 16);
-	if (id_end == selector || *id_end != ':')
-	{
-		return false;
-	}
-	char*          pc_end = nullptr;
-	const uint64_t parsed_pc = std::strtoull(id_end + 1, &pc_end, 0);
-	if (pc_end == id_end + 1 || *pc_end != '\0' || parsed_pc > UINT32_MAX)
+	if (!config.enabled || pc == nullptr || first_register == nullptr || code.GetType() != ShaderType::Pixel)
 	{
 		return false;
 	}
 	const uint64_t code_id = (static_cast<uint64_t>(code.GetHash0()) << 32u) | code.GetCrc32();
-	if (id != code_id)
-	{
-		return false;
-	}
+	uint32_t ordinal = 0;
 	for (const auto& inst: code.GetInstructions())
 	{
-		if (inst.pc == parsed_pc && inst.dst.type == ShaderOperandType::Vgpr && inst.dst.size > 0)
+		if ((config.select_ordinal ? ordinal == config.selector : inst.pc == config.selector) &&
+		    inst.dst.type == ShaderOperandType::Vgpr && inst.dst.size > 0)
 		{
-			static bool logged = false;
-			if (!logged)
+			static std::atomic_bool logged {false};
+			if (!logged.exchange(true, std::memory_order_relaxed))
 			{
-				logged = true;
-				KYTY_LOG_DEBUG( "KYTY_FS_TAP_SELECTED id=0x%016" PRIx64 " pc=%u vgpr=%d\n", code_id,
-				             static_cast<uint32_t>(parsed_pc), inst.dst.register_id);
+				KYTY_LOG_DEBUG("KYTY_FS_TAP_SELECTED id=0x%016" PRIx64 " pc=%u ordinal=%u vgpr=%d\n", code_id,
+				             inst.pc, ordinal, inst.dst.register_id);
 			}
-			*pc             = static_cast<uint32_t>(parsed_pc);
+			*pc             = inst.pc;
 			*first_register = inst.dst.register_id;
 			return true;
 		}
+		ordinal++;
 	}
 	return false;
+}
+
+bool FragmentTapQueryLodSelection(const ShaderCode& code, const ShaderFragmentTapConfig& config, uint32_t instruction_index)
+{
+	if (!config.query_lod_visualization || instruction_index >= code.GetInstructions().Size())
+	{
+		return false;
+	}
+	uint32_t tap_pc       = 0;
+	int      tap_register = 0;
+	return FragmentTapSelection(code, config, &tap_pc, &tap_register) &&
+	       code.GetInstructions().At(instruction_index).pc == tap_pc &&
+	       code.GetInstructions().At(instruction_index).type == ShaderInstructionType::ImageSampleB;
 }
 
 static int ResolveVertexParameterCount(const ShaderCode& code, const ShaderVertexInputInfo* input_info)
@@ -107,6 +102,17 @@ static bool ShaderCodeHasDiscardTail(const ShaderCode& code)
 	return false;
 }
 
+uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
+{
+	EXIT_IF(!UsesGraphicsProbeStorage());
+
+	const uint32_t descriptor_set = UsesVertexClipProbe() ? m_vs_input_info->clip_probe_descriptor_set
+	                                                    : m_ps_input_info->input0_probe_descriptor_set;
+	EXIT_IF(descriptor_set == kVertexClipProbeInvalidDescriptorSet);
+
+	return descriptor_set;
+}
+
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
@@ -117,6 +123,12 @@ void Spirv::GenerateSource()
 		case ShaderType::Vertex: m_bind = (m_vs_input_info != nullptr ? &m_vs_input_info->bind : nullptr); break;
 		case ShaderType::Compute: m_bind = (m_cs_input_info != nullptr ? &m_cs_input_info->bind : nullptr); break;
 		default: m_bind = nullptr; break;
+	}
+	if (UsesGraphicsProbeStorage())
+	{
+		// A selected diagnostic shader must never silently fall back to the
+		// ordinary module when Task 5 has not yet assigned its host-only set.
+		(void) GetGraphicsProbeDescriptorSet();
 	}
 
 	if (m_vs_input_info != nullptr)
@@ -139,7 +151,6 @@ void Spirv::GenerateSource()
 			if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 		}
 	}
-
 	WriteHeader();
 	WriteDebug();
 	WriteAnnotations();
@@ -251,7 +262,15 @@ static bool spirv_uses_i16(const ShaderCode& code)
 
 static bool spirv_uses_readfirstlane(const ShaderCode& code)
 {
-	return code.HasAnyOf({ShaderInstructionType::VReadfirstlaneB32});
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		if (code.GetInstructions().At(index).type == ShaderInstructionType::VReadfirstlaneB32 &&
+		    !ShaderReadfirstlaneCanUseUniformCopy(code, index))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 static bool spirv_uses_lane_exchange(const ShaderCode& code)
@@ -313,7 +332,7 @@ void Spirv::WriteHeader()
 		imports.Add("%NonSemantic_DebugPrintf = OpExtInstImport \"NonSemantic.DebugPrintf\"");
 	}
 
-	if (spirv_uses_subgroup_invocation(m_code) || spirv_uses_wave_branch_vote(m_code))
+	if (spirv_uses_subgroup_invocation(m_code) || spirv_uses_wave_branch_vote(m_code) || UsesSparsePixelSampleProbe())
 	{
 		capabilities.Add("OpCapability GroupNonUniform");
 		if (spirv_uses_dpp(m_code) || spirv_uses_lane_exchange(m_code))
@@ -380,6 +399,10 @@ void Spirv::WriteHeader()
 				vars.Add("%textures2D_U");
 			}
 		}
+		if (m_bind->textures2D.textures2d_sampled_depth_num > 0)
+		{
+			vars.Add("%textures2D_SD");
+		}
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
 			vars.Add("%textures2DA_S");
@@ -441,7 +464,7 @@ void Spirv::WriteHeader()
 						}
 					}
 				}
-				if (m_ps_input_info->ps_pos_xy)
+				if (m_ps_input_info->ps_pos_xy || UsesPixelMrtProbe())
 				{
 					vars.Add("%gl_FragCoord");
 				}
@@ -449,10 +472,16 @@ void Spirv::WriteHeader()
 				// depth is committed after shader kill. Vulkan EarlyFragmentTests
 				// alone commits depth before OpKill, so use late tests for shaders
 				// that can discard.
-				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable && !ShaderCodeHasDiscardTail(m_code))
+				const bool safe_late_input_probe = UsesPixelInput0Probe() && !ShaderPreventsNoopPixelElision(m_code);
+				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable && !ShaderCodeHasDiscardTail(m_code) &&
+				    !safe_late_input_probe)
 				{
 					execution_modes.Add("OpExecutionMode %main EarlyFragmentTests\n");
 				}
+			}
+			if (UsesGraphicsProbeStorage())
+			{
+				vars.Add("%vertex_clip_probe");
 			}
 			header_str = String8(header).ReplaceStr("<Type>", "Fragment");
 			execution_modes.Add("OpExecutionMode %main OriginUpperLeft\n");
@@ -473,6 +502,10 @@ void Spirv::WriteHeader()
 			vars.Add("%gl_VertexIndex");
 			vars.Add("%gl_InstanceIndex");
 			vars.Add("%outPerVertex");
+			if (UsesVertexClipProbe())
+			{
+				vars.Add("%vertex_clip_probe");
+			}
 			// vars.Add("%param0");
 			header_str = String8(header).ReplaceStr("<Type>", "Vertex");
 			break;
@@ -539,6 +572,62 @@ void Spirv::WriteAnnotations()
                OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
                <Variables>
 )";
+	static const char* vertex_clip_probe_annotations = R"(
+       OpMemberDecorate %VertexClipProbeRawStats 0 Offset 0
+       OpMemberDecorate %VertexClipProbeRawStats 1 Offset 4
+       OpMemberDecorate %VertexClipProbeRawStats 2 Offset 8
+       OpMemberDecorate %VertexClipProbeRawStats 3 Offset 12
+       OpMemberDecorate %VertexClipProbeRawStats 4 Offset 16
+       OpMemberDecorate %VertexClipProbeRawStats 5 Offset 20
+       OpMemberDecorate %VertexClipProbeRawStats 6 Offset 24
+       OpMemberDecorate %VertexClipProbeRawStats 7 Offset 28
+       OpMemberDecorate %VertexClipProbeRawStats 8 Offset 32
+       OpMemberDecorate %VertexClipProbeRawStats 9 Offset 36
+       OpMemberDecorate %VertexClipProbeRawStats 10 Offset 40
+       OpMemberDecorate %VertexClipProbeRawStats 11 Offset 44
+       OpMemberDecorate %VertexClipProbeRawStats 12 Offset 48
+       OpMemberDecorate %VertexClipProbeRawStats 13 Offset 52
+       OpMemberDecorate %VertexClipProbeRawStats 14 Offset 56
+       OpMemberDecorate %VertexClipProbeRawStats 15 Offset 60
+       OpMemberDecorate %VertexClipProbeRawStats 16 Offset 64
+       OpMemberDecorate %VertexClipProbeRawStats 17 Offset 68
+       OpMemberDecorate %VertexClipProbeRawStats 18 Offset 72
+       OpMemberDecorate %VertexClipProbeRawStats 19 Offset 76
+       OpMemberDecorate %VertexClipProbeRawStats 20 Offset 80
+       OpMemberDecorate %VertexClipProbeRawStats 21 Offset 84
+       OpMemberDecorate %VertexClipProbeRawStats 22 Offset 88
+       OpMemberDecorate %VertexClipProbeRawStats 23 Offset 92
+       OpMemberDecorate %VertexClipProbeRawStats 24 Offset 96
+       OpMemberDecorate %VertexClipProbeRawStats 25 Offset 100
+       OpMemberDecorate %VertexClipProbeRawStats 26 Offset 104
+       OpMemberDecorate %VertexClipProbeRawStats 27 Offset 108
+       OpMemberDecorate %VertexClipProbeRawStats 28 Offset 112
+       OpMemberDecorate %VertexClipProbeRawStats 29 Offset 116
+       OpMemberDecorate %VertexClipProbeRawStats 30 Offset 120
+       OpMemberDecorate %VertexClipProbeRawStats 31 Offset 124
+       OpMemberDecorate %VertexClipProbeRawStats 32 Offset 128
+       OpMemberDecorate %VertexClipProbeRawStats 33 Offset 132
+       OpMemberDecorate %VertexClipProbeRawStats 34 Offset 136
+       OpMemberDecorate %VertexClipProbeRawStats 35 Offset 140
+       OpMemberDecorate %VertexClipProbeRawStats 36 Offset 144
+       OpMemberDecorate %VertexClipProbeRawStats 37 Offset 148
+       OpMemberDecorate %VertexClipProbeRawStats 38 Offset 152
+       OpMemberDecorate %VertexClipProbeRawStats 39 Offset 156
+       OpMemberDecorate %VertexClipProbeRawStats 40 Offset 160
+       OpMemberDecorate %VertexClipProbeRawStats 41 Offset 164
+       OpMemberDecorate %VertexClipProbeRawStats 42 Offset 168
+       OpMemberDecorate %VertexClipProbeRawStats 43 Offset 172
+       OpMemberDecorate %VertexClipProbeRawStats 44 Offset 176
+       OpMemberDecorate %VertexClipProbeRawStats 45 Offset 180
+       OpMemberDecorate %VertexClipProbeRawStats 46 Offset 184
+       OpMemberDecorate %VertexClipProbeRawStats 47 Offset 188
+       OpMemberDecorate %VertexClipProbeRawStats 48 Offset 192
+       OpMemberDecorate %VertexClipProbeRawStats 49 Offset 196
+       OpMemberDecorate %VertexClipProbeRawStats 50 Offset 200
+       OpDecorate %VertexClipProbeRawStats Block
+       OpDecorate %vertex_clip_probe DescriptorSet <DescriptorSet>
+       OpDecorate %vertex_clip_probe Binding 0
+)";
 
 	Core::StringList8 vars;
 	if (spirv_uses_subgroup_invocation(m_code))
@@ -599,7 +688,7 @@ void Spirv::WriteAnnotations()
 					}
 					vars.Add(String8::FromPrintf("OpDecorate %%attr%u Location %u", i, interpolator.location));
 				}
-				if (m_ps_input_info->ps_pos_xy)
+				if (m_ps_input_info->ps_pos_xy || UsesPixelMrtProbe())
 				{
 					vars.Add("OpDecorate %gl_FragCoord BuiltIn FragCoord");
 				}
@@ -626,6 +715,12 @@ void Spirv::WriteAnnotations()
 		default: KYTY_LOG_DEBUG("WARNING: unknown shader type (continuing)\n"); return;
 	}
 
+	if (UsesGraphicsProbeStorage())
+	{
+		m_source += String8(vertex_clip_probe_annotations)
+		                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", GetGraphicsProbeDescriptorSet()));
+	}
+
 	static const char* storage_buffers_annotations = R"(
        OpDecorate %buffers_runtimearr_float ArrayStride 4
        OpMemberDecorate %BufferObject 0 Offset 0
@@ -644,6 +739,10 @@ void Spirv::WriteAnnotations()
 	static const char* textures_annotations_s = R"(
        OpDecorate %textures2D_S DescriptorSet <DescriptorSet>
        OpDecorate %textures2D_S Binding <BindingIndex>
+)";
+	static const char* textures_annotations_s_depth = R"(
+       OpDecorate %textures2D_SD DescriptorSet <DescriptorSet>
+       OpDecorate %textures2D_SD Binding <BindingIndex>
 )";
 	static const char* textures_annotations_s_3d = R"(
        OpDecorate %textures3D_S DescriptorSet <DescriptorSet>
@@ -723,6 +822,12 @@ void Spirv::WriteAnnotations()
 				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 				                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_sampled_uint_index));
 			}
+		}
+		if (m_bind->textures2D.textures2d_sampled_depth_num > 0)
+		{
+			m_source += String8(textures_annotations_s_depth)
+			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
+			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_sampled_depth_index));
 		}
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
@@ -844,6 +949,7 @@ void Spirv::WriteTypes()
      %function_buffer_load_store_float4 = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
  %function_tbuffer_load_store_format_x = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
 %function_tbuffer_load_store_format_xy = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
+%function_tbuffer_load_store_format_xyz = OpTypeFunction %void %_ptr_Function_float %_ptr_Function_float %_ptr_Function_float %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int %_ptr_Function_int
           %function_sbuffer_load_dword = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_2 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
         %function_sbuffer_load_dword_4 = OpTypeFunction %void %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_uint %_ptr_Function_int %_ptr_Function_int
@@ -860,6 +966,10 @@ void Spirv::WriteTypes()
        %_arr_float_uint_1 = OpTypeArray %float %array_length
             %gl_PerVertex = OpTypeStruct %v4float %float %_arr_float_uint_1 %_arr_float_uint_1
 %_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex
+)";
+	static const char* vertex_clip_probe_types = R"(
+	               %VertexClipProbeRawStats = OpTypeStruct %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint %uint
+%_ptr_StorageBuffer_VertexClipProbeRawStats = OpTypePointer StorageBuffer %VertexClipProbeRawStats
 )";
 
 static const char* compute_types = R"(
@@ -896,6 +1006,10 @@ static const char* compute_types = R"(
 		case ShaderType::Compute: m_source += compute_types; break;
 		default: KYTY_LOG_DEBUG("WARNING: unknown shader type (continuing)\n"); return;
 	}
+	if (UsesGraphicsProbeStorage())
+	{
+		m_source += vertex_clip_probe_types;
+	}
 
 	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
 	{
@@ -929,6 +1043,14 @@ static const char* textures_sampled_types = R"(
 %_ptr_UniformConstant__arr_ImageS_uint_<buffers_num> = OpTypePointer UniformConstant %_arr_ImageS_uint_<buffers_num>
                         %_ptr_UniformConstant_ImageS = OpTypePointer UniformConstant %ImageS
                                        %SampledImage = OpTypeSampledImage %ImageS
+)";
+	static const char* textures_sampled_types_depth = R"(
+                                            %ImageSD = OpTypeImage %<image_scalar> 2D 1 0 0 1 Unknown
+                   %textures2D_SD_uint_<buffers_num> = OpConstant %uint <buffers_num>
+                    %_arr_ImageSD_uint_<buffers_num> = OpTypeArray %ImageSD %textures2D_SD_uint_<buffers_num>
+%_ptr_UniformConstant__arr_ImageSD_uint_<buffers_num> = OpTypePointer UniformConstant %_arr_ImageSD_uint_<buffers_num>
+                       %_ptr_UniformConstant_ImageSD = OpTypePointer UniformConstant %ImageSD
+                                      %SampledImageD = OpTypeSampledImage %ImageSD
 )";
 
 static const char* textures_sampled_types_3d = R"(
@@ -1046,6 +1168,12 @@ static const char* textures_loaded_types = R"(
 				                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_sampled_num));
 			}
 		}
+		if (m_bind->textures2D.textures2d_sampled_depth_num > 0)
+		{
+			m_source += String8(textures_sampled_types_depth)
+			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_sampled_depth_num))
+			                .ReplaceStr("<image_scalar>", "float");
+		}
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
 			m_source += String8(textures_sampled_types_array)
@@ -1140,6 +1268,10 @@ void Spirv::WriteGlobalVariables()
 	{
 		vars.Add("%gl_SubgroupInvocationID = OpVariable %_ptr_Input_uint Input");
 	}
+	if (UsesGraphicsProbeStorage())
+	{
+		vars.Add("%vertex_clip_probe = OpVariable %_ptr_StorageBuffer_VertexClipProbeRawStats StorageBuffer");
+	}
 
 	if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr)
 	{
@@ -1173,6 +1305,11 @@ void Spirv::WriteGlobalVariables()
 				vars.Add(String8::FromPrintf("%%textures2D_U = OpVariable %%_ptr_UniformConstant__arr_ImageU_uint_%d UniformConstant",
 				                             m_bind->textures2D.textures2d_sampled_num));
 			}
+		}
+		if (m_bind->textures2D.textures2d_sampled_depth_num > 0)
+		{
+			vars.Add(String8::FromPrintf("%%textures2D_SD = OpVariable %%_ptr_UniformConstant__arr_ImageSD_uint_%d UniformConstant",
+			                             m_bind->textures2D.textures2d_sampled_depth_num));
 		}
 		if (m_bind->textures2D.textures2d_array_sampled_num > 0)
 		{
@@ -1237,7 +1374,7 @@ void Spirv::WriteGlobalVariables()
 						}
 					}
 				}
-				if (m_ps_input_info->ps_pos_xy)
+				if (m_ps_input_info->ps_pos_xy || UsesPixelMrtProbe())
 				{
 					vars.Add("%gl_FragCoord = OpVariable %_ptr_Input_v4float Input");
 				}
@@ -1352,7 +1489,8 @@ void Spirv::WriteLocalVariables()
 	}
 	uint32_t tap_pc = 0;
 	int      tap_register = 0;
-	const bool fragment_tap = FragmentTapSelection(m_code, &tap_pc, &tap_register);
+	const bool fragment_tap = m_ps_input_info != nullptr &&
+	                          FragmentTapSelection(m_code, m_ps_input_info->fragment_tap, &tap_pc, &tap_register);
 	if (fragment_tap)
 	{
 		for (uint32_t component = 0; component < 4u; component++)
@@ -1516,10 +1654,10 @@ void Spirv::WriteLocalVariables()
 			bool extended  = m_bind->storage_buffers.extended[i];
 
 			EXIT_IF(buffer_index + i >= static_cast<int>(m_bind->push_constant_size) / 16);
-			if (m_bind->storage_buffers.dynamic_sload[i])
+			if (m_bind->storage_buffers.dynamic_sload[i] || start_reg < 0)
 			{
-				// The S_LOAD instruction below supplies these four fields. Writing
-				// them here would erase the descriptor's instruction-local lifetime.
+				// Dynamic S_LOAD and vertex-stream SSBOs have no user-SGPR home.
+				// Writing them here would clobber live scalars (start_reg < 0).
 				continue;
 			}
 
@@ -1652,7 +1790,8 @@ void Spirv::WriteLocalVariables()
 		{
 			for (int i = 0; i < m_bind->storage_buffers.buffers_num; ++i)
 			{
-				if (!m_bind->storage_buffers.extended[i] && reg >= m_bind->storage_buffers.start_register[i] &&
+				if (!m_bind->storage_buffers.extended[i] && m_bind->storage_buffers.start_register[i] >= 0 &&
+				    reg >= m_bind->storage_buffers.start_register[i] &&
 				    reg < m_bind->storage_buffers.start_register[i] + 4)
 				{
 					return true;
@@ -1855,7 +1994,10 @@ void Spirv::DetectFetch()
 					}
 					if (resource < 0)
 					{
+						// No attribute-table semantic: keep BufferLoadFormat and
+						// address through the live V# / vertex-stream SSBO.
 						KYTY_LOG_DEBUG("WARNING: vertex fetch semantic missing input resource (continuing)\n");
+						break;
 					}
 
 					load_instructions.Add({inst, resource});
@@ -1937,10 +2079,13 @@ void Spirv::WriteInstructions()
 
 		if (!ok)
 		{
-			KYTY_LOG_DEBUG( "SHADER_EMIT_MISSING full format=0x%016" PRIx64 " type=%u pc=0x%08" PRIx32 "\n",
-			             static_cast<uint64_t>(inst.format), static_cast<unsigned>(inst.type), inst.pc);
-			EXIT("shader emitter missing: stage=%u instruction=%u format=%u pc=0x%08" PRIx32 "\n",
-			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<unsigned>(inst.format), inst.pc);
+			const int sampled_2d    = m_bind == nullptr ? 0 : m_bind->textures2D.textures2d_sampled_num;
+			const int sampled_array = m_bind == nullptr ? 0 : m_bind->textures2D.textures2d_array_sampled_num;
+			const int sampled_3d    = m_bind == nullptr ? 0 : m_bind->textures2D.textures3d_sampled_num;
+			EXIT("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64 " pc=0x%08" PRIx32
+			     " sampled=%d/%d/%d\n",
+			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc,
+			     sampled_2d, sampled_array, sampled_3d);
 		}
 		if (IsImageInstruction(inst))
 		{
@@ -1952,13 +2097,41 @@ void Spirv::WriteInstructions()
 
 		uint32_t tap_pc = 0;
 		int      tap_register = 0;
-		if (FragmentTapSelection(m_code, &tap_pc, &tap_register) && inst.pc == tap_pc)
+		if (m_ps_input_info != nullptr &&
+		    FragmentTapSelection(m_code, m_ps_input_info->fragment_tap, &tap_pc, &tap_register) && inst.pc == tap_pc)
 		{
-			for (uint32_t component = 0; component < 4u; component++)
+			const bool query_lod_tap = FragmentTapQueryLodSelection(m_code, m_ps_input_info->fragment_tap,
+			                                                             static_cast<uint32_t>(index));
+			if (!query_lod_tap)
 			{
-				m_source += String8::FromPrintf("%%fs_tap_value_%u = OpLoad %%float %%v%d\n", component,
-				                                tap_register + static_cast<int>(component));
-				m_source += String8::FromPrintf("               OpStore %%fs_tap_%u %%fs_tap_value_%u\n", component, component);
+				const bool signed_tap = m_ps_input_info->fragment_tap.signed_visualization;
+				for (uint32_t component = 0; component < 4u; component++)
+				{
+					const int register_id = tap_register + static_cast<int>(component);
+					const bool instruction_writes_register =
+					    inst.dst.type == ShaderOperandType::Vgpr && register_id >= inst.dst.register_id &&
+					    register_id < inst.dst.register_id + inst.dst.size;
+					if (!instruction_writes_register)
+					{
+						m_source += String8::FromPrintf("               OpStore %%fs_tap_%u %%float_0_000000\n", component);
+						continue;
+					}
+					m_source += String8::FromPrintf("%%fs_tap_value_%u = OpLoad %%float %%v%d\n", component,
+					                                register_id);
+					if (signed_tap)
+					{
+						m_source += String8::FromPrintf(
+						    "%%fs_tap_signed_%u = OpExtInst %%float %%GLSL_std_450 Fma %%fs_tap_value_%u %%float_0_500000 "
+						    "%%float_0_500000\n",
+						    component, component);
+						m_source += String8::FromPrintf("               OpStore %%fs_tap_%u %%fs_tap_signed_%u\n", component,
+						                                component);
+					} else
+					{
+						m_source += String8::FromPrintf("               OpStore %%fs_tap_%u %%fs_tap_value_%u\n", component,
+						                                component);
+					}
+				}
 			}
 		}
 
@@ -2080,6 +2253,7 @@ void Spirv::WriteFunctions()
 	{
 		m_source += TBUFFER_LOAD_FORMAT_X;
 		m_source += TBUFFER_LOAD_FORMAT_XY;
+		m_source += TBUFFER_LOAD_FORMAT_XYZ;
 		m_source += TBUFFER_LOAD_FORMAT_XYZW;
 	}
 
@@ -2125,7 +2299,12 @@ void Spirv::FindConstants()
 	AddConstantUint(0x40000000u);
 	AddConstantUint(0x7fffffffu);
 	AddConstantUint(0x80000000u);
-	for (int i = 0; i <= 32; i++)
+	if (UsesGraphicsProbeStorage())
+	{
+		AddConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
+	}
+	const int fixed_integer_limit = UsesPixelMrtProbe() ? 50 : (UsesPixelSampleProbe() ? 46 : (UsesGraphicsProbeStorage() ? 36 : 32));
+	for (int i = 0; i <= fixed_integer_limit; i++)
 	{
 		AddConstantInt(i);
 		AddConstantUint(i);
@@ -2142,6 +2321,10 @@ void Spirv::FindConstants()
 	}
 	for (const auto& inst: m_code.GetInstructions())
 	{
+		if (UsesVertexClipProbe())
+		{
+			AddConstantUint(inst.pc);
+		}
 		if (inst.buffer_imm_offset != 0)
 		{
 			AddConstantUint(inst.buffer_imm_offset);
@@ -2188,13 +2371,34 @@ void Spirv::FindConstants()
 			AddConstantUint(m_vs_input_info->fetch_attrib_data[i]);
 		}
 	}
+	if (m_vs_input_info != nullptr)
+	{
+		for (int i = 0; i < m_vs_input_info->buffers_num; i++)
+		{
+			const auto& stream = m_vs_input_info->buffers[i];
+			AddConstantUint(static_cast<uint32_t>(stream.addr));
+			AddConstantUint(stream.stride);
+			AddConstantUint(stream.num_records);
+			if (stream.storage_slot >= 0)
+			{
+				AddConstantInt(stream.storage_slot);
+				AddConstantUint(static_cast<uint32_t>(stream.storage_slot));
+			}
+		}
+		if (m_bind != nullptr)
+		{
+			AddConstantUint(static_cast<uint32_t>(m_bind->storage_buffers.buffers_num));
+		}
+	}
 	if (m_vs_input_info != nullptr || m_ps_input_info != nullptr || m_cs_input_info != nullptr)
 	{
 		AddConstantInt(12);
 		AddConstantInt(16);
 		AddConstantInt(31);
+		AddConstantInt(29);
 		AddConstantInt(36);
 		AddConstantInt(39);
+		AddConstantInt(71);
 		AddConstantInt(75);
 		AddConstantInt(76);
 		AddConstantInt(77);
