@@ -1779,6 +1779,12 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// 2) Type-5 pointer: overflow sharp offsets are fetched from guest memory
 	//    at that pointer (post-detile: S#@0x20/0x24 in a 12-dword EUD).
 	const bool has_eud_ptr = Gen5HasEudPointer(user_data);
+	if (has_eud_ptr)
+	{
+		bind->extended.eud_user_sgpr_num = user_sgpr_num;
+		bind->extended.eud_size_dw       = user_data->eud_size_dw;
+		bind->extended.eud_offset_base    = ShaderGen5EudOffsetBase(user_sgpr_num);
+	}
 	if (user_data->eud_size_dw != 0)
 	{
 		if (user_data->srt_size_dw != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: user_data->srt_size_dw != 0 condition ignored (continuing)\n"); }

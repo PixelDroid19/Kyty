@@ -2684,6 +2684,35 @@ void VerifyStorageRange()
 	Expect(std::strstr(event.message, "w=11223344,55667788,99aabbcc,ddeeff00") != nullptr,
 	       "storage descriptor words serialized");
 	Expect(std::strlen(event.message) < kAgentEventMessageMax, "storage range message bounded");
+
+	Lifecycle::StorageEudSnapshotContext eud {};
+	eud.submit_id              = 1234;
+	eud.stage                  = 0x10;
+	eud.resource_index         = 3;
+	eud.sgpr                   = 88;
+	eud.slot                   = 40;
+	eud.eud_user_sgpr_num      = 16;
+	eud.eud_size_dw            = 48;
+	eud.eud_offset_base        = 32;
+	eud.pointer_valid          = true;
+	eud.readable               = true;
+	eud.changed                = true;
+	eud.captured_fingerprint   = 0x11223344u;
+	eud.live_fingerprint       = 0x55667788u;
+	eud.live_base              = 0x0000f00000007000ull;
+	eud.live_declared_size     = 8192;
+	eud.live_materialized_size = 4096;
+	Lifecycle::EmitStorageEudSnapshot(eud);
+
+	const auto eud_event = LastEvent();
+	Expect(std::strcmp(eud_event.code, Lifecycle::kCodeGraphicsStorageEudSnapshot) == 0, "storage EUD event code");
+	Expect(std::strstr(eud_event.message, "st=10 sub=1234 idx=3 sg=88 sl=40 us=16 es=48 eb=32") != nullptr,
+	       "storage EUD policy identity serialized");
+	Expect(std::strstr(eud_event.message, "pv=1 rd=1 ch=1 cf=11223344 lf=55667788") != nullptr,
+	       "storage EUD snapshot comparison serialized");
+	Expect(std::strstr(eud_event.message, "lb=f00000007000 ld=8192 lm=4096") != nullptr,
+	       "storage EUD live descriptor range serialized");
+	Expect(std::strlen(eud_event.message) < kAgentEventMessageMax, "storage EUD message bounded");
 }
 
 void VerifyStorageUnknownReasonResolution()

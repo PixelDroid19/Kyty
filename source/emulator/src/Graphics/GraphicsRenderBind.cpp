@@ -2616,9 +2616,82 @@ static Emulator::Agent::Lifecycle::StorageRangeBacking DescribeStorageRangeBacki
 	return Emulator::Agent::Lifecycle::StorageRangeBacking::None;
 }
 
-static void ReportStorageRange(const ShaderStorageResources& storage_buffers, int index, const ShaderBufferResource& resource,
-	                           uint64_t base, uint64_t declared_size, uint64_t materialized_size)
+static uint32_t StorageDescriptorFingerprint(const ShaderBufferResource& resource)
 {
+	uint32_t fingerprint = 2166136261u;
+	for (uint32_t field: resource.fields)
+	{
+		fingerprint ^= field;
+		fingerprint *= 16777619u;
+	}
+	return fingerprint;
+}
+
+static Emulator::Agent::Lifecycle::StorageEudSnapshotContext DescribeDynamicEudSnapshot(
+	uint64_t submit_id, VkShaderStageFlags stage, const ShaderBindResources& bind, int index,
+	const ShaderBufferResource& captured)
+{
+	const auto& storage = bind.storage_buffers;
+	Emulator::Agent::Lifecycle::StorageEudSnapshotContext context {};
+	if (storage.sources[index] != ShaderStorageBindingSource::DynamicScalarLoad || !storage.dynamic_sload[index])
+	{
+		return context;
+	}
+
+	context.submit_id            = submit_id;
+	context.stage                = stage;
+	context.resource_index       = index;
+	context.sgpr                 = storage.start_register[index];
+	context.slot                 = storage.slots[index];
+	context.eud_user_sgpr_num    = bind.extended.eud_user_sgpr_num;
+	context.eud_size_dw          = bind.extended.eud_size_dw;
+	context.eud_offset_base      = bind.extended.eud_offset_base;
+	context.captured_fingerprint = StorageDescriptorFingerprint(captured);
+
+	const uint64_t eud_base = bind.extended.data.Base();
+	context.eud_table_base = eud_base;
+	const uint64_t eud_bytes = static_cast<uint64_t>(std::max<int>(context.eud_size_dw, context.slot + 4)) * sizeof(uint32_t);
+	GpuMemoryRangeProvenance eud_provenance {};
+	if (eud_base != 0 && eud_bytes != 0 && GpuMemoryQueryRangeProvenance(eud_base, eud_bytes, &eud_provenance))
+	{
+		context.eud_object_count = eud_provenance.total_count;
+		if (eud_provenance.entry_count != 0)
+		{
+			const auto& entry = eud_provenance.entries[0];
+			context.eud_object_type          = static_cast<uint32_t>(entry.type);
+			context.eud_object_submit_id     = entry.submit_id;
+			context.eud_object_in_use        = entry.in_use;
+			context.eud_object_write_back    = entry.write_back_capable;
+			context.eud_dependencies_complete = entry.dependencies_complete;
+		}
+	}
+	const bool slot_valid = context.slot >= 0 && context.slot <= SHADER_GEN5_EUD_MAX_DWORDS - 4;
+	context.pointer_valid = bind.extended.used && eud_base != 0 && slot_valid;
+	if (context.pointer_valid)
+	{
+		const uint64_t descriptor_address = eud_base + static_cast<uint64_t>(context.slot) * sizeof(uint32_t);
+		context.eud_descriptor_address = descriptor_address;
+		ShaderBufferResource live {};
+		context.readable = descriptor_address >= eud_base &&
+		                   Core::VirtualMemory::CopyFromGuest(live.fields, descriptor_address, sizeof(live.fields));
+		if (context.readable)
+		{
+			context.live_fingerprint = StorageDescriptorFingerprint(live);
+			context.changed          = std::memcmp(live.fields, captured.fields, sizeof(live.fields)) != 0;
+			context.live_base        = live.Base48();
+			context.live_declared_size = ShaderBufferByteSize(live.Stride(), live.NumRecords());
+			context.live_materialized_size =
+			    GpuMemoryGetAllocatedRangePrefix(context.live_base, context.live_declared_size);
+		}
+	}
+	return context;
+}
+
+static Emulator::Agent::Lifecycle::StorageEudSnapshotContext ReportStorageRange(
+	uint64_t submit_id, VkShaderStageFlags stage, const ShaderBindResources& bind, int index,
+	const ShaderBufferResource& resource, uint64_t base, uint64_t declared_size, uint64_t materialized_size)
+{
+	const auto& storage_buffers = bind.storage_buffers;
 	Emulator::GuestMemory::MappedRange mapped_range {};
 	const bool has_mapped_range = declared_size != 0 && Emulator::GuestMemory::GetPort().QueryMappedRange(base, declared_size, &mapped_range);
 
@@ -2639,19 +2712,27 @@ static void ReportStorageRange(const ShaderStorageResources& storage_buffers, in
 	context.descriptor_words[1] = resource.fields[1];
 	context.descriptor_words[2] = resource.fields[2];
 	context.descriptor_words[3] = resource.fields[3];
+	Emulator::Agent::Lifecycle::StorageEudSnapshotContext eud {};
 	if (declared_size == 0 || materialized_size == 0)
 	{
+		eud = DescribeDynamicEudSnapshot(submit_id, stage, bind, index, resource);
+		if (eud.pointer_valid || bind.storage_buffers.sources[index] == ShaderStorageBindingSource::DynamicScalarLoad)
+		{
+			Emulator::Agent::Lifecycle::EmitStorageEudSnapshot(eud);
+		}
 		Emulator::Agent::Lifecycle::EmitStorageRangeFatal(context);
 	} else
 	{
 		Emulator::Agent::Lifecycle::EmitStorageRange(context);
 	}
+	return eud;
 }
 
-static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, const ShaderStorageResources& storage_buffers,
-                                  VulkanBuffer** buffers, uint32_t** sgprs)
+static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkShaderStageFlags stage,
+	                              const ShaderBindResources& bind, VulkanBuffer** buffers, uint32_t** sgprs)
 {
 	KYTY_PROFILER_FUNCTION();
+	const auto& storage_buffers = bind.storage_buffers;
 
 	EXIT_IF(buffers == nullptr);
 	EXIT_IF(sgprs == nullptr);
@@ -2740,7 +2821,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			const uint64_t declared_size = ShaderBufferByteSize(stride, num_records);
 			if (declared_size == 0)
 			{
-				ReportStorageRange(storage_buffers, i, r, addr, declared_size, 0);
+				(void)ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, 0);
 				if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 			}
 
@@ -2766,25 +2847,34 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 				    buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 			} else if (materialized_size == 0)
 			{
-				ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
+				const auto eud = ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, materialized_size);
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
 				EXIT("storage buffer range is not materialized: index=%d addr=0x%016" PRIx64 " size=0x%016" PRIx64
 				     " access=%u source=%u reason=%u code=%d exact=%d indirect=%d raw_vmem_oob=%d raw_smem=%d"
 				     " raw_tbuffer=%d sgpr=%d slot=%d usage=%u stride=%u words=%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32
-				     ":%08" PRIx32 "\n",
+				     ":%08" PRIx32 " eud_pv=%d eud_rd=%d eud_ch=%d eud_cf=%08" PRIx32 " eud_lf=%08" PRIx32
+				     " eud_tb=%012" PRIx64 " eud_da=%012" PRIx64 " eud_lb=%012" PRIx64 " eud_ld=%" PRIu64
+				     " eud_lm=%" PRIu64 " eud_us=%d eud_es=%u eud_eb=%d eud_oc=%u eud_ot=%u eud_os=%" PRIu64
+				     " eud_oi=%d eud_ow=%d eud_od=%d\n",
 				     i, addr, requested_size, static_cast<uint32_t>(storage_buffers.accesses[i]),
 				     static_cast<uint32_t>(storage_buffers.sources[i]), static_cast<uint32_t>(storage_buffers.unknown_reasons[i]),
 				     storage_buffers.code_available[i] ? 1 : 0, storage_buffers.exact_matches[i] ? 1 : 0,
 				     storage_buffers.indirect_descriptor_use[i] ? 1 : 0, storage_buffers.raw_vmem_oob_guarded[i] ? 1 : 0,
 				     storage_buffers.raw_smem_use[i] ? 1 : 0, storage_buffers.raw_tbuffer_use[i] ? 1 : 0,
 				     storage_buffers.start_register[i], storage_buffers.slots[i], static_cast<uint32_t>(storage_buffers.usages[i]),
-				     stride, r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
+				     stride, r.fields[0], r.fields[1], r.fields[2], r.fields[3], eud.pointer_valid ? 1 : 0,
+				     eud.readable ? 1 : 0, eud.changed ? 1 : 0, eud.captured_fingerprint, eud.live_fingerprint,
+				     eud.eud_table_base, eud.eud_descriptor_address, eud.live_base, eud.live_declared_size,
+				     eud.live_materialized_size, eud.eud_user_sgpr_num,
+				     static_cast<unsigned>(eud.eud_size_dw), eud.eud_offset_base, eud.eud_object_count,
+				     eud.eud_object_type, eud.eud_object_submit_id, eud.eud_object_in_use ? 1 : 0,
+				     eud.eud_object_write_back ? 1 : 0, eud.eud_dependencies_complete ? 1 : 0);
 			} else
 			{
 				if (materialized_size != requested_size)
 				{
-					ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
+					(void)ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, materialized_size);
 				}
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
@@ -4069,7 +4159,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.storage_buffers.buffers_num > 0)
 		{
 			const auto stage_start = BindingStageClock::now();
-			PrepareStorageBuffers(submit_id, buffer, bind.storage_buffers, storage_buffers, &sgprs_ptr);
+			PrepareStorageBuffers(submit_id, buffer, vk_stage, bind, storage_buffers, &sgprs_ptr);
 			if (record_draw_timing) { DebugStatsRecordDrawDescriptorStorage(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}
