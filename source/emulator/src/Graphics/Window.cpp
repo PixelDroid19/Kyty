@@ -2072,8 +2072,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	create_info.flags                   = 0;
 	create_info.pQueueCreateInfos       = queue_create_info.GetDataConst();
 	create_info.queueCreateInfoCount    = queue_create_info_num;
-	create_info.enabledLayerCount       = (r->enable_validation_layers ? r->required_layers.Size() : 0);
-	create_info.ppEnabledLayerNames     = (r->enable_validation_layers ? r->required_layers.GetDataConst() : nullptr);
+	create_info.enabledLayerCount       = 0;
+	create_info.ppEnabledLayerNames     = nullptr;
 	create_info.enabledExtensionCount   = device_extensions.Size();
 	create_info.ppEnabledExtensionNames = device_extensions.GetDataConst();
 	create_info.pEnabledFeatures        = &device_features;
