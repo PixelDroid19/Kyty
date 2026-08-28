@@ -141,6 +141,8 @@ enum class ShaderInstructionType : uint32_t
 	SCmpLtU32,
 	SCselectB32,
 	SCselectB64,
+	SCmovB32,
+	SCmovB64,
 	SEndpgm,
 	SInstPrefetch,
 	SLoadDword,

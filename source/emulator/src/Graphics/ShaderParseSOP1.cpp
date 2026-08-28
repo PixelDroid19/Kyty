@@ -42,13 +42,20 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
-		case 0x05: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cmov_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x05:
+			inst.type        = ShaderInstructionType::SCmovB32;
+			inst.format      = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src[1]      = inst.dst;
+			inst.src_num     = 2;
 			break;
-		case 0x06: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cmov_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x06:
+			inst.type        = ShaderInstructionType::SCmovB64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.dst.size    = 2;
+			inst.src[0].size = 2;
+			inst.src[1]      = inst.dst;
+			inst.src[1].size = 2;
+			inst.src_num     = 2;
 			break;
 		case 0x07:
 			inst.type   = ShaderInstructionType::SNotB32;

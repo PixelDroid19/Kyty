@@ -306,6 +306,73 @@ void VerifyBoundedShaderDecode()
 	       "new back mapping invalidates continuations that target the reused address");
 }
 
+void VerifyScalarConditionalMoves()
+{
+	const uint32_t code_words[] = {
+	    0xbe800000u | (4u << 16u) | (0x05u << 8u) | 2u,
+	    0xbe800000u | (6u << 16u) | (0x06u << 8u) | 8u,
+	    0xbe800000u | (126u << 16u) | (0x05u << 8u) | 10u,
+	    0xbe800000u | (127u << 16u) | (0x05u << 8u) | 11u,
+	    0xbe800000u | (12u << 16u) | (0x05u << 8u) | 253u,
+	    0xbe800000u | (13u << 16u) | (0x05u << 8u) | 125u,
+	    0xbe800000u | (125u << 16u) | (0x05u << 8u) | 14u,
+	    0xbe800000u | (16u << 16u) | (0x06u << 8u) | 125u,
+	    0xbe800000u | (125u << 16u) | (0x06u << 8u) | 18u,
+	    0xbe800000u | (20u << 16u) | (0x06u << 8u) | 253u,
+	    0xbe800000u | (22u << 16u) | (0x06u << 8u) | 252u,
+	    0xbe800000u | (24u << 16u) | (0x06u << 8u) | 251u,
+	    0xbf810000u,
+	};
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	Expect(ShaderTryParseBounded(code_words, sizeof(code_words), &code), "scalar conditional moves decode in a bounded shader");
+	Expect(code.GetInstructions().Size() == 13u, "scalar conditional move shader keeps its operations and terminator");
+	const auto& move32 = code.GetInstructions().At(0);
+	const auto& move64 = code.GetInstructions().At(1);
+	const auto& exec_lo_move = code.GetInstructions().At(2);
+	const auto& exec_hi_move = code.GetInstructions().At(3);
+	Expect(move32.type == ShaderInstructionType::SCmovB32 && move32.src_num == 2 && move32.src[1] == move32.dst,
+	       "32-bit conditional move preserves its destination when SCC is clear");
+	Expect(move64.type == ShaderInstructionType::SCmovB64 && move64.src_num == 2 && move64.src[1] == move64.dst &&
+	           move64.dst.size == 2 && move64.src[0].size == 2,
+	       "64-bit conditional move preserves both destination dwords when SCC is clear");
+	Expect(exec_lo_move.dst.type == ShaderOperandType::ExecLo && exec_hi_move.dst.type == ShaderOperandType::ExecHi,
+	       "32-bit conditional moves retain individual EXEC destinations");
+	Expect(code.GetInstructions().At(4).src[0].type == ShaderOperandType::Scc,
+	       "32-bit conditional move accepts SCC as a scalar source");
+	Expect(code.GetInstructions().At(5).src[0].type == ShaderOperandType::Null &&
+	           code.GetInstructions().At(6).dst.type == ShaderOperandType::Null &&
+	           code.GetInstructions().At(7).src[0].type == ShaderOperandType::Null &&
+	           code.GetInstructions().At(8).dst.type == ShaderOperandType::Null,
+	       "scalar conditional moves retain NULL source and destination operands");
+	Expect(code.GetInstructions().At(9).src[0].type == ShaderOperandType::Scc &&
+	           code.GetInstructions().At(10).src[0].type == ShaderOperandType::ExecZ &&
+	           code.GetInstructions().At(11).src[0].type == ShaderOperandType::VccZ,
+	       "64-bit conditional moves retain scalar status sources");
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 1;
+	input.threads_num[1] = 1;
+	input.threads_num[2] = 1;
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Expect(source.FindIndex("OpLoad %uint %scc") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "scalar conditional moves read SCC during translation");
+	Expect(source.FindIndex("OpSelect %uint") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "scalar conditional moves select between source and prior destination");
+	Expect(source.FindIndex("OpStore %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("OpStore %exec_hi") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "32-bit conditional moves write both individual EXEC destinations");
+	Expect(source.FindIndex("%z191_2 = OpLoad %uint %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("OpStore %execz %z196_2") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("%z191_3 = OpLoad %uint %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("OpStore %execz %z196_3") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "32-bit conditional moves refresh EXECZ after each individual EXEC write");
+	Expect(source.FindIndex("%snz") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "scalar conditional moves preserve SCC instead of deriving it from their result");
+	Expect(source.FindIndex("OpCopyObject %uint %uint_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "NULL scalar sources translate to zero");
+	ExpectValidSpirv(source, "scalar conditional moves emit valid SPIR-V for SCC, NULL, and EXEC operands");
+}
+
 void VerifyGuestReadVisitSerializesProtection()
 {
 	const uint64_t page_size = Kyty::Core::VirtualMemory::GetPageSize();
@@ -2235,6 +2302,7 @@ int main()
 	VerifyGuestReadVisitSerializesProtection();
 	VerifyImageCopyNormalization();
 	VerifyBoundedShaderDecode();
+	VerifyScalarConditionalMoves();
 	VerifyFusedShaderUsesEffectiveBackEntry();
 	VerifyComparisonSamplerCacheIdentity();
 	VerifyStencilFrontier();

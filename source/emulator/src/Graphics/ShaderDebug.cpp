@@ -90,6 +90,11 @@ static String8 operand_array_to_str(ShaderOperand op, int n)
 				ret = "exec";
 			}
 			break;
+		case ShaderOperandType::VccZ: ret = "vccz"; break;
+		case ShaderOperandType::ExecZ: ret = "execz"; break;
+		case ShaderOperandType::Scc: ret = "scc"; break;
+		case ShaderOperandType::M0: ret = "m0"; break;
+		case ShaderOperandType::Null: ret = "null"; break;
 		case ShaderOperandType::Sgpr: ret = String8::FromPrintf("s[%d:%d]", op.register_id, op.register_id + n - 1); break;
 		case ShaderOperandType::Vgpr: ret = String8::FromPrintf("v[%d:%d]", op.register_id, op.register_id + n - 1); break;
 		case ShaderOperandType::LiteralConstant:
