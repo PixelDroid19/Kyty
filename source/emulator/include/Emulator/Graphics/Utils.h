@@ -58,17 +58,18 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // Sample→surface alias ranking for PrepareTextures.
 //
 // Live color surfaces may be bound only when:
-//   1) sample ufmt and surface VkFormat are the same family, and
+//   1) the surface format exactly matches the resolved immutable sample
+//      interpretation (including gamma), and
 //   2) Vulkan extent equals the sample descriptor (exact width×height).
 // Binding a larger parent without a crop view samples the wrong tiles and
-// leaves horizontal bands or false-color geometry. For known
-// ufmts 56/71, zero exact+format matches → reject alias (fall through); never
-// fall back to a format-compatible different extent.
+// leaves horizontal bands or false-color geometry. Zero exact+format matches
+// rejects the alias; never fall back to a different gamma or extent.
 //
 // formats[i]/extents_w[i]/extents_h[i] describe candidate i of candidate_count
 // (capped at 16). On success, out_indices[0..out_count) are candidate indices
 // in preference order; out_count==0 && !reject means "use full unfiltered list".
-[[nodiscard]] inline bool Gen5PickSampleSurfaceAliases(uint32_t sample_ufmt, uint32_t sample_width, uint32_t sample_height,
+[[nodiscard]] inline bool Gen5PickSampleSurfaceAliases(uint32_t sample_ufmt, bool use_srgb, uint32_t sample_width,
+	                                                   uint32_t sample_height,
                                                        size_t candidate_count, const VkFormat* formats, const uint32_t* extents_w,
                                                        const uint32_t* extents_h, int* out_indices, size_t* out_count, bool* reject)
 {
@@ -84,7 +85,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	const size_t n            = candidate_count < 16 ? candidate_count : 16;
 	for (size_t i = 0; i < n; i++)
 	{
-		if (!VulkanGen5SampleFormatMatches(static_cast<uint16_t>(sample_ufmt), formats[i]))
+		if (!VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(sample_ufmt), use_srgb, formats[i]))
 		{
 			continue;
 		}
@@ -150,7 +151,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	}
 	if (tile == 9u)
 	{
-		return ufmt == 56u || ufmt == 71u;
+		return ufmt == 56u || ufmt == 71u || ufmt == 130u;
 	}
 	return true;
 }
@@ -172,20 +173,11 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 }
 
 // Texture CreateFromObjects may copy a live RT/StorageTexture parent only when
-// the sample ufmt and the surface VkFormat are the same family. Copying a float
-// lighting RT into an RGBA8 Texture (after PrepareTextures rejects the alias)
-// reinterprets float bits as 8-bit channels → residual cyan/hot prop boxes.
-[[nodiscard]] inline bool Gen5SampleMayCopyFromSurfaceParent(uint32_t sample_ufmt, VkFormat surface_vk)
+// the surface has the exact immutable sample format. Family-only matches can
+// reinterpret gamma or float bits and produce false color.
+[[nodiscard]] inline bool Gen5SampleMayCopyFromSurfaceParent(uint32_t sample_ufmt, bool use_srgb, VkFormat surface_vk)
 {
-	// Keep the two formats with known render-target alias hazards strict. Other
-	// ufmts have no complete surface-family catalogue yet; rejecting every
-	// parent for them would regress the legacy copy path, so retain its
-	// permissive fallback until those families are described explicitly.
-	if (sample_ufmt == 56u || sample_ufmt == 71u)
-	{
-		return VulkanGen5SampleFormatMatches(static_cast<uint16_t>(sample_ufmt), surface_vk);
-	}
-	return true;
+	return VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(sample_ufmt), use_srgb, surface_vk);
 }
 
 // A blit source cannot be read before its first-use contents are established.

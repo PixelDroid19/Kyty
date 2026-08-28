@@ -149,14 +149,15 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).pc == pc &&
 		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type == ShaderInstructionType::SSetpcB64;
 
+		const uint32_t next_pc = 4u * static_cast<uint32_t>(ptr - src);
+		const bool tail_has_static_entry = end != nullptr
+		                                       ? dst->GetLabels().Contains(
+		                                             next_pc, [](auto label, auto target) { return label.GetDst() >= target; })
+		                                       : dst->GetLabels().Contains(
+		                                             next_pc, [](auto label, auto target) { return label.GetDst() == target; });
 		const bool endpgm_terminator =
 		    instruction == 0xBF810000 && (type == ShaderType::Vertex || type == ShaderType::Pixel || type == ShaderType::Compute) &&
-		    !dst->GetLabels().Contains(4 * static_cast<uint32_t>(ptr - src), [](auto label, auto target) { return label.GetDst() == target; });
-		if (endpgm_terminator && end != nullptr && ptr < end && ptr[0] == kSCodeEndWord &&
-		    !shader_code_end_padding_valid(ptr, end, src, *dst))
-		{
-			return false;
-		}
+		    !tail_has_static_entry;
 
 		if (endpgm_terminator ||
 		    (instruction == 0xBE802000 && type == ShaderType::Fetch) || setpc_terminator)
@@ -192,9 +193,38 @@ void ShaderParse(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst)
 {
 	if (!ShaderTryParseBounded(src, code_size_bytes, dst))
 	{
+		const auto instruction_count = dst != nullptr ? dst->GetInstructions().Size() : 0u;
+		const auto* last = instruction_count != 0u ? &dst->GetInstructions().At(instruction_count - 1u) : nullptr;
+		uint32_t   code_end_words_after_last = 0u;
+		uint32_t   labels_after_last         = 0u;
+		uint32_t   first_label_after_last    = 0u;
+		if (src != nullptr && last != nullptr && last->pc / sizeof(uint32_t) + 1u < code_size_bytes / sizeof(uint32_t))
+		{
+			const uint32_t tail_word = last->pc / sizeof(uint32_t) + 1u;
+			for (uint32_t index = tail_word; index < code_size_bytes / sizeof(uint32_t) && src[index] == kSCodeEndWord; ++index)
+			{
+				++code_end_words_after_last;
+			}
+			for (const auto& label: dst->GetLabels())
+			{
+				if (label.GetDst() >= tail_word * sizeof(uint32_t))
+				{
+					if (labels_after_last == 0u)
+					{
+						first_label_after_last = label.GetDst();
+					}
+					++labels_after_last;
+				}
+			}
+		}
 		EXIT("shader code range ended without a complete reachable terminator: size=%u hash0=0x%08" PRIx32 " crc32=0x%08" PRIx32
-		     "\n",
-		     code_size_bytes, dst != nullptr ? dst->GetHash0() : 0u, dst != nullptr ? dst->GetCrc32() : 0u);
+		     " stage=%u decoded=%u last_pc=0x%08" PRIx32 " last_type=%u last_format=0x%016" PRIx64
+		     " code_end_words_after_last=%u labels_after_last=%u first_label_after_last=0x%08" PRIx32 "\n",
+		     code_size_bytes, dst != nullptr ? dst->GetHash0() : 0u, dst != nullptr ? dst->GetCrc32() : 0u,
+		     dst != nullptr ? static_cast<unsigned>(dst->GetType()) : 0u, static_cast<unsigned>(instruction_count),
+		     last != nullptr ? last->pc : 0u, last != nullptr ? static_cast<unsigned>(last->type) : 0u,
+		     last != nullptr ? static_cast<uint64_t>(last->format) : 0u, code_end_words_after_last, labels_after_last,
+		     first_label_after_last);
 	}
 }
 

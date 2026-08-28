@@ -1881,6 +1881,79 @@ void VerifyVertexClipProbeContract()
 	Expect(!mrt_pixel_binary.IsEmpty(), "pixel MRT selected source recompiles");
 	ExpectValidSpirv(mrt_pixel_binary, "pixel MRT selected binary validates");
 
+	// Parsed s_nop; EXP target 8 (pixel Z), v0; s_endpgm. This is the
+	// captured single-source depth form: done=1, compr=0, vm=1, en=0x1.
+	const uint32_t pixel_depth_shader[] = {0xbf800000u, 0xf8001881u, 0x03020100u, 0xbf810000u};
+	ShaderCode     pixel_depth_code {};
+	pixel_depth_code.SetType(ShaderType::Pixel);
+	ShaderParse(pixel_depth_shader, &pixel_depth_code);
+	Expect(pixel_depth_code.GetInstructions().Size() == 3u,
+	       "synthetic pixel-depth shader parses no-op, exact target-8 export, and endpgm");
+	const auto& pixel_depth_export = pixel_depth_code.GetInstructions().At(1);
+	Expect(pixel_depth_export.type == ShaderInstructionType::Exp &&
+	           pixel_depth_export.format == ShaderInstructionFormat::PixelZVsrc0VmDone && pixel_depth_export.src_num == 1u &&
+	           pixel_depth_export.exp_enable_mask == 0x01u && pixel_depth_export.src[0].type == ShaderOperandType::Vgpr &&
+	           pixel_depth_export.src[0].register_id == 0,
+	       "exact target-8 export decodes as a one-source pixel-depth IR instruction");
+	const auto pixel_depth_debug = ShaderCode::DbgInstructionToStr(pixel_depth_export);
+	Expect(pixel_depth_debug.FindIndex("PixelZVsrc0VmDone") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           pixel_depth_debug.FindIndex("pixel_z") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           pixel_depth_debug.FindIndex("????") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "pixel-depth export has a complete debug representation");
+	ShaderPixelInputInfo pixel_depth_input {};
+	const auto pixel_depth_source = SpirvGenerateSource(pixel_depth_code, nullptr, &pixel_depth_input, nullptr);
+	const auto pixel_depth_exec_guard = pixel_depth_source.FindIndex("OpBranchConditional %exp_exec_b_1 %exp_store_1 %exp_kill_1");
+	const auto pixel_depth_kill       = pixel_depth_source.FindIndex("%exp_kill_1 = OpLabel\n               OpKill");
+	const auto pixel_depth_store      = pixel_depth_source.FindIndex("OpStore %fragDepth %t0_1");
+	Expect(pixel_depth_source.FindIndex("OpDecorate %fragDepth BuiltIn FragDepth") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           pixel_depth_source.FindIndex("OpExecutionMode %main DepthReplacing") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           pixel_depth_source.FindIndex("%fragDepth = OpVariable %_ptr_Output_float Output") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           pixel_depth_source.FindIndex("OpStore %outColor") == Kyty::Core::STRING8_INVALID_INDEX &&
+	           pixel_depth_exec_guard != Kyty::Core::STRING8_INVALID_INDEX && pixel_depth_kill != Kyty::Core::STRING8_INVALID_INDEX &&
+	           pixel_depth_store != Kyty::Core::STRING8_INVALID_INDEX && pixel_depth_exec_guard < pixel_depth_kill &&
+	           pixel_depth_kill < pixel_depth_store,
+	       "exact target-8 export declares and conditionally stores FragDepth without a color export");
+	ExpectValidSpirv(pixel_depth_source, "pixel-depth selected source validates");
+	const auto pixel_depth_binary = ShaderRecompilePS(pixel_depth_code, &pixel_depth_input);
+	Expect(!pixel_depth_binary.IsEmpty(), "pixel-depth selected source recompiles");
+	ExpectValidSpirv(pixel_depth_binary, "pixel-depth selected binary validates");
+	ShaderPixelInputInfo pixel_depth_early_input = pixel_depth_input;
+	pixel_depth_early_input.ps_early_z            = true;
+	const auto pixel_depth_early_source = SpirvGenerateSource(pixel_depth_code, nullptr, &pixel_depth_early_input, nullptr);
+	Expect(pixel_depth_early_source.FindIndex("OpExecutionMode %main EarlyFragmentTests") == Kyty::Core::STRING8_INVALID_INDEX &&
+	           pixel_depth_early_source.FindIndex("OpExecutionMode %main DepthReplacing") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "pixel-depth export suppresses early fragment tests without a conservative-depth proof while retaining DepthReplacing");
+	ExpectValidSpirv(pixel_depth_early_source, "pixel-depth early-Z source validates");
+
+	// An unconditional branch to s_endpgm is an early return that bypasses the
+	// exact depth export. The depth contract must reject this unsupported CFG
+	// rather than declare DepthReplacing for a path that has no FragDepth store.
+	ShaderInstruction pixel_depth_bypass_branch {};
+	pixel_depth_bypass_branch.pc              = 0;
+	pixel_depth_bypass_branch.type            = ShaderInstructionType::SBranch;
+	pixel_depth_bypass_branch.format          = ShaderInstructionFormat::Label;
+	pixel_depth_bypass_branch.src[0]          = {.type = ShaderOperandType::LiteralConstant};
+	pixel_depth_bypass_branch.src[0].constant = {.i = 4}; // pc 0 + 4 + 4 = pc 8 (s_endpgm)
+	pixel_depth_bypass_branch.src_num         = 1;
+	auto pixel_depth_bypass_export = pixel_depth_export;
+	pixel_depth_bypass_export.pc   = 4;
+	ShaderInstruction pixel_depth_bypass_end {};
+	pixel_depth_bypass_end.pc     = 8;
+	pixel_depth_bypass_end.type   = ShaderInstructionType::SEndpgm;
+	pixel_depth_bypass_end.format = ShaderInstructionFormat::Empty;
+	ShaderCode pixel_depth_bypass_code {};
+	pixel_depth_bypass_code.SetType(ShaderType::Pixel);
+	pixel_depth_bypass_code.GetInstructions().Add(pixel_depth_bypass_branch);
+	pixel_depth_bypass_code.GetInstructions().Add(pixel_depth_bypass_export);
+	pixel_depth_bypass_code.GetInstructions().Add(pixel_depth_bypass_end);
+	pixel_depth_bypass_code.GetLabels().Add(ShaderLabel(pixel_depth_bypass_end.pc, pixel_depth_bypass_branch.pc));
+	const auto pixel_depth_bypass_source = SpirvGenerateSource(pixel_depth_bypass_code, nullptr, &pixel_depth_input, nullptr);
+	Expect(pixel_depth_bypass_source.FindIndex("OpKytyPixelDepthControlFlowRejected") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "pixel-depth export rejects an early-return branch that bypasses the FragDepth store");
+	const auto pixel_depth_bypass_binary = ShaderRecompilePS(pixel_depth_bypass_code, &pixel_depth_input);
+	Expect(pixel_depth_bypass_binary.IsEmpty(),
+	       "pixel-depth early-return bypass remains rejected through pixel shader recompilation");
+
 	ShaderInstruction guest_atomic {};
 	guest_atomic.type              = ShaderInstructionType::BufferAtomicAdd;
 	guest_atomic.format            = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
@@ -2247,10 +2320,11 @@ void VerifyBoundedShaderDecode()
 	code.SetType(ShaderType::Compute);
 	Expect(ShaderTryParseBounded(terminated_padding, sizeof(terminated_padding), &code),
 	       "bounded shader validates a five-word code-end tail after its terminator");
-	const uint32_t short_terminated_padding[] = {0xbf810000u, code_end, code_end, code_end, code_end};
+	const uint32_t short_terminated_padding[] = {0xbf810000u, code_end};
 	code.SetType(ShaderType::Compute);
-	Expect(!ShaderTryParseBounded(short_terminated_padding, sizeof(short_terminated_padding), &code),
-	       "bounded shader rejects a short code-end tail after its terminator");
+	Expect(ShaderTryParseBounded(short_terminated_padding, sizeof(short_terminated_padding), &code) &&
+	           code.GetInstructions().Size() == 1u && code.GetInstructions().At(0).type == ShaderInstructionType::SEndpgm,
+	       "bounded shader accepts a terminal endpgm independently of unreachable code-end padding");
 	const uint32_t short_padding[] = {
 	    0xbf850001u,
 	    0xbf810000u,

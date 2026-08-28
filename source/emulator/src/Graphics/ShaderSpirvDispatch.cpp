@@ -80,6 +80,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3,          ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm,     {"outColor1"}},
     {Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3,          ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm,     {"outColor2"}},
     {Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3,          ShaderInstructionType::Exp,                 ShaderInstructionFormat::Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm,     {"outColor3"}},
+    {Recompile_Exp_PixelZ_Vsrc0VmDone,                     ShaderInstructionType::Exp,                 ShaderInstructionFormat::PixelZVsrc0VmDone,              {"fragDepth"}},
     {Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3,         ShaderInstructionType::Exp,                 ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3,     {"param0"}},
     {Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3,         ShaderInstructionType::Exp,                 ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3,     {"param1"}},
     {Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3,         ShaderInstructionType::Exp,                 ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3,     {"param2"}},

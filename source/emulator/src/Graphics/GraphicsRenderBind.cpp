@@ -2826,16 +2826,27 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 	}
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static bool ShouldForceGen5Degamma(const ShaderSamplerResources& samplers, int sampled_index)
+static bool ShouldUseGen5Srgb(const ShaderSamplerResources& samplers, const ShaderTextureDescriptor& texture, uint16_t fmt)
 {
-	if (sampled_index < 0 || sampled_index >= samplers.samplers_num)
+	bool resolved = false;
+	bool use_srgb = VulkanGen5SampleUsesSrgb(fmt, false, false);
+	for (int index = 0; index < samplers.samplers_num && index < 16; ++index)
 	{
-		return false;
+		if ((texture.sampler_indices_mask & static_cast<uint16_t>(1u << index)) == 0u)
+		{
+			continue;
+		}
+		const auto& sampler  = samplers.samplers[index];
+		const bool  candidate = VulkanGen5SampleUsesSrgb(fmt, sampler.ForceDegamma(), sampler.SkipDegamma());
+		if (resolved && candidate != use_srgb)
+		{
+			EXIT("sampled image uses conflicting sampler gamma interpretations: format=%u sampler_mask=0x%04x\n",
+			     static_cast<unsigned>(fmt), static_cast<unsigned>(texture.sampler_indices_mask));
+		}
+		use_srgb = candidate;
+		resolved = true;
 	}
-
-	const auto& sampler = samplers.samplers[sampled_index];
-	return sampler.ForceDegamma() && !sampler.SkipDegamma();
+	return use_srgb;
 }
 
 static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage* image, bool depth, bool arrayed,
@@ -2936,10 +2947,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				     tile_mode, static_cast<uint32_t>(r.Format()), r.Width5() + 1u, r.Height5() + 1u, r.Base40(),
 				     static_cast<uint32_t>(r.Type()));
 			}
-			if (!VulkanSupportsGen5ImageFormat(GuestImageUsage::Sampled, r.Format()))
+			const auto image_usage = textures.desc[i].textures2d_without_sampler ? GuestImageUsage::Storage : GuestImageUsage::Sampled;
+			if (!VulkanSupportsGen5ImageFormat(image_usage, r.Format()))
 			{
-				EXIT("unsupported Gen5 sampled texture format: format=%u tile=%u width=%u height=%u base=0x%012" PRIx64
+				EXIT("unsupported Gen5 %s texture format: format=%u tile=%u width=%u height=%u base=0x%012" PRIx64
 				     " type=%u\n",
+				     image_usage == GuestImageUsage::Storage ? "storage" : "sampled",
 				     static_cast<uint32_t>(r.Format()), tile_mode, r.Width5() + 1u, r.Height5() + 1u, r.Base40(),
 				     static_cast<uint32_t>(r.Type()));
 			}
@@ -3060,7 +3073,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		auto       fmt           = (gen5 ? r.Format() : 0);
 		uint32_t   swizzle       = r.DstSelXYZW();
 		uint32_t   view_swizzle  = swizzle;
-		const bool force_degamma = gen5 && !textures.desc[i].textures2d_without_sampler && ShouldForceGen5Degamma(samplers, index_sampled);
+		const bool use_srgb = gen5 && ShouldUseGen5Srgb(samplers, textures.desc[i], static_cast<uint16_t>(fmt));
 
 		const bool check_depth_texture = (!gen5 && tile == 2u) || (gen5 && tile == 24u);
 
@@ -3141,7 +3154,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		// Opt-in catalog (KYTY_SAMPLE_BIND_CATALOG=/abs/path): a bounded set of
 		// unique sample binds for residual investigation. No guest-visible side
 		// effects when unset.
-		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, swizzle, view_swizzle, force_degamma, &r](const char* path)
+		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, swizzle, view_swizzle, use_srgb, &r](const char* path)
 		{
 			static constexpr size_t k_catalog_entry_limit = 128u;
 			static const char* catalog_path = std::getenv("KYTY_SAMPLE_BIND_CATALOG");
@@ -3153,8 +3166,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			static std::set<std::string> catalog_seen;
 			char                         line[384];
 			std::snprintf(line, sizeof(line),
-			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x view_swizzle=0x%03x degamma=%u word4=0x%08x type=%u depth=%u base_array=%u base_level=%u last_level=%u max_mip=%u path=%s addr=0x%012" PRIx64 "\n",
-			              fmt, tile, width, height, pitch, swizzle, view_swizzle, force_degamma ? 1u : 0u, r.fields[4],
+			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x view_swizzle=0x%03x srgb=%u word4=0x%08x type=%u depth=%u base_array=%u base_level=%u last_level=%u max_mip=%u path=%s addr=0x%012" PRIx64 "\n",
+			              fmt, tile, width, height, pitch, swizzle, view_swizzle, use_srgb ? 1u : 0u, r.fields[4],
 			              static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()) + 1u,
 			              static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
 			              static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()), path,
@@ -3291,7 +3304,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				int    filtered[16] = {};
 				size_t filtered_n   = 0;
 				bool   reject_alias = false;
-				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
+				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
 				                                      &reject_alias));
 				if (reject_alias)
 				{
@@ -3383,7 +3396,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					int    filtered[16] = {};
 					size_t filtered_n   = 0;
 					bool   reject_st    = false;
-					EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
+					EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
 					                                      &reject_st));
 					if (reject_st)
 					{
@@ -3455,7 +3468,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				const auto video_image = VideoOut::VideoOutGetImageForSubmission(addr, buffer);
 				if (video_image.image != nullptr && video_image.buffer_size == size.size && video_image.buffer_pitch == pitch &&
 				    video_image.image->MatchesGuestExtent(width, height) &&
-				    (!gen5 || VulkanGen5SampleFormatMatches(static_cast<uint16_t>(fmt), video_image.image->format)))
+				    (!gen5 || VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(fmt), use_srgb,
+				                                                     video_image.image->format)))
 				{
 					tex         = video_image.image;
 					materialize = "videoout";
@@ -3523,7 +3537,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				} else
 				{
 					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo,
-					                                  view_swizzle, force_degamma,
+					                                  view_swizzle, use_srgb,
 					                                  depth_source == GpuMemoryDepthD16Source::StorageBuffer, host_resource_type,
 					                                  depth, base_array, true);
 					tex = static_cast<TextureVulkanImage*>(GpuMemoryCreateObject(
@@ -3579,7 +3593,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				}
 				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
 				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, view_swizzle,
-				                                  force_degamma, skip_guest, host_resource_type, depth, base_array);
+				                                  use_srgb, skip_guest, host_resource_type, depth, base_array);
 				tex = static_cast<TextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 				materialize = skip_guest ? "guest-skip-live-cover" : "guest-upload";
@@ -3910,8 +3924,9 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 		// unnormalized-coordinate restrictions.
 		// Vulkan exposes no anisotropic threshold; preserve filter mapping and MaxAnisoRatio.
 		if (!gen5 && r.McCoordTrunc() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !gen5 && r.McCoordTrunc() != false condition ignored (continuing)\n"); }
-		// ForceDegamma / SkipDegamma are resolved in ShouldForceGen5Degamma and
-		// VulkanResolveGuestImageFormat (RGBA8 → sRGB only when force && !skip).
+		// ForceDegamma / SkipDegamma resolve to one effective host-sRGB choice
+		// before TextureObject construction, so its cache identity selects the
+		// matching immutable Vulkan image format.
 		// Both flags are legal guest sampler state; do not EXIT on them.
 		if (gen5 && r.PointPreclamp() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gen5 && r.PointPreclamp() != false condition ignored (continuing)\n"); }
 		if (gen5 && r.AnisoOverride() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gen5 && r.AnisoOverride() != false condition ignored (continuing)\n"); }

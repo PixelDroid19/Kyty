@@ -577,6 +577,7 @@ enum FormatByte : uint64_t
 	Gds,    // gds
 	DA,     // operand_array_to_str(inst.dst, inst.dst.size)
 	MimgDmask, // dmask carried by ShaderInstruction::mimg_dmask
+	PixelZ, // pixel Z
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -612,6 +613,8 @@ enum Format : uint64_t
 	Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt1, S0, S1, S2, S3, Vm}),
 	Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt2, S0, S1, S2, S3, Vm}),
 	Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt3, S0, S1, S2, S3, Vm}),
+	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1, done=1.
+	PixelZVsrc0VmDone                    = FormatDefine({PixelZ, S0, Vm, Done}),
 	Param0Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param0, S0, S1, S2, S3}),
 	Param1Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param1, S0, S1, S2, S3}),
 	Param2Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param2, S0, S1, S2, S3}),
@@ -1486,6 +1489,7 @@ struct ShaderTextureDescriptor
 	int                   start_register             = 0;
 	bool                  extended                   = false;
 	bool                  dynamic_sload              = false;
+	uint16_t              sampler_indices_mask       = 0;
 	bool                  textures2d_without_sampler = false;
 	bool                  sampled_shape_from_instruction = false;
 	// Set only for a compute storage image whose shader has an image store and
@@ -1602,6 +1606,12 @@ struct ShaderBindResources
 	ShaderExtendedResources    extended;
 	ShaderDynamicSLoadMappings dynamic_sloads;
 };
+
+[[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
+	                                                       int user_data_register_base);
+[[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
+	                                                int user_data_register_base);
+void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base);
 
 [[nodiscard]] constexpr bool ShaderBindRequiresDescriptorSet(const ShaderBindResources& bind)
 {

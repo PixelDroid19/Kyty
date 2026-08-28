@@ -37,7 +37,7 @@ namespace Kyty::Libs::Graphics {
 
 uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format)
 {
-	if (format != 56u && format != 71u && !Gen5IsBc1PackageFormat(format))
+	if (format != 56u && format != 71u && format != 130u && !Gen5IsBc1PackageFormat(format))
 	{
 		return 0u;
 	}
@@ -819,18 +819,18 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// upload. Render-target aliases still prefer FindRenderTexture
 			// before create; this path covers pure CPU-backed sample textures.
 			// tile 27 = kRenderTarget layout; tile 9 = kStandard64KB
-			// (RGBA8/RGBA16F package data).
+			// (RGBA8/RGBA8-sRGB/RGBA16F package data).
 			// BC1 (catalog 133 / guest 169 UNORM / 170 SRGB) detiles compressed
 			// 4x4 blocks as 8-byte elements on tile 27 only.
-			// SKIPPED: tile == 9 && fmt != 56 && fmt != 71
-			if (tile == 9 && fmt != 56 && fmt != 71)
+			// SKIPPED: tile == 9 && fmt != 56 && fmt != 71 && fmt != 130
+			if (tile == 9 && fmt != 56 && fmt != 71 && fmt != 130)
 			{
-				KYTY_LOG_DEBUG("WARNING: skipped check: tile == 9 && fmt != 56 && fmt != 71\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: tile == 9 && fmt != 56 && fmt != 71 && fmt != 130\n");
 			}
-			// SKIPPED: fmt != 56 && fmt != 71 && !Gen5IsBc1PackageFormat(fmt)
-			if (fmt != 56 && fmt != 71 && !Gen5IsBc1PackageFormat(static_cast<uint32_t>(fmt)))
+			// SKIPPED: fmt != 56 && fmt != 71 && fmt != 130 && !Gen5IsBc1PackageFormat(fmt)
+			if (fmt != 56 && fmt != 71 && fmt != 130 && !Gen5IsBc1PackageFormat(static_cast<uint32_t>(fmt)))
 			{
-				KYTY_LOG_DEBUG("WARNING: skipped check: fmt != 56 && fmt != 71 && !Gen5IsBc1PackageFormat(fmt)\n");
+				KYTY_LOG_DEBUG("WARNING: skipped check: fmt != 56 && fmt != 71 && fmt != 130 && !Gen5IsBc1PackageFormat(fmt)\n");
 			}
 			// SKIPPED: levels != 1
 			if (levels != 1)
@@ -1019,11 +1019,11 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		}
 	}
 
-	// Select a surface parent only when sample ufmt and VkFormat families match
-	// and the parent extent equals this mip. Copying float lighting into RGBA8
-	// reinterprets bits as cyan/hot garbage; copying a larger parent without a
-	// crop view leaves horizontal bands on world tiles.
-	const auto surface_parent_ok = [fmt](VulkanImage* img, uint32_t need_w, uint32_t need_h) -> bool
+	// Select a surface parent only when its immutable format matches the resolved
+	// sample interpretation and its extent equals this mip. Different gamma or
+	// numeric formats reinterpret pixels; larger parents need a crop view.
+	const bool use_srgb = params[TextureObject::PARAM_FORCE_DEGAMMA] != 0u;
+	const auto surface_parent_ok = [fmt, use_srgb](VulkanImage* img, uint32_t need_w, uint32_t need_h) -> bool
 	{
 		if (img == nullptr)
 		{
@@ -1037,7 +1037,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 		{
 			return true;
 		}
-		return Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), img->format);
+		return Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), use_srgb, img->format);
 	};
 
 	// Leave layout UNDEFINED when no valid surface parent. GpuMemory then
@@ -1115,7 +1115,8 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 			// Single ST parent: exact sample extent, or a larger atlas that can host
 			// mip offsets (legacy GenerateMips-style). Wrong-format parents rejected.
 			const bool st_ok = src_obj != nullptr && src_guest_extent.width >= width && src_guest_extent.height >= height &&
-			                   (fmt == 0u || Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), src_obj->format));
+			                   (fmt == 0u ||
+			                    Gen5SampleMayCopyFromSurfaceParent(static_cast<uint32_t>(fmt), use_srgb, src_obj->format));
 			if (!st_ok)
 			{
 				skip_surface_copy();
@@ -1220,7 +1221,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				if (o.type == GpuMemoryObjectType::StorageTexture)
 				{
 					auto* src_obj = static_cast<StorageTextureVulkanImage*>(o.obj);
-					if (src_obj->MatchesGuestExtent(mip_width, mip_height))
+					if (surface_parent_ok(src_obj, mip_width, mip_height))
 					{
 						src_image = src_obj;
 						storage   = true;
@@ -1229,7 +1230,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				} else if (o.type == GpuMemoryObjectType::RenderTexture)
 				{
 					auto* src_obj = static_cast<RenderTextureVulkanImage*>(o.obj);
-					if (src_obj->MatchesGuestExtent(mip_width, mip_height))
+					if (surface_parent_ok(src_obj, mip_width, mip_height))
 					{
 						src_image = src_obj;
 						storage   = false;
@@ -1238,10 +1239,10 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 				}
 			}
 
-			// SKIPPED: src_image == nullptr
 			if (src_image == nullptr)
 			{
-				KYTY_LOG_DEBUG("WARNING: skipped check: src_image == nullptr\n");
+				skip_surface_copy();
+				return;
 			}
 
 			if (storage)

@@ -2293,6 +2293,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 			bind->samplers.operations[i] = evidence.operation;
 		}
+		ShaderAssociateSampledTextureSamplers(*code, bind, user_data_register_base);
 	}
 
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
@@ -2450,6 +2451,10 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// projection CBV. Rebase the metadata sharp table instead.
 		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
 		                  kGen5GsFrontUserDataBase);
+		if (vs_isa != nullptr)
+		{
+			ShaderAssociateSampledTextureSamplers(*vs_isa, &info->bind, kGen5GsFrontUserDataBase);
+		}
 	} else
 	{
 		if (gs_instead_of_vs) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs_instead_of_vs condition ignored (continuing)\n"); }

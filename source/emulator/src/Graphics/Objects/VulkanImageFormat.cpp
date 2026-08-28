@@ -20,7 +20,7 @@ struct Gen5ImageFormat
 {
 	uint16_t              fmt;
 	VkFormat              sampled;
-	VkFormat              sampled_degamma;
+	VkFormat              sampled_srgb;
 	VkFormat              storage;
 	GuestImageNumericType numeric_type;
 };
@@ -58,6 +58,7 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {70, VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_R16G16B16A16_SINT, VK_FORMAT_UNDEFINED, GuestImageNumericType::SignedInteger},
     Gen5ImageFormat {71, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {75, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_UINT, GuestImageNumericType::UnsignedInteger},
+    Gen5ImageFormat {130, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {133, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {169, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {170, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
@@ -93,7 +94,17 @@ VkFormat SelectFormat(GuestImageUsage usage, VkFormat sampled, VkFormat storage)
 
 } // namespace
 
-VkFormat VulkanResolveGuestImageFormat(GuestImageUsage usage, uint8_t dfmt, uint8_t nfmt, uint16_t fmt, bool force_degamma)
+bool VulkanGen5SampleUsesSrgb(uint16_t fmt, bool force_degamma, bool skip_degamma)
+{
+	return fmt == 130u ? !skip_degamma : force_degamma && !skip_degamma;
+}
+
+VkFormat VulkanResolveGuestImageFormat(GuestImageUsage usage, uint8_t dfmt, uint8_t nfmt, uint16_t fmt)
+{
+	return VulkanResolveGuestImageFormat(usage, dfmt, nfmt, fmt, VulkanGen5SampleUsesSrgb(fmt, false, false));
+}
+
+VkFormat VulkanResolveGuestImageFormat(GuestImageUsage usage, uint8_t dfmt, uint8_t nfmt, uint16_t fmt, bool use_srgb)
 {
 	if (fmt == 0)
 	{
@@ -115,7 +126,7 @@ VkFormat VulkanResolveGuestImageFormat(GuestImageUsage usage, uint8_t dfmt, uint
 			{
 				return entry.storage;
 			}
-			return force_degamma ? entry.sampled_degamma : entry.sampled;
+			return use_srgb ? entry.sampled_srgb : entry.sampled;
 		}
 	}
 	return VK_FORMAT_UNDEFINED;
@@ -139,7 +150,7 @@ bool VulkanGen5SampleFormatMatches(uint16_t fmt, VkFormat format)
 	{
 		if (entry.fmt == fmt)
 		{
-			if (format == entry.sampled || format == entry.sampled_degamma)
+			if (format == entry.sampled || format == entry.sampled_srgb)
 			{
 				return true;
 			}
@@ -154,6 +165,23 @@ bool VulkanGen5SampleFormatMatches(uint16_t fmt, VkFormat format)
 		}
 	}
 	return false;
+}
+
+bool VulkanGen5SampleFormatMatchesEffective(uint16_t fmt, bool use_srgb, VkFormat format)
+{
+	const VkFormat expected = VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0u, 0u, fmt, use_srgb);
+	if (expected == VK_FORMAT_UNDEFINED)
+	{
+		return false;
+	}
+	if (format == expected)
+	{
+		return true;
+	}
+	// RGBA8 resources may be backed by the byte-compatible BGRA host family;
+	// keep gamma interpretation exact while component mapping handles channels.
+	return fmt == 56u && ((expected == VK_FORMAT_R8G8B8A8_UNORM && format == VK_FORMAT_B8G8R8A8_UNORM) ||
+	                      (expected == VK_FORMAT_R8G8B8A8_SRGB && format == VK_FORMAT_B8G8R8A8_SRGB));
 }
 
 GuestImageNumericType VulkanGen5ImageNumericType(uint16_t fmt)

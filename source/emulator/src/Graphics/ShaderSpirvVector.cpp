@@ -316,6 +316,38 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 	return true;
 }
 
+// RDNA2 EXP target 8 is the fragment depth export. The parser admits only the
+// evidenced one-channel, full-precision VM form. Reuse the established export
+// control flow so inactive EXEC invocations terminate without writing depth.
+KYTY_RECOMPILER_FUNC(Recompile_Exp_PixelZ_Vsrc0VmDone)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!operand_is_variable(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.src[0]) condition ignored (continuing)\n"); }
+	if (param[0] == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: param[0] == nullptr condition ignored (continuing)\n"); }
+
+	const auto src0_value = operand_variable_to_str(inst.src[0]);
+	static const char* text = R"(
+         %exp_exec_u_<index> = OpLoad %uint %exec_lo
+         %exp_exec_b_<index> = OpINotEqual %bool %exp_exec_u_<index> %uint_0
+               OpSelectionMerge %exp_merge_<index> None
+               OpBranchConditional %exp_exec_b_<index> %exp_store_<index> %exp_kill_<index>
+         %exp_kill_<index> = OpLabel
+               OpKill
+         %exp_store_<index> = OpLabel
+         %t0_<index> = OpLoad %float %<src0>
+               OpStore %<depth> %t0_<index>
+               OpBranch %exp_merge_<index>
+         %exp_merge_<index> = OpLabel
+)";
+
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                   .ReplaceStr("<src0>", src0_value.value)
+	                   .ReplaceStr("<depth>", param[0]);
+
+	return true;
+}
+
 /* XXX: 0, 1, 2, 3, 4 */
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3)
 {
