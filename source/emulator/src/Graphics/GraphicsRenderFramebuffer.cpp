@@ -124,6 +124,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 
 	EXIT_IF(gctx == nullptr);
+	if (depth_stencil_read_only && !gctx->load_store_op_none_supported)
+	{
+		EXIT("read-only sampled depth attachments require load-store-op-none support\n");
+	}
+	const bool depth_stencil_store_none = depth_stencil_read_only;
 
 	if (!with_depth && !with_color) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_depth && !with_color condition ignored (continuing)\n"); }
 
@@ -206,9 +211,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	attachments[attachment_count].format  = depth->format;
 	attachments[attachment_count].samples = with_depth ? depth->vulkan_buffer->samples : VK_SAMPLE_COUNT_1_BIT;
 	attachments[attachment_count].loadOp  = depth_load_ops.depth_load;
-	attachments[attachment_count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[attachment_count].storeOp =
+	    depth_stencil_store_none ? VulkanAttachmentStoreOpNone() : VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[attachment_count].stencilLoadOp  = depth_load_ops.stencil_load;
-	attachments[attachment_count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachments[attachment_count].stencilStoreOp =
+	    depth_stencil_store_none ? VulkanAttachmentStoreOpNone() : VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[attachment_count].initialLayout  = (depth_stencil_read_only ? depth_stencil_layout : depth_load_ops.initial_layout);
 	attachments[attachment_count].finalLayout    = depth_stencil_layout;
 

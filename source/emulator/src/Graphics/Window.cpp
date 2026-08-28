@@ -2752,6 +2752,21 @@ static void VulkanCreate(WindowContext* ctx)
 			device_extensions.Add(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
 		}
 
+		const char* load_store_op_none_extension = nullptr;
+		if (has_ext(VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME))
+		{
+			load_store_op_none_extension = VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME;
+		} else if (has_ext(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME))
+		{
+			load_store_op_none_extension = VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME;
+		}
+		ctx->graphic_ctx.load_store_op_none_supported = load_store_op_none_extension != nullptr;
+		if (load_store_op_none_extension != nullptr &&
+		    !device_extensions.Contains(load_store_op_none_extension, [](auto s, auto l) { return strcmp(s, l) == 0; }))
+		{
+			device_extensions.Add(load_store_op_none_extension);
+		}
+
 		ctx->graphic_ctx.subgroup_size_control_supported = has_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 
 		ctx->graphic_ctx.sample_location_capabilities.extension_enabled = has_ext(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) ? 1u : 0u;

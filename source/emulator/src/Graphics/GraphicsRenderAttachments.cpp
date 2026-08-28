@@ -481,6 +481,31 @@ void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 	}
 }
 
+DepthStencilAttachmentAccess ResolveDepthStencilAttachmentAccess(const RenderDepthInfo& depth, bool sampled_in_same_draw,
+                                                                 bool load_store_op_none_supported)
+{
+	if (depth.format == VK_FORMAT_UNDEFINED || !sampled_in_same_draw)
+	{
+		return DepthStencilAttachmentAccess::Writable;
+	}
+
+	const bool depth_writes = depth.depth_write_enable && !depth.suppress_depth_write;
+	const auto stencil_face_writes = [](const PipelineStencilStaticState& face, const PipelineStencilDynamicState& dynamic)
+	{
+		return dynamic.writeMask != 0u &&
+		       (face.failOp != VK_STENCIL_OP_KEEP || face.passOp != VK_STENCIL_OP_KEEP || face.depthFailOp != VK_STENCIL_OP_KEEP);
+	};
+	const bool stencil_writes = depth.stencil_test_enable &&
+	                            (stencil_face_writes(depth.stencil_static_front, depth.stencil_dynamic_front) ||
+	                             stencil_face_writes(depth.stencil_static_back, depth.stencil_dynamic_back));
+
+	if (depth.depth_clear_enable || depth.stencil_clear_enable || depth_writes || stencil_writes || !load_store_op_none_supported)
+	{
+		return DepthStencilAttachmentAccess::Unsupported;
+	}
+	return DepthStencilAttachmentAccess::ReadOnly;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderTarget& rt, RenderColorInfo* r)
 {

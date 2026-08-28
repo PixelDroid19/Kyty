@@ -381,7 +381,11 @@ enum class DepthStencilAttachmentAccess
 {
 	Writable,
 	ReadOnly,
+	Unsupported,
 };
+
+DepthStencilAttachmentAccess ResolveDepthStencilAttachmentAccess(const RenderDepthInfo& depth, bool sampled_in_same_draw,
+                                                                 bool load_store_op_none_supported);
 
 class FramebufferCache
 {

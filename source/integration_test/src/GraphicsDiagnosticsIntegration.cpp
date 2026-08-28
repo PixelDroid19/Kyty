@@ -115,6 +115,49 @@ void VerifyStencilFrontier()
 	Expect(EventRing::Instance().GetStats().total_pushed == 64, "stencil frontier volume bounded");
 }
 
+void VerifyDepthStencilAttachmentAccess(bool load_store_op_none_supported)
+{
+	RenderDepthInfo depth {};
+	depth.format = VK_FORMAT_D32_SFLOAT;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, false, false) == DepthStencilAttachmentAccess::Writable,
+	       "depth attachment without a sampled alias keeps the writable path");
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, false) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias requires store-op-none support");
+	if (!load_store_op_none_supported)
+	{
+		return;
+	}
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::ReadOnly,
+	       "non-writing depth attachment uses the read-only path");
+
+	depth.depth_write_enable = true;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, false, true) == DepthStencilAttachmentAccess::Writable,
+	       "depth write without a sampled alias keeps the writable path");
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias rejects simultaneous depth writes");
+	depth.suppress_depth_write = true;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::ReadOnly,
+	       "suppressed depth write stays read-only");
+
+	depth.depth_clear_enable = true;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias rejects simultaneous depth clear");
+	depth.depth_clear_enable = false;
+
+	depth.stencil_test_enable               = true;
+	depth.stencil_dynamic_front.writeMask   = 0xffu;
+	depth.stencil_static_front.passOp       = VK_STENCIL_OP_REPLACE;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias rejects simultaneous stencil writes");
+	depth.stencil_dynamic_front.writeMask = 0u;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::ReadOnly,
+	       "masked stencil operation stays read-only");
+
+	depth.stencil_clear_enable = true;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias rejects simultaneous stencil clear");
+}
+
 void VerifyStorageFrontier()
 {
 	EventRing::Instance().ResetForTests();
@@ -1535,6 +1578,30 @@ public:
 
 		for (const auto physical: physical_devices)
 		{
+			uint32_t extension_count = 0;
+			if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, nullptr) != VK_SUCCESS)
+			{
+				continue;
+			}
+			std::vector<VkExtensionProperties> extensions(extension_count);
+			if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, extensions.data()) != VK_SUCCESS)
+			{
+				continue;
+			}
+			const auto has_extension = [&extensions](const char* name)
+			{
+				return std::any_of(extensions.cbegin(), extensions.cend(),
+				                   [name](const auto& extension) { return std::strcmp(extension.extensionName, name) == 0; });
+			};
+			const char* load_store_op_none_extension = nullptr;
+			if (has_extension(VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME))
+			{
+				load_store_op_none_extension = VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME;
+			} else if (has_extension(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME))
+			{
+				load_store_op_none_extension = VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME;
+			}
+
 			uint32_t family_count = 0;
 			vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, nullptr);
 			std::vector<VkQueueFamilyProperties> families(family_count);
@@ -1555,6 +1622,9 @@ public:
 				device_info.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 				device_info.queueCreateInfoCount = 1;
 				device_info.pQueueCreateInfos    = &queue_info;
+				device_info.enabledExtensionCount   = load_store_op_none_extension != nullptr ? 1u : 0u;
+				device_info.ppEnabledExtensionNames =
+				    load_store_op_none_extension != nullptr ? &load_store_op_none_extension : nullptr;
 				if (vkCreateDevice(physical, &device_info, nullptr, &context.device) != VK_SUCCESS)
 				{
 					continue;
@@ -1563,6 +1633,7 @@ public:
 				VkQueue queue = VK_NULL_HANDLE;
 				vkGetDeviceQueue(context.device, family, 0, &queue);
 				context.physical_device                              = physical;
+				context.load_store_op_none_supported                 = load_store_op_none_extension != nullptr;
 				context.queues[GraphicContext::QUEUE_UTIL].vk_queue = queue;
 				context.queues[GraphicContext::QUEUE_UTIL].family   = family;
 				context.queues[GraphicContext::QUEUE_UTIL].index    = 0;
@@ -1697,6 +1768,72 @@ private:
 	VkDeviceMemory  memory    = VK_NULL_HANDLE;
 };
 
+class VulkanDepthReadOnlyFramebuffer
+{
+public:
+	explicit VulkanDepthReadOnlyFramebuffer(VkDevice device): m_device(device) {}
+	~VulkanDepthReadOnlyFramebuffer()
+	{
+		if (framebuffer != VK_NULL_HANDLE)
+		{
+			vkDestroyFramebuffer(m_device, framebuffer, nullptr);
+		}
+		if (render_pass != VK_NULL_HANDLE)
+		{
+			vkDestroyRenderPass(m_device, render_pass, nullptr);
+		}
+	}
+
+	[[nodiscard]] bool Create(VkImageView depth_view)
+	{
+		if (m_device == VK_NULL_HANDLE || depth_view == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+		VkAttachmentDescription attachment {};
+		attachment.format         = VK_FORMAT_D32_SFLOAT;
+		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+		attachment.storeOp        = VulkanAttachmentStoreOpNone();
+		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachment.stencilStoreOp = VulkanAttachmentStoreOpNone();
+		attachment.initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		attachment.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+		VkAttachmentReference depth_reference {};
+		depth_reference.attachment = 0;
+		depth_reference.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		VkSubpassDescription subpass {};
+		subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.pDepthStencilAttachment = &depth_reference;
+		VkRenderPassCreateInfo render_pass_info {};
+		render_pass_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		render_pass_info.attachmentCount = 1;
+		render_pass_info.pAttachments    = &attachment;
+		render_pass_info.subpassCount    = 1;
+		render_pass_info.pSubpasses      = &subpass;
+		if (vkCreateRenderPass(m_device, &render_pass_info, nullptr, &render_pass) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkFramebufferCreateInfo framebuffer_info {};
+		framebuffer_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		framebuffer_info.renderPass      = render_pass;
+		framebuffer_info.attachmentCount = 1;
+		framebuffer_info.pAttachments    = &depth_view;
+		framebuffer_info.width           = 4;
+		framebuffer_info.height          = 4;
+		framebuffer_info.layers          = 1;
+		return vkCreateFramebuffer(m_device, &framebuffer_info, nullptr, &framebuffer) == VK_SUCCESS;
+	}
+
+private:
+	VkDevice      m_device    = VK_NULL_HANDLE;
+	VkRenderPass  render_pass = VK_NULL_HANDLE;
+	VkFramebuffer framebuffer = VK_NULL_HANDLE;
+};
+
 class VulkanDepthDescriptorBinding
 {
 public:
@@ -1762,7 +1899,7 @@ public:
 
 		VkDescriptorImageInfo image_info {};
 		image_info.imageView   = depth_view;
-		image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		image_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 		VkDescriptorImageInfo sampler_info {};
 		sampler_info.sampler = comparison_sampler;
 		VkWriteDescriptorSet writes[2] {};
@@ -1793,6 +1930,7 @@ void VerifyComparisonSamplerCacheIdentity()
 {
 	VulkanSamplerContext vulkan;
 	Expect(vulkan.Initialize(), "Vulkan sampler context must initialize");
+	VerifyDepthStencilAttachmentAccess(vulkan.context.load_store_op_none_supported);
 	ShaderSamplerResource descriptor {};
 	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular);
 	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference);
@@ -1807,6 +1945,11 @@ void VerifyComparisonSamplerCacheIdentity()
 	Expect(depth_sample.Create(), "sampled depth image and depth-aspect view must be created");
 	VulkanDepthDescriptorBinding binding(vulkan.context.device);
 	Expect(binding.Create(depth_sample.view, comparison_sampler), "depth view and comparison sampler descriptor update must succeed");
+	if (vulkan.context.load_store_op_none_supported)
+	{
+		VulkanDepthReadOnlyFramebuffer framebuffer(vulkan.context.device);
+		Expect(framebuffer.Create(depth_sample.view), "read-only sampled depth framebuffer must use store-op-none");
+	}
 }
 
 } // namespace
