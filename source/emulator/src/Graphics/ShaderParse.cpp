@@ -5,6 +5,36 @@
 namespace Kyty::Libs::Graphics {
 namespace {
 
+constexpr uint32_t kSCodeEndWord  = 0xbf9f0000u;
+constexpr uint32_t kSCodeEndCount = 5u;
+
+bool shader_code_end_padding_valid(const uint32_t* ptr, const uint32_t* end, const uint32_t* src, const ShaderCode& code)
+{
+	if (ptr == nullptr || end == nullptr || src == nullptr || ptr >= end)
+	{
+		return false;
+	}
+	uint32_t marker_count = 0;
+	for (const auto* marker = ptr; marker < end && *marker == kSCodeEndWord; ++marker)
+	{
+		++marker_count;
+	}
+	if (marker_count < kSCodeEndCount)
+	{
+		return false;
+	}
+	const uint32_t padding_pc = 4u * static_cast<uint32_t>(ptr - src);
+	const uint32_t range_end_pc = 4u * static_cast<uint32_t>(end - src);
+	for (const auto& label: code.GetLabels())
+	{
+		if (label.GetDst() >= padding_pc && label.GetDst() < range_end_pc)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* dst, bool next_gen, bool allow_setpc_terminator,
 	                    uint32_t* parsed_words)
 {
@@ -19,6 +49,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 	dst->GetIndirectLabels().Clear();
 
 	const auto* ptr = src;
+	bool        saw_endpgm = false;
 	for (;;)
 	{
 		if (end != nullptr && ptr >= end)
@@ -27,6 +58,21 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 		}
 		auto instruction = ptr[0];
 		auto pc          = 4 * static_cast<uint32_t>(ptr - src);
+		if (instruction == kSCodeEndWord)
+		{
+			if (!saw_endpgm || dst->GetInstructions().IsEmpty() ||
+			    !shader_code_end_padding_valid(ptr, end, src, *dst))
+			{
+				return false;
+			}
+			const auto last_type = dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type;
+			if (last_type != ShaderInstructionType::SEndpgm && last_type != ShaderInstructionType::SBranch)
+			{
+				return false;
+			}
+			*parsed_words = static_cast<uint32_t>(ptr - src);
+			return true;
+		}
 		constexpr uint32_t kMaxDecodedInstructionWords = 8u;
 		uint32_t           bounded_words[kMaxDecodedInstructionWords] = {};
 		const uint32_t*    decode_src = src;
@@ -93,13 +139,26 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 			return false;
 		}
 		ptr += words;
+		if (!dst->GetInstructions().IsEmpty() &&
+		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type == ShaderInstructionType::SEndpgm)
+		{
+			saw_endpgm = true;
+		}
 		const bool setpc_terminator =
 		    allow_setpc_terminator && end != nullptr && ptr == end && !dst->GetInstructions().IsEmpty() &&
 		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).pc == pc &&
 		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type == ShaderInstructionType::SSetpcB64;
 
-		if ((instruction == 0xBF810000 && (type == ShaderType::Vertex || type == ShaderType::Pixel || type == ShaderType::Compute) &&
-		     !dst->GetLabels().Contains(4 * static_cast<uint32_t>(ptr - src), [](auto label, auto pc) { return label.GetDst() == pc; })) ||
+		const bool endpgm_terminator =
+		    instruction == 0xBF810000 && (type == ShaderType::Vertex || type == ShaderType::Pixel || type == ShaderType::Compute) &&
+		    !dst->GetLabels().Contains(4 * static_cast<uint32_t>(ptr - src), [](auto label, auto target) { return label.GetDst() == target; });
+		if (endpgm_terminator && end != nullptr && ptr < end && ptr[0] == kSCodeEndWord &&
+		    !shader_code_end_padding_valid(ptr, end, src, *dst))
+		{
+			return false;
+		}
+
+		if (endpgm_terminator ||
 		    (instruction == 0xBE802000 && type == ShaderType::Fetch) || setpc_terminator)
 		{
 			break;

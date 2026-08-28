@@ -275,6 +275,86 @@ void VerifyBoundedShaderDecode()
 	code.SetType(ShaderType::Vertex);
 	Expect(!ShaderTryParseBounded(terminal_setpc, sizeof(terminal_setpc), &code),
 	       "ordinary bounded shader rejects an unregistered indirect terminator");
+
+	constexpr uint32_t code_end = 0xbf9f0000u;
+	const uint32_t padded_control_flow[] = {
+	    0xbf850001u,
+	    0xbf810000u,
+	    0xbf82ffffu,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(ShaderTryParseBounded(padded_control_flow, sizeof(padded_control_flow), &code),
+	       "bounded shader accepts an unreachable five-word code-end padding marker");
+	Expect(code.GetInstructions().Size() == 3u && code.GetInstructions().At(2).type == ShaderInstructionType::SBranch,
+	       "code-end padding remains outside the decoded instruction stream");
+	const uint32_t terminated_padding[] = {0xbf810000u, code_end, code_end, code_end, code_end, code_end};
+	code.SetType(ShaderType::Compute);
+	Expect(ShaderTryParseBounded(terminated_padding, sizeof(terminated_padding), &code),
+	       "bounded shader validates a five-word code-end tail after its terminator");
+	const uint32_t short_terminated_padding[] = {0xbf810000u, code_end, code_end, code_end, code_end};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(short_terminated_padding, sizeof(short_terminated_padding), &code),
+	       "bounded shader rejects a short code-end tail after its terminator");
+	const uint32_t short_padding[] = {
+	    0xbf850001u,
+	    0xbf810000u,
+	    0xbf82ffffu,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(short_padding, sizeof(short_padding), &code),
+	       "bounded shader rejects an ambiguous code-end run shorter than five words");
+	const uint32_t reachable_padding[] = {
+	    0xbf820001u,
+	    0xbf810000u,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(reachable_padding, sizeof(reachable_padding), &code),
+	       "bounded shader rejects a branch into code-end padding");
+	const uint32_t later_reachable_padding[] = {
+	    0xbf820006u,
+	    0xbf810000u,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(later_reachable_padding, sizeof(later_reachable_padding), &code),
+	       "bounded shader rejects a branch into a later word of code-end padding");
+	const uint32_t fallthrough_padding[] = {
+	    0xbf850001u,
+	    0xbf810000u,
+	    0xbf800000u,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(fallthrough_padding, sizeof(fallthrough_padding), &code),
+	       "bounded shader rejects code-end padding reachable by fallthrough");
+	const uint32_t padding_only[] = {code_end, code_end, code_end, code_end, code_end};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(padding_only, sizeof(padding_only), &code),
+	       "bounded shader rejects code-end padding without a decoded program terminator");
+
 	ShaderMappedData terminal_front_map {};
 	terminal_front_map.code_size_bytes = sizeof(terminal_setpc);
 	ShaderMappedData terminal_back_map {};
