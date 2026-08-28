@@ -1798,8 +1798,9 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
 // Gen5 fused GS front→back: terminal s_setpc in the front half transfers to a
 // separately allocated back half. Record the relationship at fuse time so the
 // recompiler can linearize the chain.
-void     ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_addr);
+[[nodiscard]] bool ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_addr);
 uint64_t ShaderLookupContinuation(uint64_t front_code_addr);
+[[nodiscard]] bool ShaderHasTerminalSetpc(const ShaderCode& code);
 
 void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count);

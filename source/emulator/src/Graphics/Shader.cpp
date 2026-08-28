@@ -6,6 +6,7 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/String8.h"
 #include "Kyty/Core/Vector.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
@@ -33,6 +34,7 @@
 #include <cinttypes>
 #include <cstdlib>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -386,6 +388,7 @@ static Vector<uint64_t>*                               g_disabled_shaders = null
 static Vector<ShaderDebugPrintfCmds>*                  g_debug_printfs    = nullptr;
 static std::unordered_map<uint64_t, ShaderMappedData>* g_shader_map       = nullptr;
 static std::mutex                                      g_shader_map_mutex;
+static std::shared_mutex                               g_shader_lifetime_mutex;
 static std::unordered_map<uint64_t, int32_t>*          g_vertex_offset_sgpr_map = nullptr;
 static std::unordered_map<uint64_t, uint64_t>*         g_shader_continuations  = nullptr;
 
@@ -402,19 +405,61 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
 {
 	EXIT_IF(g_shader_map == nullptr);
 
+	std::unique_lock lifetime_lock(g_shader_lifetime_mutex);
 	std::scoped_lock lock(g_shader_map_mutex);
+	// A new mapping at the same guest address is a new shader generation. Any
+	// relation using its previous owned range as front or back must not survive
+	// address reuse.
+	uint32_t previous_size = 0;
+	if (const auto previous = g_shader_map->find(addr); previous != g_shader_map->end())
+	{
+		previous_size = previous->second.code_size_bytes;
+	}
+	const auto belonged_to_previous = [addr, previous_size](uint64_t shader_addr)
+	{
+		return shader_addr == addr ||
+		       (previous_size != 0u && shader_addr >= addr && shader_addr - addr < static_cast<uint64_t>(previous_size));
+	};
+	for (auto continuation = g_shader_continuations->begin(); continuation != g_shader_continuations->end();)
+	{
+		if (belonged_to_previous(continuation->first) || belonged_to_previous(continuation->second))
+		{
+			continuation = g_shader_continuations->erase(continuation);
+		} else
+		{
+			++continuation;
+		}
+	}
 	g_shader_map->insert_or_assign(addr, data);
 }
 
-void ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_addr)
+static bool ShaderHasMappedCodeRangeLocked(uint64_t addr)
+{
+	for (const auto& [base, mapped]: *g_shader_map)
+	{
+		if (mapped.code_size_bytes != 0u && addr >= base && addr - base < mapped.code_size_bytes)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_addr)
 {
 	EXIT_IF(g_shader_continuations == nullptr);
 	if (front_code_addr == 0 || back_code_addr == 0 || front_code_addr == back_code_addr)
 	{
-		return;
+		return false;
 	}
+	std::unique_lock lifetime_lock(g_shader_lifetime_mutex);
 	std::scoped_lock lock(g_shader_map_mutex);
+	if (!ShaderHasMappedCodeRangeLocked(front_code_addr) || !ShaderHasMappedCodeRangeLocked(back_code_addr))
+	{
+		return false;
+	}
 	g_shader_continuations->insert_or_assign(front_code_addr, back_code_addr);
+	return true;
 }
 
 uint64_t ShaderLookupContinuation(uint64_t front_code_addr)
@@ -432,16 +477,34 @@ uint64_t ShaderLookupContinuation(uint64_t front_code_addr)
 	return 0;
 }
 
+enum class ShaderContinuationMode : uint8_t
+{
+	None,
+	AllowTerminator,
+	Append,
+};
+
+static void ShaderParseMappedLocked(uint64_t shader_addr, ShaderCode* code, ShaderContinuationMode continuation_mode);
+static void ShaderParseMapped(uint64_t shader_addr, ShaderCode* code,
+	                          ShaderContinuationMode continuation_mode = ShaderContinuationMode::None);
+
+bool ShaderHasTerminalSetpc(const ShaderCode& code)
+{
+	return !code.GetInstructions().IsEmpty() &&
+	       code.GetInstructions().At(code.GetInstructions().Size() - 1u).type == ShaderInstructionType::SSetpcB64;
+}
+
 // Linearize a Gen5 fused front→back chain: append the back half after the
 // front's instructions and rewrite terminal s_setpc into a static branch so
 // the SPIR-V CFG reaches position/param exports in the back half.
 static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
 {
 	EXIT_IF(code == nullptr || back_code_addr == 0);
-	if (!code->HasAnyOf({ShaderInstructionType::SSetpcB64}))
+	if (!ShaderHasTerminalSetpc(*code))
 	{
 		return;
 	}
+	const uint32_t front_terminal_index = code->GetInstructions().Size() - 1u;
 
 	const auto* back_src = reinterpret_cast<const uint32_t*>(back_code_addr);
 	if (back_src == nullptr)
@@ -451,7 +514,7 @@ static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
 
 	ShaderCode back;
 	back.SetType(code->GetType());
-	ShaderParse(back_src, &back);
+	ShaderParseMappedLocked(back_code_addr, &back, ShaderContinuationMode::None);
 	if (back.GetInstructions().IsEmpty())
 	{
 		return;
@@ -485,12 +548,12 @@ static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
 		code->GetIndirectLabels().Add(ShaderLabel(label.GetDst() + pc_offset, label.GetSrc() + pc_offset));
 	}
 
-	// Rewrite every s_setpc to a static branch into the back entry. Internal
-	// getpc+add setpcs that already target a PC inside the front half would
-	// need per-site resolution; fused halves always jump to the back entry.
+	// Only the effective final transfer belongs to the registered back half.
+	// Earlier setpc instructions may belong to other control-flow paths.
+	uint32_t terminal_index = 0;
 	for (auto& inst: code->GetInstructions())
 	{
-		if (inst.type != ShaderInstructionType::SSetpcB64)
+		if (terminal_index++ != front_terminal_index)
 		{
 			continue;
 		}
@@ -504,6 +567,7 @@ static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
 		inst.src[0].constant.i       = rel;
 		inst.dst                     = {};
 		code->GetLabels().Add(ShaderLabel(back_entry_pc, inst.pc));
+		break;
 	}
 
 	static uint32_t logs = 0;
@@ -553,7 +617,66 @@ static bool ShaderGetMappedData(uint64_t addr, ShaderMappedData* data)
 		return false;
 	}
 	*data = *best;
+	data->code_size_bytes -= static_cast<uint32_t>(addr - best_base);
 	return true;
+}
+
+static void ShaderParseMappedLocked(uint64_t shader_addr, ShaderCode* code, ShaderContinuationMode continuation_mode)
+{
+	EXIT_IF(shader_addr == 0u || code == nullptr);
+	if (Config::IsNextGen())
+	{
+		ShaderMappedData data;
+		if (ShaderGetMappedData(shader_addr, &data) && data.code_size_bytes != 0u)
+		{
+			const uint64_t continuation =
+			    continuation_mode != ShaderContinuationMode::None ? ShaderLookupContinuation(shader_addr) : 0u;
+			struct ParseContext
+			{
+				ShaderCode* code        = nullptr;
+				bool        fused_front = false;
+			} context {code, continuation != 0u};
+			const bool parsed = Core::VirtualMemory::VisitReadableGuestRange(
+			    shader_addr, data.code_size_bytes,
+			    [](const void* source, uint64_t size, void* opaque)
+			    {
+				    auto* parse = static_cast<ParseContext*>(opaque);
+				    if (source == nullptr || parse == nullptr || parse->code == nullptr || size > UINT32_MAX)
+				    {
+					    return false;
+				    }
+				    if (parse->fused_front)
+				    {
+					    ShaderParseFusedFront(static_cast<const uint32_t*>(source), static_cast<uint32_t>(size), parse->code);
+				    } else
+				    {
+					    ShaderParse(static_cast<const uint32_t*>(source), static_cast<uint32_t>(size), parse->code);
+				    }
+				    return true;
+			    },
+			    &context);
+			if (!parsed)
+			{
+				EXIT("shader code range became unreadable before parsing: address=0x%016" PRIx64 " size=0x%08" PRIx32 "\n",
+				     shader_addr, data.code_size_bytes);
+			}
+			if (continuation != 0u)
+			{
+				if (continuation_mode == ShaderContinuationMode::Append)
+				{
+					ShaderAppendContinuation(code, continuation);
+				}
+			}
+			return;
+		}
+	}
+	ShaderParse(reinterpret_cast<const uint32_t*>(shader_addr), code);
+}
+
+static void ShaderParseMapped(uint64_t shader_addr, ShaderCode* code, ShaderContinuationMode continuation_mode)
+{
+	std::shared_lock lifetime_lock(g_shader_lifetime_mutex);
+	ShaderParseMappedLocked(shader_addr, code, continuation_mode);
 }
 
 static bool IsDiscardInstruction(const Vector<ShaderInstruction>& code, uint32_t index)
@@ -1922,7 +2045,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		{
 			ShaderCode code;
 			code.SetType(ShaderType::Vertex);
-			ShaderParse(reinterpret_cast<const uint32_t*>(shader_addr), &code);
+			ShaderParseMapped(shader_addr, &code,
+			                  gs_instead_of_vs ? ShaderContinuationMode::AllowTerminator : ShaderContinuationMode::None);
 			const int32_t detected = ShaderDetectVertexOffsetSgpr(code, user_data_base, user_sgpr_num);
 			cached                 = g_vertex_offset_sgpr_map->insert({shader_addr, detected}).first;
 		}
@@ -2041,7 +2165,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			    code->SetCrc32(regs->ps_regs.chksum & 0xffffffffu);
 			    {
 				    DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
-				    ShaderParse(reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr), code.get());
+				    ShaderParseMapped(regs->ps_regs.data_addr, code.get());
 			    }
 			    ShaderProbeWrite("ps", *code, nullptr, nullptr);
 			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code};
@@ -2107,7 +2231,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		code.SetType(ShaderType::Compute);
 		{
 			DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
-			ShaderParse(reinterpret_cast<const uint32_t*>(regs->cs_regs.data_addr), &code);
+			ShaderParseMapped(regs->cs_regs.data_addr, &code);
 		}
 		const auto user_sgpr_num =
 		    ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count, data.user_data->eud_size_dw);
@@ -2503,16 +2627,8 @@ ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegis
 		// shader_parse(0, src, nullptr, &code);
 		{
 			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
-			ShaderParse(src, &code);
-		}
-
-		if (gs_instead_of_vs)
-		{
-			const uint64_t continuation = ShaderLookupContinuation(shader_addr);
-			if (continuation != 0)
-			{
-				ShaderAppendContinuation(&code, continuation);
-			}
+			ShaderParseMapped(shader_addr, &code,
+			                  gs_instead_of_vs ? ShaderContinuationMode::Append : ShaderContinuationMode::None);
 		}
 
 		if (g_debug_printfs != nullptr)
@@ -2616,7 +2732,7 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 		// shader_parse(0, src, nullptr, &code);
 		{
 			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
-			ShaderParse(src, &code);
+			ShaderParseMapped(regs->ps_regs.data_addr, &code);
 		}
 
 		if (g_debug_printfs != nullptr)
@@ -2723,7 +2839,7 @@ ShaderCode ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegi
 	// shader_parse(0, src, nullptr, &code);
 	{
 		DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
-		ShaderParse(src, &code);
+		ShaderParseMapped(regs->cs_regs.data_addr, &code);
 	}
 
 	if (g_debug_printfs != nullptr)

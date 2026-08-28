@@ -1,10 +1,12 @@
 #include "Kyty/Core/Core.h"
 #include "Kyty/Core/Subsystems.h"
 #include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Pm4.h"
@@ -18,10 +20,14 @@
 #include "spirv-tools/libspirv.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 using namespace Kyty::Emulator::Agent;
@@ -244,6 +250,187 @@ void VerifyImageCopyNormalization()
 	block_destination.physical_extent.width = 115u;
 	Expect(!NormalizeImageImageCopy(block_copy, &block_destination, &normalized),
 	       "block-adjusted destination overflow is rejected");
+}
+
+void VerifyBoundedShaderDecode()
+{
+	ShaderInit();
+	static const uint32_t terminated[] = {0xbf810000u, 0xffffffffu};
+	ShaderCode     code;
+	code.SetType(ShaderType::Compute);
+	Expect(ShaderTryParseBounded(terminated, sizeof(uint32_t), &code), "bounded shader accepts an in-range terminator");
+	Expect(code.GetInstructions().Size() == 1u, "bounded shader ignores words outside the mapped code range");
+
+	const uint32_t unterminated[] = {0xbf800000u};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(unterminated, sizeof(unterminated), &code),
+	       "bounded shader rejects a range without a reachable terminator");
+	const uint32_t truncated_literals[] = {0x8000ffffu, 0xbf810000u};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(truncated_literals, sizeof(truncated_literals), &code),
+	       "bounded shader rejects an instruction whose literal words cross the range");
+	Expect(!ShaderTryParseBounded(terminated, sizeof(uint32_t) - 1u, &code), "bounded shader rejects a partial dword range");
+
+	static const uint32_t terminal_setpc[] = {0xbe802000u};
+	code.SetType(ShaderType::Vertex);
+	Expect(!ShaderTryParseBounded(terminal_setpc, sizeof(terminal_setpc), &code),
+	       "ordinary bounded shader rejects an unregistered indirect terminator");
+	ShaderMappedData terminal_front_map {};
+	terminal_front_map.code_size_bytes = sizeof(terminal_setpc);
+	ShaderMappedData terminal_back_map {};
+	terminal_back_map.code_size_bytes = sizeof(terminated);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(terminal_setpc), terminal_front_map);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(terminated), terminal_back_map);
+	Expect(ShaderRegisterContinuation(reinterpret_cast<uint64_t>(terminal_setpc), reinterpret_cast<uint64_t>(terminated)),
+	       "fused continuation registration requires bounded front and back mappings");
+	ShaderParseFusedFront(terminal_setpc, sizeof(terminal_setpc), &code);
+	Expect(code.GetInstructions().Size() == 1u && code.GetInstructions().At(0).type == ShaderInstructionType::SSetpcB64,
+	       "registered fused front accepts an exact-range indirect terminator");
+	static const uint32_t setpc_then_endpgm[] = {0xbe802000u, 0xbf810000u};
+	ShaderMappedData branched_front_map {};
+	branched_front_map.code_size_bytes = sizeof(setpc_then_endpgm);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(setpc_then_endpgm), branched_front_map);
+	Expect(ShaderRegisterContinuation(reinterpret_cast<uint64_t>(setpc_then_endpgm), reinterpret_cast<uint64_t>(terminated)),
+	       "mapped front with in-range control flow registers its continuation");
+	ShaderParseFusedFront(setpc_then_endpgm, sizeof(setpc_then_endpgm), &code);
+	Expect(code.GetInstructions().Size() == 2u && code.GetInstructions().At(1).type == ShaderInstructionType::SEndpgm,
+	       "in-range code after setpc remains available to other control-flow paths");
+	Expect(!ShaderHasTerminalSetpc(code), "non-terminal setpc does not authorize continuation linearization");
+	ShaderMappedData replacement {};
+	replacement.code_size_bytes = sizeof(terminal_setpc);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(terminal_setpc), replacement);
+	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(terminal_setpc)) == 0u,
+	       "new front mapping invalidates an address-reused continuation");
+	ShaderMapUserData(reinterpret_cast<uint64_t>(terminated), terminal_back_map);
+	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(setpc_then_endpgm)) == 0u,
+	       "new back mapping invalidates continuations that target the reused address");
+}
+
+void VerifyGuestReadVisitSerializesProtection()
+{
+	const uint64_t page_size = Kyty::Core::VirtualMemory::GetPageSize();
+	Expect(page_size != 0u, "guest read visit requires a host page size");
+	const uint64_t address = Kyty::Core::VirtualMemory::Alloc(0, page_size, Kyty::Core::VirtualMemory::Mode::ReadWrite);
+	Expect(address != 0u, "guest read visit allocates a guest-owned page");
+	const uint32_t marker = 0x5a17c0deu;
+	Expect(Kyty::Core::VirtualMemory::CopyToGuest(address, &marker, sizeof(marker)), "guest read visit initializes the range");
+
+	struct VisitSync
+	{
+		std::mutex              mutex;
+		std::condition_variable changed;
+		bool                    visitor_entered = false;
+		bool                    release_visitor = false;
+		bool                    protector_started = false;
+		bool                    protector_finished = false;
+		bool                    marker_valid = false;
+	} sync;
+	bool visit_result   = false;
+	bool protect_result = false;
+	std::thread visitor(
+	    [&]
+	    {
+		    visit_result = Kyty::Core::VirtualMemory::VisitReadableGuestRange(
+		        address, sizeof(marker),
+		        [](const void* data, uint64_t size, void* opaque)
+		        {
+			        auto* state = static_cast<VisitSync*>(opaque);
+			        std::unique_lock lock(state->mutex);
+			        state->marker_valid   = size == sizeof(uint32_t) && *static_cast<const uint32_t*>(data) == 0x5a17c0deu;
+			        state->visitor_entered = true;
+			        state->changed.notify_all();
+			        state->changed.wait(lock, [&] { return state->release_visitor; });
+			        return state->marker_valid;
+		        },
+		        &sync);
+	    });
+	{
+		std::unique_lock lock(sync.mutex);
+		Expect(sync.changed.wait_for(lock, std::chrono::seconds(1), [&] { return sync.visitor_entered; }),
+		       "guest read visitor enters before protection changes");
+	}
+	std::thread protector(
+	    [&]
+	    {
+		    {
+			    std::lock_guard lock(sync.mutex);
+			    sync.protector_started = true;
+			    sync.changed.notify_all();
+		    }
+		    protect_result = Kyty::Core::VirtualMemory::ProtectGuest(address, page_size, Kyty::Core::VirtualMemory::Mode::NoAccess);
+		    {
+			    std::lock_guard lock(sync.mutex);
+			    sync.protector_finished = true;
+			    sync.changed.notify_all();
+		    }
+	    });
+	{
+		std::unique_lock lock(sync.mutex);
+		Expect(sync.changed.wait_for(lock, std::chrono::seconds(1), [&] { return sync.protector_started; }),
+		       "guest protection attempt starts while visitor is active");
+		Expect(!sync.changed.wait_for(lock, std::chrono::milliseconds(25), [&] { return sync.protector_finished; }),
+		       "guest protection waits for the active read visitor");
+		sync.release_visitor = true;
+		sync.changed.notify_all();
+	}
+	visitor.join();
+	protector.join();
+	Expect(visit_result && protect_result, "guest read visit and deferred protection both complete");
+	Expect(Kyty::Core::VirtualMemory::ProtectGuest(address, page_size, Kyty::Core::VirtualMemory::Mode::ReadWrite),
+	       "guest read visit restores page access for cleanup");
+	Expect(Kyty::Core::VirtualMemory::Free(address), "guest read visit releases its guest page");
+}
+
+void VerifyFusedShaderUsesEffectiveBackEntry()
+{
+	alignas(256) static uint32_t front_code[64] = {};
+	alignas(256) static uint32_t back_code[128] = {};
+	const uint64_t               back_entry     = reinterpret_cast<uint64_t>(back_code) + 256u;
+	ShaderRegister               back_registers[2] {};
+	back_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_GS;
+	back_registers[0].value  = static_cast<uint32_t>((back_entry >> 8u) & 0xffffffffu);
+	back_registers[1].offset = Pm4::SPI_SHADER_PGM_LO_GS + 1u;
+	back_registers[1].value  = static_cast<uint32_t>((back_entry >> 40u) & 0xffu);
+
+	Shader front {};
+	front.type = 4u;
+	front.code = front_code;
+	Shader back {};
+	back.type             = 6u;
+	back.code             = back_code;
+	back.sh_registers     = back_registers;
+	back.num_sh_registers = 2u;
+	Shader         fused {};
+	ShaderRegister scratch[2] {};
+	ShaderMappedData front_map {};
+	front_map.code_size_bytes = sizeof(front_code);
+	ShaderMappedData back_map {};
+	back_map.code_size_bytes = sizeof(back_code);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(front_code), front_map);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(back_code), back_map);
+	Expect(Gen5::GraphicsUnknownFuseShaderHalves(&fused, &front, &back, scratch) == 0,
+	       "valid fused shader halves resolve their back program address");
+	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(front_code)) == back_entry,
+	       "fused shader continuation uses the effective back entry rather than the allocation base");
+	ShaderMappedData smaller_back_map {};
+	smaller_back_map.code_size_bytes = 128u;
+	ShaderMapUserData(reinterpret_cast<uint64_t>(back_code), smaller_back_map);
+	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(front_code)) == 0u,
+	       "reusing a back allocation invalidates continuations into its previous range");
+	Expect(!ShaderRegisterContinuation(reinterpret_cast<uint64_t>(front_code), back_entry),
+	       "continuation registration rejects an entry outside the replacement owner range");
+	alignas(256) static uint32_t unmapped_back_code[64] = {};
+	const uint64_t               unmapped_back_entry    = reinterpret_cast<uint64_t>(unmapped_back_code);
+	ShaderRegister               unmapped_registers[2] {};
+	unmapped_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_GS;
+	unmapped_registers[0].value  = static_cast<uint32_t>((unmapped_back_entry >> 8u) & 0xffffffffu);
+	unmapped_registers[1].offset = Pm4::SPI_SHADER_PGM_LO_GS + 1u;
+	unmapped_registers[1].value  = static_cast<uint32_t>((unmapped_back_entry >> 40u) & 0xffu);
+	Shader unmapped_back          = back;
+	unmapped_back.code            = unmapped_back_code;
+	unmapped_back.sh_registers    = unmapped_registers;
+	Expect(Gen5::GraphicsUnknownFuseShaderHalves(&fused, &front, &unmapped_back, scratch) != 0,
+	       "fused shader rejects an unmapped back entry");
 }
 
 void VerifyStorageFrontier()
@@ -2045,7 +2232,10 @@ void VerifyComparisonSamplerCacheIdentity()
 int main()
 {
 	InitializeGraphicsConfig();
+	VerifyGuestReadVisitSerializesProtection();
 	VerifyImageCopyNormalization();
+	VerifyBoundedShaderDecode();
+	VerifyFusedShaderUsesEffectiveBackEntry();
 	VerifyComparisonSamplerCacheIdentity();
 	VerifyStencilFrontier();
 	VerifyStorageFrontier();
