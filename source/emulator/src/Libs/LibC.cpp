@@ -1750,7 +1750,7 @@ constexpr std::int32_t  kCxxNumPutMaxPrecision = 512;
 //   near-null address (RIP=N) and FatalFault with rc=139.
 struct CxxIosSmanipInt
 {
-	void (*apply)(CxxIosBaseLayout* ios, int arg);
+	void(KYTY_SYSV_ABI *apply)(CxxIosBaseLayout* ios, int arg);
 	int arg;
 };
 
@@ -3216,7 +3216,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("uhnb6dnXOnc", LibC::c_thread_pad_named_ctor);
 	LIB_FUNC("gjLRZgfb3i0", LibC::c_thread_pad_dtor);
 	LIB_FUNC("XyJPhPqpzMw", LibC::c_thread_pad_dtor);
-	LIB_FUNC("xZqiZvmcp9k", static_cast<void (*)(LibC::CxxThreadPad*, Kernel::Pthread*)>(LibC::c_thread_pad_launch));
+	LIB_FUNC("xZqiZvmcp9k",
+	         static_cast<void(KYTY_SYSV_ABI*)(LibC::CxxThreadPad*, Kernel::Pthread*)>(LibC::c_thread_pad_launch));
 	LIB_FUNC("PBbZjsL6nfc", LibC::c_thread_pad_named_launch);
 	LIB_FUNC("fLBZMOQh-3Y", LibC::c_thread_pad_attr_launch);
 	LIB_FUNC("H7-7Z3ixv-w", LibC::c_thread_pad_named_attr_launch);

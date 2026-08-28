@@ -51,6 +51,7 @@ ShaderOperand operand_parse(uint32_t code)
 			case 127: ret.type = ShaderOperandType::ExecHi; break;
 			case 251: ret.type = ShaderOperandType::VccZ; break;
 			case 252: ret.type = ShaderOperandType::ExecZ; break;
+			case 253: ret.type = ShaderOperandType::Scc; break;
 			case 255:
 				ret.type = ShaderOperandType::LiteralConstant;
 				ret.size = 0;

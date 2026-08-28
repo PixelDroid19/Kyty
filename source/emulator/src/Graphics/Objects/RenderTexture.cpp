@@ -10,11 +10,77 @@
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Profiler.h"
 
+#include <limits>
+
 // IWYU pragma: no_forward_declare VkImageView_T
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer, uint32_t last_layer,
+	                               RenderTextureArrayView* view)
+{
+	if (view == nullptr)
+	{
+		return false;
+	}
+	*view = {};
+	if (bytes_per_layer == 0 || last_layer != base_layer || last_layer == std::numeric_limits<uint32_t>::max())
+	{
+		return false;
+	}
+	const uint32_t image_layers = last_layer + 1u;
+	if (bytes_per_layer > std::numeric_limits<uint64_t>::max() / image_layers)
+	{
+		return false;
+	}
+	view->image_layers      = image_layers;
+	view->base_layer        = base_layer;
+	view->layer_count       = 1u;
+	view->full_backing_size = bytes_per_layer * image_layers;
+	return true;
+}
+
+bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)
+{
+	if (existing == nullptr || incoming == nullptr)
+	{
+		return false;
+	}
+	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_SAMPLES; param++)
+	{
+		if (existing[param] != incoming[param])
+		{
+			return false;
+		}
+	}
+	if (existing[RenderTextureObject::PARAM_TILED] == 0u || existing[RenderTextureObject::PARAM_WRITE_BACK] != 0u)
+	{
+		return false;
+	}
+	const auto existing_layers = existing[RenderTextureObject::PARAM_ARRAY_LAYERS];
+	const auto incoming_layers = incoming[RenderTextureObject::PARAM_ARRAY_LAYERS];
+	return existing_layers > 0u && incoming_layers > existing_layers;
+}
+
+bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t* incoming)
+{
+	if (existing == nullptr || incoming == nullptr)
+	{
+		return false;
+	}
+	for (int param = RenderTextureObject::PARAM_FORMAT; param <= RenderTextureObject::PARAM_SAMPLES; param++)
+	{
+		if (existing[param] != incoming[param])
+		{
+			return false;
+		}
+	}
+	const auto existing_layers = existing[RenderTextureObject::PARAM_ARRAY_LAYERS];
+	const auto incoming_layers = incoming[RenderTextureObject::PARAM_ARRAY_LAYERS];
+	return incoming_layers > 0u && existing_layers >= incoming_layers;
+}
 
 RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order)
 {
@@ -98,7 +164,10 @@ static void create_render_texture_image_views(GraphicContext* ctx, RenderTexture
 {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(vk_obj == nullptr);
-	if (!VulkanCreateStandardColorImageViews(ctx, vk_obj)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateStandardColorImageViews(ctx, vk_obj) condition ignored (continuing)\n"); }
+	if (!VulkanCreateStandardColorImageViews(ctx, vk_obj))
+	{
+		EXIT("failed to create render-texture image views\n");
+	}
 }
 
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
@@ -181,7 +250,28 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	//	    objects.At(1).type == GpuMemoryObjectType::StorageTexture && scenario == GpuMemoryScenario::GenerateMips)
 	//	{
 	//		auto* src_obj = static_cast<StorageTextureVulkanImage*>(objects.At(1).obj);
-	if (objects.Size() == 3 && objects.At(0).type == GpuMemoryObjectType::StorageBuffer &&
+	if (scenario == GpuMemoryScenario::Common && objects.Size() == 1 &&
+	    objects.At(0).type == GpuMemoryObjectType::RenderTexture)
+	{
+		auto* source = static_cast<RenderTextureVulkanImage*>(objects.At(0).obj);
+		EXIT_IF(buffer == nullptr || source == nullptr || source->array_layers == 0u || source->array_layers >= vk_obj->array_layers);
+		EXIT_IF(source->format != vk_obj->format || source->samples != vk_obj->samples ||
+		        !source->MatchesGuestExtent(vk_obj->GetGuestExtent().width, vk_obj->GetGuestExtent().height) ||
+		        source->extent.width != vk_obj->extent.width || source->extent.height != vk_obj->extent.height);
+
+		Vector<ImageImageCopy> regions(1);
+		regions[0].src_image   = source;
+		regions[0].src_level   = 0;
+		regions[0].dst_level   = 0;
+		regions[0].width       = source->extent.width;
+		regions[0].height      = source->extent.height;
+		regions[0].src_x       = 0;
+		regions[0].src_y       = 0;
+		regions[0].dst_x       = 0;
+		regions[0].dst_y       = 0;
+		regions[0].layer_count = source->array_layers;
+		UtilImageToImage(buffer, regions, vk_obj, static_cast<uint64_t>(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+	} else if (objects.Size() == 3 && objects.At(0).type == GpuMemoryObjectType::StorageBuffer &&
 	    objects.At(1).type == GpuMemoryObjectType::Texture && objects.At(2).type == GpuMemoryObjectType::StorageTexture &&
 	    scenario == GpuMemoryScenario::GenerateMips)
 	{
@@ -271,7 +361,18 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	const auto height    = params[RenderTextureObject::PARAM_HEIGHT];
 	const auto vk_format = resolve_render_texture_format(params[RenderTextureObject::PARAM_FORMAT]);
 	const auto samples    = static_cast<VkSampleCountFlagBits>(params[RenderTextureObject::PARAM_SAMPLES]);
-	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 condition ignored (continuing)\n"); }
+	const auto array_layers = static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]);
+	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || array_layers == 0)
+	{
+		EXIT("invalid render-texture image description\n");
+	}
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
+	if (array_layers > properties.limits.maxImageArrayLayers)
+	{
+		EXIT("render-texture layer count exceeds the device limit: requested=%" PRIu32 " limit=%" PRIu32 "\n", array_layers,
+		     properties.limits.maxImageArrayLayers);
+	}
 
 	VulkanResolutionAttachmentRequest capability_request {};
 	capability_request.extent       = {static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
@@ -300,6 +401,7 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 	vk_obj->format = vk_format;
 	vk_obj->image  = nullptr;
 	vk_obj->samples = samples;
+	vk_obj->array_layers = array_layers;
 	if (guest_size != nullptr)
 	{
 		vk_obj->guest_size = *guest_size;
@@ -311,11 +413,15 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 
 	VulkanImageDescriptor image_descriptor {};
 	image_descriptor.extent = {vk_obj->extent.width, vk_obj->extent.height, 1};
+	image_descriptor.array_layers = vk_obj->array_layers;
 	image_descriptor.format = vk_obj->format;
 	image_descriptor.samples = vk_obj->samples;
 	image_descriptor.usage  = vk_usage;
 	const auto image_info   = VulkanBuildImageCreateInfo(image_descriptor);
-	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem) condition ignored (continuing)\n"); }
+	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, mem))
+	{
+		EXIT("failed to create render-texture image\n");
+	}
 	return vk_obj;
 }
 
@@ -350,7 +456,21 @@ static void* create2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint
 	KYTY_PROFILER_BLOCK("RenderTextureObject::CreateFromObjects");
 
 	EXIT_IF(objects.IsEmpty());
-	auto*      vk_obj = create_render_texture_image(ctx, params, mem, nullptr);
+	uint64_t       growing_guest_size = 0;
+	const uint64_t* guest_size        = nullptr;
+	if (scenario == GpuMemoryScenario::Common && objects.Size() == 1 &&
+	    objects.At(0).type == GpuMemoryObjectType::RenderTexture)
+	{
+		auto* source = static_cast<RenderTextureVulkanImage*>(objects.At(0).obj);
+		const auto incoming_layers = params[RenderTextureObject::PARAM_ARRAY_LAYERS];
+		EXIT_IF(source == nullptr || source->array_layers == 0u || source->guest_size == 0u ||
+		        source->guest_size % source->array_layers != 0u || incoming_layers <= source->array_layers);
+		const uint64_t bytes_per_layer = source->guest_size / source->array_layers;
+		EXIT_IF(incoming_layers > UINT64_MAX / bytes_per_layer);
+		growing_guest_size = bytes_per_layer * incoming_layers;
+		guest_size         = &growing_guest_size;
+	}
+	auto*      vk_obj = create_render_texture_image(ctx, params, mem, guest_size);
 	const auto width  = params[RenderTextureObject::PARAM_WIDTH];
 	const auto height = params[RenderTextureObject::PARAM_HEIGHT];
 
@@ -429,7 +549,8 @@ bool RenderTextureObject::Equal(const uint64_t* other) const
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_WIDTH] == other[PARAM_WIDTH] &&
 	        params[PARAM_HEIGHT] == other[PARAM_HEIGHT] && params[PARAM_TILED] == other[PARAM_TILED] &&
 	        params[PARAM_NEO] == other[PARAM_NEO] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
-	        params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK] && params[PARAM_SAMPLES] == other[PARAM_SAMPLES]);
+	        params[PARAM_WRITE_BACK] == other[PARAM_WRITE_BACK] && params[PARAM_SAMPLES] == other[PARAM_SAMPLES] &&
+	        params[PARAM_ARRAY_LAYERS] == other[PARAM_ARRAY_LAYERS]);
 }
 
 GpuObject::create_func_t RenderTextureObject::GetCreateFunc() const

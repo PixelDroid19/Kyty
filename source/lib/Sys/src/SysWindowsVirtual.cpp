@@ -1069,6 +1069,22 @@ bool sys_virtual_is_range_writable(uint64_t address, uint64_t size)
 	return range_is_guest_owned_locked(address, size) && range_has_access_locked(address, size, true);
 }
 
+bool sys_virtual_visit_readable_guest_range(uint64_t address, uint64_t size,
+	                                        VirtualMemory::ReadableGuestRangeVisitor visitor, void* context)
+{
+	if (visitor == nullptr || size > std::numeric_limits<size_t>::max())
+	{
+		return false;
+	}
+
+	std::scoped_lock transaction(g_protection_transaction_mutex);
+	if (!range_is_guest_owned_locked(address, size) || !range_has_access_locked(address, size, false))
+	{
+		return false;
+	}
+	return visitor(reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), size, context);
+}
+
 bool sys_virtual_copy_from_guest(void* destination, uint64_t source, uint64_t size)
 {
 	if (destination == nullptr || size > std::numeric_limits<size_t>::max())

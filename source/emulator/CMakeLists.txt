@@ -85,6 +85,12 @@ add_library(kyty_hle STATIC ${hle_src} ${hle_domain_src})
 add_library(kyty_audio_video_backend STATIC src/AudioVideoBackend.cpp)
 add_library(emulator STATIC ${emulator_src})
 
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND (NOT MSVC OR CLANG))
+	enable_language(ASM)
+	target_sources(kyty_kernel PRIVATE src/Kernel/FiberContext.S)
+	target_compile_definitions(kyty_kernel PRIVATE KYTY_FIBER_ASM_CONTEXT=1)
+endif()
+
 target_sources(kyty_host PRIVATE
 	$<TARGET_OBJECTS:imgui_sdl_backend_obj>
 )
@@ -186,6 +192,9 @@ target_include_directories(kyty_runtime_core PUBLIC
 	"${CMAKE_SOURCE_DIR}/include"
 )
 target_link_libraries(kyty_runtime_core PUBLIC core math sys)
+if(MINGW)
+	target_link_libraries(kyty_runtime_core PUBLIC atomic)
+endif()
 
 target_include_directories(kyty_kernel PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"

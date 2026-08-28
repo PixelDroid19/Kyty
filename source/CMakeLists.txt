@@ -203,6 +203,10 @@ if(KYTY_BUILD_UNIT_TESTS)
 	)
 else()
 	add_library(unit_test STATIC unit_test/src/UnitTestDisabled.cpp)
+	target_include_directories(unit_test PRIVATE
+		"${CMAKE_SOURCE_DIR}/3rdparty/gtest/include"
+		"${CMAKE_SOURCE_DIR}/3rdparty/gtest"
+	)
 	target_link_libraries(unit_test core)
 endif()
 if(KYTY_BUILD_LAUNCHER AND NOT ${KYTY_PROJECT_NAME} MATCHES "Build_Tools")
@@ -285,16 +289,13 @@ endif()
 
 add_executable(fc_script ${KYTY_SCRIPT_SRC})
 
-if(KYTY_BUILD_UNIT_TESTS)
-	# fc_script embeds the unit-test archive for its Lua test entry point.  The
-	# GoogleTest translation unit is compiled as part of that host executable,
-	# so its private include roots must be scoped here rather than inherited from
-	# the standalone runner.
-	target_include_directories(fc_script PRIVATE
-		"${CMAKE_SOURCE_DIR}/3rdparty/gtest/include"
-		"${CMAKE_SOURCE_DIR}/3rdparty/gtest"
-	)
-endif()
+# fc_script includes the unit-test facade for its Lua test entry point.  When
+# tests are disabled, the facade links to UnitTestDisabled.cpp but still needs
+# the vendored GoogleTest include roots used by UnitTest.h.
+target_include_directories(fc_script PRIVATE
+	"${CMAKE_SOURCE_DIR}/3rdparty/gtest/include"
+	"${CMAKE_SOURCE_DIR}/3rdparty/gtest"
+)
 
 if(MINGW OR (UNIX AND NOT APPLE))
 	# unit_test references supervisor APIs only from fc_script. Pull every
@@ -341,6 +342,9 @@ target_link_libraries(fc_script iphlpapi)
 target_link_libraries(fc_script setupapi)
 target_link_libraries(fc_script ws2_32)
 target_link_libraries(fc_script psapi)
+if(MINGW)
+	target_link_libraries(fc_script atomic)
+endif()
 endif()
 if (CLANG AND NOT MSVC)
 target_link_libraries(fc_script pthread)

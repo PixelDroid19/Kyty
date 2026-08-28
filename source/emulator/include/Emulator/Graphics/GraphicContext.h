@@ -34,9 +34,24 @@ typedef struct VkPipelineViewportDepthClipControlCreateInfoEXT
 #define VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME "VK_EXT_depth_range_unrestricted"
 #endif
 
+#ifndef VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME
+#define VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME "VK_EXT_load_store_op_none"
+#endif
+
+#ifndef VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME
+#define VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME "VK_KHR_load_store_op_none"
+#endif
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+[[nodiscard]] constexpr VkAttachmentStoreOp VulkanAttachmentStoreOpNone()
+{
+	// The vendored header exposes the original alias; KHR and EXT use the same
+	// registry value when their corresponding device extension is enabled.
+	return VK_ATTACHMENT_STORE_OP_NONE_QCOM;
+}
 
 struct VulkanSwapchain
 {
@@ -116,6 +131,10 @@ struct GraphicContext
 
 	// VK_EXT_depth_range_unrestricted allows viewport min/maxDepth outside [0,1].
 	bool depth_range_unrestricted_supported = false;
+
+	// A read-only attachment sampled by the same draw must use STORE_OP_NONE;
+	// STORE and DONT_CARE may still perform attachment writes.
+	bool load_store_op_none_supported = false;
 
 	// Core depthBiasClamp is optional and must be enabled explicitly at device creation.
 	bool depth_bias_clamp_supported = false;
@@ -202,11 +221,15 @@ struct VulkanImage
 	// the independently selectable Vulkan storage extent.
 	VkExtent2D             guest_extent         = {};
 	VkExtent2D             extent               = {};
+	// Exact allocation extent from VkImageCreateInfo. This can exceed the
+	// logical extent when storage mips are packed into one host image.
+	VkExtent3D             physical_extent      = {};
 	VkImage                image                = nullptr;
 	VkImageView            image_view[VIEW_MAX] = {};
 	VkImageUsageFlags      usage                = 0;
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkSampleCountFlagBits  samples               = VK_SAMPLE_COUNT_1_BIT;
+	uint32_t               mip_levels            = 1;
 	uint32_t               array_layers          = 1;
 	Graphics::VulkanMemory memory;
 	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.

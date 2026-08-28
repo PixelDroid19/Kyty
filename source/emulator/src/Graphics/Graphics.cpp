@@ -1981,6 +1981,15 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 
 			KYTY_LOG_DEBUG("\t base   = 0x%016" PRIx64 "\n", base);
 
+	constexpr uint64_t kMaxEncodedShaderAddress = 0x0000ffffffffffffull;
+	if ((base & 0xFFFF0000000000FFull) != 0u || h->shader_size == 0u || (h->shader_size & 3u) != 0u ||
+	    static_cast<uint64_t>(h->shader_size) - 1u > kMaxEncodedShaderAddress - base ||
+	    !Core::VirtualMemory::IsRangeReadable(base, h->shader_size))
+	{
+		EXIT("shader code address or readable range is invalid: address=0x%016" PRIx64 " size=0x%08" PRIx32 "\n",
+		     base, h->shader_size);
+	}
+
 	ShaderMappedData map;
 	map.user_data           = h->user_data;
 	map.input_semantics     = h->input_semantics;
@@ -1988,8 +1997,6 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 	map.code_size_bytes     = h->shader_size;
 
 	ShaderMapUserData(base, map);
-
-	if ((base & 0xFFFF0000000000FFull) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (base & 0xFFFF0000000000FFull) != 0 condition ignored (continuing)\n"); }
 
 	// Gen5 shader binary types (Prospero::ShaderBinaryType). Front halves and FS
 	// carry no program address registers; GS/HS use LO_ES/LO_LS (merged) or
@@ -2024,7 +2031,10 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 
 	if (needs_pgm)
 	{
-		if (h->sh_registers == nullptr || h->num_sh_registers == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: h->sh_registers == nullptr || h->num_sh_registers == 0 condition ignored (continuing)\n"); }
+		if (h->sh_registers == nullptr || h->num_sh_registers == 0)
+		{
+			EXIT("shader program register list is missing\n");
+		}
 
 		bool patched = false;
 		for (uint32_t lo_index = 0; lo_index < h->num_sh_registers; lo_index++)
@@ -2035,18 +2045,21 @@ int KYTY_SYSV_ABI GraphicsCreateShader(Shader** dst, void* header, const volatil
 			}
 			const uint32_t hi_index  = lo_index + 1u;
 			const uint32_t hi_offset = lo_offset + 1u;
-			if (hi_index >= h->num_sh_registers || h->sh_registers[hi_index].offset != hi_offset) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: hi_index >= h->num_sh_registers || h->sh_registers[hi_index].offset != hi_offset condition ignored (continuing)\n"); }
+			if (hi_index >= h->num_sh_registers || h->sh_registers[hi_index].offset != hi_offset)
+			{
+				EXIT("shader program register pair is incomplete\n");
+			}
 
 			// Header LO/HI hold a relative code offset; absolute = base + offset.
 			const uint64_t shader_offset =
 			    (static_cast<uint64_t>(h->sh_registers[lo_index].value) << 8u) |
 			    ((static_cast<uint64_t>(h->sh_registers[hi_index].value) & 0xffu) << 40u);
+			if (shader_offset >= map.code_size_bytes || (shader_offset & 3u) != 0u)
+			{
+				EXIT("shader entry point is outside the mapped code range: offset=0x%016" PRIx64 " size=0x%08" PRIx32 "\n",
+				     shader_offset, map.code_size_bytes);
+			}
 			const uint64_t addr = base + shader_offset;
-
-			// PGM_LO/HI name the effective entry point, which may be inside the
-			// supplied code allocation. Resource metadata belongs to that address,
-			// not only to the allocation base.
-			ShaderMapUserData(addr, map);
 
 			h->sh_registers[lo_index].value = static_cast<uint32_t>((addr >> 8u) & 0xffffffffu);
 			h->sh_registers[hi_index].value =
@@ -2096,6 +2109,28 @@ static ShaderRegister* find_shader_register(ShaderRegister* regs, uint32_t num_r
 	return nullptr;
 }
 
+static const ShaderRegister* find_shader_register(const ShaderRegister* regs, uint32_t num_regs, uint32_t offset,
+	                                               uint32_t occurrence = 0)
+{
+	if (regs == nullptr)
+	{
+		return nullptr;
+	}
+	for (uint32_t i = 0; i < num_regs; i++)
+	{
+		if (regs[i].offset != offset)
+		{
+			continue;
+		}
+		if (occurrence == 0)
+		{
+			return regs + i;
+		}
+		occurrence--;
+	}
+	return nullptr;
+}
+
 static void patch_shader_register_address(ShaderRegister* regs, uint32_t num_regs, uint32_t lo_offset, uint64_t address)
 {
 	auto* lo = find_shader_register(regs, num_regs, lo_offset);
@@ -2110,6 +2145,22 @@ static void patch_shader_register_address(ShaderRegister* regs, uint32_t num_reg
 	}
 	lo->value = static_cast<uint32_t>((address >> 8u) & 0xffffffffu);
 	hi->value = (hi->value & 0xffffff00u) | static_cast<uint32_t>((address >> 40u) & 0xffu);
+}
+
+static bool get_shader_register_address(const ShaderRegister* regs, uint32_t num_regs, uint32_t lo_offset, uint64_t* address)
+{
+	if (address == nullptr)
+	{
+		return false;
+	}
+	const auto* lo = find_shader_register(regs, num_regs, lo_offset);
+	if (lo == nullptr || lo + 1 >= regs + num_regs || (lo + 1)->offset != lo_offset + 1u)
+	{
+		return false;
+	}
+	const auto* hi = lo + 1;
+	*address       = (static_cast<uint64_t>(lo->value) << 8u) | ((static_cast<uint64_t>(hi->value) & 0xffu) << 40u);
+	return *address != 0u;
 }
 
 int KYTY_SYSV_ABI GraphicsUnknownGetFusedShaderSize(SizeAlign* dst, const Shader* front, const Shader* back)
@@ -2210,7 +2261,17 @@ int KYTY_SYSV_ABI GraphicsUnknownFuseShaderHalves(Shader* fused_result, const Sh
 	// Record that relationship so ES-as-VS recompilation can linearize both.
 	if (front->code != nullptr && back->code != nullptr)
 	{
-		ShaderRegisterContinuation(reinterpret_cast<uint64_t>(front->code), reinterpret_cast<uint64_t>(back->code));
+		const uint32_t back_lo_offset = back->type == kGsBack ? Pm4::SPI_SHADER_PGM_LO_GS : Pm4::SPI_SHADER_PGM_LO_HS;
+		uint64_t       back_entry     = 0;
+		if (!get_shader_register_address(back->sh_registers, static_cast<uint32_t>(back->num_sh_registers), back_lo_offset,
+		                                 &back_entry))
+		{
+			return kGraphics5ErrorInvalidShaderHalves;
+		}
+		if (!ShaderRegisterContinuation(reinterpret_cast<uint64_t>(front->code), back_entry))
+		{
+			return kGraphics5ErrorInvalidShaderHalves;
+		}
 	}
 
 	fused_result->user_data = nullptr;

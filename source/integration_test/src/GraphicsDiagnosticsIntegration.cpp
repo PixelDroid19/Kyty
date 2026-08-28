@@ -1,6 +1,7 @@
 #include "Kyty/Core/Core.h"
 #include "Kyty/Core/Subsystems.h"
 #include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Math/MathAll.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
@@ -15,6 +16,7 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/Texture.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
@@ -32,11 +34,13 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -2068,6 +2072,465 @@ void VerifyStencilFrontier()
 	Expect(EventRing::Instance().GetStats().total_pushed == 64, "stencil frontier volume bounded");
 }
 
+void VerifyDepthStencilAttachmentAccess(bool load_store_op_none_supported)
+{
+	RenderDepthInfo depth {};
+	depth.format = VK_FORMAT_D32_SFLOAT;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, false, false) == DepthStencilAttachmentAccess::Writable,
+	       "depth attachment without a sampled alias keeps the writable path");
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, false) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias requires store-op-none support");
+	if (!load_store_op_none_supported)
+	{
+		return;
+	}
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::ReadOnly,
+	       "non-writing depth attachment uses the read-only path");
+
+	depth.depth_write_enable = true;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, false, true) == DepthStencilAttachmentAccess::Writable,
+	       "depth write without a sampled alias keeps the writable path");
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias rejects simultaneous depth writes");
+	depth.suppress_depth_write = true;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::ReadOnly,
+	       "suppressed depth write stays read-only");
+
+	depth.depth_clear_enable = true;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias rejects simultaneous depth clear");
+	depth.depth_clear_enable = false;
+
+	depth.stencil_test_enable               = true;
+	depth.stencil_dynamic_front.writeMask   = 0xffu;
+	depth.stencil_static_front.passOp       = VK_STENCIL_OP_REPLACE;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias rejects simultaneous stencil writes");
+	depth.stencil_dynamic_front.writeMask = 0u;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::ReadOnly,
+	       "masked stencil operation stays read-only");
+
+	depth.stencil_clear_enable = true;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
+	       "sampled depth alias rejects simultaneous stencil clear");
+}
+
+void VerifyImageCopyNormalization()
+{
+	VulkanImage source(VulkanImageType::StorageTexture);
+	VulkanImage destination(VulkanImageType::Texture);
+	source.SetNativeExtent(256u, 128u);
+	source.SetHostExtent(128u, 64u);
+	source.physical_extent = {128u, 64u, 1u};
+	source.mip_levels      = 4u;
+	source.array_layers    = 4u;
+	destination.SetNativeExtent(200u, 160u);
+	destination.SetHostExtent(100u, 80u);
+	destination.physical_extent = {100u, 80u, 1u};
+	destination.mip_levels      = 3u;
+	destination.array_layers    = 3u;
+
+	ImageImageCopy requested {};
+	requested.src_image       = &source;
+	requested.src_level       = 1u;
+	requested.dst_level       = 1u;
+	requested.width           = 32u;
+	requested.height          = 16u;
+	requested.src_x           = 60;
+	requested.src_y           = 24;
+	requested.dst_x           = 45;
+	requested.dst_y           = 30;
+	requested.src_array_layer = 1u;
+	requested.dst_array_layer = 0u;
+	requested.layer_count     = 2u;
+	ImageImageCopy normalized {};
+	Expect(NormalizeImageImageCopy(requested, &destination, &normalized), "intersecting image copy remains valid");
+	Expect(normalized.width == 4u && normalized.height == 8u, "image copy uses the real host mip intersection");
+	Expect(normalized.src_x == requested.src_x && normalized.dst_x == requested.dst_x,
+	       "image copy intersection preserves exact offsets");
+	Expect(normalized.layer_count == 2u, "image copy preserves a valid layer range");
+
+	requested.src_level = source.mip_levels;
+	Expect(!NormalizeImageImageCopy(requested, &destination, &normalized), "source mip outside the image is rejected");
+	requested.src_level       = 1u;
+	requested.dst_array_layer = 2u;
+	Expect(!NormalizeImageImageCopy(requested, &destination, &normalized), "destination layer overflow is rejected");
+	requested.dst_array_layer = 0u;
+	requested.src_x           = 64;
+	Expect(!NormalizeImageImageCopy(requested, &destination, &normalized), "empty source intersection is rejected");
+
+	VulkanImage atlas(VulkanImageType::StorageTexture);
+	atlas.SetNativeExtent(256u, 128u);
+	atlas.physical_extent = {256u, 192u, 1u};
+	atlas.format          = VK_FORMAT_R8G8B8A8_UNORM;
+	VulkanImage mip_destination(VulkanImageType::Texture);
+	mip_destination.SetNativeExtent(256u, 128u);
+	mip_destination.physical_extent = {256u, 128u, 1u};
+	mip_destination.mip_levels      = 2u;
+	mip_destination.format          = atlas.format;
+	ImageImageCopy atlas_lod {};
+	atlas_lod.src_image = &atlas;
+	atlas_lod.src_level = 0u;
+	atlas_lod.dst_level = 1u;
+	atlas_lod.width     = 128u;
+	atlas_lod.height    = 64u;
+	atlas_lod.src_x     = 0;
+	atlas_lod.src_y     = 128;
+	atlas_lod.dst_x     = 0;
+	atlas_lod.dst_y     = 0;
+	Expect(NormalizeImageImageCopy(atlas_lod, &mip_destination, &normalized), "packed storage atlas LOD remains valid");
+	Expect(normalized.width == atlas_lod.width && normalized.height == atlas_lod.height,
+	       "packed storage atlas LOD is not cropped");
+
+	VulkanImage block_source(VulkanImageType::StorageTexture);
+	block_source.physical_extent = {29u, 30u, 1u};
+	block_source.format          = VK_FORMAT_R32G32B32A32_UINT;
+	VulkanImage block_destination(VulkanImageType::Texture);
+	block_destination.physical_extent = {116u, 120u, 1u};
+	block_destination.format          = VK_FORMAT_BC3_UNORM_BLOCK;
+	ImageImageCopy block_copy {};
+	block_copy.src_image = &block_source;
+	block_copy.width     = 29u;
+	block_copy.height    = 30u;
+	block_copy.src_x     = 0;
+	block_copy.src_y     = 0;
+	block_copy.dst_x     = 0;
+	block_copy.dst_y     = 0;
+	Expect(NormalizeImageImageCopy(block_copy, &block_destination, &normalized),
+	       "compatible uncompressed-to-block copy uses source coordinates");
+	block_destination.physical_extent.width = 115u;
+	Expect(!NormalizeImageImageCopy(block_copy, &block_destination, &normalized),
+	       "block-adjusted destination overflow is rejected");
+}
+
+void VerifyBoundedShaderDecode()
+{
+	ShaderInit();
+	static const uint32_t terminated[] = {0xbf810000u, 0xffffffffu};
+	ShaderCode     code;
+	code.SetType(ShaderType::Compute);
+	Expect(ShaderTryParseBounded(terminated, sizeof(uint32_t), &code), "bounded shader accepts an in-range terminator");
+	Expect(code.GetInstructions().Size() == 1u, "bounded shader ignores words outside the mapped code range");
+
+	const uint32_t unterminated[] = {0xbf800000u};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(unterminated, sizeof(unterminated), &code),
+	       "bounded shader rejects a range without a reachable terminator");
+	const uint32_t truncated_literals[] = {0x8000ffffu, 0xbf810000u};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(truncated_literals, sizeof(truncated_literals), &code),
+	       "bounded shader rejects an instruction whose literal words cross the range");
+	Expect(!ShaderTryParseBounded(terminated, sizeof(uint32_t) - 1u, &code), "bounded shader rejects a partial dword range");
+
+	static const uint32_t terminal_setpc[] = {0xbe802000u};
+	code.SetType(ShaderType::Vertex);
+	Expect(!ShaderTryParseBounded(terminal_setpc, sizeof(terminal_setpc), &code),
+	       "ordinary bounded shader rejects an unregistered indirect terminator");
+
+	constexpr uint32_t code_end = 0xbf9f0000u;
+	const uint32_t padded_control_flow[] = {
+	    0xbf850001u,
+	    0xbf810000u,
+	    0xbf82ffffu,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(ShaderTryParseBounded(padded_control_flow, sizeof(padded_control_flow), &code),
+	       "bounded shader accepts an unreachable five-word code-end padding marker");
+	Expect(code.GetInstructions().Size() == 3u && code.GetInstructions().At(2).type == ShaderInstructionType::SBranch,
+	       "code-end padding remains outside the decoded instruction stream");
+	const uint32_t terminated_padding[] = {0xbf810000u, code_end, code_end, code_end, code_end, code_end};
+	code.SetType(ShaderType::Compute);
+	Expect(ShaderTryParseBounded(terminated_padding, sizeof(terminated_padding), &code),
+	       "bounded shader validates a five-word code-end tail after its terminator");
+	const uint32_t short_terminated_padding[] = {0xbf810000u, code_end, code_end, code_end, code_end};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(short_terminated_padding, sizeof(short_terminated_padding), &code),
+	       "bounded shader rejects a short code-end tail after its terminator");
+	const uint32_t short_padding[] = {
+	    0xbf850001u,
+	    0xbf810000u,
+	    0xbf82ffffu,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(short_padding, sizeof(short_padding), &code),
+	       "bounded shader rejects an ambiguous code-end run shorter than five words");
+	const uint32_t reachable_padding[] = {
+	    0xbf820001u,
+	    0xbf810000u,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(reachable_padding, sizeof(reachable_padding), &code),
+	       "bounded shader rejects a branch into code-end padding");
+	const uint32_t later_reachable_padding[] = {
+	    0xbf820006u,
+	    0xbf810000u,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(later_reachable_padding, sizeof(later_reachable_padding), &code),
+	       "bounded shader rejects a branch into a later word of code-end padding");
+	const uint32_t fallthrough_padding[] = {
+	    0xbf850001u,
+	    0xbf810000u,
+	    0xbf800000u,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	    code_end,
+	};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(fallthrough_padding, sizeof(fallthrough_padding), &code),
+	       "bounded shader rejects code-end padding reachable by fallthrough");
+	const uint32_t padding_only[] = {code_end, code_end, code_end, code_end, code_end};
+	code.SetType(ShaderType::Compute);
+	Expect(!ShaderTryParseBounded(padding_only, sizeof(padding_only), &code),
+	       "bounded shader rejects code-end padding without a decoded program terminator");
+
+	ShaderMappedData terminal_front_map {};
+	terminal_front_map.code_size_bytes = sizeof(terminal_setpc);
+	ShaderMappedData terminal_back_map {};
+	terminal_back_map.code_size_bytes = sizeof(terminated);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(terminal_setpc), terminal_front_map);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(terminated), terminal_back_map);
+	Expect(ShaderRegisterContinuation(reinterpret_cast<uint64_t>(terminal_setpc), reinterpret_cast<uint64_t>(terminated)),
+	       "fused continuation registration requires bounded front and back mappings");
+	ShaderParseFusedFront(terminal_setpc, sizeof(terminal_setpc), &code);
+	Expect(code.GetInstructions().Size() == 1u && code.GetInstructions().At(0).type == ShaderInstructionType::SSetpcB64,
+	       "registered fused front accepts an exact-range indirect terminator");
+	static const uint32_t setpc_then_endpgm[] = {0xbe802000u, 0xbf810000u};
+	ShaderMappedData branched_front_map {};
+	branched_front_map.code_size_bytes = sizeof(setpc_then_endpgm);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(setpc_then_endpgm), branched_front_map);
+	Expect(ShaderRegisterContinuation(reinterpret_cast<uint64_t>(setpc_then_endpgm), reinterpret_cast<uint64_t>(terminated)),
+	       "mapped front with in-range control flow registers its continuation");
+	ShaderParseFusedFront(setpc_then_endpgm, sizeof(setpc_then_endpgm), &code);
+	Expect(code.GetInstructions().Size() == 2u && code.GetInstructions().At(1).type == ShaderInstructionType::SEndpgm,
+	       "in-range code after setpc remains available to other control-flow paths");
+	Expect(!ShaderHasTerminalSetpc(code), "non-terminal setpc does not authorize continuation linearization");
+	ShaderMappedData replacement {};
+	replacement.code_size_bytes = sizeof(terminal_setpc);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(terminal_setpc), replacement);
+	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(terminal_setpc)) == 0u,
+	       "new front mapping invalidates an address-reused continuation");
+	ShaderMapUserData(reinterpret_cast<uint64_t>(terminated), terminal_back_map);
+	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(setpc_then_endpgm)) == 0u,
+	       "new back mapping invalidates continuations that target the reused address");
+}
+
+void VerifyScalarConditionalMoves()
+{
+	const uint32_t code_words[] = {
+	    0xbe800000u | (4u << 16u) | (0x05u << 8u) | 2u,
+	    0xbe800000u | (6u << 16u) | (0x06u << 8u) | 8u,
+	    0xbe800000u | (126u << 16u) | (0x05u << 8u) | 10u,
+	    0xbe800000u | (127u << 16u) | (0x05u << 8u) | 11u,
+	    0xbe800000u | (12u << 16u) | (0x05u << 8u) | 253u,
+	    0xbe800000u | (13u << 16u) | (0x05u << 8u) | 125u,
+	    0xbe800000u | (125u << 16u) | (0x05u << 8u) | 14u,
+	    0xbe800000u | (16u << 16u) | (0x06u << 8u) | 125u,
+	    0xbe800000u | (125u << 16u) | (0x06u << 8u) | 18u,
+	    0xbe800000u | (20u << 16u) | (0x06u << 8u) | 253u,
+	    0xbe800000u | (22u << 16u) | (0x06u << 8u) | 252u,
+	    0xbe800000u | (24u << 16u) | (0x06u << 8u) | 251u,
+	    0xbf810000u,
+	};
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	Expect(ShaderTryParseBounded(code_words, sizeof(code_words), &code), "scalar conditional moves decode in a bounded shader");
+	Expect(code.GetInstructions().Size() == 13u, "scalar conditional move shader keeps its operations and terminator");
+	const auto& move32 = code.GetInstructions().At(0);
+	const auto& move64 = code.GetInstructions().At(1);
+	const auto& exec_lo_move = code.GetInstructions().At(2);
+	const auto& exec_hi_move = code.GetInstructions().At(3);
+	Expect(move32.type == ShaderInstructionType::SCmovB32 && move32.src_num == 2 && move32.src[1] == move32.dst,
+	       "32-bit conditional move preserves its destination when SCC is clear");
+	Expect(move64.type == ShaderInstructionType::SCmovB64 && move64.src_num == 2 && move64.src[1] == move64.dst &&
+	           move64.dst.size == 2 && move64.src[0].size == 2,
+	       "64-bit conditional move preserves both destination dwords when SCC is clear");
+	Expect(exec_lo_move.dst.type == ShaderOperandType::ExecLo && exec_hi_move.dst.type == ShaderOperandType::ExecHi,
+	       "32-bit conditional moves retain individual EXEC destinations");
+	Expect(code.GetInstructions().At(4).src[0].type == ShaderOperandType::Scc,
+	       "32-bit conditional move accepts SCC as a scalar source");
+	Expect(code.GetInstructions().At(5).src[0].type == ShaderOperandType::Null &&
+	           code.GetInstructions().At(6).dst.type == ShaderOperandType::Null &&
+	           code.GetInstructions().At(7).src[0].type == ShaderOperandType::Null &&
+	           code.GetInstructions().At(8).dst.type == ShaderOperandType::Null,
+	       "scalar conditional moves retain NULL source and destination operands");
+	Expect(code.GetInstructions().At(9).src[0].type == ShaderOperandType::Scc &&
+	           code.GetInstructions().At(10).src[0].type == ShaderOperandType::ExecZ &&
+	           code.GetInstructions().At(11).src[0].type == ShaderOperandType::VccZ,
+	       "64-bit conditional moves retain scalar status sources");
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 1;
+	input.threads_num[1] = 1;
+	input.threads_num[2] = 1;
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	Expect(source.FindIndex("OpLoad %uint %scc") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "scalar conditional moves read SCC during translation");
+	Expect(source.FindIndex("OpSelect %uint") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "scalar conditional moves select between source and prior destination");
+	Expect(source.FindIndex("OpStore %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("OpStore %exec_hi") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "32-bit conditional moves write both individual EXEC destinations");
+	Expect(source.FindIndex("%z191_2 = OpLoad %uint %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("OpStore %execz %z196_2") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("%z191_3 = OpLoad %uint %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           source.FindIndex("OpStore %execz %z196_3") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "32-bit conditional moves refresh EXECZ after each individual EXEC write");
+	Expect(source.FindIndex("%snz") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "scalar conditional moves preserve SCC instead of deriving it from their result");
+	Expect(source.FindIndex("OpCopyObject %uint %uint_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "NULL scalar sources translate to zero");
+	ExpectValidSpirv(source, "scalar conditional moves emit valid SPIR-V for SCC, NULL, and EXEC operands");
+}
+
+void VerifyGuestReadVisitSerializesProtection()
+{
+	const uint64_t page_size = Kyty::Core::VirtualMemory::GetPageSize();
+	Expect(page_size != 0u, "guest read visit requires a host page size");
+	const uint64_t address = Kyty::Core::VirtualMemory::Alloc(0, page_size, Kyty::Core::VirtualMemory::Mode::ReadWrite);
+	Expect(address != 0u, "guest read visit allocates a guest-owned page");
+	const uint32_t marker = 0x5a17c0deu;
+	Expect(Kyty::Core::VirtualMemory::CopyToGuest(address, &marker, sizeof(marker)), "guest read visit initializes the range");
+
+	struct VisitSync
+	{
+		std::mutex              mutex;
+		std::condition_variable changed;
+		bool                    visitor_entered = false;
+		bool                    release_visitor = false;
+		bool                    protector_started = false;
+		bool                    protector_finished = false;
+		bool                    marker_valid = false;
+	} sync;
+	bool visit_result   = false;
+	bool protect_result = false;
+	std::thread visitor(
+	    [&]
+	    {
+		    visit_result = Kyty::Core::VirtualMemory::VisitReadableGuestRange(
+		        address, sizeof(marker),
+		        [](const void* data, uint64_t size, void* opaque)
+		        {
+			        auto* state = static_cast<VisitSync*>(opaque);
+			        std::unique_lock lock(state->mutex);
+			        state->marker_valid   = size == sizeof(uint32_t) && *static_cast<const uint32_t*>(data) == 0x5a17c0deu;
+			        state->visitor_entered = true;
+			        state->changed.notify_all();
+			        state->changed.wait(lock, [&] { return state->release_visitor; });
+			        return state->marker_valid;
+		        },
+		        &sync);
+	    });
+	{
+		std::unique_lock lock(sync.mutex);
+		Expect(sync.changed.wait_for(lock, std::chrono::seconds(1), [&] { return sync.visitor_entered; }),
+		       "guest read visitor enters before protection changes");
+	}
+	std::thread protector(
+	    [&]
+	    {
+		    {
+			    std::lock_guard lock(sync.mutex);
+			    sync.protector_started = true;
+			    sync.changed.notify_all();
+		    }
+		    protect_result = Kyty::Core::VirtualMemory::ProtectGuest(address, page_size, Kyty::Core::VirtualMemory::Mode::NoAccess);
+		    {
+			    std::lock_guard lock(sync.mutex);
+			    sync.protector_finished = true;
+			    sync.changed.notify_all();
+		    }
+	    });
+	{
+		std::unique_lock lock(sync.mutex);
+		Expect(sync.changed.wait_for(lock, std::chrono::seconds(1), [&] { return sync.protector_started; }),
+		       "guest protection attempt starts while visitor is active");
+		Expect(!sync.changed.wait_for(lock, std::chrono::milliseconds(25), [&] { return sync.protector_finished; }),
+		       "guest protection waits for the active read visitor");
+		sync.release_visitor = true;
+		sync.changed.notify_all();
+	}
+	visitor.join();
+	protector.join();
+	Expect(visit_result && protect_result, "guest read visit and deferred protection both complete");
+	Expect(Kyty::Core::VirtualMemory::ProtectGuest(address, page_size, Kyty::Core::VirtualMemory::Mode::ReadWrite),
+	       "guest read visit restores page access for cleanup");
+	Expect(Kyty::Core::VirtualMemory::Free(address), "guest read visit releases its guest page");
+}
+
+void VerifyFusedShaderUsesEffectiveBackEntry()
+{
+	alignas(256) static uint32_t front_code[64] = {};
+	alignas(256) static uint32_t back_code[128] = {};
+	const uint64_t               back_entry     = reinterpret_cast<uint64_t>(back_code) + 256u;
+	ShaderRegister               back_registers[2] {};
+	back_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_GS;
+	back_registers[0].value  = static_cast<uint32_t>((back_entry >> 8u) & 0xffffffffu);
+	back_registers[1].offset = Pm4::SPI_SHADER_PGM_LO_GS + 1u;
+	back_registers[1].value  = static_cast<uint32_t>((back_entry >> 40u) & 0xffu);
+
+	Shader front {};
+	front.type = 4u;
+	front.code = front_code;
+	Shader back {};
+	back.type             = 6u;
+	back.code             = back_code;
+	back.sh_registers     = back_registers;
+	back.num_sh_registers = 2u;
+	Shader         fused {};
+	ShaderRegister scratch[2] {};
+	ShaderMappedData front_map {};
+	front_map.code_size_bytes = sizeof(front_code);
+	ShaderMappedData back_map {};
+	back_map.code_size_bytes = sizeof(back_code);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(front_code), front_map);
+	ShaderMapUserData(reinterpret_cast<uint64_t>(back_code), back_map);
+	Expect(Gen5::GraphicsUnknownFuseShaderHalves(&fused, &front, &back, scratch) == 0,
+	       "valid fused shader halves resolve their back program address");
+	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(front_code)) == back_entry,
+	       "fused shader continuation uses the effective back entry rather than the allocation base");
+	ShaderMappedData smaller_back_map {};
+	smaller_back_map.code_size_bytes = 128u;
+	ShaderMapUserData(reinterpret_cast<uint64_t>(back_code), smaller_back_map);
+	Expect(ShaderLookupContinuation(reinterpret_cast<uint64_t>(front_code)) == 0u,
+	       "reusing a back allocation invalidates continuations into its previous range");
+	Expect(!ShaderRegisterContinuation(reinterpret_cast<uint64_t>(front_code), back_entry),
+	       "continuation registration rejects an entry outside the replacement owner range");
+	alignas(256) static uint32_t unmapped_back_code[64] = {};
+	const uint64_t               unmapped_back_entry    = reinterpret_cast<uint64_t>(unmapped_back_code);
+	ShaderRegister               unmapped_registers[2] {};
+	unmapped_registers[0].offset = Pm4::SPI_SHADER_PGM_LO_GS;
+	unmapped_registers[0].value  = static_cast<uint32_t>((unmapped_back_entry >> 8u) & 0xffffffffu);
+	unmapped_registers[1].offset = Pm4::SPI_SHADER_PGM_LO_GS + 1u;
+	unmapped_registers[1].value  = static_cast<uint32_t>((unmapped_back_entry >> 40u) & 0xffu);
+	Shader unmapped_back          = back;
+	unmapped_back.code            = unmapped_back_code;
+	unmapped_back.sh_registers    = unmapped_registers;
+	Expect(Gen5::GraphicsUnknownFuseShaderHalves(&fused, &front, &unmapped_back, scratch) != 0,
+	       "fused shader rejects an unmapped back entry");
+}
+
 void VerifyStorageFrontier()
 {
 	EventRing::Instance().ResetForTests();
@@ -2175,7 +2638,46 @@ void VerifyStorageUnknownReasonResolution()
 
 	evidence = ResolveShaderStorageAccessEvidence(true, ShaderStorageBindingSource::DirectResource, ShaderStorageAccess::Unknown,
 	                                              ShaderStorageAccess::Unknown, false, false);
-	Expect(evidence.reason == ShaderStorageUnknownReason::NoMatchingInstruction, "no matching instruction reason");
+	Expect(evidence.access == ShaderStorageAccess::Unknown, "unmatched direct resource remains strict");
+	Expect(evidence.reason == ShaderStorageUnknownReason::NoMatchingInstruction, "unmatched direct resource preserves its reason");
+}
+
+void VerifyRenderColorArrayBackingGrouping()
+{
+	RenderColorInfo color {};
+	color.targets_num = 2;
+	for (auto& attachment: color.attachment)
+	{
+		attachment.type                  = RenderColorType::RenderTexture;
+		attachment.base_addr             = 0x1000u;
+		attachment.render_texture_format = RenderTextureFormat::R8G8B8A8Unorm;
+		attachment.width                 = 128u;
+		attachment.height                = 64u;
+		attachment.pitch                 = 128u;
+		attachment.tile                  = true;
+	}
+	color.attachment[0].image_layers    = 1u;
+	color.attachment[0].base_array_layer = 0u;
+	color.attachment[0].size            = 0x20000u;
+	color.attachment[1].image_layers    = 2u;
+	color.attachment[1].base_array_layer = 1u;
+	color.attachment[1].size            = 0x40000u;
+
+	NormalizeRenderColorArrayBackings(&color);
+	Expect(color.attachment[0].image_layers == 2u && color.attachment[1].image_layers == 2u,
+	       "MRT slices share the largest array backing");
+	Expect(color.attachment[0].size == 0x40000u && color.attachment[1].size == 0x40000u,
+	       "MRT slices share the full backing size");
+	Expect(color.attachment[0].base_array_layer == 0u && color.attachment[1].base_array_layer == 1u,
+	       "MRT slice views remain distinct");
+
+	RenderTextureVulkanImage render_array;
+	render_array.usage                               = VK_IMAGE_USAGE_STORAGE_BIT;
+	render_array.image_view[VulkanImage::VIEW_ARRAY] = reinterpret_cast<VkImageView>(0x1);
+	int storage_view = -1;
+	Expect(VulkanResolveStorageImageView(&render_array, false, true, &storage_view),
+	       "render-target arrays expose a storage-compatible view");
+	Expect(storage_view == VulkanImage::VIEW_ARRAY, "render-target storage arrays use the canonical array view");
 }
 
 ShaderOperand Sgpr(int register_id, int size)
@@ -3458,6 +3960,30 @@ public:
 
 		for (const auto physical: physical_devices)
 		{
+			uint32_t extension_count = 0;
+			if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, nullptr) != VK_SUCCESS)
+			{
+				continue;
+			}
+			std::vector<VkExtensionProperties> extensions(extension_count);
+			if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, extensions.data()) != VK_SUCCESS)
+			{
+				continue;
+			}
+			const auto has_extension = [&extensions](const char* name)
+			{
+				return std::any_of(extensions.cbegin(), extensions.cend(),
+				                   [name](const auto& extension) { return std::strcmp(extension.extensionName, name) == 0; });
+			};
+			const char* load_store_op_none_extension = nullptr;
+			if (has_extension(VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME))
+			{
+				load_store_op_none_extension = VK_KHR_LOAD_STORE_OP_NONE_EXTENSION_NAME;
+			} else if (has_extension(VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME))
+			{
+				load_store_op_none_extension = VK_EXT_LOAD_STORE_OP_NONE_EXTENSION_NAME;
+			}
+
 			uint32_t family_count = 0;
 			vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, nullptr);
 			std::vector<VkQueueFamilyProperties> families(family_count);
@@ -3478,6 +4004,9 @@ public:
 				device_info.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 				device_info.queueCreateInfoCount = 1;
 				device_info.pQueueCreateInfos    = &queue_info;
+				device_info.enabledExtensionCount   = load_store_op_none_extension != nullptr ? 1u : 0u;
+				device_info.ppEnabledExtensionNames =
+				    load_store_op_none_extension != nullptr ? &load_store_op_none_extension : nullptr;
 				if (vkCreateDevice(physical, &device_info, nullptr, &context.device) != VK_SUCCESS)
 				{
 					continue;
@@ -3486,6 +4015,7 @@ public:
 				VkQueue queue = VK_NULL_HANDLE;
 				vkGetDeviceQueue(context.device, family, 0, &queue);
 				context.physical_device                              = physical;
+				context.load_store_op_none_supported                = load_store_op_none_extension != nullptr;
 				context.queues[GraphicContext::QUEUE_GFX].vk_queue  = queue;
 				context.queues[GraphicContext::QUEUE_GFX].family    = family;
 				context.queues[GraphicContext::QUEUE_GFX].index     = 0;
@@ -4383,6 +4913,72 @@ private:
 	VkDeviceMemory  memory    = VK_NULL_HANDLE;
 };
 
+class VulkanDepthReadOnlyFramebuffer
+{
+public:
+	explicit VulkanDepthReadOnlyFramebuffer(VkDevice device): m_device(device) {}
+	~VulkanDepthReadOnlyFramebuffer()
+	{
+		if (framebuffer != VK_NULL_HANDLE)
+		{
+			vkDestroyFramebuffer(m_device, framebuffer, nullptr);
+		}
+		if (render_pass != VK_NULL_HANDLE)
+		{
+			vkDestroyRenderPass(m_device, render_pass, nullptr);
+		}
+	}
+
+	[[nodiscard]] bool Create(VkImageView depth_view)
+	{
+		if (m_device == VK_NULL_HANDLE || depth_view == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+		VkAttachmentDescription attachment {};
+		attachment.format         = VK_FORMAT_D32_SFLOAT;
+		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_LOAD;
+		attachment.storeOp        = VulkanAttachmentStoreOpNone();
+		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachment.stencilStoreOp = VulkanAttachmentStoreOpNone();
+		attachment.initialLayout  = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		attachment.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+
+		VkAttachmentReference depth_reference {};
+		depth_reference.attachment = 0;
+		depth_reference.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		VkSubpassDescription subpass {};
+		subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.pDepthStencilAttachment = &depth_reference;
+		VkRenderPassCreateInfo render_pass_info {};
+		render_pass_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+		render_pass_info.attachmentCount = 1;
+		render_pass_info.pAttachments    = &attachment;
+		render_pass_info.subpassCount    = 1;
+		render_pass_info.pSubpasses      = &subpass;
+		if (vkCreateRenderPass(m_device, &render_pass_info, nullptr, &render_pass) != VK_SUCCESS)
+		{
+			return false;
+		}
+
+		VkFramebufferCreateInfo framebuffer_info {};
+		framebuffer_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+		framebuffer_info.renderPass      = render_pass;
+		framebuffer_info.attachmentCount = 1;
+		framebuffer_info.pAttachments    = &depth_view;
+		framebuffer_info.width           = 4;
+		framebuffer_info.height          = 4;
+		framebuffer_info.layers          = 1;
+		return vkCreateFramebuffer(m_device, &framebuffer_info, nullptr, &framebuffer) == VK_SUCCESS;
+	}
+
+private:
+	VkDevice      m_device    = VK_NULL_HANDLE;
+	VkRenderPass  render_pass = VK_NULL_HANDLE;
+	VkFramebuffer framebuffer = VK_NULL_HANDLE;
+};
+
 class VulkanDepthDescriptorBinding
 {
 public:
@@ -4448,7 +5044,7 @@ public:
 
 		VkDescriptorImageInfo image_info {};
 		image_info.imageView   = depth_view;
-		image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		image_info.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 		VkDescriptorImageInfo sampler_info {};
 		sampler_info.sampler = comparison_sampler;
 		VkWriteDescriptorSet writes[2] {};
@@ -4575,6 +5171,7 @@ void VerifyComparisonSamplerCacheIdentity()
 {
 	VulkanSamplerContext vulkan;
 	Expect(vulkan.Initialize(), "Vulkan sampler context must initialize");
+	VerifyDepthStencilAttachmentAccess(vulkan.context.load_store_op_none_supported);
 	ShaderSamplerResource descriptor {};
 	const auto regular      = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::Regular);
 	const auto depth        = g_render_ctx->GetSamplerCache()->GetSamplerId(descriptor, State::ImageSampleOperation::DepthReference);
@@ -4589,6 +5186,11 @@ void VerifyComparisonSamplerCacheIdentity()
 	Expect(depth_sample.Create(), "sampled depth image and depth-aspect view must be created");
 	VulkanDepthDescriptorBinding binding(vulkan.context.device);
 	Expect(binding.Create(depth_sample.view, comparison_sampler), "depth view and comparison sampler descriptor update must succeed");
+	if (vulkan.context.load_store_op_none_supported)
+	{
+		VulkanDepthReadOnlyFramebuffer framebuffer(vulkan.context.device);
+		Expect(framebuffer.Create(depth_sample.view), "read-only sampled depth framebuffer must use store-op-none");
+	}
 }
 
 } // namespace
@@ -4661,11 +5263,17 @@ int main(int argc, char** argv)
 		VerifyEventWriteExecutionContract();
 		return 0;
 	}
+	VerifyGuestReadVisitSerializesProtection();
+	VerifyImageCopyNormalization();
+	VerifyBoundedShaderDecode();
+	VerifyScalarConditionalMoves();
+	VerifyFusedShaderUsesEffectiveBackEntry();
 	VerifyComparisonSamplerCacheIdentity();
 	VerifyStencilFrontier();
 	VerifyStorageFrontier();
 	VerifyStorageRange();
 	VerifyStorageUnknownReasonResolution();
+	VerifyRenderColorArrayBackingGrouping();
 	VerifyStorageConsumerAnalysis();
 	VerifyUnusedMetadataExclusionPreservesActiveOrdering();
 	VerifyResidualStencilPm4Boundary();

@@ -13,6 +13,15 @@ namespace Kyty::Libs::Graphics {
 class ShaderCode;
 
 void ShaderParse(const uint32_t* src, ShaderCode* dst);
+void ShaderParse(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst);
+// A registered fused front transfers through terminal s_setpc_b64 to its
+// separately mapped continuation. This entry point is only valid after that
+// relationship has been established.
+void ShaderParseFusedFront(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst);
+// Boundary-only diagnostic form used by integration tests. Instruction
+// semantic errors remain strict; false means the byte range ended before a
+// complete, reachable program terminator.
+[[nodiscard]] bool ShaderTryParseBounded(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst);
 
 } // namespace Kyty::Libs::Graphics
 

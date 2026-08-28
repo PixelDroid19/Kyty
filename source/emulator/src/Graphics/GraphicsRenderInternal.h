@@ -388,13 +388,18 @@ struct VulkanFramebuffer
 	VkImageLayout             depth_initial_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkImageLayout             depth_stencil_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkExtent2D                 extent                            = {};
+	VkImageView                owned_color_view[TARGETS_MAX]     = {};
 };
 
 enum class DepthStencilAttachmentAccess
 {
 	Writable,
 	ReadOnly,
+	Unsupported,
 };
+
+DepthStencilAttachmentAccess ResolveDepthStencilAttachmentAccess(const RenderDepthInfo& depth, bool sampled_in_same_draw,
+                                                                 bool load_store_op_none_supported);
 
 class FramebufferCache
 {
@@ -416,6 +421,8 @@ private:
 		VulkanFramebuffer* framebuffer             = nullptr;
 		uint32_t           targets_num             = 0;
 		uint64_t           image_id[8]             = {};
+		uint32_t           base_array_layer[8]     = {};
+		uint32_t           layer_count[8]          = {};
 		uint64_t           depth_id                = 0;
 		bool               depth_clear_enable      = false;
 		bool               stencil_clear_enable    = false;
@@ -704,6 +711,9 @@ struct RenderColorAttachmentInfo
 	VkSampleCountFlagBits samples                 = VK_SAMPLE_COUNT_1_BIT;
 	uint32_t              pitch                   = 0;
 	uint64_t              size                    = 0;
+	uint32_t              image_layers            = 1;
+	uint32_t              base_array_layer         = 0;
+	uint32_t              layer_count              = 1;
 	bool                  tile                    = false;
 	bool                  neo                     = false;
 	bool                  write_back              = false;
@@ -1504,6 +1514,7 @@ void DescribeRenderDepthInfo(const HW::Context& hw, RenderDepthInfo* r);
 void MaterializeRenderDepthInfo(uint64_t submit_id, CommandBuffer* buffer, RenderDepthInfo* r, uint32_t host_width = 0,
                                 uint32_t host_height = 0, const VulkanSampleLocationState* sample_locations = nullptr);
 void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, RenderColorInfo* r);
+void NormalizeRenderColorArrayBackings(RenderColorInfo* color);
 void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, RenderColorInfo* r);
 void InvalidateMemoryObject(const RenderColorInfo& r);
 void InvalidateMemoryObject(const RenderDepthInfo& r);

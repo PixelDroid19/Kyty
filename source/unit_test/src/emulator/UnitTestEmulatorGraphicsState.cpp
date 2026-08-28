@@ -2016,6 +2016,7 @@ TEST(EmulatorGraphicsState, DecodesScreenScissorHalves)
 
 TEST(EmulatorGraphicsState, DecodesRenderControl)
 {
+	Config::SetNextGen(true);
 	HW::Context context;
 
 	const uint32_t value = (1u << Pm4::DB_RENDER_CONTROL_DEPTH_CLEAR_ENABLE_SHIFT) |
@@ -2329,7 +2330,7 @@ TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescript
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
 }
 
-TEST(EmulatorGraphicsState, Gen5CodeAvailablePrunesUnusedDirectStorageDescriptor)
+TEST(EmulatorGraphicsState, Gen5CodeAvailablePreservesUnmatchedDirectStorageDescriptor)
 {
 	HW::UserSgprInfo user_sgpr {};
 	for (int i = 0; i < 4; ++i)
@@ -2361,7 +2362,10 @@ TEST(EmulatorGraphicsState, Gen5CodeAvailablePrunesUnusedDirectStorageDescriptor
 	ShaderBindResources bind {};
 	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 4, &code);
 
-	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	ASSERT_EQ(bind.storage_buffers.buffers_num, 1);
+	EXPECT_EQ(bind.storage_buffers.sources[0], ShaderStorageBindingSource::DirectResource);
+	EXPECT_EQ(bind.storage_buffers.accesses[0], ShaderStorageAccess::Unknown);
+	EXPECT_EQ(bind.storage_buffers.unknown_reasons[0], ShaderStorageUnknownReason::NoMatchingInstruction);
 }
 
 TEST(EmulatorGraphicsState, RawStorageDescriptorRequiresNonZeroDwordStride)
@@ -3410,6 +3414,31 @@ TEST(EmulatorGraphicsState, BuildsCanonicalVulkanImageCreateInfo)
 	EXPECT_EQ(view_info.subresourceRange.levelCount, 3u);
 	EXPECT_EQ(view_info.subresourceRange.baseArrayLayer, 4u);
 	EXPECT_EQ(view_info.subresourceRange.layerCount, 5u);
+}
+
+TEST(EmulatorGraphicsState, ResolvesLayeredRenderTargetBackingAndView)
+{
+	RenderTextureArrayView view {};
+	ASSERT_TRUE(ResolveRenderTextureArrayView(0x20000u, 4u, 4u, &view));
+	EXPECT_EQ(view.image_layers, 5u);
+	EXPECT_EQ(view.base_layer, 4u);
+	EXPECT_EQ(view.layer_count, 1u);
+	EXPECT_EQ(view.full_backing_size, 0xa0000u);
+
+	EXPECT_FALSE(ResolveRenderTextureArrayView(0x20000u, 2u, 4u, &view));
+	EXPECT_FALSE(ResolveRenderTextureArrayView(0x20000u, 4u, 3u, &view));
+	EXPECT_FALSE(ResolveRenderTextureArrayView(UINT64_MAX, 0u, 1u, &view));
+
+	RenderTextureObject single(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, false, 1u, 1u);
+	RenderTextureObject layered(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, false, 1u, 5u);
+	EXPECT_FALSE(single.Equal(layered.params));
+	EXPECT_TRUE(RenderTextureCanCopyGrowingBacking(single.params, layered.params));
+	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(layered.params, single.params));
+	EXPECT_TRUE(RenderTextureCanReuseLargerBacking(layered.params, single.params));
+	EXPECT_FALSE(RenderTextureCanReuseLargerBacking(single.params, layered.params));
+	RenderTextureObject cpu_visible(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 1u);
+	RenderTextureObject cpu_visible_layered(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 5u);
+	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(cpu_visible.params, cpu_visible_layered.params));
 }
 
 TEST(EmulatorGraphicsState, DecodesAndNormalizesVulkanComponentMappings)

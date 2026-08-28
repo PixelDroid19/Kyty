@@ -1,5 +1,7 @@
 #include "Kyty/UnitTest.h"
 
+#include "Kyty/Core/VirtualMemory.h"
+
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
@@ -1184,8 +1186,16 @@ TEST(EmulatorGraphicsPackets, AcceptsComputeShaderWithoutWorkgroupId)
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	static const uint32_t shader[] = {(0x17Fu << 23u) | (0x01u << 16u)}; // s_endpgm
+	const uint64_t page_size       = Core::VirtualMemory::GetPageSize();
+	const uint64_t shader_addr     = Core::VirtualMemory::Alloc(0, page_size, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(shader_addr, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(shader_addr, shader, sizeof(shader)));
+	ShaderInit();
+	ShaderMappedData mapped {};
+	mapped.code_size_bytes = sizeof(shader);
+	ShaderMapUserData(shader_addr, mapped);
 	HW::ComputeShaderInfo regs {};
-	regs.cs_regs.data_addr = reinterpret_cast<uint64_t>(shader);
+	regs.cs_regs.data_addr = shader_addr;
 	regs.cs_regs.tgid_x_en = 0;
 	HW::ShaderRegisters shader_regs {};
 
@@ -1195,6 +1205,8 @@ TEST(EmulatorGraphicsPackets, AcceptsComputeShaderWithoutWorkgroupId)
 		    _exit(parsed.GetInstructions().IsEmpty() ? 1 : 0);
 	    },
 	    ::testing::ExitedWithCode(0), "");
+	ShaderMapUserData(shader_addr, {});
+	EXPECT_TRUE(Core::VirtualMemory::Free(shader_addr));
 }
 
 TEST(EmulatorGraphicsPackets, UsesForwardSBranchBeforeTargetAsSelectionMerge)

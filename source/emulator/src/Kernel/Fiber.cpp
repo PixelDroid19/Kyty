@@ -20,6 +20,11 @@ namespace Kyty::Kernel::Fiber {
 
 KERNEL_LIB_NAME();
 
+#if defined(KYTY_FIBER_ASM_CONTEXT)
+extern "C" KYTY_SYSV_ABI int KytyFiberSaveContext(FiberCpuContext* ctx) __attribute__((returns_twice));
+extern "C" KYTY_SYSV_ABI void KytyFiberRestoreContext(FiberCpuContext* ctx, uint64_t ret) __attribute__((noreturn));
+#endif
+
 namespace {
 
 thread_local FiberObject*    g_current_fiber       = nullptr;
@@ -192,7 +197,10 @@ void FiberSetContextValid(FiberObject* fiber, bool valid)
 	fiber->context       = valid ? &fiber->saved_context : nullptr;
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(KYTY_FIBER_ASM_CONTEXT)
+#define FiberSaveContext    KytyFiberSaveContext
+#define FiberRestoreContext KytyFiberRestoreContext
+#elif defined(__x86_64__) || defined(_M_X64)
 __attribute__((noinline, returns_twice)) int FiberSaveContext(FiberCpuContext* ctx)
 {
 	int ret = 0;
@@ -251,7 +259,7 @@ void FiberRestoreContext(FiberCpuContext* ctx, uint64_t ret)
 }
 #endif
 
-[[noreturn]] void FiberStartTrampoline();
+[[noreturn]] KYTY_SYSV_ABI void FiberStartTrampoline();
 
 [[noreturn]] void FiberStartOnGuestStack(FiberObject* fiber)
 {
@@ -268,7 +276,7 @@ void FiberRestoreContext(FiberCpuContext* ctx, uint64_t ret)
 	FiberRestoreContext(&ctx, 1);
 }
 
-[[noreturn]] void FiberStartTrampoline()
+[[noreturn]] KYTY_SYSV_ABI void FiberStartTrampoline()
 {
 	auto* fiber      = g_starting_fiber;
 	g_starting_fiber = nullptr;

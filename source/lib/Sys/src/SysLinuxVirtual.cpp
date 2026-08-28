@@ -1551,6 +1551,28 @@ bool sys_virtual_is_range_writable(uint64_t address, uint64_t size)
 	return writable;
 }
 
+bool sys_virtual_visit_readable_guest_range(uint64_t address, uint64_t size,
+	                                        VirtualMemory::ReadableGuestRangeVisitor visitor, void* context)
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (visitor == nullptr || !get_host_page_range(static_cast<uintptr_t>(address), size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	if (!range_is_guest_owned_locked(static_cast<uintptr_t>(address), size) ||
+	    !range_has_protection_locked(page_start, page_end, PROT_READ))
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	const bool result = visitor(reinterpret_cast<const void*>(static_cast<uintptr_t>(address)), size, context);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return result;
+}
+
 bool sys_virtual_copy_from_guest(void* destination, uint64_t source, uint64_t size)
 {
 	uintptr_t page_start = 0;

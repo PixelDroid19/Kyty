@@ -735,6 +735,12 @@ struct ImageImageCopy
 	uint32_t     layer_count     = 1;
 };
 
+// Intersect a requested copy with the real host mip extents and validate its
+// array-layer range. Offsets remain exact; an empty or invalid intersection is
+// rejected rather than emitted as an out-of-bounds Vulkan command.
+[[nodiscard]] bool NormalizeImageImageCopy(const ImageImageCopy& requested, const VulkanImage* dst_image,
+                                           ImageImageCopy* normalized);
+
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image,
                             uint64_t dst_layout);

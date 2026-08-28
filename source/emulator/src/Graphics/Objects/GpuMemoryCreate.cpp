@@ -18,6 +18,7 @@
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
+#include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
@@ -468,6 +469,8 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 	uint64_t               latest_surface_time = 0;
 	int                    reusable_index_id   = -1;
 	uint64_t               reusable_index_size = UINT64_MAX;
+	int                    reusable_rt_id      = -1;
+	uint64_t               reusable_rt_layers  = UINT64_MAX;
 	*covered_reuse                             = false;
 	*stale_reuse_id                            = -1;
 
@@ -501,6 +504,16 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 			reusable_index_size = h.block.size[0];
 		}
 
+		if (vaddr_num == 1 && h.block.vaddr_num == 1 && h.scenario == GpuMemoryScenario::Common &&
+		    o.object.type == GpuMemoryObjectType::RenderTexture && info.type == GpuMemoryObjectType::RenderTexture &&
+		    obj.relation == OverlapType::Contains && h.block.vaddr[0] == vaddr[0] && h.block.size[0] >= size[0] &&
+		    RenderTextureCanReuseLargerBacking(o.params, info.params) &&
+		    o.params[RenderTextureObject::PARAM_ARRAY_LAYERS] < reusable_rt_layers)
+		{
+			reusable_rt_id     = obj.object_id;
+			reusable_rt_layers = o.params[RenderTextureObject::PARAM_ARRAY_LAYERS];
+		}
+
 		if (o.gpu_update_time > max_gpu_update_time)
 		{
 			max_gpu_update_time = o.gpu_update_time;
@@ -522,6 +535,12 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 	if (reusable_index_id >= 0)
 	{
 		*id            = reusable_index_id;
+		*covered_reuse = true;
+		return true;
+	}
+	if (reusable_rt_id >= 0)
+	{
+		*id            = reusable_rt_id;
 		*covered_reuse = true;
 		return true;
 	}
@@ -1031,6 +1050,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// Equals: same guest range re-registered as StorageBuffer (captured
 				// post-menu). RO share: partial overlapping RO views.
 				overlap = true;
+			} else if (buffer != nullptr && o.object.type == GpuMemoryObjectType::RenderTexture &&
+			           info.type == GpuMemoryObjectType::RenderTexture && obj.relation == OverlapType::IsContainedWithin &&
+			           h.block.vaddr_num == 1 && vaddr_num == 1 && h.block.vaddr[0] == vaddr[0] && h.block.size[0] < size[0] &&
+			           h.others.IsEmpty() && RenderTextureCanCopyGrowingBacking(o.params, info.params))
+			{
+				create_from_objects = true;
+				retire_after_copy_ids.Add(obj.object_id);
 			} else if (buffer != nullptr && o.object.type == GpuMemoryObjectType::StorageTexture &&
 			           info.type == GpuMemoryObjectType::StorageTexture && obj.relation == OverlapType::IsContainedWithin &&
 			           h.block.vaddr_num == 1 && vaddr_num == 1 && h.block.vaddr[0] == vaddr[0] && h.block.size[0] < size[0] &&

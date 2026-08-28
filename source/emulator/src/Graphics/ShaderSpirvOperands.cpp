@@ -277,6 +277,27 @@ SpirvValue operand_variable_to_str(ShaderOperand op, int shift)
 				ret.type  = SpirvType::Uint;
 			}
 			break;
+		case ShaderOperandType::ExecZ:
+			if (shift == 0)
+			{
+				ret.value = "execz";
+				ret.type  = SpirvType::Uint;
+			}
+			break;
+		case ShaderOperandType::Scc:
+			if (shift == 0)
+			{
+				ret.value = "scc";
+				ret.type  = SpirvType::Uint;
+			}
+			break;
+		case ShaderOperandType::M0:
+			if (shift == 0)
+			{
+				ret.value = "m0";
+				ret.type  = SpirvType::Uint;
+			}
+			break;
 		default: break;
 	}
 
@@ -411,6 +432,18 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load, int shift)
 {
 	EXIT_IF(load == nullptr);
+	if (op.type == ShaderOperandType::Null)
+	{
+		*load = String8("%<result_id> = OpCopyObject %uint %uint_0").ReplaceStr("<result_id>", result_id);
+		return true;
+	}
+	const bool scalar_special = op.type == ShaderOperandType::VccZ || op.type == ShaderOperandType::ExecZ ||
+	                            op.type == ShaderOperandType::Scc || op.type == ShaderOperandType::M0;
+	if (op.size == 2 && shift == 1 && scalar_special)
+	{
+		*load = String8("%<result_id> = OpCopyObject %uint %uint_0").ReplaceStr("<result_id>", result_id);
+		return true;
+	}
 	if (op.type == ShaderOperandType::VccZ)
 	{
 		*load = String8(R"(%vccz_lo_<index> = OpLoad %uint %vcc_lo
@@ -728,11 +761,19 @@ void Spirv::AddVariable(ShaderOperandType type, int register_id, int size)
 
 void Spirv::AddVariable(ShaderOperand op)
 {
+	if (op.type == ShaderOperandType::VccZ)
+	{
+		AddVariable(ShaderOperandType::VccLo, 0, 2);
+		return;
+	}
 	if (operand_is_variable(op))
 	{
 		EXIT_IF(op.size == 0);
+		const bool scalar_special = op.type == ShaderOperandType::ExecZ || op.type == ShaderOperandType::Scc ||
+		                            op.type == ShaderOperandType::M0;
+		const int variable_count = scalar_special ? 1 : op.size;
 
-		for (int i = 0; i < op.size; i++)
+		for (int i = 0; i < variable_count; i++)
 		{
 			Variable v;
 			v.op.type        = op.type;
