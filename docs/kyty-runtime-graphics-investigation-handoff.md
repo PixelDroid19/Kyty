@@ -339,6 +339,14 @@ against the same correct gameplay capture.
   while opaque early-Z shaders retain it.
 - Temporary MRT, descriptor, and frame-selection instrumentation was removed
   before the semantic commit.
+- Retiring an idle `StorageTexture` by frame age can discard the only valid
+  GPU-authored contents because that object has no GPU-to-guest write-back.
+  Permanently excluding every storage image from retirement was also rejected:
+  distinct images in a long-lived mapped heap would have no residency admission
+  bound. The complete fix must treat writable storage images as live resources,
+  reserve their actual Vulkan memory requirements against the device-reported
+  memory budget, release that reservation only after deferred destruction, and
+  keep reconstructible textures on the existing bounded retirement path.
 - Eliding the submit/fence boundary for a `WAIT_REG_MEM` whose newest producer
   was still in the current recording was tested as a performance hypothesis.
   A bounded baseline classified 24,604 waits: 13,374 were already satisfied
