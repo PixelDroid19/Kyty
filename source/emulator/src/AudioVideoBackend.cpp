@@ -33,6 +33,71 @@ extern "C" {
 namespace Kyty::Emulator::AudioVideoBackend {
 
 #if defined(KYTY_HAVE_FFMPEG)
+struct VideoFormatSelection
+{
+	AVPixelFormat format          = AV_PIX_FMT_NONE;
+	bool          require_hardware = false;
+};
+#endif
+
+struct Decoder::State
+{
+	Status     status = Status::Unavailable;
+	std::string error;
+	StreamInfo info;
+
+	mutable std::mutex mutex;
+	std::condition_variable condition;
+	bool decode_done = false;
+
+#if defined(KYTY_HAVE_FFMPEG)
+	AVFormatContext* format = nullptr;
+	AVCodecContext*  video  = nullptr;
+	AVCodecContext*  audio  = nullptr;
+	AVPacket*        packet = nullptr;
+	AVFrame*         video_frame = nullptr;
+	AVFrame*         transferred_video_frame = nullptr;
+	AVFrame*         audio_frame = nullptr;
+	AVBufferRef*     hardware_device = nullptr;
+	SwsContext*      scaler = nullptr;
+	SwrContext*      resampler = nullptr;
+	AVChannelLayout  output_layout {};
+	VideoFormatSelection video_format_selection {};
+	AVPixelFormat    hardware_video_format = AV_PIX_FMT_NONE;
+
+	int video_stream = -1;
+	int audio_stream = -1;
+	bool demux_eof   = false;
+	bool video_eof   = false;
+	bool audio_eof   = false;
+	bool flushed     = false;
+
+	uint64_t next_video_timestamp = 0;
+	uint64_t next_audio_timestamp = 0;
+
+	std::thread worker;
+	bool stop_requested = false;
+	std::deque<VideoFrame> video_queue;
+	std::deque<AudioFrame> audio_queue;
+#endif
+};
+
+static void SetError(Decoder::State* state, Status status, const char* message)
+{
+	if (state == nullptr)
+	{
+		return;
+	}
+	{
+		std::lock_guard<std::mutex> lock(state->mutex);
+		state->status = status;
+		state->error  = message != nullptr ? message : "FFmpeg operation failed";
+		state->decode_done = true;
+	}
+	state->condition.notify_all();
+}
+
+#if defined(KYTY_HAVE_FFMPEG)
 
 namespace {
 
@@ -77,12 +142,6 @@ const char* ErrorText(int error, char* buffer, size_t buffer_size)
 
 } // namespace
 
-struct VideoFormatSelection
-{
-	AVPixelFormat format          = AV_PIX_FMT_NONE;
-	bool          require_hardware = false;
-};
-
 static AVPixelFormat SelectVideoFormat(AVCodecContext* context, const AVPixelFormat* formats)
 {
 	if (context == nullptr || formats == nullptr)
@@ -117,60 +176,6 @@ static AVPixelFormat SelectVideoFormat(AVCodecContext* context, const AVPixelFor
 		}
 	}
 	return AV_PIX_FMT_NONE;
-}
-
-struct Decoder::State
-{
-	Status     status = Status::Unavailable;
-	std::string error;
-	StreamInfo info;
-
-	AVFormatContext* format = nullptr;
-	AVCodecContext*  video  = nullptr;
-	AVCodecContext*  audio  = nullptr;
-	AVPacket*        packet = nullptr;
-	AVFrame*         video_frame = nullptr;
-	AVFrame*         transferred_video_frame = nullptr;
-	AVFrame*         audio_frame = nullptr;
-	AVBufferRef*     hardware_device = nullptr;
-	SwsContext*      scaler = nullptr;
-	SwrContext*      resampler = nullptr;
-	AVChannelLayout  output_layout {};
-	VideoFormatSelection video_format_selection {};
-	AVPixelFormat    hardware_video_format = AV_PIX_FMT_NONE;
-
-	int video_stream = -1;
-	int audio_stream = -1;
-	bool demux_eof   = false;
-	bool video_eof   = false;
-	bool audio_eof   = false;
-	bool flushed     = false;
-
-	uint64_t next_video_timestamp = 0;
-	uint64_t next_audio_timestamp = 0;
-
-	mutable std::mutex mutex;
-	std::condition_variable condition;
-	std::thread worker;
-	bool stop_requested = false;
-	bool decode_done     = false;
-	std::deque<VideoFrame> video_queue;
-	std::deque<AudioFrame> audio_queue;
-};
-
-static void SetError(Decoder::State* state, Status status, const char* message)
-{
-	if (state == nullptr)
-	{
-		return;
-	}
-	{
-		std::lock_guard<std::mutex> lock(state->mutex);
-		state->status = status;
-		state->error  = message != nullptr ? message : "FFmpeg operation failed";
-		state->decode_done = true;
-	}
-	state->condition.notify_all();
 }
 
 static void SetFfmpegError(Decoder::State* state, Status status, int error, const char* operation)

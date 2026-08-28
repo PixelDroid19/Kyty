@@ -186,6 +186,9 @@ target_include_directories(kyty_runtime_core PUBLIC
 	"${CMAKE_SOURCE_DIR}/include"
 )
 target_link_libraries(kyty_runtime_core PUBLIC core math sys)
+if(MINGW)
+	target_link_libraries(kyty_runtime_core PUBLIC atomic)
+endif()
 
 target_include_directories(kyty_kernel PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}/include"
