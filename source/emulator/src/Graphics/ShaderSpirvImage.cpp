@@ -104,16 +104,6 @@ static int FindImageStorageTextureDescriptor(const ShaderInstruction& inst, cons
 	}
 
 	const int texture_register = inst.src[1].register_id;
-	for (int index = 0; index < bind.textures2D.textures_num; ++index)
-	{
-		const auto& descriptor = bind.textures2D.desc[index];
-		if (descriptor.usage == ShaderTextureUsage::ReadWrite && !descriptor.dynamic_sload &&
-		    descriptor.start_register + user_data_register_base == texture_register)
-		{
-			return index;
-		}
-	}
-
 	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
 	{
 		if (bind.dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::Texture ||
@@ -125,6 +115,16 @@ static int FindImageStorageTextureDescriptor(const ShaderInstruction& inst, cons
 
 		const int index = bind.dynamic_sloads.resource_index[mapping];
 		if (index >= 0 && index < bind.textures2D.textures_num && bind.textures2D.desc[index].usage == ShaderTextureUsage::ReadWrite)
+		{
+			return index;
+		}
+	}
+
+	for (int index = 0; index < bind.textures2D.textures_num; ++index)
+	{
+		const auto& descriptor = bind.textures2D.desc[index];
+		if (descriptor.usage == ShaderTextureUsage::ReadWrite && !descriptor.dynamic_sload &&
+		    descriptor.start_register + user_data_register_base == texture_register)
 		{
 			return index;
 		}
