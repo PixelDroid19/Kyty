@@ -219,11 +219,15 @@ struct VulkanImage
 	// the independently selectable Vulkan storage extent.
 	VkExtent2D             guest_extent         = {};
 	VkExtent2D             extent               = {};
+	// Exact allocation extent from VkImageCreateInfo. This can exceed the
+	// logical extent when storage mips are packed into one host image.
+	VkExtent3D             physical_extent      = {};
 	VkImage                image                = nullptr;
 	VkImageView            image_view[VIEW_MAX] = {};
 	VkImageUsageFlags      usage                = 0;
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkSampleCountFlagBits  samples               = VK_SAMPLE_COUNT_1_BIT;
+	uint32_t               mip_levels            = 1;
 	uint32_t               array_layers          = 1;
 	Graphics::VulkanMemory memory;
 	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.

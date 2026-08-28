@@ -158,6 +158,94 @@ void VerifyDepthStencilAttachmentAccess(bool load_store_op_none_supported)
 	       "sampled depth alias rejects simultaneous stencil clear");
 }
 
+void VerifyImageCopyNormalization()
+{
+	VulkanImage source(VulkanImageType::StorageTexture);
+	VulkanImage destination(VulkanImageType::Texture);
+	source.SetNativeExtent(256u, 128u);
+	source.SetHostExtent(128u, 64u);
+	source.physical_extent = {128u, 64u, 1u};
+	source.mip_levels      = 4u;
+	source.array_layers    = 4u;
+	destination.SetNativeExtent(200u, 160u);
+	destination.SetHostExtent(100u, 80u);
+	destination.physical_extent = {100u, 80u, 1u};
+	destination.mip_levels      = 3u;
+	destination.array_layers    = 3u;
+
+	ImageImageCopy requested {};
+	requested.src_image       = &source;
+	requested.src_level       = 1u;
+	requested.dst_level       = 1u;
+	requested.width           = 32u;
+	requested.height          = 16u;
+	requested.src_x           = 60;
+	requested.src_y           = 24;
+	requested.dst_x           = 45;
+	requested.dst_y           = 30;
+	requested.src_array_layer = 1u;
+	requested.dst_array_layer = 0u;
+	requested.layer_count     = 2u;
+	ImageImageCopy normalized {};
+	Expect(NormalizeImageImageCopy(requested, &destination, &normalized), "intersecting image copy remains valid");
+	Expect(normalized.width == 4u && normalized.height == 8u, "image copy uses the real host mip intersection");
+	Expect(normalized.src_x == requested.src_x && normalized.dst_x == requested.dst_x,
+	       "image copy intersection preserves exact offsets");
+	Expect(normalized.layer_count == 2u, "image copy preserves a valid layer range");
+
+	requested.src_level = source.mip_levels;
+	Expect(!NormalizeImageImageCopy(requested, &destination, &normalized), "source mip outside the image is rejected");
+	requested.src_level       = 1u;
+	requested.dst_array_layer = 2u;
+	Expect(!NormalizeImageImageCopy(requested, &destination, &normalized), "destination layer overflow is rejected");
+	requested.dst_array_layer = 0u;
+	requested.src_x           = 64;
+	Expect(!NormalizeImageImageCopy(requested, &destination, &normalized), "empty source intersection is rejected");
+
+	VulkanImage atlas(VulkanImageType::StorageTexture);
+	atlas.SetNativeExtent(256u, 128u);
+	atlas.physical_extent = {256u, 192u, 1u};
+	atlas.format          = VK_FORMAT_R8G8B8A8_UNORM;
+	VulkanImage mip_destination(VulkanImageType::Texture);
+	mip_destination.SetNativeExtent(256u, 128u);
+	mip_destination.physical_extent = {256u, 128u, 1u};
+	mip_destination.mip_levels      = 2u;
+	mip_destination.format          = atlas.format;
+	ImageImageCopy atlas_lod {};
+	atlas_lod.src_image = &atlas;
+	atlas_lod.src_level = 0u;
+	atlas_lod.dst_level = 1u;
+	atlas_lod.width     = 128u;
+	atlas_lod.height    = 64u;
+	atlas_lod.src_x     = 0;
+	atlas_lod.src_y     = 128;
+	atlas_lod.dst_x     = 0;
+	atlas_lod.dst_y     = 0;
+	Expect(NormalizeImageImageCopy(atlas_lod, &mip_destination, &normalized), "packed storage atlas LOD remains valid");
+	Expect(normalized.width == atlas_lod.width && normalized.height == atlas_lod.height,
+	       "packed storage atlas LOD is not cropped");
+
+	VulkanImage block_source(VulkanImageType::StorageTexture);
+	block_source.physical_extent = {29u, 30u, 1u};
+	block_source.format          = VK_FORMAT_R32G32B32A32_UINT;
+	VulkanImage block_destination(VulkanImageType::Texture);
+	block_destination.physical_extent = {116u, 120u, 1u};
+	block_destination.format          = VK_FORMAT_BC3_UNORM_BLOCK;
+	ImageImageCopy block_copy {};
+	block_copy.src_image = &block_source;
+	block_copy.width     = 29u;
+	block_copy.height    = 30u;
+	block_copy.src_x     = 0;
+	block_copy.src_y     = 0;
+	block_copy.dst_x     = 0;
+	block_copy.dst_y     = 0;
+	Expect(NormalizeImageImageCopy(block_copy, &block_destination, &normalized),
+	       "compatible uncompressed-to-block copy uses source coordinates");
+	block_destination.physical_extent.width = 115u;
+	Expect(!NormalizeImageImageCopy(block_copy, &block_destination, &normalized),
+	       "block-adjusted destination overflow is rejected");
+}
+
 void VerifyStorageFrontier()
 {
 	EventRing::Instance().ResetForTests();
@@ -1957,6 +2045,7 @@ void VerifyComparisonSamplerCacheIdentity()
 int main()
 {
 	InitializeGraphicsConfig();
+	VerifyImageCopyNormalization();
 	VerifyComparisonSamplerCacheIdentity();
 	VerifyStencilFrontier();
 	VerifyStorageFrontier();
