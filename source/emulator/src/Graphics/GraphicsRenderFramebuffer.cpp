@@ -32,6 +32,21 @@ namespace Kyty::Libs::Graphics {
 
 // FramebufferCache + SamplerCache::GetSampler
 
+static void DestroyCachedFramebuffer(GraphicContext* context, VulkanFramebuffer* framebuffer)
+{
+	EXIT_IF(context == nullptr || framebuffer == nullptr);
+	vkDestroyFramebuffer(context->device, framebuffer->framebuffer, nullptr);
+	for (auto view: framebuffer->owned_color_view)
+	{
+		if (view != nullptr)
+		{
+			vkDestroyImageView(context->device, view, nullptr);
+		}
+	}
+	vkDestroyRenderPass(context->device, framebuffer->render_pass, nullptr);
+	delete framebuffer;
+}
+
 VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, RenderDepthInfo* depth,
                                                         DepthStencilAttachmentAccess depth_stencil_access)
 {
@@ -88,8 +103,11 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			auto*       image      = attachment.vulkan_buffer;
 			const auto  load_ops   = ResolveColorAttachmentLoadOps(image->layout, attachment.cmask_fast_clear_enable,
 			                                                      attachment.clear_word0, attachment.clear_word1, image->format);
+			const auto initial_layout = image->array_layers > 1u ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : load_ops.initial_layout;
 			same_colors         = (f.image_id[slot] == image->memory.unique_id) && (f.color_load_op[slot] == load_ops.load_op) &&
-			              (f.color_initial_layout[slot] == load_ops.initial_layout);
+			              (f.color_initial_layout[slot] == initial_layout) &&
+			              (f.base_array_layer[slot] == attachment.base_array_layer) &&
+			              (f.layer_count[slot] == attachment.layer_count);
 		}
 		if (f.framebuffer != nullptr && same_colors && f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) &&
 		    f.depth_clear_enable == depth->depth_clear_enable && f.stencil_clear_enable == depth->stencil_clear_enable &&
@@ -130,10 +148,22 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		const auto* color_attachment = with_color ? &color->attachment[slot] : nullptr;
 		auto*       image            = with_color ? color_attachment->vulkan_buffer : vulkan_buffer;
 		if (image->samples != attachment_samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: image->samples != attachment_samples condition ignored (continuing)\n"); }
+		const uint32_t base_array_layer = with_color ? color_attachment->base_array_layer : 0u;
+		const uint32_t layer_count      = with_color ? color_attachment->layer_count : 1u;
+		if (layer_count == 0u || base_array_layer >= image->array_layers || layer_count > image->array_layers - base_array_layer)
+		{
+			EXIT("invalid color attachment layer range: base=%" PRIu32 " count=%" PRIu32 " image_layers=%" PRIu32 "\n",
+			     base_array_layer, layer_count, image->array_layers);
+		}
+		if (layer_count != 1u)
+		{
+			EXIT("multi-layer color attachment views are not supported\n");
+		}
 		framebuffer_extent = IntersectFramebufferAttachmentExtent(framebuffer_extent, image);
 		const auto load_ops       = ResolveColorAttachmentLoadOps(image->layout, with_color ? color_attachment->cmask_fast_clear_enable : false,
 		                                                          with_color ? color_attachment->clear_word0 : 0u,
 		                                                          with_color ? color_attachment->clear_word1 : 0u, image->format);
+		const auto initial_layout = image->array_layers > 1u ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : load_ops.initial_layout;
 		attachments[attachment_count].flags   = 0;
 		attachments[attachment_count].format  = image->format;
 		attachments[attachment_count].samples = image->samples;
@@ -141,12 +171,28 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		attachments[attachment_count].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 		attachments[attachment_count].stencilLoadOp         = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachments[attachment_count].stencilStoreOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		attachments[attachment_count].initialLayout         = load_ops.initial_layout;
+		attachments[attachment_count].initialLayout         = initial_layout;
 		attachments[attachment_count].finalLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 		color_attachment_refs[slot]                         = {attachment_count, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-		views[attachment_count]                             = image->image_view[VulkanImage::VIEW_DEFAULT];
+		if (base_array_layer == 0u && layer_count == 1u)
+		{
+			views[attachment_count] = image->image_view[VulkanImage::VIEW_DEFAULT];
+		} else
+		{
+			VulkanImageViewDescriptor view_descriptor {};
+			view_descriptor.image            = image->image;
+			view_descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D;
+			view_descriptor.format           = image->format;
+			view_descriptor.base_array_layer = base_array_layer;
+			view_descriptor.layer_count      = layer_count;
+			if (!VulkanCreateDeviceImageView(gctx->device, view_descriptor, &framebuffer->owned_color_view[slot]))
+			{
+				EXIT("failed to create color attachment layer view\n");
+			}
+			views[attachment_count] = framebuffer->owned_color_view[slot];
+		}
 		framebuffer->color_load_op[slot]        = load_ops.load_op;
-		framebuffer->color_initial_layout[slot] = load_ops.initial_layout;
+		framebuffer->color_initial_layout[slot] = initial_layout;
 		attachment_count++;
 	}
 	framebuffer->color_count            = color_count;
@@ -194,11 +240,14 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	render_pass_info.dependencyCount = 0;
 	render_pass_info.pDependencies   = nullptr;
 
-	vkCreateRenderPass(gctx->device, &render_pass_info, nullptr, &framebuffer->render_pass);
+	if (vkCreateRenderPass(gctx->device, &render_pass_info, nullptr, &framebuffer->render_pass) != VK_SUCCESS ||
+	    framebuffer->render_pass == nullptr)
+	{
+		DestroyCachedFramebuffer(gctx, framebuffer);
+		EXIT("failed to create render pass\n");
+	}
 
 	framebuffer->render_pass_id = ++seq;
-
-	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
 
 	if (with_depth)
 	{
@@ -220,17 +269,31 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	framebuffer_info.width     = framebuffer->extent.width;
 	framebuffer_info.height    = framebuffer->extent.height;
 	framebuffer_info.layers = 1;
-
-	vkCreateFramebuffer(gctx->device, &framebuffer_info, nullptr, &framebuffer->framebuffer);
-
-	if (framebuffer->framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->framebuffer == nullptr condition ignored (continuing)\n"); }
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
+	if (framebuffer_info.layers > properties.limits.maxFramebufferLayers)
+	{
+		DestroyCachedFramebuffer(gctx, framebuffer);
+		EXIT("framebuffer layer count exceeds the device limit\n");
+	}
+	if (vkCreateFramebuffer(gctx->device, &framebuffer_info, nullptr, &framebuffer->framebuffer) != VK_SUCCESS ||
+	    framebuffer->framebuffer == nullptr)
+	{
+		DestroyCachedFramebuffer(gctx, framebuffer);
+		EXIT("failed to create framebuffer\n");
+	}
 
 	Framebuffer fnew;
 	fnew.framebuffer = framebuffer;
 	fnew.targets_num = color->targets_num;
 	for (uint32_t slot = 0; slot < color->targets_num; slot++)
 	{
-		fnew.image_id[slot] = RenderColorSlotActive(*color, slot) ? color->attachment[slot].vulkan_buffer->memory.unique_id : 0;
+		if (RenderColorSlotActive(*color, slot))
+		{
+			fnew.image_id[slot]         = color->attachment[slot].vulkan_buffer->memory.unique_id;
+			fnew.base_array_layer[slot] = color->attachment[slot].base_array_layer;
+			fnew.layer_count[slot]      = color->attachment[slot].layer_count;
+		}
 	}
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
@@ -292,15 +355,9 @@ void FramebufferCache::FreeFramebufferByColor(VulkanImage* image)
 
 		EXIT_IF(gctx == nullptr);
 
-		vkDestroyFramebuffer(gctx->device, f.framebuffer->framebuffer, nullptr);
-
-		vkDestroyRenderPass(gctx->device, f.framebuffer->render_pass, nullptr);
-
-		delete f.framebuffer;
+		DestroyCachedFramebuffer(gctx, f.framebuffer);
 
 		f.framebuffer = nullptr;
-
-		break;
 	}
 }
 
@@ -322,15 +379,9 @@ void FramebufferCache::FreeFramebufferByDepth(DepthStencilVulkanImage* image)
 
 			EXIT_IF(gctx == nullptr);
 
-			vkDestroyFramebuffer(gctx->device, f.framebuffer->framebuffer, nullptr);
-
-			vkDestroyRenderPass(gctx->device, f.framebuffer->render_pass, nullptr);
-
-			delete f.framebuffer;
+			DestroyCachedFramebuffer(gctx, f.framebuffer);
 
 			f.framebuffer = nullptr;
-
-			break;
 		}
 	}
 }

@@ -65,11 +65,13 @@ bool VulkanCreateStandardColorImageViews(GraphicContext* context, VulkanImage* i
 		return false;
 	}
 	descriptor.view_type = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+	descriptor.layer_count = image->array_layers;
 	if (!create(VulkanImage::VIEW_ARRAY))
 	{
 		goto fail;
 	}
 	descriptor.view_type  = VK_IMAGE_VIEW_TYPE_2D;
+	descriptor.layer_count = 1;
 	descriptor.components = {VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_IDENTITY};
 	if (!create(VulkanImage::VIEW_BGRA))
 	{
@@ -92,6 +94,25 @@ fail:
 		}
 	}
 	return false;
+}
+
+bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index)
+{
+	if (image == nullptr || view_index == nullptr || (image->usage & VK_IMAGE_USAGE_STORAGE_BIT) == 0u)
+	{
+		return false;
+	}
+	if (three_dimensional)
+	{
+		*view_index = VulkanImage::VIEW_3D;
+	} else if (arrayed_2d)
+	{
+		*view_index = image->type == VulkanImageType::RenderTexture ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_STORAGE_ARRAY;
+	} else
+	{
+		*view_index = VulkanImage::VIEW_DEFAULT;
+	}
+	return image->image_view[*view_index] != nullptr;
 }
 
 namespace {

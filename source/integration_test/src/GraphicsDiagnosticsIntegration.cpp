@@ -6,6 +6,7 @@
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
@@ -221,7 +222,46 @@ void VerifyStorageUnknownReasonResolution()
 
 	evidence = ResolveShaderStorageAccessEvidence(true, ShaderStorageBindingSource::DirectResource, ShaderStorageAccess::Unknown,
 	                                              ShaderStorageAccess::Unknown, false, false);
-	Expect(evidence.reason == ShaderStorageUnknownReason::NoMatchingInstruction, "no matching instruction reason");
+	Expect(evidence.access == ShaderStorageAccess::UnusedMetadata, "unused direct resource classification");
+	Expect(evidence.reason == ShaderStorageUnknownReason::None, "unused direct resource is not unknown");
+}
+
+void VerifyRenderColorArrayBackingGrouping()
+{
+	RenderColorInfo color {};
+	color.targets_num = 2;
+	for (auto& attachment: color.attachment)
+	{
+		attachment.type                  = RenderColorType::RenderTexture;
+		attachment.base_addr             = 0x1000u;
+		attachment.render_texture_format = RenderTextureFormat::R8G8B8A8Unorm;
+		attachment.width                 = 128u;
+		attachment.height                = 64u;
+		attachment.pitch                 = 128u;
+		attachment.tile                  = true;
+	}
+	color.attachment[0].image_layers    = 1u;
+	color.attachment[0].base_array_layer = 0u;
+	color.attachment[0].size            = 0x20000u;
+	color.attachment[1].image_layers    = 2u;
+	color.attachment[1].base_array_layer = 1u;
+	color.attachment[1].size            = 0x40000u;
+
+	NormalizeRenderColorArrayBackings(&color);
+	Expect(color.attachment[0].image_layers == 2u && color.attachment[1].image_layers == 2u,
+	       "MRT slices share the largest array backing");
+	Expect(color.attachment[0].size == 0x40000u && color.attachment[1].size == 0x40000u,
+	       "MRT slices share the full backing size");
+	Expect(color.attachment[0].base_array_layer == 0u && color.attachment[1].base_array_layer == 1u,
+	       "MRT slice views remain distinct");
+
+	RenderTextureVulkanImage render_array;
+	render_array.usage                               = VK_IMAGE_USAGE_STORAGE_BIT;
+	render_array.image_view[VulkanImage::VIEW_ARRAY] = reinterpret_cast<VkImageView>(0x1);
+	int storage_view = -1;
+	Expect(VulkanResolveStorageImageView(&render_array, false, true, &storage_view),
+	       "render-target arrays expose a storage-compatible view");
+	Expect(storage_view == VulkanImage::VIEW_ARRAY, "render-target storage arrays use the canonical array view");
 }
 
 ShaderOperand Sgpr(int register_id, int size)
@@ -1779,6 +1819,7 @@ int main()
 	VerifyStorageFrontier();
 	VerifyStorageRange();
 	VerifyStorageUnknownReasonResolution();
+	VerifyRenderColorArrayBackingGrouping();
 	VerifyStorageConsumerAnalysis();
 	VerifyUnusedMetadataExclusionPreservesActiveOrdering();
 	VerifyResidualStencilPm4Boundary();

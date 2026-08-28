@@ -537,15 +537,30 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 		Graphics::TileSizeAlign size32 {};
 		Graphics::TileGetRenderTargetSize(attachment.width, attachment.height, attachment.pitch, rt.attrib3.tile_mode, rt_bpp, &size32);
 
-		attachment.size = size32.size;
-
-		if (attachment.size == 0)
+		RenderTextureArrayView array_view {};
+		if (!ResolveRenderTextureArrayView(size32.size, rt.view.base_array_slice_index, rt.view.last_array_slice_index, &array_view))
 		{
-			EXIT("unsupported render-target layout: width=%" PRIu32 " height=%" PRIu32 " pitch=%" PRIu32 " tile=%u\n",
-			     attachment.width, attachment.height, attachment.pitch, rt.attrib3.tile_mode);
+			EXIT("invalid layered render-target layout: width=%" PRIu32 " height=%" PRIu32 " pitch=%" PRIu32
+			     " tile=%u layer=%" PRIu32 "..%" PRIu32 "\n",
+			     attachment.width, attachment.height, attachment.pitch, rt.attrib3.tile_mode, rt.view.base_array_slice_index,
+			     rt.view.last_array_slice_index);
+		}
+		attachment.size             = array_view.full_backing_size;
+		attachment.image_layers     = array_view.image_layers;
+		attachment.base_array_layer = array_view.base_layer;
+		attachment.layer_count      = array_view.layer_count;
+		if (attachment.image_layers > 1u &&
+		    GpuMemoryValidateAllocatedRange(rt.base.addr, attachment.size) != GpuMemoryRangeValidationStatus::Valid)
+		{
+			EXIT("layered render-target backing is not fully allocated: size=%" PRIu64 " layers=%" PRIu32 "\n", attachment.size,
+			     attachment.image_layers);
 		}
 	} else
 	{
+		if (attachment.image_layers != 1u || attachment.base_array_layer != 0u || attachment.layer_count != 1u)
+		{
+			EXIT("display buffer cannot use an array-slice view\n");
+		}
 		switch (rt.attrib.tile_mode)
 		{
 			case 0x8:
@@ -621,6 +636,45 @@ static void CopyRenderColorSlot(RenderColorInfo* dst, uint32_t dst_slot, const R
 	dst->targets_num          = std::max(dst->targets_num, dst_slot + 1);
 }
 
+void NormalizeRenderColorArrayBackings(RenderColorInfo* color)
+{
+	EXIT_IF(color == nullptr);
+	for (uint32_t first = 0; first < color->targets_num; first++)
+	{
+		auto& a = color->attachment[first];
+		if (a.type != RenderColorType::RenderTexture || a.image_layers == 0u || a.size % a.image_layers != 0u)
+		{
+			continue;
+		}
+		const uint64_t bytes_per_layer = a.size / a.image_layers;
+		for (uint32_t second = first + 1u; second < color->targets_num; second++)
+		{
+			auto& b = color->attachment[second];
+			const bool compatible = b.type == RenderColorType::RenderTexture && a.base_addr == b.base_addr &&
+			                        a.render_texture_format == b.render_texture_format && a.width == b.width && a.height == b.height &&
+			                        a.samples == b.samples && a.pitch == b.pitch && a.tile == b.tile && a.neo == b.neo &&
+			                        a.write_back == b.write_back;
+			if (!compatible)
+			{
+				continue;
+			}
+			if (b.image_layers == 0u || b.size % b.image_layers != 0u || b.size / b.image_layers != bytes_per_layer)
+			{
+				EXIT("incompatible layered render-target backing sizes\n");
+			}
+			const uint32_t shared_layers = std::max(a.image_layers, b.image_layers);
+			if (bytes_per_layer > UINT64_MAX / shared_layers)
+			{
+				EXIT("layered render-target backing size overflow\n");
+			}
+			a.image_layers = shared_layers;
+			b.image_layers = shared_layers;
+			a.size         = bytes_per_layer * shared_layers;
+			b.size         = a.size;
+		}
+	}
+}
+
 void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, RenderColorInfo* r)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -658,6 +712,7 @@ void DescribeRenderColorInfo(CommandBuffer* buffer, const HW::Context& hw, Rende
 		}
 		CopyRenderColorSlot(r, slot, current);
 	}
+	NormalizeRenderColorArrayBackings(r);
 
 	if (r->attachment[0].type == RenderColorType::DisplayBuffer)
 	{
@@ -693,7 +748,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		if (attachment.type != RenderColorType::RenderTexture) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.type != RenderColorType::RenderTexture condition ignored (continuing)\n"); }
 		RenderTextureObject vulkan_buffer_info(attachment.render_texture_format, attachment.width, attachment.height, attachment.tile,
 		                                      attachment.neo, attachment.pitch, attachment.write_back,
-		                                      static_cast<uint32_t>(attachment.samples));
+		                                      static_cast<uint32_t>(attachment.samples), attachment.image_layers);
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
@@ -831,6 +886,11 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	if (src->samples == VK_SAMPLE_COUNT_1_BIT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->samples == VK_SAMPLE_COUNT_1_BIT condition ignored (continuing)\n"); }
 	if (dst->samples != VK_SAMPLE_COUNT_1_BIT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst->samples != VK_SAMPLE_COUNT_1_BIT condition ignored (continuing)\n"); }
 	if (src->format != dst->format) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->format != dst->format condition ignored (continuing)\n"); }
+	if (source.attachment[0].layer_count != destination.attachment[0].layer_count)
+	{
+		EXIT("color resolve layer-count mismatch: source=%" PRIu32 " destination=%" PRIu32 "\n",
+		     source.attachment[0].layer_count, destination.attachment[0].layer_count);
+	}
 	if (src->GetGuestExtent().width != dst->GetGuestExtent().width ||
 	                     src->GetGuestExtent().height != dst->GetGuestExtent().height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->GetGuestExtent().width != dst->GetGuestExtent().width || condition ignored (continuing)\n"); }
 	if (src->extent.width != dst->extent.width || src->extent.height != dst->extent.height) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src->extent.width != dst->extent.width || src->extent.height != dst->extent.height condition ignored (continuing)\n"); }
@@ -844,9 +904,12 @@ bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const
 	VkImageResolve region {};
 	region.srcSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
 	region.srcSubresource.mipLevel       = 0;
-	region.srcSubresource.baseArrayLayer = 0;
-	region.srcSubresource.layerCount     = 1;
-	region.dstSubresource                = region.srcSubresource;
+	region.srcSubresource.baseArrayLayer = source.attachment[0].base_array_layer;
+	region.srcSubresource.layerCount     = source.attachment[0].layer_count;
+	region.dstSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+	region.dstSubresource.mipLevel       = 0;
+	region.dstSubresource.baseArrayLayer = destination.attachment[0].base_array_layer;
+	region.dstSubresource.layerCount     = destination.attachment[0].layer_count;
 	region.srcOffset                     = {0, 0, 0};
 	region.dstOffset                     = {0, 0, 0};
 	region.extent                        = {src->extent.width, src->extent.height, 1};

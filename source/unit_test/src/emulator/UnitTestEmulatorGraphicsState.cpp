@@ -2771,6 +2771,31 @@ TEST(EmulatorGraphicsState, BuildsCanonicalVulkanImageCreateInfo)
 	EXPECT_EQ(view_info.subresourceRange.layerCount, 5u);
 }
 
+TEST(EmulatorGraphicsState, ResolvesLayeredRenderTargetBackingAndView)
+{
+	RenderTextureArrayView view {};
+	ASSERT_TRUE(ResolveRenderTextureArrayView(0x20000u, 4u, 4u, &view));
+	EXPECT_EQ(view.image_layers, 5u);
+	EXPECT_EQ(view.base_layer, 4u);
+	EXPECT_EQ(view.layer_count, 1u);
+	EXPECT_EQ(view.full_backing_size, 0xa0000u);
+
+	EXPECT_FALSE(ResolveRenderTextureArrayView(0x20000u, 2u, 4u, &view));
+	EXPECT_FALSE(ResolveRenderTextureArrayView(0x20000u, 4u, 3u, &view));
+	EXPECT_FALSE(ResolveRenderTextureArrayView(UINT64_MAX, 0u, 1u, &view));
+
+	RenderTextureObject single(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, false, 1u, 1u);
+	RenderTextureObject layered(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, false, 1u, 5u);
+	EXPECT_FALSE(single.Equal(layered.params));
+	EXPECT_TRUE(RenderTextureCanCopyGrowingBacking(single.params, layered.params));
+	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(layered.params, single.params));
+	EXPECT_TRUE(RenderTextureCanReuseLargerBacking(layered.params, single.params));
+	EXPECT_FALSE(RenderTextureCanReuseLargerBacking(single.params, layered.params));
+	RenderTextureObject cpu_visible(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 1u);
+	RenderTextureObject cpu_visible_layered(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 5u);
+	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(cpu_visible.params, cpu_visible_layered.params));
+}
+
 TEST(EmulatorGraphicsState, DecodesAndNormalizesVulkanComponentMappings)
 {
 	VkComponentMapping mapping {};
