@@ -463,7 +463,9 @@ enum class GraphicsWaitRegMemForm : uint8_t
 	}
 }
 
-// Prefer B8G8R8A8 UNORM/SRGB + SRGB_NONLINEAR. Never pick a host-HDR color space when
+// Prefer B8G8R8A8 SRGB + SRGB_NONLINEAR: the presentation blit decodes an
+// sRGB source and needs an sRGB destination to encode display values again.
+// Never pick a host-HDR color space when
 // any LDR SRGB_NONLINEAR candidate exists. Last resort: first non-HDR entry, else [0].
 [[nodiscard]] inline VkSurfaceFormatKHR SelectDefaultSwapchainSurfaceFormat(const VkSurfaceFormatKHR* formats, uint32_t count)
 {
@@ -477,6 +479,7 @@ enum class GraphicsWaitRegMemForm : uint8_t
 
 	const VkSurfaceFormatKHR* unorm_srgb = nullptr;
 	const VkSurfaceFormatKHR* srgb_srgb  = nullptr;
+	const VkSurfaceFormatKHR* rgba_srgb  = nullptr;
 	const VkSurfaceFormatKHR* any_srgb   = nullptr;
 	const VkSurfaceFormatKHR* any_ldr    = nullptr;
 
@@ -505,16 +508,24 @@ enum class GraphicsWaitRegMemForm : uint8_t
 			{
 				srgb_srgb = &f;
 			}
+			if (f.format == VK_FORMAT_R8G8B8A8_SRGB && rgba_srgb == nullptr)
+			{
+				rgba_srgb = &f;
+			}
 		}
 	}
 
-	if (unorm_srgb != nullptr)
-	{
-		return *unorm_srgb;
-	}
 	if (srgb_srgb != nullptr)
 	{
 		return *srgb_srgb;
+	}
+	if (rgba_srgb != nullptr)
+	{
+		return *rgba_srgb;
+	}
+	if (unorm_srgb != nullptr)
+	{
+		return *unorm_srgb;
 	}
 	if (any_srgb != nullptr)
 	{

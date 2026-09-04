@@ -2365,20 +2365,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL VulkanCreateDebugUtilsMessengerEXT(VkInsta
 
 	// Host presentation default is ordinary LDR sRGB. Never prefer HDR10/HLG/etc.
 	// even when a driver lists them first (SelectDefaultSwapchainSurfaceFormat).
-	if (r->format_unorm_bgra32)
-	{
-		create_info.imageFormat     = VK_FORMAT_B8G8R8A8_UNORM;
-		create_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	} else if (r->format_srgb_bgra32)
-	{
-		create_info.imageFormat     = VK_FORMAT_B8G8R8A8_SRGB;
-		create_info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-	} else
-	{
-		const auto chosen           = SelectDefaultSwapchainSurfaceFormat(r->formats.GetData(), static_cast<uint32_t>(r->formats.Size()));
-		create_info.imageFormat     = chosen.format;
-		create_info.imageColorSpace = chosen.colorSpace;
-	}
+	const auto chosen = SelectDefaultSwapchainSurfaceFormat(r->formats.GetData(), static_cast<uint32_t>(r->formats.Size()));
+	create_info.imageFormat     = chosen.format;
+	create_info.imageColorSpace = chosen.colorSpace;
 
 	create_info.imageExtent           = extent;
 	create_info.imageArrayLayers      = 1;
