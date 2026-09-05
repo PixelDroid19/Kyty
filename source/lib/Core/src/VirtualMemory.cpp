@@ -1991,6 +1991,11 @@ bool IsRangeWritable(uint64_t address, uint64_t size)
 	return sys_virtual_is_range_writable(address, size);
 }
 
+bool VisitReadableGuestRange(uint64_t address, uint64_t size, ReadableGuestRangeVisitor visitor, void* context)
+{
+	return visitor != nullptr && sys_virtual_visit_readable_guest_range(address, size, visitor, context);
+}
+
 bool CopyFromGuest(void* destination, uint64_t source, uint64_t size)
 {
 	return destination != nullptr && sys_virtual_copy_from_guest(destination, source, size);

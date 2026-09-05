@@ -90,6 +90,11 @@ static String8 operand_array_to_str(ShaderOperand op, int n)
 				ret = "exec";
 			}
 			break;
+		case ShaderOperandType::VccZ: ret = "vccz"; break;
+		case ShaderOperandType::ExecZ: ret = "execz"; break;
+		case ShaderOperandType::Scc: ret = "scc"; break;
+		case ShaderOperandType::M0: ret = "m0"; break;
+		case ShaderOperandType::Null: ret = "null"; break;
 		case ShaderOperandType::Sgpr: ret = String8::FromPrintf("s[%d:%d]", op.register_id, op.register_id + n - 1); break;
 		case ShaderOperandType::Vgpr: ret = String8::FromPrintf("v[%d:%d]", op.register_id, op.register_id + n - 1); break;
 		case ShaderOperandType::LiteralConstant:
@@ -141,6 +146,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
 		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
 		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
+		case ShaderInstructionFormat::PixelZVsrc0VmDone: return "PixelZVsrc0VmDone"; break;
 		case ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3: return "Param0Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3: return "Param1Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3: return "Param2Vsrc0Vsrc1Vsrc2Vsrc3"; break;
@@ -301,6 +307,7 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Mrt1: s = "mrt_color1"; break;
 			case ShaderInstructionFormat::Mrt2: s = "mrt_color2"; break;
 			case ShaderInstructionFormat::Mrt3: s = "mrt_color3"; break;
+			case ShaderInstructionFormat::PixelZ: s = "pixel_z"; break;
 			case ShaderInstructionFormat::Prim: s = "prim"; break;
 			case ShaderInstructionFormat::Off: s = "off"; break;
 			case ShaderInstructionFormat::Compr: s = "compr"; break;

@@ -102,6 +102,79 @@ static bool ShaderCodeHasDiscardTail(const ShaderCode& code)
 	return false;
 }
 
+static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
+{
+	if (code.GetType() != ShaderType::Pixel)
+	{
+		return false;
+	}
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ShaderInstructionChangesControlFlow(const ShaderInstruction& inst)
+{
+	switch (inst.type)
+	{
+		case ShaderInstructionType::SBranch:
+		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchScc0:
+		case ShaderInstructionType::SCbranchScc1:
+		case ShaderInstructionType::SCbranchVccz:
+		case ShaderInstructionType::SCbranchVccnz:
+		case ShaderInstructionType::SSetpcB64:
+		case ShaderInstructionType::SSwappcB64: return true;
+		default: return false;
+	}
+}
+
+// FragDepth requires an exact depth write on every non-discard exit. The
+// current emitter has no general depth-export CFG lowering, so admit only the
+// linear graph we can prove: one exact export followed by the sole terminal
+// s_endpgm. Any explicit label or control transfer could introduce a bypass
+// (including an early return), and is rejected rather than guessed.
+static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code)
+{
+	if (code.GetType() != ShaderType::Pixel || code.GetLabels().Size() != 0 || code.GetIndirectLabels().Size() != 0)
+	{
+		return false;
+	}
+
+	const auto& instructions = code.GetInstructions();
+	bool        has_depth    = false;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (inst.type == ShaderInstructionType::Unknown || ShaderInstructionChangesControlFlow(inst))
+		{
+			return false;
+		}
+		if (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone)
+		{
+			if (has_depth || inst.src_num != 1 || inst.exp_enable_mask != 0x1u || inst.src[0].type != ShaderOperandType::Vgpr ||
+			    inst.src[0].size != 1)
+			{
+				return false;
+			}
+			has_depth = true;
+		}
+		if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			// The only exit must be terminal and follows the exact Pixel-Z export,
+			// which establishes dominance for every reachable non-discard exit.
+			return has_depth && inst.format == ShaderInstructionFormat::Empty && index + 1 == instructions.Size();
+		}
+	}
+
+	return false;
+}
+
 uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
 {
 	EXIT_IF(!UsesGraphicsProbeStorage());
@@ -116,6 +189,17 @@ uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
+
+	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
+		               "WARNING: pixel depth export rejected: control flow cannot prove a FragDepth write before every non-discard exit\n");
+		// SpirvGenerateSource has no error result. Keep this a distinct invalid
+		// assembly token so ShaderRecompilePS fails closed in ShaderToolchain;
+		// an empty source can be assembled or served by its source cache.
+		m_source = "OpKytyPixelDepthControlFlowRejected\n";
+		return;
+	}
 
 	switch (m_code.GetType())
 	{
@@ -443,6 +527,10 @@ void Spirv::WriteHeader()
 			// Location 0 always uses %outColor (legacy name). Additional RTs that
 			// have a non-zero target_output_mode are declared as %outColorN.
 			vars.Add("%outColor");
+			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			{
+				vars.Add("%fragDepth");
+			}
 			if (m_ps_input_info != nullptr)
 			{
 				for (int rt = 1; rt < 8; rt++)
@@ -474,7 +562,7 @@ void Spirv::WriteHeader()
 				// that can discard.
 				const bool safe_late_input_probe = UsesPixelInput0Probe() && !ShaderPreventsNoopPixelElision(m_code);
 				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable && !ShaderCodeHasDiscardTail(m_code) &&
-				    !safe_late_input_probe)
+				    !ShaderCodeHasPixelDepthExport(m_code) && !safe_late_input_probe)
 				{
 					execution_modes.Add("OpExecutionMode %main EarlyFragmentTests\n");
 				}
@@ -485,6 +573,10 @@ void Spirv::WriteHeader()
 			}
 			header_str = String8(header).ReplaceStr("<Type>", "Fragment");
 			execution_modes.Add("OpExecutionMode %main OriginUpperLeft\n");
+			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			{
+				execution_modes.Add("OpExecutionMode %main DepthReplacing\n");
+			}
 			// TODO() do we need PixelCenterInteger mode?
 			break;
 		case ShaderType::Vertex:
@@ -642,6 +734,10 @@ void Spirv::WriteAnnotations()
 	switch (m_code.GetType())
 	{
 		case ShaderType::Pixel:
+			if (ShaderCodeHasSafePixelDepthExport(m_code))
+			{
+				vars.Add("OpDecorate %fragDepth BuiltIn FragDepth");
+			}
 			if (m_ps_input_info != nullptr)
 			{
 				for (int rt = 1; rt < 8; rt++)
@@ -917,6 +1013,7 @@ void Spirv::WriteTypes()
            %_ptr_Input_v4float = OpTypePointer Input %v4float
             %_ptr_Input_v3uint = OpTypePointer Input %v3uint
           %_ptr_Output_v4float = OpTypePointer Output %v4float
+           %_ptr_Output_float = OpTypePointer Output %float
           %_ptr_Function_float = OpTypePointer Function %float
            %_ptr_Function_bool = OpTypePointer Function %bool
             %_ptr_Function_int = OpTypePointer Function %int
@@ -1282,6 +1379,10 @@ void Spirv::WriteGlobalVariables()
 				vars.Add(String8::FromPrintf("%%outColor%d = OpVariable %%_ptr_Output_v4float Output", rt));
 			}
 		}
+	}
+	if (m_code.GetType() == ShaderType::Pixel && ShaderCodeHasSafePixelDepthExport(m_code))
+	{
+		vars.Add("%fragDepth = OpVariable %_ptr_Output_float Output");
 	}
 
 	if (m_bind != nullptr)

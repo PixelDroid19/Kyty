@@ -66,36 +66,6 @@ struct ImageSampleLzPlan
 	bool                          cube_coordinates;
 };
 
-static int FindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
-{
-	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8 condition ignored (continuing)\n"); }
-	const int texture_register = inst.src[1].register_id;
-	for (int i = 0; i < bind.textures2D.textures_num; ++i)
-	{
-		const auto& descriptor = bind.textures2D.desc[i];
-		if (descriptor.usage == ShaderTextureUsage::ReadOnly && !descriptor.dynamic_sload &&
-		    descriptor.start_register + user_data_register_base == texture_register)
-		{
-			return i;
-		}
-	}
-
-	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
-	{
-		if (bind.dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::Texture ||
-		    bind.dynamic_sloads.destination_register[mapping] != texture_register ||
-		    inst.pc <= bind.dynamic_sloads.instruction_pc[mapping] || inst.pc > bind.dynamic_sloads.last_consumer_pc[mapping])
-		{
-			continue;
-		}
-		const int index = bind.dynamic_sloads.resource_index[mapping];
-		if (index < 0 || index >= bind.textures2D.textures_num ||
-		                     bind.textures2D.desc[index].usage != ShaderTextureUsage::ReadOnly) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 0 || index >= bind.textures2D.textures_num || condition ignored (continuing)\n"); }
-		return index;
-	}
-	return -1;
-}
-
 static int FindImageStorageTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
 {
 	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8)
@@ -148,41 +118,9 @@ static int ResolveStorageTextureArrayIndex(const ShaderInstruction& inst, const 
 	return storage_index < bind.textures2D.textures2d_storage_num ? storage_index : -1;
 }
 
-static int FindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
-{
-	if (inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].size != 4)
-	{
-		return -1;
-	}
-	const int sampler_register = inst.src[2].register_id;
-	for (int i = 0; i < bind.samplers.samplers_num; ++i)
-	{
-		if (!bind.samplers.dynamic_sload[i] && bind.samplers.start_register[i] + user_data_register_base == sampler_register)
-		{
-			return i;
-		}
-	}
-
-	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
-	{
-		if (bind.dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::Sampler ||
-		    bind.dynamic_sloads.destination_register[mapping] != sampler_register ||
-		    inst.pc <= bind.dynamic_sloads.instruction_pc[mapping] || inst.pc > bind.dynamic_sloads.last_consumer_pc[mapping])
-		{
-			continue;
-		}
-		const int index = bind.dynamic_sloads.resource_index[mapping];
-		if (index >= 0 && index < bind.samplers.samplers_num)
-		{
-			return index;
-		}
-	}
-	return -1;
-}
-
 static ImageSampleLzPlan PlanImageSampleLz(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
 {
-	const int descriptor_index = FindImageSampledTextureDescriptor(inst, bind, user_data_register_base);
+	const int descriptor_index = ShaderFindImageSampledTextureDescriptor(inst, bind, user_data_register_base);
 	if (descriptor_index >= 0)
 	{
 		const auto& descriptor = bind.textures2D.desc[descriptor_index];
@@ -516,7 +454,7 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 	}
 	const auto* vs_info = spirv->GetVsInputInfo();
 	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
-	const int   descriptor_index = FindImageSampledTextureDescriptor(inst, *bind, user_data_register_base);
+	const int   descriptor_index = ShaderFindImageSampledTextureDescriptor(inst, *bind, user_data_register_base);
 	if (descriptor_index < 0)
 	{
 		return false;
@@ -2180,8 +2118,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 
 	const auto* vs_info = spirv->GetVsInputInfo();
 	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
-	const int   texture_index = FindImageSampledTextureDescriptor(inst, *bind_info, user_data_register_base);
-	const int   sampler_index = FindImageSamplerDescriptor(inst, *bind_info, user_data_register_base);
+	const int   texture_index = ShaderFindImageSampledTextureDescriptor(inst, *bind_info, user_data_register_base);
+	const int   sampler_index = ShaderFindImageSamplerDescriptor(inst, *bind_info, user_data_register_base);
 	if (texture_index < 0 || sampler_index < 0)
 	{
 		return false;

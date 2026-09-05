@@ -23,6 +23,7 @@ std::atomic_bool g_input_ready_emitted {false};
 std::atomic<uint32_t> g_stencil_frontier_emits {0};
 std::atomic<uint32_t> g_storage_frontier_emits {0};
 std::atomic<uint32_t> g_storage_range_emits {0};
+std::atomic<uint32_t> g_storage_eud_snapshot_emits {0};
 
 constexpr uint32_t kGraphicsFrontierEmitLimit = 64;
 
@@ -346,6 +347,25 @@ void EmitStorageRangeFatal(const StorageRangeContext& context)
 	FormatStorageRange(context, msg, sizeof(msg));
 	EmitStorageRange(context);
 	KYTY_LOG_DEBUG( "KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageRange, msg);
+}
+
+void EmitStorageEudSnapshot(const StorageEudSnapshotContext& context)
+{
+	if (g_storage_eud_snapshot_emits.fetch_add(1, std::memory_order_relaxed) >= kGraphicsFrontierEmitLimit)
+	{
+		return;
+	}
+	char msg[kAgentEventMessageMax] {};
+	std::snprintf(msg, sizeof(msg),
+	              "st=%x sub=%" PRIu64 " idx=%d sg=%d sl=%d us=%d es=%u eb=%d pv=%u rd=%u ch=%u "
+	              "cf=%08" PRIx32 " lf=%08" PRIx32 " lb=%012" PRIx64 " ld=%" PRIu64 " lm=%" PRIu64,
+	              context.stage, context.submit_id, context.resource_index, context.sgpr, context.slot,
+	              context.eud_user_sgpr_num, static_cast<unsigned>(context.eud_size_dw), context.eud_offset_base,
+	              context.pointer_valid ? 1u : 0u, context.readable ? 1u : 0u, context.changed ? 1u : 0u,
+	              context.captured_fingerprint, context.live_fingerprint, context.live_base,
+	              context.live_declared_size, context.live_materialized_size);
+	Emit(EventKind::Error, kCodeGraphicsStorageEudSnapshot, msg);
+	KYTY_LOG_DEBUG("KYTY_AGENT_FRONTIER code=%s %s\n", kCodeGraphicsStorageEudSnapshot, msg);
 }
 
 void EmitFirstFrame(int frame)

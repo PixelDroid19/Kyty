@@ -35,6 +35,22 @@ struct RenderTextureFormatInfo
 	uint32_t            bytes_per_element = 0;
 };
 
+struct RenderTextureArrayView
+{
+	uint32_t image_layers      = 0;
+	uint32_t base_layer        = 0;
+	uint32_t layer_count       = 0;
+	uint64_t full_backing_size = 0;
+};
+
+// A color-target view names one slice inside an allocation whose storage starts
+// at layer zero. Keep the storage extent and the selected view separate so
+// cache identity cannot collapse a layered image into a single-layer image.
+[[nodiscard]] bool ResolveRenderTextureArrayView(uint64_t bytes_per_layer, uint32_t base_layer, uint32_t last_layer,
+                                                 RenderTextureArrayView* view);
+[[nodiscard]] bool RenderTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
+[[nodiscard]] bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t* incoming);
+
 [[nodiscard]] RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order);
 
 // GPU-owned tiled render targets without write-back never upload guest memory
@@ -55,9 +71,10 @@ public:
 	static constexpr int PARAM_PITCH      = 5;
 	static constexpr int PARAM_WRITE_BACK = 6;
 	static constexpr int PARAM_SAMPLES    = 7;
+	static constexpr int PARAM_ARRAY_LAYERS = 8;
 
 	explicit RenderTextureObject(RenderTextureFormat pixel_format, uint32_t width, uint32_t height, bool tiled, bool neo, uint32_t pitch,
-	                             bool write_back, uint32_t sample_count = 1)
+	                             bool write_back, uint32_t sample_count = 1, uint32_t array_layers = 1)
 	{
 		params[PARAM_FORMAT]     = static_cast<uint64_t>(pixel_format);
 		params[PARAM_WIDTH]      = width;
@@ -67,6 +84,7 @@ public:
 		params[PARAM_PITCH]      = pitch;
 		params[PARAM_WRITE_BACK] = write_back ? 1 : 0;
 		params[PARAM_SAMPLES]    = sample_count;
+		params[PARAM_ARRAY_LAYERS] = array_layers;
 		check_hash               = RenderTextureMayCpuUploadOnUpdate(tiled, write_back);
 		type                     = Graphics::GpuMemoryObjectType::RenderTexture;
 	}

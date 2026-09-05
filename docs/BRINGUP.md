@@ -400,14 +400,14 @@ Recent strict bring-up (evidence-backed, focused tests where noted) includes:
   `0.2896`, 176 bins), so the address correction is necessary shader semantics
   but is not sufficient to recover the vehicle or world. 3D recovery remains
   unproven.
-- `kyty_graphics_diagnostics_integration` is inconsistent on current `HEAD`:
-  `ShaderResourceAnalysis.cpp` classifies an unreferenced `DirectResource` as
-  `UnusedMetadata`, while the integration requires `NoMatchingInstruction`.
-  Restricting that classification to `MetadataSharp` made the integration pass,
-  but the strict private workload then failed to reach present 8,000 within the
-  existing 45-second gate and received no input. The experiment was reverted.
-  Before changing global storage pruning, isolate which direct binding would be
-  retained and prove its ownership, size, and real shader consumer.
+- The storage-analysis inconsistency is closed conservatively: an unmatched
+  `DirectResource` remains `Unknown` with `NoMatchingInstruction`, while only
+  proven-unused `MetadataSharp` entries may be removed before binding. Focused
+  unit and graphics-integration coverage enforce that distinction. An earlier
+  strict private run with the same conservative policy did not reach its present
+  gate before timeout, so it is not compatibility evidence. Before changing
+  global storage pruning, isolate the exact direct binding and prove its
+  ownership, size, and real shader consumer.
 - SMEM dual offset (SGPR soffset + 21-bit imm) and variable-offset
   `s_buffer_load_dword` / `x2` / `x4` with imm constants registered for SPIR-V.
 - `s_buffer_load_dwordx8` still lacks that dual-offset/variable-SOFFSET

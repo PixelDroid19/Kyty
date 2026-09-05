@@ -1770,6 +1770,10 @@ void RuntimeLinker::Execute()
 	{
 		sys_dbg_stack_info_t s {};
 		sys_stack_usage(s);
+		if (s.guard_addr == 0 || s.guard_size == 0 || s.reserved_size <= s.guard_size)
+		{
+			break;
+		}
 		*reinterpret_cast<uint32_t*>(s.guard_addr) = 0;
 		expanded_size += s.guard_size;
 	}

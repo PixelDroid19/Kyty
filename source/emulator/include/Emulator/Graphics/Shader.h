@@ -142,6 +142,8 @@ enum class ShaderInstructionType : uint32_t
 	SCmpLtU32,
 	SCselectB32,
 	SCselectB64,
+	SCmovB32,
+	SCmovB64,
 	SEndpgm,
 	SInstPrefetch,
 	SLoadDword,
@@ -575,6 +577,7 @@ enum FormatByte : uint64_t
 	Gds,    // gds
 	DA,     // operand_array_to_str(inst.dst, inst.dst.size)
 	MimgDmask, // dmask carried by ShaderInstruction::mimg_dmask
+	PixelZ, // pixel Z
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -610,6 +613,8 @@ enum Format : uint64_t
 	Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt1, S0, S1, S2, S3, Vm}),
 	Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt2, S0, S1, S2, S3, Vm}),
 	Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt3, S0, S1, S2, S3, Vm}),
+	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1, done=1.
+	PixelZVsrc0VmDone                    = FormatDefine({PixelZ, S0, Vm, Done}),
 	Param0Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param0, S0, S1, S2, S3}),
 	Param1Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param1, S0, S1, S2, S3}),
 	Param2Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param2, S0, S1, S2, S3}),
@@ -1484,6 +1489,7 @@ struct ShaderTextureDescriptor
 	int                   start_register             = 0;
 	bool                  extended                   = false;
 	bool                  dynamic_sload              = false;
+	uint16_t              sampler_indices_mask       = 0;
 	bool                  textures2d_without_sampler = false;
 	bool                  sampled_shape_from_instruction = false;
 	// Set only for a compute storage image whose shader has an image store and
@@ -1577,6 +1583,9 @@ struct ShaderExtendedResources
 	bool                   used           = false;
 	int                    slot           = 0;
 	int                    start_register = 0;
+	int                    eud_user_sgpr_num = 0;
+	uint16_t               eud_size_dw       = 0;
+	int                    eud_offset_base    = 0;
 	ShaderExtendedResource data;
 };
 
@@ -1600,6 +1609,12 @@ struct ShaderBindResources
 	ShaderExtendedResources    extended;
 	ShaderDynamicSLoadMappings dynamic_sloads;
 };
+
+[[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
+	                                                       int user_data_register_base);
+[[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
+	                                                int user_data_register_base);
+void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base);
 
 [[nodiscard]] constexpr bool ShaderBindRequiresDescriptorSet(const ShaderBindResources& bind)
 {
@@ -1965,8 +1980,9 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data);
 // Gen5 fused GS front→back: terminal s_setpc in the front half transfers to a
 // separately allocated back half. Record the relationship at fuse time so the
 // recompiler can linearize the chain.
-void     ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_addr);
+[[nodiscard]] bool ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_addr);
 uint64_t ShaderLookupContinuation(uint64_t front_code_addr);
+[[nodiscard]] bool ShaderHasTerminalSetpc(const ShaderCode& code);
 
 void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count);

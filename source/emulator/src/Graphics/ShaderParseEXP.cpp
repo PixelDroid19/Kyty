@@ -96,6 +96,15 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 				inst.format = k_full[target];
 			}
 		}
+	} else if (target == 0x08u && dst->GetType() == ShaderType::Pixel)
+	{
+		// RDNA2 Table 56: target 8 is pixel Z. Only the captured full-precision
+		// one-channel form is accepted; all other target-8 encodings remain strict.
+		if (done != 0 && compr == 0 && vm != 0 && en == 0x1u)
+		{
+			inst.format  = ShaderInstructionFormat::PixelZVsrc0VmDone;
+			inst.src_num = 1;
+		}
 	} else if (target == 0x0cu)
 	{
 		if (done != 0 && en == 0xfu)

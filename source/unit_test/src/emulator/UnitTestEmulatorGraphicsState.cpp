@@ -1776,6 +1776,7 @@ TEST(EmulatorGraphicsState, SurfaceCopyPreservesEverySampledArrayLayer)
 TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 {
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(56u), 4u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(130u), 4u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(71u), 8u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(133u), 8u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(169u), 8u);
@@ -2016,6 +2017,7 @@ TEST(EmulatorGraphicsState, DecodesScreenScissorHalves)
 
 TEST(EmulatorGraphicsState, DecodesRenderControl)
 {
+	Config::SetNextGen(true);
 	HW::Context context;
 
 	const uint32_t value = (1u << Pm4::DB_RENDER_CONTROL_DEPTH_CLEAR_ENABLE_SHIFT) |
@@ -2128,6 +2130,27 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(5), 1u);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_TRUE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Sampled, 130));
+	EXPECT_FALSE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, 130));
+	EXPECT_TRUE(VulkanGen5SampleUsesSrgb(130u, false, false));
+	EXPECT_TRUE(VulkanGen5SampleUsesSrgb(130u, true, false));
+	EXPECT_FALSE(VulkanGen5SampleUsesSrgb(130u, true, true));
+	EXPECT_TRUE(VulkanGen5SampleUsesSrgb(56u, true, false));
+	EXPECT_FALSE(VulkanGen5SampleUsesSrgb(56u, true, true));
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 130), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 130, VulkanGen5SampleUsesSrgb(130u, true, false)),
+	          VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 130, VulkanGen5SampleUsesSrgb(130u, true, true)),
+	          VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(VulkanGen5ImageNumericType(130), GuestImageNumericType::FloatingPoint);
+	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(130), 4u);
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(130, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(130, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(130, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, false, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, false, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, true, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, true, VK_FORMAT_R8G8B8A8_UNORM));
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 13), VK_FORMAT_R16_SFLOAT);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(13), 2u);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 14), VK_FORMAT_R8G8_UNORM);
@@ -2329,7 +2352,7 @@ TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescript
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
 }
 
-TEST(EmulatorGraphicsState, Gen5CodeAvailablePrunesUnusedDirectStorageDescriptor)
+TEST(EmulatorGraphicsState, Gen5CodeAvailablePreservesUnmatchedDirectStorageDescriptor)
 {
 	HW::UserSgprInfo user_sgpr {};
 	for (int i = 0; i < 4; ++i)
@@ -2361,7 +2384,10 @@ TEST(EmulatorGraphicsState, Gen5CodeAvailablePrunesUnusedDirectStorageDescriptor
 	ShaderBindResources bind {};
 	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 4, &code);
 
-	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	ASSERT_EQ(bind.storage_buffers.buffers_num, 1);
+	EXPECT_EQ(bind.storage_buffers.sources[0], ShaderStorageBindingSource::DirectResource);
+	EXPECT_EQ(bind.storage_buffers.accesses[0], ShaderStorageAccess::Unknown);
+	EXPECT_EQ(bind.storage_buffers.unknown_reasons[0], ShaderStorageUnknownReason::NoMatchingInstruction);
 }
 
 TEST(EmulatorGraphicsState, RawStorageDescriptorRequiresNonZeroDwordStride)
@@ -3412,6 +3438,31 @@ TEST(EmulatorGraphicsState, BuildsCanonicalVulkanImageCreateInfo)
 	EXPECT_EQ(view_info.subresourceRange.layerCount, 5u);
 }
 
+TEST(EmulatorGraphicsState, ResolvesLayeredRenderTargetBackingAndView)
+{
+	RenderTextureArrayView view {};
+	ASSERT_TRUE(ResolveRenderTextureArrayView(0x20000u, 4u, 4u, &view));
+	EXPECT_EQ(view.image_layers, 5u);
+	EXPECT_EQ(view.base_layer, 4u);
+	EXPECT_EQ(view.layer_count, 1u);
+	EXPECT_EQ(view.full_backing_size, 0xa0000u);
+
+	EXPECT_FALSE(ResolveRenderTextureArrayView(0x20000u, 2u, 4u, &view));
+	EXPECT_FALSE(ResolveRenderTextureArrayView(0x20000u, 4u, 3u, &view));
+	EXPECT_FALSE(ResolveRenderTextureArrayView(UINT64_MAX, 0u, 1u, &view));
+
+	RenderTextureObject single(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, false, 1u, 1u);
+	RenderTextureObject layered(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, false, 1u, 5u);
+	EXPECT_FALSE(single.Equal(layered.params));
+	EXPECT_TRUE(RenderTextureCanCopyGrowingBacking(single.params, layered.params));
+	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(layered.params, single.params));
+	EXPECT_TRUE(RenderTextureCanReuseLargerBacking(layered.params, single.params));
+	EXPECT_FALSE(RenderTextureCanReuseLargerBacking(single.params, layered.params));
+	RenderTextureObject cpu_visible(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 1u);
+	RenderTextureObject cpu_visible_layered(RenderTextureFormat::R8G8B8A8Unorm, 128u, 64u, true, false, 128u, true, 1u, 5u);
+	EXPECT_FALSE(RenderTextureCanCopyGrowingBacking(cpu_visible.params, cpu_visible_layered.params));
+}
+
 TEST(EmulatorGraphicsState, DecodesAndNormalizesVulkanComponentMappings)
 {
 	VkComponentMapping mapping {};
@@ -3573,6 +3624,8 @@ TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledTile27ByFormat)
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 56u, true));
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 71u, false));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 71u, true));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 130u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 130u, true));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 133u, false));
 }
 
@@ -3586,19 +3639,24 @@ TEST(EmulatorGraphicsState, Gen5SampleTextureHashRefreshStaysEnabled)
 	EXPECT_TRUE(Gen5SampleTextureUsesHashRefresh(0u));
 }
 
-// CreateFromObjects may copy a live surface parent only when ufmt families match.
-// Float lighting under an RGBA8 sample must not be blitted into the Texture.
+// CreateFromObjects may copy a live surface parent only when its immutable
+// format matches the resolved sample interpretation.
 TEST(EmulatorGraphicsState, Gen5SampleMayCopyFromSurfaceParentMatchesFormatFamily)
 {
 	using namespace Kyty::Libs::Graphics;
-	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R8G8B8A8_UNORM));
-	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R8G8B8A8_SRGB));
-	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
-	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
-	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(71u, VK_FORMAT_R8G8B8A8_UNORM));
-	// Unknown sample ufmt: do not block all parents.
-	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(14u, VK_FORMAT_R8G8_UNORM));
-	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(56u, false, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(56u, false, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(56u, true, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(56u, true, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(56u, false, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(71u, false, VK_FORMAT_R16G16B16A16_SFLOAT));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(71u, false, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(130u, false, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(130u, false, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(130u, true, VK_FORMAT_R8G8B8A8_SRGB));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(130u, true, VK_FORMAT_R8G8B8A8_UNORM));
+	EXPECT_TRUE(Gen5SampleMayCopyFromSurfaceParent(14u, false, VK_FORMAT_R8G8_UNORM));
+	EXPECT_FALSE(Gen5SampleMayCopyFromSurfaceParent(14u, false, VK_FORMAT_R16G16B16A16_SFLOAT));
 }
 
 // Bind only the exact sample extent. A larger parent without a crop view leaves
@@ -3614,13 +3672,13 @@ TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
 	bool           reject      = false;
 
 	// Sample 128x128 ufmt 56: skip float parent; only exact 128x128.
-	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 128u, 128u, 3, formats, extents_w, extents_h, indices, &count, &reject));
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 128u, 128u, 3, formats, extents_w, extents_h, indices, &count, &reject));
 	EXPECT_FALSE(reject);
 	ASSERT_EQ(count, 1u);
 	EXPECT_EQ(indices[0], 2);
 
 	// Only float candidates for ufmt 56 → reject.
-	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 1920u, 1080u, 1, formats, extents_w, extents_h, indices, &count, &reject));
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 1920u, 1080u, 1, formats, extents_w, extents_h, indices, &count, &reject));
 	EXPECT_TRUE(reject);
 	EXPECT_EQ(count, 0u);
 
@@ -3628,7 +3686,7 @@ TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
 	const VkFormat only_large[] = {VK_FORMAT_R8G8B8A8_UNORM};
 	const uint32_t large_w[]    = {1920u};
 	const uint32_t large_h[]    = {1080u};
-	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, 128u, 128u, 1, only_large, large_w, large_h, indices, &count, &reject));
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 128u, 128u, 1, only_large, large_w, large_h, indices, &count, &reject));
 	EXPECT_TRUE(reject);
 	EXPECT_EQ(count, 0u);
 }
@@ -5452,9 +5510,34 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBind
 	ASSERT_EQ(bind.samplers.samplers_num, 1);
 	EXPECT_TRUE(bind.samplers.dynamic_sload[0]);
 	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::DepthReference);
+	EXPECT_EQ(bind.textures2D.desc[0].sampler_indices_mask, 0x1u);
 	ASSERT_EQ(bind.dynamic_sloads.mappings_num, 2);
 	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::Texture);
 	EXPECT_EQ(bind.dynamic_sloads.kind[1], ShaderDynamicSLoadResourceKind::Sampler);
+
+	// Dynamic texture and sampler descriptors can occupy different EUD slots;
+	// their MIMG operands establish the association used for SkipDegamma.
+	auto regular_sample = depth_reference;
+	regular_sample.type = ShaderInstructionType::ImageSampleLz;
+	ShaderCode gamma_code;
+	gamma_code.SetType(ShaderType::Compute);
+	gamma_code.GetInstructions().Add(texture_load);
+	gamma_code.GetInstructions().Add(sampler_load);
+	gamma_code.GetInstructions().Add(regular_sample);
+	gamma_code.GetInstructions().Add(end);
+	eud[33] = 130u << 20u;
+	eud[40] = 1u << 31u;
+	ShaderParsedUsage   gamma_usage {};
+	ShaderBindResources gamma_bind {};
+	ShaderParseUsage2(&user_data, &gamma_usage, &gamma_bind, user_sgpr, 16, &gamma_code);
+	ASSERT_EQ(gamma_bind.textures2D.textures_num, 1);
+	ASSERT_EQ(gamma_bind.samplers.samplers_num, 1);
+	EXPECT_EQ(gamma_bind.textures2D.desc[0].slot, 32);
+	EXPECT_EQ(gamma_bind.samplers.slots[0], 40);
+	EXPECT_EQ(gamma_bind.textures2D.desc[0].sampler_indices_mask, 0x1u);
+	EXPECT_FALSE(VulkanGen5SampleUsesSrgb(
+	    gamma_bind.textures2D.desc[0].texture.Format(), gamma_bind.samplers.samplers[0].ForceDegamma(),
+	    gamma_bind.samplers.samplers[0].SkipDegamma()));
 }
 
 // Captured failure: S_LOAD_DWORDX4 from EUD @offset_dw=40 of a null V#, then

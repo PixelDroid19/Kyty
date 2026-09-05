@@ -340,6 +340,14 @@ against the same correct gameplay capture.
   while opaque early-Z shaders retain it.
 - Temporary MRT, descriptor, and frame-selection instrumentation was removed
   before the semantic commit.
+- Retiring an idle `StorageTexture` by frame age can discard the only valid
+  GPU-authored contents because that object has no GPU-to-guest write-back.
+  Permanently excluding every storage image from retirement was also rejected:
+  distinct images in a long-lived mapped heap would have no residency admission
+  bound. The complete fix must treat writable storage images as live resources,
+  reserve their actual Vulkan memory requirements against the device-reported
+  memory budget, release that reservation only after deferred destruction, and
+  keep reconstructible textures on the existing bounded retirement path.
 - On the current Gen5 world-scene branch, mixed sampled-image operations now
   use the compatible regular host sampler path and participate in shader
   identity. A strict, validation-enabled run advanced beyond the former mixed
@@ -1408,16 +1416,15 @@ against the same correct gameplay capture.
   host writeback remains a possible temporal gap in general, but no such guest
   clear was observed for this cycle. Do not synthesize an HTILE clear, disable
   depth, swap position channels, or add generic OOB behavior on this evidence.
-- A pre-existing strict-storage inconsistency was exposed by the native
-  graphics integration: `ShaderResourceAnalysis.cpp` treats an unreferenced
-  `DirectResource` as `UnusedMetadata`, although the integration expects the
-  conservative `NoMatchingInstruction` result. Restricting unused classification
-  to `MetadataSharp` made that integration pass, but a single strict private run
-  then timed out at the unchanged present-8,000 gate after 45 seconds, before
-  either input edge. No emulator process remained and the runtime log stayed at
-  459 bytes. The semantic experiment was reverted and `fc_script` rebuilt. Do
-  not retain all unmatched direct resources globally without first tracing the
-  exact binding, materialized range, and shader consumer.
+- The strict-storage inconsistency is closed conservatively: an unmatched
+  `DirectResource` remains `Unknown` with `NoMatchingInstruction`, while only
+  proven-unused `MetadataSharp` entries may be removed before binding. Focused
+  unit and native graphics-integration coverage enforce that distinction. A
+  single earlier strict private run with the same conservative policy timed out
+  at the unchanged present gate before either input edge, so it is not
+  compatibility evidence. Do not change global direct-resource retention
+  without first tracing the exact binding, materialized range, and shader
+  consumer.
 - Expanding immutable transient vertex/index snapshots from 4 KiB to 512 KiB
   was tested as the next single-variable regression hypothesis. Temporarily
   routing only vertex and index ranges above 4 KiB back through persistent

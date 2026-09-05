@@ -160,8 +160,8 @@ static void rt_check(const HW::RenderTarget& rt)
 			if (rt.pitch.fmask_pitch_div8_minus1 != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.pitch.fmask_pitch_div8_minus1 != 0 condition ignored (continuing)\n"); }
 			if (rt.slice.slice_div64_minus1 != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.slice.slice_div64_minus1 != 0 condition ignored (continuing)\n"); }
 		}
-		if (rt.view.base_array_slice_index != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.view.base_array_slice_index != 0x00000000 condition ignored (continuing)\n"); }
-		if (rt.view.last_array_slice_index != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.view.last_array_slice_index != 0x00000000 condition ignored (continuing)\n"); }
+		if (!ps5 && rt.view.base_array_slice_index != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.view.base_array_slice_index != 0x00000000 condition ignored (continuing)\n"); }
+		if (!ps5 && rt.view.last_array_slice_index != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.view.last_array_slice_index != 0x00000000 condition ignored (continuing)\n"); }
 		if (rt.view.current_mip_level != 0x00000000) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.view.current_mip_level != 0x00000000 condition ignored (continuing)\n"); }
 		if (rt.info.fmask_compression_enable != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: rt.info.fmask_compression_enable != false condition ignored (continuing)\n"); }
 

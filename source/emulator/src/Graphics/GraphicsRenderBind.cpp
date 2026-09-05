@@ -30,6 +30,7 @@
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Tile.h"
@@ -2615,9 +2616,82 @@ static Emulator::Agent::Lifecycle::StorageRangeBacking DescribeStorageRangeBacki
 	return Emulator::Agent::Lifecycle::StorageRangeBacking::None;
 }
 
-static void ReportStorageRange(const ShaderStorageResources& storage_buffers, int index, const ShaderBufferResource& resource,
-	                           uint64_t base, uint64_t declared_size, uint64_t materialized_size)
+static uint32_t StorageDescriptorFingerprint(const ShaderBufferResource& resource)
 {
+	uint32_t fingerprint = 2166136261u;
+	for (uint32_t field: resource.fields)
+	{
+		fingerprint ^= field;
+		fingerprint *= 16777619u;
+	}
+	return fingerprint;
+}
+
+static Emulator::Agent::Lifecycle::StorageEudSnapshotContext DescribeDynamicEudSnapshot(
+	uint64_t submit_id, VkShaderStageFlags stage, const ShaderBindResources& bind, int index,
+	const ShaderBufferResource& captured)
+{
+	const auto& storage = bind.storage_buffers;
+	Emulator::Agent::Lifecycle::StorageEudSnapshotContext context {};
+	if (storage.sources[index] != ShaderStorageBindingSource::DynamicScalarLoad || !storage.dynamic_sload[index])
+	{
+		return context;
+	}
+
+	context.submit_id            = submit_id;
+	context.stage                = stage;
+	context.resource_index       = index;
+	context.sgpr                 = storage.start_register[index];
+	context.slot                 = storage.slots[index];
+	context.eud_user_sgpr_num    = bind.extended.eud_user_sgpr_num;
+	context.eud_size_dw          = bind.extended.eud_size_dw;
+	context.eud_offset_base      = bind.extended.eud_offset_base;
+	context.captured_fingerprint = StorageDescriptorFingerprint(captured);
+
+	const uint64_t eud_base = bind.extended.data.Base();
+	context.eud_table_base = eud_base;
+	const uint64_t eud_bytes = static_cast<uint64_t>(std::max<int>(context.eud_size_dw, context.slot + 4)) * sizeof(uint32_t);
+	GpuMemoryRangeProvenance eud_provenance {};
+	if (eud_base != 0 && eud_bytes != 0 && GpuMemoryQueryRangeProvenance(eud_base, eud_bytes, &eud_provenance))
+	{
+		context.eud_object_count = eud_provenance.total_count;
+		if (eud_provenance.entry_count != 0)
+		{
+			const auto& entry = eud_provenance.entries[0];
+			context.eud_object_type          = static_cast<uint32_t>(entry.type);
+			context.eud_object_submit_id     = entry.submit_id;
+			context.eud_object_in_use        = entry.in_use;
+			context.eud_object_write_back    = entry.write_back_capable;
+			context.eud_dependencies_complete = entry.dependencies_complete;
+		}
+	}
+	const bool slot_valid = context.slot >= 0 && context.slot <= SHADER_GEN5_EUD_MAX_DWORDS - 4;
+	context.pointer_valid = bind.extended.used && eud_base != 0 && slot_valid;
+	if (context.pointer_valid)
+	{
+		const uint64_t descriptor_address = eud_base + static_cast<uint64_t>(context.slot) * sizeof(uint32_t);
+		context.eud_descriptor_address = descriptor_address;
+		ShaderBufferResource live {};
+		context.readable = descriptor_address >= eud_base &&
+		                   Core::VirtualMemory::CopyFromGuest(live.fields, descriptor_address, sizeof(live.fields));
+		if (context.readable)
+		{
+			context.live_fingerprint = StorageDescriptorFingerprint(live);
+			context.changed          = std::memcmp(live.fields, captured.fields, sizeof(live.fields)) != 0;
+			context.live_base        = live.Base48();
+			context.live_declared_size = ShaderBufferByteSize(live.Stride(), live.NumRecords());
+			context.live_materialized_size =
+			    GpuMemoryGetAllocatedRangePrefix(context.live_base, context.live_declared_size);
+		}
+	}
+	return context;
+}
+
+static Emulator::Agent::Lifecycle::StorageEudSnapshotContext ReportStorageRange(
+	uint64_t submit_id, VkShaderStageFlags stage, const ShaderBindResources& bind, int index,
+	const ShaderBufferResource& resource, uint64_t base, uint64_t declared_size, uint64_t materialized_size)
+{
+	const auto& storage_buffers = bind.storage_buffers;
 	Emulator::GuestMemory::MappedRange mapped_range {};
 	const bool has_mapped_range = declared_size != 0 && Emulator::GuestMemory::GetPort().QueryMappedRange(base, declared_size, &mapped_range);
 
@@ -2638,19 +2712,27 @@ static void ReportStorageRange(const ShaderStorageResources& storage_buffers, in
 	context.descriptor_words[1] = resource.fields[1];
 	context.descriptor_words[2] = resource.fields[2];
 	context.descriptor_words[3] = resource.fields[3];
+	Emulator::Agent::Lifecycle::StorageEudSnapshotContext eud {};
 	if (declared_size == 0 || materialized_size == 0)
 	{
+		eud = DescribeDynamicEudSnapshot(submit_id, stage, bind, index, resource);
+		if (eud.pointer_valid || bind.storage_buffers.sources[index] == ShaderStorageBindingSource::DynamicScalarLoad)
+		{
+			Emulator::Agent::Lifecycle::EmitStorageEudSnapshot(eud);
+		}
 		Emulator::Agent::Lifecycle::EmitStorageRangeFatal(context);
 	} else
 	{
 		Emulator::Agent::Lifecycle::EmitStorageRange(context);
 	}
+	return eud;
 }
 
-static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, const ShaderStorageResources& storage_buffers,
-                                  VulkanBuffer** buffers, uint32_t** sgprs)
+static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkShaderStageFlags stage,
+	                              const ShaderBindResources& bind, VulkanBuffer** buffers, uint32_t** sgprs)
 {
 	KYTY_PROFILER_FUNCTION();
+	const auto& storage_buffers = bind.storage_buffers;
 
 	EXIT_IF(buffers == nullptr);
 	EXIT_IF(sgprs == nullptr);
@@ -2739,7 +2821,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 			const uint64_t declared_size = ShaderBufferByteSize(stride, num_records);
 			if (declared_size == 0)
 			{
-				ReportStorageRange(storage_buffers, i, r, addr, declared_size, 0);
+				(void)ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, 0);
 				if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 			}
 
@@ -2765,25 +2847,34 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 				    buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 			} else if (materialized_size == 0)
 			{
-				ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
+				const auto eud = ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, materialized_size);
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
 				EXIT("storage buffer range is not materialized: index=%d addr=0x%016" PRIx64 " size=0x%016" PRIx64
 				     " access=%u source=%u reason=%u code=%d exact=%d indirect=%d raw_vmem_oob=%d raw_smem=%d"
 				     " raw_tbuffer=%d sgpr=%d slot=%d usage=%u stride=%u words=%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32
-				     ":%08" PRIx32 "\n",
+				     ":%08" PRIx32 " eud_pv=%d eud_rd=%d eud_ch=%d eud_cf=%08" PRIx32 " eud_lf=%08" PRIx32
+				     " eud_tb=%012" PRIx64 " eud_da=%012" PRIx64 " eud_lb=%012" PRIx64 " eud_ld=%" PRIu64
+				     " eud_lm=%" PRIu64 " eud_us=%d eud_es=%u eud_eb=%d eud_oc=%u eud_ot=%u eud_os=%" PRIu64
+				     " eud_oi=%d eud_ow=%d eud_od=%d\n",
 				     i, addr, requested_size, static_cast<uint32_t>(storage_buffers.accesses[i]),
 				     static_cast<uint32_t>(storage_buffers.sources[i]), static_cast<uint32_t>(storage_buffers.unknown_reasons[i]),
 				     storage_buffers.code_available[i] ? 1 : 0, storage_buffers.exact_matches[i] ? 1 : 0,
 				     storage_buffers.indirect_descriptor_use[i] ? 1 : 0, storage_buffers.raw_vmem_oob_guarded[i] ? 1 : 0,
 				     storage_buffers.raw_smem_use[i] ? 1 : 0, storage_buffers.raw_tbuffer_use[i] ? 1 : 0,
 				     storage_buffers.start_register[i], storage_buffers.slots[i], static_cast<uint32_t>(storage_buffers.usages[i]),
-				     stride, r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
+				     stride, r.fields[0], r.fields[1], r.fields[2], r.fields[3], eud.pointer_valid ? 1 : 0,
+				     eud.readable ? 1 : 0, eud.changed ? 1 : 0, eud.captured_fingerprint, eud.live_fingerprint,
+				     eud.eud_table_base, eud.eud_descriptor_address, eud.live_base, eud.live_declared_size,
+				     eud.live_materialized_size, eud.eud_user_sgpr_num,
+				     static_cast<unsigned>(eud.eud_size_dw), eud.eud_offset_base, eud.eud_object_count,
+				     eud.eud_object_type, eud.eud_object_submit_id, eud.eud_object_in_use ? 1 : 0,
+				     eud.eud_object_write_back ? 1 : 0, eud.eud_dependencies_complete ? 1 : 0);
 			} else
 			{
 				if (materialized_size != requested_size)
 				{
-					ReportStorageRange(storage_buffers, i, r, addr, declared_size, materialized_size);
+					(void)ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, materialized_size);
 				}
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
@@ -2825,16 +2916,27 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, con
 	}
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static bool ShouldForceGen5Degamma(const ShaderSamplerResources& samplers, int sampled_index)
+static bool ShouldUseGen5Srgb(const ShaderSamplerResources& samplers, const ShaderTextureDescriptor& texture, uint16_t fmt)
 {
-	if (sampled_index < 0 || sampled_index >= samplers.samplers_num)
+	bool resolved = false;
+	bool use_srgb = VulkanGen5SampleUsesSrgb(fmt, false, false);
+	for (int index = 0; index < samplers.samplers_num && index < 16; ++index)
 	{
-		return false;
+		if ((texture.sampler_indices_mask & static_cast<uint16_t>(1u << index)) == 0u)
+		{
+			continue;
+		}
+		const auto& sampler  = samplers.samplers[index];
+		const bool  candidate = VulkanGen5SampleUsesSrgb(fmt, sampler.ForceDegamma(), sampler.SkipDegamma());
+		if (resolved && candidate != use_srgb)
+		{
+			EXIT("sampled image uses conflicting sampler gamma interpretations: format=%u sampler_mask=0x%04x\n",
+			     static_cast<unsigned>(fmt), static_cast<unsigned>(texture.sampler_indices_mask));
+		}
+		use_srgb = candidate;
+		resolved = true;
 	}
-
-	const auto& sampler = samplers.samplers[sampled_index];
-	return sampler.ForceDegamma() && !sampler.SkipDegamma();
+	return use_srgb;
 }
 
 static ShaderSampledImageViewKind ResolveBoundSampledImageView(const VulkanImage* image, bool depth, bool arrayed,
@@ -2935,10 +3037,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				     tile_mode, static_cast<uint32_t>(r.Format()), r.Width5() + 1u, r.Height5() + 1u, r.Base40(),
 				     static_cast<uint32_t>(r.Type()));
 			}
-			if (!VulkanSupportsGen5ImageFormat(GuestImageUsage::Sampled, r.Format()))
+			const auto image_usage = textures.desc[i].textures2d_without_sampler ? GuestImageUsage::Storage : GuestImageUsage::Sampled;
+			if (!VulkanSupportsGen5ImageFormat(image_usage, r.Format()))
 			{
-				EXIT("unsupported Gen5 sampled texture format: format=%u tile=%u width=%u height=%u base=0x%012" PRIx64
+				EXIT("unsupported Gen5 %s texture format: format=%u tile=%u width=%u height=%u base=0x%012" PRIx64
 				     " type=%u\n",
+				     image_usage == GuestImageUsage::Storage ? "storage" : "sampled",
 				     static_cast<uint32_t>(r.Format()), tile_mode, r.Width5() + 1u, r.Height5() + 1u, r.Base40(),
 				     static_cast<uint32_t>(r.Type()));
 			}
@@ -3059,7 +3163,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		auto       fmt           = (gen5 ? r.Format() : 0);
 		uint32_t   swizzle       = r.DstSelXYZW();
 		uint32_t   view_swizzle  = swizzle;
-		const bool force_degamma = gen5 && !textures.desc[i].textures2d_without_sampler && ShouldForceGen5Degamma(samplers, index_sampled);
+		const bool use_srgb = gen5 && ShouldUseGen5Srgb(samplers, textures.desc[i], static_cast<uint16_t>(fmt));
 
 		const bool check_depth_texture = (!gen5 && tile == 2u) || (gen5 && tile == 24u);
 
@@ -3140,7 +3244,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		// Opt-in catalog (KYTY_SAMPLE_BIND_CATALOG=/abs/path): a bounded set of
 		// unique sample binds for residual investigation. No guest-visible side
 		// effects when unset.
-		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, swizzle, view_swizzle, force_degamma, &r](const char* path)
+		const auto catalog_sample = [gen5, fmt, tile, width, height, pitch, addr, swizzle, view_swizzle, use_srgb, &r](const char* path)
 		{
 			static constexpr size_t k_catalog_entry_limit = 128u;
 			static const char* catalog_path = std::getenv("KYTY_SAMPLE_BIND_CATALOG");
@@ -3152,8 +3256,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			static std::set<std::string> catalog_seen;
 			char                         line[384];
 			std::snprintf(line, sizeof(line),
-			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x view_swizzle=0x%03x degamma=%u word4=0x%08x type=%u depth=%u base_array=%u base_level=%u last_level=%u max_mip=%u path=%s addr=0x%012" PRIx64 "\n",
-			              fmt, tile, width, height, pitch, swizzle, view_swizzle, force_degamma ? 1u : 0u, r.fields[4],
+			              "fmt=%u tile=%u %ux%u pitch=%u swizzle=0x%03x view_swizzle=0x%03x srgb=%u word4=0x%08x type=%u depth=%u base_array=%u base_level=%u last_level=%u max_mip=%u path=%s addr=0x%012" PRIx64 "\n",
+			              fmt, tile, width, height, pitch, swizzle, view_swizzle, use_srgb ? 1u : 0u, r.fields[4],
 			              static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()) + 1u,
 			              static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
 			              static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()), path,
@@ -3290,7 +3394,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				int    filtered[16] = {};
 				size_t filtered_n   = 0;
 				bool   reject_alias = false;
-				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
+				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
 				                                      &reject_alias));
 				if (reject_alias)
 				{
@@ -3382,7 +3486,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					int    filtered[16] = {};
 					size_t filtered_n   = 0;
 					bool   reject_st    = false;
-					EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
+					EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
 					                                      &reject_st));
 					if (reject_st)
 					{
@@ -3454,7 +3558,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				const auto video_image = VideoOut::VideoOutGetImageForSubmission(addr, buffer);
 				if (video_image.image != nullptr && video_image.buffer_size == size.size && video_image.buffer_pitch == pitch &&
 				    video_image.image->MatchesGuestExtent(width, height) &&
-				    (!gen5 || VulkanGen5SampleFormatMatches(static_cast<uint16_t>(fmt), video_image.image->format)))
+				    (!gen5 || VulkanGen5SampleFormatMatchesEffective(static_cast<uint16_t>(fmt), use_srgb,
+				                                                     video_image.image->format)))
 				{
 					tex         = video_image.image;
 					materialize = "videoout";
@@ -3522,7 +3627,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				} else
 				{
 					TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo,
-					                                  view_swizzle, force_degamma,
+					                                  view_swizzle, use_srgb,
 					                                  depth_source == GpuMemoryDepthD16Source::StorageBuffer, host_resource_type,
 					                                  depth, base_array, true);
 					tex = static_cast<TextureVulkanImage*>(GpuMemoryCreateObject(
@@ -3578,7 +3683,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				}
 				const bool skip_guest = !Gen5SampleMayGuestUploadTiled(tile, fmt, live_cover);
 				TextureObject vulkan_texture_info(dfmt, nfmt, fmt, width, height, pitch, base_level, levels, tile, neo, view_swizzle,
-				                                  force_degamma, skip_guest, host_resource_type, depth, base_array);
+				                                  use_srgb, skip_guest, host_resource_type, depth, base_array);
 				tex = static_cast<TextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 				materialize = skip_guest ? "guest-skip-live-cover" : "guest-upload";
@@ -3675,8 +3780,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (textures.desc[i].textures2d_without_sampler)
 		{
 			images_storage[index_storage] = tex;
-			images_storage_view[index_storage] =
-			    (three_dimensional ? VulkanImage::VIEW_3D : (arrayed_2d ? VulkanImage::VIEW_STORAGE_ARRAY : VulkanImage::VIEW_DEFAULT));
+			if (!VulkanResolveStorageImageView(tex, three_dimensional, arrayed_2d, &images_storage_view[index_storage]))
+			{
+				EXIT("storage image has no compatible Vulkan view\n");
+			}
 			RecordDrawMaterialTraceTexture(material_trace, i, textures.desc[i], r, addr, width, height, pitch, depth, tex,
 			                               images_storage_view[index_storage], trace_provenance, &textures, &samplers);
 			if (gen5)
@@ -3907,8 +4014,9 @@ static void PrepareSamplers(const ShaderSamplerResources& samplers, const Shader
 		// unnormalized-coordinate restrictions.
 		// Vulkan exposes no anisotropic threshold; preserve filter mapping and MaxAnisoRatio.
 		if (!gen5 && r.McCoordTrunc() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !gen5 && r.McCoordTrunc() != false condition ignored (continuing)\n"); }
-		// ForceDegamma / SkipDegamma are resolved in ShouldForceGen5Degamma and
-		// VulkanResolveGuestImageFormat (RGBA8 → sRGB only when force && !skip).
+		// ForceDegamma / SkipDegamma resolve to one effective host-sRGB choice
+		// before TextureObject construction, so its cache identity selects the
+		// matching immutable Vulkan image format.
 		// Both flags are legal guest sampler state; do not EXIT on them.
 		if (gen5 && r.PointPreclamp() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gen5 && r.PointPreclamp() != false condition ignored (continuing)\n"); }
 		if (gen5 && r.AnisoOverride() != false) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gen5 && r.AnisoOverride() != false condition ignored (continuing)\n"); }
@@ -4051,7 +4159,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.storage_buffers.buffers_num > 0)
 		{
 			const auto stage_start = BindingStageClock::now();
-			PrepareStorageBuffers(submit_id, buffer, bind.storage_buffers, storage_buffers, &sgprs_ptr);
+			PrepareStorageBuffers(submit_id, buffer, vk_stage, bind, storage_buffers, &sgprs_ptr);
 			if (record_draw_timing) { DebugStatsRecordDrawDescriptorStorage(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}

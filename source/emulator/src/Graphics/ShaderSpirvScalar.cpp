@@ -18,13 +18,20 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
 	const auto& inst = code.GetInstructions().At(index);
 
 	String8 index_str = String8::FromPrintf("%u", index);
+	const bool discard_result = inst.type == ShaderInstructionType::SCmovB64 && inst.dst.type == ShaderOperandType::Null;
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
+	if (!operand_is_variable(inst.dst) && !discard_result)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n");
+	}
 
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
+	auto dst_value0 = (discard_result ? SpirvValue {} : operand_variable_to_str(inst.dst, 0));
+	auto dst_value1 = (discard_result ? SpirvValue {} : operand_variable_to_str(inst.dst, 1));
 
-	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	if (!discard_result && dst_value0.type != SpirvType::Uint)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n");
+	}
 
 	String8 load0;
 	String8 load1;
@@ -57,8 +64,8 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
     <param1>
     <param2>
     <param3>
-    OpStore %<dst0> %tb_<index>
-    OpStore %<dst1> %td_<index>
+    <store0>
+    <store1>
     <execz>
     <scc>
 )";
@@ -74,6 +81,8 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B64_Sdst2Ssrc02Ssrc12)
 	                   .ReplaceStr("<param3>", (param[3] == nullptr ? "" : param[3]))
 	                   .ReplaceStr("<execz>", (operand_is_exec(inst.dst) ? EXECZ : ""))
 	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 2))
+	                   .ReplaceStr("<store0>", discard_result ? "" : String8("OpStore %<dst0> %tb_<index>").ReplaceStr("<dst0>", dst_value0.value))
+	                   .ReplaceStr("<store1>", discard_result ? "" : String8("OpStore %<dst1> %td_<index>").ReplaceStr("<dst1>", dst_value1.value))
 	                   .ReplaceStr("<dst0>", dst_value0.value)
 	                   .ReplaceStr("<dst1>", dst_value1.value)
 	                   .ReplaceStr("<index>", index_str);
@@ -301,14 +310,19 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B32_SVdstSVsrc0SVsrc1)
 	String8 load1;
 
 	String8 index_str = String8::FromPrintf("%u", index);
+	const bool discard_result = inst.type == ShaderInstructionType::SCmovB32 && inst.dst.type == ShaderOperandType::Null;
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
+	if (!operand_is_variable(inst.dst) && !discard_result)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n");
+	}
 
-	auto dst_value = operand_variable_to_str(inst.dst);
+	auto dst_value = (discard_result ? SpirvValue {} : operand_variable_to_str(inst.dst));
 
-	if (dst_value.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n"); }
-	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
-
+	if (!discard_result && dst_value.type != SpirvType::Uint)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Uint condition ignored (continuing)\n");
+	}
 	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
 		return false;
@@ -324,7 +338,8 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B32_SVdstSVsrc0SVsrc1)
               <param0>
               <param1>
               <param2>
-              OpStore %<dst> %t_<index>
+              <store>
+              <execz>
               <scc>
 )";
 	*dst_source += String8(text)
@@ -333,6 +348,8 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B32_SVdstSVsrc0SVsrc1)
 	                   .ReplaceStr("<param0>", param[0])
 	                   .ReplaceStr("<param1>", (param[1] == nullptr ? "" : param[1]))
 	                   .ReplaceStr("<param2>", (param[2] == nullptr ? "" : param[2]))
+	                   .ReplaceStr("<store>", discard_result ? "" : String8("OpStore %<dst> %t_<index>").ReplaceStr("<dst>", dst_value.value))
+	                   .ReplaceStr("<execz>", (operand_is_exec(inst.dst) ? EXECZ : ""))
 	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 1))
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);

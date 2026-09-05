@@ -1020,12 +1020,12 @@ static void ReclaimCompletedHostContextRequests()
 }
 #endif
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 static int HostContextSignal()
 {
 	return SIGRTMIN + 6;
 }
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 // Linux does not place FSBASE/GSBASE in the public x86_64 gregset. The
 // exception is delivered on the interrupted guest thread, so ARCH_GET_* reads
 // the exact TLS bases that the PS5 callback must see in its ucontext.
@@ -1036,7 +1036,6 @@ static uint64_t ReadHostSegmentBase(int selector)
 	uint64_t value = 0;
 	return (::syscall(SYS_arch_prctl, selector, &value) == 0 ? value : 0);
 }
-#endif
 
 static void CopyHostContext(SignalMcontext* guest, const ucontext_t* host)
 {
@@ -1061,13 +1060,10 @@ static void CopyHostContext(SignalMcontext* guest, const ucontext_t* host)
 	guest->mc_rip    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RIP]);
 	guest->mc_rflags = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_EFL]);
 	guest->mc_rsp    = static_cast<uint64_t>(host->uc_mcontext.gregs[REG_RSP]);
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	guest->mc_fsbase = ReadHostSegmentBase(ARCH_GET_FS);
 	guest->mc_gsbase = ReadHostSegmentBase(ARCH_GET_GS);
-#endif
 }
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 [[noreturn]] static void HostContextTrampoline(HostContextRequest* request)
 {
 	HostContextTrace("trampoline_enter", request->trace_id, request, nullptr, request->handler, 0);

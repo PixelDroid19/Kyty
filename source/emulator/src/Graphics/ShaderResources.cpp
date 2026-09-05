@@ -15,6 +15,94 @@
 
 namespace Kyty::Libs::Graphics {
 
+int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
+	                                        int user_data_register_base)
+{
+	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8)
+	{
+		return -1;
+	}
+	const int texture_register = inst.src[1].register_id;
+	for (int index = 0; index < bind.textures2D.textures_num; ++index)
+	{
+		const auto& descriptor = bind.textures2D.desc[index];
+		if (descriptor.usage == ShaderTextureUsage::ReadOnly && !descriptor.dynamic_sload &&
+		    descriptor.start_register + user_data_register_base == texture_register)
+		{
+			return index;
+		}
+	}
+	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
+	{
+		if (bind.dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::Texture ||
+		    bind.dynamic_sloads.destination_register[mapping] != texture_register ||
+		    inst.pc <= bind.dynamic_sloads.instruction_pc[mapping] || inst.pc > bind.dynamic_sloads.last_consumer_pc[mapping])
+		{
+			continue;
+		}
+		const int index = bind.dynamic_sloads.resource_index[mapping];
+		if (index >= 0 && index < bind.textures2D.textures_num && bind.textures2D.desc[index].usage == ShaderTextureUsage::ReadOnly)
+		{
+			return index;
+		}
+	}
+	return -1;
+}
+
+int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
+	                                 int user_data_register_base)
+{
+	if (inst.src_num < 3 || inst.src[2].type != ShaderOperandType::Sgpr || inst.src[2].size != 4)
+	{
+		return -1;
+	}
+	const int sampler_register = inst.src[2].register_id;
+	for (int index = 0; index < bind.samplers.samplers_num; ++index)
+	{
+		if (!bind.samplers.dynamic_sload[index] && bind.samplers.start_register[index] + user_data_register_base == sampler_register)
+		{
+			return index;
+		}
+	}
+	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
+	{
+		if (bind.dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::Sampler ||
+		    bind.dynamic_sloads.destination_register[mapping] != sampler_register ||
+		    inst.pc <= bind.dynamic_sloads.instruction_pc[mapping] || inst.pc > bind.dynamic_sloads.last_consumer_pc[mapping])
+		{
+			continue;
+		}
+		const int index = bind.dynamic_sloads.resource_index[mapping];
+		if (index >= 0 && index < bind.samplers.samplers_num)
+		{
+			return index;
+		}
+	}
+	return -1;
+}
+
+void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base)
+{
+	EXIT_IF(bind == nullptr);
+	for (int index = 0; index < bind->textures2D.textures_num; ++index)
+	{
+		bind->textures2D.desc[index].sampler_indices_mask = 0u;
+	}
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (!ShaderInstructionUsesImageSampler(inst.type))
+		{
+			continue;
+		}
+		const int texture_index = ShaderFindImageSampledTextureDescriptor(inst, *bind, user_data_register_base);
+		const int sampler_index = ShaderFindImageSamplerDescriptor(inst, *bind, user_data_register_base);
+		if (texture_index >= 0 && sampler_index >= 0 && sampler_index < 16)
+		{
+			bind->textures2D.desc[texture_index].sampler_indices_mask |= static_cast<uint16_t>(1u << sampler_index);
+		}
+	}
+}
+
 
 
 bool Gen5HasEudPointer(const ShaderUserData* user_data)

@@ -356,7 +356,7 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	//   - ufmt 56 (RGBA8): GuestMemoryTexture; MayGuestUpload always false (skip_guest
 	//     transparent clear — never detile GPU intermediates)
 	//   - ufmt 71 (RGBA16F): requires live RT (Unsupported without alias)
-	// tile 9 (kStandard64KB): ufmt 56/71; MayGuestUpload when uncovered
+	// tile 9 (kStandard64KB): ufmt 56/130/71; MayGuestUpload when uncovered
 	//
 	// Unsupported = no Texture object and no live alias → structured EXIT.
 	if (tile == 27u)
@@ -369,7 +369,7 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	}
 	if (tile == 9u)
 	{
-		if (fmt == 56u || fmt == 71u)
+		if (fmt == 56u || fmt == 71u || fmt == 130u)
 		{
 			return Gen5SampleBacking::GuestMemoryTexture;
 		}

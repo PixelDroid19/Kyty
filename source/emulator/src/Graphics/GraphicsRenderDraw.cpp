@@ -295,6 +295,57 @@ bool DispatchTextureExtentMatches(const ShaderComputeInputInfo& input, const cha
 	return false;
 }
 
+bool ShaderSamplesDepthAttachment(CommandBuffer* buffer, const RenderDepthInfo& depth, const ShaderBindResources& bind)
+{
+	if (buffer == nullptr || depth.vulkan_buffer == nullptr)
+	{
+		return false;
+	}
+	const bool gen5 = Config::IsNextGen();
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		const auto& descriptor = bind.textures2D.desc[i];
+		if (descriptor.usage != ShaderTextureUsage::ReadOnly)
+		{
+			continue;
+		}
+		const auto& resource = descriptor.texture;
+		if ((gen5 && resource.TileMode() != 24u) || (!gen5 && resource.TileMode() != 2u))
+		{
+			continue;
+		}
+		const uint64_t address = gen5 ? resource.Base40() : resource.Base38();
+		if (address == 0u)
+		{
+			continue;
+		}
+		const auto aliases = FindDepthStencil(buffer, address, 1u, false);
+		for (auto* alias: aliases)
+		{
+			if (alias == depth.vulkan_buffer)
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+DepthStencilAttachmentAccess ResolveDrawDepthStencilAccess(CommandBuffer* buffer, const RenderDepthInfo& depth,
+	                                                        const ShaderBindResources& vertex_bind,
+	                                                        const ShaderBindResources& pixel_bind)
+{
+	const bool sampled_in_same_draw = ShaderSamplesDepthAttachment(buffer, depth, vertex_bind) ||
+	                                  ShaderSamplesDepthAttachment(buffer, depth, pixel_bind);
+	const auto access = ResolveDepthStencilAttachmentAccess(
+	    depth, sampled_in_same_draw, g_render_ctx->GetGraphicCtx()->load_store_op_none_supported);
+	if (access == DepthStencilAttachmentAccess::Unsupported)
+	{
+		EXIT("same-draw depth sampling conflicts with attachment writes or missing store-op-none support\n");
+	}
+	return access;
+}
+
 } // namespace
 
 // DrawIndex, DrawIndexAuto, DispatchDirect, depth-stencil copy
@@ -1188,7 +1239,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
 	const auto pipeline_setup_start = DrawStageClock::now();
-	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
+	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind);
+	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
 
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
@@ -2107,7 +2159,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
 	const auto pipeline_setup_start = DrawStageClock::now();
-	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info);
+	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind);
+	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
 
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }

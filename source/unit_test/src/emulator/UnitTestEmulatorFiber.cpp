@@ -27,6 +27,22 @@ void EnsureLog()
 
 static KYTY_SYSV_ABI void DummyFiberEntry(uint64_t /*arg_init*/, uint64_t /*arg_run*/) {}
 
+struct FiberRoundTripState
+{
+	uint64_t initial_run_arg = 0;
+	uint64_t resumed_run_arg = 0;
+	int32_t  return_result   = FIBER_ERROR_INVALID;
+	uint32_t entry_count     = 0;
+};
+
+static KYTY_SYSV_ABI void RoundTripFiberEntry(uint64_t arg_init, uint64_t arg_run)
+{
+	auto* state = reinterpret_cast<FiberRoundTripState*>(arg_init);
+	state->entry_count++;
+	state->initial_run_arg = arg_run;
+	state->return_result   = FiberReturnToThread(0xa1u, &state->resumed_run_arg);
+}
+
 } // namespace
 
 TEST(EmulatorFiber, LayoutAndValidateArgs)
@@ -63,6 +79,33 @@ TEST(EmulatorFiber, InitializeFillsGuestObject)
 	EXPECT_STREQ(fiber.name, "boot");
 	EXPECT_EQ(*reinterpret_cast<uint64_t*>(stack), FIBER_STACK_MAGIC);
 	EXPECT_FALSE(fiber.context_valid);
+}
+
+TEST(EmulatorFiber, RunsReturnsAndResumesOnGuestStack)
+{
+	EnsureLog();
+
+	alignas(16) uint8_t stack[4096] {};
+	FiberObject         fiber {};
+	FiberRoundTripState state {};
+
+	ASSERT_EQ(FiberInitialize(&fiber, "round-trip", RoundTripFiberEntry, reinterpret_cast<uint64_t>(&state), stack,
+	                          sizeof(stack), nullptr, 0x03500000u),
+	          OK);
+
+	uint64_t return_arg = 0;
+	EXPECT_EQ(FiberRun(&fiber, 0xb1u, &return_arg), OK);
+	EXPECT_EQ(return_arg, 0xa1u);
+	EXPECT_EQ(state.entry_count, 1u);
+	EXPECT_EQ(state.initial_run_arg, 0xb1u);
+	EXPECT_EQ(state.return_result, FIBER_ERROR_INVALID);
+
+	return_arg = 0xffffu;
+	EXPECT_EQ(FiberRun(&fiber, 0xb2u, &return_arg), FIBER_ERROR_STATE);
+	EXPECT_EQ(return_arg, 0u);
+	EXPECT_EQ(state.entry_count, 1u);
+	EXPECT_EQ(state.resumed_run_arg, 0xb2u);
+	EXPECT_EQ(state.return_result, OK);
 }
 
 TEST(EmulatorFiber, ResolvesFiberExports)

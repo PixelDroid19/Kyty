@@ -12,6 +12,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -280,8 +281,97 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanIm
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
+bool NormalizeImageImageCopy(const ImageImageCopy& requested, const VulkanImage* dst_image, ImageImageCopy* normalized)
+{
+	if (requested.src_image == nullptr || dst_image == nullptr || normalized == nullptr || requested.width == 0u ||
+	    requested.height == 0u || requested.layer_count == 0u || requested.src_x < 0 || requested.src_y < 0 || requested.dst_x < 0 ||
+	    requested.dst_y < 0 || requested.src_level >= requested.src_image->mip_levels || requested.dst_level >= dst_image->mip_levels ||
+	    requested.src_image->physical_extent.width == 0u || requested.src_image->physical_extent.height == 0u ||
+	    dst_image->physical_extent.width == 0u || dst_image->physical_extent.height == 0u ||
+	    requested.src_array_layer >= requested.src_image->array_layers || requested.dst_array_layer >= dst_image->array_layers ||
+	    requested.layer_count > requested.src_image->array_layers - requested.src_array_layer ||
+	    requested.layer_count > dst_image->array_layers - requested.dst_array_layer)
+	{
+		return false;
+	}
+
+	const auto mip_extent = [](uint32_t extent, uint32_t level)
+	{
+		const uint32_t shifted = level < 32u ? extent >> level : 0u;
+		return std::max(1u, shifted);
+	};
+	const auto block_extent = [](VkFormat format)
+	{
+		switch (format)
+		{
+			case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+			case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+			case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+			case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+			case VK_FORMAT_BC2_UNORM_BLOCK:
+			case VK_FORMAT_BC2_SRGB_BLOCK:
+			case VK_FORMAT_BC3_UNORM_BLOCK:
+			case VK_FORMAT_BC3_SRGB_BLOCK:
+			case VK_FORMAT_BC4_UNORM_BLOCK:
+			case VK_FORMAT_BC4_SNORM_BLOCK:
+			case VK_FORMAT_BC5_UNORM_BLOCK:
+			case VK_FORMAT_BC5_SNORM_BLOCK:
+			case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+			case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+			case VK_FORMAT_BC7_UNORM_BLOCK:
+			case VK_FORMAT_BC7_SRGB_BLOCK: return VkExtent2D {4u, 4u};
+			default: return VkExtent2D {1u, 1u};
+		}
+	};
+	const uint32_t src_width  = mip_extent(requested.src_image->physical_extent.width, requested.src_level);
+	const uint32_t src_height = mip_extent(requested.src_image->physical_extent.height, requested.src_level);
+	const uint32_t dst_width  = mip_extent(dst_image->physical_extent.width, requested.dst_level);
+	const uint32_t dst_height = mip_extent(dst_image->physical_extent.height, requested.dst_level);
+	const auto     src_x      = static_cast<uint32_t>(requested.src_x);
+	const auto     src_y      = static_cast<uint32_t>(requested.src_y);
+	const auto     dst_x      = static_cast<uint32_t>(requested.dst_x);
+	const auto     dst_y      = static_cast<uint32_t>(requested.dst_y);
+	if (src_x >= src_width || src_y >= src_height || dst_x >= dst_width || dst_y >= dst_height)
+	{
+		return false;
+	}
+
+	*normalized             = requested;
+	const auto src_block    = block_extent(requested.src_image->format);
+	const auto dst_block    = block_extent(dst_image->format);
+	const bool scaled_block = src_block.width != dst_block.width || src_block.height != dst_block.height;
+	if (scaled_block)
+	{
+		// This is the one format-size conversion currently constructed by the
+		// renderer: one 128-bit storage texel carries one 4x4 BC3 block.
+		if (requested.src_image->format != VK_FORMAT_R32G32B32A32_UINT || dst_image->format != VK_FORMAT_BC3_UNORM_BLOCK ||
+		    requested.width > src_width - src_x || requested.height > src_height - src_y)
+		{
+			return false;
+		}
+		const bool source_aligned = src_x % src_block.width == 0u && src_y % src_block.height == 0u &&
+		                            (requested.width % src_block.width == 0u || src_x + requested.width == src_width) &&
+		                            (requested.height % src_block.height == 0u || src_y + requested.height == src_height);
+		const bool destination_aligned = dst_x % dst_block.width == 0u && dst_y % dst_block.height == 0u;
+		const uint64_t destination_width =
+		    ((static_cast<uint64_t>(requested.width) + src_block.width - 1u) / src_block.width) * dst_block.width;
+		const uint64_t destination_height =
+		    ((static_cast<uint64_t>(requested.height) + src_block.height - 1u) / src_block.height) * dst_block.height;
+		if (!source_aligned || !destination_aligned || destination_width > dst_width - dst_x || destination_height > dst_height - dst_y)
+		{
+			return false;
+		}
+		return true;
+	}
+
+	normalized->width  = std::min({requested.width, src_width - src_x, dst_width - dst_x});
+	normalized->height = std::min({requested.height, src_height - src_y, dst_height - dst_y});
+	return normalized->width != 0u && normalized->height != 0u;
+}
+
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout)
 {
+	EXIT_IF(buffer == nullptr);
 	EXIT_IF(dst_image == nullptr);
 	EXIT_IF(dst_image->image == nullptr);
 
@@ -295,9 +385,18 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 	set_image_layout(vk_buffer, dst_image, 0, VK_REMAINING_MIP_LEVELS, VK_IMAGE_ASPECT_COLOR_BIT, UtilGetImageUploadSourceLayout(dst_image),
 	                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	for (const auto& r: regions)
+	for (const auto& requested: regions)
 	{
-		VkImageCopy region;
+		ImageImageCopy r {};
+		if (!NormalizeImageImageCopy(requested, dst_image, &r))
+		{
+			EXIT("invalid image copy region: src_level=%u dst_level=%u src_offset=%d,%d dst_offset=%d,%d extent=%ux%u "
+			     "src_layer=%u dst_layer=%u layers=%u\n",
+			     requested.src_level, requested.dst_level, requested.src_x, requested.src_y, requested.dst_x, requested.dst_y,
+			     requested.width, requested.height, requested.src_array_layer, requested.dst_array_layer, requested.layer_count);
+		}
+
+		VkImageCopy region {};
 
 		auto src_layout = r.src_image->layout;
 

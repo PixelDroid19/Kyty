@@ -27,6 +27,7 @@ inline constexpr const char* kCodeGraphicsInit          = "graphics_init";
 inline constexpr const char* kCodeGraphicsStencilFrontier = "gfx_stencil_frontier";
 inline constexpr const char* kCodeGraphicsStorageFrontier = "gfx_storage_frontier";
 inline constexpr const char* kCodeGraphicsStorageRange = "gfx_storage_range";
+inline constexpr const char* kCodeGraphicsStorageEudSnapshot = "gfx_storage_eud_snapshot";
 inline constexpr const char* kCodeFirstFrame            = "first_frame";
 inline constexpr const char* kCodeFirstPresent          = "first_present";
 inline constexpr const char* kCodeInputReady            = "input_ready";
@@ -129,6 +130,37 @@ struct StorageRangeContext
 	uint32_t                 descriptor_words[4] = {};
 };
 
+// Bounded correlation between the descriptor captured during shader resource
+// analysis and the same EUD slot at descriptor-bind time. It is diagnostic
+// only: no live word is substituted into the binding.
+struct StorageEudSnapshotContext
+{
+	uint64_t submit_id             = 0;
+	uint64_t eud_table_base        = 0;
+	uint64_t eud_descriptor_address = 0;
+	uint64_t live_base             = 0;
+	uint64_t live_declared_size    = 0;
+	uint64_t live_materialized_size = 0;
+	uint32_t stage                 = 0;
+	uint32_t captured_fingerprint  = 0;
+	uint32_t live_fingerprint      = 0;
+	uint32_t eud_object_count      = 0;
+	uint32_t eud_object_type       = 0;
+	uint64_t eud_object_submit_id  = 0;
+	int      resource_index        = 0;
+	int      sgpr                  = 0;
+	int      slot                  = 0;
+	int      eud_user_sgpr_num     = 0;
+	uint16_t eud_size_dw           = 0;
+	int      eud_offset_base       = 0;
+	bool     pointer_valid         = false;
+	bool     readable              = false;
+	bool     changed               = false;
+	bool     eud_object_in_use     = false;
+	bool     eud_object_write_back = false;
+	bool     eud_dependencies_complete = false;
+};
+
 // Read-only publish edge: never wakes guest sync or mutates execution.
 // Sanitizes message (strips absolute host path prefixes) before ring push.
 void Emit(EventKind kind, const char* code, const char* message);
@@ -149,6 +181,7 @@ void EmitStorageFrontier(const StorageFrontierContext& context);
 void EmitStorageFrontierFatal(const StorageFrontierContext& context);
 void EmitStorageRange(const StorageRangeContext& context);
 void EmitStorageRangeFatal(const StorageRangeContext& context);
+void EmitStorageEudSnapshot(const StorageEudSnapshotContext& context);
 void EmitFirstFrame(int frame);
 void EmitFirstPresent(uint64_t present);
 void EmitInputReady();

@@ -97,7 +97,7 @@ KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 {
 	if (character > 0x7f)
 	{
-		if (character > 0x7f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+		EXIT_NOT_IMPLEMENTED(character > 0x7f);
 		return 0;
 	}
 
@@ -106,7 +106,7 @@ KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 	// change guest control flow without an established ABI contract.
 	if (character_class != 2)
 	{
-		if (character_class != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+		EXIT_NOT_IMPLEMENTED(character_class != 2);
 		return 0;
 	}
 

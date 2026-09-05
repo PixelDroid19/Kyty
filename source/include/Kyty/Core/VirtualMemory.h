@@ -177,6 +177,10 @@ bool           IsRangeReadable(uint64_t address, uint64_t size);
 // protection permits writes. The range must also be guest-owned. It does not
 // probe memory or install a fault guard.
 bool           IsRangeWritable(uint64_t address, uint64_t size);
+using ReadableGuestRangeVisitor = bool (*)(const void* data, uint64_t size, void* context);
+// Validate and visit a readable guest-owned range while Free() and protection
+// changes are excluded. The visitor must not call virtual-memory APIs.
+bool VisitReadableGuestRange(uint64_t address, uint64_t size, ReadableGuestRangeVisitor visitor, void* context);
 // Copy while holding the virtual-memory tracker lock across range validation
 // and the copy. This serializes the transfer with Free() and Protect().
 bool           CopyFromGuest(void* destination, uint64_t source, uint64_t size);
