@@ -419,6 +419,24 @@ struct ProvenanceContractStorageGpuObject final: public GpuObject
 
 void VerifyRenderTargetIndexAliasContract()
 {
+	GpuMap2 candidate_index;
+	candidate_index.Insert(0x200010u, 0x10u, 7);
+	candidate_index.Insert(0x200020u, 0x10u, 7);
+	candidate_index.Insert(0x2ffff0u, 0x20u, 9);
+	auto retained_candidates = candidate_index.FindAll(0x200000u, 0x100u);
+	Expect(retained_candidates.Size() == 2u && retained_candidates.Contains(7) && retained_candidates.Contains(9),
+	       "single-bucket candidates are unique and still include bucket false positives");
+	candidate_index.Erase(0x200010u, 0x10u, 7);
+	Expect(retained_candidates.Size() == 2u && retained_candidates.Contains(7),
+	       "retained candidate result survives index mutation");
+	retained_candidates.Add(11);
+	const auto current_candidates = candidate_index.FindAll(0x200000u, 0x100u);
+	Expect(current_candidates.Size() == 1u && current_candidates.Contains(9) && !current_candidates.Contains(11),
+	       "caller mutation cannot change the indexed candidate bucket");
+	const auto spanning_candidates = candidate_index.FindAll(0x2ffff0u, 0x20u);
+	Expect(spanning_candidates.Size() == 1u && spanning_candidates.Contains(9),
+	       "multi-bucket queries still deduplicate spanning objects");
+	Expect(candidate_index.FindAll(0x400000u, 0x10u).IsEmpty(), "absent bucket has no candidates");
 	GpuWriteHistoryConfigureForTesting(0x4000u, 0x100u);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaData, 0x2000u, 0x20u, 1u, 0u, 0u);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::WriteData, 0x4040u, 0x20u, 2u, 0u, 0u);

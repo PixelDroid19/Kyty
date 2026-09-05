@@ -158,6 +158,12 @@ public:
 		auto first_page = CalcPageId(vaddr);
 		auto last_page  = CalcPageId(vaddr + size - 1);
 		EXIT_IF(last_page < first_page);
+		if (first_page == last_page)
+		{
+			// Insert keeps each bucket unique. Vector copies share immutable data
+			// until mutation, so this preserves a stable result without rebuilding it.
+			return m_map.Get(first_page);
+		}
 		for (auto page = first_page; page <= last_page; page++)
 		{
 			for (int id: m_map.Get(page))

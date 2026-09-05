@@ -3929,6 +3929,9 @@ TEST(EmulatorGraphicsState, AllowsMixedTextureIndexStorageParents)
 	// A StorageBuffer may cross an IndexBuffer and other read-only storage views.
 	EXPECT_TRUE(GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
 	                                             GpuMemoryObjectType::StorageBuffer));
+	// Exact IB/storage views are independent bindings over the same guest bytes.
+	EXPECT_TRUE(GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Equals,
+	                                             GpuMemoryObjectType::StorageBuffer));
 	EXPECT_TRUE(
 	    GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses, GpuMemoryObjectType::StorageBuffer));
 	EXPECT_TRUE(GpuMemoryAllowsStorageParent(GpuMemoryObjectType::StorageBuffer, GpuMemoryOverlapType::Crosses,
@@ -4700,12 +4703,12 @@ TEST(EmulatorGraphicsState, DefaultSwapchainPrefersLdrSrgbOverHdr10First)
 	    {VK_FORMAT_B8G8R8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
 	};
 	const auto chosen = SelectDefaultSwapchainSurfaceFormat(formats, 3u);
-	EXPECT_EQ(chosen.format, VK_FORMAT_B8G8R8A8_UNORM);
+	EXPECT_EQ(chosen.format, VK_FORMAT_B8G8R8A8_SRGB);
 	EXPECT_EQ(chosen.colorSpace, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
 	EXPECT_FALSE(VulkanColorSpaceIsHostHdr(chosen.colorSpace));
 }
 
-TEST(EmulatorGraphicsState, DefaultSwapchainPrefersUnormSrgbOverSrgbFormat)
+TEST(EmulatorGraphicsState, DefaultSwapchainPreservesSrgbBlitEncoding)
 {
 	using namespace Kyty::Libs::Graphics;
 	const VkSurfaceFormatKHR formats[] = {
@@ -4713,8 +4716,15 @@ TEST(EmulatorGraphicsState, DefaultSwapchainPrefersUnormSrgbOverSrgbFormat)
 	    {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
 	};
 	const auto chosen = SelectDefaultSwapchainSurfaceFormat(formats, 2u);
-	EXPECT_EQ(chosen.format, VK_FORMAT_B8G8R8A8_UNORM);
+	EXPECT_EQ(chosen.format, VK_FORMAT_B8G8R8A8_SRGB);
 	EXPECT_EQ(chosen.colorSpace, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
+	const VkSurfaceFormatKHR rgba_formats[] = {
+	    {VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	    {VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
+	};
+	const auto rgba_chosen = SelectDefaultSwapchainSurfaceFormat(rgba_formats, 2u);
+	EXPECT_EQ(rgba_chosen.format, VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(rgba_chosen.colorSpace, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR);
 }
 
 TEST(EmulatorGraphicsState, ResolvesContiguousMultiRenderTargetLayout)
