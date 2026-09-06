@@ -4,6 +4,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DescriptorBufferInvalidation.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -1942,6 +1943,26 @@ TEST(EmulatorGraphicsState, DescriptorBufferReferenceFindsStorageAndVsharpRanges
 	EXPECT_TRUE(VulkanDescriptorReferencesBuffer(storage, 2, true, vsharp_large, 7u));
 	EXPECT_FALSE(VulkanDescriptorReferencesBuffer(storage, 2, false, vsharp_small, 7u));
 	EXPECT_FALSE(VulkanDescriptorReferencesBuffer(storage, 2, true, vsharp_small, 11u));
+}
+
+TEST(EmulatorGraphicsState, DescriptorInvalidationKeepsShaderVisibleAndUnknownBufferUsages)
+{
+	const VkBufferUsageFlags non_descriptor[] = {
+	    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+	    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+	    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+	    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+	};
+	for (const auto usage: non_descriptor)
+	{
+		EXPECT_FALSE(VulkanBufferNeedsDescriptorInvalidation(usage));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | 0x80000000u));
+	}
+	EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(0u));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryAccumulatesWriteIntentUntilWriteBack)
