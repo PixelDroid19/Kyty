@@ -130,58 +130,63 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 	const uint32_t retire_batch_limit    = GpuMemoryRetirementBatchLimit(m_transient_creates_since_retirement);
 	m_transient_creates_since_retirement = 0;
 	uint32_t retired                     = 0;
-	uint32_t linked_scan_budget           = 2048u;
-	int      heap_id                     = 0;
-	for (auto& heap: m_heaps)
+	uint32_t linked_scan_budget          = 2048u;
+	// Resume after the last examined slot. A truncated component must not
+	// spend every pass's budget before later complete components are reached.
+	// Cursors are positions, not identities; normalize after heap removal.
+	uint32_t heaps_remaining  = m_heaps.Size();
+	uint32_t visits_remaining = 4096u;
+	while (heaps_remaining != 0 && visits_remaining != 0 && retired < retire_batch_limit && linked_scan_budget != 0)
 	{
-		int object_id = 0;
-		for (auto& h: heap.objects)
+		visits_remaining--;
+		if (m_retirement_heap_cursor >= m_heaps.Size())
 		{
-			if (retired >= retire_batch_limit)
-			{
-				break;
-			}
-			if (h.free || h.scenario != GpuMemoryScenario::Common)
-			{
-				object_id++;
-				continue;
-			}
-			if (!h.others.IsEmpty())
-			{
-				Vector<int> component;
-				if (h.info.object.type == GpuMemoryObjectType::StorageBuffer &&
-				    CollectRetireableLinkedBufferComponent(heap_id, object_id, kRetireAfterFrames, &linked_scan_budget, &component) &&
-				    component.Size() <= retire_batch_limit - retired)
-				{
-					for (int component_id: component)
-					{
-						destructors.Add(Free(heap_id, component_id));
-					}
-					retired += component.Size();
-				}
-				object_id++;
-				continue;
-			}
-
-			auto&      object           = h.info;
-			const bool reclaimable_type = object.object.type == GpuMemoryObjectType::Texture ||
-			                              object.object.type == GpuMemoryObjectType::StorageTexture ||
-			                              object.object.type == GpuMemoryObjectType::StorageBuffer;
-			const bool storage_buffer_safe =
-			    object.object.type != GpuMemoryObjectType::StorageBuffer || object.write_back_func == nullptr || object.read_only;
-			const bool old_enough            = m_current_frame - object.use_last_frame >= kRetireAfterFrames;
-			const bool dependencies_complete = m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies());
-			if (reclaimable_type && storage_buffer_safe && old_enough && dependencies_complete)
-			{
-				destructors.Add(Free(heap_id, object_id));
-				retired++;
-			}
-			object_id++;
+			m_retirement_heap_cursor   = 0;
+			m_retirement_object_cursor = 0;
 		}
-		heap_id++;
-		if (retired >= retire_batch_limit)
+		auto& heap = m_heaps[m_retirement_heap_cursor];
+		if (m_retirement_object_cursor >= heap.objects.Size())
 		{
-			break;
+			m_retirement_heap_cursor++;
+			m_retirement_object_cursor = 0;
+			heaps_remaining--;
+			continue;
+		}
+		const int heap_id   = static_cast<int>(m_retirement_heap_cursor);
+		const int object_id = static_cast<int>(m_retirement_object_cursor++);
+		auto&     h         = heap.objects[object_id];
+		if (h.free || h.scenario != GpuMemoryScenario::Common)
+		{
+			continue;
+		}
+		if (!h.others.IsEmpty())
+		{
+			Vector<int> component;
+			if (h.info.object.type == GpuMemoryObjectType::StorageBuffer &&
+			    CollectRetireableLinkedBufferComponent(heap_id, object_id, kRetireAfterFrames, &linked_scan_budget, &component) &&
+			    component.Size() <= retire_batch_limit - retired)
+			{
+				for (int component_id: component)
+				{
+					destructors.Add(Free(heap_id, component_id));
+				}
+				retired += component.Size();
+			}
+			continue;
+		}
+
+		auto&      object           = h.info;
+		const bool reclaimable_type = object.object.type == GpuMemoryObjectType::Texture ||
+		                              object.object.type == GpuMemoryObjectType::StorageTexture ||
+		                              object.object.type == GpuMemoryObjectType::StorageBuffer;
+		const bool storage_buffer_safe =
+		    object.object.type != GpuMemoryObjectType::StorageBuffer || object.write_back_func == nullptr || object.read_only;
+		const bool old_enough            = m_current_frame - object.use_last_frame >= kRetireAfterFrames;
+		const bool dependencies_complete = m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies());
+		if (reclaimable_type && storage_buffer_safe && old_enough && dependencies_complete)
+		{
+			destructors.Add(Free(heap_id, object_id));
+			retired++;
 		}
 	}
 

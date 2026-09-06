@@ -15,10 +15,12 @@ struct StorageVulkanBuffer;
 class StorageBufferGpuObject: public GpuObject
 {
 public:
+	static constexpr uint32_t PARAM_INITIAL_READ_ONLY = 2;
 	StorageBufferGpuObject(uint64_t stride, uint64_t num_records, bool ronly)
 	{
 		params[0]  = stride;
 		params[1]  = num_records;
+		params[PARAM_INITIAL_READ_ONLY] = ronly ? 1u : 0u;
 		check_hash = true;
 		read_only  = ronly;
 		type       = Graphics::GpuMemoryObjectType::StorageBuffer;
@@ -32,6 +34,10 @@ public:
 	[[nodiscard]] delete_func_t              GetDeleteFunc() const override;
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
+
+// Establish the comparison baseline before the first writable use. The factory
+// guard excludes other implementations that share the storage object type.
+void StorageBufferPrepareWriteback(void* object, GpuObject::create_func_t factory);
 
 } // namespace Kyty::Libs::Graphics
 

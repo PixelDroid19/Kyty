@@ -478,6 +478,8 @@ private:
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;
 	uint32_t m_transient_creates_since_retirement = 0;
+	uint32_t m_retirement_heap_cursor            = 0;
+	uint32_t m_retirement_object_cursor          = 0;
 
 	MaterializationCache m_materialization_cache;
 	AllocatedValidationCache m_allocated_validation_cache;

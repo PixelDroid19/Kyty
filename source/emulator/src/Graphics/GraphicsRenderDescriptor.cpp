@@ -11,6 +11,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/DescriptorBufferInvalidation.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -1126,6 +1127,10 @@ void DescriptorCache::FreeDescriptor(VulkanBuffer* buffer)
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer == nullptr);
+	if (!VulkanBufferNeedsDescriptorInvalidation(buffer->usage))
+	{
+		return;
+	}
 
 	Core::LockGuard lock(m_mutex);
 

@@ -21,6 +21,7 @@ public:
 	explicit GpuWritebackPageCache(uint64_t page_size = 4096u): m_page_size(page_size) {}
 
 	void Reset(const void* source, uint64_t size);
+	[[nodiscard]] bool IsInitialized() const { return !m_snapshot.empty(); }
 
 	[[nodiscard]] GpuWritebackResult CopyChangedPages(void* guest_dst, const void* gpu_src, uint64_t size,
 	                                                 const uint64_t* hole_begin, const uint64_t* hole_end, int hole_count,
