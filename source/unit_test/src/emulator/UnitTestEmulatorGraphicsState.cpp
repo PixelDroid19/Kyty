@@ -1602,7 +1602,7 @@ TEST(EmulatorGraphicsState, GpuMemoryRetiresOnlyCompleteReadOnlyBufferComponents
 	delete[] guest;
 }
 
-TEST(EmulatorGraphicsState, GpuMemoryKeepsTruncatedLinkedBufferComponents)
+TEST(EmulatorGraphicsState, GpuMemoryRetirementReachesPastTruncatedComponents)
 {
 	EnsureGpuMemoryForTests();
 
@@ -1627,15 +1627,20 @@ TEST(EmulatorGraphicsState, GpuMemoryKeepsTruncatedLinkedBufferComponents)
 	ASSERT_NE(GpuMemoryCreateObject(parent_count + 1u, &ctx, nullptr, first_parent, combined_size,
 	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
 	          nullptr);
+	// This separate complete component must not starve behind the large one.
+	ASSERT_NE(GpuMemoryCreateObject(parent_count + 2u, &ctx, nullptr, base + 0x2000u, 0x100u,
+	                                TestGpuObject(GpuMemoryObjectType::VertexBuffer, true)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(parent_count + 3u, &ctx, nullptr, base + 0x2000u, 0x100u,
+	                                ReadOnlyWriteBackTestGpuObject()), nullptr);
 
 	const auto before = DebugStatsGetPerformanceSnapshot(false);
-	for (uint32_t i = 0; i < 150u; ++i)
+	for (uint32_t i = 0; i < 600u; ++i)
 	{
 		GpuMemoryFrameDone(&ctx);
 	}
 	const auto after = DebugStatsGetPerformanceSnapshot(false);
-	EXPECT_EQ(g_test_gpu_object_deletes, 0);
-	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free);
+	EXPECT_EQ(g_test_gpu_object_deletes, 2);
+	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free + 1u);
 
 	GpuMemoryFree(&ctx, base, heap_size);
 	delete[] guest;
