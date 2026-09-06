@@ -44,6 +44,17 @@ struct VulkanMemoryStat
 
 static VulkanMemoryStat* g_mem_stat = nullptr;
 
+uint64_t VulkanAllocatedBytes()
+{
+	if (g_mem_stat == nullptr) { return 0; }
+	uint64_t bytes = 0;
+	for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; ++i)
+	{
+		bytes += g_mem_stat->allocated[i].load(std::memory_order_relaxed);
+	}
+	return bytes;
+}
+
 void GpuMemoryVulkanStatsInit()
 {
 	g_mem_stat = new VulkanMemoryStat;
@@ -64,6 +75,7 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(mem->memory != nullptr);
+	EXIT_IF(ctx->allocate_memory == nullptr);
 	if (mem->requirements.size == 0)
 	{
 		mem->requirements.size = 4096;
@@ -82,6 +94,22 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 		}
 	}
 
+	EXIT_IF(index == memory_properties.memoryTypeCount);
+	const uint32_t required_index = index;
+	if (mem->preferred_property != 0u)
+	{
+		const auto preferred = mem->property | mem->preferred_property;
+		for (uint32_t candidate = 0u; candidate < memory_properties.memoryTypeCount; ++candidate)
+		{
+			if ((mem->requirements.memoryTypeBits & (uint32_t {1} << candidate)) != 0u &&
+			    (memory_properties.memoryTypes[candidate].propertyFlags & preferred) == preferred)
+			{
+				index = candidate;
+				break;
+			}
+		}
+	}
+
 	mem->type   = index;
 	mem->offset = 0;
 
@@ -94,7 +122,17 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 	mem->unique_id = ++seq;
 
 	const auto allocate_start = std::chrono::steady_clock::now();
-	auto       result         = vkAllocateMemory(ctx->device, &alloc_info, nullptr, &mem->memory);
+	auto       result         = ctx->allocate_memory(ctx->device, &alloc_info, nullptr, &mem->memory);
+	if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && index != required_index)
+	{
+		// A limited host-visible local heap must not make an optional placement
+		// preference fail an allocation that the ordinary local heap can serve.
+		index = required_index;
+		mem->type = index;
+		mem->memory = VK_NULL_HANDLE;
+		alloc_info.memoryTypeIndex = index;
+		result = ctx->allocate_memory(ctx->device, &alloc_info, nullptr, &mem->memory);
+	}
 	const auto allocate_ns =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - allocate_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanAllocate, static_cast<uint64_t>(allocate_ns),

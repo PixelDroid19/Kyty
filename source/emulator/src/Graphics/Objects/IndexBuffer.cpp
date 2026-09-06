@@ -4,10 +4,13 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/ExactStagingPool.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Profiler.h"
+
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -134,9 +137,8 @@ void IndexBufferDeleteAll(GraphicContext* ctx)
 	g_index_buffer_manager->DeleteAll(ctx);
 }
 
-// Device-local index buffers mirror VertexBuffer: create allocates GPU memory,
-// update re-uploads guest CPU bytes through a host-visible staging buffer.
-// GpuMemory calls update when a registered index range is dirtied after create.
+// Published backing retains its synchronized device-copy update path.
+// Direct host initialization is limited to fresh, unpublished allocations.
 static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr, const uint64_t* size,
                         int vaddr_num)
 {
@@ -172,12 +174,37 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	vk_obj->usage           = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 	vk_obj->memory.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+	vk_obj->memory.preferred_property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 	vk_obj->buffer          = nullptr;
 
 	VulkanCreateBuffer(ctx, *size, vk_obj);
 	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
 
-	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
+	VkPhysicalDeviceMemoryProperties properties {};
+	vkGetPhysicalDeviceMemoryProperties(ctx->physical_device, &properties);
+	constexpr auto host_flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	const bool host_coherent = vk_obj->memory.type < properties.memoryTypeCount &&
+	                           (properties.memoryTypes[vk_obj->memory.type].propertyFlags & host_flags) == host_flags;
+	bool initialized = false;
+	if (host_coherent)
+	{
+		void* mapped = nullptr;
+		const auto result = vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0u, &mapped);
+		if (result == VK_SUCCESS)
+		{
+			EXIT_IF(mapped == nullptr);
+			const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, *size);
+			std::memcpy(mapped, reinterpret_cast<const void*>(*vaddr), *size);
+			vkUnmapMemory(ctx->device, vk_obj->memory.memory);
+			// The first queue submission publishes these coherent host writes.
+			// No earlier command can reference this fresh buffer yet.
+			initialized = true;
+		}
+	}
+	if (!initialized)
+	{
+		update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
+	}
 
 	return vk_obj;
 }

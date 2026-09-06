@@ -8,12 +8,14 @@
 #include "Emulator/Agent/AgentServer.h"
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
@@ -5192,6 +5194,183 @@ private:
 	VkDescriptorSet       set      = VK_NULL_HANDLE;
 };
 
+uint32_t g_rejected_allocation_type = UINT32_MAX;
+uint32_t g_rejected_allocation_calls = 0u;
+
+VkResult VKAPI_CALL RejectPreferredAllocation(VkDevice device, const VkMemoryAllocateInfo* info,
+                                             const VkAllocationCallbacks* callbacks, VkDeviceMemory* memory)
+{
+	if (info->memoryTypeIndex == g_rejected_allocation_type)
+	{
+		g_rejected_allocation_calls++;
+		*memory = VK_NULL_HANDLE;
+		return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+	}
+	return vkAllocateMemory(device, info, callbacks, memory);
+}
+
+void VerifyIndexBufferInitialUpload()
+{
+	VulkanSamplerContext vulkan;
+	Expect(vulkan.Initialize(), "initial index upload initializes Vulkan");
+	GpuMemoryInit();
+	LabelInit();
+	IndexBufferInit();
+	HostNanRasterTarget target(&vulkan.context);
+	Expect(target.Create(), "index upload creates its raster control");
+	const auto vertex = CreateHostNanRasterShaderModule(vulkan.context.device, HostNanRasterVertexShaderSource(false),
+	                                                   "index upload vertex shader validates");
+	const auto fragment = CreateHostNanRasterShaderModule(vulkan.context.device, HostNanRasterFragmentShaderSource(),
+	                                                     "index upload fragment shader validates");
+	VkPipelineLayoutCreateInfo layout_info {};
+	layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	VkPipelineLayout layout = VK_NULL_HANDLE;
+	Expect(vkCreatePipelineLayout(vulkan.context.device, &layout_info, nullptr, &layout) == VK_SUCCESS,
+	       "index upload creates a pipeline layout");
+	const auto pipeline = CreateHostNanRasterPipeline(vulkan.context.device, target.render_pass, layout, vertex, fragment);
+	Expect(pipeline != VK_NULL_HANDLE, "index upload creates a raster pipeline");
+	VkQueryPoolCreateInfo query_info {};
+	query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+	query_info.queryType = VK_QUERY_TYPE_OCCLUSION;
+	query_info.queryCount = 1u;
+	VkQueryPool query = VK_NULL_HANDLE;
+	Expect(vkCreateQueryPool(vulkan.context.device, &query_info, nullptr, &query) == VK_SUCCESS,
+	       "index upload creates a bounded coverage query");
+	std::array<uint16_t, 3> values {0u, 1u, 2u};
+	std::array<uint16_t, 3> fallback_values {0u, 1u, 2u};
+	const uint64_t address = reinterpret_cast<uint64_t>(values.data());
+	const uint64_t fallback_address = reinterpret_cast<uint64_t>(fallback_values.data());
+	const uint64_t size = sizeof(values);
+	GpuMemorySetAllocatedRange(address, size);
+	VkPhysicalDeviceMemoryProperties properties {};
+	vkGetPhysicalDeviceMemoryProperties(vulkan.context.physical_device, &properties);
+	uint32_t legacy_type = properties.memoryTypeCount;
+	uint32_t preferred_type = properties.memoryTypeCount;
+	constexpr auto preferred_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+	                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+	VulkanBuffer* index = nullptr;
+	VkMemoryRequirements index_requirements {};
+	for (uint32_t pass = 0u; pass < 4u; ++pass)
+	{
+		const bool force_fallback = pass == 3u;
+		if (force_fallback)
+		{
+			if (preferred_type == properties.memoryTypeCount || legacy_type == preferred_type)
+			{
+				std::fprintf(stderr, "index_allocation_retry_integration=unavailable no distinct preferred type\n");
+				break;
+			}
+			GpuMemorySetAllocatedRange(fallback_address, size);
+			g_rejected_allocation_type = preferred_type;
+			g_rejected_allocation_calls = 0u;
+			vulkan.context.allocate_memory = RejectPreferredAllocation;
+		} else if (pass != 0u)
+		{
+			values = pass == 1u ? std::array<uint16_t, 3> {0u, 0u, 0u} : std::array<uint16_t, 3> {0u, 1u, 2u};
+		}
+		CommandBuffer commands(GraphicContext::QUEUE_GFX);
+		const SubmissionId submission {GpuQueueId {static_cast<uint32_t>(GraphicContext::QUEUE_GFX)}, pass + 1u};
+		commands.SetSubmissionId(submission);
+		commands.Begin();
+		(void)DebugStatsGetPerformanceSnapshot(true);
+		const auto bytes_before = VulkanAllocatedBytes();
+		auto* previous = index;
+		index = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(
+		    pass + 1u, &vulkan.context, &commands, force_fallback ? fallback_address : address, size, IndexBufferGpuObject()));
+		Expect(index != nullptr, "registry materializes guest indices");
+		vulkan.context.allocate_memory = vkAllocateMemory;
+		const auto stats = DebugStatsGetPerformanceSnapshot(false);
+		// This interval covers only materialization; no draw has been submitted.
+		const auto copies = stats.fence_waits;
+		if (pass == 0u)
+		{
+			index_requirements = index->memory.requirements;
+			for (uint32_t i = 0u; i < properties.memoryTypeCount; ++i)
+			{
+				if ((index_requirements.memoryTypeBits & (1u << i)) == 0u) { continue; }
+				if (legacy_type == properties.memoryTypeCount &&
+				    (properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0u)
+				{
+					legacy_type = i;
+				}
+				if (preferred_type == properties.memoryTypeCount &&
+				    (properties.memoryTypes[i].propertyFlags & preferred_flags) == preferred_flags)
+				{
+					preferred_type = i;
+				}
+			}
+			const bool coherent_placement = index->memory.type < properties.memoryTypeCount &&
+			    (properties.memoryTypes[index->memory.type].propertyFlags & preferred_flags) == preferred_flags;
+			Expect(copies == 1u || (copies == 0u && coherent_placement),
+			       "fresh indices use either coherent direct initialization or one synchronized fallback copy");
+			std::fprintf(stderr, "index_initial_upload_path=%s\n", copies == 0u ? "direct" : "staged");
+			std::fprintf(stderr, "index_initial_direct_coverage=%s\n", copies == 0u ? "exercised" : "not exercised");
+		} else if (force_fallback)
+		{
+			Expect(g_rejected_allocation_calls == 1u && index->memory.type == legacy_type && copies == 1u,
+			       "fresh index allocation retries the ordinary type and initializes it with one staged copy");
+			Expect(VulkanAllocatedBytes() == bytes_before + index->memory.requirements.size,
+			       "failed preferred allocation is not counted and the existing staging allocation is reused");
+		} else
+		{
+			Expect(index == previous && copies == 1u,
+			       "registry updates of completed published indices retain the synchronized copy path");
+		}
+		Expect(stats.upload_bytes == size, "each index initialization or update uploads its bytes exactly once");
+		auto vk_commands = commands.GetPool()->buffers[commands.GetIndex()];
+		vkCmdResetQueryPool(vk_commands, query, 0u, 1u);
+		VkRenderPassBeginInfo begin {};
+		begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+		begin.renderPass = target.render_pass;
+		begin.framebuffer = target.framebuffer;
+		begin.renderArea.extent = {HostNanRasterTarget::kExtent, HostNanRasterTarget::kExtent};
+		vkCmdBeginRenderPass(vk_commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+		vkCmdBindPipeline(vk_commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+		vkCmdBindIndexBuffer(vk_commands, index->buffer, 0u, VK_INDEX_TYPE_UINT16);
+		vkCmdBeginQuery(vk_commands, query, 0u, 0u);
+		vkCmdDrawIndexed(vk_commands, 3u, 1u, 0u, 0, 0u);
+		vkCmdEndQuery(vk_commands, query, 0u);
+		vkCmdEndRenderPass(vk_commands);
+		commands.End();
+		commands.Execute();
+		Expect(CompleteFenceWithoutBlockingSleep(&commands), "index draw fence completes");
+		GpuMemoryCompleteSubmission(submission);
+		uint64_t samples = 0u;
+		Expect(vkGetQueryPoolResults(vulkan.context.device, query, 0u, 1u, sizeof(samples), &samples, sizeof(samples),
+		                            VK_QUERY_RESULT_64_BIT) == VK_SUCCESS, "index coverage is available after its fence");
+		Expect((samples != 0u) == (pass != 1u), "GPU reads distinguish triangle, degenerate update and restored triangle");
+		if (force_fallback)
+		{
+			GpuMemoryFree(&vulkan.context, fallback_address, size);
+			std::fprintf(stderr, "index_allocation_retry_integration=passed\n");
+		}
+	}
+	if (preferred_type != properties.memoryTypeCount && legacy_type != preferred_type)
+	{
+		VulkanMemory allocation {};
+		allocation.requirements = index_requirements;
+		allocation.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		allocation.preferred_property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		g_rejected_allocation_calls = 0u;
+		vulkan.context.allocate_memory = RejectPreferredAllocation;
+		allocation.requirements.memoryTypeBits = 1u << legacy_type;
+		Expect(VulkanAllocate(&vulkan.context, &allocation) && allocation.type == legacy_type && g_rejected_allocation_calls == 0u,
+		       "a disallowed preferred type uses the permitted required-only type without attempting it");
+		VulkanFree(&vulkan.context, &allocation);
+		vulkan.context.allocate_memory = vkAllocateMemory;
+	}
+	GpuMemoryFree(&vulkan.context, address, size);
+	IndexBufferDeleteAll(&vulkan.context);
+	Expect(VulkanAllocatedBytes() == 0u, "index initialization and updates release their tracked allocations");
+	vkDestroyQueryPool(vulkan.context.device, query, nullptr);
+	vkDestroyPipeline(vulkan.context.device, pipeline, nullptr);
+	vkDestroyPipelineLayout(vulkan.context.device, layout, nullptr);
+	vkDestroyShaderModule(vulkan.context.device, fragment, nullptr);
+	vkDestroyShaderModule(vulkan.context.device, vertex, nullptr);
+	std::fprintf(stderr, "index_map_failure_injection=not exercised\n");
+	std::fprintf(stderr, "index_initial_upload_integration=passed\n");
+}
+
 void VerifyEventWriteExecutionContract()
 {
 	VulkanSamplerContext vulkan;
@@ -5319,6 +5498,11 @@ void VerifyComparisonSamplerCacheIdentity()
 int main(int argc, char** argv)
 {
 	InitializeGraphicsConfig();
+	if (argc == 2 && std::strcmp(argv[1], "--index-initial-upload-only") == 0)
+	{
+		VerifyIndexBufferInitialUpload();
+		return 0;
+	}
 	VerifyRenderTargetLifetimeAgentArmServerPublication();
 	VerifyRenderTargetLifetimeAgentArmGate();
 	VerifyRenderTargetLifetimeDepthFilter();
