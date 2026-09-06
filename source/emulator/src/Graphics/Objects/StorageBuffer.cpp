@@ -14,27 +14,29 @@
 
 namespace Kyty::Libs::Graphics {
 
-static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr, const uint64_t* size,
+static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size,
                         int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::update_func");
 
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(obj == nullptr);
+	EXIT_IF(params == nullptr);
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num != 1);
 
 	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
 
 	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, *size);
-	void*                      data = nullptr;
-	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
-	VulkanMapMemory(ctx, &vk_obj->memory, &data);
-	memcpy(data, reinterpret_cast<void*>(*vaddr), *size);
-	vk_obj->writeback_cache.Reset(data, *size);
+	EXIT_IF(vk_obj->mapped == nullptr);
+	memcpy(vk_obj->mapped, reinterpret_cast<void*>(*vaddr), *size);
+	// Only proven non-writing uses may omit the baseline. Unknown access is
+	// writable; after promotion retain the snapshot for this backing's lifetime.
+	if (params[StorageBufferGpuObject::PARAM_INITIAL_READ_ONLY] == 0u || vk_obj->writeback_cache.IsInitialized())
+	{
+		vk_obj->writeback_cache.Reset(vk_obj->mapped, *size);
+	}
 	// HTILE clears often arrive through GpuMemory Update before the world draw.
-	(void)DepthMetaObserveStorageWrite(vk_obj->depth_meta_addr, data, *size);
-	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
-	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	(void)DepthMetaObserveStorageWrite(vk_obj->depth_meta_addr, vk_obj->mapped, *size);
 }
 
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
@@ -58,10 +60,26 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	VulkanCreateBuffer(ctx, *size, vk_obj);
 	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
+	VulkanMapMemory(ctx, &vk_obj->memory, &vk_obj->mapped);
+	EXIT_IF(vk_obj->mapped == nullptr);
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 
 	return vk_obj;
+}
+
+void StorageBufferPrepareWriteback(void* object, GpuObject::create_func_t factory)
+{
+	if (factory != create_func)
+	{
+		return;
+	}
+	auto* storage = static_cast<StorageVulkanBuffer*>(object);
+	EXIT_IF(storage == nullptr || storage->mapped == nullptr || storage->guest_size == 0u);
+	if (!storage->writeback_cache.IsInitialized())
+	{
+		storage->writeback_cache.Reset(storage->mapped, storage->guest_size);
+	}
 }
 
 static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
@@ -73,7 +91,10 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	EXIT_IF(vk_obj == nullptr);
 	EXIT_IF(vk_obj->buffer == nullptr);
 	EXIT_IF(ctx == nullptr);
+	EXIT_IF(vk_obj->mapped == nullptr);
 
+	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	vk_obj->mapped = nullptr;
 	VulkanDeleteBuffer(ctx, vk_obj);
 
 	delete vk_obj;
@@ -90,12 +111,8 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 
 	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
 
-	void* data = nullptr;
-
-	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::vkMapMemory");
-	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
-	VulkanMapMemory(ctx, &vk_obj->memory, &data);
-	KYTY_PROFILER_END_BLOCK;
+	void* data = vk_obj->mapped;
+	EXIT_IF(data == nullptr);
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::memcpy");
 	const auto result =
@@ -110,10 +127,6 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 	}
 	KYTY_PROFILER_END_BLOCK;
 
-	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::vkUnmapMemory");
-	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
-	VulkanUnmapMemory(ctx, &vk_obj->memory);
-	KYTY_PROFILER_END_BLOCK;
 	return result;
 }
 

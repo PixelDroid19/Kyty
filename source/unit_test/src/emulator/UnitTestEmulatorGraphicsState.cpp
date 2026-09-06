@@ -4,6 +4,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DescriptorBufferInvalidation.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -1602,7 +1603,7 @@ TEST(EmulatorGraphicsState, GpuMemoryRetiresOnlyCompleteReadOnlyBufferComponents
 	delete[] guest;
 }
 
-TEST(EmulatorGraphicsState, GpuMemoryKeepsTruncatedLinkedBufferComponents)
+TEST(EmulatorGraphicsState, GpuMemoryRetirementReachesPastTruncatedComponents)
 {
 	EnsureGpuMemoryForTests();
 
@@ -1627,15 +1628,20 @@ TEST(EmulatorGraphicsState, GpuMemoryKeepsTruncatedLinkedBufferComponents)
 	ASSERT_NE(GpuMemoryCreateObject(parent_count + 1u, &ctx, nullptr, first_parent, combined_size,
 	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
 	          nullptr);
+	// This separate complete component must not starve behind the large one.
+	ASSERT_NE(GpuMemoryCreateObject(parent_count + 2u, &ctx, nullptr, base + 0x2000u, 0x100u,
+	                                TestGpuObject(GpuMemoryObjectType::VertexBuffer, true)), nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(parent_count + 3u, &ctx, nullptr, base + 0x2000u, 0x100u,
+	                                ReadOnlyWriteBackTestGpuObject()), nullptr);
 
 	const auto before = DebugStatsGetPerformanceSnapshot(false);
-	for (uint32_t i = 0; i < 150u; ++i)
+	for (uint32_t i = 0; i < 600u; ++i)
 	{
 		GpuMemoryFrameDone(&ctx);
 	}
 	const auto after = DebugStatsGetPerformanceSnapshot(false);
-	EXPECT_EQ(g_test_gpu_object_deletes, 0);
-	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free);
+	EXPECT_EQ(g_test_gpu_object_deletes, 2);
+	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free + 1u);
 
 	GpuMemoryFree(&ctx, base, heap_size);
 	delete[] guest;
@@ -1938,6 +1944,26 @@ TEST(EmulatorGraphicsState, DescriptorBufferReferenceFindsStorageAndVsharpRanges
 	EXPECT_TRUE(VulkanDescriptorReferencesBuffer(storage, 2, true, vsharp_large, 7u));
 	EXPECT_FALSE(VulkanDescriptorReferencesBuffer(storage, 2, false, vsharp_small, 7u));
 	EXPECT_FALSE(VulkanDescriptorReferencesBuffer(storage, 2, true, vsharp_small, 11u));
+}
+
+TEST(EmulatorGraphicsState, DescriptorInvalidationKeepsShaderVisibleAndUnknownBufferUsages)
+{
+	const VkBufferUsageFlags non_descriptor[] = {
+	    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+	    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+	    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+	    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+	};
+	for (const auto usage: non_descriptor)
+	{
+		EXPECT_FALSE(VulkanBufferNeedsDescriptorInvalidation(usage));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | 0x80000000u));
+	}
+	EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(0u));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryAccumulatesWriteIntentUntilWriteBack)
@@ -4481,6 +4507,44 @@ TEST(EmulatorGraphicsState, MemcpySkipAbsoluteRangesPreservesFenceHoles)
 	{
 		EXPECT_EQ(dst[i], static_cast<uint8_t>(0x10 + i));
 	}
+}
+
+TEST(EmulatorGraphicsState, ReadOnlyStorageUploadDoesNotAllocateWritebackSnapshot)
+{
+	GraphicContext ctx {};
+	std::array<uint8_t, 8192> guest {};
+	std::array<uint8_t, 8192> mapped {};
+	guest[17] = 42;
+	StorageVulkanBuffer storage;
+	storage.mapped = mapped.data();
+	storage.guest_size = guest.size();
+	const uint64_t address = reinterpret_cast<uint64_t>(guest.data());
+	const uint64_t size = guest.size();
+	const StorageBufferGpuObject view(4, 2048, true);
+	view.GetUpdateFunc()(&ctx, view.params, &storage, &address, &size, 1);
+	EXPECT_EQ(mapped, guest);
+	EXPECT_FALSE(storage.writeback_cache.IsInitialized());
+	StorageBufferPrepareWriteback(nullptr, nullptr); // Unrelated factories must not be cast.
+	StorageBufferPrepareWriteback(&storage, view.GetCreateFunc());
+	ASSERT_TRUE(storage.writeback_cache.IsInitialized());
+	guest[17] = 91; // CPU-only page must survive a later GPU write elsewhere.
+	mapped[4097] = 53;
+	StorageBufferPrepareWriteback(&storage, view.GetCreateFunc()); // Must not rebaseline.
+	const auto result = storage.writeback_cache.CopyChangedPages(
+	    guest.data(), mapped.data(), size, nullptr, nullptr, 0, [](void*, uint64_t, uint64_t) {}, nullptr);
+	EXPECT_EQ(result.changed_pages, 1u);
+	EXPECT_EQ(guest[17], 91);
+	EXPECT_EQ(guest[4097], 53);
+	view.GetUpdateFunc()(&ctx, view.params, &storage, &address, &size, 1);
+	EXPECT_TRUE(storage.writeback_cache.IsInitialized());
+	const auto after_upload = storage.writeback_cache.CopyChangedPages(
+	    guest.data(), mapped.data(), size, nullptr, nullptr, 0, [](void*, uint64_t, uint64_t) {}, nullptr);
+	EXPECT_EQ(after_upload.changed_pages, 0u);
+	StorageVulkanBuffer writable;
+	writable.mapped = mapped.data();
+	const StorageBufferGpuObject writable_view(4, 2048, false);
+	writable_view.GetUpdateFunc()(&ctx, writable_view.params, &writable, &address, &size, 1);
+	EXPECT_TRUE(writable.writeback_cache.IsInitialized());
 }
 
 TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreservesFenceHoles)
