@@ -4282,35 +4282,33 @@ TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsLoadOnOptimalSubsequentPass)
 	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
-TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearWhenRebindingAfterSample)
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsPreserveSceneWhenRebindingAfterSample)
 {
 	using namespace Kyty::Libs::Graphics;
-	// After composite samples the lighting RT, layout is SHADER_READ_ONLY. The next
-	// frame's first additive light pass must CLEAR (zeros), not LOAD prior-frame HDR.
-	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
-	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
-	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
-
-	// Within-frame accumulation (still COLOR_ATTACHMENT) must keep LOAD.
-	auto load_ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
-	EXPECT_EQ(load_ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+	// Opaque scene -> sampled scene copy -> transparent pass on the original.
+	// Reading the scene cannot discard the pixels not covered by transparency.
+	for (auto format: {VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT})
+	{
+		for (bool fast_clear: {false, true})
+		{
+			auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, fast_clear, 0u, 0u, format);
+			EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+			EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		}
+	}
 }
 
-TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRgba8RebindClearsTransparent)
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRgba8RebindPreservesContents)
 {
 	using namespace Kyty::Libs::Graphics;
-	// Captured GBuffer/sprite RTs: fmt=10, CLEAR_WORD=0, fast=0, sampled then rebound.
+	// Clear-word registers describe a clear value, not a new clear operation.
 	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
-	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
 	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+	auto registered_clear = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true, 0xff804020u, 0u,
+	                                                      VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(registered_clear.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(registered_clear.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba8GuestClearWords)

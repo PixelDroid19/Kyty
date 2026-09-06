@@ -684,13 +684,12 @@ struct ColorAttachmentLoadOps
                                                                           uint32_t clear_word0, uint32_t clear_word1, VkFormat format)
 {
 	ColorAttachmentLoadOps ops {};
-	// First bind (UNDEFINED) and rebind after sampling (SHADER_READ_ONLY) must CLEAR.
-	// Additive RGBA16F lighting can omit a guest fast-clear;
-	// LOAD after sample keeps prior-frame light and accumulates into hot yellow/red slabs.
-	// Within-frame light draws stay COLOR_ATTACHMENT_OPTIMAL and still LOAD.
-	// BeginRenderPass barriers non-COLOR layouts to COLOR before vkCmdBeginRenderPass,
-	// so SHADER_READ rebinds use COLOR as the render-pass initial layout.
-	const bool clear_on_bind = tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED || tracked_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	// Sampling preserves image contents. Rebinding a sampled scene for a later
+	// transparent pass must LOAD its opaque pixels, not infer a new clear from
+	// the read-only layout. Clear-word and fast-clear registers alone do not
+	// establish a new clear operation on an already materialized attachment.
+	// BeginRenderPass transitions preserved layouts to COLOR before the pass.
+	const bool clear_on_bind = tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED;
 	if (clear_on_bind)
 	{
 		ops.load_op = VK_ATTACHMENT_LOAD_OP_CLEAR;
