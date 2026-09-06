@@ -955,6 +955,7 @@ inline bool GpuMemoryCanShareReadOnlyStorageViews(uint64_t existing_addr, uint64
 }
 
 bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem);
+uint64_t VulkanAllocatedBytes();
 void VulkanFree(GraphicContext* ctx, VulkanMemory* mem);
 void VulkanMapMemory(GraphicContext* ctx, VulkanMemory* mem, void** data);
 void VulkanUnmapMemory(GraphicContext* ctx, VulkanMemory* mem);

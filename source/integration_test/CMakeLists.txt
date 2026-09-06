@@ -127,6 +127,15 @@ set_tests_properties(KytyGraphicsDiagnosticsIntegration.SerializationAndBounds P
 )
 
 add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.IndexInitialUpload
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --index-initial-upload-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.IndexInitialUpload PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 60
+)
+
+add_test(
 	NAME KytyGraphicsDiagnosticsIntegration.EventWrite
 	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --event-write-only
 )

@@ -156,6 +156,7 @@ struct GraphicContext
 	// programs custom guest locations is rejected when the selected host cannot
 	// represent the exact state.
 	VulkanSampleLocationCapabilities sample_location_capabilities;
+	PFN_vkAllocateMemory allocate_memory = vkAllocateMemory;
 };
 
 struct VulkanMemory
@@ -166,6 +167,9 @@ struct VulkanMemory
 	VkDeviceSize          offset       = 0;
 	uint32_t              type         = 0;
 	uint64_t              unique_id    = 0;
+	// Optional placement only. Required flags and their original allocation
+	// remain the fallback if the preferred memory type is absent or exhausted.
+	VkMemoryPropertyFlags preferred_property = 0;
 };
 
 enum class VulkanImageType
