@@ -4430,6 +4430,44 @@ TEST(EmulatorGraphicsState, MemcpySkipAbsoluteRangesPreservesFenceHoles)
 	}
 }
 
+TEST(EmulatorGraphicsState, ReadOnlyStorageUploadDoesNotAllocateWritebackSnapshot)
+{
+	GraphicContext ctx {};
+	std::array<uint8_t, 8192> guest {};
+	std::array<uint8_t, 8192> mapped {};
+	guest[17] = 42;
+	StorageVulkanBuffer storage;
+	storage.mapped = mapped.data();
+	storage.guest_size = guest.size();
+	const uint64_t address = reinterpret_cast<uint64_t>(guest.data());
+	const uint64_t size = guest.size();
+	const StorageBufferGpuObject view(4, 2048, true);
+	view.GetUpdateFunc()(&ctx, view.params, &storage, &address, &size, 1);
+	EXPECT_EQ(mapped, guest);
+	EXPECT_FALSE(storage.writeback_cache.IsInitialized());
+	StorageBufferPrepareWriteback(nullptr, nullptr); // Unrelated factories must not be cast.
+	StorageBufferPrepareWriteback(&storage, view.GetCreateFunc());
+	ASSERT_TRUE(storage.writeback_cache.IsInitialized());
+	guest[17] = 91; // CPU-only page must survive a later GPU write elsewhere.
+	mapped[4097] = 53;
+	StorageBufferPrepareWriteback(&storage, view.GetCreateFunc()); // Must not rebaseline.
+	const auto result = storage.writeback_cache.CopyChangedPages(
+	    guest.data(), mapped.data(), size, nullptr, nullptr, 0, [](void*, uint64_t, uint64_t) {}, nullptr);
+	EXPECT_EQ(result.changed_pages, 1u);
+	EXPECT_EQ(guest[17], 91);
+	EXPECT_EQ(guest[4097], 53);
+	view.GetUpdateFunc()(&ctx, view.params, &storage, &address, &size, 1);
+	EXPECT_TRUE(storage.writeback_cache.IsInitialized());
+	const auto after_upload = storage.writeback_cache.CopyChangedPages(
+	    guest.data(), mapped.data(), size, nullptr, nullptr, 0, [](void*, uint64_t, uint64_t) {}, nullptr);
+	EXPECT_EQ(after_upload.changed_pages, 0u);
+	StorageVulkanBuffer writable;
+	writable.mapped = mapped.data();
+	const StorageBufferGpuObject writable_view(4, 2048, false);
+	writable_view.GetUpdateFunc()(&ctx, writable_view.params, &writable, &address, &size, 1);
+	EXPECT_TRUE(writable.writeback_cache.IsInitialized());
+}
+
 TEST(EmulatorGraphicsState, GpuWritebackPageCacheCopiesOnlyChangedPagesAndPreservesFenceHoles)
 {
 	using namespace Kyty::Libs::Graphics;

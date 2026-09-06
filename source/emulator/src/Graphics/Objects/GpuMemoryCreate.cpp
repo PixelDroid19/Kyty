@@ -18,6 +18,7 @@
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
+#include "Emulator/Graphics/Objects/StorageBuffer.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
@@ -708,6 +709,10 @@ String GpuMemory::create_dbg_exit(const String& msg, const uint64_t* vaddr, cons
 void GpuMemory::RecordUse(ObjectInfo* object, SubmissionId submission)
 {
 	EXIT_IF(object == nullptr);
+	if (object->object.type == GpuMemoryObjectType::StorageBuffer && !object->read_only)
+	{
+		StorageBufferPrepareWriteback(object->object.obj, object->create_func);
+	}
 	if (object->submission_uses.RecordUse(submission) != GpuDeferredDeletionResult::Success)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
@@ -721,6 +726,10 @@ void GpuMemory::RecordUse(ObjectInfo* object, CommandBuffer* buffer)
 	EXIT_IF(object == nullptr);
 	if (buffer == nullptr)
 	{
+		if (object->object.type == GpuMemoryObjectType::StorageBuffer && !object->read_only)
+		{
+			StorageBufferPrepareWriteback(object->object.obj, object->create_func);
+		}
 		return;
 	}
 
