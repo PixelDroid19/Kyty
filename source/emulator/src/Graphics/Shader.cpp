@@ -15,6 +15,7 @@
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Graphics/ShaderComputeWaveNativeEquivalence.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
@@ -1930,6 +1931,26 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		direct_sgprs[i] = (i < user_sgpr_num);
 	}
 
+	// A direct resource whose SGPRs every path redefines before reading them
+	// is never consumed from user data; registering it would materialize an
+	// arbitrary dispatch-time value as a descriptor.
+	std::bitset<kShaderScalarLivenessSgprs> entry_live;
+	entry_live.set();
+	if (code != nullptr)
+	{
+		entry_live = ShaderSgprsLiveAtEntry(*code);
+	}
+	auto entry_reads = [&](int first, int dwords)
+	{
+		for (int r = first; r < first + dwords; r++)
+		{
+			if (r < 0 || r >= kShaderScalarLivenessSgprs || entry_live.test(static_cast<size_t>(r)))
+			{
+				return true;
+			}
+		}
+		return false;
+	};
 	for (uint16_t type = 0; type < user_data->direct_resource_count; type++)
 	{
 		if (user_data->direct_resource_offset[type] == 0xffff)
@@ -2006,6 +2027,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				// fallthrough
 			default:
 			{
+				if (code != nullptr && !entry_reads(reg + user_data_register_base, 4))
+				{
+					break;
+				}
 				if (code != nullptr)
 				{
 					const auto image = AnalyzeShaderDirectImageUse(*code, reg + user_data_register_base);
@@ -2060,6 +2085,13 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				auto usage = ShaderStorageUsage::ReadOnly;
 				if (code != nullptr)
 				{
+					// With the instruction stream available, only a slot that
+					// reaches a storage consumer is a buffer descriptor; others (for
+					// example 64-bit table pointers) stay ordinary SGPR data.
+					if (AnalyzeShaderStorageUse(*code, reg + user_data_register_base).access == ShaderStorageAccess::Unknown)
+					{
+						break;
+					}
 					usage = ShaderGetDirectStorageUsage(*code, reg + user_data_register_base);
 					if (usage == ShaderStorageUsage::Unknown)
 					{
@@ -2323,10 +2355,25 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// null-descriptor rejection and the same EUD translation used by metadata.
 	if (code != nullptr)
 	{
+		const auto entry_values = ShaderSgprsHoldingEntryValue(*code);
+		uint32_t   inst_index   = 0;
 		for (const auto& inst: code->GetInstructions())
 		{
+			const uint32_t current = inst_index++;
 			if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num == 0 || inst.src[0].type != ShaderOperandType::Sgpr ||
 			    inst.src[0].size != 4 || ShaderIsDynamicScalarStorageConsumer(*bind, inst))
+			{
+				continue;
+			}
+			// Only a base that still holds its user-data value here is a
+			// dispatch-time descriptor; a redefined base is runtime data.
+			bool entry_base = true;
+			for (int r = inst.src[0].register_id; r < inst.src[0].register_id + 4; r++)
+			{
+				entry_base = entry_base && r >= 0 && r < kShaderScalarLivenessSgprs &&
+				             entry_values[current].test(static_cast<size_t>(r));
+			}
+			if (!entry_base)
 			{
 				continue;
 			}
