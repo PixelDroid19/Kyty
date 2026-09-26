@@ -326,6 +326,24 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- A block-dispatcher iteration cap of 67 still lost the device on the
+  device-addressed ray-tracing dispatches (`Engine reset engine_class=rcs`,
+  `Timedout job`, `vkWaitForFences` result -4). An infinite dispatcher loop is
+  excluded. Requiring each device-address load to end inside the imported
+  span (guest bytes plus the guard page) also still reset the engine, so an
+  access that merely overruns its chunk is excluded as this hang's cause.
+  The same dispatches are the ones that hang: skipping every dispatch whose
+  shader uses guest device addressing advances past them. Those programs do
+  reach `s_barrier` on some waves after other waves have exited, but neither
+  a subgroup-scope barrier nor a workgroup join that waits only for
+  invocations still inside the dispatch stopped the engine reset. The barrier
+  scope is excluded as this hang's cause.
+- Recorded, not yet fixed: `ShaderSpirvGenerator.cpp` exits at a vertex
+  `s_getpc_b64` (`stage=1 instruction=474 format=0x8 pc=0x5c`) once the
+  device-address dispatches are skipped. The compute emitter refuses a
+  non-compute stage (`ShaderSpirvProgramAddress.cpp`). Suggested direction:
+  publish the stage's guest program base and add the instruction's original
+  byte offset, including a fused continuation whose PCs were shifted.
 - Device-addressed ray-tracing workload, `vkQueueSubmit` result -4 about 30 s
   after the first address table: -4 is `VK_ERROR_DEVICE_LOST`, not memory
   exhaustion (1.5 GiB of imports is fine in a standalone repro). Excluded, in
