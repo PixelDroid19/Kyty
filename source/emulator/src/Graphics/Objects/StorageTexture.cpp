@@ -482,7 +482,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	// Storage image views use identity component mapping. Single-component R32
 	// resources encode their read result as R,0,0,1 while writes address R only;
 	// Normalize that view contract before Vulkan validation.
-	if (IsR32SingleComponentStorageFormat(static_cast<uint32_t>(fmt)) || fmt == 5u || fmt == 14u || fmt == 62u)
+	// Single-component R16/R16F (formats 7 and 13) share that contract.
+	if (IsR32SingleComponentStorageFormat(static_cast<uint32_t>(fmt)) || fmt == 5u || fmt == 7u || fmt == 13u || fmt == 14u || fmt == 62u)
 	{
 		components.r = VK_COMPONENT_SWIZZLE_R;
 		components.g = VK_COMPONENT_SWIZZLE_G;

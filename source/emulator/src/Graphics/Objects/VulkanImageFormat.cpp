@@ -40,7 +40,7 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {1, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {5, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {7, VK_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
-    Gen5ImageFormat {13, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
+    Gen5ImageFormat {13, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {14, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {20, VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT, VK_FORMAT_R32_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {22, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32_SFLOAT, GuestImageNumericType::FloatingPoint},
