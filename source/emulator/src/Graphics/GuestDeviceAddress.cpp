@@ -1,6 +1,7 @@
 #include "Emulator/Graphics/GuestDeviceAddress.h"
 
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/Objects/GpuMemory.h"
 
 #include <cstring>
 #include <map>
@@ -278,6 +279,24 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		DestroyTable(ctx->device, table);
 	}
 	registry.retired.clear();
+}
+
+void GuestDeviceAddressWriteBack(GraphicContext* ctx)
+{
+	std::vector<std::pair<uint64_t, uint64_t>> ranges;
+	{
+		auto&                       registry = GetRegistry();
+		std::lock_guard<std::mutex> lock(registry.mutex);
+		for (const auto& [base, range]: registry.ranges)
+		{
+			ranges.emplace_back(base, range.size);
+		}
+	}
+	// Outside the registry lock: write-back may wait on GPU submissions.
+	for (const auto& [base, size]: ranges)
+	{
+		GpuMemoryWriteBackStorageRange(ctx, base, size);
+	}
 }
 
 bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uint32_t* entry_count)

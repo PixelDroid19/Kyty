@@ -28,6 +28,11 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size);
 // every table retired since the last quiesced release.
 void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
 
+// Writes back GPU results held in Kyty storage-buffer objects over every
+// registered range, so a shader dereferencing guest pointers reads the
+// current guest memory. Call before recording such a dispatch.
+void GuestDeviceAddressWriteBack(GraphicContext* ctx);
+
 // Imports all registered ranges not imported yet and returns the translation
 // table. Fails when the device cannot import guest memory.
 [[nodiscard]] bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uint32_t* entry_count);

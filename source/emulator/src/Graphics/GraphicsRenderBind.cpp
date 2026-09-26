@@ -4271,6 +4271,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			uint64_t table   = 0;
 			uint32_t entries = 0;
 			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.device_address_offset_dw);
+			GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx());
 			if (!GuestDeviceAddressPrepare(g_render_ctx->GetGraphicCtx(), &table, &entries))
 			{
 				EXIT("guest memory device addressing is unavailable for a shader that dereferences guest pointers\n");
