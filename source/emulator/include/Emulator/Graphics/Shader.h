@@ -12,6 +12,8 @@
 #include "Emulator/Graphics/RenderResolutionShaderScale.h"
 #include "Emulator/Graphics/VertexClipProbe.h"
 
+#include <bitset>
+#include <vector>
 #include <algorithm>
 #ifdef KYTY_EMU_ENABLED
 
@@ -1540,7 +1542,10 @@ struct ShaderZeroSBufferResources
 [[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
 [[nodiscard]] ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& code, int source_start_register,
 	                                                                      int destination_start_register, int parameter_start_register);
-[[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register);
+// With entry_values (see ShaderSgprsHoldingEntryValue), only instructions whose
+// descriptor SGPRs still hold their user-data value count as direct uses.
+[[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register,
+                                                                       const std::vector<std::bitset<106>>* entry_values = nullptr);
 [[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 

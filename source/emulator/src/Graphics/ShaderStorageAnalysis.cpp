@@ -863,12 +863,27 @@ static void RecordMimgSampledShape(const ShaderInstruction& inst, ShaderDirectIm
 	result->sampled_shape_conflict = result->sampled_shape != shape;
 }
 
-ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register)
+ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register,
+                                                 const std::vector<std::bitset<106>>* entry_values)
 {
 	ShaderDirectImageUse result;
 
+	uint32_t inst_index = 0;
 	for (const auto& inst: code.GetInstructions())
 	{
+		const uint32_t current = inst_index++;
+		if (entry_values != nullptr && current < entry_values->size())
+		{
+			bool held = true;
+			for (int r = start_register; r < start_register + 8; r++)
+			{
+				held = held && r >= 0 && r < 106 && (*entry_values)[current].test(static_cast<size_t>(r));
+			}
+			if (!held)
+			{
+				continue;
+			}
+		}
 		const bool read  = ShaderInstructionReadsImageResource(inst.type);
 		const bool write = ShaderInstructionWritesImageResource(inst.type);
 		if ((!read && !write) || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr ||

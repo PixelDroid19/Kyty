@@ -1936,9 +1936,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// arbitrary dispatch-time value as a descriptor.
 	std::bitset<kShaderScalarLivenessSgprs> entry_live;
 	entry_live.set();
+	std::vector<std::bitset<kShaderScalarLivenessSgprs>> entry_values;
 	if (code != nullptr)
 	{
-		entry_live = ShaderSgprsLiveAtEntry(*code);
+		entry_live   = ShaderSgprsLiveAtEntry(*code);
+		entry_values = ShaderSgprsHoldingEntryValue(*code);
 	}
 	auto entry_reads = [&](int first, int dwords)
 	{
@@ -1974,6 +1976,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		switch (type)
 		{
 			case 8:
+				if (!vertex_resource_types && code != nullptr && !entry_reads(reg + user_data_register_base, 8))
+				{
+					break;
+				}
 				if (!vertex_resource_types)
 				{
 					ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, reg, bind->textures2D.textures_num,
@@ -2033,7 +2039,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				}
 				if (code != nullptr)
 				{
-					const auto image = AnalyzeShaderDirectImageUse(*code, reg + user_data_register_base);
+					const auto image = AnalyzeShaderDirectImageUse(*code, reg + user_data_register_base, &entry_values);
 					if (image.texture != ShaderTextureUsage::Unknown)
 					{
 						ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, reg, bind->textures2D.textures_num, image.texture,
