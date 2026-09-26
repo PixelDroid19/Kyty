@@ -5163,7 +5163,7 @@ TEST(EmulatorGraphicsState, PreservesOnlyPureDepthReferenceHostSampler)
 	EXPECT_EQ(ResolveSamplerBindingOperation(ImageSampleOperation::DepthReference, false), ImageSampleOperation::Regular);
 }
 
-TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5Depth16Samples)
+TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5DepthSamples)
 {
 	const auto accepts = [](uint32_t format = 7u, uint32_t type = 9u, uint32_t depth = 0u, uint32_t base_array = 0u,
 	                        uint32_t base_level = 0u, uint32_t last_level = 0u, uint32_t max_mip = 0u, uint32_t bc_swizzle = 0u,
@@ -5171,13 +5171,19 @@ TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5Depth16Samples)
 	                        uint32_t width = 2048u, uint32_t height = 1024u, uint32_t pitch = 2048u,
 	                        uint64_t size = 4194304u, State::ImageSampleOperation operation = State::ImageSampleOperation::DepthReference)
 	{
-		return State::CanMaterializeGen5Depth16Sample(format, 24u, type, depth, base_array, base_level, last_level, max_mip,
+		return State::CanMaterializeGen5DepthSample(format, 24u, type, depth, base_array, base_level, last_level, max_mip,
 		                                                   bc_swizzle, swizzle, msaa, metadata, address, width, height, pitch, size,
 		                                                   operation);
 	};
 	EXPECT_TRUE(accepts());
 	EXPECT_TRUE(accepts(7u, 8u));
+	// 32_FLOAT depth: a 64 KiB block is 128x128, so the same surface needs
+	// twice the bytes; color formats never materialize as depth.
 	EXPECT_FALSE(accepts(22u));
+	EXPECT_TRUE(accepts(22u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0000u, 2048u, 1024u, 2048u, 8388608u));
+	EXPECT_TRUE(accepts(22u, 13u, 15u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0000u, 1024u, 1024u, 1024u, 4194304u));
+	EXPECT_FALSE(accepts(22u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0000u, 1000u, 1024u, 1000u, 8388608u));
+	EXPECT_FALSE(accepts(4u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0000u, 2048u, 1024u, 2048u, 8388608u));
 	EXPECT_FALSE(accepts(7u, 13u));
 	// Layered depth arrays: resource type 13 with an explicit layer count.
 	// The descriptor size covers one 64 KiB-blocked layer; the caller verifies
@@ -5202,6 +5208,19 @@ TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5Depth16Samples)
 	                     2048u, 1024u, 2048u, 4194303u));
 	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 0u, 0u, 0u, 0u, 0x924u, false, false, 0x4d7d0000u,
 	                     2048u, 1024u, 2048u, 4194304u, State::ImageSampleOperation::Regular));
+}
+
+TEST(EmulatorGraphicsState, SizesGen5DepthSampleLayersByElementWidth)
+{
+	EXPECT_EQ(State::Gen5DepthSampleBytesPerElement(7u), 2u);
+	EXPECT_EQ(State::Gen5DepthSampleBytesPerElement(22u), 4u);
+	EXPECT_EQ(State::Gen5DepthSampleBytesPerElement(4u), 0u);
+	// 16 bpp: 256x128 elements per block; 32 bpp: 128x128.
+	EXPECT_EQ(State::Gen5DepthSampleLayerBytes(7u, 2048u, 1024u), 4194304u);
+	EXPECT_EQ(State::Gen5DepthSampleLayerBytes(22u, 1024u, 1024u), 4194304u);
+	EXPECT_EQ(State::Gen5DepthSampleLayerBytes(22u, 1024u, 1000u), 4194304u);
+	EXPECT_EQ(State::Gen5DepthSampleLayerBytes(7u, 128u, 128u), 0u);
+	EXPECT_EQ(State::Gen5DepthSampleLayerBytes(22u, 1024u, 0u), 0u);
 }
 
 TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)

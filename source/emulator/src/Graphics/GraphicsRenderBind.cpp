@@ -3588,29 +3588,24 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 
 		if (!render_texture && !depth_texture && tex == nullptr)
 		{
-			const bool depth16_request = gen5 && check_depth_texture && fmt == 7u &&
-			                             textures.desc[i].sample_operation == State::ImageSampleOperation::DepthReference;
-			bool                      materialize_depth16 = false;
-			GpuMemoryDepthD16Source  depth_source        = GpuMemoryDepthD16Source::Unsupported;
-			uint64_t                 depth_span_size     = size.size;
-			if (depth16_request)
+			const bool depth_request = gen5 && check_depth_texture && State::Gen5DepthSampleBytesPerElement(fmt) != 0u &&
+			                           textures.desc[i].sample_operation == State::ImageSampleOperation::DepthReference;
+			bool                      materialize_depth = false;
+			GpuMemoryDepthD16Source  depth_source      = GpuMemoryDepthD16Source::Unsupported;
+			uint64_t                 depth_span_size   = size.size;
+			if (depth_request)
 			{
 				Kernel::Memory::KernelMappedRange mapped {};
 				GpuMemoryOverlapSnapshot overlaps {};
 				// Layered depth arrays stack whole 64 KiB-blocked slices
 				// contiguously: verify the full span mapping, not just the
 				// first layer. Single-layer surfaces keep the descriptor size.
-				const uint64_t depth_layers = static_cast<uint64_t>(r.Depth()) == 0u ? 1u : static_cast<uint64_t>(r.Depth());
-				const uint64_t depth_blocks_x = static_cast<uint64_t>(pitch) / 256u;
-				const uint64_t depth_blocks_y = (static_cast<uint64_t>(height) + 127u) / 128u;
-				const uint64_t depth_layer_size =
-				    (depth_blocks_x <= UINT64_MAX / depth_blocks_y &&
-				     depth_blocks_x * depth_blocks_y <= UINT64_MAX / 65536u)
-				        ? depth_blocks_x * depth_blocks_y * 65536u
-				        : 0u;
-				uint64_t query_addr = addr;
-				uint64_t query_size = size.size;
-				bool     span_ok    = true;
+				const uint64_t depth_layers     = depth == 0u ? 1u : static_cast<uint64_t>(depth);
+				const uint64_t depth_layer_size = State::Gen5DepthSampleLayerBytes(fmt, static_cast<uint32_t>(pitch),
+				                                                                   static_cast<uint32_t>(height));
+				uint64_t       query_addr       = addr;
+				uint64_t       query_size       = size.size;
+				bool           span_ok          = true;
 				if (depth_layers > 1u)
 				{
 					span_ok = depth_layer_size != 0u && depth_layers <= UINT64_MAX / depth_layer_size;
@@ -3626,55 +3621,18 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				                         mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
 				const bool overlaps_ok = GpuMemoryQueryOverlaps(&query_addr, &query_size, 1u, &overlaps);
 				depth_source = overlaps_ok ? GpuMemoryClassifyDepthD16Source(overlaps) : GpuMemoryDepthD16Source::Unsupported;
-				materialize_depth16 = physical_ok && depth_source != GpuMemoryDepthD16Source::Unsupported &&
-				                      State::CanMaterializeGen5Depth16Sample(
-				                          fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
-				                          static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
-				                          static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
-					                          static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u, addr,
-					                          width, height, pitch, size.size, textures.desc[i].sample_operation);
-				{
-					// Bounded diagnostic for the D16 materialization decision.
-					static std::atomic_uint d16_decisions {0};
-					if (d16_decisions.fetch_add(1u, std::memory_order_relaxed) < 8u)
-					{
-						std::fprintf(stderr,
-						             "KYTY_D16_DECISION physical=%u source=%u can_materialize=%u can_mat_depth0=%u fmt=%u tile=%u "
-						             "type=%u depth=%u host_layers=%u array_pitch=%u base_array=%u base_level=%u last_level=%u max_mip=%u addr=0x%012" PRIx64
-						             " %ux%u\n",
-						             physical_ok ? 1u : 0u, static_cast<unsigned>(depth_source),
-						             State::CanMaterializeGen5Depth16Sample(
-						                 fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
-						                 static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
-						                 static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
-						                 static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u,
-						                 addr, width, height, pitch, size.size, textures.desc[i].sample_operation)
-						                 ? 1u
-						                 : 0u,
-						             State::CanMaterializeGen5Depth16Sample(
-						                 fmt, tile, static_cast<uint32_t>(r.Type()), 0u,
-						                 static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
-						                 static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
-						                 static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u,
-						                 addr, width, height, pitch, size.size, textures.desc[i].sample_operation)
-						                 ? 1u
-						                 : 0u,
-						             fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
-						             static_cast<uint32_t>(depth), static_cast<uint32_t>(r.ArrayPitch()),
-						             static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
-						             static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()), addr,
-						             static_cast<uint32_t>(width), static_cast<uint32_t>(height));
-						for (uint32_t k = 0; k < overlaps.entry_count; k++)
-						{
-							std::fprintf(stderr, "KYTY_D16_OVERLAP type=%u relation=%u count=%u exact=%u read_only=%u\n",
-							             static_cast<unsigned>(overlaps.entries[k].type), static_cast<unsigned>(overlaps.entries[k].relation),
-							             overlaps.entries[k].count, overlaps.entries[k].exact ? 1u : 0u,
-							             overlaps.entries[k].all_read_only ? 1u : 0u);
-						}
-					}
-				}
+				// The storage-backed detile is a 16-bit equation.
+				const bool source_ok = depth_source == GpuMemoryDepthD16Source::Guest ||
+				                       (depth_source == GpuMemoryDepthD16Source::StorageBuffer && fmt == 7u);
+				materialize_depth    = physical_ok && source_ok &&
+				                    State::CanMaterializeGen5DepthSample(
+				                        fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
+				                        static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
+				                        static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
+				                        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u, addr, width,
+				                        height, pitch, size.size, textures.desc[i].sample_operation);
 			}
-			if (materialize_depth16)
+			if (materialize_depth)
 			{
 				StorageVulkanBuffer* depth_storage        = nullptr;
 				uint64_t             depth_storage_offset = 0u;
@@ -3695,9 +3653,9 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 							depth_storage_offset = addr - depth_storage->guest_addr;
 						}
 					}
-					materialize_depth16 = depth_storage != nullptr;
+					materialize_depth = depth_storage != nullptr;
 				}
-				if (!materialize_depth16)
+				if (!materialize_depth)
 				{
 					// Preserve the strict incompatible-view rejection below.
 				} else
@@ -3709,7 +3667,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					tex = static_cast<TextureVulkanImage*>(GpuMemoryCreateObject(
 					    submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, depth_span_size, vulkan_texture_info));
 					depth_texture = tex != nullptr;
-					materialize   = depth_source == GpuMemoryDepthD16Source::StorageBuffer ? "d16-storage" : "d16-guest";
+					materialize   = depth_source == GpuMemoryDepthD16Source::StorageBuffer ? "depth-storage" : "depth-guest";
 					if (depth_texture && depth_storage != nullptr)
 					{
 						const auto detile_status = TileGpuDetileDepthD16Inline(
@@ -3724,11 +3682,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						}
 					}
 				}
-			} else if (depth16_request)
+			} else if (depth_request)
 			{
-				// Preserve the strict depth-reference rejection below. D16 must never
-				// fall through to the ordinary sampled-color TextureObject path.
-				materialize = "d16-unsupported";
+				// Preserve the strict depth-reference rejection below. A depth sample
+				// must never fall through to the ordinary sampled-color path.
+				materialize = "depth-unsupported";
 			} else if (textures.desc[i].textures2d_without_sampler)
 			{
 				if (textures.desc[i].usage != ShaderTextureUsage::ReadWrite) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: textures.desc[i].usage != ShaderTextureUsage::ReadWrite condition ignored (continuing)\n"); }

@@ -9,6 +9,7 @@
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GuestTextureLayout.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
@@ -150,6 +151,27 @@ static VkImageUsageFlags get_usage()
 	vk_usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
 
 	return vk_usage;
+}
+
+// Layered depth surfaces stack whole 64 KiB-blocked slices contiguously;
+// each layer detiles into `linear` and fills its own array layer.
+static void upload_depth_layers(GraphicContext* ctx, TextureVulkanImage* image, uint64_t vaddr, uint64_t size,
+                                std::vector<uint8_t>* linear, uint32_t fmt, uint32_t width, uint32_t height, uint32_t pitch,
+                                uint32_t layers, uint64_t layout)
+{
+	const uint64_t layer_bytes = State::Gen5DepthSampleLayerBytes(fmt, pitch, height);
+	if (layer_bytes == 0u || layers == 0u || layers > size / layer_bytes)
+	{
+		EXIT("depth upload exceeds its source: format=%u %ux%u pitch=%u layers=%u size=0x%" PRIx64 "\n", fmt, width, height, pitch, layers,
+		     size);
+	}
+	const uint32_t bytes = State::Gen5DepthSampleBytesPerElement(fmt);
+	for (uint32_t layer = 0; layer < layers; layer++)
+	{
+		TileConvertDepth64KBToLinear(linear->data(), reinterpret_cast<const void*>(vaddr + layer * layer_bytes), width, height, pitch,
+		                            bytes);
+		UtilFillDepthImage(ctx, image, linear->data(), linear->size(), width, layout, layer);
+	}
 }
 
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
@@ -801,10 +823,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// uploading an invented pattern.
 			// A 16-bit depth surface (format 7) keeps its depth tiling when sampled
 			// through a color view; only the upload target differs.
-			const bool     stencil_plane      = !depth_view && fmt == 5u;
-			const bool     depth16            = fmt == 7u;
-			const uint32_t bytes_per_element = (depth_view || depth16) ? 2u : (stencil_plane ? 1u : 4u);
-			if ((depth_view && !depth16) || (!depth_view && !stencil_plane && !depth16 && fmt != 22u) || levels != 1u)
+			const bool     stencil_plane     = !depth_view && fmt == 5u;
+			const uint32_t depth_bytes       = State::Gen5DepthSampleBytesPerElement(static_cast<uint32_t>(fmt));
+			const uint32_t bytes_per_element = stencil_plane ? 1u : depth_bytes;
+			if ((!stencil_plane && depth_bytes == 0u) || levels != 1u)
 			{
 				EXIT("unsupported depth tile upload: format=%u levels=%u depth_view=%u\n", static_cast<unsigned>(fmt),
 				     static_cast<unsigned>(levels), depth_view ? 1u : 0u);
@@ -822,16 +844,18 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 						EXIT("unimplemented 8bpp depth-64KB equation: nonzero stencil plane addr=0x%012" PRIx64 "\n", *vaddr);
 					}
 				}
+			} else if (depth_view)
+			{
+				upload_depth_layers(ctx, vk_obj, *vaddr, *size, &linear, static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+				                    static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), arrayed_2d ? static_cast<uint32_t>(depth) : 1u,
+				                    static_cast<uint64_t>(vk_layout));
+				return;
 			} else
 			{
 				TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
 				                            static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
 			}
-			if (depth_view)
-			{
-				UtilFillDepthImage(ctx, vk_obj, linear.data(), linear.size(), static_cast<uint32_t>(width),
-				                   static_cast<uint64_t>(vk_layout));
-			} else
+			if (!depth_view)
 			{
 				regions[0].offset = 0;
 				regions[0].width  = static_cast<uint32_t>(width);
@@ -1440,7 +1464,7 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	if (
 	    !VulkanDecodeComponentMapping(static_cast<uint32_t>(params[TextureObject::PARAM_SWIZZLE]), &view_config->components)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanDecodeComponentMapping(static_cast<uint32_t>(params[TextureObject::PARAM_ condition ignored (continuing)\n"); }
 
-	const auto pixel_format = view_config->depth_view ? VK_FORMAT_D16_UNORM :
+	const auto pixel_format = view_config->depth_view ? (fmt == 22u ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D16_UNORM) :
 	                                                  VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, dfmt, nfmt, fmt, force_degamma);
 	if (pixel_format == VK_FORMAT_UNDEFINED) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pixel_format == VK_FORMAT_UNDEFINED condition ignored (continuing)\n"); }
 
@@ -1487,7 +1511,7 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 		descriptor.aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
 		if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]))
 		{
-			EXIT("failed to create D16 sampled-depth image view\n");
+			EXIT("failed to create sampled-depth image view\n");
 		}
 		if (config.arrayed_2d && config.depth > 1u)
 		{
@@ -1499,7 +1523,7 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 			if (!VulkanCreateDeviceImageView(ctx->device, descriptor,
 			                                 &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY]))
 			{
-				EXIT("failed to create D16 sampled-depth array image view\n");
+				EXIT("failed to create sampled-depth array image view\n");
 			}
 		}
 		return;
