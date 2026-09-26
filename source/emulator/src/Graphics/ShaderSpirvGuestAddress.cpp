@@ -30,7 +30,7 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 )";
 	for (uint32_t offset = 0; offset <= kMaxLoadBytes; offset += 4)
 	{
-		types += String8::FromPrintf("%%gda_u64_%u = OpConstant %%ulong %u\n", offset);
+		types += String8::FromPrintf("%%gda_u64_%u = OpConstant %%ulong %u\n", offset, offset);
 	}
 	types += String8::FromPrintf("%%gda_u64_null = OpConstant %%ulong %u\n", kGuestDeviceAddressNullBytes);
 	return types;
