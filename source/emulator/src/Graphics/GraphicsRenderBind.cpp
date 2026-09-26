@@ -3664,6 +3664,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						             static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
 						             static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()), addr,
 						             static_cast<uint32_t>(width), static_cast<uint32_t>(height));
+						for (uint32_t k = 0; k < overlaps.entry_count; k++)
+						{
+							std::fprintf(stderr, "KYTY_D16_OVERLAP type=%u relation=%u count=%u exact=%u read_only=%u\n",
+							             static_cast<unsigned>(overlaps.entries[k].type), static_cast<unsigned>(overlaps.entries[k].relation),
+							             overlaps.entries[k].count, overlaps.entries[k].exact ? 1u : 0u,
+							             overlaps.entries[k].all_read_only ? 1u : 0u);
+						}
 					}
 				}
 			}

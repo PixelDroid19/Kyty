@@ -9,6 +9,8 @@
 #define _XOPEN_SOURCE 1
 #endif
 
+#include <cstring>
+#include <vector>
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Kyty/Sys/SysVirtual.h"
@@ -1984,6 +1986,33 @@ bool IsRangeGuestOwned(uint64_t address, uint64_t size)
 bool IsRangeReadable(uint64_t address, uint64_t size)
 {
 	return sys_virtual_is_range_readable(address, size);
+}
+
+bool QueryResidentPages(uint64_t address, uint64_t size, uint8_t* resident)
+{
+	if (resident == nullptr || size == 0)
+	{
+		return false;
+	}
+	const uint64_t page  = GetPageSize();
+	const uint64_t pages = (size + page - 1) / page;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::memset(resident, 1, static_cast<size_t>(pages));
+	return true;
+#else
+	// mincore reports populated pages; never-touched anonymous or memfd pages
+	// read as zero and are not resident.
+	std::vector<unsigned char> vec(static_cast<size_t>(pages));
+	if (::mincore(reinterpret_cast<void*>(address), static_cast<size_t>(size), reinterpret_cast<decltype(&vec[0])>(vec.data())) != 0)
+	{
+		return false;
+	}
+	for (uint64_t i = 0; i < pages; i++)
+	{
+		resident[i] = (vec[i] & 1u) != 0 ? 1u : 0u;
+	}
+	return true;
+#endif
 }
 
 bool IsRangeWritable(uint64_t address, uint64_t size)

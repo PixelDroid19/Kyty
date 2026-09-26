@@ -1,8 +1,15 @@
 #include "Emulator/Graphics/GuestDeviceAddress.h"
 
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
+#include "Emulator/Kernel/Memory.h"
+#include "Kyty/Core/VirtualMemory.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 
+#include <algorithm>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -13,8 +20,9 @@
 namespace Kyty::Libs::Graphics {
 namespace {
 
-// Device buffers are limited to 4 GiB; 1 GiB chunks keep allocations modest.
-constexpr uint64_t kChunkBytes = 1ull << 30u;
+// Imports cover resident pages only (never-touched pages read as zero through
+// the table's zero prefix), in chunks bounded to keep each pin modest.
+constexpr uint64_t kChunkBytes = 64ull << 20u;
 constexpr uint64_t kPageBytes  = 4096;
 
 struct Chunk
@@ -24,12 +32,17 @@ struct Chunk
 	VkDeviceMemory memory = nullptr;
 	VkBuffer       buffer = nullptr;
 	uint64_t       device = 0;
+	uint64_t       alias  = 0;       // writable host view that was imported
+	void*          copy   = nullptr; // tracked snapshot that was imported
+	uint64_t       generation = 0;   // dirty-tracker generation of the snapshot
+	bool           tracked    = false; // snapshot is refreshed from tracker generations
 };
 
 struct Range
 {
-	uint64_t           size = 0;
-	std::vector<Chunk> chunks; // empty until imported
+	uint64_t             size = 0;
+	std::vector<Chunk>   chunks;
+	std::vector<uint8_t> imported; // one byte per page
 };
 
 struct Table
@@ -59,6 +72,30 @@ void DestroyChunk(VkDevice device, const Chunk& chunk)
 {
 	vkDestroyBuffer(device, chunk.buffer, nullptr);
 	vkFreeMemory(device, chunk.memory, nullptr);
+	Kernel::Memory::KernelUnmapPhysicalAlias(chunk.alias);
+	std::free(chunk.copy);
+}
+
+// Copies guest memory into a snapshot using the dirty tracker's read protocol
+// (arm write protection, copy, validate the generation). Returns false when
+// the range is not tracked, since a snapshot could then go stale unnoticed.
+bool SnapshotGuest(void* copy, uint64_t guest, uint64_t size, uint64_t* generation)
+{
+	auto& tracker = GpuDirtyPageTracker::Instance();
+	for (int attempt = 0; attempt < 8; attempt++)
+	{
+		const auto observation = tracker.BeginRead(guest, size);
+		if (!observation.tracked || !Core::VirtualMemory::CopyFromGuest(copy, guest, size))
+		{
+			return false;
+		}
+		if (tracker.ReadObservationIsStable(guest, size, observation))
+		{
+			*generation = observation.generation;
+			return true;
+		}
+	}
+	return false;
 }
 
 void DestroyTable(VkDevice device, const Table& table)
@@ -111,11 +148,12 @@ uint64_t BufferDeviceAddress(VkDevice device, VkBuffer buffer)
 }
 
 // Imports [guest, guest + size) of host memory as a device-addressable buffer.
-bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, Chunk* out)
+// Imports `size` bytes of host memory at `pointer` as a device-addressable
+// buffer. Host-pointer import requires writable, page-aligned memory.
+bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t size, Chunk* out)
 {
 	static auto get_properties = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
 	    vkGetDeviceProcAddr(ctx->device, "vkGetMemoryHostPointerPropertiesEXT"));
-	auto* pointer = reinterpret_cast<void*>(guest);
 	VkMemoryHostPointerPropertiesEXT host_properties {};
 	host_properties.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT;
 	uint32_t type_index   = 0;
@@ -125,7 +163,6 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, Chunk* out)
 	{
 		return false;
 	}
-
 	VkBuffer buffer = CreateAddressBuffer(ctx->device, size, true);
 	if (buffer == nullptr)
 	{
@@ -155,26 +192,87 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, Chunk* out)
 		vkDestroyBuffer(ctx->device, buffer, nullptr);
 		return false;
 	}
-	*out = {guest, size, memory, buffer, BufferDeviceAddress(ctx->device, buffer)};
+	out->memory = memory;
+	out->buffer = buffer;
+	out->device = BufferDeviceAddress(ctx->device, buffer);
 	return true;
 }
 
-bool ImportRange(GraphicContext* ctx, uint64_t base, Range* range)
+// Imports [guest, guest + size) from, in order: a writable alias of physical
+// direct memory (the guest view may be write-protected by dirty tracking),
+// the guest view itself, or a snapshot kept current through the dirty
+// tracker's generations.
+bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, Chunk* out)
 {
-	for (uint64_t offset = 0; offset < range->size; offset += kChunkBytes)
+	*out       = {};
+	out->guest = guest;
+	out->size  = size;
+	if (const uint64_t alias = Kernel::Memory::KernelMapPhysicalAlias(guest, size); alias != 0)
 	{
-		const uint64_t size = range->size - offset < kChunkBytes ? range->size - offset : kChunkBytes;
-		Chunk          chunk;
-		if (!ImportChunk(ctx, base + offset, size, &chunk))
+		out->alias = alias;
+		if (ImportPointer(ctx, reinterpret_cast<void*>(alias), size, out))
 		{
-			for (const auto& imported: range->chunks)
-			{
-				DestroyChunk(ctx->device, imported);
-			}
-			range->chunks.clear();
+			return true;
+		}
+		Kernel::Memory::KernelUnmapPhysicalAlias(alias);
+		std::fprintf(stderr, "guest import of physical alias failed: base=0x%012" PRIx64 " size=0x%" PRIx64 "\n", guest, size);
+		return false;
+	}
+	if (ImportPointer(ctx, reinterpret_cast<void*>(guest), size, out))
+	{
+		return true;
+	}
+	void* copy = std::aligned_alloc(kPageBytes, size);
+	// Tracked memory: a snapshot refreshed when the tracker sees CPU writes.
+	// Untracked memory the host keeps non-writable (guest mprotect to read-only)
+	// cannot change until another mprotect, which invalidates the import.
+	const bool tracked   = copy != nullptr && SnapshotGuest(copy, guest, size, &out->generation);
+	const bool immutable = !tracked && copy != nullptr && !Core::VirtualMemory::IsRangeWritable(guest, size) &&
+	                       Core::VirtualMemory::CopyFromGuest(copy, guest, size);
+	if ((tracked || immutable) && ImportPointer(ctx, copy, size, out))
+	{
+		out->copy    = copy;
+		out->tracked = tracked;
+		return true;
+	}
+	std::free(copy);
+	std::fprintf(stderr, "guest import failed: base=0x%012" PRIx64 " size=0x%" PRIx64 " host_writable=%d\n", guest, size,
+	             Core::VirtualMemory::IsRangeWritable(guest, size) ? 1 : 0);
+	return false;
+}
+
+// Imports the resident, not yet imported pages of a range. Sets *changed when
+// new chunks were added.
+bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* changed)
+{
+	const uint64_t       pages = range->size / kPageBytes;
+	std::vector<uint8_t> resident(static_cast<size_t>(pages));
+	if (!Core::VirtualMemory::QueryResidentPages(base, range->size, resident.data()))
+	{
+		return false;
+	}
+	range->imported.resize(static_cast<size_t>(pages), 0);
+	for (uint64_t page = 0; page < pages;)
+	{
+		if (resident[page] == 0 || range->imported[page] != 0)
+		{
+			page++;
+			continue;
+		}
+		uint64_t end = page;
+		while (end < pages && resident[end] != 0 && range->imported[end] == 0 && (end - page) * kPageBytes < kChunkBytes)
+		{
+			end++;
+		}
+		Chunk chunk;
+		if (!ImportChunk(ctx, base + page * kPageBytes, (end - page) * kPageBytes, &chunk))
+		{
 			return false;
 		}
 		range->chunks.push_back(chunk);
+		std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(page), range->imported.begin() + static_cast<std::ptrdiff_t>(end), 1);
+		*changed = true;
+		page     = end;
 	}
 	return true;
 }
@@ -251,8 +349,28 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size)
 	}
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
-	registry.ranges[vaddr] = {size, {}};
+	registry.ranges[vaddr] = {size, {}, {}};
 	registry.dirty         = true;
+}
+
+void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	for (auto& [base, range]: registry.ranges)
+	{
+		if (!(base < vaddr + size && vaddr < base + range.size))
+		{
+			continue;
+		}
+		for (const auto& chunk: range.chunks)
+		{
+			DestroyChunk(ctx->device, chunk);
+		}
+		range.chunks.clear();
+		range.imported.assign(range.imported.size(), 0);
+		registry.dirty = true;
+	}
 }
 
 void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
@@ -309,15 +427,22 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 	std::lock_guard<std::mutex> lock(registry.mutex);
 	for (auto& [base, range]: registry.ranges)
 	{
-		if (!range.chunks.empty())
-		{
-			continue;
-		}
-		if (!ImportRange(ctx, base, &range))
+		bool changed = false;
+		if (!ImportResident(ctx, base, &range, &changed))
 		{
 			return false;
 		}
-		registry.dirty = true;
+		registry.dirty = registry.dirty || changed;
+		// Refresh snapshots the CPU wrote since they were taken; the imported
+		// host memory is coherent, so the device sees the refresh directly.
+		for (auto& chunk: range.chunks)
+		{
+			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.size, chunk.generation) &&
+			    !SnapshotGuest(chunk.copy, chunk.guest, chunk.size, &chunk.generation))
+			{
+				return false;
+			}
+		}
 	}
 	if (registry.dirty && !RebuildTable(ctx, &registry))
 	{

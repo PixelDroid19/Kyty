@@ -99,6 +99,7 @@ bool GraphicsCompleteGpuMappingInvalidation(void* data)
 		    EXIT_IF(action_data == nullptr);
 		    auto* transaction = static_cast<GpuMappingInvalidationTransaction*>(action_data);
 		    GpuMemoryInvalidateMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+		    GuestDeviceAddressInvalidateRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
 		    return true;
 	    },
 	    transaction);

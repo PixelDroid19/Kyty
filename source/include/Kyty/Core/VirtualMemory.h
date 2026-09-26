@@ -173,6 +173,10 @@ bool           IsRangeGuestOwned(uint64_t address, uint64_t size);
 // protection permits reads. The range must also be guest-owned. It does not
 // probe memory or install a fault guard.
 bool           IsRangeReadable(uint64_t address, uint64_t size);
+// One byte per page of [address, address + size): nonzero when the page is
+// resident (populated). Platforms without a residency query report every page
+// resident. address and size must be page aligned.
+bool           QueryResidentPages(uint64_t address, uint64_t size, uint8_t* resident);
 // Returns true only when every byte belongs to a committed mapping whose host
 // protection permits writes. The range must also be guest-owned. It does not
 // probe memory or install a fault guard.

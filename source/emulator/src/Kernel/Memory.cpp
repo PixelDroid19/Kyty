@@ -223,6 +223,7 @@ public:
 	bool     Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode,
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
+	uint64_t MapAlias(uint64_t vaddr, uint64_t size);
 	uint64_t TotalAllocatedBytes();
 	void     FillSnapshot(KernelMemorySnapshot* snapshot);
 	bool     FindLargestAvailableSpan(uint64_t search_start, uint64_t search_end, uint64_t alignment, uint64_t* span_start,
@@ -1223,6 +1224,26 @@ bool PhysicalMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, Vi
 	return apply_protection_blocks(&m_protections, vaddr, size, prot, mode);
 }
 
+// Maps a read-write view of the backing pages behind [vaddr, vaddr + size) at
+// a host-chosen address. The view shares bytes with the guest mapping and
+// ignores its protection, which the dirty-page tracker may have lowered.
+uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size)
+{
+	uint64_t            base      = 0;
+	size_t              len       = 0;
+	int                 prot      = 0;
+	VirtualMemory::Mode mode      = VirtualMemory::Mode::NoAccess;
+	auto                gpu_mode  = KernelGpuMappingAccessMode::NoAccess;
+	uint64_t            phys_addr = 0;
+	if (size == 0 || !Find(vaddr, &base, &len, &prot, &mode, &gpu_mode, &phys_addr) || vaddr < base ||
+	    vaddr - base > len || size > len - (vaddr - base))
+	{
+		return 0;
+	}
+	return VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr + (vaddr - base), size, VirtualMemory::Mode::ReadWrite,
+	                                       VirtualMemory::GetPageSize());
+}
+
 bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)
 {
 	EXIT_IF(out == nullptr);
@@ -2173,6 +2194,20 @@ int KYTY_SYSV_ABI KernelQueryMemoryProtection(void* addr, void** start, void** e
 	}
 
 	return OK;
+}
+
+uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size)
+{
+	if (g_physical_memory == nullptr)
+	{
+		return 0;
+	}
+	return g_physical_memory->MapAlias(vaddr, size);
+}
+
+bool KernelUnmapPhysicalAlias(uint64_t alias)
+{
+	return alias != 0 && VirtualMemory::Free(alias);
 }
 
 bool KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* out)

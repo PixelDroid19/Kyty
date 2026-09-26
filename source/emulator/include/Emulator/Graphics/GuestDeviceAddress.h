@@ -24,6 +24,11 @@ constexpr uint32_t kGuestDeviceAddressNullBytes   = 256;
 // Bookkeeping only; safe to call from the kernel mapping path.
 void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size);
 
+// Must run with GPU submissions quiesced: drops the imports overlapping the
+// range (its protection or contents may have changed); they are imported
+// again on the next use. The range stays registered.
+void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
+
 // Must run with GPU submissions quiesced: destroys imports of the range and
 // every table retired since the last quiesced release.
 void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
