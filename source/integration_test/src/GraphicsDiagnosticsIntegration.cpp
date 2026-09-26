@@ -9,6 +9,7 @@
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/NativeCapture.h"
@@ -563,6 +564,18 @@ void VerifyRenderTargetIndexAliasContract()
 	           parent_before->content_sequence != 0u && storage_before->content_sequence != 0u,
 	       "new buffer views report CPU upload provenance and write-back capability");
 	GpuMemoryFree(&ctx, heap_addr, guest.size());
+}
+
+void VerifyColorAttachmentTransferContract()
+{
+	Expect(VulkanResolveColorAttachmentView(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM) ==
+	           VulkanImage::VIEW_COLOR_UNORM &&
+	           VulkanResolveColorAttachmentView(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB) ==
+	               VulkanImage::VIEW_COLOR_SRGB &&
+	           VulkanResolveColorAttachmentView(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB) ==
+	               VulkanImage::VIEW_DEFAULT &&
+	           VulkanResolveColorAttachmentView(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM) < 0,
+	       "color attachment views preserve exact compatible UNORM/sRGB transfer domains");
 }
 
 void VerifyVertexClipProbeContract()
@@ -2190,6 +2203,22 @@ void VerifyDepthStencilAttachmentAccess(bool load_store_op_none_supported)
 
 void VerifyImageCopyNormalization()
 {
+	Gen5TextureArrayLayout cube_layout {};
+	Expect(Gen5GetTextureArrayLayout(181u, 4096u, 4096u, 4096u, 13u, 5u, 6u, &cube_layout),
+	       "BC7 cube layout resolves for the host mip containment contract");
+	uint32_t cube_region_count = 0u;
+	Expect(Gen5FillTextureArrayLayerUploadRegionsForLevels(cube_layout, 2u, 11u, nullptr, 0u, &cube_region_count) &&
+	           cube_region_count == 11u,
+	       "array upload exposes only mip levels created in the host image");
+	std::vector<Gen5TextureArrayUploadRegion> cube_regions(cube_region_count);
+	Expect(Gen5FillTextureArrayLayerUploadRegionsForLevels(cube_layout, 2u, 11u, cube_regions.data(), cube_region_count,
+	                                                      &cube_region_count) &&
+	           cube_region_count == 11u && cube_regions.back().dst_level == 10u && cube_regions.back().dst_array_layer == 2u,
+	       "bounded array upload retains exact destination levels and layer identity");
+	Expect(!Gen5FillTextureArrayLayerUploadRegionsForLevels(cube_layout, 0u, 0u, nullptr, 0u, &cube_region_count) &&
+	           !Gen5FillTextureArrayLayerUploadRegionsForLevels(cube_layout, 0u, 14u, nullptr, 0u, &cube_region_count),
+	       "array upload rejects empty or nonexistent host mip ranges");
+
 	VulkanImage source(VulkanImageType::StorageTexture);
 	VulkanImage destination(VulkanImageType::Texture);
 	source.SetNativeExtent(256u, 128u);
@@ -2551,6 +2580,113 @@ void VerifyGuestReadVisitSerializesProtection()
 	Expect(Kyty::Core::VirtualMemory::ProtectGuest(address, page_size, Kyty::Core::VirtualMemory::Mode::ReadWrite),
 	       "guest read visit restores page access for cleanup");
 	Expect(Kyty::Core::VirtualMemory::Free(address), "guest read visit releases its guest page");
+}
+
+void VerifyGen5EudSnapshotCoherence()
+{
+	using Kyty::Core::VirtualMemory::Alloc;
+	using Kyty::Core::VirtualMemory::CopyToGuest;
+	using Kyty::Core::VirtualMemory::Free;
+	using Kyty::Core::VirtualMemory::GetPageSize;
+	using Kyty::Core::VirtualMemory::Mode;
+
+	const uint64_t eud_address = Alloc(0u, GetPageSize(), Mode::ReadWrite);
+	Expect(eud_address != 0u, "Gen5 EUD snapshot fixture allocates guest table storage");
+
+	std::array<uint32_t, 44> first_table {};
+	std::array<uint32_t, 44> replacement_table {};
+	first_table[40]       = 0x00001000u;
+	first_table[41]       = 0x00000010u;
+	first_table[42]       = 0x00000020u;
+	first_table[43]       = 0x00000030u;
+	replacement_table[40] = 0x00002000u;
+	replacement_table[41] = 0x00000011u;
+	replacement_table[42] = 0x00000022u;
+	replacement_table[43] = 0x00000033u;
+	Expect(CopyToGuest(eud_address, first_table.data(), sizeof(first_table)),
+	       "Gen5 EUD snapshot fixture writes the first descriptor table");
+
+	std::array<uint16_t, 6> direct_offsets {};
+	direct_offsets.fill(0xffffu);
+	constexpr uint32_t eud_direct_type = 5u;
+	direct_offsets[eud_direct_type] = 28u;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets.data();
+	user_data.eud_size_dw            = 4u;
+	user_data.direct_resource_count  = static_cast<uint16_t>(direct_offsets.size());
+
+	HW::UserSgprInfo user_sgpr {};
+	user_sgpr.value[28] = static_cast<uint32_t>(eud_address);
+	user_sgpr.value[29] = static_cast<uint32_t>(eud_address >> 32u);
+
+	ShaderInstruction eud_load {};
+	eud_load.pc                = 0u;
+	eud_load.type              = ShaderInstructionType::SLoadDwordx4;
+	eud_load.format            = ShaderInstructionFormat::Sdst4SbaseSoffset;
+	eud_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 76, .size = 4};
+	eud_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 28, .size = 2};
+	eud_load.src[1].type       = ShaderOperandType::LiteralConstant;
+	eud_load.src[1].constant.u = 40u * sizeof(uint32_t);
+	eud_load.src_num           = 2;
+
+	ShaderInstruction storage_consumer {};
+	storage_consumer.pc                = 4u;
+	storage_consumer.type              = ShaderInstructionType::SBufferLoadDword;
+	storage_consumer.format            = ShaderInstructionFormat::SdstSbaseSoffset;
+	storage_consumer.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 1};
+	storage_consumer.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 76, .size = 4};
+	storage_consumer.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+	storage_consumer.src[1].constant.u = 0u;
+	storage_consumer.src_num           = 2;
+
+	ShaderInstruction end {};
+	end.pc     = 8u;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code {};
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(eud_load);
+	code.GetInstructions().Add(storage_consumer);
+	code.GetInstructions().Add(end);
+
+	uint32_t required_end_dw = 0u;
+	Expect(ShaderGen5EudRequiredEndDwords(&user_data, 30, 28, &code, 0, &required_end_dw) && required_end_dw == 44u,
+	       "Gen5 EUD snapshot includes the dynamic descriptor span at dword 40");
+
+	struct SnapshotMutation
+	{
+		uint64_t        address     = 0u;
+		const uint32_t* replacement = nullptr;
+		uint64_t        bytes       = 0u;
+		bool            changed     = false;
+		bool            write_ok    = false;
+	} mutation {eud_address, replacement_table.data(), sizeof(replacement_table)};
+	ShaderSetGen5EudSnapshotTestHook(
+	    [](void* opaque)
+	    {
+		    auto* state = static_cast<SnapshotMutation*>(opaque);
+		    if (!state->changed)
+		    {
+			    state->write_ok = Kyty::Core::VirtualMemory::CopyToGuest(state->address, state->replacement, state->bytes);
+			    state->changed  = true;
+		    }
+	    },
+	    &mutation);
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 30, &code, 0, false);
+	ShaderSetGen5EudSnapshotTestHook(nullptr, nullptr);
+
+	Expect(mutation.changed && mutation.write_ok, "Gen5 EUD snapshot fixture changes the guest table during capture");
+	Expect(bind.storage_buffers.buffers_num == 1 && bind.storage_buffers.dynamic_sload[0],
+	       "Gen5 EUD snapshot materializes the dynamic storage descriptor");
+	for (int field = 0; field < 4; ++field)
+	{
+		Expect(bind.storage_buffers.buffers[0].fields[field] == replacement_table[40 + field],
+		       "Gen5 EUD snapshot never combines descriptor words from two guest-table versions");
+	}
+	Expect(Free(eud_address), "Gen5 EUD snapshot fixture releases guest table storage");
 }
 
 void VerifyFusedShaderUsesEffectiveBackEntry()
@@ -5314,6 +5450,11 @@ int main(int argc, char** argv)
 		VerifyRenderTargetIndexAliasContract();
 		return 0;
 	}
+	if (argc == 2 && std::strcmp(argv[1], "--color-attachment-transfer-only") == 0)
+	{
+		VerifyColorAttachmentTransferContract();
+		return 0;
+	}
 	if (argc == 2 && std::strcmp(argv[1], "--vertex-clip-probe-contract-only") == 0)
 	{
 		VerifyVertexClipProbeContract();
@@ -5367,7 +5508,9 @@ int main(int argc, char** argv)
 		return 0;
 	}
 	VerifyGuestReadVisitSerializesProtection();
+	VerifyGen5EudSnapshotCoherence();
 	VerifyImageCopyNormalization();
+	VerifyColorAttachmentTransferContract();
 	VerifyBoundedShaderDecode();
 	VerifyScalarConditionalMoves();
 	VerifyFusedShaderUsesEffectiveBackEntry();

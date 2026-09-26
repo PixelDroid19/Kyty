@@ -621,13 +621,21 @@ struct ColorAttachmentLoadOps
 // Do not invent B=0/A=1 by bitcasting WORD0/1 as float32 R/G.
 [[nodiscard]] inline bool ColorClearWordsHaveKnownPacking(VkFormat format)
 {
-	return format == VK_FORMAT_R16G16B16A16_SFLOAT || format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB ||
-	       format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
+	return format == VK_FORMAT_R32_SFLOAT || format == VK_FORMAT_R16G16B16A16_SFLOAT || format == VK_FORMAT_R8G8B8A8_UNORM ||
+	       format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
 }
 
 [[nodiscard]] inline VkClearColorValue DecodeGuestColorClearWords(uint32_t word0, uint32_t word1, VkFormat format)
 {
 	VkClearColorValue value {};
+	if (format == VK_FORMAT_R32_SFLOAT)
+	{
+		// A single 32-bit floating component occupies WORD0; WORD1 is not
+		// another channel. Preserve the payload, including signed zero.
+		std::memcpy(&value.float32[0], &word0, sizeof(word0));
+		value.float32[3] = 1.0f;
+		return value;
+	}
 	if (format == VK_FORMAT_R16G16B16A16_SFLOAT)
 	{
 		value.float32[0] = Float16BitsToFloat32(static_cast<uint16_t>(word0 & 0xffffu));
@@ -735,7 +743,7 @@ struct ImageImageCopy
 
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image,
-                            uint64_t dst_layout);
+                            uint64_t dst_layout, uint32_t dst_base_array_layer = 0);
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanImage* dst_image, const Vector<BufferImageCopy>& regions,
                        uint64_t dst_layout);
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,
@@ -745,7 +753,7 @@ void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchai
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
                    uint64_t dst_layout);
 void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
-                        uint64_t dst_layout);
+                        uint64_t dst_layout, uint32_t dst_base_array_layer = 0);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, const Vector<BufferImageCopy>& regions,
                    uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);

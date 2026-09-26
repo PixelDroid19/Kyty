@@ -18,8 +18,10 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
-	inst.src[0]  = operand_parse(ssrc0);
-	inst.src_num = 1;
+	// GETPC has no source and is always one word, even if the unused field
+	// resembles a literal selector.
+	inst.src[0]  = (opcode == 0x1fu ? ShaderOperand {} : operand_parse(ssrc0));
+	inst.src_num = (opcode == 0x1fu ? 0 : 1);
 	inst.dst     = operand_parse(sdst);
 
 	uint32_t size = 1;
@@ -149,17 +151,20 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x1D: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitset1_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x1D:
+			inst.type    = ShaderInstructionType::SBitset1B32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src[1]  = inst.dst;
+			inst.src_num = 2;
 			break;
 		case 0x1E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitset1_b64 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x1F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getpc_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x1F:
+			inst.type     = ShaderInstructionType::SGetpcB64;
+			inst.format   = ShaderInstructionFormat::Sdst2;
+			inst.dst.size = 2;
 			break;
 		case 0x20:
 			inst.type        = ShaderInstructionType::SSetpcB64;

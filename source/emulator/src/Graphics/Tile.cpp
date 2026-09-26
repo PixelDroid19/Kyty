@@ -2030,7 +2030,10 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 
 			if (levels != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: levels != 1 condition ignored (continuing)\n"); }
 			if (tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format) condition ignored (continuing)\n"); }
-			if (tile == 0x18u && format != 7u && format != 22u)
+			// Tile 24 also carries the 8-bit stencil plane of a depth-stencil
+			// surface (the guest samples it as an 8-bit unsigned format). Its
+			// 64 KiB block grid uses the same sizing math as the depth formats.
+			if (tile == 0x18u && format != 5u && format != 7u && format != 22u)
 			{
 				EXIT("unsupported Gen5 depth tile format: tile=%u format=%u\n", tile, format);
 			}

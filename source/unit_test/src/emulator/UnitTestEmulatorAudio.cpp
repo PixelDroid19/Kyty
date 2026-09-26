@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <cstdlib>
 #include <chrono>
@@ -108,6 +109,115 @@ TEST(EmulatorAudio, AudioOut2UserCreateRejectsReadOnlyOutputWithoutWriting)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorAudio, AudioOut2GetSpeakerInfoMatchesEvidencedTwoArgumentAbi)
+{
+	using ExpectedGetSpeakerInfo = int(KYTY_SYSV_ABI*)(void*, uint32_t);
+	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2GetSpeakerInfo), ExpectedGetSpeakerInfo>));
+}
+
+TEST(EmulatorAudio, AudioOut2GetSpeakerInfoWritesStereoHostRecord)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// Independent copy of the observed record: type @0, available_bits @4,
+	// flags @8, then 16 {azimuth, elevation} int16 degree pairs at @0x10.
+	struct SpeakerAngle
+	{
+		int16_t azimuth;
+		int16_t elevation;
+	};
+	struct SpeakerInfo
+	{
+		uint8_t      type;
+		uint8_t      reserved1;
+		uint16_t     reserved2;
+		uint32_t     available_bits;
+		uint32_t     flags;
+		uint32_t     reserved3;
+		SpeakerAngle speaker_angle[16];
+	};
+	static_assert(sizeof(SpeakerInfo) == 0x50);
+	static_assert(offsetof(SpeakerInfo, available_bits) == 0x4);
+	static_assert(offsetof(SpeakerInfo, flags) == 0x8);
+	static_assert(offsetof(SpeakerInfo, speaker_angle) == 0x10);
+
+	// Observed call sites pass selector 0 and 1 against one host output.
+	for (uint32_t selector: {0u, 1u})
+	{
+		GuestReadableBlock storage(0x100);
+		ASSERT_TRUE(storage.IsValid());
+		std::memset(storage.Data(), 0xa5, 0x100);
+		ASSERT_EQ(AudioOut2::AudioOut2GetSpeakerInfo(storage.Data(), selector), 0);
+
+		const auto* info = static_cast<const SpeakerInfo*>(storage.Data());
+		EXPECT_EQ(info->type, 0u);
+		EXPECT_EQ(info->reserved1, 0u);
+		EXPECT_EQ(info->reserved2, 0u);
+		EXPECT_EQ(info->available_bits, 0x3u);
+		EXPECT_EQ(info->flags, 0u);
+		EXPECT_EQ(info->reserved3, 0u);
+		EXPECT_EQ(info->speaker_angle[0].azimuth, 30);
+		EXPECT_EQ(info->speaker_angle[0].elevation, 0);
+		EXPECT_EQ(info->speaker_angle[1].azimuth, -30);
+		EXPECT_EQ(info->speaker_angle[1].elevation, 0);
+		for (size_t i = 2; i < 16; i++)
+		{
+			EXPECT_EQ(info->speaker_angle[i].azimuth, 0);
+			EXPECT_EQ(info->speaker_angle[i].elevation, 0);
+		}
+		// The observed caller keeps the record on its stack: nothing past the
+		// 0x50-byte extent may be touched.
+		const auto* tail = static_cast<const uint8_t*>(storage.Data()) + 0x50;
+		for (size_t i = 0; i < 0x100 - 0x50; i++)
+		{
+			ASSERT_EQ(tail[i], 0xa5u) << i;
+		}
+	}
+}
+
+TEST(EmulatorAudio, AudioOut2GetSpeakerInfoRejectsInvalidOutputWithoutWriting)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	EXPECT_EQ(AudioOut2::AudioOut2GetSpeakerInfo(nullptr, 0), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+
+	ASSERT_EXIT(
+	    {
+		Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		GuestReadableBlock storage(0x100);
+		if (!storage.IsValid())
+		{
+			std::_Exit(2);
+		}
+		std::memset(storage.Data(), 0xa5, 0x100);
+		if (!storage.Protect(Core::VirtualMemory::Mode::Read))
+		{
+			std::_Exit(3);
+		}
+		const int   result    = AudioOut2::AudioOut2GetSpeakerInfo(storage.Data(), 0);
+		const auto* bytes     = static_cast<const uint8_t*>(storage.Data());
+		bool        unchanged = true;
+		for (size_t i = 0; i < 0x100; i++)
+		{
+			if (bytes[i] != 0xa5)
+			{
+				unchanged = false;
+				break;
+			}
+		}
+		std::_Exit(result == Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL && unchanged ? 0 : 4);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorAudio, AudioInCloseReleasesTheHostInputSlot)
 {
 	// The HLE owns the guest-visible handle, while HostAudio owns the slot.
@@ -180,11 +290,109 @@ TEST(EmulatorAudio, AudioOut2ContextLifecycleAcceptsObservedGen5Profile)
 	                        static_cast<uint8_t*>(context_workspace.Data()) + kContextBytes, [](uint8_t value) { return value == 0xa5; }));
 }
 
+TEST(EmulatorAudio, AudioOut2ContextLifecycleAcceptsSecondCapturedProfile)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	GuestReadableBlock   parameter_storage(0x40);
+	GuestValue<uint64_t> memory_size_storage;
+	GuestValue<int32_t>  context_storage;
+	ASSERT_TRUE(parameter_storage.IsValid());
+	ASSERT_TRUE(memory_size_storage.IsValid());
+	ASSERT_TRUE(context_storage.IsValid());
+	const uint64_t observed_configuration[8] = {0x0000020000000014ull, 0x0000000100000000ull, 0x0000000100000200ull};
+	std::memcpy(parameter_storage.Data(), observed_configuration, sizeof(observed_configuration));
+	*memory_size_storage.Data() = 0;
+	*context_storage.Data()     = 0;
+	ASSERT_EQ(AudioOut2::AudioOut2ContextQueryMemory(parameter_storage.Data(), memory_size_storage.Data()), 0);
+	// This is Kyty's existing opaque HLE workspace policy, not a measured
+	// native workspace layout or native QueryMemory result for this profile.
+	ASSERT_EQ(*memory_size_storage.Data(), 0x10000u);
+	GuestReadableBlock workspace(*memory_size_storage.Data());
+	ASSERT_TRUE(workspace.IsValid());
+	ASSERT_EQ(
+	    AudioOut2::AudioOut2ContextCreate(parameter_storage.Data(), workspace.Data(), *memory_size_storage.Data(), context_storage.Data()),
+	    0);
+	EXPECT_GT(*context_storage.Data(), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(*context_storage.Data()), 0);
+
+	for (const size_t offset: {0u, 4u, 16u, 24u, 63u})
+	{
+		auto* bytes = static_cast<uint8_t*>(parameter_storage.Data());
+		bytes[offset] ^= 1u;
+		*memory_size_storage.Data() = UINT64_MAX;
+		*context_storage.Data()     = INT32_MAX;
+		EXPECT_EQ(AudioOut2::AudioOut2ContextQueryMemory(bytes, memory_size_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+		EXPECT_EQ(*memory_size_storage.Data(), UINT64_MAX);
+		EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(bytes, workspace.Data(), 0x10000, context_storage.Data()),
+		          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+		EXPECT_EQ(*context_storage.Data(), INT32_MAX);
+		bytes[offset] ^= 1u;
+	}
+}
+
+TEST(EmulatorAudio, AudioOut2SecondCapturedProfileReadsAComplete512FrameGrain)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	GuestReadableBlock   parameter_storage(0x40);
+	GuestReadableBlock   workspace(0x10000);
+	GuestValue<int32_t>  context_storage;
+	GuestValue<uint64_t> memory_size_storage;
+	ASSERT_TRUE(parameter_storage.IsValid());
+	ASSERT_TRUE(workspace.IsValid());
+	ASSERT_TRUE(context_storage.IsValid());
+	ASSERT_TRUE(memory_size_storage.IsValid());
+	const uint64_t observed_configuration[8] = {0x0000020000000014ull, 0x0000000100000000ull, 0x0000000100000200ull};
+	std::memcpy(parameter_storage.Data(), observed_configuration, sizeof(observed_configuration));
+	ASSERT_EQ(AudioOut2::AudioOut2ContextQueryMemory(parameter_storage.Data(), memory_size_storage.Data()), 0);
+	ASSERT_EQ(*memory_size_storage.Data(), 0x10000u);
+	ASSERT_EQ(AudioOut2::AudioOut2ContextCreate(parameter_storage.Data(), workspace.Data(), 0x10000, context_storage.Data()), 0);
+	const int32_t context = *context_storage.Data();
+
+	GuestReadableBlock  port_param_storage(16);
+	GuestValue<int32_t> port_storage;
+	ASSERT_TRUE(port_param_storage.IsValid());
+	ASSERT_TRUE(port_storage.IsValid());
+	const uint32_t port_param[4] = {0, 0x800, 48000, 0}; // MAIN, F32, 8 channels.
+	std::memcpy(port_param_storage.Data(), port_param, sizeof(port_param));
+	ASSERT_EQ(AudioOut2::AudioOut2PortCreate(context, port_param_storage.Data(), port_storage.Data()), 0);
+	const int32_t port = *port_storage.Data();
+
+	GuestReadableBlock   pcm_storage(0x8000);
+	GuestReadableBlock   attribute_storage(0x18);
+	GuestValue<uint64_t> pcm_pointer;
+	ASSERT_TRUE(pcm_storage.IsValid());
+	ASSERT_TRUE(attribute_storage.IsValid());
+	ASSERT_TRUE(pcm_pointer.IsValid());
+	const auto pcm_address = reinterpret_cast<uint64_t>(pcm_storage.Data());
+	std::memset(pcm_storage.Data(), 0, 0x8000);
+	ASSERT_TRUE(Core::VirtualMemory::Protect(pcm_address + 0x4000, 0x4000, Core::VirtualMemory::Mode::NoAccess));
+	const uint64_t attribute[3] = {0, reinterpret_cast<uint64_t>(pcm_pointer.Data()), sizeof(uint64_t)};
+	std::memcpy(attribute_storage.Data(), attribute, sizeof(attribute));
+
+	// Only 256 F32/8-channel frames are readable at this address. A context
+	// which accidentally kept the legacy grain would wrongly accept it.
+	*pcm_pointer.Data() = pcm_address + 0x2000;
+	EXPECT_EQ(AudioOut2::AudioOut2PortSetAttributes(port, attribute_storage.Data(), 1), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	// 512 * 8 * sizeof(float) bytes end exactly at the guard page.
+	*pcm_pointer.Data() = pcm_address;
+	EXPECT_EQ(AudioOut2::AudioOut2PortSetAttributes(port, attribute_storage.Data(), 1), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2PortDestroy(port), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+}
+
 TEST(EmulatorAudio, AudioOut2HostStatePushPreservesPcmQueueAndSinkAcrossFailure)
 {
-	// Host-state regression only: ContextCreate itself is intentionally not a
-	// supported guest contract until its parameter/workspace ABI is evidenced.
-	using ExpectedPush = int(KYTY_SYSV_ABI*)(int32_t, uint32_t);
+	// Isolate host queue/sink failure handling from the bounded ContextCreate
+	// parameter profiles, which are covered separately above.
+	using ExpectedPush    = int(KYTY_SYSV_ABI*)(int32_t, uint32_t);
 	using ExpectedSetAttr = int(KYTY_SYSV_ABI*)(int32_t, const void*, uint32_t);
 	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2ContextPush), ExpectedPush>));
 	EXPECT_TRUE((std::is_same_v<decltype(&AudioOut2::AudioOut2PortSetAttributes), ExpectedSetAttr>));

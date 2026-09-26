@@ -13,7 +13,8 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	KYTY_TYPE_STR("mimg");
 
 	uint32_t slc    = (buffer[0] >> 25u) & 0x1u;
-	uint32_t opcode = (buffer[0] >> 18u) & 0x7fu;
+	// GFX10 stores OP[7] separately in bit zero; legacy MIMG has seven bits.
+	uint32_t opcode = ((buffer[0] >> 18u) & 0x7fu) | (next_gen ? ((buffer[0] & 1u) << 7u) : 0u);
 	uint32_t lwe    = (buffer[0] >> 17u) & 0x1u;
 	uint32_t tff    = (buffer[0] >> 16u) & 0x1u;
 	uint32_t r128   = (buffer[0] >> 15u) & 0x1u;
@@ -28,6 +29,10 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	uint32_t srsrc = (buffer[1] >> 16u) & 0x1fu; // T#
 	uint32_t vdata = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr = (buffer[1] >> 0u) & 0xffu;
+
+	// BVH has a separate address tuple and a 128-bit resource, not a texture.
+	if (next_gen && opcode == 0xe6u) { return shader_parse_bvh(pc, src, buffer, dst, next_gen); }
+	if (next_gen && opcode == 0xe7u) { KYTY_NI("image_bvh64_intersect_ray"); }
 
 	EXIT_NOT_IMPLEMENTED(da == 1);
 	EXIT_NOT_IMPLEMENTED(r128 == 1);

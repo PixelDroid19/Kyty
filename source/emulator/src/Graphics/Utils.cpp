@@ -176,7 +176,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t
 }
 
 void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image,
-	                        uint64_t dst_layout)
+	                        uint64_t dst_layout, uint32_t dst_base_array_layer)
 {
 	EXIT_IF(buffer == nullptr || src_buffer == nullptr || src_buffer->buffer == nullptr || dst_image == nullptr ||
 	        dst_image->image == nullptr);
@@ -186,6 +186,7 @@ void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uin
 	VkBufferImageCopy region {};
 	region.bufferRowLength             = src_pitch != dst_image->extent.width ? src_pitch : 0u;
 	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	region.imageSubresource.baseArrayLayer = dst_base_array_layer;
 	region.imageSubresource.layerCount = 1u;
 	region.imageExtent                 = {dst_image->extent.width, dst_image->extent.height, 1u};
 	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
@@ -581,7 +582,7 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 }
 
 void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
-	                    uint64_t dst_layout)
+	                    uint64_t dst_layout, uint32_t dst_base_array_layer)
 {
 	EXIT_IF(ctx == nullptr || dst_image == nullptr || src_data == nullptr);
 	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
@@ -595,7 +596,7 @@ void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void*
 	VulkanUnmapMemory(ctx, &staging_buffer.memory);
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	buffer.Begin();
-	UtilBufferToDepthImage(&buffer, &staging_buffer, src_pitch, dst_image, dst_layout);
+	UtilBufferToDepthImage(&buffer, &staging_buffer, src_pitch, dst_image, dst_layout, dst_base_array_layer);
 	buffer.End();
 	buffer.Execute();
 	buffer.WaitForFence();

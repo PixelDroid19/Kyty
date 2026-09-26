@@ -144,7 +144,8 @@ does not cancel it. `at-present` is an absolute future presentation count,
 `repeat` defaults to one, and a repeated tap requires a positive
 `--present-delta`. The presentation path starts the existing
 release → press → release FSM immediately after it records the exact target
-present, so `delivered_taps` advances only when the guest samples the press.
+present. The press is held for two advancing guest samples, while
+`delivered_taps` advances on the first sampled press.
 If a target is missed, its button is held, or the prior FSM is still pending,
 that target is cancelled rather than delayed; `status.pad` exposes
 `scheduled_taps`, `next_target_present`, and `cancelled_scheduled_taps`.

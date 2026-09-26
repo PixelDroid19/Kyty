@@ -57,6 +57,7 @@ static bool ShaderInstructionIsConditionalBranch(ShaderInstructionType type)
 	switch (type)
 	{
 		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchExecnz:
 		case ShaderInstructionType::SCbranchScc0:
 		case ShaderInstructionType::SCbranchScc1:
 		case ShaderInstructionType::SCbranchVccz:

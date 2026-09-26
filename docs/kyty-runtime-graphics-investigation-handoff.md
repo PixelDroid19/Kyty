@@ -340,6 +340,17 @@ against the same correct gameplay capture.
   while opaque early-Z shaders retain it.
 - Temporary MRT, descriptor, and frame-selection instrumentation was removed
   before the semantic commit.
+- A Gen5 pixel shader that loads its constant-buffer V# through the type-5 EUD
+  pointer was observed with matching metadata and ISA offsets: logical sharp
+  slot 72 and `s_load_dwordx4` byte offset 160 both select EUD dword 40. Two
+  consecutive full-table reads matched, and bounded GPU-writer history found
+  no overlapping DMA, WRITE_DATA, event, or write-back producer. This excludes
+  a torn table, a shifted EUD base, and an omitted GPU ordering edge for that
+  failure. At register decode the four supposed V# words were already PM4-like
+  register/value pairs, and the EUD address was adjacent to—but outside—the
+  copied command span. The remaining ownership frontier is submission-time
+  capture or relocation of referenced EUD storage; do not replace the invalid
+  V# with a null carrier or weaken range validation.
 - Retiring an idle `StorageTexture` by frame age can discard the only valid
   GPU-authored contents because that object has no GPU-to-guest write-back.
   Permanently excluding every storage image from retirement was also rejected:
@@ -4073,3 +4084,193 @@ false-negative interleaving has been demonstrated. The next occurrence must
 publish a signal-safe bounded snapshot of tracker page state, reference count,
 captured original mode/token and native protection before fatal termination.
 Until then this is a recorded runtime defect, not a graphics or allocator fix.
+
+## Color-load policy audit: outstanding structural risks
+
+A bounded CPU probe of `ResolveColorAttachmentLoadOps` in
+`source/emulator/include/Emulator/Graphics/Utils.h` confirms that a retained
+RGBA8 target selects `LOAD` while the identical target in
+`SHADER_READ_ONLY_OPTIMAL` selects `CLEAR`, with the fast-clear flag false and
+both clear words zero. Sampling does not by itself establish a guest discard
+or a new frame. A render-to-texture, sample, then partial-render sequence can
+therefore lose previously rendered pixels. Existing graphics-state tests
+explicitly expect this sample-rebind clear; their success is not independent
+evidence for that policy.
+
+Do not conflate this structural risk with the already traced damaged world
+writer: that writer had `LOAD`, so this audit does not reopen its excluded
+clear hypothesis. Before replacing the policy, capture an affected target's
+write/sample/rebind sequence and establish the guest clear or retention
+contract. A focused Vulkan integration should seed the target, sample it,
+render a partial region, and read back both changed and untouched regions.
+Clear requests must come from their evidenced producer, not a sampled layout.
+
+The missing `R32_SFLOAT` decoder is now corrected locally: WORD0 is preserved
+as a float payload, WORD1 is ignored for this one-component format, and no
+numeric conversion or clamp is applied. A bounded CPU reproduction previously
+returned zero for five of six explicit bit patterns; the corrected decoder
+preserves all six, including signed zero and nonfinite payloads. This changes
+clear-value decoding only, not the policy that decides when a clear occurs.
+
+`CommandBuffer::BeginRenderPass` now decodes
+clear values through `attachment.attachment_format`, matching framebuffer
+creation. Both paths resolve through the same attachment interpretation; the
+earlier divergence was numerically masked for compatible UNORM/sRGB pairs but
+mattered once the clear packing differs (e.g. R32 display-buffer clears).
+The fast-clear-enable register bit alone must not be assumed to be a new clear
+command; prove its metadata/event semantics before changing the load decision.
+
+The compute metadata-fill path already requires an exact instruction sequence
+and descriptor-use proof. A generic rule that substitutes a whole-surface
+clear merely because metadata is writable would weaken this implementation;
+retain the existing proof and normal dispatch execution.
+
+### Float-clear validation boundary
+
+A fresh Release build of `fc_script`, `kyty_unit_test`, and
+`kyty_graphics_diagnostics_integration` passed with two jobs, a 3-GiB hard
+memory limit, and swap disabled. The focused color-clear filter passed all ten
+tests; `KytyGraphicsDiagnosticsIntegration.ColorAttachmentTransfer` passed
+one CTest case with `--no-tests=error` and the automatic build fixture excluded.
+The graphics-table manifest check passed for all thirteen tables, and
+`git diff --check` was clean. Existing compiler/linker warnings remain; this
+was not a warning-free build.
+
+One subsequent strict Silent run, capped at 100 seconds, 2.5 GiB and one CPU,
+advanced beyond 11,000 presents with `last-error=null`. The diagnostic input
+route began after its intended present threshold and timed out waiting for
+100 more presents after the first delivered tap. Later status still showed
+presentation progress, so this was not proof of a deadlock. The retained native
+frame showed a coherent track and the PLAY prompt, not controllable gameplay.
+Native heuristic scoring was healthy, but offline scoring returned exit 1
+with `scene_ok=false`; neither score establishes material correctness. Final
+status reported 2.603 FPS during loading, not a gameplay benchmark. Recorded
+peak memory was 2,418,012,160 bytes, with zero swap, and the sole guest was
+stopped deliberately. No same-scene A/B links the float-clear correction to a
+visible improvement. Dark-surface correctness, sustained performance, and
+formal playability remain open; do not publish this as acceptance.
+
+### DPP arithmetic source routing (local, not visual acceptance)
+
+The float arithmetic emitter consumed a same-lane source even when the decoded
+VOP2 operand selected DPP. Only the move emitter implemented quad permutation.
+The RDNA2 ISA sections 6.9 and 13.3.9 specify that DPP transforms the source of
+the arithmetic instruction as well. A retained terrain-like fragment program
+uses broadcasts of quad lanes zero, one and two to form two position differences
+before a cross product and reciprocal square root. Losing the arithmetic
+permutations collapses those distinct differences into the same vector; changing
+brightness or the final clamp cannot restore the missing source values.
+
+The full-mask quad-permutation float path is now shared with move lowering.
+Unsupported controls, partial row/bank masks and fetch-inactive remain outside
+this subset and fail visibly rather than becoming same-lane arithmetic. This
+does not implement all DPP modes or resolve fragment helper-lane/EXEC semantics.
+Translator identity is advanced past the previously observed local cache
+versions so old same-lane modules cannot satisfy the new lookup.
+
+The focused regression failed before the change because the generated program
+contained only the move's shuffle, not the subtraction's. All three focused
+DPP cases pass afterward, including recompilation through the real shader
+toolchain. Both emulator and unit-test targets built with two jobs, a 3-GiB
+hard memory limit and no swap. Existing compiler/linker warnings remain.
+
+A subsequent bounded Silent run with shader validation reached a coherent track
+and vehicle frame with no last error. Its live shader dump confirms the six
+arithmetic quad permutations are present. However, the first 100-present input
+wait timed out during loading, so the route did not reach the selected terrain
+checkpoint. Native scoring was healthy while the offline gate returned exit 1
+with `scene_ok=false`. Final instantaneous rate was 11.257 FPS, not a comparable
+performance benchmark. Peak memory was 1,862,537,216 bytes, swap was zero, and
+the process was explicitly stopped. No visual improvement or gameplay acceptance
+is established by this run.
+
+The captured fragment variant also declares no interpolated input and emits
+zero for the three position interpolation results. This is a separate remaining
+lead: correlate its input metadata and upstream parameter exports with an actual
+terrain draw before changing interpolation defaults. Do not generalize an older
+depth-rejected writer exclusion to a different scene or shader-input variant.
+
+Independent review found no new blocker in the narrow full-mask F32 routing
+change, but confirmed inherited gaps that must not be presented as solved:
+`operand_load_uint` and `operand_load_int` in `ShaderSpirvOperands.cpp` now
+share the same validated full-mask quad-permutation subset as the float path
+(raw-bit `OpCopyObject`/`OpBitcast` into a `%uint` lane exchange, fail-closed
+outside the subset). The shared shuffle still lacks inactive-source zeroing
+for partial guest EXEC with FI=0. Trace source EXEC and fragment helper
+participation before expanding the support claim. The regression additionally checks the
+generated subtraction's actual source/control dependency and fail-closed
+handling of a partial bank mask. Ten shader-cache tests and all thirteen
+graphics-table provenance checks passed; the initial provenance invocation
+without its required manifest was a usage error, not a passing check.
+
+### Terrain input variant: output-producing draw verified
+
+A subsequent bounded main-checkout trace resolves the missing-interpolator
+lead above for the observed terrain program. In one submission, the indexed
+1,536-index / 289-vertex draw has two vertex exports, one pixel input mapped to
+parameter location one, an RGB write mask, and a full-resolution color target.
+The next draw with the same pixel program has a default `0x20` interpolator,
+one vertex export, no color attachment, and a zero color write mask. The
+zero-input variant is therefore not evidence that this terrain color writer
+lost its position varying. Do not replace the legitimate default or alter
+interpolation globally based on the checksum-only shader dump.
+
+The diagnostic file itself is not variant-specific: `ShaderProbeWrite` names
+the file by stage and guest checksum and recreates it for each write, including
+analysis-only writes. The runtime shader identity, in contrast, includes input
+count, system-input masks and all interpolator settings. A retained dump must
+be correlated with the draw's actual interface and attachment before it is
+used as an output-producing shader oracle. If this probe is extended, retain
+bounded variants with their interface identity rather than an unbounded dump.
+
+The first live attempt used a CLI from another checkout and failed protocol
+negotiation; it was stopped and contributes no graphics evidence. The matching
+CLI uses protocol eight. A later strict Silent run captured coherent track,
+vehicle and green terrain, but the first 100-present input wait timed out and
+the intended route was not completed. Native scoring was healthy; the offline
+gate returned exit one with `scene_ok=false`. The focused trace run captured a
+black transitional frame, despite observing the two draw interfaces above;
+that frame is not visual acceptance. Both guests reported no last error and
+were deliberately stopped, with peaks below 1.6 GiB and zero swap. These runs
+used the existing locally built runtime, not a fresh build of every pending
+change. Neither proves sustained playability, complete material correctness,
+nor a performance improvement. No renderer semantics were changed for this
+investigation.
+
+### Fragment quad helper participation and short shader termination
+
+The full-mask float DPP quad-permutation path now uses constant-index
+`OpGroupNonUniformQuadBroadcast` in pixel shaders. General subgroup shuffle
+does not guarantee helper-invocation participation; quad operations do under
+the Vulkan shader execution contract. Only distinct source lanes selected by
+the constant control are broadcast, followed by selection when required.
+Non-pixel shaders retain the prior shuffle path. The generated pixel capability
+is checked against fragment-stage and quad-operation support before module
+creation, including cached modules. Translator version 41 invalidates earlier
+modules. This addresses host helper participation only: guest source EXEC/FI
+semantics remain an open correctness concern in the existing DPP path.
+
+The expanded short-program regression also exposed an independent terminator
+bug in `Recompile_SEndpgm_Empty`: it indexed two instructions backward even
+when `s_endpgm` occurred before index two. Such programs cannot contain the
+two-instruction discard idiom; they now emit the ordinary return directly.
+The failure was reproduced under the debugger in that exact bounds check.
+
+The two original quad regressions failed before the helper change. After the
+terminator guard, all thirteen focused DPP and shader-cache tests passed,
+including real shader-toolchain compilation of uniform and non-uniform quad
+controls and a compute control retaining shuffle. Emulator and test builds
+passed with two jobs, a 3-GiB hard limit and no swap; existing warnings remain.
+All thirteen graphics-table checks passed and the diff whitespace check was
+clean.
+
+A subsequent strict Silent run captured coherent vehicle, bridge, road and
+green terrain with no structured runtime error. The first 100-present wait
+after input timed out, so the intended gameplay route did not complete. Native
+scoring reported `hot_corruption`; offline scoring reported `scene_ok=false`.
+The red bridge dominates the retained image, but that observation does not
+waive either gate. Peak memory was 2,169,917,440 bytes with zero swap, and the
+sole guest was explicitly stopped. There is no matched-scene visual A/B or
+sustained gameplay/performance acceptance for this change. Resolve the
+source-EXEC/FI concern and validate the actual scene before publishing a
+complete DPP or visual-correctness claim.

@@ -254,6 +254,540 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Paired compute admission frontier (2026-09-22, not gameplay)
+
+The restricted wave64-on-native32 compute path is connected to direct and
+indirect dispatch admission on this dirty `main`: checked guest/physical local
+sizes and host capabilities precede pipeline and descriptor work, and
+translation identity separates the two layouts. This remains an instruction
+allowlist, not general wave64 emulation. Strict Silent/Native runs first
+stopped at PC `0x0` (`S_INST_PREFETCH`), then PC `0x4`
+(`S_LOAD_DWORDX4`), then PC `0xC` (`S_LSHL_B32`). Exact SOPP opcode
+`0x20` modes 1–3 are admitted as instruction-cache hints, with parser aliases
+rejected. The latest owned build and strict rerun completes resident loading
+and stops at PC `0x10`: `SWaitcnt is outside the paired compute-wave admission
+set` (dispatch mode `0x41`). The cache-hint interpretation follows the
+[AMD RDNA2 ISA](https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture).
+This is admission progress only; no guest compute
+dispatch, presentation, input-to-gameplay, capture, or playability gate passed.
+
+At PC `0x4`, the captured tuple loads `s16..s19` from type-5 EUD pointer
+`s12:s13` at byte offset `0x50`. A paused diagnostic found the nonzero pointer,
+24 declared EUD dwords, zero GLC/DLC, and the normal resource collector's
+storage-buffer descriptor mapping for EUD dwords 20–23 with a consumer at PC
+`0x14`. The paired admission now runs **after** resource mapping and requires
+that exact per-PC producer, offset, span, flags, binding source, and consumer
+record. The emitter fails closed if any mapped word is missing. A separate
+128-logical-lane Vulkan probe on Arc A770 passes all four descriptor words in
+both banks of two waves, but supplies its mapping manually: it proves mapped
+SPIR-V lowering, not production mapping or a guest dispatch. The collector
+diagnostic and its focused mapping tests provide distinct provenance evidence.
+Because the EUD base pair is not initialized as ordinary SGPR data, paired
+analysis also rejects all other reads and writes of that pair for an extended
+bind, including later control-flow paths. The gate keeps combined SGPR plus
+`smem_imm_offset` loads rejected; `recompile_sload_from_extended` does not add
+that extra offset. Unrepresented SMEM reserved bits still require a fail-closed
+decoder check. A later EUD load at PC `0x490` lacks a verified mapping; inspect
+its actual consumer only if it becomes the first strict frontier.
+
+The PC `0xC` scalar shift is admitted only for a plain one-word SGPR input,
+inline shift 0–31, and `VccHi` destination. Two synthetic GPU cases on Arc
+A770 verify nonzero/zero results, SCC, VCC-low and EXEC preservation across
+128 logical lanes. The preceding complete regression checkpoint passed 1221
+unit tests with eight skips, three compute/graphics integrations, emulator
+boundaries, graphics-table provenance and `git diff --check`; the newer EUD
+guard passed 23 focused units and the shift passed 20 focused units and the
+paired GPU integration. Full regression after these additions is still due.
+A separate portability risk remains in
+`GraphicsRenderPipeline.cpp`: native W32 compute shaders using subgroup
+operations do not currently request subgroup size 32, so a host whose default
+subgroup is not 32 can execute incorrect lane-width semantics. The Arc A770
+used for these probes defaults to 32, so this has not reproduced locally.
+Require size 32 only for subgroup-sensitive W32 modules when supported, without
+the paired path's full-subgroup flag; otherwise reject that sensitive pipeline.
+Even a forced size 32 does not by itself prove subgroup lane ordering.
+
+### Latest startup shader frontier (2026-09-22, not gameplay)
+
+The latest strict run passes the texture-resource and scalar-load mapping
+ceilings described below, then stops at the missing `S_GETPC_B64` emitter.
+Dynamic scalar-load mappings now use copy-on-write records bounded by parsed
+instruction count, not a 64-entry parallel-array table. A 65-load shared-resource
+fixture failed on the prior ceiling and passes with preserved mapping lifetimes
+and copy isolation. Independent review found no blocking migration findings.
+Three separate regression processes passed 49 shader, 225 state and 231 packet
+tests, and both compute and graphics integrations passed. This does not erase
+the separately recorded combined-suite retirement-counter failures or establish
+any presentation/gameplay. The next contract is a runtime, cache-relocatable
+compute program address; fused graphics program addresses remain unrepresented.
+
+The subsequent compute GETPC implementation passes that stop and reaches an
+unsupported vector 64-bit comparison. Its program base is per-dispatch metadata
+in the existing push/UBO path, while cache identity contains only presence and
+layout. The 55 shader tests pass. On Intel Arc A770, thirteen numeric GPU cases
+pass, including two-base same-pipeline GETPC dispatches through push and UBO
+metadata, low-word carry, empty EXEC execution and preservation of an active
+EXEC low bit. These do not prove nonzero EXEC high-half behavior. Independent
+production and harness reviews found no remaining blocking findings. No
+presentation or gameplay is proven.
+
+The next comparison consumes a vector-comparison-produced VCC mask. The current
+backend stores that mask as a per-invocation boolean, not the architectural
+packed wave mask; comparing that boolean numerically with zero would therefore
+be incorrect. A bounded dispatch-entry capture reports initiator `0x41` and a
+256-invocation workgroup, while the host supports subgroups of at most 32.
+The public [GFX10.3 register definitions](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/include/asic_reg/gc/gc_10_3_0_sh_mask.h)
+place `CS_W32_EN` at bit 15; the [LLVM PAL wave-size regression](https://github.com/llvm/llvm-project/blob/main/llvm/test/CodeGen/AMDGPU/mixed_wave32_wave64.ll)
+corroborates its use for wave32. The captured dispatch requests wave64.
+
+Do not replace the numeric whole-wave comparison with a native subgroup32
+vote or request an unsupported native subgroup64. The actual parsed shader
+contains LDS reads, writes, an atomic and two real workgroup barriers, so
+splitting its workgroup into independent waves is not justified. A preceding
+EXEC-dependent branch can bypass the comparison, so inserting a workgroup
+barrier at the comparison also requires a convergence proof that is not
+currently available. Complete wave64 execution remains an architectural
+prerequisite; the bounded implementation below does not yet admit this shader.
+Retain these exclusions when continuing.
+The observed comparison also aliases its VCC source and destination. RDNA2
+ISA section 6.2.4 warns that wave64 VALU same-SGPR read/write can be
+unpredictable; the generic packed-mask rule alone does not establish this
+aliased sequence's hardware result. Do not infer per-half write behavior from
+the instruction-level statement that VCC is fully written.
+Follow-up comparison with public implementations did not close this gap:
+snapshotting U64 sources in another emulator and host-Vulkan tests with
+authored expected values are not target-hardware measurements. No verified
+same-SGPR exception or half-pass visibility rule was found. A lawful synthetic
+target-device result with initial/final masks and repeatability is still
+needed before choosing snapshot or forwarding semantics for this alias.
+
+The checked paired-layout module and optional Vulkan feature path now build.
+A real Vulkan host-layout probe verifies four guest waves per workgroup across
+two workgroups, with 512 distinct logical-lane output slots, on the Arc A770.
+The thirteen existing scalar/GETPC probes remain passing. The production
+paired prolog and non-CMPX U32 comparisons now pass eleven numerical GPU cases:
+packed lane63, zero/low/high/both/partial EXEC, ordinary SGPR mask destination,
+and three guest-coordinate axes across two waves. The full unit command reports
+1185 passes and eight skips. This is a bounded compare-only capability, not
+complete wave execution or gameplay; runtime paired admission remains disabled.
+
+The GPU canary caught an integration defect before admission: the execution
+mode used physical32 but the decorated WorkgroupSize constant retained guest64.
+[WorkgroupSize takes precedence over LocalSize](https://docs.vulkan.org/refpages/latest/refpages/source/WorkgroupSize.html),
+so duplicate wave records overwrote the canary. Both now use physical dimensions;
+all eleven numerical cases preserve the canary. Do not weaken that oracle or
+attribute this reproduced source mismatch to the probe's readback.
+
+The lane-operation stage reproduced and corrected an existing contract in
+`ShaderSpirvVector.cpp`, `Recompile_VReadfirstlaneB32_SVdstSVsrc0`: empty EXEC
+returned literal zero instead of lane0's value. A native32 GPU regression first
+returned zero for lane0=42; removing the post-broadcast zero selection makes it
+return42. Twelve paired read/write/readfirst cases also pass, including upper
+halves, modulo64 and EXEC-independent lane accesses. This does not establish
+complete wave execution or runtime admission. After the related parser fixes,
+all thirteen paired lane/move cases pass. The integrated checkpoint has82
+focused passes and1191 full-suite passes with8 known skips; both scalar and
+wave GPU integration targets pass without skips.
+
+`ShaderParseDS.cpp`, opcode0x20 (DS_ADD_RTN_U32), previously discarded VDST
+and the upper byte of its offset. Focused parser regressions reproduced both
+losses; the parser now retains a distinct return tuple and full byte offset.
+Paired LDS lowering has passed its bounded numerical and safety checks.
+The isolated native `ShaderSpirvLdsAtomic.cpp` handler now preserves the old
+value, full offset, operand aliases and inactive EXEC. Eight numerical GPU
+cases pass, including 32 contending invocations with distinct returned values.
+Translator version 46 invalidates binaries with the earlier native semantics.
+The paired LDS numerical counter probe passes128 logical increments with
+all returned old values0..127, but independent review found an admission gap:
+`ShaderComputeWaveLds.cpp`, `ValidateLdsAddress`, checks bounds without proving
+that non-atomic constant-address writes have a unique active writer or that
+later cross-invocation effects are synchronized. Such accepted programs can
+produce a host data race under the [Vulkan memory model](https://docs.vulkan.org/spec/latest/appendices/memorymodel.html).
+This finding is now closed for the narrow admitted subset by the separate
+`ShaderComputeWaveLdsSafety.cpp` proof: whole-workgroup singleton writer
+provenance, generic SGPR-half invalidation, and real-barrier effect phases.
+Independent review and numerical tests pass, including a lane63-only atomic
+that preserves inactive destinations. Current validation:91 focused passes,
+1199 full-suite passes and8 known skips; both GPU targets pass on Arc A770.
+Do not strengthen DS writes into invented
+atomics, insert extra barriers, or treat the passing counter as general LDS
+acceptance. Runtime paired admission stays disabled.
+The strict native-return rerun passes that missing-emitter frontier and again
+reaches the unresolved U64 comparison after resident-load completion. There
+is still no presentation or gameplay evidence.
+Related native defect recorded, not fixed here: `ShaderSpirvBuffer.cpp`,
+`Recompile_DsWriteB32_VaddrVdataOffset` (line2067) and
+`Recompile_DsReadB32_VdstVaddrOffset` (line2228) emit unconditional accesses;
+an inactive EXEC can therefore still write LDS or change a VGPR. Existing
+non-returning LDS atomics share this gap. Add focused inactive-effect tests
+and native predicate guards before claiming general native LDS correctness.
+
+The paired scalar subset now admits exact S_AND/OR/XOR_B64 and
+S_AND_SAVEEXEC_B64 (ordinary SGPR save destination only). Twelve numerical
+cases exercise high-half masks, SCC/EXECZ, source/destination aliasing and
+vector EXEC consumption. Full-EXEC initialization and singleton-writer
+proofs are conservatively invalidated by their explicit/implicit writes;
+four RED regressions reproduced stale-proof acceptance before correction.
+Current validation: 93 focused passes, 1201 full passes and 8 known skips,
+both compute GPU targets passing. These remain opt-in translation probes;
+paired runtime admission and general control-flow/memory support are pending.
+The next bounded control-flow slice now parses SOPP `0x09` as a real
+`S_CBRANCH_EXECNZ` and admits only one forward EXECZ/EXECNZ diamond with a
+shared join. A canonical workgroup barrier may precede or follow that diamond,
+but not appear inside either divergent arm; a branch-containing shader rejects
+all LDS effects until a CFG-aware LDS proof exists. The paired branch predicate
+tests both EXEC words, while the native subgroup path remains unchanged. A
+real compare-to-lane-63 fixture failed numerically on the old low-word-only
+predicate, then passed both EXECZ and EXECNZ across two guest waves on Arc A770
+with a 64-lane output canary. The three structural tests, 50 focused tests,
+1205 full tests (8 existing skips), and three compute/diagnostics integration
+targets pass. Translator version 47 invalidates earlier branch binaries.
+The newly decoded EXECNZ remains fail-closed outside paired mode: a native
+low-word-only predicate cannot prove a wave64 result.
+This is probe-only progress: the strict Silent workload still stops after
+resident load at the unsupported aliased U64 comparison, PC `0x784`, with no
+presentation or gameplay evidence. Paired runtime admission is still disabled.
+
+Independent review found a separate native LDS atomic host-safety gap in
+`ShaderSpirvLdsAtomic.cpp`: dynamic `vaddr + offset` is shifted into an
+`OpAccessChain` without proving it is within `lds_dwords`; an address at the
+allocation end can therefore access outside the host Workgroup array. A
+native shader with 128 allocated dwords and `vaddr=512` bytes is a synthetic
+trigger. The [RDNA2 ISA reference](https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture)
+describes general LDS out-of-range reads/writes but does not establish the
+returned value of this atomic form. Do not clamp or synthesize a return value.
+Next: establish that return contract or a sound address-range proof, add an
+in-range/boundary/wrap red test, and guard before constructing the host pointer.
+The passing in-range native atomic probes are not a general OOB-safety claim.
+The restricted forward diamond does not generalize to loops or multiway
+branches. Linear LDS proofs remain unusable across arbitrary joins, including
+an LDS operation only in the suffix after a divergent arm.
+The
+[RDNA2 ISA reference](https://docs.amd.com/v/u/en-US/rdna2-shader-instruction-set-architecture)
+sections12.8,12.12,12.13 also specify that readlane/writelane ignore EXEC and
+select modulo64 in wave64; writelane must not acquire an ordinary vector EXEC guard.
+
+DS decoder hypothesis excluded: do **not** move the Gen5 OP/GDS fields to
+bits17/16 based on the old PDF table94. AMD's newer
+[machine-readable RDNA2 specification](https://gpuopen.com/machine-readable-isa/)
+defines OP at bit18 (8bits), GDS at bit17 and VDST at bit56 (8bits). Its XML
+SHA256 is `d671ecbc36543674ab59e9b2feffd56718fd2137e7ad913c314f2e2508b9f4f7`.
+LLVM22 gfx1030 decoding of independent synthetic read/write/add-return words
+agrees, as do28 DS instructions in the private workload capture. The source
+also agrees with [LLVM's GFX10 DS encoding](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/DSInstructions.td).
+Retain the current field positions; the defect to fix is the lost return
+destination and unsupported aliases, not these bit positions.
+
+The new exact-admission tests also exposed inactive DPP fields populated from
+the next instruction by the VOP1/VOP2/VOPC parsers. Plain V_MOV then appeared
+modified and was rejected. The parser-local correction reads DPP controls only
+for actual DPP encoding. Preserve SDWA encoding and VOP3 OMOD metadata before
+destination replacement, and reject those unsupported variants in paired
+analysis; erased controls are not evidence of a plain instruction.
+
+The dispatch audit additionally found an existing size-validation defect in
+`GraphicsRenderDraw.cpp:2533`, `GraphicsRenderDispatchDirect`: thread-dimension
+ceil division uses `(count + local_size - 1) / local_size` in `uint32_t` and
+only warns for a zero local size. Large counts can overflow and zero local
+dimensions can reach division by zero. A focused checked-ceil-division
+regression and validation against host dispatch limits are needed; no size
+semantics were changed during the wave investigation.
+
+The full unit command now reports 1164 passes and 8 skips (1172 total), and both
+compute/graphics integrations pass. Its initial isolated tap failure was a stale
+test: the existing dirty controller/header/docs explicitly hold two pressed
+guest samples, while the unchanged test expected one. The test now asserts
+release/press/press/release and one delivered tap without changing controller
+behavior. The earlier order-dependent retirement-counter failures remain a
+separate recorded subset-order issue; they did not reproduce in this full run.
+
+A fresh Linux Release run of the current working tree, using Native resolution,
+Silent output and no permissive flags, passes the earlier allocator/audio import
+boundaries and completes resident loading. This supersedes the startup stop
+described in the older bounded-repair entries below, not the independent original
+reference-workload frontier. No presentation or controllable gameplay has been
+established for this startup workload.
+
+Two incomplete depth-array edits prevented compilation: the D16 span variable
+escaped its declaration scope in `GraphicsRenderBind.cpp`, and the
+`UtilFillDepthImage` definition in `Utils.cpp` omitted the layer parameter already
+declared in its header. Those declaration/signature errors are repaired without
+changing the array layout contract.
+
+The next observed shader failure was Gen5 `V_SUBREV_CO_CI_U32`. The decoder now
+handles its VOP2 and VOP3B forms; lowering computes `src1 - src0 - borrow_in` with
+two unsigned subtract-with-borrow operations, combining their borrow outputs.
+The existing scalarized mask is normalized to zero/one. Unimplemented modifiers
+and SDWA controls that would be discarded fail closed for this new opcode.
+Synthetic regressions demonstrated the original parser rejection and validate
+the generated SPIR-V. The workload still stops during whole-shader parsing,
+before its full shader can be lowered or dispatched; this is not a workload
+emitter-execution or GPU numeric-conformance claim.
+
+Independent review caught and corrected an unconditional VGPR destination
+write in the new lowering: inactive EXEC lanes now preserve their old value.
+The older shared `V_ADD_CO_CI_U32` text in `ShaderSpirvVector.cpp` still writes
+its destination unconditionally before testing EXEC; that pre-existing defect
+needs a separate inactive-lane regression and repair. The observed reverse-
+borrow SGPR mask is produced by a vector comparison, which this backend stores
+as a per-invocation boolean. A raw packed SGPR mask is a different representation;
+blindly extracting a lane bit from a comparison-produced boolean is incorrect.
+`ShaderMaskAnalysis.cpp` now admits ordinary SGPR-pair inputs only when a
+full-pair supported comparison is proven in the same straight-line block;
+unknown producers, partial overwrites and branch-entry bypasses fail closed.
+VCC/EXEC retain the existing backend mask representation. The translator cache
+version is incremented so older generated modules cannot bypass the new policy.
+These are deliberately not claims of arbitrary packed-wave-mask support.
+
+The new tests are separate shader-focused modules, leaving the pre-existing
+graphics-packet test file unchanged relative to the starting working tree.
+The earlier Linux build and 317 focused shader/cache/graphics/heap/audio tests
+passed. Subsequent parser/scalar work below advances the failure to shader
+emission, still with zero presentations; a playable/capture-scoring gate cannot
+pass in this state.
+
+The subsequent strict run stops at `IMAGE_BVH_INTERSECT_RAY`. GFX10 MIMG encodes
+the eighth opcode bit separately in word-zero bit zero; masking to seven bits
+misidentifies opcode `0xe6` as `0x66`. The decoder now preserves that bit and
+reports the unsupported BVH instruction explicitly rather than treating its
+128-bit resource as a texture. The [LLVM encoding definitions](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/SIInstrFormats.td)
+and [opcode definitions](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/AMDGPU/MIMGInstructions.td)
+corroborate the identity. Removing the `r128` rejection, inventing a hit/miss,
+or skipping the instruction would not implement it. AMD's public
+[legacy GPURT node definitions](https://github.com/GPUOpen-Drivers/gpurt/tree/7b226d48b46b7e92fec3b9ecc5712e5bf2bf3dd9/src/shadersClean/common/gfx10)
+provide the FP16/FP32 box and two-triangle node layouts. The
+[software intersection path](https://github.com/GPUOpen-Drivers/gpurt/blob/7b226d48b46b7e92fec3b9ecc5712e5bf2bf3dd9/src/shaders/IntersectCommon.hlsl)
+is a vendor reference for arithmetic, not proof of every hardware edge case.
+Mode-zero triangle-ID/status encoding remains unverified.
+
+The live compute shader constructs the BVH descriptor after a 16-dword scalar
+load through a computed pointer, then extracts the base field and forms the
+size/type/mode words with scalar arithmetic. It is not a four-dword BVH
+descriptor copied directly from the EUD table. Extending the existing dynamic
+V# resource classifier alone would therefore be insufficient. Required next
+work is bounds-checked, coherent memory access for this computed resource plus
+real box/triangle intersection lowering; Vulkan ray query is not a drop-in
+replacement for this per-node instruction.
+
+In particular, the current `ShaderSpirvBuffer.cpp::recompile_sload_from_extended`
+reads snapshotted descriptor metadata, not arbitrary computed guest pointers.
+It only warns when the source register is not the EUD register, then continues
+with metadata indexing. `S_LOAD_DWORDX16` also has no dispatch-table emitter.
+Do not request sixteen outputs from the eight-element local destination array,
+or reinterpret a computed pointer load as EUD metadata. Add a bounded
+address-to-backing contract and dedicated computed-load regressions first.
+
+A further live metadata capture exposes a preceding resource-classification
+defect: the same compute stage declares nonempty SRT and EUD regions together,
+with a type-5 pointer and scalar loads through that pair. However,
+`ShaderResources.cpp::Gen5HasEudPointer` previously required `srt_size_dw == 0`, so this
+dispatch reaches emission with `extended.used == false`. Its direct pointer
+also enters the generic four-word storage path in `ShaderParseUsage2`. Do not
+use the resulting candidate bindings as proof of computed-pointer coverage.
+The mixed-region predicate now has a red/green regression and recognizes the
+explicit EUD pointer. The generic four-word fallback now preserves a partially
+overlapping SRT span as raw scalar data. A conflicting direct buffer use is
+rejected only when existing CFG analysis proves an incoming descriptor reaches
+the consumer; later SGPR overwrites are not evidence about the incoming pointer.
+Focused red/green cases cover the two-word pointer, a live-in contradiction,
+and descriptor reuse after overwrite. This is initialization preservation, not
+an implementation of computed memory resolution.
+The next snapshot guard incorrectly capped API sharp slots by dividing backing
+dwords by four. Sparse or aliased slots need not occupy distinct storage; both
+span passes now accept them while retaining the actual 256-dword access bounds.
+A separate small resource-pointer suite covers sparse aliases and out-of-range
+spans.
+
+The full-precision, 32-bit-node BVH form now has a dedicated parser with eleven
+address registers and a four-word resource tuple. Contiguous and NSA addressing
+have synthetic regressions; other formats remain unsupported. This is parser
+support only, not an intersection emitter. Fresh raw SOP1 opcode evidence also
+identifies two descriptor-producing instructions as `S_BITSET1_B32`, not GETPC
+or FF1: the earlier probe printed their inline bit indices, not opcodes. A
+dedicated bitset emitter preserves the other destination bits and SCC. The next
+parser stop, `S_CMP_LG_U64`, now compares both scalar words and writes SCC without
+requiring host Int64 support. Ordinary pair bounds are checked. Six focused
+parser/scalar tests pass, including SPIR-V validation; GPU numeric validation
+is still pending.
+
+The fresh strict run now reaches `Spirv::WriteInstructions`. A bounded backtrace
+identified its first unknown-format instruction as `S_PACK_LL_B32_B16`.
+That instruction now has a dedicated scalar packing module, tested with distinct
+halves, aliased inputs/destination and VCC_HI. Ten hermetic Vulkan numerical
+cases covering bitset, scalar inequality and packing pass on an Intel Arc A770,
+including scalar execution with EXEC zero and SCC preservation where specified.
+These synthetic shader results are not proof of workload shader dispatch.
+The formatter assertion at `ShaderDebug.cpp:216` can
+hide the underlying unimplemented instruction when printing placeholder IR.
+
+Admitting the real EUD table exposed a host memory-corruption defect:
+`ShaderGetTextureBuffer` warned at its sixteen-entry capacity but still appended,
+corrupting counters later read by `ShaderAddDynamicTextureResource`. The strict
+launch produced an access violation in that later loop; a focused capacity
+regression proves an append at capacity previously returned instead of rejecting
+the write. The subsequent strict run identifies a seventeenth combined
+sampled/storage resource, not a Vulkan device limit. A focused test reproduces
+sixteen sampled entries followed by a writable entry. The logical table is
+being expanded to thirty-two entries while preserving separate sampler and
+storage-buffer bounds and the thirty-two-bit image-write mask. Do not truncate
+resources or merge distinct sampled and writable uses. The dense layout cache
+remains bounded (approximately 29 MiB across the three stages).
+Generated layouts need checks against actual host limits, including all seven
+sampled-image arrays, and pipeline layouts need aggregate checks across sets.
+Standalone samplers do not contribute to `maxPerStageResources`; they retain
+their own per-stage and pipeline limits (see the
+[Vulkan limits specification](https://docs.vulkan.org/spec/latest/chapters/limits.html)).
+The expanded table passes focused capacity/limit tests, ten numerical Vulkan
+shader checks, and the graphics diagnostics integration. A strict run now
+retains eighteen textures and advances to a different ceiling: dynamic scalar
+resource collection exhausts its sixty-four instruction-PC mapping records.
+Those mappings represent producers, not distinct Vulkan resources. Repeated
+loads may share one resource while requiring distinct lifetime mappings; replace
+the fixed mapping ceiling with instruction-count-bounded storage rather than
+dropping producers. The SRT-preserving build reaches the same mapping frontier.
+Presentation and gameplay remain unverified.
+
+An additional broad-test limitation remains recorded: the two
+`EmulatorGraphicsState` linked-buffer retirement tests pass individually,
+together, and in the entire graphics-state suite, but adding the graphics-packet
+suite before the pair produces nine extra storage-buffer delete callbacks in
+the second test. `EnsureGpuMemoryForTests` initializes a process-wide singleton
+once, while these assertions reset global callback counters and compare global
+free deltas. The origin of the prior objects is unproven; isolate ownership or
+drain only test-owned objects before interpreting this as a retirement-contract
+regression. No production retirement fix or complete broad-suite pass is claimed.
+
+The two retirement tests now use fixture-owned callback tokens and exact backing
+presence, with one reusable dedicated range and scoped cleanup. The ordered
+packet-suite plus pair run passes 233 tests; the pair passes three repetitions.
+The broader run passes 1182 tests with eight skips when excluding only the
+currently pending wave-mask RED case. No production retirement policy changed.
+An additional repeat-only fixture defect remains: repeating the entire packet
+suite reaches `AcceptsComputeShaderWithoutWorkgroupId` a second time and calls
+`ShaderInit()` again, failing its `g_shader_map != nullptr` guard in
+`Shader.cpp:770`. Isolate that test's shader-global initialization or make its
+fixture lifecycle explicit; do not weaken the production initialization guard.
+
+Important strictness limitation: `ShaderParseSOP1.cpp` and the other scalar
+parsers still map several unimplemented operations to `SBarrier` with warning-
+only diagnostics, including get-PC and find-first-one. They retain an unknown format rather than
+the real barrier's empty format; parser survival is not evidence that an emitter
+can execute them. A launch without permissive environment flags does not validate
+these unimplemented semantics. Identify and implement the actual producer
+operations from their encoded instructions before claiming a correct BVH binding
+or compatibility; do not perpetuate the placeholders.
+
+Related unresolved defects found in the current depth-array changes:
+
+- `GraphicsRenderBind.cpp` normalizes type-13 raw DEPTH to `DEPTH + 1` for
+  image creation, but its D16 span calculation uses raw DEPTH as a count.
+  Raw DEPTH two therefore creates three layers while validating two candidate
+  slices. Storage containment also checks only the first-slice size.
+- `Objects/Texture.cpp` and the inline storage-backed D16 detile path upload
+  only layer zero, while image layout transitions expose every array layer.
+  Correcting the count alone does not fix the uninitialized layers. The local
+  2D detile equation has no slice coordinate; a repeated identical XY detile
+  must not be assumed correct for XOR-swizzled array slices.
+- The type-13 one-layer case (raw DEPTH zero) is rejected by the current D16
+  gate; the depth-array view is also created only when logical depth exceeds
+  one. Gate, span, ownership and every upload layer need one consistent,
+  evidenced array-layout contract and focused regressions.
+
+The new speaker/privacy HLE paths pass the observed startup route, but their
+broader ABI assumptions remain unverified: `Audio.cpp::AudioOut2GetSpeakerInfo`
+places availability bits at output offset four whereas the earlier caller
+trace consumes offset eight; full write extent, angles and additional selector
+semantics are not established by that trace. `LibUserService.cpp` interprets
+the privacy query's first argument as a user ID without an independently
+verified invocation contract. Preserve these as open evidence requirements;
+passing self-consistent HLE tests does not establish native ABI equivalence.
+
+### Process allocator startup (bounded repair, not gameplay acceptance)
+
+Libc startup now consumes the declared `PT_OS_PROCPARAM -> libc parameters ->
+malloc replacement` chain. The replacement record has a two-qword header;
+its initializer is not the first entry of the direct kernel heap API. A
+captured failure reached the first allocation without ever calling this
+initializer. Calling the declared initializer before publishing the direct
+API fixes that null-mspace boundary without scanning load segments, replaying
+main-image constructors, or substituting a host heap.
+Both HLE libc need-flags were already set in the failing run, and the main CRT
+already called its constructors: changing those flags or adding a second
+constructor pass does not explain the missing allocator producer.
+
+The common pointer offsets and version-one record are corroborated by the
+[public OpenOrbis CRT](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/blob/af1619c2d1bfffe85a9534c9abb3fb43eed45dfd/src/crt/crt1.S).
+The version-two tail and successful initializer return were checked against
+local runtime evidence. Publish-after-success is Kyty's safety policy, not a
+claim about undocumented system ordering. Empty default tables preserve the
+default allocator. Reentry and concurrent startup have focused regressions;
+guest callbacks run outside host publication locks.
+
+Known unresolved lifecycle defect: `Libs/ApplicationHeap.cpp`'s process-global
+API and startup identity outlive `Loader/RuntimeLinker.cpp`'s destructor and
+`Clear()`. Reusing one host process for successive or nested guest runtimes can
+retain callbacks to unmapped guest code; the new once-state can also reject a
+different parameter address or mistake a reused address for the old process.
+The direct-API lifetime defect predates this startup repair. Fix direction:
+owner-generation-scoped state, owner-conditional retirement, and quiescence of
+in-flight allocator callbacks before guest unmapping. An unconditional reset
+in a nested linker's destructor is not safe. Current verification uses a fresh
+host process per guest run and does not establish multi-runtime reuse safety.
+
+### Nested arenas and AudioOut2 startup (bounded repair)
+
+The next allocation failure was a legitimate child mspace rejected by the
+registry's blanket overlap check in `Core/MSpace.cpp::MSpaceRegister`. Admission
+now requires a live canonical parent allocation containing the entire child;
+invalid overlaps are rejected before writing the child header. Backing storage
+cannot be freed, moved, or destroyed while a child is registered. A transient
+realloc pin prevents an OOM callback from creating a child on a moving chunk,
+without holding the global registry lock across that callback. Copied alignment
+markers and raw-prefix subpointers have red-to-green regressions. The allocator
+and adjacent libc/loader suite passes 135 tests; arbitrary allocator-metadata
+corruption is not a supported contract.
+
+The strict workload then reached an audio-startup polling loop with zero GPU
+submissions. This was not a nested-heap deadlock: the context-parameter whitelist
+in `Audio.cpp::ReadSupportedContextParam` rejected a second captured 0x40-byte
+configuration. The guest ignored the failed memory query, passed a zero-size
+workspace to context creation, and retried port creation on a missing context.
+Do not force a successful port result or bypass this guest wait.
+
+The decoder now accepts only the two complete measured configurations. The
+second configuration's producer/consumer trace establishes 512 frames per
+submission; the corresponding F32 eight-channel snapshot is 16384 bytes, not
+the legacy 8192. Header fields remain opaque and unknown blocks still fail
+closed. A guard-page regression checks the full PCM read, alongside mutation
+tests that leave rejected outputs untouched. The existing 64 KiB workspace is
+explicitly a shared HLE reservation policy, **not** a measured native query
+result or native workspace layout for the new configuration. Native-equivalent
+workspace sizing and audible PCM routing remain unverified.
+
+The final core/audio/heap/loader/symbol validation ran 197 tests: 192 passed and
+five media-fixture-dependent tests skipped. The next strict original-workload run
+exited at the unresolved lazy import `sceAudioOut2GetSpeakerInfo` in
+`AudioOut2_v1 / AudioOut_v1.1`, with no draws or presentations. The export is
+deliberately absent from `Libs/LibAudio.cpp` until its argument/output contract
+is evidenced; a public name/NID mapping alone does not justify a success stub.
+The caller explicitly prepares an output pointer and a zero second argument,
+then consumes a byte at output offset zero and bit zero of a dword at offset
+eight; it does not test the return value. This proves neither the complete
+output size nor the meanings of these fields. The old log-and-success binding
+from `908d78d4` was deliberately removed in `ea839c67`; restoring it, zeroing a
+guessed structure, or returning an error without an evidenced output contract
+does not solve this boundary. Public HLE layouts are research leads, not a
+verified native contract.
+
+Next requirement: a valid contract or a successful reference trace for the
+observed invocation, with return value, pre/post output, actual write extent,
+and a second controlled speaker configuration to identify the consumed fields.
+No speaker implementation is added in this repair. Gameplay is still unproven
+for this workload. The original reference-workload frontier below is independent
+of these startup repairs.
+
+### Original reference workload
+
 The local reference workload reaches Vulkan device creation, guest engine
 startup, Gen5 shader creation, indexed draws, VideoOut submission, repeated
 swapchain presentation, logos, a recognizable menu, Play / mode selection,

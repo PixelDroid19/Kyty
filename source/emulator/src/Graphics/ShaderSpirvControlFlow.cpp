@@ -15,6 +15,7 @@ static bool instruction_is_conditional_branch(const ShaderInstruction& inst)
 	switch (inst.type)
 	{
 		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchExecnz:
 		case ShaderInstructionType::SCbranchScc0:
 		case ShaderInstructionType::SCbranchScc1:
 		case ShaderInstructionType::SCbranchVccz:
@@ -29,6 +30,7 @@ static bool instruction_changes_control_flow(const ShaderInstruction& inst)
 	{
 		case ShaderInstructionType::SBranch:
 		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchExecnz:
 		case ShaderInstructionType::SCbranchScc0:
 		case ShaderInstructionType::SCbranchScc1:
 		case ShaderInstructionType::SCbranchVccz:
@@ -180,14 +182,31 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	const auto& next_inst = code.GetInstructions().At(index + 1);
 
 	if (!operand_is_constant(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[0]) condition ignored (continuing)\n"); }
+	// EXECNZ was previously an unsupported parser placeholder. Native mode has
+	// no verified high-word wave representation, so keep it fail-closed there.
+	if (inst.type == ShaderInstructionType::SCbranchExecnz && !spirv->UsesComputeWaveBanks())
+	{
+		return false;
+	}
 
 	const char* branch_param[2] = {param[0], param[1]};
-	if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
-	    ShaderVccBranchIsWaveUniform(code, index))
+	if (spirv->UsesComputeWaveBanks() &&
+	    (inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz))
+	{
+		// Each physical subgroup owns one complete guest wave. The packed EXEC
+		// pair is uniform within it, so no subgroup vote or low-half shortcut is
+		// needed to decide this wave's branch.
+		branch_param[0] = "%cc_lo_<index> = OpLoad %uint %exec_lo\n"
+		                  "%cc_hi_<index> = OpLoad %uint %exec_hi\n"
+		                  "%cc_mask_<index> = OpBitwiseOr %uint %cc_lo_<index> %cc_hi_<index>";
+		branch_param[1] = inst.type == ShaderInstructionType::SCbranchExecz ? "%cc_b_<index> = OpIEqual %bool %cc_mask_<index> %uint_0"
+		                                                                    : "%cc_b_<index> = OpINotEqual %bool %cc_mask_<index> %uint_0";
+	} else if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
+	           ShaderVccBranchIsWaveUniform(code, index))
 	{
 		branch_param[0] = inst.type == ShaderInstructionType::SCbranchVccz
-		                     ? "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpIEqual %bool %cc_u_<index> %uint_0"
-		                     : "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpINotEqual %bool %cc_u_<index> %uint_0";
+		                      ? "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpIEqual %bool %cc_u_<index> %uint_0"
+		                      : "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpINotEqual %bool %cc_u_<index> %uint_0";
 		branch_param[1] = "";
 	}
 
@@ -397,6 +416,58 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		}
 	}
 
+	// A nested selection sharing its merge join with an outer edge must not
+	// merge on the raw guest label: WriteLabel materializes that join as an
+	// sc_join chain, and the outer link forwards to the guest label from
+	// outside this construct (the edge enters past the header, which
+	// structured validation rejects). Merge on this selection's own sc_join
+	// link instead; the chain order keeps every construct closed before the
+	// guest join. Only redirect when the merge names a guest label with an
+	// outer incoming edge and WriteLabel will materialize this selection's
+	// link, otherwise the merge target would dangle.
+	if (if_else && loop_backedge == 0 && label_merge.Size() != 0)
+	{
+		uint32_t merge_join = 0;
+		for (const auto& merge_label: code.GetLabels())
+		{
+			if (!merge_label.IsDisabled() && merge_label.ToString() == label_merge)
+			{
+				merge_join = merge_label.GetDst();
+				break;
+			}
+		}
+		bool outer_edge = false;
+		if (merge_join != 0)
+		{
+			for (const auto& join_label: code.GetLabels())
+			{
+				if (!join_label.IsDisabled() && join_label.GetDst() == merge_join && join_label.GetSrc() < inst.pc)
+				{
+					outer_edge = true;
+					break;
+				}
+			}
+		}
+		if (outer_edge)
+		{
+			Vector<uint32_t> sc_join_srcs;
+			ScJoinCollectSources(code, merge_join, &sc_join_srcs);
+			Vector<uint32_t> sc_join_order;
+			if (sc_join_srcs.Size() > 0)
+			{
+				ScJoinOrderForEmission(code, merge_join, sc_join_srcs, &sc_join_order);
+			}
+			for (int s = 0; s < sc_join_order.Size(); s++)
+			{
+				if (sc_join_order[s] == inst.pc)
+				{
+					label_merge = ScJoinMergeName(merge_join, inst.pc);
+					break;
+				}
+			}
+		}
+	}
+
 	const char* text = text_variant_a;
 	if (discard)
 	{
@@ -553,7 +624,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SEndpgm_Empty)
        OpReturn
 )";
 
-	if (index < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 2 condition ignored (continuing)\n"); }
+	// A short program cannot contain the two-instruction discard sequence.
+	if (index < 2)
+	{
+		*dst_source += String8(text);
+		return true;
+	}
 
 	const auto& prev_prev_inst = code.GetInstructions().At(index - 2);
 	const auto& prev_inst      = code.GetInstructions().At(index - 1);

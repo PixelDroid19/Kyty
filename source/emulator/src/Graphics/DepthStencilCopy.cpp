@@ -1,4 +1,5 @@
 #include "Emulator/Graphics/DepthStencilCopy.h"
+#include "GraphicsRenderPipelineLimits.h"
 
 #include "Kyty/Core/DbgAssert.h"
 
@@ -606,8 +607,12 @@ DepthStencilCopyRenderer::RenderPipeline* DepthStencilCopyRenderer::GetRenderPip
 	pipeline_layout_info.pPushConstantRanges    = (push_constant_range_count > 0 ? push_constant_ranges : nullptr);
 
 	VkPipelineLayout pipeline_layout = nullptr;
-	if (vkCreatePipelineLayout(m_device, &pipeline_layout_info, nullptr, &pipeline_layout) != VK_SUCCESS ||
-	                     pipeline_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vkCreatePipelineLayout(m_device, &pipeline_layout_info, nullptr, &pipeline_layou condition ignored (continuing)\n"); }
+	ValidateDepthCopyDescriptorLimits(context, guest_vertex_stage ? vertex_bind : nullptr, expand_to_color);
+	const auto layout_result = vkCreatePipelineLayout(m_device, &pipeline_layout_info, nullptr, &pipeline_layout);
+	if (layout_result != VK_SUCCESS || pipeline_layout == VK_NULL_HANDLE)
+	{
+		EXIT("depth copy pipeline layout creation failed: VkResult=%d\n", static_cast<int>(layout_result));
+	}
 
 	VkGraphicsPipelineCreateInfo pipeline_info {};
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;

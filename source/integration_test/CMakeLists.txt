@@ -102,6 +102,61 @@ set_tests_properties(KytyKernelMemoryIntegration.ReserveVirtualRange PROPERTIES
 	TIMEOUT 120
 )
 
+add_executable(kyty_shader_compute_integration
+	src/shader_compute/ShaderComputeIntegration.cpp
+	src/shader_compute/ShaderProbeSource.cpp
+	src/shader_compute/VulkanComputeProbe.cpp
+	src/shader_compute/VulkanComputeProbeDevice.cpp
+	src/shader_compute/VulkanProgramBaseProbe.cpp
+	src/shader_compute/VulkanWaveProbe.cpp
+)
+target_link_libraries(kyty_shader_compute_integration PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_shader_compute_integration PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+	"${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include"
+)
+add_test(NAME KytyShaderComputeIntegration.ScalarContracts
+	COMMAND $<TARGET_FILE:kyty_shader_compute_integration>)
+set_tests_properties(KytyShaderComputeIntegration.ScalarContracts PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
+
+add_executable(kyty_shader_wave64_integration
+	src/shader_compute/ShaderWaveIntegration.cpp
+	src/shader_compute/ShaderWaveMaskSource.cpp
+	src/shader_compute/ShaderWaveProbeSource.cpp
+	src/shader_compute/ShaderWaveLaneCases.cpp
+	src/shader_compute/ShaderWaveLdsCases.cpp
+	src/shader_compute/ShaderNativeLdsAtomicCases.cpp
+	src/shader_compute/ShaderWaveScalarCases.cpp
+	src/shader_compute/ShaderWaveBranchCases.cpp
+	src/shader_compute/ShaderWaveAluCases.cpp
+	src/shader_compute/ShaderWaveHintCases.cpp
+	src/shader_compute/ShaderWaveResourceCases.cpp
+	src/shader_compute/ShaderWaveShiftCases.cpp
+	src/shader_compute/ShaderWaveMaskCases.cpp
+	src/shader_compute/VulkanComputeProbe.cpp
+	src/shader_compute/VulkanComputeProbeDevice.cpp
+	src/shader_compute/VulkanProgramBaseProbe.cpp
+	src/shader_compute/VulkanWaveProbe.cpp
+)
+target_link_libraries(kyty_shader_wave64_integration PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_shader_wave64_integration PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+	"${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include"
+)
+add_test(NAME KytyShaderComputeIntegration.PairedWave64
+	COMMAND $<TARGET_FILE:kyty_shader_wave64_integration>)
+set_tests_properties(KytyShaderComputeIntegration.PairedWave64 PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
+
 add_executable(kyty_graphics_diagnostics_integration
 	src/GraphicsDiagnosticsIntegration.cpp
 )
@@ -140,6 +195,15 @@ add_test(
 	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --render-target-index-alias-only
 )
 set_tests_properties(KytyGraphicsDiagnosticsIntegration.RenderTargetIndexAlias PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
+
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.ColorAttachmentTransfer
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --color-attachment-transfer-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.ColorAttachmentTransfer PROPERTIES
 	FIXTURES_REQUIRED KytyIntegrationBinaries
 	TIMEOUT 120
 )
@@ -692,6 +756,8 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_domain_validation_integration
 	kyty_kernel_memory_integration
 	kyty_graphics_diagnostics_integration
+	kyty_shader_compute_integration
+	kyty_shader_wave64_integration
 	kyty_libc_wide_integration
 	kyty_libc_time_integration
 	kyty_libc_locale_integration

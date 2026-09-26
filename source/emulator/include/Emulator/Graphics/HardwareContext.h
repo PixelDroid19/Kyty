@@ -496,6 +496,9 @@ struct PsStageRegisters
 	PsShaderResource1 rsrc1;
 	PsShaderResource2 rsrc2;
 	uint64_t          chksum = 0;
+	// Wave-packing hints (shared VGPR count, instruction prefetch). Recorded
+	// for completeness; the recompiler re-derives register allocation.
+	uint32_t rsrc3 = 0;
 };
 
 struct CsStageRegisters
@@ -567,6 +570,9 @@ struct GsStageRegisters
 	GsShaderResource1 rsrc1;
 	GsShaderResource2 rsrc2;
 	uint64_t          chksum = 0;
+	// Wave-packing hints (shared VGPR count, instruction prefetch). Recorded
+	// for completeness; the recompiler re-derives register allocation.
+	uint32_t rsrc3 = 0;
 };
 
 struct ShaderRegisters
@@ -988,6 +994,7 @@ public:
 		m_vs.gs_regs.chksum <<= 32u;
 		m_vs.gs_regs.chksum |= value;
 	}
+	void SetGsRsrc3(uint32_t value) { m_vs.gs_regs.rsrc3 = value; }
 
 	void SetPsShaderBase(uint64_t addr)
 	{
@@ -1014,6 +1021,7 @@ public:
 		m_ps.ps_regs.chksum <<= 32u;
 		m_ps.ps_regs.chksum |= value;
 	}
+	void SetPsRsrc3(uint32_t value) { m_ps.ps_regs.rsrc3 = value; }
 
 	void SetCsShader(const CsStageRegisters& cs_regs, uint32_t shader_modifier)
 	{
@@ -1057,6 +1065,11 @@ public:
 		m_vs.gs_user_sgpr.count     = ((id + 1) > m_vs.gs_user_sgpr.count ? (id + 1) : m_vs.gs_user_sgpr.count);
 	}
 
+	// Hull-shader RSRC3 (wave-packing hints such as shared VGPR count).
+	// Recorded for completeness; the recompiler re-derives register
+	// allocation, so it does not affect the computed result.
+	void SetHsRsrc3(uint32_t value) { m_hs_rsrc3 = value; }
+
 	[[nodiscard]] const PixelShaderInfo&   GetPs() const { return m_ps; }
 	[[nodiscard]] const VertexShaderInfo&  GetVs() const { return m_vs; }
 	[[nodiscard]] const ComputeShaderInfo& GetCs() const { return m_cs; }
@@ -1065,6 +1078,7 @@ private:
 	VertexShaderInfo  m_vs;
 	PixelShaderInfo   m_ps;
 	ComputeShaderInfo m_cs;
+	uint32_t          m_hs_rsrc3 = 0;
 };
 
 } // namespace Kyty::Libs::Graphics::HW

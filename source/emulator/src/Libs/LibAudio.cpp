@@ -49,6 +49,7 @@ LIB_DEFINE(InitAudio_1_AudioOut2)
 	LIB_FUNC("gatEUKG+Ea4", AudioOut2::AudioOut2PortGetState);         // PortGetState
 	LIB_FUNC("xywYcRB7nbQ", AudioOut2::AudioOut2UserCreate);           // UserCreate
 	LIB_FUNC("IaZXJ9M79uo", AudioOut2::AudioOut2UserDestroy);          // UserDestroy
+	LIB_FUNC("DImz2Ft9E2g", AudioOut2::AudioOut2GetSpeakerInfo);       // GetSpeakerInfo
 }
 
 } // namespace LibAudioOut2

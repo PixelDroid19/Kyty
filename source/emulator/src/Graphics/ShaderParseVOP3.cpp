@@ -34,6 +34,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
+	inst.vop3_op_sel = static_cast<uint8_t>(op_sel);
+	inst.vop3_omod   = static_cast<uint8_t>(omod);
 	inst.src[0]  = operand_parse(src0);
 	inst.src[1]  = operand_parse(src1);
 	inst.src[2]  = operand_parse(src2);
@@ -917,7 +919,12 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x12A:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type        = ShaderInstructionType::VSubrevCoCiU32;
+				inst.format      = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2;
+				inst.src_num     = 3;
+				inst.src[2].size = 2;
+				inst.dst2        = operand_parse(sdst);
+				inst.dst2.size   = 2;
 			} else
 			{
 				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_subbrev_u32 treated as SBarrier (continuing)\n");
@@ -1365,13 +1372,34 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
 			break;
+		case 0x365:
+			// v_bcnt_i32_b32: count src0 bits differing from the sign bit, plus src1.
+			inst.type    = ShaderInstructionType::VBcntI32B32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			break;
+		case 0x366:
+			// v_mbcnt_lo_u32_b32: SGPR dst; two sources, exec mask + accumulator.
+			inst.type    = ShaderInstructionType::VMbcntLoU32B32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			inst.dst     = operand_parse(vdst);
+			break;
+		case 0x367:
+			// v_mbcnt_hi_u32_b32: SGPR dst; two sources, exec mask + accumulator.
+			inst.type    = ShaderInstructionType::VMbcntHiU32B32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			inst.dst     = operand_parse(vdst);
+			break;
 		case 0x36D: inst.type = ShaderInstructionType::VAdd3U32; break;
 		case 0x36F: inst.type = ShaderInstructionType::VLshlOrB32; break;
 		case 0x371: inst.type = ShaderInstructionType::VAndOrB32; break;
 		case 0x372:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				// v_or3_b32: dst = src0 | src1 | src2 (three-source vector ALU).
+				inst.type = ShaderInstructionType::VOr3B32;
 			} else
 			{
 				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_or3_u32 treated as SBarrier (continuing)\n");

@@ -5,7 +5,9 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Graphics/ShaderComputeWaveResourceAnalysis.h"
 
+#include <cinttypes>
 #include <cstdlib>
 #include <cstring>
 
@@ -2236,7 +2238,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset)
 	}
 
 	auto address = operand_variable_to_str(inst.src[0]);
-	auto dst     = operand_variable_to_str(inst.dst);
+	auto dst     = operand_variable_to_str(inst.dst, 0);
 
 	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
 	if (dst.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -2254,11 +2256,29 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset)
         %lds_data_f_<index> = OpBitcast %float %lds_data_u_<index>
                OpStore %<dst> %lds_data_f_<index>
 )";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<index>", index_str)
-	                   .ReplaceStr("<address>", address.value)
-	                   .ReplaceStr("<dst>", dst.value)
-	                   .ReplaceStr("<offset>", offset_str);
+	String8 source =
+	    String8(text)
+	        .ReplaceStr("<index>", index_str)
+	        .ReplaceStr("<address>", address.value)
+	        .ReplaceStr("<dst>", dst.value)
+	        .ReplaceStr("<offset>", offset_str);
+	if (inst.dst.size == 2)
+	{
+		// ds_read_b64: the upper dword lives at the next LDS index and lands
+		// in the next consecutive VGPR.
+		auto dst1 = operand_variable_to_str(inst.dst, 1);
+		if (dst1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst1.type != SpirvType::Float condition ignored (continuing)\n"); }
+
+		static const char* text_hi = R"(
+        %lds_index1_<index> = OpIAdd %uint %lds_index_<index> %uint_1
+        %lds_ptr1_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index1_<index>
+        %lds_data1_u_<index> = OpLoad %uint %lds_ptr1_<index>
+        %lds_data1_f_<index> = OpBitcast %float %lds_data1_u_<index>
+               OpStore %<dst1> %lds_data1_f_<index>
+)";
+		source += String8(text_hi).ReplaceStr("<index>", index_str).ReplaceStr("<dst1>", dst1.value);
+	}
+	*dst_source += source;
 	return true;
 }
 
@@ -2680,6 +2700,11 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 	{
 		return false;
 	}
+	const bool paired_wave = spirv->UsesComputeWaveBanks();
+	if (paired_wave && !ShaderPairedEudStorageLoadSupported(inst, *bind_info))
+	{
+		EXIT("paired-wave S_LOAD requires an exact EUD descriptor mapping at pc=0x%08" PRIx32 "\n", inst.pc);
+	}
 
 	const auto* vs_info    = spirv->GetVsInputInfo();
 	int         shift_regs = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
@@ -2719,6 +2744,10 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 		int field  = 0;
 		if (!spirv->GetDynamicSLoadMappedIndex(inst.pc, offset + i, &buffer, &field))
 		{
+			if (paired_wave)
+			{
+				EXIT("paired-wave S_LOAD lost its EUD descriptor field mapping at pc=0x%08" PRIx32 " word=%d\n", inst.pc, i);
+			}
 			spirv->GetMappedIndex(offset + i, &buffer, &field);
 		}
 

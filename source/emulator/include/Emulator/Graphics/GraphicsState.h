@@ -252,7 +252,12 @@ enum class ImageSampleOperation
     uint64_t address, uint32_t width, uint32_t height, uint32_t pitch, uint64_t source_size, ImageSampleOperation operation)
 {
 	const bool supported_swizzle = swizzle == 0x924u || swizzle == 0x004u || swizzle == 0x204u;
-	if (format != 7u || tile != 24u || (resource_type != 8u && resource_type != 9u) || depth != 0u || base_array != 0u || base_level != 0u ||
+	// Layered depth arrays carry the slice count in depth (depth 0 means one
+	// layer); only the 2D resource types use depth 0, and array layers stay
+	// bounded so the caller can verify the full span mapping.
+	const bool single_layer = (resource_type == 8u || resource_type == 9u) && depth == 0u && base_array == 0u;
+	const bool array_layers = resource_type == 13u && depth >= 1u && depth <= 2048u && base_array == 0u;
+	if (format != 7u || tile != 24u || (!single_layer && !array_layers) || base_level != 0u ||
 	    last_level != 0u || max_mip != 0u || bc_swizzle != 0u || !supported_swizzle || msaa || has_metadata ||
 	    operation != ImageSampleOperation::DepthReference || address == 0u || (address & 0xffffu) != 0u ||
 	    width == 0u || height == 0u || pitch < width || (pitch % 256u) != 0u)

@@ -71,6 +71,11 @@ bool AgentPadScheduleTap(uint32_t button);
 // successful schedule is retained by the emulator, not by the request socket.
 inline constexpr uint32_t kAgentPadScheduledTapMax = 8u;
 
+// Keep a diagnostic tap visible across a bounded pair of advancing guest
+// samples. This makes paired-poll reproduction deterministic without tying the
+// pulse to host timing or claiming gameplay input compatibility.
+inline constexpr uint32_t kAgentPadTapPressSamples = 2u;
+
 enum class AgentPadScheduleResult: uint8_t
 {
 	Scheduled,

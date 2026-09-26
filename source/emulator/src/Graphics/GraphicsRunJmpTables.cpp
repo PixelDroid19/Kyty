@@ -728,6 +728,7 @@ static void graphics_init_jmp_tables_sh_indirect()
 	};
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_CHKSUM_GS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetGsShaderChksum(value); };
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC3_GS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetGsRsrc3(value); };
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC1_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -777,6 +778,7 @@ static void graphics_init_jmp_tables_sh_indirect()
 	};
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_CHKSUM_PS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetPsShaderChksum(value); };
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC3_PS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetPsRsrc3(value); };
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC1_PS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -828,6 +830,9 @@ static void graphics_init_jmp_tables_sh_indirect()
 	g_hw_sh_indirect_func[Pm4::COMPUTE_RESOURCE_LIMITS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{ if (!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1) condition ignored (continuing)\n"); } };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3]     = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->CsRegs().rsrc3 = value; };
+	// Hull-shader RSRC3 (wave-packing hints). Recorded for completeness; the
+	// recompiler re-derives register allocation, so it does not affect output.
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC3_HS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetHsRsrc3(value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_SHADER_CHKSUM] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
 		auto& r  = cp->GetShCtx()->CsRegs();

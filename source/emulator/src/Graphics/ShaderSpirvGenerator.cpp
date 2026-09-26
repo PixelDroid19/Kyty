@@ -1,4 +1,5 @@
 #include "ShaderSpirvInternal.h"
+#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
@@ -124,6 +125,7 @@ static bool ShaderInstructionChangesControlFlow(const ShaderInstruction& inst)
 	{
 		case ShaderInstructionType::SBranch:
 		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchExecnz:
 		case ShaderInstructionType::SCbranchScc0:
 		case ShaderInstructionType::SCbranchScc1:
 		case ShaderInstructionType::SCbranchVccz:
@@ -189,6 +191,15 @@ uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
 void Spirv::GenerateSource()
 {
 	m_source.Clear();
+	if (UsesComputeWaveBanks())
+	{
+		const auto analysis = ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		if (!analysis.supported)
+		{
+			EXIT("paired-wave instruction contract unsupported: pc=0x%08" PRIx32 " reason=%s\n",
+			     analysis.unsupported_pc, analysis.reason.c_str());
+		}
+	}
 
 	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code))
 	{
@@ -284,8 +295,7 @@ static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
 
 static bool spirv_uses_mbcnt(const ShaderCode& code)
 {
-	return code.GetType() == ShaderType::Pixel &&
-	       code.HasAnyOf({ShaderInstructionType::VMbcntLoU32B32, ShaderInstructionType::VMbcntHiU32B32});
+	return code.HasAnyOf({ShaderInstructionType::VMbcntLoU32B32, ShaderInstructionType::VMbcntHiU32B32});
 }
 
 static bool spirv_uses_buffer_atomics(const ShaderCode& code)
@@ -364,7 +374,7 @@ static bool spirv_uses_lane_exchange(const ShaderCode& code)
 
 static bool spirv_uses_wave_branch_vote(const ShaderCode& code)
 {
-	if (code.HasAnyOf({ShaderInstructionType::SCbranchExecz}))
+	if (code.HasAnyOf({ShaderInstructionType::SCbranchExecz, ShaderInstructionType::SCbranchExecnz}))
 	{
 		return true;
 	}
@@ -410,20 +420,30 @@ void Spirv::WriteHeader()
 
 	imports.Add("%GLSL_std_450 = OpExtInstImport \"GLSL.std.450\"");
 
+	if (UsesVertexLayerExport())
+	{
+		capabilities.Add("OpCapability ShaderLayer");
+		vars.Add("%gl_Layer");
+	}
+
 	if (Config::SpirvDebugPrintfEnabled())
 	{
 		extensions.Add("OpExtension \"SPV_KHR_non_semantic_info\"");
 		imports.Add("%NonSemantic_DebugPrintf = OpExtInstImport \"NonSemantic.DebugPrintf\"");
 	}
 
-	if (spirv_uses_subgroup_invocation(m_code) || spirv_uses_wave_branch_vote(m_code) || UsesSparsePixelSampleProbe())
+	if (spirv_uses_subgroup_invocation(m_code) || spirv_uses_wave_branch_vote(m_code) || UsesSparsePixelSampleProbe() || UsesComputeWaveBanks())
 	{
 		capabilities.Add("OpCapability GroupNonUniform");
-		if (spirv_uses_dpp(m_code) || spirv_uses_lane_exchange(m_code))
+		if ((spirv_uses_dpp(m_code) && m_code.GetType() != ShaderType::Pixel) || spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks())
 		{
 			capabilities.Add("OpCapability GroupNonUniformShuffle");
 		}
-		if (spirv_uses_readfirstlane(m_code))
+		if (spirv_uses_dpp(m_code) && m_code.GetType() == ShaderType::Pixel)
+		{
+			capabilities.Add("OpCapability GroupNonUniformQuad");
+		}
+		if (spirv_uses_readfirstlane(m_code) || UsesComputeWaveBanks())
 		{
 			capabilities.Add("OpCapability GroupNonUniformBallot");
 		}
@@ -435,9 +455,13 @@ void Spirv::WriteHeader()
 		{
 			capabilities.Add("OpCapability GroupNonUniformArithmetic");
 		}
-		if (spirv_uses_subgroup_invocation(m_code))
+		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks())
 		{
 			vars.Add("%gl_SubgroupInvocationID");
+		}
+		if (UsesComputeWaveBanks())
+		{
+			vars.Add("%gl_SubgroupID");
 		}
 	}
 
@@ -604,8 +628,8 @@ void Spirv::WriteHeader()
 		case ShaderType::Compute:
 			if (m_cs_input_info != nullptr)
 			{
-				execution_modes.Add(String8::FromPrintf("OpExecutionMode %%main LocalSize %u %u %u", m_cs_input_info->threads_num[0],
-				                                        m_cs_input_info->threads_num[1], m_cs_input_info->threads_num[2]));
+				const auto* local_size = UsesComputeWaveBanks() ? m_cs_input_info->wave_layout.physical_local : m_cs_input_info->threads_num;
+				execution_modes.Add(String8::FromPrintf("OpExecutionMode %%main LocalSize %u %u %u", local_size[0], local_size[1], local_size[2]));
 				if (m_cs_input_info->lds_dwords > 0)
 				{
 					vars.Add("%lds");
@@ -722,13 +746,17 @@ void Spirv::WriteAnnotations()
 )";
 
 	Core::StringList8 vars;
-	if (spirv_uses_subgroup_invocation(m_code))
+	if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks())
 	{
 		vars.Add("OpDecorate %gl_SubgroupInvocationID BuiltIn SubgroupLocalInvocationId");
 		if (m_code.GetType() == ShaderType::Pixel)
 		{
 			vars.Add("OpDecorate %gl_SubgroupInvocationID Flat");
 		}
+	}
+	if (UsesComputeWaveBanks())
+	{
+		vars.Add("OpDecorate %gl_SubgroupID BuiltIn SubgroupId");
 	}
 
 	switch (m_code.GetType())
@@ -802,6 +830,10 @@ void Spirv::WriteAnnotations()
 			for (int i = 0; i < ResolveVertexParameterCount(m_code, m_vs_input_info); i++)
 			{
 				vars.Add(String8::FromPrintf("OpDecorate %%param%d Location %d", i, i));
+			}
+			if (UsesVertexLayerExport())
+			{
+				vars.Add("OpDecorate %gl_Layer BuiltIn Layer");
 			}
 			m_source += String8(vertex_annotations).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
@@ -1014,6 +1046,7 @@ void Spirv::WriteTypes()
             %_ptr_Input_v3uint = OpTypePointer Input %v3uint
           %_ptr_Output_v4float = OpTypePointer Output %v4float
            %_ptr_Output_float = OpTypePointer Output %float
+             %_ptr_Output_int = OpTypePointer Output %int
           %_ptr_Function_float = OpTypePointer Function %float
            %_ptr_Function_bool = OpTypePointer Function %bool
             %_ptr_Function_int = OpTypePointer Function %int
@@ -1352,8 +1385,7 @@ void Spirv::WriteGlobalVariables()
       %outPerVertex = OpVariable %_ptr_Output_gl_PerVertex Output
             ; %param0 = OpVariable %_ptr_Output_v4float Output
                <Variables>
-)";
-	static const char* compute_variables = R"(
+)";	static const char* compute_variables = R"(
               ;Variables
 %gl_LocalInvocationID = OpVariable %_ptr_Input_v3uint Input
       %gl_WorkGroupID = OpVariable %_ptr_Input_v3uint Input
@@ -1361,9 +1393,13 @@ void Spirv::WriteGlobalVariables()
 )";
 
 	Core::StringList8 vars;
-	if (spirv_uses_subgroup_invocation(m_code))
+	if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks())
 	{
 		vars.Add("%gl_SubgroupInvocationID = OpVariable %_ptr_Input_uint Input");
+	}
+	if (UsesComputeWaveBanks())
+	{
+		vars.Add("%gl_SubgroupID = OpVariable %_ptr_Input_uint Input");
 	}
 	if (UsesGraphicsProbeStorage())
 	{
@@ -1504,14 +1540,29 @@ void Spirv::WriteGlobalVariables()
 			{
 				vars.Add(String8::FromPrintf("%%param%d = OpVariable %%_ptr_Output_v4float Output", i));
 			}
+			if (UsesVertexLayerExport())
+			{
+				vars.Add("%gl_Layer = OpVariable %_ptr_Output_int Output");
+			}
 			m_source += String8(vertex_variables).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
 		case ShaderType::Compute:
 			if (m_cs_input_info != nullptr)
 			{
-				vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%uint_%u %%uint_%u %%uint_%u",
-				                             m_cs_input_info->threads_num[0], m_cs_input_info->threads_num[1],
-				                             m_cs_input_info->threads_num[2]));
+				if (UsesComputeWaveBanks())
+				{
+					// WorkgroupSize takes precedence over LocalSize in Vulkan;
+					// both must describe physical invocations, not guest lanes.
+					const auto* physical = m_cs_input_info->wave_layout.physical_local;
+					vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%%s %%%s %%%s",
+					                             GetConstantUint(physical[0]).c_str(), GetConstantUint(physical[1]).c_str(),
+					                             GetConstantUint(physical[2]).c_str()));
+				} else
+				{
+					vars.Add(String8::FromPrintf("%%gl_WorkGroupSize = OpConstantComposite %%v3uint %%uint_%u %%uint_%u %%uint_%u",
+					                             m_cs_input_info->threads_num[0], m_cs_input_info->threads_num[1],
+					                             m_cs_input_info->threads_num[2]));
+				}
 			}
 			m_source += String8(compute_variables).ReplaceStr("<Variables>", vars.Concat("\n" + String8(' ', 15)));
 			break;
@@ -1565,6 +1616,16 @@ void Spirv::WriteLocalVariables()
 
 	for (const auto& c: m_variables)
 	{
+		if (UsesComputeWaveBanks() && c.op.type == ShaderOperandType::Vgpr)
+		{
+			for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
+			{
+				const auto value = GetComputeWaveRegister(c.op, bank, 0);
+				EXIT_IF(value.type != SpirvType::Float);
+				m_source += String8::FromPrintf("%%%s = OpVariable %%_ptr_Function_float Function\n", value.value.c_str());
+			}
+			continue;
+		}
 		auto value = operand_variable_to_str(c.op);
 		m_source += String8::FromPrintf("%%%s = OpVariable %%_ptr_Function_%s Function\n", value.value.c_str(),
 		                                Core::EnumName(value.type).ToLower().C_Str());
@@ -1713,9 +1774,18 @@ void Spirv::WriteLocalVariables()
 )";
 		if (m_cs_input_info != nullptr)
 		{
-			for (int i = 0; i < m_cs_input_info->thread_ids_num; i++)
+			if (UsesComputeWaveBanks())
 			{
-				m_source += String8(text_thread_id).ReplaceStr("<i>", String8::FromPrintf("%d", i));
+				if (!EmitComputeWaveProlog(&m_source))
+				{
+					EXIT("paired-wave compute prolog contract unsupported\n");
+				}
+			} else
+			{
+				for (int i = 0; i < m_cs_input_info->thread_ids_num; i++)
+				{
+					m_source += String8(text_thread_id).ReplaceStr("<i>", String8::FromPrintf("%d", i));
+				}
 			}
 
 			int reg = 0;
@@ -1957,7 +2027,16 @@ void Spirv::WriteLocalVariables()
                OpStore %scc %uint_0
 	)";
 
-	m_source += common_init;
+	if (UsesComputeWaveBanks())
+	{
+		const auto full_mask = GetConstantUint(0xffffffffu);
+		m_source += String8::FromPrintf("OpStore %%exec_lo %%%s\nOpStore %%exec_hi %%%s\n"
+		                                "OpStore %%execz %%uint_0\nOpStore %%scc %%uint_0\n",
+		                                full_mask.c_str(), full_mask.c_str());
+	} else
+	{
+		m_source += common_init;
+	}
 	m_source += "\n";
 }
 
@@ -2141,6 +2220,15 @@ void Spirv::DetectFetch()
 void Spirv::WriteInstructions()
 {
 	ModifyCode();
+	if (UsesComputeWaveBanks())
+	{
+		const auto analysis = ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		if (!analysis.supported)
+		{
+			EXIT("paired-wave transformed instruction unsupported: pc=0x%08" PRIx32 " reason=%s\n",
+			     analysis.unsupported_pc, analysis.reason.c_str());
+		}
+	}
 
 	const bool  uses_arrayed_2d_sampled_images = UsesArrayed2dImages(m_bind, ShaderTextureUsage::ReadOnly);
 	const bool  uses_arrayed_2d_storage_images = UsesArrayed2dImages(m_bind, ShaderTextureUsage::ReadWrite);
@@ -2163,7 +2251,6 @@ void Spirv::WriteInstructions()
 
 		WriteLabel(index);
 
-		String8 src = ShaderCode::DbgInstructionToStr(inst);
 		String8 dst;
 		String8 dst_debug;
 
@@ -2171,7 +2258,22 @@ void Spirv::WriteInstructions()
 
 		const auto* func = RecompFunc(inst.type, inst.format);
 
-		if (func != nullptr)
+		const auto wave_kind = UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
+		                                             : ShaderComputeWaveInstructionKind::Unsupported;
+		if (wave_kind == ShaderComputeWaveInstructionKind::BankedVector || wave_kind == ShaderComputeWaveInstructionKind::WaveLane ||
+		    wave_kind == ShaderComputeWaveInstructionKind::BankedSdwaExtract)
+		{
+			ok = EmitComputeWaveLaneInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedLds)
+		{
+			ok = EmitComputeWaveLdsInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedAlu)
+		{
+			ok = EmitComputeWaveAluInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedBufferLoad)
+		{
+			ok = EmitComputeWaveBufferLoadInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (func != nullptr)
 		{
 			EXIT_IF(func->type != inst.type);
 			EXIT_IF(func->format != inst.format);
@@ -2193,6 +2295,9 @@ void Spirv::WriteInstructions()
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}
 
+		// Unknown parser formats must reach the actionable missing-emitter
+		// diagnostic above, not an assertion inside the debug formatter.
+		const String8 src = ShaderCode::DbgInstructionToStr(inst);
 		m_source += String8::FromPrintf("; %s\n", src.c_str());
 		m_source += String8::FromPrintf("%s\n", dst.c_str());
 
@@ -2404,6 +2509,10 @@ void Spirv::FindConstants()
 	{
 		AddConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
 	}
+	if (UsesVertexLayerExport())
+	{
+		AddConstantUint(0x7ffu);
+	}
 	const int fixed_integer_limit = UsesPixelMrtProbe() ? 50 : (UsesPixelSampleProbe() ? 46 : (UsesGraphicsProbeStorage() ? 36 : 32));
 	for (int i = 0; i <= fixed_integer_limit; i++)
 	{
@@ -2426,11 +2535,15 @@ void Spirv::FindConstants()
 		{
 			AddConstantUint(inst.pc);
 		}
+		if (inst.type == ShaderInstructionType::SGetpcB64 && inst.pc <= UINT32_MAX - 4u)
+		{
+			AddConstantUint(inst.pc + 4u);
+		}
 		if (inst.buffer_imm_offset != 0)
 		{
 			AddConstantUint(inst.buffer_imm_offset);
 		}
-		if (inst.type == ShaderInstructionType::SBarrier)
+		if (inst.type == ShaderInstructionType::SBarrier || inst.type == ShaderInstructionType::DsAddRtnU32)
 		{
 			AddConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
 		}
@@ -2462,6 +2575,25 @@ void Spirv::FindConstants()
 		if (inst.smem_imm_offset != 0)
 		{
 			AddConstantUint(static_cast<uint32_t>(inst.smem_imm_offset));
+		}
+		// SDWA extract emitters resolve the field mask through GetConstantUint.
+		if (inst.vop_sdwa)
+		{
+			AddConstantUint(0xffu);
+			AddConstantUint(0xffffu);
+		}
+		// DS emitters resolve inst.ds_offset through GetConstantUint: the
+		// read2 pair is dword-scaled while single-offset DS ops carry bytes.
+		// Undeclared offsets would assemble into an orphan id that the driver
+		// rejects at pipeline creation.
+		if (inst.type == ShaderInstructionType::DsRead2B32)
+		{
+			AddConstantUint((inst.ds_offset & 0xffu) * 4u);
+			AddConstantUint(((inst.ds_offset >> 8u) & 0xffu) * 4u);
+		}
+		else if (inst.ds_offset != 0)
+		{
+			AddConstantUint(inst.ds_offset);
 		}
 	}
 	// Attribute-table dwords materialized by SLoad from fetch_attrib_reg.
@@ -2553,6 +2685,17 @@ void Spirv::FindConstants()
 		AddConstantUint(m_cs_input_info->threads_num[0]);
 		AddConstantUint(m_cs_input_info->threads_num[1]);
 		AddConstantUint(m_cs_input_info->threads_num[2]);
+		if (UsesComputeWaveBanks())
+		{
+			for (const auto dimension: m_cs_input_info->wave_layout.guest_local)
+			{
+				AddConstantUint(dimension);
+			}
+			for (const auto dimension: m_cs_input_info->wave_layout.physical_local)
+			{
+				AddConstantUint(dimension);
+			}
+		}
 	}
 }
 

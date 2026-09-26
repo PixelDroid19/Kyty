@@ -74,16 +74,16 @@ static int FindImageStorageTextureDescriptor(const ShaderInstruction& inst, cons
 	}
 
 	const int texture_register = inst.src[1].register_id;
-	for (int mapping = 0; mapping < bind.dynamic_sloads.mappings_num; ++mapping)
+	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
 	{
-		if (bind.dynamic_sloads.kind[mapping] != ShaderDynamicSLoadResourceKind::Texture ||
-		    bind.dynamic_sloads.destination_register[mapping] != texture_register ||
-		    inst.pc <= bind.dynamic_sloads.instruction_pc[mapping] || inst.pc > bind.dynamic_sloads.last_consumer_pc[mapping])
+		const auto& record = bind.dynamic_sloads.records.At(mapping);
+		if (record.kind != ShaderDynamicSLoadResourceKind::Texture || record.destination_register != texture_register ||
+		    inst.pc <= record.instruction_pc || inst.pc > record.last_consumer_pc)
 		{
 			continue;
 		}
 
-		const int index = bind.dynamic_sloads.resource_index[mapping];
+		const int index = record.resource_index;
 		if (index >= 0 && index < bind.textures2D.textures_num && bind.textures2D.desc[index].usage == ShaderTextureUsage::ReadWrite)
 		{
 			return index;
@@ -2261,7 +2261,16 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
+	if (bind_info == nullptr || bind_info->samplers.samplers_num <= 0)
+	{
+		return false;
+	}
+
+	const auto* vs_info = spirv->GetVsInputInfo();
+	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+	const auto  plan                    = PlanImageSampleLz(inst, *bind_info, user_data_register_base);
+
+	if (plan.shape == ShaderGen5SampledTextureShape::TwoDimensional && bind_info->textures2D.textures2d_sampled_num > 0)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
 		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
@@ -2305,6 +2314,68 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
                OpStore %<dst_value3> %t58_<index>
 )";
 		*dst_source += String8(text)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<src0_value0>", src0_value0.value)
+		                   .ReplaceStr("<src0_value1>", src0_value1.value)
+		                   .ReplaceStr("<src0_value2>", src0_value2.value)
+		                   .ReplaceStr("<src1_value0>", src1_value0.value)
+		                   .ReplaceStr("<src2_value0>", src2_value0.value)
+		                   .ReplaceStr("<dst_value0>", dst_value0.value)
+		                   .ReplaceStr("<dst_value1>", dst_value1.value)
+		                   .ReplaceStr("<dst_value2>", dst_value2.value)
+		                   .ReplaceStr("<dst_value3>", dst_value3.value);
+
+		return true;
+	}
+
+	if (plan.shape == ShaderGen5SampledTextureShape::ThreeDimensional && bind_info->textures2D.textures3d_sampled_num > 0)
+	{
+		ValidateImageSampleLzAddresses(inst, 3u);
+
+		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
+		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
+		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
+		auto dst_value3  = operand_variable_to_str(inst.dst, 3);
+		auto src0_value0 = mimg_address_to_str(inst, 0);
+		auto src0_value1 = mimg_address_to_str(inst, 1);
+		auto src0_value2 = mimg_address_to_str(inst, 2);
+		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
+		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
+
+		if (dst_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src0_value2.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value2.type != SpirvType::Float condition ignored (continuing)\n"); }
+		if (src1_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (src2_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src2_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+
+		static const char* volume_text = R"(
+         %t24_<index> = OpLoad %uint %<src1_value0>
+         %t26_<index> = OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S %t24_<index>
+         %t27_<index> = OpLoad %ImageS3D %t26_<index>
+         %t33_<index> = OpLoad %uint %<src2_value0>
+         %t35_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %t33_<index>
+         %t36_<index> = OpLoad %Sampler %t35_<index>
+         %t38_<index> = OpSampledImage %SampledImage3D %t27_<index> %t36_<index>
+         %t39_<index> = OpLoad %float %<src0_value0>
+         %t40_<index> = OpLoad %float %<src0_value1>
+         %t41_<index> = OpLoad %float %<src0_value2>
+         %t42_<index> = OpCompositeConstruct %v3float %t39_<index> %t40_<index> %t41_<index>
+         %t43_<index> = OpImageSampleExplicitLod %v4float %t38_<index> %t42_<index> Lod %float_0_000000
+               OpStore %temp_v4float %t43_<index>
+         %t46_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_0
+         %t47_<index> = OpLoad %float %t46_<index>
+               OpStore %<dst_value0> %t47_<index>
+         %t50_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_1
+         %t51_<index> = OpLoad %float %t50_<index>
+               OpStore %<dst_value1> %t51_<index>
+         %t54_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_2
+         %t55_<index> = OpLoad %float %t54_<index>
+               OpStore %<dst_value2> %t55_<index>
+         %t57_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_3
+         %t58_<index> = OpLoad %float %t57_<index>
+               OpStore %<dst_value3> %t58_<index>
+)";
+		*dst_source += String8(volume_text)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<src0_value1>", src0_value1.value)

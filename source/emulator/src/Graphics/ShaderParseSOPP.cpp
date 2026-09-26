@@ -16,7 +16,8 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 	uint32_t simm   = (buffer[0] >> 0u) & 0xffffu;
 
 	ShaderInstruction inst;
-	inst.pc = pc;
+	inst.pc          = pc;
+	inst.sopp_opcode = static_cast<uint8_t>(opcode);
 
 	inst.format            = ShaderInstructionFormat::Label;
 	inst.src[0].type       = ShaderOperandType::LiteralConstant;
@@ -36,6 +37,7 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 		case 0x06: inst.type = ShaderInstructionType::SCbranchVccz; break;
 		case 0x07: inst.type = ShaderInstructionType::SCbranchVccnz; break;
 		case 0x08: inst.type = ShaderInstructionType::SCbranchExecz; break;
+		case 0x09: inst.type = ShaderInstructionType::SCbranchExecnz; break;
 		case 0x0c:
 			inst.type              = ShaderInstructionType::SWaitcnt;
 			inst.format            = ShaderInstructionFormat::Imm;
@@ -65,10 +67,6 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.src[0].type       = ShaderOperandType::LiteralConstant;
 			inst.src[0].constant.u = simm;
 			inst.src_num           = 1;
-			break;
-		case 0x9: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_execnz treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
 			break;
 		case 0xA:
 			if (simm != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: simm != 0 condition ignored (continuing)\n"); }
@@ -145,7 +143,8 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 
 	if (inst.type == ShaderInstructionType::SCbranchScc0 || inst.type == ShaderInstructionType::SCbranchScc1 ||
 	    inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz ||
-	    inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SBranch)
+	    inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz ||
+	    inst.type == ShaderInstructionType::SBranch)
 	{
 		dst->GetLabels().Add(ShaderLabel(inst));
 

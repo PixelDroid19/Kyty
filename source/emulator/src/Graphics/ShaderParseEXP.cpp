@@ -76,8 +76,10 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 			// The IR format has two physical packed-half source slots. Keep both
 			// present even when the enable mask consumes only the first pair.
 			inst.src_num = 2;
-		} else if (compr == 0 && en == 0xfu)
+		} else if (compr == 0 && en != 0u)
 		{
+			// Full-precision MRT exports enable their four physical sources
+			// independently. Retain EN for component-wise output accumulation.
 			static const ShaderInstructionFormat::Format k_full[] = {
 			    ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone,
 			    ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm,
@@ -110,6 +112,16 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		if (done != 0 && en == 0xfu)
 		{
 			inst.format = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done;
+		}
+	} else if (target == 0x0du && dst->GetType() == ShaderType::Vertex && Config::IsNextGen())
+	{
+		// Z is the only source in this form. DONE marks the last position
+		// export, so both intermediate and final miscellaneous exports are valid.
+		if (compr == 0 && vm == 0 && en == 0x4u)
+		{
+			inst.format  = ShaderInstructionFormat::Pos1OffOffVsrc0Off;
+			inst.src[0]  = inst.src[2];
+			inst.src_num = 1;
 		}
 	} else if (target == 0x14u)
 	{

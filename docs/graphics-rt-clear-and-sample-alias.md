@@ -25,21 +25,29 @@ decode the packing that Mesa/RADV use for the attachment’s Vulkan format:
 
 | Format | Packing |
 | --- | --- |
+| `R32_SFLOAT` | WORD0 = raw f32(R); WORD1 does not supply another component |
 | `R16G16B16A16_SFLOAT` | WORD0 = f16(R)\|(f16(G)<<16), WORD1 = f16(B)\|(f16(A)<<16) |
 | `R8G8B8A8_*` | WORD0 = R\|(G<<8)\|(B<<16)\|(A<<24), WORD1 = 0 |
 | `B8G8R8A8_*` | WORD0 BGRA8 similarly |
 
-**Contract:** for those known packings, `CLEAR_WORD0/1 = 0` is **transparent
+**Contract:** for the RGBA/BGRA packings, `CLEAR_WORD0/1 = 0` is **transparent
 black** (`A = 0`), not opaque black. Inventing `A = 1` on an RGBA8 intermediate
 that is later sampled with alpha blend produces **opaque black quads** around
 sprites and props.
+
+For `R32_SFLOAT`, preserve WORD0's floating-point bits rather than substituting
+black, converting the integer numerically, or clamping the value to a color
+range. The image stores only R; the decoder initializes unused G/B to zero
+and A to one. This decoding contract does not establish when a guest clear
+event occurred and does not change the existing load-op policy.
 
 `ResolveColorAttachmentLoadOps` clears on first bind (`UNDEFINED`) and when
 rebinding after sampling (`SHADER_READ_ONLY_OPTIMAL`). Within-frame draws that
 stay in `COLOR_ATTACHMENT_OPTIMAL` still `LOAD`.
 
 Unsupported formats must not invent channels: callers either skip decode or
-fail structured. Do not bitcast WORD0/1 as float32 R/G for float RTs.
+fail structured. Do not treat the two words as float32 R/G for packed
+half-float RGBA targets.
 
 ### Implementation checklist
 

@@ -2028,7 +2028,8 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKHR surface, const VulkanExtensions* r,
                                    const VulkanQueues& queues, const Vector<const char*>& device_extensions,
                                    bool color_write_enable_supported, bool depth_clip_enable_supported,
-                                   bool depth_clip_control_supported)
+                                   bool depth_clip_control_supported,
+                                   const ShaderComputeWaveVulkanState* compute_wave_state)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -2087,6 +2088,16 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	color_write_ext.pNext            = nullptr;
 	color_write_ext.colorWriteEnable = VK_TRUE;
 
+	VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_control_features {};
+	subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
+	if (compute_wave_state != nullptr && compute_wave_state->extension_enabled)
+	{
+		subgroup_size_control_features.subgroupSizeControl =
+		    compute_wave_state->size_control_feature_supported ? VK_TRUE : VK_FALSE;
+		subgroup_size_control_features.computeFullSubgroups =
+		    compute_wave_state->full_subgroups_feature_supported ? VK_TRUE : VK_FALSE;
+	}
+
 	void* device_feature_chain = nullptr;
 	if (depth_clip_control_supported)
 	{
@@ -2102,6 +2113,11 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	{
 		color_write_ext.pNext = device_feature_chain;
 		device_feature_chain  = &color_write_ext;
+	}
+	if (compute_wave_state != nullptr && compute_wave_state->extension_enabled)
+	{
+		subgroup_size_control_features.pNext = device_feature_chain;
+		device_feature_chain                = &subgroup_size_control_features;
 	}
 
 	VkDeviceCreateInfo create_info {};
@@ -2747,6 +2763,14 @@ static void VulkanCreate(WindowContext* ctx)
 
 		auto has_ext = [&](const char* name)
 		{ return dev_exts.Contains(name, [](auto s, auto l) { return strcmp(s.extensionName, l) == 0; }); };
+		auto extension_revision = [&](const char* name)
+		{
+			for (uint32_t i = 0; i < dev_exts.Size(); ++i)
+			{
+				if (strcmp(dev_exts[i].extensionName, name) == 0) { return dev_exts[i].specVersion; }
+			}
+			return 0u;
+		};
 		auto drop_ext = [&](const char* name)
 		{
 			if (auto idx = device_extensions.Find(name, [](auto s, auto l) { return strcmp(s, l) == 0; });
@@ -2762,6 +2786,11 @@ static void VulkanCreate(WindowContext* ctx)
 		depth_clip_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT;
 		VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control {};
 		depth_clip_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
+		VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_control_features {};
+		subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
+		const uint32_t subgroup_size_control_revision = extension_revision(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+		const bool subgroup_size_control_revision2 =
+		    subgroup_size_control_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION;
 
 		void* query_chain = nullptr;
 		if (has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME))
@@ -2778,6 +2807,11 @@ static void VulkanCreate(WindowContext* ctx)
 		{
 			depth_clip_control.pNext = query_chain;
 			query_chain              = &depth_clip_control;
+		}
+		if (subgroup_size_control_revision2)
+		{
+			subgroup_size_control_features.pNext = query_chain;
+			query_chain                          = &subgroup_size_control_features;
 		}
 		VkPhysicalDeviceFeatures2 available_features {};
 		available_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -2840,6 +2874,28 @@ static void VulkanCreate(WindowContext* ctx)
 		}
 
 		ctx->graphic_ctx.subgroup_size_control_supported = has_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+		auto& wave_state = ctx->graphic_ctx.compute_wave_vulkan_state;
+		wave_state.extension_advertised = ctx->graphic_ctx.subgroup_size_control_supported;
+		wave_state.extension_revision = subgroup_size_control_revision;
+		wave_state.size_control_feature_supported = subgroup_size_control_revision2 &&
+		                                           subgroup_size_control_features.subgroupSizeControl == VK_TRUE;
+		wave_state.full_subgroups_feature_supported = subgroup_size_control_revision2 &&
+		                                              subgroup_size_control_features.computeFullSubgroups == VK_TRUE;
+		wave_state.extension_enabled = subgroup_size_control_revision2 &&
+		                               (wave_state.size_control_feature_supported || wave_state.full_subgroups_feature_supported);
+		wave_state.size_control_feature_enabled = wave_state.extension_enabled && wave_state.size_control_feature_supported;
+		wave_state.full_subgroups_feature_enabled = wave_state.extension_enabled && wave_state.full_subgroups_feature_supported;
+		if (wave_state.extension_enabled)
+		{
+			if (!device_extensions.Contains(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME,
+			                               [](auto s, auto l) { return strcmp(s, l) == 0; }))
+			{
+				device_extensions.Add(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+			}
+		} else
+		{
+			drop_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+		}
 
 		ctx->graphic_ctx.sample_location_capabilities.extension_enabled = has_ext(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) ? 1u : 0u;
 		if (ctx->graphic_ctx.sample_location_capabilities.extension_enabled == 0)
@@ -2873,14 +2929,16 @@ static void VulkanCreate(WindowContext* ctx)
 	VkPhysicalDeviceProperties2 physical_device_properties {};
 	subgroup_size_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT;
 	subgroup_properties.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-	subgroup_properties.pNext   = ctx->graphic_ctx.subgroup_size_control_supported ? &subgroup_size_control : nullptr;
+	subgroup_properties.pNext   =
+	    ctx->graphic_ctx.compute_wave_vulkan_state.extension_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION ?
+	        &subgroup_size_control : nullptr;
 	physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
 	physical_device_properties.pNext = &subgroup_properties;
 	vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
 	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
 	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;
 	ctx->graphic_ctx.subgroup_operations = subgroup_properties.supportedOperations;
-	if (ctx->graphic_ctx.subgroup_size_control_supported)
+	if (ctx->graphic_ctx.compute_wave_vulkan_state.extension_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION)
 	{
 		ctx->graphic_ctx.subgroup_min_size = subgroup_size_control.minSubgroupSize;
 		ctx->graphic_ctx.subgroup_max_size = subgroup_size_control.maxSubgroupSize;
@@ -2889,6 +2947,26 @@ static void VulkanCreate(WindowContext* ctx)
 		ctx->graphic_ctx.subgroup_min_size = subgroup_properties.subgroupSize;
 		ctx->graphic_ctx.subgroup_max_size = subgroup_properties.subgroupSize;
 	}
+	auto& wave_state = ctx->graphic_ctx.compute_wave_vulkan_state;
+	wave_state.compute_required_size_supported =
+	    (subgroup_size_control.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+	    wave_state.extension_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION;
+	wave_state.compute_ballot_shuffle_supported =
+	    (subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+	    (subgroup_properties.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0 &&
+	    (subgroup_properties.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
+	wave_state.min_subgroup_size = ctx->graphic_ctx.subgroup_min_size;
+	wave_state.max_subgroup_size = ctx->graphic_ctx.subgroup_max_size;
+	wave_state.max_local_size[0] = device_properties.limits.maxComputeWorkGroupSize[0];
+	wave_state.max_local_size[1] = device_properties.limits.maxComputeWorkGroupSize[1];
+	wave_state.max_local_size[2] = device_properties.limits.maxComputeWorkGroupSize[2];
+	wave_state.max_group_count[0] = device_properties.limits.maxComputeWorkGroupCount[0];
+	wave_state.max_group_count[1] = device_properties.limits.maxComputeWorkGroupCount[1];
+	wave_state.max_group_count[2] = device_properties.limits.maxComputeWorkGroupCount[2];
+	wave_state.max_invocations = device_properties.limits.maxComputeWorkGroupInvocations;
+	wave_state.max_subgroups = wave_state.extension_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION ?
+	                               subgroup_size_control.maxComputeWorkgroupSubgroups : 0u;
+	wave_state.max_shared_bytes = device_properties.limits.maxComputeSharedMemorySize;
 	VkPhysicalDeviceFeatures device_features {};
 	vkGetPhysicalDeviceFeatures(ctx->graphic_ctx.physical_device, &device_features);
 	ctx->graphic_ctx.depth_bias_clamp_supported    = device_features.depthBiasClamp == VK_TRUE;
@@ -2902,7 +2980,8 @@ static void VulkanCreate(WindowContext* ctx)
 	ctx->graphic_ctx.device =
 	    VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions,
 	                       ctx->graphic_ctx.color_write_enable_supported, ctx->graphic_ctx.depth_clip_enable_supported,
-	                       ctx->graphic_ctx.depth_clip_control_supported);
+	                       ctx->graphic_ctx.depth_clip_control_supported,
+	                       &ctx->graphic_ctx.compute_wave_vulkan_state);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
 		EXIT("Could not create device");

@@ -1,6 +1,13 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 
+#include "Kyty/Core/VirtualMemory.h"
+#include "Kyty/Core/DbgAssert.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Loader/GuestCall.h"
+
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -12,11 +19,70 @@ using MallocFunc = void*(KYTY_SYSV_ABI*)(size_t);
 using FreeFunc   = void(KYTY_SYSV_ABI*)(void*);
 using StatsFunc  = int(KYTY_SYSV_ABI*)(void*);
 
-static MallocFunc g_malloc     = nullptr;
-static FreeFunc   g_free       = nullptr;
-static StatsFunc  g_stats_fast = nullptr;
+struct RuntimeApi
+{
+	MallocFunc malloc = nullptr;
+	FreeFunc free = nullptr;
+	StatsFunc stats_fast = nullptr;
+};
+std::mutex g_api_mutex;
+RuntimeApi g_api;
+
+RuntimeApi GetApi()
+{
+	std::lock_guard lock(g_api_mutex);
+	return g_api;
+}
 
 static thread_local bool g_in_guest_allocator = false;
+
+enum class StartupState { Empty, Initializing, Ready, Failed };
+std::mutex   g_startup_mutex;
+StartupState g_startup_state = StartupState::Empty;
+uint64_t     g_startup_parameters = 0;
+std::thread::id g_startup_thread;
+std::condition_variable g_startup_changed;
+
+// Only the common, size-gated prefixes are read. The replacement record is
+// distinct from the direct kernel API: its header precedes init/fini and the
+// ten callbacks; version 2 appends aligned_alloc.
+struct ProcessParametersPrefix
+{
+	uint64_t size;
+	uint32_t magic;
+	uint32_t version;
+	uint64_t reserved[5];
+	uint64_t libc_parameters;
+};
+struct LibcParametersPrefix
+{
+	uint64_t size;
+	uint64_t reserved[5];
+	uint64_t malloc_replace;
+};
+struct MallocReplacement
+{
+	uint64_t size;
+	uint64_t version;
+	uint64_t initialize;
+	uint64_t finalize;
+	uint64_t callbacks[kApiSlotCount];
+};
+static_assert(sizeof(ProcessParametersPrefix) == 0x40);
+static_assert(sizeof(LibcParametersPrefix) == 0x38);
+static_assert(sizeof(MallocReplacement) == 0x70);
+
+template <typename T> bool ReadRecord(uint64_t address, T* record)
+{
+	return Core::VirtualMemory::CopyFromGuest(record, address, sizeof(T)) && record->size >= sizeof(T) &&
+	       Core::VirtualMemory::IsRangeReadable(address, record->size);
+}
+
+bool ValidCallback(uint64_t address)
+{
+	return address == 0 || (Core::VirtualMemory::IsRangeGuestOwned(address, 1) &&
+	                        Emulator::GuestRuntimePort::IsExecutableAddress(address));
+}
 
 class AllocatorCallbackScope
 {
@@ -41,22 +107,93 @@ bool IsValidApi(const Api* api)
 void RegisterApi(void* const api[kApiSlotCount])
 {
 	const auto* table = reinterpret_cast<const Api*>(api);
+	std::lock_guard lock(g_api_mutex);
 	if (!IsValidApi(table))
 	{
-		g_malloc     = nullptr;
-		g_free       = nullptr;
-		g_stats_fast = nullptr;
+		g_api = {};
 		return;
 	}
 
-	g_malloc     = reinterpret_cast<MallocFunc>(table->slots[kMallocSlot]);
-	g_free       = reinterpret_cast<FreeFunc>(table->slots[kFreeSlot]);
-	g_stats_fast = reinterpret_cast<StatsFunc>(table->slots[kMallocStatsFastSlot]);
+	g_api.malloc     = reinterpret_cast<MallocFunc>(table->slots[kMallocSlot]);
+	g_api.free       = reinterpret_cast<FreeFunc>(table->slots[kFreeSlot]);
+	g_api.stats_fast = reinterpret_cast<StatsFunc>(table->slots[kMallocStatsFastSlot]);
+}
+
+bool InitializeProcessHeap(uint64_t process_parameters)
+{
+	if (process_parameters == 0) { return true; }
+	ProcessParametersPrefix process {};
+	if (!ReadRecord(process_parameters, &process) || process.magic != 0x4942524f || process.version == 0)
+	{
+		return false;
+	}
+	if (process.libc_parameters == 0) { return true; }
+	LibcParametersPrefix libc {};
+	if (!ReadRecord(process.libc_parameters, &libc)) { return false; }
+	if (libc.malloc_replace == 0) { return true; }
+	MallocReplacement replacement {};
+	if (!ReadRecord(libc.malloc_replace, &replacement) ||
+	    !((replacement.version == 1 && replacement.size == 0x70) ||
+	      (replacement.version == 2 && replacement.size == 0x78)) ||
+	    !ValidCallback(replacement.initialize) || !ValidCallback(replacement.finalize))
+	{
+		return false;
+	}
+	Api api {};
+	for (size_t slot = 0; slot < kApiSlotCount; ++slot)
+	{
+		if (!ValidCallback(replacement.callbacks[slot])) { return false; }
+		api.slots[slot] = reinterpret_cast<void*>(replacement.callbacks[slot]);
+	}
+	bool empty = replacement.initialize == 0 && replacement.finalize == 0;
+	for (const auto callback: replacement.callbacks) { empty = empty && callback == 0; }
+	if (replacement.version == 2)
+	{
+		uint64_t aligned_alloc = 0;
+		if (!Core::VirtualMemory::CopyFromGuest(&aligned_alloc, libc.malloc_replace + sizeof(replacement), sizeof(aligned_alloc)) ||
+		    !ValidCallback(aligned_alloc)) { return false; }
+		empty = empty && aligned_alloc == 0;
+	}
+	// Public CRTs emit a default record whose callbacks are all null.
+	if (empty) { return true; }
+	if (!IsValidApi(&api)) { return false; }
+	{
+		std::unique_lock lock(g_startup_mutex);
+		if (g_startup_state == StartupState::Initializing && g_startup_thread == std::this_thread::get_id())
+		{
+			return g_startup_parameters == process_parameters;
+		}
+		g_startup_changed.wait(lock, [] { return g_startup_state != StartupState::Initializing; });
+		if (g_startup_state != StartupState::Empty)
+		{
+			return g_startup_parameters == process_parameters && g_startup_state == StartupState::Ready;
+		}
+		g_startup_parameters = process_parameters;
+		g_startup_state = StartupState::Initializing;
+		g_startup_thread = std::this_thread::get_id();
+	}
+	// Do not hold a host lock across guest code, or publish partially initialized
+	// callbacks. Main-image constructors remain exclusively owned by its CRT.
+	const auto result = replacement.initialize == 0 ? 0 : static_cast<int32_t>(
+	    Emulator::GuestRuntimePort::Invoke(replacement.initialize, 0, 0, 0));
+	std::lock_guard lock(g_startup_mutex);
+	g_startup_thread = {};
+	if (result != 0)
+	{
+		g_startup_state = StartupState::Failed;
+		g_startup_changed.notify_all();
+		return false;
+	}
+	RegisterApi(api.slots);
+	g_startup_state = StartupState::Ready;
+	g_startup_changed.notify_all();
+	return true;
 }
 
 bool IsInitialized()
 {
-	return g_malloc != nullptr && g_free != nullptr;
+	const auto api = GetApi();
+	return api.malloc != nullptr && api.free != nullptr;
 }
 
 bool HasAllocator()
@@ -71,30 +208,33 @@ bool IsAllocatorCallbackActive()
 
 bool HasMallocStatsFast()
 {
-	return HasAllocator() && g_stats_fast != nullptr;
+	const auto api = GetApi();
+	return !g_in_guest_allocator && api.malloc != nullptr && api.free != nullptr && api.stats_fast != nullptr;
 }
 
 void* Malloc(size_t size)
 {
-	if (!HasAllocator())
+	const auto api = GetApi();
+	if (g_in_guest_allocator || api.malloc == nullptr || api.free == nullptr)
 	{
 		return nullptr;
 	}
 
 	AllocatorCallbackScope scope;
-	const uint64_t         ptr = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_malloc), size, 0, 0);
+	const uint64_t         ptr = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(api.malloc), size, 0, 0);
 	return reinterpret_cast<void*>(ptr);
 }
 
 int MallocStatsFast(void* stats)
 {
-	if (!HasMallocStatsFast() || stats == nullptr)
+	const auto api = GetApi();
+	if (g_in_guest_allocator || api.malloc == nullptr || api.free == nullptr || api.stats_fast == nullptr || stats == nullptr)
 	{
 		return -1;
 	}
 
 	AllocatorCallbackScope scope;
-	const int result = static_cast<int>(Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_stats_fast),
+	const int result = static_cast<int>(Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(api.stats_fast),
 	                                                              reinterpret_cast<uint64_t>(stats), 0, 0));
 	return result;
 }
@@ -106,21 +246,26 @@ bool Free(void* ptr)
 		return true;
 	}
 
-	if (!HasAllocator())
+	const auto api = GetApi();
+	if (g_in_guest_allocator || api.malloc == nullptr || api.free == nullptr)
 	{
 		return false;
 	}
 
 	AllocatorCallbackScope scope;
-	Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(g_free), reinterpret_cast<uint64_t>(ptr), 0, 0);
+	Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(api.free), reinterpret_cast<uint64_t>(ptr), 0, 0);
 	return true;
 }
 
 void Reset()
 {
-	g_malloc             = nullptr;
-	g_free               = nullptr;
-	g_stats_fast         = nullptr;
+	std::unique_lock lock(g_startup_mutex);
+	EXIT_IF(g_startup_state == StartupState::Initializing && g_startup_thread == std::this_thread::get_id());
+	g_startup_changed.wait(lock, [] { return g_startup_state != StartupState::Initializing; });
+	g_startup_state       = StartupState::Empty;
+	g_startup_parameters  = 0;
+	g_startup_thread     = {};
+	RegisterApi(nullptr);
 	g_in_guest_allocator = false;
 }
 

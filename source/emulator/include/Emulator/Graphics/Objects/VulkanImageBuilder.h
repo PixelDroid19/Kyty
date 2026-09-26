@@ -48,6 +48,13 @@ struct VulkanImageViewDescriptor
 // Creation is atomic: a partial set is destroyed and cleared on failure.
 [[nodiscard]] bool VulkanCreateStandardColorImageViews(GraphicContext* context, VulkanImage* image);
 
+// Create the alternate UNORM/sRGB attachment view for a mutable color image.
+[[nodiscard]] bool VulkanCreateCompatibleColorAttachmentViews(GraphicContext* context, VulkanImage* image);
+
+// Resolve the view that preserves the guest color-attachment transfer domain.
+// Returns -1 when the image and attachment formats are not view-compatible.
+[[nodiscard]] int VulkanResolveColorAttachmentView(VkFormat image_format, VkFormat attachment_format);
+
 // Resolve the descriptor view for a storage-image bind. Render-target arrays
 // reuse their canonical identity array view; storage textures keep their
 // dedicated normalized storage view.

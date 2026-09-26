@@ -7,6 +7,7 @@
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
 #include "Emulator/Graphics/SampleLocations.h"
+#include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
 
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
@@ -150,7 +151,10 @@ struct GraphicContext
 	uint32_t subgroup_max_size              = 0;
 	VkShaderStageFlags subgroup_stages      = 0;
 	VkSubgroupFeatureFlags subgroup_operations = 0;
-	bool subgroup_size_control_supported    = false;
+	// Extension advertisement is diagnostic only; wave execution consumes the
+	// separate support and enabled fields in compute_wave_vulkan_state.
+	bool subgroup_size_control_supported = false;
+	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that
 	// programs custom guest locations is rejected when the selected host cannot
@@ -180,7 +184,7 @@ enum class VulkanImageType
 
 struct VulkanImage
 {
-	static constexpr int VIEW_MAX                   = 9;
+	static constexpr int VIEW_MAX                   = 11;
 	static constexpr int VIEW_DEFAULT       = 0;
 	static constexpr int VIEW_BGRA          = 1;
 	static constexpr int VIEW_DEPTH_TEXTURE = 2;
@@ -190,6 +194,8 @@ struct VulkanImage
 	static constexpr int VIEW_STENCIL_TEXTURE = 6;
 	static constexpr int VIEW_DEPTH_TEXTURE_ARRAY = 7;
 	static constexpr int VIEW_STORAGE_ARRAY       = 8;
+	static constexpr int VIEW_COLOR_UNORM         = 9;
+	static constexpr int VIEW_COLOR_SRGB          = 10;
 
 	explicit VulkanImage(VulkanImageType type): type(type) {}
 

@@ -6,6 +6,7 @@
 #include "Kyty/Core/String.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
@@ -154,6 +155,10 @@ static KYTY_SYSV_ABI void init_env(const ProcessEnvironment::InitParameters* par
 	PRINT_NAME();
 
 	(void)ProcessEnvironment::Initialize(parameters);
+	if (!LibKernel::ApplicationHeap::InitializeProcessHeap(Emulator::GuestRuntimePort::GetProcessParameters()))
+	{
+		EXIT("libc process allocator metadata or initialization failed\n");
+	}
 }
 
 // The C++ runtime uses _Cnd_t as a pointer to the kernel condition object.

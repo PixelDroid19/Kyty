@@ -79,6 +79,14 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 		// image views must keep an identity component mapping.
 		return DstSel(4, 5, 6, 7);
 	}
+	if (fmt == 29u && swizzle == DstSel(4, 5, 0, 1))
+	{
+		// The two-component format has no physical blue/alpha channels. Its
+		// guest selector supplies the architectural defaults (0, 1), which is
+		// exactly how a two-component Vulkan format expands, whereas storage
+		// image views must keep an identity component mapping.
+		return DstSel(4, 5, 6, 7);
+	}
 	return swizzle;
 }
 
@@ -484,7 +492,9 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 
 	if (!VulkanNormalizeStorageComponentMapping(&image_info.format, &components))
 	{
-		EXIT("swizzle is not supported");
+		EXIT("swizzle is not supported: format=%" PRIu64 " swizzle=0x%03" PRIx64 " decoded=(%d,%d,%d,%d) vkformat=%d\n",
+		     fmt, swizzle, static_cast<int>(components.r), static_cast<int>(components.g), static_cast<int>(components.b),
+		     static_cast<int>(components.a), static_cast<int>(image_info.format));
 	}
 
 	if (!VulkanImageFormatSupported(ctx, image_info))

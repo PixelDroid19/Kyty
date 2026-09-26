@@ -71,6 +71,12 @@ struct SpirvValue
 	String8   value;
 };
 
+enum class ShaderWaveBank : uint32_t
+{
+	Low = 0u,
+	High = 1u
+};
+
 enum class PixelInterpolationMode
 {
 	Unused,
@@ -102,6 +108,21 @@ public:
 	void GenerateSource();
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
+	[[nodiscard]] bool UsesComputeWaveBanks() const;
+	[[nodiscard]] bool EmitComputeWaveLaneInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveLdsInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveAluInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] SpirvValue GetComputeWaveRegister(ShaderOperand operand, ShaderWaveBank bank, int word) const;
+	[[nodiscard]] bool EmitComputeWaveOperandUint(const ShaderOperand& operand, ShaderWaveBank bank,
+	                                              const String8& result_id, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveProlog(String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveMaskBit(const ShaderOperand& mask, ShaderWaveBank bank,
+	                                         const String8& result_id, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveBallot(const String8& low_predicate, const String8& high_predicate,
+	                                        const String8& low_result, const String8& high_result, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveCompareU32(const ShaderInstruction& instruction, uint32_t index,
+	                                            const char* predicate_op, String8* output) const;
 	[[nodiscard]] bool           CanLoadPackedHalfForExport(int export_index, ShaderOperand op) const;
 	[[nodiscard]] bool UsesVertexClipProbe() const
 	{
@@ -130,6 +151,22 @@ public:
 	[[nodiscard]] bool UsesGraphicsProbeStorage() const
 	{
 		return UsesVertexClipProbe() || UsesPixelInput0Probe() || UsesPixelSampleProbe() || UsesPixelMrtProbe();
+	}
+	[[nodiscard]] bool UsesVertexLayerExport() const
+	{
+		if (m_code.GetType() != ShaderType::Vertex || m_vs_input_info == nullptr ||
+		    m_vs_input_info->position1_usage != ShaderVertexPosition1Usage::RenderTargetLayer)
+		{
+			return false;
+		}
+		for (const auto& inst: m_code.GetInstructions())
+		{
+			if (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 	[[nodiscard]] uint32_t GetGraphicsProbeDescriptorSet() const;
 
@@ -182,21 +219,22 @@ public:
 			return false;
 		}
 		const auto& dynamic_sloads = m_bind->dynamic_sloads;
-		for (int mapping = 0; mapping < dynamic_sloads.mappings_num; ++mapping)
+		for (uint32_t mapping = 0; mapping < dynamic_sloads.records.Size(); ++mapping)
 		{
-			if (dynamic_sloads.instruction_pc[mapping] != instruction_pc)
+			const auto& record = dynamic_sloads.records.At(mapping);
+			if (record.instruction_pc != instruction_pc)
 			{
 				continue;
 			}
-			const int first_dword = dynamic_sloads.offset_dw[mapping];
-			if (offset < first_dword || offset >= first_dword + dynamic_sloads.dword_count[mapping])
+			const int first_dword = record.offset_dw;
+			if (offset < first_dword || offset >= first_dword + record.dword_count)
 			{
 				continue;
 			}
 
-			const int resource_index = dynamic_sloads.resource_index[mapping];
-			const int resource_field = dynamic_sloads.resource_field_offset[mapping] + offset - first_dword;
-			switch (dynamic_sloads.kind[mapping])
+			const int resource_index = record.resource_index;
+			const int resource_field = record.resource_field_offset + offset - first_dword;
+			switch (record.kind)
 			{
 				case ShaderDynamicSLoadResourceKind::StorageBuffer:
 					if (resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num condition ignored (continuing)\n"); }

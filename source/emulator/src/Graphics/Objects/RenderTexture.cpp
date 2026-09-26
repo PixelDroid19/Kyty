@@ -329,9 +329,9 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	}
 }
 
-static VkFormat resolve_render_texture_format(uint64_t format)
+uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 {
-	switch (static_cast<RenderTextureFormat>(format))
+	switch (format)
 	{
 		case RenderTextureFormat::R8Unorm: return VK_FORMAT_R8_UNORM;
 		case RenderTextureFormat::R8G8B8A8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
@@ -359,7 +359,8 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 
 	const auto width     = params[RenderTextureObject::PARAM_WIDTH];
 	const auto height    = params[RenderTextureObject::PARAM_HEIGHT];
-	const auto vk_format = resolve_render_texture_format(params[RenderTextureObject::PARAM_FORMAT]);
+	const auto vk_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(
+	    static_cast<RenderTextureFormat>(params[RenderTextureObject::PARAM_FORMAT])));
 	const auto samples    = static_cast<VkSampleCountFlagBits>(params[RenderTextureObject::PARAM_SAMPLES]);
 	const auto array_layers = static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]);
 	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || array_layers == 0)

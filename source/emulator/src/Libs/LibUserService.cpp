@@ -1,5 +1,6 @@
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Common.h"
 #include "Emulator/Libs/Errno.h"
@@ -96,15 +97,29 @@ static KYTY_SYSV_ABI int UserServiceGetUserName(int user_id, char* name, size_t 
 	return OK;
 }
 
-// sceUserServicePlatformPrivacyWs1* — NID D-CzAxQL0XI (UserServicePlatformPrivacyWs1_v1).
-// Observed Astro after font glyph blit; accept any args and return OK so boot continues.
-static KYTY_SYSV_ABI int UserServicePlatformPrivacyWs1Stub(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
-                                                           uint64_t a4, uint64_t a5)
+// sceUserServicePlatformPrivacyWs1GetSetting — NID D-CzAxQL0XI
+// (UserServicePlatformPrivacyWs1_v1). The observed Gen5 call site is
+// (user_id, int32_t* value_out): the id comes from sceUserServiceGetInitialUser
+// (1 for the single offline user) and the caller treats *value_out != 0 as
+// "enabled", so the output must always be written. Report the setting
+// disabled for this offline profile.
+static KYTY_SYSV_ABI int UserServicePlatformPrivacyWs1GetSetting(int user_id, int32_t* value_out)
 {
 	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t a0=0x%016" PRIx64 " a1=0x%016" PRIx64 " a2=0x%016" PRIx64 "\n", a0, a1, a2);
-	KYTY_LOG_DEBUG("\t a3=0x%016" PRIx64 " a4=0x%016" PRIx64 " a5=0x%016" PRIx64 "\n", a3, a4, a5);
-	return OK;
+	if (value_out == nullptr)
+	{
+		return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+	}
+	if (user_id != 1)
+	{
+		return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+	}
+	constexpr int32_t disabled = 0;
+	// The locked guest-memory boundary rejects host pointers, unmapped
+	// addresses and partial writable ranges without writing anything.
+	return Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(value_out), &disabled, sizeof(disabled))
+	           ? OK
+	           : USER_SERVICE_ERROR_INVALID_ARGUMENT;
 }
 
 // Guest game presets blob (40 bytes). Defaults to zeroed options.
@@ -253,6 +268,22 @@ static KYTY_SYSV_ABI int UserServiceGetAccessibilityZoomFollowFocus(int user_id,
 
 } // namespace UserService
 
+// Distinct library UserServicePlatformPrivacyWs1_v1 under the same module
+// UserService_v1.1 (the guest's Gen5 import shape); canonical matching only
+// finds the export under this identity, not under plain UserService.
+namespace LibUserServicePlatformPrivacyWs1 {
+
+LIB_VERSION("UserServicePlatformPrivacyWs1", 1, "UserService", 1, 1);
+
+namespace UserServicePlatformPrivacyWs1 = UserService;
+
+LIB_DEFINE(InitUserService_1_PlatformPrivacyWs1)
+{
+	LIB_FUNC("D-CzAxQL0XI", UserServicePlatformPrivacyWs1::UserServicePlatformPrivacyWs1GetSetting); // GetSetting
+}
+
+} // namespace LibUserServicePlatformPrivacyWs1
+
 LIB_DEFINE(InitUserService_1)
 {
 	LIB_FUNC("j3YMu1MVNNo", UserService::UserServiceInitialize);
@@ -260,8 +291,9 @@ LIB_DEFINE(InitUserService_1)
 	LIB_FUNC("yH17Q6NWtVg", UserService::UserServiceGetEvent);
 	LIB_FUNC("fPhymKNvK-A", UserService::UserServiceGetLoginUserIdList);
 	LIB_FUNC("1xxcMiGu2fo", UserService::UserServiceGetUserName);
-	// Gen5 privacy Ws1 entry used on Astro after font setup.
-	LIB_FUNC("D-CzAxQL0XI", UserService::UserServicePlatformPrivacyWs1Stub);
+	// Gen5 privacy Ws1 entry used on Astro after font setup; it carries the
+	// UserServicePlatformPrivacyWs1 library identity, so it registers there.
+	LibUserServicePlatformPrivacyWs1::InitUserService_1_PlatformPrivacyWs1(s);
 	LIB_FUNC("-sD02mFDBh4", UserService::UserServiceGetGamePresets);
 	LIB_FUNC("qWYHOFwqCxY", UserService::UserServiceGetAccessibilityVibration);
 	LIB_FUNC("-3Y5GO+-i78", UserService::UserServiceGetAccessibilityTriggerEffect);

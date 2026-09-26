@@ -365,6 +365,9 @@ void RunCliScheduledPresentTap(const std::string& endpoint)
 	Expect((sample & PAD_BUTTON_CROSS) == PAD_BUTTON_CROSS, "scheduled tap press reaches the guest");
 	sample = 0;
 	AgentPadApplyReadStateSample(&sample);
+	Expect((sample & PAD_BUTTON_CROSS) == PAD_BUTTON_CROSS, "scheduled tap press remains visible on the next guest sample");
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
 	Expect((sample & PAD_BUTTON_CROSS) == 0, "scheduled tap ends released");
 	const std::string status_after_first = Kyty::Emulator::Agent::Internal::DispatchLine(R"({"id":7,"tool":"status","args":{}})");
 	Expect(status_after_first.find("\"delivered_taps\":1") != std::string::npos,
@@ -380,6 +383,9 @@ void RunCliScheduledPresentTap(const std::string& endpoint)
 	sample = 0;
 	AgentPadApplyReadStateSample(&sample);
 	Expect((sample & PAD_BUTTON_CROSS) == PAD_BUTTON_CROSS, "second scheduled press reaches the guest");
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	Expect((sample & PAD_BUTTON_CROSS) == PAD_BUTTON_CROSS, "second scheduled press remains visible on the next guest sample");
 	sample = 0;
 	AgentPadApplyReadStateSample(&sample);
 	const std::string status_after_second =

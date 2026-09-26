@@ -1,9 +1,13 @@
 #include "Kyty/UnitTest.h"
 #include "Kyty/Core/VirtualMemory.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SymbolDatabase.h"
+#include "Emulator/Log.h"
+
+#include <cstring>
 
 UT_BEGIN(EmulatorSymbolDatabase);
 
@@ -77,11 +81,13 @@ TEST(EmulatorSymbolDatabase, AudioOut2RegistersOnlyIdentifiedExports)
 	ASSERT_TRUE(Libs::Init(U"libAudio_1", &symbols));
 
 	const char16_t* unresolved_nids[] = {u"TUuiYS2kE8s", u"jbz9I9vkqkk", u"3BytPOQgVKc", u"Ec63y59l9tw", u"fYapWA9xVmA",
-	                                     u"Bagshr7OQ6Q", u"Gz1rmUZpROM", u"sysY2FHYff4", u"DImz2Ft9E2g"};
+	                                     u"Bagshr7OQ6Q", u"Gz1rmUZpROM", u"sysY2FHYff4"};
 	for (const auto* nid: unresolved_nids)
 	{
 		EXPECT_EQ(symbols.Find(ResolveFor(nid, Loader::SymbolType::Func, U"AudioOut2", U"AudioOut")), nullptr);
 	}
+	// Identified speaker-info export: registered under AudioOut2_v1/AudioOut.
+	EXPECT_NE(symbols.Find(ResolveFor(u"DImz2Ft9E2g", Loader::SymbolType::Func, U"AudioOut2", U"AudioOut")), nullptr);
 }
 
 TEST(EmulatorSymbolDatabase, TextToSpeechStatusUsesGuestOutputContract)
@@ -177,6 +183,102 @@ TEST(EmulatorSymbolDatabase, NeutralHleRegistryPreservesCanonicalIdentity)
 	EXPECT_NE(symbols.Find(query), nullptr);
 	query.name = U"neutral-alias-b";
 	EXPECT_NE(symbols.Find(query), nullptr);
+}
+
+TEST(EmulatorSymbolDatabase, PlatformPrivacyResolvesUnderItsOwnLibraryScope)
+{
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libUserService_1", &symbols));
+	// The guest imports this NID under library UserServicePlatformPrivacyWs1_v1
+	// of module UserService_v1.1; the plain UserService library must not claim it.
+	ASSERT_NE(symbols.Find(ResolveFor(u"D-CzAxQL0XI", Loader::SymbolType::Func, U"UserServicePlatformPrivacyWs1", U"UserService")),
+	          nullptr);
+	EXPECT_EQ(symbols.Find(ResolveFor(u"D-CzAxQL0XI", Loader::SymbolType::Func, U"UserService", U"UserService")), nullptr);
+}
+
+TEST(EmulatorSymbolDatabase, PlatformPrivacyWritesOnlyTheGuestSetting)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libUserService_1", &symbols));
+	const auto* record = symbols.Find(ResolveFor(u"D-CzAxQL0XI", Loader::SymbolType::Func, U"UserServicePlatformPrivacyWs1", U"UserService"));
+	ASSERT_NE(record, nullptr);
+	using GetSetting = KYTY_SYSV_ABI int (*)(int, int32_t*);
+	auto* get_setting = reinterpret_cast<GetSetting>(record->vaddr);
+
+	const uint64_t address = Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	auto*        words = reinterpret_cast<int32_t*>(address);
+	words[0]           = -1;
+	words[1]           = 0x12345678;
+	const int32_t kept = words[1];
+	// The id comes from GetInitialUser (which yields 1); any other id is offline.
+	EXPECT_EQ(get_setting(2, words), Libs::UserService::USER_SERVICE_ERROR_NOT_LOGGED_IN);
+	EXPECT_EQ(words[0], -1);
+	EXPECT_EQ(get_setting(1, nullptr), Libs::UserService::USER_SERVICE_ERROR_INVALID_ARGUMENT);
+	// The caller treats *value_out != 0 as "enabled": report the offline default.
+	EXPECT_EQ(get_setting(1, words), 0);
+	EXPECT_EQ(words[0], 0);
+	EXPECT_EQ(words[1], kept);
+	EXPECT_TRUE(Core::VirtualMemory::Free(address));
+
+	int32_t host_output = -1;
+	EXPECT_EQ(get_setting(1, &host_output), Libs::UserService::USER_SERVICE_ERROR_INVALID_ARGUMENT);
+	EXPECT_EQ(host_output, -1);
+}
+
+TEST(EmulatorSymbolDatabase, PlatformPrivacyRejectsUnwritableOutputsWithoutFaultingOrPartialWrites)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libUserService_1", &symbols));
+	const auto* record = symbols.Find(ResolveFor(u"D-CzAxQL0XI", Loader::SymbolType::Func, U"UserServicePlatformPrivacyWs1", U"UserService"));
+	ASSERT_NE(record, nullptr);
+	using GetSetting = KYTY_SYSV_ABI int (*)(int, int32_t*);
+	auto* get_setting = reinterpret_cast<GetSetting>(record->vaddr);
+
+	for (int output_case = 0; output_case < 3; ++output_case)
+	{
+		SCOPED_TRACE(output_case);
+		ASSERT_EXIT(
+		    {
+			    Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+			    const uint64_t page     = Core::VirtualMemory::GetPageSize();
+			    const uint64_t address  = Core::VirtualMemory::Alloc(0, page * 2, Core::VirtualMemory::Mode::ReadWrite);
+			    if (address == 0) { std::_Exit(2); }
+			    auto*         bytes = reinterpret_cast<uint8_t*>(address);
+			    std::memset(bytes, 0xa5, static_cast<size_t>(page * 2));
+			    int32_t* output = reinterpret_cast<int32_t*>(uintptr_t {1});
+			    if (output_case == 1)
+			    {
+				    output = reinterpret_cast<int32_t*>(address);
+				    if (!Core::VirtualMemory::ProtectGuest(address, page, Core::VirtualMemory::Mode::Read)) { std::_Exit(3); }
+			    }
+			    if (output_case == 2)
+			    {
+				    output = reinterpret_cast<int32_t*>(address + page - 2);
+				    if (!Core::VirtualMemory::ProtectGuest(address + page, page, Core::VirtualMemory::Mode::NoAccess)) { std::_Exit(3); }
+			    }
+			    const int result = get_setting(1, output);
+			    if (result != Libs::UserService::USER_SERVICE_ERROR_INVALID_ARGUMENT) { std::_Exit(4); }
+			    for (uint64_t i = 0; i < page; ++i)
+			    {
+				    if (bytes[i] != 0xa5) { std::_Exit(5); }
+			    }
+			    std::_Exit(0);
+		    },
+		    ::testing::ExitedWithCode(0), "");
+	}
 }
 
 UT_END();

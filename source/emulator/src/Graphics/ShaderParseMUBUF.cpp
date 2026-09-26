@@ -44,6 +44,9 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	inst.buffer_idxen      = idxen == 1;
 	inst.buffer_offen      = offen == 1;
 	inst.buffer_return_old_value = glc == 1;
+	inst.buffer_flags      = static_cast<uint8_t>((lds << 0u) | (slc << 1u) | (tfe << 2u) |
+	                                             ((((buffer[0] >> 15u) & 1u) | ((buffer[0] >> 17u) & 1u) | ((buffer[1] >> 21u) & 1u))
+	                                              << 7u));
 	inst.src[0].size += static_cast<int>(offen);
 
 	if (inst.src[2].type == ShaderOperandType::LiteralConstant)

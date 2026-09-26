@@ -389,9 +389,112 @@ static String8 sdwa_swizzle_uint(const String8& input_id, const String8& result_
 	    .ReplaceStr("<index>", index);
 }
 
+// DPP transforms the source before the ALU operation for every operand type:
+// the lane permutation is bit-level and does not depend on float or integer
+// interpretation. Only the full-mask quad-permutation subset is admitted.
+static bool operand_dpp_supported(const ShaderOperand& op)
+{
+	return op.type == ShaderOperandType::Vgpr && op.dpp_ctrl <= 0xffu && op.dpp_row_mask == 0xfu &&
+	       op.dpp_bank_mask == 0xfu && !op.dpp_fetch_inactive && op.swizzle == 6u;
+}
+
+// Emits the lane permutation for an already-loaded operand. Produces
+// %dpp_value_<result> as %uint read from the %<in> source id.
+static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, const String8& result_id,
+                                     const String8& input_id, bool input_is_uint, String8* text)
+{
+	if (!operand_dpp_supported(op))
+	{
+		return false;
+	}
+	const auto control = op.dpp_ctrl;
+	const auto ctrl    = spirv->GetConstantUint(control);
+
+	String8 head = input_is_uint ? String8("\n        %dpp_bits_<result> = OpCopyObject %uint %<in>\n")
+	                             : String8("\n        %dpp_bits_<result> = OpBitcast %uint %<in>\n");
+	static const char* permutation = R"(        %dpp_lane_<result> = OpLoad %uint %gl_SubgroupInvocationID
+       %dpp_local_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<three>
+       %dpp_shift_<result> = OpShiftLeftLogical %uint %dpp_local_<result> %<one>
+       %dpp_table_<result> = OpShiftRightLogical %uint %<ctrl> %dpp_shift_<result>
+      %dpp_select_<result> = OpBitwiseAnd %uint %dpp_table_<result> %<three>
+<exchange>
+)";
+	// Fragment quad operations keep helper invocations participating. A general
+	// shuffle may treat them as inactive, losing values needed at primitive edges.
+	// Constant broadcast indices also work with pre-SPIR-V-1.5 toolchains.
+	String8 exchange;
+	if (spirv->GetCode().GetType() == ShaderType::Pixel)
+	{
+		uint32_t selected_lanes = 0;
+		for (uint32_t lane = 0; lane < 4; ++lane)
+		{
+			selected_lanes |= 1u << ((control >> (lane * 2u)) & 3u);
+		}
+		String8 selected;
+		for (uint32_t lane = 0; lane < 4; ++lane)
+		{
+			if ((selected_lanes & (1u << lane)) == 0u) { continue; }
+			const auto suffix = String8::FromPrintf("%u", lane);
+			const auto value = "%dpp_quad" + suffix + "_<result>";
+			exchange += value + " = OpGroupNonUniformQuadBroadcast %uint %uint_3 %dpp_bits_<result> %" +
+			            spirv->GetConstantUint(lane) + "\n";
+			if (selected.IsEmpty())
+			{
+				selected = value;
+			} else
+			{
+				const auto condition = "%dpp_is" + suffix + "_<result>";
+				const auto pick = "%dpp_pick" + suffix + "_<result>";
+				exchange += condition + " = OpIEqual %bool %dpp_select_<result> %" + spirv->GetConstantUint(lane) + "\n";
+				exchange += pick + " = OpSelect %uint " + condition + " " + value + " " + selected + "\n";
+				selected = pick;
+			}
+		}
+		exchange += "%dpp_value_<result> = OpCopyObject %uint " + selected + "\n";
+	} else
+	{
+		exchange = R"(
+        %dpp_base_<result> = OpBitwiseAnd %uint %dpp_lane_<result> %<quad_mask>
+      %dpp_target_<result> = OpBitwiseOr %uint %dpp_base_<result> %dpp_select_<result>
+       %dpp_value_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_bits_<result> %dpp_target_<result>
+)";
+	}
+	*text = (head + String8(permutation))
+	                     .ReplaceStr("<exchange>", exchange)
+	                     .ReplaceStr("<result>", result_id)
+	                     .ReplaceStr("<in>", input_id)
+	                     .ReplaceStr("<ctrl>", ctrl)
+	                     .ReplaceStr("<quad_mask>", spirv->GetConstantUint(0xfffffffcu))
+	                     .ReplaceStr("<zero>", spirv->GetConstantUint(0u))
+	                     .ReplaceStr("<one>", spirv->GetConstantUint(1u))
+	                     .ReplaceStr("<two>", spirv->GetConstantUint(2u))
+	                     .ReplaceStr("<three>", spirv->GetConstantUint(3u));
+	return true;
+}
+
 bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load)
 {
 	EXIT_IF(load == nullptr);
+
+	if (op.dpp)
+	{
+		if (!operand_dpp_supported(op))
+		{
+			return false;
+		}
+		const auto permute_op = op;
+		op.dpp              = false;
+		String8 source;
+		String8 permuted;
+		if (!operand_load_int(spirv, op, "dpp_input_" + result_id, index, &source) ||
+		    !operand_dpp_permute_uint(spirv, permute_op, result_id, "dpp_input_" + result_id, false, &permuted))
+		{
+			return false;
+		}
+		*load = source + permuted +
+		        String8("                 %<result> = OpBitcast %int %dpp_value_<result>\n").ReplaceStr("<result>", result_id);
+		return true;
+	}
 
 	if (op.negate || op.absolute) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op.negate || op.absolute condition ignored (continuing)\n"); }
 
@@ -432,6 +535,25 @@ bool operand_load_int(Spirv* spirv, ShaderOperand op, const String8& result_id, 
 bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load, int shift)
 {
 	EXIT_IF(load == nullptr);
+	if (op.dpp)
+	{
+		if (!operand_dpp_supported(op))
+		{
+			return false;
+		}
+		const auto permute_op = op;
+		op.dpp              = false;
+		String8 source;
+		String8 permuted;
+		if (!operand_load_uint(spirv, op, "dpp_input_" + result_id, index, &source, shift) ||
+		    !operand_dpp_permute_uint(spirv, permute_op, result_id, "dpp_input_" + result_id, true, &permuted))
+		{
+			return false;
+		}
+		*load = source + permuted +
+		        String8("                 %<result> = OpCopyObject %uint %dpp_value_<result>\n").ReplaceStr("<result>", result_id);
+		return true;
+	}
 	if (op.type == ShaderOperandType::Null)
 	{
 		*load = String8("%<result_id> = OpCopyObject %uint %uint_0").ReplaceStr("<result_id>", result_id);
@@ -531,6 +653,27 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load)
 {
 	EXIT_IF(load == nullptr);
+	if (op.dpp)
+	{
+		// DPP transforms source zero before the ALU operation, not only V_MOV.
+		// Keep the full-mask quad-permutation subset shared by all consumers.
+		if (!operand_dpp_supported(op))
+		{
+			return false;
+		}
+		const auto permute_op = op;
+		op.dpp = false;
+		String8 source;
+		String8 permuted;
+		if (!operand_load_float(spirv, op, "dpp_input_" + result_id, index, &source) ||
+		    !operand_dpp_permute_uint(spirv, permute_op, result_id, "dpp_input_" + result_id, false, &permuted))
+		{
+			return false;
+		}
+		*load = source + permuted +
+		        String8("                 %<result> = OpBitcast %float %dpp_value_<result>\n").ReplaceStr("<result>", result_id);
+		return true;
+	}
 	if (op.type == ShaderOperandType::VccZ)
 	{
 		String8 uint_load;

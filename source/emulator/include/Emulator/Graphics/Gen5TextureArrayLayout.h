@@ -66,6 +66,13 @@ struct Gen5TextureArrayUploadRegion
 [[nodiscard]] bool Gen5FillTextureArrayLayerUploadRegions(const Gen5TextureArrayLayout& layout, uint32_t layer,
                                                           Gen5TextureArrayUploadRegion* regions, uint32_t region_capacity,
                                                           uint32_t* region_count);
+// Same per-layer layout, bounded to the number of mip levels actually created
+// in the destination image. The guest allocation can retain a longer BC mip
+// chain than the host image containment policy exposes.
+[[nodiscard]] bool Gen5FillTextureArrayLayerUploadRegionsForLevels(const Gen5TextureArrayLayout& layout, uint32_t layer,
+                                                                   uint32_t upload_levels,
+                                                                   Gen5TextureArrayUploadRegion* regions,
+                                                                   uint32_t region_capacity, uint32_t* region_count);
 
 // DXGI/Khronos BC6H_UFLOAT mode in the low bits of the first 16-byte block.
 // Returns 0–13 for defined modes, 0xFFu for reserved or truncated input.

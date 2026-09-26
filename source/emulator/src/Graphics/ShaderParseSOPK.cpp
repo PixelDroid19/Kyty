@@ -80,6 +80,16 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
+		case 0x17:
+			// s_waitcnt_depctr: VALU/VS dependency-counter wait; a scheduling
+			// constraint on guest hardware with no host-side value semantics.
+			inst.type              = ShaderInstructionType::SWaitcntDepctr;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = static_cast<uint16_t>(buffer[0] & 0xffffu);
+			inst.src_num           = 1;
+			inst.dst               = {};
+			break;
 
 		default: KYTY_UNKNOWN_OP();
 	}

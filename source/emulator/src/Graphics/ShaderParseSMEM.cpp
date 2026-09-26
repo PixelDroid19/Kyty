@@ -20,12 +20,19 @@ KYTY_SHADER_PARSER(shader_parse_smem)
 	uint32_t soffset = (buffer[1] >> 25u) & 0x7fu;
 	auto     offset  = static_cast<int32_t>((buffer[1] >> 0u) & 0x1fffffu);
 
+	// RDNA2 ISA table 73 defines no SMEM field at word0 bits 13, 15, 17 or
+	// word1 bits 21..24. Keep a nonzero value visible so exact admission fails.
+	constexpr uint32_t kUndefinedWord0Bits = (1u << 13u) | (1u << 15u) | (1u << 17u);
+	constexpr uint32_t kUndefinedWord1Bits = 0xfu << 21u;
+	const bool undefined_bits = (buffer[0] & kUndefinedWord0Bits) != 0u || (buffer[1] & kUndefinedWord1Bits) != 0u;
+
 	ShaderInstruction inst;
-	inst.pc      = pc;
-	inst.dst     = operand_parse(sdst);
-	inst.src_num = 2;
-	inst.src[0]  = operand_parse(sbase * 2);
-	inst.src[1]  = operand_parse(soffset);
+	inst.pc         = pc;
+	inst.smem_flags = static_cast<uint8_t>(glc | (dlc << 1u) | (undefined_bits ? 0x80u : 0u));
+	inst.dst        = operand_parse(sdst);
+	inst.src_num    = 2;
+	inst.src[0]     = operand_parse(sbase * 2);
+	inst.src[1]     = operand_parse(soffset);
 
 	uint32_t size = 2;
 

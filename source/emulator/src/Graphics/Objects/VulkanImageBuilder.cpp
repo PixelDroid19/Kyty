@@ -96,6 +96,58 @@ fail:
 	return false;
 }
 
+int VulkanResolveColorAttachmentView(VkFormat image_format, VkFormat attachment_format)
+{
+	if (image_format == attachment_format)
+	{
+		return VulkanImage::VIEW_DEFAULT;
+	}
+	if ((image_format == VK_FORMAT_R8G8B8A8_SRGB && attachment_format == VK_FORMAT_R8G8B8A8_UNORM) ||
+	    (image_format == VK_FORMAT_B8G8R8A8_SRGB && attachment_format == VK_FORMAT_B8G8R8A8_UNORM))
+	{
+		return VulkanImage::VIEW_COLOR_UNORM;
+	}
+	if ((image_format == VK_FORMAT_R8G8B8A8_UNORM && attachment_format == VK_FORMAT_R8G8B8A8_SRGB) ||
+	    (image_format == VK_FORMAT_B8G8R8A8_UNORM && attachment_format == VK_FORMAT_B8G8R8A8_SRGB))
+	{
+		return VulkanImage::VIEW_COLOR_SRGB;
+	}
+	return -1;
+}
+
+bool VulkanCreateCompatibleColorAttachmentViews(GraphicContext* context, VulkanImage* image)
+{
+	EXIT_IF(context == nullptr || image == nullptr || image->image == nullptr);
+
+	VkFormat alternate = VK_FORMAT_UNDEFINED;
+	int      index     = -1;
+	switch (image->format)
+	{
+		case VK_FORMAT_R8G8B8A8_SRGB:
+			alternate = VK_FORMAT_R8G8B8A8_UNORM;
+			index     = VulkanImage::VIEW_COLOR_UNORM;
+			break;
+		case VK_FORMAT_B8G8R8A8_SRGB:
+			alternate = VK_FORMAT_B8G8R8A8_UNORM;
+			index     = VulkanImage::VIEW_COLOR_UNORM;
+			break;
+		case VK_FORMAT_R8G8B8A8_UNORM:
+			alternate = VK_FORMAT_R8G8B8A8_SRGB;
+			index     = VulkanImage::VIEW_COLOR_SRGB;
+			break;
+		case VK_FORMAT_B8G8R8A8_UNORM:
+			alternate = VK_FORMAT_B8G8R8A8_SRGB;
+			index     = VulkanImage::VIEW_COLOR_SRGB;
+			break;
+		default: return true;
+	}
+
+	VulkanImageViewDescriptor descriptor {};
+	descriptor.image  = image->image;
+	descriptor.format = alternate;
+	return VulkanCreateDeviceImageView(context->device, descriptor, &image->image_view[index]);
+}
+
 bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index)
 {
 	if (image == nullptr || view_index == nullptr || (image->usage & VK_IMAGE_USAGE_STORAGE_BIT) == 0u)

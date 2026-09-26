@@ -41,7 +41,9 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	if (src0_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sext != 0 condition ignored (continuing)\n"); }
 
 	ShaderInstruction inst;
-	inst.pc = pc;
+	inst.pc            = pc;
+	inst.vop_sdwa      = sdwa;
+	inst.vop_sdwa_ctrl = sdwa ? buffer[1] : 0u;
 	// Non-SDWA: 9-bit src0 is already SGPR/VGPR encoded. SDWA: 8-bit + s0 flag
 	// (s0==0 → VGPR, same as VOP2 SDWA).
 	inst.src[0]  = operand_parse(dpp ? (src0 + 256u) : (sdwa ? (src0 + (s0 == 0 ? 256u : 0u)) : src0));
@@ -66,12 +68,15 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	inst.src[0].swizzle  = static_cast<uint8_t>(src0_sel);
 	inst.src[0].absolute = (src0_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
-	inst.src[0].dpp                = dpp;
-	inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
-	inst.src[0].dpp_fetch_inactive = dpp && ((buffer[1] & (1u << 18u)) != 0);
-	inst.src[0].dpp_bound_ctrl     = dpp && ((buffer[1] & (1u << 19u)) != 0);
-	inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
-	inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+	inst.src[0].dpp = dpp;
+	if (dpp)
+	{
+		inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
+		inst.src[0].dpp_fetch_inactive = ((buffer[1] & (1u << 18u)) != 0);
+		inst.src[0].dpp_bound_ctrl     = ((buffer[1] & (1u << 19u)) != 0);
+		inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
+		inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+	}
 	inst.dst.clamp       = (clmp != 0);
 
 	inst.format = ShaderInstructionFormat::SVdstSVsrc0;

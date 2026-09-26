@@ -18,6 +18,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/RenderResolutionAlias.h"
 #include "Emulator/Graphics/RenderResolutionImageCapability.h"
 #include "Emulator/Graphics/RenderResolutionPlanner.h"
@@ -698,9 +699,9 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 	auto video_image       = VideoOut::VideoOutGetImageMetadataForSubmission(rt.base.addr, buffer);
 	bool render_to_texture = (video_image.image == nullptr);
 
+	attachment.render_texture_format = render_format.format;
 	if (render_to_texture)
 	{
-		attachment.render_texture_format = render_format.format;
 		attachment.type                  = RenderColorType::RenderTexture;
 		attachment.base_addr             = rt.base.addr;
 	} else
@@ -847,6 +848,16 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 			if (video_image.image != attachment.existing_video_image) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: video_image.image != attachment.existing_video_image condition ignored (continuing)\n"); }
 			attachment.vulkan_buffer = video_image.image;
 			if (attachment.vulkan_buffer == nullptr || attachment.vulkan_buffer->samples != attachment.samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.vulkan_buffer == nullptr || attachment.vulkan_buffer->samples != attachment.samples condition ignored (continuing)\n"); }
+			attachment.attachment_format =
+			    static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
+			attachment.attachment_view = VulkanResolveColorAttachmentView(attachment.vulkan_buffer->format, attachment.attachment_format);
+			if (attachment.attachment_view < 0 || attachment.attachment_view >= VulkanImage::VIEW_MAX ||
+			    attachment.vulkan_buffer->image_view[attachment.attachment_view] == nullptr)
+			{
+				EXIT("display-buffer attachment view unavailable: image_format=%u attachment_format=%u view=%d\n",
+				     static_cast<uint32_t>(attachment.vulkan_buffer->format), static_cast<uint32_t>(attachment.attachment_format),
+				     attachment.attachment_view);
+			}
 			continue;
 		}
 
@@ -857,7 +868,9 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
-		attachment.vulkan_buffer = buffer_vulkan;
+		attachment.vulkan_buffer     = buffer_vulkan;
+		attachment.attachment_format = buffer_vulkan->format;
+		attachment.attachment_view   = VulkanImage::VIEW_DEFAULT;
 	}
 }
 

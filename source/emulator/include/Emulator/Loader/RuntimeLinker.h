@@ -297,6 +297,8 @@ private:
 	static void DeleteProgram(Program* program);
 	static void SetupTlsHandler(Program* program);
 	static const void* FindProgramByAddrForPort(uint64_t vaddr);
+	static uint64_t GetProcessParametersForPort();
+	static bool IsExecutableAddressForPort(uint64_t address);
 	static RuntimeLinker* AcquireCurrentRuntimeForUse();
 	static void ReleaseCurrentRuntimeForUse(RuntimeLinker* runtime);
 	static void SetCurrentRuntimeAcquireHookForTesting(void (*hook)(void*), void* context);

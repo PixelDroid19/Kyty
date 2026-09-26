@@ -251,7 +251,7 @@ public:
 	static constexpr int SAMPLERS_MAX         = ShaderSamplerResources::RES_MAX;
 	static constexpr int PUSH_CONSTANTS_MAX   = static_cast<int>(ShaderBindResources::PORTABLE_PUSH_CONSTANT_BYTES / 4);
 	static constexpr int METADATA_DWORDS_MAX  = ShaderStorageResources::BUFFERS_MAX * 4 + ShaderTextureResources::RES_MAX * 8 +
-	                                            ShaderSamplerResources::RES_MAX * 4 + 4 + ShaderDirectSgprsResources::SGPRS_MAX;
+	                                            ShaderSamplerResources::RES_MAX * 4 + 4 + ShaderDirectSgprsResources::SGPRS_MAX + 4;
 	static constexpr int GDS_BUFFER_MAX       = 1;
 
 	DescriptorCache() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
@@ -423,6 +423,8 @@ private:
 		uint64_t           image_id[8]             = {};
 		uint32_t           base_array_layer[8]     = {};
 		uint32_t           layer_count[8]          = {};
+		VkFormat           color_format[8]         = {};
+		int                color_view[8]           = {};
 		uint64_t           depth_id                = 0;
 		bool               depth_clear_enable      = false;
 		bool               stencil_clear_enable    = false;
@@ -705,6 +707,8 @@ struct RenderColorAttachmentInfo
 	uint32_t              clear_word0             = 0;
 	uint32_t              clear_word1             = 0;
 	RenderTextureFormat   render_texture_format   = RenderTextureFormat::Unknown;
+	VkFormat              attachment_format       = VK_FORMAT_UNDEFINED;
+	int                   attachment_view         = VulkanImage::VIEW_DEFAULT;
 	VideoOutVulkanImage*  existing_video_image    = nullptr;
 	uint32_t              width                   = 0;
 	uint32_t              height                  = 0;
@@ -1532,7 +1536,8 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 	                   uint32_t required_records);
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                     uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr);
+                     uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
+                     uint64_t shader_checksum = 0);
 void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
 void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
 	                                    const VulkanFramebuffer& framebuffer);

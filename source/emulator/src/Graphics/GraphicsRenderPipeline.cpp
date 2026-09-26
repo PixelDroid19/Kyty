@@ -1,6 +1,8 @@
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
 
 #include "GraphicsRenderInternal.h"
+#include "GraphicsRenderPipelineLimits.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -32,6 +34,8 @@
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
+
+#include "spirv-headers/spirv.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -284,6 +288,7 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 		EXIT_IF(bind.descriptor_set_slot != *set_layouts_num);
 
 		set_layouts[*set_layouts_num] = g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(stage, bind /*, bind_params*/);
+		EXIT_IF(set_layouts[*set_layouts_num] == VK_NULL_HANDLE);
 		(*set_layouts_num)++;
 	}
 }
@@ -324,6 +329,24 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	const bool has_fragment_stage = !ps_shader.IsEmpty();
 	if (has_fragment_stage)
 	{
+		// Capabilities precede all other declarations in a SPIR-V module. Check
+		// the compiled module, including cache hits, before requesting quad ops.
+		for (uint32_t word = 5; word < ps_shader.Size();)
+		{
+			const auto instruction = ps_shader.At(word);
+			if ((instruction & 0xffffu) != static_cast<uint32_t>(spv::OpCapability))
+			{
+				break;
+			}
+			EXIT_IF((instruction >> 16u) != 2u || ps_shader.Size() - word < 2u);
+			if (ps_shader.At(word + 1u) == static_cast<uint32_t>(spv::CapabilityGroupNonUniformQuad) &&
+			    ((gctx->subgroup_stages & VK_SHADER_STAGE_FRAGMENT_BIT) == 0u ||
+			     (gctx->subgroup_operations & VK_SUBGROUP_FEATURE_QUAD_BIT) == 0u))
+			{
+				EXIT("fragment shader requires unsupported subgroup quad operations\n");
+			}
+			word += 2u;
+		}
 		create_info.codeSize = static_cast<size_t>(ps_shader.Size()) * 4;
 		create_info.pCode    = ps_shader.GetDataConst();
 		vkCreateShaderModule(gctx->device, &create_info, nullptr, &frag_shader_module);
@@ -614,9 +637,21 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
 
-	vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
-
-	if (pipeline->pipeline_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pipeline->pipeline_layout == nullptr condition ignored (continuing)\n"); }
+	const ShaderBindResources* descriptor_stages[] = {&vs_input_info->bind, &ps_input_info->bind};
+	// Match the generated fragment interface: Location 0 is always declared.
+	uint32_t fragment_outputs = 1;
+	for (uint32_t rt = 1; rt < 8; ++rt)
+	{
+		fragment_outputs += ps_input_info->target_output_mode[rt] != 0 ? 1u : 0u;
+	}
+	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 2,
+	                                 vs_input_info->clip_probe.enabled || ps_input_info->input0_probe.enabled,
+	                                 static_params->color_targets_num, fragment_outputs);
+	const auto layout_result = vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
+	if (layout_result != VK_SUCCESS || pipeline->pipeline_layout == VK_NULL_HANDLE)
+	{
+		EXIT("graphics pipeline layout creation failed: VkResult=%d\n", static_cast<int>(layout_result));
+	}
 
 	VkPipelineDepthStencilStateCreateInfo depth_stencil_info {};
 	depth_stencil_info.sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -806,6 +841,16 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 	comp_shader_stage_info.module              = comp_shader_module;
 	comp_shader_stage_info.pName               = "main";
 	comp_shader_stage_info.pSpecializationInfo = nullptr;
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
+	if (input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
+	{
+		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
+		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(input_info->wave_layout, capabilities,
+		                                                     &comp_shader_stage_info, &required_subgroup_size))
+		{
+			EXIT("paired-wave compute layout is unsupported by the enabled Vulkan subgroup features or limits\n");
+		}
+	}
 
 	VkDescriptorSetLayout set_layouts[1]  = {};
 	uint32_t              set_layouts_num = 0;
@@ -828,9 +873,13 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
 
-	vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
-
-	if (pipeline->pipeline_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pipeline->pipeline_layout == nullptr condition ignored (continuing)\n"); }
+	const ShaderBindResources* descriptor_stages[] = {&input_info->bind};
+	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 1, false);
+	const auto layout_result = vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
+	if (layout_result != VK_SUCCESS || pipeline->pipeline_layout == VK_NULL_HANDLE)
+	{
+		EXIT("compute pipeline layout creation failed: VkResult=%d\n", static_cast<int>(layout_result));
+	}
 
 	VkComputePipelineCreateInfo info {};
 	info.sType              = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;

@@ -378,9 +378,13 @@ void GpuMemory::WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId s
 					{
 						if (queue_use.sequence > submission.sequence)
 						{
-							EXIT("GpuMemory write-back crossed a later same-queue use: type=%s completing=%" PRIu64 " latest=%" PRIu64
-							     " queue=%" PRIu32 "\n",
-							     Core::EnumName(o.object.type).C_Str(), submission.sequence, queue_use.sequence, submission.queue.Value());
+							// Back-to-back same-queue submissions share the buffer
+							// while the earlier one completes: the later use is
+							// still in flight, so defer this object (it stays
+							// in use and is written back when the later
+							// submission completes) instead of copying a stale
+							// snapshot and clearing the later use's tracking.
+							continue;
 						}
 						for (const auto& dependency: o.submission_uses.Dependencies())
 						{

@@ -156,6 +156,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3: return "Param6Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3: return "Param7Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done: return "Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done"; break;
+		case ShaderInstructionFormat::Pos1OffOffVsrc0Off: return "Pos1OffOffVsrc0Off"; break;
 		case ShaderInstructionFormat::PrimVsrc0OffOffOffDone: return "PrimVsrc0OffOffOffDone"; break;
 		case ShaderInstructionFormat::Saddr: return "Saddr"; break;
 		case ShaderInstructionFormat::SdstSbaseSoffset: return "SdstSbaseSoffset"; break;
@@ -168,6 +169,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Sdst16SvSoffset: return "Sdst16SvSoffset"; break;
 		case ShaderInstructionFormat::SVdstSVsrc0: return "SVdstSVsrc0"; break;
 		case ShaderInstructionFormat::Sdst2Ssrc02: return "Sdst2Ssrc02"; break;
+		case ShaderInstructionFormat::Sdst2: return "Sdst2"; break;
 		case ShaderInstructionFormat::Sdst2Ssrc02Ssrc1: return "Sdst2Ssrc02Ssrc1"; break;
 		case ShaderInstructionFormat::Sdst2Ssrc02Ssrc12: return "Sdst2Ssrc02Ssrc12"; break;
 		case ShaderInstructionFormat::SmaskVsrc0Vsrc1: return "SmaskVsrc0Vsrc1"; break;
@@ -230,13 +232,16 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 		switch (fu)
 		{
 			case ShaderInstructionFormat::D:
-				if (inst.dst.size != 1)
+				// ds_read_b64 decodes as a B32 read with a two-dword
+				// destination; print the pair instead of tripping the scalar
+				// invariant, which only guards larger unexpected widths.
+				if (inst.dst.size != 1 && inst.dst.size != 2)
 				{
 					EXIT("shader debug format requires scalar destination: type=%u format=%" PRIu64 " pc=0x%08" PRIx32
 					     " size=%d\n",
 					     static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc, inst.dst.size);
 				}
-				s = operand_to_str(inst.dst);
+				s = (inst.dst.size == 1) ? operand_to_str(inst.dst) : operand_array_to_str(inst.dst, inst.dst.size);
 				break;
 			case ShaderInstructionFormat::DA: s = operand_array_to_str(inst.dst, inst.dst.size); break;
 			case ShaderInstructionFormat::D2: s = operand_to_str(inst.dst2); break;

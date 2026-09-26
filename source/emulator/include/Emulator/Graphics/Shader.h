@@ -8,6 +8,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderComputeWaveLayout.h"
 #include "Emulator/Graphics/RenderResolutionShaderScale.h"
 #include "Emulator/Graphics/VertexClipProbe.h"
 
@@ -183,6 +184,7 @@ enum class ShaderInstructionType : uint32_t
 	SSwappcB64,
 	SSubI32,
 	SWaitcnt,
+	SWaitcntDepctr,
 	SWqmB64,
 	SXnorB32,
 	SXorB32,
@@ -206,6 +208,7 @@ enum class ShaderInstructionType : uint32_t
 	VAshrI32,
 	VAshrrevI32,
 	VBcntU32B32,
+	VBcntI32B32,
 	VBfeI32,
 	VBfeU32,
 	VBfiB32,
@@ -463,6 +466,7 @@ enum class ShaderInstructionType : uint32_t
 	VMulU32U24,
 	VNotB32,
 	VOrB32,
+	VOr3B32,
 	VXnorB32,
 	VRcpF32,
 	VRcpF64,
@@ -502,6 +506,17 @@ enum class ShaderInstructionType : uint32_t
 	FetchXy,
 	FetchXyz,
 	FetchXyzw,
+
+	// Gen5 VOP2/VOP3B V_SUBREV_CO_CI_U32: src1 - src0 - borrow-in.
+	// Keep this at the end so existing instruction ids remain stable.
+	VSubrevCoCiU32,
+	ImageBvhIntersectRay,
+	SBitset1B32,
+	SCmpLgU64,
+	SPackLlB32B16,
+	SGetpcB64,
+	DsAddRtnU32,
+	SCbranchExecnz,
 
 	ZMax
 };
@@ -575,6 +590,7 @@ enum FormatByte : uint64_t
 	DmaskC, // dmask:0xc (B+A, two components)
 	DmaskD, // dmask:0xd (R+B+A, three components)
 	Gds,    // gds
+	Pos1,   // position miscellaneous vector
 	DA,     // operand_array_to_str(inst.dst, inst.dst.size)
 	MimgDmask, // dmask carried by ShaderInstruction::mimg_dmask
 	PixelZ, // pixel Z
@@ -624,12 +640,14 @@ enum Format : uint64_t
 	Param6Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param6, S0, S1, S2, S3}),
 	Param7Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param7, S0, S1, S2, S3}),
 	Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done        = FormatDefine({Pos0, S0, S1, S2, S3, Done}),
+	Pos1OffOffVsrc0Off                = FormatDefine({Pos1, Off, Off, S0, Off}),
 	PrimVsrc0OffOffOffDone              = FormatDefine({Prim, S0, Off, Off, Off, Done}),
 	Saddr                               = FormatDefine({S0A2}),
 	SdstSbaseSoffset                    = FormatDefine({D, S0A2, S1}),
 	Sdst16SbaseSoffset                  = FormatDefine({DA16, S0A2, S1}),
 	Sdst16SvSoffset                     = FormatDefine({DA16, S0A4, S1}),
 	Sdst2Ssrc02                         = FormatDefine({DA2, S0A2}),
+	Sdst2                              = FormatDefine({DA2}),
 	Sdst2Ssrc02Ssrc1                    = FormatDefine({DA2, S0A2, S1}),
 	Sdst2Ssrc02Ssrc12                   = FormatDefine({DA2, S0A2, S1A2}),
 	Sdst2SvSoffset                      = FormatDefine({DA2, S0A4, S1}),
@@ -640,6 +658,7 @@ enum Format : uint64_t
 	SdstSvSoffset                       = FormatDefine({D, S0A4, S1}),
 	SmaskVsrc0Vsrc1                     = FormatDefine({DA2, S0, S1}),
 	Ssrc0Ssrc1                          = FormatDefine({S0, S1}),
+	Ssrc02Ssrc12                        = FormatDefine({S0A2, S1A2}),
 	SVdstSVsrc0                         = FormatDefine({D, S0}),
 	SVdstSVsrc0SVsrc1                   = FormatDefine({D, S0, S1}),
 	Vdata1Vaddr3StSsDmask1              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask1}),
@@ -708,6 +727,7 @@ enum Format : uint64_t
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
 	VaddrOffset                         = FormatDefine({S0}),
 	VdstVaddrOffset                     = FormatDefine({D, S0}),
+	VdstVaddrVdataOffset                = FormatDefine({D, S0, S1}),
 	// ds_read2_b32: vdst is a VGPR pair; offsets live in ds_offset (see field comment).
 	Vdst2VaddrOffset01            = FormatDefine({DA2, S0}),
 	VdstSdst2Vsrc0Vsrc1           = FormatDefine({D, D2A2, S0, S1}),
@@ -716,6 +736,7 @@ enum Format : uint64_t
 	VdstVsrc0Vsrc1Smask2          = FormatDefine({D, S0, S1, S2A2}),
 	VdstVsrc0Vsrc1Vsrc2           = FormatDefine({D, S0, S1, S2}),
 	VdstVsrcAttrChan              = FormatDefine({D, S0, Attr}),
+	Vdata4BvhAddressSrsrc4        = FormatDefine({DA4, S0, S1A4}),
 };
 
 } // namespace ShaderInstructionFormat
@@ -788,10 +809,20 @@ struct ShaderInstruction
 	uint32_t                        pc     = 0;
 	ShaderInstructionType           type   = ShaderInstructionType::Unknown;
 	ShaderInstructionFormat::Format format = ShaderInstructionFormat::Unknown;
+	// Keep the original SOPP opcode when several encodings share one IR type.
+	uint8_t                         sopp_opcode = 0xffu;
 	ShaderOperand                   src[4];
 	int                             src_num = 0;
 	ShaderOperand                   dst;
 	ShaderOperand                   dst2;
+	// Preserve VOP3 source-selection controls for exact backend admission.
+	uint8_t vop3_op_sel = 0;
+	uint8_t vop3_omod   = 0;
+	// SDWA destination/sign controls are not fully represented by operands.
+	bool vop_sdwa = false;
+	// Raw SDWA control dword (the encoding's second word) so admission can
+	// verify every select/sext/neg/abs/dst field and the reserved bits exactly.
+	uint32_t vop_sdwa_ctrl = 0;
 	// Encoded MIMG NSA address slots in order, including VADDR as address 0.
 	// Empty for the normal sequential encoding; trailing slots may be unused by
 	// the selected opcode and resource dimension.
@@ -806,6 +837,8 @@ struct ShaderInstruction
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
+	// Preserve cache-control bits for exact SMEM admission. Unknown is fail-closed.
+	uint8_t smem_flags = 0xffu; // bit 0: GLC; bit 1: DLC; bit 7: undefined encoding bits set
 	// MUBUF/MTBUF byte-address controls. The instruction's 12-bit immediate is
 	// deliberately separate from src[2] (S_OFFSET): Gen5 swizzle applies to
 	// index * stride + (imm + V_OFFSET), and adds S_OFFSET afterwards.
@@ -815,6 +848,8 @@ struct ShaderInstruction
 	// MUBUF atomics replace VDATA with the pre-operation value only when GLC
 	// requests that result.
 	bool buffer_return_old_value = false;
+	// Preserve MUBUF control bits for exact admission. Unknown is fail-closed.
+	uint8_t buffer_flags = 0xffu; // bit 0: LDS; bit 1: SLC; bit 2: TFE; bit 7: undefined encoding bits set
 	// DS addressing:
 	// - DsAddU32: byte offset added to the byte address in src[0].
 	// - DsWriteB32: byte offset added to the byte address in src[0].
@@ -822,6 +857,10 @@ struct ShaderInstruction
 	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
 	//   while src[0] remains a byte address (addr_i = vaddr + offset_i * 4).
 	uint16_t ds_offset = 0;
+	// Retain exact DS encoding for admission: legacy aliases and ignored
+	// controls must not become evidence that a different operation is supported.
+	uint32_t ds_encoding_control   = 0;
+	uint32_t ds_encoding_registers = 0;
 	// EXP channel enable mask. Compressed exports map bits 0..1 to the two
 	// halves of src0 and bits 2..3 to src1.
 	uint8_t exp_enable_mask = 0x0f;
@@ -966,6 +1005,15 @@ bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
 // Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);
+
+enum class ShaderVertexPosition1Usage : uint32_t
+{
+	Unknown,
+	RenderTargetLayer,
+};
+
+[[nodiscard]] ShaderVertexPosition1Usage ShaderDecodeVertexPosition1Usage(uint32_t position_format, uint32_t output_control,
+                                                                         bool next_gen);
 // True when one texture element represents a 4x4 compressed texel block.
 bool ShaderGen5TextureIsBlockCompressed(uint32_t format);
 // Linear Gen5 texture row pitch in texels: 256-byte aligned rows (GFX linear surface rule).
@@ -1371,20 +1419,22 @@ enum class ShaderDynamicSLoadResourceKind : uint8_t
 	Sampler,
 };
 
+struct ShaderDynamicSLoadMapping
+{
+	ShaderDynamicSLoadResourceKind kind                  = ShaderDynamicSLoadResourceKind::StorageBuffer;
+	int                            resource_index        = 0;
+	int                            destination_register  = 0;
+	uint32_t                       instruction_pc        = 0;
+	int                            offset_dw             = 0;
+	int                            dword_count           = 0;
+	int                            resource_field_offset = 0;
+	uint32_t                       last_consumer_pc      = 0;
+	bool                           raw_vmem_oob_guarded  = false;
+};
+
 struct ShaderDynamicSLoadMappings
 {
-	static constexpr int MAPPINGS_MAX = 64;
-
-	ShaderDynamicSLoadResourceKind kind[MAPPINGS_MAX]                 = {};
-	int                            resource_index[MAPPINGS_MAX]       = {};
-	int                            destination_register[MAPPINGS_MAX] = {};
-	uint32_t                       instruction_pc[MAPPINGS_MAX]       = {};
-	int                            offset_dw[MAPPINGS_MAX]            = {};
-	int                            dword_count[MAPPINGS_MAX]          = {};
-	int                            resource_field_offset[MAPPINGS_MAX] = {};
-	uint32_t                       last_consumer_pc[MAPPINGS_MAX]     = {};
-	bool                           raw_vmem_oob_guarded[MAPPINGS_MAX] = {};
-	int                            mappings_num                        = 0;
+	Vector<ShaderDynamicSLoadMapping> records;
 };
 
 enum class ShaderTextureUsage
@@ -1506,7 +1556,10 @@ constexpr ShaderGen5SampledTextureShape ShaderResolvedSampledTextureShape(const 
 
 struct ShaderTextureResources
 {
-	static constexpr int RES_MAX = 16;
+	// This table combines sampled and storage images. The host descriptor
+	// classes have separate limits, checked when constructing their layouts.
+	static constexpr int RES_MAX = 32;
+	static_assert(RES_MAX <= 32, "storage-image write-only masks use one uint32_t bit per logical resource");
 	// A virtual sampled-texture descriptor carries a local index and the
 	// SPIR-V image shape of its target descriptor array. Vulkan descriptor
 	// arrays are statically typed, so 2D, 2D-array and 3D images cannot share
@@ -1600,6 +1653,10 @@ struct ShaderBindResources
 	uint32_t                   descriptor_set_slot   = 0;
 	bool                       vsharp_uniform_buffer = false;
 	int                        vsharp_binding_index  = -1;
+	// Address values are per-dispatch data, never part of shader identity.
+	bool                       program_base_used      = false;
+	uint32_t                   program_base_offset_dw = 0;
+	uint64_t                   program_base           = 0;
 	ShaderStorageResources     storage_buffers;
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
@@ -1659,6 +1716,7 @@ struct ShaderVertexInputInfo
 	int      fetch_buffer_reg           = 0;
 	int      buffers_num                = 0;
 	int      export_count               = 0;
+	ShaderVertexPosition1Usage position1_usage = ShaderVertexPosition1Usage::Unknown;
 	int32_t  vertex_offset_sgpr         = -1;
 	uint32_t vertex_offset_value        = 0;
 	bool     fetch_external             = false;
@@ -1774,6 +1832,8 @@ struct ShaderGen5MubufStreamSpan
 
 struct ShaderComputeInputInfo
 {
+	ShaderComputeWaveLayout wave_layout;
+	uint32_t            dispatch_mode      = 0;
 	uint32_t            threads_num[3]     = {0, 0, 0};
 	uint32_t            lds_dwords         = 0;
 	bool                group_id[3]        = {false, false, false};
@@ -1873,6 +1933,19 @@ struct ShaderUserData
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
                        int user_data_register_base = 0, bool vertex_resource_types = true);
+
+[[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
+                                                   int eud_pointer_register, const ShaderCode* code,
+                                                   int user_data_register_base, uint32_t* required_end_dw);
+[[nodiscard]] bool ShaderGen5EudExpandEndDwordsForSharpImages(const ShaderUserData* user_data, int user_sgpr_num,
+                                                               const uint32_t* eud_snapshot, uint32_t snapshot_dwords,
+                                                               uint32_t* required_end_dw);
+
+// Test-only hook invoked between the two guest reads of a Gen5 EUD snapshot.
+// Lets focused tests mutate the table mid-capture to prove no descriptor words
+// are assembled from two different guest-memory versions.
+using ShaderGen5EudSnapshotTestHook = void (*)(void*);
+void ShaderSetGen5EudSnapshotTestHook(ShaderGen5EudSnapshotTestHook hook, void* context);
 
 // Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
 // guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
@@ -1994,7 +2067,8 @@ bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, i
 void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                                       ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
-void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderComputeInputInfo* info);
+void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, uint32_t dispatch_mode,
+                                      ShaderComputeInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderVertexInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderComputeInputInfo* info);

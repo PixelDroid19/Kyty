@@ -114,6 +114,43 @@ void RuntimeLinker::SetCurrentRuntimeAcquireHookForTesting(void (*hook)(void*), 
 	g_current_runtime_acquire_hook_context = context;
 }
 
+uint64_t RuntimeLinker::GetProcessParametersForPort()
+{
+	auto* runtime = AcquireCurrentRuntimeForUse();
+	if (runtime == nullptr) { return 0; }
+	const auto address = runtime->GetProcParam();
+	ReleaseCurrentRuntimeForUse(runtime);
+	return address;
+}
+
+bool RuntimeLinker::IsExecutableAddressForPort(uint64_t address)
+{
+	auto* runtime = AcquireCurrentRuntimeForUse();
+	if (runtime == nullptr) { return false; }
+	bool executable = false;
+	{
+		Core::LockGuard lock(runtime->m_mutex);
+		for (const auto* program: runtime->m_programs)
+		{
+			if (program->elf == nullptr || address < program->base_vaddr) { continue; }
+			const auto relative = address - program->base_vaddr;
+			const auto* phdr = program->elf->GetPhdr();
+			for (uint16_t i = 0; i < program->elf->GetEhdr()->e_phnum; ++i)
+			{
+				if (phdr[i].p_type == PT_LOAD && (phdr[i].p_flags & PF_X) != 0 &&
+				    relative >= phdr[i].p_vaddr && relative - phdr[i].p_vaddr < phdr[i].p_memsz)
+				{
+					executable = true;
+					break;
+				}
+			}
+			if (executable) { break; }
+		}
+	}
+	ReleaseCurrentRuntimeForUse(runtime);
+	return executable;
+}
+
 void RuntimeLinker::SetCurrentRuntimeUnpublishedHookForTesting(void (*hook)(void*), void* context)
 {
 	Core::LockGuard lock(g_guest_runtime_owner_mutex);
@@ -1497,7 +1534,8 @@ RuntimeLinker::RuntimeLinker(): m_symbols(new SymbolDatabase)
 	m_current_runtime_published    = true;
 	g_guest_runtime_owner          = this;
 	Emulator::GuestRuntimePort::Install(
-	    {FindProgramByAddrForPort, GuestCall::Invoke, GuestCall::Invoke4, GuestCall::InvokeOnStack, ReleaseCurrentThreadDynamicTls});
+	    {FindProgramByAddrForPort, GuestCall::Invoke, GuestCall::Invoke4, GuestCall::InvokeOnStack, ReleaseCurrentThreadDynamicTls,
+	     GetProcessParametersForPort, IsExecutableAddressForPort});
 }
 
 RuntimeLinker::~RuntimeLinker()

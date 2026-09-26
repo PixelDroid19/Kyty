@@ -24,6 +24,8 @@
 #include "Emulator/Graphics/RenderResolutionTransform.h"
 #include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderComputeWaveRuntime.h"
+#include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Utils.h"
@@ -1292,7 +1294,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
-	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
+	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum);
 
 	uint32_t declared_vertex_records = 0;
 	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
@@ -1376,7 +1378,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                                                                 ps_input_info.interpolator_settings[6],
 	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum);
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 
 	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
@@ -1795,7 +1797,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 			if (guest_vertex_input.bind.descriptor_set_slot != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: guest_vertex_input.bind.descriptor_set_slot != 0 condition ignored (continuing)\n"); }
 			guest_vertex_stage.descriptor_set_layout =
 			    g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(DescriptorCache::Stage::Vertex, guest_vertex_input.bind);
-			if (guest_vertex_stage.descriptor_set_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: guest_vertex_stage.descriptor_set_layout == nullptr condition ignored (continuing)\n"); }
+			EXIT_IF(guest_vertex_stage.descriptor_set_layout == VK_NULL_HANDLE);
 		}
 
 		const auto& mode = ctx->GetModeControl();
@@ -2230,7 +2232,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
-	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex);
+	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum);
 
 	uint32_t declared_vertex_records = 0;
 	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
@@ -2314,7 +2316,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                                                                 ps_input_info.interpolator_settings[6],
 	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum);
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 
@@ -2507,37 +2509,45 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		return;
 	}
 
-	// COMPUTE_DISPATCH_INITIATOR bits. Direct-dispatch packets already select the
-	// compute queue; USE_THREAD_DIMENSIONS means the packet carries thread counts instead of
-	// group counts, so they are divided by the shader's threadgroup size. The
-	// remaining bits observed (FORCE_START_AT_000, ORDER_MODE, wave ordering) are
-	// hardware scheduling hints that do not change the dispatched grid.
-	constexpr uint32_t DISPATCH_COMPUTE_SHADER_EN     = 0x01u;
-	constexpr uint32_t DISPATCH_PARTIAL_TG_EN         = 0x02u;
-	constexpr uint32_t DISPATCH_FORCE_START_AT_000    = 0x04u;
-	constexpr uint32_t DISPATCH_USE_THREAD_DIMENSIONS = 0x20u;
-	constexpr uint32_t DISPATCH_ORDER_MODE            = 0x40u;
-	constexpr uint32_t DISPATCH_KNOWN_BITS            = DISPATCH_COMPUTE_SHADER_EN | DISPATCH_PARTIAL_TG_EN | DISPATCH_FORCE_START_AT_000 |
-	                                                    DISPATCH_USE_THREAD_DIMENSIONS | DISPATCH_ORDER_MODE;
+	const auto& cs_regs         = sh_ctx->GetCs();
+	const auto& sh_regs         = ctx->GetShaderRegisters();
+	const auto* graphic_context = g_render_ctx->GetGraphicCtx();
+	EXIT_IF(graphic_context == nullptr);
 
-	if ((mode & ~DISPATCH_KNOWN_BITS) != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (mode & ~DISPATCH_KNOWN_BITS) != 0 condition ignored (continuing)\n"); }
-
-	const auto& cs_regs = sh_ctx->GetCs();
-	const auto& sh_regs = ctx->GetShaderRegisters();
-
-	if ((mode & DISPATCH_USE_THREAD_DIMENSIONS) != 0)
+	ShaderComputeWavePreflightRequest request {};
+	request.is_next_gen           = Config::IsNextGen();
+	request.dispatch_mode         = mode;
+	request.raw_dispatch_count[0] = thread_group_x;
+	request.raw_dispatch_count[1] = thread_group_y;
+	request.raw_dispatch_count[2] = thread_group_z;
+	request.local_size[0]         = cs_regs.cs_regs.num_thread_x;
+	request.local_size[1]         = cs_regs.cs_regs.num_thread_y;
+	request.local_size[2]         = cs_regs.cs_regs.num_thread_z;
+	request.lds_dwords            = ShaderComputeLdsDwords(cs_regs.cs_regs.lds_size);
+	request.tg_size_en            = cs_regs.cs_regs.tg_size_en != 0u;
+	// These are the ordinary GFX10.3 group-count modes. Unknown scheduling or
+	// partial controls never inherit a verified guest lane order.
+	request.lane_order =
+	    request.is_next_gen && (mode == 0x01u || mode == 0x41u) ? ShaderGuestLaneOrder::LinearXFirst : ShaderGuestLaneOrder::Unverified;
+	const auto                    capabilities = ShaderComputeWaveVulkanBuildCapabilities(graphic_context->compute_wave_vulkan_state);
+	ShaderComputeWaveDispatchPlan plan {};
+	const auto                    preflight = ShaderBuildComputeWaveDispatchPlan(request, capabilities, &plan);
+	if (preflight.status == ShaderComputeWavePreflightStatus::NoWork)
 	{
-		const uint32_t lx = cs_regs.cs_regs.num_thread_x;
-		const uint32_t ly = cs_regs.cs_regs.num_thread_y;
-		const uint32_t lz = cs_regs.cs_regs.num_thread_z;
-		if (lx == 0 || ly == 0 || lz == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: lx == 0 || ly == 0 || lz == 0 condition ignored (continuing)\n"); }
-		thread_group_x = (thread_group_x + lx - 1) / lx;
-		thread_group_y = (thread_group_y + ly - 1) / ly;
-		thread_group_z = (thread_group_z + lz - 1) / lz;
+		return;
 	}
+	if (preflight.status != ShaderComputeWavePreflightStatus::Supported)
+	{
+		EXIT("compute dispatch admission rejected: mode=0x%08" PRIx32 " reason=%s\n", mode,
+		     ShaderComputeWavePreflightReasonName(preflight.reason));
+	}
+	thread_group_x = plan.group_count[0];
+	thread_group_y = plan.group_count[1];
+	thread_group_z = plan.group_count[2];
 
 	ShaderComputeInputInfo input_info;
-	ShaderGetInputInfoCS(&cs_regs, &sh_regs, &input_info);
+	input_info.wave_layout = plan.wave_layout;
+	ShaderGetInputInfoCS(&cs_regs, &sh_regs, plan.dispatch_mode, &input_info);
 	// Diagnostic A/B only (not a product fix):
 	//   KYTY_AB_SKIP_ALL_CS=1 — skip every compute dispatch
 	//   KYTY_AB_SKIP_TEX_CS=1 — skip compute that binds textures
@@ -2654,7 +2664,8 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 
 	const uint32_t storage_seed_skip_mask = ResolveStorageSeedSkipMask(input_info, thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
-	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr);
+	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,
+	                cs_regs.cs_regs.chksum);
 	(void)TryPublishComputeDepthMetaFill(submit_id, input_info, thread_group_x, thread_group_y, thread_group_z);
 
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);

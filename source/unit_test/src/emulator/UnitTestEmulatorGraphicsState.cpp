@@ -1,4 +1,5 @@
 #include "Kyty/UnitTest.h"
+#include "GraphicsRetirementTestFixture.h"
 
 #include "Kyty/Core/VirtualMemory.h"
 
@@ -54,6 +55,7 @@
 UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
+using namespace GraphicsRetirementHelpers;
 
 TEST(EmulatorGraphicsState, FailedQueueSubmitCannotPublishCommandBuffer)
 {
@@ -291,7 +293,6 @@ void PauseSpirvCacheWrite(void* opaque)
 }
 
 int                     g_test_gpu_object_deletes      = 0;
-int                     g_read_only_writeback_calls    = 0;
 int                     g_versioned_gpu_object_creates = 0;
 int                     g_versioned_gpu_object_updates = 0;
 int                     g_versioned_gpu_object_deletes = 0;
@@ -343,20 +344,6 @@ struct TestGpuObject: public GpuObject
 	update_func_t GetUpdateFunc() const override { return nullptr; }
 };
 
-struct ReadOnlyWriteBackTestGpuObject final: public TestGpuObject
-{
-	ReadOnlyWriteBackTestGpuObject(): TestGpuObject(GpuMemoryObjectType::StorageBuffer, true) {}
-
-	write_back_func_t GetWriteBackFunc() const override
-	{
-		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* /*obj*/, const uint64_t* /*vaddr*/,
-		          const uint64_t* /*size*/, int /*vaddr_num*/) -> GpuWritebackResult
-		{
-			g_read_only_writeback_calls++;
-			return {};
-		};
-	}
-};
 
 struct HtileFlushTestGpuObject: public GpuObject
 {
@@ -1570,75 +1557,71 @@ TEST(EmulatorGraphicsState, GpuMemoryRetiresOnlyCompleteReadOnlyBufferComponents
 {
 	EnsureGpuMemoryForTests();
 
-	GraphicContext     ctx {};
-	constexpr uint64_t heap_size = 0x1000ull;
-	auto*              guest     = new uint8_t[heap_size] {};
-	const uint64_t     base      = reinterpret_cast<uint64_t>(guest);
-	const uint64_t     address   = base + 0x100u;
-	constexpr uint64_t size      = 0x100u;
-	GpuMemorySetAllocatedRange(base, heap_size);
-	g_test_gpu_object_deletes   = 0;
-	g_read_only_writeback_calls = 0;
+	GraphicContext          ctx {};
+	constexpr uint64_t      heap_size = 0x1000ull;
+	constexpr uint64_t      size      = 0x100u;
+	constexpr uint32_t      vertex_token = 0u;
+	constexpr uint32_t      storage_token = 1u;
+	ScopedRetirementFixture fixture(&ctx, heap_size);
+	const uint64_t          address = fixture.Base() + 0x100u;
 
-	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, address, size,
-	                                TestGpuObject(GpuMemoryObjectType::VertexBuffer, true)),
-	          nullptr);
-	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, address, size,
-	                                ReadOnlyWriteBackTestGpuObject()),
-	          nullptr);
+	void* const vertex_backing = GpuMemoryCreateObject(
+	    1, &ctx, nullptr, address, size, RetirementTestGpuObject(&fixture.State(), vertex_token, GpuMemoryObjectType::VertexBuffer));
+	void* const storage_backing = GpuMemoryCreateObject(
+	    2, &ctx, nullptr, address, size, RetirementTestGpuObject(&fixture.State(), storage_token, GpuMemoryObjectType::StorageBuffer, true));
+	ASSERT_NE(vertex_backing, nullptr);
+	ASSERT_NE(storage_backing, nullptr);
+	ASSERT_TRUE(GpuMemoryHasExactTestBacking(address, size, GpuMemoryObjectType::VertexBuffer, vertex_backing));
+	ASSERT_TRUE(GpuMemoryHasExactTestBacking(address, size, GpuMemoryObjectType::StorageBuffer, storage_backing));
 
-	const auto before = DebugStatsGetPerformanceSnapshot(false);
 	for (uint32_t i = 0; i < 150u; ++i)
 	{
 		GpuMemoryFrameDone(&ctx);
 	}
-	const auto after = DebugStatsGetPerformanceSnapshot(false);
-	EXPECT_EQ(g_test_gpu_object_deletes, 2);
-	EXPECT_EQ(g_read_only_writeback_calls, 0);
-	EXPECT_EQ(after.gpu_memory_types[4].logical_free, before.gpu_memory_types[4].logical_free + 1u);
-	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free + 1u);
-
-	GpuMemoryFree(&ctx, base, heap_size);
-	delete[] guest;
+	EXPECT_EQ(fixture.State().delete_counts[vertex_token], 1u);
+	EXPECT_EQ(fixture.State().delete_counts[storage_token], 1u);
+	EXPECT_EQ(fixture.State().writeback_calls, 0u);
+	EXPECT_TRUE(GpuMemoryFindObjects(address, size, GpuMemoryObjectType::VertexBuffer, true, false).IsEmpty());
+	EXPECT_TRUE(GpuMemoryFindObjects(address, size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryKeepsTruncatedLinkedBufferComponents)
 {
 	EnsureGpuMemoryForTests();
 
-	GraphicContext      ctx {};
-	constexpr uint64_t  heap_size     = 0x4000ull;
-	constexpr uint32_t  parent_count  = 129u;
-	constexpr uint64_t  parent_size   = 0x10ull;
-	constexpr uint64_t  parent_stride = 0x20ull;
-	auto*               guest          = new uint8_t[heap_size] {};
-	const uint64_t      base           = reinterpret_cast<uint64_t>(guest);
-	const uint64_t      first_parent   = base + 0x100u;
-	const uint64_t      combined_size  = (parent_count - 1u) * parent_stride + parent_size;
-	GpuMemorySetAllocatedRange(base, heap_size);
-	g_test_gpu_object_deletes = 0;
+	GraphicContext          ctx {};
+	constexpr uint64_t      heap_size     = 0x4000ull;
+	constexpr uint32_t      parent_count  = 129u;
+	constexpr uint64_t      parent_size   = 0x10ull;
+	constexpr uint64_t      parent_stride = 0x20ull;
+	constexpr uint64_t      combined_size = (parent_count - 1u) * parent_stride + parent_size;
+	ScopedRetirementFixture fixture(&ctx, heap_size);
+	const uint64_t          first_parent = fixture.Base() + 0x100u;
+	std::array<void*, parent_count + 1u> backings {};
 
 	for (uint32_t i = 0; i < parent_count; ++i)
 	{
-		ASSERT_NE(GpuMemoryCreateObject(i + 1u, &ctx, nullptr, first_parent + i * parent_stride, parent_size,
-		                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
-		          nullptr);
+		backings[i] = GpuMemoryCreateObject(i + 1u, &ctx, nullptr, first_parent + i * parent_stride, parent_size,
+		                                    RetirementTestGpuObject(&fixture.State(), i, GpuMemoryObjectType::StorageBuffer));
+		ASSERT_NE(backings[i], nullptr);
 	}
-	ASSERT_NE(GpuMemoryCreateObject(parent_count + 1u, &ctx, nullptr, first_parent, combined_size,
-	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
-	          nullptr);
+	backings[parent_count] = GpuMemoryCreateObject(parent_count + 1u, &ctx, nullptr, first_parent, combined_size,
+	                                                 RetirementTestGpuObject(&fixture.State(), parent_count,
+	                                                                        GpuMemoryObjectType::StorageBuffer));
+	ASSERT_NE(backings[parent_count], nullptr);
 
-	const auto before = DebugStatsGetPerformanceSnapshot(false);
 	for (uint32_t i = 0; i < 150u; ++i)
 	{
 		GpuMemoryFrameDone(&ctx);
 	}
-	const auto after = DebugStatsGetPerformanceSnapshot(false);
-	EXPECT_EQ(g_test_gpu_object_deletes, 0);
-	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free);
-
-	GpuMemoryFree(&ctx, base, heap_size);
-	delete[] guest;
+	for (uint32_t i = 0; i < parent_count; ++i)
+	{
+		const uint64_t address = first_parent + i * parent_stride;
+		EXPECT_EQ(fixture.State().delete_counts[i], 0u);
+		EXPECT_TRUE(GpuMemoryHasExactTestBacking(address, parent_size, GpuMemoryObjectType::StorageBuffer, backings[i]));
+	}
+	EXPECT_EQ(fixture.State().delete_counts[parent_count], 0u);
+	EXPECT_TRUE(GpuMemoryHasExactTestBacking(first_parent, combined_size, GpuMemoryObjectType::StorageBuffer, backings[parent_count]));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryKeepsSurfaceConnectedLinkedBufferComponents)
@@ -2161,6 +2144,10 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(VulkanGen5ImageNumericType(29), GuestImageNumericType::FloatingPoint);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(29), 4u);
 	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(29, VK_FORMAT_R16G16_SFLOAT));
+	// Strict run binds a 960x540 format-29 texture with storage usage: the
+	// same two-component R16G16_SFLOAT layout the sampled path resolves.
+	EXPECT_TRUE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, 29));
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 29), VK_FORMAT_R16G16_SFLOAT);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 71), VK_FORMAT_R16G16B16A16_SFLOAT);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 75), VK_FORMAT_R32G32B32A32_UINT);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(75), 16u);
@@ -2314,6 +2301,71 @@ TEST(EmulatorGraphicsState, Gen5SharpNullBufferDescriptorIsNotStorageBuffer)
 	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
 	EXPECT_EQ(usage.storage_buffers_constant, 0);
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
+}
+
+TEST(EmulatorGraphicsState, Gen5OrderedAppendGdsBindsObservedM0Source)
+{
+	// ds_append indexes the global GDS buffer via m0, which the driver feeds
+	// from a user SGPR holding the descriptor. When no direct-resource table
+	// entry declares that slot, the observed m0 source still binds the GDS
+	// pointer; otherwise emission has no counter to atomically bump.
+	HW::UserSgprInfo user_sgpr {};
+
+	ShaderInstruction feed {};
+	feed.pc         = 0;
+	feed.type       = ShaderInstructionType::SMovB32;
+	feed.format     = ShaderInstructionFormat::SVdstSVsrc0;
+	feed.dst.type   = ShaderOperandType::M0;
+	feed.src[0].type        = ShaderOperandType::Sgpr;
+	feed.src[0].register_id = 14;
+	feed.src_num            = 1;
+
+	ShaderInstruction append {};
+	append.pc       = 4;
+	append.type     = ShaderInstructionType::DsAppend;
+	append.format   = ShaderInstructionFormat::VdstGds;
+	append.dst.type = ShaderOperandType::Vgpr;
+	append.dst.register_id = 0;
+
+	ShaderInstruction end {};
+	end.pc     = 8;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(feed);
+	code.GetInstructions().Add(append);
+	code.GetInstructions().Add(end);
+
+	ShaderUserData user_data {};
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code, 0, false);
+
+	EXPECT_EQ(usage.gds_pointers, 1);
+	ASSERT_EQ(bind.gds_pointers.pointers_num, 1);
+	EXPECT_EQ(bind.gds_pointers.start_register[0], 14);
+}
+
+TEST(EmulatorGraphicsState, Gen5Position1LayerRouteNeedsLayerPlusMiscOnly)
+{
+	// POS1 field 4 selects the miscellaneous position vector; the layer-only
+	// route additionally requires render-target-index + misc-vec enables with
+	// viewport-index and kill-flag off.
+	const uint32_t pos1_z = 4u << 4u;
+	const uint32_t layer  = 1u << 18u;
+	const uint32_t misc   = 1u << 21u;
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, layer | misc, true), ShaderVertexPosition1Usage::RenderTargetLayer);
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, layer | misc, false), ShaderVertexPosition1Usage::Unknown);
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(0u, layer | misc, true), ShaderVertexPosition1Usage::Unknown);
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, layer | misc | (1u << 19u), true),
+	          ShaderVertexPosition1Usage::Unknown);
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, layer | misc | (1u << 20u), true),
+	          ShaderVertexPosition1Usage::Unknown);
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, layer, true), ShaderVertexPosition1Usage::Unknown);
 }
 
 TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescriptor)
@@ -2901,7 +2953,7 @@ TEST(EmulatorGraphicsState, RejectsUnsafeNoopPixelElision)
 	for (const auto type: {ShaderInstructionType::Unknown, ShaderInstructionType::SSetpcB64, ShaderInstructionType::SSwappcB64,
 	                       ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferAtomicXor,
 	                       ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
-	                       ShaderInstructionType::DsWriteB32, ShaderInstructionType::DsAppend})
+	                       ShaderInstructionType::DsWriteB32, ShaderInstructionType::DsAppend, ShaderInstructionType::DsAddRtnU32})
 	{
 		ShaderInstruction instruction {};
 		instruction.type = type;
@@ -4413,6 +4465,26 @@ TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba16FloatGuestClear
 	EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
 }
 
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsPreserveR32FloatClearBits)
+{
+	using namespace Kyty::Libs::Graphics;
+	// Include nonzero, negative, signed-zero and nonfinite values: decoding is
+	// bit-preserving, not an integer conversion or a color-range clamp.
+	const uint32_t words[] = {0x3f800000u, 0xc0200000u, 0x80000000u, 0x00000000u, 0x7f800000u, 0x7fc12345u};
+	for (const auto word : words)
+	{
+		const auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_UNDEFINED, true, word, 0xdeadbeefu, VK_FORMAT_R32_SFLOAT);
+		uint32_t actual = 0;
+		std::memcpy(&actual, &ops.clear_r, sizeof(actual));
+		EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+		EXPECT_EQ(actual, word);
+		EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
+		EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
+		EXPECT_FLOAT_EQ(ops.clear_a, 1.0f);
+	}
+	EXPECT_TRUE(ColorClearWordsHaveKnownPacking(VK_FORMAT_R32_SFLOAT));
+}
+
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRejectsInventedFloat32RgClear)
 {
 	using namespace Kyty::Libs::Graphics;
@@ -5107,6 +5179,13 @@ TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5Depth16Samples)
 	EXPECT_TRUE(accepts(7u, 8u));
 	EXPECT_FALSE(accepts(22u));
 	EXPECT_FALSE(accepts(7u, 13u));
+	// Layered depth arrays: resource type 13 with an explicit layer count.
+	// The descriptor size covers one 64 KiB-blocked layer; the caller verifies
+	// the full span mapping.
+	EXPECT_TRUE(accepts(7u, 13u, 2u));
+	EXPECT_FALSE(accepts(7u, 13u, 0u));
+	EXPECT_FALSE(accepts(7u, 13u, 2049u));
+	EXPECT_FALSE(accepts(7u, 13u, 2u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 0u, 1u));
 	EXPECT_FALSE(accepts(7u, 9u, 0u, 0u, 1u));
@@ -5383,13 +5462,18 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceSamplerBinding)
 	code.GetInstructions().Add(depth_reference);
 	code.GetInstructions().Add(end);
 
+	// The snapshot path reads the EUD table through real guest memory; a host
+	// stack array no longer satisfies the guest-pointer contract.
 	alignas(16) uint32_t eud[64] = {};
 	HW::UserSgprInfo     user_sgpr {};
 	for (int i = 0; i < 16; ++i)
 	{
 		user_sgpr.type[i] = HW::UserSgprType::Region;
 	}
-	const uint64_t eud_ptr = reinterpret_cast<uintptr_t>(eud);
+	const uint64_t eud_ptr =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(eud_ptr, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
 	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
 	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
 
@@ -5408,13 +5492,14 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceSamplerBinding)
 	ShaderParsedUsage   usage {};
 	ShaderBindResources bind {};
 	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+	EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
 
 	ASSERT_EQ(bind.samplers.samplers_num, 1);
 	EXPECT_TRUE(bind.samplers.dynamic_sload[0]);
 	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::DepthReference);
-	ASSERT_EQ(bind.dynamic_sloads.mappings_num, 1);
-	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::Sampler);
-	EXPECT_EQ(bind.dynamic_sloads.destination_register[0], 4);
+	ASSERT_EQ(bind.dynamic_sloads.records.Size(), 1u);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).kind, ShaderDynamicSLoadResourceKind::Sampler);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).destination_register, 4);
 }
 
 TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBindings)
@@ -5470,7 +5555,10 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBind
 	{
 		user_sgpr.type[i] = HW::UserSgprType::Region;
 	}
-	const uint64_t eud_ptr = reinterpret_cast<uintptr_t>(eud);
+	const uint64_t eud_ptr =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(eud_ptr, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
 	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
 	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
 
@@ -5501,9 +5589,9 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBind
 	EXPECT_TRUE(bind.samplers.dynamic_sload[0]);
 	EXPECT_EQ(bind.samplers.operations[0], State::ImageSampleOperation::DepthReference);
 	EXPECT_EQ(bind.textures2D.desc[0].sampler_indices_mask, 0x1u);
-	ASSERT_EQ(bind.dynamic_sloads.mappings_num, 2);
-	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::Texture);
-	EXPECT_EQ(bind.dynamic_sloads.kind[1], ShaderDynamicSLoadResourceKind::Sampler);
+	ASSERT_EQ(bind.dynamic_sloads.records.Size(), 2u);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).kind, ShaderDynamicSLoadResourceKind::Texture);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(1).kind, ShaderDynamicSLoadResourceKind::Sampler);
 
 	// Dynamic texture and sampler descriptors can occupy different EUD slots;
 	// their MIMG operands establish the association used for SkipDegamma.
@@ -5517,9 +5605,11 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBind
 	gamma_code.GetInstructions().Add(end);
 	eud[33] = 130u << 20u;
 	eud[40] = 1u << 31u;
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
 	ShaderParsedUsage   gamma_usage {};
 	ShaderBindResources gamma_bind {};
 	ShaderParseUsage2(&user_data, &gamma_usage, &gamma_bind, user_sgpr, 16, &gamma_code);
+	EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
 	ASSERT_EQ(gamma_bind.textures2D.textures_num, 1);
 	ASSERT_EQ(gamma_bind.samplers.samplers_num, 1);
 	EXPECT_EQ(gamma_bind.textures2D.desc[0].slot, 32);
@@ -5580,7 +5670,8 @@ TEST(EmulatorGraphicsState, DynamicSLoadNullEudStorageMaterializesWithoutExit)
 	end.type = ShaderInstructionType::SEndpgm;
 	code.GetInstructions().Add(end);
 
-	// Null V# at EUD dword 40 (guest leaves unused slots zeroed).
+	// Null V# at EUD dword 40 (guest leaves unused slots zeroed). The snapshot
+	// path requires the table in real guest memory, not a host stack array.
 	alignas(16) uint32_t eud[64] = {};
 
 	HW::UserSgprInfo user_sgpr {};
@@ -5588,7 +5679,10 @@ TEST(EmulatorGraphicsState, DynamicSLoadNullEudStorageMaterializesWithoutExit)
 	{
 		user_sgpr.type[i] = HW::UserSgprType::Region;
 	}
-	const uint64_t eud_ptr = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(eud));
+	const uint64_t eud_ptr =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(eud_ptr, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
 	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
 	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
 
@@ -5609,15 +5703,16 @@ TEST(EmulatorGraphicsState, DynamicSLoadNullEudStorageMaterializesWithoutExit)
 	ShaderParsedUsage   usage {};
 	ShaderBindResources bind {};
 	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+	EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
 
 	ASSERT_TRUE(bind.extended.used);
 	EXPECT_EQ(bind.extended.start_register, 0);
 	ASSERT_GE(bind.storage_buffers.buffers_num, 1);
 	EXPECT_TRUE(bind.storage_buffers.dynamic_sload[0]);
-	ASSERT_GE(bind.dynamic_sloads.mappings_num, 1);
-	EXPECT_EQ(bind.dynamic_sloads.offset_dw[0], 40);
-	EXPECT_EQ(bind.dynamic_sloads.destination_register[0], 4);
-	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::StorageBuffer);
+	ASSERT_GE(bind.dynamic_sloads.records.Size(), 1u);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).offset_dw, 40);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).destination_register, 4);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).kind, ShaderDynamicSLoadResourceKind::StorageBuffer);
 	// Null NumRecords → zero_sbuffer lowering for S_BUFFER consumers of s[4:7].
 	bool zero_dst = false;
 	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
@@ -5679,7 +5774,10 @@ TEST(EmulatorGraphicsState, DynamicSLoadFeedsVectorBufferDescriptor)
 	{
 		user_sgpr.type[i] = HW::UserSgprType::Region;
 	}
-	const uint64_t eud_ptr = reinterpret_cast<uintptr_t>(eud);
+	const uint64_t eud_ptr =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(eud_ptr, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
 	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
 	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
 
@@ -5698,14 +5796,15 @@ TEST(EmulatorGraphicsState, DynamicSLoadFeedsVectorBufferDescriptor)
 	ShaderParsedUsage   usage {};
 	ShaderBindResources bind {};
 	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+	EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
 
 	ASSERT_EQ(bind.storage_buffers.buffers_num, 1);
 	EXPECT_TRUE(bind.storage_buffers.dynamic_sload[0]);
 	EXPECT_TRUE(bind.storage_buffers.raw_vmem_oob_guarded[0]);
-	ASSERT_EQ(bind.dynamic_sloads.mappings_num, 1);
-	EXPECT_EQ(bind.dynamic_sloads.kind[0], ShaderDynamicSLoadResourceKind::StorageBuffer);
-	EXPECT_EQ(bind.dynamic_sloads.destination_register[0], 32);
-	EXPECT_EQ(bind.dynamic_sloads.last_consumer_pc[0], 0x5cu);
+	ASSERT_EQ(bind.dynamic_sloads.records.Size(), 1u);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).kind, ShaderDynamicSLoadResourceKind::StorageBuffer);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).destination_register, 32);
+	EXPECT_EQ(bind.dynamic_sloads.records.At(0).last_consumer_pc, 0x5cu);
 }
 
 UT_END();

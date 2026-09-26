@@ -6,6 +6,7 @@
 #ifdef KYTY_EMU_ENABLED
 
 #include <cstddef>
+#include <cstdint>
 
 namespace Kyty::Libs::LibKernel::ApplicationHeap {
 
@@ -27,6 +28,11 @@ struct Api
 // The runtime linker supplies a direct function table. Registration does not
 // execute any slot; libc owns construction and publishes the table when ready.
 void RegisterApi(void* const api[kApiSlotCount]);
+
+// libc startup consumes the declared process-parameter chain, never a scan of
+// load segments. A missing replacement is valid. Malformed metadata or a
+// failed initializer returns false without publishing an allocator.
+[[nodiscard]] bool InitializeProcessHeap(uint64_t process_parameters);
 
 [[nodiscard]] bool IsInitialized();
 [[nodiscard]] bool HasAllocator();

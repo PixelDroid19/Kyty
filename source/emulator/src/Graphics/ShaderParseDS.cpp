@@ -26,6 +26,8 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 
 	ShaderInstruction inst;
 	inst.pc = pc;
+	inst.ds_encoding_control   = buffer[0];
+	inst.ds_encoding_registers = buffer[1];
 
 	switch (opcode) // NOLINT
 	{
@@ -268,13 +270,13 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			inst.ds_offset = static_cast<uint16_t>(offset0);
 			break;
 		case 0x20:
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_add_rtn_u32 treated as DsAddU32 (continuing)\n");
-			inst.type = ShaderInstructionType::DsAddU32;
-			inst.format = ShaderInstructionFormat::VaddrVdataOffset;
+			inst.type = ShaderInstructionType::DsAddRtnU32;
+			inst.format = ShaderInstructionFormat::VdstVaddrVdataOffset;
+			inst.dst = operand_parse(vdst + 256);
 			inst.src[0] = operand_parse(addr + 256);
 			inst.src[1] = operand_parse(data0 + 256);
 			inst.src_num = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = static_cast<uint16_t>(offset0 | (offset1 << 8u));
 			break;
 		case 0x21:
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_sub_rtn_u32 treated as DsSubU32 (continuing)\n");

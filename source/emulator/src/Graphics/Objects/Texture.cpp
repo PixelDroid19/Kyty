@@ -257,8 +257,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// Stream one layer at a time. A 4096^2 x6 BC7 cube is ~128 MiB linear;
 		// allocating every face plus a padded mip0 temp stalls the load path.
 		std::vector<uint8_t> slice(static_cast<size_t>(array_layout.linear_slice_size));
+		const uint32_t host_levels = resolve_host_mip_count(static_cast<uint16_t>(fmt), static_cast<uint32_t>(width),
+		                                                       static_cast<uint32_t>(height), static_cast<uint32_t>(levels));
 		uint32_t             layer_region_count = 0;
-		if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, 0u, nullptr, 0u, &layer_region_count) ||
+		if (!Gen5FillTextureArrayLayerUploadRegionsForLevels(array_layout, 0u, host_levels, nullptr, 0u, &layer_region_count) ||
 		    layer_region_count == 0u)
 		{
 			EXIT("Gen5 2D-array layer upload regions are invalid: layers=%u levels=%u\n", array_layout.layers, array_layout.levels);
@@ -314,7 +316,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				}
 			}
 			uint32_t filled = layer_region_count;
-			if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, layer, upload_regions.data(), layer_region_count, &filled) ||
+			if (!Gen5FillTextureArrayLayerUploadRegionsForLevels(array_layout, layer, host_levels, upload_regions.data(),
+			                                                    layer_region_count, &filled) ||
 			    filled != layer_region_count)
 			{
 				EXIT("Gen5 2D-array layer upload region fill failed: layer=%u layers=%u levels=%u\n", layer, array_layout.layers,
@@ -790,8 +793,15 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			UtilFillImage(ctx, vk_obj, temp_buf.data(), linear_bytes, regions, static_cast<uint64_t>(vk_layout));
 		} else if (tile == 24)
 		{
-			const uint32_t bytes_per_element = depth_view ? 2u : 4u;
-			if ((depth_view && fmt != 7u) || (!depth_view && fmt != 22u) || levels != 1u)
+			// Format 5 on a depth tile is the stencil plane of a depth-stencil
+			// surface (1 byte per element). The 8bpp depth-64KB block equation
+			// is not implemented; an all-zero guest plane detiles to zeros
+			// under any equation, so the upload stays exact while the plane is
+			// untouched. Nonzero stencil contents still fail loudly instead of
+			// uploading an invented pattern.
+			const bool     stencil_plane      = !depth_view && fmt == 5u;
+			const uint32_t bytes_per_element = depth_view ? 2u : (stencil_plane ? 1u : 4u);
+			if ((depth_view && fmt != 7u) || (!depth_view && !stencil_plane && fmt != 22u) || levels != 1u)
 			{
 				EXIT("unsupported depth tile upload: format=%u levels=%u depth_view=%u\n", static_cast<unsigned>(fmt),
 				     static_cast<unsigned>(levels), depth_view ? 1u : 0u);
@@ -799,8 +809,21 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * bytes_per_element;
 			if (linear_bytes == 0u || linear_bytes > *size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n"); }
 			std::vector<uint8_t> linear(static_cast<size_t>(linear_bytes));
-			TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
-			                            static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
+			if (stencil_plane)
+			{
+				const auto* guest = reinterpret_cast<const uint8_t*>(*vaddr);
+				for (uint64_t i = 0; i < *size; ++i)
+				{
+					if (guest[i] != 0)
+					{
+						EXIT("unimplemented 8bpp depth-64KB equation: nonzero stencil plane addr=0x%012" PRIx64 "\n", *vaddr);
+					}
+				}
+			} else
+			{
+				TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
+				                            static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
+			}
 			if (depth_view)
 			{
 				UtilFillDepthImage(ctx, vk_obj, linear.data(), linear.size(), static_cast<uint32_t>(width),
@@ -1462,6 +1485,19 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 		if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]))
 		{
 			EXIT("failed to create D16 sampled-depth image view\n");
+		}
+		if (config.arrayed_2d && config.depth > 1u)
+		{
+			// Layered depth arrays sample through the array view; layers stack
+			// whole 64 KiB-blocked slices contiguously from the base layer.
+			descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+			descriptor.base_array_layer = config.base_array;
+			descriptor.layer_count      = config.depth - config.base_array;
+			if (!VulkanCreateDeviceImageView(ctx->device, descriptor,
+			                                 &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY]))
+			{
+				EXIT("failed to create D16 sampled-depth array image view\n");
+			}
 		}
 		return;
 	}

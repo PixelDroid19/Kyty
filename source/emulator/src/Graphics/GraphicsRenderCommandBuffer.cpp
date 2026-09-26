@@ -876,8 +876,12 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 			// render pass/pipeline for every animated clear color and stalls loading
 			// on Metal pipeline compilation.
 			const auto& attachment = color->attachment[slot];
+			// The clear value must be decoded with the same format the render
+			// pass/framebuffer bind the attachment as — attachment_format — not
+			// the backing image format. They differ for compatible-view binds
+			// (UNORM image viewed as sRGB, R32 display buffers).
 			const auto clear = ResolveColorAttachmentLoadOps(attachment.vulkan_buffer->layout, attachment.cmask_fast_clear_enable,
-			                                                  attachment.clear_word0, attachment.clear_word1, attachment.vulkan_buffer->format);
+			                                                  attachment.clear_word0, attachment.clear_word1, attachment.attachment_format);
 			clears[clear_attachment].color = {{clear.clear_r, clear.clear_g, clear.clear_b, clear.clear_a}};
 		} else
 		{

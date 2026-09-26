@@ -42,7 +42,9 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 	if (src1_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_sext != 0 condition ignored (continuing)\n"); }
 
 	ShaderInstruction inst;
-	inst.pc      = pc;
+	inst.pc            = pc;
+	inst.vop_sdwa      = sdwa;
+	inst.vop_sdwa_ctrl = sdwa ? buffer[1] : 0u;
 	inst.src[0]  = operand_parse(src0 + ((dpp || s0 == 0) ? 256 : 0));
 	inst.src[1]  = operand_parse(vsrc1 + (s1 == 0 ? 256 : 0));
 	inst.src_num = 2;
@@ -59,12 +61,15 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 	inst.src[1].absolute = (src1_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
 	inst.src[1].negate   = (src1_neg != 0);
-	inst.src[0].dpp                = dpp;
-	inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
-	inst.src[0].dpp_fetch_inactive = dpp && ((buffer[1] & (1u << 18u)) != 0);
-	inst.src[0].dpp_bound_ctrl     = dpp && ((buffer[1] & (1u << 19u)) != 0);
-	inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
-	inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+	inst.src[0].dpp = dpp;
+	if (dpp)
+	{
+		inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
+		inst.src[0].dpp_fetch_inactive = ((buffer[1] & (1u << 18u)) != 0);
+		inst.src[0].dpp_bound_ctrl     = ((buffer[1] & (1u << 19u)) != 0);
+		inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
+		inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+	}
 
 	inst.format = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
 	if (sd == 0)

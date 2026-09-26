@@ -1354,7 +1354,7 @@ TEST(AgentTools, AgentPadOverlayMergesButtonsAndAxes)
 	EXPECT_EQ(buttons, 0u);
 }
 
-TEST(AgentTools, AgentPadTapIsReleasePressReleaseOnGuestSamples)
+TEST(AgentTools, AgentPadTapHoldsTwoPressSamplesBeforeRelease)
 {
 	using Kyty::Libs::Controller::AgentPadApplyReadStateSample;
 	using Kyty::Libs::Controller::AgentPadClear;
@@ -1378,6 +1378,16 @@ TEST(AgentTools, AgentPadTapIsReleasePressReleaseOnGuestSamples)
 	sample = 0;
 	AgentPadApplyReadStateSample(&sample);
 	EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+	AgentPadGetReadStats(&stats);
+	EXPECT_TRUE(stats.tap_pending);
+	EXPECT_EQ(stats.delivered_taps, 1u);
+
+	sample = 0;
+	AgentPadApplyReadStateSample(&sample);
+	EXPECT_EQ(sample & PAD_BUTTON_CROSS, PAD_BUTTON_CROSS);
+	AgentPadGetReadStats(&stats);
+	EXPECT_TRUE(stats.tap_pending);
+	EXPECT_EQ(stats.delivered_taps, 1u);
 
 	sample = 0;
 	AgentPadApplyReadStateSample(&sample);
