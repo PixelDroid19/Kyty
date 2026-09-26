@@ -302,11 +302,15 @@ the paired allowlist. No presentation, input or gameplay state is claimed.
   -Os exceed 12 GB; unoptimized compiles in 25 s / 0.9 GB).
 - Wave64 programs proven wave-width independent now take the native route even
   when a paired layout exists (half the generated code).
-- Current first failure (strict, ~1 min in, frame 1, 0 presents): bind-time
-  materialization of an indirectly loaded storage V# describing ~7 GB at an
-  unmapped-looking address (`GraphicsRenderBind.cpp`, reason=2). Suspect stale
-  guest memory (GPU results not written back) or a descriptor on an unexecuted
-  path; not yet diagnosed.
+- Current first failure (strict Silent, frame 1, 0 presents): the compute
+  dispatches that use guest device addressing and `image_bvh_intersect_ray`
+  reset the render engine (`Engine reset engine_class=rcs`, `Timedout job`,
+  `vkWaitForFences` result -4, sequence 54). Excluded in
+  `docs/kyty-runtime-graphics-investigation-handoff.md`: an infinite block
+  dispatcher, a device-address load that merely overruns its imported span,
+  and `s_barrier` scope. Skipping those dispatches reaches a vertex
+  `s_getpc_b64` with no compute program base
+  (`ShaderSpirvProgramAddress.cpp`). Not gameplay.
 
 Recorded, not yet fixed:
 - `source/emulator/src/Graphics/ShaderParse*.cpp` still map about 600 opcodes
