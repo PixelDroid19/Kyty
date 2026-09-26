@@ -799,9 +799,12 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// under any equation, so the upload stays exact while the plane is
 			// untouched. Nonzero stencil contents still fail loudly instead of
 			// uploading an invented pattern.
+			// A 16-bit depth surface (format 7) keeps its depth tiling when sampled
+			// through a color view; only the upload target differs.
 			const bool     stencil_plane      = !depth_view && fmt == 5u;
-			const uint32_t bytes_per_element = depth_view ? 2u : (stencil_plane ? 1u : 4u);
-			if ((depth_view && fmt != 7u) || (!depth_view && !stencil_plane && fmt != 22u) || levels != 1u)
+			const bool     depth16            = fmt == 7u;
+			const uint32_t bytes_per_element = (depth_view || depth16) ? 2u : (stencil_plane ? 1u : 4u);
+			if ((depth_view && !depth16) || (!depth_view && !stencil_plane && !depth16 && fmt != 22u) || levels != 1u)
 			{
 				EXIT("unsupported depth tile upload: format=%u levels=%u depth_view=%u\n", static_cast<unsigned>(fmt),
 				     static_cast<unsigned>(levels), depth_view ? 1u : 0u);
