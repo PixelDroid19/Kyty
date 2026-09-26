@@ -739,24 +739,28 @@ enum class GpuMemoryDepthD16Source : uint8_t
 	{
 		return GpuMemoryDepthD16Source::Guest;
 	}
-	if (snapshot.truncated || snapshot.total_count > 2u || snapshot.entry_count != snapshot.total_count)
+	if (snapshot.truncated || snapshot.entry_count != snapshot.total_count)
 	{
 		return GpuMemoryDepthD16Source::Unsupported;
 	}
+	// Sampled Texture objects are uploads of guest memory and never hold GPU
+	// writes, so any number of views over the span leave guest memory
+	// authoritative. GPU-written sources (storage buffers) stay exclusive.
 	const GpuMemoryOverlapEntry* texture = nullptr;
 	const GpuMemoryOverlapEntry* storage = nullptr;
 	for (uint32_t index = 0; index < snapshot.entry_count; ++index)
 	{
 		const auto& entry = snapshot.entries[index];
+		if (entry.type == GpuMemoryObjectType::Texture)
+		{
+			texture = &entry;
+			continue;
+		}
 		if (entry.count != 1u)
 		{
 			return GpuMemoryDepthD16Source::Unsupported;
 		}
-		if (entry.type == GpuMemoryObjectType::Texture && entry.relation == GpuMemoryOverlapType::Equals && entry.exact &&
-		    texture == nullptr)
-		{
-			texture = &entry;
-		} else if (entry.type == GpuMemoryObjectType::StorageBuffer &&
+		if (entry.type == GpuMemoryObjectType::StorageBuffer &&
 		           (entry.relation == GpuMemoryOverlapType::Contains || entry.relation == GpuMemoryOverlapType::Equals) &&
 		           storage == nullptr)
 		{
@@ -770,9 +774,7 @@ enum class GpuMemoryDepthD16Source : uint8_t
 	{
 		return storage->all_read_only ? GpuMemoryDepthD16Source::Guest : GpuMemoryDepthD16Source::StorageBuffer;
 	}
-	return texture != nullptr && snapshot.total_count == 1u && snapshot.exact_count == 1u
-	           ? GpuMemoryDepthD16Source::Guest
-	           : GpuMemoryDepthD16Source::Unsupported;
+	return texture != nullptr ? GpuMemoryDepthD16Source::Guest : GpuMemoryDepthD16Source::Unsupported;
 }
 
 enum class GpuMemoryMutationAction : uint8_t
