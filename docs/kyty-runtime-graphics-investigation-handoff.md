@@ -326,6 +326,22 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Device-addressed ray-tracing workload, `vkQueueSubmit` result -4 about 30 s
+  after the first address table: -4 is `VK_ERROR_DEVICE_LOST`, not memory
+  exhaustion (1.5 GiB of imports is fine in a standalone repro). Excluded, in
+  order: an endless BVH traversal (the first TLAS pointer really is zero, but
+  a 67-iteration dispatcher cap still lost the device); a load crossing a
+  chunk end (a guard page did not help); the ray-tracing dispatches themselves
+  (skipping both still lost the device). No kernel reset was logged and no DRM
+  ioctl failed. `MESA_VK_ABORT_ON_DEVICE_LOSS=1` under gdb placed the loss
+  inside `vkAllocateMemory` of a host-pointer import of the guest view: a
+  pinned userptr cannot revalidate a page whose write access the dirty tracker
+  or guest mprotect removed. Closed by `fix(graphics): never import guest views
+  for device addressing` (alias or tracked snapshot only).
+- The first ray-tracing dispatch runs with a zero TLAS pointer and the ray
+  enable flag set; no GPU writer, storage buffer, CP packet or skipped
+  indirect dispatch targets it. The descriptor's size field (nodes - 1) makes
+  such traversal end, now honored by the BVH lowering.
 - Source atlas dumps contain meaningful alpha; the sampled descriptor used
   RGBA8 UNORM with identity swizzle and guest upload.
 - Blend factors, compressed MRT component order, and sampled alpha propagation
