@@ -337,7 +337,10 @@ against the same correct gameplay capture.
   reach `s_barrier` on some waves after other waves have exited, but neither
   a subgroup-scope barrier nor a workgroup join that waits only for
   invocations still inside the dispatch stopped the engine reset. The barrier
-  scope is excluded as this hang's cause.
+  scope is excluded as this hang's cause. Guarding LDS reads and writes
+  with a per-access selection did not produce a finished pipeline within the
+  run limit (the process stayed CPU-bound, with no engine reset); that
+  attempt was reverted and does not clear an out-of-range LDS index.
 - Recorded, not yet fixed: `ShaderSpirvGenerator.cpp` exits at a vertex
   `s_getpc_b64` (`stage=1 instruction=474 format=0x8 pc=0x5c`) once the
   device-address dispatches are skipped. The compute emitter refuses a
