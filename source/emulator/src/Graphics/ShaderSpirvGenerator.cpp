@@ -2751,7 +2751,11 @@ void Spirv::FindConstants()
 		}
 		if (inst.type == ShaderInstructionType::ImageBvhIntersectRay)
 		{
+			AddConstantUint(0u);
+			AddConstantUint(3u);
 			AddConstantUint(255u);
+			AddConstantUint(0x3ffu);
+			AddConstantUint(0x3f800000u);
 			AddConstantUint(0xfffffff8u);
 			AddConstantUint(0xffffffffu);
 			AddConstantUint(0x33800000u);

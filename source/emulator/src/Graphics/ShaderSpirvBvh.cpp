@@ -14,6 +14,9 @@ namespace Kyty::Libs::Graphics {
 // distance by T#.box_grow ULPs of 2^-24. Triangle nodes return
 // {t_num, t_denom, triangle_id, hit} (T# return mode 0) or
 // {t_num, t_denom, I_num, J_num} with the node's barycentric rotation (mode 1).
+// T#.size (nodes - 1) bounds the node index (pointer >> 3): an out-of-range
+// node returns four invalid children for a box or a miss for a triangle, which
+// is what ends traversal of an empty (all-zero) acceleration structure.
 // Every result is computed and the node type selects one, so the lowering has
 // no data-dependent control flow besides the EXEC-gated store.
 KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
@@ -62,7 +65,15 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 %<p>_hi_sum = OpIAdd %uint %<p>_base_hi %<p>_ptr_hi
 %<p>_addr_hi = OpIAdd %uint %<p>_hi_sum %<p>_carry
 %<p>_is16 = OpIEqual %bool %<p>_type %uint_4
-)").ReplaceStr("<p>", i).ReplaceStr("<not7>", spirv->GetConstantUint(0xfffffff8u));
+%<p>_index = OpShiftRightLogical %uint %<p>_ptr %<three>
+%<p>_size_hi = OpBitwiseAnd %uint %<p>_t3 %<size_hi_mask>
+%<p>_size_big = OpINotEqual %bool %<p>_size_hi %uint_0
+%<p>_index_fits = OpULessThanEqual %bool %<p>_index %<p>_t2
+%<p>_in_bounds = OpLogicalOr %bool %<p>_size_big %<p>_index_fits
+)").ReplaceStr("<p>", i)
+	                                                        .ReplaceStr("<not7>", spirv->GetConstantUint(0xfffffff8u))
+	                                                        .ReplaceStr("<size_hi_mask>", spirv->GetConstantUint(0x3ffu))
+	                                                        .ReplaceStr("<three>", spirv->GetConstantUint(3u));
 	if (!spirv->EmitGuestLoad(i + "_addr_lo", i + "_addr_hi", 32, i + "_n", &s))
 	{
 		return false;
@@ -245,13 +256,18 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageBvhIntersectRay_Vdata4BvhAddressSrsrc4)
 %<p>_is_box32 = OpIEqual %bool %<p>_type %uint_5
 %<p>_is_box = OpLogicalOr %bool %<p>_is_box16 %<p>_is_box32
 )").ReplaceStr("<p>", i).ReplaceStr("<inf>", i + "_inf");
-	const auto invalid = spirv->GetConstantUint(0xffffffffu);
+	const auto    invalid          = spirv->GetConstantUint(0xffffffffu);
+	const String8 triangle_miss[4] = {spirv->GetConstantUint(0x7f800000u), spirv->GetConstantUint(0x3f800000u), spirv->GetConstantUint(0u),
+	                                  spirv->GetConstantUint(0u)};
 	for (int r = 0; r < 4; r++)
 	{
 		line("%%%s_rb%d = OpSelect %%uint %%%s_is_box %%%s_v%d_%d %%%s\n"
-		     "%%%s_r%d = OpSelect %%uint %%%s_is_tri %%%s_tri_r%d %%%s_rb%d\n"
+		     "%%%s_rt%d = OpSelect %%uint %%%s_is_tri %%%s_tri_r%d %%%s_rb%d\n"
+		     "%%%s_ro%d = OpSelect %%uint %%%s_is_tri %%%s %%%s\n"
+		     "%%%s_r%d = OpSelect %%uint %%%s_in_bounds %%%s_rt%d %%%s_ro%d\n"
 		     "%%%s_r%d_f = OpBitcast %%float %%%s_r%d\n",
-		     p, r, p, p, r, version[r], invalid.c_str(), p, r, p, p, r, p, r, p, r, p, r);
+		     p, r, p, p, r, version[r], invalid.c_str(), p, r, p, p, r, p, r, p, r, p, triangle_miss[r].c_str(), invalid.c_str(), p, r, p, p,
+		     r, p, r, p, r, p, r);
 	}
 	// EXEC-gated store of the four results.
 	line("%%%s_exec = OpLoad %%uint %%exec_lo\n%%%s_active = OpINotEqual %%bool %%%s_exec %%uint_0\n"
