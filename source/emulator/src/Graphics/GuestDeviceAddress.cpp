@@ -25,10 +25,16 @@ namespace {
 constexpr uint64_t kChunkBytes = 64ull << 20u;
 constexpr uint64_t kPageBytes  = 4096;
 
+// A translated load reads up to 128 bytes from its start address, so it can
+// cross the logical end of a chunk. Each chunk's buffer spans one more page
+// whenever the guest backing continues, keeping such loads inside the buffer.
+constexpr uint64_t kGuardBytes = kPageBytes;
+
 struct Chunk
 {
 	uint64_t       guest  = 0;
-	uint64_t       size   = 0;
+	uint64_t       size   = 0; // bytes the table maps to this chunk
+	uint64_t       span   = 0; // imported bytes: size plus an optional guard page
 	VkDeviceMemory memory = nullptr;
 	VkBuffer       buffer = nullptr;
 	uint64_t       device = 0;
@@ -36,6 +42,7 @@ struct Chunk
 	void*          copy   = nullptr; // tracked snapshot that was imported
 	uint64_t       generation = 0;   // dirty-tracker generation of the snapshot
 	bool           tracked    = false; // snapshot is refreshed from tracker generations
+	bool           registered = false; // this chunk holds a dirty-tracker registration
 };
 
 struct Range
@@ -74,6 +81,10 @@ void DestroyChunk(VkDevice device, const Chunk& chunk)
 	vkFreeMemory(device, chunk.memory, nullptr);
 	Kernel::Memory::KernelUnmapPhysicalAlias(chunk.alias);
 	std::free(chunk.copy);
+	if (chunk.registered)
+	{
+		(void)GpuDirtyPageTracker::Instance().UnregisterRange(chunk.guest, chunk.span);
+	}
 }
 
 // Copies guest memory into a snapshot using the dirty tracker's read protocol
@@ -198,46 +209,49 @@ bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t size, Chunk* out
 	return true;
 }
 
-// Imports [guest, guest + size) from, in order: a writable alias of physical
-// direct memory (the guest view may be write-protected by dirty tracking),
-// the guest view itself, or a snapshot kept current through the dirty
-// tracker's generations.
-bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, Chunk* out)
+// Imports [guest, guest + span) for a chunk mapping [guest, guest + size)
+// from a writable alias of physical direct memory, or else from a snapshot.
+// The guest view itself is never imported: dirty tracking and guest mprotect
+// change its protection, and a driver that pins host pages (a userptr) cannot
+// revalidate a page that lost write access, which loses the device.
+bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t span, Chunk* out)
 {
 	*out       = {};
 	out->guest = guest;
 	out->size  = size;
-	if (const uint64_t alias = Kernel::Memory::KernelMapPhysicalAlias(guest, size); alias != 0)
+	out->span  = span;
+	if (const uint64_t alias = Kernel::Memory::KernelMapPhysicalAlias(guest, span); alias != 0)
 	{
 		out->alias = alias;
-		if (ImportPointer(ctx, reinterpret_cast<void*>(alias), size, out))
+		if (ImportPointer(ctx, reinterpret_cast<void*>(alias), span, out))
 		{
 			return true;
 		}
 		Kernel::Memory::KernelUnmapPhysicalAlias(alias);
-		std::fprintf(stderr, "guest import of physical alias failed: base=0x%012" PRIx64 " size=0x%" PRIx64 "\n", guest, size);
 		return false;
 	}
-	if (ImportPointer(ctx, reinterpret_cast<void*>(guest), size, out))
-	{
-		return true;
-	}
-	void* copy = std::aligned_alloc(kPageBytes, size);
-	// Tracked memory: a snapshot refreshed when the tracker sees CPU writes.
-	// Untracked memory the host keeps non-writable (guest mprotect to read-only)
-	// cannot change until another mprotect, which invalidates the import.
-	const bool tracked   = copy != nullptr && SnapshotGuest(copy, guest, size, &out->generation);
-	const bool immutable = !tracked && copy != nullptr && !Core::VirtualMemory::IsRangeWritable(guest, size) &&
-	                       Core::VirtualMemory::CopyFromGuest(copy, guest, size);
-	if ((tracked || immutable) && ImportPointer(ctx, copy, size, out))
+	void* copy = std::aligned_alloc(kPageBytes, span);
+	// Writable memory: a snapshot refreshed when the dirty tracker sees CPU
+	// writes; the chunk registers the range so the tracker covers it.
+	// Memory the host keeps non-writable (guest mprotect to read-only) cannot
+	// change until another mprotect, which invalidates the import.
+	auto&      tracker   = GpuDirtyPageTracker::Instance();
+	const bool writable  = Core::VirtualMemory::IsRangeWritable(guest, span);
+	out->registered      = copy != nullptr && writable && tracker.RegisterRange(guest, span);
+	const bool tracked   = out->registered && SnapshotGuest(copy, guest, span, &out->generation);
+	const bool immutable = copy != nullptr && !writable && Core::VirtualMemory::CopyFromGuest(copy, guest, span);
+	if ((tracked || immutable) && ImportPointer(ctx, copy, span, out))
 	{
 		out->copy    = copy;
 		out->tracked = tracked;
 		return true;
 	}
+	if (out->registered)
+	{
+		(void)tracker.UnregisterRange(guest, span);
+		out->registered = false;
+	}
 	std::free(copy);
-	std::fprintf(stderr, "guest import failed: base=0x%012" PRIx64 " size=0x%" PRIx64 " host_writable=%d\n", guest, size,
-	             Core::VirtualMemory::IsRangeWritable(guest, size) ? 1 : 0);
 	return false;
 }
 
@@ -264,9 +278,15 @@ bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* chan
 		{
 			end++;
 		}
-		Chunk chunk;
-		if (!ImportChunk(ctx, base + page * kPageBytes, (end - page) * kPageBytes, &chunk))
+		const uint64_t guest = base + page * kPageBytes;
+		const uint64_t size  = (end - page) * kPageBytes;
+		Chunk          chunk;
+		// The guard page needs backing that continues past the chunk; at the
+		// end of a mapping the chunk is imported without it.
+		if (!(end < pages && ImportChunk(ctx, guest, size, size + kGuardBytes, &chunk)) && !ImportChunk(ctx, guest, size, size, &chunk))
 		{
+			std::fprintf(stderr, "guest import failed: base=0x%012" PRIx64 " size=0x%" PRIx64 " host_writable=%d\n", guest, size,
+			             Core::VirtualMemory::IsRangeWritable(guest, size) ? 1 : 0);
 			return false;
 		}
 		range->chunks.push_back(chunk);
@@ -437,8 +457,8 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 		// host memory is coherent, so the device sees the refresh directly.
 		for (auto& chunk: range.chunks)
 		{
-			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.size, chunk.generation) &&
-			    !SnapshotGuest(chunk.copy, chunk.guest, chunk.size, &chunk.generation))
+			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span, chunk.generation) &&
+			    !SnapshotGuest(chunk.copy, chunk.guest, chunk.span, &chunk.generation))
 			{
 				return false;
 			}
