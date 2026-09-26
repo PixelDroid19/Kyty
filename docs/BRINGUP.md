@@ -254,6 +254,73 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Generic wave64 compute frontier (2026-09-26, not gameplay)
+
+Strict Silent/Native runs on the reference workload now admit, translate and
+create pipelines for several wave64 compute programs that previously stopped at
+the paired allowlist. No presentation, input or gameplay state is claimed.
+
+- A wave64 program that is proven wave-width independent runs one guest lane
+  per invocation on the native recompiler over the unchanged guest workgroup
+  (`ShaderComputeWaveNativeEquivalence`). The fail-closed proof rejects lane
+  crossing, mask/data mixing (flow-sensitive), SCC produced by mask logic and
+  any scalar value written inside an EXEC/VCC-conditional region that is live
+  at its join, which is what makes an independently skipping host subgroup
+  equivalent to the guest wave.
+- Paired lanes no longer depend on a per-opcode allowlist: per-lane VALU,
+  vector memory and DPP16 instructions re-emit the native lowering once per
+  bank; all VOPC compares ballot a native lane predicate into the architectural
+  mask; DS accesses are followed by a subgroup barrier (one guest wave is one
+  converged subgroup); uniform scalar instructions, saveexec and GETPC use the
+  native lowering on the architectural SGPR/VCC/EXEC words; `v_mbcnt`, GDS
+  `ds_append`/`ds_consume` and `v_*_co_ci_u32` have dedicated wave emitters.
+- Partial waves and `USE_THREAD_DIMENSIONS` dispatches are admitted: the
+  initial EXEC is the ballot of lanes inside the workgroup and inside the
+  per-dispatch thread limits (runtime metadata, not a cache key), and every
+  EXEC write is clamped to it.
+- ISA decoder corrections (RDNA2 tables, confirmed against the live guest
+  operands): VOP3 `0x365`/`0x366` are `v_mbcnt_lo`/`v_mbcnt_hi` with a VGPR
+  destination (the former `v_bcnt_i32_b32` decode did not exist); single-address
+  DS instructions use the 16-bit `{OFFSET1, OFFSET0}` offset; `ds_read`/`ds_write`
+  `b64`/`b96`/`b128` move all their dwords; `ds_wrxchg_rtn_b32` exchanges;
+  `s_bitcmp*`, `s_ff1_i32_b*`, `s_trap` (no trap handler: not taken) and
+  `v_cmp_*_u64` are decoded instead of the `SBarrier` placeholder.
+- Guest-memory device addressing: GPU-visible guest mappings are imported as
+  host-pointer device memory (`GuestDeviceAddress`); shaders translate computed
+  guest pointers through a device-resident range table and read through
+  `PhysicalStorageBuffer` pointers (scalar loads off the extended pointer,
+  `image_bvh_intersect_ray`). Write-back coherency before such reads is not
+  implemented yet.
+- `image_bvh_intersect_ray` (RTIP 1.1, 32-bit pointer, non-A16) follows the ISA
+  T#/VGPR contract and AMD's open-source ray-tracing library for node layouts,
+  box/triangle arithmetic, sorting and barycentric rotation. Return mode 0's
+  `triangle_id` is taken from the node's triangle-id dword (unverified).
+- Paired programs with branches run as a block dispatcher (loop around a switch
+  on the guest block id); branch conditions are uniform per subgroup. Their
+  SPIR-V is not run through spirv-opt: SSA promotion of the per-bank registers
+  across the dispatcher loop makes the driver compile unbounded (offline: -O and
+  -Os exceed 12 GB; unoptimized compiles in 25 s / 0.9 GB).
+- Wave64 programs proven wave-width independent now take the native route even
+  when a paired layout exists (half the generated code).
+- Current first failure (strict, ~1 min in, frame 1, 0 presents): bind-time
+  materialization of an indirectly loaded storage V# describing ~7 GB at an
+  unmapped-looking address (`GraphicsRenderBind.cpp`, reason=2). Suspect stale
+  guest memory (GPU results not written back) or a descriptor on an unexecuted
+  path; not yet diagnosed.
+
+Recorded, not yet fixed:
+- `source/emulator/src/Graphics/ShaderParse*.cpp` still map about 600 opcodes
+  to an `SBarrier` placeholder and the DS parser keeps "treated as" substitutes
+  (for example `ds_write2_b32`, `ds_rsub_u32`, `ds_cmpst_b32`). Each silently
+  changes guest semantics; decode each from the ISA when it is reached.
+- The native `ds_read`/`ds_write` emitters previously ignored EXEC; they now gate
+  on it, but the other native DS atomics without a return value still do not.
+- Storage image stores used the sampled-3D flag to pick three coordinates; they
+  now follow the declared 2D (optionally arrayed) storage type. Real 3D storage
+  images remain unsupported.
+- Kyty names float constants with six decimals, so distinct small values (for
+  example 2^-24 and 0) collide; emitters must use bit patterns for them.
+
 ### Paired compute admission frontier (2026-09-22, not gameplay)
 
 The restricted wave64-on-native32 compute path is connected to direct and

@@ -106,8 +106,12 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 		return false;
 	}
 
-	bool optimize = true;
-	switch (Config::GetShaderOptimizationType())
+	// Block-dispatch modules (paired wave64 programs with arbitrary guest CFG)
+	// are left unoptimized: promoting their per-bank registers to SSA across
+	// the dispatcher loop produces phi webs the driver cannot compile in
+	// bounded memory, while the unoptimized module compiles normally.
+	bool optimize = !src.ContainsStr("%cf_header = OpLabel");
+	switch (optimize ? Config::GetShaderOptimizationType() : Config::ShaderOptimizationType::None)
 	{
 		case Config::ShaderOptimizationType::Performance: opt.RegisterPerformancePasses(); break;
 		case Config::ShaderOptimizationType::Size: opt.RegisterSizePasses(); break;

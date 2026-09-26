@@ -85,6 +85,20 @@ enum class ShaderInstructionType : uint32_t
 	DsReadB32,
 	DsRead2B32,
 	DsWriteB32,
+	DsWrxchgRtnB32,
+	SBitcmp0B32,
+	SBitcmp1B32,
+	SBitcmp0B64,
+	SBitcmp1B64,
+	SFf1I32B32,
+	SFf1I32B64,
+	STrap,
+	VCmpLtU64,
+	VCmpEqU64,
+	VCmpLeU64,
+	VCmpGtU64,
+	VCmpNeU64,
+	VCmpGeU64,
 	Exp,
 	ImageGetResinfo,
 	ImageGather4,
@@ -208,7 +222,6 @@ enum class ShaderInstructionType : uint32_t
 	VAshrI32,
 	VAshrrevI32,
 	VBcntU32B32,
-	VBcntI32B32,
 	VBfeI32,
 	VBfeU32,
 	VBfiB32,
@@ -659,6 +672,8 @@ enum Format : uint64_t
 	SmaskVsrc0Vsrc1                     = FormatDefine({DA2, S0, S1}),
 	Ssrc0Ssrc1                          = FormatDefine({S0, S1}),
 	Ssrc02Ssrc12                        = FormatDefine({S0A2, S1A2}),
+	Ssrc02Ssrc1                         = FormatDefine({S0A2, S1}),
+	SVdstSVsrc02                        = FormatDefine({D, S0A2}),
 	SVdstSVsrc0                         = FormatDefine({D, S0}),
 	SVdstSVsrc0SVsrc1                   = FormatDefine({D, S0, S1}),
 	Vdata1Vaddr3StSsDmask1              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask1}),
@@ -1657,6 +1672,14 @@ struct ShaderBindResources
 	bool                       program_base_used      = false;
 	uint32_t                   program_base_offset_dw = 0;
 	uint64_t                   program_base           = 0;
+	// Guest-memory device addressing: a metadata block {table_lo, table_hi,
+	// entries, 0} filled at bind time (see GuestDeviceAddress.h).
+	bool     device_address_used      = false;
+	uint32_t device_address_offset_dw = 0;
+	// Per-dispatch global thread limits (USE_THREAD_DIMENSIONS), runtime data.
+	bool     thread_limits_used      = false;
+	uint32_t thread_limits_offset_dw = 0;
+	uint32_t thread_limits[3]        = {0, 0, 0};
 	ShaderStorageResources     storage_buffers;
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
@@ -1833,6 +1856,12 @@ struct ShaderGen5MubufStreamSpan
 struct ShaderComputeInputInfo
 {
 	ShaderComputeWaveLayout wave_layout;
+	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
+	bool                    native_equivalent_valid = false;
+	ShaderComputeWaveLayout native_equivalent_layout;
+	bool                    native_equivalence_required = false;
+	bool                    thread_limits_used          = false;
+	uint32_t                thread_limits[3]            = {0, 0, 0};
 	uint32_t            dispatch_mode      = 0;
 	uint32_t            threads_num[3]     = {0, 0, 0};
 	uint32_t            lds_dwords         = 0;

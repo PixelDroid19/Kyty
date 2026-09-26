@@ -404,8 +404,8 @@ TEST(EmulatorGraphicsPackets, ParsesGen5Or3B32)
 	EXPECT_EQ(instruction.src[2].register_id, 2);
 }
 
-// RDNA2 VOP3 v_mbcnt_lo_u32_b32 (op 0x366): SGPR dst, exec mask + accumulator.
-TEST(EmulatorGraphicsPackets, ParsesGen5MbcntLoU32B32)
+// RDNA2 VOP3 opcode 870 is v_mbcnt_hi_u32_b32 with a VGPR destination.
+TEST(EmulatorGraphicsPackets, ParsesGen5MbcntHiU32B32)
 {
 	const uint32_t shader[] = {0xd7660003u, 0x00000400u, 0xbf810000u};
 
@@ -422,42 +422,15 @@ TEST(EmulatorGraphicsPackets, ParsesGen5MbcntLoU32B32)
 
 	ASSERT_EQ(code.GetInstructions().Size(), 2u);
 	const auto& instruction = code.GetInstructions().At(0);
-	EXPECT_EQ(instruction.type, ShaderInstructionType::VMbcntLoU32B32);
-	EXPECT_EQ(instruction.format, ShaderInstructionFormat::SVdstSVsrc0SVsrc1);
-	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Sgpr);
-	EXPECT_EQ(instruction.dst.register_id, 3);
-	EXPECT_EQ(instruction.src[0].register_id, 0);
-	EXPECT_EQ(instruction.src[1].register_id, 2);
-}
-
-// RDNA2 VOP3 v_mbcnt_hi_u32_b32 (op 0x367): SGPR dst, exec mask + accumulator.
-TEST(EmulatorGraphicsPackets, ParsesGen5MbcntHiU32B32)
-{
-	const uint32_t shader[] = {0xd7670003u, 0x00000400u, 0xbf810000u};
-
-	if (!Config::IsInitialized())
-	{
-		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-	}
-	Config::SetNextGen(true);
-	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-
-	ShaderCode code;
-	code.SetType(ShaderType::Compute);
-	ShaderParse(shader, &code);
-
-	ASSERT_EQ(code.GetInstructions().Size(), 2u);
-	const auto& instruction = code.GetInstructions().At(0);
 	EXPECT_EQ(instruction.type, ShaderInstructionType::VMbcntHiU32B32);
 	EXPECT_EQ(instruction.format, ShaderInstructionFormat::SVdstSVsrc0SVsrc1);
-	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Sgpr);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
 	EXPECT_EQ(instruction.dst.register_id, 3);
 	EXPECT_EQ(instruction.src[0].register_id, 0);
 	EXPECT_EQ(instruction.src[1].register_id, 2);
 }
 
-// RDNA2 VOP3 v_bcnt_i32_b32 (op 0x365): VGPR dst, sign-divergent bit count plus src1.
-TEST(EmulatorGraphicsPackets, ParsesGen5BcntI32B32)
+TEST(EmulatorGraphicsPackets, ParsesGen5MbcntLoU32B32)
 {
 	const uint32_t shader[] = {0xd7650003u, 0x040a0300u, 0xbf810000u};
 
@@ -474,7 +447,7 @@ TEST(EmulatorGraphicsPackets, ParsesGen5BcntI32B32)
 
 	ASSERT_EQ(code.GetInstructions().Size(), 2u);
 	const auto& instruction = code.GetInstructions().At(0);
-	EXPECT_EQ(instruction.type, ShaderInstructionType::VBcntI32B32);
+	EXPECT_EQ(instruction.type, ShaderInstructionType::VMbcntLoU32B32);
 	EXPECT_EQ(instruction.format, ShaderInstructionFormat::SVdstSVsrc0SVsrc1);
 	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Vgpr);
 	EXPECT_EQ(instruction.dst.register_id, 3);

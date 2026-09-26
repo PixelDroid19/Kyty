@@ -190,17 +190,22 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	}
 
 	const char* branch_param[2] = {param[0], param[1]};
-	if (spirv->UsesComputeWaveBanks() &&
-	    (inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz))
+	const bool exec_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz;
+	const bool vcc_branch  = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;
+	if (spirv->UsesComputeWaveBanks() && (exec_branch || vcc_branch))
 	{
-		// Each physical subgroup owns one complete guest wave. The packed EXEC
+		// Each physical subgroup owns one complete guest wave. The packed mask
 		// pair is uniform within it, so no subgroup vote or low-half shortcut is
 		// needed to decide this wave's branch.
-		branch_param[0] = "%cc_lo_<index> = OpLoad %uint %exec_lo\n"
-		                  "%cc_hi_<index> = OpLoad %uint %exec_hi\n"
-		                  "%cc_mask_<index> = OpBitwiseOr %uint %cc_lo_<index> %cc_hi_<index>";
-		branch_param[1] = inst.type == ShaderInstructionType::SCbranchExecz ? "%cc_b_<index> = OpIEqual %bool %cc_mask_<index> %uint_0"
-		                                                                    : "%cc_b_<index> = OpINotEqual %bool %cc_mask_<index> %uint_0";
+		branch_param[0] = exec_branch ? "%cc_lo_<index> = OpLoad %uint %exec_lo\n"
+		                                "%cc_hi_<index> = OpLoad %uint %exec_hi\n"
+		                                "%cc_mask_<index> = OpBitwiseOr %uint %cc_lo_<index> %cc_hi_<index>"
+		                              : "%cc_lo_<index> = OpLoad %uint %vcc_lo\n"
+		                                "%cc_hi_<index> = OpLoad %uint %vcc_hi\n"
+		                                "%cc_mask_<index> = OpBitwiseOr %uint %cc_lo_<index> %cc_hi_<index>";
+		const bool zero_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchVccz;
+		branch_param[1] = zero_branch ? "%cc_b_<index> = OpIEqual %bool %cc_mask_<index> %uint_0"
+		                              : "%cc_b_<index> = OpINotEqual %bool %cc_mask_<index> %uint_0";
 	} else if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
 	           ShaderVccBranchIsWaveUniform(code, index))
 	{

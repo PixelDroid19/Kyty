@@ -785,10 +785,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1)
 KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (spirv->UsesComputeWaveBanks())
-	{
-		return spirv->EmitComputeWaveCompareU32(inst, index, param[0], dst_source);
-	}
 
 	String8 load0;
 	String8 load1;
@@ -839,10 +835,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1)
 KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (spirv->UsesComputeWaveBanks())
-	{
-		return spirv->EmitComputeWaveCompareU32(inst, index, param[0], dst_source);
-	}
 
 	String8 load0;
 	String8 load1;
@@ -940,10 +932,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_I32_SmaskVsrc0Vsrc1)
 KYTY_RECOMPILER_FUNC(Recompile_VCmpx_XXX_U32_SmaskVsrc0Vsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (spirv->UsesComputeWaveBanks())
-	{
-		return spirv->EmitComputeWaveCompareU32(inst, index, param[0], dst_source);
-	}
 
 	String8 load0;
 	String8 load1;

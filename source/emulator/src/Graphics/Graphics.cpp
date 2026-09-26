@@ -1,3 +1,4 @@
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/Graphics.h"
 
 #include "Kyty/Core/DbgAssert.h"
@@ -65,6 +66,7 @@ void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t siz
 {
 	(void)context;
 	GpuMemorySetAllocatedRange(vaddr, size);
+	GuestDeviceAddressRegisterRange(vaddr, size);
 }
 
 bool GraphicsCompleteGpuMappingRelease(void* data)
@@ -79,6 +81,7 @@ bool GraphicsCompleteGpuMappingRelease(void* data)
 		    EXIT_IF(action_data == nullptr);
 		    auto* transaction = static_cast<GpuMappingReleaseTransaction*>(action_data);
 		    GpuMemoryFreeMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+		    GuestDeviceAddressReleaseRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
 		    return transaction->completion(transaction->completion_data);
 	    },
 	    transaction);

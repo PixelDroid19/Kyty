@@ -94,9 +94,13 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x12: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_trap treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x12:
+			// Traps are not taken without a trap handler (STATUS.TRAP_EN = 0).
+			inst.type              = ShaderInstructionType::STrap;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
+			inst.src_num           = 1;
 			break;
 		case 0x13: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_icache_inv treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;

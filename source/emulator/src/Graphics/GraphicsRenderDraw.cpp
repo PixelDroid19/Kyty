@@ -2546,7 +2546,15 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	thread_group_z = plan.group_count[2];
 
 	ShaderComputeInputInfo input_info;
-	input_info.wave_layout = plan.wave_layout;
+	input_info.wave_layout              = plan.wave_layout;
+	input_info.native_equivalent_valid  = plan.native_equivalent_valid;
+	input_info.native_equivalent_layout = plan.native_equivalent_layout;
+	input_info.native_equivalence_required = plan.native_equivalence_required;
+	input_info.thread_limits_used          = plan.thread_limits_used;
+	for (int axis = 0; axis < 3; axis++)
+	{
+		input_info.thread_limits[axis] = plan.thread_limits[axis];
+	}
 	ShaderGetInputInfoCS(&cs_regs, &sh_regs, plan.dispatch_mode, &input_info);
 	// Diagnostic A/B only (not a product fix):
 	//   KYTY_AB_SKIP_ALL_CS=1 — skip every compute dispatch

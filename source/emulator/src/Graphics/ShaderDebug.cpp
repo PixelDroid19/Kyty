@@ -232,10 +232,9 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 		switch (fu)
 		{
 			case ShaderInstructionFormat::D:
-				// ds_read_b64 decodes as a B32 read with a two-dword
-				// destination; print the pair instead of tripping the scalar
-				// invariant, which only guards larger unexpected widths.
-				if (inst.dst.size != 1 && inst.dst.size != 2)
+				// ds_read_b64/b96/b128 decode as a dword-vector read; print the
+				// range. The invariant guards other unexpected widths.
+				if (inst.dst.size < 1 || inst.dst.size > 4)
 				{
 					EXIT("shader debug format requires scalar destination: type=%u format=%" PRIu64 " pc=0x%08" PRIx32
 					     " size=%d\n",
@@ -261,6 +260,12 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 					// The addressing state is carried by the instruction rather than
 					// duplicated across every static buffer format.
 					EXIT_IF(source.type != ShaderOperandType::Vgpr || source.size != 2);
+					s = operand_array_to_str(source, source.size);
+					break;
+				}
+				// Multi-dword DS data operands are consecutive VGPRs.
+				if (source.type == ShaderOperandType::Vgpr && source.size > 1)
+				{
 					s = operand_array_to_str(source, source.size);
 					break;
 				}

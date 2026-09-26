@@ -3393,7 +3393,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 		}
 
 		const bool arrayed           = UsesArrayed2dImages(bind_info, ShaderTextureUsage::ReadWrite);
-		const bool three_dimensional = UsesThreeDimensionalImages(bind_info);
+		// Storage images are declared 2D (optionally arrayed); sampled 3D
+		// textures do not change the storage image's dimensionality.
+		const bool three_dimensional = false;
 		const bool uint_images       = UsesUnsignedIntegerImages(bind_info);
 		const auto src0_value0       = mimg_address_to_str(inst, 0);
 		const auto src0_value1       = mimg_address_to_str(inst, 1);

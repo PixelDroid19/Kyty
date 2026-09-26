@@ -1,3 +1,4 @@
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 
 #include "GraphicsRenderInternal.h"
@@ -4264,6 +4265,30 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.direct_sgprs.sgprs_num > 0)
 		{
 			PrepareDirectSgprs(bind.direct_sgprs, &sgprs_ptr);
+		}
+		if (bind.device_address_used)
+		{
+			uint64_t table   = 0;
+			uint32_t entries = 0;
+			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.device_address_offset_dw);
+			if (!GuestDeviceAddressPrepare(g_render_ctx->GetGraphicCtx(), &table, &entries))
+			{
+				EXIT("guest memory device addressing is unavailable for a shader that dereferences guest pointers\n");
+			}
+			sgprs_ptr[0] = static_cast<uint32_t>(table);
+			sgprs_ptr[1] = static_cast<uint32_t>(table >> 32u);
+			sgprs_ptr[2] = entries;
+			sgprs_ptr[3] = 0;
+			sgprs_ptr += 4;
+		}
+		if (bind.thread_limits_used)
+		{
+			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.thread_limits_offset_dw);
+			sgprs_ptr[0] = bind.thread_limits[0];
+			sgprs_ptr[1] = bind.thread_limits[1];
+			sgprs_ptr[2] = bind.thread_limits[2];
+			sgprs_ptr[3] = 0;
+			sgprs_ptr += 4;
 		}
 		if (bind.program_base_used)
 		{

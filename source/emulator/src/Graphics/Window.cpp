@@ -2029,7 +2029,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
                                    const VulkanQueues& queues, const Vector<const char*>& device_extensions,
                                    bool color_write_enable_supported, bool depth_clip_enable_supported,
                                    bool depth_clip_control_supported,
-                                   const ShaderComputeWaveVulkanState* compute_wave_state)
+                                   const ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -2098,7 +2098,20 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 		    compute_wave_state->full_subgroups_feature_supported ? VK_TRUE : VK_FALSE;
 	}
 
+	VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address {};
+	buffer_device_address.sType               = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+	buffer_device_address.bufferDeviceAddress = VK_TRUE;
+	if (guest_device_address)
+	{
+		device_features.shaderInt64 = VK_TRUE;
+	}
+
 	void* device_feature_chain = nullptr;
+	if (guest_device_address)
+	{
+		buffer_device_address.pNext = device_feature_chain;
+		device_feature_chain        = &buffer_device_address;
+	}
 	if (depth_clip_control_supported)
 	{
 		depth_clip_control_ext.pNext = device_feature_chain;
@@ -2873,6 +2886,22 @@ static void VulkanCreate(WindowContext* ctx)
 			device_extensions.Add(load_store_op_none_extension);
 		}
 
+		{
+			VkPhysicalDeviceBufferDeviceAddressFeatures address_features {};
+			address_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
+			VkPhysicalDeviceFeatures2 features2 {};
+			features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+			features2.pNext = &address_features;
+			vkGetPhysicalDeviceFeatures2(ctx->graphic_ctx.physical_device, &features2);
+			ctx->graphic_ctx.guest_device_address_supported = has_ext(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) &&
+			                                                  address_features.bufferDeviceAddress == VK_TRUE &&
+			                                                  features2.features.shaderInt64 == VK_TRUE;
+			if (ctx->graphic_ctx.guest_device_address_supported &&
+			    !device_extensions.Contains(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME, [](auto s, auto l) { return strcmp(s, l) == 0; }))
+			{
+				device_extensions.Add(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+			}
+		}
 		ctx->graphic_ctx.subgroup_size_control_supported = has_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 		auto& wave_state = ctx->graphic_ctx.compute_wave_vulkan_state;
 		wave_state.extension_advertised = ctx->graphic_ctx.subgroup_size_control_supported;
@@ -2981,7 +3010,7 @@ static void VulkanCreate(WindowContext* ctx)
 	    VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions,
 	                       ctx->graphic_ctx.color_write_enable_supported, ctx->graphic_ctx.depth_clip_enable_supported,
 	                       ctx->graphic_ctx.depth_clip_control_supported,
-	                       &ctx->graphic_ctx.compute_wave_vulkan_state);
+	                       &ctx->graphic_ctx.compute_wave_vulkan_state, ctx->graphic_ctx.guest_device_address_supported);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
 		EXIT("Could not create device");

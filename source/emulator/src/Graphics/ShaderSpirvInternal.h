@@ -30,6 +30,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include <set>
+#include <vector>
 #include <string>
 
 #include "Emulator/Graphics/Shader.h"
@@ -113,10 +114,31 @@ public:
 	[[nodiscard]] bool EmitComputeWaveLdsInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveAluInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
+	                                                     uint32_t index, String8* output);
+	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
+	[[nodiscard]] bool    UsesBlockDispatch() const;
+	void                  BuildBlockDispatch();
+	[[nodiscard]] int     BlockId(uint32_t pc) const;
+	[[nodiscard]] String8 BlockDispatchProlog() const;
+	[[nodiscard]] String8 BlockDispatchBoundary(uint32_t index);
+	[[nodiscard]] bool    BlockDispatchControl(const ShaderInstruction& inst, uint32_t index, String8* output);
+	[[nodiscard]] String8 BlockDispatchEpilog() const;
+	[[nodiscard]] bool    UsesGuestDeviceAddress() const;
+	[[nodiscard]] String8 GuestDeviceAddressTypes(bool ulong_declared) const;
+	[[nodiscard]] String8 GuestDeviceAddressFunction() const;
+	[[nodiscard]] bool    EmitGuestLoad(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;
+	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;
+	[[nodiscard]] bool EmitComputeWaveCarryInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveMbcnt(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveGenericCompare(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
+	                                                 uint32_t index, String8* output);
 	[[nodiscard]] SpirvValue GetComputeWaveRegister(ShaderOperand operand, ShaderWaveBank bank, int word) const;
 	[[nodiscard]] bool EmitComputeWaveOperandUint(const ShaderOperand& operand, ShaderWaveBank bank,
 	                                              const String8& result_id, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveProlog(String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveValidLanes(String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveMaskBit(const ShaderOperand& mask, ShaderWaveBank bank,
 	                                         const String8& result_id, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveBallot(const String8& low_predicate, const String8& high_predicate,
@@ -257,6 +279,10 @@ public:
 	}
 
 private:
+	// Block dispatcher state (sorted guest block start PCs).
+	std::vector<uint32_t> m_block_starts;
+	bool                  m_block_terminated = false;
+
 	struct Variable
 	{
 		ShaderOperand op;

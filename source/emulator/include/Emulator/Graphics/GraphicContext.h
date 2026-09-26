@@ -154,6 +154,9 @@ struct GraphicContext
 	// Extension advertisement is diagnostic only; wave execution consumes the
 	// separate support and enabled fields in compute_wave_vulkan_state.
 	bool subgroup_size_control_supported = false;
+	// Guest memory is importable as device-addressable buffers (host pointer
+	// import, buffer device address and 64-bit shader integers).
+	bool guest_device_address_supported = false;
 	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that

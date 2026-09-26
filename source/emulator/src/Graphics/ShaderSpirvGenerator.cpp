@@ -1,3 +1,4 @@
+#include "Kyty/Core/MagicEnum.h"
 #include "ShaderSpirvInternal.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 
@@ -14,6 +15,8 @@
 #include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
+
+KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>(Kyty::Libs::Graphics::ShaderInstructionType::ZMax));
 
 namespace Kyty::Libs::Graphics {
 
@@ -473,6 +476,15 @@ void Spirv::WriteHeader()
 		// by the generated OpBitcast instructions.
 		capabilities.Add("OpCapability Int64");
 	}
+	if (UsesGuestDeviceAddress())
+	{
+		if (!spirv_uses_f64(m_code))
+		{
+			capabilities.Add("OpCapability Int64");
+		}
+		capabilities.Add("OpCapability PhysicalStorageBufferAddresses");
+		extensions.Add("OpExtension \"SPV_KHR_physical_storage_buffer\"");
+	}
 	if (spirv_uses_f16(m_code))
 	{
 		capabilities.Add("OpCapability Float16");
@@ -646,7 +658,9 @@ void Spirv::WriteHeader()
 	                .ReplaceStr("<Capabilities>", capabilities.Concat("\n" + String8(' ', 15)))
 	                .ReplaceStr("<ExecutionModes>", execution_modes.Concat("\n" + String8(' ', 15)))
 	                .ReplaceStr("<Imports>", imports.Concat("\n" + String8(' ', 15)))
-	                .ReplaceStr("<Extensions>", extensions.Concat("\n" + String8(' ', 15)));
+	                .ReplaceStr("<Extensions>", extensions.Concat("\n" + String8(' ', 15)))
+	                .ReplaceStr("OpMemoryModel Logical GLSL450",
+	                            UsesGuestDeviceAddress() ? "OpMemoryModel PhysicalStorageBuffer64 GLSL450" : "OpMemoryModel Logical GLSL450");
 }
 
 void Spirv::WriteDebug()
@@ -1128,6 +1142,11 @@ static const char* compute_types = R"(
 	}
 	m_source += optional_types;
 	m_source += types;
+	// Guest addressing types build on %uint from the base types.
+	if (UsesGuestDeviceAddress())
+	{
+		m_source += GuestDeviceAddressTypes(spirv_uses_f64(m_code));
+	}
 
 	switch (m_code.GetType())
 	{
@@ -1668,7 +1687,7 @@ void Spirv::WriteLocalVariables()
 	       %temp_v4float = OpVariable %_ptr_Function_v4float Function
            %temp_int_0 = OpVariable %_ptr_Function_int Function
            %temp_int_1 = OpVariable %_ptr_Function_int Function
-           %temp_int_2 = OpVariable %_ptr_Function_int Function
+<block_dispatch_variable>           %temp_int_2 = OpVariable %_ptr_Function_int Function
            %temp_int_3 = OpVariable %_ptr_Function_int Function
            %temp_int_4 = OpVariable %_ptr_Function_int Function
            %temp_int_5 = OpVariable %_ptr_Function_int Function
@@ -1680,7 +1699,9 @@ void Spirv::WriteLocalVariables()
            %temp_uint_5 = OpVariable %_ptr_Function_uint Function
 )";
 
-	m_source += common_vars;
+	m_source += String8(common_vars)
+	                .ReplaceStr("<block_dispatch_variable>",
+	                            UsesBlockDispatch() ? "           %cf_block = OpVariable %_ptr_Function_uint Function\n" : "");
 	if (fragment_tap)
 	{
 		for (uint32_t component = 0; component < 4u; component++)
@@ -2029,15 +2050,54 @@ void Spirv::WriteLocalVariables()
 
 	if (UsesComputeWaveBanks())
 	{
-		const auto full_mask = GetConstantUint(0xffffffffu);
-		m_source += String8::FromPrintf("OpStore %%exec_lo %%%s\nOpStore %%exec_hi %%%s\n"
-		                                "OpStore %%execz %%uint_0\nOpStore %%scc %%uint_0\n",
-		                                full_mask.c_str(), full_mask.c_str());
+		// Initial EXEC holds exactly the lanes that exist in this guest wave.
+		m_source += "OpStore %exec_lo %wave_valid_lo\nOpStore %exec_hi %wave_valid_hi\n"
+		            "OpStore %execz %uint_0\nOpStore %scc %uint_0\n";
 	} else
 	{
 		m_source += common_init;
+		if (m_cs_input_info != nullptr && m_bind != nullptr && m_bind->thread_limits_used)
+		{
+			m_source += EmitNativeThreadLimitExec();
+		}
 	}
 	m_source += "\n";
+}
+
+// Loads dispatch thread limit word `axis` from the per-dispatch metadata.
+String8 Spirv::EmitThreadLimitLoad(uint32_t axis, const String8& id) const
+{
+	return String8::FromPrintf("%%%s_ptr = OpAccessChain %%%s %%vsharp %%int_0 %%%s %%%s\n%%%s = OpLoad %%uint %%%s_ptr\n", id.c_str(),
+	                           m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint",
+	                           GetConstantInt(static_cast<int>(m_bind->thread_limits_offset_dw / 4u)).c_str(),
+	                           GetConstantInt(static_cast<int>(axis)).c_str(), id.c_str(), id.c_str());
+}
+
+// Native compute: an invocation whose global ID is past a thread limit starts
+// with EXEC clear, like the lanes the hardware never launches.
+String8 Spirv::EmitNativeThreadLimitExec() const
+{
+	String8 source;
+	for (uint32_t axis = 0; axis < 3u; axis++)
+	{
+		const auto a = String8::FromPrintf("tl_native_%u", axis);
+		source += EmitThreadLimitLoad(axis, a + "_limit");
+		source += String8::FromPrintf("%%%s_group_ptr = OpAccessChain %%_ptr_Input_uint %%gl_WorkGroupID %%uint_%u\n"
+		                              "%%%s_group = OpLoad %%uint %%%s_group_ptr\n"
+		                              "%%%s_local_ptr = OpAccessChain %%_ptr_Input_uint %%gl_LocalInvocationID %%uint_%u\n"
+		                              "%%%s_local = OpLoad %%uint %%%s_local_ptr\n"
+		                              "%%%s_base = OpIMul %%uint %%%s_group %%%s\n"
+		                              "%%%s_global = OpIAdd %%uint %%%s_base %%%s_local\n"
+		                              "%%%s_ok = OpULessThan %%bool %%%s_global %%%s_limit\n",
+		                              a.c_str(), axis, a.c_str(), a.c_str(), a.c_str(), axis, a.c_str(), a.c_str(), a.c_str(), a.c_str(),
+		                              GetConstantUint(m_cs_input_info->threads_num[axis]).c_str(), a.c_str(), a.c_str(), a.c_str(),
+		                              a.c_str(), a.c_str(), a.c_str());
+	}
+	source += "%tl_native_xy = OpLogicalAnd %bool %tl_native_0_ok %tl_native_1_ok\n"
+	          "%tl_native_ok = OpLogicalAnd %bool %tl_native_xy %tl_native_2_ok\n"
+	          "%tl_native_exec = OpSelect %uint %tl_native_ok %uint_1 %uint_0\n"
+	          "OpStore %exec_lo %tl_native_exec\n";
+	return source;
 }
 
 
@@ -2217,6 +2277,14 @@ void Spirv::DetectFetch()
 	}
 }
 
+static bool InstructionWritesExec(const ShaderInstruction& inst)
+{
+	const auto is_exec = [](const ShaderOperand& operand)
+	{ return operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::ExecHi; };
+	const auto name = Core::EnumName8(inst.type);
+	return is_exec(inst.dst) || is_exec(inst.dst2) || name.StartsWith("VCmpx") || name.ContainsStr("Saveexec");
+}
+
 void Spirv::WriteInstructions()
 {
 	ModifyCode();
@@ -2236,9 +2304,26 @@ void Spirv::WriteInstructions()
 	int         index        = -1;
 	const auto& instructions = m_code.GetInstructions();
 	bool        need_debug   = (Config::SpirvDebugPrintfEnabled() && !m_code.GetDebugPrintfs().IsEmpty());
+	const bool  block_dispatch = UsesBlockDispatch();
+	if (block_dispatch)
+	{
+		BuildBlockDispatch();
+		m_source += BlockDispatchProlog();
+	}
 	for (const auto& inst: instructions)
 	{
 		index++;
+		if (block_dispatch)
+		{
+			m_source += BlockDispatchBoundary(static_cast<uint32_t>(index));
+			String8 control;
+			if (BlockDispatchControl(inst, static_cast<uint32_t>(index), &control))
+			{
+				m_source += String8::FromPrintf("; %s\n", ShaderCode::DbgInstructionToStr(inst).c_str());
+				m_source += control;
+				continue;
+			}
+		}
 		if (uses_arrayed_2d_sampled_images && IsSampledImageInstruction(inst) &&
 		                     !SupportsArrayed2dImageInstruction(inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uses_arrayed_2d_sampled_images && IsSampledImageInstruction(inst) && condition ignored (continuing)\n"); }
 		if (uses_arrayed_2d_storage_images && IsStorageImageInstruction(inst) &&
@@ -2249,7 +2334,10 @@ void Spirv::WriteInstructions()
 		// captured material shader.
 		if (uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uses_uint_images && IsImageInstruction(inst) && !SupportsArrayed2dImageInstruction(inst) condition ignored (continuing)\n"); }
 
-		WriteLabel(index);
+		if (!block_dispatch)
+		{
+			WriteLabel(index);
+		}
 
 		String8 dst;
 		String8 dst_debug;
@@ -2273,6 +2361,31 @@ void Spirv::WriteInstructions()
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedBufferLoad)
 		{
 			ok = EmitComputeWaveBufferLoadInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGeneric)
+		{
+			ok = EmitComputeWaveGenericInstruction(func, inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedCarry)
+		{
+			ok = EmitComputeWaveCarryInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::WaveCount)
+		{
+			ok = EmitComputeWaveMbcnt(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::WaveAppend)
+		{
+			ok = EmitComputeWaveAppend(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGenericCompare)
+		{
+			ok = EmitComputeWaveGenericCompare(func, inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedGenericLds)
+		{
+			// One guest wave is one converged host subgroup, so a subgroup
+			// barrier here orders this DS access for all 64 lanes before the next.
+			ok = EmitComputeWaveGenericInstruction(func, inst, static_cast<uint32_t>(index), &dst);
+			if (ok)
+			{
+				dst += String8::FromPrintf("OpControlBarrier %%%s %%%s %%%s\n", GetConstantUint(3u).c_str(), GetConstantUint(3u).c_str(),
+				                           GetConstantUint(0x108u).c_str());
+			}
 		} else if (func != nullptr)
 		{
 			EXIT_IF(func->type != inst.type);
@@ -2293,6 +2406,16 @@ void Spirv::WriteInstructions()
 		if (IsImageInstruction(inst))
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
+		}
+		if (UsesComputeWaveBanks() && InstructionWritesExec(inst))
+		{
+			// Lanes missing from a partial guest wave can never become active.
+			dst += String8::FromPrintf("%%exec_clamp_lo_%d = OpLoad %%uint %%exec_lo\n"
+			                           "%%exec_clamp_hi_%d = OpLoad %%uint %%exec_hi\n"
+			                           "%%exec_clamp_lo_v_%d = OpBitwiseAnd %%uint %%exec_clamp_lo_%d %%wave_valid_lo\n"
+			                           "%%exec_clamp_hi_v_%d = OpBitwiseAnd %%uint %%exec_clamp_hi_%d %%wave_valid_hi\n"
+			                           "OpStore %%exec_lo %%exec_clamp_lo_v_%d\nOpStore %%exec_hi %%exec_clamp_hi_v_%d\n",
+			                           index, index, index, index, index, index, index, index);
 		}
 
 		// Unknown parser formats must reach the actionable missing-emitter
@@ -2346,6 +2469,10 @@ void Spirv::WriteInstructions()
 			m_source += String8::FromPrintf("%s\n", dst_debug.c_str());
 		}
 	}
+	if (block_dispatch)
+	{
+		m_source += BlockDispatchEpilog();
+	}
 }
 
 void Spirv::WriteMainEpilog()
@@ -2360,6 +2487,11 @@ void Spirv::WriteMainEpilog()
 
 void Spirv::WriteFunctions()
 {
+	if (UsesGuestDeviceAddress())
+	{
+		m_source += GuestDeviceAddressFunction();
+	}
+
 	if (spirv_uses_buffer_descriptor_addressing(m_code))
 	{
 		m_source += BUFFER_RAW_ADDRESS;
@@ -2492,6 +2624,24 @@ void Spirv::WriteFunctions()
 void Spirv::FindConstants()
 {
 	m_constants.Clear();
+	if (UsesBlockDispatch())
+	{
+		// The block table is rebuilt after ModifyCode; register the upper
+		// bound of ids: the entry plus a target and a fallthrough per branch.
+		uint32_t bound = 1;
+		for (const auto& inst: m_code.GetInstructions())
+		{
+			bound += (inst.type == ShaderInstructionType::SEndpgm || Core::EnumName8(inst.type).StartsWith("SCbranch") ||
+			          inst.type == ShaderInstructionType::SBranch)
+			             ? 2u
+			             : 0u;
+		}
+		for (uint32_t id = 0; id <= bound; id++)
+		{
+			AddConstantUint(id);
+		}
+		AddConstantUint(0xffffffffu);
+	}
 	AddConstantFloat(0.0f);
 	AddConstantFloat(0.5f);
 	AddConstantFloat(1.0f);
@@ -2576,6 +2726,54 @@ void Spirv::FindConstants()
 		{
 			AddConstantUint(static_cast<uint32_t>(inst.smem_imm_offset));
 		}
+		// Paired generic emission: lane bits, and subgroup-scope barriers
+		// (Subgroup=3, AcquireRelease|WorkgroupMemory=0x108) after DS accesses.
+		if (UsesComputeWaveBanks())
+		{
+			AddConstantUint(0u);
+			AddConstantUint(1u);
+			AddConstantUint(3u);
+			AddConstantUint(0x108u);
+			AddConstantUint(16u);
+			AddConstantUint(72u);
+			AddConstantUint(0xffffffffu);
+			AddConstantInt(0);
+			AddConstantUint(32u);
+			AddConstantUint(64u);
+			AddConstantUint(0x7fffffffu);
+			AddConstantUint(0x80000000u);
+			const auto& local = m_cs_input_info->wave_layout.guest_local;
+			AddConstantUint(local[0] * local[1] * local[2]);
+			AddConstantUint(local[0]);
+			AddConstantUint(local[1]);
+			AddConstantUint(local[0] * local[1]);
+		}
+		if (inst.type == ShaderInstructionType::ImageBvhIntersectRay)
+		{
+			AddConstantUint(255u);
+			AddConstantUint(0xfffffff8u);
+			AddConstantUint(0xffffffffu);
+			AddConstantUint(0x33800000u);
+			AddConstantUint(0x7f800000u);
+			AddConstantUint(0xff800000u);
+			AddConstantFloat(1.0f);
+		}
+		if (UsesGuestDeviceAddress())
+		{
+			AddConstantUint(0xffffu);
+			AddConstantUint(0xfffffffcu);
+			AddConstantUint(static_cast<uint32_t>(inst.smem_imm_offset));
+			AddConstantInt(static_cast<int>(m_bind->device_address_offset_dw / 4u));
+		}
+		if (m_cs_input_info != nullptr && m_bind != nullptr && m_bind->thread_limits_used)
+		{
+			for (int axis = 0; axis < 3; axis++)
+			{
+				AddConstantInt(axis);
+				AddConstantUint(m_cs_input_info->threads_num[axis]);
+			}
+			AddConstantInt(static_cast<int>(m_bind->thread_limits_offset_dw / 4u));
+		}
 		// SDWA extract emitters resolve the field mask through GetConstantUint.
 		if (inst.vop_sdwa)
 		{
@@ -2586,6 +2784,23 @@ void Spirv::FindConstants()
 		// read2 pair is dword-scaled while single-offset DS ops carry bytes.
 		// Undeclared offsets would assemble into an orphan id that the driver
 		// rejects at pipeline creation.
+		// 64-bit compares sign-extend negative inline constants.
+		if (inst.src[0].size == 2 || inst.src[1].size == 2)
+		{
+			AddConstantUint(0xffffffffu);
+		}
+		if (inst.type == ShaderInstructionType::SBitcmp0B64 || inst.type == ShaderInstructionType::SBitcmp1B64)
+		{
+			AddConstantUint(63u);
+		}
+		// Multi-dword DS reads/writes index consecutive words 0..3.
+		if (inst.type == ShaderInstructionType::DsReadB32 || inst.type == ShaderInstructionType::DsWriteB32)
+		{
+			for (uint32_t word = 0; word < 4u; word++)
+			{
+				AddConstantUint(word);
+			}
+		}
 		if (inst.type == ShaderInstructionType::DsRead2B32)
 		{
 			AddConstantUint((inst.ds_offset & 0xffu) * 4u);

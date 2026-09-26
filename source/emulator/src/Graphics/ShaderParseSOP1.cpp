@@ -111,13 +111,14 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x13: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_ff1_i32_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x13:
+			inst.type   = ShaderInstructionType::SFf1I32B32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
 			break;
-		case 0x14: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_ff1_i32_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x14:
+			inst.type        = ShaderInstructionType::SFf1I32B64;
+			inst.format      = ShaderInstructionFormat::SVdstSVsrc02;
+			inst.src[0].size = 2;
 			break;
 		case 0x15: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_flbit_i32_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;

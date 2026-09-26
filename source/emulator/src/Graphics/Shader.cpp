@@ -1,3 +1,4 @@
+#include "Kyty/Core/MagicEnum.h"
 #include "Emulator/Graphics/Shader.h"
 
 #include "Kyty/Core/Common.h"
@@ -14,6 +15,7 @@
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveNativeEquivalence.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
@@ -46,6 +48,8 @@
 // #include "spirv_cross/spirv_glsl.hpp"
 
 #ifdef KYTY_EMU_ENABLED
+
+KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>(Kyty::Libs::Graphics::ShaderInstructionType::ZMax));
 
 namespace Kyty::Libs::Graphics {
 
@@ -284,7 +288,6 @@ static bool ShaderInstructionIsPureLaneAlu(const ShaderInstruction& inst)
 		case ShaderInstructionType::VAshrI32:
 		case ShaderInstructionType::VAshrrevI32:
 		case ShaderInstructionType::VBcntU32B32:
-		case ShaderInstructionType::VBcntI32B32:
 		case ShaderInstructionType::VBfeI32:
 		case ShaderInstructionType::VBfeU32:
 		case ShaderInstructionType::VBfiB32:
@@ -1576,6 +1579,20 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	if (bind->direct_sgprs.sgprs_num > 0)
 	{
 		bind->push_constant_size += (((bind->direct_sgprs.sgprs_num - 1) / 4) + 1) * 16;
+	}
+	// Device-address and thread-limit blocks precede the program base, which
+	// stays the final block.
+	bind->device_address_offset_dw = 0;
+	if (bind->device_address_used)
+	{
+		bind->device_address_offset_dw = bind->push_constant_size / 4u;
+		bind->push_constant_size += 16u;
+	}
+	bind->thread_limits_offset_dw = 0;
+	if (bind->thread_limits_used)
+	{
+		bind->thread_limits_offset_dw = bind->push_constant_size / 4u;
+		bind->push_constant_size += 16u;
 	}
 	bind->program_base_offset_dw = 0;
 	if (bind->program_base_used)
@@ -2895,6 +2912,26 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	ShaderCalcBindingIndices(&ps_info->bind);
 }
 
+// Instructions that dereference guest memory through a computed address: BVH
+// traversal, and scalar loads whose base is not the mapped extended pointer.
+static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBindResources& bind)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::ImageBvhIntersectRay)
+		{
+			return true;
+		}
+		const auto name = Core::EnumName8(inst.type);
+		if (name.StartsWith("SLoad") && !(bind.extended.used && inst.src[0].type == ShaderOperandType::Sgpr &&
+		                                   inst.src[0].register_id == bind.extended.start_register))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* /*sh*/, uint32_t dispatch_mode,
                           ShaderComputeInputInfo* info)
 {
@@ -2941,19 +2978,45 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false);
 		// Resource-coupled S_LOAD admission needs the exact per-PC EUD mapping.
 		// This is still before shader-cache, pipeline and descriptor preparation.
-		if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
+		if (info->native_equivalence_required)
 		{
-			const auto admission = ShaderAnalyzeComputeWaveCode(code, *info);
-			if (!admission.supported)
+			const auto native = ShaderAnalyzeComputeWaveNativeEquivalence(code);
+			if (!native.supported)
 			{
-				EXIT("paired-wave dispatch admission unsupported: mode=0x%08" PRIx32 " pc=0x%08" PRIx32 " reason=%s\n", dispatch_mode,
-				     admission.unsupported_pc, admission.reason.c_str());
+				EXIT("wave64 dispatch has no paired layout and is not wave-width independent: mode=0x%08" PRIx32
+				     " local=%ux%ux%u pc=0x%08" PRIx32 " reason=%s\n",
+				     dispatch_mode, info->threads_num[0], info->threads_num[1], info->threads_num[2], native.unsupported_pc,
+				     native.reason.c_str());
+			}
+		} else if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
+		{
+			// A program proven wave-width independent runs one guest lane per
+			// invocation: half the code of paired banks, over the same workgroup.
+			const auto native = info->native_equivalent_valid ? ShaderAnalyzeComputeWaveNativeEquivalence(code)
+			                                                  : ShaderComputeWaveAnalysisResult {};
+			const auto admission = native.supported ? ShaderComputeWaveAnalysisResult {true, 0, {}}
+			                                        : ShaderAnalyzeComputeWaveCode(code, *info);
+			if (native.supported)
+			{
+				info->wave_layout = info->native_equivalent_layout;
+			} else if (!admission.supported)
+			{
+				EXIT("paired-wave dispatch admission unsupported: mode=0x%08" PRIx32 " pc=0x%08" PRIx32 " reason=%s; "
+				     "native-equivalence %s pc=0x%08" PRIx32 " reason=%s\n",
+				     dispatch_mode, admission.unsupported_pc, admission.reason.c_str(),
+				     info->native_equivalent_valid ? "rejected" : "unavailable", native.unsupported_pc, native.reason.c_str());
 			}
 		}
 		// Compute parsing preserves byte PCs relative to this dispatch's start.
 		// The base must remain runtime data when a cached pipeline is relocated.
 		info->bind.program_base_used = code.HasAnyOf({ShaderInstructionType::SGetpcB64});
 		info->bind.program_base      = info->bind.program_base_used ? regs->cs_regs.data_addr : 0u;
+		info->bind.device_address_used = ShaderUsesGuestDeviceAddress(code, info->bind);
+		info->bind.thread_limits_used = info->thread_limits_used;
+		for (int axis = 0; axis < 3; axis++)
+		{
+			info->bind.thread_limits[axis] = info->thread_limits[axis];
+		}
 		if (code.HasAnyOf({ShaderInstructionType::VLshlAddU32, ShaderInstructionType::VCmpxGtU32,
 		                   ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferStoreFormatX}))
 		{
@@ -3752,6 +3815,16 @@ Vector<uint32_t> ShaderRecompileCS(const ShaderCode& code, const ShaderComputeIn
 
 static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 {
+	ret->ids.Add(static_cast<uint32_t>(bind.device_address_used));
+	if (bind.device_address_used)
+	{
+		ret->ids.Add(bind.device_address_offset_dw);
+	}
+	ret->ids.Add(static_cast<uint32_t>(bind.thread_limits_used));
+	if (bind.thread_limits_used)
+	{
+		ret->ids.Add(bind.thread_limits_offset_dw);
+	}
 	ret->ids.Add(static_cast<uint32_t>(bind.program_base_used));
 	if (bind.program_base_used)
 	{

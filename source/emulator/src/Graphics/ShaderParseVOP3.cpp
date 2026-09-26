@@ -660,29 +660,41 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0xE1: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_lt_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE1:
+			inst.type        = ShaderInstructionType::VCmpLtU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE2: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_eq_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE2:
+			inst.type        = ShaderInstructionType::VCmpEqU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE3: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_le_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE3:
+			inst.type        = ShaderInstructionType::VCmpLeU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE4: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_gt_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE4:
+			inst.type        = ShaderInstructionType::VCmpGtU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE5: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_ne_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE5:
+			inst.type        = ShaderInstructionType::VCmpNeU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE6: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_ge_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE6:
+			inst.type        = ShaderInstructionType::VCmpGeU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
 		case 0xE7: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_t_u64 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
@@ -1372,25 +1384,16 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
 			break;
+		// RDNA2 VOP3 869/870: masked bit counts into a VGPR (mask, accumulator).
 		case 0x365:
-			// v_bcnt_i32_b32: count src0 bits differing from the sign bit, plus src1.
-			inst.type    = ShaderInstructionType::VBcntI32B32;
+			inst.type    = ShaderInstructionType::VMbcntLoU32B32;
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
 			break;
 		case 0x366:
-			// v_mbcnt_lo_u32_b32: SGPR dst; two sources, exec mask + accumulator.
-			inst.type    = ShaderInstructionType::VMbcntLoU32B32;
-			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
-			inst.src_num = 2;
-			inst.dst     = operand_parse(vdst);
-			break;
-		case 0x367:
-			// v_mbcnt_hi_u32_b32: SGPR dst; two sources, exec mask + accumulator.
 			inst.type    = ShaderInstructionType::VMbcntHiU32B32;
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
-			inst.dst     = operand_parse(vdst);
 			break;
 		case 0x36D: inst.type = ShaderInstructionType::VAdd3U32; break;
 		case 0x36F: inst.type = ShaderInstructionType::VLshlOrB32; break;
