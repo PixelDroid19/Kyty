@@ -17,9 +17,23 @@ struct GraphicContext;
 // device addresses. The table starts with kGuestDeviceAddressNullBytes of
 // zeros, the target of any unmapped guest address, followed by entries of
 // eight dwords:
-//   {guest_base_lo, guest_base_hi, size_lo, size_hi, device_lo, device_hi, 0, 0}
+//   {guest_base_lo, guest_base_hi, size_lo, size_hi, device_lo, device_hi, span_lo, span_hi}
+// `size` is the guest byte count. `span` is the imported byte count: `size`,
+// plus one page when the backing continues, so a load may finish in that page.
 constexpr uint32_t kGuestDeviceAddressEntryDwords = 8;
 constexpr uint32_t kGuestDeviceAddressNullBytes   = 256;
+
+// A load of `bytes` at `offset` into a chunk matches only when it starts in
+// the guest `size` and ends inside the imported `span`. An access that would
+// walk off the allocation misses, instead of faulting the device.
+[[nodiscard]] constexpr bool GuestDeviceAddressAccessFits(uint64_t size, uint64_t span, uint64_t offset, uint64_t bytes)
+{
+	if (bytes == 0 || offset >= size || offset >= span || bytes > span - offset)
+	{
+		return false;
+	}
+	return true;
+}
 
 // Bookkeeping only; safe to call from the kernel mapping path.
 void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size);

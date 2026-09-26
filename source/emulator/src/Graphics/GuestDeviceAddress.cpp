@@ -309,8 +309,7 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 			const uint32_t entry[kGuestDeviceAddressEntryDwords] = {static_cast<uint32_t>(chunk.guest), static_cast<uint32_t>(chunk.guest >> 32u),
 			                                                        static_cast<uint32_t>(chunk.size),  static_cast<uint32_t>(chunk.size >> 32u),
 			                                                        static_cast<uint32_t>(chunk.device), static_cast<uint32_t>(chunk.device >> 32u),
-			                                                        0,
-			                                                        0};
+			                                                        static_cast<uint32_t>(chunk.span),  static_cast<uint32_t>(chunk.span >> 32u)};
 			words.insert(words.end(), entry, entry + kGuestDeviceAddressEntryDwords);
 		}
 	}

@@ -26,7 +26,7 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 %_ptr_PhysicalStorageBuffer_uint = OpTypePointer PhysicalStorageBuffer %uint
 %_ptr_Function_ulong_gda = OpTypePointer Function %ulong
 %_ptr_Function_uint_gda = OpTypePointer Function %uint
-%function_ul_ul = OpTypeFunction %ulong %ulong
+%function_gda = OpTypeFunction %ulong %ulong %ulong
 )";
 	for (uint32_t offset = 0; offset <= kMaxLoadBytes; offset += 4)
 	{
@@ -36,13 +36,15 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 	return types;
 }
 
-// ulong guest_device_address(ulong guest): device address of `guest`, or the
-// table's zero prefix when no imported range contains it.
+// ulong guest_device_address(ulong guest, ulong bytes): device address of
+// `guest`, or the table's zero prefix when no imported range contains the
+// whole access (GuestDeviceAddressAccessFits).
 String8 Spirv::GuestDeviceAddressFunction() const
 {
 	static const char* text = R"(
-%guest_device_address = OpFunction %ulong DontInline %function_ul_ul
+%guest_device_address = OpFunction %ulong DontInline %function_gda
 %gda_addr = OpFunctionParameter %ulong
+%gda_bytes = OpFunctionParameter %ulong
 %gda_entry = OpLabel
 %gda_i = OpVariable %_ptr_Function_uint_gda Function
 %gda_result = OpVariable %_ptr_Function_ulong_gda Function
@@ -74,8 +76,14 @@ OpBranchConditional %gda_more %gda_body %gda_merge
 <load64 base 0>
 <load64 size 8>
 <load64 dev 16>
+<load64 span 24>
 %gda_rel = OpISub %ulong %gda_addr %gda_base
-%gda_inside = OpULessThan %bool %gda_rel %gda_size
+%gda_started = OpULessThan %bool %gda_rel %gda_size
+%gda_inspan = OpULessThan %bool %gda_rel %gda_span
+%gda_room = OpISub %ulong %gda_span %gda_rel
+%gda_fit = OpUGreaterThanEqual %bool %gda_room %gda_bytes
+%gda_end_ok = OpLogicalAnd %bool %gda_inspan %gda_fit
+%gda_inside = OpLogicalAnd %bool %gda_started %gda_end_ok
 OpSelectionMerge %gda_skip None
 OpBranchConditional %gda_inside %gda_hit %gda_skip
 %gda_hit = OpLabel
@@ -112,6 +120,7 @@ OpFunctionEnd
 	    .ReplaceStr("<load64 base 0>", load64("base", 0))
 	    .ReplaceStr("<load64 size 8>", load64("size", 8))
 	    .ReplaceStr("<load64 dev 16>", load64("dev", 16))
+	    .ReplaceStr("<load64 span 24>", load64("span", 24))
 	    .ReplaceStr("<ptr>", m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint")
 	    .ReplaceStr("<block>", GetConstantInt(static_cast<int>(m_bind->device_address_offset_dw / 4u)));
 }
@@ -129,8 +138,8 @@ bool Spirv::EmitGuestLoad(const String8& lo, const String8& hi, int dwords, cons
 	                               "%%%s_hi64 = OpUConvert %%ulong %%%s\n"
 	                               "%%%s_his = OpShiftLeftLogical %%ulong %%%s_hi64 %%uint_32\n"
 	                               "%%%s_guest = OpBitwiseOr %%ulong %%%s_his %%%s_lo64\n"
-	                               "%%%s_device = OpFunctionCall %%ulong %%guest_device_address %%%s_guest\n",
-	                               p, lo.c_str(), p, hi.c_str(), p, p, p, p, p, p, p);
+	                               "%%%s_device = OpFunctionCall %%ulong %%guest_device_address %%%s_guest %%gda_u64_%u\n",
+	                               p, lo.c_str(), p, hi.c_str(), p, p, p, p, p, p, p, static_cast<uint32_t>(dwords) * 4u);
 	for (int word = 0; word < dwords; word++)
 	{
 		*output += String8::FromPrintf("%%%s_a%d = OpIAdd %%ulong %%%s_device %%gda_u64_%d\n"
