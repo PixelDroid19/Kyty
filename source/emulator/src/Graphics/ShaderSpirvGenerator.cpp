@@ -2517,7 +2517,8 @@ void Spirv::WriteFunctions()
 		m_source += FUNC_ADDC;
 	}
 
-	if (m_code.HasAnyOf({ShaderInstructionType::SLshl4AddU32}))
+	if (m_code.HasAnyOf({ShaderInstructionType::SLshl1AddU32, ShaderInstructionType::SLshl2AddU32, ShaderInstructionType::SLshl3AddU32,
+	                     ShaderInstructionType::SLshl4AddU32}))
 	{
 		m_source += FUNC_LSHL_ADD;
 	}

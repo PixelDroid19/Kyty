@@ -195,6 +195,9 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			if (!next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !next_gen condition ignored (continuing)\n"); }
 			inst.type = ShaderInstructionType::SLshl4AddU32;
 			break;
+		case 0x2E: inst.type = ShaderInstructionType::SLshl1AddU32; break;
+		case 0x2F: inst.type = ShaderInstructionType::SLshl2AddU32; break;
+		case 0x30: inst.type = ShaderInstructionType::SLshl3AddU32; break;
 		case 0x32: inst.type = ShaderInstructionType::SPackLlB32B16; break;
 		case 0x33: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_pack_lh_b32_b16 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
