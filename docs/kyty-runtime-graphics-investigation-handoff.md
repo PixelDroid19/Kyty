@@ -347,8 +347,11 @@ against the same correct gameplay capture.
   decodes the RDNA base, stride and record count and reads through guest
   device addressing is valid SPIR-V, but pipeline creation of that compute
   shader grows past 5 GB and does not finish; a branchless form of the same
-  lookup, inlined at the existing call sites, grows past 7 GB. The multi-block
-  lookup already in the tree compiles and still reaches the engine reset.
+  lookup, inlined at the existing call sites, grows past 7 GB. Emitting the
+  load as straight-line arithmetic plus a call to the existing lookup, and
+  leaving the bind-time base as a guest address, also grows past 5 GB once
+  that shader is reached. The multi-block lookup already in the tree compiles
+  and still reaches the engine reset.
   Suggested direction: call that existing lookup from the scalar load without
   adding control flow at the call site, and stop rewriting bind-time
   descriptor bases to slot indices only if every scalar consumer uses the
