@@ -1878,6 +1878,7 @@ struct ShaderComputeInputInfo
 	uint32_t            dispatch_mode      = 0;
 	uint32_t            threads_num[3]     = {0, 0, 0};
 	uint32_t            lds_dwords         = 0;
+	uint32_t            barrier_workspace_dwords = 0;
 	bool                group_id[3]        = {false, false, false};
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;

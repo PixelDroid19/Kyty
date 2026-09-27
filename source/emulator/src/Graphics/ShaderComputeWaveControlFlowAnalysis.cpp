@@ -3,6 +3,20 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+uint32_t ShaderComputeBarrierWorkspaceDwords(const ShaderCode& code, const ShaderComputeWaveLayout& layout)
+{
+	if (layout.strategy != ShaderComputeWaveStrategy::Paired64On32 || !code.HasAnyOf({ShaderInstructionType::SBarrier}))
+	{
+		return 0;
+	}
+	const bool branches = code.HasAnyOf({ShaderInstructionType::SBranch, ShaderInstructionType::SCbranchScc0,
+	                                    ShaderInstructionType::SCbranchScc1, ShaderInstructionType::SCbranchVccz,
+	                                    ShaderInstructionType::SCbranchVccnz, ShaderInstructionType::SCbranchExecz,
+	                                    ShaderInstructionType::SCbranchExecnz});
+	return branches ? layout.waves : 0u;
+}
+
 namespace {
 
 constexpr uint32_t kNoInstruction = UINT32_MAX;

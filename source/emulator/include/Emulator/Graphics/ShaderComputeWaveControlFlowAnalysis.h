@@ -8,6 +8,7 @@
 namespace Kyty::Libs::Graphics {
 
 [[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveControlFlow(const ShaderCode& code);
+[[nodiscard]] uint32_t ShaderComputeBarrierWorkspaceDwords(const ShaderCode& code, const ShaderComputeWaveLayout& layout);
 
 } // namespace Kyty::Libs::Graphics
 

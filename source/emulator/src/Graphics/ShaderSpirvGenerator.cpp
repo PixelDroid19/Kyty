@@ -649,6 +649,10 @@ void Spirv::WriteHeader()
 			}
 			vars.Add("%gl_LocalInvocationID");
 			vars.Add("%gl_WorkGroupID");
+			if (UsesBarrierPhases())
+			{
+				vars.Add("%cf_phase_flags");
+			}
 			header_str = String8(header).ReplaceStr("<Type>", "GLCompute");
 			break;
 		default: KYTY_LOG_DEBUG("WARNING: unknown shader type (continuing)\n"); return;
@@ -1171,6 +1175,8 @@ static const char* compute_types = R"(
 		                .ReplaceStr("<lds_dwords>", String8::FromPrintf("%u", m_cs_input_info->lds_dwords));
 	}
 
+	m_source += BarrierPhaseTypes();
+
 static const char* storage_buffers_types = R"(
                                %buffers_runtimearr_float = OpTypeRuntimeArray %float
                                            %BufferObject = OpTypeStruct %buffers_runtimearr_float
@@ -1512,6 +1518,10 @@ void Spirv::WriteGlobalVariables()
 	{
 		vars.Add("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup");
 	}
+	if (UsesBarrierPhases())
+	{
+		vars.Add("%cf_phase_flags = OpVariable %cf_phase_array_ptr Workgroup");
+	}
 
 	switch (m_code.GetType())
 	{
@@ -1702,6 +1712,10 @@ void Spirv::WriteLocalVariables()
 	m_source += String8(common_vars)
 	                .ReplaceStr("<block_dispatch_variable>",
 	                            UsesBlockDispatch() ? "           %cf_block = OpVariable %_ptr_Function_uint Function\n" : "");
+	if (UsesBarrierPhases())
+	{
+		m_source += "%cf_phase_pending = OpVariable %_ptr_Function_uint Function\n";
+	}
 	if (fragment_tap)
 	{
 		for (uint32_t component = 0; component < 4u; component++)
@@ -2632,7 +2646,8 @@ void Spirv::FindConstants()
 		uint32_t bound = 1;
 		for (const auto& inst: m_code.GetInstructions())
 		{
-			bound += (inst.type == ShaderInstructionType::SEndpgm || Core::EnumName8(inst.type).StartsWith("SCbranch") ||
+			bound += (inst.type == ShaderInstructionType::SEndpgm || inst.type == ShaderInstructionType::SBarrier ||
+			          Core::EnumName8(inst.type).StartsWith("SCbranch") ||
 			          inst.type == ShaderInstructionType::SBranch)
 			             ? 2u
 			             : 0u;
@@ -2642,6 +2657,13 @@ void Spirv::FindConstants()
 			AddConstantUint(id);
 		}
 		AddConstantUint(0xffffffffu);
+	}
+	if (UsesBarrierPhases())
+	{
+		for (uint32_t wave = 0; wave < m_cs_input_info->wave_layout.waves; wave++)
+		{
+			AddConstantUint(wave);
+		}
 	}
 	AddConstantFloat(0.0f);
 	AddConstantFloat(0.5f);

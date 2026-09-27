@@ -326,6 +326,45 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- An isolated Vulkan replay of the first large compute module also reset the
+  render engine without a guest process, HLE, imported guest views, or private
+  resource contents. It used zero-filled synthetic buffers, cleared images,
+  the required subgroup size of 32, and the captured module from the removed
+  table experiment. A sentinel scalar input taking the initial exit completed
+  in 3 ms; zero input lost the device after 647 ms with a timed-out replay job.
+  This localizes that replay failure to shader execution or its synthetic
+  inputs, but does not establish that every later guest instruction has valid
+  inputs or that the driver alone is responsible. The initial scalar buffer
+  load and the block-dispatch selector are already uniform in the driver's
+  intermediate representation; adding a broadcast there has no supporting
+  evidence. A reduced module containing only the first two workgroup barriers
+  and their preceding blocks also reset the engine. A bounded prefix ending
+  after two dispatcher iterations completed in 2 ms and recorded block 2 on
+  the first subgroup and block 3 (the first barrier) on the other three.
+  Removing execution synchronization from those two barriers completed the
+  reduced replay, while retaining subgroup barriers and memory ordering.
+  A phase loop that leaves the per-wave dispatcher at each guest barrier,
+  reconverges the entire host workgroup, and keeps terminated waves participating
+  in the host rendezvous completed the reduced replay in 2 ms and the complete
+  module in 6 ms. Both validated as Vulkan 1.2 SPIR-V. These synthetic controls
+  provide new evidence about barrier placement across loop iterations; the
+  earlier scope changes and software waits did not test this lowering. The
+  production generator now splits at each guest barrier and emits that phase
+  rendezvous, with one shared status word per guest wave and a host shared-memory
+  admission check. Its generated first module also completed the zero replay
+  in 7 ms. The affected executable built with two jobs, and all 18 emitted
+  modules in the strict run validated. That run still reset the same sequence-54
+  fence after 652 ms, exited with status 65, and presented zero frames. This is
+  a corrected host convergence contract, not resolution of the guest reset.
+  Translator identity 51 identifies the phase lowering. Investigate the later
+  executed paths and runtime descriptor interpretation next.
+
+- Recorded, not yet fixed: `Objects/StorageTexture.cpp:496` formats a 32-bit
+  swizzle argument with `PRIx64` when rejecting an unsupported swizzle. The
+  local build reports a format/type mismatch. Use a matching 32-bit format or
+  an explicit 64-bit argument so that this failure diagnostic has defined
+  behavior on each host ABI.
+
 - Replacing the binary search with a three-level, page-indexed address table
   did not clear the compute reset. The generated modules passed Vulkan 1.2
   SPIR-V validation; address lookup loops were gone, but the three large

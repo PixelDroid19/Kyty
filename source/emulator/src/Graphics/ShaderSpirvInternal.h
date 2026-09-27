@@ -118,6 +118,9 @@ public:
 	                                                     uint32_t index, String8* output);
 	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
 	[[nodiscard]] bool    UsesBlockDispatch() const;
+	[[nodiscard]] bool    UsesBarrierPhases() const;
+	[[nodiscard]] String8 BarrierPhaseTypes() const;
+	[[nodiscard]] String8 BarrierPhaseJoin() const;
 	void                  BuildBlockDispatch();
 	[[nodiscard]] int     BlockId(uint32_t pc) const;
 	[[nodiscard]] String8 BlockDispatchProlog() const;

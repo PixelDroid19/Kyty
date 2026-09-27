@@ -1,5 +1,7 @@
 #include "ShaderSpirvInternal.h"
 
+#include "Emulator/Graphics/ShaderComputeWaveControlFlowAnalysis.h"
+
 #include <algorithm>
 
 #ifdef KYTY_EMU_ENABLED
@@ -26,7 +28,7 @@ bool IsGuestBranch(ShaderInstructionType type)
 
 bool EndsBlock(ShaderInstructionType type)
 {
-	return IsGuestBranch(type) || type == ShaderInstructionType::SEndpgm;
+	return IsGuestBranch(type) || type == ShaderInstructionType::SEndpgm || type == ShaderInstructionType::SBarrier;
 }
 
 uint32_t BranchTarget(const ShaderInstruction& inst)
@@ -54,6 +56,24 @@ bool Spirv::UsesBlockDispatch() const
 		}
 	}
 	return false;
+}
+
+bool Spirv::UsesBarrierPhases() const
+{
+	return UsesComputeWaveBanks() && ShaderComputeBarrierWorkspaceDwords(m_code, m_cs_input_info->wave_layout) != 0u;
+}
+
+String8 Spirv::BarrierPhaseTypes() const
+{
+	if (!UsesBarrierPhases())
+	{
+		return {};
+	}
+	return String8::FromPrintf("%%cf_phase_waves = OpConstant %%uint %u\n"
+	                           "%%cf_phase_array = OpTypeArray %%uint %%cf_phase_waves\n"
+	                           "%%cf_phase_array_ptr = OpTypePointer Workgroup %%cf_phase_array\n"
+	                           "%%cf_phase_word_ptr = OpTypePointer Workgroup %%uint\n",
+	                           m_cs_input_info->wave_layout.waves);
 }
 
 void Spirv::BuildBlockDispatch()
@@ -104,7 +124,16 @@ String8 Spirv::BlockDispatchProlog() const
 	{
 		cases += String8::FromPrintf(" %u %%cf_block_%u", static_cast<uint32_t>(id), static_cast<uint32_t>(id));
 	}
-	return String8::FromPrintf("OpStore %%cf_block %%uint_0\nOpBranch %%cf_header\n%%cf_header = OpLabel\n"
+	String8 source = "OpStore %cf_block %uint_0\n";
+	if (UsesBarrierPhases())
+	{
+		// Different guest waves can reach s_barrier on different dispatcher
+		// iterations. Reconverge the workgroup outside that loop before waiting.
+		source += "OpBranch %cf_phase_header\n%cf_phase_header = OpLabel\n"
+		          "OpLoopMerge %cf_phase_merge %cf_phase_continue None\nOpBranch %cf_phase_start\n"
+		          "%cf_phase_start = OpLabel\nOpStore %cf_phase_pending %uint_0\n";
+	}
+	return source + String8::FromPrintf("OpBranch %%cf_header\n%%cf_header = OpLabel\n"
 	                           "OpLoopMerge %%cf_merge %%cf_continue None\nOpBranch %%cf_dispatch\n%%cf_dispatch = OpLabel\n"
 	                           "%%cf_current = OpLoad %%uint %%cf_block\nOpSelectionMerge %%cf_switch_merge None\n"
 	                           "OpSwitch %%cf_current %%cf_switch_merge%s\n",
@@ -141,6 +170,19 @@ bool Spirv::BlockDispatchControl(const ShaderInstruction& inst, uint32_t index, 
 	if (inst.type == ShaderInstructionType::SEndpgm)
 	{
 		*output += String8::FromPrintf("OpStore %%cf_block %%%s\nOpBranch %%cf_switch_merge\n", GetConstantUint(kExitBlock).c_str());
+		return true;
+	}
+	if (inst.type == ShaderInstructionType::SBarrier)
+	{
+		const auto& instructions = m_code.GetInstructions();
+		const int next = index + 1 < instructions.Size() ? BlockId(instructions.At(index + 1).pc) : -1;
+		EXIT_IF(!UsesBarrierPhases());
+		if (next < 0)
+		{
+			EXIT("paired-wave barrier has no resumable instruction: pc=0x%08x\n", inst.pc);
+		}
+		*output += String8::FromPrintf("OpStore %%cf_block %%%s\nOpStore %%cf_phase_pending %%uint_1\n"
+		                               "OpBranch %%cf_switch_merge\n", GetConstantUint(static_cast<uint32_t>(next)).c_str());
 		return true;
 	}
 	const int target = BlockId(BranchTarget(inst));
@@ -196,6 +238,40 @@ bool Spirv::BlockDispatchControl(const ShaderInstruction& inst, uint32_t index, 
 	return true;
 }
 
+String8 Spirv::BarrierPhaseJoin() const
+{
+	String8 source = R"(
+%cf_phase_current = OpLoad %uint %cf_block
+%cf_phase_is_done = OpIEqual %bool %cf_phase_current %uint_0xffffffff
+%cf_phase_done_word = OpSelect %uint %cf_phase_is_done %uint_1 %uint_0
+%cf_phase_leader = OpIEqual %bool %wave_lane_id %uint_0
+OpSelectionMerge %cf_phase_flags_written None
+OpBranchConditional %cf_phase_leader %cf_phase_write_flag %cf_phase_flags_written
+%cf_phase_write_flag = OpLabel
+%cf_phase_flag_ptr = OpAccessChain %cf_phase_word_ptr %cf_phase_flags %wave_subgroup_id
+OpStore %cf_phase_flag_ptr %cf_phase_done_word
+OpBranch %cf_phase_flags_written
+%cf_phase_flags_written = OpLabel
+OpControlBarrier %uint_2 %uint_2 %uint_0x00000108
+)";
+	String8 all = "%uint_1";
+	for (uint32_t wave = 0; wave < m_cs_input_info->wave_layout.waves; wave++)
+	{
+		source += String8::FromPrintf("%%cf_phase_read_ptr_%u = OpAccessChain %%cf_phase_word_ptr %%cf_phase_flags %%%s\n"
+		                             "%%cf_phase_read_%u = OpLoad %%uint %%cf_phase_read_ptr_%u\n"
+		                             "%%cf_phase_all_%u = OpBitwiseAnd %%uint %s %%cf_phase_read_%u\n",
+		                             wave, GetConstantUint(wave).c_str(), wave, wave, wave, all.c_str(), wave);
+		all = String8::FromPrintf("%%cf_phase_all_%u", wave);
+	}
+	// Every wave reads this generation before a fast wave can overwrite it.
+	source += String8::FromPrintf("%%cf_phase_all_done = OpINotEqual %%bool %s %%uint_0\n"
+	                              "OpControlBarrier %%uint_2 %%uint_2 %%uint_0x00000108\n"
+	                              "OpBranch %%cf_phase_continue\n%%cf_phase_continue = OpLabel\n"
+	                              "OpBranchConditional %%cf_phase_all_done %%cf_phase_merge %%cf_phase_header\n"
+	                              "%%cf_phase_merge = OpLabel\nOpReturn\n", all.c_str());
+	return source;
+}
+
 String8 Spirv::BlockDispatchEpilog() const
 {
 	String8 source;
@@ -204,9 +280,19 @@ String8 Spirv::BlockDispatchEpilog() const
 		source += String8::FromPrintf("OpStore %%cf_block %%%s\nOpBranch %%cf_switch_merge\n", GetConstantUint(kExitBlock).c_str());
 	}
 	source += String8::FromPrintf("%%cf_switch_merge = OpLabel\nOpBranch %%cf_continue\n%%cf_continue = OpLabel\n"
-	                              "%%cf_after = OpLoad %%uint %%cf_block\n%%cf_done = OpIEqual %%bool %%cf_after %%%s\n"
-	                              "OpBranchConditional %%cf_done %%cf_merge %%cf_header\n%%cf_merge = OpLabel\nOpReturn\n",
+	                              "%%cf_after = OpLoad %%uint %%cf_block\n%%cf_ended = OpIEqual %%bool %%cf_after %%%s\n",
 	                              GetConstantUint(kExitBlock).c_str());
+	if (UsesBarrierPhases())
+	{
+		source += "%cf_phase_pending_value = OpLoad %uint %cf_phase_pending\n"
+		          "%cf_phase_waiting = OpINotEqual %bool %cf_phase_pending_value %uint_0\n"
+		          "%cf_done = OpLogicalOr %bool %cf_ended %cf_phase_waiting\n";
+	} else
+	{
+		source += "%cf_done = OpCopyObject %bool %cf_ended\n";
+	}
+	source += "OpBranchConditional %cf_done %cf_merge %cf_header\n%cf_merge = OpLabel\n";
+	source += UsesBarrierPhases() ? BarrierPhaseJoin() : String8("OpReturn\n");
 	return source;
 }
 
