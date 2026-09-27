@@ -351,11 +351,23 @@ against the same correct gameplay capture.
   load as straight-line arithmetic plus a call to the existing lookup, and
   leaving the bind-time base as a guest address, also grows past 5 GB once
   that shader is reached. The multi-block lookup already in the tree compiles
-  and still reaches the engine reset.
-  Suggested direction: call that existing lookup from the scalar load without
-  adding control flow at the call site, and stop rewriting bind-time
-  descriptor bases to slot indices only if every scalar consumer uses the
-  lookup. Do not add another per-load selection.
+  and still reaches the engine reset. Calling that lookup from only the
+  scalar loads whose base is built by scalar ALU, with no per-load bounds
+  select, also fails to finish pipeline creation: the process stays
+  CPU-bound, peaks near 8 GB, and the guest log stops at resident load with
+  no engine reset. Vulkan compute inlines every function, so each new call
+  duplicates the lookup into the dispatcher. Do not add further calls to
+  that lookup in this shader.
+  Enabling robustBufferAccess2 and robustImageAccess2 on the device still
+  resets the engine at the same fence (sequence 54, kernel seqno 165). A
+  defined-zero descriptor or image miss, as that feature implements it, is
+  not this hang. Requiring the device-address load to end inside the guest
+  byte count, rather than the imported span, also still resets that fence.
+  An access that only overruns the guest size is excluded.
+  Suggested direction: this host's default storage-buffer robustness is
+  disabled unless the pipeline requests it. Request robust buffer and image
+  access on the pipeline before treating an out-of-range buffer index as
+  excluded. Do not add another copy of the address lookup.
 - Recorded, not yet fixed: `ShaderSpirvGenerator.cpp` exits at a vertex
   `s_getpc_b64` (`stage=1 instruction=474 format=0x8 pc=0x5c`) once the
   device-address dispatches are skipped. The compute emitter refuses a
