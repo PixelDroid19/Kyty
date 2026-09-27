@@ -341,6 +341,18 @@ against the same correct gameplay capture.
   with a per-access selection did not produce a finished pipeline within the
   run limit (the process stayed CPU-bound, with no engine reset); that
   attempt was reverted and does not clear an out-of-range LDS index.
+  Scalar loads whose descriptor base is a guest address, not a bind-time slot
+  index, use that word as a storage-buffer index and fault the device
+  (`ShaderSpirvBuffer.cpp`, the `sbuffer_load_dword*` helpers). A helper that
+  decodes the RDNA base, stride and record count and reads through guest
+  device addressing is valid SPIR-V, but pipeline creation of that compute
+  shader grows past 5 GB and does not finish; a branchless form of the same
+  lookup, inlined at the existing call sites, grows past 7 GB. The multi-block
+  lookup already in the tree compiles and still reaches the engine reset.
+  Suggested direction: call that existing lookup from the scalar load without
+  adding control flow at the call site, and stop rewriting bind-time
+  descriptor bases to slot indices only if every scalar consumer uses the
+  lookup. Do not add another per-load selection.
 - Recorded, not yet fixed: `ShaderSpirvGenerator.cpp` exits at a vertex
   `s_getpc_b64` (`stage=1 instruction=474 format=0x8 pc=0x5c`) once the
   device-address dispatches are skipped. The compute emitter refuses a

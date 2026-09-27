@@ -308,9 +308,11 @@ the paired allowlist. No presentation, input or gameplay state is claimed.
   `vkWaitForFences` result -4, sequence 54). Excluded in
   `docs/kyty-runtime-graphics-investigation-handoff.md`: an infinite block
   dispatcher, a device-address load that merely overruns its imported span,
-  and `s_barrier` scope. Skipping those dispatches reaches a vertex
-  `s_getpc_b64` with no compute program base
-  (`ShaderSpirvProgramAddress.cpp`). Not gameplay.
+  and `s_barrier` scope. A scalar load whose descriptor base is a guest
+  address still indexes the storage-buffer array with that word; decoding the
+  descriptor in a per-load helper is valid SPIR-V but pipeline creation does
+  not finish. Skipping those dispatches reaches a vertex `s_getpc_b64` with
+  no compute program base (`ShaderSpirvProgramAddress.cpp`). Not gameplay.
 
 Recorded, not yet fixed:
 - `source/emulator/src/Graphics/ShaderParse*.cpp` still map about 600 opcodes
