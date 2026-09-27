@@ -38,7 +38,10 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 
 // ulong guest_device_address(ulong guest, ulong bytes): device address of
 // `guest`, or the table's zero prefix when no imported range contains the
-// whole access (GuestDeviceAddressAccessFits).
+// whole access (GuestDeviceAddressAccessFits). Entries are sorted by guest
+// base, so a binary search finds the only candidate: the last entry whose
+// base is not above `guest`. A linear scan made each load cost hundreds of
+// table reads, enough for a large dispatch to outlast GPU preemption.
 String8 Spirv::GuestDeviceAddressFunction() const
 {
 	static const char* text = R"(
@@ -46,8 +49,8 @@ String8 Spirv::GuestDeviceAddressFunction() const
 %gda_addr = OpFunctionParameter %ulong
 %gda_bytes = OpFunctionParameter %ulong
 %gda_entry = OpLabel
-%gda_i = OpVariable %_ptr_Function_uint_gda Function
-%gda_result = OpVariable %_ptr_Function_ulong_gda Function
+%gda_lo_v = OpVariable %_ptr_Function_uint_gda Function
+%gda_hi_v = OpVariable %_ptr_Function_uint_gda Function
 %gda_tlo_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_0
 %gda_thi_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_1
 %gda_cnt_p = OpAccessChain %<ptr> %vsharp %int_0 %<block> %int_2
@@ -59,52 +62,62 @@ String8 Spirv::GuestDeviceAddressFunction() const
 %gda_this = OpShiftLeftLogical %ulong %gda_thi64 %uint_32
 %gda_table = OpBitwiseOr %ulong %gda_this %gda_tlo64
 %gda_entries = OpIAdd %ulong %gda_table %gda_u64_null
-OpStore %gda_i %uint_0
-OpStore %gda_result %gda_table
+OpStore %gda_lo_v %uint_0
+OpStore %gda_hi_v %gda_count
 OpBranch %gda_header
 %gda_header = OpLabel
 OpLoopMerge %gda_merge %gda_continue None
 OpBranch %gda_cond
 %gda_cond = OpLabel
-%gda_iv = OpLoad %uint %gda_i
-%gda_more = OpULessThan %bool %gda_iv %gda_count
+%gda_lo = OpLoad %uint %gda_lo_v
+%gda_hi = OpLoad %uint %gda_hi_v
+%gda_more = OpULessThan %bool %gda_lo %gda_hi
 OpBranchConditional %gda_more %gda_body %gda_merge
 %gda_body = OpLabel
-%gda_off = OpIMul %uint %gda_iv %uint_32
+%gda_sum = OpIAdd %uint %gda_lo %gda_hi
+%gda_mid = OpShiftRightLogical %uint %gda_sum %uint_1
+%gda_moff = OpIMul %uint %gda_mid %uint_32
+%gda_moff64 = OpUConvert %ulong %gda_moff
+%gda_m = OpIAdd %ulong %gda_entries %gda_moff64
+<load64 mbase m 0>
+%gda_below = OpULessThanEqual %bool %gda_mbase %gda_addr
+%gda_mid1 = OpIAdd %uint %gda_mid %uint_1
+%gda_lo_n = OpSelect %uint %gda_below %gda_mid1 %gda_lo
+%gda_hi_n = OpSelect %uint %gda_below %gda_hi %gda_mid
+OpStore %gda_lo_v %gda_lo_n
+OpStore %gda_hi_v %gda_hi_n
+OpBranch %gda_continue
+%gda_continue = OpLabel
+OpBranch %gda_header
+%gda_merge = OpLabel
+%gda_found = OpLoad %uint %gda_lo_v
+%gda_any = OpINotEqual %bool %gda_found %uint_0
+%gda_pick = OpISub %uint %gda_found %uint_1
+%gda_idx = OpSelect %uint %gda_any %gda_pick %uint_0
+%gda_off = OpIMul %uint %gda_idx %uint_32
 %gda_off64 = OpUConvert %ulong %gda_off
 %gda_e = OpIAdd %ulong %gda_entries %gda_off64
-<load64 base 0>
-<load64 size 8>
-<load64 dev 16>
-<load64 span 24>
+<load64 base e 0>
+<load64 size e 8>
+<load64 dev e 16>
+<load64 span e 24>
 %gda_rel = OpISub %ulong %gda_addr %gda_base
 %gda_started = OpULessThan %bool %gda_rel %gda_size
 %gda_inspan = OpULessThan %bool %gda_rel %gda_span
 %gda_room = OpISub %ulong %gda_span %gda_rel
 %gda_fit = OpUGreaterThanEqual %bool %gda_room %gda_bytes
 %gda_end_ok = OpLogicalAnd %bool %gda_inspan %gda_fit
-%gda_inside = OpLogicalAnd %bool %gda_started %gda_end_ok
-OpSelectionMerge %gda_skip None
-OpBranchConditional %gda_inside %gda_hit %gda_skip
-%gda_hit = OpLabel
+%gda_inside0 = OpLogicalAnd %bool %gda_started %gda_end_ok
+%gda_inside = OpLogicalAnd %bool %gda_inside0 %gda_any
 %gda_device = OpIAdd %ulong %gda_dev %gda_rel
-OpStore %gda_result %gda_device
-OpBranch %gda_merge
-%gda_skip = OpLabel
-OpBranch %gda_continue
-%gda_continue = OpLabel
-%gda_next = OpIAdd %uint %gda_iv %uint_1
-OpStore %gda_i %gda_next
-OpBranch %gda_header
-%gda_merge = OpLabel
-%gda_ret = OpLoad %ulong %gda_result
+%gda_ret = OpSelect %ulong %gda_inside %gda_device %gda_table
 OpReturnValue %gda_ret
 OpFunctionEnd
 )";
-	auto load64 = [](const char* name, uint32_t offset)
+	auto load64 = [](const char* name, const char* entry, uint32_t offset)
 	{
-		return String8::FromPrintf("%%gda_%s_a0 = OpIAdd %%ulong %%gda_e %%gda_u64_%u\n"
-		                           "%%gda_%s_a1 = OpIAdd %%ulong %%gda_e %%gda_u64_%u\n"
+		return String8::FromPrintf("%%gda_%s_a0 = OpIAdd %%ulong %%gda_%s %%gda_u64_%u\n"
+		                           "%%gda_%s_a1 = OpIAdd %%ulong %%gda_%s %%gda_u64_%u\n"
 		                           "%%gda_%s_p0 = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_uint %%gda_%s_a0\n"
 		                           "%%gda_%s_p1 = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_uint %%gda_%s_a1\n"
 		                           "%%gda_%s_lo = OpLoad %%uint %%gda_%s_p0 Aligned 4\n"
@@ -113,14 +126,15 @@ OpFunctionEnd
 		                           "%%gda_%s_hi64 = OpUConvert %%ulong %%gda_%s_hi\n"
 		                           "%%gda_%s_his = OpShiftLeftLogical %%ulong %%gda_%s_hi64 %%uint_32\n"
 		                           "%%gda_%s = OpBitwiseOr %%ulong %%gda_%s_his %%gda_%s_lo64\n",
-		                           name, offset, name, offset + 4, name, name, name, name, name, name, name, name, name, name, name, name,
-		                           name, name, name, name, name);
+		                           name, entry, offset, name, entry, offset + 4, name, name, name, name, name, name, name, name, name, name,
+		                           name, name, name, name, name, name, name);
 	};
 	return String8(text)
-	    .ReplaceStr("<load64 base 0>", load64("base", 0))
-	    .ReplaceStr("<load64 size 8>", load64("size", 8))
-	    .ReplaceStr("<load64 dev 16>", load64("dev", 16))
-	    .ReplaceStr("<load64 span 24>", load64("span", 24))
+	    .ReplaceStr("<load64 mbase m 0>", load64("mbase", "m", 0))
+	    .ReplaceStr("<load64 base e 0>", load64("base", "e", 0))
+	    .ReplaceStr("<load64 size e 8>", load64("size", "e", 8))
+	    .ReplaceStr("<load64 dev e 16>", load64("dev", "e", 16))
+	    .ReplaceStr("<load64 span e 24>", load64("span", "e", 24))
 	    .ReplaceStr("<ptr>", m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint")
 	    .ReplaceStr("<block>", GetConstantInt(static_cast<int>(m_bind->device_address_offset_dw / 4u)));
 }

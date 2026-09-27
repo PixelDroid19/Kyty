@@ -301,17 +301,24 @@ bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* chan
 // next quiesced release because in-flight work may still read it.
 bool RebuildTable(GraphicContext* ctx, Registry* registry)
 {
-	std::vector<uint32_t> words(kGuestDeviceAddressNullBytes / 4u, 0u);
+	// The device lookup binary-searches entries by guest base.
+	std::vector<const Chunk*> sorted;
 	for (const auto& [base, range]: registry->ranges)
 	{
 		for (const auto& chunk: range.chunks)
 		{
-			const uint32_t entry[kGuestDeviceAddressEntryDwords] = {static_cast<uint32_t>(chunk.guest), static_cast<uint32_t>(chunk.guest >> 32u),
-			                                                        static_cast<uint32_t>(chunk.size),  static_cast<uint32_t>(chunk.size >> 32u),
-			                                                        static_cast<uint32_t>(chunk.device), static_cast<uint32_t>(chunk.device >> 32u),
-			                                                        static_cast<uint32_t>(chunk.span),  static_cast<uint32_t>(chunk.span >> 32u)};
-			words.insert(words.end(), entry, entry + kGuestDeviceAddressEntryDwords);
+			sorted.push_back(&chunk);
 		}
+	}
+	std::sort(sorted.begin(), sorted.end(), [](const Chunk* a, const Chunk* b) { return a->guest < b->guest; });
+	std::vector<uint32_t> words(kGuestDeviceAddressNullBytes / 4u, 0u);
+	for (const auto* chunk: sorted)
+	{
+		const uint32_t entry[kGuestDeviceAddressEntryDwords] = {static_cast<uint32_t>(chunk->guest), static_cast<uint32_t>(chunk->guest >> 32u),
+		                                                        static_cast<uint32_t>(chunk->size),  static_cast<uint32_t>(chunk->size >> 32u),
+		                                                        static_cast<uint32_t>(chunk->device), static_cast<uint32_t>(chunk->device >> 32u),
+		                                                        static_cast<uint32_t>(chunk->span),  static_cast<uint32_t>(chunk->span >> 32u)};
+		words.insert(words.end(), entry, entry + kGuestDeviceAddressEntryDwords);
 	}
 	const uint64_t bytes  = words.size() * 4u;
 	Table          table;
