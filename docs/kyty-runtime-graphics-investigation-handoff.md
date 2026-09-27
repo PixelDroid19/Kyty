@@ -326,6 +326,28 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Replacing the binary search with a three-level, page-indexed address table
+  did not clear the compute reset. The generated modules passed Vulkan 1.2
+  SPIR-V validation; address lookup loops were gone, but the three large
+  SIMD32 programs still compiled to 173,387 / 187,933 / 205,099 instructions,
+  with 7,472 / 8,055 / 8,921 spills and 21,585 / 23,668 / 26,184 fills. The
+  strict Silent run reached the same sequence-54 fence, failed with result -4
+  after 646 ms, and logged a render-engine reset and timed-out job. The table
+  rewrite was removed. This excludes search-loop removal alone as sufficient;
+  it does not exclude register pressure elsewhere in the dispatcher. Translator
+  identity 50 was used by this removed experiment and must not be reused for
+  a different lowering. The next observation should isolate the actual shader
+  execution or the register-state traffic before another address-table change.
+
+- Recorded, not yet fixed: `GraphicsRunOpParsers.cpp:1284` calls a null
+  direct SH-register handler after `SET_SH_REG` writes two registers starting
+  at `SPI_SHADER_USER_DATA_ADDR_LO_GS` (0x82). A bounded debugger run with
+  device-address dispatches skipped stops at PC zero in the host parser, not
+  in a guest HLE callback. The suggested direction is to decode the evidenced
+  stage-data address through the same SH decoder for direct and indirect
+  packets, and reject unsupported registers before calling a handler. This
+  diagnostic route is not strict runtime or gameplay acceptance.
+
 - A block-dispatcher iteration cap of 67 still lost the device on the
   device-addressed ray-tracing dispatches (`Engine reset engine_class=rcs`,
   `Timedout job`, `vkWaitForFences` result -4). An infinite dispatcher loop is
