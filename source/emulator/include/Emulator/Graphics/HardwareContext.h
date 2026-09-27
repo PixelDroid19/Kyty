@@ -645,6 +645,11 @@ struct VertexShaderInfo
 	VsStageRegisters vs_regs;
 	EsStageRegisters es_regs;
 	GsStageRegisters gs_regs;
+	// SPI_SHADER_PGM_{LO,HI}_GS of a fused NGG pair: the back half's entry.
+	// The front's terminal s_setpc reaches it through the continuation
+	// registry, so it is kept apart from gs_regs, whose zero base selects the
+	// ES-as-VS path.
+	uint64_t         gs_back_addr       = 0;
 	uint32_t         vs_shader_modifier = 0;
 	uint32_t         vs_embedded_id     = 0;
 	UserSgprInfo     vs_user_sgpr;
@@ -974,6 +979,8 @@ public:
 		m_vs.vs_shader_modifier = shader_modifier;
 		m_vs.vs_embedded        = true;
 	}
+	void SetGsBackBase(uint64_t addr) { m_vs.gs_back_addr = addr; }
+	[[nodiscard]] uint64_t GetGsBackBase() const { return m_vs.gs_back_addr; }
 	void SetEsShaderBase(uint64_t addr)
 	{
 		m_vs.es_regs.data_addr = addr;

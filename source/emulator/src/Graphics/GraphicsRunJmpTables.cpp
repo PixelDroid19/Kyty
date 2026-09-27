@@ -727,6 +727,22 @@ static void graphics_init_jmp_tables_sh_indirect()
 		cp->GetShCtx()->SetEsShaderBase(base);
 	};
 
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_LO_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{
+		auto base = cp->GetShCtx()->GetGsBackBase();
+		base &= 0xFFFFFF00000000FFull;
+		base |= static_cast<uint64_t>(value) << 8u;
+		cp->GetShCtx()->SetGsBackBase(base);
+	};
+
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_HI_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{
+		auto base = cp->GetShCtx()->GetGsBackBase();
+		base &= 0xFFFF00FFFFFFFFFFull;
+		base |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
+		cp->GetShCtx()->SetGsBackBase(base);
+	};
+
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_CHKSUM_GS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetGsShaderChksum(value); };
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC3_GS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetGsRsrc3(value); };
 
