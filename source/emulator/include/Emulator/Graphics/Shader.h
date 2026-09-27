@@ -982,8 +982,13 @@ public:
 	void                   SetCrc32(uint32_t c) { this->m_crc32 = c; }
 	[[nodiscard]] uint32_t GetHash0() const { return m_hash0; }
 	void                   SetHash0(uint32_t h) { this->m_hash0 = h; }
+	// First PC of an appended continuation; earlier PCs are offsets from the
+	// program's own base address.
+	[[nodiscard]] uint32_t GetContinuationPc() const { return m_continuation_pc; }
+	void                   SetContinuationPc(uint32_t pc) { m_continuation_pc = pc; }
 
 private:
+	uint32_t                  m_continuation_pc = UINT32_MAX;
 	uint32_t                  m_hash0 = 0;
 	uint32_t                  m_crc32 = 0;
 	Vector<ShaderInstruction> m_instructions;

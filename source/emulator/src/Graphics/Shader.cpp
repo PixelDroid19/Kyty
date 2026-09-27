@@ -895,6 +895,7 @@ enum class ShaderContinuationMode : uint8_t
 };
 
 static void ShaderParseMappedLocked(uint64_t shader_addr, ShaderCode* code, ShaderContinuationMode continuation_mode);
+static bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind);
 static void ShaderParseMapped(uint64_t shader_addr, ShaderCode* code,
 	                          ShaderContinuationMode continuation_mode = ShaderContinuationMode::None);
 
@@ -943,6 +944,7 @@ static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
 	// back PC is shifted by the same constant.
 	const uint32_t pc_offset       = front_max_pc + 16u;
 	const uint32_t back_entry_pc   = back.GetInstructions().At(0).pc + pc_offset;
+	code->SetContinuationPc(pc_offset);
 
 	for (auto& inst: back.GetInstructions())
 	{
@@ -2724,6 +2726,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		if (vs_isa != nullptr)
 		{
 			ShaderAssociateSampledTextureSamplers(*vs_isa, &info->bind, kGen5GsFrontUserDataBase);
+			// Constant tables embedded after the code are addressed from GETPC;
+			// the base stays runtime data so a cached pipeline can relocate.
+			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});
+			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
+			info->bind.device_address_used = ShaderHasUnboundBufferLoad(*vs_isa, info->bind);
 		}
 	} else
 	{
@@ -2967,8 +2974,33 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 
 // Instructions that dereference guest memory through a computed address: BVH
 // traversal, and scalar loads whose base is not the mapped extended pointer.
+// A vector buffer load whose V# register range is not a bound storage buffer
+// reads through a descriptor built at run time.
+static bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (!Core::EnumName8(inst.type).StartsWith("BufferLoad") || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr)
+		{
+			continue;
+		}
+		const auto& storage = bind.storage_buffers;
+		const bool  bound   = std::any_of(storage.start_register, storage.start_register + storage.buffers_num,
+		                                  [&](int reg) { return reg == inst.src[1].register_id; });
+		if (!bound)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBindResources& bind)
 {
+	if (ShaderHasUnboundBufferLoad(code, bind))
+	{
+		return true;
+	}
 	for (const auto& inst: code.GetInstructions())
 	{
 		if (inst.type == ShaderInstructionType::ImageBvhIntersectRay)

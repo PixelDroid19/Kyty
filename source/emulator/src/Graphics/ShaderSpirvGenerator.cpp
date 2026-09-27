@@ -2769,6 +2769,11 @@ void Spirv::FindConstants()
 			AddConstantUint(0xfffffffcu);
 			AddConstantUint(static_cast<uint32_t>(inst.smem_imm_offset));
 			AddConstantInt(static_cast<int>(m_bind->device_address_offset_dw / 4u));
+			// Guest-addressed MUBUF loads: stride field, access sizes, offset.
+			for (const uint32_t value: {1u, 16u, 0x3fffu, 4u, 8u, 12u, 16u, static_cast<uint32_t>(inst.buffer_imm_offset)})
+			{
+				AddConstantUint(value);
+			}
 		}
 		if (m_cs_input_info != nullptr && m_bind != nullptr && m_bind->thread_limits_used)
 		{

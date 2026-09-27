@@ -8,9 +8,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SGetpcB64)
 {
 	const auto& inst = code.GetInstructions().At(index);
 	const auto* bind = spirv->GetBindInfo();
-	// Fused graphics streams have remapped PCs. Until their original segment
-	// addresses are represented, a single compute-style base is not valid there.
-	if (code.GetType() != ShaderType::Compute || bind == nullptr || !bind->program_base_used ||
+	// PCs of an appended continuation are shifted away from the program base,
+	// so only the program's own segment resolves through it.
+	if (inst.pc >= code.GetContinuationPc() || bind == nullptr || !bind->program_base_used ||
 	    inst.src_num != 0 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != 2 ||
 	    inst.dst.register_id < 0 || inst.dst.register_id > 102 || inst.dst.negate || inst.dst.absolute ||
 	    inst.dst.dpp || inst.dst.swizzle != 6u || inst.pc > UINT32_MAX - 4u || (inst.pc % 4u) != 0u)

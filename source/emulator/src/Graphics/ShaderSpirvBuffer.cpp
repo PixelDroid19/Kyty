@@ -504,6 +504,112 @@ static bool emit_gen5_raw_buffer_load(Spirv* spirv, const ShaderInstruction& ins
 	return true;
 }
 
+// True when the instruction's V# register range is one of the bound storage
+// buffers; any other V# is built at run time (for example from s_getpc).
+static bool buffer_resource_is_bound(const ShaderBindResources* bind, const ShaderOperand& resource)
+{
+	if (bind == nullptr || resource.type != ShaderOperandType::Sgpr)
+	{
+		return false;
+	}
+	for (int i = 0; i < bind->storage_buffers.buffers_num; i++)
+	{
+		if (bind->storage_buffers.start_register[i] == resource.register_id)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// MUBUF load through a V# that no binding describes: the descriptor's 48-bit
+// base plus the RDNA2 buffer offset (index * stride + voffset + soffset +
+// imm) is read through guest device addressing. Out-of-range accesses read
+// zero: structured (stride != 0 with IDXEN) checks the index against
+// NUM_RECORDS, raw checks the byte range.
+static bool emit_guest_buffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t dwords,
+                                   String8* dst_source)
+{
+	if (!spirv->UsesGuestDeviceAddress() || dwords == 0 || dwords > 4u || inst.src_num < 3 || inst.src[1].size < 4)
+	{
+		return false;
+	}
+	const auto tag  = String8::FromPrintf("gbl_%d", instruction_index);
+	const auto zero = spirv->GetConstantFloat(0.0f);
+	String8    loads;
+	if (inst.buffer_idxen && !operand_load_uint(spirv, inst.src[0], tag + "_idx", tag, &loads, inst.buffer_offen ? 0 : -1))
+	{
+		return false;
+	}
+	String8 voffset;
+	if (inst.buffer_offen && !operand_load_uint(spirv, inst.src[0], tag + "_voff", tag, &voffset, inst.buffer_idxen ? 1 : 0))
+	{
+		return false;
+	}
+	String8 soffset;
+	if (!operand_load_uint(spirv, inst.src[2], tag + "_soff", tag, &soffset))
+	{
+		return false;
+	}
+	String8 source = loads + "\n" + voffset + "\n" + soffset + "\n";
+	source += String8(R"(%<t>_d0 = OpLoad %uint %<desc0>
+%<t>_d1 = OpLoad %uint %<desc1>
+%<t>_d2 = OpLoad %uint %<desc2>
+%<t>_stride_raw = OpShiftRightLogical %uint %<t>_d1 %uint_16
+%<t>_stride = OpBitwiseAnd %uint %<t>_stride_raw %uint_0x00003fff
+%<t>_base_hi = OpBitwiseAnd %uint %<t>_d1 %<mask16>
+%<t>_elem = OpIMul %uint <index> %<t>_stride
+%<t>_o0 = OpIAdd %uint %<t>_elem %<t>_soff
+%<t>_o1 = OpIAdd %uint %<t>_o0 %<imm>
+%<t>_off = OpIAdd %uint %<t>_o1 <voffset>
+%<t>_structured_s = OpINotEqual %bool %<t>_stride %uint_0
+%<t>_structured = OpLogicalAnd %bool %<t>_structured_s %<idxen>
+%<t>_in_index = OpULessThan %bool <index> %<t>_d2
+%<t>_room = OpUGreaterThanEqual %bool %<t>_d2 %<size>
+%<t>_last = OpISub %uint %<t>_d2 %<size>
+%<t>_fits = OpULessThanEqual %bool %<t>_off %<t>_last
+%<t>_in_raw = OpLogicalAnd %bool %<t>_room %<t>_fits
+%<t>_in = OpSelect %bool %<t>_structured %<t>_in_index %<t>_in_raw
+%<t>_lo = OpIAdd %uint %<t>_d0 %<t>_off
+%<t>_carry_b = OpULessThan %bool %<t>_lo %<t>_d0
+%<t>_carry = OpSelect %uint %<t>_carry_b %uint_1 %uint_0
+%<t>_hi = OpIAdd %uint %<t>_base_hi %<t>_carry
+OpSelectionMerge %<t>_merge None
+OpBranchConditional %<t>_in %<t>_then %<t>_oob
+%<t>_then = OpLabel
+)")
+	              .ReplaceStr("<t>", tag)
+	              .ReplaceStr("<desc0>", operand_variable_to_str(inst.src[1], 0).value)
+	              .ReplaceStr("<desc1>", operand_variable_to_str(inst.src[1], 1).value)
+	              .ReplaceStr("<desc2>", operand_variable_to_str(inst.src[1], 2).value)
+	              .ReplaceStr("<mask16>", spirv->GetConstantUint(0xffffu))
+	              .ReplaceStr("<index>", inst.buffer_idxen ? "%" + tag + "_idx" : String8("%uint_0"))
+	              .ReplaceStr("<voffset>", inst.buffer_offen ? "%" + tag + "_voff" : String8("%uint_0"))
+	              .ReplaceStr("<imm>", spirv->GetConstantUint(inst.buffer_imm_offset))
+	              .ReplaceStr("<idxen>", inst.buffer_idxen ? "true" : "false")
+	              .ReplaceStr("<size>", spirv->GetConstantUint(dwords * 4u));
+	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(dwords), tag + "_g", &source))
+	{
+		return false;
+	}
+	String8 zeros;
+	for (uint32_t component = 0; component < dwords; component++)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
+		if (dst.type != SpirvType::Float)
+		{
+			return false;
+		}
+		source += String8::FromPrintf("%%%s_f%u = OpBitcast %%float %%%s_g_d%u\nOpStore %%%s %%%s_f%u\n", tag.c_str(), component, tag.c_str(),
+		                              component, dst.value.c_str(), tag.c_str(), component);
+		zeros += String8::FromPrintf("OpStore %%%s %%%s\n", dst.value.c_str(), zero.c_str());
+	}
+	source += String8::FromPrintf("OpBranch %%%s_merge\n%%%s_oob = OpLabel\n%sOpBranch %%%s_merge\n%%%s_merge = OpLabel\n", tag.c_str(),
+	                              tag.c_str(), zeros.c_str(), tag.c_str(), tag.c_str());
+	*dst_source += source;
+	return true;
+}
+
 static bool emit_gen5_raw_buffer_store(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
                                        uint32_t dwords, String8* dst_source)
 {
@@ -1031,6 +1137,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
 
+	if (Config::IsNextGen() && !buffer_resource_is_bound(bind_info, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	{
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 1, dst_source);
+	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
 		if (Config::IsNextGen())
@@ -1118,6 +1228,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen)
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
 
+	if (Config::IsNextGen() && !buffer_resource_is_bound(bind_info, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	{
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 2, dst_source);
+	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
 		if (Config::IsNextGen())
@@ -1180,6 +1294,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen)
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
 
+	if (Config::IsNextGen() && !buffer_resource_is_bound(bind_info, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	{
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 4, dst_source);
+	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
 		if (Config::IsNextGen())
@@ -1241,6 +1359,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen)
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
 
+	if (Config::IsNextGen() && !buffer_resource_is_bound(bind_info, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	{
+		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 3, dst_source);
+	}
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
 		if (Config::IsNextGen())
