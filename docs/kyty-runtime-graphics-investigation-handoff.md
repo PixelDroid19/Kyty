@@ -364,10 +364,11 @@ against the same correct gameplay capture.
   not this hang. Requiring the device-address load to end inside the guest
   byte count, rather than the imported span, also still resets that fence.
   An access that only overruns the guest size is excluded.
-  Suggested direction: this host's default storage-buffer robustness is
-  disabled unless the pipeline requests it. Request robust buffer and image
-  access on the pipeline before treating an out-of-range buffer index as
-  excluded. Do not add another copy of the address lookup.
+  Requesting robust buffer and image access on the pipeline
+  (`VkPipelineRobustnessCreateInfoEXT`, with robustBufferAccess2 enabled)
+  still resets that same fence. An out-of-range storage-buffer or image
+  index, as that request implements it, is excluded. Do not add another
+  copy of the address lookup.
 - Recorded, not yet fixed: `ShaderSpirvGenerator.cpp` exits at a vertex
   `s_getpc_b64` (`stage=1 instruction=474 format=0x8 pc=0x5c`) once the
   device-address dispatches are skipped. The compute emitter refuses a
