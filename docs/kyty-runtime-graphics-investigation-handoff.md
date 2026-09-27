@@ -367,8 +367,10 @@ against the same correct gameplay capture.
   Requesting robust buffer and image access on the pipeline
   (`VkPipelineRobustnessCreateInfoEXT`, with robustBufferAccess2 enabled)
   still resets that same fence. An out-of-range storage-buffer or image
-  index, as that request implements it, is excluded. Do not add another
-  copy of the address lookup.
+  index, as that request implements it, is excluded. Keeping every
+  local-data-share index inside the declared workgroup array still resets
+  that fence, and that pipeline did finish creation. An index past the
+  declared array is excluded. Do not add another copy of the address lookup.
 - Recorded, not yet fixed: `ShaderSpirvGenerator.cpp` exits at a vertex
   `s_getpc_b64` (`stage=1 instruction=474 format=0x8 pc=0x5c`) once the
   device-address dispatches are skipped. The compute emitter refuses a
