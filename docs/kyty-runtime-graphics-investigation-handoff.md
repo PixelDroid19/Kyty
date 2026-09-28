@@ -437,6 +437,15 @@ against the same correct gameplay capture.
   explanation for that sustained frame time. It does not establish correct
   visual content, a real-hardware two-byte tiling match, or gameplay.
 
+- Empty audio-push pacing versus slow flips (2026-09-28): a temporary bounded
+  counter recorded 3,000 empty blocking pushes in about 34 seconds, with a
+  512-sample grain at 48 kHz. This is near the 93.75-push/s output cadence and
+  does not by itself attribute the roughly eight-second flip intervals to
+  audio. A strict GDB run placed the empty audio wait on thread 60 and the
+  internal flip on thread 6. The direct-sleep-on-flip-thread hypothesis is
+  excluded; an indirect dependency has not been demonstrated. The temporary
+  counter was removed and audio pacing was not changed.
+
 - First partial storage output and tile-copy proof (2026-09-28): the former
   `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`
   involved one live RGBA16F render target and a larger storage view with the

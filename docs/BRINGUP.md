@@ -286,6 +286,12 @@ source image bytes, revised two-byte tiling on real hardware, and cause of
 black/slow output still need direct validation. There is no controllable
 gameplay evidence.
 
+A temporary audio probe counted 3,000 empty blocking pushes in about 34
+seconds at 512 samples and 48 kHz, close to a real-time audio cadence. GDB
+placed that wait on thread 60 and the internal flip on thread 6 in the same
+strict run. This rules out a direct sleep on the flip thread; it does not
+identify the remaining frame-time cost. The probe was removed.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show
