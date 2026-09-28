@@ -349,8 +349,14 @@ against the same correct gameplay capture.
   sampled. Those whole-image bind events do not establish which host image
   owns each guest byte at the later overlap. The filtered trace and two GDB
   probes reached their run deadlines before the overlap; do not interpret
-  their missing tail as a writer or dependency result. The first-present
-  VideoOut source was confirmed as `VK_FORMAT_A2R10G10B10_UNORM_PACK32`.
+  their missing tail as a writer or dependency result. Extending the filtered
+  trace to 300 seconds did not reach the overlap either: agent counters stayed
+  at 78 draws, 133 dispatches, 549 submissions, and zero presents between
+  the 155- and 207-second samples; one host thread kept using a CPU core.
+  Attaching GDB to that process was denied by `ptrace`. This instrumented run's
+  stall has no proven call site and is not evidence of the alias's byte owner.
+  The first-present VideoOut source was confirmed as
+  `VK_FORMAT_A2R10G10B10_UNORM_PACK32`.
   After adding packed-format capture, the strict run produced four native PNGs
   from four presents and then reached the same mixed-parent exit. Each capture
   scored `entropy=0`, one quantized color, and `gameplay_like=false`, so this is
