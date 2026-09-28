@@ -2788,6 +2788,33 @@ TEST(EmulatorGraphicsPackets, Sw64kRx4bppWithinBlockIsBijective)
 	EXPECT_EQ(TileGetSw64kRxOffset(1, 1, k_block, 4), 0xcu);
 }
 
+TEST(EmulatorGraphicsPackets, Sw64kRx2bppWithinBlockIsBijective)
+{
+	constexpr uint32_t k_width  = 256u;
+	constexpr uint32_t k_height = 128u;
+	bool               seen[32768] {};
+	uint32_t           unique = 0;
+	for (uint32_t y = 0; y < k_height; y++)
+	{
+		for (uint32_t x = 0; x < k_width; x++)
+		{
+			const uint64_t offset = TileGetSw64kRxOffset(x, y, k_width, 2u);
+			ASSERT_LT(offset, 65536u);
+			ASSERT_EQ(offset % 2u, 0u);
+			ASSERT_FALSE(seen[offset / 2u]);
+			seen[offset / 2u] = true;
+			unique++;
+		}
+	}
+	EXPECT_EQ(unique, k_width * k_height);
+	EXPECT_EQ(TileGetSw64kRxOffset(1, 0, k_width, 2u), 2u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 1, k_width, 2u), 0x10u);
+	EXPECT_EQ(TileGetSw64kRxOffset(32, 0, k_width, 2u), 0x800u);
+	EXPECT_EQ(TileGetSw64kRxOffset(0, 64, k_width, 2u), 0x4800u);
+	EXPECT_EQ(TileGetSw64kRxOffset(128, 0, k_width, 2u), 0x8000u);
+	EXPECT_EQ(TileGetSw64kRxOffset(256, 0, 2u * k_width, 2u), 65536u);
+}
+
 TEST(EmulatorGraphicsPackets, UsesOneCanonical64KbPitchGeometry)
 {
 	EXPECT_EQ(TileGet64KBBlockWidth(1), 256u);

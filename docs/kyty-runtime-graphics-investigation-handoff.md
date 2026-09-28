@@ -365,12 +365,13 @@ against the same correct gameplay capture.
   texels (0.12%), so a full-overwrite seed omission is excluded.
   Determine which parent owns each byte range and whether the new output needs
   those prior bytes before extending the overlap policy. Its two-byte tile-27
-  format also reaches `Tile.cpp:1022`, where the current within-block converter
-  uses its eight-byte equation for two-byte elements. Over one 256×128,
-  64 KiB block, this maps 32,768 texels to only 8,192 distinct offsets.
-  This is a real two-byte tiling defect; derive and validate its bit equation
-  against guest evidence before materializing this view. A filtered lifetime
-  trace of the overlapping render address showed separate RGBA16F and packed
+  format previously reused the eight-byte equation, mapping 32,768 texels to
+  only 8,192 distinct offsets over a 256×128 block. A focused red/green test
+  established this collision and verifies that the revised 16-pipe equation
+  is bijective and two-byte aligned over a full 64 KiB block. A strict run
+  still stopped at this mixed-parent rejection; guest visual evidence for the
+  revised tiling and a raw cross-format transfer remain outstanding. A filtered
+  lifetime trace of the overlapping render address showed separate RGBA16F and packed
   float host images, both bound with `CLEAR` and the packed image subsequently
   sampled. Those whole-image bind events do not establish which host image
   owns each guest byte at the later overlap. A later Wayland-backed GDB run

@@ -59,7 +59,7 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 [[nodiscard]] uint32_t TileAlign64KBPitch(uint32_t width, uint32_t bytes_per_element);
 // Byte offset of texel (x,y) inside a Gen5 kRenderTarget (tile mode 27) surface.
 // pitch_elems is the element pitch used for the block grid (0 → width).
-// Supported: 4- and 8-byte elements.
+// Supported: 2-, 4-, and 8-byte elements.
 uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
 // Detile kRenderTarget into tightly packed linear rows of width*bytes_per_element.
 void TileConvertSw64kRxToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,

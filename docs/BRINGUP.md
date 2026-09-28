@@ -276,10 +276,12 @@ and a later sample before the storage creation, with no later render-target
 write to that address. A bounded writer-history query at the rejection covered
 the overlapping range with zero retained or dropped DMA, WriteData, event,
 or write-back events. It does not observe direct guest CPU stores or render-
-target writes. The raw cross-format byte mapping remains unresolved. The
-existing two-byte render-target tiling path
-also maps 32,768 texels to only 8,192 distinct byte offsets per block; that
-layout must be proven before materialization.
+target writes. The raw cross-format byte mapping remains unresolved. A focused
+red/green test exposed that the old two-byte tile-27 path mapped 32,768 texels
+to only 8,192 distinct offsets per block. The revised 16-pipe equation maps
+every texel in a 64 KiB block to a unique aligned byte offset, and a strict
+run reached the same mixed-parent rejection. PS5 visual accuracy for that
+equation and live image-byte transfer remain unverified.
 Four native captures are now available from the first four presents, but all
 score as uniform black (`entropy=0`, one quantized color,
 `gameplay_like=false`). There is no controllable gameplay evidence.

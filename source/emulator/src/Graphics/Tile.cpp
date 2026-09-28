@@ -911,6 +911,23 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
 {
 	uint32_t offset = 0;
+	if (bytes_per_element == 2u)
+	{
+		// The 256x128 block needs all 15 element-address bits. Reusing the
+		// eight-byte equation folds four distinct texels onto each offset.
+		offset |= (x & 0x7u) << 1u;
+		offset |= (y & 0x7u) << 4u;
+		offset |= (x & 0x8u) << 4u;
+		offset |= ((x ^ y) & 0x8u) << 5u;
+		offset |= ((x ^ y) & 0x10u) << 5u;
+		offset |= (((x >> 6u) ^ (y >> 5u)) & 1u) << 10u;
+		offset |= (((x >> 5u) ^ (y >> 6u)) & 1u) << 11u;
+		offset |= (y & 0x10u) << 8u;
+		offset |= (x & 0x40u) << 7u;
+		offset |= (y & 0x40u) << 8u;
+		offset |= (x & 0x80u) << 8u;
+		return offset;
+	}
 	if (bytes_per_element == 4u)
 	{
 		offset ^= (y << 3u) & 0x0008u;
@@ -1019,7 +1036,7 @@ static uint32_t Standard64KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t b
 
 uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	if (bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element != 4u && bytes_per_element != 8u condition ignored (continuing)\n"); }
+	if (bytes_per_element != 2u && bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported SW_64KB_R_X element size (continuing)\n"); }
 	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block_bytes = 65536u;
