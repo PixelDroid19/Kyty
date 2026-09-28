@@ -2880,6 +2880,26 @@ TEST(EmulatorGraphicsState, IntersectsEnabledScissorRectangles)
 	EXPECT_EQ(scissor.bottom, 180);
 }
 
+TEST(EmulatorGraphicsState, ViewportFifteenDoesNotOverwriteScissorState)
+{
+	HW::Context context;
+	context.SetGenericScissor(10, 20, 600, 440, false);
+	context.SetViewportYOffset(15, 0.5f);
+	context.SetViewportZScale(15, 1.0f);
+
+	const auto& viewport = context.GetScreenViewport();
+	EXPECT_EQ(std::size(viewport.viewports), 16u);
+	EXPECT_EQ(viewport.generic_scissor_left, 10);
+	EXPECT_EQ(viewport.generic_scissor_top, 20);
+	EXPECT_EQ(viewport.generic_scissor_right, 600);
+	EXPECT_EQ(viewport.generic_scissor_bottom, 440);
+	if (std::size(viewport.viewports) == 16u)
+	{
+		EXPECT_FLOAT_EQ(viewport.viewports[15].yoffset, 0.5f);
+		EXPECT_FLOAT_EQ(viewport.viewports[15].zscale, 1.0f);
+	}
+}
+
 TEST(EmulatorGraphicsState, IgnoresViewportScissorWhenDisabled)
 {
 	HW::Context context;

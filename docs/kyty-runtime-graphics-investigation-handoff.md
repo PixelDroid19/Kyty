@@ -471,6 +471,34 @@ against the same correct gameplay capture.
   `GraphicsRunOpParsers.cpp:1367`. Do not shorten, extend, or skip the wait as
   a performance fix.
 
+- Viewport-bank overwrite and black-frame boundary (2026-09-28): a bounded
+  native readback found zero RGB in the packed VideoOut image before PNG
+  conversion, in its 2432×1368 RGBA16F input, and in the preceding 1920×1080
+  packed HDR target. The first color-chain census showed that the final
+  targets each had a full-screen, color-enabled writer and exact bound source
+  images. One source-writer trace showed an impossible generic scissor:
+  `left=1056964608`, `top=1065353216`, `right=bottom=0`, producing a zero-area
+  Vulkan scissor. The first two values are the bit patterns of `0.5f` and
+  `1.0f`. `GraphicsRunJmpTables.cpp` and the direct register parser accept all
+  16 viewport slots, while `HardwareContext.h:418` held `viewports[15]`.
+  Viewport-15 writes therefore overwrote the adjacent scissor state. The
+  focused red test reproduced the same two integers and now passes with 16
+  entries. A new strict trace resolves the HDR writer to `0,0,2432,1368`.
+  This fixes memory corruption, not the remaining black output: a 125-second
+  strict Silent/Native run reached present 15, retained captures were all
+  uniform black, and the frame rate stayed around 0.12 FPS. A post-fix
+  readback found the preceding 1920×1080 HDR image still all zero. Its writer
+  samples smaller HDR postprocess images; the first-frame shader census also
+  identified an earlier 1920×1080 float color target sampling a guest-uploaded
+  single-channel image. Establish which earliest input is nonzero and whether
+  its draw writes visible color before changing compositor or wait semantics.
+  Temporary capture/scissor probes were removed. A broad state-unit run passed
+  232 of 233 tests: `Gen5CodeAvailablePreservesUnmatchedDirectStorageDescriptor`
+  still reports zero bound storage buffers instead of one at
+  `UnitTestEmulatorGraphicsState.cpp:2552`. This is separate from the viewport
+  bank; inspect `ShaderParseUsage2` direct-resource retention and the test's
+  code-available contract before altering descriptor behavior.
+
 - First partial storage output and tile-copy proof (2026-09-28): the former
   `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`
   involved one live RGBA16F render target and a larger storage view with the

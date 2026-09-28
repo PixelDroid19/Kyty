@@ -415,7 +415,7 @@ struct Viewport
 
 struct ScreenViewport
 {
-	Viewport viewports[15];
+	Viewport viewports[16];
 	uint32_t transform_control                    = 1087;
 	int      screen_scissor_left                  = 0;
 	int      screen_scissor_top                   = 0;

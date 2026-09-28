@@ -307,6 +307,22 @@ was removed. The missing earlier producer remains unresolved; changing the
 wait timeout or fabricating the label would conceal it. This explains slow
 progress, not the uniform black native captures.
 
+The first color-chain readback located a separate raster-state defect. The
+context register decoders handle viewport indices 0 through 15, but
+`HW::ScreenViewport` allocated only 15 entries. Writes to viewport 15 landed
+in the following generic-scissor fields; a strict trace observed the bit
+patterns for `0.5` and `1.0` as its left and top coordinates, leaving Vulkan
+with a zero-area scissor. A focused test reproduced those exact integers
+before the array was expanded to 16 and passed afterward. The corrected
+strict trace resolves the HDR writer's scissor to its full 2432×1368 target.
+Nevertheless, a 125-second strict run reached present 15 with every retained
+capture uniformly black (`entropy=0`, `gameplay_like=false`), and its measured
+pace remained about 0.12 FPS. Direct readbacks showed the packed VideoOut
+image, its 2432×1368 HDR source, and the preceding 1920×1080 HDR source all
+zero in the opening presents. The viewport defect is corrected, but visual
+output and playability are not established. Trace the first nonzero producer
+upstream of the HDR postprocess chain before changing the final compositor.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show
