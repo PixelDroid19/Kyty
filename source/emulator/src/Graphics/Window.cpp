@@ -427,21 +427,40 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 		std::filesystem::remove(ctx->native_capture.trigger_file, error);
 	}
 
-	const bool hdr_capture = (image->format == VK_FORMAT_R16G16B16A16_SFLOAT);
-	if (image->format != VK_FORMAT_B8G8R8A8_SRGB && image->format != VK_FORMAT_R8G8B8A8_SRGB && !hdr_capture)
+	auto capture_pixel_format = Emulator::Host::HostCaptureImagePixelFormat::Rgba8;
+	bool hdr_capture = false;
+	bool packed_capture = false;
+	switch (image->format)
 	{
-		if (milestone == NativeCaptureMilestone::FirstPresent)
-		{
-			ctx->native_capture.first_pending = false;
-		}
-		KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=readback frame=%d format=%s recoverable=0\n", frame,
-		             NativeCaptureFormatName(image->format));
-		if (agent_waiting)
-		{
-			NativeCapturePublishResult(ctx, false, nullptr, milestone, selected_request_id, NativeCaptureFormatName(image->format),
-			                           0, 0, frame, "unsupported_format", "native capture requires B8G8R8A8_SRGB or R8G8B8A8_SRGB");
-		}
-		return;
+		case VK_FORMAT_B8G8R8A8_SRGB:
+		case VK_FORMAT_B8G8R8A8_UNORM: capture_pixel_format = Emulator::Host::HostCaptureImagePixelFormat::Bgra8; break;
+		case VK_FORMAT_R8G8B8A8_SRGB:
+		case VK_FORMAT_R8G8B8A8_UNORM: break;
+		case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+			capture_pixel_format = Emulator::Host::HostCaptureImagePixelFormat::A2R10G10B10Unorm;
+			packed_capture       = true;
+			break;
+		case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+			capture_pixel_format = Emulator::Host::HostCaptureImagePixelFormat::A2B10G10R10Unorm;
+			packed_capture       = true;
+			break;
+		case VK_FORMAT_R16G16B16A16_SFLOAT:
+			capture_pixel_format = Emulator::Host::HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat;
+			hdr_capture          = true;
+			break;
+		default:
+			if (milestone == NativeCaptureMilestone::FirstPresent)
+			{
+				ctx->native_capture.first_pending = false;
+			}
+			KYTY_LOG_ERROR("KYTY_CAPTURE_ERROR subsystem=frame_capture operation=readback frame=%d format=%s recoverable=0\n", frame,
+			             NativeCaptureFormatName(image->format));
+			if (agent_waiting)
+			{
+				NativeCapturePublishResult(ctx, false, nullptr, milestone, selected_request_id, NativeCaptureFormatName(image->format),
+				                           0, 0, frame, "unsupported_format", "native capture source format is unsupported");
+			}
+			return;
 	}
 
 	const uint64_t width  = image->extent.width;
@@ -468,11 +487,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	std::vector<uint8_t> pixels(size);
 	UtilFillBuffer(&ctx->graphic_ctx, pixels.data(), size, static_cast<uint32_t>(width), image,
 	               static_cast<uint64_t>(image->layout));
-	const auto capture_pixel_format = hdr_capture ? Emulator::Host::HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat
-	                                              : (image->format == VK_FORMAT_B8G8R8A8_SRGB
-	                                                     ? Emulator::Host::HostCaptureImagePixelFormat::Bgra8
-	                                                     : Emulator::Host::HostCaptureImagePixelFormat::Rgba8);
-	if (hdr_capture)
+	if (hdr_capture || packed_capture)
 	{
 		std::vector<uint8_t> converted;
 		if (!Emulator::Host::HostCaptureImageCodecNormalizeRgba8(
@@ -529,7 +544,7 @@ static void NativeCaptureFrame(WindowContext* ctx, VideoOutVulkanImage* image, i
 	const auto image_path = ctx->native_capture.directory / filename;
 	const auto codec_result = Emulator::Host::HostCaptureImageCodecWritePng(
 	    {pixels.data(), {static_cast<uint32_t>(width), static_cast<uint32_t>(height)}, width * 4u,
-	     hdr_capture ? Emulator::Host::HostCaptureImagePixelFormat::Rgba8 : capture_pixel_format},
+	     (hdr_capture || packed_capture) ? Emulator::Host::HostCaptureImagePixelFormat::Rgba8 : capture_pixel_format},
 	    ctx->native_capture.max_edge, image_path);
 	GraphicsPeekRememberedSceneTargets(&ctx->graphic_ctx);
 	if (codec_result.downscale_fallback)

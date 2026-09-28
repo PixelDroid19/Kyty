@@ -269,7 +269,9 @@ output of the same 16×1-group dispatch. That image crosses three live render
 targets and contains a small storage/sampled pair; the parents include
 different formats. Its `skip_seed=0`, so the earlier full-overwrite policy is
 not established, and the sources of its overlapping bytes remain unresolved.
-There is no scored capture or controllable gameplay evidence from this run.
+Four native captures are now available from the first four presents, but all
+score as uniform black (`entropy=0`, one quantized color,
+`gameplay_like=false`). There is no controllable gameplay evidence.
 
 - A scalar-loaded storage descriptor consumed by vector stores or atomics is
   now classified writable and merged with its equal-descriptor users. Compute
@@ -333,11 +335,12 @@ that import, reached later load phases, then stopped at the separate mixed
 were traced separately and passed as described above. Their proofs do not
 apply to the current partially written image.
 
-An explicit native capture at the first present returned `unsupported_format`:
-`Window.cpp:442` accepts only its current SRGB/HDR readback formats. No PNG was
-published. Inspect the actual VideoOut format at that milestone and implement
-its verified conversion or capture a later supported surface before scoring;
-the first present alone is not visual acceptance.
+The first present uses `VK_FORMAT_A2R10G10B10_UNORM_PACK32` at 3840×2160.
+Native capture now converts both packed 10:10:10:2 channel orders to RGBA8 and
+also accepts 8-bit UNORM sources. A focused channel-order test passed, and the
+strict Silent/Native run saved four 1280×720 PNGs with matching metadata. All
+four have the same black-image hash and fail the official scene/gameplay score;
+presentation and capture alone do not establish rendering or playability.
 
 ### Generic wave64 compute frontier (2026-09-26, not gameplay)
 

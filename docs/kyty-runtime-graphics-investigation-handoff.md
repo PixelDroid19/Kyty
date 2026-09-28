@@ -338,9 +338,11 @@ against the same correct gameplay capture.
   those prior bytes before extending the overlap policy. Its two-byte tile-27
   format also reaches `Tile.cpp:1022`, where the current within-block converter
   only has four- and eight-byte equations; prove the two-byte layout before
-  materializing this view. The first-present
-  `kyty_agent capture` returned `unsupported_format` at `Window.cpp:442`; no
-  scored native capture or gameplay is proven.
+  materializing this view. The first-present VideoOut source was confirmed as
+  `VK_FORMAT_A2R10G10B10_UNORM_PACK32`. After adding packed-format capture,
+  the strict run produced four native PNGs from four presents and then reached
+  the same mixed-parent exit. Each capture scored `entropy=0`, one quantized
+  color, and `gameplay_like=false`, so this is capture-path progress only.
 
 - First partial storage output and tile-copy proof (2026-09-28): the former
   `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`

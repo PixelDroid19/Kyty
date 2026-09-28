@@ -3949,6 +3949,26 @@ TEST(EmulatorGraphicsState, HostCaptureImageCodecNormalizesCaptureChannelLayouts
 	EXPECT_EQ(rgba, (std::vector<uint8_t> {0, 128, 255, 255}));
 }
 
+TEST(EmulatorGraphicsState, HostCaptureImageCodecNormalizesPackedTenBitColor)
+{
+	using namespace Kyty::Emulator::Host;
+
+	const std::array<uint32_t, 4> pixels = {
+	    (3u << 30u) | (1023u << 20u),
+	    (2u << 30u) | (512u << 10u) | 1023u,
+	    (1u << 30u) | 1023u,
+	    (3u << 30u) | (1023u << 20u),
+	};
+	std::vector<uint8_t> rgba;
+	EXPECT_TRUE(HostCaptureImageCodecNormalizeRgba8(
+	    {reinterpret_cast<const uint8_t*>(pixels.data()), {2, 2}, 8, HostCaptureImagePixelFormat::A2R10G10B10Unorm}, &rgba));
+	EXPECT_EQ(rgba, (std::vector<uint8_t> {255, 0, 0, 255, 0, 128, 255, 170, 0, 0, 255, 85, 255, 0, 0, 255}));
+
+	EXPECT_TRUE(HostCaptureImageCodecNormalizeRgba8(
+	    {reinterpret_cast<const uint8_t*>(pixels.data()), {2, 1}, 8, HostCaptureImagePixelFormat::A2B10G10R10Unorm}, &rgba));
+	EXPECT_EQ(rgba, (std::vector<uint8_t> {0, 0, 255, 255, 255, 128, 0, 170}));
+}
+
 TEST(EmulatorGraphicsState, HostCaptureImageCodecAppliesCaptureMaxEdgeRounding)
 {
 	using namespace Kyty::Emulator::Host;
