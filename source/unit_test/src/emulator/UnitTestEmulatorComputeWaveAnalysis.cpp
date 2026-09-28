@@ -114,6 +114,40 @@ static ShaderInstruction EudBasePairRead(uint32_t pc)
 	return instruction;
 }
 
+static ShaderInstruction EudBasePairBufferLoad(uint32_t pc)
+{
+	ShaderInstruction instruction {};
+	instruction.pc           = pc;
+	instruction.type         = ShaderInstructionType::SBufferLoadDwordx2;
+	instruction.format       = ShaderInstructionFormat::Sdst2SvSoffset;
+	instruction.dst          = {.type = ShaderOperandType::Sgpr, .register_id = 12, .size = 2};
+	instruction.src[0]       = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 4};
+	instruction.src[1].type  = ShaderOperandType::IntegerInlineConstant;
+	instruction.src_num      = 2;
+	return instruction;
+}
+
+static ShaderInstruction EudTestBranch(uint32_t pc, uint32_t target, bool conditional = false)
+{
+	ShaderInstruction instruction {};
+	instruction.pc                 = pc;
+	instruction.type               = conditional ? ShaderInstructionType::SCbranchScc0 : ShaderInstructionType::SBranch;
+	instruction.format             = ShaderInstructionFormat::Label;
+	instruction.src[0].type        = ShaderOperandType::LiteralConstant;
+	instruction.src[0].constant.i  = static_cast<int32_t>(target) - static_cast<int32_t>(pc) - 4;
+	instruction.src_num            = 1;
+	return instruction;
+}
+
+static ShaderInstruction EudTestEnd(uint32_t pc)
+{
+	ShaderInstruction instruction {};
+	instruction.pc     = pc;
+	instruction.type   = ShaderInstructionType::SEndpgm;
+	instruction.format = ShaderInstructionFormat::Empty;
+	return instruction;
+}
+
 TEST(EmulatorComputeWaveAnalysis, AdmitsScalarSelectorAndCrossHalfRead)
 {
 	const uint32_t words[] = {0xbe84039fu, 0xd7600005u, 256u | (4u << 9u), 0xbf810000u};
@@ -288,7 +322,7 @@ TEST(EmulatorComputeWaveAnalysis, RejectsSgpr64MoveThatClobbersEudBaseBeforeLoad
 	code.GetInstructions().Add(end);
 	const auto result = ShaderAnalyzeComputeWaveCode(code, MappedEudInput());
 	EXPECT_FALSE(result.supported);
-	EXPECT_EQ(result.unsupported_pc, 0u);
+	EXPECT_EQ(result.unsupported_pc, 4u);
 	EXPECT_TRUE(result.reason.ContainsStr("extended pointer base"));
 }
 
@@ -306,6 +340,51 @@ TEST(EmulatorComputeWaveAnalysis, RejectsLaterHighHalfClobberOfEudBase)
 	const auto result = ShaderAnalyzeComputeWaveCode(code, MappedEudInput());
 	EXPECT_FALSE(result.supported);
 	EXPECT_EQ(result.unsupported_pc, 12u);
+	EXPECT_TRUE(result.reason.ContainsStr("extended pointer base"));
+}
+
+TEST(EmulatorComputeWaveAnalysis, AdmitsEudBasePairReuseAfterMappedLoad)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(MappedEudLoad());
+	code.GetInstructions().Add(EudBasePairBufferLoad(0x18u));
+	code.GetInstructions().Add(EudBasePairRead(0x20u));
+	code.GetInstructions().Add(EudTestEnd(0x24u));
+	const auto result = ShaderAnalyzeComputeWaveCode(code, MappedEudInput());
+	EXPECT_TRUE(result.supported) << result.reason.c_str();
+}
+
+TEST(EmulatorComputeWaveAnalysis, RejectsEudBasePairReuseAcrossBackEdge)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(MappedEudLoad());
+	code.GetInstructions().Add(EudBasePairBufferLoad(0x18u));
+	const auto branch = EudTestBranch(0x20u, 4u);
+	code.GetInstructions().Add(branch);
+	code.GetLabels().Add(ShaderLabel(branch));
+	code.GetInstructions().Add(EudTestEnd(0x24u));
+	const auto result = ShaderAnalyzeComputeWaveCode(code, MappedEudInput());
+	EXPECT_FALSE(result.supported);
+	EXPECT_EQ(result.unsupported_pc, 4u);
+	EXPECT_TRUE(result.reason.ContainsStr("extended pointer base"));
+}
+
+TEST(EmulatorComputeWaveAnalysis, RejectsEudBaseReadWhenBranchSkipsPairWrite)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(MappedEudLoad());
+	const auto branch = EudTestBranch(0x18u, 0x24u, true);
+	code.GetInstructions().Add(branch);
+	code.GetLabels().Add(ShaderLabel(branch));
+	code.GetInstructions().Add(EudBasePairBufferLoad(0x1cu));
+	code.GetInstructions().Add(EudBasePairRead(0x24u));
+	code.GetInstructions().Add(EudTestEnd(0x28u));
+	const auto result = ShaderAnalyzeComputeWaveCode(code, MappedEudInput());
+	EXPECT_FALSE(result.supported);
+	EXPECT_EQ(result.unsupported_pc, 0x24u);
 	EXPECT_TRUE(result.reason.ContainsStr("extended pointer base"));
 }
 

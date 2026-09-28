@@ -309,16 +309,25 @@ through a unique, writable, guarded raw V# binding. Paired admission now
 requires that exact tuple and binding; the existing Gen5 atomic emitter emits
 one guarded operation per bank. Focused red/green admission, resource-use, and
 SPIR-V tests pass, including negative return, index, and binding cases. Two
-strict runs passed the former PC 0x74c gate and stopped at PC 0x560:
-the extended-pointer base SGPR pair is written by `SBufferLoadDwordx2` after
-six mapped EUD loads, and later vector instructions read the written pair.
-Determine whether any control-flow path can reach another EUD load after that
-write before relaxing the base-pair guard. A separate retry stopped earlier at
-a storage write-back dependency; that intermittent exit needs a separate
-causal reproduction. Native wave-width equivalence remains rejected at PC
-0x208 for a lane-crossing read. A native frame-10 capture was uniformly black
-(`entropy=0`, one color). No controlled gameplay has been observed. Xe
-`execbuf` ENOMEM can also stop earlier runs.
+strict runs passed the former PC 0x74c gate and stopped at PC 0x560. A
+bounded trace of that 368-instruction program found six mapped EUD loads, a
+full write to their former `s12:s13` base by `SBufferLoadDwordx2` at PC
+0x560, two later ordinary reads, and 18 static branches, all forward.
+Paired admission now tracks possible and definite writes through the parsed
+control-flow graph: every mapped EUD load requires the original pair on all
+paths, while an ordinary read requires a full replacement on all paths.
+Partial writes and unresolved branch targets stay rejected. Eight focused
+tests cover reuse, a back edge, a skipped write, and the earlier guard cases.
+A strict diagnostic explicitly recorded admission of this program before a
+later storage-texture overlap exit. This confirms admission, not correct GPU
+execution or gameplay. A separate retry stopped earlier at a storage
+write-back dependency, which needs a causal reproduction. Native wave-width
+equivalence remains rejected at PC 0x208 for a lane-crossing read. A native
+frame-10 capture was uniformly black (`entropy=0`, one color). No controlled
+gameplay has been observed. Several bounded retries also stopped before shader
+admission when Xe reported `execbuf` ENOMEM and `vkQueueSubmit` failed in
+`GraphicsRenderCommandBuffer.cpp:656`; correlate live GPU allocation budget
+and competing Vulkan clients before changing submission policy.
 
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
@@ -719,8 +728,10 @@ both banks of two waves, but supplies its mapping manually: it proves mapped
 SPIR-V lowering, not production mapping or a guest dispatch. The collector
 diagnostic and its focused mapping tests provide distinct provenance evidence.
 Because the EUD base pair is not initialized as ordinary SGPR data, paired
-analysis also rejects all other reads and writes of that pair for an extended
-bind, including later control-flow paths. The gate keeps combined SGPR plus
+analysis rejects ordinary reads until every control-flow path writes both
+words. It rejects mapped EUD loads after any path writes either word, and
+rejects partial writes outright. A later full-pair write may reuse those
+registers once mapped EUD loads are dead. The gate keeps combined SGPR plus
 `smem_imm_offset` loads rejected; `recompile_sload_from_extended` does not add
 that extra offset. Unrepresented SMEM reserved bits still require a fail-closed
 decoder check. A later EUD load at PC `0x490` lacks a verified mapping; inspect

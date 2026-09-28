@@ -11,6 +11,9 @@
 
 #include "ShaderStorageAnalysis.h"
 
+#include <unordered_map>
+#include <vector>
+
 #ifdef KYTY_EMU_ENABLED
 
 KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>(Kyty::Libs::Graphics::ShaderInstructionType::ZMax));
@@ -320,23 +323,24 @@ bool IsBarrierInstruction(const ShaderInstruction& instruction)
 	return true;
 }
 
-bool ComputeWaveOperandMayOverwriteSgprPair(const ShaderOperand& destination, int pair_start)
+uint8_t ComputeWaveOperandSgprPairWriteMask(const ShaderOperand& destination, int pair_start)
 {
 	if (destination.type != ShaderOperandType::Sgpr)
 	{
-		return false;
+		return 0;
 	}
 	if (!ComputeWaveRegisterRangeIsValid(destination.register_id, destination.size, kMaxSgpr))
 	{
-		return true;
+		return 0xffu;
 	}
-	return ShaderOperandOverlapsSgprRange(destination, pair_start, 2);
+	return static_cast<uint8_t>((ShaderOperandOverlapsSgprRange(destination, pair_start, 1) ? 1u : 0u) |
+	                            (ShaderOperandOverlapsSgprRange(destination, pair_start + 1, 1) ? 2u : 0u));
 }
 
-bool ComputeWaveInstructionMayOverwriteEudBase(const ShaderInstruction& instruction, int pair_start)
+uint8_t ComputeWaveInstructionSgprPairWriteMask(const ShaderInstruction& instruction, int pair_start)
 {
-	return ComputeWaveOperandMayOverwriteSgprPair(instruction.dst, pair_start) ||
-	       ComputeWaveOperandMayOverwriteSgprPair(instruction.dst2, pair_start);
+	return static_cast<uint8_t>(ComputeWaveOperandSgprPairWriteMask(instruction.dst, pair_start) |
+	                            ComputeWaveOperandSgprPairWriteMask(instruction.dst2, pair_start));
 }
 
 bool ComputeWaveOperandMayReadSgprPair(const ShaderOperand& source, int pair_start)
@@ -383,6 +387,148 @@ bool ComputeWaveInstructionMayReadEudBase(const ShaderInstruction& instruction, 
 		}
 	}
 	return false;
+}
+
+bool ComputeWaveInstructionHasInvalidSgprSource(const ShaderInstruction& instruction)
+{
+	if (instruction.src_num < 0 || instruction.src_num > 4 || instruction.mimg_address_num < 0 ||
+	    instruction.mimg_address_num > 13)
+	{
+		return true;
+	}
+	for (int source = 0; source < instruction.src_num; ++source)
+	{
+		const auto& operand = instruction.src[source];
+		if (operand.type == ShaderOperandType::Sgpr &&
+		    !ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxSgpr))
+		{
+			return true;
+		}
+	}
+	for (int address = 0; address < instruction.mimg_address_num; ++address)
+	{
+		const auto& operand = instruction.mimg_address[address];
+		if (operand.type == ShaderOperandType::Sgpr &&
+		    !ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxSgpr))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+// The EUD pointer is available through per-PC mappings until an instruction
+// reuses its SGPR pair. A normal read is safe only when every path to it has
+// written both words; a mapped S_LOAD is safe only when no path has written
+// either. Branch joins and back edges are part of this proof.
+ShaderComputeWaveAnalysisResult AnalyzeExtendedBaseLifetime(const ShaderCode& code, const ShaderBindResources& bind,
+                                                             int pair_start)
+{
+	const auto& instructions = code.GetInstructions();
+	struct State
+	{
+		bool reachable   = false;
+		bool may_reused  = false;
+		bool must_reused = false;
+	};
+	std::unordered_map<uint32_t, uint32_t> instruction_index;
+	instruction_index.reserve(instructions.Size());
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		if (!instruction_index.emplace(instructions.At(index).pc, index).second)
+		{
+			return {false, instructions.At(index).pc, "paired extended pointer base has duplicate instruction PCs"};
+		}
+	}
+	std::vector<State> states(instructions.Size());
+	std::vector<uint32_t> work_list;
+	work_list.reserve(instructions.Size());
+	states[0].reachable = true;
+	work_list.push_back(0);
+	auto propagate = [&](uint32_t successor, const State& outgoing)
+	{
+		if (successor >= instructions.Size())
+		{
+			return false;
+		}
+		auto& incoming = states[successor];
+		if (!incoming.reachable)
+		{
+			incoming = outgoing;
+			incoming.reachable = true;
+			work_list.push_back(successor);
+			return true;
+		}
+		const bool may  = incoming.may_reused || outgoing.may_reused;
+		const bool must = incoming.must_reused && outgoing.must_reused;
+		if (may != incoming.may_reused || must != incoming.must_reused)
+		{
+			incoming.may_reused  = may;
+			incoming.must_reused = must;
+			work_list.push_back(successor);
+		}
+		return true;
+	};
+	while (!work_list.empty())
+	{
+		const uint32_t index = work_list.back();
+		work_list.pop_back();
+		const auto& instruction = instructions.At(index);
+		State outgoing = states[index];
+		const uint8_t written = ComputeWaveInstructionSgprPairWriteMask(instruction, pair_start);
+		if (written != 0)
+		{
+			outgoing.may_reused = true;
+			outgoing.must_reused = written == 3u;
+		}
+		if (ShaderInstructionHasStaticBranchTarget(instruction.type))
+		{
+			const auto target = instruction_index.find(ShaderLabel(instruction).GetDst());
+			if (target == instruction_index.end() || !propagate(target->second, outgoing))
+			{
+				return {false, instruction.pc, "paired extended pointer base branch target is unresolved"};
+			}
+			if (instruction.type == ShaderInstructionType::SBranch)
+			{
+				continue;
+			}
+		}
+		if (instruction.type == ShaderInstructionType::SEndpgm)
+		{
+			continue;
+		}
+		if (instruction.type == ShaderInstructionType::SSetpcB64 || !propagate(index + 1, outgoing))
+		{
+			return {false, instruction.pc, "paired extended pointer base control flow is unresolved"};
+		}
+	}
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& instruction = instructions.At(index);
+		const auto& state = states[index];
+		const auto name = Core::EnumName8(instruction.type);
+		const bool mapped_load = instruction.src_num > 0 &&
+		                         ComputeWaveOperandMayReadSgprPair(instruction.src[0], pair_start) &&
+		                         (ShaderPairedEudStorageLoadSupported(instruction, bind) || name.StartsWith("SLoad"));
+		if (ComputeWaveInstructionHasInvalidSgprSource(instruction))
+		{
+			return {false, instruction.pc, "paired extended pointer base has an invalid SGPR source"};
+		}
+		if (mapped_load && (!state.reachable || state.may_reused))
+		{
+			return {false, instruction.pc, "paired extended pointer base may have changed before a mapped S_LOAD"};
+		}
+		if (ComputeWaveInstructionMayReadEudBase(instruction, pair_start, bind) && (!state.reachable || !state.must_reused))
+		{
+			return {false, instruction.pc, "paired extended pointer base SGPR pair is read before a full ordinary write"};
+		}
+		const uint8_t written = ComputeWaveInstructionSgprPairWriteMask(instruction, pair_start);
+		if (written != 0u && written != 3u)
+		{
+			return {false, instruction.pc, "paired extended pointer base SGPR pair is only partly or invalidly overwritten"};
+		}
+	}
+	return {true, 0, {}};
 }
 
 bool IsWaveBranchInstruction(const ShaderInstruction& instruction)
@@ -1034,21 +1180,7 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& c
 			result.reason         = "paired extended pointer base SGPR pair is outside the valid architectural range";
 			return result;
 		}
-		for (const auto& instruction: instructions)
-		{
-			if (ComputeWaveInstructionMayOverwriteEudBase(instruction, extended_base))
-			{
-				result.unsupported_pc = instruction.pc;
-				result.reason         = "paired extended pointer base SGPR pair may be overwritten";
-				return result;
-			}
-			if (ComputeWaveInstructionMayReadEudBase(instruction, extended_base, input.bind))
-			{
-				result.unsupported_pc = instruction.pc;
-				result.reason         = "paired extended pointer base SGPR pair is read outside its exact mapped S_LOAD operand";
-				return result;
-			}
-		}
+		return AnalyzeExtendedBaseLifetime(code, input.bind, extended_base);
 	}
 	return lds_safety;
 }
