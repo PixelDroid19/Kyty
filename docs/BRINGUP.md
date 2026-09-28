@@ -259,9 +259,15 @@ When switching private fixtures (or adding a second root):
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native
 mode now passes the former dynamic-storage write-back, fused ES+GS register,
 offset image-sample, storage-image alias, render-target-format, first
-audio-propagation imports, and bounded libc string imports. The current first
-exit is `!create_all_the_same` while creating a `StorageTexture` with mixed
-overlap relations, including `Contains`, `Crosses`, and `IsContainedWithin`.
+audio-propagation imports, bounded libc string imports, and three later
+storage-image overlap cases. The current first exit is an unknown single-parent
+`RenderTexture Crosses StorageTexture` relation in `GpuMemoryCreate.cpp:1191`.
+The incoming 2432×1368 R16G16B16A16 image has `skip_seed=0`; its 16×1-group
+indirect dispatch does not prove a full overwrite. The source of the overlapping
+GPU-owned parent bytes must be established before changing that relation. The
+parent is still in use, its GPU update is newer than its CPU update, and its
+tiled view has no write-back callback; simply seeding from guest memory or
+reclaiming it would lose observed content.
 There is no scored capture or controllable gameplay evidence from this run.
 
 - A scalar-loaded storage descriptor consumed by vector stores or atomics is
@@ -280,6 +286,15 @@ There is no scored capture or controllable gameplay evidence from this run.
   parents. GDB confirmed skip mask `0x2` at the actual dispatch. The strict
   run passed the former `!create_all_the_same` exit. The proof rejects
   incomplete coverage and destination reads in focused tests.
+- A later native 16×16 reduction dispatch loads its destination descriptor
+  after sampling a separate source, then writes one R32 texel per selected
+  2×2 block. A bounded symbolic proof tracks the EXEC reset, even-coordinate
+  predicate, and 8×8 output tile; 152×86 and 76×43 dispatches cover the
+  observed output extents. The fully overwritten images can retain live render,
+  storage, and sampled-image parents in the captured overlap relations. Another
+  8×8 dispatch writes two destinations under bounds read from a buffer; the
+  observed bounds match its 1216×684 output and the computed 152×86 grid
+  covers it. Focused tests and strict runs passed all three former exits.
 - The next render target was 3840×2160, tile `0x1b`, with color format
   `0x9`, UNORM type `0`, and alternate component order `1`. A focused
   red/green test and the next strict run confirmed the 4-byte
@@ -305,9 +320,15 @@ The subsequent `Xnrfb2-WhVw` import is `strnstr`: two independent local
 emulator catalogs agree on the name, and the live guest passes haystack,
 needle, and a haystack byte limit. A focused bound test and strict run passed
 that import, reached later load phases, then stopped at the separate mixed
-`StorageTexture` overlap above. The earlier wave64 storage-image proof covers
-only its captured writer and layout; do not reuse its skip policy for this
-new image without tracing its producer, parent types, and coverage.
+`StorageTexture` overlap. The later reduction and bounded dual-output writers
+were traced separately and passed as described above. Their proofs do not
+apply to the current partially written image.
+
+An explicit native capture at the first present returned `unsupported_format`:
+`Window.cpp:442` accepts only its current SRGB/HDR readback formats. No PNG was
+published. Inspect the actual VideoOut format at that milestone and implement
+its verified conversion or capture a later supported surface before scoring;
+the first present alone is not visual acceptance.
 
 ### Generic wave64 compute frontier (2026-09-26, not gameplay)
 

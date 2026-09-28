@@ -142,6 +142,122 @@ TEST(EmulatorShaderMimg, RejectsIncompleteOrReadBeforeWriteStorageOverwrite)
 	}
 }
 
+static ShaderCode MakeQuadReductionShader(bool restore_exec = true, bool read_destination = false, bool full_channel_store = true,
+                                          bool skipped_scalar_write = false)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	auto add = [&code](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> sources)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		inst.type    = type;
+		inst.dst     = dst;
+		inst.src_num = static_cast<int>(sources.size());
+		int source_index = 0;
+		for (const auto source: sources)
+		{
+			inst.src[source_index++] = source;
+		}
+		code.GetInstructions().Add(inst);
+	};
+	add(ShaderInstructionType::VLshlAddU32, TileVgpr(3), {TileSgpr(15), TileConstant(4), TileVgpr(1)});
+	add(ShaderInstructionType::VLshlAddU32, TileVgpr(2), {TileSgpr(14), TileConstant(4), TileVgpr(0)});
+	add(ShaderInstructionType::VCmpxGtU32, {}, {TileSgpr(17), TileVgpr(3)});
+	const int early_branch_index = code.GetInstructions().Size();
+	add(ShaderInstructionType::SCbranchExecz, {}, {TileConstant(0)});
+	add(ShaderInstructionType::ImageLoad, TileVgpr(4), {TileVgpr(2), TileSgpr(0, 8)});
+	if (skipped_scalar_write)
+	{
+		add(ShaderInstructionType::SLoadDwordx8, TileSgpr(20, 8), {TileSgpr(12, 2), TileConstant(0)});
+	}
+	if (restore_exec)
+	{
+		ShaderOperand exec {.type = ShaderOperandType::ExecLo, .size = 2};
+		const uint32_t reset_pc = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		code.GetInstructions()[early_branch_index].src[0].constant.u =
+		    reset_pc - (code.GetInstructions().At(early_branch_index).pc + 4);
+		add(ShaderInstructionType::SMovB64, exec, {TileConstant(UINT32_MAX)});
+	}
+	add(ShaderInstructionType::VAndB32, TileVgpr(4), {TileConstant(1), TileVgpr(1)});
+	add(ShaderInstructionType::VAndB32, TileVgpr(5), {TileConstant(1), TileVgpr(0)});
+	add(ShaderInstructionType::VCmpxEqU32, {}, {TileConstant(0), TileVgpr(4)});
+	add(ShaderInstructionType::VCmpxEqU32, {}, {TileConstant(0), TileVgpr(5)});
+	const int branch_index = code.GetInstructions().Size();
+	add(ShaderInstructionType::SCbranchExecz, {}, {TileConstant(0)});
+	add(ShaderInstructionType::VLshrrevB32, TileVgpr(0), {TileConstant(1), TileVgpr(2)});
+	add(ShaderInstructionType::VLshrrevB32, TileVgpr(1), {TileConstant(1), TileVgpr(3)});
+	add(ShaderInstructionType::SLoadDwordx8, TileSgpr(0, 8), {TileSgpr(12, 2), TileConstant(0)});
+	if (read_destination)
+	{
+		add(ShaderInstructionType::ImageLoad, TileVgpr(6), {TileVgpr(0), TileSgpr(0, 8)});
+	}
+	ShaderInstruction store {};
+	store.pc               = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+	store.type             = ShaderInstructionType::ImageStore;
+	store.src[0]           = TileVgpr(0);
+	store.src[0].size      = 3;
+	store.src[1]           = TileSgpr(0, 8);
+	store.src_num          = 2;
+	store.mimg_dimension   = 1;
+	store.mimg_dmask       = full_channel_store ? 1 : 2;
+	code.GetInstructions().Add(store);
+	add(ShaderInstructionType::SEndpgm, {}, {});
+	code.GetInstructions()[branch_index].src[0].constant.u =
+	    code.GetInstructions().At(code.GetInstructions().Size() - 1).pc -
+	    (code.GetInstructions().At(branch_index).pc + 4);
+	return code;
+}
+
+static ShaderBindResources QuadReductionBinding(const ShaderCode& code)
+{
+	ShaderBindResources bind {};
+	bind.textures2D.textures_num = 2;
+	bind.textures2D.desc[0].usage = ShaderTextureUsage::ReadOnly;
+	bind.textures2D.desc[0].start_register = 0;
+	bind.textures2D.desc[1].usage = ShaderTextureUsage::ReadWrite;
+	bind.textures2D.desc[1].textures2d_without_sampler = true;
+	bind.textures2D.desc[1].texture.fields[1] = 22u << 20u;
+	ShaderDynamicSLoadMapping record {};
+	record.kind                 = ShaderDynamicSLoadResourceKind::Texture;
+	record.resource_index       = 1;
+	record.destination_register = 0;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::SLoadDwordx8 && inst.dst.register_id == 0)
+		{
+			record.instruction_pc = inst.pc;
+			break;
+		}
+	}
+	record.last_consumer_pc     = code.GetInstructions().At(code.GetInstructions().Size() - 2).pc;
+	record.dword_count          = 8;
+	bind.dynamic_sloads.records.Add(record);
+	return bind;
+}
+
+TEST(EmulatorShaderMimg, ProvesQuadReductionStorageOverwrite)
+{
+	const auto code = MakeQuadReductionShader();
+	const auto bind = QuadReductionBinding(code);
+	const uint32_t threads[3] = {16, 16, 1};
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 1, 14, threads, true);
+	EXPECT_EQ(coverage.width, 8u);
+	EXPECT_EQ(coverage.height, 8u);
+}
+
+TEST(EmulatorShaderMimg, RejectsUnprovenQuadReductionStorageOverwrite)
+{
+	const uint32_t threads[3] = {16, 16, 1};
+	for (const auto& code: {MakeQuadReductionShader(false), MakeQuadReductionShader(true, true),
+	                       MakeQuadReductionShader(true, false, false), MakeQuadReductionShader(true, false, true, true)})
+	{
+		const auto bind = QuadReductionBinding(code);
+		const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 1, 14, threads, true);
+		EXPECT_EQ(coverage.width, 0u);
+	}
+}
+
 TEST(EmulatorShaderMimg, RejectsGen5MimgExtendedOpcodeInsteadOfAliasingImageLoad)
 {
 	// GFX10 MIMG encodes OP[7] in word zero bit zero, not beside OP[6:0].

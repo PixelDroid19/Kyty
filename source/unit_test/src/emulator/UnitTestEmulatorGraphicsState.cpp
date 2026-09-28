@@ -3799,9 +3799,17 @@ TEST(EmulatorGraphicsState, LinksOnlyFullyOverwrittenStorageImageSurfaceParents)
 	                                                          Type::StorageTexture, true));
 	EXPECT_FALSE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::RenderTexture, Relation::Crosses,
 	                                                           Type::StorageTexture, false));
-	EXPECT_FALSE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::Texture, Relation::Crosses,
-	                                                           Type::StorageTexture, true));
+	EXPECT_TRUE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::Texture, Relation::Crosses,
+	                                                          Type::StorageTexture, true));
+	EXPECT_TRUE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::RenderTexture, Relation::Contains,
+	                                                          Type::StorageTexture, true));
+	EXPECT_TRUE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::StorageTexture, Relation::Contains,
+	                                                          Type::StorageTexture, true));
 	EXPECT_FALSE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::RenderTexture, Relation::Contains,
+	                                                           Type::StorageTexture, false));
+	EXPECT_TRUE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::StorageTexture, Relation::Crosses,
+	                                                          Type::StorageTexture, true));
+	EXPECT_FALSE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::Texture, Relation::Contains,
 	                                                           Type::StorageTexture, true));
 }
 

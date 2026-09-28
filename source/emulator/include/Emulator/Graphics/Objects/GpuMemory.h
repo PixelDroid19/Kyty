@@ -293,12 +293,24 @@ inline bool GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType existing_type
 inline bool GpuMemoryAllowsOverwrittenStorageTextureParent(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                            GpuMemoryObjectType incoming_type, bool skip_seed)
 {
-	if (!skip_seed || incoming_type != GpuMemoryObjectType::StorageTexture ||
-	    (existing_type != GpuMemoryObjectType::RenderTexture && existing_type != GpuMemoryObjectType::StorageBuffer))
+	if (!skip_seed || incoming_type != GpuMemoryObjectType::StorageTexture)
 	{
 		return false;
 	}
-	return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin;
+	if (existing_type == GpuMemoryObjectType::StorageTexture)
+	{
+		return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses;
+	}
+	if (existing_type == GpuMemoryObjectType::Texture)
+	{
+		return relation == GpuMemoryOverlapType::Crosses;
+	}
+	if (existing_type != GpuMemoryObjectType::RenderTexture && existing_type != GpuMemoryObjectType::StorageBuffer)
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+	       relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
 // VertexBuffer parent of an incoming StorageBuffer (multi-parent link path).

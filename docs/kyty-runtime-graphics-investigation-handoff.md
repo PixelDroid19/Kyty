@@ -326,14 +326,39 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Partial storage image after the covered-image passes (2026-09-27): the
+  strict Silent/Native run passed three earlier multi-parent storage-image
+  exits, then stopped in `GpuMemoryCreate.cpp:1191` on a single live
+  `RenderTexture Crosses StorageTexture` relation. The incoming 2432×1368
+  R16G16B16A16 image has `skip_seed=0`; the indirect dispatch is only 16×1
+  groups, so reusing the full-overwrite alias policy is excluded. The parent
+  is still in use and GPU-newer than CPU, with tiled storage and no write-back
+  callback; plain guest upload or reclaim would lose that content. Trace the
+  intended byte ownership and layout before deciding how to materialize it. The
+  first-present `kyty_agent capture` returned `unsupported_format` at
+  `Window.cpp:442`; no scored native capture or gameplay is proven.
+
+- Covered later storage-image overlaps (2026-09-27): a native 16×16 compute
+  shader samples one image, resets EXEC, selects even local coordinates, and
+  writes one R32 texel per 2×2 input block through a dynamically loaded
+  descriptor. The symbolic 8×8 tile proof rejects missing EXEC reset,
+  destination reads, and incomplete component stores. Its dispatches cover
+  both observed output sizes. A second 8×8 shader writes two images under
+  bounds read from a buffer; the live bounds equal the output extent, and
+  its dispatch covers the extent. `skip_seed` was set at both actual bindings.
+  The formerly rejected `Contains` render/storage and `Crosses` sampled/storage
+  parent views remain linked only under that full-overwrite contract. Focused
+  tests and successive strict runs advanced beyond those exits. This evidence
+  says nothing about the current partial writer above.
+
 - Bounded libc substring import (2026-09-27): local independent emulator
   catalogs identify `Xnrfb2-WhVw` as `strnstr`. The guest passes a path,
   a prefix needle, and the path's byte limit; the focused test covers matches,
   bounds, misses, and the empty needle. The strict run passed the former
   missing import and reached a later `StorageTexture` overlap with mixed
-  `Contains`, `Crosses`, and `IsContainedWithin` relations. Parent types and
-  the new image's writer remain to be captured before changing alias policy.
-  No presentation or gameplay is proven.
+  `Contains`, `Crosses`, and `IsContainedWithin` relations. Those parent types
+  and the writer were captured in the covered-image investigation above.
+  That import-stage run alone did not prove presentation or gameplay.
 
 - libc string NID correction (2026-09-27): the empty-basename `.agx` graph
   lookup was caused by mapping `NC4MSB+BRQg` to a formatter. The guest's

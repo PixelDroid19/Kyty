@@ -933,6 +933,7 @@ ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int sta
 namespace {
 
 constexpr uint32_t k_tile_lanes = 64;
+constexpr uint32_t k_grid_lanes = 256;
 constexpr uint32_t k_max_tile_extent = 256;
 
 struct ShaderTileValue
@@ -940,7 +941,7 @@ struct ShaderTileValue
 	bool valid = false;
 	uint32_t group_x = 0;
 	uint32_t group_y = 0;
-	std::array<uint32_t, k_tile_lanes> lane {};
+	std::array<uint32_t, k_grid_lanes> lane {};
 };
 
 bool ShaderTilePlainOperand(const ShaderOperand& operand)
@@ -1001,6 +1002,28 @@ ShaderTileValue ShaderTileEvaluateInstruction(const ShaderInstruction& inst, con
 	switch (inst.type)
 	{
 		case ShaderInstructionType::VLshrrevB32:
+			if (!ShaderTileLaneOnly(a))
+			{
+				return result;
+			}
+			if (!ShaderTileLaneOnly(b))
+			{
+				const uint32_t shift = a.lane[0];
+				if (shift > 8u || (b.group_x % (1u << shift)) != 0u || (b.group_y % (1u << shift)) != 0u)
+				{
+					return result;
+				}
+				for (uint32_t lane = 1; lane < lane_count; ++lane)
+				{
+					if (a.lane[lane] != shift)
+					{
+						return result;
+					}
+				}
+				result.group_x = b.group_x >> shift;
+				result.group_y = b.group_y >> shift;
+			}
+			break;
 		case ShaderInstructionType::VBfeU32:
 		case ShaderInstructionType::VAndB32:
 		case ShaderInstructionType::VAndOrB32:
@@ -1114,7 +1137,8 @@ bool ShaderTileStoreCoordinates(const ShaderInstruction& inst, const std::array<
 }
 
 bool ShaderTileMarkStore(const ShaderTileValue& x, const ShaderTileValue& y, uint32_t lane_count,
-	                     ShaderStorageImageTileCoverage* coverage, std::vector<uint8_t>* seen)
+	                     ShaderStorageImageTileCoverage* coverage, std::vector<uint8_t>* seen,
+	                     const std::array<uint8_t, k_grid_lanes>* active = nullptr)
 {
 	EXIT_IF(coverage == nullptr || seen == nullptr);
 	if (coverage->width == 0)
@@ -1129,6 +1153,10 @@ bool ShaderTileMarkStore(const ShaderTileValue& x, const ShaderTileValue& y, uin
 	}
 	for (uint32_t lane = 0; lane < lane_count; ++lane)
 	{
+		if (active != nullptr && (*active)[lane] == 0)
+		{
+			continue;
+		}
 		if (x.lane[lane] >= coverage->width || y.lane[lane] >= coverage->height)
 		{
 			return false;
@@ -1178,12 +1206,174 @@ void ShaderTileInvalidateVgpr(const ShaderOperand& destination, std::array<Shade
 	}
 }
 
+ShaderStorageImageTileCoverage AnalyzeShaderStorageImageGridCoverage(const ShaderCode& code, const ShaderBindResources& bind,
+	                                                                 int texture_index, int workgroup_register,
+	                                                                 const uint32_t threads[3])
+{
+	if (threads[0] != 16u || threads[1] != 16u || threads[2] != 1u ||
+	    bind.textures2D.desc[texture_index].texture.Format() != 22u)
+	{
+		return {};
+	}
+	const auto& instructions = code.GetInstructions();
+	if (instructions.IsEmpty() || instructions.At(instructions.Size() - 1).type != ShaderInstructionType::SEndpgm)
+	{
+		return {};
+	}
+	uint32_t reset_pc = UINT32_MAX;
+	for (const auto& inst: instructions)
+	{
+		if (inst.type == ShaderInstructionType::SMovB64 && inst.dst.type == ShaderOperandType::ExecLo &&
+		    inst.dst.size == 2 && inst.src_num == 1 &&
+		    (inst.src[0].type == ShaderOperandType::IntegerInlineConstant ||
+		     inst.src[0].type == ShaderOperandType::LiteralConstant) &&
+		    inst.src[0].constant.u == UINT32_MAX)
+		{
+			if (reset_pc != UINT32_MAX)
+			{
+				return {};
+			}
+			reset_pc = inst.pc;
+		}
+	}
+	if (reset_pc == UINT32_MAX)
+	{
+		return {};
+	}
+
+	std::array<ShaderTileValue, 256> registers {};
+	registers[0].valid = true;
+	registers[1].valid = true;
+	for (uint32_t lane = 0; lane < k_grid_lanes; ++lane)
+	{
+		registers[0].lane[lane] = lane % threads[0];
+		registers[1].lane[lane] = lane / threads[0];
+	}
+	std::array<uint8_t, k_grid_lanes> active {};
+	bool restored = false;
+	bool predicated_before_reset = false;
+	bool skipped_to_reset = false;
+	ShaderStorageImageTileCoverage coverage {};
+	std::vector<uint8_t> seen;
+	const uint32_t end_pc = instructions.At(instructions.Size() - 1).pc;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (inst.pc == reset_pc)
+		{
+			restored = true;
+			active.fill(1);
+			predicated_before_reset = false;
+			skipped_to_reset = false;
+			continue;
+		}
+		if (inst.type == ShaderInstructionType::VCmpxGtU32 && !restored)
+		{
+			predicated_before_reset = true;
+			continue;
+		}
+		if (inst.type == ShaderInstructionType::VCmpxEqU32 && restored && inst.src_num == 2)
+		{
+			const auto a = ShaderTileReadOperand(inst.src[0], registers, workgroup_register);
+			const auto b = ShaderTileReadOperand(inst.src[1], registers, workgroup_register);
+			if (!ShaderTileLaneOnly(a) || !ShaderTileLaneOnly(b))
+			{
+				return {};
+			}
+			for (uint32_t lane = 0; lane < k_grid_lanes; ++lane)
+			{
+				active[lane] &= static_cast<uint8_t>(a.lane[lane] == b.lane[lane]);
+			}
+			continue;
+		}
+		if (inst.type == ShaderInstructionType::SCbranchExecz && inst.src_num == 1 &&
+		    (inst.src[0].type == ShaderOperandType::LiteralConstant ||
+		     inst.src[0].type == ShaderOperandType::IntegerInlineConstant))
+		{
+			const uint64_t target_pc = static_cast<uint64_t>(inst.pc) + 4u + inst.src[0].constant.u;
+			if (target_pc != (restored ? end_pc : reset_pc) ||
+			    (!restored && (!predicated_before_reset || skipped_to_reset)))
+			{
+				return {};
+			}
+			skipped_to_reset = !restored;
+			continue;
+		}
+		// The pre-reset branch may bypass only a source read. Any skipped
+		// scalar or coordinate producer could change a later destination write.
+		if (skipped_to_reset && !ShaderInstructionReadsImageResource(inst.type) &&
+		    inst.type != ShaderInstructionType::SWaitcnt)
+		{
+			return {};
+		}
+		if (!ShaderTileControlFlowIsLinear(inst, index + 1 == instructions.Size()))
+		{
+			return {};
+		}
+		if (inst.dst.type == ShaderOperandType::Sgpr && inst.dst.size > 0 &&
+		    inst.dst.register_id <= workgroup_register + 1 &&
+		    inst.dst.register_id + inst.dst.size > workgroup_register)
+		{
+			return {};
+		}
+		if (ShaderInstructionReadsImageResource(inst.type) || ShaderInstructionWritesImageResource(inst.type))
+		{
+			const int resource_index = ShaderTileImageResourceIndex(inst, bind);
+			if (resource_index == -2 || (resource_index == texture_index && inst.type != ShaderInstructionType::ImageStore) ||
+			    (ShaderInstructionWritesImageResource(inst.type) && resource_index != texture_index))
+			{
+				return {};
+			}
+			if (resource_index == texture_index)
+			{
+				if (!restored || inst.mimg_dimension != 1 || inst.mimg_dmask != 1)
+				{
+					return {};
+				}
+				ShaderTileValue x {};
+				ShaderTileValue y {};
+				if (!ShaderTileStoreCoordinates(inst, registers, &x, &y) ||
+				    !ShaderTileMarkStore(x, y, k_grid_lanes, &coverage, &seen, &active))
+				{
+					return {};
+				}
+			}
+		}
+		if (inst.dst.type == ShaderOperandType::Vgpr && inst.type != ShaderInstructionType::ImageStore &&
+		    inst.type != ShaderInstructionType::ImageStoreMip)
+		{
+			const auto value = predicated_before_reset ? ShaderTileValue {}
+			                                          : ShaderTileEvaluateInstruction(inst, registers, workgroup_register, k_grid_lanes);
+			ShaderTileInvalidateVgpr(inst.dst, &registers);
+			if (inst.dst.register_id >= 0 && inst.dst.register_id < 256 && inst.dst.size == 1)
+			{
+				registers[inst.dst.register_id] = value;
+			}
+		}
+		ShaderTileInvalidateVgpr(inst.dst2, &registers);
+	}
+	if (coverage.width == 0 || !std::all_of(seen.begin(), seen.end(), [](uint8_t value) { return value != 0; }))
+	{
+		return {};
+	}
+	return coverage;
+}
+
 } // namespace
 
 ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code, const ShaderBindResources& bind,
                                                                     int texture_index, int workgroup_register,
-                                                                    const uint32_t threads[3])
+                                                                    const uint32_t threads[3], bool native_xy_thread_ids)
 {
+	if (threads != nullptr && texture_index >= 0 && texture_index < bind.textures2D.textures_num && workgroup_register >= 0 &&
+	    bind.textures2D.desc[texture_index].textures2d_without_sampler && native_xy_thread_ids)
+	{
+		const auto grid_coverage = AnalyzeShaderStorageImageGridCoverage(code, bind, texture_index, workgroup_register, threads);
+		if (grid_coverage.width != 0)
+		{
+			return grid_coverage;
+		}
+	}
 	if (threads == nullptr || threads[0] == 0 || threads[0] > k_tile_lanes || threads[1] != 1 || threads[2] != 1 ||
 	    texture_index < 0 || texture_index >= bind.textures2D.textures_num || workgroup_register < 0 ||
 	    !bind.textures2D.desc[texture_index].textures2d_without_sampler)
