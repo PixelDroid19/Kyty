@@ -337,9 +337,23 @@ against the same correct gameplay capture.
   and per-dispatch snapshot now skip that semantically empty dispatch. The
   strict probe confirmed the gate fired and advanced to a different R32
   depth-tile upload with eight mips. The tile-size fallback only describes mip
-  zero when no catalog entry matches. Do not make up offsets for the remaining
-  mips or broaden the raw render alias to depth tiling; first capture and
-  validate the actual per-level layout and data owner.
+  zero when no catalog entry matches. The per-level layout and next strict
+  frontier are recorded below; raw color-to-depth aliasing remains excluded.
+
+- Depth mip storage view exclusion (2026-09-28): the earlier 768 KiB R32
+  depth-tile size was only mip zero, not the eight-level allocation. The
+  1152 KiB chain has reverse-ordered ordinary mips and a shared 64 KiB tail.
+  An observed 8×8 compute shader executes `IMAGE_STORE` against a view whose
+  base and last levels are 6, then a second view requests level 7 of the same
+  backing. Treating either view as the origin of Kyty's one-level mip atlas
+  would write the wrong texels; creating two independent overlapping images
+  also lost their shared GPU state. Single-level Vulkan storage views now
+  select the guest base level on one mipmapped image. The first implementation
+  wrongly expected a 2D resource's normalized layer count to be zero; the
+  binding actually passes one. After correcting that and sharing the image,
+  a strict run passed both overlap exits and reached a distinct D16
+  depth-reference binding failure. Its native capture at present 30 was
+  uniform black. No gameplay or correct rendering follows from the presents.
 
 - Late Xe `execbuf` ENOMEM (2026-09-28): two bounded strict runs returned
   `VK_ERROR_DEVICE_LOST` on compute submissions near sequences 2009 and 2052,

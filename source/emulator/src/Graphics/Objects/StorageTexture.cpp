@@ -5,6 +5,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Gen5TextureArrayLayout.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -109,7 +110,6 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	auto nfmt   = (params[StorageTextureObject::PARAM_FORMAT]) & 0xffu;
 	auto width  = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
 	auto height = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
-	// auto base_level = params[StorageTextureObject::PARAM_LEVELS] >> 32u;
 	auto       levels            = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
 	auto       pitch             = params[StorageTextureObject::PARAM_PITCH];
 	auto       resource_type     = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
@@ -177,7 +177,38 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	if (depth64kb32)
 	{
 		const bool one_2d_layer =
-		    (resource_type == 9u && depth == 0u && base_array == 0u) || (arrayed_2d && depth == 1u && base_array == 0u);
+		    (resource_type == 9u && depth == 1u && base_array == 0u) || (arrayed_2d && depth == 1u && base_array == 0u);
+		if (levels > 1u)
+		{
+			Gen5TextureMipLayout mip_layout {};
+			if (resource_type != 9u || depth != 1u || base_array != 0u ||
+			    !Gen5GetDepth64KBTextureMipLayout(static_cast<uint32_t>(fmt),
+			                                                         static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+			                                                         static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels),
+			                                                         &mip_layout) || *size != mip_layout.tiled.size)
+			{
+				EXIT("unsupported Gen5 depth storage mip backing: format=%u levels=%u size=0x%" PRIx64 "\n",
+				     static_cast<unsigned>(fmt), static_cast<unsigned>(levels), *size);
+			}
+			std::vector<uint8_t> linear(static_cast<size_t>(mip_layout.linear_size));
+			if (!Gen5DetileDepth64KBTextureMipChain(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr),
+			                                        *size, mip_layout))
+			{
+				EXIT("Gen5 depth storage mip detile failed: levels=%u\n", static_cast<unsigned>(levels));
+			}
+			Vector<BufferImageCopy> regions(static_cast<int>(levels));
+			for (uint32_t level = 0u; level < levels; level++)
+			{
+				const auto& mip        = mip_layout.level[level];
+				regions[level].offset    = mip.linear_offset;
+				regions[level].pitch     = mip.width;
+				regions[level].width     = mip.width;
+				regions[level].height    = mip.height;
+				regions[level].dst_level = level;
+			}
+			UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+			return;
+		}
 		if (!one_2d_layer || levels != 1u || pitch < width)
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !one_2d_layer || levels != 1u || pitch < width condition ignored (continuing)\n");
@@ -425,12 +456,14 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto       tile              = params[StorageTextureObject::PARAM_TILE];
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
+	const bool depth_mip_chain    = fmt == 22u && tile == 24u && levels > 1u && resource_type == 9u && depth == 1u &&
+	                                base_array == 0u;
 	if (resource_type != 8u && resource_type != 9u && !arrayed_2d && !three_dimensional)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported storage texture resource type (continuing)\n");
 	}
 
-	if (base_level != 0)
+	if (base_level != 0u && !depth_mip_chain)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_level != 0 condition ignored (continuing)\n");
 	}
@@ -468,7 +501,11 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: arrayed_2d && (depth == 0u || base_array >= depth) condition ignored (continuing)\n");
 	}
 
-	auto real_height = ((levels > 1) ? height + (height > 1 ? height / 2 : 1) : height);
+	if (depth_mip_chain && (base_level >= levels || levels > VulkanImage::VIEW_STORAGE_MIP_COUNT))
+	{
+		EXIT("unsupported depth storage mip view: base=%" PRIu64 " levels=%" PRIu64 "\n", base_level, levels);
+	}
+	auto real_height = ((levels > 1u && !depth_mip_chain) ? height + (height > 1u ? height / 2u : 1u) : height);
 
 	auto* vk_obj = new StorageTextureVulkanImage;
 
@@ -477,6 +514,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	image_descriptor.extent       = {static_cast<uint32_t>(width), static_cast<uint32_t>(real_height),
 	                                 static_cast<uint32_t>(three_dimensional ? depth : 1u)};
 	image_descriptor.array_layers = static_cast<uint32_t>(arrayed_2d ? depth : 1u);
+	image_descriptor.mip_levels   = static_cast<uint32_t>(depth_mip_chain ? levels : 1u);
 	image_descriptor.format       = pixel_format;
 	image_descriptor.usage        = vk_usage;
 	auto image_info               = VulkanBuildImageCreateInfo(image_descriptor);
@@ -538,6 +576,21 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
 		               "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[view_index]) condition "
 		               "ignored (continuing)\n");
+	}
+	if (depth_mip_chain)
+	{
+		view_descriptor.level_count    = 1u;
+		for (uint32_t level = 0u; level < levels; level++)
+		{
+			view_descriptor.base_mip_level = level;
+			if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor,
+			                                 &vk_obj->image_view[VulkanImage::VIEW_STORAGE_MIP_BASE + level]))
+			{
+				EXIT("failed to create depth storage mip view: level=%u\n", level);
+			}
+		}
+		view_descriptor.base_mip_level = 0u;
+		view_descriptor.level_count    = VK_REMAINING_MIP_LEVELS;
 	}
 	if (!three_dimensional)
 	{
@@ -672,8 +725,16 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 
 	const auto fmt       = static_cast<uint32_t>((params[PARAM_FORMAT] >> 16u) & 0xffffu);
 	const auto other_fmt = static_cast<uint32_t>((other[PARAM_FORMAT] >> 16u) & 0xffffu);
+	const bool depth_mip_chain = fmt == 22u && params[PARAM_TILE] == 24u && params[PARAM_RESOURCE_TYPE] == 9u &&
+	                             params[PARAM_DEPTH] == 1u && params[PARAM_BASE_ARRAY] == 0u &&
+	                             (params[PARAM_LEVELS] & 0xffffffffu) > 1u;
+	const bool same_depth_backing = depth_mip_chain && other_fmt == 22u && other[PARAM_TILE] == 24u &&
+	                                other[PARAM_RESOURCE_TYPE] == 9u && other[PARAM_DEPTH] == 1u &&
+	                                other[PARAM_BASE_ARRAY] == 0u &&
+	                                (params[PARAM_LEVELS] & 0xffffffffu) == (other[PARAM_LEVELS] & 0xffffffffu);
+	const bool same_levels = params[PARAM_LEVELS] == other[PARAM_LEVELS] || same_depth_backing;
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
-	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && params[PARAM_LEVELS] == other[PARAM_LEVELS] &&
+	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && same_levels &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
 	        NormalizeStorageTextureSwizzle(fmt, params[PARAM_SWIZZLE]) == NormalizeStorageTextureSwizzle(other_fmt, other[PARAM_SWIZZLE]) &&
 	        params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] && params[PARAM_DEPTH] == other[PARAM_DEPTH] &&

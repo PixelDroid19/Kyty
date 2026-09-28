@@ -58,7 +58,8 @@ struct VulkanImageViewDescriptor
 // Resolve the descriptor view for a storage-image bind. Render-target arrays
 // reuse their canonical identity array view; storage textures keep their
 // dedicated normalized storage view.
-[[nodiscard]] bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index);
+[[nodiscard]] bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index,
+                                                 uint32_t base_mip_level = 0u);
 
 // Decode the four guest 3-bit selectors. Unknown selector values are rejected;
 // they are never rewritten to IDENTITY.

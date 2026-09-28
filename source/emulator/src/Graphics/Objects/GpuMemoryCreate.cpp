@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
+#include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
@@ -1312,6 +1313,77 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
+			// A sampled depth mip chain just uploaded from guest memory can seed
+			// an exact storage view of the same range. Older, larger color and
+			// storage surfaces stay linked, but their different formats are not
+			// copied into the depth image. Re-detiling the same guest chain into
+			// the mipmapped storage image preserves every level before a partial write.
+			bool multi_depth_mip_storage_guest = info.type == GpuMemoryObjectType::StorageTexture && vaddr_num == 1 &&
+			    info.params[StorageTextureObject::PARAM_TILE] == 24u &&
+			    ((info.params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu) == 22u &&
+			    (info.params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) > 1u &&
+			    info.params[StorageTextureObject::PARAM_SKIP_SEED] == 0u;
+			int exact_guest_texture_id = -1;
+			if (multi_depth_mip_storage_guest)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& parent = heap.objects[obj.object_id];
+					EXIT_IF(parent.free);
+					if (!GpuMemoryAllowsDepthMipStorageParent(parent.info.object.type, obj.relation))
+					{
+						multi_depth_mip_storage_guest = false;
+						break;
+					}
+					if (parent.info.object.type != GpuMemoryObjectType::Texture)
+					{
+						continue;
+					}
+					const auto* image = static_cast<const TextureVulkanImage*>(parent.info.object.obj);
+					if (exact_guest_texture_id >= 0 || image == nullptr || parent.block.vaddr_num != 1 ||
+					    parent.block.vaddr[0] != vaddr[0] || parent.block.size[0] != size[0] ||
+					    parent.info.content_origin != GpuMemoryContentOrigin::CpuUpload || parent.info.write_back_func != nullptr ||
+					    parent.info.gpu_update_time != parent.info.cpu_update_time ||
+					    parent.info.params[TextureObject::PARAM_FORMAT] != info.params[StorageTextureObject::PARAM_FORMAT] ||
+					    parent.info.params[TextureObject::PARAM_WIDTH_HEIGHT] != info.params[StorageTextureObject::PARAM_WIDTH_HEIGHT] ||
+					    parent.info.params[TextureObject::PARAM_PITCH] != info.params[StorageTextureObject::PARAM_PITCH] ||
+					    (parent.info.params[TextureObject::PARAM_LEVELS] >> 32u) != 0u ||
+					    (parent.info.params[TextureObject::PARAM_LEVELS] & 0xffffffffu) !=
+					        (info.params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) ||
+					    (info.params[StorageTextureObject::PARAM_LEVELS] >> 32u) >=
+					        (info.params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu) ||
+					    parent.info.params[TextureObject::PARAM_TILE] != info.params[StorageTextureObject::PARAM_TILE] ||
+					    image->format != VK_FORMAT_R32_SFLOAT || image->mip_levels !=
+					        (info.params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu))
+					{
+						multi_depth_mip_storage_guest = false;
+						break;
+					}
+					exact_guest_texture_id = obj.object_id;
+				}
+				if (exact_guest_texture_id < 0)
+				{
+					multi_depth_mip_storage_guest = false;
+				}
+				if (multi_depth_mip_storage_guest)
+				{
+					const auto latest_guest_upload = heap.objects[exact_guest_texture_id].info.cpu_update_time;
+					for (const auto& obj: others)
+					{
+						if (obj.object_id == exact_guest_texture_id)
+						{
+							continue;
+						}
+						const auto& parent_info = heap.objects[obj.object_id].info;
+						if (std::max(parent_info.cpu_update_time, parent_info.gpu_update_time) > latest_guest_upload)
+						{
+							multi_depth_mip_storage_guest = false;
+							break;
+						}
+					}
+				}
+			}
+
 			bool multi_raw_render_alias = info.type == GpuMemoryObjectType::StorageTexture && buffer != nullptr &&
 			                              vaddr_num == 1 && info.params[StorageTextureObject::PARAM_SKIP_SEED] == 0u;
 			if (multi_raw_render_alias)
@@ -1580,7 +1652,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				create_from_objects   = true;
 				retire_after_copy_ids = storage_growth_ids;
 			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_raw_render_alias ||
-			           multi_overwritten_storage_texture || multi_vertex_in_surface || multi_render_target_alias)
+			           multi_overwritten_storage_texture || multi_depth_mip_storage_guest || multi_vertex_in_surface ||
+			           multi_render_target_alias)
 			{
 				overlap = true;
 			} else if (multi_texture_reclaim)

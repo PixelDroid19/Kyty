@@ -6,6 +6,7 @@
 
 #include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Profiler.h"
 
@@ -1992,6 +1993,34 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 	bool pow2 = (IsPowerOfTwo(width) && IsPowerOfTwo(height) && IsPowerOfTwo(pitch));
 
 	EXIT_IF(levels == 0 || levels > 16);
+	if (tile == 0x18u && levels > 1u && (format == 7u || format == 22u))
+	{
+		Gen5TextureMipLayout mip_layout {};
+		if (!Gen5GetDepth64KBTextureMipLayout(format, width, height, pitch, levels, &mip_layout))
+		{
+			EXIT("unsupported Gen5 depth mip layout: format=%u %ux%u pitch=%u levels=%u\n", format, width, height, pitch,
+			     levels);
+		}
+		if (total_size != nullptr)
+		{
+			*total_size = mip_layout.tiled;
+		}
+		for (uint32_t level = 0u; level < levels; level++)
+		{
+			const auto& mip = mip_layout.level[level];
+			if (level_sizes != nullptr)
+			{
+				level_sizes[level].offset = mip.tiled_offset;
+				level_sizes[level].size   = mip.tiled_size;
+			}
+			if (padded_size != nullptr)
+			{
+				padded_size[level].width  = mip.tiled_pitch;
+				padded_size[level].height = mip.in_mip_tail ? 128u : ((mip.height + 127u) & ~127u);
+			}
+		}
+		return;
+	}
 
 	FindTextureInfo2(format, width, height, pitch, tile, levels, &infos, &num, pow2);
 

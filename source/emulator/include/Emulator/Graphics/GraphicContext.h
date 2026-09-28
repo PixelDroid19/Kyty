@@ -187,7 +187,9 @@ enum class VulkanImageType
 
 struct VulkanImage
 {
-	static constexpr int VIEW_MAX                   = 11;
+	static constexpr int VIEW_STORAGE_MIP_BASE  = 11;
+	static constexpr int VIEW_STORAGE_MIP_COUNT = 16;
+	static constexpr int VIEW_MAX               = VIEW_STORAGE_MIP_BASE + VIEW_STORAGE_MIP_COUNT;
 	static constexpr int VIEW_DEFAULT       = 0;
 	static constexpr int VIEW_BGRA          = 1;
 	static constexpr int VIEW_DEPTH_TEXTURE = 2;

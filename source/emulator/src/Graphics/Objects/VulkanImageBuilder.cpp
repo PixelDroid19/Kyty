@@ -148,7 +148,8 @@ bool VulkanCreateCompatibleColorAttachmentViews(GraphicContext* context, VulkanI
 	return VulkanCreateDeviceImageView(context->device, descriptor, &image->image_view[index]);
 }
 
-bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index)
+bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index,
+                                   uint32_t base_mip_level)
 {
 	if (image == nullptr || view_index == nullptr || (image->usage & VK_IMAGE_USAGE_STORAGE_BIT) == 0u)
 	{
@@ -162,7 +163,17 @@ bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensio
 		*view_index = image->type == VulkanImageType::RenderTexture ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_STORAGE_ARRAY;
 	} else
 	{
-		*view_index = VulkanImage::VIEW_DEFAULT;
+		if (image->type == VulkanImageType::StorageTexture && image->mip_levels > 1u)
+		{
+			if (base_mip_level >= image->mip_levels || base_mip_level >= VulkanImage::VIEW_STORAGE_MIP_COUNT)
+			{
+				return false;
+			}
+			*view_index = VulkanImage::VIEW_STORAGE_MIP_BASE + static_cast<int>(base_mip_level);
+		} else
+		{
+			*view_index = VulkanImage::VIEW_DEFAULT;
+		}
 	}
 	return image->image_view[*view_index] != nullptr;
 }

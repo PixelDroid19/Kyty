@@ -3973,6 +3973,55 @@ TEST(EmulatorGraphicsState, LinksOnlyFullyOverwrittenStorageImageSurfaceParents)
 	                                                           Type::StorageTexture, true));
 }
 
+TEST(EmulatorGraphicsState, DepthMipStorageLinksExactTextureAndContainingSurfaces)
+{
+	using Type = GpuMemoryObjectType;
+	using Relation = GpuMemoryOverlapType;
+	EXPECT_TRUE(GpuMemoryAllowsDepthMipStorageParent(Type::Texture, Relation::Equals));
+	EXPECT_TRUE(GpuMemoryAllowsDepthMipStorageParent(Type::RenderTexture, Relation::Contains));
+	EXPECT_TRUE(GpuMemoryAllowsDepthMipStorageParent(Type::StorageTexture, Relation::Contains));
+	EXPECT_FALSE(GpuMemoryAllowsDepthMipStorageParent(Type::Texture, Relation::Contains));
+	EXPECT_FALSE(GpuMemoryAllowsDepthMipStorageParent(Type::StorageTexture, Relation::Equals));
+	EXPECT_FALSE(GpuMemoryAllowsDepthMipStorageParent(Type::RenderTexture, Relation::Crosses));
+	EXPECT_FALSE(GpuMemoryAllowsDepthMipStorageParent(Type::StorageBuffer, Relation::Contains));
+}
+
+TEST(EmulatorGraphicsState, StorageMipViewTargetsOneLevelWhileSamplingRetainsChain)
+{
+	const StorageTextureObject level6(0u, 0u, 22u, 480u, 270u, 512u, 6u, 8u, 24u, false,
+	                                  DstSel(4, 5, 6, 7), 9u, 1u);
+	const StorageTextureObject level7(0u, 0u, 22u, 480u, 270u, 512u, 7u, 8u, 24u, false,
+	                                  DstSel(4, 5, 6, 7), 9u, 1u);
+	const StorageTextureObject shorter(0u, 0u, 22u, 480u, 270u, 512u, 6u, 7u, 24u, false,
+	                                   DstSel(4, 5, 6, 7), 9u, 1u);
+	EXPECT_TRUE(level6.Equal(level7.params));
+	EXPECT_TRUE(level7.Equal(level6.params));
+	EXPECT_FALSE(level6.Equal(shorter.params));
+
+	StorageTextureVulkanImage image;
+	image.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	image.mip_levels = 8u;
+	image.image_view[VulkanImage::VIEW_DEFAULT] = reinterpret_cast<VkImageView>(0x1000);
+	image.image_view[VulkanImage::VIEW_STORAGE_MIP_BASE + 6] = reinterpret_cast<VkImageView>(0x2000);
+	image.image_view[VulkanImage::VIEW_STORAGE_MIP_BASE + 7] = reinterpret_cast<VkImageView>(0x3000);
+	int selected = -1;
+	ASSERT_TRUE(VulkanResolveStorageImageView(&image, false, false, &selected, 6u));
+	EXPECT_EQ(selected, VulkanImage::VIEW_STORAGE_MIP_BASE + 6);
+	ASSERT_TRUE(VulkanResolveStorageImageView(&image, false, false, &selected, 7u));
+	EXPECT_EQ(selected, VulkanImage::VIEW_STORAGE_MIP_BASE + 7);
+	EXPECT_FALSE(VulkanResolveStorageImageView(&image, false, false, &selected, 8u));
+	VulkanImageViewDescriptor storage_view {};
+	storage_view.base_mip_level = 6u;
+	storage_view.level_count = 1u;
+	const auto vk_view = VulkanBuildImageViewCreateInfo(storage_view);
+	EXPECT_EQ(vk_view.subresourceRange.baseMipLevel, 6u);
+	EXPECT_EQ(vk_view.subresourceRange.levelCount, 1u);
+	EXPECT_NE(image.image_view[VulkanImage::VIEW_DEFAULT], image.image_view[selected]);
+	image.mip_levels = 1u;
+	ASSERT_TRUE(VulkanResolveStorageImageView(&image, false, false, &selected));
+	EXPECT_EQ(selected, VulkanImage::VIEW_DEFAULT);
+}
+
 // Capture/disk bounds: unset env defaults to 1280 so 4K VideoOut dumps are not
 // multi-dozen-MB PNGs; explicit 0 keeps full resolution; prune math is pure.
 TEST(EmulatorGraphicsState, NativeCaptureDefaultsAndPruneBoundDisk)

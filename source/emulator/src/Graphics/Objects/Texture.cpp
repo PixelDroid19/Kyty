@@ -484,6 +484,42 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
 		return;
 	}
+	if (tile == 24u && levels > 1u)
+	{
+		if ((fmt != 7u && fmt != 22u) || depth_view || arrayed_2d || skip_guest)
+		{
+			EXIT("unsupported Gen5 depth mip upload: format=%u levels=%u depth_view=%u array=%u skip_guest=%u\n",
+			     static_cast<unsigned>(fmt), static_cast<unsigned>(levels), depth_view ? 1u : 0u,
+			     arrayed_2d ? 1u : 0u, skip_guest ? 1u : 0u);
+		}
+		Gen5TextureMipLayout mip_layout {};
+		if (!Gen5GetDepth64KBTextureMipLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+		                                     static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
+		                                     static_cast<uint32_t>(levels), &mip_layout) || *size != mip_layout.tiled.size)
+		{
+			EXIT("Gen5 depth mip backing mismatch: format=%u levels=%u size=0x%" PRIx64 "\n",
+			     static_cast<unsigned>(fmt), static_cast<unsigned>(levels), *size);
+		}
+		std::vector<uint8_t> linear(static_cast<size_t>(mip_layout.linear_size));
+		if (!Gen5DetileDepth64KBTextureMipChain(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size,
+		                                        mip_layout))
+		{
+			EXIT("Gen5 depth mip detile failed: format=%u levels=%u size=0x%" PRIx64 "\n",
+			     static_cast<unsigned>(fmt), static_cast<unsigned>(levels), *size);
+		}
+		Vector<BufferImageCopy> regions(static_cast<int>(levels));
+		for (uint32_t level = 0u; level < levels; level++)
+		{
+			const auto& mip        = mip_layout.level[level];
+			regions[level].offset    = mip.linear_offset;
+			regions[level].pitch     = mip.width;
+			regions[level].width     = mip.width;
+			regions[level].height    = mip.height;
+			regions[level].dst_level = level;
+		}
+		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+		return;
+	}
 
 	// GPU-owned range under a live color surface that could not be bound as an
 	// alias: never detile guest (period-16 bands). Transparent black clear.

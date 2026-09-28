@@ -314,6 +314,19 @@ inline bool GpuMemoryAllowsOverwrittenStorageTextureParent(GpuMemoryObjectType e
 	       relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
+// A depth-mip storage view may share its backing with the exact CPU-uploaded
+// sampled mip chain while older, larger GPU surfaces remain linked. The exact
+// texture is checked separately for format, extent, levels and update order.
+inline bool GpuMemoryAllowsDepthMipStorageParent(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation)
+{
+	if (existing_type == GpuMemoryObjectType::Texture)
+	{
+		return relation == GpuMemoryOverlapType::Equals;
+	}
+	return (existing_type == GpuMemoryObjectType::RenderTexture ||
+	        existing_type == GpuMemoryObjectType::StorageTexture) && relation == GpuMemoryOverlapType::Contains;
+}
+
 // VertexBuffer parent of an incoming StorageBuffer (multi-parent link path).
 // Matches CreateObject multi_vertex_storage_alias / multi_mixed_storage_alias.
 inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,

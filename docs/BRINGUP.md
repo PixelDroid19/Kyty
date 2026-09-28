@@ -254,7 +254,7 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
-### Inactive compute gate and depth mip frontier (2026-09-28, not gameplay)
+### Depth mip storage views and D16 reference frontier (2026-09-28, not gameplay)
 
 A strict Silent/Native run passed a mixed-parent storage-image creation that
 previously stopped at `!create_all_the_same`. The incoming R32 image lay inside
@@ -267,15 +267,28 @@ snapshot confirmed the guest value, and the new control-flow check omits only
 dispatches for which that value remains zero and the source range can be read
 without a writable GPU alias. Focused tests reject a bypass around the gate,
 an altered restore, other writes, an unproved binding, and a nonzero compare.
-The strict probe recorded that this gate fired, then reached a separate
-`unsupported depth tile upload` for an R32 depth-tiled image with eight mips
-(480×270, pitch 512, 768 KiB). Kyty's fallback size calculation for this tile
-mode only fills level zero when its catalog lacks an entry; the mip offsets
-cannot be inferred from that fallback. This new upload remains unresolved.
-Native captures and controlled gameplay are still absent. Intermittent Xe
-`execbuf` ENOMEM and guest-address import failures can stop earlier runs, so
-passing the former alias exit was checked in the run that logged the gate and
-the new depth-mip failure.
+The next R32 depth-tiled image has eight mips (480×270, pitch 512). The old
+size fallback covered only mip zero (768 KiB); the GFX10 depth-64KB mip layout
+occupies 1152 KiB, with the smaller levels in a shared 64 KiB tail. A focused
+red/green size test, detile test, public AddrLib layout comparison, and the
+adjacent guest allocation boundary support that layout. The strict run passed
+the former upload exit.
+
+The consuming compute shader uses `IMAGE_STORE` with an 8×8 group and a
+resource view at base level 6; another descriptor selects base level 7 of the
+same eight-level backing. Storage writes now use single-level Vulkan views of
+one mipmapped image, while its sampled view retains the full chain. Reuse
+requires matching format, extent, pitch, tiling, mip count, and seed policy;
+the mixed older color surfaces remain linked without being copied as depth.
+Four focused tests and a strict Silent/Native run passed both former
+`!create_all_the_same` exits. The run reached present 30, then stopped at
+`unsupported depth-reference image binding` in `GraphicsRenderBind.cpp`: a
+2048×2048, two-layer, D16 depth-64KB sample uses a depth-reference operation,
+but materialization resolved to `depth-unsupported`. Trace its mapped source,
+array-view eligibility, and reference view before changing the contract.
+The native present-30 capture is uniformly black (`entropy=0`, one color),
+and no controlled gameplay has been observed. Intermittent Xe `execbuf`
+ENOMEM can stop earlier runs; one diagnostic run did so before the mip writer.
 
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 

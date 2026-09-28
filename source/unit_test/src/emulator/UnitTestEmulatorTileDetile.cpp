@@ -5,6 +5,7 @@
 
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Gen5TextureArrayLayout.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -13,6 +14,7 @@
 
 #include "../../../emulator/src/Graphics/GraphicsRenderInternal.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -1591,6 +1593,71 @@ TEST(EmulatorTileDetile, Standard4KBBc1WorldAlbedoMipChainMatchesGuestSize)
 		++covered;
 	}
 	EXPECT_EQ(covered, k_levels);
+}
+
+TEST(EmulatorTileDetile, Depth64KBR32MipChainSizeIncludesTail)
+{
+	TileSizeAlign size {};
+	TileSizeOffset levels[8] {};
+	TileGetTextureSize2(22u, 480u, 270u, 512u, 8u, 24u, &size, levels, nullptr);
+	EXPECT_EQ(size.size, 0x120000u);
+	EXPECT_EQ(levels[0].offset, 0x60000u);
+	EXPECT_EQ(levels[1].offset, 0x20000u);
+	EXPECT_EQ(levels[2].offset, 0x10000u);
+}
+
+TEST(EmulatorTileDetile, Depth64KBR32MipChainHasPhysicalTailAndFullBacking)
+{
+	Gen5TextureMipLayout layout {};
+	ASSERT_TRUE(Gen5GetDepth64KBTextureMipLayout(22u, 480u, 270u, 512u, 8u, &layout));
+	EXPECT_EQ(layout.tiled.size, 0x120000u);
+	EXPECT_EQ(layout.tiled.align, 65536u);
+	EXPECT_EQ(layout.first_tail_level, 3u);
+
+	constexpr uint32_t k_offsets[] = {0x60000u, 0x20000u, 0x10000u, 0u, 0u, 0u, 0u, 0u};
+	constexpr uint32_t k_pitches[] = {512u, 256u, 128u, 128u, 128u, 128u, 128u, 128u};
+	constexpr uint32_t k_tail_x[]  = {0u, 0u, 0u, 64u, 0u, 32u, 0u, 16u};
+	constexpr uint32_t k_tail_y[]  = {0u, 0u, 0u, 0u, 64u, 0u, 32u, 0u};
+	std::vector<uint8_t> tiled(layout.tiled.size, 0u);
+	for (uint32_t level = 0; level < 8u; ++level)
+	{
+		const auto& mip = layout.level[level];
+		EXPECT_EQ(mip.width, std::max(1u, 480u >> level));
+		EXPECT_EQ(mip.height, std::max(1u, 270u >> level));
+		EXPECT_EQ(mip.tiled_offset, k_offsets[level]);
+		EXPECT_EQ(mip.tiled_pitch, k_pitches[level]);
+		EXPECT_EQ(mip.tail_x, k_tail_x[level]);
+		EXPECT_EQ(mip.tail_y, k_tail_y[level]);
+		EXPECT_EQ(mip.in_mip_tail, level >= 3u);
+		for (uint32_t sample = 0; sample < 3u; ++sample)
+		{
+			const uint32_t x = sample == 0u ? 0u : sample == 1u ? mip.width / 2u : mip.width - 1u;
+			const uint32_t y = sample == 0u ? 0u : sample == 1u ? mip.height / 2u : mip.height - 1u;
+			const uint64_t source = static_cast<uint64_t>(k_offsets[level]) +
+			                        TileGetDepth64KBOffset(x + k_tail_x[level], y + k_tail_y[level], k_pitches[level], 4u);
+			ASSERT_LE(source + 4u, tiled.size());
+			const uint32_t value = 0x3f000000u | (level << 12u) | (sample << 8u) | 0x5au;
+			std::memcpy(tiled.data() + source, &value, sizeof(value));
+		}
+	}
+
+	std::vector<uint8_t> linear(static_cast<size_t>(layout.linear_size), 0u);
+	ASSERT_TRUE(Gen5DetileDepth64KBTextureMipChain(linear.data(), linear.size(), tiled.data(), tiled.size(), layout));
+	for (uint32_t level = 0; level < 8u; ++level)
+	{
+		const auto& mip = layout.level[level];
+		for (uint32_t sample = 0; sample < 3u; ++sample)
+		{
+			const uint32_t x = sample == 0u ? 0u : sample == 1u ? mip.width / 2u : mip.width - 1u;
+			const uint32_t y = sample == 0u ? 0u : sample == 1u ? mip.height / 2u : mip.height - 1u;
+			const uint64_t dest = static_cast<uint64_t>(mip.linear_offset) + (static_cast<uint64_t>(y) * mip.width + x) * 4u;
+			uint32_t value = 0u;
+			std::memcpy(&value, linear.data() + dest, sizeof(value));
+			EXPECT_EQ(value, 0x3f000000u | (level << 12u) | (sample << 8u) | 0x5au);
+		}
+	}
+	EXPECT_FALSE(Gen5DetileDepth64KBTextureMipChain(linear.data(), linear.size(), tiled.data(), tiled.size() - 1u, layout));
+	EXPECT_FALSE(Gen5GetDepth64KBTextureMipLayout(22u, 480u, 270u, 480u, 8u, &layout));
 }
 
 TEST(EmulatorTileDetile, ParsesDrawPsTraceCensusAndExactChecksum)
