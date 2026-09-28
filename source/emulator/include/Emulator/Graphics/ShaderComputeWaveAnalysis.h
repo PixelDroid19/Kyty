@@ -30,7 +30,7 @@ enum class ShaderComputeWaveInstructionKind
 	BankedBufferLoad,
 	BankedSdwaExtract,
 	PackedExecMask,
-	// Per-lane VALU instruction emitted once per bank from its native emitter.
+	// Proven per-lane instruction emitted once per bank from its native emitter.
 	BankedGeneric,
 	// Per-lane LDS instruction emitted once per bank from its native emitter and
 	// followed by a subgroup barrier, which restores in-wave DS ordering.

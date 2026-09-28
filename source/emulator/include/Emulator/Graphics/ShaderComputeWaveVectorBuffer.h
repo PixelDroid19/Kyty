@@ -29,6 +29,12 @@ namespace Kyty::Libs::Graphics {
 [[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveVectorBufferLoad(const ShaderCode& code, uint32_t index,
                                                                                        const ShaderBindResources& bind);
 
+// BUFFER_ATOMIC_UMAX without a returned value: one guarded unsigned atomic
+// operation per active guest lane, using a proven, writable raw V# binding.
+[[nodiscard]] bool ShaderComputeWaveVectorBufferAtomicUmaxSupported(const ShaderInstruction& instruction);
+[[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(const ShaderCode& code, uint32_t index,
+                                                                                             const ShaderBindResources& bind);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

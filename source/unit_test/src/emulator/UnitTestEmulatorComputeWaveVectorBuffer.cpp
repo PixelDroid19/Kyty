@@ -2,10 +2,13 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveVectorBuffer.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 UT_BEGIN(EmulatorComputeWaveVectorBuffer);
@@ -201,6 +204,108 @@ TEST(EmulatorComputeWaveVectorBuffer, RejectsDescriptorsOutsideTheRawAccessContr
 	zero_policy.bind.zero_sbuffer_resources.start_register[0] = 16;
 	zero_policy.bind.zero_sbuffer_resources.buffers_num       = 1;
 	ExpectFirstUnsupportedPc(words, zero_policy, 0x10u, "paired BufferLoadDwordx2");
+}
+
+TEST(EmulatorComputeWaveVectorBuffer, AdmitsDirectRawUmaxWithoutReturn)
+{
+	// Synthetic BUFFER_ATOMIC_UMAX v5, v7, s[0:3], 0 offset:4.
+	// IDXEN/OFFEN/GLC and the unsupported cache/control bits are clear.
+	constexpr uint32_t atomic_w0 = 0xe0e00004u;
+	constexpr uint32_t atomic_w1 = 0x80000507u;
+	auto input = DirectInput();
+	input.bind.storage_buffers.start_register[0]   = 0;
+	input.bind.storage_buffers.sources[0]          = ShaderStorageBindingSource::MetadataSharp;
+	input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadWrite;
+	input.bind.storage_buffers.accesses[0]        = ShaderStorageAccess::Raw;
+	input.bind.storage_buffers.raw_vmem_oob_guarded[0] = true;
+	input.bind.storage_buffers.code_available[0]   = true;
+	input.bind.storage_buffers.exact_matches[0]    = true;
+	input.bind.storage_buffers.buffers[0].fields[1] = 1u << 16u;
+	input.bind.storage_buffers.buffers[0].fields[2] = 20u;
+	input.bind.push_constant_size                   = 16u;
+	const uint32_t shader_words[] = {atomic_w0, atomic_w1, kEnd};
+
+	ASSERT_EXIT(
+	    {
+		    InitializeConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(shader_words, sizeof(shader_words), &code) || !ShaderAnalyzeComputeWaveCode(code, input).supported)
+		    {
+			    std::_Exit(3);
+		    }
+		    const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+		    const std::string text(source.c_str());
+		    const auto first_atomic = text.find("OpAtomicUMax");
+		    const auto second_atomic = first_atomic == std::string::npos ? first_atomic : text.find("OpAtomicUMax", first_atomic + 1);
+		    if (first_atomic == std::string::npos || second_atomic == std::string::npos ||
+		        text.find("OpAtomicUMax", second_atomic + 1) != std::string::npos ||
+		        source.FindIndex("%buf_uint = OpVariable") == Core::STRING8_INVALID_INDEX ||
+		        source.FindIndex("unknown_uint_constant") != Core::STRING8_INVALID_INDEX ||
+		        ShaderRecompileCS(code, &input).IsEmpty())
+		    {
+			    std::_Exit(4);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorComputeWaveVectorBuffer, RejectsUmaxReturnAndUnprovenBinding)
+{
+	InitializeConfig();
+	const uint32_t words[] = {0xe0e00004u, 0x80000507u, kEnd};
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ASSERT_TRUE(ShaderTryParseBounded(words, sizeof(words), &code));
+	auto input = DirectInput();
+	input.bind.storage_buffers.start_register[0]   = 0;
+	input.bind.storage_buffers.sources[0]          = ShaderStorageBindingSource::MetadataSharp;
+	input.bind.storage_buffers.usages[0]           = ShaderStorageUsage::ReadWrite;
+	input.bind.storage_buffers.accesses[0]         = ShaderStorageAccess::Raw;
+	input.bind.storage_buffers.raw_vmem_oob_guarded[0] = true;
+	input.bind.storage_buffers.code_available[0]   = true;
+	input.bind.storage_buffers.exact_matches[0]    = true;
+	input.bind.storage_buffers.buffers[0].fields[1] = 1u << 16u;
+	input.bind.storage_buffers.buffers[0].fields[2] = 20u;
+	ASSERT_TRUE(ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(code, 0, input.bind).supported);
+
+	auto modified = code.GetInstructions().At(0);
+	modified.buffer_return_old_value = true;
+	ShaderCode returning;
+	returning.SetType(ShaderType::Compute);
+	returning.GetInstructions().Add(modified);
+	returning.GetInstructions().Add(code.GetInstructions().At(1));
+	EXPECT_FALSE(ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(returning, 0, input.bind).supported);
+	modified = code.GetInstructions().At(0);
+	modified.buffer_idxen = true;
+	ShaderCode indexed;
+	indexed.SetType(ShaderType::Compute);
+	indexed.GetInstructions().Add(modified);
+	indexed.GetInstructions().Add(code.GetInstructions().At(1));
+	EXPECT_FALSE(ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(indexed, 0, input.bind).supported);
+	auto bind = input.bind;
+	bind.storage_buffers.exact_matches[0] = false;
+	EXPECT_FALSE(ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(code, 0, bind).supported);
+	bind = input.bind;
+	bind.storage_buffers.usages[0] = ShaderStorageUsage::ReadOnly;
+	EXPECT_FALSE(ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(code, 0, bind).supported);
+	bind = input.bind;
+	bind.storage_buffers.buffers[0].fields[2] = 4u;
+	EXPECT_FALSE(ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(code, 0, bind).supported);
+}
+
+TEST(EmulatorComputeWaveVectorBuffer, ClassifiesRawUmaxAsGuardedWrite)
+{
+	constexpr uint32_t words[] = {0xe0e00004u, 0x80000507u, kEnd};
+	InitializeConfig();
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ASSERT_TRUE(ShaderTryParseBounded(words, sizeof(words), &code));
+	const auto use = AnalyzeShaderStorageUse(code, 0);
+	EXPECT_EQ(use.access, ShaderStorageAccess::Raw);
+	EXPECT_TRUE(use.raw_vmem_oob_guarded);
+	EXPECT_EQ(ShaderGetDirectStorageUsage(code, 0), ShaderStorageUsage::ReadWrite);
 }
 
 UT_END();

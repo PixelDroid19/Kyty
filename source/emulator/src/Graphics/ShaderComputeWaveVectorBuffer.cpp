@@ -97,6 +97,30 @@ bool IsPlainTuple(const ShaderInstruction& instruction)
 	       soffset.size == 0 && soffset.type == ShaderOperandType::IntegerInlineConstant && soffset.constant.i == 0;
 }
 
+bool IsPlainAtomicUmaxTuple(const ShaderInstruction& instruction)
+{
+	if (instruction.type != ShaderInstructionType::BufferAtomicUmax ||
+	    instruction.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen || instruction.src_num != 3 ||
+	    instruction.buffer_idxen || instruction.buffer_offen || instruction.buffer_return_old_value || instruction.buffer_flags != 0u ||
+	    (instruction.buffer_imm_offset & 3u) != 0u || !OperandIsUnused(instruction.dst2) || !OperandIsUnused(instruction.src[3]) ||
+	    instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u || instruction.vop_sdwa || instruction.mimg_address_num != 0 ||
+	    instruction.ds_offset != 0u || instruction.ds_encoding_control != 0u || instruction.ds_encoding_registers != 0u)
+	{
+		return false;
+	}
+	const auto& value      = instruction.dst;
+	const auto& vaddr      = instruction.src[0];
+	const auto& descriptor = instruction.src[1];
+	const auto& soffset    = instruction.src[2];
+	return OperandIsPlain(value) && value.type == ShaderOperandType::Vgpr && value.size == 1 &&
+	       RegisterRangeIsValid(value.register_id, value.size, kMaxVgpr) && OperandIsPlain(vaddr) &&
+	       vaddr.type == ShaderOperandType::Vgpr && vaddr.size == 1 && RegisterRangeIsValid(vaddr.register_id, vaddr.size, kMaxVgpr) &&
+	       OperandIsPlain(descriptor) && descriptor.type == ShaderOperandType::Sgpr && descriptor.size == 4 &&
+	       (descriptor.register_id & 3) == 0 && RegisterRangeIsValid(descriptor.register_id, descriptor.size, kMaxSgpr) &&
+	       OperandIsPlain(soffset) && soffset.type == ShaderOperandType::IntegerInlineConstant && soffset.size == 0 &&
+	       soffset.constant.i == 0;
+}
+
 bool WritesSgprRange(const ShaderInstruction& instruction, int start_register, int registers_num)
 {
 	return ShaderOperandOverlapsSgprRange(instruction.dst, start_register, registers_num) ||
@@ -154,6 +178,63 @@ const ShaderBufferResource* FindDirectDescriptor(const ShaderCode& code, const S
 bool ShaderComputeWaveVectorBufferLoadSupported(const ShaderInstruction& instruction)
 {
 	return IsPlainTuple(instruction);
+}
+
+bool ShaderComputeWaveVectorBufferAtomicUmaxSupported(const ShaderInstruction& instruction)
+{
+	return IsPlainAtomicUmaxTuple(instruction);
+}
+
+ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(const ShaderCode& code, uint32_t index,
+                                                                                const ShaderBindResources& bind)
+{
+	const auto& instructions = code.GetInstructions();
+	if (index >= instructions.Size())
+	{
+		return Failure(0, ShaderInstructionType::BufferAtomicUmax, "admission index is outside the parsed program");
+	}
+	const auto& atomic = instructions.At(index);
+	if (!IsPlainAtomicUmaxTuple(atomic))
+	{
+		return Failure(atomic.pc, atomic.type,
+		               "requires the aligned no-index, no-offset, no-return dword tuple with zero S_OFFSET and no cache/control bits");
+	}
+	const int descriptor = atomic.src[1].register_id;
+	const auto* resource = FindDirectDescriptor(code, bind, descriptor);
+	if (resource == nullptr)
+	{
+		return Failure(atomic.pc, atomic.type, "V# is not a unique, never-written shader-entry binding");
+	}
+	int binding = -1;
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		if (&bind.storage_buffers.buffers[i] == resource)
+		{
+			binding = i;
+			break;
+		}
+	}
+	if (binding < 0)
+	{
+		return Failure(atomic.pc, atomic.type, "V# has no physical storage binding");
+	}
+	const auto& buffers = bind.storage_buffers;
+	const auto source = buffers.sources[binding];
+	if ((source != ShaderStorageBindingSource::DirectResource && source != ShaderStorageBindingSource::MetadataSharp) ||
+	    buffers.usages[binding] != ShaderStorageUsage::ReadWrite || buffers.accesses[binding] != ShaderStorageAccess::Raw ||
+	    !buffers.raw_vmem_oob_guarded[binding] ||
+	    (source == ShaderStorageBindingSource::MetadataSharp && (!buffers.code_available[binding] || !buffers.exact_matches[binding])))
+	{
+		return Failure(atomic.pc, atomic.type, "V# is not an exactly matched writable raw buffer with guarded VMEM access");
+	}
+	const uint64_t bytes = ShaderBufferByteSize(resource->Stride(), resource->NumRecords());
+	const uint64_t span  = static_cast<uint64_t>(atomic.buffer_imm_offset) + 4u;
+	if (ShaderGen5RawDescriptorAlwaysOutOfBounds(*resource) || !ShaderRawStorageDescriptorSupported(*resource) ||
+	    resource->SwizzleEnabled() || resource->AddTid() || span > bytes)
+	{
+		return Failure(atomic.pc, atomic.type, "requires a non-empty, unswizzled raw V# without ADD_TID and with the atomic dword in range");
+	}
+	return {true, 0, {}};
 }
 
 ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveVectorBufferLoad(const ShaderCode& code, uint32_t index,

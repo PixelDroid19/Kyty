@@ -277,13 +277,19 @@ static bool spirv_uses_dpp(const ShaderCode& code)
 	return false;
 }
 
+static bool spirv_uses_buffer_atomics(const ShaderCode& code)
+{
+	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd,
+	                                           ShaderInstructionType::BufferAtomicUmax});
+}
+
 static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
 {
 	if (!Config::IsNextGen())
 	{
 		return false;
 	}
-	return code.HasAnyOf({ShaderInstructionType::BufferLoadUbyte, ShaderInstructionType::BufferLoadDword,
+	return spirv_uses_buffer_atomics(code) || code.HasAnyOf({ShaderInstructionType::BufferLoadUbyte, ShaderInstructionType::BufferLoadDword,
 	                      ShaderInstructionType::BufferLoadDwordx2, ShaderInstructionType::BufferLoadDwordx3,
 	                      ShaderInstructionType::BufferLoadDwordx4, ShaderInstructionType::BufferLoadFormatX,
 	                      ShaderInstructionType::BufferLoadFormatXy, ShaderInstructionType::BufferLoadFormatXyz,
@@ -291,7 +297,6 @@ static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
 	                      ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
 	                      ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX,
 	                      ShaderInstructionType::BufferStoreFormatXy, ShaderInstructionType::BufferStoreFormatXyzw,
-	                      ShaderInstructionType::BufferAtomicAdd,
 	                      ShaderInstructionType::TBufferLoadFormatX, ShaderInstructionType::TBufferLoadFormatXy,
 	                      ShaderInstructionType::TBufferLoadFormatXyzw});
 }
@@ -299,11 +304,6 @@ static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
 static bool spirv_uses_mbcnt(const ShaderCode& code)
 {
 	return code.HasAnyOf({ShaderInstructionType::VMbcntLoU32B32, ShaderInstructionType::VMbcntHiU32B32});
-}
-
-static bool spirv_uses_buffer_atomics(const ShaderCode& code)
-{
-	return Config::IsNextGen() && code.HasAnyOf({ShaderInstructionType::BufferAtomicAdd});
 }
 
 // FP64 (double) is used when the shader has f64 ALU or 64-bit float compares.
@@ -2679,7 +2679,7 @@ void Spirv::FindConstants()
 	AddConstantUint(0x40000000u);
 	AddConstantUint(0x7fffffffu);
 	AddConstantUint(0x80000000u);
-	if (UsesGraphicsProbeStorage())
+	if (UsesGraphicsProbeStorage() || spirv_uses_buffer_atomics(m_code))
 	{
 		AddConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
 	}
@@ -2720,10 +2720,6 @@ void Spirv::FindConstants()
 		if (inst.type == ShaderInstructionType::SBarrier || inst.type == ShaderInstructionType::DsAddRtnU32)
 		{
 			AddConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
-		}
-		if (inst.type == ShaderInstructionType::BufferAtomicAdd)
-		{
-			AddConstantUint(SPIRV_DEVICE_MEMORY_ACQ_REL);
 		}
 		for (int i = 0; i < inst.src_num; i++)
 		{

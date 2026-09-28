@@ -1,4 +1,5 @@
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveVectorBuffer.h"
 
 #include "Kyty/Core/MagicEnum.h"
 
@@ -254,7 +255,8 @@ bool Spirv::EmitComputeWaveGenericInstruction(const RecompilerFunc* func, const 
 {
 	if (output == nullptr || func == nullptr || func->type != instruction.type || func->format != instruction.format ||
 	    !UsesComputeWaveBanks() ||
-	    !(ShaderComputeWaveGenericVectorSupported(instruction) || ShaderComputeWaveGenericLdsSupported(instruction)))
+	    !(ShaderComputeWaveGenericVectorSupported(instruction) || ShaderComputeWaveGenericLdsSupported(instruction) ||
+	      ShaderComputeWaveVectorBufferAtomicUmaxSupported(instruction)))
 	{
 		return false;
 	}

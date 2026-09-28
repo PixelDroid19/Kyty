@@ -562,6 +562,10 @@ ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const Shad
 	{
 		return kind;
 	}
+	if (ShaderComputeWaveVectorBufferAtomicUmaxSupported(instruction))
+	{
+		return ShaderComputeWaveInstructionKind::BankedGeneric;
+	}
 	if (ShaderComputeWaveGenericVectorSupported(instruction))
 	{
 		return ShaderComputeWaveInstructionKind::BankedGeneric;
@@ -961,6 +965,14 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& c
 			} else
 			{
 				return load;
+			}
+		}
+		if (instruction.type == ShaderInstructionType::BufferAtomicUmax)
+		{
+			const auto atomic = ShaderAnalyzeComputeWaveVectorBufferAtomicUmax(code, index, input.bind);
+			if (!atomic.supported)
+			{
+				return atomic;
 			}
 		}
 		if (kind == ShaderComputeWaveInstructionKind::Unsupported)

@@ -303,11 +303,22 @@ lowered in two 32-bit SPIR-V words without writing SCC, and paired admission
 requires an exact scalar tuple. The barrier gate also requires the real SOPP
 opcode 0x0a; a placeholder opcode stays rejected. Focused red/green tests
 and SPIR-V toolchain validation passed. A strict run with this change passed
-PC 0x66c and stopped next at `BufferAtomicUmax` at PC 0x74c; native wave-width
-equivalence remains rejected at PC 0x208 for a lane-crossing read. Its native
-frame-9 capture was uniformly black (`entropy=0`, one color). No controlled
-gameplay has been observed. Intermittent Xe `execbuf` ENOMEM can stop earlier
-runs.
+PC 0x66c and stopped next at `BufferAtomicUmax` at PC 0x74c. The captured
+atomic is an aligned, no-index, no-offset, no-return unsigned dword maximum
+through a unique, writable, guarded raw V# binding. Paired admission now
+requires that exact tuple and binding; the existing Gen5 atomic emitter emits
+one guarded operation per bank. Focused red/green admission, resource-use, and
+SPIR-V tests pass, including negative return, index, and binding cases. Two
+strict runs passed the former PC 0x74c gate and stopped at PC 0x560:
+the extended-pointer base SGPR pair is written by `SBufferLoadDwordx2` after
+six mapped EUD loads, and later vector instructions read the written pair.
+Determine whether any control-flow path can reach another EUD load after that
+write before relaxing the base-pair guard. A separate retry stopped earlier at
+a storage write-back dependency; that intermittent exit needs a separate
+causal reproduction. Native wave-width equivalence remains rejected at PC
+0x208 for a lane-crossing read. A native frame-10 capture was uniformly black
+(`entropy=0`, one color). No controlled gameplay has been observed. Xe
+`execbuf` ENOMEM can also stop earlier runs.
 
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 

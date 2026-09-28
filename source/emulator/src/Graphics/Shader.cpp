@@ -1636,7 +1636,8 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 		case ShaderInstructionType::BufferStoreFormatX:
 		case ShaderInstructionType::BufferStoreFormatXy:
 		case ShaderInstructionType::BufferStoreFormatXyzw:
-		case ShaderInstructionType::BufferAtomicAdd: is_store = true; break;
+		case ShaderInstructionType::BufferAtomicAdd:
+		case ShaderInstructionType::BufferAtomicUmax: is_store = true; break;
 			default: break;
 		}
 

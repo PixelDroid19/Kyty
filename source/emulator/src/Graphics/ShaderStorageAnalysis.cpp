@@ -714,6 +714,7 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 			case ShaderInstructionType::BufferStoreDwordx3:
 			case ShaderInstructionType::BufferStoreDwordx4:
 			case ShaderInstructionType::BufferAtomicAdd:
+			case ShaderInstructionType::BufferAtomicUmax:
 				candidate_raw      = true;
 				candidate_raw_vmem = true;
 				break;
