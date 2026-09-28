@@ -1551,6 +1551,13 @@ struct ShaderZeroSBufferResources
 [[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
 [[nodiscard]] ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& code, int source_start_register,
 	                                                                      int destination_start_register, int parameter_start_register);
+struct ShaderBindResources;
+struct ShaderComputeEmptyGate
+{
+	int      storage_buffer_index = -1;
+	uint32_t byte_offset          = 0;
+};
+[[nodiscard]] ShaderComputeEmptyGate AnalyzeShaderComputeEmptyGate(const ShaderCode& code, const ShaderBindResources& bind);
 // With entry_values (see ShaderSgprsHoldingEntryValue), only instructions whose
 // descriptor SGPRs still hold their user-data value count as direct uses.
 [[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register,
@@ -1560,7 +1567,6 @@ struct ShaderStorageImageTileCoverage
 	uint32_t width  = 0;
 	uint32_t height = 0;
 };
-struct ShaderBindResources;
 [[nodiscard]] ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code,
                                                                                    const ShaderBindResources& bind, int texture_index,
                                                                                    int workgroup_register, const uint32_t threads[3],
@@ -1896,6 +1902,7 @@ struct ShaderComputeInputInfo
 	int                 workgroup_register = 0;
 	uint32_t            storage_image_write_only_mask = 0;
 	ShaderStorageImageTileCoverage storage_image_tile_coverage[ShaderTextureResources::RES_MAX] {};
+	ShaderComputeEmptyGate empty_gate;
 	ShaderComputeMetaFillEvidence meta_fill;
 	ShaderBindResources bind;
 };

@@ -326,6 +326,21 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Inactive depth-image compute dispatch (2026-09-28): a mixed-parent R32
+  storage view with depth-64KB tiling was contained in two newer GPU-owned
+  color render targets and an older storage view. Their formats and tile
+  equations do not permit a raw color-to-depth alias copy. The consuming
+  shader's only side effect is an image store; a scalar parameter from an
+  exact read-only dynamic binding was zero in a stable guest snapshot. Its
+  unsigned comparison clears `EXEC`, and every path to the store passes that
+  comparison and a restore from the zero `VCC`. A conservative shader analyzer
+  and per-dispatch snapshot now skip that semantically empty dispatch. The
+  strict probe confirmed the gate fired and advanced to a different R32
+  depth-tile upload with eight mips. The tile-size fallback only describes mip
+  zero when no catalog entry matches. Do not make up offsets for the remaining
+  mips or broaden the raw render alias to depth tiling; first capture and
+  validate the actual per-level layout and data owner.
+
 - Late Xe `execbuf` ENOMEM (2026-09-28): two bounded strict runs returned
   `VK_ERROR_DEVICE_LOST` on compute submissions near sequences 2009 and 2052,
   with the Intel driver reporting repeated `execbuf` ENOMEM. The hypothesis

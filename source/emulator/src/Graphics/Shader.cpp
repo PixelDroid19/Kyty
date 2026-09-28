@@ -3052,6 +3052,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	info->group_id[2]                   = regs->cs_regs.tgid_z_en != 0;
 	info->thread_ids_num                = regs->cs_regs.tidig_comp_cnt + 1;
 	info->storage_image_write_only_mask = 0;
+	info->empty_gate = {};
 	for (auto& coverage: info->storage_image_tile_coverage)
 	{
 		coverage = {};
@@ -3190,6 +3191,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				info->storage_image_write_only_mask |= 1u << static_cast<uint32_t>(i);
 			}
 		}
+		info->empty_gate = AnalyzeShaderComputeEmptyGate(code, info->bind);
 	} else
 	{
 		ShaderParseUsage(regs->cs_regs.data_addr, &usage, &info->bind, regs->cs_user_sgpr, regs->cs_regs.user_sgpr);

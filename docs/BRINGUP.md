@@ -254,6 +254,29 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Inactive compute gate and depth mip frontier (2026-09-28, not gameplay)
+
+A strict Silent/Native run passed a mixed-parent storage-image creation that
+previously stopped at `!create_all_the_same`. The incoming R32 image lay inside
+live render targets but used depth tiling, so their color texels could not be
+copied into it. The parsed compute program has one image store and no other
+side-effecting operation. An exact read-only scalar binding supplies a uniform
+value that is currently zero; its unsigned compare clears `EXEC`, and the
+branch restores `EXEC` from the same zero `VCC` before every store. A bounded
+snapshot confirmed the guest value, and the new control-flow check omits only
+dispatches for which that value remains zero and the source range can be read
+without a writable GPU alias. Focused tests reject a bypass around the gate,
+an altered restore, other writes, an unproved binding, and a nonzero compare.
+The strict probe recorded that this gate fired, then reached a separate
+`unsupported depth tile upload` for an R32 depth-tiled image with eight mips
+(480×270, pitch 512, 768 KiB). Kyty's fallback size calculation for this tile
+mode only fills level zero when its catalog lacks an entry; the mip offsets
+cannot be inferred from that fallback. This new upload remains unresolved.
+Native captures and controlled gameplay are still absent. Intermittent Xe
+`execbuf` ENOMEM and guest-address import failures can stop earlier runs, so
+passing the former alias exit was checked in the run that logged the gate and
+the new depth-mip failure.
+
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native

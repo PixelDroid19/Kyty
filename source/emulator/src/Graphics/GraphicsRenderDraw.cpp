@@ -2582,6 +2582,23 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	thread_group_x = plan.group_count[0];
 	thread_group_y = plan.group_count[1];
 	thread_group_z = plan.group_count[2];
+	const auto gate = input_info.empty_gate;
+	if (gate.storage_buffer_index >= 0 && gate.storage_buffer_index < input_info.bind.storage_buffers.buffers_num)
+	{
+		const auto& resource = input_info.bind.storage_buffers.buffers[gate.storage_buffer_index];
+		const uint64_t bytes = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+		const uint64_t base = resource.Base48();
+		uint32_t gate_value = UINT32_MAX;
+		if (base != 0u && bytes >= sizeof(gate_value) && gate.byte_offset <= bytes - sizeof(gate_value) &&
+		    base <= UINT64_MAX - gate.byte_offset &&
+		    GpuMemoryCaptureSnapshotReadOnlyBuffer(base + gate.byte_offset, sizeof(gate_value), &gate_value) &&
+		    gate_value == 0u)
+		{
+			// The proven scalar gate clears EXEC on every path to each image
+			// store. No descriptor or image needs materialization for this dispatch.
+			return;
+		}
+	}
 
 	const auto& cs_regs = sh_ctx->GetCs();
 	// Diagnostic A/B only (not a product fix):

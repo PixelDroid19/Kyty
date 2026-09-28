@@ -258,6 +258,138 @@ TEST(EmulatorShaderMimg, RejectsUnprovenQuadReductionStorageOverwrite)
 	}
 }
 
+static ShaderCode MakeUniformZeroStoreGate()
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderOperand zero {.type = ShaderOperandType::IntegerInlineConstant};
+	zero.constant.u = 0u;
+	ShaderOperand offset {.type = ShaderOperandType::IntegerInlineConstant};
+	offset.constant.u = 64u;
+	ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+	ShaderOperand exec {.type = ShaderOperandType::ExecLo, .size = 2};
+	ShaderInstruction load {};
+	load.pc      = 0u;
+	load.type    = ShaderInstructionType::SBufferLoadDword;
+	load.format  = ShaderInstructionFormat::SdstSvSoffset;
+	load.smem_flags = 0u;
+	load.dst     = TileSgpr(22);
+	load.src[0]  = TileSgpr(16, 4);
+	load.src[1]  = offset;
+	load.src_num = 2;
+	code.GetInstructions().Add(load);
+	ShaderInstruction compare {};
+	compare.pc      = 4u;
+	compare.type    = ShaderInstructionType::VCmpxGtU32;
+	compare.format  = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
+	compare.dst     = vcc;
+	compare.src[0]  = TileSgpr(22);
+	compare.src[1]  = zero;
+	compare.src_num = 2;
+	code.GetInstructions().Add(compare);
+	ShaderInstruction branch {};
+	branch.pc      = 8u;
+	branch.type    = ShaderInstructionType::SCbranchExecz;
+	branch.src[0]  = zero;
+	branch.src_num = 1;
+	code.GetInstructions().Add(branch);
+	ShaderInstruction restore {};
+	restore.pc      = 12u;
+	restore.type    = ShaderInstructionType::SMovB64;
+	restore.dst     = exec;
+	restore.src[0]  = vcc;
+	restore.src_num = 1;
+	code.GetInstructions().Add(restore);
+	ShaderInstruction store {};
+	store.pc   = 16u;
+	store.type = ShaderInstructionType::ImageStore;
+	code.GetInstructions().Add(store);
+	ShaderInstruction end {};
+	end.pc   = 20u;
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(end);
+	return code;
+}
+
+static ShaderBindResources UniformZeroStoreGateBinding()
+{
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num       = 1;
+	bind.storage_buffers.start_register[0] = 16;
+	bind.storage_buffers.sources[0]        = ShaderStorageBindingSource::MetadataSharp;
+	bind.storage_buffers.usages[0]         = ShaderStorageUsage::ReadOnly;
+	bind.storage_buffers.code_available[0] = true;
+	bind.storage_buffers.exact_matches[0]  = true;
+	return bind;
+}
+
+TEST(EmulatorShaderMimg, ProvesUniformZeroGateSuppressesEveryStore)
+{
+	const auto code = MakeUniformZeroStoreGate();
+	const auto bind = UniformZeroStoreGateBinding();
+	const auto gate = AnalyzeShaderComputeEmptyGate(code, bind);
+	EXPECT_EQ(gate.storage_buffer_index, 0);
+	EXPECT_EQ(gate.byte_offset, 64u);
+	auto dynamic_bind = bind;
+	dynamic_bind.storage_buffers.sources[0] = ShaderStorageBindingSource::DynamicScalarLoad;
+	EXPECT_EQ(AnalyzeShaderComputeEmptyGate(code, dynamic_bind).storage_buffer_index, 0);
+}
+
+TEST(EmulatorShaderMimg, RejectsStorePathsOutsideUniformZeroGate)
+{
+	const auto bind = UniformZeroStoreGateBinding();
+	{
+		const auto original = MakeUniformZeroStoreGate();
+		ShaderCode code;
+		code.SetType(ShaderType::Compute);
+		ShaderInstruction bypass {};
+		bypass.pc      = 0u;
+		bypass.type    = ShaderInstructionType::SCbranchExecz;
+		bypass.src[0].type = ShaderOperandType::IntegerInlineConstant;
+		bypass.src[0].constant.u = 16u; // branch to the shifted ImageStore
+		bypass.src_num = 1;
+		code.GetInstructions().Add(bypass);
+		for (auto inst: original.GetInstructions())
+		{
+			inst.pc += 4u;
+			code.GetInstructions().Add(inst);
+		}
+		EXPECT_EQ(AnalyzeShaderComputeEmptyGate(code, bind).storage_buffer_index, -1);
+	}
+	{
+		auto code = MakeUniformZeroStoreGate();
+		code.GetInstructions()[3].src[0] = TileConstant(UINT32_MAX);
+		EXPECT_EQ(AnalyzeShaderComputeEmptyGate(code, bind).storage_buffer_index, -1);
+	}
+	{
+		auto code = MakeUniformZeroStoreGate();
+		code.GetInstructions()[3].dst = TileSgpr(20, 2);
+		EXPECT_EQ(AnalyzeShaderComputeEmptyGate(code, bind).storage_buffer_index, -1);
+	}
+	{
+		auto code = MakeUniformZeroStoreGate();
+		code.GetInstructions()[4].type = ShaderInstructionType::BufferStoreDword;
+		EXPECT_EQ(AnalyzeShaderComputeEmptyGate(code, bind).storage_buffer_index, -1);
+	}
+	{
+		auto code = MakeUniformZeroStoreGate();
+		code.GetInstructions()[1].src[1].constant.u = 1u;
+		EXPECT_EQ(AnalyzeShaderComputeEmptyGate(code, bind).storage_buffer_index, -1);
+	}
+	{
+		auto code = MakeUniformZeroStoreGate();
+		auto bad_bind = bind;
+		bad_bind.storage_buffers.usages[0] = ShaderStorageUsage::ReadWrite;
+		EXPECT_EQ(AnalyzeShaderComputeEmptyGate(code, bad_bind).storage_buffer_index, -1);
+	}
+	{
+		const auto code = MakeUniformZeroStoreGate();
+		auto bad_bind = bind;
+		bad_bind.storage_buffers.exact_matches[0] = false;
+		EXPECT_EQ(AnalyzeShaderComputeEmptyGate(code, bad_bind).storage_buffer_index, -1);
+	}
+}
+
 TEST(EmulatorShaderMimg, RejectsGen5MimgExtendedOpcodeInsteadOfAliasingImageLoad)
 {
 	// GFX10 MIMG encodes OP[7] in word zero bit zero, not beside OP[6:0].

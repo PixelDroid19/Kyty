@@ -1444,6 +1444,241 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const Shade
 	return coverage;
 }
 
+namespace {
+
+// Keep this admission closed to known side-effect-free instructions and image
+// stores. A newly parsed operation cannot inherit the skip without review.
+bool EmptyGateInstructionAllowed(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::SInstPrefetch:
+		case ShaderInstructionType::VLshlAddU32:
+		case ShaderInstructionType::SLoadDwordx4:
+		case ShaderInstructionType::SLoadDwordx8:
+		case ShaderInstructionType::SWaitcnt:
+		case ShaderInstructionType::SBufferLoadDword:
+		case ShaderInstructionType::SBufferLoadDwordx2:
+		case ShaderInstructionType::VCmpLeU32:
+		case ShaderInstructionType::SNorB64:
+		case ShaderInstructionType::SMovB64:
+		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchScc0:
+		case ShaderInstructionType::VLshlrevB32:
+		case ShaderInstructionType::VCvtF32U32:
+		case ShaderInstructionType::SAddI32:
+		case ShaderInstructionType::VRcpF32:
+		case ShaderInstructionType::VAddF32:
+		case ShaderInstructionType::VMulF32:
+		case ShaderInstructionType::VMovB32:
+		case ShaderInstructionType::VCmpxEqU32:
+		case ShaderInstructionType::VCmpxGtU32:
+		case ShaderInstructionType::ImageSampleL:
+		case ShaderInstructionType::VMaxF32:
+		case ShaderInstructionType::VMax3F32:
+		case ShaderInstructionType::SCmpLgU32:
+		case ShaderInstructionType::VSubrevF32:
+		case ShaderInstructionType::ImageStore:
+		case ShaderInstructionType::SEndpgm: return true;
+		default: return false;
+	}
+}
+
+bool EmptyGateCanReachWithout(const Vector<ShaderInstruction>& instructions,
+                              const std::unordered_map<uint32_t, uint32_t>& instruction_index,
+                              uint32_t excluded, uint32_t target)
+{
+	std::vector<uint8_t> seen(instructions.Size());
+	std::vector<uint32_t> pending {0u};
+	while (!pending.empty())
+	{
+		const uint32_t index = pending.back();
+		pending.pop_back();
+		if (index >= instructions.Size() || index == excluded || seen[index] != 0u)
+		{
+			continue;
+		}
+		if (index == target)
+		{
+			return true;
+		}
+		seen[index] = 1u;
+		const auto& inst = instructions.At(index);
+		if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			continue;
+		}
+		if (ShaderInstructionHasStaticBranchTarget(inst.type))
+		{
+			uint32_t destination = 0;
+			if (!ShaderTryGetStaticBranchTarget(instruction_index, inst, &destination))
+			{
+				return true;
+			}
+			pending.push_back(destination);
+			if (inst.type == ShaderInstructionType::SBranch)
+			{
+				continue;
+			}
+		}
+		pending.push_back(index + 1u);
+	}
+	return false;
+}
+
+bool EmptyGateWritesExec(const ShaderInstruction& inst)
+{
+	return inst.dst.type == ShaderOperandType::ExecLo || inst.dst.type == ShaderOperandType::ExecHi ||
+	       inst.dst2.type == ShaderOperandType::ExecLo || inst.dst2.type == ShaderOperandType::ExecHi ||
+	       inst.type == ShaderInstructionType::VCmpxEqU32 || inst.type == ShaderInstructionType::VCmpxGtU32;
+}
+
+} // namespace
+
+ShaderComputeEmptyGate AnalyzeShaderComputeEmptyGate(const ShaderCode& code, const ShaderBindResources& bind)
+{
+	const auto& instructions = code.GetInstructions();
+	if (code.GetType() != ShaderType::Compute || instructions.IsEmpty() ||
+	    instructions.At(instructions.Size() - 1u).type != ShaderInstructionType::SEndpgm)
+	{
+		return {};
+	}
+	std::unordered_map<uint32_t, uint32_t> instruction_index;
+	std::vector<uint32_t> stores;
+	for (uint32_t i = 0; i < instructions.Size(); ++i)
+	{
+		const auto& inst = instructions.At(i);
+		if (!EmptyGateInstructionAllowed(inst.type) || !instruction_index.emplace(inst.pc, i).second)
+		{
+			return {};
+		}
+		if (inst.type == ShaderInstructionType::ImageStore)
+		{
+			stores.push_back(i);
+		}
+	}
+	if (stores.empty())
+	{
+		return {};
+	}
+	for (const auto& inst: instructions)
+	{
+		if (ShaderInstructionHasStaticBranchTarget(inst.type))
+		{
+			uint32_t destination = 0;
+			if (!ShaderTryGetStaticBranchTarget(instruction_index, inst, &destination))
+			{
+				return {};
+			}
+		}
+	}
+	for (uint32_t gate = 0; gate + 2u < instructions.Size(); ++gate)
+	{
+		const auto& compare = instructions.At(gate);
+		const auto& branch = instructions.At(gate + 1u);
+		if (compare.type != ShaderInstructionType::VCmpxGtU32 || compare.dst.type != ShaderOperandType::VccLo ||
+		    compare.format != ShaderInstructionFormat::SmaskVsrc0Vsrc1 || compare.src_num != 2 ||
+		    compare.src[0].type != ShaderOperandType::Sgpr || compare.src[0].size != 1 ||
+		    !MetaFillOperandIsPlain(compare.src[0]) || !MetaFillOperandIsPlain(compare.dst) ||
+		    !MetaFillOperandIsImmediate(compare.src[1], 0u) || branch.type != ShaderInstructionType::SCbranchExecz)
+		{
+			continue;
+		}
+		uint32_t restore = 0;
+		if (!ShaderTryGetStaticBranchTarget(instruction_index, branch, &restore) || restore <= gate + 1u ||
+		    restore >= stores.front())
+		{
+			continue;
+		}
+		const auto& restore_inst = instructions.At(restore);
+		if (restore_inst.type != ShaderInstructionType::SMovB64 || restore_inst.dst.type != ShaderOperandType::ExecLo ||
+		    restore_inst.dst.size != 2 || restore_inst.src_num != 1 || restore_inst.src[0].type != ShaderOperandType::VccLo ||
+		    restore_inst.src[0].size != 2 || !MetaFillOperandIsPlain(restore_inst.src[0]))
+		{
+			continue;
+		}
+		bool safe_suffix = true;
+		for (uint32_t i = restore + 1u; i < instructions.Size(); ++i)
+		{
+			const auto& inst = instructions.At(i);
+			if (EmptyGateWritesExec(inst))
+			{
+				safe_suffix = false;
+				break;
+			}
+			if (ShaderInstructionHasStaticBranchTarget(inst.type))
+			{
+				uint32_t destination = 0;
+				if (!ShaderTryGetStaticBranchTarget(instruction_index, inst, &destination) || destination < restore)
+				{
+					safe_suffix = false;
+					break;
+				}
+			}
+		}
+		if (!safe_suffix)
+		{
+			continue;
+		}
+		for (uint32_t store: stores)
+		{
+			if (store <= restore || EmptyGateCanReachWithout(instructions, instruction_index, gate, store))
+			{
+				safe_suffix = false;
+				break;
+			}
+		}
+		if (!safe_suffix)
+		{
+			continue;
+		}
+		for (uint32_t load = 0; load < gate; ++load)
+		{
+			const auto& inst = instructions.At(load);
+			if (inst.type != ShaderInstructionType::SBufferLoadDword || inst.format != ShaderInstructionFormat::SdstSvSoffset ||
+			    inst.src_num != 2 || !MetaFillOperandIsSgpr(inst.dst, compare.src[0].register_id, 1) ||
+			    inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4 || inst.smem_flags != 0u ||
+			    inst.smem_imm_offset != 0u || inst.src[1].size != 0 ||
+			    (inst.src[1].type != ShaderOperandType::IntegerInlineConstant &&
+			     inst.src[1].type != ShaderOperandType::LiteralConstant) ||
+			    inst.src[1].constant.i < 0 || (inst.src[1].constant.u & 3u) != 0u ||
+			    EmptyGateCanReachWithout(instructions, instruction_index, load, gate))
+			{
+				continue;
+			}
+			bool unchanged = true;
+			for (uint32_t i = load + 1u; i < gate; ++i)
+			{
+				if (ShaderOperandOverlapsSgprRange(instructions.At(i).dst, compare.src[0].register_id, 1) ||
+				    ShaderOperandOverlapsSgprRange(instructions.At(i).dst2, compare.src[0].register_id, 1))
+				{
+					unchanged = false;
+					break;
+				}
+			}
+			if (!unchanged)
+			{
+				continue;
+			}
+			for (int b = 0; b < bind.storage_buffers.buffers_num; ++b)
+			{
+				const auto source = bind.storage_buffers.sources[b];
+				if (bind.storage_buffers.start_register[b] == inst.src[0].register_id &&
+				    (source == ShaderStorageBindingSource::MetadataSharp ||
+				     source == ShaderStorageBindingSource::DynamicScalarLoad) &&
+				    ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[b]) &&
+				    bind.storage_buffers.code_available[b] && bind.storage_buffers.exact_matches[b] &&
+				    !bind.storage_buffers.unbased_matches[b] &&
+				    !bind.storage_buffers.decoded_unknown[b] && !bind.storage_buffers.indirect_descriptor_use[b])
+				{
+					return {b, inst.src[1].constant.u};
+				}
+			}
+		}
+	}
+	return {};
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED
