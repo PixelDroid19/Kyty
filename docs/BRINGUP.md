@@ -356,6 +356,28 @@ The native present-19 capture still scored `entropy=0`, one color bin, and
 does not establish gameplay or a controlled performance benchmark. The next
 work is a contract-backed JSON data path and the still-missing scene source.
 
+The JSON data path now parses bounded UTF-8 input into owned values and
+supports object lookup by a bounded C-string key. A focused test covers a
+nested document, numeric value, missing key, Unicode escape, malformed trailing
+input, and destructor cleanup. A strict Silent/Native probe reached the former
+parser import with a 14-byte document: parsing returned success with an object,
+and a seven-byte key lookup found an array. It then stopped at the next
+unresolved `SHtAad20YYM[Json2_v1][Json_v1.1]` (`Value::getType`) import, after
+19 presents in about 53 seconds. That type accessor now returns the value's
+guest-visible enum, with its own focused assertion. The bounded probe's
+result-only diagnostics were removed. Error codes for malformed input and
+invalid arguments remain inferred from secondary implementations rather than
+measured on hardware. A subsequent strict Silent/Native run with the final
+JSON path passed the former `getType` import and reached present 22, but the
+host Vulkan submission failed with `vkQueueSubmit result=-4` at
+`GraphicsRenderCommandBuffer.cpp:656` after the Intel driver reported repeated
+`execbuf` ENOMEM. The service used 3.8 GiB at peak under a 16 GiB limit, while
+the host reported 15 GiB of available RAM and full swap. These counters do not
+identify whether device memory, driver address space, or another resource was
+exhausted. Reproduce and measure the Vulkan allocation/submission state before
+changing the queue or memory policy. No captured image or controlled gameplay
+validates the scene.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show

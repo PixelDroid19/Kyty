@@ -11,6 +11,7 @@
 #include "Emulator/Log.h"
 
 #include "Kyty/Core/File.h"
+#include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
 #include <atomic>
@@ -855,6 +856,106 @@ TEST(EmulatorModuleLoad, Json2InitializerRegistersExactJsonModuleIdentity)
 
 	query.module = U"Json2";
 	EXPECT_EQ(symbols.Find(query), nullptr);
+}
+
+TEST(EmulatorModuleLoad, Json2ParserUsesBoundedInputAndReleasesParsedValues)
+{
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libJson2_1", &symbols));
+
+	auto find = [&](const char16_t* nid)
+	{
+		SymbolResolve query {};
+		query.name                 = nid;
+		query.library              = U"Json2";
+		query.library_version      = 1;
+		query.module               = U"Json";
+		query.module_version_major = 1;
+		query.module_version_minor = 1;
+		query.type                 = SymbolType::Func;
+		return symbols.Find(query);
+	};
+	const auto* ctor_record  = find(u"qBMjqyBn3OM");
+	const auto* parse_record = find(u"S5JxQnoGF3E");
+	const auto* index_record = find(u"HwDt5lD9Bfo");
+	const auto* type_record  = find(u"SHtAad20YYM");
+	const auto* cstr_record  = find(u"L1KAkYWml-M");
+	const auto* dtor_record  = find(u"WTtYf+cNnXI");
+	ASSERT_NE(ctor_record, nullptr);
+	ASSERT_NE(parse_record, nullptr);
+	ASSERT_NE(index_record, nullptr);
+	ASSERT_NE(type_record, nullptr);
+	ASSERT_NE(cstr_record, nullptr);
+	ASSERT_NE(dtor_record, nullptr);
+
+	using CtorFn  = void* (*)(void*);
+	using ParseFn = int32_t (*)(void*, const char*, size_t);
+	using IndexFn = const void* (*)(const void*, const char*);
+	using TypeFn  = uint32_t (*)(const void*);
+	using CStrFn  = const char* (*)(const void*);
+	using DtorFn  = void (*)(void*);
+	auto ctor  = reinterpret_cast<CtorFn>(ctor_record->vaddr);
+	auto parse = reinterpret_cast<ParseFn>(parse_record->vaddr);
+	auto index = reinterpret_cast<IndexFn>(index_record->vaddr);
+	auto get_type = reinterpret_cast<TypeFn>(type_record->vaddr);
+	auto cstr = reinterpret_cast<CStrFn>(cstr_record->vaddr);
+	auto dtor  = reinterpret_cast<DtorFn>(dtor_record->vaddr);
+	const uint64_t guest_page = Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(guest_page, 0u);
+	auto* value = reinterpret_cast<uint8_t*>(guest_page);
+	auto* source = reinterpret_cast<char*>(guest_page + 64u);
+	ASSERT_EQ(ctor(value), value);
+	const char input[] = R"({"text":"\uD83D\uDE80","count":-7,"ok":true})";
+	std::memcpy(source, input, sizeof(input));
+	auto* key = source + sizeof(input) + 16u;
+	std::memcpy(key, "count", 6u);
+	ASSERT_EQ(parse(value, source, sizeof(input) - 1u), 0);
+	uint32_t type = 0;
+	std::memcpy(&type, value + 28, sizeof(type));
+	EXPECT_EQ(type, 7u);
+	uint32_t reserved = 1;
+	std::memcpy(&reserved, value + 24, sizeof(reserved));
+	EXPECT_EQ(reserved, 0u);
+	const auto* count = static_cast<const uint8_t*>(index(value, key));
+	ASSERT_NE(count, nullptr);
+	std::memcpy(&type, count + 28, sizeof(type));
+	EXPECT_EQ(type, 2u);
+	EXPECT_EQ(get_type(count), 2u);
+	int64_t integer = 0;
+	std::memcpy(&integer, count + 16, sizeof(integer));
+	EXPECT_EQ(integer, -7);
+	std::memcpy(key, "text", 5u);
+	const auto* text_value = static_cast<const uint8_t*>(index(value, key));
+	ASSERT_NE(text_value, nullptr);
+	EXPECT_EQ(get_type(text_value), 5u);
+	const void* string_wrapper = nullptr;
+	std::memcpy(&string_wrapper, text_value + 16, sizeof(string_wrapper));
+	EXPECT_STREQ(cstr(string_wrapper), "\xF0\x9F\x9A\x80");
+	std::memcpy(key, "absent", 7u);
+	const auto* missing = static_cast<const uint8_t*>(index(value, key));
+	ASSERT_NE(missing, nullptr);
+	std::memcpy(&type, missing + 28, sizeof(type));
+	EXPECT_EQ(type, 0u);
+	EXPECT_EQ(get_type(missing), 0u);
+	dtor(value);
+	std::memcpy(&type, value + 28, sizeof(type));
+	EXPECT_EQ(type, 0u);
+
+	const char invalid[] = "true false";
+	std::memcpy(source, invalid, sizeof(invalid));
+	EXPECT_NE(parse(value, source, sizeof(invalid) - 1u), 0);
+	std::memcpy(&type, value + 28, sizeof(type));
+	EXPECT_EQ(type, 0u);
+	const char real[] = "-1.25e2";
+	std::memcpy(source, real, sizeof(real));
+	ASSERT_EQ(parse(value, source, sizeof(real) - 1u), 0);
+	std::memcpy(&type, value + 28, sizeof(type));
+	EXPECT_EQ(type, 4u);
+	double number = 0.0;
+	std::memcpy(&number, value + 16, sizeof(number));
+	EXPECT_DOUBLE_EQ(number, -125.0);
+	dtor(value);
+	EXPECT_TRUE(Core::VirtualMemory::Free(guest_page));
 }
 
 TEST(EmulatorModuleLoad, LibcWcsstrUsesGuestUtf16CodeUnits)

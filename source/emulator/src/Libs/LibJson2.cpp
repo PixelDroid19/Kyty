@@ -1,15 +1,24 @@
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Common.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <charconv>
+#include <cstddef>
 #include <cinttypes>
 #include <cstdint>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -19,8 +28,10 @@ LIB_VERSION("Json2", 1, "Json", 1, 1);
 
 namespace Json2 {
 
-// Gen5 libSceJson2 constructor surface initializes the parser context. Zero
-// objects and return this; expand parse/serialize when the data path reaches it.
+// Guest-facing value layout is shared by the constructor and parser surface.
+
+constexpr int32_t JSON_PARSE_ERROR    = static_cast<int32_t>(0x80848101u);
+constexpr int32_t JSON_ARGUMENT_ERROR = static_cast<int32_t>(0x80848120u);
 
 enum JsonValueType : uint32_t
 {
@@ -50,6 +61,9 @@ struct JsonValue
 	uint32_t type = JsonValueTypeNull;
 };
 
+static_assert(sizeof(JsonValue) == 32);
+static_assert(offsetof(JsonValue, type) == 28);
+
 struct JsonInitParameter2
 {
 	void*    allocator                 = nullptr;
@@ -63,10 +77,11 @@ static void JsonValueInit(JsonValue* self)
 {
 	if (self != nullptr)
 	{
-		std::memset(self, 0, sizeof(JsonValue));
-		self->type = JsonValueTypeNull;
+		*self = JsonValue {};
 	}
 }
+
+static void JsonValueClear(JsonValue* self);
 
 static void* KYTY_SYSV_ABI JsonMemAllocatorCtor(void* self)
 {
@@ -162,7 +177,7 @@ static void* KYTY_SYSV_ABI JsonValueCtor(void* self)
 static void KYTY_SYSV_ABI JsonValueDtor(void* self)
 {
 	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t self = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(self));
+	JsonValueClear(static_cast<JsonValue*>(self));
 }
 
 static void* KYTY_SYSV_ABI JsonObjectCtor(void* self)
@@ -186,6 +201,93 @@ struct JsonString
 	// Host heap string; lifetime owned by this wrapper until Dtor.
 	char* data = nullptr;
 };
+
+struct JsonArray
+{
+	std::vector<JsonValue*>* items = nullptr;
+};
+
+struct JsonObject
+{
+	std::map<std::string, JsonValue*>* members = nullptr;
+};
+
+static std::mutex                           g_owned_mutex;
+static std::unordered_map<void*, uint32_t> g_owned_values;
+
+static void JsonTrackOwned(void* pointer, uint32_t type)
+{
+	std::lock_guard lock(g_owned_mutex);
+	g_owned_values.emplace(pointer, type);
+}
+
+static uint32_t JsonTakeOwnedType(void* pointer)
+{
+	std::lock_guard lock(g_owned_mutex);
+	const auto it = g_owned_values.find(pointer);
+	if (it == g_owned_values.end())
+	{
+		return UINT32_MAX;
+	}
+	const uint32_t type = it->second;
+	g_owned_values.erase(it);
+	return type;
+}
+
+static void JsonValueClear(JsonValue* self)
+{
+	if (self == nullptr)
+	{
+		return;
+	}
+	if ((self->type == JsonValueTypeString || self->type == JsonValueTypeArray || self->type == JsonValueTypeObject) &&
+	    self->ptr != nullptr)
+	{
+		switch (JsonTakeOwnedType(self->ptr))
+		{
+			case JsonValueTypeString:
+			{
+				auto* str = static_cast<JsonString*>(self->ptr);
+				std::free(str->data);
+				delete str;
+				break;
+			}
+			case JsonValueTypeArray:
+			{
+				auto* array = static_cast<JsonArray*>(self->ptr);
+				if (array->items != nullptr)
+				{
+					for (auto* child: *array->items)
+					{
+						JsonValueClear(child);
+						delete child;
+					}
+				}
+				delete array->items;
+				delete array;
+				break;
+			}
+			case JsonValueTypeObject:
+			{
+				auto* object = static_cast<JsonObject*>(self->ptr);
+				if (object->members != nullptr)
+				{
+					for (auto& [key, child]: *object->members)
+					{
+						(void)key;
+						JsonValueClear(child);
+						delete child;
+					}
+				}
+				delete object->members;
+				delete object;
+				break;
+			}
+			default: break;
+		}
+	}
+	JsonValueInit(self);
+}
 
 static void* KYTY_SYSV_ABI JsonStringCtor(void* self)
 {
@@ -264,7 +366,7 @@ static void KYTY_SYSV_ABI JsonStringAssign(JsonString* self, const char* str)
 static void KYTY_SYSV_ABI JsonValueSetBool(JsonValue* self, bool value)
 {
 	PRINT_NAME();
-	JsonValueInit(self);
+	JsonValueClear(self);
 	if (self != nullptr)
 	{
 		self->type    = JsonValueTypeBoolean;
@@ -275,7 +377,7 @@ static void KYTY_SYSV_ABI JsonValueSetBool(JsonValue* self, bool value)
 static void KYTY_SYSV_ABI JsonValueSetInt(JsonValue* self, int64_t value)
 {
 	PRINT_NAME();
-	JsonValueInit(self);
+	JsonValueClear(self);
 	if (self != nullptr)
 	{
 		self->type    = JsonValueTypeInteger;
@@ -286,7 +388,7 @@ static void KYTY_SYSV_ABI JsonValueSetInt(JsonValue* self, int64_t value)
 static void KYTY_SYSV_ABI JsonValueSetUInt(JsonValue* self, uint64_t value)
 {
 	PRINT_NAME();
-	JsonValueInit(self);
+	JsonValueClear(self);
 	if (self != nullptr)
 	{
 		self->type     = JsonValueTypeUInteger;
@@ -297,7 +399,7 @@ static void KYTY_SYSV_ABI JsonValueSetUInt(JsonValue* self, uint64_t value)
 static void KYTY_SYSV_ABI JsonValueSetDouble(JsonValue* self, double value)
 {
 	PRINT_NAME();
-	JsonValueInit(self);
+	JsonValueClear(self);
 	if (self != nullptr)
 	{
 		self->type = JsonValueTypeReal;
@@ -308,7 +410,7 @@ static void KYTY_SYSV_ABI JsonValueSetDouble(JsonValue* self, double value)
 static void KYTY_SYSV_ABI JsonValueSetString(JsonValue* self, const JsonString* value)
 {
 	PRINT_NAME();
-	JsonValueInit(self);
+	JsonValueClear(self);
 	if (self != nullptr)
 	{
 		self->type = JsonValueTypeString;
@@ -321,7 +423,7 @@ static void KYTY_SYSV_ABI JsonValueSetString(JsonValue* self, const JsonString* 
 static void KYTY_SYSV_ABI JsonValueSetType(JsonValue* self, uint32_t type)
 {
 	PRINT_NAME();
-	JsonValueInit(self);
+	JsonValueClear(self);
 	if (self != nullptr)
 	{
 		self->type = type;
@@ -333,6 +435,496 @@ static void KYTY_SYSV_ABI JsonInitializerSetGlobalNullAccessCallback(void* cb, v
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t cb   = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cb));
 	KYTY_LOG_DEBUG("\t user = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(user));
+}
+
+class JsonDocumentParser
+{
+public:
+	JsonDocumentParser(const char* data, size_t size): m_cursor(data), m_end(data + size) {}
+
+	bool Parse(JsonValue* output)
+	{
+		SkipSpace();
+		if (!ParseValue(output, nullptr, 0))
+		{
+			return false;
+		}
+		SkipSpace();
+		return m_cursor == m_end;
+	}
+
+private:
+	static constexpr uint32_t MaxDepth = 64;
+	static constexpr uint32_t MaxNodes = 100000;
+
+	void SkipSpace()
+	{
+		while (m_cursor < m_end && (*m_cursor == ' ' || *m_cursor == '\t' || *m_cursor == '\r' || *m_cursor == '\n'))
+		{
+			m_cursor++;
+		}
+	}
+
+	bool Consume(const char* literal, size_t size)
+	{
+		if (static_cast<size_t>(m_end - m_cursor) < size || std::memcmp(m_cursor, literal, size) != 0)
+		{
+			return false;
+		}
+		m_cursor += size;
+		return true;
+	}
+
+	static void AppendCodepoint(std::string* output, uint32_t codepoint)
+	{
+		if (codepoint < 0x80u)
+		{
+			output->push_back(static_cast<char>(codepoint));
+		} else if (codepoint < 0x800u)
+		{
+			output->push_back(static_cast<char>(0xc0u | (codepoint >> 6u)));
+			output->push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+		} else if (codepoint < 0x10000u)
+		{
+			output->push_back(static_cast<char>(0xe0u | (codepoint >> 12u)));
+			output->push_back(static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu)));
+			output->push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+		} else
+		{
+			output->push_back(static_cast<char>(0xf0u | (codepoint >> 18u)));
+			output->push_back(static_cast<char>(0x80u | ((codepoint >> 12u) & 0x3fu)));
+			output->push_back(static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu)));
+			output->push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+		}
+	}
+
+	bool ParseHex4(uint32_t* codepoint)
+	{
+		if (m_end - m_cursor < 4)
+		{
+			return false;
+		}
+		uint32_t value = 0;
+		for (int i = 0; i < 4; i++)
+		{
+			const char ch = *m_cursor++;
+			value <<= 4u;
+			if (ch >= '0' && ch <= '9')
+			{
+				value |= static_cast<uint32_t>(ch - '0');
+			} else if (ch >= 'a' && ch <= 'f')
+			{
+				value |= static_cast<uint32_t>(ch - 'a' + 10);
+			} else if (ch >= 'A' && ch <= 'F')
+			{
+				value |= static_cast<uint32_t>(ch - 'A' + 10);
+			} else
+			{
+				return false;
+			}
+		}
+		*codepoint = value;
+		return true;
+	}
+
+	bool ParseString(std::string* output)
+	{
+		if (m_cursor == m_end || *m_cursor++ != '"')
+		{
+			return false;
+		}
+		while (m_cursor < m_end)
+		{
+			const auto ch = static_cast<unsigned char>(*m_cursor++);
+			if (ch == '"')
+			{
+				return true;
+			}
+			if (ch < 0x20u)
+			{
+				return false;
+			}
+			if (ch == '\\')
+			{
+				if (m_cursor == m_end)
+				{
+					return false;
+				}
+				const char escape = *m_cursor++;
+				switch (escape)
+				{
+					case '"': output->push_back('"'); break;
+					case '\\': output->push_back('\\'); break;
+					case '/': output->push_back('/'); break;
+					case 'b': output->push_back('\b'); break;
+					case 'f': output->push_back('\f'); break;
+					case 'n': output->push_back('\n'); break;
+					case 'r': output->push_back('\r'); break;
+					case 't': output->push_back('\t'); break;
+					case 'u':
+					{
+						uint32_t codepoint = 0;
+						if (!ParseHex4(&codepoint))
+						{
+							return false;
+						}
+						if (codepoint >= 0xd800u && codepoint <= 0xdbffu)
+						{
+							if (!Consume("\\u", 2))
+							{
+								return false;
+							}
+							uint32_t low = 0;
+							if (!ParseHex4(&low) || low < 0xdc00u || low > 0xdfffu)
+							{
+								return false;
+							}
+							codepoint = 0x10000u + ((codepoint - 0xd800u) << 10u) + low - 0xdc00u;
+						} else if (codepoint >= 0xdc00u && codepoint <= 0xdfffu)
+						{
+							return false;
+						}
+						AppendCodepoint(output, codepoint);
+						break;
+					}
+					default: return false;
+				}
+			} else if (ch < 0x80u)
+			{
+				output->push_back(static_cast<char>(ch));
+			} else
+			{
+				uint32_t codepoint = 0;
+				uint32_t min_value = 0;
+				int      following = 0;
+				if ((ch & 0xe0u) == 0xc0u)
+				{
+					codepoint = ch & 0x1fu;
+					min_value = 0x80u;
+					following = 1;
+				} else if ((ch & 0xf0u) == 0xe0u)
+				{
+					codepoint = ch & 0x0fu;
+					min_value = 0x800u;
+					following = 2;
+				} else if ((ch & 0xf8u) == 0xf0u)
+				{
+					codepoint = ch & 0x07u;
+					min_value = 0x10000u;
+					following = 3;
+				} else
+				{
+					return false;
+				}
+				const char* const start = m_cursor - 1;
+				if (m_end - m_cursor < following)
+				{
+					return false;
+				}
+				for (int i = 0; i < following; i++)
+				{
+					const auto next = static_cast<unsigned char>(*m_cursor++);
+					if ((next & 0xc0u) != 0x80u)
+					{
+						return false;
+					}
+					codepoint = (codepoint << 6u) | (next & 0x3fu);
+				}
+				if (codepoint < min_value || codepoint > 0x10ffffu || (codepoint >= 0xd800u && codepoint <= 0xdfffu))
+				{
+					return false;
+				}
+				output->append(start, static_cast<size_t>(following + 1));
+			}
+		}
+		return false;
+	}
+
+	bool ParseNumber(JsonValue* output)
+	{
+		const char* const begin = m_cursor;
+		const bool        negative = *m_cursor == '-';
+		if (negative && ++m_cursor == m_end)
+		{
+			return false;
+		}
+		if (*m_cursor == '0')
+		{
+			m_cursor++;
+		} else if (*m_cursor >= '1' && *m_cursor <= '9')
+		{
+			do { m_cursor++; } while (m_cursor < m_end && *m_cursor >= '0' && *m_cursor <= '9');
+		} else
+		{
+			return false;
+		}
+		bool fractional = false;
+		if (m_cursor < m_end && *m_cursor == '.')
+		{
+			fractional = true;
+			m_cursor++;
+			if (m_cursor == m_end || *m_cursor < '0' || *m_cursor > '9')
+			{
+				return false;
+			}
+			do { m_cursor++; } while (m_cursor < m_end && *m_cursor >= '0' && *m_cursor <= '9');
+		}
+		if (m_cursor < m_end && (*m_cursor == 'e' || *m_cursor == 'E'))
+		{
+			fractional = true;
+			m_cursor++;
+			if (m_cursor < m_end && (*m_cursor == '+' || *m_cursor == '-'))
+			{
+				m_cursor++;
+			}
+			if (m_cursor == m_end || *m_cursor < '0' || *m_cursor > '9')
+			{
+				return false;
+			}
+			do { m_cursor++; } while (m_cursor < m_end && *m_cursor >= '0' && *m_cursor <= '9');
+		}
+		if (!fractional)
+		{
+			if (negative)
+			{
+				int64_t value = 0;
+				const auto [end, error] = std::from_chars(begin, m_cursor, value);
+				if (error == std::errc {} && end == m_cursor)
+				{
+					output->type = JsonValueTypeInteger;
+					output->integer = value;
+					return true;
+				}
+			} else
+			{
+				uint64_t value = 0;
+				const auto [end, error] = std::from_chars(begin, m_cursor, value);
+				if (error == std::errc {} && end == m_cursor)
+				{
+					output->type = JsonValueTypeUInteger;
+					output->uinteger = value;
+					return true;
+				}
+			}
+		}
+		double value = 0.0;
+		const auto [end, error] = std::from_chars(begin, m_cursor, value, std::chars_format::general);
+		if (error != std::errc {} || end != m_cursor || !std::isfinite(value))
+		{
+			return false;
+		}
+		output->type = JsonValueTypeReal;
+		output->real = value;
+		return true;
+	}
+
+	bool ParseArray(JsonValue* output, uint32_t depth)
+	{
+		m_cursor++;
+		output->type = JsonValueTypeArray;
+		auto* array = new JsonArray {};
+		array->items = new std::vector<JsonValue*>;
+		output->ptr = array;
+		JsonTrackOwned(array, JsonValueTypeArray);
+		SkipSpace();
+		if (m_cursor < m_end && *m_cursor == ']')
+		{
+			m_cursor++;
+			return true;
+		}
+		for (;;)
+		{
+			auto* child = new JsonValue {};
+			if (!ParseValue(child, output, depth + 1u))
+			{
+				JsonValueClear(child);
+				delete child;
+				return false;
+			}
+			array->items->push_back(child);
+			SkipSpace();
+			if (m_cursor == m_end)
+			{
+				return false;
+			}
+			if (*m_cursor == ']')
+			{
+				m_cursor++;
+				return true;
+			}
+			if (*m_cursor++ != ',')
+			{
+				return false;
+			}
+			SkipSpace();
+		}
+	}
+
+	bool ParseObject(JsonValue* output, uint32_t depth)
+	{
+		m_cursor++;
+		output->type = JsonValueTypeObject;
+		auto* object = new JsonObject {};
+		object->members = new std::map<std::string, JsonValue*>;
+		output->ptr = object;
+		JsonTrackOwned(object, JsonValueTypeObject);
+		SkipSpace();
+		if (m_cursor < m_end && *m_cursor == '}')
+		{
+			m_cursor++;
+			return true;
+		}
+		for (;;)
+		{
+			std::string key;
+			if (!ParseString(&key))
+			{
+				return false;
+			}
+			SkipSpace();
+			if (m_cursor == m_end || *m_cursor++ != ':')
+			{
+				return false;
+			}
+			SkipSpace();
+			auto* child = new JsonValue {};
+			if (!ParseValue(child, output, depth + 1u))
+			{
+				JsonValueClear(child);
+				delete child;
+				return false;
+			}
+			auto [it, inserted] = object->members->emplace(std::move(key), child);
+			if (!inserted)
+			{
+				JsonValueClear(it->second);
+				delete it->second;
+				it->second = child;
+			}
+			SkipSpace();
+			if (m_cursor == m_end)
+			{
+				return false;
+			}
+			if (*m_cursor == '}')
+			{
+				m_cursor++;
+				return true;
+			}
+			if (*m_cursor++ != ',')
+			{
+				return false;
+			}
+			SkipSpace();
+		}
+	}
+
+	bool ParseValue(JsonValue* output, JsonValue* parent, uint32_t depth)
+	{
+		if (depth > MaxDepth || ++m_nodes > MaxNodes || m_cursor == m_end)
+		{
+			return false;
+		}
+		JsonValueInit(output);
+		output->parent = parent;
+		switch (*m_cursor)
+		{
+			case 'n': return Consume("null", 4);
+			case 't': output->type = JsonValueTypeBoolean; output->boolean = true; return Consume("true", 4);
+			case 'f': output->type = JsonValueTypeBoolean; output->boolean = false; return Consume("false", 5);
+			case '[': return ParseArray(output, depth);
+			case '{': return ParseObject(output, depth);
+			case '"':
+			{
+				std::string value;
+				if (!ParseString(&value))
+				{
+					return false;
+				}
+				auto* string = new JsonString {};
+				string->data = static_cast<char*>(std::malloc(value.size() + 1u));
+				if (string->data == nullptr)
+				{
+					delete string;
+					return false;
+				}
+				std::memcpy(string->data, value.data(), value.size());
+				string->data[value.size()] = '\0';
+				output->type = JsonValueTypeString;
+				output->ptr = string;
+				JsonTrackOwned(string, JsonValueTypeString);
+				return true;
+			}
+			default:
+				if (*m_cursor == '-' || (*m_cursor >= '0' && *m_cursor <= '9'))
+				{
+					return ParseNumber(output);
+				}
+				return false;
+		}
+	}
+
+	const char* m_cursor = nullptr;
+	const char* m_end = nullptr;
+	uint32_t    m_nodes = 0;
+};
+
+static int32_t KYTY_SYSV_ABI JsonParserParse(JsonValue* dst, const char* src, size_t size)
+{
+	constexpr size_t MaxDocumentBytes = 4u * 1024u * 1024u;
+	if (dst == nullptr || src == nullptr || size == 0 || size > MaxDocumentBytes ||
+	    !Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(dst), sizeof(JsonValue)) ||
+	    !Core::VirtualMemory::IsRangeReadable(reinterpret_cast<uint64_t>(src), size))
+	{
+		return JSON_ARGUMENT_ERROR;
+	}
+	JsonValueClear(dst);
+	JsonDocumentParser parser(src, size);
+	if (!parser.Parse(dst))
+	{
+		JsonValueClear(dst);
+		return JSON_PARSE_ERROR;
+	}
+	return OK;
+}
+
+static const JsonValue* KYTY_SYSV_ABI JsonValueIndexString(const JsonValue* self, const char* key)
+{
+	static const JsonValue null_value {};
+	if (self == nullptr || self->type != JsonValueTypeObject || self->ptr == nullptr || key == nullptr)
+	{
+		return &null_value;
+	}
+	std::string text;
+	const auto key_address = reinterpret_cast<uint64_t>(key);
+	for (size_t i = 0; i < 4096; i++)
+	{
+		if (key_address > UINT64_MAX - i || !Core::VirtualMemory::IsRangeReadable(key_address + i, 1))
+		{
+			EXIT("JsonValueIndexString: unreadable key at byte %zu\n", i);
+			return &null_value;
+		}
+		const char ch = *reinterpret_cast<const char*>(key_address + i);
+		if (ch == '\0')
+		{
+			const auto* object = static_cast<const JsonObject*>(self->ptr);
+			if (object->members == nullptr)
+			{
+				return &null_value;
+			}
+			const auto found = object->members->find(text);
+			const auto* result = (found == object->members->end() ? &null_value : found->second);
+			return result;
+		}
+		text.push_back(ch);
+	}
+	EXIT("JsonValueIndexString: key exceeds 4096 bytes\n");
+	return &null_value;
+}
+
+static uint32_t KYTY_SYSV_ABI JsonValueGetType(const JsonValue* self)
+{
+	return (self != nullptr ? self->type : JsonValueTypeNull);
 }
 
 } // namespace Json2
@@ -370,6 +962,9 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("BSmWDIkV4w4", Json2::JsonValueSetDouble);
 	LIB_FUNC("6l3Bv2gysNc", Json2::JsonValueSetString);
 	LIB_FUNC("IKQimvG9Wqs", Json2::JsonValueSetType);
+	LIB_FUNC("S5JxQnoGF3E", Json2::JsonParserParse);
+	LIB_FUNC("HwDt5lD9Bfo", Json2::JsonValueIndexString);
+	LIB_FUNC("SHtAad20YYM", Json2::JsonValueGetType);
 	LIB_FUNC("+drDFyAS6u4", Json2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", Json2::JsonInitializerSetGlobalNullAccessCallback);
 }
