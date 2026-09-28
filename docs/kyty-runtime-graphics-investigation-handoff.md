@@ -326,15 +326,24 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Bounded libc substring import (2026-09-27): local independent emulator
+  catalogs identify `Xnrfb2-WhVw` as `strnstr`. The guest passes a path,
+  a prefix needle, and the path's byte limit; the focused test covers matches,
+  bounds, misses, and the empty needle. The strict run passed the former
+  missing import and reached a later `StorageTexture` overlap with mixed
+  `Contains`, `Crosses`, and `IsContainedWithin` relations. Parent types and
+  the new image's writer remain to be captured before changing alias policy.
+  No presentation or gameplay is proven.
+
 - libc string NID correction (2026-09-27): the empty-basename `.agx` graph
   lookup was caused by mapping `NC4MSB+BRQg` to a formatter. The guest's
   four-argument calls append path pieces and test an errno-style return; a
   second local emulator's export catalog identifies the NID as `strncat_s`.
   Watching the graph name confirmed that the old handler replaced the existing
   text with `.agx`. A focused red/green test and strict run passed the former
-  assertion. The new first exit is unresolved bounded substring search NID
-  `Xnrfb2-WhVw`. The prior format-wrapper hypothesis is closed by this
-  evidence. No gameplay is claimed.
+  assertion. That run's next exit was bounded substring search NID
+  `Xnrfb2-WhVw`, addressed above. The prior format-wrapper hypothesis is
+  closed by this evidence. No gameplay is claimed.
 
 - Audio propagation and animation-graph frontier (2026-09-27): a CPU-only
   `SystemQueryMemory`/`SystemCreate` implementation uses the 0x30-byte output

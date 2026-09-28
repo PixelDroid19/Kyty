@@ -314,6 +314,30 @@ KYTY_SYSV_ABI char* c_strstr(const char* haystack, const char* needle)
 {
 	return const_cast<char*>(::strstr(haystack, needle));
 }
+KYTY_SYSV_ABI char* c_strnstr(const char* haystack, const char* needle, size_t count)
+{
+	if (haystack == nullptr || needle == nullptr)
+	{
+		return nullptr;
+	}
+	if (*needle == '\0')
+	{
+		return const_cast<char*>(haystack);
+	}
+
+	const size_t needle_size = std::strlen(needle);
+	const char*  current     = haystack;
+	while (count >= needle_size && *current != '\0')
+	{
+		if (*current == *needle && std::strncmp(current, needle, needle_size) == 0)
+		{
+			return const_cast<char*>(current);
+		}
+		current++;
+		count--;
+	}
+	return nullptr;
+}
 KYTY_SYSV_ABI char* c_getenv(const char* name)
 {
 	const char* value = ProcessEnvironment::GetEnvironmentVariable(name);

@@ -3162,6 +3162,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("9yDWMxEFdJU", LibC::c_strrchr);
 	// Gen5 libc_v1 strstr.
 	LIB_FUNC("viiwFMaNamA", LibC::c_strstr);
+	LIB_FUNC("Xnrfb2-WhVw", LibC::c_strnstr);
 	LIB_FUNC("WDpobjImAb4", LibC::c_wcsstr);
 	LIB_FUNC("E8wCoUEbfzk", LibC::c_wcsncmp);
 	LIB_FUNC("fJnpuVVBbKk", LibC::cxx_new);         // operator new(size_t)

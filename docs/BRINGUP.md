@@ -258,9 +258,10 @@ When switching private fixtures (or adding a second root):
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native
 mode now passes the former dynamic-storage write-back, fused ES+GS register,
-offset image-sample, storage-image alias, render-target-format, and first
-audio-propagation import exits. The current first exit is an unresolved
-`libc_v1` import for bounded substring search (`Xnrfb2-WhVw`).
+offset image-sample, storage-image alias, render-target-format, first
+audio-propagation imports, and bounded libc string imports. The current first
+exit is `!create_all_the_same` while creating a `StorageTexture` with mixed
+overlap relations, including `Contains`, `Crosses`, and `IsContainedWithin`.
 There is no scored capture or controllable gameplay evidence from this run.
 
 - A scalar-loaded storage descriptor consumed by vector stores or atomics is
@@ -299,6 +300,14 @@ same NID `strncat_s`. A hardware watchpoint showed the previous binding
 replaced an existing name with only `.agx`. A focused test and strict run
 confirmed the corrected append contract and advanced to the substring import.
 Keep raw guest strings, disassembly, and addresses in scratch.
+
+The subsequent `Xnrfb2-WhVw` import is `strnstr`: two independent local
+emulator catalogs agree on the name, and the live guest passes haystack,
+needle, and a haystack byte limit. A focused bound test and strict run passed
+that import, reached later load phases, then stopped at the separate mixed
+`StorageTexture` overlap above. The earlier wave64 storage-image proof covers
+only its captured writer and layout; do not reuse its skip policy for this
+new image without tracing its producer, parent types, and coverage.
 
 ### Generic wave64 compute frontier (2026-09-26, not gameplay)
 
