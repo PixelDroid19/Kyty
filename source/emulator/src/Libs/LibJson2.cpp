@@ -927,6 +927,25 @@ static uint32_t KYTY_SYSV_ABI JsonValueGetType(const JsonValue* self)
 	return (self != nullptr ? self->type : JsonValueTypeNull);
 }
 
+static size_t KYTY_SYSV_ABI JsonValueCount(const JsonValue* self)
+{
+	if (self == nullptr || self->ptr == nullptr)
+	{
+		return 0;
+	}
+	if (self->type == JsonValueTypeArray)
+	{
+		const auto* array = static_cast<const JsonArray*>(self->ptr);
+		return (array->items != nullptr ? array->items->size() : 0u);
+	}
+	if (self->type == JsonValueTypeObject)
+	{
+		const auto* object = static_cast<const JsonObject*>(self->ptr);
+		return (object->members != nullptr ? object->members->size() : 0u);
+	}
+	return 0;
+}
+
 } // namespace Json2
 
 LIB_DEFINE(InitJson2_1)
@@ -965,6 +984,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("S5JxQnoGF3E", Json2::JsonParserParse);
 	LIB_FUNC("HwDt5lD9Bfo", Json2::JsonValueIndexString);
 	LIB_FUNC("SHtAad20YYM", Json2::JsonValueGetType);
+	LIB_FUNC("RBw+4NukeGQ", Json2::JsonValueCount);
 	LIB_FUNC("+drDFyAS6u4", Json2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", Json2::JsonInitializerSetGlobalNullAccessCallback);
 }

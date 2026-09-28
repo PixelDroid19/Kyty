@@ -385,6 +385,17 @@ failure at sequence 2000 and leaves intermittent host/device failure to
 measure separately. No captured image or controlled gameplay validates the
 scene.
 
+`Value::count` now reports parsed array and object sizes, with focused checks
+for array, object, and scalar values. In the next strict Silent/Native run, the
+guest passed the former count import, logged that a level had started, and then
+stopped at missing `CPLV6G-eXmk[AudioPropagation_v1][AudioPropagation_v1.0]`,
+catalogued as `sceAudioPropagationSystemRegisterMaterial`. The 61-second run
+did not establish that the level image was displayed or controlled. The audio
+material ABI, output handle, lifetime, and acoustic behavior require a guest
+call trace before implementation; secondary implementations in the local
+comparison either return success without state or depend on unverified record
+sizes.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show
