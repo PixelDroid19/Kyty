@@ -432,6 +432,17 @@ at `unknown mimg format for opcode: 0x24`, `dmask: 0x1`. The present-32 native
 capture still scored `entropy=0`, `healthy=false`. The empty result does not
 establish acoustic propagation or a visually correct level.
 
+The graphics decode failure was a Gen5 `IMAGE_SAMPLE_L` (`0x24`) with
+`DIM=1` (2D), one scalar destination selected by `DMASK=0x1`, and NSA
+addresses. The local RDNA2 ISA defines this as an explicit-LOD texture
+sample; the parser previously accepted only three- or four-component forms.
+The new scalar emitter reads the three selected address VGPRs, samples with
+the explicit LOD, and writes only the red component. A synthetic parse/SPIR-V
+source test passed, and the strict run passed the former MIMG exit. It next
+stopped at `!create_all_the_same` for a storage texture with three containing
+GPU-memory objects. The present-34 native capture remained uniform black
+(`entropy=0`, `healthy=false`). This is shader admission, not visual proof.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show

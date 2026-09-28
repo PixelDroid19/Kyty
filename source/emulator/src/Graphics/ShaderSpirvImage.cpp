@@ -2412,6 +2412,55 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 	return false;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_Vdata1Vaddr3StSsDmask1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const auto* bind = spirv->GetBindInfo();
+	if (inst.mimg_dimension != 1u || bind == nullptr || bind->textures2D.textures2d_sampled_num <= 0 || bind->samplers.samplers_num <= 0)
+	{
+		return false;
+	}
+
+	const auto dst     = operand_variable_to_str(inst.dst);
+	const auto x       = mimg_address_to_str(inst, 0);
+	const auto y       = mimg_address_to_str(inst, 1);
+	const auto lod     = mimg_address_to_str(inst, 2);
+	const auto texture = operand_variable_to_str(inst.src[1], 0);
+	const auto sampler = operand_variable_to_str(inst.src[2], 0);
+	if (dst.type != SpirvType::Float || x.type != SpirvType::Float || y.type != SpirvType::Float || lod.type != SpirvType::Float ||
+	    texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint)
+	{
+		return false;
+	}
+
+	static const char* source = R"(
+%sample_l_scalar_descriptor_raw_<index> = OpLoad %uint %<texture>
+%sample_l_scalar_descriptor_<index> = OpBitwiseAnd %uint %sample_l_scalar_descriptor_raw_<index> %uint_0x1fffffff
+%sample_l_scalar_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %sample_l_scalar_descriptor_<index>
+%sample_l_scalar_image_<index> = OpLoad %ImageS %sample_l_scalar_image_ptr_<index>
+%sample_l_scalar_sampler_index_<index> = OpLoad %uint %<sampler>
+%sample_l_scalar_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %sample_l_scalar_sampler_index_<index>
+%sample_l_scalar_sampler_<index> = OpLoad %Sampler %sample_l_scalar_sampler_ptr_<index>
+%sample_l_scalar_sampled_<index> = OpSampledImage %SampledImage %sample_l_scalar_image_<index> %sample_l_scalar_sampler_<index>
+%sample_l_scalar_x_<index> = OpLoad %float %<x>
+%sample_l_scalar_y_<index> = OpLoad %float %<y>
+%sample_l_scalar_lod_<index> = OpLoad %float %<lod>
+%sample_l_scalar_coordinate_<index> = OpCompositeConstruct %v2float %sample_l_scalar_x_<index> %sample_l_scalar_y_<index>
+%sample_l_scalar_value_<index> = OpImageSampleExplicitLod %v4float %sample_l_scalar_sampled_<index> %sample_l_scalar_coordinate_<index> Lod %sample_l_scalar_lod_<index>
+%sample_l_scalar_red_<index> = OpCompositeExtract %float %sample_l_scalar_value_<index> 0
+OpStore %<dst> %sample_l_scalar_red_<index>
+)";
+	*dst_source += String8(source)
+	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                   .ReplaceStr("<texture>", texture.value)
+	                   .ReplaceStr("<sampler>", sampler.value)
+	                   .ReplaceStr("<x>", x.value)
+	                   .ReplaceStr("<y>", y.value)
+	                   .ReplaceStr("<lod>", lod.value)
+	                   .ReplaceStr("<dst>", dst.value);
+	return true;
+}
+
 static bool RecompileCubeImageSampleL(uint32_t destination_num, KYTY_RECOMPILER_ARGS)
 {
 	const auto& inst = code.GetInstructions().At(index);

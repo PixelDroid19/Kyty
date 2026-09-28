@@ -3560,6 +3560,52 @@ TEST(EmulatorGraphicsPackets, ParsesImageSampleLWithExplicitLod)
 	EXPECT_EQ(code.GetInstructions().At(0).dst.size, 4);
 }
 
+TEST(EmulatorGraphicsPackets, Gen5ScalarImageSampleLUsesExplicitLodAndNsaCoordinates)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x24u << 18u) | (1u << 8u) | (1u << 3u) | (1u << 1u);
+	const uint32_t word1 = (2u << 21u) | (12u << 8u) | 3u;
+	const uint32_t shader[] = {word0, word1, 4u | (5u << 8u) | (6u << 16u) | (7u << 24u), 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& sample = code.GetInstructions().At(0);
+	EXPECT_EQ(sample.type, ShaderInstructionType::ImageSampleL);
+	EXPECT_EQ(sample.format, ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1);
+	EXPECT_EQ(sample.mimg_dimension, 1u);
+	EXPECT_EQ(sample.mimg_address_num, 5);
+	EXPECT_EQ(sample.mimg_address[0].register_id, 3);
+	EXPECT_EQ(sample.mimg_address[1].register_id, 4);
+	EXPECT_EQ(sample.mimg_address[2].register_id, 5);
+	EXPECT_EQ(sample.dst.size, 1);
+
+	ShaderPixelInputInfo input {};
+	input.bind.textures2D.textures_num           = 1;
+	input.bind.textures2D.textures2d_sampled_num = 1;
+	input.bind.textures2D.desc[0].start_register = 0;
+	input.bind.textures2D.desc[0].usage          = ShaderTextureUsage::ReadOnly;
+	input.bind.textures2D.desc[0].texture.fields[1] = 56u << 20u;
+	input.bind.textures2D.desc[0].texture.fields[3] = 9u << 28u;
+	input.bind.samplers.samplers_num             = 1;
+	input.bind.samplers.start_register[0]       = 8;
+	ShaderCalcBindingIndices(&input.bind);
+
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_NE(source.FindIndex("%sample_l_scalar_lod_0 = OpLoad %float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpImageSampleExplicitLod %v4float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("Lod %sample_l_scalar_lod_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpCompositeExtract %float %sample_l_scalar_value_0 0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("OpImageSampleImplicitLod"), Core::STRING8_INVALID_INDEX);
+}
+
 TEST(EmulatorGraphicsPackets, DecodesCubeLayerAndExplicitLodForArraySampling)
 {
 	const uint32_t word0 = (0x3cu << 26u) | (0x24u << 18u) | (0x7u << 8u) | (3u << 3u);

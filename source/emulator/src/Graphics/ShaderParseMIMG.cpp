@@ -253,6 +253,13 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				inst.mimg_dmask  = static_cast<uint8_t>(dmask);
 			switch (dmask)
 			{
+					case 0x1:
+						if (dim == 1u)
+						{
+							inst.format = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1;
+							inst.dst.size = 1;
+						}
+						break;
 					case 0x7:
 						inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7;
 						if (dim == 3u)

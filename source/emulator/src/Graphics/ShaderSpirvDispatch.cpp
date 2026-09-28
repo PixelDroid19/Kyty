@@ -113,6 +113,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_ImageSample_Vdata3Vaddr3StSsDmaskB,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB,         {""}},
 	{Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF,         {""}},
 	{Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7,         {""}},
+	{Recompile_ImageSampleL_Vdata1Vaddr3StSsDmask1,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1,         {""}},
 	{Recompile_ImageSampleL_Vdata4Vaddr3StSsDmaskF,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF,         {""}},
 	{Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7,         {""}},
 	{Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata3Vaddr4StSsDmaskB,         {""}},
