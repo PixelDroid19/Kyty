@@ -303,7 +303,7 @@ timeouts. No compute ring was mapped or advanced during the measured opening
 window, and the first 40 dispatches belonged to the graphics queue. Returning
 from DCB submit immediately after command-buffer snapshotting did not improve
 the measured pace (about 0.11 FPS in a bounded A/B run), so that timing change
-was removed. The missing earlier producer remains unresolved; changing the
+was removed. The earlier producer had not yet been identified; changing the
 wait timeout or fabricating the label would conceal it. This explains slow
 progress, not the uniform black native captures.
 
@@ -335,11 +335,26 @@ first occurrence used three nonindexed vertices and no depth attachment.
 Those samples do not prove that every repeated draw has the same shape. A
 scheduled diagnostic `cross` was delivered at present 2, yet a present-6
 native capture still scored zero entropy and the input counters recorded no
-ordinary guest pad reads. The live boundary is the missing nonzero scene
+ordinary guest pad reads. At this point the live boundary was the missing nonzero scene
 source or scene submission, together with the unresolved graphics-label wait;
 no evidence justifies changing the compositor, sampled-image selection, or
 audio memory contract to force visible pixels. The temporary probes were
 removed before the clean build.
+
+A later paired-submit trace identified the first slow label's producer. The
+opening ACB on one async queue contains five waits for that label; a later
+DCB contains its matching `RELEASE_MEM`. Kyty had sent both through the
+graphics ring, so the producer could run only after the ACB's timeout
+fallback. ACB handles now retain separate ordered compute command processors,
+and GPU write-back waits until every queue using a writable object has
+completed. Two focused tests and the boundary/table gates passed. In the
+first strict run after the correction, the agent reached present 15 in about
+36 seconds (snapshot FPS about 0.44); 32 `WAIT_REG_MEM` suspensions remained.
+The native present-19 capture still scored `entropy=0`, one color bin, and
+`healthy=false`. The run then exited on missing strict import
+`S5JxQnoGF3E[Json2_v1][Json_v1.1]`, identified as `Parser::parse`. This
+does not establish gameplay or a controlled performance benchmark. The next
+work is a contract-backed JSON data path and the still-missing scene source.
 
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits

@@ -5,6 +5,7 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GpuDeferredDeletionQueue.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Graphics/Objects/GpuMemoryOverlap.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
@@ -601,6 +602,28 @@ inline bool GpuMemoryAllowsPendingDepthStencilStorageAlias(GpuMemoryObjectType e
                                                                bool dependencies_complete)
 {
 	return in_use && has_write_back_func && !read_only && !dependencies_complete;
+}
+
+// A completed queue may publish a writable object only after every other
+// queue that uses the same object has completed. A later use on this queue
+// also defers publication until that later submission completes.
+[[nodiscard]] inline bool GpuMemoryCanWriteBackAtSubmission(const GpuSubmissionHighWater& uses,
+                                                            const GpuDeferredDeletionQueue& completions, SubmissionId publishing)
+{
+	SubmissionId latest;
+	if (!uses.LatestForQueue(publishing.queue, &latest) || latest.sequence > publishing.sequence)
+	{
+		return false;
+	}
+	std::vector<SubmissionId> other_queues;
+	for (const auto& dependency: uses.Dependencies())
+	{
+		if (dependency.queue != publishing.queue)
+		{
+			other_queues.push_back(dependency);
+		}
+	}
+	return completions.AreDependenciesComplete(other_queues);
 }
 
 // Combined create-time decision: link pending StorageBuffer under an incoming

@@ -373,34 +373,8 @@ void GpuMemory::WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId s
 				auto& o = h.info;
 				if (o.in_use && o.write_back_func != nullptr && !o.read_only)
 				{
-					SubmissionId queue_use;
-					if (o.submission_uses.LatestForQueue(submission.queue, &queue_use))
+					if (GpuMemoryCanWriteBackAtSubmission(o.submission_uses, m_deferred_deletions, submission))
 					{
-						if (queue_use.sequence > submission.sequence)
-						{
-							// Back-to-back same-queue submissions share the buffer
-							// while the earlier one completes: the later use is
-							// still in flight, so defer this object (it stays
-							// in use and is written back when the later
-							// submission completes) instead of copying a stale
-							// snapshot and clearing the later use's tracking.
-							continue;
-						}
-						for (const auto& dependency: o.submission_uses.Dependencies())
-						{
-							if (dependency.queue == submission.queue)
-							{
-								continue;
-							}
-							const std::vector<SubmissionId> exact_dependency {dependency};
-							if (!m_deferred_deletions.AreDependenciesComplete(exact_dependency))
-							{
-								EXIT("GpuMemory write-back has an unordered cross-queue use: type=%s completing_queue=%" PRIu32
-								     " completing_sequence=%" PRIu64 " blocking_queue=%" PRIu32 " blocking_sequence=%" PRIu64 "\n",
-								     Core::EnumName(o.object.type).C_Str(), submission.queue.Value(), submission.sequence,
-								     dependency.queue.Value(), dependency.sequence);
-							}
-						}
 						objects.Add(WriteBackObject({heap_id, index}));
 					}
 				}

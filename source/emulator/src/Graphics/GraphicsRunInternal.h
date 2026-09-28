@@ -574,6 +574,7 @@ public:
 
 	void     Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
 	                GraphicsSubmissionCompletion completion);
+	bool     SubmitAgcAsync(uint32_t queue_handle, uint32_t* cmd_buffer, uint32_t num_dw);
 	void     SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
 	                       int index, int flip_mode, int64_t flip_arg);
 	uint32_t MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw, uint32_t* read_ptr_addr);
@@ -601,6 +602,8 @@ private:
 
 	CommandProcessor* m_compute_cp[8]    = {};
 	ComputeRing*      m_compute_ring[64] = {};
+	GraphicsAgcAsyncQueueSlots m_agc_async_queue_slots;
+	GraphicsRing*              m_agc_async_ring[GraphicsAgcAsyncQueueSlots::Capacity] = {};
 
 	std::atomic_int m_done_num = 0;
 };

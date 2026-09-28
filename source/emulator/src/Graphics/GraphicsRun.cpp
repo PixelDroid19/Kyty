@@ -78,6 +78,38 @@ void Gpu::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_
 	    });
 }
 
+bool Gpu::SubmitAgcAsync(uint32_t queue_handle, uint32_t* cmd_buffer, uint32_t num_dw)
+{
+	return m_submission_admission_gate.RunAdmitted(
+	    [&]
+	    {
+		    GraphicsRing* ring = nullptr;
+		    {
+			    std::lock_guard<std::mutex> topology_lock(m_topology_mutex);
+			    bool unavailable[GraphicsAgcAsyncQueueSlots::Capacity] = {};
+			    for (int slot = 0; slot < GraphicsAgcAsyncQueueSlots::Capacity; slot++)
+			    {
+				    unavailable[slot] = m_compute_cp[slot] != nullptr && m_agc_async_ring[slot] == nullptr;
+			    }
+			    const int slot = m_agc_async_queue_slots.Bind(queue_handle, unavailable);
+			    if (slot < 0)
+			    {
+				    return false;
+			    }
+			    if (m_agc_async_ring[slot] == nullptr)
+			    {
+				    EXIT_IF(m_compute_cp[slot] != nullptr);
+				    m_compute_cp[slot]   = new CommandProcessor(&m_submission_coordinator, GraphicContext::QUEUE_COMPUTE_START + slot);
+				    m_agc_async_ring[slot] = new GraphicsRing;
+				    m_agc_async_ring[slot]->SetCp(m_compute_cp[slot]);
+			    }
+			    ring = m_agc_async_ring[slot];
+		    }
+		    ring->Submit(cmd_buffer, num_dw, nullptr, 0, 0, 0, 0, 0, false, GraphicsSubmissionCompletion::None);
+		    return true;
+	    });
+}
+
 void Gpu::SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
                         int index, int flip_mode, int64_t flip_arg)
 {
@@ -156,6 +188,13 @@ void Gpu::Done()
 	    [&]
 	    {
 		    m_gfx_ring->Done();
+		    for (auto* ring: m_agc_async_ring)
+		    {
+			    if (ring != nullptr)
+			    {
+				    ring->Done();
+			    }
+		    }
 		    for (auto& cr: m_compute_ring)
 		    {
 			    if (cr != nullptr)
@@ -175,6 +214,13 @@ bool Gpu::AreSubmitsAllowed()
 	    {
 		    if (m_gfx_ring->IsIdle())
 		    {
+			    for (auto* ring: m_agc_async_ring)
+			    {
+				    if (ring != nullptr && !ring->IsIdle())
+				    {
+					    return false;
+				    }
+			    }
 			    for (auto& cr: m_compute_ring)
 			    {
 				    if (cr != nullptr && !cr->IsIdle())
@@ -201,6 +247,13 @@ void Gpu::Wait()
 void Gpu::WaitLocked()
 {
 	m_gfx_ring->WaitForIdle();
+	for (auto* ring: m_agc_async_ring)
+	{
+		if (ring != nullptr)
+		{
+			ring->WaitForIdle();
+		}
+	}
 	m_gfx_cp->SubmitAndWait();
 	for (auto& cr: m_compute_ring)
 	{
@@ -275,6 +328,7 @@ ComputeRing* Gpu::GetRing(uint32_t ring_id)
 	int v        = static_cast<int>(ring_id - 1);
 	int pipe_id  = v / 8;
 	int queue_id = v % 8;
+	EXIT_IF(m_agc_async_ring[pipe_id] != nullptr);
 
 	if (m_compute_cp[pipe_id] == nullptr)
 	{
@@ -2319,6 +2373,15 @@ void GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t
 	EXIT_IF(g_gpu == nullptr);
 
 	g_gpu->Submit(cmd_draw_buffer, num_draw_dw, cmd_const_buffer, num_const_dw, completion);
+}
+
+bool GraphicsRunSubmitAgcAsync(uint32_t queue_handle, uint32_t* cmd_buffer, uint32_t num_dw)
+{
+	EXIT_IF(cmd_buffer == nullptr);
+	EXIT_IF(num_dw == 0);
+	EXIT_IF(g_gpu == nullptr);
+
+	return g_gpu->SubmitAgcAsync(queue_handle, cmd_buffer, num_dw);
 }
 
 void GraphicsRunSubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,

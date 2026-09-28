@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/NativeCapture.h"
@@ -56,6 +57,50 @@ UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
 using namespace GraphicsRetirementHelpers;
+
+TEST(EmulatorGraphicsState, AgcAsyncQueueHandlesKeepSeparateOrderedSlots)
+{
+	GraphicsAgcAsyncQueueSlots slots;
+	bool                       unavailable[GraphicsAgcAsyncQueueSlots::Capacity] = {};
+	unavailable[GraphicsAgcAsyncQueueSlots::Capacity - 1] = true;
+
+	const int first  = slots.Bind(17u, unavailable);
+	const int second = slots.Bind(29u, unavailable);
+	EXPECT_GE(first, 0);
+	EXPECT_GE(second, 0);
+	EXPECT_NE(first, second);
+	EXPECT_EQ(slots.Bind(17u, unavailable), first);
+	EXPECT_EQ(slots.Bind(29u, unavailable), second);
+	EXPECT_EQ(slots.Find(31u), -1);
+
+	for (int i = 0; i < GraphicsAgcAsyncQueueSlots::Capacity - 3; i++)
+	{
+		EXPECT_GE(slots.Bind(100u + static_cast<uint32_t>(i), unavailable), 0);
+	}
+	EXPECT_EQ(slots.Bind(200u, unavailable), -1);
+	EXPECT_EQ(slots.Bind(17u, unavailable), first);
+}
+
+TEST(EmulatorGraphicsState, WriteBackWaitsForEveryQueueUsingTheObject)
+{
+	GpuSubmissionHighWater     uses;
+	GpuDeferredDeletionQueue completions;
+	const SubmissionId         graphics {GpuQueueId(8), 121};
+	const SubmissionId         async {GpuQueueId(7), 7};
+	ASSERT_EQ(uses.RecordUse(graphics), GpuDeferredDeletionResult::Success);
+	ASSERT_EQ(uses.RecordUse(async), GpuDeferredDeletionResult::Success);
+
+	EXPECT_FALSE(GpuMemoryCanWriteBackAtSubmission(uses, completions, graphics));
+	EXPECT_FALSE(GpuMemoryCanWriteBackAtSubmission(uses, completions, async));
+	ASSERT_EQ(completions.CompleteSubmission(async), GpuDeferredDeletionResult::Success);
+	EXPECT_TRUE(GpuMemoryCanWriteBackAtSubmission(uses, completions, graphics));
+
+	const SubmissionId later_graphics {GpuQueueId(8), 122};
+	ASSERT_EQ(uses.RecordUse(later_graphics), GpuDeferredDeletionResult::Success);
+	EXPECT_FALSE(GpuMemoryCanWriteBackAtSubmission(uses, completions, graphics));
+	EXPECT_TRUE(GpuMemoryCanWriteBackAtSubmission(uses, completions, later_graphics));
+	EXPECT_FALSE(GpuMemoryCanWriteBackAtSubmission(uses, completions, SubmissionId {GpuQueueId(6), 1}));
+}
 
 TEST(EmulatorGraphicsState, FailedQueueSubmitCannotPublishCommandBuffer)
 {

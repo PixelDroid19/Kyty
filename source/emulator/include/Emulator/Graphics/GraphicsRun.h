@@ -99,11 +99,56 @@ enum class GraphicsSubmissionCompletion
 	QueuedGraphicsInterrupt,
 };
 
+// ACB handles name independent ordered queues. Bind each live handle to one
+// host compute command processor so a graphics producer can run while an ACB
+// waits for its label.
+class GraphicsAgcAsyncQueueSlots
+{
+public:
+	static constexpr int Capacity = 8;
+
+	int Find(uint32_t handle) const
+	{
+		for (int slot = 0; slot < Capacity; slot++)
+		{
+			if (m_bound[slot] && m_handle[slot] == handle)
+			{
+				return slot;
+			}
+		}
+		return -1;
+	}
+
+	int Bind(uint32_t handle, const bool (&unavailable)[Capacity])
+	{
+		const int existing = Find(handle);
+		if (existing >= 0)
+		{
+			return existing;
+		}
+		for (int slot = Capacity - 1; slot >= 0; slot--)
+		{
+			if (!m_bound[slot] && !unavailable[slot])
+			{
+				m_bound[slot]  = true;
+				m_handle[slot] = handle;
+				return slot;
+			}
+		}
+		return -1;
+	}
+
+private:
+	bool     m_bound[Capacity]  = {};
+	uint32_t m_handle[Capacity] = {};
+};
+
 GraphicsAgcReleaseMemControl GraphicsDecodeAgcReleaseMemControl(uint32_t control_dw);
 uint32_t GraphicsAgcReleaseMemCacheAction(uint16_t gcr_cntl);
 
 void     GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
                            GraphicsSubmissionCompletion completion);
+bool     GraphicsRunSubmitAgcAsync(uint32_t queue_handle, uint32_t* cmd_buffer, uint32_t num_dw);
 void     GraphicsRunSubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
                                   int handle, int index, int flip_mode, int64_t flip_arg);
 uint32_t GraphicsRunMapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw,

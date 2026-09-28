@@ -465,11 +465,31 @@ against the same correct gameplay capture.
   earlier producer or exclude an indirect shader/device-address route.
   Signaling `DecodeCompletion` immediately after the PM4 snapshot was tried as
   one bounded A/B experiment; present 2 still reported about 0.11 FPS and a
-  six-second gap, so the change was removed. Next, correlate the first blocked
-  DCB's paired constant/draw streams and the label's producer packet or guest
-  store before modifying `GraphicsRun.cpp:1075` or
-  `GraphicsRunOpParsers.cpp:1367`. Do not shorten, extend, or skip the wait as
-  a performance fix.
+  six-second gap, so the change was removed. The later paired-submit trace
+  below identifies the first slow label's producer. Do not shorten, extend,
+  or skip the wait as a performance fix.
+
+- Independent ACB queue and write-back frontier (2026-09-28): a bounded scan
+  of snapshot command buffers found the first slow `WAIT_MEM64` five times in
+  submission 0's ACB draw stream (1005 dwords, empty constant stream), with
+  its matching `RELEASE_MEM` in submission 4's DCB. The ACB used driver queue
+  handle 64; a second ACB used handle 72. Both had been submitted into the
+  single graphics ring, preventing the DCB producer from running until five
+  one-second fallback skips let the ACB finish. The production change routes
+  each ACB handle to a distinct ordered compute command processor. A first
+  strict trial reached a preexisting write-back guard: one `StorageBuffer`
+  was still used by compute queue 7 when graphics queue 8 completed. The
+  write-back gate now defers CPU publication until all recorded queue uses
+  complete, retaining the existing same-queue high-water check. Focused
+  queue-binding and two-queue publication tests passed; both changed targets
+  built with `-j2`; boundary and graphics-table gates passed. In the next
+  strict run, the agent reached present 15 in about 36 seconds with snapshot
+  FPS around 0.44 and 32 remaining wait suspensions. A native present-19
+  capture was still one-bin black (`entropy=0`, `healthy=false`). The later
+  strict exit was a missing `Json2_v1` `Parser::parse` import, not a queue or
+  Vulkan fault. The temporary submit-origin probe was removed. Continue with
+  a verified JSON parse/value contract, then recheck missing scene submission
+  and the remaining waits; there is still no playable result.
 
 - Viewport-bank overwrite and black-frame boundary (2026-09-28): a bounded
   native readback found zero RGB in the packed VideoOut image before PNG

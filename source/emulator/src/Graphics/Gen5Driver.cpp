@@ -272,14 +272,13 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet)
 			KYTY_LOG_DEBUG("\t acb    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(packet->addr));
 			KYTY_LOG_DEBUG("\t dw_num = 0x%08" PRIx32 "\n", packet->dw_num);
 
-	// Queue-indexed compute submit is not fully modeled yet. Execute the ACB
-	// through the existing command processor so WaitRegMem/ReleaseMem packets
-	// still complete guest labels rather than stalling on an empty GPU path.
-	(void)queue;
 	if (packet->addr != nullptr && packet->dw_num != 0)
 	{
 		GraphicsDbgDumpDcb("a", packet->dw_num, packet->addr);
-		GraphicsRunSubmit(packet->addr, packet->dw_num, nullptr, 0, GraphicsSubmissionCompletion::None);
+		if (!GraphicsRunSubmitAgcAsync(queue, packet->addr, packet->dw_num))
+		{
+			EXIT("AGC async submission exceeds available independent queues\n");
+		}
 	}
 	return Kernel::OK;
 }
