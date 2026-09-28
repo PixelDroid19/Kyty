@@ -798,8 +798,11 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 	const uint32_t grain = (ctx.grain >= 64 && ctx.grain <= 4096) ? ctx.grain : kDefaultGrain;
 	const uint32_t sample_rate = ctx.sample_rate != 0 ? ctx.sample_rate : kDefaultSampleRate;
 	const uint32_t queue_depth = ctx.queue_depth != 0 ? ctx.queue_depth : kDefaultQueueDepth;
+	const auto grain_duration =
+	    std::chrono::nanoseconds(static_cast<int64_t>(grain) * 1'000'000'000LL / static_cast<int64_t>(sample_rate));
 
 	// Blocking-when-full: wait one grain when the emulated queue is saturated.
+	bool waited_for_queue = false;
 	while (ctx.queue_used >= queue_depth)
 	{
 		if (blocking == 0)
@@ -807,9 +810,8 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 			return AUDIO_OUT_ERROR_PORT_FULL;
 		}
 		lock.unlock();
-		const auto ns = std::chrono::nanoseconds(static_cast<int64_t>(grain) * 1'000'000'000LL /
-		                                         static_cast<int64_t>(sample_rate));
-		std::this_thread::sleep_for(ns);
+		std::this_thread::sleep_for(grain_duration);
+		waited_for_queue = true;
 		lock.lock();
 		if (!ctx.used || ctx.generation != context_generation)
 		{
@@ -861,6 +863,18 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 
 	if (consumed_ports.empty())
 	{
+		// With no PCM to submit, a blocking push still advances one output grain.
+		// Otherwise a silent feeder can spin without a hardware queue or sink.
+		if (blocking != 0 && !waited_for_queue)
+		{
+			lock.unlock();
+			std::this_thread::sleep_for(grain_duration);
+			lock.lock();
+			if (!ctx.used || ctx.generation != context_generation)
+			{
+				return LibKernel::KERNEL_ERROR_EINVAL;
+			}
+		}
 		return OK;
 	}
 	// Keeping the context lock through submission prevents close/recreate from

@@ -660,6 +660,25 @@ TEST(EmulatorAudio, AudioOut2NonBlockingPushReportsFullQueue)
 	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
 }
 
+TEST(EmulatorAudio, AudioOut2BlockingEmptyPushPacesOneGrain)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ASSERT_EQ(AudioOut2::AudioOut2Initialize(), 0);
+	const int32_t context = AudioOut2::HostStateTest::CreateContext();
+	ASSERT_GT(context, 0);
+	const auto start = std::chrono::steady_clock::now();
+	EXPECT_EQ(AudioOut2::AudioOut2ContextPush(context, 1), 0);
+	const auto elapsed = std::chrono::steady_clock::now() - start;
+	// The default host-state context has a 256-frame grain at 48 kHz.
+	EXPECT_GE(elapsed, std::chrono::milliseconds(4));
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(context), 0);
+}
+
 TEST(EmulatorAudio, AudioOut2PortSetAttributesRejectsMalformedPcmPointerEntry)
 {
 	if (!Config::IsInitialized())
