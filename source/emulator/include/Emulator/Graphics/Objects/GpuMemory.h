@@ -290,7 +290,9 @@ inline bool GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType existing_type
 }
 
 // A storage image whose first dispatch covers every texel can start with
-// undefined contents while older GPU-owned surface views remain alive.
+// undefined contents while older surface views remain alive. Smaller sampled
+// and storage views are linked for lifetime and independent reads, never used
+// to seed the fully overwritten destination.
 inline bool GpuMemoryAllowsOverwrittenStorageTextureParent(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
                                                            GpuMemoryObjectType incoming_type, bool skip_seed)
 {
@@ -300,11 +302,12 @@ inline bool GpuMemoryAllowsOverwrittenStorageTextureParent(GpuMemoryObjectType e
 	}
 	if (existing_type == GpuMemoryObjectType::StorageTexture)
 	{
-		return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses;
+		return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
+		       relation == GpuMemoryOverlapType::IsContainedWithin;
 	}
 	if (existing_type == GpuMemoryObjectType::Texture)
 	{
-		return relation == GpuMemoryOverlapType::Crosses;
+		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin;
 	}
 	if (existing_type != GpuMemoryObjectType::RenderTexture && existing_type != GpuMemoryObjectType::StorageBuffer)
 	{
