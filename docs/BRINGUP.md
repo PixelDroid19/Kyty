@@ -273,8 +273,11 @@ excluded: the observed dispatch can write at most 4,096 of 3,326,976 texels.
 The packed-float render target is the leading source candidate for the
 overlap: a filtered strict trace recorded its full-extent `CLEAR`, a draw,
 and a later sample before the storage creation, with no later render-target
-write to that address. Untraced CPU/DMA writes and the raw cross-format byte
-mapping remain unresolved. The existing two-byte render-target tiling path
+write to that address. A bounded writer-history query at the rejection covered
+the overlapping range with zero retained or dropped DMA, WriteData, event,
+or write-back events. It does not observe direct guest CPU stores or render-
+target writes. The raw cross-format byte mapping remains unresolved. The
+existing two-byte render-target tiling path
 also maps 32,768 texels to only 8,192 distinct byte offsets per block; that
 layout must be proven before materialization.
 Four native captures are now available from the first four presents, but all

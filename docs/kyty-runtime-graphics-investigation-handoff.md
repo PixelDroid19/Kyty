@@ -388,9 +388,17 @@ against the same correct gameplay capture.
   the filtered address appeared before the new storage view. The overlapping
   source span is the first 78 whole 64 KiB blocks of a 15-block-wide surface;
   those blocks lie within the attachment's valid 1080 rows. This identifies
-  the packed host image as the leading source candidate, subject to any
-  untraced DMA or CPU write. A raw byte mapping into the differently formatted
-  16-bit storage image remains unimplemented. A temporary seed-skip diagnostic
+  the packed host image as the leading source candidate. A separate bounded
+  strict run stopped at the rejection under GDB and queried the existing
+  writer-history recorder for that entire overlapping span. The query reported
+  `enabled=1`, `covers=1`, `retained=0`, `dropped=0`, and `matching=0`.
+  Thus no recorded DMA, immediate WriteData, constant-RAM, addressed event,
+  or GPU write-back touched those bytes in that run. The packed parent had the
+  newest GPU update marker (259 versus 258 and 254 for the crossing render
+  peers); its CPU marker was 130. The recorder does not cover direct guest
+  CPU stores or render pass writes, which were observed separately. A raw byte
+  mapping into the differently formatted 16-bit storage image remains
+  unimplemented. A temporary seed-skip diagnostic
   still reached the same rejection because the existing full-overwrite policy
   does not accept a `Texture IsContainedWithin` parent; the diagnostic was
   removed and provides no evidence about later image reads. The filtered
