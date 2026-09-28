@@ -23,6 +23,7 @@ namespace {
 constexpr uint32_t kSystemOptionId = 0x010107d5;
 constexpr uint32_t kSystemMemoryId = 0x010107d4;
 constexpr uint32_t kMaterialId     = 0x010107d1;
+constexpr uint32_t kRoomAttributeId = 0x00020000;
 constexpr size_t   kMaterialBytes  = 0x40;
 constexpr size_t   kMaxSystems     = 32;
 constexpr size_t   kMaxRooms       = 4096;
@@ -38,6 +39,15 @@ struct SystemRecord
 {
 	uint64_t     handle = 0;
 	SystemOption option;
+	uint64_t     room_attribute_handle = 0;
+};
+
+struct AttributeEntry
+{
+	uint32_t id = 0;
+	uint32_t opaque = 0;
+	uint64_t value_address = 0;
+	uint64_t value_size = 0;
 };
 
 struct RoomRecord
@@ -58,6 +68,7 @@ static_assert(sizeof(SystemOption) == 0x38);
 static_assert(sizeof(SystemMemory) == 0x30);
 static_assert(offsetof(SystemMemory, cpu_memory_size) == 0x18);
 static_assert(sizeof(SystemWorkspace) == 0x40);
+static_assert(sizeof(AttributeEntry) == 0x18);
 
 std::mutex                            g_system_mutex;
 std::array<SystemRecord, kMaxSystems> g_systems {};
@@ -250,6 +261,13 @@ int KYTY_SYSV_ABI RoomDestroy(uint64_t system, uint64_t room_handle)
 		if (room.handle == room_handle && room_handle != 0 && room.system == system)
 		{
 			room = {};
+			for (auto& record: g_systems)
+			{
+				if (record.handle == system && record.room_attribute_handle == room_handle)
+				{
+					record.room_attribute_handle = 0;
+				}
+			}
 			return 0;
 		}
 	}
@@ -300,6 +318,43 @@ int KYTY_SYSV_ABI SystemRegisterMaterial(uint64_t system, const void* material, 
 	g_next_object_handle++;
 	*free_record = MaterialRecord {.handle = handle, .system = system, .data = material_value};
 	return 0;
+}
+
+int KYTY_SYSV_ABI SystemSetAttributes(uint64_t system, const void* attributes, uint32_t count)
+{
+	PRINT_NAME();
+	AttributeEntry entry {};
+	uint64_t       room_handle = 0;
+	if (count != 1 || !ReadGuest(&entry, attributes, sizeof(entry)) || entry.id != kRoomAttributeId ||
+	    entry.value_size != sizeof(room_handle) ||
+	    !ReadGuest(&room_handle, reinterpret_cast<const void*>(entry.value_address), sizeof(room_handle)))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+
+	std::lock_guard lock(g_system_mutex);
+	SystemRecord* owner = nullptr;
+	for (auto& record: g_systems)
+	{
+		if (record.handle == system && system != 0)
+		{
+			owner = &record;
+			break;
+		}
+	}
+	if (owner == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	for (const auto& room: g_rooms)
+	{
+		if (room.handle == room_handle && room_handle != 0 && room.system == system)
+		{
+			owner->room_attribute_handle = room_handle;
+			return 0;
+		}
+	}
+	return LibKernel::KERNEL_ERROR_EINVAL;
 }
 
 } // namespace Kyty::Libs::Audio::AudioPropagation

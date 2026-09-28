@@ -408,6 +408,19 @@ implement acoustic propagation. The request for a native capture did not
 complete before the missing import stopped the run; no visual result is
 established.
 
+The next strict call to `SystemSetAttributes` supplied one 24-byte entry:
+ID `0x20000`, an eight-byte value pointer, and size eight. Guest code wrote
+only the low ID dword, so the following dword cannot be treated as a required
+flag. A bounded live-object probe proved the pointed-to value was a room
+handle owned by the system, not a material handle. Kyty retains that room
+association and clears it when the room is destroyed; unsupported attribute
+IDs remain rejected. A focused red/green lifecycle test passed, and a strict
+Silent/Native run passed this import before stopping at missing
+`ht-QXT3zGxo[AudioPropagation_v1][AudioPropagation_v1.0]`, catalogued as
+`sceAudioPropagationSystemGetRays`. A native capture from the preceding probe
+was uniform black (`entropy=0`, `healthy=false`); there is still no gameplay
+evidence.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show

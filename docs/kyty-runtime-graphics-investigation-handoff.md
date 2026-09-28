@@ -636,6 +636,16 @@ against the same correct gameplay capture.
   by its own caller-owned state, as described above; acoustic behavior still
   requires independent implementation and validation.
 
+- AudioPropagation system-attribute identity exclusion (2026-09-28): after
+  material registration, the guest passed value `2` through a counted
+  24-byte `SystemSetAttributes` entry with ID `0x20000` and an eight-byte
+  value. The hypothesis that `2` was the just-registered material was false:
+  a bounded live-object probe matched it to a room in the same system and to
+  no registered material. The guest writes only the entry's ID dword; the
+  adjacent dword was stack residue, not a validated flag. Kyty now binds the
+  observed room attribute and passes the former import in a strict run. This
+  does not establish acoustic rendering; the next import is `SystemGetRays`.
+
 - The second-module replay with a diagnostic 64-block bound and descriptor-slot
   checks completed in 17 ms. No scalar buffer index was invalid before that
   bound. Its subgroups remained at blocks 36/43 in the linked-list traversal;

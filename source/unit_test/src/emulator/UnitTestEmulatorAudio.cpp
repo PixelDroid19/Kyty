@@ -75,14 +75,26 @@ private:
 
 TEST(EmulatorAudio, AudioPropagationQueryCreatesAndReleasesCallerOwnedSystem)
 {
+	struct SystemAttribute
+	{
+		uint32_t id;
+		uint32_t unused;
+		uint64_t value;
+		uint64_t size;
+	};
+	static_assert(sizeof(SystemAttribute) == 0x18);
+
 	GuestValue<AudioPropagation::SystemOption> option_storage;
 	GuestValue<AudioPropagation::SystemMemory> memory_storage;
 	GuestValue<uint64_t>                       system_storage;
 	GuestValue<uint64_t>                       room_storage;
 	GuestReadableBlock                         material_storage(0x40);
 	GuestValue<uint64_t>                       material_handle_storage;
+	GuestValue<SystemAttribute>                attribute_storage;
+	GuestValue<uint64_t>                       attribute_value_storage;
 	ASSERT_TRUE(option_storage.IsValid() && memory_storage.IsValid() && system_storage.IsValid() && room_storage.IsValid() &&
-	            material_storage.IsValid() && material_handle_storage.IsValid());
+	            material_storage.IsValid() && material_handle_storage.IsValid() && attribute_storage.IsValid() &&
+	            attribute_value_storage.IsValid());
 
 	auto* option           = option_storage.Data();
 	auto* memory           = memory_storage.Data();
@@ -133,8 +145,20 @@ TEST(EmulatorAudio, AudioPropagationQueryCreatesAndReleasesCallerOwnedSystem)
 	EXPECT_EQ(AudioPropagation::SystemRegisterMaterial(*system_storage.Data(), material_storage.Data(), material_handle_storage.Data()),
 	          Kyty::Libs::LibKernel::KERNEL_ERROR_ENOMEM);
 	EXPECT_EQ(*material_handle_storage.Data(), material_handle);
+	*attribute_storage.Data() = SystemAttribute {.id = 0x20000,
+	                                            .unused = 0xdeadbeef,
+	                                            .value = reinterpret_cast<uint64_t>(attribute_value_storage.Data()),
+	                                            .size = sizeof(uint64_t)};
+	*attribute_value_storage.Data() = material_handle;
+	EXPECT_EQ(AudioPropagation::SystemSetAttributes(*system_storage.Data(), attribute_storage.Data(), 1),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	*attribute_value_storage.Data() = *room_storage.Data();
+	EXPECT_EQ(AudioPropagation::SystemSetAttributes(0, attribute_storage.Data(), 1), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	ASSERT_EQ(AudioPropagation::SystemSetAttributes(*system_storage.Data(), attribute_storage.Data(), 1), 0);
 	EXPECT_EQ(AudioPropagation::RoomDestroy(0, *room_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(AudioPropagation::RoomDestroy(*system_storage.Data(), *room_storage.Data()), 0);
+	EXPECT_EQ(AudioPropagation::SystemSetAttributes(*system_storage.Data(), attribute_storage.Data(), 1),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(AudioPropagation::RoomDestroy(*system_storage.Data(), *room_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(AudioPropagation::SystemDestroy(*system_storage.Data()), 0);
 	EXPECT_EQ(AudioPropagation::SystemRegisterMaterial(*system_storage.Data(), material_storage.Data(), material_handle_storage.Data()),

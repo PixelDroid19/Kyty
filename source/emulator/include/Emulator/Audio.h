@@ -481,6 +481,7 @@ int KYTY_SYSV_ABI SystemDestroy(uint64_t system);
 int KYTY_SYSV_ABI RoomCreate(uint64_t system, uint64_t* room_out);
 int KYTY_SYSV_ABI RoomDestroy(uint64_t system, uint64_t room);
 int KYTY_SYSV_ABI SystemRegisterMaterial(uint64_t system, const void* material, uint64_t* material_out);
+int KYTY_SYSV_ABI SystemSetAttributes(uint64_t system, const void* attributes, uint32_t count);
 
 } // namespace AudioPropagation
 
