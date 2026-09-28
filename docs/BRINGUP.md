@@ -375,8 +375,15 @@ host Vulkan submission failed with `vkQueueSubmit result=-4` at
 the host reported 15 GiB of available RAM and full swap. These counters do not
 identify whether device memory, driver address space, or another resource was
 exhausted. Reproduce and measure the Vulkan allocation/submission state before
-changing the queue or memory policy. No captured image or controlled gameplay
-validates the scene.
+changing the queue or memory policy. A repeat with the same binary did not
+reproduce ENOMEM: the agent reached 21 presents in strict mode, then the guest
+stopped at missing `RBw+4NukeGQ[Json2_v1][Json_v1.1]` (`Value::count`). Near
+that point, the agent reported 159 live GPU memory objects and a maximum of
+three submissions in flight; Xe fdinfo attributed about 1.58 GiB resident
+VRAM and 665 MiB resident GTT to the process. This excludes deterministic
+failure at sequence 2000 and leaves intermittent host/device failure to
+measure separately. No captured image or controlled gameplay validates the
+scene.
 
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits

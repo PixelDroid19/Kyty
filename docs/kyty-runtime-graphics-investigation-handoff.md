@@ -326,6 +326,19 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Late Xe `execbuf` ENOMEM (2026-09-28): two bounded strict runs returned
+  `VK_ERROR_DEVICE_LOST` on compute submissions near sequences 2009 and 2052,
+  with the Intel driver reporting repeated `execbuf` ENOMEM. The hypothesis
+  that the same submission sequence deterministically exhausts Kyty's Vulkan
+  allocations was not reproduced: a third strict run with the same binary
+  passed that point and stopped at a later JSON import. Its agent snapshot
+  showed 159 live GPU memory objects, 2,391 submissions, and at most
+  three in flight; the process's Xe fdinfo showed about 1.58 GiB resident VRAM
+  and 665 MiB resident GTT near present 21. Neither those values nor the host's
+  available RAM prove the driver fault's cause. If ENOMEM recurs, capture the
+  exact submission and device memory budget or Xe fault data before changing
+  Kyty's queue or allocation policy.
+
 - First-flip host-window stall (2026-09-28): a bounded strict Silent/Native
   run with the SDL X11 backend held at 78 draws, 133 dispatches, 549
   submissions, and zero presents. GDB linked the guest submitter's decode
