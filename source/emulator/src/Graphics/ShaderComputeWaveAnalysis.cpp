@@ -228,6 +228,28 @@ bool IsUniformScalarWord(const ShaderOperand& operand)
 	                                   (operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::VccHi));
 }
 
+bool IsScalarBitfieldMaskInstruction(const ShaderInstruction& instruction)
+{
+	if (instruction.sopp_opcode != 0xffu ||
+	    !IsExactTupleBase(instruction, ShaderInstructionFormat::SmaskVsrc0Vsrc1, 2) ||
+	    !IsScalarPairVariable(instruction.dst) || instruction.ds_offset != 0u ||
+	    instruction.ds_encoding_control != 0u || instruction.ds_encoding_registers != 0u)
+	{
+		return false;
+	}
+	const auto scalar_word = [](const ShaderOperand& source)
+	{
+		if (IsUniformScalarWord(source) || IsIntegerOrLiteralConstant(source))
+		{
+			return true;
+		}
+		return source.size == 1 && source.register_id == 0 && ComputeWaveOperandIsPlain(source) &&
+		       (source.type == ShaderOperandType::ExecLo || source.type == ShaderOperandType::ExecHi);
+	};
+	return scalar_word(instruction.src[0]) && scalar_word(instruction.src[1]) &&
+	       IsUnusedDestination(instruction.src[2]) && IsUnusedDestination(instruction.src[3]);
+}
+
 bool IsReadlaneInstruction(const ShaderInstruction& instruction)
 {
 	// The emitter reads data and selector before its single store, so the
@@ -282,8 +304,20 @@ bool IsBarrierInstruction(const ShaderInstruction& instruction)
 {
 	// S_BARRIER ignores its SIMM16. A paired wave is one converged subgroup and
 	// the guest guarantees every wave reaches it, so any immediate is admitted.
-	return IsUnusedDestination(instruction.dst) && instruction.ds_offset == 0u && instruction.ds_encoding_control == 0u &&
-	       instruction.ds_encoding_registers == 0u;
+	if (instruction.sopp_opcode != 0x0au || !IsExactTupleBase(instruction, ShaderInstructionFormat::Empty, 0) ||
+	    !IsUnusedDestination(instruction.dst) || instruction.ds_offset != 0u || instruction.ds_encoding_control != 0u ||
+	    instruction.ds_encoding_registers != 0u)
+	{
+		return false;
+	}
+	for (const auto& source: instruction.src)
+	{
+		if (!IsUnusedDestination(source))
+		{
+			return false;
+		}
+	}
+	return true;
 }
 
 bool ComputeWaveOperandMayOverwriteSgprPair(const ShaderOperand& destination, int pair_start)
@@ -440,6 +474,8 @@ String8 ComputeWaveUnsupportedReason(const ShaderInstruction& instruction)
 	case ShaderInstructionType::SMovB32: return "SMovB32 requires ordinary one-word SGPR operands";
 		case ShaderInstructionType::SLshlB32:
 			return "SLshlB32 in paired compute-wave requires VccHi, one ordinary SGPR, and a plain 0..31 inline shift amount";
+		case ShaderInstructionType::SBfmB64:
+			return "SBfmB64 requires a two-word scalar destination and two plain scalar-word sources";
 		case ShaderInstructionType::SInstPrefetch:
 			return "SInstPrefetch requires SOPP opcode 0x20 and an exact defined 1-to-3-line hint immediate";
 		case ShaderInstructionType::SMovB64:
@@ -583,6 +619,9 @@ ShaderComputeWaveInstructionKind ClassifySpecificComputeWaveInstruction(const Sh
 		case ShaderInstructionType::SAndSaveexecB64:
 			return IsScalarMaskInstruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarMask
 			                                            : ShaderComputeWaveInstructionKind::Unsupported;
+		case ShaderInstructionType::SBfmB64:
+			return IsScalarBitfieldMaskInstruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarMask
+			                                               : ShaderComputeWaveInstructionKind::Unsupported;
 		case ShaderInstructionType::SMovB32:
 			return IsScalarCopyInstruction(instruction) ? ShaderComputeWaveInstructionKind::ScalarCopy
 			                                            : ShaderComputeWaveInstructionKind::Unsupported;
@@ -732,6 +771,7 @@ bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instructio
 		case ShaderInstructionType::SBranch:
 		case ShaderInstructionType::SEndpgm:
 		case ShaderInstructionType::SBarrier:
+		case ShaderInstructionType::SBfmB64:
 		case ShaderInstructionType::SWaitcnt:
 		case ShaderInstructionType::SSendmsg:
 		case ShaderInstructionType::SWqmB64: return false;

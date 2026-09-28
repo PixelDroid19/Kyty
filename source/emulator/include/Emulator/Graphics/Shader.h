@@ -136,6 +136,7 @@ enum class ShaderInstructionType : uint32_t
 	SBfeU32,
 	SBfeU64,
 	SBfmB32,
+	SBfmB64,
 	SBarrier,
 	SBranch,
 	SBufferLoadDword,

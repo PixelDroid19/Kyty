@@ -297,13 +297,17 @@ fills only layer zero. Focused source-classification and layout tests pass.
 A subsequent strict Silent/Native run passed that D16 binding and reached
 present 32, then stopped at `paired-wave dispatch admission unsupported` for
 an instruction represented as `SBarrier` at PC 0x66c. A bounded retry
-identified SOP2 opcode 0x25, `S_BFM_B64`: the parser substitutes `SBarrier`
-for this bitfield-mask operation. Implement the real operation and prove its
-paired-wave tuple before changing admission. Native wave-width equivalence
-was rejected at PC 0x208 for a lane-crossing read. No capture was obtained
-before this exit; the last scored present-30 capture is uniformly black
-(`entropy=0`, one color), and no controlled gameplay has been observed.
-Intermittent Xe `execbuf` ENOMEM can stop earlier runs.
+identified SOP2 opcode 0x25, `S_BFM_B64`: the parser had substituted a barrier
+for this bitfield-mask operation. Its real 64-bit mask semantics are now
+lowered in two 32-bit SPIR-V words without writing SCC, and paired admission
+requires an exact scalar tuple. The barrier gate also requires the real SOPP
+opcode 0x0a; a placeholder opcode stays rejected. Focused red/green tests
+and SPIR-V toolchain validation passed. A strict run with this change passed
+PC 0x66c and stopped next at `BufferAtomicUmax` at PC 0x74c; native wave-width
+equivalence remains rejected at PC 0x208 for a lane-crossing read. Its native
+frame-9 capture was uniformly black (`entropy=0`, one color). No controlled
+gameplay has been observed. Intermittent Xe `execbuf` ENOMEM can stop earlier
+runs.
 
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
@@ -651,6 +655,18 @@ the paired allowlist. No presentation, input or gameplay state is claimed.
   no compute program base (`ShaderSpirvProgramAddress.cpp`). Not gameplay.
 
 Recorded, not yet fixed:
+- `source/emulator/src/Graphics/ShaderComputeWaveAnalysis.cpp:759` uses a
+  broad scalar fallback after exact paired-wave classifiers reject a tuple.
+  A malformed `SMovB64` pair and `SGetpcB64` were reclassified as
+  `ScalarGeneric` in the existing compute-wave tests. Replace the fallback
+  with audited instruction/tuple admission before using those tests as a
+  strictness gate; do not treat a generic scalar register shape as sufficient.
+- `source/unit_test/src/emulator/UnitTestEmulatorGraphicsPackets.cpp:6495`
+  expects the older direct LDS `ds_write_b32` SPIR-V text. The current emitter
+  no longer produces its two asserted instruction strings in that fixture.
+  Inspect the emitted program and update the test to check the actual LDS
+  address/write contract; a source-string mismatch alone does not prove a
+  runtime LDS defect.
 - `source/emulator/src/Graphics/ShaderParse*.cpp` still map about 600 opcodes
   to an `SBarrier` placeholder and the DS parser keeps "treated as" substitutes
   (for example `ds_write2_b32`, `ds_rsub_u32`, `ds_cmpst_b32`). Each silently

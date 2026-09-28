@@ -480,4 +480,28 @@ TEST(EmulatorComputeWaveAnalysis, ScalarMaskCopyRequiresAlignedBoundedPairs)
 	}
 }
 
+TEST(EmulatorComputeWaveAnalysis, AdmitsOnlyTheRealSoppBarrierTuple)
+{
+	// SOPP opcode 0x0a is a barrier; opcode 0x0b is still a parser placeholder.
+	constexpr uint32_t real_words[] = {0xbf8a0000u, 0xbf810000u};
+	constexpr uint32_t placeholder_words[] = {0xbf8b0000u, 0xbf810000u};
+	ASSERT_EXIT(
+	    {
+		    InitializeConfig();
+		    ShaderCode real;
+		    real.SetType(ShaderType::Compute);
+		    ShaderCode placeholder;
+		    placeholder.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(real_words, sizeof(real_words), &real) ||
+		        !ShaderTryParseBounded(placeholder_words, sizeof(placeholder_words), &placeholder))
+		    {
+			    std::_Exit(2);
+		    }
+		    const auto real_result = ShaderAnalyzeComputeWaveCode(real, PairedInput());
+		    const auto placeholder_result = ShaderAnalyzeComputeWaveCode(placeholder, PairedInput());
+		    std::_Exit(real_result.supported && !placeholder_result.supported && placeholder_result.unsupported_pc == 0u ? 0 : 3);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 UT_END();

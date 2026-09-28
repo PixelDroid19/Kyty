@@ -2559,7 +2559,7 @@ void Spirv::WriteFunctions()
 		m_source += FUNC_SHIFT_RIGHT;
 	}
 
-	if (m_code.HasAnyOf({ShaderInstructionType::SLshlB64, ShaderInstructionType::SBfeU64}))
+	if (m_code.HasAnyOf({ShaderInstructionType::SLshlB64, ShaderInstructionType::SBfeU64, ShaderInstructionType::SBfmB64}))
 	{
 		m_source += FUNC_SHIFT_LEFT;
 	}

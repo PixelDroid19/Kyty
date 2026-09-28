@@ -373,6 +373,17 @@ against the same correct gameplay capture.
   Native equivalence also rejected a lane-crossing read at PC 0x208. The run
   produced no new capture, so the latest scored image remains uniformly black.
 
+- Scalar bitfield mask follow-up (2026-09-28): SOP2 opcode 0x25 now decodes as
+  `S_BFM_B64` rather than a barrier placeholder. The two-word SPIR-V lowering
+  masks width and offset to six bits, builds the low-bit mask, shifts it, and
+  preserves SCC. Paired admission checks the exact scalar tuple, while real
+  SOPP `S_BARRIER` requires opcode 0x0a and the empty tuple. Focused tests were
+  red before the change and green afterward; the generated SPIR-V passed the
+  toolchain. A strict Silent/Native run passed the former PC 0x66c exit and
+  then rejected `BufferAtomicUmax` at PC 0x74c. Its automatic native frame-9
+  capture scored `entropy=0` and one color. Neither progress nor presents
+  establish correct rendering or gameplay.
+
 - Late Xe `execbuf` ENOMEM (2026-09-28): two bounded strict runs returned
   `VK_ERROR_DEVICE_LOST` on compute submissions near sequences 2009 and 2052,
   with the Intel driver reporting repeated `execbuf` ENOMEM. The hypothesis

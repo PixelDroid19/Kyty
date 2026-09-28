@@ -301,6 +301,69 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_U64_Sdst2Ssrc02Ssrc1)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_S_Bfm_B64_Sdst2Ssrc0Ssrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!operand_is_variable(inst.dst) || inst.dst.size != 2)
+	{
+		return false;
+	}
+	const auto dst_lo = operand_variable_to_str(inst.dst, 0);
+	const auto dst_hi = operand_variable_to_str(inst.dst, 1);
+	if (dst_lo.type != SpirvType::Uint || dst_hi.type != SpirvType::Uint)
+	{
+		return false;
+	}
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8 width_load;
+	String8 offset_load;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &width_load) ||
+	    !operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &offset_load))
+	{
+		return false;
+	}
+
+	// S_BFM_B64 builds width low bits and shifts the resulting 64-bit mask
+	// by offset. The ISA masks both source words to six bits and leaves SCC
+	// unchanged. Split the mask into dwords for SPIR-V without Int64.
+	static const char* text = R"(
+<width_load>
+<offset_load>
+<param0>
+<param1>
+<param2>
+<param3>
+%bfm_count_<index> = OpBitwiseAnd %uint %t0_<index> %uint_63
+%bfm_offset_<index> = OpBitwiseAnd %uint %t1_<index> %uint_63
+%bfm_low_count_<index> = OpExtInst %uint %GLSL_std_450 UMin %bfm_count_<index> %uint_32
+%bfm_high_count_<index> = OpISub %uint %bfm_count_<index> %bfm_low_count_<index>
+%bfm_initial_lo_<index> = OpBitFieldInsert %uint %uint_0 %uint_0xffffffff %uint_0 %bfm_low_count_<index>
+%bfm_initial_hi_<index> = OpBitFieldInsert %uint %uint_0 %uint_0xffffffff %uint_0 %bfm_high_count_<index>
+OpStore %temp_uint_2 %bfm_initial_lo_<index>
+OpStore %temp_uint_3 %bfm_initial_hi_<index>
+OpStore %temp_uint_4 %bfm_offset_<index>
+%bfm_shift_<index> = OpFunctionCall %void %shift_left %temp_uint_0 %temp_uint_1 %temp_uint_2 %temp_uint_3 %temp_uint_4
+%bfm_result_lo_<index> = OpLoad %uint %temp_uint_0
+%bfm_result_hi_<index> = OpLoad %uint %temp_uint_1
+OpStore %<dst_lo> %bfm_result_lo_<index>
+OpStore %<dst_hi> %bfm_result_hi_<index>
+<execz>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<width_load>", width_load)
+	                   .ReplaceStr("<offset_load>", offset_load)
+	                   .ReplaceStr("<param0>", param[0])
+	                   .ReplaceStr("<param1>", param[1] == nullptr ? "" : param[1])
+	                   .ReplaceStr("<param2>", param[2] == nullptr ? "" : param[2])
+	                   .ReplaceStr("<param3>", param[3] == nullptr ? "" : param[3])
+	                   .ReplaceStr("<dst_lo>", dst_lo.value)
+	                   .ReplaceStr("<dst_hi>", dst_hi.value)
+	                   .ReplaceStr("<execz>", operand_is_exec(inst.dst) ? EXECZ : "")
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 /* XXX: And, Lshl, Lshr, CSelect, Or */
 KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B32_SVdstSVsrc0SVsrc1)
 {

@@ -163,9 +163,10 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
 		case 0x24: inst.type = ShaderInstructionType::SBfmB32; break;
-		case 0x25: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bfm_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x25:
+			inst.type     = ShaderInstructionType::SBfmB64;
+			inst.format   = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
+			inst.dst.size = 2;
 			break;
 		case 0x26: inst.type = ShaderInstructionType::SMulI32; break;
 		case 0x27: inst.type = ShaderInstructionType::SBfeU32; break;

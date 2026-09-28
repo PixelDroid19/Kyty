@@ -3,6 +3,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
@@ -104,6 +105,75 @@ TEST(EmulatorShaderScalarBit, ParsesAndLowersBitset1B32AsReadModifyWrite)
 		    Core::String8    error;
 		    const bool       toolchain_contract = ShaderToolchain::Run(source, &binary, &error) && !binary.IsEmpty();
 		    std::_Exit(source_contract && toolchain_contract ? 0 : 4);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderScalarBit, DecodesAndLowersBfmB64WithoutWritingScc)
+{
+	// Public SOP2 fields: a pair destination, one-word width and offset.
+	// The second instruction reads the prior low result before replacing VCC.
+	constexpr uint32_t prefix = 0x80000000u | (0x25u << 23u);
+	constexpr uint32_t bfm_s8 = prefix | (8u << 16u) | (128u << 8u) | 160u;
+	constexpr uint32_t bfm_vcc = prefix | (106u << 16u) | (161u << 8u) | 8u;
+	constexpr uint32_t words[] = {bfm_s8, bfm_vcc, 0xbf810000u};
+	ASSERT_EXIT(
+	    {
+		    if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+		    Config::SetNextGen(true);
+		    Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		    class ValidationConfig final: public Config::ConfigSource
+		    {
+		    public:
+			    bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+			    int64_t GetInteger(const Core::String&) const override { return 0; }
+			    bool GetBool(const Core::String&) const override { return true; }
+			    Core::String GetString(const Core::String&) const override { return {}; }
+		    } validation;
+		    Config::Load(validation);
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(words, sizeof(words), &code) || code.GetInstructions().Size() != 3u) { std::_Exit(2); }
+		    const auto& first = code.GetInstructions().At(0);
+		    const auto& second = code.GetInstructions().At(1);
+		    if (first.type == ShaderInstructionType::SBarrier || first.format != ShaderInstructionFormat::SmaskVsrc0Vsrc1 ||
+		        first.dst.type != ShaderOperandType::Sgpr || first.dst.register_id != 8 || first.dst.size != 2 ||
+		        first.src[0].type != ShaderOperandType::IntegerInlineConstant || first.src[0].constant.i != 32 ||
+		        first.src[1].constant.i != 0 || second.dst.type != ShaderOperandType::VccLo || second.dst.size != 2 ||
+		        second.src[0].type != ShaderOperandType::Sgpr || second.src[0].register_id != 8 ||
+		        second.src[1].constant.i != 33)
+		    {
+			    std::_Exit(3);
+		    }
+		    auto malformed = first;
+		    malformed.dst.register_id = 9;
+		    if (ShaderClassifyComputeWaveInstruction(malformed) != ShaderComputeWaveInstructionKind::Unsupported) { std::_Exit(6); }
+		    malformed = first;
+		    malformed.src[0].type = ShaderOperandType::Vgpr;
+		    if (ShaderClassifyComputeWaveInstruction(malformed) != ShaderComputeWaveInstructionKind::Unsupported) { std::_Exit(7); }
+		    malformed = first;
+		    malformed.format = ShaderInstructionFormat::Unknown;
+		    if (ShaderClassifyComputeWaveInstruction(malformed) != ShaderComputeWaveInstructionKind::Unsupported) { std::_Exit(8); }
+		    ShaderComputeInputInfo input {};
+		    input.threads_num[0] = 64u;
+		    input.threads_num[1] = input.threads_num[2] = 1u;
+		    input.thread_ids_num = 1;
+		    input.wave_layout = (decltype(input.wave_layout) {ShaderComputeWaveStrategy::Paired64On32, {64, 1, 1}, {32, 1, 1}, 64, 32, 2, 1, 0});
+		    if (!ShaderAnalyzeComputeWaveCode(code, input).supported) { std::_Exit(4); }
+		    const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+		    const auto first_store = source.FindIndex("OpStore %s8 %bfm_result_lo_0");
+		    const auto second_load = source.FindIndex("%t0_1 = OpLoad %uint %s8");
+		    const auto second_store = source.FindIndex("OpStore %vcc_lo %bfm_result_lo_1");
+		    const bool source_contract =
+		        source.FindIndex("%bfm_count_0 = OpBitwiseAnd %uint %t0_0 %uint_63") != Core::STRING8_INVALID_INDEX &&
+		        source.FindIndex("%bfm_initial_lo_0 = OpBitFieldInsert") != Core::STRING8_INVALID_INDEX &&
+		        source.FindIndex("OpFunctionCall %void %shift_left") != Core::STRING8_INVALID_INDEX &&
+		        first_store != Core::STRING8_INVALID_INDEX && second_load != Core::STRING8_INVALID_INDEX &&
+		        second_store != Core::STRING8_INVALID_INDEX && first_store < second_load && second_load < second_store &&
+		        source.FindIndex("OpStore %scc", first_store) == Core::STRING8_INVALID_INDEX;
+		    Vector<uint32_t> binary;
+		    Core::String8 error;
+		    std::_Exit(source_contract && ShaderToolchain::Run(source, &binary, &error) && !binary.IsEmpty() ? 0 : 5);
 	    },
 	    ::testing::ExitedWithCode(0), "");
 }

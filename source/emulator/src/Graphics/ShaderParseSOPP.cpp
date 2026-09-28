@@ -73,6 +73,7 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.type    = ShaderInstructionType::SBarrier;
 			inst.format  = ShaderInstructionFormat::Empty;
 			inst.src_num = 0;
+			inst.src[0]  = {};
 			break;
 		case 0xB: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setkill treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
