@@ -396,6 +396,18 @@ call trace before implementation; secondary implementations in the local
 comparison either return success without state or depend on unverified record
 sizes.
 
+A bounded strict call probe of `SystemRegisterMaterial` found a live system,
+a readable 64-byte material record with descriptor ID `0x010107d1`, and a
+writable eight-byte output handle. Kyty now retains the complete opaque record
+under that system, enforces its material count, and releases it with the
+system. A focused lifecycle test passed. The next strict Silent/Native run
+passed the former material import and stopped at missing
+`kIdb+iQUzCs[AudioPropagation_v1][AudioPropagation_v1.0]`, catalogued as
+`sceAudioPropagationSystemSetAttributes`. Registration alone does not
+implement acoustic propagation. The request for a native capture did not
+complete before the missing import stopped the run; no visual result is
+established.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show

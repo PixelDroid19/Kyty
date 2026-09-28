@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
@@ -21,8 +22,11 @@ namespace {
 
 constexpr uint32_t kSystemOptionId = 0x010107d5;
 constexpr uint32_t kSystemMemoryId = 0x010107d4;
+constexpr uint32_t kMaterialId     = 0x010107d1;
+constexpr size_t   kMaterialBytes  = 0x40;
 constexpr size_t   kMaxSystems     = 32;
 constexpr size_t   kMaxRooms       = 4096;
+constexpr size_t   kMaxMaterials   = 4096;
 
 struct SystemWorkspace
 {
@@ -42,6 +46,13 @@ struct RoomRecord
 	uint64_t system = 0;
 };
 
+struct MaterialRecord
+{
+	uint64_t                            handle = 0;
+	uint64_t                            system = 0;
+	std::array<uint8_t, kMaterialBytes> data {};
+};
+
 static_assert(sizeof(StructDescriptor) == 0x10);
 static_assert(sizeof(SystemOption) == 0x38);
 static_assert(sizeof(SystemMemory) == 0x30);
@@ -51,7 +62,8 @@ static_assert(sizeof(SystemWorkspace) == 0x40);
 std::mutex                            g_system_mutex;
 std::array<SystemRecord, kMaxSystems> g_systems {};
 std::array<RoomRecord, kMaxRooms>     g_rooms {};
-uint64_t                              g_next_room_handle = 1;
+std::array<MaterialRecord, kMaxMaterials> g_materials {};
+uint64_t                                  g_next_object_handle = 1;
 
 bool ReadGuest(void* destination, const void* source, size_t size)
 {
@@ -93,6 +105,17 @@ bool ReadMemory(const SystemMemory* guest_memory, SystemMemory* memory)
 {
 	return ReadGuest(memory, guest_memory, sizeof(*memory)) && memory->desc.id == kSystemMemoryId && memory->desc.size == sizeof(*memory) &&
 	       memory->desc.pad == 0;
+}
+
+bool ReadMaterial(const void* guest_material, std::array<uint8_t, kMaterialBytes>* material)
+{
+	if (material == nullptr || !ReadGuest(material->data(), guest_material, material->size()))
+	{
+		return false;
+	}
+	StructDescriptor descriptor {};
+	std::memcpy(&descriptor, material->data(), sizeof(descriptor));
+	return descriptor.id == kMaterialId && descriptor.pad == 0 && descriptor.size == kMaterialBytes;
 }
 
 } // namespace
@@ -168,6 +191,13 @@ int KYTY_SYSV_ABI SystemDestroy(uint64_t system)
 					room = {};
 				}
 			}
+			for (auto& material: g_materials)
+			{
+				if (material.system == system)
+				{
+					material = {};
+				}
+			}
 			return 0;
 		}
 	}
@@ -195,11 +225,11 @@ int KYTY_SYSV_ABI RoomCreate(uint64_t system, uint64_t* room_out)
 	{
 		if (room.handle == 0)
 		{
-			if (g_next_room_handle == 0)
+			if (g_next_object_handle == 0)
 			{
 				return LibKernel::KERNEL_ERROR_ENOMEM;
 			}
-			const uint64_t handle = g_next_room_handle++;
+			const uint64_t handle = g_next_object_handle++;
 			if (!WriteGuest(room_out, &handle, sizeof(handle)))
 			{
 				return LibKernel::KERNEL_ERROR_EINVAL;
@@ -224,6 +254,52 @@ int KYTY_SYSV_ABI RoomDestroy(uint64_t system, uint64_t room_handle)
 		}
 	}
 	return LibKernel::KERNEL_ERROR_EINVAL;
+}
+
+int KYTY_SYSV_ABI SystemRegisterMaterial(uint64_t system, const void* material, uint64_t* material_out)
+{
+	PRINT_NAME();
+	std::array<uint8_t, kMaterialBytes> material_value {};
+	if (!ReadMaterial(material, &material_value) || !WritableGuest(material_out, sizeof(*material_out)))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	std::lock_guard lock(g_system_mutex);
+	const SystemRecord* owner = nullptr;
+	for (const auto& record: g_systems)
+	{
+		if (record.handle == system && system != 0)
+		{
+			owner = &record;
+			break;
+		}
+	}
+	if (owner == nullptr)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	size_t          used = 0;
+	MaterialRecord* free_record = nullptr;
+	for (auto& record: g_materials)
+	{
+		used += record.handle != 0 && record.system == system;
+		if (record.handle == 0 && free_record == nullptr)
+		{
+			free_record = &record;
+		}
+	}
+	if (used >= owner->option.max_materials || free_record == nullptr || g_next_object_handle == 0)
+	{
+		return LibKernel::KERNEL_ERROR_ENOMEM;
+	}
+	const uint64_t handle = g_next_object_handle;
+	if (!WriteGuest(material_out, &handle, sizeof(handle)))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	g_next_object_handle++;
+	*free_record = MaterialRecord {.handle = handle, .system = system, .data = material_value};
+	return 0;
 }
 
 } // namespace Kyty::Libs::Audio::AudioPropagation
