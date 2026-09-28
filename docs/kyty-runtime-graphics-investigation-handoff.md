@@ -326,6 +326,29 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- First-flip host-window stall (2026-09-28): a bounded strict Silent/Native
+  run with the SDL X11 backend held at 78 draws, 133 dispatches, 549
+  submissions, and zero presents. GDB linked the guest submitter's decode
+  completion wait to a graphics worker in `cp_op_wait_flip_done`; the main
+  thread was in SDL's `X11_ShowWindow` waiting for an X11 map event while the
+  window remained unmapped. A minimal program linked to the bundled SDL
+  library blocked at `SDL_ShowWindow` with either a hidden Vulkan window or a
+  hidden non-Vulkan window. The same program returned with the Wayland backend.
+  One strict run using `SDL_VIDEODRIVER=wayland` and the active Wayland display
+  presented frames and reached the mixed-parent storage-image exit below.
+  Opening the window before the first flip did not map it and was reverted.
+  Do not interpret the X11 zero-present stall as an image-alias or GPU fence
+  failure. The exact X11/window-manager interaction remains unproven.
+
+- Empty blocking audio push (2026-09-28): a bounded strict probe observed
+  10,000 empty-PCM `AudioOut2ContextPush` calls in 529 ms from a blocking
+  context. A red/green focused test covers one grain of pacing; the wait drops
+  the context mutex and checks that the context still exists afterward. GDB
+  confirmed the strict guest exercises the new wait, but the X11 run still
+  stopped at the first flip. Audio pacing therefore did not cause or resolve
+  that graphics stall. The Wayland run reached the same mixed-parent exit as
+  earlier captures.
+
 - Mixed parents of the second partial storage output (2026-09-28): after the
   first partial output's GPU tile copy, the strict Silent/Native run advanced
   to `!create_all_the_same` in `GpuMemoryCreate.cpp:1691`. This output is a
@@ -347,14 +370,22 @@ against the same correct gameplay capture.
   trace of the overlapping render address showed separate RGBA16F and packed
   float host images, both bound with `CLEAR` and the packed image subsequently
   sampled. Those whole-image bind events do not establish which host image
-  owns each guest byte at the later overlap. The filtered trace and two GDB
+  owns each guest byte at the later overlap. A later Wayland-backed GDB run
+  reached the rejection and found a two-megabyte prefix with no tracked image
+  parent, followed by a range covered by three render targets. Their GPU
+  update markers were ordered 252, 256, and 257; the newest whole-object
+  marker belongs to the packed-float render target, while the new storage
+  image is single-channel 16-bit float. The small storage/sampled pair inside
+  that range has older creation and GPU markers. Whole-object markers do not
+  prove the last writer of each byte or permit a typed Vulkan image copy
+  between the packed and 16-bit formats. The filtered trace and two GDB
   probes reached their run deadlines before the overlap; do not interpret
   their missing tail as a writer or dependency result. Extending the filtered
   trace to 300 seconds did not reach the overlap either: agent counters stayed
   at 78 draws, 133 dispatches, 549 submissions, and zero presents between
-  the 155- and 207-second samples; one host thread kept using a CPU core.
-  Attaching GDB to that process was denied by `ptrace`. This instrumented run's
-  stall has no proven call site and is not evidence of the alias's byte owner.
+  the 155- and 207-second samples. Attaching GDB to that process was denied by
+  `ptrace`; a later launch under GDB identified the first-flip X11 wait chain
+  above. This stall is not evidence of the alias's byte owner.
   The first-present VideoOut source was confirmed as
   `VK_FORMAT_A2R10G10B10_UNORM_PACK32`.
   After adding packed-format capture, the strict run produced four native PNGs

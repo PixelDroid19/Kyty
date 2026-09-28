@@ -263,7 +263,8 @@ audio-propagation imports, bounded libc string imports, and three later
 storage-image overlap cases. A blockwise GPU copy now carries the live bytes
 from a compatible tiled render target into the first partially written storage
 image. The strict run passed the former single-parent
-`RenderTexture Crosses StorageTexture` exit. The current first exit is
+`RenderTexture Crosses StorageTexture` exit. With SDL's Wayland backend on the
+current Linux Wayland session, the next structured exit is
 `!create_all_the_same` in `GpuMemoryCreate.cpp:1691` for the second storage
 output of the same 16×1-group dispatch. That image crosses three live render
 targets and contains a small storage/sampled pair; the parents include
@@ -275,6 +276,25 @@ offsets per block; that layout must be proven before materialization.
 Four native captures are now available from the first four presents, but all
 score as uniform black (`entropy=0`, one quantized color,
 `gameplay_like=false`). There is no controllable gameplay evidence.
+
+The default SDL X11 backend can stop earlier at zero presents on this host.
+At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
+for flip completion while the main thread waits inside SDL's X11 window show
+for a map event; the guest submitter then waits for decode completion while
+holding a guest mutex. The X11 window remained unmapped. A standalone program
+linked to the same SDL build reproduced the blocked hidden-window show with
+and without `SDL_WINDOW_VULKAN`; the same program returned normally with
+`SDL_VIDEODRIVER=wayland`. A strict Silent/Native run with that Wayland backend
+presented frames and reached the storage overlap exit above. This identifies
+an environment-dependent host-window blocker, not a rendering or gameplay fix.
+Showing the window early did not resolve the X11 stall and was reverted.
+
+`AudioOut2ContextPush` also returned immediately for empty PCM in a blocking
+context: a bounded strict probe observed 10,000 calls in 529 ms. A focused
+red/green test now requires one grain of pacing, and the implementation releases
+the context mutex while waiting and revalidates its lifetime afterward. The
+strict run confirmed the changed path executes, but X11 still stopped at the
+first flip; audio pacing alone did not advance the graphics frontier.
 
 - A scalar-loaded storage descriptor consumed by vector stores or atomics is
   now classified writable and merged with its equal-descriptor users. Compute
