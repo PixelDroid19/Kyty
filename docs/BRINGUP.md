@@ -277,16 +277,18 @@ Four native captures are now available from the first four presents, but all
 score as uniform black (`entropy=0`, one quantized color,
 `gameplay_like=false`). There is no controllable gameplay evidence.
 
-The default SDL X11 backend can stop earlier at zero presents on this host.
+The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show
 for a map event; the guest submitter then waits for decode completion while
 holding a guest mutex. The X11 window remained unmapped. A standalone program
 linked to the same SDL build reproduced the blocked hidden-window show with
 and without `SDL_WINDOW_VULKAN`; the same program returned normally with
-`SDL_VIDEODRIVER=wayland`. A strict Silent/Native run with that Wayland backend
-presented frames and reached the storage overlap exit above. This identifies
-an environment-dependent host-window blocker, not a rendering or gameplay fix.
+`SDL_VIDEODRIVER=wayland`. On Linux Wayland sessions, the host window now asks
+SDL to try `wayland,x11` when no video driver was explicitly selected. A strict
+Silent/Native run with the driver unset reached the storage overlap exit above.
+This identifies and routes around an environment-dependent host-window blocker,
+not a rendering or gameplay fix.
 Showing the window early did not resolve the X11 stall and was reverted.
 
 `AudioOut2ContextPush` also returned immediately for empty PCM in a blocking

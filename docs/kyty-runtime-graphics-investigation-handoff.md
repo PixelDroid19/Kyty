@@ -335,7 +335,10 @@ against the same correct gameplay capture.
   library blocked at `SDL_ShowWindow` with either a hidden Vulkan window or a
   hidden non-Vulkan window. The same program returned with the Wayland backend.
   One strict run using `SDL_VIDEODRIVER=wayland` and the active Wayland display
-  presented frames and reached the mixed-parent storage-image exit below.
+  presented frames and reached the mixed-parent storage-image exit below. The
+  host window now prefers `wayland,x11` on a Linux Wayland session when the
+  driver is unset; a strict Silent/Native run with no driver override reached
+  the same mixed-parent exit. An explicit driver selection still takes priority.
   Opening the window before the first flip did not map it and was reverted.
   Do not interpret the X11 zero-present stall as an image-alias or GPU fence
   failure. The exact X11/window-manager interaction remains unproven.

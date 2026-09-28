@@ -6,6 +6,8 @@
 
 #include "SDL.h"
 #include "SDL_error.h"
+#include "SDL_hints.h"
+#include "SDL_stdinc.h"
 #include "SDL_surface.h"
 #include "SDL_video.h"
 
@@ -21,6 +23,20 @@ constexpr const char* kWindowCaption = "Game";
 constexpr uint32_t    kWindowFlags = static_cast<uint32_t>(SDL_WINDOW_HIDDEN) | static_cast<uint32_t>(SDL_WINDOW_VULKAN);
 constexpr int         kWindowPositionCentered = SDL_WINDOWPOS_CENTERED; // NOLINT(hicpp-signed-bitwise)
 constexpr uint64_t    kCursorHideDelayMilliseconds = 2000;
+
+void PreferNativeWaylandSession()
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	const char* selected = SDL_GetHint(SDL_HINT_VIDEODRIVER);
+	const char* session  = SDL_getenv("XDG_SESSION_TYPE");
+	const char* display  = SDL_getenv("WAYLAND_DISPLAY");
+	if ((selected == nullptr || selected[0] == '\0') && session != nullptr && SDL_strcasecmp(session, "wayland") == 0 &&
+	    display != nullptr && display[0] != '\0')
+	{
+		SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
+	}
+#endif
+}
 
 [[nodiscard]] uint64_t SteadyMilliseconds()
 {
@@ -59,6 +75,7 @@ HostWindow* HostWindow::Create(uint32_t width, uint32_t height)
 {
 	EXIT_IF(width == 0 || height == 0 || width > static_cast<uint32_t>(INT_MAX) || height > static_cast<uint32_t>(INT_MAX));
 
+	PreferNativeWaylandSession();
 	constexpr uint32_t requested_subsystems = SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER;
 	const uint32_t     previously_initialized = SDL_WasInit(requested_subsystems);
 
