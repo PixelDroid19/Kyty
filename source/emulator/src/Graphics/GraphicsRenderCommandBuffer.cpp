@@ -1010,6 +1010,24 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	}
 
 	vkCmdBeginRenderPass(buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+	for (uint32_t slot = 0; slot < color_count; slot++)
+	{
+		if (!with_color || color->attachment[slot].vulkan_buffer == nullptr ||
+		    color->attachment[slot].vulkan_buffer->type != VulkanImageType::RenderTexture)
+		{
+			continue;
+		}
+		auto* image = static_cast<RenderTextureVulkanImage*>(color->attachment[slot].vulkan_buffer);
+		if (framebuffer->color_load_op[slot] == VK_ATTACHMENT_LOAD_OP_CLEAR &&
+		    extent.width == image->extent.width && extent.height == image->extent.height &&
+		    color->attachment[slot].base_array_layer == 0u && color->attachment[slot].layer_count == 1u)
+		{
+			image->fully_defined_from_clear = true;
+		} else if (framebuffer->color_load_op[slot] == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+		{
+			image->fully_defined_from_clear = false;
+		}
+	}
 
 	// The render pass final layout is COLOR_ATTACHMENT_OPTIMAL. Keep the
 	// emulator-side tracker in sync so a later sampled use emits the required

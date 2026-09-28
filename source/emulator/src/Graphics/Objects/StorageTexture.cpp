@@ -62,7 +62,7 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 	// mapping. Reuse must follow the effective host view contract rather than
 	// the raw guest selector bits, otherwise equivalent bindings churn a fresh
 	// GpuMemory object every frame.
-	if (fmt == 5u || fmt == 14u || fmt == 62u)
+	if (fmt == 5u || fmt == 7u || fmt == 13u || fmt == 14u || fmt == 62u)
 	{
 		return DstSel(4, 5, 6, 7);
 	}
@@ -863,6 +863,80 @@ bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t rende
 		copies->Add(copy);
 	}
 	return !copies->IsEmpty();
+}
+
+bool StorageTexturePlanRawRenderAlias(const uint64_t* render_params, uint64_t render_address, uint64_t render_size,
+                                      const uint64_t* storage_params, uint64_t storage_address, uint64_t storage_size,
+                                      StorageTextureRawRenderAliasPlan* plan)
+{
+	if (render_params == nullptr || storage_params == nullptr || plan == nullptr)
+	{
+		return false;
+	}
+	*plan = {};
+	const uint32_t storage_format = static_cast<uint32_t>(storage_params[StorageTextureObject::PARAM_FORMAT] >> 16u);
+	if (static_cast<RenderTextureFormat>(render_params[RenderTextureObject::PARAM_FORMAT]) !=
+	        RenderTextureFormat::B10G11R11Ufloat ||
+	    VulkanResolveGuestImageFormat(GuestImageUsage::Storage,
+	                                  static_cast<uint8_t>(storage_params[StorageTextureObject::PARAM_FORMAT] >> 8u),
+	                                  static_cast<uint8_t>(storage_params[StorageTextureObject::PARAM_FORMAT]),
+	                                  static_cast<uint16_t>(storage_format)) != VK_FORMAT_R16_SFLOAT ||
+	    render_params[RenderTextureObject::PARAM_TILED] != 1u ||
+	    render_params[RenderTextureObject::PARAM_WRITE_BACK] != 0u ||
+	    render_params[RenderTextureObject::PARAM_SAMPLES] != 1u ||
+	    render_params[RenderTextureObject::PARAM_ARRAY_LAYERS] != 1u ||
+	    render_params[RenderTextureObject::PARAM_NEO] != storage_params[StorageTextureObject::PARAM_NEO] ||
+	    storage_params[StorageTextureObject::PARAM_TILE] != 27u ||
+	    storage_params[StorageTextureObject::PARAM_LEVELS] != 1u ||
+	    storage_params[StorageTextureObject::PARAM_DEPTH] != 1u ||
+	    storage_params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u ||
+	    storage_params[StorageTextureObject::PARAM_SKIP_SEED] != 0u ||
+	    (storage_params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 8u &&
+	     storage_params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u) ||
+	    NormalizeStorageTextureSwizzle(storage_format, storage_params[StorageTextureObject::PARAM_SWIZZLE]) !=
+	        DstSel(4, 5, 6, 7))
+	{
+		return false;
+	}
+	RenderAliasLayout render {};
+	RenderAliasLayout storage {};
+	if (!DescribeRenderAliasLayout(render_address, render_size, render_params[RenderTextureObject::PARAM_WIDTH],
+	                               render_params[RenderTextureObject::PARAM_HEIGHT],
+	                               render_params[RenderTextureObject::PARAM_PITCH], 4u, &render) ||
+	    !DescribeRenderAliasLayout(storage_address, storage_size,
+	                               storage_params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u,
+	                               storage_params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu,
+	                               storage_params[StorageTextureObject::PARAM_PITCH], 2u, &storage))
+	{
+		return false;
+	}
+	constexpr uint64_t block_bytes = 65536u;
+	const uint64_t overlap_start = std::max(render.address, storage.address);
+	const uint64_t overlap_end = std::min(render.address + render.size, storage.address + storage.size);
+	if (overlap_start >= overlap_end || render.blocks_x > UINT32_MAX || storage.blocks_x > UINT32_MAX)
+	{
+		return false;
+	}
+	const uint64_t source_first = (overlap_start - render.address) / block_bytes;
+	const uint64_t destination_first = (overlap_start - storage.address) / block_bytes;
+	const uint64_t count = (overlap_end - overlap_start) / block_bytes;
+	if (source_first > UINT32_MAX || destination_first > UINT32_MAX || count > UINT32_MAX)
+	{
+		return false;
+	}
+	for (uint64_t index = source_first; index < source_first + count; ++index)
+	{
+		const uint64_t x = (index % render.blocks_x) * 128u;
+		const uint64_t y = (index / render.blocks_x) * 128u;
+		if (x + 128u > render.width || y + 128u > render.height)
+		{
+			return false;
+		}
+	}
+	*plan = {static_cast<uint32_t>(source_first), static_cast<uint32_t>(destination_first),
+	         static_cast<uint32_t>(count), static_cast<uint32_t>(render.blocks_x),
+	         static_cast<uint32_t>(storage.blocks_x)};
+	return count != 0u;
 }
 
 void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, VulkanImage* destination,

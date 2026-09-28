@@ -263,28 +263,28 @@ audio-propagation imports, bounded libc string imports, and three later
 storage-image overlap cases. A blockwise GPU copy now carries the live bytes
 from a compatible tiled render target into the first partially written storage
 image. The strict run passed the former single-parent
-`RenderTexture Crosses StorageTexture` exit. With SDL's Wayland backend on the
-current Linux Wayland session, the next structured exit is
-`!create_all_the_same` in `GpuMemoryCreate.cpp:1691` for the second storage
-output of the same 16×1-group dispatch. That image crosses three live render
-targets and contains a small storage/sampled pair; the parents include
-different formats. Its `skip_seed=0`, so the earlier full-overwrite policy is
-excluded: the observed dispatch can write at most 4,096 of 3,326,976 texels.
-The packed-float render target is the leading source candidate for the
-overlap: a filtered strict trace recorded its full-extent `CLEAR`, a draw,
-and a later sample before the storage creation, with no later render-target
-write to that address. A bounded writer-history query at the rejection covered
-the overlapping range with zero retained or dropped DMA, WriteData, event,
-or write-back events. It does not observe direct guest CPU stores or render-
-target writes. The raw cross-format byte mapping remains unresolved. A focused
-red/green test exposed that the old two-byte tile-27 path mapped 32,768 texels
-to only 8,192 distinct offsets per block. The revised 16-pipe equation maps
-every texel in a 64 KiB block to a unique aligned byte offset, and a strict
-run reached the same mixed-parent rejection. PS5 visual accuracy for that
-equation and live image-byte transfer remain unverified.
-Four native captures are now available from the first four presents, but all
-score as uniform black (`entropy=0`, one quantized color,
-`gameplay_like=false`). There is no controllable gameplay evidence.
+`RenderTexture Crosses StorageTexture` exit. With SDL's Wayland backend, a raw
+32-to-16-bit tiled alias transfer now passes the former `!create_all_the_same`
+exit for the second partially written storage output. It reads the live source
+image, swizzles its raw words, and uploads the destination in the current
+command buffer. The multi-parent policy requires a newer packed render target
+whose guest range covers every other parent's overlapping bytes and whose
+full host extent received a render-pass `CLEAR`. The destination still takes
+its uncovered prefix from guest memory. A focused red/green test exposed that
+the old two-byte tile-27 path mapped 32,768 texels to only 8,192 distinct
+offsets per block. The revised mapping is bijective and aligned over 64 KiB;
+a synthetic cross-format test checks the raw word address mapping, and the
+embedded compute shader passes `spirv-val`.
+
+The 180-second strict run reached present 17 without the former structured
+exit. Its native capture is uniform black (`entropy=0`, one quantized color,
+`gameplay_like=false`). A second 110-second run with the full-clear gate
+reached present 9 and recorded the five-parent storage creation as linked;
+it ended at its runtime limit without a guest error. Performance telemetry
+measured that creation near 30 ms while frames took about 8 seconds. The
+source image bytes, revised two-byte tiling on real hardware, and cause of
+black/slow output still need direct validation. There is no controllable
+gameplay evidence.
 
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits

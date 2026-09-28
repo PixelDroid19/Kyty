@@ -75,6 +75,22 @@ struct StorageTextureRenderAliasCopy
 void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, VulkanImage* destination,
 	                              const Vector<StorageTextureRenderAliasCopy>& copies);
 
+struct StorageTextureRawRenderAliasPlan
+{
+	uint32_t source_first_block      = 0;
+	uint32_t destination_first_block = 0;
+	uint32_t block_count             = 0;
+	uint32_t source_blocks_x         = 0;
+	uint32_t destination_blocks_x    = 0;
+};
+
+[[nodiscard]] bool StorageTexturePlanRawRenderAlias(const uint64_t* render_params, uint64_t render_address,
+	                                                 uint64_t render_size, const uint64_t* storage_params,
+	                                                 uint64_t storage_address, uint64_t storage_size,
+	                                                 StorageTextureRawRenderAliasPlan* plan);
+[[nodiscard]] bool StorageTextureCopyRawRenderAlias(GraphicContext* ctx, CommandBuffer* buffer, VulkanImage* source,
+	                                                VulkanImage* destination, const StorageTextureRawRenderAliasPlan& plan);
+
 struct StorageTextureArrayViewRange
 {
 	uint32_t base_array_layer = 0;

@@ -281,6 +281,7 @@ struct StorageTextureVulkanImage: public VulkanImage
 struct RenderTextureVulkanImage: public VulkanImage
 {
 	RenderTextureVulkanImage(): VulkanImage(VulkanImageType::RenderTexture) {}
+	bool fully_defined_from_clear = false;
 };
 
 struct VulkanBufferDescriptorKey

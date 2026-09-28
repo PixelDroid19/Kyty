@@ -951,6 +951,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	bool        create_from_objects    = false;
 	int         render_alias_parent_id = -1;
 	Vector<StorageTextureRenderAliasCopy> render_alias_copies;
+	StorageTextureRawRenderAliasPlan raw_render_alias_plan {};
+	bool raw_render_alias = false;
 	Vector<int> selective_reclaim_ids;
 	Vector<int> depth_stencil_reclaim_ids;
 	Vector<int> retire_after_copy_ids;
@@ -1310,6 +1312,65 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
+			bool multi_raw_render_alias = info.type == GpuMemoryObjectType::StorageTexture && buffer != nullptr &&
+			                              vaddr_num == 1 && info.params[StorageTextureObject::PARAM_SKIP_SEED] == 0u;
+			if (multi_raw_render_alias)
+			{
+				multi_raw_render_alias = false;
+				for (const auto& candidate: others)
+				{
+					const auto& source = heap.objects[candidate.object_id];
+					const auto& source_info = source.info;
+					StorageTextureRawRenderAliasPlan proposed {};
+					if (source_info.object.type != GpuMemoryObjectType::RenderTexture ||
+					    candidate.relation != OverlapType::Crosses || !source_info.in_use ||
+					    source_info.object.obj == nullptr || source_info.gpu_update_time <= source_info.cpu_update_time ||
+					    source.block.vaddr_num != 1 ||
+					    !static_cast<RenderTextureVulkanImage*>(source_info.object.obj)->fully_defined_from_clear ||
+					    !StorageTexturePlanRawRenderAlias(source_info.params, source.block.vaddr[0], source.block.size[0],
+					                                      info.params, vaddr[0], size[0], &proposed))
+					{
+						continue;
+					}
+					const uint64_t source_start = source.block.vaddr[0];
+					const uint64_t source_end = source_start + source.block.size[0];
+					bool owns_other_overlaps = true;
+					for (const auto& parent: others)
+					{
+						if (parent.object_id == candidate.object_id)
+						{
+							continue;
+						}
+						const auto& other = heap.objects[parent.object_id];
+						const auto& other_info = other.info;
+						if (other.block.vaddr_num != 1 ||
+						    (other_info.object.type != GpuMemoryObjectType::RenderTexture &&
+						     other_info.object.type != GpuMemoryObjectType::StorageTexture &&
+						     other_info.object.type != GpuMemoryObjectType::Texture) ||
+						    source_info.gpu_update_time <= std::max(other_info.gpu_update_time, other_info.cpu_update_time))
+						{
+							owns_other_overlaps = false;
+							break;
+						}
+						const uint64_t other_start = std::max(other.block.vaddr[0], vaddr[0]);
+						const uint64_t other_end = std::min(other.block.vaddr[0] + other.block.size[0], vaddr[0] + size[0]);
+						if (other_start < source_start || other_end > source_end)
+						{
+							owns_other_overlaps = false;
+							break;
+						}
+					}
+					if (owns_other_overlaps)
+					{
+						multi_raw_render_alias = true;
+						raw_render_alias = true;
+						raw_render_alias_plan = proposed;
+						render_alias_parent_id = candidate.object_id;
+						break;
+					}
+				}
+			}
+
 			// Multi-parent VertexBuffer Contained in StorageBuffer/RenderTexture
 			// (and similar surfaces). Observed: new VB 0x480 inside a 0x60000
 			// StorageBuffer+RenderTexture Equals pair at the same guest base.
@@ -1518,7 +1579,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				create_from_objects   = true;
 				retire_after_copy_ids = storage_growth_ids;
-			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias ||
+			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_raw_render_alias ||
 			           multi_overwritten_storage_texture || multi_vertex_in_surface || multi_render_target_alias)
 			{
 				overlap = true;
@@ -1894,8 +1955,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	{
 		auto& parent = heap.objects[render_alias_parent_id].info;
 		RecordUse(&parent, buffer);
-		StorageTextureCopyRenderAlias(buffer, static_cast<RenderTextureVulkanImage*>(parent.object.obj),
-		                              static_cast<StorageTextureVulkanImage*>(o.object.obj), render_alias_copies);
+		if (raw_render_alias)
+		{
+			EXIT_IF(!StorageTextureCopyRawRenderAlias(ctx, buffer, static_cast<RenderTextureVulkanImage*>(parent.object.obj),
+			                                          static_cast<StorageTextureVulkanImage*>(o.object.obj), raw_render_alias_plan));
+		} else
+		{
+			StorageTextureCopyRenderAlias(buffer, static_cast<RenderTextureVulkanImage*>(parent.object.obj),
+				                              static_cast<StorageTextureVulkanImage*>(o.object.obj), render_alias_copies);
+		}
 	}
 
 	if (info.type == GpuMemoryObjectType::StorageBuffer && vaddr_num == 1)

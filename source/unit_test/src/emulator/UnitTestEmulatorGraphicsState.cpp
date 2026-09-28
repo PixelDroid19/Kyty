@@ -1702,6 +1702,12 @@ TEST(EmulatorGraphicsState, StorageTextureBackingIdentityKeepsDistinctViewFamili
 	EXPECT_FALSE(rgba_identity.Equal(rgba_bgra.params));
 	EXPECT_FALSE(rgba_bgra.Equal(rgba_identity.params));
 	EXPECT_FALSE(rgba_identity.Equal(nullptr));
+	const StorageTextureObject r16_identity(0u, 0u, 13u, 64u, 64u, 256u, 0u, 1u, 27u, true,
+	                                        DstSel(4, 5, 6, 7));
+	const StorageTextureObject r16_guest(0u, 0u, 13u, 64u, 64u, 256u, 0u, 1u, 27u, true,
+	                                     DstSel(4, 0, 0, 1));
+	EXPECT_TRUE(r16_identity.Equal(r16_guest.params));
+	EXPECT_TRUE(r16_guest.Equal(r16_identity.params));
 }
 
 TEST(EmulatorGraphicsState, StorageTextureGrowthCopiesGpuOwnedArrayPrefix)
@@ -1758,6 +1764,52 @@ TEST(EmulatorGraphicsState, RenderTargetStorageAliasCopiesOnlyMatchingGuestBlock
 	                                           destination_address, 15u * block_bytes, &copies));
 	EXPECT_FALSE(StorageTexturePlanRenderAlias(source.params, source_address, 8u * block_bytes, destination.params,
 	                                           destination_address + 1u, 15u * block_bytes, &copies));
+}
+
+TEST(EmulatorGraphicsState, RawRenderStorageAliasPreservesGuestWordsAcrossFormats)
+{
+	constexpr uint64_t block_bytes = 65536u;
+	constexpr uint64_t base = 0x200000u;
+	const RenderTextureObject source(RenderTextureFormat::B10G11R11Ufloat, 128u, 128u, true, true, 128u, false);
+	const StorageTextureObject destination(0u, 0u, 13u, 512u, 128u, 512u, 0u, 1u, 27u, true,
+	                                       DstSel(4, 0, 0, 1));
+	StorageTextureRawRenderAliasPlan plan {};
+	ASSERT_TRUE(StorageTexturePlanRawRenderAlias(source.params, base + block_bytes, block_bytes, destination.params,
+	                                             base, 2u * block_bytes, &plan));
+	EXPECT_EQ(plan.source_first_block, 0u);
+	EXPECT_EQ(plan.destination_first_block, 1u);
+	EXPECT_EQ(plan.block_count, 1u);
+	EXPECT_EQ(plan.source_blocks_x, 1u);
+	EXPECT_EQ(plan.destination_blocks_x, 2u);
+	bool seen_words[16384] {};
+	for (uint32_t y = 0; y < 128u; ++y)
+	{
+		for (uint32_t x = 0; x < 256u; x += 2u)
+		{
+			const uint64_t word_address = base + TileGetSw64kRxOffset(256u + x, y, 512u, 2u);
+			const uint64_t source_offset = word_address - (base + block_bytes);
+			ASSERT_LT(source_offset, block_bytes);
+			ASSERT_EQ(source_offset % 4u, 0u);
+			ASSERT_FALSE(seen_words[source_offset / 4u]);
+			seen_words[source_offset / 4u] = true;
+			const uint32_t offset = static_cast<uint32_t>(source_offset);
+			const auto bit = [offset](uint32_t index) { return (offset >> index) & 1u; };
+			const uint32_t source_x = bit(2u) | (bit(4u) << 1u) | (bit(6u) << 2u) |
+			                          ((bit(8u) ^ bit(12u)) << 3u) | (bit(13u) << 4u) |
+			                          ((bit(11u) ^ bit(14u)) << 5u) | (bit(15u) << 6u);
+			const uint32_t source_y = bit(3u) | (bit(5u) << 1u) | (bit(7u) << 2u) |
+			                          (bit(12u) << 3u) | ((bit(9u) ^ bit(13u)) << 4u) |
+			                          ((bit(10u) ^ bit(15u)) << 5u) | (bit(14u) << 6u);
+			ASSERT_EQ(TileGetSw64kRxOffset(source_x, source_y, 128u, 4u), source_offset);
+		}
+	}
+	const RenderTextureObject partial(RenderTextureFormat::B10G11R11Ufloat, 128u, 64u, true, true, 128u, false);
+	EXPECT_FALSE(StorageTexturePlanRawRenderAlias(partial.params, base + block_bytes, block_bytes, destination.params,
+	                                              base, 2u * block_bytes, &plan));
+	const StorageTextureObject no_seed(0u, 0u, 13u, 512u, 128u, 512u, 0u, 1u, 27u, true,
+	                                   DstSel(4, 0, 0, 1), 9u, 1u, 0u, true);
+	EXPECT_FALSE(StorageTexturePlanRawRenderAlias(source.params, base + block_bytes, block_bytes, no_seed.params,
+	                                              base, 2u * block_bytes, &plan));
 }
 
 TEST(EmulatorGraphicsState, StorageTextureBackingSupportsSamplingAfterComputeWrites)

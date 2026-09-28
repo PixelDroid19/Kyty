@@ -397,9 +397,7 @@ against the same correct gameplay capture.
   or GPU write-back touched those bytes in that run. The packed parent had the
   newest GPU update marker (259 versus 258 and 254 for the crossing render
   peers); its CPU marker was 130. The recorder does not cover direct guest
-  CPU stores or render pass writes, which were observed separately. A raw byte
-  mapping into the differently formatted 16-bit storage image remains
-  unimplemented. A temporary seed-skip diagnostic
+  CPU stores or render pass writes, which were observed separately. A temporary seed-skip diagnostic
   still reached the same rejection because the existing full-overwrite policy
   does not accept a `Texture IsContainedWithin` parent; the diagnostic was
   removed and provides no evidence about later image reads. The filtered
@@ -416,6 +414,28 @@ against the same correct gameplay capture.
   from four presents and then reached the same mixed-parent exit. Each capture
   scored `entropy=0`, one quantized color, and `gameplay_like=false`, so this is
   capture-path progress only.
+
+- Raw mixed-format image alias (2026-09-28): the new R16F storage output's
+  guest selector was `0x204` (`R,0,0,1`); Kyty already forced identity for its
+  single-component Vulkan storage view, so that selector is now normalized
+  for R16/R16F cache identity and planning. A raw 32-bit packed-render to
+  paired 16-bit storage transfer uses 64 KiB guest block addresses to select
+  source words from the live image. It is admitted only when the source's
+  full host extent was cleared, its GPU marker is newer than every overlapping
+  parent's CPU/GPU marker, and its guest span covers all those parent
+  intersections. The transfer records source/destination image readbacks,
+  a bit-preserving compute mapping, and destination upload in the same command
+  buffer. A synthetic test verifies the full block's source/destination byte
+  equations and rejects partial source blocks; the embedded shader passed
+  `spirv-val`. The first strict Wayland run crossed the old mixed-parent exit,
+  reached present 17, and timed out at 180 seconds. A native present-17 capture
+  scored `entropy=0` and `gameplay_like=false`. A second strict run with the
+  full-clear gate reached present 9 and timed out at 110 seconds with no guest
+  error. Its performance snapshot recorded the five-parent storage creation
+  as `new_linked` in about 30 ms, while ordinary frames still took about
+  8 seconds. This excludes the alias creation itself as a sufficient
+  explanation for that sustained frame time. It does not establish correct
+  visual content, a real-hardware two-byte tiling match, or gameplay.
 
 - First partial storage output and tile-copy proof (2026-09-28): the former
   `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`
