@@ -333,16 +333,28 @@ against the same correct gameplay capture.
   storage/sampled pair and crosses three live, GPU-newer render targets. Two
   render targets are RGBA16F and one has a different packed-float format; all
   are tiled and have no write-back callback. A generic same-format image copy
-  cannot seed this mixed layout, and 16×1 groups do not prove a full overwrite.
+  cannot seed this mixed layout. The shader has at most one store to this
+  output per invocation, with no backward branch around that store. Its
+  16×1 groups of 16×16 invocations can write at most 4,096 of 3,326,976
+  texels (0.12%), so a full-overwrite seed omission is excluded.
   Determine which parent owns each byte range and whether the new output needs
   those prior bytes before extending the overlap policy. Its two-byte tile-27
   format also reaches `Tile.cpp:1022`, where the current within-block converter
-  only has four- and eight-byte equations; prove the two-byte layout before
-  materializing this view. The first-present VideoOut source was confirmed as
-  `VK_FORMAT_A2R10G10B10_UNORM_PACK32`. After adding packed-format capture,
-  the strict run produced four native PNGs from four presents and then reached
-  the same mixed-parent exit. Each capture scored `entropy=0`, one quantized
-  color, and `gameplay_like=false`, so this is capture-path progress only.
+  uses its eight-byte equation for two-byte elements. Over one 256×128,
+  64 KiB block, this maps 32,768 texels to only 8,192 distinct offsets.
+  This is a real two-byte tiling defect; derive and validate its bit equation
+  against guest evidence before materializing this view. A filtered lifetime
+  trace of the overlapping render address showed separate RGBA16F and packed
+  float host images, both bound with `CLEAR` and the packed image subsequently
+  sampled. Those whole-image bind events do not establish which host image
+  owns each guest byte at the later overlap. The filtered trace and two GDB
+  probes reached their run deadlines before the overlap; do not interpret
+  their missing tail as a writer or dependency result. The first-present
+  VideoOut source was confirmed as `VK_FORMAT_A2R10G10B10_UNORM_PACK32`.
+  After adding packed-format capture, the strict run produced four native PNGs
+  from four presents and then reached the same mixed-parent exit. Each capture
+  scored `entropy=0`, one quantized color, and `gameplay_like=false`, so this is
+  capture-path progress only.
 
 - First partial storage output and tile-copy proof (2026-09-28): the former
   `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`
