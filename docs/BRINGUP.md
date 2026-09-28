@@ -421,6 +421,17 @@ Silent/Native run passed this import before stopping at missing
 was uniform black (`entropy=0`, `healthy=false`); there is still no gameplay
 evidence.
 
+The strict `SystemGetRays` call passes a writable count initialized to 64 and
+a caller-owned array of 64 records, each initialized by the guest with a
+0x58-byte descriptor. Guest code scans the resulting records for nonzero
+coordinates. Kyty's CPU-only propagation system has no ray producer, so its
+current result is an empty set: it writes count zero and leaves the caller's
+array untouched. A focused red/green test passed. The following strict run
+passed this import and reached a logged level start, then stopped in graphics
+at `unknown mimg format for opcode: 0x24`, `dmask: 0x1`. The present-32 native
+capture still scored `entropy=0`, `healthy=false`. The empty result does not
+establish acoustic propagation or a visually correct level.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show

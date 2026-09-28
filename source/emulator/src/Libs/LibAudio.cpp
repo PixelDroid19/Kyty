@@ -246,6 +246,7 @@ LIB_DEFINE(InitAudio_1_AudioPropagation)
 	LIB_FUNC("S0JwP2AFTTE", AudioPropagation::RoomDestroy);
 	LIB_FUNC("CPLV6G-eXmk", AudioPropagation::SystemRegisterMaterial);
 	LIB_FUNC("kIdb+iQUzCs", AudioPropagation::SystemSetAttributes);
+	LIB_FUNC("ht-QXT3zGxo", AudioPropagation::SystemGetRays);
 }
 
 } // namespace LibAudioPropagation

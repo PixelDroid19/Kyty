@@ -92,9 +92,11 @@ TEST(EmulatorAudio, AudioPropagationQueryCreatesAndReleasesCallerOwnedSystem)
 	GuestValue<uint64_t>                       material_handle_storage;
 	GuestValue<SystemAttribute>                attribute_storage;
 	GuestValue<uint64_t>                       attribute_value_storage;
+	GuestReadableBlock                         rays_storage(64 * 0x58);
+	GuestValue<uint32_t>                       ray_count_storage;
 	ASSERT_TRUE(option_storage.IsValid() && memory_storage.IsValid() && system_storage.IsValid() && room_storage.IsValid() &&
 	            material_storage.IsValid() && material_handle_storage.IsValid() && attribute_storage.IsValid() &&
-	            attribute_value_storage.IsValid());
+	            attribute_value_storage.IsValid() && rays_storage.IsValid() && ray_count_storage.IsValid());
 
 	auto* option           = option_storage.Data();
 	auto* memory           = memory_storage.Data();
@@ -155,6 +157,14 @@ TEST(EmulatorAudio, AudioPropagationQueryCreatesAndReleasesCallerOwnedSystem)
 	*attribute_value_storage.Data() = *room_storage.Data();
 	EXPECT_EQ(AudioPropagation::SystemSetAttributes(0, attribute_storage.Data(), 1), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 	ASSERT_EQ(AudioPropagation::SystemSetAttributes(*system_storage.Data(), attribute_storage.Data(), 1), 0);
+	std::memset(rays_storage.Data(), 0x5a, 64 * 0x58);
+	*ray_count_storage.Data() = 64;
+	EXPECT_EQ(AudioPropagation::SystemGetRays(0, rays_storage.Data(), ray_count_storage.Data()),
+	          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(*ray_count_storage.Data(), 64u);
+	ASSERT_EQ(AudioPropagation::SystemGetRays(*system_storage.Data(), rays_storage.Data(), ray_count_storage.Data()), 0);
+	EXPECT_EQ(*ray_count_storage.Data(), 0u);
+	EXPECT_EQ(*static_cast<uint8_t*>(rays_storage.Data()), 0x5au);
 	EXPECT_EQ(AudioPropagation::RoomDestroy(0, *room_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 	EXPECT_EQ(AudioPropagation::RoomDestroy(*system_storage.Data(), *room_storage.Data()), 0);
 	EXPECT_EQ(AudioPropagation::SystemSetAttributes(*system_storage.Data(), attribute_storage.Data(), 1),

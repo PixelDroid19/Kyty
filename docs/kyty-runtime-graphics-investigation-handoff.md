@@ -646,6 +646,16 @@ against the same correct gameplay capture.
   observed room attribute and passes the former import in a strict run. This
   does not establish acoustic rendering; the next import is `SystemGetRays`.
 
+- AudioPropagation ray-query reference exclusion (2026-09-28): the live
+  `SystemGetRays` call presents capacity 64 and 64 caller-initialized
+  0x58-byte records. The guest later scans their coordinates. Local secondary
+  implementations either return success without output or force count zero;
+  they do not establish a ray-generation contract. Kyty's current CPU-only
+  system has no ray producer, so its own empty set reports count zero while
+  leaving the guest records intact. The strict run passed the import and
+  stopped later on a graphics MIMG decode, with a uniformly black capture.
+  Do not infer acoustic support from this query's success.
+
 - The second-module replay with a diagnostic 64-block bound and descriptor-slot
   checks completed in 17 ms. No scalar buffer index was invalid before that
   bound. Its subgroups remained at blocks 36/43 in the linked-list traversal;

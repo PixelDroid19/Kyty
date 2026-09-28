@@ -357,6 +357,29 @@ int KYTY_SYSV_ABI SystemSetAttributes(uint64_t system, const void* attributes, u
 	return LibKernel::KERNEL_ERROR_EINVAL;
 }
 
+int KYTY_SYSV_ABI SystemGetRays(uint64_t system, void* rays, uint32_t* count)
+{
+	PRINT_NAME();
+	uint32_t capacity = 0;
+	if (!ReadGuest(&capacity, count, sizeof(capacity)) || !WritableGuest(count, sizeof(capacity)) || (capacity != 0 && rays == nullptr))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	std::lock_guard lock(g_system_mutex);
+	bool            live_system = false;
+	for (const auto& record: g_systems)
+	{
+		live_system |= record.handle == system && system != 0;
+	}
+	if (!live_system)
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	// The CPU-only system has no ray producer, so its current ray set is empty.
+	const uint32_t ray_count = 0;
+	return WriteGuest(count, &ray_count, sizeof(ray_count)) ? 0 : LibKernel::KERNEL_ERROR_EINVAL;
+}
+
 } // namespace Kyty::Libs::Audio::AudioPropagation
 
 #endif // KYTY_EMU_ENABLED
