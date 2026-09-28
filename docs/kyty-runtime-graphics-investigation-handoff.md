@@ -446,6 +446,31 @@ against the same correct gameplay capture.
   excluded; an indirect dependency has not been demonstrated. The temporary
   counter was removed and audio pacing was not changed.
 
+- Slow graphics-label waits (2026-09-28): two strict GDB samples five seconds
+  apart placed the graphics worker in `WaitForSuspendedRuns` while the guest
+  submitter waited for `DecodeCompletion` and audio independently paced its
+  output. A breakpoint counted 16 one-second fallback expirations during the
+  first three presents. Bounded packet traces found `WAIT_MEM64` equality
+  checks for `1` against zero-valued labels in one guest arena; the submission
+  tracker reported `ProducerNotFound`. A separate set of waits for an immediate
+  marker had a preceding `RELEASE_MEM` and found the current submission's
+  producer. A hardware watchpoint saw guest code set the first slow label to
+  `0` before the wait and `LabelManager::FireCallbacks` set it to `1` later,
+  after several fallback expirations. No tracked GPU writer or live storage
+  object covered the label at the first timeout. The first 40 dispatches ran
+  on the graphics queue with no ordinary storage descriptor spanning it; no
+  compute ring was mapped, notified, or run in the 20-second opening probe.
+  These observations exclude the storage-alias creation and direct audio sleep
+  as sufficient causes of the eight-second interval. They do not identify the
+  earlier producer or exclude an indirect shader/device-address route.
+  Signaling `DecodeCompletion` immediately after the PM4 snapshot was tried as
+  one bounded A/B experiment; present 2 still reported about 0.11 FPS and a
+  six-second gap, so the change was removed. Next, correlate the first blocked
+  DCB's paired constant/draw streams and the label's producer packet or guest
+  store before modifying `GraphicsRun.cpp:1075` or
+  `GraphicsRunOpParsers.cpp:1367`. Do not shorten, extend, or skip the wait as
+  a performance fix.
+
 - First partial storage output and tile-copy proof (2026-09-28): the former
   `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`
   involved one live RGBA16F render target and a larger storage view with the

@@ -292,6 +292,21 @@ placed that wait on thread 60 and the internal flip on thread 6 in the same
 strict run. This rules out a direct sleep on the flip thread; it does not
 identify the remaining frame-time cost. The probe was removed.
 
+Bounded GDB and packet probes now attribute much of the roughly eight-second
+frame interval to repeated one-second `WAIT_MEM64` fallbacks in the graphics
+ring. The slow waits compare a 64-bit label against `1` with a low-32-bit mask;
+the live word stays `0` and the submission tracker finds no pending producer.
+In contrast, waits paired with a preceding immediate `RELEASE_MEM` find their
+current submission's producer. A guest store initializes the slow label to
+`0`; a later graphics-label completion writes `1` only after several fallback
+timeouts. No compute ring was mapped or advanced during the measured opening
+window, and the first 40 dispatches belonged to the graphics queue. Returning
+from DCB submit immediately after command-buffer snapshotting did not improve
+the measured pace (about 0.11 FPS in a bounded A/B run), so that timing change
+was removed. The missing earlier producer remains unresolved; changing the
+wait timeout or fabricating the label would conceal it. This explains slow
+progress, not the uniform black native captures.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show
