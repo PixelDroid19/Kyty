@@ -326,6 +326,22 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- AudioPropagation_v1 reference exclusion (2026-09-27): the current strict
+  `SystemQueryMemory` call passes a 0x38-byte option record first and a
+  0x30-byte memory record second. Its continuation reads the CPU-memory size
+  from memory-record offset `+0x18`, allocates that many bytes, and passes the
+  filled record to `SystemCreate`. Five related local C++ emulator variants
+  return success with zero CPU/GPU sizes and do not consume the options;
+  two other local implementations write an unverified 1 MiB/256 B pair into
+  the first 16 output bytes and return success without a working system.
+  Those writes collide with the observed descriptor header, and none of these
+  references supplies a usable size calculation or acoustics contract. An
+  older local Kyty prototype writes a fixed size at `+0x58` of the first
+  argument; that offset is outside the current 0x30-byte output record and
+  cannot establish this call's ABI. Next hypothesis: a lawful reference trace
+  of the option/output pair or a complete backend contract can establish
+  memory requirements and object behavior; do not adopt any fixed-size stub.
+
 - The second-module replay with a diagnostic 64-block bound and descriptor-slot
   checks completed in 17 ms. No scalar buffer index was invalid before that
   bound. Its subgroups remained at blocks 36/43 in the linked-list traversal;
