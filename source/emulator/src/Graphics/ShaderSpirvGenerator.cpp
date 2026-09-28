@@ -2025,7 +2025,8 @@ void Spirv::WriteLocalVariables()
 		for (int i = 0; i < m_bind->direct_sgprs.sgprs_num; i++)
 		{
 			int start_reg = m_bind->direct_sgprs.start_register[i];
-			if (is_descriptor_register(start_reg))
+			const bool absolute = m_bind->direct_sgprs.absolute_register[i];
+			if (!absolute && is_descriptor_register(start_reg))
 			{
 				continue;
 			}
@@ -2033,7 +2034,7 @@ void Spirv::WriteLocalVariables()
 			EXIT_IF(buffer_index + i / 4 >= static_cast<int>(m_bind->push_constant_size) / 16);
 
 			String8 buffer = String8::FromPrintf("%d", buffer_index + i / 4);
-			String8 reg    = String8::FromPrintf("s%d", start_reg + shift_regs);
+			String8 reg    = String8::FromPrintf("s%d", start_reg + (absolute ? 0 : shift_regs));
 			String8 field  = String8::FromPrintf("%d", i % 4);
 			m_source += String8(text)
 			                .ReplaceStr("<vsharp_uint_ptr>", m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint")
@@ -3023,7 +3024,8 @@ void Spirv::FindVariables()
 		}
 		for (int i = 0; i < m_bind->direct_sgprs.sgprs_num; i++)
 		{
-			int direct_start = m_bind->direct_sgprs.start_register[i] + shift_regs;
+			int direct_start = m_bind->direct_sgprs.start_register[i] +
+			                   (m_bind->direct_sgprs.absolute_register[i] ? 0 : shift_regs);
 			AddVariable(ShaderOperandType::Sgpr, direct_start, 1);
 		}
 	}

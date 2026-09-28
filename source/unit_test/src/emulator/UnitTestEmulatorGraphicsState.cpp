@@ -1958,6 +1958,24 @@ TEST(EmulatorGraphicsState, ResolvesObservedTwoChannelFloatRenderTarget)
 	EXPECT_EQ(format.bytes_per_element, 4u);
 }
 
+TEST(EmulatorGraphicsState, ResolvesTwoChannelUnormRenderTarget)
+{
+	const auto format = ResolveRenderTextureFormat(0x3u, 0x0u, 0x0u);
+	EXPECT_NE(format.format, RenderTextureFormat::Unknown);
+	EXPECT_EQ(format.bytes_per_element, 2u);
+	EXPECT_EQ(VulkanResolveRenderTextureFormat(format.format), static_cast<uint32_t>(VK_FORMAT_R8G8_UNORM));
+}
+
+TEST(EmulatorGraphicsState, ResolvesObservedPackedUnormRenderTarget)
+{
+	const auto format = ResolveRenderTextureFormat(0x9u, 0x0u, 0x1u);
+	EXPECT_NE(format.format, RenderTextureFormat::Unknown);
+	EXPECT_EQ(format.bytes_per_element, 4u);
+	EXPECT_EQ(VulkanResolveRenderTextureFormat(format.format), static_cast<uint32_t>(VK_FORMAT_A2R10G10B10_UNORM_PACK32));
+	EXPECT_EQ(ResolveRenderTextureFormat(0x9u, 0x7u, 0x1u).format, RenderTextureFormat::Unknown);
+	EXPECT_EQ(ResolveRenderTextureFormat(0x9u, 0x0u, 0x0u).format, RenderTextureFormat::Unknown);
+}
+
 TEST(EmulatorGraphicsState, ResolvesPackedFloatRenderTargetsToB10G11R11)
 {
 	const auto ten_eleven = ResolveRenderTextureFormat(0x6u, 0x7u, 0x0u);
@@ -3767,6 +3785,24 @@ TEST(EmulatorGraphicsState, PreferGpuMemoryAliasUsesGuestByteSizes)
 	// Sample fits only under-sample objects: pick the largest child.
 	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, 0x900000ull), 1u);
 	EXPECT_EQ(PreferGpuMemoryAliasIndex(guest_sizes, 3, 0x18000ull), 2u);
+}
+
+TEST(EmulatorGraphicsState, LinksOnlyFullyOverwrittenStorageImageSurfaceParents)
+{
+	using Type = GpuMemoryObjectType;
+	using Relation = GpuMemoryOverlapType;
+	EXPECT_TRUE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::RenderTexture, Relation::Crosses,
+	                                                          Type::StorageTexture, true));
+	EXPECT_TRUE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::RenderTexture, Relation::IsContainedWithin,
+	                                                          Type::StorageTexture, true));
+	EXPECT_TRUE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::StorageBuffer, Relation::IsContainedWithin,
+	                                                          Type::StorageTexture, true));
+	EXPECT_FALSE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::RenderTexture, Relation::Crosses,
+	                                                           Type::StorageTexture, false));
+	EXPECT_FALSE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::Texture, Relation::Crosses,
+	                                                           Type::StorageTexture, true));
+	EXPECT_FALSE(GpuMemoryAllowsOverwrittenStorageTextureParent(Type::RenderTexture, Relation::Contains,
+	                                                           Type::StorageTexture, true));
 }
 
 // Capture/disk bounds: unset env defaults to 1280 so 4K VideoOut dumps are not

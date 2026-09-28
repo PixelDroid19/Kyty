@@ -192,6 +192,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7: return "Vdata3Vaddr3StSsDmask7"; break;
 		case ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB: return "Vdata3Vaddr3StSsDmaskB"; break;
 		case ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7: return "Vdata3Vaddr4StSsDmask7"; break;
+		case ShaderInstructionFormat::VdataVaddr4StSsMimgDmask: return "VdataVaddr4StSsMimgDmask"; break;
 		case ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF: return "Vdata4Vaddr3StSsDmaskF"; break;
 		case ShaderInstructionFormat::Vdata4Vaddr3StSsMimgDmask: return "Vdata4Vaddr3StSsMimgDmask"; break;
 		case ShaderInstructionFormat::Vdata4Vaddr3StDmaskF: return "Vdata4Vaddr3StDmaskF"; break;

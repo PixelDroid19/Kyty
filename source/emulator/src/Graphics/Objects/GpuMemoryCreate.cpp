@@ -1064,6 +1064,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				create_from_objects = true;
 				retire_after_copy_ids.Add(obj.object_id);
+			} else if (GpuMemoryAllowsOverwrittenStorageTextureParent(
+			               o.object.type, obj.relation, info.type,
+			               info.params[StorageTextureObject::PARAM_SKIP_SEED] != 0))
+			{
+				// The first dispatch overwrites the entire new image. Keep the
+				// previous GPU surfaces alive for independent reads in that dispatch.
+				overlap = true;
 			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
 			{
 				// Texture↔StorageBuffer partial shares and Texture↔StorageTexture
@@ -1268,6 +1275,24 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					if (!GpuMemoryAllowsStorageParent(o.object.type, obj.relation, info.type))
 					{
 						multi_mixed_storage_alias = false;
+						break;
+					}
+				}
+			}
+
+			bool multi_overwritten_storage_texture =
+			    info.type == GpuMemoryObjectType::StorageTexture &&
+			    info.params[StorageTextureObject::PARAM_SKIP_SEED] != 0 && !others.IsEmpty();
+			if (multi_overwritten_storage_texture)
+			{
+				for (const auto& obj: others)
+				{
+					const auto& parent = heap.objects[obj.object_id];
+					EXIT_IF(parent.free);
+					if (!GpuMemoryAllowsOverwrittenStorageTextureParent(
+					        parent.info.object.type, obj.relation, info.type, true))
+					{
+						multi_overwritten_storage_texture = false;
 						break;
 					}
 				}
@@ -1481,8 +1506,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				create_from_objects   = true;
 				retire_after_copy_ids = storage_growth_ids;
-			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_vertex_in_surface ||
-			           multi_render_target_alias)
+			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias ||
+			           multi_overwritten_storage_texture || multi_vertex_in_surface || multi_render_target_alias)
 			{
 				overlap = true;
 			} else if (multi_texture_reclaim)

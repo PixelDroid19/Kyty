@@ -326,6 +326,41 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- The second-module replay with a diagnostic 64-block bound and descriptor-slot
+  checks completed in 17 ms. No scalar buffer index was invalid before that
+  bound. Its subgroups remained at blocks 36/43 in the linked-list traversal;
+  captured list heads and the first node were zero. Filling only the captured
+  list-head input with the shader's tested end marker made the unchanged
+  complete module finish in 10 ms. This is an input control, not a permitted
+  runtime substitution. Producer tracing found a preceding shader that stores
+  to that same descriptor after loading it with S_LOAD. The dynamic resource
+  collector in `ShaderResources.cpp` assigned every such storage descriptor
+  ReadOnly, including vector stores. That permits transient snapshot storage
+  with no guest write-back owner, so a later reader can upload the unchanged
+  CPU zeros. The general correction records stores and atomics as ReadWrite,
+  merges writable usage across equal descriptors/load PCs, and updates
+  resource counts. A subsequent strict run passed this shader and advanced
+  through the storage-image alias and packed render-target frontiers to a
+  separate lazy audio import. Translator identity 54 prevents reuse of binaries
+  compiled under the former usage and offset image-sample translation.
+
+- After the phase correction, all three large modules completed standalone
+  zero-input replays in 5-7 ms with their own descriptor layouts. This does
+  not exclude data-dependent execution failures. A bounded diagnostic split
+  that submitted all preceding commands before each large dispatch, without
+  skipping any dispatch, completed the first module with live resources. The
+  second module lost the device after 791 ms; the third was not reached. Its
+  eight bound buffers and metadata were captured from their actual Vulkan
+  mappings, including persistent transient mappings, after the preceding fence.
+  A standalone replay of that second module with captured buffers, metadata,
+  and bounded guest-memory windows also lost the device after 747 ms. One
+  31.6 MiB buffer was captured only through its first MiB and zero-filled
+  thereafter; images remained synthetic, and 37 guest windows were omitted
+  at the 32 MiB capture limit. Both the program and system-pointer ranges were
+  present. This now isolates a reproducible data-dependent second-module
+  failure without the guest process; it does not identify the failing contract.
+  The temporary split and capture instrumentation was removed after collection.
+
 - An isolated Vulkan replay of the first large compute module also reset the
   render engine without a guest process, HLE, imported guest views, or private
   resource contents. It used zero-filled synthetic buffers, cleared images,

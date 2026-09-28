@@ -3,6 +3,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
 #include <cstdlib>
@@ -16,6 +17,129 @@ static void InitMimgParser()
 	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
 	Config::SetNextGen(true);
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+}
+
+static ShaderOperand TileVgpr(int reg)
+{
+	return {.type = ShaderOperandType::Vgpr, .register_id = reg, .size = 1};
+}
+
+static ShaderOperand TileSgpr(int reg, int size = 1)
+{
+	return {.type = ShaderOperandType::Sgpr, .register_id = reg, .size = size};
+}
+
+static ShaderOperand TileConstant(uint32_t value)
+{
+	ShaderOperand operand {.type = ShaderOperandType::IntegerInlineConstant, .size = 1};
+	operand.constant.u = value;
+	return operand;
+}
+
+static ShaderCode MakeFourQuadrantTileShader(bool omit_last_store = false, bool read_destination = false)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	auto add = [&code](ShaderInstructionType type, int dst, std::initializer_list<ShaderOperand> sources)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = static_cast<uint32_t>((code.GetInstructions().Size() + 1) * 4);
+		inst.type    = type;
+		inst.dst     = TileVgpr(dst);
+		inst.src_num = static_cast<int>(sources.size());
+		int index = 0;
+		for (const auto source: sources)
+		{
+			inst.src[index++] = source;
+		}
+		code.GetInstructions().Add(inst);
+	};
+	add(ShaderInstructionType::VLshrrevB32, 1, {TileConstant(3), TileVgpr(0)});
+	add(ShaderInstructionType::VBfeU32, 2, {TileVgpr(0), TileConstant(1), TileConstant(3)});
+	add(ShaderInstructionType::VAndB32, 1, {TileConstant(6), TileVgpr(1)});
+	add(ShaderInstructionType::VAndOrB32, 1, {TileConstant(1), TileVgpr(0), TileVgpr(1)});
+	add(ShaderInstructionType::VLshlAddU32, 39, {TileSgpr(14), TileConstant(4), TileVgpr(2)});
+	add(ShaderInstructionType::VLshlAddU32, 40, {TileSgpr(15), TileConstant(4), TileVgpr(1)});
+	add(ShaderInstructionType::VAddI32, 47, {TileConstant(8), TileVgpr(39)});
+	add(ShaderInstructionType::VAddI32, 41, {TileConstant(8), TileVgpr(40)});
+	if (read_destination)
+	{
+		ShaderInstruction load {};
+		load.pc       = static_cast<uint32_t>((code.GetInstructions().Size() + 1) * 4);
+		load.type     = ShaderInstructionType::ImageLoad;
+		load.src[0]   = TileVgpr(39);
+		load.src[1]   = TileSgpr(24, 8);
+		load.src_num  = 2;
+		code.GetInstructions().Add(load);
+	}
+	const int x[4] = {39, 47, 47, 39};
+	const int y[4] = {40, 40, 41, 41};
+	for (int index = 0; index < (omit_last_store ? 3 : 4); ++index)
+	{
+		ShaderInstruction store {};
+		store.pc               = static_cast<uint32_t>((code.GetInstructions().Size() + 1) * 4);
+		store.type             = ShaderInstructionType::ImageStore;
+		store.dst              = TileVgpr(100);
+		store.dst.size         = 4;
+		store.src[0]           = TileVgpr(x[index]);
+		store.src[0].size      = 3;
+		store.src[1]           = TileSgpr(24, 8);
+		store.src_num          = 2;
+		store.mimg_dimension   = 1;
+		store.mimg_dmask       = 0xf;
+		store.mimg_address_num = 5;
+		store.mimg_address[0]  = TileVgpr(x[index]);
+		store.mimg_address[1]  = TileVgpr(y[index]);
+		code.GetInstructions().Add(store);
+	}
+	ShaderInstruction end {};
+	end.pc   = static_cast<uint32_t>((code.GetInstructions().Size() + 1) * 4);
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(end);
+	return code;
+}
+
+static ShaderBindResources FourQuadrantTileBinding(const ShaderCode& code)
+{
+	ShaderBindResources bind {};
+	bind.textures2D.textures_num = 1;
+	bind.textures2D.desc[0].usage = ShaderTextureUsage::ReadWrite;
+	bind.textures2D.desc[0].textures2d_without_sampler = true;
+	// A metadata descriptor can also be consumed through a mapped S_LOAD.
+	bind.textures2D.desc[0].dynamic_sload = false;
+	bind.textures2D.desc[0].start_register = 16;
+	ShaderDynamicSLoadMapping record {};
+	record.kind                 = ShaderDynamicSLoadResourceKind::Texture;
+	record.resource_index       = 0;
+	record.destination_register = 24;
+	record.instruction_pc       = 0;
+	record.last_consumer_pc     = code.GetInstructions().At(code.GetInstructions().Size() - 2).pc;
+	record.dword_count          = 8;
+	bind.dynamic_sloads.records.Add(record);
+	return bind;
+}
+
+TEST(EmulatorShaderMimg, ProvesFourQuadrantStorageOverwriteFromDynamicDescriptor)
+{
+	const auto code = MakeFourQuadrantTileShader();
+	const auto bind = FourQuadrantTileBinding(code);
+	const uint32_t threads[3] = {64, 1, 1};
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 14, threads);
+	EXPECT_EQ(coverage.width, 16u);
+	EXPECT_EQ(coverage.height, 16u);
+}
+
+TEST(EmulatorShaderMimg, RejectsIncompleteOrReadBeforeWriteStorageOverwrite)
+{
+	const uint32_t threads[3] = {64, 1, 1};
+	for (const bool read_destination: {false, true})
+	{
+		const auto code = MakeFourQuadrantTileShader(!read_destination, read_destination);
+		const auto bind = FourQuadrantTileBinding(code);
+		const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 14, threads);
+		EXPECT_EQ(coverage.width, 0u);
+		EXPECT_EQ(coverage.height, 0u);
+	}
 }
 
 TEST(EmulatorShaderMimg, RejectsGen5MimgExtendedOpcodeInsteadOfAliasingImageLoad)
@@ -89,6 +213,113 @@ TEST(EmulatorShaderMimg, ParsesContiguousBvhSourcesThroughLastVgpr)
 		    }
 		    std::_Exit(0);
 	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, ParsesTwoDimensionalOffsetSampleWithRedOnlyNsaResult)
+{
+	const uint32_t shader[] = {(0x3cu << 26u) | (0x37u << 18u) | (1u << 8u) | (1u << 3u) | (1u << 1u),
+	                           (5u << 21u) | (2u << 16u) | 4u, 0x08070605u, 0xbf810000u};
+	ASSERT_EXIT(
+	    {
+		    InitMimgParser();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    ShaderParse(shader, &code);
+		    const auto& inst = code.GetInstructions().At(0);
+		    if (inst.type != ShaderInstructionType::ImageSampleLzO ||
+		        inst.format != ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1 || inst.dst.size != 1 ||
+		        inst.mimg_dmask != 1 || inst.mimg_dimension != 1 || inst.mimg_address_num != 5 ||
+		        inst.mimg_address[0].register_id != 4 || inst.mimg_address[1].register_id != 5 ||
+		        inst.mimg_address[2].register_id != 6 || inst.mimg_address[3].register_id != 7)
+		    {
+			    std::_Exit(2);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, ParsesTwoDimensionalOffsetSampleWithGreenOnlyNsaResult)
+{
+	const uint32_t shader[] = {(0x3cu << 26u) | (0x37u << 18u) | (2u << 8u) | (1u << 3u) | (1u << 1u),
+	                           (5u << 21u) | (2u << 16u) | 4u, 0x08070605u, 0xbf810000u};
+	ASSERT_EXIT(
+	    {
+		    InitMimgParser();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    ShaderParse(shader, &code);
+		    const auto& inst = code.GetInstructions().At(0);
+		    if (inst.type != ShaderInstructionType::ImageSampleLzO ||
+		        inst.format == ShaderInstructionFormat::Unknown || inst.dst.size != 1 ||
+		        inst.mimg_dmask != 2 || inst.mimg_dimension != 1 || inst.mimg_address_num != 5)
+		    {
+			    std::_Exit(2);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, EmitsOffsetSampleWithOnlyTheSelectedRedDestination)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    ShaderInstruction sample {};
+		    sample.type             = ShaderInstructionType::ImageSampleLzO;
+		    sample.format           = ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1;
+		    sample.dst              = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+		    sample.src[0]           = {.type = ShaderOperandType::Vgpr, .register_id = 4, .size = 4};
+		    sample.src[1]           = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
+		    sample.src[2]           = {.type = ShaderOperandType::Sgpr, .register_id = 20, .size = 4};
+		    sample.src_num          = 3;
+		    sample.mimg_dimension   = 1;
+		    sample.mimg_dmask       = 1;
+		    sample.mimg_address_num = 5;
+		    for (int address = 0; address < 5; ++address)
+		    {
+			    sample.mimg_address[address] = {.type = ShaderOperandType::Vgpr, .register_id = 4 + address, .size = 1};
+		    }
+		    ShaderInstruction end {};
+		    end.type   = ShaderInstructionType::SEndpgm;
+		    end.format = ShaderInstructionFormat::Empty;
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    code.GetInstructions().Add(sample);
+		    code.GetInstructions().Add(end);
+		    ShaderPixelInputInfo input {};
+		    input.bind.push_constant_size                   = 48;
+		    input.bind.textures2D.textures_num              = 1;
+		    input.bind.textures2D.textures2d_sampled_num    = 1;
+		    input.bind.textures2D.desc[0].start_register    = 8;
+		    input.bind.textures2D.desc[0].usage             = ShaderTextureUsage::ReadOnly;
+		    input.bind.textures2D.desc[0].texture.fields[1] = 22u << 20u;
+		    input.bind.textures2D.desc[0].texture.fields[3] = 9u << 28u;
+		    input.bind.samplers.samplers_num                = 1;
+		    input.bind.samplers.start_register[0]           = 20;
+		    ShaderCalcBindingIndices(&input.bind);
+		    const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+		    if (source.FindIndex("OpImageSampleExplicitLod") == Core::STRING8_INVALID_INDEX ||
+		        source.FindIndex("OpBitFieldSExtract") == Core::STRING8_INVALID_INDEX ||
+		        source.FindIndex("OpStore %v0") == Core::STRING8_INVALID_INDEX ||
+		        source.FindIndex("OpStore %v1") != Core::STRING8_INVALID_INDEX)
+		    {
+			    std::_Exit(2);
+		    }
+		    code.GetInstructions()[0].format     = ShaderInstructionFormat::VdataVaddr4StSsMimgDmask;
+		    code.GetInstructions()[0].mimg_dmask = 2;
+		    const auto green_source               = SpirvGenerateSource(code, nullptr, &input, nullptr);
+		    if (green_source.FindIndex("OpCompositeExtract %float %t43_0 1") == Core::STRING8_INVALID_INDEX ||
+		        green_source.FindIndex("OpCompositeExtract %float %t43_0 0") != Core::STRING8_INVALID_INDEX ||
+		        green_source.FindIndex("OpStore %v0") == Core::STRING8_INVALID_INDEX ||
+		        green_source.FindIndex("OpStore %v1") != Core::STRING8_INVALID_INDEX)
+		    {
+			    std::_Exit(3);
+		    }
+		    std::_Exit(0);
+	    }()),
 	    ::testing::ExitedWithCode(0), "");
 }
 

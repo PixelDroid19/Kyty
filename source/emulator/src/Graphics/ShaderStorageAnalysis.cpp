@@ -5,8 +5,10 @@
 #include "Kyty/Core/DbgAssert.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -926,6 +928,330 @@ ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int sta
 	}
 
 	return result;
+}
+
+namespace {
+
+constexpr uint32_t k_tile_lanes = 64;
+constexpr uint32_t k_max_tile_extent = 256;
+
+struct ShaderTileValue
+{
+	bool valid = false;
+	uint32_t group_x = 0;
+	uint32_t group_y = 0;
+	std::array<uint32_t, k_tile_lanes> lane {};
+};
+
+bool ShaderTilePlainOperand(const ShaderOperand& operand)
+{
+	return operand.swizzle == 6 && !operand.dpp && !operand.absolute && !operand.negate && !operand.clamp &&
+	       operand.multiplier == 1.0f;
+}
+
+ShaderTileValue ShaderTileReadOperand(const ShaderOperand& operand, const std::array<ShaderTileValue, 256>& registers,
+                                     int workgroup_register)
+{
+	ShaderTileValue result {};
+	if (!ShaderTilePlainOperand(operand))
+	{
+		return result;
+	}
+	if (operand.type == ShaderOperandType::Vgpr && operand.register_id >= 0 && operand.register_id < 256 &&
+	    operand.size == 1)
+	{
+		return registers[operand.register_id];
+	}
+	if (operand.type == ShaderOperandType::Sgpr && operand.size == 1 &&
+	    (operand.register_id == workgroup_register || operand.register_id == workgroup_register + 1))
+	{
+		result.valid   = true;
+		result.group_x = operand.register_id == workgroup_register ? 1u : 0u;
+		result.group_y = operand.register_id == workgroup_register + 1 ? 1u : 0u;
+		return result;
+	}
+	if (operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant)
+	{
+		result.valid = true;
+		result.lane.fill(operand.constant.u);
+	}
+	return result;
+}
+
+bool ShaderTileLaneOnly(const ShaderTileValue& value)
+{
+	return value.valid && value.group_x == 0 && value.group_y == 0;
+}
+
+ShaderTileValue ShaderTileEvaluateInstruction(const ShaderInstruction& inst, const std::array<ShaderTileValue, 256>& registers,
+                                              int workgroup_register, uint32_t lane_count)
+{
+	ShaderTileValue result {};
+	if (inst.src_num < 2 || inst.src_num > 3)
+	{
+		return result;
+	}
+	const auto a = ShaderTileReadOperand(inst.src[0], registers, workgroup_register);
+	const auto b = ShaderTileReadOperand(inst.src[1], registers, workgroup_register);
+	const auto c = inst.src_num == 3 ? ShaderTileReadOperand(inst.src[2], registers, workgroup_register) : ShaderTileValue {};
+	if (!a.valid || !b.valid)
+	{
+		return result;
+	}
+	switch (inst.type)
+	{
+		case ShaderInstructionType::VLshrrevB32:
+		case ShaderInstructionType::VBfeU32:
+		case ShaderInstructionType::VAndB32:
+		case ShaderInstructionType::VAndOrB32:
+			if (!ShaderTileLaneOnly(a) || !ShaderTileLaneOnly(b) ||
+			    (inst.src_num == 3 && !ShaderTileLaneOnly(c)))
+			{
+				return result;
+			}
+			break;
+		case ShaderInstructionType::VLshlAddU32:
+			if (!c.valid || !ShaderTileLaneOnly(b) || !ShaderTileLaneOnly(c) ||
+			    (a.group_x + a.group_y != 1) || b.lane[0] > 8)
+			{
+				return result;
+			}
+			for (uint32_t lane = 0; lane < lane_count; ++lane)
+			{
+				if (a.lane[lane] != 0 || b.lane[lane] != b.lane[0])
+				{
+					return result;
+				}
+			}
+			result.group_x = a.group_x << b.lane[0];
+			result.group_y = a.group_y << b.lane[0];
+			break;
+		case ShaderInstructionType::VAddI32:
+			if (a.group_x + b.group_x > k_max_tile_extent || a.group_y + b.group_y > k_max_tile_extent)
+			{
+				return result;
+			}
+			result.group_x = a.group_x + b.group_x;
+			result.group_y = a.group_y + b.group_y;
+			break;
+		default: return result;
+	}
+	for (uint32_t lane = 0; lane < lane_count; ++lane)
+	{
+		const uint32_t x = a.lane[lane];
+		const uint32_t y = b.lane[lane];
+		const uint32_t z = c.lane[lane];
+		switch (inst.type)
+		{
+			case ShaderInstructionType::VLshrrevB32: result.lane[lane] = y >> (x & 31u); break;
+			case ShaderInstructionType::VBfeU32:
+				if ((z & 31u) == 0u) { return {}; }
+				result.lane[lane] = (x >> (y & 31u)) & ((1u << (z & 31u)) - 1u);
+				break;
+			case ShaderInstructionType::VAndB32: result.lane[lane] = x & y; break;
+			case ShaderInstructionType::VAndOrB32: result.lane[lane] = (x & y) | z; break;
+			case ShaderInstructionType::VLshlAddU32: result.lane[lane] = z; break;
+			case ShaderInstructionType::VAddI32:
+				if (static_cast<uint64_t>(x) + y > std::numeric_limits<uint32_t>::max()) { return {}; }
+				result.lane[lane] = x + y;
+				break;
+			default: return {};
+		}
+	}
+	result.valid = true;
+	return result;
+}
+
+int ShaderTileImageResourceIndex(const ShaderInstruction& inst, const ShaderBindResources& bind)
+{
+	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8)
+	{
+		return -1;
+	}
+	int result = -1;
+	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
+	{
+		const auto& record = bind.dynamic_sloads.records.At(mapping);
+		if (record.destination_register != inst.src[1].register_id || inst.pc <= record.instruction_pc ||
+		    inst.pc > record.last_consumer_pc)
+		{
+			continue;
+		}
+		if (record.kind != ShaderDynamicSLoadResourceKind::Texture || record.dword_count != 8 ||
+		    record.resource_field_offset != 0 || result >= 0)
+		{
+			return -2;
+		}
+		result = record.resource_index;
+	}
+	return result;
+}
+
+bool ShaderTileStoreCoordinates(const ShaderInstruction& inst, const std::array<ShaderTileValue, 256>& registers,
+	                            ShaderTileValue* x, ShaderTileValue* y)
+{
+	EXIT_IF(x == nullptr || y == nullptr);
+	ShaderOperand x_operand {};
+	ShaderOperand y_operand {};
+	if (inst.mimg_address_num >= 2)
+	{
+		x_operand = inst.mimg_address[0];
+		y_operand = inst.mimg_address[1];
+	} else if (inst.mimg_address_num == 0 && inst.src[0].type == ShaderOperandType::Vgpr)
+	{
+		x_operand = inst.src[0];
+		x_operand.size = 1;
+		y_operand = x_operand;
+		y_operand.register_id++;
+	} else
+	{
+		return false;
+	}
+	*x = ShaderTileReadOperand(x_operand, registers, -100);
+	*y = ShaderTileReadOperand(y_operand, registers, -100);
+	return x->valid && y->valid && x->group_x > 0 && x->group_y == 0 && y->group_x == 0 && y->group_y > 0 &&
+	       x->group_x <= k_max_tile_extent && y->group_y <= k_max_tile_extent;
+}
+
+bool ShaderTileMarkStore(const ShaderTileValue& x, const ShaderTileValue& y, uint32_t lane_count,
+	                     ShaderStorageImageTileCoverage* coverage, std::vector<uint8_t>* seen)
+{
+	EXIT_IF(coverage == nullptr || seen == nullptr);
+	if (coverage->width == 0)
+	{
+		coverage->width  = x.group_x;
+		coverage->height = y.group_y;
+		seen->assign(static_cast<size_t>(coverage->width) * coverage->height, 0);
+	}
+	if (x.group_x != coverage->width || y.group_y != coverage->height)
+	{
+		return false;
+	}
+	for (uint32_t lane = 0; lane < lane_count; ++lane)
+	{
+		if (x.lane[lane] >= coverage->width || y.lane[lane] >= coverage->height)
+		{
+			return false;
+		}
+		(*seen)[static_cast<size_t>(y.lane[lane]) * coverage->width + x.lane[lane]] = 1;
+	}
+	return true;
+}
+
+bool ShaderTileControlFlowIsLinear(const ShaderInstruction& inst, bool final_instruction)
+{
+	const auto type = inst.type;
+	if (type == ShaderInstructionType::Unknown || type == ShaderInstructionType::SSetpcB64 ||
+	    type == ShaderInstructionType::SSwappcB64 || type == ShaderInstructionType::STrap ||
+	    ShaderInstructionHasStaticBranchTarget(type) || (type == ShaderInstructionType::SEndpgm && !final_instruction))
+	{
+		return false;
+	}
+	if ((type >= ShaderInstructionType::SAndSaveexecB64 && type <= ShaderInstructionType::SXorSaveexecB64) ||
+	    (type >= ShaderInstructionType::VCmpLtU64 && type <= ShaderInstructionType::VCmpGeU64) ||
+	    (type >= ShaderInstructionType::VCmpEqF32 && type <= ShaderInstructionType::VCmpxUF32))
+	{
+		return false;
+	}
+	const auto changes_exec = [](const ShaderOperand& operand)
+	{
+		return operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::ExecHi ||
+		       operand.type == ShaderOperandType::ExecZ;
+	};
+	return !changes_exec(inst.dst) && !changes_exec(inst.dst2);
+}
+
+void ShaderTileInvalidateVgpr(const ShaderOperand& destination, std::array<ShaderTileValue, 256>* registers)
+{
+	EXIT_IF(registers == nullptr);
+	if (destination.type != ShaderOperandType::Vgpr)
+	{
+		return;
+	}
+	for (int index = 0; index < destination.size; ++index)
+	{
+		const int reg = destination.register_id + index;
+		if (reg >= 0 && reg < 256)
+		{
+			(*registers)[reg] = {};
+		}
+	}
+}
+
+} // namespace
+
+ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code, const ShaderBindResources& bind,
+                                                                    int texture_index, int workgroup_register,
+                                                                    const uint32_t threads[3])
+{
+	if (threads == nullptr || threads[0] == 0 || threads[0] > k_tile_lanes || threads[1] != 1 || threads[2] != 1 ||
+	    texture_index < 0 || texture_index >= bind.textures2D.textures_num || workgroup_register < 0 ||
+	    !bind.textures2D.desc[texture_index].textures2d_without_sampler)
+	{
+		return {};
+	}
+	std::array<ShaderTileValue, 256> registers {};
+	registers[0].valid = true;
+	for (uint32_t lane = 0; lane < threads[0]; ++lane)
+	{
+		registers[0].lane[lane] = lane;
+	}
+	ShaderStorageImageTileCoverage coverage {};
+	std::vector<uint8_t> seen;
+	const auto& instructions = code.GetInstructions();
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (!ShaderTileControlFlowIsLinear(inst, index + 1 == instructions.Size()))
+		{
+			return {};
+		}
+		if (ShaderInstructionReadsImageResource(inst.type) || ShaderInstructionWritesImageResource(inst.type))
+		{
+			const int resource_index = ShaderTileImageResourceIndex(inst, bind);
+			if (resource_index == -2)
+			{
+				return {};
+			}
+			if (resource_index == texture_index)
+			{
+				if (inst.type != ShaderInstructionType::ImageStore || inst.mimg_dimension != 1 || inst.mimg_dmask != 0xf)
+				{
+					return {};
+				}
+				ShaderTileValue x {};
+				ShaderTileValue y {};
+				if (!ShaderTileStoreCoordinates(inst, registers, &x, &y) ||
+				    !ShaderTileMarkStore(x, y, threads[0], &coverage, &seen))
+				{
+					return {};
+				}
+			}
+		}
+		if (inst.dst.type == ShaderOperandType::Sgpr && inst.dst.size > 0 &&
+		    inst.dst.register_id <= workgroup_register + 1 &&
+		    inst.dst.register_id + inst.dst.size > workgroup_register)
+		{
+			return {};
+		}
+		if (inst.dst.type == ShaderOperandType::Vgpr && inst.type != ShaderInstructionType::ImageStore &&
+		    inst.type != ShaderInstructionType::ImageStoreMip)
+		{
+			const auto value = ShaderTileEvaluateInstruction(inst, registers, workgroup_register, threads[0]);
+			ShaderTileInvalidateVgpr(inst.dst, &registers);
+			if (inst.dst.register_id >= 0 && inst.dst.register_id < 256 && inst.dst.size == 1)
+			{
+				registers[inst.dst.register_id] = value;
+			}
+		}
+		ShaderTileInvalidateVgpr(inst.dst2, &registers);
+	}
+	if (coverage.width == 0 ||
+	    !std::all_of(seen.begin(), seen.end(), [](uint8_t value) { return value != 0; }))
+	{
+		return {};
+	}
+	return coverage;
 }
 
 } // namespace Kyty::Libs::Graphics

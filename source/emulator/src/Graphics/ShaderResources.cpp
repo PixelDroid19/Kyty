@@ -518,12 +518,24 @@ static bool ShaderAddDynamicSLoadMapping(ShaderDynamicSLoadMappings* mappings, S
 	return true;
 }
 
-static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, const ShaderInstruction& sload, int offset_dw,
+static void ShaderCountStorageUsage(ShaderParsedUsage* info, ShaderStorageUsage usage, int delta)
+{
+	switch (usage)
+	{
+		case ShaderStorageUsage::Constant: info->storage_buffers_constant += delta; break;
+		case ShaderStorageUsage::ReadOnly: info->storage_buffers_readonly += delta; break;
+		case ShaderStorageUsage::ReadWrite: info->storage_buffers_readwrite += delta; break;
+		default: break;
+	}
+}
+
+static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, ShaderParsedUsage* info,
+	                                               const ShaderInstruction& sload, int offset_dw, ShaderStorageUsage usage,
 	                                               uint32_t last_consumer_pc, bool raw_vmem_oob_guarded,
 	                                               const uint32_t* extended_buffer, uint32_t instruction_count,
 	                                               bool* added_resource)
 {
-	EXIT_IF(bind == nullptr || extended_buffer == nullptr || added_resource == nullptr);
+	EXIT_IF(bind == nullptr || info == nullptr || extended_buffer == nullptr || added_resource == nullptr);
 	if (sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sload.dst.type != ShaderOperandType::Sgpr || sload.dst.size != 4 condition ignored (continuing)\n"); }
 	*added_resource = false;
 
@@ -556,13 +568,21 @@ static bool ShaderAddDynamicScalarStorageResource(ShaderBindResources* bind, con
 		}
 		storage_index                           = resources.buffers_num++;
 		resources.buffers[storage_index]        = resource;
-		resources.usages[storage_index]         = ShaderStorageUsage::ReadOnly;
+		resources.usages[storage_index]         = usage;
 		resources.sources[storage_index]        = ShaderStorageBindingSource::DynamicScalarLoad;
 		resources.slots[storage_index]          = offset_dw;
 		resources.start_register[storage_index] = sload.dst.register_id;
 		resources.extended[storage_index]       = false;
 		resources.dynamic_sload[storage_index]  = true;
 		*added_resource                         = true;
+		ShaderCountStorageUsage(info, usage, 1);
+	} else if (usage == ShaderStorageUsage::ReadWrite && resources.usages[storage_index] != ShaderStorageUsage::ReadWrite)
+	{
+		// Equal descriptors can be loaded at several PCs. A later store must
+		// retain writable backing even when the first consumer only read it.
+		ShaderCountStorageUsage(info, resources.usages[storage_index], -1);
+		resources.usages[storage_index] = ShaderStorageUsage::ReadWrite;
+		ShaderCountStorageUsage(info, ShaderStorageUsage::ReadWrite, 1);
 	}
 
 	return ShaderAddDynamicSLoadMapping(&bind->dynamic_sloads, ShaderDynamicSLoadResourceKind::StorageBuffer, storage_index, sload,
@@ -867,6 +887,7 @@ static void ShaderCollectSplitTextureResources(const ShaderCode& code, ShaderBin
 struct ShaderDynamicSLoadUse
 {
 	ShaderDynamicSLoadResourceKind kind              = ShaderDynamicSLoadResourceKind::StorageBuffer;
+	ShaderStorageUsage             storage_usage     = ShaderStorageUsage::ReadOnly;
 	ShaderTextureUsage             texture_usage     = ShaderTextureUsage::Unknown;
 	State::ImageSampleOperation sampler_operation = State::ImageSampleOperation::Regular;
 	ShaderGen5SampledTextureShape sampled_shape = ShaderGen5SampledTextureShape::TwoDimensional;
@@ -877,8 +898,36 @@ struct ShaderDynamicSLoadUse
 	bool                        valid              = true;
 };
 
+static bool ShaderInstructionWritesVectorBufferDescriptor(ShaderInstructionType type)
+{
+	switch (type)
+	{
+		case ShaderInstructionType::BufferStoreDword:
+		case ShaderInstructionType::BufferStoreDwordx2:
+		case ShaderInstructionType::BufferStoreDwordx3:
+		case ShaderInstructionType::BufferStoreDwordx4:
+		case ShaderInstructionType::BufferStoreFormatX:
+		case ShaderInstructionType::BufferStoreFormatXy:
+		case ShaderInstructionType::BufferStoreFormatXyzw:
+		case ShaderInstructionType::BufferAtomicAdd:
+		case ShaderInstructionType::BufferAtomicAnd:
+		case ShaderInstructionType::BufferAtomicOr:
+		case ShaderInstructionType::BufferAtomicSmax:
+		case ShaderInstructionType::BufferAtomicSmin:
+		case ShaderInstructionType::BufferAtomicSub:
+		case ShaderInstructionType::BufferAtomicUmax:
+		case ShaderInstructionType::BufferAtomicUmin:
+		case ShaderInstructionType::BufferAtomicXor: return true;
+		default: return false;
+	}
+}
+
 static bool ShaderInstructionUsesVectorBufferDescriptor(ShaderInstructionType type)
 {
+	if (ShaderInstructionWritesVectorBufferDescriptor(type))
+	{
+		return true;
+	}
 	switch (type)
 	{
 		case ShaderInstructionType::BufferLoadUbyte:
@@ -890,14 +939,6 @@ static bool ShaderInstructionUsesVectorBufferDescriptor(ShaderInstructionType ty
 		case ShaderInstructionType::BufferLoadFormatXy:
 		case ShaderInstructionType::BufferLoadFormatXyz:
 		case ShaderInstructionType::BufferLoadFormatXyzw:
-		case ShaderInstructionType::BufferStoreDword:
-		case ShaderInstructionType::BufferStoreDwordx2:
-		case ShaderInstructionType::BufferStoreDwordx3:
-		case ShaderInstructionType::BufferStoreDwordx4:
-		case ShaderInstructionType::BufferStoreFormatX:
-		case ShaderInstructionType::BufferStoreFormatXy:
-		case ShaderInstructionType::BufferStoreFormatXyzw:
-		case ShaderInstructionType::BufferAtomicAdd:
 		case ShaderInstructionType::TBufferLoadFormatX:
 		case ShaderInstructionType::TBufferLoadFormatXy:
 		case ShaderInstructionType::TBufferLoadFormatXyzw: return true;
@@ -937,6 +978,8 @@ static bool ShaderDynamicSLoadMatchesConsumer(const ShaderInstruction& inst, con
 				}
 			}
 			use->kind                   = ShaderDynamicSLoadResourceKind::StorageBuffer;
+			use->storage_usage = ShaderInstructionWritesVectorBufferDescriptor(inst.type) ? ShaderStorageUsage::ReadWrite
+			                                                                              : ShaderStorageUsage::ReadOnly;
 			use->texture_usage          = ShaderTextureUsage::Unknown;
 			use->raw_vmem_oob_guarded = true;
 			return true;
@@ -1047,6 +1090,10 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 				        ? State::ImageSampleOperation::Mixed
 				        : next_use.sampler_operation;
 				use.kind              = next_use.kind;
+				if (next_use.storage_usage == ShaderStorageUsage::ReadWrite)
+				{
+					use.storage_usage = ShaderStorageUsage::ReadWrite;
+				}
 				use.texture_usage     = next_use.texture_usage;
 				use.sampler_operation = sampler_operation;
 				if (next_use.sampled_shape_known)
@@ -1080,13 +1127,9 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		switch (use.kind)
 		{
 			case ShaderDynamicSLoadResourceKind::StorageBuffer:
-				added_mapping = ShaderAddDynamicScalarStorageResource(bind, sload, offset_dw, use.last_consumer_pc,
+				added_mapping = ShaderAddDynamicScalarStorageResource(bind, info, sload, offset_dw, use.storage_usage, use.last_consumer_pc,
 				                                                      use.raw_vmem_oob_guarded, extended_buffer,
 				                                                      instruction_count, &added_resource);
-				if (added_resource)
-				{
-					info->storage_buffers_readonly++;
-				}
 				break;
 			case ShaderDynamicSLoadResourceKind::Texture:
 				added_mapping = ShaderAddDynamicTextureResource(bind, sload, offset_dw, use.last_consumer_pc, use.texture_usage,

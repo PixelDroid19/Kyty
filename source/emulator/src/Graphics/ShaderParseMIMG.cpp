@@ -488,15 +488,32 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			inst.src[0].size = 4;
 			inst.src[1].size = 8;
 			inst.src[2].size = 4;
+			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
 			switch (dmask) // NOLINT
 			{
+				case 0x1:
+				{
+					inst.format   = ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1;
+					inst.dst.size = 1;
+					break;
+				}
 				case 0x7:
 				{
 					inst.format   = ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7;
 					inst.dst.size = 3;
 					break;
 				}
-				default:;
+				default:
+					if (dmask != 0 && dim == 1)
+					{
+						inst.format   = ShaderInstructionFormat::VdataVaddr4StSsMimgDmask;
+						inst.dst.size = 0;
+						for (uint32_t component = 0; component < 4; component++)
+						{
+							inst.dst.size += static_cast<int>((dmask >> component) & 1u);
+						}
+					}
+					break;
 			}
 			break;
 		case 0x38: KYTY_NI("image_sample_c_o"); break;

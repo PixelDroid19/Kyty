@@ -92,6 +92,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R16Sfloat, 2};
 	}
+	if (format == 0x3u && channel_type == 0x0u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R8G8Unorm, 2};
+	}
 	if (format == 0x4u && channel_type == 0x7u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::R32Sfloat, 4};
@@ -106,6 +110,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	if ((format == 0x6u || format == 0x7u) && channel_type == 0x7u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::B10G11R11Ufloat, 4};
+	}
+	if (format == 0x9u && channel_type == 0x0u && channel_order == 0x1u)
+	{
+		return {RenderTextureFormat::A2R10G10B10Unorm, 4};
 	}
 	if (format == 0xau && channel_type == 0x0u && channel_order == 0x0u)
 	{
@@ -334,6 +342,7 @@ uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 	switch (format)
 	{
 		case RenderTextureFormat::R8Unorm: return VK_FORMAT_R8_UNORM;
+		case RenderTextureFormat::R8G8Unorm: return VK_FORMAT_R8G8_UNORM;
 		case RenderTextureFormat::R8G8B8A8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
 		case RenderTextureFormat::R8G8B8A8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
 		case RenderTextureFormat::B8G8R8A8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
@@ -342,6 +351,7 @@ uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 		case RenderTextureFormat::R16G16Sfloat: return VK_FORMAT_R16G16_SFLOAT;
 		case RenderTextureFormat::R32Sfloat: return VK_FORMAT_R32_SFLOAT;
 		case RenderTextureFormat::B10G11R11Ufloat: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+		case RenderTextureFormat::A2R10G10B10Unorm: return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
 		case RenderTextureFormat::R16G16B16A16Unorm: return VK_FORMAT_R16G16B16A16_UNORM;
 		case RenderTextureFormat::R16G16B16A16Snorm: return VK_FORMAT_R16G16B16A16_SNORM;
 		case RenderTextureFormat::R16G16B16A16Uint: return VK_FORMAT_R16G16B16A16_UINT;

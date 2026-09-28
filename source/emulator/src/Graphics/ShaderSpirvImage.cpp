@@ -1840,20 +1840,26 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata3Vaddr3StSsDmask7)
 	return false;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLzO_Vdata3Vaddr4StSsDmask7)
+static bool RecompileImageSampleLzO(KYTY_RECOMPILER_ARGS)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	uint32_t destination_count = 0;
+	for (uint32_t component = 0; component < 4; component++)
+	{
+		destination_count += (inst.mimg_dmask >> component) & 1u;
+	}
+	if (destination_count == 0 || inst.dst.size != static_cast<int>(destination_count))
+	{
+		return false;
+	}
 
 	if (bind_info != nullptr && bind_info->textures2D.textures2d_sampled_num > 0 && bind_info->samplers.samplers_num > 0)
 	{
 		auto dst_value0  = operand_variable_to_str(inst.dst, 0);
-		auto dst_value1  = operand_variable_to_str(inst.dst, 1);
-		auto dst_value2  = operand_variable_to_str(inst.dst, 2);
 		auto src0_value0 = mimg_address_to_str(inst, 0);
 		auto src0_value1 = mimg_address_to_str(inst, 1);
 		auto src0_value2 = mimg_address_to_str(inst, 2);
-		auto src0_value3 = mimg_address_to_str(inst, 3);
 		auto src1_value0 = operand_variable_to_str(inst.src[1], 0);
 		auto src2_value0 = operand_variable_to_str(inst.src[2], 0);
 
@@ -1889,36 +1895,49 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLzO_Vdata3Vaddr4StSsDmask7)
         %139_<index> = OpImageQuerySizeLod %v2int %138_<index> %int_0
         %140_<index> = OpConvertSToF %v2float %139_<index>
         %141_<index> = OpFDiv %v2float %130_<index> %140_<index>
-        %142_<index> = OpFAdd %v2float %t42_<index> %141_<index>
+         %142_<index> = OpFAdd %v2float %t42_<index> %141_<index>
 
          %t43_<index> = OpImageSampleExplicitLod %v4float %t38_<index> %142_<index> Lod %float_0_000000
-               OpStore %temp_v4float %t43_<index>
-         %t46_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_0
-         %t47_<index> = OpLoad %float %t46_<index>
-               OpStore %<dst_value0> %t47_<index>
-         %t50_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_1
-         %t51_<index> = OpLoad %float %t50_<index>
-               OpStore %<dst_value1> %t51_<index>
-         %t54_<index> = OpAccessChain %_ptr_Function_float %temp_v4float %uint_2
-         %t55_<index> = OpLoad %float %t54_<index>
-               OpStore %<dst_value2> %t55_<index>
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<src0_value1>", src0_value1.value)
 		                   .ReplaceStr("<src0_value2>", src0_value2.value)
-		                   .ReplaceStr("<src0_value3>", src0_value3.value)
 		                   .ReplaceStr("<src1_value0>", src1_value0.value)
-		                   .ReplaceStr("<src2_value0>", src2_value0.value)
-		                   .ReplaceStr("<dst_value0>", dst_value0.value)
-		                   .ReplaceStr("<dst_value1>", dst_value1.value)
-		                   .ReplaceStr("<dst_value2>", dst_value2.value);
+		                   .ReplaceStr("<src2_value0>", src2_value0.value);
+		uint32_t destination = 0;
+		for (uint32_t component = 0; component < 4; component++)
+		{
+			if ((inst.mimg_dmask & (1u << component)) == 0)
+			{
+				continue;
+			}
+			const auto dst_value = operand_variable_to_str(inst.dst, static_cast<int>(destination++));
+			*dst_source += String8::FromPrintf(
+			    "%%image_sample_lzo_%u_%u = OpCompositeExtract %%float %%t43_%u %u\nOpStore %%%s %%image_sample_lzo_%u_%u\n",
+			    index, component, index, component, dst_value.value.c_str(), index, component);
+		}
 
 		return true;
 	}
 
 	return false;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLzO_Vdata1Vaddr4StSsDmask1)
+{
+	return RecompileImageSampleLzO(index, code, dst_source, spirv, param, scc_check);
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLzO_Vdata3Vaddr4StSsDmask7)
+{
+	return RecompileImageSampleLzO(index, code, dst_source, spirv, param, scc_check);
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLzO_VdataVaddr4StSsMimgDmask)
+{
+	return RecompileImageSampleLzO(index, code, dst_source, spirv, param, scc_check);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)

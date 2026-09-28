@@ -343,6 +343,10 @@ void GraphicsRenderQueueQueuedGraphicsInterrupt(CommandBuffer* buffer);
 // The caller submits after releasing its CommandProcessor mutex so publication
 // cannot precede GPU -> CPU materialization.
 void GraphicsRenderPrepareWriteBack(CommandBuffer* buffer);
+// Analyze the same compute admission and resources used by DispatchDirect
+// before the command processor decides whether to complete prior GPU writes.
+[[nodiscard]] bool GraphicsRenderComputeUsesGuestDeviceAddress(HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
+                                                                uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
 void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
                                   uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);

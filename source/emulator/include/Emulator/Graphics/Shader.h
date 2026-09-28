@@ -730,6 +730,7 @@ enum Format : uint64_t
 	Vdata2Vaddr4StSsDmaskC                  = FormatDefine({DA2, S0A4, S1A8, S2A4, DmaskC}),
 	Vdata3Vaddr4StSsDmaskD                  = FormatDefine({DA3, S0A4, S1A8, S2A4, DmaskD}),
 	Vdata4Vaddr4StSsDmaskF                  = FormatDefine({DA4, S0A4, S1A8, S2A4, DmaskF}),
+	VdataVaddr4StSsMimgDmask                = FormatDefine({DA, S0A4, S1A8, S2A4, MimgDmask}),
 	Vdata4Vaddr4StDmaskF                = FormatDefine({DA4, S0A4, S1A8, DmaskF}),
 	// image_gather4 returns four values from the selected component. The MIMG
 	// component mask selects that component; it does not alter result width.
@@ -1554,6 +1555,15 @@ struct ShaderZeroSBufferResources
 // descriptor SGPRs still hold their user-data value count as direct uses.
 [[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register,
                                                                        const std::vector<std::bitset<106>>* entry_values = nullptr);
+struct ShaderStorageImageTileCoverage
+{
+	uint32_t width  = 0;
+	uint32_t height = 0;
+};
+struct ShaderBindResources;
+[[nodiscard]] ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code,
+                                                                                   const ShaderBindResources& bind, int texture_index,
+                                                                                   int workgroup_register, const uint32_t threads[3]);
 [[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 
@@ -1652,10 +1662,11 @@ struct ShaderGdsResources
 
 struct ShaderDirectSgprsResources
 {
-	static constexpr int SGPRS_MAX = 32;
+	static constexpr int SGPRS_MAX = 34;
 
 	ShaderDirectSgprResource sgprs[SGPRS_MAX];
 	int                      start_register[SGPRS_MAX] = {0};
+	bool                     absolute_register[SGPRS_MAX] = {};
 	int                      sgprs_num                 = 0;
 };
 
@@ -1883,6 +1894,7 @@ struct ShaderComputeInputInfo
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
 	uint32_t            storage_image_write_only_mask = 0;
+	ShaderStorageImageTileCoverage storage_image_tile_coverage[ShaderTextureResources::RES_MAX] {};
 	ShaderComputeMetaFillEvidence meta_fill;
 	ShaderBindResources bind;
 };

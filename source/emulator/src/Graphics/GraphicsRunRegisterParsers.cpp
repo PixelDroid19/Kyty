@@ -955,6 +955,31 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_user_sgpr)
 	return reg_num;
 }
 
+KYTY_HW_SH_PARSER(hw_sh_set_es_rsrc1)
+{
+	EXIT_IF(cmd_offset != Pm4::SPI_SHADER_PGM_RSRC1_ES || ((cmd_id >> 16u) & 0x3fffu) != 1u || dw < 2u);
+	cp->GetShCtx()->SetEsShaderResource1(buffer[0]);
+	return 1;
+}
+
+KYTY_HW_SH_PARSER(hw_sh_set_gs_user_data_address)
+{
+	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
+	EXIT_IF(cmd_offset < Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS || cmd_offset > Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS);
+	EXIT_IF(count == 0 || count > Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS - cmd_offset + 1u || count + 1u > dw);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		if (cmd_offset + i == Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS)
+		{
+			cp->GetShCtx()->SetGsUserDataAddressLow(buffer[i]);
+		} else
+		{
+			cp->GetShCtx()->SetGsUserDataAddressHigh(buffer[i]);
+		}
+	}
+	return count;
+}
+
 KYTY_HW_SH_PARSER(hw_sh_set_gs_user_sgpr)
 {
 	if (!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_GS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_GS_15)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_GS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_GS_15) condition ignored (continuing)\n"); }

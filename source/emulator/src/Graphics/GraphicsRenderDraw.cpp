@@ -393,8 +393,6 @@ static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_i
 		return 0u;
 	}
 
-	const uint64_t global_x = static_cast<uint64_t>(groups_x) * input_info.threads_num[0];
-	const uint64_t global_y = static_cast<uint64_t>(groups_y) * input_info.threads_num[1];
 	const uint64_t global_z = static_cast<uint64_t>(groups_z) * input_info.threads_num[2];
 	uint32_t       result   = 0u;
 	for (int i = 0; i < input_info.bind.textures2D.textures_num; ++i)
@@ -407,11 +405,16 @@ static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_i
 		}
 
 		const auto shape = ShaderResolvedSampledTextureShape(descriptor);
+		const auto& coverage = input_info.storage_image_tile_coverage[i];
+		const uint64_t global_x = static_cast<uint64_t>(groups_x) *
+		                          (coverage.width != 0 ? coverage.width : input_info.threads_num[0]);
+		const uint64_t global_y = static_cast<uint64_t>(groups_y) *
+		                          (coverage.height != 0 ? coverage.height : input_info.threads_num[1]);
 		const uint64_t width  = static_cast<uint64_t>(descriptor.texture.Width5()) + 1u;
 		const uint64_t height = static_cast<uint64_t>(descriptor.texture.Height5()) + 1u;
 		const uint64_t depth  = shape == ShaderGen5SampledTextureShape::TwoDimensional ? 1u :
 		                       static_cast<uint64_t>(descriptor.texture.Depth()) + 1u;
-		if (global_x >= width && global_y >= height && global_z >= depth)
+		if (global_x <= UINT32_MAX && global_y <= UINT32_MAX && global_x >= width && global_y >= height && global_z >= depth)
 		{
 			result |= 1u << static_cast<uint32_t>(i);
 		}
@@ -422,8 +425,7 @@ static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_i
 		static std::atomic_uint32_t logged {0};
 		if (dump && logged.fetch_add(1, std::memory_order_relaxed) < 32u)
 		{
-			KYTY_LOG_DEBUG( "KYTY_STORAGE_SEED_SKIP mask=0x%08" PRIx32 " global=%" PRIu64 "x%" PRIu64 "x%" PRIu64 "\n",
-			             result, global_x, global_y, global_z);
+			KYTY_LOG_DEBUG("KYTY_STORAGE_SEED_SKIP mask=0x%08" PRIx32 "\n", result);
 		}
 	}
 	return result;
@@ -2491,22 +2493,20 @@ static bool TryPublishComputeDepthMetaFill(uint64_t submit_id, const ShaderCompu
 	return DepthMetaPublishComputeFill(identity, source_word);
 }
 
-void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
-                                  uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
+static bool BuildComputeDispatchInput(HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x, uint32_t thread_group_y,
+                                      uint32_t thread_group_z, uint32_t mode, ShaderComputeInputInfo* input_info,
+                                      ShaderComputeWaveDispatchPlan* plan)
 {
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
-	EXIT_IF(buffer == nullptr);
-	EXIT_IF(buffer->IsInvalid());
-
-	Core::LockGuard lock(g_render_ctx->GetMutex());
+	EXIT_IF(sh_ctx == nullptr || input_info == nullptr || plan == nullptr);
 
 	const auto& cs_disable_regs = sh_ctx->GetCs().cs_regs;
 	const bool  cs_disabled     = (cs_disable_regs.chksum != 0 ? ShaderIsDisabled2(cs_disable_regs.data_addr, cs_disable_regs.chksum)
 	                                                           : ShaderIsDisabled(cs_disable_regs.data_addr));
 	if (cs_disabled)
 	{
-		return;
+		return false;
 	}
 
 	const auto& cs_regs         = sh_ctx->GetCs();
@@ -2530,32 +2530,60 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	request.lane_order =
 	    request.is_next_gen && (mode == 0x01u || mode == 0x41u) ? ShaderGuestLaneOrder::LinearXFirst : ShaderGuestLaneOrder::Unverified;
 	const auto                    capabilities = ShaderComputeWaveVulkanBuildCapabilities(graphic_context->compute_wave_vulkan_state);
-	ShaderComputeWaveDispatchPlan plan {};
-	const auto                    preflight = ShaderBuildComputeWaveDispatchPlan(request, capabilities, &plan);
+	const auto preflight = ShaderBuildComputeWaveDispatchPlan(request, capabilities, plan);
 	if (preflight.status == ShaderComputeWavePreflightStatus::NoWork)
 	{
-		return;
+		return false;
 	}
 	if (preflight.status != ShaderComputeWavePreflightStatus::Supported)
 	{
 		EXIT("compute dispatch admission rejected: mode=0x%08" PRIx32 " reason=%s\n", mode,
 		     ShaderComputeWavePreflightReasonName(preflight.reason));
 	}
+	input_info->wave_layout                 = plan->wave_layout;
+	input_info->native_equivalent_valid     = plan->native_equivalent_valid;
+	input_info->native_equivalent_layout    = plan->native_equivalent_layout;
+	input_info->native_equivalence_required = plan->native_equivalence_required;
+	input_info->thread_limits_used          = plan->thread_limits_used;
+	for (int axis = 0; axis < 3; axis++)
+	{
+		input_info->thread_limits[axis] = plan->thread_limits[axis];
+	}
+	ShaderGetInputInfoCS(&cs_regs, &sh_regs, plan->dispatch_mode, input_info);
+	return true;
+}
+
+bool GraphicsRenderComputeUsesGuestDeviceAddress(HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
+                                                  uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+	ShaderComputeInputInfo input_info;
+	ShaderComputeWaveDispatchPlan plan {};
+	return BuildComputeDispatchInput(ctx, sh_ctx, thread_group_x, thread_group_y, thread_group_z, mode, &input_info, &plan) &&
+	       input_info.bind.device_address_used;
+}
+
+void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
+                                  uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
+{
+	EXIT_IF(ctx == nullptr);
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(buffer == nullptr);
+	EXIT_IF(buffer->IsInvalid());
+
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+	ShaderComputeInputInfo input_info;
+	ShaderComputeWaveDispatchPlan plan {};
+	if (!BuildComputeDispatchInput(ctx, sh_ctx, thread_group_x, thread_group_y, thread_group_z, mode, &input_info, &plan))
+	{
+		return;
+	}
 	thread_group_x = plan.group_count[0];
 	thread_group_y = plan.group_count[1];
 	thread_group_z = plan.group_count[2];
 
-	ShaderComputeInputInfo input_info;
-	input_info.wave_layout              = plan.wave_layout;
-	input_info.native_equivalent_valid  = plan.native_equivalent_valid;
-	input_info.native_equivalent_layout = plan.native_equivalent_layout;
-	input_info.native_equivalence_required = plan.native_equivalence_required;
-	input_info.thread_limits_used          = plan.thread_limits_used;
-	for (int axis = 0; axis < 3; axis++)
-	{
-		input_info.thread_limits[axis] = plan.thread_limits[axis];
-	}
-	ShaderGetInputInfoCS(&cs_regs, &sh_regs, plan.dispatch_mode, &input_info);
+	const auto& cs_regs = sh_ctx->GetCs();
 	// Diagnostic A/B only (not a product fix):
 	//   KYTY_AB_SKIP_ALL_CS=1 — skip every compute dispatch
 	//   KYTY_AB_SKIP_TEX_CS=1 — skip compute that binds textures

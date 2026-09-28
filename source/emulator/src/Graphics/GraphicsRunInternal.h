@@ -132,6 +132,8 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_rsrc);
 KYTY_HW_SH_PARSER(hw_sh_set_cs_shader);
 KYTY_HW_SH_PARSER(hw_sh_set_cs_user_sgpr);
 KYTY_HW_SH_PARSER(hw_sh_set_gs_user_sgpr);
+KYTY_HW_SH_PARSER(hw_sh_set_gs_user_data_address);
+KYTY_HW_SH_PARSER(hw_sh_set_es_rsrc1);
 KYTY_HW_SH_PARSER(hw_sh_set_ps_embedded);
 KYTY_HW_SH_PARSER(hw_sh_set_ps_shader);
 KYTY_HW_SH_PARSER(hw_sh_set_ps_user_sgpr);

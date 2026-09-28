@@ -254,6 +254,48 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Strict compute/storage and audio-import frontier (2026-09-27, not gameplay)
+
+On the reference Gen5 workload, the owned Linux build in strict Silent/Native
+mode now passes the former dynamic-storage write-back, fused ES+GS register,
+offset image-sample, storage-image alias, and render-target-format exits. The
+current first exit is a lazy PLT import in the main program for
+`7xyAxrusLko[AudioPropagation_v1][AudioPropagation_v1.0][Func]` at
+`RuntimeLinker.cpp:1081`. There is no scored capture or controllable gameplay
+evidence from this run.
+
+- A scalar-loaded storage descriptor consumed by vector stores or atomics is
+  now classified writable and merged with its equal-descriptor users. Compute
+  dispatches using guest device addresses receive ordered GPU write-back
+  before descriptor preparation. The strict run passed the former zeroed
+  linked-list input; standalone shader replay alone was not the acceptance.
+- The observed fused ES+GS program receives the GS user-data address in
+  `s0:s1`; the indirect ES resource register is parsed. The observed 2D
+  `image_sample_lz_o` masks 1 and 2 now produce their selected components.
+  Translator identity 54 separates these modules from older cached SPIR-V.
+- For an observed wave64 storage-image writer, symbolic lane/group analysis
+  proved four stores cover each 16×16 tile without reading that destination.
+  The 152×86 dispatch covers the 2432×1368 image, so it may omit an initial
+  guest-memory seed while retaining overlapping live render and storage
+  parents. GDB confirmed skip mask `0x2` at the actual dispatch. The strict
+  run passed the former `!create_all_the_same` exit. The proof rejects
+  incomplete coverage and destination reads in focused tests.
+- The next render target was 3840×2160, tile `0x1b`, with color format
+  `0x9`, UNORM type `0`, and alternate component order `1`. A focused
+  red/green test and the next strict run confirmed the 4-byte
+  `VK_FORMAT_A2R10G10B10_UNORM_PACK32` mapping moves beyond that exit.
+
+The unresolved audio symbol is identified by public NID inventories as
+`sceAudioPropagationSystemQueryMemory`. GDB captured PLT entry 1247 from the
+main program: the guest passes two pointers, initializes 56-byte options and
+a 48-byte output record, and branches on a nonzero return. Independent public
+bindings agree on the two-pointer signature, but they do not establish the
+memory requirement values or the rest of the service behavior. Do not install
+a success stub or guessed output. The next change requires a functional,
+validated audio-propagation contract with its own query/create state, or a
+lawful reference trace of the exact option/output pair. Keep raw guest
+disassembly and addresses in scratch, outside the repository.
+
 ### Generic wave64 compute frontier (2026-09-26, not gameplay)
 
 Strict Silent/Native runs on the reference workload now admit, translate and

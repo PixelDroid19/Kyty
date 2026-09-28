@@ -4168,6 +4168,12 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.samplers.samplers_num > DescriptorCache::SAMPLERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bind.samplers.samplers_num > DescriptorCache::SAMPLERS_MAX condition ignored (continuing)\n"); }
 
 		bool need_descriptor = false;
+		// Complete and materialize prior GPU storage writes before this bind can
+		// register writable objects for its still-recording submission.
+		if (bind.device_address_used)
+		{
+			GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx());
+		}
 
 		VulkanBuffer* storage_buffers[DescriptorCache::BUFFERS_MAX] = {};
 		VulkanImage*  textures2d_sampled[DescriptorCache::TEXTURES_SAMPLED_MAX] = {};
@@ -4236,7 +4242,6 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			uint64_t table   = 0;
 			uint32_t entries = 0;
 			EXIT_IF(static_cast<uint32_t>(sgprs_ptr - sgprs) != bind.device_address_offset_dw);
-			GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx());
 			if (!GuestDeviceAddressPrepare(g_render_ctx->GetGraphicCtx(), &table, &entries))
 			{
 				EXIT("guest memory device addressing is unavailable for a shader that dereferences guest pointers\n");

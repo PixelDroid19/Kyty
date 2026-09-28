@@ -912,6 +912,7 @@ constexpr uint32_t SPI_SHADER_USER_DATA_GS_15      = 0x9B;
 constexpr uint32_t SPI_SHADER_USER_ACCUM_ESGS_0    = 0xB2;
 constexpr uint32_t SPI_SHADER_PGM_LO_ES            = 0xC8;
 constexpr uint32_t SPI_SHADER_PGM_HI_ES            = 0xC9;
+constexpr uint32_t SPI_SHADER_PGM_RSRC1_ES         = 0xCA;
 constexpr uint32_t SPI_SHADER_PGM_CHKSUM_HS        = 0x100;
 constexpr uint32_t SPI_SHADER_PGM_RSRC4_HS         = 0x101;
 constexpr uint32_t SPI_SHADER_USER_DATA_ADDR_LO_HS = 0x102;

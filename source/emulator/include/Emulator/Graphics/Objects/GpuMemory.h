@@ -288,6 +288,19 @@ inline bool GpuMemoryAllowsTextureStorageAlias(GpuMemoryObjectType existing_type
 	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses;
 }
 
+// A storage image whose first dispatch covers every texel can start with
+// undefined contents while older GPU-owned surface views remain alive.
+inline bool GpuMemoryAllowsOverwrittenStorageTextureParent(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                           GpuMemoryObjectType incoming_type, bool skip_seed)
+{
+	if (!skip_seed || incoming_type != GpuMemoryObjectType::StorageTexture ||
+	    (existing_type != GpuMemoryObjectType::RenderTexture && existing_type != GpuMemoryObjectType::StorageBuffer))
+	{
+		return false;
+	}
+	return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin;
+}
+
 // VertexBuffer parent of an incoming StorageBuffer (multi-parent link path).
 // Matches CreateObject multi_vertex_storage_alias / multi_mixed_storage_alias.
 inline bool GpuMemoryAllowsVertexStorageShare(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,

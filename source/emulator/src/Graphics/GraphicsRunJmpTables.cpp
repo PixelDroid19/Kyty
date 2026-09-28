@@ -710,6 +710,10 @@ static void graphics_init_jmp_tables_sh_indirect()
 	{
 		func = nullptr;
 	}
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{ cp->GetShCtx()->SetGsUserDataAddressLow(value); };
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{ cp->GetShCtx()->SetGsUserDataAddressHigh(value); };
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_LO_ES] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -726,6 +730,8 @@ static void graphics_init_jmp_tables_sh_indirect()
 		base |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
 		cp->GetShCtx()->SetEsShaderBase(base);
 	};
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC1_ES] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{ cp->GetShCtx()->SetEsShaderResource1(value); };
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_LO_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -1042,6 +1048,9 @@ void graphics_init_jmp_tables()
 		g_hw_sh_func[Pm4::COMPUTE_USER_DATA_0 + slot * 1]       = hw_sh_set_cs_user_sgpr;
 		g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_GS_0 + slot * 1] = hw_sh_set_gs_user_sgpr;
 	}
+	g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS] = hw_sh_set_gs_user_data_address;
+	g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS] = hw_sh_set_gs_user_data_address;
+	g_hw_sh_func[Pm4::SPI_SHADER_PGM_RSRC1_ES]          = hw_sh_set_es_rsrc1;
 	// PS user data is 32 dwords on Gen5 (SPI_SHADER_USER_DATA_PS_0..31).
 	for (uint32_t slot = 0; slot < 32; slot++)
 	{

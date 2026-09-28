@@ -536,6 +536,9 @@ struct CsStageRegisters
 struct EsStageRegisters
 {
 	uint64_t data_addr = 0;
+	// Legacy ES program resource word. The fused ES+GS wave uses the GS
+	// resource registers; keep this write in the stage register file.
+	uint32_t rsrc1     = 0;
 };
 
 struct GsShaderResource1
@@ -650,6 +653,8 @@ struct VertexShaderInfo
 	// registry, so it is kept apart from gs_regs, whose zero base selects the
 	// ES-as-VS path.
 	uint64_t         gs_back_addr       = 0;
+	// SPI_SHADER_USER_DATA_ADDR_{LO,HI}_GS seed the front's s0:s1.
+	uint64_t         gs_user_data_addr  = 0;
 	uint32_t         vs_shader_modifier = 0;
 	uint32_t         vs_embedded_id     = 0;
 	UserSgprInfo     vs_user_sgpr;
@@ -981,11 +986,20 @@ public:
 	}
 	void SetGsBackBase(uint64_t addr) { m_vs.gs_back_addr = addr; }
 	[[nodiscard]] uint64_t GetGsBackBase() const { return m_vs.gs_back_addr; }
+	void SetGsUserDataAddressLow(uint32_t value)
+	{
+		m_vs.gs_user_data_addr = (m_vs.gs_user_data_addr & 0xffff00000000ull) | value;
+	}
+	void SetGsUserDataAddressHigh(uint32_t value)
+	{
+		m_vs.gs_user_data_addr = (m_vs.gs_user_data_addr & 0xffffffffull) | (static_cast<uint64_t>(value & 0xffffu) << 32u);
+	}
 	void SetEsShaderBase(uint64_t addr)
 	{
 		m_vs.es_regs.data_addr = addr;
 		m_vs.vs_embedded       = false;
 	}
+	void SetEsShaderResource1(uint32_t value) { m_vs.es_regs.rsrc1 = value; }
 	void SetGsShaderResource1(const GsShaderResource1& rsrc1)
 	{
 		m_vs.gs_regs.rsrc1 = rsrc1;

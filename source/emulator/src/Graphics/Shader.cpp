@@ -2864,6 +2864,20 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		}
 	}
 
+	if (gs_instead_of_vs)
+	{
+		// RDNA initializes the fused ES+GS front with the GS user-data
+		// address in s0:s1, before the user SGPRs at s8 and above.
+		auto& direct = info->bind.direct_sgprs;
+		EXIT_IF(direct.sgprs_num > ShaderDirectSgprsResources::SGPRS_MAX - 2);
+		for (int word = 0; word < 2; ++word)
+		{
+			const int index = direct.sgprs_num++;
+			direct.start_register[index]   = word;
+			direct.absolute_register[index] = true;
+			direct.sgprs[index].field = static_cast<uint32_t>(regs->gs_user_data_addr >> (word * 32));
+		}
+	}
 	ShaderCalcBindingIndices(&info->bind);
 }
 
@@ -3038,6 +3052,10 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	info->group_id[2]                   = regs->cs_regs.tgid_z_en != 0;
 	info->thread_ids_num                = regs->cs_regs.tidig_comp_cnt + 1;
 	info->storage_image_write_only_mask = 0;
+	for (auto& coverage: info->storage_image_tile_coverage)
+	{
+		coverage = {};
+	}
 
 	info->workgroup_register = regs->cs_regs.user_sgpr;
 
@@ -3147,6 +3165,19 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		{
 			auto& descriptor = info->bind.textures2D.desc[i];
 			if (!descriptor.textures2d_without_sampler)
+			{
+				continue;
+			}
+			const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register,
+			                                                             info->threads_num);
+			if (coverage.width != 0)
+			{
+				info->storage_image_tile_coverage[i] = coverage;
+				descriptor.storage_image_write_only = true;
+				info->storage_image_write_only_mask |= 1u << static_cast<uint32_t>(i);
+				continue;
+			}
+			if (descriptor.dynamic_sload)
 			{
 				continue;
 			}
@@ -4057,6 +4088,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 	for (int i = 0; i < bind.direct_sgprs.sgprs_num; i++)
 	{
 		ret->ids.Add(bind.direct_sgprs.start_register[i]);
+		ret->ids.Add(static_cast<uint32_t>(bind.direct_sgprs.absolute_register[i]));
 	}
 
 	ret->ids.Add(static_cast<uint32_t>(bind.extended.used));

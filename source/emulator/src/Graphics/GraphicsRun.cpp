@@ -1806,8 +1806,19 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
 {
 	const ScopedDebugStatsTimer dispatch_timer(DebugStatsRecordDispatchProcessor);
-	Core::LockGuard lock(m_mutex);
+	bool needs_guest_writeback = false;
+	{
+		Core::LockGuard lock(m_mutex);
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		needs_guest_writeback = GraphicsRenderComputeUsesGuestDeviceAddress(&m_ctx, &m_sh_ctx, thread_group_x, thread_group_y,
+		                                                                  thread_group_z, mode);
+	}
+	if (needs_guest_writeback)
+	{
+		WriteBack();
+	}
 
+	Core::LockGuard lock(m_mutex);
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
 	GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x, thread_group_y, thread_group_z,
@@ -1824,41 +1835,52 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 		uint32_t thread_group_z;
 	};
 
-	Core::LockGuard lock(m_mutex);
-
-	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-	if (m_dispatch_indirect_args_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_dispatch_indirect_args_base_addr == 0 condition ignored (continuing)\n"); }
-
 	DispatchIndirectArgs args {};
-	memcpy(&args, reinterpret_cast<const void*>(m_dispatch_indirect_args_base_addr + data_offset), sizeof(args));
-	if (args.thread_group_x == 0 || args.thread_group_y == 0 || args.thread_group_z == 0)
+	bool needs_guest_writeback = false;
 	{
+		Core::LockGuard lock(m_mutex);
+
+		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+		if (m_dispatch_indirect_args_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_dispatch_indirect_args_base_addr == 0 condition ignored (continuing)\n"); }
+
+		memcpy(&args, reinterpret_cast<const void*>(m_dispatch_indirect_args_base_addr + data_offset), sizeof(args));
+		if (args.thread_group_x == 0 || args.thread_group_y == 0 || args.thread_group_z == 0)
+		{
+			if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+			{
+				static uint32_t logs = 0;
+				if (logs < 64u)
+				{
+					++logs;
+					KYTY_LOG_DEBUG(
+					             "KYTY_DUMP_INDIRECT dispatch_skip offset=0x%08" PRIx32 " dims=%ux%ux%u base=0x%012" PRIx64 "\n",
+					             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z,
+					             m_dispatch_indirect_args_base_addr);
+				}
+			}
+			return;
+		}
+
 		if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
 		{
 			static uint32_t logs = 0;
 			if (logs < 64u)
 			{
 				++logs;
-				KYTY_LOG_DEBUG(
-				             "KYTY_DUMP_INDIRECT dispatch_skip offset=0x%08" PRIx32 " dims=%ux%ux%u base=0x%012" PRIx64 "\n",
-				             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z,
-				             m_dispatch_indirect_args_base_addr);
+				KYTY_LOG_DEBUG( "KYTY_DUMP_INDIRECT dispatch offset=0x%08" PRIx32 " dims=%ux%ux%u mode=0x%08" PRIx32 "\n",
+				             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z, mode);
 			}
 		}
-		return;
+		needs_guest_writeback = GraphicsRenderComputeUsesGuestDeviceAddress(&m_ctx, &m_sh_ctx, args.thread_group_x,
+		                                                                  args.thread_group_y, args.thread_group_z, mode);
 	}
-
-	if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
+	if (needs_guest_writeback)
 	{
-		static uint32_t logs = 0;
-		if (logs < 64u)
-		{
-			++logs;
-			KYTY_LOG_DEBUG( "KYTY_DUMP_INDIRECT dispatch offset=0x%08" PRIx32 " dims=%ux%ux%u mode=0x%08" PRIx32 "\n",
-			             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z, mode);
-		}
+		WriteBack();
 	}
 
+	Core::LockGuard lock(m_mutex);
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 	GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, args.thread_group_x, args.thread_group_y,
 	                             args.thread_group_z, mode);
 }
