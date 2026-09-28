@@ -254,7 +254,7 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
-### Depth mip storage views and D16 reference frontier (2026-09-28, not gameplay)
+### Depth mip storage views, D16 arrays, and paired compute frontier (2026-09-28, not gameplay)
 
 A strict Silent/Native run passed a mixed-parent storage-image creation that
 previously stopped at `!create_all_the_same`. The incoming R32 image lay inside
@@ -281,14 +281,29 @@ one mipmapped image, while its sampled view retains the full chain. Reuse
 requires matching format, extent, pitch, tiling, mip count, and seed policy;
 the mixed older color surfaces remain linked without being copied as depth.
 Four focused tests and a strict Silent/Native run passed both former
-`!create_all_the_same` exits. The run reached present 30, then stopped at
-`unsupported depth-reference image binding` in `GraphicsRenderBind.cpp`: a
-2048×2048, two-layer, D16 depth-64KB sample uses a depth-reference operation,
-but materialization resolved to `depth-unsupported`. Trace its mapped source,
-array-view eligibility, and reference view before changing the contract.
-The native present-30 capture is uniformly black (`entropy=0`, one color),
-and no controlled gameplay has been observed. Intermittent Xe `execbuf`
-ENOMEM can stop earlier runs; one diagnostic run did so before the mip writer.
+`!create_all_the_same` exits. The next depth-reference binding had a 2048×2048
+D16 depth-64KB array descriptor with raw depth two, normalized to three
+layers. A bounded trace found the complete 24 MiB span physically mapped and
+overlapping two CPU-uploaded Texture views with no write-back ownership.
+Overlap summaries group equal type/relation objects; source admission now
+requires matching individual provenance and rejects GPU-materialized or
+write-back-capable Texture aliases. The full overlap count also bounds a
+provenance scan that hits its page cap after visiting every matching object.
+The matched GFX10 16-pipe Z_X equation XORs array-layer bits into within-block
+address bits 8–11; CPU upload now detiles every layer with its slice index.
+The storage-backed inline path remains limited to one layer because its shader
+fills only layer zero. Focused source-classification and layout tests pass.
+
+A subsequent strict Silent/Native run passed that D16 binding and reached
+present 32, then stopped at `paired-wave dispatch admission unsupported` for
+an instruction represented as `SBarrier` at PC 0x66c. A bounded retry
+identified SOP2 opcode 0x25, `S_BFM_B64`: the parser substitutes `SBarrier`
+for this bitfield-mask operation. Implement the real operation and prove its
+paired-wave tuple before changing admission. Native wave-width equivalence
+was rejected at PC 0x208 for a lane-crossing read. No capture was obtained
+before this exit; the last scored present-30 capture is uniformly black
+(`entropy=0`, one color), and no controlled gameplay has been observed.
+Intermittent Xe `execbuf` ENOMEM can stop earlier runs.
 
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
@@ -1071,21 +1086,16 @@ these unimplemented semantics. Identify and implement the actual producer
 operations from their encoded instructions before claiming a correct BVH binding
 or compatibility; do not perpetuate the placeholders.
 
-Related unresolved defects found in the current depth-array changes:
+Related depth-array limits still open:
 
-- `GraphicsRenderBind.cpp` normalizes type-13 raw DEPTH to `DEPTH + 1` for
-  image creation, but its D16 span calculation uses raw DEPTH as a count.
-  Raw DEPTH two therefore creates three layers while validating two candidate
-  slices. Storage containment also checks only the first-slice size.
-- `Objects/Texture.cpp` and the inline storage-backed D16 detile path upload
-  only layer zero, while image layout transitions expose every array layer.
-  Correcting the count alone does not fix the uninitialized layers. The local
-  2D detile equation has no slice coordinate; a repeated identical XY detile
-  must not be assumed correct for XOR-swizzled array slices.
-- The type-13 one-layer case (raw DEPTH zero) is rejected by the current D16
-  gate; the depth-array view is also created only when logical depth exceeds
-  one. Gate, span, ownership and every upload layer need one consistent,
-  evidenced array-layout contract and focused regressions.
+- The source span now uses the normalized layer count and CPU upload detiles
+  each slice with the matched Z_X layer term. The inline storage-backed D16
+  path still fills only layer zero and is therefore admitted only for a
+  single-layer descriptor. Layered GPU-owned depth sources need a separate
+  evidenced multi-layer producer and upload contract.
+- The type-13 one-layer case (raw DEPTH zero) remains rejected by the D16
+  gate; the depth-array view is created only when logical depth exceeds one.
+  Establish the guest descriptor/view contract before extending this case.
 
 The new speaker/privacy HLE paths pass the observed startup route, but their
 broader ABI assumptions remain unverified: `Audio.cpp::AudioOut2GetSpeakerInfo`

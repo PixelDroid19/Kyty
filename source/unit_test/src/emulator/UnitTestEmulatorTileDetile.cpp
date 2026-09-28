@@ -694,6 +694,51 @@ TEST(EmulatorTileDetile, Depth64KB16ProductionMatchesIndependentReference)
 	EXPECT_EQ(production, linear);
 }
 
+TEST(EmulatorTileDetile, Depth64KBArraySlicesApplyTheMatchedGfx10ZEquation)
+{
+	// The GFX10 16-pipe Z_X pattern matching Kyty's XY equation puts Z3..Z0
+	// into byte-offset bits 8..11. Every slice must permute data within its
+	// own 64 KiB block; merely adding sliceBytes * layer is insufficient.
+	constexpr uint32_t height = 128u;
+	constexpr uint64_t slice_bytes = 65536u;
+	const std::array<uint32_t, 4> layers {0u, 1u, 2u, 8u};
+	const std::array<uint32_t, 4> slice_xors {0u, 0x800u, 0x400u, 0x100u};
+	for (const uint32_t bpe: {2u, 4u})
+	{
+		const uint32_t width = static_cast<uint32_t>(slice_bytes / height / bpe);
+		for (size_t index = 0; index < layers.size(); ++index)
+		{
+			std::vector<uint8_t> tiled(slice_bytes, 0u);
+			std::vector<uint8_t> expected(slice_bytes, 0u);
+			for (uint32_t y = 0u; y < height; y++)
+			{
+				for (uint32_t x = 0u; x < width; x++)
+				{
+					const uint32_t value = x * 131u + y * 17u + layers[index] * 103u;
+					const uint64_t tiled_offset = TileGetDepth64KBOffset(x, y, width, bpe) ^ slice_xors[index];
+					const uint64_t linear_offset = (static_cast<uint64_t>(y) * width + x) * bpe;
+					std::memcpy(tiled.data() + tiled_offset, &value, bpe);
+					std::memcpy(expected.data() + linear_offset, &value, bpe);
+				}
+			}
+			std::vector<uint8_t> actual(slice_bytes, 0u);
+			auto request = MakeRequest(actual.data(), tiled.data(), width, height, width, width, bpe,
+			                           TileDetileLayout::Depth64KB, slice_bytes);
+			request.depth_layer = layers[index];
+			ASSERT_TRUE(TileDetileIsSupported(request));
+			ASSERT_TRUE(TileDetile(request));
+			EXPECT_EQ(actual, expected) << "bpe=" << bpe << " layer=" << layers[index];
+			std::fill(actual.begin(), actual.end(), 0u);
+			ASSERT_TRUE(TileDetileReference(request));
+			EXPECT_EQ(actual, expected) << "reference bpe=" << bpe << " layer=" << layers[index];
+		}
+	}
+	uint8_t byte = 0u;
+	auto invalid = MakeRequest(&byte, &byte, 1u, 1u, 1u, 1u, 1u, TileDetileLayout::Standard4KB, 4096u);
+	invalid.depth_layer = 1u;
+	EXPECT_FALSE(TileDetileIsSupported(invalid));
+}
+
 TEST(EmulatorTileDetile, RejectsUnsupportedRequests)
 {
 	uint8_t dst[16] {};

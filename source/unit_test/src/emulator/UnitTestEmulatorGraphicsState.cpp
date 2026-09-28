@@ -5509,7 +5509,14 @@ TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)
 	texture.entries[0].relation     = GpuMemoryOverlapType::Equals;
 	texture.entries[0].count        = 1u;
 	texture.entries[0].exact        = true;
-	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(texture), GpuMemoryDepthD16Source::Guest);
+	GpuMemoryRangeProvenance uploaded {};
+	uploaded.total_count                    = 1u;
+	uploaded.entry_count                    = 1u;
+	uploaded.entries[0].type                = GpuMemoryObjectType::Texture;
+	uploaded.entries[0].relation            = GpuMemoryOverlapType::Equals;
+	uploaded.entries[0].content_origin      = GpuMemoryContentOrigin::CpuUpload;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(texture, &uploaded), GpuMemoryDepthD16Source::Guest);
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(texture), GpuMemoryDepthD16Source::Unsupported);
 
 	auto depth = texture;
 	depth.entries[0].type = GpuMemoryObjectType::DepthStencilBuffer;
@@ -5538,7 +5545,13 @@ TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)
 	materialized.entry_count = 2u;
 	materialized.entries[1] = texture.entries[0];
 	materialized.entries[0].all_read_only = false;
-	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized), GpuMemoryDepthD16Source::StorageBuffer);
+	auto mixed_provenance = uploaded;
+	mixed_provenance.total_count = 2u;
+	mixed_provenance.entry_count = 2u;
+	mixed_provenance.entries[0].type = GpuMemoryObjectType::StorageBuffer;
+	mixed_provenance.entries[0].relation = GpuMemoryOverlapType::Contains;
+	mixed_provenance.entries[1] = uploaded.entries[0];
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(materialized, &mixed_provenance), GpuMemoryDepthD16Source::StorageBuffer);
 	auto duplicate_storage = materialized;
 	duplicate_storage.entries[1] = duplicate_storage.entries[0];
 	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(duplicate_storage), GpuMemoryDepthD16Source::Unsupported);
@@ -5551,6 +5564,41 @@ TEST(EmulatorGraphicsState, ClassifiesOnlyUnambiguousDepthD16Sources)
 	auto truncated = texture;
 	truncated.truncated = true;
 	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(truncated), GpuMemoryDepthD16Source::Unsupported);
+}
+
+TEST(EmulatorGraphicsState, DepthD16GuestSourceRequiresEveryOverlappingTextureToBeCpuUploaded)
+{
+	GpuMemoryOverlapSnapshot grouped {};
+	grouped.total_count              = 2u;
+	grouped.entry_count              = 1u;
+	grouped.entries[0].type          = GpuMemoryObjectType::Texture;
+	grouped.entries[0].relation      = GpuMemoryOverlapType::IsContainedWithin;
+	grouped.entries[0].count         = 2u;
+	grouped.entries[0].all_read_only = false;
+
+	GpuMemoryRangeProvenance provenance {};
+	provenance.total_count = 2u;
+	provenance.entry_count = 2u;
+	for (auto& entry: provenance.entries)
+	{
+		entry.type           = GpuMemoryObjectType::Texture;
+		entry.relation       = GpuMemoryOverlapType::IsContainedWithin;
+		entry.content_origin = GpuMemoryContentOrigin::CpuUpload;
+	}
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(grouped, &provenance), GpuMemoryDepthD16Source::Guest);
+
+	provenance.entries[1].content_origin = GpuMemoryContentOrigin::GpuAliasMaterialization;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(grouped, &provenance), GpuMemoryDepthD16Source::Unsupported);
+	provenance.entries[1].content_origin = GpuMemoryContentOrigin::CpuUpload;
+	provenance.entries[1].write_back_capable = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(grouped, &provenance), GpuMemoryDepthD16Source::Unsupported);
+	provenance.entries[1].write_back_capable = false;
+	provenance.truncated = true;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(grouped, &provenance), GpuMemoryDepthD16Source::Guest);
+	provenance.entry_count = 1u;
+	provenance.total_count = 1u;
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(grouped, &provenance), GpuMemoryDepthD16Source::Unsupported);
+	EXPECT_EQ(GpuMemoryClassifyDepthD16Source(grouped, nullptr), GpuMemoryDepthD16Source::Unsupported);
 }
 
 TEST(EmulatorGraphicsState, UnnormalizedSamplerCoordinatesUseVulkanCompatiblePolicy)

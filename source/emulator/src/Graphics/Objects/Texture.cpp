@@ -169,7 +169,7 @@ static void upload_depth_layers(GraphicContext* ctx, TextureVulkanImage* image, 
 	for (uint32_t layer = 0; layer < layers; layer++)
 	{
 		TileConvertDepth64KBToLinear(linear->data(), reinterpret_cast<const void*>(vaddr + layer * layer_bytes), width, height, pitch,
-		                            bytes);
+		                            bytes, layer);
 		UtilFillDepthImage(ctx, image, linear->data(), linear->size(), width, layout, layer);
 	}
 }

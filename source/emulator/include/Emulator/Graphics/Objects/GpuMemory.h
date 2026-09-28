@@ -794,24 +794,31 @@ enum class GpuMemoryDepthD16Source : uint8_t
 	StorageBuffer,
 };
 
-[[nodiscard]] inline GpuMemoryDepthD16Source GpuMemoryClassifyDepthD16Source(const GpuMemoryOverlapSnapshot& snapshot)
+[[nodiscard]] inline GpuMemoryDepthD16Source GpuMemoryClassifyDepthD16Source(
+    const GpuMemoryOverlapSnapshot& snapshot, const GpuMemoryRangeProvenance* provenance = nullptr)
 {
 	if (snapshot.total_count == 0u)
 	{
 		return GpuMemoryDepthD16Source::Guest;
 	}
-	if (snapshot.truncated || snapshot.entry_count != snapshot.total_count)
+	if (snapshot.truncated || snapshot.entry_count == 0u)
 	{
 		return GpuMemoryDepthD16Source::Unsupported;
 	}
-	// Sampled Texture objects are uploads of guest memory and never hold GPU
-	// writes, so any number of views over the span leave guest memory
-	// authoritative. GPU-written sources (storage buffers) stay exclusive.
+	// An overlap entry groups equal type/relation pairs, so entry_count can
+	// be smaller than total_count. Trust guest bytes under Texture views only
+	// when every participating object still records a CPU-uploaded origin.
 	const GpuMemoryOverlapEntry* texture = nullptr;
 	const GpuMemoryOverlapEntry* storage = nullptr;
+	uint32_t                     counted = 0u;
 	for (uint32_t index = 0; index < snapshot.entry_count; ++index)
 	{
 		const auto& entry = snapshot.entries[index];
+		if (entry.count == 0u || entry.count > snapshot.total_count - counted)
+		{
+			return GpuMemoryDepthD16Source::Unsupported;
+		}
+		counted += entry.count;
 		if (entry.type == GpuMemoryObjectType::Texture)
 		{
 			texture = &entry;
@@ -829,6 +836,54 @@ enum class GpuMemoryDepthD16Source : uint8_t
 		} else
 		{
 			return GpuMemoryDepthD16Source::Unsupported;
+		}
+	}
+	if (counted != snapshot.total_count)
+	{
+		return GpuMemoryDepthD16Source::Unsupported;
+	}
+	if (texture != nullptr)
+	{
+		// A large range can hit the provenance scan's page cap after it has
+		// already found every object. The independent, complete overlap count
+		// proves that no other owner was omitted when counts and relations match.
+		if (provenance == nullptr || provenance->total_count != snapshot.total_count ||
+		    provenance->entry_count != provenance->total_count)
+		{
+			return GpuMemoryDepthD16Source::Unsupported;
+		}
+		for (uint32_t index = 0u; index < provenance->entry_count; index++)
+		{
+			const auto& object = provenance->entries[index];
+			if (object.type == GpuMemoryObjectType::Texture &&
+			    (object.content_origin != GpuMemoryContentOrigin::CpuUpload || object.write_back_capable))
+			{
+				return GpuMemoryDepthD16Source::Unsupported;
+			}
+			uint32_t matches = 0u;
+			for (uint32_t overlap = 0u; overlap < snapshot.entry_count; overlap++)
+			{
+				const auto& entry = snapshot.entries[overlap];
+				matches += object.type == entry.type && object.relation == entry.relation ? 1u : 0u;
+			}
+			if (matches != 1u)
+			{
+				return GpuMemoryDepthD16Source::Unsupported;
+			}
+		}
+		for (uint32_t overlap = 0u; overlap < snapshot.entry_count; overlap++)
+		{
+			const auto& entry = snapshot.entries[overlap];
+			uint32_t    matches = 0u;
+			for (uint32_t index = 0u; index < provenance->entry_count; index++)
+			{
+				const auto& object = provenance->entries[index];
+				matches += object.type == entry.type && object.relation == entry.relation ? 1u : 0u;
+			}
+			if (matches != entry.count)
+			{
+				return GpuMemoryDepthD16Source::Unsupported;
+			}
 		}
 	}
 	if (storage != nullptr)

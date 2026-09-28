@@ -72,9 +72,11 @@ void     TileConvertStandard64KBToLinear(void* dst, const void* src, uint32_t wi
 // Gen5 depth tile mode 24 stores 16- or 32-bit depth samples in 64 KiB
 // Z-order blocks. This is distinct from render-target tile mode 27 despite
 // identical block size.
-uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
+// layer permutes the within-block Z_X address bits for 2D array slices.
+uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element,
+                                uint32_t layer = 0u);
 void     TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
-                                      uint32_t bytes_per_element);
+	                                      uint32_t bytes_per_element, uint32_t layer = 0u);
 uint64_t TileGetDepth64KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems);
 void     TileConvertDepth64KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems);
 // Gen5 kStandard4KB (tile mode 5) 32bpp surfaces. The layout is used by
@@ -118,6 +120,7 @@ struct TileDetileRequest
 	uint32_t         dst_pitch_elems   = 0; // linear row pitch in elements
 	uint32_t         bytes_per_element = 0;
 	TileDetileLayout layout            = TileDetileLayout::Sw64kRx;
+	uint32_t         depth_layer       = 0; // Z_X slice index; valid only for Depth64KB.
 	// Guest tiled allocation size. A nonzero value is a hard source-read limit
 	// for every detile path; GPU paths require it. Zero is retained only for
 	// legacy host wrappers whose containing allocation was validated by the caller.

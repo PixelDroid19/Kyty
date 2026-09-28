@@ -1147,7 +1147,8 @@ static uint32_t Depth64KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t byte
 	return x_offset ^ y_offset;
 }
 
-uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
+uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element,
+	                            uint32_t layer)
 {
 	EXIT_IF(bytes_per_element != 2u && bytes_per_element != 4u);
 	const uint32_t block_width = bytes_per_element == 2u ? 256u : 128u;
@@ -1159,12 +1160,17 @@ uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, ui
 	const uint32_t            xb            = x / block_width;
 	const uint32_t            yb            = y / k_block_height;
 	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
+	// The matched 16-pipe GFX10 Z_X equation contributes Z3..Z0 to offset
+	// bits 8..11. Each array slice starts on a whole-block boundary, so only
+	// these within-block bits change with the layer index.
+	const uint32_t slice_xor = ((layer & 1u) << 11u) ^ ((layer & 2u) << 9u) ^ ((layer & 4u) << 7u) ^
+	                           ((layer & 8u) << 5u);
 	return (block_index * k_block_bytes) +
-	       Depth64KBWithinBlockOffset(x % block_width, y % k_block_height, bytes_per_element);
+	       (Depth64KBWithinBlockOffset(x % block_width, y % k_block_height, bytes_per_element) ^ slice_xor);
 }
 
 void TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
-	                              uint32_t bytes_per_element)
+	                              uint32_t bytes_per_element, uint32_t layer)
 {
 	EXIT_IF(dst == nullptr || src == nullptr);
 	TileDetileRequest request {};
@@ -1176,6 +1182,7 @@ void TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, ui
 	request.dst_pitch_elems   = width;
 	request.bytes_per_element = bytes_per_element;
 	request.layout            = TileDetileLayout::Depth64KB;
+	request.depth_layer       = layer;
 	if (!TileDetile(request))
 	{
 		EXIT("TileConvertDepth64KBToLinear unsupported request\n");

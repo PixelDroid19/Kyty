@@ -3620,10 +3620,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				const bool physical_ok = span_ok && Kernel::Memory::KernelQueryMappedRange(addr, query_size, &mapped) &&
 				                         mapped.kind == Kernel::Memory::KernelMappedRangeKind::Physical;
 				const bool overlaps_ok = GpuMemoryQueryOverlaps(&query_addr, &query_size, 1u, &overlaps);
-				depth_source = overlaps_ok ? GpuMemoryClassifyDepthD16Source(overlaps) : GpuMemoryDepthD16Source::Unsupported;
+				bool has_texture_parent = false;
+				if (overlaps_ok)
+				{
+					for (uint32_t entry = 0u; entry < overlaps.entry_count; entry++)
+					{
+						has_texture_parent |= overlaps.entries[entry].type == GpuMemoryObjectType::Texture;
+					}
+				}
+				GpuMemoryRangeProvenance provenance {};
+				const bool provenance_ok = !has_texture_parent || GpuMemoryQueryRangeProvenance(addr, depth_span_size, &provenance);
+				depth_source = overlaps_ok && provenance_ok
+				                   ? GpuMemoryClassifyDepthD16Source(overlaps, has_texture_parent ? &provenance : nullptr)
+				                   : GpuMemoryDepthD16Source::Unsupported;
 				// The storage-backed detile is a 16-bit equation.
 				const bool source_ok = depth_source == GpuMemoryDepthD16Source::Guest ||
-				                       (depth_source == GpuMemoryDepthD16Source::StorageBuffer && fmt == 7u);
+				                       (depth_source == GpuMemoryDepthD16Source::StorageBuffer && fmt == 7u && depth == 1u);
 				materialize_depth    = physical_ok && source_ok &&
 				                    State::CanMaterializeGen5DepthSample(
 				                        fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),

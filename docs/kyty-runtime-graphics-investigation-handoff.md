@@ -355,6 +355,24 @@ against the same correct gameplay capture.
   depth-reference binding failure. Its native capture at present 30 was
   uniform black. No gameplay or correct rendering follows from the presents.
 
+- D16 array source and slice frontier (2026-09-28): the rejected depth view
+  described three normalized layers occupying 24 MiB. One complete overlap
+  query found two Texture views inside that span; individual provenance found
+  both CPU-uploaded, with no write-back capability. The previous classifier
+  treated a grouped overlap entry count as an object count and rejected them.
+  It now requires matching provenance for every Texture object, including
+  when the bounded page scan reports truncation after finding the complete
+  count. A GFX10 16-pipe Z_X pattern matching Kyty's existing XY equation
+  supplies the four array-slice XOR terms. CPU depth upload uses that term on
+  every layer; the inline storage source stays single-layer only. Focused
+  tests passed, and one strict run advanced from the old D16 rejection to
+  present 32 before a paired compute-wave admission exit at PC 0x66c. The
+  instruction is represented as `SBarrier`. A bounded retry identified SOP2
+  opcode 0x25 (`S_BFM_B64`); the parser substitutes the barrier placeholder.
+  Implement the real bitfield-mask operation and validate its paired tuple.
+  Native equivalence also rejected a lane-crossing read at PC 0x208. The run
+  produced no new capture, so the latest scored image remains uniformly black.
+
 - Late Xe `execbuf` ENOMEM (2026-09-28): two bounded strict runs returned
   `VK_ERROR_DEVICE_LOST` on compute submissions near sequences 2009 and 2052,
   with the Intel driver reporting repeated `execbuf` ENOMEM. The hypothesis
