@@ -378,14 +378,17 @@ against the same correct gameplay capture.
   image is single-channel 16-bit float. The small storage/sampled pair inside
   that range has older creation and GPU markers. Whole-object markers do not
   prove the last writer of each byte or permit a typed Vulkan image copy
-  between the packed and 16-bit formats. The filtered trace and two GDB
-  probes reached their run deadlines before the overlap; do not interpret
-  their missing tail as a writer or dependency result. Extending the filtered
-  trace to 300 seconds did not reach the overlap either: agent counters stayed
-  at 78 draws, 133 dispatches, 549 submissions, and zero presents between
-  the 155- and 207-second samples. Attaching GDB to that process was denied by
-  `ptrace`; a later launch under GDB identified the first-flip X11 wait chain
-  above. This stall is not evidence of the alias's byte owner.
+  between the packed and 16-bit formats. A temporary seed-skip diagnostic
+  still reached the same rejection because the existing full-overwrite policy
+  does not accept a `Texture IsContainedWithin` parent; the diagnostic was
+  removed and provides no evidence about later image reads. The filtered
+  trace and two GDB probes reached their run deadlines before the overlap;
+  do not interpret their missing tail as a writer or dependency result.
+  Extending the filtered trace to 300 seconds did not reach the overlap either:
+  agent counters stayed at 78 draws, 133 dispatches, 549 submissions, and zero
+  presents between the 155- and 207-second samples. Attaching GDB to that
+  process was denied by `ptrace`. A later launch under GDB found the X11 wait
+  chain above. This stall is not evidence of the alias's byte owner.
   The first-present VideoOut source was confirmed as
   `VK_FORMAT_A2R10G10B10_UNORM_PACK32`.
   After adding packed-format capture, the strict run produced four native PNGs
