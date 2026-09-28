@@ -254,15 +254,14 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
-### Strict compute/storage and audio-import frontier (2026-09-27, not gameplay)
+### Strict compute/storage and asset-name frontier (2026-09-27, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native
 mode now passes the former dynamic-storage write-back, fused ES+GS register,
-offset image-sample, storage-image alias, and render-target-format exits. The
-current first exit is a lazy PLT import in the main program for
-`7xyAxrusLko[AudioPropagation_v1][AudioPropagation_v1.0][Func]` at
-`RuntimeLinker.cpp:1081`. There is no scored capture or controllable gameplay
-evidence from this run.
+offset image-sample, storage-image alias, render-target-format, and first
+audio-propagation import exits. The current first exit is a guest assertion
+after an animation-graph lookup receives the empty-basename name `.agx`.
+There is no scored capture or controllable gameplay evidence from this run.
 
 - A scalar-loaded storage descriptor consumed by vector stores or atomics is
   now classified writable and merged with its equal-descriptor users. Compute
@@ -285,16 +284,17 @@ evidence from this run.
   red/green test and the next strict run confirmed the 4-byte
   `VK_FORMAT_A2R10G10B10_UNORM_PACK32` mapping moves beyond that exit.
 
-The unresolved audio symbol is identified by public NID inventories as
-`sceAudioPropagationSystemQueryMemory`. GDB captured PLT entry 1247 from the
-main program: the guest passes two pointers, initializes 56-byte options and
-a 48-byte output record, and branches on a nonzero return. Independent public
-bindings agree on the two-pointer signature, but they do not establish the
-memory requirement values or the rest of the service behavior. Do not install
-a success stub or guessed output. The next change requires a functional,
-validated audio-propagation contract with its own query/create state, or a
-lawful reference trace of the exact option/output pair. Keep raw guest
-disassembly and addresses in scratch, outside the repository.
+The guest's `sceAudioPropagationSystemQueryMemory` call passes a 56-byte option
+record and a 48-byte memory record, then reads the CPU size from memory-record
+offset `+0x18`. The new CPU-only HLE reports its own 64-byte caller-owned
+system state, validates and initializes that memory in `SystemCreate`, and
+tracks room lifetime under a live system. A focused test and strict run passed
+the former query and room imports. This establishes only those lifecycle
+operations: no acoustic rendering or broader library compatibility is proven.
+The next investigation must trace the producer of the graph name; GDB found
+`.agx` already in the guest graph object before the failed lookup, and the
+installation contains other `.agx` assets. Do not substitute an asset or
+silence the assertion. Keep raw guest disassembly and addresses in scratch.
 
 ### Generic wave64 compute frontier (2026-09-26, not gameplay)
 

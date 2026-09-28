@@ -73,6 +73,55 @@ private:
 
 } // namespace
 
+TEST(EmulatorAudio, AudioPropagationQueryCreatesAndReleasesCallerOwnedSystem)
+{
+	GuestValue<AudioPropagation::SystemOption> option_storage;
+	GuestValue<AudioPropagation::SystemMemory> memory_storage;
+	GuestValue<uint64_t>                       system_storage;
+	GuestValue<uint64_t>                       room_storage;
+	ASSERT_TRUE(option_storage.IsValid() && memory_storage.IsValid() && system_storage.IsValid() && room_storage.IsValid());
+
+	auto* option           = option_storage.Data();
+	auto* memory           = memory_storage.Data();
+	*option                = {};
+	option->desc.id        = 0x010107d5;
+	option->desc.size      = 0x38;
+	option->max_sources    = 64;
+	option->max_materials  = 64;
+	option->max_raycasts   = 6;
+	option->max_bounces    = 1;
+	option->update_grain   = 512;
+	option->speed_of_sound = 343.0f;
+	option->max_distance   = 150.0f;
+	*memory                = {};
+	memory->desc.id        = 0x010107d4;
+	memory->desc.size      = 0x30;
+
+	ASSERT_EQ(AudioPropagation::SystemQueryMemory(option, memory), 0);
+	EXPECT_EQ(memory->desc.id, 0x010107d4u);
+	EXPECT_EQ(memory->desc.size, 0x30u);
+	EXPECT_GE(memory->cpu_memory_size, sizeof(AudioPropagation::SystemOption));
+	EXPECT_EQ(memory->cpu_memory_size % 16, 0u);
+	EXPECT_EQ(memory->gpu_memory_size, 0u);
+	GuestReadableBlock workspace(memory->cpu_memory_size);
+	ASSERT_TRUE(workspace.IsValid());
+	memory->cpu_memory          = workspace.Data();
+	const uint64_t queried_size = memory->cpu_memory_size;
+	memory->cpu_memory_size     = queried_size - 1;
+	EXPECT_EQ(AudioPropagation::SystemCreate(option, memory, system_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	memory->cpu_memory_size = queried_size;
+	ASSERT_EQ(AudioPropagation::SystemCreate(option, memory, system_storage.Data()), 0);
+	EXPECT_NE(*system_storage.Data(), 0u);
+	EXPECT_EQ(AudioPropagation::RoomCreate(0, room_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	ASSERT_EQ(AudioPropagation::RoomCreate(*system_storage.Data(), room_storage.Data()), 0);
+	EXPECT_NE(*room_storage.Data(), 0u);
+	EXPECT_EQ(AudioPropagation::RoomDestroy(0, *room_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioPropagation::RoomDestroy(*system_storage.Data(), *room_storage.Data()), 0);
+	EXPECT_EQ(AudioPropagation::RoomDestroy(*system_storage.Data(), *room_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+	EXPECT_EQ(AudioPropagation::SystemDestroy(*system_storage.Data()), 0);
+	EXPECT_EQ(AudioPropagation::SystemDestroy(*system_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+}
+
 TEST(EmulatorAudio, AudioOut2UserCreateUsesTwoArgumentPointerSizedHandleAbi)
 {
 	using ExpectedCreate = int(KYTY_SYSV_ABI*)(uint32_t, uintptr_t*);

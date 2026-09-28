@@ -443,6 +443,46 @@ int KYTY_SYSV_ABI  Audio3dPortPush(uint32_t port_id, uint32_t blocking);
 
 } // namespace Audio3d
 
+namespace AudioPropagation {
+
+struct StructDescriptor
+{
+	uint32_t id   = 0;
+	uint32_t pad  = 0;
+	uint64_t size = 0;
+};
+
+struct SystemOption
+{
+	StructDescriptor desc;
+	uint32_t         max_sources    = 0;
+	uint32_t         max_materials  = 0;
+	uint32_t         max_raycasts   = 0;
+	uint32_t         max_bounces    = 0;
+	uint32_t         update_grain   = 0;
+	float            speed_of_sound = 0;
+	float            max_distance   = 0;
+	uint32_t         flags          = 0;
+	uint32_t         pad            = 0;
+};
+
+struct SystemMemory
+{
+	StructDescriptor desc;
+	void*            cpu_memory      = nullptr;
+	uint64_t         cpu_memory_size = 0;
+	void*            gpu_memory      = nullptr;
+	uint64_t         gpu_memory_size = 0;
+};
+
+int KYTY_SYSV_ABI SystemQueryMemory(const SystemOption* option, SystemMemory* memory);
+int KYTY_SYSV_ABI SystemCreate(const SystemOption* option, const SystemMemory* memory, uint64_t* system_out);
+int KYTY_SYSV_ABI SystemDestroy(uint64_t system);
+int KYTY_SYSV_ABI RoomCreate(uint64_t system, uint64_t* room_out);
+int KYTY_SYSV_ABI RoomDestroy(uint64_t system, uint64_t room);
+
+} // namespace AudioPropagation
+
 namespace Ngs2 {
 
 struct Ngs2SystemOption;

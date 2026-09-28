@@ -326,6 +326,18 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Audio propagation and animation-graph frontier (2026-09-27): a CPU-only
+  `SystemQueryMemory`/`SystemCreate` implementation uses the 0x30-byte output
+  record's CPU size field and 64 bytes of caller-owned state. Room creation
+  returns a live opaque handle and checks system ownership; the focused test
+  passed, and a strict run passed both former missing imports. The next failure
+  is a guest animation-graph assertion for `.agx`. A breakpoint before lookup
+  showed that the guest graph object already contained that empty-basename
+  string; the content tree has other `.agx` files. The hypothesis that a host
+  file lookup simply dropped the name is not supported. Trace the writer of
+  the graph object's name before changing filesystem or asset behavior. No
+  audio rendering or gameplay is claimed.
+
 - AudioPropagation_v1 reference exclusion (2026-09-27): the current strict
   `SystemQueryMemory` call passes a 0x38-byte option record first and a
   0x30-byte memory record second. Its continuation reads the CPU-memory size
@@ -338,9 +350,10 @@ against the same correct gameplay capture.
   references supplies a usable size calculation or acoustics contract. An
   older local Kyty prototype writes a fixed size at `+0x58` of the first
   argument; that offset is outside the current 0x30-byte output record and
-  cannot establish this call's ABI. Next hypothesis: a lawful reference trace
-  of the option/output pair or a complete backend contract can establish
-  memory requirements and object behavior; do not adopt any fixed-size stub.
+  cannot establish this call's ABI. The reference-copying lead was closed in
+  `12f41a58`. Kyty's CPU-only lifecycle instead reports the bytes occupied
+  by its own caller-owned state, as described above; acoustic behavior still
+  requires independent implementation and validation.
 
 - The second-module replay with a diagnostic 64-block bound and descriptor-slot
   checks completed in 17 ms. No scalar buffer index was invalid before that

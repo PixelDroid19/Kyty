@@ -27,6 +27,7 @@ AUDIO_SOURCE_FILES = (
     "emulator/src/Audio.cpp",
     "emulator/src/AudioAvPlayer.cpp",
     "emulator/src/AudioNgs2.cpp",
+    "emulator/src/AudioPropagation.cpp",
     "emulator/src/Audio3d.cpp",
     "emulator/src/AudioHost.cpp",
     "emulator/src/AudioPcm.cpp",

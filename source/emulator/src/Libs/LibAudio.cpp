@@ -231,6 +231,23 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 
 } // namespace LibNgs2
 
+namespace LibAudioPropagation {
+
+LIB_VERSION("AudioPropagation", 1, "AudioPropagation", 1, 0);
+
+namespace AudioPropagation = Audio::AudioPropagation;
+
+LIB_DEFINE(InitAudio_1_AudioPropagation)
+{
+	LIB_FUNC("7xyAxrusLko", AudioPropagation::SystemQueryMemory);
+	LIB_FUNC("aNEqtSHdUSo", AudioPropagation::SystemCreate);
+	LIB_FUNC("x5VPqg5iyAk", AudioPropagation::SystemDestroy);
+	LIB_FUNC("8bI5h8req30", AudioPropagation::RoomCreate);
+	LIB_FUNC("S0JwP2AFTTE", AudioPropagation::RoomDestroy);
+}
+
+} // namespace LibAudioPropagation
+
 LIB_DEFINE(InitAudio_1)
 {
 	LibAudioOut::InitAudio_1_AudioOut(s);
@@ -241,6 +258,7 @@ LIB_DEFINE(InitAudio_1)
 	LibAvPlayer::InitAudio_1_AvPlayer(s);
 	LibAudio3d::InitAudio_1_Audio3d(s);
 	LibNgs2::InitAudio_1_Ngs2(s);
+	LibAudioPropagation::InitAudio_1_AudioPropagation(s);
 }
 
 } // namespace Kyty::Libs

@@ -24,6 +24,7 @@ file(GLOB hle_domain_src CONFIGURE_DEPENDS
 	src/NetworkHttpUri.cpp
 	src/Audio.cpp
 	src/Audio3d.cpp
+	src/AudioPropagation.cpp
 	src/AudioAjm.cpp
 	src/AudioAvPlayer.cpp
 	src/AudioHost.cpp
