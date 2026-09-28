@@ -127,6 +127,7 @@ int                KYTY_SYSV_ABI c_strcasecmp(const char* lhs, const char* rhs);
 int                KYTY_SYSV_ABI c_strncasecmp(const char* lhs, const char* rhs, size_t count);
 char*              KYTY_SYSV_ABI c_strcat(char* dst, const char* src);
 char*              KYTY_SYSV_ABI c_strncat(char* dst, const char* src, size_t count);
+int                KYTY_SYSV_ABI c_strncat_s(char* dst, size_t dst_size, const char* src, size_t count);
 char*              KYTY_SYSV_ABI c_strpbrk(const char* value, const char* accept);
 char*              KYTY_SYSV_ABI c_strchr(const char* value, int character);
 char*              KYTY_SYSV_ABI c_strrchr(const char* value, int character);

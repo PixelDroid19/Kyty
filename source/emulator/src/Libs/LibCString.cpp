@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/ProcessEnvironment.h"
 #include "Emulator/VideoFrameMemory.h"
 
@@ -264,6 +265,42 @@ KYTY_SYSV_ABI char* c_strcat(char* d, const char* s)
 KYTY_SYSV_ABI char* c_strncat(char* d, const char* s, size_t n)
 {
 	return ::strncat(d, s, n);
+}
+KYTY_SYSV_ABI int c_strncat_s(char* d, size_t destsz, const char* s, size_t count)
+{
+	if (d == nullptr || s == nullptr)
+	{
+		return Posix::POSIX_EINVAL;
+	}
+	if (destsz == 0)
+	{
+		return Posix::POSIX_ERANGE;
+	}
+
+	size_t used = 0;
+	while (used < destsz && d[used] != '\0')
+	{
+		used++;
+	}
+	if (used == destsz)
+	{
+		return Posix::POSIX_EINVAL;
+	}
+
+	size_t appended = 0;
+	while (appended < count && s[appended] != '\0')
+	{
+		if (appended >= destsz - used - 1)
+		{
+			return Posix::POSIX_ERANGE;
+		}
+		appended++;
+	}
+
+	Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(d + used), appended + 1);
+	std::memcpy(d + used, s, appended);
+	d[used + appended] = '\0';
+	return 0;
 }
 KYTY_SYSV_ABI char* c_strpbrk(const char* string, const char* accept)
 {

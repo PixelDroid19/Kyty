@@ -326,6 +326,16 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- libc string NID correction (2026-09-27): the empty-basename `.agx` graph
+  lookup was caused by mapping `NC4MSB+BRQg` to a formatter. The guest's
+  four-argument calls append path pieces and test an errno-style return; a
+  second local emulator's export catalog identifies the NID as `strncat_s`.
+  Watching the graph name confirmed that the old handler replaced the existing
+  text with `.agx`. A focused red/green test and strict run passed the former
+  assertion. The new first exit is unresolved bounded substring search NID
+  `Xnrfb2-WhVw`. The prior format-wrapper hypothesis is closed by this
+  evidence. No gameplay is claimed.
+
 - Audio propagation and animation-graph frontier (2026-09-27): a CPU-only
   `SystemQueryMemory`/`SystemCreate` implementation uses the 0x30-byte output
   record's CPU size field and 64 bytes of caller-owned state. Room creation
@@ -334,9 +344,9 @@ against the same correct gameplay capture.
   is a guest animation-graph assertion for `.agx`. A breakpoint before lookup
   showed that the guest graph object already contained that empty-basename
   string; the content tree has other `.agx` files. The hypothesis that a host
-  file lookup simply dropped the name is not supported. Trace the writer of
-  the graph object's name before changing filesystem or asset behavior. No
-  audio rendering or gameplay is claimed.
+  file lookup simply dropped the name was not supported; the producer was the
+  wrong libc NID binding recorded above. No audio rendering or gameplay is
+  claimed.
 
 - AudioPropagation_v1 reference exclusion (2026-09-27): the current strict
   `SystemQueryMemory` call passes a 0x38-byte option record first and a

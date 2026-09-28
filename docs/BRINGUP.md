@@ -254,13 +254,13 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
-### Strict compute/storage and asset-name frontier (2026-09-27, not gameplay)
+### Strict compute/storage and libc string frontier (2026-09-27, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native
 mode now passes the former dynamic-storage write-back, fused ES+GS register,
 offset image-sample, storage-image alias, render-target-format, and first
-audio-propagation import exits. The current first exit is a guest assertion
-after an animation-graph lookup receives the empty-basename name `.agx`.
+audio-propagation import exits. The current first exit is an unresolved
+`libc_v1` import for bounded substring search (`Xnrfb2-WhVw`).
 There is no scored capture or controllable gameplay evidence from this run.
 
 - A scalar-loaded storage descriptor consumed by vector stores or atomics is
@@ -291,10 +291,14 @@ system state, validates and initializes that memory in `SystemCreate`, and
 tracks room lifetime under a live system. A focused test and strict run passed
 the former query and room imports. This establishes only those lifecycle
 operations: no acoustic rendering or broader library compatibility is proven.
-The next investigation must trace the producer of the graph name; GDB found
-`.agx` already in the guest graph object before the failed lookup, and the
-installation contains other `.agx` assets. Do not substitute an asset or
-silence the assertion. Keep raw guest disassembly and addresses in scratch.
+The former `.agx` graph-name assertion came from a wrong libc NID binding:
+`NC4MSB+BRQg` was handled as an errno-style formatter, which overwrote the
+destination. The guest passes destination, capacity, source, and count and
+expects `strncat_s` to append; an independent local export catalog labels the
+same NID `strncat_s`. A hardware watchpoint showed the previous binding
+replaced an existing name with only `.agx`. A focused test and strict run
+confirmed the corrected append contract and advanced to the substring import.
+Keep raw guest strings, disassembly, and addresses in scratch.
 
 ### Generic wave64 compute frontier (2026-09-26, not gameplay)
 

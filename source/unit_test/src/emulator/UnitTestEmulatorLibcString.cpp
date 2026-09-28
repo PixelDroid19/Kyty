@@ -16,6 +16,7 @@
 namespace Kyty::Libs::LibC {
 int c_strcasecmp(const char* a, const char* b);
 int c_strncasecmp(const char* a, const char* b, size_t count);
+int c_strncat_s(char* dst, size_t dst_size, const char* src, size_t count);
 int c_vsnprintf(char* s, size_t n, const char* fmt, Kyty::Libs::VaList* ap);
 size_t c_fread(void* ptr, size_t size, size_t count, FILE* stream);
 char* c_fgets(char* buffer, int size, FILE* stream);
@@ -117,6 +118,25 @@ TEST(EmulatorLibcString, StrNCaseCmpHonorsCount)
 	EXPECT_LT(c_strncasecmp("abcd", "abce", 4), 0);
 	EXPECT_EQ(c_strncasecmp("", "anything", 0), 0);
 	EXPECT_EQ(c_strncasecmp("a", "A", 0), 0);
+}
+
+TEST(EmulatorLibcString, StrncatSAppendsWithoutLosingExistingPath)
+{
+	using Kyty::Libs::LibC::c_strncat_s;
+
+	char path[32] = "assets/";
+	EXPECT_EQ(c_strncat_s(path, sizeof(path), "scene", 5), 0);
+	EXPECT_STREQ(path, "assets/scene");
+	EXPECT_EQ(c_strncat_s(path, sizeof(path), ".bin", 4), 0);
+	EXPECT_STREQ(path, "assets/scene.bin");
+	EXPECT_EQ(c_strncat_s(path, sizeof(path), "ignored", 0), 0);
+	EXPECT_STREQ(path, "assets/scene.bin");
+
+	char bounded[8] = "xy";
+	EXPECT_EQ(c_strncat_s(bounded, sizeof(bounded), "z123", 1), 0);
+	EXPECT_STREQ(bounded, "xyz");
+	EXPECT_NE(c_strncat_s(bounded, sizeof(bounded), "oversized", 9), 0);
+	EXPECT_STREQ(bounded, "xyz");
 }
 
 // vsnprintf (NID Q2V+iqvjgC0): s/n/format arrive as direct SysV parameters;
