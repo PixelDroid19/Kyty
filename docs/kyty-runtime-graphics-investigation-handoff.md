@@ -499,6 +499,36 @@ against the same correct gameplay capture.
   bank; inspect `ShaderParseUsage2` direct-resource retention and the test's
   code-available contract before altering descriptor behavior.
 
+- First scene-source discriminator after the viewport fix (2026-09-28): the
+  existing vertex probe recorded three finite vertices for the first HDR
+  writer, with one inside clip and two forming the expected full-screen
+  triangle. The output-preserving MRT probe then counted 2,073,600 finite
+  fragment exports, all RGB-zero; an exact-fence attachment readback also
+  counted zero nonblack pixels. A temporary bounded guest-memory count found
+  zero nonzero words in the writer's readable 8,847,360-byte R32 input. The
+  exact target lifetime showed this writer followed only by a texture-free
+  shader and color-disabled draws before the first downstream sample.
+  A separate full-screen branch's MRT probe counted another 2,073,600
+  finite RGB-zero exports and an all-zero attachment. Its storage-image
+  writer was traced to a compute upscaler whose read-only input is the prior
+  1920×1080 HDR image, so that branch cannot create scene color from an empty
+  input. A fresh-cache shader-dump attempt failed to reach the first present
+  within its 70-second cap; a bounded local parse of the exact writer instead
+  confirmed image loads from that HDR input and image stores to the storage
+  output. All temporary source probes were removed and `fc_script` was rebuilt.
+  The first-draw shader census at the opening present and again at present 11
+  found the same 14 distinct pixel shaders. Each first occurrence was a
+  three-vertex nonindexed draw without depth; repeated occurrences are not
+  covered by that census. A diagnostic `cross` scheduled at present 2 was
+  delivered, but the present-6 native capture remained `entropy=0`, one color
+  bin, and `healthy=false`; the agent counted zero ordinary guest pad reads
+  and two state samples at present 5. This does not prove the input was
+  consumed or that an interactive phase was reached. Do not patch the final
+  compositor, invent a nonzero texture, or loosen the audio API on these
+  results. The next causally useful observation is the producer of the first
+  nonzero scene/depth source or the missing scene submission, correlated with
+  the first slow label wait and guest loading phase.
+
 - First partial storage output and tile-copy proof (2026-09-28): the former
   `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`
   involved one live RGBA16F render target and a larger storage view with the

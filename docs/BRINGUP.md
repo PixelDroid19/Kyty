@@ -323,6 +323,24 @@ zero in the opening presents. The viewport defect is corrected, but visual
 output and playability are not established. Trace the first nonzero producer
 upstream of the HDR postprocess chain before changing the final compositor.
 
+The next strict probes reached the first full-screen HDR source writer. Its
+2,073,600 fragment exports and the immediate 1920×1080 attachment were all
+RGB-zero. The guest-uploaded single-channel input was readable but contained
+zero in every word of its 8,847,360-byte span at that draw. A second
+full-screen branch likewise exported zero RGB over 2,073,600 fragments; its
+storage-image producer is a compute upscaler that reads an earlier HDR target,
+so it is not an independent source of scene color. First-draw censuses at the
+opening present and at present 11 each found the same 14 pixel shaders; every
+first occurrence used three nonindexed vertices and no depth attachment.
+Those samples do not prove that every repeated draw has the same shape. A
+scheduled diagnostic `cross` was delivered at present 2, yet a present-6
+native capture still scored zero entropy and the input counters recorded no
+ordinary guest pad reads. The live boundary is the missing nonzero scene
+source or scene submission, together with the unresolved graphics-label wait;
+no evidence justifies changing the compositor, sampled-image selection, or
+audio memory contract to force visible pixels. The temporary probes were
+removed before the clean build.
+
 The SDL X11 backend can stop earlier at zero presents on this host.
 At 78 draws, 133 dispatches, and 549 submissions, the graphics worker waits
 for flip completion while the main thread waits inside SDL's X11 window show
@@ -389,6 +407,12 @@ system state, validates and initializes that memory in `SystemCreate`, and
 tracks room lifetime under a live system. A focused test and strict run passed
 the former query and room imports. This establishes only those lifecycle
 operations: no acoustic rendering or broader library compatibility is proven.
+Two local secondary emulators report a 1 MiB size and 256-byte alignment and
+return success from the remaining entry points; one explicitly ports the
+other. They provide no independent hardware measurement of the size, alignment,
+creation behavior, or return codes. Keep the guest-traced record layout and
+Kyty's current CPU-only HLE until a real trace or independent published
+contract establishes a broader one.
 The former `.agx` graph-name assertion came from a wrong libc NID binding:
 `NC4MSB+BRQg` was handled as an errno-style formatter, which overwrote the
 destination. The guest passes destination, capacity, source, and count and
