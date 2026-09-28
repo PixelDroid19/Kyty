@@ -946,9 +946,11 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		                                                                    info.GetDeleteFunc(), info.GetUpdateFunc()});
 	};
 
-	bool        overlap             = false;
-	bool        delete_all          = false;
-	bool        create_from_objects = false;
+	bool        overlap                = false;
+	bool        delete_all             = false;
+	bool        create_from_objects    = false;
+	int         render_alias_parent_id = -1;
+	Vector<StorageTextureRenderAliasCopy> render_alias_copies;
 	Vector<int> selective_reclaim_ids;
 	Vector<int> depth_stencil_reclaim_ids;
 	Vector<int> retire_after_copy_ids;
@@ -1064,6 +1066,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				create_from_objects = true;
 				retire_after_copy_ids.Add(obj.object_id);
+			} else if (buffer != nullptr && o.object.type == GpuMemoryObjectType::RenderTexture &&
+			           info.type == GpuMemoryObjectType::StorageTexture && obj.relation == OverlapType::Crosses &&
+			           o.in_use && o.gpu_update_time > o.cpu_update_time && h.block.vaddr_num == 1 && vaddr_num == 1 &&
+			           StorageTexturePlanRenderAlias(o.params, h.block.vaddr[0], h.block.size[0], info.params, vaddr[0], size[0],
+			                                         &render_alias_copies))
+			{
+				// This partially written image aliases whole 64 KiB blocks of a
+				// GPU-owned render target. Keep its live pixels before compute writes.
+				overlap                = true;
+				render_alias_parent_id = obj.object_id;
 			} else if (GpuMemoryAllowsOverwrittenStorageTextureParent(
 			               o.object.type, obj.relation, info.type,
 			               info.params[StorageTextureObject::PARAM_SKIP_SEED] != 0))
@@ -1878,6 +1890,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
 	}
+	if (render_alias_parent_id >= 0)
+	{
+		auto& parent = heap.objects[render_alias_parent_id].info;
+		RecordUse(&parent, buffer);
+		StorageTextureCopyRenderAlias(buffer, static_cast<RenderTextureVulkanImage*>(parent.object.obj),
+		                              static_cast<StorageTextureVulkanImage*>(o.object.obj), render_alias_copies);
+	}
 
 	if (info.type == GpuMemoryObjectType::StorageBuffer && vaddr_num == 1)
 	{
@@ -1905,7 +1924,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	o.write_back_func = info.GetWriteBackFunc();
 	o.delete_func     = info.GetDeleteFunc();
 	o.update_func     = info.GetUpdateFunc();
-	o.content_origin = GpuMemoryCreationContentOrigin(info.type, create_from_objects, create_from_objects_fell_back_to_cpu);
+	o.content_origin = render_alias_parent_id >= 0 ? GpuMemoryContentOrigin::GpuAliasMaterialization
+	                                                : GpuMemoryCreationContentOrigin(info.type, create_from_objects,
+	                                                                                 create_from_objects_fell_back_to_cpu);
 	o.content_sequence = NextContentSequence();
 	o.use_num         = 1;
 	o.use_last_frame  = m_current_frame;

@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 #include "Emulator/Graphics/Shader.h"
@@ -17,6 +18,7 @@
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
+#include <algorithm>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -717,6 +719,175 @@ bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_
 	}
 	return NormalizeStorageTextureSwizzle(existing_fmt, existing[StorageTextureObject::PARAM_SWIZZLE]) ==
 	       NormalizeStorageTextureSwizzle(incoming_fmt, incoming[StorageTextureObject::PARAM_SWIZZLE]);
+}
+
+static uint32_t RenderAliasBytesPerElement(const uint64_t* render_params, const uint64_t* storage_params)
+{
+	if (render_params == nullptr || storage_params == nullptr)
+	{
+		return 0u;
+	}
+	if (render_params[RenderTextureObject::PARAM_TILED] != 1u ||
+	    render_params[RenderTextureObject::PARAM_WRITE_BACK] != 0u ||
+	    render_params[RenderTextureObject::PARAM_SAMPLES] != 1u ||
+	    render_params[RenderTextureObject::PARAM_ARRAY_LAYERS] != 1u ||
+	    render_params[RenderTextureObject::PARAM_NEO] != storage_params[StorageTextureObject::PARAM_NEO] ||
+	    storage_params[StorageTextureObject::PARAM_TILE] != 27u ||
+	    storage_params[StorageTextureObject::PARAM_LEVELS] != 1u ||
+	    storage_params[StorageTextureObject::PARAM_DEPTH] != 1u ||
+	    storage_params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u ||
+	    storage_params[StorageTextureObject::PARAM_SKIP_SEED] != 0u ||
+	    (storage_params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 8u &&
+	     storage_params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u))
+	{
+		return 0u;
+	}
+
+	const uint32_t guest_format = static_cast<uint32_t>(storage_params[StorageTextureObject::PARAM_FORMAT] >> 16u);
+	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(guest_format);
+	if ((bytes_per_element != 4u && bytes_per_element != 8u) ||
+	    NormalizeStorageTextureSwizzle(guest_format, storage_params[StorageTextureObject::PARAM_SWIZZLE]) !=
+	        DstSel(4, 5, 6, 7))
+	{
+		return 0u;
+	}
+	const auto storage_format = VulkanResolveGuestImageFormat(
+	    GuestImageUsage::Storage, static_cast<uint8_t>(storage_params[StorageTextureObject::PARAM_FORMAT] >> 8u),
+	    static_cast<uint8_t>(storage_params[StorageTextureObject::PARAM_FORMAT]), static_cast<uint16_t>(guest_format));
+	const auto render_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(
+	    static_cast<RenderTextureFormat>(render_params[RenderTextureObject::PARAM_FORMAT])));
+	if (storage_format == VK_FORMAT_UNDEFINED || storage_format != render_format)
+	{
+		return 0u;
+	}
+	return bytes_per_element;
+}
+
+struct RenderAliasLayout
+{
+	uint64_t address  = 0;
+	uint64_t size     = 0;
+	uint64_t width    = 0;
+	uint64_t height   = 0;
+	uint64_t blocks_x = 0;
+};
+
+static bool DescribeRenderAliasLayout(uint64_t address, uint64_t size, uint64_t width, uint64_t height, uint64_t pitch,
+                                      uint32_t bytes_per_element, RenderAliasLayout* layout)
+{
+	constexpr uint64_t block_bytes = 65536u;
+	const uint64_t block_width = TileGet64KBBlockWidth(bytes_per_element);
+	const uint64_t block_height = block_bytes / (block_width * bytes_per_element);
+	if (layout == nullptr || width == 0u || height == 0u || width > UINT32_MAX || height > UINT32_MAX || pitch > UINT32_MAX ||
+	    pitch != TileAlign64KBPitch(static_cast<uint32_t>(width), bytes_per_element))
+	{
+		return false;
+	}
+	const uint64_t blocks_x = pitch / block_width;
+	const uint64_t blocks_y = (height + block_height - 1u) / block_height;
+	if (blocks_x > UINT64_MAX / blocks_y / block_bytes || address % block_bytes != 0u || size > UINT64_MAX - address ||
+	    size != blocks_x * blocks_y * block_bytes)
+	{
+		return false;
+	}
+	*layout = {address, size, width, height, blocks_x};
+	return true;
+}
+
+bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t render_address, uint64_t render_size,
+                                   const uint64_t* storage_params, uint64_t storage_address, uint64_t storage_size,
+                                   Vector<StorageTextureRenderAliasCopy>* copies)
+{
+	if (copies == nullptr)
+	{
+		return false;
+	}
+	copies->Clear();
+	const uint32_t bytes_per_element = RenderAliasBytesPerElement(render_params, storage_params);
+	if (bytes_per_element == 0u)
+	{
+		return false;
+	}
+	const uint64_t block_bytes = 65536u;
+	const uint64_t block_width = TileGet64KBBlockWidth(bytes_per_element);
+	const uint64_t block_height = block_bytes / (block_width * bytes_per_element);
+	RenderAliasLayout render {};
+	RenderAliasLayout storage {};
+	if (!DescribeRenderAliasLayout(render_address, render_size, render_params[RenderTextureObject::PARAM_WIDTH],
+	                               render_params[RenderTextureObject::PARAM_HEIGHT], render_params[RenderTextureObject::PARAM_PITCH],
+	                               bytes_per_element, &render) ||
+	    !DescribeRenderAliasLayout(storage_address, storage_size,
+	                               storage_params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u,
+	                               storage_params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu,
+	                               storage_params[StorageTextureObject::PARAM_PITCH], bytes_per_element, &storage))
+	{
+		return false;
+	}
+
+	const uint64_t overlap_start = std::max(render.address, storage.address);
+	const uint64_t overlap_end = std::min(render.address + render.size, storage.address + storage.size);
+	if (overlap_start >= overlap_end || (overlap_end - overlap_start) % block_bytes != 0u)
+	{
+		return false;
+	}
+	Vector<StorageTextureRenderAliasCopy> plan;
+	for (uint64_t address = overlap_start; address < overlap_end; address += block_bytes)
+	{
+		const uint64_t render_index = (address - render.address) / block_bytes;
+		const uint64_t storage_index = (address - storage.address) / block_bytes;
+		const uint64_t source_x = (render_index % render.blocks_x) * block_width;
+		const uint64_t source_y = (render_index / render.blocks_x) * block_height;
+		const uint64_t destination_x = (storage_index % storage.blocks_x) * block_width;
+		const uint64_t destination_y = (storage_index / storage.blocks_x) * block_height;
+		if (source_x + block_width > render.width || source_y + block_height > render.height ||
+		    destination_x + block_width > storage.width || destination_y + block_height > storage.height)
+		{
+			return false;
+		}
+		StorageTextureRenderAliasCopy copy {static_cast<uint32_t>(source_x), static_cast<uint32_t>(source_y),
+		                                    static_cast<uint32_t>(destination_x), static_cast<uint32_t>(destination_y),
+		                                    static_cast<uint32_t>(block_width), static_cast<uint32_t>(block_height)};
+		if (!plan.IsEmpty() && plan.At(plan.Size() - 1).source_y == copy.source_y &&
+		    plan.At(plan.Size() - 1).destination_y == copy.destination_y &&
+		    plan.At(plan.Size() - 1).source_x + plan.At(plan.Size() - 1).width == copy.source_x &&
+		    plan.At(plan.Size() - 1).destination_x + plan.At(plan.Size() - 1).width == copy.destination_x)
+		{
+			plan[plan.Size() - 1].width += copy.width;
+		} else
+		{
+			plan.Add(copy);
+		}
+	}
+	for (const auto& copy: plan)
+	{
+		copies->Add(copy);
+	}
+	return !copies->IsEmpty();
+}
+
+void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, VulkanImage* destination,
+                                   const Vector<StorageTextureRenderAliasCopy>& copies)
+{
+	EXIT_IF(buffer == nullptr || source == nullptr || destination == nullptr || copies.IsEmpty());
+	EXIT_IF(source->format != destination->format || source->samples != VK_SAMPLE_COUNT_1_BIT ||
+	        destination->samples != VK_SAMPLE_COUNT_1_BIT ||
+	        source->extent.width != source->guest_extent.width || source->extent.height != source->guest_extent.height ||
+	        destination->extent.width != destination->guest_extent.width ||
+	        destination->extent.height != destination->guest_extent.height);
+	Vector<ImageImageCopy> regions;
+	for (const auto& copy: copies)
+	{
+		ImageImageCopy region {};
+		region.src_image = source;
+		region.src_x = static_cast<int>(copy.source_x);
+		region.src_y = static_cast<int>(copy.source_y);
+		region.dst_x = static_cast<int>(copy.destination_x);
+		region.dst_y = static_cast<int>(copy.destination_y);
+		region.width = copy.width;
+		region.height = copy.height;
+		regions.Add(region);
+	}
+	UtilImageToImage(buffer, regions, destination, static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
 }
 
 GpuObject::create_func_t StorageTextureObject::GetCreateFunc() const

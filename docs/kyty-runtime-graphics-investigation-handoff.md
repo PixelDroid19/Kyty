@@ -326,17 +326,34 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
-- Partial storage image after the covered-image passes (2026-09-27): the
-  strict Silent/Native run passed three earlier multi-parent storage-image
-  exits, then stopped in `GpuMemoryCreate.cpp:1191` on a single live
-  `RenderTexture Crosses StorageTexture` relation. The incoming 2432×1368
-  R16G16B16A16 image has `skip_seed=0`; the indirect dispatch is only 16×1
-  groups, so reusing the full-overwrite alias policy is excluded. The parent
-  is still in use and GPU-newer than CPU, with tiled storage and no write-back
-  callback; plain guest upload or reclaim would lose that content. Trace the
-  intended byte ownership and layout before deciding how to materialize it. The
-  first-present `kyty_agent capture` returned `unsupported_format` at
-  `Window.cpp:442`; no scored native capture or gameplay is proven.
+- Mixed parents of the second partial storage output (2026-09-28): after the
+  first partial output's GPU tile copy, the strict Silent/Native run advanced
+  to `!create_all_the_same` in `GpuMemoryCreate.cpp:1691`. This output is a
+  single-channel storage image with `skip_seed=0`. It contains a small live
+  storage/sampled pair and crosses three live, GPU-newer render targets. Two
+  render targets are RGBA16F and one has a different packed-float format; all
+  are tiled and have no write-back callback. A generic same-format image copy
+  cannot seed this mixed layout, and 16×1 groups do not prove a full overwrite.
+  Determine which parent owns each byte range and whether the new output needs
+  those prior bytes before extending the overlap policy. Its two-byte tile-27
+  format also reaches `Tile.cpp:1022`, where the current within-block converter
+  only has four- and eight-byte equations; prove the two-byte layout before
+  materializing this view. The first-present
+  `kyty_agent capture` returned `unsupported_format` at `Window.cpp:442`; no
+  scored native capture or gameplay is proven.
+
+- First partial storage output and tile-copy proof (2026-09-28): the former
+  `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`
+  involved one live RGBA16F render target and a larger storage view with the
+  same format, sample count, and 64 KiB tile layout. The guest ranges overlapped
+  on whole tile boundaries. A focused red/green test checked that each copied
+  texel names the same guest byte under both layouts and rejected incompatible
+  format, partial-edge, and unaligned cases. The new materialization copies
+  only those shared tiles from the live GPU image, retaining guest upload for
+  the remainder. The strict run passed the former exit and stopped at the
+  separate mixed-parent output above. Reclaiming the live render target or
+  copying stale guest bytes had been excluded by its newer GPU update and
+  absent write-back callback.
 
 - Covered later storage-image overlaps (2026-09-27): a native 16×16 compute
   shader samples one image, resets EXEC, selects even local coordinates, and

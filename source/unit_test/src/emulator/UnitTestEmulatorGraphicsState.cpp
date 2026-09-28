@@ -1717,6 +1717,49 @@ TEST(EmulatorGraphicsState, StorageTextureGrowthCopiesGpuOwnedArrayPrefix)
 	EXPECT_FALSE(StorageTextureCanCopyGrowingBacking(second.params, first.params));
 }
 
+TEST(EmulatorGraphicsState, RenderTargetStorageAliasCopiesOnlyMatchingGuestBlocks)
+{
+	constexpr uint32_t block_width  = 128u;
+	constexpr uint32_t block_height = 64u;
+	constexpr uint32_t block_bytes  = 65536u;
+	const RenderTextureObject source(RenderTextureFormat::R16G16B16A16Sfloat, 4u * block_width, 2u * block_height,
+	                                 true, false, 4u * block_width, false);
+	const StorageTextureObject destination(0u, 0u, 71u, 5u * block_width, 3u * block_height,
+	                                       5u * block_width, 0u, 1u, 27u, false, DstSel(4, 5, 6, 7));
+	constexpr uint64_t source_address      = 0x100000u;
+	constexpr uint64_t destination_address = source_address + 2u * block_bytes;
+	Vector<StorageTextureRenderAliasCopy> copies;
+	ASSERT_TRUE(StorageTexturePlanRenderAlias(source.params, source_address, 8u * block_bytes, destination.params,
+	                                          destination_address, 15u * block_bytes, &copies));
+	uint64_t copied_texels = 0;
+	for (const auto& copy: copies)
+	{
+		for (uint32_t y = 0; y < copy.height; ++y)
+		{
+			for (uint32_t x = 0; x < copy.width; ++x)
+			{
+				const uint64_t source_byte = source_address +
+				    TileGetSw64kRxOffset(copy.source_x + x, copy.source_y + y, 4u * block_width, 8u);
+				const uint64_t destination_byte = destination_address +
+				    TileGetSw64kRxOffset(copy.destination_x + x, copy.destination_y + y, 5u * block_width, 8u);
+				EXPECT_EQ(source_byte, destination_byte);
+				++copied_texels;
+			}
+		}
+	}
+	EXPECT_EQ(copied_texels, 6u * block_width * block_height);
+	const RenderTextureObject wrong_format(RenderTextureFormat::R16G16B16A16Unorm, 4u * block_width,
+	                                       2u * block_height, true, false, 4u * block_width, false);
+	EXPECT_FALSE(StorageTexturePlanRenderAlias(wrong_format.params, source_address, 8u * block_bytes, destination.params,
+	                                           destination_address, 15u * block_bytes, &copies));
+	const RenderTextureObject partial_edge(RenderTextureFormat::R16G16B16A16Sfloat, 4u * block_width - 1u,
+	                                       2u * block_height, true, false, 4u * block_width, false);
+	EXPECT_FALSE(StorageTexturePlanRenderAlias(partial_edge.params, source_address, 8u * block_bytes, destination.params,
+	                                           destination_address, 15u * block_bytes, &copies));
+	EXPECT_FALSE(StorageTexturePlanRenderAlias(source.params, source_address, 8u * block_bytes, destination.params,
+	                                           destination_address + 1u, 15u * block_bytes, &copies));
+}
+
 TEST(EmulatorGraphicsState, StorageTextureBackingSupportsSamplingAfterComputeWrites)
 {
 	const auto usage = StorageTextureGetImageUsage();

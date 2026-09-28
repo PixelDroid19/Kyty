@@ -254,20 +254,21 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
-### Strict compute/storage and libc string frontier (2026-09-27, not gameplay)
+### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native
 mode now passes the former dynamic-storage write-back, fused ES+GS register,
 offset image-sample, storage-image alias, render-target-format, first
 audio-propagation imports, bounded libc string imports, and three later
-storage-image overlap cases. The current first exit is an unknown single-parent
-`RenderTexture Crosses StorageTexture` relation in `GpuMemoryCreate.cpp:1191`.
-The incoming 2432×1368 R16G16B16A16 image has `skip_seed=0`; its 16×1-group
-indirect dispatch does not prove a full overwrite. The source of the overlapping
-GPU-owned parent bytes must be established before changing that relation. The
-parent is still in use, its GPU update is newer than its CPU update, and its
-tiled view has no write-back callback; simply seeding from guest memory or
-reclaiming it would lose observed content.
+storage-image overlap cases. A blockwise GPU copy now carries the live bytes
+from a compatible tiled render target into the first partially written storage
+image. The strict run passed the former single-parent
+`RenderTexture Crosses StorageTexture` exit. The current first exit is
+`!create_all_the_same` in `GpuMemoryCreate.cpp:1691` for the second storage
+output of the same 16×1-group dispatch. That image crosses three live render
+targets and contains a small storage/sampled pair; the parents include
+different formats. Its `skip_seed=0`, so the earlier full-overwrite policy is
+not established, and the sources of its overlapping bytes remain unresolved.
 There is no scored capture or controllable gameplay evidence from this run.
 
 - A scalar-loaded storage descriptor consumed by vector stores or atomics is
@@ -299,6 +300,14 @@ There is no scored capture or controllable gameplay evidence from this run.
   `0x9`, UNORM type `0`, and alternate component order `1`. A focused
   red/green test and the next strict run confirmed the 4-byte
   `VK_FORMAT_A2R10G10B10_UNORM_PACK32` mapping moves beyond that exit.
+- The first partial storage output has the same RGBA16F format, sample count,
+  and 64 KiB tile layout as its single live render-target parent. Their
+  overlap begins on a tile boundary. A copy plan maps each shared guest tile
+  to source and destination image rectangles, while CPU upload seeds the
+  non-overlapping range. It rejects partial tiles, mismatched formats,
+  incompatible extents, and unaligned ranges. A red/green byte-address test
+  and the strict run verified the former exit is passed; neither proves the
+  resulting pixels are visually correct.
 
 The guest's `sceAudioPropagationSystemQueryMemory` call passes a 56-byte option
 record and a 48-byte memory record, then reads the CPU size from memory-record

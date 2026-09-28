@@ -58,6 +58,23 @@ public:
 [[nodiscard]] bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
 [[nodiscard]] VkImageUsageFlags StorageTextureGetImageUsage();
 
+struct StorageTextureRenderAliasCopy
+{
+	uint32_t source_x      = 0;
+	uint32_t source_y      = 0;
+	uint32_t destination_x = 0;
+	uint32_t destination_y = 0;
+	uint32_t width         = 0;
+	uint32_t height        = 0;
+};
+
+[[nodiscard]] bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t render_address,
+	                                             uint64_t render_size, const uint64_t* storage_params,
+	                                             uint64_t storage_address, uint64_t storage_size,
+	                                             Vector<StorageTextureRenderAliasCopy>* copies);
+void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, VulkanImage* destination,
+	                              const Vector<StorageTextureRenderAliasCopy>& copies);
+
 struct StorageTextureArrayViewRange
 {
 	uint32_t base_array_layer = 0;
