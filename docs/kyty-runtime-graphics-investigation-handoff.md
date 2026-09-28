@@ -381,7 +381,16 @@ against the same correct gameplay capture.
   image is single-channel 16-bit float. The small storage/sampled pair inside
   that range has older creation and GPU markers. Whole-object markers do not
   prove the last writer of each byte or permit a typed Vulkan image copy
-  between the packed and 16-bit formats. A temporary seed-skip diagnostic
+  between the packed and 16-bit formats. A filtered strict Wayland trace then
+  followed that render address through the rejection: the latest packed-float
+  pass used `CLEAR` on a 1920×1080 attachment, drew a three-vertex primitive,
+  and the next pass sampled that host image. No later render-target write to
+  the filtered address appeared before the new storage view. The overlapping
+  source span is the first 78 whole 64 KiB blocks of a 15-block-wide surface;
+  those blocks lie within the attachment's valid 1080 rows. This identifies
+  the packed host image as the leading source candidate, subject to any
+  untraced DMA or CPU write. A raw byte mapping into the differently formatted
+  16-bit storage image remains unimplemented. A temporary seed-skip diagnostic
   still reached the same rejection because the existing full-overwrite policy
   does not accept a `Texture IsContainedWithin` parent; the diagnostic was
   removed and provides no evidence about later image reads. The filtered

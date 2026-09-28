@@ -270,9 +270,13 @@ output of the same 16×1-group dispatch. That image crosses three live render
 targets and contains a small storage/sampled pair; the parents include
 different formats. Its `skip_seed=0`, so the earlier full-overwrite policy is
 excluded: the observed dispatch can write at most 4,096 of 3,326,976 texels.
-The sources of its overlapping bytes remain unresolved. The existing two-byte
-render-target tiling path also maps 32,768 texels to only 8,192 distinct byte
-offsets per block; that layout must be proven before materialization.
+The packed-float render target is the leading source candidate for the
+overlap: a filtered strict trace recorded its full-extent `CLEAR`, a draw,
+and a later sample before the storage creation, with no later render-target
+write to that address. Untraced CPU/DMA writes and the raw cross-format byte
+mapping remain unresolved. The existing two-byte render-target tiling path
+also maps 32,768 texels to only 8,192 distinct byte offsets per block; that
+layout must be proven before materialization.
 Four native captures are now available from the first four presents, but all
 score as uniform black (`entropy=0`, one quantized color,
 `gameplay_like=false`). There is no controllable gameplay evidence.
