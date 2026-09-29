@@ -721,6 +721,28 @@ before implementing the storage-image query. No scene or gameplay output is
 established by the completed carry-mask dispatch. Focused unit tests remain
 deferred until gameplay.
 
+The storage-query replay confirms a zero LOD produced by an unmodified vector
+move in the entry block, a plain 2D descriptor with base/last/max mip zero,
+and a width/height-only result. Its later image store references the same
+descriptor. The new lowering uses the proven writable binding and
+`OpImageQuerySize` for that single-mip spatial query. Unknown LODs, control-flow
+bypasses, other mip views and unimplemented result components remain rejected.
+Storage mip metadata participates in the translation key so cache reuse cannot
+bypass those checks. The entire 496-instruction program validates before and
+after Vulkan 1.4 optimization. A strict Silent/Native run submits it at queue 8,
+sequence 96,483; that queue's completion ledger reaches 96,485. Native capture
+213 retains the opening caption, capture 707 is uniformly black, and the run
+reaches present 810 before a new allocation failure. This establishes execution
+of the queried program, not correct scene output or gameplay.
+
+The new stop is `Objects/GpuMemoryCreate.cpp:1895`: a single-mip 32x32 storage
+image equals one sampled Texture range and crosses a second sampled Texture.
+Both parents have CPU-upload origin, equal CPU/GPU markers and no write-back
+function. The first parent's format, extent, pitch, tiling and mip parameters
+match the incoming storage image. The multi-parent classifier has no path for
+this mixed relation set. Verify guest upload ownership and preserve both sampled
+backings before extending the classifier; do not seed from stale GPU aliases.
+
 A related summary-operand defect remains unverified in this workload:
 `ShaderSpirvOperands.cpp:573` combines VCC_LO and VCC_HI when reading VCCZ,
 even for a native wave32 dispatch. RDNA2 defines that summary from the low

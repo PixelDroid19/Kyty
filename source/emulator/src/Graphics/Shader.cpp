@@ -4049,6 +4049,12 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		// shader specialized for a differently shaped or integer texture.
 		ret->ids.Add(r.Type());
 		ret->ids.Add(r.Format());
+		// Storage resinfo admission depends on the resource's mip view.
+		// A module admitted for one mip must not bypass that check on reuse.
+		const bool storage = bind.textures2D.desc[i].usage == ShaderTextureUsage::ReadWrite;
+		ret->ids.Add(storage ? r.BaseLevel() : 0u);
+		ret->ids.Add(storage ? r.LastLevel() : 0u);
+		ret->ids.Add(storage ? r.MaxMip() : 0u);
 		// ret->ids.Add(r.Depth());
 		// ret->ids.Add(r.Pitch());
 		// ret->ids.Add(r.BaseArray());

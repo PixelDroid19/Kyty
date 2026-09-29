@@ -2,6 +2,7 @@
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
+#include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicsState.h"
@@ -3154,6 +3155,94 @@ OpStore %<destination> %image_gather_component_f_<index>_<component>
 	return true;
 }
 
+static bool ImageResinfoHasZeroLod(const ShaderCode& code, uint32_t index)
+{
+	const auto& instructions = code.GetInstructions();
+	const auto& query = instructions.At(index);
+	const auto& lod = query.mimg_address_num > 0 ? query.mimg_address[0] : query.src[0];
+	if (lod.type != ShaderOperandType::Vgpr || lod.size != 1 || lod.dpp) { return false; }
+	for (const auto& label: code.GetLabels())
+	{
+		if (!label.IsDisabled() && label.GetDst() <= query.pc) { return false; }
+	}
+	for (const auto& label: code.GetIndirectLabels())
+	{
+		if (!label.IsDisabled() && label.GetDst() <= query.pc) { return false; }
+	}
+	const auto overlaps = [&lod](const ShaderOperand& operand)
+	{
+		return operand.type == ShaderOperandType::Vgpr && operand.register_id <= lod.register_id &&
+		       operand.size > lod.register_id - operand.register_id;
+	};
+	const auto writes_exec = [](const ShaderOperand& operand)
+	{
+		return operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::ExecHi ||
+		       operand.type == ShaderOperandType::ExecZ;
+	};
+	bool zero = false;
+	for (uint32_t current = 0; current < index; ++current)
+	{
+		const auto& inst = instructions.At(current);
+		const auto name = Core::EnumName8(inst.type);
+		if (ShaderInstructionHasStaticBranchTarget(inst.type) || inst.type == ShaderInstructionType::SSetpcB64 ||
+		    inst.type == ShaderInstructionType::SSwappcB64 || inst.type == ShaderInstructionType::SEndpgm ||
+		    inst.type == ShaderInstructionType::Unknown || writes_exec(inst.dst) || writes_exec(inst.dst2) ||
+		    name.StartsWith("VCmpx") || name.ContainsStr("Saveexec")) { return false; }
+		if (overlaps(inst.dst))
+		{
+			zero = inst.type == ShaderInstructionType::VMovB32 && inst.dst.size == 1 && inst.src_num == 1 &&
+			       operand_is_constant(inst.src[0]) && inst.src[0].constant.u == 0u && !inst.src[0].dpp &&
+			       !inst.src[0].absolute && !inst.src[0].negate && inst.src[0].swizzle == 6u &&
+			       !inst.dst.clamp && inst.dst.multiplier == 1.0f && !inst.vop_sdwa;
+		}
+		if (overlaps(inst.dst2)) { zero = false; }
+	}
+	return zero;
+}
+
+static bool EmitStorageImageResinfo(const ShaderCode& code, uint32_t index, int descriptor_index, int storage_index,
+                                    Spirv* spirv, String8* dst_source)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const auto& bind = *spirv->GetBindInfo();
+	const auto& texture = bind.textures2D.desc[descriptor_index].texture;
+	// A storage view has one mip. Only a proven level-zero spatial query of
+	// a single-mip 2D resource has the same dimensions as that view here.
+	if (!Config::IsNextGen() || texture.Type() != 9u || texture.BaseLevel() != 0u || texture.LastLevel() != 0u ||
+	    texture.MaxMip() != 0u || inst.mimg_dimension != 1u || inst.mimg_dmask == 0u || (inst.mimg_dmask & ~3u) != 0u ||
+	    !ImageResinfoHasZeroLod(code, index) || code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd})) { return false; }
+	for (int resource = 0; resource < bind.textures2D.textures_num; ++resource)
+	{
+		const auto& candidate = bind.textures2D.desc[resource];
+		if (candidate.usage == ShaderTextureUsage::ReadWrite && candidate.texture.Type() != 9u) { return false; }
+	}
+	const int components = static_cast<int>((inst.mimg_dmask & 1u) + ((inst.mimg_dmask >> 1u) & 1u));
+	const auto storage_constant = spirv->GetConstantUint(static_cast<uint32_t>(storage_index));
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != components || storage_constant.StartsWith("unknown_"))
+	{
+		return false;
+	}
+	const auto index_string = String8::FromPrintf("%u", index);
+	*dst_source += String8(R"(
+%storage_resinfo_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageL %textures2D_L %<storage_index>
+%storage_resinfo_image_<index> = OpLoad %ImageL %storage_resinfo_ptr_<index>
+%storage_resinfo_size_<index> = OpImageQuerySize %v2uint %storage_resinfo_image_<index>
+)").ReplaceStr("<index>", index_string).ReplaceStr("<storage_index>", storage_constant);
+	int destination = 0;
+	for (uint32_t component = 0; component < 2u; ++component)
+	{
+		if ((inst.mimg_dmask & (1u << component)) == 0u) { continue; }
+		const auto dst = operand_variable_to_str(inst.dst, destination++);
+		*dst_source += String8(R"(
+%storage_resinfo_component_<index>_<component> = OpCompositeExtract %uint %storage_resinfo_size_<index> <component>
+%storage_resinfo_float_<index>_<component> = OpBitcast %float %storage_resinfo_component_<index>_<component>
+OpStore %<destination> %storage_resinfo_float_<index>_<component>
+)").ReplaceStr("<index>", index_string).ReplaceStr("<component>", String8::FromPrintf("%u", component))
+		   .ReplaceStr("<destination>", dst.value);
+	}
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageGetResinfo_VdataVaddrStDmask)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -3161,6 +3250,16 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageGetResinfo_VdataVaddrStDmask)
 	if (bind_info == nullptr)
 	{
 		return false;
+	}
+	const auto* vs_info = spirv->GetVsInputInfo();
+	const int user_data_register_base = vs_info != nullptr && vs_info->gs_prolog ? 8 : 0;
+	const int sampled_descriptor = ShaderFindImageSampledTextureDescriptor(inst, *bind_info, user_data_register_base);
+	const int storage_descriptor = sampled_descriptor < 0 && bind_info->textures2D.textures2d_storage_num > 0
+	                                   ? ShaderFindImageStorageTextureDescriptor(code, index, *bind_info, user_data_register_base) : -1;
+	if (storage_descriptor >= 0)
+	{
+		const int storage_index = ResolveStorageTextureArrayIndex(code, index, *bind_info, user_data_register_base);
+		return storage_index >= 0 && EmitStorageImageResinfo(code, index, storage_descriptor, storage_index, spirv, dst_source);
 	}
 
 	const bool has_flat  = bind_info->textures2D.textures2d_sampled_num > 0;
