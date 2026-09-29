@@ -227,7 +227,7 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 	const auto name = Core::EnumName8(instruction.type);
 	// V_CMPX writes only EXEC; the decoder's VCC destination is a placeholder.
 	const bool exec_compare = out->vector && name.StartsWith("VCmpx");
-	out->writes_scc_data    = name.StartsWith("SCmp");
+	out->writes_scc_data    = name.StartsWith("SCmp") || instruction.type == ShaderInstructionType::SAbsI32;
 	if (IsLaneCrossingType(instruction.type))
 	{
 		return Failure(instruction.pc, "instruction reads another lane or a wave-wide count");

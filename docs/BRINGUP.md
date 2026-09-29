@@ -595,6 +595,16 @@ The captured workgroup is 5 by 5 by 1 with one paired guest wave; native
 equivalence separately rejects a cross-lane operation at PC 0x90. Preserve
 that rejection while correcting the first decoded instruction.
 
+The scalar parser and emitter now implement the ISA's signed absolute value,
+including the unchanged INT_MIN bits and SCC for a null destination. With the
+subsequent EUD lifetime and image-descriptor corrections, the actual
+147-instruction program translates to an 8,105-word module that passes
+`spirv-val --target-env vulkan1.2`. Its dispatch is recorded and the same
+queue's completed sequence advances beyond that submission before the next
+strict failure. Native-equivalence rejection of the cross-lane operation is
+preserved. This verifies the exercised translation and completion; focused
+integer edge-case tests remain deferred until gameplay as requested.
+
 Two existing string-contract gaps were found while reviewing value ownership:
 `LibJson2.cpp:394` uses `strlen` for `JsonStringLength`, although the parser
 retains embedded NUL bytes. Verify the length export's guest contract and use

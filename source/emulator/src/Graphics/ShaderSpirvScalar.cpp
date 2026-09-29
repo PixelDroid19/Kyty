@@ -841,6 +841,47 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB64_Sdst2Ssrc02)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_SAbsI32)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const bool discard = inst.dst.type == ShaderOperandType::Null;
+	if (!discard && !operand_is_variable(inst.dst))
+	{
+		return false;
+	}
+	const auto dst = discard ? SpirvValue {} : operand_variable_to_str(inst.dst);
+	if (!discard && dst.type != SpirvType::Uint)
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8 load;
+	if (!operand_load_int(spirv, inst.src[0], "abs_source_<index>", index_str, &load))
+	{
+		return false;
+	}
+	// Unsigned subtraction preserves the ISA's INT_MIN result without signed
+	// overflow. SCC observes the result even when the destination is null.
+	static const char* text = R"(
+<load>
+%abs_negative_<index> = OpSLessThan %bool %abs_source_<index> %int_0
+%abs_bits_<index> = OpBitcast %uint %abs_source_<index>
+%abs_negated_<index> = OpISub %uint %uint_0 %abs_bits_<index>
+%abs_result_<index> = OpSelect %uint %abs_negative_<index> %abs_negated_<index> %abs_bits_<index>
+<store>
+<execz>
+%abs_nonzero_<index> = OpINotEqual %bool %abs_result_<index> %uint_0
+%abs_scc_<index> = OpSelect %uint %abs_nonzero_<index> %uint_1 %uint_0
+OpStore %scc %abs_scc_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load>", load)
+	                   .ReplaceStr("<store>", discard ? "" : String8("OpStore %<dst> %abs_result_<index>").ReplaceStr("<dst>", dst.value))
+	                   .ReplaceStr("<execz>", operand_is_exec(inst.dst) ? EXECZ : "")
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 static const char* ScalarUnaryB32Operation(ShaderInstructionType type)
 {
 	switch (type)

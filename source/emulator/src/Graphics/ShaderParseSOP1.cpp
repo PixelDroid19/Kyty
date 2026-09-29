@@ -262,9 +262,9 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x34: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_abs_i32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x34:
+			inst.type   = ShaderInstructionType::SAbsI32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
 			break;
 		case 0x35: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_mov_fed_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;

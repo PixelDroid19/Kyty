@@ -537,6 +537,7 @@ enum class ShaderInstructionType : uint32_t
 	DsAddRtnU32,
 	SCbranchExecnz,
 	SCmpEqU64,
+	SAbsI32,
 
 	ZMax
 };
