@@ -441,6 +441,9 @@ against the same correct gameplay capture.
   DCC operation is still rasterized as a zero red/green export on the overlay;
   the next correction must preserve the existing expanded surface rather
   than interpret that export as ordinary pixel output.
+  That bounded handler is now verified on three existing expanded attachments.
+  After context restoration is repaired, native capture 89 shows the caption
+  in white; native and offline image scores still reject it as gameplay.
 
 - DCC dispatch classification (2026-09-29): an ordinary postprocess draw
   inherits mode six and has no existing target backing. The original guest

@@ -916,6 +916,70 @@ static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, 
 	image->layout = new_layout;
 }
 
+static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::RenderTarget& rt)
+{
+	if (rt.base.addr == 0u || rt.dcc_addr.addr == 0u ||
+	    rt.info.cmask_fast_clear_enable || rt.dcc.dcc_clear_key_enable || rt.attrib.num_samples != 0u ||
+	    rt.attrib.num_fragments != 0u || rt.view.current_mip_level != 0u || rt.view.base_array_slice_index != 0u ||
+	    rt.view.last_array_slice_index != 0u || rt.attrib3.dimension != 1u || rt.attrib3.depth != 0u)
+	{
+		EXIT("unsupported color DCC decompression state: dcc=%u cmask_clear=%u dcc_clear=%u "
+		     "samples=%u fragments=%u mip=%u layers=%u..%u dimension=%u depth=%u\n",
+		     rt.info.dcc_compression_enable, rt.info.cmask_fast_clear_enable,
+		     rt.dcc.dcc_clear_key_enable, rt.attrib.num_samples, rt.attrib.num_fragments, rt.view.current_mip_level,
+		     rt.view.base_array_slice_index, rt.view.last_array_slice_index, rt.attrib3.dimension, rt.attrib3.depth);
+	}
+
+	RenderColorInfo color {};
+	EXIT_IF(!DescribeRenderColorSlotInfo(buffer, rt, &color));
+	const auto& attachment = color.attachment[0];
+	if (attachment.type != RenderColorType::RenderTexture)
+	{
+		EXIT("DCC decompression requires an existing render texture\n");
+	}
+	const auto images = FindRenderTexture(buffer, attachment.base_addr, attachment.size, true);
+	if (images.Size() != 1u)
+	{
+		EXIT("DCC decompression has no unique expanded backing: size=%" PRIu64 " matches=%u\n",
+		     attachment.size, images.Size());
+	}
+	const auto* image = images[0];
+	const auto format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
+	if (image == nullptr || image->image == nullptr || image->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+	    !image->MatchesGuestExtent(attachment.width, attachment.height) || image->format != format ||
+	    image->samples != VK_SAMPLE_COUNT_1_BIT || image->array_layers != 1u || image->mip_levels != 1u)
+	{
+		EXIT("DCC decompression backing is not an initialized matching single-sample image\n");
+	}
+	// The host render texture already stores expanded color. Retain its exact
+	// backing and submission use; rasterizing the metadata shader would replace
+	// those pixels with an export used only to drive the guest color block.
+}
+
+bool GraphicsRenderColorDecompress(CommandBuffer* buffer, const HW::Context& hw)
+{
+	if (hw.GetColorControl().mode != 6u)
+	{
+		return false;
+	}
+	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
+	if (!Config::IsNextGen() || hw.GetColorControl().op != 0xccu)
+	{
+		EXIT("unsupported color DCC decompression control: op=0x%x\n", hw.GetColorControl().op);
+	}
+	const auto mask = hw.GetRenderTargetMask() & hw.GetShaderRegisters().m_cbShaderMask;
+	for (uint32_t slot = 0; slot < RenderColorInfo::TARGETS_MAX; ++slot)
+	{
+		const auto& rt = hw.GetRenderTarget(slot);
+		if (((mask >> (slot * 4u)) & 0xfu) == 0u || !rt.info.dcc_compression_enable)
+		{
+			continue;
+		}
+		PreserveExpandedDccAttachment(buffer, rt);
+	}
+	return true;
+}
+
 bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw)
 {
 	if (hw.GetColorControl().mode != 3)

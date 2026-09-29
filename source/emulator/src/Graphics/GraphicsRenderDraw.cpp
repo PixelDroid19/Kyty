@@ -1120,6 +1120,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 		}
 	}
 
+	if (GraphicsRenderColorDecompress(buffer, *ctx))
+	{
+		return;
+	}
 	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
 	{
 		MaybeDumpIndexDrawSkip("color-resolve", index_count, draw_modifier, type);
@@ -2041,6 +2045,10 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 			KYTY_LOG_DEBUG( "KYTY_AB_SKIP_PS_ADDR skip ps=0x%012" PRIx64 "\n", sh_ctx->GetPs().ps_regs.data_addr);
 			return;
 		}
+	}
+	if (GraphicsRenderColorDecompress(buffer, *ctx))
+	{
+		return;
 	}
 	if (GraphicsRenderColorResolve(submit_id, buffer, *ctx))
 	{

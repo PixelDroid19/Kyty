@@ -414,6 +414,23 @@ the metadata operation before ordinary rasterization. Mode two also occurs
 on other targets and denotes fast-clear elimination; its clear-state contract
 must be handled separately from DCC decompression.
 
+The expanded-surface handler now consumes mode-six operations before either
+indexed or automatic ordinary draws. It requires one existing initialized
+render texture with exactly matching extent, format and memory span, a single
+sample/mip/layer, and no fast-clear key. It records the submission use through
+the GPU-memory lookup. A bounded live probe confirms three enabled DCC
+attachments return through this preservation path. With context restoration
+corrected, native capture 89 contains the opening caption in white instead of
+blue. Both native and offline scores classify this simple caption as low
+entropy and not gameplay. The emulator/executable build, boundary gate and
+thirteen-table provenance gate pass; focused test execution remains deferred.
+
+The same run reports a separate stencil frontier from
+`GraphicsRenderHwCheck.cpp:339`: stencil testing is enabled with neither read
+nor write base present. It has not caused a process stop here. Capture the
+producer and format before deciding whether that state is inactive hardware
+state or a missing attachment; the opening caption does not validate stencil.
+
 ### Register-default lookup and context restoration (2026-09-29)
 
 A strict diagnostic run with expanded-surface DCC handling stops at present

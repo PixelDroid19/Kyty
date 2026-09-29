@@ -544,9 +544,8 @@ static void bc_check(const HW::BlendControl& /*c*/, const HW::BlendColor& color,
 	if (!std::isfinite(color.green)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !std::isfinite(color.green) condition ignored (continuing)\n"); }
 	if (!std::isfinite(color.blue)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !std::isfinite(color.blue) condition ignored (continuing)\n"); }
 	if (!std::isfinite(color.alpha)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !std::isfinite(color.alpha) condition ignored (continuing)\n"); }
-	// CB_COLOR_CONTROL.MODE is a three-bit field. MODE=3 selects the
-	// fixed-function resolve path; every other encoded value is a valid
-	// ordinary color draw and must not be rejected during state validation.
+	// Resolve and DCC decompression are consumed before ordinary draw state
+	// validation. Their pixel exports do not describe new attachment colors.
 	if (cc.op != 0xCC) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cc.op != 0xCC condition ignored (continuing)\n"); }
 }
 

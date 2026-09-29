@@ -1523,6 +1523,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 void InvalidateMemoryObject(const RenderColorInfo& r);
 void InvalidateMemoryObject(const RenderDepthInfo& r);
 bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw);
+bool GraphicsRenderColorDecompress(CommandBuffer* buffer, const HW::Context& hw);
 RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buffer, const RenderColorInfo& color,
                                                              const RenderDepthInfo& depth);
 RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,
