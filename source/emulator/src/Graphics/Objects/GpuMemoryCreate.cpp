@@ -688,6 +688,59 @@ bool GpuMemory::create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuM
 	return false;
 }
 
+static bool TextureMatchesStorageSeed(const uint64_t* texture, const uint64_t* storage)
+{
+	return texture[TextureObject::PARAM_FORMAT] == storage[StorageTextureObject::PARAM_FORMAT] &&
+	       texture[TextureObject::PARAM_PITCH] == storage[StorageTextureObject::PARAM_PITCH] &&
+	       texture[TextureObject::PARAM_WIDTH_HEIGHT] == storage[StorageTextureObject::PARAM_WIDTH_HEIGHT] &&
+	       texture[TextureObject::PARAM_LEVELS] == storage[StorageTextureObject::PARAM_LEVELS] &&
+	       texture[TextureObject::PARAM_TILE] == storage[StorageTextureObject::PARAM_TILE] &&
+	       texture[TextureObject::PARAM_NEO] == storage[StorageTextureObject::PARAM_NEO] &&
+	       texture[TextureObject::PARAM_SWIZZLE] == storage[StorageTextureObject::PARAM_SWIZZLE] &&
+	       texture[TextureObject::PARAM_FORCE_DEGAMMA] == 0u && texture[TextureObject::PARAM_DEPTH_VIEW] == 0u &&
+	       texture[TextureObject::PARAM_RESOURCE_INFO] == TextureObject::PackResourceInfo(9u, 1u);
+}
+
+bool GpuMemory::create_cpu_texture_storage_alias(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id,
+                                                 const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const
+{
+	if (info.type != GpuMemoryObjectType::StorageTexture || vaddr_num != 1 || !info.check_hash ||
+	    info.params[StorageTextureObject::PARAM_NEO] == 0u || info.params[StorageTextureObject::PARAM_LEVELS] != 1u ||
+	    info.params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u || info.params[StorageTextureObject::PARAM_DEPTH] != 1u ||
+	    info.params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u || info.params[StorageTextureObject::PARAM_SKIP_SEED] != 0u)
+	{
+		return false;
+	}
+	bool exact_seed = false;
+	for (const auto& obj: others)
+	{
+		const auto& parent = m_heaps[heap_id].objects[obj.object_id];
+		const auto& owner = parent.info;
+		if (parent.free || parent.block.vaddr_num != 1 || owner.object.type != GpuMemoryObjectType::Texture ||
+		    owner.object.obj == nullptr || owner.content_origin != GpuMemoryContentOrigin::CpuUpload ||
+		    owner.write_back_func != nullptr || owner.cpu_update_time != owner.gpu_update_time ||
+		    owner.params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0u ||
+		    (obj.relation != OverlapType::Equals && obj.relation != OverlapType::Crosses))
+		{
+			return false;
+		}
+		if (obj.relation == OverlapType::Equals)
+		{
+			if (parent.block.vaddr[0] != vaddr[0] || parent.block.size[0] != size[0] ||
+			    !TextureMatchesStorageSeed(owner.params, info.params))
+			{
+				return false;
+			}
+			exact_seed = true;
+		}
+	}
+	// Every existing view was uploaded from guest memory. The exact compatible
+	// sampled view proves the storage layout; normal creation uploads the same
+	// guest bytes while links keep pending sampled reads alive. GPU-owned parents
+	// need a separate materialization plan and are never admitted by this path.
+	return exact_seed;
+}
+
 bool GpuMemory::create_all_the_same(const Vector<OverlappedBlock>& others, int heap_id)
 {
 	auto&               heap = m_heaps[heap_id];
@@ -1720,6 +1773,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				create_from_objects   = true;
 				retire_after_copy_ids = storage_growth_ids;
+			} else if (create_cpu_texture_storage_alias(others, info, heap_id, vaddr, size, vaddr_num))
+			{
+				overlap = true;
 			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_raw_render_alias ||
 			           multi_raw_render_composite ||
 			           multi_overwritten_storage_texture || multi_depth_mip_storage_guest || multi_vertex_in_surface ||

@@ -743,6 +743,23 @@ match the incoming storage image. The multi-parent classifier has no path for
 this mixed relation set. Verify guest upload ownership and preserve both sampled
 backings before extending the classifier; do not seed from stale GPU aliases.
 
+The classifier now admits a single-mip 2D storage view only when every parent
+is a CPU-uploaded sampled Texture with equal CPU/GPU markers, no write-back
+function and an Equals or Crosses relation. An exact parent must also match
+the full sampled layout. Normal storage creation uploads the guest bytes;
+existing links preserve the sampled backings and their pending reads. A strict
+Silent/Native run observes this path, dispatches the formerly blocked work at
+queue 8, sequence 96,778, and completes through 96,779. Native capture 279
+preserves the fading opening caption; no scene capture was obtained before
+the next failure. Source/table gates and the Linux build pass.
+
+The next first failure is a 335-instruction pixel shader at PC 0x44c:
+`S_GETPC_B64` writes a scalar pair, but `ShaderGetInputInfoPS` never supplies
+the program-base metadata required by `ShaderSpirvProgramAddress.cpp:13`.
+Vertex and compute input analysis already supply it. Capture its consumer
+chain and apply the same runtime base-address contract to the pixel stage;
+do not bake the mapped address into the translated module.
+
 A related summary-operand defect remains unverified in this workload:
 `ShaderSpirvOperands.cpp:573` combines VCC_LO and VCC_HI when reading VCCZ,
 even for a native wave32 dispatch. RDNA2 defines that summary from the low
