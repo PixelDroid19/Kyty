@@ -143,6 +143,7 @@ struct GraphicContext
 	// Per-sample fragment execution is optional and must be enabled explicitly
 	// before a graphics pipeline can request sample shading.
 	bool sample_rate_shading_supported = false;
+	bool geometry_shader_supported = false;
 
 	// Vulkan subgroup limits used to validate shaders that require an exact guest
 	// wave width. A zero maximum means the physical-device query was unavailable.

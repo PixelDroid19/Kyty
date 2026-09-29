@@ -296,7 +296,8 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const ShaderVertexInputInfo* vs_input_info,
                                               const Vector<uint32_t>& vs_shader, const ShaderPixelInputInfo* ps_input_info,
-                                              const Vector<uint32_t>& ps_shader, const PipelineStaticParameters* static_params,
+                                              const Vector<uint32_t>& ps_shader, const Vector<uint32_t>& geometry_shader,
+                                              const PipelineStaticParameters* static_params,
                                               PipelineDynamicParameters* dynamic_params)
 {
 	EXIT_IF(g_render_ctx == nullptr);
@@ -315,6 +316,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkShaderModule vert_shader_module = nullptr;
 	VkShaderModule frag_shader_module = nullptr;
+	VkShaderModule geometry_shader_module = nullptr;
 
 	VkShaderModuleCreateInfo create_info {};
 
@@ -373,7 +375,19 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	frag_shader_stage_info.pName               = "main";
 	frag_shader_stage_info.pSpecializationInfo = nullptr;
 
-	VkPipelineShaderStageCreateInfo shader_stages[] = {vert_shader_stage_info, frag_shader_stage_info};
+	VkPipelineShaderStageCreateInfo shader_stages[3] = {vert_shader_stage_info, frag_shader_stage_info};
+	uint32_t shader_stage_count = has_fragment_stage ? 2u : 1u;
+	if (!geometry_shader.IsEmpty())
+	{
+		create_info.codeSize = static_cast<size_t>(geometry_shader.Size()) * sizeof(uint32_t);
+		create_info.pCode = geometry_shader.GetDataConst();
+		EXIT_IF(vkCreateShaderModule(gctx->device, &create_info, nullptr, &geometry_shader_module) != VK_SUCCESS);
+		auto& stage = shader_stages[shader_stage_count++];
+		stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stage.stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+		stage.module = geometry_shader_module;
+		stage.pName = "main";
+	}
 
 
 	VulkanVertexInputLayout input_layout {};
@@ -729,7 +743,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	pipeline_info.pNext               = nullptr;
 	pipeline_info.flags               = 0;
-	pipeline_info.stageCount          = has_fragment_stage ? 2u : 1u;
+	pipeline_info.stageCount          = shader_stage_count;
 	pipeline_info.pStages             = shader_stages;
 	pipeline_info.pVertexInputState   = &vertex_input_info;
 	pipeline_info.pInputAssemblyState = &input_assembly;
@@ -800,6 +814,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		vkDestroyShaderModule(gctx->device, frag_shader_module, nullptr);
 	}
 	vkDestroyShaderModule(gctx->device, vert_shader_module, nullptr);
+	if (geometry_shader_module != VK_NULL_HANDLE) { vkDestroyShaderModule(gctx->device, geometry_shader_module, nullptr); }
 
 	return pipeline;
 }
@@ -1330,6 +1345,20 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	}
 
 	const auto miss_start = std::chrono::steady_clock::now();
+	if (ps_input_info->custom_interpolation.Enabled())
+	{
+		EXIT_IF(!gctx->geometry_shader_supported);
+		EXIT_IF(p.static_params->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &&
+		        p.static_params->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP &&
+		        p.static_params->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN);
+		VkPhysicalDeviceProperties properties {};
+		vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
+		const auto& limits = properties.limits;
+		const auto components = ps_input_info->custom_interpolation.location_count * 4u;
+		EXIT_IF(components > limits.maxFragmentInputComponents || components + 4u > limits.maxGeometryOutputComponents ||
+		        (components + 4u) * 3u > limits.maxGeometryTotalOutputComponents || limits.maxGeometryOutputVertices < 3u ||
+		        static_cast<uint32_t>(vs_input_info->export_count) * 4u + 4u > limits.maxGeometryInputComponents);
+	}
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1370,9 +1399,18 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		             ps_translation.hit ? 1u : 0u);
 	}
 	EXIT_IF(ps_input_info->stage_enabled && ps_translation.binary.IsEmpty());
+	ShaderTranslationCacheResult geometry_translation;
+	if (ps_input_info->custom_interpolation.Enabled())
+	{
+		geometry_translation = translation_cache->GetOrCompile(
+		    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Geometry, optimization, next_gen),
+		    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info); });
+		DebugStatsRecordShaderTranslationCache(geometry_translation.hit, geometry_translation.evicted);
+		EXIT_IF(geometry_translation.binary.IsEmpty());
+	}
 
 	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_translation.binary, ps_input_info,
-	                                    ps_translation.binary, p.static_params, p.dynamic_params);
+	                                    ps_translation.binary, geometry_translation.binary, p.static_params, p.dynamic_params);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 	p.pipeline->framebuffer_extent = framebuffer->extent;

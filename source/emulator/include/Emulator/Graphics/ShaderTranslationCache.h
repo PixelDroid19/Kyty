@@ -23,7 +23,8 @@ enum class ShaderModuleStage : uint8_t
 {
 	Vertex,
 	Pixel,
-	Compute
+	Compute,
+	Geometry
 };
 
 struct ShaderModuleKey

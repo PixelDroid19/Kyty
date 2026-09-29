@@ -385,6 +385,16 @@ against the same correct gameplay capture.
   default location. Preserve this red artifact outside the repository for the
   corrected-module comparison.
 
+  The corrected route now passes the raw three-vertex values through a
+  generated geometry stage and supplies the requested manual interpolation
+  coordinates. Both actual cached modules validate (30,488-byte pixel,
+  1,868-byte geometry), as do pixel source and optimized disassembly. The
+  duplicate input location and collapsed selectors are corrected. Captures
+  at presents 93 and 184 are still black: this falsifies the sufficiency of
+  that correction for useful output, but does not tell whether the previously
+  nonfinite overlay samples are now finite. Probe the corrected material
+  output and its inputs before attributing the remaining black result.
+
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
   2,113,929,216 bytes with `mincore` from a vertex descriptor bind. Over the

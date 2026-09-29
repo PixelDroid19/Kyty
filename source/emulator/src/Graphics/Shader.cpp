@@ -2987,6 +2987,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			ps_info->stage_enabled = false;
 			return;
 		}
+		ShaderResolveCustomInterpolation(*analysis.code, *vs_info, ps_info);
 		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get(), 0,
 		                  false);
 	} else
@@ -4279,6 +4280,12 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ret.ids.Add(input_info->input_num);
 	ret.ids.Add(input_info->system_input_enable);
 	ret.ids.Add(input_info->system_input_address);
+	if (input_info->custom_interpolation.Enabled())
+	{
+		ret.ids.Add(0x43504931u); // CPI1: per-vertex inputs transported through geometry.
+		ret.ids.Add(input_info->custom_interpolation.inputs);
+		ret.ids.Add(input_info->custom_interpolation.per_vertex_inputs);
+	}
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pos_xy));
 	ret.ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
 	ret.ids.Add(input_info->host_to_guest_scale.x_host_denominator);

@@ -314,6 +314,10 @@ private:
 	void WriteGlobalVariables();
 	void WriteMainProlog();
 	void WriteLocalVariables();
+	void WriteCustomPixelInterface(Core::StringList8* variables) const;
+	void WriteCustomPixelAnnotations(Core::StringList8* annotations) const;
+	void WriteCustomPixelVariables(Core::StringList8* variables) const;
+	void WriteCustomPixelProlog();
 	void WriteInstructions();
 	void WriteMainEpilog();
 	void WriteFunctions();

@@ -2085,6 +2085,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
 	device_features.depthBiasClamp    = supported_features.depthBiasClamp;
 	device_features.sampleRateShading = supported_features.sampleRateShading;
+	device_features.geometryShader = supported_features.geometryShader;
 	device_features.depthClamp = supported_features.depthClamp;
 	// device_features.shaderImageGatherExtended = VK_TRUE;
 
@@ -3015,6 +3016,7 @@ static void VulkanCreate(WindowContext* ctx)
 	vkGetPhysicalDeviceFeatures(ctx->graphic_ctx.physical_device, &device_features);
 	ctx->graphic_ctx.depth_bias_clamp_supported    = device_features.depthBiasClamp == VK_TRUE;
 	ctx->graphic_ctx.sample_rate_shading_supported = device_features.sampleRateShading == VK_TRUE;
+	ctx->graphic_ctx.geometry_shader_supported = device_features.geometryShader == VK_TRUE;
 
 	KYTY_LOG_DEBUG("Select device: %s\n", device_properties.deviceName);
 

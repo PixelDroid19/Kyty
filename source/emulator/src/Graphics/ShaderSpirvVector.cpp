@@ -2858,12 +2858,27 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpMovF32_VdstVsrcAttrChan)
 	if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
 	if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
-	if (inst.src[0].constant.u != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].constant.u != 2 condition ignored (continuing)\n"); }
-
 	auto dst_value = operand_variable_to_str(inst.dst);
 
 	const auto* ps_info = spirv->GetPsInputInfo();
 	EXIT_IF(ps_info == nullptr);
+	const uint32_t input = inst.src[1].constant.u;
+	EXIT_IF(input >= ps_info->input_num || input >= 32u || inst.src[2].constant.u >= 4u);
+	if (ps_info->custom_interpolation.Enabled() && (ps_info->custom_interpolation.per_vertex_inputs & (1u << input)) != 0)
+	{
+		const uint32_t selector = inst.src[0].constant.u;
+		EXIT_IF(selector > 2u);
+		const uint32_t vertex = (selector + 1u) % 3u;
+		const uint32_t attribute = ShaderPixelCanonicalInterpolator(*ps_info, input);
+		*dst_source += String8::FromPrintf(
+		    "%%custom_ptr_%u = OpAccessChain %%_ptr_Input_uint %%attr%u %%uint_%u %%uint_%u\n"
+		    "%%custom_raw_%u = OpLoad %%uint %%custom_ptr_%u\n"
+		    "%%custom_float_%u = OpBitcast %%float %%custom_raw_%u\n"
+		    "OpStore %%%s %%custom_float_%u\n",
+		    index, attribute, vertex, inst.src[2].constant.u, index, index, index, index, dst_value.value.c_str(), index);
+		return true;
+	}
+	if (inst.src[0].constant.u != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].constant.u != 2 condition ignored (continuing)\n"); }
 	return RecompilePixelInterpolatorLoad(spirv, ps_info, inst.src[1].constant.u, inst.src[2].constant.u, index_str, dst_value.value,
 	                                      dst_source);
 }

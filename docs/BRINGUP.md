@@ -277,6 +277,23 @@ actual-module red validation case. A corrected strict comparison must establish
 whether this is the producer of the nonfinite overlay values; the code mismatch
 alone does not yet prove that causal result.
 
+The first correction transports raw parameter values through a generated
+triangle geometry stage, using distinct flat unsigned vectors for each
+vertex and perspective/linear center or centroid coordinates for manual
+interpolation. It selects the route from the consumed controls and the host
+geometry capability, checks interface limits and gives that route its own
+pixel/module identity. Ordinary inputs retain their interpolation modes.
+The exercised pixel module (30,488 bytes) and geometry module (1,868 bytes),
+read from the live translation cache, both pass Vulkan 1.2 SPIR-V validation;
+the pixel source and optimized disassembly also validate. The original
+duplicate-location failure is gone, with four component loads from each of
+the three vertices and initialized barycentric VGPRs. Native captures at
+presents 93 and 184 remain uniformly black. This corrects the exercised
+interface and selector translation but does not establish useful rendering
+or identify the remaining producer of zero/nonfinite output. PARAM0's
+ambiguous custom/default encoding, sample/pull-model barycentrics and layered
+geometry still require separate contracts.
+
 ### Pending storage write-back retry (2026-09-29, unresolved)
 
 A later Silent/Native diagnostic run passed at least 598 presents, then stopped

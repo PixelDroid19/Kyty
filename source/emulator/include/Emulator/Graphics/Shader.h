@@ -1938,6 +1938,17 @@ struct ShaderFragmentTapConfig
 	uint64_t diagnostic_identity  = 0;
 };
 
+struct ShaderPixelCustomInterpolation
+{
+	uint32_t inputs = 0;
+	uint32_t per_vertex_inputs = 0;
+	uint32_t locations[32] {};
+	uint32_t barycentric_locations[7] {};
+	uint32_t location_count = 0;
+
+	[[nodiscard]] bool Enabled() const { return per_vertex_inputs != 0; }
+};
+
 struct ShaderPixelInputInfo
 {
 	bool                   stage_enabled             = true;
@@ -1945,6 +1956,7 @@ struct ShaderPixelInputInfo
 	uint32_t               input_num                 = 0;
 	uint32_t               system_input_enable       = 0;
 	uint32_t               system_input_address      = 0;
+	ShaderPixelCustomInterpolation custom_interpolation;
 	uint8_t                target_output_mode[8]     = {};
 	uint8_t                target_output_order[8]    = {};
 	RenderHostToGuestScale host_to_guest_scale;
@@ -1975,6 +1987,7 @@ struct ShaderPixelInputInfo
 enum class ShaderPixelInterpolatorSource
 {
 	Parameter,
+	PerVertex,
 	Default
 };
 
@@ -1992,6 +2005,10 @@ struct ShaderPixelInterpolator
 [[nodiscard]] uint32_t ShaderPixelCanonicalInterpolator(const ShaderPixelInputInfo& info, uint32_t index);
 [[nodiscard]] bool ShaderDecodePixelInterpolator(uint32_t setting, ShaderPixelInterpolator* interpolator);
 [[nodiscard]] float ShaderPixelInterpolatorDefaultComponent(const ShaderPixelInterpolator& interpolator, uint32_t component);
+[[nodiscard]] bool ShaderPixelInputActive(const ShaderPixelInputInfo& info, uint32_t index);
+[[nodiscard]] uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32_t field);
+void ShaderResolveCustomInterpolation(const ShaderCode& code, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
+[[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info);
 
 struct ShaderSharp
 {
