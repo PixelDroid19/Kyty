@@ -888,12 +888,17 @@ static int32_t KYTY_SYSV_ABI JsonParserParse(JsonValue* dst, const char* src, si
 	return OK;
 }
 
-static const JsonValue* KYTY_SYSV_ABI JsonValueIndexString(const JsonValue* self, const char* key)
+static const JsonValue* JsonNullValue()
 {
 	static const JsonValue null_value {};
+	return &null_value;
+}
+
+static const JsonValue* KYTY_SYSV_ABI JsonValueIndexString(const JsonValue* self, const char* key)
+{
 	if (self == nullptr || self->type != JsonValueTypeObject || self->ptr == nullptr || key == nullptr)
 	{
-		return &null_value;
+		return JsonNullValue();
 	}
 	std::string text;
 	const auto key_address = reinterpret_cast<uint64_t>(key);
@@ -902,7 +907,7 @@ static const JsonValue* KYTY_SYSV_ABI JsonValueIndexString(const JsonValue* self
 		if (key_address > UINT64_MAX - i || !Core::VirtualMemory::IsRangeReadable(key_address + i, 1))
 		{
 			EXIT("JsonValueIndexString: unreadable key at byte %zu\n", i);
-			return &null_value;
+			return JsonNullValue();
 		}
 		const char ch = *reinterpret_cast<const char*>(key_address + i);
 		if (ch == '\0')
@@ -910,16 +915,31 @@ static const JsonValue* KYTY_SYSV_ABI JsonValueIndexString(const JsonValue* self
 			const auto* object = static_cast<const JsonObject*>(self->ptr);
 			if (object->members == nullptr)
 			{
-				return &null_value;
+				return JsonNullValue();
 			}
 			const auto found = object->members->find(text);
-			const auto* result = (found == object->members->end() ? &null_value : found->second);
+			const auto* result = (found == object->members->end() ? JsonNullValue() : found->second);
 			return result;
 		}
 		text.push_back(ch);
 	}
 	EXIT("JsonValueIndexString: key exceeds 4096 bytes\n");
-	return &null_value;
+	return JsonNullValue();
+}
+
+static const JsonValue* KYTY_SYSV_ABI JsonValueIndexUInt(const JsonValue* self, uint64_t index)
+{
+	if (self == nullptr) { return JsonNullValue(); }
+	EXIT_IF(!Core::VirtualMemory::IsRangeReadable(reinterpret_cast<uint64_t>(self), sizeof(JsonValue)));
+	if (self->type != JsonValueTypeArray || self->ptr == nullptr) { return JsonNullValue(); }
+
+	std::lock_guard lock(g_owned_mutex);
+	const auto owned = g_owned_values.find(self->ptr);
+	EXIT_IF(owned == g_owned_values.end() || owned->second != JsonValueTypeArray);
+	const auto* array = static_cast<const JsonArray*>(self->ptr);
+	if (array->items == nullptr || index >= array->items->size()) { return JsonNullValue(); }
+	// The parent owns the element. Returning it must not clone or extend the array.
+	return (*array->items)[static_cast<size_t>(index)];
 }
 
 static uint32_t KYTY_SYSV_ABI JsonValueGetType(const JsonValue* self)
@@ -983,6 +1003,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("IKQimvG9Wqs", Json2::JsonValueSetType);
 	LIB_FUNC("S5JxQnoGF3E", Json2::JsonParserParse);
 	LIB_FUNC("HwDt5lD9Bfo", Json2::JsonValueIndexString);
+	LIB_FUNC("XlWbvieLj2M", Json2::JsonValueIndexUInt);
 	LIB_FUNC("SHtAad20YYM", Json2::JsonValueGetType);
 	LIB_FUNC("RBw+4NukeGQ", Json2::JsonValueCount);
 	LIB_FUNC("+drDFyAS6u4", Json2::JsonInitializerSetGlobalNullAccessCallback);

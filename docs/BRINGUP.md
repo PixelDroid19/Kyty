@@ -254,6 +254,21 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### JSON array element lookup (2026-09-29, not gameplay)
+
+The title transition now passes `Value::operator[](uint64_t)`. The missing
+NID matches the const array-index operator's mangled name. Kyty validates
+the value and owned array, bounds the index and returns the existing child;
+absent elements share the same immutable null value as object lookup.
+
+A Silent/Native call trace sees index zero of a one-element array and verifies
+that the returned object is that owned child. The run then reaches the next
+unresolved import, `4zrm6VrgIAw[Json2_v1][Json_v1.1]`, the value assignment
+operator. Its caller immediately assigns the indexed value to another
+32-byte value. `LibJson2.cpp` still needs an owned deep-copy path there,
+including correct replacement lifetime. Visible rendering, controls and
+both gameplay acceptance windows remain unverified.
+
 ### Residency preparation cost (2026-09-29, not gameplay)
 
 `GuestDeviceAddress` now queries every interval of pages still awaiting
