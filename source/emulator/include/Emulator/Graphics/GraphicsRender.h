@@ -343,15 +343,18 @@ void GraphicsRenderQueueQueuedGraphicsInterrupt(CommandBuffer* buffer);
 // The caller submits after releasing its CommandProcessor mutex so publication
 // cannot precede GPU -> CPU materialization.
 void GraphicsRenderPrepareWriteBack(CommandBuffer* buffer);
-// Analyze the same compute admission and resources used by DispatchDirect
-// before the command processor decides whether to complete prior GPU writes.
-[[nodiscard]] bool GraphicsRenderComputeUsesGuestDeviceAddress(HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
-                                                                uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
-// False leaves the command buffer untouched and identifies the resource use
-// that must complete before retrying this dispatch.
-[[nodiscard]] bool GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx,
-                                                uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z,
-                                                uint32_t mode, SubmissionId* pending_writeback);
+enum class ComputeDispatchResult
+{
+	Completed,
+	ProcessorWriteBackRequired,
+	SubmissionCompletionRequired,
+};
+// Preparation and recording share one resource analysis. A required write-back
+// leaves the command buffer untouched; retry after completing it with fresh inputs.
+[[nodiscard]] ComputeDispatchResult GraphicsRenderDispatchDirect(
+    uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
+    uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, bool processor_writeback_complete,
+    SubmissionId* pending_writeback);
 void GraphicsRenderMemoryBarrier(CommandBuffer* buffer);
 void GraphicsRenderRenderTextureBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
 void GraphicsRenderDepthStencilBarrier(CommandBuffer* buffer, uint64_t vaddr, uint64_t size);

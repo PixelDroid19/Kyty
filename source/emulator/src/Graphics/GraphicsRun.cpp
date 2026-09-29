@@ -1887,31 +1887,30 @@ void CommandProcessor::DrawIndexIndirect(uint32_t data_offset, uint32_t initiato
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
 {
 	const ScopedDebugStatsTimer dispatch_timer(DebugStatsRecordDispatchProcessor);
-	bool needs_guest_writeback = false;
-	{
-		Core::LockGuard lock(m_mutex);
-		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-		needs_guest_writeback = GraphicsRenderComputeUsesGuestDeviceAddress(&m_ctx, &m_sh_ctx, thread_group_x, thread_group_y,
-		                                                                  thread_group_z, mode);
-	}
-	if (needs_guest_writeback)
-	{
-		const ScopedDebugStatsTimer writeback_timer(DebugStatsRecordDispatchWriteBack);
-		WriteBack();
-	}
-
+	bool processor_writeback_complete = false;
 	SubmissionId pending;
-	for (uint32_t attempt = 0; attempt < 64u; ++attempt)
+	for (uint32_t attempt = 0; attempt < 64u;)
 	{
+		ComputeDispatchResult result;
 		{
 			Core::LockGuard lock(m_mutex);
 			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-			if (GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x,
-			                                 thread_group_y, thread_group_z, mode, &pending)) { return; }
+			result = GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x,
+			                                      thread_group_y, thread_group_z, mode, processor_writeback_complete, &pending);
+		}
+		if (result == ComputeDispatchResult::Completed) { return; }
+		if (result == ComputeDispatchResult::ProcessorWriteBackRequired)
+		{
+			EXIT_IF(processor_writeback_complete);
+			const ScopedDebugStatsTimer writeback_timer(DebugStatsRecordDispatchWriteBack);
+			WriteBack();
+			processor_writeback_complete = true;
+			continue;
 		}
 		// Waiting can submit another processor's recording buffer and publish
 		// its resources; neither processor nor render recording locks may be held.
 		g_gpu->WaitSubmission(pending);
+		++attempt;
 	}
 	EXIT("device-address dispatch preparation did not stabilize: queue=%u sequence=%" PRIu64 "\n",
 	     pending.queue.Value(), pending.sequence);

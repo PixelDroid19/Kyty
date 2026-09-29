@@ -321,6 +321,42 @@ present-813 capture remains uniformly black. Gameplay and acceptable runtime
 performance are still unverified; focused unit tests remain deferred until
 gameplay as requested.
 
+### Compute dispatch input preparation (2026-09-29, bounded measured)
+
+The command processor previously performed the complete compute input analysis
+once to decide whether to drain guest-address writes, then again to record the
+dispatch. Preparation and recording now share that analysis under the render
+lock. A guest-address dispatch requests its processor drain before touching the
+command buffer, then retries with newly analyzed inputs. Peer submission waits
+still release both recording locks and retry with fresh inputs. The initial
+processor drain does not consume the existing sixty-four peer retry budget.
+No resource snapshot is cached across a wait.
+
+Two strict Silent/Native runs without a debugger measure forty-five-second
+warm introduction windows beginning after present 153. Both use Vulkan 1.4,
+native resolution, the same compiled shader cache and resource bounds; neither
+window compiles SPIR-V. The earlier executable differs only in these dispatch
+preparation objects. Its launch uses a PTY while the new run uses a pipe;
+logging is Silent in both measured windows. This transport difference and the
+single sample per arm limit the comparison.
+
+The earlier window contains 194 presents in 45.038 seconds (4.307 FPS), with a
+226 ms median frame time. The new window contains 228 in 45.039 seconds
+(5.062 FPS), with a 194 ms median. Input analyses per processor dispatch change
+from 2.0001 to 1.0725, and accumulated dispatch processing per present changes
+from 128.815 to 97.968 ms. Dispatches per present remain 77.81 and 77.73;
+submissions per present remain 126.60 and 127.09. These samples measure a
+17.5 percent introduction frame-rate increase, not a gameplay benchmark or
+acceptable overall performance.
+
+The owned Linux build, strict source boundaries and graphics-table manifest
+pass. Both native captures are uniformly black and their offline score gates
+exit 1. The new strict run preserves the first pixel-emitter failure at PC
+0xfec and exits 65. The earlier guest also exits 65 according to its service
+journal; its PTY proxy loses output, so that arm's final error text is unavailable.
+Gameplay and the missing wave64 pixel lowering remain unresolved. Focused unit
+tests remain deferred until gameplay as requested.
+
 ### Sparse physical residency query (2026-09-29, not gameplay)
 
 Read-only sampling found descriptor preparation repeatedly scanning an entirely
