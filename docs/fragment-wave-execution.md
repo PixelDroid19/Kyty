@@ -227,13 +227,15 @@ must update resolve coverage instead of terminating a helper invocation with
 `OpKill`. These are explicit adapters, not permission to classify pixel IR as
 guest compute code.
 
-`ShaderSpirvOperands.cpp:459` directly shuffles retained VGPR values for
-native quad DPP. `ShaderComputeWaveAnalysis.cpp` also admits such floating
-point operations through the generic bank wrapper. Remaining inside a bank
-does not establish the required FI=0 source-EXEC behavior. Ten captured
-`VSubF32` quad tuples need that source mask contract or an evidenced proof
-that their source quads are always fully active. Complete pixel admission
-and execution remain gated on this proof; no visual cause is attributed here.
+The generic bank wrapper now supplies the complete architectural EXEC word
+to quad DPP source loads. FI=0 selects zero for an inactive source before
+applying ALU modifiers, while destination writes retain their separate lane
+mask. Five original `VSubF32` modules with the captured quad controls exposed
+216 GPU differences before the correction. They now agree with the independent
+ISA reference under all eight EXEC masks. The combined replay passes 320
+cases and 42,064 observations across 40 modules, with zero differences and
+valid Vulkan 1.4 modules. This corrects shared source-mask behavior; no guest
+visual cause or frame-rate improvement is attributed to the replay.
 
 ## Compiler memory experiment
 

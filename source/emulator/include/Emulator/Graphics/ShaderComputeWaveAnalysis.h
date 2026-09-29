@@ -65,8 +65,8 @@ struct ShaderComputeWaveAnalysisResult
 [[nodiscard]] bool ShaderComputeWaveTypeIsExecCompare(ShaderInstructionType type);
 // A VALU instruction whose result for each lane depends only on that lane's
 // VGPRs and on uniform SGPR/VCC words or constants, and that writes only VGPRs.
-// It reads neither EXEC nor another lane, so running its native per-invocation
-// lowering once per bank is exact.
+// Quad DPP sources additionally use the bank's architectural source-EXEC
+// word; ordinary EXEC guards use only the destination lane's mask bit.
 [[nodiscard]] bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderComputeWaveGenericLdsSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instruction);

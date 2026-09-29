@@ -87,7 +87,12 @@ bool RewriteForBank(const std::string& text, const std::set<std::string>& define
 			++end;
 		}
 		const std::string id = text.substr(pos + 1, end - pos - 1);
-		if (id == "exec_lo" || id == "exec_hi")
+		if (id == "wave_dpp_source_exec")
+		{
+			// Source activity uses the entire architectural mask word. The
+			// ordinary EXEC names below represent this destination lane's bit.
+			result += "%exec_" + (bank == "low" ? std::string("lo") : std::string("hi"));
+		} else if (id == "exec_lo" || id == "exec_hi")
 		{
 			static const std::string kLoad = "OpLoad %uint ";
 			if (result.size() < kLoad.size() || result.compare(result.size() - kLoad.size(), kLoad.size(), kLoad) != 0)

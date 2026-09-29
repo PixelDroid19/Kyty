@@ -458,6 +458,20 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
       %dpp_target_<result> = OpBitwiseOr %uint %dpp_base_<result> %dpp_select_<result>
        %dpp_value_<result> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_bits_<result> %dpp_target_<result>
 )";
+		if (spirv->UsesComputeWaveBanks())
+		{
+			// FI=0 substitutes zero for an inactive source before ALU modifiers.
+			// The bank rewriter resolves this mask alias to the architectural
+			// word, independently of its ordinary per-destination EXEC loads.
+			exchange = exchange.ReplaceStr("%dpp_value_<result> =", "%dpp_fetched_<result> =");
+			exchange += R"(
+    %dpp_exec_word_<result> = OpLoad %uint %wave_dpp_source_exec
+     %dpp_exec_bit_<result> = OpShiftLeftLogical %uint %<one> %dpp_target_<result>
+    %dpp_exec_mask_<result> = OpBitwiseAnd %uint %dpp_exec_word_<result> %dpp_exec_bit_<result>
+  %dpp_source_live_<result> = OpINotEqual %bool %dpp_exec_mask_<result> %<zero>
+       %dpp_value_<result> = OpSelect %uint %dpp_source_live_<result> %dpp_fetched_<result> %<zero>
+)";
+		}
 	}
 	*text = (head + String8(permutation))
 	                     .ReplaceStr("<exchange>", exchange)
