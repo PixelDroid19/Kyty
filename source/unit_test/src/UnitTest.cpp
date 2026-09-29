@@ -93,6 +93,7 @@ UT_LINK(EmulatorComputeWaveVectorBuffer);
 UT_LINK(EmulatorComputeWaveSdwa);
 UT_LINK(EmulatorComputeWaveTernaryAlu);
 UT_LINK(EmulatorShaderScalarPack);
+UT_LINK(EmulatorShaderVectorPack);
 UT_LINK(EmulatorShaderMaskAnalysis);
 UT_LINK(EmulatorShaderReverseBorrow);
 UT_LINK(EmulatorShaderTranslationCache);

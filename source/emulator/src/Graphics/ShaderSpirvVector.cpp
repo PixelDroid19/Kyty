@@ -1989,8 +1989,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkI16I32_SVdstSVsrc0SVsrc1)
 	return true;
 }
 
-/* v_cvt_pknorm_u16_f32: clamp both f32 sources to [0,1], scale to u16 and
- * pack. */
+/* v_cvt_pknorm_u16_f32: pack two f32 sources as unsigned normalized u16. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormU16F32_SVdstSVsrc0SVsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -2000,17 +1999,15 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormU16F32_SVdstSVsrc0SVsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	if (!operand_is_variable(inst.dst) || inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.vop3_op_sel != 0u ||
+	    inst.vop3_omod != 0u)
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	const auto zero = spirv->GetConstantFloat(0.0f);
-	const auto one  = spirv->GetConstantFloat(1.0f);
-	if (zero == "unknown_float_constant" || one == "unknown_float_constant")
+	if (dst_value.type != SpirvType::Float)
 	{
 		return false;
 	}
@@ -2027,24 +2024,18 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormU16F32_SVdstSVsrc0SVsrc1)
 	static const char* text = R"(
     <load0>
     <load1>
-        %c0_<index> = OpExtInst %float %GLSL_std_450 FClamp %t0_<index> <zero> <one>
-        %c1_<index> = OpExtInst %float %GLSL_std_450 FClamp %t1_<index> <zero> <one>
-        %u0_<index> = OpConvertFToU %uint %c0_<index>
-        %u1_<index> = OpConvertFToU %uint %c1_<index>
-        %lo_<index> = OpBitwiseAnd %uint %u0_<index> %uint_0xffff
-        %hi_<index> = OpBitwiseAnd %uint %u1_<index> %uint_0xffff
-        %t_<index> = OpBitFieldInsert %uint %lo_<index> %hi_<index> %uint_16 %uint_16
+        %packed_pair_<index> = OpCompositeConstruct %v2float %t0_<index> %t1_<index>
+        %packed_bits_<index> = OpExtInst %uint %GLSL_std_450 PackUnorm2x16 %packed_pair_<index>
+        %packed_value_<index> = OpBitcast %float %packed_bits_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
         %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %packed_value_<index> %tdst_<index>
                OpStore %<dst> %tval_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<zero>", zero)
-	                   .ReplaceStr("<one>", one)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 	return true;
