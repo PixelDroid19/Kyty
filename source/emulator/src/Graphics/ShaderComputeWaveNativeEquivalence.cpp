@@ -232,6 +232,10 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 	{
 		return Failure(instruction.pc, "instruction reads another lane or a wave-wide count");
 	}
+	if (instruction.type >= ShaderInstructionType::SAndSaveexecB32 && instruction.type <= ShaderInstructionType::SOrn1SaveexecB32)
+	{
+		return Failure(instruction.pc, "32-bit SAVEEXEC changes only the lower half of a wave64 mask");
+	}
 	if (instruction.src_num < 0 || instruction.src_num > 4 || instruction.mimg_address_num < 0 || instruction.mimg_address_num > 13)
 	{
 		return Failure(instruction.pc, "instruction operand count is outside the analyzed range");

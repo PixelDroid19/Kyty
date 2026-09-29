@@ -15,7 +15,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-inline constexpr uint32_t kShaderTranslatorVersion = 70;
+inline constexpr uint32_t kShaderTranslatorVersion = 71;
 
 class SpirvBinaryCacheStore;
 

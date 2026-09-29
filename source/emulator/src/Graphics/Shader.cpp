@@ -163,6 +163,10 @@ static bool ShaderIsVccCompare(ShaderInstructionType type)
 
 static bool ShaderInstructionTypeChangesExec(ShaderInstructionType type)
 {
+	if (type >= ShaderInstructionType::SAndSaveexecB32 && type <= ShaderInstructionType::SOrn1SaveexecB32)
+	{
+		return true;
+	}
 	const auto value = static_cast<uint32_t>(type);
 	if (value >= static_cast<uint32_t>(ShaderInstructionType::VCmpxEqF32) &&
 	    value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32))

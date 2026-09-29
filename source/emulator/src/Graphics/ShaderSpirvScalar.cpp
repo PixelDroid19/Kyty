@@ -511,6 +511,42 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_SSaveexecB32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!operand_is_variable(inst.dst) || inst.dst.size != 1 || inst.src_num != 1)
+	{
+		return false;
+	}
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Uint) { return false; }
+	const auto index_string = String8::FromPrintf("%u", index);
+	String8 load;
+	if (!operand_load_uint(spirv, inst.src[0], "saveexec_source_<index>", index_string, &load))
+	{
+		return false;
+	}
+	// Read both operands before saving EXEC, including when source and destination alias.
+	// The B32 form preserves EXEC_HI and derives SCC from the new EXEC_LO alone.
+	*dst_source += String8(R"(
+<load>
+%saveexec_old_<index> = OpLoad %uint %exec_lo
+<operation>
+OpStore %<destination> %saveexec_old_<index>
+OpStore %exec_lo %saveexec_new_<index>
+<execz>
+%saveexec_nonzero_<index> = OpINotEqual %bool %saveexec_new_<index> %uint_0
+%saveexec_scc_<index> = OpSelect %uint %saveexec_nonzero_<index> %uint_1 %uint_0
+OpStore %scc %saveexec_scc_<index>
+)")
+	                   .ReplaceStr("<load>", load)
+	                   .ReplaceStr("<operation>", param[0])
+	                   .ReplaceStr("<destination>", destination.value)
+	                   .ReplaceStr("<execz>", EXECZ)
+	                   .ReplaceStr("<index>", index_string);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_SSaveexecB64_Sdst2Ssrc02)
 {
 	const auto& inst = code.GetInstructions().At(index);

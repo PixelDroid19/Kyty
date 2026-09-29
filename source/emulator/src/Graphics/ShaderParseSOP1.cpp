@@ -276,6 +276,28 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
+		case 0x3c:
+		case 0x3d:
+		case 0x3e:
+		case 0x3f:
+		case 0x40:
+		case 0x41:
+		case 0x42:
+		case 0x43:
+		case 0x44:
+		case 0x45:
+		{
+			if (!next_gen) { KYTY_UNKNOWN_OP(); }
+			static constexpr ShaderInstructionType types[] = {
+			    ShaderInstructionType::SAndSaveexecB32, ShaderInstructionType::SOrSaveexecB32,
+			    ShaderInstructionType::SXorSaveexecB32, ShaderInstructionType::SAndn2SaveexecB32,
+			    ShaderInstructionType::SOrn2SaveexecB32, ShaderInstructionType::SNandSaveexecB32,
+			    ShaderInstructionType::SNorSaveexecB32, ShaderInstructionType::SXnorSaveexecB32,
+			    ShaderInstructionType::SAndn1SaveexecB32, ShaderInstructionType::SOrn1SaveexecB32};
+			inst.type   = types[opcode - 0x3c];
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
+			break;
+		}
 
 		default: KYTY_UNKNOWN_OP();
 	}
