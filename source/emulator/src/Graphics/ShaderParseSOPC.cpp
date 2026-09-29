@@ -72,6 +72,13 @@ KYTY_SHADER_PARSER(shader_parse_sopc)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
+		case 0x12:
+			EXIT_NOT_IMPLEMENTED(!next_gen);
+			inst.type        = ShaderInstructionType::SCmpEqU64;
+			inst.format      = ShaderInstructionFormat::Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
+			break;
 		case 0x13:
 			EXIT_NOT_IMPLEMENTED(!next_gen);
 			inst.type        = ShaderInstructionType::SCmpLgU64;

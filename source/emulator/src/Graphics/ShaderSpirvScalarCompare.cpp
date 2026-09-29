@@ -4,10 +4,13 @@
 
 namespace Kyty::Libs::Graphics {
 
-KYTY_RECOMPILER_FUNC(Recompile_SCmpLgU64)
+KYTY_RECOMPILER_FUNC(Recompile_SCmpEqLgU64)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (inst.src_num != 2) { return false; }
+	if (inst.src_num != 2 || (inst.type != ShaderInstructionType::SCmpEqU64 && inst.type != ShaderInstructionType::SCmpLgU64))
+	{
+		return false;
+	}
 	String8 loads;
 	const auto tag = String8::FromPrintf("%u", index);
 	for (int src_index = 0; src_index < 2; ++src_index)
@@ -30,15 +33,18 @@ KYTY_RECOMPILER_FUNC(Recompile_SCmpLgU64)
 			loads += load + "\n";
 		}
 	}
-	// Inequality is true when either half differs. This needs no host Int64
-	// capability and writes only SCC, independent of EXEC.
+	// Equality requires both halves to match; inequality requires either half
+	// to differ. This needs no host Int64 capability and writes only SCC.
+	const bool equal = inst.type == ShaderInstructionType::SCmpEqU64;
 	*dst_source += (loads + String8(R"(
-%cmp64_low_<index> = OpINotEqual %bool %cmp64_word0_<index> %cmp64_word2_<index>
-%cmp64_high_<index> = OpINotEqual %bool %cmp64_word1_<index> %cmp64_word3_<index>
-%cmp64_different_<index> = OpLogicalOr %bool %cmp64_low_<index> %cmp64_high_<index>
-%cmp64_result_<index> = OpSelect %uint %cmp64_different_<index> %uint_1 %uint_0
+%cmp64_low_<index> = <compare> %bool %cmp64_word0_<index> %cmp64_word2_<index>
+%cmp64_high_<index> = <compare> %bool %cmp64_word1_<index> %cmp64_word3_<index>
+%cmp64_combined_<index> = <combine> %bool %cmp64_low_<index> %cmp64_high_<index>
+%cmp64_result_<index> = OpSelect %uint %cmp64_combined_<index> %uint_1 %uint_0
 OpStore %scc %cmp64_result_<index>
-)")).ReplaceStr("<index>", tag);
+)")).ReplaceStr("<index>", tag)
+        .ReplaceStr("<compare>", equal ? "OpIEqual" : "OpINotEqual")
+        .ReplaceStr("<combine>", equal ? "OpLogicalAnd" : "OpLogicalOr");
 	return true;
 }
 
