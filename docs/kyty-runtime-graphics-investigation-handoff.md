@@ -326,6 +326,34 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Fragment row reduction width and helper participation (2026-09-29): the
+  captured pixel program requests wave64 and reduces selected 32-bit lane
+  values through four OR row shifts, a cross-row permutation and reads of
+  lanes 31 and 63. Source values can vary by fragment; the upper half cannot
+  be discarded merely because the host offers at most 32 lanes. A canonical
+  reduction with lower-half contribution 1 and upper-half contribution 2
+  produces 3 in wave64 and 1 after dropping the upper half. This excludes an
+  unconditional narrower shuffle or selector mask as an equivalent lowering.
+  The aggregate reaches two later lighting branches, so its consumers have
+  not been proven width independent.
+
+  The compared partial-wave fragment reference deliberately excludes DPP row
+  reads, and a separate program-specific wave32 override does not match this
+  captured program. Neither establishes a general guest-width contract.
+  Vulkan's shader execution specification provides a distinct helper rule:
+  `MaximallyReconvergesKHR` keeps helpers active for group operations during
+  their quad scope; without that mode, non-quad operations may exclude them.
+  The captured host reports maximal reconvergence and quad control support,
+  but these features must be enabled before using their execution modes.
+  They address participation and reconvergence, not the missing 64-lane
+  storage or exchanges. Follow the complete guest-wave packing, inactive-lane
+  state and register-lifetime contract before admitting the row reduction.
+  A virtual partially populated wave remains a design hypothesis; it requires
+  a verified packing policy and proof for every ghost-lane read, not an assumed
+  zero tail. No narrower fragment behavior is implemented by this review.
+  [Vulkan shader execution and helper rules](https://docs.vulkan.org/spec/latest/chapters/shaders.html).
+
+
 - Mixed storage-image types at an atomic operation (2026-09-29): the strict
   parser decodes all 1,429 instructions after admitting the observed integer
   atomic addition. Its resource check then rejects the same operation because
