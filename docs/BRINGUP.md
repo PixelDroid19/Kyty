@@ -259,10 +259,12 @@ When switching private fixtures (or adding a second root):
 The clean Silent/Native run stopped after 347 seconds at pixel target 9,
 `DONE=1`, `VM=1`, `COMPR=0`, `EN=0`. RDNA2 defines this NULL export as a
 valid-mask update without a color or depth payload. The decoder now admits
-that form, preserves per-invocation discard, retains the pixel stage and
+that form for Gen5, preserves per-invocation discard, retains the pixel stage and
 omits color outputs for programs whose exports are all NULL. Such programs
 also disable Vulkan color writes: live guest state leaves both CB masks
 enabled, which otherwise permits undefined fragment outputs to reach color.
+Admission is limited to the Gen5 path that carries this export analysis into
+the pipeline's write mask.
 
 The actual failing program now executes. Its generated and optimized SPIR-V
 both pass `spirv-val --target-env vulkan1.2`, with discard and no color output.
