@@ -445,6 +445,73 @@ measurements, not complete pipeline or frame-time results. Full initial masks
 alone therefore do not explain the allocation barrier; no mask optimization
 is activated from these observations.
 
+The matching Intel compiler exposes a host spill-batching option. Its default
+value is eleven; setting `shader_spilling_rate=0` in one external child makes
+each failed allocation spill one value per retry. At sixty allocator entries,
+the unchanged original module reaches 46,886 nodes and 690,323,376 adjacency
+bytes, compared with 72,594 nodes and 1,859,236,448 bytes under the default.
+All 59 completed allocation attempts still fail in both probes. A complete
+pipeline-only retry with the single-spill setting reaches its eight-minute
+runtime limit without completing compilation. It consumes 475.415 CPU seconds
+and peaks at approximately 1.9 GiB; no guest dispatch is queued. Lower spill
+growth therefore does not establish a usable compilation time or an FPS fix.
+No global driver configuration or runtime spill policy is changed. The next
+investigation must measure the live values responsible for allocation failure,
+rather than extend an unbounded sequence of spill retries.
+
+A matching-build read-only probe now checks the allocator owner's live-range
+metadata and class sizes. The original module has 35,438 virtual registers
+and 58,580 backend instructions; its maximum interval overlap is 992 values,
+requiring 2,172 contiguous register units. This is the allocator's conservative
+interval model, not a count of live guest registers. The finite native-phase
+candidate still reaches 761 overlapping values and 1,771 units.
+
+An external rotated Private-array candidate places the same 234 direct locals
+in 936 bytes per invocation, using a stable bijection of array indices. The
+compiler actually reserves 29,952 scratch bytes for its dispatch, but the
+initial graph rises to 51,068 nodes and fails allocation. Its maximum interval
+overlap remains 1,063 values and 2,125 register units. Thus preventing all these
+locals from becoming SSA does not remove the remaining temporary pressure.
+The module validates for Vulkan 1.4, but has not passed GPU equivalence or a
+complete compile and is not activated. Investigation proceeds to temporary
+lifetimes within address-translation helpers rather than another storage-only
+variant.
+
+The owner-checked backend walk identifies all 992 values overlapping the
+original peak. Of them, 588 share the interval from instruction 141 to 58,575,
+almost the entire enclosing dispatcher loop. Their definition histogram
+includes vector selects and additions, single-channel shifts and moves, and
+undef initializations. This locates conservative temporary retention but does
+not map those values to specific guest instructions.
+
+Further external probes keep zero queued guest dispatches:
+
+| Candidate | Initial graph nodes | Maximum interval register units |
+| --- | ---: | ---: |
+| Pack 28 low/high word pairs with a bit-preserving vector cast | 35,442 | 2,172 |
+| Six-level radix lookup retaining full chunk-fit checks | 38,355 | 2,254 |
+| Inline helpers, then clear state dead on the decoded guest CFG | 37,386 | 2,388 |
+| XOR-indexed Private arrays for the original 234 direct locals | 49,630 | 2,101 |
+| XOR-indexed Private arrays for 492 scalar locals after helper inlining | 79,862 | 2,220 |
+
+All modules validate for Vulkan 1.4. The packed-pair variant produces the same
+backend instruction count and initial graph as the original. The radix variant
+removes binary-search loops from the address helper but increases the initial
+pressure, so that helper's loops alone do not explain the barrier. Inlining
+admits previously escaping scalar temporaries to CFG analysis, but adding
+59,887 dead-state clears still increases pressure. Private storage also leaves
+large temporary intervals even after those helpers are inlined. These probes
+do not establish full compilation, GPU equivalence, runtime speed or gameplay;
+none is shipped. The next bounded question is whether rematerializing Private
+slot addresses at use removes their long intervals, within the shared-memory
+limit, before considering any production strategy. That probe now uses 512
+additional shared bytes for stable invocation ownership and requests 324,733
+allocator nodes before its 3 GiB cgroup OOM kill, after 30.409 wall seconds.
+It does not reach live-range measurement. Private-slot rematerialization via
+shared ownership is also excluded. The external probe now stops graph requests
+above 100,000 nodes before allocating them. Production memory and compiler
+policies remain unchanged.
+
 ### Loaded image resource lifetime (2026-09-29, compiler verified)
 
 Sampled-texture and sampler lookup now checks a live mapped load before the
