@@ -326,6 +326,26 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Unsigned normalized pair conversion (2026-09-28): a bounded shader trace
+  found VOP3A opcode `0x369` with two VGPR sources, one VGPR destination, and
+  zero input, output, clamp, and operand-select modifiers. The local RDNA2
+  ISA maps it to `V_CVT_PKNORM_U16_F32`. Commit `f41b2f06` decodes that
+  two-source form and uses the validated SPIR-V `PackUnorm2x16` operation;
+  the old shared emitter omitted the 65535 scale and used a uint as a float.
+  A synthetic red/green parser and SPIR-V validation test passed, and the
+  strict Silent/Native run passed this opcode. The new first failure is VOP3A
+  opcode `0x368` later in the same shader; the ISA calls it the signed
+  normalized pair conversion. This is still logo-stage execution.
+
+- Adjacent packed integer emitters (2026-09-28):
+  `ShaderSpirvVector.cpp:1899` and `:1946` lower the existing packed U16/U32
+  and I16/I32 instructions, respectively. When either is exercised, their
+  generated `OpSelect %float` receives an uncast `%uint` packed value, which
+  fails SPIR-V type validation. They are outside the current strict failure;
+  add a focused lowering test and bitcast the packed word before selection
+  when one becomes live. Do not infer their runtime use from this static
+  finding.
+
 - Paired linear single-store coverage (2026-09-28): the six-parent storage
   image's first shader writes one full-channel pixel for each of 64 paired
   wave64 lanes. Symbolic lane coordinates permute the 8x8 local tile without

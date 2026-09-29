@@ -379,6 +379,19 @@ RDNA2 ISA identifies it as `V_CVT_PKNORM_U16_F32`. Its actual encoded tuple
 and lowering must be verified before adding parser support. The run reached
 only the logo; it did not establish a playable or correctly rendered state.
 
+A bounded trace found two VGPR float sources, a VGPR destination, and no
+modifiers for opcode `0x369`. Commit `f41b2f06` decodes the two-source tuple
+and uses the SPIR-V normalized-pair conversion, which clamps, scales, rounds,
+and packs the first source into the low half. The prior emitter converted
+clamped floats directly to integers and had a float/uint type mismatch.
+The synthetic parser/emitter test failed before the change and passes with
+SPIR-V validation; both affected targets build and the source/table gates
+pass. The strict Silent/Native run passed `0x369` and stopped at the adjacent
+unknown VOP3 opcode `0x368` later in the same program. The local RDNA2 ISA
+identifies that opcode as the signed normalized pair conversion. Verify its
+observed tuple and numeric lowering before enabling it. No gameplay or
+correct-rendering claim follows from this parser advance.
+
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native
