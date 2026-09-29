@@ -1065,11 +1065,13 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	return true;
 }
 
-ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)
+static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input,
+                                                              const ShaderPixelInputInfo* pixel,
+                                                              uint32_t parameter_register = UINT32_MAX)
 {
 	ShaderComputeWaveAnalysisResult result {};
 	const auto&                     instructions = code.GetInstructions();
-	if (code.GetType() != ShaderType::Compute)
+	if (code.GetType() != (pixel == nullptr ? ShaderType::Compute : ShaderType::Pixel))
 	{
 		if (instructions.Size() != 0)
 		{
@@ -1092,12 +1094,24 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& c
 		result.reason = "paired compute-wave code is empty";
 		return result;
 	}
+	if (pixel != nullptr)
+	{
+		const auto parameters = ShaderAnalyzeFragmentParameterBase(code, parameter_register);
+		if (!parameters.supported) { return parameters; }
+	}
 	bool saw_end = false;
 	bool saw_branch = false;
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& instruction = instructions.At(index);
-		auto kind = ShaderClassifyComputeWaveInstruction(instruction);
+		if (pixel != nullptr && (instruction.type == ShaderInstructionType::VInterpP1F32 ||
+		                         instruction.type == ShaderInstructionType::VInterpP2F32) &&
+		    !ShaderFragmentInterpolationPairSupported(code, index, *pixel))
+		{
+			return {false, instruction.pc, "fragment interpolation requires an unobserved pair with unchanged native barycentrics"};
+		}
+		auto kind = pixel == nullptr ? ShaderClassifyComputeWaveInstruction(instruction)
+		                            : ShaderClassifyFragmentWaveInstruction(instruction, *pixel);
 		if (kind == ShaderComputeWaveInstructionKind::Unsupported &&
 		    ShaderPairedEudStorageLoadSupported(instruction, input.bind))
 		{
@@ -1165,7 +1179,7 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& c
 		}
 		if (kind == ShaderComputeWaveInstructionKind::End)
 		{
-			if (index + 1 != instructions.Size())
+			if (pixel == nullptr && index + 1 != instructions.Size())
 			{
 				result.unsupported_pc = instruction.pc;
 				result.reason         = "SEndpgm must be the final paired compute-wave instruction";
@@ -1184,6 +1198,11 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& c
 		result.unsupported_pc = instructions.At(instructions.Size() - 1).pc;
 		result.reason         = "paired compute-wave code has no terminal SEndpgm";
 		return result;
+	}
+	if (pixel != nullptr)
+	{
+		const auto exports = ShaderAnalyzeFragmentExports(code);
+		if (!exports.supported) { return exports; }
 	}
 	// Branch conditions read uniform SCC/VCC/EXEC words, so every branch is
 	// subgroup-uniform and uses the shared control-flow structurizer.
@@ -1219,6 +1238,17 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& c
 		return AnalyzeExtendedBaseLifetime(code, input.bind, extended_base);
 	}
 	return lds_safety;
+}
+
+ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)
+{
+	return AnalyzePairedWaveCode(code, input, nullptr);
+}
+
+ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
+                                                               const ShaderComputeInputInfo& host, uint32_t parameter_register)
+{
+	return AnalyzePairedWaveCode(code, host, &pixel, parameter_register);
 }
 
 } // namespace Kyty::Libs::Graphics

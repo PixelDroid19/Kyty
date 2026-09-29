@@ -125,7 +125,7 @@ void AppendComputeWaveCoordinate(String8* output, const char* coordinate_name, c
 
 bool Spirv::UsesComputeWaveBanks() const
 {
-	return m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr &&
+	return (m_code.GetType() == ShaderType::Compute || UsesFragmentCompute()) && m_cs_input_info != nullptr &&
 	       m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32;
 }
 

@@ -31,6 +31,7 @@ bool IsNativeVgprName(const std::string& id)
 	}
 	for (size_t i = 1; i < id.size(); ++i)
 	{
+		if (id.compare(i, std::string::npos, "_packed_half") == 0) { return i > 1u; }
 		if (std::isdigit(static_cast<unsigned char>(id[i])) == 0)
 		{
 			return false;
@@ -118,6 +119,7 @@ bool RewriteForBank(const std::string& text, const std::set<std::string>& define
 const char* RegisterStoreType(const std::string& name)
 {
 	auto starts = [&](const char* prefix) { return name.rfind(prefix, 0) == 0; };
+	if (starts("v") && name.find("_packed_half_") != std::string::npos) { return "uint"; }
 	if (starts("v") && (name.find("_low") != std::string::npos || name.find("_high") != std::string::npos))
 	{
 		return "float";
@@ -273,6 +275,17 @@ bool Spirv::EmitComputeWaveGenericInstruction(const RecompilerFunc* func, const 
 	// Image templates store native VGPR names. Guard those stores while they
 	// are still recognizable, then rewrite each guard to its bank's EXEC bit.
 	native = GuardImageDestinationStores(native, instruction, index);
+	if (instruction.type == ShaderInstructionType::VCvtPkrtzF16F32)
+	{
+		// An inactive conversion retains the previous VGPR bits. Refresh the
+		// export shadow before the guarded conversion updates either value.
+		const auto retained = String8::FromPrintf(
+		    "%%wave_pk_old_%u = OpLoad %%float %%v%d\n"
+		    "%%wave_pk_raw_%u = OpBitcast %%uint %%wave_pk_old_%u\n"
+		    "OpStore %%v%d_packed_half %%wave_pk_raw_%u\n",
+		    index, instruction.dst.register_id, index, index, instruction.dst.register_id, index);
+		native = retained + native;
+	}
 	const std::string text(native.c_str());
 	const auto        defined = DefinedIds(text);
 	const auto        zero    = GetConstantUint(0u);

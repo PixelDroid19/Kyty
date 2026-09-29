@@ -5,8 +5,9 @@
 The current renderer cannot execute a guest fragment wave wider than the
 host subgroup when the program observes values from both halves. The current
 strict compiler stop is a full-mask OR row shift, followed by a cross-row
-permutation and scalar reads of lanes 31 and 63. Decoding is complete for the
-captured program; lowering and guest execution are not.
+permutation and scalar reads of lanes 31 and 63. An explicit paired compute
+compiler now translates the complete captured pixel input; the renderer has
+not yet selected or executed that strategy.
 
 A separate Vulkan 1.4 experiment has verified one prerequisite on the current
 host: exporting complete native fragment quads, including helper values, to a
@@ -220,12 +221,55 @@ and 36,824 observations across 35 modules, with zero differences. Boundary
 and graphics-table provenance gates also pass; unit tests remain deferred
 until the requested gameplay checkpoint.
 
-## Compiler integration gaps
+## Explicit fragment compiler
 
-The program still needs pixel interpolation and exports. Pixel exports
-must update resolve coverage instead of terminating a helper invocation with
-`OpKill`. These are explicit adapters, not permission to classify pixel IR as
-guest compute code.
+`SpirvGenerateFragmentComputeSource` retains the guest Pixel stage and its
+bindings while choosing a host Compute scaffold. The caller supplies separate
+allocated, initial EXEC and coverage masks, raw initial VGPR words and sixteen
+words per attribute: four native interpolants and twelve P10/P20/P0 parameter
+words. An optional wave header supplies the raw parameter-state SGPR located
+after the user SGPRs (ISA section 3.12.2). It and the parameter triples must
+describe the same parameter cache. M0 initialization must stay in the entry
+prefix, and later copies cannot read an overwritten system register. Reusing
+the SGPR after copying it to M0 is allowed.
+
+Ordinary P1/P2 pairs use the native final attribute only when the intermediate
+destination is unobserved, execution stays unchanged and I/J retain their
+initial native values until each instruction consumes them. P1 may overwrite
+I after consuming it; requiring I to stay unchanged through P2 incorrectly
+rejected a captured pair. Other arithmetic interpolation remains unsupported.
+Parameter moves load the actual captured raw words. Each output lane has
+34 words: pixel validity, an MRT component mask and 32 raw color components.
+
+EXP decoding preserves VM, DONE and COMPR instead of relying on coarse format
+names. VM changes validity without requiring color data; an export with VM=0
+preserves the last validity update. Every reachable termination path must have
+VM and DONE exports. Compressed channel enables admit only complete pairs.
+Packed-half shadows are distinct for both banks and are refreshed from the
+retained VGPR before a masked conversion. A later EXEC restore can export
+lanes that did not convert; the original replay had 160 zero-value differences
+without this refresh, and none after it. Storage writes, atomics,
+LDS, barriers and unsupported exports remain rejected. Multiple exits flush
+once through the shared dispatcher exit; no helper invocation is killed.
+
+The complete private pixel input contains 2,300 instructions and generates
+286,670 SPIR-V words with a Compute entry, linear derivative groups and no
+OpKill. The module assembles and validates for Vulkan 1.4. An original GPU
+replay passes 19 modules, 160 cases and 356,862 output-word comparisons with
+zero differences. It covers distinct bank inputs, helper allocation and
+coverage, WQM, parameter state, partial color pairs, VM updates, multiple
+terminal blocks, two waves, excess dispatch groups and undersized buffers.
+Fifteen malformed cases fail admission; later SGPR reuse is a passing control.
+
+The [Vulkan quad contract](https://docs.vulkan.org/spec/latest/chapters/shaders.html)
+places each compute derivative quad in one subgroup with four consecutive,
+four-aligned subgroup indices. The generated bank layout preserves those
+quads. Execution requires enabled linear compute derivatives and full
+physical subgroups of 32. The interface does not enable those host features
+or select a renderer path. Real compact capture and native resolve remain
+necessary before guest execution or performance can be accepted.
+
+### Shared floating DPP source mask
 
 The generic bank wrapper now supplies the complete architectural EXEC word
 to quad DPP source loads. FI=0 selects zero for an inactive source before

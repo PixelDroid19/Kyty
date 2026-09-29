@@ -292,7 +292,7 @@ String8 Spirv::BlockDispatchEpilog() const
 		source += "%cf_done = OpCopyObject %bool %cf_ended\n";
 	}
 	source += "OpBranchConditional %cf_done %cf_merge %cf_header\n%cf_merge = OpLabel\n";
-	source += UsesBarrierPhases() ? BarrierPhaseJoin() : String8("OpReturn\n");
+	source += UsesBarrierPhases() ? BarrierPhaseJoin() : FragmentEpilog() + "OpReturn\n";
 	return source;
 }
 

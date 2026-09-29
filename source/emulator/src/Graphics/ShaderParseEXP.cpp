@@ -33,6 +33,7 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 
 	inst.type = ShaderInstructionType::Exp;
 	inst.exp_enable_mask = static_cast<uint8_t>(en);
+	inst.exp_control = static_cast<uint8_t>(vm | (done << 1u) | (compr << 2u));
 
 	// Color MRT targets 0x00-0x03 (mrt_color0..3). Compressed half2 uses two
 	// VGPRs (en=0xf, compr=1); full float uses four. Captured Gen5 also exports

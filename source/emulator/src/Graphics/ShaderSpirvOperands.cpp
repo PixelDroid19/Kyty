@@ -423,7 +423,7 @@ static bool operand_dpp_permute_uint(Spirv* spirv, const ShaderOperand& op, cons
 	// shuffle may treat them as inactive, losing values needed at primitive edges.
 	// Constant broadcast indices also work with pre-SPIR-V-1.5 toolchains.
 	String8 exchange;
-	if (spirv->GetCode().GetType() == ShaderType::Pixel)
+	if (spirv->GetHostShaderType() == ShaderType::Pixel)
 	{
 		uint32_t selected_lanes = 0;
 		for (uint32_t lane = 0; lane < 4; ++lane)

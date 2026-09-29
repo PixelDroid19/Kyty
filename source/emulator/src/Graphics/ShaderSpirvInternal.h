@@ -34,6 +34,7 @@
 #include <string>
 
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -110,6 +111,21 @@ public:
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
 	[[nodiscard]] bool UsesComputeWaveBanks() const;
+	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
+	[[nodiscard]] ShaderType GetHostShaderType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
+	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
+	[[nodiscard]] String8 FragmentTransportAnnotations() const;
+	[[nodiscard]] String8 FragmentTransportTypes() const;
+	[[nodiscard]] String8 FragmentTransportVariables() const;
+	[[nodiscard]] String8 FragmentLocalVariables() const;
+	[[nodiscard]] String8 FragmentProlog() const;
+	[[nodiscard]] String8 FragmentEpilog() const;
+	[[nodiscard]] bool EmitFragmentInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, ShaderWaveBank bank,
+	                                              const String8& tag, String8* output) const;
+	[[nodiscard]] bool EmitFragmentExport(const ShaderInstruction& instruction, uint32_t index, ShaderWaveBank bank,
+	                                       const String8& tag, String8* output) const;
+	void FindFragmentConstants();
 	[[nodiscard]] bool EmitComputeWaveLaneInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveDppInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWavePermutation(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
@@ -350,6 +366,7 @@ private:
 	const ShaderVertexInputInfo*  m_vs_input_info = nullptr;
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
+	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;

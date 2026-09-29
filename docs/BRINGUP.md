@@ -254,6 +254,40 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Fragment wave compiler (2026-09-29, compiler and GPU replay verified)
+
+An explicit compiler interface retains guest Pixel IR and metadata while
+emitting a host compute module with paired wave64 execution on a full physical
+subgroup32. Bounded inputs carry allocated lanes, initial EXEC, coverage,
+initial vector words, native attributes and raw parameter triples. Optional
+per-wave parameter state initializes the system SGPR identified by the PS
+user-SGPR count. Its entry copy to M0 must preserve the parameter-cache
+identity; later reuse of that SGPR after the copy is allowed.
+
+EXP decoding now retains VM, DONE and COMPR. Compressed masks are restricted
+to complete half pairs. VM updates pixel validity independently of color,
+and every termination path must have VM and DONE exports. Helpers continue
+through guest branches; several terminal blocks converge on one output
+epilog without OpKill. Storage writes, LDS, atomics, barriers and unverified
+interpolation pairs remain rejected.
+
+The complete 2,300-instruction private pixel input generates a 286,670-word
+module that passes assembly and validation for Vulkan 1.4. An original GPU
+replay checks 19 modules, 160 cases and 356,862 output words against independent
+references with zero differences, including both banks, WQM helpers, partial
+exports, VM changes, multiple exits, multiple waves, excess dispatch groups
+and truncated buffers. A masked packed conversion followed by EXEC restore
+previously exported zero instead of retained VGPR bits (160 replay differences);
+refreshing each bank's shadow before conversion eliminates those differences.
+Fifteen malformed cases are rejected; a control case
+permits SGPR reuse after its M0 copy. The existing paired-wave replay still
+passes 320 cases and 42,064 register observations.
+
+This interface does not enable the renderer strategy. Compact raster capture,
+required host feature enablement, native MRT/stencil resolve and strict guest
+execution of the new module remain pending. There is no new guest FPS or
+gameplay claim from these results. Unit suites remain deferred as requested.
+
 ### Loaded image resource lifetime (2026-09-29, compiler verified)
 
 Sampled-texture and sampler lookup now checks a live mapped load before the
@@ -271,7 +305,7 @@ and frame time remain unverified.
 Shared paired execution now implements bitwise DPP rows and row-table
 permutations with architectural source EXEC and destination masks, signed
 SDWA integer conversion, whole-quad masks and inactive image destination
-preservation. The combined Vulkan 1.4 GPU replay covers 280 cases and 36,824
+preservation. The combined Vulkan 1.4 GPU replay covers 320 cases and 42,064
 register observations with zero differences against independent ISA
 references. Eight malformed DPP tuples are rejected. The local Linux build,
 emulator boundary gate and graphics-table provenance gate pass. Details and

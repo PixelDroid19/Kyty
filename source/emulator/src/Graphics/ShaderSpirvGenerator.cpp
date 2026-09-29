@@ -201,7 +201,9 @@ void Spirv::GenerateSource()
 	m_source.Clear();
 	if (UsesComputeWaveBanks())
 	{
-		const auto analysis = ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		const auto analysis = UsesFragmentCompute() ? ShaderAnalyzeFragmentWaveCode(m_code, *m_ps_input_info, *m_cs_input_info,
+		                                                                              m_fragment_compute_info->user_sgpr_count)
+		                                           : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
 			EXIT("paired-wave instruction contract unsupported: pc=0x%08" PRIx32 " reason=%s\n",
@@ -428,6 +430,15 @@ void Spirv::WriteHeader()
 
 	imports.Add("%GLSL_std_450 = OpExtInstImport \"GLSL.std.450\"");
 
+	if (UsesFragmentCompute())
+	{
+		capabilities.Add("OpCapability ComputeDerivativeGroupLinearKHR");
+		extensions.Add("OpExtension \"SPV_KHR_compute_shader_derivatives\"");
+		execution_modes.Add("OpExecutionMode %main DerivativeGroupLinearKHR");
+		vars.Add("%fragment_input");
+		vars.Add("%fragment_output");
+	}
+
 	if (UsesVertexLayerExport())
 	{
 		capabilities.Add("OpCapability ShaderLayer");
@@ -443,11 +454,11 @@ void Spirv::WriteHeader()
 	if (spirv_uses_subgroup_invocation(m_code) || spirv_uses_wave_branch_vote(m_code) || UsesSparsePixelSampleProbe() || UsesComputeWaveBanks())
 	{
 		capabilities.Add("OpCapability GroupNonUniform");
-		if ((spirv_uses_dpp(m_code) && m_code.GetType() != ShaderType::Pixel) || spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks())
+		if ((spirv_uses_dpp(m_code) && GetHostShaderType() != ShaderType::Pixel) || spirv_uses_lane_exchange(m_code) || UsesComputeWaveBanks())
 		{
 			capabilities.Add("OpCapability GroupNonUniformShuffle");
 		}
-		if (spirv_uses_dpp(m_code) && m_code.GetType() == ShaderType::Pixel)
+		if (spirv_uses_dpp(m_code) && GetHostShaderType() == ShaderType::Pixel)
 		{
 			capabilities.Add("OpCapability GroupNonUniformQuad");
 		}
@@ -563,7 +574,7 @@ void Spirv::WriteHeader()
 		}
 	}
 
-	switch (m_code.GetType())
+	switch (GetHostShaderType())
 	{
 		case ShaderType::Pixel:
 			// Location 0 always uses %outColor (legacy name). Additional RTs that
@@ -692,6 +703,7 @@ void Spirv::WriteDebug()
 
 void Spirv::WriteAnnotations()
 {
+	m_source += FragmentTransportAnnotations();
 	static const char* pixel_annotations   = R"(
                ; Annotations
                <Variables>
@@ -776,7 +788,7 @@ void Spirv::WriteAnnotations()
 	if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks())
 	{
 		vars.Add("OpDecorate %gl_SubgroupInvocationID BuiltIn SubgroupLocalInvocationId");
-		if (m_code.GetType() == ShaderType::Pixel)
+		if (GetHostShaderType() == ShaderType::Pixel)
 		{
 			vars.Add("OpDecorate %gl_SubgroupInvocationID Flat");
 		}
@@ -786,7 +798,7 @@ void Spirv::WriteAnnotations()
 		vars.Add("OpDecorate %gl_SubgroupID BuiltIn SubgroupId");
 	}
 
-	switch (m_code.GetType())
+	switch (GetHostShaderType())
 	{
 		case ShaderType::Pixel:
 			if (!ShaderHasOnlyNullPixelExports(m_code)) { vars.Add("OpDecorate %outColor Location 0"); }
@@ -1168,13 +1180,14 @@ static const char* compute_types = R"(
 	}
 	m_source += optional_types;
 	m_source += types;
+	m_source += FragmentTransportTypes();
 	// Guest addressing types build on %uint from the base types.
 	if (UsesGuestDeviceAddress())
 	{
 		m_source += GuestDeviceAddressTypes(spirv_uses_f64(m_code));
 	}
 
-	switch (m_code.GetType())
+	switch (GetHostShaderType())
 	{
 		case ShaderType::Vertex: m_source += vertex_types; break;
 		case ShaderType::Pixel:
@@ -1198,7 +1211,7 @@ static const char* compute_types = R"(
 		m_source += vertex_clip_probe_types;
 	}
 
-	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
+	if (GetHostShaderType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
 	{
 		m_source += String8(R"(
                   %lds_length = OpConstant %uint <lds_dwords>
@@ -1443,6 +1456,7 @@ void Spirv::WriteConstants()
 
 void Spirv::WriteGlobalVariables()
 {
+	m_source += FragmentTransportVariables();
 	static const char* pixel_variables   = R"(
               ;Variables
                <Variables>
@@ -1475,11 +1489,11 @@ void Spirv::WriteGlobalVariables()
 		vars.Add("%vertex_clip_probe = OpVariable %_ptr_StorageBuffer_VertexClipProbeRawStats StorageBuffer");
 	}
 
-	if (m_code.GetType() == ShaderType::Pixel && !ShaderHasOnlyNullPixelExports(m_code))
+	if (GetHostShaderType() == ShaderType::Pixel && !ShaderHasOnlyNullPixelExports(m_code))
 	{
 		vars.Add("%outColor = OpVariable %_ptr_Output_v4float Output");
 	}
-	if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && !ShaderHasOnlyNullPixelExports(m_code))
+	if (GetHostShaderType() == ShaderType::Pixel && m_ps_input_info != nullptr && !ShaderHasOnlyNullPixelExports(m_code))
 	{
 		for (int rt = 1; rt < 8; rt++)
 		{
@@ -1489,7 +1503,7 @@ void Spirv::WriteGlobalVariables()
 			}
 		}
 	}
-	if (m_code.GetType() == ShaderType::Pixel && ShaderCodeHasSafePixelDepthExport(m_code))
+	if (GetHostShaderType() == ShaderType::Pixel && ShaderCodeHasSafePixelDepthExport(m_code))
 	{
 		vars.Add("%fragDepth = OpVariable %_ptr_Output_float Output");
 	}
@@ -1567,7 +1581,7 @@ void Spirv::WriteGlobalVariables()
 		}
 	}
 
-	if (m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
+	if (GetHostShaderType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->lds_dwords > 0)
 	{
 		vars.Add("%lds = OpVariable %_ptr_Workgroup_lds_array_uint Workgroup");
 	}
@@ -1576,7 +1590,7 @@ void Spirv::WriteGlobalVariables()
 		vars.Add("%cf_phase_flags = OpVariable %cf_phase_array_ptr Workgroup");
 	}
 
-	switch (m_code.GetType())
+	switch (GetHostShaderType())
 	{
 		case ShaderType::Pixel:
 			if (m_ps_input_info != nullptr)
@@ -1720,7 +1734,14 @@ void Spirv::WriteLocalVariables()
 	}
 	for (auto reg: packed_half_regs)
 	{
-		m_source += String8::FromPrintf("%%v%d_packed_half = OpVariable %%_ptr_Function_uint Function\n", reg);
+		if (UsesComputeWaveBanks())
+		{
+			m_source += String8::FromPrintf("%%v%d_packed_half_low = OpVariable %%_ptr_Function_uint Function\n"
+			                                "%%v%d_packed_half_high = OpVariable %%_ptr_Function_uint Function\n", reg, reg);
+		} else
+		{
+			m_source += String8::FromPrintf("%%v%d_packed_half = OpVariable %%_ptr_Function_uint Function\n", reg);
+		}
 	}
 	std::set<std::pair<int, int>> scalar_spill_slots;
 	for (const auto& inst: m_code.GetInstructions())
@@ -1749,6 +1770,7 @@ void Spirv::WriteLocalVariables()
 		}
 	}
 
+	m_source += FragmentLocalVariables();
 	static const char* common_vars = R"(
              %temp_float = OpVariable %_ptr_Function_float Function
            %temp_v2float = OpVariable %_ptr_Function_v2float Function
@@ -1784,7 +1806,13 @@ void Spirv::WriteLocalVariables()
 	}
 	for (auto reg: packed_half_regs)
 	{
-		m_source += String8::FromPrintf("               OpStore %%v%d_packed_half %%uint_0\n", reg);
+		if (UsesComputeWaveBanks())
+		{
+			m_source += String8::FromPrintf("OpStore %%v%d_packed_half_low %%uint_0\nOpStore %%v%d_packed_half_high %%uint_0\n", reg, reg);
+		} else
+		{
+			m_source += String8::FromPrintf("OpStore %%v%d_packed_half %%uint_0\n", reg);
+		}
 	}
 
 	if (m_code.GetType() == ShaderType::Vertex)
@@ -1813,7 +1841,7 @@ void Spirv::WriteLocalVariables()
 		}
 	}
 
-	if (m_code.GetType() == ShaderType::Pixel)
+	if (m_code.GetType() == ShaderType::Pixel && !UsesFragmentCompute())
 	{
 		if (m_ps_input_info != nullptr && m_ps_input_info->ps_pos_xy && !m_ps_input_info->custom_interpolation.Enabled())
 		{
@@ -1852,8 +1880,14 @@ void Spirv::WriteLocalVariables()
 		}
 	}
 
-	WriteCustomPixelProlog();
-	WritePixelFrontFaceProlog();
+	if (UsesFragmentCompute())
+	{
+		m_source += FragmentProlog();
+	} else
+	{
+		WriteCustomPixelProlog();
+		WritePixelFrontFaceProlog();
+	}
 
 	if (m_code.GetType() == ShaderType::Compute)
 	{
@@ -2125,7 +2159,14 @@ void Spirv::WriteLocalVariables()
                OpStore %scc %uint_0
 	)";
 
-	if (UsesComputeWaveBanks())
+	if (UsesFragmentCompute())
+	{
+		m_source += "OpStore %exec_lo %fragment_initial_exec_lo\nOpStore %exec_hi %fragment_initial_exec_hi\n"
+		            "%fragment_initial_exec_mask = OpBitwiseOr %uint %fragment_initial_exec_lo %fragment_initial_exec_hi\n"
+		            "%fragment_initial_exec_empty = OpIEqual %bool %fragment_initial_exec_mask %uint_0\n"
+		            "%fragment_initial_execz = OpSelect %uint %fragment_initial_exec_empty %uint_1 %uint_0\n"
+		            "OpStore %execz %fragment_initial_execz\nOpStore %scc %uint_0\n";
+	} else if (UsesComputeWaveBanks())
 	{
 		// Initial EXEC holds exactly the lanes that exist in this guest wave.
 		m_source += "OpStore %exec_lo %wave_valid_lo\nOpStore %exec_hi %wave_valid_hi\n"
@@ -2364,10 +2405,12 @@ static bool InstructionWritesExec(const ShaderInstruction& inst)
 
 void Spirv::WriteInstructions()
 {
-	ModifyCode();
+	if (!UsesComputeWaveBanks()) { ModifyCode(); }
 	if (UsesComputeWaveBanks())
 	{
-		const auto analysis = ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
+		const auto analysis = UsesFragmentCompute() ? ShaderAnalyzeFragmentWaveCode(m_code, *m_ps_input_info, *m_cs_input_info,
+		                                                                              m_fragment_compute_info->user_sgpr_count)
+		                                           : ShaderAnalyzeComputeWaveCode(m_code, *m_cs_input_info);
 		if (!analysis.supported)
 		{
 			EXIT("paired-wave transformed instruction unsupported: pc=0x%08" PRIx32 " reason=%s\n",
@@ -2423,9 +2466,13 @@ void Spirv::WriteInstructions()
 
 		const auto* func = RecompFunc(inst.type, inst.format);
 
-		const auto wave_kind = UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
+		const auto wave_kind = UsesFragmentCompute() ? ShaderClassifyFragmentWaveInstruction(inst, *m_ps_input_info)
+		                      : UsesComputeWaveBanks() ? ShaderClassifyComputeWaveInstruction(inst)
 		                                             : ShaderComputeWaveInstructionKind::Unsupported;
-		if (wave_kind == ShaderComputeWaveInstructionKind::BankedVector || wave_kind == ShaderComputeWaveInstructionKind::WaveLane ||
+		if (wave_kind == ShaderComputeWaveInstructionKind::PixelInterpolation || wave_kind == ShaderComputeWaveInstructionKind::PixelExport)
+		{
+			ok = EmitFragmentInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedVector || wave_kind == ShaderComputeWaveInstructionKind::WaveLane ||
 		    wave_kind == ShaderComputeWaveInstructionKind::BankedSdwaExtract)
 		{
 			ok = EmitComputeWaveLaneInstruction(inst, static_cast<uint32_t>(index), &dst);
@@ -2470,6 +2517,7 @@ void Spirv::WriteInstructions()
 		{
 			EXIT_IF(func->type != inst.type);
 			EXIT_IF(func->format != inst.format);
+			if (UsesFragmentCompute() && inst.type == ShaderInstructionType::SEndpgm) { dst += FragmentEpilog(); }
 			ok = func->func(index, m_code, &dst, this, func->param, func->scc_check);
 		}
 
@@ -3025,6 +3073,7 @@ void Spirv::FindConstants()
 			}
 		}
 	}
+	FindFragmentConstants();
 }
 
 void Spirv::FindVariables()
@@ -3089,7 +3138,15 @@ void Spirv::FindVariables()
 		}
 	}
 
-	if (m_cs_input_info != nullptr)
+	if (UsesFragmentCompute())
+	{
+		AddVariable(ShaderOperandType::Vgpr, 0, static_cast<int>(m_fragment_compute_info->initial_vgpr_count));
+		if (m_fragment_compute_info->user_sgpr_count != UINT32_MAX)
+		{
+			AddVariable(ShaderOperandType::Sgpr, static_cast<int>(m_fragment_compute_info->user_sgpr_count), 1);
+		}
+	}
+	if (m_cs_input_info != nullptr && !UsesFragmentCompute())
 	{
 		AddVariable(ShaderOperandType::Vgpr, 0, 3);
 		AddVariable(ShaderOperandType::Sgpr, m_cs_input_info->workgroup_register, 3);

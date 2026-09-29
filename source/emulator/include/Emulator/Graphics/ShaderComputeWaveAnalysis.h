@@ -49,6 +49,8 @@ enum class ShaderComputeWaveInstructionKind
 	BankedCarry,
 	// DPP moves and bitwise ALU with architectural source and destination masks.
 	BankedDpp,
+	PixelInterpolation,
+	PixelExport,
 };
 
 struct ShaderComputeWaveAnalysisResult
@@ -60,6 +62,15 @@ struct ShaderComputeWaveAnalysisResult
 
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const ShaderInstruction& instruction);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
+[[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
+                                                                            const ShaderComputeInputInfo& host,
+                                                                            uint32_t parameter_register = UINT32_MAX);
+[[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyFragmentWaveInstruction(const ShaderInstruction& instruction,
+                                                                                     const ShaderPixelInputInfo& pixel);
+[[nodiscard]] bool ShaderFragmentInterpolationPairSupported(const ShaderCode& code, uint32_t index, const ShaderPixelInputInfo& pixel);
+[[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentParameterBase(const ShaderCode& code,
+                                                                                 uint32_t parameter_register = UINT32_MAX);
+[[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentExports(const ShaderCode& code);
 // True for the packed U32 compare family whose architectural destination is
 // EXEC (v_cmpx_*_u32). The plain VOPC parse surfaces a VccLo placeholder.
 [[nodiscard]] bool ShaderComputeWaveTypeIsExecCompare(ShaderInstructionType type);

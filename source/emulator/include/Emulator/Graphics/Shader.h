@@ -854,6 +854,8 @@ struct ShaderInstruction
 	uint8_t                         sopp_opcode = 0xffu;
 	ShaderOperand                   src[4];
 	int                             src_num = 0;
+	// EXP control bits: VM, DONE, COMPR. Unknown for other instruction families.
+	uint8_t                         exp_control = 0xffu;
 	ShaderOperand                   dst;
 	ShaderOperand                   dst2;
 	// Preserve VOP3 source-selection controls for exact backend admission.
