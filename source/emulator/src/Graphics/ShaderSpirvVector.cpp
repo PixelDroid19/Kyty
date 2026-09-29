@@ -4201,7 +4201,17 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1)
 KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (inst.type == ShaderInstructionType::VSubrevCoCiU32 && !ShaderReverseBorrowMaskHasProvenance(code, index))
+	const auto* cs_input = spirv->GetCsInputInfo();
+	const bool native_wave32 = cs_input != nullptr && cs_input->wave_layout.strategy == ShaderComputeWaveStrategy::Native &&
+	                           cs_input->wave_layout.guest_wave_size == 32;
+	if (inst.type == ShaderInstructionType::VSubrevCoCiU32 && !ShaderReverseBorrowMaskHasProvenance(code, index, native_wave32))
+	{
+		return false;
+	}
+	const bool single_source = inst.src[2].type == ShaderOperandType::VccHi && inst.src[2].size == 1;
+	const bool single_destination = inst.dst2.type == ShaderOperandType::VccHi && inst.dst2.size == 1;
+	if ((!native_wave32 && (single_source || single_destination)) || (!single_source && inst.src[2].size != 2) ||
+	    (!single_destination && inst.dst2.size != 2))
 	{
 		return false;
 	}
@@ -4226,8 +4236,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	if (inst.dst.clamp || inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp || inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
 
 	auto dst_value   = operand_variable_to_str(inst.dst);
-	auto dst2_value0 = operand_variable_to_str(inst.dst2, 0);
-	auto dst2_value1 = operand_variable_to_str(inst.dst2, 1);
+	auto dst2_value0 = single_destination ? operand_variable_to_str(inst.dst2) : operand_variable_to_str(inst.dst2, 0);
+	auto dst2_value1 = native_wave32 ? SpirvValue {} : operand_variable_to_str(inst.dst2, 1);
 
 	if (operand_is_exec(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst2) condition ignored (continuing)\n"); }
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -4241,12 +4251,12 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[2], "t2_<index>", index_str, &load2, 0))
+	if (!operand_load_uint(spirv, inst.src[2], "t2_<index>", index_str, &load2, single_source ? -1 : 0))
 	{
 		return false;
 	}
 
-	// V_ADD_CO_CI_U32 uses the VOP3B scalar source pair as a per-lane carry-in.
+	// V_ADD_CO_CI_U32 uses the VOP3B scalar source as a per-lane carry-in.
 	// The shared addc helper returns the modular sum and carry-out as uvec2.
 	static const char* add_text = R"(
               <load0>
@@ -4262,7 +4272,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
         %t213_<index> = OpSelect %uint %exec_lo_b_<index> %t208_<index> %uint_0
                OpStore %<dst2_0> %t213_<index>
-               OpStore %<dst2_1> %uint_0
+               <clear_high>
 )";
 	// VCC/scalar mask values are scalarized by this backend: nonzero means a
 	// borrow bit of one. Normalize before the second subtraction; subtracting
@@ -4292,7 +4302,7 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
                OpStore %<dst> %subrev_dst_<index>
         %t213_<index> = OpSelect %uint %exec_lo_b_<index> %t208_<index> %uint_0
                OpStore %<dst2_0> %t213_<index>
-               OpStore %<dst2_1> %uint_0
+               <clear_high>
 )";
 	const char* text = nullptr;
 	switch (inst.type)
@@ -4301,10 +4311,13 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 		case ShaderInstructionType::VSubrevCoCiU32: text = subrev_text; break;
 		default: return false;
 	}
+	// A wave32 carry writes one word. The adjacent scalar word can hold
+	// another live mask, including a comparison explicitly stored in VCC_HI.
+	const auto clear_high = native_wave32 ? String8 {} : String8("OpStore %<dst2_1> %uint_0").ReplaceStr("<dst2_1>", dst2_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<dst2_0>", dst2_value0.value)
-	                   .ReplaceStr("<dst2_1>", dst2_value1.value)
+	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<load2>", load2)

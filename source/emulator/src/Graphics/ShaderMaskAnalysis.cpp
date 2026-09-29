@@ -82,9 +82,46 @@ bool ShaderInstructionBreaksStraightLineProof(ShaderInstructionType type)
 	       type == ShaderInstructionType::SSwappcB64 || type == ShaderInstructionType::SEndpgm;
 }
 
+bool ShaderInstructionWritesVccHigh(const ShaderInstruction& inst)
+{
+	const auto overlaps_high = [](const ShaderOperand& operand)
+	{
+		return operand.type == ShaderOperandType::VccHi || (operand.type == ShaderOperandType::VccLo && operand.size >= 2);
+	};
+	// Native wave32 carry output occupies one scalar word, including the
+	// implicit VCC_LO destination of a VOP2 instruction.
+	const bool single_carry = inst.type == ShaderInstructionType::VAddCoCiU32 || inst.type == ShaderInstructionType::VSubrevCoCiU32;
+	return overlaps_high(inst.dst) || inst.dst2.type == ShaderOperandType::VccHi || (!single_carry && overlaps_high(inst.dst2));
+}
+
+bool ShaderReverseBorrowVccHighHasProvenance(const ShaderCode& code, uint32_t instruction_index)
+{
+	const auto& instructions = code.GetInstructions();
+	if (ShaderCodeHasLabelTarget(code, instructions.At(instruction_index).pc))
+	{
+		return false;
+	}
+	for (uint32_t candidate_index = instruction_index; candidate_index > 0;)
+	{
+		const auto& candidate = instructions.At(--candidate_index);
+		if (ShaderInstructionWritesVccHigh(candidate))
+		{
+			return ShaderInstructionIsScalarBooleanCompare(candidate.type) &&
+			       candidate.format == ShaderInstructionFormat::SmaskVsrc0Vsrc1 && candidate.src_num == 2 &&
+			       candidate.dst.type == ShaderOperandType::VccHi && candidate.dst.size == 1 &&
+			       candidate.dst2.type == ShaderOperandType::Unknown;
+		}
+		if (ShaderInstructionBreaksStraightLineProof(candidate.type) || ShaderCodeHasLabelTarget(code, candidate.pc))
+		{
+			return false;
+		}
+	}
+	return false;
+}
+
 } // namespace
 
-bool ShaderReverseBorrowMaskHasProvenance(const ShaderCode& code, uint32_t instruction_index)
+bool ShaderReverseBorrowMaskHasProvenance(const ShaderCode& code, uint32_t instruction_index, bool native_wave32)
 {
 	const auto& instructions = code.GetInstructions();
 	if (instruction_index >= instructions.Size())
@@ -93,12 +130,20 @@ bool ShaderReverseBorrowMaskHasProvenance(const ShaderCode& code, uint32_t instr
 	}
 
 	const auto& consumer = instructions.At(instruction_index);
-	if (consumer.type != ShaderInstructionType::VSubrevCoCiU32 || consumer.src_num < 3 || consumer.src[2].size != 2)
+	if (consumer.type != ShaderInstructionType::VSubrevCoCiU32 || consumer.src_num < 3)
 	{
 		return false;
 	}
 
 	const auto& mask = consumer.src[2];
+	if (native_wave32 && mask.type == ShaderOperandType::VccHi && mask.size == 1)
+	{
+		return ShaderReverseBorrowVccHighHasProvenance(code, instruction_index);
+	}
+	if (mask.size != 2)
+	{
+		return false;
+	}
 	if (mask.type == ShaderOperandType::VccLo || mask.type == ShaderOperandType::ExecLo)
 	{
 		return true;

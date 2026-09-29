@@ -700,6 +700,34 @@ which may destroy that independent mask. Verify the wave32 mask-width contract
 against the ISA and retain the captured producer/consumer sequence before
 changing either the guard or the store width.
 
+The captured program reproduces that exact emitter failure independently of
+the runtime. RDNA2 wave32 mask rules and the
+[LLVM GFX10 assembler's wave32/wave64 carry cases](https://github.com/llvm/llvm-project/blob/main/llvm/test/MC/AMDGPU/gfx10_asm_vop2.s)
+confirm that carry inputs and outputs occupy one scalar word in wave32. The
+native compute emitter now preserves the adjacent word, decodes an explicit
+high-VCC operand as one word and requires a same-block comparison producer
+before consuming it as reverse borrow. The full 2,924-instruction program
+validates before and after Vulkan 1.4 optimization; its generated consumer
+loads the original comparison value without an intervening high-word clear.
+A strict Silent/Native run dispatches it at queue 8, sequence 96,168; the
+completion ledger reaches 96,171 on that queue. Native capture 225 preserves
+the opening caption and capture 592 remains uniformly black. The next stop
+is a different 496-instruction compute program at
+`ShaderSpirvImage.cpp:3171`: IMAGE_GET_RESINFO reads a descriptor classified
+as read/write storage, while its emitter only accepts sampled images. The
+captured instruction asks for width and height, and later operations use
+the same storage descriptor. Verify the requested mip and descriptor view
+before implementing the storage-image query. No scene or gameplay output is
+established by the completed carry-mask dispatch. Focused unit tests remain
+deferred until gameplay.
+
+A related summary-operand defect remains unverified in this workload:
+`ShaderSpirvOperands.cpp:573` combines VCC_LO and VCC_HI when reading VCCZ,
+even for a native wave32 dispatch. RDNA2 defines that summary from the low
+word alone in wave32. An independent nonzero high word with a zero low word
+therefore supplies the wrong summary. Capture an actual VCCZ consumer before
+changing its lowering; scalar branch lowering already has a separate path.
+
 ### Integer value references (2026-09-29)
 
 A missing integer getter in `LibJson2.cpp` stops the title-transition caller.
