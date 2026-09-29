@@ -326,6 +326,16 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Mixed storage-image types at an atomic operation (2026-09-29): the strict
+  parser decodes all 1,429 instructions after admitting the observed integer
+  atomic addition. Its resource check then rejects the same operation because
+  it required every writable image to be 2D R32_UINT. The live binding census
+  contains two writable 2D images: four-channel floating-point format 71 for
+  the final store and R32_UINT format 20 for the atomic counter. This excludes
+  a single integer declaration for the whole storage array. Resolve each
+  access's complete descriptor and use the matching SPIR-V image type; the
+  atomic emitter and GPU completion remain unverified at this stop.
+
 - Storage-image descriptor identity (2026-09-29, `2cbcc6dc`): the first
   title-transition store uses a complete T# relocated by four scalar pair
   copies; another loads its T# from the extended table. Static destination
