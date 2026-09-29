@@ -288,6 +288,27 @@ occurrence is already recorded below. Capture the current caller, resource
 dependencies and completed queue sequences before changing synchronization;
 neither skipping write-back nor treating a pending fence as complete is valid.
 
+A subsequent run captures the exact cross-queue state. A compute command
+buffer on queue 7 calls `GuestDeviceAddressWriteBack` through
+`GraphicsRenderBind.cpp:4188`; the selected writable storage object depends
+on queue 8 sequence 48643, while the published completion is 48642. Queue 8
+sequence 48643 is still the graphics processor's active recording buffer,
+not an executing Vulkan submission. `CommandProcessor::DispatchDirect`
+already calls `WriteBack`, but that drains its own compute processor only.
+The later registry-wide storage publication therefore encounters another
+processor's recorded resource use. Capture the access role of that use and
+move exact dependency preparation outside recording/mutation locks before
+publishing host-visible bytes; adding a fence wait inside `BindDescriptors`
+would hold the render lock across the other processor's completion path.
+This run stops before exercising the pending JSON string conversion.
+
+The exercised custom-interpolation program also reads its incoming
+`FRONT_FACE` VGPR. `ShaderSpirvGenerator.cpp:1767` initializes XY position but
+does not initialize that field; the register retains its generic initial
+value. Verify the guest boolean encoding and provide the Vulkan builtin
+before claiming the full pixel system-input contract. The interpolation
+transport work alone does not correct this separate gap.
+
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 
 The bounded native sample probe now observes 2D `ImageSampleLz` RGB and RGBA
