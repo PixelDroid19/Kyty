@@ -444,6 +444,8 @@ bool Spirv::EmitComputeWaveLaneInstruction(const ShaderInstruction& instruction,
 				case ShaderInstructionType::VReadlaneB32: return EmitComputeWaveReadlane(*this, instruction, index, output);
 				case ShaderInstructionType::VWritelaneB32: return EmitComputeWaveWritelane(*this, instruction, index, output);
 				case ShaderInstructionType::VReadfirstlaneB32: return EmitComputeWaveReadfirstlane(*this, instruction, index, output);
+				case ShaderInstructionType::VPermlane16B32:
+				case ShaderInstructionType::VPermlanex16B32: return EmitComputeWavePermutation(instruction, index, output);
 				default: return false;
 			}
 		default: return false;

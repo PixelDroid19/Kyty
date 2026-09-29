@@ -2429,6 +2429,9 @@ void Spirv::WriteInstructions()
 		    wave_kind == ShaderComputeWaveInstructionKind::BankedSdwaExtract)
 		{
 			ok = EmitComputeWaveLaneInstruction(inst, static_cast<uint32_t>(index), &dst);
+		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedDpp)
+		{
+			ok = EmitComputeWaveDppInstruction(inst, static_cast<uint32_t>(index), &dst);
 		} else if (wave_kind == ShaderComputeWaveInstructionKind::BankedLds)
 		{
 			ok = EmitComputeWaveLdsInstruction(inst, static_cast<uint32_t>(index), &dst);
@@ -2783,12 +2786,20 @@ void Spirv::FindConstants()
 		{
 			AddConstantUint(SPIRV_WORKGROUP_MEMORY_ACQ_REL);
 		}
+		if (UsesComputeWaveBanks() &&
+		    (ShaderComputeWaveDppInstructionSupported(inst) || ShaderComputeWavePermutationSupported(inst)))
+		{
+			for (const auto value: {0u, 1u, 2u, 3u, 4u, 7u, 8u, 15u, 16u, 0xfffffff0u}) { AddConstantUint(value); }
+		}
 		for (int i = 0; i < inst.src_num; i++)
 		{
 			if (inst.src[i].dpp)
 			{
 				AddConstantUint(inst.src[i].dpp_ctrl);
 				AddConstantUint(0xfffffffcu);
+				AddConstantUint(inst.src[i].dpp_ctrl & 15u);
+				AddConstantUint(inst.src[i].dpp_row_mask);
+				AddConstantUint(inst.src[i].dpp_bank_mask);
 			}
 			if (operand_is_constant(inst.src[i]))
 			{

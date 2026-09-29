@@ -47,6 +47,8 @@ enum class ShaderComputeWaveInstructionKind
 	WaveAppend,
 	// v_add_co_ci_u32 / v_subrev_co_ci_u32: banked result plus carry mask pair.
 	BankedCarry,
+	// DPP moves and bitwise ALU with architectural source and destination masks.
+	BankedDpp,
 };
 
 struct ShaderComputeWaveAnalysisResult
@@ -69,6 +71,8 @@ struct ShaderComputeWaveAnalysisResult
 [[nodiscard]] bool ShaderComputeWaveGenericLdsSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderComputeWaveGenericCompareSupported(const ShaderInstruction& instruction);
+[[nodiscard]] bool ShaderComputeWaveDppInstructionSupported(const ShaderInstruction& instruction);
+[[nodiscard]] bool ShaderComputeWavePermutationSupported(const ShaderInstruction& instruction);
 
 } // namespace Kyty::Libs::Graphics
 

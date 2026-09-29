@@ -658,6 +658,24 @@ ShaderComputeWaveInstructionKind ClassifySpecificComputeWaveInstruction(const Sh
 
 ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const ShaderInstruction& instruction)
 {
+	if (ShaderComputeWaveDppInstructionSupported(instruction))
+	{
+		return ShaderComputeWaveInstructionKind::BankedDpp;
+	}
+	if (ShaderComputeWavePermutationSupported(instruction))
+	{
+		return ShaderComputeWaveInstructionKind::WaveLane;
+	}
+	if (instruction.type == ShaderInstructionType::VMovB32 || instruction.type == ShaderInstructionType::VAndB32 ||
+	    instruction.type == ShaderInstructionType::VOrB32 || instruction.type == ShaderInstructionType::VXorB32)
+	{
+		for (const auto& source: instruction.src)
+		{
+			// An unadmitted bitwise DPP tuple must not reach a generic emitter
+			// that cannot preserve its source and destination mask contract.
+			if (source.dpp) { return ShaderComputeWaveInstructionKind::Unsupported; }
+		}
+	}
 	// Every LDS access takes the ordered generic path so in-wave DS ordering
 	// never depends on the address-proof rules of the older LDS subset.
 	if (ShaderComputeWaveGenericLdsSupported(instruction))

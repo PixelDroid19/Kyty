@@ -111,6 +111,8 @@ public:
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
 	[[nodiscard]] bool UsesComputeWaveBanks() const;
 	[[nodiscard]] bool EmitComputeWaveLaneInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveDppInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWavePermutation(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveLdsInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveAluInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
