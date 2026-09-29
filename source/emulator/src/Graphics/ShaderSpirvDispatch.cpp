@@ -535,6 +535,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_V16_XXX_VdstVsrc0Vsrc1,        ShaderInstructionType::VMinU16,     ShaderInstructionFormat::SVdstSVsrc0SVsrc1,      {"%t_<index> = OpExtInst %uint %GLSL_std_450 UMin %i0x_<index> %i1x_<index>"}},
     {Recompile_V16_XXX_VdstVsrc0Vsrc1,        ShaderInstructionType::VMaxI16,     ShaderInstructionFormat::SVdstSVsrc0SVsrc1,      {"%t_<index> = OpExtInst %uint %GLSL_std_450 SMax %i0x_<index> %i1x_<index>", "s"}},
     {Recompile_V16_XXX_VdstVsrc0Vsrc1,        ShaderInstructionType::VMaxU16,     ShaderInstructionFormat::SVdstSVsrc0SVsrc1,      {"%t_<index> = OpExtInst %uint %GLSL_std_450 UMax %i0x_<index> %i1x_<index>"}},
+    {Recompile_VCmpClassF32,                 ShaderInstructionType::VCmpClassF32, ShaderInstructionFormat::SmaskVsrc0Vsrc1, {}},
     {Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpEqI32,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpIEqual"}},
     {Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpEqU32,    ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpIEqual"}},
     {Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1,  ShaderInstructionType::VCmpFI32,     ShaderInstructionFormat::SmaskVsrc0Vsrc1,      {"OpIEqual %bool %uint_0 %uint_1 ; "}},

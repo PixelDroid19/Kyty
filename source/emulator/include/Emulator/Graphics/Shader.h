@@ -539,6 +539,7 @@ enum class ShaderInstructionType : uint32_t
 	SCmpEqU64,
 	SAbsI32,
 	ImageAtomicAdd,
+	VCmpClassF32,
 
 	ZMax
 };
@@ -1744,6 +1745,7 @@ struct ShaderBindResources
                                                          int user_data_register_base);
 [[nodiscard]] bool ShaderImageAtomicAddSupported(const ShaderInstruction& instruction);
 [[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
+[[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                int user_data_register_base);
 void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base);

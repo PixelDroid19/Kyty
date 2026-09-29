@@ -520,10 +520,7 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		case 0x85: inst.type = ShaderInstructionType::VCmpNeI32; break;
 		case 0x86: inst.type = ShaderInstructionType::VCmpGeI32; break;
 		case 0x87: inst.type = ShaderInstructionType::VCmpTI32; break;
-		case 0x88: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_class_f32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x88: inst.type = ShaderInstructionType::VCmpClassF32; break;
 		case 0x89: inst.type = ShaderInstructionType::VCmpLtI16; break;
 		case 0x8A: inst.type = ShaderInstructionType::VCmpEqI16; break;
 		case 0x8B: inst.type = ShaderInstructionType::VCmpLeI16; break;
