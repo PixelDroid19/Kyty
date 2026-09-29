@@ -476,6 +476,19 @@ therefore stops earlier at queue initialization. Its existing behavior is
 preserved for the context-helper comparison; trace reset-queue arguments and
 its actual packet contract before correcting that encoder and decoder.
 
+### Integer value references (2026-09-29)
+
+A missing integer getter in `LibJson2.cpp` stops the title-transition caller.
+The captured caller accepts signed or unsigned integer tags and dereferences
+the returned address. The HLE now validates either integer tag and returns a
+reference to its existing payload. A strict Silent/Native run observes the
+unsigned value 100, a return address exactly sixteen bytes after the value
+object, and the same payload when that address is read. The missing import is
+passed; the concurrent compute program now stops later during image-store
+emission. The emulator and executable builds, source-boundary gate, and
+thirteen-table provenance gate pass. Focused tests remain deferred until the
+requested gameplay milestone; this getter observation is not gameplay.
+
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 
 The bounded native sample probe now observes 2D `ImageSampleLz` RGB and RGBA

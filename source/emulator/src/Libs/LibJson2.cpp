@@ -998,6 +998,17 @@ static const double* KYTY_SYSV_ABI JsonValueGetReal(const JsonValue* self)
 	return &self->real;
 }
 
+static const int64_t* KYTY_SYSV_ABI JsonValueGetInteger(const JsonValue* self)
+{
+	JsonValue value {};
+	EXIT_IF(self == nullptr || !JsonReadValue(self, &value));
+	if (value.type != JsonValueTypeInteger && value.type != JsonValueTypeUInteger)
+	{
+		EXIT("JsonValueGetInteger: unsupported value type %u\n", value.type);
+	}
+	return &self->integer;
+}
+
 static const bool* KYTY_SYSV_ABI JsonValueGetBoolean(const JsonValue* self)
 {
 	JsonValue value {};
@@ -1279,6 +1290,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("XlWbvieLj2M", Json2::JsonValueIndexUInt);
 	LIB_FUNC("SHtAad20YYM", Json2::JsonValueGetType);
 	LIB_FUNC("3qrge7L-AU4", Json2::JsonValueGetReal);
+	LIB_FUNC("DIxvoy7Ngvk", Json2::JsonValueGetInteger);
 	LIB_FUNC("zTwZdI8AZ5Y", Json2::JsonValueGetBoolean);
 	LIB_FUNC("RBw+4NukeGQ", Json2::JsonValueCount);
 	LIB_FUNC("4zrm6VrgIAw", Json2::JsonValueAssign);
