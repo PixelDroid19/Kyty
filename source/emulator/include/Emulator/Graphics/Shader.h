@@ -1567,11 +1567,15 @@ struct ShaderStorageImageTileCoverage
 {
 	uint32_t width  = 0;
 	uint32_t height = 0;
+	// A nonnegative index requires a validated, read-only runtime snapshot of
+	// the exact image width and height before the seed may be skipped.
+	int bounds_storage_buffer_index = -1;
 };
 [[nodiscard]] ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code,
                                                                                    const ShaderBindResources& bind, int texture_index,
                                                                                    int workgroup_register, const uint32_t threads[3],
-                                                                                   bool native_xy_thread_ids = false);
+                                                                                   bool native_xy_thread_ids = false,
+                                                                                   bool group_xy_enabled = false);
 [[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 
@@ -1907,6 +1911,9 @@ struct ShaderComputeInputInfo
 	ShaderComputeMetaFillEvidence meta_fill;
 	ShaderBindResources bind;
 };
+
+[[nodiscard]] uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen,
+                                                       uint32_t groups_x, uint32_t groups_y, uint32_t groups_z);
 
 [[nodiscard]] constexpr uint32_t ShaderComputeLdsDwords(uint16_t granulated_lds_size)
 {

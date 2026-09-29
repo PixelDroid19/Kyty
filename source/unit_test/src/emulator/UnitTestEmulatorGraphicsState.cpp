@@ -3979,6 +3979,29 @@ TEST(EmulatorGraphicsState, LinksOnlyFullyOverwrittenStorageImageSurfaceParents)
 	                                                           Type::StorageTexture, true));
 }
 
+TEST(EmulatorGraphicsState, RequiresTileProofBeforeSkippingStorageImageSeed)
+{
+	ShaderComputeInputInfo input {};
+	input.storage_image_write_only_mask = 1u;
+	input.threads_num[0]                = 16u;
+	input.threads_num[1]                = 1u;
+	input.threads_num[2]                = 1u;
+	input.bind.textures2D.textures_num  = 1;
+	auto& descriptor                    = input.bind.textures2D.desc[0];
+	descriptor.textures2d_without_sampler = true;
+	// A 16x16 2D storage image with no per-texel store proof must still seed.
+	descriptor.texture.fields[1] = 3u << 30u;
+	descriptor.texture.fields[2] = 3u | (15u << 14u);
+	descriptor.texture.fields[3] = 9u << 28u;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 1u, 16u, 1u), 0u);
+	input.storage_image_tile_coverage[0] = {16u, 16u};
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 1u, 1u, 1u), 1u);
+	input.storage_image_tile_coverage[0].bounds_storage_buffer_index = 0;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 1u, 1u, 1u), 0u);
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, false, 1u, 1u, 1u), 0u);
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 0u, 1u, 1u), 0u);
+}
+
 TEST(EmulatorGraphicsState, DepthMipStorageLinksExactTextureAndContainingSurfaces)
 {
 	using Type = GpuMemoryObjectType;

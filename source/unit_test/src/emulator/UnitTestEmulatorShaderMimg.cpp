@@ -258,6 +258,153 @@ TEST(EmulatorShaderMimg, RejectsUnprovenQuadReductionStorageOverwrite)
 	}
 }
 
+static ShaderCode MakeBoundedGridStoreShader(bool clobber_coordinate = false, bool read_destination = false)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	auto add = [&code](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> sources)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		inst.type    = type;
+		inst.dst     = dst;
+		inst.src_num = static_cast<int>(sources.size());
+		int source_index = 0;
+		for (const auto source: sources)
+		{
+			inst.src[source_index++] = source;
+		}
+		code.GetInstructions().Add(inst);
+	};
+	ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+	ShaderOperand exec {.type = ShaderOperandType::ExecLo, .size = 2};
+	add(ShaderInstructionType::SInstPrefetch, {}, {TileConstant(3)});
+	add(ShaderInstructionType::VLshlAddU32, TileVgpr(3), {TileSgpr(14), TileConstant(3), TileVgpr(0)});
+	add(ShaderInstructionType::VLshlAddU32, TileVgpr(4), {TileSgpr(15), TileConstant(3), TileVgpr(1)});
+	add(ShaderInstructionType::SLoadDwordx4, TileSgpr(16, 4), {TileSgpr(12, 2), TileConstant(96)});
+	add(ShaderInstructionType::SWaitcnt, {}, {TileConstant(0)});
+	add(ShaderInstructionType::SBufferLoadDwordx2, TileSgpr(14, 2), {TileSgpr(16, 4), TileConstant(0)});
+	add(ShaderInstructionType::SWaitcnt, {}, {TileConstant(0)});
+	add(ShaderInstructionType::VCmpLeU32, TileSgpr(16, 2), {TileSgpr(14), TileVgpr(3)});
+	add(ShaderInstructionType::VCmpLeU32, vcc, {TileSgpr(15), TileVgpr(4)});
+	add(ShaderInstructionType::SNorB64, vcc, {TileSgpr(16, 2), vcc});
+	add(ShaderInstructionType::SMovB64, exec, {vcc});
+	const int branch_index = code.GetInstructions().Size();
+	add(ShaderInstructionType::SCbranchExecz, {}, {TileConstant(0)});
+	add(ShaderInstructionType::SLoadDwordx8, TileSgpr(24, 8), {TileSgpr(12, 2), TileConstant(32)});
+	if (clobber_coordinate)
+	{
+		add(ShaderInstructionType::VMovB32, TileVgpr(3), {TileConstant(0)});
+	}
+	if (read_destination)
+	{
+		add(ShaderInstructionType::ImageLoad, TileVgpr(5), {TileVgpr(3), TileSgpr(24, 8)});
+	}
+	ShaderInstruction store {};
+	store.pc               = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+	store.type             = ShaderInstructionType::ImageStore;
+	store.src[0]           = TileVgpr(0);
+	store.src[0].size      = 2;
+	store.src[1]           = TileSgpr(24, 8);
+	store.src_num          = 2;
+	store.mimg_dimension   = 1;
+	store.mimg_dmask       = 3;
+	store.mimg_address_num = 3;
+	store.mimg_address[0]  = TileVgpr(3);
+	store.mimg_address[1]  = TileVgpr(4);
+	store.mimg_address[2]  = TileVgpr(5);
+	code.GetInstructions().Add(store);
+	add(ShaderInstructionType::SEndpgm, {}, {});
+	code.GetInstructions()[branch_index].src[0].constant.u =
+	    code.GetInstructions().At(code.GetInstructions().Size() - 1).pc - code.GetInstructions().At(branch_index).pc - 4u;
+	return code;
+}
+
+static ShaderBindResources BoundedGridStoreBinding(const ShaderCode& code)
+{
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num = 1;
+	bind.storage_buffers.usages[0] = ShaderStorageUsage::ReadOnly;
+	bind.storage_buffers.accesses[0] = ShaderStorageAccess::Raw;
+	bind.storage_buffers.sources[0] = ShaderStorageBindingSource::DynamicScalarLoad;
+	bind.storage_buffers.code_available[0] = true;
+	bind.storage_buffers.exact_matches[0] = true;
+	bind.storage_buffers.start_register[0] = 16;
+	bind.textures2D.textures_num = 1;
+	bind.textures2D.desc[0].usage = ShaderTextureUsage::ReadWrite;
+	bind.textures2D.desc[0].textures2d_without_sampler = true;
+	bind.textures2D.desc[0].texture.fields[1] = 29u << 20u;
+	ShaderDynamicSLoadMapping bounds {};
+	bounds.kind = ShaderDynamicSLoadResourceKind::StorageBuffer;
+	bounds.resource_index = 0;
+	bounds.destination_register = 16;
+	bounds.instruction_pc = code.GetInstructions().At(3).pc;
+	bounds.last_consumer_pc = code.GetInstructions().At(5).pc;
+	bounds.dword_count = 4;
+	bind.dynamic_sloads.records.Add(bounds);
+	ShaderDynamicSLoadMapping image {};
+	image.kind = ShaderDynamicSLoadResourceKind::Texture;
+	image.resource_index = 0;
+	image.destination_register = 24;
+	image.instruction_pc = code.GetInstructions().At(12).pc;
+	image.last_consumer_pc = code.GetInstructions().At(code.GetInstructions().Size() - 2).pc;
+	image.dword_count = 8;
+	bind.dynamic_sloads.records.Add(image);
+	return bind;
+}
+
+TEST(EmulatorShaderMimg, ProvesBoundedGridStorageOverwriteWithRuntimeBounds)
+{
+	auto code = MakeBoundedGridStoreShader();
+	code.GetInstructions()[1].src[1].size = 0;
+	code.GetInstructions()[2].src[1].size = 0;
+	code.GetInstructions()[5].src[1].size = 0;
+	code.GetInstructions()[13].mimg_address_num = 0;
+	code.GetInstructions()[13].src[0] = TileVgpr(3);
+	code.GetInstructions()[13].src[0].size = 3;
+	const auto bind = BoundedGridStoreBinding(code);
+	const uint32_t threads[3] = {8, 8, 1};
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 14, threads, true, true);
+	EXPECT_EQ(coverage.width, 8u);
+	EXPECT_EQ(coverage.height, 8u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 0);
+}
+
+TEST(EmulatorShaderMimg, RejectsUnprovenBoundedGridStorageOverwrite)
+{
+	const uint32_t threads[3] = {8, 8, 1};
+	const auto rejects = [&](const ShaderCode& code, const ShaderBindResources& bind)
+	{
+		const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 14, threads, true, true);
+		EXPECT_EQ(coverage.width, 0u);
+	};
+	auto code = MakeBoundedGridStoreShader();
+	auto bind = BoundedGridStoreBinding(code);
+	code.GetInstructions()[7].type = ShaderInstructionType::VCmpLtU32;
+	rejects(code, bind);
+	code = MakeBoundedGridStoreShader();
+	code.GetInstructions()[11].src[0].constant.u -= 4u;
+	rejects(code, bind);
+	code = MakeBoundedGridStoreShader(true);
+	rejects(code, BoundedGridStoreBinding(code));
+	code = MakeBoundedGridStoreShader(false, true);
+	rejects(code, BoundedGridStoreBinding(code));
+	code = MakeBoundedGridStoreShader();
+	code.GetInstructions()[13].mimg_dmask = 1;
+	rejects(code, bind);
+	code = MakeBoundedGridStoreShader();
+	code.GetInstructions()[1].src[2].dpp = true;
+	rejects(code, bind);
+	code = MakeBoundedGridStoreShader();
+	bind.storage_buffers.sources[0] = ShaderStorageBindingSource::DirectResource;
+	rejects(code, bind);
+	bind.storage_buffers.sources[0] = ShaderStorageBindingSource::DynamicScalarLoad;
+	bind.dynamic_sloads.records.Clear();
+	rejects(MakeBoundedGridStoreShader(), bind);
+	EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(code, BoundedGridStoreBinding(code), 0, 14, threads, true, false).width,
+	          0u);
+}
+
 static ShaderCode MakeUniformZeroStoreGate()
 {
 	ShaderCode code;

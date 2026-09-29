@@ -385,10 +385,10 @@ static const char* shader_disable_reason(HW::Shader* sh_ctx)
 	return nullptr;
 }
 
-static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, uint32_t groups_x, uint32_t groups_y,
-                                           uint32_t groups_z)
+uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen, uint32_t groups_x,
+                                          uint32_t groups_y, uint32_t groups_z)
 {
-	if (!Config::IsNextGen() || input_info.storage_image_write_only_mask == 0u)
+	if (!next_gen || input_info.storage_image_write_only_mask == 0u)
 	{
 		return 0u;
 	}
@@ -406,14 +406,34 @@ static uint32_t ResolveStorageSeedSkipMask(const ShaderComputeInputInfo& input_i
 
 		const auto shape = ShaderResolvedSampledTextureShape(descriptor);
 		const auto& coverage = input_info.storage_image_tile_coverage[i];
-		const uint64_t global_x = static_cast<uint64_t>(groups_x) *
-		                          (coverage.width != 0 ? coverage.width : input_info.threads_num[0]);
-		const uint64_t global_y = static_cast<uint64_t>(groups_y) *
-		                          (coverage.height != 0 ? coverage.height : input_info.threads_num[1]);
+		if (coverage.width == 0u || coverage.height == 0u)
+		{
+			continue;
+		}
+		const uint64_t global_x = static_cast<uint64_t>(groups_x) * coverage.width;
+		const uint64_t global_y = static_cast<uint64_t>(groups_y) * coverage.height;
 		const uint64_t width  = static_cast<uint64_t>(descriptor.texture.Width5()) + 1u;
 		const uint64_t height = static_cast<uint64_t>(descriptor.texture.Height5()) + 1u;
 		const uint64_t depth  = shape == ShaderGen5SampledTextureShape::TwoDimensional ? 1u :
 		                       static_cast<uint64_t>(descriptor.texture.Depth()) + 1u;
+		if (coverage.bounds_storage_buffer_index >= 0)
+		{
+			const auto& buffers = input_info.bind.storage_buffers;
+			const int bounds_index = coverage.bounds_storage_buffer_index;
+			if (bounds_index >= buffers.buffers_num)
+			{
+				continue;
+			}
+			const auto& bounds_resource = buffers.buffers[bounds_index];
+			const uint64_t address = bounds_resource.Base48();
+			uint32_t bounds[2] {};
+			if (address == 0u || ShaderBufferByteSize(bounds_resource.Stride(), bounds_resource.NumRecords()) < sizeof(bounds) ||
+			    !GpuMemoryCaptureSnapshotReadOnlyBuffer(address, sizeof(bounds), bounds) ||
+			    bounds[0] != width || bounds[1] != height)
+			{
+				continue;
+			}
+		}
 		if (global_x <= UINT32_MAX && global_y <= UINT32_MAX && global_x >= width && global_y >= height && global_z >= depth)
 		{
 			result |= 1u << static_cast<uint32_t>(i);
@@ -2715,7 +2735,8 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 
 	SetDynamicParams(vk_buffer, pipeline);
 
-	const uint32_t storage_seed_skip_mask = ResolveStorageSeedSkipMask(input_info, thread_group_x, thread_group_y, thread_group_z);
+	const uint32_t storage_seed_skip_mask =
+	    ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,
 	                cs_regs.cs_regs.chksum);
