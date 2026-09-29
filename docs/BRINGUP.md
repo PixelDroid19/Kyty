@@ -283,7 +283,7 @@ A later Silent/Native diagnostic run passed at least 598 presents, then stopped
 after 708 seconds at `Objects/GpuMemoryWriteback.cpp:214`: a writable
 `StorageBuffer` still had incomplete exact submission dependencies when
 `WriteBackObjectLocked` was requested. This occurred before the JSON assignment
-call and does not validate that pending implementation. An earlier shorter
+call in that run. An earlier shorter
 occurrence is already recorded below. Capture the current caller, resource
 dependencies and completed queue sequences before changing synchronization;
 neither skipping write-back nor treating a pending fence as complete is valid.
@@ -312,7 +312,7 @@ arithmetic or presentation. A broad format-only lifetime trace selected two
 earlier 1024-square targets and did not identify the overlay producer; use a
 selector correlated with the actual sampled image.
 
-### JSON array element lookup (2026-09-29, not gameplay)
+### JSON value lookup and assignment (2026-09-29, not gameplay)
 
 The title transition now passes `Value::operator[](uint64_t)`. The missing
 NID matches the const array-index operator's mangled name. Kyty validates
@@ -320,18 +320,33 @@ the value and owned array, bounds the index and returns the existing child;
 absent elements share the same immutable null value as object lookup.
 
 A Silent/Native call trace sees index zero of a one-element array and verifies
-that the returned object is that owned child. The run then reaches the next
+that the returned object is that owned child. That run then reached the next
 unresolved import, `4zrm6VrgIAw[Json2_v1][Json_v1.1]`, the value assignment
 operator. Its caller immediately assigns the indexed value to another
-32-byte value. `LibJson2.cpp` still needs an owned deep-copy path there,
-including correct replacement lifetime. Visible rendering, controls and
-both gameplay acceptance windows remain unverified.
+32-byte value. The initial copier rejected the host-owned source by asking the
+guest virtual-memory registry to read it. Explicit node ownership and string
+allocation byte counts now distinguish those HLE allocations from validated
+guest mappings. Assignment clones the bounded tree before releasing the
+destination, retains its parent context and gives copied children new owners.
+
+A later Silent/Native run verifies the actual return: the destination is
+returned, all five nodes have equal content, storage is independent and child
+parent links are correct. The copied object contains two strings and two real
+values. The run passes the earlier write-back occurrence and reaches the next
+missing import after the title transition at 15 minutes 23 seconds:
+`Ncel8t2Rrpc[Json2_v1][Json_v1.1]`, `Value::toString(String&) const`. The caller
+constructs an empty string, converts a string-valued JSON node and consumes
+its `c_str()` before destruction. Implement that conversion next. Nonempty
+destination replacement and embedded-NUL cases still need focused tests,
+deferred until gameplay per the requested validation order. The native capture
+at present 223 remains uniformly black; controls and both gameplay acceptance
+windows remain unverified.
 
 Two existing string-contract gaps were found while reviewing value ownership:
-`LibJson2.cpp:366` uses `strlen` for `JsonStringLength`, although the parser
+`LibJson2.cpp:394` uses `strlen` for `JsonStringLength`, although the parser
 retains embedded NUL bytes. Verify the length export's guest contract and use
 the owned byte count if the full parsed string is required. Separately,
-`LibJson2.cpp:378` frees a string's data before `JsonStringAssign` measures its
+`LibJson2.cpp:406` frees a string's data before `JsonStringAssign` measures its
 input; passing that same data pointer or a suffix therefore reads freed
 storage. Build a replacement before release when correcting that API. Neither
 case is yet observed in the live workload, and neither is gameplay evidence.

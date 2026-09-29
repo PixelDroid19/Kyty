@@ -7,6 +7,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cinttypes>
@@ -18,6 +19,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -30,8 +32,11 @@ namespace Json2 {
 
 // Guest-facing value layout is shared by the constructor and parser surface.
 
-constexpr int32_t JSON_PARSE_ERROR    = static_cast<int32_t>(0x80848101u);
-constexpr int32_t JSON_ARGUMENT_ERROR = static_cast<int32_t>(0x80848120u);
+constexpr int32_t  JSON_PARSE_ERROR     = static_cast<int32_t>(0x80848101u);
+constexpr int32_t  JSON_ARGUMENT_ERROR  = static_cast<int32_t>(0x80848120u);
+constexpr size_t   JsonMaxDocumentBytes = 4u * 1024u * 1024u;
+constexpr uint32_t JsonMaxDepth         = 64;
+constexpr uint32_t JsonMaxNodes         = 100000;
 
 enum JsonValueType : uint32_t
 {
@@ -82,6 +87,7 @@ static void JsonValueInit(JsonValue* self)
 }
 
 static void JsonValueClear(JsonValue* self);
+static const JsonValue* JsonNullValue();
 
 static void* KYTY_SYSV_ABI JsonMemAllocatorCtor(void* self)
 {
@@ -212,13 +218,64 @@ struct JsonObject
 	std::map<std::string, JsonValue*>* members = nullptr;
 };
 
-static std::mutex                           g_owned_mutex;
-static std::unordered_map<void*, uint32_t> g_owned_values;
+static std::mutex                             g_owned_mutex;
+static std::unordered_map<void*, uint32_t>     g_owned_values;
+static std::unordered_set<const JsonValue*>    g_owned_nodes;
+static std::unordered_map<const char*, size_t> g_owned_strings;
 
 static void JsonTrackOwned(void* pointer, uint32_t type)
 {
 	std::lock_guard lock(g_owned_mutex);
 	g_owned_values.emplace(pointer, type);
+}
+
+static JsonValue* JsonAllocateNode()
+{
+	auto* value = new JsonValue {};
+	std::lock_guard lock(g_owned_mutex);
+	g_owned_nodes.insert(value);
+	return value;
+}
+
+static void JsonDeleteNode(JsonValue* value)
+{
+	JsonValueClear(value);
+	std::lock_guard lock(g_owned_mutex);
+	g_owned_nodes.erase(value);
+	delete value;
+}
+
+static bool JsonOwnsNode(const JsonValue* value)
+{
+	std::lock_guard lock(g_owned_mutex);
+	return g_owned_nodes.find(value) != g_owned_nodes.end();
+}
+
+static bool JsonReadValue(const JsonValue* source, JsonValue* value)
+{
+	// Indexed children live on the host heap; the virtual-memory registry only
+	// describes guest mappings. Accept host nodes only while owned by this HLE.
+	if (source == JsonNullValue() || JsonOwnsNode(source)) { *value = *source; return true; }
+	return Core::VirtualMemory::CopyFromGuest(value, reinterpret_cast<uint64_t>(source), sizeof(*value));
+}
+
+static char* JsonAllocateString(const char* source, size_t bytes)
+{
+	if (bytes == SIZE_MAX) { return nullptr; }
+	auto* data = static_cast<char*>(std::malloc(bytes + 1u));
+	if (data == nullptr) { return nullptr; }
+	if (bytes != 0) { std::memcpy(data, source, bytes); }
+	data[bytes] = '\0';
+	std::lock_guard lock(g_owned_mutex);
+	g_owned_strings.emplace(data, bytes);
+	return data;
+}
+
+static void JsonReleaseString(char* data)
+{
+	std::lock_guard lock(g_owned_mutex);
+	g_owned_strings.erase(data);
+	std::free(data);
 }
 
 static uint32_t JsonTakeOwnedType(void* pointer)
@@ -248,7 +305,7 @@ static void JsonValueClear(JsonValue* self)
 			case JsonValueTypeString:
 			{
 				auto* str = static_cast<JsonString*>(self->ptr);
-				std::free(str->data);
+				JsonReleaseString(str->data);
 				delete str;
 				break;
 			}
@@ -259,8 +316,7 @@ static void JsonValueClear(JsonValue* self)
 				{
 					for (auto* child: *array->items)
 					{
-						JsonValueClear(child);
-						delete child;
+						JsonDeleteNode(child);
 					}
 				}
 				delete array->items;
@@ -275,8 +331,7 @@ static void JsonValueClear(JsonValue* self)
 					for (auto& [key, child]: *object->members)
 					{
 						(void)key;
-						JsonValueClear(child);
-						delete child;
+						JsonDeleteNode(child);
 					}
 				}
 				delete object->members;
@@ -306,11 +361,7 @@ static void* KYTY_SYSV_ABI JsonStringCStringCtor(JsonString* self, const char* s
 	{
 		const char* src = (str != nullptr ? str : "");
 		const size_t n  = std::strlen(src);
-		self->data      = static_cast<char*>(std::malloc(n + 1));
-		if (self->data != nullptr)
-		{
-			std::memcpy(self->data, src, n + 1);
-		}
+		self->data      = JsonAllocateString(src, n);
 	}
 	return self;
 }
@@ -320,7 +371,7 @@ static void KYTY_SYSV_ABI JsonStringDtor(JsonString* self)
 	PRINT_NAME();
 	if (self != nullptr)
 	{
-		std::free(self->data);
+		JsonReleaseString(self->data);
 		self->data = nullptr;
 	}
 }
@@ -352,15 +403,11 @@ static void KYTY_SYSV_ABI JsonStringAssign(JsonString* self, const char* str)
 	{
 		return;
 	}
-	std::free(self->data);
+	JsonReleaseString(self->data);
 	self->data = nullptr;
 	const char* src = (str != nullptr ? str : "");
 	const size_t n  = std::strlen(src);
-	self->data      = static_cast<char*>(std::malloc(n + 1));
-	if (self->data != nullptr)
-	{
-		std::memcpy(self->data, src, n + 1);
-	}
+	self->data      = JsonAllocateString(src, n);
 }
 
 static void KYTY_SYSV_ABI JsonValueSetBool(JsonValue* self, bool value)
@@ -454,8 +501,8 @@ public:
 	}
 
 private:
-	static constexpr uint32_t MaxDepth = 64;
-	static constexpr uint32_t MaxNodes = 100000;
+	static constexpr uint32_t MaxDepth = JsonMaxDepth;
+	static constexpr uint32_t MaxNodes = JsonMaxNodes;
 
 	void SkipSpace()
 	{
@@ -734,11 +781,10 @@ private:
 		}
 		for (;;)
 		{
-			auto* child = new JsonValue {};
+			auto* child = JsonAllocateNode();
 			if (!ParseValue(child, output, depth + 1u))
 			{
-				JsonValueClear(child);
-				delete child;
+				JsonDeleteNode(child);
 				return false;
 			}
 			array->items->push_back(child);
@@ -787,18 +833,16 @@ private:
 				return false;
 			}
 			SkipSpace();
-			auto* child = new JsonValue {};
+			auto* child = JsonAllocateNode();
 			if (!ParseValue(child, output, depth + 1u))
 			{
-				JsonValueClear(child);
-				delete child;
+				JsonDeleteNode(child);
 				return false;
 			}
 			auto [it, inserted] = object->members->emplace(std::move(key), child);
 			if (!inserted)
 			{
-				JsonValueClear(it->second);
-				delete it->second;
+				JsonDeleteNode(it->second);
 				it->second = child;
 			}
 			SkipSpace();
@@ -842,14 +886,12 @@ private:
 					return false;
 				}
 				auto* string = new JsonString {};
-				string->data = static_cast<char*>(std::malloc(value.size() + 1u));
+				string->data = JsonAllocateString(value.data(), value.size());
 				if (string->data == nullptr)
 				{
 					delete string;
 					return false;
 				}
-				std::memcpy(string->data, value.data(), value.size());
-				string->data[value.size()] = '\0';
 				output->type = JsonValueTypeString;
 				output->ptr = string;
 				JsonTrackOwned(string, JsonValueTypeString);
@@ -871,8 +913,7 @@ private:
 
 static int32_t KYTY_SYSV_ABI JsonParserParse(JsonValue* dst, const char* src, size_t size)
 {
-	constexpr size_t MaxDocumentBytes = 4u * 1024u * 1024u;
-	if (dst == nullptr || src == nullptr || size == 0 || size > MaxDocumentBytes ||
+	if (dst == nullptr || src == nullptr || size == 0 || size > JsonMaxDocumentBytes ||
 	    !Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(dst), sizeof(JsonValue)) ||
 	    !Core::VirtualMemory::IsRangeReadable(reinterpret_cast<uint64_t>(src), size))
 	{
@@ -930,13 +971,14 @@ static const JsonValue* KYTY_SYSV_ABI JsonValueIndexString(const JsonValue* self
 static const JsonValue* KYTY_SYSV_ABI JsonValueIndexUInt(const JsonValue* self, uint64_t index)
 {
 	if (self == nullptr) { return JsonNullValue(); }
-	EXIT_IF(!Core::VirtualMemory::IsRangeReadable(reinterpret_cast<uint64_t>(self), sizeof(JsonValue)));
-	if (self->type != JsonValueTypeArray || self->ptr == nullptr) { return JsonNullValue(); }
+	JsonValue value {};
+	EXIT_IF(!JsonReadValue(self, &value));
+	if (value.type != JsonValueTypeArray || value.ptr == nullptr) { return JsonNullValue(); }
 
 	std::lock_guard lock(g_owned_mutex);
-	const auto owned = g_owned_values.find(self->ptr);
+	const auto owned = g_owned_values.find(value.ptr);
 	EXIT_IF(owned == g_owned_values.end() || owned->second != JsonValueTypeArray);
-	const auto* array = static_cast<const JsonArray*>(self->ptr);
+	const auto* array = static_cast<const JsonArray*>(value.ptr);
 	if (array->items == nullptr || index >= array->items->size()) { return JsonNullValue(); }
 	// The parent owns the element. Returning it must not clone or extend the array.
 	return (*array->items)[static_cast<size_t>(index)];
@@ -964,6 +1006,175 @@ static size_t KYTY_SYSV_ABI JsonValueCount(const JsonValue* self)
 		return (object->members != nullptr ? object->members->size() : 0u);
 	}
 	return 0;
+}
+
+static bool JsonOwnsStorage(const void* pointer, uint32_t type)
+{
+	std::lock_guard lock(g_owned_mutex);
+	const auto entry = g_owned_values.find(const_cast<void*>(pointer));
+	return entry != g_owned_values.end() && entry->second == type;
+}
+
+static bool JsonOwnedStringSize(const char* pointer, size_t* bytes)
+{
+	std::lock_guard lock(g_owned_mutex);
+	const auto entry = g_owned_strings.find(pointer);
+	if (entry == g_owned_strings.end()) { return false; }
+	*bytes = entry->second;
+	return true;
+}
+
+class JsonValueCopier
+{
+public:
+	explicit JsonValueCopier(void* rootparam): m_rootparam(rootparam) {}
+
+	bool Copy(JsonValue* output, const JsonValue* source, JsonValue* position, void* parent, uint32_t depth = 0)
+	{
+		JsonValue value {};
+		if (depth > JsonMaxDepth || m_nodes == 0 || !JsonReadValue(source, &value)) { return false; }
+		--m_nodes;
+		output->type = value.type;
+		output->parent = parent;
+		output->rootparam = m_rootparam;
+		if (value.type <= JsonValueTypeReal)
+		{
+			std::memcpy(&output->uinteger, &value.uinteger, sizeof(value.uinteger));
+			return true;
+		}
+		if (value.type > JsonValueTypeObject) { return false; }
+		if (value.ptr == nullptr) { return true; }
+		if (value.type == JsonValueTypeString) { return CopyString(output, value.ptr); }
+		if (!JsonOwnsStorage(value.ptr, value.type)) { return false; }
+		return value.type == JsonValueTypeArray ? CopyArray(output, value, position, depth) :
+		                                        CopyObject(output, value, position, depth);
+	}
+
+private:
+	bool ReserveBytes(size_t bytes)
+	{
+		if (bytes > m_bytes) { return false; }
+		m_bytes -= bytes;
+		return true;
+	}
+
+	bool ReadString(const char* source, std::string* text) const
+	{
+		if (source == nullptr) { return true; }
+		uint64_t address = reinterpret_cast<uint64_t>(source);
+		const auto page_size = Core::VirtualMemory::GetPageSize();
+		while (text->size() <= m_bytes)
+		{
+			char buffer[4096];
+			const auto bytes = std::min<size_t>({sizeof(buffer), page_size - address % page_size, m_bytes - text->size() + 1u});
+			if (!Core::VirtualMemory::CopyFromGuest(buffer, address, bytes)) { return false; }
+			const auto* end = static_cast<const char*>(std::memchr(buffer, '\0', bytes));
+			text->append(buffer, end != nullptr ? static_cast<size_t>(end - buffer) : bytes);
+			if (end != nullptr) { return true; }
+			if (address > UINT64_MAX - bytes) { return false; }
+			address += bytes;
+		}
+		return false;
+	}
+
+	bool CopyString(JsonValue* output, const void* source)
+	{
+		JsonString value {};
+		std::string text;
+		if (JsonOwnsStorage(source, JsonValueTypeString))
+		{
+			value = *static_cast<const JsonString*>(source);
+		} else if (!Core::VirtualMemory::CopyFromGuest(&value, reinterpret_cast<uint64_t>(source), sizeof(value)))
+		{
+			return false;
+		}
+		size_t owned_bytes = 0;
+		if (JsonOwnedStringSize(value.data, &owned_bytes))
+		{
+			// Parsed strings can contain NUL bytes. Their host ownership metadata
+			// retains the byte length without extending the guest wrapper layout.
+			if (!ReserveBytes(owned_bytes)) { return false; }
+			text.assign(value.data, owned_bytes);
+		} else if (!ReadString(value.data, &text) || !ReserveBytes(text.size()))
+		{
+			return false;
+		}
+		auto* string = new JsonString {};
+		string->data = JsonAllocateString(text.data(), text.size());
+		if (string->data == nullptr) { delete string; return false; }
+		output->ptr = string;
+		JsonTrackOwned(string, JsonValueTypeString);
+		return true;
+	}
+
+	JsonValue* CopyChild(const JsonValue* source, JsonValue* parent, uint32_t depth)
+	{
+		auto* child = JsonAllocateNode();
+		if (Copy(child, source, child, parent, depth + 1u)) { return child; }
+		JsonDeleteNode(child);
+		return nullptr;
+	}
+
+	bool CopyArray(JsonValue* output, const JsonValue& value, JsonValue* position, uint32_t depth)
+	{
+		const auto* source = static_cast<const JsonArray*>(value.ptr);
+		if (source->items == nullptr) { return true; }
+		if (source->items->size() > m_nodes) { return false; }
+		auto* array = new JsonArray {};
+		array->items = new std::vector<JsonValue*>;
+		output->ptr = array;
+		JsonTrackOwned(array, JsonValueTypeArray);
+		for (const auto* item: *source->items)
+		{
+			auto* child = CopyChild(item, position, depth);
+			if (child == nullptr) { return false; }
+			array->items->push_back(child);
+		}
+		return true;
+	}
+
+	bool CopyObject(JsonValue* output, const JsonValue& value, JsonValue* position, uint32_t depth)
+	{
+		const auto* source = static_cast<const JsonObject*>(value.ptr);
+		if (source->members == nullptr) { return true; }
+		if (source->members->size() > m_nodes) { return false; }
+		auto* object = new JsonObject {};
+		object->members = new std::map<std::string, JsonValue*>;
+		output->ptr = object;
+		JsonTrackOwned(object, JsonValueTypeObject);
+		for (const auto& [key, item]: *source->members)
+		{
+			if (!ReserveBytes(key.size())) { return false; }
+			auto* child = CopyChild(item, position, depth);
+			if (child == nullptr) { return false; }
+			object->members->emplace(key, child);
+		}
+		return true;
+	}
+
+	void* m_rootparam = nullptr;
+	uint32_t m_nodes = JsonMaxNodes;
+	size_t m_bytes = JsonMaxDocumentBytes;
+};
+
+static JsonValue* KYTY_SYSV_ABI JsonValueAssign(JsonValue* self, const JsonValue* source)
+{
+	JsonValue old {};
+	EXIT_IF(self == nullptr || source == nullptr ||
+	        !JsonReadValue(self, &old) ||
+	        (!JsonOwnsNode(self) && !Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(self), sizeof(*self))));
+	if (self == source) { return self; }
+	JsonValue replacement {};
+	JsonValueCopier copier(old.rootparam);
+	// Clone before releasing the destination: source may be one of its children.
+	if (!copier.Copy(&replacement, source, self, old.parent))
+	{
+		JsonValueClear(&replacement);
+		EXIT("JsonValueAssign: invalid value or copy exceeds resource limits\n");
+	}
+	JsonValueClear(self);
+	*self = replacement;
+	return self;
 }
 
 } // namespace Json2
@@ -1006,6 +1217,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("XlWbvieLj2M", Json2::JsonValueIndexUInt);
 	LIB_FUNC("SHtAad20YYM", Json2::JsonValueGetType);
 	LIB_FUNC("RBw+4NukeGQ", Json2::JsonValueCount);
+	LIB_FUNC("4zrm6VrgIAw", Json2::JsonValueAssign);
 	LIB_FUNC("+drDFyAS6u4", Json2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", Json2::JsonInitializerSetGlobalNullAccessCallback);
 }
