@@ -313,6 +313,50 @@ TEST(EmulatorKernelMemory, AutomaticDirectMapUsesPs5UserAddressRange)
 	Config::SetNextGen(false);
 }
 
+TEST(EmulatorKernelMemory, PhysicalAliasSpansProtectionSegmentsWithoutChangingGuestRights)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+	constexpr size_t kSize = 0x8000;
+	constexpr size_t kSpan = 0x4000;
+	constexpr size_t kOffset = 0x1000;
+	int64_t physical = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kSize, 0x4000, 12, &physical), OK);
+	void* mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&mapping, kSize, 0x02, 0, physical, 0x4000), OK);
+	auto* bytes = static_cast<uint8_t*>(mapping);
+	std::array<uint8_t, kSpan> expected {};
+	for (size_t i = 0; i < expected.size(); ++i)
+	{
+		expected[i] = static_cast<uint8_t>((i * 13u) ^ (i >> 8u));
+	}
+	std::memcpy(bytes + kOffset, expected.data(), expected.size());
+	ASSERT_EQ(KernelMprotect(mapping, 0x4000, 0x00), OK);
+	const auto base = reinterpret_cast<uint64_t>(mapping);
+	EXPECT_FALSE(Core::VirtualMemory::IsRangeReadable(base + kOffset, 0x1000));
+	EXPECT_TRUE(Core::VirtualMemory::IsRangeWritable(base + 0x4000, 0x1000));
+
+	// Three host pages have no CPU access; the fourth page is writable.
+	// All four still refer to consecutive bytes of the same direct mapping.
+	const auto alias = KernelMapPhysicalAlias(base + kOffset, kSpan);
+	EXPECT_NE(alias, 0u);
+	if (alias != 0)
+	{
+		EXPECT_EQ(std::memcmp(reinterpret_cast<const void*>(alias), expected.data(), kSpan), 0);
+		*reinterpret_cast<uint8_t*>(alias) = 0x5au;
+		EXPECT_FALSE(Core::VirtualMemory::IsRangeReadable(base + kOffset, 0x1000));
+		EXPECT_TRUE(Core::VirtualMemory::IsRangeWritable(base + 0x4000, 0x1000));
+		EXPECT_TRUE(KernelUnmapPhysicalAlias(alias));
+		ASSERT_EQ(KernelMprotect(mapping, 0x4000, 0x02), OK);
+		EXPECT_EQ(bytes[kOffset], 0x5au);
+	}
+	EXPECT_EQ(KernelMapPhysicalAlias(base + kOffset, kSize), 0u);
+	EXPECT_EQ(KernelMapPhysicalAlias(base, 0), 0u);
+	EXPECT_EQ(KernelMunmap(base, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical, kSize), OK);
+	Config::SetNextGen(false);
+}
+
 TEST(EmulatorKernelMemory, VirtualQueryReportsReservedRangeAsUncommitted)
 {
 	EnsureMemorySubsystemInitialized();

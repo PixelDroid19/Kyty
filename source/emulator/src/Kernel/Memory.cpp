@@ -1229,19 +1229,24 @@ bool PhysicalMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, Vi
 // ignores its protection, which the dirty-page tracker may have lowered.
 uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size)
 {
-	uint64_t            base      = 0;
-	size_t              len       = 0;
-	int                 prot      = 0;
-	VirtualMemory::Mode mode      = VirtualMemory::Mode::NoAccess;
-	auto                gpu_mode  = KernelGpuMappingAccessMode::NoAccess;
-	uint64_t            phys_addr = 0;
-	if (size == 0 || !Find(vaddr, &base, &len, &prot, &mode, &gpu_mode, &phys_addr) || vaddr < base ||
-	    vaddr - base > len || size > len - (vaddr - base))
+	if (size == 0)
 	{
 		return 0;
 	}
-	return VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr + (vaddr - base), size, VirtualMemory::Mode::ReadWrite,
-	                                       VirtualMemory::GetPageSize());
+	Core::LockGuard lock(m_mutex);
+	for (const auto& mapping: m_mapped)
+	{
+		if (vaddr < mapping.map_vaddr || size > mapping.map_size || vaddr - mapping.map_vaddr > mapping.map_size - size)
+		{
+			continue;
+		}
+		// CPU protection segments can split one physical mapping. The alias
+		// follows its backing bytes and must remain independent of those rights.
+		const uint64_t offset = mapping.phys_addr + (vaddr - mapping.map_vaddr);
+		return VirtualMemory::MapSharedAligned(m_backing, 0, offset, size, VirtualMemory::Mode::ReadWrite,
+		                                       VirtualMemory::GetPageSize());
+	}
+	return 0;
 }
 
 bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)

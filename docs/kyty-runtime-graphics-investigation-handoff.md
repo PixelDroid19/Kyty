@@ -395,6 +395,32 @@ against the same correct gameplay capture.
   on a reproduced failure before changing the import or access contract. The
   diagnostic code was removed.
 
+  After `d8950414` removed import guard pages, a clean run reproduced the
+  fatal import for a 24 KiB non-writable span after 64 seconds. A per-page
+  protection probe then completed 120 seconds without that failure, and
+  another run reached 45 presents before an Xe timed-out job and fence loss
+  at host sequence 4545. The latter's largest preceding successful fence
+  wait was 4.57 seconds. Thus guard-page removal does not establish that
+  either intermittent import failure or long-run GPU execution is fixed.
+  A later fatal probe resolves the import cause: a 16 KiB span crosses from
+  three CPU NoAccess host pages into one read/write page, all within the same
+  physical mapping. `PhysicalMemory::MapAlias` bounded the span by the first
+  protection segment; the snapshot then failed to read it. The correction
+  bounds the alias by the physical mapping under its mutex. The focused
+  byte/coherence/permissions regression fails before the correction and passes
+  after it. A strict 120-second rerun reaches black present 43 without that
+  exit. This does not clear the later Xe timeout.
+
+- Growing indirect work (2026-09-29): a bounded command/fence correlation
+  identifies four device-addressed compute dispatches with increasing X group
+  counts: 1/1/2/3, 4/5/6/7, 8/9/10/11 across consecutive cycles. The four
+  indirect argument buffers already contain those counts, and an observation
+  after the existing write-back has the same values. This excludes a change
+  made by that write-back as the immediate producer of the observed counts;
+  locate their writer before changing dispatch dimensions or shader code.
+  Instrumentation must not gate on `GraphicsRunGetFrameNum()` here: it stays
+  zero while native VideoOut presentation counts advance.
+
 - High VCC masks and vector bit counts (2026-09-29): a bounded shader trace
   identified a one-word `VCC_HI` compare/conditional-mask tuple in a native
   32-lane program. Treating the parser failure as proof of a wave64 dispatch

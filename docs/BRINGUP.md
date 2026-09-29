@@ -254,6 +254,29 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Physical aliases across CPU protection boundaries (2026-09-29, not gameplay)
+
+The intermittent guest-device import failure was reproduced with a 16 KiB
+resident span: its first three host pages belonged to a CPU NoAccess segment,
+and the fourth to a read/write segment of the same physical mapping. The
+alias lookup incorrectly bounded the request by the first protection segment;
+its subsequent CPU snapshot could not read those NoAccess pages. The alias
+now validates containment against the physical mapping while holding its lock.
+It follows the backing offset without changing the guest view's permissions.
+
+The focused reproduction fails on the previous implementation and passes with
+the correction, checking byte identity, coherent alias writes, unchanged guest
+rights and rejection beyond the backing mapping. A strict 120-second run
+passed the former import exit and reached a scored, still-black present 43.
+This does not establish gameplay or long-run device stability.
+
+The remaining slow-GPU trace identifies four device-addressed indirect
+dispatches whose X group counts grow across consecutive cycles: initially
+1/1/2/3, then 4/5/6/7, then 8/9/10/11. Their argument values are unchanged
+before and after the existing write-back boundary. Locate the producer of
+those argument words before attributing the growing work to shader lowering
+or changing GPU timeout policy.
+
 ### Guest-address imports creating their own residency (2026-09-29, not gameplay)
 
 A clean strict Silent/Native run of `ae78d70a` reached 45 presents with a
@@ -292,6 +315,11 @@ Validation also exposed a pre-existing test mismatch at
 now admitted. The same assertion fails with the guest-address source restored
 to `ae78d70a`. Update that case to validate successful vertex lowering while
 retaining the missing-metadata and invalid-destination rejection checks.
+
+A subsequent clean `d8950414` run stopped after 64 seconds on a 24 KiB
+non-writable resident import. The later per-page reproduction and physical
+alias correction are recorded above; the residency correction alone did not
+resolve that separate failure.
 
 ### Raw render alias composition and explicit mip fetch (2026-09-29, not gameplay)
 
