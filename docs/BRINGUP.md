@@ -254,6 +254,47 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Vulkan 1.4 baseline (2026-09-29, opening image verified)
+
+The active build now requires Vulkan 1.4 SDK headers and external SPIRV-Tools
+with the Vulkan 1.4 target environment. Instance creation and device selection
+reject older runtime versions. Both assembly and optimization use that same
+environment, and the persistent cache target changes so older compiled entries
+cannot bypass it. Historical Vulkan 1.2 validation results below remain
+historical evidence rather than the current build contract.
+
+Configuration verifies the installed SDK and compiler target. The full local
+build succeeds. The generated detile module and the complete captured compute
+program, including the array comparison correction, validate under Vulkan 1.4
+with SPIR-V 1.6. A strict guest run records an actual instance request of 1.4.0
+and preserves the opening caption in a scored native present-228 capture. This
+first run spends 555 seconds creating compute pipelines; one 358,848-word
+module takes 395 seconds inside the Intel driver. A read-only stack locates
+that cost at `GraphicsRenderPipeline.cpp:917`; subsequent frames resume. The
+warm interval presents 473 through 648 in 57.301 seconds (3.054 per second),
+with no new SPIR-V compilation or Vulkan pipeline creation. The corrected
+comparison-image dispatch completes on its recorded queue before a later
+unsupported scalar instruction stops parsing. Later scene output and gameplay
+still require separate evidence. Hosted release builds now install the
+required SDK components. Windows and macOS builds and distribution packaging
+remain untested locally.
+
+### Sparse physical residency query (2026-09-29, not gameplay)
+
+Read-only sampling found descriptor preparation repeatedly scanning an entirely
+unpopulated two-gigabyte physical-backing interval. The owned Linux backing can
+prove the complete interval empty with `SEEK_DATA`. A fresh query on each
+preparation now avoids that interval's `mincore` scan; unproven intervals and
+unsupported hosts keep the existing residency path. No absence is cached.
+
+In a strict Silent/Native comparison, the warm opening interval changes from
+0.884 to 2.969 presents per second. Descriptor preparation falls from 423.33 to
+5.14 milliseconds per present, or 25.02 to 0.30 milliseconds per draw. The
+native present-173 capture preserves the opening caption. The run reaches
+present 809 and the same unresolved comparison-image binding, with no observed
+earlier failure. The image after the caption and gameplay remain unverified;
+this is a measured host-side cost reduction.
+
 ### Exercised custom pixel interpolation gap (2026-09-29, unresolved)
 
 An address-correlated native lifetime trace identifies two draws writing the
@@ -576,9 +617,35 @@ The complete 1,429-instruction captured compiler input produces a module of
 checks cover both atomic lane banks, the numeric class comparisons and array
 level-zero samples. The emulator and executable build, strict source boundary
 check and all thirteen graphics-table checks pass. A strict Silent/Native run
-has reached the opening caption; completion of this later dispatch remains
-pending. Focused unit tests are deferred until gameplay, as requested. These
-are compiler milestones, not gameplay acceptance.
+shows the opening caption and admits the complete program; its cached live
+module also passes Vulkan 1.2 validation. At present 805, resource preparation
+stops before this dispatch is submitted. Focused unit tests are deferred until
+gameplay, as requested. These are compiler milestones, not gameplay acceptance.
+
+The next binding failure is `GraphicsRenderBind.cpp:3760`: a pure comparison
+sample selects a 2D-array view of an uploaded format-56 color image.
+`ResolveDepthReferenceImageView` rejects that view, while the array emitter
+already uses a regular sample followed by an explicit comparison. The live
+sampler has linear minification and magnification, so merely relaxing the
+view check would leave compare-after-filter semantics. Resolve comparison
+filtering and color/depth view compatibility together; do not substitute a
+texture or accept the view solely to pass the binding gate.
+
+Array comparison now gathers the four base-level texels, compares each before
+bilinear filtering, and admits the floating color-array view through the
+existing regular sampled-image path. The complete captured program validates
+for Vulkan 1.4. A strict run records its dispatch at queue 8, sequence 96,288;
+the completion ledger reaches 96,294 on that same queue. The later parser stop
+is SOP1 opcode `0x44` in another compute program, after present 808. This
+proves completion of the former blocked dispatch; the black interval and
+subsequent scene output are still unverified.
+
+The new stop is `ShaderParseSOP1.cpp:280`, decoding
+`S_ANDN1_SAVEEXEC_B32` (RDNA2 SOP1 opcode 68). The captured input is a
+32-lane compute dispatch, saving EXEC_LO to a scalar destination and updating
+EXEC_LO from the complement of its scalar source. Implement the decoder,
+implicit EXEC/SCC effects and mask-aware analysis together; do not map it to
+a barrier or widen it to the existing 64-bit instruction.
 
 ### Integer value references (2026-09-29)
 
