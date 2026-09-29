@@ -501,7 +501,7 @@ void Spirv::WriteHeader()
 
 	if (m_bind != nullptr)
 	{
-		if (UsesFormatlessStorageImages(m_bind))
+		if (UsesFormatlessStorageImages(m_code, m_bind))
 		{
 			capabilities.Add("OpCapability StorageImageReadWithoutFormat");
 			capabilities.Add("OpCapability StorageImageWriteWithoutFormat");
@@ -547,6 +547,7 @@ void Spirv::WriteHeader()
 		if (m_bind->textures2D.textures2d_storage_num > 0)
 		{
 			vars.Add("%textures2D_L");
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd})) { vars.Add("%textures2D_LU"); }
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{
@@ -1019,6 +1020,12 @@ void Spirv::WriteAnnotations()
 			m_source += String8(textures_annotations_l)
 			                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
 			                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			{
+				m_source += String8(textures_annotations_l).ReplaceStr("textures2D_L", "textures2D_LU")
+				                .ReplaceStr("<DescriptorSet>", String8::FromPrintf("%u", m_bind->descriptor_set_slot))
+				                .ReplaceStr("<BindingIndex>", String8::FromPrintf("%d", m_bind->textures2D.binding_storage_index));
+			}
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{
@@ -1325,7 +1332,8 @@ static const char* textures_loaded_types = R"(
 		const bool uint_images = UsesUnsignedIntegerImages(m_bind);
 		const bool mixed_sampled_image_types = UsesMixedSampledImageNumericTypes(m_bind);
 		const char* image_scalar = uint_images ? "uint" : "float";
-		const char* image_format = uint_images ? "R32ui" : "Unknown";
+		const bool uint_storage = UsesUnsignedIntegerStorageImages(m_code, m_bind);
+		const char* image_format = uint_storage ? "R32ui" : "Unknown";
 		const char* image_dimension = "2D";
 		if (m_bind->storage_buffers.buffers_num > 0)
 		{
@@ -1382,10 +1390,20 @@ static const char* textures_loaded_types = R"(
 		{
 			m_source += String8(textures_loaded_types)
 			                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_storage_num))
-			                .ReplaceStr("<image_scalar>", image_scalar)
+			                .ReplaceStr("<image_scalar>", uint_storage ? "uint" : "float")
 			                .ReplaceStr("<image_format>", image_format)
 			                .ReplaceStr("<image_dimension>", image_dimension)
 			                .ReplaceStr("<arrayed>", storage_arrayed);
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			{
+				// Both variables address the existing storage binding; each access
+				// uses the numeric type of its proven descriptor.
+				m_source += String8(textures_loaded_types).ReplaceStr("ImageL", "ImageLU").ReplaceStr("textures2D_L", "textures2D_LU")
+				                .ReplaceStr("<buffers_num>", String8::FromPrintf("%d", m_bind->textures2D.textures2d_storage_num))
+				                .ReplaceStr("<image_scalar>", "uint").ReplaceStr("<image_format>", "R32ui")
+				                .ReplaceStr("<image_dimension>", "2D").ReplaceStr("<arrayed>", "0");
+				m_source += "%_ptr_Image_uint = OpTypePointer Image %uint\n";
+			}
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{
@@ -1527,6 +1545,11 @@ void Spirv::WriteGlobalVariables()
 		{
 			vars.Add(String8::FromPrintf("%%textures2D_L = OpVariable %%_ptr_UniformConstant__arr_ImageL_uint_%d UniformConstant",
 			                             m_bind->textures2D.textures2d_storage_num));
+			if (m_code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+			{
+				vars.Add(String8::FromPrintf("%%textures2D_LU = OpVariable %%_ptr_UniformConstant__arr_ImageLU_uint_%d UniformConstant",
+				                             m_bind->textures2D.textures2d_storage_num));
+			}
 		}
 		if (m_bind->samplers.samplers_num > 0)
 		{

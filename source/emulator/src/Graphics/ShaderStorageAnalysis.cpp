@@ -220,7 +220,8 @@ bool ShaderInstructionReadsImageResource(ShaderInstructionType type)
 
 bool ShaderInstructionWritesImageResource(ShaderInstructionType type)
 {
-	return type == ShaderInstructionType::ImageStore || type == ShaderInstructionType::ImageStoreMip;
+	return type == ShaderInstructionType::ImageStore || type == ShaderInstructionType::ImageStoreMip ||
+	       type == ShaderInstructionType::ImageAtomicAdd;
 }
 
 bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
@@ -903,7 +904,8 @@ ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int sta
 		{
 			result.texture = ShaderTextureUsage::ReadOnly;
 		}
-		result.reads = result.reads || read;
+		// Atomics need the existing texel even when they do not return its value.
+		result.reads = result.reads || read || inst.type == ShaderInstructionType::ImageAtomicAdd;
 		if (read)
 		{
 			RecordMimgSampledShape(inst, &result);

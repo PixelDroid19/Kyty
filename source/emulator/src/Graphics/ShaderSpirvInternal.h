@@ -387,8 +387,11 @@ bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id
 String8 get_scc_check(SccCheck scc_check, int dst_num);
 bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usage);
 bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);
+bool UsesUnsignedIntegerStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
+int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
+                                   const ShaderBindResources& bind, int user_data_register_base);
 bool UsesMixedSampledImageNumericTypes(const ShaderBindResources* bind);
-bool UsesFormatlessStorageImages(const ShaderBindResources* bind);
+bool UsesFormatlessStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
 bool IsImageInstruction(const ShaderInstruction& inst);
 bool IsSampledImageInstruction(const ShaderInstruction& inst);
 bool IsStorageImageInstruction(const ShaderInstruction& inst);

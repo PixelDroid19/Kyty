@@ -946,6 +946,7 @@ bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instructio
 
 bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instruction)
 {
+	if (instruction.type == ShaderInstructionType::ImageAtomicAdd) { return ShaderImageAtomicAddSupported(instruction); }
 	const auto name   = Core::EnumName8(instruction.type);
 	const bool memory = name.StartsWith("Buffer") || name.StartsWith("Tbuffer") || name.StartsWith("Image");
 	if (memory)
@@ -1104,6 +1105,11 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& c
 			{
 				return atomic;
 			}
+		}
+		if (instruction.type == ShaderInstructionType::ImageAtomicAdd &&
+		    !ShaderImageAtomicResourceSupported(code, index, input.bind))
+		{
+			return {false, instruction.pc, "image atomic addition requires a resolved 2D R32_UINT storage image"};
 		}
 		if (kind == ShaderComputeWaveInstructionKind::Unsupported)
 		{

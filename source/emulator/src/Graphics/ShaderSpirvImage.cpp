@@ -66,8 +66,8 @@ struct ImageSampleLzPlan
 	bool                          cube_coordinates;
 };
 
-static int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
-                                           const ShaderBindResources& bind, int user_data_register_base)
+int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
+                                   const ShaderBindResources& bind, int user_data_register_base)
 {
 	const int descriptor_index = ShaderFindImageStorageTextureDescriptor(code, instruction_index, bind, user_data_register_base);
 	if (descriptor_index < 0) { return -1; }
@@ -688,9 +688,24 @@ bool UsesMixedSampledImageNumericTypes(const ShaderBindResources* bind)
 	return profile.has_unsigned && profile.has_floating_point;
 }
 
-bool UsesFormatlessStorageImages(const ShaderBindResources* bind)
+bool UsesUnsignedIntegerStorageImages(const ShaderCode& code, const ShaderBindResources* bind)
 {
-	return bind != nullptr && bind->textures2D.textures2d_storage_num > 0 && !UsesUnsignedIntegerImages(bind);
+	if (code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+	{
+		if (bind == nullptr || bind->textures2D.textures2d_storage_num <= 0) { return false; }
+		for (int index = 0; index < bind->textures2D.textures_num; ++index)
+		{
+			const auto& descriptor = bind->textures2D.desc[index];
+			if (descriptor.usage == ShaderTextureUsage::ReadWrite && descriptor.texture.Format() != 20u) { return false; }
+		}
+		return true;
+	}
+	return UsesUnsignedIntegerImages(bind);
+}
+
+bool UsesFormatlessStorageImages(const ShaderCode& code, const ShaderBindResources* bind)
+{
+	return bind != nullptr && bind->textures2D.textures2d_storage_num > 0 && !UsesUnsignedIntegerStorageImages(code, bind);
 }
 
 bool IsImageInstruction(const ShaderInstruction& inst)
@@ -707,6 +722,7 @@ bool IsImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageSampleB:
 		case ShaderInstructionType::ImageSampleDrefLz:
 		case ShaderInstructionType::ImageStore:
+		case ShaderInstructionType::ImageAtomicAdd:
 		case ShaderInstructionType::ImageStoreMip: return true;
 		default: return false;
 	}
@@ -731,7 +747,8 @@ bool IsSampledImageInstruction(const ShaderInstruction& inst)
 
 bool IsStorageImageInstruction(const ShaderInstruction& inst)
 {
-	return inst.type == ShaderInstructionType::ImageStore || inst.type == ShaderInstructionType::ImageStoreMip;
+	return inst.type == ShaderInstructionType::ImageStore || inst.type == ShaderInstructionType::ImageStoreMip ||
+	       inst.type == ShaderInstructionType::ImageAtomicAdd;
 }
 
 String8 GuardImageDestinationStores(const String8& source, const ShaderInstruction& inst, uint32_t index)
@@ -3474,11 +3491,22 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 			return false;
 		}
 
-		const bool arrayed           = UsesArrayed2dImages(bind_info, ShaderTextureUsage::ReadWrite);
+		bool uint_alias = false;
+		if (code.HasAnyOf({ShaderInstructionType::ImageAtomicAdd}))
+		{
+			const int descriptor = ShaderFindImageStorageTextureDescriptor(code, index, *bind_info, user_data_register_base);
+			if (descriptor < 0) { return false; }
+			const auto& texture = bind_info->textures2D.desc[descriptor].texture;
+			const auto numeric = VulkanGen5ImageNumericType(texture.Format());
+			if (numeric == GuestImageNumericType::SignedInteger || numeric == GuestImageNumericType::Unsupported) { return false; }
+			uint_alias = numeric == GuestImageNumericType::UnsignedInteger;
+			if (uint_alias && (texture.Format() != 20u || texture.Type() != 9u)) { return false; }
+		}
+		const bool arrayed           = !uint_alias && UsesArrayed2dImages(bind_info, ShaderTextureUsage::ReadWrite);
 		// Storage images are declared 2D (optionally arrayed); sampled 3D
 		// textures do not change the storage image's dimensionality.
 		const bool three_dimensional = false;
-		const bool uint_images       = UsesUnsignedIntegerImages(bind_info);
+		const bool uint_images       = uint_alias || UsesUnsignedIntegerStorageImages(code, bind_info);
 		const auto src0_value0       = mimg_address_to_str(inst, 0);
 		const auto src0_value1       = mimg_address_to_str(inst, 1);
 		const auto zero_component    = uint_images ? spirv->GetConstantUint(0u) : spirv->GetConstantFloat(0.0f);
@@ -3564,6 +3592,8 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 		    ((arrayed || three_dimensional) ? (array_window_2d ? String8(" %uint_0") : String8::FromPrintf(" %%t721_%u", index)) :
 		                                       String8(""));
 		*dst_source += String8(text)
+		                   .ReplaceStr("ImageL", uint_alias ? "ImageLU" : "ImageL")
+		                   .ReplaceStr("textures2D_L", uint_alias ? "textures2D_LU" : "textures2D_L")
 		                   .ReplaceStr("<array_coordinate_load>", array_coordinate_load)
 		                   .ReplaceStr("<coordinate_type>", (arrayed || three_dimensional) ? "v3uint" : "v2uint")
 		                   .ReplaceStr("<extent_type>", (arrayed || three_dimensional) ? "v3int" : "v2int")

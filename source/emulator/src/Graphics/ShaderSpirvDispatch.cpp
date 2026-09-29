@@ -173,6 +173,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_ImageSampleLzO_Vdata3Vaddr4StSsDmask7,      ShaderInstructionType::ImageSampleLzO,      ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7,         {""}},
     {Recompile_ImageSampleLzO_VdataVaddr4StSsMimgDmask,    ShaderInstructionType::ImageSampleLzO,      ShaderInstructionFormat::VdataVaddr4StSsMimgDmask,       {""}},
     {Recompile_ImageStore_VdataVaddr3StDmask,              ShaderInstructionType::ImageStore,          ShaderInstructionFormat::VdataVaddr3StDmask,             {""}},
+    {Recompile_ImageAtomicAdd,                            ShaderInstructionType::ImageAtomicAdd,      ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1,       {""}},
 	{Recompile_ImageStore_VdataVaddr3StDmask,              ShaderInstructionType::ImageStore,          ShaderInstructionFormat::Vdata4Vaddr3StDmaskF,           {""}},
     {Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF,         ShaderInstructionType::ImageStoreMip,       ShaderInstructionFormat::Vdata4Vaddr4StDmaskF,           {""}},
 

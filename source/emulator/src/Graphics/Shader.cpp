@@ -1703,7 +1703,8 @@ bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 	                      ShaderInstructionType::DsMaxI32, ShaderInstructionType::DsMaxU32, ShaderInstructionType::DsMinI32,
 	                      ShaderInstructionType::DsMinU32, ShaderInstructionType::DsOrB32, ShaderInstructionType::DsRsubU32,
 	                      ShaderInstructionType::DsSubU32, ShaderInstructionType::DsXorB32, ShaderInstructionType::DsWriteB32,
-	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip});
+	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
+	                      ShaderInstructionType::ImageAtomicAdd});
 
 	return prevents;
 }

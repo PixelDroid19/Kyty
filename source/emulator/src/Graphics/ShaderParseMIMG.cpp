@@ -38,7 +38,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(r128 == 1);
 	EXIT_NOT_IMPLEMENTED(tff == 1);
 	EXIT_NOT_IMPLEMENTED(lwe == 1);
-	EXIT_NOT_IMPLEMENTED(glc == 1);
+	EXIT_NOT_IMPLEMENTED(glc == 1 && !(next_gen && opcode == 0x11u));
 	EXIT_NOT_IMPLEMENTED(slc == 1);
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
@@ -139,7 +139,19 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		}
 		case 0x0F: KYTY_NI("image_atomic_swap"); break;
 		case 0x10: KYTY_NI("image_atomic_cmpswap"); break;
-		case 0x11: KYTY_NI("image_atomic_add"); break;
+		case 0x11:
+			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask != 1u || nsa != 0u || (buffer[1] & 0x80000000u) != 0);
+			inst.type                  = ShaderInstructionType::ImageAtomicAdd;
+			inst.format                = ShaderInstructionFormat::Vdata1Vaddr2StVsrc2Dmask1;
+			inst.dst.size              = 1;
+			inst.src[0].size           = 2;
+			inst.src[1].size           = 8;
+			inst.src[2]                = inst.dst;
+			inst.src_num               = 3;
+			inst.mimg_dmask            = 1;
+			inst.mimg_return_old_value = glc != 0;
+			EXIT_NOT_IMPLEMENTED(!ShaderImageAtomicAddSupported(inst));
+			break;
 		case 0x12: KYTY_NI("image_atomic_sub"); break;
 		case 0x13: KYTY_NI("image_atomic_rsub"); break;
 		case 0x14: KYTY_NI("image_atomic_smin"); break;

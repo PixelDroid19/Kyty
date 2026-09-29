@@ -213,7 +213,8 @@ RenderShaderCoordinateUsage AnalyzeResolutionShaderUsage(const ShaderCode& code)
 	RenderShaderCoordinateUsage usage;
 	usage.integer_image_coordinates =
 	    code.HasAnyOf({ShaderInstructionType::ImageGetResinfo, ShaderInstructionType::ImageLoad,
-	                   ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip});
+	                   ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
+	                   ShaderInstructionType::ImageAtomicAdd});
 	return usage;
 }
 
