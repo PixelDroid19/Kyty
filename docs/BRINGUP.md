@@ -367,6 +367,18 @@ inside six older views (four render targets, one storage image, and one
 storage buffer). The new image's format, first-write coverage, and live byte
 owner remain to be established. No native capture or gameplay was observed.
 
+Commit `2c589a47` proves the first writer of that six-parent storage image is
+also a full overwrite. Its paired wave64 shader has one full-channel store
+to the destination, no destination read or divergent path, and a bijective
+permutation of the 64 local lane coordinates. The 2D dispatch covers every
+valid destination texel. A positive test failed before the change, 19 focused
+graphics/image tests and the source-boundary and graphics-table gates passed,
+and a strict Silent/Native run crossed the former alias. That run stopped
+later at unknown Gen5 VOP3 opcode `0x369` in `ShaderParseVOP3.cpp`; the local
+RDNA2 ISA identifies it as `V_CVT_PKNORM_U16_F32`. Its actual encoded tuple
+and lowering must be verified before adding parser support. The run reached
+only the logo; it did not establish a playable or correctly rendered state.
+
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native

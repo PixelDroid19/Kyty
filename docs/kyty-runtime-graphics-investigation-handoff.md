@@ -326,6 +326,19 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Paired linear single-store coverage (2026-09-28): the six-parent storage
+  image's first shader writes one full-channel pixel for each of 64 paired
+  wave64 lanes. Symbolic lane coordinates permute the 8x8 local tile without
+  gaps or duplicates; no path skips the store or reads the destination.
+  Commit `2c589a47` requires that exact proof, a resolved destination binding,
+  and matching dispatch coverage before omitting the initial seed. The focused
+  positive case failed before the change; 19 focused tests and source/table
+  gates passed afterward. A strict Silent/Native run crossed the alias and
+  stopped at an unrecognized Gen5 VOP3 opcode `0x369` in
+  `ShaderParseVOP3.cpp`. The local RDNA2 ISA calls it
+  `V_CVT_PKNORM_U16_F32`; verify the observed operands and conversion before
+  enabling it. The run reached only the logo, without gameplay evidence.
+
 - EUD base-pair lifetime (2026-09-28): rejecting every shader that writes
   the former EUD pointer pair after any mapped scalar load was too broad.
   A bounded 368-instruction trace had six mapped loads before one full-pair
