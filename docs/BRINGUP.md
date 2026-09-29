@@ -353,6 +353,20 @@ actual first-write coverage and each parent's content provenance before
 extending the overlap policy. A prior uniformly black native frame remains
 scored evidence from this bring-up phase.
 
+Commit `69586773` proves a second whole-image pattern in paired wave64
+compute. A symbolic 64-lane check follows the shader's local-coordinate
+permutation, verifies that the tile contains each texel exactly once, and
+requires two full-channel stores to the same dynamic image descriptor on
+complementary `EXEC` paths. It rejects destination reads, missing or altered
+branches, coordinate clobbers, incomplete masks, and unbound image reads.
+Only a matching 2D dispatch can skip the initial seed. The positive test
+failed before the change; the focused tests and a strict Silent/Native run
+passed the former nine-parent overlap. The next first strict failure is in
+`GpuMemoryCreate.cpp` at `!create_all_the_same`: a 768 KiB storage image lies
+inside six older views (four render targets, one storage image, and one
+storage buffer). The new image's format, first-write coverage, and live byte
+owner remain to be established. No native capture or gameplay was observed.
+
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native

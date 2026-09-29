@@ -348,6 +348,30 @@ against the same correct gameplay capture.
   is the new image's writer coverage or live source ownership, not a blanket
   multi-parent link.
 
+- Paired split-store coverage (2026-09-28): the next 8×8 paired-wave writer
+  uses a bijective permutation of local coordinates and two stores to one
+  storage descriptor. A scalar branch before the split bypasses only source
+  sampling; `VCmpxNeqF32` selects the first store's `EXEC` lanes, and
+  `SNotB64 exec,exec` selects their complement for the second store. All
+  sampled descriptors are distinct from the destination. Commit `69586773`
+  admits this general proof only with exact forward branch targets, unchanged
+  store coordinates, full required channel masks, a unique resolved image
+  binding, and a complete 64-lane tile. The positive test failed before the
+  change; focused tests, strict source-boundary and graphics-table gates, and
+  a Silent/Native strict run passed. That run crossed the former nine-parent
+  overlap and stopped at a later 768 KiB `StorageTexture` contained by six
+  parents in `GpuMemoryCreate.cpp:1825`. Determine its actual first writer and
+  authoritative old-byte source before any multi-parent alias rule change;
+  this is not visual or gameplay acceptance.
+
+- Intermittent guest device-address import (2026-09-28): one bounded strict
+  diagnostic failed at `GraphicsRenderBind.cpp:4260` with
+  `GuestDeviceAddressPrepare` reporting `host_writable=0`. A bounded retry
+  reached the later storage-image overlap. The triggering allocation state
+  and return path are unproved; capture `ImportResident`'s two import attempts
+  and resident-range ownership if this earlier failure recurs. Do not loosen
+  the address-import contract based on that single failure.
+
 - Inactive depth-image compute dispatch (2026-09-28): a mixed-parent R32
   storage view with depth-64KB tiling was contained in two newer GPU-owned
   color render targets and an older storage view. Their formats and tile
