@@ -239,11 +239,15 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_
 uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address);
 // sceAgcDcbStallCommandBufferParser: fixed EVENT_WRITE with CS partial flush (0x07).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf);
-// sceAgcDcbDmaData / sceAgcAcbDmaData: encode the hardware IT_DMA_DATA packet.
+// Graphics and async compute entry points share IT_DMA_DATA encoding but have distinct ABIs.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t engine, uint8_t destination,
                                            uint8_t destination_cache_policy, uint64_t destination_address, uint8_t source,
                                            uint8_t source_cache_policy, uint64_t source_address, uint32_t byte_count,
                                            uint8_t wait_for_previous, uint8_t write_confirm, uint8_t block_engine);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy,
+                                         uint64_t destination_address, uint8_t source, uint8_t source_cache_policy,
+                                         uint64_t source_address, uint32_t byte_count, uint8_t wait_for_previous,
+                                         uint8_t write_confirm);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,

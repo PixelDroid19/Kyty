@@ -4010,6 +4010,16 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t engine, u
 	return cmd;
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsAcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy,
+                                        uint64_t destination_address, uint8_t source, uint8_t source_cache_policy,
+                                        uint64_t source_address, uint32_t byte_count, uint8_t wait_for_previous,
+                                        uint8_t write_confirm)
+{
+	// The compute queue has no caller-supplied engine selector or parser-block flag.
+	return GraphicsDcbDmaData(buf, 0, destination, destination_cache_policy, destination_address, source,
+	                         source_cache_policy, source_address, byte_count, wait_for_previous, write_confirm, 0);
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles)
 {

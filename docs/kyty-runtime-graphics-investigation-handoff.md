@@ -473,6 +473,15 @@ against the same correct gameplay capture.
   and route its decoded arguments through the existing DMA packet builder;
   do not synthesize resets from dispatch counts or shader identity.
 
+  The async entry now has that distinct ABI and delegates only packet encoding
+  to the existing implementation. A subsequent bounded live trace observes
+  zero writes to all four counter cells before each producer cycle, and all
+  48 recorded indirect dispatches have group counts 1/1/1. A Silent/Native
+  five-minute run stops at its configured limit, advances to the first
+  startup scene, and retains black scored captures at presents 28, 172 and
+  222. Its sampled largest completed fence is about 65 ms. This verifies the
+  missing-reset mechanism; no image, input, or gameplay acceptance follows.
+
 - High VCC masks and vector bit counts (2026-09-29): a bounded shader trace
   identified a one-word `VCC_HI` compare/conditional-mask tuple in a native
   32-lane program. Treating the parser failure as proof of a wave64 dispatch

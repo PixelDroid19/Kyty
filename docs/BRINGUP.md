@@ -254,6 +254,26 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Async DMA argument layout and counter reset (2026-09-29, not gameplay)
+
+The async compute DMA export used the graphics entry point even though its
+ABI omits the engine selector and trailing parser-block argument. Live entry
+registers and stack words show four-byte immediate clears; the wrong function
+interprets those arguments as one-byte requests and rejects them. The async
+entry now decodes its own arguments and uses the shared hardware DMA encoder.
+
+Combined with the GDS byte-address correction in `b3288fb7`, a bounded live
+trace now observes the intended counter clears and 48 indirect dispatches
+with group counts of one across consecutive cycles. The uncontrolled counter
+accumulation is no longer present in that sample. A Silent/Native run reaches
+its five-minute limit, advances into the first startup scene and has scored
+black captures at presents 28, 172 and 222. The largest completed fence in
+the retained diagnostic sample is about 65 ms. These are execution and
+contract observations, not visible rendering, controls or gameplay acceptance.
+The next color investigation must correlate the later startup scene's final
+output with the presented buffer; the older present-20 black-source evidence
+alone does not establish that later producer.
+
 ### Physical aliases across CPU protection boundaries (2026-09-29, not gameplay)
 
 The intermittent guest-device import failure was reproduced with a 16 KiB

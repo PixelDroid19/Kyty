@@ -96,7 +96,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("t7PlZ9nt5Lc", Gen5::GraphicsCbNopGetSize);
 	// WmAc2MEj6Io: sceAgcDcbDmaData. Distinct from MWiElSNE8j8 WaitUntilSafe.
 	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbDmaData);
-	LIB_FUNC("-RnpfpxIhec", Gen5::GraphicsDcbDmaData); // sceAgcAcbDmaData alias
+	LIB_FUNC("-RnpfpxIhec", Gen5::GraphicsAcbDmaData);
 	LIB_FUNC("2ccJz9LQI+w", Gen5::GraphicsDcbDmaDataGetSize);
 	LIB_FUNC("u2T2DiA5hRI", Gen5::GraphicsDcbStallCommandBufferParser);
 	LIB_FUNC("+u6dKSLWM2o", Gen5::GraphicsDcbStallCommandBufferParserGetSize);
