@@ -136,7 +136,8 @@ ShaderSampledImageViewDecision ResolveDepthReferenceImageView(State::ImageSample
 	}
 	const bool compatible =
 	    (shape == ShaderGen5SampledTextureShape::TwoDimensional && resolved_view == ShaderSampledImageViewKind::Depth2D) ||
-	    (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray && resolved_view == ShaderSampledImageViewKind::Depth2DArray);
+	    (shape == ShaderGen5SampledTextureShape::TwoDimensionalArray &&
+	     (resolved_view == ShaderSampledImageViewKind::Color2DArray || resolved_view == ShaderSampledImageViewKind::Depth2DArray));
 	return {compatible, resolved_view};
 }
 
@@ -4093,6 +4094,11 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		// ret->ids.Add(r.BorderColorType());
 		ret->ids.Add(r.DepthCompareFunc());
 		ret->ids.Add(static_cast<uint32_t>(r.ForceUnormCoords()));
+		// Manual comparison filtering specializes the base-level footprint.
+		ret->ids.Add(r.MinLod());
+		ret->ids.Add(r.FilterMode());
+		ret->ids.Add(r.XyMagFilter());
+		ret->ids.Add(r.XyMinFilter());
 		ret->ids.Add(bind.samplers.slots[i]);
 		ret->ids.Add(bind.samplers.start_register[i]);
 		ret->ids.Add(static_cast<uint32_t>(bind.samplers.extended[i]));

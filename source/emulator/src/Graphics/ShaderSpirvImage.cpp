@@ -2125,6 +2125,47 @@ static String8 EmitImageSampleCLzCompare(uint32_t index, uint8_t compare_func)
 	    .ReplaceStr("<compare_op>", compare_op);
 }
 
+static bool SupportsArrayComparisonSampler(const ShaderSamplerResource& sampler)
+{
+	return !sampler.ForceUnormCoords() && sampler.MinLod() == 0u && sampler.FilterMode() == 0u &&
+	       sampler.XyMagFilter() <= 1u && sampler.XyMinFilter() <= 1u;
+}
+
+static String8 EmitArrayComparisonFilter(uint32_t index, uint8_t compare_func)
+{
+	const auto index_string = String8::FromPrintf("%u", index);
+	String8 text;
+	// Gather order is (i0,j1), (i1,j1), (i1,j0), (i0,j0). Compare each
+	// wrapped/border-replaced texel before interpolating the four results.
+	for (uint32_t tap = 0; tap < 4u; tap++)
+	{
+		const auto suffix = String8::FromPrintf("_%u", tap);
+		text += String8::FromPrintf("%%image_dref_texel_%u_%u = OpCompositeExtract %%float %%image_dref_gather_%u %u\n",
+		                            index, tap, index, tap);
+		text += EmitImageSampleCLzCompare(index, compare_func)
+		            .ReplaceStr("%image_dref_texel_" + index_string, "%image_dref_texel_" + index_string + suffix)
+		            .ReplaceStr("%image_dref_passes_" + index_string, "%image_dref_passes_" + index_string + suffix)
+		            .ReplaceStr("%image_dref_result_" + index_string, "%image_dref_result_" + index_string + suffix);
+	}
+	text += String8(R"(
+%image_dref_extent_<index> = OpImageQuerySizeLod %v3int %image_dref_image_<index> %int_0
+%image_dref_width_<index> = OpCompositeExtract %int %image_dref_extent_<index> 0
+%image_dref_height_<index> = OpCompositeExtract %int %image_dref_extent_<index> 1
+%image_dref_width_float_<index> = OpConvertSToF %float %image_dref_width_<index>
+%image_dref_height_float_<index> = OpConvertSToF %float %image_dref_height_<index>
+%image_dref_u_<index> = OpFMul %float %image_dref_x_<index> %image_dref_width_float_<index>
+%image_dref_v_<index> = OpFMul %float %image_dref_y_<index> %image_dref_height_float_<index>
+%image_dref_center_u_<index> = OpFSub %float %image_dref_u_<index> %float_0_500000
+%image_dref_center_v_<index> = OpFSub %float %image_dref_v_<index> %float_0_500000
+%image_dref_weight_u_<index> = OpExtInst %float %GLSL_std_450 Fract %image_dref_center_u_<index>
+%image_dref_weight_v_<index> = OpExtInst %float %GLSL_std_450 Fract %image_dref_center_v_<index>
+%image_dref_lower_<index> = OpExtInst %float %GLSL_std_450 FMix %image_dref_result_<index>_3 %image_dref_result_<index>_2 %image_dref_weight_u_<index>
+%image_dref_upper_<index> = OpExtInst %float %GLSL_std_450 FMix %image_dref_result_<index>_0 %image_dref_result_<index>_1 %image_dref_weight_u_<index>
+%image_dref_result_<index> = OpExtInst %float %GLSL_std_450 FMix %image_dref_lower_<index> %image_dref_upper_<index> %image_dref_weight_v_<index>
+)").ReplaceStr("<index>", index_string);
+	return text;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -2150,6 +2191,12 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 	const bool depth_view = flat && descriptor.sample_operation == State::ImageSampleOperation::DepthReference;
 	const bool comparison_sampled =
 	    depth_view && ShaderSamplerDepthComparisonEligible(bind_info->textures2D, bind_info->samplers, sampler_index);
+	const auto& sampler = bind_info->samplers.samplers[sampler_index];
+	if (arrayed && !SupportsArrayComparisonSampler(sampler))
+	{
+		return false;
+	}
+	const bool manual_linear = arrayed && sampler.XyMagFilter() == 1u;
 	if ((!flat && !arrayed) || (flat && inst.mimg_dimension != 1u) ||
 	    (arrayed && inst.mimg_dimension != 3u && inst.mimg_dimension != 5u))
 	{
@@ -2183,7 +2230,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 		return false;
 	}
 
-	const uint8_t compare_func = bind_info->samplers.samplers[sampler_index].DepthCompareFunc();
+	const uint8_t compare_func = sampler.DepthCompareFunc();
 	const String8 compare_text = EmitImageSampleCLzCompare(index, compare_func);
 	if (compare_text.IsEmpty())
 	{
@@ -2251,12 +2298,19 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 %image_dref_y_<index> = OpLoad %float %<y>
 %image_dref_layer_<index> = OpLoad %float %<layer>
 %image_dref_coordinate_<index> = OpCompositeConstruct %v3float %image_dref_x_<index> %image_dref_y_<index> %image_dref_layer_<index>
+<array_sample>
+)";
+	static const char* array_nearest_text = R"(
 %image_dref_sample_<index> = OpImageSampleExplicitLod %v4float %image_dref_sampled_<index> %image_dref_coordinate_<index> Lod %float_0_000000
 %image_dref_texel_<index> = OpCompositeExtract %float %image_dref_sample_<index> 0
+)";
+	static const char* array_linear_text = R"(
+%image_dref_gather_<index> = OpImageGather %v4float %image_dref_sampled_<index> %image_dref_coordinate_<index> %int_0
 )";
 
 	const char* sample_text = comparison_sampled ? flat_depth_comparison_text : (depth_view ? flat_depth_text : (flat ? flat_text : array_text));
 	*dst_source += String8(sample_text)
+	                   .ReplaceStr("<array_sample>", manual_linear ? array_linear_text : array_nearest_text)
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<texture>", texture_value.value)
 	                   .ReplaceStr("<sampler>", sampler_value.value)
@@ -2264,7 +2318,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 	                   .ReplaceStr("<x>", x_value.value)
 	                   .ReplaceStr("<y>", y_value.value)
 	                   .ReplaceStr("<layer>", layer_value.value);
-	if (!comparison_sampled)
+	if (manual_linear)
+	{
+		*dst_source += EmitArrayComparisonFilter(index, compare_func);
+	} else if (!comparison_sampled)
 	{
 		*dst_source += compare_text;
 	}
