@@ -594,6 +594,7 @@ void Spirv::WriteHeader()
 					}
 				}
 				WriteCustomPixelInterface(&vars);
+				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("%gl_FrontFacing"); }
 				if (m_ps_input_info->ps_pos_xy ||
 				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
 				    UsesPixelMrtProbe())
@@ -841,6 +842,7 @@ void Spirv::WriteAnnotations()
 					vars.Add(String8::FromPrintf("OpDecorate %%attr%u Location %u", i, location));
 				}
 				WriteCustomPixelAnnotations(&vars);
+				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("OpDecorate %gl_FrontFacing BuiltIn FrontFacing"); }
 				if (m_ps_input_info->ps_pos_xy ||
 				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
 				    UsesPixelMrtProbe())
@@ -1170,6 +1172,10 @@ static const char* compute_types = R"(
 		case ShaderType::Vertex: m_source += vertex_types; break;
 		case ShaderType::Pixel:
 			m_source += pixel_types;
+			if (m_ps_input_info != nullptr && m_ps_input_info->FrontFaceEnabled())
+			{
+				m_source += "%_ptr_Input_bool = OpTypePointer Input %bool\n";
+			}
 			if (m_ps_input_info != nullptr && m_ps_input_info->custom_interpolation.Enabled())
 			{
 				m_source += "%custom_vertex_count = OpConstant %uint 3\n"
@@ -1567,6 +1573,7 @@ void Spirv::WriteGlobalVariables()
 					}
 				}
 				WriteCustomPixelVariables(&vars);
+				if (m_ps_input_info->FrontFaceEnabled()) { vars.Add("%gl_FrontFacing = OpVariable %_ptr_Input_bool Input"); }
 				if (m_ps_input_info->ps_pos_xy ||
 				    (m_ps_input_info->custom_interpolation.Enabled() && (m_ps_input_info->system_input_enable & 0xf00u) != 0) ||
 				    UsesPixelMrtProbe())
@@ -1823,6 +1830,7 @@ void Spirv::WriteLocalVariables()
 	}
 
 	WriteCustomPixelProlog();
+	WritePixelFrontFaceProlog();
 
 	if (m_code.GetType() == ShaderType::Compute)
 	{
@@ -2947,6 +2955,11 @@ void Spirv::FindConstants()
 		AddConstantUint(0x0f000000);
 		AddConstantUint(0xf0000000);
 	}
+	if (m_ps_input_info != nullptr && m_ps_input_info->FrontFaceEnabled())
+	{
+		AddConstantUint(m_ps_input_info->front_face_all_bits ? 1u : 0x3f800000u);
+		AddConstantUint(m_ps_input_info->front_face_all_bits ? 0u : 0xbf800000u);
+	}
 	if (m_ps_input_info != nullptr && (m_ps_input_info->system_input_enable & 0x300u) != 0 &&
 	    !m_ps_input_info->host_to_guest_scale.IsIdentity())
 	{
@@ -3017,6 +3030,10 @@ void Spirv::FindVariables()
 
 	if (m_ps_input_info != nullptr)
 	{
+		if (m_ps_input_info->FrontFaceEnabled())
+		{
+			AddVariable(ShaderOperandType::Vgpr, ShaderPixelSystemInputRegister(*m_ps_input_info, 12u), 1);
+		}
 		if (m_ps_input_info->custom_interpolation.Enabled())
 		{
 			for (uint32_t field = 0; field < 12u; ++field)

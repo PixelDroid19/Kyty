@@ -1961,6 +1961,7 @@ struct ShaderPixelInputInfo
 	uint8_t                target_output_order[8]    = {};
 	RenderHostToGuestScale host_to_guest_scale;
 	bool                   ps_pos_xy                 = false;
+	bool                   front_face_all_bits       = false;
 	bool                   integer_image_coordinates = false;
 	bool                   image_size_query          = false;
 	bool                   ps_pixel_kill_enable      = false;
@@ -1980,6 +1981,11 @@ struct ShaderPixelInputInfo
 	// whose exact width must be available in the host Vulkan subgroup.
 	uint32_t               required_subgroup_size    = 0;
 	ShaderBindResources    bind;
+
+	[[nodiscard]] bool FrontFaceEnabled() const
+	{
+		return (system_input_enable & system_input_address & (1u << 12u)) != 0;
+	}
 };
 
 [[nodiscard]] ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count);

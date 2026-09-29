@@ -78,6 +78,20 @@ void Spirv::WriteCustomPixelProlog()
 	}
 }
 
+void Spirv::WritePixelFrontFaceProlog()
+{
+	if (m_ps_input_info == nullptr || !m_ps_input_info->FrontFaceEnabled()) { return; }
+	const auto reg = ShaderPixelSystemInputRegister(*m_ps_input_info, 12u);
+	// SPI_BARYC_CNTL selects integer 1/0 or the bits of floating +1/-1.
+	const auto front = GetConstantUint(m_ps_input_info->front_face_all_bits ? 1u : 0x3f800000u);
+	const auto back = GetConstantUint(m_ps_input_info->front_face_all_bits ? 0u : 0xbf800000u);
+	m_source += String8::FromPrintf(
+	    "%%front_face = OpLoad %%bool %%gl_FrontFacing\n"
+	    "%%front_face_bits = OpSelect %%uint %%front_face %%%s %%%s\n"
+	    "%%front_face_register = OpBitcast %%float %%front_face_bits\n"
+	    "OpStore %%v%u %%front_face_register\n", front.c_str(), back.c_str(), reg);
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

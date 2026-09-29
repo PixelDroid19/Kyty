@@ -402,8 +402,20 @@ against the same correct gameplay capture.
   does not identify the first zero input, and the earlier sample probe is
   not a per-pixel correspondence test. The live writer also selects the
   integer front-face representation with `SPI_BARYC_CNTL=0x01000000`, while
-  the incoming register is still left at zero; the separate system-input
+  the incoming register is read before initialization in the captured module;
+  its value is not proven to be zero. The separate system-input
   contract and primary register reference are recorded in the bring-up manual.
+
+- Front-face input versus black output (2026-09-29): after initializing the
+  requested pixel VGPR from Vulkan `FrontFacing` with the guest-selected
+  integer representation, both live pixel variants and their geometry stages
+  pass Vulkan 1.2 validation. The material probe still counts 409,600 finite
+  RGBA-zero exports, and native capture 134 remains uniformly black. The
+  missing input was a translation defect, but its correction alone does not
+  resolve this output. A descriptor-bind snapshot of that probed draw shows
+  floating one at both scalar opacity offsets 16 and 24; the zero observed
+  at an earlier first draw does not explain this occurrence. Next trace the
+  sampled color/alpha and packed per-vertex values at the same material draw.
 
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying

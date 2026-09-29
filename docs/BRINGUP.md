@@ -327,15 +327,35 @@ would hold the render lock across the other processor's completion path.
 This run stops before exercising the pending JSON string conversion.
 
 The exercised custom-interpolation program also reads its incoming
-`FRONT_FACE` VGPR. `ShaderSpirvGenerator.cpp:1786` initializes XY position but
-does not initialize that field; the register retains its generic initial
-value. Its live `SPI_BARYC_CNTL` is `0x01000000`. AMD's public
+`FRONT_FACE` VGPR. The pixel prolog in `ShaderSpirvGenerator.cpp` initializes
+XY position but does not initialize that field. The captured module declares
+the register without an initializer and first reads it at an integer compare;
+its first store comes after that read. This is undefined input, not a proven
+zero-valued front-face flag. Its live `SPI_BARYC_CNTL` is `0x01000000`. AMD's public
 [register guide, page 189](https://docs.amd.com/api/khub/documents/9fuBVmqajj07G~5~aeTUig/content)
 defines bit 24 as selecting integer one/zero for front/back, versus floating
-positive/negative one when clear. Carry that control into shader metadata
-and identity, then initialize the requested Vulkan builtin before claiming
-the full pixel system-input contract. The interpolation transport work alone
-does not correct this separate gap or establish its effect on visible output.
+positive/negative one when clear. Shader metadata now carries that control,
+and the enabled input adds a versioned identity with its encoding. The pixel
+prolog loads Vulkan `FrontFacing`, selects the requested bit representation
+and initializes the VGPR before guest instructions.
+
+A subsequent Silent/Native run validates the live 30,596-byte ordinary pixel
+module, its 33,828-byte diagnostic variant and both 1,868-byte geometry
+modules for Vulkan 1.2. Their identities contain the new front-face version
+and integer encoding. The diagnostic source and optimized module also
+validate; the source initializes VGPR4 with integer one/zero before the old
+first read. The floating representation still requires focused validation.
+At the same 100-present threshold, all 409,600 material invocations remain
+finite RGBA zero, and native capture 134 remains uniformly black. This
+corrects the missing system input but excludes it as a sufficient fix for
+that black output.
+
+A read-only snapshot at the diagnostic draw's actual descriptor bind records
+its scalar input buffer. Both opacity factors loaded at byte offsets 16 and
+24 are floating one. The zero at offset 16 seen at an earlier first draw is
+therefore not evidence for this later all-zero export. Follow the texture
+sample and packed per-vertex alpha at this same draw before changing either
+buffer contents or guest media state.
 
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 

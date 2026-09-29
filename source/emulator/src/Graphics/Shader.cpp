@@ -2924,6 +2924,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	ps_info->input_num            = sh->ps_in_control & 0x3fu;
 	ps_info->system_input_enable  = sh->ps_input_ena;
 	ps_info->system_input_address = sh->ps_input_addr;
+	ps_info->front_face_all_bits  = (sh->baryc_cntl & (1u << 24u)) != 0;
 	ps_info->ps_pos_xy            = ShaderPixelPositionEnabled(sh->ps_input_ena, sh->ps_input_addr);
 	ps_info->ps_pixel_kill_enable = sh->db_shader_control.shader_kill_enable;
 	ps_info->ps_early_z           = (sh->db_shader_control.shader_z_behavior == 1);
@@ -4280,6 +4281,11 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ret.ids.Add(input_info->input_num);
 	ret.ids.Add(input_info->system_input_enable);
 	ret.ids.Add(input_info->system_input_address);
+	if (input_info->FrontFaceEnabled())
+	{
+		ret.ids.Add(0x46464931u); // FFI1: explicit front-face system input.
+		ret.ids.Add(static_cast<uint32_t>(input_info->front_face_all_bits));
+	}
 	if (input_info->custom_interpolation.Enabled())
 	{
 		ret.ids.Add(0x43504931u); // CPI1: per-vertex inputs transported through geometry.
