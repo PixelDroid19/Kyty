@@ -1395,6 +1395,15 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
 			break;
+		case 0x368:
+			if (op_sel != 0u || clamp != 0u || omod != 0u)
+			{
+				KYTY_UNKNOWN_OP();
+			}
+			inst.type    = ShaderInstructionType::VCvtPknormI16F32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			break;
 		case 0x369:
 			if (op_sel != 0u || clamp != 0u || omod != 0u)
 			{
