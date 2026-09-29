@@ -689,6 +689,18 @@ input; passing that same data pointer or a suffix therefore reads freed
 storage. Build a replacement before release when correcting that API. Neither
 case is yet observed in the live workload, and neither is gameplay evidence.
 
+### Mixed sampled-image numeric selection (2026-09-29, unresolved)
+
+A separate captured-program review exposes a numeric-selection gap in
+`ShaderSpirvImage.cpp:3236`, `Recompile_ImageLoad_VdataVaddr3StDmask`: runtime
+unsigned/float selection is emitted only when all sampled views are flat 2D.
+With both flat and array views present, the shape branch uses the shader-wide
+numeric choice and ignores the per-descriptor unsigned tag. The captured
+program copies a complete direct R32_UINT descriptor into the image-load
+registers while also binding floating-point array views. Keep numeric selection
+inside each selected shape's fetch path. Its resulting pixels remain untested
+because the preceding image atomic has not yet passed dispatch admission.
+
 ### Residency preparation cost (2026-09-29, not gameplay)
 
 `GuestDeviceAddress` now queries every interval of pages still awaiting
