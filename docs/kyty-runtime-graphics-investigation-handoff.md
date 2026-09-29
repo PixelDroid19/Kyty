@@ -357,7 +357,7 @@ against the same correct gameplay capture.
   export for that occurrence. Inspect the sampled inputs and arithmetic;
   do not change VideoOut selection on this evidence.
 
-- Unfixed residency-query cost (2026-09-29): during the same run a stack
+- Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
   2,113,929,216 bytes with `mincore` from a vertex descriptor bind. Over the
   first 105 seconds, native timing attributes 47.2 seconds to draw descriptor
@@ -366,6 +366,14 @@ against the same correct gameplay capture.
   of GPU execution hanging. Investigate incremental residency discovery
   without hiding pages faulted in or remapped between preparations; do not
   reuse a stale residency snapshot merely to improve the frame rate.
+  The correction queries every remaining unimported interval on each
+  preparation. Already imported spans keep their alias/snapshot ownership;
+  invalidation still clears the bitmap. In a warm Silent/Native comparison,
+  the original 79-present window records 459.4 ms of descriptor finalization
+  per present, versus 426.8 ms across 73 presents afterward. Draw and dispatch
+  counts per present remain approximately 23 and 78. Throughput changes from
+  0.836 to 0.890 FPS, and the candidate passes 800 presents. This supports a
+  modest local reduction in CPU cost, not a broad benchmark or gameplay claim.
 
 - Later startup-video frontier (2026-09-29): after the async DMA correction,
   a clean Silent/Native run reaches 344 presents. The lifetime trace observes

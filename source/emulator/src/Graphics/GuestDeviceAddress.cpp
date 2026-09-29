@@ -250,30 +250,28 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	return false;
 }
 
-// Imports the resident, not yet imported pages of a range. Sets *changed when
-// new chunks were added.
-bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* changed)
+bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64_t first, uint64_t last,
+                        std::vector<uint8_t>* resident, bool* changed)
 {
-	const uint64_t       pages = range->size / kPageBytes;
-	std::vector<uint8_t> resident(static_cast<size_t>(pages));
-	if (!Core::VirtualMemory::QueryResidentPages(base, range->size, resident.data()))
+	const uint64_t pages = last - first;
+	resident->resize(static_cast<size_t>(pages));
+	if (!Core::VirtualMemory::QueryResidentPages(base + first * kPageBytes, pages * kPageBytes, resident->data()))
 	{
 		return false;
 	}
-	range->imported.resize(static_cast<size_t>(pages), 0);
 	for (uint64_t page = 0; page < pages;)
 	{
-		if (resident[page] == 0 || range->imported[page] != 0)
+		if ((*resident)[page] == 0)
 		{
 			page++;
 			continue;
 		}
 		uint64_t end = page;
-		while (end < pages && resident[end] != 0 && range->imported[end] == 0 && (end - page) * kPageBytes < kChunkBytes)
+		while (end < pages && (*resident)[end] != 0 && (end - page) * kPageBytes < kChunkBytes)
 		{
 			end++;
 		}
-		const uint64_t guest = base + page * kPageBytes;
+		const uint64_t guest = base + (first + page) * kPageBytes;
 		const uint64_t size  = (end - page) * kPageBytes;
 		Chunk          chunk;
 		// Do not pin an extra guest page: the import itself would make that
@@ -286,9 +284,33 @@ bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* chan
 			return false;
 		}
 		range->chunks.push_back(chunk);
-		std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(page), range->imported.begin() + static_cast<std::ptrdiff_t>(end), 1);
+		std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(first + page),
+		          range->imported.begin() + static_cast<std::ptrdiff_t>(first + end), 1);
 		*changed = true;
 		page     = end;
+	}
+	return true;
+}
+
+// Imported pages already have a pinned alias or tracked snapshot. Recheck every
+// remaining interval on each preparation so newly faulted pages are discovered.
+// Quiesced invalidation clears the bitmap when those imports cease to be valid.
+bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* changed)
+{
+	range->imported.resize(static_cast<size_t>(range->size / kPageBytes), 0);
+	std::vector<uint8_t> resident;
+	const auto limit = range->imported.end();
+	for (auto cursor = range->imported.begin(); cursor != limit;)
+	{
+		const auto first = std::find(cursor, limit, uint8_t {0});
+		if (first == limit) { break; }
+		const auto last = std::find(first, limit, uint8_t {1});
+		if (!ImportResidentSpan(ctx, base, range, static_cast<uint64_t>(first - range->imported.begin()),
+		                        static_cast<uint64_t>(last - range->imported.begin()), &resident, changed))
+		{
+			return false;
+		}
+		cursor = last;
 	}
 	return true;
 }

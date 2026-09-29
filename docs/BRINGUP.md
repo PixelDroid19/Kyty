@@ -254,6 +254,21 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Residency preparation cost (2026-09-29, not gameplay)
+
+`GuestDeviceAddress` now queries every interval of pages still awaiting
+import, while existing aliases and tracked snapshots keep their established
+refresh and invalidation paths. Newly faulted pages are checked on every
+preparation; quiesced invalidation clears the imported-page bitmap.
+
+One warm Silent/Native comparison in the same opening phase measures draw
+descriptor finalization at 459.4 ms per present before and 426.8 ms afterward.
+The 79- and 73-present windows have 23.04 and 23.00 draws per present and
+78.0 and 77.5 dispatches per present; observed throughput is 0.836 and 0.890
+FPS. This is a modest local CPU improvement, with one comparison and no
+gameplay acceptance. The corrected run passes 800 presents without an import
+failure. `fc_script`, the strict boundary gate and the 13-table gate pass.
+
 ### Pixel NULL export admission (2026-09-29, not gameplay)
 
 The clean Silent/Native run stopped after 347 seconds at pixel target 9,
