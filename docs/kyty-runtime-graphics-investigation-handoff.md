@@ -395,6 +395,16 @@ against the same correct gameplay capture.
   nonfinite overlay samples are now finite. Probe the corrected material
   output and its inputs before attributing the remaining black result.
 
+  That follow-up native MRT0 probe at the 100-present threshold now reports
+  409,600 invocations, all finite and RGBA zero. Its generated and optimized
+  Vulkan 1.2 modules validate; native capture 157 remains uniformly black.
+  Zero is therefore already present at this material's output. The probe
+  does not identify the first zero input, and the earlier sample probe is
+  not a per-pixel correspondence test. The live writer also selects the
+  integer front-face representation with `SPI_BARYC_CNTL=0x01000000`, while
+  the incoming register is still left at zero; the separate system-input
+  contract and primary register reference are recorded in the bring-up manual.
+
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
   2,113,929,216 bytes with `mincore` from a vertex descriptor bind. Over the

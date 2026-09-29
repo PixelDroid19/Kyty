@@ -294,6 +294,13 @@ or identify the remaining producer of zero/nonfinite output. PARAM0's
 ambiguous custom/default encoding, sample/pull-model barycentrics and layered
 geometry still require separate contracts.
 
+A subsequent native probe of the corrected material's MRT0 export at the
+100-present threshold counts 409,600 invocations: every result is finite and
+RGBA zero. The probe's generated and optimized modules validate for Vulkan
+1.2, and capture 157 is still uniformly black. This observes zero at the
+material output; it does not yet locate its first zero-valued input or prove
+per-pixel correspondence with the earlier nonfinite final sample.
+
 ### Pending storage write-back retry (2026-09-29, unresolved)
 
 A later Silent/Native diagnostic run passed at least 598 presents, then stopped
@@ -320,11 +327,15 @@ would hold the render lock across the other processor's completion path.
 This run stops before exercising the pending JSON string conversion.
 
 The exercised custom-interpolation program also reads its incoming
-`FRONT_FACE` VGPR. `ShaderSpirvGenerator.cpp:1767` initializes XY position but
+`FRONT_FACE` VGPR. `ShaderSpirvGenerator.cpp:1786` initializes XY position but
 does not initialize that field; the register retains its generic initial
-value. Verify the guest boolean encoding and provide the Vulkan builtin
-before claiming the full pixel system-input contract. The interpolation
-transport work alone does not correct this separate gap.
+value. Its live `SPI_BARYC_CNTL` is `0x01000000`. AMD's public
+[register guide, page 189](https://docs.amd.com/api/khub/documents/9fuBVmqajj07G~5~aeTUig/content)
+defines bit 24 as selecting integer one/zero for front/back, versus floating
+positive/negative one when clear. Carry that control into shader metadata
+and identity, then initialize the requested Vulkan builtin before claiming
+the full pixel system-input contract. The interpolation transport work alone
+does not correct this separate gap or establish its effect on visible output.
 
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 
