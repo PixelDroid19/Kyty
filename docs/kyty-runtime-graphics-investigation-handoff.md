@@ -369,6 +369,21 @@ against the same correct gameplay capture.
   input may legitimately be empty during a logo scene; prioritize the overlay
   writer and lifetime. A format-only lifetime selector tracked two earlier
   1024-square targets and therefore did not identify that producer.
+  A subsequent address-correlated trace identifies an indexed six-index
+  material draw and a three-vertex two-channel zero export writing the exact
+  sampled host image. This excludes the previously sampled context checksum
+  as sufficient evidence of an executed writer. The material writer uses
+  input control `0x424` and explicit `V_INTERP_MOV_F32` selectors 2, 0 and 1;
+  Kyty rejects that control but continues with an ordinary varying, loading
+  the same value for each selector. The custom-interpolation exclusion for
+  the older P1/P2-only workload does not apply to this program. Implement the
+  evidenced per-vertex contract and compare the same draw's results before
+  attributing the observed nonfinite values to that gap.
+  Its actual 89,132-byte cached pixel module fails Vulkan 1.2 SPIR-V validation
+  with conflicting fragment input location zero, component zero
+  (`VUID-StandaloneSpirv-OpEntryPoint-08721`), matching the failed decode's
+  default location. Preserve this red artifact outside the repository for the
+  corrected-module comparison.
 
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying

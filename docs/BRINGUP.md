@@ -254,6 +254,29 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Exercised custom pixel interpolation gap (2026-09-29, unresolved)
+
+An address-correlated native lifetime trace identifies two draws writing the
+sampled overlay image before final composition: an indexed six-index material
+draw, then a three-vertex draw that exports zero to two channels. The first
+draw has four pixel inputs, including control `0x424` for input three, and its
+decoded program uses `V_INTERP_MOV_F32` selectors 2, 0 and 1 on that input.
+The prior sampled context alone did not identify an executed writer.
+
+`ShaderPixelInterpolator.cpp:104` rejects that parameter-cache pass-through
+control. `ShaderSpirvVector.cpp:2802` continues after the failed decode, and
+`Recompile_VInterpMovF32_VdstVsrcAttrChan` loads the same ordinary varying for
+all three selectors. This general custom-interpolation gap, previously
+excluded for a different program with only P1/P2 instructions, is now exercised
+by the observed overlay writer. Resolve the producer parameter and distinct
+per-vertex values, preserving their raw packed bits and the guest barycentric
+inputs. The 89,132-byte pixel module read from the live translation cache fails
+`spirv-val --target-env vulkan1.2`: conflicting fragment input location zero,
+component zero (`VUID-StandaloneSpirv-OpEntryPoint-08721`). This supplies an
+actual-module red validation case. A corrected strict comparison must establish
+whether this is the producer of the nonfinite overlay values; the code mismatch
+alone does not yet prove that causal result.
+
 ### Pending storage write-back retry (2026-09-29, unresolved)
 
 A later Silent/Native diagnostic run passed at least 598 presents, then stopped
