@@ -472,6 +472,32 @@ void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }
 
+bool GpuMemory::PendingStorageWriteBack(uint64_t vaddr, uint64_t size, SubmissionId* dependency)
+{
+	EXIT_IF(dependency == nullptr);
+	if (size == 0) { return false; }
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	const int heap_id = GetHeapId(vaddr, size);
+	if (heap_id < 0) { return false; }
+	const auto objects = FindBlocks(heap_id, &vaddr, &size, 1);
+	for (const auto& object: objects)
+	{
+		const auto& block = m_heaps[heap_id].objects[object.object_id];
+		EXIT_IF(block.free);
+		const auto& info = block.info;
+		if (info.object.type != GpuMemoryObjectType::StorageBuffer || !info.in_use || info.read_only ||
+		    info.write_back_func == nullptr || info.object.obj == nullptr) { continue; }
+		for (const auto& use: info.submission_uses.Dependencies())
+		{
+			if (m_deferred_deletions.AreDependenciesComplete({use})) { continue; }
+			*dependency = use;
+			return true;
+		}
+	}
+	return false;
+}
+
 void GpuMemory::WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 {
 	EXIT_IF(ctx == nullptr);

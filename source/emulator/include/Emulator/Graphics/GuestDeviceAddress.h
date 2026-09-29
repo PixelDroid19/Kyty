@@ -10,6 +10,7 @@
 namespace Kyty::Libs::Graphics {
 
 struct GraphicContext;
+struct SubmissionId;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
 // shader can dereference a computed guest address. Guest and host virtual
@@ -52,6 +53,10 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 // registered range, so a shader dereferencing guest pointers reads the
 // current guest memory. Call before recording such a dispatch.
 void GuestDeviceAddressWriteBack(GraphicContext* ctx);
+
+// The caller holds the render recording lock through the later write-back.
+// Wait for a returned dependency only after releasing recording locks, then retry.
+[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(SubmissionId* dependency);
 
 // Imports all registered ranges not imported yet and returns the translation
 // table. Fails when the device cannot import guest memory.

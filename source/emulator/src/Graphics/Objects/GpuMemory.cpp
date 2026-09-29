@@ -709,6 +709,12 @@ void GpuMemoryWriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_
 	g_gpu_memory->WriteBackStorageRange(ctx, vaddr, size);
 }
 
+bool GpuMemoryPendingStorageWriteBack(uint64_t vaddr, uint64_t size, SubmissionId* dependency)
+{
+	EXIT_IF(g_gpu_memory == nullptr);
+	return g_gpu_memory->PendingStorageWriteBack(vaddr, size, dependency);
+}
+
 bool GpuMemoryCheckAccessViolation(uint64_t vaddr)
 {
 	return GpuDirtyPageTracker::Instance().HandleWriteFault(vaddr);

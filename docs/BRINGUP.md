@@ -301,7 +301,7 @@ RGBA zero. The probe's generated and optimized modules validate for Vulkan
 material output; it does not yet locate its first zero-valued input or prove
 per-pixel correspondence with the earlier nonfinite final sample.
 
-### Pending storage write-back retry (2026-09-29, unresolved)
+### Storage write-back dependency retry (2026-09-29)
 
 A later Silent/Native diagnostic run passed at least 598 presents, then stopped
 after 708 seconds at `Objects/GpuMemoryWriteback.cpp:214`: a writable
@@ -325,6 +325,17 @@ move exact dependency preparation outside recording/mutation locks before
 publishing host-visible bytes; adding a fence wait inside `BindDescriptors`
 would hold the render lock across the other processor's completion path.
 This run stops before exercising the pending JSON string conversion.
+
+Dispatch preparation now checks the same writable storage objects and exact
+submission dependencies as publication, while holding the render recording
+lock. A pending use returns to the command processor before command-buffer
+mutation; the processor releases recording locks, waits for that submission,
+and retries with a bounded attempt count. Indirect dispatch shares this path.
+A strict live trace exercised three retries against graphics queue 8 sequences
+24691, 24692 and 24693. All three dispatch calls returned with queue 8 completed
+through 24700, and the run continued through present 807 to an unsupported
+image-atomic instruction. This verifies the exercised cross-queue retry;
+gameplay acceptance and deferred focused tests remain outstanding.
 
 The exercised custom-interpolation program also reads its incoming
 `FRONT_FACE` VGPR. The pixel prolog in `ShaderSpirvGenerator.cpp` initializes

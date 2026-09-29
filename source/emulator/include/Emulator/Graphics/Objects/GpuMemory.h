@@ -1028,6 +1028,7 @@ void  GpuMemoryCompleteSubmission(SubmissionId submission);
 // upload. Tile-27 samples that miss RT/ST still link SB parents; without this
 // detile reads empty guest memory and paints opaque-black props.
 void GpuMemoryWriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
+[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(uint64_t vaddr, uint64_t size, SubmissionId* dependency);
 // Exception handling accepts only a page fault caused by an armed tracker
 // protection. Known host/HLE writers use the explicit range notification.
 bool GpuMemoryCheckAccessViolation(uint64_t vaddr);

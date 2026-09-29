@@ -307,6 +307,7 @@ public:
 	void WriteBackAllCompleted(GraphicContext* ctx);
 	// Write back StorageBuffers that overlap a sample range before CPU detile.
 	void WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool PendingStorageWriteBack(uint64_t vaddr, uint64_t size, SubmissionId* dependency);
 
 	// Sync: CPU -> GPU
 	void Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);

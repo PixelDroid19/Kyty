@@ -443,7 +443,7 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 	registry.retired.clear();
 }
 
-void GuestDeviceAddressWriteBack(GraphicContext* ctx)
+static std::vector<std::pair<uint64_t, uint64_t>> RegisteredRangesSnapshot()
 {
 	std::vector<std::pair<uint64_t, uint64_t>> ranges;
 	{
@@ -454,7 +454,23 @@ void GuestDeviceAddressWriteBack(GraphicContext* ctx)
 			ranges.emplace_back(base, range.size);
 		}
 	}
-	// Outside the registry lock: write-back may wait on GPU submissions.
+	return ranges;
+}
+
+bool GuestDeviceAddressPendingWriteBack(SubmissionId* dependency)
+{
+	EXIT_IF(dependency == nullptr);
+	for (const auto& [base, size]: RegisteredRangesSnapshot())
+	{
+		if (GpuMemoryPendingStorageWriteBack(base, size, dependency)) { return true; }
+	}
+	return false;
+}
+
+void GuestDeviceAddressWriteBack(GraphicContext* ctx)
+{
+	const auto ranges = RegisteredRangesSnapshot();
+	// GPU-memory mutation never nests inside the address registry lock.
 	for (const auto& [base, size]: ranges)
 	{
 		GpuMemoryWriteBackStorageRange(ctx, base, size);

@@ -11,6 +11,7 @@
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/DepthStencilCopy.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
@@ -2592,9 +2593,11 @@ bool GraphicsRenderComputeUsesGuestDeviceAddress(HW::Context* ctx, HW::Shader* s
 	       input_info.bind.device_address_used;
 }
 
-void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
-                                  uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode)
+bool GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::Shader* sh_ctx, uint32_t thread_group_x,
+                                  uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode, SubmissionId* pending_writeback)
 {
+	EXIT_IF(pending_writeback == nullptr);
+	*pending_writeback = {};
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(buffer == nullptr);
@@ -2605,7 +2608,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	ShaderComputeWaveDispatchPlan plan {};
 	if (!BuildComputeDispatchInput(ctx, sh_ctx, thread_group_x, thread_group_y, thread_group_z, mode, &input_info, &plan))
 	{
-		return;
+		return true;
 	}
 	thread_group_x = plan.group_count[0];
 	thread_group_y = plan.group_count[1];
@@ -2624,9 +2627,13 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		{
 			// The proven scalar gate clears EXEC on every path to each image
 			// store. No descriptor or image needs materialization for this dispatch.
-			return;
+			return true;
 		}
 	}
+
+	// Keep this check and descriptor publication under the same render lock.
+	// A peer queue may record a new use after the caller's own queue drains.
+	if (input_info.bind.device_address_used && GuestDeviceAddressPendingWriteBack(pending_writeback)) { return false; }
 
 	const auto& cs_regs = sh_ctx->GetCs();
 	// Diagnostic A/B only (not a product fix):
@@ -2636,14 +2643,14 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	if (const char* ab_all = std::getenv("KYTY_AB_SKIP_ALL_CS"); ab_all != nullptr && ab_all[0] != '\0')
 	{
 		KYTY_LOG_DEBUG( "KYTY_AB_SKIP_ALL_CS skip shader=0x%012" PRIx64 "\n", cs_regs.cs_regs.data_addr);
-		return;
+		return true;
 	}
 	if (const char* ab_skip = std::getenv("KYTY_AB_SKIP_TEX_CS");
 	    ab_skip != nullptr && ab_skip[0] != '\0' && input_info.bind.textures2D.textures_num > 0)
 	{
 		KYTY_LOG_DEBUG( "KYTY_AB_SKIP_TEX_CS skip shader=0x%012" PRIx64 " textures=%d\n", cs_regs.cs_regs.data_addr,
 		             input_info.bind.textures2D.textures_num);
-		return;
+		return true;
 	}
 	if (const char* ab_addr = std::getenv("KYTY_AB_SKIP_CS_ADDR"); ab_addr != nullptr && ab_addr[0] != '\0')
 	{
@@ -2652,7 +2659,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 		if (end != ab_addr && skip_addr == cs_regs.cs_regs.data_addr)
 		{
 			KYTY_LOG_DEBUG( "KYTY_AB_SKIP_CS_ADDR skip shader=0x%012" PRIx64 "\n", cs_regs.cs_regs.data_addr);
-			return;
+			return true;
 		}
 	}
 	static const char* dump_dispatch = std::getenv("KYTY_DUMP_DISPATCH");
@@ -2755,6 +2762,7 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 	DebugStatsRecordDispatch();
+	return true;
 }
 
 

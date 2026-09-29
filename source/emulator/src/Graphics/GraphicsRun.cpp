@@ -1899,11 +1899,21 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		WriteBack();
 	}
 
-	Core::LockGuard lock(m_mutex);
-	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-
-	GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x, thread_group_y, thread_group_z,
-	                             mode);
+	SubmissionId pending;
+	for (uint32_t attempt = 0; attempt < 64u; ++attempt)
+	{
+		{
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			if (GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, thread_group_x,
+			                                 thread_group_y, thread_group_z, mode, &pending)) { return; }
+		}
+		// Waiting can submit another processor's recording buffer and publish
+		// its resources; neither processor nor render recording locks may be held.
+		g_gpu->WaitSubmission(pending);
+	}
+	EXIT("device-address dispatch preparation did not stabilize: queue=%u sequence=%" PRIu64 "\n",
+	     pending.queue.Value(), pending.sequence);
 }
 
 void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
@@ -1928,7 +1938,6 @@ void CommandProcessor::DispatchIndirectAbsolute(uint64_t address, uint32_t mode)
 
 void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode)
 {
-	const ScopedDebugStatsTimer dispatch_timer(DebugStatsRecordDispatchProcessor);
 	struct DispatchIndirectArgs
 	{
 		uint32_t thread_group_x;
@@ -1937,7 +1946,6 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 	};
 
 	DispatchIndirectArgs args {};
-	bool needs_guest_writeback = false;
 	{
 		Core::LockGuard lock(m_mutex);
 
@@ -1971,18 +1979,8 @@ void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode
 				             address, args.thread_group_x, args.thread_group_y, args.thread_group_z, mode);
 			}
 		}
-		needs_guest_writeback = GraphicsRenderComputeUsesGuestDeviceAddress(&m_ctx, &m_sh_ctx, args.thread_group_x,
-		                                                                  args.thread_group_y, args.thread_group_z, mode);
 	}
-	if (needs_guest_writeback)
-	{
-		WriteBack();
-	}
-
-	Core::LockGuard lock(m_mutex);
-	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-	GraphicsRenderDispatchDirect(m_sumbit_id, m_buffer[m_current_buffer], &m_ctx, &m_sh_ctx, args.thread_group_x, args.thread_group_y,
-	                             args.thread_group_z, mode);
+	DispatchDirect(args.thread_group_x, args.thread_group_y, args.thread_group_z, mode);
 }
 
 void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifier)
