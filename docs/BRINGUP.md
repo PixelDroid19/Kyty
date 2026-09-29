@@ -502,9 +502,23 @@ and key contents preserved on every call. The earlier string, boolean, real
 and assignment checks still pass. At the title transition after 16 minutes,
 the next missing import is `rDMyAf1Jhug[libc_v1][libc_v1.1]`, whose name hash
 matches `__isinff`. The caller passes a float in XMM0, tests the integer return
-and clamps only when it is zero. Implement the float infinity predicate and
-verify its actual return. Useful rendering, controls and both gameplay
-acceptance windows remain unverified.
+and clamps only when it is zero. The float predicate follows the public
+[libc contract](https://raw.githubusercontent.com/freebsd/freebsd-src/releng/9.0/lib/libc/gen/isinf.c):
+integer one for either infinity and zero otherwise. The next Silent/Native
+run verifies twelve actual finite inputs and zero returns, matching their
+captured float bits. It advances beyond all previously missing JSON imports
+and this libc call, then stops in compute-wave admission after the title
+transition. Infinity and NaN cases still need the deferred focused tests.
+Useful rendering, controls and both gameplay acceptance windows remain
+unverified.
+
+The new compute gate at `Shader.cpp:3129` reports `SBarrier` at PC 0x40,
+but the raw word is SOP1 opcode 0x34, `S_ABS_I32`, according to the local
+RDNA2 ISA. The parser's placeholder is not a real barrier and must remain
+rejected until the scalar instruction and its SCC result are implemented.
+The captured workgroup is 5 by 5 by 1 with one paired guest wave; native
+equivalence separately rejects a cross-lane operation at PC 0x90. Preserve
+that rejection while correcting the first decoded instruction.
 
 Two existing string-contract gaps were found while reviewing value ownership:
 `LibJson2.cpp:394` uses `strlen` for `JsonStringLength`, although the parser

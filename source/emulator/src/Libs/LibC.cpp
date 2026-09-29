@@ -3325,6 +3325,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("lA94ZgT+vMM", LibC::c_isnanf);
 	// Gen5 libc_v1 __isfinitef — name-to-NID hash and float predicate ABI.
 	LIB_FUNC("Q8pvJimUWis", LibC::c_isfinitef);
+	LIB_FUNC("rDMyAf1Jhug", LibC::c_isinff);
 	// Gen5 isfinite(double) — used after strtod in a project parse.
 	LIB_FUNC("dhK16CKwhQg", LibC::c_isfinite);
 	// Gen5 isnan(double) — guest layout coordinate checks after

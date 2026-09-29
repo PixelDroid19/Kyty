@@ -116,6 +116,10 @@ KYTY_SYSV_ABI int c_isfinitef(float x)
 {
 	return std::isfinite(x) ? 1 : 0;
 }
+KYTY_SYSV_ABI int c_isinff(float x)
+{
+	return std::isinf(x) ? 1 : 0;
+}
 // Gen5 libc_v1 isfinite(double) — NID dhK16CKwhQg. Dreaming Sarah Construct
 // number parser after strtod: store double, call, test %eax; non-zero keeps value.
 // xmm0 = value; return non-zero when finite.
