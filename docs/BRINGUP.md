@@ -494,6 +494,52 @@ image-descriptor correction, the complete module passes Vulkan 1.2 SPIR-V
 validation, and the recorded dispatch's queue advances beyond its submission.
 Focused branch, partial-write and back-edge tests remain deferred as requested.
 
+The next strict run admits the original and transformed 147-instruction
+programs. Emission then fails at PC `0x298` in `ShaderSpirvImage.cpp`: a
+storage-image descriptor has moved from its original SGPR range through four
+scalar pair copies. A second store uses a descriptor loaded from the extended
+table. Both resources are present as writable 2D arrays; the static register
+lookup does not follow either origin. Track complete descriptor words through
+copies, mapped loads, and control-flow joins, rejecting partial or conflicting
+origins. This is descriptor selection, not a missing image dimensionality.
+
+The first descriptor-origin comparison stops earlier at a different store.
+Its producing scalar load maps to a sampled descriptor, while a separate
+writable binding contains the identical eight guest words. Treating binding
+usage as guest identity therefore rejects a valid sampled/storage alias. The
+origin proof must select the unique writable binding with the same complete
+T#, preserving the existing split binding model; register coincidence or a
+matching address alone is insufficient. This closes the assumption that an
+origin must already name a writable binding.
+
+The alias correction selects the existing writable binding in that earlier
+program. The next comparison exposes an analysis bug: a scalar load into VCC
+was rejected even though it cannot change any tracked ordinary SGPR word.
+Such a load preserves the descriptor-origin state; any later copy from that
+untracked special register still produces an unknown origin. The captured
+failure occurred before a later mapped texture load, so it does not disprove
+that store's complete descriptor identity.
+
+The corrected analysis passes both earlier programs and resolves the two
+original stores to their expected writable bindings. The actual complete
+module passes Vulkan 1.2 validation; its recorded dispatch completes before
+the next strict failure. Complete eight-word origins survive scalar copies
+and verified loads, while conflicting control-flow joins remain unknown.
+Build, strict boundary and all 13 table checks pass. Focused origin-analysis
+tests remain deferred, and no gameplay acceptance has been established.
+
+### Image atomic addition frontier (2026-09-29, unresolved)
+
+The next title-transition program stops at `ShaderParseMIMG.cpp:41` with
+MIMG opcode `0x11`, 2D dimension, one data component and `GLC=1`. The RDNA2
+ISA identifies `IMAGE_ATOMIC_ADD`; for atomics, GLC requests the pre-operation
+value in VDATA. The parser also leaves this opcode unimplemented at its switch
+case. Implement resource write classification, the atomic read/modify/write
+and its conditional old-value return together, preserving EXEC and image
+coordinate rules. Removing the GLC rejection alone cannot implement this
+instruction. The preceding translated dispatch has completed on its exact
+queue; this new failure is a later decoder boundary.
+
 ### Integer value references (2026-09-29)
 
 A missing integer getter in `LibJson2.cpp` stops the title-transition caller.

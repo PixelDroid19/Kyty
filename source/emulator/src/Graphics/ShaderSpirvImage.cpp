@@ -66,50 +66,11 @@ struct ImageSampleLzPlan
 	bool                          cube_coordinates;
 };
 
-static int FindImageStorageTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
+static int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
+                                           const ShaderBindResources& bind, int user_data_register_base)
 {
-	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8)
-	{
-		return -1;
-	}
-
-	const int texture_register = inst.src[1].register_id;
-	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
-	{
-		const auto& record = bind.dynamic_sloads.records.At(mapping);
-		if (record.kind != ShaderDynamicSLoadResourceKind::Texture || record.destination_register != texture_register ||
-		    inst.pc <= record.instruction_pc || inst.pc > record.last_consumer_pc)
-		{
-			continue;
-		}
-
-		const int index = record.resource_index;
-		if (index >= 0 && index < bind.textures2D.textures_num && bind.textures2D.desc[index].usage == ShaderTextureUsage::ReadWrite)
-		{
-			return index;
-		}
-	}
-
-	for (int index = 0; index < bind.textures2D.textures_num; ++index)
-	{
-		const auto& descriptor = bind.textures2D.desc[index];
-		if (descriptor.usage == ShaderTextureUsage::ReadWrite && !descriptor.dynamic_sload &&
-		    descriptor.start_register + user_data_register_base == texture_register)
-		{
-			return index;
-		}
-	}
-	return -1;
-}
-
-static int ResolveStorageTextureArrayIndex(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
-{
-	const int descriptor_index = FindImageStorageTextureDescriptor(inst, bind, user_data_register_base);
-	if (descriptor_index < 0)
-	{
-		return -1;
-	}
-
+	const int descriptor_index = ShaderFindImageStorageTextureDescriptor(code, instruction_index, bind, user_data_register_base);
+	if (descriptor_index < 0) { return -1; }
 	int storage_index = 0;
 	for (int index = 0; index < descriptor_index; ++index)
 	{
@@ -3502,7 +3463,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 	{
 		const auto* vs_info                 = spirv->GetVsInputInfo();
 		const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
-		const int   storage_index           = ResolveStorageTextureArrayIndex(inst, *bind_info, user_data_register_base);
+		const int   storage_index           = ResolveStorageTextureArrayIndex(code, index, *bind_info, user_data_register_base);
 		if (storage_index < 0)
 		{
 			return false;
@@ -3633,7 +3594,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 	{
 		const auto* vs_info                 = spirv->GetVsInputInfo();
 		const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
-		const int   storage_index           = ResolveStorageTextureArrayIndex(inst, *bind_info, user_data_register_base);
+		const int   storage_index           = ResolveStorageTextureArrayIndex(code, index, *bind_info, user_data_register_base);
 		if (storage_index < 0)
 		{
 			return false;
