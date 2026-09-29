@@ -441,6 +441,11 @@ The same run reports a separate stencil frontier from
 nor write base present. It has not caused a process stop here. Capture the
 producer and format before deciding whether that state is inactive hardware
 state or a missing attachment; the opening caption does not validate stencil.
+A later bounded read-only capture records both depth and stencil formats as
+zero, with both stencil base addresses zero. `GraphicsState.cpp:146` still
+classifies the enabled test as a missing plane before checking the disabled
+format contract. Trace the format and test-enable interaction before changing
+this classification; the observation alone does not validate stencil output.
 
 ### Register-default lookup and context restoration (2026-09-29)
 
@@ -539,7 +544,7 @@ and verified loads, while conflicting control-flow joins remain unknown.
 Build, strict boundary and all 13 table checks pass. Focused origin-analysis
 tests remain deferred, and no gameplay acceptance has been established.
 
-### Image atomic addition frontier (2026-09-29, unresolved)
+### Image atomic and class translation (2026-09-29, compiler verified)
 
 The next title-transition program stops at `ShaderParseMIMG.cpp:41` with
 MIMG opcode `0x11`, 2D dimension, one data component and `GLC=1`. The RDNA2
@@ -550,6 +555,30 @@ and its conditional old-value return together, preserving EXEC and image
 coordinate rules. Removing the GLC rejection alone cannot implement this
 instruction. The preceding translated dispatch has completed on its exact
 queue; this new failure is a later decoder boundary.
+
+The implementation resolves the atomic's complete descriptor, uses its typed
+R32_UINT storage alias, and retains the required VDATA source and conditional
+old-value return. Full admission also exposed VOPC/VOP3 opcode `0x88` being
+substituted with `SBarrier`. Both parsers now decode `V_CMP_CLASS_F32`; the
+emitter classifies the ten binary32 classes from their bits and uses the
+existing paired-wave mask packing. The captured SDWA form uses DWORD sources,
+an ordinary scalar destination pair and class mask `3`.
+
+Complete-program replay then exposed an array-view gap in
+`Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF`. Its existing typed sampler now
+handles explicit level zero while preserving the array layer and separately
+encoded coordinates. The prior atomic formatting failure was an IR format
+that declared two sources while the parser retained the third VDATA read;
+the corrected format preserves all three operands.
+
+The complete 1,429-instruction captured compiler input produces a module of
+177,518 words that passes `spirv-val --target-env vulkan1.2`. Generated-source
+checks cover both atomic lane banks, the numeric class comparisons and array
+level-zero samples. The emulator and executable build, strict source boundary
+check and all thirteen graphics-table checks pass. A strict Silent/Native run
+has reached the opening caption; completion of this later dispatch remains
+pending. Focused unit tests are deferred until gameplay, as requested. These
+are compiler milestones, not gameplay acceptance.
 
 ### Integer value references (2026-09-29)
 
@@ -689,7 +718,7 @@ input; passing that same data pointer or a suffix therefore reads freed
 storage. Build a replacement before release when correcting that API. Neither
 case is yet observed in the live workload, and neither is gameplay evidence.
 
-### Mixed sampled-image numeric selection (2026-09-29, unresolved)
+### Mixed sampled-image numeric selection (2026-09-29, compiler verified)
 
 A separate captured-program review exposes a numeric-selection gap in
 `ShaderSpirvImage.cpp:3236`, `Recompile_ImageLoad_VdataVaddr3StDmask`: runtime
@@ -698,8 +727,12 @@ With both flat and array views present, the shape branch uses the shader-wide
 numeric choice and ignores the per-descriptor unsigned tag. The captured
 program copies a complete direct R32_UINT descriptor into the image-load
 registers while also binding floating-point array views. Keep numeric selection
-inside each selected shape's fetch path. Its resulting pixels remain untested
-because the preceding image atomic has not yet passed dispatch admission.
+inside each selected shape's fetch path. Complete-program replay confirmed
+that the unsigned predicate was previously defined but never consumed. The
+corrected emitter selects the typed view in each shape, preserves integer bits
+at the numeric join and uses that join as the outer phi predecessor. Both lane
+banks now emit the unsigned fetch and the complete module passes Vulkan 1.2
+validation. Resulting pixels and live GPU completion remain unverified.
 
 ### Residency preparation cost (2026-09-29, not gameplay)
 
