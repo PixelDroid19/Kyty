@@ -357,6 +357,39 @@ journal; its PTY proxy loses output, so that arm's final error text is unavailab
 Gameplay and the missing wave64 pixel lowering remain unresolved. Focused unit
 tests remain deferred until gameplay as requested.
 
+### Metadata descriptor liveness preparation (2026-09-29, bounded measured)
+
+Read-only host stacks also locate per-instruction hash-node destruction in
+`ShaderStorageAnalysis.cpp` while preparing sampler metadata. Each storage or
+sampler query rebuilt the same PC-to-instruction index. The liveness traversal
+now validates strictly increasing PCs and searches the existing instruction
+array directly. Reordered IR retains the previous hash lookup; duplicate PCs
+retain the conservative all-live result. Joins, unresolved targets, indirect
+transfers and descriptor overwrite rules are unchanged. No analysis is cached
+across guest updates.
+
+Two captured programs are replayed thirty times, querying storage and sampler
+evidence at fifty-one SGPR starts per iteration. Complete result digests are
+identical before and after. The 137-instruction compute program's median query
+batch changes from 540.648 to 81.916 microseconds; the 2,300-instruction pixel
+program's median changes from 9,545.339 to 1,556.091 microseconds. These measure
+analysis alone, not an equivalent frame-rate increase.
+
+The owned Linux build and strict source/table gates pass. A fresh strict
+Silent/Native run without a debugger reaches present 750, then preserves the
+same first pixel-emitter failure at PC 0xfec and exits 65. Its forty-five-second
+warm introduction interval contains 249 presents in 45.039 seconds (5.529 FPS),
+with a 169 ms median frame time. The preceding dispatch-preparation run had
+228 presents in the same duration (5.062 FPS), with a 194 ms median. Accumulated
+dispatch processing per present changes from 97.968 to 76.095 ms; dispatches
+and submissions per present remain approximately 77.7 and 127.1. Both windows
+start after present 153, use the same resource bounds, native resolution and
+compiled shader cache, and contain no SPIR-V compilation. This single-sample
+comparison is limited to the introduction. The new native present-403 capture
+is uniformly black and its offline score gate exits 1. Acceptable performance,
+scene output and gameplay remain unresolved; unit tests remain deferred until
+gameplay as requested.
+
 ### Sparse physical residency query (2026-09-29, not gameplay)
 
 Read-only sampling found descriptor preparation repeatedly scanning an entirely

@@ -91,6 +91,26 @@ static bool ShaderTryGetStaticBranchTarget(const std::unordered_map<uint32_t, ui
 	return true;
 }
 
+static bool ShaderTryGetSortedStaticBranchTarget(const Vector<ShaderInstruction>& instructions,
+                                                 const ShaderInstruction& inst, uint32_t* target)
+{
+	EXIT_IF(target == nullptr);
+	if (inst.src_num < 1)
+	{
+		return false;
+	}
+	const uint32_t pc = ShaderLabel(inst).GetDst();
+	const auto found = std::lower_bound(instructions.begin(), instructions.end(), pc,
+	                                    [](const ShaderInstruction& instruction, uint32_t value)
+	                                    { return instruction.pc < value; });
+	if (found == instructions.end() || found->pc != pc)
+	{
+		return false;
+	}
+	*target = static_cast<uint32_t>(found - instructions.begin());
+	return true;
+}
+
 // Returns the metadata-origin SGPR words that can reach each instruction. A
 // word stays live only when no predecessor has overwritten it. This lets
 // metadata filtering reject stale descriptors while preserving a strict result
@@ -105,13 +125,21 @@ static std::vector<uint8_t> ShaderGetMetadataSgprLiveness(const ShaderCode& code
 	}
 
 	const auto descriptor_live_mask = static_cast<uint8_t>((1u << registers_num) - 1u);
+	// Parsed PCs are normally strictly increasing. Search that existing array
+	// directly instead of allocating a hash node per instruction and resource.
+	const bool sorted_unique = std::adjacent_find(instructions.begin(), instructions.end(),
+	                                              [](const ShaderInstruction& previous, const ShaderInstruction& current)
+	                                              { return previous.pc >= current.pc; }) == instructions.end();
 	std::unordered_map<uint32_t, uint32_t> instruction_index;
-	instruction_index.reserve(instruction_count);
-	for (uint32_t index = 0; index < instruction_count; ++index)
+	if (!sorted_unique)
 	{
-		if (!instruction_index.emplace(instructions.At(index).pc, index).second)
+		instruction_index.reserve(instruction_count);
+		for (uint32_t index = 0; index < instruction_count; ++index)
 		{
-			return std::vector<uint8_t>(instruction_count, descriptor_live_mask);
+			if (!instruction_index.emplace(instructions.At(index).pc, index).second)
+			{
+				return std::vector<uint8_t>(instruction_count, descriptor_live_mask);
+			}
 		}
 	}
 
@@ -170,7 +198,9 @@ static std::vector<uint8_t> ShaderGetMetadataSgprLiveness(const ShaderCode& code
 		if (ShaderInstructionHasStaticBranchTarget(inst.type))
 		{
 			uint32_t target = 0;
-			if (!ShaderTryGetStaticBranchTarget(instruction_index, inst, &target))
+			const bool resolved = sorted_unique ? ShaderTryGetSortedStaticBranchTarget(instructions, inst, &target)
+			                                    : ShaderTryGetStaticBranchTarget(instruction_index, inst, &target);
+			if (!resolved)
 			{
 				unresolved_control_flow = true;
 				continue;
