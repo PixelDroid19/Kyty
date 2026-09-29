@@ -392,6 +392,18 @@ identifies that opcode as the signed normalized pair conversion. Verify its
 observed tuple and numeric lowering before enabling it. No gameplay or
 correct-rendering claim follows from this parser advance.
 
+The bounded trace for `0x368` found a tied VGPR source, an inline zero
+second source, a VGPR destination, and no modifiers. Commit `6e0600ea`
+decodes the two-source form and lowers it with validated SPIR-V
+`PackSnorm2x16`; the old shared emitter also omitted the normalization
+scale and passed a uint to a float selection. The synthetic red/green test
+and prior unsigned test pass. Both targets build and the source/table gates
+pass. One strict run was interrupted by the previously observed Xe
+`execbuf` ENOMEM / `VK_ERROR_DEVICE_LOST` in `GraphicsRenderCommandBuffer.cpp`.
+A single strict retry passed the former `0x368` parser exit and stopped at a
+lazy `Agc_v1.1` import in `RuntimeLinker.cpp:1081`. Its exact contract remains
+unverified. This is still logo-stage execution with no controlled gameplay.
+
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native

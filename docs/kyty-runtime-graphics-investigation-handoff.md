@@ -326,6 +326,18 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Signed normalized pair conversion (2026-09-28): VOP3A opcode `0x368`
+  appeared after the unsigned pair conversion in the same program. The
+  observed tuple has a tied VGPR first source, an inline zero second source,
+  one VGPR destination, and no modifiers. Commit `6e0600ea` decodes that
+  form and uses validated SPIR-V `PackSnorm2x16`, replacing an emitter that
+  omitted the 32767 scale and selected a uint as a float. The synthetic test
+  failed before the parser change and passes with SPIR-V validation. One
+  strict run hit the known intermittent Xe `execbuf` ENOMEM/device-lost path;
+  a single retry passed the old parser exit and reached a new unresolved
+  lazy `Agc_v1.1` import at `RuntimeLinker.cpp:1081`. The import's ABI and
+  behavior are not established; no stub or guessed return is justified.
+
 - Unsigned normalized pair conversion (2026-09-28): a bounded shader trace
   found VOP3A opcode `0x369` with two VGPR sources, one VGPR destination, and
   zero input, output, clamp, and operand-select modifiers. The local RDNA2
