@@ -428,9 +428,19 @@ remain deferred until gameplay as requested.
 That run reaches the title transition at 15 minutes 10 seconds and stops at
 `zTwZdI8AZ5Y[Json2_v1][Json_v1.1]`, `Value::getBoolean() const`. The caller
 checks type one, passes an owned boolean value and reads one byte through
-the return pointer. Implement the reference-returning boolean getter from
-that contract. Useful rendering, controls and both gameplay acceptance
-windows remain unverified.
+the return pointer. The boolean getter now validates that type and exposes
+the existing field. The next Silent/Native run verifies its actual return:
+the pointer is source plus 16, the byte agrees and all 32 source bytes are
+unchanged. Real, string and assignment return checks still pass.
+
+After the title transition at 15 minutes 18 seconds, that run stops at
+`wLsJlmgEIaI[Json2_v1][Json_v1.1]`, the mutable
+`Value::referValue(const String&)` lookup. The caller constructs a string
+wrapper, passes an owned object, destroys the wrapper and checks the returned
+pointer for null before further lookup. Its ten-byte key is absent from the
+five-member object. Implement a bounded wrapped-key lookup that returns an
+existing child or null without insertion. Useful rendering, controls and
+both gameplay acceptance windows remain unverified.
 
 Two existing string-contract gaps were found while reviewing value ownership:
 `LibJson2.cpp:394` uses `strlen` for `JsonStringLength`, although the parser
