@@ -280,7 +280,10 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 				s = operand_to_str(source);
 				break;
 			}
-			case ShaderInstructionFormat::DA2: s = operand_array_to_str(inst.dst, 2); break;
+			case ShaderInstructionFormat::DA2:
+				s = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1 ? operand_to_str(inst.dst)
+				                                                                  : operand_array_to_str(inst.dst, 2);
+				break;
 			case ShaderInstructionFormat::DA3: s = operand_array_to_str(inst.dst, 3); break;
 			case ShaderInstructionFormat::DA4: s = operand_array_to_str(inst.dst, 4); break;
 			case ShaderInstructionFormat::DA8: s = operand_array_to_str(inst.dst, 8); break;
@@ -295,7 +298,11 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::S1A3: s = operand_array_to_str(inst.src[1], 3); break;
 			case ShaderInstructionFormat::S1A4: s = operand_array_to_str(inst.src[1], 4); break;
 			case ShaderInstructionFormat::S1A8: s = operand_array_to_str(inst.src[1], 8); break;
-			case ShaderInstructionFormat::S2A2: s = operand_array_to_str(inst.src[2], 2); break;
+			case ShaderInstructionFormat::S2A2:
+				s = inst.src[2].type == ShaderOperandType::VccHi && inst.src[2].size == 1
+				        ? operand_to_str(inst.src[2])
+				        : operand_array_to_str(inst.src[2], 2);
+				break;
 			case ShaderInstructionFormat::S2A3: s = operand_array_to_str(inst.src[2], 3); break;
 			case ShaderInstructionFormat::S2A4: s = operand_array_to_str(inst.src[2], 4); break;
 			case ShaderInstructionFormat::Attr: s = String8::FromPrintf("attr%u.%u", inst.src[1].constant.u, inst.src[2].constant.u); break;

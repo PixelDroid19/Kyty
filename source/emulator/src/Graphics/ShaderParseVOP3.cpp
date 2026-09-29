@@ -90,7 +90,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		inst.format   = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
 		inst.src_num  = 2;
 		inst.dst      = operand_parse(vdst);
-		inst.dst.size = 2;
+		// VCC_HI names one scalar mask dword; VCC_LO can name the pair.
+		inst.dst.size = next_gen && inst.dst.type == ShaderOperandType::VccHi ? 1 : 2;
 	}
 
 	if (opcode >= 0x100 && opcode <= 0x13d)
@@ -761,7 +762,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.type        = ShaderInstructionType::VCndmaskB32;
 			inst.format      = ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2;
 			inst.src_num     = 3;
-			inst.src[2].size = 2;
+			inst.src[2].size = next_gen && inst.src[2].type == ShaderOperandType::VccHi ? 1 : 2;
 			break;
 		case 0x101:
 			if (next_gen)
@@ -769,7 +770,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				inst.type        = ShaderInstructionType::VCndmaskB32;
 				inst.format      = ShaderInstructionFormat::VdstVsrc0Vsrc1Smask2;
 				inst.src_num     = 3;
-				inst.src[2].size = 2;
+				inst.src[2].size = inst.src[2].type == ShaderOperandType::VccHi ? 1 : 2;
 			} 			else
 			{
 				// v_readlane_b32 writes the SGPR encoded in VDST, not a VGPR.

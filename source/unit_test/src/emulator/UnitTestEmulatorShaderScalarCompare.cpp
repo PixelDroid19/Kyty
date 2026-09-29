@@ -137,4 +137,85 @@ TEST(EmulatorShaderScalarCompare, RejectsPairOutsideOrdinarySgprRange)
 	    ::testing::ExitedWithCode(rejected_exit), "");
 }
 
+TEST(EmulatorShaderVectorMask, VccHiCompareFeedsCndmask)
+{
+	// Assembled for gfx1030: v_cmp_ne_u32_e64 vcc_hi, 0, v0;
+	// v_cndmask_b32_e64 v0, 0, v1, vcc_hi.
+	const uint32_t shader[] = {0xd4c5006bu, 0x00020080u, 0xd5010000u, 0x01ae0280u, 0xbf810000u};
+	// gfx1030 VOPC SDWA with an explicitly encoded VCC_HI result.
+	const uint32_t sdwa_shader[] = {0x7d8a00f9u, 0x0686eb80u, 0xd5010000u, 0x01ae0280u, 0xbf810000u};
+	ASSERT_EXIT(
+	    {
+		    if (!Config::IsInitialized())
+		    {
+			    Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		    }
+		    Config::SetNextGen(true);
+		    Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		    class ValidationConfig final: public Config::ConfigSource
+		    {
+			public:
+			    bool         Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+			    int64_t      GetInteger(const Core::String&) const override { return 0; }
+			    bool         GetBool(const Core::String&) const override { return true; }
+			    Core::String GetString(const Core::String&) const override { return {}; }
+		    } validation;
+		    Config::Load(validation);
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    ShaderParse(shader, &code);
+		    if (code.GetInstructions().Size() != 3u || code.GetInstructions().At(0).type != ShaderInstructionType::VCmpNeU32 ||
+		        code.GetInstructions().At(0).dst.type != ShaderOperandType::VccHi || code.GetInstructions().At(0).dst.size != 1 ||
+		        code.GetInstructions().At(1).type != ShaderInstructionType::VCndmaskB32 ||
+		        code.GetInstructions().At(1).src[2].type != ShaderOperandType::VccHi || code.GetInstructions().At(1).src[2].size != 1)
+		    {
+			    std::_Exit(2);
+		    }
+		    if (code.DbgDump().FindIndex("vcc_hi") == Core::STRING8_INVALID_INDEX)
+		    {
+			    std::_Exit(3);
+		    }
+		    ShaderComputeInputInfo input {};
+		    input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+		    const auto source                                                  = SpirvGenerateSource(code, nullptr, nullptr, &input);
+		    if (source.FindIndex("OpStore %vcc_hi %t3_0") == Core::STRING8_INVALID_INDEX ||
+		        source.FindIndex("%t22_1 = OpLoad %uint %vcc_hi") == Core::STRING8_INVALID_INDEX)
+		    {
+			    std::_Exit(4);
+		    }
+		    Vector<uint32_t> binary;
+		    String8          error;
+		    if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+		    {
+			    std::fprintf(stderr, "%s\n", error.c_str());
+			    std::_Exit(5);
+		    }
+		    ShaderCode sdwa_code;
+		    sdwa_code.SetType(ShaderType::Compute);
+		    ShaderParse(sdwa_shader, &sdwa_code);
+		    if (sdwa_code.GetInstructions().Size() != 3u || sdwa_code.GetInstructions().At(0).type != ShaderInstructionType::VCmpNeU32 ||
+		        sdwa_code.GetInstructions().At(0).dst.type != ShaderOperandType::VccHi || sdwa_code.GetInstructions().At(0).dst.size != 1 ||
+		        !sdwa_code.GetInstructions().At(0).vop_sdwa)
+		    {
+			    std::fprintf(stderr, "sdwa parsed=%u type=%u dst_type=%u dst_size=%d sdwa=%u\n", sdwa_code.GetInstructions().Size(),
+			                 static_cast<unsigned>(sdwa_code.GetInstructions().At(0).type),
+			                 static_cast<unsigned>(sdwa_code.GetInstructions().At(0).dst.type), sdwa_code.GetInstructions().At(0).dst.size,
+			                 sdwa_code.GetInstructions().At(0).vop_sdwa ? 1u : 0u);
+			    std::_Exit(6);
+		    }
+		    const auto sdwa_source = SpirvGenerateSource(sdwa_code, nullptr, nullptr, &input);
+		    if (sdwa_source.FindIndex("OpStore %vcc_hi %t3_0") == Core::STRING8_INVALID_INDEX)
+		    {
+			    std::_Exit(7);
+		    }
+		    binary.Clear();
+		    if (!ShaderToolchain::Run(sdwa_source, &binary, &error) || binary.IsEmpty())
+		    {
+			    std::_Exit(8);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 UT_END();

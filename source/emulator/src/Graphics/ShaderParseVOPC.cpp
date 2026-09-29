@@ -79,7 +79,8 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 	{
 		inst.dst = operand_parse(sdst);
 	}
-	inst.dst.size = 2;
+	// SDWA can name VCC_HI directly; it is one scalar mask dword.
+	inst.dst.size = next_gen && inst.dst.type == ShaderOperandType::VccHi ? 1 : 2;
 
 	switch (opcode)
 	{

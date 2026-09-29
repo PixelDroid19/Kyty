@@ -791,12 +791,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
+	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
+	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
 
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-
-	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
 
 	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
@@ -818,11 +818,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1)
           %t2_<index> = <param> %bool %t0_<index> %t1_<index>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
           OpStore %<dst0> %t3_<index>
-          OpStore %<dst1> %uint_0
+          <clear_high>
 )";
+	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<param>", param[0])
@@ -841,12 +842,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
+	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
+	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
 
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-
-	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
 
 	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
@@ -868,11 +869,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
           %t2_<index> = <param> %bool %t0_<index> %t1_<index>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
           OpStore %<dst0> %t3_<index>
-          OpStore %<dst1> %uint_0
+          <clear_high>
 )";
+	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<param>", param[0])
@@ -1098,12 +1100,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	if (!operand_is_variable(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.src[2]) condition ignored (continuing)\n"); }
+	const bool single_vcc_hi = inst.src[2].type == ShaderOperandType::VccHi && inst.src[2].size == 1;
+	if (!operand_is_variable(inst.src[2]) || (!single_vcc_hi && inst.src[2].size != 2)) { return false; }
 
-	auto src_bool_value0 = operand_variable_to_str(inst.src[2], 0);
-	auto src_bool_value1 = operand_variable_to_str(inst.src[2], 1);
-
-	if (src_bool_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src_bool_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	auto src_bool_value0 = single_vcc_hi ? operand_variable_to_str(inst.src[2]) : operand_variable_to_str(inst.src[2], 0);
+	if (src_bool_value0.type != SpirvType::Uint) { return false; }
 
 	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -1120,7 +1121,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
     <load0>
     <load1>
     %t22_<index> = OpLoad %uint %<src0>
-    %t23_<index> = OpLoad %uint %<src1> ; unused
     %tb_<index> = OpBitwiseAnd %uint %t22_<index> %uint_1
     %t2_<index> = OpINotEqual %bool %tb_<index> %uint_0
     %t3_<index> = OpSelect %float %t2_<index> %t1_<index> %t0_<index>
@@ -1134,7 +1134,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<src0>", src_bool_value0.value)
-	                   .ReplaceStr("<src1>", src_bool_value1.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<index>", index_str);
