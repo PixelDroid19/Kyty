@@ -275,10 +275,26 @@ then a high-order atomic page-allocation failure while capturing its
 devcoredump. The latter occurred on the coredump path and does not establish
 the cause of the timed-out GPU job. The follow-up binary had the tested shader
 change but still reported the pre-commit build revision; rebuild before the
-next strict run. The next visual investigation must identify whether the
-present source contains any nonzero pixels before normalization and then
-trace its first missing color producer. No controlled gameplay, five-minute
-stable run, or playable regression gate has passed.
+next strict run. At present 20, a bounded readback of the packed VideoOut
+source found zero RGB bits in all 8,294,400 pixels; its first word was
+`0xc0000000`. The PNG conversion did not erase color. The exact registered
+range had one VideoOut image and one CPU-uploaded storage-buffer view, with no
+live render-target view. An opt-in GPU write-history recorder covered the same
+range and found zero direct guest-memory writes before that present. The agent
+still reported the loading phase, so this identifies an unwritten early output
+buffer but does not prove which later compositor or transition is missing.
+The next visual step is to correlate the first final-color producer with the
+VideoOut range. No controlled gameplay, five-minute stable run, or playable
+regression gate has passed.
+
+Two shorter strict runs also stopped at `GraphicsRenderBind.cpp:4260` because
+`GuestDeviceAddress.cpp:288` could not import a resident, non-writable guest
+chunk. A bounded stage probe emitted no host-pointer Vulkan failure before
+that exit; a later run did not reproduce it and showed optional guard-page
+imports crossing unreadable next pages before successful unguarded retries.
+The earlier fatal chunk's exact copy/protection failure remains unproven.
+Measure its unguarded retry and mapping protection before changing the
+device-address table or guest access policy. All temporary probes were removed.
 
 ### Scalar and vector lowering, RGBA16 storage, and mixed image ownership (2026-09-29, not gameplay)
 

@@ -353,6 +353,32 @@ against the same correct gameplay capture.
   memory, or shader policy. The protected devcoredump is not available to
   this unprivileged session.
 
+- Black VideoOut producer exclusion (2026-09-29): a one-shot packed-source
+  readback at present 20 counted zero RGB bits across 8,294,400 pixels and a
+  first raw word of `0xc0000000`. The capture normalizer therefore did not
+  create the black pixels. A bounded provenance query of the registered
+  VideoOut range found exactly one VideoOutBuffer and one equal StorageBuffer
+  with CPU-upload origin, with no RenderTexture view. The opt-in write-history
+  recorder covered that same range, retained 1,549 GPU guest-memory write
+  records overall, and matched zero writes to it. This excludes a direct
+  guest-memory color write to the presented range before present 20. Because
+  the agent still reported `loading`, it does not exclude a later compositor
+  or establish the absent color producer. The next targeted trace should join
+  final-color output and VideoOut range identity at one later scene boundary.
+
+- Intermittent guest-device import failure (2026-09-29): two short strict runs
+  stopped at `GraphicsRenderBind.cpp:4260` after
+  `GuestDeviceAddress.cpp:288` failed to import a resident, non-writable chunk
+  following level start. A stage probe on one fatal run produced no
+  `vkGetMemoryHostPointerPropertiesEXT`, buffer-create, allocation, or bind
+  failure, so the failure preceded the host-pointer import. A later bounded
+  run did not reproduce the fatal exit; it showed many optional guard-span
+  attempts whose next page was unreadable and whose unguarded retries
+  succeeded. Those normal retries do not identify the earlier fatal chunk.
+  Measure `CopyFromGuest`, per-page protection, and the exact unguarded retry
+  on a reproduced failure before changing the import or access contract. The
+  diagnostic code was removed.
+
 - High VCC masks and vector bit counts (2026-09-29): a bounded shader trace
   identified a one-word `VCC_HI` compare/conditional-mask tuple in a native
   32-lane program. Treating the parser failure as proof of a wave64 dispatch
