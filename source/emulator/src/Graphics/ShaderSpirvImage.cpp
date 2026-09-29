@@ -2893,6 +2893,45 @@ static String8 EmitImageLoadFetch(uint32_t index, SampledImageShape shape, const
 	    .ReplaceStr("<image_vector>", image_vector);
 }
 
+struct ImageLoadFetch
+{
+	String8 source;
+	String8 result;
+	String8 exit_label;
+};
+
+static ImageLoadFetch BuildImageLoadFetch(uint32_t index, SampledImageShape shape, const String8& descriptor_index,
+                                         const String8& x, const String8& y, const String8& z, bool uint_images,
+                                         bool mixed_numeric_types, const String8& lod)
+{
+	const auto prefix = String8::FromPrintf("image_load_%s_%u", GetSampledImageTypeInfo(shape).suffix, index);
+	if (!mixed_numeric_types)
+	{
+		return {EmitImageLoadFetch(index, shape, descriptor_index, x, y, z, uint_images, lod),
+		        ImageLoadResultName(index, shape, uint_images), "%" + prefix};
+	}
+
+	static const char* select = R"(
+OpSelectionMerge %<prefix>_numeric_merge None
+OpBranchConditional %image_load_is_uint_<index> %<prefix>_uint_branch %<prefix>_float_branch
+%<prefix>_float_branch = OpLabel
+<float_fetch>OpBranch %<prefix>_numeric_merge
+%<prefix>_uint_branch = OpLabel
+<uint_fetch>%<prefix>_uint_bits = OpBitcast %v4float <uint_result>
+OpBranch %<prefix>_numeric_merge
+%<prefix>_numeric_merge = OpLabel
+%<prefix>_numeric_result = OpPhi %v4float <float_result> %<prefix>_float_branch %<prefix>_uint_bits %<prefix>_uint_branch
+)";
+	const auto source = String8(select).ReplaceStr("<prefix>", prefix)
+	                                  .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                                  .ReplaceStr("<float_fetch>", EmitImageLoadFetch(index, shape, descriptor_index, x, y, z, false, lod))
+	                                  .ReplaceStr("<uint_fetch>", EmitImageLoadFetch(index, shape, descriptor_index, x, y, z, true, lod))
+	                                  .ReplaceStr("<float_result>", ImageLoadResultName(index, shape, false))
+	                                  .ReplaceStr("<uint_result>", ImageLoadResultName(index, shape, true));
+	// The shape selection's phi must name the numeric merge as predecessor.
+	return {source, "%" + prefix + "_numeric_result", "%" + prefix + "_numeric_merge"};
+}
+
 static uint32_t ImageGatherComponent(uint8_t dmask)
 {
 	if (dmask == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dmask == 0 condition ignored (continuing)\n"); }
@@ -3326,48 +3365,25 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageLoad_VdataVaddr3StDmask)
 	const auto y_value          = String8::FromPrintf("%%image_load_y_%u", index);
 	const auto z_value          = String8::FromPrintf("%%image_load_z_%u", index);
 	const auto result_type      = uint_images ? "v4uint" : "v4float";
-	const auto emit_fetch = [&](uint32_t fetch_index, SampledImageShape shape, const String8& fetch_descriptor,
-	                            const String8& fetch_x, const String8& fetch_y, const String8& fetch_z, bool fetch_uint)
-	{
-		return EmitImageLoadFetch(fetch_index, shape, fetch_descriptor, fetch_x, fetch_y, fetch_z, fetch_uint, lod_value);
-	};
-	String8     result;
+	const auto flat_fetch = BuildImageLoadFetch(index, SampledImageShape::Flat2d, descriptor_index, x_value, y_value, z_value,
+	                                            uint_images, mixed_numeric_types, lod_value);
+	const auto array_fetch = BuildImageLoadFetch(index, SampledImageShape::Array2d, descriptor_index, x_value, y_value, z_value,
+	                                             uint_images, mixed_numeric_types, lod_value);
+	const auto volume_fetch = BuildImageLoadFetch(index, SampledImageShape::ThreeDimensional, descriptor_index, x_value, y_value, z_value,
+	                                              uint_images, mixed_numeric_types, lod_value);
+	String8 result;
 	if (has_flat && !has_array && !has_3d)
 	{
-		if (mixed_numeric_types)
-		{
-			static const char* select = R"(
-OpSelectionMerge %image_load_numeric_merge_<index> None
-OpBranchConditional %image_load_is_uint_<index> %image_load_uint_<index> %image_load_float_<index>
-%image_load_float_<index> = OpLabel
-<float_fetch>OpBranch %image_load_numeric_merge_<index>
-%image_load_uint_<index> = OpLabel
-<uint_fetch>OpBranch %image_load_numeric_merge_<index>
-%image_load_numeric_merge_<index> = OpLabel
-%image_load_numeric_result_<index> = OpPhi %v4float <float_result> %image_load_float_<index> <uint_result> %image_load_uint_<index>
-)";
-			const auto uint_fetch = emit_fetch(index, SampledImageShape::Flat2d, descriptor_index, x_value, y_value, z_value, true) +
-			                        String8::FromPrintf("%%image_load_flat_uint_%u_float = OpBitcast %%v4float %%image_load_flat_uint_%u_result\n", index, index);
-			*dst_source += String8(select)
-			                   .ReplaceStr("<index>", index_string)
-			                   .ReplaceStr("<float_fetch>", emit_fetch(index, SampledImageShape::Flat2d, descriptor_index, x_value, y_value, z_value, false))
-			                   .ReplaceStr("<uint_fetch>", uint_fetch)
-			                   .ReplaceStr("<float_result>", ImageLoadResultName(index, SampledImageShape::Flat2d, false))
-			                   .ReplaceStr("<uint_result>", String8::FromPrintf("%%image_load_flat_uint_%u_float", index));
-			result = String8::FromPrintf("%%image_load_numeric_result_%u", index);
-		} else
-		{
-			*dst_source += emit_fetch(index, SampledImageShape::Flat2d, descriptor_index, x_value, y_value, z_value, uint_images);
-			result = ImageLoadResultName(index, SampledImageShape::Flat2d, uint_images);
-		}
+		*dst_source += flat_fetch.source;
+		result = flat_fetch.result;
 	} else if (!has_flat && has_array && !has_3d)
 	{
-		*dst_source += emit_fetch(index, SampledImageShape::Array2d, descriptor_index, x_value, y_value, z_value, uint_images);
-		result = ImageLoadResultName(index, SampledImageShape::Array2d, uint_images);
+		*dst_source += array_fetch.source;
+		result = array_fetch.result;
 	} else if (!has_flat && !has_array && has_3d)
 	{
-		*dst_source += emit_fetch(index, SampledImageShape::ThreeDimensional, descriptor_index, x_value, y_value, z_value, uint_images);
-		result = ImageLoadResultName(index, SampledImageShape::ThreeDimensional, uint_images);
+		*dst_source += volume_fetch.source;
+		result = volume_fetch.result;
 	} else if (has_flat && has_array && !has_3d)
 	{
 		static const char* select = R"(
@@ -3380,13 +3396,16 @@ OpBranchConditional %image_load_is_array_<index> %image_load_array_<index> %imag
 %image_load_array_<index> = OpLabel
 <array_fetch>OpBranch %image_load_merge_<index>
 %image_load_merge_<index> = OpLabel
-%image_load_result_<index> = OpPhi %<result_type> %image_load_flat_<index>_result %image_load_flat_<index> %image_load_array_<index>_result %image_load_array_<index>
+%image_load_result_<index> = OpPhi %<result_type> <flat_result> <flat_exit> <array_result> <array_exit>
 )";
 		*dst_source += String8(select)
 		                   .ReplaceStr("<index>", index_string)
 		                   .ReplaceStr("<result_type>", result_type)
-		                   .ReplaceStr("<flat_fetch>", emit_fetch(index, SampledImageShape::Flat2d, descriptor_index, x_value, y_value, z_value, uint_images))
-		                   .ReplaceStr("<array_fetch>", emit_fetch(index, SampledImageShape::Array2d, descriptor_index, x_value, y_value, z_value, uint_images));
+		                   .ReplaceStr("<flat_result>", flat_fetch.result).ReplaceStr("<flat_exit>", flat_fetch.exit_label)
+		                   .ReplaceStr("<array_result>", array_fetch.result).ReplaceStr("<array_exit>", array_fetch.exit_label)
+		                   .ReplaceStr("<volume_result>", volume_fetch.result).ReplaceStr("<volume_exit>", volume_fetch.exit_label)
+		                   .ReplaceStr("<flat_fetch>", flat_fetch.source)
+		                   .ReplaceStr("<array_fetch>", array_fetch.source);
 		result = String8::FromPrintf("%%image_load_result_%u", index);
 	} else if (has_flat && !has_array && has_3d)
 	{
@@ -3400,13 +3419,16 @@ OpBranchConditional %image_load_is_3d_<index> %image_load_3d_<index> %image_load
 %image_load_3d_<index> = OpLabel
 <volume_fetch>OpBranch %image_load_merge_<index>
 %image_load_merge_<index> = OpLabel
-%image_load_result_<index> = OpPhi %<result_type> %image_load_flat_<index>_result %image_load_flat_<index> %image_load_3d_<index>_result %image_load_3d_<index>
+%image_load_result_<index> = OpPhi %<result_type> <flat_result> <flat_exit> <volume_result> <volume_exit>
 )";
 		*dst_source += String8(select)
 		                   .ReplaceStr("<index>", index_string)
 		                   .ReplaceStr("<result_type>", result_type)
-		                   .ReplaceStr("<flat_fetch>", emit_fetch(index, SampledImageShape::Flat2d, descriptor_index, x_value, y_value, z_value, uint_images))
-		                   .ReplaceStr("<volume_fetch>", emit_fetch(index, SampledImageShape::ThreeDimensional, descriptor_index, x_value, y_value, z_value, uint_images));
+		                   .ReplaceStr("<flat_result>", flat_fetch.result).ReplaceStr("<flat_exit>", flat_fetch.exit_label)
+		                   .ReplaceStr("<array_result>", array_fetch.result).ReplaceStr("<array_exit>", array_fetch.exit_label)
+		                   .ReplaceStr("<volume_result>", volume_fetch.result).ReplaceStr("<volume_exit>", volume_fetch.exit_label)
+		                   .ReplaceStr("<flat_fetch>", flat_fetch.source)
+		                   .ReplaceStr("<volume_fetch>", volume_fetch.source);
 		result = String8::FromPrintf("%%image_load_result_%u", index);
 	} else if (!has_flat && has_array && has_3d)
 	{
@@ -3420,13 +3442,16 @@ OpBranchConditional %image_load_is_3d_<index> %image_load_3d_<index> %image_load
 %image_load_3d_<index> = OpLabel
 <volume_fetch>OpBranch %image_load_merge_<index>
 %image_load_merge_<index> = OpLabel
-%image_load_result_<index> = OpPhi %<result_type> %image_load_array_<index>_result %image_load_array_<index> %image_load_3d_<index>_result %image_load_3d_<index>
+%image_load_result_<index> = OpPhi %<result_type> <array_result> <array_exit> <volume_result> <volume_exit>
 )";
 		*dst_source += String8(select)
 		                   .ReplaceStr("<index>", index_string)
 		                   .ReplaceStr("<result_type>", result_type)
-		                   .ReplaceStr("<array_fetch>", emit_fetch(index, SampledImageShape::Array2d, descriptor_index, x_value, y_value, z_value, uint_images))
-		                   .ReplaceStr("<volume_fetch>", emit_fetch(index, SampledImageShape::ThreeDimensional, descriptor_index, x_value, y_value, z_value, uint_images));
+		                   .ReplaceStr("<flat_result>", flat_fetch.result).ReplaceStr("<flat_exit>", flat_fetch.exit_label)
+		                   .ReplaceStr("<array_result>", array_fetch.result).ReplaceStr("<array_exit>", array_fetch.exit_label)
+		                   .ReplaceStr("<volume_result>", volume_fetch.result).ReplaceStr("<volume_exit>", volume_fetch.exit_label)
+		                   .ReplaceStr("<array_fetch>", array_fetch.source)
+		                   .ReplaceStr("<volume_fetch>", volume_fetch.source);
 		result = String8::FromPrintf("%%image_load_result_%u", index);
 	} else
 	{
@@ -3445,19 +3470,22 @@ OpBranchConditional %image_load_is_array_<index> %image_load_array_<index> %imag
 %image_load_array_<index> = OpLabel
 <array_fetch>OpBranch %image_load_2d_merge_<index>
 %image_load_2d_merge_<index> = OpLabel
-%image_load_2d_result_<index> = OpPhi %<result_type> %image_load_flat_<index>_result %image_load_flat_<index> %image_load_array_<index>_result %image_load_array_<index>
+%image_load_2d_result_<index> = OpPhi %<result_type> <flat_result> <flat_exit> <array_result> <array_exit>
 OpBranch %image_load_merge_<index>
 %image_load_3d_<index> = OpLabel
 <volume_fetch>OpBranch %image_load_merge_<index>
 %image_load_merge_<index> = OpLabel
-%image_load_result_<index> = OpPhi %<result_type> %image_load_2d_result_<index> %image_load_2d_merge_<index> %image_load_3d_<index>_result %image_load_3d_<index>
+%image_load_result_<index> = OpPhi %<result_type> %image_load_2d_result_<index> %image_load_2d_merge_<index> <volume_result> <volume_exit>
 )";
 		*dst_source += String8(select)
 		                   .ReplaceStr("<index>", index_string)
 		                   .ReplaceStr("<result_type>", result_type)
-		                   .ReplaceStr("<flat_fetch>", emit_fetch(index, SampledImageShape::Flat2d, descriptor_index, x_value, y_value, z_value, uint_images))
-		                   .ReplaceStr("<array_fetch>", emit_fetch(index, SampledImageShape::Array2d, descriptor_index, x_value, y_value, z_value, uint_images))
-		                   .ReplaceStr("<volume_fetch>", emit_fetch(index, SampledImageShape::ThreeDimensional, descriptor_index, x_value, y_value, z_value, uint_images));
+		                   .ReplaceStr("<flat_result>", flat_fetch.result).ReplaceStr("<flat_exit>", flat_fetch.exit_label)
+		                   .ReplaceStr("<array_result>", array_fetch.result).ReplaceStr("<array_exit>", array_fetch.exit_label)
+		                   .ReplaceStr("<volume_result>", volume_fetch.result).ReplaceStr("<volume_exit>", volume_fetch.exit_label)
+		                   .ReplaceStr("<flat_fetch>", flat_fetch.source)
+		                   .ReplaceStr("<array_fetch>", array_fetch.source)
+		                   .ReplaceStr("<volume_fetch>", volume_fetch.source);
 		result = String8::FromPrintf("%%image_load_result_%u", index);
 	}
 
