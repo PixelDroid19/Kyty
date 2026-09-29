@@ -288,6 +288,163 @@ required host feature enablement, native MRT/stencil resolve and strict guest
 execution of the new module remain pending. There is no new guest FPS or
 gameplay claim from these results. Unit suites remain deferred as requested.
 
+### Cold compute compilation capacity (2026-09-29, unresolved)
+
+A strict Silent/Native retry of the compiler-interface build collects native
+readiness, doctor, events, last error, threads, synchronization and performance
+snapshots. It remains before the first present and reaches a cgroup OOM kill
+after 269.732 seconds, with an 8 GiB service peak. Completed compute-pipeline
+creation already accumulates 44.875 seconds in the early snapshot; the active
+command-processor host stack remains in the Intel driver. Guest thread
+liveness and an unsupported metadata diagnostic are not frame-rate evidence.
+No warm FPS, new capture or gameplay result exists for this retry.
+
+The 8 GiB bound is insufficient for this cold compile plus guest state. A
+read-only debugger snapshot supplies driver instruction addresses, but stripped
+symbols do not identify the specific compiler pass. Resolve those addresses
+with the matching driver build before choosing another shader transformation.
+The matching symbol and string sections now resolve the captured frames to
+`update_pq_info`, `add_node_to_stack`, `ra_allocate`, `brw_assign_regs` and
+`brw_allocate_registers`. The snapshot therefore locates work in register
+allocation rather than identifying a NIR pass. This is one stack sample, not
+a complete CPU profile. The prior local-load elimination experiment did not
+remove the memory barrier; the next bounded experiment must constrain register
+liveness while preserving guest control flow and enabled shared-memory limits.
+Unit suites remain deferred, and no compatibility push is authorized yet.
+
+An external checkpoint experiment moves eighty cross-block FP32 variables to
+invocation-private cells in Workgroup memory and restores them at case entry.
+It retains 181 dispatcher cases, uses 48,656 shared bytes against the queried
+49,152-byte device limit, and dispatches no guest GPU work. Its module validates
+for Vulkan 1.4. Three original branch/export GPU fixtures pass 24 cases and
+52,224 output comparisons with no differences. The large pipeline-only replay
+still reaches its 4 GiB cgroup OOM bound after 172.141 seconds. Thus
+checkpointing these FP32 variables alone is insufficient; scalar state and the
+remaining register-allocation pressure need measured evidence before another
+transformation. No checkpoint policy or renderer behavior is shipped from this experiment.
+
+Matching-build debugger probes now measure the allocator graph at entry and
+terminate the pipeline-only child before further compilation. The original
+module requests 35,442 nodes, 26,788,659 interference edges and 416,195,416 bytes
+for adjacency lists and their triangular bitset. Five initial scheduling
+attempts fail allocation; the first spill grows graph capacity from 35,456 to
+70,912 nodes, quadrupling the bitset to 314,277,552 bytes. These measurements
+locate an initial allocation barrier; they do not account for the complete
+8 GiB guest peak or prove which later allocation causes the OOM.
+
+The eighty-variable checkpoint increases the initial graph to 69,202 nodes and
+1,002,890,076 adjacency bytes. Other external candidates retain the original
+guest branches and validate for Vulkan 1.4, but do not reduce this initial
+barrier:
+
+| External candidate | Initial nodes | Initial interference edges |
+| --- | ---: | ---: |
+| CFG-liveness candidate using Undef | 35,442 | 26,788,659 |
+| CFG-liveness candidate clearing locals | 35,674 | 27,334,053 |
+| Ordered case traversal with barrier guards | 35,506 | 26,901,155 |
+| Direct invocation-private Workgroup storage for eighty FP32 locals | 42,137 | 27,358,252 |
+| Scalar register loads broadcast within each physical subgroup | 35,502 | 26,189,746 |
+| Twelve grouped dispatcher loops | 35,470 | 27,300,973 |
+| Local optimizer passes without global SSA promotion | 35,477 | 26,841,149 |
+
+Direct Workgroup storage and scalar broadcasts also fail their first allocation
+attempt. These are compiler diagnostics with zero queued guest dispatches;
+they supply no pixel-equivalence or runtime-speed result. No such policy is
+shipped. Before another structural change, isolate the contribution of repeated
+address-translation searches and measure later spill growth. Merely decreasing
+SPIR-V byte count or moving variables to shared memory is not a verified fix.
+Broadcasting the barrier-generation exit or all dispatcher control values
+produces the same initial graph as the original, with a failed first allocation.
+
+Sixty bounded allocator entries expose later growth: the original reaches
+72,594 nodes and a capacity of 141,824 after 24.662 debugger seconds. Its bitset
+alone is 1,257,119,072 bytes. All 59 completed attempts fail; the probe stops
+before allocating further. These debugger durations are not guest frame times.
+
+A separate region experiment preserves the two generation barriers, admits
+single-entry cyclic regions and emits direct acyclic paths with distinct
+selection merges. The 181-block input has three phase entries, two cyclic
+components of 19 and 116 blocks, and 46 acyclic regions. It emits 182 case
+copies and validates for Vulkan 1.4. Three original fragment fixtures pass
+52,224 GPU comparisons; a compute loop and a loop between two barriers pass
+16 cases and 2,096 register comparisons, including partial EXEC and both banks.
+The sixty-entry probe reaches 54,033 nodes rather than 72,594. Nevertheless,
+the complete pipeline-only run still reaches its 4 GiB OOM bound after
+167.393 seconds. Early graph reduction therefore does not establish a capacity
+or speed fix, and this region policy is not shipped.
+
+The captured CFG has seven natural loop headers. Both barrier cases are outside
+the cyclic components. Five natural loops have one exit and contiguous blocks;
+two nested loops have four backedges and two exits. The next structural
+experiment must retain their exact exit state while removing internal
+dispatchers. An external native-loop prototype now emits all seven loops,
+validates for Vulkan 1.4, and passes the same 52,224 fragment and 2,096 compute
+register comparisons. Its sixty-entry probe reaches 50,385 nodes, but the
+complete compile again exhausts 4 GiB after 153.637 seconds. Removing the
+internal dispatchers alone therefore does not resolve compilation capacity.
+
+The two barrier resumes also form a finite chain of three phases with 5, 7 and
+170 reachable blocks. A separate external prototype removes the enclosing
+phase loop only when each phase has a unique barrier resume and the chain is
+acyclic and bounded. It retains both generation barriers and continues retired
+waves through empty later phases. Eight original two-wave cases pass 4,096
+independent VGPR observations and 4,160 original/transformed word comparisons,
+including four early retirements and different per-wave loop counts. The
+fixture explicitly initializes observed SGPRs before early retirement; reading
+unwritten SGPRs is not an equivalence contract. Nevertheless, its complete
+pipeline-only run exhausts 4 GiB after 123.777 seconds. The finite-phase
+transformation is therefore not a capacity fix and is not shipped.
+
+Twelve matching-build spill selections from that module occupy classes with
+6, 7 or 9 contiguous host registers and interfere with 15,078 to 32,350 nodes.
+Those classes are host allocator metadata, not identified guest registers.
+Further transformations must measure complete spill growth rather than treat
+smaller initial graphs as acceptance. Direct invocation-private Workgroup
+storage now also passes 52,224 fragment comparisons and the same 4,096 two-wave
+VGPR and 4,160 equivalence-word checks. Its complete pipeline-only compile
+nevertheless exhausts 4 GiB after 168.951 seconds. The shared-memory bound
+allows eighty variables in that module; offloading them does not establish a
+capacity fix. No Workgroup state policy is shipped.
+
+A separate external Private-array candidate uses disjoint two-cell ranges for
+102 direct cross-block FP32 locals, indexed by a stable invocation selector.
+It requires 816 private bytes per invocation and does not consume Workgroup
+memory or add a descriptor. Pointer escapes remain excluded. Its module
+validates for Vulkan 1.4 and passes the same 52,224 fragment, 4,096 two-wave VGPR
+and 4,160 equivalence-word comparisons. Its complete pipeline-only compile
+still exhausts 4 GiB after 174.765 seconds. Its sixty-entry allocator probe
+reaches 76,992 nodes, a capacity of 88,256, and 1,053,255,284 adjacency bytes.
+Private FP32 storage alone is not a capacity fix and is not shipped.
+
+The next external candidate also moves direct unsigned locals and does not
+limit admission to locals referenced from several dispatcher cases. It selects
+234 scalar locals (107 FP32, 127 unsigned), requires 1,872 private bytes per
+invocation, validates for Vulkan 1.4, and passes the same fragment and two-wave
+checks. Pointer escapes remain excluded. Its complete compile nevertheless
+exhausts 4 GiB after 176.993 seconds, with 174.134 CPU seconds. A small parallel
+read-only liveness calculation makes this wall duration unsuitable for a speed
+comparison. Exact liveness finds 102 simultaneous direct FP32 locals and 102
+colors; putting all of them in invocation-private Workgroup cells would need
+59,920 bytes, above the queried device limit. Neither Private storage nor
+Workgroup aliasing is accepted as a capacity fix.
+
+The captured module has 256 guest invocations and 128 physical invocations,
+with four complete guest waves and no thread-limit predicates in its initial
+lane mask. The next bounded probe examines whether making that verified full
+initial mask explicit reduces preserved inactive-register state. Partial waves
+and dispatch thread limits must retain their existing predicates. No runtime
+policy or new FPS result has been established.
+
+Replacing only the initial lane predicates with true produces the same first
+allocator graph and the same sixty-entry node growth as the original. Explicit
+full mask words reduce the initial node count only from 35,442 to 35,140 and
+still grow to 70,524 nodes before the bounded probe stops. Applying those
+verified full mask words to the finite native-phase prototype reaches 57,173
+nodes at sixty entries, above that prototype's prior 48,880. These are allocator
+measurements, not complete pipeline or frame-time results. Full initial masks
+alone therefore do not explain the allocation barrier; no mask optimization
+is activated from these observations.
+
 ### Loaded image resource lifetime (2026-09-29, compiler verified)
 
 Sampled-texture and sampler lookup now checks a live mapped load before the
