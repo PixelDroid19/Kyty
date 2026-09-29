@@ -297,6 +297,30 @@ present-791 capture is uniformly black. Translation still stops on a pixel DPP
 row shift at PC 0xfec; no scene or gameplay result is established. These counters
 identify costs without changing guest synchronization or residency decisions.
 
+### Compute wave-analysis preparation cost (2026-09-29, bounded verified)
+
+Read-only host stacks locate repeated owned-string allocation and destruction
+inside `ShaderComputeWaveNativeEquivalence.cpp`. Enum classification now uses
+views of the same static names. Label validation and CFG target lookup use a
+binary search after proving decoded PCs are sorted; reordered IR retains the
+original linear search, and duplicate PCs retain their first matching index.
+No admission condition, shader instruction or synchronization rule changes.
+
+Two actual captured compute programs are replayed thirty times before and after
+the change. The 2,924-instruction program retains its rejection, PC and reason;
+median analysis time changes from 103.025 to 9.278 microseconds. A separate
+137-instruction program captured at live analysis retains its successful result;
+its median changes from 142.952 to 72.728 microseconds. These measure this CPU
+analysis alone and do not establish an equivalent frame-rate improvement.
+
+`ninja -C _build_linux_astro_play_s1 -j2 fc_script` succeeds. Strict source
+boundaries and the graphics-table manifest pass. A fresh strict Silent/Native
+run preserves the same first pixel-emitter failure at PC 0xfec. A 58.031-second
+warm window contains 229 presents with a 243 ms median frame time; the scored
+present-813 capture remains uniformly black. Gameplay and acceptable runtime
+performance are still unverified; focused unit tests remain deferred until
+gameplay as requested.
+
 ### Sparse physical residency query (2026-09-29, not gameplay)
 
 Read-only sampling found descriptor preparation repeatedly scanning an entirely

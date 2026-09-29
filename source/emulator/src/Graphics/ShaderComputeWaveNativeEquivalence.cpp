@@ -2,7 +2,9 @@
 
 #include "Kyty/Core/MagicEnum.h"
 
+#include <algorithm>
 #include <bitset>
+#include <string_view>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -42,10 +44,15 @@ ShaderComputeWaveAnalysisResult Failure(uint32_t pc, const char* reason)
 	return result;
 }
 
+bool NameStartsWith(std::string_view name, std::string_view prefix)
+{
+	return name.substr(0, prefix.size()) == prefix;
+}
+
 bool IsVectorType(ShaderInstructionType type)
 {
-	const auto name = Core::EnumName8(type);
-	return !name.IsEmpty() && name.At(0) == 'V';
+	const auto name = magic_enum::enum_name(type);
+	return !name.empty() && name.front() == 'V';
 }
 
 bool IsLaneCrossingType(ShaderInstructionType type)
@@ -141,9 +148,9 @@ bool IsVectorMaskConsumer(ShaderInstructionType type)
 // Scalar memory side effects are not gated by EXEC.
 bool HasScalarSideEffect(const ShaderInstruction& instruction)
 {
-	const auto name = Core::EnumName8(instruction.type);
-	return name.StartsWith("SStore") || name.StartsWith("SBufferStore") || name.StartsWith("SAtomic") ||
-	       name.StartsWith("SBufferAtomic") || name.StartsWith("SDcache");
+	const auto name = magic_enum::enum_name(instruction.type);
+	return NameStartsWith(name, "SStore") || NameStartsWith(name, "SBufferStore") || NameStartsWith(name, "SAtomic") ||
+	       NameStartsWith(name, "SBufferAtomic") || NameStartsWith(name, "SDcache");
 }
 
 enum class OperandUnits
@@ -224,10 +231,10 @@ struct DecodedInstruction
 ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, DecodedInstruction* out)
 {
 	out->vector = IsVectorType(instruction.type);
-	const auto name = Core::EnumName8(instruction.type);
+	const auto name = magic_enum::enum_name(instruction.type);
 	// V_CMPX writes only EXEC; the decoder's VCC destination is a placeholder.
-	const bool exec_compare = out->vector && name.StartsWith("VCmpx");
-	out->writes_scc_data    = name.StartsWith("SCmp") || instruction.type == ShaderInstructionType::SAbsI32;
+	const bool exec_compare = out->vector && NameStartsWith(name, "VCmpx");
+	out->writes_scc_data    = NameStartsWith(name, "SCmp") || instruction.type == ShaderInstructionType::SAbsI32;
 	if (IsLaneCrossingType(instruction.type))
 	{
 		return Failure(instruction.pc, "instruction reads another lane or a wave-wide count");
@@ -426,6 +433,26 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 	{
 		return Failure(count != 0 ? instructions.At(0).pc : 0u, "native-equivalence analysis requires non-empty compute code");
 	}
+	// Decoded PCs normally follow byte order. Keep the linear path for manually
+	// constructed or reordered IR, and preserve the first match for duplicate PCs.
+	const auto* first = instructions.GetDataConst();
+	const auto* last  = first + count;
+	const bool ordered = std::is_sorted(first, last, [](const auto& a, const auto& b) { return a.pc < b.pc; });
+	auto find = [&](uint32_t pc) -> int64_t
+	{
+		if (ordered)
+		{
+			const auto* match = std::lower_bound(first, last, pc, [](const auto& instruction, uint32_t value)
+			                                    { return instruction.pc < value; });
+			return match != last && match->pc == pc ? static_cast<int64_t>(match - first) : -1;
+		}
+		for (uint32_t index = 0; index < count; ++index)
+		{
+			if (instructions.At(index).pc == pc) { return index; }
+		}
+		return -1;
+	};
+
 	// The decoder records each conditional branch's fallthrough edge as an
 	// indirect label; the CFG below already contains those edges. Anything else
 	// would be control flow this analysis does not model.
@@ -435,16 +462,10 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 		{
 			continue;
 		}
-		bool fallthrough = false;
-		for (const auto& instruction: instructions)
-		{
-			if (instruction.pc == label.GetSrc())
-			{
-				fallthrough = IsBranchType(instruction.type) && instruction.type != ShaderInstructionType::SBranch &&
-				              label.GetDst() == instruction.pc + 4;
-				break;
-			}
-		}
+		const auto index = find(label.GetSrc());
+		const bool fallthrough = index >= 0 && IsBranchType(instructions.At(static_cast<uint32_t>(index)).type) &&
+		                         instructions.At(static_cast<uint32_t>(index)).type != ShaderInstructionType::SBranch &&
+		                         label.GetDst() == instructions.At(static_cast<uint32_t>(index)).pc + 4;
 		if (!fallthrough)
 		{
 			return Failure(label.GetSrc(), "indirect-label metadata is not a conditional-branch fallthrough");
@@ -463,17 +484,6 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 		}
 	}
 
-	auto find = [&](uint32_t pc) -> int64_t
-	{
-		for (uint32_t index = 0; index < count; ++index)
-		{
-			if (instructions.At(index).pc == pc)
-			{
-				return index;
-			}
-		}
-		return -1;
-	};
 	std::vector<int64_t> target_index(count, -1);
 	for (uint32_t index = 0; index < count; ++index)
 	{
