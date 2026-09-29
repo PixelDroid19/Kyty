@@ -258,7 +258,7 @@ static bool PixelInput0ProbeSelectsFirstSampleB(const Spirv* spirv, uint32_t ins
 	return true;
 }
 
-static bool PixelSampleProbeSelectsImageSampleB(const Spirv* spirv, uint32_t instruction_index)
+static bool PixelSampleProbeSelectsInstruction(const Spirv* spirv, uint32_t instruction_index)
 {
 	if (spirv == nullptr || !spirv->UsesPixelSampleProbe())
 	{
@@ -266,8 +266,7 @@ static bool PixelSampleProbeSelectsImageSampleB(const Spirv* spirv, uint32_t ins
 	}
 	const auto* input = spirv->GetPsInputInfo();
 	const auto& code  = spirv->GetCode();
-	if (input == nullptr || instruction_index >= code.GetInstructions().Size() ||
-	    code.GetInstructions().At(instruction_index).type != ShaderInstructionType::ImageSampleB)
+	if (input == nullptr || !ShaderPixelSampleProbeMatchesInstruction(code, input->input0_probe))
 	{
 		return false;
 	}
@@ -476,7 +475,7 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 	const bool  query_lod_tap = bias != nullptr && ps_info != nullptr &&
 	                           FragmentTapQueryLodSelection(spirv->GetCode(), ps_info->fragment_tap, index);
 	const bool input0_probe = PixelInput0ProbeSelectsFirstSampleB(spirv, index);
-	const bool sample_probe = PixelSampleProbeSelectsImageSampleB(spirv, index);
+	const bool sample_probe = PixelSampleProbeSelectsInstruction(spirv, index);
 
 	const auto index_string = String8::FromPrintf("%u", index);
 	static const char* flat_text = R"(
@@ -1835,6 +1834,16 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata3Vaddr3StSsDmask7)
 		                   .ReplaceStr("<dst_value1>", dst_value1.value)
 		                   .ReplaceStr("<dst_value2>", dst_value2.value);
 
+		if (PixelSampleProbeSelectsInstruction(spirv, index))
+		{
+			String8 sample_probe_source;
+			if (!spirv->EmitPixelRgbaProbe(&sample_probe_source, index, String8::FromPrintf("%%t43_%u", index),
+			                              "pixel_sample_probe"))
+			{
+				return false;
+			}
+			*dst_source += sample_probe_source;
+		}
 		return true;
 	}
 
@@ -2345,6 +2354,16 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 		                   .ReplaceStr("<dst_value2>", dst_value2.value)
 		                   .ReplaceStr("<dst_value3>", dst_value3.value);
 
+		if (PixelSampleProbeSelectsInstruction(spirv, index))
+		{
+			String8 sample_probe_source;
+			if (!spirv->EmitPixelRgbaProbe(&sample_probe_source, index, String8::FromPrintf("%%t43_%u", index),
+			                              "pixel_sample_probe"))
+			{
+				return false;
+			}
+			*dst_source += sample_probe_source;
+		}
 		return true;
 	}
 

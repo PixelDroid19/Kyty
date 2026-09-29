@@ -254,6 +254,23 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
+
+The bounded native sample probe now observes 2D `ImageSampleLz` RGB and RGBA
+results as well as the existing biased sample. It records the original sampled
+vector after the normal destination stores and does not replace shader output.
+The RGB form is verified in a live Silent/Native run: at present 100, all
+8,294,400 samples are finite, with RGB zero and alpha one. Generated and
+optimized SPIR-V both pass `spirv-val --target-env vulkan1.2`. A native capture
+at present 200 remains uniformly black. The corresponding RGBA lowering has
+not yet been selected by a live probe.
+
+This locates zero color before the final shader's arithmetic for that opening
+occurrence. It does not establish why the sampled storage image contains no
+color, whether every later occurrence is black, or whether its producer has
+run. Follow the sampled image's producer and lifetime before changing texture
+decoding, arithmetic or presentation.
+
 ### JSON array element lookup (2026-09-29, not gameplay)
 
 The title transition now passes `Value::operator[](uint64_t)`. The missing

@@ -356,6 +356,13 @@ against the same correct gameplay capture.
   excludes absent raster coverage or presentation alone hiding a nonblack
   export for that occurrence. Inspect the sampled inputs and arithmetic;
   do not change VideoOut selection on this evidence.
+  A subsequent output-preserving sample probe selects the first 2D zero-LOD
+  RGB sample at the same present threshold. All 8,294,400 sampled vectors are
+  finite RGB zero with alpha one. Both generated and optimized SPIR-V validate,
+  and a native capture at present 200 remains black. This excludes the final
+  shader's arithmetic as the first producer of zero RGB for that occurrence;
+  it does not explain the separate nonfinite final results. The sampled HDR
+  image's writer and lifetime are the next evidence boundary.
 
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
