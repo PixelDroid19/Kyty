@@ -75,6 +75,33 @@ bool ShaderComputeWaveSdwaExtractSupported(const ShaderInstruction& instruction)
 	       instruction.dst2.type == ShaderOperandType::Unknown && instruction.dst2.size == 0 && OperandIsPlain(instruction.dst2);
 }
 
+bool ShaderComputeWaveSdwaSignedConvertSupported(const ShaderInstruction& instruction)
+{
+	if (instruction.type != ShaderInstructionType::VCvtF32I32 || !instruction.vop_sdwa ||
+	    instruction.format != ShaderInstructionFormat::SVdstSVsrc0 || instruction.src_num != 1 ||
+	    instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u || instruction.ds_offset != 0u ||
+	    instruction.ds_encoding_control != 0u || instruction.ds_encoding_registers != 0u)
+	{
+		return false;
+	}
+	const uint32_t control = instruction.vop_sdwa_ctrl;
+	const uint32_t select = (control >> 16u) & 7u;
+	// S0=0, DWORD destination, PAD, source SEXT, no other modifiers or reserved bits.
+	if ((control & kSdwaExtractFixedMask) != (kSdwaExtractFixedBits | (1u << 19u)) || select == kSdwaSelectReserved)
+	{
+		return false;
+	}
+	const auto& destination = instruction.dst;
+	const auto& source = instruction.src[0];
+	auto plain_source = source;
+	plain_source.swizzle = 6u;
+	return OperandIsPlain(destination) && destination.type == ShaderOperandType::Vgpr && destination.size == 1 &&
+	       RegisterRangeIsValid(destination.register_id, 1, kMaxVgpr) && OperandIsPlain(plain_source) &&
+	       source.type == ShaderOperandType::Vgpr && source.size == 1 && RegisterRangeIsValid(source.register_id, 1, kMaxVgpr) &&
+	       source.swizzle == select && static_cast<uint32_t>(source.register_id) == (control & 0xffu) &&
+	       instruction.dst2.type == ShaderOperandType::Unknown && instruction.dst2.size == 0 && OperandIsPlain(instruction.dst2);
+}
+
 bool ShaderComputeWaveSdwaCompareTupleSupported(const ShaderInstruction& instruction)
 {
 	if (!instruction.vop_sdwa || instruction.format != ShaderInstructionFormat::SmaskVsrc0Vsrc1 || instruction.src_num != 2 ||

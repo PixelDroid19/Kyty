@@ -1,4 +1,5 @@
 #include "ShaderParseInternal.h"
+#include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -38,7 +39,6 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	if (dst_sel != 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_sel != 6 condition ignored (continuing)\n"); }
 	if (sdwa && dst_sel == 6 && dst_u != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sdwa && dst_sel == 6 && dst_u != 0 condition ignored (continuing)\n"); }
 	if (src0_sel > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sel > 6 condition ignored (continuing)\n"); }
-	if (src0_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sext != 0 condition ignored (continuing)\n"); }
 
 	ShaderInstruction inst;
 	inst.pc            = pc;
@@ -350,6 +350,11 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	// DPP VOP1 is currently represented only for v_mov_b32, whose lane routing
 	// can be emitted exactly. Other VOP1 operations need their own modifiers.
 	if (dpp && inst.type != ShaderInstructionType::VMovB32) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dpp && inst.type != ShaderInstructionType::VMovB32 condition ignored (continuing)\n"); }
+
+	if (src0_sext != 0 && !ShaderComputeWaveSdwaSignedConvertSupported(inst))
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported SDWA source sign extension\n");
+	}
 
 	dst->GetInstructions().Add(inst);
 

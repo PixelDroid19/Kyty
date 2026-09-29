@@ -13,6 +13,10 @@ namespace Kyty::Libs::Graphics {
 // reserved control bit clear. Other SDWA forms and opcodes stay fail-closed.
 [[nodiscard]] bool ShaderComputeWaveSdwaExtractSupported(const ShaderInstruction& instruction);
 
+// Exact VOP1 signed integer-to-float conversion with a selected VGPR byte,
+// word or dword, source sign extension, and an unmodified DWORD destination.
+[[nodiscard]] bool ShaderComputeWaveSdwaSignedConvertSupported(const ShaderInstruction& instruction);
+
 // Admit only the VOPC SDWAB form of the packed-mask U32 compares whose
 // control word keeps DWORD selects on both sources and no sext/neg/abs or
 // reserved bits. The mask destination fields (SDST, SD) and the source

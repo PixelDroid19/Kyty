@@ -979,6 +979,7 @@ bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instructio
 
 bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instruction)
 {
+	if (ShaderComputeWaveSdwaSignedConvertSupported(instruction)) { return true; }
 	if (instruction.type == ShaderInstructionType::ImageAtomicAdd) { return ShaderImageAtomicAddSupported(instruction); }
 	const auto name   = Core::EnumName8(instruction.type);
 	const bool memory = name.StartsWith("Buffer") || name.StartsWith("Tbuffer") || name.StartsWith("Image");
