@@ -326,6 +326,33 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Raw render alias and explicit mip-fetch frontier (2026-09-29): the first
+  partially written 960x540 RGBA16 UNORM storage image has overlapping
+  mixed-format render-target writers. Its first dispatch can touch at most
+  8,960 of 518,400 texels, excluding a full-overwrite seed bypass. Commit
+  `28db4aa3` composes intersecting 64 KiB raw blocks from write-ordered
+  parents; a live Vulkan byte comparison and focused classification tests
+  pass. A strict run crossed the old alias exit and exposed `IMAGE_LOAD_MIP`
+  opcode `0x01`. Commit `e169d95b` passes the level as `OpImageFetch Lod`;
+  focused SPIR-V and strict execution crossed the old parser exit. The
+  hypothesis that these two admission fixes alone restore visible color is
+  false: native captures at presents 20, 40, and 42 have the same uniform
+  black hash and score `entropy=0`. The next hypothesis is upstream of PNG
+  normalization if a bounded raw present-source readback is also all zero;
+  otherwise inspect the packed-format normalization. Do not infer alias
+  visual correctness from the synthetic byte test or presentation count.
+
+- Later Xe fence loss (2026-09-29): a separate longer strict run stopped after
+  40 presents at `GraphicsRenderCommandBuffer.cpp:823`, fence sequence 4640,
+  with `VK_ERROR_DEVICE_LOST`. The kernel reported an Xe timed-out job. Its
+  subsequent order-9 `GFP_ATOMIC` page-allocation warning arose in
+  `xe_guc_log_snapshot_capture` while taking a devcoredump, so it cannot be
+  used as proof that memory pressure caused the GPU timeout. This failure is
+  distinct from the earlier Mesa `execbuf` ENOMEM reports. Obtain the exact
+  timed-out GPU submission and host resource state before changing queue,
+  memory, or shader policy. The protected devcoredump is not available to
+  this unprivileged session.
+
 - High VCC masks and vector bit counts (2026-09-29): a bounded shader trace
   identified a one-word `VCC_HI` compare/conditional-mask tuple in a native
   32-lane program. Treating the parser failure as proof of a wave64 dispatch

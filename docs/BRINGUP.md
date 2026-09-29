@@ -254,6 +254,32 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Raw render alias composition and explicit mip fetch (2026-09-29, not gameplay)
+
+Commit `28db4aa3` materializes a partially written linear storage image from
+the raw bytes of its overlapping render-target parents, ordered by observed GPU
+write time. A live Vulkan test compared every byte of a mixed-format,
+two-block alias against the CPU tile-address equation; the focused geometry
+tests and source gates passed. A strict Silent/Native run crossed the former
+mixed-parent creation exit and stopped later at Gen5 `IMAGE_LOAD_MIP` opcode
+`0x01`. Commit `e169d95b` decodes its explicit level and emits an
+`OpImageFetch` LOD operand. Its focused parse/SPIR-V test and the MIMG test
+filter passed; a strict run crossed that parser failure and reached 42
+presents. This proves the two former exits were passed, not correct pixels.
+
+Native captures at presents 20, 40, and 42 were identically uniform black
+(`entropy=0`, one quantized color). The longer follow-up run stopped after
+40 presents and 189 seconds at `GraphicsRenderCommandBuffer.cpp:823` with
+`vkWaitForFences` device loss. The kernel recorded an Xe timed-out job and
+then a high-order atomic page-allocation failure while capturing its
+devcoredump. The latter occurred on the coredump path and does not establish
+the cause of the timed-out GPU job. The follow-up binary had the tested shader
+change but still reported the pre-commit build revision; rebuild before the
+next strict run. The next visual investigation must identify whether the
+present source contains any nonzero pixels before normalization and then
+trace its first missing color producer. No controlled gameplay, five-minute
+stable run, or playable regression gate has passed.
+
 ### Scalar and vector lowering, RGBA16 storage, and mixed image ownership (2026-09-29, not gameplay)
 
 The strict Silent/Native workload passed the earlier absolute async indirect
