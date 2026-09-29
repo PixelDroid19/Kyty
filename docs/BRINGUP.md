@@ -254,6 +254,42 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Scalar and vector lowering, RGBA16 storage, and mixed image ownership (2026-09-29, not gameplay)
+
+The strict Silent/Native workload passed the earlier absolute async indirect
+dispatch, scalar 64-bit equality, single-word high-VCC mask, and vector bit-count
+failures. The vector bit-count emitter had loaded a float-typed VGPR pointer as
+an unsigned integer and stored an unsigned integer through it. Commit
+`f9b56b0c` bitcasts at the VGPR boundary; a red/green SPIR-V toolchain test
+and a strict run passed the former pipeline-creation failure. That run stopped
+at an unsupported Gen5 storage image with format 65. The local format table
+and independent decoder observations identify four 16-bit UNORM channels. The
+host Vulkan device reports storage-image and formatless read/write support for
+`VK_FORMAT_R16G16B16A16_UNORM`. Commit `f4db885b` maps the storage use to that
+format. Its focused test failed before the change and passes afterward.
+
+A strict run with that format reached 36 presents and then stopped at
+`GpuMemoryCreate.cpp:1825` while creating a linear 960×540 RGBA16 UNORM
+storage image with `skip_seed=0`. Its range crosses 12 existing views: storage
+buffers, render targets, sampled textures, and storage textures. The saved
+GPU-memory database records a larger tiled RGBA16F storage image covering the
+whole incoming range. A bounded diagnostic found its content origin is
+`Unknown`, as are the render targets'; their object-wide update markers do not
+prove which image owns the latest bytes of every tile. The first compute
+writer uses a table of tile positions and dispatches 140 groups of 8×8
+threads. Its two full-channel image stores can touch at most 8,960 of the
+518,400 texels in the incoming image; the table gate can reduce that count.
+Skipping the seed is therefore incorrect. The incoming range crosses two
+recently GPU-written render targets with different pixel widths, so a single
+covering image or object-wide timestamp cannot supply its prior bytes. Trace
+per-range ownership and a format-aware raw materialization path before
+extending the mixed-parent alias policy. A native frame-36 capture
+scored `entropy=0`, one quantized color, and `gameplay_like=false` with
+`scripts/kyty_capture.py`; presents are not gameplay evidence. Other bounded
+retries stopped earlier at intermittent Xe `execbuf` ENOMEM / `vkQueueSubmit`
+device loss in `GraphicsRenderCommandBuffer.cpp:656`. No controlled gameplay
+or visual acceptance has been observed.
+
 ### Depth mip storage views, D16 arrays, and paired compute frontier (2026-09-28, not gameplay)
 
 A strict Silent/Native run passed a mixed-parent storage-image creation that

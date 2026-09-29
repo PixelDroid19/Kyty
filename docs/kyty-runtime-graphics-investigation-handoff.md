@@ -326,6 +326,57 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- High VCC masks and vector bit counts (2026-09-29): a bounded shader trace
+  identified a one-word `VCC_HI` compare/conditional-mask tuple in a native
+  32-lane program. Treating the parser failure as proof of a wave64 dispatch
+  mismatch was excluded by the recorded native wave width. Commit `91cbf4a3`
+  fixes the tuple. A later failing compute pipeline's SPIR-V loaded a
+  float-typed VGPR as `%uint` and stored `%uint` through it in `V_MBCNT`.
+  `spirv-val` rejected that module. Commit `f9b56b0c` bitcasts the VGPR
+  boundary; the red/green toolchain test and strict rerun passed the former
+  pipeline failure. The rerun stopped at a storage-image format check, not at
+  another SPIR-V type error.
+
+- Four-channel 16-bit UNORM storage image (2026-09-29): Gen5 format 65 was
+  already mapped for sampling but rejected for storage. The host Vulkan format
+  query reported storage-image, sampled-image, and formatless read/write
+  features for `VK_FORMAT_R16G16B16A16_UNORM`; two independent local decoders
+  agree on its four normalized 16-bit components. The focused mapping test
+  failed before commit `f4db885b` and passes afterward. A strict Silent/Native
+  run crossed the former binding exit and reached a new mixed-parent storage
+  alias at `GpuMemoryCreate.cpp:1825`. Its frame-36 native capture had one
+  quantized color and `gameplay_like=false`.
+
+- Mixed storage-image ownership after the format-65 bind (2026-09-29): the
+  incoming `StorageTexture` is linear 960×540 RGBA16 UNORM, pitch 960, one
+  level, with `skip_seed=0`. It spans `0x3f4800` bytes and intersects 12 tracked
+  parents: two `StorageBuffer`, six `RenderTexture`, three `StorageTexture`,
+  and one `Texture`. A saved GPU-memory database shows one larger storage
+  image covering the entire new range and several GPU-written render
+  targets over parts of it. A bounded rerun recorded `Unknown` content origin
+  for those images and `CpuUpload` for the two storage buffers. Object-wide
+  update times and geometric containment do not establish per-byte ownership
+  or format-compatible copying. The first compute writer has two RGBA
+  `ImageStore` instructions guarded by a table entry and bounds checks. It
+  dispatches 140 groups of 8×8 threads; even without duplicate tile positions
+  or skipped entries, one destination receives at most 8,960 writes for
+  518,400 texels. This disproves the full-overwrite hypothesis and confirms
+  that `skip_seed=0` is necessary. The range crosses two recently GPU-written
+  render targets with distinct byte widths. A single covering image or an
+  object-wide timestamp cannot identify the source of all prior bytes.
+  Resolve ownership for each covered byte interval, including tile padding,
+  and prove a format-aware raw materialization path before changing
+  `GpuMemoryCreate.cpp:1654` or its alias classifier. Bounded temporary
+  diagnostics produced the tuple and dispatch evidence and were removed.
+
+- Intermittent Xe submission loss (2026-09-29): two bounded strict runs before
+  the mixed storage exit stopped at `GraphicsRenderCommandBuffer.cpp:656` when
+  Mesa reported repeated `execbuf` ENOMEM and `vkQueueSubmit` returned device
+  loss. Their cgroup memory peaks were below the configured 16 GiB limit; that
+  alone does not establish the Xe allocation failure's cause. Record live
+  VRAM/GTT and host-memory use at the failing submission before changing Kyty's
+  queue or memory policy. Do not treat a failed earlier run as an alias result.
+
 - Absolute async indirect dispatch (2026-09-28): the live lazy-call trace
   showed an ACB pointer, a guest-built 64-bit argument address, and a
   modifier. Independent local implementations agreed on a four-dword native
@@ -429,7 +480,12 @@ against the same correct gameplay capture.
   reached the later storage-image overlap. The triggering allocation state
   and return path are unproved; capture `ImportResident`'s two import attempts
   and resident-range ownership if this earlier failure recurs. Do not loosen
-  the address-import contract based on that single failure.
+  the address-import contract based on that single failure. A later bounded
+  import diagnostic did not reproduce the terminal failure. It observed
+  unsuccessful guarded copies across unreadable pages before the unguarded
+  retry succeeded and reached the storage overlap. Those guarded attempts do
+  not establish a Vulkan memory-type or allocation-size failure; the temporary
+  diagnostic was removed.
 
 - Inactive depth-image compute dispatch (2026-09-28): a mixed-parent R32
   storage view with depth-64KB tiling was contained in two newer GPU-owned
