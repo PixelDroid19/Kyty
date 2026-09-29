@@ -1085,7 +1085,8 @@ KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
 {
 	const auto& inst = code.GetInstructions().At(index);
 
-	if (inst.dst.type == ShaderOperandType::ExecLo && inst.src[0].type == ShaderOperandType::ExecLo)
+	// Paired mode stores the actual mask and must expand its quads explicitly.
+	if (!spirv->UsesComputeWaveBanks() && inst.dst.type == ShaderOperandType::ExecLo && inst.src[0].type == ShaderOperandType::ExecLo)
 	{
 		return true;
 	}

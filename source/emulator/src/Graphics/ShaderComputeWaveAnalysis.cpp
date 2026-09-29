@@ -167,6 +167,14 @@ bool IsScalarPairCopyInstruction(const ShaderInstruction& instruction)
 	       (IsScalarPairVariable(instruction.src[0]) || IsIntegerInlineConstantPair(instruction.src[0]));
 }
 
+bool IsWholeQuadMaskInstruction(const ShaderInstruction& instruction)
+{
+	return IsExactTupleBase(instruction, ShaderInstructionFormat::Sdst2Ssrc02, 1) && IsScalarPairVariable(instruction.dst) &&
+	       IsScalarPairVariable(instruction.src[0]) && IsUnusedDestination(instruction.src[1]) &&
+	       IsUnusedDestination(instruction.src[2]) && IsUnusedDestination(instruction.src[3]) && instruction.ds_offset == 0u &&
+	       instruction.ds_encoding_control == 0u && instruction.ds_encoding_registers == 0u;
+}
+
 bool IsScalarShiftInstruction(const ShaderInstruction& instruction)
 {
 	if (!IsExactTupleBase(instruction, ShaderInstructionFormat::SVdstSVsrc0SVsrc1, 2) || instruction.dst.type != ShaderOperandType::VccHi ||
@@ -925,6 +933,10 @@ bool ShaderComputeWaveGenericLdsSupported(const ShaderInstruction& instruction)
 
 bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instruction)
 {
+	if (instruction.type == ShaderInstructionType::SWqmB64)
+	{
+		return IsWholeQuadMaskInstruction(instruction);
+	}
 	const auto name = Core::EnumName8(instruction.type);
 	// Saveexec variants are included: their native lowering updates the two
 	// architectural EXEC words, which paired mode keeps uniform per wave.
