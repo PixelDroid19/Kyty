@@ -326,6 +326,25 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Complete-quad transport and native resolve (2026-09-29): an original Vulkan
+  1.4 synthetic experiment exports helper values through one covered quad
+  writer, then preserves all 64 values in compute shared storage. Native
+  color inputs match bit for bit, fine derivatives match captured finite
+  differences, and complete-wave OR reductions match a CPU reference. At
+  1024 square, 10,745 groups have an upper-half contribution that changes the
+  aggregate, so the check detects a dropped half-wave. A second native draw
+  resolves compute-produced color, discard and depth through the original
+  attachment pipeline. Source-alpha blending, changing depth order and
+  overlapping primitives produce bit-identical color and D32 depth to direct
+  fragment execution across 1,048,576 pixels. This is a prerequisite proof,
+  not guest shader or gameplay acceptance; custom pixel inputs, architectural
+  masks, exports and side effects remain unconnected. The dense per-primitive
+  allocation is excluded for production use because its size scales with
+  primitive count and framebuffer area. See
+  [fragment execution design](fragment-wave-execution.md) for bounded-buffer
+  requirements, measured costs and remaining contracts. No runtime policy or
+  narrower guest-wave behavior is enabled by these experiments.
+
 - Fragment row reduction width and helper participation (2026-09-29): the
   captured pixel program requests wave64 and reduces selected 32-bit lane
   values through four OR row shifts, a cross-row permutation and reads of
