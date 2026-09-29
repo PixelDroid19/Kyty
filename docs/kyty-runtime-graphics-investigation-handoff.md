@@ -326,6 +326,21 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Storage-image descriptor identity (2026-09-29, `2cbcc6dc`): the first
+  title-transition store uses a complete T# relocated by four scalar pair
+  copies; another loads its T# from the extended table. Static destination
+  register matching loses both origins. The first replacement incorrectly
+  required a producing load's binding to be writable, although a distinct
+  writable binding contained the same eight guest words. Selecting the unique
+  complete writable alias removes that rejection. A second early rejection
+  came from treating a scalar load into VCC as an invalid ordinary SGPR load;
+  it cannot alter the tracked SGPR origins. The corrected flow analysis passes
+  both earlier programs, selects the expected two original bindings, validates
+  the complete SPIR-V module and reaches a completed dispatch. This excludes
+  missing image dimensionality for those two stores. The next first failure is
+  an unimplemented image atomic addition with an old-value return, recorded in
+  the bring-up manual. No gameplay acceptance follows from this dispatch.
+
 - Opening media preload and NULL export frontier (2026-09-29): a live call
   trace shows an explicit guest pause after delivery of the first decoded
   frame. The guest's media object then remains in its preloaded state, whose
