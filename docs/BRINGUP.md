@@ -374,11 +374,25 @@ values. The run passes the earlier write-back occurrence and reaches the next
 missing import after the title transition at 15 minutes 23 seconds:
 `Ncel8t2Rrpc[Json2_v1][Json_v1.1]`, `Value::toString(String&) const`. The caller
 constructs an empty string, converts a string-valued JSON node and consumes
-its `c_str()` before destruction. Implement that conversion next. Nonempty
-destination replacement and embedded-NUL cases still need focused tests,
-deferred until gameplay per the requested validation order. The native capture
-at present 223 remains uniformly black; controls and both gameplay acceptance
-windows remain unverified.
+its `c_str()` before destruction. The string-valued conversion now copies the
+bounded contents into independently owned storage, allocating the replacement
+before releasing the destination. Other value kinds fail explicitly until
+their conversion contract is verified. A later Silent/Native run verifies
+two actual returns of 36 and 12 bytes: both match their source, preserve it
+and own independent storage. Value assignment's five-node ownership check
+also still passes in that run. Nonempty destination replacement and
+embedded-NUL cases still need focused tests, deferred until gameplay per the
+requested validation order.
+
+The next transition failure is the unresolved import
+`3qrge7L-AU4[Json2_v1][Json_v1.1]`, `Value::getReal() const`. The caller checks
+for real type four, passes an owned value and immediately reads a double
+through the returned pointer. `LibJson2.cpp` does not register that getter;
+validate the value and expose its existing real field when implementing it,
+without substituting a numeric result for the reference. The native captures
+remain uniformly black; controls and both gameplay acceptance windows remain
+unverified. The build, strict boundary check and 13-table provenance check
+pass for the string conversion.
 
 Two existing string-contract gaps were found while reviewing value ownership:
 `LibJson2.cpp:394` uses `strlen` for `JsonStringLength`, although the parser

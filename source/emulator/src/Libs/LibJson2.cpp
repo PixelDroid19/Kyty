@@ -1024,6 +1024,71 @@ static bool JsonOwnedStringSize(const char* pointer, size_t* bytes)
 	return true;
 }
 
+static bool JsonReadStringWrapper(const void* source, JsonString* value)
+{
+	if (JsonOwnsStorage(source, JsonValueTypeString))
+	{
+		*value = *static_cast<const JsonString*>(source);
+		return true;
+	}
+	return Core::VirtualMemory::CopyFromGuest(value, reinterpret_cast<uint64_t>(source), sizeof(*value));
+}
+
+static bool JsonReadCString(const char* source, size_t limit, std::string* text)
+{
+	if (source == nullptr) { return true; }
+	uint64_t address = reinterpret_cast<uint64_t>(source);
+	const auto page_size = Core::VirtualMemory::GetPageSize();
+	while (text->size() <= limit)
+	{
+		char buffer[4096];
+		const auto bytes = std::min<size_t>({sizeof(buffer), page_size - address % page_size, limit - text->size() + 1u});
+		if (!Core::VirtualMemory::CopyFromGuest(buffer, address, bytes)) { return false; }
+		const auto* end = static_cast<const char*>(std::memchr(buffer, '\0', bytes));
+		text->append(buffer, end != nullptr ? static_cast<size_t>(end - buffer) : bytes);
+		if (end != nullptr) { return true; }
+		if (address > UINT64_MAX - bytes) { return false; }
+		address += bytes;
+	}
+	return false;
+}
+
+static bool JsonReadString(const void* source, size_t limit, std::string* text)
+{
+	JsonString value {};
+	if (!JsonReadStringWrapper(source, &value)) { return false; }
+	size_t owned_bytes = 0;
+	if (!JsonOwnedStringSize(value.data, &owned_bytes)) { return JsonReadCString(value.data, limit, text); }
+	// Parsed strings can contain NUL bytes. Their host ownership metadata
+	// retains the byte length without extending the guest wrapper layout.
+	if (owned_bytes > limit) { return false; }
+	text->assign(value.data, owned_bytes);
+	return true;
+}
+
+static void KYTY_SYSV_ABI JsonValueToString(const JsonValue* self, JsonString* destination)
+{
+	JsonValue value {};
+	JsonString old {};
+	EXIT_IF(self == nullptr || destination == nullptr || !JsonReadValue(self, &value) ||
+	        !JsonReadStringWrapper(destination, &old) ||
+	        (!JsonOwnsStorage(destination, JsonValueTypeString) &&
+	         !Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(destination), sizeof(*destination))));
+	if (value.type != JsonValueTypeString)
+	{
+		EXIT("JsonValueToString: unsupported value type %u\n", value.type);
+	}
+	size_t old_bytes = 0;
+	EXIT_IF(old.data != nullptr && !JsonOwnedStringSize(old.data, &old_bytes));
+	std::string text;
+	EXIT_IF(value.ptr != nullptr && !JsonReadString(value.ptr, JsonMaxDocumentBytes, &text));
+	// Allocate before release because the output may also be the source wrapper.
+	char* replacement = JsonAllocateString(text.data(), text.size());
+	EXIT_IF(replacement == nullptr);
+	JsonReleaseString(old.data);
+	destination->data = replacement;
+}
+
 class JsonValueCopier
 {
 public:
@@ -1058,47 +1123,10 @@ private:
 		return true;
 	}
 
-	bool ReadString(const char* source, std::string* text) const
-	{
-		if (source == nullptr) { return true; }
-		uint64_t address = reinterpret_cast<uint64_t>(source);
-		const auto page_size = Core::VirtualMemory::GetPageSize();
-		while (text->size() <= m_bytes)
-		{
-			char buffer[4096];
-			const auto bytes = std::min<size_t>({sizeof(buffer), page_size - address % page_size, m_bytes - text->size() + 1u});
-			if (!Core::VirtualMemory::CopyFromGuest(buffer, address, bytes)) { return false; }
-			const auto* end = static_cast<const char*>(std::memchr(buffer, '\0', bytes));
-			text->append(buffer, end != nullptr ? static_cast<size_t>(end - buffer) : bytes);
-			if (end != nullptr) { return true; }
-			if (address > UINT64_MAX - bytes) { return false; }
-			address += bytes;
-		}
-		return false;
-	}
-
 	bool CopyString(JsonValue* output, const void* source)
 	{
-		JsonString value {};
 		std::string text;
-		if (JsonOwnsStorage(source, JsonValueTypeString))
-		{
-			value = *static_cast<const JsonString*>(source);
-		} else if (!Core::VirtualMemory::CopyFromGuest(&value, reinterpret_cast<uint64_t>(source), sizeof(value)))
-		{
-			return false;
-		}
-		size_t owned_bytes = 0;
-		if (JsonOwnedStringSize(value.data, &owned_bytes))
-		{
-			// Parsed strings can contain NUL bytes. Their host ownership metadata
-			// retains the byte length without extending the guest wrapper layout.
-			if (!ReserveBytes(owned_bytes)) { return false; }
-			text.assign(value.data, owned_bytes);
-		} else if (!ReadString(value.data, &text) || !ReserveBytes(text.size()))
-		{
-			return false;
-		}
+		if (!JsonReadString(source, m_bytes, &text) || !ReserveBytes(text.size())) { return false; }
 		auto* string = new JsonString {};
 		string->data = JsonAllocateString(text.data(), text.size());
 		if (string->data == nullptr) { delete string; return false; }
@@ -1218,6 +1246,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("SHtAad20YYM", Json2::JsonValueGetType);
 	LIB_FUNC("RBw+4NukeGQ", Json2::JsonValueCount);
 	LIB_FUNC("4zrm6VrgIAw", Json2::JsonValueAssign);
+	LIB_FUNC("Ncel8t2Rrpc", Json2::JsonValueToString);
 	LIB_FUNC("+drDFyAS6u4", Json2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", Json2::JsonInitializerSetGlobalNullAccessCallback);
 }
