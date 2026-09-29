@@ -2,6 +2,7 @@
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
+#include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
@@ -2469,6 +2470,103 @@ KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
 }
 
 
+static String8 GuestScalarBufferAddress(Spirv* spirv, const ShaderInstruction& inst, const String8& tag, const String8& offset)
+{
+	// SMEM ignores format and selectors. Stride changes the byte extent only;
+	// the scalar offset already contains any element-index multiplication.
+	return String8(R"(
+%<t>_base_raw = OpLoad %uint %<base_lo>
+%<t>_descriptor_hi = OpLoad %uint %<base_hi>
+%<t>_records = OpLoad %uint %<records>
+%<t>_base_lo = OpBitwiseAnd %uint %<t>_base_raw %<align>
+%<t>_base_hi = OpBitwiseAnd %uint %<t>_descriptor_hi %<mask16>
+%<t>_base_lo64 = OpUConvert %ulong %<t>_base_lo
+%<t>_base_hi64 = OpUConvert %ulong %<t>_base_hi
+%<t>_base_shift = OpShiftLeftLogical %ulong %<t>_base_hi64 %uint_32
+%<t>_base = OpBitwiseOr %ulong %<t>_base_shift %<t>_base_lo64
+%<t>_stride_raw = OpShiftRightLogical %uint %<t>_descriptor_hi %uint_16
+%<t>_stride = OpBitwiseAnd %uint %<t>_stride_raw %<stride_mask>
+%<t>_raw = OpIEqual %bool %<t>_stride %uint_0
+%<t>_scale = OpSelect %uint %<t>_raw %uint_1 %<t>_stride
+%<t>_scale64 = OpUConvert %ulong %<t>_scale
+%<t>_records64 = OpUConvert %ulong %<t>_records
+%<t>_bytes = OpIMul %ulong %<t>_scale64 %<t>_records64
+%<t>_offset_aligned = OpBitwiseAnd %uint %<offset> %<align>
+%<t>_offset64 = OpUConvert %ulong %<t>_offset_aligned
+)")
+	    .ReplaceStr("<t>", tag).ReplaceStr("<offset>", offset)
+	    .ReplaceStr("<base_lo>", operand_variable_to_str(inst.src[0], 0).value)
+	    .ReplaceStr("<base_hi>", operand_variable_to_str(inst.src[0], 1).value)
+	    .ReplaceStr("<records>", operand_variable_to_str(inst.src[0], 2).value)
+	    .ReplaceStr("<align>", spirv->GetConstantUint(0xfffffffcu))
+	    .ReplaceStr("<mask16>", spirv->GetConstantUint(0xffffu))
+	    .ReplaceStr("<stride_mask>", spirv->GetConstantUint(0x3fffu));
+}
+
+static bool EmitGuestScalarBufferWord(Spirv* spirv, const String8& tag, uint32_t word, String8* source)
+{
+	const auto part = tag + String8::FromPrintf("_%u", word);
+	*source += String8(R"(
+%<p>_offset = OpIAdd %ulong %<t>_offset64 %gda_u64_<byte>
+%<p>_inside = OpULessThan %bool %<p>_offset %<t>_bytes
+OpSelectionMerge %<p>_merge None
+OpBranchConditional %<p>_inside %<p>_read %<p>_oob
+%<p>_read = OpLabel
+%<p>_address = OpIAdd %ulong %<t>_base %<p>_offset
+%<p>_lo = OpUConvert %uint %<p>_address
+%<p>_shift = OpShiftRightLogical %ulong %<p>_address %uint_32
+%<p>_hi = OpUConvert %uint %<p>_shift
+)")
+	    .ReplaceStr("<p>", part).ReplaceStr("<t>", tag).ReplaceStr("<byte>", String8::FromPrintf("%u", word * 4u));
+	if (!spirv->EmitGuestLoad(part + "_lo", part + "_hi", 1, part + "_load", source)) { return false; }
+	*source += String8(R"(
+OpBranch %<p>_merge
+%<p>_oob = OpLabel
+OpBranch %<p>_merge
+%<p>_merge = OpLabel
+%<p>_value = OpPhi %uint %<p>_load_d0 %<p>_read %uint_0 %<p>_oob
+)").ReplaceStr("<p>", part);
+	return true;
+}
+
+static bool EmitGuestScalarBufferLoad(Spirv* spirv, const ShaderInstruction& inst, uint32_t index, uint32_t components,
+                                      String8* dst_source)
+{
+	const uint32_t alignment = components == 1u ? 1u : (components == 2u ? 2u : 4u);
+	if (!spirv->UsesGuestDeviceAddress() || components == 0u || components > 16u || inst.smem_flags != 0u ||
+	    inst.smem_imm_offset != 0 || inst.src_num != 2 || inst.src[0].type != ShaderOperandType::Sgpr ||
+	    inst.src[0].size != 4 || inst.src[0].register_id < 0 || inst.src[0].register_id > 100 ||
+	    (inst.src[0].register_id % 4) != 0 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != components ||
+	    inst.dst.register_id < 0 || inst.dst.register_id + components > 106u || (inst.dst.register_id % alignment) != 0u ||
+	    inst.src[1].dpp || inst.src[1].absolute || inst.src[1].negate || inst.src[1].swizzle != 6u)
+	{
+		return false;
+	}
+	const auto tag = String8::FromPrintf("gsb_%u", index);
+	String8 source;
+	if (!operand_load_uint(spirv, inst.src[1], tag + "_offset", tag, &source)) { return false; }
+	source += GuestScalarBufferAddress(spirv, inst, tag, tag + "_offset");
+	for (uint32_t word = 0; word < components; ++word)
+	{
+		if (!EmitGuestScalarBufferWord(spirv, tag, word, &source)) { return false; }
+	}
+	// Load every word before committing results: SDST may overlap SBASE/SOFFSET.
+	for (uint32_t word = 0; word < components; ++word)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(word));
+		source += String8::FromPrintf("OpStore %%%s %%%s_%u_value\n", dst.value.c_str(), tag.c_str(), word);
+	}
+	*dst_source += source;
+	return true;
+}
+
+static bool PixelScalarBufferUsesGuestAddress(const Spirv* spirv, const ShaderInstruction& inst)
+{
+	const auto* bind = spirv->GetBindInfo();
+	return Config::IsNextGen() && spirv->GetPsInputInfo() != nullptr && bind != nullptr &&
+	       ShaderScalarBufferUsesRuntimeDescriptor(*bind, inst);
+}
+
 static bool RecompileZeroSBufferLoad(const ShaderInstruction& inst, uint32_t components, const ShaderBindResources* bind_info,
                                      String8* dst_source)
 {
@@ -2498,6 +2596,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDword_SdstSvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	{
+		return EmitGuestScalarBufferLoad(spirv, inst, index, 1u, dst_source);
+	}
 	if (RecompileZeroSBufferLoad(inst, 1, bind_info, dst_source))
 	{
 		return true;
@@ -2555,6 +2657,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx2_Sdst2SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	{
+		return EmitGuestScalarBufferLoad(spirv, inst, index, 2u, dst_source);
+	}
 	if (RecompileZeroSBufferLoad(inst, 2, bind_info, dst_source))
 	{
 		return true;
@@ -2614,6 +2720,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	{
+		return EmitGuestScalarBufferLoad(spirv, inst, index, 4u, dst_source);
+	}
 	if (RecompileZeroSBufferLoad(inst, 4, bind_info, dst_source))
 	{
 		return true;
@@ -2699,6 +2809,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx8_Sdst8SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	{
+		return EmitGuestScalarBufferLoad(spirv, inst, index, 8u, dst_source);
+	}
 	if (RecompileZeroSBufferLoad(inst, 8, bind_info, dst_source))
 	{
 		return true;
@@ -2752,6 +2866,10 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	const auto* bind_info = spirv->GetBindInfo();
+	if (PixelScalarBufferUsesGuestAddress(spirv, inst))
+	{
+		return EmitGuestScalarBufferLoad(spirv, inst, index, 16u, dst_source);
+	}
 	if (RecompileZeroSBufferLoad(inst, 16, bind_info, dst_source))
 	{
 		return true;

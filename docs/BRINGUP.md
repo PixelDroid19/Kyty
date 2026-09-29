@@ -760,6 +760,28 @@ Vertex and compute input analysis already supply it. Capture its consumer
 chain and apply the same runtime base-address contract to the pixel stage;
 do not bake the mapped address into the translated module.
 
+The captured consumer builds a 128-byte V# over an inline table immediately
+following the program, then reads sixteen pairs at scalar byte offsets. A
+second defect in `ShaderSpirvBuffer.cpp`, the scalar-buffer load emitters,
+would use that constructed base word as a storage-descriptor index whenever
+another bound buffer exists. Merely enabling pixel GETPC metadata is therefore
+insufficient. Pixel input analysis now supplies the runtime program base
+and routes unbound scalar V# reads through the existing guest-address table.
+It preserves statically bound and dynamically materialized buffer paths,
+checks each DWORD against the descriptor extent and reads all source words
+before writing overlapping destinations. Scalar execution stays independent
+of EXEC. Cache policy hints and combined register/immediate forms outside the
+admitted subset remain rejected. The complete captured 335-instruction module
+passes Vulkan 1.4 validation before and after optimization. A strict
+Silent/Native run records that draw at queue 8, sequence 96,400, and the
+completion ledger reaches 96,424. Its live metadata has both runtime address
+blocks enabled and spills 160 bytes through the existing uniform-buffer path.
+Native capture 318 is uniformly black; the run reaches present 809 before
+another pixel program stops in `ShaderParse.cpp:131` on family 0x33, word
+0xcc20701a at PC 0xb8. The complete 13,920-byte program and stack are captured
+for decoding against the ISA. No scene or gameplay output is established;
+focused unit tests remain deferred until gameplay.
+
 A related summary-operand defect remains unverified in this workload:
 `ShaderSpirvOperands.cpp:573` combines VCC_LO and VCC_HI when reading VCCZ,
 even for a native wave32 dispatch. RDNA2 defines that summary from the low

@@ -2997,6 +2997,14 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ShaderResolveCustomInterpolation(*analysis.code, *vs_info, ps_info);
 		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get(), 0,
 		                  false);
+		// GETPC uses runtime metadata so relocated pixel programs keep their
+		// inline tables. A constructed V# must read guest bytes, not index the
+		// descriptor array using its base address.
+		ps_info->bind.program_base_used = analysis.code->HasAnyOf({ShaderInstructionType::SGetpcB64});
+		ps_info->bind.program_base = ps_info->bind.program_base_used ? regs->ps_regs.data_addr : 0u;
+		const auto& instructions = analysis.code->GetInstructions();
+		ps_info->bind.device_address_used = std::any_of(instructions.begin(), instructions.end(),
+		    [&bind = ps_info->bind](const auto& inst) { return ShaderScalarBufferUsesRuntimeDescriptor(bind, inst); });
 	} else
 	{
 		ShaderParseUsage(regs->ps_regs.data_addr, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr);

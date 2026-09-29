@@ -1188,6 +1188,25 @@ bool ShaderIsDynamicScalarStorageConsumer(const ShaderBindResources& bind, const
 	return false;
 }
 
+bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst)
+{
+	if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.src_num < 1 || inst.src[0].type != ShaderOperandType::Sgpr ||
+	    inst.src[0].size != 4 || ShaderIsDynamicScalarStorageConsumer(bind, inst))
+	{
+		return false;
+	}
+	const int reg = inst.src[0].register_id;
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		if (bind.storage_buffers.start_register[i] == reg) { return false; }
+	}
+	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
+	{
+		if (bind.zero_sbuffer_resources.start_register[i] == reg) { return false; }
+	}
+	return true;
+}
+
 bool ShaderStorageResourceHasDynamicSLoad(const ShaderBindResources& bind, int storage_index)
 {
 	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
