@@ -135,6 +135,7 @@ public:
 	[[nodiscard]] bool EmitComputeWaveCarryInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveMbcnt(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] String8 EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const;
 	[[nodiscard]] bool EmitComputeWaveGenericCompare(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                 uint32_t index, String8* output);
 	[[nodiscard]] SpirvValue GetComputeWaveRegister(ShaderOperand operand, ShaderWaveBank bank, int word) const;

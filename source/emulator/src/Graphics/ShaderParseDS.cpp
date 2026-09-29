@@ -531,18 +531,13 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			inst.ds_offset = static_cast<uint16_t>(offset0);
 			break;
 		case 0x3d:
-			if (addr != 0 || data0 != 0 || data1 != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: addr != 0 || data0 != 0 || data1 != 0 condition ignored (continuing)\n"); }
-			if (offset0 != 0 || offset1 != 0 || gds == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset0 != 0 || offset1 != 0 || gds == 0 condition ignored (continuing)\n"); }
-			inst.type   = ShaderInstructionType::DsConsume;
-			inst.format = ShaderInstructionFormat::VdstGds;
-			inst.dst    = operand_parse(vdst + 256);
-			break;
 		case 0x3e:
 			if (addr != 0 || data0 != 0 || data1 != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: addr != 0 || data0 != 0 || data1 != 0 condition ignored (continuing)\n"); }
-			if (offset0 != 0 || offset1 != 0 || gds == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset0 != 0 || offset1 != 0 || gds == 0 condition ignored (continuing)\n"); }
-			inst.type   = ShaderInstructionType::DsAppend;
-			inst.format = ShaderInstructionFormat::VdstGds;
-			inst.dst    = operand_parse(vdst + 256);
+			EXIT_NOT_IMPLEMENTED(gds == 0 || (offset0 & 3u) != 0);
+			inst.type      = opcode == 0x3du ? ShaderInstructionType::DsConsume : ShaderInstructionType::DsAppend;
+			inst.format    = ShaderInstructionFormat::VdstGds;
+			inst.dst       = operand_parse(vdst + 256);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x3F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_ordered_count treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;

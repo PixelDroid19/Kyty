@@ -273,9 +273,17 @@ This does not establish gameplay or long-run device stability.
 The remaining slow-GPU trace identifies four device-addressed indirect
 dispatches whose X group counts grow across consecutive cycles: initially
 1/1/2/3, then 4/5/6/7, then 8/9/10/11. Their argument values are unchanged
-before and after the existing write-back boundary. Locate the producer of
-those argument words before attributing the growing work to shader lowering
-or changing GPU timeout policy.
+before and after the existing write-back boundary. A later writer watchpoint
+and binding trace identifies a GPU shader whose four GDS appends collapse
+onto one incorrectly scaled counter address. The decoder drops their byte
+offsets, and both emitters omit conversion from bytes to dwords. The correction
+preserves the offset and shares the byte address calculation between both
+emitters. A clean Silent/Native rerun reaches 70 presents with a black scored
+capture. Four counters now advance separately by one per cycle, so reset
+remains broken. A live ABI trace finds that the async DMA entry is incorrectly
+aliased to the graphics entry and rejects valid counter clears. The handoff
+records that next correction and the separate native-wave limitation. This
+is not gameplay acceptance.
 
 ### Guest-address imports creating their own residency (2026-09-29, not gameplay)
 
@@ -302,6 +310,15 @@ preparation time. This bounds the artificial import growth in that run; it
 does not establish long-run stability, correct color output or gameplay.
 The experimental physical read-ahead was removed before this run because it
 would amplify the newly proven residency mechanism.
+
+Later cache inspection qualifies that runtime evidence: `d8950414` did not
+invalidate translator version 56, so retained modules could still use the
+old single-span shader loads. The focused Vulkan regression exercised the
+new split-load emitter, but the cached workload run did not establish its
+integration. Regeneration during the GDS investigation produces a larger,
+valid SPIR-V module and spends several minutes in the host driver's compute
+pipeline compiler before dispatch. Shader semantic edits must invalidate
+the module cache, and compilation time is distinct from a GPU fence stall.
 
 Recorded separately: `ShaderSpirvGuestAddress.cpp`, in the lookup after
 `gda_merge`, reads entry zero even when the table count is zero. An empty

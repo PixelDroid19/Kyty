@@ -95,6 +95,20 @@ bool Spirv::EmitComputeWaveMbcnt(const ShaderInstruction& instruction, uint32_t 
 	return true;
 }
 
+String8 Spirv::EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const
+{
+	// M0[31:16] and the instruction offset are bytes; the storage array holds dwords.
+	const char* p = prefix.c_str();
+	return String8::FromPrintf(
+	    "%%%s_m0 = OpLoad %%uint %%m0\n"
+	    "%%%s_base = OpShiftRightLogical %%uint %%%s_m0 %%%s\n"
+	    "%%%s_byte = OpIAdd %%uint %%%s_base %%%s\n"
+	    "%%%s_index = OpShiftRightLogical %%uint %%%s_byte %%%s\n"
+	    "%%%s_ptr = OpAccessChain %%_ptr_StorageBuffer_uint %%gds %%int_0 %%%s_index\n",
+	    p, p, p, GetConstantUint(16u).c_str(), p, p, GetConstantUint(byte_offset).c_str(),
+	    p, p, GetConstantUint(2u).c_str(), p, p);
+}
+
 // ds_append/ds_consume on GDS: the wave adds (subtracts) the number of active
 // lanes once and every active lane receives the counter's previous value.
 bool Spirv::EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t index, String8* output) const
@@ -109,7 +123,6 @@ bool Spirv::EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t
 	const auto  zero   = GetConstantUint(0u);
 	const auto  one    = GetConstantUint(1u);
 	const auto  scope  = GetConstantUint(3u);
-	const auto  shift  = GetConstantUint(16u);
 	const auto  p      = String8::FromPrintf("wave_append_%u", index);
 
 	// Only the elected invocation contributes the count, so the other
@@ -121,16 +134,15 @@ bool Spirv::EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t
 	    "%%%s_chi = OpBitCount %%uint %%%s_hi\n"
 	    "%%%s_count = OpIAdd %%uint %%%s_clo %%%s_chi\n"
 	    "%%%s_elect = OpGroupNonUniformElect %%bool %%%s\n"
-	    "%%%s_value = OpSelect %%uint %%%s_elect %%%s_count %%%s\n"
-	    "%%%s_m0 = OpLoad %%uint %%m0\n"
-	    "%%%s_index = OpShiftRightLogical %%uint %%%s_m0 %%%s\n"
-	    "%%%s_ptr = OpAccessChain %%_ptr_StorageBuffer_uint %%gds %%int_0 %%%s_index\n"
+	    "%%%s_value = OpSelect %%uint %%%s_elect %%%s_count %%%s\n",
+	    p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), scope.c_str(),
+	    p.c_str(), p.c_str(), p.c_str(), zero.c_str());
+	source += EmitGdsCounterPointer(instruction.ds_offset, p);
+	source += String8::FromPrintf(
 	    "%%%s_old = %s %%uint %%%s_ptr %%%s %%%s %%%s_value\n"
 	    "%%%s_first = OpGroupNonUniformBroadcastFirst %%uint %%%s %%%s_old\n"
 	    "               OpMemoryBarrier %%%s %%uint_72\n",
-	    p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), p.c_str(), scope.c_str(),
-	    p.c_str(), p.c_str(), p.c_str(), zero.c_str(), p.c_str(), p.c_str(), p.c_str(), shift.c_str(), p.c_str(), p.c_str(), p.c_str(),
-	    atomic, p.c_str(), one.c_str(), zero.c_str(), p.c_str(), p.c_str(), scope.c_str(), p.c_str(), one.c_str());
+	    p.c_str(), atomic, p.c_str(), one.c_str(), zero.c_str(), p.c_str(), p.c_str(), scope.c_str(), p.c_str(), one.c_str());
 	for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
 	{
 		if (!EmitGuardedStore(*this, instruction.dst, bank, p + "_first", p + "_" + BankName(bank), &source))

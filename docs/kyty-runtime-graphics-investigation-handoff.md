@@ -421,6 +421,58 @@ against the same correct gameplay capture.
   Instrumentation must not gate on `GraphicsRunGetFrameNum()` here: it stays
   zero while native VideoOut presentation counts advance.
 
+  A hardware watchpoint on an argument count subsequently identifies GPU
+  storage-buffer write-back as its writer. A bounded binding probe locates a
+  one-invocation producer with four `DS_APPEND` instructions using the same
+  M0 descriptor and four distinct aligned byte offsets. The decoder loses
+  all four offsets, and both GDS emitters use M0's byte base directly as a
+  dword index. RDNA2 sections 3.7 and 12.13 establish the descriptor units
+  and base-plus-instruction-offset operation. The observed nonzero GDS
+  offsets also agree with independent implementations; do not infer that
+  they are zero from the compiler guidance in the ISA description.
+  Correcting the address calculation makes the four initial indirect group
+  counts all one. The first 120-second validation expires while creating
+  large compute pipelines, before a presentation; it is not runtime or
+  gameplay acceptance. Counter reset and sustained execution still need
+  observation before attributing the long-run Xe loss solely to this bug.
+  The longer bounded diagnostic run subsequently reaches presentations with
+  all four counters advancing separately by one per cycle. A scored capture
+  remains black. This verifies removal of the shared-counter error while
+  falsifying address correction alone as a cure for unbounded accumulation:
+  the observed DMA stream clears a different counter and never resets these
+  four. Both large pipeline creations eventually complete; the third takes
+  323 seconds in the driver.
+
+  Separate unresolved contract: `ShaderSpirvBuffer.cpp`'s ordinary
+  `Recompile_DsAppend_VdstGds` and consume emitter perform one atomic per
+  host invocation and do not honor EXEC. The paired compute-wave emitter
+  already counts architectural EXEC and broadcasts the old value. Audit
+  admission of multi-lane native and graphics-stage GDS programs before
+  claiming their wave semantics are correct; the address correction alone
+  does not fix that older limitation.
+
+  Cache qualification: the page-crossing shader load change in `d8950414`
+  did not advance `kShaderTranslatorVersion` from 56. A live cache audit
+  finds the same device-addressed compute program retained at 327,035
+  words in versions 51 through 56, while regeneration after invalidation
+  produces 334,074 words. The large increase includes the earlier
+  page-crossing loads, not just the GDS counter arithmetic. Previous cached
+  runtime observations therefore validate the host residency correction but
+  cannot validate the new shader-side split-load path. The captured current
+  module passes Vulkan 1.2 `spirv-val`; a host stack locates the subsequent
+  long stall inside `vkCreateComputePipelines`, before GPU submission.
+  Cache invalidation is required whenever emitted shader semantics change.
+
+  The reset producer is now identified: `GraphicsHleExports.cpp:99` binds
+  `sceAgcAcbDmaData` to the DCB implementation, whose ABI additionally takes
+  an engine selector before the destination. A live entry-register/stack
+  capture shows valid ACB immediate-zero clears of four bytes at the append
+  counters. The alias shifts the arguments and sees a one-byte request,
+  rejecting it before any PM4 packet is emitted. Independent implementations
+  agree on the ACB register/stack layout. Add the ACB-specific entry point
+  and route its decoded arguments through the existing DMA packet builder;
+  do not synthesize resets from dispatch counts or shader identity.
+
 - High VCC masks and vector bit counts (2026-09-29): a bounded shader trace
   identified a one-word `VCC_HI` compare/conditional-mask tuple in a native
   32-lane program. Treating the parser failure as proof of a wave64 dispatch

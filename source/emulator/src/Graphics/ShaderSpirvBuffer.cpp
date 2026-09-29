@@ -2137,14 +2137,12 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAppend_VdstGds)
 		// TODO() check EXEC
 
 		static const char* text = R"(
-        %t192_<index> = OpLoad %uint %m0
-        %t194_<index> = OpShiftRightLogical %uint %t192_<index> %int_16
-        %t196_<index> = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %t194_<index>
-        %t198_<index> = OpAtomicIAdd %uint %t196_<index> %uint_1 %uint_0 %uint_1
+        %t198_<index> = OpAtomicIAdd %uint %gds_counter_<index>_ptr %uint_1 %uint_0 %uint_1
         %t199_<index> = OpBitcast %float %t198_<index>
                OpStore %<dst> %t199_<index>
                OpMemoryBarrier %uint_1 %uint_72
 )";
+		*dst_source += spirv->EmitGdsCounterPointer(inst.ds_offset, "gds_counter_" + index_str);
 		*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
 
 		return true;
@@ -2172,14 +2170,12 @@ KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 		// TODO() check EXEC
 
 		static const char* text = R"(
-        %t192_<index> = OpLoad %uint %m0
-        %t194_<index> = OpShiftRightLogical %uint %t192_<index> %int_16
-        %t196_<index> = OpAccessChain %_ptr_StorageBuffer_uint %gds %int_0 %t194_<index>
-        %t198_<index> = OpAtomicISub %uint %t196_<index> %uint_1 %uint_0 %uint_1
+        %t198_<index> = OpAtomicISub %uint %gds_counter_<index>_ptr %uint_1 %uint_0 %uint_1
         %t199_<index> = OpBitcast %float %t198_<index>
                OpStore %<dst> %t199_<index>
                OpMemoryBarrier %uint_1 %uint_72
 )";
+		*dst_source += spirv->EmitGdsCounterPointer(inst.ds_offset, "gds_counter_" + index_str);
 		*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
 
 		return true;
