@@ -744,6 +744,7 @@ enum Format : uint64_t
 	// image_load has the same dynamic destination mask but carries up to three
 	// integer image coordinates rather than the scalar LOD used by resinfo.
 	VdataVaddr3StDmask                  = FormatDefine({DA, S0A3, S1A8, MimgDmask}),
+	VdataVaddr4StDmask                  = FormatDefine({DA, S0A4, S1A8, MimgDmask}),
 	Vdata4VaddrSvSoffsIdxen             = FormatDefine({DA4, S0, S1A4, S2, Idxen}),
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
@@ -857,6 +858,8 @@ struct ShaderInstruction
 	// MIMG DIM field. It defines the instruction's coordinate contract and is
 	// independent from the set of descriptors bound by the pipeline.
 	uint8_t mimg_dimension = 0;
+	// IMAGE_LOAD_MIP fetches the resource-view level carried after the coordinates.
+	bool mimg_explicit_lod = false;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;

@@ -70,12 +70,18 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	switch (opcode)
 	{
 		case 0x00:
+		case 0x01:
+		{
 			EXIT_NOT_IMPLEMENTED(dmask == 0);
+			const bool mip = opcode == 0x01u;
+			EXIT_NOT_IMPLEMENTED(mip && dim != 1u && dim != 2u && dim != 5u);
 			inst.type        = ShaderInstructionType::ImageLoad;
-			inst.src[0].size = 3;
+			inst.mimg_explicit_lod = mip;
+			inst.src[0].size = mip && dim != 1u ? 4 : 3;
 			inst.src[1].size = 8;
 			inst.src_num     = 2;
-			inst.format      = ShaderInstructionFormat::VdataVaddr3StDmask;
+			inst.format      = mip && dim != 1u ? ShaderInstructionFormat::VdataVaddr4StDmask
+			                                     : ShaderInstructionFormat::VdataVaddr3StDmask;
 			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
 			inst.dst.size    = 0;
 			for (uint32_t component = 0; component < 4; component++)
@@ -83,7 +89,7 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				inst.dst.size += static_cast<int>((dmask >> component) & 1u);
 			}
 			break;
-		case 0x01: KYTY_NI("image_load_mip"); break;
+		}
 		case 0x02: KYTY_NI("image_load_pck"); break;
 		case 0x03: KYTY_NI("image_load_pck_sgn"); break;
 		case 0x04: KYTY_NI("image_load_mip_pck"); break;

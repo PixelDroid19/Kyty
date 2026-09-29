@@ -25,6 +25,8 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
+
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -4291,6 +4293,45 @@ TEST(EmulatorGraphicsPackets, DerivesSampledImageShapeFromMimgDimension)
 	EXPECT_TRUE(array_use.sampled_shape_known);
 	EXPECT_FALSE(array_use.sampled_shape_conflict);
 	EXPECT_EQ(array_use.sampled_shape, ShaderGen5SampledTextureShape::TwoDimensionalArray);
+}
+
+TEST(EmulatorGraphicsPackets, ImageLoadMipCarriesExplicitLevelToImageFetch)
+{
+	const uint32_t word0 = (0x3cu << 26u) | (0x01u << 18u) | (0x03u << 8u) | (1u << 3u);
+	const uint32_t word1 = (8u << 16u) | (8u << 8u) | 4u;
+	const uint32_t shader[] = {word0, word1, 0xbf810000u};
+
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	ShaderParse(shader, &code);
+	ASSERT_EQ(code.GetInstructions().Size(), 2u);
+	const auto& inst = code.GetInstructions().At(0);
+	EXPECT_EQ(inst.type, ShaderInstructionType::ImageLoad);
+	EXPECT_TRUE(inst.mimg_explicit_lod);
+	EXPECT_EQ(inst.format, ShaderInstructionFormat::VdataVaddr3StDmask);
+	EXPECT_EQ(inst.src[0].size, 3);
+	EXPECT_EQ(inst.dst.size, 2);
+
+	ShaderPixelInputInfo input {};
+	input.bind.push_constant_size                   = 48;
+	input.bind.textures2D.textures_num              = 1;
+	input.bind.textures2D.textures2d_sampled_num    = 1;
+	input.bind.textures2D.desc[0].start_register    = 32;
+	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+	EXPECT_NE(source.FindIndex("%image_load_lod_f_0 = OpLoad %float %v6"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpImageFetch %v4float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex(" Lod %image_load_lod_0"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	ASSERT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
 }
 
 // image_sample (MIMG op 0x20) with single-channel dmasks — captured post-Play

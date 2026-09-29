@@ -96,6 +96,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_Exp_PrimVsrc0OffOffOffDone,                 ShaderInstructionType::Exp,                 ShaderInstructionFormat::PrimVsrc0OffOffOffDone,         {""}},
 
 	{Recompile_ImageLoad_VdataVaddr3StDmask,                ShaderInstructionType::ImageLoad,           ShaderInstructionFormat::VdataVaddr3StDmask,             {""}},
+	{Recompile_ImageLoad_VdataVaddr3StDmask,                ShaderInstructionType::ImageLoad,           ShaderInstructionFormat::VdataVaddr4StDmask,             {""}},
 	{Recompile_ImageLoad_VdataVaddr3StDmask,                ShaderInstructionType::ImageLoad,           ShaderInstructionFormat::Vdata4Vaddr3StDmaskF,           {""}},
 	{Recompile_ImageGetResinfo_VdataVaddrStDmask,           ShaderInstructionType::ImageGetResinfo,     ShaderInstructionFormat::VdataVaddrStDmask,              {""}},
 	{Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask,      ShaderInstructionType::ImageGather4,        ShaderInstructionFormat::Vdata4Vaddr3StSsMimgDmask,      {""}},
