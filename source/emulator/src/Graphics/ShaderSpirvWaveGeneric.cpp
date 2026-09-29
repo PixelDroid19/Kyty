@@ -265,6 +265,9 @@ bool Spirv::EmitComputeWaveGenericInstruction(const RecompilerFunc* func, const 
 	{
 		return false;
 	}
+	// Image templates store native VGPR names. Guard those stores while they
+	// are still recognizable, then rewrite each guard to its bank's EXEC bit.
+	native = GuardImageDestinationStores(native, instruction, index);
 	const std::string text(native.c_str());
 	const auto        defined = DefinedIds(text);
 	const auto        zero    = GetConstantUint(0u);

@@ -2483,7 +2483,7 @@ void Spirv::WriteInstructions()
 			     static_cast<unsigned>(m_code.GetType()), static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc,
 			     sampled_2d, sampled_array, sampled_3d);
 		}
-		if (IsImageInstruction(inst))
+		if (IsImageInstruction(inst) && !UsesComputeWaveBanks())
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}
