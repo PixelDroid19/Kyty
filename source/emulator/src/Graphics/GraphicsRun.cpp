@@ -358,6 +358,7 @@ void CommandProcessor::Reset()
 	m_sh_ctx.Reset();
 	m_ucfg.Reset();
 	m_ctx.Reset();
+	m_saved_ctx.reset();
 	m_index_type_and_size = 0;
 	m_index_buffer_size   = 0;
 	m_index_base_addr     = 0;
@@ -365,6 +366,31 @@ void CommandProcessor::Reset()
 	m_synthetic_occlusion_counter = 0;
 
 	std::memset(m_const_ram, 0, sizeof(m_const_ram));
+}
+
+void CommandProcessor::ApplyContextState(uint32_t operation)
+{
+	// Only CX registers participate; SH/UCONFIG and queue execution state
+	// remain live while a utility temporarily replaces the drawing context.
+	switch (operation)
+	{
+		case 0: m_ctx.Reset(); break;
+		case 1:
+		case 3:
+			EXIT_IF(m_saved_ctx.has_value());
+			m_saved_ctx.emplace(m_ctx);
+			if (operation == 3)
+			{
+				m_ctx.Reset();
+			}
+			break;
+		case 2:
+			EXIT_IF(!m_saved_ctx.has_value());
+			m_ctx = *m_saved_ctx;
+			m_saved_ctx.reset();
+			break;
+		default: EXIT("invalid context-state operation: %" PRIu32 "\n", operation);
+	}
 }
 
 void CommandProcessor::BufferInit()

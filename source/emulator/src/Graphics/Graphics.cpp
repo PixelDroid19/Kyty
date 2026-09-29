@@ -4076,24 +4076,67 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	return cmd;
 }
 
-// Gen5 NID qj7QZpgr9Uw: append a single Type-2 PM4 pad dword (0x80000000).
-// Observed after compute/context setup; CP treats Type-2 as header-only filler.
-uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf)
+struct ContextStatePacketLayout
+{
+	uint32_t segment_dw[6];
+	uint32_t reserve_before;
+};
+
+// The save/restore sequence reserves 22 dwords together. Preserve its
+// callback boundaries and the complete helper size around the HLE operation.
+static constexpr ContextStatePacketLayout g_context_state_layout[] = {
+    {{5, 0, 0, 0, 0, 0}, 6}, // clear
+    {{5, 8, 9, 3, 2, 0}, 0}, // push
+    {{3, 5, 8, 9, 2, 0}, 1}, // pop
+    {{5, 8, 9, 3, 2, 5}, 0}, // push-clear
+};
+
+uint64_t KYTY_SYSV_ABI GraphicsDcbContextStateOpGetSize(uint32_t operation)
 {
 	PRINT_NAME();
+	if (operation >= std::size(g_context_state_layout))
+	{
+		return 0;
+	}
+	uint64_t dwords = 0;
+	for (auto count: g_context_state_layout[operation].segment_dw)
+	{
+		dwords += count;
+	}
+	return dwords * sizeof(uint32_t);
+}
 
-	if (buf == nullptr)
+uint32_t* KYTY_SYSV_ABI GraphicsDcbContextStateOp(CommandBuffer* buf, uint32_t operation)
+{
+	PRINT_NAME();
+	if (buf == nullptr || operation >= std::size(g_context_state_layout))
 	{
 		return nullptr;
 	}
 
-		auto* cmd = buf->AllocateDW(1);
-	if (cmd == nullptr)
+	const auto& layout = g_context_state_layout[operation];
+	uint32_t* first = nullptr;
+	for (uint32_t i = 0; i < std::size(layout.segment_dw) && layout.segment_dw[i] != 0; i++)
 	{
-		return nullptr;
+		if (i == layout.reserve_before && !buf->ReserveDW(22))
+		{
+			return nullptr;
+		}
+		const auto count = layout.segment_dw[i];
+		auto* packet = buf->AllocateDW(count);
+		if (packet == nullptr)
+		{
+			return nullptr;
+		}
+		std::fill_n(packet, count, 0u);
+		packet[0] = KYTY_PM4(count, Pm4::IT_NOP, i == 0 ? Pm4::R_CONTEXT_STATE : Pm4::R_ZERO);
+		if (i == 0)
+		{
+			first = packet;
+			packet[1] = operation;
+		}
 	}
-	cmd[0] = 0x80000000u;
-	return cmd;
+	return first;
 }
 
 // sceAgcDcbSetBaseIndirectArgs: IT_SET_BASE for indirect argument buffers.

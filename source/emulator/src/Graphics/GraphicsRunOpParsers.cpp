@@ -560,6 +560,22 @@ KYTY_CP_OP_PARSER(cp_op_clear_state)
 	return 1;
 }
 
+KYTY_CP_OP_PARSER(cp_op_context_state)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_IF(dw < 3);
+	const auto operation = buffer[0];
+	const uint32_t packet_dw = operation == 2 ? 3 : 5;
+	EXIT_IF(operation > 3 || dw < packet_dw || cmd_id != KYTY_PM4(packet_dw, Pm4::IT_NOP, Pm4::R_CONTEXT_STATE));
+	for (uint32_t i = 1; i < packet_dw - 1; i++)
+	{
+		EXIT_IF(buffer[i] != 0);
+	}
+	cp->ApplyContextState(operation);
+	return packet_dw - 1;
+}
+
 KYTY_CP_OP_PARSER(cp_op_dump_const_ram)
 {
 	KYTY_PROFILER_FUNCTION();

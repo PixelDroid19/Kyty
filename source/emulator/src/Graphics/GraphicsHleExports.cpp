@@ -148,7 +148,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("KT-hTp-Ch14", Gen5::GraphicsAcbAcquireMem);
 	LIB_FUNC("i1jyy49AjXU", Gen5::GraphicsDcbWriteData);
 	LIB_FUNC("eZ4+17OQz4Q", Gen5::GraphicsAcbWriteData);
-	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsCbType2Pad);
+	LIB_FUNC("qj7QZpgr9Uw", Gen5::GraphicsDcbContextStateOp);
+	LIB_FUNC("H6vHS5cidSA", Gen5::GraphicsDcbContextStateOpGetSize);
 	LIB_FUNC("RmaJwLtc8rY", Gen5::GraphicsDcbSetBaseIndirectArgs);
 	LIB_FUNC("CtB+A9-VxO0", Gen5::GraphicsDcbDispatchIndirect);
 	LIB_FUNC("j3EtxFkSIhQ", Gen5::GraphicsAcbDispatchIndirect);

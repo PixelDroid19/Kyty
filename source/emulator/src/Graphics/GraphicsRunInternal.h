@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -148,6 +149,7 @@ KYTY_HW_UC_PARSER(hw_uc_set_primitive_type);
 // and is registered into the jump tables at startup.
 KYTY_CP_OP_PARSER(cp_op_acquire_mem);
 KYTY_CP_OP_PARSER(cp_op_clear_state);
+KYTY_CP_OP_PARSER(cp_op_context_state);
 KYTY_CP_OP_PARSER(cp_op_custom_dma_data);
 KYTY_CP_OP_PARSER(cp_op_dispatch_direct);
 KYTY_CP_OP_PARSER(cp_op_dispatch_indirect);
@@ -245,6 +247,7 @@ public:
 	KYTY_CLASS_NO_COPY(CommandProcessor);
 
 	void Reset();
+	void ApplyContextState(uint32_t operation);
 
 	void               BufferInit();
 	SubmissionId       BufferFlush();
@@ -367,6 +370,7 @@ private:
 	};
 
 	HW::Context      m_ctx;
+	std::optional<HW::Context> m_saved_ctx;
 	HW::UserConfig   m_ucfg;
 	HW::Shader       m_sh_ctx;
 	HW::UserSgprType m_user_data_marker    = HW::UserSgprType::Unknown;

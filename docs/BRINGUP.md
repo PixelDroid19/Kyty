@@ -442,11 +442,22 @@ instruction.
 
 The guest surrounds its metadata helper with context-state operations three
 and two. The import resolves to `GraphicsCbType2Pad` in `Graphics.cpp:4079`,
-which drops the operation argument and emits one padding word. The native
-`IT_CLEAR_STATE` parser in `GraphicsRunOpParsers.cpp:547` also resets for every
-operation. These are producer and decoder defects: push-clear and pop must
-save and restore the context bank. Shader and UCONFIG banks are separate.
-The corrected contract still requires a live strict comparison.
+which dropped the operation argument and emitted one padding word. The
+corrected HLE encodes clear/push/pop/push-clear and retains the helper's
+allocation boundaries and byte-size query. The processor owns one saved CX
+bank; shader and UCONFIG banks remain separate. In the strict comparison,
+twenty pops restore the complete saved context byte-for-byte, including a
+mode-six utility returning to normal mode one. The run passes the old
+35-present failure. This verifies context restoration, with the pending
+expanded-surface DCC handler present in that comparison; it is not gameplay.
+
+The first comparison also exposes an older, separate reset-queue encoding
+problem in `Graphics.cpp:3424`: it writes the third argument's low four bits
+as a native `CLEAR_STATE` operation. The live value thirteen is outside the
+hardware clear/push/pop/push-clear range. Tightening the native packet decoder
+therefore stops earlier at queue initialization. Its existing behavior is
+preserved for the context-helper comparison; trace reset-queue arguments and
+its actual packet contract before correcting that encoder and decoder.
 
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 

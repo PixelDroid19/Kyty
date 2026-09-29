@@ -1153,6 +1153,7 @@ void graphics_init_jmp_tables()
 	g_cp_op_custom_func[Pm4::R_FLIP]             = cp_op_flip;
 	g_cp_op_custom_func[Pm4::R_RELEASE_MEM]      = cp_op_release_mem;
 	g_cp_op_custom_func[Pm4::R_DMA_DATA]         = cp_op_custom_dma_data;
+	g_cp_op_custom_func[Pm4::R_CONTEXT_STATE]    = cp_op_context_state;
 
 	graphics_init_jmp_tables_cx_indirect();
 	graphics_init_jmp_tables_sh_indirect();

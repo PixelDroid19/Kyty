@@ -1978,8 +1978,7 @@ TEST(EmulatorGraphicsPackets, EncodesDrawIndexAutoShaderInputModifier)
 	EXPECT_EQ(cmd[6], 0u);
 }
 
-// Gen5 type-2 pad (NID qj7QZpgr9Uw): single 0x80000000 dword.
-TEST(EmulatorGraphicsPackets, EncodesCbType2Pad)
+TEST(EmulatorGraphicsPackets, EncodesDcbContextClear)
 {
 	struct AlignasCommandBuffer
 	{
@@ -2006,10 +2005,11 @@ TEST(EmulatorGraphicsPackets, EncodesCbType2Pad)
 	cb.cursor_up   = storage;
 	cb.cursor_down = storage + 8;
 
-	uint32_t* cmd = Gen5::GraphicsCbType2Pad(reinterpret_cast<Gen5::CommandBuffer*>(&cb));
+	uint32_t* cmd = Gen5::GraphicsDcbContextStateOp(reinterpret_cast<Gen5::CommandBuffer*>(&cb), 0);
 	ASSERT_NE(cmd, nullptr);
-	EXPECT_EQ(cmd[0], 0x80000000u);
-	EXPECT_EQ(cb.cursor_up, storage + 1);
+	EXPECT_EQ(cmd[0], KYTY_PM4(5, Pm4::IT_NOP, Pm4::R_CONTEXT_STATE));
+	EXPECT_EQ(cmd[1], 0u);
+	EXPECT_EQ(cb.cursor_up, storage + 5);
 }
 
 // sceAgcDcbSetBaseIndirectArgs: IT_SET_BASE with 8-byte-aligned address.

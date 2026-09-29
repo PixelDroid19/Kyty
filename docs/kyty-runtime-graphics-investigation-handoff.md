@@ -451,10 +451,14 @@ against the same correct gameplay capture.
   write while leaving the same DCC failure. Neither the blend lookup nor
   upper color-control type metadata explains this stale mode. A subsequent
   guest-call trace finds context operations three and two around the utility;
-  their HLE import instead emits padding and ignores the operation. Implement
-  context push-clear/pop in the producer and shared packet decoder, then
-  repeat the strict comparison. Do not use shader-pattern dispatch or an
-  invented target backing to compensate for this missing restoration.
+  their HLE import emitted padding and ignored the operation. Correcting the
+  context helper and its packet handler restores twenty saved contexts
+  byte-for-byte, including mode six returning to ordinary mode one, and
+  passes present 35 with expanded-surface DCC handling. This closes missing
+  context restoration as the stale-mode cause. A separate queue-reset helper
+  still encodes a non-hardware operation value; its contract is recorded in
+  the bring-up manual. No shader-pattern dispatch or fabricated backing is
+  needed for the observed utility.
 
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying

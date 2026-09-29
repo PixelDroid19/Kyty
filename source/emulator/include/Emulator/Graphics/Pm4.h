@@ -104,6 +104,7 @@ constexpr uint32_t R_RELEASE_MEM      = 0x18;
 // Custom AGC DmaData builder (sceAgcDcbDmaData / sceAgcAcbDmaData). Packet is
 // IT_NOP + this register; CP copies guest bytes when src/dst are memory.
 constexpr uint32_t R_DMA_DATA         = 0x19;
+constexpr uint32_t R_CONTEXT_STATE    = 0x1A;
 
 constexpr uint32_t R_NUM = 0x3F + 1;
 
