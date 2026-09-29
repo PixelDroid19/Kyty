@@ -476,6 +476,24 @@ therefore stops earlier at queue initialization. Its existing behavior is
 preserved for the context-helper comparison; trace reset-queue arguments and
 its actual packet contract before correcting that encoder and decoder.
 
+### Title-transition admission (2026-09-29, not gameplay)
+
+The context-restored Silent/Native run reaches the title transition after
+15 minutes 49 seconds. Two threads stop there. The 147-instruction compute
+program now decodes scalar absolute value correctly, then fails in
+`ShaderComputeWaveAnalysis.cpp:528`: the last mapped EUD load precedes two
+separate ordinary writes to the former pointer registers. Both words are
+replaced before later arithmetic reads. The prior lifetime proof rejected
+any partial write and could not accumulate these definite per-word writes.
+The correction tracks possible and definite word masks across the existing
+control-flow edges. It retains rejection of mapped loads after either original
+pointer word may have changed and of ordinary reads lacking a definite write.
+
+The original and transformed programs now pass admission. With the subsequent
+image-descriptor correction, the complete module passes Vulkan 1.2 SPIR-V
+validation, and the recorded dispatch's queue advances beyond its submission.
+Focused branch, partial-write and back-edge tests remain deferred as requested.
+
 ### Integer value references (2026-09-29)
 
 A missing integer getter in `LibJson2.cpp` stops the title-transition caller.
@@ -1421,10 +1439,10 @@ both banks of two waves, but supplies its mapping manually: it proves mapped
 SPIR-V lowering, not production mapping or a guest dispatch. The collector
 diagnostic and its focused mapping tests provide distinct provenance evidence.
 Because the EUD base pair is not initialized as ordinary SGPR data, paired
-analysis rejects ordinary reads until every control-flow path writes both
-words. It rejects mapped EUD loads after any path writes either word, and
-rejects partial writes outright. A later full-pair write may reuse those
-registers once mapped EUD loads are dead. The gate keeps combined SGPR plus
+analysis rejects each ordinary word read until every control-flow path writes
+that word. It rejects mapped EUD loads after any path writes either word.
+The later per-word lifetime correction permits separate ordinary writes once
+mapped EUD loads are dead. The gate keeps combined SGPR plus
 `smem_imm_offset` loads rejected; `recompile_sload_from_extended` does not add
 that extra offset. Unrepresented SMEM reserved bits still require a fail-closed
 decoder check. A later EUD load at PC `0x490` lacks a verified mapping; inspect

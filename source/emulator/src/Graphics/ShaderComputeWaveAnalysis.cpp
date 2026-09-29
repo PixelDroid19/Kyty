@@ -323,70 +323,52 @@ bool IsBarrierInstruction(const ShaderInstruction& instruction)
 	return true;
 }
 
-uint8_t ComputeWaveOperandSgprPairWriteMask(const ShaderOperand& destination, int pair_start)
+uint8_t ComputeWaveOperandSgprPairMask(const ShaderOperand& operand, int pair_start)
 {
-	if (destination.type != ShaderOperandType::Sgpr)
+	if (operand.type != ShaderOperandType::Sgpr)
 	{
 		return 0;
 	}
-	if (!ComputeWaveRegisterRangeIsValid(destination.register_id, destination.size, kMaxSgpr))
+	if (!ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxSgpr))
 	{
 		return 0xffu;
 	}
-	return static_cast<uint8_t>((ShaderOperandOverlapsSgprRange(destination, pair_start, 1) ? 1u : 0u) |
-	                            (ShaderOperandOverlapsSgprRange(destination, pair_start + 1, 1) ? 2u : 0u));
+	return static_cast<uint8_t>((ShaderOperandOverlapsSgprRange(operand, pair_start, 1) ? 1u : 0u) |
+	                            (ShaderOperandOverlapsSgprRange(operand, pair_start + 1, 1) ? 2u : 0u));
 }
 
 uint8_t ComputeWaveInstructionSgprPairWriteMask(const ShaderInstruction& instruction, int pair_start)
 {
-	return static_cast<uint8_t>(ComputeWaveOperandSgprPairWriteMask(instruction.dst, pair_start) |
-	                            ComputeWaveOperandSgprPairWriteMask(instruction.dst2, pair_start));
+	return static_cast<uint8_t>(ComputeWaveOperandSgprPairMask(instruction.dst, pair_start) |
+	                            ComputeWaveOperandSgprPairMask(instruction.dst2, pair_start));
 }
 
-bool ComputeWaveOperandMayReadSgprPair(const ShaderOperand& source, int pair_start)
-{
-	if (source.type != ShaderOperandType::Sgpr)
-	{
-		return false;
-	}
-	if (!ComputeWaveRegisterRangeIsValid(source.register_id, source.size, kMaxSgpr))
-	{
-		return true;
-	}
-	return ShaderOperandOverlapsSgprRange(source, pair_start, 2);
-}
-
-bool ComputeWaveInstructionMayReadEudBase(const ShaderInstruction& instruction, int pair_start,
-	                                      const ShaderBindResources& bind)
+uint8_t ComputeWaveInstructionEudBaseReadMask(const ShaderInstruction& instruction, int pair_start,
+                                             const ShaderBindResources& bind)
 {
 	if (instruction.src_num < 0 || instruction.src_num > 4 || instruction.mimg_address_num < 0 ||
 	    instruction.mimg_address_num > 13)
 	{
-		return true;
+		return 0xffu;
 	}
 	// Scalar loads through the extended pointer resolve through the native
 	// per-PC EUD mapping; the emitter fails closed when a PC is unmapped.
 	const auto name        = Core::EnumName8(instruction.type);
 	const bool mapped_load = ShaderPairedEudStorageLoadSupported(instruction, bind) || name.StartsWith("SLoad");
+	uint8_t read_mask       = 0;
 	for (int source = 0; source < instruction.src_num; ++source)
 	{
 		if (mapped_load && source == 0)
 		{
 			continue;
 		}
-		if (ComputeWaveOperandMayReadSgprPair(instruction.src[source], pair_start))
-		{
-			return true;
-		}
+		read_mask |= ComputeWaveOperandSgprPairMask(instruction.src[source], pair_start);
 	}
 	for (int address = 0; address < instruction.mimg_address_num; ++address)
 	{
-		if (ComputeWaveOperandMayReadSgprPair(instruction.mimg_address[address], pair_start))
-		{
-			return true;
-		}
+		read_mask |= ComputeWaveOperandSgprPairMask(instruction.mimg_address[address], pair_start);
 	}
-	return false;
+	return read_mask;
 }
 
 bool ComputeWaveInstructionHasInvalidSgprSource(const ShaderInstruction& instruction)
@@ -418,18 +400,18 @@ bool ComputeWaveInstructionHasInvalidSgprSource(const ShaderInstruction& instruc
 }
 
 // The EUD pointer is available through per-PC mappings until an instruction
-// reuses its SGPR pair. A normal read is safe only when every path to it has
-// written both words; a mapped S_LOAD is safe only when no path has written
-// either. Branch joins and back edges are part of this proof.
+// reuses its SGPR pair. Each ordinary word read needs a prior write on every
+// path; those writes may be separate instructions. A mapped S_LOAD still
+// requires both original pointer words. Branch joins intersect definite writes.
 ShaderComputeWaveAnalysisResult AnalyzeExtendedBaseLifetime(const ShaderCode& code, const ShaderBindResources& bind,
                                                              int pair_start)
 {
 	const auto& instructions = code.GetInstructions();
 	struct State
 	{
-		bool reachable   = false;
-		bool may_reused  = false;
-		bool must_reused = false;
+		bool    reachable    = false;
+		uint8_t may_written  = 0;
+		uint8_t must_written = 0;
 	};
 	std::unordered_map<uint32_t, uint32_t> instruction_index;
 	instruction_index.reserve(instructions.Size());
@@ -459,12 +441,12 @@ ShaderComputeWaveAnalysisResult AnalyzeExtendedBaseLifetime(const ShaderCode& co
 			work_list.push_back(successor);
 			return true;
 		}
-		const bool may  = incoming.may_reused || outgoing.may_reused;
-		const bool must = incoming.must_reused && outgoing.must_reused;
-		if (may != incoming.may_reused || must != incoming.must_reused)
+		const uint8_t may  = incoming.may_written | outgoing.may_written;
+		const uint8_t must = incoming.must_written & outgoing.must_written;
+		if (may != incoming.may_written || must != incoming.must_written)
 		{
-			incoming.may_reused  = may;
-			incoming.must_reused = must;
+			incoming.may_written  = may;
+			incoming.must_written = must;
 			work_list.push_back(successor);
 		}
 		return true;
@@ -476,11 +458,12 @@ ShaderComputeWaveAnalysisResult AnalyzeExtendedBaseLifetime(const ShaderCode& co
 		const auto& instruction = instructions.At(index);
 		State outgoing = states[index];
 		const uint8_t written = ComputeWaveInstructionSgprPairWriteMask(instruction, pair_start);
-		if (written != 0)
+		if (written == 0xffu)
 		{
-			outgoing.may_reused = true;
-			outgoing.must_reused = written == 3u;
+			return {false, instruction.pc, "paired extended pointer base has an invalid SGPR destination"};
 		}
+		outgoing.may_written |= written;
+		outgoing.must_written |= written;
 		if (ShaderInstructionHasStaticBranchTarget(instruction.type))
 		{
 			const auto target = instruction_index.find(ShaderLabel(instruction).GetDst());
@@ -508,24 +491,25 @@ ShaderComputeWaveAnalysisResult AnalyzeExtendedBaseLifetime(const ShaderCode& co
 		const auto& state = states[index];
 		const auto name = Core::EnumName8(instruction.type);
 		const bool mapped_load = instruction.src_num > 0 &&
-		                         ComputeWaveOperandMayReadSgprPair(instruction.src[0], pair_start) &&
+		                         ComputeWaveOperandSgprPairMask(instruction.src[0], pair_start) != 0u &&
 		                         (ShaderPairedEudStorageLoadSupported(instruction, bind) || name.StartsWith("SLoad"));
 		if (ComputeWaveInstructionHasInvalidSgprSource(instruction))
 		{
 			return {false, instruction.pc, "paired extended pointer base has an invalid SGPR source"};
 		}
-		if (mapped_load && (!state.reachable || state.may_reused))
+		if (mapped_load && (!state.reachable || state.may_written != 0u))
 		{
 			return {false, instruction.pc, "paired extended pointer base may have changed before a mapped S_LOAD"};
 		}
-		if (ComputeWaveInstructionMayReadEudBase(instruction, pair_start, bind) && (!state.reachable || !state.must_reused))
+		const auto read_mask = ComputeWaveInstructionEudBaseReadMask(instruction, pair_start, bind);
+		if (read_mask != 0u && (!state.reachable || (read_mask & state.must_written) != read_mask))
 		{
-			return {false, instruction.pc, "paired extended pointer base SGPR pair is read before a full ordinary write"};
+			return {false, instruction.pc, "paired extended pointer base word is read before a definite ordinary write"};
 		}
 		const uint8_t written = ComputeWaveInstructionSgprPairWriteMask(instruction, pair_start);
-		if (written != 0u && written != 3u)
+		if (written == 0xffu)
 		{
-			return {false, instruction.pc, "paired extended pointer base SGPR pair is only partly or invalidly overwritten"};
+			return {false, instruction.pc, "paired extended pointer base has an invalid SGPR destination"};
 		}
 	}
 	return {true, 0, {}};
