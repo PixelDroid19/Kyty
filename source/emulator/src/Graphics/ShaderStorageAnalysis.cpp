@@ -1002,6 +1002,12 @@ ShaderTileValue ShaderTileEvaluateInstruction(const ShaderInstruction& inst, con
 	}
 	switch (inst.type)
 	{
+		case ShaderInstructionType::VLshlrevB32:
+			if (!ShaderTileLaneOnly(a) || !ShaderTileLaneOnly(b))
+			{
+				return result;
+			}
+			break;
 		case ShaderInstructionType::VLshrrevB32:
 			if (!ShaderTileLaneOnly(a))
 			{
@@ -1058,6 +1064,15 @@ ShaderTileValue ShaderTileEvaluateInstruction(const ShaderInstruction& inst, con
 			result.group_x = a.group_x + b.group_x;
 			result.group_y = a.group_y + b.group_y;
 			break;
+		case ShaderInstructionType::VAdd3U32:
+			if (!c.valid || a.group_x + b.group_x + c.group_x > k_max_tile_extent ||
+			    a.group_y + b.group_y + c.group_y > k_max_tile_extent)
+			{
+				return result;
+			}
+			result.group_x = a.group_x + b.group_x + c.group_x;
+			result.group_y = a.group_y + b.group_y + c.group_y;
+			break;
 		default: return result;
 	}
 	for (uint32_t lane = 0; lane < lane_count; ++lane)
@@ -1067,6 +1082,7 @@ ShaderTileValue ShaderTileEvaluateInstruction(const ShaderInstruction& inst, con
 		const uint32_t z = c.lane[lane];
 		switch (inst.type)
 		{
+			case ShaderInstructionType::VLshlrevB32: result.lane[lane] = y << (x & 31u); break;
 			case ShaderInstructionType::VLshrrevB32: result.lane[lane] = y >> (x & 31u); break;
 			case ShaderInstructionType::VBfeU32:
 				if ((z & 31u) == 0u) { return {}; }
@@ -1078,6 +1094,10 @@ ShaderTileValue ShaderTileEvaluateInstruction(const ShaderInstruction& inst, con
 			case ShaderInstructionType::VAddI32:
 				if (static_cast<uint64_t>(x) + y > std::numeric_limits<uint32_t>::max()) { return {}; }
 				result.lane[lane] = x + y;
+				break;
+			case ShaderInstructionType::VAdd3U32:
+				if (static_cast<uint64_t>(x) + y + z > std::numeric_limits<uint32_t>::max()) { return {}; }
+				result.lane[lane] = x + y + z;
 				break;
 			default: return {};
 		}
@@ -1434,6 +1454,244 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageBoundedGridCoverage(cons
 	return {threads[0], threads[1], bounds_index};
 }
 
+void ShaderTileInvalidateVgpr(const ShaderOperand& destination, std::array<ShaderTileValue, 256>* registers);
+
+int ShaderPairedSplitImageIndex(const ShaderInstruction& inst, const ShaderCode& code,
+                               const ShaderBindResources& bind)
+{
+	const int mapped = ShaderTileImageResourceIndex(inst, bind);
+	if (mapped != -1)
+	{
+		return mapped;
+	}
+	if (inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 8)
+	{
+		return -2;
+	}
+	const int reg = inst.src[1].register_id;
+	for (const auto& earlier: code.GetInstructions())
+	{
+		if (earlier.pc >= inst.pc) { break; }
+		if (ShaderOperandOverlapsSgprRange(earlier.dst, reg, 8) ||
+		    ShaderOperandOverlapsSgprRange(earlier.dst2, reg, 8))
+		{
+			return -2;
+		}
+	}
+	int direct = -1;
+	for (int index = 0; index < bind.textures2D.textures_num; ++index)
+	{
+		const auto& descriptor = bind.textures2D.desc[index];
+		if (descriptor.dynamic_sload || descriptor.start_register != reg) { continue; }
+		if (direct >= 0) { return -2; }
+		direct = index;
+	}
+	return direct;
+}
+
+bool ShaderPairedSplitPlainCompare(const ShaderInstruction& inst)
+{
+	const bool type_allowed = inst.type == ShaderInstructionType::VCmpLtF32 ||
+	                          inst.type == ShaderInstructionType::VCmpEqF32 ||
+	                          inst.type == ShaderInstructionType::VCmpEqU32 ||
+	                          inst.type == ShaderInstructionType::VCmpGeU32;
+	return type_allowed && inst.dst.type != ShaderOperandType::ExecLo && inst.dst.type != ShaderOperandType::ExecHi &&
+	       inst.dst2.type != ShaderOperandType::ExecLo && inst.dst2.type != ShaderOperandType::ExecHi;
+}
+
+struct ShaderPairedSplitFlow
+{
+	int early_branch  = -1;
+	int split         = -1;
+	int first_branch  = -1;
+	int first_store   = -1;
+	int invert        = -1;
+	int second_branch = -1;
+	int second_store  = -1;
+};
+
+bool ShaderPairedSplitFindFlow(const ShaderCode& code, const ShaderBindResources& bind, int texture_index,
+                              uint8_t full_mask, ShaderPairedSplitFlow* flow)
+{
+	EXIT_IF(flow == nullptr);
+	const auto& instructions = code.GetInstructions();
+	if (instructions.Size() < 8 || instructions.At(instructions.Size() - 1).type != ShaderInstructionType::SEndpgm)
+	{
+		return false;
+	}
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (index > 0 && inst.pc <= instructions.At(index - 1).pc) { return false; }
+		if (inst.type == ShaderInstructionType::SCbranchVccz)
+		{
+			if (flow->early_branch >= 0) { return false; }
+			flow->early_branch = static_cast<int>(index);
+		} else if (inst.type == ShaderInstructionType::VCmpxNeqF32)
+		{
+			if (flow->split >= 0 || inst.src_num != 2) { return false; }
+			flow->split = static_cast<int>(index);
+		} else if (inst.type == ShaderInstructionType::SCbranchExecz)
+		{
+			if (flow->first_branch < 0) { flow->first_branch = static_cast<int>(index); }
+			else if (flow->second_branch < 0) { flow->second_branch = static_cast<int>(index); }
+			else { return false; }
+		} else if (inst.type == ShaderInstructionType::SNotB64 && inst.dst.type == ShaderOperandType::ExecLo)
+		{
+			if (flow->invert >= 0 || inst.src_num != 1 ||
+			    !ShaderBoundedGridPlainRegister(inst.dst, ShaderOperandType::ExecLo, 0, 2) ||
+			    !ShaderBoundedGridPlainRegister(inst.src[0], ShaderOperandType::ExecLo, 0, 2))
+			{
+				return false;
+			}
+			flow->invert = static_cast<int>(index);
+		} else if (inst.type == ShaderInstructionType::SEndpgm)
+		{
+			if (index + 1 != instructions.Size()) { return false; }
+		} else if (!ShaderTileControlFlowIsLinear(inst, false) && !ShaderPairedSplitPlainCompare(inst))
+		{
+			return false;
+		}
+		if (ShaderInstructionReadsImageResource(inst.type) || ShaderInstructionWritesImageResource(inst.type))
+		{
+			const int image_index = ShaderPairedSplitImageIndex(inst, code, bind);
+			if (image_index < 0 || image_index >= bind.textures2D.textures_num ||
+			    (ShaderInstructionReadsImageResource(inst.type) && image_index == texture_index) ||
+			    (ShaderInstructionWritesImageResource(inst.type) &&
+			     (image_index != texture_index || inst.type != ShaderInstructionType::ImageStore ||
+			      inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
+			{
+				return false;
+			}
+			if (inst.type == ShaderInstructionType::ImageStore)
+			{
+				if (flow->first_store < 0) { flow->first_store = static_cast<int>(index); }
+				else if (flow->second_store < 0) { flow->second_store = static_cast<int>(index); }
+				else { return false; }
+			}
+		}
+	}
+	const int end = static_cast<int>(instructions.Size()) - 1;
+	if (!(0 <= flow->early_branch && flow->early_branch < flow->split &&
+	      flow->split < flow->first_branch && flow->first_branch < flow->first_store &&
+	      flow->first_store < flow->invert && flow->invert < flow->second_branch &&
+	      flow->second_branch < flow->second_store && flow->second_store < end))
+	{
+		return false;
+	}
+	const auto& early = instructions.At(flow->early_branch);
+	const auto& first = instructions.At(flow->first_branch);
+	const auto& second = instructions.At(flow->second_branch);
+	return early.src_num == 1 && first.src_num == 1 && second.src_num == 1 &&
+	       ShaderLabel(early).GetDst() == instructions.At(flow->split).pc &&
+	       ShaderLabel(first).GetDst() == instructions.At(flow->invert).pc &&
+	       ShaderLabel(second).GetDst() == instructions.At(end).pc;
+}
+
+ShaderStorageImageTileCoverage ShaderPairedSplitCoordinates(const ShaderCode& code, const ShaderPairedSplitFlow& flow,
+                                                            int workgroup_register, const uint32_t threads[3])
+{
+	constexpr uint32_t lane_count = 64;
+	std::array<ShaderTileValue, 256> registers {};
+	registers[0].valid = true;
+	registers[1].valid = true;
+	for (uint32_t lane = 0; lane < lane_count; ++lane)
+	{
+		registers[0].lane[lane] = lane % threads[0];
+		registers[1].lane[lane] = lane / threads[0];
+	}
+	bool group_ids_valid = true;
+	const auto& instructions = code.GetInstructions();
+	for (int index = 0; index < flow.early_branch; ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (inst.dst.type == ShaderOperandType::Vgpr && inst.type != ShaderInstructionType::ImageStore)
+		{
+			const auto value = ShaderTileEvaluateInstruction(inst, registers,
+			                                                 group_ids_valid ? workgroup_register : -100, lane_count);
+			ShaderTileInvalidateVgpr(inst.dst, &registers);
+			if (inst.dst.size == 1 && inst.dst.register_id >= 0 && inst.dst.register_id < 256)
+			{
+				registers[inst.dst.register_id] = value;
+			}
+		}
+		ShaderTileInvalidateVgpr(inst.dst2, &registers);
+		if (ShaderOperandOverlapsSgprRange(inst.dst, workgroup_register, 2) ||
+		    ShaderOperandOverlapsSgprRange(inst.dst2, workgroup_register, 2))
+		{
+			group_ids_valid = false;
+		}
+	}
+	const auto& first = instructions.At(flow.first_store);
+	const auto& second = instructions.At(flow.second_store);
+	if ((first.mimg_address_num == 0 && first.src[0].size < 2) ||
+	    (second.mimg_address_num == 0 && second.src[0].size < 2))
+	{
+		return {};
+	}
+	ShaderTileValue first_x {};
+	ShaderTileValue first_y {};
+	ShaderTileValue second_x {};
+	ShaderTileValue second_y {};
+	if (!ShaderTileStoreCoordinates(first, registers, &first_x, &first_y) ||
+	    !ShaderTileStoreCoordinates(second, registers, &second_x, &second_y) ||
+	    first_x.group_x != second_x.group_x || first_y.group_y != second_y.group_y)
+	{
+		return {};
+	}
+	for (uint32_t lane = 0; lane < lane_count; ++lane)
+	{
+		if (first_x.lane[lane] != second_x.lane[lane] || first_y.lane[lane] != second_y.lane[lane]) { return {}; }
+	}
+	const int x_reg = first.mimg_address_num >= 2 ? first.mimg_address[0].register_id : first.src[0].register_id;
+	const int y_reg = first.mimg_address_num >= 2 ? first.mimg_address[1].register_id : x_reg + 1;
+	const int second_x_reg = second.mimg_address_num >= 2 ? second.mimg_address[0].register_id : second.src[0].register_id;
+	const int second_y_reg = second.mimg_address_num >= 2 ? second.mimg_address[1].register_id : second_x_reg + 1;
+	for (int index = flow.early_branch; index < static_cast<int>(instructions.Size()); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (inst.type == ShaderInstructionType::ImageStore) { continue; }
+		const auto clobbers = [x_reg, y_reg, second_x_reg, second_y_reg](const ShaderOperand& dst)
+		{
+			return dst.type == ShaderOperandType::Vgpr && dst.size > 0 &&
+			       ((x_reg >= dst.register_id && x_reg < dst.register_id + dst.size) ||
+			        (y_reg >= dst.register_id && y_reg < dst.register_id + dst.size) ||
+			        (second_x_reg >= dst.register_id && second_x_reg < dst.register_id + dst.size) ||
+			        (second_y_reg >= dst.register_id && second_y_reg < dst.register_id + dst.size));
+		};
+		if (clobbers(inst.dst) || clobbers(inst.dst2)) { return {}; }
+	}
+	ShaderStorageImageTileCoverage coverage {};
+	std::vector<uint8_t> seen;
+	if (!ShaderTileMarkStore(first_x, first_y, lane_count, &coverage, &seen) ||
+	    coverage.width != threads[0] || coverage.height != threads[1] ||
+	    !std::all_of(seen.begin(), seen.end(), [](uint8_t value) { return value != 0; }))
+	{
+		return {};
+	}
+	return coverage;
+}
+
+ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedSplitCoverage(const ShaderCode& code,
+                                                                            const ShaderBindResources& bind,
+                                                                            int texture_index, int workgroup_register,
+                                                                            const uint32_t threads[3], bool group_xy_enabled)
+{
+	if (!group_xy_enabled || threads == nullptr || threads[0] == 0 || threads[1] == 0 ||
+	    static_cast<uint64_t>(threads[0]) * threads[1] != 64u || threads[2] != 1u ||
+	    workgroup_register < 0 || texture_index < 0 || texture_index >= bind.textures2D.textures_num ||
+	    !bind.textures2D.desc[texture_index].textures2d_without_sampler ||
+	    ShaderResolvedSampledTextureShape(bind.textures2D.desc[texture_index]) != ShaderGen5SampledTextureShape::TwoDimensional)
+	{
+		return {};
+	}
+	const uint8_t full_mask = ShaderBoundedGridFullStoreMask(bind.textures2D.desc[texture_index].texture.Format());
+	if (full_mask == 0u) { return {}; }
+	ShaderPairedSplitFlow flow {};
+	if (!ShaderPairedSplitFindFlow(code, bind, texture_index, full_mask, &flow)) { return {}; }
+	return ShaderPairedSplitCoordinates(code, flow, workgroup_register, threads);
+}
+
 void ShaderTileInvalidateVgpr(const ShaderOperand& destination, std::array<ShaderTileValue, 256>* registers)
 {
 	EXIT_IF(registers == nullptr);
@@ -1609,8 +1867,13 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageGridCoverage(const Shade
 ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code, const ShaderBindResources& bind,
                                                                     int texture_index, int workgroup_register,
                                                                     const uint32_t threads[3], bool native_xy_thread_ids,
-                                                                    bool group_xy_enabled)
+                                                                    bool group_xy_enabled, bool paired_xy_thread_ids)
 {
+	if (paired_xy_thread_ids)
+	{
+		return AnalyzeShaderStorageImagePairedSplitCoverage(code, bind, texture_index, workgroup_register,
+		                                                    threads, group_xy_enabled);
+	}
 	if (threads != nullptr && texture_index >= 0 && texture_index < bind.textures2D.textures_num && workgroup_register >= 0 &&
 	    bind.textures2D.desc[texture_index].textures2d_without_sampler && native_xy_thread_ids)
 	{

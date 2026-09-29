@@ -3172,9 +3172,12 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 			}
 			const bool native_xy_thread_ids =
 			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->thread_ids_num >= 2;
+			const bool paired_xy_thread_ids =
+			    info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32 && info->thread_ids_num >= 2;
 			const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, info->bind, i, info->workgroup_register,
 			                                                             info->threads_num, native_xy_thread_ids,
-			                                                             info->group_id[0] && info->group_id[1]);
+			                                                             info->group_id[0] && info->group_id[1],
+			                                                             paired_xy_thread_ids);
 			if (coverage.width != 0)
 			{
 				info->storage_image_tile_coverage[i] = coverage;

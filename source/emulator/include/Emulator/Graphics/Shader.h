@@ -1575,7 +1575,8 @@ struct ShaderStorageImageTileCoverage
                                                                                    const ShaderBindResources& bind, int texture_index,
                                                                                    int workgroup_register, const uint32_t threads[3],
                                                                                    bool native_xy_thread_ids = false,
-                                                                                   bool group_xy_enabled = false);
+                                                                                   bool group_xy_enabled = false,
+                                                                                   bool paired_xy_thread_ids = false);
 [[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 
