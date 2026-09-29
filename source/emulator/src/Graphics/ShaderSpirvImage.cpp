@@ -397,7 +397,7 @@ bool Spirv::EmitPixelRgbaProbe(String8* dst_source, uint32_t index, const String
 	return true;
 }
 
-static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index, const ShaderInstruction& inst, const Spirv* spirv,
+static bool EmitTypedImageSample(String8* dst_source, uint32_t index, const ShaderInstruction& inst, const Spirv* spirv,
                                             const SpirvValue& x, const SpirvValue& y, const SpirvValue& array_layer,
                                             const SpirvValue& texture, const SpirvValue& sampler,
                                             const SpirvValue* destinations, uint32_t destination_num,
@@ -563,7 +563,7 @@ static bool EmitTypedImageSampleImplicitLod(String8* dst_source, uint32_t index,
 	const bool cube_array_implicit =
 	    cube_coordinates && shape == ShaderGen5SampledTextureShape::TwoDimensionalArray && bias == nullptr;
 	const char* array_sample_op =
-	    cube_array_implicit
+	    (cube_array_implicit || inst.type == ShaderInstructionType::ImageSampleLz)
 	        ? "OpImageSampleExplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index> Lod %float_0_000000"
 	        : "OpImageSampleImplicitLod %v4float %image_sampled_image_<index> %image_sample_coord_<index><bias_operand>";
 	String8 source = bias_source + EmitImageSampleCoordinateLoads(index, x, y, cube_coordinates) + input0_probe_source + String8(sample_text)
@@ -856,7 +856,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata1Vaddr3StSsDmask1)
 		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
 		{
 			const SpirvValue destinations[] = {dst_value0};
-			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			return EmitTypedImageSample(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
 			                                      src1_value0, src2_value0, destinations, 1);
 		}
 
@@ -1089,7 +1089,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmask3)
 		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
 		{
 			const SpirvValue destinations[] = {dst_value0, dst_value1};
-			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			return EmitTypedImageSample(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
 			                                      src1_value0, src2_value0, destinations, 2);
 		}
 
@@ -1333,7 +1333,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata2Vaddr3StSsDmaskC)
 		{
 			const uint32_t components[]  = {2, 3};
 			const SpirvValue destinations[] = {dst_value0, dst_value1};
-			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			return EmitTypedImageSample(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
 			                                      src1_value0, src2_value0, destinations, 2, components);
 		}
 
@@ -1400,7 +1400,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmask7)
 		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
 		{
 			const SpirvValue destinations[] = {dst_value0, dst_value1, dst_value2};
-			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			return EmitTypedImageSample(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
 			                                      src1_value0, src2_value0, destinations, 3);
 		}
 
@@ -1536,7 +1536,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata3Vaddr3StSsDmaskD)
 		{
 			const uint32_t components[]  = {0, 2, 3};
 			const SpirvValue destinations[] = {dst_value0, dst_value1, dst_value2};
-			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			return EmitTypedImageSample(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
 			                                      src1_value0, src2_value0, destinations, 3, components);
 		}
 
@@ -1955,7 +1955,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 		if (bind_info->textures2D.textures2d_array_sampled_num > 0)
 		{
 			const SpirvValue destinations[] = {dst_value0, dst_value1, dst_value2, dst_value3};
-			return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
+			return EmitTypedImageSample(dst_source, index, inst, spirv, src0_value0, src0_value1, src0_value2,
 			                                      src1_value0, src2_value0, destinations, 4);
 		}
 
@@ -2091,7 +2091,7 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleB_Vdata4Vaddr3StSsDmaskF)
 	{
 		return false;
 	}
-	return EmitTypedImageSampleImplicitLod(dst_source, index, inst, spirv, src0_x, src0_y, src0_layer, src1_value0, src2_value0,
+	return EmitTypedImageSample(dst_source, index, inst, spirv, src0_x, src0_y, src0_layer, src1_value0, src2_value0,
 	                                       dst_value, static_cast<uint32_t>(num), components, &src0_bias);
 }
 
@@ -2287,6 +2287,23 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 	const auto* vs_info = spirv->GetVsInputInfo();
 	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
 	const auto  plan                    = PlanImageSampleLz(inst, *bind_info, user_data_register_base);
+
+	if (plan.shape == ShaderGen5SampledTextureShape::TwoDimensionalArray &&
+	    bind_info->textures2D.textures2d_array_sampled_num > 0)
+	{
+		const int descriptor = ShaderFindImageSampledTextureDescriptor(inst, *bind_info, user_data_register_base);
+		if (Config::IsNextGen() &&
+		    VulkanGen5ImageNumericType(bind_info->textures2D.desc[descriptor].texture.Format()) != GuestImageNumericType::FloatingPoint)
+		{
+			return false;
+		}
+		ValidateImageSampleLzAddresses(inst, plan.coordinate_num);
+		const SpirvValue destinations[] = {operand_variable_to_str(inst.dst, 0), operand_variable_to_str(inst.dst, 1),
+		                                    operand_variable_to_str(inst.dst, 2), operand_variable_to_str(inst.dst, 3)};
+		return EmitTypedImageSample(dst_source, index, inst, spirv, mimg_address_to_str(inst, 0), mimg_address_to_str(inst, 1),
+		                            mimg_address_to_str(inst, 2), operand_variable_to_str(inst.src[1], 0),
+		                            operand_variable_to_str(inst.src[2], 0), destinations, 4);
+	}
 
 	if (plan.shape == ShaderGen5SampledTextureShape::TwoDimensional && bind_info->textures2D.textures2d_sampled_num > 0)
 	{
