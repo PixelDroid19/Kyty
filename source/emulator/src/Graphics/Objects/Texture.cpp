@@ -391,19 +391,20 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 		return;
 	}
-	if (fmt != 0u && tile == 5u && levels > 1u)
+	const bool standard64_bc = tile == 9u && ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt));
+	if ((fmt != 0u && tile == 5u && levels > 1u) || (standard64_bc && !skip_guest))
 	{
 		Gen5TextureMipLayout mip_layout {};
-		const bool mip_layout_ok = Gen5GetStandard4KBTextureMipLayout(
+		const auto get_layout = standard64_bc ? Gen5GetStandard64KBTextureMipLayout : Gen5GetStandard4KBTextureMipLayout;
+		const auto detile_chain = standard64_bc ? Gen5DetileStandard64KBTextureMipChain : Gen5DetileStandard4KBTextureMipChain;
+		const bool mip_layout_ok = get_layout(
 		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
 		    static_cast<uint32_t>(levels), &mip_layout);
-		if (!mip_layout_ok) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Gen5 mip layout failed (continuing)\n"); }
-		if (*size != mip_layout.tiled.size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: *size != mip_layout.tiled.size condition ignored (continuing)\n"); }
+		EXIT_IF(!mip_layout_ok || *size != mip_layout.tiled.size);
 
 		std::vector<uint8_t> linear(static_cast<size_t>(mip_layout.linear_size));
-		const bool mip_detile_ok = mip_layout_ok && Gen5DetileStandard4KBTextureMipChain(
-		                                                linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, mip_layout);
-		if (!mip_detile_ok) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Gen5 mip detile failed (continuing)\n"); }
+		const bool mip_detile_ok = detile_chain(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, mip_layout);
+		EXIT_IF(!mip_detile_ok);
 
 		const char* block_dump_spec = std::getenv("KYTY_DUMP_TILED_BLOCKS");
 		const bool  block_dump_matches = mip_detile_ok && ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt)) &&

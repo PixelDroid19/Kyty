@@ -430,6 +430,18 @@ against the same correct gameplay capture.
   image; capture its creation before claiming that the zero seed caused this
   exact result.
 
+- Standard64KB package upload (2026-09-29): the retired opening-image record
+  confirms the old zero-seed path and incorrect texel-based footprint. After
+  using the compressed mip layout, a creation-time snapshot shows the correct
+  span and enabled upload, and the first detiled level agrees byte-for-byte
+  with independent decoding. The same material sample now produces finite
+  near-white RGB and varying alpha. Capture 173 contains a blue opening
+  caption and still fails the gameplay image gate. This closes the missing
+  package upload as the source of that zero sample. A correlated mode-six
+  DCC operation is still rasterized as a zero red/green export on the overlay;
+  the next correction must preserve the existing expanded surface rather
+  than interpret that export as ordinary pixel output.
+
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
   2,113,929,216 bytes with `mincore` from a vertex descriptor bind. Over the

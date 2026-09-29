@@ -69,6 +69,13 @@ struct Gen5TextureMipLayout
 [[nodiscard]] bool Gen5DetileStandard4KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
                                                          uint64_t src_size, const Gen5TextureMipLayout& layout);
 
+[[nodiscard]] bool Gen5GetStandard64KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height,
+                                                        uint32_t pitch, uint32_t levels,
+                                                        Gen5TextureMipLayout* layout);
+
+[[nodiscard]] bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
+                                                          uint64_t src_size, const Gen5TextureMipLayout& layout);
+
 [[nodiscard]] bool Gen5GetDepth64KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height,
                                                     uint32_t pitch, uint32_t levels,
                                                     Gen5TextureMipLayout* layout);

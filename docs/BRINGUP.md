@@ -376,6 +376,44 @@ which materialization path was used at the probed draw. Capture the creation
 and implement the evidenced block-coordinate mip layout, preserving live
 GPU-owned surface dependencies.
 
+The retired object record does retain the exact opening descriptor: eleven
+levels, a 6,553,600-byte claimed span and `skip_guest_upload=1`. Its content
+origin is recorded as CPU upload even though that path clears the image.
+The still-readable source bytes decode into a coherent nonzero opening
+caption with a meaningful alpha channel using Standard64KB block addressing
+and the reverse mip-chain placement; they were read after object retirement,
+not at the original draw. The
+[public GFX10 layout](https://github.com/GPUOpen-Drivers/pal/blob/dev/src/core/imported/addrlib/src/gfx10/gfx10addrlib.cpp)
+and two local implementations agree on a shared tail block followed by the
+larger levels in reverse order. For this descriptor the compressed block
+model requires 983,040 bytes, with mip zero at byte 524,288 and the tail
+beginning at level four. The original texel-based size and zero-seed policy
+are therefore both incorrect for this CPU package texture. A corrected run
+must capture its upload and sample before claiming visual improvement.
+
+The corrected Silent/Native run captures creation with the expected
+983,040-byte span and guest upload enabled. The shared detiler returns all
+eleven compact levels; its first level is byte-identical to the independently
+decoded source. At the same 100-present threshold, all 409,600 sampled
+vectors are finite: RGB ranges from 0.99115 to one and alpha from zero to one.
+Native capture 173 now contains the opening caption, although it is blue.
+The offline capture gate still rejects it as gameplay. The affected build,
+source-boundary gate and thirteen-table provenance check pass; unit tests
+remain deferred until the requested runtime milestone. This verifies the
+package upload correction, not gameplay or correct final composition.
+
+The remaining color defect has a separate concrete trigger:
+`GraphicsRenderHwCheck.cpp:547` incorrectly describes every color mode except
+resolve as an ordinary draw, while both draw entry points route only mode
+three through fixed-function handling. A bounded live trace captures mode
+six with DCC enabled on the same HDR overlay after its material draw. The
+ordinary shader exports zero to red and green, preserving blue and alpha;
+that shader export is not the decompression operation's color result. Check
+the existing expanded host backing and submission dependencies, then handle
+the metadata operation before ordinary rasterization. Mode two also occurs
+on other targets and denotes fast-clear elimination; its clear-state contract
+must be handled separately from DCC decompression.
+
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 
 The bounded native sample probe now observes 2D `ImageSampleLz` RGB and RGBA

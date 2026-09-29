@@ -3154,6 +3154,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			const uint32_t bpp = ShaderGen5TextureBytesPerElement(r.Format());
 			pitch              = TileAlign64KBPitch(width, bpp);
 			if (pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch == 0u condition ignored (continuing)\n"); }
+		} else if (tile == 9 && ShaderGen5TextureIsBlockCompressed(r.Format()))
+		{
+			// The shared layout aligns compressed block rows, not texel rows.
+			pitch = width;
 		} else if (tile == 9 || tile == 24)
 		{
 			pitch = TileAlign64KBPitch(width, ShaderGen5TextureBytesPerElement(r.Format()));

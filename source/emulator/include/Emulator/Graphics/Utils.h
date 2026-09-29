@@ -5,6 +5,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Graphics/Shader.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -126,7 +127,8 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 // are GPU intermediates (also appear as path=rt); CPU detile of those pages is
 // always wrong even when FindRenderTexture misses on the first bind. BC1 (ufmt
 // 133) package textures may still detile from guest when uncovered.
-// Tile 9 (kStandard64KB) remains package RGBA8/RGBA16F when uncovered.
+// Uncovered Standard64KB package images also admit block-compressed data;
+// their footprint and upload must both use the compressed mip layout.
 // Guest T# BC1 is RDNA2 ufmt 169 (UNORM) / 170 (SRGB). Catalog 133 is the
 // same 8-byte 4x4 block family used by older tile-27 package fixtures.
 [[nodiscard]] inline bool Gen5IsBc1PackageFormat(uint32_t ufmt)
@@ -151,7 +153,7 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	}
 	if (tile == 9u)
 	{
-		return ufmt == 56u || ufmt == 71u || ufmt == 130u;
+		return ufmt == 56u || ufmt == 71u || ufmt == 130u || ShaderGen5TextureIsBlockCompressed(ufmt);
 	}
 	return true;
 }

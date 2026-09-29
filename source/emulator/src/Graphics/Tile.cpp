@@ -2000,6 +2000,32 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 	bool pow2 = (IsPowerOfTwo(width) && IsPowerOfTwo(height) && IsPowerOfTwo(pitch));
 
 	EXIT_IF(levels == 0 || levels > 16);
+	if (tile == 9u && ShaderGen5TextureIsBlockCompressed(format))
+	{
+		Gen5TextureMipLayout mip_layout {};
+		if (!Gen5GetStandard64KBTextureMipLayout(format, width, height, pitch, levels, &mip_layout))
+		{
+			EXIT("unsupported Gen5 Standard64KB compressed layout: format=%u %ux%u pitch=%u levels=%u\n",
+			     format, width, height, pitch, levels);
+		}
+		if (total_size != nullptr) { *total_size = mip_layout.tiled; }
+		for (uint32_t level = 0u; level < levels; ++level)
+		{
+			const auto& mip = mip_layout.level[level];
+			if (level_sizes != nullptr)
+			{
+				level_sizes[level].offset = mip.tiled_offset;
+				level_sizes[level].size = mip.tiled_size;
+			}
+			if (padded_size != nullptr)
+			{
+				padded_size[level].width = mip.tiled_pitch * mip_layout.texels_per_element_x;
+				padded_size[level].height = mip.tiled_size / mip.tiled_pitch / mip_layout.bytes_per_element *
+				                            mip_layout.texels_per_element_y;
+			}
+		}
+		return;
+	}
 	if (tile == 0x18u && levels > 1u && (format == 7u || format == 22u))
 	{
 		Gen5TextureMipLayout mip_layout {};
