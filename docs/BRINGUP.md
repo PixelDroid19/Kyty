@@ -457,9 +457,16 @@ After the title transition at 15 minutes 18 seconds, that run stops at
 `Value::referValue(const String&)` lookup. The caller constructs a string
 wrapper, passes an owned object, destroys the wrapper and checks the returned
 pointer for null before further lookup. Its ten-byte key is absent from the
-five-member object. Implement a bounded wrapped-key lookup that returns an
-existing child or null without insertion. Useful rendering, controls and
-both gameplay acceptance windows remain unverified.
+five-member object. The bounded wrapped-key lookup now returns the existing
+owned child or null without insertion. A Silent/Native trace verifies twelve
+actual returns: five existing children and seven absent keys, with source
+and key contents preserved on every call. The earlier string, boolean, real
+and assignment checks still pass. At the title transition after 16 minutes,
+the next missing import is `rDMyAf1Jhug[libc_v1][libc_v1.1]`, whose name hash
+matches `__isinff`. The caller passes a float in XMM0, tests the integer return
+and clamps only when it is zero. Implement the float infinity predicate and
+verify its actual return. Useful rendering, controls and both gameplay
+acceptance windows remain unverified.
 
 Two existing string-contract gaps were found while reviewing value ownership:
 `LibJson2.cpp:394` uses `strlen` for `JsonStringLength`, although the parser
@@ -469,6 +476,7 @@ the owned byte count if the full parsed string is required. Separately,
 input; passing that same data pointer or a suffix therefore reads freed
 storage. Build a replacement before release when correcting that API. Neither
 case is yet observed in the live workload, and neither is gameplay evidence.
+
 
 ### Residency preparation cost (2026-09-29, not gameplay)
 

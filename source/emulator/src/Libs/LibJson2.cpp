@@ -1083,6 +1083,23 @@ static bool JsonReadString(const void* source, size_t limit, std::string* text)
 	return true;
 }
 
+static JsonValue* KYTY_SYSV_ABI JsonValueReferValueKey(JsonValue* self, const JsonString* key)
+{
+	if (self == nullptr) { return nullptr; }
+	JsonValue value {};
+	EXIT_IF(!JsonReadValue(self, &value));
+	if (value.type != JsonValueTypeObject || value.ptr == nullptr) { return nullptr; }
+	std::string text;
+	EXIT_IF(key == nullptr || !JsonReadString(key, 4096, &text));
+	std::lock_guard lock(g_owned_mutex);
+	const auto owned = g_owned_values.find(value.ptr);
+	EXIT_IF(owned == g_owned_values.end() || owned->second != JsonValueTypeObject);
+	const auto* object = static_cast<const JsonObject*>(value.ptr);
+	if (object->members == nullptr) { return nullptr; }
+	const auto found = object->members->find(text);
+	return found == object->members->end() ? nullptr : found->second;
+}
+
 static void KYTY_SYSV_ABI JsonValueToString(const JsonValue* self, JsonString* destination)
 {
 	JsonValue value {};
@@ -1266,6 +1283,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("RBw+4NukeGQ", Json2::JsonValueCount);
 	LIB_FUNC("4zrm6VrgIAw", Json2::JsonValueAssign);
 	LIB_FUNC("Ncel8t2Rrpc", Json2::JsonValueToString);
+	LIB_FUNC("wLsJlmgEIaI", Json2::JsonValueReferValueKey);
 	LIB_FUNC("+drDFyAS6u4", Json2::JsonInitializerSetGlobalNullAccessCallback);
 	LIB_FUNC("00oCq0RwSAY", Json2::JsonInitializerSetGlobalNullAccessCallback);
 }
