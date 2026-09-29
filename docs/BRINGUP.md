@@ -395,15 +395,22 @@ also still passes in that run. Nonempty destination replacement and
 embedded-NUL cases still need focused tests, deferred until gameplay per the
 requested validation order.
 
-The next transition failure is the unresolved import
-`3qrge7L-AU4[Json2_v1][Json_v1.1]`, `Value::getReal() const`. The caller checks
-for real type four, passes an owned value and immediately reads a double
-through the returned pointer. `LibJson2.cpp` does not register that getter;
-validate the value and expose its existing real field when implementing it,
-without substituting a numeric result for the reference. The native captures
-remain uniformly black; controls and both gameplay acceptance windows remain
-unverified. The build, strict boundary check and 13-table provenance check
-pass for the string conversion.
+The next exercised import, `3qrge7L-AU4[Json2_v1][Json_v1.1]`, is
+`Value::getReal() const`. The caller checks for real type four, passes an
+owned value and immediately reads a double through the returned pointer.
+The getter now validates the value and returns its existing real field.
+A Silent/Native run verifies two actual returns: each points into the source
+value at offset 16, preserves its exact double bits and leaves all 32 source
+bytes unchanged. The earlier string and assignment checks also still pass.
+Build, strict boundary and 13-table provenance checks pass; focused tests
+remain deferred until gameplay as requested.
+
+That run reaches the title transition at 15 minutes 10 seconds and stops at
+`zTwZdI8AZ5Y[Json2_v1][Json_v1.1]`, `Value::getBoolean() const`. The caller
+checks type one, passes an owned boolean value and reads one byte through
+the return pointer. Implement the reference-returning boolean getter from
+that contract. Useful rendering, controls and both gameplay acceptance
+windows remain unverified.
 
 Two existing string-contract gaps were found while reviewing value ownership:
 `LibJson2.cpp:394` uses `strlen` for `JsonStringLength`, although the parser

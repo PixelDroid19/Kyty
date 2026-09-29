@@ -989,6 +989,15 @@ static uint32_t KYTY_SYSV_ABI JsonValueGetType(const JsonValue* self)
 	return (self != nullptr ? self->type : JsonValueTypeNull);
 }
 
+static const double* KYTY_SYSV_ABI JsonValueGetReal(const JsonValue* self)
+{
+	JsonValue value {};
+	EXIT_IF(self == nullptr || !JsonReadValue(self, &value));
+	if (value.type != JsonValueTypeReal) { EXIT("JsonValueGetReal: unsupported value type %u\n", value.type); }
+	// The ABI returns a reference with the value's lifetime, not a numeric copy.
+	return &self->real;
+}
+
 static size_t KYTY_SYSV_ABI JsonValueCount(const JsonValue* self)
 {
 	if (self == nullptr || self->ptr == nullptr)
@@ -1244,6 +1253,7 @@ LIB_DEFINE(InitJson2_1)
 	LIB_FUNC("HwDt5lD9Bfo", Json2::JsonValueIndexString);
 	LIB_FUNC("XlWbvieLj2M", Json2::JsonValueIndexUInt);
 	LIB_FUNC("SHtAad20YYM", Json2::JsonValueGetType);
+	LIB_FUNC("3qrge7L-AU4", Json2::JsonValueGetReal);
 	LIB_FUNC("RBw+4NukeGQ", Json2::JsonValueCount);
 	LIB_FUNC("4zrm6VrgIAw", Json2::JsonValueAssign);
 	LIB_FUNC("Ncel8t2Rrpc", Json2::JsonValueToString);
