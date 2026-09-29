@@ -417,6 +417,19 @@ against the same correct gameplay capture.
   at an earlier first draw does not explain this occurrence. Next trace the
   sampled color/alpha and packed per-vertex values at the same material draw.
 
+- Implicit material sample (2026-09-29): a native probe immediately after the
+  selected 2D RGBA sample records 409,600 finite zero vectors. Its actual
+  cached SPIR-V and the ordinary pixel/geometry modules validate for Vulkan
+  1.2; generated and optimized diagnostic modules validate too. Capture 129
+  remains uniformly black. The exact descriptor bind identifies an eleven-
+  level Standard64KB BC7 sRGB image, and every vertex color is opaque white.
+  This puts zero before material arithmetic and excludes packed vertex alpha
+  as the first zero producer for this occurrence. The uncovered BC upload
+  exclusion and missing Standard64KB compressed mip layout are recorded in
+  the bring-up manual. A later cache snapshot does not retain the opening
+  image; capture its creation before claiming that the zero seed caused this
+  exact result.
+
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
   2,113,929,216 bytes with `mincore` from a vertex descriptor bind. Over the

@@ -2022,6 +2022,17 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 		                   .ReplaceStr("<dst_value2>", dst_value2.value)
 		                   .ReplaceStr("<dst_value3>", dst_value3.value);
 
+		if (PixelSampleProbeSelectsInstruction(spirv, index))
+		{
+			String8 sample_probe_source;
+			if (!spirv->EmitPixelRgbaProbe(&sample_probe_source, index, String8::FromPrintf("%%t43_%u", index),
+			                              "pixel_sample_probe"))
+			{
+				return false;
+			}
+			*dst_source += sample_probe_source;
+		}
+
 		return true;
 	}
 

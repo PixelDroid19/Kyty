@@ -357,6 +357,25 @@ therefore not evidence for this later all-zero export. Follow the texture
 sample and packed per-vertex alpha at this same draw before changing either
 buffer contents or guest media state.
 
+The implicit-LOD 2D RGBA sample is now also admitted by the bounded native
+sample probe. At the same threshold it records 409,600 finite RGBA-zero
+vectors immediately after sampling, before material arithmetic. Its actual
+33,300-byte cached diagnostic module, 30,596-byte ordinary pixel module and
+both geometry modules pass Vulkan 1.2 validation, as do the generated and
+optimized diagnostic modules. Capture 129 remains uniformly black. The
+correlated descriptor is a 1600-by-256 BC7 sRGB image with Standard64KB tiling
+and eleven allocated levels; all four vertex colors are opaque white.
+
+`Utils.h:155` excludes uncovered Standard64KB BC formats from guest upload.
+`Objects/Texture.cpp:533` consequently seeds a zero image when that policy is
+selected. The Standard64KB sample path also lacks a compressed mip-chain
+layout. This is a concrete unsupported-package defect; confirm the actual
+backing role and bytes before attributing the observed sample to it. A later
+cache snapshot no longer contains that opening texture, so it does not prove
+which materialization path was used at the probed draw. Capture the creation
+and implement the evidenced block-coordinate mip layout, preserving live
+GPU-owned surface dependencies.
+
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 
 The bounded native sample probe now observes 2D `ImageSampleLz` RGB and RGBA

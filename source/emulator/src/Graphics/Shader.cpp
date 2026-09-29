@@ -4397,6 +4397,8 @@ bool ShaderPixelSampleProbeMatchesInstruction(const ShaderCode& code, const Shad
 	if (config.sample_ordinal >= code.GetInstructions().Size()) { return false; }
 	const auto& inst = code.GetInstructions().At(config.sample_ordinal);
 	return inst.type == ShaderInstructionType::ImageSampleB ||
+	       (inst.type == ShaderInstructionType::ImageSample && inst.mimg_dimension == 1u &&
+	        inst.format == ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF) ||
 	       (inst.type == ShaderInstructionType::ImageSampleLz && inst.mimg_dimension == 1u &&
 	        (inst.format == ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7 ||
 	         inst.format == ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF));
