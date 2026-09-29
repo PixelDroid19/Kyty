@@ -254,6 +254,17 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Pending storage write-back retry (2026-09-29, unresolved)
+
+A later Silent/Native diagnostic run passed at least 598 presents, then stopped
+after 708 seconds at `Objects/GpuMemoryWriteback.cpp:214`: a writable
+`StorageBuffer` still had incomplete exact submission dependencies when
+`WriteBackObjectLocked` was requested. This occurred before the JSON assignment
+call and does not validate that pending implementation. An earlier shorter
+occurrence is already recorded below. Capture the current caller, resource
+dependencies and completed queue sequences before changing synchronization;
+neither skipping write-back nor treating a pending fence as complete is valid.
+
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 
 The bounded native sample probe now observes 2D `ImageSampleLz` RGB and RGBA
@@ -262,14 +273,21 @@ vector after the normal destination stores and does not replace shader output.
 The RGB form is verified in a live Silent/Native run: at present 100, all
 8,294,400 samples are finite, with RGB zero and alpha one. Generated and
 optimized SPIR-V both pass `spirv-val --target-env vulkan1.2`. A native capture
-at present 200 remains uniformly black. The corresponding RGBA lowering has
-not yet been selected by a live probe.
+at present 200 remains uniformly black. A second live run selects the RGBA
+overlay sample: it records 8,294,400 samples, 409,600 nonfinite vectors and
+RGBA zero for every finite vector. Both SPIR-V forms validate for this variant
+too. The nonfinite count matches the earlier final-export observation and
+places invalid values before final composition, although individual pixels
+have not been correlated across those runs.
 
 This locates zero color before the final shader's arithmetic for that opening
 occurrence. It does not establish why the sampled storage image contains no
 color, whether every later occurrence is black, or whether its producer has
-run. Follow the sampled image's producer and lifetime before changing texture
-decoding, arithmetic or presentation.
+run. The HDR input can legitimately be empty during a logo scene. Follow the
+overlay image's writer and lifetime before changing texture decoding,
+arithmetic or presentation. A broad format-only lifetime trace selected two
+earlier 1024-square targets and did not identify the overlay producer; use a
+selector correlated with the actual sampled image.
 
 ### JSON array element lookup (2026-09-29, not gameplay)
 
@@ -285,6 +303,15 @@ operator. Its caller immediately assigns the indexed value to another
 32-byte value. `LibJson2.cpp` still needs an owned deep-copy path there,
 including correct replacement lifetime. Visible rendering, controls and
 both gameplay acceptance windows remain unverified.
+
+Two existing string-contract gaps were found while reviewing value ownership:
+`LibJson2.cpp:366` uses `strlen` for `JsonStringLength`, although the parser
+retains embedded NUL bytes. Verify the length export's guest contract and use
+the owned byte count if the full parsed string is required. Separately,
+`LibJson2.cpp:378` frees a string's data before `JsonStringAssign` measures its
+input; passing that same data pointer or a suffix therefore reads freed
+storage. Build a replacement before release when correcting that API. Neither
+case is yet observed in the live workload, and neither is gameplay evidence.
 
 ### Residency preparation cost (2026-09-29, not gameplay)
 

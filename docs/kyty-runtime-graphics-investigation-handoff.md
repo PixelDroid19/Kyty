@@ -361,8 +361,14 @@ against the same correct gameplay capture.
   finite RGB zero with alpha one. Both generated and optimized SPIR-V validate,
   and a native capture at present 200 remains black. This excludes the final
   shader's arithmetic as the first producer of zero RGB for that occurrence;
-  it does not explain the separate nonfinite final results. The sampled HDR
-  image's writer and lifetime are the next evidence boundary.
+  it does not explain the separate nonfinite final results. A second run
+  probes the RGBA overlay sample: 409,600 of 8,294,400 sampled vectors are
+  already nonfinite, and every finite vector is RGBA zero. Both SPIR-V forms
+  validate. Equal aggregate counts do not prove per-pixel identity across
+  runs, but invalid data is now observed before final composition. The HDR
+  input may legitimately be empty during a logo scene; prioritize the overlay
+  writer and lifetime. A format-only lifetime selector tracked two earlier
+  1024-square targets and therefore did not identify that producer.
 
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
