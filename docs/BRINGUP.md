@@ -329,6 +329,30 @@ admission when Xe reported `execbuf` ENOMEM and `vkQueueSubmit` failed in
 `GraphicsRenderCommandBuffer.cpp:656`; correlate live GPU allocation budget
 and competing Vulkan clients before changing submission policy.
 
+### Bounded storage-image overwrite and next mixed alias (2026-09-28, not gameplay)
+
+Linking older render, storage, and sampled views around a new storage image
+depends on proof that its first dispatch writes every texel. The prior
+write-only image-use bit alone did not provide that proof: it allowed seed
+skipping when symbolic tile coverage was zero. Commit `4f8f0719` makes zero
+coverage retain the seed and admits a bounded-grid pattern only when group
+and lane IDs form the full 2D grid, the shader's sole `EXEC` guard excludes
+coordinates beyond a scalar width/height pair, a full-channel image store
+reaches every in-bounds lane, and a read-only snapshot of that pair matches
+the destination extent at dispatch time. Altered branches, coordinates,
+masks, source binding, or missing snapshots fail closed. A focused test failed
+on the old fallback and 16 focused graphics/image tests now pass.
+
+The strict Silent/Native run passed the former three-parent storage overlap
+after that runtime proof. It entered the logo-level startup and stopped at a
+different storage-image overlap with nine linked parents: six render targets,
+two storage images, and one storage buffer; eight relations cross the new
+range and one existing render target is contained within it. No native
+capture or controlled gameplay was obtained. Determine the new image's
+actual first-write coverage and each parent's content provenance before
+extending the overlap policy. A prior uniformly black native frame remains
+scored evidence from this bring-up phase.
+
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
 On the reference Gen5 workload, the owned Linux build in strict Silent/Native

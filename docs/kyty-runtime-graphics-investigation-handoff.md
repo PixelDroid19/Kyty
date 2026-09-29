@@ -326,6 +326,28 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- EUD base-pair lifetime (2026-09-28): rejecting every shader that writes
+  the former EUD pointer pair after any mapped scalar load was too broad.
+  A bounded 368-instruction trace had six mapped loads before one full-pair
+  replacement, two later ordinary reads, and 18 forward-only branch edges.
+  Commit `05832a6d` tracks possible and definite writes along those edges:
+  mapped loads require the original pair on all paths; ordinary reads require
+  both new words on all paths. Partial writes and unresolved targets still
+  fail. The next hypothesis lies after shader admission, not in permitting
+  EUD loads after an arbitrary pointer clobber.
+
+- Storage-image seed exclusion (2026-09-28): a direct write-only use is not
+  evidence that every destination texel is written. With zero symbolic tile
+  coverage, the old dispatch-size fallback skipped the seed and hid an
+  earlier three-parent alias. Commit `4f8f0719` removed that fallback and
+  proves one shared bounded-grid pattern with a per-dispatch read-only bounds
+  snapshot. Strict execution again passed that alias, then stopped at a
+  different nine-parent overlap. Commit `ce0ecfae` links older smaller views
+  only when skip-seed proof is present; it does not authorize copying their
+  different formats into a partially written destination. The next hypothesis
+  is the new image's writer coverage or live source ownership, not a blanket
+  multi-parent link.
+
 - Inactive depth-image compute dispatch (2026-09-28): a mixed-parent R32
   storage view with depth-64KB tiling was contained in two newer GPU-owned
   color render targets and an older storage view. Their formats and tile
