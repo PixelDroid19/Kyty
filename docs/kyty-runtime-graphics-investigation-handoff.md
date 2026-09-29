@@ -350,8 +350,24 @@ against the same correct gameplay capture.
   used as proof that memory pressure caused the GPU timeout. This failure is
   distinct from the earlier Mesa `execbuf` ENOMEM reports. Obtain the exact
   timed-out GPU submission and host resource state before changing queue,
-  memory, or shader policy. The protected devcoredump is not available to
-  this unprivileged session.
+  memory, or shader policy. A later authorized local copy of the devcoredump
+  identifies an RCS job with start sequence 14318 and completed sequence
+  14317; the GuC log snapshot was not allocated. It confirms the unfinished
+  job but does not identify the responsible guest draw or dispatch.
+
+- Guest-address self-induced residency (2026-09-29): repeated host-pointer
+  imports of a resident span plus a guard page populate one more guest page
+  per preparation even without guest writes. This was reproduced with a
+  synthetic Vulkan mapping and with the production importer. In a bounded
+  workload sample, 64,066 of 64,200 chunks were adjacent to another chunk at
+  preparation 500. Importing exact page spans and resolving a crossing load
+  through two page translations reduces that sample to 1,804 entries and
+  120 retained tables (76.5 ms mean preparation time). The native residency
+  and cross-page value tests both fail with the old implementation and pass
+  with the correction. The 120-second strict run ends at its time limit;
+  present 39 still scores uniform black. This does not establish that all Xe
+  device-loss paths or the visual frontier are fixed. The unvalidated
+  physical read-ahead experiment was removed before the corrected run.
 
 - Black VideoOut producer exclusion (2026-09-29): a one-shot packed-source
   readback at present 20 counted zero RGB bits across 8,294,400 pixels and a

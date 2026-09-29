@@ -24,6 +24,7 @@ UT_LINK(DevToolsExportCatalog);
 #endif
 UT_LINK(EmulatorGraphicsState);
 UT_LINK(EmulatorGraphicsDirtyTracking);
+UT_LINK(EmulatorGuestDeviceAddress);
 UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorKernelTime);
 UT_LINK(EmulatorGuestMemory);

@@ -33,6 +33,8 @@ String8 Spirv::GuestDeviceAddressTypes(bool ulong_declared) const
 		types += String8::FromPrintf("%%gda_u64_%u = OpConstant %%ulong %u\n", offset, offset);
 	}
 	types += String8::FromPrintf("%%gda_u64_null = OpConstant %%ulong %u\n", kGuestDeviceAddressNullBytes);
+	types += String8::FromPrintf("%%gda_u64_page = OpConstant %%ulong %u\n", kGuestDeviceAddressPageBytes);
+	types += String8::FromPrintf("%%gda_u64_page_mask = OpConstant %%ulong %u\n", kGuestDeviceAddressPageBytes - 1u);
 	return types;
 }
 
@@ -152,14 +154,51 @@ bool Spirv::EmitGuestLoad(const String8& lo, const String8& hi, int dwords, cons
 	                               "%%%s_hi64 = OpUConvert %%ulong %%%s\n"
 	                               "%%%s_his = OpShiftLeftLogical %%ulong %%%s_hi64 %%uint_32\n"
 	                               "%%%s_guest = OpBitwiseOr %%ulong %%%s_his %%%s_lo64\n"
-	                               "%%%s_device = OpFunctionCall %%ulong %%guest_device_address %%%s_guest %%gda_u64_%u\n",
-	                               p, lo.c_str(), p, hi.c_str(), p, p, p, p, p, p, p, static_cast<uint32_t>(dwords) * 4u);
+	                               "%%%s_device = OpFunctionCall %%ulong %%guest_device_address %%%s_guest %%gda_u64_4\n",
+	                               p, lo.c_str(), p, hi.c_str(), p, p, p, p, p, p, p);
+	if (dwords > 1)
+	{
+		// Chunks have page-aligned boundaries. A load of at most 128 bytes
+		// therefore needs at most two translations, and the second lookup is
+		// only executed when the load crosses a page. Neither import needs to
+		// make an otherwise untouched neighbouring guest page resident.
+		*output += String8::FromPrintf(
+		    "%%%s_page_offset = OpBitwiseAnd %%ulong %%%s_guest %%gda_u64_page_mask\n"
+		    "%%%s_last_offset = OpIAdd %%ulong %%%s_page_offset %%gda_u64_%u\n"
+		    "%%%s_crosses = OpUGreaterThanEqual %%bool %%%s_last_offset %%gda_u64_page\n"
+		    "%%%s_next_delta = OpISub %%ulong %%gda_u64_page %%%s_page_offset\n"
+		    "%%%s_next_guest = OpIAdd %%ulong %%%s_guest %%%s_next_delta\n"
+		    "OpSelectionMerge %%%s_split_end None\n"
+		    "OpBranchConditional %%%s_crosses %%%s_split_load %%%s_split_skip\n"
+		    "%%%s_split_load = OpLabel\n"
+		    "%%%s_next_device_raw = OpFunctionCall %%ulong %%guest_device_address %%%s_next_guest %%gda_u64_4\n"
+		    "OpBranch %%%s_split_end\n"
+		    "%%%s_split_skip = OpLabel\n"
+		    "OpBranch %%%s_split_end\n"
+		    "%%%s_split_end = OpLabel\n"
+		    "%%%s_next_device = OpPhi %%ulong %%%s_next_device_raw %%%s_split_load %%%s_device %%%s_split_skip\n",
+		    p, p, p, p, static_cast<uint32_t>(dwords - 1) * 4u, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p, p);
+	}
 	for (int word = 0; word < dwords; word++)
 	{
-		*output += String8::FromPrintf("%%%s_a%d = OpIAdd %%ulong %%%s_device %%gda_u64_%d\n"
-		                               "%%%s_p%d = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_uint %%%s_a%d\n"
+		if (word == 0)
+		{
+			*output += String8::FromPrintf("%%%s_a0 = OpCopyObject %%ulong %%%s_device\n", p, p);
+		} else
+		{
+			*output += String8::FromPrintf(
+			    "%%%s_offset%d = OpIAdd %%ulong %%%s_page_offset %%gda_u64_%d\n"
+			    "%%%s_second%d = OpUGreaterThanEqual %%bool %%%s_offset%d %%gda_u64_page\n"
+			    "%%%s_next_offset%d = OpISub %%ulong %%%s_offset%d %%gda_u64_page\n"
+			    "%%%s_next_addr%d = OpIAdd %%ulong %%%s_next_device %%%s_next_offset%d\n"
+			    "%%%s_first_addr%d = OpIAdd %%ulong %%%s_device %%gda_u64_%d\n"
+			    "%%%s_a%d = OpSelect %%ulong %%%s_second%d %%%s_next_addr%d %%%s_first_addr%d\n",
+			    p, word, p, word * 4, p, word, p, word, p, word, p, word, p, word, p, p, word,
+			    p, word, p, word * 4, p, word, p, word, p, word, p, word);
+		}
+		*output += String8::FromPrintf("%%%s_p%d = OpConvertUToPtr %%_ptr_PhysicalStorageBuffer_uint %%%s_a%d\n"
 		                               "%%%s_d%d = OpLoad %%uint %%%s_p%d Aligned 4\n",
-		                               p, word, p, word * 4, p, word, p, word, p, word, p, word);
+		                               p, word, p, word, p, word, p, word);
 	}
 	return true;
 }

@@ -18,10 +18,11 @@ struct GraphicContext;
 // zeros, the target of any unmapped guest address, followed by entries of
 // eight dwords:
 //   {guest_base_lo, guest_base_hi, size_lo, size_hi, device_lo, device_hi, span_lo, span_hi}
-// `size` is the guest byte count. `span` is the imported byte count: `size`,
-// plus one page when the backing continues, so a load may finish in that page.
+// `size` is the guest byte count and `span` the imported byte count. Chunks
+// cover whole pages; translated multiword loads resolve each page separately.
 constexpr uint32_t kGuestDeviceAddressEntryDwords = 8;
 constexpr uint32_t kGuestDeviceAddressNullBytes   = 256;
+constexpr uint32_t kGuestDeviceAddressPageBytes   = 4096;
 
 // A load of `bytes` at `offset` into a chunk matches only when it starts in
 // the guest `size` and ends inside the imported `span`. An access that would

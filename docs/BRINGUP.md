@@ -254,6 +254,45 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Guest-address imports creating their own residency (2026-09-29, not gameplay)
+
+A clean strict Silent/Native run of `ae78d70a` reached 45 presents with a
+uniform-black scored capture, then lost the device in `vkQueueSubmit` after
+172 seconds. A bounded timing probe subsequently found about 98 ms per
+`GuestDeviceAddressPrepare` call, 63,588 chunk entries and 499 retained tables
+at call 500; that run ended with Mesa `execbuf` ENOMEM. A second sample had
+64,200 entries, of which 64,066 adjoined another chunk.
+
+A synthetic Vulkan reproduction proves a self-induced growth mechanism:
+importing a resident run plus one guard page makes that next page resident.
+The next preparation imports it and another guard page, without any new guest
+write. The correction imports exact page spans and translates the two pages
+of a crossing shader load separately. Two native Vulkan regressions fail on
+the previous implementation and pass with the correction: repeated preparation
+does not populate untouched neighbours, and 128-byte loads preserve both
+pages (or the zero tail when the second page is absent).
+
+The strict 120-second measurement reached a scored, still-black present 39
+and stopped at its configured time limit, with a 6.1 GiB service memory peak.
+At call 500 it had 1,804 entries, 120 retained tables and 76.5 ms mean
+preparation time. This bounds the artificial import growth in that run; it
+does not establish long-run stability, correct color output or gameplay.
+The experimental physical read-ahead was removed before this run because it
+would amplify the newly proven residency mechanism.
+
+Recorded separately: `ShaderSpirvGuestAddress.cpp`, in the lookup after
+`gda_merge`, reads entry zero even when the table count is zero. An empty
+registry allocates only the zero prefix, so those entry reads are outside the
+buffer. Guard the empty-table path before reading entry fields; the current
+workload evidence has not identified an empty table at its remaining failure.
+
+Validation also exposed a pre-existing test mismatch at
+`UnitTestEmulatorShaderGetpc.cpp:170`: the rejection test expects a vertex
+`s_getpc_b64` with valid program-base metadata to exit, although that path is
+now admitted. The same assertion fails with the guest-address source restored
+to `ae78d70a`. Update that case to validate successful vertex lowering while
+retaining the missing-metadata and invalid-destination rejection checks.
+
 ### Raw render alias composition and explicit mip fetch (2026-09-29, not gameplay)
 
 Commit `28db4aa3` materializes a partially written linear storage image from

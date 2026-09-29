@@ -23,18 +23,13 @@ namespace {
 // Imports cover resident pages only (never-touched pages read as zero through
 // the table's zero prefix), in chunks bounded to keep each pin modest.
 constexpr uint64_t kChunkBytes = 64ull << 20u;
-constexpr uint64_t kPageBytes  = 4096;
-
-// A translated load reads up to 128 bytes from its start address, so it can
-// cross the logical end of a chunk. Each chunk's buffer spans one more page
-// whenever the guest backing continues, keeping such loads inside the buffer.
-constexpr uint64_t kGuardBytes = kPageBytes;
+constexpr uint64_t kPageBytes  = kGuestDeviceAddressPageBytes;
 
 struct Chunk
 {
 	uint64_t       guest  = 0;
 	uint64_t       size   = 0; // bytes the table maps to this chunk
-	uint64_t       span   = 0; // imported bytes: size plus an optional guard page
+	uint64_t       span   = 0; // imported bytes
 	VkDeviceMemory memory = nullptr;
 	VkBuffer       buffer = nullptr;
 	uint64_t       device = 0;
@@ -281,9 +276,10 @@ bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* chan
 		const uint64_t guest = base + page * kPageBytes;
 		const uint64_t size  = (end - page) * kPageBytes;
 		Chunk          chunk;
-		// The guard page needs backing that continues past the chunk; at the
-		// end of a mapping the chunk is imported without it.
-		if (!(end < pages && ImportChunk(ctx, guest, size, size + kGuardBytes, &chunk)) && !ImportChunk(ctx, guest, size, size, &chunk))
+		// Do not pin an extra guest page: the import itself would make that
+		// page resident and every subsequent prepare would import another one.
+		// Translated loads split at page boundaries instead.
+		if (!ImportChunk(ctx, guest, size, size, &chunk))
 		{
 			std::fprintf(stderr, "guest import failed: base=0x%012" PRIx64 " size=0x%" PRIx64 " host_writable=%d\n", guest, size,
 			             Core::VirtualMemory::IsRangeWritable(guest, size) ? 1 : 0);
