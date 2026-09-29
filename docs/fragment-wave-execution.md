@@ -121,6 +121,137 @@ compute pass takes about 7.0 ms at 1024 square, including production of dense
 color and coverage results; this reinforces the need to avoid dispatching and
 writing unused slots. It is not an end-to-end guest performance result.
 
+## Verified banked row execution
+
+The paired compute backend now emits DPP moves and bitwise operations with
+architectural source EXEC, destination row/bank masks, fetch-inactive and
+bound-control handling. It also emits `PERMLANE16` and `PERMLANEX16` with
+their two-word selector table and source EXEC. Both banks' sources are loaded
+before either destination bank is stored, preserving aliased operands.
+The admitted DPP controls are quad permutation, row shifts, row rotation,
+row mirror and half-row mirror. Other tuples remain rejected.
+
+An original GPU integration replay uses the production compiler's output and
+compares every retained vector register plus scalar reads of lanes 31 and 63
+against an independent ISA reference. Eighteen modules and eight EXEC masks
+per module pass on the current host: 144 cases, 18,864 register observations,
+zero mismatches. There are 138 cases in which the upper half changes the
+aggregate. The matrix includes both empty destination masks, inactive source
+lanes, partial destination masks, source/destination aliasing, both FI values
+and both BC values. All modules validate with the Vulkan 1.4 target.
+
+Admission also rejects eight malformed tuples. Six previously escaped to a
+generic emitter or ignored unused operands. Unadmitted bitwise DPP tuples
+now fail before generic lowering; source counts, unused sources, destination
+modifiers and DS metadata are checked explicitly.
+
+Full destination masks are folded at translation time instead of generating
+row and quarter-bank indexing. The complete synthetic reduction module
+changes from 834 to 746 SPIR-V operations with identical GPU results. These
+counts include its observation code and declarations; they do not establish
+driver compile-time, memory or guest frame-rate improvements.
+
+This implements shared execution primitives. It does not enable a compute
+fragment pipeline or advance the strict fragment-emitter frontier. A first
+strict integration attempt terminates before any present because the host
+kernel invokes its global OOM killer during pipeline compilation. The service
+reports a 6.8 GiB memory peak, while the kernel reports exhausted host RAM and
+swap; this is not evidence of a shader semantic failure or a Xe timeout.
+The integration comparison therefore remains pending.
+
+A second attempt reuses the completed pipelines but reaches the 6 GiB
+service memory limit while compiling the next pipeline. The kernel attributes
+this termination to the service's memory cgroup, not a GPU reset. Neither
+attempt reaches a present; neither supplies a new frame-rate result.
+
+## Verified signed subword conversion
+
+The captured pixel IR contains twenty-four `VCvtF32I32` operations selecting
+one SDWA word with `SRC0_SEXT`. The unsigned operand loader positioned the
+selected bits correctly but did not extend their sign. Conversion now extends
+the selected byte, word or dword before converting the signed integer to
+FP32. For example, selected word `0x8000` converts from `-32768`. Admission
+requires the exact plain VGPR source, full destination and modifier tuple;
+unsupported encodings remain rejected. The ISA contract is section 13.3.7.
+
+The decoded signed tuple failed paired admission before the correction.
+Seven additional GPU replay modules cover all valid source selections with
+positive and negative values and independent lower/upper EXEC masks. The
+combined row, permutation and conversion replay passes 200 cases and 26,200
+register observations, with zero differences; all modules validate for
+Vulkan 1.4. Inactive destinations retain their original bits. Strict guest
+integration remains pending because of the pipeline-compilation memory limit.
+
+## Verified whole-quad masks
+
+Paired execution now admits the exact scalar-pair `SWqmB64` tuple and
+expands each nonempty four-bit group in both words. The native fragment
+`exec, exec` no-op is not used when registers hold an architectural mask.
+The existing scalar emitter reads both source words before either store and
+updates SCC from the resulting pair. Section 12.3 defines these effects.
+
+A decoded `exec, exec` replay failed paired admission before the correction.
+Six GPU modules now cover EXEC, aligned SGPR pairs and VCC, including
+source/destination aliasing and distinct sources. Independent ISA references
+check both result words, SCC and subsequent masked writes. Combined with
+the preceding replay, 248 cases and 32,632 observations pass with zero
+differences and valid Vulkan 1.4 modules. This is compiler contract evidence;
+the compute fragment pipeline is still pending.
+
+## Verified image destination preservation
+
+The paired generic emitter previously applied image destination guards after
+renaming native registers to their bank names. The guard recognized only
+native VGPR names, so samples could overwrite inactive destinations. The
+generic emitter now guards the native snippet before rewriting it. Rewriting
+then substitutes each bank's EXEC bit into the guard; the native path keeps
+its existing guard placement.
+
+Three GPU replay modules sample a real RGBA32F image with component masks
+1, 2 and 8 and independent lower/upper EXEC masks. The old placement produces
+981 mismatches, including every destination under empty EXEC. After correction,
+the combined replay passes 272 cases and 35,776 observations with zero
+differences. All modules validate for Vulkan 1.4. This proves register
+preservation; no guest capture has attributed a visual symptom to this defect.
+
+The final combined replay adds a four-iteration row operation controlled by
+uniform scalar branches. The unchanged production output passes 280 cases
+and 36,824 observations across 35 modules, with zero differences. Boundary
+and graphics-table provenance gates also pass; unit tests remain deferred
+until the requested gameplay checkpoint.
+
+## Compiler integration gaps
+
+The program still needs pixel interpolation and exports. Pixel exports
+must update resolve coverage instead of terminating a helper invocation with
+`OpKill`. These are explicit adapters, not permission to classify pixel IR as
+guest compute code.
+
+`ShaderSpirvOperands.cpp:459` directly shuffles retained VGPR values for
+native quad DPP. `ShaderComputeWaveAnalysis.cpp` also admits such floating
+point operations through the generic bank wrapper. Remaining inside a bank
+does not establish the required FI=0 source-EXEC behavior. Ten captured
+`VSubF32` quad tuples need that source mask contract or an evidenced proof
+that their source quads are always fully active. Complete pixel admission
+and execution remain gated on this proof; no visual cause is attributed here.
+
+## Compiler memory experiment
+
+A pipeline-only Vulkan 1.4 replay isolates the large compute module from
+guest memory and dispatches no GPU work. Under a 4 GiB service limit, the
+original module reaches a cgroup OOM termination after about three minutes.
+Applying only the SPIRV-Tools local single-block load/store elimination pass
+reduces its operations from 77,860 to 70,865 and loads from 18,191 to 11,980.
+Both modules validate, and the independent 280-case GPU replay remains exact
+after that pass. The module still reaches the same 4 GiB OOM limit after
+about three minutes. The hypothesis that these redundant loads were enough
+to remove the compilation memory barrier is disproven.
+
+No optimizer policy change is shipped from this experiment and no guest
+frame-time improvement is claimed. Further compiler-memory work needs a
+measured cause beyond the number of local loads; strict runtime comparison
+also needs sufficient host memory for guest state and driver compilation.
+
 ## Integration design
 
 The planned execution strategy has three GPU phases. The existing native

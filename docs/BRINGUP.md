@@ -254,6 +254,32 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Paired wave primitives (2026-09-29, GPU replay verified)
+
+Shared paired execution now implements bitwise DPP rows and row-table
+permutations with architectural source EXEC and destination masks, signed
+SDWA integer conversion, whole-quad masks and inactive image destination
+preservation. The combined Vulkan 1.4 GPU replay covers 280 cases and 36,824
+register observations with zero differences against independent ISA
+references. Eight malformed DPP tuples are rejected. The local Linux build,
+emulator boundary gate and graphics-table provenance gate pass. Details and
+remaining fragment adapters are recorded in `fragment-wave-execution.md`.
+
+This does not enable compute fragment execution or provide a new guest FPS
+measurement. Strict integration attempts end before any present: one is
+terminated by host-wide OOM and another reaches its 6 GiB service limit
+during pipeline compilation. Preservation of the strict guest frontier is
+therefore still awaiting a run with sufficient memory.
+
+A separate pipeline-only experiment tests whether eliminating redundant
+local loads solves the compiler memory barrier. A single-block elimination
+pass reduces the large module from 77,860 to 70,865 operations without adding
+phi nodes; both variants still reach a 4 GiB cgroup OOM limit after roughly
+three minutes. GPU reference checks remain exact. The capacity hypothesis is
+disproven, and no optimizer policy change is shipped. The next investigation
+must measure the driver's memory producer rather than infer it from SPIR-V
+operation counts alone. Unit tests and gameplay gates remain pending.
+
 ### Vulkan 1.4 baseline (2026-09-29, opening image verified)
 
 The active build now requires Vulkan 1.4 SDK headers and external SPIRV-Tools
