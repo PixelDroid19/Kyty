@@ -129,6 +129,9 @@ int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void*
 // guest view's protection. Returns 0 for non-physical or partial ranges.
 [[nodiscard]] uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size);
 bool                 KernelUnmapPhysicalAlias(uint64_t alias);
+// Snapshot query: true only when one physical mapping covers the range and
+// its entire backing interval is known to contain no populated host pages.
+[[nodiscard]] bool KernelIsPhysicalRangeUnpopulated(uint64_t vaddr, uint64_t size);
 int KYTY_SYSV_ABI    KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size);
 int KYTY_SYSV_ABI    KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 int KYTY_SYSV_ABI    KernelBatchMap2(void* entries, int entry_count, int* processed_out, int flags);

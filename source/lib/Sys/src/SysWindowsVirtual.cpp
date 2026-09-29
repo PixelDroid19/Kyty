@@ -837,6 +837,12 @@ bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_of
 	return true;
 }
 
+bool sys_virtual_is_shared_backing_range_unpopulated([[maybe_unused]] void* backing, [[maybe_unused]] uint64_t backing_offset,
+                                                    [[maybe_unused]] uint64_t size)
+{
+	return false;
+}
+
 uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
 	                                    VirtualMemory::Mode mode, uint64_t alignment)
 {

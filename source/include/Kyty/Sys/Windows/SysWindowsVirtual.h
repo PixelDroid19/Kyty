@@ -29,6 +29,7 @@ void     sys_virtual_destroy_shared_backing(void* backing);
 // Drop host pages for a released direct-memory range. No-op when the host
 // section cannot punch holes; callers still treat success as best-effort reclaim.
 bool     sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_offset, uint64_t size);
+bool     sys_virtual_is_shared_backing_range_unpopulated(void* backing, uint64_t backing_offset, uint64_t size);
 uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                         VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,

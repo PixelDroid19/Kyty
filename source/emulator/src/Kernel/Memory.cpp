@@ -224,6 +224,7 @@ public:
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	uint64_t MapAlias(uint64_t vaddr, uint64_t size);
+	bool     IsRangeUnpopulated(uint64_t vaddr, uint64_t size);
 	uint64_t TotalAllocatedBytes();
 	void     FillSnapshot(KernelMemorySnapshot* snapshot);
 	bool     FindLargestAvailableSpan(uint64_t search_start, uint64_t search_end, uint64_t alignment, uint64_t* span_start,
@@ -1249,6 +1250,30 @@ uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size)
 	return 0;
 }
 
+bool PhysicalMemory::IsRangeUnpopulated(uint64_t vaddr, uint64_t size)
+{
+	if (vaddr == 0 || size == 0 || vaddr > UINT64_MAX - (size - 1u))
+	{
+		return false;
+	}
+	Core::LockGuard lock(m_mutex);
+	for (const auto& mapping: m_mapped)
+	{
+		if (mapping.unmap_pending || vaddr < mapping.map_vaddr || size > mapping.map_size ||
+		    vaddr - mapping.map_vaddr > mapping.map_size - size)
+		{
+			continue;
+		}
+		const uint64_t delta = vaddr - mapping.map_vaddr;
+		if (delta > UINT64_MAX - mapping.phys_addr)
+		{
+			return false;
+		}
+		return VirtualMemory::IsSharedBackingRangeUnpopulated(m_backing, mapping.phys_addr + delta, size);
+	}
+	return false;
+}
+
 bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)
 {
 	EXIT_IF(out == nullptr);
@@ -2213,6 +2238,11 @@ uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size)
 bool KernelUnmapPhysicalAlias(uint64_t alias)
 {
 	return alias != 0 && VirtualMemory::Free(alias);
+}
+
+bool KernelIsPhysicalRangeUnpopulated(uint64_t vaddr, uint64_t size)
+{
+	return g_physical_memory != nullptr && g_physical_memory->IsRangeUnpopulated(vaddr, size);
 }
 
 bool KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* out)

@@ -899,6 +899,29 @@ bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_of
 #endif
 }
 
+bool sys_virtual_is_shared_backing_range_unpopulated(void* backing, uint64_t backing_offset, uint64_t size)
+{
+#if defined(__linux__) && defined(SEEK_DATA)
+	const auto* shared = static_cast<const SharedBacking*>(backing);
+	if (shared == nullptr || shared->fd < 0 || size == 0 || backing_offset > shared->size || size > shared->size - backing_offset)
+	{
+		return false;
+	}
+	// The memfd's SEEK_DATA includes populated and swapped-out pages. None of
+	// its mapping operations consume the file position changed by this query.
+	const int   saved_errno = errno;
+	const off_t next_data   = ::lseek(shared->fd, static_cast<off_t>(backing_offset), SEEK_DATA);
+	const int   query_errno = errno;
+	errno                  = saved_errno;
+	return next_data >= 0 ? static_cast<uint64_t>(next_data) >= backing_offset + size : query_errno == ENXIO;
+#else
+	(void)backing;
+	(void)backing_offset;
+	(void)size;
+	return false;
+#endif
+}
+
 static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t prefer, uint64_t backing_offset, uint64_t size,
 	                                     int protect, uint64_t alignment)
 {

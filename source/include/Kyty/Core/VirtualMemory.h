@@ -146,6 +146,9 @@ void           DestroySharedBacking(SharedBacking* backing);
 // Reclaim host RAM for a released physical range (punch hole / discard pages).
 // Only call when no live map still covers [backing_offset, backing_offset+size).
 bool           DiscardSharedBackingRange(SharedBacking* backing, uint64_t backing_offset, uint64_t size);
+// True only for a positively identified, page-aligned unpopulated interval.
+// False includes unsupported hosts and query errors. The result is a snapshot.
+bool           IsSharedBackingRangeUnpopulated(SharedBacking* backing, uint64_t backing_offset, uint64_t size);
 uint64_t       MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                 uint64_t alignment);
 bool           MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode);

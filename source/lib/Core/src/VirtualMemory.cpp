@@ -1905,6 +1905,17 @@ bool DiscardSharedBackingRange(SharedBacking* backing, uint64_t backing_offset, 
 	return sys_virtual_discard_shared_backing_range(backing->handle, backing_offset, size);
 }
 
+bool IsSharedBackingRangeUnpopulated(SharedBacking* backing, uint64_t backing_offset, uint64_t size)
+{
+	const uint64_t page_size = GetPageSize();
+	if (!shared_range_is_valid(backing, backing_offset, size) || page_size == 0 || backing_offset % page_size != 0 ||
+	    size % page_size != 0)
+	{
+		return false;
+	}
+	return sys_virtual_is_shared_backing_range_unpopulated(backing->handle, backing_offset, size);
+}
+
 uint64_t MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                           uint64_t alignment)
 {

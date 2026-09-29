@@ -253,9 +253,17 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64_t first, uint64_t last,
                         std::vector<uint8_t>* resident, bool* changed)
 {
-	const uint64_t pages = last - first;
+	const uint64_t pages        = last - first;
+	const uint64_t span_address = base + first * kPageBytes;
+	const uint64_t span_size    = pages * kPageBytes;
+	// A wholly sparse physical interval cannot contain resident pages. Requery
+	// each preparation so a later guest write is discovered normally.
+	if (Kernel::Memory::KernelIsPhysicalRangeUnpopulated(span_address, span_size))
+	{
+		return true;
+	}
 	resident->resize(static_cast<size_t>(pages));
-	if (!Core::VirtualMemory::QueryResidentPages(base + first * kPageBytes, pages * kPageBytes, resident->data()))
+	if (!Core::VirtualMemory::QueryResidentPages(span_address, span_size, resident->data()))
 	{
 		return false;
 	}
