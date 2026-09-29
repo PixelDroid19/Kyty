@@ -19,6 +19,23 @@
 
 namespace Kyty::Libs::Graphics {
 
+struct SpirvSBranchLoop
+{
+	uint32_t header = 0;
+	uint32_t latch  = 0;
+	uint32_t merge  = 0;
+	uint32_t exit   = 0;
+
+	[[nodiscard]] String8 HeaderName() const;
+	[[nodiscard]] String8 MergeName() const;
+};
+
+// A single-entry interval loop ending in SBranch, with one exit destination.
+// Several guest back edges share its final latch and structured continue block.
+bool ScJoinFindSBranchLoop(const ShaderCode& code, uint32_t header, SpirvSBranchLoop* loop);
+bool ScJoinFindSBranchLoopContaining(const ShaderCode& code, uint32_t pc, SpirvSBranchLoop* loop);
+bool ScJoinFindSBranchLoopExit(const ShaderCode& code, const ShaderInstruction& inst, SpirvSBranchLoop* loop);
+
 // Static branch edges (SBranch / SCbranch*) that land on pc.
 int ScJoinCountLabelSources(const ShaderCode& code, uint32_t pc);
 

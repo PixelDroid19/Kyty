@@ -120,7 +120,7 @@ void classify_backward_loop_header(const ShaderCode& code, const ShaderLabel& la
 
 void Spirv::WriteLabel(int index)
 {
-	if (index <= 0)
+	if (index < 0)
 	{
 		return;
 	}
@@ -128,7 +128,8 @@ void Spirv::WriteLabel(int index)
 	const auto& instructions = m_code.GetInstructions();
 	const auto& inst         = instructions.At(index);
 	auto&       labels       = m_code.GetLabels();
-	const auto& prev         = instructions.At(index - 1);
+	const ShaderInstruction entry;
+	const auto& prev         = index == 0 ? entry : instructions.At(index - 1);
 
 	// Partition guest labels at this PC.
 	Vector<ShaderLabel*> loop_merges;
@@ -156,10 +157,33 @@ void Spirv::WriteLabel(int index)
 	{
 		ScJoinOrderForEmission(m_code, inst.pc, sc_join_srcs, &sc_join_order);
 	}
+	SpirvSBranchLoop loop;
+	const bool structured_loop_header = ScJoinFindSBranchLoop(m_code, inst.pc, &loop);
+	if (structured_loop_header && guest_labels.Size() > 0)
+	{
+		for (uint32_t g = 0; g < guest_labels.Size(); ++g)
+		{
+			if (guest_labels[g]->GetSrc() == loop.latch)
+			{
+				auto* first = guest_labels[0];
+				guest_labels[0] = guest_labels[g];
+				guest_labels[g] = first;
+				break;
+			}
+		}
+	}
 
 	const String8 guest_join   = pick_guest_join_label(inst.pc, guest_labels);
 	const String8 sc_join_root = pick_sc_join_root(m_code, inst.pc, sc_join_order, sc_join_srcs);
-	const String8 after_loop   = !sc_join_root.IsEmpty() ? sc_join_root : guest_join;
+	String8 after_loop = !sc_join_root.IsEmpty() ? sc_join_root : guest_join;
+	if (loop_merges.Size() > 0 && sc_join_srcs.Size() > 0)
+	{
+		const uint32_t owner = ScJoinFindOwner(m_code, loop_merges[loop_merges.Size() - 1]->GetSrc(), inst.pc, sc_join_srcs);
+		if (owner != 0)
+		{
+			after_loop = ScJoinMergeName(inst.pc, owner);
+		}
+	}
 
 	// pending_branch: previous block still needs a terminator OpBranch %next.
 	// skip_branch_to_next: next OpLabel is already the target of a prior OpBranch
@@ -280,6 +304,17 @@ void Spirv::WriteLabel(int index)
 		}
 		m_source += String8::FromPrintf("       %%%s = OpLabel\n", label.ToString().c_str());
 		labels_num++;
+		if (structured_loop_header)
+		{
+			if (g == 0)
+			{
+				m_source += String8::FromPrintf("OpLoopMerge %%%s %%loop_continue_%04" PRIx32 " None\n"
+				                                "OpBranch %%loop_body_%04" PRIx32 "\n"
+				                                "%%loop_body_%04" PRIx32 " = OpLabel\n",
+				                                loop.MergeName().c_str(), loop.latch, loop.latch, loop.latch);
+			}
+			continue;
+		}
 
 		// Backward SBranch / SCbranch targets are loop headers: emit OpLoopMerge.
 		bool backward_loop_source    = false;

@@ -98,6 +98,11 @@ static uint32_t find_backward_loop_for_exit(const ShaderCode& code, const Shader
 		}
 
 		const auto backedge = ShaderLabel(inst);
+		SpirvSBranchLoop loop;
+		if (ScJoinFindSBranchLoop(code, backedge.GetDst(), &loop))
+		{
+			continue;
+		}
 		if (backedge.GetDst() >= backedge.GetSrc() || find_backward_loop_merge(code, backedge) != exit.ToString())
 		{
 			continue;
@@ -124,6 +129,17 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 
 	if (branch.GetDst() < inst.pc)
 	{
+		SpirvSBranchLoop loop;
+		if (ScJoinFindSBranchLoop(code, branch.GetDst(), &loop))
+		{
+			*dst_source += String8::FromPrintf("OpBranch %%loop_continue_%04" PRIx32 "\n", loop.latch);
+			if (inst.pc == loop.latch)
+			{
+				*dst_source += String8::FromPrintf("%%loop_continue_%04" PRIx32 " = OpLabel\nOpBranch %%%s\n",
+				                                  loop.latch, loop.HeaderName().c_str());
+			}
+			return true;
+		}
 		String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, inst.pc);
 		String8 merge_label    = find_backward_loop_merge(code, branch);
 		const bool has_exit    = merge_label.Size() != 0;
@@ -146,6 +162,13 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 		        .ReplaceStr("<unreachable_merge>",
 		                    has_exit ? ""
 		                             : String8::FromPrintf("%%%s = OpLabel\n                OpUnreachable", merge_label.c_str()));
+		return true;
+	}
+
+	SpirvSBranchLoop exit_loop;
+	if (ScJoinFindSBranchLoopExit(code, inst, &exit_loop))
+	{
+		*dst_source += String8::FromPrintf("OpBranch %%%s\n", exit_loop.MergeName().c_str());
 		return true;
 	}
 
@@ -284,7 +307,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 			label_merge = "";
 		}
 	}
-	const uint32_t loop_backedge = find_backward_loop_for_exit(code, label);
+	SpirvSBranchLoop exit_loop;
+	const bool structured_loop_exit = ScJoinFindSBranchLoopExit(code, inst, &exit_loop);
+	const uint32_t loop_backedge = structured_loop_exit ? 0 : find_backward_loop_for_exit(code, label);
 
 	// Promote a forward conditional to if/else only for a true diamond: the
 	// block before the taken target is an unconditional branch to a join that
@@ -382,6 +407,15 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
         <param1>
                OpLoopMerge %<label> %loop_continue_<backedge> None
                OpBranchConditional %cc_b_<index> %<label> %t230_<index>
+        %t230_<index> = OpLabel
+)";
+	static const char* text_loop_selection = R"(
+        <param0>
+        <param1>
+               OpSelectionMerge %sc_exit_<index> None
+               OpBranchConditional %cc_b_<index> %<label> %t230_<index>
+        %sc_exit_<index> = OpLabel
+               OpUnreachable
         %t230_<index> = OpLabel
 )";
 
@@ -500,6 +534,24 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	{
 		// Guest label is the structured loop merge (not sc_join).
 		text      = text_loop_exit;
+		label_str = label.ToString();
+	}
+	if (structured_loop_exit)
+	{
+		// A break leaves the innermost loop; the non-breaking arm is this
+		// selection's merge. The loop header already owns OpLoopMerge.
+		text      = text_variant_b;
+		label_str = exit_loop.MergeName();
+	}
+	SpirvSBranchLoop enclosing_loop;
+	if (!structured_loop_exit && !discard && label.GetDst() > inst.pc &&
+	    ScJoinFindSBranchLoopContaining(code, inst.pc, &enclosing_loop) &&
+	    ScJoinFindReconvergence(code, label.GetDst(), next_inst.pc) >= enclosing_loop.merge)
+	{
+		// Both arms leave through the loop's break/continue edges. A selection
+		// inside the loop cannot own a merge after that loop; its local merge
+		// is unreachable, while the real guest edges stay intact.
+		text      = text_loop_selection;
 		label_str = label.ToString();
 	}
 
