@@ -254,6 +254,18 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Loaded image resource lifetime (2026-09-29, compiler verified)
+
+Sampled-texture and sampler lookup now checks a live mapped load before the
+initial SGPR binding. An initial flat texture and a later array descriptor
+share one SGPR home in the captured pixel program. The later load's recorded
+consumer lifetime identifies the array descriptor, but lookup previously
+returned the initial flat binding. Comparison sampling then rejected the
+instruction's four array coordinates. With the lookup priority corrected,
+complete-program replay selects the loaded array and emits both lane banks.
+This is resource-selection and compiler evidence; resulting guest pixels
+and frame time remain unverified.
+
 ### Paired wave primitives (2026-09-29, GPU replay verified)
 
 Shared paired execution now implements bitwise DPP rows and row-table

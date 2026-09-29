@@ -24,15 +24,8 @@ int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const
 		return -1;
 	}
 	const int texture_register = inst.src[1].register_id;
-	for (int index = 0; index < bind.textures2D.textures_num; ++index)
-	{
-		const auto& descriptor = bind.textures2D.desc[index];
-		if (descriptor.usage == ShaderTextureUsage::ReadOnly && !descriptor.dynamic_sload &&
-		    descriptor.start_register + user_data_register_base == texture_register)
-		{
-			return index;
-		}
-	}
+	// A mapped load replaces the initial descriptor in this SGPR home.
+	// Its recorded consumer lifetime takes precedence over the initial binding.
 	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
 	{
 		const auto& record = bind.dynamic_sloads.records.At(mapping);
@@ -43,6 +36,15 @@ int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const
 		}
 		const int index = record.resource_index;
 		if (index >= 0 && index < bind.textures2D.textures_num && bind.textures2D.desc[index].usage == ShaderTextureUsage::ReadOnly)
+		{
+			return index;
+		}
+	}
+	for (int index = 0; index < bind.textures2D.textures_num; ++index)
+	{
+		const auto& descriptor = bind.textures2D.desc[index];
+		if (descriptor.usage == ShaderTextureUsage::ReadOnly && !descriptor.dynamic_sload &&
+		    descriptor.start_register + user_data_register_base == texture_register)
 		{
 			return index;
 		}
@@ -58,13 +60,8 @@ int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const Shader
 		return -1;
 	}
 	const int sampler_register = inst.src[2].register_id;
-	for (int index = 0; index < bind.samplers.samplers_num; ++index)
-	{
-		if (!bind.samplers.dynamic_sload[index] && bind.samplers.start_register[index] + user_data_register_base == sampler_register)
-		{
-			return index;
-		}
-	}
+	// A mapped load replaces the initial descriptor in this SGPR home.
+	// Its recorded consumer lifetime takes precedence over the initial binding.
 	for (uint32_t mapping = 0; mapping < bind.dynamic_sloads.records.Size(); ++mapping)
 	{
 		const auto& record = bind.dynamic_sloads.records.At(mapping);
@@ -75,6 +72,13 @@ int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const Shader
 		}
 		const int index = record.resource_index;
 		if (index >= 0 && index < bind.samplers.samplers_num)
+		{
+			return index;
+		}
+	}
+	for (int index = 0; index < bind.samplers.samplers_num; ++index)
+	{
+		if (!bind.samplers.dynamic_sload[index] && bind.samplers.start_register[index] + user_data_register_base == sampler_register)
 		{
 			return index;
 		}
