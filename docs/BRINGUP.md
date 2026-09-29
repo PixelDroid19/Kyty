@@ -414,6 +414,40 @@ the metadata operation before ordinary rasterization. Mode two also occurs
 on other targets and denotes fast-clear elimination; its clear-state contract
 must be handled separately from DCC decompression.
 
+### Register-default lookup and context restoration (2026-09-29)
+
+A strict diagnostic run with expanded-surface DCC handling stops at present
+35 on a 2432-by-1368 HDR target with no live GPU-memory object. Its ordinary
+postprocess draw still has color mode six after the preceding metadata
+operation. Original guest indirect lists and their immutable snapshots agree
+at the failure. Creating a zero backing or recognizing operations by shader
+words would conceal the missing state restoration.
+
+A producer hardware watchpoint confirms API version thirteen reads seventeen
+pairs from the sixteen-pair depth default in `Graphics.cpp`. The seventeenth
+read lands on the next `RegisterDefaultInfo` header. This table-size defect
+remains unresolved; verify the versioned depth layout before extending it.
+The ordinary color-control default itself is copied correctly, and its
+observed type lookup reads only the bank and pointer index. Upper index
+metadata is not a supported explanation for the stale mode.
+
+A separate missing target-zero blend key supplies an all-ones pair, later
+used as an invalid register offset. Adding the key with the existing
+`CB_BLEND0_CONTROL` default changes the live normal draw to the valid blend
+register and removes the inherited reserved bits. The same DCC failure
+remains, excluding this lookup defect as the stale-mode cause. The emulator
+and executable builds, source-boundary gate, and graphics-table gate pass;
+focused tests remain deferred until gameplay by the active investigation
+instruction.
+
+The guest surrounds its metadata helper with context-state operations three
+and two. The import resolves to `GraphicsCbType2Pad` in `Graphics.cpp:4079`,
+which drops the operation argument and emits one padding word. The native
+`IT_CLEAR_STATE` parser in `GraphicsRunOpParsers.cpp:547` also resets for every
+operation. These are producer and decoder defects: push-clear and pop must
+save and restore the context bank. Shader and UCONFIG banks are separate.
+The corrected contract still requires a live strict comparison.
+
 ### Zero-LOD HDR sample observation (2026-09-29, not gameplay)
 
 The bounded native sample probe now observes 2D `ImageSampleLz` RGB and RGBA
@@ -528,7 +562,6 @@ the owned byte count if the full parsed string is required. Separately,
 input; passing that same data pointer or a suffix therefore reads freed
 storage. Build a replacement before release when correcting that API. Neither
 case is yet observed in the live workload, and neither is gameplay evidence.
-
 
 ### Residency preparation cost (2026-09-29, not gameplay)
 

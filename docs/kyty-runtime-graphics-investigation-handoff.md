@@ -442,6 +442,20 @@ against the same correct gameplay capture.
   the next correction must preserve the existing expanded surface rather
   than interpret that export as ordinary pixel output.
 
+- DCC dispatch classification (2026-09-29): an ordinary postprocess draw
+  inherits mode six and has no existing target backing. The original guest
+  indirect lists match their snapshots, excluding snapshot corruption in
+  this occurrence. A depth-default read overruns sixteen pairs by one, but
+  the ordinary color-control default is copied correctly. Correcting a
+  separate missing target-zero blend key repairs the live blend-register
+  write while leaving the same DCC failure. Neither the blend lookup nor
+  upper color-control type metadata explains this stale mode. A subsequent
+  guest-call trace finds context operations three and two around the utility;
+  their HLE import instead emits padding and ignores the operation. Implement
+  context push-clear/pop in the producer and shared packet decoder, then
+  repeat the strict comparison. Do not use shader-pattern dispatch or an
+  invented target backing to compensate for this missing restoration.
+
 - Residency-query cost (2026-09-29): during the same run a stack
   sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
   2,113,929,216 bytes with `mincore` from a vertex descriptor bind. Over the
