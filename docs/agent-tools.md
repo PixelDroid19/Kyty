@@ -154,6 +154,15 @@ that target is cancelled rather than delayed; `status.pad` exposes
 It is evidence for reaching and exercising a runtime frontier, not by itself a
 gameplay compatibility claim.
 
+Address-coherency timing in `diagnostics.performance` includes
+`dispatch_writeback`, `guest_address_prepare`, `guest_address_residency` and
+`guest_address_refresh`, each with `_calls`, `_ns` and `_max_ns` fields.
+Dispatch write-back measures the processor drain before guest-address work;
+prepare includes registry locking and table preparation, while residency and
+refresh measure its nested page-discovery and snapshot stages. Counts and
+times use the same snapshot window as other performance metrics. Nested times
+and concurrent processors overlap; do not add them as exclusive frame costs.
+
 ## Stable behavior
 
 - Protocol and payload limits are versioned in

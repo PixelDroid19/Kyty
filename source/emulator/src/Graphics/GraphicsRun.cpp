@@ -1896,6 +1896,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 	}
 	if (needs_guest_writeback)
 	{
+		const ScopedDebugStatsTimer writeback_timer(DebugStatsRecordDispatchWriteBack);
 		WriteBack();
 	}
 

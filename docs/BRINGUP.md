@@ -279,6 +279,24 @@ still require separate evidence. Hosted release builds now install the
 required SDK components. Windows and macOS builds and distribution packaging
 remain untested locally.
 
+### Dispatch address preparation timing (2026-09-29, native verified)
+
+Native `perf-snapshot` and `diagnostics.performance` now expose call counts,
+total time and maximum time for dispatch write-back, guest-address preparation,
+residency discovery and tracked-snapshot refresh. Preparation includes registry
+locking and table work; residency and refresh are nested intervals. They overlap
+with processor and fence timings and are not exclusive frame costs.
+
+The owned Linux build passes, as do strict source boundaries and the graphics
+table manifest. A strict Silent/Native run verifies all twelve new fields in
+both serializers and their snapshot/reset window. A 56.366-second warm interval
+contains 216 presents, a median frame time of 245 ms and 124 submissions per
+present. Dispatch processing accumulates 29.44 seconds, address preparation
+1.90 seconds, residency 1.81 seconds and write-back 1.19 seconds. The scored
+present-791 capture is uniformly black. Translation still stops on a pixel DPP
+row shift at PC 0xfec; no scene or gameplay result is established. These counters
+identify costs without changing guest synchronization or residency decisions.
+
 ### Sparse physical residency query (2026-09-29, not gameplay)
 
 Read-only sampling found descriptor preparation repeatedly scanning an entirely

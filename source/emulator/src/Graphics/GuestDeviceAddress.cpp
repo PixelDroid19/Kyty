@@ -1,4 +1,5 @@
 #include "Emulator/Graphics/GuestDeviceAddress.h"
+#include "Emulator/Graphics/DebugStats.h"
 
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
@@ -305,6 +306,7 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 // Quiesced invalidation clears the bitmap when those imports cease to be valid.
 bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* changed)
 {
+	const DebugStatsScopedTimer residency_timer(DebugStatsRecordGuestAddressResidency);
 	range->imported.resize(static_cast<size_t>(range->size / kPageBytes), 0);
 	std::vector<uint8_t> resident;
 	const auto limit = range->imported.end();
@@ -491,6 +493,7 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 	{
 		return false;
 	}
+	const DebugStatsScopedTimer prepare_timer(DebugStatsRecordGuestAddressPrepare);
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
 	for (auto& [base, range]: registry.ranges)
@@ -503,6 +506,7 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 		registry.dirty = registry.dirty || changed;
 		// Refresh snapshots the CPU wrote since they were taken; the imported
 		// host memory is coherent, so the device sees the refresh directly.
+		const DebugStatsScopedTimer refresh_timer(DebugStatsRecordGuestAddressRefresh);
 		for (auto& chunk: range.chunks)
 		{
 			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span, chunk.generation) &&
