@@ -254,6 +254,24 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Media file replacement callbacks (2026-09-29, not gameplay)
+
+The later startup scene writes the same two packed-color images that VideoOut
+presents, but its media player had no decoder. A live entry trace proves that
+the guest supplied a complete file replacement table, which initialization
+discarded. The source URI was therefore mapped to a nonexistent host path.
+
+AvPlayer now retains that table and provides its bytes to the host demuxer
+through a bounded random-access source. The decoder owns the source until its
+worker has stopped, then closes it outside player publication locks. Failed
+opens return failure without announcing READY or accepting playback.
+
+A Silent/Native run now opens the actual 4K stream, prepares six decoded frames
+and delivers its first frame. Subsequent live state is paused by the guest,
+with no backend error; captures at presents 36 and 103 are still black.
+The next frontier is the pause/resume sequence and its guest-side condition.
+Rendering, controls and the two gameplay acceptance windows remain unverified.
+
 ### Async DMA argument layout and counter reset (2026-09-29, not gameplay)
 
 The async compute DMA export used the graphics entry point even though its

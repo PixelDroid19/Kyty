@@ -326,6 +326,26 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Later startup-video frontier (2026-09-29): after the async DMA correction,
+  a clean Silent/Native run reaches 344 presents. The lifetime trace observes
+  full-size packed-color writes to two alternating targets, and four live
+  VideoOut samples use those same guest addresses and host image identities.
+  Captures at presents 40 and 185 remain uniformly black. This excludes
+  selection of a different present target in that sample; it does not prove
+  the final shader's sampled inputs contain color. The live media player is
+  playing with `source_failed=true`, no decoder, no video frame buffers and
+  no delivered frames. A subsequent entry trace finds a complete four-function
+  file replacement table and a relative media URI. `AvPlayerInit` discards the
+  table, and `add_source` instead asks FFmpeg to open a nonexistent sandbox
+  path, then reports READY despite that failure. The correction retains the
+  table and streams through its open/size/read-offset/close callbacks with a
+  bounded host buffer; failed opens no longer announce READY or accept start.
+  Live inspection now finds a real 3840x2160 decoder, six queued NV12 frames
+  and one delivered frame, with no backend error. The guest then holds the
+  player paused, and native captures remain black at presents 36 and 103.
+  This advances media source opening, not visible playback. Trace the guest's
+  pause/resume sequence before altering frame delivery or the compositor.
+
 - Raw render alias and explicit mip-fetch frontier (2026-09-29): the first
   partially written 960x540 RGBA16 UNORM storage image has overlapping
   mixed-format render-target writers. Its first dispatch can touch at most

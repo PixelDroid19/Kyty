@@ -50,6 +50,17 @@ struct StreamInfo
 	uint64_t duration_ms = 0;
 };
 
+// ReadAt returns the number of bytes read, zero at EOF, or a negative error.
+// The decoder owns the source until its worker has stopped. Reads are serial
+// and may run on the decoding thread after Open returns.
+class InputSource
+{
+public:
+	virtual ~InputSource() = default;
+	[[nodiscard]] virtual uint64_t Size() const = 0;
+	virtual int ReadAt(uint64_t offset, uint8_t* destination, uint32_t size) = 0;
+};
+
 // Owns one demux/decode session. Reads return copied frames, so callers may
 // retain a frame until the next read or until the session is closed.
 class Decoder final
@@ -60,6 +71,7 @@ public:
 	static bool IsAvailable();
 	static const char* BackendName();
 	static std::unique_ptr<Decoder> Open(const char* host_path, std::string* error = nullptr);
+	static std::unique_ptr<Decoder> OpenSource(std::unique_ptr<InputSource> source, std::string* error = nullptr);
 
 	~Decoder();
 
@@ -82,6 +94,7 @@ public:
 
 private:
 	Decoder();
+	static std::unique_ptr<Decoder> OpenInput(const char* host_path, std::unique_ptr<InputSource> source, std::string* error);
 
 	std::unique_ptr<State> state_;
 };

@@ -101,6 +101,7 @@ struct AvPlayerInternal
 	uint64_t             start_time_ms = 0;
 	AvPlayerEventReplacement event;
 	AvPlayerMemAllocator mem;
+	AvPlayerFileReplacement file;
 	Core::Mutex          mutex;
 	std::vector<uint8_t> synthetic_storage;
 	uint8_t*             synthetic_storage_data = nullptr;
@@ -127,6 +128,86 @@ struct AvPlayerInternal
 	uint32_t             media_audio_channels  = 0;
 	uint32_t             media_audio_rate      = 0;
 };
+
+class CallbackInputSource final: public ::Kyty::Emulator::AudioVideoBackend::InputSource
+{
+public:
+	explicit CallbackInputSource(const AvPlayerFileReplacement& file): m_file(file) {}
+	~CallbackInputSource() override
+	{
+		if (m_opened)
+		{
+			const auto result = static_cast<int32_t>(GuestRuntimePort::Invoke(
+			    reinterpret_cast<uint64_t>(m_file.close), reinterpret_cast<uint64_t>(m_file.object_pointer), 0, 0));
+			if (result < 0) { KYTY_LOG_ERROR("AvPlayer file close callback failed: result=%d\n", result); }
+		}
+	}
+
+	bool Open(const char* uri, std::string* error)
+	{
+		const uint64_t callbacks[] = {reinterpret_cast<uint64_t>(m_file.open), reinterpret_cast<uint64_t>(m_file.close),
+		                              reinterpret_cast<uint64_t>(m_file.read_offset), reinterpret_cast<uint64_t>(m_file.size)};
+		for (uint64_t callback: callbacks)
+		{
+			if (callback == 0 || !GuestRuntimePort::IsExecutableAddress(callback))
+			{
+				*error = "invalid media file callbacks";
+				return false;
+			}
+		}
+		const auto result = static_cast<int32_t>(GuestRuntimePort::Invoke(
+		    callbacks[0], reinterpret_cast<uint64_t>(m_file.object_pointer), reinterpret_cast<uint64_t>(uri), 0));
+		if (result < 0)
+		{
+			*error = "media file open callback failed";
+			return false;
+		}
+		m_opened = true;
+		m_size = GuestRuntimePort::Invoke(callbacks[3], reinterpret_cast<uint64_t>(m_file.object_pointer), 0, 0);
+		if (m_size == 0 || m_size > static_cast<uint64_t>(INT64_MAX))
+		{
+			*error = "invalid media file callback size";
+			return false;
+		}
+		return true;
+	}
+
+	[[nodiscard]] uint64_t Size() const override { return m_size; }
+	int ReadAt(uint64_t offset, uint8_t* destination, uint32_t size) override
+	{
+		if (destination == nullptr || offset > m_size || size > m_size - offset || size > INT32_MAX)
+		{
+			return -1;
+		}
+		return static_cast<int32_t>(GuestRuntimePort::Invoke4(reinterpret_cast<uint64_t>(m_file.read_offset),
+		    reinterpret_cast<uint64_t>(m_file.object_pointer), reinterpret_cast<uint64_t>(destination), offset, size));
+	}
+
+private:
+	AvPlayerFileReplacement m_file;
+	uint64_t m_size = 0;
+	bool m_opened = false;
+};
+
+static std::unique_ptr<::Kyty::Emulator::AudioVideoBackend::Decoder> OpenPlayerSource(
+	const AvPlayerFileReplacement& file, const String& uri, String* host_filename, std::string* error)
+{
+	if (file.open != nullptr || file.close != nullptr || file.read_offset != nullptr || file.size != nullptr)
+	{
+		auto source = std::make_unique<CallbackInputSource>(file);
+		if (!source->Open(uri.C_Str(), error))
+		{
+			return nullptr;
+		}
+		return ::Kyty::Emulator::AudioVideoBackend::Decoder::OpenSource(std::move(source), error);
+	}
+	if (!Core::File::IsFileExisting(uri) && Kernel::FileSystem::IsMounted())
+	{
+		String mounted = Kernel::FileSystem::GetRealFilename(uri);
+		if (!mounted.IsEmpty()) { *host_filename = mounted; }
+	}
+	return ::Kyty::Emulator::AudioVideoBackend::Decoder::Open(host_filename->C_Str(), error);
+}
 
 static void rgb_to_yuv(float r, float g, float b, uint8_t* y, uint8_t* u, uint8_t* v)
 {
@@ -426,11 +507,12 @@ static void delete_synthetic_video(AvPlayerInternal* r)
 	std::vector<AvPlayerInternal::VideoFrameBuffer> frames;
 	std::vector<uint8_t>                         storage;
 	AvPlayerMemAllocator                          mem;
+	std::unique_ptr<::Kyty::Emulator::AudioVideoBackend::Decoder> decoder;
 	{
 		std::unique_lock<std::shared_mutex> decoder_lock(r->decoder_mutex);
 		{
 			Core::LockGuard lock(r->mutex);
-			r->decoder.reset();
+			decoder = std::move(r->decoder);
 			mem = r->mem;
 			frames.swap(r->video_frames);
 			storage.swap(r->synthetic_storage);
@@ -451,6 +533,8 @@ static void delete_synthetic_video(AvPlayerInternal* r)
 			r->source_failed          = false;
 		}
 	}
+	// Joining the decoder can close a guest file through its callback.
+	decoder.reset();
 	release_video_frames(mem, frames);
 }
 
@@ -837,11 +921,13 @@ static AvPlayerRef remove_player(AvPlayerInternal* handle)
 	return player;
 }
 
-static AvPlayerRef create_player(const AvPlayerMemAllocator& mem, const AvPlayerEventReplacement& event, bool auto_start,
+static AvPlayerRef create_player(const AvPlayerMemAllocator& mem, const AvPlayerFileReplacement& file,
+	                             const AvPlayerEventReplacement& event, bool auto_start,
 	                             int32_t requested_framebuffers)
 {
 	AvPlayerRef r(new AvPlayerInternal, finalize_player);
 	r->mem                    = mem;
+	r->file                   = file;
 	r->event                  = event;
 	r->auto_start             = auto_start;
 	r->requested_framebuffers = requested_framebuffers;
@@ -862,7 +948,7 @@ AvPlayerInternal* KYTY_SYSV_ABI AvPlayerInit(AvPlayerInitData* init)
 	{
 		return nullptr;
 	}
-	return register_player(create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0,
+	return register_player(create_player(init->memory_replacement, init->file_replacement, init->event_replacement, init->auto_start != 0,
 	                                     init->num_output_video_framebuffers));
 }
 
@@ -873,7 +959,7 @@ int KYTY_SYSV_ABI AvPlayerInitEx(const AvPlayerInitDataEx* init, AvPlayerInterna
 	{
 		return AVPLAYER_ERROR_INVALID_PARAMS;
 	}
-	*handle = register_player(create_player(init->memory_replacement, init->event_replacement, init->auto_start != 0,
+	*handle = register_player(create_player(init->memory_replacement, init->file_replacement, init->event_replacement, init->auto_start != 0,
 	                                        init->num_output_video_framebuffers));
 	return *handle == nullptr ? AVPLAYER_ERROR_OPERATION_FAILED : 0;
 }
@@ -906,16 +992,8 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 	delete_synthetic_video(h);
 
 	String host_filename = clean_filename;
-	if (!Core::File::IsFileExisting(clean_filename) && Kernel::FileSystem::IsMounted())
-	{
-		String mounted_filename = Kernel::FileSystem::GetRealFilename(clean_filename);
-		if (!mounted_filename.IsEmpty())
-		{
-			host_filename = mounted_filename;
-		}
-	}
 	std::string decoder_error;
-	auto decoder = ::Kyty::Emulator::AudioVideoBackend::Decoder::Open(host_filename.C_Str(), &decoder_error);
+	auto decoder = OpenPlayerSource(h->file, clean_filename, &host_filename, &decoder_error);
 	if (decoder == nullptr || !decoder->GetStreamInfo().has_video)
 	{
 		if (avplayer_dump_enabled())
@@ -923,14 +1001,13 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 			KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER backend=error path=%s reason=%s\n", host_filename.C_Str(),
 			             decoder_error.empty() ? "media has no supported video stream" : decoder_error.c_str());
 		}
-		bool auto_start = false;
 		{
 			Core::LockGuard lock(h->mutex);
 			h->filename               = clean_filename;
 			h->host_filename          = host_filename;
-			h->synthetic_width        = 1920;
-			h->synthetic_height       = 1080;
-			h->synthetic_frame_rate   = 30.0f;
+			h->synthetic_width        = 0;
+			h->synthetic_height       = 0;
+			h->synthetic_frame_rate   = 0.0f;
 			h->synthetic_frame_count  = 0;
 			h->synthetic_obtained_num = 0;
 			h->last_media_time_ms     = 0;
@@ -941,19 +1018,8 @@ static int add_source(AvPlayerInternal* h, const char* raw_filename, uint32_t le
 			h->paused                 = false;
 			h->stop_fired             = false;
 			h->source_failed          = true;
-			auto_start                = h->auto_start;
 		}
-		if (avplayer_dump_enabled())
-		{
-			KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER source handle=%p auto_start=%d empty=1\n", static_cast<void*>(h),
-			             auto_start ? 1 : 0);
-		}
-		emit_event(h, AVPLAYER_EVENT_STATE_READY);
-		if (h->closing.load(std::memory_order_acquire))
-		{
-			return AVPLAYER_ERROR_OPERATION_FAILED;
-		}
-		return auto_start ? start_player(h) : 0;
+		return AVPLAYER_ERROR_OPERATION_FAILED;
 	}
 	bool auto_start = false;
 	{
@@ -1037,7 +1103,7 @@ int KYTY_SYSV_ABI AvPlayerAddSourceEx(AvPlayerInternal* h, uint32_t uri_type, co
 
 static int stream_count(AvPlayerInternal* h)
 {
-	if (h->filename.IsEmpty())
+	if (h->filename.IsEmpty() || h->source_failed)
 	{
 		return 0;
 	}
@@ -1143,6 +1209,7 @@ static int start_player(AvPlayerInternal* h)
 	}
 	{
 		Core::LockGuard lock(h->mutex);
+		if (h->source_failed || h->decoder == nullptr) { return AVPLAYER_ERROR_OPERATION_FAILED; }
 		h->playing           = true;
 		h->paused            = false;
 		h->stop_fired        = false;
@@ -1177,6 +1244,7 @@ int KYTY_SYSV_ABI AvPlayerStartEx(AvPlayerInternal* h, const void* start_info_ex
 	const auto* info = static_cast<const AvPlayerStartInfoEx*>(start_info_ex);
 	{
 		Core::LockGuard lock(h->mutex);
+		if (h->source_failed || h->decoder == nullptr) { return AVPLAYER_ERROR_OPERATION_FAILED; }
 		h->start_time_ms     = (info != nullptr ? info->start_time_milliseconds : 0);
 		h->synthetic_obtained_num = static_cast<uint32_t>(
 		    std::min<uint64_t>(h->synthetic_frame_count, static_cast<uint64_t>(h->start_time_ms * h->synthetic_frame_rate / 1000.0f)));

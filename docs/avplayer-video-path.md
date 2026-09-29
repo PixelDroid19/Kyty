@@ -18,6 +18,14 @@ the ownership and lifetime of every frame.
    This invalidates any cached Vulkan representation of the previous contents.
 5. The guest renders the new buffer through the normal texture path.
 
+When initialization supplies file replacement callbacks, AvPlayer opens the
+logical URI through those callbacks and gives the host demuxer a random-access
+source. It does not resolve that URI as a host filename. The source uses a
+64 KiB I/O buffer, checks reads and seeks against the reported length, and
+closes the guest file after the decoding worker stops. Guest callbacks run
+outside player state locks. A partial or invalid callback table and a failed
+source open return an error without a READY event or fabricated stream data.
+
 Advancing the output-buffer ring before a decoded frame is available can expose
 an old buffer again. Dropping the front of the decoder queue causes visible
 timestamp gaps. Omitting the host-write notification lets Vulkan reuse stale
