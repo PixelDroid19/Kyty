@@ -1857,6 +1857,38 @@ TEST(EmulatorGraphicsState, RawRenderStorageAliasPreservesGuestWordsAcrossFormat
 	                                              base, 2u * block_bytes, &plan));
 }
 
+TEST(EmulatorGraphicsState, MixedRawRenderSourcesRequireCompleteOlderCoverage)
+{
+	constexpr uint64_t base = 0x200000u;
+	constexpr uint64_t destination_address = base + 0x300000u;
+	constexpr uint64_t destination_bytes = 960u * 540u * 8u;
+	const RenderTextureObject full(RenderTextureFormat::R16G16B16A16Sfloat, 2432u, 1368u,
+	                               true, false, 2432u, false);
+	const RenderTextureObject first_overlay(RenderTextureFormat::R8G8Unorm, 1920u, 1080u,
+	                                        true, false, 2048u, false);
+	const RenderTextureObject second_overlay(RenderTextureFormat::R8G8B8A8Unorm, 1920u, 1080u,
+	                                         true, false, 1920u, false);
+	const StorageTextureObject destination(0u, 0u, 65u, 960u, 540u, 960u, 0u, 1u,
+	                                       0u, false, DstSel(4, 5, 6, 7));
+	StorageTextureRawRenderSource source {};
+	ASSERT_TRUE(StorageTextureCanCompositeRawRenderDestination(destination.params, destination_address, destination_bytes));
+	ASSERT_TRUE(StorageTextureDescribeRawRenderSource(full.params, base, 0x1a20000u, &source));
+	EXPECT_EQ(source.bytes_per_pixel, 8u);
+	EXPECT_TRUE(StorageTextureRawRenderSourceCovers(source, destination_address, destination_bytes));
+	auto malformed = source;
+	malformed.pitch = 1u;
+	EXPECT_FALSE(StorageTextureRawRenderSourceCovers(malformed, destination_address, destination_bytes));
+	ASSERT_TRUE(StorageTextureDescribeRawRenderSource(first_overlay.params, base, 0x480000u, &source));
+	EXPECT_EQ(source.bytes_per_pixel, 2u);
+	EXPECT_FALSE(StorageTextureRawRenderSourceCovers(source, destination_address, destination_bytes));
+	ASSERT_TRUE(StorageTextureDescribeRawRenderSource(second_overlay.params, base + 0x480000u, 0x870000u, &source));
+	EXPECT_EQ(source.bytes_per_pixel, 4u);
+	EXPECT_FALSE(StorageTextureRawRenderSourceCovers(source, destination_address, destination_bytes));
+	EXPECT_FALSE(StorageTextureDescribeRawRenderSource(full.params, base, 0x1a10000u, &source));
+	EXPECT_FALSE(StorageTextureCanCompositeRawRenderDestination(destination.params, destination_address,
+	                                                             destination_bytes - 8u));
+}
+
 TEST(EmulatorGraphicsState, StorageTextureBackingSupportsSamplingAfterComputeWrites)
 {
 	const auto usage = StorageTextureGetImageUsage();

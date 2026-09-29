@@ -91,6 +91,28 @@ struct StorageTextureRawRenderAliasPlan
 [[nodiscard]] bool StorageTextureCopyRawRenderAlias(GraphicContext* ctx, CommandBuffer* buffer, VulkanImage* source,
 	                                                VulkanImage* destination, const StorageTextureRawRenderAliasPlan& plan);
 
+struct StorageTextureRawRenderSource
+{
+	VulkanImage* image         = nullptr;
+	uint64_t     guest_address = 0;
+	uint64_t     guest_size    = 0;
+	uint32_t     width         = 0;
+	uint32_t     height        = 0;
+	uint32_t     pitch         = 0;
+	uint32_t     bytes_per_pixel = 0;
+};
+
+[[nodiscard]] bool StorageTextureDescribeRawRenderSource(const uint64_t* render_params, uint64_t address,
+	                                                       uint64_t size, StorageTextureRawRenderSource* source);
+[[nodiscard]] bool StorageTextureRawRenderSourceCovers(const StorageTextureRawRenderSource& source,
+	                                                    uint64_t address, uint64_t size);
+[[nodiscard]] bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* storage_params,
+	                                                               uint64_t address, uint64_t size);
+[[nodiscard]] bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer* buffer,
+	                                                         const Vector<StorageTextureRawRenderSource>& sources,
+	                                                         VulkanImage* destination, uint64_t address,
+	                                                         uint64_t size);
+
 struct StorageTextureArrayViewRange
 {
 	uint32_t base_array_layer = 0;

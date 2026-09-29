@@ -18,7 +18,7 @@ layout(push_constant) uniform PushConstants
 	uint pitch_elems;
 	uint dst_pitch_elems;
 	uint bytes_per_element;
-	uint layout_kind; // 0 Sw64kRx, 1 Standard64KB, 2 Standard4KB, 3 Depth64KB32, 4 raw image alias
+	uint layout_kind; // 0 Sw64kRx, 1 Standard64KB, 2 Standard4KB, 3 Depth64KB32, 4 raw image alias, 5 raw render scatter
 	uint src_u32_count;
 	uint dst_u32_count;
 	uint src_byte_offset;
@@ -131,6 +131,51 @@ void copy_raw_image_alias(uint word_x, uint y)
 	if (source_word < pc.src_u32_count && destination_word < pc.dst_u32_count)
 	{
 		buffers[1].words[destination_word] = buffers[0].words[source_word];
+	}
+}
+
+void scatter_raw_render(uint x, uint y)
+{
+	uint bpe = pc.bytes_per_element;
+	uint block_w = block_width_64kb(bpe);
+	uint block_h = bpe == 8u ? 64u : 128u;
+	uint block = (y / block_h) * pc.source_blocks_x + x / block_w;
+	if (block < pc.source_first_block || block - pc.source_first_block >= pc.alias_block_count)
+	{
+		return;
+	}
+	uint within = bpe == 2u ? sw64k_rx_within_2(x % block_w, y % block_h)
+	                        : sw64k_rx_within(x % block_w, y % block_h, bpe);
+	int destination_byte = int(pc.src_byte_offset) + int(block * 65536u + within);
+	if (destination_byte < 0 || uint(destination_byte) > pc.dst_u32_count * 4u - bpe)
+	{
+		return;
+	}
+	uint source_byte = (block - pc.source_first_block) * 65536u +
+	                   ((y % block_h) * block_w + (x % block_w)) * bpe;
+	uint source_word = source_byte / 4u;
+	uint destination_word = uint(destination_byte) / 4u;
+	if (source_word >= pc.src_u32_count)
+	{
+		return;
+	}
+	if (bpe == 2u)
+	{
+		uint value = (buffers[0].words[source_word] >> ((source_byte & 2u) * 8u)) & 0xffffu;
+		uint shift = (uint(destination_byte) & 2u) * 8u;
+		uint mask = 0xffffu << shift;
+		atomicAnd(buffers[1].words[destination_word], ~mask);
+		atomicOr(buffers[1].words[destination_word], value << shift);
+		return;
+	}
+	uint count = bpe / 4u;
+	if (count > pc.src_u32_count - source_word || count > pc.dst_u32_count - destination_word)
+	{
+		return;
+	}
+	for (uint word = 0u; word < count; ++word)
+	{
+		buffers[1].words[destination_word + word] = buffers[0].words[source_word + word];
 	}
 }
 
@@ -317,6 +362,11 @@ void main()
 	if (pc.layout_kind == 4u)
 	{
 		copy_raw_image_alias(x, y);
+		return;
+	}
+	if (pc.layout_kind == 5u)
+	{
+		scatter_raw_render(x, y);
 		return;
 	}
 

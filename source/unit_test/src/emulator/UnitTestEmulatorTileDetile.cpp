@@ -3,14 +3,17 @@
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/Label.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Log.h"
 
 #include "../../../emulator/src/Graphics/GraphicsRenderInternal.h"
 
@@ -420,6 +423,84 @@ public:
 
 private:
 	GraphicContext*     m_context = nullptr;
+	TextureVulkanImage m_image;
+};
+
+class ScopedRawAliasImage
+{
+public:
+	explicit ScopedRawAliasImage(GraphicContext* context): m_context(context) {}
+	~ScopedRawAliasImage() { Reset(); }
+	KYTY_CLASS_NO_COPY(ScopedRawAliasImage);
+
+	[[nodiscard]] bool Create(VkFormat format, uint32_t width, uint32_t height)
+	{
+		if (m_context == nullptr || m_context->device == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+		m_image.format = format;
+		m_image.SetNativeExtent(width, height);
+		VkImageCreateInfo info {};
+		info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		info.imageType = VK_IMAGE_TYPE_2D;
+		info.format = format;
+		info.extent = {width, height, 1u};
+		info.mipLevels = 1u;
+		info.arrayLayers = 1u;
+		info.samples = VK_SAMPLE_COUNT_1_BIT;
+		info.tiling = VK_IMAGE_TILING_OPTIMAL;
+		info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if (vkCreateImage(m_context->device, &info, nullptr, &m_image.image) != VK_SUCCESS)
+		{
+			return false;
+		}
+		vkGetImageMemoryRequirements(m_context->device, m_image.image, &m_image.memory.requirements);
+		uint32_t memory_type = 0u;
+		if (!FindTestMemoryType(m_context, m_image.memory.requirements.memoryTypeBits,
+		                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type))
+		{
+			Reset();
+			return false;
+		}
+		VkMemoryAllocateInfo allocation {};
+		allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocation.allocationSize = m_image.memory.requirements.size;
+		allocation.memoryTypeIndex = memory_type;
+		if (vkAllocateMemory(m_context->device, &allocation, nullptr, &m_image.memory.memory) != VK_SUCCESS ||
+		    vkBindImageMemory(m_context->device, m_image.image, m_image.memory.memory, 0u) != VK_SUCCESS)
+		{
+			Reset();
+			return false;
+		}
+		m_image.usage = info.usage;
+		return true;
+	}
+
+	void Reset()
+	{
+		if (m_context == nullptr || m_context->device == VK_NULL_HANDLE)
+		{
+			return;
+		}
+		if (m_image.image != VK_NULL_HANDLE)
+		{
+			vkDestroyImage(m_context->device, m_image.image, nullptr);
+			m_image.image = VK_NULL_HANDLE;
+		}
+		if (m_image.memory.memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(m_context->device, m_image.memory.memory, nullptr);
+			m_image.memory.memory = VK_NULL_HANDLE;
+		}
+	}
+
+	[[nodiscard]] VulkanImage* Get() { return &m_image; }
+
+private:
+	GraphicContext* m_context = nullptr;
 	TextureVulkanImage m_image;
 };
 
@@ -917,6 +998,84 @@ TEST(EmulatorTileDetile, ProductionBc1UploadRoundTripsPaddedBlockRows)
 		std::memcpy(expected.data() + 8u, k_block_01.data(), k_block_01.size());
 		std::memcpy(expected.data() + k_row_bytes, k_block_10.data(), k_block_10.size());
 		std::memcpy(expected.data() + k_row_bytes + 8u, k_block_11.data(), k_block_11.size());
+		EXPECT_EQ(actual, expected);
+	}
+	EXPECT_TRUE(vulkan.ReleaseProductionUploadPath());
+}
+
+TEST(EmulatorTileDetile, GpuRawRenderAliasCompositionPreservesMixedFormatBytes)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	VulkanDetileTestContext vulkan {};
+	if (!vulkan.Initialize())
+	{
+		GTEST_SKIP() << "no Vulkan graphics+compute device is available";
+	}
+	constexpr VkFormat formats[] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8_UNORM,
+	                                VK_FORMAT_R16G16B16A16_UNORM};
+	for (VkFormat format: formats)
+	{
+		VkFormatProperties properties {};
+		vkGetPhysicalDeviceFormatProperties(vulkan.context.physical_device, format, &properties);
+		constexpr auto required = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+		if ((properties.optimalTilingFeatures & required) != required)
+		{
+			GTEST_SKIP() << "Vulkan device lacks required image transfer support";
+		}
+	}
+	ASSERT_TRUE(vulkan.InitializeProductionUploadPath());
+	{
+		ScopedRawAliasImage baseline(&vulkan.context);
+		ScopedRawAliasImage overlay(&vulkan.context);
+		ScopedRawAliasImage destination(&vulkan.context);
+		ASSERT_TRUE(baseline.Create(formats[0], 128u, 128u));
+		ASSERT_TRUE(overlay.Create(formats[1], 256u, 128u));
+		ASSERT_TRUE(destination.Create(formats[2], 128u, 128u));
+
+		std::vector<uint8_t> baseline_linear(128u * 128u * 8u);
+		for (size_t index = 0; index < baseline_linear.size() / 2u; ++index)
+		{
+			const uint16_t bits = static_cast<uint16_t>(0x3c00u + index % 512u);
+			baseline_linear[index * 2u] = static_cast<uint8_t>(bits);
+			baseline_linear[index * 2u + 1u] = static_cast<uint8_t>(bits >> 8u);
+		}
+		std::vector<uint8_t> overlay_linear(256u * 128u * 2u);
+		for (size_t index = 0; index < overlay_linear.size(); ++index)
+		{
+			overlay_linear[index] = static_cast<uint8_t>((index * 7u + 31u) & 0xffu);
+		}
+		UtilFillImage(&vulkan.context, baseline.Get(), baseline_linear.data(), baseline_linear.size(), 128u,
+		              static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+		UtilFillImage(&vulkan.context, overlay.Get(), overlay_linear.data(), overlay_linear.size(), 256u,
+		              static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+
+		std::vector<uint8_t> expected(baseline_linear.size(), 0u);
+		FillTiledFromLinear(&expected, baseline_linear, 128u, 128u, 128u, 8u, TileDetileLayout::Sw64kRx);
+		std::vector<uint8_t> overlay_raw(overlay_linear.size(), 0u);
+		FillTiledFromLinear(&overlay_raw, overlay_linear, 256u, 128u, 256u, 2u, TileDetileLayout::Sw64kRx);
+		std::memcpy(expected.data() + 65536u, overlay_raw.data(), overlay_raw.size());
+
+		constexpr uint64_t base = 0x100000u;
+		Vector<StorageTextureRawRenderSource> sources;
+		sources.Add({baseline.Get(), base, expected.size(), 128u, 128u, 128u, 8u});
+		sources.Add({overlay.Get(), base + 65536u, overlay_raw.size(), 256u, 128u, 256u, 2u});
+		CommandBuffer command(GraphicContext::QUEUE_UTIL);
+		ASSERT_FALSE(command.IsInvalid());
+		command.Begin();
+		ASSERT_TRUE(StorageTextureCompositeRawRenderAliases(&vulkan.context, &command, sources, destination.Get(),
+		                                                  base, expected.size()));
+		command.End();
+		command.Execute();
+		command.WaitForFence();
+
+		std::vector<uint8_t> actual(expected.size(), 0u);
+		UtilFillBuffer(&vulkan.context, actual.data(), actual.size(), 128u, destination.Get(),
+		               static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
 		EXPECT_EQ(actual, expected);
 	}
 	EXPECT_TRUE(vulkan.ReleaseProductionUploadPath());

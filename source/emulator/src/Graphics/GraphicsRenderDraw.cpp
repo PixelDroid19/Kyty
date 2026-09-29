@@ -2742,6 +2742,9 @@ void GraphicsRenderDispatchDirect(uint64_t submit_id, CommandBuffer* buffer, HW:
 	                cs_regs.cs_regs.chksum);
 	(void)TryPublishComputeDepthMetaFill(submit_id, input_info, thread_group_x, thread_group_y, thread_group_z);
 
+	// Materialization may dispatch a host compute kernel. Restore the guest
+	// pipeline after all preparation has completed.
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 	DebugStatsRecordDispatch();
 }

@@ -954,6 +954,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	Vector<StorageTextureRenderAliasCopy> render_alias_copies;
 	StorageTextureRawRenderAliasPlan raw_render_alias_plan {};
 	bool raw_render_alias = false;
+	std::vector<int> mixed_raw_render_source_ids;
 	Vector<int> selective_reclaim_ids;
 	Vector<int> depth_stencil_reclaim_ids;
 	Vector<int> retire_after_copy_ids;
@@ -1443,6 +1444,75 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
+			// A linear image may reinterpret bytes written by several tiled render
+			// targets. Select one complete older clear, then replay every newer
+			// GPU-written render view in write order. Unknown newer writers still fail.
+			bool multi_raw_render_composite = false;
+			if (!multi_raw_render_alias && buffer != nullptr && vaddr_num == 1 &&
+			    info.type == GpuMemoryObjectType::StorageTexture &&
+			    StorageTextureCanCompositeRawRenderDestination(info.params, vaddr[0], size[0]))
+			{
+				auto describe = [&](int id, StorageTextureRawRenderSource* source)
+				{
+					const auto& parent = heap.objects[id];
+					const auto& owner  = parent.info;
+					if (owner.object.type != GpuMemoryObjectType::RenderTexture || owner.object.obj == nullptr ||
+					    owner.params[RenderTextureObject::PARAM_NEO] != info.params[StorageTextureObject::PARAM_NEO] ||
+					    !static_cast<RenderTextureVulkanImage*>(owner.object.obj)->fully_defined_from_clear ||
+					    parent.block.vaddr_num != 1 ||
+					    !StorageTextureDescribeRawRenderSource(owner.params, parent.block.vaddr[0], parent.block.size[0], source))
+					{
+						return false;
+					}
+					source->image = static_cast<RenderTextureVulkanImage*>(owner.object.obj);
+					return true;
+				};
+				int baseline_id = -1;
+				uint64_t baseline_time = 0u;
+				for (const auto& parent: others)
+				{
+					const auto& owner = heap.objects[parent.object_id].info;
+					StorageTextureRawRenderSource source {};
+					if (owner.gpu_update_time > owner.cpu_update_time && owner.gpu_update_time > baseline_time &&
+					    describe(parent.object_id, &source) &&
+					    StorageTextureRawRenderSourceCovers(source, vaddr[0], size[0]))
+					{
+						baseline_id   = parent.object_id;
+						baseline_time = owner.gpu_update_time;
+					}
+				}
+				if (baseline_id >= 0)
+				{
+					std::vector<std::pair<uint64_t, int>> ordered {{baseline_time, baseline_id}};
+					multi_raw_render_composite = true;
+					for (const auto& parent: others)
+					{
+						const auto& owner = heap.objects[parent.object_id].info;
+						if (owner.content_origin == GpuMemoryContentOrigin::CpuUpload && owner.cpu_update_time > baseline_time)
+						{
+							multi_raw_render_composite = false;
+							break;
+						}
+						if (owner.gpu_update_time <= owner.cpu_update_time || owner.gpu_update_time <= baseline_time)
+						{
+							continue;
+						}
+						StorageTextureRawRenderSource source {};
+						if (!describe(parent.object_id, &source))
+						{
+							multi_raw_render_composite = false;
+							break;
+						}
+						ordered.emplace_back(owner.gpu_update_time, parent.object_id);
+					}
+					if (multi_raw_render_composite)
+					{
+						std::sort(ordered.begin(), ordered.end());
+						for (const auto& entry: ordered) { mixed_raw_render_source_ids.push_back(entry.second); }
+					}
+				}
+			}
+
 			// Multi-parent VertexBuffer Contained in StorageBuffer/RenderTexture
 			// (and similar surfaces). Observed: new VB 0x480 inside a 0x60000
 			// StorageBuffer+RenderTexture Equals pair at the same guest base.
@@ -1652,6 +1722,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				create_from_objects   = true;
 				retire_after_copy_ids = storage_growth_ids;
 			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_raw_render_alias ||
+			           multi_raw_render_composite ||
 			           multi_overwritten_storage_texture || multi_depth_mip_storage_guest || multi_vertex_in_surface ||
 			           multi_render_target_alias)
 			{
@@ -2038,6 +2109,22 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				                              static_cast<StorageTextureVulkanImage*>(o.object.obj), render_alias_copies);
 		}
 	}
+	if (!mixed_raw_render_source_ids.empty())
+	{
+		Vector<StorageTextureRawRenderSource> sources;
+		for (int id: mixed_raw_render_source_ids)
+		{
+			auto& parent = heap.objects[id];
+			StorageTextureRawRenderSource source {};
+			EXIT_IF(!StorageTextureDescribeRawRenderSource(parent.info.params, parent.block.vaddr[0], parent.block.size[0], &source));
+			source.image = static_cast<RenderTextureVulkanImage*>(parent.info.object.obj);
+			RecordUse(&parent.info, buffer);
+			sources.Add(source);
+		}
+		EXIT_IF(!StorageTextureCompositeRawRenderAliases(ctx, buffer, sources,
+		                                                  static_cast<StorageTextureVulkanImage*>(o.object.obj),
+		                                                  vaddr[0], size[0]));
+	}
 
 	if (info.type == GpuMemoryObjectType::StorageBuffer && vaddr_num == 1)
 	{
@@ -2065,7 +2152,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	o.write_back_func = info.GetWriteBackFunc();
 	o.delete_func     = info.GetDeleteFunc();
 	o.update_func     = info.GetUpdateFunc();
-	o.content_origin = render_alias_parent_id >= 0 ? GpuMemoryContentOrigin::GpuAliasMaterialization
+	o.content_origin = render_alias_parent_id >= 0 || !mixed_raw_render_source_ids.empty() ? GpuMemoryContentOrigin::GpuAliasMaterialization
 	                                                : GpuMemoryCreationContentOrigin(info.type, create_from_objects,
 	                                                                                 create_from_objects_fell_back_to_cpu);
 	o.content_sequence = NextContentSequence();

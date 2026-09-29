@@ -226,6 +226,19 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 	                 static_cast<VkImageLayout>(src_layout));
 }
 
+void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer,
+                       const Vector<VkBufferImageCopy>& regions, uint64_t src_layout)
+{
+	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_buffer == nullptr || regions.IsEmpty());
+	EXIT_IF(src_image->image == VK_NULL_HANDLE || dst_buffer->buffer == VK_NULL_HANDLE);
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer,
+	                       regions.Size(), regions.GetDataConst());
+	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                 static_cast<VkImageLayout>(src_layout));
+}
+
 static void UtilImageDepthToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch,
                                    uint64_t src_layout)
 {

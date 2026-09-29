@@ -1000,6 +1000,93 @@ bool StorageTexturePlanRawRenderAlias(const uint64_t* render_params, uint64_t re
 	return count != 0u;
 }
 
+bool StorageTextureDescribeRawRenderSource(const uint64_t* params, uint64_t address, uint64_t size,
+                                           StorageTextureRawRenderSource* source)
+{
+	if (params == nullptr || source == nullptr || address % 65536u != 0u || size == 0u || size > INT32_MAX)
+	{
+		return false;
+	}
+	*source = {};
+	uint32_t bytes_per_pixel = 0u;
+	switch (static_cast<RenderTextureFormat>(params[RenderTextureObject::PARAM_FORMAT]))
+	{
+		case RenderTextureFormat::R8G8Unorm: bytes_per_pixel = 2u; break;
+		case RenderTextureFormat::R8G8B8A8Unorm: bytes_per_pixel = 4u; break;
+		case RenderTextureFormat::R16G16B16A16Sfloat: bytes_per_pixel = 8u; break;
+		default: return false;
+	}
+	const uint64_t width  = params[RenderTextureObject::PARAM_WIDTH];
+	const uint64_t height = params[RenderTextureObject::PARAM_HEIGHT];
+	const uint64_t pitch  = params[RenderTextureObject::PARAM_PITCH];
+	const uint64_t block_width = TileGet64KBBlockWidth(bytes_per_pixel);
+	const uint64_t block_height = bytes_per_pixel == 8u ? 64u : 128u;
+	if (params[RenderTextureObject::PARAM_TILED] != 1u || params[RenderTextureObject::PARAM_WRITE_BACK] != 0u ||
+	    params[RenderTextureObject::PARAM_SAMPLES] != 1u || params[RenderTextureObject::PARAM_ARRAY_LAYERS] != 1u ||
+	    width == 0u || height == 0u || width > UINT32_MAX || height > UINT32_MAX ||
+	    pitch != TileAlign64KBPitch(static_cast<uint32_t>(width), bytes_per_pixel) ||
+	    pitch > UINT32_MAX || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+	const uint64_t blocks_x = pitch / block_width;
+	const uint64_t blocks_y = (height + block_height - 1u) / block_height;
+	if (blocks_x == 0u || blocks_y == 0u || blocks_x > UINT32_MAX || blocks_y > UINT32_MAX ||
+	    blocks_x > UINT64_MAX / blocks_y / 65536u || blocks_x * blocks_y * 65536u != size)
+	{
+		return false;
+	}
+	*source = {nullptr, address, size, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+	           static_cast<uint32_t>(pitch), bytes_per_pixel};
+	return true;
+}
+
+bool StorageTextureRawRenderSourceCovers(const StorageTextureRawRenderSource& source, uint64_t address, uint64_t size)
+{
+	if (size == 0u || address < source.guest_address || source.guest_address > UINT64_MAX - source.guest_size ||
+	    address > UINT64_MAX - size || address + size > source.guest_address + source.guest_size ||
+	    (source.bytes_per_pixel != 2u && source.bytes_per_pixel != 4u && source.bytes_per_pixel != 8u) || source.pitch == 0u)
+	{
+		return false;
+	}
+	const uint64_t block_width  = TileGet64KBBlockWidth(source.bytes_per_pixel);
+	const uint64_t block_height = source.bytes_per_pixel == 8u ? 64u : 128u;
+	if (block_width == 0u || source.pitch < block_width || source.pitch % block_width != 0u)
+	{
+		return false;
+	}
+	const uint64_t blocks_x     = source.pitch / block_width;
+	const uint64_t first_block  = (address - source.guest_address) / 65536u;
+	const uint64_t last_block   = (address + size - 1u - source.guest_address) / 65536u;
+	for (uint64_t block = first_block; block <= last_block; ++block)
+	{
+		const uint64_t x = (block % blocks_x) * block_width;
+		const uint64_t y = (block / blocks_x) * block_height;
+		if (x + block_width > source.width || y + block_height > source.height)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* params, uint64_t address, uint64_t size)
+{
+	if (params == nullptr || address % 65536u != 0u || size == 0u || size > INT32_MAX ||
+	    params[StorageTextureObject::PARAM_TILE] != 0u || params[StorageTextureObject::PARAM_LEVELS] != 1u ||
+	    params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u || params[StorageTextureObject::PARAM_DEPTH] != 1u ||
+	    params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u || params[StorageTextureObject::PARAM_SKIP_SEED] != 0u ||
+	    (params[StorageTextureObject::PARAM_FORMAT] >> 16u) != 65u)
+	{
+		return false;
+	}
+	const uint64_t width  = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u;
+	const uint64_t height = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
+	return width != 0u && height != 0u && width <= UINT32_MAX / 8u && height <= UINT32_MAX / (width * 8u) &&
+	       params[StorageTextureObject::PARAM_PITCH] == width && size == width * height * 8u &&
+	       NormalizeStorageTextureSwizzle(65u, params[StorageTextureObject::PARAM_SWIZZLE]) == DstSel(4, 5, 6, 7);
+}
+
 void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, VulkanImage* destination,
                                    const Vector<StorageTextureRenderAliasCopy>& copies)
 {
