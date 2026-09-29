@@ -1657,12 +1657,27 @@ ShaderStorageUsage ShaderGetDirectStorageUsage(const ShaderCode& code, int start
 	return usage;
 }
 
+bool ShaderHasOnlyNullPixelExports(const ShaderCode& code)
+{
+	if (code.GetType() != ShaderType::Pixel) { return false; }
+	bool found = false;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type != ShaderInstructionType::Exp) { continue; }
+		if (inst.format != ShaderInstructionFormat::NullVmDone) { return false; }
+		found = true;
+	}
+	return found;
+}
+
 bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 {
 	bool prevents = false;
 	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
 	{
-		if (IsDiscardInstruction(code.GetInstructions(), index))
+		const auto& inst = code.GetInstructions().At(index);
+		if (IsDiscardInstruction(code.GetInstructions(), index) ||
+		    (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::NullVmDone))
 		{
 			prevents = true;
 			break;
@@ -2966,6 +2981,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;
 		ps_info->required_subgroup_size    = ShaderPixelRequiredSubgroupSize(*analysis.code, ps_wave32);
+		ps_info->has_only_null_exports     = ShaderHasOnlyNullPixelExports(*analysis.code);
 		if (allow_noop_stage_disable && !ShaderPreventsNoopPixelElision(*analysis.code))
 		{
 			ps_info->stage_enabled = false;

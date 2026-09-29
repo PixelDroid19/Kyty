@@ -107,6 +107,14 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 			inst.format  = ShaderInstructionFormat::PixelZVsrc0VmDone;
 			inst.src_num = 1;
 		}
+	} else if (target == 0x09u && dst->GetType() == ShaderType::Pixel)
+	{
+		// RDNA2 Table 106: NULL carries the valid EXEC mask, without VGPR data.
+		if (done != 0 && compr == 0 && vm != 0 && en == 0u)
+		{
+			inst.format  = ShaderInstructionFormat::NullVmDone;
+			inst.src_num = 0;
+		}
 	} else if (target == 0x0cu)
 	{
 		if (done != 0 && en == 0xfu)

@@ -1267,7 +1267,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		if (p.static_params->color_targets_num > 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.static_params->color_targets_num > 8 condition ignored (continuing)\n"); }
 		for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 		{
-			if (!RenderColorSlotConfigured(*color, rt))
+			// A NULL export sends no color even when the guest leaves CB masks set.
+			// Vulkan must not write an undefined fragment output to those attachments.
+			if (!RenderColorSlotConfigured(*color, rt) || ps_input_info->has_only_null_exports)
 			{
 				p.static_params->color_mask[rt]   = 0;
 				p.static_params->blend_enable[rt] = false;

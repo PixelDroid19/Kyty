@@ -45,6 +45,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SGetpcB64);
 KYTY_RECOMPILER_FUNC(Recompile_SCmpEqLgU64);
 KYTY_RECOMPILER_FUNC(Recompile_SPackLlB32B16);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone);
+KYTY_RECOMPILER_FUNC(Recompile_Exp_NullVmDone);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_PixelZ_Vsrc0VmDone);

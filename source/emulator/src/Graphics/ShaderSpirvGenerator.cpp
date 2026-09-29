@@ -87,13 +87,18 @@ static int ResolveVertexParameterCount(const ShaderCode& code, const ShaderVerte
 	return count;
 }
 
-static bool ShaderCodeHasDiscardTail(const ShaderCode& code)
+static bool ShaderCodeCanDiscard(const ShaderCode& code)
 {
 	const auto& instructions = code.GetInstructions();
-	for (uint32_t index = 1; index + 1 < instructions.Size(); ++index)
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
-		const auto& previous = instructions.At(index - 1);
 		const auto& current  = instructions.At(index);
+		if (current.type == ShaderInstructionType::Exp && current.format == ShaderInstructionFormat::NullVmDone)
+		{
+			return true;
+		}
+		if (index == 0 || index + 1 >= instructions.Size()) { continue; }
+		const auto& previous = instructions.At(index - 1);
 		const auto& next     = instructions.At(index + 1);
 		if (previous.type == ShaderInstructionType::SMovB64 && previous.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
 		    previous.dst.type == ShaderOperandType::ExecLo && previous.src[0].type == ShaderOperandType::IntegerInlineConstant &&
@@ -562,7 +567,7 @@ void Spirv::WriteHeader()
 		case ShaderType::Pixel:
 			// Location 0 always uses %outColor (legacy name). Additional RTs that
 			// have a non-zero target_output_mode are declared as %outColorN.
-			vars.Add("%outColor");
+			if (!ShaderHasOnlyNullPixelExports(m_code)) { vars.Add("%outColor"); }
 			if (ShaderCodeHasSafePixelDepthExport(m_code))
 			{
 				vars.Add("%fragDepth");
@@ -571,7 +576,7 @@ void Spirv::WriteHeader()
 			{
 				for (int rt = 1; rt < 8; rt++)
 				{
-					if (m_ps_input_info->target_output_mode[rt] != 0)
+					if (m_ps_input_info->target_output_mode[rt] != 0 && !ShaderHasOnlyNullPixelExports(m_code))
 					{
 						vars.Add(String8::FromPrintf("%%outColor%d", rt));
 					}
@@ -597,7 +602,7 @@ void Spirv::WriteHeader()
 				// alone commits depth before OpKill, so use late tests for shaders
 				// that can discard.
 				const bool safe_late_input_probe = UsesPixelInput0Probe() && !ShaderPreventsNoopPixelElision(m_code);
-				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable && !ShaderCodeHasDiscardTail(m_code) &&
+				if (m_ps_input_info->ps_early_z && !m_ps_input_info->ps_pixel_kill_enable && !ShaderCodeCanDiscard(m_code) &&
 				    !ShaderCodeHasPixelDepthExport(m_code) && !safe_late_input_probe)
 				{
 					execution_modes.Add("OpExecutionMode %main EarlyFragmentTests\n");
@@ -684,7 +689,6 @@ void Spirv::WriteAnnotations()
 {
 	static const char* pixel_annotations   = R"(
                ; Annotations
-               OpDecorate %outColor Location 0
                <Variables>
 )";
 	static const char* vertex_annotations  = R"(
@@ -780,6 +784,7 @@ void Spirv::WriteAnnotations()
 	switch (m_code.GetType())
 	{
 		case ShaderType::Pixel:
+			if (!ShaderHasOnlyNullPixelExports(m_code)) { vars.Add("OpDecorate %outColor Location 0"); }
 			if (ShaderCodeHasSafePixelDepthExport(m_code))
 			{
 				vars.Add("OpDecorate %fragDepth BuiltIn FragDepth");
@@ -788,7 +793,7 @@ void Spirv::WriteAnnotations()
 			{
 				for (int rt = 1; rt < 8; rt++)
 				{
-					if (m_ps_input_info->target_output_mode[rt] != 0)
+					if (m_ps_input_info->target_output_mode[rt] != 0 && !ShaderHasOnlyNullPixelExports(m_code))
 					{
 						vars.Add(String8::FromPrintf("OpDecorate %%outColor%d Location %d", rt, rt));
 					}
@@ -1400,7 +1405,6 @@ void Spirv::WriteGlobalVariables()
 {
 	static const char* pixel_variables   = R"(
               ;Variables
-   %outColor = OpVariable %_ptr_Output_v4float Output
                <Variables>
 )";
 	static const char* vertex_variables  = R"(
@@ -1431,7 +1435,11 @@ void Spirv::WriteGlobalVariables()
 		vars.Add("%vertex_clip_probe = OpVariable %_ptr_StorageBuffer_VertexClipProbeRawStats StorageBuffer");
 	}
 
-	if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr)
+	if (m_code.GetType() == ShaderType::Pixel && !ShaderHasOnlyNullPixelExports(m_code))
+	{
+		vars.Add("%outColor = OpVariable %_ptr_Output_v4float Output");
+	}
+	if (m_code.GetType() == ShaderType::Pixel && m_ps_input_info != nullptr && !ShaderHasOnlyNullPixelExports(m_code))
 	{
 		for (int rt = 1; rt < 8; rt++)
 		{

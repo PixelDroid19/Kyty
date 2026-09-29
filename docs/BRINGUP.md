@@ -254,6 +254,33 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Pixel NULL export admission (2026-09-29, not gameplay)
+
+The clean Silent/Native run stopped after 347 seconds at pixel target 9,
+`DONE=1`, `VM=1`, `COMPR=0`, `EN=0`. RDNA2 defines this NULL export as a
+valid-mask update without a color or depth payload. The decoder now admits
+that form, preserves per-invocation discard, retains the pixel stage and
+omits color outputs for programs whose exports are all NULL. Such programs
+also disable Vulkan color writes: live guest state leaves both CB masks
+enabled, which otherwise permits undefined fragment outputs to reach color.
+
+The actual failing program now executes. Its generated and optimized SPIR-V
+both pass `spirv-val --target-env vulkan1.2`, with discard and no color output.
+The first corrected run reaches the title transition and exits after 969
+seconds on missing `XlWbvieLj2M[Json2_v1][Json_v1.1]`, the const array-index
+operator. `LibJson2.cpp` lacks that export despite retaining parsed array
+elements; the next HLE work is bounded lookup returning the owned element.
+The final build with color writes suppressed also passes the former export
+failure and reaches present 324. `fc_script` and the strict boundary gate pass.
+
+The media pause is an explicit guest preload transition after its first
+decoded frame, not a decoder failure. Native captures remain black. An
+output-preserving probe of the final color export observes 8,294,400
+invocations across the full 3840-by-2160 target, 409,600 nonfinite results,
+and RGB zero in all finite results. Its CPU constants are populated and its
+three textures are bound; the remaining color investigation is upstream of
+presentation. Neither the scene transition nor these probes prove gameplay.
+
 ### Media file replacement callbacks (2026-09-29, not gameplay)
 
 The later startup scene writes the same two packed-color images that VideoOut

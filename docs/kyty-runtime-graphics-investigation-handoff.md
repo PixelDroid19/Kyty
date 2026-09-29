@@ -326,6 +326,47 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Opening media preload and NULL export frontier (2026-09-29): a live call
+  trace shows an explicit guest pause after delivery of the first decoded
+  frame. The guest's media object then remains in its preloaded state, whose
+  update branch returns without polling or resuming playback. The decoder
+  retains six frames with no error. This excludes a spontaneous host decoder
+  pause; it does not identify the later scene condition that resumes playback.
+  A longer clean Silent/Native run reaches a new parser failure after 347
+  seconds: `ShaderParseEXP.cpp` rejects pixel target 9 with `DONE=1`, `VM=1`,
+  `COMPR=0`, `EN=0`. RDNA2 section 12.17 and Table 106 define this as a NULL
+  export carrying the valid EXEC mask without data. Treating it as a no-op
+  would lose its depth/stencil discard effect. The final-color shader's
+  constants are finite and populated and its three textures are bound;
+  captures at presents 41 and 262 remain black. This excludes an entirely
+  zero CPU constant block, not missing upstream texture content.
+  The correction admits only the evidenced NULL encoding, carries EXEC to
+  discard, omits fabricated color outputs and suppresses color writes for
+  NULL-only programs. Live state has nonzero CB masks even for that program,
+  so an outputless Vulkan shader alone would leave color writes undefined.
+  Both forms of its SPIR-V validate, and execution passes the old failure.
+  The first corrected run exits at the title transition after 969 seconds
+  on the missing const JSON array-index export; the final color-mask build
+  reaches present 324 with another black native capture.
+
+- Final-color export exclusion (2026-09-29): the native MRT aggregate at
+  present 100 sees 8,294,400 invocations spanning X 0.5 through 3839.5 and Y
+  0.5 through 2159.5. It counts 409,600 nonfinite results; the finite extrema
+  are RGB 0 and alpha 1. The pass has no depth or stencil attachment. This
+  excludes absent raster coverage or presentation alone hiding a nonblack
+  export for that occurrence. Inspect the sampled inputs and arithmetic;
+  do not change VideoOut selection on this evidence.
+
+- Unfixed residency-query cost (2026-09-29): during the same run a stack
+  sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
+  2,113,929,216 bytes with `mincore` from a vertex descriptor bind. Over the
+  first 105 seconds, native timing attributes 47.2 seconds to draw descriptor
+  finalization, while all completed fence waits total 9.6 seconds. Repeated
+  address-table residency preparation is a measured CPU cost, not evidence
+  of GPU execution hanging. Investigate incremental residency discovery
+  without hiding pages faulted in or remapped between preparations; do not
+  reuse a stale residency snapshot merely to improve the frame rate.
+
 - Later startup-video frontier (2026-09-29): after the async DMA correction,
   a clean Silent/Native run reaches 344 presents. The lifetime trace observes
   full-size packed-color writes to two alternating targets, and four live

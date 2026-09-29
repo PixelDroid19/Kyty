@@ -614,6 +614,7 @@ enum FormatByte : uint64_t
 	DA,     // operand_array_to_str(inst.dst, inst.dst.size)
 	MimgDmask, // dmask carried by ShaderInstruction::mimg_dmask
 	PixelZ, // pixel Z
+	NullTarget, // pixel valid mask without data
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -632,6 +633,7 @@ enum Format : uint64_t
 	Empty                 = FormatDefine({N}),
 	Imm                   = FormatDefine({S0}),
 	Label                 = FormatDefine({L}),
+	NullVmDone            = FormatDefine({NullTarget, Vm, Done}),
 	Mrt0OffOffComprVmDone = FormatDefine({Mrt0, Off, Off, Compr, Vm, Done}),
 	// Null MRT export (en=0): no channels written; often ends the export sequence.
 	// Any MRT target is a discard when bracketed by exec=0 and endpgm; otherwise
@@ -1952,6 +1954,7 @@ struct ShaderPixelInputInfo
 	bool                   ps_pixel_kill_enable      = false;
 	bool                   ps_early_z                = false;
 	bool                   ps_execute_on_noop        = false;
+	bool                   has_only_null_exports     = false;
 	uint8_t                float_mode                = 0;
 	bool                   dx10_clamp                = false;
 	bool                   ieee_mode                 = false;
@@ -2138,6 +2141,7 @@ void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] bool    ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info,
 	                                             int32_t* resolved_offset, int32_t vertex_offset_add = 0);
 [[nodiscard]] bool    ShaderPreventsNoopPixelElision(const ShaderCode& code);
+[[nodiscard]] bool    ShaderHasOnlyNullPixelExports(const ShaderCode& code);
 ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
 bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
 void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);

@@ -90,6 +90,29 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_Exp_NullVmDone)
+{
+	if (code.GetType() != ShaderType::Pixel || code.GetInstructions().At(index).src_num != 0)
+	{
+		return false;
+	}
+	// Pixel EXEC is represented per invocation. Invalid pixels must not commit
+	// depth or stencil even though this export has no color/depth payload.
+	static const char* text = R"(
+         %null_exec_lo_<index> = OpLoad %uint %exec_lo
+         %null_exec_hi_<index> = OpLoad %uint %exec_hi
+         %null_exec_<index> = OpBitwiseOr %uint %null_exec_lo_<index> %null_exec_hi_<index>
+         %null_valid_<index> = OpINotEqual %bool %null_exec_<index> %uint_0
+               OpSelectionMerge %null_merge_<index> None
+               OpBranchConditional %null_valid_<index> %null_merge_<index> %null_kill_<index>
+         %null_kill_<index> = OpLabel
+               OpKill
+         %null_merge_<index> = OpLabel
+)";
+	*dst_source += String8(text).ReplaceStr("<index>", String8::FromPrintf("%u", index));
+	return true;
+}
+
 // Compressed half2 MRT export → Location <mrt>. param[0] is the SPIR-V output
 // variable name (outColor, outColor1, …).
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
