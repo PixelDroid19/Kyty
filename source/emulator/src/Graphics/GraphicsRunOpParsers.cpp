@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/BringUp.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -509,14 +510,23 @@ KYTY_CP_OP_PARSER(cp_op_set_base)
 	return 3;
 }
 
-// Gen5 IT_DISPATCH_INDIRECT: header + data_offset + modifier.
-// Full GPU dispatch from the SetBaseIndirect arg buffer is future work;
-// consuming the packet keeps the command stream aligned.
+// DCB uses a base-relative offset; ACB carries an absolute 64-bit address.
 KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (dw < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 2 condition ignored (continuing)\n"); }
+	if (Config::IsNextGen() && cmd_id == KYTY_PM4(4, Pm4::IT_DISPATCH_INDIRECT, 0u))
+	{
+		EXIT_IF(dw < 4u);
+		const uint64_t address = static_cast<uint64_t>(buffer[0]) | (static_cast<uint64_t>(buffer[1]) << 32u);
+		cp->DispatchIndirectAbsolute(address, buffer[2]);
+		return 3;
+	}
+	if (cmd_id != KYTY_PM4(3, Pm4::IT_DISPATCH_INDIRECT, 0u))
+	{
+		EXIT("unsupported dispatch-indirect header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	EXIT_IF(dw < 3u);
 	cp->DispatchIndirect(buffer[0], buffer[1]);
 
 	return 2;

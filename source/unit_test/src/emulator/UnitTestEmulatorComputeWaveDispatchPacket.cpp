@@ -54,4 +54,30 @@ TEST(EmulatorComputeWaveDispatchPacket, IndirectPreservesWave32InitiatorBit)
 	EXPECT_EQ(command[2], 0x8041u);
 }
 
+TEST(EmulatorComputeWaveDispatchPacket, AsyncIndirectPreservesFullArgumentAddress)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	uint32_t          storage[8] = {};
+	TestCommandBuffer buffer {};
+	buffer.bottom      = storage;
+	buffer.top         = storage + 8;
+	buffer.cursor_up   = storage;
+	buffer.cursor_down = storage + 8;
+
+	constexpr uint64_t address = 0x234567890ull;
+	uint32_t* command = Gen5::GraphicsAcbDispatchIndirect(reinterpret_cast<Gen5::CommandBuffer*>(&buffer),
+	                                                     reinterpret_cast<const volatile void*>(address), 0x8000u);
+	ASSERT_NE(command, nullptr);
+	EXPECT_EQ(command[0], KYTY_PM4(4, Pm4::IT_DISPATCH_INDIRECT, 0u));
+	EXPECT_EQ(command[1], 0x34567890u);
+	EXPECT_EQ(command[2], 0x2u);
+	EXPECT_EQ(command[3], 0x8041u);
+	EXPECT_EQ(buffer.cursor_up, storage + 4);
+}
+
 UT_END();

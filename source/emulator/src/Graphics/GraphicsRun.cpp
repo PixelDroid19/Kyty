@@ -7,6 +7,7 @@
 #include "Kyty/Core/LinkList.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/AsyncJob.h"
@@ -1881,6 +1882,26 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 
 void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 {
+	uint64_t base = 0;
+	{
+		Core::LockGuard lock(m_mutex);
+		base = m_dispatch_indirect_args_base_addr;
+	}
+	if (base == 0 || base > UINT64_MAX - data_offset)
+	{
+		EXIT("invalid dispatch-indirect base or offset: base=0x%016" PRIx64 " offset=0x%08" PRIx32 "\n", base,
+		     data_offset);
+	}
+	DispatchIndirectAtAddress(base + data_offset, mode);
+}
+
+void CommandProcessor::DispatchIndirectAbsolute(uint64_t address, uint32_t mode)
+{
+	DispatchIndirectAtAddress(address, mode);
+}
+
+void CommandProcessor::DispatchIndirectAtAddress(uint64_t address, uint32_t mode)
+{
 	const ScopedDebugStatsTimer dispatch_timer(DebugStatsRecordDispatchProcessor);
 	struct DispatchIndirectArgs
 	{
@@ -1895,9 +1916,10 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 		Core::LockGuard lock(m_mutex);
 
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-		if (m_dispatch_indirect_args_base_addr == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_dispatch_indirect_args_base_addr == 0 condition ignored (continuing)\n"); }
-
-		memcpy(&args, reinterpret_cast<const void*>(m_dispatch_indirect_args_base_addr + data_offset), sizeof(args));
+		if (address == 0 || !Core::VirtualMemory::CopyFromGuest(&args, address, sizeof(args)))
+		{
+			EXIT("unreadable dispatch-indirect arguments: address=0x%016" PRIx64 "\n", address);
+		}
 		if (args.thread_group_x == 0 || args.thread_group_y == 0 || args.thread_group_z == 0)
 		{
 			if (std::getenv("KYTY_DUMP_INDIRECT") != nullptr)
@@ -1906,10 +1928,8 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 				if (logs < 64u)
 				{
 					++logs;
-					KYTY_LOG_DEBUG(
-					             "KYTY_DUMP_INDIRECT dispatch_skip offset=0x%08" PRIx32 " dims=%ux%ux%u base=0x%012" PRIx64 "\n",
-					             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z,
-					             m_dispatch_indirect_args_base_addr);
+					KYTY_LOG_DEBUG( "KYTY_DUMP_INDIRECT dispatch_skip address=0x%016" PRIx64 " dims=%ux%ux%u\n", address,
+					                args.thread_group_x, args.thread_group_y, args.thread_group_z);
 				}
 			}
 			return;
@@ -1921,8 +1941,8 @@ void CommandProcessor::DispatchIndirect(uint32_t data_offset, uint32_t mode)
 			if (logs < 64u)
 			{
 				++logs;
-				KYTY_LOG_DEBUG( "KYTY_DUMP_INDIRECT dispatch offset=0x%08" PRIx32 " dims=%ux%ux%u mode=0x%08" PRIx32 "\n",
-				             data_offset, args.thread_group_x, args.thread_group_y, args.thread_group_z, mode);
+				KYTY_LOG_DEBUG( "KYTY_DUMP_INDIRECT dispatch address=0x%016" PRIx64 " dims=%ux%ux%u mode=0x%08" PRIx32 "\n",
+				             address, args.thread_group_x, args.thread_group_y, args.thread_group_z, mode);
 			}
 		}
 		needs_guest_writeback = GraphicsRenderComputeUsesGuestDeviceAddress(&m_ctx, &m_sh_ctx, args.thread_group_x,

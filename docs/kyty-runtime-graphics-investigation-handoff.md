@@ -326,6 +326,20 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Absolute async indirect dispatch (2026-09-28): the live lazy-call trace
+  showed an ACB pointer, a guest-built 64-bit argument address, and a
+  modifier. Independent local implementations agreed on a four-dword native
+  `IT_DISPATCH_INDIRECT` packet with low/high absolute address words and a
+  masked initiator; the existing DCB packet has a base-relative offset.
+  The synthetic full-address packet test failed before the export existed and
+  passes after implementation. The first strict run exposed a local parser
+  mistake: its `dw` argument counts all remaining stream words, not the
+  current packet body. Header-based size selection corrected that mistake.
+  The next strict run crossed the import and packet parser, reached the
+  logo-stage level, and stopped at unknown SOPC `0x12`; a native frame-28
+  capture had one color bin and scored `low_entropy`. This excludes a
+  compatibility or gameplay claim from packet progress alone.
+
 - Signed normalized pair conversion (2026-09-28): VOP3A opcode `0x368`
   appeared after the unsigned pair conversion in the same program. The
   observed tuple has a tied VGPR first source, an inline zero second source,
@@ -335,8 +349,8 @@ against the same correct gameplay capture.
   failed before the parser change and passes with SPIR-V validation. One
   strict run hit the known intermittent Xe `execbuf` ENOMEM/device-lost path;
   a single retry passed the old parser exit and reached a new unresolved
-  lazy `Agc_v1.1` import at `RuntimeLinker.cpp:1081`. The import's ABI and
-  behavior are not established; no stub or guessed return is justified.
+  lazy `Agc_v1.1` import at `RuntimeLinker.cpp:1081`. That import required
+  ABI evidence before implementation; no stub or guessed return was justified.
 
 - Unsigned normalized pair conversion (2026-09-28): a bounded shader trace
   found VOP3A opcode `0x369` with two VGPR sources, one VGPR destination, and

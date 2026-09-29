@@ -4135,6 +4135,29 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t
 	return cmd;
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirect_args, uint32_t modifier)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(4);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto address = reinterpret_cast<uint64_t>(indirect_args);
+	cmd[0] = KYTY_PM4(4, Pm4::IT_DISPATCH_INDIRECT, 0u);
+	cmd[1] = static_cast<uint32_t>(address);
+	cmd[2] = static_cast<uint32_t>(address >> 32u);
+	cmd[3] = (modifier & 0xa038u) | 0x41u;
+	return cmd;
+}
+
 static uint32_t extract_modifier_bits(uint32_t modifier, uint32_t start, uint32_t count)
 {
 	return (modifier >> start) & ((1u << count) - 1u);

@@ -401,8 +401,22 @@ and prior unsigned test pass. Both targets build and the source/table gates
 pass. One strict run was interrupted by the previously observed Xe
 `execbuf` ENOMEM / `VK_ERROR_DEVICE_LOST` in `GraphicsRenderCommandBuffer.cpp`.
 A single strict retry passed the former `0x368` parser exit and stopped at a
-lazy `Agc_v1.1` import in `RuntimeLinker.cpp:1081`. Its exact contract remains
-unverified. This is still logo-stage execution with no controlled gameplay.
+lazy `Agc_v1.1` import in `RuntimeLinker.cpp:1081`. Its exact contract was
+unverified at that point. This is still logo-stage execution with no controlled gameplay.
+
+A bounded live call trace and independent local implementations established
+that the async indirect-dispatch import receives an ACB, a full 64-bit
+argument address, and a modifier. The native packet carries the absolute
+address in two dwords; the DCB form remains relative to the indirect-argument
+base. The new synthetic packet test failed to link before implementation and
+passes with its full high address preserved. Both affected targets build and
+the source-boundary and graphics-table gates pass. A strict Silent/Native run
+crossed the former lazy import and both indirect-dispatch packet forms,
+reached the logo-stage level, then stopped at unrecognized SOPC opcode
+`0x12` in `ShaderParseSOPC.cpp`. A native capture at 28 presents scored
+`low_entropy` (one color bin). Neither the presentations nor that capture
+prove correct rendering or gameplay; the SOPC operands and 64-bit equality
+lowering are the next verified frontier.
 
 ### Strict compute/storage and libc string frontier (2026-09-28, not gameplay)
 
