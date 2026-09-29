@@ -30,7 +30,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 	uint32_t   src1           = (buffer[1] >> 9u) & 0x1ffu;
 	uint32_t   src2           = (buffer[1] >> 18u) & 0x1ffu;
 
-	if (op_sel != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op_sel != 0 condition ignored (continuing)\n"); }
+	const bool permlane = next_gen && (opcode == 0x377u || opcode == 0x378u);
+	if (op_sel != 0 && !permlane) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op_sel != 0 condition ignored (continuing)\n"); }
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
@@ -1286,14 +1287,10 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
 		case 0x316: inst.type = ShaderInstructionType::VDot4cI32I8; break;
-		// VOP3P mixed-precision FMA (RDNA2). For now, map all three variants
-		// to a full-precision f32 FMA — this is correct for _MIX_F32 and a
-		// safe over-precision approximation for the f16 narrowing variants
-		// (_MIXLO/_MIXHI), which would write a packed half-float lane. The
-		// SPIR-V back-end already handles the Fma GLSL intrinsic correctly.
-		case 0x320: inst.type = ShaderInstructionType::VFmaMixF32; break;
-		case 0x321: inst.type = ShaderInstructionType::VFmaMixF32; break; // v_fma_mixlo_f16 → Fma f32 (safe)
-		case 0x322: inst.type = ShaderInstructionType::VFmaMixF32; break; // v_fma_mixhi_f16 → Fma f32 (safe)
+		// Mixed-precision FMA has a separate VOP3P encoding and modifiers.
+		case 0x320:
+		case 0x321:
+		case 0x322: KYTY_UNKNOWN_OP();
 		case 0x340: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_mad_u16 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
@@ -1413,6 +1410,17 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			break;
 		case 0x36D: inst.type = ShaderInstructionType::VAdd3U32; break;
 		case 0x36F: inst.type = ShaderInstructionType::VLshlOrB32; break;
+		case 0x377:
+		case 0x378:
+			// OPSEL names FI and BC here, rather than source half selection.
+			if (!next_gen || op_sel > 3u || abs != 0u || neg != 0u || omod != 0u || clamp != 0u ||
+			    inst.src[0].type != ShaderOperandType::Vgpr || inst.src[1].type == ShaderOperandType::Vgpr ||
+			    inst.src[2].type == ShaderOperandType::Vgpr)
+			{
+				KYTY_UNKNOWN_OP();
+			}
+			inst.type = opcode == 0x377u ? ShaderInstructionType::VPermlane16B32 : ShaderInstructionType::VPermlanex16B32;
+			break;
 		case 0x371: inst.type = ShaderInstructionType::VAndOrB32; break;
 		case 0x372:
 			if (next_gen)

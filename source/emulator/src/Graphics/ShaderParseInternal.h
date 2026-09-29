@@ -46,6 +46,7 @@ KYTY_SHADER_PARSER(shader_parse_vopc);
 KYTY_SHADER_PARSER(shader_parse_vop1);
 KYTY_SHADER_PARSER(shader_parse_vop2);
 KYTY_SHADER_PARSER(shader_parse_vop3);
+KYTY_SHADER_PARSER(shader_parse_vop3p);
 KYTY_SHADER_PARSER(shader_parse_exp);
 KYTY_SHADER_PARSER(shader_parse_smem);
 KYTY_SHADER_PARSER(shader_parse_smrd);

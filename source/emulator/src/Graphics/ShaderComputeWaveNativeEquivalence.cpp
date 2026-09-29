@@ -59,6 +59,8 @@ bool IsLaneCrossingType(ShaderInstructionType type)
 {
 	switch (type)
 	{
+		case ShaderInstructionType::VPermlane16B32:
+		case ShaderInstructionType::VPermlanex16B32:
 		case ShaderInstructionType::VReadfirstlaneB32:
 		case ShaderInstructionType::VReadlaneB32:
 		case ShaderInstructionType::VWritelaneB32:

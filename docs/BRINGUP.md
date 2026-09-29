@@ -288,8 +288,9 @@ locking and table work; residency and refresh are nested intervals. They overlap
 with processor and fence timings and are not exclusive frame costs.
 
 The owned Linux build passes, as do strict source boundaries and the graphics
-table manifest. A strict Silent/Native run verifies all twelve new fields in
-both serializers and their snapshot/reset window. A 56.366-second warm interval
+table manifest. A strict Silent/Native run under read-only debugger probes
+verifies all twelve new fields in both serializers and their snapshot/reset
+window. A 56.366-second warm interval
 contains 216 presents, a median frame time of 245 ms and 124 submissions per
 present. Dispatch processing accumulates 29.44 seconds, address preparation
 1.90 seconds, residency 1.81 seconds and write-back 1.19 seconds. The scored
@@ -315,8 +316,9 @@ analysis alone and do not establish an equivalent frame-rate improvement.
 
 `ninja -C _build_linux_astro_play_s1 -j2 fc_script` succeeds. Strict source
 boundaries and the graphics-table manifest pass. A fresh strict Silent/Native
-run preserves the same first pixel-emitter failure at PC 0xfec. A 58.031-second
-warm window contains 229 presents with a 243 ms median frame time; the scored
+run under read-only debugger probes preserves the same first pixel-emitter
+failure at PC 0xfec. A 58.031-second warm window contains 229 presents with a
+243 ms median frame time; the scored
 present-813 capture remains uniformly black. Gameplay and acceptable runtime
 performance are still unverified; focused unit tests remain deferred until
 gameplay as requested.
@@ -892,6 +894,64 @@ another pixel program stops in `ShaderParse.cpp:131` on family 0x33, word
 0xcc20701a at PC 0xb8. The complete 13,920-byte program and stack are captured
 for decoding against the ISA. No scene or gameplay output is established;
 focused unit tests remain deferred until gameplay.
+
+The next captured family is RDNA2 VOP3P. Its first operation is
+V_FMA_MIX_F32; the complete byte range contains twelve independently decoded
+instances with different FP16/FP32 source selections. `ShaderParse.cpp` lacks
+family 0x33, while `ShaderParseVOP3.cpp` incorrectly treats different-family
+opcodes 0x320/0x321/0x322 as ordinary FP32 FMA, including approximated packed
+destinations. `ShaderSpirvDispatch.cpp` also routes VFmaMixF32 through a generic
+three-FP32 emitter. A correct implementation needs a separate family decoder,
+source precision and half selection, inline constants at the selected width,
+and modifiers applied after conversion. The RDNA2 operand table and sections
+12.10/13.3.6 specify those semantics. LLVM's gfx1030 disassembler independently
+confirms all twelve captured operations and places OPSEL_HI source bits at
+59, 60 and 14 respectively; the older PDF's prose reverses two of those source
+names. The full-program parser replay reproduces the first failure with exit
+65 before implementation. The Linux build and source/table gates pass with the
+new decoder and mixed-source emitter. Parser replay now reaches PC 0x100c and
+rejects VOP3 opcode 0x378 (V_PERMLANEX16_B32); it has decoded all twelve mixed
+operations before that stop. Live translation now emits all twelve mixed
+operations before stopping at
+PC 0xfec on a DPP row shift. The retained source prefix contains twelve Fma
+operations and twenty-eight FP16 unpack operations; it is not a complete
+validated module or a completed draw. Unknown packed operations, unverified
+packed destination forms and upper-half inline FP16 constants stay rejected.
+
+The captured prefix also contains V_OR_B32 DPP row shifts with controls 0x111,
+0x112, 0x114 and 0x118, followed by the cross-row permutation and reads of
+lanes 31 and 63. `ShaderSpirvOperands.cpp:395` admits only quad permutations,
+so adding the missing parser opcode alone cannot translate this program.
+The later wave-width and consumer captures below constrain the host subgroup
+lowering. `GraphicsRenderPipeline.cpp:371` currently
+leaves the fragment stage pNext empty, even when pixel input analysis requests
+an exact subgroup width. Its capability check covers quad operations alone;
+`ShaderSpirvVector.cpp:3545` also forwards readlane selectors without the ISA
+wave-width mask. These are unresolved contract defects. Any correction must
+preserve helper participation and inactive-lane rules; a 32-lane host cannot
+be assumed equivalent to a 64-lane guest without a program-level proof.
+
+A strict Silent/Native rerun confirms the same full program bytes and stops
+at PC 0x100c after 706 decoded instructions. The live SPI_PS_IN_CONTROL value
+is 0x4005: PS_W32_EN is clear, so this is a wave64 input. The captured host
+reports a maximum subgroup width of 32 and does not support required fragment
+subgroup sizes. A new parser representation preserves PERMLANE16/PERMLANEX16
+FI and BC bits and rejects their reserved modifiers. Full-program replay now
+parses 2,300 instructions through PC 0x3260 with exit 0; those operations still
+have no admitted backend lowering. This closes a decoding gap only.
+
+The same run reaches present 808; native capture 328 is uniformly black.
+A 152.56-second native interval under read-only debugger probes contains 445
+presents, a median frame time of 299 ms and roughly 146 submissions per present. Dispatch
+processing accumulates 92.14 seconds; fence waits accumulate 33.38 seconds
+and WAIT_REG_MEM waits 39.52 seconds. These times overlap across processors
+and must not be added as an exclusive frame-time breakdown. Shader cache hits
+are 251 with no misses or SPIR-V compilations in that interval. Coherency and
+submission preparation are the next performance measurement, separate from
+the missing scene shader. Timers for dispatch write-back, address preparation,
+residency discovery and snapshot refresh are now verified through native
+diagnostics. The later plain-run comparisons above measure the two dispatch
+preparation improvements separately from this debugger interval.
 
 A related summary-operand defect remains unverified in this workload:
 `ShaderSpirvOperands.cpp:573` combines VCC_LO and VCC_HI when reading VCCZ,

@@ -417,8 +417,7 @@ enum class ShaderInstructionType : uint32_t
 	VFmaF32,
 	VFmaF64,
 	VFmaF16,
-	// VOP3P v_fma_mix_f32: mixed-precision FMA used by Unity HDR/URP shaders.
-	// Computes fma(a,b,c) with per-operand f16↔f32 conversion via op_sel_hi.
+	// VOP3P fused multiply-add with independently selected input precision.
 	VFmaMixF32,
 	// RDNA2 dot-product with accumulation in destination register
 	VDot2cF32F16,
@@ -550,6 +549,8 @@ enum class ShaderInstructionType : uint32_t
 	SAbsI32,
 	ImageAtomicAdd,
 	VCmpClassF32,
+	VPermlane16B32,
+	VPermlanex16B32,
 
 	ZMax
 };
@@ -858,6 +859,9 @@ struct ShaderInstruction
 	// Preserve VOP3 source-selection controls for exact backend admission.
 	uint8_t vop3_op_sel = 0;
 	uint8_t vop3_omod   = 0;
+	// VOP3P uses three additional precision/select bits instead of OMOD.
+	// The sentinel distinguishes instructions decoded from other families.
+	uint8_t vop3p_op_sel_hi = 0xffu;
 	// SDWA destination/sign controls are not fully represented by operands.
 	bool vop_sdwa = false;
 	// Raw SDWA control dword (the encoding's second word) so admission can

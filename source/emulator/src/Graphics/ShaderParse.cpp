@@ -108,6 +108,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 			switch (instruction >> 26u)
 			{
 				case 0x32: words = shader_parse_vintrp(pc, decode_src, decode_ptr, dst, next_gen); break;
+				case 0x33: words = shader_parse_vop3p(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x34:
 					if (next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: next_gen guard ignored (continuing)\n"); }
 					words = shader_parse_vop3(pc, decode_src, decode_ptr, dst, next_gen);
