@@ -647,6 +647,59 @@ EXEC_LO from the complement of its scalar source. Implement the decoder,
 implicit EXEC/SCC effects and mask-aware analysis together; do not map it to
 a barrier or widen it to the existing 64-bit instruction.
 
+Captured-program replay then reaches `S_AND_SAVEEXEC_B32` in the same input.
+The 32-bit SAVEEXEC family now decodes and emits its operation on EXEC_LO,
+saves the old low word before any destination alias can overwrite the source,
+and derives SCC from the low result while retaining the high EXEC word.
+Implicit-mask analysis excludes these operations from linear storage coverage
+and rejects treating a wave64 low-half update as wave-width independent.
+The full 2,404-instruction captured program now decodes all seven observed
+SAVEEXEC operations (AND and ANDN1). A strict run reaches source generation
+and stops earlier in that program at `ShaderSpirvVector.cpp:772`: the floating
+comparison emitter unconditionally asks for a second destination word, but a
+captured SDWA comparison targets only VCC_HI. The integer comparison path
+already handles this single-word form. Preserve that destination width in the
+floating path; do not widen VCC_HI to a pair. GPU execution of this program was
+still pending at that stop. Focused unit tests remain deferred until gameplay.
+
+After preserving the single-word floating comparison destination, the complete
+program emits source and assembles for Vulkan 1.4. Validation exposes a separate
+native control-flow defect in `ShaderSpirvWriteLabel.cpp:288`: backward branches
+sharing a destination have their loop header deferred to a later exit test.
+The back edges consequently target ordinary blocks, rejected by `spirv-val`.
+The failing graph contains nested loops with several back edges. Derive one
+header and continue target from each loop's complete predecessor set, retaining
+its real exit and every guest branch. Do not route this through the paired-wave
+dispatcher without proving the native lane and barrier semantics.
+
+The native lowering now recognizes single-entry interval loops with a common
+exit, emits the loop header at the real entry, and routes every return through
+one continue block. It also keeps selections inside their enclosing loop,
+closes loop exits through the owning selection, and proves arm reachability
+before nesting shared joins. Header repair alone was insufficient: validation
+then exposed a selection merge outside its loop, a skipped inner selection
+merge, and sibling cases incorrectly chained as parent/child. Those failures
+are preserved in the local compiler evidence. The complete captured program,
+both before and after performance optimization, now validates for Vulkan 1.4;
+the preceding 1,429-instruction program also still validates. A strict
+Silent/Native Vulkan 1.4 run records the new dispatch at queue 8, sequence
+96,272, and the completion ledger reaches 96,273 on that queue. Its scored
+native present-195 capture preserves the opening caption; present 726 is
+black. The runtime then starts the title and requests the map resources,
+before a different 2,924-instruction compute program stops in source emission.
+These are dispatch and loading milestones, not scene or gameplay acceptance.
+The structural rules are defined in the
+[SPIR-V specification, section 2.11](https://registry.khronos.org/SPIR-V/specs/unified1/SPIRV.html#_structured_control_flow).
+
+The new stop is `ShaderSpirvVector.cpp:4204`: reverse subtraction with borrow
+reads VCC_HI in a native 32-lane dispatch, but the provenance guard accepts
+only the low VCC/EXEC word or a proven SGPR pair. A preceding single-word
+unsigned comparison produces VCC_HI; an intervening reverse subtraction
+writes VCC_LO. The shared carry emitter also clears the high destination word,
+which may destroy that independent mask. Verify the wave32 mask-width contract
+against the ISA and retain the captured producer/consumer sequence before
+changing either the guard or the store width.
+
 ### Integer value references (2026-09-29)
 
 A missing integer getter in `LibJson2.cpp` stops the title-transition caller.
