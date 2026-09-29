@@ -1672,10 +1672,91 @@ ShaderStorageImageTileCoverage ShaderPairedSplitCoordinates(const ShaderCode& co
 	return coverage;
 }
 
-ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedSplitCoverage(const ShaderCode& code,
-                                                                            const ShaderBindResources& bind,
-                                                                            int texture_index, int workgroup_register,
-                                                                            const uint32_t threads[3], bool group_xy_enabled)
+ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedLinearCoverage(const ShaderCode& code,
+                                                                             const ShaderBindResources& bind,
+                                                                             int texture_index, int workgroup_register,
+                                                                             const uint32_t threads[3], uint8_t full_mask)
+{
+	constexpr uint32_t lane_count = 64;
+	const auto& instructions = code.GetInstructions();
+	if (instructions.IsEmpty() || instructions.At(instructions.Size() - 1).type != ShaderInstructionType::SEndpgm)
+	{
+		return {};
+	}
+	std::array<ShaderTileValue, 256> registers {};
+	registers[0].valid = true;
+	registers[1].valid = true;
+	for (uint32_t lane = 0; lane < lane_count; ++lane)
+	{
+		registers[0].lane[lane] = lane % threads[0];
+		registers[1].lane[lane] = lane / threads[0];
+	}
+	bool group_ids_valid = true;
+	int stores = 0;
+	ShaderStorageImageTileCoverage coverage {};
+	std::vector<uint8_t> seen;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (index > 0 && inst.pc <= instructions.At(index - 1).pc) { return {}; }
+		if (!ShaderTileControlFlowIsLinear(inst, index + 1 == instructions.Size()) &&
+		    !ShaderPairedSplitPlainCompare(inst))
+		{
+			return {};
+		}
+		if (ShaderInstructionReadsImageResource(inst.type) || ShaderInstructionWritesImageResource(inst.type))
+		{
+			const int image_index = ShaderPairedSplitImageIndex(inst, code, bind);
+			if (image_index < 0 || image_index >= bind.textures2D.textures_num ||
+			    (ShaderInstructionReadsImageResource(inst.type) && image_index == texture_index) ||
+			    (ShaderInstructionWritesImageResource(inst.type) &&
+			     (image_index != texture_index || inst.type != ShaderInstructionType::ImageStore ||
+			      inst.mimg_dimension != 1 || (inst.mimg_dmask & full_mask) != full_mask)))
+			{
+				return {};
+			}
+			if (inst.type == ShaderInstructionType::ImageStore)
+			{
+				ShaderTileValue x {};
+				ShaderTileValue y {};
+				if (++stores != 1 || (inst.mimg_address_num == 0 && inst.src[0].size < 2) ||
+				    !ShaderTileStoreCoordinates(inst, registers, &x, &y) ||
+				    !ShaderTileMarkStore(x, y, lane_count, &coverage, &seen))
+				{
+					return {};
+				}
+				continue;
+			}
+		}
+		if (inst.dst.type == ShaderOperandType::Vgpr)
+		{
+			const auto value = ShaderTileEvaluateInstruction(inst, registers,
+			                                                 group_ids_valid ? workgroup_register : -100, lane_count);
+			ShaderTileInvalidateVgpr(inst.dst, &registers);
+			if (inst.dst.size == 1 && inst.dst.register_id >= 0 && inst.dst.register_id < 256)
+			{
+				registers[inst.dst.register_id] = value;
+			}
+		}
+		ShaderTileInvalidateVgpr(inst.dst2, &registers);
+		if (ShaderOperandOverlapsSgprRange(inst.dst, workgroup_register, 2) ||
+		    ShaderOperandOverlapsSgprRange(inst.dst2, workgroup_register, 2))
+		{
+			group_ids_valid = false;
+		}
+	}
+	if (stores != 1 || coverage.width != threads[0] || coverage.height != threads[1] ||
+	    !std::all_of(seen.begin(), seen.end(), [](uint8_t value) { return value != 0; }))
+	{
+		return {};
+	}
+	return coverage;
+}
+
+ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedCoverage(const ShaderCode& code,
+                                                                       const ShaderBindResources& bind,
+                                                                       int texture_index, int workgroup_register,
+                                                                       const uint32_t threads[3], bool group_xy_enabled)
 {
 	if (!group_xy_enabled || threads == nullptr || threads[0] == 0 || threads[1] == 0 ||
 	    static_cast<uint64_t>(threads[0]) * threads[1] != 64u || threads[2] != 1u ||
@@ -1688,8 +1769,12 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImagePairedSplitCoverage(cons
 	const uint8_t full_mask = ShaderBoundedGridFullStoreMask(bind.textures2D.desc[texture_index].texture.Format());
 	if (full_mask == 0u) { return {}; }
 	ShaderPairedSplitFlow flow {};
-	if (!ShaderPairedSplitFindFlow(code, bind, texture_index, full_mask, &flow)) { return {}; }
-	return ShaderPairedSplitCoordinates(code, flow, workgroup_register, threads);
+	if (ShaderPairedSplitFindFlow(code, bind, texture_index, full_mask, &flow))
+	{
+		return ShaderPairedSplitCoordinates(code, flow, workgroup_register, threads);
+	}
+	return AnalyzeShaderStorageImagePairedLinearCoverage(code, bind, texture_index, workgroup_register,
+	                                                     threads, full_mask);
 }
 
 void ShaderTileInvalidateVgpr(const ShaderOperand& destination, std::array<ShaderTileValue, 256>* registers)
@@ -1871,8 +1956,8 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const Shade
 {
 	if (paired_xy_thread_ids)
 	{
-		return AnalyzeShaderStorageImagePairedSplitCoverage(code, bind, texture_index, workgroup_register,
-		                                                    threads, group_xy_enabled);
+		return AnalyzeShaderStorageImagePairedCoverage(code, bind, texture_index, workgroup_register,
+		                                               threads, group_xy_enabled);
 	}
 	if (threads != nullptr && texture_index >= 0 && texture_index < bind.textures2D.textures_num && workgroup_register >= 0 &&
 	    bind.textures2D.desc[texture_index].textures2d_without_sampler && native_xy_thread_ids)

@@ -556,6 +556,116 @@ TEST(EmulatorShaderMimg, RejectsUnprovenPairedSplitStorageOverwrite)
 	EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(code, bind, 1, 14, threads, false, false, true).width, 0u);
 }
 
+static ShaderCode MakePairedLinearStoreShader(bool omit_store = false, bool read_destination = false, bool partial_store = false)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	auto add = [&code](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> sources)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		inst.type    = type;
+		inst.dst     = dst;
+		inst.src_num = static_cast<int>(sources.size());
+		int source_index = 0;
+		for (const auto source: sources) { inst.src[source_index++] = source; }
+		code.GetInstructions().Add(inst);
+	};
+	add(ShaderInstructionType::VAndB32, TileVgpr(2), {TileConstant(4), TileVgpr(0)});
+	add(ShaderInstructionType::VBfeU32, TileVgpr(5), {TileVgpr(0), TileConstant(1), TileConstant(1)});
+	add(ShaderInstructionType::VLshlrevB32, TileVgpr(4), {TileConstant(2), TileVgpr(1)});
+	add(ShaderInstructionType::VAndB32, TileVgpr(1), {TileConstant(6), TileVgpr(1)});
+	add(ShaderInstructionType::VAndB32, TileVgpr(3), {TileConstant(1), TileVgpr(0)});
+	add(ShaderInstructionType::VLshrrevB32, TileVgpr(2), {TileConstant(1), TileVgpr(2)});
+	add(ShaderInstructionType::VLshlAddU32, TileVgpr(6), {TileSgpr(15), TileConstant(3), TileVgpr(5)});
+	add(ShaderInstructionType::VAndB32, TileVgpr(5), {TileConstant(4), TileVgpr(4)});
+	add(ShaderInstructionType::VAddI32, TileVgpr(19), {TileVgpr(6), TileVgpr(1)});
+	add(ShaderInstructionType::VLshlAddU32, TileVgpr(6), {TileSgpr(14), TileConstant(3), TileVgpr(2)});
+	add(ShaderInstructionType::SLoadDwordx4, TileSgpr(16, 4), {TileSgpr(12, 2), TileConstant(32)});
+	add(ShaderInstructionType::SBufferLoadDwordx2, TileSgpr(14, 2), {TileSgpr(16, 4), TileConstant(0)});
+	add(ShaderInstructionType::VAdd3U32, TileVgpr(20), {TileVgpr(6), TileVgpr(5), TileVgpr(3)});
+	add(ShaderInstructionType::ImageSampleLz, TileVgpr(0), {TileVgpr(6), TileSgpr(0, 8), TileSgpr(8, 4)});
+	add(ShaderInstructionType::SLoadDwordx8, TileSgpr(28, 8), {TileSgpr(12, 2), TileConstant(0)});
+	if (read_destination) { add(ShaderInstructionType::ImageLoad, TileVgpr(4), {TileVgpr(20), TileSgpr(28, 8)}); }
+	if (!omit_store)
+	{
+		ShaderInstruction store {};
+		store.pc               = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		store.type             = ShaderInstructionType::ImageStore;
+		store.src[0]           = TileVgpr(20);
+		store.src[0].size      = 3;
+		store.src[1]           = TileSgpr(28, 8);
+		store.src_num          = 2;
+		store.mimg_dimension   = 1;
+		store.mimg_dmask       = partial_store ? 0x3 : 0xf;
+		store.mimg_address_num = 3;
+		store.mimg_address[0]  = TileVgpr(20);
+		store.mimg_address[1]  = TileVgpr(19);
+		code.GetInstructions().Add(store);
+	}
+	add(ShaderInstructionType::SEndpgm, {}, {});
+	return code;
+}
+
+static ShaderBindResources PairedLinearStoreBinding(const ShaderCode& code)
+{
+	ShaderBindResources bind {};
+	bind.textures2D.textures_num = 2;
+	bind.textures2D.desc[0].usage = ShaderTextureUsage::ReadOnly;
+	bind.textures2D.desc[0].start_register = 0;
+	bind.textures2D.desc[1].usage = ShaderTextureUsage::ReadWrite;
+	bind.textures2D.desc[1].textures2d_without_sampler = true;
+	bind.textures2D.desc[1].start_register = 16;
+	bind.textures2D.desc[1].texture.fields[1] = 36u << 20u;
+	ShaderDynamicSLoadMapping mapping {};
+	mapping.kind = ShaderDynamicSLoadResourceKind::Texture;
+	mapping.resource_index = 1;
+	mapping.destination_register = 28;
+	mapping.dword_count = 8;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::SLoadDwordx8) { mapping.instruction_pc = inst.pc; }
+		if (inst.type == ShaderInstructionType::ImageStore) { mapping.last_consumer_pc = inst.pc; }
+	}
+	if (mapping.last_consumer_pc != 0u) { bind.dynamic_sloads.records.Add(mapping); }
+	return bind;
+}
+
+TEST(EmulatorShaderMimg, ProvesPairedLinearStorageOverwrite)
+{
+	const auto code = MakePairedLinearStoreShader();
+	const auto bind = PairedLinearStoreBinding(code);
+	const uint32_t threads[3] = {8, 8, 1};
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 1, 14, threads, false, true, true);
+	EXPECT_EQ(coverage.width, 8u);
+	EXPECT_EQ(coverage.height, 8u);
+}
+
+TEST(EmulatorShaderMimg, RejectsUnprovenPairedLinearStorageOverwrite)
+{
+	const uint32_t threads[3] = {8, 8, 1};
+	for (const auto& code: {MakePairedLinearStoreShader(true), MakePairedLinearStoreShader(false, true),
+	                       MakePairedLinearStoreShader(false, false, true)})
+	{
+		EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(code, PairedLinearStoreBinding(code), 1, 14, threads,
+		                                               false, true, true).width, 0u);
+	}
+	auto code = MakePairedLinearStoreShader();
+	auto bind = PairedLinearStoreBinding(code);
+	code.GetInstructions()[0].src[0] = TileConstant(0);
+	EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(code, bind, 1, 14, threads, false, true, true).width, 0u);
+	code = MakePairedLinearStoreShader();
+	bind = PairedLinearStoreBinding(code);
+	code.GetInstructions()[code.GetInstructions().Size() - 2].mimg_address[1] = TileVgpr(20);
+	EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(code, bind, 1, 14, threads, false, true, true).width, 0u);
+	code = MakePairedLinearStoreShader();
+	bind = PairedLinearStoreBinding(code);
+	code.GetInstructions()[code.GetInstructions().Size() - 2].mimg_dmask = 1;
+	EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(code, bind, 1, 14, threads, false, true, true).width, 0u);
+	EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(MakePairedLinearStoreShader(), PairedLinearStoreBinding(code), 1, 14,
+	                                               threads, false, true, false).width, 0u);
+}
+
 static ShaderCode MakeUniformZeroStoreGate()
 {
 	ShaderCode code;

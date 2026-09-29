@@ -4000,6 +4000,12 @@ TEST(EmulatorGraphicsState, RequiresTileProofBeforeSkippingStorageImageSeed)
 	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 1u, 1u, 1u), 0u);
 	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, false, 1u, 1u, 1u), 0u);
 	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 0u, 1u, 1u), 0u);
+	input.threads_num[0] = 8u;
+	input.threads_num[1] = 8u;
+	input.storage_image_tile_coverage[0] = {8u, 8u};
+	descriptor.texture.fields[1] = (36u << 20u) | (3u << 30u);
+	descriptor.texture.fields[2] = 119u | (269u << 14u);
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 60u, 34u, 1u), 1u);
 }
 
 TEST(EmulatorGraphicsState, DepthMipStorageLinksExactTextureAndContainingSurfaces)
