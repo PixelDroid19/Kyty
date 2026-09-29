@@ -6818,13 +6818,15 @@ TEST(EmulatorGraphicsPackets, Gen5ComputeMbcntLoUsesExclusiveScan)
 	};
 
 	ShaderInstruction mbcnt {};
-	mbcnt.pc       = 0;
-	mbcnt.type     = ShaderInstructionType::VMbcntLoU32B32;
-	mbcnt.format   = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
-	mbcnt.dst      = sgpr(3);
-	mbcnt.src[0]   = sgpr(0);
-	mbcnt.src[1]   = sgpr(2);
-	mbcnt.src_num  = 2;
+	mbcnt.pc              = 0;
+	mbcnt.type            = ShaderInstructionType::VMbcntLoU32B32;
+	mbcnt.format          = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	mbcnt.dst.type        = ShaderOperandType::Vgpr;
+	mbcnt.dst.register_id = 3;
+	mbcnt.dst.size        = 1;
+	mbcnt.src[0]          = sgpr(0);
+	mbcnt.src[1]          = sgpr(2);
+	mbcnt.src_num         = 2;
 
 	ShaderInstruction end {};
 	end.pc     = 4;
@@ -6846,11 +6848,9 @@ TEST(EmulatorGraphicsPackets, Gen5ComputeMbcntLoUsesExclusiveScan)
 
 	EXPECT_NE(source.FindIndex("ExclusiveScan"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpGroupNonUniformIAdd"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpStore %s3"), Core::STRING8_INVALID_INDEX);
-	// The SGPR destination variable is uint-typed: the exec-gated old-value
-	// path must load/select/store uint, never float.
-	EXPECT_NE(source.FindIndex("%mbcnt_old_0 = OpLoad %uint %s3"), Core::STRING8_INVALID_INDEX);
-	EXPECT_EQ(source.FindIndex("OpLoad %float %s3"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mbcnt_old_float_0 = OpLoad %float %v3"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%mbcnt_old_0 = OpBitcast %uint %mbcnt_old_float_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %v3 %mbcnt_value_float_0"), Core::STRING8_INVALID_INDEX);
 }
 
 TEST(EmulatorGraphicsPackets, Gen5VertexPos1ZExportsRenderTargetLayer)

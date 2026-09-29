@@ -3246,15 +3246,21 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
 static bool RecompileFragmentMbcnt(const ShaderInstruction& inst, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
 {
 	EXIT_IF(spirv == nullptr || dst_source == nullptr);
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp || inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp || inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || !operand_is_variable(inst.dst) || inst.dst.clamp ||
+	    inst.dst.multiplier != 1.0f)
+	{
+		return false;
+	}
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (dst_value.type != SpirvType::Float)
+	{
+		return false;
+	}
 
 	const String8 index_str = String8::FromPrintf("%u", index);
-	String8      mask_load;
-	String8      accumulator_load;
+	String8       mask_load;
+	String8       accumulator_load;
 	if (!operand_load_uint(spirv, inst.src[0], "mbcnt_mask_<index>", index_str, &mask_load) ||
 	    !operand_load_uint(spirv, inst.src[1], "mbcnt_acc_<index>", index_str, &accumulator_load))
 	{
@@ -3281,9 +3287,11 @@ static bool RecompileFragmentMbcnt(const ShaderInstruction& inst, uint32_t index
         %mbcnt_exec_mask_<index> = OpShiftLeftLogical %uint %uint_1 %mbcnt_exec_lane_bit_<index>
         %mbcnt_exec_masked_<index> = OpBitwiseAnd %uint %mbcnt_exec_word_<index> %mbcnt_exec_mask_<index>
         %mbcnt_exec_active_<index> = OpINotEqual %bool %mbcnt_exec_masked_<index> %uint_0
-        %mbcnt_old_<index> = OpLoad %uint %<dst>
+        %mbcnt_old_float_<index> = OpLoad %float %<dst>
+        %mbcnt_old_<index> = OpBitcast %uint %mbcnt_old_float_<index>
         %mbcnt_value_<index> = OpSelect %uint %mbcnt_exec_active_<index> %mbcnt_result_<index> %mbcnt_old_<index>
-               OpStore %<dst> %mbcnt_value_<index>
+        %mbcnt_value_float_<index> = OpBitcast %float %mbcnt_value_<index>
+               OpStore %<dst> %mbcnt_value_float_<index>
     )";
 
 	String8 half_test;
@@ -3299,16 +3307,16 @@ static bool RecompileFragmentMbcnt(const ShaderInstruction& inst, uint32_t index
 	}
 
 	String8 source = String8(text)
-	                    .ReplaceStr("<mask_load>", mask_load)
-	                    .ReplaceStr("<accumulator_load>", accumulator_load)
-	                    .ReplaceStr("<half_test>", half_test)
-	                    .ReplaceStr("<lane_bit>", lane_bit)
-	                    .ReplaceStr("<dst>", dst_value.value)
-	                    .ReplaceStr("<index>", index_str);
+	                     .ReplaceStr("<mask_load>", mask_load)
+	                     .ReplaceStr("<accumulator_load>", accumulator_load)
+	                     .ReplaceStr("<half_test>", half_test)
+	                     .ReplaceStr("<lane_bit>", lane_bit)
+	                     .ReplaceStr("<dst>", dst_value.value)
+	                     .ReplaceStr("<index>", index_str);
 	if (!low_half)
 	{
-		const String8 offset = String8("        %mbcnt_lane_offset_<index> = OpISub %uint %mbcnt_lane_<index> %uint_32\n")
-		                           .ReplaceStr("<index>", index_str);
+		const String8 offset =
+		    String8("        %mbcnt_lane_offset_<index> = OpISub %uint %mbcnt_lane_<index> %uint_32\n").ReplaceStr("<index>", index_str);
 		source = offset + source;
 	}
 

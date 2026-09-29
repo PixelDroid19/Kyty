@@ -218,4 +218,65 @@ TEST(EmulatorShaderVectorMask, VccHiCompareFeedsCndmask)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorShaderVectorCount, ComputeMbcntWritesFloatTypedVgpr)
+{
+	ASSERT_EXIT(
+	    {
+		    if (!Config::IsInitialized())
+		    {
+			    Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		    }
+		    Config::SetNextGen(true);
+		    Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+		    class ValidationConfig final: public Config::ConfigSource
+		    {
+			public:
+			    bool         Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+			    int64_t      GetInteger(const Core::String&) const override { return 0; }
+			    bool         GetBool(const Core::String&) const override { return true; }
+			    Core::String GetString(const Core::String&) const override { return {}; }
+		    } validation;
+		    Config::Load(validation);
+		    ShaderInstruction mbcnt {};
+		    mbcnt.type               = ShaderInstructionType::VMbcntLoU32B32;
+		    mbcnt.format             = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+		    mbcnt.dst.type           = ShaderOperandType::Vgpr;
+		    mbcnt.dst.register_id    = 3;
+		    mbcnt.dst.size           = 1;
+		    mbcnt.src[0].type        = ShaderOperandType::Sgpr;
+		    mbcnt.src[0].register_id = 0;
+		    mbcnt.src[0].size        = 1;
+		    mbcnt.src[1].type        = ShaderOperandType::Vgpr;
+		    mbcnt.src[1].register_id = 2;
+		    mbcnt.src[1].size        = 1;
+		    mbcnt.src_num            = 2;
+		    ShaderInstruction end {};
+		    end.pc     = 4;
+		    end.type   = ShaderInstructionType::SEndpgm;
+		    end.format = ShaderInstructionFormat::Empty;
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    code.GetInstructions().Add(mbcnt);
+		    code.GetInstructions().Add(end);
+		    ShaderComputeInputInfo input {};
+		    input.threads_num[0] = input.threads_num[1] = input.threads_num[2] = 1;
+		    const auto       source                                            = SpirvGenerateSource(code, nullptr, nullptr, &input);
+		    Vector<uint32_t> binary;
+		    String8          error;
+		    if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+		    {
+			    std::fprintf(stderr, "%s\n", error.c_str());
+			    std::_Exit(2);
+		    }
+		    if (source.FindIndex("%mbcnt_old_float_0 = OpLoad %float %v3") == Core::STRING8_INVALID_INDEX ||
+		        source.FindIndex("%mbcnt_value_float_0 = OpBitcast %float %mbcnt_value_0") == Core::STRING8_INVALID_INDEX ||
+		        source.FindIndex("OpStore %v3 %mbcnt_value_float_0") == Core::STRING8_INVALID_INDEX)
+		    {
+			    std::_Exit(3);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 UT_END();
