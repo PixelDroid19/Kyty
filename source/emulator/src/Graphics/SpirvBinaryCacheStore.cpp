@@ -34,7 +34,7 @@ namespace {
 constexpr uint8_t  k_magic[8]            = {'K', 'Y', 'T', 'S', 'P', 'V', '1', '\0'};
 constexpr uint32_t k_header_size         = 80;
 constexpr uint32_t k_format_version      = 1;
-constexpr uint32_t k_target_vulkan_12    = 1;
+constexpr uint32_t k_target_vulkan_14    = 2;
 constexpr uint32_t k_spirv_magic         = 0x07230203u;
 constexpr char     k_key_domain[]        = "KytySpirvAssemblyCacheKey";
 constexpr char     k_module_key_domain[] = "KytySpirvModuleCacheKey";
@@ -83,7 +83,7 @@ XXH128_hash_t SourceKey(const String8& source, uint32_t optimization, bool valid
 	canonical.reserve(sizeof(k_key_domain) + 24u + source.Size());
 	canonical.insert(canonical.end(), std::begin(k_key_domain), std::end(k_key_domain));
 	AppendU32(&canonical, kSpirvBinaryCacheSchemaVersion);
-	AppendU32(&canonical, k_target_vulkan_12);
+	AppendU32(&canonical, k_target_vulkan_14);
 	AppendU32(&canonical, optimization);
 	AppendU32(&canonical, validation_enabled ? 1u : 0u);
 	AppendU64(&canonical, source.Size());
@@ -97,7 +97,7 @@ std::vector<uint8_t> ModuleIdentity(const ShaderModuleKey& key, bool validation_
 	canonical.reserve(sizeof(k_module_key_domain) + 40u + static_cast<size_t>(key.shader_id.ids.Size()) * sizeof(uint32_t));
 	canonical.insert(canonical.end(), std::begin(k_module_key_domain), std::end(k_module_key_domain));
 	AppendU32(&canonical, kSpirvBinaryCacheSchemaVersion);
-	AppendU32(&canonical, k_target_vulkan_12);
+	AppendU32(&canonical, k_target_vulkan_14);
 	AppendU32(&canonical, key.shader_id.hash0);
 	AppendU32(&canonical, key.shader_id.crc32);
 	AppendU32(&canonical, static_cast<uint32_t>(key.shader_id.ids.Size()));
@@ -305,7 +305,7 @@ SpirvBinaryCacheLoadResult SpirvBinaryCacheStore::LoadEntry(const uint8_t* ident
 
 	const uint8_t* header = data.data();
 	if (memcmp(header, k_magic, sizeof(k_magic)) != 0 || ReadU32(header + 8) != k_header_size || ReadU32(header + 12) != k_format_version ||
-	    ReadU32(header + 16) != kSpirvBinaryCacheSchemaVersion || ReadU32(header + 20) != k_target_vulkan_12 ||
+	    ReadU32(header + 16) != kSpirvBinaryCacheSchemaVersion || ReadU32(header + 20) != k_target_vulkan_14 ||
 	    ReadU32(header + 24) != optimization || ReadU32(header + 28) != (validation_enabled ? 1u : 0u))
 	{
 		return cache_corrupt();
@@ -611,7 +611,7 @@ SpirvBinaryCacheStoreResult SpirvBinaryCacheStore::StoreEntry(const uint8_t* ide
 	AppendU32(&data, k_header_size);
 	AppendU32(&data, k_format_version);
 	AppendU32(&data, kSpirvBinaryCacheSchemaVersion);
-	AppendU32(&data, k_target_vulkan_12);
+	AppendU32(&data, k_target_vulkan_14);
 	AppendU32(&data, optimization);
 	AppendU32(&data, validation_enabled ? 1u : 0u);
 	AppendU64(&data, identity_size);

@@ -35,7 +35,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
-#include "spirv-headers/spirv.hpp"
+#include "spirv/unified1/spirv.hpp"
 
 #include <atomic>
 #include <chrono>

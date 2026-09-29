@@ -27,7 +27,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <vulkan/vk_enum_string_helper.h>
 
 #define XXH_INLINE_ALL
 #include <xxhash/xxhash.h>
@@ -116,7 +115,7 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 	}
 	g_gpu_memory->DbgDbDump();
 	g_gpu_memory->DbgDbSave(U"_gpu_memory.db");
-	EXIT("size = %" PRIu64 ", index = %u, error: %s:%s\n", mem->requirements.size, index, string_VkResult(result),
+	EXIT("size = %" PRIu64 ", index = %u, VkResult=%d:%s\n", mem->requirements.size, index, static_cast<int>(result),
 	     stat.Concat(U'\n').C_Str());
 
 	return false;

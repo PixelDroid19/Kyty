@@ -38,7 +38,7 @@ struct Device
 	bool Init()
 	{
 		VkApplicationInfo app {VK_STRUCTURE_TYPE_APPLICATION_INFO};
-		app.apiVersion = VK_API_VERSION_1_2;
+		app.apiVersion = VK_API_VERSION_1_4;
 		VkInstanceCreateInfo create {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 		create.pApplicationInfo = &app;
 		if (vkCreateInstance(&create, nullptr, &instance) != VK_SUCCESS) { return false; }
@@ -48,6 +48,9 @@ struct Device
 		vkEnumeratePhysicalDevices(instance, &count, devices.data());
 		for (auto physical: devices)
 		{
+			VkPhysicalDeviceProperties properties {};
+			vkGetPhysicalDeviceProperties(physical, &properties);
+			if (properties.apiVersion < VK_API_VERSION_1_4) { continue; }
 			vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, nullptr);
 			std::vector<VkExtensionProperties> extensions(count);
 			vkEnumerateDeviceExtensionProperties(physical, nullptr, &count, extensions.data());

@@ -91,12 +91,12 @@ def run(command: list[str]) -> None:
 
 
 def compile_shader(compiler: str, source: pathlib.Path, output: pathlib.Path) -> list[int]:
-    run([compiler, "-fshader-stage=compute", "-O", "-o", str(output), str(source)])
+    run([compiler, "--target-env=vulkan1.4", "-fshader-stage=compute", "-O", "-o", str(output), str(source)])
     return read_words(output)
 
 
 def validate(validator: str, path: pathlib.Path) -> None:
-    run([validator, "--target-env", "vulkan1.0", str(path)])
+    run([validator, "--target-env", "vulkan1.4", str(path)])
 
 
 def write_spirv(path: pathlib.Path, words: list[int]) -> None:

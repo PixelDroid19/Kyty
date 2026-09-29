@@ -47,7 +47,6 @@
 #include <string>
 #include <system_error>
 #include <vector>
-#include <vulkan/vk_enum_string_helper.h>
 #include <vulkan/vk_platform.h>
 
 // IWYU pragma: no_include <intrin.h>
@@ -1804,6 +1803,13 @@ static void VulkanFindPhysicalDevice(VkInstance instance, VkSurfaceKHR surface, 
 		device_features2.pNext = &color_write_ext;
 
 		vkGetPhysicalDeviceProperties(device, &device_properties);
+		if (device_properties.apiVersion < VK_API_VERSION_1_4)
+		{
+			KYTY_LOG_DEBUG("Vulkan 1.4 required; skipping device %s (API %u.%u.%u)\n", device_properties.deviceName,
+			               VK_API_VERSION_MAJOR(device_properties.apiVersion), VK_API_VERSION_MINOR(device_properties.apiVersion),
+			               VK_API_VERSION_PATCH(device_properties.apiVersion));
+			continue;
+		}
 		vkGetPhysicalDeviceFeatures2(device, &device_features2);
 
 		KYTY_LOG_DEBUG("Vulkan device: %s\n", device_properties.deviceName);
@@ -2668,6 +2674,14 @@ static void VulkanCreate(WindowContext* ctx)
 
 	VulkanExtensions r;
 	VulkanGetExtensions(ctx->host_window, &r);
+	const auto enumerate_version = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+	    vkGetInstanceProcAddr(nullptr, "vkEnumerateInstanceVersion"));
+	uint32_t loader_version = 0;
+	if (enumerate_version == nullptr || enumerate_version(&loader_version) != VK_SUCCESS || loader_version < VK_API_VERSION_1_4)
+	{
+		EXIT("Vulkan 1.4 loader required (reported %u.%u.%u)\n", VK_API_VERSION_MAJOR(loader_version),
+		     VK_API_VERSION_MINOR(loader_version), VK_API_VERSION_PATCH(loader_version));
+	}
 
 	VkApplicationInfo app_info {};
 	app_info.sType              = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -2676,7 +2690,7 @@ static void VulkanCreate(WindowContext* ctx)
 	app_info.applicationVersion = 1;
 	app_info.pEngineName        = "Kyty";
 	app_info.engineVersion      = 1;
-	app_info.apiVersion         = VK_API_VERSION_1_2; // NOLINT
+	app_info.apiVersion         = VK_API_VERSION_1_4; // NOLINT
 
 	VkValidationFeatureDisableEXT disabled_features[] = {};
 	VkValidationFeatureEnableEXT  enabled_features[]  = {
@@ -2778,7 +2792,7 @@ static void VulkanCreate(WindowContext* ctx)
 	if (ctx->graphic_ctx.physical_device == nullptr)
 	{
 		std::fflush(stdout);
-		EXIT("Could not find suitable device");
+		EXIT("Could not find a suitable Vulkan 1.4 device");
 	}
 
 	// Detect VK_EXT_color_write_enable support; drop it from the enabled extension

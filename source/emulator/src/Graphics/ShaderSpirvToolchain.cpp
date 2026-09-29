@@ -27,7 +27,7 @@ static bool SpirvDisassemble(const uint32_t* src_binary, size_t src_binary_size,
 {
 	if (dst_disassembly != nullptr)
 	{
-		spvtools::SpirvTools core(SPV_ENV_VULKAN_1_2);
+		spvtools::SpirvTools core(SPV_ENV_VULKAN_1_4);
 
 		std::string disassembly;
 		if (!core.Disassemble(src_binary, src_binary_size, &disassembly,
@@ -66,8 +66,8 @@ static bool SpirvCompile(const String8& src, Vector<uint32_t>* dst, String8* err
 	EXIT_IF(dst == nullptr);
 	EXIT_IF(err_msg == nullptr);
 
-	spvtools::SpirvTools core(SPV_ENV_VULKAN_1_2);
-	spvtools::Optimizer  opt(SPV_ENV_VULKAN_1_2);
+	spvtools::SpirvTools core(SPV_ENV_VULKAN_1_4);
+	spvtools::Optimizer  opt(SPV_ENV_VULKAN_1_4);
 
 	spv_position_t error_position {};
 	String8        error_msg;

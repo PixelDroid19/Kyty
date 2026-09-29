@@ -200,7 +200,7 @@ public:
 	{
 		VkApplicationInfo app_info {};
 		app_info.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-		app_info.apiVersion = VK_API_VERSION_1_0;
+		app_info.apiVersion = VK_API_VERSION_1_4;
 
 		const char* validation_layer = nullptr;
 		uint32_t    layer_count      = 0;
@@ -246,6 +246,9 @@ public:
 
 		for (const auto physical_device: physical_devices)
 		{
+			VkPhysicalDeviceProperties properties {};
+			vkGetPhysicalDeviceProperties(physical_device, &properties);
+			if (properties.apiVersion < VK_API_VERSION_1_4) { continue; }
 			uint32_t queue_family_count = 0;
 			vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, nullptr);
 			std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);

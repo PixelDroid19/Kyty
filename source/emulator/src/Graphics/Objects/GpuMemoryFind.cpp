@@ -29,7 +29,6 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <vulkan/vk_enum_string_helper.h>
 
 #define XXH_INLINE_ALL
 #include <xxhash/xxhash.h>

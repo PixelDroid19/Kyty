@@ -87,14 +87,18 @@ build and publishes the resulting archives.
 ### Requirements
 
 - Git;
-- CMake;
+- CMake 3.24 or newer;
 - Ninja;
 - a C++17-capable compiler;
-- Vulkan development files appropriate for the host platform;
+- Vulkan 1.4 headers and loader, plus SPIRV-Headers and SPIRV-Tools with
+  Vulkan 1.4 support (including the optimizer CMake package);
 - platform-specific window, input, and audio development packages.
 
-The CI workflow is the authoritative reference for tested dependencies and
-compiler configuration.
+Set `VULKAN_SDK` to a Vulkan 1.4 SDK installation or install equivalent host
+development packages. Configuration rejects older headers or shader tools;
+runtime also requires a Vulkan 1.4 loader and physical device. Shared
+SPIRV-Tools libraries must be available to the executable when using a shared
+SDK build. The bundled older compiler sources are not used.
 
 ### Configure and build
 

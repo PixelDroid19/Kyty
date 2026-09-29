@@ -114,7 +114,6 @@ target_link_libraries(kyty_shader_compute_integration PRIVATE core emulator vulk
 target_include_directories(kyty_shader_compute_integration PRIVATE
 	"${CMAKE_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/emulator/include"
-	"${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include"
 )
 add_test(NAME KytyShaderComputeIntegration.ScalarContracts
 	COMMAND $<TARGET_FILE:kyty_shader_compute_integration>)
@@ -147,7 +146,6 @@ target_link_libraries(kyty_shader_wave64_integration PRIVATE core emulator vulka
 target_include_directories(kyty_shader_wave64_integration PRIVATE
 	"${CMAKE_SOURCE_DIR}/include"
 	"${CMAKE_SOURCE_DIR}/emulator/include"
-	"${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include"
 )
 add_test(NAME KytyShaderComputeIntegration.PairedWave64
 	COMMAND $<TARGET_FILE:kyty_shader_wave64_integration>)

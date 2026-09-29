@@ -2077,7 +2077,7 @@ void VerifyEventWritePacketContract()
 
 std::vector<uint32_t> AssembleValidSpirv(const Kyty::Core::String8& source, const char* message)
 {
-	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_4);
 	std::vector<uint32_t> binary;
 	tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t& position, const char* detail)
 	{
@@ -2095,7 +2095,7 @@ void ExpectValidSpirv(const Kyty::Core::String8& source, const char* message)
 
 void ExpectValidSpirv(const Kyty::Vector<uint32_t>& binary, const char* message)
 {
-	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_4);
 	tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t& position, const char* detail)
 	{
 		std::fprintf(stderr, "SPIR-V validation at %zu:%zu: %s\n", position.line, position.column, detail);
@@ -4177,7 +4177,7 @@ public:
 	{
 		VkApplicationInfo application {};
 		application.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-		application.apiVersion = VK_API_VERSION_1_0;
+		application.apiVersion = VK_API_VERSION_1_4;
 		VkInstanceCreateInfo instance_info {};
 		instance_info.sType            = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
 		instance_info.pApplicationInfo = &application;
@@ -4199,6 +4199,9 @@ public:
 
 		for (const auto physical: physical_devices)
 		{
+			VkPhysicalDeviceProperties properties {};
+			vkGetPhysicalDeviceProperties(physical, &properties);
+			if (properties.apiVersion < VK_API_VERSION_1_4) { continue; }
 			uint32_t extension_count = 0;
 			if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, nullptr) != VK_SUCCESS)
 			{

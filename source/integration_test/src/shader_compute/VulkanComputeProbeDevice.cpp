@@ -134,15 +134,14 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 	}
 	wave_capabilities_ = {};
 
-	if (request_wave_features)
 	{
 		const auto enumerate_instance_version = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
 		    vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
-		uint32_t loader_version = VK_API_VERSION_1_0;
+		uint32_t loader_version = 0;
 		if (enumerate_instance_version == nullptr || enumerate_instance_version(&loader_version) != VK_SUCCESS ||
-		    loader_version < VK_API_VERSION_1_2)
+		    loader_version < VK_API_VERSION_1_4)
 		{
-			*message = "paired-wave compute probe requires a Vulkan 1.2 instance API";
+			*message = "compute probe requires a Vulkan 1.4 instance API";
 			return Result::Unavailable;
 		}
 	}
@@ -153,7 +152,7 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 	app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
 	app_info.pEngineName        = "Kyty";
 	app_info.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
-	app_info.apiVersion         = request_wave_features ? VK_API_VERSION_1_2 : VK_API_VERSION_1_0;
+	app_info.apiVersion         = VK_API_VERSION_1_4;
 
 	VkInstanceCreateInfo instance_info {};
 	instance_info.sType            = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -196,6 +195,7 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 	{
 		VkPhysicalDeviceProperties properties {};
 		vkGetPhysicalDeviceProperties(candidate, &properties);
+		if (properties.apiVersion < VK_API_VERSION_1_4) { continue; }
 		const VkDeviceSize required_storage_range = request_wave_features ? kMaximumProbeBufferBytes :
 		                                                                         VulkanComputeProbeInternal::kProgramBaseProbeBufferSize;
 		if (properties.limits.maxStorageBufferRange < required_storage_range) { continue; }
@@ -219,8 +219,8 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 	if (physical_device_ == VK_NULL_HANDLE)
 	{
 		*message = request_wave_features ?
-		                "no compute device supports revision-2 subgroup size control, full compute subgroups and the paired size-32 layout" :
-		                "no Vulkan device exposes a compute queue with a 32-byte storage buffer limit";
+		                "no Vulkan 1.4 compute device supports revision-2 subgroup size control, full compute subgroups and the paired size-32 layout" :
+		                "no Vulkan 1.4 device exposes a compute queue with a 32-byte storage buffer limit";
 		return Result::Unavailable;
 	}
 
