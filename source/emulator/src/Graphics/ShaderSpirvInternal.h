@@ -134,6 +134,8 @@ public:
 	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
+	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
+	[[nodiscard]] String8 EmitMetadataStore(int row, int field, const String8& reg) const;
 	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
 	[[nodiscard]] bool    UsesBlockDispatch() const;
 	[[nodiscard]] bool    UsesBarrierPhases() const;

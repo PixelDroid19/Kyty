@@ -733,6 +733,42 @@ The next investigation must trace this nineteenth pipeline's allocation
 trajectory and device feature admission. No current frame-time, graphics
 capture, controls or gameplay acceptance exists.
 
+### Immutable resource-index specialization (2026-09-30, strict compile progress)
+
+The nineteenth pending module uses the corrected separate-array layout. A
+matching-runtime-device pipeline probe reaches its 120-second bound without
+completing compilation, with 118.965 CPU seconds and a 2.6 GiB service peak.
+An owner-checked allocator trace separately reaches 125,659 nodes, 174,599
+instructions and 416,544 logical scratch bytes after 114.731 seconds; it stops
+at its RSS bound without dispatching the program.
+
+A source-matched resource capture recovers the immutable image/sampler indices
+that the host binding code writes into metadata word zero. Replacing only
+thirty-four such loads, with all other descriptor words retained as runtime
+inputs, completes the same module's pipeline in 44.080 seconds and 1,733,468
+KiB peak RSS. Layout, subgroup flags and enabled runtime device features match;
+the shader cache is disabled and zero private-program dispatches are queued.
+A public image/sampler loop compares dynamic and known index loads over seven
+metadata variants on both driver builds: 57,344 GPU values have zero
+differences. That preservation result does not cover private-program pixels.
+
+The production candidate derives these indices from the bind's existing
+spatial/numeric banks, handles mapped scalar loads and initial SGPR metadata
+through one emitter, retains mutable loads and versions the module cache.
+The image-versus-storage classification participates in module identity.
+Focused cases compile but remain deferred. The Release build and boundary/table
+provenance gates pass. A strict Silent/Native integration run advances from
+eighteen completed compute pipelines and zero presents to forty-eight completed
+compute pipelines and 643 observed presents. Its native snapshot has a 172 ms
+median and 241 ms p95 frame time; these are current timings, not a matched
+frame-rate comparison. A scored native capture at present 643 is entirely
+black (`low_entropy`), and cannot establish a visual or gameplay fix. The run
+logs the title transition and subsequent map resource load, then reaches its
+6 GiB cgroup OOM bound after 356.215 wall seconds and 337.890 CPU seconds.
+Separate the remaining workload-memory and visual frontier from the resolved
+nineteenth pipeline compilation; a warm-cache run must capture the opening,
+transition and later state before input/gameplay acceptance.
+
 ### Descriptor-array feature admission (2026-09-29, unresolved)
 
 `Window.cpp:2083` initializes device features to zero and leaves sampled-image,

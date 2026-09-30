@@ -2960,44 +2960,50 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 
 	// TODO() check pointer
 
-	if (dword_count <= 0 || dword_count > 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dword_count <= 0 || dword_count > 8 condition ignored (continuing)\n"); }
-	if (inst.dst.size != dword_count) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != dword_count condition ignored (continuing)\n"); }
+	if (dword_count <= 0 || dword_count > 16)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dword_count <= 0 || dword_count > 8 condition ignored (continuing)\n");
+	}
+	if (inst.dst.size != dword_count)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != dword_count condition ignored (continuing)\n");
+	}
 
 	SpirvValue dst_value[16];
 	for (int i = 0; i < dword_count; i++)
 	{
 		dst_value[i] = (dword_count == 1 ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, i));
-		if (dst_value[i].type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value[i].type != SpirvType::Uint condition ignored (continuing)\n"); }
+		if (dst_value[i].type != SpirvType::Uint)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value[i].type != SpirvType::Uint condition ignored (continuing)\n");
+		}
 	}
 
 	auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
 	auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-	int  offset      = static_cast<int>(inst.src[1].constant.u >> 2u);
+	int offset = static_cast<int>(inst.src[1].constant.u >> 2u);
 
-	if (src0_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
-	if (src0_value1.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value1.type != SpirvType::Uint condition ignored (continuing)\n"); }
-
-	static const char* text = R"(
-		         %vsharp_<index>_<reg> = OpAccessChain %<vsharp_uint_ptr> %vsharp %int_0 %int_<buffer> %int_<field>
-		         %vsharp_<index>_value_<reg> = OpLoad %uint %vsharp_<index>_<reg>
-		               OpStore %<reg> %vsharp_<index>_value_<reg>
-				)";
+	if (src0_value0.type != SpirvType::Uint)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value0.type != SpirvType::Uint condition ignored (continuing)\n");
+	}
+	if (src0_value1.type != SpirvType::Uint)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value1.type != SpirvType::Uint condition ignored (continuing)\n");
+	}
 
 	for (int i = 0; i < dword_count; i++)
 	{
 		int buffer = 0;
-		int field  = 0;
+		int field = 0;
 		if (!spirv->GetDynamicSLoadMappedIndex(inst.pc, offset + i, &buffer, &field))
 		{
 			spirv->GetMappedIndex(offset + i, &buffer, &field);
 		}
 
-		*dst_source += String8(text)
-		                   .ReplaceStr("<vsharp_uint_ptr>", bind_info->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint")
-		                   .ReplaceStr("<reg>", dst_value[i].value)
-		                   .ReplaceStr("<buffer>", String8::FromPrintf("%d", buffer))
-		                   .ReplaceStr("<field>", String8::FromPrintf("%d", field))
-		                   .ReplaceStr("<index>", String8::FromPrintf("%u_%d", index, i));
+		const auto id = String8::FromPrintf("vsharp_%u_%d_value_%s", index, i, dst_value[i].value.c_str());
+		*dst_source += spirv->EmitMetadataLoad(buffer, field, id);
+		*dst_source += String8::FromPrintf("OpStore %%%s %%%s\n", dst_value[i].value.c_str(), id.c_str());
 	}
 
 	return true;

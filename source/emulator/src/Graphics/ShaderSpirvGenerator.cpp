@@ -7,6 +7,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Graphics/ShaderMetadataResourceIndex.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Log.h"
 
@@ -1935,11 +1936,6 @@ void Spirv::WriteLocalVariables()
 
 	if (m_bind != nullptr)
 	{
-		static const char* text = R"(
-		 %vsharp_<reg>_<buffer>_<field> = OpAccessChain %<vsharp_uint_ptr> %vsharp %int_0 %int_<buffer> %int_<field>
-         %vsharp_value_<reg>_<buffer>_<field> = OpLoad %uint %vsharp_<reg>_<buffer>_<field>
-	               OpStore %<reg> %vsharp_value_<reg>_<buffer>_<field>
-		)";
 
 		int buffer_index = 0;
 
@@ -1963,7 +1959,6 @@ void Spirv::WriteLocalVariables()
 				continue;
 			}
 
-			String8 buffer = String8::FromPrintf("%d", buffer_index + i);
 			for (int f = 0; f < 4; f++)
 			{
 				if (extended)
@@ -1975,12 +1970,8 @@ void Spirv::WriteLocalVariables()
 					m_extended_mapping[start_reg - 16 + f][1] = f;
 				} else
 				{
-					String8 reg   = String8::FromPrintf("s%d", start_reg + f + shift_regs);
-					String8 field = String8::FromPrintf("%d", f);
-					m_source += String8(text)
-					                .ReplaceStr("<vsharp_uint_ptr>", m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" :
-					                                                       "_ptr_PushConstant_uint")
-					                .ReplaceStr("<reg>", reg).ReplaceStr("<buffer>", buffer).ReplaceStr("<field>", field);
+					String8 reg = String8::FromPrintf("s%d", start_reg + f + shift_regs);
+					m_source += EmitMetadataStore(buffer_index + i, f, reg);
 				}
 			}
 		}
@@ -2000,7 +1991,6 @@ void Spirv::WriteLocalVariables()
 			{
 				EXIT_IF(buffer_index + i * 2 + ti >= static_cast<int>(m_bind->push_constant_size) / 16);
 
-				String8 buffer = String8::FromPrintf("%d", buffer_index + i * 2 + ti);
 				for (int f = 0; f < 4; f++)
 				{
 					if (extended)
@@ -2012,12 +2002,8 @@ void Spirv::WriteLocalVariables()
 						m_extended_mapping[start_reg - 16 + 4 * ti + f][1] = f;
 					} else
 					{
-						String8 reg   = String8::FromPrintf("s%d", start_reg + 4 * ti + f + shift_regs);
-						String8 field = String8::FromPrintf("%d", f);
-						m_source += String8(text)
-						                .ReplaceStr("<vsharp_uint_ptr>", m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" :
-						                                                       "_ptr_PushConstant_uint")
-						                .ReplaceStr("<reg>", reg).ReplaceStr("<buffer>", buffer).ReplaceStr("<field>", field);
+						String8 reg = String8::FromPrintf("s%d", start_reg + 4 * ti + f + shift_regs);
+						m_source += EmitMetadataStore(buffer_index + i * 2 + ti, f, reg);
 					}
 				}
 			}
@@ -2036,7 +2022,6 @@ void Spirv::WriteLocalVariables()
 
 			EXIT_IF(buffer_index + i >= static_cast<int>(m_bind->push_constant_size) / 16);
 
-			String8 buffer = String8::FromPrintf("%d", buffer_index + i);
 			for (int f = 0; f < 4; f++)
 			{
 				if (extended)
@@ -2048,12 +2033,8 @@ void Spirv::WriteLocalVariables()
 					m_extended_mapping[start_reg - 16 + f][1] = f;
 				} else
 				{
-					String8 reg   = String8::FromPrintf("s%d", start_reg + f + shift_regs);
-					String8 field = String8::FromPrintf("%d", f);
-					m_source += String8(text)
-					                .ReplaceStr("<vsharp_uint_ptr>", m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" :
-					                                                       "_ptr_PushConstant_uint")
-					                .ReplaceStr("<reg>", reg).ReplaceStr("<buffer>", buffer).ReplaceStr("<field>", field);
+					String8 reg = String8::FromPrintf("s%d", start_reg + f + shift_regs);
+					m_source += EmitMetadataStore(buffer_index + i, f, reg);
 				}
 			}
 		}
@@ -2076,13 +2057,8 @@ void Spirv::WriteLocalVariables()
 				m_extended_mapping[start_reg - 16][1] = i % 4;
 			} else
 			{
-				String8 buffer = String8::FromPrintf("%d", buffer_index + i / 4);
-				String8 reg    = String8::FromPrintf("s%d", start_reg + shift_regs);
-				String8 field  = String8::FromPrintf("%d", i % 4);
-				m_source += String8(text)
-				                .ReplaceStr("<vsharp_uint_ptr>", m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" :
-				                                                       "_ptr_PushConstant_uint")
-				                .ReplaceStr("<reg>", reg).ReplaceStr("<buffer>", buffer).ReplaceStr("<field>", field);
+				String8 reg = String8::FromPrintf("s%d", start_reg + shift_regs);
+				m_source += EmitMetadataStore(buffer_index + i / 4, i % 4, reg);
 			}
 		}
 
@@ -2129,12 +2105,8 @@ void Spirv::WriteLocalVariables()
 
 			EXIT_IF(buffer_index + i / 4 >= static_cast<int>(m_bind->push_constant_size) / 16);
 
-			String8 buffer = String8::FromPrintf("%d", buffer_index + i / 4);
-			String8 reg    = String8::FromPrintf("s%d", start_reg + (absolute ? 0 : shift_regs));
-			String8 field  = String8::FromPrintf("%d", i % 4);
-			m_source += String8(text)
-			                .ReplaceStr("<vsharp_uint_ptr>", m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint")
-			                .ReplaceStr("<reg>", reg).ReplaceStr("<buffer>", buffer).ReplaceStr("<field>", field);
+			String8 reg = String8::FromPrintf("s%d", start_reg + (absolute ? 0 : shift_regs));
+			m_source += EmitMetadataStore(buffer_index + i / 4, i % 4, reg);
 		}
 
 		/* buffer_index += (m_bind->direct_sgprs.sgprs_num > 0 ? (m_bind->direct_sgprs.sgprs_num - 1) / 4 + 1 : 0); */
@@ -2182,8 +2154,26 @@ void Spirv::WriteLocalVariables()
 	m_source += "\n";
 }
 
+String8 Spirv::EmitMetadataLoad(int row, int field, const String8&id) const
+{
+	uint32_t value = 0;
+	if (m_bind != nullptr && ShaderKnownMetadataResourceIndex(*m_bind, Config::IsNextGen(), row, field, &value))
+	{
+		return String8::FromPrintf("%%%s = OpCopyObject %%uint %%%s\n", id.c_str(), GetConstantUint(value).c_str());
+	}
+	return String8::FromPrintf("%%%s_ptr = OpAccessChain %%%s %%vsharp %%int_0 %%%s %%%s\n%%%s = OpLoad %%uint %%%s_ptr\n", id.c_str(),
+							   m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint", GetConstantInt(row).c_str(),
+							   GetConstantInt(field).c_str(), id.c_str(), id.c_str());
+}
+
+String8 Spirv::EmitMetadataStore(int row, int field, const String8&reg) const
+{
+	const auto id = String8::FromPrintf("vsharp_value_%s_%d_%d", reg.c_str(), row, field);
+	return EmitMetadataLoad(row, field, id) + String8::FromPrintf("OpStore %%%s %%%s\n", reg.c_str(), id.c_str());
+}
+
 // Loads dispatch thread limit word `axis` from the per-dispatch metadata.
-String8 Spirv::EmitThreadLimitLoad(uint32_t axis, const String8& id) const
+String8 Spirv::EmitThreadLimitLoad(uint32_t axis, const String8&id) const
 {
 	return String8::FromPrintf("%%%s_ptr = OpAccessChain %%%s %%vsharp %%int_0 %%%s %%%s\n%%%s = OpLoad %%uint %%%s_ptr\n", id.c_str(),
 	                           m_bind->vsharp_uniform_buffer ? "_ptr_Uniform_uint" : "_ptr_PushConstant_uint",
@@ -2217,7 +2207,6 @@ String8 Spirv::EmitNativeThreadLimitExec() const
 	          "OpStore %exec_lo %tl_native_exec\n";
 	return source;
 }
-
 
 void Spirv::DetectFetch()
 {
@@ -2753,6 +2742,19 @@ void Spirv::WriteFunctions()
 void Spirv::FindConstants()
 {
 	m_constants.Clear();
+	if (m_bind != nullptr)
+	{
+		constexpr int rows = ShaderStorageResources::BUFFERS_MAX + ShaderTextureResources::RES_MAX * 2 + ShaderSamplerResources::RES_MAX;
+		for (int row = 0; row < rows; ++row)
+		{
+			uint32_t value = 0;
+			if (ShaderKnownMetadataResourceIndex(*m_bind, Config::IsNextGen(), row, 0, &value))
+			{
+				AddConstantUint(value);
+			}
+		}
+	}
+
 	if (UsesBlockDispatch())
 	{
 		// The block table is rebuilt after ModifyCode; register the upper

@@ -4075,6 +4075,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].extended));
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].dynamic_sload));
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].usage));
+		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].textures2d_without_sampler));
 		ret->ids.Add(static_cast<uint32_t>(ShaderResolvedSampledTextureShape(bind.textures2D.desc[i])));
 		ret->ids.Add(static_cast<uint32_t>(bind.textures2D.desc[i].sample_operation));
 	}
