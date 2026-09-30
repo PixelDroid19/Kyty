@@ -1559,8 +1559,8 @@ void ShaderCalcBindingIndices(ShaderBindResources* bind)
 	{
 		bind->textures2D.binding_sampled_index = binding_index++;
 		bind->textures2D.binding_storage_index = binding_index++;
-		// Reserve every sampled-image shape. Descriptor layouts are keyed by the
-		// aggregate sampled count while each shader can use a different subset.
+		// Keep sparse binding numbers stable while descriptor layouts reserve the
+		// separate array size of each declared shape and numeric bank.
 		bind->textures2D.binding_sampled_array_index = binding_index++;
 		bind->textures2D.binding_sampled_3d_index = binding_index++;
 		bind->textures2D.binding_sampled_uint_index = binding_index++;

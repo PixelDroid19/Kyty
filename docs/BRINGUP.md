@@ -699,6 +699,40 @@ without executing the emulator or its caches on NTFS. This is layout-dependent
 compiler evidence under the probe's device configuration, not private-program
 GPU equivalence or authorization for an unverified renderer change.
 
+### Per-array descriptor layouts (2026-09-29, strict compile progress)
+
+The renderer now derives each layout from the separate image-array sizes
+already declared by its shader generator. It preserves sparse binding numbers,
+depth arrays, storage resources and every declared numeric dispatch bank.
+Layout and descriptor-set caches include the complete binding/type/count key;
+per-stage and pipeline limit checks count the same plan. Layout handles remain
+live for their dependent sets and pipelines, with a bounded cache. The shader
+module and descriptor writes are unchanged.
+
+An independent public image/sampler program compares padded and separate-array
+layouts on both the installed and external compiler builds. Distinct image
+views and seven sampler LOD clamps produce 57,344 checked GPU values with zero
+differences across four runs. This is preservation evidence, not a private
+workload rendering result or a frame-rate benchmark. The Release executable
+and native agent build successfully in a dedicated btrfs build directory;
+boundary and graphics-table provenance gates pass. Focused unit cases for
+shape keys, numeric banks, counts and binding collisions compile; their
+execution remains deferred until the workload runs, as requested.
+
+A strict Silent/Native run using the external compiler completes eighteen
+compute pipelines and reaches thirty-six dispatches and 290 submissions at
+the last native snapshot, with zero presents. It ends at its 6 GiB cgroup OOM
+bound after 263.393 wall seconds and 277.620 CPU seconds. A bounded Vulkan-call
+capture confirms that pipeline eighteen uses the byte-identical earlier
+175-case module and unchanged stage/subgroup flags, with sampled descriptor
+arrays of ten, six and one instead of seven arrays of seventeen. The next
+pending pipeline is a different, larger module using that same corrected
+layout. Thus aggregate descriptor padding is a verified compile-capacity
+contributor, but is insufficient to solve the remaining compilation cost.
+The next investigation must trace this nineteenth pipeline's allocation
+trajectory and device feature admission. No current frame-time, graphics
+capture, controls or gameplay acceptance exists.
+
 ### Descriptor-array feature admission (2026-09-29, unresolved)
 
 `Window.cpp:2083` initializes device features to zero and leaves sampled-image,

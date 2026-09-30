@@ -19,8 +19,6 @@
 //
 // Public API remains in include/Emulator/Graphics/GraphicsRender.h
 
-#include "Emulator/Graphics/GraphicsRender.h"
-
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/File.h"
@@ -32,6 +30,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DepthStencilCopy.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -42,6 +41,7 @@
 #include "Emulator/Graphics/RenderResolutionPlanner.h"
 #include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderDescriptorLayoutPlan.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Kernel/EventQueue.h"
@@ -52,6 +52,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -260,8 +261,7 @@ public:
 
 	VkDescriptorSetLayout GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind);
 
-	VulkanDescriptorSet* Allocate(Stage stage, int storage_buffers_num, int textures2d_sampled_num, int textures2d_storage_num,
-	                              int samplers_num, int gds_buffers_num, bool vsharp_uniform_buffer);
+	VulkanDescriptorSet* Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                 Free(VulkanDescriptorSet* set);
 
 	VulkanDescriptorSet* GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
@@ -284,6 +284,7 @@ private:
 		int                  next_free_set                                 = -1;
 		uint32_t             hash                                          = 0;
 		Stage                stage                                         = Stage::Unknown;
+		ShaderDescriptorLayoutPlan::Key layout_key = {};
 		int                  storage_buffers_num                           = 0;
 		VulkanBufferDescriptorKey storage_buffers[BUFFERS_MAX]             = {};
 		int                  textures2d_sampled_num                        = 0;
@@ -325,8 +326,7 @@ private:
 		bool             free           = true;
 	};
 
-	VkDescriptorSetLayout GetOrCreateLayout(Stage stage, int storage_buffers_num, int textures2d_sampled_num, int textures2d_storage_num,
-	                                        int samplers_num, int gds_buffers_num, bool vsharp_uniform_buffer);
+	VkDescriptorSetLayout GetOrCreateLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                  CreatePool();
 
 	static uint32_t CalcHash(const Set& s);
@@ -341,12 +341,7 @@ private:
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
 
-	VkDescriptorSetLayout m_descriptor_set_layout_vertex[BUFFERS_MAX + 1][TEXTURES_SAMPLED_MAX + 1][TEXTURES_STORAGE_MAX + 1]
-	                                                    [SAMPLERS_MAX + 1][GDS_BUFFER_MAX + 1][2] = {};
-	VkDescriptorSetLayout m_descriptor_set_layout_pixel[BUFFERS_MAX + 1][TEXTURES_SAMPLED_MAX + 1][TEXTURES_STORAGE_MAX + 1]
-	                                                   [SAMPLERS_MAX + 1][GDS_BUFFER_MAX + 1][2] = {};
-	VkDescriptorSetLayout m_descriptor_set_layout_compute[BUFFERS_MAX + 1][TEXTURES_SAMPLED_MAX + 1][TEXTURES_STORAGE_MAX + 1]
-	                                                     [SAMPLERS_MAX + 1][GDS_BUFFER_MAX + 1][2] = {};
+	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
 };
 
 class SamplerCache

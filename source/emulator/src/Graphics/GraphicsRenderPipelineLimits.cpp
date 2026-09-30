@@ -1,10 +1,13 @@
 #include "GraphicsRenderPipelineLimits.h"
 
-#include "GraphicsRenderDescriptorLimits.h"
+#include "Kyty/Core/DbgAssert.h"
+
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderDescriptorLayoutPlan.h"
 #include "Emulator/Graphics/ShaderDescriptorLimits.h"
-#include "Kyty/Core/DbgAssert.h"
+
+#include "GraphicsRenderDescriptorLimits.h"
 
 #include <cinttypes>
 
@@ -28,12 +31,9 @@ Limits::DescriptorCounts CountStage(const ShaderBindResources& bind)
 {
 	Limits::DescriptorCounts counts {};
 	if (!ShaderBindRequiresDescriptorSet(bind)) { return counts; }
-	const auto& textures = bind.textures2D;
-	const int64_t sampled = static_cast<int64_t>(textures.textures2d_sampled_num) + textures.textures2d_sampled_depth_num +
-	                        textures.textures2d_array_sampled_num + textures.textures3d_sampled_num;
-	RequireDescriptorLimit(Limits::CountLayout(bind.storage_buffers.buffers_num, sampled, textures.textures2d_storage_num,
-	                                          bind.samplers.samplers_num, bind.gds_pointers.pointers_num,
-	                                          bind.vsharp_uniform_buffer, &counts));
+	ShaderDescriptorLayoutPlan plan {};
+	EXIT_IF(!ShaderBuildDescriptorLayoutPlan(bind, &plan));
+	RequireDescriptorLimit(ShaderCountDescriptorLayoutPlan(plan, &counts));
 	return counts;
 }
 
