@@ -512,6 +512,210 @@ shared ownership is also excluded. The external probe now stops graph requests
 above 100,000 nodes before allocating them. Production memory and compiler
 policies remain unchanged.
 
+A separate external StorageBuffer candidate materializes 490 direct scalar
+locals after helper inlining and retains the two dispatcher-control locals.
+Disjoint invocation slices preserve raw 32-bit values; the proposed workspace
+requires 262,144 bytes per physical workgroup. Its matching-layout Vulkan 1.4
+module validates and reduces peak interval pressure to 1,263 units, but raises
+the initial graph to 90,084 nodes and backend size to 124,093 instructions.
+Inlining alone reproduces the original graph and pressure, so it is not the
+source of that reduction. A complete pipeline-only run still reaches its
+180-second limit without finishing, with 177.828 CPU seconds and a 3.6 GiB
+service peak. No guest dispatch or runtime workspace is activated.
+
+Combining that materialization with the finite native phases also validates,
+but increases the peak to 1,612 units; its initial graph contains 84,377 nodes.
+Neither smaller early pressure nor a new buffer representation establishes
+compile-time or frame-time acceptance. Further work must preserve the known
+subgroup-uniform scalar state when assessing any materialization strategy;
+broadcasting arbitrary unsigned temporaries would alter guest vector values.
+
+A fresh bounded strict Silent/Native source capture with Vulkan 1.4 reaches
+its 120-second process limit, with 126.545 CPU seconds and a journal-reported
+peak of about 4 GiB. Its native fifteen-second watch records zero frame and
+present progress. The last generated compute source has 175 dispatcher cases;
+assembly reproduces the corresponding captured module body exactly. This
+recovers the actual scalar-register names without guessing a map from the
+larger 181-case cached fixture. Source order alone is not a complete host stack
+or proof of which later pipeline is active at timeout.
+
+That source-matched program requests 34,519 initial allocator nodes and has
+2,156 interval register units. External materialization of 487 direct scalar
+locals reduces the peak to 1,263, with 86,618 graph nodes. Preserving the known
+subgroup-uniform SGPR, EXEC, EXECZ, SCC and VCC state on their materialized loads
+reduces the peak only to 1,217 and raises the graph to 87,292. Arbitrary unsigned
+temporaries remain excluded from the broadcast. Representing the one dedicated
+immutable metadata buffer with point-of-use StorageBuffer reads changes that
+peak only to 1,209, with 88,358 nodes. These Vulkan 1.4-valid diagnostics do not
+establish complete compilation, GPU preservation or a runtime policy.
+
+Two other bounded address-liveness questions are also excluded as sufficient
+fixes. Volatile Uniform loads in the original 181-case module change the peak
+from 2,172 to 2,105 and raise nodes to 36,608. In its materialized counterpart,
+a stable per-invocation workspace base read at each basic block changes 1,263
+to 1,181 while raising nodes to 96,406; the workspace size remains unchanged.
+Neither result meets the compile or execution gate.
+
+An external unsigned word-pair representation preserves the 175-case guest
+CFG, carry, borrow, high/low unsigned comparisons, the observed constant
+shifts and physical pointer bit patterns. It validates for Vulkan 1.4 and
+replaces all unsigned 64-bit value operations; an unused signed 64-bit type
+and capability remain. The initial graph instead grows to 38,579 nodes, and
+interval pressure barely changes from 2,156 to 2,154. Thus native unsigned
+64-bit arithmetic alone does not explain the barrier. No GPU equivalence or
+complete compile result exists for this representation, and it is not shipped.
+
+Matching driver source excludes partial register writes from full block-def
+kills. Read-only probes identify many width-one definitions with intervals
+spanning the outer loop, but that does not prove those values are unnecessary
+or that the driver is incorrect. Trace their actual producer and consumers
+before another shader representation or allocator change. All external
+pipeline probes queue zero dispatches; production compiler, memory, descriptor
+and driver policies remain unchanged.
+
+The width-one shift producers use an immediate count of eight. Matching
+sampler-send lowering constructs packed surface/sampler descriptor bits with
+that shift; the traced values have multiple partial writes and depend on
+width-one sends. This is a resource-lowering lead, not evidence that guest
+64-bit address arithmetic is responsible or that every such interval is
+semantically unnecessary.
+
+An external immutable-sampler layout leaves the original 175-case graph and
+pressure unchanged: 34,519 nodes and 2,156 units. Folding eleven known sampler
+metadata indices validates for Vulkan 1.4 but only changes those values to
+34,341 and 2,138. Conservative continuation-CFG propagation, including
+function-parameter write effects, resolves sixty image-register reads and
+still produces that same backend graph and pressure. Immutable samplers and
+these sampler-index constants alone are therefore excluded as sufficient
+compile-capacity fixes. No complete pipeline, guest dispatch or FPS improvement
+is established by these probes; all remain outside the production renderer.
+
+A read-only resource-layout capture confirms the source-matched metadata
+ordering. Folding its thirty-four known texture/sampler index loads validates
+for Vulkan 1.4 and changes the initial graph to 33,930 nodes, with 1,740 interval
+units. This includes typed image-array tags; other descriptor fields remain
+runtime inputs. It is still compiler-only evidence, without complete compilation
+or GPU equivalence, and is not activated.
+
+A separate matching-layout descriptor-buffer probe admits the advertised host
+feature and keeps the original shader unchanged. Its initial graph has 34,017
+nodes and 1,841 units; singleton classes at the peak fall from 308 to 51.
+Combining descriptor buffers with the external scalar-state workspace produces
+87,278 nodes, 163,928 backend instructions and 937 units. The complete pipeline
+still reaches its 175-second limit, after 173.572 CPU seconds and a 3.4 GiB
+service peak, without a pipeline result. No guest dispatches are queued. These
+representations do not establish a capacity fix or frame-time improvement.
+
+An independently authored descriptor-loop reproducer contains no workload
+code or data. Both eight-case and sixty-four-case modules validate for Vulkan
+1.4. Their initial interval pressure is 43 and 155 units respectively. In the
+larger program, 128 packed-descriptor temporaries span the outer loop from
+instruction 5 to 2,826. Each is consumed by width-one OR/AND operations reading
+its low word at byte offset zero; the remaining register bytes are not read.
+This isolates the partial-register-def question independently of the private
+program. The next compiler experiment must account for bytes actually read
+and preserve predication, masking, wider reads and indirect access; it does
+not authorize treating every long interval in the original program as dead.
+No driver modification or system installation is validated by this evidence.
+
+An external Mesa 26.2.3 build now tests that question in
+`brw_analysis_liveness.cpp`, without changing the installed driver or Kyty's
+renderer policy. It conservatively collects the byte spans of all VGRF reads.
+An additional block-def kill requires a contiguous NoMask write covering all
+read bytes, and excludes predicated non-select writes and indirect/subregister
+addressing. Wider reads, high-word reads, masking, predication, prior reads and
+noncontiguous writes retain their existing lifetime. Two independently authored
+contract cases fail before the correction and pass afterward; the six negative
+cases pass in both versions. All 299 compiler tests pass with the correction.
+
+The same public sixty-four-case module falls from 155 to 28 interval register
+units. Its complete pipeline creation changes from 132.950 to 36.105 ms in the
+two local builds, with the shader cache disabled. Seven GPU dispatches exercise
+distinct sampler LOD clamps and check 14,336 values against expected mip
+colors; both builds produce zero differences. These are focused compiler and
+GPU-preservation results, not a workload FPS benchmark.
+
+The original 175-case module retains its 56,898 backend instructions and 34,515
+VGRFs, while interval pressure falls from 2,156 to 1,896 units. With the external
+correction, complete pipeline creation now finishes in 104.767 seconds under
+the 4 GiB bound, with a 2.2 GiB service peak and no queued dispatches. This passes
+the probe's complete-compilation gate, but remains a long cold compile. A
+scoped warm-cache retry of the same module and probe layout without push
+constants finishes in 9.236 ms with 28,280 KiB peak RSS. This is one cached pipeline,
+not the complete workload. Private-program GPU execution, strict runtime
+progress, frame time and gameplay acceptance still require measurement. No system
+driver installation or vendor-specific production policy is made.
+
+A strict Silent/Native run with the external driver and scoped cache still
+ends in its 4 GiB cgroup OOM bound after 210.015 wall seconds and 221.135 CPU
+seconds. At the last native snapshot, 153.961 seconds into the run, seventeen
+compute pipelines have completed, totaling 81.357 seconds of Vulkan creation
+time; thirty-five dispatches and 272 submissions are recorded, with zero
+presents. Completed fence waits total only 0.186 seconds. No usable frame-time
+sample or native graphics capture exists. The next evidence must identify the
+actual pending compute module and stage flags; successful compilation of an
+earlier source-matched fixture does not establish which pipeline exhausts the
+runtime bound. This remains an unresolved compile-capacity failure, not proof
+of improved gameplay or a current Xe reset.
+
+A subsequent bounded Vulkan-call capture identifies the eighteenth application
+compute pipeline before creation. Its SPIR-V matches the 175-case fixture
+byte-for-byte; its full-subgroup flag and required size of thirty-two also
+match. Its actual layout differs from the earlier probes: seven sampled-image
+bindings each reserve seventeen descriptors, including unused typed banks,
+whereas the probe layout has only the three declared sampled arrays of ten,
+six and one. Both use eight storage buffers, two storage images, seven
+samplers and one metadata UBO, with no push range in the runtime layout. Thus
+the standalone completion and cache timing must retain that layout qualifier.
+`GraphicsRenderDescriptor.cpp:146` reserves the aggregate sampled count for
+every sampled bank; measure the captured layout before changing that shared
+contract or attributing the remaining capacity failure to different shader
+code or subgroup flags. No descriptor compaction is activated.
+
+A warm-prefix retry with an 8 GiB service bound also ends in cgroup OOM,
+after 176.239 wall seconds and 185.944 CPU seconds. Seventeen cached compute
+pipelines complete in 3.074 ms total at the last native snapshot, but the
+eighteenth remains pending; there are still zero presents. Host available
+memory stays above 11 GiB. Increasing this service bound or caching the
+completed prefix therefore does not establish a capacity fix.
+
+The captured layout's initial interval pressure is 1,888 units, with 34,514
+VGRFs and 56,895 instructions. This is slightly lower than the compact probe's
+1,896 units, so unused descriptor banks do not explain higher initial pressure.
+A bounded allocator trace nevertheless reaches 128,931 graph nodes, 179,395
+instructions and 484,608 logical scratch bytes after 124.881 seconds, without
+successful allocation. The probe stops at its RSS/time bound and queues zero
+dispatches. Compare complete allocation trajectories with the same device
+features before attributing that later growth to descriptor padding.
+
+After relocating the runtime executables, external driver, caches and evidence
+to a local btrfs filesystem, the compact-layout trace completes the unchanged
+module in 94.518 seconds, with 2,351,668 KiB peak RSS and zero dispatches. Its
+ninety-third allocation attempt succeeds with 120,677 graph nodes. The two
+probe sources differ only in their descriptor-binding include. A complete
+captured-layout run instead reaches its 4 GiB cgroup OOM bound after 156.595
+wall seconds and 155.318 CPU seconds. Thus this capacity failure is reproduced
+without executing the emulator or its caches on NTFS. This is layout-dependent
+compiler evidence under the probe's device configuration, not private-program
+GPU equivalence or authorization for an unverified renderer change.
+
+### Descriptor-array feature admission (2026-09-29, unresolved)
+
+`Window.cpp:2083` initializes device features to zero and leaves sampled-image,
+storage-image and storage-buffer array dynamic indexing disabled. A read-only
+Vulkan-call capture confirms those disabled feature values. The pending
+compute module contains 194 nonconstant UniformConstant-array access chains;
+its declared capabilities also omit the corresponding array dynamic-indexing
+capabilities. This is an admission/emission contract to audit against Vulkan's
+shader-interface requirements, independently of the compiler capacity issue.
+The [Vulkan shader-interface contract](https://docs.vulkan.org/spec/latest/chapters/interfaces.html)
+defines the required features and capabilities for each descriptor-index class.
+The existing standalone compiler probe enables all supported core features,
+so it does not reproduce that device configuration. No validation-layer result
+or causal performance claim exists for this discrepancy. Check the resource
+index uniformity and required capabilities, then admit supported features and
+reject unavailable requirements before enabling a production correction.
+
 ### Loaded image resource lifetime (2026-09-29, compiler verified)
 
 Sampled-texture and sampler lookup now checks a live mapped load before the
