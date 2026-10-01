@@ -1203,6 +1203,8 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 	{
 		const auto exports = ShaderAnalyzeFragmentExports(code);
 		if (!exports.supported) { return exports; }
+		const auto partial = ShaderAnalyzeFragmentPartialWaveReads(code);
+		if (!partial.supported) { return partial; }
 	}
 	// Branch conditions read uniform SCC/VCC/EXEC words, so every branch is
 	// subgroup-uniform and uses the shared control-flow structurizer.

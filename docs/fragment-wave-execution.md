@@ -358,6 +358,72 @@ ordered tiling, command-buffer lifetime and capability admission remain
 integration work. The compute color producer in the resolve fixture is
 synthetic; it is not evidence of guest gameplay or guest frame rate.
 
+### Partial-wave reduction (2026-10-01)
+
+`ShaderSpirvGenerator.cpp` clamps EXEC to the capture allocation bitmap after
+every instruction that writes it. A public fragment program saves its current
+mask, explicitly widens EXEC, initializes unused lanes to the OR identity,
+reduces both rows and reads lanes 31 and 63. The clamp prevented that
+initialization in uncaptured lanes, so retained values reached the scalar
+reduction instead of the active contributions. Before the correction, six
+partial-quad counts fail with 132 output differences on both driver builds;
+the complete sixteen-quad control passes. After it, quad counts 1, 4, 7, 8,
+9, 15 and 16 pass on both builds with zero differences, and the module
+validates for Vulkan 1.4. Do not replace missing rasterizer inputs with zero
+to conceal this failure, and do not remove the clamp globally: compute and
+every unproven fragment program keep it.
+
+ISA section 6.9 requires full EXEC and neutral unused lanes for a DPP scan.
+`ShaderFragmentNeutralRegion.cpp` lets only the widening
+`s_orn2_saveexec_b64` skip the clamp, and only for a closed region it proves:
+
+- the saved mask is a copy of EXEC (or a restore from such a copy) with no
+  intervening write to the mask or to EXEC, label or transfer, so it is a
+  subset of the captured allocation;
+- the next instruction is a `v_cndmask_b32` that gives zero to every lane
+  outside a condition that is that mask or an `s_and_b64` of it, with no
+  alias between the saved pair and the condition;
+- every later instruction is a single-VGPR bitwise operation or PERMLANE
+  whose sources are already defined in all 64 lanes. A DPP destination that
+  keeps its old value must be defined too. SDWA, `op_sel`, `omod`, labels,
+  branches and any scalar, memory or export effect end the proof;
+- the region ends by restoring EXEC from the saved pair.
+
+The first draft indexed a 256-entry table with the unvalidated destination of
+the initializer and admitted bitwise instructions carrying SDWA, `op_sel`
+and `omod`, whose partial writes keep undefined bits. Both are fixed. Twelve
+single-condition mutants of the analysis, each removing one check, are all
+killed by the focused cases (the first run left two alive, which exposed the
+missing non-DPP SDWA/`op_sel`/`omod` cases now covered). The same case source
+ran without the unit-test framework against the production analysis: 14
+cases, 67 checks, zero failures. The complete captured pixel program has one
+region, recognized from its instructions rather than a hash or address. Its
+paired module generates, assembles and validates for Vulkan 1.4, with exactly
+one clamp fewer than before. The 19-module, 160-case fragment replay still
+passes on both drivers with 356,862 observations and zero differences.
+
+### Reads that can observe uncaptured lanes
+
+`v_readlane` ignores EXEC, and DPP or PERMLANE with fetch-inactive set read
+inactive lanes (ISA 12.12, 13.3.9). With fetch-inactive clear, an inactive
+source reads as unavailable, which matches hardware where an absent lane has
+EXEC clear. Quad-local DPP never leaves a captured quad. Paired fragment
+admission now rejects every other such read, with its PC, unless a proven
+region wrote the source register in all lanes and is the unconditional
+predecessor of the read. Later narrower writes keep the other lanes, as on
+hardware. An unadmitted region keeps the clamp, which is the 132-difference
+result above, and previously nothing reported it. The public variant whose
+condition is not derived from the captured mask is not admitted, and now stops
+with `reads lanes outside the captured wave without a proven full-wave
+initialization` at the lane read and emits no module.
+
+This is deliberately conservative. A read separated from its region by a label
+is rejected, and a set-inactive idiom that inverts EXEC instead of widening it
+is not recognized. Generalize to a control-flow dataflow only when a rejected
+real program shows the need. `v_readfirstlane` with EXEC empty reads lane 0
+(ISA VOP1 table); whether lane 0 is captured depends on the packing policy and
+is not analyzed. The native transport strategy remains unselected.
+
 ### Enabled compute derivatives
 
 Device discovery queries `computeDerivativeGroupLinear` only when the ratified

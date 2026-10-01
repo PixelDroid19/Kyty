@@ -2524,9 +2524,11 @@ void Spirv::WriteInstructions()
 		{
 			dst = GuardImageDestinationStores(dst, inst, static_cast<uint32_t>(index));
 		}
-		if (UsesComputeWaveBanks() && InstructionWritesExec(inst))
+		const bool neutral_region = UsesFragmentCompute() && ShaderFragmentNeutralRegionSupported(m_code, static_cast<uint32_t>(index));
+		if (UsesComputeWaveBanks() && InstructionWritesExec(inst) && !neutral_region)
 		{
-			// Lanes missing from a partial guest wave can never become active.
+			// Uncaptured lanes stay inactive unless the fragment program proves
+			// its own full-wave initialization and a closed pure reduction.
 			dst += String8::FromPrintf("%%exec_clamp_lo_%d = OpLoad %%uint %%exec_lo\n"
 			                           "%%exec_clamp_hi_%d = OpLoad %%uint %%exec_hi\n"
 			                           "%%exec_clamp_lo_v_%d = OpBitwiseAnd %%uint %%exec_clamp_lo_%d %%wave_valid_lo\n"

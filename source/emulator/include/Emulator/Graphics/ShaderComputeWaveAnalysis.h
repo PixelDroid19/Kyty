@@ -76,6 +76,13 @@ struct ShaderComputeWaveAnalysisResult
 // the unconditional entry prefix; an observable M0 read rejects this route.
 [[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentVirtualParameterState(const ShaderCode& code,
                                                                                          uint32_t          parameter_register);
+// A closed, side-effect-free region may initialize uncaptured lanes itself.
+// Only its proven full-EXEC entry may bypass the ordinary allocation clamp.
+[[nodiscard]] bool ShaderFragmentNeutralRegionSupported(const ShaderCode& code, uint32_t index);
+// Reads that ignore EXEC or fetch inactive lanes can observe lanes absent from
+// a partial captured wave. Each needs a source that a proven neutral region
+// initialized in every lane; otherwise the program is rejected with its PC.
+[[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentPartialWaveReads(const ShaderCode& code);
 // True for the packed U32 compare family whose architectural destination is
 // EXEC (v_cmpx_*_u32). The plain VOPC parse surfaces a VccLo placeholder.
 [[nodiscard]] bool ShaderComputeWaveTypeIsExecCompare(ShaderInstructionType type);
