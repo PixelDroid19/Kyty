@@ -358,6 +358,23 @@ ordered tiling, command-buffer lifetime and capability admission remain
 integration work. The compute color producer in the resolve fixture is
 synthetic; it is not evidence of guest gameplay or guest frame rate.
 
+### Enabled compute derivatives
+
+Device discovery queries `computeDerivativeGroupLinear` only when the ratified
+KHR extension is advertised. Device creation explicitly enables that feature
+and the extension together; the graphics context records queried support and
+successful enablement separately. Hosts lacking the feature retain a false
+capability. Vulkan 1.4 remains required. The
+[feature contract](https://docs.vulkan.org/refpages/latest/refpages/source/VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR.html)
+requires this device feature chain before using the generated derivative mode.
+
+A strict Silent/Native guard with the feature enabled reaches the unchanged
+fragment DPP rejection without exhausting host memory. A separate pipeline-only
+compile of the complete current pixel module with the local driver build takes
+13.77 seconds and peaks at 619,716 KiB RSS. It dispatches no GPU work. This
+removes the observed compile barrier for that exact module and driver build;
+it does not establish execution cost, guest frame rate or native draw selection.
+
 ### Virtual interpolation parameter state
 
 The optional virtual parameter mode represents the initial parameter-cache

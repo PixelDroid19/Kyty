@@ -11,6 +11,15 @@
 
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
+// The ratified derivative feature has the same ABI as the NV structure in
+// older headers. Device creation still enables the KHR extension explicitly.
+#ifndef VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME
+#define VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME "VK_KHR_compute_shader_derivatives"
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR \
+	VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_NV
+using VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR = VkPhysicalDeviceComputeShaderDerivativesFeaturesNV;
+#endif
+
 // Vendored vulkan_core.h may predate VK_EXT_depth_clip_control; define the ABI
 // locally when the header lacks it so capability-driven hosts can enable it.
 #ifndef VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME
@@ -144,6 +153,8 @@ struct GraphicContext
 	// before a graphics pipeline can request sample shading.
 	bool sample_rate_shading_supported = false;
 	bool geometry_shader_supported = false;
+	bool compute_derivative_group_linear_supported = false;
+	bool compute_derivative_group_linear_enabled = false;
 
 	// Vulkan subgroup limits used to validate shaders that require an exact guest
 	// wave width. A zero maximum means the physical-device query was unavailable.

@@ -2050,7 +2050,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
                                    const VulkanQueues& queues, const Vector<const char*>& device_extensions,
                                    bool color_write_enable_supported, bool depth_clip_enable_supported,
                                    bool depth_clip_control_supported,
-                                   const ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address)
+                                   const ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address,
+                                   bool compute_derivative_group_linear)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
@@ -2128,7 +2129,10 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 		device_features.shaderInt64 = VK_TRUE;
 	}
 
-	void* device_feature_chain = nullptr;
+	VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives {};
+	derivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+	derivatives.computeDerivativeGroupLinear = compute_derivative_group_linear ? VK_TRUE : VK_FALSE;
+	void* device_feature_chain = compute_derivative_group_linear ? &derivatives : nullptr;
 	if (guest_device_address)
 	{
 		buffer_device_address.pNext = device_feature_chain;
@@ -2831,11 +2835,18 @@ static void VulkanCreate(WindowContext* ctx)
 		depth_clip_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
 		VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_control_features {};
 		subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
+		VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives {};
+		derivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
 		const uint32_t subgroup_size_control_revision = extension_revision(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 		const bool subgroup_size_control_revision2 =
 		    subgroup_size_control_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION;
 
 		void* query_chain = nullptr;
+		if (has_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME))
+		{
+			derivatives.pNext = query_chain;
+			query_chain = &derivatives;
+		}
 		if (has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME))
 		{
 			color_write_enable.pNext = query_chain;
@@ -2861,6 +2872,12 @@ static void VulkanCreate(WindowContext* ctx)
 		available_features.pNext = query_chain;
 		vkGetPhysicalDeviceFeatures2(ctx->graphic_ctx.physical_device, &available_features);
 		ctx->graphic_ctx.depth_clamp_supported = available_features.features.depthClamp == VK_TRUE;
+		ctx->graphic_ctx.compute_derivative_group_linear_supported =
+		    has_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME) && derivatives.computeDerivativeGroupLinear == VK_TRUE;
+		if (ctx->graphic_ctx.compute_derivative_group_linear_supported)
+		{
+			device_extensions.Add(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+		}
 
 		ctx->graphic_ctx.color_write_enable_supported =
 		    has_ext(VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME) && color_write_enable.colorWriteEnable == VK_TRUE;
@@ -3041,11 +3058,13 @@ static void VulkanCreate(WindowContext* ctx)
 	    VulkanCreateDevice(ctx->graphic_ctx.physical_device, ctx->surface, &r, queues, device_extensions,
 	                       ctx->graphic_ctx.color_write_enable_supported, ctx->graphic_ctx.depth_clip_enable_supported,
 	                       ctx->graphic_ctx.depth_clip_control_supported,
-	                       &ctx->graphic_ctx.compute_wave_vulkan_state, ctx->graphic_ctx.guest_device_address_supported);
+	                       &ctx->graphic_ctx.compute_wave_vulkan_state, ctx->graphic_ctx.guest_device_address_supported,
+	                       ctx->graphic_ctx.compute_derivative_group_linear_supported);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
 		EXIT("Could not create device");
 	}
+	ctx->graphic_ctx.compute_derivative_group_linear_enabled = ctx->graphic_ctx.compute_derivative_group_linear_supported;
 
 	VulkanCreateQueues(&ctx->graphic_ctx, queues);
 
