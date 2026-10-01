@@ -1,3 +1,4 @@
+#include "Emulator/Graphics/FragmentTransportLayout.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 
 #include "ShaderSpirvInternal.h"
@@ -7,7 +8,7 @@
 namespace Kyty::Libs::Graphics {
 namespace {
 
-constexpr uint32_t kOutputWords = 34u;
+constexpr uint32_t kOutputWords = FragmentTransport::OUTPUT_LANE_WORDS;
 
 const char* BankName(ShaderWaveBank bank)
 {
@@ -102,7 +103,7 @@ void Spirv::FindFragmentConstants()
 		return;
 	}
 	const uint32_t input_words  = 1u + m_fragment_compute_info->initial_vgpr_count + m_ps_input_info->input_num * 16u;
-	const uint32_t header_words = m_fragment_compute_info->user_sgpr_count != UINT32_MAX ? 1u : 0u;
+	const uint32_t header_words = m_fragment_compute_info->HeaderWords();
 	for (uint32_t value = 0; value <= input_words; ++value)
 	{
 		AddConstantUint(value);
@@ -127,7 +128,7 @@ void Spirv::FindFragmentConstants()
 String8 Spirv::FragmentProlog() const
 {
 	const uint32_t stride       = 1u + m_fragment_compute_info->initial_vgpr_count + m_ps_input_info->input_num * 16u;
-	const uint32_t header_words = m_fragment_compute_info->user_sgpr_count != UINT32_MAX ? 1u : 0u;
+	const uint32_t header_words = m_fragment_compute_info->HeaderWords();
 	const uint32_t wave_words   = stride * 64u + header_words;
 	String8 source = String8::FromPrintf("%%wave_lane_id = OpLoad %%uint %%gl_SubgroupInvocationID\n"
 	                                     "%%wave_subgroup_id = OpLoad %%uint %%gl_SubgroupID\n"
@@ -159,6 +160,12 @@ String8 Spirv::FragmentProlog() const
 	{
 		source += ReadWord(*this, "fragment_input_wave_base", 0u, "fragment_parameters");
 		source += String8::FromPrintf("OpStore %%s%u %%fragment_parameters\n", m_fragment_compute_info->user_sgpr_count);
+	}
+	if (m_fragment_compute_info->parameter_state == ShaderFragmentParameterState::Virtualized)
+	{
+		// All sixteen quads own the same captured parameter block. Zero selects
+		// its normalized base; admission proves no raw state word is observable.
+		source += String8::FromPrintf("OpStore %%s%u %%uint_0\n", m_fragment_compute_info->user_sgpr_count);
 	}
 	for (const char* bank: {"low", "high"})
 	{

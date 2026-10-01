@@ -110,6 +110,27 @@ bool Reads(const ShaderInstruction& instruction, int reg)
 	return false;
 }
 
+bool ScalarCovers(const ShaderOperand& operand, uint32_t reg)
+{
+	return operand.type == ShaderOperandType::Sgpr && operand.register_id >= 0 && operand.size > 0 &&
+	       static_cast<uint32_t>(operand.register_id) <= reg &&
+	       reg - static_cast<uint32_t>(operand.register_id) < static_cast<uint32_t>(operand.size);
+}
+
+bool EntryParameterOverwrite(const ShaderInstruction& instruction, uint32_t reg)
+{
+	const bool move = instruction.type == ShaderInstructionType::SMovB32 || instruction.type == ShaderInstructionType::SMovB64;
+	return move && Plain(instruction.dst) && ScalarCovers(instruction.dst, reg) && instruction.src_num == 1 &&
+	       ShaderClassifyComputeWaveInstruction(instruction) == ShaderComputeWaveInstructionKind::ScalarCopy;
+}
+
+bool LeavesEntryPrefix(const ShaderInstruction& instruction)
+{
+	const auto name = Core::EnumName8(instruction.type);
+	return name.ContainsStr("branch") || name.ContainsStr("Branch") || instruction.type == ShaderInstructionType::SEndpgm ||
+	       instruction.type == ShaderInstructionType::SSetpcB64 || instruction.type == ShaderInstructionType::SSwappcB64;
+}
+
 bool ChangesExecution(const ShaderInstruction& instruction)
 {
 	const auto name = Core::EnumName8(instruction.type);
@@ -219,8 +240,7 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentParameterBase(const ShaderC
 		{
 			return {false, instruction.pc, "fragment interpolation parameter base is not initialized"};
 		}
-		const auto name = Core::EnumName8(instruction.type);
-		saw_control |= name.ContainsStr("branch") || name.ContainsStr("Branch") || instruction.type == ShaderInstructionType::SEndpgm;
+		saw_control |= LeavesEntryPrefix(instruction);
 		if (instruction.dst.type != ShaderOperandType::M0 && instruction.dst2.type != ShaderOperandType::M0)
 		{
 			continue;
@@ -261,6 +281,42 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentParameterBase(const ShaderC
 		base        = current;
 		captured    = system;
 		initialized = true;
+	}
+	return {true, 0u, {}};
+}
+
+ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentVirtualParameterState(const ShaderCode& code, uint32_t parameter_register)
+{
+	if (parameter_register > 32u)
+	{
+		return {false, 0u, "virtual fragment parameter register is unavailable"};
+	}
+	const auto base = ShaderAnalyzeFragmentParameterBase(code, parameter_register);
+	if (!base.supported)
+	{
+		return base;
+	}
+	bool overwritten  = false;
+	bool entry_prefix = true;
+	for (const auto& instruction: code.GetInstructions())
+	{
+		const bool copy_to_m0 = instruction.type == ShaderInstructionType::SMovB32 && instruction.dst.type == ShaderOperandType::M0 &&
+		                        ScalarCovers(instruction.src[0], parameter_register) &&
+		                        instruction.src[0].register_id == static_cast<int>(parameter_register) && instruction.src[0].size == 1;
+		for (int source = 0; source < instruction.src_num; ++source)
+		{
+			if (instruction.src[source].type == ShaderOperandType::M0 ||
+			    (!overwritten && ScalarCovers(instruction.src[source], parameter_register) && !(copy_to_m0 && source == 0)))
+			{
+				return {false, instruction.pc, "fragment parameter state escapes its virtual interpolation selector"};
+			}
+		}
+		if ((instruction.dst.type == ShaderOperandType::M0 || instruction.dst2.type == ShaderOperandType::M0) && !copy_to_m0)
+		{
+			return {false, instruction.pc, "virtual fragment selector must copy the initial parameter state"};
+		}
+		entry_prefix &= !LeavesEntryPrefix(instruction);
+		overwritten |= entry_prefix && EntryParameterOverwrite(instruction, parameter_register);
 	}
 	return {true, 0u, {}};
 }

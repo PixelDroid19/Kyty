@@ -26,13 +26,28 @@ struct ShaderComputeInputInfo;
 // If user_sgpr_count is specified from the PS resource register, each input
 // wave starts with its raw parameter-state SGPR word, followed by 64 lanes.
 // That word and the parameter triples must describe the same parameter cache.
+// Virtualized uses a normalized selector into the host's primitive-owned
+// captured block, without a raw wave header. It requires proof that the initial
+// word reaches M0 alone and that M0 never escapes into guest data or control.
+enum class ShaderFragmentParameterState
+{
+	Captured,
+	Virtualized
+};
+
 struct ShaderFragmentComputeInfo
 {
-	uint32_t descriptor_set     = 1;
-	uint32_t input_binding      = 0;
-	uint32_t output_binding     = 1;
-	uint32_t initial_vgpr_count = 0;
-	uint32_t user_sgpr_count    = UINT32_MAX;
+	uint32_t                     descriptor_set     = 1;
+	uint32_t                     input_binding      = 0;
+	uint32_t                     output_binding     = 1;
+	uint32_t                     initial_vgpr_count = 0;
+	uint32_t                     user_sgpr_count    = UINT32_MAX;
+	ShaderFragmentParameterState parameter_state    = ShaderFragmentParameterState::Captured;
+
+	[[nodiscard]] uint32_t HeaderWords() const
+	{
+		return user_sgpr_count != UINT32_MAX && parameter_state == ShaderFragmentParameterState::Captured ? 1u : 0u;
+	}
 };
 
 String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info, const ShaderPixelInputInfo* ps_input_info,

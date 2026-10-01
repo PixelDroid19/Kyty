@@ -1,0 +1,64 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "fragment_wave_layout.glsl"
+
+layout(local_size_x=64) in;
+layout(std430, set=0, binding=0) readonly buffer Records { uint records[]; };
+layout(std430, set=0, binding=1) buffer Control { uint control[]; };
+layout(std430, set=0, binding=2) buffer References { uint references[]; };
+layout(std430, set=0, binding=3) writeonly buffer WaveInput { uint wave_input[]; };
+
+void main() {
+    uint wave = gl_WorkGroupID.x;
+    uint lane = gl_LocalInvocationID.x;
+    if (control.length() < 16u) return;
+    if (control.length() < wave_table_offset() + transport.wave_lookup_capacity ||
+        references.length() < output_reference_offset() + transport.quad_capacity ||
+        records.length() < transport.quad_capacity * quad_words() ||
+        wave_input.length() < transport.wave_capacity * wave_words()) {
+        atomicOr(control[1], buffer_error);
+        return;
+    }
+    if (atomicAdd(control[1], 0u) != 0u || wave >= transport.wave_capacity || wave >= control[2]) return;
+    uint slot = references[active_reference_offset() + wave];
+    if (slot >= transport.wave_lookup_capacity) {
+        atomicOr(control[1], reference_error);
+        return;
+    }
+    uint key = control[wave_table_offset() + slot];
+    uint primitive = (key - 1u) >> 16u;
+    if (key == 0u || primitive >= transport.primitive_count) {
+        atomicOr(control[1], reference_error);
+        return;
+    }
+    uint record = references[slot * 16u + lane / 4u];
+    bool present = record != invalid_reference;
+    if (control[0] > transport.quad_capacity ||
+        (present && (record >= transport.quad_capacity || record >= control[0]))) {
+        atomicOr(control[1], reference_error);
+        return;
+    }
+    if (present) {
+        uint header = record * quad_words();
+        uint ordinal = records[header + 3u];
+        if (records[header + 2u] != primitive || ordinal / 16u != ((key - 1u) & 0xffffu) ||
+            (ordinal & 15u) != lane / 4u) {
+            atomicOr(control[1], reference_error);
+            return;
+        }
+    }
+    uint input_base = wave * wave_words();
+    if (lane == 0u && transport.wave_header_words != 0u) {
+        // The caller supplies parameter state for the same primitive-owned
+        // cache as the captured triples. A primitive ordinal is not that word.
+        wave_input[input_base] = control[16u + primitive * 2u];
+    }
+    uint destination = input_base + transport.wave_header_words + lane * transport.lane_words;
+    uint source = (present ? record : 0u) * quad_words() + 4u + (lane & 3u) * transport.lane_words;
+    for (uint word = 0u; word < transport.lane_words; ++word) {
+        wave_input[destination + word] = present ? records[source + word] : 0u;
+    }
+    if (present && (lane & 3u) == 0u) {
+        references[output_reference_offset() + record] = wave * 64u + lane;
+    }
+}

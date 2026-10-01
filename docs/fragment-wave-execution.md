@@ -327,6 +327,58 @@ The planned execution strategy has three GPU phases. The existing native
 strategy remains appropriate where its capability and semantic proof succeeds.
 Selection must depend on the requested operations and enabled host features.
 
+### Compact host transport modules
+
+The host now has bounded production modules for capture, wave scan, packing
+and ordered native resolve. The aggregate transient budget is 128 MiB, with
+checked 64-bit allocation arithmetic, device limits, saturating counters and
+bounded hash probes. Each primitive can own a partial wave; capacity includes
+that case. Record-to-output references preserve fragment identity independently
+of the atomic record order. Transport padding represents unobserved slots,
+not fabricated guest inputs.
+
+Capture preserves the decoded system values, active ordinary attributes and
+raw per-vertex triples. P1/P2 admission derives center, centroid and perspective
+qualifiers from the actual barycentric source registers; conflicting evaluation
+modes for one captured attribute are rejected. Four qualifier modules validate
+for Vulkan 1.4 and a conflicting pair is rejected before assembly.
+
+The public GPU pack replay passes 26 cases across two driver builds, with
+3,178,036 word observations and no differences. The production capture and
+geometry replay passes six cases and 11,923,224 observations, including raw
+parameter bits, helper values and both primitive owners. Production resolve
+passes fourteen cases against an independent native fragment implementation:
+MRT colors, discard, blend, fixed depth, stencil and component write masks
+compare bit for bit. Capacity failure and missing export components produce
+error flags and preserve clear attachments in the tested cases.
+
+These modules are not yet selected by a native draw. Their error flags require
+host completion checks before accepting output. Native resource binding,
+ordered tiling, command-buffer lifetime and capability admission remain
+integration work. The compute color producer in the resolve fixture is
+synthetic; it is not evidence of guest gameplay or guest frame rate.
+
+### Virtual interpolation parameter state
+
+The optional virtual parameter mode represents the initial parameter-cache
+pointer as a normalized selector into a captured primitive-owned block. It
+removes the raw wave header only after proving that the initial SGPR reaches
+M0 alone and M0 never becomes ordinary guest data. Subsequent reuse of that
+SGPR is allowed after a complete unconditional entry-prefix overwrite. Branches
+and indirect control transfers end that prefix. Other flows remain rejected;
+the default raw captured-header contract is unchanged.
+
+A public production-compiler replay compares raw headers with four distinct
+bit patterns against the normalized headerless module. Both banks, unallocated
+lanes, helpers, coverage and two MRT exports agree in 21,760 output-word checks
+across two driver builds. An independent expected-output comparison passes.
+The raw-header module leaves all 2,176 output words untouched when given the
+headerless packet; the admitted normalized module executes it. Six unsafe
+parameter flows are rejected, including reads before overwrite, conditional
+and partial overwrites, explicit M0 data reads and indirect jumps. Both modules
+and the complete private pixel module validate for Vulkan 1.4. No runtime
+strategy or performance claim follows from these compiler checks.
+
 ### Capture
 
 Run the original vertex transformation and rasterization with a generated

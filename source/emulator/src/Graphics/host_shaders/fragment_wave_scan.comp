@@ -1,0 +1,33 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "fragment_wave_layout.glsl"
+
+layout(local_size_x=64) in;
+layout(std430, set=0, binding=1) buffer Control { uint control[]; };
+layout(std430, set=0, binding=2) buffer References { uint references[]; };
+
+// At most wave_lookup_capacity invocations contend for this monotonic,
+// saturating counter. Every failed CAS observes another successful increment.
+uint reserve_wave() {
+    uint current = atomicAdd(control[2], 0u);
+    while (current < transport.wave_capacity) {
+        uint observed = atomicCompSwap(control[2], current, current + 1u);
+        if (observed == current) return current;
+        current = observed;
+    }
+    atomicOr(control[1], capacity_error);
+    return invalid_reference;
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= transport.wave_lookup_capacity || control.length() < 16u) return;
+    if (control.length() < wave_table_offset() + transport.wave_lookup_capacity ||
+        references.length() < output_reference_offset() + transport.quad_capacity) {
+        atomicOr(control[1], buffer_error);
+        return;
+    }
+    if (atomicAdd(control[1], 0u) != 0u || control[wave_table_offset() + slot] == 0u) return;
+    uint wave = reserve_wave();
+    if (wave != invalid_reference) references[active_reference_offset() + wave] = slot;
+}
