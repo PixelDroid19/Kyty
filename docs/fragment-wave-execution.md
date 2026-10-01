@@ -424,6 +424,41 @@ real program shows the need. `v_readfirstlane` with EXEC empty reads lane 0
 (ISA VOP1 table); whether lane 0 is captured depends on the packing policy and
 is not analyzed. The native transport strategy remains unselected.
 
+### Selection and renderer hook points (2026-10-01)
+
+`FragmentTransportAdmission` selects the strategy only for pixel programs with
+a DPP row control or PERMLANE and names the first host capability it lacks
+(geometry shader, fragment quad operations, device addresses, enabled linear
+derivatives, enabled subgroup size control and full subgroups, subgroup 32).
+Quad-local DPP and ordinary programs stay native. The renderer does not call
+it yet. The renderer code that a connection must change, as read from the
+current tree:
+
+- `PipelineCache::CreatePipeline` (graphics) parses and recompiles the guest
+  pixel stage on a cache miss, which is where an unsupported native emission
+  stops a strict run. The pipeline key is the render pass, the pixel and
+  vertex shader identities and the static state, so a strategy needs its own
+  identity bits. The interpolation geometry stage is already created there
+  when custom interpolation is enabled, and capture needs the same stage.
+- `GraphicsRenderDrawIndex` and `GraphicsRenderDrawIndexAuto` bind the
+  pipeline, dynamic state, vertex and index buffers and both descriptor sets,
+  then record one render pass. A transported draw replaces that sequence with
+  capture (attachment-free pass), scan, pack, shade, then the resolve draw in
+  the guest framebuffer pass, with explicit buffer barriers between phases.
+- Graphics pipelines hold at most three descriptor sets, and `CreateLayout`
+  requires the stage's slot to equal the running layout count. The vertex
+  clip probe already appends a third draw-scoped set, which is the precedent
+  for the transport set at index 2. The compute pipeline builder supports one
+  descriptor set, so shade needs its own layout: empty set for an unused slot,
+  the pixel resources (compute stage) at their slot, the transport set at 2.
+  Capture, resolve, scan and pack read 28 bytes of push constants.
+- `TransientBufferPool` is host-visible, capped at 16 MiB and may return one
+  buffer for several equal requests, so it cannot hold the five transport
+  buffers. A per-command-buffer device-local arena is needed, reset when the
+  command buffer starts and completed through the same fence hook that
+  `VertexClipProbeRenderer::Complete` uses. Error words are copied to a
+  host-visible slot and consumed after that fence.
+
 ### Enabled compute derivatives
 
 Device discovery queries `computeDerivativeGroupLinear` only when the ratified
