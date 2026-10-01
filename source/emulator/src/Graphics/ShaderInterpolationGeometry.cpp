@@ -84,6 +84,7 @@ void GeometryEmitVertex(const ShaderPixelInputInfo& info, uint32_t vertex, Geome
 	    "%%position_ptr_%u = OpAccessChain %%input_vector %%vertices %%u%u %%u0\n"
 	    "%%position_%u = OpLoad %%v4float %%position_ptr_%u\n"
 	    "OpStore %%position_out %%position_%u\n", vertex, vertex, vertex, vertex, vertex);
+	source->body += "OpStore %primitive_out %primitive\n";
 	for (uint32_t input = 0; input < info.input_num; ++input)
 	{
 		ShaderPixelInterpolator decoded {};
@@ -117,19 +118,23 @@ Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& 
 	GeometrySource source;
 	GeometryDeclareInputs(info, &source);
 	source.body = "%main = OpFunction %void None %function\n%entry = OpLabel\n"
-	              "%position_out = OpAccessChain %output_vector %output_vertex %u0\n";
+	              "%position_out = OpAccessChain %output_vector %output_vertex %u0\n"
+	              "%primitive = OpLoad %int %primitive_in\n";
 	GeometryLoadRaw(info, &source);
 	for (uint32_t vertex = 0; vertex < 3u; ++vertex) { GeometryEmitVertex(info, vertex, &source); }
 	source.body += "OpEndPrimitive\nOpReturn\nOpFunctionEnd\n";
 	const String8 header = "OpCapability Shader\nOpCapability Geometry\nOpMemoryModel Logical GLSL450\n"
-	                       "OpEntryPoint Geometry %main \"main\" %vertices %output_vertex";
+	                       "OpEntryPoint Geometry %main \"main\" %vertices %output_vertex %primitive_in %primitive_out";
 	const String8 modes = "\nOpExecutionMode %main Triangles\nOpExecutionMode %main OutputTriangleStrip\n"
 	                      "OpExecutionMode %main OutputVertices 3\nOpExecutionMode %main Invocations 1\n"
 	                      "OpMemberDecorate %vertex 0 BuiltIn Position\nOpDecorate %vertex Block\n";
+	const String8 primitive_annotations = "OpDecorate %primitive_in BuiltIn PrimitiveId\n"
+	                                      "OpDecorate %primitive_out BuiltIn PrimitiveId\n";
 	const String8 types = R"(
 %void = OpTypeVoid
 %float = OpTypeFloat 32
 %uint = OpTypeInt 32 0
+%int = OpTypeInt 32 1
 %v2float = OpTypeVector %float 2
 %v4float = OpTypeVector %float 4
 %v4uint = OpTypeVector %uint 4
@@ -154,13 +159,17 @@ Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& 
 %output_pair = OpTypePointer Output %v2float
 %output_raw_triangle = OpTypePointer Output %raw_triangle
 %function = OpTypeFunction %void
+%input_primitive = OpTypePointer Input %int
+%output_primitive = OpTypePointer Output %int
+%primitive_in = OpVariable %input_primitive Input
+%primitive_out = OpVariable %output_primitive Output
 %vertices = OpVariable %input_vertices Input
 %output_vertex = OpVariable %output_vertex_type Output
 )";
 	Vector<uint32_t> binary;
 	String8 error;
-	EXIT_IF(!ShaderToolchain::Run(header + source.interface + modes + source.annotations + types + source.variables + source.body,
-	                            &binary, &error));
+	const auto assembly = header + source.interface + modes + primitive_annotations + source.annotations + types + source.variables + source.body;
+	EXIT_IF(!ShaderToolchain::Run(assembly, &binary, &error));
 	return binary;
 }
 

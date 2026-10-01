@@ -179,6 +179,19 @@ TEST(EmulatorShaderTranslationCache, KeyTracksOnlyExactTranslationInputs)
 	EXPECT_EQ(lod_tapped.diagnostic_identity, 0x9800000000000000ull);
 }
 
+TEST(EmulatorShaderTranslationCache, GeometryUsesItsOwnTranslationVersion)
+{
+	const ShaderId id = TestShaderId(1, 2, 3);
+	for (const auto stage: {ShaderModuleStage::Vertex, ShaderModuleStage::Pixel, ShaderModuleStage::Compute})
+	{
+		const auto key = ShaderModuleKey::Create(id, stage, Config::ShaderOptimizationType::Performance, true);
+		EXPECT_EQ(key.translator_version, kShaderTranslatorVersion);
+	}
+	const auto geometry = ShaderModuleKey::Create(id, ShaderModuleStage::Geometry, Config::ShaderOptimizationType::Performance, true);
+	EXPECT_EQ(geometry.translator_version, kShaderGeometryTranslatorVersion);
+	EXPECT_NE(geometry.translator_version, kShaderTranslatorVersion);
+}
+
 TEST(EmulatorShaderTranslationCache, ExactMissCompilesOnceAndHitDoesNotInvokeCompiler)
 {
 	ShaderTranslationCache cache(16);

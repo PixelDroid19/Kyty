@@ -300,6 +300,29 @@ also needs sufficient host memory for guest state and driver compilation.
 
 ## Integration design
 
+### Primitive identity through interpolation geometry
+
+The generated interpolation geometry stage now copies its input
+`PrimitiveId` to every emitted vertex. Its output-component limits include
+that additional integer. The geometry translation version advances separately
+from vertex, pixel and compute translations, preserving their warm entries.
+
+The public capture replay previously received primitive 1,044,885,012 from a
+two-primitive draw and failed before recording a quad. The geometry stage had
+not written the builtin. Vulkan requires that write whenever the following
+fragment stage reads `PrimitiveId`; see the
+[builtin contract](https://docs.vulkan.org/refpages/latest/refpages/source/PrimitiveId.html).
+After the correction, the same draw captures both primitive owners. Six GPU
+cases at 64, 128 and 256 pixels per edge pass with two driver builds, preserving
+coverage, helpers, raw parameter bits and input-to-wave mapping. The comparison
+uses the device's subpixel precision for mathematical interpolation checks;
+transported words and raw parameter triples are compared bit for bit.
+
+This is a geometry contract fix. A strict Silent/Native guard run still reaches
+the existing fragment DPP rejection. It does not establish scene rendering or
+a frame-rate improvement. The cache regression case is compiled; execution of
+the unit suite remains deferred until gameplay, as requested.
+
 The planned execution strategy has three GPU phases. The existing native
 strategy remains appropriate where its capability and semantic proof succeeds.
 Selection must depend on the requested operations and enabled host features.

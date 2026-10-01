@@ -1355,8 +1355,8 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
 		const auto& limits = properties.limits;
 		const auto components = ps_input_info->custom_interpolation.location_count * 4u;
-		EXIT_IF(components > limits.maxFragmentInputComponents || components + 4u > limits.maxGeometryOutputComponents ||
-		        (components + 4u) * 3u > limits.maxGeometryTotalOutputComponents || limits.maxGeometryOutputVertices < 3u ||
+		EXIT_IF(components > limits.maxFragmentInputComponents || components + 5u > limits.maxGeometryOutputComponents ||
+		        (components + 5u) * 3u > limits.maxGeometryTotalOutputComponents || limits.maxGeometryOutputVertices < 3u ||
 		        static_cast<uint32_t>(vs_input_info->export_count) * 4u + 4u > limits.maxGeometryInputComponents);
 	}
 

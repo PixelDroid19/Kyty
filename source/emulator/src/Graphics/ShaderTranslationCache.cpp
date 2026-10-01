@@ -24,7 +24,7 @@ ShaderModuleKey ShaderModuleKey::Create(const ShaderId& shader_id, ShaderModuleS
 	key.next_gen           = next_gen;
 	key.debug_printf_enabled = debug_printf_enabled;
 	key.diagnostic_identity = (stage == ShaderModuleStage::Vertex || stage == ShaderModuleStage::Pixel) ? diagnostic_identity : 0;
-	key.translator_version = kShaderTranslatorVersion;
+	key.translator_version = stage == ShaderModuleStage::Geometry ? kShaderGeometryTranslatorVersion : kShaderTranslatorVersion;
 	return key;
 }
 
