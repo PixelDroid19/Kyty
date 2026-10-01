@@ -481,10 +481,13 @@ allocated densely (about 33 KiB per quad when each quad is its own wave, about
 
 - Whole-draw capture does not fit. Screen tiles are needed (about 350x350
   pixels for a few primitives), or the budget policy must change for this case.
-- The resolve draw must run in the guest framebuffer pass. Beginning that pass
-  once per tile would repeat a first-use clear unless the load operation is
-  proven to be LOAD from the second tile on; the framebuffer cache decides the
-  load operation per call, and that decision has not been traced.
+- The resolve draw must run in the guest framebuffer pass, once per tile. A
+  color load operation is CLEAR only while the tracked image layout is
+  UNDEFINED or SHADER_READ_ONLY (`ResolveColorAttachmentLoadOps`), and
+  `CommandBuffer::BeginRenderPass` then records COLOR_ATTACHMENT_OPTIMAL. Asking
+  the framebuffer cache again for each later tile therefore yields a LOAD pass,
+  compatible with the pipeline built for the first one; reusing the first
+  framebuffer object for every tile would clear the earlier tiles.
 - The captured parameter-state header has no producer: the capture module never
   writes the per-primitive control word and the host has no value for the guest
   parameter cache pointer. Only the virtualized form is usable, and it is
