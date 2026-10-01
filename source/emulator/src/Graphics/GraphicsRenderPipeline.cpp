@@ -1360,6 +1360,18 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		        static_cast<uint32_t>(vs_input_info->export_count) * 4u + 4u > limits.maxGeometryInputComponents);
 	}
 
+	if (ps_input_info->stage_enabled)
+	{
+		const auto requirement = FragmentTransportRequire(ShaderParsePS(&ps_regs, &sh_regs), *ps_input_info,
+		                                                  static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), *p.static_params,
+		                                                  framebuffer->extent);
+		if (requirement.required)
+		{
+			EXIT("fragment wave transport is required by the pixel stage but the renderer does not select it yet: %s\n",
+			     requirement.facts.c_str());
+		}
+	}
+
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
 	const auto optimization = Config::GetShaderOptimizationType();

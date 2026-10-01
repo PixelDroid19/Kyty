@@ -24,7 +24,7 @@ KYTY_HASH_DEFINE_EQUALS(Kyty::Libs::Graphics::ShaderInstructionTypeFormat)
 
 namespace Kyty::Libs::Graphics {
 
-static uint32_t ResolvePixelParameterCount(const ShaderCode& code, uint32_t register_count)
+uint32_t SpirvResolvePixelParameterCount(const ShaderCode& code, uint32_t register_count)
 {
 	uint32_t count = register_count;
 	for (const auto& inst: code.GetInstructions())
@@ -55,7 +55,7 @@ String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo*
 	if (ps_input_info != nullptr)
 	{
 		resolved_ps_input           = *ps_input_info;
-		resolved_ps_input.input_num = ResolvePixelParameterCount(code, ps_input_info->input_num);
+		resolved_ps_input.input_num = SpirvResolvePixelParameterCount(code, ps_input_info->input_num);
 		ps_input_info               = &resolved_ps_input;
 	}
 
@@ -164,7 +164,7 @@ String8 SpirvGenerateFragmentComputeSource(const ShaderCode& code, const ShaderP
 		}
 	}
 	ShaderPixelInputInfo pixel = ps_input_info;
-	pixel.input_num            = ResolvePixelParameterCount(code, pixel.input_num);
+	pixel.input_num            = SpirvResolvePixelParameterCount(code, pixel.input_num);
 	ShaderComputeInputInfo host {};
 	host.threads_num[0] = 64u;
 	host.threads_num[1] = host.threads_num[2] = 1u;

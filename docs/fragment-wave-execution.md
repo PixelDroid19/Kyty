@@ -459,6 +459,39 @@ current tree:
   `VertexClipProbeRenderer::Complete` uses. Error words are copied to a
   host-visible slot and consumed after that fence.
 
+### First transported draw observed in a strict run (2026-10-01)
+
+Pipeline creation now stops, before native compilation, when a pixel stage
+needs the strategy, and prints the facts a connection needs. A strict Silent,
+Native run (Vulkan 1.4, Intel Arc A770) reached the title level after 176 s
+and stopped there with: every host capability enabled and available, virtual
+parameter state and partial-wave reads admitted for the real program and
+runtime inputs, 89 words per lane (8 initial VGPRs, 5 interpolants, 30 user
+SGPRs), and the capture, shade and resolve modules generated and assembled
+in-process (3,420, 285,305 and 2,017 words). This closes the question of
+whether the real program passes admission with live inputs.
+
+The draw is 1920x1080 with three color targets (write masks 7 and 3 on the
+first two), blending on target 0, no depth attachment and one sample. That is a
+full-screen pass, so it needs about 518,000 captured quads. The layout module's
+128 MiB budget allows 30,215 quads for 1,000 primitives and 4,046 for 10,000
+or 30,000, because every primitive may own a partial wave and the worst case is
+allocated densely (about 33 KiB per quad when each quad is its own wave, about
+3.5 KiB when a few primitives own full waves). Consequences for the connection:
+
+- Whole-draw capture does not fit. Screen tiles are needed (about 350x350
+  pixels for a few primitives), or the budget policy must change for this case.
+- The resolve draw must run in the guest framebuffer pass. Beginning that pass
+  once per tile would repeat a first-use clear unless the load operation is
+  proven to be LOAD from the second tile on; the framebuffer cache decides the
+  load operation per call, and that decision has not been traced.
+- The captured parameter-state header has no producer: the capture module never
+  writes the per-primitive control word and the host has no value for the guest
+  parameter cache pointer. Only the virtualized form is usable, and it is
+  admitted for this program.
+- Capture, shade and resolve must derive `lane_words` from the same resolved
+  interpolant count; `SpirvResolvePixelParameterCount` is now shared for that.
+
 ### Enabled compute derivatives
 
 Device discovery queries `computeDerivativeGroupLinear` only when the ratified

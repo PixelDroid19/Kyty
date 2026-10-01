@@ -50,6 +50,9 @@ struct ShaderFragmentComputeInfo
 	}
 };
 
+// Highest interpolant the program reads, or the register count when larger.
+// Native, capture and shade generators must agree on it for one program.
+uint32_t SpirvResolvePixelParameterCount(const ShaderCode& code, uint32_t register_count);
 String8 SpirvGenerateSource(const ShaderCode& code, const ShaderVertexInputInfo* vs_input_info, const ShaderPixelInputInfo* ps_input_info,
                             const ShaderComputeInputInfo* cs_input_info);
 String8 SpirvGenerateFragmentComputeSource(const ShaderCode& code, const ShaderPixelInputInfo& ps_input_info,

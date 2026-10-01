@@ -1547,6 +1547,17 @@ void TraceRenderTargetLifetimeDepthClearPass(uint64_t submit_id, const RenderDep
 void TraceRenderTargetLifetimeResolve(uint64_t submit_id, const RenderColorInfo& source, const RenderColorInfo& destination);
 void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
 
+// A pixel stage that needs the capture, shade and resolve strategy. The facts
+// text records host capabilities, program contract verdicts, plan sizing and
+// whether each generated module assembles, for a strict-mode stop.
+struct FragmentTransportRequirement
+{
+	bool    required = false;
+	String8 facts;
+};
+FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, const ShaderPixelInputInfo& pixel, uint32_t user_sgpr_count,
+                                                      const PipelineStaticParameters& state, const VkExtent2D& extent);
+
 
 bool GraphicsResolvePrimitiveDrawPlan(uint32_t primitive_type, uint32_t guest_count, int vertex_buffers_num, bool indexed,
                                       PrimitiveDrawPlan* plan);
