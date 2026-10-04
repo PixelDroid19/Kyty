@@ -304,11 +304,17 @@ KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 	HostAllocationRecord record {};
 	if (!claim_allocation(p, &record))
 	{
-		if (LibKernel::ApplicationHeap::IsInitialized())
+		if (!LibKernel::ApplicationHeap::IsInitialized())
 		{
-			EXIT("libc HLE cannot realloc an unowned application-heap pointer\n");
+			return ::realloc(p, size);
 		}
-		return ::realloc(p, size);
+		// Once the title's allocator replacement exists, libc allocates from it,
+		// so a pointer the shim does not own belongs to that allocator.
+		if (!LibKernel::ApplicationHeap::HasRealloc())
+		{
+			EXIT("libc HLE cannot realloc an application-heap pointer without a replacement realloc\n");
+		}
+		return LibKernel::ApplicationHeap::Realloc(p, size);
 	}
 
 	void* replacement = ::realloc(p, size);
