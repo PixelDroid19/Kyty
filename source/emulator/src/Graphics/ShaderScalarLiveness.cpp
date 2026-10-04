@@ -1,7 +1,13 @@
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
 
 #include <algorithm>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
+
+#define XXH_INLINE_ALL
+#include <xxhash/xxhash.h>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -113,9 +119,7 @@ bool BuildScalarFlow(const ShaderCode& code, ScalarFlow* flow)
 	return true;
 }
 
-} // namespace
-
-Sgprs ShaderSgprsLiveAtEntry(const ShaderCode& code)
+Sgprs ComputeSgprsLiveAtEntry(const ShaderCode& code)
 {
 	const uint32_t count = code.GetInstructions().Size();
 	Sgprs          all;
@@ -154,7 +158,7 @@ Sgprs ShaderSgprsLiveAtEntry(const ShaderCode& code)
 	return live_in[0];
 }
 
-std::vector<Sgprs> ShaderSgprsHoldingEntryValue(const ShaderCode& code)
+std::vector<Sgprs> ComputeSgprsHoldingEntryValue(const ShaderCode& code)
 {
 	const uint32_t count = code.GetInstructions().Size();
 	ScalarFlow     flow;
@@ -200,6 +204,89 @@ std::vector<Sgprs> ShaderSgprsHoldingEntryValue(const ShaderCode& code)
 		}
 	}
 	return in;
+}
+
+// Every instruction field the scalar flow reads, in order: equal signatures
+// yield equal analyses, so a memoized result is exact for the program.
+std::vector<int64_t> FlowSignature(const ShaderCode& code)
+{
+	const auto&          instructions = code.GetInstructions();
+	std::vector<int64_t> signature;
+	signature.reserve(static_cast<size_t>(instructions.Size()) * 12u);
+	const auto operand = [&signature](const ShaderOperand& op)
+	{
+		signature.push_back(static_cast<int64_t>(op.type));
+		signature.push_back(op.register_id);
+		signature.push_back(op.size);
+	};
+	for (const auto& inst: instructions)
+	{
+		signature.push_back(static_cast<int64_t>(inst.pc));
+		signature.push_back(static_cast<int64_t>(inst.type));
+		signature.push_back(inst.src_num);
+		signature.push_back(inst.mimg_address_num);
+		signature.push_back(inst.src[0].constant.i);
+		for (int s = 0; s < inst.src_num && s < 4; s++)
+		{
+			operand(inst.src[s]);
+		}
+		for (int a = 0; a < inst.mimg_address_num && a < 13; a++)
+		{
+			operand(inst.mimg_address[a]);
+		}
+		operand(inst.dst);
+		operand(inst.dst2);
+	}
+	return signature;
+}
+
+struct FlowSummary
+{
+	std::vector<int64_t> signature;
+	Sgprs                live_at_entry;
+	std::vector<Sgprs>   holding_entry_value;
+};
+
+// The CP thread analyzes the same programs every draw; keep the results.
+std::shared_ptr<const FlowSummary> SummaryOf(const ShaderCode& code)
+{
+	constexpr size_t kMaxPrograms = 4096;
+	static std::mutex                                                          mutex;
+	static std::unordered_multimap<uint64_t, std::shared_ptr<const FlowSummary>> summaries;
+	auto           signature = FlowSignature(code);
+	const uint64_t key       = XXH3_64bits(signature.data(), signature.size() * sizeof(int64_t));
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		const auto [first, last] = summaries.equal_range(key);
+		for (auto it = first; it != last; ++it)
+		{
+			if (it->second->signature == signature)
+			{
+				return it->second;
+			}
+		}
+	}
+	auto summary = std::make_shared<FlowSummary>(
+	    FlowSummary {std::move(signature), ComputeSgprsLiveAtEntry(code), ComputeSgprsHoldingEntryValue(code)});
+	std::lock_guard<std::mutex> lock(mutex);
+	if (summaries.size() >= kMaxPrograms)
+	{
+		summaries.clear();
+	}
+	summaries.emplace(key, summary);
+	return summary;
+}
+
+} // namespace
+
+Sgprs ShaderSgprsLiveAtEntry(const ShaderCode& code)
+{
+	return SummaryOf(code)->live_at_entry;
+}
+
+std::vector<Sgprs> ShaderSgprsHoldingEntryValue(const ShaderCode& code)
+{
+	return SummaryOf(code)->holding_entry_value;
 }
 
 } // namespace Kyty::Libs::Graphics
