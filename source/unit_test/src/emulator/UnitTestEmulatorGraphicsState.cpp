@@ -3233,7 +3233,8 @@ TEST(EmulatorGraphicsState, ResolvesObservedPackedUnormRenderTarget)
 	EXPECT_EQ(format.bytes_per_element, 4u);
 	EXPECT_EQ(VulkanResolveRenderTextureFormat(format.format), static_cast<uint32_t>(VK_FORMAT_A2R10G10B10_UNORM_PACK32));
 	EXPECT_EQ(ResolveRenderTextureFormat(0x9u, 0x7u, 0x1u).format, RenderTextureFormat::Unknown);
-	EXPECT_EQ(ResolveRenderTextureFormat(0x9u, 0x0u, 0x0u).format, RenderTextureFormat::Unknown);
+	EXPECT_EQ(VulkanResolveRenderTextureFormat(ResolveRenderTextureFormat(0x9u, 0x0u, 0x0u).format),
+	          static_cast<uint32_t>(VK_FORMAT_A2B10G10R10_UNORM_PACK32));
 }
 
 TEST(EmulatorGraphicsState, ResolvesPackedFloatRenderTargetsToB10G11R11)
