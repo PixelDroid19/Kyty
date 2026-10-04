@@ -123,6 +123,45 @@ KYTY_SYSV_ABI int c_Wctombx(char* dst, uint32_t character, std::mbstate_t* /*sta
 	dst[0] = static_cast<char>(character);
 	return 1;
 }
+// Gen5 libc_v1 wcstombs_s — bounded wide->multibyte (C11 Annex K form). The
+// guest wide character is a 16-bit code unit; Kyty's locale model is
+// single-byte, so each code unit maps to one byte.
+KYTY_SYSV_ABI int c_wcstombs_s(size_t* pConvertedChars, char* dst, size_t dstSizeInBytes,
+                               const uint16_t* src, size_t maxBytesIn)
+{
+	if (pConvertedChars != nullptr)
+	{
+		*pConvertedChars = 0;
+	}
+	if (dst == nullptr || dstSizeInBytes == 0 || src == nullptr)
+	{
+		return -1;
+	}
+	dst[0] = 0;
+	for (size_t i = 0; i < maxBytesIn; ++i)
+	{
+		const uint16_t ch = src[i];
+		if (ch == 0)
+		{
+			if (i + 1 > dstSizeInBytes)
+			{
+				return -1;
+			}
+			dst[i] = 0;
+			if (pConvertedChars != nullptr)
+			{
+				*pConvertedChars = i + 1;
+			}
+			return 0;
+		}
+		if (i + 1 >= dstSizeInBytes)
+		{
+			return -1;
+		}
+		dst[i] = ch <= 0xff ? static_cast<char>(ch) : '?';
+	}
+	return -1;
+}
 KYTY_SYSV_ABI int c_Mbtowcx(uint16_t* dst, const char* src, size_t count, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
 {
 	if (src == nullptr)

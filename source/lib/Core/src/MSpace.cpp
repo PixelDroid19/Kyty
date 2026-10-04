@@ -1135,4 +1135,16 @@ bool MSpaceIsHeapEmpty(mspace_t msp)
 	return empty;
 }
 
+bool MSpaceIsManaged(mspace_t msp)
+{
+	if (msp == nullptr)
+	{
+		return false;
+	}
+	Core::LockGuard registry_lock(g_mspace_registry_mutex);
+	const auto      registration =
+	    g_mspace_registry.Find(msp, [](const auto& registered, mspace_t value) { return registered.context == value; });
+	return g_mspace_registry.IndexValid(registration);
+}
+
 } // namespace Kyty::Core

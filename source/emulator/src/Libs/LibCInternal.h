@@ -42,6 +42,7 @@ char* KYTY_SYSV_ABI c_strdup(const char* source);
 void* KYTY_SYSV_ABI c_calloc(size_t count, size_t size);
 void* KYTY_SYSV_ABI c_memalign(size_t alignment, size_t size);
 void* KYTY_SYSV_ABI c_realloc(void* ptr, size_t size);
+void* KYTY_SYSV_ABI c_reallocalign(void* ptr, size_t boundary, size_t size);
 void  KYTY_SYSV_ABI c_free(void* ptr);
 void* KYTY_SYSV_ABI c_aligned_alloc(size_t alignment, size_t size);
 int   KYTY_SYSV_ABI c_posix_memalign(void** memptr, size_t alignment, size_t size);
@@ -119,6 +120,7 @@ uint16_t*          KYTY_SYSV_ABI c_wcsncpy(uint16_t* dst, const uint16_t* src, s
 int                KYTY_SYSV_ABI c_Iswctype(uint32_t character, int character_class);
 int                KYTY_SYSV_ABI c_Wctombx(char* dst, uint32_t character, std::mbstate_t* state, const void* cvtvec);
 int                KYTY_SYSV_ABI c_Mbtowcx(uint16_t* dst, const char* src, size_t count, std::mbstate_t* state, const void* cvtvec);
+int                KYTY_SYSV_ABI c_wcstombs_s(size_t* converted_chars, char* dst, size_t dst_size, const uint16_t* src, size_t max_bytes);
 char*              KYTY_SYSV_ABI c_strcpy(char* dst, const char* src);
 wchar_t*           KYTY_SYSV_ABI c_wmemchr(const wchar_t* src, wchar_t value, size_t count);
 int                KYTY_SYSV_ABI c_wmemcmp(const wchar_t* lhs, const wchar_t* rhs, size_t count);
@@ -203,6 +205,7 @@ KYTY_SYSV_ABI float c_log2f(float x);
 KYTY_SYSV_ABI float c_exp2f(float x);
 KYTY_SYSV_ABI float c_expf(float x);
 KYTY_SYSV_ABI float c_ldexpf(float x, int e);
+KYTY_SYSV_ABI float c_modff(float x, float* ip);
 KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c);
 
 } // namespace LibC

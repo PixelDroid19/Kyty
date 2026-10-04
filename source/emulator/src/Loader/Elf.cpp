@@ -65,7 +65,7 @@ static void save_ehdr_64(Core::File& f, const Elf64_Ehdr* ehdr)
 
 static Elf64_Phdr* load_phdr_64(Core::File& f, uint64_t offset, Elf64_Half num)
 {
-	auto* phdr = new Elf64_Phdr[num];
+	auto* phdr = new Elf64_Phdr[num]();
 
 	f.Seek(offset);
 	f.Read(phdr, sizeof(Elf64_Phdr) * num);
@@ -92,7 +92,7 @@ static Elf64_Shdr* load_shdr_64(Core::File& f, uint64_t offset, Elf64_Half num)
 		return nullptr;
 	}
 
-	auto* shdr = new Elf64_Shdr[num];
+	auto* shdr = new Elf64_Shdr[num]();
 
 	f.Seek(offset);
 	f.Read(shdr, sizeof(Elf64_Shdr) * num);
@@ -685,7 +685,8 @@ void Elf64::Open(const String& file_name)
 		// are not required for runtime segment loading.
 		m_shdr = (m_self == nullptr ? load_shdr_64(*m_f, ehdr_pos + m_ehdr->e_shoff, m_ehdr->e_shnum) : nullptr);
 
-		if (m_shdr != nullptr)
+		if (m_shdr != nullptr && m_ehdr->e_shstrndx < m_ehdr->e_shnum &&
+		    m_shdr[m_ehdr->e_shstrndx].sh_size <= m_f->Size())
 		{
 			m_str_table =
 			    load_str_table(*m_f, m_shdr[m_ehdr->e_shstrndx].sh_offset, static_cast<uint32_t>(m_shdr[m_ehdr->e_shstrndx].sh_size));

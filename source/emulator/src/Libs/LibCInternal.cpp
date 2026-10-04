@@ -176,7 +176,14 @@ int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 	}
 
 	Core::MSpaceSize sizes {};
-	if (!Core::MSpaceMallocStatsFast(msp, &sizes))
+	if (!Core::MSpaceIsManaged(msp))
+	{
+		// Not an mspace this libc created (e.g. the title's own allocator or the
+		// internally-managed default heap). Report the host allocator snapshot so
+		// the managed-size pre-check still sees real bounds, as the public
+		// malloc_stats_fast bootstrap path does.
+		LibC::collect_host_malloc_stats(&sizes);
+	} else if (!Core::MSpaceMallocStatsFast(msp, &sizes))
 	{
 		return -1;
 	}

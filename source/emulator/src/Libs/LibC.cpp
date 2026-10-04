@@ -4,6 +4,7 @@
 #include "Kyty/Core/MSpace.h"
 #include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/String.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Common.h"
 #include "Emulator/GuestRuntimePort.h"
@@ -48,8 +49,75 @@
 #include <system_error>
 #include <thread>
 #include <type_traits>
+#include <typeinfo>
 #include <unordered_map>
 #include <vector>
+
+// Host Itanium C++ ABI / unwinder. Guest code executes natively on the host,
+// so guest C++ exceptions are serviced by the real host libstdc++/libgcc
+// runtime; each module's .eh_frame is published via __register_frame (see
+// RuntimeLinker) so the host unwinder can unwind guest frames. The entry points
+// are declared extern "C" directly because <cxxabi.h> does not re-export every
+// one of them into abi:: on all toolchains.
+#include <exception>
+#include <typeinfo>
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
+#include <unwind.h>
+
+extern "C" {
+[[noreturn]] void         __cxa_throw(void* thrown_exception, const std::type_info* tinfo, void (*dest)(void*));
+void*                     __cxa_begin_catch(void* exception_object);
+void                      __cxa_end_catch();
+[[noreturn]] void         __cxa_rethrow();
+void*                     __cxa_allocate_exception(size_t thrown_size);
+void                      __cxa_free_exception(void* thrown_exception);
+const std::type_info*     __cxa_current_exception_type();
+void*                     __cxa_get_globals();
+void*                     __cxa_get_globals_fast();
+void*                     __cxa_allocate_dependent_exception();
+void                      __cxa_free_dependent_exception(void* dependent_exception);
+int                       __gxx_personality_v0(int version, _Unwind_Action actions, _Unwind_Exception_Class exception_class,
+                                               _Unwind_Exception* exception_object, _Unwind_Context* context);
+}
+
+// Host libstdc++ Itanium exception-object layouts (stable across GCC releases).
+// The four std::exception_ptr helpers (__cxa_current_primary_exception,
+// __cxa_rethrow_primary_exception, __cxa_*_exception_refcount) are not present
+// in the statically-linked libstdc++, so they are implemented here against the
+// same structures the host runtime uses.
+struct KytyCxaException
+{
+	std::type_info*     exceptionType;
+	void (*exceptionDestructor)(void*);
+	void*               unexpectedHandler;
+	void*               terminateHandler;
+	KytyCxaException*   nextException;
+	int                 handlerCount;
+	int                 handlerSwitchValue;
+	const unsigned char* actionRecord;
+	const unsigned char* languageSpecificData;
+	void*               catchTemp;
+	void*               adjustedPtr;
+	_Unwind_Exception   unwindHeader;
+};
+
+struct KytyCxaDependentException
+{
+	void*               primaryException;
+	void (*exceptionDestructor)(void*);
+	void*               unexpectedHandler;
+	void*               terminateHandler;
+	_Unwind_Exception   unwindHeader;
+};
+
+struct KytyCxaEhGlobals
+{
+	KytyCxaException* caughtExceptions;
+	unsigned int      uncaughtExceptions;
+};
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
 #include <malloc.h>
@@ -265,6 +333,61 @@ static KYTY_SYSV_ABI void c_srand(unsigned int seed)
 static KYTY_SYSV_ABI int c_rand()
 {
 	return ::rand();
+}
+// drand48 family — 48-bit linear-congruential PRNG, independent state from rand().
+static KYTY_SYSV_ABI void c_srand48(long seed)
+{
+	::srand48(seed);
+}
+static KYTY_SYSV_ABI double c_drand48()
+{
+	return ::drand48();
+}
+static KYTY_SYSV_ABI long c_lrand48()
+{
+	return ::lrand48();
+}
+static KYTY_SYSV_ABI long c_mrand48()
+{
+	return ::mrand48();
+}
+
+// --- libc_v1 math/time/stdio imports required by IL2CPP modules -------------
+static KYTY_SYSV_ABI double c_difftime(time_t end, time_t beg)
+{
+	return ::difftime(end, beg);
+}
+static KYTY_SYSV_ABI double c_logb(double x)
+{
+	return ::logb(x);
+}
+static KYTY_SYSV_ABI double c_scalbn(double x, int n)
+{
+	return ::scalbn(x, n);
+}
+static KYTY_SYSV_ABI double c_log10(double x)
+{
+	return ::log10(x);
+}
+static KYTY_SYSV_ABI double c_log2(double x)
+{
+	return ::log2(x);
+}
+static KYTY_SYSV_ABI int c_ungetc(int ch, FILE* f)
+{
+	return (f != nullptr ? ::ungetc(ch, f) : EOF);
+}
+static KYTY_SYSV_ABI int c_fgetpos(FILE* f, fpos_t* pos)
+{
+	return (f != nullptr && pos != nullptr ? ::fgetpos(f, pos) : -1);
+}
+static KYTY_SYSV_ABI int c_fsetpos(FILE* f, const fpos_t* pos)
+{
+	return (f != nullptr && pos != nullptr ? ::fsetpos(f, pos) : -1);
+}
+static KYTY_SYSV_ABI void c_quick_exit(int code)
+{
+	::quick_exit(code);
 }
 // Gen5 libc_v1 strtok (oVkZ8W8-Q8A): host uses strtok_r with a per-thread save pointer.
 static KYTY_SYSV_ABI char* c_strtok(char* str, const char* delim)
@@ -578,6 +701,14 @@ static KYTY_SYSV_ABI std::mbstate_t* c_Getpwcstate()
 {
 	static std::mbstate_t state {};
 	return &state;
+}
+
+// Gen5 libc_v1 _Getmbcurmax — maximum bytes per multibyte character in the
+// current locale. Kyty models the guest locale with the host process locale
+// (c_setlocale forwards to the host), so MB_CUR_MAX is the live value.
+static KYTY_SYSV_ABI size_t c_Getmbcurmax()
+{
+	return MB_CUR_MAX;
 }
 
 // --- printf / scanf family ---------------------------------------------------
@@ -1532,6 +1663,12 @@ static CxxSiTypeInfoLayout g_typeinfo_bad_array_new_length {
     g_si_class_type_info_vtable,
     g_ti_name_bad_array_new_length,
     reinterpret_cast<const CxxTypeInfoLayout*>(&g_typeinfo_bad_alloc),
+};
+static const char g_ti_name_bad_function_call[]  = "St18bad_function_call";
+static CxxSiTypeInfoLayout g_typeinfo_bad_function_call {
+    g_si_class_type_info_vtable,
+    g_ti_name_bad_function_call,
+    reinterpret_cast<const CxxTypeInfoLayout*>(&g_typeinfo_exception),
 };
 static CxxSiTypeInfoLayout g_typeinfo_ios_base {g_si_class_type_info_vtable, g_ti_name_ios_base, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_ios_failure {g_si_class_type_info_vtable, g_ti_name_ios_failure, nullptr};
@@ -2524,6 +2661,98 @@ static KYTY_SYSV_ABI void c_Unlock_shared_ptr_spin_lock()
 static KYTY_SYSV_ABI void c_Locksyslock(int /*index*/) {}
 static KYTY_SYSV_ABI void c_Unlocksyslock(int /*index*/) {}
 
+// _Lockfilelock / _Unlockfilelock — per-FILE stdio lock. Guest FILE* is a host
+// FILE*, so map to flockfile/funlockfile to keep the host lock consistent.
+static KYTY_SYSV_ABI void c_Lockfilelock(FILE* f)
+{
+	if (f != nullptr)
+	{
+		::flockfile(f);
+	}
+}
+static KYTY_SYSV_ABI void c_Unlockfilelock(FILE* f)
+{
+	if (f != nullptr)
+	{
+		::funlockfile(f);
+	}
+}
+
+// std::_Fiopen — open a FILE* for fstream from an ios_base::openmode bitmask.
+// Dinkumware openmode bits: in=0x01 out=0x02 ate=0x04 app=0x08 trunc=0x10
+// binary=0x20 _Nocreate=0x40 _Noreplace=0x80.
+static KYTY_SYSV_ABI FILE* c_Fiopen(const char* name, int mode, int /*prot*/)
+{
+	if (name == nullptr)
+	{
+		return nullptr;
+	}
+	const bool in     = (mode & 0x01) != 0;
+	const bool out    = (mode & 0x02) != 0;
+	const bool app    = (mode & 0x08) != 0;
+	const bool trunc  = (mode & 0x10) != 0;
+	const bool binary = (mode & 0x20) != 0;
+	char        buf[8];
+	int         i = 0;
+	buf[i++] = (app ? 'a' : (out || trunc) && !(in && !trunc && !out) ? 'w' : 'r');
+	if ((in && (out || trunc)) || (in && app))
+	{
+		buf[i++] = '+';
+	}
+	if (binary)
+	{
+		buf[i++] = 'b';
+	}
+	buf[i] = '\0';
+	return ::fopen(name, buf);
+}
+
+// std::exception / std::runtime_error destructors. The object storage is
+// guest-owned; a no-op dtor leaks the (rare) embedded message but is safe.
+static KYTY_SYSV_ABI void c_std_exception_dtor(void* /*self*/) {}
+static KYTY_SYSV_ABI void c_std_runtime_error_dtor(void* /*self*/) {}
+
+// std::iostream_category() — on libstdc++ this is the same object as
+// generic_category(), so return the shared generic singleton.
+static KYTY_SYSV_ABI const CxxErrorCategoryLayout* c_iostream_category()
+{
+	return &g_generic_error_category;
+}
+
+// std::_Xbad_alloc / _Xbad_function_call — throw helpers. Now that guest
+// exception unwinding works, construct a minimal exception object and throw it
+// with the matching guest typeinfo so a guest catch(...)/catch(bad_alloc&) can
+// handle it. The object vptr uses the existing Itanium vtable address point so
+// a virtual what() call resolves to the real message.
+static KYTY_SYSV_ABI const char* c_bad_function_call_what(const void* /*self*/)
+{
+	return "std::bad_function_call";
+}
+static void* g_bad_function_call_vtable[] = {
+    nullptr,
+    &g_typeinfo_bad_function_call,
+    reinterpret_cast<void*>(&CxxVtableNoop), // dtor — no embedded storage to free
+    reinterpret_cast<void*>(&CxxVtableNoop), // deleting dtor
+    reinterpret_cast<void*>(&c_bad_function_call_what),
+    reinterpret_cast<void*>(&CxxVtableNoop), // _Doraise
+};
+
+static KYTY_SYSV_ABI void c_Xbad_alloc()
+{
+	auto** obj = static_cast<void**>(__cxa_allocate_exception(8));
+	obj[0]     = &g_bad_alloc_vtable[2]; // Itanium vtable address point
+	__cxa_throw(obj, reinterpret_cast<const std::type_info*>(&g_typeinfo_bad_alloc), nullptr);
+}
+static KYTY_SYSV_ABI void c_Xbad_function_call()
+{
+	auto** obj = static_cast<void**>(__cxa_allocate_exception(8));
+	obj[0]     = &g_bad_function_call_vtable[2];
+	__cxa_throw(obj, reinterpret_cast<const std::type_info*>(&g_typeinfo_bad_function_call), nullptr);
+}
+
+// _Dtest — Dinkumware ctype mask table pointer (same table _Getpctype returns).
+static const unsigned short* g_dtest_table = g_c_locale_ctype.data() + 1;
+
 // std::locale::_Getgloballocale — return classic Locimp.
 static KYTY_SYSV_ABI void* c_locale_Getgloballocale()
 {
@@ -2559,22 +2788,548 @@ static KYTY_SYSV_ABI void c_cxa_pure_virtual()
 // nothing; derived exception types override it when they need to raise.
 static KYTY_SYSV_ABI void c_exception_doraise(const void* /*self*/) {}
 
-// std::uncaught_exception() — returns non-zero while an exception is active.
-// Full EH is not implemented; report "no active exception" so destructors that
-// probe this during Construct string/locale work continue.
+// std::uncaught_exception() — returns non-zero while an exception is in flight.
+// Forward to the host so destructors observe the real state during a guest
+// unwind (the host runtime tracks the count in its own TLS).
 static KYTY_SYSV_ABI int c_uncaught_exception()
 {
-	return 0;
+	return std::uncaught_exception() ? 1 : 0;
 }
 
-// Itanium ABI __gxx_personality_v0. The current HLE exception path stops at
-// __cxa_throw, so this is only required to relocate guest unwind metadata.
-// Returning _URC_CONTINUE_UNWIND (8) is the conservative choice if a guest
-// unwinder reaches it: do not claim to recognize or handle a foreign frame.
-static KYTY_SYSV_ABI int c_gxx_personality_v0(int /*version*/, int /*actions*/, uint64_t /*exception_class*/,
-                                              void* /*exception_object*/, void* /*context*/)
+// ---------------------------------------------------------------------------
+// Guest C++ exception personality (Itanium __gxx_personality_v0).
+//
+// The host libgcc unwinder performs the mechanical DWARF frame walk over the
+// guest's registered .eh_frame; that part is ABI-neutral. The *personality*,
+// however, must interpret the guest's LSDA (call-site/action/type tables) and
+// decide which catch clause matches. The host __gxx_personality_v0 cannot be
+// used because it matches types by calling __do_catch/__do_upcast on the
+// caught/thrown type_info, and the guest (PS5 toolchain) type_info vtable
+// layout differs from host __cxxabiv1 — dispatching a host virtual on a guest
+// vtable jumps to a null slot.
+//
+// Instead we parse the LSDA ourselves and match the catch type against the
+// thrown type by pointer equality, falling back to comparing the mangled
+// type_info name field (offset +8). That covers the dominant IL2CPP pattern
+// (catch(Il2CppExceptionWrapper&) catching Il2CppExceptionWrapper) and
+// catch(...) without ever dispatching on a guest vtable.
+// ---------------------------------------------------------------------------
+
+// Defined later in this translation unit; used by GuestTypeMatch to probe
+// candidate base-class type_info pointers without trusting guest data.
+static size_t CxaSafeRead(void* dst, const void* src, size_t n);
+
+namespace {
+
+constexpr uint8_t kDwEhPeOmit    = 0xff;
+constexpr uint8_t kDwEhPeUleb128 = 0x01;
+constexpr uint8_t kDwEhPeUdata2  = 0x02;
+constexpr uint8_t kDwEhPeUdata4  = 0x03;
+constexpr uint8_t kDwEhPeUdata8  = 0x04;
+constexpr uint8_t kDwEhPeSleb128 = 0x09;
+constexpr uint8_t kDwEhPeSdata2  = 0x0a;
+constexpr uint8_t kDwEhPeSdata4  = 0x0b;
+constexpr uint8_t kDwEhPeSdata8  = 0x0c;
+constexpr uint8_t kDwEhPePcrel   = 0x10;
+constexpr uint8_t kDwEhPeTextrel = 0x20;
+constexpr uint8_t kDwEhPeDatarel = 0x30;
+constexpr uint8_t kDwEhPeFuncrel = 0x40;
+constexpr uint8_t kDwEhPeAligned = 0x50;
+constexpr uint8_t kDwEhPeIndirect = 0x80;
+
+struct GuestLsdaInfo
 {
-	return 8;
+	uint64_t start;
+	uint64_t lpstart;
+	uint64_t ttype_base;
+	const uint8_t* ttype;
+	const uint8_t* action_table;
+	uint8_t        ttype_encoding;
+	uint8_t        call_site_encoding;
+};
+
+const uint8_t* GuestReadUleb128(const uint8_t* p, uint64_t* val)
+{
+	uint64_t result = 0;
+	uint32_t shift  = 0;
+	uint8_t  byte;
+	do
+	{
+		byte = *p++;
+		result |= (static_cast<uint64_t>(byte) & 0x7f) << shift;
+		shift += 7;
+	} while (byte & 0x80);
+	*val = result;
+	return p;
+}
+
+const uint8_t* GuestReadSleb128(const uint8_t* p, int64_t* val)
+{
+	uint64_t result = 0;
+	uint32_t shift  = 0;
+	uint8_t  byte;
+	do
+	{
+		byte = *p++;
+		result |= (static_cast<uint64_t>(byte) & 0x7f) << shift;
+		shift += 7;
+	} while (byte & 0x80);
+	if (shift < 64 && (byte & 0x40) != 0)
+	{
+		result |= static_cast<uint64_t>(-(static_cast<int64_t>(1) << shift));
+	}
+	*val = static_cast<int64_t>(result);
+	return p;
+}
+
+uint64_t GuestEhBaseOfEncoded(uint8_t encoding, _Unwind_Context* context)
+{
+	switch (encoding & 0x70)
+	{
+		case 0x00:
+		case kDwEhPePcrel:
+		case kDwEhPeAligned: return 0;
+		case kDwEhPeTextrel: return _Unwind_GetTextRelBase(context);
+		case kDwEhPeDatarel: return _Unwind_GetDataRelBase(context);
+		case kDwEhPeFuncrel: return _Unwind_GetRegionStart(context);
+		default: return 0;
+	}
+}
+
+const uint8_t* GuestReadEncodedValue(uint8_t encoding, uint64_t base, const uint8_t* p, uint64_t* val)
+{
+	uint64_t result = 0;
+	const auto* u   = p;
+	switch (encoding & 0x0f)
+	{
+		case 0x00: // absptr
+			std::memcpy(&result, u, sizeof(void*));
+			p += sizeof(void*);
+			break;
+		case kDwEhPeUleb128:
+		{
+			uint64_t tmp = 0;
+			p            = GuestReadUleb128(p, &tmp);
+			result       = tmp;
+			break;
+		}
+		case kDwEhPeSleb128:
+		{
+			int64_t tmp = 0;
+			p           = GuestReadSleb128(p, &tmp);
+			result      = static_cast<uint64_t>(tmp);
+			break;
+		}
+		case kDwEhPeUdata2:
+		{
+			uint16_t t = 0;
+			std::memcpy(&t, u, 2);
+			result = t;
+			p += 2;
+			break;
+		}
+		case kDwEhPeUdata4:
+		{
+			uint32_t t = 0;
+			std::memcpy(&t, u, 4);
+			result = t;
+			p += 4;
+			break;
+		}
+		case kDwEhPeUdata8:
+		{
+			uint64_t t = 0;
+			std::memcpy(&t, u, 8);
+			result = t;
+			p += 8;
+			break;
+		}
+		case kDwEhPeSdata2:
+		{
+			int16_t t = 0;
+			std::memcpy(&t, u, 2);
+			result = static_cast<uint64_t>(static_cast<int64_t>(t));
+			p += 2;
+			break;
+		}
+		case kDwEhPeSdata4:
+		{
+			int32_t t = 0;
+			std::memcpy(&t, u, 4);
+			result = static_cast<uint64_t>(static_cast<int64_t>(t));
+			p += 4;
+			break;
+		}
+		case kDwEhPeSdata8:
+		{
+			int64_t t = 0;
+			std::memcpy(&t, u, 8);
+			result = static_cast<uint64_t>(t);
+			p += 8;
+			break;
+		}
+		default:
+			*val = 0;
+			return p;
+	}
+	if (result != 0)
+	{
+		result += ((encoding & 0x70) == kDwEhPePcrel) ? reinterpret_cast<uint64_t>(u) : base;
+		if (encoding & kDwEhPeIndirect)
+		{
+			result = *reinterpret_cast<uint64_t*>(result);
+		}
+	}
+	*val = result;
+	return p;
+}
+
+unsigned GuestSizeOfEncodedValue(uint8_t encoding)
+{
+	switch (encoding & 0x07)
+	{
+		case 0x00: return sizeof(void*);
+		case kDwEhPeUdata2: return 2;
+		case kDwEhPeUdata4: return 4;
+		case kDwEhPeUdata8: return 8;
+		default: return 0;
+	}
+}
+
+const uint8_t* GuestParseLsdaHeader(_Unwind_Context* context, const uint8_t* p, GuestLsdaInfo* info)
+{
+	info->start = (context != nullptr) ? _Unwind_GetRegionStart(context) : 0;
+
+	const uint8_t lpstart_encoding = *p++;
+	if (lpstart_encoding != kDwEhPeOmit)
+	{
+		p = GuestReadEncodedValue(lpstart_encoding, GuestEhBaseOfEncoded(lpstart_encoding, context), p, &info->lpstart);
+	} else
+	{
+		info->lpstart = info->start;
+	}
+
+	info->ttype_encoding = *p++;
+	if (info->ttype_encoding != kDwEhPeOmit)
+	{
+		uint64_t tmp = 0;
+		p            = GuestReadUleb128(p, &tmp);
+		info->ttype  = p + tmp;
+	} else
+	{
+		info->ttype = nullptr;
+	}
+
+	info->call_site_encoding = *p++;
+	uint64_t tmp             = 0;
+	p                        = GuestReadUleb128(p, &tmp);
+	info->action_table       = p + tmp;
+
+	return p;
+}
+
+// Read a pointer-sized field from a possibly-guest address; returns the stored
+// pointer or nullptr when the source is not readable.
+const void* GuestSafePtr(const void* addr)
+{
+	const void* v = nullptr;
+	return (CxaSafeRead(&v, addr, sizeof(v)) == sizeof(v) ? v : nullptr);
+}
+
+// A guest type_info is "[vptr][name]"; `ti` is a plausible type_info when it is
+// readable and its +8 name pointer addresses readable, non-empty bytes.
+bool GuestTypeInfoPlausible(const void* ti)
+{
+	if (ti == nullptr)
+	{
+		return false;
+	}
+	const auto* name = static_cast<const char*>(GuestSafePtr(static_cast<const uint8_t*>(ti) + 8));
+	char        first = 0;
+	return name != nullptr && CxaSafeRead(&first, name, 1) == 1 && first != 0;
+}
+
+// Compare two type_info objects by their +8 mangled names via bounded safe
+// reads (never a raw strcmp on unvalidated guest pointers).
+bool GuestTypeNameMatch(const void* a, const void* b)
+{
+	const auto* na = static_cast<const char*>(GuestSafePtr(static_cast<const uint8_t*>(a) + 8));
+	const auto* nb = static_cast<const char*>(GuestSafePtr(static_cast<const uint8_t*>(b) + 8));
+	if (na == nullptr || nb == nullptr)
+	{
+		return false;
+	}
+	char   ba[96];
+	char   bb[96];
+	size_t ra = CxaSafeRead(ba, na, sizeof(ba) - 1);
+	size_t rb = CxaSafeRead(bb, nb, sizeof(bb) - 1);
+	if (ra == 0 || rb == 0)
+	{
+		return false;
+	}
+	ba[ra] = '\0';
+	bb[rb] = '\0';
+	if (std::memchr(ba, '\0', ra) == nullptr || std::memchr(bb, '\0', rb) == nullptr)
+	{
+		return false;
+	}
+	return std::strcmp(ba, bb) == 0;
+}
+
+// Match a caught type against the thrown type without ever dispatching on a
+// guest type_info vtable: pointer equality, then mangled-name equality, then a
+// bounded walk over the thrown type's base classes so catch(Base&) matches a
+// thrown Derived. __si_class_type_info keeps a single base type_info* at +0x10;
+// __vmi_class_type_info keeps {__flags,__base_count} at +0x10 and an array of
+// __base_class_type_info {base_type*, offset_flags} starting at +0x18.
+bool GuestTypeMatchDepth(const void* catch_type, const void* throw_type, int depth)
+{
+	if (catch_type == nullptr)
+	{
+		return true; // catch(...) — the type table entry is null
+	}
+	if (throw_type == nullptr || depth > 8 || !GuestTypeInfoPlausible(throw_type))
+	{
+		return false;
+	}
+	if (catch_type == throw_type || GuestTypeNameMatch(catch_type, throw_type))
+	{
+		return true;
+	}
+	const auto* t = static_cast<const uint8_t*>(throw_type);
+	if (const void* si_base = GuestSafePtr(t + 0x10);
+	    si_base != nullptr && si_base != throw_type && GuestTypeInfoPlausible(si_base) &&
+	    GuestTypeMatchDepth(catch_type, si_base, depth + 1))
+	{
+		return true;
+	}
+	uint32_t base_count = 0;
+	if (CxaSafeRead(&base_count, t + 0x14, sizeof(base_count)) == sizeof(base_count) && base_count > 0 &&
+	    base_count < 64)
+	{
+		const uint8_t* arr = t + 0x18;
+		for (uint32_t i = 0; i < base_count; i++)
+		{
+			const void* b = GuestSafePtr(arr + i * 16);
+			if (b != nullptr && GuestTypeInfoPlausible(b) && GuestTypeMatchDepth(catch_type, b, depth + 1))
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool GuestTypeMatch(const void* catch_type, const void* throw_type)
+{
+	return GuestTypeMatchDepth(catch_type, throw_type, 0);
+}
+
+} // namespace
+
+// Itanium ABI __gxx_personality_v0. Registered as the CIE personality for guest
+// frames; invoked by the host libgcc unwinder once per guest frame, in both the
+// search and cleanup phases.
+static KYTY_SYSV_ABI int c_gxx_personality_v0(int version, int actions, uint64_t exception_class,
+                                              void* exception_object, void* context_ptr)
+{
+	auto* context  = static_cast<_Unwind_Context*>(context_ptr);
+	auto* ue_header = static_cast<_Unwind_Exception*>(exception_object);
+
+	if (version != 1 || ue_header == nullptr || context == nullptr)
+	{
+		return _URC_FATAL_PHASE1_ERROR;
+	}
+	if ((actions & _UA_FORCE_UNWIND) != 0)
+	{
+		// Forced unwind (pthread_exit etc.) has no catch semantics here.
+		return _URC_CONTINUE_UNWIND;
+	}
+
+	const uint8_t* lsda = static_cast<const uint8_t*>(_Unwind_GetLanguageSpecificData(context));
+	if (lsda == nullptr)
+	{
+		return _URC_CONTINUE_UNWIND;
+	}
+
+	GuestLsdaInfo info {};
+	const uint8_t* p = GuestParseLsdaHeader(context, lsda, &info);
+	info.ttype_base  = GuestEhBaseOfEncoded(info.ttype_encoding, context);
+
+	int       ip_before_insn = 0;
+	uint64_t  ip             = _Unwind_GetIPInfo(context, &ip_before_insn);
+	if (!ip_before_insn)
+	{
+		ip--;
+	}
+
+	uint64_t        landing_pad         = 0;
+	const uint8_t*  action_record       = nullptr;
+	const void*     throw_type_dbg      = nullptr;
+	int             handler_switch      = 0;
+	const int       found_nothing       = 0;
+	const int       found_terminate     = 1;
+	const int       found_cleanup       = 2;
+	const int       found_handler       = 3;
+	int             found_type          = found_terminate;
+	bool            found_something     = false;
+
+	// Scan the call-site table for the entry covering the throwing IP.
+	while (p < info.action_table)
+	{
+		uint64_t cs_start = 0;
+		uint64_t cs_len   = 0;
+		uint64_t cs_lp    = 0;
+		uint64_t cs_action = 0;
+		p = GuestReadEncodedValue(info.call_site_encoding, 0, p, &cs_start);
+		p = GuestReadEncodedValue(info.call_site_encoding, 0, p, &cs_len);
+		p = GuestReadEncodedValue(info.call_site_encoding, 0, p, &cs_lp);
+		p = GuestReadUleb128(p, &cs_action);
+
+		if (ip < info.start + cs_start)
+		{
+			break; // sorted table — past the throw site
+		}
+		if (ip < info.start + cs_start + cs_len)
+		{
+			if (cs_lp != 0)
+			{
+				landing_pad = info.lpstart + cs_lp;
+			}
+			if (cs_action != 0)
+			{
+				action_record = info.action_table + cs_action - 1;
+			}
+			found_something = true;
+			break;
+		}
+	}
+
+	if (!found_something)
+	{
+		found_type = found_terminate;
+	} else if (landing_pad == 0)
+	{
+		found_type = found_nothing;
+	} else if (action_record == nullptr)
+	{
+		found_type = found_cleanup;
+	} else
+	{
+		// Catch handler or exception spec. Resolve the thrown type from the
+		// __cxa_exception header that precedes the unwind header.
+		auto*        cxa         = reinterpret_cast<KytyCxaException*>(reinterpret_cast<uint8_t*>(ue_header) -
+                                                                 offsetof(KytyCxaException, unwindHeader));
+		const void*  throw_type  = cxa->exceptionType;
+		throw_type_dbg           = throw_type;
+		bool         saw_cleanup = false;
+		bool         saw_handler = false;
+
+		while (true)
+		{
+			const uint8_t* ap = action_record;
+			int64_t        ar_filter = 0;
+			int64_t        ar_disp   = 0;
+			ap = GuestReadSleb128(ap, &ar_filter);
+			GuestReadSleb128(ap, &ar_disp);
+
+			if (ar_filter == 0)
+			{
+				saw_cleanup = true;
+			} else if ((actions & _UA_CLEANUP_PHASE) != 0 && (actions & _UA_HANDLER_FRAME) == 0)
+			{
+				// During phase-2 cleanup of a non-handler frame, handler
+				// entries don't re-match.
+			} else if (ar_filter > 0)
+			{
+				// Positive filter: catch handler. TType entries index the
+				// type table backward from its base.
+				const uint8_t* e  = info.ttype - static_cast<size_t>(ar_filter) * GuestSizeOfEncodedValue(info.ttype_encoding);
+				uint64_t       tp = 0;
+				GuestReadEncodedValue(info.ttype_encoding, info.ttype_base, e, &tp);
+				const void* catch_type = reinterpret_cast<const void*>(tp);
+				if (GuestTypeMatch(catch_type, throw_type))
+				{
+					saw_handler    = true;
+					handler_switch = static_cast<int>(ar_filter);
+					break;
+				}
+			} else
+			{
+				// Negative filter: exception specification. We cannot evaluate
+				// the guest spec safely; treat an empty spec as terminate, else
+				// accept it as a handler so unwinding can proceed.
+				const uint8_t* e  = info.ttype - static_cast<size_t>(-ar_filter) - 1;
+				uint64_t       first = 0;
+				const uint8_t* e2 = GuestReadUleb128(e, &first);
+				(void)e2;
+				if (first == 0)
+				{
+					found_type = found_terminate;
+					goto decided;
+				}
+				saw_handler    = true;
+				handler_switch = static_cast<int>(ar_filter);
+				break;
+			}
+
+			if (ar_disp == 0)
+			{
+				break;
+			}
+			action_record = ap + ar_disp;
+		}
+
+		if (saw_handler)
+		{
+			found_type = found_handler;
+		} else
+		{
+			found_type = saw_cleanup ? found_cleanup : found_nothing;
+		}
+	}
+
+decided:
+	static const bool dbg = [] { const char* e = std::getenv("KYTY_EH_TRACE"); return e != nullptr && e[0] == '1'; }();
+	if (dbg)
+	{
+		fprintf(stderr, "EH persona v%d act=%x ip=%llx lp=%llx ft=%d sw=%d tt=%p\n", version, actions,
+		        (unsigned long long)ip, (unsigned long long)landing_pad, found_type, handler_switch,
+		        (void*)throw_type_dbg);
+	}
+	if (found_type == found_nothing)
+	{
+		return _URC_CONTINUE_UNWIND;
+	}
+
+	if ((actions & _UA_SEARCH_PHASE) != 0)
+	{
+		if (found_type == found_cleanup)
+		{
+			return _URC_CONTINUE_UNWIND;
+		}
+		// Cache the caught-exception state in the __cxa_exception header, exactly
+		// as save_caught_exception does — __cxa_begin_catch returns adjustedPtr,
+		// and the handler frame is re-entered in phase 2 to run the catch.
+		auto* cxa = reinterpret_cast<KytyCxaException*>(reinterpret_cast<uint8_t*>(ue_header) -
+		                                              offsetof(KytyCxaException, unwindHeader));
+		cxa->handlerSwitchValue   = handler_switch;
+		cxa->actionRecord         = action_record;
+		cxa->languageSpecificData = lsda;
+		cxa->adjustedPtr          = reinterpret_cast<uint8_t*>(ue_header) + sizeof(_Unwind_Exception);
+		cxa->catchTemp            = reinterpret_cast<void*>(landing_pad);
+		return _URC_HANDLER_FOUND;
+	}
+
+	// Phase 2: install the context to transfer control to the landing pad.
+	if (found_type == found_terminate)
+	{
+		return _URC_CONTINUE_UNWIND;
+	}
+	_Unwind_SetGR(context, 0, reinterpret_cast<uint64_t>(ue_header));
+	_Unwind_SetGR(context, 1, static_cast<uint64_t>(handler_switch));
+	_Unwind_SetIP(context, landing_pad);
+	return _URC_INSTALL_CONTEXT;
 }
 
 // std::ios_base::~ios_base() — guest tears down temporary stream objects after
@@ -2586,27 +3341,63 @@ static KYTY_SYSV_ABI void c_ios_base_dtor(void* /*self*/) {}
 // down, so destruction deliberately leaves the guest allocation untouched.
 static KYTY_SYSV_ABI void c_ios_base_failure_dtor(void* /*self*/) {}
 
-// Itanium C++ ABI exception entry points (Gen5 libc_v1). Full unwind is not
-// implemented; throws are host-fatal with a decoded type/message so the
-// producer of the exception remains diagnosable (same spirit as Xlength_error).
+// Itanium C++ ABI exception entry points (Gen5 libc_v1). Guest code executes
+// natively, so these forward to the host libstdc++/libgcc implementations; the
+// host runtime owns the __cxa_exception header and the per-thread caught-
+// exception stack, keeping every step of the throw/catch lifecycle coherent.
 static KYTY_SYSV_ABI void* cxa_allocate_exception(size_t thrown_size)
 {
-	// Header is opaque to the guest object body; keep a small leading region
-	// for freestanding dtor bookkeeping if free_exception is later wired.
-	constexpr size_t kHeader = 128;
-	void*            block   = ::malloc(kHeader + (thrown_size != 0 ? thrown_size : 1));
-	EXIT_IF(block == nullptr);
-	return static_cast<uint8_t*>(block) + kHeader;
+	return __cxa_allocate_exception(thrown_size);
 }
 
 static KYTY_SYSV_ABI void cxa_free_exception(void* thrown_exception)
 {
-	if (thrown_exception == nullptr)
+	__cxa_free_exception(thrown_exception);
+}
+
+static KYTY_SYSV_ABI void* cxa_begin_catch(void* exception_object)
+{
+	return __cxa_begin_catch(exception_object);
+}
+
+static KYTY_SYSV_ABI void cxa_end_catch()
+{
+	__cxa_end_catch();
+}
+
+static KYTY_SYSV_ABI void cxa_rethrow()
+{
+	__cxa_rethrow();
+}
+
+// std::exception_ptr support, absent from the statically-linked libstdc++.
+// Shared-exception refcounts are tracked in a side table keyed by the thrown
+// object so the host libstdc++ header layout is never probed for a field it
+// does not carry.
+static std::unordered_map<void*, unsigned>& CxaSharedRefcounts()
+{
+	static std::unordered_map<void*, unsigned> refcounts;
+	return refcounts;
+}
+
+// __cxa_current_primary_exception — the primary (non-dependent) unwind header
+// for the exception currently being propagated or handled.
+static KYTY_SYSV_ABI void* cxa_current_primary_exception()
+{
+	auto* globals = static_cast<KytyCxaEhGlobals*>(__cxa_get_globals());
+	if (globals == nullptr || globals->caughtExceptions == nullptr)
 	{
-		return;
+		return nullptr;
 	}
-	constexpr size_t kHeader = 128;
-	::free(static_cast<uint8_t*>(thrown_exception) - kHeader);
+	return &globals->caughtExceptions->unwindHeader;
+}
+
+static KYTY_SYSV_ABI void cxa_increment_exception_refcount(void* thrown_exception)
+{
+	if (thrown_exception != nullptr)
+	{
+		CxaSharedRefcounts()[thrown_exception]++;
+	}
 }
 
 static KYTY_SYSV_ABI void cxa_decrement_exception_refcount(void* thrown_exception)
@@ -2615,65 +3406,123 @@ static KYTY_SYSV_ABI void cxa_decrement_exception_refcount(void* thrown_exceptio
 	{
 		return;
 	}
-
-	EXIT("__cxa_decrement_exception_refcount requires an exception header: obj=%p\n", thrown_exception);
+	auto& table = CxaSharedRefcounts();
+	auto  it    = table.find(thrown_exception);
+	if (it != table.end() && --it->second == 0)
+	{
+		table.erase(it);
+		__cxa_free_exception(thrown_exception);
+	}
 }
 
-// Only touch pointers that are known host-mapped. Reject the NoAccess
-// unresolved-object sentinel at ~0x840000000 and other sparse holes.
+// __cxa_rethrow_primary_exception — raise a dependent exception that refers to
+// the still-live primary. Mirrors libc++abi: bump the primary's refcount, then
+// raise a dependent object whose unwind header carries the dependent marker.
+static KYTY_SYSV_ABI void cxa_rethrow_primary_exception(void* thrown_exception)
+{
+	if (thrown_exception == nullptr)
+	{
+		EXIT("__cxa_rethrow_primary_exception(null)\n");
+	}
+	cxa_increment_exception_refcount(thrown_exception);
+	auto* dep = static_cast<KytyCxaDependentException*>(__cxa_allocate_dependent_exception());
+	EXIT_IF(dep == nullptr);
+	auto* primary            = static_cast<KytyCxaException*>(thrown_exception) - 1;
+	dep->primaryException    = thrown_exception;
+	dep->exceptionDestructor = primary->exceptionDestructor;
+	dep->unexpectedHandler   = primary->unexpectedHandler;
+	dep->terminateHandler    = primary->terminateHandler;
+	std::memcpy(&dep->unwindHeader.exception_class, "GNUCC++\x01", 8);
+	dep->unwindHeader.exception_cleanup = [](_Unwind_Reason_Code, _Unwind_Exception* e) {
+		__cxa_free_dependent_exception(reinterpret_cast<KytyCxaDependentException*>(e));
+	};
+	_Unwind_RaiseException(&dep->unwindHeader);
+	EXIT("__cxa_rethrow_primary_exception returned (no landing pad) obj=%p\n", thrown_exception);
+}
+
+static KYTY_SYSV_ABI void* cxa_current_exception_type()
+{
+	return const_cast<std::type_info*>(__cxa_current_exception_type());
+}
+
+// Level-2 unwind entry points imported alongside the C++ ABI. Forward to the
+// host libgcc unwinder, which unwinds guest frames via the registered
+// .eh_frame.
+static KYTY_SYSV_ABI int c_unwind_raise_exception(void* exception_object)
+{
+	return static_cast<int>(_Unwind_RaiseException(static_cast<_Unwind_Exception*>(exception_object)));
+}
+
+static KYTY_SYSV_ABI void c_unwind_resume(void* exception_object)
+{
+	_Unwind_Resume(static_cast<_Unwind_Exception*>(exception_object));
+}
+
+static KYTY_SYSV_ABI void c_unwind_resume_or_rethrow(void* exception_object)
+{
+	_Unwind_Resume_or_Rethrow(static_cast<_Unwind_Exception*>(exception_object));
+}
+
+static KYTY_SYSV_ABI void c_unwind_delete_exception(void* exception_object)
+{
+	_Unwind_DeleteException(static_cast<_Unwind_Exception*>(exception_object));
+}
+
+// Read up to `n` bytes from a guest address into `dst` without risking a fault.
+// process_vm_readv honours page protections and reports EFAULT for unmapped or
+// non-readable pages, so a bad guest pointer can never crash the diagnostic.
+// Returns the number of bytes actually readable (0 if the first byte is not).
+static size_t CxaSafeRead(void* dst, const void* src, size_t n)
+{
+	if (dst == nullptr || src == nullptr || n == 0)
+	{
+		return 0;
+	}
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	struct iovec local {};
+	local.iov_base  = dst;
+	local.iov_len   = n;
+	struct iovec remote {};
+	remote.iov_base = const_cast<void*>(src);
+	remote.iov_len  = n;
+	const ssize_t r = process_vm_readv(getpid(), &local, 1, &remote, 1, 0);
+	return r > 0 ? static_cast<size_t>(r) : 0;
+#else
+	return 0;
+#endif
+}
+
 [[nodiscard]] static bool CxaGuestPtrLooksMapped(const void* p, size_t bytes)
 {
-	const auto a = reinterpret_cast<uintptr_t>(p);
-	if (a < 0x1000u || bytes == 0 || a > UINTPTR_MAX - bytes)
+	if (p == nullptr || bytes == 0 || bytes > 256)
 	{
 		return false;
 	}
-	const auto end = a + bytes;
-	// Unresolved weak Object sentinel (VirtualMemory NoAccess page).
-	if (a >= 0x840000000ull && a < 0x850000000ull)
-	{
-		return false;
-	}
-	// Main image and TLS/data around 0x900000000.
-	if (a >= 0x900000000ull && end <= 0x920000000ull)
-	{
-		return true;
-	}
-	// Flexible/direct guest heaps used by titles (low 32-bit and mid ranges).
-	if (a >= 0x10000ull && end <= 0x080000000ull)
-	{
-		return true;
-	}
-	if (a >= 0x100000000ull && end <= 0x200000000ull)
-	{
-		return true;
-	}
-	// Host/HLE-owned exception objects may still land here. High userspace
-	// mappings on Linux.
-	if (a >= 0x7f0000000000ull && end < 0x800000000000ull)
-	{
-		return true;
-	}
-	return false;
+	unsigned char scratch[256];
+	return CxaSafeRead(scratch, p, bytes) == bytes;
 }
 
-static const char* CxaTryReadCString(const void* p)
+// Copy a candidate C-string out of guest memory into `buf`; returns `buf` when
+// a printable NUL-terminated string fits, else nullptr. Never dereferences `p`
+// directly.
+static const char* CxaTryReadCString(const void* p, char* buf, size_t bufsz)
 {
-	if (!CxaGuestPtrLooksMapped(p, 1))
+	if (p == nullptr || buf == nullptr || bufsz < 2)
 	{
 		return nullptr;
 	}
-	const auto* s = static_cast<const char*>(p);
-	for (int i = 0; i < 256; i++)
+	const size_t n = CxaSafeRead(buf, p, bufsz - 1);
+	if (n == 0)
 	{
-		if (!CxaGuestPtrLooksMapped(s + i, 1))
-		{
-			return nullptr;
-		}
-		const unsigned char c = static_cast<unsigned char>(s[i]);
+		return nullptr;
+	}
+	buf[n] = 0;
+	for (size_t i = 0; i < n; i++)
+	{
+		const auto c = static_cast<unsigned char>(buf[i]);
 		if (c == 0)
 		{
-			return i > 0 ? s : nullptr;
+			return i > 0 ? buf : nullptr;
 		}
 		if (c < 0x09 || (c > 0x0d && c < 0x20))
 		{
@@ -2686,18 +3535,23 @@ static const char* CxaTryReadCString(const void* p)
 // Guest type_info / exception layouts (libstdc++ Itanium):
 //   type_info:  [0]=vtable, [8]=name (const char*, may be mangled with leading '*')
 //   exception with SSO string: after vptr, std::string at +8 (capacity/size/data)
-static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (* /*dest*/)(void*))
+static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*dest)(void*))
 {
-	const char* type_name = nullptr;
-	const char* what_msg  = nullptr;
+	char        type_buf[256] = {};
+	char        what_buf[256] = {};
+	const char* type_name     = nullptr;
+	const char* what_msg      = nullptr;
 
 	if (CxaGuestPtrLooksMapped(tinfo, 16))
 	{
-		const auto* words = static_cast<const uint64_t*>(tinfo);
-		type_name         = CxaTryReadCString(reinterpret_cast<const void*>(words[1]));
-		if (type_name != nullptr && type_name[0] == '*')
+		uint64_t name_ptr = 0;
+		if (CxaSafeRead(&name_ptr, static_cast<const uint8_t*>(tinfo) + 8, sizeof(name_ptr)) == sizeof(name_ptr))
 		{
-			type_name++; // libstdc++ marks non-mangled names with a leading '*'
+			type_name = CxaTryReadCString(reinterpret_cast<const void*>(name_ptr), type_buf, sizeof(type_buf));
+			if (type_name != nullptr && type_name[0] == '*')
+			{
+				type_name++; // libstdc++ marks non-mangled names with a leading '*'
+			}
 		}
 	}
 
@@ -2705,23 +3559,30 @@ static KYTY_SYSV_ABI void cxa_throw(void* thrown_exception, void* tinfo, void (*
 	{
 		// Heuristic: many libstdc++ exception objects store a std::string at +8.
 		// SSO layout (GCC): local buffer at +16 when capacity field at +24 is small.
-		const auto* words = static_cast<const uint64_t*>(thrown_exception);
-		const auto  cap   = words[3]; // often capacity for SSO string
+		uint64_t words[4] = {};
+		CxaSafeRead(words, thrown_exception, sizeof(words));
+		const auto cap = words[3]; // often capacity for SSO string
 		if (cap <= 15u)
 		{
-			what_msg = CxaTryReadCString(static_cast<const char*>(thrown_exception) + 16);
+			what_msg = CxaTryReadCString(static_cast<const char*>(thrown_exception) + 16, what_buf, sizeof(what_buf));
 		} else
 		{
-			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[1]));
+			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[1]), what_buf, sizeof(what_buf));
 		}
 		if (what_msg == nullptr)
 		{
-			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[2]));
+			what_msg = CxaTryReadCString(reinterpret_cast<const void*>(words[2]), what_buf, sizeof(what_buf));
 		}
 	}
 
-	EXIT("__cxa_throw type=%s what=%s obj=%p tinfo=%p\n", type_name != nullptr ? type_name : "?", what_msg != nullptr ? what_msg : "?",
-	     thrown_exception, tinfo);
+	KYTY_LOG_DEBUG("__cxa_throw type=%s what=%s obj=%p tinfo=%p\n", type_name != nullptr ? type_name : "?",
+	               what_msg != nullptr ? what_msg : "?", thrown_exception, tinfo);
+
+	// Forward to the real ABI throw: the host unwinder walks the (registered)
+	// guest frames and transfers control to the guest's landing pad.
+	__cxa_throw(thrown_exception, reinterpret_cast<std::type_info*>(tinfo), dest);
+	EXIT("__cxa_throw returned (no landing pad found) type=%s obj=%p\n", type_name != nullptr ? type_name : "?",
+	     thrown_exception);
 }
 
 static KYTY_SYSV_ABI int atexit(void (*func)())
@@ -2890,6 +3751,47 @@ static KYTY_SYSV_ABI void c_terminate()
 	EXIT("std::terminate called\n");
 }
 
+// Gen5 libc_v1 sceLibcBacktraceGetBufferSize — NID sMko2YZqDNQ. IL2CPP's
+// managed StackTrace path asks libc how large a buffer sceLibcBacktraceSelf
+// needs for a given frame count; one return-address slot per frame.
+static KYTY_SYSV_ABI size_t c_sce_libc_backtrace_get_buffer_size(size_t frame_count)
+{
+	return frame_count * sizeof(void*);
+}
+
+struct BacktraceSelfCtx
+{
+	void** buffer;
+	size_t capacity;
+	size_t count;
+};
+
+static _Unwind_Reason_Code BacktraceSelfCallback(_Unwind_Context* context, void* arg)
+{
+	auto* ctx = static_cast<BacktraceSelfCtx*>(arg);
+	if (ctx->count >= ctx->capacity)
+	{
+		return _URC_END_OF_STACK;
+	}
+	ctx->buffer[ctx->count++] = reinterpret_cast<void*>(_Unwind_GetIP(context));
+	return _URC_NO_REASON;
+}
+
+// Gen5 libc_v1 sceLibcBacktraceSelf — NID MTnuKt7HiN0. Captures a return-address
+// backtrace into the guest buffer. The host _Unwind_Backtrace walks real frames,
+// including guest frames published via __register_frame, so IPs land in guest
+// code where the managed stack expects them.
+static KYTY_SYSV_ABI size_t c_sce_libc_backtrace_self(void* buffer, size_t capacity)
+{
+	if (buffer == nullptr || capacity == 0)
+	{
+		return 0;
+	}
+	BacktraceSelfCtx ctx {static_cast<void**>(buffer), capacity, 0};
+	_Unwind_Backtrace(BacktraceSelfCallback, &ctx);
+	return ctx.count;
+}
+
 } // namespace LibC
 
 
@@ -3009,6 +3911,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("OwfBD-2nhJQ", LibC::g_time_put_char_vtable);
 	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
 	LIB_OBJECT("wiR+rIcbnlc", LibC::g_fpz);
+	LIB_OBJECT("b-xTWRgI1qw", &LibC::g_dtest_table);
 	// HEAD-only unresolved Object placeholders (NIDs that do not collide with RTTI above).
 	LIB_OBJECT("MpxhMh8QFro", &LibC::g_dummy_obj_5);
 	LIB_OBJECT("NU-T4QowTNA", &LibC::g_dummy_obj_6);
@@ -3023,6 +3926,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Uq5K8tl8I9U", LibC::c_locale_classic);
 	LIB_FUNC("QxqK-IdpumU", LibC::c_Getpmbstate);
 	LIB_FUNC("zS94yyJRSUs", LibC::c_Getpwcstate);
+	LIB_FUNC("U52BlHBvYvE", LibC::c_Getmbcurmax);
+	LIB_FUNC("sZLrjx-yEx4", LibC::c_wcstombs_s);
 	LIB_FUNC("-9SIhUr4Iuo", LibC::c_Mbtowcx);
 	LIB_FUNC("stv1S3BKfgw", LibC::c_Wctombx);
 	LIB_OBJECT("2wz4rthdiy8", &LibC::g_dummy_obj_17);
@@ -3096,6 +4001,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("Y7aJ1uydPMo", LibC::c_realloc);
 	LIB_FUNC("tIhsqj0qsFE", LibC::c_free);
 	LIB_FUNC("Ujf3KzMvRmI", LibC::c_memalign);
+	LIB_FUNC("OGybVuPAhAY", LibC::c_reallocalign);
 	LIB_FUNC("2Btkg8k24Zg", LibC::c_aligned_alloc);
 	LIB_FUNC("cVSk9y8URbc", LibC::c_posix_memalign);
 	LIB_FUNC("KuOuD58hqn4", LibcInternal::LibcMallocStatsFast);
@@ -3156,6 +4062,24 @@ LIB_DEFINE(InitLibC_1)
 	// Gen5 libc_v1 C++ EH — guest throw path after initialization.
 	// vkuuLfhnSZI: __cxa_throw (rdi=obj, rsi=typeinfo, rdx=dtor; ud2 after).
 	LIB_FUNC("vkuuLfhnSZI", LibC::cxa_throw);
+	// Itanium catch/unwind lifecycle — forwarded to the host runtime, which
+	// unwinds guest frames via the registered .eh_frame.
+	LIB_FUNC("3cUUypQzMiI", LibC::cxa_begin_catch);                    // __cxa_begin_catch
+	LIB_FUNC("lX+4FNUklF0", LibC::cxa_end_catch);                      // __cxa_end_catch
+	LIB_FUNC("ZL9FV4mJXxo", LibC::cxa_rethrow);                        // __cxa_rethrow
+	LIB_FUNC("RY8mQlhg7mI", LibC::cxa_current_primary_exception);      // __cxa_current_primary_exception
+	LIB_FUNC("qKQiNX91IGo", LibC::cxa_rethrow_primary_exception);      // __cxa_rethrow_primary_exception
+	LIB_FUNC("PsrRUg671K0", LibC::cxa_increment_exception_refcount);   // __cxa_increment_exception_refcount
+	LIB_FUNC("nOIEswYD4Ig", LibC::cxa_free_exception);                 // __cxa_free_exception
+	LIB_FUNC("f1zwJ3jAI2k", LibC::c_unwind_resume);                    // _Unwind_Resume
+	LIB_FUNC("wpNJwmDDtxw", LibC::c_unwind_raise_exception);           // _Unwind_RaiseException
+	LIB_FUNC("yK3VESxclT0", LibC::c_unwind_raise_exception);           // __libunwind_Unwind_RaiseException
+	LIB_FUNC("Gbr7tQZ4A1A", LibC::c_unwind_resume);                    // __libunwind_Unwind_Resume
+	LIB_FUNC("xUsJSLsdv9I", LibC::c_unwind_resume_or_rethrow);         // _Unwind_Resume_or_Rethrow
+	LIB_FUNC("rsqqpUwcsQY", LibC::c_unwind_resume_or_rethrow);         // __libunwind_Unwind_Resume_or_Rethrow
+	LIB_FUNC("GslDM6l8E7U", LibC::c_unwind_delete_exception);          // _Unwind_DeleteException
+	LIB_FUNC("H0NwmJX8SOA", LibC::c_unwind_delete_exception);          // __libunwind_Unwind_DeleteException
+	LIB_FUNC("MTnuKt7HiN0", LibC::c_sce_libc_backtrace_self);          // sceLibcBacktraceSelf
 	LIB_FUNC("hdm0YfMa7TQ", LibC::cxx_new_array);         // operator new[](size_t)
 	LIB_FUNC("Jh5qUcwiSEk", LibC::cxx_new_array_nothrow); // operator new[](size_t, const std::nothrow_t&)
 	LIB_FUNC("MLWl90SFWNE", LibC::cxx_delete_array);      // operator delete[](void*)
@@ -3261,6 +4185,30 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("NesIgTmfF0Q", LibC::c_bsearch);
 	LIB_FUNC("L1SBTkC+Cvw", LibC::c_abort);
 	LIB_FUNC("VPbJwTCgME0", LibC::c_srand);
+	// drand48 family — 48-bit LCG PRNG (IL2CPP runtime init).
+	LIB_FUNC("+KSnjvZ0NMc", LibC::c_srand48);
+	LIB_FUNC("WIg11rA+MRY", LibC::c_drand48);
+	LIB_FUNC("5IpoNfxu84U", LibC::c_lrand48);
+	LIB_FUNC("k-l0Jth-Go8", LibC::c_mrand48);
+	// IL2CPP libc_v1 imports — math/time/stdio delegations.
+	LIB_FUNC("-VVn74ZyhEs", LibC::c_difftime);
+	LIB_FUNC("owKuegZU4ew", LibC::c_logb);
+	LIB_FUNC("KGKBeVcqJjc", LibC::c_scalbn);
+	LIB_FUNC("WuMbPBKN1TU", LibC::c_log10);
+	LIB_FUNC("Y5DhuDKGlnQ", LibC::c_log2);
+	LIB_FUNC("-LFO7jhD5CE", LibC::c_ungetc);
+	LIB_FUNC("SHlt7EhOtqA", LibC::c_fgetpos);
+	LIB_FUNC("7PkSz+qnTto", LibC::c_fsetpos);
+	LIB_FUNC("qdGFBoLVNKI", LibC::c_quick_exit);
+	// IL2CPP libc_v1 imports — CRT/Dinkumware internals.
+	LIB_FUNC("vZkmJmvqueY", LibC::c_Lockfilelock);
+	LIB_FUNC("0x7rx8TKy2Y", LibC::c_Unlockfilelock);
+	LIB_FUNC("vYWK2Pz8vGE", LibC::c_Fiopen);
+	LIB_FUNC("MOBxtefPZUg", LibC::c_std_exception_dtor);
+	LIB_FUNC("oe9tS0VztYk", LibC::c_std_runtime_error_dtor);
+	LIB_FUNC("V23qt24VPVs", LibC::c_iostream_category);
+	LIB_FUNC("eT2UsmTewbU", LibC::c_Xbad_alloc);
+	LIB_FUNC("MELi-cKqWq0", LibC::c_Xbad_function_call);
 	// Gen5 libc_v1 rand — Nmtr628eA3A observed early; cpCOXWMgha0 after Fiber/thread bring-up.
 	LIB_FUNC_ALIASES(LibC::c_rand, "Nmtr628eA3A", "cpCOXWMgha0");
 	LIB_FUNC("oVkZ8W8-Q8A", LibC::c_strtok);
@@ -3345,6 +4293,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("-QgqOT5u2Vk", LibC::c_assert);
 	LIB_FUNC("W0j6vCxh9Pc", LibC::c_throw_cpp_error);
 	LIB_FUNC("qYhnoevd9bI", LibC::c_terminate);
+	// Gen5 libc_v1 sceLibcBacktraceGetBufferSize — sMko2YZqDNQ (IL2CPP stack-trace path).
+	LIB_FUNC("sMko2YZqDNQ", LibC::c_sce_libc_backtrace_get_buffer_size);
 	LIB_FUNC("lhpd6Wk6ccs", LibC::c_log10f); // next Unpatched after sinf
 	LIB_FUNC("RQXLbdT2lc4", LibC::c_logf);
 	LIB_FUNC("Q+xU11-h0xQ", LibC::c_sqrtf);
@@ -3355,6 +4305,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("wuAQt-j+p4o", LibC::c_exp2f);
 	LIB_FUNC("8zsu04XNsZ4", LibC::c_expf);
 	LIB_FUNC("kn0yiYeExgA", LibC::c_ldexpf);
+	// Gen5 libc_v1 modff — float modf; IL2CPP runtimes use it during init.
+	LIB_FUNC("3+UPM-9E6xY", LibC::c_modff);
 	LIB_FUNC("pztV4AF18iI", LibC::c_sincosf);
 
 	// C++ runtime

@@ -31,6 +31,9 @@ size_t MSpaceMallocUsableSize(const void* ptr);
 bool   MSpaceMallocStats(mspace_t msp, MSpaceSize* mmsize);
 bool   MSpaceMallocStatsFast(mspace_t msp, MSpaceSize* mmsize);
 bool   MSpaceIsHeapEmpty(mspace_t msp);
+// True only for a handle MSpaceCreate published; a title may hand back a pointer
+// into its own allocator or the default heap, which is not an MSpaceContext.
+bool   MSpaceIsManaged(mspace_t msp);
 
 } // namespace Kyty::Core
 

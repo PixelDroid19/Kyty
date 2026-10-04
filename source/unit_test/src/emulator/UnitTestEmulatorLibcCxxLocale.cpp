@@ -28,6 +28,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <unwind.h>
 
 UT_BEGIN(EmulatorLibcCxxLocale);
 
@@ -1146,7 +1147,7 @@ TEST(EmulatorLibcCxxLocale, ResolvesBaseExceptionDoraiseAsVoidFunction)
 	fn(reinterpret_cast<const void*>(0x840000000));
 }
 
-TEST(EmulatorLibcCxxLocale, ResolvesGxxPersonalityAndContinuesUnwind)
+TEST(EmulatorLibcCxxLocale, ResolvesGxxPersonalityAndRejectsMissingContext)
 {
 	EnsureLog();
 
@@ -1159,7 +1160,47 @@ TEST(EmulatorLibcCxxLocale, ResolvesGxxPersonalityAndContinuesUnwind)
 
 	using GxxPersonality = KYTY_SYSV_ABI int (*)(int, int, uint64_t, void*, void*);
 	auto* fn              = reinterpret_cast<GxxPersonality>(rec->vaddr);
-	EXPECT_EQ(fn(1, 0, 0, nullptr, nullptr), 8);
+	// Null is not an opaque context supplied by the unwinder. The previous
+	// expectation described the removed unconditional continue-unwind stub.
+	EXPECT_EQ(fn(1, 0, 0, nullptr, nullptr), _URC_FATAL_PHASE1_ERROR);
+	_Unwind_Exception exception {};
+	EXPECT_EQ(fn(1, _UA_SEARCH_PHASE, 0, &exception, nullptr), _URC_FATAL_PHASE1_ERROR);
+	EXPECT_EQ(fn(0, _UA_SEARCH_PHASE, 0, nullptr, nullptr), _URC_FATAL_PHASE1_ERROR);
+}
+
+TEST(EmulatorLibcCxxLocale, ContinuesPersonalitySearchAndCleanupForRealFrameWithoutLsda)
+{
+	EnsureLog();
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"XwLA5cTHjt4");
+	ASSERT_NE(rec, nullptr);
+	using GxxPersonality = KYTY_SYSV_ABI int (*)(int, int, uint64_t, void*, void*);
+	struct Probe
+	{
+		GxxPersonality fn;
+		_Unwind_Exception exception {};
+		bool visited = false;
+		int search = -1;
+		int cleanup = -1;
+	} probe {reinterpret_cast<GxxPersonality>(rec->vaddr)};
+	// Do not fabricate the layout of _Unwind_Context: borrow a real frame from
+	// the host unwinder and choose one with no language-specific landing pads.
+	_Unwind_Backtrace([](_Unwind_Context* context, void* opaque) -> _Unwind_Reason_Code
+	{
+		auto* state = static_cast<Probe*>(opaque);
+		if (_Unwind_GetLanguageSpecificData(context) != nullptr)
+		{
+			return _URC_NO_REASON;
+		}
+		state->search = state->fn(1, _UA_SEARCH_PHASE, 0, &state->exception, context);
+		state->cleanup = state->fn(1, _UA_CLEANUP_PHASE, 0, &state->exception, context);
+		state->visited = true;
+		return _URC_END_OF_STACK;
+	}, &probe);
+	ASSERT_TRUE(probe.visited);
+	EXPECT_EQ(probe.search, _URC_CONTINUE_UNWIND);
+	EXPECT_EQ(probe.cleanup, _URC_CONTINUE_UNWIND);
 }
 
 TEST(EmulatorLibcCxxLocale, ResolvesIosBaseFailureCompleteDestructor)

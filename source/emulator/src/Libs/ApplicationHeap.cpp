@@ -17,15 +17,19 @@ namespace Kyty::Libs::LibKernel::ApplicationHeap {
 
 namespace {
 
-using MallocFunc = void*(KYTY_SYSV_ABI*)(size_t);
-using FreeFunc   = void(KYTY_SYSV_ABI*)(void*);
-using StatsFunc  = int(KYTY_SYSV_ABI*)(void*);
+using MallocFunc       = void*(KYTY_SYSV_ABI*)(size_t);
+using FreeFunc         = void(KYTY_SYSV_ABI*)(void*);
+using StatsFunc        = int(KYTY_SYSV_ABI*)(void*);
+using ReallocFunc      = void*(KYTY_SYSV_ABI*)(void*, size_t);
+using ReallocalignFunc = void*(KYTY_SYSV_ABI*)(void*, size_t, size_t);
 
 struct RuntimeApi
 {
-	MallocFunc malloc = nullptr;
-	FreeFunc free = nullptr;
-	StatsFunc stats_fast = nullptr;
+	MallocFunc       malloc       = nullptr;
+	FreeFunc         free         = nullptr;
+	StatsFunc        stats_fast   = nullptr;
+	ReallocFunc      realloc      = nullptr;
+	ReallocalignFunc reallocalign = nullptr;
 };
 std::mutex g_api_mutex;
 RuntimeApi g_api;
@@ -130,6 +134,8 @@ void RegisterApi(void* const api[kApiSlotCount])
 	g_api.malloc     = reinterpret_cast<MallocFunc>(table->slots[kMallocSlot]);
 	g_api.free       = reinterpret_cast<FreeFunc>(table->slots[kFreeSlot]);
 	g_api.stats_fast = reinterpret_cast<StatsFunc>(table->slots[kMallocStatsFastSlot]);
+	g_api.realloc    = reinterpret_cast<ReallocFunc>(table->slots[kReallocSlot]);
+	g_api.reallocalign = reinterpret_cast<ReallocalignFunc>(table->slots[kReallocalignSlot]);
 }
 
 bool InitializeProcessHeap(uint64_t process_parameters)
@@ -251,6 +257,16 @@ bool HasMallocStatsFast()
 	return !g_in_guest_allocator && api.malloc != nullptr && api.free != nullptr && api.stats_fast != nullptr;
 }
 
+bool HasReallocalign()
+{
+	return HasAllocator() && GetApi().reallocalign != nullptr;
+}
+
+bool HasRealloc()
+{
+	return HasAllocator() && GetApi().realloc != nullptr;
+}
+
 void* Malloc(size_t size)
 {
 	const auto api = GetApi();
@@ -276,6 +292,35 @@ int MallocStatsFast(void* stats)
 	const int result = static_cast<int>(Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(api.stats_fast),
 	                                                              reinterpret_cast<uint64_t>(stats), 0, 0));
 	return result;
+}
+
+void* Realloc(void* ptr, size_t size)
+{
+	const auto api = GetApi();
+	if (g_in_guest_allocator || api.malloc == nullptr || api.free == nullptr || api.realloc == nullptr)
+	{
+		return nullptr;
+	}
+
+	AllocatorCallbackScope scope;
+	const uint64_t result = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(api.realloc), reinterpret_cast<uint64_t>(ptr), size, 0);
+	return reinterpret_cast<void*>(result);
+}
+
+void* Reallocalign(void* ptr, size_t size, size_t boundary)
+{
+	const auto api = GetApi();
+	if (g_in_guest_allocator || api.malloc == nullptr || api.free == nullptr || api.reallocalign == nullptr)
+	{
+		return nullptr;
+	}
+
+	AllocatorCallbackScope scope;
+	// The replacement reallocalign slot takes (ptr, size, boundary); the public
+	// libc function forwards its arguments to the slot verbatim.
+	const uint64_t result = Loader::GuestCall::Invoke(reinterpret_cast<uint64_t>(api.reallocalign), reinterpret_cast<uint64_t>(ptr),
+	                                                  size, boundary);
+	return reinterpret_cast<void*>(result);
 }
 
 bool Free(void* ptr)

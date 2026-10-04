@@ -252,6 +252,10 @@ KYTY_SYSV_ABI float c_ldexpf(float x, int e)
 {
 	return ::ldexpf(x, e);
 }
+KYTY_SYSV_ABI float c_modff(float x, float* ip)
+{
+	return ::modff(x, ip);
+}
 KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c)
 {
 	*s = ::sinf(x);

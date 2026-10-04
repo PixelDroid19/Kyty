@@ -324,6 +324,74 @@ KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 	return replacement;
 }
 
+// reallocalign(ptr, boundary, size): reallocate ptr into a boundary-aligned
+// block of size bytes. The public ordering mirrors memalign(boundary, size)
+// with the pointer prepended; the MallocReplace slot keeps the internal
+// mspace_realloc2 ordering (ptr, size, boundary), so delegation swaps the tail.
+KYTY_SYSV_ABI void* c_reallocalign(void* p, size_t boundary, size_t size)
+{
+	if (size == 0)
+	{
+		c_free(p);
+		return nullptr;
+	}
+
+	// Pointers this shim allocated are re-aligned here; the registered
+	// replacement only understands the application heap.
+	AlignedAllocation allocation {};
+	if (claim_aligned_allocation(p, &allocation))
+	{
+		void* replacement = c_memalign(boundary, size);
+		if (replacement == nullptr)
+		{
+			const bool restored = register_aligned_allocation(p, allocation);
+			EXIT_IF(!restored);
+			return nullptr;
+		}
+
+		::memcpy(replacement, p, (allocation.size < size ? allocation.size : size));
+		if (!free_by_owner(allocation.base))
+		{
+			EXIT("ApplicationHeap free failed during reallocalign\n");
+		}
+		return replacement;
+	}
+
+	HostAllocationRecord record {};
+	if (claim_allocation(p, &record))
+	{
+		void* replacement = c_memalign(boundary, size);
+		if (replacement == nullptr)
+		{
+			const bool restored = register_allocation(p, record);
+			EXIT_IF(!restored);
+			return nullptr;
+		}
+
+		::memcpy(replacement, p, (record.size < size ? record.size : size));
+		::free(p);
+		return replacement;
+	}
+
+	// nullptr or an application-heap pointer: the registered reallocalign slot
+	// owns these (nullptr allocates fresh on the application heap).
+	if (LibKernel::ApplicationHeap::HasReallocalign())
+	{
+		return LibKernel::ApplicationHeap::Reallocalign(p, size, boundary);
+	}
+
+	if (p == nullptr)
+	{
+		return c_memalign(boundary, size);
+	}
+
+	if (LibKernel::ApplicationHeap::IsInitialized())
+	{
+		EXIT("libc HLE cannot reallocalign an unowned application-heap pointer\n");
+	}
+	return nullptr;
+}
+
 KYTY_SYSV_ABI void c_free(void* p)
 {
 	AlignedAllocation allocation {};
