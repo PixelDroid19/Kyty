@@ -406,6 +406,43 @@ TEST(CoreVirtualMemory, SharedBackingPreservesAliasCoherence)
 	DestroySharedBacking(backing);
 }
 
+// A view gains backing pages only when it first touches them and loses them
+// only through a discard, so the population summary changes exactly then.
+TEST(CoreVirtualMemory, SharedBackingPopulationChangesOnlyWhenPagesAreAddedOrDiscarded)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "population is reported by the Linux memfd backing";
+#else
+	constexpr uint64_t kSize     = 0x10000;
+	const uint64_t     page_size = GetPageSize();
+	SharedBacking*     backing   = CreateSharedBacking(kSize);
+	ASSERT_NE(backing, nullptr);
+	const uint64_t view = MapSharedAligned(backing, 0, 0, kSize, Mode::ReadWrite, page_size);
+	ASSERT_NE(view, 0u);
+
+	SharedBackingPopulation empty;
+	ASSERT_TRUE(QuerySharedBackingPopulation(backing, &empty));
+	reinterpret_cast<volatile uint8_t*>(view)[0] = 1;
+	SharedBackingPopulation touched;
+	ASSERT_TRUE(QuerySharedBackingPopulation(backing, &touched));
+	EXPECT_NE(touched, empty);
+	EXPECT_EQ(touched.populated_bytes, empty.populated_bytes + page_size);
+
+	reinterpret_cast<volatile uint8_t*>(view)[8] = 2;
+	SharedBackingPopulation retouched;
+	ASSERT_TRUE(QuerySharedBackingPopulation(backing, &retouched));
+	EXPECT_EQ(retouched, touched);
+
+	ASSERT_TRUE(Free(view));
+	ASSERT_TRUE(DiscardSharedBackingRange(backing, 0, kSize));
+	SharedBackingPopulation discarded;
+	ASSERT_TRUE(QuerySharedBackingPopulation(backing, &discarded));
+	EXPECT_NE(discarded, retouched);
+	EXPECT_EQ(discarded.discards, retouched.discards + 1u);
+	DestroySharedBacking(backing);
+#endif
+}
+
 // Large guest heaps must not create one host metadata node per page. This is
 // intentionally sparse so the test exercises the tracking contract without
 // requiring physical memory proportional to the guest reservation.

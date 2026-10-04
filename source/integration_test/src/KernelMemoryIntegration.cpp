@@ -123,7 +123,7 @@ struct GpuMappingPortProbe
 	uint32_t invalidate_count = 0;
 	uint32_t release_count    = 0;
 
-	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size)
+	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingBacking /*backing*/)
 	{
 		auto* probe           = static_cast<GpuMappingPortProbe*>(context);
 		probe->register_vaddr = vaddr;

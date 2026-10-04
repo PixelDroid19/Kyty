@@ -46,6 +46,7 @@ struct Range
 	uint64_t             size = 0;
 	std::vector<Chunk>   chunks;
 	std::vector<uint8_t> imported; // one byte per page
+	bool                 physical_backing = false;
 };
 
 struct Table
@@ -61,6 +62,9 @@ struct Registry
 	std::mutex                mutex;
 	std::map<uint64_t, Range> ranges;
 	bool                      dirty = true;
+	// Physical-backing population at the last complete scan of physical ranges.
+	Core::VirtualMemory::SharedBackingPopulation scanned_population;
+	bool                                         population_scanned = false;
 	Table                     table;
 	std::vector<Table>        retired;
 };
@@ -302,7 +306,8 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 }
 
 // Imported pages already have a pinned alias or tracked snapshot. Recheck every
-// remaining interval on each preparation so newly faulted pages are discovered.
+// remaining interval of a range whose backing may have gained pages, so newly
+// faulted pages are discovered.
 // Quiesced invalidation clears the bitmap when those imports cease to be valid.
 bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* changed)
 {
@@ -395,7 +400,7 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 
 } // namespace
 
-void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size)
+void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physical_backing)
 {
 	if (vaddr == 0 || size == 0 || (vaddr % kPageBytes) != 0 || (size % kPageBytes) != 0)
 	{
@@ -403,8 +408,9 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size)
 	}
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
-	registry.ranges[vaddr] = {size, {}, {}};
-	registry.dirty         = true;
+	registry.ranges[vaddr]      = {size, {}, {}, physical_backing};
+	registry.dirty              = true;
+	registry.population_scanned = false;
 }
 
 void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
@@ -423,7 +429,8 @@ void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vad
 		}
 		range.chunks.clear();
 		range.imported.assign(range.imported.size(), 0);
-		registry.dirty = true;
+		registry.dirty              = true;
+		registry.population_scanned = false;
 	}
 }
 
@@ -496,10 +503,14 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 	const DebugStatsScopedTimer prepare_timer(DebugStatsRecordGuestAddressPrepare);
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
+	// Query before scanning: a page populated during the scan changes the next query.
+	Core::VirtualMemory::SharedBackingPopulation population;
+	const bool known    = Kernel::Memory::KernelQueryPhysicalPopulation(&population);
+	const bool physical = !known || !registry.population_scanned || population != registry.scanned_population;
 	for (auto& [base, range]: registry.ranges)
 	{
 		bool changed = false;
-		if (!ImportResident(ctx, base, &range, &changed))
+		if ((physical || !range.physical_backing) && !ImportResident(ctx, base, &range, &changed))
 		{
 			return false;
 		}
@@ -520,7 +531,9 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 	{
 		return false;
 	}
-	*table_address = registry.table.device;
+	registry.scanned_population = population;
+	registry.population_scanned = known;
+	*table_address              = registry.table.device;
 	*entry_count   = registry.table.entries;
 	return true;
 }

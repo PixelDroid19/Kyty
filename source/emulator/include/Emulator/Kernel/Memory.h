@@ -124,6 +124,9 @@ int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void*
 // Internal, side-effect-free range query. Returns true only when the entire
 // requested range lies inside one currently mapped protection segment.
 [[nodiscard]] bool   KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* out);
+// Population of the shared backing behind every Physical mapping; see
+// VirtualMemory::SharedBackingPopulation. False before the kernel exists.
+[[nodiscard]] bool   KernelQueryPhysicalPopulation(Core::VirtualMemory::SharedBackingPopulation* out);
 // Read-write host view of the direct-memory pages behind a physical guest
 // mapping, for importing guest memory into a device independently of the
 // guest view's protection. Returns 0 for non-physical or partial ranges.

@@ -62,11 +62,11 @@ struct GpuMappingInvalidationTransaction
 	uint64_t size  = 0;
 };
 
-void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size)
+void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingBacking backing)
 {
 	(void)context;
 	GpuMemorySetAllocatedRange(vaddr, size);
-	GuestDeviceAddressRegisterRange(vaddr, size);
+	GuestDeviceAddressRegisterRange(vaddr, size, backing == Kernel::Memory::KernelGpuMappingBacking::Physical);
 }
 
 bool GraphicsCompleteGpuMappingRelease(void* data)

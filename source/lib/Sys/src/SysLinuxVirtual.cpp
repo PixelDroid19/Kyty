@@ -19,6 +19,7 @@
 #include <map>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <cstdlib>
 #include <chrono>
@@ -920,6 +921,19 @@ bool sys_virtual_is_shared_backing_range_unpopulated(void* backing, uint64_t bac
 	(void)size;
 	return false;
 #endif
+}
+
+bool sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes)
+{
+	const auto* shared = static_cast<const SharedBacking*>(backing);
+	struct stat status {};
+	if (shared == nullptr || shared->fd < 0 || bytes == nullptr || ::fstat(shared->fd, &status) != 0)
+	{
+		return false;
+	}
+	// st_blocks counts 512-byte units for every page the memfd holds.
+	*bytes = static_cast<uint64_t>(status.st_blocks) * 512u;
+	return true;
 }
 
 static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t prefer, uint64_t backing_offset, uint64_t size,

@@ -143,7 +143,7 @@ int StableResidencyProbe()
 	if (guest == 0) { return 2; }
 	*reinterpret_cast<uint32_t*>(guest) = 0x12345678u;
 	if (!Core::VirtualMemory::Protect(guest, bytes, Core::VirtualMemory::Mode::Read)) { return 3; }
-	GuestDeviceAddressRegisterRange(guest, bytes);
+	GuestDeviceAddressRegisterRange(guest, bytes, false);
 	for (unsigned round = 0; round < 8; ++round)
 	{
 		uint64_t table = 0;
@@ -157,6 +157,33 @@ int StableResidencyProbe()
 			std::fprintf(stderr, "round=%u entries=%u resident=%zu\n", round, entries, static_cast<size_t>(count));
 			return 6;
 		}
+	}
+	return 0;
+}
+
+// A range without a population summary (private anonymous memory) is rescanned
+// on every preparation: a page touched after one is imported by the next.
+int AnonymousResidencyProbe()
+{
+	Device device;
+	if (!device.Init()) { return 77; }
+	constexpr uint64_t bytes = 64u * kGuestDeviceAddressPageBytes;
+	const uint64_t guest = Core::VirtualMemory::Alloc(0, bytes, Core::VirtualMemory::Mode::ReadWrite);
+	if (guest == 0) { return 2; }
+	*reinterpret_cast<uint32_t*>(guest) = 0x12345678u;
+	if (!Core::VirtualMemory::Protect(guest, bytes, Core::VirtualMemory::Mode::Read)) { return 2; }
+	GuestDeviceAddressRegisterRange(guest, bytes, false);
+	uint64_t table   = 0;
+	uint32_t entries = 0;
+	if (!GuestDeviceAddressPrepare(&device.context, &table, &entries) || entries != 1) { return 3; }
+	const uint64_t touched = guest + 10u * kGuestDeviceAddressPageBytes;
+	if (!Core::VirtualMemory::Protect(touched, kGuestDeviceAddressPageBytes, Core::VirtualMemory::Mode::ReadWrite)) { return 2; }
+	*reinterpret_cast<uint32_t*>(touched) = 0x9abcdef0u;
+	if (!Core::VirtualMemory::Protect(touched, kGuestDeviceAddressPageBytes, Core::VirtualMemory::Mode::Read)) { return 2; }
+	if (!GuestDeviceAddressPrepare(&device.context, &table, &entries) || entries != 2)
+	{
+		std::fprintf(stderr, "entries=%u after the touch\n", entries);
+		return 4;
 	}
 	return 0;
 }
@@ -344,5 +371,6 @@ void RunIsolated(int (*probe)())
 
 TEST(EmulatorGuestDeviceAddress, RepeatedPrepareDoesNotImportUntouchedNeighbours) { RunIsolated(StableResidencyProbe); }
 TEST(EmulatorGuestDeviceAddress, VulkanLoadPreservesWordsAcrossImportedPageBoundary) { RunIsolated(PageBoundaryLoadProbe); }
+TEST(EmulatorGuestDeviceAddress, AnAnonymousRangeImportsATouchedPageOnTheNextPreparation) { RunIsolated(AnonymousResidencyProbe); }
 
 UT_END();

@@ -37,8 +37,11 @@ constexpr uint32_t kGuestDeviceAddressPageBytes   = 4096;
 	return true;
 }
 
-// Bookkeeping only; safe to call from the kernel mapping path.
-void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size);
+// Bookkeeping only; safe to call from the kernel mapping path. A range that
+// views the kernel's physical backing is rescanned for newly resident pages
+// only when that backing's population changed; any other range on every
+// preparation. Untouched pages read as zero, like the table's null target.
+void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physical_backing);
 
 // Must run with GPU submissions quiesced: drops the imports overlapping the
 // range (its protection or contents may have changed); they are imported

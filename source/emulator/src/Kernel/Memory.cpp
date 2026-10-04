@@ -232,6 +232,11 @@ public:
 
 	[[nodiscard]] Core::Mutex&               GetMutex() { return m_mutex; }
 	[[nodiscard]] const Vector<MappedBlock>& GetMappedBlocks() const { return m_mapped; }
+	// The backing outlives every mapping, so the query needs no lock.
+	[[nodiscard]] bool QueryPopulation(VirtualMemory::SharedBackingPopulation* out) const
+	{
+		return VirtualMemory::QuerySharedBackingPopulation(m_backing, out);
+	}
 
 private:
 	static constexpr uint64_t kNextGenAutoMapBegin = 0x2000000000ull;
@@ -1627,7 +1632,7 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 			KYTY_LOG_DEBUG("[FlexMap] registering GPU mapping range addr=0x%016" PRIx64 " size=%" PRIu64 "\n", out_addr,
 			       static_cast<uint64_t>(len));
 		}
-		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len));
+		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len, KernelGpuMappingBacking::Flexible));
 	}
 
 	if (g_alloc_callback != nullptr)
@@ -2133,7 +2138,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 
 	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
 	{
-		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len));
+		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len, KernelGpuMappingBacking::Physical));
 	}
 
 	if (g_alloc_callback != nullptr)
@@ -2243,6 +2248,11 @@ bool KernelUnmapPhysicalAlias(uint64_t alias)
 bool KernelIsPhysicalRangeUnpopulated(uint64_t vaddr, uint64_t size)
 {
 	return g_physical_memory != nullptr && g_physical_memory->IsRangeUnpopulated(vaddr, size);
+}
+
+bool KernelQueryPhysicalPopulation(Core::VirtualMemory::SharedBackingPopulation* out)
+{
+	return g_physical_memory != nullptr && out != nullptr && g_physical_memory->QueryPopulation(out);
 }
 
 bool KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* out)
@@ -2669,6 +2679,8 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 		uint64_t mapping_addr = 0;
 		uint64_t mapping_size = 0;
 		auto     promotion    = g_physical_memory->PromoteGpuRange(aligned_vaddr, aligned_len, gpu_mode, &mapping_addr, &mapping_size);
+		const auto backing    = promotion == KernelGpuMappingPromotionStatus::NotContained ? KernelGpuMappingBacking::Flexible
+		                                                                                     : KernelGpuMappingBacking::Physical;
 		if (promotion == KernelGpuMappingPromotionStatus::NotContained)
 		{
 			promotion = g_flexible_memory->PromoteGpuRange(aligned_vaddr, aligned_len, gpu_mode, &mapping_addr, &mapping_size);
@@ -2680,12 +2692,12 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 		}
 		if (registration_action == KernelGpuMappingRegistrationAction::RegisterOwnerMapping)
 		{
-			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(mapping_addr, mapping_size));
+			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(mapping_addr, mapping_size, backing));
 		} else if (registration_action == KernelGpuMappingRegistrationAction::RegisterProtectedRange)
 		{
 			// Guest-owned mappings outside the physical/flexible records still
 			// need lifecycle registration after their guest protection changes.
-			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(aligned_vaddr, aligned_len));
+			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(aligned_vaddr, aligned_len, KernelGpuMappingBacking::Flexible));
 		}
 	}
 

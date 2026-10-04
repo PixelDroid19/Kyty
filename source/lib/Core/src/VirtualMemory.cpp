@@ -1859,8 +1859,9 @@ bool ReserveFixed(uint64_t address, uint64_t size)
 class SharedBacking
 {
 public:
-	void*    handle = nullptr;
-	uint64_t size   = 0;
+	void*                 handle = nullptr;
+	uint64_t              size   = 0;
+	std::atomic<uint64_t> discards {0};
 };
 
 SharedBacking* CreateSharedBacking(uint64_t size)
@@ -1902,7 +1903,20 @@ bool DiscardSharedBackingRange(SharedBacking* backing, uint64_t backing_offset, 
 	{
 		return false;
 	}
+	// Count every attempt: a partial punch may already have dropped pages.
+	backing->discards.fetch_add(1, std::memory_order_acq_rel);
 	return sys_virtual_discard_shared_backing_range(backing->handle, backing_offset, size);
+}
+
+bool QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulation* population)
+{
+	if (backing == nullptr || backing->handle == nullptr || population == nullptr)
+	{
+		return false;
+	}
+	// Read the discard count first: a discard racing the size query changes it.
+	population->discards = backing->discards.load(std::memory_order_acquire);
+	return sys_virtual_query_shared_backing_populated_bytes(backing->handle, &population->populated_bytes);
 }
 
 bool IsSharedBackingRangeUnpopulated(SharedBacking* backing, uint64_t backing_offset, uint64_t size)

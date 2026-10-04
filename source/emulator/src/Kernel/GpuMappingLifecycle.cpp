@@ -37,7 +37,7 @@ bool GpuMappingLifecyclePort::IsInstalled() const
 	return m_callbacks.register_range != nullptr && m_callbacks.invalidate_range != nullptr && m_callbacks.release_range != nullptr;
 }
 
-bool GpuMappingLifecyclePort::RegisterRange(uint64_t vaddr, uint64_t size)
+bool GpuMappingLifecyclePort::RegisterRange(uint64_t vaddr, uint64_t size, KernelGpuMappingBacking backing)
 {
 	if (!IsRepresentableRange(vaddr, size))
 	{
@@ -53,7 +53,7 @@ bool GpuMappingLifecyclePort::RegisterRange(uint64_t vaddr, uint64_t size)
 		}
 		callbacks = m_callbacks;
 	}
-	callbacks.register_range(callbacks.context, vaddr, size);
+	callbacks.register_range(callbacks.context, vaddr, size, backing);
 	return true;
 }
 

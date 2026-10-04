@@ -142,6 +142,7 @@ struct GpuMappingLifecycleTestState
 	uint32_t                 event_count      = 0;
 	uint64_t                 register_vaddr   = 0;
 	uint64_t                 register_size    = 0;
+	KernelGpuMappingBacking  register_backing = KernelGpuMappingBacking::Flexible;
 	uint64_t                 invalidate_vaddr = 0;
 	uint64_t                 invalidate_size  = 0;
 	uint64_t                 release_vaddr    = 0;
@@ -154,11 +155,12 @@ struct GpuMappingLifecycleTestState
 		events[event_count++] = event;
 	}
 
-	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size)
+	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingBacking backing)
 	{
-		auto* state           = static_cast<GpuMappingLifecycleTestState*>(context);
-		state->register_vaddr = vaddr;
-		state->register_size  = size;
+		auto* state             = static_cast<GpuMappingLifecycleTestState*>(context);
+		state->register_vaddr   = vaddr;
+		state->register_size    = size;
+		state->register_backing = backing;
 		state->Record(Event::Register);
 	}
 
@@ -193,7 +195,7 @@ struct GpuMappingLifecycleTestState
 		state->release_vaddr = vaddr;
 		state->release_size  = size;
 		state->Record(Event::Release);
-		if (!state->lifecycle->RegisterRange(vaddr + size, size))
+		if (!state->lifecycle->RegisterRange(vaddr + size, size, KernelGpuMappingBacking::Flexible))
 		{
 			return false;
 		}
@@ -212,7 +214,7 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	partial.register_range = GpuMappingLifecycleTestState::RegisterRange;
 	EXPECT_FALSE(lifecycle.Install(partial));
 	EXPECT_FALSE(lifecycle.IsInstalled());
-	EXPECT_FALSE(lifecycle.RegisterRange(0x100000u, 0x4000u));
+	EXPECT_FALSE(lifecycle.RegisterRange(0x100000u, 0x4000u, KernelGpuMappingBacking::Physical));
 	EXPECT_FALSE(lifecycle.InvalidateRange(0x100000u, 0x4000u));
 	EXPECT_FALSE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, nullptr));
 
@@ -224,12 +226,13 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	callbacks.release_range    = GpuMappingLifecycleTestState::ReleaseRange;
 	ASSERT_TRUE(lifecycle.Install(callbacks));
 
-	ASSERT_TRUE(lifecycle.RegisterRange(0x100000u, 0x4000u));
+	ASSERT_TRUE(lifecycle.RegisterRange(0x100000u, 0x4000u, KernelGpuMappingBacking::Physical));
 	ASSERT_TRUE(lifecycle.InvalidateRange(0x100000u, 0x4000u));
 	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
 
 	EXPECT_EQ(state.register_vaddr, 0x100000u);
 	EXPECT_EQ(state.register_size, 0x4000u);
+	EXPECT_EQ(state.register_backing, KernelGpuMappingBacking::Physical);
 	EXPECT_EQ(state.invalidate_vaddr, 0x100000u);
 	EXPECT_EQ(state.invalidate_size, 0x4000u);
 	EXPECT_EQ(state.release_vaddr, 0x100000u);

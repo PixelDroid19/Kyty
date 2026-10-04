@@ -149,6 +149,21 @@ bool           DiscardSharedBackingRange(SharedBacking* backing, uint64_t backin
 // True only for a positively identified, page-aligned unpopulated interval.
 // False includes unsupported hosts and query errors. The result is a snapshot.
 bool           IsSharedBackingRangeUnpopulated(SharedBacking* backing, uint64_t backing_offset, uint64_t size);
+// The backing gains a page only when a view first touches it and loses pages
+// only through DiscardSharedBackingRange, so an unchanged population means no
+// page of any view became resident or was dropped in between.
+struct SharedBackingPopulation
+{
+	uint64_t populated_bytes = 0;
+	uint64_t discards        = 0;
+	bool     operator==(const SharedBackingPopulation& other) const
+	{
+		return populated_bytes == other.populated_bytes && discards == other.discards;
+	}
+	bool operator!=(const SharedBackingPopulation& other) const { return !(*this == other); }
+};
+// False when the host cannot report the population.
+bool           QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulation* population);
 uint64_t       MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                 uint64_t alignment);
 bool           MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode);
