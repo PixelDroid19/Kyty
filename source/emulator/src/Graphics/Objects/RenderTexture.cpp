@@ -111,6 +111,12 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::B10G11R11Ufloat, 4};
 	}
+	// CB COLOR_2_10_10_10 packs channel 0 in the low ten bits: the standard
+	// swap is R10G10B10A2 (Vulkan A2B10G10R10); the alternate swap exchanges R and B.
+	if (format == 0x9u && channel_type == 0x0u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::A2B10G10R10Unorm, 4};
+	}
 	if (format == 0x9u && channel_type == 0x0u && channel_order == 0x1u)
 	{
 		return {RenderTextureFormat::A2R10G10B10Unorm, 4};
@@ -352,6 +358,7 @@ uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 		case RenderTextureFormat::R32Sfloat: return VK_FORMAT_R32_SFLOAT;
 		case RenderTextureFormat::B10G11R11Ufloat: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
 		case RenderTextureFormat::A2R10G10B10Unorm: return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+		case RenderTextureFormat::A2B10G10R10Unorm: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 		case RenderTextureFormat::R16G16B16A16Unorm: return VK_FORMAT_R16G16B16A16_UNORM;
 		case RenderTextureFormat::R16G16B16A16Snorm: return VK_FORMAT_R16G16B16A16_SNORM;
 		case RenderTextureFormat::R16G16B16A16Uint: return VK_FORMAT_R16G16B16A16_UINT;

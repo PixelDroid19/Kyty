@@ -51,6 +51,9 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {36, VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                      VK_FORMAT_B10G11R11_UFLOAT_PACK32,
                      GuestImageNumericType::FloatingPoint},
+    // IMG_FORMAT 2_10_10_10_UNORM: channel 0 in the low ten bits (Vulkan A2B10G10R10).
+    Gen5ImageFormat {50, VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_UNDEFINED,
+                     GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {56, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {62, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, GuestImageNumericType::UnsignedInteger},
