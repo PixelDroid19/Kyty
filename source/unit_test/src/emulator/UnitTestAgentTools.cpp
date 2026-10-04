@@ -1005,7 +1005,7 @@ TEST(AgentTools, PerformanceSnapshotReportsPresentSourceAndDestination)
 	using namespace Kyty::Libs::Graphics;
 
 	DebugStatsInit();
-	DebugStatsRecordPresentSource(3840, 2160, 1280, 720, 7);
+	DebugStatsRecordPresentSource(3840, 2160, 1280, 720, 7, 64);
 
 	const DebugStatsPerformanceSnapshot snapshot = DebugStatsGetPerformanceSnapshot(false);
 
@@ -1014,6 +1014,7 @@ TEST(AgentTools, PerformanceSnapshotReportsPresentSourceAndDestination)
 	EXPECT_EQ(snapshot.present_dst_w, 1280u);
 	EXPECT_EQ(snapshot.present_dst_h, 720u);
 	EXPECT_EQ(snapshot.present_src_layout, 7u);
+	EXPECT_EQ(snapshot.present_src_format, 64u);
 	DebugStatsShutdown();
 }
 

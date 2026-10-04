@@ -1,6 +1,7 @@
 #include "Kyty/Core/File.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/UnitTest.h"
+#include "ScopedTestDirectory.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Dialog.h"
@@ -18,6 +19,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <string>
 
 UT_BEGIN(EmulatorSaveData);
@@ -408,13 +410,14 @@ TEST(EmulatorSaveData, CreatesTransactionResourceThroughReturnValue)
 	EXPECT_GT(second, first);
 }
 
-TEST(EmulatorSaveData, SaveDataDialogInitializeRequiresCommonDialog)
+[[noreturn]] static void SaveDataDialogInitializationProbe()
 {
 	using namespace Libs::Dialog;
 
-	// Alphabetically early within the suite when process is fresh: common dialog
-	// may already be initialized by other suites in the same process. Exercise
-	// the documented contract that Initialize succeeds once system init is up.
+	EnsureLogSubsystem();
+	// CommonDialog initialization lasts for the process; SaveDataDialog's
+	// termination does not reset it. Verify first and repeated initialization
+	// in a fresh death-test child, including on a repeated suite iteration.
 	EXPECT_EQ(CommonDialog::CommonDialogInitialize(), 0);
 	// Second call is already-system-initialized.
 	EXPECT_EQ(CommonDialog::CommonDialogInitialize(), CommonDialog::ERROR_ALREADY_SYSTEM_INITIALIZED);
@@ -437,6 +440,12 @@ TEST(EmulatorSaveData, SaveDataDialogInitializeRequiresCommonDialog)
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogTerminate(), 0);
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogUpdateStatus(), CommonDialog::STATUS_NONE);
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogTerminate(), CommonDialog::ERROR_NOT_INITIALIZED);
+	std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+}
+
+TEST(EmulatorSaveData, SaveDataDialogInitializeRequiresCommonDialog)
+{
+	ASSERT_EXIT(SaveDataDialogInitializationProbe(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorSaveData, GetMountInfoValidatesAndReportsCapacity)
@@ -471,12 +480,26 @@ TEST(EmulatorSaveData, Mount2CreatesMissingDirectoryForCreateIfMissingMode)
 	ASSERT_NE(mount2, nullptr);
 
 	constexpr char     kDirectory[] = "ut-mount2-cim";
-	const auto         save_root    = std::filesystem::temp_directory_path() / "kyty-savedata-mount2-test";
+	// The parent owns a unique directory; a threadsafe death-test child must
+	// inherit that same path so the parent can verify persistence afterward.
+	std::unique_ptr<ScopedTestDirectory> owned_directory;
+	std::filesystem::path save_root;
+	if (::testing::internal::InDeathTestChild())
+	{
+		const char* inherited = std::getenv("KYTY_SAVEDATA_DIR");
+		ASSERT_NE(inherited, nullptr);
+		save_root = inherited;
+	} else
+	{
+		owned_directory = std::make_unique<ScopedTestDirectory>("savedata-mount2");
+		save_root = owned_directory->Path();
+	}
+	ASSERT_FALSE(save_root.empty());
 	ScopedSaveDataRoot scoped_root(save_root);
 	const auto         host_path      = Libs::SaveData::SaveDataBuildTitleRoot(save_root, nullptr) / kDirectory;
 	const auto         host_utf8      = host_path.u8string();
 	const String       host_directory = String::FromUtf8(host_utf8.c_str());
-	Core::File::DeleteDirectories(host_directory);
+	ASSERT_FALSE(Core::File::IsDirectoryExisting(host_directory));
 
 	Libs::SaveData::SaveDataDirName dir_name {};
 	std::memcpy(dir_name.data, kDirectory, sizeof(kDirectory));
@@ -496,8 +519,6 @@ TEST(EmulatorSaveData, Mount2CreatesMissingDirectoryForCreateIfMissingMode)
 	    },
 	    ::testing::ExitedWithCode(0), "");
 	EXPECT_TRUE(Core::File::IsDirectoryExisting(host_directory));
-
-	Core::File::DeleteDirectories(host_directory);
 }
 
 TEST(EmulatorSaveData, GetEventResultReportsEmptyQueue)

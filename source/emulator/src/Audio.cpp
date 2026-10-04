@@ -146,7 +146,12 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 
 	KYTY_LOG_DEBUG("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
 
-	if (format == HostAudio::Format::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	// The host layer refuses an unknown format as well; report it as the format error it is
+	// instead of a full port table.
+	if (format == HostAudio::Format::Unknown)
+	{
+		return AUDIO_OUT_ERROR_INVALID_FORMAT;
+	}
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr)
@@ -189,7 +194,10 @@ int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state)
 		return AUDIO_OUT_ERROR_INVALID_PORT;
 	}
 
-	if (state == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (state == nullptr)
+	{
+		return AUDIO_OUT_ERROR_INVALID_POINTER;
+	}
 
 	state->reroute_counter = 0;
 	state->volume          = 127;
@@ -230,7 +238,10 @@ int KYTY_SYSV_ABI AudioOutSetVolume(int handle, uint32_t flag, int* vol)
 	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 	KYTY_LOG_DEBUG("\t flag   = %u\n", flag);
 
-	if (vol == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (vol == nullptr)
+	{
+		return AUDIO_OUT_ERROR_INVALID_POINTER;
+	}
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr || !audio->AudioOutSetVolume(HostAudio::Id(handle), flag, vol))

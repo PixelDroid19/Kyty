@@ -40,6 +40,10 @@ uint32_t Target(const ShaderInstruction& instruction)
 		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1ComprVm: return 1u;
 		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1ComprVm: return 2u;
 		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm: return 3u;
+		case ShaderInstructionFormat::Mrt4Vsrc0Vsrc1ComprVm: return 4u;
+		case ShaderInstructionFormat::Mrt5Vsrc0Vsrc1ComprVm: return 5u;
+		case ShaderInstructionFormat::Mrt6Vsrc0Vsrc1ComprVm: return 6u;
+		case ShaderInstructionFormat::Mrt7Vsrc0Vsrc1ComprVm: return 7u;
 		default: return 8u;
 	}
 }

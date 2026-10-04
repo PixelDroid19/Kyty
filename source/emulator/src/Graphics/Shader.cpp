@@ -11,14 +11,20 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DiagnosticDump.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/GraphicsGeState.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderComputeWaveControlFlowAnalysis.h"
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
 #include "Emulator/Graphics/ShaderComputeWaveNativeEquivalence.h"
+#include "Emulator/Graphics/ShaderFragmentMaskFlow.h"
+#include "Emulator/Graphics/ShaderNggFront.h"
+#include "ShaderNativeWaveInternal.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Graphics/ShaderProgramSnapshot.h"
 #include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "ShaderSpirvInternal.h"
@@ -40,11 +46,14 @@
 #include <cinttypes>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 #include <vector>
+#define XXH_INLINE_ALL
+#include <xxhash/xxhash.h>
 
 // #define SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS
 // #include "spirv_cross/spirv_glsl.hpp"
@@ -161,7 +170,7 @@ static bool ShaderIsVccCompare(ShaderInstructionType type)
 	        value <= static_cast<uint32_t>(ShaderInstructionType::VCmpxUF32));
 }
 
-static bool ShaderInstructionTypeChangesExec(ShaderInstructionType type)
+bool ShaderInstructionTypeChangesExec(ShaderInstructionType type)
 {
 	if (type >= ShaderInstructionType::SAndSaveexecB32 && type <= ShaderInstructionType::SOrn1SaveexecB32)
 	{
@@ -300,6 +309,7 @@ static bool ShaderInstructionIsPureLaneAlu(const ShaderInstruction& inst)
 		case ShaderInstructionType::VBfiB32:
 		case ShaderInstructionType::VBfmB32:
 		case ShaderInstructionType::VBfrevB32:
+		case ShaderInstructionType::VLdexpF32:
 		case ShaderInstructionType::VLshlB32:
 		case ShaderInstructionType::VLshlrevB32:
 		case ShaderInstructionType::VLshrB32:
@@ -328,7 +338,7 @@ static bool ShaderInstructionIsPureLaneAlu(const ShaderInstruction& inst)
 	}
 }
 
-static bool ShaderInstructionWritesExec(const ShaderInstruction& inst)
+bool ShaderInstructionWritesExec(const ShaderInstruction& inst)
 {
 	return inst.dst.type == ShaderOperandType::ExecLo || inst.dst.type == ShaderOperandType::ExecHi ||
 	       inst.dst.type == ShaderOperandType::ExecZ || inst.dst2.type == ShaderOperandType::ExecLo ||
@@ -342,7 +352,7 @@ static bool ShaderInstructionIsNoopExecWrite(const ShaderInstruction& inst)
 	       inst.src[0].type == ShaderOperandType::ExecLo;
 }
 
-static bool ShaderInstructionIsControlFlowBoundary(const ShaderInstruction& inst)
+bool ShaderInstructionIsControlFlowBoundary(const ShaderInstruction& inst)
 {
 	switch (inst.type)
 	{
@@ -611,40 +621,377 @@ bool ShaderVccBranchIsWaveUniform(const ShaderCode& code, uint32_t instruction_i
 	return true;
 }
 
-static bool ShaderPixelUsesSubgroupSemantics(const ShaderCode& code)
+bool ShaderNativeMaskOperand(const ShaderOperand& operand)
 {
-	if (UsesNativeLaneExchange(code) || code.HasAnyOf({ShaderInstructionType::VMbcntLoU32B32,
-	                   ShaderInstructionType::VMbcntHiU32B32, ShaderInstructionType::SCbranchExecz,
-	                   ShaderInstructionType::SCbranchExecnz}))
+	return operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::ExecHi ||
+	       operand.type == ShaderOperandType::ExecZ || operand.type == ShaderOperandType::VccLo ||
+	       operand.type == ShaderOperandType::VccHi || operand.type == ShaderOperandType::VccZ;
+}
+
+bool ShaderNativePackedResult(const ShaderInstruction& inst)
+{
+	// Include compares to arbitrary SGPR pairs and all compare widths, not only
+	// the original VCC enum interval. Carry destinations likewise need packing.
+	return Core::EnumName8(inst.type).StartsWith("VCmp") ||
+	       inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1 ||
+	       inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2 ||
+	       inst.format == ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair;
+}
+
+bool ShaderUsesNativeWaveState(const ShaderCode& code)
+{
+	for (const auto& inst: code.GetInstructions())
 	{
-		return true;
-	}
-	for (uint32_t index = 0; index < code.GetInstructions().Size(); index++)
-	{
-		const auto type = code.GetInstructions().At(index).type;
-		if ((type == ShaderInstructionType::SCbranchVccz || type == ShaderInstructionType::SCbranchVccnz) &&
-		    !ShaderVccBranchIsWaveUniform(code, index))
+		if (inst.src_num < 0 || inst.src_num > 4 || inst.mimg_address_num < 0 ||
+		    inst.mimg_address_num > static_cast<int>(std::size(inst.mimg_address))) { return true; }
+		if (ShaderNativeMaskOperand(inst.dst) || ShaderNativeMaskOperand(inst.dst2) || ShaderNativePackedResult(inst) ||
+		    ShaderInstructionTypeChangesExec(inst.type) || inst.type == ShaderInstructionType::VCndmaskB32 ||
+		    inst.type == ShaderInstructionType::VMbcntLoU32B32 || inst.type == ShaderInstructionType::VMbcntHiU32B32 ||
+		    inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz ||
+		    inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz ||
+		    inst.type == ShaderInstructionType::DsAppend || inst.type == ShaderInstructionType::DsConsume)
 		{
 			return true;
 		}
-	}
-
-	for (const auto& inst: code.GetInstructions())
-	{
-		for (uint32_t source = 0; source < static_cast<uint32_t>(inst.src_num); source++)
+		for (int source = 0; source < inst.src_num; ++source)
 		{
-			if (inst.src[source].dpp)
-			{
-				return true;
-			}
+			if (ShaderNativeMaskOperand(inst.src[source]) || inst.src[source].dpp) { return true; }
+		}
+		for (int source = 0; source < inst.mimg_address_num; ++source)
+		{
+			if (ShaderNativeMaskOperand(inst.mimg_address[source])) { return true; }
 		}
 	}
-	return false;
+	return UsesNativeLaneExchange(code);
 }
 
-static uint32_t ShaderPixelRequiredSubgroupSize(const ShaderCode& code, bool wave32)
+// A separate whole-program mask-use proof. The neutral-region analyzer proves
+// lane values, not that a copied EXEC/VCC word never escapes as numeric data.
+// Taint is monotone: unknown CFG joins and later partial overwrites cannot erase
+// evidence of a mask. This intentionally trades precision for a bounded proof.
+static bool ShaderMasksStayLaneLocal(const ShaderCode& code, const std::vector<bool>& regions, uint32_t* refused_pc)
 {
-	return ShaderPixelUsesSubgroupSemantics(code) ? (wave32 ? 32u : 64u) : 0u;
+	std::bitset<128> mask_sgprs;
+	bool mask_scc = false;
+	const auto mask_source = [&mask_sgprs](const ShaderOperand& operand)
+	{
+		if (ShaderNativeMaskOperand(operand)) { return true; }
+		if (operand.type == ShaderOperandType::Sgpr)
+		{
+			for (int word = 0; word < operand.size; ++word)
+			{
+				const int reg = operand.register_id + word;
+				if (reg < 0 || reg >= 128 || mask_sgprs[static_cast<size_t>(reg)]) { return true; }
+			}
+		}
+		return false;
+	};
+	const auto mark = [&mask_sgprs](const ShaderOperand& operand)
+	{
+		if (operand.type != ShaderOperandType::Sgpr) { return; }
+		for (int word = 0; word < operand.size; ++word)
+		{
+			const int reg = operand.register_id + word;
+			if (reg >= 0 && reg < 128) { mask_sgprs.set(static_cast<size_t>(reg)); }
+		}
+	};
+	// Solve mask provenance to a fixed point before checking uses. A back edge
+	// can consume an SGPR before its textual definition; one forward pass is not
+	// a proof. No kill sets means each pass adds a bit or terminates (128 bits).
+	for (uint32_t pass = 0; pass <= 128u; ++pass)
+	{
+		const auto before = mask_sgprs;
+		for (const auto& inst: code.GetInstructions())
+		{
+			bool masked = ShaderNativePackedResult(inst) || ShaderInstructionTypeChangesExec(inst.type);
+			for (int source = 0; source < inst.src_num; ++source) { masked = masked || mask_source(inst.src[source]); }
+			if (masked) { mark(inst.dst); mark(inst.dst2); }
+		}
+		if (mask_sgprs == before) { break; }
+	}
+	// SCC is implicit on many scalar instructions. A mask-derived definition
+	// anywhere in a loop also taints a preceding textual SCC consumer.
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (!Core::EnumName8(inst.type).StartsWith("S") || inst.type == ShaderInstructionType::SMovB32 ||
+		    inst.type == ShaderInstructionType::SMovB64) { continue; }
+		mask_scc = mask_scc || ShaderInstructionTypeChangesExec(inst.type);
+		for (int source = 0; source < inst.src_num; ++source) { mask_scc = mask_scc || mask_source(inst.src[source]); }
+	}
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		const auto& inst = code.GetInstructions().At(index);
+		*refused_pc = inst.pc;
+		const bool copy = inst.type == ShaderInstructionType::SMovB32 || inst.type == ShaderInstructionType::SMovB64;
+		const bool bits = inst.type == ShaderInstructionType::SAndB32 || inst.type == ShaderInstructionType::SAndB64 ||
+		                  inst.type == ShaderInstructionType::SOrB32 || inst.type == ShaderInstructionType::SOrB64 ||
+		                  inst.type == ShaderInstructionType::SXorB32 || inst.type == ShaderInstructionType::SXorB64 ||
+		                  inst.type == ShaderInstructionType::SWqmB32 || inst.type == ShaderInstructionType::SWqmB64;
+		const bool region = inst.type == ShaderInstructionType::SOrn2SaveexecB64 && regions[index];
+		if (inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz ||
+		    inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz ||
+		    (mask_scc && (inst.type == ShaderInstructionType::SCbranchScc0 || inst.type == ShaderInstructionType::SCbranchScc1 ||
+		                  inst.type == ShaderInstructionType::SCselectB32 || inst.type == ShaderInstructionType::SCselectB64 ||
+		                  inst.type == ShaderInstructionType::SCmovB32 || inst.type == ShaderInstructionType::SCmovB64 ||
+		                  inst.type == ShaderInstructionType::SAddcU32)))
+		{
+			return false;
+		}
+		bool reads_mask = region;
+		for (int address = 0; address < inst.mimg_address_num; ++address)
+		{
+			if (mask_source(inst.mimg_address[address])) { return false; }
+		}
+		for (int source = 0; source < inst.src_num; ++source)
+		{
+			const auto& operand = inst.src[source];
+			if (operand.type == ShaderOperandType::ExecZ || operand.type == ShaderOperandType::VccZ ||
+			    (mask_scc && operand.type == ShaderOperandType::Scc)) { return false; }
+			if (!mask_source(operand)) { continue; }
+			const bool lane_bit = (inst.type == ShaderInstructionType::VCndmaskB32 && source == 2) ||
+			                      (inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2 && source == 2);
+			if (lane_bit) { continue; }
+			if (!copy && !bits && !region) { return false; }
+			reads_mask = true;
+		}
+		if (reads_mask)
+		{
+			if (inst.dst.type != ShaderOperandType::Sgpr && !ShaderNativeMaskOperand(inst.dst)) { return false; }
+			mark(inst.dst);
+			mask_scc = mask_scc || bits || region;
+		}
+		if (ShaderNativePackedResult(inst))
+		{
+			mark(inst.dst);
+			mark(inst.dst2);
+		}
+	}
+	return true;
+}
+
+std::string ShaderDumpGuestProgram(const char* dump_dir, const char* kind, uint64_t id, uint64_t program_addr, const ShaderCode& code)
+{
+	char stem[40];
+	std::snprintf(stem, sizeof(stem), "%s_%016" PRIx64, kind, id);
+	auto& writer = DiagnosticDumpProcessWriter();
+
+	std::string listing;
+	uint32_t    program_bytes = 0;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (listing.size() <= kDiagnosticDumpFileBytesMax)
+		{
+			char prefix[16];
+			std::snprintf(prefix, sizeof(prefix), "0x%08x ", inst.pc);
+			listing += prefix;
+			listing += ShaderCode::DbgInstructionToStr(inst).c_str();
+			listing += '\n';
+		}
+		program_bytes = std::max(program_bytes, inst.pc + 8u);
+	}
+	const auto text_status = writer.Write(dump_dir, (std::string(stem) + ".txt").c_str(), listing.data(), listing.size());
+
+	if (code.GetInstructions().IsEmpty())
+	{
+		return std::string(".txt=") + DiagnosticDumpStatusName(text_status) + " .bin=empty";
+	}
+	// The byte count is guest-derived: read one byte past the limit so the writer
+	// reports Truncated instead of allocating or writing an unbounded range.
+	std::vector<uint8_t> bytes;
+	const uint64_t       wanted = std::min<uint64_t>(program_bytes, kDiagnosticDumpFileBytesMax + 1u);
+	const bool           read   = Core::VirtualMemory::VisitReadableGuestRange(
+        program_addr, wanted,
+        [](const void* source, uint64_t size, void* opaque)
+        {
+            auto* out = static_cast<std::vector<uint8_t>*>(opaque);
+            if (source != nullptr)
+            {
+                const auto* begin = static_cast<const uint8_t*>(source);
+                out->insert(out->end(), begin, begin + size);
+            }
+            return true;
+        },
+        &bytes);
+	const char* bin_status = read ? DiagnosticDumpStatusName(writer.Write(dump_dir, (std::string(stem) + ".bin").c_str(), bytes.data(), bytes.size()))
+	                             : "guest_range_unreadable";
+	return std::string(".txt=") + DiagnosticDumpStatusName(text_status) + " .bin=" + bin_status;
+}
+
+ShaderNativeWaveInfo ShaderNativeWaveVerdict::Get(const ShaderCode& code, uint32_t guest_wave_size) const
+{
+	if (guest_wave_size != 32u && guest_wave_size != 64u) { return ShaderAnalyzeNativeWave(code, guest_wave_size); }
+	auto& slot = guest_wave_size == 32u ? m_wave32 : m_wave64;
+	std::call_once(slot.once, [&] { slot.info = ShaderAnalyzeNativeWave(code, guest_wave_size); });
+	return slot.info;
+}
+
+// Native pixel lowering keeps EXEC and VCC as packed words that every invocation of the subgroup holds
+// alike (helpers receive their quad's real value), and every scalar is computed alike from them and from
+// uniform inputs. A direct guest branch is therefore uniform host control flow and moves whole quads.
+// Only an export, which kills each invocation whose own EXEC bit is clear, or an indirect jump, which is
+// not lowered to that structured flow, can leave a quad without one of its members.
+static bool ShaderFragmentQuadMayLoseMember(const ShaderInstruction& inst)
+{
+	return inst.type == ShaderInstructionType::Exp || inst.type == ShaderInstructionType::SSetpcB64 ||
+	       inst.type == ShaderInstructionType::SSwappcB64;
+}
+
+ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size)
+{
+	ShaderNativeWaveInfo info;
+	info.guest_wave_size = guest_wave_size;
+	if (guest_wave_size != 32u && guest_wave_size != 64u)
+	{
+		info.refusal_reason = "guest wave width is not established by stage control";
+		return info;
+	}
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (!ShaderInstructionLoweringPreconditions(inst))
+		{
+			info.refusal_pc = inst.pc;
+			info.refusal_reason = "invalid instruction before native wave analysis";
+			return info;
+		}
+	}
+	info.proof = ShaderUsesNativeWaveState(code) ? ShaderNativeWaveProof::ExactSubgroup : ShaderNativeWaveProof::LaneLocal;
+	if (code.GetType() != ShaderType::Pixel) { return info; }
+
+	std::vector<bool> regions(code.GetInstructions().Size(), false);
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		if (code.GetInstructions().At(index).type != ShaderInstructionType::SOrn2SaveexecB64 ||
+		    !ShaderFragmentWaveInsideRegion(code, index)) { continue; }
+		// The existing closed-region proof guarantees the first subsequent EXEC
+		// writer is its exact restore; no copy of that proof is reimplemented here.
+		regions[index] = true;
+		while (++index < code.GetInstructions().Size())
+		{
+			regions[index] = true;
+			if (ShaderInstructionWritesExec(code.GetInstructions().At(index))) { break; }
+		}
+	}
+	uint32_t mask_pc = 0;
+	// The whole-program monotone proof keeps every verdict it already gave. The flow-sensitive
+	// proof runs on every program: besides rescuing what the monotone one refuses, it is what
+	// accounts for EXEC writes (a WQM widening and its restore) that the monotone one cannot.
+	const bool monotone_masks = ShaderMasksStayLaneLocal(code, regions, &mask_pc);
+	const auto mask_flow      = ShaderAnalyzeFragmentMaskFlow(code);
+	const bool local_masks    = monotone_masks || mask_flow.lane_local;
+	bool has_region = false;
+	bool writes_exec_outside_region = false;
+	bool cross_lane = UsesNativeLaneExchange(code);
+	bool quad_local = false;
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		const auto& inst = code.GetInstructions().At(index);
+		const bool region = regions[index];
+		has_region = has_region || region;
+		const bool closed_wrapper  = mask_flow.lane_local && index < mask_flow.closed_exec_write.size() && mask_flow.closed_exec_write[index];
+		writes_exec_outside_region = writes_exec_outside_region || (ShaderInstructionWritesExec(inst) && !region && !closed_wrapper);
+		cross_lane = cross_lane || inst.type == ShaderInstructionType::VMbcntLoU32B32 ||
+		             inst.type == ShaderInstructionType::VMbcntHiU32B32 || inst.type == ShaderInstructionType::DsAppend ||
+		             inst.type == ShaderInstructionType::DsConsume;
+		for (int source = 0; source < inst.src_num; ++source)
+		{
+			cross_lane = cross_lane || (inst.src[source].dpp && inst.src[source].dpp_ctrl > 0xffu);
+			quad_local = quad_local || inst.src[source].dpp;
+		}
+	}
+	if (local_masks && !cross_lane && !writes_exec_outside_region)
+	{
+		// Packed compare/carry results consumed only as this invocation's bit do
+		// not observe missing upper lanes or all-helper quads. No EXEC widening.
+		// Quad DPP has no dependence outside its complete four-invocation quad.
+		info.proof = quad_local ? ShaderNativeWaveProof::QuadLocal : ShaderNativeWaveProof::LaneLocal;
+	} else if (guest_wave_size == 64u && local_masks && has_region && !writes_exec_outside_region &&
+	           ShaderAnalyzeFragmentNativeWaveTier(code).supported)
+	{
+		info.proof = ShaderNativeWaveProof::FragmentNeutral32;
+	}
+	if (!local_masks)
+	{
+		// The flow proof names the construct that broke it; the whole-program pass only knows
+		// where it gave up on the first register it could not tell apart.
+		info.refusal_pc     = mask_flow.located ? mask_flow.refused_pc : mask_pc;
+		info.refusal_reason = mask_flow.located ? mask_flow.reason
+		                                        : "fragment numeric mask observation lacks an all-helper/unavailable-quad proof";
+		return info;
+	}
+
+	bool initial_exec = true;
+	bool intact_participation = true;
+	bool whole_quads = true;
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		const auto& inst = code.GetInstructions().At(index);
+		const char* refusal = nullptr;
+		if (inst.type == ShaderInstructionType::DsAppend || inst.type == ShaderInstructionType::DsConsume)
+		{
+			refusal = "fragment wave append/consume lacks a participating-lane proof";
+		}
+		// A packed compare is one bit per lane. When the mask flow proved that every use of
+		// such a word is that lane's own bit, missing or non-participating neighbours
+		// cannot change it.
+		if (!whole_quads && ShaderNativePackedResult(inst) && !mask_flow.lane_local)
+		{
+			refusal = "fragment mask packing after an export or indirect jump lacks a quad participation proof";
+		}
+		if (inst.type == ShaderInstructionType::VReadfirstlaneB32 && !ShaderReadfirstlaneCanUseUniformCopy(code, index) &&
+		    (!initial_exec || !intact_participation))
+		{
+			refusal = "READFIRSTLANE target quad is not proven to retain a participating real member";
+		}
+		if (inst.type == ShaderInstructionType::VReadlaneB32)
+		{
+			int reg = 0;
+			int lane = 0;
+			if (!IsStaticScalarSpillRead(inst, &reg, &lane) || !HasLiveScalarSpill(code, index, reg, lane))
+			{
+				refusal = "READLANE physical source may be unavailable or in an all-helper quad";
+			}
+		}
+		if (inst.type == ShaderInstructionType::VPermlane16B32 || inst.type == ShaderInstructionType::VPermlanex16B32)
+		{
+			refusal = "fragment permutation source participation is unproven";
+		}
+		for (int source = 0; source < inst.src_num; ++source)
+		{
+			if (inst.src[source].dpp && !whole_quads)
+			{
+				refusal = "fragment DPP after an export or indirect jump lacks a quad participation proof";
+			}
+			if (inst.src[source].dpp && inst.src[source].dpp_ctrl > 0xffu)
+			{
+				refusal = "fragment row DPP source participation is unproven (neutral values do not prove helper recovery)";
+			}
+		}
+		if (refusal != nullptr)
+		{
+			info.refusal_pc = inst.pc;
+			info.refusal_reason = refusal;
+			return info;
+		}
+		initial_exec = initial_exec && !ShaderInstructionWritesExec(inst);
+		// Guest branches are translated into host control flow; without a CFG
+		// participation proof do not claim the target quad still has a real peer.
+		intact_participation = intact_participation && !ShaderInstructionIsControlFlowBoundary(inst) &&
+		                       inst.type != ShaderInstructionType::Exp;
+		whole_quads = whole_quads && !ShaderFragmentQuadMayLoseMember(inst);
+	}
+	return info;
+}
+
+uint32_t ShaderVertexGuestWaveSize(const GraphicsGeRawRegister& stages, bool next_gen, bool gs_front)
+{
+	if (!next_gen) { return 64u; } // GCN has fixed architectural Wave64.
+	const auto decoded = GraphicsDecodeGeStages(stages, GraphicsGeGeneration::Gfx103);
+	if (!stages.known || decoded.raw_unknown_bits != 0) { return 0; }
+	if (gs_front && (decoded.kind == GraphicsGeStageKind::MergedEsGs || decoded.kind == GraphicsGeStageKind::NggPassthrough))
+	{
+		return decoded.gs_w32_en ? 32u : 64u;
+	}
+	return !gs_front && decoded.kind == GraphicsGeStageKind::LegacyVs ? (decoded.vs_w32_en ? 32u : 64u) : 0u;
 }
 
 
@@ -675,10 +1022,87 @@ struct VertexOffsetCacheEntry
 static std::unordered_map<uint64_t, VertexOffsetCacheEntry>* g_vertex_offset_sgpr_map = nullptr;
 static std::mutex                                      g_vertex_offset_sgpr_mutex;
 static std::unordered_map<uint64_t, uint64_t>*         g_shader_continuations  = nullptr;
-static std::unordered_map<uint64_t, std::shared_ptr<ShaderCode>>* g_vs_isa_cache = nullptr;
-static std::mutex                                      g_vs_isa_cache_mutex;
+struct ShaderVertexProgramKey
+{
+	uint64_t front_addr        = 0;
+	uint64_t continuation_addr = 0;
+	uint64_t bound_back_addr   = 0;
+	uint64_t checksum          = 0;
+	uint64_t generation        = 0;
+	bool     gs_front          = false;
 
-static std::shared_ptr<ShaderCode> GetCachedParsedVsIsa(uint64_t shader_addr, uint32_t hash0, uint32_t crc32);
+	bool operator==(const ShaderVertexProgramKey& other) const
+	{
+		return front_addr == other.front_addr && continuation_addr == other.continuation_addr &&
+		       bound_back_addr == other.bound_back_addr && checksum == other.checksum && generation == other.generation &&
+		       gs_front == other.gs_front;
+	}
+};
+
+struct ShaderVertexProgram
+{
+	ShaderVertexProgramKey key;
+	ShaderCode             front_code;
+	ShaderCode             code;
+	std::array<uint32_t, 4> fingerprint {};
+	// Native-wave classification of `code`, computed once per guest width.
+	ShaderNativeWaveVerdict native_wave;
+	// Width-neutrality of the fused NGG front, proved once for this immutable code.
+	ShaderNggFrontVerdict  ngg_front;
+};
+
+struct ShaderVertexProgramKeyHash
+{
+	size_t operator()(const ShaderVertexProgramKey& key) const
+	{
+		size_t hash = 0;
+		for (uint64_t value: {key.front_addr, key.continuation_addr, key.bound_back_addr, key.checksum, key.generation,
+		                     static_cast<uint64_t>(key.gs_front)})
+		{
+			hash ^= std::hash<uint64_t> {}(value) + static_cast<size_t>(0x9e3779b9u) + (hash << 6u) + (hash >> 2u);
+		}
+		return hash;
+	}
+};
+
+using ShaderVertexProgramCache =
+    std::unordered_map<ShaderVertexProgramKey, std::shared_ptr<const ShaderVertexProgram>, ShaderVertexProgramKeyHash>;
+static constexpr size_t   kVertexProgramCacheEntries = 256u;
+static constexpr uint64_t kVertexProgramCacheBytes   = 64u * 1024u * 1024u;
+static ShaderVertexProgramCache* g_vs_isa_cache = nullptr;
+static std::mutex                g_vs_isa_cache_mutex;
+static uint64_t                  g_vs_isa_cache_bytes = 0;
+static uint64_t                  g_vs_program_generation = 1;
+
+// Caller holds the exclusive lifetime lock. Lock order is lifetime -> map/cache;
+// no cache holder may acquire lifetime. Both code owners and debug state use it.
+static void ShaderInvalidateVertexProgramsLocked()
+{
+	EXIT_IF(g_vs_program_generation == UINT64_MAX);
+	++g_vs_program_generation;
+	std::scoped_lock cache_lock(g_vs_isa_cache_mutex, g_vertex_offset_sgpr_mutex);
+	if (g_vs_isa_cache != nullptr) { g_vs_isa_cache->clear(); }
+	g_vs_isa_cache_bytes = 0;
+	if (g_vertex_offset_sgpr_map != nullptr) { g_vertex_offset_sgpr_map->clear(); }
+}
+
+// The builder already owns a lifetime lease; do not recursively acquire it.
+static void ShaderCopyDebugPrintfsLocked(ShaderCode* code)
+{
+	if (g_debug_printfs == nullptr) { return; }
+	const auto id = (static_cast<uint64_t>(code->GetHash0()) << 32u) | code->GetCrc32();
+	if (auto index = g_debug_printfs->Find(id, [](auto cmd, auto value) { return cmd.id == value; });
+	    g_debug_printfs->IndexValid(index))
+	{
+		code->GetDebugPrintfs() = g_debug_printfs->At(index).cmds;
+	}
+}
+
+static void ShaderCopyDebugPrintfs(ShaderCode* code)
+{
+	std::shared_lock lifetime_lock(g_shader_lifetime_mutex);
+	ShaderCopyDebugPrintfsLocked(code);
+}
 
 void ShaderSetGen5EudSnapshotTestHook(ShaderGen5EudSnapshotTestHook hook, void* context)
 {
@@ -785,7 +1209,7 @@ void ShaderInit()
 	g_shader_map             = new std::unordered_map<uint64_t, ShaderMappedData>();
 	g_vertex_offset_sgpr_map = new std::unordered_map<uint64_t, VertexOffsetCacheEntry>();
 	g_shader_continuations   = new std::unordered_map<uint64_t, uint64_t>();
-	g_vs_isa_cache           = new std::unordered_map<uint64_t, std::shared_ptr<ShaderCode>>();
+	g_vs_isa_cache           = new ShaderVertexProgramCache();
 }
 
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
@@ -817,35 +1241,7 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data)
 			++continuation;
 		}
 	}
-	{
-		std::scoped_lock cache_lock(g_vs_isa_cache_mutex, g_vertex_offset_sgpr_mutex);
-		if (g_vs_isa_cache != nullptr)
-		{
-			for (auto cached = g_vs_isa_cache->begin(); cached != g_vs_isa_cache->end();)
-			{
-				if (belonged_to_previous(cached->first))
-				{
-					cached = g_vs_isa_cache->erase(cached);
-				} else
-				{
-					++cached;
-				}
-			}
-		}
-		if (g_vertex_offset_sgpr_map != nullptr)
-		{
-			for (auto cached = g_vertex_offset_sgpr_map->begin(); cached != g_vertex_offset_sgpr_map->end();)
-			{
-				if (belonged_to_previous(cached->first))
-				{
-					cached = g_vertex_offset_sgpr_map->erase(cached);
-				} else
-				{
-					++cached;
-				}
-			}
-		}
-	}
+	ShaderInvalidateVertexProgramsLocked();
 	g_shader_map->insert_or_assign(addr, data);
 }
 
@@ -875,6 +1271,7 @@ bool ShaderRegisterContinuation(uint64_t front_code_addr, uint64_t back_code_add
 		return false;
 	}
 	g_shader_continuations->insert_or_assign(front_code_addr, back_code_addr);
+	ShaderInvalidateVertexProgramsLocked();
 	return true;
 }
 
@@ -901,7 +1298,6 @@ enum class ShaderContinuationMode : uint8_t
 };
 
 static void ShaderParseMappedLocked(uint64_t shader_addr, ShaderCode* code, ShaderContinuationMode continuation_mode);
-static bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind);
 static void ShaderParseMapped(uint64_t shader_addr, ShaderCode* code,
 	                          ShaderContinuationMode continuation_mode = ShaderContinuationMode::None);
 
@@ -914,28 +1310,14 @@ bool ShaderHasTerminalSetpc(const ShaderCode& code)
 // Linearize a Gen5 fused front→back chain: append the back half after the
 // front's instructions and rewrite terminal s_setpc into a static branch so
 // the SPIR-V CFG reaches position/param exports in the back half.
-static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
+static void ShaderAppendContinuation(ShaderCode* code, const ShaderCode& back, uint64_t back_code_addr)
 {
-	EXIT_IF(code == nullptr || back_code_addr == 0);
+	EXIT_IF(code == nullptr || back_code_addr == 0 || back.GetInstructions().IsEmpty());
 	if (!ShaderHasTerminalSetpc(*code))
 	{
 		return;
 	}
 	const uint32_t front_terminal_index = code->GetInstructions().Size() - 1u;
-
-	const auto* back_src = reinterpret_cast<const uint32_t*>(back_code_addr);
-	if (back_src == nullptr)
-	{
-		return;
-	}
-
-	ShaderCode back;
-	back.SetType(code->GetType());
-	ShaderParseMappedLocked(back_code_addr, &back, ShaderContinuationMode::None);
-	if (back.GetInstructions().IsEmpty())
-	{
-		return;
-	}
 
 	uint32_t front_max_pc = 0;
 	for (const auto& inst: code->GetInstructions())
@@ -948,11 +1330,18 @@ static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
 	// Place the back half after the front's last instruction dword so PCs stay
 	// unique. Relative branches inside the back half remain valid because every
 	// back PC is shifted by the same constant.
+	EXIT_IF(front_max_pc > UINT32_MAX - 16u);
 	const uint32_t pc_offset       = front_max_pc + 16u;
+	const auto check_pc = [pc_offset](uint32_t pc) { EXIT_IF(pc > UINT32_MAX - pc_offset); };
+	for (const auto& inst: back.GetInstructions()) { check_pc(inst.pc); }
+	for (const auto& label: back.GetLabels()) { check_pc(label.GetDst()); check_pc(label.GetSrc()); }
+	for (const auto& label: back.GetIndirectLabels()) { check_pc(label.GetDst()); check_pc(label.GetSrc()); }
 	const uint32_t back_entry_pc   = back.GetInstructions().At(0).pc + pc_offset;
+	const int64_t rel = static_cast<int64_t>(back_entry_pc) - code->GetInstructions().At(front_terminal_index).pc - 4;
+	EXIT_IF(rel < INT32_MIN || rel > INT32_MAX);
 	code->SetContinuationPc(pc_offset);
 
-	for (auto& inst: back.GetInstructions())
+	for (auto inst: back.GetInstructions())
 	{
 		inst.pc += pc_offset;
 		code->GetInstructions().Add(inst);
@@ -975,23 +1364,21 @@ static void ShaderAppendContinuation(ShaderCode* code, uint64_t back_code_addr)
 		{
 			continue;
 		}
-		const int32_t rel = static_cast<int32_t>(back_entry_pc) - static_cast<int32_t>(inst.pc) - 4;
 		inst.type                    = ShaderInstructionType::SBranch;
 		inst.format                  = ShaderInstructionFormat::Label;
 		inst.src_num                 = 1;
 		inst.src[0]                  = {};
 		inst.src[0].type             = ShaderOperandType::IntegerInlineConstant;
 		inst.src[0].size             = 0;
-		inst.src[0].constant.i       = rel;
+		inst.src[0].constant.i       = static_cast<int32_t>(rel);
 		inst.dst                     = {};
 		code->GetLabels().Add(ShaderLabel(back_entry_pc, inst.pc));
 		break;
 	}
 
-	static uint32_t logs = 0;
-	if (logs < 16u)
+	static std::atomic_uint32_t logs {0};
+	if (logs.fetch_add(1u, std::memory_order_relaxed) < 16u)
 	{
-		++logs;
 		KYTY_LOG_DEBUG(
 		             "KYTY_SHADER: linearized front→back continuation front_max_pc=0x%08" PRIx32
 		             " back=0x%012" PRIx64 " entry_pc=0x%08" PRIx32 " insts=%u\n",
@@ -1039,6 +1426,64 @@ static bool ShaderGetMappedData(uint64_t addr, ShaderMappedData* data)
 	return true;
 }
 
+const char* ShaderProgramSnapshotStatusName(ShaderProgramSnapshotStatus status)
+{
+	switch (status)
+	{
+		case ShaderProgramSnapshotStatus::Unmapped: return "unmapped";
+		case ShaderProgramSnapshotStatus::InvalidRange: return "invalid_range";
+		case ShaderProgramSnapshotStatus::Unreadable: return "unreadable";
+		case ShaderProgramSnapshotStatus::Complete: return "complete";
+		case ShaderProgramSnapshotStatus::Truncated: return "truncated";
+	}
+	return "unknown";
+}
+
+ShaderProgramSnapshot ShaderSnapshotMappedProgram(uint64_t address, uint32_t max_bytes)
+{
+	ShaderProgramSnapshot snapshot;
+	if (address == 0u || (address & 3u) != 0u || max_bytes == 0u || (max_bytes & 3u) != 0u ||
+	    max_bytes > kShaderProgramSnapshotBytesMax)
+	{
+		snapshot.status = ShaderProgramSnapshotStatus::InvalidRange;
+		return snapshot;
+	}
+	std::shared_lock lifetime_lock(g_shader_lifetime_mutex);
+	ShaderMappedData data;
+	if (g_shader_map == nullptr || !ShaderGetMappedData(address, &data) || data.code_size_bytes == 0u)
+	{
+		return snapshot;
+	}
+	snapshot.mapped_bytes = data.code_size_bytes;
+	if ((data.code_size_bytes & 3u) != 0u || address > UINT64_MAX - data.code_size_bytes)
+	{
+		snapshot.status = ShaderProgramSnapshotStatus::InvalidRange;
+		return snapshot;
+	}
+	const uint32_t size = std::min(max_bytes, data.code_size_bytes);
+	snapshot.words.resize(size / sizeof(uint32_t));
+	const bool copied = Core::VirtualMemory::VisitReadableGuestRange(
+	    address, size,
+	    [](const void* source, uint64_t bytes, void* destination)
+	    {
+		    if (source == nullptr || destination == nullptr)
+		    {
+			    return false;
+		    }
+		    std::memcpy(destination, source, bytes);
+		    return true;
+	    },
+	    snapshot.words.data());
+	if (!copied)
+	{
+		snapshot.words.clear();
+		snapshot.status = ShaderProgramSnapshotStatus::Unreadable;
+		return snapshot;
+	}
+	snapshot.status = size == data.code_size_bytes ? ShaderProgramSnapshotStatus::Complete : ShaderProgramSnapshotStatus::Truncated;
+	return snapshot;
+}
+
 static void ShaderParseMappedLocked(uint64_t shader_addr, ShaderCode* code, ShaderContinuationMode continuation_mode)
 {
 	EXIT_IF(shader_addr == 0u || code == nullptr);
@@ -1083,9 +1528,12 @@ static void ShaderParseMappedLocked(uint64_t shader_addr, ShaderCode* code, Shad
 			}
 			if (continuation != 0u)
 			{
-				if (continuation_mode == ShaderContinuationMode::Append)
+				if (continuation_mode == ShaderContinuationMode::Append && ShaderHasTerminalSetpc(*code))
 				{
-					ShaderAppendContinuation(code, continuation);
+					ShaderCode back;
+					back.SetType(code->GetType());
+					ShaderParseMappedLocked(continuation, &back, ShaderContinuationMode::None);
+					ShaderAppendContinuation(code, back, continuation);
 				}
 			}
 			return;
@@ -1100,42 +1548,172 @@ static void ShaderParseMapped(uint64_t shader_addr, ShaderCode* code, ShaderCont
 	ShaderParseMappedLocked(shader_addr, code, continuation_mode);
 }
 
-static std::shared_ptr<ShaderCode> GetCachedParsedVsIsa(uint64_t shader_addr, uint32_t hash0, uint32_t crc32)
+static std::vector<uint32_t> ShaderCopyProgramWords(uint64_t address, uint32_t bytes)
 {
-	if (shader_addr == 0 || g_vs_isa_cache == nullptr)
+	if (address == 0u || (address & 3u) != 0u || bytes == 0u || (bytes & 3u) != 0u || address > UINT64_MAX - bytes)
 	{
-		return nullptr;
+		EXIT("invalid vertex program range: address=0x%016" PRIx64 " size=0x%08" PRIx32 "\n", address, bytes);
 	}
-	std::shared_lock lifetime_lock(g_shader_lifetime_mutex);
+	std::vector<uint32_t> words;
+	if (!Core::VirtualMemory::VisitReadableGuestRange(
+	        address, bytes,
+	        [](const void* source, uint64_t size, void* destination)
+	        {
+		        if (source == nullptr || destination == nullptr || size > UINT32_MAX) { return false; }
+		        auto* copy = static_cast<std::vector<uint32_t>*>(destination);
+		        copy->resize(static_cast<size_t>(size / sizeof(uint32_t)));
+		        std::memcpy(copy->data(), source, static_cast<size_t>(size));
+		        return true;
+	        }, &words))
 	{
-		std::lock_guard<std::mutex> lock(g_vs_isa_cache_mutex);
-		if (auto cached = g_vs_isa_cache->find(shader_addr); cached != g_vs_isa_cache->end())
+		EXIT("vertex program range became unreadable: address=0x%016" PRIx64 " size=0x%08" PRIx32 "\n", address, bytes);
+	}
+	return words;
+}
+
+static std::array<uint32_t, 4> ShaderVertexProgramFingerprint(const ShaderVertexProgram& program,
+                                                            const std::vector<uint32_t>& front,
+                                                            const std::vector<uint32_t>& back)
+{
+	std::unique_ptr<XXH3_state_t, decltype(&XXH3_freeState)> state(XXH3_createState(), &XXH3_freeState);
+	EXIT_IF(state == nullptr || XXH3_128bits_reset(state.get()) != XXH_OK);
+	const auto bytes = [&state](const void* data, size_t size)
+	{
+		if (size != 0u) { EXIT_IF(XXH3_128bits_update(state.get(), data, size) != XXH_OK); }
+	};
+	const auto word = [&bytes](uint32_t value)
+	{
+		const uint8_t encoded[] = {static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8u),
+		                           static_cast<uint8_t>(value >> 16u), static_cast<uint8_t>(value >> 24u)};
+		bytes(encoded, sizeof(encoded));
+	};
+	// LVP1: explicit little-endian framing, exact copied guest bytes, and the
+	// link algorithm's resulting boundary. No addresses, epochs or object padding.
+	word(0x4c565031u);
+	word(static_cast<uint32_t>(program.key.gs_front));
+	word(program.code.GetContinuationPc());
+	for (const auto* segment: {&front, &back})
+	{
+		word(static_cast<uint32_t>(segment->size() * sizeof(uint32_t)));
+		bytes(segment->data(), segment->size() * sizeof(uint32_t));
+	}
+	word(program.code.GetDebugPrintfs().Size());
+	for (const auto& cmd: program.code.GetDebugPrintfs())
+	{
+		word(cmd.pc);
+		word(cmd.format.Size());
+		for (uint32_t i = 0; i < cmd.format.Size(); ++i) { word(static_cast<uint32_t>(cmd.format.At(i))); }
+		word(cmd.types.Size());
+		for (auto type: cmd.types) { word(static_cast<uint32_t>(type)); }
+		word(cmd.args.Size());
+		for (const auto& arg: cmd.args)
 		{
-			if (cached->second->GetHash0() == hash0 && cached->second->GetCrc32() == crc32)
-			{
-				return cached->second;
-			}
-			g_vs_isa_cache->erase(cached);
+			uint32_t multiplier = 0;
+			static_assert(sizeof(multiplier) == sizeof(arg.multiplier));
+			std::memcpy(&multiplier, &arg.multiplier, sizeof(multiplier)); // Scalar float bits, not a struct image.
+			word(static_cast<uint32_t>(arg.type));
+			word(arg.constant.u);
+			word(static_cast<uint32_t>(arg.register_id));
+			word(static_cast<uint32_t>(arg.size));
+			word(multiplier);
+			word(arg.absolute); word(arg.negate); word(arg.clamp); word(arg.swizzle);
+			word(arg.dpp); word(arg.dpp_ctrl); word(arg.dpp_row_mask); word(arg.dpp_bank_mask);
+			word(arg.dpp_fetch_inactive); word(arg.dpp_bound_ctrl);
 		}
 	}
-	auto code = std::make_shared<ShaderCode>();
-	code->SetType(ShaderType::Vertex);
-	code->SetHash0(hash0);
-	code->SetCrc32(crc32);
-	ShaderParseMappedLocked(shader_addr, code.get(), ShaderContinuationMode::AllowTerminator);
-	ShaderProbeWrite("vs", *code, nullptr, nullptr);
+	const auto hash = XXH3_128bits_digest(state.get());
+	return {static_cast<uint32_t>(hash.low64), static_cast<uint32_t>(hash.low64 >> 32u),
+	        static_cast<uint32_t>(hash.high64), static_cast<uint32_t>(hash.high64 >> 32u)};
+}
+
+static uint64_t ShaderVertexProgramCacheCost(const ShaderVertexProgram& program)
+{
+	// Budget retained IR capacities, counting shared front/linked storage twice
+	// conservatively. Entry count separately bounds hash nodes/control blocks.
+	// Debug strings/operands have nested allocations: keep those owners uncached.
+	if (!program.code.GetDebugPrintfs().IsEmpty()) { return kVertexProgramCacheBytes + 1u; }
+	uint64_t bytes = sizeof(ShaderVertexProgram);
+	for (const auto* code: {&program.front_code, &program.code})
+	{
+		bytes += sizeof(Core::SimpleArray<ShaderInstruction>) +
+		         static_cast<uint64_t>(code->GetInstructions().Capacity()) * sizeof(ShaderInstruction);
+		bytes += 2u * sizeof(Core::SimpleArray<ShaderLabel>) +
+		         static_cast<uint64_t>(code->GetLabels().Capacity()) * sizeof(ShaderLabel) +
+		         static_cast<uint64_t>(code->GetIndirectLabels().Capacity()) * sizeof(ShaderLabel);
+		bytes += sizeof(Core::SimpleArray<ShaderDebugPrintf>) +
+		         static_cast<uint64_t>(code->GetDebugPrintfs().Capacity()) * sizeof(ShaderDebugPrintf);
+	}
+	return bytes;
+}
+
+// Caller retains the shared lifetime lock through resource-metadata consumption.
+// This cache observes MapUserData/RegisterContinuation/debug generations; direct
+// in-place guest code writes without a new mapping are NOT observed on a hit.
+static std::shared_ptr<const ShaderVertexProgram> GetCachedVertexProgramLocked(const HW::VertexShaderInfo& regs,
+                                                                              const ShaderMappedData& data, bool gs_front)
+{
+	EXIT_IF(g_vs_isa_cache == nullptr);
+	const uint64_t shader_addr = gs_front ? regs.es_regs.data_addr : regs.vs_regs.data_addr;
+	const ShaderVertexProgramKey key {shader_addr, gs_front ? ShaderLookupContinuation(shader_addr) : 0u,
+	                                  regs.gs_back_addr, regs.gs_regs.chksum, g_vs_program_generation, gs_front};
+	{
+		std::lock_guard<std::mutex> lock(g_vs_isa_cache_mutex);
+		if (auto cached = g_vs_isa_cache->find(key); cached != g_vs_isa_cache->end())
+		{
+			return cached->second;
+		}
+	}
+	auto program = std::make_shared<ShaderVertexProgram>();
+	program->key = key;
+	program->front_code.SetType(ShaderType::Vertex);
+	program->front_code.SetHash0(static_cast<uint32_t>(key.checksum >> 32u));
+	program->front_code.SetCrc32(static_cast<uint32_t>(key.checksum));
+	const auto front = ShaderCopyProgramWords(shader_addr, data.code_size_bytes);
+	const auto boundary = key.continuation_addr != 0u ? ShaderParseBoundary::RegisteredFront : ShaderParseBoundary::CompleteProgram;
+	if (!ShaderTryParseBounded(front.data(), data.code_size_bytes, &program->front_code, boundary))
+	{
+		EXIT("vertex front has no complete reachable terminator: address=0x%016" PRIx64 " size=0x%08" PRIx32 "\n",
+		     shader_addr, data.code_size_bytes);
+	}
+	program->code = program->front_code;
+	std::vector<uint32_t> back_words;
+	if (ShaderHasTerminalSetpc(program->front_code))
+	{
+		if (key.continuation_addr == 0u || key.bound_back_addr != key.continuation_addr)
+		{
+			EXIT("vertex continuation binding mismatch: front=0x%016" PRIx64 " registered=0x%016" PRIx64
+			     " bound=0x%016" PRIx64 "\n", shader_addr, key.continuation_addr, key.bound_back_addr);
+		}
+		ShaderMappedData back_data;
+		if (!ShaderGetMappedData(key.continuation_addr, &back_data) || back_data.code_size_bytes == 0u)
+		{
+			EXIT("vertex continuation has no bounded mapped range: address=0x%016" PRIx64 "\n", key.continuation_addr);
+		}
+		back_words = ShaderCopyProgramWords(key.continuation_addr, back_data.code_size_bytes);
+		ShaderCode back;
+		back.SetType(ShaderType::Vertex);
+		ShaderParse(back_words.data(), back_data.code_size_bytes, &back);
+		ShaderAppendContinuation(&program->code, back, key.continuation_addr);
+	}
+	ShaderCopyDebugPrintfsLocked(&program->code);
+	program->fingerprint = ShaderVertexProgramFingerprint(*program, front, back_words);
+	ShaderProbeWrite("vs", program->code, nullptr, nullptr);
+	const uint64_t cache_cost = ShaderVertexProgramCacheCost(*program);
+	// This is a cache-retention budget, not a production program-size limit.
+	if (cache_cost > kVertexProgramCacheBytes) { return program; }
 	std::lock_guard<std::mutex> lock(g_vs_isa_cache_mutex);
-	if (auto cached = g_vs_isa_cache->find(shader_addr); cached != g_vs_isa_cache->end() &&
-	    cached->second->GetHash0() == hash0 && cached->second->GetCrc32() == crc32)
+	if (auto cached = g_vs_isa_cache->find(key); cached != g_vs_isa_cache->end())
 	{
 		return cached->second;
 	}
-	if (g_vs_isa_cache->size() >= 256u)
+	if (g_vs_isa_cache->size() >= kVertexProgramCacheEntries || cache_cost > kVertexProgramCacheBytes - g_vs_isa_cache_bytes)
 	{
 		g_vs_isa_cache->clear();
+		g_vs_isa_cache_bytes = 0;
 	}
-	g_vs_isa_cache->insert_or_assign(shader_addr, code);
-	return code;
+	g_vs_isa_cache->emplace(key, program);
+	g_vs_isa_cache_bytes += cache_cost;
+	return program;
 }
 
 static bool IsDiscardInstruction(const Vector<ShaderInstruction>& code, uint32_t index)
@@ -1146,10 +1724,17 @@ static bool IsDiscardInstruction(const Vector<ShaderInstruction>& code, uint32_t
 		const auto& inst      = code.At(index);
 		const auto& next_inst = code.At(index + 1);
 
-		return (inst.type == ShaderInstructionType::Exp && ShaderIsNullMrtDoneFormat(inst.format) &&
-		        prev_inst.type == ShaderInstructionType::SMovB64 && prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
-		        prev_inst.dst.type == ShaderOperandType::ExecLo && prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
-		        prev_inst.src[0].constant.i == 0 && next_inst.type == ShaderInstructionType::SEndpgm);
+		const bool exec_zeroed =
+		    (prev_inst.type == ShaderInstructionType::SMovB64 &&
+		     prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
+		     prev_inst.dst.type == ShaderOperandType::ExecLo && prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
+		     prev_inst.src[0].constant.i == 0) ||
+		    (prev_inst.type == ShaderInstructionType::SMovB32 &&
+		     prev_inst.format == ShaderInstructionFormat::SVdstSVsrc0 &&
+		     prev_inst.dst.type == ShaderOperandType::ExecLo && prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
+		     prev_inst.src[0].constant.i == 0);
+		return (inst.type == ShaderInstructionType::Exp && ShaderIsNullMrtDoneFormat(inst.format) && exec_zeroed &&
+		        next_inst.type == ShaderInstructionType::SEndpgm);
 	}
 	return false;
 }
@@ -1275,7 +1860,7 @@ static void ApplyDirectImageShape(const ShaderDirectImageUse& image, ShaderTextu
 		               "WARNING: sampled image resource uses multiple MIMG dimensions; descriptor shape retained\n");
 		return;
 	}
-	if (!image.sampled_shape_known)
+	if (!image.sampled_shape_known || !ShaderGen5InstructionShapeAppliesToType(descriptor->texture.Type(), image.sampled_shape))
 	{
 		return;
 	}
@@ -1708,6 +2293,7 @@ bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 	                      ShaderInstructionType::DsMaxI32, ShaderInstructionType::DsMaxU32, ShaderInstructionType::DsMinI32,
 	                      ShaderInstructionType::DsMinU32, ShaderInstructionType::DsOrB32, ShaderInstructionType::DsRsubU32,
 	                      ShaderInstructionType::DsSubU32, ShaderInstructionType::DsXorB32, ShaderInstructionType::DsWriteB32,
+	                      ShaderInstructionType::DsWrite2B32, ShaderInstructionType::DsWrite2St64B32,
 	                      ShaderInstructionType::ImageStore, ShaderInstructionType::ImageStoreMip,
 	                      ShaderInstructionType::ImageAtomicAdd});
 
@@ -2014,8 +2600,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				}
 				info->vertex_buffer                       = true;
 				info->vertex_buffer_reg                   = reg;
-				direct_sgprs[info->vertex_buffer_reg]     = false;
-				direct_sgprs[info->vertex_buffer_reg + 1] = false;
+				// This is a guest table pointer, not a rewritten V#. Native
+				// S_LOAD still needs both original words in the user-data window.
 				break;
 
 			case 10:
@@ -2027,8 +2613,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				}
 				info->vertex_attrib                       = true;
 				info->vertex_attrib_reg                   = reg;
-				direct_sgprs[info->vertex_attrib_reg]     = false;
-				direct_sgprs[info->vertex_attrib_reg + 1] = false;
+				// Attribute-table metadata does not consume the pointer value:
+				// preserve it for guest S_LOAD using the normal register base.
 				break;
 
 			case k_gen5_eud_direct_type:
@@ -2668,7 +3254,14 @@ bool ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInf
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info)
+Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& info)
+{
+	return info.program != nullptr && info.gs_prolog ? info.program->ngg_front.Refusal(info.native_wave.guest_wave_size)
+	                                                  : Kyty::Core::String8();
+}
+
+void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
+                          const GraphicsGeRawRegister* shader_stages)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2686,6 +3279,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 	info->float_mode                = 0;
 	info->dx10_clamp                = false;
 	info->ieee_mode                 = false;
+	info->fp16_overflow             = false;
+	info->fp16_overflow_known       = false;
+	info->native_wave               = {};
+	info->required_subgroup_size    = 0;
+	info->program.reset();
 
 	if (regs->vs_embedded)
 	{
@@ -2696,9 +3294,14 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 	bool gs_instead_of_vs =
 	    (regs->vs_regs.data_addr == 0 && regs->gs_regs.data_addr == 0 && regs->es_regs.data_addr != 0 && regs->gs_regs.chksum != 0);
+	const uint32_t guest_wave_size = ShaderVertexGuestWaveSize(shader_stages != nullptr ? *shader_stages : GraphicsGeRawRegister {},
+	                                                          Config::IsNextGen(), gs_instead_of_vs);
 	info->float_mode = gs_instead_of_vs ? regs->gs_regs.rsrc1.float_mode : regs->vs_regs.rsrc1.float_mode;
 	info->dx10_clamp = gs_instead_of_vs ? regs->gs_regs.rsrc1.dx10_clamp : regs->vs_regs.rsrc1.dx10_clamp;
 	info->ieee_mode  = gs_instead_of_vs ? regs->gs_regs.rsrc1.ieee_mode : regs->vs_regs.rsrc1.ieee_mode;
+	info->fp16_overflow = gs_instead_of_vs ? regs->gs_regs.rsrc1.fp16_overflow : regs->vs_regs.rsrc1.fp16_overflow;
+	info->fp16_overflow_known =
+	    gs_instead_of_vs ? regs->gs_regs.rsrc1.fp16_overflow_known : regs->vs_regs.rsrc1.fp16_overflow_known;
 
 	uint64_t                shader_addr   = (gs_instead_of_vs ? regs->es_regs.data_addr : regs->vs_regs.data_addr);
 	const HW::UserSgprInfo& user_sgpr     = (gs_instead_of_vs ? regs->gs_user_sgpr : regs->vs_user_sgpr);
@@ -2707,10 +3310,19 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 	bool ps5 = Config::IsNextGen();
 
 	ShaderMappedData data;
+	std::shared_lock<std::shared_mutex> shader_lifetime_lock(g_shader_lifetime_mutex, std::defer_lock);
 
 	if (ps5)
 	{
-		(void)ShaderGetMappedData(shader_addr, &data);
+		// Match shallow mapping metadata and both code segments to one generation.
+		// This is not a snapshot of arbitrary writes to the pointed-to resources.
+		// Nested code/debug helpers must use their Locked forms under this lease.
+		shader_lifetime_lock.lock();
+		if (!ShaderGetMappedData(shader_addr, &data) || data.code_size_bytes == 0u)
+		{
+			EXIT("Gen5 vertex shader has no bounded mapped code range: address=0x%016" PRIx64 "\n", shader_addr);
+		}
+		info->program = GetCachedVertexProgramLocked(*regs, data, gs_instead_of_vs);
 	}
 
 	if (ps5)
@@ -2726,8 +3338,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		// loads are bound; VS used to pass nullptr and dropped reused
 		// constant buffers (measured: skybox projection at s[16:19]).
 		constexpr int kGen5GsFrontUserDataBase = 8;
-		const auto vs_isa = GetCachedParsedVsIsa(shader_addr, (regs->gs_regs.chksum >> 32u) & 0xffffffffu,
-		                                         regs->gs_regs.chksum & 0xffffffffu);
+		const auto* vs_isa = &info->program->front_code;
 		ShaderUserData  rebased_user {};
 		ShaderSharp     sharp_copy[32] = {};
 		const ShaderUserData* usage_user = data.user_data;
@@ -2738,7 +3349,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			std::memcpy(sharp_copy, data.user_data->sharp_resource_offset[3],
 			            static_cast<size_t>(data.user_data->sharp_resource_count[3]) * sizeof(ShaderSharp));
 			rebased_user.sharp_resource_offset[3] = sharp_copy;
-			RebaseNggConstantSharps(&rebased_user, vs_isa.get(), user_sgpr, static_cast<int>(user_sgpr_num));
+			RebaseNggConstantSharps(&rebased_user, vs_isa, user_sgpr, static_cast<int>(user_sgpr_num));
 			usage_user = &rebased_user;
 		}
 		// Do not pass the ISA into ParseUsage2 here: the instruction-stream
@@ -2748,12 +3359,17 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		                  kGen5GsFrontUserDataBase);
 		if (vs_isa != nullptr)
 		{
+			info->native_wave = info->program->native_wave.Get(info->program->code, guest_wave_size);
+			info->required_subgroup_size =
+			    ShaderApplyNggFrontProof(&info->native_wave, info->program->code, shader_stages, info->program->ngg_front)
+			        ? guest_wave_size
+			        : 0u;
 			ShaderAssociateSampledTextureSamplers(*vs_isa, &info->bind, kGen5GsFrontUserDataBase);
 			// Constant tables embedded after the code are addressed from GETPC;
 			// the base stays runtime data so a cached pipeline can relocate.
 			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
-			info->bind.device_address_used = ShaderHasUnboundBufferLoad(*vs_isa, info->bind);
+			info->bind.device_address_used = ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase);
 		}
 	} else
 	{
@@ -2762,6 +3378,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		info->gs_prolog = false;
 
 		ShaderParseUsage(shader_addr, &usage, &info->bind, user_sgpr, user_sgpr_num);
+		ShaderCode code;
+		code.SetType(ShaderType::Vertex);
+		ShaderParseMapped(shader_addr, &code);
+		info->native_wave = ShaderAnalyzeNativeWave(code, guest_wave_size);
+		info->required_subgroup_size = ShaderUsesNativeWaveState(code) ? guest_wave_size : 0u;
 	}
 
 	if (usage.extended_buffer) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: usage.extended_buffer condition ignored (continuing)\n"); }
@@ -2819,7 +3440,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		const uint32_t shader_crc32 = regs->gs_regs.chksum & 0xffffffffu;
 		int32_t        detected_offset = -1;
 		bool           offset_cached   = false;
-		std::shared_lock shader_lifetime_lock(g_shader_lifetime_mutex);
+		std::shared_lock<std::shared_mutex> offset_lifetime_lock(g_shader_lifetime_mutex, std::defer_lock);
+		if (!ps5) { offset_lifetime_lock.lock(); }
 		{
 			std::lock_guard<std::mutex> lock(g_vertex_offset_sgpr_mutex);
 			if (auto cached = g_vertex_offset_sgpr_map->find(shader_addr); cached != g_vertex_offset_sgpr_map->end())
@@ -2836,12 +3458,19 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 		}
 		if (!offset_cached)
 		{
-			ShaderCode code;
-			code.SetType(ShaderType::Vertex);
-			ShaderParseMappedLocked(shader_addr, &code,
-			                        gs_instead_of_vs ? ShaderContinuationMode::AllowTerminator : ShaderContinuationMode::None);
-			detected_offset = ShaderDetectVertexOffsetSgpr(code, user_data_base, user_sgpr_num);
+			if (ps5)
+			{
+				detected_offset = ShaderDetectVertexOffsetSgpr(info->program->front_code, user_data_base, user_sgpr_num);
+			} else
+			{
+				ShaderCode code;
+				code.SetType(ShaderType::Vertex);
+				ShaderParseMappedLocked(shader_addr, &code,
+				                        gs_instead_of_vs ? ShaderContinuationMode::AllowTerminator : ShaderContinuationMode::None);
+				detected_offset = ShaderDetectVertexOffsetSgpr(code, user_data_base, user_sgpr_num);
+			}
 			std::lock_guard<std::mutex> lock(g_vertex_offset_sgpr_mutex);
+			if (g_vertex_offset_sgpr_map->size() >= kVertexProgramCacheEntries) { g_vertex_offset_sgpr_map->clear(); }
 			const auto entry = VertexOffsetCacheEntry {shader_hash0, shader_crc32, detected_offset};
 			auto [cached, inserted] = g_vertex_offset_sgpr_map->insert_or_assign(shader_addr, entry);
 			static_cast<void>(inserted);
@@ -2917,6 +3546,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	ps_info->float_mode = regs->ps_regs.rsrc1.float_mode;
 	ps_info->dx10_clamp = regs->ps_regs.rsrc1.dx10_clamp;
 	ps_info->ieee_mode  = regs->ps_regs.rsrc1.ieee_mode;
+	ps_info->fp16_overflow       = regs->ps_regs.rsrc1.fp16_overflow;
+	ps_info->fp16_overflow_known = !regs->ps_embedded && regs->ps_regs.rsrc1.fp16_overflow_known;
 	if (!regs->ps_embedded && regs->ps_regs.data_addr == 0)
 	{
 		ps_info->stage_enabled = false;
@@ -2983,11 +3614,12 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 				    ShaderParseMapped(regs->ps_regs.data_addr, code.get());
 			    }
 			    ShaderProbeWrite("ps", *code, nullptr, nullptr);
-			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code};
+			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code, std::make_shared<ShaderNativeWaveVerdict>()};
 		    });
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;
-		ps_info->required_subgroup_size    = ShaderPixelRequiredSubgroupSize(*analysis.code, ps_wave32);
+		ps_info->native_wave = analysis.native_wave->Get(*analysis.code, ps_wave32 ? 32u : 64u);
+		ps_info->required_subgroup_size = ShaderUsesNativeWaveState(*analysis.code) ? ps_info->native_wave.guest_wave_size : 0u;
 		ps_info->has_only_null_exports     = ShaderHasOnlyNullPixelExports(*analysis.code);
 		if (allow_noop_stage_disable && !ShaderPreventsNoopPixelElision(*analysis.code))
 		{
@@ -3008,6 +3640,11 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	} else
 	{
 		ShaderParseUsage(regs->ps_regs.data_addr, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr);
+		ShaderCode code;
+		code.SetType(ShaderType::Pixel);
+		ShaderParseMapped(regs->ps_regs.data_addr, &code);
+		ps_info->native_wave = ShaderAnalyzeNativeWave(code, 64u);
+		ps_info->required_subgroup_size = ShaderUsesNativeWaveState(code) ? 64u : 0u;
 	}
 
 	// Gen5 user-data is shared by linked stages. A PS can therefore carry the
@@ -3024,7 +3661,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 // traversal, and scalar loads whose base is not the mapped extended pointer.
 // A vector buffer load whose V# register range is not a bound storage buffer
 // reads through a descriptor built at run time.
-static bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind)
+bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind, int user_data_register_base)
 {
 	for (const auto& inst: code.GetInstructions())
 	{
@@ -3032,10 +3669,7 @@ static bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindR
 		{
 			continue;
 		}
-		const auto& storage = bind.storage_buffers;
-		const bool  bound   = std::any_of(storage.start_register, storage.start_register + storage.buffers_num,
-		                                  [&](int reg) { return reg == inst.src[1].register_id; });
-		if (!bound)
+		if (!ShaderStorageBufferResourceIsBound(bind, inst.src[1], user_data_register_base))
 		{
 			return true;
 		}
@@ -3072,8 +3706,15 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	EXIT_IF(regs == nullptr);
 
 	info->dispatch_mode  = dispatch_mode;
-	info->bind           = {};
-	info->meta_fill      = {};
+	info->float_mode     = regs->cs_regs.float_mode;
+	info->dx10_clamp     = regs->cs_regs.dx10_clamp;
+	info->ieee_mode      = regs->cs_regs.ieee_mode;
+	info->fp_mode_known  = regs->cs_regs.fp_mode_known;
+	info->fp16_overflow       = regs->cs_regs.fp16_overflow;
+	info->fp16_overflow_known = regs->cs_regs.fp16_overflow_known;
+	info->bind                = {};
+	info->meta_fill           = {};
+	info->uniform_buffer_fill = {};
 	info->threads_num[0] = regs->cs_regs.num_thread_x;
 	info->threads_num[1] = regs->cs_regs.num_thread_y;
 	info->threads_num[2] = regs->cs_regs.num_thread_z;
@@ -3140,10 +3781,16 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 				info->wave_layout = info->native_equivalent_layout;
 			} else if (!admission.supported)
 			{
+				std::string dump_note;
+				if (const char* dump_dir = std::getenv("KYTY_TRANSPORT_DUMP"); dump_dir != nullptr && dump_dir[0] != '\0')
+				{
+					dump_note = " (compute dump: " + ShaderDumpGuestProgram(dump_dir, "cs", regs->cs_regs.chksum, regs->cs_regs.data_addr, code) + ")";
+				}
 				EXIT("paired-wave dispatch admission unsupported: mode=0x%08" PRIx32 " pc=0x%08" PRIx32 " reason=%s; "
-				     "native-equivalence %s pc=0x%08" PRIx32 " reason=%s\n",
+				     "native-equivalence %s pc=0x%08" PRIx32 " reason=%s%s\n",
 				     dispatch_mode, admission.unsupported_pc, admission.reason.c_str(),
-				     info->native_equivalent_valid ? "rejected" : "unavailable", native.unsupported_pc, native.reason.c_str());
+				     info->native_equivalent_valid ? "rejected" : "unavailable", native.unsupported_pc, native.reason.c_str(),
+				     dump_note.c_str());
 			}
 		}
 		info->barrier_workspace_dwords = ShaderComputeBarrierWorkspaceDwords(code, info->wave_layout);
@@ -3157,6 +3804,7 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		{
 			info->bind.thread_limits[axis] = info->thread_limits[axis];
 		}
+		info->uniform_buffer_fill = AnalyzeShaderComputeUniformBufferFill(code);
 		if (code.HasAnyOf({ShaderInstructionType::VLshlAddU32, ShaderInstructionType::VCmpxGtU32,
 		                   ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferStoreFormatX}))
 		{
@@ -3451,6 +4099,8 @@ void ShaderDbgDumpInputInfo(const ShaderVertexInputInfo* info)
 	KYTY_PROFILER_BLOCK("ShaderDbgDumpInputInfo(Vs)");
 
 	KYTY_LOG_DEBUG("ShaderDbgDumpInputInfo()\n");
+	KYTY_LOG_DEBUG("\t fp16_overflow       = %s\n", info->fp16_overflow ? "true" : "false");
+	KYTY_LOG_DEBUG("\t fp16_overflow_known = %s\n", info->fp16_overflow_known ? "true" : "false");
 
 	KYTY_LOG_DEBUG("\t fetch_external = %s\n", info->fetch_external ? "true" : "false");
 	KYTY_LOG_DEBUG("\t fetch_embedded = %s\n", info->fetch_embedded ? "true" : "false");
@@ -3515,6 +4165,8 @@ void ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info)
 	KYTY_PROFILER_BLOCK("ShaderDbgDumpInputInfo(Ps)");
 
 	KYTY_LOG_DEBUG("ShaderDbgDumpInputInfo()\n");
+	KYTY_LOG_DEBUG("\t fp16_overflow       = %s\n", info->fp16_overflow ? "true" : "false");
+	KYTY_LOG_DEBUG("\t fp16_overflow_known = %s\n", info->fp16_overflow_known ? "true" : "false");
 
 	KYTY_LOG_DEBUG("\t input_num            = %u\n", info->input_num);
 	KYTY_LOG_DEBUG("\t ps_pos_xy            = %s\n", info->ps_pos_xy ? "true" : "false");
@@ -3534,6 +4186,12 @@ void ShaderDbgDumpInputInfo(const ShaderComputeInputInfo* info)
 {
 	KYTY_LOG_DEBUG("ShaderDbgDumpInputInfo()\n");
 
+	KYTY_LOG_DEBUG("\t fp_mode_known      = %s\n", info->fp_mode_known ? "true" : "false");
+	KYTY_LOG_DEBUG("\t fp16_overflow      = %s\n", info->fp16_overflow ? "true" : "false");
+	KYTY_LOG_DEBUG("\t fp16_overflow_known = %s\n", info->fp16_overflow_known ? "true" : "false");
+	KYTY_LOG_DEBUG("\t float_mode         = 0x%02x\n", static_cast<uint32_t>(info->float_mode));
+	KYTY_LOG_DEBUG("\t dx10_clamp         = %s\n", info->dx10_clamp ? "true" : "false");
+	KYTY_LOG_DEBUG("\t ieee_mode          = %s\n", info->ieee_mode ? "true" : "false");
 	KYTY_LOG_DEBUG("\t workgroup_register = %d\n", info->workgroup_register);
 	KYTY_LOG_DEBUG("\t thread_ids_num     = %d\n", info->thread_ids_num);
 	KYTY_LOG_DEBUG("\t threads_num        = {%u, %u, %u}\n", info->threads_num[0], info->threads_num[1], info->threads_num[2]);
@@ -3543,6 +4201,37 @@ void ShaderDbgDumpInputInfo(const ShaderComputeInputInfo* info)
 	ShaderDbgDumpResources(info->bind);
 }
 
+
+void ShaderRequireVertexProgram(const HW::VertexShaderInfo* regs, const ShaderVertexInputInfo* input_info)
+{
+	EXIT_IF(regs == nullptr || input_info == nullptr);
+	if (!Config::IsNextGen() || regs->vs_embedded) { return; }
+	if (input_info->program == nullptr) { EXIT("Gen5 vertex program owner is required before cache lookup\n"); }
+	const bool gs_front =
+	    regs->vs_regs.data_addr == 0 && regs->gs_regs.data_addr == 0 && regs->es_regs.data_addr != 0 && regs->gs_regs.chksum != 0;
+	const auto& key = input_info->program->key;
+	if (key.front_addr != (gs_front ? regs->es_regs.data_addr : regs->vs_regs.data_addr) || key.gs_front != gs_front ||
+	    key.checksum != regs->gs_regs.chksum || key.bound_back_addr != regs->gs_back_addr)
+	{
+		EXIT("vertex program owner does not match the draw binding\n");
+	}
+	// Do not compare with the CURRENT registry generation: an in-flight draw
+	// owns its prior immutable program even after a later remap or registration.
+}
+
+ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh,
+                         const ShaderVertexInputInfo* input_info)
+{
+	EXIT_IF(sh == nullptr);
+	ShaderRequireVertexProgram(regs, input_info);
+	if (Config::IsNextGen() && !regs->vs_embedded)
+	{
+		vs_print("ShaderParseVS()", *regs, *sh);
+		vs_check(*regs, *sh);
+		return input_info->program->code;
+	}
+	return ShaderParseVS(regs, sh);
+}
 
 ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh)
 {
@@ -3609,14 +4298,7 @@ ShaderCode ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegis
 			                  gs_instead_of_vs ? ShaderContinuationMode::Append : ShaderContinuationMode::None);
 		}
 
-		if (g_debug_printfs != nullptr)
-		{
-			auto id = (static_cast<uint64_t>(hash0) << 32u) | crc32;
-			if (auto index = g_debug_printfs->Find(id, [](auto cmd, auto id) { return cmd.id == id; }); g_debug_printfs->IndexValid(index))
-			{
-				code.GetDebugPrintfs() = g_debug_printfs->At(index).cmds;
-			}
-		}
+		ShaderCopyDebugPrintfs(&code);
 	}
 
 	return code;
@@ -3714,14 +4396,7 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 			ShaderParseMapped(regs->ps_regs.data_addr, &code);
 		}
 
-		if (g_debug_printfs != nullptr)
-		{
-			auto id = (static_cast<uint64_t>(hash0) << 32u) | crc32;
-			if (auto index = g_debug_printfs->Find(id, [](auto cmd, auto id) { return cmd.id == id; }); g_debug_printfs->IndexValid(index))
-			{
-				code.GetDebugPrintfs() = g_debug_printfs->At(index).cmds;
-			}
-		}
+		ShaderCopyDebugPrintfs(&code);
 	}
 
 	return code;
@@ -3821,14 +4496,7 @@ ShaderCode ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegi
 		ShaderParseMapped(regs->cs_regs.data_addr, &code);
 	}
 
-	if (g_debug_printfs != nullptr)
-	{
-		auto id = (static_cast<uint64_t>(hash0) << 32u) | crc32;
-		if (auto index = g_debug_printfs->Find(id, [](auto cmd, auto id) { return cmd.id == id; }); g_debug_printfs->IndexValid(index))
-		{
-			code.GetDebugPrintfs() = g_debug_printfs->At(index).cmds;
-		}
-	}
+	ShaderCopyDebugPrintfs(&code);
 
 	return code;
 }
@@ -4176,6 +4844,16 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 
 		ret.hash0 = (regs->gs_regs.chksum >> 32u) & 0xffffffffu;
 		ret.crc32 = regs->gs_regs.chksum & 0xffffffffu;
+		// Keep metadata-only identity fixtures usable. Production callers require
+		// the owner BEFORE lookup, including hits that never invoke the compiler.
+		if (input_info->program != nullptr)
+		{
+			ShaderRequireVertexProgram(regs, input_info);
+			ret.hash0 = input_info->program->code.GetHash0();
+			ret.crc32 = input_info->program->code.GetCrc32();
+			ret.ids.Add(0x4c565031u); // LVP1: exact copied front/back content and frozen debug commands.
+			for (uint32_t word: input_info->program->fingerprint) { ret.ids.Add(word); }
+		}
 	} else
 	{
 		const auto* src = reinterpret_cast<const uint32_t*>(shader_addr);
@@ -4196,9 +4874,16 @@ ShaderId ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInput
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_inline));
 	ret.ids.Add(static_cast<uint32_t>(input_info->gs_prolog));
 	ret.ids.Add(static_cast<uint32_t>(input_info->position1_usage));
+	ret.ids.Add(0x4e574d31u); // NWM1: architectural width and native mapping proof.
+	ret.ids.Add(input_info->native_wave.guest_wave_size);
+	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
+	ret.ids.Add(input_info->required_subgroup_size);
+	ret.ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
 	ret.ids.Add(input_info->float_mode);
 	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_attrib_reg));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fetch_buffer_reg));
 	ret.ids.Add(input_info->resources_num);
@@ -4314,9 +4999,10 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	}
 	if (input_info->custom_interpolation.Enabled())
 	{
-		ret.ids.Add(0x43504931u); // CPI1: per-vertex inputs transported through geometry.
+		ret.ids.Add(0x43504932u); // CPI2: raw inputs and qualified parameter aliases through geometry.
 		ret.ids.Add(input_info->custom_interpolation.inputs);
 		ret.ids.Add(input_info->custom_interpolation.per_vertex_inputs);
+		ret.ids.Add(input_info->custom_interpolation.aliased_parameter_inputs);
 	}
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pos_xy));
 	ret.ids.Add(input_info->host_to_guest_scale.x_guest_numerator);
@@ -4326,9 +5012,16 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_pixel_kill_enable));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_early_z));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ps_execute_on_noop));
+	ret.ids.Add(0x4e574d31u); // NWM1: distinct from the selected physical size.
+	ret.ids.Add(input_info->native_wave.guest_wave_size);
+	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave.proof));
+	ret.ids.Add(input_info->required_subgroup_size);
+	ret.ids.Add(input_info->native_wave.refusal_reason != nullptr ? 1u : 0u);
 	ret.ids.Add(input_info->float_mode);
 	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
 	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 
 	// The export declarations and component order are part of the generated
 	// SPIR-V interface. They must distinguish pipelines that use the same guest
@@ -4409,6 +5102,14 @@ bool ShaderPixelMrtProbeMatchesInstruction(const ShaderCode& code, const ShaderP
 		case Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 2u; break;
 		case Mrt3Vsrc0Vsrc1ComprVm:
 		case Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 3u; break;
+		case Mrt4Vsrc0Vsrc1ComprVm:
+		case Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 4u; break;
+		case Mrt5Vsrc0Vsrc1ComprVm:
+		case Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 5u; break;
+		case Mrt6Vsrc0Vsrc1ComprVm:
+		case Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 6u; break;
+		case Mrt7Vsrc0Vsrc1ComprVm:
+		case Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 7u; break;
 		default: return false;
 	}
 	return target == config.mrt_target && input_info.target_output_mode[target] != 0u;
@@ -4523,6 +5224,12 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 		ret.ids.Add(header->length);
 	}
 
+	ret.ids.Add(input_info->float_mode);
+	ret.ids.Add(static_cast<uint32_t>(input_info->dx10_clamp));
+	ret.ids.Add(static_cast<uint32_t>(input_info->ieee_mode));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fp_mode_known));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
+	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 	ret.ids.Add(input_info->workgroup_register);
 	ret.ids.Add(input_info->thread_ids_num);
 	ret.ids.Add(input_info->lds_dwords);
@@ -4591,6 +5298,8 @@ void ShaderDisable(uint64_t id)
 
 void ShaderInjectDebugPrintf(uint64_t id, const ShaderDebugPrintf& cmd)
 {
+	std::unique_lock lifetime_lock(g_shader_lifetime_mutex);
+	ShaderInvalidateVertexProgramsLocked();
 	if (g_debug_printfs == nullptr)
 	{
 		g_debug_printfs = new Vector<ShaderDebugPrintfCmds>;

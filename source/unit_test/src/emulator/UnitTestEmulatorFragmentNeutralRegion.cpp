@@ -356,4 +356,114 @@ TEST(EmulatorFragmentNeutralRegion, FetchedInactiveRowReadsNeedProofButQuadReads
 	EXPECT_TRUE(Proven(Insert(Region(), 5, Permute(1))));
 }
 
+static ShaderInstruction ReadlaneAt(int vgpr, uint32_t lane)
+{
+	auto readlane              = Readlane(vgpr);
+	readlane.src[1].constant.u = lane;
+	return readlane;
+}
+
+static ShaderInstruction ReadlaneDynamic(int vgpr)
+{
+	auto readlane   = Readlane(vgpr);
+	readlane.src[1] = Operand(ShaderOperandType::Sgpr, 40, 1);
+	return readlane;
+}
+
+static ShaderInstruction Mbcnt()
+{
+	ShaderInstruction mbcnt {};
+	mbcnt.type    = ShaderInstructionType::VMbcntLoU32B32;
+	mbcnt.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	mbcnt.dst     = Operand(ShaderOperandType::Vgpr, 20, 1);
+	mbcnt.src[0]  = Pair(38);
+	mbcnt.src[1]  = Operand(ShaderOperandType::Vgpr, 20, 1);
+	mbcnt.src_num = 2;
+	return mbcnt;
+}
+
+static ShaderInstruction NullExport()
+{
+	ShaderInstruction kill {};
+	kill.type   = ShaderInstructionType::Exp;
+	kill.format = ShaderInstructionFormat::NullVmDone;
+	return kill;
+}
+
+static bool Tier(const Program& program, const std::vector<ShaderLabel>& labels = {})
+{
+	return ShaderAnalyzeFragmentNativeWaveTier(Build(program, labels)).supported;
+}
+
+TEST(EmulatorFragmentNativeWaveTier, RequiresAPixelProgramWithLaneExchanges)
+{
+	EXPECT_TRUE(Tier(Region()));
+	EXPECT_FALSE(Tier({Scalar(ShaderInstructionType::SMovB64, Pair(40), Pair(42))}));
+	auto compute = Build(Region());
+	EXPECT_TRUE(ShaderAnalyzeFragmentNativeWaveTier(compute).supported);
+	auto non_pixel = Build(Region());
+	non_pixel.SetType(ShaderType::Compute);
+	EXPECT_FALSE(ShaderAnalyzeFragmentNativeWaveTier(non_pixel).supported);
+}
+
+TEST(EmulatorFragmentNativeWaveTier, RejectsLaneExchangesOutsideProvenRegions)
+{
+	EXPECT_FALSE(Tier({Reduction()}));
+	EXPECT_FALSE(Tier({Permute(0)}));
+	EXPECT_FALSE(Tier({ReadlaneAt(10, 63)}));
+	EXPECT_TRUE(Tier({ReadlaneAt(10, 31)}));
+	EXPECT_TRUE(Tier({ReadlaneAt(10, 5)}));
+	EXPECT_FALSE(Tier(Insert(Region(), 5, Permute(0))));
+}
+
+TEST(EmulatorFragmentNativeWaveTier, RejectsGroupingSensitivePopcountsAndReservedControls)
+{
+	EXPECT_FALSE(Tier({Mbcnt()}));
+	auto mbcnt_hi = Mbcnt();
+	mbcnt_hi.type = ShaderInstructionType::VMbcntHiU32B32;
+	EXPECT_FALSE(Tier({mbcnt_hi}));
+	EXPECT_FALSE(Tier(Insert(Region(), 5, Mbcnt())));
+	EXPECT_FALSE(Tier({Reduction(false, 0x100u)}));
+	auto reserved = Insert(Region(), 4, Reduction(false, 0x100u));
+	EXPECT_FALSE(Tier(reserved));
+}
+
+TEST(EmulatorFragmentNativeWaveTier, GhostReadsNeedAProvenNeutralSource)
+{
+	EXPECT_TRUE(Tier(Insert(Region(), 5, ReadlaneAt(10, 63))));
+	EXPECT_TRUE(Tier(Insert(Region(), 5, ReadlaneAt(10, 31))));
+	EXPECT_FALSE(Tier(Insert(Region(), 5, ReadlaneAt(10, 64))));
+	EXPECT_FALSE(Tier(Insert(Region(), 5, ReadlaneAt(11, 63))));
+	EXPECT_TRUE(Tier(Insert(Region(), 5, ReadlaneDynamic(10))));
+	EXPECT_FALSE(Tier(Insert(Region(), 5, ReadlaneDynamic(11))));
+	EXPECT_FALSE(Tier(Insert(Region(), 4, ReadlaneAt(10, 63))));
+	auto clobber   = Bitwise();
+	clobber.dst    = Operand(ShaderOperandType::Vgpr, 10, 1);
+	clobber.src[0] = Operand(ShaderOperandType::Vgpr, 11, 1);
+	clobber.src[1] = clobber.src[0];
+	EXPECT_FALSE(Tier(Insert(Insert(Region(), 5, clobber), 6, ReadlaneAt(10, 63))));
+	EXPECT_FALSE(Tier(Insert(Region(), 5, ReadlaneAt(10, 63)), {ShaderLabel(20, 100)}));
+}
+
+TEST(EmulatorFragmentNativeWaveTier, LaneOpsInsideTheRegionSpanStayInsideItsProof)
+{
+	EXPECT_TRUE(Tier(Insert(Region(), 4, Permute(0))));
+	EXPECT_FALSE(Tier(Insert(Region(), 4, Permute(1))));
+	EXPECT_TRUE(Tier(Insert(Region(), 4, Reduction(false, 0x113u))));
+	EXPECT_FALSE(Tier(Insert(Region(), 4, Reduction(false, 0x100u))));
+}
+
+TEST(EmulatorFragmentNativeWaveTier, RejectsKillsBeforeLaneExchanges)
+{
+	auto killed = Insert(Region(), 0, NullExport());
+	EXPECT_FALSE(Tier(killed));
+	EXPECT_TRUE(Tier(Insert(Region(), 5, NullExport())));
+	auto exec_kill       = Region();
+	exec_kill[0].type    = ShaderInstructionType::SMovB64;
+	exec_kill[0].dst     = Exec();
+	exec_kill[0].src[0]  = Operand(ShaderOperandType::LiteralConstant, 0, 0);
+	exec_kill[0].src_num = 1;
+	EXPECT_FALSE(Tier(exec_kill));
+}
+
 UT_END();

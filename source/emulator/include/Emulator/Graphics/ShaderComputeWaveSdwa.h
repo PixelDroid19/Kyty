@@ -23,6 +23,8 @@ namespace Kyty::Libs::Graphics {
 // register-file flags (S0, S1) stay free because the operand tuple and the
 // shared compare emitter already bound them.
 [[nodiscard]] bool ShaderComputeWaveSdwaCompareTupleSupported(const ShaderInstruction& instruction);
+// Element-type agnostic operand tuple of an SDWA compare with whole-dword selects and no modifiers; the caller checks the opcode family.
+[[nodiscard]] bool ShaderComputeWaveSdwaCompareIdentityTuple(const ShaderInstruction& instruction);
 
 // Admit a VOP2 SDWA control word only when it is the identity form: DWORD
 // destination and source selects, dst_u=PAD, no clamp, output modifier,

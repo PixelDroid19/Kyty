@@ -38,7 +38,9 @@ constexpr std::array LEGACY_IMAGE_FORMATS = {
 
 constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {1, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, GuestImageNumericType::FloatingPoint},
-    Gen5ImageFormat {5, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_R8_UNORM, GuestImageNumericType::FloatingPoint},
+    // RDNA2 ISA Table 47: 5=8_UINT. Storage uses the exact R8ui declaration
+    // with StorageImageExtendedFormats, subject to the host format query.
+    Gen5ImageFormat {5, VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {7, VK_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {13, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {14, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, GuestImageNumericType::FloatingPoint},
@@ -52,6 +54,7 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {56, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM,
                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {62, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32_UINT, GuestImageNumericType::UnsignedInteger},
+    Gen5ImageFormat {64, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {65, VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_R16G16B16A16_UNORM,
                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {66, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_R16G16B16A16_SNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
@@ -61,7 +64,9 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     Gen5ImageFormat {75, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_UINT, VK_FORMAT_R32G32B32A32_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {77, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {130, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
-    Gen5ImageFormat {133, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
+    // Hardware X/Y/Z occupy low-to-high bits (AMD PAL ChNumFormat contract).
+    Gen5ImageFormat {133, VK_FORMAT_B5G6R5_UNORM_PACK16, VK_FORMAT_B5G6R5_UNORM_PACK16, VK_FORMAT_UNDEFINED,
+                      GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {169, VK_FORMAT_BC1_RGBA_UNORM_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {170, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_BC1_RGBA_SRGB_BLOCK, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {171, VK_FORMAT_BC2_UNORM_BLOCK, VK_FORMAT_BC2_SRGB_BLOCK, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},

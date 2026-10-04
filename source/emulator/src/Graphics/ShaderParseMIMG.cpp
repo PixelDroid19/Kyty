@@ -4,6 +4,14 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Number of components a MIMG DMASK enables; they return packed into that many VGPRs.
+static int MimgDmaskComponents(uint32_t dmask)
+{
+	int count = 0;
+	for (uint32_t bits = dmask & 0xfu; bits != 0u; bits &= bits - 1u) { ++count; }
+	return count;
+}
+
 KYTY_SHADER_PARSER(shader_parse_mimg)
 {
 	EXIT_IF(dst == nullptr);
@@ -43,15 +51,28 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	EXIT_NOT_IMPLEMENTED(unrm == 1);
 	// EXIT_NOT_IMPLEMENTED(dmask != 0xf && dmask != 0x7);
 
+	// RDNA2 8.2.3/Table 42 and 12.16: these admitted image operations have
+	// no sampler. The manual does not establish that nonzero SSAMP is ignored
+	// for them (its explicit SSAMP=0 restriction is for BVH). Admit the zero
+	// encoding only, without inventing a sampler read or erasing unknown bits.
+	const bool samplerless = opcode == 0x00u || opcode == 0x01u || opcode == 0x08u || opcode == 0x09u || opcode == 0x0eu ||
+	                         opcode == 0x11u;
+	if (samplerless && ssamp != 0u)
+	{
+		EXIT("unsupported samplerless MIMG SSAMP: opcode=0x%02" PRIx32 " ssamp=0x%02" PRIx32 " pc=0x%08" PRIx32
+		     " word0=0x%08" PRIx32 " word1=0x%08" PRIx32 "; only SSAMP=0 is admitted\n",
+		     opcode, ssamp, pc, buffer[0], buffer[1]);
+	}
+
 	uint32_t size = 2 + nsa;
 
 	ShaderInstruction inst;
 	inst.pc             = pc;
 	inst.dst            = operand_parse(vdata + 256);
-	inst.src_num        = 3;
+	inst.src_num        = samplerless ? 2 : 3;
 	inst.src[0]         = operand_parse(vaddr + 256);
 	inst.src[1]         = operand_parse(srsrc * 4);
-	inst.src[2]         = operand_parse(ssamp * 4);
+	if (!samplerless) { inst.src[2] = operand_parse(ssamp * 4); }
 	inst.mimg_dimension = static_cast<uint8_t>(dim);
 
 	if (nsa != 0)
@@ -327,135 +348,30 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 			{
 				inst.mimg_address_num = sample_b_addr;
 			}
+			// The enabled components return in R, G, B, A order, packed into consecutive VGPRs.
 			inst.mimg_dmask = static_cast<uint8_t>(dmask);
-			switch (dmask)
+			inst.dst.size   = MimgDmaskComponents(dmask);
+			if (dmask != 0u)
 			{
-				case 0x1:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask1 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask1 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1);
-					inst.dst.size = 1;
-					break;
-				}
-				case 0x2:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask2 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask2 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2);
-					inst.dst.size = 1;
-					break;
-				}
-				case 0x3:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmask3 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmask3 : ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3);
-					inst.dst.size = 2;
-					break;
-				}
-				case 0x4:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask4 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask4 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask4);
-					inst.dst.size = 1;
-					break;
-				}
-				case 0x5:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmask5 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmask5 : ShaderInstructionFormat::Vdata2Vaddr3StSsDmask5);
-					inst.dst.size = 2;
-					break;
-				}
-				case 0x7:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata3Vaddr2StSsDmask7 : ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7);
-					inst.dst.size = 3;
-					break;
-				}
-				case 0x8:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata1Vaddr4StSsDmask8 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata1Vaddr2StSsDmask8 : ShaderInstructionFormat::Vdata1Vaddr3StSsDmask8);
-					inst.dst.size = 1;
-					break;
-				}
-				case 0x9:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmask9 : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmask9 : ShaderInstructionFormat::Vdata2Vaddr3StSsDmask9);
-					inst.dst.size = 2;
-					break;
-				}
-				case 0xa:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmaskA : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmaskA : ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskA);
-					inst.dst.size = 2;
-					break;
-				}
-				case 0xb:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata3Vaddr4StSsDmaskB : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata3Vaddr2StSsDmaskB : ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB);
-					inst.dst.size = 3;
-					break;
-				}
-				case 0xc:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata2Vaddr4StSsDmaskC : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata2Vaddr2StSsDmaskC : ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskC);
-					inst.dst.size = 2;
-					break;
-				}
-				case 0xd:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata3Vaddr4StSsDmaskD : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata3Vaddr2StSsDmaskD : ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskD);
-					inst.dst.size = 3;
-					break;
-				}
-				case 0xf:
-				{
-					inst.format   = sample_b_addr == 4u ? ShaderInstructionFormat::Vdata4Vaddr4StSsDmaskF : (sample_b_addr == 2u ? ShaderInstructionFormat::Vdata4Vaddr2StSsDmaskF : ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF);
-					inst.dst.size = 4;
-					break;
-				}
+				inst.format = sample_b_addr == 4u ? ShaderInstructionFormat::VdataVaddr4StSsMimgDmask
+				              : (sample_b_addr == 2u ? ShaderInstructionFormat::VdataVaddr2StSsMimgDmask
+				                                     : ShaderInstructionFormat::VdataVaddr3StSsMimgDmask);
 			}
 			break;
 		}
 		case 0x26: KYTY_NI("image_sample_b_cl"); break;
 		case 0x27:
+			// image_sample_lz: the enabled components return in R, G, B, A order, packed into consecutive VGPRs.
 			inst.type        = ShaderInstructionType::ImageSampleLz;
 			inst.src[0].size = 3;
 			inst.src[1].size = 8;
 			inst.src[2].size = 4;
-			switch (dmask) // NOLINT
+			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+			inst.dst.size    = MimgDmaskComponents(dmask);
+			if (dmask != 0u)
 			{
-				case 0x1:
-				{
-					inst.format   = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1;
-					inst.dst.size = 1;
-					break;
-				}
-				case 0x2:
-				{
-					inst.format   = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2;
-					inst.dst.size = 1;
-					break;
-				}
-				case 0x3:
-				{
-					inst.format   = ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3;
-					inst.dst.size = 2;
-					break;
-				}
-				case 0x7:
-				{
-					inst.format   = ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7;
-					inst.dst.size = 3;
-					break;
-				}
-				case 0x8:
-				{
-					inst.format   = ShaderInstructionFormat::Vdata1Vaddr3StSsDmask8;
-					inst.dst.size = 1;
-					break;
-				}
-				case 0xf:
-				{
-					inst.format   = ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF;
-					inst.dst.size = 4;
-					break;
-				}
-				default:;
+				inst.format = dmask == 0xfu ? ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF
+				                            : ShaderInstructionFormat::VdataVaddr3StSsMimgDmask;
 			}
 			break;
 		case 0x28: KYTY_NI("image_sample_c"); break;

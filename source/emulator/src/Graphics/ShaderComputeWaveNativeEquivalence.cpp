@@ -2,6 +2,9 @@
 
 #include "Kyty/Core/MagicEnum.h"
 
+#include "ShaderLaneFlow.h"
+#include "ShaderNativeWaveInternal.h"
+
 #include <algorithm>
 #include <bitset>
 #include <string_view>
@@ -425,6 +428,140 @@ ShaderComputeWaveAnalysisResult Decode(const ShaderInstruction& instruction, Dec
 	return {true, 0, {}};
 }
 
+
+// Wave-uniformity of VGPRs and VCC under a known-full EXEC. A VCC branch is only a lane-conditional
+// branch when some lane can disagree with the others; when every lane computes VCC from values all
+// lanes share, the wave takes one path and a back edge is an ordinary loop. Only what the loop
+// counters of guest shaders need is modelled: a lane that is inactive when a VGPR is written keeps
+// its old value, so a write is uniform only under a full EXEC; a lane-indexed input, a memory
+// result or anything read through a mask is not uniform.
+struct UniformityState
+{
+	std::bitset<256> uniform;
+	bool             exec_full   = false;
+	bool             vcc_uniform = false;
+	bool             reached     = false;
+
+	bool Merge(const UniformityState& other)
+	{
+		if (!other.reached) { return false; }
+		if (!reached)
+		{
+			*this = other;
+			return true;
+		}
+		const auto merged_uniform = uniform & other.uniform;
+		const bool merged_exec    = exec_full && other.exec_full;
+		const bool merged_vcc     = vcc_uniform && other.vcc_uniform;
+		const bool changed        = merged_uniform != uniform || merged_exec != exec_full || merged_vcc != vcc_uniform;
+		uniform                   = merged_uniform;
+		exec_full                 = merged_exec;
+		vcc_uniform               = merged_vcc;
+		return changed;
+	}
+};
+
+bool WritesExecOperand(const ShaderInstruction& instruction)
+{
+	for (const auto* destination: {&instruction.dst, &instruction.dst2})
+	{
+		if (destination->type == ShaderOperandType::ExecLo || destination->type == ShaderOperandType::ExecHi) { return true; }
+	}
+	return false;
+}
+
+// True when every source of a vector instruction holds the same value in every lane.
+bool SourcesAreWaveUniform(const ShaderInstruction& instruction, const UniformityState& state, const UnitState& classes)
+{
+	for (int source = 0; source < instruction.src_num; ++source)
+	{
+		const auto& operand = instruction.src[source];
+		if (operand.dpp || operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::ExecHi)
+		{
+			return false;
+		}
+		unsigned first = 0;
+		unsigned count = 0;
+		if (LaneFlow::VgprRange(operand, &first, &count))
+		{
+			for (unsigned word = 0; word < count; ++word)
+			{
+				if (first + word >= state.uniform.size() || !state.uniform[first + word]) { return false; }
+			}
+			continue;
+		}
+		if (operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::VccHi)
+		{
+			if (!state.vcc_uniform) { return false; }
+			continue;
+		}
+		UnitSet    units;
+		const auto kind = CollectUnits(operand, &units);
+		if (kind == OperandUnits::Invalid || kind == OperandUnits::Exec) { return false; }
+		for (int unit = 0; unit < kUnits; ++unit)
+		{
+			if (units.test(static_cast<size_t>(unit)) && classes.units[unit] != kData) { return false; }
+		}
+	}
+	return true;
+}
+
+void ApplyUniformity(const ShaderInstruction& instruction, const DecodedInstruction& decoded, const UnitState& classes,
+                     UniformityState* state)
+{
+	const auto name          = magic_enum::enum_name(instruction.type);
+	const bool exec_compare  = decoded.vector && NameStartsWith(name, "VCmpx");
+	const bool pure_vector   = decoded.vector && !exec_compare && !instruction.vop_sdwa;
+	const bool uniform_value = pure_vector && state->exec_full && SourcesAreWaveUniform(instruction, *state, classes);
+	for (const auto* destination: {&instruction.dst, &instruction.dst2})
+	{
+		unsigned first = 0;
+		unsigned count = 0;
+		if (LaneFlow::VgprRange(*destination, &first, &count))
+		{
+			for (unsigned word = 0; word < count && first + word < state->uniform.size(); ++word)
+			{
+				state->uniform.set(first + word, uniform_value);
+			}
+		} else if (destination->type == ShaderOperandType::VccLo || destination->type == ShaderOperandType::VccHi)
+		{
+			// A compare or carry defines VCC from its sources; any other writer of VCC is not modelled.
+			state->vcc_uniform = pure_vector && uniform_value;
+		}
+	}
+	// SAVEEXEC forms and V_CMPX rewrite EXEC implicitly; the rest name it as a destination.
+	if (WritesExecOperand(instruction) || exec_compare || ShaderInstructionTypeChangesExec(instruction.type))
+	{
+		const bool full_constant = instruction.type == ShaderInstructionType::SMovB64 && instruction.src_num == 1 &&
+		                           instruction.src[0].type == ShaderOperandType::IntegerInlineConstant && instruction.src[0].constant.i == -1;
+		state->exec_full = full_constant;
+	}
+}
+
+// Forward fixpoint of UniformityState over the CFG the main analysis already built.
+std::vector<UniformityState> SolveUniformity(const Vector<ShaderInstruction>& instructions, const std::vector<DecodedInstruction>& decoded,
+                                             const std::vector<UnitState>& classes, const std::vector<std::vector<uint32_t>>& successors)
+{
+	const auto                   count = instructions.Size();
+	std::vector<UniformityState> in(count);
+	in[0].reached = true; // entry: no VGPR is known to be uniform, EXEC may be partial
+	bool changed  = true;
+	while (changed)
+	{
+		changed = false;
+		for (uint32_t index = 0; index < count; ++index)
+		{
+			if (!in[index].reached) { continue; }
+			UniformityState state = in[index];
+			ApplyUniformity(instructions.At(index), decoded[index], classes[index], &state);
+			for (auto successor: successors[index])
+			{
+				changed = in[successor].Merge(state) || changed;
+			}
+		}
+	}
+	return in;
+}
 } // namespace
 
 ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const ShaderCode& code)
@@ -643,6 +780,7 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 		}
 	}
 
+	std::vector<UniformityState> uniformity;
 	for (uint32_t index = 0; index < count; ++index)
 	{
 		const auto& instruction = instructions.At(index);
@@ -653,7 +791,23 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveNativeEquivalence(const 
 		const auto target = target_index[index];
 		if (target <= static_cast<int64_t>(index))
 		{
-			return Failure(instruction.pc, "lane-conditional branch is not a forward region");
+			// A back edge on VCC is a loop every lane leaves together when VCC is wave-uniform. A back edge on
+			// EXEC relies on narrowing that keeps finished lanes idle, which this proof does not model.
+			const bool vcc_branch = instruction.type == ShaderInstructionType::SCbranchVccz ||
+			                        instruction.type == ShaderInstructionType::SCbranchVccnz;
+			if (!vcc_branch)
+			{
+				return Failure(instruction.pc, "lane-conditional branch is not a forward region");
+			}
+			if (uniformity.empty())
+			{
+				uniformity = SolveUniformity(instructions, decoded, in, successors);
+			}
+			if (!uniformity[index].reached || !uniformity[index].vcc_uniform)
+			{
+				return Failure(instruction.pc, "loop condition is not provably wave-uniform");
+			}
+			continue;
 		}
 		UnitSet written;
 		for (auto inner = static_cast<int64_t>(index) + 1; inner < target; ++inner)

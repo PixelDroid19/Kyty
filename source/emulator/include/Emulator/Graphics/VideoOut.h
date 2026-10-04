@@ -124,6 +124,9 @@ KYTY_SYSV_ABI int  VideoOutRegisterBuffers2(int handle, int set_index, int buffe
                                             int buffer_num, const VideoOutBufferAttribute2* attribute, int category, void* option);
 KYTY_SYSV_ABI int  VideoOutSubmitFlip(int handle, int index, int flip_mode, int64_t flip_arg);
 void               VideoOutSubmitFlipInternal(int handle, int index, int flip_mode, int64_t flip_arg);
+// Counts a flip the command processor decoded (gcQueueNum) until its
+// VideoOutSubmitFlipInternal hands it to the flip queue.
+void               VideoOutQueueGpuFlip(int handle);
 KYTY_SYSV_ABI int  VideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status);
 // Returns flipPendingNum for Gen5 waiters (NID zgXifHT9ErY).
 KYTY_SYSV_ABI int VideoOutIsFlipPending(int handle);

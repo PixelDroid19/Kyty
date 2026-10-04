@@ -40,6 +40,10 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Function-local array backing ds_*_addtid_b32 spill slots in non-compute
+// stages: indexed by (M0[15:0] + offset) >> 2 and private to each invocation.
+constexpr uint32_t kDsAddtidSpillDwords = 1024u;
+
 class Spirv;
 
 enum class SccCheck
@@ -111,7 +115,26 @@ public:
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
 	[[nodiscard]] bool UsesComputeWaveBanks() const;
+	// Architectural EXEC/VCC and SGPR mask destinations always contain packed
+	// words. Native templates' implicit EXEC loads use a separate lane view;
+	// explicit numeric operand loads are marked until the strategy is resolved.
+	[[nodiscard]] bool NativeWave32() const;
+	[[nodiscard]] String8 NativeExecRefresh(const String8& tag) const;
+	[[nodiscard]] String8 NativeQuadUniform(const String8& value, const String8& type, const String8& result) const;
+	[[nodiscard]] String8 NativeMaskBallot(const String8& predicate, const String8& result) const;
+	[[nodiscard]] String8 ResolveMaskAccesses(const ShaderInstruction& instruction, uint32_t index, const String8& source) const;
+	[[nodiscard]] bool EmitNativeMaskBit(const ShaderOperand& mask, const String8& result, String8* output) const;
+	// A guest Wave64 pixel program admitted as a partially populated wave on a
+	// host subgroup of at most 32 lanes: lane-indexed ops (row DPP, PERMLANE,
+	// READLANE over the ghost half) run only inside proven neutral regions or
+	// against proven-neutral sources.
+	[[nodiscard]] bool UsesFragmentWaveTier() const;
 	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
+	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
+	// Compute lowers it onto the shared %lds array; other stages carry it in
+	// a function-local spill array since only the writing lane can observe it.
+	[[nodiscard]] bool UsesDsAddtid() const;
+	[[nodiscard]] bool UsesDsAddtidLds() const;
 	[[nodiscard]] ShaderType GetHostShaderType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
 	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
 	[[nodiscard]] String8 FragmentTransportAnnotations() const;
@@ -151,6 +174,8 @@ public:
 	[[nodiscard]] String8 GuestDeviceAddressTypes(bool ulong_declared) const;
 	[[nodiscard]] String8 GuestDeviceAddressFunction() const;
 	[[nodiscard]] bool    EmitGuestLoad(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;
+	[[nodiscard]] String8 WrapVertexScalarBufferProbe(const ShaderInstruction& inst, uint32_t index,
+	                                                 uint32_t site, const String8& original);
 	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;
 	[[nodiscard]] bool EmitComputeWaveCarryInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
 	[[nodiscard]] bool EmitComputeWaveMbcnt(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
@@ -369,6 +394,7 @@ private:
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
 	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
+	mutable int                   m_native_wave_tier = -1;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;
@@ -399,6 +425,8 @@ bool FragmentTapQueryLodSelection(const ShaderCode& code, const ShaderFragmentTa
 String8 packed_half_shadow_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op, int shift);
+// Read-only numeric pointer: protects packed EXEC words from lane adaptation.
+SpirvValue operand_numeric_variable_to_str(ShaderOperand op, int shift = -1);
 SpirvValue buffer_index_variable_to_str(const ShaderInstruction& inst);
 SpirvValue mimg_address_to_str(const ShaderInstruction& inst, int address);
 bool operand_is_exec(ShaderOperand op);
@@ -407,6 +435,8 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load);
 String8 get_scc_check(SccCheck scc_check, int dst_num);
 bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usage);
+// True when the writable (storage) bank holds 3D images; the plan admits one shape per bank.
+bool UsesVolumeStorageImages(const ShaderBindResources* bind);
 bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);
 bool UsesUnsignedIntegerStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
 int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
@@ -425,6 +455,9 @@ bool HasLiveScalarSpill(const ShaderCode& code, uint32_t instruction_index, int 
 bool HasInvalidatedScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool HasFutureScalarSpillRead(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool UsesNativeLaneExchange(const ShaderCode& code);
+// M0-relative moves lower to a named register only when M0 is a proven literal
+// in the same basic block. Returns the literal through m0 on success.
+bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);

@@ -12,11 +12,13 @@
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Log.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -39,6 +41,7 @@ struct LabelCallbacks
 	uint64_t                   value64              = 0;
 	uint32_t*                  dst_gpu_addr32       = nullptr;
 	uint32_t                   value32              = 0;
+	uint64_t                   store_bytes          = 0;
 	LabelCallback callback_1 = nullptr;
 	LabelCallback callback_2 = nullptr;
 	uint64_t                   args[LABEL_ARGS_MAX] = {};
@@ -75,12 +78,15 @@ public:
 	void   DrainCompleted();
 	void   CompleteSubmission(SubmissionId submission);
 	[[nodiscard]] GpuWritebackResult WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
-	                                              GpuWritebackPageCache* page_cache);
+	                                              GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
+	void StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
+	                   LabelStoragePublication* publication);
+	[[nodiscard]] bool StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
 	void   ReleaseMappedRange(uint64_t addr, uint64_t bytes);
 
 private:
 	static void ThreadRun(void* data);
-	static void FireCallbacks(const Vector<LabelCallbacks>& fired_labels);
+	void FireCallbacks(const Vector<LabelCallbacks>& fired_labels);
 
 	bool        Remove(Label* label);
 	static void Destroy(Label* label);
@@ -113,12 +119,16 @@ LabelFenceRegistrationStatus LabelFenceRegistry::Register(uint64_t addr, uint64_
 	{
 		if (m_begin.At(i) == addr && m_end.At(i) == end)
 		{
+			EXIT_IF(m_pending.At(i) == UINT64_MAX);
+			m_pending[i]++;
 			return LabelFenceRegistrationStatus::AlreadyRegistered;
 		}
 	}
 
 	m_begin.Add(addr);
 	m_end.Add(end);
+	m_completed_version.Add(0);
+	m_pending.Add(1);
 	return LabelFenceRegistrationStatus::Inserted;
 }
 
@@ -157,6 +167,8 @@ LabelFenceReleaseStatus LabelFenceRegistry::ReleaseAllocation(uint64_t addr, uin
 		{
 			m_begin.RemoveAt(i);
 			m_end.RemoveAt(i);
+			m_completed_version.RemoveAt(i);
+			m_pending.RemoveAt(i);
 		}
 	}
 	return LabelFenceReleaseStatus::Released;
@@ -182,6 +194,193 @@ void LabelManager::RegisterFenceHole(uint64_t addr, uint64_t bytes)
 	if (result == LabelFenceRegistrationStatus::InvalidArgument) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: result == LabelFenceRegistrationStatus::InvalidArgument condition ignored (continuing)\n"); }
 }
 
+void LabelFenceRegistry::Complete(uint64_t addr, uint64_t bytes)
+{
+	EXIT_IF(bytes == 0 || bytes > UINT64_MAX - addr);
+	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	{
+		if (m_begin.At(i) == addr && m_end.At(i) == addr + bytes)
+		{
+			EXIT_IF(m_pending.At(i) == 0 || m_version == UINT64_MAX);
+			m_pending[i]--;
+			m_completed_version[i] = ++m_version;
+			return;
+		}
+	}
+	EXIT("Completion of unregistered label destination\n");
+}
+
+void LabelFenceRegistry::SnapshotExcluded(uint64_t acquired_version, Vector<uint64_t>* begin, Vector<uint64_t>* end) const
+{
+	EXIT_IF(begin == nullptr || end == nullptr);
+	begin->Clear();
+	end->Clear();
+	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	{
+		if (m_pending.At(i) != 0 || m_completed_version.At(i) > acquired_version)
+		{
+			begin->Add(m_begin.At(i));
+			end->Add(m_end.At(i));
+		}
+	}
+}
+
+bool LabelFenceRegistry::NeedsUpload(uint64_t addr, uint64_t bytes, uint64_t acquired_version) const
+{
+	EXIT_IF(bytes == 0 || bytes > UINT64_MAX - addr);
+	for (uint32_t i = 0; i < m_begin.Size(); ++i)
+	{
+		if (m_begin.At(i) < addr + bytes && addr < m_end.At(i) && m_completed_version.At(i) > acquired_version)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void LabelStoragePublication::Upload(const LabelFenceRegistry& registry, void* gpu_dst, const void* guest_src, uint64_t size,
+                                      GpuWritebackPageCache* page_cache)
+{
+	EXIT_IF(gpu_dst == nullptr || guest_src == nullptr || page_cache == nullptr || size == 0);
+	const auto base = reinterpret_cast<uint64_t>(guest_src);
+	EXIT_IF(size > UINT64_MAX - base);
+	std::memcpy(gpu_dst, guest_src, size);
+	page_cache->Reset(gpu_dst, size);
+	m_version = registry.Version();
+	m_fences.clear();
+	m_cpu_conflict = false;
+	Vector<uint64_t> begin;
+	Vector<uint64_t> end;
+	registry.Snapshot(&begin, &end);
+	for (uint32_t i = 0; i < begin.Size(); ++i)
+	{
+		const auto first = std::max(base, begin.At(i));
+		const auto last = std::min(base + size, end.At(i));
+		if (first >= last) { continue; }
+		FenceBaseline fence;
+		fence.offset = first - base;
+		fence.word_size = end.At(i) - begin.At(i) == sizeof(uint64_t) ? sizeof(uint64_t) : sizeof(uint32_t);
+		fence.whole_words = end.At(i) - begin.At(i) == sizeof(uint64_t)
+		                        ? first == begin.At(i) && last == end.At(i)
+		                        : (first - begin.At(i)) % sizeof(uint32_t) == 0 && (last - first) % sizeof(uint32_t) == 0;
+		const auto* source = static_cast<const uint8_t*>(gpu_dst) + fence.offset;
+		fence.bytes.assign(source, source + (last - first));
+		m_fences.push_back(std::move(fence));
+	}
+}
+
+bool LabelStoragePublication::NeedsUpload(const LabelFenceRegistry& registry, uint64_t addr, uint64_t size) const
+{
+	return m_cpu_conflict || registry.NeedsUpload(addr, size, m_version);
+}
+
+template <typename T> static bool PublishFenceWord(uint64_t address, const uint8_t* before, const uint8_t* after)
+{
+	static_assert(sizeof(std::atomic<T>) == sizeof(T));
+	static_assert(alignof(std::atomic<T>) <= alignof(T));
+	static_assert(std::atomic<T>::is_always_lock_free);
+	T expected = 0;
+	T desired = 0;
+	std::memcpy(&expected, before, sizeof(T));
+	std::memcpy(&desired, after, sizeof(T));
+	// Guest stores are native memory accesses. Use the same lock-free atomic
+	// guest-memory convention as the libc atomic HLE, rather than a check/copy
+	// window in which a newer CPU store could be overwritten.
+	return reinterpret_cast<std::atomic<T>*>(address)->compare_exchange_strong(expected, desired, std::memory_order_seq_cst);
+}
+
+GpuWritebackResult LabelStoragePublication::Copy(const LabelFenceRegistry& registry, void* guest_dst, const void* gpu_src,
+                                                  uint64_t size, GpuWritebackPageCache* page_cache,
+                                                  GpuWritebackPageCache::NotifyWriteFunc notify_write, void* notify_opaque)
+{
+	EXIT_IF(guest_dst == nullptr || gpu_src == nullptr || page_cache == nullptr);
+	const auto base = reinterpret_cast<uint64_t>(guest_dst);
+	EXIT_IF(size == 0 || size > UINT64_MAX - base);
+	Vector<uint64_t> begin;
+	Vector<uint64_t> end;
+	// Bulk page copies always retain the holes. Eligible words are published
+	// separately by CAS, making a concurrent CPU store authoritative as well.
+	registry.Snapshot(&begin, &end);
+	auto result = page_cache->CopyChangedPages(guest_dst, gpu_src, size, begin.GetData(), end.GetData(),
+	                                           static_cast<int>(begin.Size()), notify_write, notify_opaque);
+	registry.SnapshotExcluded(m_version, &begin, &end);
+	if (m_cpu_conflict) { return result; }
+	for (auto& fence: m_fences)
+	{
+		EXIT_IF(fence.offset > size || fence.bytes.size() > size - fence.offset);
+		const uint64_t word_size = fence.word_size;
+		if (!fence.whole_words || (base + fence.offset) % word_size != 0 || fence.bytes.size() % word_size != 0)
+		{
+			// A clipped or unaligned label has no proven whole-word atomic host
+			// publication here. Retain its protection instead of splitting a store.
+			continue;
+		}
+		for (uint64_t offset = 0; offset < fence.bytes.size(); offset += word_size)
+		{
+			const uint64_t address = base + fence.offset + offset;
+			bool wider_word = false;
+			if (word_size == sizeof(uint32_t))
+			{
+				for (const auto& other: m_fences)
+				{
+					if (other.word_size == sizeof(uint64_t) && base + other.offset < address + word_size &&
+					    address < base + other.offset + other.bytes.size())
+					{
+						wider_word = true;
+						break;
+					}
+				}
+			}
+			// Never publish a dword first and then discover a CPU conflict in the
+			// overlapping qword. The widest known store owns that atomic decision.
+			if (wider_word) { continue; }
+			uint8_t desired[sizeof(uint64_t)] {};
+			std::memcpy(desired, fence.bytes.data() + offset, word_size);
+			bool changed = false;
+			for (uint64_t byte = 0; byte < word_size; ++byte)
+			{
+				const uint64_t byte_address = address + byte;
+				bool excluded = false;
+				for (uint32_t i = 0; i < begin.Size(); ++i)
+				{
+					if (begin.At(i) <= byte_address && byte_address < end.At(i)) { excluded = true; break; }
+				}
+				if (!excluded)
+				{
+					const auto value = static_cast<const uint8_t*>(gpu_src)[fence.offset + offset + byte];
+					changed = changed || value != desired[byte];
+					desired[byte] = value;
+				}
+			}
+			if (!changed) { continue; }
+			notify_write(notify_opaque, address, word_size);
+			const auto* expected = fence.bytes.data() + offset;
+			const bool published = word_size == sizeof(uint64_t) ? PublishFenceWord<uint64_t>(address, expected, desired)
+			                                                       : PublishFenceWord<uint32_t>(address, expected, desired);
+			if (!published)
+			{
+				// Do not retry a stale GPU delta after a CPU ABA. The next genuinely
+				// quiescent use must acquire fresh guest bytes by uploading again.
+				m_cpu_conflict = true;
+				return result;
+			}
+			result.content_changed = true;
+			// Overlapping 32/64-bit reservations share the same guest bytes; a
+			// successful publication is not a CPU conflict for the other view.
+			for (auto& other: m_fences)
+			{
+				const uint64_t first = std::max(address, base + other.offset);
+				const uint64_t last = std::min(address + word_size, base + other.offset + other.bytes.size());
+				if (first < last)
+				{
+					std::memcpy(other.bytes.data() + (first - base - other.offset), desired + (first - address), last - first);
+				}
+			}
+		}
+	}
+	return result;
+}
+
 void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 {
 	static const bool eop_trace = (std::getenv("KYTY_EOP_TRACE") != nullptr);
@@ -203,12 +402,9 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 	// Phase 2: publish EOP fence values after all WriteBacks.
 	for (int i = 0; i < static_cast<int>(fired_labels.Size()); i++)
 	{
-		if (!allow_store.At(i))
-		{
-			continue;
-		}
+		Core::LockGuard publication_lock(m_mutex);
 		auto& label = fired_labels.At(i);
-		if (label.dst_gpu_addr64 != nullptr)
+		if (allow_store.At(i) && label.dst_gpu_addr64 != nullptr)
 		{
 			*label.dst_gpu_addr64 = label.value64;
 
@@ -216,12 +412,18 @@ void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 			       reinterpret_cast<uint64_t>(label.dst_gpu_addr64), label.value64);
 		}
 
-		if (label.dst_gpu_addr32 != nullptr)
+		if (allow_store.At(i) && label.dst_gpu_addr32 != nullptr)
 		{
 			*label.dst_gpu_addr32 = label.value32;
 
 			KYTY_LOG_DEBUG(FG_BRIGHT_GREEN "EndOfPipe Signal!!! [0x%016" PRIx64 "] <- 0x%08" PRIx32 "\n" FG_DEFAULT,
 			       reinterpret_cast<uint64_t>(label.dst_gpu_addr32), label.value32);
+		}
+		if (label.store_bytes != 0)
+		{
+			const auto address = label.dst_gpu_addr64 != nullptr ? reinterpret_cast<uint64_t>(label.dst_gpu_addr64)
+			                                                       : reinterpret_cast<uint64_t>(label.dst_gpu_addr32);
+			m_fence_holes.Complete(address, label.store_bytes);
 		}
 	}
 
@@ -357,7 +559,7 @@ void LabelManager::ThreadRun(void* data)
 			Destroy(label);
 		}
 
-		FireCallbacks(fired_labels);
+		manager->FireCallbacks(fired_labels);
 
 		Core::Thread::SleepMicro(100);
 	}
@@ -439,56 +641,28 @@ void LabelManager::CompleteSubmission(SubmissionId submission)
 }
 
 GpuWritebackResult LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
-                                              GpuWritebackPageCache* page_cache)
+                                              GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
-	EXIT_IF(guest_dst == nullptr);
-	EXIT_IF(gpu_src == nullptr);
-	EXIT_IF(page_cache == nullptr);
+	EXIT_IF(publication == nullptr);
+	// The exclusion snapshot and guest copy must be one transaction with label
+	// stores. Otherwise a newer label can publish between those two operations.
+	Core::LockGuard lock(m_mutex);
+	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { (void)GpuMemoryNotifyHostWrite(address, bytes); };
+	return publication->Copy(m_fence_holes, guest_dst, gpu_src, size, page_cache, notify_write, nullptr);
+}
 
-	Vector<uint64_t> hole_begin;
-	Vector<uint64_t> hole_end;
+void LabelManager::StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                                  LabelStoragePublication* publication)
+{
+	EXIT_IF(publication == nullptr);
+	Core::LockGuard lock(m_mutex);
+	publication->Upload(m_fence_holes, gpu_dst, guest_src, size, page_cache);
+}
 
-	{
-		Core::LockGuard lock(m_mutex);
-		m_fence_holes.Snapshot(&hole_begin, &hole_end);
-	}
-
-	static const bool eop_trace = (std::getenv("KYTY_EOP_TRACE") != nullptr);
-	if (eop_trace)
-	{
-		const auto* dst_bytes = static_cast<const uint8_t*>(guest_dst);
-		const auto* src_bytes = static_cast<const uint8_t*>(gpu_src);
-		const uint64_t base   = reinterpret_cast<uint64_t>(guest_dst);
-		for (int i = 0; i < static_cast<int>(hole_begin.Size()); i++)
-		{
-			const uint64_t a = hole_begin.At(i);
-			const uint64_t b = hole_end.At(i);
-			if (a < base || b > base + size || b <= a || (b - a) > 8u)
-			{
-				continue;
-			}
-			uint64_t before = 0;
-			uint64_t after  = 0;
-			const uint64_t n = b - a;
-			std::memcpy(&before, dst_bytes + (a - base), static_cast<size_t>(n));
-			std::memcpy(&after, src_bytes + (a - base), static_cast<size_t>(n));
-			if (before != 0 && after == 0)
-			{
-				static std::atomic<uint32_t> clobber_logs {0};
-				if (clobber_logs.fetch_add(1) < 32u)
-				{
-					KYTY_LOG_DEBUG( "EOP_HOLE_PROTECT addr=0x%016" PRIx64 " keep=0x%016" PRIx64 " would_clobber=0\n", a, before);
-				}
-			}
-		}
-	}
-
-	const auto notify_write = [](void* /*opaque*/, uint64_t address, uint64_t bytes)
-	{
-		(void)GpuMemoryNotifyHostWrite(address, bytes);
-	};
-	return page_cache->CopyChangedPages(guest_dst, gpu_src, size, hole_begin.GetData(), hole_end.GetData(),
-	                                    static_cast<int>(hole_begin.Size()), notify_write, nullptr);
+bool LabelManager::StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication)
+{
+	Core::LockGuard lock(m_mutex);
+	return publication.NeedsUpload(m_fence_holes, addr, size);
 }
 
 void LabelManager::ReleaseMappedRange(uint64_t addr, uint64_t bytes)
@@ -517,6 +691,7 @@ Label* LabelManager::Create64(GraphicContext* ctx, uint64_t* dst_gpu_addr, uint6
 	label->callbacks.value64        = value;
 	label->callbacks.dst_gpu_addr32 = nullptr;
 	label->callbacks.value32        = 0;
+	label->callbacks.store_bytes    = dst_gpu_addr == nullptr ? 0 : sizeof(uint64_t);
 	label->event                    = nullptr;
 	label->device                   = ctx->device;
 	label->callbacks.callback_1     = callback_1;
@@ -562,6 +737,7 @@ Label* LabelManager::Create32(GraphicContext* ctx, uint32_t* dst_gpu_addr, uint3
 	label->callbacks.value32        = value;
 	label->callbacks.dst_gpu_addr64 = nullptr;
 	label->callbacks.value64        = 0;
+	label->callbacks.store_bytes    = dst_gpu_addr == nullptr ? 0 : LabelDwordStoreSizeBytes(dst_word_count);
 	label->event                    = nullptr;
 	label->device                   = ctx->device;
 	label->callbacks.callback_1     = callback_1;
@@ -663,6 +839,12 @@ void LabelManager::Set(CommandBuffer* buffer, Label* label)
 	if (!m_labels.IndexValid(index)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_labels.IndexValid(index) condition ignored (continuing)\n"); }
 
 	if (label->status != LabelStatus::New && label->status != LabelStatus::NotActive) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: label->status != LabelStatus::New && label->status != LabelStatus::NotActive condition ignored (continuing)\n"); }
+	if (label->status == LabelStatus::NotActive && label->callbacks.store_bytes != 0)
+	{
+		const auto address = label->callbacks.dst_gpu_addr64 != nullptr ? reinterpret_cast<uint64_t>(label->callbacks.dst_gpu_addr64)
+		                                                                 : reinterpret_cast<uint64_t>(label->callbacks.dst_gpu_addr32);
+		RegisterFenceHole(address, label->callbacks.store_bytes);
+	}
 
 	SubmissionId submission;
 	if (!buffer->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !buffer->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
@@ -739,11 +921,24 @@ void LabelCompleteSubmission(SubmissionId submission)
 }
 
 GpuWritebackResult LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
-                                     GpuWritebackPageCache* page_cache)
+                                     GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
 	EXIT_IF(g_label_manager == nullptr);
 
-	return g_label_manager->WriteBackCopy(guest_dst, gpu_src, size, page_cache);
+	return g_label_manager->WriteBackCopy(guest_dst, gpu_src, size, page_cache, publication);
+}
+
+void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
+                        LabelStoragePublication* publication)
+{
+	EXIT_IF(g_label_manager == nullptr);
+	g_label_manager->StorageUpload(gpu_dst, guest_src, size, page_cache, publication);
+}
+
+bool LabelStorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication)
+{
+	EXIT_IF(g_label_manager == nullptr);
+	return g_label_manager->StorageNeedsUpload(addr, size, publication);
 }
 
 void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes)

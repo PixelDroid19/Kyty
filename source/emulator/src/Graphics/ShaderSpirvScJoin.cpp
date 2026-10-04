@@ -763,7 +763,7 @@ uint32_t ScJoinFindOwner(const ShaderCode& code, uint32_t pc, uint32_t join_pc, 
 	}
 	if (candidates.Size() == 0)
 	{
-		return 0;
+		return kScJoinNoSource;
 	}
 	// Deepest nesting first; tie-break highest src (innermost cascade).
 	uint32_t best      = candidates[0];
@@ -783,7 +783,7 @@ uint32_t ScJoinFindOwner(const ShaderCode& code, uint32_t pc, uint32_t join_pc, 
 
 uint32_t ScJoinFindParent(const ShaderCode& code, uint32_t src, uint32_t join_pc, const Vector<uint32_t>& sc_join_srcs)
 {
-	uint32_t parent = 0;
+	uint32_t parent = kScJoinNoSource;
 	for (int i = 0; i < sc_join_srcs.Size(); i++)
 	{
 		const uint32_t cand = sc_join_srcs[i];
@@ -793,7 +793,7 @@ uint32_t ScJoinFindParent(const ShaderCode& code, uint32_t src, uint32_t join_pc
 		}
 		if (ScJoinIsNestedIn(code, cand, src, join_pc))
 		{
-			if (parent == 0 || cand > parent)
+			if (parent == kScJoinNoSource || cand > parent)
 			{
 				parent = cand;
 			}
@@ -821,6 +821,13 @@ void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint3
 		}
 		const auto taken = ShaderLabel(cand);
 		if (taken.GetDst() <= cand.pc)
+		{
+			continue;
+		}
+		// A terminating discard arm uses a local fallthrough merge, not a
+		// reconvergence at its destination. Publishing an orphan sc_join there
+		// would add an extra predecessor to a real, separately emitted kill body.
+		if (code.ReadBlock(taken.GetDst()).is_discard)
 		{
 			continue;
 		}

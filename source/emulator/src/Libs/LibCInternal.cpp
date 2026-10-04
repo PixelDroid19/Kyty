@@ -5,6 +5,7 @@
 #include "Kyty/Core/String.h"
 
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Printf.h"
@@ -47,9 +48,7 @@ int KYTY_SYSV_ABI fflush(FILE* stream)
 {
 	PRINT_NAME();
 
-	if (stream != stdout && stream != stderr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	return ::fflush(stream);
+	return Kernel::FileSystem::FlushStreams(stream);
 }
 
 void* KYTY_SYSV_ABI memset(void* s, int c, size_t n)
@@ -245,8 +244,8 @@ LIB_DEFINE(InitLibcInternal_1)
 	LIB_OBJECT("ZT4ODD2Ts9o", &LibcInternal::g_need_flag);
 	// stdin Object triad: guest import tables list 1TDo-ImqkJc immediately before
 	// the registered stdout NID 2sWzhYqFH4E and stderr H8AprKeZtNg (libc_v1).
-	LIB_OBJECT("1TDo-ImqkJc", stdin);
-	LIB_OBJECT("2sWzhYqFH4E", stdout);
+	LIB_OBJECT("1TDo-ImqkJc", Kernel::FileSystem::StandardStream(0));
+	LIB_OBJECT("2sWzhYqFH4E", Kernel::FileSystem::StandardStream(1));
 
 	LIB_FUNC("GMpvxPFW924", LibcInternal::vprintf);
 	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);

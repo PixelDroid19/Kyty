@@ -1609,9 +1609,9 @@ const char EMBEDDED_SHADER_PS_0[] = R"(
 )";
 
 const char EXECZ[] = R"(
-        %z191_<index> = OpLoad %uint %exec_lo
+        %z191_<index> = OpLoad %uint %packed_exec_lo
         %z192_<index> = OpIEqual %bool %z191_<index> %uint_0
-        %z193_<index> = OpLoad %uint %exec_hi
+        %z193_<index> = OpLoad %uint %packed_exec_hi
         %z194_<index> = OpIEqual %bool %z193_<index> %uint_0
         %z195_<index> = OpLogicalAnd %bool %z192_<index> %z194_<index>
         %z196_<index> = OpSelect %uint %z195_<index> %uint_1 %uint_0
@@ -1657,11 +1657,10 @@ const char SCC_OVERFLOW_ADD_1[] = R"(
 )";
 
 const char SCC_OVERFLOW_SUB_1[] = R"(
-        %so1_124_<index> = OpExtInst %int %GLSL_std_450 SSign %t0_<index>
-        %so1_127_<index> = OpExtInst %int %GLSL_std_450 SSign %t1_<index>
-        %so1_129_<index> = OpLoad %uint %<dst>
-        %so1_130_<index> = OpBitcast %int %so1_129_<index>
-        %so1_131_<index> = OpExtInst %int %GLSL_std_450 SSign %so1_130_<index>
+        ; Compare sign bits, not signum: zero has the same sign bit as positive values.
+        %so1_124_<index> = OpShiftRightArithmetic %int %t0_<index> %uint_31
+        %so1_127_<index> = OpShiftRightArithmetic %int %t1_<index> %uint_31
+        %so1_131_<index> = OpShiftRightArithmetic %int %t_<index> %uint_31
         %so1_135_<index> = OpINotEqual %bool %so1_124_<index> %so1_127_<index>
         %so1_138_<index> = OpINotEqual %bool %so1_131_<index> %so1_124_<index>
         %so1_139_<index> = OpLogicalAnd %bool %so1_135_<index> %so1_138_<index>

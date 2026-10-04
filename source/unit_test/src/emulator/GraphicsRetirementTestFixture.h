@@ -13,7 +13,7 @@ using namespace Libs::Graphics;
 
 struct RetirementTestFixtureState
 {
-	static constexpr uint32_t kMaxBackings = 130u;
+	static constexpr uint32_t kMaxBackings = 132u;
 
 	std::array<uint32_t, kMaxBackings> delete_counts {};
 	uint32_t                           writeback_calls = 0;

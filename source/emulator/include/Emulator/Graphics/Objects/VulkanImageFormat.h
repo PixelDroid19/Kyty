@@ -23,7 +23,20 @@ enum class GuestImageNumericType
 	SignedInteger,
 };
 
-// Resolve both legacy dfmt/nfmt and Gen5 unified image formats from one table.
+// Historical BC1 package fixtures use catalog identifier 133, which is
+// RGB565 in the raw T# namespace. Only catalog readers/fixtures may
+// translate this value; descriptor consumers always pass the raw hardware ID.
+enum class Gen5CatalogImageFormat: uint16_t
+{
+	Bc1Unorm = 133,
+};
+
+[[nodiscard]] constexpr uint16_t Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat format)
+{
+	return format == Gen5CatalogImageFormat::Bc1Unorm ? 169u : 0u;
+}
+
+// fmt is the raw nine-bit Gen5 T# FORMAT field. fmt=0 selects legacy dfmt/nfmt.
 // Unsupported usage/format combinations return VK_FORMAT_UNDEFINED; callers
 // must reject them instead of substituting another host format.
 [[nodiscard]] VkFormat VulkanResolveGuestImageFormat(GuestImageUsage usage, uint8_t dfmt, uint8_t nfmt, uint16_t fmt);

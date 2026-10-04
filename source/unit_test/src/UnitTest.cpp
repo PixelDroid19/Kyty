@@ -1,5 +1,7 @@
 #include "Kyty/UnitTest.h"
 
+#include <cstdlib>
+
 namespace Kyty::UnitTest {
 
 UT_LINK(CoreCharString);
@@ -23,7 +25,24 @@ UT_LINK(DevToolsLifecycle);
 UT_LINK(DevToolsExportCatalog);
 #endif
 UT_LINK(EmulatorGraphicsState);
+UT_LINK(EmulatorGraphicsResources);
+UT_LINK(EmulatorGeState);
+UT_LINK(EmulatorComputeModes);
+UT_LINK(EmulatorNativeWaveAdmission);
+UT_LINK(EmulatorNativeWaveSnapshot);
+UT_LINK(EmulatorVertexProgram);
+UT_LINK(EmulatorNggPassthroughProof);
+UT_LINK(EmulatorNggFront);
+UT_LINK(EmulatorFragmentMaskFlow);
+UT_LINK(EmulatorComputeColorFill);
+UT_LINK(EmulatorSyncOnAddressLibrary);
+UT_LINK(EmulatorImeDialog);
+UT_LINK(EmulatorPrimitiveState);
+UT_LINK(EmulatorShaderArithmetic);
+UT_LINK(EmulatorShaderMaskValues);
+UT_LINK(EmulatorShaderLdsBounds);
 UT_LINK(EmulatorGraphicsDirtyTracking);
+UT_LINK(EmulatorLabelPublication);
 UT_LINK(EmulatorGuestDeviceAddress);
 UT_LINK(EmulatorKernelMemory);
 UT_LINK(EmulatorKernelTime);
@@ -32,6 +51,7 @@ UT_LINK(EmulatorLibCTime);
 UT_LINK(EmulatorGraphicsPackets);
 UT_LINK(EmulatorTileDetile);
 UT_LINK(EmulatorKernelProcess);
+UT_LINK(EmulatorAmprRead);
 UT_LINK(EmulatorNp);
 UT_LINK(EmulatorNpTrophy2);
 UT_LINK(EmulatorHttp2);
@@ -54,6 +74,18 @@ UT_LINK(AgentJson);
 UT_LINK(AgentTools);
 UT_LINK(EmulatorExactStagingPool);
 UT_LINK(EmulatorFiber);
+UT_LINK(EmulatorFiberOwnership);
+UT_LINK(EmulatorVideoOutFlipPending);
+UT_LINK(EmulatorVideoOutLifecycle);
+UT_LINK(EmulatorControllerSources);
+UT_LINK(EmulatorFileSystemPath);
+UT_LINK(EmulatorFileDescriptors);
+UT_LINK(EmulatorPlayGo);
+// Also registers EmulatorFragmentNativeWaveTier from this translation unit.
+UT_LINK(EmulatorFragmentNeutralRegion);
+UT_LINK(EmulatorFragmentParameterState);
+UT_LINK(EmulatorFragmentTransportAdmission);
+UT_LINK(EmulatorFragmentTransportLayout);
 UT_LINK(EmulatorGpuDeferredDeletionQueue);
 UT_LINK(EmulatorGpuMemoryFault);
 UT_LINK(EmulatorGpuMemoryRangeQueryCache);
@@ -66,11 +98,14 @@ UT_LINK(EmulatorLoaderUnwind);
 UT_LINK(EmulatorLog);
 UT_LINK(EmulatorModuleDiscovery);
 UT_LINK(EmulatorShaderMimg);
+UT_LINK(EmulatorShaderExport);
 UT_LINK(EmulatorShaderScalarCompare);
 UT_LINK(EmulatorShaderScalarBit);
 UT_LINK(EmulatorShaderResourcePointers);
 UT_LINK(EmulatorShaderResourceBounds);
 UT_LINK(EmulatorShaderDescriptorLimits);
+UT_LINK(EmulatorShaderDescriptorLayoutPlan);
+UT_LINK(EmulatorShaderMetadataResourceIndex);
 UT_LINK(EmulatorShaderDynamicMappings);
 UT_LINK(EmulatorShaderGetpc);
 UT_LINK(EmulatorShaderProgramAddress);
@@ -82,11 +117,11 @@ UT_LINK(EmulatorComputeWaveResourceAnalysis);
 UT_LINK(EmulatorComputeWaveVulkan);
 UT_LINK(EmulatorComputeWaveMasks);
 UT_LINK(EmulatorComputeWaveAnalysis);
+UT_LINK(EmulatorComputeWaveNativeEquivalence);
 UT_LINK(EmulatorComputeWaveLds);
 UT_LINK(EmulatorComputeWaveAlu);
 UT_LINK(EmulatorComputeWaveScalar);
 UT_LINK(EmulatorComputeWaveControlFlow);
-UT_LINK(EmulatorComputeWaveLdsSafety);
 UT_LINK(EmulatorComputeWaveWaitcnt);
 UT_LINK(EmulatorShaderSmemEncoding);
 UT_LINK(EmulatorComputeWaveScalarBuffer);
@@ -97,6 +132,10 @@ UT_LINK(EmulatorShaderScalarPack);
 UT_LINK(EmulatorShaderVectorPack);
 UT_LINK(EmulatorShaderMaskAnalysis);
 UT_LINK(EmulatorShaderReverseBorrow);
+UT_LINK(EmulatorShaderLaneExec);
+UT_LINK(EmulatorShaderEmitterPreconditions);
+UT_LINK(EmulatorShaderSopkDecode);
+UT_LINK(EmulatorDiagnosticDump);
 UT_LINK(EmulatorShaderTranslationCache);
 UT_LINK(EmulatorSymbolDatabase);
 UT_LINK(EmulatorSystemContentPort);
@@ -105,6 +144,13 @@ UT_LINK(EmulatorVulkanQueueIdentity);
 
 void UnitTestSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
+	// Earlier suites can leave worker threads alive. Re-exec the death-test
+	// child rather than inheriting possibly locked runtime state after fork.
+	// Explicit environment/command-line selections still take precedence.
+	if (std::getenv("GTEST_DEATH_TEST_STYLE") == nullptr)
+	{
+		::testing::FLAGS_gtest_death_test_style = "threadsafe";
+	}
 	testing::InitGoogleTest(parent->GetArgc(), parent->GetArgv());
 }
 

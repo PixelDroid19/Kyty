@@ -18,7 +18,7 @@ using namespace Libs::Graphics;
 // extract.
 static constexpr uint32_t kMovSdwaW0 = 0x7e0c02f9u; // v_mov_b32_sdwa v6, <src0>
 static constexpr uint32_t kCtrlBase  = 0x00000616u; // src0=v22, dst_sel=DWORD, dst_u=PAD, sel=BYTE_0
-static constexpr uint32_t kGetpc     = 0xbe941f00u; // s_getpc_b64 s[20:21]; outside the paired set
+static constexpr uint32_t kUnsupportedSentinel = 0xc8000001u; // v_interp_p1_f32 v0, v1, attr0.x; pixel-only, outside the paired compute set
 static constexpr uint32_t kEnd       = 0xbf810000u; // s_endpgm
 
 static void InitializeConfig()
@@ -65,7 +65,7 @@ TEST(EmulatorComputeWaveSdwa, AdmitsZeroExtendExtractMov)
 	for (const uint32_t sel: {0u, 1u, 2u, 3u, 4u, 5u, 6u})
 	{
 		const uint32_t ctrl = kCtrlBase | (sel << 16u);
-		ExpectFirstUnsupportedPc({kMovSdwaW0, ctrl, kGetpc, kEnd}, 0x8u, "SGetpcB64");
+		ExpectFirstUnsupportedPc({kMovSdwaW0, ctrl, kUnsupportedSentinel, kEnd}, 0x8u, "VInterpP1F32");
 	}
 }
 
@@ -86,25 +86,34 @@ TEST(EmulatorComputeWaveSdwa, AdmitsCompleteProgramWithExtractMov)
 	    ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorComputeWaveSdwa, RejectsEveryNonContractControlField)
+TEST(EmulatorComputeWaveSdwa, RejectsUndefinedOrUnrepresentableControlFields)
 {
-	// Each dword flips exactly one field off the admitted BYTE_0 tuple:
-	// src0_sext, src0_neg, src0_abs, CLMP, OMOD=1, DST_U=PRESERVE,
-	// DST_SEL=BYTE_0, SGPR source (S0=1), reserved select 7, reserved bit 22,
-	// reserved bit 24.
-	for (const uint32_t ctrl:
-	     {0x00080616u, 0x00100616u, 0x00200616u, 0x00002616u, 0x00004616u, 0x00001616u, 0x00000016u, 0x00800616u, 0x00070616u,
-	      0x00400616u, 0x01000616u})
+	// Each dword flips exactly one field off the admitted BYTE_0 tuple. A sign
+	// extension, a partial destination select and the reserved encodings (source
+	// select 7, bits 22 and 24) have no lowering and are refused at the SDWA mov.
+	for (const uint32_t ctrl: {0x00080616u, 0x00000016u, 0x00070616u, 0x00400616u, 0x01000616u})
 	{
-		ExpectFirstUnsupportedPc({kMovSdwaW0, ctrl, kGetpc, kEnd}, 0x0u, "SDWA");
+		ExpectFirstUnsupportedPc({kMovSdwaW0, ctrl, kUnsupportedSentinel, kEnd}, 0x0u, "SDWA");
 	}
 }
 
-TEST(EmulatorComputeWaveSdwa, RejectsSdwaOnOtherVop1Opcodes)
+TEST(EmulatorComputeWaveSdwa, LowersFoldedModifiersThroughTheGenericVectorPath)
 {
-	// v_not_b32_sdwa keeps the same operand tuple but is a different operation.
+	// src0_neg, src0_abs, CLMP, OMOD=1, DST_U=PRESERVE (inert with a DWORD
+	// destination) and an SGPR source are folded into operands by the decoder, so
+	// the generic lowering admits them and the first unsupported pc is the sentinel.
+	for (const uint32_t ctrl: {0x00100616u, 0x00200616u, 0x00002616u, 0x00004616u, 0x00001616u, 0x00800616u})
+	{
+		ExpectFirstUnsupportedPc({kMovSdwaW0, ctrl, kUnsupportedSentinel, kEnd}, 0x8u, "VInterpP1F32");
+	}
+}
+
+TEST(EmulatorComputeWaveSdwa, LowersSdwaOnOtherVop1OpcodesThroughTheGenericVectorPath)
+{
+	// v_not_b32_sdwa keeps the operand tuple of the extract mov but is another
+	// operation; only the extract tuple is claimed by the SDWA extract path.
 	const uint32_t not_sdwa = (kMovSdwaW0 & ~0x0001fe00u) | (0x37u << 9u);
-	ExpectFirstUnsupportedPc({not_sdwa, kCtrlBase, kGetpc, kEnd}, 0x0u, "SDWA");
+	ExpectFirstUnsupportedPc({not_sdwa, kCtrlBase, kUnsupportedSentinel, kEnd}, 0x8u, "VInterpP1F32");
 }
 
 // VOPC SDWAB words verified against the LLVM gfx1030 assembler.
@@ -120,25 +129,30 @@ TEST(EmulatorComputeWaveSdwa, AdmitsDwordSelectCompareMasks)
 	for (const uint32_t ctrl: {0x06868e81u /*const src0*/, 0x06869080u /*s16, const 0*/, 0x06068e14u /*v20 src0*/,
 	                           0x86868e81u /*sgpr src1*/, 0x06860081u /*VCC destination*/, 0x06868f81u /*s15 pair*/})
 	{
-		ExpectFirstUnsupportedPc({kCmpEqSdwaW0, ctrl, kGetpc, kEnd}, 0x8u, "SGetpcB64");
+		ExpectFirstUnsupportedPc({kCmpEqSdwaW0, ctrl, kUnsupportedSentinel, kEnd}, 0x8u, "VInterpP1F32");
 	}
-	ExpectFirstUnsupportedPc({kCmpNeSdwaW0, 0x06868e81u, kGetpc, kEnd}, 0x8u, "SGetpcB64");
+	ExpectFirstUnsupportedPc({kCmpNeSdwaW0, 0x06868e81u, kUnsupportedSentinel, kEnd}, 0x8u, "VInterpP1F32");
 }
 
-TEST(EmulatorComputeWaveSdwa, RejectsNonContractCompareControls)
+TEST(EmulatorComputeWaveSdwa, RejectsUndefinedOrSignExtendedCompareControls)
 {
-	// src0_sel=BYTE_0, src1_sel=BYTE_0, src0_sext, src0_neg, src0_abs,
-	// src1_sext, src1_neg, src1_abs, reserved bit 22, reserved bit 30.
-	for (const uint32_t ctrl:
-	     {0x06808e81u, 0x00808e81u, 0x068e8e81u, 0x06968e81u, 0x06a68e81u, 0x0e868e81u, 0x16868e81u, 0x26868e81u, 0x06c68e81u,
-	      0x46868e81u})
+	// src0_sext, src1_sext, reserved bit 22, reserved bit 30 and the NULL mask
+	// destination have no compare lowering.
+	for (const uint32_t ctrl: {0x068e8e81u, 0x0e868e81u, 0x06c68e81u, 0x46868e81u})
 	{
-		ExpectFirstUnsupportedPc({kCmpEqSdwaW0, ctrl, kGetpc, kEnd}, 0x0u, "SDWA");
+		ExpectFirstUnsupportedPc({kCmpEqSdwaW0, ctrl, kUnsupportedSentinel, kEnd}, 0x0u, "SDWA");
 	}
-	// Destination pair aliasing an SGPR source stays outside the compare set.
-	ExpectFirstUnsupportedPc({kCmpEqSdwaW0, 0x06868e0eu /*s14 vs s14*/, kGetpc, kEnd}, 0x0u, "SDWA");
 	// The encoding reserved for a NULL mask destination is not a mask pair.
-	ExpectFirstUnsupportedPc({kCmpEqSdwaW0, 0x0686fe81u /*sdst=0x7f null*/, kGetpc, kEnd}, 0x0u, "SDWA");
+	ExpectFirstUnsupportedPc({kCmpEqSdwaW0, 0x0686fe81u /*sdst=0x7f null*/, kUnsupportedSentinel, kEnd}, 0x0u, "SDWA");
 }
 
+TEST(EmulatorComputeWaveSdwa, LowersSelectsAndFoldedModifiersOfCompareThroughTheGenericPath)
+{
+	// src0/src1 BYTE_0 selects, source neg/abs, and a destination pair that
+	// aliases an SGPR source (operands are read before the mask is written).
+	for (const uint32_t ctrl: {0x06808e81u, 0x00808e81u, 0x06968e81u, 0x06a68e81u, 0x16868e81u, 0x26868e81u, 0x06868e0eu /*s14 vs s14*/})
+	{
+		ExpectFirstUnsupportedPc({kCmpEqSdwaW0, ctrl, kUnsupportedSentinel, kEnd}, 0x8u, "VInterpP1F32");
+	}
+}
 UT_END();

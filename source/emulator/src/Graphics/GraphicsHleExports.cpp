@@ -193,6 +193,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("6UzEidRZwkg", Gen5Driver::GraphicsDriverSubmitMultiDcbs);
 	LIB_FUNC("gSRnr79F8tQ", Gen5Driver::GraphicsDriverSubmitAcb);
 	LIB_FUNC("w2rJhmD+dsE", Gen5Driver::GraphicsDriverAddEqEvent);
+	LIB_FUNC("Zw7uUVPulbw", Gen5Driver::GraphicsDriverGetEqContextId);
 	LIB_FUNC("XlNp7jzGiPo", Gen5Driver::GraphicsDriverSetTFRing);
 	LIB_FUNC("MM4IZSEYytQ", Gen5Driver::GraphicsDriverSetHsOffchipParam);
 }

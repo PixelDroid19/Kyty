@@ -1,10 +1,12 @@
 #include "GraphicsRunInternal.h"
+#include "GraphicsRunWaitPolicy.h"
 
 #include "Emulator/Config.h"
 
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -59,22 +61,33 @@ void require_publication_success(GpuSubmissionPublicationResult result, const ch
 	}
 }
 
+uint64_t ParseSuspendedWaitTimeoutMs(const char* value)
+{
+	if (value == nullptr || *value == '\0')
+	{
+		return 0;
+	}
+	constexpr uint64_t max_timeout_ms = std::numeric_limits<uint64_t>::max() / 1'000'000ull;
+	uint64_t           timeout_ms     = 0;
+	for (const char* digit = value; *digit != '\0'; ++digit)
+	{
+		if (*digit < '0' || *digit > '9')
+		{
+			return 0;
+		}
+		const auto next = static_cast<uint64_t>(*digit - '0');
+		if (timeout_ms > (max_timeout_ms - next) / 10u)
+		{
+			return 0;
+		}
+		timeout_ms = timeout_ms * 10u + next;
+	}
+	return timeout_ms;
+}
+
 uint64_t SuspendedWaitTimeoutMs()
 {
-	static const uint64_t timeout_ms = [] {
-		const char* value = std::getenv("KYTY_WAIT_TIMEOUT_MS");
-		if (value == nullptr || *value == '\0')
-		{
-			return uint64_t {1000};
-		}
-		char* end = nullptr;
-		const auto parsed = std::strtoull(value, &end, 10);
-		if (end == value || *end != '\0')
-		{
-			return uint64_t {1000};
-		}
-		return static_cast<uint64_t>(parsed);
-	}();
+	static const uint64_t timeout_ms = ParseSuspendedWaitTimeoutMs(std::getenv("KYTY_WAIT_TIMEOUT_MS"));
 	return timeout_ms;
 }
 

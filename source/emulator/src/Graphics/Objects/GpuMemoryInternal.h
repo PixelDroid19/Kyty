@@ -158,6 +158,12 @@ public:
 		auto first_page = CalcPageId(vaddr);
 		auto last_page  = CalcPageId(vaddr + size - 1);
 		EXIT_IF(last_page < first_page);
+		if (first_page == last_page)
+		{
+			// Insert keeps each bucket unique. Vector copies share immutable data
+			// until mutation, so this preserves a stable result without rebuilding it.
+			return m_map.Get(first_page);
+		}
 		for (auto page = first_page; page <= last_page; page++)
 		{
 			for (int id: m_map.Get(page))
@@ -464,6 +470,9 @@ private:
 
 	[[nodiscard]] String create_dbg_exit(const String& msg, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
 	                                     const Vector<OverlappedBlock>& others, GpuMemoryObjectType type);
+	// One line per overlapping parent (type, relation, scenario, parent count, range, raw parameters)
+	// plus the parameters of the object being created: what a refused overlap needs to be classified.
+	[[nodiscard]] String create_dbg_parents(int heap_id, const Vector<OverlappedBlock>& others, const GpuObject& info);
 
 	Core::Mutex m_mutex;
 	// Serializes logical object graph mutations while VersionBacking temporarily
@@ -475,6 +484,8 @@ private:
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;
 	uint32_t m_transient_creates_since_retirement = 0;
+	uint32_t m_retirement_heap_cursor            = 0;
+	uint32_t m_retirement_object_cursor          = 0;
 
 	MaterializationCache m_materialization_cache;
 	AllocatedValidationCache m_allocated_validation_cache;

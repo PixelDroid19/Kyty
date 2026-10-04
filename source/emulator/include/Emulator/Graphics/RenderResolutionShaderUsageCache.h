@@ -10,6 +10,8 @@
 
 namespace Kyty::Libs::Graphics {
 
+class ShaderNativeWaveVerdict;
+
 struct RenderResolutionShaderUsageKey
 {
 	uint64_t address            = 0;
@@ -23,6 +25,8 @@ struct RenderResolutionShaderAnalysis
 {
 	RenderShaderCoordinateUsage usage;
 	std::shared_ptr<const ShaderCode> code;
+	// Per-program native-wave verdict, shared by every draw of this program.
+	std::shared_ptr<const ShaderNativeWaveVerdict> native_wave;
 };
 
 struct RenderResolutionShaderUsageResult
@@ -31,6 +35,7 @@ struct RenderResolutionShaderUsageResult
 	std::shared_ptr<const ShaderCode> code;
 	bool                            hit     = false;
 	bool                            evicted = false;
+	std::shared_ptr<const ShaderNativeWaveVerdict> native_wave;
 };
 
 class RenderResolutionShaderUsageCache final

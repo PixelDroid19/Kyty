@@ -90,7 +90,10 @@ TEST(EmulatorComputeWaveControlFlow, NativeExecNonzeroFailsClosedUntilWaveWidthI
 	    ::testing::ExitedWithCode(65), "");
 }
 
-TEST(EmulatorComputeWaveControlFlow, AdmitsOnlyReconvergedForwardDiamond)
+// Since 704f4ad3 guest control flow runs as a block dispatcher, exact for any CFG
+// of uniform branches, so the barrier-in-arm, back-edge and second-conditional
+// variants are admitted along with the reconverged diamond itself.
+TEST(EmulatorComputeWaveControlFlow, AdmitsTheDiamondAndItsBlockDispatchedVariants)
 {
 	// Two guest waves: the comparison selects logical lane 63 in the first
 	// wave, while the second wave has an empty EXEC mask.
@@ -111,12 +114,10 @@ TEST(EmulatorComputeWaveControlFlow, AdmitsOnlyReconvergedForwardDiamond)
 	{
 		int      altered_word;
 		uint32_t replacement;
-		uint32_t failure_pc;
-		bool     accepted;
-	} cases[] = {{-1, 0, 0, true},
-	             {7, 0xbf8a0000u, 28, false},   // barrier within one divergent arm
-	             {8, 0xbf82fffbu, 32, false},   // backward edge
-	             {10, 0xbf880000u, 40, false}}; // second conditional
+	} cases[] = {{-1, 0},
+	             {7, 0xbf8a0000u},    // barrier within one divergent arm
+	             {8, 0xbf82fffbu},    // backward edge
+	             {10, 0xbf880000u}};  // second conditional
 	for (const auto& test: cases)
 	{
 		auto words = diamond;
@@ -127,26 +128,18 @@ TEST(EmulatorComputeWaveControlFlow, AdmitsOnlyReconvergedForwardDiamond)
 		ShaderCode code;
 		code.SetType(ShaderType::Compute);
 		ASSERT_TRUE(ShaderTryParseBounded(words.data(), words.size() * sizeof(uint32_t), &code));
-		const auto result = ShaderAnalyzeComputeWaveCode(code, input);
 		SCOPED_TRACE(test.altered_word);
-		EXPECT_EQ(result.supported, test.accepted);
-		if (!test.accepted)
-		{
-			EXPECT_EQ(result.unsupported_pc, test.failure_pc);
-		}
+		EXPECT_TRUE(ShaderAnalyzeComputeWaveCode(code, input).supported);
 	}
 
-	// A shared LDS access after reconvergence still needs a CFG-aware proof of
-	// its address and writer mask; a linear predecessor proof is not enough.
+	// A shared LDS access after reconvergence takes the ordered generic LDS path.
 	std::vector<uint32_t> lds_suffix(diamond.begin(), diamond.end());
 	lds_suffix.insert(lds_suffix.end() - 1, {0xd8340000u, 0x00000101u});
 	input.wave_layout.lds_dwords = 1u;
 	ShaderCode with_lds;
 	with_lds.SetType(ShaderType::Compute);
 	ASSERT_TRUE(ShaderTryParseBounded(lds_suffix.data(), lds_suffix.size() * sizeof(uint32_t), &with_lds));
-	const auto suffix_result = ShaderAnalyzeComputeWaveCode(with_lds, input);
-	EXPECT_FALSE(suffix_result.supported);
-	EXPECT_EQ(suffix_result.unsupported_pc, 44u);
+	EXPECT_TRUE(ShaderAnalyzeComputeWaveCode(with_lds, input).supported);
 }
 
 UT_END();

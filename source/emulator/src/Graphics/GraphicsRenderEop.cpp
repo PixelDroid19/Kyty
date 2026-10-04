@@ -172,7 +172,7 @@ void GraphicsRenderWriteAtEndOfPipeWithWriteBack64(uint64_t /*submit_id*/, Comma
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr,
-                                                            uint64_t value)
+                                                            uint64_t value, uint32_t interrupt_context_id)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 	// A null target is valid for callback-only cache/interrupt packets. Any
@@ -184,6 +184,8 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t /*submit_id
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
+	const uint64_t args[LABEL_ARGS_MAX] = {interrupt_context_id};
+
 	RecordTransientLabel64(
 	    buffer, dst_gpu_addr, value,
 	    [](SubmissionId submission, const uint64_t* /*args*/)
@@ -193,16 +195,17 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(uint64_t /*submit_id
 		    GpuMemoryWriteBackCompletedSubmission(g_render_ctx->GetGraphicCtx(), submission);
 		    return true;
 	    },
-	    [](SubmissionId /*submission*/, const uint64_t* /*args*/)
+	    [](SubmissionId /*submission*/, const uint64_t* args)
 	    {
 		    EXIT_IF(g_render_ctx == nullptr);
-		    g_render_ctx->TriggerEopEvent();
+		    g_render_ctx->TriggerEopEvent(static_cast<uint32_t>(args[0]));
 		    return true;
 	    },
-	    nullptr);
+	    args);
 }
 
-void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
+void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value,
+                                                   uint32_t interrupt_context_id)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 	if (dst_gpu_addr != nullptr && !ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
@@ -212,18 +215,21 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt64(uint64_t /*submit_id*/, Comma
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
+	const uint64_t args[LABEL_ARGS_MAX] = {interrupt_context_id};
+
 	RecordTransientLabel64(
 	    buffer, dst_gpu_addr, value, nullptr,
-	    [](SubmissionId /*submission*/, const uint64_t* /*args*/)
+	    [](SubmissionId /*submission*/, const uint64_t* args)
 	    {
 		    EXIT_IF(g_render_ctx == nullptr);
-		    g_render_ctx->TriggerEopEvent();
+		    g_render_ctx->TriggerEopEvent(static_cast<uint32_t>(args[0]));
 		    return true;
 	    },
-	    nullptr);
+	    args);
 }
 
-void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value)
+void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t value,
+                                                   uint32_t interrupt_context_id)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 	if (!ValidateTransientLabelDestination(dst_gpu_addr, sizeof(*dst_gpu_addr)))
@@ -233,15 +239,17 @@ void GraphicsRenderWriteAtEndOfPipeWithInterrupt32(uint64_t /*submit_id*/, Comma
 
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 
+	const uint64_t args[LABEL_ARGS_MAX] = {interrupt_context_id};
+
 	RecordTransientLabel32(
 	    buffer, dst_gpu_addr, value, 1u, nullptr,
-	    [](SubmissionId /*submission*/, const uint64_t* /*args*/)
+	    [](SubmissionId /*submission*/, const uint64_t* args)
 	    {
 		    EXIT_IF(g_render_ctx == nullptr);
-		    g_render_ctx->TriggerEopEvent();
+		    g_render_ctx->TriggerEopEvent(static_cast<uint32_t>(args[0]));
 		    return true;
 	    },
-	    nullptr);
+	    args);
 }
 
 void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr,
@@ -277,7 +285,8 @@ void GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(uint64_t /*submi
 		    int64_t flip_arg  = static_cast<int64_t>(args[3]);
 
 		    VideoOut::VideoOutSubmitFlipInternal(handle, index, flip_mode, flip_arg);
-		    g_render_ctx->TriggerEopEvent();
+		    // The EOP flip packet carries no interrupt context id.
+		    g_render_ctx->TriggerEopEvent(0);
 		    return true;
 	    },
 	    args);

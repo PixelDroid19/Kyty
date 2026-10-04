@@ -326,6 +326,385 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Uninitialized constant-buffer V# in a Unity title's EUD (2026-10-04, open).
+  A pixel shader loads its constant-buffer V# with `s_load_dwordx4 s[88:91],
+  s[28:29], 160` and immediately reads 272 bytes through it. Its AGC metadata
+  agrees: user SGPRs 30, `eud_size_dw` 44, type-5 EUD pointer at SGPR 28, five
+  8-dword T# at API offsets 32-64 (EUD dwords 0-39) and one constant-buffer
+  sharp at API offset 72 (EUD dwords 40-43). The DCB sets `s[28:29]` to the
+  table that holds those five T# words, and the indirect SH register list
+  begins exactly at table+0xb0, so all 44 dwords are reserved. Dwords 40-43
+  are never written: a 1 ms CPU watcher from the first submit shows the slot
+  receiving unrelated heap data from the guest itself about 0.55 s into boot
+  and no later write for the life of the run; a GPU-writer history restricted
+  to the slot records no CP, DMA, EOP or writeback write; no DMA destination is
+  rejected and no indirect SH pair is dropped. Binding therefore receives a
+  stale V# and stops on an unmaterialized range in most normal-speed runs; a
+  slower diagnostic run reaches the menu. Excluded: late guest write, lost or
+  clobbering emulator writes, wrong EUD pointer and wrong EUD offset base. An
+  older uncommitted working copy of `feature/gen5-3d-world` (2026-09-08 binary) reaches
+  gameplay from the same profile in 2/2 runs with no storage error, and its HLE
+  call sequence matches; the behavioural difference is unidentified. Next
+  step: hardware-watch the slot under that binary to identify the guest writer,
+  then compare the decision the guest takes in the current tree. Separately,
+  `Shader.cpp` marks every dynamically loaded storage descriptor as having a
+  dynamic SMEM offset, so its required byte span is never derived even when
+  every consumer uses immediate offsets.
+
+- Metadata-operation qualification (2026-10-03): same-context observations
+  identify fast-clear elimination and a newly created, undefined host color
+  image. Ordinary pixel exports and the existing expanded-image path cannot
+  establish this operation's result. Production-linked CPU parsing binds a
+  candidate 4 KiB zero-fill descriptor to the observed CMASK start, but neither
+  descriptor extent nor a readable zero prefix proves the whole metadata
+  plane, its layout, GPU completion or coherent materialization. The capture
+  ends at an observer output quota; it is partial evidence, not a completed
+  native failure replay. A later source-bound 119-suite build passes 1,742 cases
+  with the same 16 environmental skips. Its compact observer confirms the
+  requested/returned storage range and a post-dispatch marker for four
+  64-invocation workgroups, then reaches the original native-wave SIGILL after
+  10.11 seconds. Same-context backing remains undefined; no completed producer
+  fence is observed. Native input and all six cache containers match the earlier
+  complete-program build. Preserve the launch and observer obligations described
+  in [BRINGUP.md](BRINGUP.md). No gameplay acceptance follows.
+
+- Subgroup-reference exclusion (2026-10-03): the examined Intel tutorial and
+  pinned current/release vkd3d-proton sources provide subgroup selection and
+  portable wave-operation examples, not an exact native64-on32 NGG translator.
+  Required64 is rejected on max32 hardware. The audit also exposes a separate
+  SPIR-V 1.6 default-width assumption in local admission. Version/range-aware
+  selection now corrects that contract: the unchanged independent fixture goes
+  from 22 failures to 40 passes, preserving native64 and exact64/max32 refusal.
+  Full-tree qualification passes 119 isolated suites with 1,753 passes and the
+  same 16 environmental skips, plus the required CPU/static checks. Fresh
+  binary/device binding passes; the strict replay reaches the unchanged guest64
+  vertex refusal after 10.33 seconds, reporting actual SPIR-V 1.6 and host range
+  8..32. This correction establishes no narrower NGG execution or metadata
+  materialization proof, and the playable runtime gate remains unavailable.
+
+- Complete vertex-program binding (2026-10-03): an unchanged owned-memory
+  reproducer exposes front-only wave classification for back-only lane/EXEC
+  reads and a module-key collision between distinct neutral continuations.
+  Both wave cases and the collision fail before the correction; both neutral
+  controls pass. The corrected immutable program owner passes all five cases,
+  all 20 ownership regressions, and the source-bound 119-suite CPU gate with
+  1,737 passes and 16 exact environmental skips. The new suite and four adjacent
+  suites pass twice, and required CPU/static gates pass. Fresh schemas,
+  host-main and exact-device checks precede a strict replay that ends after
+  3.68 seconds at the same guest64 refusal. Draw/launch/output records and
+  program bytes match the preceding capture; all six cached SPIR-V payloads
+  are unchanged and validate for Vulkan 1.4. The new content fingerprint agrees
+  with the separately captured program, without establishing an atomic copy
+  history. The captured draw has no continuation, so correcting this proof/cache
+  prerequisite supplies neither its native launch model nor type-7 raster
+  equivalence. No present, action-response checkpoint or sustained gameplay is
+  established. Mapping-lifecycle and specialized depth-copy admission limits
+  are recorded in [BRINGUP.md](BRINGUP.md).
+
+- Reference-history follow-up (2026-10-03): immutable source citations and
+  publicly identified scene/build and controller-progression reports provide
+  useful implementation candidates. Their application-level observations do
+  not establish the retained draw's native wave populations, allocation owner,
+  primitive connectivity or all raster observers. Some reports use different
+  renderer routes or explicitly qualified diagnostic settings. Preserve each
+  report's exact revision, host, settings and scope; do not combine them into
+  an unsupported native launch certificate. The attached public ISA confirms
+  independent ES/GS count fields and allocation before primitive export, but
+  does not supply the missing same-mode population or type-7 raster rules.
+
+- Gameplay-branch route exclusion (2026-10-03): fresh normal shader decoding
+  in both inspected gameplay-associated integration revisions selects
+  Geometry/guest64 for the captured passthrough state, then rejects input type
+  7. Their mesh translator admits passthrough triangle inputs 4/6; their
+  three-record rectangle backend separately requires Vertex routing. Their
+  packet executors also report failed draws and advance. This is a static
+  exclusion of the captured shader route, not an observed skip count from a
+  recording. Metadata-only early returns do not execute the retained program.
+  The adjacent two-lane mesh implementation supplies an emulator launch model,
+  not native population, allocation-owner or raster evidence for this draw.
+  The next admission prerequisite remains a same-mode authoritative contract
+  or bound initialized-wave observation, followed by raster/observer proof.
+
+- Primitive-state producer observation (2026-10-03): three bounded captures
+  of the unchanged qualified executable each observe 31 complete constructor
+  returns. Thirteen calls use the first rejected draw's vertex program, request
+  input type 7 without a GS/HS output owner, and return output zero. An
+  independent production-linked owned-memory fixture reproduces 19 failures
+  out of 21; both explicit-GS controls pass. The corrected build passes the same
+  21-case fixture, 1,717 CPU cases with 16 exact environmental skips across 118
+  suites, and required CPU/static gates. Its 13 new pointer/ownership controls
+  and four adjacent suites pass twice. Two freshly bound strict observations
+  now retain known/written output primitive 3, with identical program and six
+  shader-cache-container bytes. The second observes the real register callback
+  write 3 and the report read 3 from the same Context. The intervening guest
+  command-memory copy/last-writer chain remains unobserved; matching values are
+  not a substitute. Both observations end after about 4.03 seconds at unchanged
+  native guest64 admission, with no observed present or gameplay. Launch
+  population/allocation and raster equivalence still require independent
+  evidence; the positive-count CPU proof does not supply that hardware contract.
+
+- Extended passthrough observation (2026-10-03): the 117-suite build passes
+  1,704 cases with 16 explicit environmental skips; all 18 conditional proof
+  controls and 16 input-snapshot controls also pass repeated execution.
+  Fresh exact-device and strict capture evidence retains identical program and
+  shader-cache bytes. Output primitive zero is now known and written, excluding
+  an unassigned-reset explanation. The count-specific CPU proof succeeds for
+  the complete captured program, while launch/output assembly and raster
+  equivalence remain unproved. Inspect the upstream primitive-state producer
+  before adopting any generation-specific ignore-zero hypothesis. No observed
+  present or action-response checkpoint is established.
+
+- Bounded vertex input capture (2026-10-03): the 116-suite diagnostic build
+  passes 1,684 CPU cases with 16 environmental skips and the native numerical
+  and exact-device gates. Its first input is a three-vertex NGG passthrough
+  rectangle draw, with a complete 288-byte program and no bound GS-back program.
+  This does not identify the later merged-geometry pair. Production parsing
+  admits all 26 decoded instructions; the runtime still refuses native guest64
+  on the subgroup32 host. Scalar EXEC construction from system counts needs
+  a real logical-launch/primitive-forwarding proof. A physical subgroup ballot
+  or the fixed `s3=1` prolog cannot provide that proof. No present, playable
+  checkpoint or action response is established by this short capture.
+
+- Revision-100 strict replay (2026-10-03): the EXP tail correction passes its
+  15 tests and 73 complete-module cases, the 115-suite CPU gate and static
+  checks. The native32 numerical probes and fresh native-device preflight pass.
+  The first strict failure advances to vertex guest64/`ExactSubgroup` admission
+  on a host without native64. Cached source shows the fixed GS system seed and
+  scalar EXEC shifts; lack of a general shuffle does not establish a narrower
+  proof. Capture the actual launch state and both programs before changing the
+  execution path. The short run reaches no observed present or GE skip report.
+
+- Revision-99 strict replay (2026-10-03): final-source CPU/static checks and
+  the rebound native32 numerical probes pass. Fresh layouts and an exact
+  Vulkan 1.4/Wayland device preflight pass; the guest then stops before GE
+  capture on the shared lowering precondition for a one-source `EXP PRIM`.
+  The EXP parser left three unused VGPR operands populated. A sanitized probe
+  reproduces this with the retained archives while its four-source export
+  control passes. Correct the producer tail, retain strict admission, then
+  recapture the first failure. The short failure is not a completed bounded
+  gameplay run, a GE program capture or evidence against the previous compiler
+  correction. The private observation helper's earlier missing-file message
+  obscured this failure; the native log and service duration remain authoritative.
+
+- Bounded selector controls (2026-10-02): both historical EXEC-representation
+  mismatches reproduce numerically on subgroup32, reach the explicit 64-iteration
+  exhaustion result and complete their real fences with zero validation errors.
+  Their matching-representation controls pass. See the current-frontier entry
+  in [BRINGUP.md](BRINGUP.md) for counts and scope. These are consumer-only
+  synthetic controls, not whole captured shader replays or proof of the game
+  device-loss cause. Native subgroup64 is unavailable on this host; no upper-half
+  fragment-wave equivalence follows from these results.
+
+- Distinct pending compute compilation (2026-10-01, unresolved): the current
+  timeout-disabled capture identifies the render-mutex owner in pipeline
+  creation, before the pending module has been dispatched. Valid Vulkan 1.4
+  modules and 842 flips do not establish menu, input or gameplay. Scalar/PC
+  broadcasts, real-CFG clearing, resource-slot folding and complete shared
+  register storage are bounded external experiments, not activated fixes.
+  Complete pipeline compilation still misses the two-GiB, sixty-second gate.
+  The graph itself builds in about 1.54 seconds; repeated failed allocation and
+  spill growth require further evidence. External allocator index, capacity and
+  reset corrections pass focused CPU tests but still do not complete this
+  pipeline or establish GPU preservation. See the current arithmetic-lowering
+  frontier in [the bring-up manual](BRINGUP.md) for the individual exclusions;
+  do not repeat completed variants or raise resource limits to hide this result.
+  Sparse membership and supported spill batching also fail the compilation
+  gate. Case caching and both masked shared-store representations are excluded
+  as sufficient fixes and remain undispatched. An external frontend candidate
+  preserves explicit uniform NIR register declarations as scalar32, reducing
+  the original interval peak to 1,016 units; seven CPU contracts pass, but its
+  compile stops at the unchanged capacity guard. No installed driver, guest
+  shader or runtime policy has been changed by this candidate. Tighter sparse
+  capacity growth also stops during spill emission with 74,688 actual nodes;
+  it is excluded as a sufficient fix. Invocation-private Function arrays also
+  fail the pre-graph capacity criterion (143,954 VGRFs); they remain external
+  and undispatched. Instruction-local spill-temporary reuse is the next host
+  seam; no larger graph is authorized by any of these results.
+  The subsequent reuse-plus-changed-region candidate completes the original
+  compute pipeline in 42.589 seconds under the unchanged resource and graph
+  guards, with no dispatch queued. Eight focused CPU contracts pass; GPU
+  preservation and the exact guest device remain unverified. This supersedes
+  the statement that no external candidate completes compilation, not any
+  image/input/gameplay exclusion. Subsequent synthetic GPU checks pass 69,704
+  components, including natural SIMD32 spilling, with no differences. Exact
+  captured runtime-device inputs also complete the original pipeline in 42.474
+  seconds without dispatch. Protected integration initially stops before the
+  first present in the already-documented X11 window-show blocker: the external
+  runner forced X11 and removed active Wayland variables, disabling the existing
+  host selection. Correct that runner environment before attributing the stop
+  to the compiler or guest wait policy. Full guest-compute equivalence, images
+  and gameplay remain unaccepted.
+  Native selection and normal driver-cache validation then pass. The protected
+  guest observes all 59 compute creations complete, including a real return
+  from the unchanged former pending pipeline, and continues presenting afterward.
+  The later native image is still black and no pad reads are observed. The first
+  dispatch-specific completion trace is the next diagnostic gate, not a reason
+  to alter waits, clear targets, omit shaders or claim gameplay. A new helper's
+  global-name collision also caused a separate instrumentation-only startup
+   failure; namespace isolation, a synthetic submit/fence/output check and a raw
+   host-main schema preflight now pass before the next guest run.
+
+- Late native color chain (2026-10-02, unresolved): a protected ordinary run
+  correlates the unchanged former pending compute pipeline with its real
+  dispatch, successful submit and observed fence completion. The bounded native
+  census then records 21 distinct pixel draws and their intermediate/final
+  bindings without shader instrumentation. A separate output-preserving sparse
+  probe of the final compositor's first scene-color sample records 259,200
+  elected samples, finite RGB zero and alpha one. Therefore the observed black
+  precedes that compositor's final color arithmetic; do not replace its output,
+  suppress draws, or treat the binding census as pixel execution proof. This
+  does not establish that every source texel is zero or that its producer is
+  correct. Both runs complete all 59 compute creations and the selected compute
+  submission, validate their 101/102 actual Vulkan 1.4 modules, fail all nine
+  native image gates and observe no guest pad reads. The snapshots find normal
+  read-only-buffer protection work in the render-mutex owner, not a demonstrated
+  GPU wait/deadlock. Guest waits and all resource guards remain unchanged. Follow
+  the upstream sampled-color boundary next; gameplay remains unaccepted.
+  That upstream consumer then records 104,576 elected samples with the same
+  finite RGB-zero/alpha-one result from an exact storage-texture binding.
+  Its 102 actual modules validate, all nine native image gates fail, and no pad
+  reads occur. Do not attribute this to the formerly pending compute module
+  without a producer/binding correlation, or infer that all texels are zero.
+  Observe the earlier HDR consumer next. Diagnostic stop-grace exhaustion ends
+  this run with a kill; the removed unit's subsequently queried default success
+  is not a guest success or a contradiction of its retained timeout journal.
+  Both selected conditional HDR reads subsequently have zero observations,
+  which is inconclusive for color. The paired vertex/resolver probe records
+  three exports but no finite post-divide extrema, and a GETPC-built raw buffer
+  base enters the descriptor-array resolver as a large slot. The metadata
+  classifier and raw-load emitter compare API register zero instead of its
+  Gen5 vertex register eight. This incorrectly marks s[0:3] as bound and fails
+  to classify the real s[8:11] binding consistently. Fix that shared namespace
+  seam only after a sanitized red regression; do not replace coordinates, color,
+  clears or shader outputs to compensate. All 103 diagnostic modules validate,
+  eight native captures fail their image gate, and no pad reads occur.
+  The namespace correction is now implemented through one shared binding
+  predicate used by input classification and all four raw-load widths, with
+  revision 92 cache invalidation. Nine focused tests pass, including the two
+  opposite-direction red assembly regressions. The original synthetic fixtures
+  lacked a terminator; their early assembly results did not prove validation.
+  Complete-fixture validation now passes the inline case but exposes the
+  undeclared s3 system destination in the bound-only prolog, separately recorded
+  in the bring-up manual. The actual guest modules remain valid.
+  Fresh binary-bound DWARF and exact native-device preflights pass; a protected
+  repeat of the same vertex/sample selectors is in progress. No color/input
+  advancement or normal guest exit is established by these preflights.
+  That repeat confirms finite fullscreen vertex positions (W=1, X/Y -1..3,
+  Z=0), varying parameters and zero erroneous array-resolver invocations. All
+  103 actual modules validate and the former pending compute execution still
+  completes. The selected alternate conditional read remains unobserved. Eight
+  native captures fail their gate, all before the delayed selected color draw;
+  final capture timeout is not a scored image. Follow the other conditional
+  read with the corrected geometry rather than inferring source black from
+  zero observations. Image, input and gameplay remain unaccepted.
+  The subsequent repeat stops at present 854, before its threshold, with no
+  delivered probe event. All 103 actual modules and the selected compute
+  completion pass; eight capture gates still fail and no pad read occurs.
+  Observe the same HDR instruction earlier rather than extending the deadline
+  or interpreting an undelivered probe as zero samples.
+  Earlier selection then yields 65,280 elected finite RGBA-zero samples with
+  valid fullscreen geometry; ten native capture gates still fail. The s3
+  declaration correction passes both explicitly validated complete fixtures
+  and all nine focused tests with revision 93, without changing its value.
+  Fresh schemas and native Wayland/device preflights pass for that binary.
+  The paired indexed HDR-producer probe records 1,361 finite vertex exports,
+  all with nonpositive W, zero MRT exports/coverage, and a full unchanged
+  RGBA16F attachment with no nonzero RGB pixels. Depth/stencil is disabled.
+  Its prolog never initializes the table-pointer SGPRs later read by native
+  S_LOAD: metadata parsing consumes their two-word API bindings. Record and
+  regression-test that missing initialization contract before correcting it;
+  retain real pointer values and loads. All 103 actual modules validate, the
+  original compute completes, nine capture gates fail and no pad reads occur.
+  Two sanitized parser-to-prolog tests reproduce the lost pointer words on the
+  old code. Retaining both real table pointers as direct API words fixes those
+  tests without replacing native S_LOAD. Eighteen focused controls now pass,
+  including explicit validation of the native-load fixture; an unrelated old
+  ENDPGM-only SRT-span fixture required a live consumer (the preserved old binary
+  fails it identically). Revision 94 invalidates cached layouts. Fresh DWARF and
+  native Wayland/exact-device preflights pass, and the same paired producer
+  diagnostic completes: all table-pointer stores now precede native S_LOAD,
+  but all 1,361 observed positions still have nonpositive W, no MRT export or
+  coverage is observed, and the unchanged zero attachment has the same hash.
+  All 103 modules validate and the selected compute completes. Ten native
+  capture gates fail and no pad read occurs. This excludes missing pointer
+  initialization as a sufficient cause of this producer's zero geometry; the
+  corrected contract remains independently proven. Observe the original scalar
+  buffer results and their input descriptors before changing matrix arithmetic.
+  An append-only eight-site scalar-buffer snapshot now passes two red-to-green
+  explicitly validated module tests, fourteen neighboring controls and the probe
+  layout/serialization integration. It preserves original instructions and
+  observes one elected invocation per load after the existing fence. Revision 95,
+  fresh binary-bound schemas and the native Wayland/device preflight pass. The
+  same first producer draw is the next diagnostic, without attachment retries;
+  GPU words and bounded CPU constants require direct correlation before a fix.
+  These tests/preflights are not guest image or gameplay evidence.
+  The native repeat observes six sites with all 73 scalar result words matching
+  the first draw's CPU constants bit for bit. All 103 modules validate, but eight
+  capture gates fail and pad reads remain zero. The same draw's packed vertex
+  stream has format 66 and reports a failed layout with zero attributes. That
+  SNORM format is absent from the vertex format table despite its established
+  image mapping; the pipeline continues after the rejected layout. This is the
+  next demonstrated input contract, not an excuse to replace vertex values.
+  Two sanitized mapping/packed-layout regressions fail before adding unified
+  format 66 and pass afterward, along with 22 neighboring controls. The fix is
+  one evidenced table entry, not a guessed alias or vertex-output substitute.
+  Revision 96, fresh schemas and native Wayland/exact-device preflight pass;
+  the same producer's post-fix layout and geometry/color remain to be observed.
+  That repeat confirms all three attributes, positive-W finite geometry and
+  2,073,600 finite MRT0 observations with nonzero RGB. The 73 scalar words still
+  match; all 103 modules validate and the original compute completes. None of
+  the nine scored captures follows the delayed selected draw, and the final
+  capture times out. Pad reads remain zero. The next run removes shader probes,
+  binding traces, shader dumps and GDB; producer color is not yet a verified
+  presented image, input response or gameplay acceptance.
+  The next uninstrumented run reaches a real `VK_ERROR_DEVICE_LOST` fence wait
+  on queue 8, slot 2. Its Xe coredump records a started but incomplete render
+  job and retains the entry/ACTHD batch allocations. IPEHR matches the preceding
+  PIPE_CONTROL ending at ACTHD, not the word at ACTHD. Offline batch decoding
+  and a bounded native submit-fault trail are the next correlation, not a
+  reason to skip the submission, replace outputs or expand resource limits.
+  The diagnostic repeat stops at frame 839 / present 838 before its native
+  census threshold, with no captured device-loss report or original target
+  exit. All 101 captured modules validate, eight image gates fail and no pad
+  read occurs. It does not exclude the uninstrumented fault. Repair the native
+  Silent-mode diagnostic before another protected correlation; do not raise
+  deadlines or resource limits to make the debugger repeat reach its threshold.
+  The subsequent native-only repeat delivers the bounded Silent-mode fault
+  JSON and reaches another real queue-8 device-loss fence. The failing caller
+  matches a successful submit return in the eight-entry trail; the correlated
+  kernel journal records a render-job timeout. Its census retains the first
+  occurrence of each of 21 shaders, not the later failing guest submission.
+  Recent draw/submission identity is therefore still missing. All eight image
+  gates fail and pad reads remain zero; 58 logged modules and 25 unique persisted
+  cache payloads validate but do not form a complete live census. The new dump
+  read times out with zero bytes. Do not attribute the older job's last kernel
+  to this fault or change shaders/driver policy without that missing correlation.
+  A bounded opt-in recent-draw ring now records every emitted guest draw and
+  dispatch with its command-buffer recording, keeping repeated shaders and
+  separating recording, submit call/return and observed fence signal. The
+  census deduplication is thereby bypassed, not repaired; do not repeat a
+  first-occurrence census to look for the failing submission's draws.
+  A protected run (d50) reproduced the device loss at the same queue-8 fence
+  and PM4 position as d48 and named 28 recorded draws in the failing
+  submission, 18 of one vertex/pixel pair. That pixel module contains three
+  `V_READFIRSTLANE` waterfall loops, and the lowering tested bit `1 << lane`
+  of lane-local EXEC, which only lane 0 can satisfy (fixed in translator 97;
+  see the bring-up manual). Two later runs (d52, d54) with the corrected
+  lowering complete 264 seconds without device loss where earlier runs lost
+  it at 214-221 seconds. That is consistent with, not proof of, the cause: no
+  isolated GPU replay exists and every capture is still black. The same runs
+  expose the next candidate: 4,458 skipped draws in a GE configuration
+  (`stages=0x00002030`, ES bound, legacy GS base zero) that `ShouldSkipUnsupportedGeShader`
+  does not model. Do not re-litigate the device loss before that frontier is
+  understood; do not reintroduce a bit test of lane-local EXEC in any
+  cross-lane lowering. A later source audit qualifies both observations:
+  scalar-written packed EXEC/VCC must also remain coherent with lane predicates,
+  and the original GE diagnostic inspected `gs_regs.data_addr` while GS program
+  registers populate `gs_back_addr`. Thus the retained report does not establish
+  an absent back program. The corrected skipped-draw report records both program
+  identities and the associated GE/resource state; that diagnostic alone does
+  not implement merged-stage execution.
+
 - Complete-quad transport and native resolve (2026-09-29): an original Vulkan
   1.4 synthetic experiment exports helper values through one covered quad
   writer, then preserves all 64 values in compute shared storage. Native

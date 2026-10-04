@@ -2316,4 +2316,13 @@ TEST(EmulatorAudio, AvPlayerSanitizesFileUriAndFiresEvents)
 	EXPECT_EQ(AvPlayer::AvPlayerClose(handle), 0);
 }
 
+TEST(EmulatorAudio, AudioOutRejectsUnknownFormatsAndNullPointersBeforeTouchingTheHost)
+{
+	// 99 is not one of the eight PCM/float layouts: a format error, not a full port table.
+	EXPECT_EQ(AudioOut::AudioOutOpen(255, 0, 0, 256, 48000, 99u), AUDIO_OUT_ERROR_INVALID_FORMAT);
+	// A null volume array is refused instead of being dereferenced by the port.
+	EXPECT_EQ(AudioOut::AudioOutSetVolume(1, 0u, nullptr), AUDIO_OUT_ERROR_INVALID_POINTER);
+}
+
+
 UT_END();

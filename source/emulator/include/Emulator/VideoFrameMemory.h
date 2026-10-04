@@ -14,12 +14,16 @@ using UnregisterFrameCallback     = void (*)(uint64_t base);
 // graphics implementation may need to restore write permission on pages that
 // are temporarily protected for dirty tracking.
 using NotifyHostWriteCallback     = void (*)(uint64_t base, uint64_t size);
+using BeginHostWriteCallback      = uint64_t (*)(uint64_t base, uint64_t size);
+using EndHostWriteCallback        = void (*)(uint64_t token);
 
 struct Callbacks
 {
 	RegisterLinearFrameCallback register_linear_frame = nullptr;
 	UnregisterFrameCallback     unregister_frame      = nullptr;
 	NotifyHostWriteCallback     notify_host_write     = nullptr;
+	BeginHostWriteCallback      begin_host_write      = nullptr;
+	EndHostWriteCallback        end_host_write        = nullptr;
 };
 
 // Installs a complete callback bundle, or an empty bundle to restore no-op
@@ -35,6 +39,23 @@ void UnregisterFrame(uint64_t base);
 // marking that range dirty is preferable to letting host I/O fail on a watched
 // read-only destination.
 void NotifyHostWrite(uint64_t base, uint64_t size);
+
+// Owns artificial write-watch permission through a blocking host operation.
+// Construct before waiting for the file/decoder lock; keep alive through every
+// transfer and error exit. Both acquisition and destruction preserve errno.
+// The paired callbacks are optional only for clients without a write tracker.
+class HostWriteLease final
+{
+public:
+	HostWriteLease(uint64_t base, uint64_t size);
+	~HostWriteLease();
+	HostWriteLease(const HostWriteLease&) = delete;
+	HostWriteLease& operator=(const HostWriteLease&) = delete;
+
+private:
+	uint64_t m_token = 0;
+	EndHostWriteCallback m_end = nullptr;
+};
 
 } // namespace Kyty::Emulator::VideoFrameMemory
 

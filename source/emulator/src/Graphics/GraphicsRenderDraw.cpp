@@ -981,6 +981,96 @@ static bool DrawHasValidVertexShader(const HW::Shader& sh_ctx)
 	return vs.vs_regs.data_addr != 0;
 }
 
+GraphicsSkippedGeState GraphicsDescribeSkippedGeState(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shader)
+{
+	const auto& vs = shader.GetVs();
+	const auto& regs = ctx.GetShaderRegisters();
+	GraphicsSkippedGeState state;
+	state.stages_raw = ctx.GetShaderStagesRaw();
+	state.ge_control_raw = ucfg.GetGeControlRaw();
+	state.ge_user_vgpr_raw = ucfg.GetGeUserVgprEnRaw();
+	state.gs_resource1_raw = shader.GetGsShaderResource1Raw();
+	state.gs_resource2_raw = shader.GetGsShaderResource2Raw();
+	state.gs_resource3_raw = shader.GetGsRsrc3Raw();
+	state.stages = ctx.GetShaderStages();
+	state.es_program = vs.es_regs.data_addr;
+	state.gs_back_program = vs.gs_back_addr;
+	state.legacy_gs_program = vs.gs_regs.data_addr;
+	state.gs_checksum = vs.gs_regs.chksum;
+	state.gs_user_data_address = vs.gs_user_data_addr;
+	state.es_resource1 = vs.es_regs.rsrc1;
+	state.gs_resource3 = vs.gs_regs.rsrc3;
+	state.gs_vgprs = vs.gs_regs.rsrc1.vgprs;
+	state.gs_sgprs = vs.gs_regs.rsrc1.sgprs;
+	state.float_mode = vs.gs_regs.rsrc1.float_mode;
+	state.lds_size = vs.gs_regs.rsrc2.lds_size;
+	state.es_vgpr_components = vs.gs_regs.rsrc2.es_vgpr_component_count;
+	state.gs_vgpr_components = vs.gs_regs.rsrc1.gs_vgpr_component_count;
+	state.user_sgpr_count = vs.gs_user_sgpr.count;
+	static_assert(HW::UserSgprInfo::SGPRS_MAX == 32);
+	for (size_t i = 0; i < state.user_sgprs.size(); ++i)
+	{
+		state.user_sgprs[i] = vs.gs_user_sgpr.value[i];
+	}
+	state.max_vertex_out = regs.m_vgtGsMaxVertOut;
+	state.output_primitive = regs.m_vgtGsOutPrimType;
+	state.ngg_subgroup_control = regs.m_geNggSubgrpCntl;
+	state.max_output_per_subgroup = regs.m_geMaxOutputPerSubgroup;
+	state.gs_instance_count = regs.m_vgtGsInstanceCnt;
+	state.gs_onchip_control = regs.m_vgtGsOnchipCntl;
+	state.esgs_ring_item_size = regs.m_vgtEsgsRingItemsize;
+	state.index_format = regs.m_spiShaderIdxFormat;
+	state.primitive_group_size = ucfg.GetGeControl().primitive_group_size;
+	state.vertex_group_size = ucfg.GetGeControl().vertex_group_size;
+	auto& output = state.output_state.emplace();
+	output.vs_out_config_raw = regs.vs_out_config_raw;
+	output.position_format_raw = regs.shader_pos_format_raw;
+	output.output_control_raw = regs.cl_vs_out_control_raw;
+	output.output_primitive_raw = regs.gs_out_primitive_raw;
+	output.vs_out_config = regs.m_spiVsOutConfig;
+	output.position_format = regs.m_spiShaderPosFormat;
+	output.output_control = regs.m_paClVsOutCntl;
+	output.output_primitive = regs.m_vgtGsOutPrimType;
+	output.pixel_program = shader.GetPs().ps_regs.data_addr;
+	output.pixel_checksum = shader.GetPs().ps_regs.chksum;
+	output.pixel_embedded = shader.GetPs().ps_embedded;
+	output.pixel_embedded_id = shader.GetPs().ps_embedded_id;
+	output.pixel_input_enable = regs.ps_input_ena;
+	output.pixel_input_address = regs.ps_input_addr;
+	output.pixel_input_control = regs.ps_in_control;
+	output.barycentric_control = regs.baryc_cntl;
+	output.interpolator_written_mask = regs.ps_interpolator_written_mask;
+	for (size_t i = 0; i < output.interpolators.size(); ++i)
+	{
+		output.interpolators[i] = regs.ps_interpolator_settings[i];
+	}
+	const auto& mode = ctx.GetModeControl();
+	output.raster_mode = {mode.cull_front, mode.cull_back, mode.face, mode.poly_mode, mode.polymode_front_ptype,
+	                      mode.polymode_back_ptype, mode.poly_offset_front_enable, mode.poly_offset_back_enable,
+	                      mode.vtx_window_offset_enable, mode.provoking_vtx_last, mode.persp_corr_dis};
+	const auto& clip = ctx.GetClipControl();
+	output.clip_control = {clip.user_clip_planes, clip.user_clip_plane_mode, clip.dx_clip_space, clip.vertex_kill_any,
+	                       clip.min_z_clip_disable, clip.max_z_clip_disable, clip.user_clip_plane_negate_y, clip.clip_disable,
+	                       clip.user_clip_plane_cull_only, clip.cull_on_clipping_error_disable, clip.linear_attribute_clip_enable,
+	                       clip.force_viewport_index_from_vs_enable};
+	return state;
+}
+
+static void MaybeReportNativeWaveInput(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& shader,
+                                      const ShaderVertexInputInfo& input, const GraphicsNativeWaveDrawInfo& draw)
+{
+	const char* prefix = std::getenv("KYTY_NATIVE_WAVE_REPORT");
+	if (prefix == nullptr || prefix[0] == '\0')
+	{
+		return;
+	}
+	auto launch = draw;
+	launch.primitive_type = ucfg.GetPrimType();
+	launch.index_offset = ucfg.GetIndexOffset();
+	(void)GraphicsReportNativeWaveInput(GraphicsDescribeSkippedGeState(ctx, ucfg, shader), input.native_wave,
+	                                   input.required_subgroup_size, launch);
+}
+
 static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx)
 {
 	if (!Config::IsNextGen())
@@ -1023,20 +1113,67 @@ static bool ShouldSkipUnsupportedGeShader(const HW::Context& ctx, const HW::User
 
 	if (unsupported_stage_mask || unsupported_gs_stage || ge_group_size || ge_shader_regs)
 	{
+		char detail[160] {};
+		std::snprintf(detail, sizeof(detail),
+		              "stages=0x%08" PRIx32 " es=%d gs_back=%d gs_legacy=%d max_vert=0x%x out_prim=0x%x ge_ngg=0x%x"
+		              " max_out=0x%08" PRIx32 " prim_group=0x%04" PRIx32 " vert_group=0x%04" PRIx32,
+		              stages, vertex_info.es_regs.data_addr != 0 ? 1 : 0, vertex_info.gs_back_addr != 0 ? 1 : 0,
+		              vertex_info.gs_regs.data_addr != 0 ? 1 : 0,
+		              sh_regs.m_vgtGsMaxVertOut, sh_regs.m_vgtGsOutPrimType, sh_regs.m_geNggSubgrpCntl,
+		              sh_regs.m_geMaxOutputPerSubgroup, static_cast<uint32_t>(ge_cntl.primitive_group_size),
+		              static_cast<uint32_t>(ge_cntl.vertex_group_size));
+		const auto captured = GraphicsDescribeSkippedGeState(ctx, ucfg, sh_ctx);
+		GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::UnsupportedGeState, detail, &captured);
 		static uint32_t logs = 0;
 		if (logs < 16u)
 		{
 			++logs;
 			KYTY_LOG_INFO(
 			             "KYTY_GRAPHICS: skip unsupported GE draw stages=0x%08" PRIx32 " es=0x%012" PRIx64
-			             " gs=0x%012" PRIx64 " max_vert=0x%08" PRIx32 " out_prim=0x%08" PRIx32
+			             " gs_back=0x%012" PRIx64 " gs_legacy=0x%012" PRIx64 " max_vert=0x%08" PRIx32 " out_prim=0x%08" PRIx32
 			             " ge_ngg=0x%08" PRIx32 " max_out=0x%08" PRIx32 "\n",
-			             stages, vertex_info.es_regs.data_addr, vertex_info.gs_regs.data_addr, sh_regs.m_vgtGsMaxVertOut,
+			             stages, vertex_info.es_regs.data_addr, vertex_info.gs_back_addr, vertex_info.gs_regs.data_addr, sh_regs.m_vgtGsMaxVertOut,
 			             sh_regs.m_vgtGsOutPrimType, sh_regs.m_geNggSubgrpCntl, sh_regs.m_geMaxOutputPerSubgroup);
 		}
 		return true;
 	}
 	return false;
+}
+
+// Every skipped guest draw is counted and its first occurrence per reason is
+// published natively, so an omission is never silent under Silent logging.
+static bool SkipGuestDrawForUnsupportedVertexState(const HW::Context& ctx, const HW::UserConfig& ucfg, const HW::Shader& sh_ctx)
+{
+	if (!DrawHasValidVertexShader(sh_ctx))
+	{
+		GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::InvalidVertexShader, nullptr);
+		return true;
+	}
+	return ShouldSkipUnsupportedGeShader(ctx, ucfg, sh_ctx);
+}
+
+// Opt-in recent-draw identity for commands already emitted into buffer. The
+// shader identities are the same guest register checksums used by the census.
+static void RecordRecentGuestDraw(uint64_t submit_id, const CommandBuffer* buffer, const HW::Shader& sh_ctx, VulkanRecentDrawKind kind,
+                                  uint32_t primitive_type, uint32_t count, uint32_t instances, int32_t vertex_offset,
+                                  uint32_t first_instance, uint32_t host_commands)
+{
+	if (VulkanRecentDrawTraceTrail() == nullptr)
+	{
+		return;
+	}
+	VulkanRecentDraw draw;
+	draw.kind           = kind;
+	draw.guest_submit   = submit_id;
+	draw.vs_checksum    = sh_ctx.GetVs().gs_regs.chksum;
+	draw.ps_checksum    = sh_ctx.GetPs().ps_regs.chksum;
+	draw.primitive_type = primitive_type;
+	draw.count          = count;
+	draw.instances      = instances;
+	draw.vertex_offset  = vertex_offset;
+	draw.first_instance = first_instance;
+	draw.host_commands  = host_commands;
+	VulkanRecentDrawRecord(buffer, draw);
 }
 
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
@@ -1065,7 +1202,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
 	const auto state_setup_start = DrawStageClock::now();
-	if (!DrawHasValidVertexShader(*sh_ctx) || ShouldSkipUnsupportedGeShader(*ctx, *ucfg, *sh_ctx))
+	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx))
 	{
 		MaybeDumpIndexDrawSkip("invalid-vs-or-ge", index_count, draw_modifier, type);
 		return;
@@ -1215,7 +1352,10 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	RequireSupportedRenderResolutionPlan(depth_only_resolution);
 
 	ShaderVertexInputInfo vs_input_info;
-	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info);
+	ShaderGetInputInfoVS(&sh_ctx->GetVs(), &ctx->GetShaderRegisters(), &vs_input_info, &ctx->GetShaderStagesRaw());
+	MaybeReportNativeWaveInput(*ctx, *ucfg, *sh_ctx, vs_input_info,
+	                          {index_count, true, index_type_and_size, first_instance, instance_count,
+	                           reinterpret_cast<uint64_t>(index_addr), vertex_offset_add, draw_modifier});
 	if (ShaderVertexClipProbeEligible(Config::IsNextGen(), sh_ctx->GetVs().vs_embedded))
 	{
 		vs_input_info.clip_probe = ShaderResolveVertexClipProbeConfig(sh_ctx->GetVs().gs_regs.chksum, true, index_count);
@@ -1433,18 +1573,23 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	{
 		vertex_clip_probe->BeginDepthPassQuery(buffer);
 	}
+	uint32_t host_draws = 0;
 	if (primitive_plan.chunked)
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
 			vkCmdDrawIndexed(vk_buffer, primitive_plan.chunk_count, instance_count, i, vertex_offset, first_instance);
 			DebugStatsRecordDraw();
+			host_draws++;
 		}
 	} else
 	{
 		vkCmdDrawIndexed(vk_buffer, primitive_plan.draw_count, instance_count, 0, vertex_offset, first_instance);
 		DebugStatsRecordDraw();
+		host_draws++;
 	}
+	RecordRecentGuestDraw(submit_id, buffer, *sh_ctx, VulkanRecentDrawKind::DrawIndexed, ucfg->GetPrimType(), index_count,
+	                      instance_count, vertex_offset, first_instance, host_draws);
 	if (vertex_clip_probe != nullptr)
 	{
 		vertex_clip_probe->EndDepthPassQuery(buffer);
@@ -1799,11 +1944,15 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 
 		const auto& vertex_shader_info = sh_ctx->GetVs();
 		const auto& shader_registers   = ctx->GetShaderRegisters();
-		ShaderGetInputInfoVS(&vertex_shader_info, &shader_registers, &guest_vertex_input);
+		ShaderGetInputInfoVS(&vertex_shader_info, &shader_registers, &guest_vertex_input, &ctx->GetShaderStagesRaw());
+		MaybeReportNativeWaveInput(*ctx, *ucfg, *sh_ctx, guest_vertex_input,
+		                          {index_count, indexed_draw, index_type_and_size, first_instance, instance_count,
+		                           reinterpret_cast<uint64_t>(index_addr), vertex_offset_add, std::nullopt});
 		if (!guest_vertex_input.input_resources_valid)
 		{
 			return;
 		}
+		ShaderRequireVertexProgram(&vertex_shader_info, &guest_vertex_input);
 		guest_vertex_id = ShaderGetIdVS(&vertex_shader_info, &guest_vertex_input);
 
 		auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
@@ -1813,7 +1962,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		                            Config::IsNextGen(), Config::SpirvDebugPrintfEnabled()),
 		    [&]
 		    {
-			    auto vertex_code = ShaderParseVS(&vertex_shader_info, &shader_registers);
+			    auto vertex_code = ShaderParseVS(&vertex_shader_info, &shader_registers, &guest_vertex_input);
 			    return ShaderRecompileVS(vertex_code, &guest_vertex_input);
 		    });
 		DebugStatsRecordShaderTranslationCache(guest_vertex_translation.hit, guest_vertex_translation.evicted);
@@ -2012,7 +2161,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	Core::LockGuard lock(g_render_ctx->GetMutex());
 	DebugStatsRecordDrawRenderLockWait(DrawStageElapsedNs(render_lock_start));
 	const auto state_setup_start = DrawStageClock::now();
-	if (!DrawHasValidVertexShader(*sh_ctx) || ShouldSkipUnsupportedGeShader(*ctx, *ucfg, *sh_ctx))
+	if (SkipGuestDrawForUnsupportedVertexState(*ctx, *ucfg, *sh_ctx))
 	{
 		return;
 	}
@@ -2139,7 +2288,9 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	}
 
 	ShaderVertexInputInfo vs_input_info;
-	ShaderGetInputInfoVS(&vertex_shader_info, &shader_regs, &vs_input_info);
+	ShaderGetInputInfoVS(&vertex_shader_info, &shader_regs, &vs_input_info, &ctx->GetShaderStagesRaw());
+	MaybeReportNativeWaveInput(*ctx, *ucfg, *sh_ctx, vs_input_info,
+	                          {index_count, false, std::nullopt, 0u, instance_count, std::nullopt, std::nullopt, draw_modifier});
 	if (ShaderVertexClipProbeEligible(Config::IsNextGen(), vertex_shader_info.vs_embedded))
 	{
 		vs_input_info.clip_probe = ShaderResolveVertexClipProbeConfig(vertex_shader_info.gs_regs.chksum, false, index_count);
@@ -2364,17 +2515,25 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	}
 	const uint32_t first_vertex = static_cast<uint32_t>(resolved_first_vertex);
 
+	uint32_t host_draws = 0;
 	if (!clear_only && primitive_plan.chunked)
 	{
 		for (uint32_t i = 0; i < index_count; i += primitive_plan.chunk_count)
 		{
 			vkCmdDraw(vk_buffer, primitive_plan.chunk_count, instance_count, first_vertex + i, 0);
 			DebugStatsRecordDraw();
+			host_draws++;
 		}
 	} else if (!clear_only)
 	{
 		vkCmdDraw(vk_buffer, primitive_plan.draw_count, instance_count, first_vertex, 0);
 		DebugStatsRecordDraw();
+		host_draws++;
+	}
+	if (host_draws != 0u)
+	{
+		RecordRecentGuestDraw(submit_id, buffer, *sh_ctx, VulkanRecentDrawKind::Draw, ucfg->GetPrimType(), index_count, instance_count,
+		                      static_cast<int32_t>(first_vertex), 0u, host_draws);
 	}
 	if (vertex_clip_probe != nullptr)
 	{
@@ -2759,7 +2918,27 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	// pipeline after all preparation has completed.
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
+	// The buffer write always executes. A proven full uniform fill additionally updates its exact
+	// color-image aliases in this recording; partial thread groups would leave the range uncovered.
+	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
+	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
+	if ((mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u)
+	{
+		(void)PropagateComputeUniformColorFill(buffer, input_info, thread_group_x, thread_group_y, thread_group_z);
+	}
 	DebugStatsRecordDispatch();
+	if (VulkanRecentDrawTraceTrail() != nullptr)
+	{
+		VulkanRecentDraw dispatch;
+		dispatch.kind          = VulkanRecentDrawKind::Dispatch;
+		dispatch.guest_submit  = submit_id;
+		dispatch.cs_checksum   = cs_regs.cs_regs.chksum;
+		dispatch.groups[0]     = thread_group_x;
+		dispatch.groups[1]     = thread_group_y;
+		dispatch.groups[2]     = thread_group_z;
+		dispatch.host_commands = 1;
+		VulkanRecentDrawRecord(buffer, dispatch);
+	}
 	return ComputeDispatchResult::Completed;
 }
 

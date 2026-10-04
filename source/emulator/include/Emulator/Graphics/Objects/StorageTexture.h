@@ -56,6 +56,18 @@ public:
 };
 
 [[nodiscard]] bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
+// A 2D single-layer image with several levels is one mipmapped backing: each level is written through
+// its own single-level view (the descriptor's BASE_LEVEL picks it) and the whole chain is sampled
+// through another. Depth-tiled R32 chains established this contract; Gen5 colour chains in the
+// render-target (27) and Standard64KB (9) tilings follow it. Tile 9 is a different layout on Gen4, so
+// the colour case needs `gen5`. Every other layout keeps the single-level atlas.
+[[nodiscard]] bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5);
+// Levels of the host image behind a mip backing (0 when there is none). A depth chain has exactly the
+// descriptor's levels. A colour chain carries every level its extent allows: captured descriptors
+// address levels past MAX_MIP (a downsample loop stores to level 6 of a MAX_MIP = 5 resource, into the
+// slack after the allocation), and those stores must land in the image, not fail or clamp onto a real
+// level. The result never exceeds the per-level view table.
+[[nodiscard]] uint32_t StorageTextureMipBackingLevels(const uint64_t* params, bool gen5);
 [[nodiscard]] VkImageUsageFlags StorageTextureGetImageUsage();
 
 struct StorageTextureRenderAliasCopy

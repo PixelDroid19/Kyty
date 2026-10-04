@@ -305,6 +305,7 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, 
                                                  uint32_t count);
 int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet);
 int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata);
+uint32_t KYTY_SYSV_ABI GraphicsDriverGetEqContextId(const Kernel::EventQueue::KernelEvent* ev);
 int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(size_t* size, uint32_t max_resources,
                                                                                  uint32_t max_owners);
 int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t size, uint32_t max_owners);

@@ -2,8 +2,12 @@
 """Small deterministic tests for the capture contract."""
 
 import importlib.util
+import contextlib
+import io
 from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("kyty_capture.py")
@@ -26,6 +30,36 @@ def metrics(*, white: float, entropy: float, colors: int, stripey: bool = False)
 
 
 class CaptureContractTests(unittest.TestCase):
+    def test_healthy_frame_without_green_hud_is_health_only_and_never_ocr_scene(self):
+        image = capture.Image(64, 48, lambda x, y: ((x * 4) % 240, (x * 4) % 240, (y * 5) % 240), "fixture")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "fixture.png"
+            path.write_bytes(b"synthetic pixels supplied by test backend")
+            with mock.patch.object(capture, "load_image", return_value=image), \
+                 mock.patch.object(capture, "run_text", side_effect=AssertionError("OCR must not classify scenes")):
+                score = capture.score_image(path)
+                args = capture.parser().parse_args(["score", str(path), "--gate"])
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(capture.command_score(args), 0)
+        self.assertTrue(score["world"]["material_healthy"])
+        self.assertEqual(score["world"]["green_hud_ratio"], 0)
+        self.assertEqual(score["scene_status"], "unknown")
+        self.assertEqual(score["assessment"], "material_health_only")
+        self.assertNotIn("scene_ok", score["world"])
+        self.assertNotIn("gameplay_like", score["world"])
+        aggregate = capture.aggregate_captures([score])
+        self.assertEqual(aggregate["scene_status"], "unknown")
+
+    def test_legacy_scene_flag_does_not_change_material_comparison(self):
+        baseline = metrics(white=0.01, entropy=7.0, colors=1300)
+        current = metrics(white=0.02, entropy=6.9, colors=1200)
+        current["world"]["scene_ok"] = False
+        result = capture.compare_metrics(current, baseline)
+        self.assertTrue(result["pass"])
+        self.assertEqual(result["assessment"], "material_health_only")
+        self.assertEqual(result["scene_status"], "unknown")
+        self.assertNotIn("scene_is_gameplay", result["checks"])
+
     def test_capture_disables_continuous_auto_cross_by_default(self):
         args = capture.parser().parse_args(["capture", "--guest-root", "/tmp"])
         self.assertFalse(args.auto_cross)

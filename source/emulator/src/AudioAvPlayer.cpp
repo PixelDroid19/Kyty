@@ -201,10 +201,16 @@ static std::unique_ptr<::Kyty::Emulator::AudioVideoBackend::Decoder> OpenPlayerS
 		}
 		return ::Kyty::Emulator::AudioVideoBackend::Decoder::OpenSource(std::move(source), error);
 	}
-	if (!Core::File::IsFileExisting(uri) && Kernel::FileSystem::IsMounted())
+	if (!Kernel::FileSystem::IsMounted())
 	{
-		String mounted = Kernel::FileSystem::GetRealFilename(uri);
-		if (!mounted.IsEmpty()) { *host_filename = mounted; }
+		*error = "media filesystem is not mounted";
+		return nullptr;
+	}
+	*host_filename = Kernel::FileSystem::GetExistingFilename(uri);
+	if (host_filename->IsEmpty())
+	{
+		*error = "media source is outside the guest filesystem";
+		return nullptr;
 	}
 	return ::Kyty::Emulator::AudioVideoBackend::Decoder::Open(host_filename->C_Str(), error);
 }
@@ -614,29 +620,10 @@ static String sanitize_avplayer_uri(const char* name, uint32_t length = 0)
 			decoded.push_back(s[i]);
 		}
 	}
-	String guest_path = String::FromUtf8(decoded.c_str());
-
-	if (Core::File::IsFileExisting(guest_path))
-	{
-		return guest_path;
-	}
-
-	if (Kernel::FileSystem::IsMounted())
-	{
-		String real_path = Kernel::FileSystem::GetRealFilename(guest_path);
-		if (!real_path.IsEmpty() && Core::File::IsFileExisting(real_path))
-		{
-			return real_path;
-		}
-
-		String resolved_path = Kernel::FileSystem::PreferHostApp0DataSegment(guest_path, real_path);
-		if (!resolved_path.IsEmpty() && Core::File::IsFileExisting(resolved_path))
-		{
-			return resolved_path;
-		}
-	}
-
-	return guest_path;
+	if (decoded.find('\0') != std::string::npos) { return {}; }
+	// File callbacks receive the guest URI; only the no-callback path resolves
+	// it through the VFS. An existing host file is never a guest-path fallback.
+	return String::FromUtf8(decoded.c_str());
 }
 
 static bool synthetic_is_playing(const AvPlayerInternal* r)
@@ -777,7 +764,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		{
 			return false;
 		}
-		VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(frame), decoded.data.size());
+		const VideoFrameMemory::HostWriteLease write_lease(reinterpret_cast<uint64_t>(frame), decoded.data.size());
 		std::memcpy(frame, decoded.data.data(), decoded.data.size());
 		timestamp = decoded.timestamp_ms;
 		Core::LockGuard lock(r->mutex);
@@ -804,7 +791,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 			level = 1.0f - (1.0f - pos * (1.0f / 0.5f)) * (1.0f - pos * (1.0f / 0.5f));
 		}
 
-		VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(frame), frame_bytes);
+		const VideoFrameMemory::HostWriteLease write_lease(reinterpret_cast<uint64_t>(frame), frame_bytes);
 		draw_synthetic_frame(width, height, frame, level * 0.7f);
 		Core::LockGuard lock(r->mutex);
 		r->synthetic_obtained_num++;

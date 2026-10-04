@@ -610,6 +610,7 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 		resource.fields[field] = extended_buffer[offset_dw + field];
 	}
 
+	sampled_shape_known = sampled_shape_known && ShaderGen5InstructionShapeAppliesToType(resource.Type(), sampled_shape);
 	int texture_index = -1;
 	for (int index = 0; index < bind->textures2D.textures_num; ++index)
 	{
@@ -855,7 +856,8 @@ static void ShaderCollectSplitTextureResources(const ShaderCode& code, ShaderBin
 		const auto operation = ShaderInstructionUsesImageSampler(consumer.type) ? ShaderInstructionSamplerOperation(consumer.type)
 		                                                                        : State::ImageSampleOperation::Regular;
 		ShaderGen5SampledTextureShape shape {};
-		const bool                    shape_known = reads && ShaderGen5SampledTextureShapeForMimgDimension(consumer.mimg_dimension, &shape);
+		const bool                    shape_known = reads && ShaderGen5SampledTextureShapeForMimgDimension(consumer.mimg_dimension, &shape) &&
+		                                            ShaderGen5InstructionShapeAppliesToType(resource.Type(), shape);
 		bool                          added_resource = false;
 		const int resource_index = ShaderAddSplitTextureResource(bind, resource, consumer.src[1].register_id, low.offset_dw, usage,
 		                                                         operation, shape, shape_known, &added_resource);

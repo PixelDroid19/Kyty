@@ -2,6 +2,7 @@
 
 #include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 
+#include <algorithm>
 #include <array>
 #include <vector>
 
@@ -16,9 +17,12 @@ using VectorSet = std::array<bool, 256>;
 
 struct NeutralRegion
 {
-	uint32_t  begin = 0;
-	uint32_t  end   = 0;
-	VectorSet written {};
+	uint32_t  begin       = 0;
+	uint32_t  end         = 0;
+	VectorSet written     {};
+	VectorSet zero        {};
+	bool      zero_closed = false;
+	bool      tier_safe   = true;
 };
 
 bool Plain(const ShaderOperand& operand)
@@ -327,11 +331,80 @@ bool Restores(const ShaderInstruction& instruction, const ShaderOperand& saved)
 	return ScalarMove(instruction, exec, saved);
 }
 
+// Row shift/rotate/mirror/broadcast controls stay inside the 16-lane row.
+// Shifts below 0x121 can leave the row; everything else the banked emitter
+// supports is always in bounds. 0x100 is reserved and the step-0 encodings at
+// 0x110 and 0x120 sit outside the ISA ranges, so they stay rejected too.
+bool RowCtrlSupported(uint32_t control)
+{
+	return (control >= 0x101u && control <= 0x10fu) || (control >= 0x111u && control <= 0x11fu) ||
+	       (control >= 0x121u && control <= 0x12fu) || control == 0x140u || control == 0x141u;
+}
+
+bool RowCtrlAlwaysInBounds(uint32_t control)
+{
+	return control >= 0x121u;
+}
+
+// A row-shift operand can observe the lane outside the row boundary only when
+// bound_ctrl is off; otherwise the destination is written or zeroed. For the
+// injected-zero lowering to preserve the keep-old semantics, the ALU must map
+// (0, old dst) to the old value: bitwise or/xor whose other source IS dst.
+bool RowOpKeepOldSafe(const ShaderInstruction& instruction)
+{
+	const auto& source = instruction.src[0];
+	if (!source.dpp || source.dpp_ctrl <= 0xffu || !RowCtrlSupported(source.dpp_ctrl) || source.dpp_row_mask != 15u ||
+	    source.dpp_bank_mask != 15u)
+	{
+		return false;
+	}
+	if (RowCtrlAlwaysInBounds(source.dpp_ctrl))
+	{
+		return true;
+	}
+	if (source.dpp_bound_ctrl)
+	{
+		return false;
+	}
+	const bool identity_or = instruction.type == ShaderInstructionType::VOrB32 || instruction.type == ShaderInstructionType::VXorB32;
+	return identity_or && instruction.src_num >= 2 && VectorRegister(instruction.src[1]) &&
+	       instruction.src[1].register_id == instruction.dst.register_id;
+}
+
+// A lane the captured wave never populated reads the neutral initializer and
+// nothing else: the initializer's condition is a subset of the capture, so such
+// a lane takes the zero constant. From there every source that feeds a later
+// result must itself be proven zero in those lanes for the result to stay zero.
+// Permutation tables (src1/src2) choose which lane supplies the value but never
+// add one, so only src0 is a data source for them.
+bool GhostZeroSources(const ShaderInstruction& instruction, const VectorSet& zero)
+{
+	const int last = instruction.type == ShaderInstructionType::VPermlane16B32 ||
+	                         instruction.type == ShaderInstructionType::VPermlanex16B32
+	                     ? 1
+	                     : instruction.src_num;
+	for (int source = 0; source < last; ++source)
+	{
+		const auto& operand = instruction.src[source];
+		if (ZeroConstant(operand))
+		{
+			continue;
+		}
+		if (!VectorRegister(operand) || !zero[operand.register_id])
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ClosedRegion(const ShaderCode& code, uint32_t begin, const ShaderOperand& saved, NeutralRegion* region)
 {
-	region->begin                                                          = begin;
-	region->written                                                        = {};
+	region->begin = begin;
+	region->written = {};
+	region->zero    = {};
 	region->written[code.GetInstructions().At(begin + 1u).dst.register_id] = true;
+	region->zero[code.GetInstructions().At(begin + 1u).dst.register_id]    = true;
 	for (uint32_t cursor = begin + 2u; cursor < code.GetInstructions().Size(); ++cursor)
 	{
 		const auto& instruction = code.GetInstructions().At(cursor);
@@ -341,14 +414,36 @@ bool ClosedRegion(const ShaderCode& code, uint32_t begin, const ShaderOperand& s
 		}
 		if (Restores(instruction, saved))
 		{
-			region->end = cursor;
+			region->end         = cursor;
+			region->zero_closed = true;
+			for (uint32_t reg = 0; reg < region->written.size(); ++reg)
+			{
+				region->zero_closed = region->zero_closed && (!region->written[reg] || region->zero[reg]);
+			}
 			return true;
 		}
 		if (!PureVector(instruction, region->written))
 		{
 			return false;
 		}
-		region->written[instruction.dst.register_id] = true;
+		const auto& source = instruction.src[0];
+		if (source.dpp && source.dpp_ctrl > 0xffu && !RowOpKeepOldSafe(instruction))
+		{
+			region->tier_safe = false;
+		}
+		if ((instruction.type == ShaderInstructionType::VPermlane16B32 || instruction.type == ShaderInstructionType::VPermlanex16B32) &&
+		    (instruction.vop3_op_sel & 1u) != 0u)
+		{
+			region->tier_safe = false;
+		}
+		const bool keeps_old = source.dpp && source.dpp_ctrl > 0xffu && !source.dpp_bound_ctrl &&
+		                       !RowCtrlAlwaysInBounds(source.dpp_ctrl);
+		const int dst = instruction.dst.register_id;
+		// A later write replaces the lane value: the register keeps its proven
+		// ghost zero only when this instruction also derives it from proven
+		// zeros (or, for a keep-old DPP, from the zero it already held).
+		region->zero[dst]    = GhostZeroSources(instruction, region->zero) && (!keeps_old || region->zero[dst]);
+		region->written[dst] = true;
 	}
 	return false;
 }
@@ -435,15 +530,29 @@ bool RegionDefines(const std::vector<NeutralRegion>& regions, uint32_t cursor, i
 	return false;
 }
 
+bool RewritesVector(const ShaderInstruction& instruction, int reg)
+{
+	for (const auto& dst: {instruction.dst, instruction.dst2})
+	{
+		if (dst.type == ShaderOperandType::Vgpr && dst.register_id >= 0 && reg >= dst.register_id &&
+		    reg < dst.register_id + std::max(dst.size, 1))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 // A VGPR holds a guest-defined value in every lane after a proven region wrote
 // it with full EXEC. Narrower later writes keep the other lanes, as on hardware.
-// The region must be the unconditional predecessor of the read: any label
-// between them would allow entry that skipped the initialization.
+// The region must be the unconditional predecessor of the read: any label or
+// overwriting instruction between them invalidates the proof.
 bool DefinedBeforeRead(const ShaderCode& code, const std::vector<NeutralRegion>& regions, uint32_t index, int reg)
 {
 	for (uint32_t cursor = index; cursor > 0;)
 	{
-		if (LabelAt(code, code.GetInstructions().At(cursor).pc))
+		const auto& instruction = code.GetInstructions().At(cursor);
+		if (LabelAt(code, instruction.pc) || RewritesVector(instruction, reg))
 		{
 			return false;
 		}
@@ -486,6 +595,248 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentPartialWaveReads(const Shad
 			result.unsupported_pc = instruction.pc;
 			result.reason         = "reads lanes outside the captured wave without a proven full-wave initialization";
 			return result;
+		}
+	}
+	return result;
+}
+
+namespace {
+
+// Whether `index` sits inside a proven region (save/restore pair included).
+// In-region instructions execute with EXEC widened to the whole host wave, so
+// lane exchanges only need the injection lowering, never an EXEC test.
+bool WaveRegionAt(const std::vector<NeutralRegion>& regions, uint32_t index, const NeutralRegion** out)
+{
+	for (const auto& region: regions)
+	{
+		if (index >= region.begin && index <= region.end)
+		{
+			*out = &region;
+			return true;
+		}
+	}
+	return false;
+}
+
+// The lane a read names may be unpopulated on a narrower host subgroup. Its
+// value is the proven neutral zero only when the source register was written
+// by a zero-closed region and nothing could bypass that write.
+bool GhostZeroBeforeRead(const ShaderCode& code, const std::vector<NeutralRegion>& regions, uint32_t index, int reg)
+{
+	for (uint32_t cursor = index; cursor > 0;)
+	{
+		const auto& instruction = code.GetInstructions().At(cursor);
+		if (LabelAt(code, instruction.pc) || RewritesVector(instruction, reg))
+		{
+			return false;
+		}
+		--cursor;
+		for (const auto& region: regions)
+		{
+			if (region.end == cursor && region.zero_closed && region.zero[reg])
+			{
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool ConstantLane(const ShaderOperand& operand, uint32_t* lane)
+{
+	const bool literal = operand.type == ShaderOperandType::LiteralConstant || operand.type == ShaderOperandType::IntegerInlineConstant;
+	if (!literal || operand.size != 0)
+	{
+		return false;
+	}
+	*lane = operand.constant.u;
+	return true;
+}
+
+// The proven ghost-zero state of `reg` at instruction `index` inside `region`:
+// the prefix is replayed with the same rules ClosedRegion applied, so a read
+// before the region end observes exactly what the ghost lanes carry there.
+bool RegionZeroAt(const ShaderCode& code, const NeutralRegion& region, uint32_t index, int reg)
+{
+	if (reg < 0 || index <= region.begin + 1u)
+	{
+		return false;
+	}
+	VectorSet zero {};
+	zero[code.GetInstructions().At(region.begin + 1u).dst.register_id] = true;
+	for (uint32_t cursor = region.begin + 2u; cursor < index && cursor <= region.end; ++cursor)
+	{
+		const auto& instruction = code.GetInstructions().At(cursor);
+		const auto& source      = instruction.src[0];
+		const bool  keeps_old   = source.dpp && source.dpp_ctrl > 0xffu && !source.dpp_bound_ctrl &&
+		                          !RowCtrlAlwaysInBounds(source.dpp_ctrl);
+		const int dst = instruction.dst.register_id;
+		if (dst >= 0 && dst < static_cast<int>(zero.size()))
+		{
+			zero[dst] = GhostZeroSources(instruction, zero) && (!keeps_old || zero[dst]);
+		}
+	}
+	return zero[reg];
+}
+
+} // namespace
+
+bool ShaderFragmentWaveInsideRegion(const ShaderCode& code, uint32_t index)
+{
+	if (code.GetType() != ShaderType::Pixel || index >= code.GetInstructions().Size())
+	{
+		return false;
+	}
+	const auto           regions = CollectRegions(code);
+	const NeutralRegion* found   = nullptr;
+	return WaveRegionAt(regions, index, &found) && found->tier_safe && found->zero_closed;
+}
+
+bool ShaderFragmentWaveGhostZero(const ShaderCode& code, uint32_t index, int vgpr)
+{
+	if (code.GetType() != ShaderType::Pixel || index >= code.GetInstructions().Size() || vgpr < 0 || vgpr >= 256)
+	{
+		return false;
+	}
+	const auto           regions = CollectRegions(code);
+	const NeutralRegion* region  = nullptr;
+	if (WaveRegionAt(regions, index, &region) && region->tier_safe && region->zero_closed)
+	{
+		return RegionZeroAt(code, *region, index, vgpr);
+	}
+	return GhostZeroBeforeRead(code, regions, index, vgpr);
+}
+
+// Runs a Wave64 fragment program as a partially populated guest wave on a
+// 32-lane host subgroup: grouping is the rasterizer's choice, a correct shader
+// cannot depend on it, so the host wave is a legal wave64 population. Exact
+// lowering needs every lane-indexed operation to stay inside a proven region
+// (EXEC full there) or to read proven-neutral ghost lanes.
+ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentNativeWaveTier(const ShaderCode& code)
+{
+	ShaderComputeWaveAnalysisResult result;
+	result.supported = code.GetType() == ShaderType::Pixel;
+	if (!result.supported)
+	{
+		return result;
+	}
+	bool       uses_wave = false;
+	uint32_t   last_lane_op = 0;
+	const auto regions  = CollectRegions(code);
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		const auto&   instruction = code.GetInstructions().At(index);
+		const NeutralRegion* region = nullptr;
+		const bool    inside      = WaveRegionAt(regions, index, &region) && region->tier_safe && region->zero_closed;
+		const bool    permute =
+		    instruction.type == ShaderInstructionType::VPermlane16B32 || instruction.type == ShaderInstructionType::VPermlanex16B32;
+		const bool row_dpp = instruction.src_num > 0 && instruction.src[0].dpp && instruction.src[0].dpp_ctrl > 0xffu;
+		const bool readlane = instruction.type == ShaderInstructionType::VReadlaneB32 && instruction.src_num >= 2;
+		// A masked bit count folds the architectural 64-lane EXEC into scalar
+		// state; on a narrower host wave that value depends on the grouping.
+		const bool popcount = instruction.type == ShaderInstructionType::VMbcntLoU32B32 ||
+		                      instruction.type == ShaderInstructionType::VMbcntHiU32B32;
+		// A real s_barrier orders the whole guest wave; Vulkan offers no legal
+		// control barrier in the fragment stage, so the tier cannot lower it.
+		// The Imm-format SOPP pseudo-ops are parser-level no-ops instead.
+		const bool real_barrier = instruction.type == ShaderInstructionType::SBarrier &&
+		                          instruction.format == ShaderInstructionFormat::Empty;
+		uses_wave = uses_wave || permute || row_dpp || readlane || popcount;
+		if (permute || row_dpp || readlane)
+		{
+			last_lane_op = index;
+		}
+		if (real_barrier)
+		{
+			result.supported      = false;
+			result.unsupported_pc = instruction.pc;
+			result.reason         = "s_barrier cannot be lowered in the fragment stage";
+			return result;
+		}
+		if (popcount)
+		{
+			result.supported      = false;
+			result.unsupported_pc = instruction.pc;
+			result.reason         = "masked bit count is grouping sensitive";
+			return result;
+		}
+		if (inside)
+		{
+			// Inside the region EXEC is full, so lane ops run directly. A
+			// readlane still reaches guest lanes the host wave never populated;
+			// those read the proven neutral zero, which RegionZeroAt evaluates
+			// at this exact point.
+			if (!readlane)
+			{
+				continue;
+			}
+			uint32_t lane = 0;
+			if (ConstantLane(instruction.src[1], &lane) && lane < 32u)
+			{
+				continue;
+			}
+			const auto& source = instruction.src[0];
+			if ((ConstantLane(instruction.src[1], &lane) && lane >= 64u) || !VectorRegister(source) ||
+			    !RegionZeroAt(code, *region, index, source.register_id))
+			{
+				result.supported      = false;
+				result.unsupported_pc = instruction.pc;
+				result.reason         = "readlane inside a neutral region over a ghost lane without a proven zero";
+				return result;
+			}
+			continue;
+		}
+		if (row_dpp || permute)
+		{
+			result.supported      = false;
+			result.unsupported_pc = instruction.pc;
+			result.reason         = "lane exchange outside a proven neutral region";
+			return result;
+		}
+		if (!readlane)
+		{
+			continue;
+		}
+		uint32_t lane = 0;
+		if (!ConstantLane(instruction.src[1], &lane) || lane >= 32u)
+		{
+			const auto& source = instruction.src[0];
+			if ((ConstantLane(instruction.src[1], &lane) && lane >= 64u) || !VectorRegister(source) ||
+			    !GhostZeroBeforeRead(code, regions, index, source.register_id))
+			{
+				result.supported      = false;
+				result.unsupported_pc = instruction.pc;
+				result.reason         = "readlane over the ghost half without a proven neutral value";
+				return result;
+			}
+		}
+	}
+	result.supported = result.supported && uses_wave;
+	// A kill before the last lane exchange demotes lanes the shuffles still
+	// read. Host-side demotion comes only from an OpKill emitter: the discard
+	// tail (a null export following a discard block) or a literal exec=0 write.
+	if (result.supported)
+	{
+		for (uint32_t index = 0; index <= last_lane_op; ++index)
+		{
+			const auto& instruction = code.GetInstructions().At(index);
+			const bool  null_tail   = instruction.format == ShaderInstructionFormat::NullVmDone;
+			const bool  mrt_null_done =
+			    instruction.format >= ShaderInstructionFormat::Mrt0OffOffComprVmDone &&
+			    instruction.format <= ShaderInstructionFormat::Mrt7OffOffComprVmDone;
+			const bool  null_export = instruction.type == ShaderInstructionType::Exp &&
+			                         (null_tail || (mrt_null_done && index > 0 &&
+			                                        code.ReadBlock(code.GetInstructions().At(index - 1u).pc).is_discard));
+			const bool exec_kill = instruction.dst.type == ShaderOperandType::ExecLo && instruction.src_num > 0 &&
+			                       instruction.src[0].type == ShaderOperandType::LiteralConstant &&
+			                       instruction.src[0].constant.u == 0u;
+			if (null_export || exec_kill)
+			{
+				result.supported      = false;
+				result.unsupported_pc = instruction.pc;
+				result.reason         = "a discard or exec kill precedes a lane exchange";
+				return result;
+			}
 		}
 	}
 	return result;

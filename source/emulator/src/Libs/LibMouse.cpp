@@ -6,6 +6,7 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <cinttypes>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -19,6 +20,9 @@ namespace Mouse {
 
 constexpr int MOUSE_ERROR_INVALID_ARG    = -2132869119; /* 0x80DF0001 */
 constexpr int MOUSE_ERROR_INVALID_HANDLE = -2132869117; /* 0x80DF0003 */
+// Largest capacity the HLE fills per call: a loss-resistant drain uses 64 records
+// (2,560 bytes). The count is guest-controlled and sizes a memset, so it is bounded.
+constexpr int MOUSE_MAX_DATA_NUM = 64;
 
 struct MouseData
 {
@@ -32,6 +36,12 @@ struct MouseData
 	int32_t  tilt;
 	uint8_t  reserved[8];
 };
+
+// The native record is 40 bytes: timestamp 0x00, connected 0x08, buttons 0x0C,
+// x 0x10, y 0x14, wheel 0x18, tilt 0x1C, reserved 0x20.
+static_assert(sizeof(MouseData) == 40);
+static_assert(offsetof(MouseData, buttons) == 0x0c);
+static_assert(offsetof(MouseData, tilt) == 0x1c);
 
 // sceMouseInit — NID Qs0wWulgl7U
 static int KYTY_SYSV_ABI MouseInit()
@@ -78,7 +88,7 @@ static int KYTY_SYSV_ABI MouseRead(int32_t handle, MouseData* data, int32_t num)
 	{
 		return MOUSE_ERROR_INVALID_HANDLE;
 	}
-	if (data == nullptr || num <= 0)
+	if (data == nullptr || num <= 0 || num > MOUSE_MAX_DATA_NUM)
 	{
 		return MOUSE_ERROR_INVALID_ARG;
 	}

@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cinttypes>
 #include <cstring>
 #include <ctime>
@@ -611,6 +612,33 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	return AppendRecord(cmd, record.data(), record.size(), &action);
 }
 
+static int ReadErrorToKernel(int error)
+{
+	// Core::File returns host errno classes, not the guest's BSD error numbers.
+	switch (error)
+	{
+		case EACCES: return LibKernel::KERNEL_ERROR_EACCES;
+		case EAGAIN: return LibKernel::KERNEL_ERROR_EAGAIN;
+		case EBADF: return LibKernel::KERNEL_ERROR_EBADF;
+		case EFAULT: return LibKernel::KERNEL_ERROR_EFAULT;
+		case EINTR: return LibKernel::KERNEL_ERROR_EINTR;
+		case EINVAL: return LibKernel::KERNEL_ERROR_EINVAL;
+		case EISDIR: return LibKernel::KERNEL_ERROR_EISDIR;
+		case ENOMEM: return LibKernel::KERNEL_ERROR_ENOMEM;
+		case ENXIO: return LibKernel::KERNEL_ERROR_ENXIO;
+#ifdef EOVERFLOW
+		case EOVERFLOW: return LibKernel::KERNEL_ERROR_EOVERFLOW;
+#endif
+#ifdef ECANCELED
+		case ECANCELED: return LibKernel::KERNEL_ERROR_ECANCELED;
+#endif
+#ifdef ETIMEDOUT
+		case ETIMEDOUT: return LibKernel::KERNEL_ERROR_ETIMEDOUT;
+#endif
+		default: return LibKernel::KERNEL_ERROR_EIO;
+	}
+}
+
 static int ExecuteRead(const PendingAction& action)
 {
 	Core::String host_path;
@@ -627,15 +655,21 @@ static int ExecuteRead(const PendingAction& action)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	Emulator::VideoFrameMemory::NotifyHostWrite(action.destination, action.size);
+	const Emulator::VideoFrameMemory::HostWriteLease write_lease(action.destination, action.size);
 	uint64_t total = 0;
 	auto*    dest  = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(action.destination));
 	while (total < action.size)
 	{
 		const auto request = static_cast<uint32_t>(
 		    action.size - total > kReadChunkSize ? kReadChunkSize : action.size - total);
-		uint32_t read = 0;
-		file.Read(dest + total, request, &read);
+		uint32_t  read  = 0;
+		const int error = file.Read(dest + total, request, &read);
+		if (error != 0)
+		{
+			// Bytes already transferred stay in the destination, but a failed
+			// read must stop the submission before any later completion action.
+			return ReadErrorToKernel(error);
+		}
 		if (read == 0)
 		{
 			break;

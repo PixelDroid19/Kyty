@@ -24,6 +24,19 @@ void DecodeDsWrite(ShaderInstruction* inst, uint32_t addr, uint32_t data0, uint1
 	inst->ds_offset   = offset;
 }
 
+// ds_write2[st64]_b32: DATA0 and DATA1 go to two independent dword addresses; the offsets stay packed in ds_offset.
+void DecodeDsWrite2(ShaderInstruction* inst, ShaderInstructionType type, uint32_t addr, uint32_t data0, uint32_t data1, uint32_t offset0,
+                    uint32_t offset1)
+{
+	inst->type      = type;
+	inst->format    = ShaderInstructionFormat::VaddrVdata2Offset01;
+	inst->src[0]    = operand_parse(addr + 256);
+	inst->src[1]    = operand_parse(data0 + 256);
+	inst->src[2]    = operand_parse(data1 + 256);
+	inst->src_num   = 3;
+	inst->ds_offset = static_cast<uint16_t>((offset1 << 8u) | offset0);
+}
+
 // ds_read_b32/b64/b96/b128: consecutive dwords at ADDR + offset into VDST.
 void DecodeDsRead(ShaderInstruction* inst, uint32_t vdst, uint32_t addr, uint16_t offset, int dwords)
 {
@@ -76,13 +89,12 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			break;
 		case 0x01:
 			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
-			if (data1 != 0 || offset1 != 0 || vdst != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data1 != 0 || offset1 != 0 || vdst != 0 condition ignored (continuing)\n"); }
 			inst.type      = ShaderInstructionType::DsSubU32;
 			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
 			inst.src[0]    = operand_parse(addr + 256);
 			inst.src[1]    = operand_parse(data0 + 256);
 			inst.src_num   = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x02: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_rsub_u32 treated as DsSubU32 (continuing)\n");
 			inst.type = ShaderInstructionType::DsSubU32;
@@ -112,73 +124,66 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			break;
 		case 0x05:
 			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
-			if (data1 != 0 || offset1 != 0 || vdst != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data1 != 0 || offset1 != 0 || vdst != 0 condition ignored (continuing)\n"); }
 			inst.type      = ShaderInstructionType::DsMinI32;
 			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
 			inst.src[0]    = operand_parse(addr + 256);
 			inst.src[1]    = operand_parse(data0 + 256);
 			inst.src_num   = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x06:
 			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
-			if (data1 != 0 || offset1 != 0 || vdst != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data1 != 0 || offset1 != 0 || vdst != 0 condition ignored (continuing)\n"); }
 			inst.type      = ShaderInstructionType::DsMaxI32;
 			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
 			inst.src[0]    = operand_parse(addr + 256);
 			inst.src[1]    = operand_parse(data0 + 256);
 			inst.src_num   = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x07:
 			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
-			if (data1 != 0 || offset1 != 0 || vdst != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data1 != 0 || offset1 != 0 || vdst != 0 condition ignored (continuing)\n"); }
 			inst.type      = ShaderInstructionType::DsMinU32;
 			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
 			inst.src[0]    = operand_parse(addr + 256);
 			inst.src[1]    = operand_parse(data0 + 256);
 			inst.src_num   = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x08:
 			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
-			if (data1 != 0 || offset1 != 0 || vdst != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data1 != 0 || offset1 != 0 || vdst != 0 condition ignored (continuing)\n"); }
 			inst.type      = ShaderInstructionType::DsMaxU32;
 			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
 			inst.src[0]    = operand_parse(addr + 256);
 			inst.src[1]    = operand_parse(data0 + 256);
 			inst.src_num   = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x09:
 			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
-			if (data1 != 0 || offset1 != 0 || vdst != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data1 != 0 || offset1 != 0 || vdst != 0 condition ignored (continuing)\n"); }
 			inst.type      = ShaderInstructionType::DsAndB32;
 			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
 			inst.src[0]    = operand_parse(addr + 256);
 			inst.src[1]    = operand_parse(data0 + 256);
 			inst.src_num   = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x0A:
 			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
-			if (data1 != 0 || offset1 != 0 || vdst != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data1 != 0 || offset1 != 0 || vdst != 0 condition ignored (continuing)\n"); }
 			inst.type      = ShaderInstructionType::DsOrB32;
 			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
 			inst.src[0]    = operand_parse(addr + 256);
 			inst.src[1]    = operand_parse(data0 + 256);
 			inst.src_num   = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x0B:
 			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
-			if (data1 != 0 || offset1 != 0 || vdst != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data1 != 0 || offset1 != 0 || vdst != 0 condition ignored (continuing)\n"); }
 			inst.type      = ShaderInstructionType::DsXorB32;
 			inst.format    = ShaderInstructionFormat::VaddrVdataOffset;
 			inst.src[0]    = operand_parse(addr + 256);
 			inst.src[1]    = operand_parse(data0 + 256);
 			inst.src_num   = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x0C: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_mskor_b32 treated as DsOrB32 (continuing)\n");
 			inst.type = ShaderInstructionType::DsOrB32;
@@ -191,22 +196,8 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0x0D:
 			DecodeDsWrite(&inst, addr, data0, DsSingleOffset(offset0, offset1), 1);
 			break;
-		case 0x0E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_write2_b32 treated as DsWriteB32 (continuing)\n");
-			inst.type = ShaderInstructionType::DsWriteB32;
-			inst.format = ShaderInstructionFormat::VaddrVdataOffset;
-			inst.src[0] = operand_parse(addr + 256);
-			inst.src[1] = operand_parse(data0 + 256);
-			inst.src_num = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
-			break;
-		case 0x0F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_write2st64_b32 treated as DsWriteB32 (continuing)\n");
-			inst.type = ShaderInstructionType::DsWriteB32;
-			inst.format = ShaderInstructionFormat::VaddrVdataOffset;
-			inst.src[0] = operand_parse(addr + 256);
-			inst.src[1] = operand_parse(data0 + 256);
-			inst.src_num = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
-			break;
+		case 0x0E: DecodeDsWrite2(&inst, ShaderInstructionType::DsWrite2B32, addr, data0, data1, offset0, offset1); break;
+		case 0x0F: DecodeDsWrite2(&inst, ShaderInstructionType::DsWrite2St64B32, addr, data0, data1, offset0, offset1); break;
 		case 0x10: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_cmpst_b32 treated as DsAddU32 (continuing)\n");
 			inst.type = ShaderInstructionType::DsAddU32;
 			inst.format = ShaderInstructionFormat::VaddrVdataOffset;
@@ -302,7 +293,7 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			inst.src[0] = operand_parse(addr + 256);
 			inst.src[1] = operand_parse(data0 + 256);
 			inst.src_num = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0 | (offset1 << 8u));
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0x21:
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_sub_rtn_u32 treated as DsSubU32 (continuing)\n");
@@ -486,13 +477,15 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			inst.src_num   = 1;
 			inst.ds_offset = static_cast<uint16_t>((offset1 << 8u) | offset0);
 			break;
-		case 0x38: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_read2st64_b32 treated as DsReadB32 (continuing)\n");
-			inst.type = ShaderInstructionType::DsReadB32;
-			inst.format = ShaderInstructionFormat::VdstVaddrOffset;
-			inst.dst = operand_parse(vdst + 256);
-			inst.src[0] = operand_parse(addr + 256);
-			inst.src_num = 1;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+		case 0x38:
+			if (gds != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gds!=0 treated as LDS (continuing)\n"); }
+			inst.type      = ShaderInstructionType::DsRead2St64B32;
+			inst.format    = ShaderInstructionFormat::Vdst2VaddrOffset01;
+			inst.dst       = operand_parse(vdst + 256);
+			inst.dst.size  = 2;
+			inst.src[0]    = operand_parse(addr + 256);
+			inst.src_num   = 1;
+			inst.ds_offset = static_cast<uint16_t>((offset1 << 8u) | offset0);
 			break;
 		case 0x39:
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_read_i8 treated as DsReadB32 (continuing)\n");
@@ -1003,6 +996,23 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			inst.src[1] = operand_parse(data0 + 256);
 			inst.src_num = 2;
 			inst.ds_offset = static_cast<uint16_t>(offset0);
+			break;
+		case 0xB0:
+			// ds_write_addtid_b32: LDS[M0[15:0] + offset + TID*4] = DATA0 (no ADDR field).
+			if (gds != 0) { KYTY_NI("ds_write_addtid_b32_gds"); break; }
+			inst.type      = ShaderInstructionType::DsWriteAddtidB32;
+			inst.format    = ShaderInstructionFormat::VdataOffset;
+			inst.src[0]    = operand_parse(data0 + 256);
+			inst.src_num   = 1;
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
+			break;
+		case 0xB1:
+			// ds_read_addtid_b32: VDST = LDS[M0[15:0] + offset + TID*4] (no ADDR field).
+			if (gds != 0) { KYTY_NI("ds_read_addtid_b32_gds"); break; }
+			inst.type      = ShaderInstructionType::DsReadAddtidB32;
+			inst.format    = ShaderInstructionFormat::VdstOffset;
+			inst.dst       = operand_parse(vdst + 256);
+			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
 		case 0xC0: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_add_src2_u64 treated as DsAddU32 (continuing)\n");
 			inst.type = ShaderInstructionType::DsAddU32;

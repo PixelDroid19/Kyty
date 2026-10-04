@@ -263,10 +263,20 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 	auto& h           = heap.objects[obj_id];
 	auto& o           = h.info;
 	bool  need_update = false;
+	if (!o.in_use && o.object.type == GpuMemoryObjectType::StorageBuffer && o.object.obj != nullptr && h.block.vaddr_num == 1 &&
+	    m_deferred_deletions.AreDependenciesComplete(o.submission_uses.Dependencies()))
+	{
+		const auto* storage = static_cast<const StorageVulkanBuffer*>(o.object.obj);
+		// The previous writer has completed AND published. A completed label can
+		// now be acquired as ordinary data even when WriteBack's guest hash already
+		// contains its value. Resetting the backing snapshot is essential: skipped
+		// bytes from an older GPU batch must not become a later batch's changes.
+		need_update = LabelStorageNeedsUpload(h.block.vaddr[0], h.block.size[0], storage->label_publication);
+	}
 
 	bool mem_watch = false;
 
-	if ((mem_watch && o.cpu_update_time > o.gpu_update_time) || (!mem_watch && submit_id > o.submit_id))
+	if (need_update || (mem_watch && o.cpu_update_time > o.gpu_update_time) || (!mem_watch && submit_id > o.submit_id))
 	{
 		uint64_t                hash[VADDR_BLOCKS_MAX] = {};
 		GpuDirtyReadObservation dirty_read[VADDR_BLOCKS_MAX] {};
@@ -777,6 +787,29 @@ String GpuMemory::create_dbg_exit(const String& msg, const uint64_t* vaddr, cons
 	return str;
 }
 
+String GpuMemory::create_dbg_parents(int heap_id, const Vector<OverlappedBlock>& others, const GpuObject& info)
+{
+	const auto& heap = m_heaps[heap_id];
+	Core::StringList list;
+	const auto params = [](const uint64_t* values)
+	{
+		String text;
+		for (int i = 0; i < 10; i++) { text += String::FromPrintf(" %" PRIu64, values[i]); }
+		return text;
+	};
+	list.Add(String::FromPrintf("\t new params:%s", params(info.params).C_Str()));
+	for (const auto& d: others)
+	{
+		const auto& h = heap.objects[d.object_id];
+		list.Add(String::FromPrintf("\t parent id=%d type=%s rel=%s scenario=%s parents=%u read_only=%d vaddr=0x%016" PRIx64
+		                            " size=0x%016" PRIx64 " params:%s",
+		                            d.object_id, Core::EnumName(h.info.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
+		                            Core::EnumName(h.scenario).C_Str(), static_cast<unsigned>(h.others.Size()), h.info.read_only ? 1 : 0,
+		                            h.block.vaddr[0], h.block.size[0], params(h.info.params).C_Str()));
+	}
+	return list.Concat(U'\n');
+}
+
 void GpuMemory::RecordUse(ObjectInfo* object, SubmissionId submission)
 {
 	EXIT_IF(object == nullptr);
@@ -1132,6 +1165,13 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// GPU-owned render target. Keep its live pixels before compute writes.
 				overlap                = true;
 				render_alias_parent_id = obj.object_id;
+			} else if (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type))
+			{
+				// A storage view inside a live render target reuses its guest
+				// range (captured: RT 2432x1368 Contains a 240x135 fmt-64
+				// storage image). Formats differ, so no alias copy can seed it;
+				// link both views and keep the render target live.
+				overlap = true;
 			} else if (GpuMemoryAllowsOverwrittenStorageTextureParent(
 			               o.object.type, obj.relation, info.type,
 			               info.params[StorageTextureObject::PARAM_SKIP_SEED] != 0))
@@ -1948,7 +1988,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						               d.object_id, Core::EnumName(oi.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
 						               oi.read_only ? 1 : 0, oh.block.vaddr[0], oh.block.size[0]);
 					}
-					EXIT("%s\n", create_dbg_exit(U"!create_all_the_same", vaddr, size, vaddr_num, others, info.type).C_Str());
+					EXIT("%s\n%s\n", create_dbg_exit(U"!create_all_the_same", vaddr, size, vaddr_num, others, info.type).C_Str(),
+					     create_dbg_parents(heap_id, others, info).C_Str());
 				}
 
 				OverlapType         rel  = others.At(0).relation;

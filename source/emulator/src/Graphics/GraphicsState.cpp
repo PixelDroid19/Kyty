@@ -351,7 +351,7 @@ Gen5SampleBacking ResolveGen5SampleBacking(uint32_t fmt, uint32_t tile, bool exa
 	// detiled is decided only by Gen5SampleMayGuestUploadTiled — one behavior:
 	//
 	// tile 27 (kRenderTarget):
-	//   - BC1 family (133 / guest 169 UNORM / 170 SRGB): GuestMemoryTexture;
+	//   - BC1 family (raw 169 UNORM / 170 SRGB): GuestMemoryTexture;
 	//     MayGuestUpload may detile package data
 	//   - ufmt 56 (RGBA8): GuestMemoryTexture; MayGuestUpload always false (skip_guest
 	//     transparent clear — never detile GPU intermediates)
@@ -387,14 +387,29 @@ SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp)
 		case 0: return SamplerAddressMode::Repeat;
 		case 1: return SamplerAddressMode::MirroredRepeat;
 		case 2: return SamplerAddressMode::ClampToEdge;
+		case 3: return SamplerAddressMode::MirrorOnceLastTexel;
+		case 4: return SamplerAddressMode::ClampHalfBorder;
+		case 5: return SamplerAddressMode::MirrorOnceHalfBorder;
 		case 6: return SamplerAddressMode::ClampToBorder;
-		// AMD SQ_TEX_MIRROR_ONCE_BORDER has no exact Vulkan address mode.
-		// Prefer border behavior over enabling mirror-clamp-to-edge without a
-		// checked device feature/extension.
-		case 7: return SamplerAddressMode::ClampToBorder;
+		case 7: return SamplerAddressMode::MirrorOnceBorder;
 		default: EXIT("unknown clamp: %u\n", sq_tex_clamp);
 	}
 	return SamplerAddressMode::ClampToBorder;
+}
+
+bool SamplerAddressModeHasExactHostMapping(SamplerAddressMode mode, bool mirror_clamp_to_edge_enabled, bool force_unnormalized)
+{
+	// RDNA2 Table 46 mode 3 mirrors once then clamps to the last texel. Vulkan's
+	// mirror-clamp-to-edge performs precisely this operation (Sampling: Texel
+	// Addressing). VUID-01079 requires the enabled feature; VUID-01075 excludes
+	// mirror addressing with unnormalizedCoordinates. Half-border and mode 7
+	// still have no exact native mapping here.
+	if (mode == SamplerAddressMode::MirrorOnceLastTexel)
+	{
+		return mirror_clamp_to_edge_enabled && !force_unnormalized;
+	}
+	return mode == SamplerAddressMode::Repeat || mode == SamplerAddressMode::MirroredRepeat ||
+	       mode == SamplerAddressMode::ClampToEdge || mode == SamplerAddressMode::ClampToBorder;
 }
 
 SamplerComparison ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation)

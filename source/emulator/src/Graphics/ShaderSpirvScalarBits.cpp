@@ -45,6 +45,44 @@ KYTY_RECOMPILER_FUNC(Recompile_SBitcmp_XXX)
 	return true;
 }
 
+// s_bcnt{0,1}_i32_b{32,64}: number of clear (param[0] == "0") or set bits of the
+// source; SCC = (result != 0).
+KYTY_RECOMPILER_FUNC(Recompile_SBcnt_XXX)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const bool  wide      = inst.src[0].size == 2;
+	const bool  count_set = param[0][0] == '1';
+	const auto  dst       = operand_variable_to_str(inst.dst);
+	const auto  index_str = String8::FromPrintf("%u", index);
+	String8     load_lo;
+	String8     load_hi;
+	if (dst.type != SpirvType::Uint || !operand_load_uint(spirv, inst.src[0], "bn_lo_<index>", index_str, &load_lo, wide ? 0 : -1) ||
+	    (wide && !operand_load_uint(spirv, inst.src[0], "bn_hi_<index>", index_str, &load_hi, 1)))
+	{
+		return false;
+	}
+	String8 source = load_lo + "\n" + load_hi + "\n";
+	if (!count_set)
+	{
+		source += "%bn_lo_in_<index> = OpNot %uint %bn_lo_<index>\n";
+		source += wide ? "%bn_hi_in_<index> = OpNot %uint %bn_hi_<index>\n" : "";
+	}
+	const char* lo = count_set ? "bn_lo" : "bn_lo_in";
+	const char* hi = count_set ? "bn_hi" : "bn_hi_in";
+	source += String8::FromPrintf("%%bn_count_lo_<index> = OpBitCount %%uint %%%s_<index>\n", lo);
+	if (wide)
+	{
+		source += String8::FromPrintf("%%bn_count_hi_<index> = OpBitCount %%uint %%%s_<index>\n", hi);
+		source += "%bn_count_<index> = OpIAdd %uint %bn_count_lo_<index> %bn_count_hi_<index>\n";
+	} else
+	{
+		source += "%bn_count_<index> = OpCopyObject %uint %bn_count_lo_<index>\n";
+	}
+	source += "               OpStore %<dst> %bn_count_<index>\n    <scc>\n";
+	*dst_source += source.ReplaceStr("<scc>", get_scc_check(scc_check, 1)).ReplaceStr("<dst>", dst.value).ReplaceStr("<index>", index_str);
+	return true;
+}
+
 // s_ff1_i32_b{32,64}: index of the least significant set bit, or -1.
 KYTY_RECOMPILER_FUNC(Recompile_SFf1I32_XXX)
 {

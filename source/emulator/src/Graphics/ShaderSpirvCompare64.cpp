@@ -16,7 +16,7 @@ bool LoadWord64(Spirv* spirv, const ShaderOperand& operand, int word, const Stri
 		*output += String8::FromPrintf("%%%s = OpCopyObject %%uint %%%s\n", id.c_str(), spirv->GetConstantUint(value).c_str());
 		return true;
 	}
-	const auto value = operand_variable_to_str(operand, word);
+	const auto value = operand_numeric_variable_to_str(operand, word);
 	if (value.value.IsEmpty())
 	{
 		return false;

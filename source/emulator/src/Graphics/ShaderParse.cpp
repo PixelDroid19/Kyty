@@ -92,6 +92,8 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 			decode_ptr = bounded_words;
 		}
 
+		const uint32_t instructions_before = dst->GetInstructions().Size();
+
 		uint32_t words = 0;
 		if ((instruction & 0x80000000u) == 0x00000000)
 		{
@@ -139,6 +141,10 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 		{
 			return false;
 		}
+		for (uint32_t index = instructions_before; index < dst->GetInstructions().Size(); ++index)
+		{
+			dst->GetInstructions()[index].raw_word = instruction;
+		}
 		ptr += words;
 		if (!dst->GetInstructions().IsEmpty() &&
 		    dst->GetInstructions().At(dst->GetInstructions().Size() - 1u).type == ShaderInstructionType::SEndpgm)
@@ -182,12 +188,18 @@ void ShaderParse(const uint32_t* src, ShaderCode* dst)
 
 bool ShaderTryParseBounded(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst)
 {
+	return ShaderTryParseBounded(src, code_size_bytes, dst, ShaderParseBoundary::CompleteProgram);
+}
+
+bool ShaderTryParseBounded(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst, ShaderParseBoundary boundary)
+{
 	if (src == nullptr || dst == nullptr || code_size_bytes == 0u || (code_size_bytes & 3u) != 0u)
 	{
 		return false;
 	}
 	uint32_t parsed_words = 0;
-	return shader_parse_range(src, src + code_size_bytes / sizeof(uint32_t), dst, Config::IsNextGen(), false, &parsed_words);
+	return shader_parse_range(src, src + code_size_bytes / sizeof(uint32_t), dst, Config::IsNextGen(),
+	                          boundary == ShaderParseBoundary::RegisteredFront, &parsed_words);
 }
 
 void ShaderParse(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst)
@@ -236,8 +248,7 @@ void ShaderParseFusedFront(const uint32_t* src, uint32_t code_size_bytes, Shader
 	{
 		EXIT("invalid or unregistered fused shader code range\n");
 	}
-	uint32_t parsed_words = 0;
-	if (!shader_parse_range(src, src + code_size_bytes / sizeof(uint32_t), dst, Config::IsNextGen(), true, &parsed_words))
+	if (!ShaderTryParseBounded(src, code_size_bytes, dst, ShaderParseBoundary::RegisteredFront))
 	{
 		EXIT("fused shader code range ended without a complete reachable terminator: size=%u hash0=0x%08" PRIx32
 		     " crc32=0x%08" PRIx32 "\n",

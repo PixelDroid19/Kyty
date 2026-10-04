@@ -145,6 +145,9 @@ private:
 
 GraphicsAgcReleaseMemControl GraphicsDecodeAgcReleaseMemControl(uint32_t control_dw);
 uint32_t GraphicsAgcReleaseMemCacheAction(uint16_t gcr_cntl);
+// Interrupt context id of a custom ReleaseMem body (dwords after the header).
+// Only the 8-dword envelope carries one; the other forms deliver 0.
+uint32_t GraphicsAgcReleaseMemInterruptContextId(uint32_t cmd_id, const uint32_t* body);
 
 void     GraphicsRunSubmit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
                            GraphicsSubmissionCompletion completion);

@@ -45,6 +45,10 @@ enum class ShaderComputeWaveInstructionKind
 	WaveCount,
 	// ds_append/ds_consume on GDS: one per-wave counter update, broadcast.
 	WaveAppend,
+	// ds_write_addtid_b32/ds_read_addtid_b32: per-lane LDS slot addressed by
+	// M0[15:0] + offset + TID*4; the emitter walks both banks itself because
+	// the flat lane index differs per bank.
+	BankedAddtidLds,
 	// v_add_co_ci_u32 / v_subrev_co_ci_u32: banked result plus carry mask pair.
 	BankedCarry,
 	// DPP moves and bitwise ALU with architectural source and destination masks.
@@ -61,6 +65,9 @@ struct ShaderComputeWaveAnalysisResult
 };
 
 [[nodiscard]] ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const ShaderInstruction& instruction);
+// Strategy-independent rejection of malformed register spans and controls that
+// these lowerings cannot represent. Must precede both native and generic choice.
+[[nodiscard]] bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input);
 [[nodiscard]] ShaderComputeWaveAnalysisResult  ShaderAnalyzeFragmentWaveCode(const ShaderCode& code, const ShaderPixelInputInfo& pixel,
                                                                              const ShaderComputeInputInfo& host,
@@ -83,6 +90,18 @@ struct ShaderComputeWaveAnalysisResult
 // a partial captured wave. Each needs a source that a proven neutral region
 // initialized in every lane; otherwise the program is rejected with its PC.
 [[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentPartialWaveReads(const ShaderCode& code);
+// A Wave64 fragment program on a host subgroup of at most 32 lanes is a
+// partially populated guest wave: which pixels share a wave is the
+// rasterizer's choice and not a program input. This tier is exact only when
+// every lane-indexed instruction (row DPP, PERMLANE, and READLANE reaching
+// lanes 32-63 or a dynamic index) stays inside a proven neutral region or
+// reads a register the region initialized to its neutral zero for lanes the
+// host wave does not hold.
+[[nodiscard]] ShaderComputeWaveAnalysisResult ShaderAnalyzeFragmentNativeWaveTier(const ShaderCode& code);
+// `index` inside a proven neutral region, or a VGPR proven to hold the neutral
+// zero on lanes the captured wave never populated before `index`.
+[[nodiscard]] bool ShaderFragmentWaveInsideRegion(const ShaderCode& code, uint32_t index);
+[[nodiscard]] bool ShaderFragmentWaveGhostZero(const ShaderCode& code, uint32_t index, int vgpr);
 // True for the packed U32 compare family whose architectural destination is
 // EXEC (v_cmpx_*_u32). The plain VOPC parse surfaces a VccLo placeholder.
 [[nodiscard]] bool ShaderComputeWaveTypeIsExecCompare(ShaderInstructionType type);

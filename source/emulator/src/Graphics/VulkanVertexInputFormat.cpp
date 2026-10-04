@@ -20,13 +20,14 @@ struct Gen5VertexInputFormatEntry
 // guest_format ids match Gen5 image/buffer data formats (see VulkanImageFormat).
 // Format 29 (R16G16_SFLOAT) is required for interleaved UV streams in
 // stride-24/32 layouts of {position f32x3, normal h16x4, UV h16x2}.
-constexpr std::array<Gen5VertexInputFormatEntry, 9> k_gen5_formats {{
+constexpr std::array<Gen5VertexInputFormatEntry, 10> k_gen5_formats {{
     {0, 20, VK_FORMAT_R32_UINT, 1, VulkanVertexInputNumericClass::Uint},
     {0, 22, VK_FORMAT_R32_SFLOAT, 1, VulkanVertexInputNumericClass::Float},
     {0x05d, 23, VK_FORMAT_R16G16_UNORM, 2, VulkanVertexInputNumericClass::Float},
     {0, 29, VK_FORMAT_R16G16_SFLOAT, 2, VulkanVertexInputNumericClass::Float},
     {0x0e3, 56, VK_FORMAT_R8G8B8A8_UNORM, 4, VulkanVertexInputNumericClass::Float},
     {0x101, 64, VK_FORMAT_R32G32_SFLOAT, 2, VulkanVertexInputNumericClass::Float},
+    {0, 66, VK_FORMAT_R16G16B16A16_SNORM, 4, VulkanVertexInputNumericClass::Float},
     {0x11f, 71, VK_FORMAT_R16G16B16A16_SFLOAT, 4, VulkanVertexInputNumericClass::Float},
     {0x12a, 74, VK_FORMAT_R32G32B32_SFLOAT, 3, VulkanVertexInputNumericClass::Float},
     {0x137, 77, VK_FORMAT_R32G32B32A32_SFLOAT, 4, VulkanVertexInputNumericClass::Float},

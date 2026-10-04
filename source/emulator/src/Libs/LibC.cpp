@@ -157,7 +157,7 @@ static KYTY_SYSV_ABI void init_env(const ProcessEnvironment::InitParameters* par
 	(void)ProcessEnvironment::Initialize(parameters);
 	if (!LibKernel::ApplicationHeap::InitializeProcessHeap(Emulator::GuestRuntimePort::GetProcessParameters()))
 	{
-		EXIT("libc process allocator metadata or initialization failed\n");
+		EXIT("libc process allocator metadata or initialization failed: %s\n", LibKernel::ApplicationHeap::ProcessHeapFailureReason());
 	}
 }
 
@@ -241,9 +241,9 @@ static KYTY_SYSV_ABI int c_pthread_equal(Kernel::Pthread thread1, Kernel::Pthrea
 {
 	return Kernel::PthreadEqual(thread1, thread2);
 }
-static KYTY_SYSV_ABI int c_fstat(int fd, Kernel::FileSystem::FileStat* sb)
+KYTY_SYSV_ABI int c_fstat(int fd, Kernel::FileSystem::FileStat* sb)
 {
-	return Kernel::FileSystem::KernelFstat(fd, sb);
+	return POSIX_CALL(Kernel::FileSystem::KernelFstat(fd, sb));
 }
 static KYTY_SYSV_ABI int c_wcscmp(const wchar_t* s1, const wchar_t* s2)
 {
@@ -252,17 +252,6 @@ static KYTY_SYSV_ABI int c_wcscmp(const wchar_t* s1, const wchar_t* s2)
 static KYTY_SYSV_ABI void c_perror(const char* s)
 {
 	::perror(s);
-}
-static KYTY_SYSV_ABI void c_rewind(FILE* f)
-{
-	if (f != nullptr)
-	{
-		::rewind(f);
-	}
-}
-static KYTY_SYSV_ABI int c_fgetc(FILE* f)
-{
-	return (f != nullptr ? ::fgetc(f) : EOF);
 }
 static KYTY_SYSV_ABI int c_getc(FILE* f)
 {
@@ -654,7 +643,7 @@ static KYTY_SYSV_ABI int c_fprintf(VA_ARGS)
 	{
 		return written;
 	}
-	::fwrite(buffer, 1, static_cast<size_t>(written), f);
+	c_fwrite(buffer, 1, static_cast<size_t>(written), f);
 	return written;
 }
 static KYTY_SYSV_ABI int c_vfprintf(VA_ARGS)
@@ -672,7 +661,7 @@ static KYTY_SYSV_ABI int c_vfprintf(VA_ARGS)
 	{
 		return written;
 	}
-	::fwrite(buffer, 1, static_cast<size_t>(written), f);
+	c_fwrite(buffer, 1, static_cast<size_t>(written), f);
 	return written;
 }
 // scanf parses a guest input string into guest output pointers. Kyty has no input
@@ -2771,17 +2760,6 @@ static KYTY_SYSV_ABI int c_putchar(int ch)
 	return GetPrintfStdFunc()("%c", ch);
 }
 
-// Guest FILE* is not always a host FILE*. Log path uses the host printf
-// sink; the stream argument is accepted for ABI compatibility only.
-static KYTY_SYSV_ABI int c_fputs(const char* s, FILE* /*stream*/)
-{
-	if (s == nullptr)
-	{
-		return EOF;
-	}
-	return GetPrintfStdFunc()("%s", s);
-}
-
 static KYTY_SYSV_ABI void catchReturnFromMain(int status)
 {
 	PRINT_NAME();
@@ -2926,9 +2904,9 @@ LIB_DEFINE(InitLibC_1)
 
 	LIB_OBJECT("P330P3dFF68", &LibC::g_need_flag);
 	// stdin Object triad: same NIDs as InitLibcInternal_1 (see comment there).
-	LIB_OBJECT("1TDo-ImqkJc", stdin);
-	LIB_OBJECT("2sWzhYqFH4E", stdout);
-	LIB_OBJECT("H8AprKeZtNg", stderr);
+	LIB_OBJECT("1TDo-ImqkJc", Kernel::FileSystem::StandardStream(0));
+	LIB_OBJECT("2sWzhYqFH4E", Kernel::FileSystem::StandardStream(1));
+	LIB_OBJECT("H8AprKeZtNg", Kernel::FileSystem::StandardStream(2));
 
 	LIB_FUNC("-hn1tcVHq5Q", LibcInternal::LibcMspaceCreate);
 	LIB_FUNC("OJjm-QOIHlI", LibcInternal::LibcMspaceMalloc);
@@ -3227,6 +3205,10 @@ LIB_DEFINE(InitLibC_1)
 
 	// stdio
 	LIB_FUNC("xeYO4u7uyJ0", LibC::c_fopen);
+	// idc/ps4libdoc a71315e7f36e312ae71e9e3a92982e9ffbfc725f:
+	// system/common/lib/libc.sprx.json, exported library libc version 1.
+	LIB_FUNC("qdlHjTa9hQ4", LibC::c_fdopen);
+	LIB_FUNC("gkWgn0p1AfU", LibC::c_freopen);
 	LIB_FUNC("uodLYyUip20", LibC::c_fclose);
 	LIB_FUNC("lbB+UlZqVG0", LibC::c_fread);
 	// Gen5 fgets — NID KdP-nULpuGw.

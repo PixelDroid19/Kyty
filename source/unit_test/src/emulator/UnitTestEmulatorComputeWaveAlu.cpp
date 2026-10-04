@@ -5,7 +5,9 @@ UT_BEGIN(EmulatorComputeWaveAlu);
 
 using namespace Libs::Graphics;
 
-TEST(EmulatorComputeWaveAlu, AdmitsOnlyPlainSingleDestinationIntegerTuples)
+// A different lowering strategy cannot legalize malformed registers or controls
+// that neither lowering models. Valid generic tuples have separate controls.
+TEST(EmulatorComputeWaveAlu, BankedAluClaimsOnlyPlainSingleDestinationIntegerTuples)
 {
 	ShaderInstruction instruction;
 	instruction.format = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
@@ -123,7 +125,7 @@ TEST(EmulatorComputeWaveAlu, RejectsNonContractCndmaskTuples)
 	modified.src[0].size = 2;
 	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(modified), ShaderComputeWaveInstructionKind::Unsupported);
 
-	// Modifier fields, a second destination, and a fourth source stay rejected.
+	// Encoding modifiers, a second destination, and a fourth source stay rejected.
 	modified = instruction;
 	modified.vop_sdwa = true;
 	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(modified), ShaderComputeWaveInstructionKind::Unsupported);
@@ -133,9 +135,13 @@ TEST(EmulatorComputeWaveAlu, RejectsNonContractCndmaskTuples)
 	modified             = instruction;
 	modified.vop3_omod   = 1;
 	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(modified), ShaderComputeWaveInstructionKind::Unsupported);
+	// Float input modifiers are lowered in ISA order, neg(abs(x)), by the banked path.
 	modified                 = instruction;
 	modified.src[0].negate   = true;
-	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(modified), ShaderComputeWaveInstructionKind::Unsupported);
+	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(modified), ShaderComputeWaveInstructionKind::BankedAlu);
+	modified                 = instruction;
+	modified.src[1].absolute = true;
+	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(modified), ShaderComputeWaveInstructionKind::BankedAlu);
 	modified          = instruction;
 	modified.dst2.type = ShaderOperandType::VccLo;
 	modified.dst2.size = 2;

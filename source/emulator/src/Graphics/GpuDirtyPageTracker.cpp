@@ -544,6 +544,13 @@ bool GpuDirtyPageTracker::Rearm(uintptr_t address, size_t size) noexcept
 	{
 		return false;
 	}
+	if (HasHostWriteLocked(first, last))
+	{
+		// This is temporary ownership, not a tracking failure. Do not make the
+		// resource permanently hash-only when an unrelated I/O byte range shares
+		// its protection page.
+		return false;
+	}
 	auto finalize_arming = [this](uintptr_t page, PageEntry* entry) noexcept
 	{
 		for (;;)
@@ -985,77 +992,180 @@ bool GpuDirtyPageTracker::HandleWriteFault(uintptr_t address) noexcept
 	return true;
 }
 
+template <typename Visitor>
+void GpuDirtyPageTracker::VisitWritePages(uintptr_t first, uintptr_t last, const Visitor& visitor) noexcept
+{
+	if ((last - first) / m_page_size < kDirectWritePages)
+	{
+		for (uintptr_t page = first;; page += m_page_size)
+		{
+			if (auto* entry = FindPage(page); entry != nullptr) { visitor(entry, page); }
+			if (page == last) { break; }
+		}
+		return;
+	}
+
+	// NotifyWrite is also a signal-safe seam: no registration lock, allocation,
+	// mutable range snapshot or walk across the caller's potentially enormous
+	// untracked address space. Empty and retired slots still cost only one pass.
+	for (size_t i = 0; i < kPageTableSize; ++i)
+	{
+		auto& entry = m_pages[i];
+		const uintptr_t page = entry.key.load(std::memory_order_acquire);
+		if (page > kTombstoneKey && page >= first && page <= last) { visitor(&entry, page); }
+	}
+}
+
+bool GpuDirtyPageTracker::NotifyPageWrite(PageEntry* entry, uintptr_t page_address) noexcept
+{
+	bool handled = false;
+	for (;;)
+	{
+		if (entry->key.load(std::memory_order_acquire) != page_address) { return handled; }
+		uint32_t       state = entry->protection_state.load(std::memory_order_acquire);
+		const uint32_t refs  = entry->refs.load(std::memory_order_acquire);
+		if (refs == 0u && state != static_cast<uint32_t>(GpuDirtyProtectionState::Capturing) &&
+		    state != static_cast<uint32_t>(GpuDirtyProtectionState::Disarming))
+		{
+			return handled;
+		}
+		handled = true;
+		if (state == static_cast<uint32_t>(GpuDirtyProtectionState::Capturing) ||
+		    state == static_cast<uint32_t>(GpuDirtyProtectionState::Disarming))
+		{
+			std::this_thread::yield();
+			continue;
+		}
+		if (refs == 0u) { return handled; }
+		if (state == static_cast<uint32_t>(GpuDirtyProtectionState::Writable))
+		{
+			MarkPageWrite(entry);
+			return handled;
+		}
+		const uint32_t claimed_state = state;
+		if (!entry->protection_state.compare_exchange_weak(state, static_cast<uint32_t>(GpuDirtyProtectionState::Disarming),
+		                                                   std::memory_order_acq_rel, std::memory_order_acquire))
+		{
+			continue;
+		}
+		// A slot can be recycled between lookup and claim by registration. Never
+		// apply another page's restore token to the address sampled by the walk.
+		if (entry->key.load(std::memory_order_acquire) != page_address)
+		{
+			entry->protection_state.store(claimed_state, std::memory_order_release);
+			return handled;
+		}
+		MarkPageWrite(entry);
+		const uint32_t token    = entry->original_token.load(std::memory_order_relaxed);
+		const bool     restored = m_protection_ops.restore_signal_safe(m_protection_ops.context, page_address, m_page_size, token);
+		const bool     arming_in_flight = claimed_state == static_cast<uint32_t>(GpuDirtyProtectionState::Arming) ||
+		                                  claimed_state == static_cast<uint32_t>(GpuDirtyProtectionState::ArmingRollback);
+		entry->protection_state.store(restored ? static_cast<uint32_t>(arming_in_flight ? GpuDirtyProtectionState::ArmingRollback
+		                                                                                : GpuDirtyProtectionState::Writable)
+		                                       : static_cast<uint32_t>(GpuDirtyProtectionState::Armed),
+		                              std::memory_order_release);
+		if (!restored) { MarkFallback(page_address, PageEnd(page_address)); }
+		return handled;
+	}
+}
+
+bool GpuDirtyPageTracker::NotifyWritePages(uintptr_t first, uintptr_t last) noexcept
+{
+	bool handled = false;
+	VisitWritePages(first, last, [this, &handled](PageEntry* entry, uintptr_t page) noexcept
+	{
+		const bool page_handled = NotifyPageWrite(entry, page);
+		handled = handled || page_handled;
+	});
+	return handled;
+}
+
 bool GpuDirtyPageTracker::NotifyWrite(uintptr_t address, size_t size) noexcept
 {
-	if (!m_enabled || m_page_size == 0 || address == 0 || size == 0)
-	{
-		return false;
-	}
+	if (!m_enabled || m_page_size == 0 || address == 0 || size == 0) { return false; }
 	const uintptr_t end = RangeEnd(address, size);
-	if (end == 0)
+	if (end == 0) { return false; }
+	return NotifyWritePages(PageStart(address), PageStart(end - 1u));
+}
+
+bool GpuDirtyPageTracker::HasHostWriteLocked(uintptr_t first, uintptr_t last) const noexcept
+{
+	for (const auto& write: m_host_writes)
 	{
-		return false;
-	}
-	bool            handled = false;
-	const uintptr_t first   = PageStart(address);
-	const uintptr_t last    = PageStart(end - 1u);
-	for (uintptr_t page_address = first;; page_address += m_page_size)
-	{
-		if (auto* entry = FindPage(page_address); entry != nullptr)
+		if (write.first <= last && first <= write.last)
 		{
-			for (;;)
-			{
-				uint32_t       state = entry->protection_state.load(std::memory_order_acquire);
-				const uint32_t refs  = entry->refs.load(std::memory_order_acquire);
-				if (refs == 0u && state != static_cast<uint32_t>(GpuDirtyProtectionState::Capturing) &&
-				    state != static_cast<uint32_t>(GpuDirtyProtectionState::Disarming))
-				{
-					break;
-				}
-				handled = true;
-				if (state == static_cast<uint32_t>(GpuDirtyProtectionState::Capturing) ||
-				    state == static_cast<uint32_t>(GpuDirtyProtectionState::Disarming))
-				{
-					std::this_thread::yield();
-					continue;
-				}
-				if (refs == 0u)
-				{
-					break;
-				}
-				if (state == static_cast<uint32_t>(GpuDirtyProtectionState::Writable))
-				{
-					MarkPageWrite(entry);
-					break;
-				}
-				const uint32_t claimed_state = state;
-				if (!entry->protection_state.compare_exchange_weak(state, static_cast<uint32_t>(GpuDirtyProtectionState::Disarming),
-				                                                   std::memory_order_acq_rel, std::memory_order_acquire))
-				{
-					continue;
-				}
-				MarkPageWrite(entry);
-				const uint32_t token    = entry->original_token.load(std::memory_order_relaxed);
-				const bool     restored = m_protection_ops.restore_signal_safe(m_protection_ops.context, page_address, m_page_size, token);
-				const bool     arming_in_flight = claimed_state == static_cast<uint32_t>(GpuDirtyProtectionState::Arming) ||
-				                                  claimed_state == static_cast<uint32_t>(GpuDirtyProtectionState::ArmingRollback);
-				entry->protection_state.store(restored ? static_cast<uint32_t>(arming_in_flight ? GpuDirtyProtectionState::ArmingRollback
-				                                                                                : GpuDirtyProtectionState::Writable)
-				                                       : static_cast<uint32_t>(GpuDirtyProtectionState::Armed),
-				                              std::memory_order_release);
-				if (!restored)
-				{
-					MarkFallback(page_address, PageEnd(page_address));
-				}
-				break;
-			}
+			return true;
 		}
-		if (page_address == last || page_address > last - m_page_size)
+	}
+	return false;
+}
+
+void GpuDirtyPageTracker::PrepareHostWriteLocked(uintptr_t address, size_t size) noexcept
+{
+	VisitWritePages(PageStart(address), PageStart(RangeEnd(address, size) - 1u), [this](PageEntry* entry, uintptr_t page) noexcept
+	{
+		(void)NotifyPageWrite(entry, page);
+		if (entry->refs.load(std::memory_order_acquire) != 0u)
 		{
+			uint32_t state = entry->protection_state.load(std::memory_order_acquire);
+			while (state == static_cast<uint32_t>(GpuDirtyProtectionState::Disarming))
+			{
+				std::this_thread::yield();
+				state = entry->protection_state.load(std::memory_order_acquire);
+			}
+			// Native rearming cannot be in flight while we hold the registration
+			// mutex. A failed permission restore is an internal VM failure, never
+			// permission to start I/O into an artificially read-only destination.
+			EXIT_IF(state != static_cast<uint32_t>(GpuDirtyProtectionState::Writable));
+		}
+	});
+}
+
+uint64_t GpuDirtyPageTracker::BeginHostWrite(uintptr_t address, size_t size) noexcept
+{
+	if (!Enabled() || address == 0 || RangeEnd(address, size) == 0)
+	{
+		return 0;
+	}
+	std::lock_guard<std::mutex> lock(*m_registration_mutex);
+	const uintptr_t first = PageStart(address);
+	const uintptr_t last = PageStart(RangeEnd(address, size) - 1u);
+	uint64_t token = 0;
+	for (auto& write: m_host_writes)
+	{
+		if (write.first == first && write.last == last)
+		{
+			EXIT_IF(write.refs == UINT64_MAX);
+			write.refs++;
+			token = write.token;
 			break;
 		}
 	}
-	return handled;
+	if (token == 0)
+	{
+		EXIT_IF(m_next_host_write == 0);
+		token = m_next_host_write++;
+		m_host_writes.push_back({token, first, last, 1});
+	}
+	PrepareHostWriteLocked(address, size);
+	return token;
+}
+
+void GpuDirtyPageTracker::EndHostWrite(uint64_t token) noexcept
+{
+	if (token == 0) { return; }
+	EXIT_IF(!Enabled());
+	std::lock_guard<std::mutex> lock(*m_registration_mutex);
+	for (auto it = m_host_writes.begin(); it != m_host_writes.end(); ++it)
+	{
+		if (it->token != token) { continue; }
+		// A reader starting after Begin must also see the completion generation.
+		// This covers a newly registered resource and short/error exits alike.
+		(void)NotifyWritePages(it->first, it->last);
+		if (--it->refs == 0) { m_host_writes.erase(it); }
+		return;
+	}
+	EXIT("Unknown host-write lease\n");
 }
 
 uint64_t GpuDirtyPageTracker::SnapshotGeneration(uintptr_t address, size_t size) const noexcept
@@ -1092,6 +1202,12 @@ uint64_t GpuDirtyPageTracker::SnapshotGeneration(uintptr_t address, size_t size)
 bool GpuDirtyPageTracker::ChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept
 {
 	if (!m_enabled || m_ranges == nullptr)
+	{
+		return true;
+	}
+	std::lock_guard<std::mutex> lock(*m_registration_mutex);
+	const uintptr_t lease_end = RangeEnd(address, size);
+	if (lease_end == 0 || HasHostWriteLocked(PageStart(address), PageStart(lease_end - 1u)))
 	{
 		return true;
 	}

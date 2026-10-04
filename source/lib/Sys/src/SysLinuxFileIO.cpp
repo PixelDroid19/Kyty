@@ -39,15 +39,40 @@ bool sys_file_io_init()
 	return !g_internal_files_dir->IsEmpty();
 }
 
-void sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read)
+int sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read)
 {
+	if (bytes_read != nullptr)
+	{
+		*bytes_read = 0;
+	}
+	if (sys_file_is_error(f))
+	{
+		return EBADF;
+	}
+	if (size == 0)
+	{
+		return 0;
+	}
+	if (data == nullptr)
+	{
+		return EFAULT;
+	}
 	if (f.type == SYS_FILE_FILE)
 	{
-		size_t w = fread(data, 1, size, f.f);
+		// fread can transfer some bytes and still set its error indicator.
+		// Isolate this operation from a stale caller errno; do not clear the
+		// stream's sticky error indicator or turn that error into EOF.
+		const int saved_errno = errno;
+		errno                 = 0;
+		const size_t transferred = fread(data, 1, size, f.f);
+		const int    read_errno  = errno;
+		const bool   failed      = ferror(f.f) != 0;
+		errno                    = saved_errno;
 		if (bytes_read != nullptr)
 		{
-			*bytes_read = w;
+			*bytes_read = static_cast<uint32_t>(transferred);
 		}
+		return failed ? (read_errno != 0 ? read_errno : EIO) : 0;
 	} else if (f.type == SYS_FILE_MEMORY_STAT)
 	{
 		uint32_t s = size;
@@ -65,6 +90,7 @@ void sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_rea
 		{
 			*bytes_read = s;
 		}
+		return 0;
 	} else if (f.type == SYS_FILE_MEMORY_DYN)
 	{
 		uint32_t s = size;
@@ -85,7 +111,9 @@ void sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_rea
 		{
 			*bytes_read = s;
 		}
+		return 0;
 	}
+	return EBADF;
 }
 
 void sys_file_write(const void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_written)

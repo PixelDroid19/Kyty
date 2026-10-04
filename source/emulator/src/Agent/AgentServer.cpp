@@ -357,6 +357,8 @@ std::string PerformanceResult(bool reset)
 	out += std::to_string(stats.present_src_h);
 	out += ",\"layout\":";
 	out += std::to_string(stats.present_src_layout);
+	out += ",\"format\":";
+	out += std::to_string(stats.present_src_format);
 	out += "},\"present_destination\":{\"width\":";
 	out += std::to_string(stats.present_dst_w);
 	out += ",\"height\":";

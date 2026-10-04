@@ -746,6 +746,35 @@ void VertexClipProbeRenderer::LogCompletedRawStatsLocked(const VertexClipProbeRa
 	{
 		return;
 	}
+	for (uint32_t site = 0; site < kVertexScalarBufferProbeSites; ++site)
+	{
+		const auto& load = stats.scalar_buffer[site];
+		if (load.claimed == 0u) { continue; }
+		EXIT_IF(load.claimed != 1u || load.components == 0u || load.components > 16u);
+		char message[Emulator::Agent::kAgentEventMessageMax] {};
+		const int length = std::snprintf(message, sizeof(message),
+		    "cs=%016" PRIx64 " k=%c n=%u s=%u site=%u pc=%08x w=%u off=%u d=%08x:%08x:%08x:%08x",
+		    result_info.checksum, result_info.indexed ? 'i' : 'a', result_info.guest_count, result_info.descriptor_set,
+		    site, load.instruction_pc, load.components, load.byte_offset,
+		    load.descriptor[0], load.descriptor[1], load.descriptor[2], load.descriptor[3]);
+		EXIT_IF(length < 0 || static_cast<size_t>(length) >= sizeof(message));
+		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Info, "vs_sbuffer_probe", message);
+		for (uint32_t word = 0; word < load.components; word += 4u)
+		{
+			const uint32_t count = std::min(4u, load.components - word);
+			int used = std::snprintf(message, sizeof(message), "cs=%016" PRIx64 " site=%u pc=%08x first=%u w=%u v=",
+			                         result_info.checksum, site, load.instruction_pc, word, count);
+			EXIT_IF(used < 0 || static_cast<size_t>(used) >= sizeof(message));
+			for (uint32_t value = 0; value < count; ++value)
+			{
+				const int added = std::snprintf(message + used, sizeof(message) - used, "%s%08x", value == 0u ? "" : ":",
+				                                load.values[word + value]);
+				EXIT_IF(added < 0 || static_cast<size_t>(added) >= sizeof(message) - used);
+				used += added;
+			}
+			Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Info, "vs_sbuffer_values", message);
+		}
+	}
 	char resolver_message[Emulator::Agent::kAgentEventMessageMax] {};
 	EXIT_IF(!VertexClipProbeFormatResolverResultMessage(result_info, stats, resolver_message, sizeof(resolver_message)));
 	Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Info, "vs_resolver_probe", resolver_message);

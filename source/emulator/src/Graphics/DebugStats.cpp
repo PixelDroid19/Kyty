@@ -247,6 +247,7 @@ std::atomic<uint32_t>                                  g_present_src_h {0};
 std::atomic<uint32_t>                                  g_present_dst_w {0};
 std::atomic<uint32_t>                                  g_present_dst_h {0};
 std::atomic<uint32_t>                                  g_present_src_layout {0};
+std::atomic<uint32_t>                                  g_present_src_format {0};
 
 std::atomic<double> g_last_fps {0.0};
 std::atomic<double> g_last_frame_ms {0.0};
@@ -1345,8 +1346,10 @@ void DebugStatsRecordGpuMemoryHashComparison(uint32_t type_index, bool tracked, 
 	counter.fetch_add(1, std::memory_order_relaxed);
 }
 
-void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout)
+void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout,
+                                   uint32_t src_format)
 {
+	g_present_src_format.store(src_format, std::memory_order_relaxed);
 	g_present_src_w.store(src_w, std::memory_order_relaxed);
 	g_present_src_h.store(src_h, std::memory_order_relaxed);
 	g_present_dst_w.store(dst_w, std::memory_order_relaxed);
@@ -1407,6 +1410,7 @@ DebugStatsSnapshot DebugStatsTick(double now_seconds)
 	snap.present_dst_w          = g_present_dst_w.load(std::memory_order_relaxed);
 	snap.present_dst_h          = g_present_dst_h.load(std::memory_order_relaxed);
 	snap.present_src_layout     = g_present_src_layout.load(std::memory_order_relaxed);
+	snap.present_src_format     = g_present_src_format.load(std::memory_order_relaxed);
 
 	g_last_snapshot        = snap;
 	g_window_start_seconds = now_seconds;
@@ -1484,6 +1488,7 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.present_dst_w      = g_present_dst_w.load(std::memory_order_relaxed);
 	snapshot.present_dst_h      = g_present_dst_h.load(std::memory_order_relaxed);
 	snapshot.present_src_layout = g_present_src_layout.load(std::memory_order_relaxed);
+	snapshot.present_src_format = g_present_src_format.load(std::memory_order_relaxed);
 	snapshot.wait_reg_mem    = wait_reg_mem - g_performance_baseline.wait_reg_mem;
 	snapshot.wait_reg_mem_ns = wait_reg_mem_ns - g_performance_baseline.wait_reg_mem_ns;
 	snapshot.wait_reg_mem_max_ns =

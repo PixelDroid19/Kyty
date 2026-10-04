@@ -31,7 +31,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 	uint32_t   src2           = (buffer[1] >> 18u) & 0x1ffu;
 
 	const bool permlane = next_gen && (opcode == 0x377u || opcode == 0x378u);
-	if (op_sel != 0 && !permlane) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op_sel != 0 condition ignored (continuing)\n"); }
+	const bool half_opsel = next_gen && (opcode == 0x34bu || opcode == 0x351u || opcode == 0x354u || opcode == 0x357u);
+	if (op_sel != 0 && !permlane && !half_opsel) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: op_sel != 0 condition ignored (continuing)\n"); }
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
@@ -66,22 +67,6 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 	}
 
 	uint32_t size = 2;
-
-	const bool has_literal = inst.src[0].type == ShaderOperandType::LiteralConstant ||
-	                         inst.src[1].type == ShaderOperandType::LiteralConstant ||
-	                         inst.src[2].type == ShaderOperandType::LiteralConstant;
-	if (has_literal)
-	{
-		const uint32_t literal = buffer[size];
-		for (auto& operand: inst.src)
-		{
-			if (operand.type == ShaderOperandType::LiteralConstant)
-			{
-				operand.constant.u = literal;
-			}
-		}
-		size++;
-	}
 
 	inst.format = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
 
@@ -1015,14 +1000,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 				inst.format = ShaderInstructionFormat::Unknown;
 			};
 			break;
-		case 0x139: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_max_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x13A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_min_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x139: inst.type = ShaderInstructionType::VMaxF16; break;
+		case 0x13A: inst.type = ShaderInstructionType::VMinF16; break;
 		case 0x13B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_ldexp_f16 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
@@ -1308,17 +1287,7 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x345:
-			if (next_gen)
-			{
-				KYTY_UNKNOWN_OP();
-			} else
-			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_xad_b32 treated as SBarrier (continuing)\n");
-				inst.type = ShaderInstructionType::SBarrier;
-				inst.format = ShaderInstructionFormat::Unknown;
-			};
-			break;
+		case 0x345: inst.type = ShaderInstructionType::VXadU32; break;
 		case 0x346: inst.type = ShaderInstructionType::VLshlAddU32; break;
 		case 0x347: inst.type = ShaderInstructionType::VAddLshlU32; break;
 		case 0x34B: inst.type = ShaderInstructionType::VFmaF16; break;
@@ -1371,6 +1340,22 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 		case 0x361:
 			// v_writelane_b32 writes one lane of the VGPR encoded in VDST.
 			inst.type    = ShaderInstructionType::VWritelaneB32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src_num = 2;
+			break;
+		case 0x362:
+			// v_ldexp_f32: dst.f = src0.f * 2**src1.i. The exponent operand is
+			// signed int32, so ABS/NEG are only meaningful on the float src0;
+			// OMOD stays rejected until its denormal contract is proven. CLAMP
+			// is the generic result saturate and is emitted by FloatClampModifier.
+			if (op_sel != 0u || omod != 0u || (abs & 0x6u) != 0u || (neg & 0x6u) != 0u)
+			{
+				EXIT("unsupported v_ldexp_f32 modifiers at addr 0x%08" PRIx32
+				     " raw=0x%08" PRIx32 ":0x%08" PRIx32 " op_sel=%u abs=%u clamp=%u omod=%u neg=%u (hash0 = 0x%08" PRIx32
+				     ", crc32 = 0x%08" PRIx32 ")\n",
+				     pc, buffer[0], buffer[1], op_sel, abs, clamp, omod, neg, dst->GetHash0(), dst->GetCrc32());
+			}
+			inst.type    = ShaderInstructionType::VLdexpF32;
 			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
 			inst.src_num = 2;
 			break;
@@ -1476,14 +1461,8 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x18A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_f16_f32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x18B: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_f32_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x18A: inst.type = ShaderInstructionType::VCvtF16F32; break;
+		case 0x18B: inst.type = ShaderInstructionType::VCvtF32F16; break;
 		case 0x18C: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cvt_rpi_i32_f32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
@@ -1735,6 +1714,35 @@ KYTY_SHADER_PARSER(shader_parse_vop3)
 	if (next_gen)
 	{
 		inst.dst.clamp = (clamp != 0);
+	}
+
+	// Decode the source count before resolving literals. Zero unused selector
+	// fields encode padding, not live s0 operands. Retain strict refusal of
+	// noncanonical unused selectors/modifiers instead of erasing their evidence.
+	const uint32_t selectors[] = {src0, src1, src2};
+	for (int source = inst.src_num; source < 3; ++source)
+	{
+		const uint32_t source_abs = inst.dst2.type == ShaderOperandType::Unknown ? ((abs >> source) & 1u) : 0u;
+		const uint32_t source_neg = (neg >> source) & 1u;
+		if (selectors[source] != 0u || source_abs != 0u || source_neg != 0u)
+		{
+			EXIT("unsupported vop3 unused source: opcode=0x%03" PRIx32 " pc=0x%08" PRIx32
+			     " source=%d selector=%u abs=%u neg=%u\n", opcode, pc, source, selectors[source], source_abs, source_neg);
+		}
+		inst.src[source] = {};
+	}
+	bool has_literal = false;
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		has_literal = has_literal || inst.src[source].type == ShaderOperandType::LiteralConstant;
+	}
+	if (has_literal)
+	{
+		const uint32_t literal = buffer[size++];
+		for (int source = 0; source < inst.src_num; ++source)
+		{
+			if (inst.src[source].type == ShaderOperandType::LiteralConstant) { inst.src[source].constant.u = literal; }
+		}
 	}
 
 	dst->GetInstructions().Add(inst);

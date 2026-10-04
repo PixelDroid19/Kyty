@@ -14,6 +14,8 @@
 
 #include <windows.h> // IWYU pragma: keep
 
+#include <cerrno>
+
 // IWYU pragma: no_include <fileapi.h>
 // IWYU pragma: no_include <handleapi.h>
 // IWYU pragma: no_include <minwinbase.h>
@@ -50,16 +52,56 @@ static DWORD get_cache_access_type(sys_file_cache_type_t t)
 	return SYS_FILE_CACHE_AUTO;
 }
 
-void sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read)
+static int read_error_to_errno(DWORD error)
 {
+	switch (error)
+	{
+		case ERROR_ACCESS_DENIED:
+		case ERROR_LOCK_VIOLATION:
+		case ERROR_SHARING_VIOLATION: return EACCES;
+		case ERROR_INVALID_HANDLE: return EBADF;
+		case ERROR_INVALID_PARAMETER: return EINVAL;
+		case ERROR_NOACCESS:
+		case ERROR_INVALID_USER_BUFFER: return EFAULT;
+		case ERROR_NOT_ENOUGH_MEMORY:
+		case ERROR_OUTOFMEMORY:
+		case ERROR_NOT_ENOUGH_QUOTA: return ENOMEM;
+		case ERROR_OPERATION_ABORTED: return EINTR;
+		case ERROR_IO_PENDING: return EAGAIN;
+		default: return EIO;
+	}
+}
+
+int sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read)
+{
+	if (bytes_read != nullptr)
+	{
+		*bytes_read = 0;
+	}
+	if (sys_file_is_error(f))
+	{
+		return EBADF;
+	}
+	if (size == 0)
+	{
+		return 0;
+	}
+	if (data == nullptr)
+	{
+		return EFAULT;
+	}
 	if (f.type == SYS_FILE_FILE)
 	{
-		DWORD w = 0;
-		ReadFile(f.handle, data, size, &w, nullptr);
+		DWORD       w         = 0;
+		const BOOL  succeeded = ReadFile(f.handle, data, size, &w, nullptr);
+		const DWORD error     = succeeded != 0 ? ERROR_SUCCESS : GetLastError();
 		if (bytes_read != nullptr)
 		{
 			*bytes_read = w;
 		}
+		// Synchronous disk EOF is a successful ReadFile with zero bytes.
+		// Every native failure remains an error, even with a partial transfer.
+		return succeeded != 0 ? 0 : read_error_to_errno(error);
 	} else if (f.type == SYS_FILE_MEMORY_STAT)
 	{
 		uint32_t s = size;
@@ -77,6 +119,7 @@ void sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_rea
 		{
 			*bytes_read = s;
 		}
+		return 0;
 	} else if (f.type == SYS_FILE_MEMORY_DYN)
 	{
 		uint32_t s = size;
@@ -97,7 +140,9 @@ void sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_rea
 		{
 			*bytes_read = s;
 		}
+		return 0;
 	}
+	return EBADF;
 }
 
 void sys_file_write(const void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_written)

@@ -293,6 +293,16 @@ int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(Kernel::EventQueue::KernelEqueue eq, 
 	return GraphicsRenderAddEqEvent(eq, id, udata);
 }
 
+// The interrupt context id of the ReleaseMem that raised a graphics event
+// travels as its event data (see RenderContext::TriggerEopEvent).
+uint32_t KYTY_SYSV_ABI GraphicsDriverGetEqContextId(const Kernel::EventQueue::KernelEvent* ev)
+{
+	PRINT_NAME();
+	EXIT_NOT_IMPLEMENTED(ev == nullptr);
+	EXIT_NOT_IMPLEMENTED(ev->filter != Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
+	return static_cast<uint32_t>(ev->data);
+}
+
 } // namespace Gen5Driver
 
 } // namespace Kyty::Libs::Graphics

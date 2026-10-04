@@ -14,6 +14,8 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+namespace Kyty::Kernel::FileSystem { struct FileStat; }
+
 namespace Kyty::Libs {
 
 class VaList;
@@ -81,6 +83,8 @@ int  KYTY_SYSV_ABI c_cxa_thread_atexit(cxa_destructor_func_t dtor, void* obj, vo
 // stdio guest shims — host FILE* remains opaque to the guest and mounted paths
 // are translated by the isolated implementation in LibCStdIo.cpp.
 FILE*  KYTY_SYSV_ABI c_fopen(const char* path, const char* mode);
+FILE*  KYTY_SYSV_ABI c_fdopen(int descriptor, const char* mode);
+FILE*  KYTY_SYSV_ABI c_freopen(const char* path, const char* mode, FILE* stream);
 int    KYTY_SYSV_ABI c_fclose(FILE* stream);
 size_t KYTY_SYSV_ABI c_fread(void* ptr, size_t size, size_t count, FILE* stream);
 char*  KYTY_SYSV_ABI c_fgets(char* buffer, int size, FILE* stream);
@@ -92,6 +96,10 @@ int    KYTY_SYSV_ABI c_feof(FILE* stream);
 int    KYTY_SYSV_ABI c_ferror(FILE* stream);
 int    KYTY_SYSV_ABI c_fileno(FILE* stream);
 int    KYTY_SYSV_ABI c_fputc(int character, FILE* stream);
+int    KYTY_SYSV_ABI c_fputs(const char* text, FILE* stream);
+int    KYTY_SYSV_ABI c_fgetc(FILE* stream);
+void   KYTY_SYSV_ABI c_rewind(FILE* stream);
+int    KYTY_SYSV_ABI c_fstat(int descriptor, Kernel::FileSystem::FileStat* status);
 int    KYTY_SYSV_ABI c_remove(const char* path);
 
 // Memory, string and guest UTF-16 shims. Their implementations live in

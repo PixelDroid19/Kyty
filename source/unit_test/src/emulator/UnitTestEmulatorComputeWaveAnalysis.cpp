@@ -166,8 +166,10 @@ TEST(EmulatorComputeWaveAnalysis, AdmitsScalarSelectorAndCrossHalfRead)
 	    ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorComputeWaveAnalysis, PreservesEncodedOpSelAndRejectsAtItsOriginalPc)
+TEST(EmulatorComputeWaveAnalysis, PreservesEncodedOpSelAndLowersThe32BitCompare)
 {
+	// op_sel is decoded faithfully; a 32-bit compare ignores it, so the generic
+	// compare lowering admits the tuple instead of rejecting it at its pc.
 	const uint32_t words[] = {0xbe84039fu, 0xd4c2086au, 256u | (128u << 9u), 0xbf810000u};
 	ASSERT_EXIT(
 	    {
@@ -182,14 +184,15 @@ TEST(EmulatorComputeWaveAnalysis, PreservesEncodedOpSelAndRejectsAtItsOriginalPc
 		    {
 			    std::_Exit(3);
 		    }
-		    const auto analysis = ShaderAnalyzeComputeWaveCode(code, PairedInput());
-		    std::_Exit(!analysis.supported && analysis.unsupported_pc == 4u && !analysis.reason.IsEmpty() ? 0 : 4);
+		    std::_Exit(ShaderAnalyzeComputeWaveCode(code, PairedInput()).supported ? 0 : 4);
 	    },
 	    ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorComputeWaveAnalysis, ReportsFirstUnsupportedBranchNotEarlierScalarSetup)
+TEST(EmulatorComputeWaveAnalysis, AdmitsABranchToTheNextInstruction)
 {
+	// Guest branches run through the block dispatcher, so the scalar setup and
+	// the branch are both admitted and the first unsupported pc is never a branch.
 	const uint32_t words[] = {0xbe84039fu, 0xbf820000u, 0xbf810000u};
 	ASSERT_EXIT(
 	    {
@@ -200,8 +203,7 @@ TEST(EmulatorComputeWaveAnalysis, ReportsFirstUnsupportedBranchNotEarlierScalarS
 		    {
 			    std::_Exit(2);
 		    }
-		    const auto analysis = ShaderAnalyzeComputeWaveCode(code, PairedInput());
-		    std::_Exit(!analysis.supported && analysis.unsupported_pc == 4u && !analysis.reason.IsEmpty() ? 0 : 3);
+		    std::_Exit(ShaderAnalyzeComputeWaveCode(code, PairedInput()).supported ? 0 : 3);
 	    },
 	    ::testing::ExitedWithCode(0), "");
 }
@@ -212,17 +214,19 @@ TEST(EmulatorComputeWaveAnalysis, NamesUnknownInstructionAtItsOriginalPc)
 	code.SetType(ShaderType::Compute);
 	ShaderInstruction instruction {};
 	instruction.pc   = 12u;
-	instruction.type = ShaderInstructionType::SGetpcB64;
+	instruction.type = ShaderInstructionType::VInterpP1F32;
 	code.GetInstructions().Add(instruction);
 
 	const auto analysis = ShaderAnalyzeComputeWaveCode(code, PairedInput());
 	EXPECT_FALSE(analysis.supported);
 	EXPECT_EQ(analysis.unsupported_pc, 12u);
-	EXPECT_TRUE(analysis.reason.ContainsStr("SGetpcB64"));
+	EXPECT_TRUE(analysis.reason.ContainsStr("VInterpP1F32"));
 }
 
-TEST(EmulatorComputeWaveAnalysis, AdmitsOnlyDefinedInstructionPrefetchModes)
+TEST(EmulatorComputeWaveAnalysis, ClassifiesOnlyDefinedInstructionPrefetchModesAsHints)
 {
+	// Modes 1-3 are the defined hints. Any other mode has no effect on state, so
+	// the generic scalar lowering admits it without calling it a prefetch hint.
 	for (const uint32_t encoded: {0xbfa00000u, 0xbfa00001u, 0xbfa00002u, 0xbfa00003u, 0xbfa00004u})
 	{
 		EXPECT_EXIT(
@@ -238,16 +242,18 @@ TEST(EmulatorComputeWaveAnalysis, AdmitsOnlyDefinedInstructionPrefetchModes)
 			    {
 				    std::_Exit(2);
 			    }
-			    const auto result = ShaderAnalyzeComputeWaveCode(code, PairedInput());
 			    const bool defined_mode = encoded >= 0xbfa00001u && encoded <= 0xbfa00003u;
-			    std::_Exit(result.supported == defined_mode ? 0 : 3);
+			    const bool hint = ShaderClassifyComputeWaveInstruction(code.GetInstructions().At(0)) == ShaderComputeWaveInstructionKind::ScalarHint;
+			    std::_Exit(hint == defined_mode && ShaderAnalyzeComputeWaveCode(code, PairedInput()).supported ? 0 : 3);
 		    },
 		    ::testing::ExitedWithCode(0), "");
 	}
 }
 
-TEST(EmulatorComputeWaveAnalysis, DoesNotPromoteSoppHintAliasesToInstructionPrefetch)
+TEST(EmulatorComputeWaveAnalysis, DoesNotPromoteSoppHintAliasesToInstructionPrefetchHints)
 {
+	// s_nop 3 and the SOPP alias 0xbf96 decode through the same placeholder type;
+	// they are state-free, so they are admitted but never classified as a hint.
 	for (const uint32_t encoded: {0xbf800003u, 0xbf960003u})
 	{
 		EXPECT_EXIT(
@@ -262,8 +268,8 @@ TEST(EmulatorComputeWaveAnalysis, DoesNotPromoteSoppHintAliasesToInstructionPref
 			    {
 				    std::_Exit(2);
 			    }
-			    const auto result = ShaderAnalyzeComputeWaveCode(code, PairedInput());
-			    std::_Exit(!result.supported && result.unsupported_pc == 0u ? 0 : 3);
+			    const bool hint = ShaderClassifyComputeWaveInstruction(code.GetInstructions().At(0)) == ShaderComputeWaveInstructionKind::ScalarHint;
+			    std::_Exit(!hint && ShaderAnalyzeComputeWaveCode(code, PairedInput()).supported ? 0 : 3);
 		    },
 		    ::testing::ExitedWithCode(0), "");
 	}
@@ -293,20 +299,20 @@ TEST(EmulatorComputeWaveAnalysis, PreservesSmemCacheControlBitsForAdmission)
 	}
 }
 
-TEST(EmulatorComputeWaveAnalysis, MappedScalarLoadAdvancesToNextUnsupportedInstruction)
+TEST(EmulatorComputeWaveAnalysis, ScalarLoadAdvancesToNextUnsupportedInstructionWithOrWithoutAMapping)
 {
+	// An unmapped S_LOAD is no longer the first unsupported instruction: the
+	// generic scalar lowering reads through the computed pointer.
 	ShaderCode code;
 	code.SetType(ShaderType::Compute);
 	code.GetInstructions().Add(MappedEudLoad());
 	ShaderInstruction next {};
 	next.pc   = 12u;
-	next.type = ShaderInstructionType::SGetpcB64;
+	next.type = ShaderInstructionType::VInterpP1F32;
 	code.GetInstructions().Add(next);
 
-	auto input = PairedInput();
-	EXPECT_EQ(ShaderAnalyzeComputeWaveCode(code, input).unsupported_pc, 4u);
-	input = MappedEudInput();
-	EXPECT_EQ(ShaderAnalyzeComputeWaveCode(code, input).unsupported_pc, 12u);
+	EXPECT_EQ(ShaderAnalyzeComputeWaveCode(code, PairedInput()).unsupported_pc, 12u);
+	EXPECT_EQ(ShaderAnalyzeComputeWaveCode(code, MappedEudInput()).unsupported_pc, 12u);
 }
 
 TEST(EmulatorComputeWaveAnalysis, RejectsSgpr64MoveThatClobbersEudBaseBeforeLoad)
@@ -326,20 +332,34 @@ TEST(EmulatorComputeWaveAnalysis, RejectsSgpr64MoveThatClobbersEudBaseBeforeLoad
 	EXPECT_TRUE(result.reason.ContainsStr("extended pointer base"));
 }
 
-TEST(EmulatorComputeWaveAnalysis, RejectsLaterHighHalfClobberOfEudBase)
+TEST(EmulatorComputeWaveAnalysis, HighHalfClobberOfEudBaseOnlyMattersToALaterMappedLoad)
 {
-	ShaderCode code;
-	code.SetType(ShaderType::Compute);
-	code.GetInstructions().Add(MappedEudLoad());
-	code.GetInstructions().Add(EudBaseHighHalfClobber(12u));
 	ShaderInstruction end {};
-	end.pc   = 16u;
-	end.type = ShaderInstructionType::SEndpgm;
+	end.type   = ShaderInstructionType::SEndpgm;
 	end.format = ShaderInstructionFormat::Empty;
-	code.GetInstructions().Add(end);
-	const auto result = ShaderAnalyzeComputeWaveCode(code, MappedEudInput());
+
+	// A write to the base after its last use changes nothing the lowering reads.
+	ShaderCode unused_after;
+	unused_after.SetType(ShaderType::Compute);
+	unused_after.GetInstructions().Add(MappedEudLoad());
+	unused_after.GetInstructions().Add(EudBaseHighHalfClobber(12u));
+	end.pc = 16u;
+	unused_after.GetInstructions().Add(end);
+	EXPECT_TRUE(ShaderAnalyzeComputeWaveCode(unused_after, MappedEudInput()).supported);
+
+	// A second mapped load through the clobbered base no longer sees the original pointer.
+	ShaderCode reused;
+	reused.SetType(ShaderType::Compute);
+	reused.GetInstructions().Add(MappedEudLoad());
+	reused.GetInstructions().Add(EudBaseHighHalfClobber(12u));
+	auto second = MappedEudLoad();
+	second.pc   = 16u;
+	reused.GetInstructions().Add(second);
+	end.pc = 24u;
+	reused.GetInstructions().Add(end);
+	const auto result = ShaderAnalyzeComputeWaveCode(reused, MappedEudInput());
 	EXPECT_FALSE(result.supported);
-	EXPECT_EQ(result.unsupported_pc, 12u);
+	EXPECT_EQ(result.unsupported_pc, 16u);
 	EXPECT_TRUE(result.reason.ContainsStr("extended pointer base"));
 }
 
@@ -518,7 +538,9 @@ TEST(EmulatorComputeWaveAnalysis, Vop2AndVopcPreserveEncodingControlsWithoutLook
 	}
 }
 
-TEST(EmulatorComputeWaveAnalysis, ScalarMaskCopyRequiresAlignedBoundedPairs)
+// Malformed pairs must fail before generic fallback; other representable source
+// forms remain outside the specialized scalar-copy contract.
+TEST(EmulatorComputeWaveAnalysis, ScalarMaskCopyClaimsOnlyAlignedBoundedPairs)
 {
 	ShaderInstruction instruction;
 	instruction.type               = ShaderInstructionType::SMovB64;
@@ -539,7 +561,7 @@ TEST(EmulatorComputeWaveAnalysis, ScalarMaskCopyRequiresAlignedBoundedPairs)
 	                       ShaderOperandType::LiteralConstant, ShaderOperandType::FloatInlineConstant})
 	{
 		instruction.src[0].type = type;
-		EXPECT_EQ(ShaderClassifyComputeWaveInstruction(instruction), ShaderComputeWaveInstructionKind::Unsupported);
+		EXPECT_NE(ShaderClassifyComputeWaveInstruction(instruction), ShaderComputeWaveInstructionKind::ScalarCopy);
 	}
 	instruction.src[0].type     = ShaderOperandType::VccLo;
 	instruction.dst.type        = ShaderOperandType::Sgpr;
@@ -553,9 +575,8 @@ TEST(EmulatorComputeWaveAnalysis, ScalarMaskCopyRequiresAlignedBoundedPairs)
 	for (const int value: {-17, -16, 0, 64, 65})
 	{
 		instruction.src[0].constant.i = value;
-		const auto expected = value >= -16 && value <= 64 ? ShaderComputeWaveInstructionKind::ScalarCopy :
-		                                                    ShaderComputeWaveInstructionKind::Unsupported;
-		EXPECT_EQ(ShaderClassifyComputeWaveInstruction(instruction), expected);
+		const bool claimed = ShaderClassifyComputeWaveInstruction(instruction) == ShaderComputeWaveInstructionKind::ScalarCopy;
+		EXPECT_EQ(claimed, value >= -16 && value <= 64) << value;
 	}
 }
 
@@ -581,6 +602,71 @@ TEST(EmulatorComputeWaveAnalysis, AdmitsOnlyTheRealSoppBarrierTuple)
 		    std::_Exit(real_result.supported && !placeholder_result.supported && placeholder_result.unsupported_pc == 0u ? 0 : 3);
 	    },
 	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorComputeWaveAnalysis, GenericFallbackRequiresValidOperandSpans)
+{
+	ShaderInstruction instruction {};
+	instruction.type = ShaderInstructionType::VAddF32;
+	instruction.format = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	instruction.src_num = 2;
+	instruction.dst = {.type = ShaderOperandType::Vgpr, .register_id = 255, .size = 1};
+	instruction.src[0] = {.type = ShaderOperandType::Vgpr, .register_id = 254, .size = 1};
+	instruction.src[1] = {.type = ShaderOperandType::Sgpr, .register_id = 103, .size = 1};
+	ASSERT_EQ(ShaderClassifyComputeWaveInstruction(instruction), ShaderComputeWaveInstructionKind::BankedGeneric);
+	for (int corrupt = 0; corrupt < 6; ++corrupt)
+	{
+		auto invalid = instruction;
+		switch (corrupt)
+		{
+			case 0: invalid.dst.register_id = 256; break;
+			case 1: invalid.dst.size = 2; break; // crosses v255
+			case 2: invalid.src[0].register_id = -1; break;
+			case 3: invalid.src[1].size = 2; break; // crosses s103
+			case 4: invalid.src_num = 1; break; // live source outside the tuple
+			case 5: invalid.src_num = 5; break;
+		}
+		EXPECT_FALSE(ShaderComputeWaveGenericVectorSupported(invalid));
+		EXPECT_EQ(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::Unsupported);
+	}
+	ShaderInstruction copy {};
+	copy.type = ShaderInstructionType::SMovB64;
+	copy.format = ShaderInstructionFormat::Sdst2Ssrc02;
+	copy.src_num = 1;
+	copy.dst = {.type = ShaderOperandType::Sgpr, .register_id = 2, .size = 2};
+	copy.src[0] = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 2};
+	EXPECT_TRUE(ShaderInstructionLoweringPreconditions(copy));
+	copy.src[0].register_id = 5;
+	EXPECT_FALSE(ShaderComputeWaveGenericScalarSupported(copy));
+	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(copy), ShaderComputeWaveInstructionKind::Unsupported);
+}
+
+TEST(EmulatorComputeWaveAnalysis, IntegerControlsCannotEscapeToGenericLowering)
+{
+	ShaderInstruction instruction {};
+	instruction.type = ShaderInstructionType::VAdd3U32;
+	instruction.format = ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
+	instruction.src_num = 3;
+	instruction.dst = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	for (int source = 0; source < 3; ++source)
+	{
+		instruction.src[source] = {.type = ShaderOperandType::Vgpr, .register_id = source + 1, .size = 1};
+	}
+	EXPECT_TRUE(ShaderInstructionLoweringPreconditions(instruction));
+	for (int corrupt = 0; corrupt < 5; ++corrupt)
+	{
+		auto invalid = instruction;
+		switch (corrupt)
+		{
+			case 0: invalid.dst.clamp = true; break;
+			case 1: invalid.vop3_op_sel = 1; break;
+			case 2: invalid.vop3_omod = 1; break;
+			case 3: invalid.src[1].size = 2; break;
+			case 4: invalid.src[2].negate = true; break;
+		}
+		EXPECT_FALSE(ShaderComputeWaveGenericVectorSupported(invalid));
+		EXPECT_EQ(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::Unsupported);
+	}
 }
 
 UT_END();

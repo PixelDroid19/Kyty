@@ -199,7 +199,9 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	const Kyty::Emulator::VideoFrameMemory::Callbacks video_frame_memory_callbacks {
 	    GuestTextureLayoutRegisterLinear,
 	    GuestTextureLayoutUnregister,
-	    [](uint64_t base, uint64_t size) { (void)GpuMemoryNotifyHostWrite(base, size); }};
+	    [](uint64_t base, uint64_t size) { (void)GpuMemoryNotifyHostWrite(base, size); },
+	    [](uint64_t base, uint64_t size) { return GpuDirtyPageTracker::Instance().BeginHostWrite(base, size); },
+	    [](uint64_t token) { GpuDirtyPageTracker::Instance().EndHostWrite(token); }};
 	EXIT_IF(!Kyty::Emulator::VideoFrameMemory::InstallCallbacks(video_frame_memory_callbacks));
 	const Kyty::Emulator::PresentationStats::Callbacks presentation_stats_callbacks {nullptr, GraphicsQueryPresentationStats};
 	EXIT_IF(!Kyty::Emulator::PresentationStats::GetPort().Install(presentation_stats_callbacks));
@@ -2401,6 +2403,52 @@ int KYTY_SYSV_ABI GraphicsSetUcRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 	return OK;
 }
 
+static ShaderSpecialRegs GraphicsSnapshotPrimSpecials(const Shader* shader, uint8_t expected_type, const char* role)
+{
+	Shader header {};
+	if (!Core::VirtualMemory::CopyFromGuest(&header, reinterpret_cast<uint64_t>(shader), sizeof(header)))
+	{
+		EXIT("GraphicsCreatePrimState: unreadable %s header at 0x%016" PRIx64, role, reinterpret_cast<uint64_t>(shader));
+	}
+	if (header.type != expected_type || header.special_sizes_bytes < sizeof(ShaderSpecialRegs))
+	{
+		EXIT("GraphicsCreatePrimState: invalid %s metadata type=%u expected=%u specials_size=%u required=%zu", role,
+		     static_cast<unsigned>(header.type), static_cast<unsigned>(expected_type),
+		     static_cast<unsigned>(header.special_sizes_bytes), sizeof(ShaderSpecialRegs));
+	}
+	ShaderSpecialRegs specials {};
+	if (!Core::VirtualMemory::CopyFromGuest(&specials, reinterpret_cast<uint64_t>(header.specials), sizeof(specials)))
+	{
+		EXIT("GraphicsCreatePrimState: unreadable %s specials at 0x%016" PRIx64, role,
+		     reinterpret_cast<uint64_t>(header.specials));
+	}
+	return specials;
+}
+
+static bool GraphicsMapPrimInputToOutput(uint32_t input, uint32_t* output)
+{
+	switch (input)
+	{
+		case 1: *output = 0; return true; // points
+		case 2:
+		case 3:
+		case 10:
+		case 11:
+		case 18: *output = 1; return true; // lines
+		case 4:
+		case 5:
+		case 6:
+		case 12:
+		case 13:
+		case 19:
+		case 20:
+		case 21: *output = 2; return true; // triangles
+		case 7: *output = 3; return true;  // GFX10+ bounding rectangle
+		case 17: *output = 4; return true; // GFX10+ three-corner rectangle
+		default: return false;
+	}
+}
+
 int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegister* uc_regs, const Shader* hs, const Shader* gs,
                                           uint32_t prim_type)
 {
@@ -2412,24 +2460,94 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 			KYTY_LOG_DEBUG("\t gs        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(gs));
 			KYTY_LOG_DEBUG("\t prim_type = %" PRIu32 "\n", prim_type);
 
-	if (hs != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: hs != nullptr condition ignored (continuing)\n"); }
-	if (gs == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs == nullptr condition ignored (continuing)\n"); }
-	if (cx_regs == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cx_regs == nullptr condition ignored (continuing)\n"); }
-	if (uc_regs == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uc_regs == nullptr condition ignored (continuing)\n"); }
+	if (cx_regs == nullptr && uc_regs == nullptr)
+	{
+		return OK;
+	}
 
-	if (gs->type != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->type != 2 condition ignored (continuing)\n"); }
-	if (gs->specials->vgt_shader_stages_en.offset != Pm4::VGT_SHADER_STAGES_EN) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->specials->vgt_shader_stages_en.offset != Pm4::VGT_SHADER_STAGES_EN condition ignored (continuing)\n"); }
-	if (gs->specials->vgt_gs_out_prim_type.offset != Pm4::VGT_GS_OUT_PRIM_TYPE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->specials->vgt_gs_out_prim_type.offset != Pm4::VGT_GS_OUT_PRIM_TYPE condition ignored (continuing)\n"); }
-	if (gs->specials->ge_cntl.offset != Pm4::GE_CNTL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->specials->ge_cntl.offset != Pm4::GE_CNTL condition ignored (continuing)\n"); }
-	if (gs->specials->ge_user_vgpr_en.offset != Pm4::GE_USER_VGPR_EN) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->specials->ge_user_vgpr_en.offset != Pm4::GE_USER_VGPR_EN condition ignored (continuing)\n"); }
+	// Snapshot both fixed objects before publishing any output, including aliases.
+	const auto gs_specials = GraphicsSnapshotPrimSpecials(gs, 2, "GS");
+	const auto hs_specials = hs != nullptr ? GraphicsSnapshotPrimSpecials(hs, 3, "HS") : ShaderSpecialRegs {};
+	constexpr uint32_t gs_enable = 1u << 5u;
+	constexpr uint32_t hs_enable = 1u << 2u;
+	constexpr uint32_t ls_hs_enable = 0x7u;
+	const uint32_t gs_stages = gs_specials.vgt_shader_stages_en.value;
+	const uint32_t hs_stages = hs_specials.vgt_shader_stages_en.value;
+	if (gs_specials.vgt_shader_stages_en.offset != Pm4::VGT_SHADER_STAGES_EN ||
+	    (hs != nullptr && hs_specials.vgt_shader_stages_en.offset != Pm4::VGT_SHADER_STAGES_EN))
+	{
+		EXIT("GraphicsCreatePrimState: invalid stage register offsets GS=0x%x HS=0x%x",
+		     gs_specials.vgt_shader_stages_en.offset, hs_specials.vgt_shader_stages_en.offset);
+	}
+	if ((hs == nullptr && (gs_stages & ls_hs_enable) != 0u) ||
+	    (hs != nullptr && ((hs_stages & gs_enable) != 0u || (hs_stages & hs_enable) == 0u)))
+	{
+		EXIT("GraphicsCreatePrimState: unsupported stage ownership GS=0x%08x HS=0x%08x has_hs=%u",
+		     gs_stages, hs_stages, static_cast<unsigned>(hs != nullptr));
+	}
+	uint32_t mapped_output = 0;
+	if (!GraphicsMapPrimInputToOutput(prim_type, &mapped_output) && !(prim_type == 9u && hs != nullptr))
+	{
+		// PATCH requires an HS owner; NONE and reserved/unknown inputs have no mapping.
+		EXIT("GraphicsCreatePrimState: unsupported input primitive=%u has_hs=%u", prim_type,
+		     static_cast<unsigned>(hs != nullptr));
+	}
 
-	cx_regs[0] = gs->specials->vgt_shader_stages_en;
-	cx_regs[1] = gs->specials->vgt_gs_out_prim_type;
-
-	uc_regs[0]        = gs->specials->ge_cntl;
-	uc_regs[1]        = gs->specials->ge_user_vgpr_en;
-	uc_regs[2].offset = Pm4::VGT_PRIMITIVE_TYPE;
-	uc_regs[2].value  = prim_type;
+	ShaderRegister cx[2] {};
+	ShaderRegister uc[3] {};
+	if (cx_regs != nullptr)
+	{
+		cx[0] = {Pm4::VGT_SHADER_STAGES_EN, gs_stages | hs_stages};
+		// Stage ownership, never the numeric output value, selects the full pair.
+		if ((gs_stages & gs_enable) != 0u)
+		{
+			cx[1] = gs_specials.vgt_gs_out_prim_type;
+		} else if (hs != nullptr)
+		{
+			cx[1] = hs_specials.vgt_gs_out_prim_type;
+		} else
+		{
+			cx[1] = {Pm4::VGT_GS_OUT_PRIM_TYPE, mapped_output};
+		}
+		if (cx[1].offset != Pm4::VGT_GS_OUT_PRIM_TYPE)
+		{
+			EXIT("GraphicsCreatePrimState: invalid selected output register=0x%x", cx[1].offset);
+		}
+	}
+	if (uc_regs != nullptr)
+	{
+		uc[0] = gs_specials.ge_cntl;
+		uc[1] = hs != nullptr ? hs_specials.ge_user_vgpr_en : gs_specials.ge_user_vgpr_en;
+		uc[2] = {Pm4::VGT_PRIMITIVE_TYPE, prim_type};
+		if (uc[0].offset != Pm4::GE_CNTL || uc[1].offset != Pm4::GE_USER_VGPR_EN)
+		{
+			EXIT("GraphicsCreatePrimState: invalid selected UC registers GE_CNTL=0x%x GE_USER_VGPR_EN=0x%x",
+			     uc[0].offset, uc[1].offset);
+		}
+	}
+	const auto cx_address = reinterpret_cast<uint64_t>(cx_regs);
+	const auto uc_address = reinterpret_cast<uint64_t>(uc_regs);
+	if ((cx_regs != nullptr && !Core::VirtualMemory::IsRangeWritable(cx_address, sizeof(cx))) ||
+	    (uc_regs != nullptr && !Core::VirtualMemory::IsRangeWritable(uc_address, sizeof(uc))))
+	{
+		EXIT("GraphicsCreatePrimState: unwritable output ranges CX=0x%016" PRIx64 " UC=0x%016" PRIx64,
+		     cx_address, uc_address);
+	}
+	if (cx_regs != nullptr && uc_regs != nullptr &&
+	    (cx_address <= uc_address ? uc_address - cx_address < sizeof(cx) : cx_address - uc_address < sizeof(uc)))
+	{
+		EXIT("GraphicsCreatePrimState: overlapping CX and UC output ranges");
+	}
+	// Each copy revalidates under the VM lock. Two separate outputs are not an
+	// atomic transaction: callers must keep both mappings stable through return.
+	if (cx_regs != nullptr && !Core::VirtualMemory::CopyToGuest(cx_address, cx, sizeof(cx)))
+	{
+		EXIT("GraphicsCreatePrimState: CX output invalidated during publication at 0x%016" PRIx64, cx_address);
+	}
+	if (uc_regs != nullptr && !Core::VirtualMemory::CopyToGuest(uc_address, uc, sizeof(uc)))
+	{
+		EXIT("GraphicsCreatePrimState: UC output invalidated during publication at 0x%016" PRIx64, uc_address);
+	}
 
 	return OK;
 }

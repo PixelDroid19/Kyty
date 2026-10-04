@@ -35,22 +35,26 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 	inst.exp_enable_mask = static_cast<uint8_t>(en);
 	inst.exp_control = static_cast<uint8_t>(vm | (done << 1u) | (compr << 2u));
 
-	// Color MRT targets 0x00-0x03 (mrt_color0..3). Compressed half2 uses two
+	// Color MRT targets 0x00-0x07 (mrt_color0..7). Compressed half2 uses two
 	// VGPRs (en=0xf, compr=1); full float uses four. Captured Gen5 also exports
-	// MRT2/MRT3 with done=0 and vm=0, so neither done nor vm is required for
+	// MRT2+ with done=0 and vm=0, so neither done nor vm is required for
 	// color MRT forms other than the kill path.
-	if (target <= 0x03u)
+	if (target <= 0x07u)
 	{
 		if (done != 0 && compr != 0 && en == 0x0u)
 		{
 			// Null export (no channels). Any MRT target may terminate a discard
-			// block when preceded by exec=0; outside that pattern MRT1-3 are
+			// block when preceded by exec=0; outside that pattern MRT1-7 are
 			// no-ops that close the export sequence.
 			static const ShaderInstructionFormat::Format k_null[] = {
 			    ShaderInstructionFormat::Mrt0OffOffComprVmDone,
 			    ShaderInstructionFormat::Mrt1OffOffComprVmDone,
 			    ShaderInstructionFormat::Mrt2OffOffComprVmDone,
 			    ShaderInstructionFormat::Mrt3OffOffComprVmDone,
+			    ShaderInstructionFormat::Mrt4OffOffComprVmDone,
+			    ShaderInstructionFormat::Mrt5OffOffComprVmDone,
+			    ShaderInstructionFormat::Mrt6OffOffComprVmDone,
+			    ShaderInstructionFormat::Mrt7OffOffComprVmDone,
 			};
 			// Historical MRT0 kill path also required vm=1; keep that gate for RT0.
 			if (target == 0x00u)
@@ -72,6 +76,10 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 			    ShaderInstructionFormat::Mrt1Vsrc0Vsrc1ComprVm,
 			    ShaderInstructionFormat::Mrt2Vsrc0Vsrc1ComprVm,
 			    ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm,
+			    ShaderInstructionFormat::Mrt4Vsrc0Vsrc1ComprVm,
+			    ShaderInstructionFormat::Mrt5Vsrc0Vsrc1ComprVm,
+			    ShaderInstructionFormat::Mrt6Vsrc0Vsrc1ComprVm,
+			    ShaderInstructionFormat::Mrt7Vsrc0Vsrc1ComprVm,
 			};
 			inst.format  = k_compr[target];
 			// The IR format has two physical packed-half source slots. Keep both
@@ -86,6 +94,10 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 			    ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm,
 			    ShaderInstructionFormat::Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm,
 			    ShaderInstructionFormat::Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+			    ShaderInstructionFormat::Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+			    ShaderInstructionFormat::Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+			    ShaderInstructionFormat::Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm,
+			    ShaderInstructionFormat::Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm,
 			};
 			// MRT0 full form historically required done=1; keep that for RT0 only.
 			if (target == 0x00u)
@@ -141,9 +153,7 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		}
 	}
 
-	// GCN/GFX: parameter exports use targets 0x20+N (N = param index). Targets
-	// in [32,64) are treated the same way. Targets through 0x27 map directly
-	// to Param0 through Param7.
+	// GCN/GFX: parameter exports use targets 0x20+N (N = param index, up to 31).
 	if (inst.format == ShaderInstructionFormat::Unknown && done == 0 && compr == 0 && vm == 0 && en == 0xf)
 	{
 		switch (target)
@@ -156,6 +166,30 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 			case 0x25: inst.format = ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			case 0x26: inst.format = ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			case 0x27: inst.format = ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x28: inst.format = ShaderInstructionFormat::Param8Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x29: inst.format = ShaderInstructionFormat::Param9Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2a: inst.format = ShaderInstructionFormat::Param10Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2b: inst.format = ShaderInstructionFormat::Param11Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2c: inst.format = ShaderInstructionFormat::Param12Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2d: inst.format = ShaderInstructionFormat::Param13Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2e: inst.format = ShaderInstructionFormat::Param14Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2f: inst.format = ShaderInstructionFormat::Param15Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x30: inst.format = ShaderInstructionFormat::Param16Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x31: inst.format = ShaderInstructionFormat::Param17Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x32: inst.format = ShaderInstructionFormat::Param18Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x33: inst.format = ShaderInstructionFormat::Param19Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x34: inst.format = ShaderInstructionFormat::Param20Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x35: inst.format = ShaderInstructionFormat::Param21Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x36: inst.format = ShaderInstructionFormat::Param22Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x37: inst.format = ShaderInstructionFormat::Param23Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x38: inst.format = ShaderInstructionFormat::Param24Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x39: inst.format = ShaderInstructionFormat::Param25Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3a: inst.format = ShaderInstructionFormat::Param26Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3b: inst.format = ShaderInstructionFormat::Param27Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3c: inst.format = ShaderInstructionFormat::Param28Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3d: inst.format = ShaderInstructionFormat::Param29Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3e: inst.format = ShaderInstructionFormat::Param30Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3f: inst.format = ShaderInstructionFormat::Param31Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			default: break;
 		}
 	}
@@ -175,6 +209,30 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 			case 0x25: inst.format = ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			case 0x26: inst.format = ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			case 0x27: inst.format = ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x28: inst.format = ShaderInstructionFormat::Param8Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x29: inst.format = ShaderInstructionFormat::Param9Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2a: inst.format = ShaderInstructionFormat::Param10Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2b: inst.format = ShaderInstructionFormat::Param11Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2c: inst.format = ShaderInstructionFormat::Param12Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2d: inst.format = ShaderInstructionFormat::Param13Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2e: inst.format = ShaderInstructionFormat::Param14Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x2f: inst.format = ShaderInstructionFormat::Param15Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x30: inst.format = ShaderInstructionFormat::Param16Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x31: inst.format = ShaderInstructionFormat::Param17Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x32: inst.format = ShaderInstructionFormat::Param18Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x33: inst.format = ShaderInstructionFormat::Param19Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x34: inst.format = ShaderInstructionFormat::Param20Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x35: inst.format = ShaderInstructionFormat::Param21Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x36: inst.format = ShaderInstructionFormat::Param22Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x37: inst.format = ShaderInstructionFormat::Param23Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x38: inst.format = ShaderInstructionFormat::Param24Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x39: inst.format = ShaderInstructionFormat::Param25Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3a: inst.format = ShaderInstructionFormat::Param26Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3b: inst.format = ShaderInstructionFormat::Param27Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3c: inst.format = ShaderInstructionFormat::Param28Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3d: inst.format = ShaderInstructionFormat::Param29Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3e: inst.format = ShaderInstructionFormat::Param30Vsrc0Vsrc1Vsrc2Vsrc3; break;
+			case 0x3f: inst.format = ShaderInstructionFormat::Param31Vsrc0Vsrc1Vsrc2Vsrc3; break;
 			default: break;
 		}
 	}
@@ -186,6 +244,14 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		     "unknown exp target: 0x%02" PRIx32 " done=%u compr=%u vm=%u en=0x%x at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32
 		     ", crc32 = 0x%08" PRIx32 ")\n",
 		     dst->DbgDump().c_str(), target, done, compr, vm, en, pc, dst->GetHash0(), dst->GetCrc32());
+	}
+
+	// Canonicalize only the unused IR tail after format selection and source
+	// remapping (POS1 Z becomes src[0]). EN does not change the physical source
+	// slots retained by full or compressed exports.
+	for (int source = inst.src_num; source < 4; ++source)
+	{
+		inst.src[source] = ShaderOperand {};
 	}
 
 	dst->GetInstructions().Add(inst);

@@ -222,32 +222,23 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	if (three_dimensional)
 	{
 		Gen5TextureVolumeLayout volume_layout {};
-		const bool              is_standard = Gen5GetStandard4KBVolumeTextureLayout(
+		const bool              layout_valid = Gen5GetVolumeTextureLayout(
 		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
 		    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &volume_layout);
-		if (!is_standard)
+		if (!layout_valid || !Gen5ValidateTextureVolumeUpload(volume_layout, *size))
 		{
-			const uint32_t bpe        = std::max(1u, ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt)));
-			volume_layout.linear_size = static_cast<uint64_t>(pitch) * height * depth * bpe;
-			volume_layout.tiled.size  = std::max(4096u, static_cast<uint32_t>(volume_layout.linear_size));
-			volume_layout.tiled.align = 4096;
+			EXIT("unsupported Gen5 volume upload: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
+			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), depth,
+			     static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), *size);
 		}
 		std::vector<uint8_t> linear(static_cast<size_t>(volume_layout.linear_size));
-		if (is_standard && !linear.empty())
-		{
-			TileConvertStandard4KB32VolumeToLinear(linear.data(), reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
-			                                       static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
-			                                       static_cast<uint32_t>(pitch));
-		} else if (!linear.empty())
-		{
-			std::memcpy(linear.data(), reinterpret_cast<void*>(*vaddr), linear.size());
-		}
+		EXIT_IF(!Gen5DetileTextureVolume(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, volume_layout));
 		Vector<BufferImageCopy> regions(1);
 		regions[0].offset    = 0;
-		regions[0].pitch     = static_cast<uint32_t>(pitch);
-		regions[0].width     = static_cast<uint32_t>(width);
-		regions[0].height    = static_cast<uint32_t>(height);
-		regions[0].depth     = static_cast<uint32_t>(depth);
+		regions[0].pitch     = volume_layout.pitch;
+		regions[0].width     = volume_layout.width;
+		regions[0].height    = volume_layout.height;
+		regions[0].depth     = volume_layout.depth;
 		regions[0].dst_level = 0;
 		regions[0].dst_x     = 0;
 		regions[0].dst_y     = 0;
@@ -907,7 +898,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// before create; this path covers pure CPU-backed sample textures.
 			// tile 27 = kRenderTarget layout; tile 9 = kStandard64KB
 			// (RGBA8/RGBA8-sRGB/RGBA16F package data).
-			// BC1 (catalog 133 / guest 169 UNORM / 170 SRGB) detiles compressed
+			// BC1 (raw 169 UNORM / 170 SRGB) detiles compressed
 			// 4x4 blocks as 8-byte elements on tile 27 only.
 			// SKIPPED: tile == 9 && fmt != 56 && fmt != 71 && fmt != 130
 			if (tile == 9 && fmt != 56 && fmt != 71 && fmt != 130)
@@ -1493,6 +1484,18 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	view_config->three_dimensional = resource_type == 10u;
 	view_config->arrayed_2d        = resource_type == 13u || resource_type == 11u;
 	view_config->depth_view        = params[TextureObject::PARAM_DEPTH_VIEW] != 0u;
+	if (view_config->three_dimensional)
+	{
+		Gen5TextureVolumeLayout volume_layout {};
+		if (!Gen5GetVolumeTextureLayout(fmt, width, height, view_config->depth,
+		                                          static_cast<uint32_t>(params[TextureObject::PARAM_PITCH]), guest_levels,
+		                                          static_cast<uint32_t>(params[TextureObject::PARAM_TILE]), &volume_layout) ||
+		    view_config->base_level != 0u)
+		{
+			EXIT("unsupported Gen5 volume image: format=%u %ux%ux%u levels=%u base=%u\n", fmt, width, height,
+			     view_config->depth, guest_levels, view_config->base_level);
+		}
+	}
 
 	if (resource_type != 8u && resource_type != 9u && !view_config->arrayed_2d && !view_config->three_dimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_type != 8u && resource_type != 9u && !view_config->arrayed_2d && !view_config->three_dimensional condition ignored (continuing)\n"); }
 	if (width == 0 || height == 0 || levels == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0 || height == 0 || levels == 0 condition ignored (continuing)\n"); }

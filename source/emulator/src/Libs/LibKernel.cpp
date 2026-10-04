@@ -16,7 +16,6 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/Semaphore.h"
-#include "Emulator/Kernel/SyncOnAddress.h"
 #include "Emulator/Kernel/Time.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Errno.h"
@@ -1887,7 +1886,6 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 
 namespace FileSystem    = Kernel::FileSystem;
 namespace Memory        = Kernel::Memory;
-namespace SyncOnAddress = Kernel::SyncOnAddress;
 namespace EventQueue    = Kernel::EventQueue;
 namespace EventFlag     = Kernel::EventFlag;
 namespace Semaphore     = Kernel::Semaphore;
@@ -2165,8 +2163,6 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("kUpgrXIrz7Q", LibKernel::KernelGetModuleInfo);
 	LIB_FUNC("IuxnUuXk6Bg", LibKernel::KernelGetModuleList);
 	LIB_FUNC("uvT2iYBBnkY", LibKernel::KernelSync);
-	LIB_FUNC("Hc4CaR6JBL0", Kernel::SyncOnAddress::KernelSyncOnAddressWait);
-	LIB_FUNC("q2y-wDIVWZA", Kernel::SyncOnAddress::KernelSyncOnAddressWake);
 	LIB_FUNC("Fjc4-n1+y2g", LibKernel::elf_phdr_match_addr);
 	LIB_FUNC("FxVZqBAA7ks", LibKernel::write);
 	LIB_FUNC("kbw4UHHSYy0", LibKernel::pthread_cxa_finalize);

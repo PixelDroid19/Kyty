@@ -30,9 +30,12 @@ struct Api
 void RegisterApi(void* const api[kApiSlotCount]);
 
 // libc startup consumes the declared process-parameter chain, never a scan of
-// load segments. A missing replacement is valid. Malformed metadata or a
-// failed initializer returns false without publishing an allocator.
+// load segments. A missing replacement is valid. Malformed metadata returns
+// false without publishing an allocator; the initializer result is ignored.
 [[nodiscard]] bool InitializeProcessHeap(uint64_t process_parameters);
+// Why the last InitializeProcessHeap call on this thread returned false: the
+// failed record or callback and its decoded fields. Empty after success.
+[[nodiscard]] const char* ProcessHeapFailureReason();
 
 [[nodiscard]] bool IsInitialized();
 [[nodiscard]] bool HasAllocator();

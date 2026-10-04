@@ -51,6 +51,86 @@ bool VulkanCreateDeviceImageView(VkDevice device, const VulkanImageViewDescripto
 	return vkCreateImageView(device, &view_info, nullptr, view) == VK_SUCCESS && *view != nullptr;
 }
 
+bool VulkanPlanSampledImageView(const VulkanImage& image, VkImageViewType view_type, VkImageAspectFlags aspect,
+                                uint32_t base_mip, uint32_t mip_count, uint32_t base_layer, uint32_t layer_count,
+                                uint32_t selectors, VulkanImageViewDescriptor* descriptor)
+{
+	if (descriptor == nullptr)
+	{
+		return false;
+	}
+	*descriptor = {};
+	VkComponentMapping components {};
+	if (image.image == VK_NULL_HANDLE || image.format == VK_FORMAT_UNDEFINED ||
+	    (image.usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u ||
+	    !VulkanDecodeComponentMapping(selectors, &components) ||
+	    base_mip >= image.mip_levels || mip_count == 0u || mip_count > image.mip_levels - base_mip ||
+	    base_layer >= image.array_layers || layer_count == 0u || layer_count > image.array_layers - base_layer)
+	{
+		return false;
+	}
+	const bool volume = view_type == VK_IMAGE_VIEW_TYPE_3D;
+	if ((view_type != VK_IMAGE_VIEW_TYPE_2D && view_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY && !volume) ||
+	    (volume ? image.image_type != VK_IMAGE_TYPE_3D || base_layer != 0u || layer_count != 1u
+	            : image.image_type != VK_IMAGE_TYPE_2D) ||
+	    (view_type == VK_IMAGE_VIEW_TYPE_2D && layer_count != 1u))
+	{
+		return false;
+	}
+	const bool depth_format = image.format == VK_FORMAT_D16_UNORM || image.format == VK_FORMAT_D32_SFLOAT ||
+	                          image.format == VK_FORMAT_D16_UNORM_S8_UINT || image.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+	                          image.format == VK_FORMAT_D32_SFLOAT_S8_UINT || image.format == VK_FORMAT_X8_D24_UNORM_PACK32;
+	const bool stencil_format = image.format == VK_FORMAT_S8_UINT || image.format == VK_FORMAT_D16_UNORM_S8_UINT ||
+	                            image.format == VK_FORMAT_D24_UNORM_S8_UINT || image.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+	if ((aspect == VK_IMAGE_ASPECT_COLOR_BIT && (depth_format || stencil_format)) ||
+	    (aspect == VK_IMAGE_ASPECT_DEPTH_BIT && !depth_format) ||
+	    (aspect == VK_IMAGE_ASPECT_STENCIL_BIT && !stencil_format) ||
+	    (aspect != VK_IMAGE_ASPECT_COLOR_BIT && aspect != VK_IMAGE_ASPECT_DEPTH_BIT && aspect != VK_IMAGE_ASPECT_STENCIL_BIT))
+	{
+		return false;
+	}
+	*descriptor = {image.image, view_type, image.format, components, aspect, base_mip, mip_count, base_layer, layer_count};
+	return true;
+}
+
+bool VulkanImageViewDescriptorsEqual(const VulkanImageViewDescriptor& a, const VulkanImageViewDescriptor& b)
+{
+	return a.image == b.image && a.view_type == b.view_type && a.format == b.format && a.aspect_mask == b.aspect_mask &&
+	       a.components.r == b.components.r && a.components.g == b.components.g && a.components.b == b.components.b &&
+	       a.components.a == b.components.a && a.base_mip_level == b.base_mip_level && a.level_count == b.level_count &&
+	       a.base_array_layer == b.base_array_layer && a.layer_count == b.layer_count;
+}
+
+int VulkanGetOrCreateSampledImageView(VkDevice device, VulkanImage* image, const VulkanImageViewDescriptor& descriptor,
+                                     VulkanImageViewCreator create)
+{
+	if (image == nullptr || create == nullptr || descriptor.image != image->image || descriptor.format != image->format ||
+	    (image->usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u)
+	{
+		return -1;
+	}
+	for (size_t i = 0; i < image->sampled_view_descriptors.size(); ++i)
+	{
+		if (VulkanImageViewDescriptorsEqual(image->sampled_view_descriptors[i], descriptor))
+		{
+			return VulkanImage::VIEW_MAX + static_cast<int>(i);
+		}
+	}
+	if (image->image_view.size() >= VulkanImage::VIEW_CACHE_LIMIT)
+	{
+		return -1;
+	}
+	VkImageView view = VK_NULL_HANDLE;
+	if (!create(device, descriptor, &view) || view == VK_NULL_HANDLE)
+	{
+		return -1;
+	}
+	const int index = static_cast<int>(image->image_view.size());
+	image->image_view.push_back(view);
+	image->sampled_view_descriptors.push_back(descriptor);
+	return index;
+}
+
 bool VulkanCreateStandardColorImageViews(GraphicContext* context, VulkanImage* image)
 {
 	EXIT_IF(context == nullptr || image == nullptr);
@@ -269,6 +349,7 @@ bool VulkanCreateDeviceImage(GraphicContext* context, const VkImageCreateInfo& i
 	image->physical_extent = image_info.extent;
 	image->mip_levels      = image_info.mipLevels;
 	image->array_layers    = image_info.arrayLayers;
+	image->image_type      = image_info.imageType;
 	return true;
 }
 

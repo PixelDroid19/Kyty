@@ -115,6 +115,28 @@ static uint32_t find_backward_loop_for_exit(const ShaderCode& code, const Shader
 	return owner;
 }
 
+static String8 selection_merge_name(const ShaderCode& code, uint32_t source_pc, const String8& guest_merge)
+{
+	for (const auto& label: code.GetLabels())
+	{
+		if (label.IsDisabled() || label.ToString() != guest_merge)
+		{
+			continue;
+		}
+		Vector<uint32_t> sources;
+		ScJoinCollectSources(code, label.GetDst(), &sources);
+		for (uint32_t source: sources)
+		{
+			if (source == source_pc)
+			{
+				return ScJoinMergeName(label.GetDst(), source_pc);
+			}
+		}
+		break;
+	}
+	return guest_merge;
+}
+
 
 KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 {
@@ -180,7 +202,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 			Vector<uint32_t> sc_join_srcs;
 			ScJoinCollectSources(code, join_pc, &sc_join_srcs);
 			const uint32_t owner_pc = ScJoinFindOwner(code, inst.pc, join_pc, sc_join_srcs);
-			if (owner_pc != 0)
+			if (owner_pc != kScJoinNoSource)
 			{
 				label = ScJoinMergeName(join_pc, owner_pc);
 			}
@@ -236,6 +258,17 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		                      ? "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpIEqual %bool %cc_u_<index> %uint_0"
 		                      : "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpINotEqual %bool %cc_u_<index> %uint_0";
 		branch_param[1] = "";
+	}
+	String8 quad_uniform_vote;
+	if (!spirv->UsesComputeWaveBanks() && spirv->GetHostShaderType() == ShaderType::Pixel && (exec_branch || vcc_branch) &&
+	    String8(branch_param[0]).ContainsStr("OpGroupNonUniformAny"))
+	{
+		// Helpers may sit out non-quad collectives and read an undefined vote. Hand them the vote of a real
+		// fragment of their quad, so every quad takes this branch as one: an implicit-derivative fetch inside
+		// the region then sees its whole quad, whose masked lanes keep the register values the hardware reads.
+		quad_uniform_vote = String8(branch_param[0]).ReplaceStr("%cc_any_<index> = ", "%cc_vote_<index> = ") + "\n" +
+		                    spirv->NativeQuadUniform("cc_vote_<index>", "bool", "cc_any_<index>");
+		branch_param[0] = quad_uniform_vote.c_str();
 	}
 
 	// TODO(): analyze control flow graph
@@ -455,55 +488,19 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		}
 	}
 
-	// A nested selection sharing its merge join with an outer edge must not
-	// merge on the raw guest label: WriteLabel materializes that join as an
-	// sc_join chain, and the outer link forwards to the guest label from
-	// outside this construct (the edge enters past the header, which
-	// structured validation rejects). Merge on this selection's own sc_join
-	// link instead; the chain order keeps every construct closed before the
-	// guest join. Only redirect when the merge names a guest label with an
-	// outer incoming edge and WriteLabel will materialize this selection's
-	// link, otherwise the merge target would dangle.
+	// Branches and WriteLabel reconverge through the selection's synthetic
+	// join, including standalone diamonds. Declare that same block as the
+	// merge: maximal reconvergence forbids an undeclared multi-predecessor
+	// intermediate block. Redirect only when WriteLabel will emit this link.
 	if (if_else && loop_backedge == 0 && label_merge.Size() != 0)
 	{
-		uint32_t merge_join = 0;
-		for (const auto& merge_label: code.GetLabels())
+		label_merge = selection_merge_name(code, inst.pc, label_merge);
+		if (label_merge == ScJoinMergeName(label.GetDst(), inst.pc))
 		{
-			if (!merge_label.IsDisabled() && merge_label.ToString() == label_merge)
-			{
-				merge_join = merge_label.GetDst();
-				break;
-			}
-		}
-		bool outer_edge = false;
-		if (merge_join != 0)
-		{
-			for (const auto& join_label: code.GetLabels())
-			{
-				if (!join_label.IsDisabled() && join_label.GetDst() == merge_join && join_label.GetSrc() < inst.pc)
-				{
-					outer_edge = true;
-					break;
-				}
-			}
-		}
-		if (outer_edge)
-		{
-			Vector<uint32_t> sc_join_srcs;
-			ScJoinCollectSources(code, merge_join, &sc_join_srcs);
-			Vector<uint32_t> sc_join_order;
-			if (sc_join_srcs.Size() > 0)
-			{
-				ScJoinOrderForEmission(code, merge_join, sc_join_srcs, &sc_join_order);
-			}
-			for (int s = 0; s < sc_join_order.Size(); s++)
-			{
-				if (sc_join_order[s] == inst.pc)
-				{
-					label_merge = ScJoinMergeName(merge_join, inst.pc);
-					break;
-				}
-			}
+			// An empty taken arm reaches the same guest PC as the merge.
+			// Enter its synthetic merge first, just like the nonempty arm;
+			// the raw guest continuation may itself begin another selection.
+			label_str = label_merge;
 		}
 	}
 
@@ -691,11 +688,17 @@ KYTY_RECOMPILER_FUNC(Recompile_SEndpgm_Empty)
 	const auto& prev_prev_inst = code.GetInstructions().At(index - 2);
 	const auto& prev_inst      = code.GetInstructions().At(index - 1);
 
-	bool after_kill =
-	    (prev_prev_inst.type == ShaderInstructionType::SMovB64 && prev_prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
+	const bool exec_zeroed =
+	    (prev_prev_inst.type == ShaderInstructionType::SMovB64 &&
+	     prev_prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
 	     prev_prev_inst.dst.type == ShaderOperandType::ExecLo && prev_prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
-	     prev_prev_inst.src[0].constant.i == 0 && prev_inst.type == ShaderInstructionType::Exp &&
-	     ShaderIsNullMrtDoneFormat(prev_inst.format));
+	     prev_prev_inst.src[0].constant.i == 0) ||
+	    (prev_prev_inst.type == ShaderInstructionType::SMovB32 &&
+	     prev_prev_inst.format == ShaderInstructionFormat::SVdstSVsrc0 &&
+	     prev_prev_inst.dst.type == ShaderOperandType::ExecLo && prev_prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
+	     prev_prev_inst.src[0].constant.i == 0);
+	bool after_kill = exec_zeroed && prev_inst.type == ShaderInstructionType::Exp &&
+	                  ShaderIsNullMrtDoneFormat(prev_inst.format);
 
 	if (!after_kill)
 	{

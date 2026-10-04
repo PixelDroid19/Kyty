@@ -67,7 +67,9 @@ TEST(EmulatorComputeWaveTernaryAlu, AdmitsPlainAdd3WithScalarWordAndVectorSource
 	}
 }
 
-TEST(EmulatorComputeWaveTernaryAlu, RejectsModifiersAndUnprovenScalarSources)
+// The banked ternary path lowers only the plain tuple. Encoding modifiers leave
+// it for the generic per-lane lowering; EXEC as a data source has no lowering at all.
+TEST(EmulatorComputeWaveTernaryAlu, BankedPathClaimsNoModifiedTuple)
 {
 	struct Case
 	{
@@ -80,7 +82,6 @@ TEST(EmulatorComputeWaveTernaryAlu, RejectsModifiersAndUnprovenScalarSources)
 	    {kAdd3Word0 | (1u << 8u), kAdd3Word1},  // abs src0
 	    {kAdd3Word0, kAdd3Word1 | (1u << 31u)}, // neg src2
 	    {kAdd3Word0, kAdd3Word1 | (1u << 27u)}, // omod
-	    {kAdd3Word0, 0x0400d67eu},              // exec_lo as data
 	    {kAdd3Word0, 0x0400d67cu},              // m0 as data
 	};
 	for (const auto& test: cases)
@@ -95,11 +96,29 @@ TEST(EmulatorComputeWaveTernaryAlu, RejectsModifiersAndUnprovenScalarSources)
 			    {
 				    std::_Exit(2);
 			    }
-			    const auto result = ShaderAnalyzeComputeWaveCode(code, PairedInput());
-			    std::_Exit(!result.supported && result.unsupported_pc == 0u ? 0 : 3);
+			    const auto kind = ShaderClassifyComputeWaveInstruction(code.GetInstructions().At(0));
+			    std::_Exit(kind != ShaderComputeWaveInstructionKind::BankedAlu ? 0 : 3);
 		    },
 		    ::testing::ExitedWithCode(0), "");
 	}
+}
+
+TEST(EmulatorComputeWaveTernaryAlu, RejectsExecAsADataSource)
+{
+	const uint32_t words[] = {kAdd3Word0, 0x0400d67eu, kEnd}; // exec_lo as data
+	ASSERT_EXIT(
+	    {
+		    InitializeConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(words, sizeof(words), &code) || code.GetInstructions().At(0).type != ShaderInstructionType::VAdd3U32)
+		    {
+			    std::_Exit(2);
+		    }
+		    const auto result = ShaderAnalyzeComputeWaveCode(code, PairedInput());
+		    std::_Exit(!result.supported && result.unsupported_pc == 0u ? 0 : 3);
+	    },
+	    ::testing::ExitedWithCode(0), "");
 }
 
 UT_END();

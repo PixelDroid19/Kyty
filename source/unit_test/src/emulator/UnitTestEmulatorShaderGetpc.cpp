@@ -1,6 +1,7 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
@@ -139,6 +140,189 @@ TEST(EmulatorShaderGetpc, ValidatesRuntimeAddressLoadsInPushAndUniformLayouts)
 	ASSERT_EXIT(LowerGetpcProbe(), ::testing::ExitedWithCode(0), "");
 }
 
+static String8 NggBufferLoadSource(int descriptor_register)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderInstruction getpc {};
+	getpc.type   = ShaderInstructionType::SGetpcB64;
+	getpc.format = ShaderInstructionFormat::Sdst2;
+	getpc.dst    = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	ShaderInstruction load {};
+	load.pc                  = 4;
+	load.type                = ShaderInstructionType::BufferLoadDwordx4;
+	load.format              = ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen;
+	load.dst                 = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	load.src[0]              = {.type = ShaderOperandType::Vgpr, .register_id = 5, .size = 1};
+	load.src[1]              = {.type = ShaderOperandType::Sgpr, .register_id = descriptor_register, .size = 4};
+	load.src[2].type         = ShaderOperandType::IntegerInlineConstant;
+	load.src[2].constant.u   = 0;
+	load.src_num             = 3;
+	load.buffer_idxen        = true;
+	load.buffer_flags        = 0; // Ordinary access: no LDS, TFE or unmodeled encoding bits.
+	ShaderInstruction end {};
+	end.pc     = 12;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(getpc);
+	code.GetInstructions().Add(load);
+	code.GetInstructions().Add(end);
+
+	ShaderVertexInputInfo input {};
+	input.gs_prolog                              = true;
+	input.bind.program_base_used                 = true;
+	input.bind.device_address_used               = true;
+	input.bind.storage_buffers.buffers_num        = 1;
+	input.bind.storage_buffers.start_register[0] = 0; // API zero is s[8:11], not s[0:3].
+	input.bind.storage_buffers.usages[0]          = ShaderStorageUsage::ReadOnly;
+	ShaderCalcBindingIndices(&input.bind);
+	return SpirvGenerateSource(code, &input, nullptr, nullptr);
+}
+
+static bool ValidateNggBufferLoad(const String8& source, Vector<uint32_t>* binary, String8* error)
+{
+	class ValidationConfig final: public Config::ConfigSource
+	{
+	public:
+		explicit ValidationConfig(bool enabled): m_enabled(enabled) {}
+		bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		int64_t GetInteger(const Core::String&) const override { return 0; }
+		bool GetBool(const Core::String&) const override { return m_enabled; }
+		Core::String GetString(const Core::String&) const override { return {}; }
+
+	private:
+		bool m_enabled;
+	};
+	const ValidationConfig restore(Config::ShaderValidationEnabled());
+	Config::Load(ValidationConfig(true));
+	const bool valid = ShaderToolchain::Run(source, binary, error);
+	Config::Load(restore);
+	return valid;
+}
+
+TEST(EmulatorShaderGetpc, NggInlineBufferDoesNotAliasApiRegisterZero)
+{
+	const auto source = NggBufferLoadSource(0);
+	EXPECT_NE(source.FindIndex("%gbl_1_d0 = OpLoad %uint %s0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%buf_addr_desc0_1_0"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
+TEST(EmulatorShaderGetpc, NggBoundBufferUsesShiftedShaderRegister)
+{
+	const auto source = NggBufferLoadSource(8);
+	EXPECT_EQ(source.FindIndex("%gbl_1_d0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%buf_addr_desc0_1_0 = OpLoad %uint %s8"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
+
+TEST(EmulatorShaderGetpc, BufferNamespaceClassificationMatchesLoweringAndIgnoresStreamSentinels)
+{
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num = 2;
+	bind.storage_buffers.start_register[0] = 0;
+	bind.storage_buffers.start_register[1] = -1;
+	for (const int base: {0, 8})
+	{
+		for (const int reg: {0, 7, 8, 12})
+		{
+			const ShaderOperand resource {.type = ShaderOperandType::Sgpr, .register_id = reg, .size = 4};
+			const bool bound = reg == base;
+			EXPECT_EQ(ShaderStorageBufferResourceIsBound(bind, resource, base), bound);
+			ShaderInstruction load {};
+			load.type = ShaderInstructionType::BufferLoadDwordx4;
+			load.src_num = 2;
+			load.src[1] = resource;
+			ShaderCode code;
+			code.GetInstructions().Add(load);
+			EXPECT_EQ(ShaderHasUnboundBufferLoad(code, bind, base), !bound);
+		}
+	}
+	const ShaderOperand invalid {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	EXPECT_FALSE(ShaderStorageBufferResourceIsBound(bind, invalid));
+	const ShaderOperand negative {.type = ShaderOperandType::Sgpr, .register_id = -1, .size = 4};
+	EXPECT_FALSE(ShaderStorageBufferResourceIsBound(bind, negative));
+}
+
+static String8 VertexScalarProbeSource(bool enabled, uint32_t loads)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	ShaderVertexInputInfo input {};
+	input.gs_prolog = true;
+	input.clip_probe.enabled = enabled;
+	input.clip_probe_descriptor_set = 1;
+	input.bind.storage_buffers.buffers_num = 1;
+	input.bind.storage_buffers.start_register[0] = 0;
+	input.bind.storage_buffers.usages[0] = ShaderStorageUsage::ReadOnly;
+	ShaderCalcBindingIndices(&input.bind);
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	for (uint32_t index = 0; index < loads; ++index)
+	{
+		ShaderInstruction load {};
+		load.pc = index * 8u;
+		load.type = index == 0u ? ShaderInstructionType::SBufferLoadDwordx16 : ShaderInstructionType::SBufferLoadDwordx4;
+		load.format = index == 0u ? ShaderInstructionFormat::Sdst16SvSoffset : ShaderInstructionFormat::Sdst4SvSoffset;
+		load.dst = {.type = ShaderOperandType::Sgpr, .register_id = index == 0u ? 32 : 8, .size = index == 0u ? 16 : 4};
+		load.src[0] = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 4};
+		load.src[1].type = ShaderOperandType::IntegerInlineConstant;
+		load.src[1].constant.i = 128;
+		load.src_num = 2;
+		code.GetInstructions().Add(load);
+	}
+	ShaderInstruction end {};
+	end.pc = loads * 8u;
+	end.type = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	code.GetInstructions().Add(end);
+	return SpirvGenerateSource(code, &input, nullptr, nullptr);
+}
+
+TEST(EmulatorShaderGetpc, VertexScalarProbePreservesLoadAndSnapshotsBeforeOverlap)
+{
+	const auto source = VertexScalarProbeSource(true, 2u);
+	const auto descriptor = source.FindIndex("%vs_sbuffer_desc_1_0 = OpLoad %uint %s8");
+	const auto original = source.FindIndex("%t110_1 = OpFunctionCall %void %sbuffer_load_dword_4");
+	const auto result = source.FindIndex("%vs_sbuffer_value_1_0 = OpLoad %uint %s8");
+	EXPECT_NE(descriptor, Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(original, Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(result, Core::STRING8_INVALID_INDEX);
+	EXPECT_LT(descriptor, original);
+	EXPECT_LT(original, result);
+	EXPECT_NE(source.FindIndex("%vs_sbuffer_value_0_15 = OpLoad %uint %s47"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%vs_sbuffer_value_1_4"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpAtomicCompareExchange %uint %vs_sbuffer_claim_ptr_1"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(source, &binary, &error)) << error.c_str();
+}
+
+TEST(EmulatorShaderGetpc, VertexScalarProbeIsDisabledNormallyAndCapsSites)
+{
+	const auto ordinary = VertexScalarProbeSource(false, 2u);
+	EXPECT_EQ(ordinary.FindIndex("%vs_sbuffer_desc_"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(ordinary.FindIndex("%vertex_clip_probe"), Core::STRING8_INVALID_INDEX);
+	const auto diagnostic = VertexScalarProbeSource(true, 9u);
+	EXPECT_NE(diagnostic.FindIndex("%vs_sbuffer_desc_7_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(diagnostic.FindIndex("%vs_sbuffer_desc_8_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(diagnostic.FindIndex("%t110_8 = OpFunctionCall %void %sbuffer_load_dword_4"), Core::STRING8_INVALID_INDEX);
+	Vector<uint32_t> binary;
+	String8 error;
+	EXPECT_TRUE(ValidateNggBufferLoad(diagnostic, &binary, &error)) << error.c_str();
+}
+
 [[noreturn]] static void RejectGetpcProbe(int destination, bool metadata, bool graphics)
 {
 	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
@@ -167,7 +351,10 @@ TEST(EmulatorShaderGetpc, RejectsUnsupportedAddressAndDestinationRepresentations
 #endif
 	ASSERT_EXIT(RejectGetpcProbe(103, true, false), ::testing::ExitedWithCode(rejected_exit), "");
 	ASSERT_EXIT(RejectGetpcProbe(8, false, false), ::testing::ExitedWithCode(rejected_exit), "");
-	ASSERT_EXIT(RejectGetpcProbe(8, true, true), ::testing::ExitedWithCode(rejected_exit), "");
+	// Since 8d08fb38 a vertex program with a bound program base resolves GETPC
+	// like compute; only a missing base or an invalid destination is rejected.
+	ASSERT_EXIT(RejectGetpcProbe(8, true, true), ::testing::ExitedWithCode(0), "");
+	ASSERT_EXIT(RejectGetpcProbe(8, false, true), ::testing::ExitedWithCode(rejected_exit), "");
 }
 
 UT_END();

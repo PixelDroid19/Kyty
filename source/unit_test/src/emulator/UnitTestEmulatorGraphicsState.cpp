@@ -1,10 +1,16 @@
 #include "Kyty/UnitTest.h"
 #include "GraphicsRetirementTestFixture.h"
+#include "ScopedTestDirectory.h"
 
+#include "../../../emulator/src/Graphics/Objects/GpuMemoryInternal.h"
+
+#include "Kyty/Core/JsonReader.h"
 #include "Kyty/Core/VirtualMemory.h"
 
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DescriptorBufferInvalidation.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/GraphicsRender.h"
@@ -20,6 +26,8 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/StorageBuffer.h"
+#include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderProgramSnapshot.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VertexBuffer.h"
@@ -33,6 +41,7 @@
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Tile.h"
+#include "Emulator/Graphics/PresentationScaler.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/WindowControls.h"
@@ -46,11 +55,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <string>
 #include <thread>
 
 UT_BEGIN(EmulatorGraphicsState);
@@ -209,7 +221,9 @@ TEST(EmulatorGraphicsState, VulkanSubmitTrailPreservesUntrackedFailureContext)
 	overflow.command_buffer_slot      = 11u;
 	overflow.host_submission_sequence = 13u;
 	overflow.guest_submit             = 15u;
-	overflow.frame                    = 17;
+	overflow.presented_frame          = 17;
+	overflow.has_host_submission      = true;
+	overflow.has_guest_context        = true;
 	overflow.pm4_op                   = 19u;
 	overflow.pm4_dw                   = 21u;
 	overflow.signals_semaphore        = true;
@@ -223,7 +237,9 @@ TEST(EmulatorGraphicsState, VulkanSubmitTrailPreservesUntrackedFailureContext)
 	EXPECT_EQ(observed.command_buffer_slot, overflow.command_buffer_slot);
 	EXPECT_EQ(observed.host_submission_sequence, overflow.host_submission_sequence);
 	EXPECT_EQ(observed.guest_submit, overflow.guest_submit);
-	EXPECT_EQ(observed.frame, overflow.frame);
+	EXPECT_EQ(observed.presented_frame, overflow.presented_frame);
+	EXPECT_TRUE(observed.has_host_submission);
+	EXPECT_TRUE(observed.has_guest_context);
 	EXPECT_EQ(observed.pm4_op, overflow.pm4_op);
 	EXPECT_EQ(observed.pm4_dw, overflow.pm4_dw);
 	EXPECT_TRUE(observed.signals_semaphore);
@@ -270,7 +286,9 @@ TEST(EmulatorGraphicsState, VulkanSubmitTrailJoinsAttemptWithDriverResult)
 	attempt.command_buffer_slot      = 2u;
 	attempt.host_submission_sequence = 37u;
 	attempt.guest_submit             = 41u;
-	attempt.frame                    = 43;
+	attempt.presented_frame          = 43;
+	attempt.has_host_submission      = true;
+	attempt.has_guest_context        = true;
 	attempt.pm4_op                   = 0x2du;
 	attempt.pm4_dw                   = 47u;
 	attempt.signals_semaphore        = true;
@@ -293,12 +311,987 @@ TEST(EmulatorGraphicsState, VulkanSubmitTrailJoinsAttemptWithDriverResult)
 	EXPECT_EQ(snapshot.entries[0].command_buffer_slot, 2u);
 	EXPECT_EQ(snapshot.entries[0].host_submission_sequence, 37u);
 	EXPECT_EQ(snapshot.entries[0].guest_submit, 41u);
-	EXPECT_EQ(snapshot.entries[0].frame, 43);
+	EXPECT_EQ(snapshot.entries[0].presented_frame, 43);
+	EXPECT_TRUE(snapshot.entries[0].has_host_submission);
+	EXPECT_TRUE(snapshot.entries[0].has_guest_context);
 	EXPECT_EQ(snapshot.entries[0].pm4_op, 0x2du);
 	EXPECT_EQ(snapshot.entries[0].pm4_dw, 47u);
 	EXPECT_TRUE(snapshot.entries[0].signals_semaphore);
 	EXPECT_TRUE(snapshot.entries[0].completed);
 	EXPECT_EQ(snapshot.entries[0].result, VK_ERROR_DEVICE_LOST);
+}
+
+namespace {
+
+void SetSubmitFaultTestEnvironment(const char* name, const char* value)
+{
+#if defined(_WIN32)
+	_putenv_s(name, value);
+#else
+	::setenv(name, value, 1);
+#endif
+}
+
+std::string ReadSubmitFaultTestReport(const char* path)
+{
+	auto* file = std::fopen(path, "rb");
+	if (file == nullptr)
+	{
+		return {};
+	}
+	char data[8193] {};
+	const auto size = std::fread(data, 1, sizeof(data) - 1, file);
+	const bool bounded = std::fgetc(file) == EOF;
+	std::fclose(file);
+	return bounded ? std::string(data, size) : std::string {};
+}
+
+void InitializeSubmitFaultTest(const char* enabled, const char* path)
+{
+	SetSubmitFaultTestEnvironment("KYTY_SUBMIT_FAULT_TRACE", enabled);
+	SetSubmitFaultTestEnvironment("KYTY_SUBMIT_FAULT_REPORT", path);
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	Log::SetDirection(Log::Direction::Silent);
+	Emulator::Agent::EventRing::Instance().ResetForTests();
+}
+
+void RunSubmitFaultEvidenceFixture()
+{
+	InitializeSubmitFaultTest("1", "native-submit-fault.json");
+	auto* trail = VulkanSubmitFaultTraceTrail();
+	if (trail == nullptr || Log::GetDirection() != Log::Direction::Silent)
+	{
+		std::_Exit(1);
+	}
+	for (uint64_t i = 1; i <= 10; ++i)
+	{
+		VulkanSubmitAttempt attempt {};
+		attempt.host_submission_sequence = i;
+		attempt.queue = 8;
+		attempt.command_buffer_slot = 2;
+		const auto id = trail->Begin(attempt);
+		if (i != 10 && !trail->Finish(id, VK_SUCCESS))
+		{
+			std::_Exit(2);
+		}
+	}
+	VulkanSubmitAttempt immediate {};
+	immediate.queue = 8;
+	immediate.command_buffer_slot = 2;
+	immediate.has_host_submission = true;
+	immediate.host_submission_sequence = 71;
+	immediate.has_guest_context = true;
+	immediate.guest_submit = 37;
+	VulkanSubmitFaultReport("fixture\"\\\n", VK_TIMEOUT, &immediate);
+	if (!ReadSubmitFaultTestReport("native-submit-fault.json").empty())
+	{
+		std::_Exit(3);
+	}
+	VulkanSubmitFaultReport("fixture\"\\\n", VK_ERROR_DEVICE_LOST, &immediate);
+	const auto report = ReadSubmitFaultTestReport("native-submit-fault.json");
+	const char* required[] = {"\"stage\":\"fixture\\\"\\\\\\n\"", "\"result\":-4", "\"count\":8", "\"dropped\":2",
+	                          "\"host_sequence\":71", "\"guest_submit\":37", "\"queue\":8", "\"slot\":2",
+	                          "\"completed\":false", "\"result\":1", "\"immediate_tracked\":false",
+	                          "\"completed_means\":\"submit_return_not_fence\""};
+	for (const auto* token: required)
+	{
+		if (report.find(token) == std::string::npos)
+		{
+			std::_Exit(4);
+		}
+	}
+	Emulator::Agent::EventRecord event {};
+	if (!Emulator::Agent::EventRing::Instance().LastError(&event) ||
+	    !Emulator::Agent::EventMatches(event, Emulator::Agent::EventKind::Fatal, "device_lost") ||
+	    std::strstr(event.message, "report=written") == nullptr)
+	{
+		std::_Exit(5);
+	}
+	immediate.host_submission_sequence = 99;
+	VulkanSubmitFaultReport("second_failure", VK_ERROR_DEVICE_LOST, &immediate);
+	std::_Exit(report == ReadSubmitFaultTestReport("native-submit-fault.json") &&
+	                   Emulator::Agent::EventRing::Instance().Size() == 1u ? 0 : 6);
+}
+
+void RunSubmitFaultContextFixture()
+{
+	InitializeSubmitFaultTest("1", "native-submit-context.json");
+	VulkanSubmitAttempt context {};
+	context.queue = 8;
+	context.command_buffer_slot = 2;
+	context.has_host_submission = true;
+	context.host_submission_sequence = (1ULL << 40u) + 71u;
+	context.has_guest_context = true;
+	context.guest_submit = (1ULL << 40u) + 37u;
+	context.presented_frame = 855;
+	context.pm4_op = 45;
+	context.pm4_dw = 63;
+	const std::string stage(256, 'x');
+	VulkanSubmitFaultReport(stage.c_str(), VK_ERROR_DEVICE_LOST, nullptr, &context);
+	const auto report = ReadSubmitFaultTestReport("native-submit-context.json");
+	Core::Json::Init();
+	std::unique_ptr<const Core::Json> json(Core::Json::Create(String::FromUtf8(report.c_str())));
+	if (json == nullptr || json->GetString("stage").Size() != 64u || json->GetInt("result", 0) != -4 ||
+	    json->GetInt("version", 0) != 2)
+	{
+		std::_Exit(1);
+	}
+	const auto* captured = json->GetItem("command_buffer_context");
+	if (captured->IsNull() || captured->GetInt("host_sequence", 0) != static_cast<int64_t>(context.host_submission_sequence) ||
+	    captured->GetInt("guest_submit", 0) != static_cast<int64_t>(context.guest_submit) ||
+	    captured->GetInt("pm4_dw", 0) != context.pm4_dw || captured->GetInt("presented_frame", 0) != 855 ||
+	    !captured->GetItem("frame")->IsNull() || !captured->GetItem("completed")->IsNull() ||
+	    !captured->GetItem("result")->IsNull() || !captured->GetItem("semaphore")->IsNull())
+	{
+		std::_Exit(2);
+	}
+	std::_Exit(0);
+}
+
+void RunSubmitFaultUnknownContextFixture()
+{
+	// A command buffer without a host submission or guest packet context must
+	// report those values as unknown, never as zero.
+	InitializeSubmitFaultTest("1", "native-submit-unknown.json");
+	auto* trail = VulkanSubmitFaultTraceTrail();
+	VulkanSubmitAttempt untracked {};
+	untracked.queue = 9;
+	untracked.command_buffer_slot = 0;
+	if (trail == nullptr || !trail->Finish(trail->Begin(untracked), VK_SUCCESS))
+	{
+		std::_Exit(1);
+	}
+	VulkanSubmitFaultReport("fence_wait", VK_ERROR_DEVICE_LOST, nullptr, &untracked);
+	const auto report = ReadSubmitFaultTestReport("native-submit-unknown.json");
+	Core::Json::Init();
+	std::unique_ptr<const Core::Json> json(Core::Json::Create(String::FromUtf8(report.c_str())));
+	if (json == nullptr)
+	{
+		std::_Exit(2);
+	}
+	const auto& entries = json->GetItem("entries")->ToArray();
+	if (entries.Size() != 1u)
+	{
+		std::_Exit(3);
+	}
+	for (const auto* row: {json->GetItem("command_buffer_context"), entries[0]})
+	{
+		if (row->IsNull() || row->GetInt("queue", 0) != 9 || !row->GetItem("host_sequence")->IsNull() ||
+		    !row->GetItem("guest_submit")->IsNull() || !row->GetItem("pm4_op")->IsNull() || !row->GetItem("pm4_dw")->IsNull())
+		{
+			std::_Exit(4);
+		}
+	}
+	std::_Exit(0);
+}
+
+void RunSubmitFaultPathFixture(uint32_t mode)
+{
+	const char* paths[] = {"native-submit-disabled.json", "native-submit-existing.json",
+	                       "not-created/native-submit-fault.json", "native-submit-no-file.json"};
+	const char* path = paths[mode];
+	if (mode == 1u)
+	{
+		std::ofstream file(path);
+		file << "existing-evidence";
+		if (!file.good())
+		{
+			std::_Exit(1);
+		}
+	}
+	InitializeSubmitFaultTest(mode == 0u ? "0" : "1", mode == 3u ? "" : path);
+	VulkanSubmitFaultReport(nullptr, VK_ERROR_DEVICE_LOST);
+	const auto report = ReadSubmitFaultTestReport(path);
+	if (mode == 0u)
+	{
+		std::_Exit(report.empty() && VulkanSubmitFaultTraceTrail() == nullptr &&
+		                   Emulator::Agent::EventRing::Instance().Size() == 0u ? 0 : 2);
+	}
+	Emulator::Agent::EventRecord event {};
+	const char* status = mode == 3u ? "report=disabled" : "report=open_failed";
+	const bool kept = mode == 1u ? report == "existing-evidence" : report.empty();
+	std::_Exit(kept && Emulator::Agent::EventRing::Instance().LastError(&event) &&
+	                   Emulator::Agent::EventMatches(event, Emulator::Agent::EventKind::Fatal, "device_lost") &&
+	                   std::strstr(event.message, status) != nullptr ? 0 : 3);
+}
+
+class ScopedSubmitFaultDeathTestStyle final
+{
+public:
+	ScopedSubmitFaultDeathTestStyle(): previous_style(::testing::FLAGS_gtest_death_test_style), previous_cwd(std::filesystem::current_path())
+	{
+		::testing::FLAGS_gtest_death_test_style = "threadsafe";
+		const char* inherited = std::getenv("KYTY_UNIT_FAULT_DIRECTORY");
+		had_environment = inherited != nullptr;
+		previous_environment = inherited != nullptr ? inherited : "";
+		if (!::testing::internal::InDeathTestChild())
+		{
+			directory = std::make_unique<ScopedTestDirectory>("fault-evidence");
+			if (directory->Path().empty())
+			{
+				std::_Exit(90);
+			}
+			SetSubmitFaultTestEnvironment("KYTY_UNIT_FAULT_DIRECTORY", directory->Path().string().c_str());
+		}
+		const char* path = std::getenv("KYTY_UNIT_FAULT_DIRECTORY");
+		std::error_code error;
+		if (path == nullptr)
+		{
+			std::_Exit(91);
+		}
+		std::filesystem::current_path(path, error);
+		if (error)
+		{
+			std::_Exit(92);
+		}
+	}
+	~ScopedSubmitFaultDeathTestStyle()
+	{
+		::testing::FLAGS_gtest_death_test_style = previous_style;
+		std::error_code error;
+		std::filesystem::current_path(previous_cwd, error);
+		if (had_environment)
+		{
+			SetSubmitFaultTestEnvironment("KYTY_UNIT_FAULT_DIRECTORY", previous_environment.c_str());
+		} else
+		{
+#if defined(_WIN32)
+			_putenv_s("KYTY_UNIT_FAULT_DIRECTORY", "");
+#else
+			::unsetenv("KYTY_UNIT_FAULT_DIRECTORY");
+#endif
+		}
+	}
+
+private:
+	std::string previous_style;
+	std::filesystem::path previous_cwd;
+	std::unique_ptr<ScopedTestDirectory> directory;
+	bool had_environment = false;
+	std::string previous_environment;
+};
+
+} // namespace
+
+TEST(EmulatorGraphicsState, VulkanSubmitFaultReportPersistsBoundedEvidenceWithSilentLogging)
+{
+	// Re-exec so opt-in configuration and the first-failure latch are isolated.
+	// This fixture never initializes Vulkan or launches guest code.
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSubmitFaultEvidenceFixture(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitFaultReportSeparatesWaitContextFromSubmitCompletion)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSubmitFaultContextFixture(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitFaultReportKeepsMissingContextUnknown)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSubmitFaultUnknownContextFixture(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitFaultReportRequiresTraceOptIn)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSubmitFaultPathFixture(0u), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitFaultReportPreservesExistingEvidence)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSubmitFaultPathFixture(1u), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitFaultReportFileFailureStillPublishesNativeEvent)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSubmitFaultPathFixture(2u), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanSubmitFaultReportDoesNotRequireFileOutput)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSubmitFaultPathFixture(3u), ::testing::ExitedWithCode(0), "");
+}
+
+namespace {
+
+VulkanRecentDraw MakeRecentDrawFixture(uint32_t slot, uint64_t host_sequence, uint64_t ps_checksum, uint32_t count)
+{
+	VulkanRecentDraw draw {};
+	draw.kind                     = VulkanRecentDrawKind::DrawIndexed;
+	draw.queue                    = 8u;
+	draw.command_buffer_slot      = slot;
+	draw.has_host_submission      = true;
+	draw.host_submission_sequence = host_sequence;
+	draw.guest_submit             = 6u;
+	draw.vs_checksum              = 0x11u;
+	draw.ps_checksum              = ps_checksum;
+	draw.count                    = count;
+	draw.instances                = 2u;
+	draw.host_commands            = 1u;
+	return draw;
+}
+
+} // namespace
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawTrailRetainsRepeatedShaderDraws)
+{
+	// Unlike the first-occurrence census, later draws of the same shader stay distinct.
+	VulkanRecentDrawTrail trail(8u);
+	EXPECT_EQ(trail.Record(MakeRecentDrawFixture(0u, 5u, 0xabcu, 3u)), 1u);
+	EXPECT_EQ(trail.Record(MakeRecentDrawFixture(0u, 5u, 0xabcu, 7110u)), 2u);
+	EXPECT_EQ(trail.Record(MakeRecentDrawFixture(0u, 5u, 0xabcu, 8604u)), 3u);
+
+	VulkanRecentDraw draws[8] {};
+	uint64_t         dropped = 99u;
+	ASSERT_EQ(trail.Snapshot(draws, 8u, &dropped), 3u);
+	EXPECT_EQ(dropped, 0u);
+	EXPECT_EQ(draws[0].count, 3u);
+	EXPECT_EQ(draws[1].count, 7110u);
+	EXPECT_EQ(draws[2].count, 8604u);
+	EXPECT_EQ(draws[2].record, 3u);
+	EXPECT_EQ(draws[1].ps_checksum, draws[2].ps_checksum);
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawTrailJoinsOnlyMatchingCommandBufferRecording)
+{
+	VulkanRecentDrawTrail trail(8u);
+	(void)trail.Record(MakeRecentDrawFixture(0u, 10u, 0x1u, 1u));
+	// Same slot reused by the next recording on this queue.
+	(void)trail.Record(MakeRecentDrawFixture(0u, 11u, 0x2u, 2u));
+	auto other_queue  = MakeRecentDrawFixture(0u, 10u, 0x3u, 3u);
+	other_queue.queue = 9u;
+	(void)trail.Record(other_queue);
+	auto untracked                = MakeRecentDrawFixture(0u, 0u, 0x4u, 4u);
+	untracked.has_host_submission = false;
+	(void)trail.Record(untracked);
+
+	trail.MarkSubmitCalled(8u, 10u);
+	trail.MarkSubmitReturned(8u, 10u, VK_SUCCESS);
+	trail.MarkFenceCompleted(8u, 10u);
+	trail.MarkSubmitCalled(8u, 11u);
+	trail.MarkSubmitReturned(8u, 11u, VK_SUCCESS);
+	trail.MarkSubmitCalled(8u, 0u);
+	trail.MarkSubmitReturned(8u, 0u, VK_SUCCESS);
+	trail.MarkFenceCompleted(8u, 0u);
+
+	VulkanRecentDraw draws[8] {};
+	ASSERT_EQ(trail.Snapshot(draws, 8u, nullptr), 4u);
+	EXPECT_TRUE(draws[0].submit_called);
+	EXPECT_TRUE(draws[0].submit_returned);
+	EXPECT_EQ(draws[0].submit_result, VK_SUCCESS);
+	EXPECT_TRUE(draws[0].fence_completed);
+	// A successful submit return is not GPU completion.
+	EXPECT_TRUE(draws[1].submit_called);
+	EXPECT_TRUE(draws[1].submit_returned);
+	EXPECT_FALSE(draws[1].fence_completed);
+	EXPECT_FALSE(draws[2].submit_called);
+	EXPECT_FALSE(draws[2].fence_completed);
+	EXPECT_FALSE(draws[3].submit_called);
+	EXPECT_FALSE(draws[3].submit_returned);
+	EXPECT_FALSE(draws[3].fence_completed);
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawTrailSeparatesSubmitCallFromReturn)
+{
+	VulkanRecentDrawTrail trail(4u);
+	(void)trail.Record(MakeRecentDrawFixture(2u, 31u, 0x9u, 9u));
+	trail.MarkSubmitCalled(8u, 31u);
+
+	VulkanRecentDraw draws[4] {};
+	ASSERT_EQ(trail.Snapshot(draws, 4u, nullptr), 1u);
+	EXPECT_TRUE(draws[0].submit_called);
+	EXPECT_FALSE(draws[0].submit_returned);
+	EXPECT_EQ(draws[0].submit_result, VK_NOT_READY);
+	EXPECT_FALSE(draws[0].fence_completed);
+
+	trail.MarkSubmitReturned(8u, 31u, VK_ERROR_DEVICE_LOST);
+	ASSERT_EQ(trail.Snapshot(draws, 4u, nullptr), 1u);
+	EXPECT_TRUE(draws[0].submit_returned);
+	EXPECT_EQ(draws[0].submit_result, VK_ERROR_DEVICE_LOST);
+	EXPECT_FALSE(draws[0].fence_completed);
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawTrailWrapsAndCountsDroppedRecords)
+{
+	VulkanRecentDrawTrail trail(4u);
+	for (uint32_t i = 1; i <= 6u; ++i)
+	{
+		EXPECT_EQ(trail.Record(MakeRecentDrawFixture(0u, i, 0x5u, i)), i);
+	}
+	VulkanRecentDraw draws[VulkanRecentDrawTrail::CAPACITY_MAX] {};
+	uint64_t         dropped = 0;
+	ASSERT_EQ(trail.Snapshot(draws, VulkanRecentDrawTrail::CAPACITY_MAX, &dropped), 4u);
+	EXPECT_EQ(dropped, 2u);
+	for (uint32_t i = 0; i < 4u; ++i)
+	{
+		EXPECT_EQ(draws[i].record, 3u + i);
+		EXPECT_EQ(draws[i].count, 3u + i);
+	}
+
+	// A smaller output keeps the newest records and reports the rest as dropped.
+	ASSERT_EQ(trail.Snapshot(draws, 2u, &dropped), 2u);
+	EXPECT_EQ(dropped, 4u);
+	EXPECT_EQ(draws[0].record, 5u);
+	EXPECT_EQ(draws[1].record, 6u);
+
+	// A later fence mark reaches only records still retained.
+	trail.MarkFenceCompleted(8u, 1u);
+	trail.MarkFenceCompleted(8u, 6u);
+	ASSERT_EQ(trail.Snapshot(draws, 4u, nullptr), 4u);
+	EXPECT_FALSE(draws[0].fence_completed);
+	EXPECT_TRUE(draws[3].fence_completed);
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawTrailRejectsUnboundedCapacity)
+{
+	for (const uint32_t capacity: {0u, VulkanRecentDrawTrail::CAPACITY_MAX + 1u})
+	{
+		VulkanRecentDrawTrail trail(capacity);
+		EXPECT_EQ(trail.Capacity(), 0u);
+		EXPECT_EQ(trail.Record(MakeRecentDrawFixture(0u, 1u, 0x1u, 1u)), 0u);
+		VulkanRecentDraw draw {};
+		uint64_t         dropped = 7u;
+		EXPECT_EQ(trail.Snapshot(&draw, 1u, &dropped), 0u);
+		EXPECT_EQ(dropped, 0u);
+	}
+	VulkanRecentDrawTrail full(VulkanRecentDrawTrail::CAPACITY_MAX);
+	EXPECT_EQ(full.Capacity(), VulkanRecentDrawTrail::CAPACITY_MAX);
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawReportKeepsUnobservedValuesNull)
+{
+	VulkanRecentDraw draws[3] {};
+	draws[0]                 = MakeRecentDrawFixture(0u, (1ULL << 40u) + 5u, 0xabcu, 7110u);
+	draws[0].record          = 1u;
+	draws[0].has_pm4         = true;
+	draws[0].pm4_op          = 0x2du;
+	draws[0].pm4_dw          = 11828u;
+	draws[0].submit_called   = true;
+	draws[0].submit_returned = true;
+	draws[0].submit_result   = VK_SUCCESS;
+	draws[1]                     = MakeRecentDrawFixture(1u, 0u, 0xdefu, 3u);
+	draws[1].record              = 2u;
+	draws[1].has_host_submission = false;
+	draws[2]                     = {};
+	draws[2].record              = 3u;
+	draws[2].kind                = VulkanRecentDrawKind::Dispatch;
+	draws[2].has_host_submission = true;
+	draws[2].host_submission_sequence = 4u;
+	draws[2].cs_checksum         = 0x77u;
+	draws[2].groups[0]           = 390u;
+	draws[2].groups[1]           = 1u;
+	draws[2].groups[2]           = 1u;
+	draws[2].submit_called       = true;
+	draws[2].submit_returned     = true;
+	draws[2].submit_result       = VK_SUCCESS;
+	draws[2].fence_completed     = true;
+
+	VulkanRecentDrawFault fault {};
+	fault.stage         = "fence_wait\"";
+	fault.result        = VK_ERROR_DEVICE_LOST;
+	fault.has_context   = true;
+	fault.queue         = 8u;
+	fault.has_host_submission = true;
+	fault.host_sequence = (1ULL << 40u) + 5u;
+	const auto report = VulkanRecentDrawReportJson(fault, 64u, draws, 3u, 17u);
+	ASSERT_FALSE(report.empty());
+
+	const auto has_string = [](const Core::Json* object, const char* name, const char* text)
+	{ return object->GetString(name) == String::FromUtf8(text); };
+
+	Core::Json::Init();
+	std::unique_ptr<const Core::Json> json(Core::Json::Create(String::FromUtf8(report.c_str())));
+	ASSERT_NE(json, nullptr);
+	EXPECT_TRUE(has_string(json.get(), "schema", "vulkan_recent_draws"));
+	EXPECT_TRUE(has_string(json.get(), "recorded_means", "command_recorded_not_executed"));
+	EXPECT_EQ(json->GetInt("capacity", 0), 64);
+	EXPECT_EQ(json->GetInt("count", 0), 3);
+	EXPECT_EQ(json->GetInt("dropped", 0), 17);
+	EXPECT_TRUE(has_string(json.get(), "stage", "fence_wait\""));
+	EXPECT_EQ(json->GetInt("result", 0), -4);
+	const auto* context = json->GetItem("command_buffer_context");
+	EXPECT_EQ(context->GetInt("queue", 0), 8);
+	EXPECT_EQ(context->GetInt("host_sequence", 0), static_cast<int64_t>(fault.host_sequence));
+	EXPECT_TRUE(context->GetItem("completed")->IsNull());
+
+	const auto& list = json->GetItem("draws")->ToArray();
+	ASSERT_EQ(list.Size(), 3u);
+	const auto* first = list[0];
+	EXPECT_TRUE(has_string(first, "kind", "draw_indexed"));
+	EXPECT_EQ(first->GetInt("record", 0), 1);
+	EXPECT_EQ(first->GetInt("host_sequence", 0), static_cast<int64_t>(draws[0].host_submission_sequence));
+	EXPECT_EQ(first->GetInt("pm4_op", 0), 0x2d);
+	EXPECT_EQ(first->GetInt("pm4_dw", 0), 11828);
+	EXPECT_TRUE(has_string(first, "vs", "0x0000000000000011"));
+	EXPECT_TRUE(has_string(first, "ps", "0x0000000000000abc"));
+	EXPECT_EQ(first->GetInt("count", 0), 7110);
+	EXPECT_EQ(first->GetInt("instances", 0), 2);
+	EXPECT_TRUE(first->GetBool("recorded", false));
+	EXPECT_TRUE(first->GetBool("submit_called", false));
+	EXPECT_EQ(first->GetInt("submit_result", 1), 0);
+	// A successful submit return is not reported as GPU completion.
+	EXPECT_TRUE(first->GetItem("gpu_completed")->IsNull());
+	EXPECT_TRUE(first->GetItem("cs")->IsNull());
+	EXPECT_TRUE(first->GetItem("groups")->IsNull());
+
+	const auto* second = list[1];
+	EXPECT_TRUE(second->GetItem("host_sequence")->IsNull());
+	EXPECT_TRUE(second->GetItem("pm4_op")->IsNull());
+	EXPECT_TRUE(second->GetItem("pm4_dw")->IsNull());
+	EXPECT_TRUE(second->GetItem("submit_called")->IsNull());
+	EXPECT_TRUE(second->GetItem("submit_result")->IsNull());
+	EXPECT_TRUE(second->GetItem("gpu_completed")->IsNull());
+
+	const auto* third = list[2];
+	EXPECT_TRUE(has_string(third, "kind", "dispatch"));
+	EXPECT_TRUE(has_string(third, "cs", "0x0000000000000077"));
+	EXPECT_TRUE(third->GetItem("ps")->IsNull());
+	EXPECT_TRUE(third->GetItem("count")->IsNull());
+	const auto& groups = third->GetItem("groups")->ToArray();
+	ASSERT_EQ(groups.Size(), 3u);
+	EXPECT_EQ(groups[0]->ToInt(), 390);
+	EXPECT_TRUE(third->GetBool("gpu_completed", false));
+
+	VulkanRecentDrawFault no_context {};
+	no_context.result = VK_ERROR_DEVICE_LOST;
+	const auto bare   = VulkanRecentDrawReportJson(no_context, 64u, nullptr, 0u, 0u);
+	std::unique_ptr<const Core::Json> bare_json(Core::Json::Create(String::FromUtf8(bare.c_str())));
+	ASSERT_NE(bare_json, nullptr);
+	EXPECT_TRUE(bare_json->GetItem("command_buffer_context")->IsNull());
+	EXPECT_TRUE(has_string(bare_json.get(), "stage", "unknown"));
+	EXPECT_TRUE(bare_json->GetItem("draws")->ToArray().IsEmpty());
+}
+
+TEST(EmulatorGraphicsState, VulkanFaultSnapshotsSurvivePeerWritesBeforePersistence)
+{
+	VulkanSubmitAttemptTrail submits;
+	VulkanRecentDrawTrail    draws(2u);
+	(void)draws.Record(MakeRecentDrawFixture(0u, 71u, 0xabcu, 3u));
+	VulkanSubmitAttempt attempt {};
+	attempt.queue = 8u;
+	attempt.has_host_submission = true;
+	attempt.host_submission_sequence = 71u;
+	ASSERT_TRUE(submits.Finish(submits.Begin(attempt), VK_SUCCESS));
+	VulkanFaultSnapshot captured;
+	EXPECT_FALSE(VulkanLatchFaultSnapshot(&submits, &draws, VK_TIMEOUT, &captured));
+	ASSERT_TRUE(VulkanLatchFaultSnapshot(&submits, &draws, VK_ERROR_DEVICE_LOST, &captured));
+
+	// Model a delayed report write while a peer queue evicts every live record.
+	for (uint32_t i = 0; i < 4; ++i)
+	{
+		auto peer = MakeRecentDrawFixture(1u, 80u + i, 0xdefu, 9u);
+		peer.queue = 9u;
+		(void)draws.Record(peer);
+	}
+	ASSERT_EQ(captured.draw_count, 1u);
+	EXPECT_EQ(captured.draws[0].host_submission_sequence, 71u);
+	EXPECT_EQ(captured.draw_dropped, 0u);
+	EXPECT_EQ(captured.submits.count, 1u);
+	VulkanFaultSnapshot repeated;
+	EXPECT_FALSE(VulkanLatchFaultSnapshot(&submits, &draws, VK_ERROR_DEVICE_LOST, &repeated));
+	VulkanRecentDrawFault fault {};
+	fault.result = VK_ERROR_DEVICE_LOST;
+	const auto report = VulkanRecentDrawReportJson(fault, captured.draw_capacity, captured.draws.data(), captured.draw_count,
+	                                               captured.draw_dropped, captured.skipped);
+	EXPECT_NE(report.find("\"host_sequence\":71"), std::string::npos);
+	EXPECT_EQ(report.find("\"host_sequence\":83"), std::string::npos);
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawReportFitsFullCapacity)
+{
+	std::array<VulkanRecentDraw, VulkanRecentDrawTrail::CAPACITY_MAX> draws {};
+	for (auto& draw: draws)
+	{
+		draw = MakeRecentDrawFixture(UINT32_MAX, UINT64_MAX, UINT64_MAX, UINT32_MAX);
+		draw.record         = UINT64_MAX;
+		draw.queue          = UINT32_MAX;
+		draw.guest_submit   = UINT64_MAX;
+		draw.has_pm4        = true;
+		draw.pm4_op         = UINT32_MAX;
+		draw.pm4_dw         = UINT32_MAX;
+		draw.vs_checksum    = UINT64_MAX;
+		draw.primitive_type = UINT32_MAX;
+		draw.instances      = UINT32_MAX;
+		draw.vertex_offset  = INT32_MIN;
+		draw.first_instance = UINT32_MAX;
+		draw.host_commands  = UINT32_MAX;
+		draw.submit_called   = true;
+		draw.submit_returned = true;
+		draw.submit_result   = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+		draw.fence_completed = true;
+	}
+	VulkanRecentDrawFault fault {};
+	const std::string     stage(256, 'x');
+	fault.stage  = stage.c_str();
+	fault.result = VK_ERROR_DEVICE_LOST;
+	const auto report =
+	    VulkanRecentDrawReportJson(fault, VulkanRecentDrawTrail::CAPACITY_MAX, draws.data(), VulkanRecentDrawTrail::CAPACITY_MAX, UINT64_MAX);
+	ASSERT_FALSE(report.empty());
+	EXPECT_LE(report.size(), RECENT_DRAW_REPORT_BYTES_MAX);
+	EXPECT_NE(report.find("\"stage\":\"" + std::string(64, 'x') + "\""), std::string::npos);
+	EXPECT_EQ(report.find(std::string(65, 'x')), std::string::npos);
+}
+
+namespace {
+
+void InitializeRecentDrawTest(const char* fault_path, const char* draw_path, const char* capacity)
+{
+	SetSubmitFaultTestEnvironment("KYTY_RECENT_DRAW_REPORT", draw_path);
+	SetSubmitFaultTestEnvironment("KYTY_RECENT_DRAW_CAPACITY", capacity);
+	InitializeSubmitFaultTest("1", fault_path);
+}
+
+void RunRecentDrawReportFixture(uint32_t mode)
+{
+	// 0: written under Silent, 1: existing file preserved, 2: open failure,
+	// 3: disabled without a report path, 4: invalid capacity disables it.
+	const char* paths[] = {"recent-draws.json", "recent-draws-existing.json", "not-created/recent-draws.json", "", "recent-draws-invalid.json"};
+	const char* path    = paths[mode];
+	if (mode == 1u)
+	{
+		std::ofstream file(path);
+		file << "existing-evidence";
+		if (!file.good())
+		{
+			std::_Exit(1);
+		}
+	}
+	const std::string fault_path = "recent-draws-fault-" + std::to_string(mode) + ".json";
+	InitializeRecentDrawTest(fault_path.c_str(), path, mode == 4u ? "257" : "4");
+	auto* trail = VulkanRecentDrawTraceTrail();
+	if ((trail == nullptr) != (mode >= 3u) || Log::GetDirection() != Log::Direction::Silent)
+	{
+		std::_Exit(2);
+	}
+	if (trail != nullptr)
+	{
+		for (uint32_t i = 1; i <= 5u; ++i)
+		{
+			(void)trail->Record(MakeRecentDrawFixture(0u, 70u + (i % 2u), 0xabcu, i));
+		}
+		trail->MarkSubmitCalled(8u, 71u);
+		trail->MarkSubmitReturned(8u, 71u, VK_SUCCESS);
+	}
+	VulkanSubmitAttempt context {};
+	context.queue                    = 8;
+	context.command_buffer_slot      = 0;
+	context.has_host_submission      = true;
+	context.host_submission_sequence = 71;
+	VulkanSubmitFaultReport("fence_wait", VK_ERROR_DEVICE_LOST, nullptr, &context);
+
+	Emulator::Agent::EventRecord event {};
+	if (!Emulator::Agent::EventRing::Instance().LastError(&event) ||
+	    !Emulator::Agent::EventMatches(event, Emulator::Agent::EventKind::Fatal, "device_lost") ||
+	    std::strstr(event.message, "report=written") == nullptr ||
+	    ReadSubmitFaultTestReport(fault_path.c_str()).empty())
+	{
+		std::_Exit(3);
+	}
+	const char* statuses[] = {"draws=written", "draws=open_failed", "draws=open_failed", "draws=disabled", "draws=disabled"};
+	if (std::strstr(event.message, statuses[mode]) == nullptr)
+	{
+		std::_Exit(4);
+	}
+	const auto report = mode == 3u ? std::string {} : ReadSubmitFaultTestReport(path);
+	if (mode == 1u)
+	{
+		std::_Exit(report == "existing-evidence" ? 0 : 5);
+	}
+	if (mode != 0u)
+	{
+		std::_Exit(report.empty() ? 0 : 6);
+	}
+	Core::Json::Init();
+	std::unique_ptr<const Core::Json> json(Core::Json::Create(String::FromUtf8(report.c_str())));
+	if (json == nullptr || json->GetInt("count", 0) != 4 || json->GetInt("dropped", 0) != 1 || json->GetInt("capacity", 0) != 4)
+	{
+		std::_Exit(7);
+	}
+	const auto& draws = json->GetItem("draws")->ToArray();
+	if (draws.Size() != 4u)
+	{
+		std::_Exit(8);
+	}
+	const auto* last = draws[3];
+	if (last->GetInt("count", 0) != 5 || last->GetInt("host_sequence", 0) != 71 || last->GetInt("submit_result", 1) != 0 ||
+	    !last->GetItem("gpu_completed")->IsNull() || !draws[2]->GetItem("submit_called")->IsNull() ||
+	    json->GetItem("command_buffer_context")->GetInt("host_sequence", 0) != 71)
+	{
+		std::_Exit(8);
+	}
+	// Only the first device loss writes evidence.
+	VulkanSubmitFaultReport("second_failure", VK_ERROR_DEVICE_LOST, nullptr, &context);
+	std::_Exit(report == ReadSubmitFaultTestReport(path) ? 0 : 9);
+}
+
+} // namespace
+
+TEST(EmulatorGraphicsState, SkippedDrawEventsMarkTheFirstSkipAndEveryPowerOfTen)
+{
+	using namespace Kyty::Libs::Graphics;
+	EXPECT_FALSE(GraphicsSkippedDrawEventDue(0u));
+	EXPECT_TRUE(GraphicsSkippedDrawEventDue(1u));
+	for (const uint64_t count: {2u, 3u, 9u, 11u, 99u, 101u, 999u, 1001u, 20u, 200u, 12000u})
+	{
+		EXPECT_FALSE(GraphicsSkippedDrawEventDue(count)) << count;
+	}
+	uint64_t due = 0;
+	for (uint64_t count = 1; count <= 1000000u; ++count)
+	{
+		due += GraphicsSkippedDrawEventDue(count) ? 1u : 0u;
+	}
+	EXPECT_EQ(due, 7u) << "1, 10, 100, ... 1000000";
+	EXPECT_TRUE(GraphicsSkippedDrawEventDue(10000000000000000000ull)) << "the top power of ten of a 64-bit counter";
+}
+
+namespace {
+
+void RunSkippedDrawFixture()
+{
+	InitializeSubmitFaultTest("0", "");
+	const auto before = GraphicsGetSkippedDrawCounts();
+	if (before.invalid_vertex_shader != 0u || before.unsupported_ge_state != 0u)
+	{
+		std::_Exit(1);
+	}
+	GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::UnsupportedGeState, "stages=0x02002001");
+	GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::UnsupportedGeState, "stages=0x02002002");
+	GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::InvalidVertexShader, nullptr);
+	const auto after = GraphicsGetSkippedDrawCounts();
+	if (after.unsupported_ge_state != 2u || after.invalid_vertex_shader != 1u)
+	{
+		std::_Exit(2);
+	}
+	// One native event per reason, visible under Silent; later skips only count.
+	Emulator::Agent::EventRecord events[8] {};
+	const auto copied = Emulator::Agent::EventRing::Instance().CopySinceOldest(0, events, 8);
+	if (copied.count != 2u || !Emulator::Agent::EventMatches(events[0], Emulator::Agent::EventKind::Warn, "draw_skipped") ||
+	    std::strstr(events[0].message, "reason=unsupported_ge_state") == nullptr ||
+	    std::strstr(events[0].message, "stages=0x02002001") == nullptr ||
+	    !Emulator::Agent::EventMatches(events[1], Emulator::Agent::EventKind::Warn, "draw_skipped") ||
+	    std::strstr(events[1].message, "reason=invalid_vertex_shader") == nullptr)
+	{
+		std::_Exit(3);
+	}
+	std::_Exit(0);
+}
+
+void RunSkippedDrawReportFixture(bool existing)
+{
+	const char* path  = existing ? "skipped-existing" : "skipped";
+	const auto  ge    = std::string(path) + "-unsupported_ge_state.json";
+	const auto  vs    = std::string(path) + "-invalid_vertex_shader.json";
+	if (existing)
+	{
+		std::ofstream file(ge);
+		file << "existing-evidence";
+	}
+	SetSubmitFaultTestEnvironment("KYTY_SKIPPED_DRAW_REPORT", path);
+	InitializeSubmitFaultTest("0", "");
+	GraphicsSkippedGeState state;
+	state.gs_back_program = 0x1234567800u;
+	GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::UnsupportedGeState, "stages=0x02002001 \"q\"", &state);
+	GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason::UnsupportedGeState, "stages=0x02002002");
+	const auto ge_report = ReadSubmitFaultTestReport(ge.c_str());
+	if (existing)
+	{
+		std::_Exit(ge_report == "existing-evidence" ? 0 : 1);
+	}
+	Core::Json::Init();
+	std::unique_ptr<const Core::Json> json(Core::Json::Create(String::FromUtf8(ge_report.c_str())));
+	// Only the first skip of a reason is written; a reason never seen writes nothing.
+	if (json == nullptr || json->GetString("reason") != String::FromUtf8("unsupported_ge_state") ||
+	    json->GetString("detail") != String::FromUtf8("stages=0x02002001 \"q\"") ||
+	    json->GetInt("version", 0) != 2 ||
+	    json->GetItem("ge_state")->GetString("gs_back_program") != String::FromUtf8("0x0000001234567800") ||
+	    json->GetInt("presented_frame", -1) < 0 || !ReadSubmitFaultTestReport(vs.c_str()).empty())
+	{
+		std::_Exit(2);
+	}
+	std::_Exit(0);
+}
+
+} // namespace
+
+TEST(EmulatorGraphicsState, SkippedDrawReportWritesFirstOccurrencePerReason)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSkippedDrawReportFixture(false), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, SkippedGeStateDistinguishesBackProgramFromLegacyBase)
+{
+	HW::Context ctx;
+	HW::UserConfig ucfg;
+	HW::Shader shader;
+	ctx.SetShaderStages(0x2030u);
+	ctx.SetGsMaxVertOut(72u);
+	ctx.SetGsOutPrimType(2u);
+	ctx.SetNggSubgrpCntl(0x46u);
+	ctx.SetMaxOutputPerSubgroup(216u);
+	ucfg.SetGeControl({3u, 24u});
+	shader.SetEsShaderBase(0x123400u);
+	shader.SetGsBackBase(0x567800u);
+	shader.SetGsShaderChksum(0x91u);
+	const auto state = GraphicsDescribeSkippedGeState(ctx, ucfg, shader);
+	EXPECT_EQ(state.es_program, 0x123400u);
+	EXPECT_EQ(state.gs_back_program, 0x567800u);
+	EXPECT_EQ(state.legacy_gs_program, 0u);
+	EXPECT_EQ(state.stages, 0x2030u);
+	EXPECT_EQ(state.max_vertex_out, 72u);
+	EXPECT_EQ(state.primitive_group_size, 3u);
+	EXPECT_EQ(state.vertex_group_size, 24u);
+	const auto report = GraphicsSkippedGeStateJson(state);
+	Core::Json::Init();
+	std::unique_ptr<const Core::Json> json(Core::Json::Create(String::FromUtf8(report.c_str())));
+	ASSERT_NE(json, nullptr);
+	EXPECT_EQ(json->GetString("gs_back_program"), String::FromUtf8("0x0000000000567800"));
+	EXPECT_EQ(json->GetString("legacy_gs_program"), String::FromUtf8("0x0000000000000000"));
+	EXPECT_EQ(json->GetItem("user_sgprs")->ToArray().Size(), 32u);
+	EXPECT_LT(report.size(), 4096u);
+}
+
+TEST(EmulatorGraphicsState, SkippedGeReportPreservesRawProvenanceWithoutInventingZeros)
+{
+	HW::Context ctx;
+	HW::UserConfig ucfg;
+	HW::Shader shader;
+	ctx.SetShaderStages(0x2030u);
+	ucfg.SetGeControl({3u, 24u});
+	shader.SetGsShaderResource1Raw(0xa523abcd);
+	shader.SetGsShaderResource2Raw(0u);
+	const auto snapshot = GraphicsDescribeSkippedGeState(ctx, ucfg, shader);
+	// Further mutable state cannot change the owned diagnostic snapshot.
+	shader.SetGsShaderResource1Raw(0u);
+	EXPECT_EQ(snapshot.gs_resource1_raw.value, 0xa523abcdu);
+	EXPECT_TRUE(snapshot.gs_resource1_raw.known);
+	EXPECT_TRUE(snapshot.ge_control_raw.written);
+	EXPECT_FALSE(snapshot.ge_control_raw.known);
+	EXPECT_FALSE(snapshot.ge_user_vgpr_raw.written);
+	const auto report = GraphicsSkippedGeStateJson(snapshot);
+	EXPECT_NE(report.find("\"ge_control\":{\"value\":null,\"written\":true,\"known\":false}"), std::string::npos);
+	EXPECT_NE(report.find("\"ge_user_vgpr_en\":{\"value\":null,\"written\":false,\"known\":false}"), std::string::npos);
+	EXPECT_NE(report.find("\"gs_resource2\":{\"value\":0,\"written\":true,\"known\":true}"), std::string::npos);
+	EXPECT_NE(report.find("\"gs_resource1\":{\"value\":" + std::to_string(0xa523abcdu)), std::string::npos);
+	EXPECT_LT(report.size(), 4096u);
+}
+
+static void CheckBoundedMappedShaderSnapshots()
+{
+	ShaderInit();
+	const uint64_t page_size = Core::VirtualMemory::GetPageSize();
+	const uint64_t address = Core::VirtualMemory::Alloc(0, page_size, Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	const std::array<uint32_t, 4> words {0x11223344u, 0xabcdef01u, 0x99887766u, 0x543210ffu};
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(address, words.data(), sizeof(words)));
+	ShaderMappedData mapped;
+	mapped.code_size_bytes = sizeof(words);
+	ShaderMapUserData(address, mapped);
+	const auto complete = ShaderSnapshotMappedProgram(address);
+	EXPECT_EQ(complete.status, ShaderProgramSnapshotStatus::Complete);
+	EXPECT_EQ(complete.mapped_bytes, sizeof(words));
+	EXPECT_EQ(complete.words, (std::vector<uint32_t>(words.begin(), words.end())));
+	ASSERT_EQ(complete.words.size(), words.size());
+	const auto tail = ShaderSnapshotMappedProgram(address + 4u, 8u);
+	EXPECT_EQ(tail.status, ShaderProgramSnapshotStatus::Truncated);
+	EXPECT_EQ(tail.mapped_bytes, 12u);
+	EXPECT_EQ(tail.words, (std::vector<uint32_t> {words[1], words[2]}));
+	EXPECT_EQ(ShaderSnapshotMappedProgram(address + sizeof(words)).status, ShaderProgramSnapshotStatus::Unmapped);
+	EXPECT_EQ(ShaderSnapshotMappedProgram(address + 1u).status, ShaderProgramSnapshotStatus::InvalidRange);
+	EXPECT_EQ(ShaderSnapshotMappedProgram(address, 0u).status, ShaderProgramSnapshotStatus::InvalidRange);
+	EXPECT_EQ(ShaderSnapshotMappedProgram(address, 3u).status, ShaderProgramSnapshotStatus::InvalidRange);
+	EXPECT_EQ(ShaderSnapshotMappedProgram(address, kShaderProgramSnapshotBytesMax + 4u).status, ShaderProgramSnapshotStatus::InvalidRange);
+	ASSERT_TRUE(Core::VirtualMemory::Protect(address, page_size, Core::VirtualMemory::Mode::NoAccess));
+	const auto unreadable = ShaderSnapshotMappedProgram(address);
+	EXPECT_EQ(unreadable.status, ShaderProgramSnapshotStatus::Unreadable);
+	EXPECT_TRUE(unreadable.words.empty());
+	// An owned earlier snapshot remains usable after the mapped range changes.
+	EXPECT_EQ(complete.words[0], words[0]);
+	ShaderMapUserData(address, {});
+	EXPECT_EQ(ShaderSnapshotMappedProgram(address).status, ShaderProgramSnapshotStatus::Unmapped);
+	EXPECT_TRUE(Core::VirtualMemory::Free(address));
+	mapped.code_size_bytes = 8u;
+	ShaderMapUserData(UINT64_MAX - 3u, mapped);
+	EXPECT_EQ(ShaderSnapshotMappedProgram(UINT64_MAX - 3u).status, ShaderProgramSnapshotStatus::InvalidRange);
+	ShaderMapUserData(UINT64_MAX - 3u, {});
+}
+
+TEST(EmulatorGraphicsState, SkippedShaderSnapshotsRespectMetadataBoundsAndReadableLifetime)
+{
+	ScopedSubmitFaultDeathTestStyle death_test_style;
+	ASSERT_EXIT(
+	    {
+		    CheckBoundedMappedShaderSnapshots();
+		    std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, SkippedDrawReportPreservesExistingEvidence)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSkippedDrawReportFixture(true), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, SkippedGuestDrawsAreCountedAndPublishedUnderSilent)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunSkippedDrawFixture(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawReportIncludesSkippedDrawCounts)
+{
+	VulkanRecentDrawFault fault {};
+	fault.result = VK_ERROR_DEVICE_LOST;
+	GraphicsSkippedDrawCounts skipped {};
+	skipped.invalid_vertex_shader = 3u;
+	skipped.unsupported_ge_state  = 5u;
+	const auto report = VulkanRecentDrawReportJson(fault, 4u, nullptr, 0u, 0u, skipped);
+	Core::Json::Init();
+	std::unique_ptr<const Core::Json> json(Core::Json::Create(String::FromUtf8(report.c_str())));
+	ASSERT_NE(json, nullptr);
+	const auto* counts = json->GetItem("skipped_draws");
+	EXPECT_EQ(counts->GetInt("invalid_vertex_shader", 0), 3);
+	EXPECT_EQ(counts->GetInt("unsupported_ge_state", 0), 5);
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawReportPersistsWithSilentLogging)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunRecentDrawReportFixture(0u), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawReportPreservesExistingEvidence)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunRecentDrawReportFixture(1u), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawReportFileFailureKeepsFaultEvidence)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunRecentDrawReportFixture(2u), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawTraceRequiresReportPath)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunRecentDrawReportFixture(3u), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsState, VulkanRecentDrawTraceRejectsInvalidCapacity)
+{
+	const ScopedSubmitFaultDeathTestStyle style;
+	EXPECT_EXIT(RunRecentDrawReportFixture(4u), ::testing::ExitedWithCode(0), "");
 }
 
 namespace {
@@ -971,6 +1964,56 @@ TEST(EmulatorGraphicsState, GpuMemoryValidatesTheCompleteAllocatedGuestRangeRead
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(UINT64_MAX - 3, 8), GpuMemoryRangeValidationStatus::InvalidArgument);
 }
 
+namespace {
+
+SubmissionId NextGpuMemoryFixtureSubmission(GpuQueueId queue)
+{
+	// Completion high-water marks belong to the process-wide GpuMemory instance,
+	// so a repeated fixture must not reuse a previously completed submission.
+	static std::atomic_uint64_t sequence {0};
+	return {queue, sequence.fetch_add(1, std::memory_order_relaxed) + 1};
+}
+
+class ScopedGpuMemoryFixtureRange final
+{
+public:
+	ScopedGpuMemoryFixtureRange(GraphicContext* ctx, uint64_t base, uint64_t size, SubmissionId first = {}, SubmissionId second = {})
+	    : m_ctx(ctx), m_base(base), m_size(size), m_submissions {first, second}
+	{
+		GpuMemorySetAllocatedRange(m_base, m_size);
+	}
+
+	~ScopedGpuMemoryFixtureRange()
+	{
+		// Also retire owned mock uses on an ASSERT_* early return, while the
+		// fixture's context and guest bytes are still alive.
+		for (const auto& submission: m_submissions)
+		{
+			if (submission.sequence != 0)
+			{
+				GpuMemoryCompleteSubmission(submission);
+			}
+		}
+		// GpuMemoryFree only removes objects. These CPU-only fixtures have no
+		// runtime queues or labels; release exactly their registered heap through
+		// the internal unmap operation without initializing runtime services.
+		g_gpu_memory->Free(m_ctx, m_base, m_size, GpuMemoryRangeReleaseMode::Unmap);
+		EXPECT_EQ(GpuMemoryValidateAllocatedRange(m_base, m_size), GpuMemoryRangeValidationStatus::Unallocated);
+		EXPECT_EQ(GpuMemoryGetAllocatedRangePrefix(m_base, m_size), 0u);
+	}
+
+	ScopedGpuMemoryFixtureRange(const ScopedGpuMemoryFixtureRange&)            = delete;
+	ScopedGpuMemoryFixtureRange& operator=(const ScopedGpuMemoryFixtureRange&) = delete;
+
+private:
+	GraphicContext*                  m_ctx;
+	uint64_t                         m_base;
+	uint64_t                         m_size;
+	const std::array<SubmissionId, 2> m_submissions;
+};
+
+} // namespace
+
 TEST(EmulatorGraphicsState, GpuMemoryRangeCachesInvalidateOnHeapAndObjectMutation)
 {
 	EnsureGpuMemoryForTests();
@@ -984,7 +2027,7 @@ TEST(EmulatorGraphicsState, GpuMemoryRangeCachesInvalidateOnHeapAndObjectMutatio
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(obj_addr, obj_size), GpuMemoryRangeValidationStatus::Unallocated);
 	EXPECT_EQ(GpuMemoryGetAllocatedRangePrefix(obj_addr, obj_size), 0u);
 
-	GpuMemorySetAllocatedRange(heap_base, heap_size);
+	const ScopedGpuMemoryFixtureRange range(&ctx, heap_base, heap_size);
 	EXPECT_EQ(GpuMemoryValidateAllocatedRange(obj_addr, obj_size), GpuMemoryRangeValidationStatus::Valid);
 	EXPECT_EQ(GpuMemoryGetAllocatedRangePrefix(obj_addr, obj_size), obj_size);
 
@@ -1014,9 +2057,9 @@ TEST(EmulatorGraphicsState, GpuMemoryFindForSubmissionDefersDeletionUntilComplet
 	const uint64_t     heap_size = 0x20000ull;
 	const uint64_t     obj_addr  = heap_base + 0x4000ull;
 	const uint64_t     obj_size  = 0x1000ull;
-	const SubmissionId submission {GpuQueueId(97), 1};
+	const SubmissionId submission = NextGpuMemoryFixtureSubmission(GpuQueueId(97));
 
-	GpuMemorySetAllocatedRange(heap_base, heap_size);
+	const ScopedGpuMemoryFixtureRange range(&ctx, heap_base, heap_size, submission);
 	g_test_gpu_object_deletes = 0;
 
 	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size, TestGpuObject()), nullptr);
@@ -1037,13 +2080,13 @@ TEST(EmulatorGraphicsState, GpuMemoryVersionsChangedBackingWithPendingUse)
 {
 	EnsureGpuMemoryForTests();
 
-	GraphicContext     ctx {};
-	auto*              guest = new uint8_t[0x1000] {};
-	const uint64_t     addr  = reinterpret_cast<uint64_t>(guest);
-	const uint64_t     size  = 0x1000;
-	const SubmissionId submission {GpuQueueId(190), 1};
+	GraphicContext            ctx {};
+	std::unique_ptr<uint8_t[]> guest(new uint8_t[0x1000] {});
+	const uint64_t            addr       = reinterpret_cast<uint64_t>(guest.get());
+	const uint64_t            size       = 0x1000;
+	const SubmissionId        submission = NextGpuMemoryFixtureSubmission(GpuQueueId(190));
 
-	GpuMemorySetAllocatedRange(addr, size);
+	const ScopedGpuMemoryFixtureRange range(&ctx, addr, size, submission);
 	g_versioned_gpu_object_creates = 0;
 	g_versioned_gpu_object_updates = 0;
 	g_versioned_gpu_object_deletes = 0;
@@ -1078,18 +2121,18 @@ TEST(EmulatorGraphicsState, VideoOutResolverPublishesCowReplacementOnlyAfterRest
 {
 	EnsureGpuMemoryForTests();
 
-	GraphicContext     ctx {};
-	constexpr uint32_t guest_width  = 1920;
-	constexpr uint32_t guest_height = 1080;
-	constexpr uint32_t host_width   = 1280;
-	constexpr uint32_t host_height  = 720;
-	const uint64_t     size         = static_cast<uint64_t>(guest_width) * guest_height * 4;
-	auto*              guest        = new uint8_t[size] {};
-	const uint64_t     addr         = reinterpret_cast<uint64_t>(guest);
-	const SubmissionId old_use {GpuQueueId(194), 1};
-	const SubmissionId new_use {GpuQueueId(195), 1};
+	GraphicContext            ctx {};
+	constexpr uint32_t        guest_width  = 1920;
+	constexpr uint32_t        guest_height = 1080;
+	constexpr uint32_t        host_width   = 1280;
+	constexpr uint32_t        host_height  = 720;
+	const uint64_t            size         = static_cast<uint64_t>(guest_width) * guest_height * 4;
+	std::unique_ptr<uint8_t[]> guest(new uint8_t[size] {});
+	const uint64_t            addr    = reinterpret_cast<uint64_t>(guest.get());
+	const SubmissionId        old_use = NextGpuMemoryFixtureSubmission(GpuQueueId(194));
+	const SubmissionId        new_use = NextGpuMemoryFixtureSubmission(GpuQueueId(195));
 
-	GpuMemorySetAllocatedRange(addr, size);
+	const ScopedGpuMemoryFixtureRange range(&ctx, addr, size, old_use, new_use);
 	const VideoOutBufferObject info(VideoOutBufferFormat::R8G8B8A8Srgb, guest_width, guest_height, false, false, guest_width);
 	auto* const                old_image = static_cast<VideoOutVulkanImage*>(GpuMemoryCreateObject(1, &ctx, nullptr, addr, size, info));
 	ASSERT_NE(old_image, nullptr);
@@ -1465,13 +2508,13 @@ TEST(EmulatorGraphicsState, GpuMemoryClassifiesTransitiveLinkedStorageTopology)
 {
 	EnsureGpuMemoryForTests();
 
-	GraphicContext     ctx {};
-	constexpr uint64_t heap_size = 0x1000ull;
-	auto*              guest     = new uint8_t[heap_size] {};
-	const uint64_t     base      = reinterpret_cast<uint64_t>(guest);
+	GraphicContext            ctx {};
+	constexpr uint64_t        heap_size = 0x1000ull;
+	std::unique_ptr<uint8_t[]> guest(new uint8_t[heap_size] {});
+	const uint64_t            base = reinterpret_cast<uint64_t>(guest.get());
 	const uint32_t stats_index =
 	    static_cast<uint32_t>(GpuMemoryObjectType::StorageBuffer) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
-	GpuMemorySetAllocatedRange(base, heap_size);
+	const ScopedGpuMemoryFixtureRange range(&ctx, base, heap_size);
 
 	const auto before = DebugStatsGetPerformanceSnapshot(false);
 	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base + 0x100u, 0x100u,
@@ -1505,25 +2548,24 @@ TEST(EmulatorGraphicsState, GpuMemoryClassifiesTransitiveLinkedStorageTopology)
 	          before.gpu_memory_types[stats_index].linked_traversal_truncated);
 
 	GpuMemoryFree(&ctx, base, heap_size);
-	delete[] guest;
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryBoundsLinkedStorageTopologyTraversal)
 {
 	EnsureGpuMemoryForTests();
 
-	GraphicContext      ctx {};
-	constexpr uint64_t  heap_size    = 0x4000ull;
-	constexpr uint32_t  parent_count = 129u;
-	constexpr uint64_t  parent_size  = 0x10ull;
-	constexpr uint64_t  parent_stride = 0x20ull;
-	auto*               guest         = new uint8_t[heap_size] {};
-	const uint64_t      base          = reinterpret_cast<uint64_t>(guest);
-	const uint64_t      first_parent  = base + 0x100u;
-	const uint64_t      combined_size = (parent_count - 1u) * parent_stride + parent_size;
+	GraphicContext            ctx {};
+	constexpr uint64_t        heap_size     = 0x4000ull;
+	constexpr uint32_t        parent_count  = 129u;
+	constexpr uint64_t        parent_size   = 0x10ull;
+	constexpr uint64_t        parent_stride = 0x20ull;
+	std::unique_ptr<uint8_t[]> guest(new uint8_t[heap_size] {});
+	const uint64_t            base          = reinterpret_cast<uint64_t>(guest.get());
+	const uint64_t            first_parent  = base + 0x100u;
+	const uint64_t            combined_size = (parent_count - 1u) * parent_stride + parent_size;
 	const uint32_t stats_index =
 	    static_cast<uint32_t>(GpuMemoryObjectType::StorageBuffer) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
-	GpuMemorySetAllocatedRange(base, heap_size);
+	const ScopedGpuMemoryFixtureRange range(&ctx, base, heap_size);
 
 	for (uint32_t i = 0; i < parent_count; ++i)
 	{
@@ -1542,20 +2584,19 @@ TEST(EmulatorGraphicsState, GpuMemoryBoundsLinkedStorageTopologyTraversal)
 	          before.gpu_memory_types[stats_index].linked_traversal_truncated + 1u);
 
 	GpuMemoryFree(&ctx, base, heap_size);
-	delete[] guest;
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryClassifiesMutableLinksButNotReclaimedObjects)
 {
 	EnsureGpuMemoryForTests();
 
-	GraphicContext     ctx {};
-	constexpr uint64_t heap_size = 0x1000ull;
-	auto*              guest     = new uint8_t[heap_size] {};
-	const uint64_t     base      = reinterpret_cast<uint64_t>(guest);
+	GraphicContext            ctx {};
+	constexpr uint64_t        heap_size = 0x1000ull;
+	std::unique_ptr<uint8_t[]> guest(new uint8_t[heap_size] {});
+	const uint64_t            base = reinterpret_cast<uint64_t>(guest.get());
 	const uint32_t stats_index =
 	    static_cast<uint32_t>(GpuMemoryObjectType::StorageBuffer) - static_cast<uint32_t>(GpuMemoryObjectType::VideoOutBuffer);
-	GpuMemorySetAllocatedRange(base, heap_size);
+	const ScopedGpuMemoryFixtureRange range(&ctx, base, heap_size);
 
 	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, base + 0x100u, 0x80u,
 	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true)),
@@ -1595,7 +2636,6 @@ TEST(EmulatorGraphicsState, GpuMemoryClassifiesMutableLinksButNotReclaimedObject
 	          before_reclaim.gpu_memory_types[stats_index].linked_traversal_truncated);
 
 	GpuMemoryFree(&ctx, base, heap_size);
-	delete[] guest;
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryRetiresOnlyCompleteReadOnlyBufferComponents)
@@ -1630,7 +2670,7 @@ TEST(EmulatorGraphicsState, GpuMemoryRetiresOnlyCompleteReadOnlyBufferComponents
 	EXPECT_TRUE(GpuMemoryFindObjects(address, size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
 }
 
-TEST(EmulatorGraphicsState, GpuMemoryKeepsTruncatedLinkedBufferComponents)
+TEST(EmulatorGraphicsState, GpuMemoryRetirementReachesPastTruncatedComponents)
 {
 	EnsureGpuMemoryForTests();
 
@@ -1654,11 +2694,24 @@ TEST(EmulatorGraphicsState, GpuMemoryKeepsTruncatedLinkedBufferComponents)
 	                                                 RetirementTestGpuObject(&fixture.State(), parent_count,
 	                                                                        GpuMemoryObjectType::StorageBuffer));
 	ASSERT_NE(backings[parent_count], nullptr);
+	// A separate complete component placed after the truncated one must not starve behind it: the
+	// bounded scan resumes where the previous frame stopped instead of restarting at the first heap slot.
+	const uint64_t complete      = fixture.Base() + 0x2000u;
+	const uint32_t vertex_token  = parent_count + 1u;
+	const uint32_t storage_token = parent_count + 2u;
+	ASSERT_NE(GpuMemoryCreateObject(parent_count + 2u, &ctx, nullptr, complete, 0x100u,
+	                                RetirementTestGpuObject(&fixture.State(), vertex_token, GpuMemoryObjectType::VertexBuffer)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(parent_count + 3u, &ctx, nullptr, complete, 0x100u,
+	                                RetirementTestGpuObject(&fixture.State(), storage_token, GpuMemoryObjectType::StorageBuffer, true)),
+	          nullptr);
 
-	for (uint32_t i = 0; i < 150u; ++i)
+	for (uint32_t i = 0; i < 600u; ++i)
 	{
 		GpuMemoryFrameDone(&ctx);
 	}
+	EXPECT_EQ(fixture.State().delete_counts[vertex_token], 1u);
+	EXPECT_EQ(fixture.State().delete_counts[storage_token], 1u);
 	for (uint32_t i = 0; i < parent_count; ++i)
 	{
 		const uint64_t address = first_parent + i * parent_stride;
@@ -1673,13 +2726,13 @@ TEST(EmulatorGraphicsState, GpuMemoryKeepsSurfaceConnectedLinkedBufferComponents
 {
 	EnsureGpuMemoryForTests();
 
-	GraphicContext     ctx {};
-	constexpr uint64_t heap_size = 0x1000ull;
-	auto*              guest     = new uint8_t[heap_size] {};
-	const uint64_t     base      = reinterpret_cast<uint64_t>(guest);
-	const uint64_t     address   = base + 0x100u;
-	constexpr uint64_t size      = 0x100u;
-	GpuMemorySetAllocatedRange(base, heap_size);
+	GraphicContext            ctx {};
+	constexpr uint64_t        heap_size = 0x1000ull;
+	std::unique_ptr<uint8_t[]> guest(new uint8_t[heap_size] {});
+	const uint64_t            base    = reinterpret_cast<uint64_t>(guest.get());
+	const uint64_t            address = base + 0x100u;
+	constexpr uint64_t        size    = 0x100u;
+	const ScopedGpuMemoryFixtureRange range(&ctx, base, heap_size);
 	g_test_gpu_object_deletes = 0;
 
 	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, address, size,
@@ -1699,7 +2752,6 @@ TEST(EmulatorGraphicsState, GpuMemoryKeepsSurfaceConnectedLinkedBufferComponents
 	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free);
 
 	GpuMemoryFree(&ctx, base, heap_size);
-	delete[] guest;
 }
 
 TEST(EmulatorGraphicsState, StorageBufferBackingIdentityIgnoresViewShape)
@@ -1933,7 +2985,7 @@ TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(56u), 4u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(130u), 4u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(71u), 8u);
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(133u), 8u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm)), 8u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(169u), 8u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(170u), 8u);
 	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(179u), 0u);
@@ -2095,6 +3147,26 @@ TEST(EmulatorGraphicsState, DescriptorBufferReferenceFindsStorageAndVsharpRanges
 	EXPECT_FALSE(VulkanDescriptorReferencesBuffer(storage, 2, true, vsharp_small, 11u));
 }
 
+TEST(EmulatorGraphicsState, DescriptorInvalidationKeepsShaderVisibleAndUnknownBufferUsages)
+{
+	const VkBufferUsageFlags non_descriptor[] = {
+	    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+	    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+	    VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+	    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
+	};
+	for (const auto usage: non_descriptor)
+	{
+		EXPECT_FALSE(VulkanBufferNeedsDescriptorInvalidation(usage));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT));
+		EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(usage | 0x80000000u));
+	}
+	EXPECT_TRUE(VulkanBufferNeedsDescriptorInvalidation(0u));
+}
+
 TEST(EmulatorGraphicsState, GpuMemoryAccumulatesWriteIntentUntilWriteBack)
 {
 	EXPECT_FALSE(GpuMemoryMergeReadOnlyUse(true, false, true));
@@ -2110,6 +3182,22 @@ TEST(EmulatorGraphicsState, BlitInitializesUndefinedSource)
 	EXPECT_TRUE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_UNDEFINED));
 	EXPECT_FALSE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
 	EXPECT_FALSE(UtilBlitImageNeedsSourceInitialization(VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL));
+}
+
+TEST(EmulatorGraphicsState, PresentationEncodesLinearLightBeforeAUnormSwapchain)
+{
+	// R8G8B8A8_SRGB display buffers (pixel format 0x8000000022000000) hold linear light; a blit into the
+	// B8G8R8A8_UNORM swapchain would store it unencoded and darken the picture.
+	EXPECT_TRUE(PresentationNeedsEncodeStage(VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_TRUE(PresentationNeedsEncodeStage(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_TRUE(PresentationNeedsEncodeStage(VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_B8G8R8A8_UNORM));
+	// Display-encoded 10-bit buffers copy their values as they are; an sRGB swapchain encodes in the blit itself.
+	EXPECT_FALSE(PresentationNeedsEncodeStage(VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_FALSE(PresentationNeedsEncodeStage(VK_FORMAT_A2R10G10B10_UNORM_PACK32, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_FALSE(PresentationNeedsEncodeStage(VK_FORMAT_R8G8B8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB));
+	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_B8G8R8A8_UNORM), VK_FORMAT_B8G8R8A8_SRGB);
+	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_R8G8B8A8_UNORM), VK_FORMAT_R8G8B8A8_SRGB);
+	EXPECT_EQ(PresentationSrgbTwin(VK_FORMAT_A2B10G10R10_UNORM_PACK32), VK_FORMAT_UNDEFINED);
 }
 
 TEST(EmulatorGraphicsState, KeepsColorExportsLogicalForPhysicalAttachmentOrder)
@@ -2297,8 +3385,8 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(1), 1u);
 	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(1, VK_FORMAT_R8_UNORM));
 	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatches(1, VK_FORMAT_R8_UINT));
-	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 5), VK_FORMAT_R8_UNORM);
-	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 5), VK_FORMAT_R8_UNORM);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 5), VK_FORMAT_R8_UINT);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 5), VK_FORMAT_R8_UINT);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 14), VK_FORMAT_R8G8_UNORM);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(5), 1u);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
@@ -2343,7 +3431,8 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 65), VK_FORMAT_R16G16B16A16_UNORM);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 75), VK_FORMAT_R32G32B32A32_UINT);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(75), 16u);
-	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 133), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm)),
+	          VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 173), VK_FORMAT_BC3_UNORM_BLOCK);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Storage, 0, 0, 56), VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_TRUE(VulkanSupportsGen5ImageFormat(GuestImageUsage::Storage, 56));
@@ -2596,7 +3685,7 @@ TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescript
 	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
 }
 
-TEST(EmulatorGraphicsState, Gen5CodeAvailablePreservesUnmatchedDirectStorageDescriptor)
+TEST(EmulatorGraphicsState, Gen5CodeAvailableKeepsUnconsumedDirectSlotAsSgprs)
 {
 	HW::UserSgprInfo user_sgpr {};
 	for (int i = 0; i < 4; ++i)
@@ -2614,9 +3703,25 @@ TEST(EmulatorGraphicsState, Gen5CodeAvailablePreservesUnmatchedDirectStorageDesc
 		user_sgpr.value[i] = descriptor.fields[i];
 	}
 
+	// The slot is live at entry (read by a scalar move) but reaches no storage
+	// instruction. Since 342e7938 a direct user-SGPR slot is a storage
+	// descriptor only with a storage consumer; otherwise it stays SGPR data
+	// (for example a 64-bit table pointer) and no buffer is materialized.
+	ShaderInstruction read {};
+	read.pc                 = 0;
+	read.type               = ShaderInstructionType::SMovB32;
+	read.format             = ShaderInstructionFormat::SVdstSVsrc0;
+	read.dst.type           = ShaderOperandType::Sgpr;
+	read.dst.register_id    = 8;
+	read.src[0].type        = ShaderOperandType::Sgpr;
+	read.src[0].register_id = 0;
+	read.src_num            = 1;
 	ShaderInstruction end {};
-	end.type = ShaderInstructionType::SEndpgm;
+	end.pc     = 4;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
 	ShaderCode code;
+	code.GetInstructions().Add(read);
 	code.GetInstructions().Add(end);
 
 	uint16_t       direct_offsets[1] = {0};
@@ -2628,10 +3733,10 @@ TEST(EmulatorGraphicsState, Gen5CodeAvailablePreservesUnmatchedDirectStorageDesc
 	ShaderBindResources bind {};
 	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 4, &code);
 
-	ASSERT_EQ(bind.storage_buffers.buffers_num, 1);
-	EXPECT_EQ(bind.storage_buffers.sources[0], ShaderStorageBindingSource::DirectResource);
-	EXPECT_EQ(bind.storage_buffers.accesses[0], ShaderStorageAccess::Unknown);
-	EXPECT_EQ(bind.storage_buffers.unknown_reasons[0], ShaderStorageUnknownReason::NoMatchingInstruction);
+	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	EXPECT_EQ(usage.storage_buffers_readonly, 0);
+	EXPECT_EQ(usage.storage_buffers_readwrite, 0);
+	EXPECT_EQ(bind.direct_sgprs.sgprs_num, 4);
 }
 
 TEST(EmulatorGraphicsState, RawStorageDescriptorRequiresNonZeroDwordStride)
@@ -3814,8 +4919,8 @@ TEST(EmulatorGraphicsState, VulkanGen5SampleFormatMatchesRejectsIncompatibleAlia
 	EXPECT_FALSE(VulkanGen5SampleFormatMatches(56u, VK_FORMAT_R16G16B16A16_SFLOAT));
 	EXPECT_TRUE(VulkanGen5SampleFormatMatches(71u, VK_FORMAT_R16G16B16A16_SFLOAT));
 	EXPECT_FALSE(VulkanGen5SampleFormatMatches(71u, VK_FORMAT_R8G8B8A8_UNORM));
-	EXPECT_TRUE(VulkanGen5SampleFormatMatches(5u, VK_FORMAT_R8_UNORM));
-	EXPECT_FALSE(VulkanGen5SampleFormatMatches(5u, VK_FORMAT_R8_UINT));
+	EXPECT_FALSE(VulkanGen5SampleFormatMatches(5u, VK_FORMAT_R8_UNORM));
+	EXPECT_TRUE(VulkanGen5SampleFormatMatches(5u, VK_FORMAT_R8_UINT));
 	EXPECT_TRUE(VulkanGen5SampleFormatMatches(14u, VK_FORMAT_R8G8_UNORM));
 	EXPECT_FALSE(VulkanGen5SampleFormatMatches(14u, VK_FORMAT_R16G16B16A16_SFLOAT));
 
@@ -3873,8 +4978,8 @@ TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledTile27ByFormat)
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 71u, false));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 56u, true));
 	// BC1 package textures may detile when no live surface covers the range.
-	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 133u, false));
-	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 133u, true));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), true));
 	// Live RDNA2 T# BC1 is ufmt 169 (UNORM) / 170 (SRGB), same 8-byte family.
 	EXPECT_TRUE(Gen5IsBc1PackageFormat(169u));
 	EXPECT_TRUE(Gen5IsBc1PackageFormat(170u));
@@ -3890,7 +4995,14 @@ TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledTile27ByFormat)
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 71u, true));
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 130u, false));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 130u, true));
-	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 133u, false));
+	// Uncovered Standard64KB package images admit block-compressed data
+	// (b632b49e, verified against an independently decoded package source).
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), false));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 169u, false));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 179u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), true));
+	// Uncompressed formats outside the package set stay GPU-owned on tile 9.
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 64u, false));
 }
 
 // Hash refresh stays enabled so late package loads still upload; SSBO clobber
@@ -3931,18 +5043,20 @@ TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
 	const VkFormat formats[]   = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_UNORM};
 	const uint32_t extents_w[] = {1920u, 1920u, 128u};
 	const uint32_t extents_h[] = {1080u, 1080u, 128u};
+	const uint32_t mips[]      = {1u, 1u, 1u};
+	const uint32_t layers[]    = {1u, 1u, 1u};
 	int            indices[16] = {};
 	size_t         count       = 0;
 	bool           reject      = false;
 
 	// Sample 128x128 ufmt 56: skip float parent; only exact 128x128.
-	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 128u, 128u, 3, formats, extents_w, extents_h, indices, &count, &reject));
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 128u, 128u, 1u, 1u, 3, formats, extents_w, extents_h, mips, layers, indices, &count, &reject));
 	EXPECT_FALSE(reject);
 	ASSERT_EQ(count, 1u);
 	EXPECT_EQ(indices[0], 2);
 
 	// Only float candidates for ufmt 56 → reject.
-	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 1920u, 1080u, 1, formats, extents_w, extents_h, indices, &count, &reject));
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 1920u, 1080u, 1u, 1u, 1, formats, extents_w, extents_h, mips, layers, indices, &count, &reject));
 	EXPECT_TRUE(reject);
 	EXPECT_EQ(count, 0u);
 
@@ -3950,9 +5064,77 @@ TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesPrefersExactExtent)
 	const VkFormat only_large[] = {VK_FORMAT_R8G8B8A8_UNORM};
 	const uint32_t large_w[]    = {1920u};
 	const uint32_t large_h[]    = {1080u};
-	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 128u, 128u, 1, only_large, large_w, large_h, indices, &count, &reject));
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(56u, false, 128u, 128u, 1u, 1u, 1, only_large, large_w, large_h, mips, layers, indices, &count, &reject));
 	EXPECT_TRUE(reject);
 	EXPECT_EQ(count, 0u);
+}
+
+// A render target or storage image is one level. A descriptor that views a mip chain
+// (BASE_LEVEL..LAST_LEVEL) over it would read levels the image does not have, so the surface
+// is not an alias: the sample is built as a texture from its parents instead.
+TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesNeedsEveryViewedMipLevel)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkFormat formats[]   = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT};
+	const uint32_t extents_w[] = {1920u, 1920u};
+	const uint32_t extents_h[] = {1080u, 1080u};
+	const uint32_t one_level[] = {1u, 1u};
+	const uint32_t one_layer[] = {1u, 1u};
+	int            indices[16] = {};
+	size_t         count       = 0;
+	bool           reject      = false;
+
+	// A single-level view is served by a single-level surface.
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(71u, false, 1920u, 1080u, 1u, 1u, 2, formats, extents_w, extents_h, one_level, one_layer, indices, &count, &reject));
+	EXPECT_FALSE(reject);
+	EXPECT_EQ(count, 2u);
+
+	// Six viewed levels over single-level surfaces: no alias.
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(71u, false, 1920u, 1080u, 6u, 1u, 2, formats, extents_w, extents_h, one_level, one_layer, indices, &count, &reject));
+	EXPECT_TRUE(reject);
+	EXPECT_EQ(count, 0u);
+
+	// Only a surface that really holds the levels qualifies.
+	const uint32_t mixed[] = {1u, 6u};
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(71u, false, 1920u, 1080u, 6u, 1u, 2, formats, extents_w, extents_h, mixed, one_layer, indices, &count, &reject));
+	EXPECT_FALSE(reject);
+	ASSERT_EQ(count, 1u);
+	EXPECT_EQ(indices[0], 1);
+
+	// A zero-level request is malformed, not "any surface".
+	EXPECT_FALSE(Gen5PickSampleSurfaceAliases(71u, false, 1920u, 1080u, 0u, 1u, 2, formats, extents_w, extents_h, one_level, one_layer, indices, &count, &reject));
+}
+
+// An array descriptor views layers BASE_ARRAY..DEPTH of its resource. A surface with fewer layers would
+// be read past its last layer, so it is not an alias; a one-layer view is served by any surface.
+TEST(EmulatorGraphicsState, Gen5PickSampleSurfaceAliasesNeedsEveryViewedArrayLayer)
+{
+	using namespace Kyty::Libs::Graphics;
+	const VkFormat formats[]   = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT};
+	const uint32_t extents_w[] = {10240u, 10240u};
+	const uint32_t extents_h[] = {320u, 320u};
+	const uint32_t one_level[] = {1u, 1u};
+	const uint32_t one_layer[] = {1u, 1u};
+	int            indices[16] = {};
+	size_t         count       = 0;
+	bool           reject      = false;
+
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(71u, false, 10240u, 320u, 1u, 1u, 2, formats, extents_w, extents_h, one_level, one_layer, indices, &count, &reject));
+	EXPECT_FALSE(reject);
+	EXPECT_EQ(count, 2u);
+
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(71u, false, 10240u, 320u, 1u, 2u, 2, formats, extents_w, extents_h, one_level, one_layer, indices, &count, &reject));
+	EXPECT_TRUE(reject) << "two viewed layers over one-layer surfaces: no alias";
+	EXPECT_EQ(count, 0u);
+
+	const uint32_t mixed[] = {1u, 4u};
+	ASSERT_TRUE(Gen5PickSampleSurfaceAliases(71u, false, 10240u, 320u, 1u, 2u, 2, formats, extents_w, extents_h, one_level, mixed, indices, &count, &reject));
+	EXPECT_FALSE(reject);
+	ASSERT_EQ(count, 1u);
+	EXPECT_EQ(indices[0], 1);
+
+	EXPECT_FALSE(Gen5PickSampleSurfaceAliases(71u, false, 10240u, 320u, 1u, 0u, 2, formats, extents_w, extents_h, one_level, one_layer, indices, &count, &reject))
+	    << "a zero-layer request is malformed";
 }
 
 // Sample pixel area vs RT extent areas (GraphicsRender sample-bind path).
@@ -4042,6 +5224,29 @@ TEST(EmulatorGraphicsState, RequiresTileProofBeforeSkippingStorageImageSeed)
 	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 60u, 34u, 1u), 1u);
 }
 
+// Storage view reused inside a live render target allocation (worldmap load:
+// RT 2432x1368 R16G16B16A16 Contains a 240x135 fmt-64 StorageTexture).
+// Formats differ so the alias copy cannot seed it; the pair is linked instead.
+TEST(EmulatorGraphicsState, LinksStorageImageContainedInRenderTarget)
+{
+	using Type     = GpuMemoryObjectType;
+	using Relation = GpuMemoryOverlapType;
+	EXPECT_TRUE(GpuMemoryAllowsStorageTextureContainedInRenderTarget(Type::RenderTexture, Relation::Contains,
+	                                                               Type::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureContainedInRenderTarget(Type::RenderTexture, Relation::Crosses,
+	                                                                Type::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureContainedInRenderTarget(Type::RenderTexture, Relation::IsContainedWithin,
+	                                                                Type::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureContainedInRenderTarget(Type::RenderTexture, Relation::Equals,
+	                                                                Type::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureContainedInRenderTarget(Type::StorageTexture, Relation::Contains,
+	                                                                Type::StorageTexture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureContainedInRenderTarget(Type::RenderTexture, Relation::Contains,
+	                                                                Type::Texture));
+	EXPECT_FALSE(GpuMemoryAllowsStorageTextureContainedInRenderTarget(Type::Texture, Relation::Contains,
+	                                                                Type::StorageTexture));
+}
+
 TEST(EmulatorGraphicsState, DepthMipStorageLinksExactTextureAndContainingSurfaces)
 {
 	using Type = GpuMemoryObjectType;
@@ -4089,6 +5294,76 @@ TEST(EmulatorGraphicsState, StorageMipViewTargetsOneLevelWhileSamplingRetainsCha
 	image.mip_levels = 1u;
 	ASSERT_TRUE(VulkanResolveStorageImageView(&image, false, false, &selected));
 	EXPECT_EQ(selected, VulkanImage::VIEW_DEFAULT);
+}
+
+// A 2D single-layer image with several levels is one mipmapped backing whose levels are written
+// through single-level views and sampled through the whole chain. The contract was established for
+// depth-tiled R32 chains; Gen5 colour chains in the render-target (27) and Standard64KB (9) tilings
+// follow it. Every other layout keeps the single-level atlas.
+TEST(EmulatorGraphicsState, StorageTextureUsesMipBackingForDepthAndGen5ColourChainsOnly)
+{
+	const uint32_t identity = DstSel(4, 5, 6, 7);
+	const StorageTextureObject depth(0u, 0u, 22u, 480u, 270u, 512u, 6u, 8u, 24u, false, identity, 9u, 1u);
+	EXPECT_TRUE(StorageTextureUsesMipBacking(depth.params, false)) << "depth chains do not depend on the generation";
+	EXPECT_TRUE(StorageTextureUsesMipBacking(depth.params, true));
+	// Gen5 colour chains, whichever tiling: linear (0), Standard4KB (5), Standard64KB (9), render target (27).
+	for (const uint32_t tile: {0u, 5u, 9u, 27u})
+	{
+		const StorageTextureObject colour(0u, 0u, 71u, 1920u, 1080u, 1920u, 1u, 6u, tile, true, identity, 9u, 1u);
+		EXPECT_TRUE(StorageTextureUsesMipBacking(colour.params, true)) << "tile " << tile;
+		EXPECT_FALSE(StorageTextureUsesMipBacking(colour.params, false)) << "Gen4 numbers these tilings differently: tile " << tile;
+	}
+	// One level, Gen4-only tile ids, arrays, volumes and non-zero base layers keep their current layout.
+	const StorageTextureObject one_level(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 1u, 27u, true, identity, 9u, 1u);
+	const StorageTextureObject legacy_linear(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 8u, true, identity, 9u, 1u);
+	const StorageTextureObject legacy_tiled(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 13u, true, identity, 9u, 1u);
+	const StorageTextureObject arrayed(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 27u, true, identity, 13u, 4u);
+	const StorageTextureObject volume(0u, 0u, 71u, 64u, 64u, 64u, 0u, 6u, 27u, true, identity, 10u, 8u);
+	const StorageTextureObject based(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 27u, true, identity, 9u, 1u, 2u);
+	for (const auto* params: {one_level.params, legacy_linear.params, legacy_tiled.params, arrayed.params, volume.params, based.params})
+	{
+		EXPECT_FALSE(StorageTextureUsesMipBacking(params, true));
+	}
+}
+
+// A captured downsample chain addresses level 6 of a resource whose T# says MAX_MIP = 5: the store lands
+// in the slack after the allocation on the hardware. A colour backing therefore carries every level its
+// extent allows so such a view resolves to real storage; a depth chain keeps exactly its descriptor's levels.
+TEST(EmulatorGraphicsState, StorageTextureMipBackingLevelsCoverEveryLevelOfAColourExtent)
+{
+	const uint32_t identity = DstSel(4, 5, 6, 7);
+	const StorageTextureObject colour_1080p(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 27u, true, identity, 9u, 1u);
+	const StorageTextureObject colour_270p(0u, 0u, 71u, 480u, 270u, 480u, 0u, 6u, 0u, true, identity, 9u, 1u);
+	const StorageTextureObject square(0u, 0u, 71u, 1024u, 1024u, 1024u, 0u, 2u, 27u, true, identity, 9u, 1u);
+	EXPECT_EQ(StorageTextureMipBackingLevels(colour_1080p.params, true), 11u) << "1920 -> 1";
+	EXPECT_EQ(StorageTextureMipBackingLevels(colour_270p.params, true), 9u) << "480 -> 1";
+	EXPECT_EQ(StorageTextureMipBackingLevels(square.params, true), 11u) << "1024 -> 1";
+	EXPECT_EQ(StorageTextureMipBackingLevels(colour_1080p.params, false), 0u) << "no mip backing on Gen4";
+	const StorageTextureObject depth(0u, 0u, 22u, 480u, 270u, 512u, 6u, 8u, 24u, false, identity, 9u, 1u);
+	EXPECT_EQ(StorageTextureMipBackingLevels(depth.params, true), 8u) << "a depth chain has its descriptor's levels";
+	const StorageTextureObject single(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 1u, 27u, true, identity, 9u, 1u);
+	EXPECT_EQ(StorageTextureMipBackingLevels(single.params, true), 0u);
+	// The host chain never exceeds the view table.
+	const StorageTextureObject huge(0u, 0u, 71u, 32768u, 32768u, 32768u, 0u, 2u, 27u, true, identity, 9u, 1u);
+	EXPECT_LE(StorageTextureMipBackingLevels(huge.params, true), static_cast<uint32_t>(VulkanImage::VIEW_STORAGE_MIP_COUNT));
+}
+
+// Descriptors that pick different levels of one chain are views of one backing, not different images.
+TEST(EmulatorGraphicsState, Gen5ColourMipViewsOfOneChainShareOneBacking)
+{
+	const uint32_t identity = DstSel(4, 5, 6, 7);
+	const StorageTextureObject level0(0u, 0u, 71u, 1920u, 1080u, 1920u, 0u, 6u, 27u, true, identity, 9u, 1u);
+	const StorageTextureObject level1(0u, 0u, 71u, 1920u, 1080u, 1920u, 1u, 6u, 27u, true, identity, 9u, 1u);
+	const StorageTextureObject shorter(0u, 0u, 71u, 1920u, 1080u, 1920u, 1u, 5u, 27u, true, identity, 9u, 1u);
+	const StorageTextureObject other_extent(0u, 0u, 71u, 960u, 540u, 960u, 1u, 6u, 27u, true, identity, 9u, 1u);
+	Config::SetNextGen(true);
+	EXPECT_TRUE(level0.Equal(level1.params));
+	EXPECT_TRUE(level1.Equal(level0.params));
+	EXPECT_FALSE(level1.Equal(shorter.params)) << "a chain of another length is another backing";
+	EXPECT_FALSE(level1.Equal(other_extent.params));
+	Config::SetNextGen(false);
+	EXPECT_FALSE(level0.Equal(level1.params)) << "without a mip backing the base level is part of the identity";
+	Config::SetNextGen(true);
 }
 
 // Capture/disk bounds: unset env defaults to 1280 so 4K VideoOut dumps are not
@@ -4322,6 +5597,9 @@ TEST(EmulatorGraphicsState, AllowsMixedTextureIndexStorageParents)
 	                                         GpuMemoryObjectType::StorageBuffer));
 	// A StorageBuffer may cross an IndexBuffer and other read-only storage views.
 	EXPECT_TRUE(GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	                                             GpuMemoryObjectType::StorageBuffer));
+	// Exact IB/storage views are independent bindings over the same guest bytes.
+	EXPECT_TRUE(GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Equals,
 	                                             GpuMemoryObjectType::StorageBuffer));
 	EXPECT_TRUE(
 	    GpuMemoryAllowsStorageParent(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses, GpuMemoryObjectType::StorageBuffer));
@@ -4731,35 +6009,33 @@ TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsLoadOnOptimalSubsequentPass)
 	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
-TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearWhenRebindingAfterSample)
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsPreserveSceneWhenRebindingAfterSample)
 {
 	using namespace Kyty::Libs::Graphics;
-	// After composite samples the lighting RT, layout is SHADER_READ_ONLY. The next
-	// frame's first additive light pass must CLEAR (zeros), not LOAD prior-frame HDR.
-	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
-	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
-	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
-
-	// Within-frame accumulation (still COLOR_ATTACHMENT) must keep LOAD.
-	auto load_ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, false, 0u, 0u, VK_FORMAT_R16G16B16A16_SFLOAT);
-	EXPECT_EQ(load_ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+	// Opaque scene -> sampled scene copy -> transparent pass on the original.
+	// Reading the scene cannot discard the pixels not covered by transparency.
+	for (auto format: {VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT})
+	{
+		for (bool fast_clear: {false, true})
+		{
+			auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, fast_clear, 0u, 0u, format);
+			EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+			EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+		}
+	}
 }
 
-TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRgba8RebindClearsTransparent)
+TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsRgba8RebindPreservesContents)
 {
 	using namespace Kyty::Libs::Graphics;
-	// Captured GBuffer/sprite RTs: fmt=10, CLEAR_WORD=0, fast=0, sampled then rebound.
+	// Clear-word registers describe a clear value, not a new clear operation.
 	auto ops = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false, 0u, 0u, VK_FORMAT_R8G8B8A8_UNORM);
-	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_CLEAR);
+	EXPECT_EQ(ops.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
 	EXPECT_EQ(ops.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-	EXPECT_FLOAT_EQ(ops.clear_r, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_g, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_b, 0.0f);
-	EXPECT_FLOAT_EQ(ops.clear_a, 0.0f);
+	auto registered_clear = ResolveColorAttachmentLoadOps(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, true, 0xff804020u, 0u,
+	                                                      VK_FORMAT_R8G8B8A8_UNORM);
+	EXPECT_EQ(registered_clear.load_op, VK_ATTACHMENT_LOAD_OP_LOAD);
+	EXPECT_EQ(registered_clear.initial_layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
 TEST(EmulatorGraphicsState, ColorAttachmentLoadOpsClearUsesRgba8GuestClearWords)
@@ -5316,15 +6592,15 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingRequiresExactLiveRenderTarget)
 	EXPECT_EQ(ResolveGen5SampleBacking(14, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, false), Gen5SampleBacking::Unsupported);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 27, true), Gen5SampleBacking::ExactRenderTarget);
-	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_EQ(ResolveGen5SampleBacking(Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(169, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(170, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(179, 27, false), Gen5SampleBacking::Unsupported);
-	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, true), Gen5SampleBacking::ExactRenderTarget);
+	EXPECT_EQ(ResolveGen5SampleBacking(Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), 27, true), Gen5SampleBacking::ExactRenderTarget);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 0, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(56, 9, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_EQ(ResolveGen5SampleBacking(71, 9, false), Gen5SampleBacking::GuestMemoryTexture);
-	EXPECT_EQ(ResolveGen5SampleBacking(133, 9, false), Gen5SampleBacking::Unsupported);
+	EXPECT_EQ(ResolveGen5SampleBacking(Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), 9, false), Gen5SampleBacking::Unsupported);
 }
 
 // ResolveGen5SampleBacking and Gen5SampleMayGuestUploadTiled share one contract:
@@ -5349,9 +6625,9 @@ TEST(EmulatorGraphicsState, Gen5SampleBackingAndUploadPolicyAreConsistent)
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 71u, true));
 
 	// BC1 package may detile when uncovered; never under a live surface.
-	EXPECT_EQ(ResolveGen5SampleBacking(133, 27, false), Gen5SampleBacking::GuestMemoryTexture);
-	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 133u, false));
-	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 133u, true));
+	EXPECT_EQ(ResolveGen5SampleBacking(Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), 27, false), Gen5SampleBacking::GuestMemoryTexture);
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), true));
 	EXPECT_EQ(ResolveGen5SampleBacking(169, 27, false), Gen5SampleBacking::GuestMemoryTexture);
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(27u, 169u, false));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(27u, 169u, true));
@@ -5369,7 +6645,7 @@ TEST(EmulatorGraphicsState, ResolvesObservedSamplerClampModes)
 	EXPECT_EQ(ResolveSamplerAddressMode(1), SamplerAddressMode::MirroredRepeat);
 	EXPECT_EQ(ResolveSamplerAddressMode(2), SamplerAddressMode::ClampToEdge);
 	EXPECT_EQ(ResolveSamplerAddressMode(6), SamplerAddressMode::ClampToBorder);
-	EXPECT_EQ(ResolveSamplerAddressMode(7), SamplerAddressMode::ClampToBorder);
+	EXPECT_EQ(ResolveSamplerAddressMode(7), SamplerAddressMode::MirrorOnceBorder);
 }
 
 // Residual visual (world false-color, HUD correct): intermediate format-71 and
@@ -5383,8 +6659,10 @@ TEST(EmulatorGraphicsState, Gen5SampledFormatsPreserveFloatAndUnormContracts)
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 56, true), VK_FORMAT_R8G8B8A8_SRGB);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 13, false), VK_FORMAT_R16_SFLOAT);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 14, false), VK_FORMAT_R8G8_UNORM);
-	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 133, false), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
-	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 133, true), VK_FORMAT_BC1_RGBA_SRGB_BLOCK);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), false),
+	          VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
+	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), true),
+	          VK_FORMAT_BC1_RGBA_SRGB_BLOCK);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 169, false), VK_FORMAT_BC1_RGBA_UNORM_BLOCK);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 169, true), VK_FORMAT_BC1_RGBA_SRGB_BLOCK);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 173, false), VK_FORMAT_BC3_UNORM_BLOCK);
@@ -5909,6 +7187,90 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceSamplerBinding)
 	ASSERT_EQ(bind.dynamic_sloads.records.Size(), 1u);
 	EXPECT_EQ(bind.dynamic_sloads.records.At(0).kind, ShaderDynamicSLoadResourceKind::Sampler);
 	EXPECT_EQ(bind.dynamic_sloads.records.At(0).destination_register, 4);
+}
+
+TEST(EmulatorGraphicsState, AVolumeDimensionDoesNotMakeAFlatDescriptorAVolume)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// MIMG DIM 3D reads a T# through the texture unit, which addresses by the T# type:
+	// only a 3D resource becomes a volume descriptor. A 2D resource read by the same
+	// instruction keeps its flat shape (the extra coordinate is ignored).
+	for (const uint32_t type: {9u, 10u})
+	{
+		ShaderInstruction texture_load {};
+		texture_load.pc                = 0x8;
+		texture_load.type              = ShaderInstructionType::SLoadDwordx8;
+		texture_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+		texture_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+		texture_load.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+		texture_load.src[1].constant.u = 128u;
+		texture_load.src_num           = 2;
+
+		ShaderInstruction image_load {};
+		image_load.pc             = 0x10;
+		image_load.type           = ShaderInstructionType::ImageLoad;
+		image_load.format         = ShaderInstructionFormat::VdataVaddr3StDmask;
+		image_load.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+		image_load.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 8, .size = 3};
+		image_load.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+		image_load.src_num        = 2;
+		image_load.mimg_dimension = 2;
+		image_load.mimg_dmask     = 15;
+
+		ShaderInstruction end {};
+		end.pc   = 0x18;
+		end.type = ShaderInstructionType::SEndpgm;
+		ShaderCode code;
+		code.SetType(ShaderType::Compute);
+		code.GetInstructions().Add(texture_load);
+		code.GetInstructions().Add(image_load);
+		code.GetInstructions().Add(end);
+
+		alignas(16) uint32_t eud[64] = {};
+		eud[33]                      = 22u << 20u;
+		eud[35]                      = type << 28u;
+		HW::UserSgprInfo user_sgpr {};
+		for (int i = 0; i < 16; ++i)
+		{
+			user_sgpr.type[i] = HW::UserSgprType::Region;
+		}
+		const uint64_t eud_ptr =
+		    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+		ASSERT_NE(eud_ptr, 0u);
+		ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
+		user_sgpr.value[0] = static_cast<uint32_t>(eud_ptr);
+		user_sgpr.value[1] = static_cast<uint32_t>(eud_ptr >> 32u);
+
+		uint16_t direct_offsets[6];
+		for (auto& offset: direct_offsets)
+		{
+			offset = 0xffffu;
+		}
+		direct_offsets[5] = 0;
+		ShaderUserData user_data {};
+		user_data.direct_resource_offset = direct_offsets;
+		user_data.direct_resource_count  = 6;
+		user_data.eud_size_dw            = 48;
+
+		ShaderParsedUsage   usage {};
+		ShaderBindResources bind {};
+		ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+		EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
+
+		ASSERT_EQ(bind.textures2D.textures_num, 1);
+		const bool volume = type == 10u;
+		EXPECT_EQ(ShaderResolvedSampledTextureShape(bind.textures2D.desc[0]),
+		          volume ? ShaderGen5SampledTextureShape::ThreeDimensional : ShaderGen5SampledTextureShape::TwoDimensional);
+		EXPECT_EQ(bind.textures2D.desc[0].sampled_shape_from_instruction, volume);
+		EXPECT_EQ(bind.textures2D.textures3d_sampled_num, volume ? 1 : 0);
+		EXPECT_EQ(bind.textures2D.textures2d_sampled_num, volume ? 0 : 1);
+	}
 }
 
 TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBindings)

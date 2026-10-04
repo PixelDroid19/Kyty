@@ -136,4 +136,99 @@ TEST(EmulatorComputeWaveVulkan, DoesNotMutateStageWhenFeatureAdmissionFails)
 	EXPECT_EQ(stage.flags, before.flags);
 }
 
+TEST(EmulatorComputeWaveVulkan, RequiresFragmentStageSupportForWave32LaneExchange)
+{
+	auto state                                 = SupportedState();
+	state.fragment_required_size_supported     = true;
+	constexpr uint32_t kLaneExchangeOps = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+	                                      VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
+	                                      VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT;
+
+	EXPECT_TRUE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                            32u, state, true));
+
+	// Every gate must hold on its own.
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_COMPUTE_BIT, kLaneExchangeOps, true,
+	                                                             32u, state, true));
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps,
+	                                                             false, 32u, state, true));
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(
+	    VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps & ~VK_SUBGROUP_FEATURE_SHUFFLE_BIT, true, 32u, state, true));
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(
+	    VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps & ~VK_SUBGROUP_FEATURE_QUAD_BIT, true, 32u, state, true));
+
+	// Only a pre-1.6, non-varying stage can use the default on this range.
+	auto no_required_size = state;
+	no_required_size.fragment_required_size_supported = false;
+	no_required_size.size_control_feature_enabled     = false;
+	EXPECT_TRUE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                            32u, no_required_size, false));
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                             32u, no_required_size, true));
+	no_required_size.max_subgroup_size = 64;
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                             64u, no_required_size, false));
+
+	// With a default of 64 only an attachable required size proves the map.
+	state.max_subgroup_size = 64;
+	EXPECT_TRUE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                            64u, state, true));
+}
+
+TEST(EmulatorComputeWaveVulkan, FragmentLaneExchangeAcceptsOnlyGuaranteed32)
+{
+	auto state = SupportedState();
+	state.size_control_feature_enabled = false;
+	state.min_subgroup_size = state.max_subgroup_size = 32;
+	constexpr uint32_t kLaneExchangeOps = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+	                                      VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
+	                                      VK_SUBGROUP_FEATURE_SHUFFLE_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT;
+	EXPECT_TRUE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                            32u, state, true));
+	state.min_subgroup_size = 16;
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                             32u, state, true));
+	state.min_subgroup_size = 0;
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                             32u, state, false));
+	state = SupportedState();
+	state.fragment_required_size_supported = true;
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                             64u, state, true)); // Default outside queried range.
+	state.max_subgroup_size = 48;
+	EXPECT_FALSE(ShaderWave32FragmentNativeLaneExchangeSupported(VK_SHADER_STAGE_FRAGMENT_BIT, kLaneExchangeOps, true,
+	                                                             32u, state, true));
+}
+
+TEST(EmulatorComputeWaveVulkan, NativeRequiredSizeAcceptsEnabledCoreSupportWithoutExtensionName)
+{
+	auto state = SupportedState();
+	state.extension_advertised = state.extension_enabled = false;
+	state.extension_revision = 0;
+	state.fragment_required_size_supported = true;
+	const auto selection = ShaderSelectNativeSubgroup(state, VK_SHADER_STAGE_FRAGMENT_BIT, 32, 32, false, false, true);
+	ASSERT_TRUE(selection.supported);
+	EXPECT_EQ(selection.size, 32u);
+	EXPECT_TRUE(selection.require_size);
+	state.size_control_feature_enabled = false;
+	EXPECT_FALSE(ShaderSelectNativeSubgroup(state, VK_SHADER_STAGE_FRAGMENT_BIT, 32, 32, false, false, true).supported);
+}
+
+TEST(EmulatorComputeWaveVulkan, FragmentRequiredSizeFollowsHostMinMax)
+{
+	auto state                             = SupportedState();
+	state.fragment_required_size_supported = true;
+
+	EXPECT_TRUE(ShaderFragmentRequiredSubgroupSizeSupported(state, 32u));
+	EXPECT_TRUE(ShaderFragmentRequiredSubgroupSizeSupported(state, 16u));
+	EXPECT_FALSE(ShaderFragmentRequiredSubgroupSizeSupported(state, 0u));
+	EXPECT_FALSE(ShaderFragmentRequiredSubgroupSizeSupported(state, 64u));
+	EXPECT_FALSE(ShaderFragmentRequiredSubgroupSizeSupported(state, 4u));
+	state.min_subgroup_size = 3;
+	EXPECT_FALSE(ShaderFragmentRequiredSubgroupSizeSupported(state, 32u));
+	state.min_subgroup_size = 8;
+	state.max_subgroup_size = 48;
+	EXPECT_FALSE(ShaderFragmentRequiredSubgroupSizeSupported(state, 32u));
+}
+
 UT_END();

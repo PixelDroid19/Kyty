@@ -2,6 +2,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/GuestRuntimePort.h"
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/CxxLocale.h"
@@ -438,7 +439,7 @@ TEST(EmulatorLibcCxxLocale, FlushesCapturedStandardErrorStream)
 	EXPECT_EQ(flush(stderr), 0);
 }
 
-TEST(EmulatorLibcCxxLocale, FilenoReturnsHostDescriptorForGuestStream)
+TEST(EmulatorLibcCxxLocale, FilenoSeparatesGuestDescriptorsFromUnregisteredHostStreams)
 {
 	EnsureLog();
 
@@ -454,13 +455,15 @@ TEST(EmulatorLibcCxxLocale, FilenoReturnsHostDescriptorForGuestStream)
 
 	FILE* stream = std::tmpfile();
 	ASSERT_NE(stream, nullptr);
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	EXPECT_EQ(fileno_guest(stream), ::_fileno(stream));
-#else
-	EXPECT_EQ(fileno_guest(stream), ::fileno(stream));
-#endif
+	// A native FILE is not implicitly a registered guest descriptor. Leaking
+	// its host number can alias an unrelated entry in the guest table.
+	EXPECT_EQ(fileno_guest(stream), -1);
 	EXPECT_EQ(fileno_guest(nullptr), -1);
 	EXPECT_EQ(std::fclose(stream), 0);
+	FILE* guest_output = Kernel::FileSystem::StandardStream(1);
+	ASSERT_NE(guest_output, nullptr);
+	EXPECT_NE(guest_output, stdout);
+	EXPECT_EQ(fileno_guest(guest_output), 1);
 }
 
 TEST(EmulatorLibcCxxLocale, DecrementExceptionRefcountAcceptsNullException)

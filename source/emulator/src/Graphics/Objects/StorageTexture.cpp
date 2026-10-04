@@ -52,6 +52,13 @@ VkImageUsageFlags StorageTextureGetImageUsage()
 	return vk_usage;
 }
 
+// Object identity is also evaluated before a guest platform has been chosen (tools, tests): an
+// unknown platform is not Gen5.
+static bool GuestIsGen5()
+{
+	return Config::IsInitialized() && Config::GetGuestPlatform() == GuestPlatform::Ps5;
+}
+
 static bool IsR32SingleComponentStorageFormat(uint32_t fmt)
 {
 	return fmt == 20u || fmt == 22u;
@@ -82,7 +89,7 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 		// image views must keep an identity component mapping.
 		return DstSel(4, 5, 6, 7);
 	}
-	if (fmt == 29u && swizzle == DstSel(4, 5, 0, 1))
+	if ((fmt == 29u || fmt == 64u) && swizzle == DstSel(4, 5, 0, 1))
 	{
 		// The two-component format has no physical blue/alpha channels. Its
 		// guest selector supplies the architectural defaults (0, 1), which is
@@ -120,6 +127,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
 	const bool depth64kb32       = fmt == 22u && tile == 24u;
 	const bool skip_seed         = params[StorageTextureObject::PARAM_SKIP_SEED] != 0;
+	const bool mip_backing       = StorageTextureUsesMipBacking(params, GuestIsGen5());
 
 	// A write-only, fully covered dispatch does not observe the guest backing.
 	// Leave the image undefined; the compute descriptor bind transitions it
@@ -138,32 +146,23 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	if (three_dimensional)
 	{
 		Gen5TextureVolumeLayout volume_layout {};
-		const bool              is_standard = Gen5GetStandard4KBVolumeTextureLayout(
+		const bool              layout_valid = Gen5GetVolumeTextureLayout(
 		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
 		    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &volume_layout);
-		if (!is_standard)
+		if (!layout_valid || !Gen5ValidateTextureVolumeUpload(volume_layout, *size))
 		{
-			const uint32_t bpe        = std::max(1u, ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt)));
-			volume_layout.linear_size = static_cast<uint64_t>(pitch) * height * depth * bpe;
-			volume_layout.tiled.size  = std::max(4096u, static_cast<uint32_t>(volume_layout.linear_size));
-			volume_layout.tiled.align = 4096;
+			EXIT("unsupported Gen5 storage volume upload: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
+			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
+			     static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), *size);
 		}
 		std::vector<uint8_t> linear(static_cast<size_t>(volume_layout.linear_size));
-		if (is_standard && !linear.empty())
-		{
-			TileConvertStandard4KB32VolumeToLinear(linear.data(), reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
-			                                       static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
-			                                       static_cast<uint32_t>(pitch));
-		} else if (!linear.empty())
-		{
-			std::memcpy(linear.data(), reinterpret_cast<void*>(*vaddr), linear.size());
-		}
+		EXIT_IF(!Gen5DetileTextureVolume(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, volume_layout));
 		Vector<BufferImageCopy> regions(1);
 		regions[0].offset    = 0;
-		regions[0].pitch     = static_cast<uint32_t>(pitch);
-		regions[0].width     = static_cast<uint32_t>(width);
-		regions[0].height    = static_cast<uint32_t>(height);
-		regions[0].depth     = static_cast<uint32_t>(depth);
+		regions[0].pitch     = volume_layout.pitch;
+		regions[0].width     = volume_layout.width;
+		regions[0].height    = volume_layout.height;
+		regions[0].depth     = volume_layout.depth;
 		regions[0].dst_level = 0;
 		regions[0].dst_x     = 0;
 		regions[0].dst_y     = 0;
@@ -323,21 +322,25 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	uint32_t mip_height = height;
 	uint32_t mip_pitch  = pitch;
 
-	Vector<BufferImageCopy> regions(levels);
-	for (uint32_t i = 0; i < levels; i++)
+	// A mip backing has real levels and nothing is packed into an atlas. Linear guest memory holds
+	// every level; the tiled layouts have no level layout here, so guest memory seeds level 0 only and
+	// the higher levels are produced on the GPU. Other layouts pack every level into one image.
+	const uint32_t region_count = (mip_backing && tile != 0) ? 1u : static_cast<uint32_t>(levels);
+	Vector<BufferImageCopy> regions(region_count);
+	for (uint32_t i = 0; i < region_count; i++)
 	{
 		if (level_sizes[i].size == 0)
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: level_sizes[i].size == 0 condition ignored (continuing)\n");
 		}
 
-		auto mipmap_offset = UtilCalcMipmapOffset(i, width, height);
+		auto mipmap_offset = mip_backing ? std::pair<int, int> {0, 0} : UtilCalcMipmapOffset(i, width, height);
 
 		regions[i].offset    = level_sizes[i].offset;
 		regions[i].width     = mip_width;
 		regions[i].height    = mip_height;
 		regions[i].pitch     = mip_pitch;
-		regions[i].dst_level = 0;
+		regions[i].dst_level = mip_backing ? i : 0;
 		regions[i].dst_x     = mipmap_offset.first;
 		regions[i].dst_y     = mipmap_offset.second;
 
@@ -370,7 +373,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	} else if (tile == 5)
 	{
 		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-		if (bytes_per_element == 0u || levels != 1u)
+		if (bytes_per_element == 0u || (levels != 1u && !mip_backing))
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || levels != 1u condition ignored (continuing)\n");
 		}
@@ -393,7 +396,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// the host storage image. Multi-mip and block-compressed storage writes
 		// are not part of this path yet.
 		const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-		if (bytes_per_element == 0u || levels != 1u)
+		if (bytes_per_element == 0u || (levels != 1u && !mip_backing))
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element == 0u || levels != 1u condition ignored (continuing)\n");
 		}
@@ -456,14 +459,28 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto       tile              = params[StorageTextureObject::PARAM_TILE];
 	const bool three_dimensional = resource_type == 10u;
 	const bool arrayed_2d        = resource_type == 13u || resource_type == 11u;
-	const bool depth_mip_chain    = fmt == 22u && tile == 24u && levels > 1u && resource_type == 9u && depth == 1u &&
-	                                base_array == 0u;
+	const uint32_t host_levels    = StorageTextureMipBackingLevels(params, GuestIsGen5());
+	const bool     mip_backing    = host_levels != 0u;
+	if (three_dimensional)
+	{
+		Gen5TextureVolumeLayout volume_layout {};
+		if (!Gen5GetVolumeTextureLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+		                                          static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
+		                                          static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels),
+		                                          static_cast<uint32_t>(tile), &volume_layout) ||
+		    base_level != 0u || !Gen5ValidateTextureVolumeUpload(volume_layout, *size))
+		{
+			EXIT("unsupported Gen5 storage volume image: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
+			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
+			     static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), *size);
+		}
+	}
 	if (resource_type != 8u && resource_type != 9u && !arrayed_2d && !three_dimensional)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported storage texture resource type (continuing)\n");
 	}
 
-	if (base_level != 0u && !depth_mip_chain)
+	if (base_level != 0u && !mip_backing)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: base_level != 0 condition ignored (continuing)\n");
 	}
@@ -501,11 +518,11 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: arrayed_2d && (depth == 0u || base_array >= depth) condition ignored (continuing)\n");
 	}
 
-	if (depth_mip_chain && (base_level >= levels || levels > VulkanImage::VIEW_STORAGE_MIP_COUNT))
+	if (mip_backing && (base_level >= host_levels || levels > VulkanImage::VIEW_STORAGE_MIP_COUNT))
 	{
-		EXIT("unsupported depth storage mip view: base=%" PRIu64 " levels=%" PRIu64 "\n", base_level, levels);
+		EXIT("unsupported storage mip view: base=%" PRIu64 " levels=%" PRIu64 " host_levels=%u\n", base_level, levels, host_levels);
 	}
-	auto real_height = ((levels > 1u && !depth_mip_chain) ? height + (height > 1u ? height / 2u : 1u) : height);
+	auto real_height = ((levels > 1u && !mip_backing) ? height + (height > 1u ? height / 2u : 1u) : height);
 
 	auto* vk_obj = new StorageTextureVulkanImage;
 
@@ -514,11 +531,14 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	image_descriptor.extent       = {static_cast<uint32_t>(width), static_cast<uint32_t>(real_height),
 	                                 static_cast<uint32_t>(three_dimensional ? depth : 1u)};
 	image_descriptor.array_layers = static_cast<uint32_t>(arrayed_2d ? depth : 1u);
-	image_descriptor.mip_levels   = static_cast<uint32_t>(depth_mip_chain ? levels : 1u);
+	image_descriptor.mip_levels   = mip_backing ? host_levels : 1u;
 	image_descriptor.format       = pixel_format;
 	image_descriptor.usage        = vk_usage;
 	auto image_info               = VulkanBuildImageCreateInfo(image_descriptor);
 
+	// These canonical views are the storage-write interface. Sampled bindings
+	// create/cache separate views from the current T# selectors in PrepareTextures;
+	// normalization here must never substitute for that descriptor's read mapping.
 	// Storage image views use identity component mapping. Single-component R32
 	// resources encode their read result as R,0,0,1 while writes address R only;
 	// Normalize that view contract before Vulkan validation.
@@ -534,7 +554,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	if (!VulkanNormalizeStorageComponentMapping(&image_info.format, &components))
 	{
 		EXIT("swizzle is not supported: format=%" PRIu64 " swizzle=0x%03" PRIx64 " decoded=(%d,%d,%d,%d) vkformat=%d\n",
-		     fmt, swizzle, static_cast<int>(components.r), static_cast<int>(components.g), static_cast<int>(components.b),
+		     fmt, static_cast<uint64_t>(swizzle), static_cast<int>(components.r), static_cast<int>(components.g), static_cast<int>(components.b),
 		     static_cast<int>(components.a), static_cast<int>(image_info.format));
 	}
 
@@ -577,16 +597,16 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		               "WARNING: !VulkanCreateDeviceImageView(ctx->device, view_descriptor, &vk_obj->image_view[view_index]) condition "
 		               "ignored (continuing)\n");
 	}
-	if (depth_mip_chain)
+	if (mip_backing)
 	{
 		view_descriptor.level_count    = 1u;
-		for (uint32_t level = 0u; level < levels; level++)
+		for (uint32_t level = 0u; level < host_levels; level++)
 		{
 			view_descriptor.base_mip_level = level;
 			if (!VulkanCreateDeviceImageView(ctx->device, view_descriptor,
 			                                 &vk_obj->image_view[VulkanImage::VIEW_STORAGE_MIP_BASE + level]))
 			{
-				EXIT("failed to create depth storage mip view: level=%u\n", level);
+				EXIT("failed to create storage mip view: level=%u\n", level);
 			}
 		}
 		view_descriptor.base_mip_level = 0u;
@@ -725,20 +745,60 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 
 	const auto fmt       = static_cast<uint32_t>((params[PARAM_FORMAT] >> 16u) & 0xffffu);
 	const auto other_fmt = static_cast<uint32_t>((other[PARAM_FORMAT] >> 16u) & 0xffffu);
-	const bool depth_mip_chain = fmt == 22u && params[PARAM_TILE] == 24u && params[PARAM_RESOURCE_TYPE] == 9u &&
-	                             params[PARAM_DEPTH] == 1u && params[PARAM_BASE_ARRAY] == 0u &&
-	                             (params[PARAM_LEVELS] & 0xffffffffu) > 1u;
-	const bool same_depth_backing = depth_mip_chain && other_fmt == 22u && other[PARAM_TILE] == 24u &&
-	                                other[PARAM_RESOURCE_TYPE] == 9u && other[PARAM_DEPTH] == 1u &&
-	                                other[PARAM_BASE_ARRAY] == 0u &&
-	                                (params[PARAM_LEVELS] & 0xffffffffu) == (other[PARAM_LEVELS] & 0xffffffffu);
-	const bool same_levels = params[PARAM_LEVELS] == other[PARAM_LEVELS] || same_depth_backing;
+	// Descriptors that pick different levels of one chain are views of one backing.
+	const bool gen5               = GuestIsGen5();
+	const bool same_mip_backing   = StorageTextureUsesMipBacking(params, gen5) && StorageTextureUsesMipBacking(other, gen5) &&
+	                              (params[PARAM_LEVELS] & 0xffffffffu) == (other[PARAM_LEVELS] & 0xffffffffu);
+	const bool same_levels = params[PARAM_LEVELS] == other[PARAM_LEVELS] || same_mip_backing;
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && same_levels &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
 	        NormalizeStorageTextureSwizzle(fmt, params[PARAM_SWIZZLE]) == NormalizeStorageTextureSwizzle(other_fmt, other[PARAM_SWIZZLE]) &&
 	        params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] && params[PARAM_DEPTH] == other[PARAM_DEPTH] &&
 	        params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY] && params[PARAM_SKIP_SEED] == other[PARAM_SKIP_SEED]);
+}
+
+bool StorageTextureUsesMipBacking(const uint64_t* params, bool gen5)
+{
+	if (params == nullptr)
+	{
+		return false;
+	}
+	const auto fmt    = static_cast<uint32_t>((params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu);
+	const auto tile   = params[StorageTextureObject::PARAM_TILE];
+	const auto levels = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
+	if (levels <= 1u || params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u || params[StorageTextureObject::PARAM_DEPTH] != 1u ||
+	    params[StorageTextureObject::PARAM_BASE_ARRAY] != 0u)
+	{
+		return false;
+	}
+	const bool depth_chain  = fmt == 22u && tile == 24u;
+	// Gen5 colour tilings: linear (0), Standard4KB (5), Standard64KB (9) and render target (27).
+	const bool colour_chain = gen5 && (tile == 0u || tile == 5u || tile == 9u || tile == 27u);
+	return depth_chain || colour_chain;
+}
+
+uint32_t StorageTextureMipBackingLevels(const uint64_t* params, bool gen5)
+{
+	if (!StorageTextureUsesMipBacking(params, gen5))
+	{
+		return 0u;
+	}
+	const auto levels = static_cast<uint32_t>(params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu);
+	if (((params[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu) == 22u && params[StorageTextureObject::PARAM_TILE] == 24u)
+	{
+		return levels;
+	}
+	const auto width  = static_cast<uint32_t>(params[StorageTextureObject::PARAM_WIDTH_HEIGHT] >> 32u);
+	const auto height = static_cast<uint32_t>(params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu);
+	uint32_t   longest = std::max(width, height);
+	uint32_t   full    = 1u;
+	while (longest > 1u)
+	{
+		longest >>= 1u;
+		++full;
+	}
+	return std::min(full, static_cast<uint32_t>(VulkanImage::VIEW_STORAGE_MIP_COUNT));
 }
 
 bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)

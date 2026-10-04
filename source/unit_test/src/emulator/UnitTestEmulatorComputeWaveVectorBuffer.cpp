@@ -7,6 +7,9 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -29,7 +32,7 @@ static constexpr uint32_t kMubufX3W0   = 0xe03c2000u; // buffer_load_dwordx3 v[5
 static constexpr uint32_t kMubufX4W0   = 0xe0382000u; // buffer_load_dwordx4 v[5:8], v43, s[16:19], 0 idxen
 static constexpr uint32_t kMubufImm8W0 = 0xe0342008u; // same x2 with immediate offset 8
 static constexpr uint32_t kMovS8Zero   = 0xbe880380u; // s_mov_b32 s8, 0
-static constexpr uint32_t kGetpc       = 0xbe941f00u; // s_getpc_b64 s[20:21]; outside the paired set
+static constexpr uint32_t kUnsupportedSentinel = 0xc8000001u; // v_interp_p1_f32 v0, v1, attr0.x; pixel-only, outside the paired compute set
 static constexpr uint32_t kEnd         = 0xbf810000u; // s_endpgm
 
 static void InitializeConfig()
@@ -111,17 +114,96 @@ static void ExpectFirstUnsupportedPc(const std::vector<uint32_t>& words, const S
 			    std::_Exit(2);
 		    }
 		    const auto result = ShaderAnalyzeComputeWaveCode(code, input);
+		    const bool expected = !result.supported && result.unsupported_pc == pc && result.reason.ContainsStr(reason);
+		    if (!expected)
+		    {
+			    std::fprintf(stderr, "supported=%d pc=0x%x expected_pc=0x%x reason=%s expected_reason=%s\n",
+			                 result.supported, result.unsupported_pc, pc, result.reason.c_str(), reason);
+		    }
+		    std::_Exit(expected ? 0 : 3);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+static uint32_t FindInstructionIndex(const ShaderCode& code, uint32_t pc)
+{
+	for (uint32_t index = 0; index < code.GetInstructions().Size(); ++index)
+	{
+		if (code.GetInstructions().At(index).pc == pc)
+		{
+			return index;
+		}
+	}
+	return UINT32_MAX;
+}
+
+static void ExpectAdmitted(const std::vector<uint32_t>& words, const ShaderComputeInputInfo& input)
+{
+	EXPECT_EXIT(
+	    {
+		    InitializeConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code))
+		    {
+			    std::_Exit(2);
+		    }
+		    std::_Exit(ShaderAnalyzeComputeWaveCode(code, input).supported ? 0 : 3);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// The descriptor-provenance proof of the specialized synchronous MUBUF load route
+// must refuse the load at `pc`.
+static void ExpectProofRefuses(const std::vector<uint32_t>& words, const ShaderComputeInputInfo& input, uint32_t pc, const char* reason)
+{
+	EXPECT_EXIT(
+	    {
+		    InitializeConfig();
+		    ShaderCode code;
+		    code.SetType(ShaderType::Compute);
+		    if (!ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code))
+		    {
+			    std::_Exit(2);
+		    }
+		    const uint32_t index = FindInstructionIndex(code, pc);
+		    if (index == UINT32_MAX)
+		    {
+			    std::_Exit(4);
+		    }
+		    const auto result = ShaderAnalyzeComputeWaveVectorBufferLoad(code, index, input.bind);
 		    std::_Exit(!result.supported && result.unsupported_pc == pc && result.reason.ContainsStr(reason) ? 0 : 3);
 	    },
 	    ::testing::ExitedWithCode(0), "");
+}
+
+// Since 704f4ad3 an unproven load is not rejected by the analysis: it is
+// lowered per lane by the generic emitter, so the first unsupported
+// instruction is the sentinel (or the program is admitted when it has none).
+static void ExpectGenericFallback(const std::vector<uint32_t>& words, const ShaderComputeInputInfo& input)
+{
+	const auto sentinel = std::find(words.begin(), words.end(), kUnsupportedSentinel);
+	if (sentinel == words.end())
+	{
+		ExpectAdmitted(words, input);
+		return;
+	}
+	ExpectFirstUnsupportedPc(words, input, static_cast<uint32_t>(sentinel - words.begin()) * 4u, "VInterpP1F32");
+}
+
+// The specialized proof refuses the load at `pc` and the analysis falls back.
+static void ExpectUnprovenLoad(const std::vector<uint32_t>& words, const ShaderComputeInputInfo& input, uint32_t pc, const char* reason)
+{
+	ExpectProofRefuses(words, input, pc, reason);
+	ExpectGenericFallback(words, input);
 }
 
 TEST(EmulatorComputeWaveVectorBuffer, AdmitsDrainedMappedRawLoads)
 {
 	for (const uint32_t word0: {kMubufX1W0, kMubufX2W0, kMubufX3W0, kMubufX4W0, kMubufImm8W0})
 	{
-		ExpectFirstUnsupportedPc({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, word0, kMubufX2W1, kGetpc, kEnd},
-		                         MappedInput(), 0x18u, "SGetpcB64");
+		ExpectFirstUnsupportedPc({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, word0, kMubufX2W1, kUnsupportedSentinel, kEnd},
+		                         MappedInput(), 0x18u, "VInterpP1F32");
 	}
 }
 
@@ -129,7 +211,7 @@ TEST(EmulatorComputeWaveVectorBuffer, AdmitsDirectUserSgprDescriptorLoad)
 {
 	// buffer_load_dwordx2 v[5:6], v43, s[8:11], 0 idxen bound directly.
 	const uint32_t direct_w1 = 0x8002052bu; // srsrc=2 -> s[8:11]
-	ExpectFirstUnsupportedPc({kPrefetch3, kMubufX2W0, direct_w1, kGetpc, kEnd}, DirectInput(), 0xcu, "SGetpcB64");
+	ExpectFirstUnsupportedPc({kPrefetch3, kMubufX2W0, direct_w1, kUnsupportedSentinel, kEnd}, DirectInput(), 0xcu, "VInterpP1F32");
 }
 
 TEST(EmulatorComputeWaveVectorBuffer, AdmitsVmcntWaitCoveringTheLoad)
@@ -137,73 +219,89 @@ TEST(EmulatorComputeWaveVectorBuffer, AdmitsVmcntWaitCoveringTheLoad)
 	// The real guest shape: mapped S_LOAD, lgkmcnt(0) drain, the dwordx2 load,
 	// then the vmcnt(4) wait that covers it before its VGPR consumer.
 	const uint32_t vmcnt4 = 0xbf8c3f74u;
-	ExpectFirstUnsupportedPc({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, kMubufX2W0, kMubufX2W1, vmcnt4, kGetpc, kEnd},
-	                         MappedInput(), 0x1cu, "SGetpcB64");
+	ExpectFirstUnsupportedPc({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, kMubufX2W0, kMubufX2W1, vmcnt4, kUnsupportedSentinel, kEnd},
+	                         MappedInput(), 0x1cu, "VInterpP1F32");
 }
 
-TEST(EmulatorComputeWaveVectorBuffer, RejectsUnprovenDescriptorProvenance)
+TEST(EmulatorComputeWaveVectorBuffer, UnprovenDescriptorProvenanceFallsBackToTheGenericLoad)
 {
 	// Descriptor still in flight: no lgkmcnt(0) between producer and consumer.
-	ExpectFirstUnsupportedPc({kPrefetch3, kLoadWord0, kLoadWord1, kMubufX2W0, kMubufX2W1, kGetpc, kEnd}, MappedInput(), 0xcu,
+	ExpectUnprovenLoad({kPrefetch3, kLoadWord0, kLoadWord1, kMubufX2W0, kMubufX2W1, kUnsupportedSentinel, kEnd}, MappedInput(), 0xcu,
 	                         "paired BufferLoadDwordx2");
 	// V# from user SGPRs s[8:11] with no direct binding and no producer.
-	ExpectFirstUnsupportedPc({kPrefetch3, kMubufX2W0, 0x8002052bu, kGetpc, kEnd}, MappedInput(), 0x4u,
+	ExpectUnprovenLoad({kPrefetch3, kMubufX2W0, 0x8002052bu, kUnsupportedSentinel, kEnd}, MappedInput(), 0x4u,
 	                         "paired BufferLoadDwordx2");
 	// s_mov_b32 s8, 0 redefines part of the direct V# quad.
-	ExpectFirstUnsupportedPc({kPrefetch3, kMovS8Zero, kMubufX2W0, 0x8002052bu, kGetpc, kEnd}, DirectInput(), 0x8u,
+	ExpectUnprovenLoad({kPrefetch3, kMovS8Zero, kMubufX2W0, 0x8002052bu, kUnsupportedSentinel, kEnd}, DirectInput(), 0x8u,
 	                         "paired BufferLoadDwordx2");
 	// The collector's mapping ends before this consumer.
-	ExpectFirstUnsupportedPc({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, kMubufX2W0, kMubufX2W1, kGetpc, kEnd},
+	ExpectUnprovenLoad({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, kMubufX2W0, kMubufX2W1, kUnsupportedSentinel, kEnd},
 	                         MappedInput(0x0cu), 0x10u, "paired BufferLoadDwordx2");
 	// s_branch at 0x18 targets the consumer, adding a second path.
-	ExpectFirstUnsupportedPc(
+	ExpectUnprovenLoad(
 	    {kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, kMubufX2W0, kMubufX2W1, 0xbf82fffdu, kEnd}, MappedInput(), 0x10u,
 	    "paired BufferLoadDwordx2");
 }
 
-TEST(EmulatorComputeWaveVectorBuffer, RejectsUnsupportedTupleControls)
+TEST(EmulatorComputeWaveVectorBuffer, UnsupportedTupleControlsFallBackToTheGenericLoadUnlessTheyHaveNoLowering)
 {
-	const std::vector<std::vector<uint32_t>> loads = {
+	// The specialized proof refuses every one of these tuples. The generic
+	// emitter lowers the ones whose controls it models (OFFEN, cache hints,
+	// IDXEN clear, SGPR or literal S_OFFSET, immediates), so the analysis falls
+	// back; LDS, TFE and undefined encoding bits have no lowering and stay
+	// rejected at the load, as does a descriptor quad outside the SGPR file.
+	const std::vector<std::vector<uint32_t>> generic_loads = {
 	    {0xe0343000u, 0x8007052bu}, // OFFEN: vaddr becomes v[43:44]
 	    {0xe0346000u, 0x8006052bu}, // GLC
-	    {0xe0352000u, 0x8006052bu}, // LDS
 	    {0xe0342000u, 0x8046052bu}, // SLC
-	    {0xe0342000u, 0x8086052bu}, // TFE
-	    {0xe034a000u, 0x8006052bu}, // undefined word0 bit 15
-	    {0xe0362000u, 0x8006052bu}, // undefined word0 bit 17
-	    {0xe0342000u, 0x8026052bu}, // undefined word1 bit 21
+	    {0xe034a000u, 0x8006052bu}, // RDNA2 DLC (word0 bit 15), not legacy ADDR64
 	    {0xe0340000u, 0x8006052bu}, // IDXEN clear
 	    {0xe0342000u, 0x0804052bu}, // dynamic SOFFSET s8
-	    {0xe0342000u, 0x801f052bu}, // srsrc quad outside the SGPR range (m0)
 	    {0xe0342010u, 0x8006052bu}, // immediate 16: 16+8 bytes past a 16-byte descriptor
 	};
-	for (const auto& load: loads)
+	for (const auto& load: generic_loads)
 	{
-		ExpectFirstUnsupportedPc({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, load[0], load[1], kGetpc, kEnd},
-		                         MappedInput(), 0x10u, "paired BufferLoad");
+		ExpectUnprovenLoad({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, load[0], load[1], kUnsupportedSentinel, kEnd}, MappedInput(),
+		                   0x10u, "paired BufferLoad");
 	}
-	// Literal SOFFSET adds a third word and is not admitted either.
-	ExpectFirstUnsupportedPc(
-	    {kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, 0xe0342000u, 0xff04052bu, 0x40u, kGetpc, kEnd}, MappedInput(),
+	// Literal SOFFSET adds a third word.
+	ExpectUnprovenLoad(
+	    {kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, 0xe0342000u, 0xff04052bu, 0x40u, kUnsupportedSentinel, kEnd}, MappedInput(),
 	    0x10u, "paired BufferLoad");
+
+	const std::vector<std::vector<uint32_t>> unlowered_loads = {
+	    {0xe0352000u, 0x8006052bu}, // LDS: the data goes to LDS, not to VGPRs
+	    {0xe0342000u, 0x8086052bu}, // TFE: an extra status VGPR is written
+	    {0xe0362000u, 0x8006052bu}, // undefined word0 bit 17
+	    {0xe0342000u, 0x8026052bu}, // undefined word1 bit 21
+	    {0xe0342000u, 0x801f052bu}, // srsrc quad outside the SGPR range (m0)
+	};
+	for (const auto& load: unlowered_loads)
+	{
+		ExpectFirstUnsupportedPc({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, load[0], load[1], kUnsupportedSentinel, kEnd},
+		                         MappedInput(), 0x10u,
+		                         "instruction BufferLoadDwordx2 has an invalid operand span or unsupported controls before strategy selection");
+		ExpectProofRefuses({kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, load[0], load[1], kUnsupportedSentinel, kEnd}, MappedInput(),
+		                   0x10u, "paired BufferLoad");
+	}
 }
 
-TEST(EmulatorComputeWaveVectorBuffer, RejectsDescriptorsOutsideTheRawAccessContract)
+TEST(EmulatorComputeWaveVectorBuffer, DescriptorsOutsideTheRawAccessContractFallBackToTheGenericLoad)
 {
-	const std::vector<uint32_t> words = {kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, kMubufX2W0, kMubufX2W1, kGetpc, kEnd};
+	const std::vector<uint32_t> words = {kPrefetch3, kLoadWord0, kLoadWord1, kWaitLgkm0, kMubufX2W0, kMubufX2W1, kUnsupportedSentinel, kEnd};
 	auto empty                                   = MappedInput();
 	empty.bind.storage_buffers.buffers[0].fields[2] = 0u;
-	ExpectFirstUnsupportedPc(words, empty, 0x10u, "paired BufferLoadDwordx2");
+	ExpectUnprovenLoad(words, empty, 0x10u, "paired BufferLoadDwordx2");
 	auto swizzled = MappedInput();
 	swizzled.bind.storage_buffers.buffers[0].fields[1] |= 1u << 31u;
-	ExpectFirstUnsupportedPc(words, swizzled, 0x10u, "paired BufferLoadDwordx2");
+	ExpectUnprovenLoad(words, swizzled, 0x10u, "paired BufferLoadDwordx2");
 	auto add_tid = MappedInput();
 	add_tid.bind.storage_buffers.buffers[0].fields[3] |= 1u << 23u;
-	ExpectFirstUnsupportedPc(words, add_tid, 0x10u, "paired BufferLoadDwordx2");
+	ExpectUnprovenLoad(words, add_tid, 0x10u, "paired BufferLoadDwordx2");
 	auto zero_policy                                         = MappedInput();
 	zero_policy.bind.zero_sbuffer_resources.start_register[0] = 16;
 	zero_policy.bind.zero_sbuffer_resources.buffers_num       = 1;
-	ExpectFirstUnsupportedPc(words, zero_policy, 0x10u, "paired BufferLoadDwordx2");
+	ExpectUnprovenLoad(words, zero_policy, 0x10u, "paired BufferLoadDwordx2");
 }
 
 TEST(EmulatorComputeWaveVectorBuffer, AdmitsDirectRawUmaxWithoutReturn)

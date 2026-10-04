@@ -1,6 +1,11 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Log.h"
+#include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 #include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
 
 #include <array>
@@ -9,6 +14,113 @@
 UT_BEGIN(EmulatorShaderResourcePointers);
 
 using namespace Libs::Graphics;
+
+static ShaderBindResources ParseVertexFetchPointers(ShaderParsedUsage* usage, HW::UserSgprInfo* user_sgpr)
+{
+	std::array<uint16_t, 11> offsets;
+	offsets.fill(0xffffu);
+	offsets[8]  = 4; // Descriptor-table pointer, not a four-word V#.
+	offsets[10] = 6; // Attribute-table pointer.
+	ShaderUserData data {};
+	data.direct_resource_offset = offsets.data();
+	data.direct_resource_count  = offsets.size();
+	for (uint32_t word = 0; word < 8u; ++word)
+	{
+		user_sgpr->value[word] = 0x10203040u + word;
+	}
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&data, usage, &bind, *user_sgpr, 8, nullptr, 8);
+	return bind;
+}
+
+TEST(EmulatorShaderResourcePointers, NggFetchTablePointersRemainDirectApiWords)
+{
+	ShaderParsedUsage usage {};
+	HW::UserSgprInfo user_sgpr {};
+	const auto bind = ParseVertexFetchPointers(&usage, &user_sgpr);
+	EXPECT_TRUE(usage.vertex_buffer);
+	EXPECT_TRUE(usage.vertex_attrib);
+	EXPECT_EQ(usage.vertex_buffer_reg, 4);
+	EXPECT_EQ(usage.vertex_attrib_reg, 6);
+	EXPECT_EQ(bind.storage_buffers.buffers_num, 0);
+	ASSERT_EQ(bind.direct_sgprs.sgprs_num, 8);
+	for (int word = 0; word < 8; ++word)
+	{
+		EXPECT_EQ(bind.direct_sgprs.start_register[word], word);
+		EXPECT_EQ(bind.direct_sgprs.sgprs[word].field, user_sgpr.value[word]);
+		EXPECT_FALSE(bind.direct_sgprs.absolute_register[word]);
+	}
+}
+
+TEST(EmulatorShaderResourcePointers, NggNativeFetchTableLoadsHaveInitializedShaderPointers)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	ShaderParsedUsage usage {};
+	HW::UserSgprInfo user_sgpr {};
+	ShaderVertexInputInfo input {};
+	input.bind                     = ParseVertexFetchPointers(&usage, &user_sgpr);
+	input.bind.device_address_used = true;
+	input.gs_prolog                = true;
+	input.fetch_embedded           = true;
+	input.fetch_attrib_reg         = usage.vertex_attrib_reg;
+	input.fetch_buffer_reg         = usage.vertex_buffer_reg;
+	ShaderCalcBindingIndices(&input.bind);
+
+	ShaderInstruction attr {};
+	attr.type               = ShaderInstructionType::SLoadDwordx2;
+	attr.format             = ShaderInstructionFormat::Sdst2Ssrc02Ssrc1;
+	attr.dst                = {.type = ShaderOperandType::Sgpr, .register_id = 32, .size = 2};
+	attr.src[0]             = {.type = ShaderOperandType::Sgpr, .register_id = 14, .size = 2};
+	attr.src[1].type        = ShaderOperandType::IntegerInlineConstant;
+	attr.src_num            = 2;
+	ShaderInstruction descriptor = attr;
+	descriptor.pc                 = 8;
+	descriptor.type               = ShaderInstructionType::SLoadDwordx4;
+	descriptor.format             = ShaderInstructionFormat::Sdst4SbaseSoffset;
+	descriptor.dst                = {.type = ShaderOperandType::Sgpr, .register_id = 36, .size = 4};
+	descriptor.src[0].register_id = 12;
+	ShaderInstruction end {};
+	end.pc     = 16;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(attr);
+	code.GetInstructions().Add(descriptor);
+	code.GetInstructions().Add(end);
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+	for (int reg = 12; reg < 16; ++reg)
+	{
+		const auto store = source.FindIndex(String8::FromPrintf("OpStore %%s%d %%vsharp_value_s%d_", reg, reg));
+		EXPECT_NE(store, Core::STRING8_INVALID_INDEX) << reg;
+		EXPECT_LT(store, source.FindIndex("%sg_0_blo = OpLoad %uint %s14")) << reg;
+	}
+	EXPECT_NE(source.FindIndex("%sg_1_blo = OpLoad %uint %s12"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpStore %s36 %sg_1_d0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%sload_attr_"), Core::STRING8_INVALID_INDEX);
+	class ValidationConfig final: public Config::ConfigSource
+	{
+	public:
+		explicit ValidationConfig(bool enabled): m_enabled(enabled) {}
+		bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		int64_t GetInteger(const Core::String&) const override { return 0; }
+		bool GetBool(const Core::String&) const override { return m_enabled; }
+		Core::String GetString(const Core::String&) const override { return {}; }
+
+	private:
+		bool m_enabled;
+	};
+	const ValidationConfig restore(Config::ShaderValidationEnabled());
+	Config::Load(ValidationConfig(true));
+	Vector<uint32_t> binary;
+	String8 error;
+	const bool valid = ShaderToolchain::Run(source, &binary, &error);
+	Config::Load(restore);
+	EXPECT_TRUE(valid) << error.c_str();
+	EXPECT_FALSE(binary.IsEmpty());
+}
 
 static void ParseLiveDirectStorageAcrossPartialSrtSpan()
 {
@@ -248,10 +360,21 @@ TEST(EmulatorShaderResourcePointers, DirectStorageSpanContainedBySrtRemainsBinda
 	user_sgpr.value[2] = 64u;
 
 	ShaderInstruction end {};
+	end.pc     = 8;
 	end.type   = ShaderInstructionType::SEndpgm;
 	end.format = ShaderInstructionFormat::Empty;
+	// A descriptor is live only if the instruction stream actually consumes it.
+	ShaderInstruction load {};
+	load.type               = ShaderInstructionType::BufferLoadDword;
+	load.format             = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	load.dst                = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 1};
+	load.src[0]             = {.type = ShaderOperandType::Vgpr, .register_id = 1, .size = 1};
+	load.src[1]             = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 4};
+	load.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	load.src_num            = 3;
 	ShaderCode code;
 	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(load);
 	code.GetInstructions().Add(end);
 
 	ShaderParsedUsage   usage {};

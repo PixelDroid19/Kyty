@@ -30,8 +30,8 @@
 	     type_str, i, opcode, pc, dst->GetHash0(), dst->GetCrc32());
 #define KYTY_UNKNOWN_OP()                                                                                                                  \
 	KYTY_LOG_DEBUG("%s", dst->DbgDump().c_str());                                                                                                  \
-	EXIT("unknown %s opcode: 0x%" PRIx32 " at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n", type_str,        \
-	     opcode, pc, dst->GetHash0(), dst->GetCrc32());
+	EXIT("unknown %s opcode: 0x%" PRIx32 " at addr 0x%08" PRIx32 " stage=%d (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n",         \
+	     type_str, opcode, pc, static_cast<int>(dst->GetType()), dst->GetHash0(), dst->GetCrc32());
 
 namespace Kyty::Libs::Graphics {
 

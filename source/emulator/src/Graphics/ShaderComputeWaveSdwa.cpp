@@ -102,14 +102,22 @@ bool ShaderComputeWaveSdwaSignedConvertSupported(const ShaderInstruction& instru
 	       instruction.dst2.type == ShaderOperandType::Unknown && instruction.dst2.size == 0 && OperandIsPlain(instruction.dst2);
 }
 
+namespace {
+
+// The SDWA compare tuple shared by every element type: whole-dword selects, no modifiers, no op_sel/omod.
+bool SdwaCompareTuple(const ShaderInstruction& instruction)
+{
+	return instruction.vop_sdwa && instruction.format == ShaderInstructionFormat::SmaskVsrc0Vsrc1 && instruction.src_num == 2 &&
+	       instruction.vop3_op_sel == 0u && instruction.vop3_omod == 0u && instruction.ds_offset == 0u &&
+	       instruction.ds_encoding_control == 0u && instruction.ds_encoding_registers == 0u &&
+	       (instruction.vop_sdwa_ctrl & kSdwabCompareFixedMask) == kSdwabCompareFixedBits;
+}
+
+} // namespace
+
 bool ShaderComputeWaveSdwaCompareTupleSupported(const ShaderInstruction& instruction)
 {
-	if (!instruction.vop_sdwa || instruction.format != ShaderInstructionFormat::SmaskVsrc0Vsrc1 || instruction.src_num != 2 ||
-	    instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u || instruction.ds_offset != 0u ||
-	    instruction.ds_encoding_control != 0u || instruction.ds_encoding_registers != 0u)
-	{
-		return false;
-	}
+	if (!SdwaCompareTuple(instruction)) { return false; }
 	switch (instruction.type)
 	{
 		case ShaderInstructionType::VCmpEqU32:
@@ -117,10 +125,14 @@ bool ShaderComputeWaveSdwaCompareTupleSupported(const ShaderInstruction& instruc
 		case ShaderInstructionType::VCmpNeU32:
 		case ShaderInstructionType::VCmpGeU32:
 		case ShaderInstructionType::VCmpGtU32:
-		case ShaderInstructionType::VCmpLeU32: break;
+		case ShaderInstructionType::VCmpLeU32: return true;
 		default: return false;
 	}
-	return (instruction.vop_sdwa_ctrl & kSdwabCompareFixedMask) == kSdwabCompareFixedBits;
+}
+
+bool ShaderComputeWaveSdwaCompareIdentityTuple(const ShaderInstruction& instruction)
+{
+	return SdwaCompareTuple(instruction);
 }
 
 bool ShaderComputeWaveSdwaVop2IdentitySupported(const ShaderInstruction& instruction)

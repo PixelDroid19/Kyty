@@ -96,7 +96,9 @@ ShaderComputeWaveLayoutStatus ShaderBuildPairedComputeWaveLayout(const ShaderCom
 	}
 	// A trailing partial wave keeps its missing lanes permanently inactive
 	// (see the paired prolog's valid-lane mask).
-	const uint32_t waves            = (guest_invocations + kGuestWaveSize - 1u) / kGuestWaveSize;
+	// Quotient/remainder avoids overflowing the rounding addition for a valid
+	// uint32_t local product near UINT32_MAX.
+	const uint32_t waves            = guest_invocations / kGuestWaveSize + (guest_invocations % kGuestWaveSize != 0u ? 1u : 0u);
 	uint32_t       physical_local_x = 0;
 	if (!MultiplyU32(waves, kNativeSubgroupSize, &physical_local_x))
 	{

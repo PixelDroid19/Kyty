@@ -61,18 +61,20 @@ static void Supported(GraphicContext* context_out)
 	context.compute_wave_vulkan_state.max_subgroup_size               = 32;
 }
 
-TEST(EmulatorFragmentTransportAdmission, SelectsOnlyProgramsThatLeaveTheQuad)
+TEST(EmulatorFragmentTransportAdmission, WaveSensitiveProgramsRequireAdmissionIncludingQuadLocalOnes)
 {
 	EXPECT_FALSE(Required(ShaderType::Pixel, {}));
-	EXPECT_FALSE(Required(ShaderType::Pixel, {Dpp(0xb1)}));
-	EXPECT_FALSE(Required(ShaderType::Pixel, {Dpp(0x00)}));
+	// Entering admission does not select transport: the whole-program proof
+	// can retain native quad-local execution after checking mask use and helpers.
+	EXPECT_TRUE(Required(ShaderType::Pixel, {Dpp(0xb1)}));
+	EXPECT_TRUE(Required(ShaderType::Pixel, {Dpp(0x00)}));
 	EXPECT_TRUE(Required(ShaderType::Pixel, {Dpp(0x101)}));
 	EXPECT_TRUE(Required(ShaderType::Pixel, {Dpp(0x111)}));
 	EXPECT_TRUE(Required(ShaderType::Pixel, {Dpp(0x140)}));
 	EXPECT_TRUE(Required(ShaderType::Pixel, {Dpp(0xb1), Typed(ShaderInstructionType::VPermlanex16B32)}));
 	EXPECT_TRUE(Required(ShaderType::Pixel, {Typed(ShaderInstructionType::VPermlane16B32)}));
 	EXPECT_FALSE(Required(ShaderType::Compute, {Dpp(0x111), Typed(ShaderInstructionType::VPermlanex16B32)}));
-	EXPECT_FALSE(Required(ShaderType::Pixel, {Typed(ShaderInstructionType::VReadlaneB32)}));
+	EXPECT_TRUE(Required(ShaderType::Pixel, {Typed(ShaderInstructionType::VReadlaneB32)}));
 }
 
 TEST(EmulatorFragmentTransportAdmission, DppWithoutSourcesIsNotARowRead)

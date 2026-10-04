@@ -7,6 +7,7 @@
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -17,6 +18,7 @@
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/VideoOutFlipLifecycleGate.h"
+#include "Emulator/Graphics/VideoOutFlipPending.h"
 #include "Emulator/Graphics/VideoOutFlipQueueAdmissionGate.h"
 #include "Emulator/Graphics/VideoOutHostAccessGate.h"
 #include "Emulator/Graphics/VideoOutMaterializationGate.h"
@@ -226,6 +228,7 @@ bool VideoOutRangesOverlap(uint64_t lhs_address, uint64_t lhs_size, uint64_t rhs
 } // namespace
 
 constexpr int VIDEO_OUT_EVENT_FLIP             = 0;
+using Graphics::VIDEO_OUT_BUFFER_INDEX_BLANK;
 constexpr int VIDEO_OUT_EVENT_VBLANK           = 1;
 constexpr int VIDEO_OUT_EVENT_PRE_VBLANK_START = 2;
 
@@ -333,6 +336,7 @@ struct VideoOutBufferInfo
 	uint32_t                       host_width    = 0;
 	uint32_t                       host_height   = 0;
 	int                            set_id        = 0;
+	uint64_t                       registration_generation = 0;
 };
 
 struct VideoOutRegisteredImageSnapshot
@@ -348,6 +352,7 @@ struct VideoOutRegisteredImageSnapshot
 	int             slot         = -1;
 	int             set_id       = 0;
 	int             relative_index = -1;
+	Graphics::VideoOutRegistrationIdentity identity;
 };
 
 enum class VideoOutEventKind : uint8_t
@@ -371,11 +376,15 @@ struct VideoOutConfig
 	VideoOutResolutionStatus         resolution;
 	bool                             opened    = false;
 	bool                             closing   = false;
+	uint64_t                         session_generation = 0;
+	uint64_t                         registration_sequence = 0;
 	int                              flip_rate = 0;
 	Vector<VideoOutEventBinding*>    flip_events;
 	Vector<VideoOutEventBinding*>    vblank_events;
 	Vector<VideoOutEventBinding*>    event_bindings;
 	VideoOutFlipStatus               flip_status;
+	// Protected by the flip queue mutex.
+	Graphics::VideoOutFlipPending    flip_pending;
 	VideoOutVblankStatus             pre_vblank_status;
 	VideoOutVblankStatus             vblank_status;
 	uint64_t                         vblank_origin_ns = 0;
@@ -415,9 +424,10 @@ public:
 	virtual ~FlipQueue() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(FlipQueue);
 
-	bool Submit(VideoOutConfig* cfg, int index, int64_t flip_arg);
+	bool Submit(VideoOutConfig* cfg, int index, int64_t flip_arg, Graphics::VideoOutRegistrationIdentity identity);
 	void ReserveInternal(VideoOutConfig* cfg);
-	void SubmitReservedBlocking(VideoOutConfig* cfg, int index, int64_t flip_arg);
+	void SubmitReservedBlocking(VideoOutConfig* cfg, int index, int64_t flip_arg, Graphics::VideoOutRegistrationIdentity identity);
+	void QueueGpuFlip(VideoOutConfig* cfg);
 	bool Flip(uint32_t micros);
 	void GetFlipStatus(VideoOutConfig* cfg, VideoOutFlipStatus* out);
 	void Wait(VideoOutConfig* cfg, int index);
@@ -430,9 +440,13 @@ private:
 		int             index;
 		int64_t         flip_arg;
 		uint64_t        submit_tsc;
+		Graphics::VideoOutRegistrationIdentity identity;
 	};
 
-	void Enqueue(VideoOutConfig* cfg, int index, int64_t flip_arg, bool accept_lifecycle);
+	void Enqueue(VideoOutConfig* cfg, int index, int64_t flip_arg, Graphics::VideoOutRegistrationIdentity identity,
+	             bool accept_lifecycle);
+	void PublishPendingLocked(VideoOutConfig* cfg, int pending_requests);
+	static void Present(const Request& r);
 
 	Core::Mutex                              m_mutex;
 	Core::CondVar                            m_submit_cond_var;
@@ -498,12 +512,13 @@ public:
 	KYTY_CLASS_NO_COPY(VideoOutContext);
 
 	int             Open();
-	void            Close(int handle);
+	bool            Close(int handle);
 	SessionAccess   AcquireSession(int handle);
 
 	VideoOutBufferImageInfo            FindImageForSubmission(const void* buffer, Graphics::CommandBuffer* command_buffer,
 	                                                          bool materialize);
-	Graphics::VideoOutVulkanImage*     MaterializeRegisteredImage(VideoOutConfig* cfg, int index, Graphics::SubmissionId submission);
+	Graphics::VideoOutVulkanImage*     MaterializeRegisteredImage(VideoOutConfig* cfg, int index, Graphics::SubmissionId submission,
+	                                                              Graphics::VideoOutRegistrationIdentity accepted);
 	VideoOutRegisteredHostExtentStatus GetRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
 	                                                           uint32_t guest_height, uint32_t* host_width, uint32_t* host_height);
 	VideoOutRegisteredHostExtentStatus SelectRegisteredHostExtent(Graphics::CommandBuffer* buffer, uint32_t guest_width,
@@ -512,6 +527,7 @@ public:
 	                    const VideoOutBufferAttribute* attribute, const VideoOutBufferAttribute2* attribute2);
 	SubmitFlipStatus SubmitFlip(int handle, int index, int64_t flip_arg);
 	SubmitFlipStatus SubmitFlipInternal(int handle, int index, int64_t flip_arg);
+	void             QueueGpuFlip(int handle);
 	bool             RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, VideoOutQuiescedAction action, void* data);
 
 	void Init(uint32_t width, uint32_t height);
@@ -535,10 +551,13 @@ public:
 
 private:
 	[[nodiscard]] int ResolveHandleLocked(int handle) const;
+	[[nodiscard]] static bool IsFlippableIndexLocked(const VideoOutConfig& ctx, int index);
+	[[nodiscard]] static Graphics::VideoOutRegistrationIdentity FlipIdentityLocked(VideoOutConfig* ctx, int index);
 	void              DetachRegisteredBuffersForUnmapLocked(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool CaptureImageLocked(const void* buffer, VideoOutRegisteredImageSnapshot* snapshot);
 	[[nodiscard]] bool CaptureRegisteredImageLocked(VideoOutConfig* cfg, int index,
-	                                                VideoOutRegisteredImageSnapshot* snapshot);
+	                                                VideoOutRegisteredImageSnapshot* snapshot,
+	                                                Graphics::VideoOutRegistrationIdentity accepted = {});
 	[[nodiscard]] bool RegisteredImageMatchesLocked(const VideoOutRegisteredImageSnapshot& snapshot) const;
 	[[nodiscard]] bool SelectRegisteredHostExtentForSnapshot(VideoOutRegisteredImageSnapshot* snapshot);
 	[[nodiscard]] Graphics::VideoOutVulkanImage*
@@ -550,6 +569,7 @@ private:
 	                      Graphics::VideoOutMaterializationGate::Pin* pin);
 	[[nodiscard]] Graphics::VideoOutVulkanImage*
 	PinRegisteredImageForSubmission(VideoOutConfig* cfg, int index, Graphics::SubmissionId submission,
+	                                Graphics::VideoOutRegistrationIdentity accepted,
 	                                Graphics::VideoOutMaterializationGate::Pin* pin);
 	VideoOutRegisteredHostExtentStatus ResolveRegisteredImagesForSubmission(Graphics::CommandBuffer*        buffer,
 	                                                                        uint32_t                        guest_width,
@@ -680,6 +700,9 @@ int VideoOutContext::Open()
 	EXIT_IF(!m_video_out_ctx[handle].event_bindings.IsEmpty());
 	EXIT_IF(m_video_out_ctx[handle].flip_rate != 0);
 
+	EXIT_IF(m_video_out_ctx[handle].session_generation == UINT64_MAX);
+	m_video_out_ctx[handle].session_generation++;
+	m_video_out_ctx[handle].registration_sequence     = 0;
 	m_video_out_ctx[handle].opened                    = true;
 	m_video_out_ctx[handle].flip_status               = VideoOutFlipStatus();
 	m_video_out_ctx[handle].flip_status.flipArg       = -1;
@@ -692,21 +715,33 @@ int VideoOutContext::Open()
 	return handle;
 }
 
-void VideoOutContext::Close(int handle)
+bool VideoOutContext::Close(int handle)
 {
-	auto quiesce = m_host_access_gate.Quiesce();
+	// Stop admission, but keep the presenter (including VblankEnd between
+	// queued flips) progressing until every accepted lifetime has completed.
+	auto drain = m_host_access_gate.Drain();
 
 	m_mutex.Lock();
 
-	if (handle < 0 || handle >= VIDEO_OUT_NUM_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: handle < 0 || handle >= VIDEO_OUT_NUM_MAX condition ignored (continuing)\n"); }
+	handle = ResolveHandleLocked(handle);
+	if (handle < 0 || handle >= VIDEO_OUT_NUM_MAX)
+	{
+		m_mutex.Unlock();
+		return false;
+	}
 	auto* ctx = m_video_out_ctx + handle;
-	if (!ctx->opened || ctx->closing) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !ctx->opened || ctx->closing condition ignored (continuing)\n"); }
+	if (!ctx->opened || ctx->closing)
+	{
+		m_mutex.Unlock();
+		return false;
+	}
 
 	ctx->closing = true;
 	m_mutex.Unlock();
 
 	m_flip_queue.WaitForConfig(ctx);
 	m_registration_gate.WaitUntilIdle();
+	auto quiesce = drain.Quiesce();
 
 	m_mutex.Lock();
 	EXIT_IF(!ctx->opened || !ctx->closing);
@@ -783,6 +818,7 @@ void VideoOutContext::Close(int handle)
 	ctx->buffers_sets_seq = 0;
 	ctx->closing          = false;
 	m_mutex.Unlock();
+	return true;
 }
 
 VideoOutContext::SessionAccess VideoOutContext::AcquireSession(int handle)
@@ -818,17 +854,48 @@ SubmitFlipStatus VideoOutContext::SubmitFlip(int handle, int index, int64_t flip
 	{
 		return SubmitFlipStatus::InvalidHandle;
 	}
-	if (index < 0 || index >= 16 || ctx->buffer_registration_reserved[index] || ctx->buffers[index].buffer == nullptr)
+	if (!IsFlippableIndexLocked(*ctx, index))
 	{
 		return SubmitFlipStatus::InvalidIndex;
 	}
-	return m_flip_queue.Submit(ctx, index, flip_arg) ? SubmitFlipStatus::Submitted : SubmitFlipStatus::QueueFull;
+	return m_flip_queue.Submit(ctx, index, flip_arg, FlipIdentityLocked(ctx, index)) ? SubmitFlipStatus::Submitted
+	                                                                                : SubmitFlipStatus::QueueFull;
+}
+
+bool VideoOutContext::IsFlippableIndexLocked(const VideoOutConfig& ctx, int index)
+{
+	const bool registered = index >= 0 && index < Graphics::VIDEO_OUT_BUFFER_INDEX_COUNT && !ctx.buffer_registration_reserved[index] &&
+	                        ctx.buffers[index].buffer != nullptr;
+	return Graphics::VideoOutIsFlippableIndex(index, registered);
+}
+
+// The blank index names no registered buffer, so it carries no registration.
+Graphics::VideoOutRegistrationIdentity VideoOutContext::FlipIdentityLocked(VideoOutConfig* ctx, int index)
+{
+	const uint64_t registration = index == VIDEO_OUT_BUFFER_INDEX_BLANK ? 0 : ctx->buffers[index].registration_generation;
+	return {ctx, ctx->session_generation, registration};
+}
+
+void VideoOutContext::QueueGpuFlip(int handle)
+{
+	VideoOutConfig* ctx = nullptr;
+	{
+		Core::LockGuard lock(m_mutex);
+		const int resolved = ResolveHandleLocked(handle);
+		if (resolved < 0 || resolved >= VIDEO_OUT_NUM_MAX || !m_video_out_ctx[resolved].opened || m_video_out_ctx[resolved].closing)
+		{
+			EXIT("GPU flip decoded for an invalid VideoOut handle %d\n", handle);
+		}
+		ctx = m_video_out_ctx + resolved;
+	}
+	m_flip_queue.QueueGpuFlip(ctx);
 }
 
 SubmitFlipStatus VideoOutContext::SubmitFlipInternal(int handle, int index, int64_t flip_arg)
 {
 	auto            access = m_host_access_gate.Acquire();
 	VideoOutConfig* ctx = nullptr;
+	Graphics::VideoOutRegistrationIdentity identity;
 	{
 		Core::LockGuard lock(m_mutex);
 		handle = ResolveHandleLocked(handle);
@@ -842,18 +909,7 @@ SubmitFlipStatus VideoOutContext::SubmitFlipInternal(int handle, int index, int6
 		{
 			return SubmitFlipStatus::InvalidHandle;
 		}
-		// index -1: flip the current buffer (UE4-style present without an
-		// explicit index). Resolve to the last presented buffer, or 0 before
-		// any indexed flip.
-		if (index == -1)
-		{
-			index = ctx->flip_status.currentBuffer;
-			if (index < 0)
-			{
-				index = 0;
-			}
-		}
-		if (index < 0 || index >= 16 || ctx->buffer_registration_reserved[index] || ctx->buffers[index].buffer == nullptr)
+		if (!IsFlippableIndexLocked(*ctx, index))
 		{
 			return SubmitFlipStatus::InvalidIndex;
 		}
@@ -862,9 +918,10 @@ SubmitFlipStatus VideoOutContext::SubmitFlipInternal(int handle, int index, int6
 		// capacity. Close marks the context as closing under m_mutex, then waits for
 		// every reservation, so the pointer remains valid after this lock is released.
 		m_flip_queue.ReserveInternal(ctx);
+		identity = FlipIdentityLocked(ctx, index);
 	}
 
-	m_flip_queue.SubmitReservedBlocking(ctx, index, flip_arg);
+	m_flip_queue.SubmitReservedBlocking(ctx, index, flip_arg, identity);
 	return SubmitFlipStatus::Submitted;
 }
 
@@ -901,7 +958,7 @@ int VideoOutResolveHandle(int handle, const bool* opened, int num_slots)
 
 void VideoOutContext::VblankBegin()
 {
-	auto access = m_host_access_gate.Acquire();
+	auto access = m_host_access_gate.AcquireProgress();
 
 	VideoOutConfig* opened[VIDEO_OUT_NUM_MAX] {};
 	uint32_t        opened_num = 0;
@@ -934,7 +991,7 @@ void VideoOutContext::VblankBegin()
 
 void VideoOutContext::VblankEnd()
 {
-	auto access = m_host_access_gate.Acquire();
+	auto access = m_host_access_gate.AcquireProgress();
 
 	VideoOutConfig* opened[VIDEO_OUT_NUM_MAX] {};
 	uint32_t        opened_num = 0;
@@ -982,20 +1039,26 @@ void VideoOutContext::VblankEnd()
 }
 
 bool VideoOutContext::CaptureRegisteredImageLocked(VideoOutConfig* cfg, int index,
-                                                   VideoOutRegisteredImageSnapshot* snapshot)
+                                                   VideoOutRegisteredImageSnapshot* snapshot,
+                                                   Graphics::VideoOutRegistrationIdentity accepted)
 {
 	bool registered_config = false;
 	for (auto& context: m_video_out_ctx)
 	{
 		registered_config = registered_config || &context == cfg;
 	}
-	if (!registered_config || snapshot == nullptr || index < 0 || index >= 16 || !cfg->opened || cfg->closing ||
+	if (!registered_config || snapshot == nullptr || index < 0 || index >= 16 ||
 	    cfg->buffer_registration_reserved[index])
 	{
 		return false;
 	}
 
 	const auto& registered = cfg->buffers[index];
+	const Graphics::VideoOutRegistrationIdentity identity {cfg, cfg->session_generation, registered.registration_generation};
+	if (!identity.CanAccess(cfg->opened, cfg->closing, accepted))
+	{
+		return false;
+	}
 	if (registered.buffer == nullptr || registered.buffer_size == 0 || registered.guest_width == 0 || registered.guest_height == 0)
 	{
 		return false;
@@ -1027,6 +1090,7 @@ bool VideoOutContext::CaptureRegisteredImageLocked(VideoOutConfig* cfg, int inde
 	    index,
 	    registered.set_id,
 	    relative_index,
+	    identity,
 	};
 	return true;
 }
@@ -1060,14 +1124,17 @@ bool VideoOutContext::CaptureImageLocked(const void* buffer, VideoOutRegisteredI
 
 bool VideoOutContext::RegisteredImageMatchesLocked(const VideoOutRegisteredImageSnapshot& snapshot) const
 {
-	if (snapshot.config == nullptr || snapshot.slot < 0 || snapshot.slot >= 16 || !snapshot.config->opened ||
-	    snapshot.config->closing || snapshot.config->buffer_registration_reserved[snapshot.slot])
+	if (snapshot.config == nullptr || snapshot.slot < 0 || snapshot.slot >= 16 ||
+	    snapshot.config->buffer_registration_reserved[snapshot.slot])
 	{
 		return false;
 	}
 
 	const auto& registered = snapshot.config->buffers[snapshot.slot];
-	return registered.buffer == snapshot.buffer && registered.buffer_size == snapshot.buffer_size &&
+	const Graphics::VideoOutRegistrationIdentity identity {snapshot.config, snapshot.config->session_generation,
+	                                                      registered.registration_generation};
+	return identity.CanAccess(snapshot.config->opened, snapshot.config->closing, snapshot.identity) &&
+	       registered.buffer == snapshot.buffer && registered.buffer_size == snapshot.buffer_size &&
 	       registered.buffer_pitch == snapshot.buffer_pitch && registered.guest_width == snapshot.guest_width &&
 	       registered.guest_height == snapshot.guest_height && registered.host_width == snapshot.host_width &&
 	       registered.host_height == snapshot.host_height && registered.set_id == snapshot.set_id;
@@ -1108,7 +1175,7 @@ bool VideoOutContext::SelectRegisteredHostExtentForSnapshot(VideoOutRegisteredIm
 		}
 		for (auto& ctx: m_video_out_ctx)
 		{
-			if (!ctx.opened || ctx.closing)
+			if (!ctx.opened || (ctx.closing && &ctx != snapshot->config))
 			{
 				continue;
 			}
@@ -1143,7 +1210,7 @@ bool VideoOutContext::SelectRegisteredHostExtentForSnapshot(VideoOutRegisteredIm
 		}
 		for (auto& ctx: m_video_out_ctx)
 		{
-			if (!ctx.opened || ctx.closing)
+			if (!ctx.opened || (ctx.closing && &ctx != snapshot->config))
 			{
 				continue;
 			}
@@ -1229,14 +1296,15 @@ VideoOutBufferImageInfo VideoOutContext::FindImageForSubmission(const void* buff
 }
 
 Graphics::VideoOutVulkanImage* VideoOutContext::MaterializeRegisteredImage(VideoOutConfig* cfg, int index,
-                                                                           Graphics::SubmissionId submission)
+                                                                           Graphics::SubmissionId submission,
+                                                                           Graphics::VideoOutRegistrationIdentity accepted)
 {
 	EXIT_IF(cfg == nullptr);
 	EXIT_IF(index < 0 || index >= 16);
 	auto* graphic_ctx = GetGraphicCtx();
 
 	Graphics::VideoOutMaterializationGate::Pin pin;
-	auto*                                      image = PinRegisteredImageForSubmission(cfg, index, submission, &pin);
+	auto*                                      image = PinRegisteredImageForSubmission(cfg, index, submission, accepted, &pin);
 	Graphics::VideoOutBufferEnsureMaterialized(graphic_ctx, image);
 	return image;
 }
@@ -1266,13 +1334,14 @@ VideoOutBufferImageInfo VideoOutContext::PinImageForSubmission(const void* buffe
 
 Graphics::VideoOutVulkanImage*
 VideoOutContext::PinRegisteredImageForSubmission(VideoOutConfig* cfg, int index, Graphics::SubmissionId submission,
+                                                 Graphics::VideoOutRegistrationIdentity accepted,
                                                  Graphics::VideoOutMaterializationGate::Pin* pin)
 {
 	EXIT_IF(pin == nullptr);
 	VideoOutRegisteredImageSnapshot snapshot;
 	{
 		Core::LockGuard lock(m_mutex);
-		if (!CaptureRegisteredImageLocked(cfg, index, &snapshot))
+		if (!CaptureRegisteredImageLocked(cfg, index, &snapshot, accepted))
 		{
 			EXIT("VideoOut registered image is no longer available: index=%d\n", index);
 		}
@@ -1415,14 +1484,14 @@ VideoOutRegisteredHostExtentStatus VideoOutContext::SelectRegisteredHostExtent(G
 	return VideoOutRegisteredHostExtentStatus::InvalidArgument;
 }
 
-bool FlipQueue::Submit(VideoOutConfig* cfg, int index, int64_t flip_arg)
+bool FlipQueue::Submit(VideoOutConfig* cfg, int index, int64_t flip_arg, Graphics::VideoOutRegistrationIdentity identity)
 {
 	if (!m_admission_gate.TryAcquire())
 	{
 		return false;
 	}
 
-	Enqueue(cfg, index, flip_arg, true);
+	Enqueue(cfg, index, flip_arg, identity, true);
 	return true;
 }
 
@@ -1432,35 +1501,72 @@ void FlipQueue::ReserveInternal(VideoOutConfig* cfg)
 	m_lifecycle_gate.Accept(cfg);
 }
 
-void FlipQueue::SubmitReservedBlocking(VideoOutConfig* cfg, int index, int64_t flip_arg)
+void FlipQueue::SubmitReservedBlocking(VideoOutConfig* cfg, int index, int64_t flip_arg,
+                                      Graphics::VideoOutRegistrationIdentity identity)
 {
 	EXIT_IF(cfg == nullptr);
 	m_admission_gate.AcquireBlocking();
-	Enqueue(cfg, index, flip_arg, false);
+	Enqueue(cfg, index, flip_arg, identity, false);
 }
 
-void FlipQueue::Enqueue(VideoOutConfig* cfg, int index, int64_t flip_arg, bool accept_lifecycle)
+void FlipQueue::Enqueue(VideoOutConfig* cfg, int index, int64_t flip_arg, Graphics::VideoOutRegistrationIdentity identity,
+                       bool accept_lifecycle)
 {
 	Core::LockGuard lock(m_mutex);
 	EXIT_IF(cfg == nullptr);
 	EXIT_IF(m_requests.Size() >= 2);
+	EXIT_IF(identity.owner != cfg || identity.session == 0);
+	EXIT_IF(index != VIDEO_OUT_BUFFER_INDEX_BLANK && identity.registration == 0);
 
 	Request r {};
 	r.cfg        = cfg;
 	r.index      = index;
 	r.flip_arg   = flip_arg;
 	r.submit_tsc = Kernel::TimePort::GetCounter();
+	r.identity   = identity;
 
 	m_requests.Add(r);
 	if (accept_lifecycle)
 	{
 		m_lifecycle_gate.Accept(cfg);
+	} else
+	{
+		// Internal submissions are the decoded GPU flips leaving gcQueueNum.
+		EXIT_IF(!cfg->flip_pending.TakeGpuFlip());
 	}
 
-	cfg->flip_status.flipPendingNum = static_cast<int>(m_requests.Size());
-	cfg->flip_status.gcQueueNum     = 0;
+	PublishPendingLocked(cfg, static_cast<int>(m_requests.Size()));
 
 	m_submit_cond_var.Signal();
+}
+
+void FlipQueue::QueueGpuFlip(VideoOutConfig* cfg)
+{
+	Core::LockGuard lock(m_mutex);
+	EXIT_IF(cfg == nullptr);
+	cfg->flip_pending.QueueGpuFlip();
+	PublishPendingLocked(cfg, static_cast<int>(m_requests.Size()));
+}
+
+void FlipQueue::PublishPendingLocked(VideoOutConfig* cfg, int pending_requests)
+{
+	cfg->flip_status.gcQueueNum     = cfg->flip_pending.GcQueueNum();
+	cfg->flip_status.flipPendingNum = cfg->flip_pending.FlipPendingNum(pending_requests);
+}
+
+void FlipQueue::Present(const Request& r)
+{
+	if (r.index == VIDEO_OUT_BUFFER_INDEX_BLANK)
+	{
+		Graphics::WindowDrawBlank();
+		return;
+	}
+	const auto present_submission = NextPresentSubmission();
+	auto*      buffer = g_video_out_context->MaterializeRegisteredImage(r.cfg, r.index, present_submission, r.identity);
+
+	Graphics::WindowDrawBuffer(buffer);
+	VideoOutAppendLog("/tmp/kyty_flip3.log", "FLIP3: index=%d buffer=%p draw_done=1\n", r.index, (void*)buffer);
+	Graphics::GpuMemoryCompleteSubmission(present_submission);
 }
 
 void FlipQueue::Wait(VideoOutConfig* cfg, int index)
@@ -1499,12 +1605,7 @@ bool FlipQueue::Flip(uint32_t micros)
 	auto r     = m_requests.At(first);
 	m_mutex.Unlock();
 
-	const auto present_submission = NextPresentSubmission();
-	auto*      buffer = g_video_out_context->MaterializeRegisteredImage(r.cfg, r.index, present_submission);
-
-	Graphics::WindowDrawBuffer(buffer);
-	VideoOutAppendLog("/tmp/kyty_flip3.log", "FLIP3: index=%d buffer=%p draw_done=1\n", r.index, (void*)buffer);
-	Graphics::GpuMemoryCompleteSubmission(present_submission);
+	Present(r);
 
 	// A flip event announces a completed flip. Publish the completion snapshot
 	// first so a woken guest can immediately query the matching count and
@@ -1517,7 +1618,7 @@ bool FlipQueue::Flip(uint32_t micros)
 	r.cfg->flip_status.submitProcessTimeCounter = r.submit_tsc;
 	r.cfg->flip_status.flipArg                   = r.flip_arg;
 	r.cfg->flip_status.currentBuffer             = r.index;
-	r.cfg->flip_status.flipPendingNum            = static_cast<int>(m_requests.Size() - 1);
+	PublishPendingLocked(r.cfg, static_cast<int>(m_requests.Size() - 1));
 	m_mutex.Unlock();
 
 	std::vector<EventQueue::KernelEqueuePin> flip_queues;
@@ -1637,13 +1738,10 @@ KYTY_SYSV_ABI int VideoOutClose(int handle)
 	    [](void* data)
 	    {
 		    EXIT_IF(data == nullptr);
-		    g_video_out_context->Close(*static_cast<int*>(data));
-		    return true;
+		    return g_video_out_context->Close(*static_cast<int*>(data));
 	    },
 	    &handle);
-	EXIT_IF(!closed);
-
-	return Kernel::OK;
+	return closed ? Kernel::OK : VIDEO_OUT_ERROR_INVALID_HANDLE;
 }
 
 KYTY_SYSV_ABI int VideoOutGetResolutionStatus(int handle, VideoOutResolutionStatus* status)
@@ -2017,6 +2115,15 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 
 	bool     tile   = (attribute2 != nullptr ? (attribute2->tiling_mode == 0) : (attribute->tiling_mode == 0));
 	bool     neo    = (attribute2 != nullptr ? true : Config::IsNeo());
+	{
+		// The raw guest pixel format carries the colour space/EOTF bits that VideoOutBufferFormat drops.
+		char message[Emulator::Agent::kAgentEventMessageMax] {};
+		std::snprintf(message, sizeof(message), "pixel_format=0x%016" PRIx64 " width=%u height=%u tiled=%d buffers=%d",
+		              attribute2 != nullptr ? attribute2->pixel_format : static_cast<uint64_t>(attribute->pixel_format),
+		              attribute2 != nullptr ? attribute2->width : attribute->width, attribute2 != nullptr ? attribute2->height : attribute->height,
+		              tile ? 1 : 0, buffer_num);
+		Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Info, "videoout_buffers", message);
+	}
 	uint32_t width  = (attribute2 != nullptr ? attribute2->width : attribute->width);
 	uint32_t height = (attribute2 != nullptr ? attribute2->height : attribute->height);
 
@@ -2206,6 +2313,8 @@ int VideoOutContext::RegisterBuffers(int handle, int set_id, bool generate_set_i
 			staged_buffers[i].guest_height              = height;
 			staged_buffers[i].host_width                = 0;
 			staged_buffers[i].host_height               = 0;
+			EXIT_IF(ctx->registration_sequence == UINT64_MAX);
+			staged_buffers[i].registration_generation  = ++ctx->registration_sequence;
 			ctx->buffers[slot]                          = staged_buffers[i];
 			ctx->buffer_registration_reserved[slot]     = false;
 			KYTY_LOG_DEBUG("\tbuffers[%d] = %016" PRIx64 "\n", slot, reinterpret_cast<uint64_t>(addresses[i]));
@@ -2275,7 +2384,7 @@ bool VideoOutContext::RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, V
 	EXIT_IF(size == 0);
 	EXIT_IF(action == nullptr);
 
-	auto quiesce = m_host_access_gate.Quiesce();
+	auto drain = m_host_access_gate.Drain();
 
 	VideoOutConfig* opened[VIDEO_OUT_NUM_MAX] {};
 	uint32_t        opened_num = 0;
@@ -2295,6 +2404,7 @@ bool VideoOutContext::RunBufferUnmapTransaction(uint64_t vaddr, uint64_t size, V
 		m_flip_queue.WaitForConfig(opened[index]);
 	}
 	m_registration_gate.WaitUntilIdle();
+	auto quiesce = drain.Quiesce();
 	m_materialization_gate.WaitUntilIdle();
 
 	{
@@ -2456,9 +2566,16 @@ KYTY_SYSV_ABI int VideoOutSubmitFlip(int handle, int index, int flip_mode, int64
 		return VIDEO_OUT_ERROR_INVALID_VALUE;
 	}
 
-	if (index < 0 || index > 15)
+	if (index < VIDEO_OUT_BUFFER_INDEX_BLANK || index > 15)
 	{
 		return VIDEO_OUT_ERROR_INVALID_INDEX;
+	}
+	if (index == VIDEO_OUT_BUFFER_INDEX_BLANK)
+	{
+		// A blank flip can precede every buffer registration and GPU
+		// submission; its present needs the render context they create.
+		Graphics::WindowWaitForGraphicInitialized();
+		Graphics::GraphicsRenderCreateContext();
 	}
 
 	switch (g_video_out_context->SubmitFlip(handle, index, flip_arg))
@@ -2485,6 +2602,12 @@ void VideoOutSubmitFlipInternal(int handle, int index, int flip_mode, int64_t fl
 		EXIT("Internal VideoOut flip failed: status=%s(%d) handle=%d index=%d mode=%d\n", SubmitFlipStatusName(status),
 		     static_cast<int>(status), handle, index, flip_mode);
 	}
+}
+
+void VideoOutQueueGpuFlip(int handle)
+{
+	EXIT_IF(g_video_out_context == nullptr);
+	g_video_out_context->QueueGpuFlip(handle);
 }
 
 void VideoOutWaitFlipDone(int handle, int index)

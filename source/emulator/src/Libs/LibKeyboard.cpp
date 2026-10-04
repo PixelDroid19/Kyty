@@ -6,6 +6,7 @@
 #include "Emulator/Libs/Libs.h"
 
 #include <cinttypes>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 
@@ -34,6 +35,14 @@ struct KeyboardData
 	uint16_t key_code[KEYBOARD_MAX_KEYCODES];
 	uint8_t  reserve2[32];
 };
+
+// The native record is 96 bytes: timestamp 0x00, intercepted 0x08, connected 0x10,
+// length 0x14, led 0x18, modifiers 0x1C, key codes 0x20, reserve 0x40.
+static_assert(sizeof(KeyboardData) == 96);
+static_assert(offsetof(KeyboardData, connected) == 0x10);
+static_assert(offsetof(KeyboardData, length) == 0x14);
+static_assert(offsetof(KeyboardData, key_code) == 0x20);
+static_assert(offsetof(KeyboardData, reserve2) == 0x40);
 
 // sceKeyboardInit — NID wadT3QBCGY0
 static int KYTY_SYSV_ABI KeyboardInit()

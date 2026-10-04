@@ -64,7 +64,9 @@ struct sys_dir_entry_t
 	bool   is_file;
 };
 
-void              sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read = nullptr);
+// Zero means no read error (EOF is not an error); otherwise positive host errno.
+// The optional count is the actual transfer even when an error is returned.
+int               sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read = nullptr);
 void              sys_file_write(const void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_written = nullptr);
 void              sys_file_read_r(void* data, uint32_t size, sys_file_t& f);
 void              sys_file_write_r(const void* data, uint32_t size, sys_file_t& f);

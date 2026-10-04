@@ -37,7 +37,9 @@ static ShaderInstruction BinaryMask()
 	return instruction;
 }
 
-TEST(EmulatorComputeWaveScalar, AdmitsOnlyExactMaskPairs)
+// The specialized scalar paths claim only their exact tuples; a tuple outside
+// the contract falls to the generic scalar lowering, which decides on operands.
+TEST(EmulatorComputeWaveScalar, MaskPathClaimsOnlyExactMaskPairs)
 {
 	for (const auto type: {ShaderInstructionType::SAndB64, ShaderInstructionType::SOrB64, ShaderInstructionType::SXorB64})
 	{
@@ -58,12 +60,12 @@ TEST(EmulatorComputeWaveScalar, AdmitsOnlyExactMaskPairs)
 				case 6: invalid.ds_encoding_control = 1; break;
 				case 7: invalid.src[0].negate = true; break;
 			}
-			EXPECT_EQ(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::Unsupported);
+			EXPECT_NE(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::ScalarMask) << variant;
 		}
 	}
 }
 
-TEST(EmulatorComputeWaveScalar, SaveExecRejectsSpecialDestinationsAndOutOfRangeImmediates)
+TEST(EmulatorComputeWaveScalar, SaveExecMaskPathRejectsSpecialDestinationsAndOutOfRangeImmediates)
 {
 	auto instruction        = BinaryMask();
 	instruction.type        = ShaderInstructionType::SAndSaveexecB64;
@@ -74,20 +76,19 @@ TEST(EmulatorComputeWaveScalar, SaveExecRejectsSpecialDestinationsAndOutOfRangeI
 	for (int value: {-17, -16, 0, 64, 65})
 	{
 		instruction.src[0].constant.i = value;
-		EXPECT_EQ(ShaderClassifyComputeWaveInstruction(instruction), value >= -16 && value <= 64
-		                                                                 ? ShaderComputeWaveInstructionKind::ScalarMask
-		                                                                 : ShaderComputeWaveInstructionKind::Unsupported);
+		const bool claimed = ShaderClassifyComputeWaveInstruction(instruction) == ShaderComputeWaveInstructionKind::ScalarMask;
+		EXPECT_EQ(claimed, value >= -16 && value <= 64) << value;
 	}
 	instruction.src[0].constant.i = 0;
 	for (const auto type: {ShaderOperandType::ExecLo, ShaderOperandType::VccLo})
 	{
 		instruction.dst.type        = type;
 		instruction.dst.register_id = 0;
-		EXPECT_EQ(ShaderClassifyComputeWaveInstruction(instruction), ShaderComputeWaveInstructionKind::Unsupported);
+		EXPECT_NE(ShaderClassifyComputeWaveInstruction(instruction), ShaderComputeWaveInstructionKind::ScalarMask);
 	}
 }
 
-TEST(EmulatorComputeWaveScalar, AdmitsOnlyExactVccHiScalarShiftTuple)
+TEST(EmulatorComputeWaveScalar, ShiftPathClaimsOnlyTheExactVccHiTuple)
 {
 	const auto code = ParseScalarShift();
 	ASSERT_EQ(code.GetInstructions().Size(), 2u);
@@ -126,15 +127,15 @@ TEST(EmulatorComputeWaveScalar, AdmitsOnlyExactVccHiScalarShiftTuple)
 			case 15: invalid.vop3_op_sel = 1; break;
 			case 16: invalid.vop_sdwa = true; break;
 		}
-		EXPECT_EQ(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::Unsupported);
+		EXPECT_NE(ShaderClassifyComputeWaveInstruction(invalid), ShaderComputeWaveInstructionKind::ScalarShift) << variant;
 	}
 
 	auto extra_source = instruction;
 	extra_source.src[3] = extra_source.src[1];
-	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(extra_source), ShaderComputeWaveInstructionKind::Unsupported);
+	EXPECT_NE(ShaderClassifyComputeWaveInstruction(extra_source), ShaderComputeWaveInstructionKind::ScalarShift);
 	auto extra_ds_registers = instruction;
 	extra_ds_registers.ds_encoding_registers = 1;
-	EXPECT_EQ(ShaderClassifyComputeWaveInstruction(extra_ds_registers), ShaderComputeWaveInstructionKind::Unsupported);
+	EXPECT_NE(ShaderClassifyComputeWaveInstruction(extra_ds_registers), ShaderComputeWaveInstructionKind::ScalarShift);
 }
 
 UT_END();

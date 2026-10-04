@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -62,20 +64,28 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 //   1) the surface format exactly matches the resolved immutable sample
 //      interpretation (including gamma), and
 //   2) Vulkan extent equals the sample descriptor (exact width×height).
+//   3) the surface holds every mip level the descriptor views: a render target
+//      or storage image is one level, so a view of a mip chain (BASE_LEVEL to
+//      LAST_LEVEL) over it would read levels the image does not have. Such a
+//      sample is built as a texture from its parents instead.
+//   4) the surface holds every array layer the descriptor views, for the same reason.
 // Binding a larger parent without a crop view samples the wrong tiles and
 // leaves horizontal bands or false-color geometry. Zero exact+format matches
 // rejects the alias; never fall back to a different gamma or extent.
 //
-// formats[i]/extents_w[i]/extents_h[i] describe candidate i of candidate_count
-// (capped at 16). On success, out_indices[0..out_count) are candidate indices
-// in preference order; out_count==0 && !reject means "use full unfiltered list".
+// formats[i]/extents_w[i]/extents_h[i]/mip_levels[i]/array_layers[i] describe candidate i
+// of candidate_count (capped at 16); sample_levels is the number of levels the view
+// needs from level 0 (LAST_LEVEL + 1) and sample_layers the number of layers from layer 0. On success, out_indices[0..out_count) are
+// candidate indices in preference order; out_count==0 && !reject means "use full
+// unfiltered list".
 [[nodiscard]] inline bool Gen5PickSampleSurfaceAliases(uint32_t sample_ufmt, bool use_srgb, uint32_t sample_width,
-	                                                   uint32_t sample_height,
+	                                                   uint32_t sample_height, uint32_t sample_levels, uint32_t sample_layers,
                                                        size_t candidate_count, const VkFormat* formats, const uint32_t* extents_w,
-                                                       const uint32_t* extents_h, int* out_indices, size_t* out_count, bool* reject)
+                                                       const uint32_t* extents_h, const uint32_t* mip_levels,
+                                                       const uint32_t* array_layers, int* out_indices, size_t* out_count, bool* reject)
 {
-	if (formats == nullptr || extents_w == nullptr || extents_h == nullptr || out_indices == nullptr || out_count == nullptr ||
-	    reject == nullptr)
+	if (formats == nullptr || extents_w == nullptr || extents_h == nullptr || mip_levels == nullptr || array_layers == nullptr ||
+	    out_indices == nullptr || out_count == nullptr || reject == nullptr || sample_levels == 0u || sample_layers == 0u)
 	{
 		return false;
 	}
@@ -90,15 +100,17 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 		{
 			continue;
 		}
-		if (extents_w[i] == sample_width && extents_h[i] == sample_height)
+		if (extents_w[i] == sample_width && extents_h[i] == sample_height && mip_levels[i] >= sample_levels &&
+		    array_layers[i] >= sample_layers)
 		{
 			exact_ok[exact_n++] = static_cast<int>(i);
 		}
 	}
 	if (exact_n == 0)
 	{
-		// No format+extent match. Reject rather than bind a larger parent
-		// without a crop view (horizontal bands / false-color props).
+		// No format+extent+levels+layers match. Reject rather than bind a larger parent
+		// without a crop view (horizontal bands / false-color props) or a view of
+		// mip levels the surface does not have.
 		*reject = true;
 		return true;
 	}
@@ -125,15 +137,15 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 //
 // Tile 27 is kRenderTarget layout. Catalog evidence: fmt 56/71 samples on tile 27
 // are GPU intermediates (also appear as path=rt); CPU detile of those pages is
-// always wrong even when FindRenderTexture misses on the first bind. BC1 (ufmt
-// 133) package textures may still detile from guest when uncovered.
+// always wrong even when FindRenderTexture misses on the first bind. BC1
+// package textures may still detile from guest when uncovered.
 // Uncovered Standard64KB package images also admit block-compressed data;
 // their footprint and upload must both use the compressed mip layout.
-// Guest T# BC1 is RDNA2 ufmt 169 (UNORM) / 170 (SRGB). Catalog 133 is the
-// same 8-byte 4x4 block family used by older tile-27 package fixtures.
+// Guest T# BC1 is RDNA2 ufmt 169 (UNORM) / 170 (SRGB). Historical catalog
+// fixtures must translate their separate ID before entering this raw-ID path.
 [[nodiscard]] inline bool Gen5IsBc1PackageFormat(uint32_t ufmt)
 {
-	return ufmt == 133u || ufmt == 169u || ufmt == 170u;
+	return ufmt == 169u || ufmt == 170u;
 }
 
 [[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt, bool live_color_surface_covers)
@@ -671,17 +683,56 @@ struct ColorAttachmentLoadOps
 	return value;
 }
 
+// A uniform compute fill stores one 16-byte word quad per invocation. Over a color image whose texel
+// repeats exactly within that quad the fill is independent of tiling, so an image clear reproduces the
+// guest memory contents. Returns false for formats without an evidenced packing or a non-repeating quad.
+[[nodiscard]] inline uint32_t GuestUniformFillTexelBytes(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_R16G16B16A16_SFLOAT: return 8u;
+		case VK_FORMAT_R8G8B8A8_UNORM:
+		case VK_FORMAT_R8G8B8A8_SRGB:
+		case VK_FORMAT_B8G8R8A8_UNORM:
+		case VK_FORMAT_B8G8R8A8_SRGB:
+		case VK_FORMAT_R32_SFLOAT: return 4u;
+		default: return 0u;
+	}
+}
+
+[[nodiscard]] inline bool DecodeGuestUniformFillTexel(const std::array<uint32_t, 4>& words, VkFormat format, VkClearColorValue* clear)
+{
+	const uint32_t texel   = GuestUniformFillTexelBytes(format);
+	const bool     repeats = texel == 8u ? (words[0] == words[2] && words[1] == words[3])
+	                                     : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]);
+	if (clear == nullptr || !repeats) { return false; }
+	*clear = DecodeGuestColorClearWords(words[0], words[1], format);
+	// vkCmdClearColorImage encodes sRGB images from linear input: decode the stored bytes first.
+	if (format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_SRGB)
+	{
+		for (int channel = 0; channel < 3; ++channel)
+		{
+			const float encoded       = clear->float32[channel];
+			clear->float32[channel] = encoded <= 0.04045f ? encoded / 12.92f : std::pow((encoded + 0.055f) / 1.055f, 2.4f);
+		}
+	}
+	for (float component: clear->float32)
+	{
+		if (!std::isfinite(component)) { return false; }
+	}
+	return true;
+}
+
 [[nodiscard]] inline ColorAttachmentLoadOps ResolveColorAttachmentLoadOps(VkImageLayout tracked_layout, bool guest_fast_clear,
                                                                           uint32_t clear_word0, uint32_t clear_word1, VkFormat format)
 {
 	ColorAttachmentLoadOps ops {};
-	// First bind (UNDEFINED) and rebind after sampling (SHADER_READ_ONLY) must CLEAR.
-	// Additive RGBA16F lighting can omit a guest fast-clear;
-	// LOAD after sample keeps prior-frame light and accumulates into hot yellow/red slabs.
-	// Within-frame light draws stay COLOR_ATTACHMENT_OPTIMAL and still LOAD.
-	// BeginRenderPass barriers non-COLOR layouts to COLOR before vkCmdBeginRenderPass,
-	// so SHADER_READ rebinds use COLOR as the render-pass initial layout.
-	const bool clear_on_bind = tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED || tracked_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	// Sampling preserves image contents. Rebinding a sampled scene for a later
+	// transparent pass must LOAD its opaque pixels, not infer a new clear from
+	// the read-only layout. Clear-word and fast-clear registers alone do not
+	// establish a new clear operation on an already materialized attachment.
+	// BeginRenderPass transitions preserved layouts to COLOR before the pass.
+	const bool clear_on_bind = tracked_layout == VK_IMAGE_LAYOUT_UNDEFINED;
 	if (clear_on_bind)
 	{
 		ops.load_op = VK_ATTACHMENT_LOAD_OP_CLEAR;
@@ -754,6 +805,8 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
                        const Vector<VkBufferImageCopy>& regions, uint64_t src_layout);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
+// Blit the whole source into [0, dst_extent) of dst_image, which ends in TRANSFER_DST_OPTIMAL (its prior contents are discarded).
+void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_image, VkExtent2D dst_extent, VkFilter filter);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
                    uint64_t dst_layout);
 void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,

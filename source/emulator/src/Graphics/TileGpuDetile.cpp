@@ -8,6 +8,7 @@
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Graphics/Window.h"
 #include "GraphicsRenderInternal.h"
 
 #include <algorithm>
@@ -724,7 +725,7 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 		attempt.kind                = VulkanSubmitKind::TileDetile;
 		attempt.queue               = static_cast<uint32_t>(GraphicContext::QUEUE_GFX);
 		attempt.command_buffer_slot = UINT32_MAX;
-		attempt.frame               = GraphicsRunGetFrameNum();
+		attempt.presented_frame     = WindowGetPresentedFrameNum();
 	}
 	{
 		Core::LockGuard queue_lock(*state->queue_mutex);

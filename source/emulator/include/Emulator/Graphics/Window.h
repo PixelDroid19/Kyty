@@ -42,6 +42,8 @@ void WindowInit(uint32_t width, uint32_t height);
 void WindowRun();
 void WindowWaitForGraphicInitialized();
 void WindowDrawBuffer(VideoOutVulkanImage* image);
+// Presents a black frame (a VideoOut flip to the blank buffer index).
+void WindowDrawBlank();
 
 // Realtime agent / tooling seam. Capture still happens on the present path;
 // these helpers only request and observe host-side VideoOut readback.

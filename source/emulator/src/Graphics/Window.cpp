@@ -2050,12 +2050,17 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
                                    const VulkanQueues& queues, const Vector<const char*>& device_extensions,
                                    bool color_write_enable_supported, bool depth_clip_enable_supported,
                                    bool depth_clip_control_supported,
-                                   const ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address,
-                                   bool compute_derivative_group_linear)
+                                   ShaderComputeWaveVulkanState* compute_wave_state, bool guest_device_address,
+                                   bool compute_derivative_group_linear, bool maximal_reconvergence_supported,
+                                   VulkanBlendFeatures* enabled_blend_features, VulkanSamplerFeatures* enabled_sampler_features)
 {
 	EXIT_IF(physical_device == nullptr);
 	EXIT_IF(r == nullptr);
 	EXIT_IF(surface == nullptr);
+	EXIT_IF(enabled_blend_features == nullptr);
+	*enabled_blend_features = {};
+	EXIT_IF(enabled_sampler_features == nullptr);
+	*enabled_sampler_features = {};
 
 	Vector<VkDeviceQueueCreateInfo> queue_create_info(queues.family_count);
 	Vector<Vector<float>>           queue_priority(queues.family_count);
@@ -2088,12 +2093,21 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.samplerAnisotropy        = VK_TRUE;
 	device_features.shaderStorageImageReadWithoutFormat  = VK_TRUE;
 	device_features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
-	VkPhysicalDeviceFeatures supported_features {};
-	vkGetPhysicalDeviceFeatures(physical_device, &supported_features);
+	VkPhysicalDeviceVulkan12Features supported_12 {};
+	supported_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	VkPhysicalDeviceFeatures2 supported_2 {};
+	supported_2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+	supported_2.pNext = &supported_12;
+	vkGetPhysicalDeviceFeatures2(physical_device, &supported_2);
+	const auto& supported_features = supported_2.features;
+	const auto sampler_features = VulkanPlanSamplerFeatures(supported_12);
 	device_features.depthBiasClamp    = supported_features.depthBiasClamp;
 	device_features.sampleRateShading = supported_features.sampleRateShading;
 	device_features.geometryShader = supported_features.geometryShader;
 	device_features.depthClamp = supported_features.depthClamp;
+	const auto blend_features = VulkanPlanBlendFeatures(supported_features, true, true);
+	device_features.independentBlend = blend_features.independent_blend;
+	device_features.dualSrcBlend = blend_features.dual_source_blend;
 	// device_features.shaderImageGatherExtended = VK_TRUE;
 
 	VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control_ext {};
@@ -2121,9 +2135,13 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 		    compute_wave_state->full_subgroups_feature_supported ? VK_TRUE : VK_FALSE;
 	}
 
-	VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address {};
-	buffer_device_address.sType               = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
-	buffer_device_address.bufferDeviceAddress = VK_TRUE;
+	// Use the Vulkan 1.2 aggregate for both core features. Its pNext chain may
+	// not also contain VkPhysicalDeviceBufferDeviceAddressFeatures (VUID-02830).
+	VkPhysicalDeviceVulkan12Features device_features_12 {};
+	device_features_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+	device_features_12.subgroupBroadcastDynamicId = supported_12.subgroupBroadcastDynamicId;
+	device_features_12.samplerMirrorClampToEdge = sampler_features.mirror_clamp_to_edge;
+	device_features_12.bufferDeviceAddress = guest_device_address ? VK_TRUE : VK_FALSE;
 	if (guest_device_address)
 	{
 		device_features.shaderInt64 = VK_TRUE;
@@ -2133,11 +2151,17 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	derivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
 	derivatives.computeDerivativeGroupLinear = compute_derivative_group_linear ? VK_TRUE : VK_FALSE;
 	void* device_feature_chain = compute_derivative_group_linear ? &derivatives : nullptr;
-	if (guest_device_address)
+
+	VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_reconvergence {};
+	maximal_reconvergence.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
+	maximal_reconvergence.shaderMaximalReconvergence = VK_TRUE;
+	if (maximal_reconvergence_supported)
 	{
-		buffer_device_address.pNext = device_feature_chain;
-		device_feature_chain        = &buffer_device_address;
+		maximal_reconvergence.pNext = device_feature_chain;
+		device_feature_chain        = &maximal_reconvergence;
 	}
+	device_features_12.pNext = device_feature_chain;
+	device_feature_chain = &device_features_12;
 	if (depth_clip_control_supported)
 	{
 		depth_clip_control_ext.pNext = device_feature_chain;
@@ -2173,7 +2197,20 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 
 	VkDevice device = nullptr;
 
-	vkCreateDevice(physical_device, &create_info, nullptr, &device);
+	const auto result = vkCreateDevice(physical_device, &create_info, nullptr, &device);
+	if (result == VK_SUCCESS && device != VK_NULL_HANDLE)
+	{
+		*enabled_blend_features = blend_features;
+		*enabled_sampler_features = sampler_features;
+		if (compute_wave_state != nullptr)
+		{
+			compute_wave_state->subgroup_broadcast_dynamic_id_enabled =
+			    device_features_12.subgroupBroadcastDynamicId == VK_TRUE;
+		}
+	} else
+	{
+		return VK_NULL_HANDLE;
+	}
 
 	return device;
 }
@@ -2837,6 +2874,8 @@ static void VulkanCreate(WindowContext* ctx)
 		subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
 		VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives {};
 		derivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
+		VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_reconvergence {};
+		maximal_reconvergence.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
 		const uint32_t subgroup_size_control_revision = extension_revision(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 		const bool subgroup_size_control_revision2 =
 		    subgroup_size_control_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION;
@@ -2867,6 +2906,11 @@ static void VulkanCreate(WindowContext* ctx)
 			subgroup_size_control_features.pNext = query_chain;
 			query_chain                          = &subgroup_size_control_features;
 		}
+		if (has_ext(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME))
+		{
+			maximal_reconvergence.pNext = query_chain;
+			query_chain                 = &maximal_reconvergence;
+		}
 		VkPhysicalDeviceFeatures2 available_features {};
 		available_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 		available_features.pNext = query_chain;
@@ -2877,6 +2921,15 @@ static void VulkanCreate(WindowContext* ctx)
 		if (ctx->graphic_ctx.compute_derivative_group_linear_supported)
 		{
 			device_extensions.Add(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME);
+		}
+		ctx->graphic_ctx.shader_maximal_reconvergence_supported =
+		    has_ext(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME) &&
+		    maximal_reconvergence.shaderMaximalReconvergence == VK_TRUE;
+		if (ctx->graphic_ctx.shader_maximal_reconvergence_supported &&
+		    !device_extensions.Contains(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME,
+		                                [](auto s, auto l) { return strcmp(s, l) == 0; }))
+		{
+			device_extensions.Add(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME);
 		}
 
 		ctx->graphic_ctx.color_write_enable_supported =
@@ -3000,33 +3053,30 @@ static void VulkanCreate(WindowContext* ctx)
 
 	VkPhysicalDeviceProperties device_properties {};
 	vkGetPhysicalDeviceProperties(ctx->graphic_ctx.physical_device, &device_properties);
-	VkPhysicalDeviceSubgroupSizeControlPropertiesEXT subgroup_size_control {};
+	// Vulkan 1.4 is required. Core properties remain authoritative even when the
+	// promoted extension name is absent; default width is not a singleton range.
+	VkPhysicalDeviceSubgroupSizeControlProperties subgroup_size_control {};
 	VkPhysicalDeviceSubgroupProperties subgroup_properties {};
 	VkPhysicalDeviceProperties2 physical_device_properties {};
-	subgroup_size_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT;
+	subgroup_size_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
 	subgroup_properties.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-	subgroup_properties.pNext   =
-	    ctx->graphic_ctx.compute_wave_vulkan_state.extension_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION ?
-	        &subgroup_size_control : nullptr;
+	subgroup_properties.pNext   = &subgroup_size_control;
 	physical_device_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
 	physical_device_properties.pNext = &subgroup_properties;
 	vkGetPhysicalDeviceProperties2(ctx->graphic_ctx.physical_device, &physical_device_properties);
 	ctx->graphic_ctx.subgroup_size       = subgroup_properties.subgroupSize;
 	ctx->graphic_ctx.subgroup_stages     = subgroup_properties.supportedStages;
 	ctx->graphic_ctx.subgroup_operations = subgroup_properties.supportedOperations;
-	if (ctx->graphic_ctx.compute_wave_vulkan_state.extension_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION)
-	{
-		ctx->graphic_ctx.subgroup_min_size = subgroup_size_control.minSubgroupSize;
-		ctx->graphic_ctx.subgroup_max_size = subgroup_size_control.maxSubgroupSize;
-	} else
-	{
-		ctx->graphic_ctx.subgroup_min_size = subgroup_properties.subgroupSize;
-		ctx->graphic_ctx.subgroup_max_size = subgroup_properties.subgroupSize;
-	}
+	ctx->graphic_ctx.subgroup_min_size = subgroup_size_control.minSubgroupSize;
+	ctx->graphic_ctx.subgroup_max_size = subgroup_size_control.maxSubgroupSize;
 	auto& wave_state = ctx->graphic_ctx.compute_wave_vulkan_state;
 	wave_state.compute_required_size_supported =
-	    (subgroup_size_control.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
-	    wave_state.extension_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION;
+	    (subgroup_size_control.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+	wave_state.fragment_required_size_supported =
+	    (subgroup_size_control.requiredSubgroupSizeStages & VK_SHADER_STAGE_FRAGMENT_BIT) != 0;
+	wave_state.vertex_required_size_supported =
+	    (subgroup_size_control.requiredSubgroupSizeStages & VK_SHADER_STAGE_VERTEX_BIT) != 0;
+	wave_state.quad_operations_in_all_stages = subgroup_properties.quadOperationsInAllStages == VK_TRUE;
 	wave_state.compute_ballot_shuffle_supported =
 	    (subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
 	    (subgroup_properties.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0 &&
@@ -3040,14 +3090,15 @@ static void VulkanCreate(WindowContext* ctx)
 	wave_state.max_group_count[1] = device_properties.limits.maxComputeWorkGroupCount[1];
 	wave_state.max_group_count[2] = device_properties.limits.maxComputeWorkGroupCount[2];
 	wave_state.max_invocations = device_properties.limits.maxComputeWorkGroupInvocations;
-	wave_state.max_subgroups = wave_state.extension_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION ?
-	                               subgroup_size_control.maxComputeWorkgroupSubgroups : 0u;
+	wave_state.max_subgroups = subgroup_size_control.maxComputeWorkgroupSubgroups;
 	wave_state.max_shared_bytes = device_properties.limits.maxComputeSharedMemorySize;
 	VkPhysicalDeviceFeatures device_features {};
 	vkGetPhysicalDeviceFeatures(ctx->graphic_ctx.physical_device, &device_features);
 	ctx->graphic_ctx.depth_bias_clamp_supported    = device_features.depthBiasClamp == VK_TRUE;
 	ctx->graphic_ctx.sample_rate_shading_supported = device_features.sampleRateShading == VK_TRUE;
 	ctx->graphic_ctx.geometry_shader_supported = device_features.geometryShader == VK_TRUE;
+	ctx->graphic_ctx.blend_capabilities.max_color_attachments = device_properties.limits.maxColorAttachments;
+	ctx->graphic_ctx.blend_capabilities.max_dual_source_attachments = device_properties.limits.maxFragmentDualSrcAttachments;
 
 	KYTY_LOG_DEBUG("Select device: %s\n", device_properties.deviceName);
 
@@ -3059,12 +3110,15 @@ static void VulkanCreate(WindowContext* ctx)
 	                       ctx->graphic_ctx.color_write_enable_supported, ctx->graphic_ctx.depth_clip_enable_supported,
 	                       ctx->graphic_ctx.depth_clip_control_supported,
 	                       &ctx->graphic_ctx.compute_wave_vulkan_state, ctx->graphic_ctx.guest_device_address_supported,
-	                       ctx->graphic_ctx.compute_derivative_group_linear_supported);
+	                       ctx->graphic_ctx.compute_derivative_group_linear_supported,
+	                       ctx->graphic_ctx.shader_maximal_reconvergence_supported,
+	                       &ctx->graphic_ctx.blend_capabilities.enabled, &ctx->graphic_ctx.enabled_sampler_features);
 	if (ctx->graphic_ctx.device == nullptr)
 	{
 		EXIT("Could not create device");
 	}
 	ctx->graphic_ctx.compute_derivative_group_linear_enabled = ctx->graphic_ctx.compute_derivative_group_linear_supported;
+	ctx->graphic_ctx.shader_maximal_reconvergence_enabled    = ctx->graphic_ctx.shader_maximal_reconvergence_supported;
 
 	VulkanCreateQueues(&ctx->graphic_ctx, queues);
 
@@ -3226,15 +3280,10 @@ void WindowUpdateTitle()
 	g_window_ctx->host_window->SetTitle(fps.C_Str());
 }
 
-void WindowDrawBuffer(VideoOutVulkanImage* image)
+// Acquires the next swapchain image into swapchain->current_index.
+static void WindowAcquireSwapchainImage()
 {
-	KYTY_PROFILER_FUNCTION();
 	constexpr uint64_t host_wait_timeout_ns = 10000000000ULL;
-
-	EXIT_IF(image == nullptr);
-	EXIT_IF(g_window_ctx == nullptr);
-	EXIT_IF(g_window_ctx->swapchain == nullptr);
-	EXIT_IF(g_window_ctx->host_window == nullptr);
 
 	bool just_shown = false;
 	if (g_window_ctx->host_window->IsHidden())
@@ -3303,6 +3352,54 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	}
 	const auto acquire_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - acquire_start).count();
 	DebugStatsRecordAcquire(static_cast<uint64_t>(acquire_ns));
+}
+
+// Presents swapchain->current_index once render_finished is signalled.
+static void WindowQueuePresent(VkSemaphore* render_finished)
+{
+	VkResult result = VK_SUCCESS;
+	VkPresentInfoKHR present;
+	present.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	present.pNext              = nullptr;
+	present.swapchainCount     = 1;
+	present.pSwapchains        = &g_window_ctx->swapchain->swapchain;
+	present.pImageIndices      = &g_window_ctx->swapchain->current_index;
+	present.pWaitSemaphores    = render_finished;
+	present.waitSemaphoreCount = 1;
+	present.pResults           = nullptr;
+
+	const auto& queue = g_window_ctx->graphic_ctx.queues[GraphicContext::QUEUE_PRESENT];
+
+	const auto present_start = std::chrono::steady_clock::now();
+	{
+		EXIT_IF(queue.mutex == nullptr);
+		Core::LockGuard queue_lock(*queue.mutex);
+		result = vkQueuePresentKHR(queue.vk_queue, &present);
+	}
+	// OUT_OF_DATE / SUBOPTIMAL are normal after resize or first present; recreate
+	// the swapchain and continue. Only hard-fail other present errors.
+	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+	{
+		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
+	} else if (result != VK_SUCCESS)
+	{
+		VulkanSubmitFaultReport("present", result);
+		EXIT("vkQueuePresentKHR failed: result=%d\n", static_cast<int>(result));
+	}
+	const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
+	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
+}
+
+void WindowDrawBuffer(VideoOutVulkanImage* image)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_IF(image == nullptr);
+	EXIT_IF(g_window_ctx == nullptr);
+	EXIT_IF(g_window_ctx->swapchain == nullptr);
+	EXIT_IF(g_window_ctx->host_window == nullptr);
+
+	WindowAcquireSwapchainImage();
 
 	auto*      blt_src_image     = image;
 	auto*      blt_dst_image     = g_window_ctx->swapchain;
@@ -3326,9 +3423,14 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 			const uint32_t w = blt_src_image->extent.width;
 			const uint32_t h = blt_src_image->extent.height;
 			const bool hdr_present = (blt_src_image->format == VK_FORMAT_R16G16B16A16_SFLOAT);
+			// Packed 10-bit presents (2 bits of alpha): channel order follows the Vulkan format name, lowest bits first.
+			const bool ten_bit_abgr = (blt_src_image->format == VK_FORMAT_A2B10G10R10_UNORM_PACK32);
+			const bool ten_bit_argb = (blt_src_image->format == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
+			const bool ten_bit      = ten_bit_abgr || ten_bit_argb;
 			if (w > 0 && h > 0 && w <= 8192 && h <= 8192 &&
 			    (blt_src_image->format == VK_FORMAT_R8G8B8A8_SRGB || blt_src_image->format == VK_FORMAT_R8G8B8A8_UNORM ||
-			     blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB || blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM || hdr_present))
+			     blt_src_image->format == VK_FORMAT_B8G8R8A8_SRGB || blt_src_image->format == VK_FORMAT_B8G8R8A8_UNORM || hdr_present ||
+			     ten_bit))
 			{
 				static std::set<int> dumped_frames;
 				if (dumped_frames.insert(frame).second)
@@ -3389,6 +3491,25 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 						{
 							KYTY_LOG_DEBUG( "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
 						}
+					} else if (ten_bit)
+					{
+						std::vector<uint8_t> rgba(static_cast<size_t>(bytes));
+						for (uint64_t pixel = 0; pixel < static_cast<uint64_t>(w) * h; pixel++)
+						{
+							uint32_t word = 0;
+							std::memcpy(&word, pixels.data() + pixel * 4u, sizeof(word));
+							const uint32_t low  = word & 0x3ffu;
+							const uint32_t mid  = (word >> 10u) & 0x3ffu;
+							const uint32_t high = (word >> 20u) & 0x3ffu;
+							rgba[pixel * 4u + 0u] = static_cast<uint8_t>((ten_bit_abgr ? low : high) >> 2u);
+							rgba[pixel * 4u + 1u] = static_cast<uint8_t>(mid >> 2u);
+							rgba[pixel * 4u + 2u] = static_cast<uint8_t>((ten_bit_abgr ? high : low) >> 2u);
+							rgba[pixel * 4u + 3u] = 255u;
+						}
+						if (UtilWriteRgba8Png(path, rgba.data(), w, h, w))
+						{
+							KYTY_LOG_DEBUG( "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
+						}
 					} else
 					{
 						std::vector<uint8_t> rgba(static_cast<size_t>(bytes));
@@ -3415,7 +3536,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	}
 
 	DebugStatsRecordPresentSource(blt_src_image->extent.width, blt_src_image->extent.height, blt_dst_image->swapchain_extent.width,
-	                              blt_dst_image->swapchain_extent.height, static_cast<uint32_t>(blt_src_image->layout));
+	                              blt_dst_image->swapchain_extent.height, static_cast<uint32_t>(blt_src_image->layout), static_cast<uint32_t>(blt_src_image->format));
 
 	CommandBuffer buffer(GraphicContext::QUEUE_PRESENT);
 	// buffer.SetQueue(GraphicContext::QUEUE_PRESENT);
@@ -3464,36 +3585,7 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	auto* render_finished = &g_window_ctx->swapchain->render_finished_semaphores[g_window_ctx->swapchain->current_index];
 	buffer.ExecuteWithSemaphore(*render_finished);
 
-	VkPresentInfoKHR present;
-	present.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-	present.pNext              = nullptr;
-	present.swapchainCount     = 1;
-	present.pSwapchains        = &g_window_ctx->swapchain->swapchain;
-	present.pImageIndices      = &g_window_ctx->swapchain->current_index;
-	present.pWaitSemaphores    = render_finished;
-	present.waitSemaphoreCount = 1;
-	present.pResults           = nullptr;
-
-	const auto& queue = g_window_ctx->graphic_ctx.queues[GraphicContext::QUEUE_PRESENT];
-
-	const auto present_start = std::chrono::steady_clock::now();
-	{
-		EXIT_IF(queue.mutex == nullptr);
-		Core::LockGuard queue_lock(*queue.mutex);
-		result = vkQueuePresentKHR(queue.vk_queue, &present);
-	}
-	// OUT_OF_DATE / SUBOPTIMAL are normal after resize or first present; recreate
-	// the swapchain and continue. Only hard-fail other present errors.
-	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
-	{
-		VulkanRecreateSwapchain(&g_window_ctx->graphic_ctx, g_window_ctx->swapchain, 2);
-	} else if (result != VK_SUCCESS)
-	{
-		VulkanSubmitFaultReport("present", result);
-		EXIT("vkQueuePresentKHR failed: result=%d\n", static_cast<int>(result));
-	}
-	const auto present_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - present_start).count();
-	DebugStatsRecordPresent(static_cast<uint64_t>(present_ns));
+	WindowQueuePresent(render_finished);
 
 	g_window_ctx->native_capture.RecordPresent(WindowSteadyMs());
 	if (const auto callback = g_present_callback.load(std::memory_order_acquire); callback != nullptr)
@@ -3531,6 +3623,66 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 	// function returns. Make that lifetime boundary explicit: vkQueuePresentKHR
 	// only consumes the swapchain image, while the source image is protected
 	// through completion of this blit submission.
+	buffer.WaitForFence();
+}
+
+static void RecordBlankSwapchainImage(VkCommandBuffer vk_buffer, VkImage image)
+{
+	VkImageSubresourceRange range {};
+	range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	range.levelCount = 1;
+	range.layerCount = 1;
+
+	VkImageMemoryBarrier barrier {};
+	barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.srcAccessMask       = 0;
+	barrier.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+	barrier.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image               = image;
+	barrier.subresourceRange    = range;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+	                     &barrier);
+
+	const VkClearColorValue black {{0.0f, 0.0f, 0.0f, 1.0f}};
+	vkCmdClearColorImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &range);
+
+	barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+	barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+	barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
+	                     &barrier);
+}
+
+void WindowDrawBlank()
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_IF(g_window_ctx == nullptr);
+	EXIT_IF(g_window_ctx->swapchain == nullptr);
+	EXIT_IF(g_window_ctx->host_window == nullptr);
+
+	WindowAcquireSwapchainImage();
+
+	CommandBuffer buffer(GraphicContext::QUEUE_PRESENT);
+	EXIT_IF(buffer.IsInvalid());
+	auto* vk_buffer = buffer.GetPool()->buffers[buffer.GetIndex()];
+
+	buffer.Begin();
+	RecordBlankSwapchainImage(vk_buffer, g_window_ctx->swapchain->swapchain_images[g_window_ctx->swapchain->current_index]);
+	buffer.End();
+	auto* render_finished = &g_window_ctx->swapchain->render_finished_semaphores[g_window_ctx->swapchain->current_index];
+	buffer.ExecuteWithSemaphore(*render_finished);
+
+	WindowQueuePresent(render_finished);
+	g_window_ctx->native_capture.RecordPresent(WindowSteadyMs());
+	if (const auto callback = g_present_callback.load(std::memory_order_acquire); callback != nullptr)
+	{
+		callback(g_window_ctx->native_capture.present_count);
+	}
 	buffer.WaitForFence();
 }
 

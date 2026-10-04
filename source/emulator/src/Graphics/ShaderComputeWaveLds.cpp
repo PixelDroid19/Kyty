@@ -1,10 +1,5 @@
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
 
-#include "Emulator/Graphics/ShaderComputeWaveLdsSafety.h"
-
-#include <array>
-#include <limits>
-
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -15,7 +10,6 @@ constexpr uint32_t kDsEncodingPrefix    = 0x36u;
 constexpr uint32_t kDsWriteB32Opcode    = 0x0du;
 constexpr uint32_t kDsAddRtnU32Opcode   = 0x20u;
 constexpr uint32_t kDsReadB32Opcode     = 0x36u;
-constexpr uint32_t kLdsElementByteWidth = 4u;
 
 struct DsEncoding
 {
@@ -30,14 +24,6 @@ struct DsEncoding
 	uint32_t data0    = 0;
 	uint32_t address  = 0;
 };
-
-struct KnownVgprValue
-{
-	bool     known = false;
-	uint32_t value = 0;
-};
-
-using KnownVgprValues = std::array<KnownVgprValue, static_cast<size_t>(kMaxVgpr) + 1u>;
 
 bool ComputeWaveOperandIsPlain(const ShaderOperand& operand)
 {
@@ -106,17 +92,6 @@ uint32_t VgprIndex(const ShaderOperand& operand)
 	return static_cast<uint32_t>(operand.register_id);
 }
 
-bool IsComputeWaveLdsInstruction(const ShaderInstruction& instruction)
-{
-	switch (instruction.type)
-	{
-		case ShaderInstructionType::DsWriteB32:
-		case ShaderInstructionType::DsReadB32:
-		case ShaderInstructionType::DsAddRtnU32: return true;
-		default: return false;
-	}
-}
-
 bool IsDsWriteB32InstructionSupported(const ShaderInstruction& instruction)
 {
 	const auto encoding = DecodeDsEncoding(instruction);
@@ -147,116 +122,6 @@ bool IsDsAddRtnU32InstructionSupported(const ShaderInstruction& instruction)
 	       instruction.ds_offset == offset;
 }
 
-bool IsExecPair(const ShaderOperand& operand)
-{
-	return operand.type == ShaderOperandType::ExecLo && operand.register_id == 0 && operand.size == 2 && ComputeWaveOperandIsPlain(operand);
-}
-
-bool IsInlineNegativeOnePair(const ShaderOperand& operand)
-{
-	return operand.type == ShaderOperandType::IntegerInlineConstant && operand.size == 2 && operand.constant.i == -1 &&
-	       ComputeWaveOperandIsPlain(operand);
-}
-
-bool TryGetKnownVgprSource(const ShaderOperand& operand, const KnownVgprValues& values, uint32_t* value)
-{
-	if (value == nullptr || !ComputeWaveOperandIsPlain(operand))
-	{
-		return false;
-	}
-
-	switch (operand.type)
-	{
-		case ShaderOperandType::IntegerInlineConstant:
-		case ShaderOperandType::LiteralConstant:
-			if (operand.size != 0)
-			{
-				return false;
-			}
-			*value = operand.constant.u;
-			return true;
-		case ShaderOperandType::Vgpr:
-			if (!IsOrdinaryVgpr(operand) || !values.at(VgprIndex(operand)).known)
-			{
-				return false;
-			}
-			*value = values.at(VgprIndex(operand)).value;
-			return true;
-		default: return false;
-	}
-}
-
-void UpdateKnownVgprMove(const ShaderInstruction& instruction, bool full_exec, KnownVgprValues* values)
-{
-	if (values == nullptr || !IsOrdinaryVgpr(instruction.dst))
-	{
-		return;
-	}
-
-	uint32_t   source_value = 0;
-	const bool source_known = TryGetKnownVgprSource(instruction.src[0], *values, &source_value);
-	auto&      destination  = values->at(VgprIndex(instruction.dst));
-	if (full_exec && source_known)
-	{
-		destination = {.known = true, .value = source_value};
-		return;
-	}
-	if (!full_exec && source_known && destination.known && destination.value == source_value)
-	{
-		return;
-	}
-	destination.known = false;
-}
-
-bool ValidateLdsAddress(const ShaderInstruction& instruction, const ShaderComputeInputInfo& input, const KnownVgprValues& values,
-                        String8* reason)
-{
-	if (reason == nullptr)
-	{
-		return false;
-	}
-	if (input.lds_dwords == 0u)
-	{
-		*reason = "paired compute-wave LDS access requires a nonzero LDS allocation";
-		return false;
-	}
-	if (!IsOrdinaryVgpr(instruction.src[0]) || !values.at(VgprIndex(instruction.src[0])).known)
-	{
-		*reason = "paired compute-wave LDS address is not a proven constant";
-		return false;
-	}
-
-	const uint64_t address = values.at(VgprIndex(instruction.src[0])).value;
-	const uint64_t offset  = instruction.ds_offset;
-	if (address > std::numeric_limits<uint64_t>::max() - offset)
-	{
-		*reason = "paired compute-wave LDS address arithmetic overflows";
-		return false;
-	}
-	const uint64_t byte_address = address + offset;
-	if ((byte_address % kLdsElementByteWidth) != 0u)
-	{
-		*reason = "paired compute-wave LDS address is not four-byte aligned";
-		return false;
-	}
-
-	const uint64_t lds_bytes = static_cast<uint64_t>(input.lds_dwords) * kLdsElementByteWidth;
-	if (byte_address > std::numeric_limits<uint64_t>::max() - kLdsElementByteWidth || byte_address + kLdsElementByteWidth > lds_bytes)
-	{
-		*reason = "paired compute-wave LDS access exceeds the declared allocation";
-		return false;
-	}
-	return true;
-}
-
-ShaderComputeWaveAnalysisResult UnsupportedLdsInstruction(const ShaderInstruction& instruction, const String8& reason)
-{
-	ShaderComputeWaveAnalysisResult result {};
-	result.unsupported_pc = instruction.pc;
-	result.reason         = reason;
-	return result;
-}
-
 } // namespace
 
 bool ShaderComputeWaveLdsInstructionSupported(const ShaderInstruction& instruction)
@@ -270,59 +135,98 @@ bool ShaderComputeWaveLdsInstructionSupported(const ShaderInstruction& instructi
 	}
 }
 
-ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveLdsAccesses(const ShaderCode& code, const ShaderComputeInputInfo& input)
+bool ShaderLdsMemoryInstructionSupported(const ShaderInstruction& instruction)
 {
-	KnownVgprValues known_values {};
-	bool            full_exec = true;
-	for (const auto& instruction: code.GetInstructions())
+	uint32_t opcode = 0;
+	int words = 1;
+	int sources = 2;
+	bool result = false;
+	auto format = ShaderInstructionFormat::VaddrVdataOffset;
+	switch (instruction.type)
 	{
-		if (IsComputeWaveLdsInstruction(instruction))
-		{
-			if (!ShaderComputeWaveLdsInstructionSupported(instruction))
+		case ShaderInstructionType::DsWriteB32:
+			words = instruction.src[1].size;
+			switch (words)
 			{
-				return UnsupportedLdsInstruction(instruction, "paired compute-wave LDS tuple is not supported");
+				case 1: opcode = 0x0du; break;
+				case 2: opcode = 0x4du; break;
+				case 3: opcode = 0xdeu; break;
+				case 4: opcode = 0xdfu; break;
+				default: return false;
 			}
-
-			String8 reason;
-			if (!ValidateLdsAddress(instruction, input, known_values, &reason))
+			break;
+		case ShaderInstructionType::DsReadB32:
+			words = instruction.dst.size;
+			sources = 1;
+			result = true;
+			format = ShaderInstructionFormat::VdstVaddrOffset;
+			switch (words)
 			{
-				return UnsupportedLdsInstruction(instruction, reason);
+				case 1: opcode = 0x36u; break;
+				case 2: opcode = 0x76u; break;
+				case 3: opcode = 0xfeu; break;
+				case 4: opcode = 0xffu; break;
+				default: return false;
 			}
-		}
-
-		const auto kind = ShaderClassifyComputeWaveInstruction(instruction);
-		if (kind == ShaderComputeWaveInstructionKind::ScalarMask &&
-		    (IsExecPair(instruction.dst) || instruction.type == ShaderInstructionType::SAndSaveexecB64))
-		{
-			// Do not infer algebraic identities for newly admitted scalar masks.
-			// SAndSaveexecB64 also changes EXEC implicitly.
-			full_exec = false;
-		} else if (instruction.type == ShaderInstructionType::SMovB64 && IsExecPair(instruction.dst))
-		{
-			full_exec = IsInlineNegativeOnePair(instruction.src[0]) || (full_exec && IsExecPair(instruction.src[0]));
-		}
-
-		if (instruction.type == ShaderInstructionType::VMovB32)
-		{
-			UpdateKnownVgprMove(instruction, full_exec, &known_values);
-		} else if (IsOrdinaryVgpr(instruction.dst))
-		{
-			// LDS reads/atomic returns and every other admitted vector write lose
-			// any constant proof after their inputs have been inspected. This also
-			// keeps later banked ALU additions from retaining a stale address.
-			known_values.at(VgprIndex(instruction.dst)).known = false;
-		}
+			break;
+		case ShaderInstructionType::DsRead2B32:
+		case ShaderInstructionType::DsRead2St64B32:
+			opcode = instruction.type == ShaderInstructionType::DsRead2B32 ? 0x37u : 0x38u;
+			words = 2;
+			sources = 1;
+			result = true;
+			format = ShaderInstructionFormat::Vdst2VaddrOffset01;
+			break;
+		case ShaderInstructionType::DsWrite2B32:
+		case ShaderInstructionType::DsWrite2St64B32:
+			opcode = instruction.type == ShaderInstructionType::DsWrite2B32 ? 0x0eu : 0x0fu;
+			words = 1;
+			sources = 3;
+			format = ShaderInstructionFormat::VaddrVdata2Offset01;
+			break;
+		case ShaderInstructionType::DsAddRtnU32:
+		case ShaderInstructionType::DsWrxchgRtnB32:
+			opcode = instruction.type == ShaderInstructionType::DsAddRtnU32 ? 0x20u : 0x2du;
+			result = true;
+			format = ShaderInstructionFormat::VdstVaddrVdataOffset;
+			break;
+		case ShaderInstructionType::DsAddU32: opcode = 0x00u; break;
+		case ShaderInstructionType::DsSubU32: opcode = 0x01u; break;
+		case ShaderInstructionType::DsMinI32: opcode = 0x05u; break;
+		case ShaderInstructionType::DsMaxI32: opcode = 0x06u; break;
+		case ShaderInstructionType::DsMinU32: opcode = 0x07u; break;
+		case ShaderInstructionType::DsMaxU32: opcode = 0x08u; break;
+		case ShaderInstructionType::DsAndB32: opcode = 0x09u; break;
+		case ShaderInstructionType::DsOrB32: opcode = 0x0au; break;
+		case ShaderInstructionType::DsXorB32: opcode = 0x0bu; break;
+		// INC/DEC require DATA0's wrap limit (ISA 12.9), which the decoder
+		// currently drops. Neither unconditional increment nor decrement is exact.
+		default: return false;
 	}
-
-	const auto safety = ShaderAnalyzeComputeWaveLdsSafety(code, input);
-	if (!safety.supported)
+	const auto vgprs = [](const ShaderOperand& operand, int count)
 	{
-		return safety;
+		return operand.type == ShaderOperandType::Vgpr && operand.size == count && count > 0 &&
+		       operand.register_id >= 0 && operand.register_id <= kMaxVgpr - count + 1 && ComputeWaveOperandIsPlain(operand);
+	};
+	if (!IsExactDsTupleBase(instruction, format, sources) || !vgprs(instruction.src[0], 1) ||
+	    (sources >= 2 && !vgprs(instruction.src[1], result ? 1 : words)) || (sources == 3 && !vgprs(instruction.src[2], words)) ||
+	    (result ? !vgprs(instruction.dst, words) : !IsUnusedOperand(instruction.dst)))
+	{
+		return false;
 	}
-
-	ShaderComputeWaveAnalysisResult result {};
-	result.supported = true;
-	return result;
+	// Zero is the absent-encoding sentinel for explicitly constructed IR. A
+	// parsed DS always retains both raw words and must agree with the tuple.
+	if (instruction.ds_encoding_control == 0u)
+	{
+		return instruction.ds_encoding_registers == 0u;
+	}
+	const auto encoding = DecodeDsEncoding(instruction);
+	return HasSupportedDsControls(encoding) && encoding.opcode == opcode &&
+	       encoding.data1 == (sources == 3 ? VgprIndex(instruction.src[2]) : 0u) &&
+	       encoding.address == VgprIndex(instruction.src[0]) &&
+	       encoding.data0 == (sources >= 2 ? VgprIndex(instruction.src[1]) : 0u) &&
+	       encoding.vdst == (result ? VgprIndex(instruction.dst) : 0u) &&
+	       instruction.ds_offset == (encoding.offset0 | (encoding.offset1 << 8u));
 }
 
 } // namespace Kyty::Libs::Graphics

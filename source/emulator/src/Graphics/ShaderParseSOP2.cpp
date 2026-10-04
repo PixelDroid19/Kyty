@@ -57,9 +57,7 @@ KYTY_SHADER_PARSER(shader_parse_sop2)
 	switch (opcode)
 	{
 		case 0x00: inst.type = ShaderInstructionType::SAddU32; break;
-		// s_sub_u32: two's-complement subtract — identical result bits to the signed
-		// s_sub_i32; only the SCC borrow-flag semantics differ (unused here).
-		case 0x01: inst.type = ShaderInstructionType::SSubI32; break;
+		case 0x01: inst.type = ShaderInstructionType::SSubU32; break;
 		case 0x02: inst.type = ShaderInstructionType::SAddI32; break;
 		case 0x03: inst.type = ShaderInstructionType::SSubI32; break;
 		case 0x04: inst.type = ShaderInstructionType::SAddcU32; break;

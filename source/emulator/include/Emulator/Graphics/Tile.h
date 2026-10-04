@@ -87,14 +87,17 @@ uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, 
 [[nodiscard]] uint32_t TileGetStandard4KBContiguousElements(uint32_t x, uint32_t bytes_per_element);
 void     TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
                                         uint32_t bytes_per_element);
-// Gen5 kStandard4KB volumetric R32_UINT resources use 8x16x8 swizzle blocks.
-// These helpers are intentionally separate from the 2D layout above: a 3D
-// descriptor interleaves Z inside each 4 KiB block and therefore cannot be
-// represented as independently tiled 2D slices.
-uint64_t TileGetStandard4KB32VolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height);
-void     TileConvertStandard4KB32VolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
-                                                uint32_t pitch_elems);
-void     TileGetStandard4KB32VolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, TileSizeAlign* size);
+// Gen5 SW_4KB_S volumes (RDNA2 3D standard swizzle) interleave Z inside each 4 KiB block, so a 3D descriptor
+// cannot be represented as independently tiled 2D slices. The element size selects the block shape: 16x16x16
+// elements for 1 byte, 8x16x16 for 2, 8x16x8 for 4, 8x8x8 for 8 and 4x8x8 for 16. Blocks follow each other
+// along X, then Y, then Z; pitch_elems is the block-aligned row length in elements.
+[[nodiscard]] bool TileGetStandard4KBVolumeBlock(uint32_t bytes_per_element, uint32_t* width, uint32_t* height, uint32_t* depth);
+uint64_t TileGetStandard4KBVolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height,
+                                        uint32_t bytes_per_element);
+void     TileConvertStandard4KBVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
+                                              uint32_t pitch_elems, uint32_t bytes_per_element);
+[[nodiscard]] bool TileTryGetStandard4KBVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems,
+                                                   uint32_t bytes_per_element, TileSizeAlign* size);
 void     TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,
                             bool neo, TileSizeAlign* total_size, TileSizeOffset* level_sizes, TilePaddedSize* padded_size);
 void     TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,

@@ -559,7 +559,210 @@ bool MetaFillMatchesDestinationStore(const ShaderInstruction& inst, int destinat
 	       MetaFillOperandIsZeroSoffset(inst.src[2]);
 }
 
+constexpr int      k_uniform_buffer_fill_descriptor_words  = 4;
+constexpr uint32_t k_uniform_buffer_fill_max_shift         = 10u;
+constexpr uint32_t k_uniform_buffer_fill_instruction_count = 7u;
+
+bool UniformBufferFillOperandIsPlain(const ShaderOperand& operand)
+{
+	return operand.swizzle == 6 && !operand.dpp && !operand.absolute && !operand.negate &&
+	       !operand.clamp && operand.multiplier == 1.0f;
+}
+
+bool UniformBufferFillOperandIsVgpr(const ShaderOperand& operand, int register_id, int registers_num)
+{
+	return register_id >= 0 && operand.type == ShaderOperandType::Vgpr && operand.register_id == register_id &&
+	       operand.size == registers_num && UniformBufferFillOperandIsPlain(operand);
+}
+
+bool UniformBufferFillOperandIsSgpr(const ShaderOperand& operand, int register_id, int registers_num)
+{
+	return register_id >= 0 && operand.type == ShaderOperandType::Sgpr && operand.register_id == register_id &&
+	       operand.size == registers_num && UniformBufferFillOperandIsPlain(operand);
+}
+
+bool UniformBufferFillOperandIsZeroSoffset(const ShaderOperand& operand)
+{
+	return ((operand.type == ShaderOperandType::Null && operand.size == 0) ||
+	        ((operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant) &&
+	         operand.size == 0 && operand.constant.u == 0u)) &&
+	       UniformBufferFillOperandIsPlain(operand);
+}
+
+bool UniformBufferFillInstructionIsPadding(const ShaderInstruction& inst)
+{
+	// s_nop is currently represented by SInstPrefetch in the shader IR.
+	return (inst.type == ShaderInstructionType::SWaitcnt || inst.type == ShaderInstructionType::SInstPrefetch) &&
+	       inst.format == ShaderInstructionFormat::Imm && inst.src_num == 1 &&
+	       inst.src[0].type == ShaderOperandType::LiteralConstant && inst.src[0].size == 0 &&
+	       UniformBufferFillOperandIsPlain(inst.src[0]);
+}
+
+bool UniformBufferFillMatchesLinearIndex(const ShaderInstruction& inst, int* index_register, int* workgroup_register,
+	                                     uint32_t* workgroup_shift)
+{
+	if (index_register == nullptr || workgroup_register == nullptr || workgroup_shift == nullptr ||
+	    inst.type != ShaderInstructionType::VLshlAddU32 || inst.format != ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2 ||
+	    inst.src_num != 3 || inst.vop3_op_sel != 0 ||
+	    !UniformBufferFillOperandIsVgpr(inst.dst, inst.dst.register_id, 1) ||
+	    !UniformBufferFillOperandIsSgpr(inst.src[0], inst.src[0].register_id, 1) ||
+	    inst.src[1].type != ShaderOperandType::IntegerInlineConstant || inst.src[1].size != 0 ||
+	    inst.src[1].constant.u > k_uniform_buffer_fill_max_shift || !UniformBufferFillOperandIsPlain(inst.src[1]) ||
+	    !UniformBufferFillOperandIsVgpr(inst.src[2], 0, 1))
+	{
+		return false;
+	}
+
+	*index_register     = inst.dst.register_id;
+	*workgroup_register = inst.src[0].register_id;
+	*workgroup_shift    = inst.src[1].constant.u;
+	return true;
+}
+
+bool UniformBufferFillMatchesValueMove(const ShaderInstruction& inst, int destination_register, int* value_register)
+{
+	if (value_register == nullptr || inst.type != ShaderInstructionType::VMovB32 ||
+	    inst.format != ShaderInstructionFormat::SVdstSVsrc0 || inst.src_num != 1 || inst.vop3_op_sel != 0 ||
+	    !UniformBufferFillOperandIsVgpr(inst.dst, destination_register, 1) ||
+	    !UniformBufferFillOperandIsSgpr(inst.src[0], inst.src[0].register_id, 1))
+	{
+		return false;
+	}
+
+	*value_register = inst.src[0].register_id;
+	return true;
+}
+
+bool UniformBufferFillMatchesStore(const ShaderInstruction& inst, int index_register, int value_start_register,
+	                              int* destination_start_register)
+{
+	if (destination_start_register == nullptr || inst.type != ShaderInstructionType::BufferStoreFormatXyzw ||
+	    inst.format != ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen || inst.src_num != 3 || inst.vop3_op_sel != 0 ||
+	    !inst.buffer_idxen || inst.buffer_offen || inst.buffer_return_old_value || inst.buffer_imm_offset != 0u ||
+	    !UniformBufferFillOperandIsVgpr(inst.dst, value_start_register, k_uniform_buffer_fill_descriptor_words) ||
+	    !UniformBufferFillOperandIsVgpr(inst.src[0], index_register, 1) ||
+	    !UniformBufferFillOperandIsSgpr(inst.src[1], inst.src[1].register_id, k_uniform_buffer_fill_descriptor_words) ||
+	    !UniformBufferFillOperandIsZeroSoffset(inst.src[2]))
+	{
+		return false;
+	}
+
+	*destination_start_register = inst.src[1].register_id;
+	return true;
+}
+
 } // namespace
+
+ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(const ShaderCode& code)
+{
+	ShaderComputeUniformBufferFillEvidence result {};
+	const auto&                            instructions = code.GetInstructions();
+	if (code.GetType() != ShaderType::Compute || instructions.Size() == 0 || code.GetLabels().Size() != 0 ||
+	    code.GetIndirectLabels().Size() != 0)
+	{
+		return result;
+	}
+
+	uint32_t semantic_indices[k_uniform_buffer_fill_instruction_count] = {};
+	uint32_t semantic_count                                               = 0;
+	for (uint32_t instruction_index = 0; instruction_index < instructions.Size(); ++instruction_index)
+	{
+		if (UniformBufferFillInstructionIsPadding(instructions.At(instruction_index)))
+		{
+			continue;
+		}
+		if (semantic_count == k_uniform_buffer_fill_instruction_count)
+		{
+			return result;
+		}
+		semantic_indices[semantic_count++] = instruction_index;
+	}
+	if (semantic_count != k_uniform_buffer_fill_instruction_count)
+	{
+		return result;
+	}
+
+	// The four scalar copies are independent of the invocation index. Both
+	// consecutive group orderings are accepted, but interleaving remains outside
+	// this narrow proof.
+	uint32_t index_semantic_index = 0;
+	uint32_t moves_semantic_index = 0;
+	if (instructions.At(semantic_indices[0]).type == ShaderInstructionType::VLshlAddU32)
+	{
+		index_semantic_index = 0;
+		moves_semantic_index = 1;
+	} else if (instructions.At(semantic_indices[4]).type == ShaderInstructionType::VLshlAddU32)
+	{
+		index_semantic_index = 4;
+		moves_semantic_index = 0;
+	} else
+	{
+		return result;
+	}
+
+	int      index_register     = -1;
+	int      workgroup_register = -1;
+	uint32_t workgroup_shift    = 0;
+	if (!UniformBufferFillMatchesLinearIndex(instructions.At(semantic_indices[index_semantic_index]), &index_register,
+	                                         &workgroup_register, &workgroup_shift))
+	{
+		return result;
+	}
+
+	const int value_start_register = instructions.At(semantic_indices[moves_semantic_index]).dst.register_id;
+	const int64_t value_end_register = static_cast<int64_t>(value_start_register) +
+	                                   static_cast<int64_t>(k_uniform_buffer_fill_descriptor_words);
+	if (static_cast<int64_t>(index_register) >= static_cast<int64_t>(value_start_register) &&
+	    static_cast<int64_t>(index_register) < value_end_register)
+	{
+		return result;
+	}
+	// A move-first sequence must leave the hardware invocation-X VGPR intact
+	// until the linear-index instruction consumes v0. Index-first sequences
+	// have already consumed v0 and can reuse it as an output component.
+	if (moves_semantic_index < index_semantic_index && static_cast<int64_t>(value_start_register) <= 0 &&
+	    0 < value_end_register)
+	{
+		return result;
+	}
+
+	int value_registers[k_uniform_buffer_fill_descriptor_words] = {};
+	for (int component = 0; component < k_uniform_buffer_fill_descriptor_words; ++component)
+	{
+		const int64_t destination_register = static_cast<int64_t>(value_start_register) + component;
+		if (destination_register > INT32_MAX ||
+		    !UniformBufferFillMatchesValueMove(instructions.At(semantic_indices[moves_semantic_index + static_cast<uint32_t>(component)]),
+		                                       static_cast<int>(destination_register), &value_registers[component]) ||
+		    value_registers[component] == workgroup_register)
+		{
+			return result;
+		}
+	}
+
+	int destination_start_register = -1;
+	if (!UniformBufferFillMatchesStore(instructions.At(semantic_indices[5]), index_register, value_start_register,
+	                                   &destination_start_register))
+	{
+		return result;
+	}
+
+	const auto& end = instructions.At(semantic_indices[6]);
+	if (end.type != ShaderInstructionType::SEndpgm || end.format != ShaderInstructionFormat::Empty || end.src_num != 0 ||
+	    semantic_indices[6] + 1u != instructions.Size())
+	{
+		return result;
+	}
+
+	result.destination_start_register = destination_start_register;
+	result.workgroup_register         = workgroup_register;
+	result.workgroup_shift            = workgroup_shift;
+	for (int component = 0; component < k_uniform_buffer_fill_descriptor_words; ++component)
+	{
+		result.value_registers[component] = value_registers[component];
+	}
+	result.valid = true;
+	return result;
+}
 
 ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& code, int source_start_register,
 	                                                        int destination_start_register, int parameter_start_register)

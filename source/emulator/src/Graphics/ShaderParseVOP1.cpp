@@ -84,9 +84,12 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 	switch (opcode)
 	{
 		case 0x00:
+			// v_nop ignores its VDST and SRC0 fields.
 			inst.type    = ShaderInstructionType::VNop;
 			inst.format  = ShaderInstructionFormat::Empty;
 			inst.src_num = 0;
+			inst.dst     = ShaderOperand {};
+			inst.src[0]  = ShaderOperand {};
 			break;
 		case 0x01: inst.type = ShaderInstructionType::VMovB32; break;
 		case 0x02:
@@ -262,18 +265,9 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x42: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_movreld_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x43: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_movrels_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x44: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_movrelsd_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x42: inst.type = ShaderInstructionType::VMovreldB32; break;
+		case 0x43: inst.type = ShaderInstructionType::VMovrelsB32; break;
+		case 0x44: inst.type = ShaderInstructionType::VMovrelsdB32; break;
 		case 0x45:
 			// v_log_legacy_f32 has the same value operation as v_log_f32.
 			inst.type = ShaderInstructionType::VLogF32;
@@ -295,14 +289,8 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x57: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_log_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x58: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_exp_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x57: inst.type = ShaderInstructionType::VLogF16; break;
+		case 0x58: inst.type = ShaderInstructionType::VExpF16; break;
 		case 0x59: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_frexp_mant_f16 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
@@ -319,14 +307,8 @@ KYTY_SHADER_PARSER(shader_parse_vop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x60: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_sin_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x61: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cos_f16 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x60: inst.type = ShaderInstructionType::VSinF16; break;
+		case 0x61: inst.type = ShaderInstructionType::VCosF16; break;
 		case 0x62: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_sat_pk_u8_i16 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;

@@ -1,4 +1,5 @@
 #include "Emulator/Controller.h"
+#include "Emulator/ControllerState.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -16,6 +17,7 @@
 #include <cinttypes>
 #include <cmath>
 #include <cctype>
+#include <cstddef>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
@@ -73,6 +75,8 @@ struct PadData
 	uint8_t  device_unique_data[12];
 };
 
+// ScePadControllerInformation — 0x1C bytes. The trailing reserve is part of the
+// structure the guest passes in, so it is cleared with the rest.
 struct PadControllerInformation
 {
 	float    touch_pixel_density;
@@ -84,6 +88,7 @@ struct PadControllerInformation
 	uint8_t  connected_count;
 	bool     connected;
 	int      device_class;
+	uint8_t  reserve[8];
 };
 
 // ScePadExtControllerInformation — 0x40 bytes.
@@ -121,52 +126,32 @@ struct PadVibrationParam
 	uint8_t small_motor;
 };
 
-struct ControllerState
-{
-	uint64_t time                                  = 0;
-	uint32_t buttons                               = 0;
-	int      axes[static_cast<int>(Axis::AxisMax)] = {128, 128, 128, 128, 0, 0};
-};
+// The guest reads these records at fixed offsets. The 120-byte ScePadData layout
+// and the 28-byte controller information agree with the independently documented
+// native layouts (the sizes also bound every memset below).
+static_assert(sizeof(PadData) == 0x78);
+static_assert(offsetof(PadData, buttons) == 0x00);
+static_assert(offsetof(PadData, left_stick_x) == 0x04);
+static_assert(offsetof(PadData, analog_buttons_l2) == 0x08);
+static_assert(offsetof(PadData, orientation_x) == 0x0C);
+static_assert(offsetof(PadData, acceleration_x) == 0x1C);
+static_assert(offsetof(PadData, angular_velocity_x) == 0x28);
+static_assert(offsetof(PadData, touch_data_touch_num) == 0x34);
+static_assert(offsetof(PadData, connected) == 0x4C);
+static_assert(offsetof(PadData, timestamp) == 0x50);
+static_assert(offsetof(PadData, extension_unit_data_extension_unit_id) == 0x58);
+static_assert(offsetof(PadData, connected_count) == 0x68);
+static_assert(offsetof(PadData, device_unique_data_len) == 0x6B);
+static_assert(offsetof(PadData, device_unique_data) == 0x6C);
+static_assert(sizeof(PadControllerInformation) == 0x1C);
+static_assert(sizeof(PadExtControllerInformation) == 0x40);
 
-class GameController
-{
-public:
-	GameController()          = default;
-	virtual ~GameController() = default;
-
-	KYTY_CLASS_NO_COPY(GameController);
-
-	void Connect(int id);
-	void Disconnect(int id);
-	void Button(int id, uint32_t button, bool down);
-	void Axis(int id, Axis axis, int value);
-	void GetConnectionInfo(bool* flag, int* count);
-	void ReadState(ControllerState* state, bool* flag, int* count);
-	int  ReadStates(ControllerState* states, int states_num, bool* flag, int* count);
-
-private:
-	static constexpr uint32_t STATES_MAX = 64;
-
-	struct StatePrivate
-	{
-		bool obtained = false;
-	};
-
-	void                          CheckActive();
-	[[nodiscard]] ControllerState GetLastState() const;
-	void                          AddState(const ControllerState& state);
-
-	Core::Mutex     m_mutex;
-	Vector<int>     m_connected_ids;
-	int             m_active_id       = -1;
-	bool            m_connected       = false;
-	int             m_connected_count = 0;
-	ControllerState m_states[STATES_MAX];
-	StatePrivate    m_private[STATES_MAX];
-	ControllerState m_last_state;
-	uint32_t        m_states_num  = 0;
-	uint32_t        m_first_state = 0;
-};
+// Resting acceleration of a motionless virtual pad. The native record reports
+// acceleration in G (observed on hardware; another HLE scales host m/s^2 to G
+// the same way), so gravity is about 1.0, never 9.8. A zero sample can look like
+// a disconnected IMU; the axis is the one this HLE already used, not verified
+// against a physical DualSense.
+constexpr float kRestingAccelerationZ = 1.0f;
 
 static GameController* g_controller = nullptr;
 
@@ -1067,13 +1052,16 @@ void GameController::Disconnect(int id)
 	EXIT_IF(!m_connected_ids.Contains(id));
 
 	m_connected_ids.Remove(id);
+	if (id == CONTROLLER_KEYBOARD_ID)
+	{
+		m_keyboard_state = {};
+	}
 
 	CheckActive();
 }
 
 void GameController::CheckActive()
 {
-	bool reset          = false;
 	bool next_connected = false;
 	int  next_active    = CONTROLLER_KEYBOARD_ID;
 
@@ -1097,20 +1085,38 @@ void GameController::CheckActive()
 
 	if (m_connected != next_connected || (next_connected && m_active_id != next_active))
 	{
-		m_active_id = next_active;
-		m_connected = next_connected;
+		// Retire only the old physical source. Keyboard buttons remain held
+		// across physical-controller changes; axis ownership still follows the
+		// active controller and starts neutral on a change.
+		m_physical_state            = {};
+		const auto keyboard_buttons = m_keyboard_state.buttons;
+		m_keyboard_state            = {};
+		m_keyboard_state.buttons    = keyboard_buttons;
+		m_active_id                 = next_active;
+		m_connected                 = next_connected;
 		if (next_connected)
 		{
 			m_connected_count++;
 		}
-		reset = true;
 	}
 
-	if (reset)
+	AddSourceState();
+}
+
+void GameController::AddSourceState()
+{
+	auto state    = (m_active_id == CONTROLLER_KEYBOARD_ID ? m_keyboard_state : m_physical_state);
+	state.time    = Kernel::KernelGetProcessTime();
+	state.buttons = m_keyboard_state.buttons | m_physical_state.buttons;
+	if (state.axes[static_cast<int>(Controller::Axis::TriggerLeft)] > 0)
 	{
-		m_states_num = 0;
-		m_last_state = ControllerState();
+		state.buttons |= PAD_BUTTON_L2;
 	}
+	if (state.axes[static_cast<int>(Controller::Axis::TriggerRight)] > 0)
+	{
+		state.buttons |= PAD_BUTTON_R2;
+	}
+	AddState(state);
 }
 
 ControllerState GameController::GetLastState() const
@@ -1149,9 +1155,7 @@ void GameController::Button(int id, uint32_t button, bool down)
 
 	if (m_active_id == id || id == CONTROLLER_KEYBOARD_ID)
 	{
-		auto state = GetLastState();
-
-		state.time = Kernel::KernelGetProcessTime();
+		auto& state = (id == CONTROLLER_KEYBOARD_ID ? m_keyboard_state : m_physical_state);
 
 		if (down)
 		{
@@ -1161,7 +1165,7 @@ void GameController::Button(int id, uint32_t button, bool down)
 			state.buttons &= ~button;
 		}
 
-		AddState(state);
+		AddSourceState();
 	}
 }
 
@@ -1171,9 +1175,7 @@ void GameController::Axis(int id, Controller::Axis axis, int value)
 
 	if (m_active_id == id)
 	{
-		auto state = GetLastState();
-
-		state.time = Kernel::KernelGetProcessTime();
+		auto& state = (id == CONTROLLER_KEYBOARD_ID ? m_keyboard_state : m_physical_state);
 
 		int axis_id = static_cast<int>(axis);
 
@@ -1181,29 +1183,7 @@ void GameController::Axis(int id, Controller::Axis axis, int value)
 
 		state.axes[axis_id] = value;
 
-		if (axis == Controller::Axis::TriggerLeft)
-		{
-			if (value > 0)
-			{
-				state.buttons |= PAD_BUTTON_L2;
-			} else
-			{
-				state.buttons &= ~PAD_BUTTON_L2;
-			}
-		}
-
-		if (axis == Controller::Axis::TriggerRight)
-		{
-			if (value > 0)
-			{
-				state.buttons |= PAD_BUTTON_R2;
-			} else
-			{
-				state.buttons &= ~PAD_BUTTON_R2;
-			}
-		}
-
-		AddState(state);
+		AddSourceState();
 	}
 }
 
@@ -1428,7 +1408,10 @@ int KYTY_SYSV_ABI PadSetMotionSensorState(int handle, bool enable)
 {
 	PRINT_NAME();
 
-	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
 
 	KYTY_LOG_DEBUG("\t enable = %s\n", (enable ? "true" : "false"));
 
@@ -1499,11 +1482,18 @@ int KYTY_SYSV_ABI PadGetControllerInformation(int handle, PadControllerInformati
 	int  connected_count = 0;
 	bool connected       = false;
 
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (info == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+
 	g_controller->GetConnectionInfo(&connected, &connected_count);
 
-	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (info == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
+	std::memset(info, 0, sizeof(*info));
 	FillPadControllerInformation(info, connected_count);
 
 	return OK;
@@ -1588,10 +1578,20 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	bool            connected       = false;
 	ControllerState state;
 
+	if (data == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+
 	g_controller->ReadState(&state, &connected, &connected_count);
 
-	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	// Every byte of the record is defined: padding, the extension unit and the
+	// reserve stay zero, and `connected` reads the same as a 32-bit boolean.
+	std::memset(data, 0, sizeof(*data));
 
 	// Optional diagnostic (KYTY_AUTO_CROSS=1): synthesize button edges so multi-
 	// screen splash/title flows can advance without a physical pad. Continuous
@@ -1658,10 +1658,9 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	data->orientation_y          = 0.0f;
 	data->orientation_z          = 0.0f;
 	data->orientation_w          = 1.0f;
-	// Resting DualSense gravity (m/s^2); zero accel can look like a disconnected IMU sample.
 	data->acceleration_x         = 0.0f;
 	data->acceleration_y         = 0.0f;
-	data->acceleration_z         = 9.8f;
+	data->acceleration_z         = kRestingAccelerationZ;
 	data->angular_velocity_x     = 0.0f;
 	data->angular_velocity_y     = 0.0f;
 	data->angular_velocity_z     = 0.0f;
@@ -1684,9 +1683,14 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 {
 	PRINT_NAME();
 
-	if (num < 1 || num > 64) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (data == nullptr || num < 1 || num > 64)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
 
 	EXIT_IF(g_controller == nullptr);
 
@@ -1701,6 +1705,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 
 	for (int i = 0; i < ret_num; i++)
 	{
+		std::memset(&data[i], 0, sizeof(data[i]));
 		data[i].buttons                = states[i].buttons | scripted.buttons;
 		data[i].left_stick_x           = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::LeftX))) != 0
 		                                    ? script_axis(scripted.left_x)
@@ -1726,7 +1731,7 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 		data[i].orientation_w          = 1.0f;
 		data[i].acceleration_x         = 0.0f;
 		data[i].acceleration_y         = 0.0f;
-		data[i].acceleration_z         = 0.0f;
+		data[i].acceleration_z         = kRestingAccelerationZ;
 		data[i].angular_velocity_x     = 0.0f;
 		data[i].angular_velocity_y     = 0.0f;
 		data[i].angular_velocity_z     = 0.0f;
@@ -1793,7 +1798,14 @@ int KYTY_SYSV_ABI PadSetVibration(int handle, const PadVibrationParam* param)
 {
 	PRINT_NAME();
 
-	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (param == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
 
 	KYTY_LOG_DEBUG("\t large_motor = %d\n", static_cast<int>(param->large_motor));
 	KYTY_LOG_DEBUG("\t small_motor = %d\n", static_cast<int>(param->small_motor));
@@ -1805,7 +1817,10 @@ int KYTY_SYSV_ABI PadResetLightBar(int handle)
 {
 	PRINT_NAME();
 
-	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
 
 	return OK;
 }
@@ -1814,8 +1829,14 @@ int KYTY_SYSV_ABI PadSetLightBar(int handle, const PadLightBarParam* param)
 {
 	PRINT_NAME();
 
-	if (handle != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-	if (param == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (!IsPrimaryPadHandle(handle))
+	{
+		return PAD_ERROR_INVALID_HANDLE;
+	}
+	if (param == nullptr)
+	{
+		return PAD_ERROR_INVALID_ARG;
+	}
 
 	return OK;
 }

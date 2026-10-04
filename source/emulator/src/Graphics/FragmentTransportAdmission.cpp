@@ -8,19 +8,8 @@
 namespace Kyty::Libs::Graphics::FragmentTransport {
 namespace {
 
-constexpr uint32_t kQuadLocalDppLimit = 0xffu;
 constexpr uint32_t kGuestWaveWidth    = 64u;
 constexpr uint32_t kHostSubgroupWidth = 32u;
-
-bool RowDpp(const ShaderInstruction& instruction)
-{
-	return instruction.src_num > 0 && instruction.src[0].dpp && instruction.src[0].dpp_ctrl > kQuadLocalDppLimit;
-}
-
-bool Permute(const ShaderInstruction& instruction)
-{
-	return instruction.type == ShaderInstructionType::VPermlane16B32 || instruction.type == ShaderInstructionType::VPermlanex16B32;
-}
 
 bool SubgroupWidthsSupported(const ShaderComputeWaveVulkanState& state)
 {
@@ -32,18 +21,9 @@ bool SubgroupWidthsSupported(const ShaderComputeWaveVulkanState& state)
 
 bool ProgramRequiresWaveTransport(const ShaderCode& code)
 {
-	if (code.GetType() != ShaderType::Pixel)
-	{
-		return false;
-	}
-	for (const auto& instruction: code.GetInstructions())
-	{
-		if (RowDpp(instruction) || Permute(instruction))
-		{
-			return true;
-		}
-	}
-	return false;
+	// This asks whether admission is necessary, not whether transport is already
+	// implemented. Packed scalar masks and SGPR compare/carry results matter too.
+	return code.GetType() == ShaderType::Pixel && ShaderUsesNativeWaveState(code);
 }
 
 const char* MissingHostCapability(const GraphicContext& context)

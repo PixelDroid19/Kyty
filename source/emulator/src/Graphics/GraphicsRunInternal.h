@@ -281,12 +281,13 @@ public:
 	                        uint32_t interrupt_selector);
 	void WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
 	                        uint32_t event_index, uint32_t event_write_source, void* dst_gpu_addr, uint64_t value,
-	                        uint32_t interrupt_selector);
+	                        uint32_t interrupt_selector, uint32_t interrupt_context_id);
 	void Flip();
 	void Flip(void* dst_gpu_addr, uint32_t value);
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value);
 	void QueueQueuedGraphicsInterrupt();
 	void WriteBack();
+	void WaitDeviceAddressWriteBacks();
 	void MemoryBarrier();
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
@@ -319,15 +320,12 @@ public:
 	{
 		uint32_t*   data             = nullptr;
 		uint32_t    num_dw           = 0;
-		uint32_t*   resume_data      = nullptr;
-		uint32_t    resume_num_dw    = 0;
 		const void* address          = nullptr;
 		uint64_t    reference        = 0;
 		uint64_t    mask             = 0;
 		uint32_t    function         = 0;
 		uint32_t    size             = 0;
 		uint64_t    blocked_since_ns = 0;
-		bool        skip_wait        = false;
 	};
 
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);

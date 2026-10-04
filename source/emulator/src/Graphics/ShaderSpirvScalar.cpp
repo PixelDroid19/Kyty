@@ -1081,15 +1081,58 @@ KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02)
 	return false;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
+// WQM is a numeric operation on a packed architectural word, independent of
+// the register that holds it. The native adapter refreshes the EXEC lane view
+// after a mask destination write, just as it does for any other scalar ALU.
+KYTY_RECOMPILER_FUNC(Recompile_SWqmB32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
 
-	// Paired mode stores the actual mask and must expand its quads explicitly.
-	if (!spirv->UsesComputeWaveBanks() && inst.dst.type == ShaderOperandType::ExecLo && inst.src[0].type == ShaderOperandType::ExecLo)
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	if (dst_value.type != SpirvType::Uint)
 	{
-		return true;
+		return false;
 	}
+
+	String8 index_str = String8::FromPrintf("%u", index);
+	String8 load0;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+        <load0>
+        %wqm_q0_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_0 %uint_15
+        %wqm_r0_<index> = OpBitwiseOr %uint %uint_0 %wqm_q0_<index>
+        %wqm_q1_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_4 %uint_240
+        %wqm_r1_<index> = OpBitwiseOr %uint %wqm_r0_<index> %wqm_q1_<index>
+        %wqm_q2_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_8 %uint_0x00000f00
+        %wqm_r2_<index> = OpBitwiseOr %uint %wqm_r1_<index> %wqm_q2_<index>
+        %wqm_q3_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_12 %uint_0x0000f000
+        %wqm_r3_<index> = OpBitwiseOr %uint %wqm_r2_<index> %wqm_q3_<index>
+        %wqm_q4_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_16 %uint_0x000f0000
+        %wqm_r4_<index> = OpBitwiseOr %uint %wqm_r3_<index> %wqm_q4_<index>
+        %wqm_q5_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_20 %uint_0x00f00000
+        %wqm_r5_<index> = OpBitwiseOr %uint %wqm_r4_<index> %wqm_q5_<index>
+        %wqm_q6_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_24 %uint_0x0f000000
+        %wqm_r6_<index> = OpBitwiseOr %uint %wqm_r5_<index> %wqm_q6_<index>
+        %wqm_q7_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_28 %uint_0xf0000000
+        %wqm_r7_<index> = OpBitwiseOr %uint %wqm_r6_<index> %wqm_q7_<index>
+)";
+
+	*dst_source += String8(text).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
+
+	*dst_source += String8("OpStore %<dst> %wqm_r7_<index>\n<scc>\n<execz>\n")
+	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 1))
+	                   .ReplaceStr("<execz>", operand_is_exec(inst.dst) ? EXECZ : "")
+	                   .ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
+{
+	const auto& inst = code.GetInstructions().At(index);
 
 	String8 index_str = String8::FromPrintf("%u", index);
 

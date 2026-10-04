@@ -102,6 +102,22 @@ struct VertexClipProbeAttachmentDeltaStats
 	bool     coverage_bounds_available           = false;
 };
 
+inline constexpr uint32_t kVertexScalarBufferProbeSites = 8u;
+inline constexpr uint32_t kVertexScalarBufferProbeWords = 24u;
+
+// One elected invocation per static scalar-load site. Descriptors/offsets are
+// copied before the original load; only its actual destination words follow it.
+struct VertexScalarBufferProbeRawStats
+{
+	uint32_t claimed = 0;
+	uint32_t instruction_pc = 0;
+	uint32_t components = 0;
+	uint32_t byte_offset = 0;
+	uint32_t descriptor[4] = {};
+	uint32_t values[16] = {};
+};
+static_assert(sizeof(VertexScalarBufferProbeRawStats) == kVertexScalarBufferProbeWords * sizeof(uint32_t));
+
 struct VertexClipProbeRawStats
 {
 	uint32_t invocations = 0;
@@ -166,6 +182,9 @@ struct VertexClipProbeRawStats
 	uint32_t max_pixel_frag_x = 0;
 	uint32_t min_pixel_frag_y = std::numeric_limits<uint32_t>::max();
 	uint32_t max_pixel_frag_y = 0;
+	// Append-only bounded scalar-load observations. Ordinary shaders neither
+	// allocate this diagnostic buffer nor emit its atomic claims.
+	VertexScalarBufferProbeRawStats scalar_buffer[kVertexScalarBufferProbeSites] {};
 };
 
 struct VertexClipProbeResultInfo

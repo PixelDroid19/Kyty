@@ -7,6 +7,8 @@
 #include "Emulator/Log.h"
 
 #include <atomic>
+#include <cstring>
+#include <mutex>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -49,14 +51,70 @@ namespace ImeDialog {
 
 LIB_NAME("ImeDialog", "ImeDialog");
 
-// The dialog starts unused. Until sceImeDialogInit is implemented, no supported
-// call can transition this state, so GetStatus accurately reports STATUS_NONE.
-static std::atomic<int> g_status {CommonDialog::STATUS_NONE};
+static std::mutex g_mutex;
+static int        g_status     = STATUS_NONE;
+static uint32_t   g_end_status = END_STATUS_OK;
+
+int KYTY_SYSV_ABI ImeDialogInit(const ImeDialogParam* param, const void* /*extended*/)
+{
+	PRINT_NAME();
+	if (param == nullptr || param->input_text_buffer == nullptr || param->max_text_length == 0)
+	{
+		EXIT("sceImeDialogInit: unsupported parameters (param=%p buffer=%p max=%u)\n", static_cast<const void*>(param),
+		     param != nullptr ? static_cast<void*>(param->input_text_buffer) : nullptr,
+		     param != nullptr ? param->max_text_length : 0u);
+	}
+	std::lock_guard lock(g_mutex);
+	if (g_status != STATUS_NONE)
+	{
+		EXIT("sceImeDialogInit: a dialog is already open (status %d)\n", g_status);
+	}
+	// No on-screen keyboard exists: the user accepts the text the title placed in the buffer.
+	g_status     = STATUS_FINISHED;
+	g_end_status = END_STATUS_OK;
+	return OK;
+}
 
 int KYTY_SYSV_ABI ImeDialogGetStatus()
 {
 	PRINT_NAME();
-	return g_status.load(std::memory_order_acquire);
+	std::lock_guard lock(g_mutex);
+	return g_status;
+}
+
+int KYTY_SYSV_ABI ImeDialogGetResult(ImeDialogResult* result)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_mutex);
+	if (result == nullptr || g_status != STATUS_FINISHED)
+	{
+		EXIT("sceImeDialogGetResult: no finished dialog (result=%p status %d)\n", static_cast<void*>(result), g_status);
+	}
+	std::memset(result, 0, sizeof(*result));
+	result->end_status = g_end_status;
+	return OK;
+}
+
+int KYTY_SYSV_ABI ImeDialogAbort()
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_mutex);
+	if (g_status == STATUS_NONE)
+	{
+		EXIT("sceImeDialogAbort: no dialog is open\n");
+	}
+	g_status     = STATUS_FINISHED;
+	g_end_status = END_STATUS_ABORTED;
+	return OK;
+}
+
+int KYTY_SYSV_ABI ImeDialogTerm()
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_mutex);
+	g_status     = STATUS_NONE;
+	g_end_status = END_STATUS_OK;
+	return OK;
 }
 
 } // namespace ImeDialog

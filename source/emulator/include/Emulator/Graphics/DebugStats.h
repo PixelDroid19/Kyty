@@ -176,6 +176,7 @@ struct DebugStatsSnapshot
 	uint32_t present_dst_w      = 0;
 	uint32_t present_dst_h      = 0;
 	uint32_t present_src_layout = 0; // VkImageLayout as uint
+	uint32_t present_src_format = 0; // VkFormat as uint
 };
 
 enum class DebugStatsWaitRegMemClass: uint8_t
@@ -305,6 +306,7 @@ struct DebugStatsPerformanceSnapshot
 	uint32_t present_dst_w         = 0;
 	uint32_t present_dst_h         = 0;
 	uint32_t present_src_layout    = 0;
+	uint32_t present_src_format    = 0; // VkFormat of the guest display buffer
 	uint64_t wait_reg_mem          = 0;
 	uint64_t wait_reg_mem_ns       = 0;
 	uint64_t wait_reg_mem_max_ns   = 0;
@@ -527,7 +529,8 @@ private:
 };
 
 // Call from WindowDrawBuffer with the guest display image and swapchain extent.
-void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout);
+void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout,
+                                   uint32_t src_format);
 
 // Refresh one-second rates and host CPU/RSS. Call from the window/present thread.
 DebugStatsSnapshot DebugStatsTick(double now_seconds);

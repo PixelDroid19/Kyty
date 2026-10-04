@@ -13,6 +13,8 @@
 #include "Emulator/Graphics/VertexClipProbe.h"
 
 #include <bitset>
+#include <memory>
+#include <mutex>
 #include <vector>
 #include <algorithm>
 #ifdef KYTY_EMU_ENABLED
@@ -86,12 +88,25 @@ enum class ShaderInstructionType : uint32_t
 	DsXorB32,
 	DsReadB32,
 	DsRead2B32,
+	DsRead2St64B32,
 	DsWriteB32,
+	// ds_write2[st64]_b32: two dwords at ADDR + OFFSET0 * 4 and ADDR + OFFSET1 * 4 (times 64 for st64).
+	DsWrite2B32,
+	DsWrite2St64B32,
+	// ds_write_addtid_b32 / ds_read_addtid_b32: per-lane LDS slot at
+	// M0[15:0] + offset + TID*4 (RDNA2 ISA 10.4). In graphics stages the
+	// slot is private to the invocation (compiler spill/reload idiom).
+	DsWriteAddtidB32,
+	DsReadAddtidB32,
 	DsWrxchgRtnB32,
 	SBitcmp0B32,
 	SBitcmp1B32,
 	SBitcmp0B64,
 	SBitcmp1B64,
+	SBcnt0I32B32,
+	SBcnt0I32B64,
+	SBcnt1I32B32,
+	SBcnt1I32B64,
 	SFf1I32B32,
 	SFf1I32B64,
 	STrap,
@@ -215,6 +230,7 @@ enum class ShaderInstructionType : uint32_t
 	SSubI32,
 	SWaitcnt,
 	SWaitcntDepctr,
+	SWqmB32,
 	SWqmB64,
 	SXnorB32,
 	SXorB32,
@@ -429,8 +445,12 @@ enum class ShaderInstructionType : uint32_t
 	VInterpP2F32,
 	VLogF32,
 	VLogF16,
+	// VOP3 0x362: dst.f = src0.f * 2**src1.i; src1 is a signed integer exponent.
+	VLdexpF32,
 	VAddLshlU32,
 	VLshlAddU32,
+	// VOP3 0x345: dst = (src0 ^ src1) + src2 (u32, SHA256 idiom).
+	VXadU32,
 	VLshlB32,
 	VLshlOrB32,
 	VLshlrevB32,
@@ -480,6 +500,12 @@ enum class ShaderInstructionType : uint32_t
 	VMinI32,
 	VMinU32,
 	VMovB32,
+	// M0-relative VGPR moves. The source and/or destination register index is
+	// offset by M0 at run time; lowering resolves M0 only when provably literal.
+	VMovrelsB32,
+	VMovreldB32,
+	VMovrelsdB32,
+	VMovrelsd2B32,
 	// VOP1/VOP3 v_nop: padding; SPIR-V emits nothing.
 	VNop,
 	VMulF32,
@@ -551,6 +577,7 @@ enum class ShaderInstructionType : uint32_t
 	VCmpClassF32,
 	VPermlane16B32,
 	VPermlanex16B32,
+	SSubU32,
 
 	ZMax
 };
@@ -599,12 +626,40 @@ enum FormatByte : uint64_t
 	Param3, // param3
 	Param4, // param4
 	Param5, // param5 — Gen5 VS export target 0x25
-	Param6, // param6 — Gen5 VS export target 0x26 (EXP range 0x20+N)
-	Param7, // param7 — Gen5 VS export target 0x27 (EXP range 0x20+N)
+	Param6,  // param6 — Gen5 VS export target 0x26 (EXP range 0x20+N)
+	Param7,  // param7 — Gen5 VS export target 0x27 (EXP range 0x20+N)
+	Param8,  // param8 — Gen5 VS export target 0x28 (EXP range 0x20+N)
+	Param9,  // param9 — Gen5 VS export target 0x29 (EXP range 0x20+N)
+	Param10, // param10 — Gen5 VS export target 0x2a (EXP range 0x20+N)
+	Param11, // param11 — Gen5 VS export target 0x2b (EXP range 0x20+N)
+	Param12, // param12 — Gen5 VS export target 0x2c (EXP range 0x20+N)
+	Param13, // param13 — Gen5 VS export target 0x2d (EXP range 0x20+N)
+	Param14, // param14 — Gen5 VS export target 0x2e (EXP range 0x20+N)
+	Param15, // param15 — Gen5 VS export target 0x2f (EXP range 0x20+N)
+	Param16, // param16 — Gen5 VS export target 0x30 (EXP range 0x20+N)
+	Param17, // param17 — Gen5 VS export target 0x31 (EXP range 0x20+N)
+	Param18, // param18 — Gen5 VS export target 0x32 (EXP range 0x20+N)
+	Param19, // param19 — Gen5 VS export target 0x33 (EXP range 0x20+N)
+	Param20, // param20 — Gen5 VS export target 0x34 (EXP range 0x20+N)
+	Param21, // param21 — Gen5 VS export target 0x35 (EXP range 0x20+N)
+	Param22, // param22 — Gen5 VS export target 0x36 (EXP range 0x20+N)
+	Param23, // param23 — Gen5 VS export target 0x37 (EXP range 0x20+N)
+	Param24, // param24 — Gen5 VS export target 0x38 (EXP range 0x20+N)
+	Param25, // param25 — Gen5 VS export target 0x39 (EXP range 0x20+N)
+	Param26, // param26 — Gen5 VS export target 0x3a (EXP range 0x20+N)
+	Param27, // param27 — Gen5 VS export target 0x3b (EXP range 0x20+N)
+	Param28, // param28 — Gen5 VS export target 0x3c (EXP range 0x20+N)
+	Param29, // param29 — Gen5 VS export target 0x3d (EXP range 0x20+N)
+	Param30, // param30 — Gen5 VS export target 0x3e (EXP range 0x20+N)
+	Param31, // param31 — Gen5 VS export target 0x3f (EXP range 0x20+N)
 	Mrt0,   // mrt_color0
 	Mrt1,   // mrt_color1
 	Mrt2,   // mrt_color2
 	Mrt3,   // mrt_color3 — captured EXP target 0x03
+	Mrt4,   // mrt_color4 — EXP target 0x04
+	Mrt5,   // mrt_color5
+	Mrt6,   // mrt_color6
+	Mrt7,   // mrt_color7
 	Prim,   // prim
 	Off,    // off
 	Compr,  // compr
@@ -629,6 +684,7 @@ enum FormatByte : uint64_t
 	MimgDmask, // dmask carried by ShaderInstruction::mimg_dmask
 	PixelZ, // pixel Z
 	NullTarget, // pixel valid mask without data
+	DsOff,  // byte offset carried by ShaderInstruction::ds_offset
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -655,16 +711,28 @@ enum Format : uint64_t
 	Mrt1OffOffComprVmDone = FormatDefine({Mrt1, Off, Off, Compr, Vm, Done}),
 	Mrt2OffOffComprVmDone = FormatDefine({Mrt2, Off, Off, Compr, Vm, Done}),
 	Mrt3OffOffComprVmDone = FormatDefine({Mrt3, Off, Off, Compr, Vm, Done}),
+	Mrt4OffOffComprVmDone = FormatDefine({Mrt4, Off, Off, Compr, Vm, Done}),
+	Mrt5OffOffComprVmDone = FormatDefine({Mrt5, Off, Off, Compr, Vm, Done}),
+	Mrt6OffOffComprVmDone = FormatDefine({Mrt6, Off, Off, Compr, Vm, Done}),
+	Mrt7OffOffComprVmDone = FormatDefine({Mrt7, Off, Off, Compr, Vm, Done}),
 	// Compressed half2 MRT export (en=0xf, compr=1). Done may be 0 or 1;
 	// the "Done" token in the Mrt0 format name is historical.
 	Mrt0Vsrc0Vsrc1ComprVmDone           = FormatDefine({Mrt0, S0, S1, Compr, Vm, Done}),
 	Mrt1Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt1, S0, S1, Compr, Vm}),
 	Mrt2Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt2, S0, S1, Compr, Vm}),
 	Mrt3Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt3, S0, S1, Compr, Vm}),
+	Mrt4Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt4, S0, S1, Compr, Vm}),
+	Mrt5Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt5, S0, S1, Compr, Vm}),
+	Mrt6Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt6, S0, S1, Compr, Vm}),
+	Mrt7Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt7, S0, S1, Compr, Vm}),
 	Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone      = FormatDefine({Mrt0, S0, S1, S2, S3, Vm, Done}),
 	Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt1, S0, S1, S2, S3, Vm}),
 	Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt2, S0, S1, S2, S3, Vm}),
 	Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt3, S0, S1, S2, S3, Vm}),
+	Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt4, S0, S1, S2, S3, Vm}),
+	Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt5, S0, S1, S2, S3, Vm}),
+	Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt6, S0, S1, S2, S3, Vm}),
+	Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt7, S0, S1, S2, S3, Vm}),
 	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1, done=1.
 	PixelZVsrc0VmDone                    = FormatDefine({PixelZ, S0, Vm, Done}),
 	Param0Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param0, S0, S1, S2, S3}),
@@ -675,6 +743,30 @@ enum Format : uint64_t
 	Param5Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param5, S0, S1, S2, S3}),
 	Param6Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param6, S0, S1, S2, S3}),
 	Param7Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param7, S0, S1, S2, S3}),
+	Param8Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param8, S0, S1, S2, S3}),
+	Param9Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param9, S0, S1, S2, S3}),
+	Param10Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param10, S0, S1, S2, S3}),
+	Param11Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param11, S0, S1, S2, S3}),
+	Param12Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param12, S0, S1, S2, S3}),
+	Param13Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param13, S0, S1, S2, S3}),
+	Param14Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param14, S0, S1, S2, S3}),
+	Param15Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param15, S0, S1, S2, S3}),
+	Param16Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param16, S0, S1, S2, S3}),
+	Param17Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param17, S0, S1, S2, S3}),
+	Param18Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param18, S0, S1, S2, S3}),
+	Param19Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param19, S0, S1, S2, S3}),
+	Param20Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param20, S0, S1, S2, S3}),
+	Param21Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param21, S0, S1, S2, S3}),
+	Param22Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param22, S0, S1, S2, S3}),
+	Param23Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param23, S0, S1, S2, S3}),
+	Param24Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param24, S0, S1, S2, S3}),
+	Param25Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param25, S0, S1, S2, S3}),
+	Param26Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param26, S0, S1, S2, S3}),
+	Param27Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param27, S0, S1, S2, S3}),
+	Param28Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param28, S0, S1, S2, S3}),
+	Param29Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param29, S0, S1, S2, S3}),
+	Param30Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param30, S0, S1, S2, S3}),
+	Param31Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param31, S0, S1, S2, S3}),
 	Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done        = FormatDefine({Pos0, S0, S1, S2, S3, Done}),
 	Pos1OffOffVsrc0Off                = FormatDefine({Pos1, Off, Off, S0, Off}),
 	PrimVsrc0OffOffOffDone              = FormatDefine({Prim, S0, Off, Off, Off, Done}),
@@ -725,29 +817,11 @@ enum Format : uint64_t
 	Vdata4Vaddr2StSsDmaskF              = FormatDefine({DA4, S0A2, S1A8, S2A4, DmaskF}),
 
 	Vdata1Vaddr2StSsDmask1                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask1}),
-	Vdata1Vaddr2StSsDmask2                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask2}),
-	Vdata2Vaddr2StSsDmask3                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask3}),
-	Vdata1Vaddr2StSsDmask4                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask4}),
-	Vdata2Vaddr2StSsDmask5                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask5}),
-	Vdata3Vaddr2StSsDmask7                  = FormatDefine({DA3, S0A2, S1A8, S2A4, Dmask7}),
-	Vdata1Vaddr2StSsDmask8                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask8}),
-	Vdata2Vaddr2StSsDmask9                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask9}),
-	Vdata2Vaddr2StSsDmaskA                  = FormatDefine({DA2, S0A2, S1A8, S2A4, DmaskA}),
-	Vdata3Vaddr2StSsDmaskB                  = FormatDefine({DA3, S0A2, S1A8, S2A4, DmaskB}),
-	Vdata2Vaddr2StSsDmaskC                  = FormatDefine({DA2, S0A2, S1A8, S2A4, DmaskC}),
-	Vdata3Vaddr2StSsDmaskD                  = FormatDefine({DA3, S0A2, S1A8, S2A4, DmaskD}),
 	Vdata1Vaddr4StSsDmask1                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask1}),
-	Vdata1Vaddr4StSsDmask2                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask2}),
-	Vdata2Vaddr4StSsDmask3                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask3}),
-	Vdata1Vaddr4StSsDmask4                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask4}),
-	Vdata2Vaddr4StSsDmask5                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask5}),
-	Vdata1Vaddr4StSsDmask8                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask8}),
-	Vdata2Vaddr4StSsDmask9                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask9}),
-	Vdata2Vaddr4StSsDmaskA                  = FormatDefine({DA2, S0A4, S1A8, S2A4, DmaskA}),
 	Vdata3Vaddr4StSsDmaskB                  = FormatDefine({DA3, S0A4, S1A8, S2A4, DmaskB}),
-	Vdata2Vaddr4StSsDmaskC                  = FormatDefine({DA2, S0A4, S1A8, S2A4, DmaskC}),
-	Vdata3Vaddr4StSsDmaskD                  = FormatDefine({DA3, S0A4, S1A8, S2A4, DmaskD}),
 	Vdata4Vaddr4StSsDmaskF                  = FormatDefine({DA4, S0A4, S1A8, S2A4, DmaskF}),
+	VdataVaddr2StSsMimgDmask                = FormatDefine({DA, S0A2, S1A8, S2A4, MimgDmask}),
+	VdataVaddr3StSsMimgDmask                = FormatDefine({DA, S0A3, S1A8, S2A4, MimgDmask}),
 	VdataVaddr4StSsMimgDmask                = FormatDefine({DA, S0A4, S1A8, S2A4, MimgDmask}),
 	Vdata4Vaddr4StDmaskF                = FormatDefine({DA4, S0A4, S1A8, DmaskF}),
 	// image_gather4 returns four values from the selected component. The MIMG
@@ -767,10 +841,15 @@ enum Format : uint64_t
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
 	VaddrOffset                         = FormatDefine({S0}),
+	// ds_*_addtid_b32: no ADDR field; S0 carries DATA0 for the write.
+	VdataOffset                         = FormatDefine({S0, DsOff}),
+	VdstOffset                          = FormatDefine({D, DsOff}),
 	VdstVaddrOffset                     = FormatDefine({D, S0}),
 	VdstVaddrVdataOffset                = FormatDefine({D, S0, S1}),
 	// ds_read2_b32: vdst is a VGPR pair; offsets live in ds_offset (see field comment).
 	Vdst2VaddrOffset01            = FormatDefine({DA2, S0}),
+	// ds_write2_b32: S0 = ADDR, S1 = DATA0, S2 = DATA1; offsets live in ds_offset.
+	VaddrVdata2Offset01           = FormatDefine({S0, S1, S2}),
 	VdstSdst2Vsrc0Vsrc1           = FormatDefine({D, D2A2, S0, S1}),
 	VdstSdst2Vsrc0Vsrc1Ssrc2A2    = FormatDefine({D, D2A2, S0, S1, S2A2}),
 	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair = FormatDefine({DA2, D2A2, S0, S1, S2A2}),
@@ -852,6 +931,8 @@ struct ShaderInstruction
 	ShaderInstructionFormat::Format format = ShaderInstructionFormat::Unknown;
 	// Keep the original SOPP opcode when several encodings share one IR type.
 	uint8_t                         sopp_opcode = 0xffu;
+	// First raw encoding word, so unsupported placeholders remain identifiable.
+	uint32_t raw_word = 0;
 	ShaderOperand                   src[4];
 	int                             src_num = 0;
 	// EXP control bits: VM, DONE, COMPR. Unknown for other instruction families.
@@ -898,8 +979,14 @@ struct ShaderInstruction
 	// MUBUF atomics replace VDATA with the pre-operation value only when GLC
 	// requests that result.
 	bool buffer_return_old_value = false;
-	// Preserve MUBUF control bits for exact admission. Unknown is fail-closed.
-	uint8_t buffer_flags = 0xffu; // bit 0: LDS; bit 1: SLC; bit 2: TFE; bit 7: undefined encoding bits set
+	// Preserve MUBUF/MTBUF controls for exact admission. Unknown is fail-closed.
+	// Bit 7 also rejects legacy ADDR64, whose bit 15 must not become Gen5 DLC.
+	uint8_t buffer_flags = 0xffu; // bit 0: LDS; bit 1: SLC; bit 2: TFE; bit 3: DLC; bit 7: reserved/unmodeled encoding
+	// MTBUF memory format is independent of the opcode's result component count.
+	// Gen5 uses a unified 7-bit format; legacy packs NFMT:DFMT in the same bits.
+	uint8_t mtbuf_format         = 0xffu;
+	uint8_t mtbuf_components     = 0;
+	bool    mtbuf_format_is_gen5 = false;
 	// DS addressing:
 	// - DsAddU32: byte offset added to the byte address in src[0].
 	// - DsWriteB32: byte offset added to the byte address in src[0].
@@ -1057,6 +1144,12 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
+
+// Opt-in evidence dump of a guest program a refusal is about: the decoded listing (<kind>_<id>.txt) and the raw
+// bytes (<kind>_<id>.bin) through the bounded exclusive process writer. `dump_dir` is the operator's directory
+// (null or empty disables). Returns the per-file outcome for the fatal message, which Silent logging would hide.
+[[nodiscard]] std::string ShaderDumpGuestProgram(const char* dump_dir, const char* kind, uint64_t id, uint64_t program_addr,
+                                                 const ShaderCode& code);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
 // Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);
@@ -1108,6 +1201,17 @@ constexpr ShaderGen5SampledTextureShape ShaderGen5SampledTextureShapeForType(uin
 
 [[nodiscard]] bool ShaderGen5SampledTextureShapeForMimgDimension(uint8_t dimension,
                                                                  ShaderGen5SampledTextureShape* shape);
+
+// MIMG DIM selects the address layout the instruction supplies; the T# type selects the
+// addressing the texture unit performs. A volume DIM therefore cannot turn a resource
+// whose type is not 3D into a volume: a 2D or array resource ignores the extra
+// coordinate, so the descriptor keeps the shape of its own type. (The other
+// instruction-derived shapes stay: an array resource read as a plain 2D slice, for
+// example, is a usage the renderer resolves per instruction.)
+constexpr bool ShaderGen5InstructionShapeAppliesToType(uint8_t type, ShaderGen5SampledTextureShape shape)
+{
+	return shape != ShaderGen5SampledTextureShape::ThreeDimensional || type == 10u;
+}
 
 constexpr uint8_t ShaderGen5HostSampledTextureType(uint8_t guest_type, ShaderGen5SampledTextureShape shape)
 {
@@ -1438,6 +1542,21 @@ struct ShaderStorageUseEvidence
 	bool                raw_smem_dynamic_offset = false;
 };
 
+// Structural evidence for a compute kernel that writes one uniform four-word
+// value to a typed buffer at one linear invocation index. `valid` proves only
+// the decoded instruction/dataflow shape; callers must still validate live
+// bindings, value words, ranges, and dispatch coverage before assigning any
+// resource semantics.
+struct ShaderComputeUniformBufferFillEvidence
+{
+	bool     valid                      = false;
+	int      destination_start_register = -1;
+	int      workgroup_register         = -1;
+	uint32_t workgroup_shift            = 0;
+	// Scalar source SGPRs in the component order consumed by the store.
+	int      value_registers[4]         = {-1, -1, -1, -1};
+};
+
 // Structural evidence for one narrowly defined compute metadata-fill family.
 // `valid` establishes only the decoded instruction/dataflow proof below; the
 // caller still has to validate the live descriptors, parameter/source words,
@@ -1578,9 +1697,16 @@ struct ShaderZeroSBufferResources
                                                                              ShaderStorageAccess unbased_match, bool decoded_unknown,
                                                                              bool indirect_descriptor_use);
 [[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
+[[nodiscard]] ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(const ShaderCode& code);
 [[nodiscard]] ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& code, int source_start_register,
 	                                                                      int destination_start_register, int parameter_start_register);
 struct ShaderBindResources;
+// Metadata uses API user-data indices. The fused Gen5 vertex front emits those
+// indices at s8; negative stream sentinels never identify shader registers.
+[[nodiscard]] bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
+                                                       int user_data_register_base = 0);
+[[nodiscard]] bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind,
+                                              int user_data_register_base = 0);
 struct ShaderComputeEmptyGate
 {
 	int      storage_buffer_index = -1;
@@ -1791,6 +1917,50 @@ struct ShaderParsedUsage
 	int  direct_sgprs              = 0;
 };
 
+// Guest architecture and proof are independent of the eventual host size.
+// In particular FragmentNeutral32 never changes a guest64 mask into wave32.
+enum class ShaderNativeWaveProof : uint32_t
+{
+	Unclassified,
+	LaneLocal,
+	QuadLocal,
+	ExactSubgroup,
+	FragmentNeutral32,
+};
+
+struct ShaderNativeWaveInfo
+{
+	uint32_t guest_wave_size = 0;
+	ShaderNativeWaveProof proof = ShaderNativeWaveProof::Unclassified;
+	uint32_t refusal_pc = 0;
+	const char* refusal_reason = nullptr;
+};
+
+struct GraphicsGeRawRegister;
+[[nodiscard]] uint32_t ShaderVertexGuestWaveSize(const GraphicsGeRawRegister& stages, bool next_gen, bool gs_front);
+[[nodiscard]] bool ShaderUsesNativeWaveState(const ShaderCode& code);
+[[nodiscard]] ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size);
+
+// ShaderAnalyzeNativeWave once per immutable program and guest width. The analysis walks the
+// whole program (mask flow to a fixpoint, 0.1-3 ms) and must not run per draw.
+class ShaderNativeWaveVerdict
+{
+public:
+	[[nodiscard]] ShaderNativeWaveInfo Get(const ShaderCode& code, uint32_t guest_wave_size) const;
+
+private:
+	struct Slot
+	{
+		std::once_flag       once;
+		ShaderNativeWaveInfo info;
+	};
+	mutable Slot m_wave32;
+	mutable Slot m_wave64;
+};
+
+
+struct ShaderVertexProgram;
+
 struct ShaderVertexInputInfo
 {
 	static constexpr int RES_MAX = 16;
@@ -1820,6 +1990,13 @@ struct ShaderVertexInputInfo
 	uint8_t  float_mode                 = 0;
 	bool     dx10_clamp                 = false;
 	bool     ieee_mode                  = false;
+	bool     fp16_overflow              = false;
+	bool     fp16_overflow_known        = false;
+	ShaderNativeWaveInfo native_wave;
+	uint32_t required_subgroup_size = 0;
+	// Gen5 proof, cache identity and emission share this immutable linked IR.
+	// The definition is private to Shader.cpp; resource ABI queries retain its front view.
+	std::shared_ptr<const ShaderVertexProgram> program;
 	// Immutable diagnostic selection resolved at the draw boundary. The host
 	// descriptor set is assigned by the renderer after both stages are known.
 	ShaderVertexClipProbeConfig clip_probe;
@@ -1831,6 +2008,11 @@ struct ShaderVertexInputInfo
 // onto semantic 0. start_register stays negative so bind-time UpdateAddress48
 // leaves the guest base in the descriptor word.
 void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info);
+
+// Why the fused NGG front of this vertex stage was not proven width neutral at its guest
+// width ("" when it was, or when the stage has no fused front). For the native-wave
+// admission diagnostic, which otherwise cannot tell a refused proof from a missing one.
+[[nodiscard]] Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& info);
 
 // Remap an embedded MUBUF format-load to resources[i] only when the V# was
 // tracked as a buffer whose attrib_id came from the attribute table. A default
@@ -1925,6 +2107,15 @@ struct ShaderGen5MubufStreamSpan
 
 struct ShaderComputeInputInfo
 {
+	// Initial wave FP controls copied from CS RSRC1. Mode-sensitive emission
+	// requires fp_mode_known; F16 also requires fp16_overflow_known. Defaults
+	// represent unavailable evidence, including an unwritten overflow bit.
+	uint8_t float_mode    = 0;
+	bool    dx10_clamp    = false;
+	bool    ieee_mode     = false;
+	bool    fp_mode_known = false;
+	bool    fp16_overflow       = false;
+	bool    fp16_overflow_known = false;
 	ShaderComputeWaveLayout wave_layout;
 	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
 	bool                    native_equivalent_valid = false;
@@ -1943,6 +2134,7 @@ struct ShaderComputeInputInfo
 	ShaderStorageImageTileCoverage storage_image_tile_coverage[ShaderTextureResources::RES_MAX] {};
 	ShaderComputeEmptyGate empty_gate;
 	ShaderComputeMetaFillEvidence meta_fill;
+	ShaderComputeUniformBufferFillEvidence uniform_buffer_fill;
 	ShaderBindResources bind;
 };
 
@@ -1969,11 +2161,14 @@ struct ShaderPixelCustomInterpolation
 {
 	uint32_t inputs = 0;
 	uint32_t per_vertex_inputs = 0;
+	// Different interpolation qualifiers may consume the same guest export,
+	// but Vulkan requires a separate location for each such input view.
+	uint32_t aliased_parameter_inputs = 0;
 	uint32_t locations[32] {};
 	uint32_t barycentric_locations[7] {};
 	uint32_t location_count = 0;
 
-	[[nodiscard]] bool Enabled() const { return per_vertex_inputs != 0; }
+	[[nodiscard]] bool Enabled() const { return per_vertex_inputs != 0 || aliased_parameter_inputs != 0; }
 };
 
 struct ShaderPixelInputInfo
@@ -1998,15 +2193,19 @@ struct ShaderPixelInputInfo
 	uint8_t                float_mode                = 0;
 	bool                   dx10_clamp                = false;
 	bool                   ieee_mode                 = false;
+	bool                   fp16_overflow             = false;
+	bool                   fp16_overflow_known       = false;
 	// Immutable diagnostic configuration resolved once at the draw boundary.
 	ShaderFragmentTapConfig fragment_tap;
 	// Immutable host-only aggregate selection resolved at the draw boundary.
 	// The renderer assigns the descriptor set only after both stage layouts are known.
 	ShaderPixelInput0ProbeConfig input0_probe;
 	uint32_t                     input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
-	// Non-zero when the translated fragment program uses guest-wave operations
-	// whose exact width must be available in the host Vulkan subgroup.
+	// Preferred width for wave-sensitive lowering. native_wave may prove a
+	// smaller physical subgroup valid; architectural width always comes from
+	// native_wave.guest_wave_size, never from a host-size selection.
 	uint32_t               required_subgroup_size    = 0;
+	ShaderNativeWaveInfo    native_wave;
 	ShaderBindResources    bind;
 
 	[[nodiscard]] bool FrontFaceEnabled() const
@@ -2194,7 +2393,8 @@ void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] bool    ShaderHasOnlyNullPixelExports(const ShaderCode& code);
 ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
 bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
-void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);
+void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
+                                          const GraphicsGeRawRegister* shader_stages = nullptr);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                                       ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
 void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, uint32_t dispatch_mode,
@@ -2205,6 +2405,12 @@ void             ShaderDbgDumpInputInfo(const ShaderComputeInputInfo* info);
 ShaderId         ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInputInfo* input_info);
 ShaderId         ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputInfo* input_info);
 ShaderId         ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInputInfo* input_info);
+// Renderers call this before ANY pipeline/module cache lookup. Metadata-only
+// identity fixtures may omit an owner; Gen5 production may not.
+void             ShaderRequireVertexProgram(const HW::VertexShaderInfo* regs, const ShaderVertexInputInfo* input_info);
+ShaderCode       ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh,
+                              const ShaderVertexInputInfo* input_info);
+// Standalone diagnostic/parser path. Not a substitute for the bound renderer overload.
 ShaderCode       ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh);
 ShaderCode       ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh);
 ShaderCode       ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh);

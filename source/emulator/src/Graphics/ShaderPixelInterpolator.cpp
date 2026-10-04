@@ -168,8 +168,28 @@ void ShaderResolveCustomInterpolation(const ShaderCode& code, const ShaderVertex
 			layout.per_vertex_inputs |= 1u << input;
 		}
 	}
-	if (!layout.Enabled()) { return; }
 	EXIT_IF(info->input_num > 32u);
+	// A smooth and a flat view of one export cannot share a Vulkan input
+	// location. The geometry interface already preserves the export source
+	// while giving each distinct view its own location. Identical settings
+	// remain canonical aliases and need no additional host stage.
+	for (uint32_t input = 0; input < info->input_num; ++input)
+	{
+		ShaderPixelInterpolator current {};
+		if (!ShaderDecodePixelInterpolator(info->interpolator_settings[input], &current) ||
+		    current.source != ShaderPixelInterpolatorSource::Parameter) { continue; }
+		for (uint32_t previous = 0; previous < input; ++previous)
+		{
+			ShaderPixelInterpolator other {};
+			if (ShaderDecodePixelInterpolator(info->interpolator_settings[previous], &other) &&
+			    other.source == ShaderPixelInterpolatorSource::Parameter && current.location == other.location &&
+			    current.flat != other.flat)
+			{
+				layout.aliased_parameter_inputs |= (1u << input) | (1u << previous);
+			}
+		}
+	}
+	if (!layout.Enabled()) { return; }
 	// Pull-model and per-sample barycentrics need distinct host evaluation modes.
 	EXIT_IF(((info->system_input_enable | info->system_input_address) & 0x19u) != 0);
 	EXIT_IF((info->system_input_enable & ~info->system_input_address) != 0);

@@ -420,6 +420,24 @@ struct ProvenanceContractStorageGpuObject final: public GpuObject
 
 void VerifyRenderTargetIndexAliasContract()
 {
+	GpuMap2 candidate_index;
+	candidate_index.Insert(0x200010u, 0x10u, 7);
+	candidate_index.Insert(0x200020u, 0x10u, 7);
+	candidate_index.Insert(0x2ffff0u, 0x20u, 9);
+	auto retained_candidates = candidate_index.FindAll(0x200000u, 0x100u);
+	Expect(retained_candidates.Size() == 2u && retained_candidates.Contains(7) && retained_candidates.Contains(9),
+	       "single-bucket candidates are unique and still include bucket false positives");
+	candidate_index.Erase(0x200010u, 0x10u, 7);
+	Expect(retained_candidates.Size() == 2u && retained_candidates.Contains(7),
+	       "retained candidate result survives index mutation");
+	retained_candidates.Add(11);
+	const auto current_candidates = candidate_index.FindAll(0x200000u, 0x100u);
+	Expect(current_candidates.Size() == 1u && current_candidates.Contains(9) && !current_candidates.Contains(11),
+	       "caller mutation cannot change the indexed candidate bucket");
+	const auto spanning_candidates = candidate_index.FindAll(0x2ffff0u, 0x20u);
+	Expect(spanning_candidates.Size() == 1u && spanning_candidates.Contains(9),
+	       "multi-bucket queries still deduplicate spanning objects");
+	Expect(candidate_index.FindAll(0x400000u, 0x10u).IsEmpty(), "absent bucket has no candidates");
 	GpuWriteHistoryConfigureForTesting(0x4000u, 0x100u);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaData, 0x2000u, 0x20u, 1u, 0u, 0u);
 	GpuWriteHistoryRecord(GpuWriteHistoryKind::WriteData, 0x4040u, 0x20u, 2u, 0u, 0u);
@@ -1028,11 +1046,18 @@ void VerifyVertexClipProbeContract()
 	           PixelMrtProbeDiagnosticIdentity(0u, 0u, 229u) != PixelMrtProbeDiagnosticIdentity(0u, 0u, 228u),
 	       "pixel MRT target and export ordinal have a distinct diagnostic identity");
 
-	static_assert(sizeof(VertexClipProbeRawStats) == sizeof(uint32_t) * 51u);
+	static_assert(sizeof(VertexClipProbeRawStats) == sizeof(uint32_t) * (51u + kVertexScalarBufferProbeSites * kVertexScalarBufferProbeWords));
+	static_assert(offsetof(VertexClipProbeRawStats, scalar_buffer) == sizeof(uint32_t) * 51u);
 	static_assert(offsetof(VertexClipProbeRawStats, min_pixel_frag_x) == sizeof(uint32_t) * 47u);
 	static_assert(offsetof(VertexClipProbeRawStats, max_pixel_frag_x) == sizeof(uint32_t) * 48u);
 	static_assert(offsetof(VertexClipProbeRawStats, min_pixel_frag_y) == sizeof(uint32_t) * 49u);
 	static_assert(offsetof(VertexClipProbeRawStats, max_pixel_frag_y) == sizeof(uint32_t) * 50u);
+	const VertexClipProbeRawStats scalar_initial {};
+	for (const auto& load: scalar_initial.scalar_buffer)
+	{
+		Expect(load.claimed == 0u && load.components == 0u,
+		       "unobserved scalar-load sites start unclaimed, not fabricated samples");
+	}
 	const auto initial_stats = VertexClipProbeInitialRawStats();
 	Expect(initial_stats.invocations == 0u && initial_stats.nonfinite == 0u && initial_stats.max_w == 0u &&
 	           initial_stats.max_x_w == 0u && initial_stats.max_y_w == 0u && initial_stats.max_z_w == 0u &&
@@ -1422,6 +1447,10 @@ void VerifyVertexClipProbeContract()
 		Expect(probe_source.FindIndex(decoration) != Kyty::Core::STRING8_INVALID_INDEX,
 		       "vertex clip probe lays out every raw-stat uint at its explicit byte offset");
 	}
+	Expect(probe_source.FindIndex("OpMemberDecorate %VertexClipProbeRawStats 51 Offset 204") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           probe_source.FindIndex("OpDecorate %VertexScalarBufferProbeWords ArrayStride 4") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           probe_source.FindIndex("%vertex_scalar_probe_word_count = OpConstant %uint 192") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "scalar-load observations append an explicitly bounded word array without moving prior fields");
 	Expect(probe_source.FindIndex("OpAtomicIAdd") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "vertex clip probe counts invocations and nonfinite observations with uint atomics");
 	Expect(probe_source.FindIndex("vertex_clip_probe_w_nonpositive_ptr_2") != Kyty::Core::STRING8_INVALID_INDEX &&

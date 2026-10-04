@@ -1,5 +1,7 @@
 #include "ShaderSpirvInternal.h"
 
+#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+
 #include <limits>
 
 #ifdef KYTY_EMU_ENABLED
@@ -127,6 +129,39 @@ bool Spirv::UsesComputeWaveBanks() const
 {
 	return (m_code.GetType() == ShaderType::Compute || UsesFragmentCompute()) && m_cs_input_info != nullptr &&
 	       m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32;
+}
+
+bool Spirv::UsesFragmentWaveTier() const
+{
+	if (m_code.GetType() != ShaderType::Pixel || UsesFragmentCompute())
+	{
+		return false;
+	}
+	if (m_native_wave_tier < 0)
+	{
+		m_native_wave_tier = m_ps_input_info != nullptr &&
+		                     m_ps_input_info->native_wave.proof == ShaderNativeWaveProof::FragmentNeutral32 &&
+		                     m_ps_input_info->native_wave.refusal_reason == nullptr ? 1 : 0;
+	}
+	return m_native_wave_tier != 0;
+}
+
+bool Spirv::UsesDsAddtid() const
+{
+	for (const auto& inst: m_code.GetInstructions())
+	{
+		if (inst.type == ShaderInstructionType::DsWriteAddtidB32 || inst.type == ShaderInstructionType::DsReadAddtidB32)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool Spirv::UsesDsAddtidLds() const
+{
+	return UsesDsAddtid() && GetHostShaderType() == ShaderType::Compute && m_cs_input_info != nullptr &&
+	       m_cs_input_info->lds_dwords > 0;
 }
 
 

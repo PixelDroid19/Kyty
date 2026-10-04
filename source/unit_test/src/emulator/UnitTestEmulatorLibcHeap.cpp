@@ -195,16 +195,18 @@ TEST(EmulatorLibcHeap, EmptyDeclaredTableKeepsTheDefaultAllocator)
 	EXPECT_FALSE(Heap::HasAllocator());
 }
 
-TEST(EmulatorLibcHeap, FailedInitializerDoesNotPublishOrRetry)
+TEST(EmulatorLibcHeap, InitializerResultIsNotAFailureSignal)
 {
+	// A shipped title declares initialize as a bare `ret`: rax still holds the
+	// callback address. libc publishes the allocator regardless.
 	HeapFixture fixture;
 	ASSERT_TRUE(fixture.Valid());
-	g_initialize_result = 1;
-	EXPECT_FALSE(Heap::InitializeProcessHeap(g_parameters));
+	g_initialize_result = 0x2e1b30;
+	EXPECT_TRUE(Heap::InitializeProcessHeap(g_parameters)) << Heap::ProcessHeapFailureReason();
 	EXPECT_EQ(g_initialize_count, 1);
-	EXPECT_FALSE(Heap::HasAllocator());
-	EXPECT_EQ(Heap::Malloc(40), nullptr);
-	EXPECT_FALSE(Heap::InitializeProcessHeap(g_parameters));
+	EXPECT_TRUE(Heap::HasAllocator());
+	EXPECT_EQ(Heap::Malloc(40), g_allocation);
+	EXPECT_TRUE(Heap::InitializeProcessHeap(g_parameters));
 	EXPECT_EQ(g_initialize_count, 1);
 }
 
@@ -223,9 +225,19 @@ TEST(EmulatorLibcHeap, RejectsMalformedRecordsBeforeCallingGuestCode)
 		ASSERT_TRUE(fixture.Valid());
 		*reinterpret_cast<uint64_t*>(g_parameters + field.offset) = field.value;
 		EXPECT_FALSE(Heap::InitializeProcessHeap(g_parameters));
+		// Every refusal names the record or callback that failed.
+		EXPECT_NE(Heap::ProcessHeapFailureReason()[0], '\0');
 		EXPECT_EQ(g_initialize_count, 0);
 		EXPECT_FALSE(Heap::HasAllocator());
 	}
+	HeapFixture fixture;
+	ASSERT_TRUE(fixture.Valid());
+	*reinterpret_cast<uint64_t*>(g_parameters + 0x208) = 99;
+	EXPECT_FALSE(Heap::InitializeProcessHeap(g_parameters));
+	EXPECT_NE(std::strstr(Heap::ProcessHeapFailureReason(), "unsupported layout (size 0x78 version 99)"), nullptr)
+	    << Heap::ProcessHeapFailureReason();
+	EXPECT_TRUE(Heap::InitializeProcessHeap(0));
+	EXPECT_EQ(Heap::ProcessHeapFailureReason()[0], '\0');
 }
 
 TEST(EmulatorLibcHeap, ReadableDataIsNotAnExecutableInitializer)

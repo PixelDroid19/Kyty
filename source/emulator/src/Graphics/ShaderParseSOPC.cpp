@@ -68,7 +68,13 @@ KYTY_SHADER_PARSER(shader_parse_sopc)
 			inst.format      = ShaderInstructionFormat::Ssrc02Ssrc1;
 			inst.src[0].size = 2;
 			break;
-		case 0x10: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setvskip treated as SBarrier (continuing)\n");
+		case 0x10:
+			if (next_gen)
+			{
+				// The RDNA2 SOPC table skips from opcode 15 to 18, and the ISA has no VSKIP.
+				KYTY_UNKNOWN_OP();
+			}
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setvskip treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;

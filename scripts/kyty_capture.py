@@ -236,14 +236,7 @@ def score_image(path: Path) -> dict[str, Any]:
     green_ratio = green_hud / max(hud_total, 1)
     white_ratio = white / max(total, 1)
     saturated_ratio = saturated / max(total, 1)
-    ocr = ""
-    tesseract = shutil.which("tesseract")
-    if tesseract:
-        ocr = run_text([tesseract, str(path), "stdout", "--psm", "6"], timeout=20).upper()
-    is_loading = bool(re.search(r"LOADING|PRISONERS|QUARTERS", ocr))
-    is_jump = bool(re.search(r"\bJUMP\b", ocr)) or green_ratio >= 0.02
-    scene_ok = is_jump and not is_loading
-    gameplay_like = white_ratio < 0.35 and entropy >= 2.5 and len(hist) >= 80 and not stripey
+    material_healthy = white_ratio < 0.35 and entropy >= 2.5 and len(hist) >= 80 and not stripey
 
     return {
         "path": path.name,
@@ -251,6 +244,8 @@ def score_image(path: Path) -> dict[str, Any]:
         "width": image.width,
         "height": image.height,
         "backend": image.backend,
+        "assessment": "material_health_only",
+        "scene_status": "unknown",
         "world": {
             "white_ratio": round(white_ratio, 6),
             "saturated_ratio": round(saturated_ratio, 6),
@@ -260,10 +255,7 @@ def score_image(path: Path) -> dict[str, Any]:
             "avg_row_diff": round(avg_row, 4),
             "stripey": stripey,
             "green_hud_ratio": round(green_ratio, 6),
-            "is_loading": is_loading,
-            "is_jump": is_jump,
-            "scene_ok": scene_ok,
-            "gameplay_like": gameplay_like,
+            "material_healthy": material_healthy,
         },
     }
 
@@ -273,6 +265,8 @@ def aggregate_captures(captures: list[dict[str, Any]]) -> dict[str, Any]:
         raise RuntimeError("capture contains no samples")
     worlds = [capture["world"] for capture in captures]
     return {
+        "assessment": "material_health_only",
+        "scene_status": "unknown",
         "world": {
             "white_ratio": max(world["white_ratio"] for world in worlds),
             "saturated_ratio": max(world["saturated_ratio"] for world in worlds),
@@ -282,10 +276,9 @@ def aggregate_captures(captures: list[dict[str, Any]]) -> dict[str, Any]:
             "avg_row_diff": min(world["avg_row_diff"] for world in worlds),
             "stripey": any(world["stripey"] for world in worlds),
             "green_hud_ratio": min(world["green_hud_ratio"] for world in worlds),
-            "is_loading": any(world.get("is_loading", False) for world in worlds),
-            "is_jump": all(world.get("is_jump", False) for world in worlds),
-            "scene_ok": all(world.get("scene_ok", False) for world in worlds),
-            "gameplay_like": all(world["gameplay_like"] for world in worlds),
+            "material_healthy": all(world["white_ratio"] < 0.35 and world["entropy"] >= 2.5
+                                    and world["unique_quantized_colors"] >= 80 and not world["stripey"]
+                                    for world in worlds),
         }
     }
 
@@ -303,10 +296,11 @@ def compare_metrics(current: dict[str, Any], baseline: dict[str, Any]) -> dict[s
             and current_world["entropy"] >= 2.5
             and current_world["unique_quantized_colors"] >= 80
         ),
-        "scene_is_gameplay": current_world.get("scene_ok", False),
     }
     return {
         "pass": all(checks.values()),
+        "assessment": "material_health_only",
+        "scene_status": "unknown",
         "checks": checks,
         "delta": {
             "white_ratio": round(current_world["white_ratio"] - baseline_world["white_ratio"], 6),
@@ -626,7 +620,7 @@ def load_manifest(path: Path) -> dict[str, Any]:
 def command_score(args: argparse.Namespace) -> int:
     metrics = score_image(Path(args.image))
     print(json.dumps(metrics, indent=2, sort_keys=True))
-    return 0 if (not args.gate or (metrics["world"]["gameplay_like"] and metrics["world"]["scene_ok"])) else 1
+    return 0 if (not args.gate or metrics["world"]["material_healthy"]) else 1
 
 
 def command_compare(args: argparse.Namespace) -> int:
@@ -698,7 +692,7 @@ def parser() -> argparse.ArgumentParser:
 
     score = commands.add_parser("score", help="score one screenshot")
     score.add_argument("image")
-    score.add_argument("--gate", action="store_true", help="return failure when gameplay-like metrics are not met")
+    score.add_argument("--gate", action="store_true", help="gate material image health only; scene identity remains unknown")
     score.set_defaults(function=command_score)
 
     compare = commands.add_parser("compare", help="compare the last sample of two manifests")

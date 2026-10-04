@@ -29,7 +29,11 @@ namespace ImeDialog = Dialog::ImeDialog;
 
 LIB_DEFINE(InitDialog_1_ImeDialog)
 {
+	LIB_FUNC("NUeBrN7hzf0", ImeDialog::ImeDialogInit);
 	LIB_FUNC("IADmD4tScBY", ImeDialog::ImeDialogGetStatus);
+	LIB_FUNC("x01jxu+vxlc", ImeDialog::ImeDialogGetResult);
+	LIB_FUNC("oBmw4xrmfKs", ImeDialog::ImeDialogAbort);
+	LIB_FUNC("gyTyVn+bXMw", ImeDialog::ImeDialogTerm);
 }
 
 } // namespace LibImeDialog

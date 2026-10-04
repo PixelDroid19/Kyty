@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 namespace Kyty::Libs::Graphics {
 
@@ -103,8 +104,15 @@ public:
 	// async-signal-safe and returns false for untracked/unarmed addresses.
 	[[nodiscard]] bool HandleWriteFault(uintptr_t address) noexcept;
 
-	// Host/HLE writers call this before writing a protected destination.
+	// Host/HLE writers call this before writing a protected destination. Work
+	// for wide spans is bounded by tracked metadata, not the requested byte count.
 	[[nodiscard]] bool NotifyWrite(uintptr_t address, size_t size) noexcept;
+
+	// Normal-thread host I/O ownership. A token excludes rearming on every
+	// overlapping host page, including ranges registered after acquisition.
+	// Zero is the no-op token (disabled tracking or an empty/invalid range).
+	[[nodiscard]] uint64_t BeginHostWrite(uintptr_t address, size_t size) noexcept;
+	void EndHostWrite(uint64_t token) noexcept;
 
 	[[nodiscard]] uint64_t             SnapshotGeneration(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] bool                 ChangedSince(uintptr_t address, size_t size, uint64_t snapshot) const noexcept;
@@ -123,6 +131,9 @@ private:
 	static constexpr size_t kPageTableSize = 1u << 18u;
 	static constexpr size_t kMaxPages      = kPageTableSize / 2u;
 	static constexpr size_t kMaxRanges     = 512u;
+	// Keep tiny writes on the hash lookup path. Larger spans scan the fixed
+	// table once, including sparse spans extending over unmapped guest memory.
+	static constexpr size_t kDirectWritePages = 64u;
 
 	[[nodiscard]] uintptr_t         PageStart(uintptr_t address) const noexcept;
 	[[nodiscard]] uintptr_t         PageEnd(uintptr_t page) const noexcept;
@@ -137,6 +148,24 @@ private:
 	[[nodiscard]] bool              HasCover(uintptr_t page, uintptr_t end, bool* fallback) const noexcept;
 	void                            MarkFallback(uintptr_t page, uintptr_t end) noexcept;
 	void                            MarkPageWrite(PageEntry* page) noexcept;
+	template <typename Visitor> void VisitWritePages(uintptr_t first, uintptr_t last, const Visitor& visitor) noexcept;
+	[[nodiscard]] bool              NotifyPageWrite(PageEntry* entry, uintptr_t page_address) noexcept;
+	[[nodiscard]] bool              NotifyWritePages(uintptr_t first, uintptr_t last) noexcept;
+	[[nodiscard]] bool              HasHostWriteLocked(uintptr_t first, uintptr_t last) const noexcept;
+	void                            PrepareHostWriteLocked(uintptr_t address, size_t size) noexcept;
+
+	struct HostWriteRange
+	{
+		uint64_t token = 0;
+		uintptr_t first = 0;
+		uintptr_t last = 0;
+		uint64_t refs = 0;
+	};
+	// Counted page spans, protected by the same mutex as native rearming. Only
+	// live leases occupy entries; no page-table capacity is needed for I/O into
+	// memory which has not been registered as a graphics resource yet.
+	std::vector<HostWriteRange> m_host_writes;
+	uint64_t m_next_host_write = 1;
 
 	uint64_t                      m_page_size = 0;
 	std::unique_ptr<PageEntry[]>  m_pages;

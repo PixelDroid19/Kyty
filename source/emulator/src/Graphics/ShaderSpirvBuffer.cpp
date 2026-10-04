@@ -1,11 +1,14 @@
 #include "ShaderSpirvInternal.h"
 
 #include "ShaderSpirvEmitters.h"
+#include "ShaderSpirvLds.h"
 #include "ShaderSpirvTemplates.h"
 #include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveLds.h"
 #include "Emulator/Graphics/ShaderComputeWaveResourceAnalysis.h"
 
 #include <cinttypes>
@@ -507,20 +510,12 @@ static bool emit_gen5_raw_buffer_load(Spirv* spirv, const ShaderInstruction& ins
 
 // True when the instruction's V# register range is one of the bound storage
 // buffers; any other V# is built at run time (for example from s_getpc).
-static bool buffer_resource_is_bound(const ShaderBindResources* bind, const ShaderOperand& resource)
+static bool buffer_resource_is_bound(const Spirv* spirv, const ShaderOperand& resource)
 {
-	if (bind == nullptr || resource.type != ShaderOperandType::Sgpr)
-	{
-		return false;
-	}
-	for (int i = 0; i < bind->storage_buffers.buffers_num; i++)
-	{
-		if (bind->storage_buffers.start_register[i] == resource.register_id)
-		{
-			return true;
-		}
-	}
-	return false;
+	const auto* bind = spirv->GetBindInfo();
+	const auto* vertex = spirv->GetVsInputInfo();
+	const int user_data_base = vertex != nullptr && vertex->gs_prolog ? 8 : 0;
+	return bind != nullptr && ShaderStorageBufferResourceIsBound(*bind, resource, user_data_base);
 }
 
 // MUBUF load through a V# that no binding describes: the descriptor's 48-bit
@@ -685,6 +680,7 @@ static bool emit_gen5_raw_buffer_store(Spirv* spirv, const ShaderInstruction& in
 KYTY_RECOMPILER_FUNC(Recompile_BufferAtomicAdd_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 	if (!Config::IsNextGen() || bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
 	{
@@ -759,6 +755,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferAtomicAdd_Vdata1VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferAtomic_XXX_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 	if (!Config::IsNextGen() || bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
 	{
@@ -1040,6 +1037,7 @@ static bool emit_gen5_mubuf_format_store(Spirv* spirv, const ShaderInstruction& 
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1136,9 +1134,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadUbyte_Vdata1VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(bind_info, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 1, dst_source);
 	}
@@ -1227,9 +1226,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDword)
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(bind_info, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 2, dst_source);
 	}
@@ -1293,9 +1293,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx2_Vdata2VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(bind_info, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 4, dst_source);
 	}
@@ -1358,9 +1359,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx4_Vdata4VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
-	if (Config::IsNextGen() && !buffer_resource_is_bound(bind_info, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
 	{
 		return emit_guest_buffer_load(spirv, inst, static_cast<int>(index), 3, dst_source);
 	}
@@ -1428,6 +1430,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadDwordx3_Vdata3VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1495,6 +1498,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num <= 0 || !Config::IsNextGen())
 	{
@@ -1509,6 +1513,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num <= 0 || !Config::IsNextGen())
 	{
@@ -1522,6 +1527,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1590,6 +1596,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1683,6 +1690,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDword_Vdata1VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx2_Vdata2VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1748,6 +1756,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx2_Vdata2VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx4_Vdata4VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1817,6 +1826,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx4_Vdata4VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx3_Vdata3VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1891,6 +1901,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreDwordx3_Vdata3VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1965,6 +1976,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatX_Vdata1VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -2041,6 +2053,7 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXy_Vdata2VaddrSvSoffsIdxen)
 KYTY_RECOMPILER_FUNC(Recompile_BufferStoreFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -2187,38 +2200,49 @@ KYTY_RECOMPILER_FUNC(Recompile_DsConsume_VdstGds)
 
 namespace {
 
-// Wraps a DS lane body so only EXEC-active lanes touch LDS or their VGPRs.
-String8 GateLdsByExec(const String8& body, const String8& index_str)
+String8 LdsAddressSnapshot(const String8& address, const String8& tag)
 {
-	static const char* text = R"(
-        %lds_exec_<index> = OpLoad %uint %exec_lo
-        %lds_active_<index> = OpINotEqual %bool %lds_exec_<index> %uint_0
-               OpSelectionMerge %lds_merge_<index> None
-               OpBranchConditional %lds_active_<index> %lds_then_<index> %lds_merge_<index>
-        %lds_then_<index> = OpLabel
-<body>
-               OpBranch %lds_merge_<index>
-        %lds_merge_<index> = OpLabel
-)";
-	return String8(text).ReplaceStr("<body>", body).ReplaceStr("<index>", index_str);
+	return String8(R"(
+%lds_addr_f_<tag> = OpLoad %float %<address>
+%lds_addr_u_<tag> = OpBitcast %uint %lds_addr_f_<tag>
+)").ReplaceStr("<address>", address).ReplaceStr("<tag>", tag);
 }
 
-// Dword `word` of an LDS access: pointer at (ADDR + offset) / 4 + word.
-String8 LdsWordPointer(Spirv* spirv, const String8& address, uint16_t offset, int word, const String8& index_str)
+// Return zero on the out-of-range arm, with both pointer and load dominated by
+// the valid-span branch. Explicit else/merge blocks also prevent generic bank
+// if-conversion from speculating a Workgroup load.
+String8 LdsReadSpan(Spirv* spirv, const ShaderOperand& destination, int first, int count, const String8& tag)
 {
-	static const char* text = R"(
-        %lds_addr_f_<id> = OpLoad %float %<address>
-        %lds_addr_u_<id> = OpBitcast %uint %lds_addr_f_<id>
-        %lds_byte_addr_<id> = OpIAdd %uint %lds_addr_u_<id> %<offset>
-        %lds_index_<id> = OpShiftRightLogical %uint %lds_byte_addr_<id> %uint_2
-        %lds_word_<id> = OpIAdd %uint %lds_index_<id> %<word>
-        %lds_ptr_<id> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_word_<id>
-)";
-	return String8(text)
-	    .ReplaceStr("<id>", String8::FromPrintf("%s_%d", index_str.c_str(), word))
-	    .ReplaceStr("<address>", address)
-	    .ReplaceStr("<offset>", spirv->GetConstantUint(offset))
-	    .ReplaceStr("<word>", spirv->GetConstantUint(static_cast<uint32_t>(word)));
+	String8 loads;
+	String8 results;
+	for (int word = 0; word < count; ++word)
+	{
+		const auto id = String8::FromPrintf("%s_%d", tag.c_str(), word);
+		loads += EmitLdsWordPointer(spirv, word, tag);
+		loads += String8::FromPrintf("%%lds_data_u_%s = OpLoad %%uint %%lds_ptr_%s\n", id.c_str(), id.c_str());
+		results += String8::FromPrintf(
+		    "%%lds_result_%s = OpPhi %%uint %%lds_data_u_%s %%lds_read_then_%s %%uint_0 %%lds_read_else_%s\n",
+		    id.c_str(), id.c_str(), tag.c_str(), tag.c_str());
+	}
+	// All Phi instructions must precede the ordinary instructions in the merge.
+	for (int word = 0; word < count; ++word)
+	{
+		const auto id = String8::FromPrintf("%s_%d", tag.c_str(), word);
+		const auto dst = operand_variable_to_str(destination, first + word);
+		results += String8::FromPrintf("%%lds_data_f_%s = OpBitcast %%float %%lds_result_%s\nOpStore %%%s %%lds_data_f_%s\n",
+		                               id.c_str(), id.c_str(), dst.value.c_str(), id.c_str());
+	}
+	return String8(R"(
+               OpSelectionMerge %lds_read_merge_<tag> None
+               OpBranchConditional %lds_valid_<tag> %lds_read_then_<tag> %lds_read_else_<tag>
+%lds_read_then_<tag> = OpLabel
+<loads>
+               OpBranch %lds_read_merge_<tag>
+%lds_read_else_<tag> = OpLabel
+               OpBranch %lds_read_merge_<tag>
+%lds_read_merge_<tag> = OpLabel
+<results>
+)").ReplaceStr("<tag>", tag).ReplaceStr("<loads>", loads).ReplaceStr("<results>", results);
 }
 
 } // namespace
@@ -2228,7 +2252,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
 	const auto& inst       = code.GetInstructions().At(index);
 	const auto* input_info = spirv->GetCsInputInfo();
 	const int   dwords     = inst.src[1].size;
-	if (input_info == nullptr || input_info->lds_dwords == 0 || dwords < 1 || dwords > 4)
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
 	{
 		return false;
 	}
@@ -2240,13 +2264,16 @@ KYTY_RECOMPILER_FUNC(Recompile_DsWriteB32_VaddrVdataOffset)
 	{
 		const auto data = dwords == 1 ? operand_variable_to_str(inst.src[1]) : operand_variable_to_str(inst.src[1], word);
 		const auto id   = String8::FromPrintf("%s_%d", index_str.c_str(), word);
-		body += LdsWordPointer(spirv, address.value, inst.ds_offset, word, index_str);
+		body += EmitLdsWordPointer(spirv, word, index_str);
 		body += String8::FromPrintf("        %%lds_data_f_%s = OpLoad %%float %%%s\n"
 		                            "        %%lds_data_u_%s = OpBitcast %%uint %%lds_data_f_%s\n"
 		                            "               OpStore %%lds_ptr_%s %%lds_data_u_%s\n",
 		                            id.c_str(), data.value.c_str(), id.c_str(), id.c_str(), id.c_str(), id.c_str());
 	}
-	*dst_source += GateLdsByExec(body, index_str);
+	const auto checked = LdsAddressSnapshot(address.value, index_str) +
+	                     EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, inst.ds_offset, dwords, index_str) +
+	                     GateLdsByBounds(body, index_str);
+	*dst_source += GateLdsByExec(checked, index_str);
 	return true;
 }
 
@@ -2255,7 +2282,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset)
 	const auto& inst       = code.GetInstructions().At(index);
 	const auto* input_info = spirv->GetCsInputInfo();
 
-	if (input_info == nullptr || input_info->lds_dwords == 0)
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
 	{
 		return false;
 	}
@@ -2263,31 +2290,24 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAddU32_VaddrVdataOffset)
 	auto address = operand_variable_to_str(inst.src[0]);
 	auto data    = operand_variable_to_str(inst.src[1]);
 
-	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
-	if (data.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.type != SpirvType::Float condition ignored (continuing)\n"); }
-
 	const auto index_str  = String8::FromPrintf("%u", index);
-	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
 	const auto scope_str  = spirv->GetConstantUint(2u);
 	const auto semantics  = spirv->GetConstantUint(0x108u);
 
 	static const char* text = R"(
-        %lds_addr_f_<index> = OpLoad %float %<address>
-        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
-        %lds_byte_addr_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset>
-        %lds_index_<index> = OpShiftRightLogical %uint %lds_byte_addr_<index> %uint_2
         %lds_ptr_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index_<index>
         %lds_data_f_<index> = OpLoad %float %<data>
         %lds_data_u_<index> = OpBitcast %uint %lds_data_f_<index>
         %lds_prior_<index> = OpAtomicIAdd %uint %lds_ptr_<index> %<scope> %<semantics> %lds_data_u_<index>
 )";
-	*dst_source += String8(text)
+	const auto body = String8(text)
 	                   .ReplaceStr("<index>", index_str)
-	                   .ReplaceStr("<address>", address.value)
 	                   .ReplaceStr("<data>", data.value)
-	                   .ReplaceStr("<offset>", offset_str)
 	                   .ReplaceStr("<scope>", scope_str)
 	                   .ReplaceStr("<semantics>", semantics);
+	*dst_source += GateLdsByExec(LdsAddressSnapshot(address.value, index_str) +
+	                           EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, inst.ds_offset, 1, index_str) +
+	                           GateLdsByBounds(body, index_str), index_str);
 	return true;
 }
 
@@ -2298,7 +2318,8 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAtomic_XXX_VaddrVdataOffset)
 	const auto& inst       = code.GetInstructions().At(index);
 	const auto* input_info = spirv->GetCsInputInfo();
 
-	if (input_info == nullptr || input_info->lds_dwords == 0)
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst) ||
+	    param == nullptr || param[0] == nullptr)
 	{
 		return false;
 	}
@@ -2306,72 +2327,35 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAtomic_XXX_VaddrVdataOffset)
 	auto address = operand_variable_to_str(inst.src[0]);
 	auto data    = operand_variable_to_str(inst.src[1]);
 
-	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
-	if (data.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.type != SpirvType::Float condition ignored (continuing)\n"); }
-
 	const auto index_str  = String8::FromPrintf("%u", index);
-	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
 	const auto scope_str  = spirv->GetConstantUint(2u);
 	const auto semantics  = spirv->GetConstantUint(0x108u);
 
 	static const char* text = R"(
-        %lds_addr_f_<index> = OpLoad %float %<address>
-        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
-        %lds_byte_addr_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset>
-        %lds_index_<index> = OpShiftRightLogical %uint %lds_byte_addr_<index> %uint_2
         %lds_ptr_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index_<index>
         %lds_data_f_<index> = OpLoad %float %<data>
         %lds_data_u_<index> = OpBitcast %uint %lds_data_f_<index>
         %lds_prior_<index> = <atomic_op> %uint %lds_ptr_<index> %<scope> %<semantics> %lds_data_u_<index>
 )";
-	*dst_source += String8(text)
+	const auto body = String8(text)
 	                   .ReplaceStr("<index>", index_str)
-	                   .ReplaceStr("<address>", address.value)
 	                   .ReplaceStr("<data>", data.value)
-	                   .ReplaceStr("<offset>", offset_str)
 	                   .ReplaceStr("<scope>", scope_str)
 	                   .ReplaceStr("<semantics>", semantics)
 	                   .ReplaceStr("<atomic_op>", param[0]);
+	*dst_source += GateLdsByExec(LdsAddressSnapshot(address.value, index_str) +
+	                           EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, inst.ds_offset, 1, index_str) +
+	                           GateLdsByBounds(body, index_str), index_str);
 	return true;
 }
 
-/* Generalized LDS atomic increment/decrement (no data operand).
- * param[0] selects the SPIR-V atomic opcode. */
 KYTY_RECOMPILER_FUNC(Recompile_DsAtomicIncDec_VaddrOffset)
 {
-	const auto& inst       = code.GetInstructions().At(index);
-	const auto* input_info = spirv->GetCsInputInfo();
-
-	if (input_info == nullptr || input_info->lds_dwords == 0)
-	{
-		return false;
-	}
-
-	auto address = operand_variable_to_str(inst.src[0]);
-
-	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	const auto index_str  = String8::FromPrintf("%u", index);
-	const auto offset_str = spirv->GetConstantUint(inst.ds_offset);
-	const auto scope_str  = spirv->GetConstantUint(2u);
-	const auto semantics  = spirv->GetConstantUint(0x108u);
-
-	static const char* text = R"(
-        %lds_addr_f_<index> = OpLoad %float %<address>
-        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
-        %lds_byte_addr_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset>
-        %lds_index_<index> = OpShiftRightLogical %uint %lds_byte_addr_<index> %uint_2
-        %lds_ptr_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index_<index>
-        %lds_prior_<index> = <atomic_op> %uint %lds_ptr_<index> %<scope> %<semantics>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<index>", index_str)
-	                   .ReplaceStr("<address>", address.value)
-	                   .ReplaceStr("<offset>", offset_str)
-	                   .ReplaceStr("<scope>", scope_str)
-	                   .ReplaceStr("<semantics>", semantics)
-	                   .ReplaceStr("<atomic_op>", param[0]);
-	return true;
+	// ISA DS_INC/DEC wrap at DATA0's unsigned limit; the VaddrOffset IR
+	// discarded that source. Refuse this lossy tuple rather than substitute
+	// SPIR-V's unconditional increment/decrement. A correct lowering needs the
+	// data operand retained by the parser and a compare/exchange loop.
+	return false;
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset)
@@ -2379,26 +2363,26 @@ KYTY_RECOMPILER_FUNC(Recompile_DsReadB32_VdstVaddrOffset)
 	const auto& inst       = code.GetInstructions().At(index);
 	const auto* input_info = spirv->GetCsInputInfo();
 	const int   dwords     = inst.dst.size;
-	if (input_info == nullptr || input_info->lds_dwords == 0 || dwords < 1 || dwords > 4)
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
 	{
 		return false;
 	}
 
 	const auto address   = operand_variable_to_str(inst.src[0]);
 	const auto index_str = String8::FromPrintf("%u", index);
-	String8    body;
-	for (int word = 0; word < dwords; word++)
-	{
-		const auto dst = operand_variable_to_str(inst.dst, word);
-		const auto id  = String8::FromPrintf("%s_%d", index_str.c_str(), word);
-		body += LdsWordPointer(spirv, address.value, inst.ds_offset, word, index_str);
-		body += String8::FromPrintf("        %%lds_data_u_%s = OpLoad %%uint %%lds_ptr_%s\n"
-		                            "        %%lds_data_f_%s = OpBitcast %%float %%lds_data_u_%s\n"
-		                            "               OpStore %%%s %%lds_data_f_%s\n",
-		                            id.c_str(), id.c_str(), id.c_str(), id.c_str(), dst.value.c_str(), id.c_str());
-	}
+	const auto body = LdsAddressSnapshot(address.value, index_str) +
+	                  EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, inst.ds_offset, dwords, index_str) +
+	                  LdsReadSpan(spirv, inst.dst, 0, dwords, index_str);
 	*dst_source += GateLdsByExec(body, index_str);
 	return true;
+}
+
+// ds_read2[st64]_b32 / ds_write2[st64]_b32 carry two independent dword offsets, each scaled by
+// 4 bytes (times 64 for the st64 forms, param[0] == "64").
+static uint32_t Ds2OffsetBytes(const ShaderInstruction& inst, uint32_t word, const char* const* param)
+{
+	const uint32_t stride = (param != nullptr && param[0] != nullptr && param[0][0] == '6') ? 64u : 1u;
+	return ((inst.ds_offset >> (word * 8u)) & 0xffu) * 4u * stride;
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01)
@@ -2406,51 +2390,401 @@ KYTY_RECOMPILER_FUNC(Recompile_DsRead2B32_Vdst2VaddrOffset01)
 	const auto& inst       = code.GetInstructions().At(index);
 	const auto* input_info = spirv->GetCsInputInfo();
 
-	if (input_info == nullptr || input_info->lds_dwords == 0)
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
 	{
 		return false;
 	}
 
-	auto address = operand_variable_to_str(inst.src[0]);
-	auto dst0    = operand_variable_to_str(inst.dst, 0);
-	auto dst1    = operand_variable_to_str(inst.dst, 1);
-
-	if (address.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: address.type != SpirvType::Float condition ignored (continuing)\n"); }
-	if (dst0.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst0.type != SpirvType::Float condition ignored (continuing)\n"); }
-	if (dst1.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst1.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	const uint32_t offset0       = inst.ds_offset & 0xffu;
-	const uint32_t offset1       = (inst.ds_offset >> 8u) & 0xffu;
-	const auto     index_str     = String8::FromPrintf("%u", index);
-	const auto     offset0_bytes = spirv->GetConstantUint(offset0 * 4u);
-	const auto     offset1_bytes = spirv->GetConstantUint(offset1 * 4u);
-
-	// Same Workgroup byte-addressed storage as ds_write_b32; read2 offsets are
-	// dword-scaled, so convert to byte offsets before the shared >>2 index path.
-	static const char* text = R"(
-        %lds_addr_f_<index> = OpLoad %float %<address>
-        %lds_addr_u_<index> = OpBitcast %uint %lds_addr_f_<index>
-        %lds_byte_addr0_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset0>
-        %lds_index0_<index> = OpShiftRightLogical %uint %lds_byte_addr0_<index> %uint_2
-        %lds_ptr0_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index0_<index>
-        %lds_data0_u_<index> = OpLoad %uint %lds_ptr0_<index>
-        %lds_data0_f_<index> = OpBitcast %float %lds_data0_u_<index>
-               OpStore %<dst0> %lds_data0_f_<index>
-        %lds_byte_addr1_<index> = OpIAdd %uint %lds_addr_u_<index> %<offset1>
-        %lds_index1_<index> = OpShiftRightLogical %uint %lds_byte_addr1_<index> %uint_2
-        %lds_ptr1_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index1_<index>
-        %lds_data1_u_<index> = OpLoad %uint %lds_ptr1_<index>
-        %lds_data1_f_<index> = OpBitcast %float %lds_data1_u_<index>
-               OpStore %<dst1> %lds_data1_f_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<index>", index_str)
-	                   .ReplaceStr("<address>", address.value)
-	                   .ReplaceStr("<dst0>", dst0.value)
-	                   .ReplaceStr("<dst1>", dst1.value)
-	                   .ReplaceStr("<offset0>", offset0_bytes)
-	                   .ReplaceStr("<offset1>", offset1_bytes);
+	const auto address = operand_variable_to_str(inst.src[0]);
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8 body = LdsAddressSnapshot(address.value, index_str);
+	for (int word = 0; word < 2; ++word)
+	{
+		// These are independent addresses, not a contiguous two-dword span.
+		const auto tag = String8::FromPrintf("%u_read2_%d", index, word);
+		body += EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, Ds2OffsetBytes(inst, static_cast<uint32_t>(word), param), 1, tag);
+		body += LdsReadSpan(spirv, inst.dst, word, 1, tag);
+	}
+	*dst_source += GateLdsByExec(body, index_str);
 	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_DsWrite2B32_VaddrVdata2Offset01)
+{
+	const auto& inst       = code.GetInstructions().At(index);
+	const auto* input_info = spirv->GetCsInputInfo();
+
+	if (input_info == nullptr || input_info->lds_dwords == 0 || !ShaderLdsMemoryInstructionSupported(inst))
+	{
+		return false;
+	}
+
+	const auto address   = operand_variable_to_str(inst.src[0]);
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8    body      = LdsAddressSnapshot(address.value, index_str);
+	// Both data words are read before either store; the two stores target independent addresses.
+	for (int word = 0; word < 2; ++word)
+	{
+		const auto tag  = String8::FromPrintf("%u_write2_%d", index, word);
+		const auto data = operand_variable_to_str(inst.src[1 + word]);
+		String8    store = EmitLdsWordPointer(spirv, 0, tag);
+		store += String8::FromPrintf("        %%lds_data_f_%s = OpLoad %%float %%%s\n"
+		                             "        %%lds_data_u_%s = OpBitcast %%uint %%lds_data_f_%s\n"
+		                             "               OpStore %%lds_ptr_%s_0 %%lds_data_u_%s\n",
+		                             tag.c_str(), data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+		body += EmitLdsAddressCheck(spirv, "lds_addr_u_" + index_str, Ds2OffsetBytes(inst, static_cast<uint32_t>(word), param), 1, tag);
+		body += GateLdsByBounds(store, tag);
+	}
+	*dst_source += GateLdsByExec(body, index_str);
+	return true;
+}
+
+namespace {
+
+// Byte address for ds_*_addtid_b32: M0[15:0] + ds_offset (+ TID*4 on the
+// shared-LDS compute path, where `tid` is the lane index inside the wave).
+// `active` names a %bool lane-execution predicate; the caller computes it
+// (EXEC load, or a banked mask bit). Produces %addtid_idx_<tag> (word index),
+// %addtid_inb_<tag> (bounds check against `bound` dwords) and
+// %addtid_gate_<tag> (in-bounds AND exec-active).
+String8 DsAddtidIndex(Spirv* spirv, uint16_t offset, const String8& bound, const String8& tid, const String8& active,
+                      const String8& tag)
+{
+	String8 text = String8::FromPrintf(
+	    "         %%addtid_m0_%s = OpLoad %%uint %%m0\n"
+	    "       %%addtid_base_%s = OpBitwiseAnd %%uint %%addtid_m0_%s %%%s\n",
+	    tag.c_str(), tag.c_str(), tag.c_str(), spirv->GetConstantUint(0xffffu).c_str());
+	if (!tid.IsEmpty())
+	{
+		text += String8::FromPrintf(
+		    "       %%addtid_tidw_%s = OpShiftLeftLogical %%uint %%%s %%uint_2\n"
+		    "      %%addtid_bytet_%s = OpIAdd %%uint %%addtid_base_%s %%addtid_tidw_%s\n",
+		    tag.c_str(), tid.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+	}
+	text += String8::FromPrintf(
+	    "       %%addtid_byte_%s = OpIAdd %%uint %%addtid_%s_%s %%%s\n"
+	    "        %%addtid_idx_%s = OpShiftRightLogical %%uint %%addtid_byte_%s %%uint_2\n"
+	    "        %%addtid_inb_%s = OpULessThan %%bool %%addtid_idx_%s %%%s\n"
+	    "      %%addtid_gate_%s = OpLogicalAnd %%bool %%%s %%addtid_inb_%s\n",
+	    tag.c_str(), tid.IsEmpty() ? "base" : "bytet", tag.c_str(), spirv->GetConstantUint(offset).c_str(), tag.c_str(),
+	    tag.c_str(), tag.c_str(), tag.c_str(), bound.c_str(), tag.c_str(), active.c_str(), tag.c_str());
+	return text;
+}
+
+// Lane-execution predicate for the shared-LDS path: a plain EXEC word test in
+// virtualized mode, or the bank's mask bit under paired compute waves.
+bool EmitDsAddtidActive(const Spirv* spirv, ShaderWaveBank bank, const String8& tag, String8* dst_source,
+                        String8* active_id)
+{
+	if (spirv->UsesComputeWaveBanks())
+	{
+		ShaderOperand exec {};
+		exec.type = ShaderOperandType::ExecLo;
+		exec.size = 2;
+		*active_id = "addtid_exec_" + tag;
+		return spirv->EmitComputeWaveMaskBit(exec, bank, *active_id, dst_source);
+	}
+	*active_id = "addtid_active_" + tag;
+	*dst_source += String8::FromPrintf(
+	    "       %%addtid_exec_%s = OpLoad %%uint %%exec_lo\n"
+	    "    %%addtid_active_%s = OpINotEqual %%bool %%addtid_exec_%s %%uint_0\n",
+	    tag.c_str(), tag.c_str(), tag.c_str());
+	return true;
+}
+
+} // namespace
+
+// ds_write_addtid_b32 / ds_read_addtid_b32: a per-lane LDS slot at
+// M0[15:0] + ds_offset + TID*4 (RDNA2 ISA 10.4). Compute with an LDS allocation
+// lowers it onto shared %lds. The existing zero-LDS/graphics route retains its
+// function-local spill array and capacity; these are lowering policy, not proof
+// of an architectural LDS allocation or general cross-lane spill equivalence.
+static bool EmitDsAddtidLdsStore(const SpirvValue& data, const String8& active, const String8& tag,
+                                 const String8& bound, const String8& tid, Spirv* spirv, const ShaderInstruction& inst,
+                                 String8* dst_source)
+{
+	*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, tid, active, tag);
+	*dst_source += String8::FromPrintf(
+	    "               OpSelectionMerge %%addtid_merge_%s None\n"
+	    "               OpBranchConditional %%addtid_gate_%s %%addtid_then_%s %%addtid_merge_%s\n"
+	    "        %%addtid_then_%s = OpLabel\n"
+	    "         %%addtid_ptr_%s = OpAccessChain %%_ptr_Workgroup_uint %%lds %%addtid_idx_%s\n"
+	    "        %%addtid_dataf_%s = OpLoad %%float %%%s\n"
+	    "         %%addtid_data_%s = OpBitcast %%uint %%addtid_dataf_%s\n"
+	    "               OpStore %%addtid_ptr_%s %%addtid_data_%s\n"
+	    "               OpBranch %%addtid_merge_%s\n"
+	    "       %%addtid_merge_%s = OpLabel\n",
+	    tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(),
+	    data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_DsWriteAddtidB32_VdataOffset)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!spirv->UsesDsAddtid())
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+
+	if (spirv->UsesDsAddtidLds())
+	{
+		const auto bound = spirv->GetConstantUint(spirv->GetCsInputInfo()->lds_dwords);
+		if (bound == "unknown_uint_constant")
+		{
+			return false;
+		}
+		if (spirv->UsesComputeWaveBanks())
+		{
+			for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
+			{
+				const auto data   = spirv->GetComputeWaveRegister(inst.src[0], bank, 0);
+				const auto bname  = bank == ShaderWaveBank::Low ? "low" : "high";
+				if (data.value.IsEmpty())
+				{
+					return false;
+				}
+				const auto tag = String8::FromPrintf("%u_%s", index, bname);
+				String8    active;
+				if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
+				{
+					return false;
+				}
+				*dst_source += String8::FromPrintf(
+				    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
+				if (!EmitDsAddtidLdsStore(data, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		String8 active;
+		if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
+		{
+			return false;
+		}
+		*dst_source += String8::FromPrintf("        %%addtid_tidl_%s = OpLoad %%uint %%gl_LocalInvocationIndex\n"
+		                                   "         %%addtid_tid_%s = OpBitwiseAnd %%uint %%addtid_tidl_%s %%uint_63\n",
+		                                   index_str.c_str(), index_str.c_str(), index_str.c_str());
+		const auto data = operand_variable_to_str(inst.src[0]);
+		if (data.value.IsEmpty())
+		{
+			return false;
+		}
+		return EmitDsAddtidLdsStore(data, active, index_str, bound, "addtid_tid_" + index_str, spirv, inst, dst_source);
+	}
+
+	// Private spill array: compute without an LDS allocation or any graphics
+	// stage. Under paired compute waves each invocation still emulates two
+	// lanes, so the bank loop and TID*4 term are kept — only the storage is
+	// per-invocation instead of the shared %lds array.
+	const auto bound = spirv->GetConstantUint(kDsAddtidSpillDwords);
+	if (bound == "unknown_uint_constant")
+	{
+		return false;
+	}
+	if (spirv->UsesComputeWaveBanks())
+	{
+		for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
+		{
+			const auto data  = spirv->GetComputeWaveRegister(inst.src[0], bank, 0);
+			const auto bname = bank == ShaderWaveBank::Low ? "low" : "high";
+			if (data.value.IsEmpty())
+			{
+				return false;
+			}
+			const auto tag = String8::FromPrintf("%u_%s", index, bname);
+			String8    active;
+			if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
+			{
+				return false;
+			}
+			*dst_source += String8::FromPrintf(
+			    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
+			*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, "addtid_tid_" + tag, active, tag);
+			*dst_source += String8::FromPrintf(
+			    "               OpSelectionMerge %%addtid_merge_%s None\n"
+			    "               OpBranchConditional %%addtid_gate_%s %%addtid_then_%s %%addtid_merge_%s\n"
+			    "        %%addtid_then_%s = OpLabel\n"
+			    "         %%addtid_ptr_%s = OpAccessChain %%_ptr_Function_float %%lds_addtid %%addtid_idx_%s\n"
+			    "        %%addtid_dataf_%s = OpLoad %%float %%%s\n"
+			    "               OpStore %%addtid_ptr_%s %%addtid_dataf_%s\n"
+			    "               OpBranch %%addtid_merge_%s\n"
+			    "       %%addtid_merge_%s = OpLabel\n",
+			    tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str(),
+			    data.value.c_str(), tag.c_str(), tag.c_str(), tag.c_str(), tag.c_str());
+		}
+		return true;
+	}
+	const auto data = operand_variable_to_str(inst.src[0]);
+	if (data.value.IsEmpty())
+	{
+		return false;
+	}
+	String8 active;
+	if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
+	{
+		return false;
+	}
+	*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, String8(), active, index_str);
+	*dst_source += String8::FromPrintf(
+	    "               OpSelectionMerge %%addtid_merge_%s None\n"
+	    "               OpBranchConditional %%addtid_gate_%s %%addtid_then_%s %%addtid_merge_%s\n"
+	    "        %%addtid_then_%s = OpLabel\n"
+	    "         %%addtid_ptr_%s = OpAccessChain %%_ptr_Function_float %%lds_addtid %%addtid_idx_%s\n"
+	    "        %%addtid_dataf_%s = OpLoad %%float %%%s\n"
+	    "               OpStore %%addtid_ptr_%s %%addtid_dataf_%s\n"
+	    "               OpBranch %%addtid_merge_%s\n"
+	    "       %%addtid_merge_%s = OpLabel\n",
+	    index_str.c_str(), index_str.c_str(), index_str.c_str(), index_str.c_str(), index_str.c_str(), index_str.c_str(),
+	    index_str.c_str(), index_str.c_str(), data.value.c_str(), index_str.c_str(), index_str.c_str(), index_str.c_str(),
+	    index_str.c_str());
+	return true;
+}
+
+static bool EmitDsAddtidLoad(const SpirvValue& dst, const String8& active, const String8& tag,
+                             const String8& bound, const String8& tid, Spirv* spirv, const ShaderInstruction& inst,
+                             String8* dst_source)
+{
+	*dst_source += DsAddtidIndex(spirv, inst.ds_offset, bound, tid, active, tag);
+	// EXEC and bounds have different result contracts: inactive preserves the
+	// VGPR; active OOB produces zero. Both must branch before evaluating memory.
+	String8 body = R"(
+OpSelectionMerge %addtid_merge_<t> None
+OpBranchConditional %<active> %addtid_active_body_<t> %addtid_merge_<t>
+%addtid_active_body_<t> = OpLabel
+OpSelectionMerge %addtid_read_merge_<t> None
+OpBranchConditional %addtid_inb_<t> %addtid_read_<t> %addtid_oob_<t>
+%addtid_read_<t> = OpLabel
+)";
+	if (spirv->UsesDsAddtidLds())
+	{
+		body += R"(
+%addtid_ptr_<t> = OpAccessChain %_ptr_Workgroup_uint %lds %addtid_idx_<t>
+%addtid_val_<t> = OpLoad %uint %addtid_ptr_<t>
+%addtid_valf_<t> = OpBitcast %float %addtid_val_<t>
+)";
+	} else
+	{
+		body += R"(
+%addtid_ptr_<t> = OpAccessChain %_ptr_Function_float %lds_addtid %addtid_idx_<t>
+%addtid_valf_<t> = OpLoad %float %addtid_ptr_<t>
+)";
+	}
+	body += R"(
+OpBranch %addtid_read_merge_<t>
+%addtid_oob_<t> = OpLabel
+%addtid_zero_<t> = OpBitcast %float %uint_0
+OpBranch %addtid_read_merge_<t>
+%addtid_read_merge_<t> = OpLabel
+%addtid_res_<t> = OpPhi %float %addtid_valf_<t> %addtid_read_<t> %addtid_zero_<t> %addtid_oob_<t>
+OpStore %<dst> %addtid_res_<t>
+OpBranch %addtid_merge_<t>
+%addtid_merge_<t> = OpLabel
+)";
+	*dst_source += body.ReplaceStr("<t>", tag).ReplaceStr("<active>", active).ReplaceStr("<dst>", dst.value);
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_DsReadAddtidB32_VdstOffset)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!spirv->UsesDsAddtid())
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+
+	if (spirv->UsesDsAddtidLds())
+	{
+		const auto bound = spirv->GetConstantUint(spirv->GetCsInputInfo()->lds_dwords);
+		if (bound == "unknown_uint_constant")
+		{
+			return false;
+		}
+		if (spirv->UsesComputeWaveBanks())
+		{
+			for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
+			{
+				const auto dst    = spirv->GetComputeWaveRegister(inst.dst, bank, 0);
+				const auto bname  = bank == ShaderWaveBank::Low ? "low" : "high";
+				if (dst.value.IsEmpty())
+				{
+					return false;
+				}
+				const auto tag = String8::FromPrintf("%u_%s", index, bname);
+				String8    active;
+				if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
+				{
+					return false;
+				}
+				*dst_source += String8::FromPrintf(
+				    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
+				if (!EmitDsAddtidLoad(dst, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source))
+				{
+					return false;
+				}
+			}
+			return true;
+		}
+		String8 active;
+		if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
+		{
+			return false;
+		}
+		*dst_source += String8::FromPrintf("        %%addtid_tidl_%s = OpLoad %%uint %%gl_LocalInvocationIndex\n"
+		                                   "         %%addtid_tid_%s = OpBitwiseAnd %%uint %%addtid_tidl_%s %%uint_63\n",
+		                                   index_str.c_str(), index_str.c_str(), index_str.c_str());
+		const auto dst = operand_variable_to_str(inst.dst);
+		if (dst.value.IsEmpty())
+		{
+			return false;
+		}
+		return EmitDsAddtidLoad(dst, active, index_str, bound, "addtid_tid_" + index_str, spirv, inst, dst_source);
+	}
+
+	// Private spill array (compute without LDS or a graphics stage): the bank
+	// loop and TID*4 term are kept so the two emulated lanes stay distinct.
+	const auto bound = spirv->GetConstantUint(kDsAddtidSpillDwords);
+	if (bound == "unknown_uint_constant")
+	{
+		return false;
+	}
+	if (spirv->UsesComputeWaveBanks())
+	{
+		for (const auto bank: {ShaderWaveBank::Low, ShaderWaveBank::High})
+		{
+			const auto dst   = spirv->GetComputeWaveRegister(inst.dst, bank, 0);
+			const auto bname = bank == ShaderWaveBank::Low ? "low" : "high";
+			if (dst.value.IsEmpty())
+			{
+				return false;
+			}
+			const auto tag = String8::FromPrintf("%u_%s", index, bname);
+			String8    active;
+			if (!EmitDsAddtidActive(spirv, bank, tag, dst_source, &active))
+			{
+				return false;
+			}
+			*dst_source += String8::FromPrintf(
+			    "        %%addtid_tid_%s = OpBitwiseAnd %%uint %%wave_logical_%s %%uint_63\n", tag.c_str(), bname);
+			if (!EmitDsAddtidLoad(dst, active, tag, bound, "addtid_tid_" + tag, spirv, inst, dst_source)) { return false; }
+		}
+		return true;
+	}
+	const auto dst = operand_variable_to_str(inst.dst);
+	if (dst.value.IsEmpty())
+	{
+		return false;
+	}
+	String8 active;
+	if (!EmitDsAddtidActive(spirv, ShaderWaveBank::Low, index_str, dst_source, &active))
+	{
+		return false;
+	}
+	return EmitDsAddtidLoad(dst, active, index_str, bound, String8(), spirv, inst, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_SBarrier_Empty)
@@ -2795,6 +3129,67 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx4_Sdst4SvSoffset)
 
 // s_buffer_load byte offset as %t102_<index> (int): an inline/literal
 // constant, or an SGPR, VCC word or M0 read at execution time.
+String8 Spirv::WrapVertexScalarBufferProbe(const ShaderInstruction& inst, uint32_t index,
+                                          uint32_t site, const String8& original)
+{
+	if (!UsesVertexClipProbe() || site >= kVertexScalarBufferProbeSites || inst.src_num < 2 ||
+	    inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4 ||
+	    inst.dst.size <= 0 || inst.dst.size > 16)
+	{
+		return original;
+	}
+	const uint32_t components = static_cast<uint32_t>(inst.dst.size);
+	// A destination word with no SPIR-V variable (for example the second word of a VCC pair) cannot be observed.
+	for (uint32_t word = 0; word < components; ++word)
+	{
+		if (operand_variable_to_str(inst.dst, word).value.IsEmpty()) { return original; }
+	}
+	String8 before;
+	const auto tag = String8::FromPrintf("vs_sbuffer_%u", index);
+	if (!operand_load_uint(this, inst.src[1], tag + "_offset_raw", tag, &before)) { return original; }
+	before += String8::FromPrintf("\n%%%s_offset = OpIAdd %%uint %%%s_offset_raw %%%s\n",
+	                              tag.c_str(), tag.c_str(), GetConstantUint(static_cast<uint32_t>(inst.smem_imm_offset)).c_str());
+	for (uint32_t word = 0; word < 4u; ++word)
+	{
+		before += String8::FromPrintf("%%vs_sbuffer_desc_%u_%u = OpLoad %%uint %%%s\n", index, word,
+		                              operand_variable_to_str(inst.src[0], word).value.c_str());
+	}
+	const auto pointer = [&](uint32_t field)
+	{
+		return String8::FromPrintf("%%vs_sbuffer_ptr_%u_%u = OpAccessChain %%_ptr_StorageBuffer_uint %%vertex_clip_probe %%int_51 %%%s\n",
+		                           index, field, GetConstantInt(static_cast<int>(site * kVertexScalarBufferProbeWords + field)).c_str());
+	};
+	String8 after = pointer(0u);
+	after += String8::FromPrintf(
+	    "%%vs_sbuffer_claim_ptr_%u = OpCopyObject %%_ptr_StorageBuffer_uint %%vs_sbuffer_ptr_%u_0\n"
+	    "%%vs_sbuffer_prior_%u = OpAtomicCompareExchange %%uint %%vs_sbuffer_claim_ptr_%u %%uint_1 %%uint_72 %%uint_0 %%uint_1 %%uint_0\n"
+	    "%%vs_sbuffer_won_%u = OpIEqual %%bool %%vs_sbuffer_prior_%u %%uint_0\n"
+	    "OpSelectionMerge %%vs_sbuffer_merge_%u None\n"
+	    "OpBranchConditional %%vs_sbuffer_won_%u %%vs_sbuffer_store_%u %%vs_sbuffer_merge_%u\n"
+	    "%%vs_sbuffer_store_%u = OpLabel\n",
+	    index, index, index, index, index, index, index, index, index, index, index);
+	const auto store = [&](uint32_t field, const String8& value)
+	{
+		after += pointer(field);
+		after += String8::FromPrintf("OpStore %%vs_sbuffer_ptr_%u_%u %s\n", index, field, value.c_str());
+	};
+	store(1u, String8("%") + GetConstantUint(inst.pc));
+	store(2u, String8("%") + GetConstantUint(components));
+	store(3u, String8::FromPrintf("%%%s_offset", tag.c_str()));
+	for (uint32_t word = 0; word < 4u; ++word)
+	{
+		store(4u + word, String8::FromPrintf("%%vs_sbuffer_desc_%u_%u", index, word));
+	}
+	for (uint32_t word = 0; word < components; ++word)
+	{
+		after += String8::FromPrintf("%%vs_sbuffer_value_%u_%u = OpLoad %%uint %%%s\n", index, word,
+		                             operand_variable_to_str(inst.dst, word).value.c_str());
+		store(8u + word, String8::FromPrintf("%%vs_sbuffer_value_%u_%u", index, word));
+	}
+	after += String8::FromPrintf("OpBranch %%vs_sbuffer_merge_%u\n%%vs_sbuffer_merge_%u = OpLabel\n", index, index);
+	return before + original + after;
+}
+
 static String8 SBufferOffsetDefinition(Spirv* spirv, const ShaderOperand& offset, uint32_t index)
 {
 	if (operand_is_constant(offset))
@@ -3211,16 +3606,32 @@ KYTY_RECOMPILER_FUNC(Recompile_SLoadDwordx16_Sdst16SbaseSoffset)
 }
 
 
+static bool TBufferFloatLoadSupported(const ShaderInstruction& inst, uint8_t components)
+{
+	if (!ShaderInstructionLoweringPreconditions(inst) || inst.src_num != 3 || inst.dst.size != components ||
+	    inst.mtbuf_components != components || inst.mtbuf_format_is_gen5 != Config::IsNextGen()) { return false; }
+	// These emitters perform unconverted 32-bit float loads. Other memory
+	// formats/component combinations need their own conversion/default rules.
+	switch (components)
+	{
+		case 1: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 22u : 0x74u);
+		case 2: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 64u : 0x7bu);
+		case 4: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 77u : 0x7eu);
+		default: return false;
+	}
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!TBufferFloatLoadSupported(inst, 1)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_x", 36, 1, dst_source);
+			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_x", inst.mtbuf_format, 1, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
@@ -3272,13 +3683,14 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1)
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloat4)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!TBufferFloatLoadSupported(inst, 4)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyzw", 119, 4, dst_source);
+			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyzw", inst.mtbuf_format, 4, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
@@ -3336,6 +3748,7 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloa
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXy_Vdata2VaddrSvSoffsIdxenFloat2)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!TBufferFloatLoadSupported(inst, 2)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
 	{
@@ -3343,7 +3756,7 @@ KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXy_Vdata2VaddrSvSoffsIdxenFloat2
 	}
 	if (Config::IsNextGen())
 	{
-		return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xy", 64, 2, dst_source);
+		return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xy", inst.mtbuf_format, 2, dst_source);
 	}
 	if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 	auto dst0 = operand_variable_to_str(inst.dst, 0);
@@ -3384,13 +3797,14 @@ OpStore %temp_int_5 %int_64
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdxenFloat4)
 {
 	const auto& inst      = code.GetInstructions().At(index);
+	if (!TBufferFloatLoadSupported(inst, 4)) { return false; }
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
 	{
 		if (Config::IsNextGen())
 		{
-			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyzw", 119, 4, dst_source);
+			return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyzw", inst.mtbuf_format, 4, dst_source);
 		}
 
 		if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }

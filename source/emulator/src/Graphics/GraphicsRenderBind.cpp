@@ -2436,6 +2436,28 @@ static void EmitDrawMaterialTraceStorage(FILE* out, uint32_t ordinal, const char
 		    static_cast<double>(floats[21]), static_cast<double>(floats[22]), static_cast<double>(floats[23]),
 		    static_cast<double>(floats[24]), static_cast<double>(floats[25]), static_cast<double>(floats[26]),
 		    static_cast<double>(floats[27]));
+		// Bounded, opt-in CPU reference for small VS constant blocks. Preserve
+		// exact words so scalar-load results can be compared without rounding.
+		if (stage[0] == 'V' && storage.start_register[i] >= 0 && addr != 0u && bytes <= 1024u &&
+		    ShaderStorageUsageIsReadOnly(storage.usages[i]))
+		{
+			for (uint64_t offset = 0; offset + sizeof(uint32_t) <= bytes; offset += 64u)
+			{
+				uint32_t block[16] {};
+				const uint32_t count = static_cast<uint32_t>(std::min<uint64_t>(sizeof(block), bytes - offset) / sizeof(uint32_t));
+				const bool ok = Core::VirtualMemory::CopyFromGuest(block, addr + offset, count * sizeof(uint32_t));
+				std::fprintf(out, "KYTY_TRACE_DRAW_VS_STORAGE_WORDS ordinal=%u index=%d off=%" PRIu64 " w=%u ok=%u v=",
+				             ordinal, i, offset, count, ok ? 1u : 0u);
+				if (ok)
+				{
+					for (uint32_t word = 0; word < count; ++word)
+					{
+						std::fprintf(out, "%s%08x", word == 0u ? "" : ":", block[word]);
+					}
+				}
+				std::fputc('\n', out);
+			}
+		}
 		if (bytes == 512u && addr != 0u)
 		{
 			float nrm[12] = {};
@@ -2857,7 +2879,6 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				    Core::VirtualMemory::CopyFromGuest(eud_near, eud.eud_descriptor_address - 4u * sizeof(uint32_t),
 				                                       sizeof(eud_near));
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
-
 				EXIT("storage buffer range is not materialized: shader=%016" PRIx64 " stage=0x%x index=%d addr=0x%016" PRIx64 " size=0x%016" PRIx64
 				     " access=%u source=%u reason=%u code=%d exact=%d indirect=%d raw_vmem_oob=%d raw_smem=%d"
 				     " raw_tbuffer=%d sgpr=%d slot=%d usage=%u stride=%u words=%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32
@@ -3173,6 +3194,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			pitch = ShaderGen5ResolveLinearPitch(width, r.Format(), r.Type(), r.fields[4]);
 		}
 		auto       base_level    = (gen5 && r.MaxMip() == 0u ? 0u : r.BaseLevel());
+		// Last level of the view (the T# allocation can be longer than the range it exposes).
+		const uint32_t view_last_level = (gen5 && r.MaxMip() == 0u ? 0u : r.LastLevel());
+		// Layers the view reads from layer 0 (an array view ends at the descriptor's last slice).
+		const uint32_t view_layers = (arrayed_2d ? depth : 1u);
 		auto       levels        = (gen5 ? static_cast<uint32_t>(r.MaxMip()) + 1u : r.LastLevel() + 1u);
 		auto       dfmt          = (gen5 ? 0 : r.Dfmt());
 		auto       nfmt          = (gen5 ? 0 : r.Nfmt());
@@ -3203,15 +3228,15 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		} else if (three_dimensional)
 		{
 			Gen5TextureVolumeLayout volume_layout {};
-			if (!Gen5GetStandard4KBVolumeTextureLayout(fmt, width, height, depth, pitch, levels, tile, &volume_layout))
+			if (!Gen5GetVolumeTextureLayout(fmt, width, height, depth, pitch, levels, tile, &volume_layout))
 			{
-				const uint32_t bpe = std::max(1u, ShaderGen5TextureBytesPerElement(fmt));
-				size.size          = std::max(4096u, pitch * height * depth * bpe * std::max(1u, levels));
-				size.align         = 4096;
-			} else
-			{
-				size = volume_layout.tiled;
+				EXIT("unsupported Gen5 volume layout: format=%u %ux%ux%u pitch=%u levels=%u tile=%u type=%u base_array=%u usage=%u "
+				     "shape_from_instruction=%u start_register=%d\n",
+				     fmt, width, height, depth, pitch, levels, tile, static_cast<uint32_t>(r.Type()),
+				     static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(textures.desc[i].usage),
+				     textures.desc[i].sampled_shape_from_instruction ? 1u : 0u, textures.desc[i].start_register);
 			}
+			size = volume_layout.tiled;
 		} else if (arrayed_2d && !check_depth_texture)
 		{
 			Gen5TextureArrayLayout array_layout {};
@@ -3298,7 +3323,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		VulkanImage* tex            = nullptr;
 		bool         render_texture = false;
 		bool         depth_texture  = false;
-		int          view_type      = VulkanImage::VIEW_DEFAULT;
 		const char*  materialize    = "unresolved";
 
 		if (check_depth_texture)
@@ -3374,11 +3398,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			}
 			if (render_texture)
 			{
-				if (swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7) && swizzle != DstSel(7, 6, 5, 4))
-				{
-					/* [gen5-nonfatal] EXIT("unsupported render texture sampled swizzle: swizzle=0x%03" PRIx32 */
-					KYTY_LOG_DEBUG("WARNING: unsupported render texture sampled swizzle (continuing)\n");
-				}
 				// Multiple non-exact RT aliases are expected under Gen5 nested /
 				// same-base parents. Prefer the tightest cover using guest allocation
 				// bytes when every match recorded guest_size at create; otherwise
@@ -3400,18 +3419,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				VkFormat     cand_fmt[16] = {};
 				uint32_t     cand_w[16]   = {};
 				uint32_t     cand_h[16]   = {};
+				uint32_t     cand_mips[16] = {};
+				uint32_t     cand_layers[16] = {};
 				for (size_t i = 0; i < cand_n; i++)
 				{
 					cand_fmt[i]             = rtex.At(static_cast<int>(i))->format;
 					const auto guest_extent = rtex.At(static_cast<int>(i))->GetGuestExtent();
 					cand_w[i]               = guest_extent.width;
 					cand_h[i]               = guest_extent.height;
+					cand_mips[i]            = rtex.At(static_cast<int>(i))->mip_levels;
+					cand_layers[i]          = rtex.At(static_cast<int>(i))->array_layers;
 				}
 				int    filtered[16] = {};
 				size_t filtered_n   = 0;
 				bool   reject_alias = false;
-				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
-				                                      &reject_alias));
+				EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, view_last_level + 1u, view_layers, cand_n, cand_fmt, cand_w,
+				                                      cand_h, cand_mips, cand_layers, filtered, &filtered_n, &reject_alias));
 				if (reject_alias)
 				{
 					render_texture = false;
@@ -3460,14 +3483,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					}
 					tex         = rtex.At(static_cast<int>(alias_index));
 					materialize = rt_exact ? "rt-exact" : "rt-inexact";
-					if (swizzle == DstSel(6, 5, 4, 7))
-					{
-						view_type = VulkanImage::VIEW_BGRA;
-					}
-				}
-				if (swizzle == DstSel(7, 6, 5, 4))
-				{
-					view_type = VulkanImage::VIEW_ABGR;
 				}
 			}
 			// Live StorageTexture (compute/UAV) can own GPU pixels without ever
@@ -3492,18 +3507,22 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					VkFormat     cand_fmt[16] = {};
 					uint32_t     cand_w[16]   = {};
 					uint32_t     cand_h[16]   = {};
+					uint32_t     cand_mips[16] = {};
+				uint32_t     cand_layers[16] = {};
 					for (size_t i = 0; i < cand_n; i++)
 					{
 						cand_fmt[i]             = stex.At(static_cast<int>(i))->format;
 						const auto guest_extent = stex.At(static_cast<int>(i))->GetGuestExtent();
 						cand_w[i]               = guest_extent.width;
 						cand_h[i]               = guest_extent.height;
+						cand_mips[i]            = stex.At(static_cast<int>(i))->mip_levels;
+						cand_layers[i]          = stex.At(static_cast<int>(i))->array_layers;
 					}
 					int    filtered[16] = {};
 					size_t filtered_n   = 0;
 					bool   reject_st    = false;
-					EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, cand_n, cand_fmt, cand_w, cand_h, filtered, &filtered_n,
-					                                      &reject_st));
+					EXIT_IF(!Gen5PickSampleSurfaceAliases(fmt, use_srgb, width, height, view_last_level + 1u, view_layers, cand_n, cand_fmt, cand_w,
+					                                      cand_h, cand_mips, cand_layers, filtered, &filtered_n, &reject_st));
 					if (reject_st)
 					{
 						materialize = "st-rejected";
@@ -3579,13 +3598,6 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				{
 					tex         = video_image.image;
 					materialize = "videoout";
-					if (swizzle == DstSel(6, 5, 4, 7))
-					{
-						view_type = VulkanImage::VIEW_BGRA;
-					} else if (swizzle == DstSel(7, 6, 5, 4))
-					{
-						view_type = VulkanImage::VIEW_ABGR;
-					}
 				}
 			}
 		}
@@ -3805,12 +3817,20 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		static const char* bound_dump_spec   = std::getenv("KYTY_DUMP_BOUND_SAMPLE");
 		uint32_t           bound_dump_width  = 0;
 		uint32_t           bound_dump_height = 0;
-		if (bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
+		// KYTY_DUMP_BOUND_SAMPLE_FROM=<present>: skip the dump until that presented frame, so a resource reused every
+		// frame is read back in its steady state rather than at its first (still empty) bind.
+		// KYTY_DUMP_BOUND_SAMPLE_TO=<present>: dump every frame in [FROM, TO] (the frame number joins the file name).
+		static const char* bound_dump_from = std::getenv("KYTY_DUMP_BOUND_SAMPLE_FROM");
+		static const char* bound_dump_to   = std::getenv("KYTY_DUMP_BOUND_SAMPLE_TO");
+		const bool         bound_dump_due =
+		    (bound_dump_from == nullptr || WindowGetPresentedFrameNum() >= std::atoi(bound_dump_from)) &&
+		    (bound_dump_to == nullptr || WindowGetPresentedFrameNum() <= std::atoi(bound_dump_to));
+		if (bound_dump_due && bound_dump_spec != nullptr && std::sscanf(bound_dump_spec, "%ux%u", &bound_dump_width, &bound_dump_height) == 2 &&
 		    bound_dump_width == static_cast<uint32_t>(width) && bound_dump_height == static_cast<uint32_t>(height))
 		{
 			char dump_tag[96];
-			std::snprintf(dump_tag, sizeof(dump_tag), "bound-addr%012" PRIx64 "-guestfmt%u-hostfmt%u-type%u", static_cast<uint64_t>(addr),
-			              fmt, static_cast<uint32_t>(tex->format), static_cast<uint32_t>(tex->type));
+			std::snprintf(dump_tag, sizeof(dump_tag), "bound-p%d-addr%012" PRIx64 "-guestfmt%u-hostfmt%u-type%u", WindowGetPresentedFrameNum(),
+			              static_cast<uint64_t>(addr), fmt, static_cast<uint32_t>(tex->format), static_cast<uint32_t>(tex->type));
 			UtilDumpVulkanImageRgba8Png(g_render_ctx->GetGraphicCtx(), tex, "/tmp/kyty-dump-bound-sample", dump_tag);
 		}
 		if (render_texture)
@@ -3837,7 +3857,14 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (!VulkanResolveStorageImageView(tex, three_dimensional, arrayed_2d, &images_storage_view[index_storage],
 			                                   base_level))
 			{
-				EXIT("storage image has no compatible Vulkan view\n");
+				EXIT("storage image has no compatible Vulkan view: backing{kind=%u vk_format=%u mips=%u layers=%u usage=0x%08x} "
+				     "descriptor{format=%u %ux%u levels=%u base_level=%u last_level=%u type=%u tile=%u 3d=%d array=%d "
+				     "dwords=%08x %08x %08x %08x %08x %08x %08x %08x}\n",
+				     static_cast<uint32_t>(tex->type), static_cast<uint32_t>(tex->format), tex->mip_levels, tex->array_layers,
+				     static_cast<uint32_t>(tex->usage), static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+				     static_cast<uint32_t>(height), levels, base_level, view_last_level, static_cast<uint32_t>(host_resource_type),
+				     static_cast<uint32_t>(tile), three_dimensional ? 1 : 0, arrayed_2d ? 1 : 0, r.fields[0], r.fields[1], r.fields[2],
+				     r.fields[3], r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
 			}
 			RecordDrawMaterialTraceTexture(material_trace, i, textures.desc[i], r, addr, width, height, pitch, depth, tex,
 			                               images_storage_view[index_storage], trace_provenance, &textures, &samplers);
@@ -3888,13 +3915,41 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				sampled_index  = &index_sampled_depth;
 			}
 			sampled_images[*sampled_index] = tex;
-			if (three_dimensional && (depth_texture || view_type != VulkanImage::VIEW_DEFAULT)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: three_dimensional && (depth_texture || view_type != VulkanImage::VIEW_DEFAULT) condition ignored (continuing)\n"); }
-			if (arrayed_2d && !depth_texture && view_type != VulkanImage::VIEW_DEFAULT) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: arrayed_2d && !depth_texture && view_type != VulkanImage::VIEW_DEFAULT condition ignored (continuing)\n"); }
 			sampled_views[*sampled_index] =
 			    (three_dimensional
 			         ? VulkanImage::VIEW_3D
 			         : (depth_texture ? (arrayed_2d ? VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY : VulkanImage::VIEW_DEPTH_TEXTURE)
-			                          : (arrayed_2d ? VulkanImage::VIEW_ARRAY : view_type)));
+			                          : (arrayed_2d ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_DEFAULT)));
+			if (!depth_texture && (tex->type == VulkanImageType::RenderTexture || tex->type == VulkanImageType::StorageTexture ||
+			                       tex->type == VulkanImageType::VideoOut))
+			{
+				// The alias owns the pixels, not this descriptor's read mapping.
+				// Keep attachment/storage views intact and cache the complete sampled
+				// view identity so two simultaneous aliases can use different DST_SEL.
+				const uint32_t last_level = view_last_level;
+				VulkanImageViewDescriptor sampled_descriptor {};
+				if (last_level < base_level ||
+				    !VulkanPlanSampledImageView(*tex, three_dimensional ? VK_IMAGE_VIEW_TYPE_3D :
+				                                  (arrayed_2d ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D),
+				                                VK_IMAGE_ASPECT_COLOR_BIT, base_level, last_level - base_level + 1u,
+				                                base_array, arrayed_2d ? depth - base_array : 1u, view_swizzle, &sampled_descriptor))
+				{
+					EXIT("unsupported sampled alias view: format=%u swizzle=0x%03x mip=%u..%u layers=%u..%u type=%u "
+					     "backing{kind=%u vk_format=%u mips=%u layers=%u usage=0x%08x image_type=%u guest=%ux%u} sample{%ux%u levels=%u}\n",
+					     fmt, view_swizzle, base_level, last_level, base_array, depth, host_resource_type,
+					     static_cast<uint32_t>(tex->type), static_cast<uint32_t>(tex->format), tex->mip_levels, tex->array_layers,
+					     static_cast<uint32_t>(tex->usage), static_cast<uint32_t>(tex->image_type), tex->GetGuestExtent().width,
+					     tex->GetGuestExtent().height, static_cast<uint32_t>(width), static_cast<uint32_t>(height), levels);
+				}
+				const int sampled_view = VulkanGetOrCreateSampledImageView(g_render_ctx->GetGraphicCtx()->device, tex,
+				                                                          sampled_descriptor);
+				if (sampled_view < 0)
+				{
+					EXIT("failed to create sampled alias view: format=%u swizzle=0x%03x cached_views=%zu\n", fmt,
+					     view_swizzle, tex->sampled_view_descriptors.size());
+				}
+				sampled_views[*sampled_index] = sampled_view;
+			}
 			if (material_trace != nullptr && material_trace->trace_rt_lifetime)
 			{
 				TraceRenderTargetLifetimeSample(material_trace->context, i, addr, width, height, tex,
@@ -4161,6 +4216,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
                      uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum)
 {
 	KYTY_PROFILER_FUNCTION();
+	InvalidateComputeColorFills(bind);
 	DrawMaterialTraceSession trace_session = BeginDrawMaterialTrace(material_trace);
 	if (trace_session.trace_rt_lifetime && material_trace != nullptr)
 	{

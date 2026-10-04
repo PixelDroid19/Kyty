@@ -255,7 +255,9 @@ ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveControlFlow(const Shader
 			}
 		}
 		if (instruction.type == ShaderInstructionType::DsWriteB32 || instruction.type == ShaderInstructionType::DsReadB32 ||
-		    instruction.type == ShaderInstructionType::DsAddRtnU32)
+		    instruction.type == ShaderInstructionType::DsAddRtnU32 || instruction.type == ShaderInstructionType::DsWrite2B32 ||
+		    instruction.type == ShaderInstructionType::DsWrite2St64B32 || instruction.type == ShaderInstructionType::DsRead2B32 ||
+		    instruction.type == ShaderInstructionType::DsRead2St64B32)
 		{
 			return Failure(instruction.pc, "LDS effects in a branch-containing shader require CFG-aware address and mask proofs");
 		}

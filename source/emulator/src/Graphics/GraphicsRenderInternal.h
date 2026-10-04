@@ -602,7 +602,10 @@ public:
 	void         PublishEopEqRegistration(void* registration);
 	void         CancelEopEqRegistration(void* registration);
 	void         DeleteEopEqRegistration(void* registration, Kernel::EventQueue::KernelEqueue eq, int id);
-	void         TriggerEopEvent();
+	// Signals the EOP-class graphics events. Their event data is the
+	// interrupt context id of the ReleaseMem that raised the interrupt
+	// (sceAgcDriverGetEqContextId reads it back).
+	void         TriggerEopEvent(uint32_t interrupt_context_id);
 	void         TriggerQueuedGraphicsInterrupt();
 	Core::Mutex& GetEopRegistrationMutex() { return m_eop_registration_mutex; }
 
@@ -621,7 +624,7 @@ private:
 		QueuedGraphicsInterrupt,
 	};
 
-	void TriggerRegisteredEvents(CompletionSignal signal);
+	void TriggerRegisteredEvents(CompletionSignal signal, uint32_t interrupt_context_id);
 
 	Core::Mutex             m_mutex;
 	PipelineCache*          m_pipeline_cache           = nullptr;
@@ -1505,6 +1508,10 @@ void hw_print(const HW::Context& hw);
 void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
                        uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval);
 Vector<RenderTextureVulkanImage*>  FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
+// Ordered compute fills of color-image aliases (docs/graphics-compute-uniform-color-fill.md).
+void               InvalidateComputeColorFills(const ShaderBindResources& bind);
+[[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ShaderComputeInputInfo& input, uint32_t group_x,
+                                                    uint32_t group_y, uint32_t group_z);
 Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 Vector<DepthStencilVulkanImage*>   FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 

@@ -317,6 +317,20 @@ inline bool GpuMemoryAllowsOverwrittenStorageTextureParent(GpuMemoryObjectType e
 	       relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
+// Incoming StorageTexture fully inside a live RenderTexture allocation.
+// Captured worldmap load: a 240x135 fmt-64 storage view (0x43800) inside a
+// 2432x1368 R16G16B16A16 target. The guest reuses part of the target's tiled
+// backing as UAV memory; the views have different formats, so no pixel copy
+// can seed the storage image. Link both: the storage view seeds from guest
+// bytes while write-back keeps the shared range coherent.
+inline bool GpuMemoryAllowsStorageTextureContainedInRenderTarget(GpuMemoryObjectType existing_type,
+                                                                 GpuMemoryOverlapType relation,
+                                                                 GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::RenderTexture && incoming_type == GpuMemoryObjectType::StorageTexture &&
+	       relation == GpuMemoryOverlapType::Contains;
+}
+
 // A depth-mip storage view may share its backing with the exact CPU-uploaded
 // sampled mip chain while older, larger GPU surfaces remain linked. The exact
 // texture is checked separately for format, extent, levels and update order.
@@ -355,8 +369,9 @@ inline bool GpuMemoryAllowsIndexStorageShare(GpuMemoryObjectType existing_type, 
 	{
 		return false;
 	}
+	// Exact IB/storage views are independent bindings over the same guest bytes.
 	return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::IsContainedWithin ||
-	       relation == GpuMemoryOverlapType::Crosses;
+	       relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::Equals;
 }
 
 // Incoming VertexBuffer fully or partially covered by an existing storage,

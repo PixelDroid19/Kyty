@@ -636,8 +636,9 @@ KYTY_CP_OP_PARSER(cp_op_event_write_eop)
 	auto*    dst_gpu_addr       = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2] & 0xffffu) << 32u));
 	uint64_t value              = (buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u));
 
+	// EVENT_WRITE_EOP carries no interrupt context id.
 	cp->WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index, event_write_source, dst_gpu_addr,
-	                       value, interrupt_selector);
+	                       value, interrupt_selector, 0);
 
 	return 5;
 }
@@ -1240,7 +1241,7 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	}
 
 	cp->WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index, event_write_source, dst_gpu_addr,
-	                       value, interrupt_selector);
+	                       value, interrupt_selector, GraphicsAgcReleaseMemInterruptContextId(cmd_id, buffer));
 
 	// Body dwords after the Type-3 header: 6 for the 7-DW form, 7 when the
 	// packet carries interrupt_ctx_id as an eighth dword.

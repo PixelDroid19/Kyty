@@ -5,6 +5,8 @@
 #include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Loader/GuestCall.h"
 
+#include <cstdarg>
+#include <cstdio>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -36,7 +38,7 @@ RuntimeApi GetApi()
 
 static thread_local bool g_in_guest_allocator = false;
 
-enum class StartupState { Empty, Initializing, Ready, Failed };
+enum class StartupState { Empty, Initializing, Ready };
 std::mutex   g_startup_mutex;
 StartupState g_startup_state = StartupState::Empty;
 uint64_t     g_startup_parameters = 0;
@@ -84,6 +86,17 @@ bool ValidCallback(uint64_t address)
 	                        Emulator::GuestRuntimePort::IsExecutableAddress(address));
 }
 
+thread_local char g_failure_reason[192] = "";
+
+bool Fail(const char* format, ...)
+{
+	va_list args;
+	va_start(args, format);
+	std::vsnprintf(g_failure_reason, sizeof(g_failure_reason), format, args);
+	va_end(args);
+	return false;
+}
+
 class AllocatorCallbackScope
 {
 public:
@@ -121,28 +134,45 @@ void RegisterApi(void* const api[kApiSlotCount])
 
 bool InitializeProcessHeap(uint64_t process_parameters)
 {
+	g_failure_reason[0] = '\0';
 	if (process_parameters == 0) { return true; }
 	ProcessParametersPrefix process {};
 	if (!ReadRecord(process_parameters, &process) || process.magic != 0x4942524f || process.version == 0)
 	{
-		return false;
+		return Fail("process parameters at 0x%llx are unreadable or malformed (size 0x%llx magic 0x%x version %u)",
+		            static_cast<unsigned long long>(process_parameters), static_cast<unsigned long long>(process.size),
+		            static_cast<unsigned>(process.magic), static_cast<unsigned>(process.version));
 	}
 	if (process.libc_parameters == 0) { return true; }
 	LibcParametersPrefix libc {};
-	if (!ReadRecord(process.libc_parameters, &libc)) { return false; }
+	if (!ReadRecord(process.libc_parameters, &libc))
+	{
+		return Fail("libc parameters at 0x%llx are unreadable (size 0x%llx)", static_cast<unsigned long long>(process.libc_parameters),
+		            static_cast<unsigned long long>(libc.size));
+	}
 	if (libc.malloc_replace == 0) { return true; }
 	MallocReplacement replacement {};
 	if (!ReadRecord(libc.malloc_replace, &replacement) ||
 	    !((replacement.version == 1 && replacement.size == 0x70) ||
-	      (replacement.version == 2 && replacement.size == 0x78)) ||
-	    !ValidCallback(replacement.initialize) || !ValidCallback(replacement.finalize))
+	      (replacement.version == 2 && replacement.size == 0x78)))
 	{
-		return false;
+		return Fail("malloc replacement at 0x%llx has an unsupported layout (size 0x%llx version %llu)",
+		            static_cast<unsigned long long>(libc.malloc_replace), static_cast<unsigned long long>(replacement.size),
+		            static_cast<unsigned long long>(replacement.version));
+	}
+	if (!ValidCallback(replacement.initialize) || !ValidCallback(replacement.finalize))
+	{
+		return Fail("malloc replacement initialize 0x%llx or finalize 0x%llx is not guest code",
+		            static_cast<unsigned long long>(replacement.initialize), static_cast<unsigned long long>(replacement.finalize));
 	}
 	Api api {};
 	for (size_t slot = 0; slot < kApiSlotCount; ++slot)
 	{
-		if (!ValidCallback(replacement.callbacks[slot])) { return false; }
+		if (!ValidCallback(replacement.callbacks[slot]))
+		{
+			return Fail("malloc replacement slot %zu = 0x%llx is not guest code", slot,
+			            static_cast<unsigned long long>(replacement.callbacks[slot]));
+		}
 		api.slots[slot] = reinterpret_cast<void*>(replacement.callbacks[slot]);
 	}
 	bool empty = replacement.initialize == 0 && replacement.finalize == 0;
@@ -151,22 +181,28 @@ bool InitializeProcessHeap(uint64_t process_parameters)
 	{
 		uint64_t aligned_alloc = 0;
 		if (!Core::VirtualMemory::CopyFromGuest(&aligned_alloc, libc.malloc_replace + sizeof(replacement), sizeof(aligned_alloc)) ||
-		    !ValidCallback(aligned_alloc)) { return false; }
+		    !ValidCallback(aligned_alloc))
+		{
+			return Fail("malloc replacement aligned_alloc 0x%llx is unreadable or not guest code",
+			            static_cast<unsigned long long>(aligned_alloc));
+		}
 		empty = empty && aligned_alloc == 0;
 	}
 	// Public CRTs emit a default record whose callbacks are all null.
 	if (empty) { return true; }
-	if (!IsValidApi(&api)) { return false; }
+	if (!IsValidApi(&api)) { return Fail("malloc replacement lacks malloc or free"); }
 	{
 		std::unique_lock lock(g_startup_mutex);
 		if (g_startup_state == StartupState::Initializing && g_startup_thread == std::this_thread::get_id())
 		{
-			return g_startup_parameters == process_parameters;
+			return g_startup_parameters == process_parameters ||
+			       Fail("re-entered with different process parameters 0x%llx", static_cast<unsigned long long>(process_parameters));
 		}
 		g_startup_changed.wait(lock, [] { return g_startup_state != StartupState::Initializing; });
 		if (g_startup_state != StartupState::Empty)
 		{
-			return g_startup_parameters == process_parameters && g_startup_state == StartupState::Ready;
+			return (g_startup_parameters == process_parameters && g_startup_state == StartupState::Ready) ||
+			       Fail("an earlier startup with parameters 0x%llx is not ready", static_cast<unsigned long long>(g_startup_parameters));
 		}
 		g_startup_parameters = process_parameters;
 		g_startup_state = StartupState::Initializing;
@@ -174,20 +210,23 @@ bool InitializeProcessHeap(uint64_t process_parameters)
 	}
 	// Do not hold a host lock across guest code, or publish partially initialized
 	// callbacks. Main-image constructors remain exclusively owned by its CRT.
-	const auto result = replacement.initialize == 0 ? 0 : static_cast<int32_t>(
-	    Emulator::GuestRuntimePort::Invoke(replacement.initialize, 0, 0, 0));
+	// The initializer result is not a failure signal: a shipped title declares
+	// initialize as a bare `ret`, leaving the callback address in rax.
+	if (replacement.initialize != 0)
+	{
+		(void)Emulator::GuestRuntimePort::Invoke(replacement.initialize, 0, 0, 0);
+	}
 	std::lock_guard lock(g_startup_mutex);
 	g_startup_thread = {};
-	if (result != 0)
-	{
-		g_startup_state = StartupState::Failed;
-		g_startup_changed.notify_all();
-		return false;
-	}
 	RegisterApi(api.slots);
 	g_startup_state = StartupState::Ready;
 	g_startup_changed.notify_all();
 	return true;
+}
+
+const char* ProcessHeapFailureReason()
+{
+	return g_failure_reason;
 }
 
 bool IsInitialized()

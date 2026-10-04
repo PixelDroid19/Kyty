@@ -137,7 +137,7 @@ TEST(EmulatorComputeWaveLayout, RejectsNullOutput)
 	          ShaderComputeWaveLayoutStatus::InvalidArgument);
 }
 
-TEST(EmulatorComputeWaveLayout, RejectsInvalidOrOverflowingLocalProductsAndPartialWaves)
+TEST(EmulatorComputeWaveLayout, RejectsInvalidOrOverflowingLocalProducts)
 {
 	const auto                                   capabilities = SupportedCapabilities();
 	const std::array<std::array<uint32_t, 3>, 3> invalid_local {
@@ -151,14 +151,70 @@ TEST(EmulatorComputeWaveLayout, RejectsInvalidOrOverflowingLocalProductsAndParti
 		}
 		ExpectRejected(request, capabilities, ShaderComputeWaveLayoutStatus::InvalidLocalSize);
 	}
+}
 
-	for (const uint32_t invocations: std::array<uint32_t, 4> {1u, 32u, 33u, 65u})
+// Since 704f4ad3 a trailing partial wave is admitted: the wave count is the
+// ceiling of the guest invocations over 64 and the missing lanes stay inactive
+// through the valid-lane mask, so each wave still occupies a whole 32-lane bank.
+TEST(EmulatorComputeWaveLayout, AdmitsPartialWavesAndSizesPhysicalXByCeilingWaves)
+{
+	struct Case
+	{
+		uint32_t invocations;
+		uint32_t waves;
+		uint32_t physical_x;
+	};
+	const std::array<Case, 6> cases {{{1, 1, 32}, {32, 1, 32}, {33, 1, 32}, {64, 1, 32}, {65, 2, 64}, {129, 3, 96}}};
+
+	for (const auto& test_case: cases)
 	{
 		auto request     = SupportedRequest();
-		request.local[0] = invocations;
+		request.local[0] = test_case.invocations;
 		request.local[1] = 1;
 		request.local[2] = 1;
-		ExpectRejected(request, capabilities, ShaderComputeWaveLayoutStatus::InvalidLocalSize);
+
+		ShaderComputeWaveLayout layout {};
+		ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, SupportedCapabilities(), &layout), ShaderComputeWaveLayoutStatus::Supported)
+		    << test_case.invocations;
+		EXPECT_EQ(layout.waves, test_case.waves) << test_case.invocations;
+		EXPECT_EQ(layout.physical_local[0], test_case.physical_x) << test_case.invocations;
+		EXPECT_EQ(layout.guest_local[0], test_case.invocations);
+	}
+}
+
+TEST(EmulatorComputeWaveLayout, StillChecksHostLimitsForPartialWaves)
+{
+	auto request     = SupportedRequest();
+	request.local[0] = 65; // two waves, 64 physical lanes
+	request.local[1] = 1;
+	request.local[2] = 1;
+
+	auto caps          = SupportedCapabilities();
+	caps.max_subgroups = 1;
+	ExpectRejected(request, caps, ShaderComputeWaveLayoutStatus::HostLimitExceeded);
+}
+
+TEST(EmulatorComputeWaveLayout, CeilingCannotWrapNonemptyWorkToZero)
+{
+	// The old rounding addition wraps throughout the last 63 uint32_t values.
+	// Ordinary host limits must reject them without publishing a zero layout.
+	for (uint32_t distance = 0; distance <= 64u; ++distance)
+	{
+		auto request     = SupportedRequest();
+		request.local[0] = std::numeric_limits<uint32_t>::max() - distance;
+		request.local[1] = request.local[2] = 1;
+		ExpectRejected(request, SupportedCapabilities(), ShaderComputeWaveLayoutStatus::HostLimitExceeded);
+
+		// A synthetic permissive host also pins the arithmetic result directly.
+		auto caps              = SupportedCapabilities();
+		caps.max_local_size[0] = std::numeric_limits<uint32_t>::max();
+		caps.max_invocations  = std::numeric_limits<uint32_t>::max();
+		caps.max_subgroups    = std::numeric_limits<uint32_t>::max();
+		ShaderComputeWaveLayout layout {};
+		ASSERT_EQ(ShaderBuildPairedComputeWaveLayout(request, caps, &layout), ShaderComputeWaveLayoutStatus::Supported);
+		const uint64_t expected_waves = (static_cast<uint64_t>(request.local[0]) + 63u) / 64u;
+		EXPECT_EQ(layout.waves, expected_waves);
+		EXPECT_EQ(layout.physical_local[0], expected_waves * 32u);
 	}
 }
 

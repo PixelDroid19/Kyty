@@ -1,12 +1,24 @@
 #include "Kyty/UnitTest.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
+#include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
+
+#include <array>
+#include <cstdio>
 #include <cstdlib>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 UT_BEGIN(EmulatorShaderMimg);
 
@@ -974,6 +986,310 @@ TEST(EmulatorShaderMimg, EmitsOffsetSampleWithOnlyTheSelectedRedDestination)
 		    {
 			    std::_Exit(3);
 		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+namespace {
+
+#if defined(_WIN32)
+constexpr int kMimgRejectedExit = 321;
+#else
+constexpr int kMimgRejectedExit = 65;
+#endif
+
+void RequireMimgTail(bool condition, const char* reason)
+{
+	if (!condition)
+	{
+		std::fprintf(stderr, "MIMG operand-tail control: %s\n", reason);
+		std::_Exit(2);
+	}
+}
+
+void CaptureMimgRejectionDiagnostic()
+{
+	// Core EXIT writes to stdout; gtest matches the death-test child's stderr.
+	std::fflush(stdout);
+#if defined(_WIN32)
+	const int redirected = ::_dup2(::_fileno(stderr), ::_fileno(stdout));
+#else
+	const int redirected = ::dup2(::fileno(stderr), ::fileno(stdout));
+#endif
+	RequireMimgTail(redirected >= 0, "redirect parser diagnostic to the death-test matcher");
+}
+
+bool EmptyMimgOperand(const ShaderOperand& operand)
+{
+	return operand == ShaderOperand {} && operand.multiplier == 1.0f && !operand.absolute && !operand.negate && !operand.clamp;
+}
+
+ShaderCode ParseMimgTailInstruction(uint32_t opcode, uint32_t ssamp = 0u, uint32_t nsa = 0u, uint32_t dmask = 0xfu,
+                                   ShaderType stage = ShaderType::Pixel, uint32_t flags = 0u)
+{
+	std::array<uint32_t, 6> words = {
+	    (0x3cu << 26u) | (opcode << 18u) | (dmask << 8u) | (1u << 3u) | (nsa << 1u) | flags,
+	    (ssamp << 21u) | (8u << 16u) | (8u << 8u) | 4u,
+	    0xfffd0911u, 0x17130f0bu, 0x27231f1bu, 0u};
+	words[2u + nsa] = 0xbf810000u;
+	ShaderCode code;
+	code.SetType(stage);
+	ShaderParse(words.data(), (3u + nsa) * sizeof(uint32_t), &code);
+	return code;
+}
+
+void EnableMimgModuleValidation()
+{
+	class ValidationConfig final: public Config::ConfigSource
+	{
+	public:
+		bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+		int64_t GetInteger(const Core::String&) const override { return 0; }
+		bool GetBool(const Core::String&) const override { return true; }
+		Core::String GetString(const Core::String&) const override { return {}; }
+	} validation;
+	Config::Load(validation);
+	RequireMimgTail(Config::ShaderValidationEnabled(), "full-module validation must be enabled");
+}
+
+Core::String8 EmitValidatedMimgTailModule(const ShaderCode& code, bool writable, bool sampler = false)
+{
+	ShaderPixelInputInfo pixel {};
+	ShaderComputeInputInfo compute {};
+	compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
+	auto& bind = code.GetType() == ShaderType::Pixel ? pixel.bind : compute.bind;
+	bind.textures2D.textures_num = 1;
+	bind.textures2D.textures2d_sampled_num = writable ? 0 : 1;
+	bind.textures2D.textures2d_storage_num = writable ? 1 : 0;
+	auto& descriptor = bind.textures2D.desc[0];
+	descriptor.start_register = 32;
+	descriptor.usage = writable ? ShaderTextureUsage::ReadWrite : ShaderTextureUsage::ReadOnly;
+	descriptor.textures2d_without_sampler = writable;
+	descriptor.texture.fields[0] = 0x100u;
+	descriptor.texture.fields[1] = 22u << 20u; // raw R32_FLOAT, independent of the sampler field
+	descriptor.texture.fields[3] = (9u << 28u) | 4u | (5u << 3u) | (6u << 6u) | (7u << 9u);
+	if (sampler)
+	{
+		bind.samplers.samplers_num = 1;
+		bind.samplers.start_register[0] = 20;
+	}
+	ShaderCalcBindingIndices(&bind);
+	const auto source = code.GetType() == ShaderType::Pixel ? SpirvGenerateSource(code, nullptr, &pixel, nullptr)
+	                                                       : SpirvGenerateSource(code, nullptr, nullptr, &compute);
+	RequireMimgTail(!source.IsEmpty(), "parsed production source is empty");
+	Vector<uint32_t> binary;
+	Core::String8 error;
+	RequireMimgTail(Config::ShaderValidationEnabled(), "validation remains enabled at the toolchain boundary");
+	const bool compiled = ShaderToolchain::Run(source, &binary, &error);
+	RequireMimgTail(compiled, error.c_str());
+	RequireMimgTail(!binary.IsEmpty(), "validated binary is empty");
+	return source;
+}
+
+} // namespace
+
+TEST(EmulatorShaderMimg, ParsesSamplerlessMimgWithExactEmptySourceTail)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    for (uint32_t opcode: {0x00u, 0x01u, 0x08u, 0x09u, 0x0eu})
+		    {
+			    for (uint32_t nsa = 0u; nsa <= 3u; ++nsa)
+			    {
+				    const auto code = ParseMimgTailInstruction(opcode, 0u, nsa);
+				    RequireMimgTail(code.GetInstructions().Size() == 2u, "MIMG and terminal instruction");
+				    const auto& inst = code.GetInstructions().At(0);
+				    const auto expected_type = opcode == 0x08u ? ShaderInstructionType::ImageStore :
+				                               opcode == 0x09u ? ShaderInstructionType::ImageStoreMip :
+				                               opcode == 0x0eu ? ShaderInstructionType::ImageGetResinfo : ShaderInstructionType::ImageLoad;
+				    const auto expected_format = opcode == 0x09u ? ShaderInstructionFormat::Vdata4Vaddr4StDmaskF :
+				                                 opcode == 0x0eu ? ShaderInstructionFormat::VdataVaddrStDmask :
+				                                                   ShaderInstructionFormat::VdataVaddr3StDmask;
+				    RequireMimgTail(inst.type == expected_type && inst.format == expected_format &&
+				                   inst.mimg_explicit_lod == (opcode == 0x01u), "operation identity and explicit level are retained");
+				    RequireMimgTail(inst.dst.type == ShaderOperandType::Vgpr && inst.dst.register_id == 8 && inst.dst.size == 4,
+				                   "four-component data tuple is retained");
+				    RequireMimgTail(inst.src_num == 2 && EmptyMimgOperand(inst.src[2]) && EmptyMimgOperand(inst.src[3]),
+				                   "samplerless op has exactly address/resource sources and a fully empty tail");
+				    RequireMimgTail(inst.src[0].type == ShaderOperandType::Vgpr && inst.src[0].register_id == 4 &&
+				                   inst.src[0].size == (opcode == 0x0eu ? 1 : opcode == 0x09u ? 4 : 3), "address tuple is retained");
+				    RequireMimgTail(inst.src[1].type == ShaderOperandType::Sgpr && inst.src[1].register_id == 32 &&
+				                   inst.src[1].size == 8, "resource remains eight SGPRs");
+				    RequireMimgTail(inst.mimg_address_num == (nsa == 0u ? 0 : static_cast<int>(1u + 4u * nsa)),
+				                   "encoded NSA slots are retained");
+				    RequireMimgTail(code.GetInstructions().At(1).pc == 4u * (2u + nsa), "next instruction PC is retained");
+				    RequireMimgTail(ShaderInstructionLoweringPreconditions(inst), "parsed samplerless instruction passes the unchanged validator");
+				    auto malformed = inst;
+				    malformed.src[2] = TileSgpr(0);
+				    RequireMimgTail(!ShaderInstructionLoweringPreconditions(malformed), "live source beyond src_num still fails");
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, PreservesSamplerlessNsaSlotsAndFollowingLiteral)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    const uint32_t words[] = {
+		        (0x3cu << 26u) | (0x01u << 18u) | (0x03u << 8u) | (1u << 3u) | (3u << 1u),
+		        (8u << 16u) | (8u << 8u) | 4u, 0xfffd0911u, 0x17130f0bu, 0x27231f1bu,
+		        (0x3fu << 25u) | (12u << 17u) | (1u << 9u) | 255u, 0x89abcdefu, 0xbf810000u};
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    ShaderParse(words, sizeof(words), &code);
+		    RequireMimgTail(code.GetInstructions().Size() == 3u, "NSA, literal move and terminator");
+		    const auto& image = code.GetInstructions().At(0);
+		    const int addresses[] = {4, 17, 9, 253, 255, 11, 15, 19, 23, 27, 31, 35, 39};
+		    RequireMimgTail(image.mimg_address_num == 13 && image.raw_word == words[0], "raw word and NSA length are retained");
+		    for (int index = 0; index < 13; ++index)
+		    {
+			    RequireMimgTail(image.mimg_address[index] == TileVgpr(addresses[index]), "every NSA slot, including padding, is retained");
+		    }
+		    const auto& move = code.GetInstructions().At(1);
+		    RequireMimgTail(move.pc == 20u && move.type == ShaderInstructionType::VMovB32 && move.src_num == 1 &&
+		                   move.src[0].type == ShaderOperandType::LiteralConstant && move.src[0].size == 0 &&
+		                   move.src[0].constant.u == 0x89abcdefu, "following literal remains in its original operand slot");
+		    const auto& end = code.GetInstructions().At(2);
+		    RequireMimgTail(end.pc == 28u && end.raw_word == 0xbf810000u && end.src_num == 0 &&
+		                   end.src[0].type == ShaderOperandType::LiteralConstant && end.src[0].size == 0 && end.src[0].constant.u == 0u,
+		                   "canonical ENDPGM literal padding remains intact");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, PreservesRealSamplerOperandsOnSampleAndGatherOpcodes)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    for (uint32_t opcode: {0x20u, 0x24u, 0x25u, 0x27u, 0x2fu, 0x37u, 0x47u})
+		    {
+			    for (uint32_t ssamp: {0u, 5u})
+			    {
+				    for (uint32_t nsa: {0u, 1u})
+				    {
+					    const auto code = ParseMimgTailInstruction(opcode, ssamp, nsa, 1u);
+					    const auto& inst = code.GetInstructions().At(0);
+					    RequireMimgTail(inst.src_num == 3 && inst.src[1] == TileSgpr(32, 8) &&
+					                   inst.src[2] == TileSgpr(static_cast<int>(ssamp * 4u), 4) && EmptyMimgOperand(inst.src[3]),
+					                   "sample/gather retains the actual four-SGPR sampler, including SSAMP zero");
+					    RequireMimgTail(ShaderInstructionLoweringPreconditions(inst), "sampled operand tuple remains valid");
+				    }
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, PreservesAtomicDataSourceWithoutSamplerOperand)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    for (uint32_t glc: {0u, 1u})
+		    {
+			    const auto code = ParseMimgTailInstruction(0x11u, 0u, 0u, 1u, ShaderType::Compute, glc << 13u);
+			    const auto& inst = code.GetInstructions().At(0);
+			    RequireMimgTail(inst.type == ShaderInstructionType::ImageAtomicAdd && inst.src_num == 3 &&
+			                   inst.src[1] == TileSgpr(32, 8) && inst.src[2] == TileVgpr(8) && EmptyMimgOperand(inst.src[3]) &&
+			                   inst.mimg_return_old_value == (glc != 0u), "atomic's third source is real VGPR data, not SSAMP");
+			    RequireMimgTail(ShaderInstructionLoweringPreconditions(inst), "atomic data source passes the unchanged validator");
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, RejectsUnprovenNonzeroSsampOnSamplerlessOpcodes)
+{
+	for (uint32_t opcode: {0x00u, 0x01u, 0x08u, 0x09u, 0x0eu, 0x11u})
+	{
+		for (uint32_t ssamp: {1u, 2u, 4u, 8u, 16u, 31u})
+		{
+			const uint32_t dmask = opcode == 0x11u ? 1u : 0xfu;
+			const auto diagnostic = Core::String8::FromPrintf(
+			    "unsupported samplerless MIMG SSAMP: opcode=0x%02x ssamp=0x%02x pc=0x00000000 "
+			    "word0=0x%08x word1=0x%08x; only SSAMP=0 is admitted",
+			    static_cast<unsigned>(opcode), static_cast<unsigned>(ssamp),
+			    static_cast<unsigned>(0xf0000008u | (opcode << 18u) | (dmask << 8u)),
+			    static_cast<unsigned>(0x00080804u | (ssamp << 21u)));
+			ASSERT_EXIT(
+			    {
+				    InitMimgParser();
+				    CaptureMimgRejectionDiagnostic();
+				    (void)ParseMimgTailInstruction(opcode, ssamp, 0u, dmask, ShaderType::Compute);
+				    std::_Exit(0);
+			    },
+			    ::testing::ExitedWithCode(kMimgRejectedExit), diagnostic.c_str());
+		}
+	}
+}
+
+TEST(EmulatorShaderMimg, RetainsReservedGen5MimgBit14Rejection)
+{
+	// RDNA2 Table 100 does not assign bit 14. The existing DA guard rejects
+	// it before decoding operands, for both samplerless and sampled opcodes.
+	for (uint32_t opcode: {0x00u, 0x01u, 0x08u, 0x09u, 0x0eu, 0x27u})
+	{
+		ASSERT_EXIT(
+		    {
+			    InitMimgParser();
+			    CaptureMimgRejectionDiagnostic();
+			    (void)ParseMimgTailInstruction(opcode, 0u, 0u, 0xfu, ShaderType::Pixel, 1u << 14u);
+			    std::_Exit(0);
+		    },
+		    ::testing::ExitedWithCode(kMimgRejectedExit), "Not implemented \\(da == 1\\)");
+	}
+}
+
+TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSamplerlessImageModules)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    for (auto stage: {ShaderType::Pixel, ShaderType::Compute})
+		    {
+			    for (uint32_t opcode: {0x00u, 0x01u, 0x08u, 0x09u, 0x0eu})
+			    {
+				    const bool writable = opcode == 0x08u || opcode == 0x09u;
+				    const auto code = ParseMimgTailInstruction(opcode, 0u, 0u, opcode == 0x01u ? 3u : 0xfu, stage);
+				    const auto source = EmitValidatedMimgTailModule(code, writable);
+				    RequireMimgTail(!source.ContainsStr("OpTypeSampler") && !source.ContainsStr("OpLoad %Sampler"),
+				                   "samplerless parsed instruction does not publish or read a sampler");
+				    RequireMimgTail(source.ContainsStr(writable ? "OpImageWrite" : opcode == 0x0eu ? "OpImageQuerySizeLod" : "OpImageFetch %v4float"),
+				                   "complete module contains the parsed image operation");
+				    if (opcode == 0x01u)
+				    {
+					    RequireMimgTail(code.GetInstructions().At(0).raw_word == 0xf0040308u &&
+					                   source.ContainsStr("%image_load_lod_f_0 = OpLoad %float %v6") &&
+					                   source.ContainsStr(" Lod %image_load_lod_0"), "reported parsed mip load retains its explicit level");
+				    }
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSampleWithRealSampler)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    const auto code = ParseMimgTailInstruction(0x27u, 5u, 0u, 1u);
+		    const auto source = EmitValidatedMimgTailModule(code, false, true);
+		    RequireMimgTail(source.ContainsStr("OpLoad %Sampler") && source.ContainsStr("OpSampledImage") &&
+		                   source.ContainsStr("OpImageSampleExplicitLod"), "parsed sample consumes its real sampler");
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");

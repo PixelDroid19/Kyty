@@ -53,7 +53,7 @@ String8 pick_guest_join_label(uint32_t join_pc, const Vector<ShaderLabel*>& gues
 	return String8::FromPrintf("label_%04" PRIx32, join_pc);
 }
 
-// Outermost selection merge (parent == 0). Nested loop merges branch here.
+// Outermost selection merge (no parent). Nested loop merges branch here.
 String8 pick_sc_join_root(const ShaderCode& code, uint32_t join_pc, const Vector<uint32_t>& order,
                           const Vector<uint32_t>& sc_join_srcs)
 {
@@ -64,7 +64,7 @@ String8 pick_sc_join_root(const ShaderCode& code, uint32_t join_pc, const Vector
 	for (int i = order.Size(); i > 0; i--)
 	{
 		const uint32_t src = order[i - 1];
-		if (ScJoinFindParent(code, src, join_pc, sc_join_srcs) == 0)
+		if (ScJoinFindParent(code, src, join_pc, sc_join_srcs) == kScJoinNoSource)
 		{
 			return ScJoinMergeName(join_pc, src);
 		}
@@ -179,7 +179,7 @@ void Spirv::WriteLabel(int index)
 	if (loop_merges.Size() > 0 && sc_join_srcs.Size() > 0)
 	{
 		const uint32_t owner = ScJoinFindOwner(m_code, loop_merges[loop_merges.Size() - 1]->GetSrc(), inst.pc, sc_join_srcs);
-		if (owner != 0)
+		if (owner != kScJoinNoSource)
 		{
 			after_loop = ScJoinMergeName(inst.pc, owner);
 		}
@@ -234,7 +234,7 @@ void Spirv::WriteLabel(int index)
 		{
 			const uint32_t owner = ScJoinFindOwner(m_code, prev.pc, inst.pc, sc_join_srcs);
 			const uint32_t entry_src =
-			    (owner != 0) ? owner : sc_join_order[sc_join_order.Size() - 1];
+			    (owner != kScJoinNoSource) ? owner : sc_join_order[sc_join_order.Size() - 1];
 			m_source += String8::FromPrintf("               OpBranch %%%s\n",
 			                                ScJoinMergeName(inst.pc, entry_src).c_str());
 			skip_branch_to_next = true;
@@ -250,7 +250,7 @@ void Spirv::WriteLabel(int index)
 			const uint32_t parent = ScJoinFindParent(m_code, src, inst.pc, sc_join_srcs);
 			// Root closes onto a real guest label when one exists; otherwise the
 			// root hosts the guest instruction body (no synthetic branch target).
-			const String8 next = (parent != 0)   ? ScJoinMergeName(inst.pc, parent)
+			const String8 next = (parent != kScJoinNoSource) ? ScJoinMergeName(inst.pc, parent)
 			                     : (guest_labels.Size() > 0) ? guest_join
 			                                                : String8();
 
@@ -275,7 +275,7 @@ void Spirv::WriteLabel(int index)
 				m_source += String8::FromPrintf("               OpBranch %%%s\n", next.c_str());
 			}
 			labels_num++;
-			if (parent == 0 && !next.IsEmpty())
+			if (parent == kScJoinNoSource && !next.IsEmpty())
 			{
 				sc_joins_branch_to_guest = true;
 				skip_branch_to_next      = true; // guest_join OpLabel is next

@@ -296,6 +296,10 @@ enum class SamplerAddressMode
 	MirroredRepeat,
 	ClampToEdge,
 	ClampToBorder,
+	MirrorOnceLastTexel,
+	ClampHalfBorder,
+	MirrorOnceHalfBorder,
+	MirrorOnceBorder,
 };
 
 enum class SamplerCompareOp
@@ -327,6 +331,8 @@ struct UnnormalizedSamplerPolicy
 };
 
 [[nodiscard]] SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp);
+[[nodiscard]] bool SamplerAddressModeHasExactHostMapping(SamplerAddressMode mode, bool mirror_clamp_to_edge_enabled = false,
+                                                        bool force_unnormalized = false);
 [[nodiscard]] SamplerCompareOp    ResolveSamplerCompareOp(uint8_t depth_compare_function);
 // Vulkan requires sampler comparison state to agree with the SPIR-V image instruction.
 [[nodiscard]] SamplerComparison         ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);

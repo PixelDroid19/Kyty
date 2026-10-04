@@ -1,18 +1,15 @@
 #include "Emulator/Kernel/Fiber.h"
 
 #include "Kyty/Core/DbgAssert.h"
-#include "Kyty/Core/Threads.h"
 
 #include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/FiberOwnership.h"
 #include "Emulator/Kernel/Trace.h"
 
-#include <atomic>
 #include <chrono>
 #include <cinttypes>
 #include <cstring>
-#include <mutex>
 #include <thread>
-#include <unordered_map>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -33,78 +30,9 @@ thread_local FiberObject*    g_starting_fiber      = nullptr;
 thread_local FiberObject*    g_pending_idle_fiber  = nullptr;
 thread_local FiberCpuContext g_thread_fiber_context {};
 
-std::mutex                                 g_fiber_owner_mutex;
-std::unordered_map<FiberObject*, uint64_t> g_fiber_owner_thread;
-std::unordered_map<uint64_t, FiberObject*> g_fiber_current_by_thread;
-
-// Guest state field is a plain u32 in the FiberObject layout; access it with
-// atomic ops on the same address so Run/Switch races stay defined.
-std::atomic<uint32_t>* FiberStateAtomic(FiberObject* fiber)
-{
-	return reinterpret_cast<std::atomic<uint32_t>*>(&fiber->state);
-}
-
-const std::atomic<uint32_t>* FiberStateAtomic(const FiberObject* fiber)
-{
-	return reinterpret_cast<const std::atomic<uint32_t>*>(&fiber->state);
-}
-
-uint32_t FiberLoadState(const FiberObject* fiber)
-{
-	return FiberStateAtomic(fiber)->load(std::memory_order_acquire);
-}
-
-uint64_t FiberCurrentHostThreadId()
-{
-	return std::hash<std::thread::id> {}(std::this_thread::get_id());
-}
-
-void FiberSetOwner(FiberObject* fiber)
-{
-	std::lock_guard lock(g_fiber_owner_mutex);
-	g_fiber_owner_thread[fiber] = FiberCurrentHostThreadId();
-}
-
-void FiberClearOwner(FiberObject* fiber)
-{
-	std::lock_guard lock(g_fiber_owner_mutex);
-	g_fiber_owner_thread.erase(fiber);
-}
-
-uint64_t FiberGetOwner(FiberObject* fiber)
-{
-	std::lock_guard lock(g_fiber_owner_mutex);
-	const auto      it = g_fiber_owner_thread.find(fiber);
-	return it != g_fiber_owner_thread.end() ? it->second : 0;
-}
-
 void FiberSetCurrentFiber(FiberObject* fiber)
 {
 	g_current_fiber = fiber;
-
-	std::lock_guard lock(g_fiber_owner_mutex);
-	const auto      thread_id = FiberCurrentHostThreadId();
-	if (fiber != nullptr)
-	{
-		g_fiber_current_by_thread[thread_id] = fiber;
-	}
-	else
-	{
-		g_fiber_current_by_thread.erase(thread_id);
-	}
-}
-
-void FiberStoreState(FiberObject* fiber, uint32_t state)
-{
-	FiberStateAtomic(fiber)->store(state, std::memory_order_release);
-	if (state == FIBER_STATE_RUNNING)
-	{
-		FiberSetOwner(fiber);
-	}
-	else
-	{
-		FiberClearOwner(fiber);
-	}
 }
 
 void FiberDeferIdle(FiberObject* fiber)
@@ -122,42 +50,17 @@ void FiberCommitDeferredIdle()
 	}
 }
 
-bool FiberCompareExchangeState(FiberObject* fiber, uint32_t expected, uint32_t desired)
-{
-	const bool ok =
-	    FiberStateAtomic(fiber)->compare_exchange_strong(expected, desired, std::memory_order_acq_rel, std::memory_order_acquire);
-	if (!ok)
-	{
-		return false;
-	}
-	if (desired == FIBER_STATE_RUNNING)
-	{
-		FiberSetOwner(fiber);
-	}
-	else
-	{
-		FiberClearOwner(fiber);
-	}
-	return true;
-}
-
-bool FiberWaitAndEnterRunning(FiberObject* fiber, uint32_t* observed_state)
+bool FiberWaitAndEnterRunning(FiberObject* fiber)
 {
 	const auto start = std::chrono::steady_clock::now();
 	uint32_t   spin  = 0;
-	auto*      ref   = FiberStateAtomic(fiber);
 
 	for (;;)
 	{
 		uint32_t expected = FIBER_STATE_IDLE;
-		if (ref->compare_exchange_strong(expected, FIBER_STATE_RUNNING, std::memory_order_acq_rel, std::memory_order_acquire))
+		if (FiberCompareExchangeState(fiber, FIBER_STATE_IDLE, FIBER_STATE_RUNNING, &expected))
 		{
-			FiberSetOwner(fiber);
 			return true;
-		}
-		if (observed_state != nullptr)
-		{
-			*observed_state = expected;
 		}
 		if (expected != FIBER_STATE_RUNNING)
 		{
@@ -176,19 +79,6 @@ bool FiberWaitAndEnterRunning(FiberObject* fiber, uint32_t* observed_state)
 			std::this_thread::sleep_for(std::chrono::microseconds(100));
 		}
 	}
-}
-
-bool FiberRepairStaleRunningOnThisThread(FiberObject* fiber, uint32_t observed_state)
-{
-	if (observed_state != FIBER_STATE_RUNNING || fiber == g_current_fiber)
-	{
-		return false;
-	}
-	if (FiberGetOwner(fiber) != 0)
-	{
-		return false;
-	}
-	return FiberCompareExchangeState(fiber, FIBER_STATE_RUNNING, FIBER_STATE_IDLE);
 }
 
 void FiberSetContextValid(FiberObject* fiber, bool valid)
@@ -473,17 +363,8 @@ int32_t KYTY_SYSV_ABI FiberSwitch(FiberObject* fiber, uint64_t arg_on_run, uint6
 		return FIBER_ERROR_PERMISSION;
 	}
 
-	for (;;)
+	if (!FiberWaitAndEnterRunning(fiber))
 	{
-		uint32_t observed_state = 0;
-		if (FiberWaitAndEnterRunning(fiber, &observed_state))
-		{
-			break;
-		}
-		if (FiberRepairStaleRunningOnThisThread(fiber, observed_state))
-		{
-			continue;
-		}
 		return FIBER_ERROR_STATE;
 	}
 

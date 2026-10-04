@@ -1,6 +1,8 @@
 #include "Emulator/Kernel/FileSystem.h"
+#include "Emulator/Kernel/FileSystemPath.h"
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/AmprPort.h"
+#include "HostFile.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DateTime.h"
@@ -13,15 +15,19 @@
 #include "Emulator/VideoFrameMemory.h"
 #include "Emulator/Log.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cerrno>
 #include <cstdlib>
 #include <climits>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
-#include <sys/stat.h>
+#include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -134,13 +140,7 @@ static bool CreateDirectoryRecursive(const String& dir_path)
 // Map an unmapped guest path into the sandbox. guest_path must start with '/'.
 static String MapToSandbox(const String& guest_path)
 {
-	const String root = GetSandboxRoot();
-	// Strip leading slash so we get sandbox/devlog/... not sandbox//devlog/...
-	if (guest_path.StartsWith(U"/"))
-	{
-		return root + guest_path.RemoveFirst(1);
-	}
-	return root + guest_path;
+	return String::FromUtf8(Path::ResolveContained(GetSandboxRoot().C_Str(), guest_path.RemoveFirst(1).C_Str()).c_str());
 }
 
 // The guest runtime uses the POSIX entropy devices during Unity and libc
@@ -179,6 +179,7 @@ public:
 
 	[[nodiscard]] String GetRealFilename(const String& mounted_file_name);
 	[[nodiscard]] String GetRealDirectory(const String& mounted_directory);
+	[[nodiscard]] bool IsHostFilenameAllowed(const String& filename);
 
 private:
 	Vector<MountPair> m_mount_pairs;
@@ -187,7 +188,7 @@ private:
 
 struct File
 {
-	Core::File                   f;
+	Host::File                   f;
 	String                       name;
 	String                       real_name;
 	std::atomic_bool             opened;
@@ -196,6 +197,77 @@ struct File
 	Core::Mutex                  mutex;
 	Vector<Core::File::DirEntry> dents;
 	uint32_t                     dents_index;
+	// Protected by mutex. Native FILE locks also cover legacy stdio callers
+	// which use the opaque host stream directly.
+	std::vector<FILE*>           streams;
+};
+
+class StreamLocks
+{
+public:
+	explicit StreamLocks(const File& file): m_streams(file.streams)
+	{
+		for (FILE* stream: m_streams) { Host::File::LockStream(stream); }
+	}
+	~StreamLocks()
+	{
+		const int saved = errno;
+		for (auto stream = m_streams.rbegin(); stream != m_streams.rend(); ++stream) { Host::File::UnlockStream(*stream); }
+		errno = saved;
+	}
+	KYTY_CLASS_NO_COPY(StreamLocks);
+private:
+	const std::vector<FILE*>& m_streams;
+};
+
+struct StreamState
+{
+	explicit StreamState(FILE* value): stream(value) {}
+	Core::Mutex mutex;
+	FILE* stream;
+	char* buffer = nullptr;
+	size_t size = 0;
+	int buffer_mode = _IOFBF;
+	// Used when freopen needs to detach caller storage independently of the
+	// host libc's buffer-retention policy. Kept alive until the FILE closes.
+	std::unique_ptr<char[]> host_buffer;
+	bool closed = false;
+};
+
+// Lock order: registry -> description -> buffer state -> native FILE. Ordinary
+// stdio releases the registry before acquiring state and never takes a
+// description lock. The state gate pins the buffer until the lease is released.
+// Close/reopen use libc's own FILE lock: unlocking a freed FILE would be invalid.
+class StreamUse
+{
+public:
+	explicit StreamUse(std::shared_ptr<StreamState> state, bool lock_native = true): m_state(std::move(state))
+	{
+		m_state->mutex.Lock();
+		if (m_state->closed) { errno = EBADF; return; }
+		if (m_state->buffer != nullptr && m_state->size != 0)
+		{
+			m_lease.emplace(reinterpret_cast<uint64_t>(m_state->buffer), m_state->size);
+		}
+		m_valid = true;
+		m_native_locked = lock_native;
+		if (lock_native) { Host::File::LockStream(m_state->stream); }
+	}
+	~StreamUse()
+	{
+		const int saved = errno;
+		if (m_native_locked) { Host::File::UnlockStream(m_state->stream); }
+		m_lease.reset();
+		m_state->mutex.Unlock();
+		errno = saved;
+	}
+	bool IsValid() const { return m_valid; }
+	KYTY_CLASS_NO_COPY(StreamUse);
+private:
+	std::shared_ptr<StreamState> m_state;
+	std::optional<Emulator::VideoFrameMemory::HostWriteLease> m_lease;
+	bool m_valid = false;
+	bool m_native_locked = false;
 };
 
 class FileDescriptors
@@ -209,25 +281,54 @@ public:
 	KYTY_CLASS_NO_COPY(FileDescriptors);
 
 	int   CreateDescriptor();
-	void  DeleteDescriptor(int d);
+	int   DeleteDescriptor(int d);
 	int   DupDescriptor(int old_d);
 	int   Dup2Descriptor(int old_d, int new_d);
 	FileHandle GetFile(int d);
 	FileHandle GetFile(const String& real_name);
 	void  CloseAll();
+	FILE* OpenStream(int d, const char* mode, uint32_t flags);
+	FILE* ReopenStream(FILE* stream, const String& path, const String& host_path, const char* mode, uint32_t flags);
+	int   CloseStream(FILE* stream);
+	int   StreamDescriptor(FILE* stream);
+	FILE* StandardStream(int descriptor);
+	std::shared_ptr<StreamState> GetStreamState(FILE* stream);
+	int FlushStreams();
 
 private:
-	void  EnsureDescriptorCapacity(uint32_t index);
+	int EnsureDescriptorCapacity(uint32_t index);
+	struct StreamEntry
+	{
+		int descriptor;
+		uint64_t generation;
+		FileHandle file;
+		std::shared_ptr<StreamState> state;
+	};
+	void Detach(const StreamEntry& stream);
+	bool Matches(const StreamEntry& stream) const;
 
 	std::vector<FileHandle> m_files;
+	std::vector<uint64_t>   m_generations;
+	uint64_t                m_next_generation = 0;
+	std::unordered_map<FILE*, StreamEntry> m_streams;
+	std::array<FILE*, DESCRIPTOR_MIN> m_standard_streams {};
 	Core::Mutex             m_mutex;
 };
 
 static MountPoints*     g_mount_points = nullptr;
 static FileDescriptors* g_files        = nullptr;
+static Core::Mutex      g_files_init_mutex;
+
+static FileDescriptors* InitializeDescriptors()
+{
+	Core::LockGuard lock(g_files_init_mutex);
+	if (g_files == nullptr) { g_files = new FileDescriptors; }
+	return g_files;
+}
 
 // Defined with APR helpers; used by KernelOpen/KernelStat for package font fallback.
 static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name);
+static int HostErrorFromKernel(int error);
 
 static void sec_to_timespec(KernelTimespec* ts, double sec)
 {
@@ -235,45 +336,95 @@ static void sec_to_timespec(KernelTimespec* ts, double sec)
 	ts->tv_nsec = static_cast<int64_t>((sec - static_cast<double>(ts->tv_sec)) * 1000000000.0);
 }
 
+static int KernelErrorFromHost(int error)
+{
+	// POSIX/BSD error numbers at the guest boundary, never host errno values.
+	constexpr int base = -2147352576;
+	switch (error)
+	{
+		case EPERM: return KERNEL_ERROR_EPERM;
+		case ENOENT: return KERNEL_ERROR_ENOENT;
+		case EINTR: return base + 4;
+		case EBADF: return KERNEL_ERROR_EBADF;
+		case ENOMEM: return KERNEL_ERROR_ENOMEM;
+		case EACCES: return KERNEL_ERROR_EACCES;
+		case EFAULT: return KERNEL_ERROR_EFAULT;
+		case EEXIST: return KERNEL_ERROR_EEXIST;
+		case ENOTDIR: return KERNEL_ERROR_ENOTDIR;
+		case EISDIR: return KERNEL_ERROR_EISDIR;
+		case EINVAL: return KERNEL_ERROR_EINVAL;
+		case ENFILE: return base + 23;
+		case EMFILE: return base + 24;
+		case EFBIG: return base + 27;
+		case ENOSPC: return base + 28;
+		case ESPIPE: return base + 29;
+		case EROFS: return base + 30;
+		case EPIPE: return base + 32;
+		case EAGAIN: return KERNEL_ERROR_EAGAIN;
+		case ENOSYS: return KERNEL_ERROR_EOPNOTSUPP;
+		case ENAMETOOLONG: return KERNEL_ERROR_ENAMETOOLONG;
+		default: return KERNEL_ERROR_EIO;
+	}
+}
+
 int FileDescriptors::CreateDescriptor()
 {
 	Core::LockGuard lock(m_mutex);
+	const int capacity = Host::File::DescriptorCapacity();
+	if (capacity < 0) { return KernelErrorFromHost(errno); }
+	if (capacity <= DESCRIPTOR_MIN) { return KernelErrorFromHost(EMFILE); }
 
 	auto file       = std::make_shared<File>();
 	file->opened    = false;
 	file->directory = false;
 
-	int files_num = static_cast<int>(m_files.size());
+	const int files_num = std::min(static_cast<int>(m_files.size()), capacity - DESCRIPTOR_MIN);
 	for (int index = 0; index < files_num; index++)
 	{
 		if (m_files[static_cast<size_t>(index)] == nullptr)
 		{
 			m_files[static_cast<size_t>(index)] = file;
+			m_generations[static_cast<size_t>(index)] = ++m_next_generation;
 			return index + DESCRIPTOR_MIN;
 		}
 	}
 
-	m_files.push_back(std::move(file));
-	return static_cast<int>(m_files.size()) + DESCRIPTOR_MIN - 1;
+	if (files_num >= capacity - DESCRIPTOR_MIN) { return KernelErrorFromHost(EMFILE); }
+	const int error = EnsureDescriptorCapacity(static_cast<uint32_t>(files_num));
+	if (error != OK) { return error; }
+	m_files[files_num] = std::move(file);
+	m_generations[files_num] = ++m_next_generation;
+	return files_num + DESCRIPTOR_MIN;
 }
 
-void FileDescriptors::EnsureDescriptorCapacity(uint32_t index)
+int FileDescriptors::EnsureDescriptorCapacity(uint32_t index)
 {
-	while (m_files.size() <= index)
+	const int capacity = Host::File::DescriptorCapacity();
+	if (capacity < 0) { return KernelErrorFromHost(errno); }
+	if (capacity <= DESCRIPTOR_MIN || index >= static_cast<uint32_t>(capacity - DESCRIPTOR_MIN))
 	{
-		m_files.emplace_back();
+		return KERNEL_ERROR_EBADF;
 	}
+	if (index < m_files.size()) { return OK; }
+	const size_t count = static_cast<size_t>(index) + 1;
+	const size_t reserve = std::min(static_cast<size_t>(capacity - DESCRIPTOR_MIN),
+	                                std::max(count, m_files.size() * 2));
+	m_files.reserve(reserve);
+	m_generations.reserve(reserve);
+	m_files.resize(count);
+	m_generations.resize(count, 0);
+	return OK;
 }
 
-void FileDescriptors::DeleteDescriptor(int d)
+int FileDescriptors::DeleteDescriptor(int d)
 {
 	Core::LockGuard lock(m_mutex);
 
+	if (d < DESCRIPTOR_MIN) { return KERNEL_ERROR_EBADF; }
 	auto index = static_cast<uint32_t>(d - DESCRIPTOR_MIN);
-
-	EXIT_IF(index >= m_files.size());
-	EXIT_IF(m_files[index] == nullptr);
+	if (index >= m_files.size() || m_files[index] == nullptr) { return KERNEL_ERROR_EBADF; }
 	m_files[index].reset();
+	return OK;
 }
 
 int FileDescriptors::DupDescriptor(int old_d)
@@ -297,22 +448,30 @@ int FileDescriptors::DupDescriptor(int old_d)
 		return KERNEL_ERROR_EBADF;
 	}
 
+	const int capacity = Host::File::DescriptorCapacity();
+	if (capacity < 0) { return KernelErrorFromHost(errno); }
+	if (capacity <= DESCRIPTOR_MIN) { return KernelErrorFromHost(EMFILE); }
 	int new_fd = -1;
-	const int  files_num = static_cast<int>(m_files.size());
+	const int files_num = std::min(static_cast<int>(m_files.size()), capacity - DESCRIPTOR_MIN);
 	for (int index = 0; index < files_num; index++)
 	{
 		if (m_files[static_cast<size_t>(index)] == nullptr)
 		{
 			new_fd = index + DESCRIPTOR_MIN;
 			m_files[static_cast<uint32_t>(index)] = file;
+			m_generations[static_cast<size_t>(index)] = ++m_next_generation;
 			break;
 		}
 	}
 
 	if (new_fd < 0)
 	{
-		m_files.push_back(file);
-		new_fd = static_cast<int>(m_files.size()) + DESCRIPTOR_MIN - 1;
+		if (files_num >= capacity - DESCRIPTOR_MIN) { return KernelErrorFromHost(EMFILE); }
+		const int error = EnsureDescriptorCapacity(static_cast<uint32_t>(files_num));
+		if (error != OK) { return error; }
+		m_files[files_num] = file;
+		m_generations[files_num] = ++m_next_generation;
+		new_fd = files_num + DESCRIPTOR_MIN;
 	}
 	return new_fd;
 }
@@ -344,9 +503,56 @@ int FileDescriptors::Dup2Descriptor(int old_d, int new_d)
 	}
 
 	const auto new_index = static_cast<uint32_t>(new_d - DESCRIPTOR_MIN);
-	EnsureDescriptorCapacity(new_index);
+	const int capacity_error = EnsureDescriptorCapacity(new_index);
+	if (capacity_error != OK) { return capacity_error; }
 
+	// A stream remains associated with its guest descriptor across an explicit
+	// dup2 replacement. Its private native descriptor must follow that change.
+	std::vector<FILE*> targets;
+	for (const auto& stream: m_streams)
+	{
+		if (stream.second.descriptor != new_d || !Matches(stream.second)) { continue; }
+		targets.push_back(stream.first);
+	}
+	if (!targets.empty())
+	{
+		if (source->directory) { return KERNEL_ERROR_EISDIR; }
+		auto previous = m_files[new_index];
+		Core::LockGuard old_lock(previous->mutex);
+		Core::LockGuard source_lock(source->mutex);
+		// Leases cover both the initial flush and all replacement/rollback calls.
+		std::vector<std::unique_ptr<StreamUse>> uses;
+		for (FILE* stream: targets) { uses.push_back(std::make_unique<StreamUse>(m_streams.at(stream).state)); }
+		int error = 0;
+		for (FILE* stream: targets)
+		{
+			if (std::fflush(stream) != 0) { error = errno; break; }
+		}
+		size_t replaced = 0;
+		while (error == 0 && replaced < targets.size())
+		{
+			if (!source->f.ReplaceStreamDescriptor(targets[replaced])) { error = errno; break; }
+			++replaced;
+		}
+		if (error != 0)
+		{
+			for (size_t i = 0; i < replaced; ++i) { previous->f.ReplaceStreamDescriptor(targets[i]); }
+		} else
+		{
+			for (FILE* stream: targets)
+			{
+				auto& streams = previous->streams;
+				streams.erase(std::remove(streams.begin(), streams.end(), stream), streams.end());
+				source->streams.push_back(stream);
+				auto& entry = m_streams.at(stream);
+				entry.file = source;
+				entry.generation = m_next_generation + 1;
+			}
+		}
+		if (error != 0) { return KernelErrorFromHost(error); }
+	}
 	m_files[new_index] = source;
+	m_generations[new_index] = ++m_next_generation;
 	return new_d;
 }
 
@@ -388,11 +594,242 @@ void FileDescriptors::CloseAll()
 {
 	Core::LockGuard lock(m_mutex);
 
+	for (const auto& stream: m_streams)
+	{
+		Core::LockGuard file_lock(stream.second.file->mutex);
+		const StreamUse use(stream.second.state, false);
+		stream.second.state->closed = true;
+		std::fclose(stream.first);
+		stream.second.file->streams.clear();
+	}
+	m_streams.clear();
+	m_standard_streams.fill(nullptr);
 	for (auto& f: m_files)
 	{
 		f.reset();
 	}
 	m_files.clear();
+	m_generations.clear();
+}
+
+bool FileDescriptors::Matches(const StreamEntry& stream) const
+{
+	if (stream.descriptor < DESCRIPTOR_MIN)
+	{
+		return stream.descriptor >= 0 && m_standard_streams[stream.descriptor] == stream.state->stream;
+	}
+	const auto index = static_cast<size_t>(stream.descriptor - DESCRIPTOR_MIN);
+	return index < m_files.size() && m_files[index] == stream.file && m_generations[index] == stream.generation;
+}
+
+void FileDescriptors::Detach(const StreamEntry& stream)
+{
+	if (!Matches(stream)) { return; }
+	if (stream.descriptor < DESCRIPTOR_MIN)
+	{
+		m_standard_streams[stream.descriptor] = nullptr;
+		g_standard_descriptors.fetch_and(static_cast<uint8_t>(~(1u << stream.descriptor)), std::memory_order_release);
+	} else
+	{
+		m_files[static_cast<size_t>(stream.descriptor - DESCRIPTOR_MIN)].reset();
+	}
+}
+
+FILE* FileDescriptors::StandardStream(int descriptor)
+{
+	Core::LockGuard lock(m_mutex);
+	if (descriptor < 0 || descriptor >= DESCRIPTOR_MIN || !KernelIsStandardDescriptorOpen(descriptor))
+	{
+		errno = EBADF;
+		return nullptr;
+	}
+	if (m_standard_streams[descriptor] != nullptr) { return m_standard_streams[descriptor]; }
+	FILE* const native[] = {stdin, stdout, stderr};
+	auto file = std::make_shared<File>();
+	if (!file->f.DuplicateFromStream(native[descriptor], false)) { return nullptr; }
+	FILE* stream = file->f.DuplicateStream(descriptor == 0 ? "rb" : "wb");
+	if (stream == nullptr) { return nullptr; }
+	// Guest setvbuf must never install storage into a host diagnostics FILE.
+	// Match stderr's unbuffered default and stdout's native terminal policy.
+	if (descriptor == 2) { std::setvbuf(stream, nullptr, _IONBF, 0); }
+	file->opened = true;
+	file->directory = false;
+	file->status_flags.store(descriptor == 0 ? 0u : 1u, std::memory_order_release);
+	file->streams.push_back(stream);
+	auto state = std::make_shared<StreamState>(stream);
+	state->buffer_mode = descriptor == 2 ? _IONBF : _IOFBF;
+	m_streams.emplace(stream, StreamEntry {descriptor, 0, file, state});
+	m_standard_streams[descriptor] = stream;
+	return stream;
+}
+
+std::shared_ptr<StreamState> FileDescriptors::GetStreamState(FILE* stream)
+{
+	Core::LockGuard lock(m_mutex);
+	const auto found = m_streams.find(stream);
+	return found == m_streams.end() ? nullptr : found->second.state;
+}
+
+int FileDescriptors::FlushStreams()
+{
+	int result = 0;
+	int saved = 0;
+	{
+		Core::LockGuard lock(m_mutex);
+		// Keep membership fixed through the native global operation. Lease all
+		// caller buffers, but let libc select output streams; individually flushing
+		// every FILE would also discard read-ahead on input/update streams.
+		std::unordered_set<File*> locked;
+		std::vector<std::unique_ptr<Core::LockGuard>> descriptions;
+		for (const auto& stream: m_streams)
+		{
+			auto* file = stream.second.file.get();
+			if (!locked.insert(file).second) { continue; }
+			descriptions.push_back(std::make_unique<Core::LockGuard>(file->mutex));
+		}
+		std::vector<std::unique_ptr<StreamUse>> uses;
+		for (const auto& stream: m_streams) { uses.push_back(std::make_unique<StreamUse>(stream.second.state, false)); }
+		// No external native locks: libc owns its global-list/FILE lock ordering.
+		result = std::fflush(nullptr);
+		saved = errno;
+	}
+	errno = saved;
+	return result;
+}
+
+FILE* FileDescriptors::OpenStream(int d, const char* mode, uint32_t flags)
+{
+	Core::LockGuard lock(m_mutex);
+	if (d < DESCRIPTOR_MIN) { errno = EBADF; return nullptr; }
+	const auto index = static_cast<size_t>(d - DESCRIPTOR_MIN);
+	if (index >= m_files.size() || m_files[index] == nullptr || !m_files[index]->opened)
+	{
+		errno = EBADF;
+		return nullptr;
+	}
+	auto file = m_files[index];
+	Core::LockGuard file_lock(file->mutex);
+	if (file->directory) { errno = EISDIR; return nullptr; }
+	const uint32_t current = file->status_flags.load(std::memory_order_acquire);
+	const auto access = current & 3u;
+	const auto requested = flags & 3u;
+	if ((access != 2u && access != requested) || file->f.IsInvalid())
+	{
+		errno = EBADF;
+		return nullptr;
+	}
+	const bool add_append = (flags & 8u) != 0 && (current & 8u) == 0;
+	if (add_append && !file->f.SetAppend(true)) { return nullptr; }
+	FILE* stream = file->f.DuplicateStream(mode);
+	if (stream == nullptr)
+	{
+		const int saved = errno;
+		if (add_append) { file->f.SetAppend(false); }
+		errno = saved;
+		return nullptr;
+	}
+	if (add_append) { file->status_flags.store(current | 8u, std::memory_order_release); }
+	file->streams.push_back(stream);
+	m_streams.emplace(stream, StreamEntry {d, m_generations[index], file, std::make_shared<StreamState>(stream)});
+	return stream;
+}
+
+int FileDescriptors::StreamDescriptor(FILE* stream)
+{
+	Core::LockGuard lock(m_mutex);
+	const auto found = m_streams.find(stream);
+	if (found == m_streams.end() || !Matches(found->second)) { errno = EBADF; return -1; }
+	return found->second.descriptor;
+}
+
+int FileDescriptors::CloseStream(FILE* stream)
+{
+	Core::LockGuard lock(m_mutex);
+	const auto found = m_streams.find(stream);
+	if (found == m_streams.end()) { errno = EBADF; return EOF; }
+	const auto entry = found->second;
+	auto file = entry.file;
+	Core::LockGuard file_lock(file->mutex);
+	const StreamUse use(entry.state, false);
+	Detach(entry);
+	m_streams.erase(found);
+	auto& streams = file->streams;
+	streams.erase(std::remove(streams.begin(), streams.end(), stream), streams.end());
+	entry.state->closed = true;
+	return std::fclose(stream);
+}
+
+FILE* FileDescriptors::ReopenStream(FILE* stream, const String& path, const String& host_path, const char* mode, uint32_t flags)
+{
+	Core::LockGuard lock(m_mutex);
+	const auto found = m_streams.find(stream);
+	if (found == m_streams.end()) { errno = EBADF; return nullptr; }
+	const auto previous = found->second;
+	const bool attached = Matches(previous);
+	Core::LockGuard file_lock(previous.file->mutex);
+	const StreamUse use(previous.state, false);
+	previous.state->closed = true;
+	auto& streams = previous.file->streams;
+	streams.erase(std::remove(streams.begin(), streams.end(), stream), streams.end());
+	m_streams.erase(found);
+	Detach(previous);
+	// freopen retains a genuine host FILE object, including libc-private layout.
+	// Existing guest dup handles retain the old native open-file description.
+	FILE* reopened = std::freopen(host_path.C_Str(), mode, stream);
+	if (reopened == nullptr) { return nullptr; }
+	auto state = std::make_shared<StreamState>(reopened);
+	if (previous.state->buffer != nullptr || previous.state->host_buffer != nullptr)
+	{
+		// Some libcs retain the old buffer on reopen. Explicit host-owned storage
+		// makes ending the old guest association portable; nullptr alone would
+		// allow libc to keep using the caller's buffer.
+		state->buffer_mode = previous.state->buffer_mode;
+		state->host_buffer = std::make_unique<char[]>(BUFSIZ);
+		const int previous_error = errno;
+		errno = 0;
+		if (std::setvbuf(reopened, state->host_buffer.get(), state->buffer_mode, BUFSIZ) != 0)
+		{
+			const int saved = errno != 0 ? errno : EIO;
+			std::fclose(reopened);
+			errno = saved;
+			return nullptr;
+		}
+		errno = previous_error;
+	}
+	auto file = std::make_shared<File>();
+	if (!file->f.DuplicateFromStream(reopened, (flags & 8u) != 0))
+	{
+		const int saved = errno;
+		std::fclose(reopened);
+		errno = saved;
+		return nullptr;
+	}
+	file->opened = true;
+	file->directory = false;
+	file->name = path;
+	file->real_name = host_path;
+	file->status_flags.store(flags, std::memory_order_release);
+	file->streams.push_back(reopened);
+	const int descriptor = attached ? previous.descriptor : CreateDescriptor();
+	if (descriptor < 0)
+	{
+		std::fclose(reopened);
+		errno = HostErrorFromKernel(descriptor);
+		return nullptr;
+	}
+	const auto generation = ++m_next_generation;
+	if (descriptor < DESCRIPTOR_MIN)
+	{
+		m_standard_streams[descriptor] = reopened;
+		g_standard_descriptors.fetch_or(static_cast<uint8_t>(1u << descriptor), std::memory_order_release);
+	} else
+	{
+		const auto index = static_cast<size_t>(descriptor - DESCRIPTOR_MIN);
+		m_files[index] = file;
+		m_generations[index] = generation;
+	}
+	m_streams.emplace(reopened, StreamEntry {descriptor, generation, file, state});
+	return reopened;
 }
 
 void MountPoints::Mount(const String& folder, const String& point)
@@ -430,41 +867,42 @@ String MountPoints::GetRealFilename(const String& mounted_file_name)
 {
 	Core::LockGuard lock(m_mutex);
 
-	auto mounted_path = mounted_file_name.FixFilenameSlash().DirectoryWithoutFilename();
-
-	if (auto index = m_mount_pairs.Find(mounted_path, [](const MountPair& p, const String& s) { return s.StartsWith(p.point); });
-	    m_mount_pairs.IndexValid(index))
+	const auto normalized = Path::NormalizeGuest(mounted_file_name.C_Str());
+	if (normalized.empty()) { return {}; }
+	const auto guest = String::FromUtf8(normalized.c_str());
+	for (const auto& pair: m_mount_pairs)
 	{
-		const auto& p = m_mount_pairs.At(index);
-		return p.dir + mounted_file_name.RemoveFirst(p.point.Size());
+		const bool at_root = guest.FixDirectorySlash() == pair.point;
+		if (!at_root && !guest.StartsWith(pair.point)) { continue; }
+		const auto suffix = at_root ? String() : guest.RemoveFirst(pair.point.Size());
+		const auto relative = Path::MatchCaseInsensitive(pair.dir.C_Str(), suffix.C_Str());
+		return String::FromUtf8(Path::ResolveContained(pair.dir.C_Str(), relative).c_str());
 	}
 
-		// No mount matched — redirect to the writable sandbox so that file
-		// creation and writes succeed without touching the host root.
-		return MapToSandbox(mounted_file_name);
+	return MapToSandbox(guest);
 }
 
 String MountPoints::GetRealDirectory(const String& mounted_directory)
 {
+	const auto resolved = GetRealFilename(mounted_directory);
+	return resolved.IsEmpty() ? String() : resolved.FixDirectorySlash();
+}
+
+bool MountPoints::IsHostFilenameAllowed(const String& filename)
+{
+	if (filename.IsEmpty()) { return false; }
 	Core::LockGuard lock(m_mutex);
-
-	auto mounted_path = mounted_directory.FixDirectorySlash();
-
-	if (auto index = m_mount_pairs.Find(mounted_path, [](const MountPair& p, const String& s) { return s.StartsWith(p.point); });
-	    m_mount_pairs.IndexValid(index))
+	for (const auto& pair: m_mount_pairs)
 	{
-		const auto& p = m_mount_pairs.At(index);
-		return p.dir + mounted_directory.RemoveFirst(p.point.Size());
+		if (Path::Allows(pair.dir.C_Str(), filename.C_Str())) { return true; }
 	}
-
-		// No mount matched — redirect to the writable sandbox.
-		return MapToSandbox(mounted_directory);
+	return Path::Allows(GetSandboxRoot().C_Str(), filename.C_Str());
 }
 
 void FileSystemSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 {
 	g_mount_points = new MountPoints;
-	g_files        = new FileDescriptors;
+	InitializeDescriptors();
 	g_standard_descriptors.store(kStandardDescriptorMask, std::memory_order_release);
 
 	// Eagerly initialize the sandbox root so the directory exists before any
@@ -514,8 +952,17 @@ String GetRealFilename(const String& mounted_file_name)
 	return g_mount_points->GetRealFilename(mounted_file_name);
 }
 
+String GetExistingFilename(const String& mounted_file_name)
+{
+	EXIT_IF(g_mount_points == nullptr);
+	const auto normalized = Path::NormalizeGuest(mounted_file_name.C_Str());
+	if (normalized.empty()) { return {}; }
+	const auto guest = String::FromUtf8(normalized.c_str());
+	return ResolveExistingHostFile(guest, g_mount_points->GetRealFilename(guest));
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
-static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_t mode)
+static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_t mode, bool kernel_path_policy = true)
 {
 	EXIT_IF(g_mount_points == nullptr || g_files == nullptr);
 
@@ -537,14 +984,11 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 	bool sync      = (flags_u & 0x0080u) != 0;
 	bool creat     = (flags_u & 0x0200u) != 0;
 	bool trunc     = (flags_u & 0x0400u) != 0;
-	bool excl      = (flags_u & 0x0800u) != 0;
 	bool dsync     = (flags_u & 0x1000u) != 0;
 	bool direct    = (flags_u & 0x00010000u) != 0;
 	bool directory = (flags_u & 0x00020000u) != 0;
 
-	// Core::File has buffered host I/O. Its close/flush boundary is the strongest
-	// durability contract available here; the PS5 advisory sync/direct flags do
-	// not change guest-visible read/write semantics.
+	// Durability/direct-I/O policy is unchanged by the descriptor bridge.
 	(void)fsync;
 	(void)sync;
 	(void)dsync;
@@ -562,13 +1006,14 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 		case 0: rw_mode = Core::File::Mode::Read; break;
 		case 1: rw_mode = Core::File::Mode::Write; break;
 		case 2: rw_mode = Core::File::Mode::ReadWrite; break;
-		default: EXIT("invalid flag_u: %u\n", flags_u);
+		default: return KERNEL_ERROR_EINVAL;
 	}
 
 	if (directory && rw_mode != Core::File::Mode::Read) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	if (directory && (trunc || creat)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	int   descriptor = g_files->CreateDescriptor();
+	if (descriptor < 0) { return descriptor; }
 	auto file        = g_files->GetFile(descriptor);
 
 	EXIT_IF(file == nullptr || file->opened || file->directory);
@@ -587,12 +1032,19 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 	else
 	{
 		// Package font fallback for incomplete dumps (SIE system fonts under app0).
+		const auto mapped = g_mount_points->GetRealFilename(file->name);
 		file->real_name = ResolveGuestDeviceFilename(
-			file->name, ResolveExistingHostFile(file->name, g_mount_points->GetRealFilename(file->name)));
+			file->name, kernel_path_policy ? ResolveExistingHostFile(file->name, mapped) : mapped);
 	}
 
 	if (trunc && rw_mode == Core::File::Mode::Read)
 	{
+		g_files->DeleteDescriptor(descriptor);
+		return KERNEL_ERROR_EACCES;
+	}
+	if (file->real_name.IsEmpty())
+	{
+		g_files->DeleteDescriptor(descriptor);
 		return KERNEL_ERROR_EACCES;
 	}
 
@@ -630,16 +1082,7 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 		}
 	} else
 	{
-		bool       result      = false;
-		const bool file_exists = Core::File::IsFileExisting(file->real_name);
-
-		if (creat && excl && file_exists)
-		{
-			g_files->DeleteDescriptor(descriptor);
-			return KERNEL_ERROR_EEXIST;
-		}
-
-		if (creat && (trunc || !file_exists))
+		if (creat && kernel_path_policy)
 		{
 			// Ensure parent directories exist for sandbox-mapped paths.
 			const String parent_dir = file->real_name.DirectoryWithoutFilename();
@@ -647,42 +1090,19 @@ static int KYTY_SYSV_ABI KernelOpenResolved(const char* path, int flags, uint16_
 			{
 				CreateDirectoryRecursive(parent_dir);
 			}
-			result = file->f.Create(file->real_name);
-
-			KYTY_LOG_DEBUG("\tCreate: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
-			       (result ? FG_GREEN "[ok]" FG_DEFAULT : FG_RED "[fail]" FG_DEFAULT));
-
-			if (result && !trunc)
-			{
-				file->f.Close();
-				result = file->f.Open(file->real_name, rw_mode);
-			}
-		} else
-		{
-			result = file->f.Open(file->real_name, rw_mode);
-
-			KYTY_LOG_DEBUG("\tOpen: " FG_WHITE BOLD "%s" DEFAULT ", %s\n", file->real_name.C_Str(),
-			       (result ? FG_GREEN "[ok]" FG_DEFAULT : FG_RED "[fail]" FG_DEFAULT));
 		}
-
-		if (result && trunc)
+		// O_CREAT/O_EXCL/O_TRUNC/O_APPEND are one native open operation. Append
+		// placement belongs to every host write, including independent opens.
+		if (!file->f.Open(file->real_name.C_Str(), status_flags, mode))
 		{
-			result = file->f.Truncate(0);
-		}
-		if (result && append)
-		{
-			result = file->f.Seek(file->f.Size());
-		}
-
-		if (!result || file->f.IsInvalid())
-		{
+			const int error = KernelErrorFromHost(errno);
 			g_files->DeleteDescriptor(descriptor);
-			return KERNEL_ERROR_EACCES;
+			return error;
 		}
 	}
 
-	file->opened = true;
 	file->status_flags.store(status_flags, std::memory_order_release);
+	file->opened = true;
 	return descriptor;
 }
 
@@ -693,6 +1113,205 @@ int KYTY_SYSV_ABI KernelOpen(const char* path, int flags, uint16_t mode)
 	const int result = KernelOpenResolved(path, flags, mode);
 	FsTrace("open", path, flags, result);
 	return result;
+}
+
+struct StreamMode
+{
+	uint32_t flags = 0;
+	char native[5] {};
+};
+
+static bool ParseStreamMode(const char* mode, StreamMode* result)
+{
+	if (mode == nullptr || (mode[0] != 'r' && mode[0] != 'w' && mode[0] != 'a')) { errno = EINVAL; return false; }
+	bool update = false;
+	bool binary = false;
+	bool exclusive = false;
+	for (size_t i = 1; mode[i] != '\0'; ++i)
+	{
+		if (mode[i] == '+' && !update) { update = true; }
+		else if (mode[i] == 'b' && !binary) { binary = true; }
+		else if (mode[i] == 'x' && !exclusive && mode[0] == 'w') { exclusive = true; }
+		else { errno = EINVAL; return false; }
+	}
+	result->flags = mode[0] == 'r' ? 0u : mode[0] == 'w' ? 0x0601u : 0x0209u;
+	if (update) { result->flags = (result->flags & ~3u) | 2u; }
+	if (exclusive) { result->flags |= 0x0800u; }
+	result->native[0] = mode[0];
+	// Guest text bytes must not acquire host newline translation on Windows.
+	result->native[1] = 'b';
+	size_t length = 2;
+	if (update) { result->native[length++] = '+'; }
+	if (exclusive) { result->native[length++] = 'x'; }
+	result->native[length] = '\0';
+	return true;
+}
+
+static int HostErrorFromKernel(int error)
+{
+	constexpr int base = -2147352576;
+	switch (error)
+	{
+		case KERNEL_ERROR_EPERM: return EPERM;
+		case base + 4: return EINTR;
+		case KERNEL_ERROR_EBADF: return EBADF;
+		case KERNEL_ERROR_ENOENT: return ENOENT;
+		case KERNEL_ERROR_EINVAL: return EINVAL;
+		case KERNEL_ERROR_EACCES: return EACCES;
+		case KERNEL_ERROR_EEXIST: return EEXIST;
+		case KERNEL_ERROR_EISDIR: return EISDIR;
+		case KERNEL_ERROR_ENOTDIR: return ENOTDIR;
+		case KERNEL_ERROR_ENOMEM: return ENOMEM;
+		case KERNEL_ERROR_EFAULT: return EFAULT;
+		case base + 23: return ENFILE;
+		case base + 24: return EMFILE;
+		case base + 27: return EFBIG;
+		case base + 28: return ENOSPC;
+		case base + 29: return ESPIPE;
+		case base + 30: return EROFS;
+		case base + 32: return EPIPE;
+		case KERNEL_ERROR_EAGAIN: return EAGAIN;
+		case KERNEL_ERROR_EOPNOTSUPP: return ENOSYS;
+		case KERNEL_ERROR_ENAMETOOLONG: return ENAMETOOLONG;
+		default: return EIO;
+	}
+}
+
+FILE* OpenStream(const char* path, const char* mode)
+{
+	StreamMode parsed;
+	if (!ParseStreamMode(mode, &parsed)) { return nullptr; }
+	if (path == nullptr) { errno = EINVAL; return nullptr; }
+	// libc uses the same table, while retaining its exact mounted-path policy.
+	const int descriptor = KernelOpenResolved(path, static_cast<int>(parsed.flags), 0666, false);
+	FsTrace("fopen", path, parsed.flags, descriptor);
+	if (descriptor < 0) { errno = HostErrorFromKernel(descriptor); return nullptr; }
+	// 'x' is an open-time constraint, not an fdopen mode.
+	if ((parsed.flags & 0x0800u) != 0) { parsed.native[std::strlen(parsed.native) - 1] = '\0'; }
+	FILE* stream = g_files->OpenStream(descriptor, parsed.native, parsed.flags);
+	if (stream == nullptr)
+	{
+		const int saved = errno;
+		g_files->DeleteDescriptor(descriptor);
+		errno = saved;
+	}
+	return stream;
+}
+
+FILE* OpenDescriptorStream(int descriptor, const char* mode)
+{
+	StreamMode parsed;
+	if (!ParseStreamMode(mode, &parsed)) { return nullptr; }
+	if ((parsed.flags & 0x0800u) != 0) { parsed.native[std::strlen(parsed.native) - 1] = '\0'; }
+	if (g_files == nullptr) { errno = EBADF; return nullptr; }
+	return g_files->OpenStream(descriptor, parsed.native, parsed.flags);
+}
+
+FILE* ReopenStream(const char* path, const char* mode, FILE* stream)
+{
+	StreamMode parsed;
+	if (stream == nullptr || g_files == nullptr) { errno = EBADF; return nullptr; }
+	if (!ParseStreamMode(mode, &parsed) || path == nullptr)
+	{
+		g_files->CloseStream(stream);
+		errno = EINVAL;
+		return nullptr;
+	}
+	const auto host = GetRealFilename(String::FromUtf8(path));
+	if (host.IsEmpty())
+	{
+		g_files->CloseStream(stream);
+		errno = EACCES;
+		return nullptr;
+	}
+	return g_files->ReopenStream(stream, String::FromUtf8(path), host, parsed.native, parsed.flags);
+}
+
+int CloseStream(FILE* stream)
+{
+	if (g_files == nullptr) { errno = EBADF; return EOF; }
+	return g_files->CloseStream(stream);
+}
+
+int StreamDescriptor(FILE* stream)
+{
+	// Standard streams are explicitly admitted; no host-integer fallback.
+	if (stream == stdin) { return 0; }
+	if (stream == stdout) { return 1; }
+	if (stream == stderr) { return 2; }
+	if (g_files == nullptr) { errno = EBADF; return -1; }
+	return g_files->StreamDescriptor(stream);
+}
+
+FILE* StandardStream(int descriptor)
+{
+	// Library-only registration (including symbol-catalog tests) need not mount
+	// a filesystem or create a sandbox just to obtain its standard FILE objects.
+	return InitializeDescriptors()->StandardStream(descriptor);
+}
+
+struct StreamOperation::State
+{
+	FILE* stream = nullptr;
+	std::unique_ptr<StreamUse> use;
+};
+
+StreamOperation::StreamOperation(FILE* stream): m_state(std::make_unique<State>())
+{
+	m_state->stream = stream;
+	const auto state = g_files != nullptr ? g_files->GetStreamState(stream) : nullptr;
+	if (state != nullptr) { m_state->use = std::make_unique<StreamUse>(state); }
+	if (stream == nullptr) { errno = EBADF; }
+}
+
+StreamOperation::~StreamOperation() = default;
+
+bool StreamOperation::IsValid() const
+{
+	return m_state->stream != nullptr && (m_state->use == nullptr || m_state->use->IsValid());
+}
+
+int SetStreamBuffer(FILE* stream, char* buffer, int host_mode, size_t size)
+{
+	if (buffer != nullptr && size > UINTPTR_MAX - reinterpret_cast<uintptr_t>(buffer)) { errno = EINVAL; return -1; }
+	std::optional<Emulator::VideoFrameMemory::HostWriteLease> new_buffer;
+	if (buffer != nullptr && size != 0) { new_buffer.emplace(reinterpret_cast<uint64_t>(buffer), size); }
+	const auto state = g_files != nullptr ? g_files->GetStreamState(stream) : nullptr;
+	// Host-created FILEs are not registered implicitly. In particular, installing
+	// guest storage into the emulator's stdout/stderr would expose unleased writes
+	// from logging. Exported standard streams are private registered duplicates.
+	if (state == nullptr) { errno = EBADF; return -1; }
+	const StreamUse use(state);
+	if (!use.IsValid()) { return -1; }
+	const int result = std::setvbuf(stream, buffer, host_mode, size);
+	if (result == 0)
+	{
+		state->buffer_mode = host_mode;
+		if (host_mode == _IONBF)
+		{
+			state->buffer = nullptr;
+			state->size = 0;
+		} else if (buffer != nullptr)
+		{
+			state->buffer = buffer;
+			state->size = size;
+		}
+		// Buffered setvbuf(nullptr, ...) may retain an existing caller buffer.
+		// Keep its association (and any host-owned storage) until explicitly
+		// replaced, made unbuffered, reopened, or closed.
+	}
+	return result;
+}
+
+int FlushStreams(FILE* stream)
+{
+	if (stream != nullptr)
+	{
+		const StreamOperation operation(stream);
+		return operation.IsValid() ? std::fflush(stream) : EOF;
+	}
+	if (g_files != nullptr) { return g_files->FlushStreams(); }
+	return std::fflush(nullptr);
 }
 
 int KYTY_SYSV_ABI KernelClose(int d)
@@ -722,15 +1341,13 @@ int KYTY_SYSV_ABI KernelClose(int d)
 		return KERNEL_ERROR_EBADF;
 	}
 
-	EXIT_IF(!file->opened);
+	if (!file->opened) { return KERNEL_ERROR_EBADF; }
 
 	KYTY_LOG_DEBUG("\tClose: " FG_WHITE BOLD "%s" DEFAULT "\n", file->real_name.C_Str());
 
 	FsTrace("close", file->name.C_Str(), d, OK);
 
-	g_files->DeleteDescriptor(d);
-
-	return OK;
+	return g_files->DeleteDescriptor(d);
 }
 
 bool KernelIsStandardDescriptorOpen(int d)
@@ -744,16 +1361,17 @@ bool KernelIsStandardDescriptorOpen(int d)
 	return (g_standard_descriptors.load(std::memory_order_acquire) & descriptor_bit) != 0;
 }
 
-static uint64_t ReadFileToCompletion(Core::File& file, void* buffer, size_t size)
+static int64_t ReadFileToCompletion(Host::File& file, void* buffer, size_t size, int64_t offset = -1)
 {
 	auto*    out   = static_cast<uint8_t*>(buffer);
 	uint64_t total = 0;
 	while (total < size)
 	{
 		const uint64_t remaining = static_cast<uint64_t>(size) - total;
-		const uint32_t request   = remaining > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(remaining);
-		uint32_t       current   = 0;
-		file.Read(out + total, request, &current);
+		const uint32_t request   = remaining > INT_MAX ? INT_MAX : static_cast<uint32_t>(remaining);
+		const int64_t current   = offset < 0 ? file.Read(out + total, request) :
+		                                      file.ReadAt(out + total, request, offset + static_cast<int64_t>(total));
+		if (current < 0) { return total != 0 ? static_cast<int64_t>(total) : KernelErrorFromHost(errno); }
 		total += current;
 		if (current < request)
 		{
@@ -763,16 +1381,17 @@ static uint64_t ReadFileToCompletion(Core::File& file, void* buffer, size_t size
 	return total;
 }
 
-static uint64_t WriteFileToCompletion(Core::File& file, const void* buffer, size_t size)
+static int64_t WriteFileToCompletion(Host::File& file, const void* buffer, size_t size, int64_t offset = -1)
 {
 	const auto* input = static_cast<const uint8_t*>(buffer);
 	uint64_t    total = 0;
 	while (total < size)
 	{
 		const uint64_t remaining = static_cast<uint64_t>(size) - total;
-		const uint32_t request   = remaining > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(remaining);
-		uint32_t       current   = 0;
-		file.Write(input + total, request, &current);
+		const uint32_t request   = remaining > INT_MAX ? INT_MAX : static_cast<uint32_t>(remaining);
+		const int64_t current   = offset < 0 ? file.Write(input + total, request) :
+		                                      file.WriteAt(input + total, request, offset + static_cast<int64_t>(total));
+		if (current < 0) { return total != 0 ? static_cast<int64_t>(total) : KernelErrorFromHost(errno); }
 		total += current;
 		if (current < request)
 		{
@@ -817,9 +1436,10 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 	{
 		return KERNEL_ERROR_EBADF;
 	}
+	if ((file->status_flags.load(std::memory_order_acquire) & 3u) == 1u) { return KERNEL_ERROR_EBADF; }
 
-	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), nbytes);
-	uint64_t bytes_read = 0;
+	const Kyty::Emulator::VideoFrameMemory::HostWriteLease write_lease(reinterpret_cast<uint64_t>(buf), nbytes);
+	int64_t bytes_read = 0;
 	{
 		Core::LockGuard lock(file->mutex);
 		if (file->f.IsInvalid())
@@ -828,7 +1448,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes)
 		}
 		bytes_read = ReadFileToCompletion(file->f, buf, nbytes);
 	}
-	KYTY_LOG_DEBUG("\tRead %" PRIu64 " bytes from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tRead result %" PRId64 " from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, file->real_name.C_Str());
 
 	FsTrace("read", file->name.C_Str(), static_cast<int64_t>(nbytes), bytes_read);
 
@@ -870,8 +1490,9 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes)
 	{
 		return KERNEL_ERROR_EBADF;
 	}
+	if ((file->status_flags.load(std::memory_order_acquire) & 3u) == 0u) { return KERNEL_ERROR_EBADF; }
 
-	uint64_t bytes_written = 0;
+	int64_t bytes_written = 0;
 	{
 		Core::LockGuard lock(file->mutex);
 		if (file->f.IsInvalid())
@@ -881,7 +1502,7 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes)
 		bytes_written = WriteFileToCompletion(file->f, buf, nbytes);
 	}
 
-	KYTY_LOG_DEBUG("\tWrite %" PRIu64 " bytes to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tWrite result %" PRId64 " to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, file->real_name.C_Str());
 
 	return bytes_written;
 }
@@ -906,7 +1527,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	if (nbytes > static_cast<size_t>(INT64_MAX))
+	if (nbytes > static_cast<size_t>(INT64_MAX - offset))
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
@@ -926,28 +1547,20 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	{
 		return KERNEL_ERROR_EBADF;
 	}
+	if ((file->status_flags.load(std::memory_order_acquire) & 3u) == 1u) { return KERNEL_ERROR_EBADF; }
 
-	Kyty::Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(buf), nbytes);
-	uint64_t bytes_read = 0;
+	const Kyty::Emulator::VideoFrameMemory::HostWriteLease write_lease(reinterpret_cast<uint64_t>(buf), nbytes);
+	int64_t bytes_read = 0;
 	{
 		Core::LockGuard lock(file->mutex);
 		if (file->f.IsInvalid())
 		{
 			return KERNEL_ERROR_EIO;
 		}
-		const uint64_t position = file->f.Tell();
-		if (!file->f.Seek(static_cast<uint64_t>(offset)))
-		{
-			(void)file->f.Seek(position);
-			return KERNEL_ERROR_EINVAL;
-		}
-		bytes_read = ReadFileToCompletion(file->f, buf, nbytes);
-		if (!file->f.Seek(position))
-		{
-			return KERNEL_ERROR_EIO;
-		}
+		const StreamLocks streams(*file);
+		bytes_read = ReadFileToCompletion(file->f, buf, nbytes, offset);
 	}
-	KYTY_LOG_DEBUG("\tRead %" PRIu64 " bytes (pos = %" PRId64 ") from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, offset,
+	KYTY_LOG_DEBUG("\tRead result %" PRId64 " (pos = %" PRId64 ") from: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_read, offset,
 	               file->real_name.C_Str());
 
 	FsTrace("pread", file->name.C_Str(), offset, bytes_read);
@@ -975,7 +1588,7 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	if (nbytes > static_cast<size_t>(INT64_MAX))
+	if (nbytes > static_cast<size_t>(INT64_MAX - offset))
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
@@ -995,28 +1608,20 @@ int64_t KYTY_SYSV_ABI KernelPwrite(int d, const void* buf, size_t nbytes, int64_
 	{
 		return KERNEL_ERROR_EBADF;
 	}
+	if ((file->status_flags.load(std::memory_order_acquire) & 3u) == 0u) { return KERNEL_ERROR_EBADF; }
 
-	uint64_t bytes_written = 0;
+	int64_t bytes_written = 0;
 	{
 		Core::LockGuard lock(file->mutex);
 		if (file->f.IsInvalid())
 		{
 			return KERNEL_ERROR_EIO;
 		}
-		const uint64_t position = file->f.Tell();
-		if (!file->f.Seek(static_cast<uint64_t>(offset)))
-		{
-			(void)file->f.Seek(position);
-			return KERNEL_ERROR_EINVAL;
-		}
-		bytes_written = WriteFileToCompletion(file->f, buf, nbytes);
-		if (!file->f.Seek(position))
-		{
-			return KERNEL_ERROR_EIO;
-		}
+		const StreamLocks streams(*file);
+		bytes_written = WriteFileToCompletion(file->f, buf, nbytes, offset);
 	}
 
-	KYTY_LOG_DEBUG("\tWrite %" PRIu64 " bytes (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, offset,
+	KYTY_LOG_DEBUG("\tWrite result %" PRId64 " (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", bytes_written, offset,
 	               file->real_name.C_Str());
 
 	return bytes_written;
@@ -1059,14 +1664,16 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence)
 		return KERNEL_ERROR_EIO;
 	}
 
-	uint64_t base = 0;
+	int64_t signed_base = 0;
 	if (whence == 1)
 	{
-		base = file->f.Tell();
+		signed_base = file->f.Tell();
 	} else if (whence == 2)
 	{
-		base = file->f.Size();
+		signed_base = file->f.Size();
 	}
+	if (signed_base < 0) { return KernelErrorFromHost(errno); }
+	const auto base = static_cast<uint64_t>(signed_base);
 
 	uint64_t target = 0;
 	if (whence == 0)
@@ -1094,17 +1701,17 @@ int64_t KYTY_SYSV_ABI KernelLseek(int d, int64_t offset, int whence)
 		target = base + delta;
 	}
 
-	if (target > static_cast<uint64_t>(INT64_MAX) || !file->f.Seek(target))
+	if (target > static_cast<uint64_t>(INT64_MAX))
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	const uint64_t position = file->f.Tell();
-	if (position != target)
+	const int64_t position = file->f.Seek(static_cast<int64_t>(target), SEEK_SET);
+	if (position < 0)
 	{
-		return KERNEL_ERROR_EIO;
+		return KernelErrorFromHost(errno);
 	}
 
-	KYTY_LOG_DEBUG("\tLseek (pos = %" PRIu64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", position, file->real_name.C_Str());
+	KYTY_LOG_DEBUG("\tLseek (pos = %" PRId64 ") to: " FG_WHITE BOLD "%s" DEFAULT "\n", position, file->real_name.C_Str());
 	return static_cast<int64_t>(position);
 }
 
@@ -1174,7 +1781,7 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 
 	if (d < DESCRIPTOR_MIN)
 	{
-		return KERNEL_ERROR_EPERM;
+		return KERNEL_ERROR_EBADF;
 	}
 
 	if (sb == nullptr)
@@ -1184,98 +1791,50 @@ int KYTY_SYSV_ABI KernelFstat(int d, FileStat* sb)
 
 	auto file = g_files->GetFile(d);
 
-	if (file == nullptr)
+	if (file == nullptr || !file->opened)
 	{
-		// libc FILE* functions are backed by the host C runtime. A guest that
-		// calls fopen -> fileno -> fstat therefore presents a valid host
-		// descriptor which is intentionally absent from Kyty's guest table.
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		struct _stat64 host_stat {};
-		if (::_fstat64(d, &host_stat) != 0)
-#else
-		struct stat host_stat {};
-		if (::fstat(d, &host_stat) != 0)
-#endif
-		{
-			return KERNEL_ERROR_EBADF;
-		}
+		return KERNEL_ERROR_EBADF;
+	}
 
-		memset(sb, 0, sizeof(FileStat));
-		sb->st_dev   = static_cast<uint32_t>(host_stat.st_dev);
-		sb->st_ino   = static_cast<uint32_t>(host_stat.st_ino);
-		sb->st_mode  = static_cast<uint16_t>(host_stat.st_mode);
-		sb->st_nlink = static_cast<uint16_t>(host_stat.st_nlink);
-#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
-		sb->st_uid  = static_cast<uint32_t>(host_stat.st_uid);
-		sb->st_gid  = static_cast<uint32_t>(host_stat.st_gid);
-		sb->st_rdev = static_cast<uint32_t>(host_stat.st_rdev);
-#endif
-		sb->st_size = static_cast<int64_t>(host_stat.st_size);
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-		sb->st_flags       = 0;
-		sb->st_blksize     = 512;
-		sb->st_blocks      = (sb->st_size + 511) / 512;
-		sb->st_atim.tv_sec = static_cast<int64_t>(host_stat.st_atime);
-		sb->st_mtim.tv_sec = static_cast<int64_t>(host_stat.st_mtime);
-		sb->st_ctim.tv_sec = static_cast<int64_t>(host_stat.st_ctime);
-#else
-		sb->st_flags        = 0;
-		sb->st_blocks       = static_cast<int64_t>(host_stat.st_blocks);
-		sb->st_blksize      = static_cast<uint32_t>(host_stat.st_blksize);
-		sb->st_atim.tv_sec  = static_cast<int64_t>(host_stat.st_atim.tv_sec);
-		sb->st_atim.tv_nsec = static_cast<int64_t>(host_stat.st_atim.tv_nsec);
-		sb->st_mtim.tv_sec  = static_cast<int64_t>(host_stat.st_mtim.tv_sec);
-		sb->st_mtim.tv_nsec = static_cast<int64_t>(host_stat.st_mtim.tv_nsec);
-		sb->st_ctim.tv_sec  = static_cast<int64_t>(host_stat.st_ctim.tv_sec);
-		sb->st_ctim.tv_nsec = static_cast<int64_t>(host_stat.st_ctim.tv_nsec);
-#endif
-		sb->st_birthtim = sb->st_mtim;
+	Core::LockGuard lock(file->mutex);
+	memset(sb, 0, sizeof(FileStat));
+	if (file->directory)
+	{
+		sb->st_mode = 0000777u | 0040000u;
+		sb->st_blksize = 512;
 		return OK;
 	}
-
-	EXIT_IF(!file->opened);
-
-	KYTY_LOG_DEBUG("\tKernelFstat: %s\n", file->real_name.C_Str());
-
-	memset(sb, 0, sizeof(FileStat));
-
-	sb->st_mode = 0000777u | (file->directory ? 0040000u : 0100000u);
-	sb->st_flags = 0;
-
-	Core::DateTime at;
-	Core::DateTime wt;
-
-	if (!file->directory)
-	{
-		file->mutex.Lock();
-
-		bool is_invalid = file->f.IsInvalid();
-		auto size       = file->f.Size();
-		file->f.GetLastAccessAndWriteTimeUTC(&at, &wt);
-
-		file->mutex.Unlock();
-
-		if (is_invalid)
-		{
-			KYTY_LOG_DEBUG("\tfile is invalid\n");
-			return KERNEL_ERROR_EIO;
-		}
-
-		sb->st_size    = static_cast<int64_t>(size);
-		sb->st_blksize = 512;
-		sb->st_blocks  = (sb->st_size + 511) / 512;
-	} else
-	{
-		sb->st_size    = 0;
-		sb->st_blksize = 512;
-		sb->st_blocks  = 0;
-	}
-
-	sec_to_timespec(&sb->st_atim, at.ToUnix());
-	sec_to_timespec(&sb->st_mtim, wt.ToUnix());
-	sb->st_ctim     = sb->st_atim;
+	Host::File::Stat host_stat {};
+	if (!file->f.GetStat(&host_stat)) { return KernelErrorFromHost(errno); }
+	sb->st_dev   = static_cast<uint32_t>(host_stat.st_dev);
+	sb->st_ino   = static_cast<uint32_t>(host_stat.st_ino);
+	sb->st_mode  = static_cast<uint16_t>(host_stat.st_mode);
+	sb->st_nlink = static_cast<uint16_t>(host_stat.st_nlink);
+#if KYTY_PLATFORM != KYTY_PLATFORM_WINDOWS
+	sb->st_uid  = static_cast<uint32_t>(host_stat.st_uid);
+	sb->st_gid  = static_cast<uint32_t>(host_stat.st_gid);
+	sb->st_rdev = static_cast<uint32_t>(host_stat.st_rdev);
+#endif
+	sb->st_size = static_cast<int64_t>(host_stat.st_size);
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	sb->st_flags       = 0;
+	sb->st_blksize     = 512;
+	sb->st_blocks      = (sb->st_size + 511) / 512;
+	sb->st_atim.tv_sec = static_cast<int64_t>(host_stat.st_atime);
+	sb->st_mtim.tv_sec = static_cast<int64_t>(host_stat.st_mtime);
+	sb->st_ctim.tv_sec = static_cast<int64_t>(host_stat.st_ctime);
+#else
+	sb->st_flags        = 0;
+	sb->st_blocks       = static_cast<int64_t>(host_stat.st_blocks);
+	sb->st_blksize      = static_cast<uint32_t>(host_stat.st_blksize);
+	sb->st_atim.tv_sec  = static_cast<int64_t>(host_stat.st_atim.tv_sec);
+	sb->st_atim.tv_nsec = static_cast<int64_t>(host_stat.st_atim.tv_nsec);
+	sb->st_mtim.tv_sec  = static_cast<int64_t>(host_stat.st_mtim.tv_sec);
+	sb->st_mtim.tv_nsec = static_cast<int64_t>(host_stat.st_mtim.tv_nsec);
+	sb->st_ctim.tv_sec  = static_cast<int64_t>(host_stat.st_ctim.tv_sec);
+	sb->st_ctim.tv_nsec = static_cast<int64_t>(host_stat.st_ctim.tv_nsec);
+#endif
 	sb->st_birthtim = sb->st_mtim;
-
 	return OK;
 }
 
@@ -1312,7 +1871,7 @@ int KYTY_SYSV_ABI KernelFtruncate(int d, int64_t length)
 		return KERNEL_ERROR_EIO;
 	}
 
-	return file->f.Truncate(static_cast<uint64_t>(length)) ? OK : KERNEL_ERROR_EIO;
+	return file->f.Truncate(length) ? OK : KernelErrorFromHost(errno);
 }
 
 int KYTY_SYSV_ABI KernelFcntl(int d, int command, int64_t argument)
@@ -1334,9 +1893,11 @@ int KYTY_SYSV_ABI KernelFcntl(int d, int command, int64_t argument)
 		case f_getfl: return static_cast<int>(file->status_flags.load(std::memory_order_acquire));
 		case f_setfl:
 		{
+			Core::LockGuard lock(file->mutex);
 			const auto requested = static_cast<uint32_t>(argument);
 			auto       current   = file->status_flags.load(std::memory_order_acquire);
 			current              = (current & ~mutable_status_flags) | (requested & mutable_status_flags);
+			if (!file->directory && !file->f.SetAppend((current & 8u) != 0)) { return KernelErrorFromHost(errno); }
 			file->status_flags.store(current, std::memory_order_release);
 			return OK;
 		}
@@ -1376,7 +1937,11 @@ int KYTY_SYSV_ABI KernelGetReadAvailability(int d, uint64_t* available)
 		return KERNEL_ERROR_EIO;
 	}
 
-	*available = file->f.Remaining();
+	const auto position = file->f.Tell();
+	if (position < 0) { return KernelErrorFromHost(errno); }
+	const auto size = file->f.Size();
+	if (size < 0) { return KernelErrorFromHost(errno); }
+	*available = size > position ? static_cast<uint64_t>(size - position) : 0;
 	return OK;
 }
 
@@ -1984,7 +2549,7 @@ static String PreferHostPatchFile(const String& guest_path, const String& reques
 }
 
 // Map guest path → existing host file (extension aliases, app0 data/, OD companions, fonts).
-static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name)
+static String ResolveExistingHostFileUnchecked(const String& guest_path, const String& real_file_name)
 {
 	const String patched = PreferHostPatchFile(guest_path, real_file_name);
 	if (Core::File::IsFileExisting(patched) && patched != real_file_name)
@@ -2021,6 +2586,13 @@ static String ResolveExistingHostFile(const String& guest_path, const String& re
 		return real_file_name;
 	}
 	return PreferPackageFontHostPath(real_file_name);
+}
+
+static String ResolveExistingHostFile(const String& guest_path, const String& real_file_name)
+{
+	if (real_file_name.IsEmpty()) { return {}; }
+	const auto candidate = ResolveExistingHostFileUnchecked(guest_path, real_file_name);
+	return g_mount_points->IsHostFilenameAllowed(candidate) ? candidate : String();
 }
 
 bool AprTryGetHostPath(uint32_t file_id, String* out_host_path)

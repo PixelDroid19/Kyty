@@ -30,9 +30,10 @@ public:
 
 	private:
 		friend class VideoOutHostAccessGate;
-		explicit AccessPin(VideoOutHostAccessGate* gate): m_gate(gate) {}
+		explicit AccessPin(VideoOutHostAccessGate* gate, bool progress = false): m_gate(gate), m_progress(progress) {}
 
-		VideoOutHostAccessGate* m_gate = nullptr;
+		VideoOutHostAccessGate* m_gate     = nullptr;
+		bool                    m_progress = false;
 	};
 
 	class QuiescePin final
@@ -55,22 +56,52 @@ public:
 		VideoOutHostAccessGate* m_gate = nullptr;
 	};
 
+	// Close ordinary admission while accepted flips and their presenter's
+	// vblank path can still run. Convert to exclusive access only after the
+	// caller has drained the accepted flip lifetimes.
+	class DrainPin final
+	{
+	public:
+		DrainPin() = default;
+		DrainPin(DrainPin&& other) noexcept;
+		DrainPin& operator=(DrainPin&& other) noexcept;
+		~DrainPin();
+
+		DrainPin(const DrainPin&)            = delete;
+		DrainPin& operator=(const DrainPin&) = delete;
+
+		void                     Reset();
+		[[nodiscard]] QuiescePin Quiesce();
+
+	private:
+		friend class VideoOutHostAccessGate;
+		explicit DrainPin(VideoOutHostAccessGate* gate): m_gate(gate) {}
+
+		VideoOutHostAccessGate* m_gate = nullptr;
+	};
+
 	VideoOutHostAccessGate()  = default;
 	~VideoOutHostAccessGate() = default;
 
 	KYTY_CLASS_NO_COPY(VideoOutHostAccessGate);
 
 	[[nodiscard]] AccessPin  Acquire();
+	[[nodiscard]] AccessPin  AcquireProgress();
+	[[nodiscard]] DrainPin   Drain();
 	[[nodiscard]] QuiescePin Quiesce();
 
 private:
-	void ReleaseAccess();
-	void EndQuiesce();
+	void                     ReleaseAccess(bool progress);
+	void                     EndDrain();
+	[[nodiscard]] QuiescePin FinishDrain();
+	void                     EndQuiesce();
 
 	Core::Mutex   m_mutex;
 	Core::CondVar m_state_changed;
 	uint32_t      m_active_accesses = 0;
+	uint32_t      m_active_progress = 0;
 	bool          m_quiescing       = false;
+	bool          m_draining        = false;
 };
 
 } // namespace Kyty::Libs::Graphics

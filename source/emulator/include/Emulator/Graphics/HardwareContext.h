@@ -4,6 +4,7 @@
 #include "Kyty/Core/Common.h"
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GraphicsGeState.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -448,6 +449,7 @@ struct VsShaderResource1
 	bool    cu_group_enable          = false;
 	bool    require_forward_progress = false;
 	bool    fp16_overflow            = false;
+	bool    fp16_overflow_known      = false;
 };
 
 struct VsShaderResource2
@@ -478,6 +480,7 @@ struct PsShaderResource1
 	bool    cu_group_disable         = false;
 	bool    require_forward_progress = false;
 	bool    fp16_overflow            = false;
+	bool    fp16_overflow_known      = false;
 };
 
 struct PsShaderResource2
@@ -519,6 +522,15 @@ struct CsStageRegisters
 	uint8_t  tg_size_en     = 0;
 	uint8_t  tidig_comp_cnt = 0;
 	uint16_t lds_size       = 0;
+	// Initial FP controls from COMPUTE_PGM_RSRC1. Values are placeholders until
+	// fp_mode_known: an unwritten register is not an observed mode-zero write.
+	uint8_t float_mode    = 0;
+	bool    dx10_clamp    = false;
+	bool    ieee_mode     = false;
+	bool    fp_mode_known = false;
+	// FP16 overflow control has a separate generation-qualified provenance.
+	bool    fp16_overflow       = false;
+	bool    fp16_overflow_known = false;
 	// Dispatch occupancy/scheduling state. It does not change shader semantics
 	// in the host SPIR-V backend, but must survive both PM4 register paths.
 	uint32_t resource_limits = 0;
@@ -552,9 +564,14 @@ struct GsShaderResource1
 	bool    ieee_mode                = false;
 	bool    cu_group_enable          = false;
 	bool    require_forward_progress = false;
-	bool    lds_configuration        = false;
+	bool    lds_configuration        = false; // WGP_MODE
 	uint8_t gs_vgpr_component_count  = 0;
 	bool    fp16_overflow            = false;
+	bool    fp16_overflow_known      = false;
+	// Retained register semantics; decoding does not enable their execution.
+	bool    priv                    = false;
+	bool    mem_ordered              = false;
+	bool    cdbg_user                = false;
 };
 
 struct GsShaderResource2
@@ -565,6 +582,12 @@ struct GsShaderResource2
 	bool    offchip_lds             = false;
 	uint8_t lds_size                = 0;
 	uint8_t shared_vgprs            = 0;
+	bool     trap_present         = false;
+	uint16_t exception_en         = 0;
+
+	// GFX10 LDS_SIZE is in units of 128 dwords (512 bytes).
+	[[nodiscard]] uint32_t GetLdsSizeDwords() const { return static_cast<uint32_t>(lds_size) * 128u; }
+	[[nodiscard]] uint32_t GetLdsSizeBytes() const { return static_cast<uint32_t>(lds_size) * 512u; }
 };
 
 struct GsStageRegisters
@@ -575,7 +598,10 @@ struct GsStageRegisters
 	uint64_t          chksum = 0;
 	// Wave-packing hints (shared VGPR count, instruction prefetch). Recorded
 	// for completeness; the recompiler re-derives register allocation.
-	uint32_t rsrc3 = 0;
+	uint32_t             rsrc3 = 0;
+	GraphicsGeRawRegister rsrc1_raw;
+	GraphicsGeRawRegister rsrc2_raw;
+	GraphicsGeRawRegister rsrc3_raw;
 };
 
 struct ShaderRegisters
@@ -583,6 +609,10 @@ struct ShaderRegisters
 	uint32_t m_spiVsOutConfig     = 0;
 	uint32_t m_spiShaderPosFormat = 0;
 	uint32_t m_paClVsOutCntl      = 0;
+	GraphicsGeRawRegister vs_out_config_raw;
+	GraphicsGeRawRegister shader_pos_format_raw;
+	GraphicsGeRawRegister cl_vs_out_control_raw;
+	GraphicsGeRawRegister gs_out_primitive_raw;
 
 	uint32_t ps_interpolator_settings[32] = {0};
 	uint32_t ps_interpolator_written_mask = 0;
@@ -681,6 +711,9 @@ struct GeControl
 {
 	uint16_t primitive_group_size = 0;
 	uint16_t vertex_group_size    = 0;
+	bool     break_wave_at_eoi    = false;
+	bool     packet_to_one_pa     = false;
+	uint32_t raw_unknown_bits    = 0;
 };
 
 struct GeUserVgprEn
@@ -688,6 +721,7 @@ struct GeUserVgprEn
 	bool vgpr1 = false;
 	bool vgpr2 = false;
 	bool vgpr3 = false;
+	uint32_t raw_unknown_bits = 0;
 };
 
 class Context
@@ -729,8 +763,9 @@ public:
 	void                   SetRenderTargetMask(uint32_t mask) { m_render_target_mask = mask; }
 	[[nodiscard]] uint32_t GetRenderTargetMask() const { return m_render_target_mask; }
 
-	void                   SetShaderStages(uint32_t flags) { m_shader_stages = flags; }
-	[[nodiscard]] uint32_t GetShaderStages() const { return m_shader_stages; }
+	void                   SetShaderStages(uint32_t flags) { m_shader_stages.SetRaw(flags); }
+	[[nodiscard]] uint32_t GetShaderStages() const { return m_shader_stages.value; }
+	[[nodiscard]] const GraphicsGeRawRegister& GetShaderStagesRaw() const { return m_shader_stages; }
 
 	void                                   SetDepthRenderTarget(const DepthRenderTarget& target) { m_depth_render_target = target; }
 	[[nodiscard]] const DepthRenderTarget& GetDepthRenderTarget() const { return m_depth_render_target; }
@@ -861,9 +896,21 @@ public:
 
 	[[nodiscard]] const ShaderRegisters& GetShaderRegisters() const { return m_sh_regs; }
 
-	void SetVsOutConfig(uint32_t value) { m_sh_regs.m_spiVsOutConfig = value; }
-	void SetShaderPosFormat(uint32_t value) { m_sh_regs.m_spiShaderPosFormat = value; }
-	void SetClVsOutCntl(uint32_t value) { m_sh_regs.m_paClVsOutCntl = value; }
+	void SetVsOutConfig(uint32_t value)
+	{
+		m_sh_regs.m_spiVsOutConfig = value;
+		m_sh_regs.vs_out_config_raw.SetRaw(value);
+	}
+	void SetShaderPosFormat(uint32_t value)
+	{
+		m_sh_regs.m_spiShaderPosFormat = value;
+		m_sh_regs.shader_pos_format_raw.SetRaw(value);
+	}
+	void SetClVsOutCntl(uint32_t value)
+	{
+		m_sh_regs.m_paClVsOutCntl = value;
+		m_sh_regs.cl_vs_out_control_raw.SetRaw(value);
+	}
 	void SetShaderIdxFormat(uint32_t value) { m_sh_regs.m_spiShaderIdxFormat = value; }
 	void SetNggSubgrpCntl(uint32_t value) { m_sh_regs.m_geNggSubgrpCntl = value; }
 	void SetGsInstanceCnt(uint32_t value) { m_sh_regs.m_vgtGsInstanceCnt = value; }
@@ -871,7 +918,11 @@ public:
 	void SetMaxOutputPerSubgroup(uint32_t value) { m_sh_regs.m_geMaxOutputPerSubgroup = value; }
 	void SetEsgsRingItemsize(uint32_t value) { m_sh_regs.m_vgtEsgsRingItemsize = value; }
 	void SetGsMaxVertOut(uint32_t value) { m_sh_regs.m_vgtGsMaxVertOut = value; }
-	void SetGsOutPrimType(uint32_t value) { m_sh_regs.m_vgtGsOutPrimType = value; }
+	void SetGsOutPrimType(uint32_t value)
+	{
+		m_sh_regs.m_vgtGsOutPrimType = value;
+		m_sh_regs.gs_out_primitive_raw.SetRaw(value);
+	}
 
 	void SetPsInputSettings(uint32_t id, uint32_t value)
 	{
@@ -906,7 +957,7 @@ private:
 	AaSampleControl m_aa_sample_control;
 	AaConfig        m_aa_config;
 
-	uint32_t m_shader_stages = 0;
+	GraphicsGeRawRegister m_shader_stages;
 
 	DepthRenderTarget m_depth_render_target;
 	RenderControl     m_render_control;
@@ -938,17 +989,39 @@ public:
 	void                   SetIndexOffset(uint32_t index_offset) { m_index_offset = index_offset; }
 	[[nodiscard]] uint32_t GetIndexOffset() const { return m_index_offset; }
 
-	[[nodiscard]] const GeControl&    GetGeControl() const { return m_ge_cntl; }
-	void                              SetGeControl(const GeControl& control) { m_ge_cntl = control; }
+	[[nodiscard]] const GeControl& GetGeControl() const { return m_ge_cntl; }
+	void SetGeControl(const GeControl& control)
+	{
+		m_ge_cntl = control;
+		m_ge_cntl_raw.SetDecoded();
+	}
+	void SetGeControlRaw(uint32_t value)
+	{
+		m_ge_cntl = GraphicsDecodeGeControl(value);
+		m_ge_cntl_raw.SetRaw(value);
+	}
+	[[nodiscard]] const GraphicsGeRawRegister& GetGeControlRaw() const { return m_ge_cntl_raw; }
 	[[nodiscard]] const GeUserVgprEn& GetGeUserVgprEn() const { return m_ge_user_vgpr_en; }
-	void                              SetGeUserVgprEn(const GeUserVgprEn& en) { m_ge_user_vgpr_en = en; }
+	void SetGeUserVgprEn(const GeUserVgprEn& en)
+	{
+		m_ge_user_vgpr_en = en;
+		m_ge_user_vgpr_en_raw.SetDecoded();
+	}
+	void SetGeUserVgprEnRaw(uint32_t value)
+	{
+		m_ge_user_vgpr_en = GraphicsDecodeGeUserVgprEn(value);
+		m_ge_user_vgpr_en_raw.SetRaw(value);
+	}
+	[[nodiscard]] const GraphicsGeRawRegister& GetGeUserVgprEnRaw() const { return m_ge_user_vgpr_en_raw; }
 
 private:
 	uint32_t m_prim_type    = 0;
 	uint32_t m_index_offset = 0;
 
-	GeControl    m_ge_cntl;
-	GeUserVgprEn m_ge_user_vgpr_en;
+	GeControl             m_ge_cntl;
+	GeUserVgprEn          m_ge_user_vgpr_en;
+	GraphicsGeRawRegister m_ge_cntl_raw;
+	GraphicsGeRawRegister m_ge_user_vgpr_en_raw;
 };
 
 class Shader
@@ -1003,19 +1076,38 @@ public:
 	void SetGsShaderResource1(const GsShaderResource1& rsrc1)
 	{
 		m_vs.gs_regs.rsrc1 = rsrc1;
+		m_vs.gs_regs.rsrc1_raw.SetDecoded();
 		m_vs.vs_embedded   = false;
 	}
 	void SetGsShaderResource2(const GsShaderResource2& rsrc2)
 	{
 		m_vs.gs_regs.rsrc2 = rsrc2;
+		m_vs.gs_regs.rsrc2_raw.SetDecoded();
 		m_vs.vs_embedded   = false;
 	}
+	void SetGsShaderResource1Raw(uint32_t value)
+	{
+		SetGsShaderResource1(GraphicsDecodeGsShaderResource1(value));
+		m_vs.gs_regs.rsrc1_raw.SetRaw(value);
+	}
+	void SetGsShaderResource2Raw(uint32_t value)
+	{
+		SetGsShaderResource2(GraphicsDecodeGsShaderResource2(value));
+		m_vs.gs_regs.rsrc2_raw.SetRaw(value);
+	}
+	[[nodiscard]] const GraphicsGeRawRegister& GetGsShaderResource1Raw() const { return m_vs.gs_regs.rsrc1_raw; }
+	[[nodiscard]] const GraphicsGeRawRegister& GetGsShaderResource2Raw() const { return m_vs.gs_regs.rsrc2_raw; }
 	void SetGsShaderChksum(uint32_t value)
 	{
 		m_vs.gs_regs.chksum <<= 32u;
 		m_vs.gs_regs.chksum |= value;
 	}
-	void SetGsRsrc3(uint32_t value) { m_vs.gs_regs.rsrc3 = value; }
+	void SetGsRsrc3(uint32_t value)
+	{
+		m_vs.gs_regs.rsrc3 = value;
+		m_vs.gs_regs.rsrc3_raw.SetRaw(value);
+	}
+	[[nodiscard]] const GraphicsGeRawRegister& GetGsRsrc3Raw() const { return m_vs.gs_regs.rsrc3_raw; }
 
 	void SetPsShaderBase(uint64_t addr)
 	{

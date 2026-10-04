@@ -78,7 +78,7 @@ private:
 
 static bool get_system_content_param_string(const char* name, char* value, size_t value_size)
 {
-	return Loader::SystemContentParamSfoGetString(name, value, value_size);
+	return Loader::SystemContentGetParamString(name, value, value_size);
 }
 
 static void load_symbols(const String& id, Loader::RuntimeLinker* rt)

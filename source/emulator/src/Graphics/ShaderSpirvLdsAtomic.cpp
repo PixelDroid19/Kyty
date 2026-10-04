@@ -1,6 +1,7 @@
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
 
 #include "ShaderSpirvInternal.h"
+#include "ShaderSpirvLds.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -24,7 +25,7 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAtomicRtn_VdstVaddrVdataOffset)
 	}
 
 	const auto& inst = code.GetInstructions().At(index);
-	if (param == nullptr || param[0] == nullptr || inst.src_num != 2 || inst.dst.type != ShaderOperandType::Vgpr)
+	if (param == nullptr || param[0] == nullptr || !ShaderLdsMemoryInstructionSupported(inst))
 	{
 		return false;
 	}
@@ -57,37 +58,34 @@ KYTY_RECOMPILER_FUNC(Recompile_DsAtomicRtn_VdstVaddrVdataOffset)
 	static const char* text         = R"(
 %native_lds_add_rtn_addr_f_<index> = OpLoad %float %<address>
 %native_lds_add_rtn_data_f_<index> = OpLoad %float %<data>
-%native_lds_add_rtn_old_f_<index> = OpLoad %float %<destination>
-%native_lds_add_rtn_exec_<index> = OpLoad %uint %exec_lo
 %native_lds_add_rtn_addr_u_<index> = OpBitcast %uint %native_lds_add_rtn_addr_f_<index>
 %native_lds_add_rtn_data_u_<index> = OpBitcast %uint %native_lds_add_rtn_data_f_<index>
-%native_lds_add_rtn_old_u_<index> = OpBitcast %uint %native_lds_add_rtn_old_f_<index>
-%native_lds_add_rtn_active_<index> = OpINotEqual %bool %native_lds_add_rtn_exec_<index> %<zero>
+<address_check>
                OpSelectionMerge %native_lds_add_rtn_merge_<index> None
-               OpBranchConditional %native_lds_add_rtn_active_<index> %native_lds_add_rtn_then_<index> %native_lds_add_rtn_else_<index>
+               OpBranchConditional %lds_valid_<index> %native_lds_add_rtn_then_<index> %native_lds_add_rtn_else_<index>
 %native_lds_add_rtn_then_<index> = OpLabel
-%native_lds_add_rtn_byte_addr_<index> = OpIAdd %uint %native_lds_add_rtn_addr_u_<index> %<offset>
-%native_lds_add_rtn_index_<index> = OpShiftRightLogical %uint %native_lds_add_rtn_byte_addr_<index> %uint_2
-%native_lds_add_rtn_ptr_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %native_lds_add_rtn_index_<index>
+%native_lds_add_rtn_ptr_<index> = OpAccessChain %_ptr_Workgroup_uint %lds %lds_index_<index>
 %native_lds_add_rtn_prior_<index> = <atomic> %uint %native_lds_add_rtn_ptr_<index> %<scope> %<semantics> %native_lds_add_rtn_data_u_<index>
                OpBranch %native_lds_add_rtn_merge_<index>
 %native_lds_add_rtn_else_<index> = OpLabel
                OpBranch %native_lds_add_rtn_merge_<index>
 %native_lds_add_rtn_merge_<index> = OpLabel
-%native_lds_add_rtn_result_<index> = OpPhi %uint %native_lds_add_rtn_prior_<index> %native_lds_add_rtn_then_<index> %native_lds_add_rtn_old_u_<index> %native_lds_add_rtn_else_<index>
+%native_lds_add_rtn_result_<index> = OpPhi %uint %native_lds_add_rtn_prior_<index> %native_lds_add_rtn_then_<index> %<zero> %native_lds_add_rtn_else_<index>
 %native_lds_add_rtn_result_f_<index> = OpBitcast %float %native_lds_add_rtn_result_<index>
                OpStore %<destination> %native_lds_add_rtn_result_f_<index>
 )";
-	*dst_source += String8(text)
+	const auto body = String8(text)
+	                   .ReplaceStr("<address_check>", EmitLdsAddressCheck(spirv, "native_lds_add_rtn_addr_u_" + index_string,
+	                                                                     inst.ds_offset, 1, index_string))
 	                   .ReplaceStr("<index>", index_string)
 	                   .ReplaceStr("<address>", address.value)
 	                   .ReplaceStr("<data>", data.value)
 	                   .ReplaceStr("<destination>", destination.value)
-	                   .ReplaceStr("<offset>", offset)
 	                   .ReplaceStr("<scope>", scope)
 	                   .ReplaceStr("<semantics>", semantics)
 	                   .ReplaceStr("<zero>", zero)
 	                   .ReplaceStr("<atomic>", param[0]);
+	*dst_source += GateLdsByExec(body, index_string);
 	return true;
 }
 

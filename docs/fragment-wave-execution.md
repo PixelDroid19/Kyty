@@ -43,6 +43,37 @@ provides the transport boundary:
 This boundary transports rasterizer inputs. It does not relax guest lane
 selectors, drop a half-wave, or supply invented helper inputs.
 
+## Native fragment-wave tier
+
+Architectural guest width, physical subgroup width and helper participation
+are separate obligations. The integrated admission metadata retains the guest
+width even when a narrower host mapping has a proof. EXEC, VCC and saved masks
+remain packed numeric words; vector write predicates are derived separately.
+
+- `ShaderAnalyzeNativeWave` examines the whole program, including numeric mask
+  escapes, scalar branches and SGPR mask propagation across back edges.
+  Lane-local and quad-local proofs can retain native execution on a narrower
+  complete-quad host subgroup. An advertised size range alone is insufficient.
+- `ShaderAnalyzeFragmentNativeWaveTier` remains a neutral-value analysis. Its
+  `FragmentNeutral32` result does not prove that ordinary subgroup shuffles can
+  fetch an in-range helper or unavailable invocation. Row DPP, PERMLANE and
+  non-spill READLANE retain an explicit participation refusal until that
+  independent obligation is implemented.
+- Initial-EXEC READFIRSTLANE has a narrower represented-target-quad proof.
+  Scalar EXEC writes, exports and unproven control flow invalidate it; numeric
+  mask observations still require their own participation proof.
+- VS/PS pipeline identity includes guest width, proof and preferred size.
+  Fresh and cached modules are checked for subgroup operations, stage support,
+  enabled dynamic broadcast, quad-stage support and maximal reconvergence.
+  Required-size nodes preserve other stage `pNext` nodes and never apply the
+  compute-only full-subgroups flag to graphics stages.
+
+Earlier driver acceptance and neutral-region controls did not establish
+whole-program native wave64-on32 correctness. Current CPU admission controls
+pass, but integrated runtime and cross-device verification remain pending.
+Validation stays required for the strict runtime work; older unvalidated
+control-flow observations are historical evidence, not acceptance.
+
 ## Verified transport experiment
 
 The standalone experiment contains original, synthetic geometry and shaders;

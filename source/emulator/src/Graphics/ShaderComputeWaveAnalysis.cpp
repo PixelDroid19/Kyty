@@ -646,6 +646,162 @@ String8 ComputeWaveUnsupportedReason(const ShaderInstruction& instruction)
 
 } // namespace
 
+bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction)
+{
+	if (instruction.src_num < 0 || instruction.src_num > 4 || instruction.mimg_address_num < 0 || instruction.mimg_address_num > 13)
+	{
+		return false;
+	}
+	const auto operand_valid = [](const ShaderOperand& operand)
+	{
+		if (operand.swizzle > 6u) { return false; }
+		switch (operand.type)
+		{
+			case ShaderOperandType::Vgpr: return ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxVgpr);
+			case ShaderOperandType::Sgpr:
+				return ComputeWaveRegisterRangeIsValid(operand.register_id, operand.size, kMaxSgpr);
+			case ShaderOperandType::VccLo:
+			case ShaderOperandType::ExecLo: return operand.register_id == 0 && (operand.size == 1 || operand.size == 2);
+			case ShaderOperandType::VccHi:
+			case ShaderOperandType::ExecHi:
+			case ShaderOperandType::VccZ:
+			case ShaderOperandType::ExecZ:
+			case ShaderOperandType::Scc:
+			case ShaderOperandType::M0: return operand.register_id == 0 && operand.size == 1;
+			case ShaderOperandType::Unknown: return operand.size == 0 && ComputeWaveOperandIsPlain(operand);
+			case ShaderOperandType::Null: return operand.size >= 0 && operand.size <= 2;
+			case ShaderOperandType::LiteralConstant:
+			case ShaderOperandType::IntegerInlineConstant:
+			case ShaderOperandType::FloatInlineConstant: return operand.size >= 0 && operand.size <= 2;
+			default: return false;
+		}
+	};
+	if (!operand_valid(instruction.dst) || !operand_valid(instruction.dst2)) { return false; }
+	if (instruction.type == ShaderInstructionType::SEndpgm &&
+	    (instruction.format != ShaderInstructionFormat::Empty || instruction.src_num != 0 ||
+	     !IsUnusedDestination(instruction.dst) || !IsUnusedDestination(instruction.dst2))) { return false; }
+	for (int source = 0; source < 4; ++source)
+	{
+		const auto& operand = instruction.src[source];
+		// SOPP's decoder initially materializes SIMM as a literal for branches.
+		// Canonical S_ENDPGM leaves that exact zero immediate behind with no
+		// source operands. It is padding, not a live register or a general tail
+		// exception; synthetic, nonzero and noncanonical tails still fail closed.
+		const bool end_padding = source == 0 && instruction.type == ShaderInstructionType::SEndpgm &&
+		                         instruction.sopp_opcode == 1u && instruction.raw_word == 0xbf810000u &&
+		                         operand.type == ShaderOperandType::LiteralConstant && operand.size == 0 &&
+		                         operand.register_id == 0 && operand.constant.u == 0u && ComputeWaveOperandIsPlain(operand);
+		if (!operand_valid(instruction.src[source]) ||
+		    (source >= instruction.src_num && !IsUnusedDestination(instruction.src[source]) && !end_padding))
+		{
+			return false;
+		}
+	}
+	for (int address = 0; address < instruction.mimg_address_num; ++address)
+	{
+		if (!operand_valid(instruction.mimg_address[address])) { return false; }
+	}
+	const auto name = Core::EnumName8(instruction.type);
+	if ((name.StartsWith("Buffer") || name.StartsWith("TBuffer")) && (instruction.buffer_flags & ~0x0au) != 0u)
+	{
+		// SLC/DLC are cache hints (ISA tables 96/98). LDS changes the destination, TFE adds a
+		// status result, and unknown/reserved bits cannot mean an ordinary access.
+		return false;
+	}
+	if (instruction.vop_sdwa)
+	{
+		const uint32_t control = instruction.vop_sdwa_ctrl;
+		const bool compare = name.StartsWith("VCmp");
+		if (instruction.src_num < 1 || instruction.src_num > 3 || instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u ||
+		    ((control >> 16u) & 7u) == 7u || (control & (1u << 22u)) != 0u ||
+		    instruction.src[0].swizzle != ((control >> 16u) & 7u) ||
+		    (instruction.src_num >= 2 && instruction.src[1].swizzle != ((control >> 24u) & 7u)) ||
+		    (instruction.src_num >= 2 ? (((control >> 24u) & 7u) == 7u || (control & (1u << 30u)) != 0u)
+		                              : (control >> 24u) != 0u))
+		{
+			return false;
+		}
+		// Partial destination updates and sign extension are not represented by
+		// the ordinary operand path. The explicit signed-convert emitter is the
+		// sole currently implemented SEXT exception.
+		if ((!compare && ((control >> 8u) & 7u) != 6u) ||
+		    ((control & ((1u << 19u) | (1u << 27u))) != 0u && !ShaderComputeWaveSdwaSignedConvertSupported(instruction)))
+		{
+			return false;
+		}
+	}
+	// These integer emitters have one word per data operand and no saturation,
+	// output scaling or half selection. A specialized rejection cannot grant a
+	// different meaning to those controls through generic native emission.
+	int integer_sources = 0;
+	switch (instruction.type)
+	{
+		case ShaderInstructionType::VAndB32:
+		case ShaderInstructionType::VOrB32:
+		case ShaderInstructionType::VXorB32:
+		case ShaderInstructionType::VAddI32:
+		case ShaderInstructionType::VSubI32: integer_sources = 2; break;
+		case ShaderInstructionType::VAdd3U32: integer_sources = 3; break;
+		default: break;
+	}
+	if (integer_sources != 0)
+	{
+		const bool carry = (instruction.type == ShaderInstructionType::VAddI32 || instruction.type == ShaderInstructionType::VSubI32) &&
+		                   instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1;
+		// Legacy VOP2/VOP3 add/sub have a real native carry/borrow emitter.
+		// This is a VALU mask destination, so odd SGPR pairs remain legal.
+		const bool destination_valid = carry ? IsMaskDestination(instruction.dst2) : IsUnusedDestination(instruction.dst2);
+		const auto expected_format = carry ? ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1
+		                                   : (integer_sources == 2 ? ShaderInstructionFormat::SVdstSVsrc0SVsrc1
+		                                                           : ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2);
+		if (instruction.src_num != integer_sources || instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u ||
+		    !IsOrdinaryVgpr(instruction.dst) || !destination_valid || instruction.format != expected_format ||
+		    (carry && instruction.vop_sdwa))
+		{
+			return false;
+		}
+		for (int source = 0; source < integer_sources; ++source)
+		{
+			const auto& operand = instruction.src[source];
+			const bool constant = operand.type == ShaderOperandType::LiteralConstant ||
+			                      operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::FloatInlineConstant;
+			if (carry)
+			{
+				// Only plain numeric one-word sources implemented by operand_load_uint.
+				const bool variable = operand.type == ShaderOperandType::Vgpr || operand.type == ShaderOperandType::Sgpr ||
+				                      operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::VccHi ||
+				                      operand.type == ShaderOperandType::ExecLo || operand.type == ShaderOperandType::ExecHi ||
+				                      operand.type == ShaderOperandType::VccZ || operand.type == ShaderOperandType::ExecZ ||
+				                      operand.type == ShaderOperandType::M0 || operand.type == ShaderOperandType::Scc ||
+				                      operand.type == ShaderOperandType::Null;
+				if ((!variable && !constant) || !ComputeWaveOperandIsPlain(operand)) { return false; }
+			}
+			if (operand.absolute || operand.negate || operand.clamp || operand.multiplier != 1.0f ||
+			    (operand.dpp && source != 0) || (constant ? operand.size != 0 : operand.size != 1))
+			{
+				return false;
+			}
+		}
+	}
+	if (!name.IsEmpty() && name.At(0) == 'S')
+	{
+		// Scalar 64-bit data needs even SGPR pairs (ISA 3.6.3). Do not apply
+		// this to VALU mask destinations, whose SDST can name an odd SGPR.
+		const auto aligned_pair = [](const ShaderOperand& operand)
+		{
+			return operand.type != ShaderOperandType::Sgpr || operand.size != 2 || (operand.register_id & 1) == 0;
+		};
+		if (instruction.vop_sdwa || instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u ||
+		    !ComputeWaveOperandIsPlain(instruction.dst) || !ComputeWaveOperandIsPlain(instruction.dst2) ||
+		    !aligned_pair(instruction.dst) || !aligned_pair(instruction.dst2)) { return false; }
+		for (int source = 0; source < instruction.src_num; ++source)
+		{
+			if (!ComputeWaveOperandIsPlain(instruction.src[source]) || !aligned_pair(instruction.src[source])) { return false; }
+		}
+	}
+	return true;
+}
+
 bool ShaderComputeWaveTypeIsExecCompare(ShaderInstructionType type)
 {
 	switch (type)
@@ -666,6 +822,10 @@ ShaderComputeWaveInstructionKind ClassifySpecificComputeWaveInstruction(const Sh
 
 ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const ShaderInstruction& instruction)
 {
+	if (!ShaderInstructionLoweringPreconditions(instruction))
+	{
+		return ShaderComputeWaveInstructionKind::Unsupported;
+	}
 	if (ShaderComputeWaveDppInstructionSupported(instruction))
 	{
 		return ShaderComputeWaveInstructionKind::BankedDpp;
@@ -700,6 +860,19 @@ ShaderComputeWaveInstructionKind ShaderClassifyComputeWaveInstruction(const Shad
 	if ((instruction.type == ShaderInstructionType::DsAppend || instruction.type == ShaderInstructionType::DsConsume) && vgpr_result)
 	{
 		return ShaderComputeWaveInstructionKind::WaveAppend;
+	}
+	if (instruction.type == ShaderInstructionType::DsWriteAddtidB32 &&
+	    instruction.format == ShaderInstructionFormat::VdataOffset && instruction.src_num == 1 &&
+	    instruction.src[0].type == ShaderOperandType::Vgpr && instruction.src[0].size == 1 && !instruction.src[0].dpp &&
+	    (instruction.dst.type == ShaderOperandType::Unknown || instruction.dst.type == ShaderOperandType::Null) &&
+	    (instruction.dst2.type == ShaderOperandType::Unknown || instruction.dst2.type == ShaderOperandType::Null))
+	{
+		return ShaderComputeWaveInstructionKind::BankedAddtidLds;
+	}
+	if (instruction.type == ShaderInstructionType::DsReadAddtidB32 &&
+	    instruction.format == ShaderInstructionFormat::VdstOffset && instruction.src_num == 0 && vgpr_result)
+	{
+		return ShaderComputeWaveInstructionKind::BankedAddtidLds;
 	}
 	const auto mask_pair = [](const ShaderOperand& operand)
 	{ return operand.size == 2 && (operand.type == ShaderOperandType::VccLo || operand.type == ShaderOperandType::Sgpr) && !operand.dpp; };
@@ -838,6 +1011,7 @@ ShaderComputeWaveInstructionKind ClassifySpecificComputeWaveInstruction(const Sh
 
 bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction)
 {
+	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
 	const auto& dst = instruction.dst;
 	// VOPC SDWA has scalar destination fields, not the VOP2 destination-select
 	// fields. Admit DWORD sources without sign extension or reserved controls.
@@ -852,9 +1026,15 @@ bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction)
 
 bool ShaderComputeWaveGenericCompareSupported(const ShaderInstruction& instruction)
 {
+	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
 	if (instruction.type == ShaderInstructionType::VCmpClassF32) { return ShaderFloatClassComparisonSupported(instruction); }
 	const auto name = Core::EnumName8(instruction.type);
-	if (!name.StartsWith("VCmp") || instruction.src_num != 2 ||
+	// SDWA compares carry the same undefined fields as the vector forms: source
+	// selects 7 and reserved bits 22 and 30 are refused, not lowered as defined values.
+	const uint32_t sdwa_ctrl           = instruction.vop_sdwa_ctrl;
+	const bool     sdwa_fields_defined = !instruction.vop_sdwa || (((sdwa_ctrl >> 16u) & 7u) != 7u && ((sdwa_ctrl >> 24u) & 7u) != 7u &&
+	                                                           (sdwa_ctrl & ((1u << 22u) | (1u << 30u))) == 0u);
+	if (!name.StartsWith("VCmp") || instruction.src_num != 2 || !sdwa_fields_defined ||
 	    (instruction.vop_sdwa && (instruction.vop_sdwa_ctrl & ((1u << 19u) | (1u << 27u))) != 0u) ||
 	    !(instruction.dst2.type == ShaderOperandType::Unknown || instruction.dst2.type == ShaderOperandType::Null))
 	{
@@ -894,45 +1074,12 @@ bool ShaderComputeWaveGenericCompareSupported(const ShaderInstruction& instructi
 
 bool ShaderComputeWaveGenericLdsSupported(const ShaderInstruction& instruction)
 {
-	switch (instruction.type)
-	{
-		case ShaderInstructionType::DsWriteB32:
-		case ShaderInstructionType::DsReadB32:
-		case ShaderInstructionType::DsRead2B32:
-		case ShaderInstructionType::DsAddU32:
-		case ShaderInstructionType::DsAddRtnU32:
-		case ShaderInstructionType::DsWrxchgRtnB32:
-		case ShaderInstructionType::DsSubU32:
-		case ShaderInstructionType::DsRsubU32:
-		case ShaderInstructionType::DsIncU32:
-		case ShaderInstructionType::DsDecU32:
-		case ShaderInstructionType::DsMinI32:
-		case ShaderInstructionType::DsMaxI32:
-		case ShaderInstructionType::DsMinU32:
-		case ShaderInstructionType::DsMaxU32:
-		case ShaderInstructionType::DsAndB32:
-		case ShaderInstructionType::DsOrB32:
-		case ShaderInstructionType::DsXorB32: break;
-		default: return false;
-	}
-	if (instruction.src_num < 0 || instruction.src_num > 4 ||
-	    !(instruction.dst.type == ShaderOperandType::Vgpr || instruction.dst.type == ShaderOperandType::Unknown) || instruction.dst.dpp ||
-	    !(instruction.dst2.type == ShaderOperandType::Unknown || instruction.dst2.type == ShaderOperandType::Null))
-	{
-		return false;
-	}
-	for (int source = 0; source < instruction.src_num; ++source)
-	{
-		if (instruction.src[source].type != ShaderOperandType::Vgpr || instruction.src[source].dpp)
-		{
-			return false;
-		}
-	}
-	return true;
+	return ShaderLdsMemoryInstructionSupported(instruction);
 }
 
 bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instruction)
 {
+	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
 	if (instruction.type == ShaderInstructionType::SWqmB64)
 	{
 		return IsWholeQuadMaskInstruction(instruction);
@@ -991,6 +1138,10 @@ bool ShaderComputeWaveGenericScalarSupported(const ShaderInstruction& instructio
 
 bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instruction)
 {
+	if (!ShaderInstructionLoweringPreconditions(instruction)) { return false; }
+	// The native legacy carry emitter does not implement paired mask packing.
+	if ((instruction.type == ShaderInstructionType::VAddI32 || instruction.type == ShaderInstructionType::VSubI32) &&
+	    instruction.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1) { return false; }
 	if (ShaderComputeWaveSdwaSignedConvertSupported(instruction)) { return true; }
 	if (instruction.type == ShaderInstructionType::ImageAtomicAdd) { return ShaderImageAtomicAddSupported(instruction); }
 	const auto name   = Core::EnumName8(instruction.type);
@@ -998,6 +1149,15 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	if (memory)
 	{
 		// Per-lane vector memory: VGPR data/addresses, uniform SGPR descriptors.
+		// A MUBUF with LDS set redirects its data to LDS, TFE appends a status VGPR
+		// and undefined encoding bits are not a valid instruction; the native buffer
+		// lowerings model none of them, so these decoder-preserved flags must be
+		// clear. SLC and DLC are cache hints, not reserved encodings.
+		constexpr uint8_t kMubufFlagsWithoutLowering = (1u << 0u) | (1u << 2u) | (1u << 7u);
+		if (name.StartsWith("Buffer") && (instruction.buffer_flags & kMubufFlagsWithoutLowering) != 0u)
+		{
+			return false;
+		}
 		if (name.ContainsStr("Atomic") || instruction.src_num < 0 || instruction.src_num > 4 || instruction.mimg_address_num < 0 ||
 		    instruction.mimg_address_num > 13 ||
 		    !(instruction.dst.type == ShaderOperandType::Vgpr || instruction.dst.type == ShaderOperandType::Unknown) ||
@@ -1030,7 +1190,18 @@ bool ShaderComputeWaveGenericVectorSupported(const ShaderInstruction& instructio
 	// a partial destination select and sign extension are not represented.
 	const bool sdwa_representable = !instruction.vop_sdwa || (((instruction.vop_sdwa_ctrl >> 8u) & 7u) == 6u &&
 	                                                          (instruction.vop_sdwa_ctrl & ((1u << 19u) | (1u << 27u))) == 0u);
-	if (name.IsEmpty() || name.At(0) != 'V' || !sdwa_representable || name.ContainsStr("Lane") || name.ContainsStr("lane") ||
+	// RDNA2 SDWA: SRC0_SEL[18:16] and SRC1_SEL[26:24] only define values 0-6, bits 22
+	// and 30 are reserved, and a one-source VOP1 leaves bits 31:24 reserved. The
+	// decoder preserves the raw control word, so an undefined field is refused here
+	// instead of being lowered as if it were a defined one.
+	const uint32_t sdwa_ctrl           = instruction.vop_sdwa_ctrl;
+	const bool     sdwa_second_source  = instruction.src_num >= 2;
+	const bool     sdwa_fields_defined = !instruction.vop_sdwa ||
+	                                     (((sdwa_ctrl >> 16u) & 7u) != 7u && (sdwa_ctrl & (1u << 22u)) == 0u &&
+	                                      (sdwa_second_source ? (((sdwa_ctrl >> 24u) & 7u) != 7u && (sdwa_ctrl & (1u << 30u)) == 0u)
+	                                                          : (sdwa_ctrl >> 24u) == 0u));
+	if (name.IsEmpty() || name.At(0) != 'V' || !sdwa_representable || !sdwa_fields_defined || name.ContainsStr("Lane") ||
+	    name.ContainsStr("lane") ||
 	    name.ContainsStr("Mbcnt") || name.ContainsStr("Movrel") || name.ContainsStr("Interp") || name.ContainsStr("Cmp") ||
 	    name.ContainsStr("Cndmask") || name.ContainsStr("Permlane"))
 	{
@@ -1104,6 +1275,12 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& instruction = instructions.At(index);
+		if (!ShaderInstructionLoweringPreconditions(instruction))
+		{
+			return {false, instruction.pc, instruction.vop_sdwa ? ComputeWaveUnsupportedReason(instruction)
+			                                                  : String8::FromPrintf("instruction %s has an invalid operand span or unsupported controls before strategy selection",
+			                                                                        Core::EnumName8(instruction.type).c_str())};
+		}
 		if (pixel != nullptr && (instruction.type == ShaderInstructionType::VInterpP1F32 ||
 		                         instruction.type == ShaderInstructionType::VInterpP2F32) &&
 		    !ShaderFragmentInterpolationPairSupported(code, index, *pixel))
@@ -1222,12 +1399,7 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 	}
 
 	// DS ordering is provided by the per-instruction subgroup barrier of the
-	// generic LDS path; the older address proofs no longer gate admission.
-	const ShaderComputeWaveAnalysisResult lds_safety {true, 0, {}};
-	if (!lds_safety.supported)
-	{
-		return lds_safety;
-	}
+	// generic LDS path, so LDS accesses need no address proof here.
 	if (input.bind.extended.used)
 	{
 		const int extended_base = input.bind.extended.start_register;
@@ -1239,7 +1411,7 @@ static ShaderComputeWaveAnalysisResult AnalyzePairedWaveCode(const ShaderCode& c
 		}
 		return AnalyzeExtendedBaseLifetime(code, input.bind, extended_base);
 	}
-	return lds_safety;
+	return {true, 0, {}};
 }
 
 ShaderComputeWaveAnalysisResult ShaderAnalyzeComputeWaveCode(const ShaderCode& code, const ShaderComputeInputInfo& input)

@@ -65,6 +65,10 @@ int CompressedTarget(ShaderInstructionFormat::Format format)
 		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1ComprVm: return 1;
 		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1ComprVm: return 2;
 		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm: return 3;
+		case ShaderInstructionFormat::Mrt4Vsrc0Vsrc1ComprVm: return 4;
+		case ShaderInstructionFormat::Mrt5Vsrc0Vsrc1ComprVm: return 5;
+		case ShaderInstructionFormat::Mrt6Vsrc0Vsrc1ComprVm: return 6;
+		case ShaderInstructionFormat::Mrt7Vsrc0Vsrc1ComprVm: return 7;
 		default: return -1;
 	}
 }
