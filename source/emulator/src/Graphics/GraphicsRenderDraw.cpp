@@ -1989,7 +1989,7 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
 		guest_vertex_stage.face             = mode.face;
 		guest_vertex_stage.dx_clip_space    = ctx->GetClipControl().dx_clip_space;
 		request_vertex_stage                 = &guest_vertex_stage;
-		if (!ShaderResolveVertexOffset(indexed_draw ? ucfg->GetIndexOffset() : 0, guest_vertex_input, &vertex_offset,
+		if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), guest_vertex_input, &vertex_offset,
 		                               vertex_offset_add))
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: depth/stencil copy vertex offset is outside int32 range; draw skipped\n");
@@ -2351,8 +2351,10 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
+	// GE_INDX_OFFSET is the first vertex of an auto-index draw, as it is the base
+	// vertex of an indexed one; batches sharing one vertex buffer depend on it.
 	int32_t resolved_first_vertex = 0;
-	if (!ShaderResolveVertexOffset(0, vs_input_info, &resolved_first_vertex))
+	if (!ShaderResolveVertexOffset(ucfg->GetIndexOffset(), vs_input_info, &resolved_first_vertex))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: auto-draw vertex offset is outside int32 range; draw skipped\n");
 		return;
