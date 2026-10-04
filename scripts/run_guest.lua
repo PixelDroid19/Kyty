@@ -82,6 +82,9 @@ local cfg = {
 kyty_init(cfg)
 kyty_mount(guest_root, '/app0')
 kyty_load_param_json(guest_root .. '/sce_sys/param.json')
+-- Installed add-on content: <guest-root>/dlc_emu.ini plus, when set,
+-- KYTY_ADDCONT_DIR/<TITLE_ID>/<package>/ folders (each with sce_sys/param.json).
+kyty_load_addcont(guest_root, env_or('KYTY_ADDCONT_DIR', ''))
 kyty_load_elf('/app0/eboot.bin')
 
 -- Registers the complete HLE symbol database, then applies any adjacent-module

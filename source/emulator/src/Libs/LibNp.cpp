@@ -2,10 +2,13 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Np.h"
+#include "Emulator/Loader/AddcontInventory.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -615,27 +618,38 @@ int KYTY_SYSV_ABI GetSkuFlag(SkuFlag* sku_flag)
 	return OK;
 }
 
-int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel /*service_label*/, const UnifiedEntitlementLabel* entitlement_label,
+static void WriteEntitlementInfo(const Loader::AddcontEntry& entry, AddcontEntitlementInfo* info)
+{
+	std::memset(info, 0, sizeof(*info));
+	std::memcpy(info->entitlement_label.data, entry.entitlement_label.data(), entry.entitlement_label.size());
+	info->package_type    = static_cast<uint32_t>(entry.package_type);
+	info->download_status = entry.download_status;
+}
+
+// Both queries answer from the local add-on content inventory that AppContent
+// also reads; an unknown label is NO_ENTITLEMENT and leaves the output as is.
+int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel service_label, const UnifiedEntitlementLabel* entitlement_label,
                                             AddcontEntitlementInfo* info)
 {
 	if (!g_entitlement_initialized.load(std::memory_order_acquire))
 	{
 		return ERROR_NOT_INITIALIZED;
 	}
-
-	// Null label/info or an ill-formed unified label are guest PARAMETER errors.
-	if (!IsValidUnifiedLabel(entitlement_label) || info == nullptr)
+	std::string label;
+	if (!IsValidUnifiedLabel(entitlement_label) || info == nullptr || !Loader::AddcontReadGuestLabel(entitlement_label->data, &label))
 	{
 		return ERROR_PARAMETER;
 	}
-
-	// No local entitlement catalog is registered. Base titles without addcont
-	// packages correctly receive NO_ENTITLEMENT; the output buffer is left
-	// untouched so residual guest data is not misinterpreted as a result.
-	return ERROR_NO_ENTITLEMENT;
+	Loader::AddcontEntry entry;
+	if (!Loader::AddcontInventoryFind(service_label, label, &entry))
+	{
+		return ERROR_NO_ENTITLEMENT;
+	}
+	WriteEntitlementInfo(entry, info);
+	return OK;
 }
 
-int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel /*service_label*/, AddcontEntitlementInfo* list, uint32_t list_num,
+int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel service_label, AddcontEntitlementInfo* list, uint32_t list_num,
                                                 uint32_t* hit_num)
 {
 	if (!g_entitlement_initialized.load(std::memory_order_acquire))
@@ -646,10 +660,38 @@ int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel /*service_label*/, 
 	{
 		return ERROR_PARAMETER;
 	}
+	if (Loader::AddcontInventoryGetState() == Loader::AddcontInventoryState::Invalid)
+	{
+		return ERROR_NO_ENTITLEMENT;
+	}
+	const auto     entries = Loader::AddcontInventoryList(service_label);
+	const uint32_t written = std::min<uint32_t>(list_num, static_cast<uint32_t>(entries.size()));
+	for (uint32_t i = 0; i < written; i++)
+	{
+		WriteEntitlementInfo(entries[i], &list[i]);
+	}
+	*hit_num = static_cast<uint32_t>(entries.size());
+	return OK;
+}
 
-	// This runtime has no registered add-on entitlement catalog. Report an
-	// empty enumeration explicitly; do not fabricate list records.
-	*hit_num = 0;
+// sceNpEntitlementAccessGetEntitlementKey: the 16-byte key of an owned label.
+int KYTY_SYSV_ABI GetEntitlementKey(ServiceLabel service_label, const UnifiedEntitlementLabel* entitlement_label, uint8_t* key)
+{
+	if (!g_entitlement_initialized.load(std::memory_order_acquire))
+	{
+		return ERROR_NOT_INITIALIZED;
+	}
+	std::string label;
+	if (!IsValidUnifiedLabel(entitlement_label) || key == nullptr || !Loader::AddcontReadGuestLabel(entitlement_label->data, &label))
+	{
+		return ERROR_PARAMETER;
+	}
+	Loader::AddcontEntry entry;
+	if (!Loader::AddcontInventoryFind(service_label, label, &entry))
+	{
+		return ERROR_NO_ENTITLEMENT;
+	}
+	std::memcpy(key, entry.entitlement_key.data(), entry.entitlement_key.size());
 	return OK;
 }
 
@@ -660,6 +702,7 @@ LIB_DEFINE(InitNpEntitlementAccess_1)
 	// sceNpEntitlementAccessGetAddcontEntitlementInfo
 	LIB_FUNC("xddD23+8TfQ", GetAddcontEntitlementInfo);
 	LIB_FUNC("TFyU+KFBv54", GetAddcontEntitlementInfoList);
+	LIB_FUNC("5LiMEPuW0DQ", GetEntitlementKey);
 }
 
 } // namespace Kyty::Libs::NpEntitlementAccess
