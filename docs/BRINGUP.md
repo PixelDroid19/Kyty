@@ -254,6 +254,44 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Performance, new-title repairs and add-on content (2026-10-04, guest verified)
+
+Scope: strict runs on the reference host (Intel Xe, Vulkan 1.4, Native, `KYTY_SHADER_OPTIMIZATION=None`, shader
+validation on). A 2D action title went from 25 to 62 fps; a 3D fighting title boots through its intro and title
+screen at 120-140 fps with correct UI art. The existing suite passes (1,873 tests).
+
+- **Performance.** GPU heap lookups use an index of disjoint spans; device-address storage queries are batched;
+  physical population is gated; completions are asynchronous with consolidated waits; scalar liveness is memoized
+  by content signature (profiled with gperftools, not guessed).
+- **Linear block-compressed rows.** Gen5 linear BC rows are padded in block columns (256 bytes of 4x4 blocks), not
+  texel columns; aligning texels sheared every block row of BC1/BC3 UI art. The tile-0 size estimate counted texels
+  as blocks (16x too large). See `graphics-texture-layout-troubleshooting.md`.
+- **WRITE_DATA ordering.** An immediate write to an address whose end-of-pipe write is still pending is deferred
+  behind it; landing first let the older value overwrite it (label order inversion, boot stall).
+- **AMPR command buffers.** Measure functions depend only on the file offset; the `_04_00` write-address and
+  kernel-event forms take a completion-mode flag; record ids are used as-is (0 is valid); every record executes in
+  order, completion actions last, and the first failure is the execution result read by `AndGetResult`.
+- **Guest malloc before the application heap.** Host-heap allocations are zeroed (a path buffer read stale bytes)
+  and GPU objects in those ranges are hashed directly (UI vertex data rewritten every frame looked unchanged).
+- **Loader and HLE.** SELF segments are bounded by the real file size (one title declares 8 bytes more); libc is
+  mirrored into LibcInternal and POSIX across libkernel by the registry instead of duplicate tables; event flag
+  queue/thread attributes are decoded; offline Remoteplay, NpAuth (requests complete SIGNED_OUT) and UDS modules.
+- **Add-on content.** One inventory answers AppContent and NpEntitlementAccess from `dlc_emu.ini` and installed
+  package folders; mount and unmount follow the published contract. See `addon-content.md`.
+
+Open blockers (one root cause each, none investigated past the point stated):
+
+- A metroidvania-style puzzle title renders its title screen (27 fps); after input the screen is garbled.
+- A turn-based artillery title: the NGG wave64 front proof refuses an instruction at pc 0x1c.
+- An isometric action title: SIGSEGV on a guest read of 0x840000008 at boot.
+- A beat 'em up: no emitter for `IMAGE_STORE` on a 2D array with NSA addressing (dim 5).
+- A sandbox title: SIGSEGV after about 940 frames.
+- Two Unreal Engine 4 titles: stall before the first frame.
+- A first-person puzzle title: stalls after one frame.
+- A roguelike: a zero-size `GpuMemoryOverlap` query is fatal (`GpuMemoryOverlap.h:71`).
+- Shared HLE entries still mapped to one host function for distinct guest functions: the AMPR `_04_00` counter and
+  wait commands, the zlib entry points of one middleware library, and `strtoll` mapped to `strtoul`.
+
 ### Title runtime repairs (2026-10-04, guest verified on seven of eight titles)
 
 Scope: strict runs of the eight-title regression set on the reference host (Intel Xe, Vulkan 1.4, Native,
