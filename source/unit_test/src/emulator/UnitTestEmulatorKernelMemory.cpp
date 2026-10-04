@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -1517,12 +1518,14 @@ TEST(EmulatorKernelMemory, CondWaitDiagnosticsStayInactiveWithoutOptIn)
 
 TEST(EmulatorKernelMemory, ThreadDiagnosticsAreUnavailableWithoutPthreadContext)
 {
-	Kernel::PthreadThreadDiagnostics diagnostics {};
-
-	EXPECT_FALSE(Kernel::PthreadGetThreadDiagnostics(&diagnostics));
-	EXPECT_FALSE(diagnostics.available);
-	EXPECT_EQ(diagnostics.allocated_count, 0u);
-	EXPECT_EQ(diagnostics.thread_count, 0u);
+	// The pthread context is process-wide and other suites create it, so the
+	// check runs in a freshly executed (threadsafe death test) process.
+	ASSERT_EXIT(([] {
+		Kernel::PthreadThreadDiagnostics diagnostics {};
+		const bool available = Kernel::PthreadGetThreadDiagnostics(&diagnostics);
+		const bool empty     = !diagnostics.available && diagnostics.allocated_count == 0u && diagnostics.thread_count == 0u;
+		std::_Exit(!available && empty ? 0 : 1);
+	})(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorKernelMemory, SyncOnAddressReturnsImmediatelyWhenValueDiffers)
