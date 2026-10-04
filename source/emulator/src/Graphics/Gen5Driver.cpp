@@ -300,7 +300,8 @@ uint32_t KYTY_SYSV_ABI GraphicsDriverGetEqContextId(const Kernel::EventQueue::Ke
 	PRINT_NAME();
 	EXIT_NOT_IMPLEMENTED(ev == nullptr);
 	EXIT_NOT_IMPLEMENTED(ev->filter != Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
-	return static_cast<uint32_t>(ev->data);
+	constexpr uint32_t kContextIdMask = 0x07ffffffu; // the ReleaseMem field width
+	return static_cast<uint32_t>(ev->data) & kContextIdMask;
 }
 
 } // namespace Gen5Driver
