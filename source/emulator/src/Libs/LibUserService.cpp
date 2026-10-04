@@ -41,6 +41,13 @@ static KYTY_SYSV_ABI int UserServiceInitialize(const void* /*params*/)
 	return OK;
 }
 
+// sceUserServiceTerminate — NID bwFjS+bX9mA. The service keeps no per-session state to release.
+static KYTY_SYSV_ABI int UserServiceTerminate()
+{
+	PRINT_NAME();
+	return OK;
+}
+
 static KYTY_SYSV_ABI int UserServiceGetInitialUser(int* user_id)
 {
 	PRINT_NAME();
@@ -287,6 +294,7 @@ LIB_DEFINE(InitUserService_1_PlatformPrivacyWs1)
 LIB_DEFINE(InitUserService_1)
 {
 	LIB_FUNC("j3YMu1MVNNo", UserService::UserServiceInitialize);
+	LIB_FUNC("bwFjS+bX9mA", UserService::UserServiceTerminate);
 	LIB_FUNC("CdWp0oHWGr0", UserService::UserServiceGetInitialUser);
 	LIB_FUNC("yH17Q6NWtVg", UserService::UserServiceGetEvent);
 	LIB_FUNC("fPhymKNvK-A", UserService::UserServiceGetLoginUserIdList);

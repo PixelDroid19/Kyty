@@ -966,6 +966,44 @@ int KYTY_SYSV_ABI SaveDataAbort()
 	return OK;
 }
 
+struct SaveDataDelete
+{
+	int32_t                user_id;
+	int32_t                pad;
+	const SaveDataTitleId* title_id;
+	const SaveDataDirName* dir_name;
+	uint32_t               unused;
+	uint8_t                reserved[32];
+	int32_t                pad2;
+};
+static_assert(offsetof(SaveDataDelete, dir_name) == 16);
+
+// NID S1GkePI17zQ — sceSaveDataDelete: removes one unmounted save directory.
+int KYTY_SYSV_ABI SaveDataDelete(const SaveDataDelete* del)
+{
+	if (del == nullptr || del->dir_name == nullptr || del->user_id < 0)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	String slot;
+	if (!ResolveSaveDataSlot(del->title_id != nullptr ? del->title_id->data : nullptr, del->dir_name->data, &slot))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	std::lock_guard lock(g_mount_mutex);
+	if (g_mount_coordinator.Acquire(del->dir_name->data).result == SaveDataMountCoordinator::AcquireResult::AlreadyMounted)
+	{
+		return SAVE_DATA_ERROR_BUSY;
+	}
+	if (!Core::File::IsDirectoryExisting(slot))
+	{
+		return SAVE_DATA_ERROR_NOT_FOUND;
+	}
+	std::error_code error;
+	std::filesystem::remove_all(std::filesystem::u8path(slot.utf8_str().GetData()), error);
+	return error ? SAVE_DATA_ERROR_INTERNAL : OK;
+}
+
 int KYTY_SYSV_ABI SaveDataIsMounted(uint32_t* mounted)
 {
 	PRINT_NAME();
@@ -1028,6 +1066,7 @@ void RegisterSaveDataFunctions(::Kyty::Hle::HleSymbolRegistry* symbols, const Li
 	RegisterLibraryFunction(symbols, identity, "yKDy8S5yLA0", SaveDataTerminate, U"SaveData::SaveDataTerminate");
 	RegisterLibraryFunction(symbols, identity, "dQ2GohUHXzk", SaveDataAbort, U"SaveData::SaveDataAbort");
 	RegisterLibraryFunction(symbols, identity, "ieP6jP138Qo", SaveDataIsMounted, U"SaveData::SaveDataIsMounted");
+	RegisterLibraryFunction(symbols, identity, "S1GkePI17zQ", SaveDataDelete, U"SaveData::SaveDataDelete");
 	RegisterLibraryFunction(symbols, identity, "XgvSuIdnMlw", SaveDataGetParam, U"SaveData::SaveDataGetParam");
 	RegisterLibraryFunction(symbols, identity, "lJUQuaKqoKY", SaveDataDeleteTransactionResource,
 	                        U"SaveData::SaveDataDeleteTransactionResource");
