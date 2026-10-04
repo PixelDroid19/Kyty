@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 #ifdef KYTY_EMU_ENABLED
@@ -720,6 +721,143 @@ LIB_DEFINE(InitNpManager_1)
 }
 
 } // namespace Kyty::Libs::NpManager
+
+namespace Kyty::Libs::NpAuth {
+
+LIB_VERSION("NpAuth", 1, "NpAuth", 1, 1);
+
+// Offline NP: requests exist, and every credential they ask for fails the way a
+// signed-out account does. An async request reports that result through Poll/Wait.
+static constexpr int kNpErrorSignedOut       = static_cast<int>(0x80550006u);
+static constexpr int kNpErrorInvalidArgument = static_cast<int>(0x80550003u);
+static constexpr int kPollAsyncFinished      = 0;
+
+struct Request
+{
+	bool async  = false;
+	int  result = OK;
+};
+
+static std::mutex                        g_requests_mutex;
+static std::unordered_map<int, Request>  g_requests;
+static int                               g_next_request = 1;
+
+static int CreateRequestOf(bool async)
+{
+	std::lock_guard lock(g_requests_mutex);
+	const int id = g_next_request++;
+	g_requests[id] = {async, OK};
+	return id;
+}
+
+static KYTY_SYSV_ABI int CreateRequest()
+{
+	PRINT_NAME();
+	return CreateRequestOf(false);
+}
+
+static KYTY_SYSV_ABI int CreateAsyncRequest(const void* /*param*/)
+{
+	PRINT_NAME();
+	return CreateRequestOf(true);
+}
+
+static KYTY_SYSV_ABI int DeleteRequest(int request_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_requests_mutex);
+	return g_requests.erase(request_id) != 0 ? OK : kNpErrorInvalidArgument;
+}
+
+static KYTY_SYSV_ABI int AbortRequest(int request_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_requests_mutex);
+	return g_requests.count(request_id) != 0 ? OK : kNpErrorInvalidArgument;
+}
+
+static KYTY_SYSV_ABI int SetTimeout(int request_id, int32_t, int32_t, int32_t, int32_t)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_requests_mutex);
+	return g_requests.count(request_id) != 0 ? OK : kNpErrorInvalidArgument;
+}
+
+// A credential query: synchronous requests fail now, async ones record the failure.
+static int QueryCredential(int request_id, const void* param, const void* output)
+{
+	if (param == nullptr || output == nullptr)
+	{
+		return kNpErrorInvalidArgument;
+	}
+	std::lock_guard lock(g_requests_mutex);
+	auto            it = g_requests.find(request_id);
+	if (it == g_requests.end())
+	{
+		return kNpErrorInvalidArgument;
+	}
+	it->second.result = kNpErrorSignedOut;
+	return it->second.async ? OK : kNpErrorSignedOut;
+}
+
+static KYTY_SYSV_ABI int GetAuthorizationCodeV3(int request_id, const void* param, void* auth_code, int32_t* /*issuer_id*/)
+{
+	PRINT_NAME();
+	return QueryCredential(request_id, param, auth_code);
+}
+
+static KYTY_SYSV_ABI int GetIdTokenV3(int request_id, const void* param, void* id_token)
+{
+	PRINT_NAME();
+	return QueryCredential(request_id, param, id_token);
+}
+
+static KYTY_SYSV_ABI int GetAuthorizedAppCode(int request_id, const void* param, void* code)
+{
+	PRINT_NAME();
+	return QueryCredential(request_id, param, code);
+}
+
+static int FinishedResult(int request_id, int32_t* result)
+{
+	std::lock_guard lock(g_requests_mutex);
+	auto            it = g_requests.find(request_id);
+	if (it == g_requests.end() || result == nullptr)
+	{
+		return kNpErrorInvalidArgument;
+	}
+	*result = it->second.result;
+	return kPollAsyncFinished;
+}
+
+static KYTY_SYSV_ABI int PollAsync(int request_id, int32_t* result)
+{
+	PRINT_NAME();
+	return FinishedResult(request_id, result);
+}
+
+static KYTY_SYSV_ABI int WaitAsync(int request_id, int32_t* result)
+{
+	PRINT_NAME();
+	const int rc = FinishedResult(request_id, result);
+	return rc == kPollAsyncFinished ? OK : rc;
+}
+
+LIB_DEFINE(InitNpAuth_1)
+{
+	LIB_FUNC("6bwFkosYRQg", CreateRequest);
+	LIB_FUNC("N+mr7GjTvr8", CreateAsyncRequest);
+	LIB_FUNC("H8wG9Bk-nPc", DeleteRequest);
+	LIB_FUNC("cE7wIsqXdZ8", AbortRequest);
+	LIB_FUNC("PM3IZCw-7m0", SetTimeout);
+	LIB_FUNC("KI4dHLlTNl0", GetAuthorizationCodeV3);
+	LIB_FUNC("RdsFVsgSpZY", GetIdTokenV3);
+	LIB_FUNC("IDX0S5EsEh4", GetAuthorizedAppCode);
+	LIB_FUNC("gjSyfzSsDcE", PollAsync);
+	LIB_FUNC("SK-S7daqJSE", WaitAsync);
+}
+
+} // namespace Kyty::Libs::NpAuth
 
 namespace Kyty::Libs::NpProfileDialog {
 

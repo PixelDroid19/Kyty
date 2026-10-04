@@ -42,6 +42,9 @@ LIB_DEFINE(InitNpEntitlementAccess_1);
 namespace NpManager {
 LIB_DEFINE(InitNpManager_1);
 } // namespace NpManager
+namespace NpAuth {
+LIB_DEFINE(InitNpAuth_1);
+} // namespace NpAuth
 namespace NpProfileDialog {
 LIB_DEFINE(InitNpProfileDialog_1);
 } // namespace NpProfileDialog
@@ -71,6 +74,7 @@ LIB_DEFINE(InitContentExport_1);
 LIB_DEFINE(InitAcm_1);
 LIB_DEFINE(InitRtc_1);
 LIB_DEFINE(InitRandom_1);
+LIB_DEFINE(InitRemoteplay_1);
 LIB_DEFINE(InitCoredump_1);
 LIB_DEFINE(InitPs5Util_1);
 LIB_DEFINE(InitTextToSpeech2_1);
@@ -98,6 +102,7 @@ bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_CHECK(U"libNpGameIntent_1", NpGameIntent::InitNpGameIntent_1);
 	LIB_CHECK(U"libNpEntitlementAccess_1", NpEntitlementAccess::InitNpEntitlementAccess_1);
 	LIB_CHECK(U"libNpManager_1", NpManager::InitNpManager_1);
+	LIB_CHECK(U"libNpAuth_1", NpAuth::InitNpAuth_1);
 	LIB_CHECK(U"libNpProfileDialog_1", NpProfileDialog::InitNpProfileDialog_1);
 	LIB_CHECK(U"libNpToolkit2_1", NpToolkit2::InitNpToolkit2_1);
 	LIB_CHECK(U"libNpTrophy2_1", NpTrophy2::InitNpTrophy2_1);
@@ -128,6 +133,7 @@ bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_CHECK(U"libAcm_1", InitAcm_1);
 	LIB_CHECK(U"libSceRtc_1", InitRtc_1);
 	LIB_CHECK(U"libSceRandom_1", InitRandom_1);
+	LIB_CHECK(U"libSceRemoteplay_1", InitRemoteplay_1);
 	LIB_CHECK(U"libSceCoredump_1", InitCoredump_1);
 	LIB_CHECK(U"libPS5Util_1", InitPs5Util_1);
 	LIB_CHECK(U"PS5Util_v1", InitPs5Util_1);
@@ -159,6 +165,7 @@ void InitAll(::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_LOAD(NpGameIntent::InitNpGameIntent_1);
 	LIB_LOAD(NpEntitlementAccess::InitNpEntitlementAccess_1);
 	LIB_LOAD(NpManager::InitNpManager_1);
+	LIB_LOAD(NpAuth::InitNpAuth_1);
 	LIB_LOAD(NpProfileDialog::InitNpProfileDialog_1);
 	LIB_LOAD(NpToolkit2::InitNpToolkit2_1);
 	LIB_LOAD(NpTrophy2::InitNpTrophy2_1);
@@ -185,6 +192,7 @@ void InitAll(::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_LOAD(InitAcm_1);
 	LIB_LOAD(InitRtc_1);
 	LIB_LOAD(InitRandom_1);
+	LIB_LOAD(InitRemoteplay_1);
 	LIB_LOAD(InitCoredump_1);
 	LIB_LOAD(InitPs5Util_1);
 	LIB_LOAD(InitTextToSpeech2_1);
