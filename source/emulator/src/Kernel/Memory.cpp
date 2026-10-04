@@ -2319,19 +2319,17 @@ int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, ui
 			return KERNEL_ERROR_EINVAL;
 		}
 
+		// [start, end) is searched as given: an empty range, like a range with no
+		// free span, has no available memory (ENOMEM). Titles split the address space
+		// recursively around each span and stop on ENOMEM.
 		const uint64_t search_start = search_start_raw < 0 ? 0ULL : static_cast<uint64_t>(search_start_raw);
-		uint64_t       search_end   = search_end_raw <= 0 ? direct_size : static_cast<uint64_t>(search_end_raw);
-		search_end                  = std::min(search_end, direct_size);
-		if (search_start >= search_end)
+		const uint64_t search_end   = std::min<uint64_t>(search_end_raw < 0 ? 0 : static_cast<uint64_t>(search_end_raw), direct_size);
+		uint64_t       span_start   = 0;
+		uint64_t       span_length  = 0;
+		if (search_start >= search_end ||
+		    !g_physical_memory->FindLargestAvailableSpan(search_start, search_end, alignment, &span_start, &span_length))
 		{
-			return KERNEL_ERROR_EINVAL;
-		}
-
-		uint64_t span_start  = 0;
-		uint64_t span_length = 0;
-		if (!g_physical_memory->FindLargestAvailableSpan(search_start, search_end, alignment, &span_start, &span_length))
-		{
-			return KERNEL_ERROR_ENOENT;
+			return KERNEL_ERROR_ENOMEM;
 		}
 
 		*out_address = span_start;
@@ -2436,6 +2434,13 @@ int KYTY_SYSV_ABI KernelBatchMap2(void* entries, int entry_count, int* processed
 	}
 
 	return result;
+}
+
+// sceKernelBatchMap places every mapping at its requested address (MAP_FIXED).
+int KYTY_SYSV_ABI KernelBatchMap(void* entries, int entry_count, int* processed_out)
+{
+	constexpr int kMapFixed = 0x10;
+	return KernelBatchMap2(entries, entry_count, processed_out, kMapFixed);
 }
 
 int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
