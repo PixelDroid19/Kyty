@@ -535,8 +535,9 @@ bool Elf64::IsSelf() const
 
 	// The dwords at header offsets 0x0C/0x0E are SDK version fields, not a
 	// size pair. Comparing them as sizes rejects valid metadata produced by
-	// newer SDKs; the file-size and segment-table bounds are the sanity checks.
-	return m_self->file_size != 0 && m_self->file_size <= m_f->Size();
+	// newer SDKs. The declared file size counts the last segment's alignment
+	// padding, which a copied image may lack; Open bounds every segment instead.
+	return m_self->file_size != 0;
 }
 
 bool Elf64::IsValid() const
@@ -650,6 +651,10 @@ void Elf64::Open(const String& file_name)
 			for (uint16_t i = 0; i < m_self->segments_num; i++)
 			{
 				const auto& seg = m_self_segments[i];
+				if (seg.offset > m_f->Size() || seg.compressed_size > m_f->Size() - seg.offset)
+				{
+					EXIT("SELF segment %u ends past the end of the file\n", i);
+				}
 				if ((seg.type & 0x2u) != 0)
 				{
 					EXIT("SELF segment %u is encrypted; provide an unencrypted executable\n", i);
