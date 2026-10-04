@@ -1362,6 +1362,16 @@ int KYTY_SYSV_ABI PadInit()
 	return OK;
 }
 
+// libScePad n3kSX62fgNo: name not in any NID database. Titles call it with no
+// arguments right after scePadInit and assert a zero result; it writes nothing
+// the caller reads, so its only contract is the success code.
+int KYTY_SYSV_ABI PadUnnamedInitStep()
+{
+	PRINT_NAME();
+
+	return OK;
+}
+
 int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param)
 {
 	return PadOpenCore(user_id, type, index, param, false);

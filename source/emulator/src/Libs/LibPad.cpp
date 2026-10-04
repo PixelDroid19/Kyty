@@ -13,6 +13,7 @@ LIB_DEFINE(InitPad_1)
 	PRINT_NAME_ENABLE(true);
 
 	LIB_FUNC("hv1luiJrqQM", Controller::PadInit);
+	LIB_FUNC("n3kSX62fgNo", Controller::PadUnnamedInitStep);
 	LIB_FUNC("xk0AcarP3V4", Controller::PadOpen);
 	LIB_FUNC("WFIiSfXGUq8", Controller::PadOpenExt);
 	LIB_FUNC("6ncge5+l5Qs", Controller::PadClose);
