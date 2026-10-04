@@ -252,7 +252,8 @@ public:
 	void               BufferInit();
 	SubmissionId       BufferFlush();
 	void               BufferWait();
-	void               PumpCompletedSubmissions();
+	// True while a submitted command buffer has not completed yet.
+	[[nodiscard]] bool PumpCompletedSubmissions();
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
@@ -340,12 +341,21 @@ public:
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
 	void                          SetFlip(const FlipInfo& flip)
 	{
-		m_flip                       = flip;
-		m_flip_issued                = false;
-		m_completion_callback_issued = false;
+		m_flip                        = flip;
+		m_flip_issued                 = false;
+		m_completion_callback_sources = 0u;
 	}
-	[[nodiscard]] bool FlipIssued() const { return m_flip_issued; }
-	[[nodiscard]] bool CompletionCallbackIssued() const { return m_completion_callback_issued; }
+	[[nodiscard]] bool    FlipIssued() const { return m_flip_issued; }
+	[[nodiscard]] bool    CompletionCallbackIssued() const { return m_completion_callback_sources != 0u; }
+	[[nodiscard]] uint8_t CompletionCallbackSources() const { return m_completion_callback_sources; }
+	// A wait on a plain label store of the current submission was answered by
+	// queue order; the batch still retires that submission before it ends.
+	[[nodiscard]] bool TakeConsolidatedPlainWait()
+	{
+		const bool pending        = m_consolidated_plain_wait;
+		m_consolidated_plain_wait = false;
+		return pending;
+	}
 
 	[[nodiscard]] uint64_t GetSumbitId() const { return m_sumbit_id; }
 	void                   SetSumbitId(uint64_t sumbit_id) { m_sumbit_id = sumbit_id; }
@@ -395,7 +405,9 @@ private:
 
 	FlipInfo m_flip;
 	bool     m_flip_issued                 = false;
-	bool     m_completion_callback_issued  = false;
+	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
+	uint8_t  m_completion_callback_sources = 0u;
+	bool     m_consolidated_plain_wait     = false;
 	uint64_t m_sumbit_id                   = 0;
 	uint64_t m_synthetic_occlusion_counter = 0;
 	uint32_t m_last_pm4_op                 = 0;
@@ -499,6 +511,8 @@ private:
 	CmdBatch GetCmdBatch();
 
 	Core::Mutex          m_mutex;
+	// Only the ring thread touches it: a deferred completion it still pumps while idle.
+	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
 	Core::CondVar        m_idle_cond_var;
 	Core::List<CmdBatch> m_cmd_batches;

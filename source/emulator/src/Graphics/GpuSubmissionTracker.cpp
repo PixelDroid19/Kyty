@@ -104,9 +104,10 @@ GpuSubmissionResult GpuSubmissionTracker::AddCompletionAction(SubmissionId id, G
 	return GpuSubmissionResult::Success;
 }
 
-GpuSubmissionResult GpuSubmissionTracker::RegisterProducer(SubmissionId id, uint64_t address, uint32_t size_bytes, uint64_t value)
+GpuSubmissionResult GpuSubmissionTracker::RegisterProducer(SubmissionId id, uint64_t address, uint32_t size_bytes, uint64_t value,
+                                                           GpuProducerEffect effects)
 {
-	if (!IsValidRange(address, size_bytes))
+	if (!IsValidRange(address, size_bytes) || effects == GpuProducerEffect::None)
 	{
 		return GpuSubmissionResult::InvalidArgument;
 	}
@@ -121,7 +122,7 @@ GpuSubmissionResult GpuSubmissionTracker::RegisterProducer(SubmissionId id, uint
 		return GpuSubmissionResult::SubmissionFrozen;
 	}
 
-	submission->producers.push_back({address, size_bytes, value, m_next_producer_registration++});
+	submission->producers.push_back({address, size_bytes, value, m_next_producer_registration++, effects});
 	return GpuSubmissionResult::Success;
 }
 
@@ -321,11 +322,13 @@ GpuSubmissionResult GpuSubmissionTracker::FindPendingProducer(uint64_t address, 
 		if (producer.registration_order == newest_order && ProducerMatches(producer, address, size_bytes, reference, mask))
 		{
 			dependency->producer = newest->id;
+			dependency->effects  = producer.effects;
 			return GpuSubmissionResult::Success;
 		}
 	}
 
 	dependency->producer = newest->id;
+	dependency->effects  = GpuProducerEffect::None;
 	return GpuSubmissionResult::ProducerValueMismatch;
 }
 

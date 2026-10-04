@@ -899,6 +899,30 @@ enum class LabelForceCompleteKind : uint8_t
 	return completion_callback_issued;
 }
 
+[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool current_submission, uint8_t producer_effects)
+{
+	// Only a plain label store can rely on same-queue GPU ordering until one
+	// end-of-batch fence publishes it. Write-back and notification callbacks
+	// have host-visible effects that must stay synchronous at their wait packet.
+	constexpr uint8_t guest_store = 1u;
+	return current_submission && producer_effects == guest_store;
+}
+
+// Completion callbacks a command-processor batch can record.
+constexpr uint8_t kGraphicsCompletionEndOfPipeInterrupt = 1u << 0u;
+constexpr uint8_t kGraphicsCompletionFlip               = 1u << 1u;
+constexpr uint8_t kGraphicsCompletionQueuedInterrupt    = 1u << 2u;
+
+[[nodiscard]] inline bool GraphicsBatchCanDeferSubmissionCompletion(uint8_t completion_callback_sources)
+{
+	// A queued graphics interrupt (a driver submission completing) is
+	// asynchronous on the guest and carries no label or flip payload the
+	// submitting thread must observe immediately; the ring's idle pump publishes
+	// it after the Vulkan fence. Interrupts and flips the stream itself raises,
+	// alone or mixed, keep synchronous completion at the end of the batch.
+	return completion_callback_sources == kGraphicsCompletionQueuedInterrupt;
+}
+
 // GPU→CPU buffer write-back with absolute holes [hole_begin[i], hole_end[i]).
 // Bytes in holes keep the existing dst contents (EOP fences, guest resets).
 inline void MemcpySkipAbsoluteRanges(void* dst, const void* src, uint64_t size, const uint64_t* hole_begin, const uint64_t* hole_end,

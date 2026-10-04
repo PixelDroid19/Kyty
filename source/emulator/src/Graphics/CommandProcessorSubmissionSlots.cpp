@@ -44,7 +44,8 @@ GpuSubmissionResult CommandProcessorSubmissionSlots::MarkSubmitted(uint32_t slot
 	return result;
 }
 
-GpuSubmissionResult CommandProcessorSubmissionSlots::RegisterProducer(uint32_t slot, uint64_t address, uint32_t size_bytes, uint64_t value)
+GpuSubmissionResult CommandProcessorSubmissionSlots::RegisterProducer(uint32_t slot, uint64_t address, uint32_t size_bytes, uint64_t value,
+                                                                      GpuProducerEffect effects)
 {
 	if (m_coordinator == nullptr || slot >= SlotCount)
 	{
@@ -54,7 +55,7 @@ GpuSubmissionResult CommandProcessorSubmissionSlots::RegisterProducer(uint32_t s
 	{
 		return GpuSubmissionResult::UnknownSubmission;
 	}
-	return m_coordinator->RegisterProducer(m_slots[slot].id, address, size_bytes, value);
+	return m_coordinator->RegisterProducer(m_slots[slot].id, address, size_bytes, value, effects);
 }
 
 GpuSubmissionResult CommandProcessorSubmissionSlots::MarkFenceCompleted(uint32_t slot)

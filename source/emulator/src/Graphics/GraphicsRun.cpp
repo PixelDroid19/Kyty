@@ -653,16 +653,26 @@ void CommandProcessor::BufferWait()
 	WaitUntilPublishedUnlessReentrant(latest_completed);
 }
 
-void CommandProcessor::PumpCompletedSubmissions()
+bool CommandProcessor::PumpCompletedSubmissions()
 {
 	BufferInit();
 
 	SubmissionId latest_completed;
+	bool         pending = false;
 	{
 		Core::LockGuard lock(m_mutex);
 		TryCompleteSubmittedLocked(&latest_completed);
+		uint32_t     slot = 0;
+		SubmissionId oldest;
+		const auto   result = m_submission_slots.GetOldestSubmitted(&slot, &oldest);
+		if (result != GpuSubmissionResult::UnknownSubmission)
+		{
+			require_submission_success(result, "GetOldestSubmitted", m_queue, slot);
+			pending = true;
+		}
 	}
 	PublishCompletedSubmissions();
+	return pending;
 }
 
 void CommandProcessor::SubmitAndWait()
@@ -810,6 +820,12 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	BufferFlushForGpuWait();
 	if (producer == GpuSubmissionResult::Success)
 	{
+		if (m_queue == GraphicContext::QUEUE_GFX &&
+		    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+		{
+			m_consolidated_plain_wait = true;
+			return;
+		}
 		TraceWait("wait32_producer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask,
 		          dependency.producer.sequence);
 		g_gpu->WaitSubmission(dependency.producer);
@@ -879,6 +895,12 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	BufferFlushForGpuWait();
 	if (producer == GpuSubmissionResult::Success)
 	{
+		if (m_queue == GraphicContext::QUEUE_GFX &&
+		    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+		{
+			m_consolidated_plain_wait = true;
+			return;
+		}
 		TraceWait("wait64_producer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask,
 		          dependency.producer.sequence);
 		g_gpu->WaitSubmission(dependency.producer);
@@ -1219,7 +1241,7 @@ static void WaitForSuspendedRuns(CommandProcessor* cp, CommandProcessor::Suspend
 		// lock to drain those callbacks, then yield so another compute queue can
 		// produce the watched label.
 		cp->RunLock();
-		cp->PumpCompletedSubmissions();
+		(void)cp->PumpCompletedSubmissions();
 		cp->RunUnlock();
 		Core::Thread::SleepMicro(1000);
 	}
@@ -1236,6 +1258,22 @@ GraphicsRing::CmdBatch GraphicsRing::GetCmdBatch()
 
 	while (m_cmd_batches.Size() == 0)
 	{
+		if (m_async_completion_pending)
+		{
+			// Publish deferred completions while no batch is queued; the ring is
+			// not idle until its last submission retired.
+			m_mutex.Unlock();
+			m_cp->RunLock();
+			const bool pending = m_cp->PumpCompletedSubmissions();
+			m_cp->RunUnlock();
+			m_mutex.Lock();
+			m_async_completion_pending = pending;
+			if (m_cmd_batches.Size() == 0 && pending)
+			{
+				(void)m_cond_var.WaitFor(&m_mutex, 1000u);
+			}
+			continue;
+		}
 		m_idle = true;
 		m_idle_cond_var.Signal();
 
@@ -1278,6 +1316,8 @@ void GraphicsRing::ThreadBatchRun(void* data)
 		{
 			cp->BufferInit();
 			cp->ResetDeCe();
+			// The previous batch retired its consolidated wait before it ended.
+			EXIT_IF(cp->TakeConsolidatedPlainWait());
 			cp->SetFlip(buf.flip);
 			cp->SetSumbitId(++seq);
 
@@ -1360,11 +1400,18 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				cp->Flip();
 				flip_submission = cp->BufferFlush();
 			}
+			if (cp->TakeConsolidatedPlainWait())
+			{
+				cp->WaitSubmission(flip_submission);
+			}
 			if (buf.decode_completion != nullptr)
 			{
 				buf.decode_completion->Signal();
 			}
-			if (GraphicsBatchNeedsSubmissionCompletion(cp->CompletionCallbackIssued()))
+			if (GraphicsBatchCanDeferSubmissionCompletion(cp->CompletionCallbackSources()))
+			{
+				ring->m_async_completion_pending = true;
+			} else if (GraphicsBatchNeedsSubmissionCompletion(cp->CompletionCallbackIssued()))
 			{
 				cp->WaitSubmission(flip_submission);
 			}
@@ -2155,6 +2202,8 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	bool     source32       = (event_write_source == 0x01);
 	bool     source_counter = (event_write_source == 0x04);
 	uint32_t producer_size  = 0;
+	// A label store alone, or with a write-back and/or an interrupt published at completion.
+	GpuProducerEffect producer_effects = GpuProducerEffect::GuestStore;
 
 	switch (interrupt_selector)
 	{
@@ -2204,10 +2253,12 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 		{
 			GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(m_sumbit_id, m_buffer[m_current_buffer],
 			                                                       static_cast<uint64_t*>(dst_gpu_addr), value, interrupt_context_id);
+			producer_effects = GpuProducerEffect::GuestStore | GpuProducerEffect::WriteBack | GpuProducerEffect::Notify;
 		} else
 		{
 			GraphicsRenderWriteAtEndOfPipeWithWriteBack64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr),
 			                                              value);
+			producer_effects = GpuProducerEffect::GuestStore | GpuProducerEffect::WriteBack;
 		}
 		producer_size = 8;
 	} else if (((eop_event_type == 0x04 && event_index == 0x05) || (eop_event_type == 0x28 && event_index == 0x00)) &&
@@ -2218,17 +2269,20 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	{
 		GraphicsRenderWriteAtEndOfPipeWithInterrupt64(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint64_t*>(dst_gpu_addr), value,
 		                                              interrupt_context_id);
-		producer_size = 8;
+		producer_effects = GpuProducerEffect::GuestStore | GpuProducerEffect::Notify;
+		producer_size    = 8;
 	} else if ((eop_event_type == 0x04 && event_index == 0x05) && cache_action == 0x00 && source32 && with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipeWithInterrupt32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value,
 		                                              interrupt_context_id);
-		producer_size = 4;
+		producer_effects = GpuProducerEffect::GuestStore | GpuProducerEffect::Notify;
+		producer_size    = 4;
 	} else if ((eop_event_type == 0x04 && event_index == 0x05) && cache_action == 0x3b && source64 && with_interrupt)
 	{
 		GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBack64(m_sumbit_id, m_buffer[m_current_buffer],
 		                                                       static_cast<uint64_t*>(dst_gpu_addr), value, interrupt_context_id);
-		producer_size = 8;
+		producer_effects = GpuProducerEffect::GuestStore | GpuProducerEffect::WriteBack | GpuProducerEffect::Notify;
+		producer_size    = 8;
 	} else
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown event type (continuing)\n");
@@ -2241,12 +2295,13 @@ void CommandProcessor::WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_
 	if (valid_producer_destination)
 	{
 		const auto register_result = m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer),
-		                                                                 reinterpret_cast<uint64_t>(dst_gpu_addr), producer_size, value);
+		                                                                 reinterpret_cast<uint64_t>(dst_gpu_addr), producer_size, value,
+		                                                                 producer_effects);
 		require_submission_success(register_result, "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
 	}
 	if (with_interrupt)
 	{
-		m_completion_callback_issued = true;
+		m_completion_callback_sources |= kGraphicsCompletionEndOfPipeInterrupt;
 	}
 }
 
@@ -2356,8 +2411,8 @@ void CommandProcessor::Flip()
 	VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
 	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_sumbit_id, m_buffer[m_current_buffer], m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                       m_flip.flip_arg);
-	m_flip_issued                = true;
-	m_completion_callback_issued = true;
+	m_flip_issued                  = true;
+	m_completion_callback_sources |= kGraphicsCompletionFlip;
 }
 
 void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
@@ -2376,8 +2431,8 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
 	VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
 	GraphicsRenderWriteAtEndOfPipeWithFlip32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value,
 	                                         m_flip.handle, m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
-	m_flip_issued                = true;
-	m_completion_callback_issued = true;
+	m_flip_issued                  = true;
+	m_completion_callback_sources |= kGraphicsCompletionFlip;
 }
 
 void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value)
@@ -2401,8 +2456,8 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(m_sumbit_id, m_buffer[m_current_buffer],
 		                                                           static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle, m_flip.index,
 		                                                           m_flip.flip_mode, m_flip.flip_arg);
-		m_flip_issued                = true;
-		m_completion_callback_issued = true;
+		m_flip_issued                  = true;
+		m_completion_callback_sources |= kGraphicsCompletionFlip | kGraphicsCompletionEndOfPipeInterrupt;
 	} else
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown event type (continuing)\n");
@@ -2416,7 +2471,7 @@ void CommandProcessor::QueueQueuedGraphicsInterrupt()
 	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
 
 	GraphicsRenderQueueQueuedGraphicsInterrupt(m_buffer[m_current_buffer]);
-	m_completion_callback_issued = true;
+	m_completion_callback_sources |= kGraphicsCompletionQueuedInterrupt;
 }
 
 void CommandProcessor::WaitDeviceAddressWriteBacks()

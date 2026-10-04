@@ -6351,6 +6351,29 @@ TEST(EmulatorGraphicsState, LabelFenceGdsStoreProtectsEveryWrittenDword)
 // SubmitAndFlip without an embedded R_FLIP/0x777 must still flip after BufferFlush.
 // Detect SubmitAndFlip via an explicit batch flag — not flip.handle != 0 (handle 0
 // is legal, and plain Submit also zeroes the flip fields).
+TEST(EmulatorGraphicsState, OnlyAPlainLabelStoreOfTheCurrentSubmissionConsolidatesAWait)
+{
+	constexpr uint8_t store     = 1u;
+	constexpr uint8_t writeback = 2u;
+	constexpr uint8_t notify    = 4u;
+	EXPECT_TRUE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(false, store));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | writeback));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, store | notify));
+	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, 0u));
+}
+
+TEST(EmulatorGraphicsState, OnlyAQueuedSubmissionInterruptDefersBatchCompletion)
+{
+	EXPECT_TRUE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionQueuedInterrupt));
+	EXPECT_FALSE(GraphicsBatchCanDeferSubmissionCompletion(0u));
+	EXPECT_FALSE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionEndOfPipeInterrupt));
+	EXPECT_FALSE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionFlip));
+	EXPECT_FALSE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionQueuedInterrupt | kGraphicsCompletionFlip));
+	EXPECT_FALSE(
+	    GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionQueuedInterrupt | kGraphicsCompletionEndOfPipeInterrupt));
+}
+
 TEST(EmulatorGraphicsState, GraphicsBatchNeedsApiFlipWhenDcbOmitsFlip)
 {
 	using namespace Kyty::Libs::Graphics;

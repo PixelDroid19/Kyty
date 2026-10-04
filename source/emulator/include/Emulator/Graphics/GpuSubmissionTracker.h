@@ -36,9 +36,24 @@ struct SubmissionId
 	return !(lhs == rhs);
 }
 
+// What publishing a producer's value does on the host besides the guest store.
+enum class GpuProducerEffect : uint8_t
+{
+	None       = 0u,
+	GuestStore = 1u,
+	WriteBack  = 2u,
+	Notify     = 4u,
+};
+
+[[nodiscard]] constexpr GpuProducerEffect operator|(GpuProducerEffect lhs, GpuProducerEffect rhs)
+{
+	return static_cast<GpuProducerEffect>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
+
 struct SubmissionDependency
 {
-	SubmissionId producer;
+	SubmissionId      producer;
+	GpuProducerEffect effects = GpuProducerEffect::None;
 };
 
 enum class GpuSubmissionState : uint8_t
@@ -92,7 +107,8 @@ public:
 
 	GpuSubmissionResult BeginRecording(GpuQueueId queue, uint32_t slot, SubmissionId* id, SubmissionDependency* blocking_dependency);
 	GpuSubmissionResult AddCompletionAction(SubmissionId id, GpuCompletionPhase phase, uint64_t token);
-	GpuSubmissionResult RegisterProducer(SubmissionId id, uint64_t address, uint32_t size_bytes, uint64_t value);
+	GpuSubmissionResult RegisterProducer(SubmissionId id, uint64_t address, uint32_t size_bytes, uint64_t value,
+	                                     GpuProducerEffect effects = GpuProducerEffect::GuestStore);
 	GpuSubmissionResult MarkSubmitted(SubmissionId id);
 	GpuSubmissionResult MarkCompleted(SubmissionId id, GpuCompletionActionSink* sink);
 	GpuSubmissionResult RetireCompleted(SubmissionId id);
@@ -112,8 +128,9 @@ private:
 	{
 		uint64_t address            = 0;
 		uint32_t size_bytes         = 0;
-		uint64_t value              = 0;
-		uint64_t registration_order = 0;
+		uint64_t          value              = 0;
+		uint64_t          registration_order = 0;
+		GpuProducerEffect effects            = GpuProducerEffect::None;
 	};
 
 	struct Submission
