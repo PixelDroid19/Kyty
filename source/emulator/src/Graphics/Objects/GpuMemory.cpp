@@ -65,7 +65,10 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 		auto&                              guest_memory = Emulator::GuestMemory::GetPort();
 		Emulator::GuestMemory::MappedRange mapped {};
 		const uint64_t                     addr = reinterpret_cast<uint64_t>(buf);
-		if (guest_memory.IsInstalled())
+		// Guest malloc memory served from the host heap (no application heap yet) is
+		// host-readable and not a guest mapping; its content must still be hashed or
+		// buffers the title rewrites every frame never look changed.
+		if (guest_memory.IsInstalled() && !GpuMemoryIsHostGuestMallocRange(addr, size))
 		{
 			const bool range_known = guest_memory.QueryMappedRange(addr, size, &mapped);
 			if (!range_known)
