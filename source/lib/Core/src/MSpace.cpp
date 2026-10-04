@@ -926,7 +926,7 @@ bool MSpaceFree(mspace_t msp, void* ptr)
 	return true;
 }
 
-void* MSpaceRealloc(mspace_t msp, void* ptr, size_t size)
+static void* MSpaceReallocAligned(mspace_t msp, void* ptr, size_t size, uint64_t boundary)
 {
 	if (msp == nullptr)
 	{
@@ -941,7 +941,7 @@ void* MSpaceRealloc(mspace_t msp, void* ptr, size_t size)
 	auto* ctx = static_cast<MSpaceContext*>(msp);
 	if (ptr == nullptr)
 	{
-		return MSpaceInternalRealloc_align(*ctx, ptr, static_cast<uint32_t>(size), 32);
+		return MSpaceInternalRealloc_align(*ctx, ptr, static_cast<uint32_t>(size), boundary);
 	}
 
 	MSpaceReallocPin pin;
@@ -976,7 +976,22 @@ void* MSpaceRealloc(mspace_t msp, void* ptr, size_t size)
 	}
 
 	// The pin blocks the moving chunk without holding the registry lock across the OOM callback.
-	return MSpaceInternalRealloc_align(*ctx, ptr, static_cast<uint32_t>(size), 32);
+	return MSpaceInternalRealloc_align(*ctx, ptr, static_cast<uint32_t>(size), boundary);
+}
+
+void* MSpaceRealloc(mspace_t msp, void* ptr, size_t size)
+{
+	return MSpaceReallocAligned(msp, ptr, size, 32);
+}
+
+// Alignments below the allocator's 32-byte granule are already satisfied.
+void* MSpaceReallocalign(mspace_t msp, void* ptr, size_t boundary, size_t size)
+{
+	if (boundary == 0 || (boundary & (boundary - 1)) != 0)
+	{
+		return nullptr;
+	}
+	return MSpaceReallocAligned(msp, ptr, size, boundary < 32 ? 32 : boundary);
 }
 
 void* MSpaceMemalign(mspace_t msp, size_t boundary, size_t size)
@@ -1022,6 +1037,22 @@ void* MSpaceCalloc(mspace_t msp, size_t nelem, size_t size)
 void* MSpaceAlignedAlloc(mspace_t msp, size_t alignment, size_t size)
 {
 	return MSpaceMemalign(msp, alignment, size);
+}
+
+// posix_memalign: a power-of-two multiple of sizeof(void*); *ptr changes only on success.
+bool MSpacePosixMemalign(mspace_t msp, void** ptr, size_t boundary, size_t size)
+{
+	if (ptr == nullptr || boundary < sizeof(void*) || (boundary & (boundary - 1)) != 0)
+	{
+		return false;
+	}
+	void* allocation = MSpaceMemalign(msp, boundary, size);
+	if (allocation == nullptr)
+	{
+		return false;
+	}
+	*ptr = allocation;
+	return true;
 }
 
 size_t MSpaceMallocUsableSize(const void* ptr)

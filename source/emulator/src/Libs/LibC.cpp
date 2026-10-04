@@ -313,9 +313,20 @@ KYTY_SYSV_ABI int c_fstat(int fd, Kernel::FileSystem::FileStat* sb)
 {
 	return POSIX_CALL(Kernel::FileSystem::KernelFstat(fd, sb));
 }
-static KYTY_SYSV_ABI int c_wcscmp(const wchar_t* s1, const wchar_t* s2)
+// The guest wchar_t is 16 bits wide.
+static KYTY_SYSV_ABI int c_wcscmp(const uint16_t* s1, const uint16_t* s2)
 {
-	return ::wcscmp(s1, s2);
+	for (;; s1++, s2++)
+	{
+		if (*s1 != *s2)
+		{
+			return *s1 < *s2 ? -1 : 1;
+		}
+		if (*s1 == 0)
+		{
+			return 0;
+		}
+	}
 }
 static KYTY_SYSV_ABI void c_perror(const char* s)
 {
@@ -3817,6 +3828,43 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("LYo3GhIlB38", LibcInternal::LibcMspaceCalloc);
 	LIB_FUNC("Vla-Z+eXlxo", LibcInternal::LibcMspaceFree);
 	LIB_FUNC("k04jLXu3+Ic", LibcInternal::LibcMspaceMallocStatsFast);
+	LIB_FUNC("mfHdJTIvhuo", LibcInternal::LibcMspaceMallocStats);
+	LIB_FUNC("W6SiVSiCDtI", LibcInternal::LibcMspaceDestroy);
+	LIB_FUNC("gigoVHZvVPE", LibcInternal::LibcMspaceRealloc);
+	LIB_FUNC("p6lrRW8-MLY", LibcInternal::LibcMspaceReallocalign);
+	LIB_FUNC("ljkqMcC4-mk", LibcInternal::LibcMspaceAlignedAlloc);
+	LIB_FUNC("qWESlyXMI3E", LibcInternal::LibcMspacePosixMemalign);
+
+	// ISO C entry points (LibCStandard.cpp).
+	LIB_FUNC("-kU6bB4M-+k", LibC::c_strspn);
+	LIB_FUNC("q0F6yS-rCms", LibC::c_strcspn);
+	LIB_FUNC("gjbmYpP-XJQ", LibC::c_strcoll);
+	LIB_FUNC("DQbtGaBKlaw", LibC::c_strnlen_s);
+	LIB_FUNC("Ezzq78ZgHPs", LibC::c_wcschr);
+	LIB_FUNC("g3ShSirD50I", LibC::c_wcsrchr);
+	LIB_FUNC("KZm8HUIX2Rw", LibC::c_wcscat);
+	LIB_FUNC("6f5f-qx4ucA", LibC::c_wcscpy_s);
+	LIB_FUNC("Ye20uNnlglA", LibC::c_abs);
+	LIB_FUNC("2gbcltk3swE", LibC::c_div);
+	LIB_FUNC("dnaeGXbjP6E", LibC::c_exp2);
+	LIB_FUNC("1t1-JoZ0sZQ", LibC::c_sinhf);
+	LIB_FUNC("RCQAffkEh9A", LibC::c_coshf);
+	LIB_FUNC("SAd0Z3wKwLA", LibC::c_tanhf);
+	LIB_FUNC("yPPtp1RMihw", LibC::c_asinhf);
+	LIB_FUNC("XJp2C-b0tRU", LibC::c_acoshf);
+	LIB_FUNC("cPGyc5FGjy0", LibC::c_atanhf);
+	LIB_FUNC("GlelR9EEeck", LibC::c_cbrtf);
+	LIB_FUNC("RpTR+VY15ss", LibC::c_fmaf);
+	LIB_FUNC("VOKOgR7L-2Y", LibC::c_lrint);
+	LIB_FUNC("rcVv5ivMhY0", LibC::c_lrintf);
+	LIB_FUNC("zck+6bVj5pA", LibC::c_nan);
+	LIB_FUNC("DZU+K1wozGI", LibC::c_nanf);
+	LIB_FUNC("7Jp3g-qTgZw", LibC::c_scalbln);
+	LIB_FUNC("9fs1btfLoUs", LibC::c_scalbnf);
+	LIB_FUNC("MU25eqxSDTw", LibC::c_Sinh);
+	LIB_FUNC("KeOZ19X8-Ug", LibC::c_Cosh);
+	LIB_FUNC("O4L+0oCN9zA", LibC::c_FSinh);
+	LIB_FUNC("PdnFCFqKGqA", LibC::c_FCosh);
 
 	// C++ locale / RTTI objects (Qoo175Ig+-k → classic locale).
 	// dynlib: _ZSt21_sceLibcClassicLocale, ctype<char>::id, locale::id::_Id_cnt,

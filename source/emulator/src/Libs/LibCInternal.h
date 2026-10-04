@@ -14,6 +14,8 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+#include <cstdlib>
+
 namespace Kyty::Kernel::FileSystem { struct FileStat; }
 
 namespace Kyty::Libs {
@@ -208,6 +210,37 @@ KYTY_SYSV_ABI float c_ldexpf(float x, int e);
 KYTY_SYSV_ABI float c_modff(float x, float* ip);
 KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c);
 
+// LibCStandard.cpp
+KYTY_SYSV_ABI size_t    c_strspn(const char* s, const char* accept);
+KYTY_SYSV_ABI size_t    c_strcspn(const char* s, const char* reject);
+KYTY_SYSV_ABI int       c_strcoll(const char* s1, const char* s2);
+KYTY_SYSV_ABI size_t    c_strnlen_s(const char* s, size_t max_size);
+KYTY_SYSV_ABI uint16_t* c_wcschr(const uint16_t* s, uint16_t c);
+KYTY_SYSV_ABI uint16_t* c_wcsrchr(const uint16_t* s, uint16_t c);
+KYTY_SYSV_ABI uint16_t* c_wcscat(uint16_t* dst, const uint16_t* src);
+KYTY_SYSV_ABI int       c_wcscpy_s(uint16_t* dst, size_t dst_size, const uint16_t* src);
+KYTY_SYSV_ABI int       c_abs(int x);
+KYTY_SYSV_ABI div_t     c_div(int numerator, int denominator);
+KYTY_SYSV_ABI double    c_exp2(double x);
+KYTY_SYSV_ABI float     c_sinhf(float x);
+KYTY_SYSV_ABI float     c_coshf(float x);
+KYTY_SYSV_ABI float     c_tanhf(float x);
+KYTY_SYSV_ABI float     c_asinhf(float x);
+KYTY_SYSV_ABI float     c_acoshf(float x);
+KYTY_SYSV_ABI float     c_atanhf(float x);
+KYTY_SYSV_ABI float     c_cbrtf(float x);
+KYTY_SYSV_ABI float     c_fmaf(float x, float y, float z);
+KYTY_SYSV_ABI long      c_lrint(double x);
+KYTY_SYSV_ABI long      c_lrintf(float x);
+KYTY_SYSV_ABI double    c_nan(const char* tag);
+KYTY_SYSV_ABI float     c_nanf(const char* tag);
+KYTY_SYSV_ABI double    c_scalbln(double x, long exponent);
+KYTY_SYSV_ABI float     c_scalbnf(float x, int exponent);
+KYTY_SYSV_ABI double    c_Sinh(double x, double y);
+KYTY_SYSV_ABI double    c_Cosh(double x, double y);
+KYTY_SYSV_ABI float     c_FSinh(float x, float y);
+KYTY_SYSV_ABI float     c_FCosh(float x, float y);
+
 } // namespace LibC
 
 namespace LibcInternalExt {
@@ -229,6 +262,12 @@ void* KYTY_SYSV_ABI LibcMspaceCalloc(void* msp, size_t nelem, size_t size);
 int  KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats);
 int  KYTY_SYSV_ABI LibcMallocStatsFast(void* stats);
 void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr);
+int  KYTY_SYSV_ABI LibcMspaceMallocStats(void* msp, void* stats);
+KYTY_SYSV_ABI int   LibcMspaceDestroy(void* msp);
+KYTY_SYSV_ABI void* LibcMspaceRealloc(void* msp, void* ptr, size_t size);
+KYTY_SYSV_ABI void* LibcMspaceReallocalign(void* msp, void* ptr, size_t boundary, size_t size);
+KYTY_SYSV_ABI void* LibcMspaceAlignedAlloc(void* msp, size_t alignment, size_t size);
+KYTY_SYSV_ABI int   LibcMspacePosixMemalign(void* msp, void** ptr, size_t boundary, size_t size);
 
 } // namespace LibcInternal
 
