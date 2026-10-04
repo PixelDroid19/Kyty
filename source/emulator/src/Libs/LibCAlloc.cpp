@@ -58,9 +58,11 @@ static bool claim_allocation(void* ptr, HostAllocationRecord* record)
 	return true;
 }
 
+// Host heap memory may hold the emulator's own data; the guest sees it zeroed,
+// as it sees fresh pages of its own heap.
 static void* allocate_host_owned(size_t size)
 {
-	void* ptr = ::malloc(size);
+	void* ptr = ::calloc(1, size);
 	if (ptr != nullptr)
 	{
 		const bool registered = register_allocation(ptr, {size});
@@ -323,6 +325,10 @@ KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 		const bool restored = register_allocation(p, record);
 		EXIT_IF(!restored);
 		return nullptr;
+	}
+	if (size > record.size)
+	{
+		::memset(static_cast<uint8_t*>(replacement) + record.size, 0, size - record.size);
 	}
 
 	const bool registered = register_allocation(replacement, {size});
