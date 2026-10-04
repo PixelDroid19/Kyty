@@ -54,6 +54,29 @@ static uint32_t resolve_host_mip_count(uint16_t fmt, uint32_t width, uint32_t he
 	return Gen5CompressedHostMipCount(width, height, guest_levels);
 }
 
+// Pitches are in texels. A guest-registered linear row stride (video planes)
+// overrides the descriptor pitch; a block-compressed element spans 4 texels.
+static uint32_t resolve_linear_upload_pitch(uint32_t fmt, uint32_t width, uint32_t pitch, uint64_t vaddr)
+{
+	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
+	if (bytes_per_element == 0u)
+	{
+		return pitch;
+	}
+	const uint32_t texels_per_element = ShaderGen5TextureIsBlockCompressed(fmt) ? 4u : 1u;
+	const uint64_t row_bytes          = static_cast<uint64_t>((width + texels_per_element - 1u) / texels_per_element) * bytes_per_element;
+	if (row_bytes > std::numeric_limits<uint32_t>::max())
+	{
+		return pitch;
+	}
+	const uint32_t registered_pitch = GuestTextureLayoutGetLinearRowPitch(vaddr, static_cast<uint32_t>(row_bytes));
+	if (registered_pitch == 0u || registered_pitch % bytes_per_element != 0u)
+	{
+		return pitch;
+	}
+	return registered_pitch / bytes_per_element * texels_per_element;
+}
+
 bool TextureBlockDumpSpecMatches(const char* spec, uint32_t width, uint32_t height, uint64_t vaddr)
 {
 	if (spec == nullptr || spec[0] == '\0')
@@ -552,7 +575,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// Other modes remain unsupported until their layout is evidenced.
 		if (tile != 0 && tile != 5 && tile != 9 && tile != 24 && tile != 27)
 		{
-			KYTY_LOG_DEBUG("WARNING: skipped check: tile != 0 && tile != 5 && tile != 27 && tile != 9\n");
+			KYTY_LOG_LIMIT(Log::Level::Warn, 64, "WARNING: unsupported Gen5 texture swizzle mode %u: format=%u %ux%u pitch=%u levels=%u\n",
+			               static_cast<unsigned>(tile), static_cast<unsigned>(fmt), static_cast<unsigned>(width),
+			               static_cast<unsigned>(height), static_cast<unsigned>(pitch), static_cast<unsigned>(levels));
 		}
 
 		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
@@ -612,17 +637,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	{
 		if (!skip_guest)
 		{
-			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-			uint32_t       upload_pitch      = static_cast<uint32_t>(pitch);
-			if (bytes_per_element != 0u && width <= std::numeric_limits<uint32_t>::max() / bytes_per_element)
-			{
-				const uint32_t row_bytes = static_cast<uint32_t>(width) * bytes_per_element;
-				if (const uint32_t registered_pitch = GuestTextureLayoutGetLinearRowPitch(*vaddr, row_bytes);
-				    registered_pitch != 0u && registered_pitch % bytes_per_element == 0u)
-				{
-					upload_pitch = registered_pitch / bytes_per_element;
-				}
-			}
+			const uint32_t upload_pitch = resolve_linear_upload_pitch(fmt, width, pitch, *vaddr);
 			regions[0].offset = 0;
 			regions[0].width  = static_cast<uint32_t>(width);
 			regions[0].height = static_cast<uint32_t>(height);
@@ -722,16 +737,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	{
 		if (tile == 0)
 		{
-			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-			if (bytes_per_element != 0u && width <= std::numeric_limits<uint32_t>::max() / bytes_per_element)
-			{
-				const uint32_t row_bytes = static_cast<uint32_t>(width) * bytes_per_element;
-				if (const uint32_t registered_pitch = GuestTextureLayoutGetLinearRowPitch(*vaddr, row_bytes);
-				    registered_pitch != 0u && registered_pitch % bytes_per_element == 0u)
-				{
-					regions[0].pitch = registered_pitch / bytes_per_element;
-				}
-			}
+			regions[0].pitch = resolve_linear_upload_pitch(fmt, width, pitch, *vaddr);
 			// Opt-in dump for linear Gen5 sample investigation (scratch only).
 			// KYTY_DUMP_LINEAR_SAMPLE=WxH writes one RGBA8 PNG under /tmp.
 			if (fmt == 56u && levels == 1u)

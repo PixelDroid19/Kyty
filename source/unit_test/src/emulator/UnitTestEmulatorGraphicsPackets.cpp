@@ -3526,6 +3526,11 @@ TEST(EmulatorGraphicsPackets, AlignsGen5LinearTexturePitchTo256ByteRows)
 	EXPECT_EQ(ShaderGen5LinearTexturePitch(129, 14), 256u);
 	// Captured loading atlas: 2048x4096 RG8 linear (format 14, tile 0).
 	EXPECT_EQ(ShaderGen5LinearTexturePitch(2048, 14), 2048u);
+	// BC3 (format 173, 16-byte 4x4 blocks) aligns block columns: 560 texels =
+	// 140 blocks -> 144 blocks = 576 texels; BC1 (8-byte blocks) aligns to 32.
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(560, 173), 576u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(1024, 173), 1024u);
+	EXPECT_EQ(ShaderGen5LinearTexturePitch(1500, 169), 1536u);
 }
 
 // RDNA2 SQ_IMG_RSRC: 256-bit 2D word4[13:0] = pitch-1; zero word4 => pitch = width.

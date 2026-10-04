@@ -2264,13 +2264,15 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// Linear layout: pitch already carries the row stride from the caller. Keep
 		// the estimate tight (no coarse dimension rounding) so it does not swallow
 		// neighbouring buffers in the GPU-memory overlap tracker.
-		uint32_t row   = (pitch != 0 ? pitch : width);
-		uint64_t total = 0;
+		// Block-compressed rows and columns count 4x4 blocks, not texels.
+		const uint32_t texels_per_element = ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u;
+		uint32_t       row                = (pitch != 0 ? pitch : width);
+		uint64_t       total              = 0;
 		for (uint32_t l = 0; l < levels; l++)
 		{
-			uint32_t lw  = row >> l;
-			uint32_t lh  = height >> l;
-			uint64_t lsz = static_cast<uint64_t>(lw == 0 ? 1 : lw) * (lh == 0 ? 1 : lh) * bpp;
+			const uint64_t lw  = std::max(row >> l, 1u);
+			const uint64_t lh  = std::max(height >> l, 1u);
+			uint64_t       lsz = ((lw + texels_per_element - 1u) / texels_per_element) * ((lh + texels_per_element - 1u) / texels_per_element) * bpp;
 			if (level_sizes != nullptr)
 			{
 				level_sizes[l].offset = total;

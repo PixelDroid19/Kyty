@@ -2,6 +2,8 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include <algorithm>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -281,16 +283,16 @@ bool ShaderGen5TextureIsBlockCompressed(uint32_t format)
 
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format)
 {
-	// GFX linear surfaces force a 256-byte row pitch alignment.
+	// GFX linear surfaces align each row of elements to 256 bytes. A block
+	// compressed element is one 4x4 block, so the alignment applies to block
+	// columns; the returned pitch is in texels.
 	const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
 	EXIT_IF(bpp == 0);
-	const uint32_t align_px = 256u / bpp;
-	EXIT_IF(align_px == 0);
-	if (width == 0)
-	{
-		return align_px;
-	}
-	return ((width + align_px - 1u) / align_px) * align_px;
+	const uint32_t align_elements = 256u / bpp;
+	EXIT_IF(align_elements == 0);
+	const uint32_t texels_per_element = ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u;
+	const uint32_t elements           = std::max((width + texels_per_element - 1u) / texels_per_element, 1u);
+	return ((elements + align_elements - 1u) / align_elements) * align_elements * texels_per_element;
 }
 
 uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t type, uint32_t word4)
