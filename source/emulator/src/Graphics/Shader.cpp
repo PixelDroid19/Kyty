@@ -3085,8 +3085,25 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					exact_evidence.raw_vmem_oob_guarded = true;
 					continue;
 				}
-				exact_evidence.raw_smem_use            = true;
-				exact_evidence.raw_smem_dynamic_offset = true;
+				exact_evidence.raw_smem_use = true;
+				const uint32_t consumer_pc  = record.last_consumer_pc;
+				bool           found_consumer = false;
+				for (uint32_t index = 0; index < code->GetInstructions().Size(); ++index)
+				{
+					const auto& inst = code->GetInstructions().At(index);
+					if (inst.pc != consumer_pc)
+					{
+						continue;
+					}
+					found_consumer = true;
+					ShaderAccumulateScalarBufferLoadSpan(inst, &exact_evidence.raw_smem_required_bytes,
+					                                     &exact_evidence.raw_smem_dynamic_offset);
+					break;
+				}
+				if (!found_consumer)
+				{
+					exact_evidence.raw_smem_dynamic_offset = true;
+				}
 			}
 		}
 		const auto exact = exact_evidence.access;

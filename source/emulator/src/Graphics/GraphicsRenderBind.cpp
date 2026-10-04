@@ -2862,14 +2862,34 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			    exact_static_smem ? std::min(declared_size, storage_buffers.raw_smem_required_bytes[i]) : declared_size;
 			const uint64_t materialized_size = GpuMemoryGetAllocatedRangePrefix(addr, requested_size);
 
-			// Executable images are mapped by the loader rather than the GPU heap.
+			// Executable images and other CPU mappings may sit outside the GPU heap.
 			// A statically addressed scalar load can safely use a per-submit copy of
-			// only the dwords proven reachable by the shader.
-			if (materialized_size == 0 && exact_static_smem && read_only && requested_size <= 0x1000u &&
-			    Core::VirtualMemory::IsRangeReadable(addr, requested_size))
+			// only the dwords proven reachable by the shader. Query the proven span,
+			// not the whole V# declaration: a 208-byte load must not require a
+			// 600 MiB mapping to exist.
+			alignas(16) uint8_t smem_span[0x1000];
+			bool                copied_smem_span = false;
+			if (materialized_size == 0 && exact_static_smem && read_only && requested_size > 0 && requested_size <= 0x1000u)
 			{
-				buf =
-				    buffer->UploadTransientBuffer(reinterpret_cast<const void*>(addr), requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				copied_smem_span = Core::VirtualMemory::CopyFromGuest(smem_span, addr, requested_size);
+				if (!copied_smem_span)
+				{
+					Kernel::Memory::KernelMappedRange mapped {};
+					Core::VirtualMemory::Mode         mode     = Core::VirtualMemory::Mode::NoAccess;
+					Kernel::Memory::KernelGpuMappingAccessMode gpu_mode = Kernel::Memory::KernelGpuMappingAccessMode::NoAccess;
+					if (Kernel::Memory::KernelQueryMappedRange(addr, requested_size, &mapped) &&
+					    Kernel::Memory::KernelDecodeMprotectProt(mapped.protection, &mode, &gpu_mode) &&
+					    (static_cast<uint32_t>(mode) & static_cast<uint32_t>(Core::VirtualMemory::Mode::Read)) != 0u)
+					{
+						std::memcpy(smem_span, reinterpret_cast<const void*>(static_cast<uintptr_t>(addr)),
+						            static_cast<size_t>(requested_size));
+						copied_smem_span = true;
+					}
+				}
+			}
+			if (copied_smem_span)
+			{
+				buf = buffer->UploadTransientBuffer(smem_span, requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 			} else if (materialized_size == 0)
 			{
 				const auto eud = ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, materialized_size);

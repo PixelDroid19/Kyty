@@ -7578,4 +7578,115 @@ TEST(EmulatorGraphicsState, DynamicSLoadFeedsVectorBufferDescriptor)
 	EXPECT_EQ(bind.dynamic_sloads.records.At(0).last_consumer_pc, 0x5cu);
 }
 
+// Captured loading-era raw SMEM: S_LOAD_DWORDX4 from EUD slot 40 into s[88:91],
+// then a constant-offset S_BUFFER_LOAD_DWORDX4. The four EUD words decode as a
+// stride-0 byte-addressed V# whose declared size is hundreds of megabytes and
+// is not in the GPU heap. Descriptor-is-dynamic must not be treated as
+// S_BUFFER offset-is-dynamic, or bind requests the whole declared range.
+TEST(EmulatorGraphicsState, DynamicSLoadConstantSmemOffsetKeepsRequiredBytes)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	ShaderInstruction sload {};
+	sload.pc                 = 0x8;
+	sload.type               = ShaderInstructionType::SLoadDwordx4;
+	sload.format             = ShaderInstructionFormat::Sdst4SbaseSoffset;
+	sload.dst.type           = ShaderOperandType::Sgpr;
+	sload.dst.register_id    = 88;
+	sload.dst.size           = 4;
+	sload.src_num            = 2;
+	sload.src[0].type        = ShaderOperandType::Sgpr;
+	sload.src[0].register_id = 0;
+	sload.src[0].size        = 2;
+	sload.src[1].type        = ShaderOperandType::IntegerInlineConstant;
+	sload.src[1].constant.u  = 160u;
+	code.GetInstructions().Add(sload);
+
+	ShaderInstruction sbuf {};
+	sbuf.pc                 = 0x10;
+	sbuf.type               = ShaderInstructionType::SBufferLoadDwordx4;
+	sbuf.format             = ShaderInstructionFormat::Sdst4SvSoffset;
+	sbuf.dst.type           = ShaderOperandType::Sgpr;
+	sbuf.dst.register_id    = 8;
+	sbuf.dst.size           = 4;
+	sbuf.src_num            = 2;
+	sbuf.src[0].type        = ShaderOperandType::Sgpr;
+	sbuf.src[0].register_id = 88;
+	sbuf.src[0].size        = 4;
+	sbuf.src[1].type        = ShaderOperandType::IntegerInlineConstant;
+	sbuf.src[1].constant.u  = 0;
+	code.GetInstructions().Add(sbuf);
+
+	ShaderInstruction end {};
+	end.pc   = 0x18;
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(end);
+
+	alignas(16) uint32_t eud[64] = {};
+	eud[40]                      = 0x280000f0u;
+	eud[41]                      = 0x0000022au;
+	eud[42]                      = 0x2449c574u;
+	eud[43]                      = 0x00000212u;
+
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 16; i++)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	const uint64_t eud_ptr =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(eud_ptr, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
+	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
+	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
+
+	uint16_t direct_offsets[6];
+	for (int i = 0; i < 6; i++)
+	{
+		direct_offsets[i] = 0xffffu;
+	}
+	direct_offsets[5] = 0;
+
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.eud_size_dw            = 48;
+	user_data.srt_size_dw            = 0;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+
+	ASSERT_EQ(bind.storage_buffers.buffers_num, 1);
+	EXPECT_TRUE(bind.storage_buffers.dynamic_sload[0]);
+	EXPECT_EQ(bind.storage_buffers.start_register[0], 88);
+	EXPECT_EQ(bind.storage_buffers.slots[0], 40);
+	EXPECT_TRUE(bind.storage_buffers.raw_smem_use[0]);
+	EXPECT_FALSE(bind.storage_buffers.raw_smem_dynamic_offset[0]);
+	EXPECT_EQ(bind.storage_buffers.raw_smem_required_bytes[0], 16u);
+	EXPECT_FALSE(ShaderGen5SBufferDescriptorAlwaysOutOfBounds(bind.storage_buffers.buffers[0]));
+	EXPECT_EQ(bind.storage_buffers.buffers[0].Stride(), 0u);
+	const uint64_t declared = ShaderBufferByteSize(bind.storage_buffers.buffers[0].Stride(),
+	                                              bind.storage_buffers.buffers[0].NumRecords());
+	EXPECT_EQ(declared, 0x2449c574u);
+	const bool exact_static_smem =
+	    bind.storage_buffers.accesses[0] == ShaderStorageAccess::Raw && bind.storage_buffers.exact_matches[0] &&
+	    !bind.storage_buffers.decoded_unknown[0] && !bind.storage_buffers.indirect_descriptor_use[0] &&
+	    bind.storage_buffers.raw_smem_use[0] && !bind.storage_buffers.raw_vmem_oob_guarded[0] &&
+	    !bind.storage_buffers.raw_tbuffer_use[0] && !bind.storage_buffers.raw_smem_dynamic_offset[0] &&
+	    bind.storage_buffers.raw_smem_required_bytes[0] != 0;
+	EXPECT_TRUE(exact_static_smem);
+	EXPECT_EQ(declared < bind.storage_buffers.raw_smem_required_bytes[0] ? declared
+	                                                                    : bind.storage_buffers.raw_smem_required_bytes[0],
+	          16u);
+}
+
 UT_END();

@@ -906,6 +906,31 @@ ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& cod
 	return result;
 }
 
+void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset)
+{
+	EXIT_IF(required_bytes == nullptr || dynamic_offset == nullptr);
+	if (!ShaderInstructionIsScalarBufferLoad(inst) || inst.dst.size <= 0 || inst.src_num < 2)
+	{
+		*dynamic_offset = true;
+		return;
+	}
+	const bool constant_offset =
+	    inst.src[1].type == ShaderOperandType::LiteralConstant || inst.src[1].type == ShaderOperandType::IntegerInlineConstant;
+	if (!constant_offset)
+	{
+		*dynamic_offset = true;
+		return;
+	}
+	const int64_t  byte_offset = static_cast<int64_t>(inst.src[1].constant.i) + inst.smem_imm_offset;
+	const uint64_t byte_count  = static_cast<uint64_t>(inst.dst.size) * sizeof(uint32_t);
+	if (byte_offset < 0 || static_cast<uint64_t>(byte_offset) > UINT64_MAX - byte_count)
+	{
+		*dynamic_offset = true;
+		return;
+	}
+	*required_bytes = std::max(*required_bytes, static_cast<uint64_t>(byte_offset) + byte_count);
+}
+
 ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int start_register)
 {
 	constexpr int     descriptor_registers = 4;

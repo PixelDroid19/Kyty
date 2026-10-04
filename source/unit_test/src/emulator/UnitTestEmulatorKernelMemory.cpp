@@ -1654,4 +1654,31 @@ TEST(EmulatorKernelMemory, EventFlagRejectsUnregisteredHandles)
 	EXPECT_EQ(KernelWaitEventFlag(ef, 1, 0x01, nullptr, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
 }
 
+// A proven scalar-SMEM span of a few dwords must be accepted even when the V#
+// declares hundreds of megabytes. The oversized declaration cannot be used as
+// the mapping query size.
+TEST(EmulatorKernelMemory, QueryMappedRangeAcceptsContainedSmemSpanAndRejectsDeclaredVsharp)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t   kMappingSize    = 0x4000;
+	constexpr uint64_t kSpanOffset     = 0xf0u;
+	constexpr uint64_t kProvenSpan     = 0xd0u;
+	constexpr uint64_t kDeclaredVsharp = 0x2449c574u;
+	void*              mapping         = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&mapping, kMappingSize, 0, kMappingSize), OK);
+	ASSERT_EQ(KernelMapNamedFlexibleMemory(&mapping, kMappingSize, 0x03, 0x10, "smem-span-query"), OK);
+	ASSERT_NE(mapping, nullptr);
+	const auto base = reinterpret_cast<uint64_t>(mapping);
+
+	KernelMappedRange span {};
+	KernelMappedRange declared {};
+	EXPECT_TRUE(KernelQueryMappedRange(base + kSpanOffset, kProvenSpan, &span));
+	EXPECT_EQ(span.base, base);
+	EXPECT_EQ(span.size, kMappingSize);
+	EXPECT_FALSE(KernelQueryMappedRange(base + kSpanOffset, kDeclaredVsharp, &declared));
+
+	EXPECT_EQ(KernelMunmap(base, kMappingSize), OK);
+}
+
 UT_END();
