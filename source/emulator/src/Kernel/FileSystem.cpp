@@ -2877,7 +2877,10 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBuffer(void* cmd, uint64_t arg1, void* a
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	return ::Kyty::Kernel::AmprPort::SubmitCommandBuffer(cmd, static_cast<uintptr_t>(arg3));
+	// The submission is accepted even when a command fails; that failure is the
+	// execution result, which only the result-returning form reports.
+	::Kyty::Kernel::AmprPort::Execution execution {};
+	return ::Kyty::Kernel::AmprPort::SubmitCommandBuffer(cmd, &execution);
 }
 
 static uint32_t AprAllocateSubmissionId(uint64_t cmd)
@@ -2918,7 +2921,9 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetResult(void* cmd, uint64_t a
 	{
 		return KERNEL_ERROR_EINVAL;
 	}
-	const int submit_rc = KernelAprSubmitCommandBuffer(cmd, arg1, result, 0, nullptr);
+	(void)arg1;
+	::Kyty::Kernel::AmprPort::Execution execution {};
+	const int submit_rc = ::Kyty::Kernel::AmprPort::SubmitCommandBuffer(cmd, &execution);
 	if (submit_rc != OK)
 	{
 		return submit_rc;
@@ -2927,10 +2932,10 @@ int KYTY_SYSV_ABI KernelAprSubmitCommandBufferAndGetResult(void* cmd, uint64_t a
 	{
 		*out_submission_id = AprAllocateSubmissionId(reinterpret_cast<uint64_t>(cmd));
 	}
-	// Optional result blob: two dwords (result, error_offset) zeroed on success.
+	// Optional result blob: two dwords, the execution result and its error offset.
 	if (result != nullptr)
 	{
-		uint32_t words[2] = {0, 0};
+		const uint32_t words[2] = {static_cast<uint32_t>(execution.result), execution.error_offset};
 		std::memcpy(result, words, sizeof(words));
 	}
 	return OK;

@@ -108,8 +108,8 @@ int KYTY_SYSV_ABI KernelDeleteEqueue(KernelEqueue eq);
 int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int* out, const KernelUseconds* timo);
 
 // sceKernelAddAmprEvent — NID bBfz7kMF2Ho.
-// Observed SysV ABI: (eq, 0, 0, ident, udata).
-int KYTY_SYSV_ABI KernelAddAmprEvent(KernelEqueue eq, uint64_t reserved0, uint64_t reserved1, uintptr_t ident, void* udata);
+// (eq, id, udata): the id a WriteKernelEventQueue record of an AMPR command buffer triggers.
+int KYTY_SYSV_ABI KernelAddAmprEvent(KernelEqueue eq, int id, void* udata);
 // sceKernelDeleteAmprEvent — NID bMmid3pfyjo.
 int KYTY_SYSV_ABI KernelDeleteAmprEvent(KernelEqueue eq, uintptr_t ident);
 

@@ -400,7 +400,7 @@ TEST_F(EmulatorAmprRead, MemoryBackedReadSharesCheckedCountContract)
 	EXPECT_EQ(count, 0u);
 }
 
-TEST_F(EmulatorAmprRead, NativeReadFailureStopsCompletionWritesEventsAndSubmissionIds)
+TEST_F(EmulatorAmprRead, NativeReadFailureIsTheExecutionResultAndCompletionActionsStillRun)
 {
 	const std::string payload = "bounded native read payload";
 	ASSERT_TRUE(Seed("payload", payload));
@@ -411,66 +411,66 @@ TEST_F(EmulatorAmprRead, NativeReadFailureStopsCompletionWritesEventsAndSubmissi
 	destination.fill(0xcc);
 	const auto sentinel = destination;
 	uint64_t completion = UINT64_C(0x1111222233334444);
-	ASSERT_EQ(read_file(command.data(), 0, 0, file_id, destination.data(), payload.size(), 0), OK);
-	ASSERT_EQ(write_address(command.data(), &completion, UINT64_C(0xabcdef)), OK);
+	const auto record = [&](uint64_t value)
+	{
+		ASSERT_EQ(read_file(command.data(), 0, 0, file_id, destination.data(), payload.size(), 0), OK);
+		ASSERT_EQ(write_address(command.data(), &completion, value), OK);
+		ASSERT_EQ(write_event(command.data(), queue, 7, 0x66, 0), OK);
+		ASSERT_EQ(CommandCount(), 3);
+	};
+	const auto expect_event = [&]()
+	{
+		KernelEvent event {};
+		Kernel::KernelUseconds zero = 0;
+		int count = 0;
+		ASSERT_EQ(KernelWaitEqueue(queue, &event, 1, &count, &zero), OK);
+		EXPECT_EQ(count, 1);
+		EXPECT_EQ(event.ident, 7u);
+		EXPECT_EQ(event.filter, KERNEL_EVFILT_AMPR);
+		EXPECT_EQ(event.data, 0x66);
+		ExpectNoEvent();
+	};
 	ASSERT_EQ(KernelCreateEqueue(&queue, "ampr-read-error"), OK);
-	ASSERT_EQ(KernelAddAmprEvent(queue, 0, 0, 7, nullptr), OK);
-	ASSERT_EQ(write_event(command.data(), queue, 7, 0x66, 0), OK);
-	ASSERT_EQ(CommandCount(), 3);
+	ASSERT_EQ(KernelAddAmprEvent(queue, 7, nullptr), OK);
+	record(UINT64_C(0xabcdef));
 	ExpectNoEvent();
 
+	// The submission is accepted: the read fails, and the write and event after it
+	// still tell waiters the buffer finished.
 	LeaseObservation observation;
 	ScopedLeaseObservation lease_scope(&observation);
-	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(command.data(), 1, nullptr, 7, nullptr), kKernelReadError);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(command.data(), 1, nullptr, 7, nullptr), OK);
 	EXPECT_EQ(destination, sentinel);
-	EXPECT_EQ(completion, UINT64_C(0x1111222233334444));
-	EXPECT_EQ(CommandCount(), 3);
+	EXPECT_EQ(completion, UINT64_C(0xabcdef));
+	EXPECT_EQ(CommandCount(), 0);
 	EXPECT_EQ(observation.begins, 1u);
 	EXPECT_EQ(observation.ends, 1u);
-	EXPECT_EQ(observation.notifications, 0u);
 	EXPECT_EQ(observation.base, reinterpret_cast<uint64_t>(destination.data()));
 	EXPECT_EQ(observation.size, payload.size());
-	ExpectNoEvent();
+	expect_event();
 
-	// The existing negative result chain must not allocate an ID or overwrite
-	// the success result blob when the underlying synchronous submit fails.
-	uint32_t submission_id = 0x12345678;
+	// The result form reports the read's error at its record offset (the first record).
+	record(UINT64_C(0xabcdee));
+	uint32_t submission_id = 0;
 	std::array<uint32_t, 2> result {0x11223344, 0x55667788};
-	const auto result_sentinel = result;
-	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetId(command.data(), 1, &submission_id), kKernelReadError);
-	EXPECT_EQ(submission_id, 0x12345678u);
-	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetResult(command.data(), 1, result.data(), &submission_id),
-	          kKernelReadError);
-	EXPECT_EQ(submission_id, 0x12345678u);
-	EXPECT_EQ(result, result_sentinel);
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetResult(command.data(), 1, result.data(), &submission_id), OK);
+	EXPECT_NE(submission_id, 0u);
+	EXPECT_EQ(result[0], static_cast<uint32_t>(kKernelReadError));
+	EXPECT_EQ(result[1], 0u);
 	EXPECT_EQ(destination, sentinel);
-	EXPECT_EQ(completion, UINT64_C(0x1111222233334444));
-	EXPECT_EQ(observation.begins, 3u);
-	EXPECT_EQ(observation.ends, 3u);
-	EXPECT_EQ(observation.notifications, 0u);
-	ExpectNoEvent();
+	EXPECT_EQ(completion, UINT64_C(0xabcdee));
+	expect_event();
 
-	// Positive control: the same retained records can complete only after the
-	// actual read succeeds. This asks for exactly the available payload bytes;
-	// it makes no claim about AMPR's guest short-read/EOF ABI.
+	// After the file reads again the same records complete with a zero result.
 	ASSERT_TRUE(RestoreReadableFile("payload", payload));
-	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(command.data(), 1, nullptr, 7, nullptr), OK);
+	record(UINT64_C(0xabcdef));
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetResult(command.data(), 1, result.data(), &submission_id), OK);
+	EXPECT_EQ(result[0], 0u);
 	EXPECT_EQ(std::memcmp(destination.data(), payload.data(), payload.size()), 0);
 	for (size_t i = payload.size(); i < destination.size(); ++i) { EXPECT_EQ(destination[i], 0xcc); }
 	EXPECT_EQ(completion, UINT64_C(0xabcdef));
 	EXPECT_EQ(CommandCount(), 0);
-	EXPECT_EQ(observation.begins, 4u);
-	EXPECT_EQ(observation.ends, 4u);
-	EXPECT_EQ(observation.notifications, 1u);
-	KernelEvent event {};
-	Kernel::KernelUseconds zero = 0;
-	int count = 0;
-	ASSERT_EQ(KernelWaitEqueue(queue, &event, 1, &count, &zero), OK);
-	EXPECT_EQ(count, 1);
-	EXPECT_EQ(event.ident, 7u);
-	EXPECT_EQ(event.filter, KERNEL_EVFILT_AMPR);
-	EXPECT_EQ(event.data, 0x66);
-	ExpectNoEvent();
+	expect_event();
 }
 
 UT_END();

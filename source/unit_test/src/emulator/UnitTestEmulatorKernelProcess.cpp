@@ -551,7 +551,7 @@ TEST(EmulatorKernelProcess, AddAmprEventRegistersAndTriggers)
 	ASSERT_NE(eq, nullptr);
 
 	int udata_probe = 0;
-	ASSERT_EQ(KernelAddAmprEvent(eq, 0, 0, /*ident=*/2, &udata_probe), OK);
+	ASSERT_EQ(KernelAddAmprEvent(eq, /*id=*/2, &udata_probe), OK);
 
 	KernelEvent ev {};
 	int         out  = 0;
@@ -794,7 +794,7 @@ TEST(EmulatorKernelProcess, AprSubmitCommandBufferRejectsNullAndAckNonNull)
 	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(fake_cmd, 1, fake_cmd, 2, fake_cmd), OK);
 }
 
-TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
+TEST(EmulatorKernelProcess, AprSubmitTriggersTheRecordIdOnCompletion)
 {
 	EnsureKernelProcessSubsystems();
 
@@ -841,16 +841,16 @@ TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
 	KernelEqueue eq = nullptr;
 	ASSERT_EQ(KernelCreateEqueue(&eq, "ampr-submit-test"), OK);
 	int udata_probe = 0;
-	ASSERT_EQ(KernelAddAmprEvent(eq, 0, 0, /*ident=*/2, &udata_probe), OK);
+	ASSERT_EQ(KernelAddAmprEvent(eq, /*id=*/2, &udata_probe), OK);
 
-	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x42, /*user_data=*/0), OK);
+	ASSERT_EQ(add_event(cmd, eq, /*id=*/2, /*completion_token=*/0x42, /*user_data=*/0), OK);
 
 	KernelEvent ev {};
 	int         out  = 0;
 	Kernel::KernelUseconds zero = 0;
 	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
 
-	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
+	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, 0, nullptr), OK);
 	ASSERT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), OK);
 	EXPECT_EQ(out, 1);
 	EXPECT_EQ(ev.ident, static_cast<uintptr_t>(2));
@@ -858,16 +858,18 @@ TEST(EmulatorKernelProcess, AprSubmitUsesSubmitIdentForDeferredCompletion)
 	EXPECT_EQ(ev.udata, &udata_probe);
 	EXPECT_EQ(ev.data, static_cast<intptr_t>(0x42));
 
-	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x43, /*user_data=*/0), OK);
+	ASSERT_EQ(add_event(cmd, eq, /*id=*/2, /*completion_token=*/0x43, /*user_data=*/0), OK);
 	ASSERT_EQ(reset(cmd), OK);
-	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr), OK);
+	ASSERT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, 0, nullptr), OK);
 	out = 0;
 	EXPECT_EQ(KernelWaitEqueue(eq, &ev, 1, &out, &zero), LibKernel::KERNEL_ERROR_ETIMEDOUT);
 
-	ASSERT_EQ(add_event(cmd, eq, /*builder_ident=*/0, /*completion_token=*/0x44, /*user_data=*/0), OK);
+	ASSERT_EQ(add_event(cmd, eq, /*id=*/2, /*completion_token=*/0x44, /*user_data=*/0), OK);
 	ASSERT_EQ(KernelDeleteEqueue(eq), OK);
-	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBuffer(cmd, 1, nullptr, /*completion_ident=*/2, nullptr),
-	          LibKernel::KERNEL_ERROR_EBADF);
+	// A deleted queue fails the event record; the submission itself is still accepted.
+	std::array<uint32_t, 2> result {};
+	EXPECT_EQ(Kernel::FileSystem::KernelAprSubmitCommandBufferAndGetResult(cmd, 1, result.data(), nullptr), OK);
+	EXPECT_EQ(result[0], static_cast<uint32_t>(LibKernel::KERNEL_ERROR_EBADF));
 	EXPECT_EQ(reset(cmd), OK);
 }
 

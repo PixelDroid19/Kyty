@@ -9,7 +9,7 @@
 namespace Kyty::Kernel::AmprPort {
 namespace {
 
-int FallbackSubmitCommandBuffer(void* command_buffer, uintptr_t /*submit_ident*/) noexcept
+int FallbackSubmitCommandBuffer(void* command_buffer, Execution* /*execution*/) noexcept
 {
 	return command_buffer != nullptr ? OK : KERNEL_ERROR_EINVAL;
 }
@@ -23,9 +23,9 @@ void Install(SubmitCommandBufferFunction provider) noexcept
 	g_submit_command_buffer.store(provider != nullptr ? provider : FallbackSubmitCommandBuffer, std::memory_order_release);
 }
 
-int SubmitCommandBuffer(void* command_buffer, uintptr_t submit_ident) noexcept
+int SubmitCommandBuffer(void* command_buffer, Execution* execution) noexcept
 {
-	return g_submit_command_buffer.load(std::memory_order_acquire)(command_buffer, submit_ident);
+	return g_submit_command_buffer.load(std::memory_order_acquire)(command_buffer, execution);
 }
 
 } // namespace Kyty::Kernel::AmprPort

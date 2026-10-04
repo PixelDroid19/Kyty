@@ -395,15 +395,15 @@ static void ampr_event_trigger_func(KernelEqueueEvent* event, void* trigger_data
 	}
 }
 
-int KYTY_SYSV_ABI KernelAddAmprEvent(KernelEqueue eq, uint64_t reserved0, uint64_t reserved1, uintptr_t ident, void* udata)
+// sceKernelAddAmprEvent(eq, id, udata): the id a WriteKernelEventQueue record later triggers.
+int KYTY_SYSV_ABI KernelAddAmprEvent(KernelEqueue eq, int id, void* udata)
 {
 	PRINT_NAME();
 
-	KYTY_LOG_DEBUG("\t eq        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
-	KYTY_LOG_DEBUG("\t reserved0 = 0x%016" PRIx64 "\n", reserved0);
-	KYTY_LOG_DEBUG("\t reserved1 = 0x%016" PRIx64 "\n", reserved1);
-	KYTY_LOG_DEBUG("\t ident     = 0x%016" PRIx64 "\n", static_cast<uint64_t>(ident));
-	KYTY_LOG_DEBUG("\t udata     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(udata));
+	KYTY_LOG_DEBUG("\t eq    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(eq));
+	KYTY_LOG_DEBUG("\t id    = %d\n", id);
+	KYTY_LOG_DEBUG("\t udata = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(udata));
+	const auto ident = static_cast<uintptr_t>(static_cast<uint32_t>(id));
 
 	if (eq == nullptr)
 	{

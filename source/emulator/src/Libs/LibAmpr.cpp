@@ -80,6 +80,8 @@ struct PendingAction
 	Kernel::EventQueue::KernelEqueueIdentity    equeue_identity {};
 	uintptr_t                                   ident            = 0;
 	uintptr_t                                   completion_token = 0;
+	// Completion actions run after every other record of the buffer.
+	bool                                        on_completion    = false;
 };
 
 struct CommandBufferState
@@ -282,13 +284,14 @@ static int AppendEmptyRecord(void* command_buffer, uint64_t record_size)
 }
 
 // --- measure APIs ------------------------------------------------------------
+// A measure reports the record size the encoding needs. Only the file offset
+// selects an encoding; titles measure with placeholder buffers (a null
+// destination and a maximal size) to size their command buffers.
 
-static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFile(uint64_t, uint64_t destination, uint64_t size, uint64_t file_offset)
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFile(uint64_t, uint64_t /*destination*/, uint64_t /*size*/, uint64_t file_offset)
 {
 	PRINT_NAME();
-	return IsValidReadRange(destination, size) && IsValidFileOffset(file_offset)
-	           ? ReadRecordSize(file_offset)
-	           : static_cast<uint32_t>(LibKernel::KERNEL_ERROR_EINVAL);
+	return IsValidFileOffset(file_offset) ? ReadRecordSize(file_offset) : static_cast<uint32_t>(LibKernel::KERNEL_ERROR_EINVAL);
 }
 
 static KYTY_SYSV_ABI uint64_t MeasureCommandSizeWriteKernelEventQueue0400()
@@ -546,8 +549,7 @@ static KYTY_SYSV_ABI int AprCommandBufferReadFile(void* cmd_obj, uint64_t /*a1*/
 	return AppendDeferredRead(cmd, 0x17, file_id, destination, size, file_offset, ReadRecordSize(file_offset));
 }
 
-// Completion writes execute after all records appended before them.
-static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, uint64_t* address, uint64_t value)
+static int AppendWriteAddress(void* cmd_obj, uint64_t* address, uint64_t value, bool on_completion)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
@@ -565,15 +567,15 @@ static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, ui
 	WriteValue(reinterpret_cast<uint64_t>(record.data()) + 0x08, reinterpret_cast<uint64_t>(address));
 	WriteValue(reinterpret_cast<uint64_t>(record.data()) + 0x10, value);
 	PendingAction action {};
-	action.kind    = PendingActionKind::WriteAddress;
-	action.address = reinterpret_cast<uint64_t>(address);
-	action.value   = value;
+	action.kind          = PendingActionKind::WriteAddress;
+	action.address       = reinterpret_cast<uint64_t>(address);
+	action.value         = value;
+	action.on_completion = on_completion;
 	return AppendRecord(cmd, record.data(), record.size(), &action);
 }
 
-// sceAmprCommandBufferWriteKernelEventQueueOnCompletion (o67gODLFpls)
-static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cmd_obj, void* equeue, uint64_t ident,
-                                                                        uint64_t completion_token, uint64_t user_data)
+static int AppendKernelEvent(void* cmd_obj, void* equeue, uint64_t ident, uint64_t completion_token, uint64_t user_data,
+                             bool on_completion)
 {
 	PRINT_NAME();
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
@@ -605,11 +607,38 @@ static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cm
 	WriteValue(reinterpret_cast<uint64_t>(record.data()) + 0x18, completion_token);
 	PendingAction action {};
 	action.kind             = PendingActionKind::KernelEvent;
+	action.on_completion    = on_completion;
 	action.equeue_identity  = identity;
 	action.ident            = static_cast<uintptr_t>(ident);
 	action.completion_token = static_cast<uintptr_t>(completion_token);
 	(void)user_data;
 	return AppendRecord(cmd, record.data(), record.size(), &action);
+}
+
+// Completion actions run once the buffer finishes, after every other record.
+static KYTY_SYSV_ABI int CommandBufferWriteAddressOnCompletion(void* cmd_obj, uint64_t* address, uint64_t value)
+{
+	return AppendWriteAddress(cmd_obj, address, value, true);
+}
+
+// sceAmprCommandBufferWriteKernelEventQueueOnCompletion (o67gODLFpls)
+static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueueOnCompletion(void* cmd_obj, void* equeue, uint64_t ident,
+                                                                        uint64_t completion_token, uint64_t user_data)
+{
+	return AppendKernelEvent(cmd_obj, equeue, ident, completion_token, user_data, true);
+}
+
+// The SDK 4.00 forms take a trailing mode: zero is an ordinary in-order record,
+// nonzero a completion action.
+static KYTY_SYSV_ABI int CommandBufferWriteAddress0400(void* cmd_obj, uint64_t* address, uint64_t value, uint32_t mode)
+{
+	return AppendWriteAddress(cmd_obj, address, value, mode != 0);
+}
+
+static KYTY_SYSV_ABI int CommandBufferWriteKernelEventQueue0400(void* cmd_obj, void* equeue, uint64_t ident, uint64_t data,
+                                                                uint32_t mode)
+{
+	return AppendKernelEvent(cmd_obj, equeue, ident, data, 0, mode != 0);
 }
 
 static int ReadErrorToKernel(int error)
@@ -679,7 +708,7 @@ static int ExecuteRead(const PendingAction& action)
 	return OK;
 }
 
-static int ExecuteAction(const PendingAction& action, uintptr_t submit_ident)
+static int ExecuteAction(const PendingAction& action)
 {
 	switch (action.kind)
 	{
@@ -695,11 +724,8 @@ static int ExecuteAction(const PendingAction& action, uintptr_t submit_ident)
 			{
 				return OK;
 			}
-			const uintptr_t ident = action.ident != 0 ? action.ident : submit_ident;
-			if (ident == 0)
-			{
-				return LibKernel::KERNEL_ERROR_EINVAL;
-			}
+			// The record's id names the event (zero is a valid id).
+			const uintptr_t ident = action.ident;
 			auto equeue_pin = Kernel::EventQueue::KernelAcquireEqueue(action.equeue_identity);
 			if (!equeue_pin)
 			{
@@ -712,10 +738,55 @@ static int ExecuteAction(const PendingAction& action, uintptr_t submit_ident)
 	return LibKernel::KERNEL_ERROR_EINVAL;
 }
 
-int SubmitCommandBuffer(void* cmd_obj, uintptr_t submit_ident)
+static void FinishSubmission(uint64_t resolved)
+{
+	Core::LockGuard lock(g_ampr_mutex);
+	auto            it = g_buffers.find(resolved);
+	if (it == g_buffers.end())
+	{
+		return;
+	}
+	auto& state                      = it->second;
+	state.write_offset               = 0;
+	state.command_count              = 0;
+	state.actions.clear();
+	state.submitting                 = false;
+	state.gather_scatter_valid       = false;
+	state.gather_scatter_file_id     = 0;
+	state.gather_scatter_destination = 0;
+	state.gather_scatter_file_offset = 0;
+	WriteHeader(resolved, state);
+}
+
+// Records run in order and completion actions after them. A failed record does
+// not stop the rest: a title that reads an optional file it could not resolve
+// still waits for the completion write and event that follow the read. The first
+// failure is the execution result, with its record offset.
+static void ExecuteActions(const std::vector<PendingAction>& actions, Kernel::AmprPort::Execution* execution)
+{
+	const auto run = [execution](const PendingAction& action)
+	{
+		const int rc = ExecuteAction(action);
+		if (execution->result == OK && rc != OK)
+		{
+			execution->result       = rc;
+			execution->error_offset = static_cast<uint32_t>(action.record_offset);
+		}
+	};
+	for (const auto& action: actions)
+	{
+		if (!action.on_completion) { run(action); }
+	}
+	for (const auto& action: actions)
+	{
+		if (action.on_completion) { run(action); }
+	}
+}
+
+int SubmitCommandBuffer(void* cmd_obj, Kernel::AmprPort::Execution* execution)
 {
 	const uint64_t cmd = reinterpret_cast<uint64_t>(cmd_obj);
-	if (cmd == 0)
+	if (cmd == 0 || execution == nullptr)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -737,36 +808,9 @@ int SubmitCommandBuffer(void* cmd_obj, uintptr_t submit_ident)
 		pending           = *state;
 	}
 
-	for (const auto& action: pending.actions)
-	{
-		const int rc = ExecuteAction(action, submit_ident);
-		if (rc != OK)
-		{
-			Core::LockGuard lock(g_ampr_mutex);
-			auto            it = g_buffers.find(resolved);
-			if (it != g_buffers.end())
-			{
-				it->second.submitting = false;
-			}
-			return rc;
-		}
-	}
-
-	Core::LockGuard lock(g_ampr_mutex);
-	auto            it = g_buffers.find(resolved);
-	if (it != g_buffers.end())
-	{
-		auto& state                      = it->second;
-		state.write_offset               = 0;
-		state.command_count              = 0;
-		state.actions.clear();
-		state.submitting                 = false;
-		state.gather_scatter_valid       = false;
-		state.gather_scatter_file_id     = 0;
-		state.gather_scatter_destination = 0;
-		state.gather_scatter_file_offset = 0;
-		WriteHeader(resolved, state);
-	}
+	*execution = {};
+	ExecuteActions(pending.actions, execution);
+	FinishSubmission(resolved);
 	return OK;
 }
 
@@ -818,26 +862,26 @@ static KYTY_SYSV_ABI uint64_t MeasureCommandSizePopMarker()
 	return kPopMarkerSize;
 }
 
-static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileScatter(uint64_t destination, uint64_t size)
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileScatter(uint64_t /*destination*/, uint64_t /*size*/)
 {
 	PRINT_NAME();
-	return IsValidReadRange(destination, size) ? kReadScatterRecordSize : static_cast<uint32_t>(LibKernel::KERNEL_ERROR_EINVAL);
+	return kReadScatterRecordSize;
 }
 
-static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileGatherScatter(uint64_t destination, uint64_t size, uint64_t file_offset)
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileGatherScatter(uint64_t /*destination*/, uint64_t /*size*/, uint64_t file_offset)
 {
 	PRINT_NAME();
-	if (!IsValidReadRange(destination, size) || !IsValidFileOffset(file_offset))
+	if (!IsValidFileOffset(file_offset))
 	{
 		return static_cast<uint32_t>(LibKernel::KERNEL_ERROR_EINVAL);
 	}
 	return file_offset > UINT32_MAX ? kReadGatherScatterExtended : kReadGatherScatterRecordSize;
 }
 
-static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileGather(uint64_t size, uint64_t file_offset)
+static KYTY_SYSV_ABI uint64_t MeasureCommandSizeReadFileGather(uint64_t /*size*/, uint64_t file_offset)
 {
 	PRINT_NAME();
-	if (size == 0 || size > kMaxAprReadSize || !IsValidFileOffset(file_offset))
+	if (!IsValidFileOffset(file_offset))
 	{
 		return static_cast<uint32_t>(LibKernel::KERNEL_ERROR_EINVAL);
 	}
@@ -1057,12 +1101,12 @@ LIB_DEFINE(InitAmpr_1)
 	LIB_FUNC("mv0O8Zg0woU", Ampr::CommandBufferMarkerNoOp);
 	LIB_FUNC("DLfoNxTFNVk", Ampr::CommandBufferMarkerNoOp3);
 	LIB_FUNC("cQb8Zr8Q0Y0", Ampr::CommandBufferMarkerNoOp2);
-	LIB_FUNC("j0+3uJMxYJY", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("j0+3uJMxYJY", Ampr::CommandBufferWriteAddress0400);
 	LIB_FUNC("jK+yuYCI7MA", Ampr::CommandBufferMarkerNoOp3);
 	LIB_FUNC("bt3LHR9xjK4", Ampr::CommandBufferMarkerNoOp2);
 	LIB_FUNC("enZm-6GjWqw", Ampr::CommandBufferMarkerNoOp3);
 	LIB_FUNC("t4ExS+SwLjs", Ampr::CommandBufferMarkerNoOp3);
-	LIB_FUNC("H896Pt-yB4I", Ampr::CommandBufferMarkerNoOp3);
+	LIB_FUNC("H896Pt-yB4I", Ampr::CommandBufferWriteKernelEventQueue0400);
 	LIB_FUNC("BVmR1H8l+XI", Ampr::AprCommandBufferReadFileGatherScatter);
 
 	// APR / completion builders
