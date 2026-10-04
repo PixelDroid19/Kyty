@@ -279,6 +279,156 @@ int KYTY_SYSV_ABI EventPropertyArraySetUInt64(EventPropertyArray* array, uint64_
 	return (IsLiveArray(array) ? OK : error_invalid_argument);
 }
 
+int KYTY_SYSV_ABI Terminate()
+{
+	return OK;
+}
+
+int KYTY_SYSV_ABI DestroyContext(int32_t /*context*/)
+{
+	return OK;
+}
+
+int KYTY_SYSV_ABI DestroyHandle(int32_t /*handle*/)
+{
+	return OK;
+}
+
+// Offline there is no outstanding request on a handle to abort.
+int KYTY_SYSV_ABI AbortHandle(int32_t /*handle*/)
+{
+	return OK;
+}
+
+static int AcceptObjectValue(const EventPropertyObject* properties, const char* key)
+{
+	return (IsLivePropertyObject(properties) && key != nullptr && key[0] != '\0' ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetBool(EventPropertyObject* properties, const char* key, bool /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetUInt32(EventPropertyObject* properties, const char* key, uint32_t /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetInt64(EventPropertyObject* properties, const char* key, int64_t /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetUInt64(EventPropertyObject* properties, const char* key, uint64_t /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetFloat32(EventPropertyObject* properties, const char* key, float /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetFloat64(EventPropertyObject* properties, const char* key, double /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetBinary(EventPropertyObject* properties, const char* key, const void* data, size_t size)
+{
+	return (data != nullptr || size == 0 ? AcceptObjectValue(properties, key) : error_invalid_argument);
+}
+
+// A null value makes a child object owned by its parent and returns it through value_ptr.
+static int NestObject(const EventPropertyObject* value, EventPropertyObject** value_ptr)
+{
+	if (value_ptr == nullptr)
+	{
+		return OK;
+	}
+	if (value != nullptr)
+	{
+		if (!IsLivePropertyObject(value))
+		{
+			return error_invalid_argument;
+		}
+		*value_ptr = const_cast<EventPropertyObject*>(value);
+		return OK;
+	}
+	auto* child = new EventPropertyObject;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		g_properties.insert(child);
+		g_live_objects.insert(child);
+	}
+	*value_ptr = child;
+	return OK;
+}
+
+static int NestArray(const EventPropertyArray* value, EventPropertyArray** value_ptr)
+{
+	if (value_ptr == nullptr)
+	{
+		return OK;
+	}
+	if (value != nullptr)
+	{
+		if (!IsLiveArray(value))
+		{
+			return error_invalid_argument;
+		}
+		*value_ptr = const_cast<EventPropertyArray*>(value);
+		return OK;
+	}
+	auto* child = new EventPropertyArray;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		g_arrays.insert(child);
+		g_live_objects.insert(child);
+	}
+	*value_ptr = child;
+	return OK;
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetObject(EventPropertyObject* properties, const char* key, const EventPropertyObject* value,
+                                               EventPropertyObject** value_ptr)
+{
+	const int accepted = AcceptObjectValue(properties, key);
+	return accepted != OK ? accepted : NestObject(value, value_ptr);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetBool(EventPropertyArray* array, bool /*value*/)
+{
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetFloat32(EventPropertyArray* array, float /*value*/)
+{
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetFloat64(EventPropertyArray* array, double /*value*/)
+{
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetBinary(EventPropertyArray* array, const void* data, size_t size)
+{
+	return (IsLiveArray(array) && (data != nullptr || size == 0) ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetArray(EventPropertyArray* array, const EventPropertyArray* value, EventPropertyArray** value_ptr)
+{
+	return (IsLiveArray(array) ? NestArray(value, value_ptr) : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetObject(EventPropertyArray* array, const EventPropertyObject* value,
+                                              EventPropertyObject** value_ptr)
+{
+	return (IsLiveArray(array) ? NestObject(value, value_ptr) : error_invalid_argument);
+}
+
 int KYTY_SYSV_ABI PostEvent(int32_t /*context*/, int32_t /*handle*/, Event* event, uint32_t /*options*/)
 {
 	return (IsLiveEvent(event) ? OK : error_invalid_argument);
@@ -306,8 +456,24 @@ int KYTY_SYSV_ABI DestroyEvent(Event* event)
 LIB_DEFINE(InitNpUniversalDataSystem_1)
 {
 	LIB_FUNC("sjaobBgqeB4", Initialize);
-	// Captured Gen5 TrophyManager thread: dual NID for Initialize.
-	LIB_FUNC("AUIHb7jUX3I", Initialize);
+	LIB_FUNC("47UAEuQl+iI", Terminate);
+	LIB_FUNC("wB7IWzGp2v0", DestroyContext);
+	LIB_FUNC("AUIHb7jUX3I", DestroyHandle);
+	LIB_FUNC("jZCqWFgMehE", AbortHandle);
+	LIB_FUNC("Fidd8vWgyVE", EventPropertyObjectSetBool);
+	LIB_FUNC("AzD4irAcKE4", EventPropertyObjectSetUInt32);
+	LIB_FUNC("56QLTqx911s", EventPropertyObjectSetInt64);
+	LIB_FUNC("xvsP5Yz6FmY", EventPropertyObjectSetUInt64);
+	LIB_FUNC("lbPlT4+QVcE", EventPropertyObjectSetFloat32);
+	LIB_FUNC("4Fu8tHW+u-k", EventPropertyObjectSetFloat64);
+	LIB_FUNC("wAcxBDLHj1M", EventPropertyObjectSetBinary);
+	LIB_FUNC("74ASEqxSnkM", EventPropertyObjectSetObject);
+	LIB_FUNC("0+l4QSWCM4E", EventPropertyArraySetBool);
+	LIB_FUNC("JmgwKm96Lq4", EventPropertyArraySetFloat32);
+	LIB_FUNC("sbSYZLR5AiE", EventPropertyArraySetFloat64);
+	LIB_FUNC("IEdUCV9j2Cw", EventPropertyArraySetBinary);
+	LIB_FUNC("rdi9BAfDLq8", EventPropertyArraySetArray);
+	LIB_FUNC("XY14n3jNIpE", EventPropertyArraySetObject);
 	LIB_FUNC("5zBnau1uIEo", CreateContext);
 	LIB_FUNC("hT0IAEvN+M0", CreateHandle);
 	LIB_FUNC("tpFJ8LIKvPw", RegisterContext);
