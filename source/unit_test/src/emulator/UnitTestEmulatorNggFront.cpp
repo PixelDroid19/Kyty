@@ -396,6 +396,43 @@ Words IfElseBody(const Words& then_block, const Words& else_block, const Words& 
 	return body;
 }
 
+// VOP3 v_writelane_b32 / v_readlane_b32: VDST holds the VGPR (write) or the SGPR (read).
+void LaneMove(Words& words, uint32_t opcode, uint32_t dst, uint32_t src0, uint32_t lane)
+{
+	words.push_back(0xd4000000u | (opcode << 16u) | dst);
+	words.push_back(src0 | (lane << 9u));
+}
+
+// A compiler spill moves one scalar through a constant lane of a VGPR and back.
+Words ScalarSpillBody(uint32_t spilled, uint32_t read_lane)
+{
+	Words body;
+	body.push_back(0xb0000000u | (24u << 16u) | 72u); // s_movk_i32 s24, 72
+	LaneMove(body, 0x361, 20, spilled, Inline(2));    // v_writelane_b32 v20, s<spilled>, 2
+	LaneMove(body, 0x360, 25, 256u + 20u, read_lane); // v_readlane_b32 s25, v20, <lane>
+	Vop1(body, 5, 13, 25);                            // v_cvt_f32_i32 v13, s25
+	Exp(body, 12, 15, true, 13, 13, 13, 13);          // exp pos0 v13 done
+	Sopp(body, 1);                                    // s_endpgm
+	return body;
+}
+
+TEST(EmulatorNggFront, AStaticScalarSpillThroughAVgprLaneExchangesNoLane)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto spill = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(ScalarSpillBody(24u, Inline(2)))), 64u);
+		if (!spill.lane_local) { std::fprintf(stderr, "refused: %s\n", spill.reason.c_str()); }
+		Check(spill.lane_local, "the read yields the spilled scalar in every lane");
+
+		const auto dynamic = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(ScalarSpillBody(24u, 24u))), 64u);
+		Check(!dynamic.lane_local && dynamic.reason.ContainsStr("lane exchange"), "a run-time lane index is a real exchange");
+
+		const auto wave_info = ShaderProveNggFrontLaneLocal(Parse(PrologueThenBody(ScalarSpillBody(3u, Inline(2)))), 64u);
+		Check(!wave_info.lane_local && wave_info.reason.ContainsStr("launch-dependent"), "the slot keeps the launch dependence");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorNggFront, AnIfElseThatDefinesBothArmsDefinesTheVgprForEveryLane)
 {
 	ASSERT_EXIT(([] {

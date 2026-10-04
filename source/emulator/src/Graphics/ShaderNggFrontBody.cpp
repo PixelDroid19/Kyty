@@ -4,6 +4,7 @@
 
 #include "ShaderLaneFlow.h"
 #include "ShaderNativeWaveInternal.h"
+#include "ShaderSpirvInternal.h"
 
 #include <bitset>
 #include <iterator>
@@ -145,6 +146,7 @@ private:
 	bool ScalarAlu(const ShaderInstruction& inst);
 	bool ScalarLoad(const ShaderInstruction& inst);
 	bool Vector(const ShaderInstruction& inst);
+	bool ScalarSpill(const ShaderInstruction& inst);
 	bool VectorSources(const ShaderInstruction& inst);
 	bool VectorDestinations(const ShaderInstruction& inst, bool uniform_result);
 	bool Export(const ShaderInstruction& inst);
@@ -173,7 +175,10 @@ private:
 	std::set<uint32_t>          m_uniform_targets; // joins also reached by an edge every lane takes
 	ExecPartition               m_partition;
 	ExecShape                   m_shape;
-	const ShaderCode*       m_code = nullptr;
+	// Taint of the scalars every static spill write put in a (VGPR, lane) slot.
+	std::map<std::pair<int, int>, uint8_t> m_spills;
+	const ShaderCode*       m_code  = nullptr;
+	uint32_t                m_index = 0;
 };
 
 uint8_t Body::Taint(const ShaderOperand& op) const
@@ -606,6 +611,29 @@ bool SdwaIsIdentity(const ShaderInstruction& inst)
 	return StartsWith(inst.type, "VCmp") ? (!StartsWith(inst.type, "VCmpx") && ShaderComputeWaveSdwaCompareIdentityTuple(inst)) : ShaderComputeWaveSdwaVop2IdentitySupported(inst);
 }
 
+// A V_WRITELANE/V_READLANE with a constant lane that only moves a scalar through one VGPR lane and
+// back (a compiler spill) is lowered to a private scalar slot, as the generic lowering proves with the
+// same predicates: it exchanges no lane and leaves the VGPR untouched. The read yields the scalar
+// written there, so the slot carries the taint of every write to it.
+bool Body::ScalarSpill(const ShaderInstruction& inst)
+{
+	int vgpr = 0;
+	int lane = 0;
+	if (IsStaticScalarSpillWrite(inst, &vgpr, &lane) && HasFutureScalarSpillRead(*m_code, m_index, vgpr, lane))
+	{
+		m_spills[{vgpr, lane}] |= Taint(inst.src[0]);
+		return true;
+	}
+	if (IsStaticScalarSpillRead(inst, &vgpr, &lane) && HasLiveScalarSpill(*m_code, m_index, vgpr, lane))
+	{
+		const auto slot = m_spills.find({vgpr, lane});
+		if (slot == m_spills.end()) { return Fail(inst, "scalar spill read before the body writes its slot"); }
+		Define(inst.dst, slot->second);
+		return true;
+	}
+	return Fail(inst, "lane exchange");
+}
+
 bool Body::Vector(const ShaderInstruction& inst)
 {
 	const bool valu = StartsWith(inst.type, "V");
@@ -670,6 +698,7 @@ bool Body::Step(const ShaderInstruction& inst)
 	if (IsScalarLoad(inst.type)) { return ScalarLoad(inst); }
 	if (IsScalarAlu(inst.type)) { return ScalarAlu(inst); }
 	if (IsLaneLocalImageRead(inst.type)) { return ImageRead(inst); }
+	if (inst.type == Type::VWritelaneB32 || inst.type == Type::VReadlaneB32) { return ScalarSpill(inst); }
 	return Vector(inst);
 }
 
@@ -700,6 +729,7 @@ ShaderNggFrontBodyProof Body::Run(const ShaderCode& code, uint32_t first_index, 
 		}
 		if (m_state.reachable) { CloseRegions(inst.pc); }
 		if (!m_state.reachable) { continue; }
+		m_index = index;
 		if (!Step(inst)) { return m_result; }
 	}
 	m_result.lane_local = m_state.reachable && m_pending.empty() && m_regions.empty();
