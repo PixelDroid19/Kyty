@@ -313,27 +313,16 @@ int KYTY_SYSV_ABI KernelCreateEventFlag(KernelEventFlag* ef, const char* name, u
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	bool single = true;
-	bool fifo   = true;
-
-	switch (attr)
+	// attr = waiter queue (0/FIFO 0x01/priority 0x02) | waiters (0/single 0x10/multi 0x20);
+	// zero fields take the defaults, FIFO and single.
+	const uint32_t queue_mode  = attr & 0x0fu;
+	const uint32_t thread_mode = attr & 0xf0u;
+	if (queue_mode > 0x02u || (thread_mode != 0u && thread_mode != 0x10u && thread_mode != 0x20u))
 	{
-		case 0x10:
-		case 0x11:
-			single = true;
-			fifo   = true;
-			break;
-		case 0x20:
-		case 0x21:
-			single = false;
-			fifo   = true;
-			break;
-		case 0x22:
-			single = false;
-			fifo   = false;
-			break;
-		default: EXIT("unknown attr: %u\n", attr);
+		return KERNEL_ERROR_EINVAL;
 	}
+	const bool single = thread_mode != 0x20u;
+	const bool fifo   = queue_mode != 0x02u;
 
 	*ef = new KernelEventFlagPrivate(String::FromUtf8(name), single, fifo, init_pattern);
 	EventFlagRegister(*ef);
