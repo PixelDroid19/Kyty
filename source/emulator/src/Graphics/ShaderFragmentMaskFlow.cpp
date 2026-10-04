@@ -50,6 +50,9 @@ struct Region
 	// Mask words whose bit is zero for every lane outside the region (a subset of the EXEC it was entered with):
 	// compares evaluated and EXEC copies taken while EXEC was such a subset (VOPC clears inactive lanes).
 	std::bitset<kWords> zero_outside;
+	// Mask words whose bit is one for every lane outside the region: the complement of such a subset, or a union with
+	// one. D = D AND M with such an M keeps every outside lane's bit.
+	std::bitset<kWords> one_outside;
 	bool                exec_subset = true; // EXEC is still a subset of the entry EXEC
 };
 
@@ -63,6 +66,12 @@ struct Loop
 	bool divergent = false;
 	// Every scalar word some instruction of the body may write.
 	std::bitset<kWords> written;
+	// Words whose every write in the body keeps the bit of each lane outside its region (D = D AND/OR/ANDN2 with a
+	// mask confined that way): a lane's bit then follows only its own iterations, so leaving the loop does not
+	// make the word divergent. Observed during a walk and confirmed by the next one.
+	std::bitset<kWords> exempt;
+	std::bitset<kWords> preserving_seen;
+	std::bitset<kWords> violated; // a non-preserving write was seen; never exempt again
 
 	[[nodiscard]] bool Contains(uint32_t pc) const { return pc >= head_pc && pc <= back_pc; }
 };
@@ -119,6 +128,9 @@ private:
 	void                  MarkWritten(unsigned first, unsigned count);
 	[[nodiscard]] bool    ZeroOutsideRegion(const ShaderOperand& operand) const;
 	[[nodiscard]] bool    PreservesLanesOutsideRegion(const ShaderInstruction& inst) const;
+	[[nodiscard]] bool    OneOutsideRegion(const ShaderOperand& operand) const;
+	[[nodiscard]] bool    ResultOneOutsideRegion(const ShaderInstruction& inst) const;
+	void                  MarkOneOutsideRegion(const ShaderOperand& dst);
 	void                  TrackRegionSubset(const ShaderInstruction& inst, bool exec_subset_before);
 	void                  UpdateScc(const ShaderInstruction& inst, uint8_t source_taint);
 	bool                  UniformComparison(const ShaderInstruction& inst) const;
@@ -132,6 +144,8 @@ private:
 	void                  EnterJoin(uint32_t pc);
 	bool                  Walk();
 	void                  FindLoops();
+	ShaderFragmentMaskFlow Fixpoint();
+	bool                  RefineLoopExemptions(bool admitted);
 	bool                  InDivergentLoop(uint32_t pc) const;
 	void                  LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const;
 	bool                  HasInstructionAt(uint32_t pc) const;
@@ -218,11 +232,21 @@ bool Flow::CheckSources(const ShaderInstruction& inst, bool* propagates)
 
 void Flow::MarkWritten(unsigned first, unsigned count)
 {
+	const uint32_t pc = m_code->GetInstructions().At(m_index).pc;
+	for (auto& loop: m_loops)
+	{
+		if (!loop.Contains(pc)) { continue; }
+		for (unsigned word = 0; word < count; ++word)
+		{
+			(m_lane_preserving ? loop.preserving_seen : loop.violated).set(first + word);
+		}
+	}
 	for (auto& region: m_regions)
 	{
 		for (unsigned word = 0; word < count; ++word)
 		{
 			region.zero_outside.reset(first + word);
+			region.one_outside.reset(first + word);
 			if (!m_lane_preserving) { region.written.set(first + word); }
 		}
 	}
@@ -242,17 +266,59 @@ bool Flow::ZeroOutsideRegion(const ShaderOperand& operand) const
 	return true;
 }
 
-// D = D OR/ANDN2/XOR M with M zero outside the region leaves the bit of every lane outside it unchanged, so it does
-// not matter that the guest runs the region for the wave while a host subgroup with no lane inside skips it.
+bool Flow::OneOutsideRegion(const ShaderOperand& operand) const
+{
+	unsigned first = 0;
+	unsigned count = 0;
+	if (m_regions.empty() || !ScalarRange(operand, &first, &count)) { return false; }
+	for (unsigned word = 0; word < count; ++word)
+	{
+		if (!m_regions.back().one_outside.test(first + word)) { return false; }
+	}
+	return true;
+}
+
+static bool SameScalar(const ShaderOperand& a, const ShaderOperand& b)
+{
+	return a.type == b.type && a.register_id == b.register_id;
+}
+
+// D = D OR/ANDN2/XOR M with M zero outside the region, or D = D AND M with M one outside it, leaves the bit of every
+// lane outside the region unchanged, so it does not matter that the guest runs the region for the wave while a host
+// subgroup with no lane inside skips it.
 bool Flow::PreservesLanesOutsideRegion(const ShaderInstruction& inst) const
 {
-	if (inst.type != Type::SOrB64 && inst.type != Type::SAndn2B64 && inst.type != Type::SXorB64) { return false; }
-	if (inst.src_num != 2 || inst.dst.type != inst.src[0].type || inst.dst.register_id != inst.src[0].register_id ||
-	    inst.dst.type == Operand::ExecLo)
+	if (inst.src_num != 2 || inst.dst.type == Operand::ExecLo) { return false; }
+	if (inst.type == Type::SAndB64)
 	{
-		return false;
+		return (SameScalar(inst.dst, inst.src[0]) && OneOutsideRegion(inst.src[1])) ||
+		       (SameScalar(inst.dst, inst.src[1]) && OneOutsideRegion(inst.src[0]));
 	}
-	return ZeroOutsideRegion(inst.src[1]);
+	if (inst.type != Type::SOrB64 && inst.type != Type::SAndn2B64 && inst.type != Type::SXorB64) { return false; }
+	return SameScalar(inst.dst, inst.src[0]) && ZeroOutsideRegion(inst.src[1]);
+}
+
+// Evaluated before the write: whether the 64-bit result has every outside lane's bit set.
+bool Flow::ResultOneOutsideRegion(const ShaderInstruction& inst) const
+{
+	if (m_regions.empty() || inst.dst.type == Operand::ExecLo || ShaderInstructionWritesExec(inst)) { return false; }
+	switch (inst.type)
+	{
+		case Type::SOrn2B64: return inst.src_num == 2 && (OneOutsideRegion(inst.src[0]) || ZeroOutsideRegion(inst.src[1]));
+		case Type::SOrB64: return inst.src_num == 2 && (OneOutsideRegion(inst.src[0]) || OneOutsideRegion(inst.src[1]));
+		case Type::SAndB64: return inst.src_num == 2 && OneOutsideRegion(inst.src[0]) && OneOutsideRegion(inst.src[1]);
+		case Type::SNotB64: return inst.src_num == 1 && ZeroOutsideRegion(inst.src[0]);
+		case Type::SMovB64: return inst.src_num == 1 && OneOutsideRegion(inst.src[0]);
+		default: return false;
+	}
+}
+
+void Flow::MarkOneOutsideRegion(const ShaderOperand& dst)
+{
+	unsigned first = 0;
+	unsigned count = 0;
+	if (m_regions.empty() || !ScalarRange(dst, &first, &count)) { return; }
+	for (unsigned word = 0; word < count; ++word) { m_regions.back().one_outside.set(first + word); }
 }
 
 // Keeps the innermost region's subset facts after `inst`: which mask words are zero outside the region and whether
@@ -473,7 +539,7 @@ void Flow::LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const
 		if (!loop.divergent || !loop.Contains(from_pc) || loop.Contains(to_pc)) { continue; }
 		for (unsigned word = 0; word < kWords; ++word)
 		{
-			if (loop.written.test(word)) { state->scalar[word] |= kDiverged; }
+			if (loop.written.test(word) && !loop.exempt.test(word)) { state->scalar[word] |= kDiverged; }
 		}
 	}
 }
@@ -656,11 +722,13 @@ bool Flow::Step(const ShaderInstruction& inst)
 		return true;
 	}
 	const bool exec_subset_before = !m_regions.empty() && m_regions.back().exec_subset;
+	const bool one_outside_after  = ResultOneOutsideRegion(inst);
 	m_lane_preserving = PreservesLanesOutsideRegion(inst);
 	const bool defined = Define(inst, inst.dst, produced) && Define(inst, inst.dst2, produced);
 	m_lane_preserving = false;
 	if (!defined) { return false; }
 	TrackRegionSubset(inst, exec_subset_before);
+	if (one_outside_after) { MarkOneOutsideRegion(inst.dst); }
 	if (ShaderInstructionTypeChangesExec(inst.type) && inst.dst.type != Operand::ExecLo)
 	{
 		// S_*_SAVEEXEC: the destination took the old EXEC; EXEC is now the combination.
@@ -727,18 +795,50 @@ ShaderFragmentMaskFlow Flow::Run(const ShaderCode& code)
 		return m_result;
 	}
 	FindLoops();
+	// Each word enters a loop's exemption at most once and leaves it at most once.
+	for (unsigned attempt = 0; attempt <= 2u * kWords; ++attempt)
+	{
+		const auto result = Fixpoint();
+		if (!RefineLoopExemptions(result.lane_local)) { return result; }
+	}
+	m_result = {};
+	m_result.reason = "loop exemptions did not settle";
+	return m_result;
+}
+
+ShaderFragmentMaskFlow Flow::Fixpoint()
+{
+	m_result = {};
+	m_entry.clear();
+	m_spills.clear();
+	for (auto& loop: m_loops) { loop.preserving_seen.reset(); }
 	for (uint32_t pass = 0; pass < kMaxPasses; ++pass)
 	{
 		if (!Walk()) { return m_result; }
 		if (!m_changed)
 		{
 			m_result.lane_local = true;
-			MarkAcceptedExecWrites(code);
+			MarkAcceptedExecWrites(*m_code);
 			return m_result;
 		}
 	}
 	m_result.reason = "the mask flow did not reach a fixpoint";
 	return m_result;
+}
+
+// Returns whether another fixpoint is needed. An admitted result stands once no exempt word saw a
+// non-preserving write; a refused one is retried with every word only ever written preservingly.
+bool Flow::RefineLoopExemptions(bool admitted)
+{
+	bool changed = false;
+	for (auto& loop: m_loops)
+	{
+		auto next = admitted ? loop.exempt : (loop.exempt | (loop.preserving_seen & loop.written));
+		next &= ~loop.violated;
+		changed = changed || next != loop.exempt;
+		loop.exempt = next;
+	}
+	return changed;
 }
 
 } // namespace
