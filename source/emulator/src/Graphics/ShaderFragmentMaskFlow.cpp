@@ -2,6 +2,7 @@
 
 #include "ShaderLaneFlow.h"
 #include "ShaderNativeWaveInternal.h"
+#include "ShaderSpirvInternal.h"
 
 #include <map>
 #include <vector>
@@ -125,6 +126,8 @@ private:
 	[[nodiscard]] bool    IsUniformMask(const ShaderOperand& operand) const;
 	void                  SetUniformMask(const ShaderOperand& dst, bool uniform);
 	bool                  Step(const ShaderInstruction& inst);
+	[[nodiscard]] bool    IsScalarSpill(const ShaderInstruction& inst) const;
+	bool                  ScalarSpill(const ShaderInstruction& inst);
 	bool                  Branch(const ShaderInstruction& inst);
 	void                  EnterJoin(uint32_t pc);
 	bool                  Walk();
@@ -144,7 +147,10 @@ private:
 	std::vector<Loop>             m_loops;
 	bool                          m_changed = false; // a back edge changed a loop-head state during this walk
 	bool                          m_lane_preserving = false; // the write being defined keeps every inactive lane's bit
+	// Taint of every word a static spill wrote to a (VGPR, lane) slot; it only grows across walks.
+	std::map<std::pair<int, int>, uint8_t> m_spills;
 	const ShaderCode*             m_code    = nullptr;
+	uint32_t                      m_index   = 0; // instruction being stepped
 };
 
 uint8_t Flow::Taint(const ShaderOperand& operand) const
@@ -578,6 +584,36 @@ void Flow::EnterJoin(uint32_t pc)
 	}
 }
 
+// A V_WRITELANE/V_READLANE with a constant lane that only moves a scalar through one VGPR lane and back (a
+// compiler spill) is lowered to a private scalar slot, as the generic lowering proves with the same predicates,
+// so it exchanges no lane. A run-time lane index or an unpaired move is not a spill.
+bool Flow::IsScalarSpill(const ShaderInstruction& inst) const
+{
+	int vgpr = 0;
+	int lane = 0;
+	return (IsStaticScalarSpillWrite(inst, &vgpr, &lane) && HasFutureScalarSpillRead(*m_code, m_index, vgpr, lane)) ||
+	       (IsStaticScalarSpillRead(inst, &vgpr, &lane) && HasLiveScalarSpill(*m_code, m_index, vgpr, lane));
+}
+
+// The slot carries the taint of every word written to it: a spilled mask word is read back as a mask word. A
+// widened slot taint takes another walk so reads before a later write in a loop see it.
+bool Flow::ScalarSpill(const ShaderInstruction& inst)
+{
+	int vgpr = 0;
+	int lane = 0;
+	if (IsStaticScalarSpillWrite(inst, &vgpr, &lane))
+	{
+		auto&         slot  = m_spills[{vgpr, lane}];
+		const uint8_t taint = static_cast<uint8_t>(slot | Taint(inst.src[0]));
+		m_changed           = m_changed || taint != slot;
+		slot                = taint;
+		return true;
+	}
+	(void)IsStaticScalarSpillRead(inst, &vgpr, &lane);
+	const auto slot = m_spills.find({vgpr, lane});
+	return Define(inst, inst.dst, slot != m_spills.end() ? slot->second : kClean);
+}
+
 bool Flow::Step(const ShaderInstruction& inst)
 {
 	if (WritesMemory(inst.type)) { return Fail(inst, "memory write: helper lanes would be observable"); }
@@ -589,6 +625,7 @@ bool Flow::Step(const ShaderInstruction& inst)
 		m_state.reachable = false; // this path ends; the next label revives the walk
 		return true;
 	}
+	if (IsScalarSpill(inst)) { return ScalarSpill(inst); }
 	// Forward EXEC/VCC branches are emitted quad-uniform (helpers take their quad's vote), so a fetch inside such a
 	// region computes derivatives from its whole quad. Inside a loop exited by a lane mask the quad can still split
 	// across iterations, so implicit derivatives stay refused there.
@@ -668,6 +705,7 @@ bool Flow::Walk()
 		const auto& inst = instructions.At(index);
 		EnterJoin(inst.pc);
 		if (!m_state.reachable) { continue; }
+		m_index = index;
 		if (!Step(inst)) { return false; }
 	}
 	if (!m_regions.empty())

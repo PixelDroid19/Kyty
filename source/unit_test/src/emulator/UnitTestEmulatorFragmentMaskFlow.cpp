@@ -144,6 +144,46 @@ TEST(EmulatorFragmentMaskFlow, ANumericObservationOfTheMaskIsRefused)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
+// VOP3 v_writelane_b32 / v_readlane_b32: VDST holds the VGPR (write) or the SGPR (read).
+void LaneMove(Words& words, uint32_t opcode, uint32_t dst, uint32_t src0, uint32_t lane)
+{
+	words.push_back(0xd4000000u | (opcode << 16u) | dst);
+	words.push_back(src0 | (lane << 9u));
+}
+
+// The saved EXEC spilled through two lanes of v3 and read back before the restore,
+// as a compiler spills a scalar pair under register pressure.
+std::vector<Words> SpilledSaveSlots(bool read_back_as_number)
+{
+	auto slots = Baseline();
+	LaneMove(slots[kSave], 0x361, 3, 12, Inline(1)); // v_writelane_b32 v3, s12, 1
+	LaneMove(slots[kSave], 0x361, 3, 13, Inline(2)); // v_writelane_b32 v3, s13, 2
+	slots[kRestore].clear();
+	LaneMove(slots[kRestore], 0x360, 40, kVgpr + 3, Inline(1)); // v_readlane_b32 s40, v3, 1
+	LaneMove(slots[kRestore], 0x360, 41, kVgpr + 3, Inline(2)); // v_readlane_b32 s41, v3, 2
+	if (read_back_as_number)
+	{
+		Vop1(slots[kRestore], 1, 4, 40); // v_mov_b32 v4, s40
+	}
+	Sop1(slots[kRestore], 4, kExecLo, 40); // s_mov_b64 exec, s[40:41]
+	return slots;
+}
+
+TEST(EmulatorFragmentMaskFlow, AMaskSpilledThroughAVgprLaneStaysAMask)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto spilled = ShaderAnalyzeFragmentMaskFlow(ParsePixel(SpilledSaveSlots(false)));
+		if (!spilled.lane_local) { std::fprintf(stderr, "refused: %s\n", spilled.reason); }
+		Check(spilled.lane_local && spilled.reason == nullptr, "a static spill moves the saved EXEC like a scalar copy");
+
+		const auto observed = ShaderAnalyzeFragmentMaskFlow(ParsePixel(SpilledSaveSlots(true)));
+		Check(!observed.lane_local && Contains(observed.reason, "mask observed as a number"),
+		      "the read-back word is still a mask");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorFragmentMaskFlow, ASelectUnderAMaskDerivedSccIsRefused)
 {
 	ASSERT_EXIT(([] {
