@@ -3161,7 +3161,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		}
 		if ((gen5 ? r.Base40() : r.Base38()) == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (gen5 ? r.Base40() : r.Base38()) == 0 condition ignored (continuing)\n"); }
 		if (r.MinLod() != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.MinLod() != 0 condition ignored (continuing)\n"); }
-		if (r.Type() != 8 && r.Type() != 9 && !arrayed_2d && !three_dimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: r.Type() != 8 && r.Type() != 9 && !arrayed_2d && !three_dimensional condition ignored (continuing)\n"); }
+		if (r.Type() != 8 && r.Type() != 9 && !arrayed_2d && !three_dimensional)
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sampled texture type %u is bound as 2D: format=%u tile=%u %ux%u\n",
+			               static_cast<unsigned>(r.Type()), static_cast<unsigned>(gen5 ? r.Format() : r.Dfmt()),
+			               static_cast<unsigned>(r.TileMode()), static_cast<unsigned>((gen5 ? r.Width5() : r.Width4()) + 1u),
+			               static_cast<unsigned>((gen5 ? r.Height5() : r.Height4()) + 1u));
+		}
 		if (arrayed_2d && (r.ArrayPitch() != 0 || r.BaseArray5() > r.Depth())) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: arrayed_2d && (r.ArrayPitch() != 0 || r.BaseArray5() > r.Depth()) condition ignored (continuing)\n"); }
 		// Gen5 2D resources encode pitch in word4[13:0]; Depth() overlaps those bits.
 		if (!gen5)
