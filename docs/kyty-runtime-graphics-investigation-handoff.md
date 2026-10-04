@@ -327,29 +327,39 @@ against the same correct gameplay capture.
 ## Evidence and exclusions
 
 - Uninitialized constant-buffer V# in a Unity title's EUD (2026-10-04, open).
-  A pixel shader loads its constant-buffer V# with `s_load_dwordx4 s[88:91],
-  s[28:29], 160` and immediately reads 272 bytes through it. Its AGC metadata
-  agrees: user SGPRs 30, `eud_size_dw` 44, type-5 EUD pointer at SGPR 28, five
-  8-dword T# at API offsets 32-64 (EUD dwords 0-39) and one constant-buffer
-  sharp at API offset 72 (EUD dwords 40-43). The DCB sets `s[28:29]` to the
-  table that holds those five T# words, and the indirect SH register list
-  begins exactly at table+0xb0, so all 44 dwords are reserved. Dwords 40-43
-  are never written: a 1 ms CPU watcher from the first submit shows the slot
-  receiving unrelated heap data from the guest itself about 0.55 s into boot
-  and no later write for the life of the run; a GPU-writer history restricted
-  to the slot records no CP, DMA, EOP or writeback write; no DMA destination is
-  rejected and no indirect SH pair is dropped. Binding therefore receives a
-  stale V# and stops on an unmaterialized range in most normal-speed runs; a
-  slower diagnostic run reaches the menu. Excluded: late guest write, lost or
-  clobbering emulator writes, wrong EUD pointer and wrong EUD offset base. An
-  older uncommitted working copy of `feature/gen5-3d-world` (2026-09-08 binary) reaches
-  gameplay from the same profile in 2/2 runs with no storage error, and its HLE
-  call sequence matches; the behavioural difference is unidentified. Next
-  step: hardware-watch the slot under that binary to identify the guest writer,
-  then compare the decision the guest takes in the current tree. Separately,
-  `Shader.cpp` marks every dynamically loaded storage descriptor as having a
-  dynamic SMEM offset, so its required byte span is never derived even when
-  every consumer uses immediate offsets.
+  A colour-grading pixel shader loads its constant-buffer V# with `s_load_dwordx4
+  s[88:91], s[28:29], 160` and reads 208 bytes through it at immediate offsets
+  (0, 16, 80, 144, 208 with x16 loads). Its AGC metadata agrees: user SGPRs 30,
+  `eud_size_dw` 44, type-5 EUD pointer at SGPR 28, five 8-dword T# at API offsets
+  32-64 (EUD dwords 0-39) and one constant-buffer sharp at API offset 72 (EUD
+  dwords 40-43). The guest writes the five T# and never dwords 40-43: a 1 ms CPU
+  watcher saw one early heap write and none later; no CP, DMA, EOP or writeback
+  write reaches the slot; no DMA_DATA source or destination is rejected; the
+  indirect SH/CX/UC patch helpers only touch their packets. The slot holds two
+  64-bit guest pointers, e.g. `0x0000022a280000f0` and `0x000002122449c574`
+  (the same values on 2026-09-09 and today, sometimes one dword later), not a V#.
+  Since `290862c0` the bind requests only the proven SMEM span (0xd0 bytes, not
+  the 0x569000 the decoded V# declares), and `32a1b60c` copies a readable mapped
+  span; the base is unmapped in this tree, so the strict run stops after 12-71 s.
+  The 2026-09-08 binary compiles and binds the same shader and slot from the same
+  profile and runs 264 s; its address was readable in its layout, so its run
+  proves no correct constant data. Open: whether hardware ever executes this pass
+  with these words, or a guest/driver write is still missing. Intermittently the
+  title also stalls at boot: the main thread stops after `RequestThreadContext`
+  while another waits in `KernelWaitEventFlag`, with no flip pending.
+
+- Unintegrated `feature/reviewed-main` work (2026-10-04). That branch holds 72
+  commits (2026-08-27..09-20) absent from main; `d0cdd035`, `65edd72c`,
+  `290862c0` and `32a1b60c` are integrated (the libc port without its duplicate
+  malloc-replacement scan). The other commits conflict with the current tree
+  (388 hunks in 90 files when merged at once; most per commit), chiefly the
+  compute-colour-fill series (`025fc328`..`7a56abb4`), the Gen5 ISA/packet
+  repairs (`ccd3bb59`, `aef71d7d`, `107130e0`), descriptor/storage priorities
+  (`2596531a`), audio and user-service fixes, fused object names, the flip
+  drain (`ea6cf330`, superseded by GPU-queued flip accounting) and the
+  case-insensitive path resolver (`d41626ed`, superseded by
+  `Path::MatchCaseInsensitive`). Port each one only against a reproduced
+  failure; several reimplement logic the current tree changed.
 
 - Metadata-operation qualification (2026-10-03): same-context observations
   identify fast-clear elimination and a newly created, undefined host color

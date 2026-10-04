@@ -29,7 +29,7 @@ Loader::SymbolResolve ResolveFor(const char16_t* nid)
 
 TEST(EmulatorImeDialog, AnOpenedDialogFinishesWithTheTitlesDefaultText)
 {
-	char16_t text[16] = u"Zoo";
+	char16_t text[16] = u"Name";
 	ImeDialog::ImeDialogParam param {};
 	param.user_id           = 1;
 	param.max_text_length   = 15;
@@ -41,7 +41,7 @@ TEST(EmulatorImeDialog, AnOpenedDialogFinishesWithTheTitlesDefaultText)
 	std::memset(&result, 0x5a, sizeof(result));
 	ASSERT_EQ(ImeDialog::ImeDialogGetResult(&result), 0);
 	EXPECT_EQ(result.end_status, ImeDialog::END_STATUS_OK);
-	EXPECT_EQ(std::memcmp(text, u"Zoo", sizeof(u"Zoo")), 0);
+	EXPECT_EQ(std::memcmp(text, u"Name", sizeof(u"Name")), 0);
 	EXPECT_EQ(ImeDialog::ImeDialogTerm(), 0);
 	EXPECT_EQ(ImeDialog::ImeDialogGetStatus(), ImeDialog::STATUS_NONE);
 }

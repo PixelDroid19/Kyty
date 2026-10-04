@@ -254,6 +254,51 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Title runtime repairs (2026-10-04, guest verified on seven of eight titles)
+
+Scope: strict runs of the eight-title regression set on the reference host (Intel Xe, Vulkan 1.4, Native,
+`KYTY_SHADER_OPTIMIZATION=None`, shader validation on, 300 s limit). Seven titles reach gameplay with no fatal for
+the whole observation window (five Unity titles, a Construct title and a Haxe title); a sixth Unity title
+still stops on an unmapped constant-buffer V# (open item below). Every repair has a focused
+red->green test; 1,859 unit tests pass in one process; boundary, table, playable-regression and capture gates pass.
+
+- **Interrupt context id.** `sceAgcDriverGetEqContextId` (`Zw7uUVPulbw`, name confirmed by NID hash) returns the
+  `interrupt_ctx_id` of the ReleaseMem that raised a graphics event. The 8-dword ReleaseMem envelope carries it in
+  its last dword; the command processor passes it to the interrupt label and the event delivers it as `data` (no
+  title reads an EOP timestamp there). The guest indexes per-frame GPU timing slots with it.
+- **Case-insensitive guest paths.** An IL2CPP player loads `Il2CppUserAssemblies.prx` that its package stores as
+  `Il2cppUserAssemblies.prx`, once, and works on hardware. Mounted paths resolve each missing component to the
+  only host entry equal ignoring ASCII case (`Path::MatchCaseInsensitive`); the exact entry wins, an ambiguous one
+  stays unresolved, and missing tails stay verbatim so creation and ENOENT follow the guest.
+- **VideoOut blank flips and GPU-queued flips.** Index -1 (`SCE_VIDEO_OUT_BUFFER_INDEX_BLANK`) presents a black
+  frame (`WindowDrawBlank`) instead of being rejected or re-flipping the current buffer. A flip the command
+  processor decoded counts as pending (`gcQueueNum`, included in `flipPendingNum`) until the flip queue owns it
+  (`VideoOutFlipPending`); a guest that waits for `IsFlipPending() == 0`, flips blank and unregisters its buffers no
+  longer races a flip still in its command stream.
+- **Quiesce before the first submission.** A guest munmap of GPU-mapped memory quiesces the GPU; a command
+  processor that never recorded has nothing to complete and no longer creates command buffers before the render
+  context exists.
+- **Malloc replacement initializer.** A Construct title declares `initialize` as a bare `ret`, so rax still holds
+  the callback address; libc publishes the allocator regardless of the initializer's return value. The duplicate
+  table scan and second `initialize` call carried by the libc runtime port were removed.
+- **`v_nop`.** VOP1 `v_nop` carries no operands (its encoding fields are ignored), and the NGG passthrough proof
+  treats it as an inert scheduling hint like `S_NOP`.
+- **NGG front scalar spills.** A `v_writelane`/`v_readlane` pair with a constant lane that only moves a scalar
+  through one VGPR lane is lowered to a private scalar slot; the fused-front body proof now carries the scalar's
+  taint through that slot instead of refusing it as a lane exchange. Run-time lane indices stay refused.
+- **Ported from `feature/reviewed-main`:** guest `.eh_frame` registration (`d0cdd035`), the libc runtime and C++
+  exception helpers (`65edd72c`: `log10`, `log2`, `difftime`, `__cxa_*`, `_Unwind_*`, ...), and the proven SMEM
+  span for dynamically loaded storage descriptors plus the readable-memory copy of tiny static spans
+  (`290862c0`, `32a1b60c`). 69 further commits of that branch conflict with the current tree and are not
+  integrated (list in the handoff).
+
+Open: the remaining Unity title's colour-grading pass loads its constant-buffer V# from extended user data dwords
+40-43, which the guest never writes; they hold two 64-bit guest pointers (deterministic across runs). The bind now
+requests only the 208 proven bytes, but the base is not mapped, so the strict run stops (12-71 s). The September
+binary binds the same slot because the address was readable in its memory layout. Intermittently the same title
+also stalls at boot (main thread after `RequestThreadContext`, another thread in `KernelWaitEventFlag`). A
+Haxe title shows a flickering element while walking and breaking objects (user report, no root cause yet).
+
 ### Reference workload runs d58-d96: stable 266 s, no fatal, still black (2026-10-04)
 
 Scope: this section records what changed between the vertex-front proof below and run d96, what the strict run
