@@ -957,6 +957,30 @@ uint32_t GraphicsAgcReleaseMemCacheAction(uint16_t gcr_cntl)
 	return ((gcr_cntl & GcrGl2Writeback) != 0u) ? 0x38u : 0x00u;
 }
 
+bool CommandProcessor::HasPendingDeferredWrite(const uint32_t* dst, uint32_t size_bytes) const
+{
+	SubmissionDependency dependency {};
+	const uint64_t       mask   = size_bytes == 8u ? ~0ull : 0xffffffffull;
+	const auto           result = m_submission_slots.FindPendingProducer(reinterpret_cast<uint64_t>(dst), size_bytes, 0, mask, &dependency);
+	return result == GpuSubmissionResult::Success || result == GpuSubmissionResult::ProducerValueMismatch;
+}
+
+void CommandProcessor::DeferWriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num)
+{
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+	const uint64_t value = dw_num == 2u ? (src[0] | (static_cast<uint64_t>(src[1]) << 32u)) : src[0];
+	if (dw_num == 2u)
+	{
+		GraphicsRenderWriteAtEndOfPipe64(m_sumbit_id, m_buffer[m_current_buffer], reinterpret_cast<uint64_t*>(dst), value);
+	} else
+	{
+		GraphicsRenderWriteAtEndOfPipe32(m_sumbit_id, m_buffer[m_current_buffer], dst, src[0]);
+	}
+	const auto register_result =
+	    m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer), reinterpret_cast<uint64_t>(dst), dw_num * 4u, value);
+	require_submission_success(register_result, "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
+}
+
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom,
                                  bool matching_wait_mem64)
 {
@@ -995,6 +1019,15 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 		const auto register_result = m_submission_slots.RegisterProducer(static_cast<uint32_t>(m_current_buffer),
 		                                                                 reinterpret_cast<uint64_t>(dst), sizeof(uint64_t), value);
 		require_submission_success(register_result, "RegisterProducer", m_queue, static_cast<uint32_t>(m_current_buffer));
+		return;
+	}
+
+	// The CP performs WRITE_DATA in order. When an earlier write to this address was
+	// deferred to end of pipe (a write its WAIT_REG_MEM consumes), an immediate store
+	// would land first and then be overwritten; it is deferred behind that one instead.
+	if (custom && (dw_num == 1u || dw_num == 2u) && HasPendingDeferredWrite(dst, dw_num * 4u))
+	{
+		DeferWriteData(dst, src, dw_num);
 		return;
 	}
 
