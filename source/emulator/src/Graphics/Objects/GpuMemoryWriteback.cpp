@@ -29,6 +29,9 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
+#include <utility>
+#include <vector>
 
 #define XXH_INLINE_ALL
 #include <xxhash/xxhash.h>
@@ -476,23 +479,54 @@ void GpuMemory::Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }
 
-bool GpuMemory::PendingStorageWriteBack(uint64_t vaddr, uint64_t size, SubmissionId* dependency)
+// True when [vaddr, vaddr + size) meets one of the sorted, disjoint ranges.
+static bool OverlapsSortedRanges(const GpuMemoryGuestRanges& ranges, uint64_t vaddr, uint64_t size)
+{
+	const uint64_t end   = vaddr + size;
+	const auto     after = std::lower_bound(ranges.begin(), ranges.end(), end,
+	                                        [](const std::pair<uint64_t, uint64_t>& range, uint64_t value) { return range.first < value; });
+	if (after == ranges.begin())
+	{
+		return false;
+	}
+	const auto& range = *std::prev(after);
+	return range.first + range.second > vaddr;
+}
+
+std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemoryGuestRanges& ranges) const
+{
+	std::vector<std::pair<int, int>> found;
+	const auto&                      heaps = m_heaps;
+	for (const auto& [heap_id, object_id]: m_storage_objects)
+	{
+		const auto& object = heaps[heap_id].objects[object_id];
+		EXIT_IF(object.free);
+		const auto& info = object.info;
+		if (!info.in_use || info.read_only || info.object.obj == nullptr)
+		{
+			continue;
+		}
+		for (int block = 0; block < object.block.vaddr_num; block++)
+		{
+			if (object.block.size[block] != 0 && OverlapsSortedRanges(ranges, object.block.vaddr[block], object.block.size[block]))
+			{
+				found.emplace_back(heap_id, object_id);
+				break;
+			}
+		}
+	}
+	return found;
+}
+
+bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
-	if (size == 0) { return false; }
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	const int heap_id = GetHeapId(vaddr, size);
-	if (heap_id < 0) { return false; }
-	const auto objects = FindBlocks(heap_id, &vaddr, &size, 1);
-	for (const auto& object: objects)
+	const auto&     heaps = m_heaps;
+	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges))
 	{
-		const auto& block = m_heaps[heap_id].objects[object.object_id];
-		EXIT_IF(block.free);
-		const auto& info = block.info;
-		if (info.object.type != GpuMemoryObjectType::StorageBuffer || !info.in_use || info.read_only ||
-		    info.write_back_func == nullptr || info.object.obj == nullptr) { continue; }
-		for (const auto& use: info.submission_uses.Dependencies())
+		for (const auto& use: heaps[heap_id].objects[object_id].info.submission_uses.Dependencies())
 		{
 			if (m_deferred_deletions.AreDependenciesComplete({use})) { continue; }
 			*dependency = use;
@@ -502,38 +536,15 @@ bool GpuMemory::PendingStorageWriteBack(uint64_t vaddr, uint64_t size, Submissio
 	return false;
 }
 
-void GpuMemory::WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
+void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges)
 {
 	EXIT_IF(ctx == nullptr);
-	if (size == 0)
-	{
-		return;
-	}
-
 	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
-
-	const int heap_id = GetHeapId(vaddr, size);
-	if (heap_id < 0)
+	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges))
 	{
-		return;
-	}
-
-	auto& heap       = m_heaps[heap_id];
-	auto  object_ids = FindBlocks(heap_id, &vaddr, &size, 1);
-
-	for (const auto& obj: object_ids)
-	{
-		auto& h = heap.objects[obj.object_id];
-		EXIT_IF(h.free);
-		auto& o = h.info;
-		if (o.object.type != GpuMemoryObjectType::StorageBuffer || !o.in_use || o.write_back_func == nullptr || o.read_only ||
-		    o.object.obj == nullptr)
-		{
-			continue;
-		}
-		WriteBackObjectLocked(ctx, heap_id, obj.object_id, &destructors);
+		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors);
 	}
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }

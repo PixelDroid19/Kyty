@@ -4,6 +4,9 @@
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/Vector.h"
 
+#include <utility>
+#include <vector>
+
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/GpuDeferredDeletionQueue.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
@@ -1039,11 +1042,12 @@ void  GpuMemoryFrameDone(GraphicContext* ctx);
 void  GpuMemoryFrameDone();
 void  GpuMemoryWriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 void  GpuMemoryCompleteSubmission(SubmissionId submission);
-// GPU→CPU for StorageBuffers overlapping [vaddr, size) before a CPU texture
-// upload. Tile-27 samples that miss RT/ST still link SB parents; without this
-// detile reads empty guest memory and paints opaque-black props.
-void GpuMemoryWriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
-[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(uint64_t vaddr, uint64_t size, SubmissionId* dependency);
+// Guest [vaddr, vaddr + size) spans, sorted by address and disjoint, queried under one GPU-memory lock.
+using GpuMemoryGuestRanges = std::vector<std::pair<uint64_t, uint64_t>>;
+// GPU→CPU for the writable StorageBuffers overlapping any of the ranges.
+void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges);
+// Reports one incomplete submission use of a writable StorageBuffer overlapping any of the ranges.
+[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, SubmissionId* dependency);
 // Exception handling accepts only a page fault caused by an armed tracker
 // protection. Known host/HLE writers use the explicit range notification.
 bool GpuMemoryCheckAccessViolation(uint64_t vaddr);

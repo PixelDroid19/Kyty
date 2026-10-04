@@ -948,6 +948,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			h.objects_map2  = new GpuMap2;
 			h.overlap_cache = new OverlapQueryCache;
 			m_heaps.Add(h);
+			RebuildHeapIndex();
 			m_allocated_validation_cache.Invalidate();
 			m_allocated_prefix_cache.Invalidate();
 			m_overlap_snapshot_cache.Invalidate();
@@ -2285,6 +2286,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		h.scenario = scenario;
 		h.free     = false;
 		heap.objects.Add(h);
+	}
+	if (o.object.type == GpuMemoryObjectType::StorageBuffer && o.write_back_func != nullptr)
+	{
+		m_storage_objects.emplace(heap_id, index);
 	}
 
 	if (overlap)

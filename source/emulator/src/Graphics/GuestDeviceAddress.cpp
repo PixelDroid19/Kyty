@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -67,6 +68,8 @@ struct Registry
 	bool                                         population_scanned = false;
 	Table                     table;
 	std::vector<Table>        retired;
+	// Sorted, disjoint union of the registered ranges; rebuilt after a change.
+	std::shared_ptr<const GpuMemoryGuestRanges> merged;
 };
 
 Registry& GetRegistry()
@@ -409,6 +412,7 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
 	registry.ranges[vaddr]      = {size, {}, {}, physical_backing};
+	registry.merged             = nullptr;
 	registry.dirty              = true;
 	registry.population_scanned = false;
 }
@@ -450,8 +454,9 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		{
 			DestroyChunk(ctx->device, chunk);
 		}
-		it             = registry.ranges.erase(it);
-		registry.dirty = true;
+		it              = registry.ranges.erase(it);
+		registry.dirty  = true;
+		registry.merged = nullptr;
 	}
 	for (const auto& table: registry.retired)
 	{
@@ -460,38 +465,44 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 	registry.retired.clear();
 }
 
-static std::vector<std::pair<uint64_t, uint64_t>> RegisteredRangesSnapshot()
+static std::shared_ptr<const GpuMemoryGuestRanges> MergedRanges(const std::map<uint64_t, Range>& ranges)
 {
-	std::vector<std::pair<uint64_t, uint64_t>> ranges;
+	auto merged = std::make_shared<GpuMemoryGuestRanges>();
+	for (const auto& [base, range]: ranges)
 	{
-		auto&                       registry = GetRegistry();
-		std::lock_guard<std::mutex> lock(registry.mutex);
-		for (const auto& [base, range]: registry.ranges)
+		const uint64_t end = base + range.size;
+		if (!merged->empty() && base <= merged->back().first + merged->back().second)
 		{
-			ranges.emplace_back(base, range.size);
+			auto& last  = merged->back();
+			last.second = std::max(last.first + last.second, end) - last.first;
+			continue;
 		}
+		merged->emplace_back(base, range.size);
 	}
-	return ranges;
+	return merged;
+}
+
+static std::shared_ptr<const GpuMemoryGuestRanges> RegisteredRangesSnapshot()
+{
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	if (registry.merged == nullptr)
+	{
+		registry.merged = MergedRanges(registry.ranges);
+	}
+	return registry.merged;
 }
 
 bool GuestDeviceAddressPendingWriteBack(SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
-	for (const auto& [base, size]: RegisteredRangesSnapshot())
-	{
-		if (GpuMemoryPendingStorageWriteBack(base, size, dependency)) { return true; }
-	}
-	return false;
+	return GpuMemoryPendingStorageWriteBack(*RegisteredRangesSnapshot(), dependency);
 }
 
 void GuestDeviceAddressWriteBack(GraphicContext* ctx)
 {
-	const auto ranges = RegisteredRangesSnapshot();
 	// GPU-memory mutation never nests inside the address registry lock.
-	for (const auto& [base, size]: ranges)
-	{
-		GpuMemoryWriteBackStorageRange(ctx, base, size);
-	}
+	GpuMemoryWriteBackStorageRanges(ctx, *RegisteredRangesSnapshot());
 }
 
 bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uint32_t* entry_count)

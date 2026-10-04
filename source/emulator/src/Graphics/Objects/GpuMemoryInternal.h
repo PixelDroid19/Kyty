@@ -32,6 +32,10 @@
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
 
+#include <set>
+#include <utility>
+#include <vector>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -311,9 +315,8 @@ public:
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
-	// Write back StorageBuffers that overlap a sample range before CPU detile.
-	void WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
-	[[nodiscard]] bool PendingStorageWriteBack(uint64_t vaddr, uint64_t size, SubmissionId* dependency);
+	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges);
+	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, SubmissionId* dependency);
 
 	// Sync: CPU -> GPU
 	void Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
@@ -450,7 +453,13 @@ private:
 	                                                          uint32_t* scan_budget, Vector<int>* component);
 	[[nodiscard]] DebugStatsGpuMemoryLinkedTopology ClassifyLinkedStorageTopology(
 	    int heap_id, const Vector<OverlappedBlock>& parents, const GpuObject& incoming) const;
-	int   GetHeapId(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] int GetHeapId(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] int HeapAt(uint64_t address) const;
+	void              RebuildHeapIndex();
+	void              ForgetHeapStorageObjects(int removed_heap_id);
+	// (heap id, object id) of each in-use writable StorageBuffer overlapping a range.
+	// The ranges are sorted by address and disjoint.
+	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges) const;
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
 	bool QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
@@ -480,6 +489,18 @@ private:
 	Core::Mutex m_backing_mutation_mutex;
 
 	Vector<Heap> m_heaps;
+	// [begin, end) address spans, sorted and disjoint, each naming the lowest heap
+	// index that covers it: GetHeapId's first-match answer by binary search.
+	struct HeapSpan
+	{
+		uint64_t begin   = 0;
+		uint64_t end     = 0;
+		int      heap_id = -1;
+	};
+	std::vector<HeapSpan> m_heap_index;
+	// (heap id, object id) of every live StorageBuffer object with a write-back:
+	// the only objects a device-address write-back or its wait can touch.
+	std::set<std::pair<int, int>> m_storage_objects;
 
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;
