@@ -191,6 +191,16 @@ void InitAll(::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_LOAD(InitWriteThrottling_1);
 	LIB_LOAD(InitSyncOnAddress_1);
 	LIB_LOAD(InitEOSSDKPS5Shipping_1);
+
+	// libSceLibcInternal exports the system C runtime that libc is built on;
+	// modules that link it directly import the same NIDs under its identity.
+	s->MirrorHleLibrary({{}, U"libc", 1, U"libc", 1, 1, ::Kyty::Hle::HleSymbolType::Func},
+	                    {{}, U"LibcInternal", 1, U"LibcInternal", 1, 1, ::Kyty::Hle::HleSymbolType::Func});
+	// The libkernel module exports its POSIX entry points under both libkernel and libScePosix.
+	s->MirrorHleLibrary({{}, U"Posix", 1, U"libkernel", 1, 1, ::Kyty::Hle::HleSymbolType::Func},
+	                    {{}, U"libkernel", 1, U"libkernel", 1, 1, ::Kyty::Hle::HleSymbolType::Func});
+	s->MirrorHleLibrary({{}, U"libkernel", 1, U"libkernel", 1, 1, ::Kyty::Hle::HleSymbolType::Func},
+	                    {{}, U"Posix", 1, U"libkernel", 1, 1, ::Kyty::Hle::HleSymbolType::Func});
 }
 
 } // namespace Kyty::Libs

@@ -53,6 +53,7 @@ public:
 	void AddHle(const ::Kyty::Hle::HleSymbolResolve& s, uint64_t vaddr, const String& dbg_name) override;
 	void AddHleAliases(::Kyty::Hle::HleSymbolResolve s, std::initializer_list<const char*> names, uint64_t vaddr,
 	                  const String& dbg_name) override;
+	void MirrorHleLibrary(const ::Kyty::Hle::HleSymbolResolve& from, const ::Kyty::Hle::HleSymbolResolve& to) override;
 
 	void Add(const SymbolResolve& s, uint64_t vaddr);
 	void Add(const SymbolResolve& s, uint64_t vaddr, const String& dbg_name);
