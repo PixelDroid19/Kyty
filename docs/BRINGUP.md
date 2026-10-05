@@ -414,6 +414,25 @@ Third round (same day):
   memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; JoJo keeps
   about 4,000 alive and the ordered-set walk was the top host hotspot of its cutscene. The scans now walk the
   in-use, writable subset.
+- **Partially released direct mappings keep their live part.** The .NET beat 'em up's runtime shrinks a buffer by
+  releasing the tail of its direct memory (0x504000 of a 0x55c000 mapping) and maps new memory over that tail. The
+  release marked the whole view released, so the fixed map dropped the head too; the unmap then removed only
+  protection blocks that start inside it, so the whole-mapping block survived and a virtual query of the head still
+  reported 0x55c000 bytes. Its release loop (query, then release `va - start + offset`) then released memory that
+  already backed other allocations, or, for the dropped head (a reservation, offset 0), physical address 0: the
+  1 GiB "User Malloc" mspace whose header lives there. The title died within 2 s in about half of the runs, with an
+  `OutOfMemoryException` from its garbage collector, a corrupted mspace mutex, or a fault on reused GC pages. A
+  release now splits the views it covers in part (the released piece stays a released view), an unmap frees exactly
+  its view's pages (`FreeRange`, as cuts already did) and trims the protection blocks, and a queried region never
+  extends past its mapping. With released views made inaccessible as a check, five runs never touched one.
+- **Written-back writable buffers retire.** The same title binds ring-buffer sub-ranges as writable storage views;
+  linked writable views never retired, so one 288 KiB region held 4,000 objects and grew by ~1,000 every 25 s, and
+  each overlap query returned hundreds of them. A writable buffer owns no content once its writes are written back
+  (`in_use` clears), so it now retires after 120 idle frames like a read-only one.
+- **Write-back and overlap scans use indexes.** Completed-submission write-backs walked every object of every heap
+  (12,546 heaps, ~16,000 objects, on every completion); they now visit an index of in-use writable objects (18 on
+  average). Overlap queries walked every heap; the heap span index now lists every heap covering a span. Loading
+  frames went from 18-23 to 30-36 fps on that title and Dead Cells' walk route from 47-63 to 86 fps.
 
 Investigated and left open:
 
@@ -423,6 +442,10 @@ Investigated and left open:
   about 53 KB changed; the page comparison reads all 15 MB (3 ms per dispatch, 27% of the time). Skipping it is not
   correct (the CPU may read the results); the planned fix copies GPU-written pages on demand. The dirty-page tracker
   also accepts only 512 ranges, so most of JoJo's buffers fall back to full hashes (250 GB hashed in 2 minutes).
+- The .NET beat 'em up plays its logo video (`logos.ogv`, Theora decoded by the title) as a uniform green screen:
+  the three Y/U/V textures (R8, SW_4KB_S, 1920x1080 and 960x540) read as zero in guest memory for the whole clip,
+  and BT.709 of zero planes is (0, 77, 0). The decoded frames never reach those textures; the upload path (the
+  title's own GPU copies) is the next step.
 - The .NET beat 'em up is not frozen: its black screen is a loading screen (its two sprite draws are black, vertex
   colour (0, 0, 0, 0.88), on a black target) while it uploads textures through compute image copies, about 20 per
   frame. Each copy uploads its source and destination images and writes the destination back, each a separate
