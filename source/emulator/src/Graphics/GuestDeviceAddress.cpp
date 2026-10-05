@@ -267,8 +267,9 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 	const uint64_t span_address = base + first * kPageBytes;
 	const uint64_t span_size    = pages * kPageBytes;
 	// A wholly sparse physical interval cannot contain resident pages. Requery
-	// each preparation so a later guest write is discovered normally.
-	if (Kernel::Memory::KernelIsPhysicalRangeUnpopulated(span_address, span_size))
+	// each preparation so a later guest write is discovered normally. Other
+	// ranges have no physical backing to ask about.
+	if (range->physical_backing && Kernel::Memory::KernelIsPhysicalRangeUnpopulated(span_address, span_size))
 	{
 		return true;
 	}
@@ -316,7 +317,6 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 // Quiesced invalidation clears the bitmap when those imports cease to be valid.
 bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* changed)
 {
-	const DebugStatsScopedTimer residency_timer(DebugStatsRecordGuestAddressResidency);
 	range->imported.resize(static_cast<size_t>(range->size / kPageBytes), 0);
 	std::vector<uint8_t> resident;
 	const auto limit = range->imported.end();
@@ -583,17 +583,25 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 	Core::VirtualMemory::SharedBackingPopulation population;
 	const bool known    = Kernel::Memory::KernelQueryPhysicalPopulation(&population);
 	const bool physical = !known || !registry.population_scanned || population != registry.scanned_population;
+	// Ranges number in the thousands for some titles: time each phase once
+	// per preparation, not once per range.
+	{
+		const DebugStatsScopedTimer residency_timer(DebugStatsRecordGuestAddressResidency);
+		for (auto& [base, range]: registry.ranges)
+		{
+			bool changed = false;
+			if ((physical || !range.physical_backing) && !ImportResident(ctx, base, &range, &changed))
+			{
+				return false;
+			}
+			registry.dirty = registry.dirty || changed;
+		}
+	}
+	// Refresh snapshots the CPU wrote since they were taken; the imported
+	// host memory is coherent, so the device sees the refresh directly.
+	const DebugStatsScopedTimer refresh_timer(DebugStatsRecordGuestAddressRefresh);
 	for (auto& [base, range]: registry.ranges)
 	{
-		bool changed = false;
-		if ((physical || !range.physical_backing) && !ImportResident(ctx, base, &range, &changed))
-		{
-			return false;
-		}
-		registry.dirty = registry.dirty || changed;
-		// Refresh snapshots the CPU wrote since they were taken; the imported
-		// host memory is coherent, so the device sees the refresh directly.
-		const DebugStatsScopedTimer refresh_timer(DebugStatsRecordGuestAddressRefresh);
 		for (auto& chunk: range.chunks)
 		{
 			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span, chunk.generation) &&
