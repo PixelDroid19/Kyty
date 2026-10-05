@@ -26,6 +26,10 @@
 namespace Kyty::Kernel::Memory {
 
 namespace VirtualMemory = Core::VirtualMemory;
+
+// sceKernelMap* flags (BSD mmap layout): MAP_FIXED and MAP_NO_OVERWRITE.
+constexpr int kMapFixed       = 0x10;
+constexpr int kMapNoOverwrite = 0x80;
 KERNEL_LIB_NAME();
 
 static bool is_representable_range(uint64_t addr, uint64_t size)
@@ -211,7 +215,14 @@ public:
 	bool     Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool     Release(uint64_t start, size_t len);
 	bool     FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings);
-	bool     CanReplaceReleasedMapping(uint64_t vaddr, uint64_t size, uint64_t new_phys_addr, uint64_t new_phys_size);
+	struct MappedView
+	{
+		uint64_t vaddr    = 0;
+		uint64_t size     = 0;
+		bool     released = false;
+	};
+	// Live (not unmapping) views overlapping [vaddr, vaddr + size), in address order.
+	std::vector<MappedView> OverlappingViews(uint64_t vaddr, uint64_t size);
 	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode,
 	             uint64_t alignment, bool fixed, bool replace_owned_reservation, bool* physical_range_valid);
 	bool     ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
@@ -835,27 +846,23 @@ bool PhysicalMemory::FindMappingsForPhysicalRelease(uint64_t start, size_t len, 
 	return true;
 }
 
-bool PhysicalMemory::CanReplaceReleasedMapping(uint64_t vaddr, uint64_t size, uint64_t new_phys_addr, uint64_t new_phys_size)
+std::vector<PhysicalMemory::MappedView> PhysicalMemory::OverlappingViews(uint64_t vaddr, uint64_t size)
 {
-	if (!is_representable_range(vaddr, size) || !is_representable_range(new_phys_addr, new_phys_size))
+	std::vector<MappedView> views;
+	if (!is_representable_range(vaddr, size))
 	{
-		return false;
+		return views;
 	}
-
 	Core::LockGuard lock(m_mutex);
-	const bool      new_range_allocated = std::any_of(m_allocated.begin(), m_allocated.end(),
-	                                                  [new_phys_addr, new_phys_size](const AllocatedBlock& block)
-	                                                  {
-		                                             return new_phys_addr >= block.start_addr && new_phys_size <= block.size &&
-		                                                    new_phys_addr - block.start_addr <= block.size - new_phys_size;
-	                                                  });
-	if (!new_range_allocated)
+	for (const auto& block: m_mapped)
 	{
-		return false;
+		if (!block.unmap_pending && block.map_vaddr < vaddr + size && vaddr < block.map_vaddr + block.map_size)
+		{
+			views.push_back({block.map_vaddr, block.map_size, block.physical_released});
+		}
 	}
-
-	return std::any_of(m_mapped.begin(), m_mapped.end(), [vaddr, size](const MappedBlock& block)
-	                   { return block.map_vaddr == vaddr && block.map_size == size && block.physical_released && !block.unmap_pending; });
+	std::sort(views.begin(), views.end(), [](const MappedView& a, const MappedView& b) { return a.vaddr < b.vaddr; });
+	return views;
 }
 
 uint64_t PhysicalMemory::TotalAllocatedBytes()
@@ -2032,6 +2039,53 @@ int KYTY_SYSV_ABI KernelCheckedReleaseDirectMemory(int64_t start, size_t len)
 	return release_direct_memory(start, len);
 }
 
+// Returns [start, end) of the reservation to the guest reservation set.
+static bool restore_reservation(uint64_t start, uint64_t end)
+{
+	return start >= end ||
+	       (g_reserved_memory != nullptr && VirtualMemory::ReserveFixed(start, end - start) && g_reserved_memory->Add(start, end - start));
+}
+
+// A fixed map without NO_OVERWRITE replaces the views it covers, as the BSD
+// kernel does. A released view (its pages may already back another
+// allocation, so no one may use it) is dropped whole and its parts outside
+// the new range return to the reservation; a live view must lie inside the
+// range. The range itself becomes a reservation the fixed-map transaction
+// consumes. Ranges with gaps or partly covered live views are left as they
+// are, and the map then fails as before.
+static int clear_fixed_map_target(uint64_t vaddr, uint64_t len)
+{
+	const auto views = g_physical_memory->OverlappingViews(vaddr, len);
+	uint64_t   next  = vaddr;
+	for (const auto& view: views)
+	{
+		const bool contained = view.vaddr >= vaddr && view.vaddr + view.size <= vaddr + len;
+		if (view.vaddr > next || (!view.released && !contained))
+		{
+			return OK;
+		}
+		next = std::max(next, view.vaddr + view.size);
+	}
+	if (views.empty() || next < vaddr + len)
+	{
+		return OK;
+	}
+	for (const auto& view: views)
+	{
+		const int unmapped = KernelMunmap(view.vaddr, view.size);
+		if (unmapped != OK)
+		{
+			return unmapped;
+		}
+		if (!restore_reservation(view.vaddr, std::min(view.vaddr + view.size, vaddr)) ||
+		    !restore_reservation(std::max(view.vaddr, vaddr + len), view.vaddr + view.size))
+		{
+			return KERNEL_ERROR_EBUSY;
+		}
+	}
+	return restore_reservation(vaddr, vaddr + len) ? OK : KERNEL_ERROR_EBUSY;
+}
+
 int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment)
 {
 	PRINT_NAME();
@@ -2051,9 +2105,8 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	// The fixed-address request is bit 0x10; accept any other flag bits rather than
-	// bailing (PS5 titles pass e.g. 0x11 = fixed + no-overwrite).
-	bool fixed = (flags & 0x10) != 0;
+	// MAP_FIXED is bit 0x10 and MAP_NO_OVERWRITE bit 0x80; other bits are accepted.
+	bool fixed = (flags & kMapFixed) != 0;
 	KYTY_LOG_DEBUG("\t flags        = 0x%x (fixed=%d)\n", flags, fixed ? 1 : 0);
 
 	VirtualMemory::Mode          mode     = VirtualMemory::Mode::NoAccess;
@@ -2078,25 +2131,12 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		return KERNEL_ERROR_EBUSY;
 	}
 
-	if (fixed && g_physical_memory->CanReplaceReleasedMapping(in_addr, len, static_cast<uint64_t>(direct_memory_start), len))
+	if (fixed && (flags & kMapNoOverwrite) == 0)
 	{
-		const int unmap_result = KernelMunmap(in_addr, len);
-		if (unmap_result != OK)
+		const int cleared = clear_fixed_map_target(in_addr, len);
+		if (cleared != OK)
 		{
-			return unmap_result;
-		}
-
-		// The host range may still belong to a larger guest reservation (notably
-		// Windows' 64 KiB reservation granularity). Restore logical ownership so
-		// the normal fixed-map transaction can replace only this released view.
-		if (g_reserved_memory == nullptr || !VirtualMemory::ReserveFixed(in_addr, len))
-		{
-			return KERNEL_ERROR_EBUSY;
-		}
-		if (!g_reserved_memory->Add(in_addr, len))
-		{
-			EXIT_IF(!VirtualMemory::Free(in_addr));
-			return KERNEL_ERROR_EBUSY;
+			return cleared;
 		}
 	}
 
@@ -2451,7 +2491,6 @@ int KYTY_SYSV_ABI KernelBatchMap2(void* entries, int entry_count, int* processed
 // sceKernelBatchMap places every mapping at its requested address (MAP_FIXED).
 int KYTY_SYSV_ABI KernelBatchMap(void* entries, int entry_count, int* processed_out)
 {
-	constexpr int kMapFixed = 0x10;
 	return KernelBatchMap2(entries, entry_count, processed_out, kMapFixed);
 }
 
