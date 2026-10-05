@@ -58,16 +58,15 @@ TEST(EmulatorNpTrophy2, CreateHandleWritesOpaqueHandle)
 // sceNpTrophy2CreateContext (NID Bagshr7OQ6Q): int*(int32_t*, int, uint32,
 // uint64) — the canonical public NID. The alternate Fbshr7OQ6Q identity also
 // resolves to the same handler; both must agree on the out-context contract.
-TEST(EmulatorNpTrophy2, CreateContextAgreesOnCanonicalAndAliasNid)
+TEST(EmulatorNpTrophy2, CreateContextIsExportedOnlyUnderItsNid)
 {
 	Loader::SymbolDatabase symbols;
 	ASSERT_TRUE(Libs::Init(U"libNpTrophy2_1", &symbols));
 
 	const auto* canonical = symbols.Find(ResolveFor(u"Bagshr7OQ6Q", Loader::SymbolType::Func));
 	ASSERT_NE(canonical, nullptr);
-	const auto* alias = symbols.Find(ResolveFor(u"Fbshr7OQ6Q", Loader::SymbolType::Func));
-	ASSERT_NE(alias, nullptr);
-	EXPECT_EQ(canonical->vaddr, alias->vaddr);
+	// A 10-character name is not a NID; no title imports it.
+	EXPECT_EQ(symbols.Find(ResolveFor(u"Fbshr7OQ6Q", Loader::SymbolType::Func)), nullptr);
 
 	auto* create_context = reinterpret_cast<CreateContextFn>(canonical->vaddr);
 	ASSERT_NE(create_context, nullptr);
