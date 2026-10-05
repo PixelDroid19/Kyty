@@ -94,24 +94,42 @@ KYTY_SYSV_ABI uint16_t* c_wcsncpy(uint16_t* destination, const uint16_t* source,
 	}
 	return destination;
 }
+// Dinkumware wctype_t values, as the iswxxx macros of the guest headers pass
+// them: 1 alnum, 2 alpha, 3 cntrl, 4 digit, 5 graph, 6 lower, 7 print, 8 punct,
+// 9 space, 10 upper, 11 xdigit, 12 blank. Titles scan format specifications
+// with class 2 (stop at the conversion letter) and trim with class 9.
+static bool AsciiClassMember(uint32_t c, int character_class)
+{
+	const bool upper = c >= 'A' && c <= 'Z';
+	const bool lower = c >= 'a' && c <= 'z';
+	const bool digit = c >= '0' && c <= '9';
+	const bool graph = c > 0x20 && c < 0x7f;
+	switch (character_class)
+	{
+		case 1: return upper || lower || digit;
+		case 2: return upper || lower;
+		case 3: return c < 0x20 || c == 0x7f;
+		case 4: return digit;
+		case 5: return graph;
+		case 6: return lower;
+		case 7: return graph || c == ' ';
+		case 8: return graph && !upper && !lower && !digit;
+		case 9: return c == ' ' || (c >= '\t' && c <= '\r');
+		case 10: return upper;
+		case 11: return digit || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+		case 12: return c == ' ' || c == '\t';
+		default: return false;
+	}
+}
+
+// The guest runs in the "C" locale, which classifies only the ASCII range.
 KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 {
-	if (character > 0x7f)
+	if (character_class < 1 || character_class > 12)
 	{
-		EXIT_NOT_IMPLEMENTED(character > 0x7f);
-		return 0;
+		EXIT("_Iswctype: unknown character class %d\n", character_class);
 	}
-
-	// The verified descriptor scans decimal width characters. Do not delegate to
-	// the host locale or accept unrelated descriptor values: either behavior can
-	// change guest control flow without an established ABI contract.
-	if (character_class != 2)
-	{
-		EXIT_NOT_IMPLEMENTED(character_class != 2);
-		return 0;
-	}
-
-	return character >= '0' && character <= '9' ? 1 : 0;
+	return character <= 0x7f && AsciiClassMember(character, character_class) ? 1 : 0;
 }
 KYTY_SYSV_ABI int c_Wctombx(char* dst, uint32_t character, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
 {

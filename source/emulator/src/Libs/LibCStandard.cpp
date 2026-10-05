@@ -217,6 +217,72 @@ KYTY_SYSV_ABI float c_FCosh(float x, float y)
 
 namespace {
 
+// Wide numeric conversions in the "C" locale: the numeric prefix is ASCII, so
+// it is narrowed, converted by the host, and the end position mapped back.
+struct NarrowedNumber
+{
+	char   text[512];
+	size_t length;
+};
+
+NarrowedNumber NarrowNumber(const uint16_t* s)
+{
+	NarrowedNumber narrowed {};
+	while (s[narrowed.length] != 0 && s[narrowed.length] < 0x80 && narrowed.length + 1 < sizeof(narrowed.text))
+	{
+		narrowed.text[narrowed.length] = static_cast<char>(s[narrowed.length]);
+		narrowed.length++;
+	}
+	return narrowed;
+}
+
+template <typename T, typename Convert>
+T ConvertWide(const uint16_t* s, uint16_t** end, Convert convert)
+{
+	const auto narrowed   = NarrowNumber(s);
+	char*      narrow_end = nullptr;
+	const T    value      = convert(narrowed.text, &narrow_end);
+	if (end != nullptr)
+	{
+		*end = const_cast<uint16_t*>(s + (narrow_end - narrowed.text));
+	}
+	return value;
+}
+
+} // namespace
+
+KYTY_SYSV_ABI float c_wcstof(const uint16_t* s, uint16_t** end)
+{
+	return ConvertWide<float>(s, end, [](const char* t, char** e) { return std::strtof(t, e); });
+}
+
+KYTY_SYSV_ABI double c_wcstod(const uint16_t* s, uint16_t** end)
+{
+	return ConvertWide<double>(s, end, [](const char* t, char** e) { return std::strtod(t, e); });
+}
+
+KYTY_SYSV_ABI int64_t c_wcstol(const uint16_t* s, uint16_t** end, int base)
+{
+	return ConvertWide<int64_t>(s, end, [base](const char* t, char** e) { return std::strtol(t, e, base); });
+}
+
+KYTY_SYSV_ABI uint64_t c_wcstoul(const uint16_t* s, uint16_t** end, int base)
+{
+	return ConvertWide<uint64_t>(s, end, [base](const char* t, char** e) { return std::strtoul(t, e, base); });
+}
+
+KYTY_SYSV_ABI int64_t c_wcstoll(const uint16_t* s, uint16_t** end, int base)
+{
+	return ConvertWide<int64_t>(s, end, [base](const char* t, char** e) { return std::strtoll(t, e, base); });
+}
+
+KYTY_SYSV_ABI uint64_t c_wcstoull(const uint16_t* s, uint16_t** end, int base)
+{
+	return ConvertWide<uint64_t>(s, end, [base](const char* t, char** e) { return std::strtoull(t, e, base); });
+}
+
+namespace {
+
 // The guest struct lconv (Dinkumware): the LC_MONETARY strings, their 14 char
 // members, then the LC_NUMERIC strings and the library's extension strings.
 struct GuestLconv

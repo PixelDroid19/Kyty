@@ -860,70 +860,16 @@ static KYTY_SYSV_ABI int c_vsnprintf_s(char* s, size_t dn, size_t count, const c
 	return Format(s, n, fmt, ap);
 }
 
-static bool c_wide_format_supported(const char* format)
-{
-	// The narrow formatter consumes the guest VaList. Keep the accepted grammar
-	// limited to formats whose argument consumption is established: literal text,
-	// %% , %i and %08x. Accepting the host printf grammar here would silently
-	// misinterpret unsupported guest argument layouts.
-	for (const char* cursor = format; *cursor != '\0'; cursor++)
-	{
-		if (*cursor != '%')
-		{
-			continue;
-		}
-		cursor++;
-		if (*cursor == '%' || *cursor == 'i')
-		{
-			continue;
-		}
-		if (std::strncmp(cursor, "08x", 3) != 0)
-		{
-			return false;
-		}
-		cursor += 2;
-	}
-	return true;
-}
-
+// C: vswprintf fails with a negative result when the output and its terminator
+// do not fit; callers such as string builders grow the buffer and retry.
 static KYTY_SYSV_ABI int c_vswprintf(uint16_t* out, size_t out_count, const uint16_t* wide_format, VaList* ap)
 {
 	if (out == nullptr || out_count == 0 || wide_format == nullptr || ap == nullptr)
 	{
 		return -1;
 	}
-
-	char   format[1024] = {};
-	size_t format_len   = 0;
-	while (wide_format[format_len] != 0)
-	{
-		if (format_len + 1 >= sizeof(format) || wide_format[format_len] > 0x7f)
-		{
-			out[0] = 0;
-			return -1;
-		}
-		format[format_len] = static_cast<char>(wide_format[format_len]);
-		format_len++;
-	}
-	if (!c_wide_format_supported(format))
-	{
-		out[0] = 0;
-		return -1;
-	}
-
-	char      narrow[C_UNBOUNDED_FORMAT] = {};
-	const int written                    = Format(narrow, sizeof(narrow), format, ap);
-	if (written < 0 || static_cast<size_t>(written) >= out_count)
-	{
-		out[0] = 0;
-		return -1;
-	}
-	for (int index = 0; index < written; index++)
-	{
-		out[index] = static_cast<uint8_t>(narrow[index]);
-	}
-	out[written] = 0;
-	return written;
+	const int length = FormatWide(out, out_count, wide_format, ap);
+	return length < 0 || static_cast<size_t>(length) >= out_count ? -1 : length;
 }
 
 // --- stdlib ------------------------------------------------------------------
@@ -1413,14 +1359,7 @@ static KYTY_SYSV_ABI int64_t c_xtime_get_ticks()
 	return now.tv_sec * ticks_per_second + now.tv_nsec / 1000;
 }
 
-static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
-{
-	KYTY_LOG_WARN("std::out_of_range warning: %s\n", msg != nullptr ? msg : "");
-}
-static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
-{
-	KYTY_LOG_WARN("std::length_error warning: %s\n", msg != nullptr ? msg : "");
-}
+
 static KYTY_SYSV_ABI void c_Xregex_error(int error_type)
 {
 	KYTY_LOG_WARN("std::regex_error warning: error_type=%d\n", error_type);
@@ -1575,11 +1514,8 @@ static std::uint64_t g_dummy_obj_1   = 0;
 static std::uint64_t g_dummy_obj_2   = 0;
 static std::uint64_t g_dummy_obj_3   = 0;
 static std::uint64_t g_dummy_obj_4   = 0;
-static std::uint64_t g_dummy_obj_5   = 0;
-static std::uint64_t g_dummy_obj_6   = 0;
 static std::uint64_t g_dummy_obj_7   = 0;
 static std::uint64_t g_dummy_obj_8   = 0;
-static std::uint64_t g_dummy_obj_9   = 0;
 static std::uint64_t g_dummy_obj_10  = 0;
 static std::uint64_t g_dummy_obj_11  = 0;
 static std::uint64_t g_dummy_obj_12  = 0;
@@ -2752,6 +2688,66 @@ static void* g_bad_function_call_vtable[] = {
     reinterpret_cast<void*>(&CxxVtableNoop), // _Doraise
 };
 
+// std::logic_error-derived exceptions raised by the runtime's _X helpers. The
+// object holds its vptr and its message (stored inline after it); what()
+// returns the message. Catch clauses match on the thrown type_info.
+static KYTY_SYSV_ABI const char* c_logic_error_what(const void* self)
+{
+	return static_cast<const char* const*>(self)[1];
+}
+static void* g_logic_error_object_vtable[] = {
+    nullptr,
+    nullptr,
+    reinterpret_cast<void*>(&CxxVtableNoop), // dtor — the message lives in the exception allocation
+    reinterpret_cast<void*>(&CxxVtableNoop), // deleting dtor
+    reinterpret_cast<void*>(&c_logic_error_what),
+    reinterpret_cast<void*>(&CxxVtableNoop),
+};
+
+[[noreturn]] static void ThrowLogicError(const void* type_info, const char* msg)
+{
+	const char*  text   = msg != nullptr ? msg : "";
+	const size_t length = std::strlen(text) + 1;
+	auto**       obj    = static_cast<void**>(__cxa_allocate_exception(2 * sizeof(void*) + length));
+	auto*        copy   = reinterpret_cast<char*>(obj + 2);
+	std::memcpy(copy, text, length);
+	obj[0] = &g_logic_error_object_vtable[2]; // Itanium vtable address point
+	obj[1] = copy;
+	__cxa_throw(obj, static_cast<const std::type_info*>(type_info), nullptr);
+}
+
+static KYTY_SYSV_ABI void c_Xout_of_range(const char* msg)
+{
+	ThrowLogicError(&g_typeinfo_out_of_range, msg);
+}
+static KYTY_SYSV_ABI void c_Xlength_error(const char* msg)
+{
+	ThrowLogicError(&g_typeinfo_length_error, msg);
+}
+static KYTY_SYSV_ABI void c_Xinvalid_argument(const char* msg)
+{
+	ThrowLogicError(&g_typeinfo_invalid_argument, msg);
+}
+
+// Dinkumware wctrans_t values: 1 folds to lower case, 2 to upper case. The
+// guest runs in the "C" locale, which maps only the ASCII letters.
+static KYTY_SYSV_ABI uint32_t c_Towctrans(uint32_t character, int transform)
+{
+	if (transform != 1 && transform != 2)
+	{
+		EXIT("_Towctrans: unknown transform %d\n", transform);
+	}
+	if (transform == 1 && character >= 'A' && character <= 'Z')
+	{
+		return character + ('a' - 'A');
+	}
+	if (transform == 2 && character >= 'a' && character <= 'z')
+	{
+		return character - ('a' - 'A');
+	}
+	return character;
+}
+
 static KYTY_SYSV_ABI void c_Xbad_alloc()
 {
 	auto** obj = static_cast<void**>(__cxa_allocate_exception(8));
@@ -3709,8 +3705,7 @@ static KYTY_SYSV_ABI int c_vprintf(const char* str, VaList* c)
 	return GetVprintfFunc()(str, c);
 }
 
-// Gen5 libc_v1 swprintf — NID nJz16JE1txM. Same narrow-format path as
-// c_vswprintf.
+// Gen5 libc_v1 swprintf — NID nJz16JE1txM, over c_vswprintf.
 static KYTY_SYSV_ABI int c_swprintf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
@@ -3864,6 +3859,12 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("zck+6bVj5pA", LibC::c_nan);
 	LIB_FUNC("DZU+K1wozGI", LibC::c_nanf);
 	LIB_FUNC("0hlfW1O4Aa4", LibC::c_localeconv);
+	LIB_FUNC("7SXNu+0KBYQ", LibC::c_wcstof);
+	LIB_FUNC("7-a7sBHeUQ8", LibC::c_wcstod);
+	LIB_FUNC("d3dMyWORw8A", LibC::c_wcstol);
+	LIB_FUNC("5AYcEn7aoro", LibC::c_wcstoul);
+	LIB_FUNC("34nH7v2xvNQ", LibC::c_wcstoll);
+	LIB_FUNC("DAbZ-Vfu6lQ", LibC::c_wcstoull);
 	LIB_FUNC("7Jp3g-qTgZw", LibC::c_scalbln);
 	LIB_FUNC("9fs1btfLoUs", LibC::c_scalbnf);
 	LIB_FUNC("MU25eqxSDTw", LibC::c_Sinh);
@@ -3968,10 +3969,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
 	LIB_OBJECT("wiR+rIcbnlc", LibC::g_fpz);
 	LIB_OBJECT("b-xTWRgI1qw", &LibC::g_dtest_table);
-	// HEAD-only unresolved Object placeholders (NIDs that do not collide with RTTI above).
-	LIB_OBJECT("MpxhMh8QFro", &LibC::g_dummy_obj_5);
-	LIB_OBJECT("NU-T4QowTNA", &LibC::g_dummy_obj_6);
-	LIB_OBJECT("DbEnA+MnVIw", &LibC::g_dummy_obj_9);
+	LIB_FUNC("NU-T4QowTNA", LibC::c_Xinvalid_argument); // std::_Xinvalid_argument
+	LIB_FUNC("DbEnA+MnVIw", LibC::c_Towctrans);
 	// Captured Gen5 UTF-16 string assignment: dst, src, code-unit count.
 	LIB_FUNC("fL3O02ypZFE", LibC::c_wmemcpy16);
 	// Captured Gen5 UTF-16 compare: lhs, rhs, code-unit count.

@@ -1011,7 +1011,9 @@ TEST(EmulatorModuleLoad, LibcWcsncmpUsesGuestUtf16CodeUnits)
 	EXPECT_EQ(wcsncmp(same, greater, 0), 0);
 }
 
-TEST(EmulatorModuleLoad, LibcWideClassifiesVerifiedDecimalDescriptorWithoutHostLocale)
+// Dinkumware wctype_t values: format scanners stop at the conversion letter
+// with class 2 (alpha); string trimming uses class 9 (space).
+TEST(EmulatorModuleLoad, LibcWideClassifiesDinkumwareClassesInTheCLocale)
 {
 	SymbolDatabase symbols;
 	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
@@ -1021,10 +1023,12 @@ TEST(EmulatorModuleLoad, LibcWideClassifiesVerifiedDecimalDescriptorWithoutHostL
 	using Iswctype = int (*)(uint32_t, int);
 	auto iswctype = reinterpret_cast<Iswctype>(record->vaddr);
 
-	EXPECT_EQ(iswctype(u'7', 2), 1);
-	EXPECT_EQ(iswctype(u'0', 2), 1);
-	EXPECT_EQ(iswctype(u'i', 2), 0);
+	EXPECT_EQ(iswctype(u'i', 2), 1);
+	EXPECT_EQ(iswctype(u'7', 2), 0);
 	EXPECT_EQ(iswctype(u'%', 2), 0);
+	EXPECT_EQ(iswctype(u'7', 4), 1);
+	EXPECT_EQ(iswctype(u' ', 9), 1);
+	EXPECT_EQ(iswctype(0x3000u, 9), 0); // the "C" locale classifies only ASCII
 }
 
 TEST(EmulatorModuleLoad, ImeDialogGetStatusReportsTheUninitializedState)
