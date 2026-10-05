@@ -3106,7 +3106,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		if (gen5)
 		{
 			const auto tile_mode = static_cast<uint32_t>(r.TileMode());
-			if (tile_mode != 0u && tile_mode != 5u && tile_mode != 9u && tile_mode != 24u && tile_mode != 27u)
+			if (tile_mode != 0u && tile_mode != 1u && tile_mode != 5u && tile_mode != 9u && tile_mode != 24u && tile_mode != 27u)
 			{
 				EXIT("unsupported Gen5 sampled texture tile mode: tile=%u format=%u width=%u height=%u base=0x%012" PRIx64
 				     " type=%u\n",

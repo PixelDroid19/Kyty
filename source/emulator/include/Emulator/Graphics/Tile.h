@@ -87,6 +87,12 @@ uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, 
 [[nodiscard]] uint32_t TileGetStandard4KBContiguousElements(uint32_t x, uint32_t bytes_per_element);
 void     TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
                                         uint32_t bytes_per_element);
+// Gen5 SW_256B_S (tile mode 1): 256-byte blocks of 16x16 (1 byte), 16x8 (2), 8x8 (4), 8x4 (8) or 4x4 (16)
+// elements in row-major order; inside a block the elements follow the low eight address bits of SW_4KB_S.
+[[nodiscard]] bool TileGetStandard256BBlock(uint32_t bytes_per_element, uint32_t* width, uint32_t* height);
+uint64_t TileGetStandard256BOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element);
+void     TileConvertStandard256BToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
+                                         uint32_t bytes_per_element);
 // Gen5 SW_4KB_S volumes (RDNA2 3D standard swizzle) interleave Z inside each 4 KiB block, so a 3D descriptor
 // cannot be represented as independently tiled 2D slices. The element size selects the block shape: 16x16x16
 // elements for 1 byte, 8x16x16 for 2, 8x16x8 for 4, 8x8x8 for 8 and 4x8x8 for 16. Blocks follow each other
@@ -110,6 +116,7 @@ enum class TileDetileLayout : uint32_t
 	Sw64kRx,      // tile mode 27 / kRenderTarget (4 or 8 BPE)
 	Standard64KB, // tile mode 9  (1/2/4/8/16 BPE)
 	Standard4KB,  // tile mode 5  (power-of-two BPE <= 16)
+	Standard256B, // tile mode 1  (power-of-two BPE <= 16)
 	Depth64KB,    // tile mode 24 (2 or 4 BPE)
 };
 

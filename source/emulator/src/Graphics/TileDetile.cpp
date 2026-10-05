@@ -73,6 +73,11 @@ uint64_t OffsetStandard4KB(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_
 	return TileGetStandard4KBOffset(x, y, pitch_elems, bytes_per_element);
 }
 
+uint64_t OffsetStandard256B(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t)
+{
+	return TileGetStandard256BOffset(x, y, pitch_elems, bytes_per_element);
+}
+
 uint64_t OffsetDepth64KB(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element,
 	                     uint32_t depth_layer)
 {
@@ -89,7 +94,7 @@ bool LayoutBpeSupported(TileDetileLayout layout, uint32_t bytes_per_element)
 	{
 		return TileGet64KBBlockWidth(bytes_per_element) != 0u;
 	}
-	if (layout == TileDetileLayout::Standard4KB)
+	if (layout == TileDetileLayout::Standard4KB || layout == TileDetileLayout::Standard256B)
 	{
 		const bool power_of_two = (bytes_per_element & (bytes_per_element - 1u)) == 0u;
 		return bytes_per_element >= 1u && bytes_per_element <= 16u && power_of_two;
@@ -114,6 +119,10 @@ TileOffsetFn ResolveOffsetFn(TileDetileLayout layout)
 	if (layout == TileDetileLayout::Standard4KB)
 	{
 		return OffsetStandard4KB;
+	}
+	if (layout == TileDetileLayout::Standard256B)
+	{
+		return OffsetStandard256B;
 	}
 	if (layout == TileDetileLayout::Depth64KB)
 	{
@@ -161,6 +170,13 @@ bool CalculateRequiredSourceBytes(const TileDetileRequest& request, uint64_t* by
 		    (request.bytes_per_element == 1u ? 64u : (request.bytes_per_element <= 4u ? 32u : 16u));
 		return CanRoundUpU32(pitch, block_width) &&
 		       CalculateBlockGridBytes(pitch, request.height, block_width, block_height, k_4kb_block_bytes, bytes);
+	}
+	if (request.layout == TileDetileLayout::Standard256B)
+	{
+		uint32_t block_width  = 0;
+		uint32_t block_height = 0;
+		return TileGetStandard256BBlock(request.bytes_per_element, &block_width, &block_height) && CanRoundUpU32(pitch, block_width) &&
+		       CalculateBlockGridBytes(pitch, request.height, block_width, block_height, 256u, bytes);
 	}
 	if (request.layout == TileDetileLayout::Depth64KB)
 	{
@@ -360,6 +376,10 @@ bool RunDetile(const TileDetileRequest& request, bool reference, bool compute_st
 				break;
 			case TileDetileLayout::Standard4KB:
 				DetileWorkgroupRange<OffsetStandard4KB>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
+				                                            request.bytes_per_element, request.depth_layer);
+				break;
+			case TileDetileLayout::Standard256B:
+				DetileWorkgroupRange<OffsetStandard256B>(dst, src, 0, request.height, request.width, pitch, dst_pitch,
 				                                            request.bytes_per_element, request.depth_layer);
 				break;
 			case TileDetileLayout::Depth64KB:

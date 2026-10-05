@@ -570,10 +570,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 
 	if (fmt != 0)
 	{
-		// Gen5: tile 0 = linear; 5 = kStandard4KB; 9 = kStandard64KB;
+		// Gen5: tile 0 = linear; 1 = kStandard256B; 5 = kStandard4KB; 9 = kStandard64KB;
 		// 24 = depth; 27 = render target.
 		// Other modes remain unsupported until their layout is evidenced.
-		if (tile != 0 && tile != 5 && tile != 9 && tile != 24 && tile != 27)
+		if (tile != 0 && tile != 1 && tile != 5 && tile != 9 && tile != 24 && tile != 27)
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 64, "WARNING: unsupported Gen5 texture swizzle mode %u: format=%u %ux%u pitch=%u levels=%u\n",
 			               static_cast<unsigned>(tile), static_cast<unsigned>(fmt), static_cast<unsigned>(width),
@@ -771,8 +771,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				}
 			}
 			UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
-		} else if (tile == 5)
+		} else if (tile == 5 || tile == 1)
 		{
+			// kStandard4KB (5) and kStandard256B (1) share the element arithmetic.
 			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
 			const bool     block_compressed  = ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt));
 			// SKIPPED: bytes_per_element == 0u || levels != 1u
@@ -790,8 +791,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				KYTY_LOG_DEBUG("WARNING: skipped check: linear_bytes == 0u || linear_bytes > *size\n");
 			}
 			std::vector<uint8_t> temp_buf(static_cast<size_t>(linear_bytes));
-			TileConvertStandard4KBToLinear(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch,
-			                               bytes_per_element);
+			const auto           detile = tile == 1 ? TileConvertStandard256BToLinear : TileConvertStandard4KBToLinear;
+			detile(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch, bytes_per_element);
 			const char* block_dump_spec = std::getenv("KYTY_DUMP_TILED_BLOCKS");
 			const bool  block_dump_matches = block_compressed &&
 			                                 TextureBlockDumpSpecMatches(block_dump_spec, static_cast<uint32_t>(width),

@@ -1269,6 +1269,42 @@ static uint32_t Standard4KB64WithinBlockOffset(uint32_t x, uint32_t y)
 	return offset;
 }
 
+static uint32_t Standard4KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
+{
+	switch (bytes_per_element)
+	{
+		case 1u: return Standard4KB8WithinBlockOffset(x, y);
+		case 2u: return Standard4KB16WithinBlockOffset(x, y);
+		case 4u: return Standard4KB32WithinBlockOffset(x, y);
+		case 8u: return Standard4KB64WithinBlockOffset(x, y);
+		default: return Standard4KB128WithinBlockOffset(x, y);
+	}
+}
+
+bool TileGetStandard256BBlock(uint32_t bytes_per_element, uint32_t* width, uint32_t* height)
+{
+	EXIT_IF(width == nullptr || height == nullptr);
+	switch (bytes_per_element)
+	{
+		case 1u: *width = 16u; *height = 16u; return true;
+		case 2u: *width = 16u; *height = 8u; return true;
+		case 4u: *width = 8u; *height = 8u; return true;
+		case 8u: *width = 8u; *height = 4u; return true;
+		case 16u: *width = 4u; *height = 4u; return true;
+		default: return false;
+	}
+}
+
+uint64_t TileGetStandard256BOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
+{
+	uint32_t block_width  = 0;
+	uint32_t block_height = 0;
+	EXIT_IF(!TileGetStandard256BBlock(bytes_per_element, &block_width, &block_height));
+	const uint64_t blocks_x    = (pitch_elems + block_width - 1u) / block_width;
+	const uint64_t block_index = static_cast<uint64_t>(y / block_height) * blocks_x + x / block_width;
+	return block_index * 256u + Standard4KBWithinBlockOffset(x % block_width, y % block_height, bytes_per_element);
+}
+
 uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
 	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
@@ -1283,12 +1319,7 @@ uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, 
 	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
 	const uint32_t            local_x       = x % block_width;
 	const uint32_t            local_y       = y % block_height;
-	const uint32_t            within        = bytes_per_element == 1u   ? Standard4KB8WithinBlockOffset(local_x, local_y)
-	                                          : bytes_per_element == 2u ? Standard4KB16WithinBlockOffset(local_x, local_y)
-	                                          : bytes_per_element == 4u ? Standard4KB32WithinBlockOffset(local_x, local_y)
-	                                          : bytes_per_element == 8u ? Standard4KB64WithinBlockOffset(local_x, local_y)
-	                                                                    : Standard4KB128WithinBlockOffset(local_x, local_y);
-	return (block_index * k_block_bytes) + within;
+	return (block_index * k_block_bytes) + Standard4KBWithinBlockOffset(local_x, local_y, bytes_per_element);
 }
 
 uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
@@ -1353,6 +1384,26 @@ void TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, 
 	if (!TileDetile(request))
 	{
 		EXIT("TileConvertStandard4KBToLinear unsupported request\n");
+	}
+}
+
+void TileConvertStandard256BToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
+                                     uint32_t bytes_per_element)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(src == nullptr);
+	TileDetileRequest request {};
+	request.dst               = dst;
+	request.src               = src;
+	request.width             = width;
+	request.height            = height;
+	request.pitch_elems       = pitch_elems;
+	request.dst_pitch_elems   = pitch_elems;
+	request.bytes_per_element = bytes_per_element;
+	request.layout            = TileDetileLayout::Standard256B;
+	if (!TileDetile(request))
+	{
+		EXIT("TileConvertStandard256BToLinear unsupported request\n");
 	}
 }
 
@@ -2219,7 +2270,13 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// This path is intentionally limited to a single mip until the tail layout is
 		// independently exercised; it still covers any dimensions/pitches that
 		// fit the documented one-level block geometry.
-		if (tile == 0x05u)
+		// kStandard256B (tile 1) uses the same arithmetic with 256-byte blocks; its mip
+		// tail is not modelled, so it accepts one level only.
+		if (tile == 0x01u && levels != 1u)
+		{
+			EXIT("unsupported Gen5 SW_256B_S mip chain: format=%u %ux%u levels=%u\n", format, width, height, levels);
+		}
+		if (tile == 0x05u || tile == 0x01u)
 		{
 			const uint32_t bpp              = ShaderGen5TextureBytesPerElement(format);
 			const bool     block_compressed = ShaderGen5TextureIsBlockCompressed(format);
@@ -2228,8 +2285,12 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			const uint64_t element_height = (static_cast<uint64_t>(height) + texels_per_element - 1u) / texels_per_element;
 			const uint64_t pitch_texels   = (pitch != 0u ? pitch : width);
 			const uint64_t element_pitch  = (pitch_texels + texels_per_element - 1u) / texels_per_element;
-			const uint64_t block_width    = bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u);
-			const uint64_t block_height   = bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u);
+			uint32_t       small_width    = 0;
+			uint32_t       small_height   = 0;
+			const bool     small_block    = tile == 0x01u && TileGetStandard256BBlock(bpp, &small_width, &small_height);
+			EXIT_IF(tile == 0x01u && !small_block);
+			const uint64_t block_width    = small_block ? small_width : (bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u));
+			const uint64_t block_height   = small_block ? small_height : (bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u));
 			const uint64_t padded_width   = (element_pitch + block_width - 1u) & ~(block_width - 1u);
 			const uint64_t padded_height  = (element_height + block_height - 1u) & ~(block_height - 1u);
 			const uint64_t bytes          = static_cast<uint64_t>(padded_width) * padded_height * bpp;
@@ -2238,7 +2299,7 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			if (total_size != nullptr)
 			{
 				total_size->size  = static_cast<uint32_t>(bytes);
-				total_size->align = 4096u;
+				total_size->align = small_block ? 256u : 4096u;
 			}
 			if (level_sizes != nullptr)
 			{
