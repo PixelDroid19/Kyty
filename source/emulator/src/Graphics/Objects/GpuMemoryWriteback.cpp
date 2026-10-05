@@ -200,6 +200,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	if (!writeback_result.content_changed)
 	{
 		o.in_use = false;
+		SyncWritableStorage(heap_id, object_id);
 		return;
 	}
 	const uint64_t content_sequence = NextContentSequence();
@@ -311,6 +312,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	}
 
 	o.in_use = false;
+	SyncWritableStorage(heap_id, object_id);
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -457,7 +459,7 @@ std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemo
 {
 	std::vector<std::pair<int, int>> found;
 	const auto&                      heaps = m_heaps;
-	for (const auto& [heap_id, object_id]: m_storage_objects)
+	for (const auto& [heap_id, object_id]: m_writable_storage)
 	{
 		const auto& object = heaps[heap_id].objects[object_id];
 		EXIT_IF(object.free);
@@ -519,7 +521,7 @@ bool GpuMemory::FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemor
 	EXIT_IF(identity == nullptr);
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
-	for (const auto& [heap_id, object_id]: m_storage_objects)
+	for (const auto& [heap_id, object_id]: m_writable_storage)
 	{
 		const auto& object = m_heaps[heap_id].objects[object_id];
 		const auto& info   = object.info;

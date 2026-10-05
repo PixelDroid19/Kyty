@@ -1010,6 +1010,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				o.in_use     = true;
 				o.check_hash = info.check_hash;
 				RecordUse(&o, buffer);
+				SyncWritableStorage(heap_id, cached.object_id);
 				finish_classification();
 				create_stats.Complete(DebugStatsGpuMemoryCreateOutcome::CachedReuse);
 				return o.object.obj;
@@ -1074,6 +1075,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			o.in_use     = true;
 			o.check_hash = info.check_hash;
 			RecordUse(&o, buffer);
+			SyncWritableStorage(heap_id, fast_id);
 
 			void* const result = o.object.obj;
 			cache_materialization(fast_id);
@@ -1121,6 +1123,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			o.in_use     = true;
 			o.check_hash = info.check_hash;
 			RecordUse(&o, buffer);
+			SyncWritableStorage(heap_id, existing_id);
 
 			void* const result = o.object.obj;
 			cache_materialization(existing_id);
@@ -2301,6 +2304,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	if (o.object.type == GpuMemoryObjectType::StorageBuffer && o.write_back_func != nullptr)
 	{
 		m_storage_objects.emplace(heap_id, index);
+		SyncWritableStorage(heap_id, index);
 	}
 
 	if (overlap)

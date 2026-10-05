@@ -514,6 +514,11 @@ private:
 	// (heap id, object id) of every live StorageBuffer object with a write-back:
 	// the only objects a device-address write-back or its wait can touch.
 	std::set<std::pair<int, int>> m_storage_objects;
+	// The in-use, writable subset of m_storage_objects: the only candidates of
+	// the per-draw pending-write scans, which titles with thousands of live
+	// storage buffers otherwise pay in full for every device-address draw.
+	std::set<std::pair<int, int>> m_writable_storage;
+	void                          SyncWritableStorage(int heap_id, int object_id);
 
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;

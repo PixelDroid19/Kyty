@@ -254,15 +254,35 @@ int GpuMemory::GetHeapId(uint64_t vaddr, uint64_t size) const
 // Heap ids past a removed heap shift down by one; its own objects are gone.
 void GpuMemory::ForgetHeapStorageObjects(int removed_heap_id)
 {
-	std::set<std::pair<int, int>> shifted;
-	for (const auto& [heap_id, object_id]: m_storage_objects)
+	const auto shift = [removed_heap_id](const std::set<std::pair<int, int>>& objects)
 	{
-		if (heap_id != removed_heap_id)
+		std::set<std::pair<int, int>> shifted;
+		for (const auto& [heap_id, object_id]: objects)
 		{
-			shifted.emplace(heap_id > removed_heap_id ? heap_id - 1 : heap_id, object_id);
+			if (heap_id != removed_heap_id)
+			{
+				shifted.emplace(heap_id > removed_heap_id ? heap_id - 1 : heap_id, object_id);
+			}
+		}
+		return shifted;
+	};
+	m_storage_objects  = shift(m_storage_objects);
+	m_writable_storage = shift(m_writable_storage);
+}
+
+void GpuMemory::SyncWritableStorage(int heap_id, int object_id)
+{
+	const std::pair<int, int> key {heap_id, object_id};
+	if (m_storage_objects.count(key) != 0u)
+	{
+		const auto& object = m_heaps[heap_id].objects[object_id];
+		if (!object.free && object.info.in_use && !object.info.read_only && object.info.object.obj != nullptr)
+		{
+			m_writable_storage.insert(key);
+			return;
 		}
 	}
-	m_storage_objects.swap(shifted);
+	m_writable_storage.erase(key);
 }
 
 // Sweeps the heap boundaries once: every elementary span keeps the lowest
@@ -539,6 +559,7 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 	h.others.Clear();
 
 	m_storage_objects.erase({heap_id, object_id});
+	m_writable_storage.erase({heap_id, object_id});
 	h.free             = true;
 	h.next_free_id     = heap.first_free_id;
 	heap.first_free_id = object_id;
