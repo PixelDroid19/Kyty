@@ -213,9 +213,11 @@ struct CContext
 // callbacks themselves.
 std::mutex g_cxa_mutex;
 
+// A title that gives up after an internal failure often just calls exit(0);
+// record who asked, so the run is not mistaken for a host crash or stall.
 static KYTY_SYSV_ABI void exit(int code)
 {
-	PRINT_NAME();
+	KYTY_LOG_WARN("guest exit(%d) from 0x%016" PRIx64 "\n", code, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 
 	::exit(code);
 }
@@ -400,6 +402,7 @@ static KYTY_SYSV_ABI int c_fsetpos(FILE* f, const fpos_t* pos)
 }
 static KYTY_SYSV_ABI void c_quick_exit(int code)
 {
+	KYTY_LOG_WARN("guest quick_exit(%d) from 0x%016" PRIx64 "\n", code, reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	::quick_exit(code);
 }
 // Gen5 libc_v1 strtok (oVkZ8W8-Q8A): host uses strtok_r with a per-thread save pointer.
@@ -1011,7 +1014,7 @@ static KYTY_SYSV_ABI void* c_bsearch(const void* key, const void* base, size_t c
 }
 static KYTY_SYSV_ABI void c_abort()
 {
-	KYTY_LOG_ERROR("libc::abort() called by guest\n");
+	KYTY_LOG_ERROR("libc::abort() called by guest from 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	::abort();
 }
 

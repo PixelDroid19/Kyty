@@ -7,6 +7,8 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Loader/SystemContent.h"
 
+#include <cinttypes>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs {
@@ -269,9 +271,11 @@ static int KYTY_SYSV_ABI SystemServiceGetMainAppTitleId(char* title_id)
 	return OK;
 }
 
+// The title's own verdict that it is failing; it may continue or exit next.
 static int KYTY_SYSV_ABI SystemServiceReportAbnormalTermination()
 {
-	PRINT_NAME();
+	KYTY_LOG_WARN("guest reported abnormal termination from 0x%016" PRIx64 "\n",
+	              reinterpret_cast<uint64_t>(__builtin_return_address(0)));
 	return OK;
 }
 
