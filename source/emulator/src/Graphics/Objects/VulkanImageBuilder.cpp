@@ -307,14 +307,16 @@ bool VulkanNormalizeStorageComponentMapping(VkFormat* format, VkComponentMapping
 	{
 		return true;
 	}
-	if (mapping->r == VK_COMPONENT_SWIZZLE_B && mapping->g == VK_COMPONENT_SWIZZLE_G && mapping->b == VK_COMPONENT_SWIZZLE_R &&
-	    mapping->a == VK_COMPONENT_SWIZZLE_A && *format == VK_FORMAT_R8G8B8A8_SRGB)
+	// A BGRA selection of an RGBA8 image is the same bytes as a BGRA8 image read with identity.
+	const bool bgra = mapping->r == VK_COMPONENT_SWIZZLE_B && mapping->g == VK_COMPONENT_SWIZZLE_G &&
+	                  mapping->b == VK_COMPONENT_SWIZZLE_R && mapping->a == VK_COMPONENT_SWIZZLE_A;
+	if (!bgra || (*format != VK_FORMAT_R8G8B8A8_SRGB && *format != VK_FORMAT_R8G8B8A8_UNORM))
 	{
-		*format  = VK_FORMAT_B8G8R8A8_SRGB;
-		*mapping = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
-		return true;
+		return false;
 	}
-	return false;
+	*format  = *format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
+	*mapping = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+	return true;
 }
 
 bool VulkanImageFormatSupported(const GraphicContext* context, const VkImageCreateInfo& image_info)

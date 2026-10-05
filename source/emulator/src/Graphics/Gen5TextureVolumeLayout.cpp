@@ -88,6 +88,13 @@ bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height
 		supported    = LinearLayout(format, height, depth, pitch, &result);
 		result.pitch = pitch;
 	}
+	// Element (0,0,0) is at byte 0 in every swizzle mode, so a one-element volume
+	// is laid out exactly as a linear one.
+	if (!supported && width == 1u && height == 1u && depth == 1u)
+	{
+		supported    = LinearLayout(format, 1u, 1u, 1u, &result);
+		result.pitch = 1u;
+	}
 	if (!supported) { return false; }
 	result.width  = width;
 	result.height = height;

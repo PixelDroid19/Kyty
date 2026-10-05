@@ -778,7 +778,9 @@ ShaderStorageImagePlan ShaderPlanStorageImages(const ShaderCode& code, const Sha
 		switch (uint_format)
 		{
 			case 5u: plan.image_format = "R8ui"; plan.extended_formats = true; break;
+			case 11u: plan.image_format = "R16ui"; plan.extended_formats = true; break;
 			case 20u: plan.image_format = "R32ui"; break;
+			case 60u: plan.image_format = "Rgba8ui"; break;
 			case 62u: plan.image_format = "Rg32ui"; plan.extended_formats = true; break;
 			case 75u: plan.image_format = "Rgba32ui"; break;
 			default: return reject("writable uint format has no exact SPIR-V declaration", first_uint, uint_format);

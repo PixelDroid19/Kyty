@@ -1490,6 +1490,7 @@ uint8_t ShaderBoundedGridFullStoreMask(uint32_t format)
 	{
 		case 1u:
 		case 5u:
+		case 11u:
 		case 13u:
 		case 20u:
 		case 22u: return 0x1u;
@@ -1499,6 +1500,7 @@ uint8_t ShaderBoundedGridFullStoreMask(uint32_t format)
 		case 36u: return 0x7u;
 		case 50u:
 		case 56u:
+		case 60u:
 		case 71u:
 		case 75u:
 		case 77u: return 0xfu;

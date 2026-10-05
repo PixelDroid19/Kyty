@@ -64,13 +64,20 @@ static bool IsR32SingleComponentStorageFormat(uint32_t fmt)
 	return fmt == 20u || fmt == 22u;
 }
 
+// One- and two-component typed formats whose storage view always uses the
+// identity mapping, whatever their guest selector.
+static bool IsIdentityViewStorageFormat(uint32_t fmt)
+{
+	return fmt == 5u || fmt == 7u || fmt == 11u || fmt == 13u || fmt == 14u || fmt == 62u;
+}
+
 static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 {
 	// Storage image views for these typed formats use identity component
 	// mapping. Reuse must follow the effective host view contract rather than
 	// the raw guest selector bits, otherwise equivalent bindings churn a fresh
 	// GpuMemory object every frame.
-	if (fmt == 5u || fmt == 7u || fmt == 13u || fmt == 14u || fmt == 62u)
+	if (IsIdentityViewStorageFormat(fmt))
 	{
 		return DstSel(4, 5, 6, 7);
 	}
@@ -543,7 +550,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	// resources encode their read result as R,0,0,1 while writes address R only;
 	// Normalize that view contract before Vulkan validation.
 	// Single-component R16/R16F (formats 7 and 13) share that contract.
-	if (IsR32SingleComponentStorageFormat(static_cast<uint32_t>(fmt)) || fmt == 5u || fmt == 7u || fmt == 13u || fmt == 14u || fmt == 62u)
+	if (IsR32SingleComponentStorageFormat(static_cast<uint32_t>(fmt)) || IsIdentityViewStorageFormat(static_cast<uint32_t>(fmt)))
 	{
 		components.r = VK_COMPONENT_SWIZZLE_R;
 		components.g = VK_COMPONENT_SWIZZLE_G;

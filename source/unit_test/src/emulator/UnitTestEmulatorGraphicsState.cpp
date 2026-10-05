@@ -4854,6 +4854,12 @@ TEST(EmulatorGraphicsState, DecodesAndNormalizesVulkanComponentMappings)
 
 	format  = VK_FORMAT_R8G8B8A8_UNORM;
 	mapping = {VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_A};
+	ASSERT_TRUE(VulkanNormalizeStorageComponentMapping(&format, &mapping));
+	EXPECT_EQ(format, VK_FORMAT_B8G8R8A8_UNORM);
+	EXPECT_EQ(mapping.r, VK_COMPONENT_SWIZZLE_R);
+
+	format  = VK_FORMAT_R8G8B8A8_UNORM;
+	mapping = {VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
 	EXPECT_FALSE(VulkanNormalizeStorageComponentMapping(&format, &mapping));
 }
 
