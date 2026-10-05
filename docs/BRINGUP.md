@@ -254,6 +254,58 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### CPU/GPU overlap and per-draw cost (2026-10-05, guest verified)
+
+Scope: same strict configuration on the reference host (Intel Arc A770, Mesa `xe`). Profiled with gperftools on the
+command-processor thread and the DRM `fdinfo` engine counters for the device. A pixel-art title whose vertex front is
+bindless (V#s loaded from tables at runtime offsets) and whose only compute shader is the SDK's 16-byte buffer fill
+went from 41 ms to 22 ms per frame (24 to 45 fps) on its start screen. Regression set (runs d586-d602, 90 s each,
+previous run in parentheses): Blasphemous 2 107 fps (98), Dreaming Sarah 248 (251), Let's Build a Zoo 239 (220),
+Formula Retro Racing 229 in the race (181), The Messenger 594 (378), Dead Cells 201 (112), ANIMAL WELL 37 in its
+new-game route (23), Worms 59 (59), JoJo 220 (203), Hades 59 (49), the .NET beat 'em up 11 (11). DREDGE ran clean once
+(66 fps, was 52) and twice stopped at 12-14 s on its known stale extended-user-data V# (the same words as runs d221,
+d466 and d571).
+
+- **Instruction mnemonics without allocation.** The shader-usage pass runs for every draw and asked `magic_enum` for
+  each instruction's name as a heap `String8` to test a prefix; with the SRT, assembled-descriptor and scalar-load
+  collectors that was 13% of the processor. `ShaderInstructionTypeName` and `ShaderInstructionTypeStartsWith` return a
+  `string_view` from the one translation unit that declares the enum range. Two translation units used magic_enum
+  without that declaration (default range -128..127), so the names of later instructions (`SLoad*`, `TBuffer*`,
+  `VCmpx*`) could read empty depending on which instantiation the linker kept.
+- **Uniform buffer fills published on the device.** Before recording a draw or dispatch that dereferences guest
+  addresses, every storage buffer a compute pass had written was written back: submit, CPU fence wait, then a page
+  comparison of the whole buffer. A title clearing buffers with the fill shader paid that about 25 times per frame
+  (13 waits, 16 ms per frame). For a dispatch the existing uniform-fill proof shows to store one value to every record
+  of its bound range, the filled object is now copied on the device into the imported view of that range, between
+  barriers, so later device-address reads in that queue see the result in GPU order, as on unified memory. Only
+  chunks that alias the guest's physical memory qualify: a snapshot chunk could be refreshed from stale guest bytes
+  before the CPU write-back. Device-address consumers on that queue then skip the write-back; the completed
+  submission still writes the object back, and because its content is the known pattern the page cache adopts it
+  without reading the GPU copy (constant time when the same pattern repeats). Objects with label fences or depth
+  metadata in range keep the byte write-back.
+- **WAIT_FLIP_DONE waits for that buffer's flip.** It waited for the device to finish everything recorded so far,
+  which serialized recording and execution every frame. A GPU flip enters the flip queue when its submission
+  completes, so the processor now waits only for the submission that recorded the latest flip to the requested
+  display buffer, then for the flip queue as before.
+- **Batch completion is asynchronous.** A batch whose completion payload is a flip, an end-of-pipe interrupt or a
+  consolidated label wait no longer blocks the processor on its fence. The guest observes those through memory, event
+  queues and flip status, never through its submit call; the fence poll of the next submission or the ring's idle
+  pump (1 ms) publishes them. A wait on a plain label store of the current submission no longer splits it: a full
+  barrier keeps the order.
+- **Scalar flow shared per program.** The memoized scalar analyses (live-at-entry, entry-value sources, holding
+  sets) were looked up three to five times per draw by materializing the program signature, and each lookup copied
+  per-instruction vectors. The signature is now hashed and compared field by field without allocation, and per-draw
+  callers share one `ShaderScalarFlow`.
+- **Draw-time snapshots without page protection.** Small read-only buffers are copied per draw; each copy and each
+  comparison armed and restored write protection around the read (two `mprotect` calls and a TLB shootdown, 18% of
+  the processor). A copy is now validated by a second read: unchanged bytes held their value between the two passes,
+  unless a store restored the old value in between. A comparison runs alone; a store racing it is the race the
+  console GPU has with a pending draw, which guests order with labels.
+
+Measured after these changes on the pixel-art title: the processor is busy about 9 ms per frame and the render
+engine about 11 ms; the title submits its next frame after the previous flip, so the two still add up. Next:
+per-draw shader usage parsing (about 10% of the processor) and submitting earlier within a frame.
+
 ### Performance, new-title repairs and add-on content (2026-10-04, guest verified)
 
 Scope: strict runs on the reference host (Intel Xe, Vulkan 1.4, Native, `KYTY_SHADER_OPTIMIZATION=None`, shader
