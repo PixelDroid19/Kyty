@@ -2287,12 +2287,12 @@ TEST(EmulatorGraphicsState, GpuMemoryRetirementBudgetKeepsUpWithTransientCreatio
 	EXPECT_EQ(GpuMemoryRetirementBatchLimit(128), 256u);
 	EXPECT_EQ(GpuMemoryRetirementBatchLimit(500), 1000u);
 	EXPECT_EQ(GpuMemoryRetirementBatchLimit(1500), 2048u);
-	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, true, false));
-	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::VertexBuffer, true, false));
-	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::IndexBuffer, true, false));
-	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, false, false));
-	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, true, true));
-	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::RenderTexture, true, false));
+	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, false, false));
+	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::VertexBuffer, false, false));
+	EXPECT_TRUE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::IndexBuffer, false, false));
+	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, true, false));
+	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::StorageBuffer, false, true));
+	EXPECT_FALSE(GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType::RenderTexture, false, false));
 }
 
 TEST(EmulatorGraphicsState, GpuMemoryCoveredIndexReusePreservesOneBackingAndVersionsSafely)

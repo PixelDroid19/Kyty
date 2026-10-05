@@ -68,12 +68,15 @@ enum class GpuMemoryObjectType : uint64_t
 	Max
 };
 
-[[nodiscard]] inline bool GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType type, bool read_only,
+// A buffer owns device content only while it is writable and in use, that is
+// until its GPU writes are written back. Read-only views and written-back
+// storage hold guest bytes or a copy of a linked peer.
+[[nodiscard]] inline bool GpuMemoryCanRetireLinkedBufferMember(GpuMemoryObjectType type, bool owns_device_content,
                                                                bool depth_meta_bound)
 {
 	const bool buffer_type = type == GpuMemoryObjectType::StorageBuffer || type == GpuMemoryObjectType::VertexBuffer ||
 	                         type == GpuMemoryObjectType::IndexBuffer;
-	return buffer_type && read_only && !depth_meta_bound;
+	return buffer_type && !owns_device_content && !depth_meta_bound;
 }
 
 enum class GpuMemoryScenario

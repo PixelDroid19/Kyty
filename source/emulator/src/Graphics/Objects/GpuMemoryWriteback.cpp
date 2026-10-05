@@ -90,14 +90,16 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 		auto&      object                = h.info;
 		const bool old_enough            = m_current_frame - object.use_last_frame >= kRetireAfterFrames;
 		const bool dependencies_complete = m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies());
+		const bool owns_device_content   = object.in_use && !object.read_only;
 		if (!h.others.IsEmpty())
 		{
 			// A read-only buffer owns no content: its bytes are guest memory or a
 			// copy of a linked peer, and a pending GPU write keeps it writable
-			// (GpuMemoryMergeReadOnlyUse). Retiring it alone drops both link
-			// directions and leaves every peer intact, so overlapping read-only
-			// views cannot grow a linked graph without bound.
-			if (GpuMemoryCanRetireLinkedBufferMember(object.object.type, object.read_only, object.depth_meta_bound) && old_enough &&
+			// (GpuMemoryMergeReadOnlyUse). A writable buffer stops owning content
+			// once its writes are written back (in_use clears). Retiring either
+			// alone drops both link directions and leaves every peer intact, so
+			// overlapping views cannot grow a linked graph without bound.
+			if (GpuMemoryCanRetireLinkedBufferMember(object.object.type, owns_device_content, object.depth_meta_bound) && old_enough &&
 			    dependencies_complete)
 			{
 				destructors.Add(Free(heap_id, object_id));
@@ -110,7 +112,7 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 		                              object.object.type == GpuMemoryObjectType::StorageTexture ||
 		                              object.object.type == GpuMemoryObjectType::StorageBuffer;
 		const bool storage_buffer_safe =
-		    object.object.type != GpuMemoryObjectType::StorageBuffer || object.write_back_func == nullptr || object.read_only;
+		    object.object.type != GpuMemoryObjectType::StorageBuffer || object.write_back_func == nullptr || !owns_device_content;
 		if (reclaimable_type && storage_buffer_safe && old_enough && dependencies_complete)
 		{
 			destructors.Add(Free(heap_id, object_id));
@@ -200,7 +202,7 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	if (!writeback_result.content_changed)
 	{
 		o.in_use = false;
-		SyncWritableStorage(heap_id, object_id);
+		SyncWriteBackIndexes(heap_id, object_id);
 		return;
 	}
 	const uint64_t content_sequence = NextContentSequence();
@@ -312,10 +314,9 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	}
 
 	o.in_use = false;
-	SyncWritableStorage(heap_id, object_id);
+	SyncWriteBackIndexes(heap_id, object_id);
 }
 
-// NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void GpuMemory::WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission)
 {
 	EXIT_IF(submission.sequence == 0);
@@ -323,39 +324,20 @@ void GpuMemory::WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId s
 	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
 
-	struct WriteBackObject
+	// Write-back changes the index; collect the candidates first.
+	std::vector<std::pair<int, int>> objects;
+	for (const auto& [heap_id, object_id]: m_pending_write_back)
 	{
-		int heap_id   = -1;
-		int object_id = -1;
-	};
-
-	Vector<WriteBackObject> objects;
-
-	int heap_id = 0;
-	for (auto& heap: m_heaps)
-	{
-		int index = 0;
-		for (auto& h: heap.objects)
+		const auto& o = m_heaps[heap_id].objects[object_id].info;
+		if (GpuMemoryCanWriteBackAtSubmission(o.submission_uses, m_deferred_deletions, submission))
 		{
-			if (!h.free)
-			{
-				auto& o = h.info;
-				if (o.in_use && o.write_back_func != nullptr && !o.read_only)
-				{
-					if (GpuMemoryCanWriteBackAtSubmission(o.submission_uses, m_deferred_deletions, submission))
-					{
-						objects.Add(WriteBackObject({heap_id, index}));
-					}
-				}
-			}
-			index++;
+			objects.emplace_back(heap_id, object_id);
 		}
-		heap_id++;
 	}
 
-	for (const auto& object: objects)
+	for (const auto& [heap_id, object_id]: objects)
 	{
-		WriteBackObjectLocked(ctx, object.heap_id, object.object_id, &destructors, &submission);
+		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors, &submission);
 	}
 
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
@@ -368,40 +350,20 @@ void GpuMemory::WriteBackAllCompleted(GraphicContext* ctx)
 	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
 
-	struct WriteBackObject
+	const std::vector<std::pair<int, int>> objects(m_pending_write_back.begin(), m_pending_write_back.end());
+	for (const auto& [heap_id, object_id]: objects)
 	{
-		int heap_id   = -1;
-		int object_id = -1;
-	};
-	Vector<WriteBackObject> objects;
-
-	int heap_id = 0;
-	for (auto& heap: m_heaps)
-	{
-		int object_id = 0;
-		for (auto& h: heap.objects)
+		const auto& object = m_heaps[heap_id].objects[object_id].info;
+		if (!m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies()))
 		{
-			if (!h.free)
-			{
-				auto& object = h.info;
-				if (object.in_use && object.write_back_func != nullptr && !object.read_only)
-				{
-					if (!m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies()))
-					{
-						EXIT("GpuMemory all-completed write-back still has a pending resource use: type=%s\n",
-						     Core::EnumName(object.object.type).C_Str());
-					}
-					objects.Add(WriteBackObject({heap_id, object_id}));
-				}
-			}
-			object_id++;
+			EXIT("GpuMemory all-completed write-back still has a pending resource use: type=%s\n",
+			     Core::EnumName(object.object.type).C_Str());
 		}
-		heap_id++;
 	}
 
-	for (const auto& object: objects)
+	for (const auto& [heap_id, object_id]: objects)
 	{
-		WriteBackObjectLocked(ctx, object.heap_id, object.object_id, &destructors);
+		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors);
 	}
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
 }

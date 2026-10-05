@@ -199,41 +199,17 @@ bool GpuMemory::QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size,
 		return true;
 	}
 
-	const auto ranges_overlap = [](uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
-	{ return a <= b ? b - a < a_size : a - b < b_size; };
-	const auto intersects_heap = [&](const Heap& heap)
-	{
-		for (int i = 0; i < vaddr_num; ++i)
-		{
-			if (ranges_overlap(vaddr[i], size[i], heap.range.vaddr, heap.range.size))
-			{
-				return true;
-			}
-		}
-		return false;
-	};
-	bool intersects_allocated_range = false;
-	for (const auto& heap: m_heaps)
-	{
-		if (intersects_heap(heap))
-		{
-			intersects_allocated_range = true;
-			break;
-		}
-	}
-	if (!intersects_allocated_range)
+	std::vector<int> heap_ids;
+	HeapsIntersecting(vaddr, size, vaddr_num, &heap_ids);
+	if (heap_ids.empty())
 	{
 		m_overlap_snapshot_cache.Store(query, *out);
 		return true;
 	}
 
-	for (uint32_t heap_id = 0; heap_id < m_heaps.Size(); heap_id++)
+	for (const int heap_id: heap_ids)
 	{
 		const auto& heap    = m_heaps[heap_id];
-		if (!intersects_heap(heap))
-		{
-			continue;
-		}
 		const auto  objects = FindBlocks(static_cast<int>(heap_id), vaddr, size, vaddr_num);
 		for (const auto& object: objects)
 		{

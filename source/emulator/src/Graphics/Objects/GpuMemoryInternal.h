@@ -467,6 +467,7 @@ private:
 	    int heap_id, const Vector<OverlappedBlock>& parents, const GpuObject& incoming) const;
 	[[nodiscard]] int GetHeapId(uint64_t vaddr, uint64_t size) const;
 	[[nodiscard]] int HeapAt(uint64_t address) const;
+	void              HeapsIntersecting(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, std::vector<int>* out) const;
 	void              RebuildHeapIndex();
 	void              ForgetHeapStorageObjects(int removed_heap_id);
 	// (heap id, object id) of each in-use writable StorageBuffer overlapping a range
@@ -504,13 +505,17 @@ private:
 	Vector<Heap> m_heaps;
 	// [begin, end) address spans, sorted and disjoint, each naming the lowest heap
 	// index that covers it: GetHeapId's first-match answer by binary search.
+	// Every covering heap, ascending, is m_heap_index_open[open_first, +open_count).
 	struct HeapSpan
 	{
-		uint64_t begin   = 0;
-		uint64_t end     = 0;
-		int      heap_id = -1;
+		uint64_t begin      = 0;
+		uint64_t end        = 0;
+		int      heap_id    = -1;
+		uint32_t open_first = 0;
+		uint32_t open_count = 0;
 	};
 	std::vector<HeapSpan> m_heap_index;
+	std::vector<int>      m_heap_index_open;
 	// (heap id, object id) of every live StorageBuffer object with a write-back:
 	// the only objects a device-address write-back or its wait can touch.
 	std::set<std::pair<int, int>> m_storage_objects;
@@ -518,7 +523,12 @@ private:
 	// the per-draw pending-write scans, which titles with thousands of live
 	// storage buffers otherwise pay in full for every device-address draw.
 	std::set<std::pair<int, int>> m_writable_storage;
-	void                          SyncWritableStorage(int heap_id, int object_id);
+	// (heap id, object id) of every live object whose GPU writes are not yet
+	// written back (in use, writable, with a write-back): the only candidates
+	// of a completed-submission write-back, which otherwise visits every object
+	// of every heap on each completion.
+	std::set<std::pair<int, int>> m_pending_write_back;
+	void                          SyncWriteBackIndexes(int heap_id, int object_id);
 
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;

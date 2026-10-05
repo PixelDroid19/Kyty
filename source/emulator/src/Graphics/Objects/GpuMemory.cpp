@@ -175,17 +175,21 @@ GpuMemoryRangeValidationStatus GpuMemory::ValidateAllocatedRangeLocked(uint64_t 
 	{
 		return cached;
 	}
-	for (const auto& heap: m_heaps)
+	// Any heap that covers vaddr may hold the whole range.
+	const auto after = std::upper_bound(m_heap_index.begin(), m_heap_index.end(), vaddr,
+	                                    [](uint64_t value, const HeapSpan& span) { return value < span.begin; });
+	if (after != m_heap_index.begin() && vaddr < std::prev(after)->end)
 	{
-		if (vaddr < heap.range.vaddr)
+		const auto& span = *std::prev(after);
+		for (uint32_t i = 0; i < span.open_count; i++)
 		{
-			continue;
-		}
-		const uint64_t offset = vaddr - heap.range.vaddr;
-		if (offset < heap.range.size && size <= heap.range.size - offset)
-		{
-			m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Valid);
-			return GpuMemoryRangeValidationStatus::Valid;
+			const auto&    heap   = m_heaps[m_heap_index_open[span.open_first + i]];
+			const uint64_t offset = vaddr - heap.range.vaddr;
+			if (size <= heap.range.size - offset)
+			{
+				m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Valid);
+				return GpuMemoryRangeValidationStatus::Valid;
+			}
 		}
 	}
 	m_allocated_validation_cache.Store(query, GpuMemoryRangeValidationStatus::Unallocated);
@@ -207,18 +211,11 @@ uint64_t GpuMemory::GetAllocatedRangePrefix(uint64_t vaddr, uint64_t maximum_siz
 	{
 		return cached;
 	}
-	for (const auto& heap: m_heaps)
+	// The first heap in index order that covers vaddr, as GetHeapId resolves it.
+	if (const int heap_id = HeapAt(vaddr); heap_id >= 0)
 	{
-		if (vaddr < heap.range.vaddr)
-		{
-			continue;
-		}
-		const uint64_t offset = vaddr - heap.range.vaddr;
-		if (offset >= heap.range.size)
-		{
-			continue;
-		}
-		const uint64_t available = heap.range.size - offset;
+		const auto&    heap      = m_heaps[heap_id];
+		const uint64_t available = heap.range.size - (vaddr - heap.range.vaddr);
 		const uint64_t prefix    = available < maximum_size ? available : maximum_size;
 		m_allocated_prefix_cache.Store(query, prefix);
 		return prefix;
@@ -266,23 +263,31 @@ void GpuMemory::ForgetHeapStorageObjects(int removed_heap_id)
 		}
 		return shifted;
 	};
-	m_storage_objects  = shift(m_storage_objects);
-	m_writable_storage = shift(m_writable_storage);
+	m_storage_objects    = shift(m_storage_objects);
+	m_writable_storage   = shift(m_writable_storage);
+	m_pending_write_back = shift(m_pending_write_back);
 }
 
-void GpuMemory::SyncWritableStorage(int heap_id, int object_id)
+void GpuMemory::SyncWriteBackIndexes(int heap_id, int object_id)
 {
 	const std::pair<int, int> key {heap_id, object_id};
-	if (m_storage_objects.count(key) != 0u)
+	const auto&               object = m_heaps[heap_id].objects[object_id];
+	const bool                pending =
+	    !object.free && object.info.in_use && !object.info.read_only && object.info.write_back_func != nullptr;
+	if (pending)
 	{
-		const auto& object = m_heaps[heap_id].objects[object_id];
-		if (!object.free && object.info.in_use && !object.info.read_only && object.info.object.obj != nullptr)
-		{
-			m_writable_storage.insert(key);
-			return;
-		}
+		m_pending_write_back.insert(key);
+	} else
+	{
+		m_pending_write_back.erase(key);
 	}
-	m_writable_storage.erase(key);
+	if (pending && object.info.object.obj != nullptr && m_storage_objects.count(key) != 0u)
+	{
+		m_writable_storage.insert(key);
+	} else
+	{
+		m_writable_storage.erase(key);
+	}
 }
 
 // Sweeps the heap boundaries once: every elementary span keeps the lowest
@@ -312,6 +317,7 @@ void GpuMemory::RebuildHeapIndex()
 	std::sort(edges.begin(), edges.end(), [](const Edge& a, const Edge& b) { return a.address < b.address; });
 	std::multiset<int> open;
 	m_heap_index.clear();
+	m_heap_index_open.clear();
 	for (size_t index = 0; index < edges.size();)
 	{
 		const uint64_t begin = edges[index].address;
@@ -328,14 +334,45 @@ void GpuMemory::RebuildHeapIndex()
 		{
 			continue;
 		}
-		const HeapSpan span {begin, edges[index].address, *open.begin()};
-		if (!m_heap_index.empty() && m_heap_index.back().end == begin && m_heap_index.back().heap_id == span.heap_id)
+		if (!m_heap_index.empty() && m_heap_index.back().end == begin && m_heap_index.back().open_count == open.size() &&
+		    std::equal(open.begin(), open.end(), m_heap_index_open.begin() + m_heap_index.back().open_first))
 		{
-			m_heap_index.back().end = span.end;
+			m_heap_index.back().end = edges[index].address;
 			continue;
 		}
+		HeapSpan span {begin, edges[index].address, *open.begin(), static_cast<uint32_t>(m_heap_index_open.size()),
+		               static_cast<uint32_t>(open.size())};
+		m_heap_index_open.insert(m_heap_index_open.end(), open.begin(), open.end());
 		m_heap_index.push_back(span);
 	}
+}
+
+// Every heap that intersects any of the ranges, ascending: the heaps a
+// linear walk would visit, without walking the heaps that miss.
+void GpuMemory::HeapsIntersecting(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, std::vector<int>* out) const
+{
+	out->clear();
+	for (int i = 0; i < vaddr_num; i++)
+	{
+		if (size[i] == 0)
+		{
+			continue;
+		}
+		const uint64_t end  = vaddr[i] + size[i] < vaddr[i] ? UINT64_MAX : vaddr[i] + size[i];
+		auto           span = std::upper_bound(m_heap_index.begin(), m_heap_index.end(), vaddr[i],
+		                                       [](uint64_t value, const HeapSpan& s) { return value < s.begin; });
+		if (span != m_heap_index.begin() && std::prev(span)->end > vaddr[i])
+		{
+			--span;
+		}
+		for (; span != m_heap_index.end() && span->begin < end; ++span)
+		{
+			out->insert(out->end(), m_heap_index_open.begin() + span->open_first,
+			            m_heap_index_open.begin() + span->open_first + span->open_count);
+		}
+	}
+	std::sort(out->begin(), out->end());
+	out->erase(std::unique(out->begin(), out->end()), out->end());
 }
 
 void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemoryRangeReleaseMode mode)
@@ -560,6 +597,7 @@ GpuMemory::Destructor GpuMemory::Free(int heap_id, int object_id)
 
 	m_storage_objects.erase({heap_id, object_id});
 	m_writable_storage.erase({heap_id, object_id});
+	m_pending_write_back.erase({heap_id, object_id});
 	h.free             = true;
 	h.next_free_id     = heap.first_free_id;
 	heap.first_free_id = object_id;
