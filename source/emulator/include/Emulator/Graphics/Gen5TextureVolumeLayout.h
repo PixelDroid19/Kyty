@@ -12,8 +12,9 @@ namespace Kyty::Libs::Graphics {
 // sampled and storage textures cannot drift apart.
 //
 // Supported swizzle modes (T# SW mode, single mip only):
-//  - 5, Standard 4KB: 1, 2, 4, 8 or 16-byte elements through the RDNA2 SW_4KB_S volume pattern; the
-//    descriptor pitch is ignored and rows are the width rounded up to the block width;
+//  - 5, Standard 4KB, and 9, Standard 64KB: 1, 2, 4, 8 or 16-byte elements through the RDNA2 SW_4KB_S /
+//    SW_64KB_S volume patterns; the descriptor pitch is ignored and rows are the width rounded up to the block
+//    width;
 //  - 0, linear: rows of `pitch` elements, `height` rows per slice, slices back to
 //    back (slice stride = pitch * height * element bytes), the allocation rounded
 //    up to 256 bytes like the 2D linear estimate. The T# stores no slice stride for
@@ -27,6 +28,7 @@ struct Gen5TextureVolumeLayout
 	uint32_t      height            = 0;
 	uint32_t      depth             = 0;
 	uint32_t      pitch             = 0;
+	uint32_t      block_bytes       = 0;     // 4096 or 65536 for the standard swizzles
 	bool          linear            = false; // SW mode 0: upload is a plain copy
 };
 

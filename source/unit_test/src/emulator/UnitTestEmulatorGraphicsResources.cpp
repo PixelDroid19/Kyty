@@ -854,26 +854,29 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 				{
 					Gen5TextureVolumeLayout layout {};
 					const bool admitted = Gen5GetVolumeTextureLayout(format, 8u, 16u, depth, 8u, levels, tile, &layout);
-					// SW mode 0 (linear) is a byte-for-byte layout and SW mode 5 the SW_4KB_S volume
-					// pattern of every element size. Any other tile mode, or a mip chain, must stay
-					// rejected instead of being read as linear.
-					EXPECT_EQ(admitted, levels == 1u && (tile == 0u || tile == 5u));
+					// SW mode 0 (linear) is a byte-for-byte layout and SW modes 5 and 9 the SW_4KB_S and
+					// SW_64KB_S volume patterns of every element size. Any other tile mode, or a mip chain,
+					// must stay rejected instead of being read as linear.
+					EXPECT_EQ(admitted, levels == 1u && (tile == 0u || tile == 5u || tile == 9u));
 					if (!admitted)
 					{
 						EXPECT_EQ(layout.tiled.size, 0u);
 						EXPECT_EQ(layout.linear_size, 0u);
 						EXPECT_FALSE(Gen5ValidateTextureVolumeUpload(layout, UINT64_MAX));
-					} else if (tile == 5u)
+					} else if (tile == 5u || tile == 9u)
 					{
-						// 8x16xdepth over blocks of 16x16x16 (1 B), 8x16x16 (2 B), 8x16x8 (4 B), 8x8x8 (8 B), 4x8x8 (16 B).
-						const uint32_t bytes = ShaderGen5TextureBytesPerElement(format);
+						// 4 KiB blocks: 16x16x16 (1 B), 8x16x16 (2 B), 8x16x8 (4 B), 8x8x8 (8 B), 4x8x8 (16 B).
+						// 64 KiB blocks extend the same pattern by four address bits.
+						const uint32_t bytes       = ShaderGen5TextureBytesPerElement(format);
+						const uint32_t block_bytes = tile == 5u ? 4096u : 65536u;
 						uint32_t       bw = 0, bh = 0, bd = 0;
-						ASSERT_TRUE(TileGetStandard4KBVolumeBlock(bytes, &bw, &bh, &bd));
+						ASSERT_TRUE(TileGetStandardVolumeBlock(bytes, block_bytes, &bw, &bh, &bd));
+						EXPECT_EQ(static_cast<uint64_t>(bw) * bh * bd * bytes, block_bytes);
 						const uint32_t pitch  = (8u + bw - 1u) / bw * bw;
 						const uint32_t blocks = (pitch / bw) * ((16u + bh - 1u) / bh) * ((depth + bd - 1u) / bd);
 						EXPECT_FALSE(layout.linear);
 						EXPECT_EQ(layout.pitch, pitch);
-						EXPECT_EQ(layout.tiled.size, blocks * 4096u);
+						EXPECT_EQ(layout.tiled.size, blocks * block_bytes);
 						EXPECT_EQ(layout.linear_size, static_cast<uint64_t>(pitch) * 16u * depth * bytes);
 					} else
 					{

@@ -104,6 +104,14 @@ void     TileConvertStandard4KBVolumeToLinear(void* dst, const void* src, uint32
                                               uint32_t pitch_elems, uint32_t bytes_per_element);
 [[nodiscard]] bool TileTryGetStandard4KBVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems,
                                                    uint32_t bytes_per_element, TileSizeAlign* size);
+// The same volumes in SW_64KB_S: the 64 KiB pattern keeps the 4 KiB pattern in its low 12 address bits and adds four
+// coordinate bits (32x32x16 elements for 4 bytes). block_bytes is 4096 or 65536.
+[[nodiscard]] bool TileGetStandardVolumeBlock(uint32_t bytes_per_element, uint32_t block_bytes, uint32_t* width, uint32_t* height,
+                                              uint32_t* depth);
+void               TileConvertStandardVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
+                                                     uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t block_bytes);
+[[nodiscard]] bool TileTryGetStandardVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems,
+                                                uint32_t bytes_per_element, uint32_t block_bytes, TileSizeAlign* size);
 void     TileGetTextureSize(uint32_t dfmt, uint32_t nfmt, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,
                             bool neo, TileSizeAlign* total_size, TileSizeOffset* level_sizes, TilePaddedSize* padded_size);
 void     TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch, uint32_t levels, uint32_t tile,

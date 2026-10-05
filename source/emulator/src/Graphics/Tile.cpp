@@ -1428,12 +1428,13 @@ struct VolumeAddressBit
 	uint8_t    bit;
 };
 
-// Which coordinate bit drives each of the 12 byte-address bits of a 4 KiB SW_4KB_S block (GFX10 swizzle pattern
-// tables; 4 KiB modes carry no pipe or bank XOR, so every pipe count shares them).
-struct Standard4KBVolumePattern
+// Which coordinate bit drives each byte-address bit of a SW_4KB_S / SW_64KB_S volume block (GFX10 3D standard
+// swizzle pattern tables). The 4 KiB pattern is the low 12 bits of the 64 KiB one; standard modes carry no pipe or
+// bank XOR, so every pipe count shares them.
+struct StandardVolumePattern
 {
 	uint32_t         bytes_per_element;
-	VolumeAddressBit bits[12];
+	VolumeAddressBit bits[16];
 };
 
 constexpr VolumeAxis kB = VolumeAxis::Byte;
@@ -1441,36 +1442,46 @@ constexpr VolumeAxis kX = VolumeAxis::X;
 constexpr VolumeAxis kY = VolumeAxis::Y;
 constexpr VolumeAxis kZ = VolumeAxis::Z;
 
-constexpr Standard4KBVolumePattern kStandard4KBVolumePatterns[] = {
-    {1u, {{kX, 0}, {kX, 1}, {kZ, 0}, {kY, 0}, {kZ, 1}, {kY, 1}, {kX, 2}, {kZ, 2}, {kY, 2}, {kX, 3}, {kZ, 3}, {kY, 3}}},
-    {2u, {{kB, 0}, {kX, 0}, {kZ, 0}, {kY, 0}, {kZ, 1}, {kY, 1}, {kX, 1}, {kZ, 2}, {kY, 2}, {kX, 2}, {kZ, 3}, {kY, 3}}},
-    {4u, {{kB, 0}, {kB, 1}, {kX, 0}, {kY, 0}, {kZ, 0}, {kY, 1}, {kX, 1}, {kZ, 1}, {kY, 2}, {kX, 2}, {kZ, 2}, {kY, 3}}},
-    {8u, {{kB, 0}, {kB, 1}, {kB, 2}, {kX, 0}, {kZ, 0}, {kY, 0}, {kX, 1}, {kZ, 1}, {kY, 1}, {kX, 2}, {kZ, 2}, {kY, 2}}},
-    {16u, {{kB, 0}, {kB, 1}, {kB, 2}, {kB, 3}, {kZ, 0}, {kY, 0}, {kX, 0}, {kZ, 1}, {kY, 1}, {kX, 1}, {kZ, 2}, {kY, 2}}},
+constexpr StandardVolumePattern kStandardVolumePatterns[] = {
+    {1u, {{kX, 0}, {kX, 1}, {kZ, 0}, {kY, 0}, {kZ, 1}, {kY, 1}, {kX, 2}, {kZ, 2}, {kY, 2}, {kX, 3}, {kZ, 3}, {kY, 3},
+          {kX, 4}, {kZ, 4}, {kY, 4}, {kX, 5}}},
+    {2u, {{kB, 0}, {kX, 0}, {kZ, 0}, {kY, 0}, {kZ, 1}, {kY, 1}, {kX, 1}, {kZ, 2}, {kY, 2}, {kX, 2}, {kZ, 3}, {kY, 3},
+          {kX, 3}, {kZ, 4}, {kY, 4}, {kX, 4}}},
+    {4u, {{kB, 0}, {kB, 1}, {kX, 0}, {kY, 0}, {kZ, 0}, {kY, 1}, {kX, 1}, {kZ, 1}, {kY, 2}, {kX, 2}, {kZ, 2}, {kY, 3},
+          {kX, 3}, {kZ, 3}, {kY, 4}, {kX, 4}}},
+    {8u, {{kB, 0}, {kB, 1}, {kB, 2}, {kX, 0}, {kZ, 0}, {kY, 0}, {kX, 1}, {kZ, 1}, {kY, 1}, {kX, 2}, {kZ, 2}, {kY, 2},
+          {kX, 3}, {kZ, 3}, {kY, 3}, {kX, 4}}},
+    {16u, {{kB, 0}, {kB, 1}, {kB, 2}, {kB, 3}, {kZ, 0}, {kY, 0}, {kX, 0}, {kZ, 1}, {kY, 1}, {kX, 1}, {kZ, 2}, {kY, 2},
+           {kX, 2}, {kZ, 3}, {kY, 3}, {kX, 3}}},
 };
 
-constexpr uint32_t kStandard4KBVolumeBlockBytes = 4096u;
-
-const Standard4KBVolumePattern* FindStandard4KBVolumePattern(uint32_t bytes_per_element)
+const StandardVolumePattern* FindStandardVolumePattern(uint32_t bytes_per_element)
 {
-	for (const auto& pattern: kStandard4KBVolumePatterns)
+	for (const auto& pattern: kStandardVolumePatterns)
 	{
 		if (pattern.bytes_per_element == bytes_per_element) { return &pattern; }
 	}
 	return nullptr;
 }
 
-uint32_t AxisBits(const Standard4KBVolumePattern& pattern, VolumeAxis axis)
+// Address bits inside one block: 12 for 4 KiB, 16 for 64 KiB.
+uint32_t StandardVolumeAddressBits(uint32_t block_bytes)
+{
+	return block_bytes == 4096u ? 12u : (block_bytes == 65536u ? 16u : 0u);
+}
+
+uint32_t AxisBits(const StandardVolumePattern& pattern, uint32_t address_bits, VolumeAxis axis)
 {
 	uint32_t count = 0;
-	for (const auto& bit: pattern.bits) { count += bit.axis == axis ? 1u : 0u; }
+	for (uint32_t address = 0; address < address_bits; ++address) { count += pattern.bits[address].axis == axis ? 1u : 0u; }
 	return count;
 }
 
-uint32_t Standard4KBVolumeWithinBlockOffset(const Standard4KBVolumePattern& pattern, uint32_t x, uint32_t y, uint32_t z)
+uint32_t StandardVolumeWithinBlockOffset(const StandardVolumePattern& pattern, uint32_t address_bits, uint32_t x, uint32_t y,
+                                         uint32_t z)
 {
 	uint32_t offset = 0;
-	for (uint32_t address = 0; address < 12u; ++address)
+	for (uint32_t address = 0; address < address_bits; ++address)
 	{
 		const auto&    source = pattern.bits[address];
 		const uint32_t value  = source.axis == kX ? x : (source.axis == kY ? y : (source.axis == kZ ? z : 0u));
@@ -1479,36 +1490,50 @@ uint32_t Standard4KBVolumeWithinBlockOffset(const Standard4KBVolumePattern& patt
 	return offset;
 }
 
+uint64_t StandardVolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height, uint32_t bytes_per_element,
+                              uint32_t block_bytes)
+{
+	const auto*    pattern      = FindStandardVolumePattern(bytes_per_element);
+	const uint32_t address_bits = StandardVolumeAddressBits(block_bytes);
+	EXIT_IF(pattern == nullptr || address_bits == 0u || pitch_elems == 0u || height == 0u);
+	uint32_t block_width = 0, block_height = 0, block_depth = 0;
+	EXIT_IF(!TileGetStandardVolumeBlock(bytes_per_element, block_bytes, &block_width, &block_height, &block_depth));
+	const uint64_t blocks_x    = (static_cast<uint64_t>(pitch_elems) + block_width - 1u) / block_width;
+	const uint64_t blocks_y    = (static_cast<uint64_t>(height) + block_height - 1u) / block_height;
+	const uint64_t block_index = ((static_cast<uint64_t>(z / block_depth) * blocks_y) + (y / block_height)) * blocks_x + (x / block_width);
+	return block_index * block_bytes +
+	       StandardVolumeWithinBlockOffset(*pattern, address_bits, x % block_width, y % block_height, z % block_depth);
+}
+
 } // namespace
+
+bool TileGetStandardVolumeBlock(uint32_t bytes_per_element, uint32_t block_bytes, uint32_t* width, uint32_t* height, uint32_t* depth)
+{
+	const auto*    pattern      = FindStandardVolumePattern(bytes_per_element);
+	const uint32_t address_bits = StandardVolumeAddressBits(block_bytes);
+	if (pattern == nullptr || address_bits == 0u || width == nullptr || height == nullptr || depth == nullptr) { return false; }
+	*width  = 1u << AxisBits(*pattern, address_bits, kX);
+	*height = 1u << AxisBits(*pattern, address_bits, kY);
+	*depth  = 1u << AxisBits(*pattern, address_bits, kZ);
+	return true;
+}
 
 bool TileGetStandard4KBVolumeBlock(uint32_t bytes_per_element, uint32_t* width, uint32_t* height, uint32_t* depth)
 {
-	const auto* pattern = FindStandard4KBVolumePattern(bytes_per_element);
-	if (pattern == nullptr || width == nullptr || height == nullptr || depth == nullptr) { return false; }
-	*width  = 1u << AxisBits(*pattern, kX);
-	*height = 1u << AxisBits(*pattern, kY);
-	*depth  = 1u << AxisBits(*pattern, kZ);
-	return true;
+	return TileGetStandardVolumeBlock(bytes_per_element, 4096u, width, height, depth);
 }
 
 uint64_t TileGetStandard4KBVolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height,
                                         uint32_t bytes_per_element)
 {
-	const auto* pattern = FindStandard4KBVolumePattern(bytes_per_element);
-	EXIT_IF(pattern == nullptr || pitch_elems == 0u || height == 0u);
-	uint32_t block_width = 0, block_height = 0, block_depth = 0;
-	EXIT_IF(!TileGetStandard4KBVolumeBlock(bytes_per_element, &block_width, &block_height, &block_depth));
-	const uint64_t blocks_x    = (static_cast<uint64_t>(pitch_elems) + block_width - 1u) / block_width;
-	const uint64_t blocks_y    = (static_cast<uint64_t>(height) + block_height - 1u) / block_height;
-	const uint64_t block_index = ((static_cast<uint64_t>(z / block_depth) * blocks_y) + (y / block_height)) * blocks_x + (x / block_width);
-	return block_index * kStandard4KBVolumeBlockBytes +
-	       Standard4KBVolumeWithinBlockOffset(*pattern, x % block_width, y % block_height, z % block_depth);
+	return StandardVolumeOffset(x, y, z, pitch_elems, height, bytes_per_element, 4096u);
 }
 
-void TileConvertStandard4KBVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
-                                          uint32_t pitch_elems, uint32_t bytes_per_element)
+void TileConvertStandardVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
+                                       uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t block_bytes)
 {
-	EXIT_IF(dst == nullptr || src == nullptr || FindStandard4KBVolumePattern(bytes_per_element) == nullptr);
+	EXIT_IF(dst == nullptr || src == nullptr || FindStandardVolumePattern(bytes_per_element) == nullptr ||
+	        StandardVolumeAddressBits(block_bytes) == 0u);
 	EXIT_IF(width == 0u || height == 0u || depth == 0u || pitch_elems < width);
 	auto*                      d = static_cast<uint8_t*>(dst);
 	const auto*                s = static_cast<const uint8_t*>(src);
@@ -1519,7 +1544,7 @@ void TileConvertStandard4KBVolumeToLinear(void* dst, const void* src, uint32_t w
 		{
 			for (uint32_t x = 0; x < width; ++x)
 			{
-				const uint64_t tiled  = TileGetStandard4KBVolumeOffset(x, y, z, pitch_elems, height, bytes_per_element);
+				const uint64_t tiled  = StandardVolumeOffset(x, y, z, pitch_elems, height, bytes_per_element, block_bytes);
 				const uint64_t linear = ((static_cast<uint64_t>(z) * height * pitch_elems) + (static_cast<uint64_t>(y) * pitch_elems) + x) *
 				                        bytes_per_element;
 				std::memcpy(d + linear, s + tiled, bytes_per_element);
@@ -1528,14 +1553,20 @@ void TileConvertStandard4KBVolumeToLinear(void* dst, const void* src, uint32_t w
 	}
 }
 
-bool TileTryGetStandard4KBVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, uint32_t bytes_per_element,
-                                     TileSizeAlign* size)
+void TileConvertStandard4KBVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
+                                          uint32_t pitch_elems, uint32_t bytes_per_element)
+{
+	TileConvertStandardVolumeToLinear(dst, src, width, height, depth, pitch_elems, bytes_per_element, 4096u);
+}
+
+bool TileTryGetStandardVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, uint32_t bytes_per_element,
+                                  uint32_t block_bytes, TileSizeAlign* size)
 {
 	if (size == nullptr) { return false; }
 	*size = {};
 	uint32_t block_width = 0, block_height = 0, block_depth = 0;
 	if (width == 0u || height == 0u || depth == 0u || pitch_elems < width ||
-	    !TileGetStandard4KBVolumeBlock(bytes_per_element, &block_width, &block_height, &block_depth))
+	    !TileGetStandardVolumeBlock(bytes_per_element, block_bytes, &block_width, &block_height, &block_depth))
 	{
 		return false;
 	}
@@ -1544,10 +1575,16 @@ bool TileTryGetStandard4KBVolumeSize(uint32_t width, uint32_t height, uint32_t d
 	const uint64_t blocks_z = (static_cast<uint64_t>(depth) + block_depth - 1u) / block_depth;
 	// Check before multiplication: even uint64_t can overflow for three
 	// guest-controlled dimensions. TileSizeAlign owns a 32-bit byte count.
-	if (blocks_x > UINT32_MAX / kStandard4KBVolumeBlockBytes / blocks_y / blocks_z) { return false; }
-	size->size  = static_cast<uint32_t>(blocks_x * blocks_y * blocks_z * kStandard4KBVolumeBlockBytes);
-	size->align = kStandard4KBVolumeBlockBytes;
+	if (blocks_x > UINT32_MAX / block_bytes / blocks_y / blocks_z) { return false; }
+	size->size  = static_cast<uint32_t>(blocks_x * blocks_y * blocks_z * block_bytes);
+	size->align = block_bytes;
 	return true;
+}
+
+bool TileTryGetStandard4KBVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, uint32_t bytes_per_element,
+                                     TileSizeAlign* size)
+{
+	return TileTryGetStandardVolumeSize(width, height, depth, pitch_elems, bytes_per_element, 4096u, size);
 }
 
 void TileConvertStandard64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,

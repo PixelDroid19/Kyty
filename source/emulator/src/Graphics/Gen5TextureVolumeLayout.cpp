@@ -11,21 +11,26 @@ namespace Kyty::Libs::Graphics {
 namespace {
 
 constexpr uint32_t kSwModeLinear     = 0u;
-constexpr uint32_t kSwModeStandard4K = 5u;
+constexpr uint32_t kSwModeStandard4K  = 5u;
+constexpr uint32_t kSwModeStandard64K = 9u;
 constexpr uint64_t kLinearAlign      = 256u; // T# base address granularity
 
 // A swizzled surface has no descriptor pitch (word4 belongs to linear resources): rows are the width rounded up
 // to the block width, which is also the staging row length of the upload.
-bool Standard4KBLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t depth, Gen5TextureVolumeLayout* layout)
+bool StandardLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t depth, uint32_t block_bytes,
+                    Gen5TextureVolumeLayout* layout)
 {
 	// Block-compressed volumes address 4x4 blocks, not texels: not modelled.
 	if (ShaderGen5TextureIsBlockCompressed(format)) { return false; }
 	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(format);
 	uint32_t       block_width = 0, block_height = 0, block_depth = 0;
-	if (!TileGetStandard4KBVolumeBlock(bytes_per_element, &block_width, &block_height, &block_depth)) { return false; }
+	if (!TileGetStandardVolumeBlock(bytes_per_element, block_bytes, &block_width, &block_height, &block_depth)) { return false; }
 	const uint32_t pitch = (width + block_width - 1u) / block_width * block_width;
 	TileSizeAlign  tiled {};
-	if (pitch < width || !TileTryGetStandard4KBVolumeSize(width, height, depth, pitch, bytes_per_element, &tiled)) { return false; }
+	if (pitch < width || !TileTryGetStandardVolumeSize(width, height, depth, pitch, bytes_per_element, block_bytes, &tiled))
+	{
+		return false;
+	}
 	const uint64_t linear_size =
 	    static_cast<uint64_t>(pitch) * static_cast<uint64_t>(height) * static_cast<uint64_t>(depth) * bytes_per_element;
 	if (linear_size == 0u || linear_size > tiled.size) { return false; }
@@ -33,6 +38,7 @@ bool Standard4KBLayout(uint32_t format, uint32_t width, uint32_t height, uint32_
 	layout->linear_size       = linear_size;
 	layout->bytes_per_element = bytes_per_element;
 	layout->pitch             = pitch;
+	layout->block_bytes       = block_bytes;
 	layout->linear            = false;
 	return true;
 }
@@ -82,7 +88,8 @@ bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height
 	if (width == 0u || height == 0u || depth == 0u || pitch < width || levels != 1u) { return false; }
 	Gen5TextureVolumeLayout result {};
 	bool                    supported = false;
-	if (tile == kSwModeStandard4K) { supported = Standard4KBLayout(format, width, height, depth, &result); }
+	if (tile == kSwModeStandard4K) { supported = StandardLayout(format, width, height, depth, 4096u, &result); }
+	if (tile == kSwModeStandard64K) { supported = StandardLayout(format, width, height, depth, 65536u, &result); }
 	if (tile == kSwModeLinear)
 	{
 		supported    = LinearLayout(format, height, depth, pitch, &result);
@@ -107,7 +114,8 @@ bool Gen5ValidateTextureVolumeUpload(const Gen5TextureVolumeLayout& layout, uint
 {
 	if (layout.linear) { return ValidateLinearUpload(layout, source_size); }
 	TileSizeAlign tiled {};
-	if (!TileTryGetStandard4KBVolumeSize(layout.width, layout.height, layout.depth, layout.pitch, layout.bytes_per_element, &tiled))
+	if (!TileTryGetStandardVolumeSize(layout.width, layout.height, layout.depth, layout.pitch, layout.bytes_per_element,
+	                                  layout.block_bytes, &tiled))
 	{
 		return false;
 	}
@@ -128,7 +136,8 @@ bool Gen5DetileTextureVolume(void* destination, uint64_t destination_size, const
 		std::memcpy(destination, source, static_cast<size_t>(layout.linear_size));
 		return true;
 	}
-	TileConvertStandard4KBVolumeToLinear(destination, source, layout.width, layout.height, layout.depth, layout.pitch, layout.bytes_per_element);
+	TileConvertStandardVolumeToLinear(destination, source, layout.width, layout.height, layout.depth, layout.pitch,
+	                                  layout.bytes_per_element, layout.block_bytes);
 	return true;
 }
 
