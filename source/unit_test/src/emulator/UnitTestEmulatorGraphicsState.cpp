@@ -2638,7 +2638,7 @@ TEST(EmulatorGraphicsState, GpuMemoryClassifiesMutableLinksButNotReclaimedObject
 	GpuMemoryFree(&ctx, base, heap_size);
 }
 
-TEST(EmulatorGraphicsState, GpuMemoryRetiresOnlyCompleteReadOnlyBufferComponents)
+TEST(EmulatorGraphicsState, GpuMemoryRetiresLinkedReadOnlyBuffers)
 {
 	EnsureGpuMemoryForTests();
 
@@ -2670,7 +2670,7 @@ TEST(EmulatorGraphicsState, GpuMemoryRetiresOnlyCompleteReadOnlyBufferComponents
 	EXPECT_TRUE(GpuMemoryFindObjects(address, size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
 }
 
-TEST(EmulatorGraphicsState, GpuMemoryRetirementReachesPastTruncatedComponents)
+TEST(EmulatorGraphicsState, GpuMemoryRetiresReadOnlyBuffersBeyondLinkTraversalBounds)
 {
 	EnsureGpuMemoryForTests();
 
@@ -2694,8 +2694,8 @@ TEST(EmulatorGraphicsState, GpuMemoryRetirementReachesPastTruncatedComponents)
 	                                                 RetirementTestGpuObject(&fixture.State(), parent_count,
 	                                                                        GpuMemoryObjectType::StorageBuffer));
 	ASSERT_NE(backings[parent_count], nullptr);
-	// A separate complete component placed after the truncated one must not starve behind it: the
-	// bounded scan resumes where the previous frame stopped instead of restarting at the first heap slot.
+	// A graph larger than any bounded traversal still retires member by member, and a separate
+	// component placed after it is reached because the scan resumes where the previous pass stopped.
 	const uint64_t complete      = fixture.Base() + 0x2000u;
 	const uint32_t vertex_token  = parent_count + 1u;
 	const uint32_t storage_token = parent_count + 2u;
@@ -2712,17 +2712,14 @@ TEST(EmulatorGraphicsState, GpuMemoryRetirementReachesPastTruncatedComponents)
 	}
 	EXPECT_EQ(fixture.State().delete_counts[vertex_token], 1u);
 	EXPECT_EQ(fixture.State().delete_counts[storage_token], 1u);
-	for (uint32_t i = 0; i < parent_count; ++i)
+	for (uint32_t i = 0; i <= parent_count; ++i)
 	{
-		const uint64_t address = first_parent + i * parent_stride;
-		EXPECT_EQ(fixture.State().delete_counts[i], 0u);
-		EXPECT_TRUE(GpuMemoryHasExactTestBacking(address, parent_size, GpuMemoryObjectType::StorageBuffer, backings[i]));
+		EXPECT_EQ(fixture.State().delete_counts[i], 1u);
 	}
-	EXPECT_EQ(fixture.State().delete_counts[parent_count], 0u);
-	EXPECT_TRUE(GpuMemoryHasExactTestBacking(first_parent, combined_size, GpuMemoryObjectType::StorageBuffer, backings[parent_count]));
+	EXPECT_TRUE(GpuMemoryFindObjects(first_parent, combined_size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
 }
 
-TEST(EmulatorGraphicsState, GpuMemoryKeepsSurfaceConnectedLinkedBufferComponents)
+TEST(EmulatorGraphicsState, GpuMemoryRetiresReadOnlyBufferButKeepsLinkedSurface)
 {
 	EnsureGpuMemoryForTests();
 
@@ -2748,8 +2745,10 @@ TEST(EmulatorGraphicsState, GpuMemoryKeepsSurfaceConnectedLinkedBufferComponents
 		GpuMemoryFrameDone(&ctx);
 	}
 	const auto after = DebugStatsGetPerformanceSnapshot(false);
-	EXPECT_EQ(g_test_gpu_object_deletes, 0);
-	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free);
+	EXPECT_EQ(g_test_gpu_object_deletes, 1);
+	EXPECT_EQ(after.gpu_memory_types[5].logical_free, before.gpu_memory_types[5].logical_free + 1u);
+	EXPECT_TRUE(GpuMemoryFindObjects(address, size, GpuMemoryObjectType::StorageBuffer, true, false).IsEmpty());
+	EXPECT_FALSE(GpuMemoryFindObjects(address, size, GpuMemoryObjectType::RenderTexture, true, false).IsEmpty());
 
 	GpuMemoryFree(&ctx, base, heap_size);
 }

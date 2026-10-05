@@ -355,6 +355,13 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   title sizes its movie texture by the pitch and crops by that field, and with a zero crop the 128 padding columns
   of a 1920-wide movie showed as a green bar (zeroed NV12). `sceAvPlayerGetVideoData` (no pitch in its frame info)
   keeps rows of the visible width.
+- **Linked read-only buffers retire one at a time.** Overlapping read-only storage views are linked to each other
+  and to the large buffers they alias. Retirement used to free a linked buffer only together with its whole linked
+  component (at most 64 nodes, all idle); a roguelike's per-frame views joined one component that also held its
+  always-live buffers, so none was ever freed: live objects grew from 98 to 22,064 in 80 s and the frame rate fell
+  from 33 to 11. A read-only buffer owns no content (its bytes are guest memory or a copy of a peer, and a pending
+  GPU write keeps an object writable), and freeing it drops both link directions, so each one idle for 120 frames
+  now retires alone. The same title then holds about 100 live objects and a steady rate over 220 s.
 
 Regression set after these repairs (run d406-d417, 90 s each, same host): GRIS 119 fps (104 before), Blasphemous 2
 85 (70), Dreaming Sarah 195 (89), Let's Build a Zoo 202 (83), The Messenger 320 (269), Dead Cells 94 (82), JoJo 87
@@ -5733,6 +5740,8 @@ observed frame/present progress and no last error, while cgroup memory peaked at
 2,185,240,576 bytes with zero swap before timeout exit 124. This falsifies
 fixed-size whole-component retirement as a sufficient containment mechanism;
 it does not prove that lifetime growth causes the 3D failure.
+Resolved later: each idle read-only buffer member now retires on its own (see
+"Linked read-only buffers retire one at a time" above).
 
 The current host-only follow-up routes safe read-only buffer snapshots up to
 512 KiB through the command-buffer-owned transient pool instead of creating a

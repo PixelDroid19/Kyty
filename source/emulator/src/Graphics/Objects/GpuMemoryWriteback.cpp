@@ -40,79 +40,6 @@
 
 namespace Kyty::Libs::Graphics {
 
-bool GpuMemory::CollectRetireableLinkedBufferComponent(int heap_id, int object_id, uint64_t retire_after_frames,
-                                                       uint32_t* scan_budget, Vector<int>* component)
-{
-	constexpr uint32_t kMaxNodes = 64u;
-	constexpr uint32_t kMaxEdges = 128u;
-	EXIT_IF(scan_budget == nullptr || component == nullptr);
-	component->Clear();
-	if (heap_id < 0 || static_cast<uint32_t>(heap_id) >= m_heaps.Size() || object_id < 0 ||
-	    static_cast<uint32_t>(object_id) >= m_heaps[heap_id].objects.Size() || *scan_budget == 0u)
-	{
-		return false;
-	}
-
-	auto&    heap           = m_heaps[heap_id];
-	uint32_t next           = 0;
-	uint32_t examined_edges = 0;
-	const auto enqueue = [&](int candidate)
-	{
-		if (candidate < 0 || static_cast<uint32_t>(candidate) >= heap.objects.Size())
-		{
-			return false;
-		}
-		for (int existing: *component)
-		{
-			if (existing == candidate)
-			{
-				return true;
-			}
-		}
-		if (component->Size() >= kMaxNodes)
-		{
-			return false;
-		}
-		component->Add(candidate);
-		return true;
-	};
-
-	if (!enqueue(object_id))
-	{
-		return false;
-	}
-	while (next < component->Size())
-	{
-		if (*scan_budget == 0u)
-		{
-			return false;
-		}
-		(*scan_budget)--;
-		const auto& h = heap.objects[component->At(next++)];
-		if (h.free || h.scenario != GpuMemoryScenario::Common ||
-		    !GpuMemoryCanRetireLinkedBufferMember(h.info.object.type, h.info.read_only, h.info.depth_meta_bound) ||
-		    m_current_frame - h.info.use_last_frame < retire_after_frames ||
-		    !m_deferred_deletions.AreDependenciesComplete(h.info.submission_uses.Dependencies()))
-		{
-			return false;
-		}
-		for (const auto& link: h.others)
-		{
-			if (*scan_budget == 0u || examined_edges >= kMaxEdges)
-			{
-				return false;
-			}
-			(*scan_budget)--;
-			examined_edges++;
-			if (!enqueue(link.object_id))
-			{
-				return false;
-			}
-		}
-	}
-	return !component->IsEmpty();
-}
-
 void GpuMemory::FrameDone(GraphicContext* ctx)
 {
 	EXIT_IF(ctx == nullptr);
@@ -132,13 +59,11 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 	const uint32_t retire_batch_limit    = GpuMemoryRetirementBatchLimit(m_transient_creates_since_retirement);
 	m_transient_creates_since_retirement = 0;
 	uint32_t retired                     = 0;
-	uint32_t linked_scan_budget          = 2048u;
-	// Resume after the last examined slot. A truncated component must not
-	// spend every pass's budget before later complete components are reached.
-	// Cursors are positions, not identities; normalize after heap removal.
+	// Resume after the last examined slot so every object is reached across
+	// passes. Cursors are positions, not identities; normalize after heap removal.
 	uint32_t heaps_remaining  = m_heaps.Size();
 	uint32_t visits_remaining = 4096u;
-	while (heaps_remaining != 0 && visits_remaining != 0 && retired < retire_batch_limit && linked_scan_budget != 0)
+	while (heaps_remaining != 0 && visits_remaining != 0 && retired < retire_batch_limit)
 	{
 		visits_remaining--;
 		if (m_retirement_heap_cursor >= m_heaps.Size())
@@ -161,30 +86,30 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 		{
 			continue;
 		}
+		auto&      object                = h.info;
+		const bool old_enough            = m_current_frame - object.use_last_frame >= kRetireAfterFrames;
+		const bool dependencies_complete = m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies());
 		if (!h.others.IsEmpty())
 		{
-			Vector<int> component;
-			if (h.info.object.type == GpuMemoryObjectType::StorageBuffer &&
-			    CollectRetireableLinkedBufferComponent(heap_id, object_id, kRetireAfterFrames, &linked_scan_budget, &component) &&
-			    component.Size() <= retire_batch_limit - retired)
+			// A read-only buffer owns no content: its bytes are guest memory or a
+			// copy of a linked peer, and a pending GPU write keeps it writable
+			// (GpuMemoryMergeReadOnlyUse). Retiring it alone drops both link
+			// directions and leaves every peer intact, so overlapping read-only
+			// views cannot grow a linked graph without bound.
+			if (GpuMemoryCanRetireLinkedBufferMember(object.object.type, object.read_only, object.depth_meta_bound) && old_enough &&
+			    dependencies_complete)
 			{
-				for (int component_id: component)
-				{
-					destructors.Add(Free(heap_id, component_id));
-				}
-				retired += component.Size();
+				destructors.Add(Free(heap_id, object_id));
+				retired++;
 			}
 			continue;
 		}
 
-		auto&      object           = h.info;
 		const bool reclaimable_type = object.object.type == GpuMemoryObjectType::Texture ||
 		                              object.object.type == GpuMemoryObjectType::StorageTexture ||
 		                              object.object.type == GpuMemoryObjectType::StorageBuffer;
 		const bool storage_buffer_safe =
 		    object.object.type != GpuMemoryObjectType::StorageBuffer || object.write_back_func == nullptr || object.read_only;
-		const bool old_enough            = m_current_frame - object.use_last_frame >= kRetireAfterFrames;
-		const bool dependencies_complete = m_deferred_deletions.AreDependenciesComplete(object.submission_uses.Dependencies());
 		if (reclaimable_type && storage_buffer_safe && old_enough && dependencies_complete)
 		{
 			destructors.Add(Free(heap_id, object_id));

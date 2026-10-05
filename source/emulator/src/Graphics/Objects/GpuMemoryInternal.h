@@ -449,8 +449,6 @@ private:
 	void  DeleteBlock(Block* b, int heap_id, int obj_id);
 	void  Link(int heap_id, int id1, int id2, OverlapType rel, GpuMemoryScenario scenario);
 	[[nodiscard]] uint64_t NextContentSequence();
-	[[nodiscard]] bool CollectRetireableLinkedBufferComponent(int heap_id, int object_id, uint64_t retire_after_frames,
-	                                                          uint32_t* scan_budget, Vector<int>* component);
 	[[nodiscard]] DebugStatsGpuMemoryLinkedTopology ClassifyLinkedStorageTopology(
 	    int heap_id, const Vector<OverlappedBlock>& parents, const GpuObject& incoming) const;
 	[[nodiscard]] int GetHeapId(uint64_t vaddr, uint64_t size) const;
