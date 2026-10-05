@@ -271,11 +271,25 @@ static uint32_t video_frame_pitch(uint32_t width)
 	return (width + kRowAlign - 1u) & ~(kRowAlign - 1u);
 }
 
-static void draw_synthetic_frame(uint32_t width, uint32_t height, void* data, float l)
+// The extended frame info carries a pitch, so those frames use aligned rows;
+// the legacy frame info has none and its consumers read rows of the visible
+// width. Frame buffers are sized for the aligned layout and fit both.
+enum class VideoRowLayout
+{
+	Tight,
+	Aligned,
+};
+
+static uint32_t video_row_pitch(uint32_t width, VideoRowLayout layout)
+{
+	return layout == VideoRowLayout::Aligned ? video_frame_pitch(width) : width;
+}
+
+static void draw_synthetic_frame(uint32_t pitch, uint32_t height, void* data, float l)
 {
 	constexpr int STRIPS_NUM = 5;
 
-	size_t luma_width        = video_frame_pitch(width);
+	size_t luma_width        = pitch;
 	size_t luma_height       = height;
 	size_t chroma_width      = luma_width / 2;
 	size_t chroma_height     = luma_height / 2;
@@ -553,20 +567,24 @@ static void delete_synthetic_video(AvPlayerInternal* r)
 	release_video_frames(mem, frames);
 }
 
-static void fill_video_ex(const AvPlayerInternal* r, AvPlayerVideoEx* video)
+// The padding between the visible width and the aligned pitch is reported as a
+// right crop, so a title that sizes its texture by the pitch samples only the
+// picture.
+static void fill_video_ex(uint32_t width, uint32_t height, uint32_t pitch, float frame_rate, AvPlayerVideoEx* video)
 {
 	std::memset(video, 0, sizeof(*video));
-	video->width                 = r->synthetic_width;
-	video->height                = r->synthetic_height;
-	video->aspect_ratio          = static_cast<float>(r->synthetic_width) / static_cast<float>(r->synthetic_height);
+	video->width                 = width;
+	video->height                = height;
+	video->aspect_ratio          = (height != 0 ? static_cast<float>(width) / static_cast<float>(height) : 16.0f / 9.0f);
 	video->language_code[0]      = 'u';
 	video->language_code[1]      = 'n';
 	video->language_code[2]      = 'd';
-	video->pitch                 = video_frame_pitch(r->synthetic_width);
+	video->pitch                 = pitch;
+	video->crop_right_offset     = pitch - width;
 	video->luma_bit_depth        = 8;
 	video->chroma_bit_depth      = 8;
 	video->video_full_tange_flag = 0;
-	video->framerate             = static_cast<double>(r->synthetic_frame_rate);
+	video->framerate             = static_cast<double>(frame_rate);
 }
 
 static void fill_audio(AvPlayerAudio* audio, uint32_t size, uint32_t channels = 2, uint32_t sample_rate = 48000)
@@ -723,7 +741,7 @@ static void stop_once_after_eof(AvPlayerInternal* h)
 	}
 }
 
-static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
+static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info, VideoRowLayout layout)
 {
 	if (r == nullptr || info == nullptr)
 	{
@@ -774,9 +792,9 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		{
 			return false;
 		}
-		// The decoder rows are tight; each luma and chroma row moves to its aligned pitch.
+		// The decoder rows are tight; each luma and chroma row moves to the layout's pitch.
 		const VideoFrameMemory::HostWriteLease write_lease(reinterpret_cast<uint64_t>(frame), frame_bytes);
-		const size_t                           pitch = video_frame_pitch(width);
+		const size_t                           pitch = video_row_pitch(width, layout);
 		for (size_t row = 0; row < height + chroma_rows; ++row)
 		{
 			std::memcpy(frame + row * pitch, decoded.data.data() + row * width, width);
@@ -807,7 +825,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		}
 
 		const VideoFrameMemory::HostWriteLease write_lease(reinterpret_cast<uint64_t>(frame), frame_bytes);
-		draw_synthetic_frame(width, height, frame, level * 0.7f);
+		draw_synthetic_frame(video_row_pitch(width, layout), height, frame, level * 0.7f);
 		Core::LockGuard lock(r->mutex);
 		r->synthetic_obtained_num++;
 	}
@@ -815,17 +833,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 	std::memset(info, 0, sizeof(*info));
 	info->data                                = frame;
 	info->time_stamp                          = timestamp;
-	info->details.video.width                 = width;
-	info->details.video.height                = height;
-	info->details.video.aspect_ratio          = (height != 0 ? static_cast<float>(width) / static_cast<float>(height) : 16.0f / 9.0f);
-	info->details.video.language_code[0]      = 'u';
-	info->details.video.language_code[1]      = 'n';
-	info->details.video.language_code[2]      = 'd';
-	info->details.video.pitch                 = video_frame_pitch(width);
-	info->details.video.luma_bit_depth        = 8;
-	info->details.video.chroma_bit_depth      = 8;
-	info->details.video.video_full_tange_flag = 0;
-	info->details.video.framerate             = static_cast<double>(frame_rate);
+	fill_video_ex(width, height, video_row_pitch(width, layout), frame_rate, &info->details.video);
 
 	if (avplayer_dump_video_enabled())
 	{
@@ -1172,7 +1180,8 @@ int KYTY_SYSV_ABI AvPlayerGetStreamInfoEx(AvPlayerInternal* h, uint32_t stream_i
 	                                                           (h->synthetic_frame_rate > 0.0f ? h->synthetic_frame_rate : 60.0f)));
 	if (stream_id == 0)
 	{
-		fill_video_ex(h, &info->details.video);
+		fill_video_ex(h->synthetic_width, h->synthetic_height, video_frame_pitch(h->synthetic_width), h->synthetic_frame_rate,
+		              &info->details.video);
 	} else
 	{
 		fill_audio_ex(&info->details.audio, static_cast<uint32_t>(h->audio_storage.size() * sizeof(int16_t)),
@@ -1363,7 +1372,7 @@ int KYTY_SYSV_ABI AvPlayerSetTrickSpeed(AvPlayerInternal* h, int32_t trick_speed
 	return 0;
 }
 
-static Bool get_video_data_ex(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info);
+static Bool get_video_data_ex(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info, VideoRowLayout layout);
 
 Bool KYTY_SYSV_ABI AvPlayerGetVideoData(AvPlayerInternal* h, AvPlayerFrameInfo* video_info)
 {
@@ -1374,7 +1383,7 @@ Bool KYTY_SYSV_ABI AvPlayerGetVideoData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 		return 0;
 	}
 	AvPlayerFrameInfoEx ex {};
-	Bool                ok = get_video_data_ex(player.get(), &ex);
+	Bool                ok = get_video_data_ex(player.get(), &ex, VideoRowLayout::Tight);
 	if (ok == 0)
 	{
 		return 0;
@@ -1389,13 +1398,13 @@ Bool KYTY_SYSV_ABI AvPlayerGetVideoData(AvPlayerInternal* h, AvPlayerFrameInfo* 
 	return 1;
 }
 
-static Bool get_video_data_ex(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info)
+static Bool get_video_data_ex(AvPlayerInternal* h, AvPlayerFrameInfoEx* video_info, VideoRowLayout layout)
 {
 	if (video_info == nullptr)
 	{
 		return 0;
 	}
-	if (get_synthetic_video(h, video_info))
+	if (get_synthetic_video(h, video_info, layout))
 	{
 		return 1;
 	}
@@ -1408,7 +1417,7 @@ Bool KYTY_SYSV_ABI AvPlayerGetVideoDataEx(AvPlayerInternal* h, AvPlayerFrameInfo
 	PRINT_NAME();
 	avplayer_dump_call("video_call", h);
 	auto player = acquire_player(h);
-	return player == nullptr ? 0 : get_video_data_ex(player.get(), video_info);
+	return player == nullptr ? 0 : get_video_data_ex(player.get(), video_info, VideoRowLayout::Aligned);
 }
 
 Bool KYTY_SYSV_ABI AvPlayerGetAudioData(AvPlayerInternal* h, AvPlayerFrameInfo* audio_info)

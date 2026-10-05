@@ -351,7 +351,10 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   storage image created over a smaller sampled texture (linked; it seeds from guest memory).
 - **AvPlayer frames use 256-byte rows** in both NV12 planes, the row alignment GPU linear surfaces require; a UE4
   title copies its movie frames with that pitch, and tight rows produced the image repeated about fifteen times
-  across the screen.
+  across the screen. The extended frame info reports the padding as `crop_right_offset = pitch - width`: a Unity
+  title sizes its movie texture by the pitch and crops by that field, and with a zero crop the 128 padding columns
+  of a 1920-wide movie showed as a green bar (zeroed NV12). `sceAvPlayerGetVideoData` (no pitch in its frame info)
+  keeps rows of the visible width.
 
 Regression set after these repairs (run d406-d417, 90 s each, same host): GRIS 119 fps (104 before), Blasphemous 2
 85 (70), Dreaming Sarah 195 (89), Let's Build a Zoo 202 (83), The Messenger 320 (269), Dead Cells 94 (82), JoJo 87
