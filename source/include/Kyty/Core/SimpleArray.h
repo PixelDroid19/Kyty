@@ -437,117 +437,174 @@ private:
 
 	void sort(int32_t low, int32_t high, uint32_t depth)
 	{
-		EXIT_IF(depth >= 64);
-		EXIT_IF(low < 0 || high < 0);
-
-		int32_t i = low;
-		int32_t j = high;
-
-		const T m = m_values[static_cast<uint32_t>(i + j) >> 1u];
-		do
+		// Recurse into the smaller partition and iterate over the larger one,
+		// so the depth stays logarithmic whatever the pivots.
+		for (;;)
 		{
-			while (m_values[i] < m)
-			{
-				i++;
-			}
-			while (m < m_values[j])
-			{
-				j--;
-			}
-			if (i <= j)
-			{
-				const T tmp = m_values[i];
-				m_values[i] = m_values[j];
-				m_values[j] = tmp;
-				i++;
-				j--;
-			}
-		} while (i <= j);
+			EXIT_IF(depth >= 64);
+			EXIT_IF(low < 0 || high < 0);
 
-		if (low < j)
-		{
-			sort(low, j, depth + 1);
-		}
-		if (i < high)
-		{
-			sort(i, high, depth + 1);
+			int32_t i = low;
+			int32_t j = high;
+
+			const T m = m_values[static_cast<uint32_t>(i + j) >> 1u];
+			do
+			{
+				while (m_values[i] < m)
+				{
+					i++;
+				}
+				while (m < m_values[j])
+				{
+					j--;
+				}
+				if (i <= j)
+				{
+					const T tmp = m_values[i];
+					m_values[i] = m_values[j];
+					m_values[j] = tmp;
+					i++;
+					j--;
+				}
+			} while (i <= j);
+			if (j - low < high - i)
+			{
+				if (low < j)
+				{
+					sort(low, j, depth + 1);
+				}
+				if (i >= high)
+				{
+					return;
+				}
+				low = i;
+			} else
+			{
+				if (i < high)
+				{
+					sort(i, high, depth + 1);
+				}
+				if (low >= j)
+				{
+					return;
+				}
+				high = j;
+			}
 		}
 	}
 
 	template <typename OP>
 	void sort_with_compare_func(int32_t low, int32_t high, uint32_t depth, OP&& comp_func)
 	{
-		EXIT_IF(depth >= 64);
-		EXIT_IF(low < 0 || high < 0);
-
-		int32_t i = low;
-		int32_t j = high;
-
-		const T m = m_values[static_cast<uint32_t>(i + j) >> 1u];
-		do
+		// Recurse into the smaller partition and iterate over the larger one,
+		// so the depth stays logarithmic whatever the pivots.
+		for (;;)
 		{
-			while (comp_func(m_values[i], m))
-			{
-				i++;
-			}
-			while (comp_func(m, m_values[j]))
-			{
-				j--;
-			}
-			if (i <= j)
-			{
-				const T tmp = m_values[i];
-				m_values[i] = m_values[j];
-				m_values[j] = tmp;
-				i++;
-				j--;
-			}
-		} while (i <= j);
+			EXIT_IF(depth >= 64);
+			EXIT_IF(low < 0 || high < 0);
 
-		if (low < j)
-		{
-			sort_with_compare_func(low, j, depth + 1, comp_func);
-		}
-		if (i < high)
-		{
-			sort_with_compare_func(i, high, depth + 1, comp_func);
+			int32_t i = low;
+			int32_t j = high;
+
+			const T m = m_values[static_cast<uint32_t>(i + j) >> 1u];
+			do
+			{
+				while (comp_func(m_values[i], m))
+				{
+					i++;
+				}
+				while (comp_func(m, m_values[j]))
+				{
+					j--;
+				}
+				if (i <= j)
+				{
+					const T tmp = m_values[i];
+					m_values[i] = m_values[j];
+					m_values[j] = tmp;
+					i++;
+					j--;
+				}
+			} while (i <= j);
+			if (j - low < high - i)
+			{
+				if (low < j)
+				{
+					sort_with_compare_func(low, j, depth + 1, comp_func);
+				}
+				if (i >= high)
+				{
+					return;
+				}
+				low = i;
+			} else
+			{
+				if (i < high)
+				{
+					sort_with_compare_func(i, high, depth + 1, comp_func);
+				}
+				if (low >= j)
+				{
+					return;
+				}
+				high = j;
+			}
 		}
 	}
 
 	void sort_with_swap_func(int32_t low, int32_t high, uint32_t depth, SortSwapFunc swap_func, void* arg)
 	{
-		EXIT_IF(depth >= 64);
-		EXIT_IF(low < 0 || high < 0);
-
-		int32_t i = low;
-		int32_t j = high;
-
-		const T m = m_values[static_cast<uint32_t>(i + j) >> 1u];
-		do
+		// Recurse into the smaller partition and iterate over the larger one,
+		// so the depth stays logarithmic whatever the pivots.
+		for (;;)
 		{
-			while (m_values[i] < m)
-			{
-				i++;
-			}
-			while (m < m_values[j])
-			{
-				j--;
-			}
-			if (i <= j)
-			{
-				swap_func(m_values, i, j, arg);
-				i++;
-				j--;
-			}
-		} while (i <= j);
+			EXIT_IF(depth >= 64);
+			EXIT_IF(low < 0 || high < 0);
 
-		if (low < j)
-		{
-			sort_with_swap_func(low, j, depth + 1, swap_func, arg);
-		}
-		if (i < high)
-		{
-			sort_with_swap_func(i, high, depth + 1, swap_func, arg);
+			int32_t i = low;
+			int32_t j = high;
+
+			const T m = m_values[static_cast<uint32_t>(i + j) >> 1u];
+			do
+			{
+				while (m_values[i] < m)
+				{
+					i++;
+				}
+				while (m < m_values[j])
+				{
+					j--;
+				}
+				if (i <= j)
+				{
+					swap_func(m_values, i, j, arg);
+					i++;
+					j--;
+				}
+			} while (i <= j);
+			if (j - low < high - i)
+			{
+				if (low < j)
+				{
+					sort_with_swap_func(low, j, depth + 1, swap_func, arg);
+				}
+				if (i >= high)
+				{
+					return;
+				}
+				low = i;
+			} else
+			{
+				if (i < high)
+				{
+					sort_with_swap_func(i, high, depth + 1, swap_func, arg);
+				}
+				if (low >= j)
+				{
+					return;
+				}
+				high = j;
+			}
 		}
 	}
 
