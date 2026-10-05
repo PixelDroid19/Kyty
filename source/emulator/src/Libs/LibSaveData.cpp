@@ -23,6 +23,7 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <unordered_set>
 #include <vector>
@@ -556,30 +557,78 @@ int KYTY_SYSV_ABI SaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount
 	return OK;
 }
 
+struct SaveDataParamField
+{
+	size_t offset;
+	size_t size;
+};
+
+// SCE_SAVE_DATA_PARAM_TYPE_*: ALL, TITLE, SUB_TITLE, DETAIL, USER_PARAM, MTIME.
+static bool SaveDataParamFieldOf(uint32_t param_type, SaveDataParamField* field)
+{
+	switch (param_type)
+	{
+		case 0: *field = {0, sizeof(SaveDataParam)}; return true;
+		case 1: *field = {offsetof(SaveDataParam, title), sizeof(SaveDataParam::title)}; return true;
+		case 2: *field = {offsetof(SaveDataParam, sub_title), sizeof(SaveDataParam::sub_title)}; return true;
+		case 3: *field = {offsetof(SaveDataParam, detail), sizeof(SaveDataParam::detail)}; return true;
+		case 4: *field = {offsetof(SaveDataParam, user_param), sizeof(SaveDataParam::user_param)}; return true;
+		case 5: *field = {offsetof(SaveDataParam, mtime), sizeof(SaveDataParam::mtime)}; return true;
+		default: return false;
+	}
+}
+
+// The parameters live with the save directory, so a later mount reads what an
+// earlier one set. The file holds the guest SaveDataParam layout.
+static int SaveDataParamFile(const SaveDataMountPoint* mount_point, std::filesystem::path* file)
+{
+	std::lock_guard lock(g_mount_mutex);
+	if (!g_mount_coordinator.Find(mount_point->data).has_value())
+	{
+		return SAVE_DATA_ERROR_NOT_MOUNTED;
+	}
+	const String guest = String::FromUtf8(mount_point->data) + U"/sce_sys/param.kyty";
+	*file              = std::filesystem::path(Kernel::FileSystem::GetRealFilename(guest).utf8_str().GetData());
+	return OK;
+}
+
+static SaveDataParam LoadSaveDataParam(const std::filesystem::path& file)
+{
+	SaveDataParam param {};
+	std::ifstream stream(file, std::ios::binary);
+	stream.read(reinterpret_cast<char*>(&param), sizeof(param));
+	if (stream.gcount() != static_cast<std::streamsize>(sizeof(param)))
+	{
+		param = {};
+	}
+	return param;
+}
+
+static bool StoreSaveDataParam(const std::filesystem::path& file, const SaveDataParam& param)
+{
+	std::error_code ec;
+	std::filesystem::create_directories(file.parent_path(), ec);
+	std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+	stream.write(reinterpret_cast<const char*>(&param), sizeof(param));
+	return !ec && stream.good();
+}
+
 int KYTY_SYSV_ABI SaveDataSetParam(const SaveDataMountPoint* mount_point, uint32_t param_type, const void* param_buf, size_t param_buf_size)
 {
 	PRINT_NAME();
-
-	if (mount_point == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t mount_point    = %s\n", mount_point->data);
-	KYTY_LOG_DEBUG("\t param_type     = %u\n", param_type);
-	KYTY_LOG_DEBUG("\t param_buf_size = %" PRIu64 "\n", param_buf_size);
-
-	if (param_type == 0)
+	SaveDataParamField field {};
+	if (mount_point == nullptr || param_buf == nullptr || !SaveDataParamFieldOf(param_type, &field) || param_buf_size < field.size)
 	{
-		const auto* p = static_cast<const SaveDataParam*>(param_buf);
-
-		KYTY_LOG_DEBUG("\t title      = %s\n", p->title);
-		KYTY_LOG_DEBUG("\t sub_title  = %s\n", p->sub_title);
-		KYTY_LOG_DEBUG("\t detail     = %s\n", p->detail);
-		KYTY_LOG_DEBUG("\t user_param = %u\n", p->user_param);
-	} else
-	{
-		KYTY_NOT_IMPLEMENTED;
+		return SAVE_DATA_ERROR_PARAMETER;
 	}
-
-	return OK;
+	std::filesystem::path file;
+	if (const int result = SaveDataParamFile(mount_point, &file); result != OK)
+	{
+		return result;
+	}
+	SaveDataParam param = LoadSaveDataParam(file);
+	std::memcpy(reinterpret_cast<uint8_t*>(&param) + field.offset, param_buf, field.size);
+	return StoreSaveDataParam(file, param) ? OK : SAVE_DATA_ERROR_INTERNAL;
 }
 
 int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, SaveDataMountInfo* info)
@@ -1018,14 +1067,18 @@ int KYTY_SYSV_ABI SaveDataIsMounted(uint32_t* mounted)
 int KYTY_SYSV_ABI SaveDataGetParam(const SaveDataMountPoint* mount_point, uint32_t param_type, void* param_buf, size_t param_buf_size)
 {
 	PRINT_NAME();
-	if (mount_point == nullptr || param_buf == nullptr)
+	SaveDataParamField field {};
+	if (mount_point == nullptr || param_buf == nullptr || !SaveDataParamFieldOf(param_type, &field) || param_buf_size < field.size)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	KYTY_LOG_DEBUG("\t mount_point    = %s\n", mount_point->data);
-	KYTY_LOG_DEBUG("\t param_type     = %u\n", param_type);
-	KYTY_LOG_DEBUG("\t param_buf_size = %" PRIu64 "\n", static_cast<uint64_t>(param_buf_size));
-	std::memset(param_buf, 0, param_buf_size);
+	std::filesystem::path file;
+	if (const int result = SaveDataParamFile(mount_point, &file); result != OK)
+	{
+		return result;
+	}
+	const SaveDataParam param = LoadSaveDataParam(file);
+	std::memcpy(param_buf, reinterpret_cast<const uint8_t*>(&param) + field.offset, field.size);
 	return OK;
 }
 
