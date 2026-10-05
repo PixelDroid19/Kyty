@@ -89,7 +89,11 @@ TEST(EmulatorGraphicsState, AgcAsyncQueueHandlesKeepSeparateOrderedSlots)
 	{
 		EXPECT_GE(slots.Bind(100u + static_cast<uint32_t>(i), unavailable), 0);
 	}
-	EXPECT_EQ(slots.Bind(200u, unavailable), -1);
+	// Every available ring has a handle: the next one shares a ring and keeps it.
+	const int shared = slots.Bind(200u, unavailable);
+	EXPECT_GE(shared, 0);
+	EXPECT_NE(shared, GraphicsAgcAsyncQueueSlots::Capacity - 1);
+	EXPECT_EQ(slots.Bind(200u, unavailable), shared);
 	EXPECT_EQ(slots.Bind(17u, unavailable), first);
 }
 

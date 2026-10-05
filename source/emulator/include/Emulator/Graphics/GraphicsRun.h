@@ -101,19 +101,23 @@ enum class GraphicsSubmissionCompletion
 
 // ACB handles name independent ordered queues. Bind each live handle to one
 // host compute command processor so a graphics producer can run while an ACB
-// waits for its label.
+// waits for its label. The console exposes more compute queues than the host
+// has processors (a fighting title probes nine at startup), so once every one
+// has a handle, a new handle shares the processor with the fewest handles: its
+// submissions stay in order there instead of failing.
 class GraphicsAgcAsyncQueueSlots
 {
 public:
-	static constexpr int Capacity = 8;
+	static constexpr int Capacity       = 8;
+	static constexpr int HandleCapacity = 64;
 
 	int Find(uint32_t handle) const
 	{
-		for (int slot = 0; slot < Capacity; slot++)
+		for (int i = 0; i < m_handles; i++)
 		{
-			if (m_bound[slot] && m_handle[slot] == handle)
+			if (m_handle[i] == handle)
 			{
-				return slot;
+				return m_slot[i];
 			}
 		}
 		return -1;
@@ -126,21 +130,42 @@ public:
 		{
 			return existing;
 		}
+		if (m_handles == HandleCapacity)
+		{
+			return -1;
+		}
+		int chosen = -1;
+		int fewest = HandleCapacity + 1;
 		for (int slot = Capacity - 1; slot >= 0; slot--)
 		{
-			if (!m_bound[slot] && !unavailable[slot])
+			if (unavailable[slot])
 			{
-				m_bound[slot]  = true;
-				m_handle[slot] = handle;
-				return slot;
+				continue;
+			}
+			int bound = 0;
+			for (int i = 0; i < m_handles; i++)
+			{
+				bound += m_slot[i] == slot ? 1 : 0;
+			}
+			if (bound < fewest)
+			{
+				fewest = bound;
+				chosen = slot;
 			}
 		}
-		return -1;
+		if (chosen >= 0)
+		{
+			m_handle[m_handles] = handle;
+			m_slot[m_handles]   = chosen;
+			m_handles++;
+		}
+		return chosen;
 	}
 
 private:
-	bool     m_bound[Capacity]  = {};
-	uint32_t m_handle[Capacity] = {};
+	uint32_t m_handle[HandleCapacity] = {};
+	int      m_slot[HandleCapacity]   = {};
+	int      m_handles                = 0;
 };
 
 GraphicsAgcReleaseMemControl GraphicsDecodeAgcReleaseMemControl(uint32_t control_dw);

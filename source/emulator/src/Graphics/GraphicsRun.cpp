@@ -1450,13 +1450,15 @@ void GraphicsRing::ThreadBatchRun(void* data)
 			{
 				buf.decode_completion->Signal();
 			}
-			if (consolidated_wait || GraphicsBatchCanDeferSubmissionCompletion(cp->CompletionCallbackSources()))
-			{
-				ring->m_async_completion_pending = true;
-			} else if (GraphicsBatchNeedsSubmissionCompletion(cp->CompletionCallbackIssued()))
+			if (!consolidated_wait && !GraphicsBatchCanDeferSubmissionCompletion(cp->CompletionCallbackSources()) &&
+			    GraphicsBatchNeedsSubmissionCompletion(cp->CompletionCallbackIssued()))
 			{
 				cp->WaitSubmission(flip_submission);
 			}
+			// Plain end-of-pipe label stores carry no callback source, yet a guest
+			// may spin on one after its last submission: the idle pump publishes
+			// every completion of this queue once its fence signals.
+			ring->m_async_completion_pending = true;
 		}
 		cp->RunUnlock();
 	}
@@ -1482,6 +1484,23 @@ void ComputeRing::ThreadRun(void* data)
 	{
 		while (!(ring->m_active && ring->m_run_offset_dw > 0))
 		{
+			if (ring->m_completion_pending)
+			{
+				// A guest may spin on an end-of-pipe label of its last
+				// submission; publish it once the fence signals. The ring is not
+				// idle until its last submission retired.
+				ring->m_mutex.Unlock();
+				cp->RunLock();
+				const bool pending = cp->PumpCompletedSubmissions();
+				cp->RunUnlock();
+				ring->m_mutex.Lock();
+				ring->m_completion_pending = pending;
+				if (pending && !(ring->m_active && ring->m_run_offset_dw > 0))
+				{
+					(void)ring->m_cond_var.WaitFor(&ring->m_mutex, 1000u);
+				}
+				continue;
+			}
 			ring->m_idle = true;
 			ring->m_idle_cond_var.Signal();
 			ring->m_cond_var.Wait(&ring->m_mutex);
@@ -1543,6 +1562,7 @@ void ComputeRing::ThreadRun(void* data)
 
 		ring->m_mutex.Lock();
 
+		ring->m_completion_pending = true;
 		ring->m_run_offset_dw -= num_dw;
 		*ring->m_read_ptr_addr = next_pos % ring_size;
 	}

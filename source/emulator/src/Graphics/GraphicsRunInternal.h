@@ -579,6 +579,9 @@ private:
 	Core::CondVar m_idle_cond_var;
 	bool          m_done = true;
 	bool          m_idle = true;
+	// Submitted work whose completions (end-of-pipe labels, interrupts) the
+	// idle loop still has to publish; nothing else polls this queue's fences.
+	bool          m_completion_pending = false;
 
 	CommandProcessor* m_cp       = nullptr;
 	int               m_queue_id = -1;
