@@ -1877,6 +1877,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	// Gen5 pthread_getthreadid_np / rename / schedparam / mutexattr_setprotocol.
 	LIB_FUNC("3eqs37G74-s", Posix::pthread_getthreadid_np);
 	LIB_FUNC("9vyP6Z7bqzc", Posix::pthread_rename_np);
+	LIB_FUNC("9HzfhdtESio", Posix::pthread_getname_np);
 	LIB_FUNC("FIs3-UQT9sg", Posix::pthread_getschedparam);
 	LIB_FUNC("Xs9hdiD7sAA", Posix::pthread_setschedparam);
 	LIB_FUNC("5txKfcMUAok", Posix::pthread_mutexattr_setprotocol);

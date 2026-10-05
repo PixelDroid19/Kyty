@@ -300,6 +300,7 @@ int KYTY_SYSV_ABI pthread_attr_getguardsize(const Kernel::PthreadAttr* attr, siz
 int KYTY_SYSV_ABI pthread_getschedparam(Kernel::Pthread thread, int* policy, Kernel::KernelSchedParam* param);
 int KYTY_SYSV_ABI pthread_setschedparam(Kernel::Pthread thread, int policy, const Kernel::KernelSchedParam* param);
 int KYTY_SYSV_ABI pthread_rename_np(Kernel::Pthread thread, const char* name);
+int KYTY_SYSV_ABI pthread_getname_np(Kernel::Pthread thread, char* name, size_t size);
 int KYTY_SYSV_ABI pthread_getthreadid_np();
 int KYTY_SYSV_ABI pthread_mutexattr_setprotocol(Kernel::PthreadMutexattr* attr, int protocol);
 
