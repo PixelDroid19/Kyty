@@ -402,6 +402,14 @@ Third round (same day):
   fallback now computes that layout and each mip upload uses its own pitch; the rule reproduces all 2,135
   multi-level entries of the SDK-generated linear RGBA8 table (offsets, sizes, padded pitch and total).
 
+- **SDK pattern fill.** Hades clears its 1920x1152 targets every frame with the SDK pattern-fill kernel
+  (`buffer_store_format_x` of `values[i % period]` for `i` below a count, 32-bit UINT records). It was never
+  recognized, so the clear reached the storage buffer but not the render-target images: rooms with strong lighting
+  showed saturated green, smeared columns and stale silhouettes. The uniform-fill proof now matches that kernel's
+  exact template (instruction types, branch targets, operands); with a live period of 1 it is a uniform fill,
+  propagated to the exact image aliases and published like the 16-byte form (publishing: 14% more frames, write-back
+  time 11.8 s to 0.8 s over 120 s). A first attempt never matched: the proof rejected programs with indirect labels,
+  which every conditional branch records for its fall-through, so its measured cost was not the fill's.
 - **Device-address scans over writable storage only.** Before a draw or dispatch that reads guest addresses, GPU
   memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; JoJo keeps
   about 4,000 alive and the ordered-set walk was the top host hotspot of its cutscene. The scans now walk the
@@ -421,9 +429,6 @@ Investigated and left open:
   util-queue submission with a fence wait (`UtilFillImage`/`UtilFillBuffer`): 92,541 waits in 180 s, about 23 ms of
   every 48 ms frame. Next: record uploads into the consuming command buffer. Its host footprint (4.5 GB of guest
   memory plus 4 GB of emulator heap) also exceeds the harness cgroup's 7 GiB `memory.high`, which throttles it.
-- Hades clears its 1080p targets with the SDK pattern-fill kernel (4-byte records, `values[i % period]` for `i` below
-  a count). Treating period 1 as a uniform fill was tried and dropped: publishing fourteen 8 MB fills per frame cost
-  83 to 35 fps with no visible change.
 - Dead Cells sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
   transport (a derivative fetch inside a lane-divergent loop at pc 0x114, 642x362, four targets); seen in runs d472,
   d721 and d729, so it predates this round.
