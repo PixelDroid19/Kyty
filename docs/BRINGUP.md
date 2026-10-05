@@ -348,6 +348,51 @@ Investigated and left open:
   buttons, shoulders, triggers, sticks, d-pad, options and touchpad were tried, tapped and held); the title menu
   before it works.
 
+Third round (same day):
+
+- **Published fills skipped write-backs that still had work (regression from the first round).** Dead Cells' gameplay
+  smeared sprites horizontally (trails behind the character) and, some seconds later, turned the whole scene white;
+  only the HUD survived. It happened in most runs since the device-side publication of uniform fills, and in some
+  runs never, depending on how submissions overlapped. Bisection: publishing the fill's bytes into the guest view
+  was correct; the defect was the exemption it granted. A published object is skipped by the in-order write-back
+  that precedes every device-address draw, so its write-back runs only when a completion finds all of its uses
+  retired. The title rewrites the same fill objects every frame, so with submissions in flight that point may never
+  come (run d724: after the first gameplay seconds, none of the 642x362 fill objects was written back again). One of
+  them is the depth target's HTILE, cleared to `0xfffffff0` by the same fill shader; the depth clear is recognized
+  from that write-back, so the depth target kept old depth, the G-buffer draws failed the depth test against it, and
+  the stale colour stayed (trails) until the light pass saturated (white). The publication mark now requires that the
+  write-back has nothing left to do: no depth metadata on the object, and every overlapping object an exact
+  colour-image alias the device wrote after the object's last write (the fill's propagated clear, or later
+  rendering). Depth/HTILE, other buffers and partial aliases keep the in-order write-back. Two runs of the walk route
+  render correctly at 47-55 fps (the unsound exemption gave 92-100; the depth clear costs one wait per frame again).
+- **Write-backs keep newer device content.** Each GPU object records the logical time of its latest writable use
+  and of the latest device write into it. A completed write-back no longer reloads or invalidates an overlapping
+  object the device wrote after the written-back object's last write; it takes the written guest bytes as that
+  object's baseline (hash and dirty generation) so its next use does not reload them over the device content either.
+- **Guest-address residency without quadratic lookups.** The .NET beat 'em up maps 12,516 GPU ranges, almost all of
+  them physical. Whenever the physical population changed, the preparation asked for each unimported span whether it
+  was unpopulated, and each question scanned every physical mapping (122 ms preparations). Physical mappings keep an
+  index ordered by guest address, rebuilt only after the list changes; live views never overlap, so the view holding
+  an address is the nearest live view at or below it (a miss falls back to the conservative answer). Preparation also
+  walks only flexible ranges and ranges holding tracked snapshots instead of all ranges and chunks. Over 180 s the
+  preparation total went from 32.7 s to 7.1 s (maximum 123 to 59 ms).
+
+Investigated and left open:
+
+- The .NET beat 'em up is not frozen: its black screen is a loading screen (its two sprite draws are black, vertex
+  colour (0, 0, 0, 0.88), on a black target) while it uploads textures through compute image copies, about 20 per
+  frame. Each copy uploads its source and destination images and writes the destination back, each a separate
+  util-queue submission with a fence wait (`UtilFillImage`/`UtilFillBuffer`): 92,541 waits in 180 s, about 23 ms of
+  every 48 ms frame. Next: record uploads into the consuming command buffer. Its host footprint (4.5 GB of guest
+  memory plus 4 GB of emulator heap) also exceeds the harness cgroup's 7 GiB `memory.high`, which throttles it.
+- Hades clears its 1080p targets with the SDK pattern-fill kernel (4-byte records, `values[i % period]` for `i` below
+  a count). Treating period 1 as a uniform fill was tried and dropped: publishing fourteen 8 MB fills per frame cost
+  83 to 35 fps with no visible change. Hades still stops presenting after cross is pressed on its title, with or
+  without it.
+- Dead Cells sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
+  transport (a derivative fetch inside a lane-divergent loop at pc 0x114, 642x362, four targets); seen in runs d472,
+  d721 and d729, so it predates this round.
+
 ### Performance, new-title repairs and add-on content (2026-10-04, guest verified)
 
 Scope: strict runs on the reference host (Intel Xe, Vulkan 1.4, Native, `KYTY_SHADER_OPTIMIZATION=None`, shader
