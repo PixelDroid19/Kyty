@@ -79,6 +79,9 @@ public:
 	void   CompleteSubmission(SubmissionId submission);
 	[[nodiscard]] GpuWritebackResult WriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
 	                                              GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
+	[[nodiscard]] bool WriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
+	                                         GpuWritebackPageCache* page_cache, LabelStoragePublication* publication,
+	                                         GpuWritebackResult* result);
 	void StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
 	                   LabelStoragePublication* publication);
 	[[nodiscard]] bool StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
@@ -381,6 +384,26 @@ GpuWritebackResult LabelStoragePublication::Copy(const LabelFenceRegistry& regis
 	return result;
 }
 
+bool LabelStoragePublication::AdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
+                                           GpuWritebackPageCache* page_cache, GpuWritebackPageCache::NotifyWriteFunc notify_write,
+                                           void* notify_opaque, GpuWritebackResult* result)
+{
+	EXIT_IF(page_cache == nullptr || notify_write == nullptr || result == nullptr || size == 0 || guest_addr > UINT64_MAX - size);
+	if (!m_fences.empty() || m_cpu_conflict || size % GpuWritebackPageCache::kUniformRecordBytes != 0u)
+	{
+		return false;
+	}
+	*result = {};
+	if (page_cache->AdoptUniform(words, size))
+	{
+		// The device wrote through a physical alias; the dirty tracker saw no fault.
+		notify_write(notify_opaque, guest_addr, size);
+		result->content_changed = true;
+		result->changed_pages   = (size + 4095u) / 4096u;
+	}
+	return true;
+}
+
 void LabelManager::FireCallbacks(const Vector<LabelCallbacks>& fired_labels)
 {
 	static const bool eop_trace = (std::getenv("KYTY_EOP_TRACE") != nullptr);
@@ -649,6 +672,16 @@ GpuWritebackResult LabelManager::WriteBackCopy(void* guest_dst, const void* gpu_
 	Core::LockGuard lock(m_mutex);
 	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { (void)GpuMemoryNotifyHostWrite(address, bytes); };
 	return publication->Copy(m_fence_holes, guest_dst, gpu_src, size, page_cache, notify_write, nullptr);
+}
+
+bool LabelManager::WriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
+                                         GpuWritebackPageCache* page_cache, LabelStoragePublication* publication,
+                                         GpuWritebackResult* result)
+{
+	EXIT_IF(publication == nullptr);
+	Core::LockGuard lock(m_mutex);
+	const auto notify_write = [](void*, uint64_t address, uint64_t bytes) { (void)GpuMemoryNotifyHostWrite(address, bytes); };
+	return publication->AdoptUniform(guest_addr, size, words, page_cache, notify_write, nullptr, result);
 }
 
 void LabelManager::StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
@@ -926,6 +959,13 @@ GpuWritebackResult LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint
 	EXIT_IF(g_label_manager == nullptr);
 
 	return g_label_manager->WriteBackCopy(guest_dst, gpu_src, size, page_cache, publication);
+}
+
+bool LabelWriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
+                                GpuWritebackPageCache* page_cache, LabelStoragePublication* publication, GpuWritebackResult* result)
+{
+	EXIT_IF(g_label_manager == nullptr);
+	return g_label_manager->WriteBackAdoptUniform(guest_addr, size, words, page_cache, publication, result);
 }
 
 void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,

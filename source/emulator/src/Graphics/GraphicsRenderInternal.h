@@ -47,6 +47,7 @@
 #include "Emulator/Kernel/EventQueue.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -1508,10 +1509,22 @@ void hw_print(const HW::Context& hw);
 void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
                        uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval);
 Vector<RenderTextureVulkanImage*>  FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
+// A dispatch proven to store `words` to every 16-byte record of its only
+// storage buffer, [address, address + size).
+struct ComputeUniformBufferFill
+{
+	uint64_t                address = 0;
+	uint64_t                size    = 0;
+	std::array<uint32_t, 4> words {};
+};
+[[nodiscard]] bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y,
+                                                   uint32_t group_z, ComputeUniformBufferFill* fill);
+// Copies the filled storage object into the guest device-address view in queue
+// order, so later device-address consumers on this queue need no CPU write-back.
+[[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 // Ordered compute fills of color-image aliases (docs/graphics-compute-uniform-color-fill.md).
 void               InvalidateComputeColorFills(const ShaderBindResources& bind);
-[[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ShaderComputeInputInfo& input, uint32_t group_x,
-                                                    uint32_t group_y, uint32_t group_z);
+[[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 Vector<DepthStencilVulkanImage*>   FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 

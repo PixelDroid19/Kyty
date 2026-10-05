@@ -315,8 +315,11 @@ public:
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
-	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges);
-	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, SubmissionId* dependency);
+	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
+	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency);
+	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
+	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 
 	// Sync: CPU -> GPU
 	void Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
@@ -359,6 +362,13 @@ private:
 		uint64_t                     content_sequence                  = 0;
 		GpuMemoryContentOrigin       content_origin                    = GpuMemoryContentOrigin::Unknown;
 		GpuSubmissionHighWater       submission_uses;
+		// Writable uses since creation, and the count a device-side publication
+		// to the guest device-address view covered (0: none) with its queue.
+		uint64_t                            write_uses                 = 0;
+		uint64_t                            guest_published_write_uses = 0;
+		uint32_t                            guest_published_queue      = 0;
+		bool                                guest_published_uniform    = false;
+		GpuWritebackPageCache::UniformWords guest_published_words {};
 		// Incarnation of the host Vulkan backing, not a content revision.
 		// In-place uploads retain it; an atomic COW swap advances it.
 		uint64_t backing_generation = 1;
@@ -455,9 +465,10 @@ private:
 	[[nodiscard]] int HeapAt(uint64_t address) const;
 	void              RebuildHeapIndex();
 	void              ForgetHeapStorageObjects(int removed_heap_id);
-	// (heap id, object id) of each in-use writable StorageBuffer overlapping a range.
+	// (heap id, object id) of each in-use writable StorageBuffer overlapping a range
+	// whose writes are not published to the guest device-address view on `consumer`.
 	// The ranges are sorted by address and disjoint.
-	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges) const;
+	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const;
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
 	bool QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,

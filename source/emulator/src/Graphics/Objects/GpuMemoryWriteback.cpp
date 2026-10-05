@@ -20,6 +20,7 @@
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
+#include "Emulator/Graphics/Objects/StorageBuffer.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Profiler.h"
 #include "Emulator/Log.h"
@@ -180,7 +181,17 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 	GpuWritebackResult writeback_result;
 	{
 		const auto writeback_start = std::chrono::steady_clock::now();
-		writeback_result           = o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
+		// A uniform result already published to guest memory on the device needs
+		// no read of the GPU copy (PublishComputeUniformFillToGuestAddress).
+		const bool published_uniform = o.object.type == GpuMemoryObjectType::StorageBuffer && o.guest_published_uniform &&
+		                               o.guest_published_write_uses != 0u && o.guest_published_write_uses == o.write_uses &&
+		                               block.vaddr_num == 1 &&
+		                               StorageBufferWriteBackPublishedUniform(o.object.obj, block.vaddr[0], block.size[0],
+		                                                                      o.guest_published_words, &writeback_result);
+		if (!published_uniform)
+		{
+			writeback_result = o.write_back_func(ctx, o.params, o.object.obj, block.vaddr, block.size, block.vaddr_num);
+		}
 		const auto writeback_elapsed =
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - writeback_start).count();
 		DebugStatsRecordGpuMemoryWriteBack(GpuMemoryStatsTypeIndex(o.object.type), writeback_result.copied_bytes,
@@ -418,7 +429,7 @@ static bool OverlapsSortedRanges(const GpuMemoryGuestRanges& ranges, uint64_t va
 	return range.first + range.second > vaddr;
 }
 
-std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemoryGuestRanges& ranges) const
+std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const
 {
 	std::vector<std::pair<int, int>> found;
 	const auto&                      heaps = m_heaps;
@@ -428,6 +439,11 @@ std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemo
 		EXIT_IF(object.free);
 		const auto& info = object.info;
 		if (!info.in_use || info.read_only || info.object.obj == nullptr)
+		{
+			continue;
+		}
+		if (info.guest_published_write_uses != 0u && info.guest_published_write_uses == info.write_uses &&
+		    info.guest_published_queue == consumer.Value())
 		{
 			continue;
 		}
@@ -443,13 +459,13 @@ std::vector<std::pair<int, int>> GpuMemory::CollectWritableStorage(const GpuMemo
 	return found;
 }
 
-bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, SubmissionId* dependency)
+bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
 	Core::LockGuard backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard lock(m_mutex);
 	const auto&     heaps = m_heaps;
-	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges))
+	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
 		for (const auto& use: heaps[heap_id].objects[object_id].info.submission_uses.Dependencies())
 		{
@@ -461,17 +477,65 @@ bool GpuMemory::PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, Subm
 	return false;
 }
 
-void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges)
+void GpuMemory::WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer)
 {
 	EXIT_IF(ctx == nullptr);
 	Core::LockGuard    backing_lock(m_backing_mutation_mutex);
 	Core::LockGuard    lock(m_mutex);
 	Vector<Destructor> destructors;
-	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges))
+	for (const auto& [heap_id, object_id]: CollectWritableStorage(ranges, consumer))
 	{
 		WriteBackObjectLocked(ctx, heap_id, object_id, &destructors);
 	}
 	ScheduleDestructorsOutsideMutationLocks(ctx, &destructors);
+}
+
+bool GpuMemory::FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity)
+{
+	EXIT_IF(identity == nullptr);
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	for (const auto& [heap_id, object_id]: m_storage_objects)
+	{
+		const auto& object = m_heaps[heap_id].objects[object_id];
+		const auto& info   = object.info;
+		if (object.free || !info.in_use || info.read_only || info.object.obj == nullptr || object.block.vaddr_num != 1 ||
+		    object.block.vaddr[0] != vaddr || object.block.size[0] != size)
+		{
+			continue;
+		}
+		identity->heap_id            = heap_id;
+		identity->object_id          = object_id;
+		identity->logical_generation = info.logical_generation;
+		identity->write_uses         = info.write_uses;
+		identity->buffer             = static_cast<const VulkanBuffer*>(info.object.obj);
+		return true;
+	}
+	return false;
+}
+
+bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+                                          const GpuWritebackPageCache::UniformWords* uniform_words)
+{
+	Core::LockGuard backing_lock(m_backing_mutation_mutex);
+	Core::LockGuard lock(m_mutex);
+	if (identity.heap_id < 0 || static_cast<uint32_t>(identity.heap_id) >= m_heaps.Size() || identity.object_id < 0 ||
+	    static_cast<uint32_t>(identity.object_id) >= m_heaps[identity.heap_id].objects.Size())
+	{
+		return false;
+	}
+	auto& object = m_heaps[identity.heap_id].objects[identity.object_id];
+	auto& info   = object.info;
+	if (object.free || info.logical_generation != identity.logical_generation || info.write_uses != identity.write_uses ||
+	    !info.in_use || info.read_only || info.object.obj != identity.buffer || identity.write_uses == 0u)
+	{
+		return false;
+	}
+	info.guest_published_write_uses = identity.write_uses;
+	info.guest_published_queue       = queue.Value();
+	info.guest_published_uniform     = uniform_words != nullptr;
+	info.guest_published_words       = uniform_words != nullptr ? *uniform_words : GpuWritebackPageCache::UniformWords {};
+	return true;
 }
 
 void GpuMemory::FlushAll(GraphicContext* ctx)

@@ -33,6 +33,13 @@ public:
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
 
+// Write-back of a storage object whose only pending GPU write was published to
+// guest memory on the device as `words` repeated over its whole range. Guest
+// memory already holds the result, so the GPU copy is not read. False: the
+// caller must use the byte write-back.
+[[nodiscard]] bool StorageBufferWriteBackPublishedUniform(void* obj, uint64_t vaddr, uint64_t size,
+                                                          const GpuWritebackPageCache::UniformWords& words, GpuWritebackResult* result);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

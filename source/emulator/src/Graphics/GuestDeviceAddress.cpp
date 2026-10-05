@@ -147,7 +147,9 @@ VkBuffer CreateAddressBuffer(VkDevice device, uint64_t size, bool external)
 	info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 	info.pNext       = external ? &external_info : nullptr;
 	info.size        = size;
-	info.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	// Imports also receive device-side publications of GPU results.
+	info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+	             (external ? VK_BUFFER_USAGE_TRANSFER_DST_BIT : 0u);
 	info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	VkBuffer buffer  = nullptr;
 	return vkCreateBuffer(device, &info, nullptr, &buffer) == VK_SUCCESS ? buffer : nullptr;
@@ -493,16 +495,79 @@ static std::shared_ptr<const GpuMemoryGuestRanges> RegisteredRangesSnapshot()
 	return registry.merged;
 }
 
-bool GuestDeviceAddressPendingWriteBack(SubmissionId* dependency)
+bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, SubmissionId* dependency)
 {
 	EXIT_IF(dependency == nullptr);
-	return GpuMemoryPendingStorageWriteBack(*RegisteredRangesSnapshot(), dependency);
+	return GpuMemoryPendingStorageWriteBack(*RegisteredRangesSnapshot(), consumer, dependency);
 }
 
-void GuestDeviceAddressWriteBack(GraphicContext* ctx)
+void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer)
 {
 	// GPU-memory mutation never nests inside the address registry lock.
-	GpuMemoryWriteBackStorageRanges(ctx, *RegisteredRangesSnapshot());
+	GpuMemoryWriteBackStorageRanges(ctx, *RegisteredRangesSnapshot(), consumer);
+}
+
+bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source, uint64_t vaddr,
+                                         uint64_t size)
+{
+	if (ctx == nullptr || cmd == nullptr || source.buffer == nullptr || size == 0 || vaddr > UINT64_MAX - size ||
+	    !ctx->guest_device_address_supported)
+	{
+		return false;
+	}
+	struct Piece
+	{
+		VkBuffer     target = nullptr;
+		VkBufferCopy copy {};
+	};
+	std::vector<Piece>          pieces;
+	auto&                       registry = GetRegistry();
+	std::lock_guard<std::mutex> lock(registry.mutex);
+	const uint64_t              end = vaddr + size;
+	for (uint64_t cursor = vaddr; cursor < end;)
+	{
+		auto range = registry.ranges.upper_bound(cursor);
+		if (range == registry.ranges.begin())
+		{
+			return false;
+		}
+		--range;
+		const Chunk* found = nullptr;
+		for (const auto& chunk: range->second.chunks)
+		{
+			if (chunk.alias != 0 && chunk.guest <= cursor && cursor - chunk.guest < chunk.size)
+			{
+				found = &chunk;
+				break;
+			}
+		}
+		if (found == nullptr)
+		{
+			return false;
+		}
+		const uint64_t piece_end = std::min(end, found->guest + found->size);
+		pieces.push_back({found->buffer, {cursor - vaddr, cursor - found->guest, piece_end - cursor}});
+		cursor = piece_end;
+	}
+	// Earlier device-address reads of the range and the producer's writes
+	// complete first; every later command observes the copy.
+	VkMemoryBarrier before {};
+	before.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0,
+	                     nullptr);
+	for (const auto& piece: pieces)
+	{
+		vkCmdCopyBuffer(cmd, source.buffer, piece.target, 1, &piece.copy);
+	}
+	VkMemoryBarrier after {};
+	after.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+	vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
+	                     &after, 0, nullptr, 0, nullptr);
+	return true;
 }
 
 bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uint32_t* entry_count)

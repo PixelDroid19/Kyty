@@ -4295,7 +4295,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		// register writable objects for its still-recording submission.
 		if (bind.device_address_used)
 		{
-			GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx());
+			GuestDeviceAddressWriteBack(g_render_ctx->GetGraphicCtx(), GpuQueueId(static_cast<uint32_t>(buffer->GetQueueIndex())));
 		}
 
 		VulkanBuffer* storage_buffers[DescriptorCache::BUFFERS_MAX] = {};

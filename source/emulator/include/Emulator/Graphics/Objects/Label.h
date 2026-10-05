@@ -77,6 +77,13 @@ public:
 	[[nodiscard]] GpuWritebackResult Copy(const LabelFenceRegistry& registry, void* guest_dst, const void* gpu_src, uint64_t size,
 	                                    GpuWritebackPageCache* page_cache, GpuWritebackPageCache::NotifyWriteFunc notify_write,
 	                                    void* notify_opaque);
+	// Write-back of a device-side publication of `words` repeated over the whole
+	// object: guest memory already holds it, so only the snapshot and the write
+	// notification change. Declines when label fence words were baselined in the
+	// object, whose atomic publication needs the byte copy.
+	[[nodiscard]] bool AdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
+	                                GpuWritebackPageCache* page_cache, GpuWritebackPageCache::NotifyWriteFunc notify_write,
+	                                void* notify_opaque, GpuWritebackResult* result);
 
 private:
 	struct FenceBaseline
@@ -115,6 +122,9 @@ void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, Gpu
 [[nodiscard]] bool LabelStorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
 [[nodiscard]] GpuWritebackResult LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
                                                    GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
+[[nodiscard]] bool LabelWriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
+                                              GpuWritebackPageCache* page_cache, LabelStoragePublication* publication,
+                                              GpuWritebackResult* result);
 // Called only after GPU submissions and host presentation have quiesced, while
 // the guest VA is still mapped and before it can be reused.
 void LabelReleaseMappedRange(uint64_t addr, uint64_t bytes);

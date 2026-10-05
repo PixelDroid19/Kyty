@@ -2789,7 +2789,8 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 
 	// Keep this check and descriptor publication under the same render lock.
 	// A peer queue may record a new use after the caller's own queue drains.
-	if (input_info.bind.device_address_used && GuestDeviceAddressPendingWriteBack(pending_writeback))
+	if (input_info.bind.device_address_used &&
+	    GuestDeviceAddressPendingWriteBack(GpuQueueId(static_cast<uint32_t>(buffer->GetQueueIndex())), pending_writeback))
 	{
 		return ComputeDispatchResult::SubmissionCompletionRequired;
 	}
@@ -2924,9 +2925,12 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	// color-image aliases in this recording; partial thread groups would leave the range uncovered.
 	constexpr uint32_t kDispatchComputeShaderEnable = 0x01u;
 	constexpr uint32_t kDispatchPartialThreadGroups = 0x02u;
-	if ((mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u)
+	ComputeUniformBufferFill fill;
+	if ((mode & kDispatchComputeShaderEnable) != 0u && (mode & kDispatchPartialThreadGroups) == 0u &&
+	    ResolveComputeUniformBufferFill(input_info, thread_group_x, thread_group_y, thread_group_z, &fill))
 	{
-		(void)PropagateComputeUniformColorFill(buffer, input_info, thread_group_x, thread_group_y, thread_group_z);
+		(void)PropagateComputeUniformColorFill(buffer, fill);
+		(void)PublishComputeUniformFillToGuestAddress(buffer, fill);
 	}
 	DebugStatsRecordDispatch();
 	if (VulkanRecentDrawTraceTrail() != nullptr)

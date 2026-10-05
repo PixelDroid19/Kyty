@@ -50,7 +50,8 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->guest_addr = *vaddr;
 	vk_obj->guest_size = *size;
 
-	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	// Transfer source: a proven full fill is copied into the guest device-address view.
+	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	vk_obj->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	vk_obj->buffer = nullptr;
@@ -114,6 +115,19 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 	VulkanUnmapMemory(ctx, &vk_obj->memory);
 	KYTY_PROFILER_END_BLOCK;
 	return result;
+}
+
+bool StorageBufferWriteBackPublishedUniform(void* obj, uint64_t vaddr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
+                                            GpuWritebackResult* result)
+{
+	auto* vk_obj = static_cast<StorageVulkanBuffer*>(obj);
+	EXIT_IF(vk_obj == nullptr || result == nullptr);
+	// Depth metadata clears are recognized from the written bytes.
+	if (vk_obj->depth_meta_addr != 0 || vk_obj->guest_addr != vaddr || vk_obj->guest_size != size)
+	{
+		return false;
+	}
+	return LabelWriteBackAdoptUniform(vaddr, size, words, &vk_obj->writeback_cache, &vk_obj->label_publication, result);
 }
 
 bool StorageBufferGpuObject::Equal(const uint64_t* other) const

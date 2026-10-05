@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
@@ -190,13 +191,14 @@ void InvalidateComputeColorFills(const ShaderBindResources& bind)
 	}
 }
 
-bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ShaderComputeInputInfo& input,
-                                      uint32_t group_x, uint32_t group_y, uint32_t group_z)
+bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y, uint32_t group_z,
+                                     ComputeUniformBufferFill* fill)
 {
+	EXIT_IF(fill == nullptr);
 	const auto& proof = input.uniform_buffer_fill;
 	const auto& buffers = input.bind.storage_buffers;
 
-	if (!proof.valid || !ComputeColorFillUsesGraphicsQueue(buffer) || buffers.buffers_num != 1 || input.bind.textures2D.textures_num != 0 ||
+	if (!proof.valid || buffers.buffers_num != 1 || input.bind.textures2D.textures_num != 0 ||
 	    input.bind.samplers.samplers_num != 0 || input.bind.gds_pointers.pointers_num != 0 ||
 	    proof.workgroup_shift > 10u || proof.workgroup_register != input.workgroup_register ||
 	    input.threads_num[0] != (1u << proof.workgroup_shift) || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
@@ -230,9 +232,32 @@ bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ShaderCompute
 		if (found < 0) { return false; }
 		words[component] = input.bind.direct_sgprs.sgprs[found].field;
 	}
+	fill->address = destination.Base48();
+	fill->size    = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
+	fill->words   = words;
+	return true;
+}
+
+bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	// The fill rewrites every byte of the bound range, so the whole storage
+	// object is the guest result; a wider object could hold older pending writes.
+	GpuMemoryStorageWriteIdentity identity {};
+	if (buffer == nullptr || !GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity) ||
+	    !GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->GetPool()->buffers[buffer->GetIndex()],
+	                                         *identity.buffer, fill.address, fill.size))
+	{
+		return false;
+	}
+	return GpuMemoryMarkStorageGuestPublished(identity, GpuQueueId(static_cast<uint32_t>(buffer->GetQueueIndex())), &fill.words);
+}
+
+bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	if (!ComputeColorFillUsesGraphicsQueue(buffer)) { return false; }
+	const auto& words = fill.words;
 	ComputeColorFillIdentity identity {};
-	if (!ResolveComputeColorFillIdentity(destination.Base48(), ShaderBufferByteSize(destination.Stride(), destination.NumRecords()),
-	                                     &identity, true)) { return false; }
+	if (!ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true)) { return false; }
 	g_compute_color_fills.DiscardOverlaps(identity.address, identity.size);
 	const auto images = FindComputeColorFillImages(buffer, identity.address, identity.size);
 	if (!images.IsEmpty()) { return ApplyComputeColorFillImages(buffer, identity, words, images); }

@@ -2,15 +2,18 @@
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GUESTDEVICEADDRESS_H_
 
 #include "Emulator/Common.h"
+#include "Emulator/Graphics/GpuSubmissionTracker.h"
 
 #include <cstdint>
+
+struct VkCommandBuffer_T;
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
 
 struct GraphicContext;
-struct SubmissionId;
+struct VulkanBuffer;
 
 // Guest GPU-visible mappings imported as host-pointer device memory, so a
 // shader can dereference a computed guest address. Guest and host virtual
@@ -54,12 +57,24 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 
 // Writes back GPU results held in Kyty storage-buffer objects over every
 // registered range, so a shader dereferencing guest pointers reads the
-// current guest memory. Call before recording such a dispatch.
-void GuestDeviceAddressWriteBack(GraphicContext* ctx);
+// current guest memory. Call before recording such a dispatch on `consumer`.
+// Results already published to the imported view on that queue are skipped.
+void GuestDeviceAddressWriteBack(GraphicContext* ctx, GpuQueueId consumer);
 
 // The caller holds the render recording lock through the later write-back.
 // Wait for a returned dependency only after releasing recording locks, then retry.
-[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(SubmissionId* dependency);
+[[nodiscard]] bool GuestDeviceAddressPendingWriteBack(GpuQueueId consumer, SubmissionId* dependency);
+
+// Records into `cmd`, after the GPU work already recorded there, a copy of
+// `source` (whose first byte is guest address `vaddr`, `size` bytes) into the
+// imported view of that guest range, between barriers ordering it after every
+// earlier command and before every later one in the queue. Device-address
+// reads recorded later in the queue then observe the result in GPU order, as
+// the guest does on unified memory. Only ranges wholly inside chunks that alias
+// the guest's physical memory qualify: a snapshot chunk could be refreshed
+// from stale guest bytes before the CPU write-back.
+[[nodiscard]] bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T* cmd, const VulkanBuffer& source,
+                                                       uint64_t vaddr, uint64_t size);
 
 // Imports all registered ranges not imported yet and returns the translation
 // table. Fails when the device cannot import guest memory.

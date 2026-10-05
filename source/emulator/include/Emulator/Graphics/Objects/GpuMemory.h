@@ -1055,10 +1055,32 @@ void  GpuMemoryWriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId su
 void  GpuMemoryCompleteSubmission(SubmissionId submission);
 // Guest [vaddr, vaddr + size) spans, sorted by address and disjoint, queried under one GPU-memory lock.
 using GpuMemoryGuestRanges = std::vector<std::pair<uint64_t, uint64_t>>;
-// GPU→CPU for the writable StorageBuffers overlapping any of the ranges.
-void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges);
-// Reports one incomplete submission use of a writable StorageBuffer overlapping any of the ranges.
-[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, SubmissionId* dependency);
+// GPU→CPU for the writable StorageBuffers overlapping any of the ranges, except
+// those whose writes are already published to the guest device-address view in
+// the consumer's queue order.
+void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
+// Reports one incomplete submission use of a writable StorageBuffer overlapping
+// any of the ranges, with the same publication exemption.
+[[nodiscard]] bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency);
+// An in-use writable StorageBuffer whose single block is exactly a requested range.
+struct GpuMemoryStorageWriteIdentity
+{
+	int                 heap_id            = -1;
+	int                 object_id          = -1;
+	uint64_t            logical_generation = 0;
+	uint64_t            write_uses         = 0;
+	const VulkanBuffer* buffer             = nullptr;
+};
+[[nodiscard]] bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
+// The caller recorded on `queue`, after the object's last write, a device copy of
+// its whole content into the guest device-address view. Device-address consumers
+// on that queue then read the result in GPU order and skip the CPU write-back; the
+// completed submission still writes it back. Fails when the object was replaced or
+// written again since the identity was taken.
+// `uniform_words`, when known, is the content repeated over the whole object; the
+// completed submission then writes back without reading the GPU copy.
+[[nodiscard]] bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+                                                      const GpuWritebackPageCache::UniformWords* uniform_words);
 // Exception handling accepts only a page fault caused by an armed tracker
 // protection. Known host/HLE writers use the explicit range notification.
 bool GpuMemoryCheckAccessViolation(uint64_t vaddr);

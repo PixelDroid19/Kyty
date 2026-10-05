@@ -786,18 +786,29 @@ void GpuMemoryCompleteSubmission(SubmissionId submission)
 	g_gpu_memory->CompleteSubmission(submission);
 }
 
-void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges)
+void GpuMemoryWriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
 	EXIT_IF(ctx == nullptr);
 
-	g_gpu_memory->WriteBackStorageRanges(ctx, ranges);
+	g_gpu_memory->WriteBackStorageRanges(ctx, ranges, consumer);
 }
 
-bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, SubmissionId* dependency)
+bool GpuMemoryPendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency)
 {
 	EXIT_IF(g_gpu_memory == nullptr);
-	return g_gpu_memory->PendingStorageWriteBack(ranges, dependency);
+	return g_gpu_memory->PendingStorageWriteBack(ranges, consumer, dependency);
+}
+
+bool GpuMemoryFindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity)
+{
+	return g_gpu_memory != nullptr && identity != nullptr && g_gpu_memory->FindExactWritableStorage(vaddr, size, identity);
+}
+
+bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+                                        const GpuWritebackPageCache::UniformWords* uniform_words)
+{
+	return g_gpu_memory != nullptr && g_gpu_memory->MarkStorageGuestPublished(identity, queue, uniform_words);
 }
 
 bool GpuMemoryCheckAccessViolation(uint64_t vaddr)
