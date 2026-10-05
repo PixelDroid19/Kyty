@@ -343,30 +343,20 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 			return false;
 		}
 	}
-	auto& dirty_tracker = GpuDirtyPageTracker::Instance();
-	if (!dirty_tracker.RegisterRange(vaddr, size))
-	{
-		finish_validation();
-		return false;
-	}
-	const auto dirty_read = dirty_tracker.BeginRead(vaddr, size);
-	if (!dirty_read.tracked)
-	{
-		(void)dirty_tracker.UnregisterRange(vaddr, size);
-		finish_validation();
-		return false;
-	}
-
 	finish_validation();
 	const auto copy_start = std::chrono::steady_clock::now();
+	// A copy that a second pass reads back unchanged is a consistent snapshot
+	// unless a store restored a byte's old value in between: every byte held
+	// its value from the end of the copy to the start of the check. This costs
+	// a second pass over a small buffer instead of arming page protection (two
+	// mprotect calls and a TLB shootdown per draw-time snapshot).
 	std::memcpy(dst, reinterpret_cast<const void*>(vaddr), static_cast<size_t>(size));
-	const bool stable_copy = dirty_tracker.ReadObservationIsStable(vaddr, size, dirty_read);
+	const bool stable_copy = std::memcmp(dst, reinterpret_cast<const void*>(vaddr), static_cast<size_t>(size)) == 0;
 	if (copy_ns != nullptr)
 	{
 		*copy_ns = static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - copy_start).count());
 	}
-	(void)dirty_tracker.UnregisterRange(vaddr, size);
 	return stable_copy;
 }
 
@@ -426,36 +416,18 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 			return false;
 		}
 	}
-	auto& dirty_tracker = GpuDirtyPageTracker::Instance();
-	if (!dirty_tracker.RegisterRange(vaddr, size))
-	{
-		finish_validation();
-		return false;
-	}
-	const auto dirty_read = dirty_tracker.BeginRead(vaddr, size);
-	if (!dirty_read.tracked)
-	{
-		(void)dirty_tracker.UnregisterRange(vaddr, size);
-		finish_validation();
-		return false;
-	}
-
 	finish_validation();
 	const auto compare_start = std::chrono::steady_clock::now();
+	// No page protection: a CPU store racing this comparison can make it match
+	// a state memory never held at one instant, the same race the console GPU
+	// has when the guest writes a buffer a pending draw reads. Guests order
+	// such stores with labels, which complete before the draw is recorded.
 	*matches = std::memcmp(reinterpret_cast<const void*>(vaddr), snapshot, static_cast<size_t>(size)) == 0;
-	const bool stable_compare = dirty_tracker.ReadObservationIsStable(vaddr, size, dirty_read);
 	if (compare_ns != nullptr)
 	{
 		*compare_ns = static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compare_start).count());
 	}
-	if (!stable_compare)
-	{
-		(void)dirty_tracker.UnregisterRange(vaddr, size);
-		*matches = false;
-		return false;
-	}
-	(void)dirty_tracker.UnregisterRange(vaddr, size);
 	return true;
 }
 

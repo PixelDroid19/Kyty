@@ -3061,17 +3061,20 @@ TEST(EmulatorGraphicsState, TransientSnapshotEligibilityTracksGpuObjectMutations
 	}
 	uint8_t captured[16] = {};
 	bool    snapshot_matches = false;
-	// Allocation and read-only overlap eligibility are insufficient: a snapshot
-	// must fail closed until a hash-tracked GPU object owns the range.
-	EXPECT_FALSE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
-	EXPECT_FALSE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
+	// Snapshots are validated by a second read, not by the dirty tracker (which
+	// the unit harness leaves disabled): eligible ranges capture and compare.
+	EXPECT_TRUE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
+	EXPECT_EQ(captured[15], 0xafu);
+	EXPECT_TRUE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
+	EXPECT_TRUE(snapshot_matches);
 	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, obj_addr, obj_size,
 	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true, true)),
 	          nullptr);
-	// The unit harness has no runtime fault handler, so its process tracker is
-	// intentionally disabled and snapshot reads remain fail-closed.
-	EXPECT_FALSE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
-	EXPECT_FALSE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
+	source[0] = 0x55u;
+	EXPECT_TRUE(GpuMemoryCompareSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured, &snapshot_matches));
+	EXPECT_FALSE(snapshot_matches);
+	EXPECT_TRUE(GpuMemoryCaptureSnapshotReadOnlyBuffer(obj_addr, sizeof(captured), captured));
+	EXPECT_EQ(captured[0], 0x55u);
 	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(large_addr, large_size));
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(large_addr, large_size + 1u));
 	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(heap_base - 8u, 16u));
