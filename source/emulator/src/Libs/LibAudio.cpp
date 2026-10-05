@@ -71,7 +71,7 @@ LIB_DEFINE(InitAudio_1_AudioIn)
 
 namespace LibVoiceQoS {
 
-LIB_VERSION("VoiceQoS", 1, "VoiceQoS", 0, 0);
+LIB_VERSION("VoiceQoS", 1, "VoiceQoS", 1, 1);
 
 namespace VoiceQoS = Audio::VoiceQoS;
 
