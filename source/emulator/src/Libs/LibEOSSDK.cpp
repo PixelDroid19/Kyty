@@ -22,19 +22,24 @@ LIB_VERSION("EOSSDK-PS5-Shipping", 1, "EOSSDK-PS5-Shipping", 1, 1);
 
 namespace EOSSDKPS5Shipping {
 
+// Guest zlib streams come in two layouts: the LP64 zlib z_stream (112 bytes)
+// and a 72-byte legacy layout that ends at zalloc. Every call copies the guest
+// stream into a host mz_stream, runs miniz with host allocators (guest
+// allocation callbacks cannot be called from the host), and copies the result
+// back. The layout is fixed by the stream_size passed to the init call.
 struct GuestZlibStream72
 {
-	const void* next_in      = nullptr;
-	uint32_t    avail_in     = 0;
-	uint32_t    avail_in_pad = 0;
-	mz_ulong    total_in     = 0;
-	void*       next_out     = nullptr;
-	uint32_t    avail_out    = 0;
-	uint32_t    avail_out_pad = 0;
-	mz_ulong    total_out    = 0;
-	char*       msg          = nullptr;
-	mz_internal_state* state  = nullptr;
-	mz_alloc_func       zalloc = nullptr;
+	const void*        next_in;
+	uint32_t           avail_in;
+	uint32_t           avail_in_pad;
+	uint64_t           total_in;
+	void*              next_out;
+	uint32_t           avail_out;
+	uint32_t           avail_out_pad;
+	uint64_t           total_out;
+	char*              msg;
+	mz_internal_state* state;
+	mz_alloc_func      zalloc;
 };
 
 static_assert(sizeof(GuestZlibStream72) == 72, "GuestZlibStream72 expected size 0x48");
@@ -62,23 +67,14 @@ struct GuestZlibStream112
 
 static_assert(sizeof(GuestZlibStream112) == 112, "GuestZlibStream112 expected size 0x70");
 
-struct StreamLayoutInfo
+enum class GuestStreamLayout
 {
-	int size = 0;
+	Legacy72,
+	Zlib112,
 };
 
-static Core::Mutex g_eos_stream_mutex;
-static std::unordered_map<mz_streamp, StreamLayoutInfo> g_eos_stream_layouts;
-
-static bool IsCompatLegacyStream72(int stream_size)
-{
-	return stream_size == static_cast<int>(sizeof(GuestZlibStream72));
-}
-
-static bool IsCompatStream112(int stream_size)
-{
-	return stream_size == static_cast<int>(sizeof(GuestZlibStream112));
-}
+static Core::Mutex                                  g_eos_stream_mutex;
+static std::unordered_map<void*, GuestStreamLayout> g_eos_stream_layouts;
 
 static void* HostAlloc(void* /*opaque*/, size_t items, size_t size)
 {
@@ -94,364 +90,185 @@ static void HostFree(void* /*opaque*/, void* address)
 	Core::mem_free(address);
 }
 
-static void RegisterLegacyStreamLayout(mz_streamp strm, int stream_size)
+// zlib rejects a stream_size or major version it was not built for.
+static bool LayoutFromInit(const char* version, int stream_size, GuestStreamLayout* layout)
 {
-	if (strm == nullptr)
-	{
-		return;
-	}
-
-	Core::LockGuard lock(g_eos_stream_mutex);
-	StreamLayoutInfo info {};
-	info.size = stream_size;
-	g_eos_stream_layouts[strm] = info;
-}
-
-static void ForgetLegacyStreamLayout(mz_streamp strm)
-{
-	if (strm == nullptr)
-	{
-		return;
-	}
-
-	Core::LockGuard lock(g_eos_stream_mutex);
-	g_eos_stream_layouts.erase(strm);
-}
-
-static bool GetLegacyStreamLayout(mz_streamp strm, StreamLayoutInfo* out)
-{
-	Core::LockGuard lock(g_eos_stream_mutex);
-	auto it = g_eos_stream_layouts.find(strm);
-	if (it == g_eos_stream_layouts.end())
+	if (version == nullptr || version[0] != '1')
 	{
 		return false;
 	}
-	if (out != nullptr)
+	if (stream_size == static_cast<int>(sizeof(GuestZlibStream72)))
 	{
-		*out = it->second;
+		*layout = GuestStreamLayout::Legacy72;
+		return true;
 	}
-	return true;
+	if (stream_size == static_cast<int>(sizeof(GuestZlibStream112)))
+	{
+		*layout = GuestStreamLayout::Zlib112;
+		return true;
+	}
+	return false;
 }
 
-static int InflateInitCompatInitImpl(mz_streamp strm, int window_bits, const char* version, int stream_size)
+template <typename Guest>
+static void LoadCommonFields(const Guest& guest, mz_stream* host)
 {
-	mz_stream host_stream {};
-	if (IsCompatLegacyStream72(stream_size))
-	{
-		GuestZlibStream72 guest_stream {};
-		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
+	host->next_in   = static_cast<const unsigned char*>(guest.next_in);
+	host->avail_in  = guest.avail_in;
+	host->total_in  = static_cast<mz_ulong>(guest.total_in);
+	host->next_out  = static_cast<unsigned char*>(guest.next_out);
+	host->avail_out = guest.avail_out;
+	host->total_out = static_cast<mz_ulong>(guest.total_out);
+	host->msg       = guest.msg;
+	host->state     = guest.state;
+}
 
-		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
-		host_stream.avail_in   = guest_stream.avail_in;
-		host_stream.total_in   = guest_stream.total_in;
-		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
-		host_stream.avail_out  = guest_stream.avail_out;
-		host_stream.total_out  = guest_stream.total_out;
-		host_stream.msg       = guest_stream.msg;
-		// miniz is built with MINIZ_NO_MALLOC in Kyty, so callers must always
-		// provide host allocators. Guest callback addresses cannot be invoked
-		// directly by the host.
-		host_stream.zalloc    = HostAlloc;
-		host_stream.zfree     = HostFree;
-		host_stream.opaque    = nullptr;
-		host_stream.data_type = 0;
-		host_stream.adler     = 0;
-		host_stream.reserved  = 0;
-	}
-	else if (IsCompatStream112(stream_size))
-	{
-		GuestZlibStream112 guest_stream {};
-		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
+template <typename Guest>
+static void StoreCommonFields(const mz_stream& host, Guest* guest)
+{
+	guest->next_in   = host.next_in;
+	guest->avail_in  = host.avail_in;
+	guest->total_in  = host.total_in;
+	guest->next_out  = host.next_out;
+	guest->avail_out = host.avail_out;
+	guest->total_out = host.total_out;
+	guest->msg       = host.msg;
+	guest->state     = host.state;
+}
 
-		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
-		host_stream.avail_in   = guest_stream.avail_in;
-		host_stream.total_in   = static_cast<mz_ulong>(guest_stream.total_in);
-		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
-		host_stream.avail_out  = guest_stream.avail_out;
-		host_stream.total_out  = static_cast<mz_ulong>(guest_stream.total_out);
-		host_stream.msg        = guest_stream.msg;
-		host_stream.state      = guest_stream.state;
-		host_stream.zalloc     = HostAlloc;
-		host_stream.zfree      = HostFree;
-		host_stream.opaque     = nullptr;
-		host_stream.data_type = guest_stream.data_type;
-		host_stream.adler     = static_cast<mz_ulong>(guest_stream.adler);
-		host_stream.reserved  = static_cast<mz_ulong>(guest_stream.reserved);
-	}
-	else
+static void LoadStream(const void* guest, GuestStreamLayout layout, mz_stream* host)
+{
+	*host = {};
+	if (layout == GuestStreamLayout::Zlib112)
 	{
-		host_stream = *strm;
-	}
-
-	const int rc = inflateInit2(&host_stream, window_bits);
-
-	if (IsCompatLegacyStream72(stream_size))
+		GuestZlibStream112 stream {};
+		std::memcpy(&stream, guest, sizeof(stream));
+		LoadCommonFields(stream, host);
+		host->data_type = stream.data_type;
+		host->adler     = static_cast<mz_ulong>(stream.adler);
+		host->reserved  = static_cast<mz_ulong>(stream.reserved);
+	} else
 	{
-		GuestZlibStream72 guest_stream {};
-		guest_stream.next_in      = host_stream.next_in;
-		guest_stream.avail_in     = host_stream.avail_in;
-		guest_stream.total_in     = host_stream.total_in;
-		guest_stream.next_out     = host_stream.next_out;
-		guest_stream.avail_out    = host_stream.avail_out;
-		guest_stream.total_out    = host_stream.total_out;
-		guest_stream.msg         = host_stream.msg;
-		guest_stream.state       = reinterpret_cast<mz_internal_state*>(host_stream.state);
-		guest_stream.zalloc      = host_stream.zalloc;
-		std::memcpy(strm, &guest_stream, sizeof(guest_stream));
-		return rc;
+		GuestZlibStream72 stream {};
+		std::memcpy(&stream, guest, sizeof(stream));
+		LoadCommonFields(stream, host);
 	}
-	if (IsCompatStream112(stream_size))
-	{
-		GuestZlibStream112 guest_stream {};
-		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
-		guest_stream.next_in   = host_stream.next_in;
-		guest_stream.avail_in  = host_stream.avail_in;
-		guest_stream.total_in  = host_stream.total_in;
-		guest_stream.next_out  = host_stream.next_out;
-		guest_stream.avail_out = host_stream.avail_out;
-		guest_stream.total_out = host_stream.total_out;
-		guest_stream.msg       = host_stream.msg;
-		guest_stream.state     = reinterpret_cast<mz_internal_state*>(host_stream.state);
-		guest_stream.data_type = host_stream.data_type;
-		guest_stream.adler     = host_stream.adler;
-		guest_stream.reserved  = host_stream.reserved;
-		std::memcpy(strm, &guest_stream, sizeof(guest_stream));
-		return rc;
-	}
+	host->zalloc = HostAlloc;
+	host->zfree  = HostFree;
+	host->opaque = nullptr;
+}
 
-	*strm = host_stream;
+// The guest's own allocator fields are left as the guest set them.
+static void StoreStream(const mz_stream& host, GuestStreamLayout layout, void* guest)
+{
+	if (layout == GuestStreamLayout::Zlib112)
+	{
+		GuestZlibStream112 stream {};
+		std::memcpy(&stream, guest, sizeof(stream));
+		StoreCommonFields(host, &stream);
+		stream.data_type = host.data_type;
+		stream.adler     = host.adler;
+		stream.reserved  = host.reserved;
+		std::memcpy(guest, &stream, sizeof(stream));
+	} else
+	{
+		GuestZlibStream72 stream {};
+		std::memcpy(&stream, guest, sizeof(stream));
+		StoreCommonFields(host, &stream);
+		std::memcpy(guest, &stream, sizeof(stream));
+	}
+}
+
+template <typename Init>
+static int InitGuestStream(void* guest, const char* version, int stream_size, Init init)
+{
+	GuestStreamLayout layout {};
+	if (guest == nullptr)
+	{
+		return MZ_STREAM_ERROR;
+	}
+	if (!LayoutFromInit(version, stream_size, &layout))
+	{
+		return MZ_VERSION_ERROR;
+	}
+	mz_stream host {};
+	LoadStream(guest, layout, &host);
+	const int rc = init(&host);
+	StoreStream(host, layout, guest);
+	if (rc == MZ_OK)
+	{
+		Core::LockGuard lock(g_eos_stream_mutex);
+		g_eos_stream_layouts[guest] = layout;
+	}
 	return rc;
 }
 
-static int InflateCompatImpl(mz_streamp strm, int flush)
+// A stream that no init call of this module set up is a guest error.
+template <typename Op>
+static int RunGuestStream(void* guest, bool end, Op op)
 {
-	StreamLayoutInfo layout {};
-	if (!GetLegacyStreamLayout(strm, &layout))
+	GuestStreamLayout layout {};
 	{
-		return inflate(strm, flush);
+		Core::LockGuard lock(g_eos_stream_mutex);
+		const auto      it = g_eos_stream_layouts.find(guest);
+		if (it == g_eos_stream_layouts.end())
+		{
+			return MZ_STREAM_ERROR;
+		}
+		layout = it->second;
+		if (end)
+		{
+			g_eos_stream_layouts.erase(it);
+		}
 	}
-
-	if (IsCompatLegacyStream72(layout.size))
-	{
-		GuestZlibStream72 guest_stream {};
-		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
-
-		mz_stream host_stream {};
-		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
-		host_stream.avail_in   = guest_stream.avail_in;
-		host_stream.total_in   = guest_stream.total_in;
-		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
-		host_stream.avail_out  = guest_stream.avail_out;
-		host_stream.total_out  = guest_stream.total_out;
-		host_stream.msg       = guest_stream.msg;
-		host_stream.state     = guest_stream.state;
-		host_stream.zalloc    = HostAlloc;
-		host_stream.zfree     = HostFree;
-		host_stream.opaque    = nullptr;
-
-		const int rc = inflate(&host_stream, flush);
-
-		guest_stream.next_in      = host_stream.next_in;
-		guest_stream.avail_in     = host_stream.avail_in;
-		guest_stream.total_in     = host_stream.total_in;
-		guest_stream.next_out     = host_stream.next_out;
-		guest_stream.avail_out    = host_stream.avail_out;
-		guest_stream.total_out    = host_stream.total_out;
-		guest_stream.msg         = host_stream.msg;
-		guest_stream.state       = reinterpret_cast<mz_internal_state*>(host_stream.state);
-		guest_stream.zalloc      = host_stream.zalloc;
-		std::memcpy(strm, &guest_stream, sizeof(guest_stream));
-		return rc;
-	}
-	if (IsCompatStream112(layout.size))
-	{
-		GuestZlibStream112 guest_stream {};
-		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
-
-		mz_stream host_stream {};
-		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
-		host_stream.avail_in   = guest_stream.avail_in;
-		host_stream.total_in   = static_cast<mz_ulong>(guest_stream.total_in);
-		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
-		host_stream.avail_out  = guest_stream.avail_out;
-		host_stream.total_out  = static_cast<mz_ulong>(guest_stream.total_out);
-		host_stream.msg        = guest_stream.msg;
-		host_stream.state      = guest_stream.state;
-		host_stream.zalloc     = HostAlloc;
-		host_stream.zfree      = HostFree;
-		host_stream.opaque     = nullptr;
-		host_stream.data_type  = guest_stream.data_type;
-		host_stream.adler      = static_cast<mz_ulong>(guest_stream.adler);
-		host_stream.reserved   = static_cast<mz_ulong>(guest_stream.reserved);
-
-		const int rc = inflate(&host_stream, flush);
-
-		guest_stream.next_in   = host_stream.next_in;
-		guest_stream.avail_in  = host_stream.avail_in;
-		guest_stream.total_in  = host_stream.total_in;
-		guest_stream.next_out  = host_stream.next_out;
-		guest_stream.avail_out = host_stream.avail_out;
-		guest_stream.total_out = host_stream.total_out;
-		guest_stream.msg       = host_stream.msg;
-		guest_stream.state     = reinterpret_cast<mz_internal_state*>(host_stream.state);
-		guest_stream.data_type = host_stream.data_type;
-		guest_stream.adler     = host_stream.adler;
-		guest_stream.reserved  = host_stream.reserved;
-		std::memcpy(strm, &guest_stream, sizeof(guest_stream));
-		return rc;
-	}
-
-	return inflate(strm, flush);
-}
-
-static int InflateEndCompatImpl(mz_streamp strm)
-{
-	StreamLayoutInfo layout {};
-	if (!GetLegacyStreamLayout(strm, &layout))
-	{
-		return inflateEnd(strm);
-	}
-
-	if (IsCompatLegacyStream72(layout.size))
-	{
-		GuestZlibStream72 guest_stream {};
-		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
-
-		mz_stream host_stream {};
-		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
-		host_stream.avail_in   = guest_stream.avail_in;
-		host_stream.total_in   = guest_stream.total_in;
-		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
-		host_stream.avail_out  = guest_stream.avail_out;
-		host_stream.total_out  = guest_stream.total_out;
-		host_stream.msg       = guest_stream.msg;
-		host_stream.state     = guest_stream.state;
-		host_stream.zalloc    = HostAlloc;
-		host_stream.zfree     = HostFree;
-		host_stream.opaque    = nullptr;
-
-		const int rc = inflateEnd(&host_stream);
-		ForgetLegacyStreamLayout(strm);
-		return rc;
-	}
-	if (IsCompatStream112(layout.size))
-	{
-		GuestZlibStream112 guest_stream {};
-		std::memcpy(&guest_stream, strm, sizeof(guest_stream));
-
-		mz_stream host_stream {};
-		host_stream.next_in    = reinterpret_cast<const unsigned char*>(guest_stream.next_in);
-		host_stream.avail_in   = guest_stream.avail_in;
-		host_stream.total_in   = static_cast<mz_ulong>(guest_stream.total_in);
-		host_stream.next_out   = reinterpret_cast<unsigned char*>(guest_stream.next_out);
-		host_stream.avail_out  = guest_stream.avail_out;
-		host_stream.total_out  = static_cast<mz_ulong>(guest_stream.total_out);
-		host_stream.msg        = guest_stream.msg;
-		host_stream.state      = guest_stream.state;
-		host_stream.zalloc     = HostAlloc;
-		host_stream.zfree      = HostFree;
-		host_stream.opaque     = nullptr;
-		host_stream.data_type  = guest_stream.data_type;
-		host_stream.adler      = static_cast<mz_ulong>(guest_stream.adler);
-		host_stream.reserved   = static_cast<mz_ulong>(guest_stream.reserved);
-
-		const int rc = inflateEnd(&host_stream);
-		ForgetLegacyStreamLayout(strm);
-		return rc;
-	}
-
-	return inflateEnd(strm);
-}
-
-// Minimal zlib-like API compatibility for EOS modules that expect standard
-// inflate entry points from a PS5 shipping SDK import table.
-static KYTY_SYSV_ABI int InflateInit(void* strm, const char* version, int stream_size)
-{
-	PRINT_NAME();
-
-	KYTY_LOG_DEBUG("\t version      = %s\n", version != nullptr ? version : "(null)");
-	KYTY_LOG_DEBUG("\t stream_size  = %d\n", stream_size);
-	KYTY_LOG_DEBUG("\t sizeof(z_stream) = %zu\n", sizeof(mz_stream));
-
-	if (strm == nullptr)
-	{
-		return Z_STREAM_ERROR;
-	}
-
-	if (IsCompatLegacyStream72(stream_size) || IsCompatStream112(stream_size))
-	{
-		const int rc = InflateInitCompatInitImpl(static_cast<mz_streamp>(strm), MZ_DEFAULT_WINDOW_BITS, version, stream_size);
-		RegisterLegacyStreamLayout(static_cast<mz_streamp>(strm), stream_size);
-		return rc;
-	}
-
-	auto* stream   = static_cast<mz_streamp>(strm);
-	stream->zalloc = HostAlloc;
-	stream->zfree  = HostFree;
-	stream->opaque = nullptr;
-	RegisterLegacyStreamLayout(stream, sizeof(mz_stream));
-	return inflateInit2(stream, MZ_DEFAULT_WINDOW_BITS);
+	mz_stream host {};
+	LoadStream(guest, layout, &host);
+	const int rc = op(&host);
+	StoreStream(host, layout, guest);
+	return rc;
 }
 
 static KYTY_SYSV_ABI int InflateInit2(void* strm, int window_bits, const char* version, int stream_size)
 {
 	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t window_bits  = %d\n", window_bits);
-	KYTY_LOG_DEBUG("\t version      = %s\n", version != nullptr ? version : "(null)");
-	KYTY_LOG_DEBUG("\t stream_size  = %d\n", stream_size);
-	KYTY_LOG_DEBUG("\t sizeof(z_stream) = %zu\n", sizeof(mz_stream));
-
-	if (strm == nullptr)
-	{
-		return Z_STREAM_ERROR;
-	}
-
-	if (IsCompatLegacyStream72(stream_size) || IsCompatStream112(stream_size))
-	{
-		const int rc = InflateInitCompatInitImpl(static_cast<mz_streamp>(strm), window_bits, version, stream_size);
-		RegisterLegacyStreamLayout(static_cast<mz_streamp>(strm), stream_size);
-		return rc;
-	}
-
-	auto* stream   = static_cast<mz_streamp>(strm);
-	stream->zalloc = HostAlloc;
-	stream->zfree  = HostFree;
-	stream->opaque = nullptr;
-	RegisterLegacyStreamLayout(stream, sizeof(mz_stream));
-	return inflateInit2(stream, window_bits);
+	return InitGuestStream(strm, version, stream_size, [window_bits](mz_stream* host) { return mz_inflateInit2(host, window_bits); });
 }
 
-static KYTY_SYSV_ABI int Inflate(mz_streamp strm, int flush)
+static KYTY_SYSV_ABI int Inflate(void* strm, int flush)
 {
 	PRINT_NAME();
-	return InflateCompatImpl(strm, flush);
+	return RunGuestStream(strm, false, [flush](mz_stream* host) { return mz_inflate(host, flush); });
 }
 
-static KYTY_SYSV_ABI int InflateEnd(mz_streamp strm)
+static KYTY_SYSV_ABI int InflateEnd(void* strm)
 {
 	PRINT_NAME();
-	return InflateEndCompatImpl(strm);
+	return RunGuestStream(strm, true, [](mz_stream* host) { return mz_inflateEnd(host); });
 }
 
-static KYTY_SYSV_ABI int InflateCompatFlexible(uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t, uint64_t)
+static KYTY_SYSV_ABI int DeflateInit2(void* strm, int level, int method, int window_bits, int mem_level, int strategy,
+                                      const char* version, int stream_size)
 {
-	if (a0 == 0)
-	{
-		return Z_STREAM_ERROR;
-	}
+	PRINT_NAME();
+	return InitGuestStream(strm, version, stream_size, [=](mz_stream* host)
+	                       { return mz_deflateInit2(host, level, method, window_bits, mem_level, strategy); });
+}
 
-	auto* stream = reinterpret_cast<void*>(a0);
-	const auto window_bits = static_cast<int64_t>(a1);
+static KYTY_SYSV_ABI int Deflate(void* strm, int flush)
+{
+	PRINT_NAME();
+	return RunGuestStream(strm, false, [flush](mz_stream* host) { return mz_deflate(host, flush); });
+}
 
-	// Heuristic dispatch: when the second argument is a small integer, assume
-	// callers are using inflateInit2_ (window bits as second positional arg).
-	if (window_bits <= static_cast<int64_t>(MZ_DEFAULT_WINDOW_BITS) && window_bits >= -static_cast<int64_t>(MZ_DEFAULT_WINDOW_BITS))
-	{
-		return InflateInit2(stream, static_cast<int>(window_bits), reinterpret_cast<const char*>(a2), static_cast<int>(a3));
-	}
+static KYTY_SYSV_ABI int DeflateEnd(void* strm)
+{
+	PRINT_NAME();
+	return RunGuestStream(strm, true, [](mz_stream* host) { return mz_deflateEnd(host); });
+}
 
-	// Otherwise treat as inflateInit_(stream, version, stream_size).
-	return InflateInit(stream, reinterpret_cast<const char*>(a1), static_cast<int>(a2));
+static KYTY_SYSV_ABI unsigned long Crc32(unsigned long crc, const unsigned char* buf, unsigned int len)
+{
+	return mz_crc32(crc, buf, len);
 }
 
 // Conservative stub: some EOS binaries reference private/internal zlib-like entry
@@ -476,10 +293,10 @@ LIB_DEFINE(InitEOSSDKPS5Shipping_1)
 	LIB_FUNC("9ET3A90qn2o", EOSSDKPS5Shipping::InflateCompatReturnZero);
 	LIB_FUNC("Ji+98V2xGZA", EOSSDKPS5Shipping::InflateCompatReturnZero);
 	LIB_FUNC("D0odCqXaXgk", EOSSDKPS5Shipping::InflateCompatReturnZero);
-	LIB_FUNC("jTKhlnqi5+o", EOSSDKPS5Shipping::InflateCompatFlexible);
-	LIB_FUNC("fKk7unahoVM", EOSSDKPS5Shipping::InflateCompatFlexible);
-	LIB_FUNC("Z0pL-Tae6N4", EOSSDKPS5Shipping::InflateCompatFlexible);
-	LIB_FUNC("gnWUEMlAxZY", EOSSDKPS5Shipping::InflateCompatFlexible);
+	LIB_FUNC("jTKhlnqi5+o", EOSSDKPS5Shipping::Crc32);
+	LIB_FUNC("fKk7unahoVM", EOSSDKPS5Shipping::DeflateInit2);
+	LIB_FUNC("Z0pL-Tae6N4", EOSSDKPS5Shipping::DeflateEnd);
+	LIB_FUNC("gnWUEMlAxZY", EOSSDKPS5Shipping::Deflate);
 	LIB_FUNC("70tCTRcliEQ", EOSSDKPS5Shipping::InflateCompatReturnZero);
 	LIB_FUNC("MM-aVBE7p-A", EOSSDKPS5Shipping::InflateInit2);
 	LIB_FUNC("dbDvWQUel6A", EOSSDKPS5Shipping::Inflate);
