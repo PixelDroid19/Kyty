@@ -397,6 +397,8 @@ struct AaConfig
 	uint8_t msaa_exposed_samples  = 0;
 };
 
+inline constexpr int kClearStateScissorExtent = 16384;
+
 struct Viewport
 {
 	float zmin                                  = 0.0f;
@@ -407,10 +409,12 @@ struct Viewport
 	float yoffset                               = 0.0f;
 	float zscale                                = 0.0f;
 	float zoffset                               = 0.0f;
+	// Clear-state scissors cover the whole 16384x16384 surface with the window
+	// offset disabled (BR 0x40004000, TL 0x80000000), as in the AGC register defaults.
 	int   viewport_scissor_left                 = 0;
 	int   viewport_scissor_top                  = 0;
-	int   viewport_scissor_right                = 0;
-	int   viewport_scissor_bottom               = 0;
+	int   viewport_scissor_right                = kClearStateScissorExtent;
+	int   viewport_scissor_bottom               = kClearStateScissorExtent;
 	bool  viewport_scissor_window_offset_enable = false;
 };
 
@@ -420,12 +424,12 @@ struct ScreenViewport
 	uint32_t transform_control                    = 1087;
 	int      screen_scissor_left                  = 0;
 	int      screen_scissor_top                   = 0;
-	int      screen_scissor_right                 = 0;
-	int      screen_scissor_bottom                = 0;
+	int      screen_scissor_right                 = kClearStateScissorExtent;
+	int      screen_scissor_bottom                = kClearStateScissorExtent;
 	int      generic_scissor_left                 = 0;
 	int      generic_scissor_top                  = 0;
-	int      generic_scissor_right                = 0;
-	int      generic_scissor_bottom               = 0;
+	int      generic_scissor_right                = kClearStateScissorExtent;
+	int      generic_scissor_bottom               = kClearStateScissorExtent;
 	bool     generic_scissor_window_offset_enable = false;
 	int      window_offset_x                       = 0;
 	int      window_offset_y                       = 0;
