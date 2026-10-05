@@ -241,7 +241,10 @@ public:
 private:
 	static constexpr uint64_t kNextGenAutoMapBegin = 0x2000000000ull;
 	static constexpr uint64_t kNextGenAutoMapEnd   = 0x40000000000ull;
-	[[nodiscard]] bool IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len) const;
+	// Every byte of [start, start + len) belongs to an allocation; adjacent
+	// allocations may share the range. With memory_type, they must also share
+	// one memory type, which is returned.
+	[[nodiscard]] bool IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len, int* memory_type = nullptr) const;
 
 	// Gen5 releases the physical reservation independently from its virtual mapping.
 	// KernelMunmap owns the mapping and host/GPU cleanup lifecycle.
@@ -713,15 +716,16 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 	return true;
 }
 
-bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len) const
+bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len, int* memory_type) const
 {
 	if (len == 0 || start > std::numeric_limits<uint64_t>::max() - len)
 	{
 		return false;
 	}
 
-	const uint64_t end    = start + len;
-	uint64_t       cursor = start;
+	const uint64_t        end    = start + len;
+	uint64_t              cursor = start;
+	const AllocatedBlock* first  = nullptr;
 	for (const auto& block: m_allocated)
 	{
 		const uint64_t block_end = block.start_addr + block.size;
@@ -729,9 +733,17 @@ bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len)
 		{
 			continue;
 		}
-		if (block.start_addr > cursor)
+		if (block.start_addr > cursor || (memory_type != nullptr && first != nullptr && block.memory_type != first->memory_type))
 		{
 			return false;
+		}
+		if (first == nullptr)
+		{
+			first = &block;
+			if (memory_type != nullptr)
+			{
+				*memory_type = block.memory_type;
+			}
 		}
 		cursor = std::min(end, block_end);
 		if (cursor == end)
@@ -995,11 +1007,11 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 		return 0;
 	}
 
-	const uint64_t map_size   = len;
-	const auto     allocation = std::find_if(
-	    m_allocated.begin(), m_allocated.end(), [phys_addr, map_size](const auto& block)
-	    { return phys_addr >= block.start_addr && map_size <= block.size && phys_addr - block.start_addr <= block.size - map_size; });
-	if (allocation == m_allocated.end())
+	// A mapping may span physically adjacent allocations (titles allocate in
+	// chunks and map larger windows), as long as every byte is allocated.
+	const uint64_t map_size    = len;
+	int            memory_type = 0;
+	if (!IsAllocatedRangeCoveredUnlocked(phys_addr, map_size, &memory_type))
 	{
 		return 0;
 	}
@@ -1062,7 +1074,7 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	b.map_size         = map_size;
 	b.prot             = prot;
 	b.mode             = mode;
-	b.memory_type      = allocation->memory_type;
+	b.memory_type      = memory_type;
 	b.gpu_cleanup_mode = gpu_mode;
 	m_mapped.Add(b);
 	m_protections.push_back({map_vaddr, map_size, prot, mode});
