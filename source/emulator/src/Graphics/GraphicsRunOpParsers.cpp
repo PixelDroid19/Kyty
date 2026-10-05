@@ -751,9 +751,8 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc0023f02) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0023f02 condition ignored (continuing)\n"); }
-
-	if ((buffer[2] & 0xff00000u) != 0x1800000u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (buffer[2] & 0xff00000u) != 0x1800000u condition ignored (continuing)\n"); }
+	EXIT_IF(KYTY_PM4_LEN(cmd_id) != 4u);
+	if ((buffer[2] & (1u << 23u)) == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: INDIRECT_BUFFER without VALID (continuing)\n"); }
 
 	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1] & 0xffffu) << 32u));
 	uint32_t indirect_num_dw = buffer[2] & 0xfffffu;
@@ -765,7 +764,9 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 
 	cp->Run(indirect_buffer, indirect_num_dw, indirect_buffer);
 
-	return 3;
+	// A chained buffer replaces the rest of the current one.
+	const bool chain = (buffer[2] & (1u << 20u)) != 0u;
+	return chain ? dw - 1u : 3u;
 }
 
 KYTY_CP_OP_PARSER(cp_op_indirect_buffer_end)
@@ -1053,14 +1054,18 @@ KYTY_CP_OP_PARSER(cp_op_num_instances)
 	return 1;
 }
 
-// SET_PREDICATION. Clearing predication reads no result; operations that make
-// later packets depend on a query or a stored boolean are not implemented yet.
+// SET_PREDICATION. Clearing predication reads no result. With the wait hint set
+// (bit 12), packets run unpredicated while the result is not ready; the command
+// processor runs ahead of the GPU work that writes the result, so a predicate
+// set that way never skips here. Predicates that must wait for their result
+// are not implemented yet.
 KYTY_CP_OP_PARSER(cp_op_set_predication)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	const uint32_t operation = (buffer[0] >> 16u) & 0x7u;
-	if (operation != 0u)
+	const uint32_t operation  = (buffer[0] >> 16u) & 0x7u;
+	const bool     draw_early = ((buffer[0] >> 12u) & 0x1u) != 0u;
+	if (operation != 0u && !draw_early)
 	{
 		EXIT("SET_PREDICATION operation %u is not implemented: condition=%u wait=%u address=0x%08x%08x\n", operation,
 		     (buffer[0] >> 8u) & 0x1u, (buffer[0] >> 12u) & 0x1u, buffer[2], buffer[1]);

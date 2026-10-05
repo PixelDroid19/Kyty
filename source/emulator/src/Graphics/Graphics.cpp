@@ -4719,6 +4719,48 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t 
 	return cmd;
 }
 
+// INDIRECT_BUFFER for sceAgcDcbJump/sceAgcAcbJump: the target address, then its
+// size in dwords (bits 0-19), CHAIN (bit 20: mode 1 ends the current buffer at the
+// jump, mode 0 returns after the target), VALID (bit 23) and the cache policy.
+uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32_t cache_policy, const void* target, uint32_t size_dw)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr || mode > 1u || cache_policy > 3u || size_dw > 0xfffffu)
+	{
+		return nullptr;
+	}
+	auto* cmd = buf->AllocateDW(4);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	const auto address = reinterpret_cast<uint64_t>(target);
+	cmd[0]             = KYTY_PM4(4, Pm4::IT_INDIRECT_BUFFER, 0u);
+	cmd[1]             = static_cast<uint32_t>(address);
+	cmd[2]             = static_cast<uint32_t>(address >> 32u) & 0xffffu;
+	cmd[3]             = size_dw | (mode << 20u) | (1u << 23u) | (cache_policy << 28u);
+	return cmd;
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbJumpGetSize()
+{
+	return 4u * sizeof(uint32_t);
+}
+
+// sceAgcSetPacketPredication: bit 0 of a packet header marks it predicated (1) or not.
+int KYTY_SYSV_ABI GraphicsSetPacketPredication(uint32_t* packet, uint32_t predication)
+{
+	PRINT_NAME();
+
+	if (packet == nullptr)
+	{
+		return Kernel::KERNEL_ERROR_EINVAL;
+	}
+	packet[0] = (packet[0] & ~1u) | (predication == 1u ? 1u : 0u);
+	return OK;
+}
+
 // SET_PREDICATION: condition (bit 8), wait hint (bit 12) and operation (bits 16-18),
 // then the 16-byte aligned address of the result the operation reads.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetPredication(CommandBuffer* buf, uint32_t condition, uint32_t operation, uint32_t wait,

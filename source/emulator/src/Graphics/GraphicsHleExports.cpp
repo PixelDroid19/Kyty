@@ -139,6 +139,11 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("8N2tmT3jmC8", Gen5::GraphicsDcbSetIndexCount);
 	LIB_FUNC("tSBxhAPyytQ", Gen5::GraphicsDcbSetNumInstances);
 	LIB_FUNC("bbFueFP+J4k", Gen5::GraphicsDcbSetPredication);
+	LIB_FUNC("w6Dj1VJt5qY", Gen5::GraphicsSetPacketPredication);
+	LIB_FUNC("xSAR0LTcRKM", Gen5::GraphicsCbJump);        // sceAgcDcbJump
+	LIB_FUNC("e1DFTg+Sd8U", Gen5::GraphicsCbJump);        // sceAgcAcbJump
+	LIB_FUNC("VEGu4dixjUg", Gen5::GraphicsCbJumpGetSize); // sceAgcDcbJumpGetSize
+	LIB_FUNC("b-oySn+G2tE", Gen5::GraphicsCbJumpGetSize); // sceAgcAcbJumpGetSize
 	LIB_FUNC("Yw0jKSqop+E", Gen5::GraphicsDcbDrawIndexAuto);
 	// sceAgcDcbDrawIndexOffset NID B+aG9DUnTKA.
 	// Misbinding this to DrawIndexAutoWithBase made UI quads ignore IndexBase

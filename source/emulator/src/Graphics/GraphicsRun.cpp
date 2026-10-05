@@ -1722,6 +1722,10 @@ void CommandProcessor::Run(uint32_t* data, uint32_t num_dw, const uint32_t* sour
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unknown PM4 packet type (continuing)\n");
 		}
 
+		// Bit 0 of a Type3 header marks the packet predicated (sceAgcSetPacketPredication).
+		// No predicate accepted by SET_PREDICATION skips a packet, so a marked packet executes.
+		cmd_id &= ~1u;
+
 		const uint32_t special_packet_dwords = Pm4::Pm4SpecialType3PacketDwords(cmd_id);
 		if (special_packet_dwords != 0u)
 		{
