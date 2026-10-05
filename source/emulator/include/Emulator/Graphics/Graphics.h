@@ -186,6 +186,8 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetDst(uint32_t* cmd, uintptr_t arg1);
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset);
 // sceAgcDcbStallCommandBufferParserGetSize (NID +u6dKSLWM2o): fixed 2-dword packet.
 uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize();
+// sceAgcDcbWaitOnAddressGetSize (43WJ08sSugE) / sceAgcAcbWaitOnAddressGetSize (idlaArvdXEs).
+uint32_t KYTY_SYSV_ABI GraphicsCbWaitOnAddressGetSize(uint32_t label_size);
 // sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w): fixed 7-dword packet.
 uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize();
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).

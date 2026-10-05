@@ -3343,6 +3343,19 @@ uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize()
 	return 2u * sizeof(uint32_t);
 }
 
+// sceAgcDcbWaitOnAddressGetSize / sceAgcAcbWaitOnAddressGetSize: bytes the
+// WaitOnAddress builder emits for a 32-bit (0) or 64-bit (1) label; titles
+// use it to reserve command space.
+uint32_t KYTY_SYSV_ABI GraphicsCbWaitOnAddressGetSize(uint32_t label_size)
+{
+	switch (label_size)
+	{
+		case 0: return 14u * sizeof(uint32_t);
+		case 1: return 16u * sizeof(uint32_t);
+		default: return 0;
+	}
+}
+
 // sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w).
 uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize()
 {

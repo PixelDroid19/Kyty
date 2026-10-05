@@ -98,6 +98,8 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("WmAc2MEj6Io", Gen5::GraphicsDcbDmaData);
 	LIB_FUNC("-RnpfpxIhec", Gen5::GraphicsAcbDmaData);
 	LIB_FUNC("2ccJz9LQI+w", Gen5::GraphicsDcbDmaDataGetSize);
+	LIB_FUNC("43WJ08sSugE", Gen5::GraphicsCbWaitOnAddressGetSize);
+	LIB_FUNC("idlaArvdXEs", Gen5::GraphicsCbWaitOnAddressGetSize);
 	LIB_FUNC("u2T2DiA5hRI", Gen5::GraphicsDcbStallCommandBufferParser);
 	LIB_FUNC("+u6dKSLWM2o", Gen5::GraphicsDcbStallCommandBufferParserGetSize);
 	LIB_FUNC("D9sr1xGUriE", Gen5::GraphicsCreatePrimState);
