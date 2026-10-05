@@ -4719,6 +4719,30 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t 
 	return cmd;
 }
 
+// SET_PREDICATION: condition (bit 8), wait hint (bit 12) and operation (bits 16-18),
+// then the 16-byte aligned address of the result the operation reads.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetPredication(CommandBuffer* buf, uint32_t condition, uint32_t operation, uint32_t wait,
+                                                  const volatile void* address)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+	auto* cmd = buf->AllocateDW(4);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	const auto result = reinterpret_cast<uint64_t>(address);
+	cmd[0]            = KYTY_PM4(4, Pm4::IT_SET_PREDICATION, 0u);
+	cmd[1]            = ((condition & 0x1u) << 8u) | ((wait & 0x1u) << 12u) | ((operation & 0x7u) << 16u);
+	cmd[2]            = static_cast<uint32_t>(result) & 0xfffffff0u;
+	cmd[3]            = static_cast<uint32_t>(result >> 32u);
+	return cmd;
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache_policy, const volatile void* buffer,
                                                uint32_t buffer_size_in_bytes, uint32_t reset_count, uint8_t force_reset,
                                                uint8_t report_and_reset, uint32_t reporting_interval_in_100k_clocks)

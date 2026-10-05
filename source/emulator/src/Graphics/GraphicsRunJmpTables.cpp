@@ -1093,6 +1093,7 @@ void graphics_init_jmp_tables()
 	}
 
 	g_cp_op_func[Pm4::IT_NOP]                     = cp_op_nop;
+	g_cp_op_func[Pm4::IT_SET_PREDICATION]         = cp_op_set_predication;
 	g_cp_op_func[Pm4::IT_CLEAR_STATE]             = cp_op_clear_state;
 	g_cp_op_func[Pm4::IT_SET_BASE]                = cp_op_set_base;
 	g_cp_op_func[Pm4::IT_DISPATCH_INDIRECT]       = cp_op_dispatch_indirect;

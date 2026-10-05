@@ -1053,6 +1053,21 @@ KYTY_CP_OP_PARSER(cp_op_num_instances)
 	return 1;
 }
 
+// SET_PREDICATION. Clearing predication reads no result; operations that make
+// later packets depend on a query or a stored boolean are not implemented yet.
+KYTY_CP_OP_PARSER(cp_op_set_predication)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	const uint32_t operation = (buffer[0] >> 16u) & 0x7u;
+	if (operation != 0u)
+	{
+		EXIT("SET_PREDICATION operation %u is not implemented: condition=%u wait=%u address=0x%08x%08x\n", operation,
+		     (buffer[0] >> 8u) & 0x1u, (buffer[0] >> 12u) & 0x1u, buffer[2], buffer[1]);
+	}
+	return KYTY_PM4_LEN(cmd_id) - 1u;
+}
+
 KYTY_CP_OP_PARSER(cp_op_pop_marker)
 {
 	KYTY_PROFILER_FUNCTION();

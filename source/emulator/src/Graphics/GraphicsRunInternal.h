@@ -178,6 +178,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs);
 KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs);
 KYTY_CP_OP_PARSER(cp_op_nop);
 KYTY_CP_OP_PARSER(cp_op_num_instances);
+KYTY_CP_OP_PARSER(cp_op_set_predication);
 KYTY_CP_OP_PARSER(cp_op_one_reg_write);
 KYTY_CP_OP_PARSER(cp_op_pop_marker);
 KYTY_CP_OP_PARSER(cp_op_push_marker);

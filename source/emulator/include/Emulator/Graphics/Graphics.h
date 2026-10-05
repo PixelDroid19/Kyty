@@ -292,6 +292,8 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbPopMarker(CommandBuffer* buf);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetPredication(CommandBuffer* buf, uint32_t condition, uint32_t operation, uint32_t wait,
+                                                  const volatile void* address);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache_policy, const volatile void* buffer,
                                                uint32_t buffer_size_in_bytes, uint32_t reset_count, uint8_t force_reset,
                                                uint8_t report_and_reset, uint32_t reporting_interval_in_100k_clocks);

@@ -138,6 +138,7 @@ LIB_DEFINE(InitGraphicsDriver_1)
 	LIB_FUNC("l4fM9K-Lyks", Gen5::GraphicsDcbSetIndexBuffer);
 	LIB_FUNC("8N2tmT3jmC8", Gen5::GraphicsDcbSetIndexCount);
 	LIB_FUNC("tSBxhAPyytQ", Gen5::GraphicsDcbSetNumInstances);
+	LIB_FUNC("bbFueFP+J4k", Gen5::GraphicsDcbSetPredication);
 	LIB_FUNC("Yw0jKSqop+E", Gen5::GraphicsDcbDrawIndexAuto);
 	// sceAgcDcbDrawIndexOffset NID B+aG9DUnTKA.
 	// Misbinding this to DrawIndexAutoWithBase made UI quads ignore IndexBase
