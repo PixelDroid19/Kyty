@@ -3232,10 +3232,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			pitch = TileAlign64KBPitch(width, ShaderGen5TextureBytesPerElement(r.Format()));
 			if (pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch == 0u condition ignored (continuing)\n"); }
-		} else if (tile == 5 && !three_dimensional && !arrayed_2d)
+		} else if (tile == 5 && !three_dimensional)
 		{
-			// Standard4KB resources use a canonical tiled pitch. Word4 is a
-			// linear-resource field and must not expand the mip layout.
+			// Standard4KB resources (each array slice alike) use a canonical
+			// tiled pitch. Word4 and the 256-byte row rule apply to linear
+			// resources only and must not expand the tiled layout.
 			pitch = width;
 		} else
 		{
