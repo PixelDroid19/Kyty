@@ -202,14 +202,17 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 	auto* private_mutex = *mutex;
 	if (PthreadMutexHeldByCaller(private_mutex))
 	{
-		if (private_mutex->type == MUTEX_TYPE_ERRORCHECK)
+		// Error-checking and adaptive mutexes refuse a lock by their owner, as in
+		// the BSD thread library. A title that relocks an adaptive mutex and then
+		// unlocks it once expects it released; counting depth kept it held.
+		if (private_mutex->type == MUTEX_TYPE_ERRORCHECK || private_mutex->type == MUTEX_TYPE_ADAPTIVE)
 		{
 			return KERNEL_ERROR_EDEADLK;
 		}
 
-		// Some guest runtimes layer normal or adaptive lock calls within one
-		// logical critical section. Keep their depth in the guest object so a
-		// host normal mutex cannot deadlock the owning guest thread.
+		// Some guest runtimes layer normal lock calls within one logical critical
+		// section. Keep their depth in the guest object so a host normal mutex
+		// cannot deadlock the owning guest thread.
 		private_mutex->recursion_count++;
 		return OK;
 	}
