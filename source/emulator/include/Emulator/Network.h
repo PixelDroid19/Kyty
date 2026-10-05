@@ -80,9 +80,24 @@ int KYTY_SYSV_ABI NetGetSockInfo(int socket_id, void* info, int info_size, int f
 
 namespace Ssl {
 
+struct SslData
+{
+	char*    ptr;
+	uint64_t size;
+};
+
+struct SslCaCerts
+{
+	SslData* cert_data;
+	uint64_t cert_data_num;
+	void*    pool;
+};
+
 int KYTY_SYSV_ABI SslInit(uint64_t pool_size);
 int KYTY_SYSV_ABI SslTerm(int ssl_ctx_id);
 int KYTY_SYSV_ABI SslClose(int ssl_id);
+int KYTY_SYSV_ABI SslGetCaCerts(int ssl_ctx_id, SslCaCerts* certs);
+int KYTY_SYSV_ABI SslFreeCaCerts(int ssl_ctx_id, SslCaCerts* certs);
 
 } // namespace Ssl
 

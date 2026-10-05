@@ -112,6 +112,7 @@ public:
 
 	Id   SslInit(uint64_t pool_size);
 	bool SslTerm(Id ssl_ctx_id);
+	bool SslIsActive(Id ssl_ctx_id);
 
 	Id   HttpInit(int memid, Id ssl_ctx_id, uint64_t pool_size);
 	bool HttpTerm(Id http_ctx_id);
@@ -138,6 +139,8 @@ public:
 	bool HttpSetAuthEnabled(Id id, int enable);
 
 private:
+	[[nodiscard]] bool SslIsActiveLocked(Id ssl_ctx_id) const;
+
 	struct Pool
 	{
 		bool   used = false;
@@ -284,11 +287,23 @@ Network::Id Network::SslInit(uint64_t pool_size)
 	return Id::Invalid();
 }
 
+bool Network::SslIsActiveLocked(Id ssl_ctx_id) const
+{
+	return ssl_ctx_id.GetType() == Id::Type::Ssl && ssl_ctx_id.GetId() >= 0 && ssl_ctx_id.GetId() < SSL_MAX &&
+	       m_ssl[ssl_ctx_id.GetId()].used;
+}
+
+bool Network::SslIsActive(Id ssl_ctx_id)
+{
+	Core::LockGuard lock(m_mutex);
+	return SslIsActiveLocked(ssl_ctx_id);
+}
+
 bool Network::SslTerm(Id ssl_ctx_id)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (ssl_ctx_id.GetType() == Id::Type::Ssl && ssl_ctx_id.GetId() >= 0 && ssl_ctx_id.GetId() < SSL_MAX && m_ssl[ssl_ctx_id.GetId()].used)
+	if (SslIsActiveLocked(ssl_ctx_id))
 	{
 		m_ssl[ssl_ctx_id.GetId()].used = false;
 
@@ -302,8 +317,7 @@ Network::Id Network::HttpInit(int memid, Id ssl_ctx_id, uint64_t pool_size)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (ssl_ctx_id.GetType() == Id::Type::Ssl && ssl_ctx_id.GetId() >= 0 && ssl_ctx_id.GetId() < SSL_MAX &&
-	    m_ssl[ssl_ctx_id.GetId()].used && memid >= 0 && memid < POOLS_MAX && m_pools[memid].used)
+	if (SslIsActiveLocked(ssl_ctx_id) && memid >= 0 && memid < POOLS_MAX && m_pools[memid].used)
 	{
 		for (int id = 0; id < HTTP_MAX; id++)
 		{
@@ -2944,6 +2958,36 @@ int KYTY_SYSV_ABI SslClose(int ssl_id)
 	KYTY_LOG_DEBUG("\t ssl_id = %d\n", ssl_id);
 
 	return OK;
+}
+
+// The emulator exposes no system certificate store, so a valid context
+// receives an empty CA list; certificate verification then fails as it would
+// against an unknown issuer.
+static int ssl_reset_ca_certs(int ssl_ctx_id, SslCaCerts* certs)
+{
+	EXIT_IF(g_net == nullptr);
+	if (certs == nullptr)
+	{
+		return SSL_ERROR_INVALID_VALUE;
+	}
+	if (!g_net->SslIsActive(Network::Id(ssl_ctx_id)))
+	{
+		return SSL_ERROR_INVALID_ID;
+	}
+	*certs = SslCaCerts {};
+	return OK;
+}
+
+int KYTY_SYSV_ABI SslGetCaCerts(int ssl_ctx_id, SslCaCerts* certs)
+{
+	PRINT_NAME();
+	return ssl_reset_ca_certs(ssl_ctx_id, certs);
+}
+
+int KYTY_SYSV_ABI SslFreeCaCerts(int ssl_ctx_id, SslCaCerts* certs)
+{
+	PRINT_NAME();
+	return ssl_reset_ca_certs(ssl_ctx_id, certs);
 }
 
 } // namespace Ssl

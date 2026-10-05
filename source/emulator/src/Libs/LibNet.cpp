@@ -160,6 +160,8 @@ LIB_DEFINE(InitNet_1_Ssl)
 	LIB_FUNC("hdpVEUDFW3s", Ssl::SslInit);
 	LIB_FUNC("0K1yQ6Lv-Yc", Ssl::SslTerm);
 	LIB_FUNC("viRXSHZYd0c", Ssl::SslClose);
+	LIB_FUNC("TDfQqO-gMbY", Ssl::SslGetCaCerts);
+	LIB_FUNC("qIvLs0gYxi0", Ssl::SslFreeCaCerts);
 }
 
 } // namespace LibSsl
