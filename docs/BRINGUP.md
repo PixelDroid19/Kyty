@@ -279,18 +279,86 @@ screen at 120-140 fps with correct UI art. The existing suite passes (1,873 test
 - **Add-on content.** One inventory answers AppContent and NpEntitlementAccess from `dlc_emu.ini` and installed
   package folders; mount and unmount follow the published contract. See `addon-content.md`.
 
+Second round (same day):
+
+- **Auto-index draws start at `GE_INDX_OFFSET`.** It is the first vertex of a `DrawIndexAuto` as it is the base vertex
+  of an indexed draw; the auto path passed 0, so a pixel-art title drew every tile batch from the start of its shared
+  vertex buffer (scrambled streaks). It now reaches gameplay.
+- **NGG fronts with a user-data base vertex.** `v_sad_u32 vN, sK, 0, vN` adds the base vertex/instance before the GS
+  allocation under an EXEC of all lanes. The proof models three-source lane-local ALU, scalar words derived only from
+  user data, and lane-local writes under an EXEC covering the vertex mask (exports keep the exact mask). An artillery
+  title now runs at about 58 fps (output is a flat colour, open below).
+- **Missing guest data symbols.** Unresolved data imports pointed at the invalid-memory sentinel; the C++ runtime's
+  fundamental `type_info` objects (`T`, `T*`, `const T*`) and two vtables come from one table.
+- Format 50 had no element size (zero-size texture, fatal overlap query); `localeconv` (Dinkumware layout,
+  `decimal_point` at +0x48), `wcsftime`, `pthread_getname_np`, save data parameters per save directory, trophy info
+  arrays, `WaitOnAddress` command sizes and graphics user data in indirect SH register lists.
+
+Third round (same day), mostly runtime-library correctness found by Unreal Engine 4 boots:
+
+- **Wide printf.** `vswprintf` accepted only `%%`, `%i` and `%08x` and returned -1 otherwise; string builders grow the
+  buffer and retry on -1, so two UE4 titles spun forever in startup. One wide engine (`FormatWide`) now formats every
+  conversion through the narrow engine, with `%ls`/`%lc` wide and `%s`/`%c` narrow; the narrow engine accepts `%ls`.
+- **Dinkumware character classes.** `_Iswctype` classes are 1 alnum .. 12 blank (titles scan format specifications
+  with 2 = alpha and trim with 9 = space); class 2 had been read as "digit". `_Towctrans` (1 lower, 2 upper) and
+  `std::_Xinvalid_argument` were registered as data objects; `_Xout_of_range`/`_Xlength_error` returned instead of
+  throwing. All four now behave as functions; the `_X` helpers throw `logic_error`-derived exceptions with what().
+- **Direct memory mappings may span adjacent allocations.** A title allocates direct memory in chunks and maps 4 GiB
+  windows across them; `Map` required a single allocation (EACCES) while `Release` already accepted spans.
+- **Guest entry stack.** `InvokeOnStack` placed the terminating frame record below the guest stack pointer, where the
+  callee's pushes overwrote it; frame-pointer stack walks then ran off the end. It now sits above the guest stack.
+- **Files larger than 4 GiB.** `sys_file_size` truncated through `uint32_t ftell`; a 17 GB pak was reported as
+  390 MB and its footer read at the wrong offset. Sizes come from `stat`/`fstat`.
+- **Kernel AIO** (`sceKernelAio*`): requests run when submitted and are complete when polled or waited for.
+- **Scalar spans of dynamically loaded descriptors.** A buffer descriptor loaded with `S_LOAD` is bound only over the
+  bytes its scalar buffer loads read. The span came from the last consumer alone, so constants read earlier through the
+  same descriptor fell outside the binding and read as zero. A Unity title's colour-grading LUT was baked from zeroed
+  parameters into solid black, which turned every 3D view black while 2D overlays stayed correct; geometry whose
+  matrices came through such a descriptor was also scrambled. The span is now the union of every consumer in the
+  mapping's window; a consumer that is not a constant-offset scalar load keeps the whole descriptor bound.
+- **APR entry points are raw system calls.** Every title links an SDK wrapper around the fourteen
+  `sceKernelApr*` imports (resolve, file size/stat, submit, wait) that turns a negative return into
+  `0x80020000 | errno` and reads a zero errno as success. The HLE returned the SCE code without setting errno, so a
+  missing loose file "resolved" with an uninitialised size; a UE4 title then allocated that size (the out-of-memory
+  report printed the 0x7FC0000000 reserved range). The exports now return -1 with errno set.
+- **Host-side contention.** Every guest mutex lock took the static-object registry lock and two state locks; guest
+  malloc/free took up to four registry and API locks. Existing objects are now returned lock-free (handles are
+  published after initialization), mutex ownership is an atomic only the owner writes, and the allocator API table is
+  an immutable snapshot.
+- **Middleware the title ships.** An HLE library named after a title's own SDK module kept the loader from loading
+  the real module; it is removed and the shipped module loads as a package sidecar.
+- `wcstof`/`wcstod`/`wcstol`/`wcstoul`/`wcstoll`/`wcstoull`, guest `exit`/`quick_exit`/`abort` and abnormal-termination
+  reports log the guest caller, and `NpManager` has one export list.
+
+- **Smaller imports a UE4 title needs at boot.** VoiceQoS is registered under module version 1.1 (the import
+  never resolved under 0.0); `sceNetCtlGetInfo(LINK)` reports the link down, consistent with the disconnected
+  state; `sceAgcDcbSetPredication` writes the SET_PREDICATION packet, and the command processor accepts clearing
+  predication and stops on the query-dependent operations, which no title has issued yet.
+
+Regression set after these repairs (run d406-d417, 90 s each, same host): GRIS 119 fps (104 before), Blasphemous 2
+85 (70), Dreaming Sarah 195 (89), Let's Build a Zoo 202 (83), The Messenger 320 (269), Dead Cells 94 (82), JoJo 87
+(54), ANIMAL WELL 22 (20), Formula Retro Racing back to its 3D views at about 110-120 fps in the race. A longer
+Blasphemous 2 run reaches gameplay; its intro frames vary with load timing between runs.
+
 Open blockers (one root cause each, none investigated past the point stated):
 
-- A metroidvania-style puzzle title renders its title screen (27 fps); after input the screen is garbled.
-- A turn-based artillery title: the NGG wave64 front proof refuses an instruction at pc 0x1c.
-- An isometric action title: SIGSEGV on a guest read of 0x840000008 at boot.
-- A beat 'em up: no emitter for `IMAGE_STORE` on a 2D array with NSA addressing (dim 5).
-- A sandbox title: SIGSEGV after about 940 frames.
-- Two Unreal Engine 4 titles: stall before the first frame.
+- Both UE4 titles now boot past the pak and ICU stage and stop on AGC builders that are not registered yet
+  (`sceAgcDcbJump` next; the title imports about 110 AGC entry points Kyty lacks, mostly `*GetSize`).
+- The artillery title renders a solid cyan colour.
+- The isometric action title: a pixel shader loads its sampler through a user-data pointer
+  (`s_load_dwordx4 s[16:19], s[0:1]`). Marking every pixel shader with a pointer load as a guest-device-address user
+  was tried and reverted: the sampler stayed unresolved and every such pixel shader moved to the device-address path.
+  The fix must cover only loads the static descriptor analysis cannot resolve.
+- A beat 'em up: a 2D-array store (DIM 5) addresses a 3D writable image; the third coordinate is z. The store is
+  now accepted; the title itself first needs `sceSslGetCaCerts`.
+- The remaining Unity title still stops 25-80 s in with a garbage V# in extended user data dwords 40-43 of its
+  colour-grading pass (the same slot holds valid LUT parameters in earlier runs and in another Unity title); the
+  bound span is now the full 272 bytes, so the remaining defect is the stale EUD contents.
+- A sandbox title: its allocator reports out of memory after about 940 frames (direct memory allocations failing).
+- A roguelike exits by itself (exit 0, no frame) without calling libc exit.
 - A first-person puzzle title: stalls after one frame.
-- A roguelike: a zero-size `GpuMemoryOverlap` query is fatal (`GpuMemoryOverlap.h:71`).
-- Shared HLE entries still mapped to one host function for distinct guest functions: the AMPR `_04_00` counter and
-  wait commands, the zlib entry points of one middleware library, and `strtoll` mapped to `strtoul`.
+- AMPR `_04_00` counter and wait commands are still no-ops; most `sceAgc*GetSize` entry points are added only when a
+  title calls them, from the size the matching Kyty builder writes.
 
 ### Title runtime repairs (2026-10-04, guest verified on seven of eight titles)
 
