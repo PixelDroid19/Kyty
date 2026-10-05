@@ -2364,6 +2364,41 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// neighbouring buffers in the GPU-memory overlap tracker.
 		// Block-compressed rows and columns count 4x4 blocks, not texels.
 		const uint32_t texels_per_element = ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u;
+		if (levels > 1u && bpp != 0u && 256u % bpp == 0u)
+		{
+			// GFX10 linear mip chains (addrlib HwlComputeSurfaceInfoLinear): each
+			// level's element pitch is aligned to 256 bytes and levels are stored
+			// from the smallest to level 0, so level 0 ends the allocation. Element
+			// (4x4 block) sizes halve independently of texel sizes.
+			const uint32_t pitch_align    = 256u / bpp;
+			const uint32_t element_width  = (width + texels_per_element - 1u) / texels_per_element;
+			const uint32_t element_height = (height + texels_per_element - 1u) / texels_per_element;
+			uint64_t       offset         = 0;
+			for (uint32_t l = levels; l-- > 0u;)
+			{
+				const uint64_t mip_width  = std::max(element_width >> l, 1u);
+				const uint64_t mip_height = std::max(element_height >> l, 1u);
+				const uint64_t mip_pitch  = align_up(mip_width, pitch_align);
+				const uint64_t mip_size   = mip_pitch * mip_height * bpp;
+				if (level_sizes != nullptr)
+				{
+					level_sizes[l].offset = static_cast<uint32_t>(offset);
+					level_sizes[l].size   = static_cast<uint32_t>(mip_size);
+				}
+				if (padded_size != nullptr)
+				{
+					padded_size[l].width  = static_cast<uint32_t>(mip_pitch * texels_per_element);
+					padded_size[l].height = static_cast<uint32_t>(mip_height * texels_per_element);
+				}
+				offset += mip_size;
+			}
+			if (total_size != nullptr)
+			{
+				total_size->size  = static_cast<uint32_t>(align_up(offset, 256));
+				total_size->align = 256;
+			}
+			return;
+		}
 		uint32_t       row                = (pitch != 0 ? pitch : width);
 		uint64_t       total              = 0;
 		for (uint32_t l = 0; l < levels; l++)

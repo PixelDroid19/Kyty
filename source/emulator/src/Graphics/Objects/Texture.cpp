@@ -572,6 +572,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	}
 
 	TileSizeOffset level_sizes[16];
+	TilePaddedSize padded_sizes[16];
 
 	if (fmt != 0)
 	{
@@ -585,7 +586,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			               static_cast<unsigned>(height), static_cast<unsigned>(pitch), static_cast<unsigned>(levels));
 		}
 
-		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
+		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, padded_sizes);
 	} else
 	{
 		// SKIPPED: tile != 8 && tile != 13 && tile != 10
@@ -615,7 +616,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		regions[i].offset    = level_sizes[i].offset;
 		regions[i].width     = mip_width;
 		regions[i].height    = mip_height;
-		regions[i].pitch     = mip_pitch;
+		// Gen5 linear mip levels keep their own 256-byte-aligned row pitch.
+		regions[i].pitch     = (fmt != 0 && tile == 0 && levels > 1) ? padded_sizes[i].width : mip_pitch;
 		regions[i].dst_level = i;
 		regions[i].dst_x     = 0;
 		regions[i].dst_y     = 0;
