@@ -232,6 +232,30 @@ void GpuMemory::WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int obje
 		{
 			continue;
 		}
+		// Completion runs after later submissions were recorded. A parent the
+		// device wrote after this object's last write already holds newer bytes:
+		// take the written-back guest bytes as its baseline instead of reloading
+		// them, now or at its next use, over that device content.
+		if (o2.device_write_time > o.write_time)
+		{
+			for (int vi = 0; vi < parent.block.vaddr_num; vi++)
+			{
+				if (o2.dirty_registered)
+				{
+					const auto read = GpuDirtyPageTracker::Instance().BeginRead(parent.block.vaddr[vi], parent.block.size[vi]);
+					if (read.tracked)
+					{
+						o2.dirty_generation[vi] = read.generation;
+					}
+				}
+				if (o2.check_hash)
+				{
+					o2.hash[vi] = GpuMemoryCalcHash(o2.object.type, reinterpret_cast<const uint8_t*>(parent.block.vaddr[vi]),
+					                                parent.block.size[vi]);
+				}
+			}
+			continue;
+		}
 		o2.cpu_update_time  = o.cpu_update_time;
 		o2.submit_id        = 0;
 		o2.content_origin   = GpuMemoryContentOrigin::AliasInvalidation;
@@ -527,9 +551,26 @@ bool GpuMemory::MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& i
 	auto& object = m_heaps[identity.heap_id].objects[identity.object_id];
 	auto& info   = object.info;
 	if (object.free || info.logical_generation != identity.logical_generation || info.write_uses != identity.write_uses ||
-	    !info.in_use || info.read_only || info.object.obj != identity.buffer || identity.write_uses == 0u)
+	    !info.in_use || info.read_only || info.object.obj != identity.buffer || identity.write_uses == 0u || info.depth_meta_bound)
 	{
 		return false;
+	}
+	// Device-address consumers then skip the in-order write-back, and an object
+	// rewritten every frame may not complete one for a long time. That is sound
+	// only when the write-back has nothing else to update: every overlapping
+	// object must be an exact image alias the device wrote after this object's
+	// last write (the fill's propagated clear or later rendering). Depth/HTILE,
+	// buffer and partial aliases keep the in-order write-back.
+	for (const auto& other: object.others)
+	{
+		const auto& alias = m_heaps[identity.heap_id].objects[other.object_id];
+		const auto  type  = alias.info.object.type;
+		if (alias.free || other.relation != OverlapType::Equals ||
+		    (type != GpuMemoryObjectType::RenderTexture && type != GpuMemoryObjectType::Texture) ||
+		    alias.info.device_write_time <= info.write_time)
+		{
+			return false;
+		}
 	}
 	info.guest_published_write_uses = identity.write_uses;
 	info.guest_published_queue       = queue.Value();

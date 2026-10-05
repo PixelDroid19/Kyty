@@ -365,6 +365,10 @@ private:
 		// Writable uses since creation, and the count a device-side publication
 		// to the guest device-address view covered (0: none) with its queue.
 		uint64_t                            write_uses                 = 0;
+		// Logical times (GpuMemoryGetCurrentTime) of the latest writable use and
+		// of the latest device write recorded into this object.
+		uint64_t                            write_time                 = 0;
+		uint64_t                            device_write_time          = 0;
 		uint64_t                            guest_published_write_uses = 0;
 		uint32_t                            guest_published_queue      = 0;
 		bool                                guest_published_uniform    = false;

@@ -467,7 +467,8 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 				       ", new_hash = 0x%016" PRIx64 "\n",
 				       Core::EnumName(o.object.type).C_Str(), vaddr[vi], size[vi], o.hash[vi], new_hash);
 			}
-			o.gpu_update_time = GpuMemoryGetCurrentTime();
+			o.gpu_update_time   = GpuMemoryGetCurrentTime();
+			o.device_write_time = o.gpu_update_time;
 
 			return;
 		}
@@ -493,7 +494,8 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 					       ", new_hash = 0x%016" PRIx64 "\n",
 					       Core::EnumName(o.object.type).C_Str(), vaddr[vi], size[vi], o.hash[vi], new_hash);
 				}
-				o.gpu_update_time = GpuMemoryGetCurrentTime();
+				o.gpu_update_time   = GpuMemoryGetCurrentTime();
+				o.device_write_time = o.gpu_update_time;
 			}
 		}
 	}

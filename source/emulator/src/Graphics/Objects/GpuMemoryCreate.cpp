@@ -1002,6 +1002,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				const bool previous_read_only = o.read_only;
 				o.read_only                   = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
 				o.write_uses += info.read_only ? 0u : 1u;
+				o.write_time = info.read_only ? o.write_time : GpuMemoryGetCurrentTime();
 				if (o.read_only != previous_read_only)
 				{
 					invalidate_overlap_snapshots(h.block);
@@ -1065,6 +1066,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			const bool previous_read_only = o.read_only;
 			o.read_only                   = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
 			o.write_uses += info.read_only ? 0u : 1u;
+			o.write_time = info.read_only ? o.write_time : GpuMemoryGetCurrentTime();
 			if (o.read_only != previous_read_only)
 			{
 				invalidate_overlap_snapshots(h.block);
@@ -1111,6 +1113,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			const bool previous_read_only = o.read_only;
 			o.read_only                   = GpuMemoryMergeReadOnlyUse(o.in_use, o.read_only, info.read_only);
 			o.write_uses += info.read_only ? 0u : 1u;
+			o.write_time = info.read_only ? o.write_time : GpuMemoryGetCurrentTime();
 			if (o.read_only != previous_read_only)
 			{
 				invalidate_overlap_snapshots(h.block);
@@ -2264,6 +2267,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	o.in_use          = true;
 	o.read_only       = info.read_only;
 	o.write_uses      = info.read_only ? 0u : 1u;
+	o.write_time      = info.read_only ? 0u : GpuMemoryGetCurrentTime();
 	o.check_hash      = info.check_hash;
 	RecordUse(&o, buffer);
 
