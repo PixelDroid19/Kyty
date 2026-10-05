@@ -2913,6 +2913,20 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			if (copied_smem_span)
 			{
 				buf = buffer->UploadTransientBuffer(smem_span, requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			} else if (Kernel::Memory::KernelMappedRange guest_mapping {};
+			           materialized_size == 0 && !Kernel::Memory::KernelQueryMappedRange(addr, 1, &guest_mapping))
+			{
+				// The console cannot read through a descriptor whose base no guest
+				// mapping contains either, so a title that runs there never
+				// dereferences it in this draw (a slot holding other data behind a
+				// disabled path). Bind the empty carrier, so any read stays in bounds.
+				KYTY_LOG_LIMIT(Log::Level::Warn, 16,
+				               "WARNING: storage descriptor base is not mapped, binding an empty buffer: shader=%016" PRIx64
+				               " index=%d addr=0x%016" PRIx64 " words=%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32 "\n",
+				               shader_checksum, i, addr, r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
+				static constexpr uint32_t kUnmappedDescriptorCarrier = 0;
+				buf = buffer->UploadTransientBuffer(&kUnmappedDescriptorCarrier, sizeof(kUnmappedDescriptorCarrier),
+				                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 			} else if (materialized_size == 0)
 			{
 				const auto eud = ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, materialized_size);
