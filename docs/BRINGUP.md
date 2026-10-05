@@ -362,6 +362,59 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   from 33 to 11. A read-only buffer owns no content (its bytes are guest memory or a copy of a peer, and a pending
   GPU write keeps an object writable), and freeing it drops both link directions, so each one idle for 120 frames
   now retires alone. The same title then holds about 100 live objects and a steady rate over 220 s.
+- **Standard 4 KiB arrays use the tiled pitch.** A SW_4KB_S 2D-array texture took the linear row rule (256-byte rows,
+  or the T# word-4 pitch), so a 1115x306 RGBA8 slice was laid out with pitch 1152 and its 32-row blocks reached
+  0x168000 bytes past a 0x160000-byte guest mapping; the detile read faulted. Hardware applies a custom pitch to
+  linear surfaces only, and the canonical pitch (1120) gives 0x15E000, exactly what the title mapped. 2D textures
+  already used it; arrays now do too.
+- **Descriptors behind shader resource table pointers.** A pixel shader whose SRT holds three 64-bit pointers loads
+  its S# from `ptr0+0` and its T# from `ptr2+0` (`s_load_dwordx4/x8` with a constant offset). Such loads, while the
+  pointer still holds its user-data value and every consumer is an image or sampler operand, are materialized like
+  the extended-user-data (EUD) loads: the table is snapshotted at draw time (two equal reads) and the S_LOAD is
+  rewritten through the same PC-keyed mapping. Buffer descriptors behind those pointers keep their existing paths.
+  The emitter now takes a mapped load's table offset from its mapping, so a nonzero SMEM immediate also resolves.
+- **GLOBAL loads.** `global_load_dword{,x2,x3,x4}` (FLAT encoding, GLOBAL segment) read a per-lane 64-bit address (a
+  VGPR pair, or a 64-bit SGPR base plus a 32-bit VGPR offset) plus a signed 12-bit offset through the guest device
+  address table, which imports every GPU-visible guest mapping. Any other FLAT/SCRATCH/GLOBAL opcode still stops
+  at decode.
+- **`sceSslGetCaCerts`/`sceSslFreeCaCerts`** return an empty CA list for a live SSL context (the emulator exposes no
+  system certificate store; verification against an unknown issuer then fails as it would). An Epic online SDK
+  module calls it at boot.
+- **`__powisf2`** (float to an integer power) is exported next to `__powidf2`; both now square and multiply, as the
+  guest's compiler runtime does, instead of calling `pow()`.
+- **SGPR copy provenance.** The scalar dataflow that told which SGPRs still hold their user-data value now tracks
+  which user-data word every SGPR holds at each instruction through S_MOV_B32/B64 copies (a must-analysis over the
+  decoded CFG; the old predicate is its "holds its own word" case). A compute shader that moves a V# out of its
+  user-data position, or builds two V#s that share their stride, record and format words (s1..s4 and s0 plus
+  s2..s4), gets one storage binding per distinct descriptor and register, and the V# registers are written with
+  that binding's metadata right before each buffer instruction.
+- **More descriptor loads behind SRT pointers.** One `s_load_dwordx16` holding two T# (or an 8-dword load holding two
+  S#) is split into descriptor blocks, each analysed as its own load of the same PC; several mapping records of one
+  PC are valid when their dword ranges are disjoint. A descriptor loaded before a conditional branch and consumed
+  after it is followed across the branch (the scan stops at the first clobber in program order and at unconditional
+  branches). The EUD collector keeps its straight-line scan.
+- **Scalar data through guest pointers in pixel shaders.** A pixel shader S_LOAD that neither the EUD path nor a
+  descriptor mapping resolves (for example two dwords of an SRT-pointed table into VCC, then a load through VCC) now
+  enables guest device addressing for that shader only; descriptor loads stay on their bindings, so the earlier
+  slowdown of marking every pointer-loading pixel shader does not return. VCC is accepted as a 64-bit S_LOAD base.
+  The constants these lowerings name are declared up front; a missing one made the SPIR-V refer to an undefined id.
+- **Typed buffer loads through an unbound V#** (a descriptor loaded at a runtime offset, as a vertex front with
+  bindless vertex streams does) read through guest device addressing with the formats the bound lowering decodes:
+  32-bit components (single component only for formats 20/22/36/39), R16G16_FLOAT and R16G16B16A16_FLOAT; other
+  formats read zero, as the bound path leaves them unread. The raw and typed variants share one address helper.
+- **Fixed direct maps replace what they cover.** `sceKernelMapDirectMemory` with MAP_FIXED (0x10) and without
+  MAP_NO_OVERWRITE (0x80) replaces the mappings in its range, as the BSD kernel and other PS5 implementations do. A
+  .NET runtime commits its GC heap by allocating, mapping at a fixed address inside a 256 GiB reservation and
+  releasing; after a release it maps a new 256 KiB view straddling two released 256 KiB views, which Kyty refused
+  with EBUSY (it replaced only an exactly equal released view), and the title died with OutOfMemoryException. A
+  released view is now dropped whole (its pages may already back another allocation) with its parts outside the
+  new range returned to the reservation, a live view is replaced when it lies inside the range, and the range
+  becomes a reservation the normal fixed-map transaction consumes. Gaps or partly covered live views still fail.
+- **What every guest thread waits on.** The blocking HLE waits (contended mutex, condition, semaphore, event flag,
+  event queue, sleep, join) record their kind, object and guest return address in the thread for their duration;
+  the agent `threads` tool reports them for the main thread too (it was missing from the list) together with the
+  loaded module bases, so a freeze names the waiting code without a debugger. Only a contended mutex lock is
+  recorded, so the uncontended path stays a single trylock.
 
 Regression set after these repairs (run d406-d417, 90 s each, same host): GRIS 119 fps (104 before), Blasphemous 2
 85 (70), Dreaming Sarah 195 (89), Let's Build a Zoo 202 (83), The Messenger 320 (269), Dead Cells 94 (82), JoJo 87
@@ -374,12 +427,18 @@ Open blockers (one root cause each, none investigated past the point stated):
   nondeterministically around 25 s, either on a guest `scePthreadMutexLock` of a null object plus 0x58 or in a
   stall; a 400x5x5 R11G11B10 volume in SW_64KB_R_X (tile 27) is not laid out yet. About 100 AGC entry points it
   imports (mostly `*GetSize`) are still missing and are added as they are called.
-- The isometric action title: a pixel shader loads its sampler through a user-data pointer
-  (`s_load_dwordx4 s[16:19], s[0:1]`). Marking every pixel shader with a pointer load as a guest-device-address user
-  was tried and reverted: the sampler stayed unresolved and every such pixel shader moved to the device-address path.
-  The fix must cover only loads the static descriptor analysis cannot resolve.
-- A beat 'em up: a 2D-array store (DIM 5) addresses a 3D writable image; the third coordinate is z. The store is
-  now accepted; the title itself first needs `sceSslGetCaCerts`.
+- The isometric action title now runs its whole observation window without a fatal (about 50 fps), but the frames are
+  black: its vertex front loads V#s from descriptor tables at runtime offsets (`s_load_dwordx4 s[16:19], s[14:15],
+  vcc_lo`) and fetches typed vertex data through them. The typed guest-address loads above cover the decoded
+  formats; whether those reads return the sprite data (and which other path still yields nothing) is next.
+- A beat 'em up (.NET with SDL_GPU) now runs its whole observation window: the GC heap commits succeed with the
+  fixed-map replacement above. Frames stay black (one solid green) at about 11 fps; a fifth of the time is spent
+  preparing the guest device address table.
+- A first-person puzzle title stalls after one frame: its main thread sleep-polls inside the FMOD Studio module
+  (`Sleep(ms)` wrapper at +0x2440) while the Studio threads wait on semaphores and an FMOD core thread sleep-polls;
+  the asynchronous bank load or mixer it waits for never completes. Not root-caused yet.
+- The arena fighter that froze when its attract sequence started now plays it (3D scenes at about 200 fps for the
+  whole window).
 - The remaining Unity title still stops 25-80 s in with a garbage V# in extended user data dwords 40-43 of its
   colour-grading pass (the same slot holds valid LUT parameters in earlier runs and in another Unity title); the
   bound span is now the full 272 bytes, so the remaining defect is the stale EUD contents.
