@@ -395,6 +395,13 @@ Third round (same day):
   some runs where its GPU allocator returns a null block and a row copy writes to 0x40; its direct-memory allocate
   and map calls do not fail in those runs).
 
+- **Linear mip chains.** JoJo's characters showed shredded textures: almost every material is a linear (tile 0)
+  BC1/BC3 texture with a full mip chain, and the linear fallback laid levels out from level 0 with halved pitches.
+  GFX10 linear mip chains (addrlib `HwlComputeSurfaceInfoLinear`) store the levels from the smallest one to level 0,
+  each with its element pitch aligned to 256 bytes, element sizes halving on their own (4x4 blocks for BC). The
+  fallback now computes that layout and each mip upload uses its own pitch; the rule reproduces all 2,135
+  multi-level entries of the SDK-generated linear RGBA8 table (offsets, sizes, padded pitch and total).
+
 Investigated and left open:
 
 - The .NET beat 'em up is not frozen: its black screen is a loading screen (its two sprite draws are black, vertex
