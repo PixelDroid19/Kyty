@@ -16,6 +16,16 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 
 namespace Kyty::Libs::Graphics {
 
+std::string_view ShaderInstructionTypeName(ShaderInstructionType type)
+{
+	return magic_enum::enum_name(type);
+}
+
+bool ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix)
+{
+	return ShaderInstructionTypeName(type).substr(0, prefix.size()) == prefix;
+}
+
 static String8 operand_to_str(ShaderOperand op)
 {
 	String8 ret = "???";

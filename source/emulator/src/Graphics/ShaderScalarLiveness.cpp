@@ -271,25 +271,25 @@ std::vector<Sgprs> HoldingOwnEntryValue(const std::vector<Sources>& sources)
 }
 
 // Every instruction field the scalar flow reads, in order: equal signatures
-// yield equal analyses, so a memoized result is exact for the program.
-std::vector<int64_t> FlowSignature(const ShaderCode& code)
+// yield equal analyses, so a memoized result is exact for the program. The
+// fields are visited without materializing the signature: once to hash, and
+// once more to compare against a stored candidate.
+template <typename Visitor>
+void VisitFlowSignature(const ShaderCode& code, Visitor&& visit)
 {
-	const auto&          instructions = code.GetInstructions();
-	std::vector<int64_t> signature;
-	signature.reserve(static_cast<size_t>(instructions.Size()) * 12u);
-	const auto operand = [&signature](const ShaderOperand& op)
+	const auto operand = [&visit](const ShaderOperand& op)
 	{
-		signature.push_back(static_cast<int64_t>(op.type));
-		signature.push_back(op.register_id);
-		signature.push_back(op.size);
+		visit(static_cast<int64_t>(op.type));
+		visit(op.register_id);
+		visit(op.size);
 	};
-	for (const auto& inst: instructions)
+	for (const auto& inst: code.GetInstructions())
 	{
-		signature.push_back(static_cast<int64_t>(inst.pc));
-		signature.push_back(static_cast<int64_t>(inst.type));
-		signature.push_back(inst.src_num);
-		signature.push_back(inst.mimg_address_num);
-		signature.push_back(inst.src[0].constant.i);
+		visit(static_cast<int64_t>(inst.pc));
+		visit(static_cast<int64_t>(inst.type));
+		visit(inst.src_num);
+		visit(inst.mimg_address_num);
+		visit(inst.src[0].constant.i);
 		for (int s = 0; s < inst.src_num && s < 4; s++)
 		{
 			operand(inst.src[s]);
@@ -301,47 +301,84 @@ std::vector<int64_t> FlowSignature(const ShaderCode& code)
 		operand(inst.dst);
 		operand(inst.dst2);
 	}
+}
+
+uint64_t FlowSignatureHash(const ShaderCode& code)
+{
+	XXH3_state_t state;
+	XXH3_64bits_reset(&state);
+	std::array<int64_t, 64> pending {};
+	size_t                  count = 0;
+	VisitFlowSignature(code,
+	                   [&](int64_t value)
+	                   {
+		                   pending[count++] = value;
+		                   if (count == pending.size())
+		                   {
+			                   XXH3_64bits_update(&state, pending.data(), sizeof(pending));
+			                   count = 0;
+		                   }
+	                   });
+	XXH3_64bits_update(&state, pending.data(), count * sizeof(int64_t));
+	return XXH3_64bits_digest(&state);
+}
+
+std::vector<int64_t> FlowSignature(const ShaderCode& code)
+{
+	std::vector<int64_t> signature;
+	signature.reserve(static_cast<size_t>(code.GetInstructions().Size()) * 12u);
+	VisitFlowSignature(code, [&signature](int64_t value) { signature.push_back(value); });
 	return signature;
+}
+
+bool FlowSignatureEquals(const ShaderCode& code, const std::vector<int64_t>& signature)
+{
+	size_t index = 0;
+	bool   equal = true;
+	VisitFlowSignature(code,
+	                   [&](int64_t value)
+	                   {
+		                   equal = equal && index < signature.size() && signature[index] == value;
+		                   index++;
+	                   });
+	return equal && index == signature.size();
 }
 
 struct FlowSummary
 {
-	std::vector<int64_t> signature;
-	Sgprs                live_at_entry;
-	std::vector<Sources> entry_sources;
-	std::vector<Sgprs>   holding_entry_value;
+	std::vector<int64_t>                    signature;
+	std::shared_ptr<const ShaderScalarFlow> flow;
 };
 
 // The CP thread analyzes the same programs every draw; keep the results.
-std::shared_ptr<const FlowSummary> SummaryOf(const ShaderCode& code)
+std::shared_ptr<const ShaderScalarFlow> SummaryOf(const ShaderCode& code)
 {
 	constexpr size_t kMaxPrograms = 4096;
-	static std::mutex                                                          mutex;
-	static std::unordered_multimap<uint64_t, std::shared_ptr<const FlowSummary>> summaries;
-	auto           signature = FlowSignature(code);
-	const uint64_t key       = XXH3_64bits(signature.data(), signature.size() * sizeof(int64_t));
+	static std::mutex                                     mutex;
+	static std::unordered_multimap<uint64_t, FlowSummary> summaries;
+	const uint64_t                                        key = FlowSignatureHash(code);
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		const auto [first, last] = summaries.equal_range(key);
 		for (auto it = first; it != last; ++it)
 		{
-			if (it->second->signature == signature)
+			if (FlowSignatureEquals(code, it->second.signature))
 			{
-				return it->second;
+				return it->second.flow;
 			}
 		}
 	}
 	auto entry_sources = ComputeSgprEntrySources(code);
 	auto holding       = HoldingOwnEntryValue(entry_sources);
-	auto summary       = std::make_shared<FlowSummary>(
-        FlowSummary {std::move(signature), ComputeSgprsLiveAtEntry(code), std::move(entry_sources), std::move(holding)});
+	auto flow          = std::make_shared<ShaderScalarFlow>(
+        ShaderScalarFlow {ComputeSgprsLiveAtEntry(code), std::move(entry_sources), std::move(holding)});
 	std::lock_guard<std::mutex> lock(mutex);
 	if (summaries.size() >= kMaxPrograms)
 	{
 		summaries.clear();
 	}
-	summaries.emplace(key, summary);
-	return summary;
+	summaries.emplace(key, FlowSummary {FlowSignature(code), flow});
+	return flow;
 }
 
 } // namespace
@@ -359,6 +396,11 @@ std::vector<Sgprs> ShaderSgprsHoldingEntryValue(const ShaderCode& code)
 std::vector<ShaderSgprEntrySources> ShaderSgprEntrySourcesAt(const ShaderCode& code)
 {
 	return SummaryOf(code)->entry_sources;
+}
+
+std::shared_ptr<const ShaderScalarFlow> ShaderScalarFlowOf(const ShaderCode& code)
+{
+	return SummaryOf(code);
 }
 
 } // namespace Kyty::Libs::Graphics

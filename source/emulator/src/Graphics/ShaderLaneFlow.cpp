@@ -1,12 +1,8 @@
 #include "ShaderLaneFlow.h"
 
-#include "Kyty/Core/MagicEnum.h"
-
 #include "ShaderNativeWaveInternal.h"
 
 #ifdef KYTY_EMU_ENABLED
-
-KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>(Kyty::Libs::Graphics::ShaderInstructionType::ZMax));
 
 namespace Kyty::Libs::Graphics::LaneFlow {
 
@@ -15,7 +11,7 @@ using Operand = ShaderOperandType;
 
 bool StartsWith(Type type, const char* prefix)
 {
-	return Core::EnumName8(type).StartsWith(prefix);
+	return ShaderInstructionTypeStartsWith(type, prefix);
 }
 
 bool AnyPrefix(Type type, std::initializer_list<const char*> prefixes)

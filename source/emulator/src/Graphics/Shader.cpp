@@ -632,7 +632,7 @@ bool ShaderNativePackedResult(const ShaderInstruction& inst)
 {
 	// Include compares to arbitrary SGPR pairs and all compare widths, not only
 	// the original VCC enum interval. Carry destinations likewise need packing.
-	return Core::EnumName8(inst.type).StartsWith("VCmp") ||
+	return ShaderInstructionTypeStartsWith(inst.type, "VCmp") ||
 	       inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1 ||
 	       inst.format == ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2 ||
 	       inst.format == ShaderInstructionFormat::Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair;
@@ -713,7 +713,7 @@ static bool ShaderMasksStayLaneLocal(const ShaderCode& code, const std::vector<b
 	// anywhere in a loop also taints a preceding textual SCC consumer.
 	for (const auto& inst: code.GetInstructions())
 	{
-		if (!Core::EnumName8(inst.type).StartsWith("S") || inst.type == ShaderInstructionType::SMovB32 ||
+		if (!ShaderInstructionTypeStartsWith(inst.type, "S") || inst.type == ShaderInstructionType::SMovB32 ||
 		    inst.type == ShaderInstructionType::SMovB64) { continue; }
 		mask_scc = mask_scc || ShaderInstructionTypeChangesExec(inst.type);
 		for (int source = 0; source < inst.src_num; ++source) { mask_scc = mask_scc || mask_source(inst.src[source]); }
@@ -2545,13 +2545,14 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// A direct resource whose SGPRs every path redefines before reading them
 	// is never consumed from user data; registering it would materialize an
 	// arbitrary dispatch-time value as a descriptor.
-	std::bitset<kShaderScalarLivenessSgprs> entry_live;
+	static const std::vector<std::bitset<kShaderScalarLivenessSgprs>> no_entry_values;
+	std::bitset<kShaderScalarLivenessSgprs>                          entry_live;
 	entry_live.set();
-	std::vector<std::bitset<kShaderScalarLivenessSgprs>> entry_values;
-	if (code != nullptr)
+	const auto  flow         = code != nullptr ? ShaderScalarFlowOf(*code) : nullptr;
+	const auto& entry_values = flow != nullptr ? flow->holding_entry_value : no_entry_values;
+	if (flow != nullptr)
 	{
-		entry_live   = ShaderSgprsLiveAtEntry(*code);
-		entry_values = ShaderSgprsHoldingEntryValue(*code);
+		entry_live = flow->live_at_entry;
 	}
 	auto entry_reads = [&](int first, int dwords)
 	{
@@ -2976,8 +2977,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// null-descriptor rejection and the same EUD translation used by metadata.
 	if (code != nullptr)
 	{
-		const auto entry_values = ShaderSgprsHoldingEntryValue(*code);
-		uint32_t   inst_index   = 0;
+		uint32_t inst_index = 0;
 		for (const auto& inst: code->GetInstructions())
 		{
 			const uint32_t current = inst_index++;
@@ -3549,7 +3549,7 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 // descriptor mapping resolves reads plain data at a runtime address.
 static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind)
 {
-	if (!Core::EnumName8(inst.type).StartsWith("SLoad") || inst.src_num < 1 ||
+	if (!ShaderInstructionTypeStartsWith(inst.type, "SLoad") || inst.src_num < 1 ||
 	    (inst.src[0].type != ShaderOperandType::Sgpr && inst.src[0].type != ShaderOperandType::VccLo))
 	{
 		return false;
@@ -3704,7 +3704,7 @@ bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResource
 {
 	for (const auto& inst: code.GetInstructions())
 	{
-		if (!Core::EnumName8(inst.type).StartsWith("BufferLoad") || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr)
+		if (!ShaderInstructionTypeStartsWith(inst.type, "BufferLoad") || inst.src_num < 2 || inst.src[1].type != ShaderOperandType::Sgpr)
 		{
 			continue;
 		}

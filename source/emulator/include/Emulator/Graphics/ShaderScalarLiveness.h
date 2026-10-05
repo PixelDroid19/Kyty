@@ -5,6 +5,7 @@
 
 #include <array>
 #include <bitset>
+#include <memory>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -31,6 +32,16 @@ constexpr int kShaderScalarLivenessSgprs = 106;
 constexpr int8_t kShaderSgprNoEntrySource = -1;
 using ShaderSgprEntrySources              = std::array<int8_t, kShaderScalarLivenessSgprs>;
 [[nodiscard]] std::vector<ShaderSgprEntrySources> ShaderSgprEntrySourcesAt(const ShaderCode& code);
+
+// The three results above for one program, computed once per distinct program
+// and shared: per-draw callers read them without copying.
+struct ShaderScalarFlow
+{
+	std::bitset<kShaderScalarLivenessSgprs>              live_at_entry;
+	std::vector<ShaderSgprEntrySources>                  entry_sources;
+	std::vector<std::bitset<kShaderScalarLivenessSgprs>> holding_entry_value;
+};
+[[nodiscard]] std::shared_ptr<const ShaderScalarFlow> ShaderScalarFlowOf(const ShaderCode& code);
 
 } // namespace Kyty::Libs::Graphics
 

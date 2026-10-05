@@ -3187,11 +3187,11 @@ static bool ImageResinfoHasZeroLod(const ShaderCode& code, uint32_t index)
 	for (uint32_t current = 0; current < index; ++current)
 	{
 		const auto& inst = instructions.At(current);
-		const auto name = Core::EnumName8(inst.type);
+		const auto name = ShaderInstructionTypeName(inst.type);
 		if (ShaderInstructionHasStaticBranchTarget(inst.type) || inst.type == ShaderInstructionType::SSetpcB64 ||
 		    inst.type == ShaderInstructionType::SSwappcB64 || inst.type == ShaderInstructionType::SEndpgm ||
 		    inst.type == ShaderInstructionType::Unknown || writes_exec(inst.dst) || writes_exec(inst.dst2) ||
-		    name.StartsWith("VCmpx") || name.ContainsStr("Saveexec")) { return false; }
+		    ShaderInstructionTypeStartsWith(inst.type, "VCmpx") || name.find("Saveexec") != std::string_view::npos) { return false; }
 		if (overlaps(inst.dst))
 		{
 			zero = inst.type == ShaderInstructionType::VMovB32 && inst.dst.size == 1 && inst.src_num == 1 &&

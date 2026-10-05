@@ -1,4 +1,3 @@
-#include "Kyty/Core/MagicEnum.h"
 #include "Emulator/Graphics/Shader.h"
 
 #include "Kyty/Core/Common.h"
@@ -1317,7 +1316,8 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 	{
 		return;
 	}
-	const auto     entry_values      = ShaderSgprsHoldingEntryValue(code);
+	const auto     flow              = ShaderScalarFlowOf(code);
+	const auto&    entry_values      = flow->holding_entry_value;
 	const uint32_t instruction_count = code.GetInstructions().Size();
 	for (uint32_t index = 0; index < instruction_count && index < entry_values.size(); ++index)
 	{
@@ -1363,8 +1363,8 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 // The V# operand of a MUBUF/MTBUF access, or nullptr.
 static const ShaderOperand* ShaderVectorBufferDescriptor(const ShaderInstruction& inst)
 {
-	const auto name = Core::EnumName8(inst.type);
-	if ((!name.StartsWith("Buffer") && !name.StartsWith("TBuffer")) || inst.src_num < 2 ||
+	if ((!ShaderInstructionTypeStartsWith(inst.type, "Buffer") && !ShaderInstructionTypeStartsWith(inst.type, "TBuffer")) ||
+	    inst.src_num < 2 ||
 	    inst.src[1].type != ShaderOperandType::Sgpr || inst.src[1].size != 4)
 	{
 		return nullptr;
@@ -1467,7 +1467,8 @@ void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindR
                                              int user_sgpr_num, int user_data_register_base)
 {
 	EXIT_IF(bind == nullptr);
-	const auto  sources      = ShaderSgprEntrySourcesAt(code);
+	const auto  flow         = ShaderScalarFlowOf(code);
+	const auto& sources      = flow->entry_sources;
 	const auto& instructions = code.GetInstructions();
 	for (uint32_t index = 0; index < instructions.Size() && index < sources.size(); ++index)
 	{
@@ -1480,9 +1481,11 @@ void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindR
 		{
 			continue;
 		}
-		const auto name   = Core::EnumName8(inst.type);
-		const bool writes = name.StartsWith("BufferStore") || name.StartsWith("TBufferStore") || name.StartsWith("BufferAtomic");
-		const bool typed  = name.StartsWith("TBuffer") || name.ContainsStr("Format");
+		const auto type   = inst.type;
+		const bool writes = ShaderInstructionTypeStartsWith(type, "BufferStore") || ShaderInstructionTypeStartsWith(type, "TBufferStore") ||
+		                    ShaderInstructionTypeStartsWith(type, "BufferAtomic");
+		const bool typed  = ShaderInstructionTypeStartsWith(type, "TBuffer") ||
+		                    ShaderInstructionTypeName(type).find("Format") != std::string_view::npos;
 		const int  resource = ShaderAddAssembledStorageResource(&bind->storage_buffers, words,
 		                                                        descriptor->register_id - user_data_register_base, writes, typed);
 		if (resource < 0)

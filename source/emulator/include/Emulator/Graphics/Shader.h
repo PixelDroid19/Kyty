@@ -15,6 +15,7 @@
 #include <bitset>
 #include <memory>
 #include <mutex>
+#include <string_view>
 #include <vector>
 #include <algorithm>
 #ifdef KYTY_EMU_ENABLED
@@ -585,6 +586,12 @@ enum class ShaderInstructionType : uint32_t
 
 	ZMax
 };
+
+// Mnemonic of an instruction type without allocating. Only ShaderDebug.cpp
+// declares the full enum range, so every name lookup must go through these
+// helpers rather than instantiating magic_enum in other translation units.
+[[nodiscard]] std::string_view ShaderInstructionTypeName(ShaderInstructionType type);
+[[nodiscard]] bool             ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix);
 
 namespace ShaderInstructionFormat {
 
