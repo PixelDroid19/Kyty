@@ -52,11 +52,30 @@ struct PthreadMutexPrivate
 	uint8_t         reserved[256];
 	String          name;
 	pthread_mutex_t p;
-	std::mutex      state_mutex;
-	pthread_t       owner {};
-	uint32_t        recursion_count = 0;
-	int             type            = MUTEX_TYPE_ERRORCHECK;
+	// Written only by the owning thread (after acquiring p, before releasing
+	// it). Any thread may compare owner with itself: the answer is exact
+	// because no other thread ever stores the caller's id.
+	std::atomic<pthread_t> owner {};
+	uint32_t               recursion_count = 0;
+	int                    type            = MUTEX_TYPE_ERRORCHECK;
 };
+
+inline bool PthreadMutexHeldByCaller(const PthreadMutexPrivate* mutex)
+{
+	return pthread_equal(mutex->owner.load(std::memory_order_relaxed), pthread_self()) != 0 && mutex->recursion_count != 0;
+}
+
+inline void PthreadMutexTakeOwnership(PthreadMutexPrivate* mutex)
+{
+	mutex->recursion_count = 1;
+	mutex->owner.store(pthread_self(), std::memory_order_relaxed);
+}
+
+inline void PthreadMutexDropOwnership(PthreadMutexPrivate* mutex)
+{
+	mutex->owner.store(pthread_t {}, std::memory_order_relaxed);
+	mutex->recursion_count = 0;
+}
 
 struct PthreadMutexattrPrivate
 {

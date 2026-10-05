@@ -525,14 +525,15 @@ int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr
 		attr = g_pthread_context->GetDefaultCondattr();
 	}
 
-	*cond = new PthreadCondPrivate {};
+	// Publish the handle only once the object is complete (see PthreadMutexInit).
+	auto* created     = new PthreadCondPrivate {};
+	created->name     = name;
+	created->clock_id = (*attr)->clock_id;
 
-	(*cond)->name     = name;
-	(*cond)->clock_id = (*attr)->clock_id;
+	int result = pthread_cond_init(&created->p, &(*attr)->p);
 
-	int result = pthread_cond_init(&(*cond)->p, &(*attr)->p);
-
-	KYTY_LOG_DEBUG("\tcond init: %s, %d\n", (*cond)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tcond init: %s, %d\n", created->name.C_Str(), result);
+	__atomic_store_n(cond, created, __ATOMIC_RELEASE);
 
 	switch (result)
 	{
@@ -603,9 +604,7 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
 
 static int pthread_cond_release_mutex_state(PthreadMutexPrivate* mutex)
 {
-	std::lock_guard lock(mutex->state_mutex);
-
-	if (mutex->recursion_count == 0 || pthread_equal(mutex->owner, pthread_self()) == 0)
+	if (!PthreadMutexHeldByCaller(mutex))
 	{
 		return EPERM;
 	}
@@ -614,16 +613,13 @@ static int pthread_cond_release_mutex_state(PthreadMutexPrivate* mutex)
 		return EINVAL;
 	}
 
-	mutex->owner           = {};
-	mutex->recursion_count = 0;
+	PthreadMutexDropOwnership(mutex);
 	return 0;
 }
 
 static void pthread_cond_restore_mutex_state(PthreadMutexPrivate* mutex)
 {
-	std::lock_guard lock(mutex->state_mutex);
-	mutex->owner           = pthread_self();
-	mutex->recursion_count = 1;
+	PthreadMutexTakeOwnership(mutex);
 }
 
 struct ResolvedCondWait

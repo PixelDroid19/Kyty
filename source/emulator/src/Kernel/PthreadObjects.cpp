@@ -12,20 +12,28 @@ namespace Kyty::Kernel {
 
 namespace GuestRuntimePort = ::Kyty::Emulator::GuestRuntimePort;
 
+// A statically-initialized pthread object holds a small sentinel, not a real
+// handle: 0 = default initializer, 1 = adaptive, etc. (matches the FreeBSD/Orbis
+// PTHREAD_*_INITIALIZER values). Once initialized, the slot holds a real heap
+// pointer (a large address). Treating the sentinel 1 as a pointer would fault.
+static bool IsCreatedHandle(const void* addr)
+{
+	return __atomic_load_n(static_cast<const uint64_t*>(addr), __ATOMIC_ACQUIRE) >= 0x100000;
+}
+
 void* PthreadStaticObjects::CreateObject(void* addr, PthreadStaticObject::Type type)
 {
-	Core::LockGuard lock(m_mutex);
-
-	// A statically-initialized pthread object holds a small sentinel, not a real
-	// handle: 0 = default initializer, 1 = adaptive, etc. (matches the FreeBSD/Orbis
-	// PTHREAD_*_INITIALIZER values). Once initialized, the slot holds a real heap
-	// pointer (a large address). Initialize on any sentinel; treat a large value as
-	// an already-created object. Treating the sentinel 1 as a pointer would fault.
-	if (addr == nullptr)
+	// Every lock/unlock of a guest object passes here: an object that already
+	// exists is returned without the registry lock (the handle is published
+	// only after the object is complete).
+	if (addr == nullptr || IsCreatedHandle(addr))
 	{
 		return addr;
 	}
-	if (uint64_t v = *static_cast<uint64_t*>(addr); v >= 0x100000)
+
+	Core::LockGuard lock(m_mutex);
+
+	if (IsCreatedHandle(addr))
 	{
 		return addr;
 	}
