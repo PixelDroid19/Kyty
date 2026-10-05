@@ -261,12 +261,28 @@ private:
 	// allocations may share the range. With memory_type, they must also share
 	// one memory type, which is returned.
 	[[nodiscard]] bool IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len, int* memory_type = nullptr) const;
+	// Live views never overlap, so the one holding an address is the nearest
+	// live view at or below it. Titles keep thousands of views; per-address
+	// queries search an index ordered by guest address instead of the list.
+	[[nodiscard]] const MappedBlock* FindLiveViewUnlocked(uint64_t vaddr);
+	void                             AddMappedUnlocked(const MappedBlock& block)
+	{
+		m_mapped.Add(block);
+		m_mapped_order_stale = true;
+	}
+	void RemoveMappedAtUnlocked(uint32_t index)
+	{
+		m_mapped.RemoveAt(index);
+		m_mapped_order_stale = true;
+	}
 
 	// Gen5 releases the physical reservation independently from its virtual mapping.
 	// KernelMunmap owns the mapping and host/GPU cleanup lifecycle.
 	// SharedBacking maps keep re-used physical ranges byte-coherent across aliases.
 	Vector<AllocatedBlock>             m_allocated;
 	Vector<MappedBlock>                m_mapped;
+	std::vector<uint32_t>              m_mapped_order; // m_mapped indices by guest address
+	bool                               m_mapped_order_stale = false;
 	std::vector<MemoryProtectionBlock> m_protections;
 	Core::Mutex                        m_mutex;
 	VirtualMemory::SharedBacking*      m_backing = nullptr;
@@ -1107,7 +1123,7 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	b.mode             = mode;
 	b.memory_type      = memory_type;
 	b.gpu_cleanup_mode = gpu_mode;
-	m_mapped.Add(b);
+	AddMappedUnlocked(b);
 	m_protections.push_back({map_vaddr, map_size, prot, mode});
 
 	return map_vaddr;
@@ -1181,7 +1197,7 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 				b.unmap_pending = false;
 				return false;
 			}
-			m_mapped.RemoveAt(index);
+			RemoveMappedAtUnlocked(index);
 			m_protections.erase(std::remove_if(m_protections.begin(), m_protections.end(), [vaddr, size](const MemoryProtectionBlock& block)
 			                                   { return block.address >= vaddr && block.address - vaddr < size; }),
 			                    m_protections.end());
@@ -1275,7 +1291,7 @@ bool PhysicalMemory::CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vad
 			return false;
 		}
 		const MappedBlock original = b;
-		m_mapped.RemoveAt(index);
+		RemoveMappedAtUnlocked(index);
 		const uint64_t cut_end = cut_vaddr + cut_size;
 		const uint64_t end     = vaddr + size;
 		if (cut_vaddr > vaddr)
@@ -1283,7 +1299,7 @@ bool PhysicalMemory::CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vad
 			MappedBlock left   = original;
 			left.map_size      = cut_vaddr - vaddr;
 			left.unmap_pending = false;
-			m_mapped.Add(left);
+			AddMappedUnlocked(left);
 		}
 		if (cut_end < end)
 		{
@@ -1292,7 +1308,7 @@ bool PhysicalMemory::CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vad
 			right.map_size      = end - cut_end;
 			right.phys_addr     = original.phys_addr + (cut_end - vaddr);
 			right.unmap_pending = false;
-			m_mapped.Add(right);
+			AddMappedUnlocked(right);
 		}
 		erase_protection_span(&m_protections, cut_vaddr, cut_end);
 		const uint64_t cut_phys    = original.phys_addr + (cut_vaddr - vaddr);
@@ -1345,7 +1361,7 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 			return false;
 		}
 
-		m_mapped.RemoveAt(index);
+		RemoveMappedAtUnlocked(index);
 		const uint64_t prefix_size = vaddr - mapping.map_vaddr;
 		const uint64_t end         = vaddr + size;
 		const uint64_t mapping_end = mapping.map_vaddr + mapping.map_size;
@@ -1353,7 +1369,7 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 		{
 			auto prefix     = mapping;
 			prefix.map_size = prefix_size;
-			m_mapped.Add(prefix);
+			AddMappedUnlocked(prefix);
 		}
 		if (end < mapping_end)
 		{
@@ -1361,7 +1377,7 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 			suffix.phys_addr += end - mapping.map_vaddr;
 			suffix.map_vaddr = end;
 			suffix.map_size  = mapping_end - end;
-			m_mapped.Add(suffix);
+			AddMappedUnlocked(suffix);
 		}
 		remove_protection_blocks(&m_protections, vaddr, size);
 		return true;
@@ -1384,7 +1400,13 @@ uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size)
 	{
 		return 0;
 	}
-	Core::LockGuard lock(m_mutex);
+	Core::LockGuard    lock(m_mutex);
+	const MappedBlock* live = FindLiveViewUnlocked(vaddr);
+	if (live != nullptr && size <= live->map_size && vaddr - live->map_vaddr <= live->map_size - size)
+	{
+		return VirtualMemory::MapSharedAligned(m_backing, 0, live->phys_addr + (vaddr - live->map_vaddr), size,
+		                                       VirtualMemory::Mode::ReadWrite, VirtualMemory::GetPageSize());
+	}
 	for (const auto& mapping: m_mapped)
 	{
 		if (vaddr < mapping.map_vaddr || size > mapping.map_size || vaddr - mapping.map_vaddr > mapping.map_size - size)
@@ -1406,22 +1428,44 @@ bool PhysicalMemory::IsRangeUnpopulated(uint64_t vaddr, uint64_t size)
 	{
 		return false;
 	}
-	Core::LockGuard lock(m_mutex);
-	for (const auto& mapping: m_mapped)
+	Core::LockGuard    lock(m_mutex);
+	const MappedBlock* mapping = FindLiveViewUnlocked(vaddr);
+	if (mapping == nullptr || size > mapping->map_size || vaddr - mapping->map_vaddr > mapping->map_size - size)
 	{
-		if (mapping.unmap_pending || vaddr < mapping.map_vaddr || size > mapping.map_size ||
-		    vaddr - mapping.map_vaddr > mapping.map_size - size)
-		{
-			continue;
-		}
-		const uint64_t delta = vaddr - mapping.map_vaddr;
-		if (delta > UINT64_MAX - mapping.phys_addr)
-		{
-			return false;
-		}
-		return VirtualMemory::IsSharedBackingRangeUnpopulated(m_backing, mapping.phys_addr + delta, size);
+		return false;
 	}
-	return false;
+	const uint64_t delta = vaddr - mapping->map_vaddr;
+	if (delta > UINT64_MAX - mapping->phys_addr)
+	{
+		return false;
+	}
+	return VirtualMemory::IsSharedBackingRangeUnpopulated(m_backing, mapping->phys_addr + delta, size);
+}
+
+const PhysicalMemory::MappedBlock* PhysicalMemory::FindLiveViewUnlocked(uint64_t vaddr)
+{
+	if (m_mapped_order_stale)
+	{
+		m_mapped_order.resize(m_mapped.Size());
+		for (uint32_t index = 0; index < m_mapped.Size(); index++)
+		{
+			m_mapped_order[index] = index;
+		}
+		std::stable_sort(m_mapped_order.begin(), m_mapped_order.end(),
+		                 [this](uint32_t a, uint32_t b) { return m_mapped[a].map_vaddr < m_mapped[b].map_vaddr; });
+		m_mapped_order_stale = false;
+	}
+	auto next = std::upper_bound(m_mapped_order.begin(), m_mapped_order.end(), vaddr,
+	                             [this](uint64_t address, uint32_t index) { return address < m_mapped[index].map_vaddr; });
+	while (next != m_mapped_order.begin())
+	{
+		const MappedBlock& mapping = m_mapped[*--next];
+		if (!mapping.unmap_pending)
+		{
+			return vaddr - mapping.map_vaddr < mapping.map_size ? &mapping : nullptr;
+		}
+	}
+	return nullptr;
 }
 
 bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)

@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -48,6 +49,7 @@ struct Range
 	std::vector<Chunk>   chunks;
 	std::vector<uint8_t> imported; // one byte per page
 	bool                 physical_backing = false;
+	uint32_t             tracked_chunks   = 0;
 };
 
 struct Table
@@ -62,6 +64,10 @@ struct Registry
 {
 	std::mutex                mutex;
 	std::map<uint64_t, Range> ranges;
+	// Titles map thousands of ranges. Preparation revisits flexible ranges and
+	// refreshes snapshots every time, so it walks these subsets, not every range.
+	std::set<uint64_t>        flexible;
+	std::set<uint64_t>        tracked;
 	bool                      dirty = true;
 	// Physical-backing population at the last complete scan of physical ranges.
 	Core::VirtualMemory::SharedBackingPopulation scanned_population;
@@ -303,6 +309,7 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 			return false;
 		}
 		range->chunks.push_back(chunk);
+		range->tracked_chunks += chunk.tracked ? 1u : 0u;
 		std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(first + page),
 		          range->imported.begin() + static_cast<std::ptrdiff_t>(first + end), 1);
 		*changed = true;
@@ -414,6 +421,14 @@ void GuestDeviceAddressRegisterRange(uint64_t vaddr, uint64_t size, bool physica
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
 	registry.ranges[vaddr]      = {size, {}, {}, physical_backing};
+	registry.tracked.erase(vaddr);
+	if (physical_backing)
+	{
+		registry.flexible.erase(vaddr);
+	} else
+	{
+		registry.flexible.insert(vaddr);
+	}
 	registry.merged             = nullptr;
 	registry.dirty              = true;
 	registry.population_scanned = false;
@@ -434,6 +449,8 @@ void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vad
 			DestroyChunk(ctx->device, chunk);
 		}
 		range.chunks.clear();
+		range.tracked_chunks = 0;
+		registry.tracked.erase(base);
 		range.imported.assign(range.imported.size(), 0);
 		registry.dirty              = true;
 		registry.population_scanned = false;
@@ -456,6 +473,8 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		{
 			DestroyChunk(ctx->device, chunk);
 		}
+		registry.flexible.erase(it->first);
+		registry.tracked.erase(it->first);
 		it              = registry.ranges.erase(it);
 		registry.dirty  = true;
 		registry.merged = nullptr;
@@ -587,22 +606,46 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 	// per preparation, not once per range.
 	{
 		const DebugStatsScopedTimer residency_timer(DebugStatsRecordGuestAddressResidency);
-		for (auto& [base, range]: registry.ranges)
+		const auto                  revisit = [&](uint64_t base, Range* range)
 		{
 			bool changed = false;
-			if ((physical || !range.physical_backing) && !ImportResident(ctx, base, &range, &changed))
+			if (!ImportResident(ctx, base, range, &changed))
 			{
 				return false;
 			}
 			registry.dirty = registry.dirty || changed;
+			if (range->tracked_chunks != 0)
+			{
+				registry.tracked.insert(base);
+			}
+			return true;
+		};
+		if (physical)
+		{
+			for (auto& [base, range]: registry.ranges)
+			{
+				if (!revisit(base, &range))
+				{
+					return false;
+				}
+			}
+		} else
+		{
+			for (const uint64_t base: registry.flexible)
+			{
+				if (!revisit(base, &registry.ranges.at(base)))
+				{
+					return false;
+				}
+			}
 		}
 	}
 	// Refresh snapshots the CPU wrote since they were taken; the imported
 	// host memory is coherent, so the device sees the refresh directly.
 	const DebugStatsScopedTimer refresh_timer(DebugStatsRecordGuestAddressRefresh);
-	for (auto& [base, range]: registry.ranges)
+	for (const uint64_t base: registry.tracked)
 	{
-		for (auto& chunk: range.chunks)
+		for (auto& chunk: registry.ranges.at(base).chunks)
 		{
 			if (chunk.tracked && GpuDirtyPageTracker::Instance().ChangedSince(chunk.guest, chunk.span, chunk.generation) &&
 			    !SnapshotGuest(chunk.copy, chunk.guest, chunk.span, &chunk.generation))
