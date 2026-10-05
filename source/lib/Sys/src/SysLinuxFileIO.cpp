@@ -338,11 +338,10 @@ uint64_t sys_file_size(sys_file_t& f)
 
 	if (f.type == SYS_FILE_FILE)
 	{
-		uint32_t pos  = ftell(f.f);
-		result        = fseek(f.f, 0, SEEK_END);
-		uint32_t size = ftell(f.f);
-		result        = fseek(f.f, pos, SEEK_SET);
-		return size;
+		// 64-bit size from the descriptor; flush first so buffered writes count.
+		struct stat st {};
+		result = (f.f != nullptr ? fflush(f.f) : -1);
+		return f.f != nullptr && ::fstat(fileno(f.f), &st) == 0 ? static_cast<uint64_t>(st.st_size) : 0;
 	}
 
 	if (f.type == SYS_FILE_MEMORY_STAT || f.type == SYS_FILE_MEMORY_DYN)
@@ -355,10 +354,8 @@ uint64_t sys_file_size(sys_file_t& f)
 
 uint64_t sys_file_size(const String& file_name)
 {
-	sys_file_t* f    = sys_file_open_r(file_name);
-	uint64_t    size = sys_file_size(*f);
-	sys_file_close(f);
-	return size;
+	struct stat st {};
+	return ::stat(get_internal_name(file_name).utf8_str().GetData(), &st) == 0 ? static_cast<uint64_t>(st.st_size) : 0;
 }
 
 bool sys_file_truncate(sys_file_t& f, uint64_t size)
