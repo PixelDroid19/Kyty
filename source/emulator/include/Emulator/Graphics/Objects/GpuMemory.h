@@ -320,6 +320,17 @@ inline bool GpuMemoryAllowsOverwrittenStorageTextureParent(GpuMemoryObjectType e
 	       relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
+// Incoming StorageTexture covering a smaller sampled Texture (a texture whose
+// levels a compute pass writes after one level was sampled). A sampled Texture
+// only caches guest bytes, so when it is the only overlapping object the guest
+// memory is current: the storage image seeds from it and both views are linked.
+inline bool GpuMemoryAllowsStorageTextureOverSampledTexture(GpuMemoryObjectType existing_type, GpuMemoryOverlapType relation,
+                                                           GpuMemoryObjectType incoming_type)
+{
+	return existing_type == GpuMemoryObjectType::Texture && relation == GpuMemoryOverlapType::IsContainedWithin &&
+	       incoming_type == GpuMemoryObjectType::StorageTexture;
+}
+
 // Incoming StorageTexture fully inside a live RenderTexture allocation.
 // Captured worldmap load: a 240x135 fmt-64 storage view (0x43800) inside a
 // 2432x1368 R16G16B16A16 target. The guest reuses part of the target's tiled

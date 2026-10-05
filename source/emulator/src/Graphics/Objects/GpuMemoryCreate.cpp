@@ -1180,6 +1180,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// The first dispatch overwrites the entire new image. Keep the
 				// previous GPU surfaces alive for independent reads in that dispatch.
 				overlap = true;
+			} else if (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type))
+			{
+				overlap = true;
 			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
 			{
 				// Texture↔StorageBuffer partial shares and Texture↔StorageTexture
