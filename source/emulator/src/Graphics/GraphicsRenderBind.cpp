@@ -1711,6 +1711,28 @@ bool DecodeDrawMaterialTraceVertexAttribute(uint64_t address, uint32_t format, f
 	return false;
 }
 
+// One-row 16-bit float textures are lookup curves the title fills at run time.
+// Report what guest memory holds at bind, so an empty curve can be told apart
+// from a stale host copy.
+static void EmitDrawMaterialTraceCurve(FILE* out, uint32_t ordinal, const DrawMaterialTraceTexture& texture)
+{
+	constexpr uint32_t kHalfFormat = 13u;
+	if (static_cast<uint32_t>(texture.guest.Format()) != kHalfFormat || texture.guest_height != 1u || texture.guest_width > 256u ||
+	    static_cast<uint32_t>(texture.guest.TileMode()) != 5u || texture.image == nullptr ||
+	    !Core::VirtualMemory::IsRangeReadable(texture.guest_addr, texture.image->guest_size))
+	{
+		return;
+	}
+	std::vector<uint16_t> row(texture.guest_pitch);
+	TileConvertStandard4KBToLinear(row.data(), reinterpret_cast<const void*>(texture.guest_addr), texture.guest_width, 1u,
+	                               texture.guest_pitch, sizeof(uint16_t));
+	const auto nonzero = std::count_if(row.begin(), row.begin() + texture.guest_width, [](uint16_t v) { return v != 0u; });
+	const uint32_t last = texture.guest_width - 1u;
+	std::fprintf(out, "KYTY_TRACE_CURVE ordinal=%u slot=%d width=%u nonzero=%u first=%g mid=%g last=%g\n", ordinal, texture.slot,
+	             texture.guest_width, static_cast<uint32_t>(nonzero), DrawMaterialTraceHalfToFloat(row[0]),
+	             DrawMaterialTraceHalfToFloat(row[last / 2u]), DrawMaterialTraceHalfToFloat(row[last]));
+}
+
 static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSession& session, const ShaderBindResources* bind)
 {
 	if (session.draw == nullptr)
@@ -2083,6 +2105,7 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 			    static_cast<uint32_t>(texture.sampler.MipFilter()), static_cast<uint32_t>(texture.guest.Format()),
 			    texture.view);
 		}
+		EmitDrawMaterialTraceCurve(out, session.ordinal, texture);
 		if (static_cast<uint32_t>(texture.guest.Format()) == 56u && texture.guest_width <= 16u && texture.guest_height <= 16u &&
 		    texture.guest_addr != 0u)
 		{
