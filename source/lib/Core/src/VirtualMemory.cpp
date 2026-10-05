@@ -31,7 +31,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
 #include <mutex>
+#include <thread>
 
 #ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
 #include <csignal>
@@ -651,7 +653,7 @@ static void kyty_sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 	auto*    uc  = static_cast<ucontext_t*>(ucontext);
 	uint64_t rip = uc_get_rip(uc);
 	static volatile sig_atomic_t n = 0;
-	if (n++ < 200)
+	if (n++ < 1000)
 	{
 		const char* tag = IsGuestCodeAddress(rip)                              ? "PROF-GUEST"
 		                  : (rip >= 0x100000000ull && rip < 0x110000000ull) ? "PROF-FC"
@@ -1748,6 +1750,21 @@ bool ExceptionHandler::InstallVectored(handler_func_t func)
 		sigemptyset(&sat.sa_mask);
 		sigaction(SIGTRAP, &sat, nullptr);
 #endif
+
+		// Diagnostic only: KYTY_GUEST_PROFILE_AFTER=<seconds> starts sampling the
+		// instruction pointer of running threads then, to locate a spinning loop
+		// in a frozen title without an external profiler.
+		if (const char* after = std::getenv("KYTY_GUEST_PROFILE_AFTER"); after != nullptr && after[0] != '\0')
+		{
+			const auto seconds = std::strtoul(after, nullptr, 10);
+			std::thread(
+			    [seconds]
+			    {
+				    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+				    StartGuestProfiler();
+			    })
+			    .detach();
+		}
 
 		return true;
 	}
