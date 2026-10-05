@@ -197,7 +197,7 @@ public:
 	{
 		for (const auto& mapping: m_mapped)
 		{
-			(void)VirtualMemory::Free(mapping.map_vaddr);
+			(void)VirtualMemory::FreeRange(mapping.map_vaddr, mapping.map_size);
 		}
 		VirtualMemory::DestroySharedBacking(m_backing);
 	}
@@ -844,12 +844,56 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 	}
 	m_allocated = std::move(remaining);
 
-	for (auto& mapped: m_mapped)
+	// Only the pages whose memory was released lose their backing. A view the
+	// release covers in part is split, so its other pages stay a live mapping
+	// of memory that is still allocated: a guest that shrinks a buffer by
+	// releasing its tail and maps new memory over that tail keeps its head.
+	std::vector<uint32_t> partial;
+	for (uint32_t index = 0; index < m_mapped.Size(); index++)
 	{
-		if (mapped.phys_addr < end && mapped.phys_addr + mapped.map_size > start)
+		auto& mapped = m_mapped[index];
+		if (mapped.phys_addr >= end || mapped.phys_addr + mapped.map_size <= start)
+		{
+			continue;
+		}
+		const bool covered = mapped.phys_addr >= start && mapped.phys_addr + mapped.map_size <= end;
+		if (covered || mapped.unmap_pending || mapped.physical_released)
 		{
 			mapped.physical_released = true;
+			continue;
 		}
+		partial.push_back(index);
+	}
+	std::vector<MappedBlock> pieces;
+	for (auto index = partial.rbegin(); index != partial.rend(); ++index)
+	{
+		const MappedBlock original = m_mapped[*index];
+		RemoveMappedAtUnlocked(*index);
+		const uint64_t original_end = original.phys_addr + original.map_size;
+		const uint64_t cut_begin    = std::max(original.phys_addr, start);
+		const uint64_t cut_end      = std::min(original_end, end);
+		const auto     piece        = [&](uint64_t phys_begin, uint64_t phys_end, bool released)
+		{
+			MappedBlock part       = original;
+			part.phys_addr         = phys_begin;
+			part.map_vaddr         = original.map_vaddr + (phys_begin - original.phys_addr);
+			part.map_size          = phys_end - phys_begin;
+			part.physical_released = released;
+			pieces.push_back(part);
+		};
+		if (original.phys_addr < cut_begin)
+		{
+			piece(original.phys_addr, cut_begin, false);
+		}
+		piece(cut_begin, cut_end, true);
+		if (cut_end < original_end)
+		{
+			piece(cut_end, original_end, false);
+		}
+	}
+	for (const auto& part: pieces)
+	{
+		AddMappedUnlocked(part);
 	}
 
 	const bool still_mapped = std::any_of(m_mapped.begin(), m_mapped.end(), [start, end](const MappedBlock& mapped)
@@ -1192,15 +1236,17 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 		{
 			const uint64_t phys_addr = b.phys_addr;
 			const uint64_t map_size  = b.map_size;
-			if (!VirtualMemory::Free(vaddr))
+			// A view may be one piece of a host mapping that a partial physical
+			// release split; free exactly its pages.
+			if (!VirtualMemory::FreeRange(vaddr, size))
 			{
 				b.unmap_pending = false;
 				return false;
 			}
 			RemoveMappedAtUnlocked(index);
-			m_protections.erase(std::remove_if(m_protections.begin(), m_protections.end(), [vaddr, size](const MemoryProtectionBlock& block)
-			                                   { return block.address >= vaddr && block.address - vaddr < size; }),
-			                    m_protections.end());
+			// Trim, not only drop, the protection blocks: one recorded for a whole
+			// mapping still covers its other pieces when a piece goes alone.
+			remove_protection_blocks(&m_protections, vaddr, size);
 
 			// If the physical reservation was already released (Gen5 unmap after
 			// Release) and no alias maps remain, drop the host pages.
@@ -1513,13 +1559,18 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                       std::find_if(m_protections.begin(), m_protections.end(), [vaddr](const MemoryProtectionBlock& block)
 			                                    { return vaddr >= block.address && vaddr - block.address < block.size; });
 			                   const bool has_protection = protection != m_protections.end();
+			                   // A region never extends past its mapping, whatever protection block covers it.
+			                   const uint64_t region_begin = has_protection ? std::max(protection->address, b.map_vaddr) : b.map_vaddr;
+			                   const uint64_t region_end   = has_protection
+			                                                     ? std::min(protection->address + protection->size, b.map_vaddr + b.map_size)
+			                                                     : b.map_vaddr + b.map_size;
 			                   if (base_addr != nullptr)
 			                   {
-				                   *base_addr = has_protection ? protection->address : b.map_vaddr;
+				                   *base_addr = region_begin;
 			                   }
 			                   if (len != nullptr)
 			                   {
-				                   *len = has_protection ? protection->size : b.map_size;
+				                   *len = region_end - region_begin;
 			                   }
 			                   if (prot != nullptr)
 			                   {
@@ -1535,7 +1586,7 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                   }
 			                   if (phys_addr != nullptr)
 			                   {
-				                   *phys_addr = b.phys_addr + ((has_protection ? protection->address : b.map_vaddr) - b.map_vaddr);
+				                   *phys_addr = b.phys_addr + (region_begin - b.map_vaddr);
 			                   }
 			                   if (memory_type != nullptr)
 			                   {
@@ -1680,13 +1731,18 @@ bool FlexibleMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                       std::find_if(m_protections.begin(), m_protections.end(), [vaddr](const MemoryProtectionBlock& block)
 			                                    { return vaddr >= block.address && vaddr - block.address < block.size; });
 			                   const bool has_protection = protection != m_protections.end();
+			                   // A region never extends past its mapping, whatever protection block covers it.
+			                   const uint64_t region_begin = has_protection ? std::max(protection->address, b.map_vaddr) : b.map_vaddr;
+			                   const uint64_t region_end   = has_protection
+			                                                     ? std::min(protection->address + protection->size, b.map_vaddr + b.map_size)
+			                                                     : b.map_vaddr + b.map_size;
 			                   if (base_addr != nullptr)
 			                   {
-				                   *base_addr = has_protection ? protection->address : b.map_vaddr;
+				                   *base_addr = region_begin;
 			                   }
 			                   if (len != nullptr)
 			                   {
-				                   *len = has_protection ? protection->size : b.map_size;
+				                   *len = region_end - region_begin;
 			                   }
 			                   if (prot != nullptr)
 			                   {
