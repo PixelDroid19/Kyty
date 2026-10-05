@@ -1891,6 +1891,18 @@ namespace EventQueue    = Kernel::EventQueue;
 namespace EventFlag     = Kernel::EventFlag;
 namespace Semaphore     = Kernel::Semaphore;
 
+// The APR entry points are raw system calls: a failure returns -1 with errno
+// set, and the SDK wrapper linked into each title rebuilds the
+// SCE_KERNEL_ERROR_* code from errno (a zero errno reads as success).
+template <auto Func>
+struct AprSyscall;
+
+template <typename... Args, int (*Func)(Args...)>
+struct AprSyscall<Func>
+{
+	static int KYTY_SYSV_ABI Call(Args... args) { return POSIX_N_CALL(Func(args...)); }
+};
+
 LIB_DEFINE(InitLibKernel_1_FS)
 {
 	LIB_FUNC("1G3lF1Gg1k8", FileSystem::KernelOpen);
@@ -1910,21 +1922,21 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
 	LIB_FUNC("naInUjYt3so", FileSystem::KernelRmdir);
-	// Gen5 APR path resolution / submit / wait (libkernel APR family).
-	LIB_FUNC("gEpBkcwxUjw", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes);
-	LIB_FUNC("WT-5NKy42fw", FileSystem::KernelAprResolveFilepathsToIds);
-	LIB_FUNC("i3HWvW35jao", FileSystem::KernelAprResolveFilepathsWithPrefixToIds);
-	LIB_FUNC("w5fcCG+t31g", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes);
-	LIB_FUNC("eYAh2vlCY-U", FileSystem::KernelAprResolveFilepathsToIdsForEach);
-	LIB_FUNC("QzB4O+bJQyA", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizesForEach);
-	LIB_FUNC("VB-BtuIW8Xc", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsForEach);
-	LIB_FUNC("C+Khtbbx2g8", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach);
-	LIB_FUNC("ApkYaHb8Sek", FileSystem::KernelAprGetFileStat);
-	LIB_FUNC("WvEu7yl3Ivg", FileSystem::KernelAprGetFileSize);
-	LIB_FUNC("eE4Szl8sil8", FileSystem::KernelAprSubmitCommandBuffer);
-	LIB_FUNC("ASoW5WE-UPo", FileSystem::KernelAprSubmitCommandBufferAndGetResult);
-	LIB_FUNC("qvMUCyyaCSI", FileSystem::KernelAprSubmitCommandBufferAndGetId);
-	LIB_FUNC("rqwFKI4PAiM", FileSystem::KernelAprWaitCommandBuffer);
+	// Gen5 APR path resolution / submit / wait (raw system calls, see AprSyscall).
+	LIB_FUNC("gEpBkcwxUjw", AprSyscall<FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes>::Call);
+	LIB_FUNC("WT-5NKy42fw", AprSyscall<FileSystem::KernelAprResolveFilepathsToIds>::Call);
+	LIB_FUNC("i3HWvW35jao", AprSyscall<FileSystem::KernelAprResolveFilepathsWithPrefixToIds>::Call);
+	LIB_FUNC("w5fcCG+t31g", AprSyscall<FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes>::Call);
+	LIB_FUNC("eYAh2vlCY-U", AprSyscall<FileSystem::KernelAprResolveFilepathsToIdsForEach>::Call);
+	LIB_FUNC("QzB4O+bJQyA", AprSyscall<FileSystem::KernelAprResolveFilepathsToIdsAndFileSizesForEach>::Call);
+	LIB_FUNC("VB-BtuIW8Xc", AprSyscall<FileSystem::KernelAprResolveFilepathsWithPrefixToIdsForEach>::Call);
+	LIB_FUNC("C+Khtbbx2g8", AprSyscall<FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach>::Call);
+	LIB_FUNC("ApkYaHb8Sek", AprSyscall<FileSystem::KernelAprGetFileStat>::Call);
+	LIB_FUNC("WvEu7yl3Ivg", AprSyscall<FileSystem::KernelAprGetFileSize>::Call);
+	LIB_FUNC("eE4Szl8sil8", AprSyscall<FileSystem::KernelAprSubmitCommandBuffer>::Call);
+	LIB_FUNC("ASoW5WE-UPo", AprSyscall<FileSystem::KernelAprSubmitCommandBufferAndGetResult>::Call);
+	LIB_FUNC("qvMUCyyaCSI", AprSyscall<FileSystem::KernelAprSubmitCommandBufferAndGetId>::Call);
+	LIB_FUNC("rqwFKI4PAiM", AprSyscall<FileSystem::KernelAprWaitCommandBuffer>::Call);
 
 	// Gen5 kernel mode / fd flush.
 	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
