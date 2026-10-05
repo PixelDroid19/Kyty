@@ -2425,6 +2425,11 @@ void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count);
 [[nodiscard]] bool    ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info,
 	                                             int32_t* resolved_offset, int32_t vertex_offset_add = 0);
+// Records a host vertex stream starts after the guest buffer base. An embedded
+// fetch adds a user-data base vertex to the vertex index in the shader itself
+// (v_sad_u32/v_add of the index VGPR); host attribute fetches index by
+// gl_VertexIndex, so the stream is shifted instead of the vertex index.
+[[nodiscard]] uint32_t ShaderVertexStreamRecordOffset(const ShaderVertexInputInfo& input_info);
 [[nodiscard]] bool    ShaderPreventsNoopPixelElision(const ShaderCode& code);
 [[nodiscard]] bool    ShaderHasOnlyNullPixelExports(const ShaderCode& code);
 ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);

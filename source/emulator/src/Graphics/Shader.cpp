@@ -3265,6 +3265,11 @@ bool ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInf
 	return true;
 }
 
+uint32_t ShaderVertexStreamRecordOffset(const ShaderVertexInputInfo& input_info)
+{
+	return !input_info.fetch_external && input_info.vertex_offset_sgpr >= 0 ? input_info.vertex_offset_value : 0u;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& info)
 {

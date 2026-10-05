@@ -2582,11 +2582,16 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 {
 	EXIT_IF(buffer == nullptr || vk_buffer == nullptr || g_render_ctx == nullptr);
 
+	const uint32_t stream_offset = ShaderVertexStreamRecordOffset(input);
 	for (int i = 0; i < input.buffers_num; i++)
 	{
 		const auto& buffer_info = input.buffers[i];
-		const uint64_t address  = buffer_info.addr;
-		const uint32_t records  = required_records == 0 ? buffer_info.num_records : std::min(buffer_info.num_records, required_records);
+		// A base beyond the declared records cannot shift the stream; the fetch
+		// then reads from the buffer base as before.
+		const uint32_t shift     = stream_offset < buffer_info.num_records ? stream_offset : 0u;
+		const uint64_t address   = buffer_info.addr + static_cast<uint64_t>(shift) * buffer_info.stride;
+		const uint32_t available = buffer_info.num_records - shift;
+		const uint32_t records   = required_records == 0 ? available : std::min(available, required_records);
 		const uint64_t size     = ShaderBufferByteSize(buffer_info.stride, records);
 
 		auto* vertices = TryUploadTransientReadOnlyBuffer(buffer, address, size, true, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
