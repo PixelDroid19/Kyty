@@ -4294,6 +4294,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("rtV7-jWC6Yg", LibC::c_log);
 	LIB_FUNC("9LCjpWyQ5Zc", LibC::c_pow);
 	LIB_FUNC("H+8UBOwfScI", LibC::c_powidf2);
+	LIB_FUNC("EiMkgQsOfU0", LibC::c_powisf2);
 	LIB_FUNC("pKwslsMUmSk", LibC::c_fmod);
 	// Gen5 libc_v1 double rounding and absolute-value exports. Float variants
 	// are registered below.

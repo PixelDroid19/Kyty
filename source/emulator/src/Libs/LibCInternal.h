@@ -166,6 +166,7 @@ KYTY_SYSV_ABI double c_exp(double x);
 KYTY_SYSV_ABI double c_log(double x);
 KYTY_SYSV_ABI double c_pow(double x, double y);
 KYTY_SYSV_ABI double c_powidf2(double x, int y);
+KYTY_SYSV_ABI float  c_powisf2(float x, int y);
 KYTY_SYSV_ABI double c_fmod(double x, double y);
 KYTY_SYSV_ABI double c_ceil(double x);
 KYTY_SYSV_ABI double c_floor(double x);

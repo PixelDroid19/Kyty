@@ -55,9 +55,37 @@ KYTY_SYSV_ABI double c_pow(double x, double y)
 {
 	return ::pow(x, y);
 }
+// Compiler runtime integer powers: square-and-multiply over the exponent's
+// magnitude, then one reciprocal for a negative exponent, as the guest's own
+// runtime computes them (rounding differs from pow()).
+template <typename T>
+static T powi_by_squaring(T base, int exponent)
+{
+	const bool reciprocal = exponent < 0;
+	T          result     = 1;
+	for (;;)
+	{
+		if ((exponent & 1) != 0)
+		{
+			result *= base;
+		}
+		exponent /= 2;
+		if (exponent == 0)
+		{
+			break;
+		}
+		base *= base;
+	}
+	return reciprocal ? 1 / result : result;
+}
+
 KYTY_SYSV_ABI double c_powidf2(double x, int y)
 {
-	return ::pow(x, y);
+	return powi_by_squaring(x, y);
+}
+KYTY_SYSV_ABI float c_powisf2(float x, int y)
+{
+	return powi_by_squaring(x, y);
 }
 KYTY_SYSV_ABI double c_fmod(double x, double y)
 {
