@@ -586,23 +586,20 @@ inline bool GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType existing
 	{
 		return relation == GpuMemoryOverlapType::Equals;
 	}
-	// A render target allocation can cover an index view that was bound
-	// earlier. Preserve both typed views for the observed full containment;
-	// partial/index-equal forms remain unsupported until captured.
-	if (existing_type == GpuMemoryObjectType::IndexBuffer)
+	// A render target allocation can reuse memory an index view was bound to
+	// earlier, wholly or partly (a 120x67 target over two index views, one of
+	// them crossing its end). Both are read-only fetch caches, linked like the
+	// vertex views below.
+	if (existing_type == GpuMemoryObjectType::IndexBuffer || existing_type == GpuMemoryObjectType::VertexBuffer)
 	{
-		return relation == GpuMemoryOverlapType::IsContainedWithin;
+		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
+		       relation == GpuMemoryOverlapType::Contains;
 	}
 	if (existing_type == GpuMemoryObjectType::StorageBuffer || existing_type == GpuMemoryObjectType::RenderTexture ||
 	    existing_type == GpuMemoryObjectType::Texture || existing_type == GpuMemoryObjectType::StorageTexture)
 	{
 		return relation == GpuMemoryOverlapType::Contains || relation == GpuMemoryOverlapType::Crosses ||
 		       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
-	}
-	if (existing_type == GpuMemoryObjectType::VertexBuffer)
-	{
-		return relation == GpuMemoryOverlapType::Crosses || relation == GpuMemoryOverlapType::IsContainedWithin ||
-		       relation == GpuMemoryOverlapType::Contains;
 	}
 	return false;
 }
