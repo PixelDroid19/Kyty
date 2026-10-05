@@ -3464,6 +3464,8 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 			memset(output.ether_addr.data, 0, sizeof(output.ether_addr.data));
 			output_size = sizeof(output.ether_addr);
 			break;
+		// LINK: the cable or radio link, consistent with the disconnected NetCtl state.
+		case 4: output.link = 0; output_size = sizeof(output.link); break;
 		case 11: output.ip_config = 0; output_size = sizeof(output.ip_config); break;
 		case 14:
 			memcpy(output.ip_address, "127.0.0.1", sizeof("127.0.0.1"));
