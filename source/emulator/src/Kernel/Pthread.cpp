@@ -58,6 +58,7 @@ namespace GuestRuntimePort  = ::Kyty::Emulator::GuestRuntimePort;
 
 
 thread_local Pthread g_pthread_self                   = nullptr;
+Pthread              g_pthread_main                   = nullptr;
 thread_local bool    g_pthread_key_destructors_active = false;
 PThreadContext*      g_pthread_context                = nullptr;
 
@@ -108,6 +109,58 @@ void PthreadInitSelfForMainThread()
 	g_pthread_self->almost_done = false;
 	g_pthread_self->entry       = nullptr;
 	g_pthread_self->arg         = nullptr;
+	g_pthread_main              = g_pthread_self;
+}
+
+// Guest return addresses above the waiting HLE function: its saved frame
+// pointer is the guest caller's frame, and each frame holds the next frame and
+// its return address. Every read is validated, so a broken chain only ends the
+// walk.
+static void capture_guest_callers(const void* frame, uint64_t* callers)
+{
+	uint64_t record[2] = {};
+	uint64_t next      = 0;
+	if (!Core::VirtualMemory::CopyFromGuest(&next, reinterpret_cast<uint64_t>(frame), sizeof(next)))
+	{
+		return;
+	}
+	for (int i = 0; i < PthreadWaitScope::kCallers && next != 0; i++)
+	{
+		if (!Core::VirtualMemory::CopyFromGuest(record, next, sizeof(record)) || record[0] <= next)
+		{
+			callers[i] = 0;
+			return;
+		}
+		callers[i] = record[1];
+		next       = record[0];
+	}
+}
+
+PthreadWaitScope::PthreadWaitScope(PthreadWaitKind kind, const void* object, const void* guest_return, const void* frame)
+{
+	auto* self = g_pthread_self;
+	if (self == nullptr || self->wait_kind.load(std::memory_order_relaxed) != 0u)
+	{
+		return;
+	}
+	uint64_t callers[kCallers] = {};
+	capture_guest_callers(frame, callers);
+	for (int i = 0; i < kCallers; i++)
+	{
+		self->wait_callers[i].store(callers[i], std::memory_order_relaxed);
+	}
+	self->wait_object.store(reinterpret_cast<uint64_t>(object), std::memory_order_relaxed);
+	self->wait_return.store(reinterpret_cast<uint64_t>(guest_return), std::memory_order_relaxed);
+	self->wait_kind.store(static_cast<uint8_t>(kind), std::memory_order_release);
+	m_active = true;
+}
+
+PthreadWaitScope::~PthreadWaitScope()
+{
+	if (m_active)
+	{
+		g_pthread_self->wait_kind.store(0u, std::memory_order_release);
+	}
 }
 
 
@@ -414,6 +467,7 @@ static int pthread_join_internal(Pthread thread, void** value)
 int KYTY_SYSV_ABI PthreadJoin(Pthread thread, void** value)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::Join, thread);
 
 	if (thread == nullptr || thread->detached.load(std::memory_order_acquire))
 	{
@@ -724,6 +778,7 @@ void PthreadSetHostThreadDtors(host_thread_dtors_func_t dtors)
 
 int KYTY_SYSV_ABI KernelUsleep(KernelUseconds microseconds)
 {
+	KYTY_GUEST_WAIT(PthreadWaitKind::Sleep, nullptr);
 	Core::Thread::SleepMicro(microseconds);
 	return OK;
 }
@@ -743,6 +798,7 @@ unsigned int KYTY_SYSV_ABI KernelSleep(unsigned int seconds)
 int KYTY_SYSV_ABI KernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rmtp)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::Sleep, nullptr);
 
 	if (rqtp == nullptr)
 	{

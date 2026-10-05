@@ -217,7 +217,13 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 		return OK;
 	}
 
-	int result = pthread_mutex_lock(&private_mutex->p);
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_mutex_trylock(&private_mutex->p);
+	if (result == EBUSY)
+	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Mutex, mutex);
+		result = pthread_mutex_lock(&private_mutex->p);
+	}
 
 	if (result == 0)
 	{

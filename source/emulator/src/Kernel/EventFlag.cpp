@@ -1,4 +1,5 @@
 #include "Emulator/Kernel/EventFlag.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Errors.h"
 
 #include "Kyty/Core/Common.h"
@@ -352,6 +353,7 @@ int KYTY_SYSV_ABI KernelWaitEventFlag(KernelEventFlag ef, uint64_t bit_pattern, 
                                       KernelUseconds* timeout)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::EventFlag, ef);
 
 	if (!EventFlagIsLive(ef))
 	{

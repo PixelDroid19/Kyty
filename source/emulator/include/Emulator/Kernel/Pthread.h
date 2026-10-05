@@ -195,15 +195,54 @@ struct PthreadCondWaitDiagnostics
 // guest, changes mutex ownership, or creates synchronization objects.
 bool PthreadGetCondWaitDiagnostics(PthreadCondWaitDiagnostics* out);
 
+// What a guest thread is blocked on inside an HLE wait. Diagnostics only.
+enum class PthreadWaitKind : uint8_t
+{
+	None,
+	Mutex,
+	Cond,
+	Semaphore,
+	EventFlag,
+	EventQueue,
+	Sleep,
+	Join,
+};
+
+// Records the calling guest thread's wait (kind, guest object, guest return
+// address and the next guest callers on the frame-pointer chain from `frame`,
+// the waiting HLE function's frame) for its lifetime; a nested scope keeps the
+// outermost record.
+class PthreadWaitScope
+{
+public:
+	static constexpr int kCallers = 3;
+
+	PthreadWaitScope(PthreadWaitKind kind, const void* object, const void* guest_return, const void* frame);
+	~PthreadWaitScope();
+	PthreadWaitScope(const PthreadWaitScope&)            = delete;
+	PthreadWaitScope& operator=(const PthreadWaitScope&) = delete;
+
+private:
+	bool m_active = false;
+};
+
+#define KYTY_GUEST_WAIT(kind, object)                                                                                                     \
+	::Kyty::Kernel::PthreadWaitScope kyty_guest_wait_scope(kind, object, __builtin_return_address(0), __builtin_frame_address(0))
+
 struct PthreadThreadDiagnostic
 {
-	uint64_t entry      = 0;
-	uint64_t argument   = 0;
-	int32_t  unique_id  = -1;
-	bool     started    = false;
-	bool     detached   = false;
-	bool     almost_done = false;
-	bool     free       = false;
+	uint64_t        entry       = 0;
+	uint64_t        argument    = 0;
+	int32_t         unique_id   = -1;
+	bool            started     = false;
+	bool            detached    = false;
+	bool            almost_done = false;
+	bool            free        = false;
+	bool            main        = false;
+	PthreadWaitKind wait_kind   = PthreadWaitKind::None;
+	uint64_t        wait_object = 0;
+	uint64_t        wait_return = 0;
+	uint64_t        wait_callers[PthreadWaitScope::kCallers] {};
 };
 
 struct PthreadThreadDiagnostics
@@ -212,7 +251,7 @@ struct PthreadThreadDiagnostics
 	uint32_t                allocated_count = 0;
 	uint32_t                active_count    = 0;
 	uint32_t                thread_count    = 0;
-	PthreadThreadDiagnostic threads[32] {};
+	PthreadThreadDiagnostic threads[64] {};
 };
 
 // Passive snapshot of guest pthread lifecycle state. It does not create,

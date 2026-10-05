@@ -118,6 +118,11 @@ struct PthreadPrivate
 	std::atomic_int      guest_priority {700};
 	uint64_t             guest_stack_base = 0;
 	uint64_t             guest_stack_size = 0;
+	// The HLE wait the thread is blocked in (see PthreadWaitScope).
+	std::atomic_uint8_t  wait_kind {0};
+	std::atomic_uint64_t wait_object {0};
+	std::atomic_uint64_t wait_return {0};
+	std::atomic_uint64_t wait_callers[PthreadWaitScope::kCallers] {};
 };
 
 struct PthreadRwlockPrivate
@@ -275,6 +280,10 @@ private:
 };
 
 extern thread_local Pthread g_pthread_self;
+extern Pthread              g_pthread_main;
+
+// Copies a thread's lifecycle and current HLE wait into a diagnostics entry.
+void PthreadSnapshotDiagnostic(const PthreadPrivate* thread, PthreadThreadDiagnostic* snapshot);
 extern thread_local bool    g_pthread_key_destructors_active;
 extern PThreadContext*      g_pthread_context;
 

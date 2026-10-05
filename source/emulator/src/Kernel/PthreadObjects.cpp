@@ -157,14 +157,26 @@ void PthreadPool::GetDiagnostics(PthreadThreadDiagnostics* out)
 			continue;
 		}
 
-		auto& snapshot = out->threads[out->thread_count++];
-		snapshot.entry = reinterpret_cast<uint64_t>(thread->entry);
-		snapshot.argument = reinterpret_cast<uint64_t>(thread->arg);
-		snapshot.unique_id = thread->unique_id;
-		snapshot.started = thread->started.load();
-		snapshot.detached = thread->detached.load();
-		snapshot.almost_done = thread->almost_done.load();
-		snapshot.free = thread->free.load();
+		PthreadSnapshotDiagnostic(thread, &out->threads[out->thread_count++]);
+	}
+}
+
+void PthreadSnapshotDiagnostic(const PthreadPrivate* thread, PthreadThreadDiagnostic* snapshot)
+{
+	EXIT_IF(thread == nullptr || snapshot == nullptr);
+	snapshot->entry       = reinterpret_cast<uint64_t>(thread->entry);
+	snapshot->argument    = reinterpret_cast<uint64_t>(thread->arg);
+	snapshot->unique_id   = thread->unique_id;
+	snapshot->started     = thread->started.load();
+	snapshot->detached    = thread->detached.load();
+	snapshot->almost_done = thread->almost_done.load();
+	snapshot->free        = thread->free.load();
+	snapshot->wait_kind   = static_cast<PthreadWaitKind>(thread->wait_kind.load(std::memory_order_acquire));
+	snapshot->wait_object = thread->wait_object.load(std::memory_order_relaxed);
+	snapshot->wait_return = thread->wait_return.load(std::memory_order_relaxed);
+	for (int i = 0; i < PthreadWaitScope::kCallers; i++)
+	{
+		snapshot->wait_callers[i] = thread->wait_callers[i].load(std::memory_order_relaxed);
 	}
 }
 

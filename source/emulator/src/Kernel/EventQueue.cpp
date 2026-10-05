@@ -1,4 +1,5 @@
 #include "Emulator/Kernel/EventQueue.h"
+#include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/Errors.h"
 
 #include "Kyty/Core/Common.h"
@@ -734,6 +735,7 @@ int KYTY_SYSV_ABI KernelDeleteEqueue(KernelEqueue eq)
 
 int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int* out, const KernelUseconds* timo)
 {
+	KYTY_GUEST_WAIT(PthreadWaitKind::EventQueue, eq);
 	// PRINT_NAME();
 
 	if (eq == nullptr)

@@ -347,6 +347,12 @@ bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out)
 	}
 
 	out->available = true;
+	if (g_pthread_main != nullptr)
+	{
+		auto& main = out->threads[out->thread_count++];
+		PthreadSnapshotDiagnostic(g_pthread_main, &main);
+		main.main = true;
+	}
 	pthread_pool->GetDiagnostics(out);
 	return true;
 }
@@ -674,6 +680,7 @@ static int wait_on_resolved_cond(const ResolvedCondWait& resolved, const timespe
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::Cond, cond);
 
 	ResolvedCondWait resolved {};
 	const int        resolve_result = resolve_cond_wait(cond, mutex, &resolved);
@@ -694,6 +701,7 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, K
 int KYTY_SYSV_ABI PthreadCondTimedwaitAbsolute(PthreadCond* cond, PthreadMutex* mutex, const KernelTimespec* abstime)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::Cond, cond);
 
 	ResolvedCondWait resolved {};
 	const int        resolve_result = resolve_cond_wait(cond, mutex, &resolved);
@@ -769,6 +777,7 @@ int KYTY_SYSV_ABI PthreadOnce(int* once_control, void (*init_routine)(void))
 int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::Cond, cond);
 
 	EXIT_IF(g_pthread_context == nullptr);
 
