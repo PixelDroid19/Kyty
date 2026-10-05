@@ -83,7 +83,9 @@ struct TextureSurfaceCopyArrayRange
 	uint32_t layer_count      = 0;
 };
 
-[[nodiscard]] uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format);
+// Element bytes of a tiled sample upload (tile 27 or 9), or 0 when that tile's
+// host detiler does not cover the format.
+[[nodiscard]] uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format, uint32_t tile);
 
 [[nodiscard]] bool TextureBlockDumpSpecMatches(const char* spec, uint32_t width, uint32_t height, uint64_t vaddr);
 

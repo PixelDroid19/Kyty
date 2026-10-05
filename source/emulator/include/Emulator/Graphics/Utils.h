@@ -148,6 +148,14 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	return ufmt == 169u || ufmt == 170u;
 }
 
+// The SW_64KB_S (tile 9) host detiler covers every element size of the GFX10
+// standard pattern, so any uncompressed format of that size is detilable.
+[[nodiscard]] inline bool Gen5Standard64KBDetilesElementBytes(uint32_t bytes_per_element)
+{
+	return bytes_per_element == 1u || bytes_per_element == 2u || bytes_per_element == 4u || bytes_per_element == 8u ||
+	       bytes_per_element == 16u;
+}
+
 [[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt, bool live_color_surface_covers)
 {
 	if (tile == 0u)
@@ -165,7 +173,9 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	}
 	if (tile == 9u)
 	{
-		return ufmt == 56u || ufmt == 71u || ufmt == 130u || ShaderGen5TextureIsBlockCompressed(ufmt);
+		// Without a live surface over the range the guest bytes are the content
+		// (CPU-written atlases, written-back storage); detile them.
+		return ShaderGen5TextureIsBlockCompressed(ufmt) || Gen5Standard64KBDetilesElementBytes(ShaderGen5TextureBytesPerElement(ufmt));
 	}
 	return true;
 }

@@ -2985,14 +2985,18 @@ TEST(EmulatorGraphicsState, SurfaceCopyPreservesEverySampledArrayLayer)
 
 TEST(EmulatorGraphicsState, TiledSampleDetileUsesTheGuestFormatElementWidth)
 {
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(56u), 4u);
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(130u), 4u);
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(71u), 8u);
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm)), 8u);
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(169u), 8u);
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(170u), 8u);
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(179u), 0u);
-	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(22u), 0u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(56u, 27u), 4u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(130u, 27u), 4u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(71u, 27u), 8u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), 27u), 8u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(169u, 27u), 8u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(170u, 27u), 8u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(179u, 27u), 0u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(22u, 27u), 0u);
+	// Standard64KB detiles every 1-16 byte uncompressed element (R8 glyph atlases).
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(1u, 9u), 1u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(22u, 9u), 4u);
+	EXPECT_EQ(TextureGetGen5TiledSampleBytesPerElement(1u, 27u), 0u);
 }
 
 TEST(EmulatorGraphicsState, ClassifiesTransientBufferOverlapSnapshotsStrictly)
@@ -5014,8 +5018,11 @@ TEST(EmulatorGraphicsState, Gen5SampleMayGuestUploadTiledTile27ByFormat)
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 169u, false));
 	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 179u, false));
 	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat::Bc1Unorm), true));
-	// Uncompressed formats outside the package set stay GPU-owned on tile 9.
-	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 64u, false));
+	// Any uncompressed tile 9 element the Standard64KB detiler covers uploads when
+	// uncovered (CPU-written R8 glyph atlases, RG32F); a live surface still wins.
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 64u, false));
+	EXPECT_TRUE(Gen5SampleMayGuestUploadTiled(9u, 1u, false));
+	EXPECT_FALSE(Gen5SampleMayGuestUploadTiled(9u, 1u, true));
 }
 
 // Hash refresh stays enabled so late package loads still upload; SSBO clobber

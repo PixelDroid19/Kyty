@@ -36,13 +36,18 @@
 
 namespace Kyty::Libs::Graphics {
 
-uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format)
+uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format, uint32_t tile)
 {
+	const uint32_t bytes = ShaderGen5TextureBytesPerElement(format);
+	if (tile == 9u && !ShaderGen5TextureIsBlockCompressed(format) && Gen5Standard64KBDetilesElementBytes(bytes))
+	{
+		return bytes;
+	}
 	if (format != 56u && format != 71u && format != 130u && !Gen5IsBc1PackageFormat(format))
 	{
 		return 0u;
 	}
-	return ShaderGen5TextureBytesPerElement(format);
+	return bytes;
 }
 
 static uint32_t resolve_host_mip_count(uint16_t fmt, uint32_t width, uint32_t height, uint32_t guest_levels)
@@ -903,15 +908,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// Tiled sample texture: detile into tightly packed linear rows then
 			// upload. Render-target aliases still prefer FindRenderTexture
 			// before create; this path covers pure CPU-backed sample textures.
-			// tile 27 = kRenderTarget layout; tile 9 = kStandard64KB
-			// (RGBA8/RGBA8-sRGB/RGBA16F package data).
+			// tile 27 = kRenderTarget layout (RGBA8/RGBA8-sRGB/RGBA16F package
+			// data); tile 9 = kStandard64KB (any 1-16 byte uncompressed element).
 			// BC1 (raw 169 UNORM / 170 SRGB) detiles compressed
 			// 4x4 blocks as 8-byte elements on tile 27 only.
-			// SKIPPED: tile == 9 && fmt != 56 && fmt != 71 && fmt != 130
-			if (tile == 9 && fmt != 56 && fmt != 71 && fmt != 130)
-			{
-				KYTY_LOG_DEBUG("WARNING: skipped check: tile == 9 && fmt != 56 && fmt != 71 && fmt != 130\n");
-			}
 			// SKIPPED: fmt != 56 && fmt != 71 && fmt != 130 && !Gen5IsBc1PackageFormat(fmt)
 			if (fmt != 56 && fmt != 71 && fmt != 130 && !Gen5IsBc1PackageFormat(static_cast<uint32_t>(fmt)))
 			{
@@ -923,7 +923,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				KYTY_LOG_DEBUG("WARNING: skipped check: levels != 1\n");
 			}
 			const bool bc1 = Gen5IsBc1PackageFormat(static_cast<uint32_t>(fmt));
-			const uint32_t bpp = TextureGetGen5TiledSampleBytesPerElement(fmt);
+			const uint32_t bpp = TextureGetGen5TiledSampleBytesPerElement(fmt, static_cast<uint32_t>(tile));
 			if (bpp == 0u)
 			{
 				EXIT("unsupported Gen5 tiled sample format: tile=%u fmt=%u\n", static_cast<unsigned>(tile),
