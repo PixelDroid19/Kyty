@@ -80,7 +80,6 @@ LIB_DEFINE(InitPs5Util_1);
 LIB_DEFINE(InitTextToSpeech2_1);
 LIB_DEFINE(InitWriteThrottling_1);
 LIB_DEFINE(InitSyncOnAddress_1);
-LIB_DEFINE(InitEOSSDKPS5Shipping_1);
 
 bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 {
@@ -140,9 +139,6 @@ bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_CHECK(U"libSceTextToSpeech2_1", InitTextToSpeech2_1);
 	LIB_CHECK(U"libkernel_write_throttling_1", InitWriteThrottling_1);
 	LIB_CHECK(U"libkernel_sync_on_address_1", InitSyncOnAddress_1);
-	LIB_CHECK(U"EOSSDK-PS5-Shipping", InitEOSSDKPS5Shipping_1);
-	LIB_CHECK(U"EOSSDK-PS5-Shipping_v1", InitEOSSDKPS5Shipping_1);
-	LIB_CHECK(U"EOSSDK-PS5-Shipping_v1.1", InitEOSSDKPS5Shipping_1);
 
 	return false;
 }
@@ -198,7 +194,6 @@ void InitAll(::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_LOAD(InitTextToSpeech2_1);
 	LIB_LOAD(InitWriteThrottling_1);
 	LIB_LOAD(InitSyncOnAddress_1);
-	LIB_LOAD(InitEOSSDKPS5Shipping_1);
 
 	// libSceLibcInternal exports the system C runtime that libc is built on;
 	// modules that link it directly import the same NIDs under its identity.
