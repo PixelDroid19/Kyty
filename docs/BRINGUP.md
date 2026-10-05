@@ -306,6 +306,48 @@ Measured after these changes on the pixel-art title: the processor is busy about
 engine about 11 ms; the title submits its next frame after the previous flip, so the two still add up. Next:
 per-draw shader usage parsing (about 10% of the processor) and submitting earlier within a frame.
 
+Second round (same day):
+
+- **HTILE size outside the table.** Gen5 depth sizes not in the table fell back to 8x8 cells of 8 bytes over the
+  unpadded width, 0x70000 bytes for a 2500x1400 target. The game clears its HTILE with the SDK metadata-fill compute
+  over 0x48000 bytes, so the clear never matched the depth target's HTILE range and was never applied: the target kept
+  the previous frames' depth, and a racing title's car-select preview (reverse-Z, GEQUAL) showed only the edges of the
+  rotating car. HTILE is one 4-byte word per 8x8 tile over whole 1024x512-pixel metadata blocks (32 KiB); this
+  reproduces every table entry (720p, 1080p, 2160p) and the guest's clears (0x48000, and 0x8000 for small targets).
+  A 32-bit depth row is padded to the 128-pixel width of its 64 KiB block (the colour target of the same pass already
+  used pitch 2560).
+- **Multisampled HTILE clears.** The metadata-fill clear was translated only for single-sample targets; the preview
+  target is 2x MSAA. A zero HTILE word marks every sample of its tile cleared and the attachment clear covers every
+  sample, so multisampled targets now take it too.
+- **Guest-address residency scan.** Ranges without physical backing were still asked whether their physical range
+  was unpopulated, a linear search over all physical mappings that never matches; per-range statistics timers called
+  the clock thousands of times per preparation. A .NET title went from 43 to 37 ms per frame (table preparation
+  28 to 21 ms). Its physical ranges still rescan whenever the physical population changes (18 ms per frame).
+
+- **Idle queues publish their completions.** The 3D fighting title froze when its story mode started: it submits one
+  ACB to each compute queue and spins on the ACB's end-of-pipe label (`while (*label != 1)`, found by profiling the
+  frozen run: two guest threads at 100% in the spin and its caller). A plain label store carries no completion
+  callback, so nothing polled that queue's fence once its ring went idle; earlier the label was published only when an
+  unrelated wait drained completions, which the asynchronous batch completion above removed. Every ring now stays in
+  its completion pump until its submissions retire, compute queue rings included.
+- **More guest compute queues than host processors.** The same title probes nine queue handles (0x20, 0x21, 0x28,
+  0x29, 0x30, 0x38, 0x40, 0x48, 0x50) and the ninth aborted with "exceeds available independent queues". Once each of
+  the eight host compute processors has a handle, a new handle shares the processor with the fewest handles; its
+  submissions stay in order there. The title now reaches its story-mode cutscenes (textures on characters are still
+  corrupted and the scene runs at about 5 fps, open).
+
+Verification: `run-check.sh <n> <slug> [route] [seconds]` in the scratch harness runs one title and prints a verdict
+(FATAL with the error line, FROZEN when the observer confirms no presents, BLACK, STATIC, or ADVANCING) with the lit
+fraction and change of each capture, so a fix is checked on the affected title instead of the whole set.
+
+Investigated and left open:
+
+- The .NET beat 'em up stops at about 1.7 s in some runs (also before this work, runs d474 and d530): its runtime
+  reads a null table pointer plus 0x120 (`mov r11, [rax + r10*8]` with rax = 0) while summing allocation statistics.
+- The pixel-art title's new game starts with a "wake up" prompt that none of the scripted pad buttons pass (all face
+  buttons, shoulders, triggers, sticks, d-pad, options and touchpad were tried, tapped and held); the title menu
+  before it works.
+
 ### Performance, new-title repairs and add-on content (2026-10-04, guest verified)
 
 Scope: strict runs on the reference host (Intel Xe, Vulkan 1.4, Native, `KYTY_SHADER_OPTIMIZATION=None`, shader
