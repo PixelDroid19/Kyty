@@ -401,7 +401,7 @@ TEST(EmulatorNetwork, NpManagerHasSignedUpRejectsUnprovenOutputWithoutWriting)
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
 	Loader::SymbolDatabase symbols;
-	ASSERT_TRUE(Libs::Init(U"libNet_1", &symbols));
+	ASSERT_TRUE(Libs::Init(U"libNpManager_1", &symbols));
 	const auto* record = symbols.Find(NpManagerFunction(u"Oad3rvY-NJQ"));
 	ASSERT_NE(record, nullptr);
 

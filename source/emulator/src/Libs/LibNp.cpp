@@ -2,6 +2,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Np.h"
+#include "Emulator/Network.h"
 #include "Emulator/Loader/AddcontInventory.h"
 
 #include <algorithm>
@@ -756,11 +757,29 @@ static KYTY_SYSV_ABI int GetUserIdByAccountId(uint64_t account_id, int32_t* user
 	return kNpErrorSignedOut;
 }
 
+// The one NpManager export list: account queries here, sign-in state and
+// requests in Network.cpp.
 LIB_DEFINE(InitNpManager_1)
 {
 	LIB_FUNC("JT+t00a3TxA", GetAccountCountryA);
 	LIB_FUNC("rbknaUjpqWo", GetAccountIdA);
 	LIB_FUNC("VgYczPGB5ss", GetUserIdByAccountId);
+	LIB_FUNC("3Zl8BePTh9Y", Network::NpManager::NpCheckCallback);
+	LIB_FUNC("Ec63y59l9tw", Network::NpManager::NpSetNpTitleId);
+	LIB_FUNC("A2CQ3kgSopQ", Network::NpManager::NpSetContentRestriction);
+	LIB_FUNC("VfRSmPmj8Q8", Network::NpManager::NpRegisterStateCallback);
+	LIB_FUNC("qQJfO8HAiaY", Network::NpManager::NpRegisterStateCallback);
+	LIB_FUNC("uFJpaKNBAj4", Network::NpManager::NpRegisterGamePresenceCallback);
+	LIB_FUNC("GImICnh+boA", Network::NpManager::NpRegisterPlusEventCallback);
+	LIB_FUNC("hw5KNqAAels", Network::NpManager::NpRegisterNpReachabilityStateCallback);
+	LIB_FUNC("p-o74CnoNzY", Network::NpManager::NpGetNpId);
+	LIB_FUNC("XDncXQIJUSk", Network::NpManager::NpGetOnlineId);
+	LIB_FUNC("eiqMCt9UshI", Network::NpManager::NpCreateAsyncRequest);
+	LIB_FUNC("S7QTn72PrDw", Network::NpManager::NpDeleteRequest);
+	LIB_FUNC("2rsFmlGWleQ", Network::NpManager::NpCheckNpAvailability);
+	LIB_FUNC("uqcPJLWL08M", Network::NpManager::NpPollAsync);
+	LIB_FUNC("eQH7nWPcAgc", Network::NpManager::NpGetState);
+	LIB_FUNC("Oad3rvY-NJQ", Network::NpManager::NpHasSignedUp);
 }
 
 } // namespace Kyty::Libs::NpManager

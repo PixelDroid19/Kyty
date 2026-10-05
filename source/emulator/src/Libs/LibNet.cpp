@@ -220,34 +220,6 @@ LIB_DEFINE(InitNet_1_NetCtl)
 
 } // namespace LibNetCtl
 
-namespace LibNpManager {
-
-LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
-
-namespace NpManager = Network::NpManager;
-
-LIB_DEFINE(InitNet_1_NpManager)
-{
-	LIB_FUNC("3Zl8BePTh9Y", NpManager::NpCheckCallback);
-	LIB_FUNC("Ec63y59l9tw", NpManager::NpSetNpTitleId);
-	LIB_FUNC("A2CQ3kgSopQ", NpManager::NpSetContentRestriction);
-	LIB_FUNC("VfRSmPmj8Q8", NpManager::NpRegisterStateCallback);
-	LIB_FUNC("qQJfO8HAiaY", NpManager::NpRegisterStateCallback);
-	LIB_FUNC("uFJpaKNBAj4", NpManager::NpRegisterGamePresenceCallback);
-	LIB_FUNC("GImICnh+boA", NpManager::NpRegisterPlusEventCallback);
-	LIB_FUNC("hw5KNqAAels", NpManager::NpRegisterNpReachabilityStateCallback);
-	LIB_FUNC("p-o74CnoNzY", NpManager::NpGetNpId);
-	LIB_FUNC("XDncXQIJUSk", NpManager::NpGetOnlineId);
-	LIB_FUNC("eiqMCt9UshI", NpManager::NpCreateAsyncRequest);
-	LIB_FUNC("S7QTn72PrDw", NpManager::NpDeleteRequest);
-	LIB_FUNC("2rsFmlGWleQ", NpManager::NpCheckNpAvailability);
-	LIB_FUNC("uqcPJLWL08M", NpManager::NpPollAsync);
-	LIB_FUNC("eQH7nWPcAgc", NpManager::NpGetState);
-	LIB_FUNC("Oad3rvY-NJQ", NpManager::NpHasSignedUp);
-}
-
-} // namespace LibNpManager
-
 namespace LibNpManagerForToolkit {
 
 LIB_VERSION("NpManagerForToolkit", 1, "NpManager", 1, 1);
@@ -1260,7 +1232,6 @@ LIB_DEFINE(InitNet_1)
 	LibHttp::InitNet_1_Http(s);
 	LibHttp2::InitNet_1_Http2(s);
 	LibNetCtl::InitNet_1_NetCtl(s);
-	LibNpManager::InitNet_1_NpManager(s);
 	LibNpManagerForToolkit::InitNet_1_NpManagerForToolkit(s);
 	LibNpSessionSignaling::InitNet_1_NpSessionSignaling(s);
 	LibNpTrophy::InitNet_1_NpTrophy(s);
