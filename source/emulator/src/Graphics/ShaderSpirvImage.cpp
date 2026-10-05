@@ -3713,9 +3713,12 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 		// The storage bank is one shape (ShaderPlanStorageImages): 2D, 2D array or
 		// 3D. Sampled 3D textures do not change the storage image's dimensionality.
 		const bool three_dimensional = UsesVolumeStorageImages(bind_info);
-		if (three_dimensional && inst.mimg_dimension != 2u)
+		// DIM states how many coordinates the instruction supplies; the T# type
+		// selects the addressing. A 2D-array store supplies (x, y, slice), which a
+		// 3D resource addresses as (x, y, z). A plain 2D store supplies no z.
+		if (three_dimensional && inst.mimg_dimension != 2u && inst.mimg_dimension != 5u)
 		{
-			return false; // 2D or array coordinates cannot address a 3D descriptor
+			return false;
 		}
 		const auto src0_value0       = mimg_address_to_str(inst, 0);
 		const auto src0_value1       = mimg_address_to_str(inst, 1);
