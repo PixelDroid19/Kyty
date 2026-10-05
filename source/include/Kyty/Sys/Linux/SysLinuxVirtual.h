@@ -42,6 +42,8 @@ bool     sys_virtual_supports_shared_fixed_owned_reservation_replacement();
 uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                                    VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_free(uint64_t address);
+// Unmaps a page-aligned part of one allocation, which keeps its other parts.
+bool     sys_virtual_free_range(uint64_t address, uint64_t size);
 bool     sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode = nullptr);
 bool     sys_virtual_protect_guest(uint64_t address, uint64_t size, VirtualMemory::Mode mode,
                                    VirtualMemory::Mode* old_mode = nullptr);

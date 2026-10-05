@@ -409,7 +409,16 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   with EBUSY (it replaced only an exactly equal released view), and the title died with OutOfMemoryException. A
   released view is now dropped whole (its pages may already back another allocation) with its parts outside the
   new range returned to the reservation, a live view is replaced when it lies inside the range, and the range
-  becomes a reservation the normal fixed-map transaction consumes. Gaps or partly covered live views still fail.
+  becomes a reservation the normal fixed-map transaction consumes.
+- **Partial unmaps.** `sceKernelMunmap` accepted only an exact mapping or a range inside one reservation block. A sandbox
+  title's allocator reserves a large block, maps an aligned part, decommits pieces by reserving over them and later
+  frees a span covering many blocks; it also maps over part of a live mapping. Following BSD munmap, a range now
+  unmaps every mapping and reservation part it covers, a direct mapping crossing the range edge is cut (the host
+  unmaps the page-aligned part and the mapping, its physical offset and protection blocks split; the GPU side
+  releases only the cut range), and a fixed map cuts the part of a live mapping it overlaps. Cuts run before any
+  other change, so an unsupported cut leaves the state untouched. The host split is implemented on Linux; on
+  Windows the views and placeholder reservations are not split yet and such unmaps fail as before. A flexible
+  mapping crossing the range edge is still refused.
 - **What every guest thread waits on.** The blocking HLE waits (contended mutex, condition, semaphore, event flag,
   event queue, sleep, join) record their kind, object and guest return address in the thread for their duration;
   the agent `threads` tool reports them for the main thread too (it was missing from the list) together with the
@@ -442,7 +451,9 @@ Open blockers (one root cause each, none investigated past the point stated):
 - The remaining Unity title still stops 25-80 s in with a garbage V# in extended user data dwords 40-43 of its
   colour-grading pass (the same slot holds valid LUT parameters in earlier runs and in another Unity title); the
   bound span is now the full 272 bytes, so the remaining defect is the stale EUD contents.
-- A sandbox title: its allocator reports out of memory after about 940 frames (direct memory allocations failing).
+- A sandbox title now passes its allocator's partial unmaps and fixed remaps and loads further (about 21 s); it stops
+  on a pixel shader with a derivative fetch inside a lane-divergent loop, which needs the fragment wave transport
+  the renderer does not select yet.
 - A roguelike exits by itself (exit 0, no frame) without calling libc exit.
 - A first-person puzzle title: stalls after one frame.
 - AMPR `_04_00` counter and wait commands are still no-ops; most `sceAgc*GetSize` entry points are added only when a

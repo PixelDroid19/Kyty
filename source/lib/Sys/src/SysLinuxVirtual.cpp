@@ -1362,6 +1362,56 @@ bool sys_virtual_alloc_fixed_replacing_owned_reservation(uint64_t address, uint6
 	return true;
 }
 
+bool sys_virtual_free_range(uint64_t address, uint64_t size)
+{
+	EXIT_IF(g_allocs == nullptr);
+
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (page_size == 0 || size == 0 || address % page_size != 0 || size % page_size != 0 || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+	const auto addr = static_cast<uintptr_t>(address);
+	const auto end  = static_cast<uintptr_t>(address + size);
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	auto allocation = g_allocs->upper_bound(addr);
+	if (allocation == g_allocs->begin())
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	--allocation;
+	const uintptr_t owner     = allocation->first;
+	const uintptr_t owner_end = owner + allocation->second;
+	if (addr < owner || end > owner_end || !range_is_guest_owned_locked(addr, size) ||
+	    munmap(reinterpret_cast<void*>(addr), size) != 0)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	g_allocs->erase(allocation);
+	if (addr > owner)
+	{
+		(*g_allocs)[owner] = addr - owner;
+	}
+	if (end < owner_end)
+	{
+		(*g_allocs)[end] = owner_end - end;
+	}
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	EXIT_IF(!get_host_page_range(addr, size, &page_start, &page_end));
+	erase_protection_range(page_start, page_end);
+	(void)erase_guest_mapping_range_locked(addr, size);
+	if (g_guest_map_cursor > addr)
+	{
+		g_guest_map_cursor = addr;
+	}
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
 bool sys_virtual_free(uint64_t address)
 {
 	EXIT_IF(g_allocs == nullptr);

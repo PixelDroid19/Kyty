@@ -1980,6 +1980,11 @@ bool Free(uint64_t address)
 	return sys_virtual_free(address);
 }
 
+bool FreeRange(uint64_t address, uint64_t size)
+{
+	return sys_virtual_free_range(address, size);
+}
+
 bool Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 {
 	return sys_virtual_protect(address, size, mode, old_mode);

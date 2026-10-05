@@ -177,6 +177,8 @@ bool SupportsSharedFixedOwnedReservationReplacement();
 uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                    uint64_t alignment);
 bool           Free(uint64_t address);
+// Unmaps a page-aligned part of one mapping; the rest stays mapped.
+bool           FreeRange(uint64_t address, uint64_t size);
 bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
 // Guest-only protection transition. Ownership validation, the host operation,
 // and protection tracking are one transaction with Free() and guest copies.

@@ -946,6 +946,13 @@ uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t addre
 	return sys_virtual_map_shared_fixed(backing, address, backing_offset, size, mode) ? address : 0;
 }
 
+// Splitting a view or a placeholder reservation is not implemented on Windows;
+// callers keep the whole mapping and report the unmap as unsupported.
+bool sys_virtual_free_range(uint64_t /*address*/, uint64_t /*size*/)
+{
+	return false;
+}
+
 bool sys_virtual_free(uint64_t address)
 {
 	std::scoped_lock transaction(g_protection_transaction_mutex);
