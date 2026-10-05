@@ -832,12 +832,32 @@ static void graphics_init_jmp_tables_sh_indirect()
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_X] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadX(value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_Y] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadY(value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_Z] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadZ(value); };
+	// User data written through an indirect register list lands in the same
+	// slots as the direct SET_SH_REG forms (GS/VS/CS 16 dwords, PS 32).
 	for (uint32_t slot = 0; slot < 16; slot++)
 	{
 		g_hw_sh_indirect_func[Pm4::COMPUTE_USER_DATA_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
 		{
 			const uint32_t id = cmd_offset - Pm4::COMPUTE_USER_DATA_0;
 			cp->GetShCtx()->SetCsUserSgpr(id, value, cp->GetUserDataMarker());
+			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
+		};
+		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_GS_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
+		{
+			cp->GetShCtx()->SetGsUserSgpr(cmd_offset - Pm4::SPI_SHADER_USER_DATA_GS_0, value, cp->GetUserDataMarker());
+			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
+		};
+		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_VS_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
+		{
+			cp->GetShCtx()->SetVsUserSgpr(cmd_offset - Pm4::SPI_SHADER_USER_DATA_VS_0, value, cp->GetUserDataMarker());
+			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
+		};
+	}
+	for (uint32_t slot = 0; slot < 32; slot++)
+	{
+		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_PS_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
+		{
+			cp->GetShCtx()->SetPsUserSgpr(cmd_offset - Pm4::SPI_SHADER_USER_DATA_PS_0, value, cp->GetUserDataMarker());
 			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
 		};
 	}
