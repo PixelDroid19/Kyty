@@ -705,12 +705,13 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 			}
 		}
 
-		// Fallback formula for non-table Gen5 dimensions (captured 642x362
-		// D32+S8 htile). Depth body matches table entries for z_format 3:
-		//   size = width * AlignUp(height, 128) * bpp, align 65536.
-		// Stencil plane: AlignUp(w,256)*AlignUp(h,256), align 65536.
-		// HTILE: coarse 8x8 cells * 8 bytes, aligned to 32 KiB (table density
-		// for 720p); keep table path preferred for known resolutions.
+		// Fallback formula for non-table Gen5 dimensions; it reproduces every
+		// table entry. Planes use 64 KiB swizzles: a 32-bit depth row pads to
+		// the 128-pixel block width (16-bit: 256) and the height to 128 rows;
+		// the 8-bit stencil plane pads both to 256. HTILE holds one 4-byte word
+		// per 8x8 tile over whole 1024x512-pixel metadata blocks (32 KiB each):
+		// guests clear exactly that range (2500x1400: 0x48000), and a larger
+		// estimate leaves the clear unmatched to its depth target.
 		const auto align_up = [](uint32_t v, uint32_t a) -> uint32_t { return (v + a - 1u) / a * a; };
 		uint32_t   bpp      = 0;
 		if (z_format == 3)
@@ -727,7 +728,7 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 			return false;
 		}
 		const uint32_t h_pad       = align_up(height, 128);
-		const uint32_t depth_pitch = (z_format == 1) ? align_up(width, 256) : width;
+		const uint32_t depth_pitch = (z_format == 1) ? align_up(width, 256) : align_up(width, 128);
 		depth_size->size           = (bpp == 0) ? 0 : depth_pitch * h_pad * bpp;
 		depth_size->align          = 65536;
 		if (stencil_format != 0)
@@ -740,10 +741,9 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 		}
 		if (htile)
 		{
-			const uint32_t cells_x = align_up(width, 8) / 8;
-			const uint32_t cells_y = h_pad / 8;
-			const uint32_t raw     = cells_x * cells_y * 8u;
-			htile_size->size       = align_up(raw, 32768);
+			const uint32_t tiles_x = align_up(width, 1024) / 8;
+			const uint32_t tiles_y = align_up(height, 512) / 8;
+			htile_size->size       = tiles_x * tiles_y * 4u;
 			htile_size->align      = 32768;
 		} else
 		{

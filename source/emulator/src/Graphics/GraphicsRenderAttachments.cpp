@@ -355,8 +355,9 @@ static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& dep
 	// from UNDEFINED. Only translate the captured zero-fill family when the
 	// guest also initializes stencil in the same first use; otherwise Vulkan
 	// could discard a stencil plane whose metadata semantics are not modeled.
-	if (depth.format != VK_FORMAT_D32_SFLOAT_S8_UINT || depth.samples != VK_SAMPLE_COUNT_1_BIT ||
-	    snapshot.pending_event.pattern.kind != DepthMetaPatternKind::UniformZero ||
+	// A zero HTILE word marks every sample of its 8x8 tile cleared, and the
+	// attachment clear covers every sample, so multisampled targets qualify.
+	if (depth.format != VK_FORMAT_D32_SFLOAT_S8_UINT || snapshot.pending_event.pattern.kind != DepthMetaPatternKind::UniformZero ||
 	    snapshot.pending_event.pattern.first_word != 0u || depth.depth_clear_value != 0.0f ||
 	    std::signbit(depth.depth_clear_value) || !depth.stencil_clear_enable || depth.stencil_clear_value != 0u)
 	{

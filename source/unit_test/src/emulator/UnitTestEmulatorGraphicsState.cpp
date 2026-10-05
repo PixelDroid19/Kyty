@@ -5961,14 +5961,16 @@ TEST(EmulatorGraphicsState, TileGetDepthSizeNextGenNonTable)
 	ASSERT_TRUE(TileGetDepthSize(1280, 720, 0, 3, 1, true, true, true, &stencil, &htile, &depth));
 	EXPECT_EQ(depth.size, 3932160u);
 	EXPECT_EQ(stencil.size, 983040u);
-	// Captured non-table surface.
+	// Captured non-table surfaces: 128-pixel depth rows, 1024x512 HTILE blocks.
 	ASSERT_TRUE(TileGetDepthSize(642, 362, 0, 3, 1, true, true, true, &stencil, &htile, &depth));
-	EXPECT_GT(depth.size, 0u);
-	EXPECT_EQ(depth.size % 4u, 0u);
+	EXPECT_EQ(depth.size, 768u * 384u * 4u);
 	EXPECT_EQ(depth.align, 65536u);
-	EXPECT_GT(stencil.size, 0u);
+	EXPECT_EQ(stencil.size, 768u * 512u);
 	EXPECT_EQ(stencil.align, 65536u);
-	EXPECT_GT(htile.size, 0u);
+	EXPECT_EQ(htile.size, 0x8000u);
+	ASSERT_TRUE(TileGetDepthSize(2500, 1400, 0, 3, 0, true, true, true, &stencil, &htile, &depth));
+	EXPECT_EQ(depth.size, 2560u * 1408u * 4u);
+	EXPECT_EQ(htile.size, 0x48000u);
 }
 
 // Captured DepthStencilBuffer create (3 vaddrs) Crossing Texture + StorageBuffer.
