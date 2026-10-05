@@ -3063,7 +3063,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		auto exact_evidence = code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base) : ShaderStorageUseEvidence {};
 		if (has_dynamic_sload)
 		{
-			// Each mapping is proven to reach one descriptor consumer before a clobber.
+			// Each mapping is proven to reach its descriptor consumers before a clobber.
 			// Merge that local raw-use proof with any independent static use of the
 			// same physical descriptor instead of assigning a synthetic entry state.
 			if (exact_evidence.access == ShaderStorageAccess::Unknown)
@@ -3086,21 +3086,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					continue;
 				}
 				exact_evidence.raw_smem_use = true;
-				const uint32_t consumer_pc  = record.last_consumer_pc;
-				bool           found_consumer = false;
-				for (uint32_t index = 0; index < code->GetInstructions().Size(); ++index)
-				{
-					const auto& inst = code->GetInstructions().At(index);
-					if (inst.pc != consumer_pc)
-					{
-						continue;
-					}
-					found_consumer = true;
-					ShaderAccumulateScalarBufferLoadSpan(inst, &exact_evidence.raw_smem_required_bytes,
-					                                     &exact_evidence.raw_smem_dynamic_offset);
-					break;
-				}
-				if (!found_consumer)
+				if (!ShaderDynamicSLoadScalarSpan(*code, record, &exact_evidence.raw_smem_required_bytes))
 				{
 					exact_evidence.raw_smem_dynamic_offset = true;
 				}

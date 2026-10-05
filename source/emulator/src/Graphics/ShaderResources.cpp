@@ -444,6 +444,32 @@ static bool ShaderInstructionWritesSgprRange(const ShaderInstruction& inst, int 
 	       ShaderOperandOverlapsSgprRange(inst.dst2, start_register, registers_num);
 }
 
+// The mapping scan accepts only consumers between the load and its last
+// consumer, so every reader of the destination range in that window is one.
+bool ShaderDynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping, uint64_t* required_bytes)
+{
+	EXIT_IF(required_bytes == nullptr);
+	bool dynamic_offset = false;
+	bool found          = false;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.pc <= mapping.instruction_pc || inst.pc > mapping.last_consumer_pc ||
+		    !ShaderInstructionReadsSgprRange(inst, mapping.destination_register, mapping.dword_count))
+		{
+			continue;
+		}
+		const bool scalar_consumer = ShaderInstructionIsScalarBufferLoad(inst) && inst.src[0].type == ShaderOperandType::Sgpr &&
+		                             inst.src[0].register_id == mapping.destination_register;
+		if (!scalar_consumer)
+		{
+			return false;
+		}
+		found = true;
+		ShaderAccumulateScalarBufferLoadSpan(inst, required_bytes, &dynamic_offset);
+	}
+	return found && !dynamic_offset;
+}
+
 static bool ShaderStorageResourcesEqual(const ShaderBufferResource& first, const ShaderBufferResource& second)
 {
 	for (int field = 0; field < 4; ++field)

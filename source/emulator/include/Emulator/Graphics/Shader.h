@@ -1891,6 +1891,11 @@ struct ShaderBindResources
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                int user_data_register_base);
 void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base);
+// Bytes read through a dynamically loaded buffer descriptor: the union of every
+// scalar buffer load that consumes the mapping. False when a consumer reads the
+// descriptor another way or at a non-constant offset.
+[[nodiscard]] bool ShaderDynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping,
+                                                uint64_t* required_bytes);
 
 [[nodiscard]] constexpr bool ShaderBindRequiresDescriptorSet(const ShaderBindResources& bind)
 {
