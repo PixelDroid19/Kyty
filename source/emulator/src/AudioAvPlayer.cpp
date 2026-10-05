@@ -262,11 +262,20 @@ void ConvertNv12ToRgba32(const uint8_t* nv12_data, uint32_t width, uint32_t heig
 	}
 }
 
+// Output frames are NV12 with both planes' rows aligned to 256 bytes, as GPU
+// linear surfaces require: titles build their textures (or copy rows) with that
+// pitch rather than the decoded width.
+static uint32_t video_frame_pitch(uint32_t width)
+{
+	constexpr uint32_t kRowAlign = 256u;
+	return (width + kRowAlign - 1u) & ~(kRowAlign - 1u);
+}
+
 static void draw_synthetic_frame(uint32_t width, uint32_t height, void* data, float l)
 {
 	constexpr int STRIPS_NUM = 5;
 
-	size_t luma_width        = width;
+	size_t luma_width        = video_frame_pitch(width);
 	size_t luma_height       = height;
 	size_t chroma_width      = luma_width / 2;
 	size_t chroma_height     = luma_height / 2;
@@ -304,7 +313,7 @@ static bool get_video_frame_bytes(uint32_t width, uint32_t height, size_t* out)
 	{
 		return false;
 	}
-	const size_t luma_width  = width;
+	const size_t luma_width  = video_frame_pitch(width);
 	const size_t luma_height = height;
 	if (luma_width > SIZE_MAX / luma_height)
 	{
@@ -462,7 +471,7 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 				return false;
 			}
 			r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {frame, true});
-			register_video_frame(frame, size, luma_width);
+			register_video_frame(frame, size, video_frame_pitch(luma_width));
 			if (r->closing.load(std::memory_order_acquire))
 			{
 				release_synthetic_video(r);
@@ -480,7 +489,7 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 		const auto aligned_address = (raw_address + 255u) & ~static_cast<uintptr_t>(255u);
 		r->synthetic_storage_data  = reinterpret_cast<uint8_t*>(aligned_address);
 		r->video_frames.push_back(AvPlayerInternal::VideoFrameBuffer {r->synthetic_storage_data, false});
-		register_video_frame(r->synthetic_storage_data, size, luma_width);
+		register_video_frame(r->synthetic_storage_data, size, video_frame_pitch(luma_width));
 		if (r->closing.load(std::memory_order_acquire))
 		{
 			release_synthetic_video(r);
@@ -499,7 +508,7 @@ static bool create_synthetic_video(AvPlayerInternal* r, int32_t requested_frameb
 	if (avplayer_dump_enabled())
 	{
 		KYTY_LOG_DEBUG( "KYTY_DUMP_AVPLAYER create frames=%zu size=%zu pitch=%u allocator=%d real=%d\n", r->video_frames.size(), size,
-		             luma_width, r->mem.allocate_texture != nullptr ? 1 : 0, r->decoder != nullptr ? 1 : 0);
+		             video_frame_pitch(luma_width), r->mem.allocate_texture != nullptr ? 1 : 0, r->decoder != nullptr ? 1 : 0);
 	}
 	return true;
 }
@@ -553,7 +562,7 @@ static void fill_video_ex(const AvPlayerInternal* r, AvPlayerVideoEx* video)
 	video->language_code[0]      = 'u';
 	video->language_code[1]      = 'n';
 	video->language_code[2]      = 'd';
-	video->pitch                 = r->synthetic_width;
+	video->pitch                 = video_frame_pitch(r->synthetic_width);
 	video->luma_bit_depth        = 8;
 	video->chroma_bit_depth      = 8;
 	video->video_full_tange_flag = 0;
@@ -751,8 +760,9 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 	if (is_real)
 	{
 		::Kyty::Emulator::AudioVideoBackend::VideoFrame decoded;
+		const size_t chroma_rows = (static_cast<size_t>(height) + 1u) / 2u;
 		if (!decoder->TryReadVideoFrame(&decoded) || decoded.width != width || decoded.height != height || decoded.pitch != width ||
-		    decoded.data.size() != frame_bytes)
+		    decoded.data.size() != static_cast<size_t>(width) * (height + chroma_rows))
 		{
 			return false;
 		}
@@ -764,8 +774,13 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 		{
 			return false;
 		}
-		const VideoFrameMemory::HostWriteLease write_lease(reinterpret_cast<uint64_t>(frame), decoded.data.size());
-		std::memcpy(frame, decoded.data.data(), decoded.data.size());
+		// The decoder rows are tight; each luma and chroma row moves to its aligned pitch.
+		const VideoFrameMemory::HostWriteLease write_lease(reinterpret_cast<uint64_t>(frame), frame_bytes);
+		const size_t                           pitch = video_frame_pitch(width);
+		for (size_t row = 0; row < height + chroma_rows; ++row)
+		{
+			std::memcpy(frame + row * pitch, decoded.data.data() + row * width, width);
+		}
 		timestamp = decoded.timestamp_ms;
 		Core::LockGuard lock(r->mutex);
 		r->synthetic_obtained_num++;
@@ -806,7 +821,7 @@ static bool get_synthetic_video(AvPlayerInternal* r, AvPlayerFrameInfoEx* info)
 	info->details.video.language_code[0]      = 'u';
 	info->details.video.language_code[1]      = 'n';
 	info->details.video.language_code[2]      = 'd';
-	info->details.video.pitch                 = width;
+	info->details.video.pitch                 = video_frame_pitch(width);
 	info->details.video.luma_bit_depth        = 8;
 	info->details.video.chroma_bit_depth      = 8;
 	info->details.video.video_full_tange_flag = 0;
