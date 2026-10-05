@@ -9,6 +9,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
+#include "Emulator/Kernel/Aio.h"
 #include "Emulator/Kernel/EventFlag.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
@@ -1910,6 +1911,18 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("Cg4srZ6TKbU", FileSystem::KernelRead);
 	LIB_FUNC("4wSze92BhLI", FileSystem::KernelWrite);
 	LIB_FUNC("+r3rMFwItV4", FileSystem::KernelPread);
+	LIB_FUNC("nu4a0-arQis", Kernel::Aio::AioInitializeParam);
+	LIB_FUNC("vYU8P9Td2Zo", Kernel::Aio::AioInitializeImpl);
+	LIB_FUNC("HgX7+AORI58", Kernel::Aio::AioSubmitReadCommands);
+	LIB_FUNC("lXT0m3P-vs4", Kernel::Aio::AioSubmitReadCommandsMultiple);
+	LIB_FUNC("XQ8C8y+de+E", Kernel::Aio::AioSubmitWriteCommands);
+	LIB_FUNC("xT3Cpz0yh6Y", Kernel::Aio::AioSubmitWriteCommandsMultiple);
+	LIB_FUNC("2pOuoWoCxdk", Kernel::Aio::AioPollRequest);
+	LIB_FUNC("o7O4z3jwKzo", Kernel::Aio::AioPollRequests);
+	LIB_FUNC("KOF-oJbQVvc", Kernel::Aio::AioWaitRequest);
+	LIB_FUNC("lgK+oIWkJyA", Kernel::Aio::AioWaitRequests);
+	LIB_FUNC("5TgME6AYty4", Kernel::Aio::AioDeleteRequest);
+	LIB_FUNC("Ft3EtsZzAoY", Kernel::Aio::AioDeleteRequests);
 	LIB_FUNC("nKWi-N2HBV4", FileSystem::KernelPwrite);
 	LIB_FUNC("eV9wAD2riIA", FileSystem::KernelStat);
 	LIB_FUNC("kBwCPsYX-m4", FileSystem::KernelFstat);
