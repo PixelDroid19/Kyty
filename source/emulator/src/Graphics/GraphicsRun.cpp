@@ -817,15 +817,20 @@ void CommandProcessor::WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_
 	// When the awaited producer is already queued, avoid the redundant
 	// publication wait for the latest completed submission; the subsequent
 	// WaitSubmission for the specific producer covers the needed ordering.
+	// A plain label store recorded earlier in the current command buffer is
+	// ordered before everything recorded after it, and it is published when the
+	// batch's fence completes either way. A full barrier keeps its memory
+	// effects visible without splitting the submission.
+	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+	{
+		MemoryBarrier();
+		m_consolidated_plain_wait = true;
+		return;
+	}
 	BufferFlushForGpuWait();
 	if (producer == GpuSubmissionResult::Success)
 	{
-		if (m_queue == GraphicContext::QUEUE_GFX &&
-		    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
-		{
-			m_consolidated_plain_wait = true;
-			return;
-		}
 		TraceWait("wait32_producer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask,
 		          dependency.producer.sequence);
 		g_gpu->WaitSubmission(dependency.producer);
@@ -892,15 +897,20 @@ void CommandProcessor::WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_
 	// exact submission order. Suspend only when no matching producer is proven.
 	// Avoid the redundant publication wait for the latest completed submission;
 	// the subsequent WaitSubmission for the specific producer covers ordering.
+	// A plain label store recorded earlier in the current command buffer is
+	// ordered before everything recorded after it, and it is published when the
+	// batch's fence completes either way. A full barrier keeps its memory
+	// effects visible without splitting the submission.
+	if (producer == GpuSubmissionResult::Success && m_queue == GraphicContext::QUEUE_GFX &&
+	    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
+	{
+		MemoryBarrier();
+		m_consolidated_plain_wait = true;
+		return;
+	}
 	BufferFlushForGpuWait();
 	if (producer == GpuSubmissionResult::Success)
 	{
-		if (m_queue == GraphicContext::QUEUE_GFX &&
-		    GraphicsWaitRegMemCanConsolidateCurrentProducer(producer_is_current_submission, static_cast<uint8_t>(dependency.effects)))
-		{
-			m_consolidated_plain_wait = true;
-			return;
-		}
 		TraceWait("wait64_producer_begin", m_queue, reinterpret_cast<uint64_t>(addr), *addr, ref, mask,
 		          dependency.producer.sequence);
 		g_gpu->WaitSubmission(dependency.producer);
@@ -1433,15 +1443,14 @@ void GraphicsRing::ThreadBatchRun(void* data)
 				cp->Flip();
 				flip_submission = cp->BufferFlush();
 			}
-			if (cp->TakeConsolidatedPlainWait())
-			{
-				cp->WaitSubmission(flip_submission);
-			}
+			// A consolidated wait's label is published with the submission, like
+			// any other completion payload of this batch.
+			const bool consolidated_wait = cp->TakeConsolidatedPlainWait();
 			if (buf.decode_completion != nullptr)
 			{
 				buf.decode_completion->Signal();
 			}
-			if (GraphicsBatchCanDeferSubmissionCompletion(cp->CompletionCallbackSources()))
+			if (consolidated_wait || GraphicsBatchCanDeferSubmissionCompletion(cp->CompletionCallbackSources()))
 			{
 				ring->m_async_completion_pending = true;
 			} else if (GraphicsBatchNeedsSubmissionCompletion(cp->CompletionCallbackIssued()))
@@ -2154,16 +2163,40 @@ void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_
 {
 	const ScopedDebugStatsTimer wait_timer(DebugStatsRecordWaitFlipDone);
 
-	SubmissionId submission;
+	// The CP waits for the flip to this buffer, not for all earlier work. A GPU
+	// flip enters the flip queue only when its submission completes, so only
+	// that submission is waited for; the flip queue then waits for its present.
+	SubmissionId flip_submission;
+	bool         flip_recorded = false;
 	{
 		Core::LockGuard lock(m_mutex);
 		EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
-		if (!m_buffer[m_current_buffer]->GetSubmissionId(&submission)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_buffer[m_current_buffer]->GetSubmissionId(&submission) condition ignored (continuing)\n"); }
+		if (display_buffer_index < m_recorded_flips.size())
+		{
+			const auto& recorded = m_recorded_flips[display_buffer_index];
+			flip_recorded        = recorded.valid && recorded.handle == static_cast<int>(video_out_handle);
+			flip_submission      = recorded.submission;
+		}
 	}
+	// Submitting keeps the device busy while this processor records on.
 	BufferFlush();
-	g_gpu->WaitSubmission(submission);
+	if (flip_recorded)
+	{
+		g_gpu->WaitSubmission(flip_submission);
+	}
 
 	VideoOut::VideoOutWaitFlipDone(static_cast<int>(video_out_handle), static_cast<int>(display_buffer_index));
+}
+
+void CommandProcessor::RecordFlipSubmissionLocked()
+{
+	SubmissionId submission;
+	if (m_flip.index < 0 || static_cast<size_t>(m_flip.index) >= m_recorded_flips.size() ||
+	    !m_buffer[m_current_buffer]->GetSubmissionId(&submission))
+	{
+		return;
+	}
+	m_recorded_flips[static_cast<size_t>(m_flip.index)] = {m_flip.handle, submission, true};
 }
 
 void CommandProcessor::WriteAtEndOfPipe32(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
@@ -2446,6 +2479,7 @@ void CommandProcessor::Flip()
 	}
 
 	VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
+	RecordFlipSubmissionLocked();
 	GraphicsRenderWriteAtEndOfPipeOnlyFlip(m_sumbit_id, m_buffer[m_current_buffer], m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                       m_flip.flip_arg);
 	m_flip_issued                  = true;
@@ -2466,6 +2500,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value)
 	}
 
 	VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
+	RecordFlipSubmissionLocked();
 	GraphicsRenderWriteAtEndOfPipeWithFlip32(m_sumbit_id, m_buffer[m_current_buffer], static_cast<uint32_t*>(dst_gpu_addr), value,
 	                                         m_flip.handle, m_flip.index, m_flip.flip_mode, m_flip.flip_arg);
 	m_flip_issued                  = true;
@@ -2490,6 +2525,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 	if (eop_event_type == 0x00000004 && cache_action == 0x00000038)
 	{
 		VideoOut::VideoOutQueueGpuFlip(m_flip.handle);
+		RecordFlipSubmissionLocked();
 		GraphicsRenderWriteAtEndOfPipeWithInterruptWriteBackFlip32(m_sumbit_id, m_buffer[m_current_buffer],
 		                                                           static_cast<uint32_t*>(dst_gpu_addr), value, m_flip.handle, m_flip.index,
 		                                                           m_flip.flip_mode, m_flip.flip_arg);

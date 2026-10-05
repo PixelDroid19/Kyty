@@ -6369,14 +6369,14 @@ TEST(EmulatorGraphicsState, OnlyAPlainLabelStoreOfTheCurrentSubmissionConsolidat
 	EXPECT_FALSE(GraphicsWaitRegMemCanConsolidateCurrentProducer(true, 0u));
 }
 
-TEST(EmulatorGraphicsState, OnlyAQueuedSubmissionInterruptDefersBatchCompletion)
+TEST(EmulatorGraphicsState, EveryCompletionPayloadDefersBatchCompletion)
 {
 	EXPECT_TRUE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionQueuedInterrupt));
 	EXPECT_FALSE(GraphicsBatchCanDeferSubmissionCompletion(0u));
-	EXPECT_FALSE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionEndOfPipeInterrupt));
-	EXPECT_FALSE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionFlip));
-	EXPECT_FALSE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionQueuedInterrupt | kGraphicsCompletionFlip));
-	EXPECT_FALSE(
+	EXPECT_TRUE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionEndOfPipeInterrupt));
+	EXPECT_TRUE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionFlip));
+	EXPECT_TRUE(GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionQueuedInterrupt | kGraphicsCompletionFlip));
+	EXPECT_TRUE(
 	    GraphicsBatchCanDeferSubmissionCompletion(kGraphicsCompletionQueuedInterrupt | kGraphicsCompletionEndOfPipeInterrupt));
 }
 

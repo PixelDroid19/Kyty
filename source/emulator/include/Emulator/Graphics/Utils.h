@@ -915,12 +915,12 @@ constexpr uint8_t kGraphicsCompletionQueuedInterrupt    = 1u << 2u;
 
 [[nodiscard]] inline bool GraphicsBatchCanDeferSubmissionCompletion(uint8_t completion_callback_sources)
 {
-	// A queued graphics interrupt (a driver submission completing) is
-	// asynchronous on the guest and carries no label or flip payload the
-	// submitting thread must observe immediately; the ring's idle pump publishes
-	// it after the Vulkan fence. Interrupts and flips the stream itself raises,
-	// alone or mixed, keep synchronous completion at the end of the batch.
-	return completion_callback_sources == kGraphicsCompletionQueuedInterrupt;
+	// Completion payloads (labels, interrupts, flips) are asynchronous on the
+	// guest: it observes them through memory, event queues and flip status,
+	// never by its submit call blocking. The fence poll of a later submission or
+	// the ring's idle pump publishes them, so the processor records the next
+	// batch while the device executes this one.
+	return completion_callback_sources != 0u;
 }
 
 // GPU→CPU buffer write-back with absolute holes [hole_begin[i], hole_end[i]).

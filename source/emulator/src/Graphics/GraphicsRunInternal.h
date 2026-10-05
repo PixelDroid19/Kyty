@@ -16,6 +16,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/HardwareContext.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -408,6 +409,16 @@ private:
 
 	FlipInfo m_flip;
 	bool     m_flip_issued                 = false;
+	// Submission that recorded the latest GPU flip to each display buffer
+	// index. Its flip request reaches the flip queue only on completion.
+	struct RecordedFlip
+	{
+		int          handle = 0;
+		SubmissionId submission;
+		bool         valid = false;
+	};
+	std::array<RecordedFlip, 16> m_recorded_flips {};
+	void                         RecordFlipSubmissionLocked();
 	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
 	uint8_t  m_completion_callback_sources = 0u;
 	bool     m_consolidated_plain_wait     = false;
