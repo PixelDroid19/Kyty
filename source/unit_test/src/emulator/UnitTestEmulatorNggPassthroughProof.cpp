@@ -192,14 +192,19 @@ TEST(EmulatorNggPassthroughProof, UnknownUpperSystemBitsRemainUnknownThroughDead
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorNggPassthroughProof, NumericScalarInputsAreRefusedEvenWhenAllBitsAreKnown)
+TEST(EmulatorNggPassthroughProof, WaveDerivedScalarInputsAreRefusedAndUserDataIsUniform)
 {
 	ASSERT_EXIT(([] {
 		Initialize();
 		const auto original = Parse(Fixture());
 		const auto first = Find(original, Type::VMovB32);
+		// An untouched user-data word holds the same value on every lane of every launch.
+		auto uniform = original;
+		uniform.GetInstructions()[first].src[0] = Register(ShaderOperandType::Sgpr, 71);
+		Accept(uniform);
+		// s20 copies the wave info word s3 and s22 is extracted from it.
 		for (auto source: {Register(ShaderOperandType::Sgpr, 3), Register(ShaderOperandType::Sgpr, 20),
-		                   Register(ShaderOperandType::Sgpr, 22), Register(ShaderOperandType::Sgpr, 71),
+		                   Register(ShaderOperandType::Sgpr, 22),
 		                   Register(ShaderOperandType::ExecLo), Register(ShaderOperandType::ExecHi),
 		                   Register(ShaderOperandType::VccLo), Register(ShaderOperandType::VccHi),
 		                   Register(ShaderOperandType::Scc), Register(ShaderOperandType::ExecZ),
@@ -232,7 +237,8 @@ TEST(EmulatorNggPassthroughProof, Wave32IgnoresHighExecActivityWithoutErasingIts
 		const auto vector_index = Find(changed, Type::VMovB32);
 		Check(preserved.steps[vector_index].exec_before.value == 0x935ac67100000007ull &&
 		          preserved.steps[vector_index].exec_before.known_mask == UINT64_MAX, "known numeric high EXEC word is preserved");
-		Refuse(changed, Reject::ExecMaskMismatch, vector_index, {64, 3, 1});
+		// Extra active lanes do not observe the lane-local move; the export still needs the exact mask.
+		Refuse(changed, Reject::ExecMaskMismatch, Find(changed, Type::Exp, 1), {64, 3, 1});
 		auto leak = changed;
 		leak.GetInstructions()[vector_index].src[0] = Register(ShaderOperandType::ExecHi);
 		Refuse(leak, Reject::ScalarVectorInput, vector_index, {32, 3, 1});
@@ -242,8 +248,9 @@ TEST(EmulatorNggPassthroughProof, Wave32IgnoresHighExecActivityWithoutErasingIts
 		const auto saved_proof = Accept(saved, {32, 3, 1});
 		Check(saved_proof.steps[saved_index - 1u].scalar_result.value == 0x935ac671u &&
 		          saved_proof.steps[saved_index - 1u].scalar_result.known_mask == 0xffffffffu, "scalar copy retains the numeric high word");
+		// The copied word was defined by a literal, so it is the same for every launch.
 		saved.GetInstructions()[saved_index].src[0] = Register(ShaderOperandType::Sgpr, 42);
-		Refuse(saved, Reject::ScalarVectorInput, saved_index, {32, 3, 1});
+		Accept(saved, {32, 3, 1});
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }
@@ -290,15 +297,24 @@ TEST(EmulatorNggPassthroughProof, EveryVectorAndExportNeedsItsProvedCountMask)
 		const auto original = Parse(Fixture());
 		const auto primitive_shift = Find(original, Type::SLshrB64);
 		const auto vertex_shift = Find(original, Type::SLshrB64, 1);
-		for (auto pair: {std::pair<uint32_t, uint32_t> {primitive_shift, Find(original, Type::Exp)},
-		                std::pair<uint32_t, uint32_t> {vertex_shift, Find(original, Type::VMovB32)}})
+		// {shift, first instruction refusing a wrong known mask, first refusing an unknown one}.
+		// A wider vertex mask is first observed by the vertex export: lane-local moves on
+		// lanes outside the ES mask are never read, but they still need a known EXEC.
+		struct Case
+		{
+			uint32_t shift;
+			uint32_t wrong_index;
+			uint32_t unknown_index;
+		};
+		for (const Case& c: {Case {primitive_shift, Find(original, Type::Exp), Find(original, Type::Exp)},
+		                     Case {vertex_shift, Find(original, Type::Exp, 1), Find(original, Type::VMovB32)}})
 		{
 			auto wrong = original;
-			wrong.GetInstructions()[pair.first].src[1] = Literal(60); // four active lanes, wrong for both supplied counts
-			Refuse(wrong, Reject::ExecMaskMismatch, pair.second);
+			wrong.GetInstructions()[c.shift].src[1] = Literal(60); // four active lanes, wrong for both supplied counts
+			Refuse(wrong, Reject::ExecMaskMismatch, c.wrong_index);
 			auto unknown = original;
-			unknown.GetInstructions()[pair.first].src[1] = Register(ShaderOperandType::Sgpr, 70);
-			Refuse(unknown, Reject::UnknownExec, pair.second);
+			unknown.GetInstructions()[c.shift].src[1] = Register(ShaderOperandType::Sgpr, 70);
+			Refuse(unknown, Reject::UnknownExec, c.unknown_index);
 		}
 		Words vector;
 		Vop1(vector, 1, 40, Inline(0));

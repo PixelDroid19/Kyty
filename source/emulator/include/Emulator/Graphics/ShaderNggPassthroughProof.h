@@ -149,8 +149,9 @@ struct ShaderNggPassthroughProof
 // scalar/EXEC bits are unknown. v0 is the original packed primitive on the
 // primitive lanes; v5/v8 are symbolic vertex/instance IDs on the vertex lanes.
 // No scalar representative or s3 seed is produced. The retained instructions
-// read only defined per-vertex VGPRs and encoded constants and run under the
-// exact ES mask. Numeric scalar/SCC/VCC/EXEC reads in that residue are refused.
+// read only defined per-vertex VGPRs, encoded constants and scalar words derived
+// only from user data (never from SGPR 0..7, VCC, EXEC, M0 or SCC), and run with
+// every ES vertex lane enabled; results on other enabled lanes are never read.
 //
 // A future compiler must retain those original ALU/export instructions (and
 // their floating-point modes), and replace allocation/EXP PRIM with PROVED

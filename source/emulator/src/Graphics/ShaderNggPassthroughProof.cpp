@@ -215,8 +215,19 @@ int VectorArity(Type type)
 		case Type::VAddF32:
 		case Type::VSubF32:
 		case Type::VMulF32: return 2;
+		case Type::VSadU32: return 3; // |src0 - src1| + src2, all unsigned full words
 		default: return 0;
 	}
+}
+
+// SGPR 0..7, VCC_LO, VCC_HI, EXEC_LO, EXEC_HI, M0, SCC carry hardware wave state;
+// every other initial scalar word (user data) is the same for every launch.
+ShaderNggScalarDependencies WaveWords()
+{
+	ShaderNggScalarDependencies words;
+	for (unsigned word = 0; word < 8u; ++word) { words.set(word); }
+	for (unsigned word = kVccLo; word <= kScc; ++word) { words.set(word); }
+	return words;
 }
 
 bool ModeledInstruction(Type type)
@@ -310,7 +321,8 @@ private:
 	bool Export(const ShaderInstruction& inst);
 	bool Vector(const ShaderInstruction& inst, int arity);
 	bool VertexSource(const ShaderOperand& op, VectorValue* value);
-	bool ExecMask(uint64_t expected);
+	// covers: EXEC may also enable lanes outside expected (their results are never read).
+	bool ExecMask(uint64_t expected, bool covers = false);
 	bool Immediate(const ShaderInstruction& inst, uint32_t* value);
 	bool PrologueComplete(const ShaderInstruction& inst) const;
 	void FinishPrologue();
@@ -463,10 +475,7 @@ bool Analyzer::PrologueComplete(const ShaderInstruction& inst) const
 
 void Analyzer::FinishPrologue()
 {
-	// SGPR 0..7, VCC_LO, VCC_HI, EXEC_LO, EXEC_HI, M0, SCC carry hardware wave state.
-	ShaderNggScalarDependencies wave_words;
-	for (unsigned word = 0; word < 8u; ++word) { wave_words.set(word); }
-	for (unsigned word = kVccLo; word <= kScc; ++word) { wave_words.set(word); }
+	const auto wave_words = WaveWords();
 	for (unsigned word = 0; word < scalar.size(); ++word)
 	{
 		if ((scalar[word].initial_dependencies & wave_words).any()) { result.wave_dependent_scalars.set(word); }
@@ -475,7 +484,7 @@ void Analyzer::FinishPrologue()
 	result.prologue_end_index = step.instruction_index;
 }
 
-bool Analyzer::ExecMask(uint64_t expected)
+bool Analyzer::ExecMask(uint64_t expected, bool covers)
 {
 	const auto exec = Pair(kExecLo);
 	const auto wave = LowMask(result.counts.guest_wave_size);
@@ -486,7 +495,8 @@ bool Analyzer::ExecMask(uint64_t expected)
 	}
 	step.active_mask_known = true;
 	step.active_mask = exec.value & wave;
-	if (step.active_mask != expected)
+	const bool matches = covers ? (step.active_mask & expected) == expected : step.active_mask == expected;
+	if (!matches)
 	{
 		return Fail(Reject::ExecMaskMismatch, "architectural EXEC activity differs from the explicit ES/GS count mask");
 	}
@@ -504,9 +514,17 @@ bool Analyzer::VertexSource(const ShaderOperand& op, VectorValue* value)
 		value->defined = result.vertex_mask;
 		return true;
 	}
+	if (op.type == Operand::Sgpr && op.size == 1 && op.register_id >= 0 && op.register_id < static_cast<int>(kVccLo) &&
+	    (scalar[op.register_id].initial_dependencies & WaveWords()).none())
+	{
+		// A word derived only from user data is the same on every lane of every launch.
+		result.scalar_dependencies |= scalar[op.register_id].initial_dependencies;
+		value->defined = result.vertex_mask;
+		return true;
+	}
 	if (op.type != Operand::Vgpr)
 	{
-		return Fail(Reject::ScalarVectorInput, "retained vertex instructions may not read scalar/SCC/VCC/EXEC numerically, even if known");
+		return Fail(Reject::ScalarVectorInput, "retained vertex instructions may not read wave-derived scalar/SCC/VCC/EXEC numerically");
 	}
 	if (op.size != 1) { return Fail(Reject::MalformedInstruction, "retained VGPR source must have exactly one word"); }
 	*value = vector[op.register_id];
@@ -525,13 +543,16 @@ bool Analyzer::VertexSource(const ShaderOperand& op, VectorValue* value)
 
 bool Analyzer::Vector(const ShaderInstruction& inst, int arity)
 {
-	const auto format = arity == 1 ? ShaderInstructionFormat::SVdstSVsrc0 : ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+	const auto format = arity == 1   ? ShaderInstructionFormat::SVdstSVsrc0
+	                    : arity == 2 ? ShaderInstructionFormat::SVdstSVsrc0SVsrc1
+	                                 : ShaderInstructionFormat::VdstVsrc0Vsrc1Vsrc2;
 	if (inst.format != format || inst.src_num != arity || inst.dst.type != Operand::Vgpr || inst.dst.size != 1 ||
 	    inst.sopp_opcode != 0xffu)
 	{
 		return Fail(Reject::MalformedInstruction, "lane-local instruction requires its exact non-carry full-word tuple");
 	}
-	if (!ExecMask(result.vertex_mask)) { return false; }
+	// A lane-local result on a lane outside the ES vertex mask is never read.
+	if (!ExecMask(result.vertex_mask, true)) { return false; }
 	if (inst.dst.register_id == 0 && result.primitive_export_index == ShaderNggPassthroughNoInstruction)
 	{
 		return Fail(Reject::PrimitiveSourceModified, "v0 may not be written before forwarding its original packed primitive");
