@@ -314,13 +314,12 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 				const bool immediate = source.type == ShaderOperandType::LiteralConstant ||
 				                       source.type == ShaderOperandType::IntegerInlineConstant ||
 				                       source.type == ShaderOperandType::FloatInlineConstant;
-				if (inst.buffer_offen && source_index == 0)
+				if (inst.buffer_offen && source_index == 0 && source.type == ShaderOperandType::Vgpr)
 				{
-					// MUBUF/MTBUF widens VADDR to {voffset, index} when OFFEN is set.
-					// The addressing state is carried by the instruction rather than
-					// duplicated across every static buffer format.
-					EXIT_IF(source.type != ShaderOperandType::Vgpr || source.size != 2);
-					s = operand_array_to_str(source, source.size);
+					// VADDR holds {index, voffset} with IDXEN and OFFEN, or the voffset
+					// alone (MTBUF with OFFEN only). The addressing state is carried by
+					// the instruction rather than duplicated across every buffer format.
+					s = source.size > 1 ? operand_array_to_str(source, source.size) : operand_to_str(source);
 					break;
 				}
 				// Multi-dword DS data operands are consecutive VGPRs.
