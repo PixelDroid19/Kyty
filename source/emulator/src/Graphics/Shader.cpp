@@ -2446,8 +2446,8 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 	}
 }
 
-static bool ShaderSnapshotGen5Eud(uint64_t guest_address, uint32_t dwords,
-                                  std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS>* snapshot)
+bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
+                                        std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS>* snapshot)
 {
 	if (snapshot == nullptr || guest_address == 0u || dwords == 0u || dwords > SHADER_GEN5_EUD_MAX_DWORDS)
 	{
@@ -2748,7 +2748,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bool snapshot_ready = false;
 		for (uint32_t pass = 0; pass < 2u; ++pass)
 		{
-			if (!ShaderSnapshotGen5Eud(eud_guest_address, required_end_dw, &eud_snapshot))
+			if (!ShaderSnapshotGuestDescriptorTable(eud_guest_address, required_end_dw, &eud_snapshot))
 			{
 				EXIT("unstable or unreadable Gen5 EUD snapshot: dwords=%u\n", static_cast<unsigned>(required_end_dw));
 			}
@@ -2965,6 +2965,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		ShaderPruneUnusedMetadataStorage(*code, &bind->storage_buffers, user_sgpr_num, user_data_register_base);
 		ShaderCollectDynamicScalarResources(*code, bind, user_sgpr, info, extended_buffer, user_data->eud_size_dw);
 	}
+	if (code != nullptr && !vertex_resource_types)
+	{
+		ShaderCollectPointerTableResources(*code, bind, user_sgpr, info, user_data->srt_size_dw, user_data_register_base);
+	}
 
 	// Gen5 metadata is advisory: some shaders address an S# descriptor directly
 	// from the EUD/user-SGPR namespace without listing it in the sharp table.
@@ -3179,6 +3183,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	}
 
 	ExcludeUnusedMetadataStorage(&bind->storage_buffers);
+	// After compaction, so the recorded resource indices stay final.
+	if (code != nullptr && !vertex_resource_types)
+	{
+		ShaderCollectAssembledBufferDescriptors(*code, bind, user_sgpr, user_sgpr_num, user_data_register_base);
+	}
 }
 
 int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count)
@@ -3372,7 +3381,8 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			// the base stays runtime data so a cached pipeline can relocate.
 			info->bind.program_base_used   = vs_isa->HasAnyOf({ShaderInstructionType::SGetpcB64});
 			info->bind.program_base        = info->bind.program_base_used ? shader_addr : 0u;
-			info->bind.device_address_used = ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase);
+			info->bind.device_address_used =
+			    ShaderHasUnboundBufferLoad(*vs_isa, info->bind, kGen5GsFrontUserDataBase) || ShaderHasGlobalMemoryLoad(*vs_isa);
 		}
 	} else
 	{
@@ -3535,6 +3545,29 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 	ShaderCalcBindingIndices(&info->bind);
 }
 
+// An S_LOAD through a guest pointer that neither the EUD path nor a PC-keyed
+// descriptor mapping resolves reads plain data at a runtime address.
+static bool ShaderScalarLoadNeedsGuestAddress(const ShaderInstruction& inst, const ShaderBindResources& bind)
+{
+	if (!Core::EnumName8(inst.type).StartsWith("SLoad") || inst.src_num < 1 ||
+	    (inst.src[0].type != ShaderOperandType::Sgpr && inst.src[0].type != ShaderOperandType::VccLo))
+	{
+		return false;
+	}
+	if (inst.src[0].type == ShaderOperandType::Sgpr && bind.extended.used && inst.src[0].register_id == bind.extended.start_register)
+	{
+		return false;
+	}
+	for (const auto& record: bind.dynamic_sloads.records)
+	{
+		if (record.instruction_pc == inst.pc)
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                           ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable)
 {
@@ -3638,8 +3671,11 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->bind.program_base_used = analysis.code->HasAnyOf({ShaderInstructionType::SGetpcB64});
 		ps_info->bind.program_base = ps_info->bind.program_base_used ? regs->ps_regs.data_addr : 0u;
 		const auto& instructions = analysis.code->GetInstructions();
-		ps_info->bind.device_address_used = std::any_of(instructions.begin(), instructions.end(),
-		    [&bind = ps_info->bind](const auto& inst) { return ShaderScalarBufferUsesRuntimeDescriptor(bind, inst); });
+		ps_info->bind.device_address_used =
+		    ShaderHasGlobalMemoryLoad(*analysis.code) ||
+		    std::any_of(instructions.begin(), instructions.end(), [&bind = ps_info->bind](const auto& inst) {
+			    return ShaderScalarBufferUsesRuntimeDescriptor(bind, inst) || ShaderScalarLoadNeedsGuestAddress(inst, bind);
+		    });
 	} else
 	{
 		ShaderParseUsage(regs->ps_regs.data_addr, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr);
@@ -3680,9 +3716,15 @@ bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResource
 	return false;
 }
 
+bool ShaderHasGlobalMemoryLoad(const ShaderCode& code)
+{
+	return code.HasAnyOf({ShaderInstructionType::GlobalLoadDword, ShaderInstructionType::GlobalLoadDwordx2,
+	                      ShaderInstructionType::GlobalLoadDwordx3, ShaderInstructionType::GlobalLoadDwordx4});
+}
+
 static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBindResources& bind)
 {
-	if (ShaderHasUnboundBufferLoad(code, bind))
+	if (ShaderHasUnboundBufferLoad(code, bind) || ShaderHasGlobalMemoryLoad(code))
 	{
 		return true;
 	}
@@ -3692,9 +3734,7 @@ static bool ShaderUsesGuestDeviceAddress(const ShaderCode& code, const ShaderBin
 		{
 			return true;
 		}
-		const auto name = Core::EnumName8(inst.type);
-		if (name.StartsWith("SLoad") && !(bind.extended.used && inst.src[0].type == ShaderOperandType::Sgpr &&
-		                                   inst.src[0].register_id == bind.extended.start_register))
+		if (ShaderScalarLoadNeedsGuestAddress(inst, bind))
 		{
 			return true;
 		}
@@ -4695,6 +4735,14 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(static_cast<uint32_t>(record.resource_field_offset));
 		ret->ids.Add(record.last_consumer_pc);
 		ret->ids.Add(static_cast<uint32_t>(record.raw_vmem_oob_guarded));
+	}
+
+	ret->ids.Add(bind.assembled_descriptors.Size());
+	for (const auto& record: bind.assembled_descriptors)
+	{
+		ret->ids.Add(record.consumer_pc);
+		ret->ids.Add(static_cast<uint32_t>(record.register_id));
+		ret->ids.Add(static_cast<uint32_t>(record.resource_index));
 	}
 
 	ret->ids.Add(bind.zero_sbuffer_resources.buffers_num);

@@ -562,7 +562,7 @@ bool Body::VectorSources(const ShaderInstruction& inst)
 		{
 			// A buffer address holds one VGPR per enabled part (index, offset); the decoder's
 			// operand width also counts OFFEN alone as a pair.
-			if (source == 0 && IsVectorLoad(inst.type)) { count = (inst.buffer_idxen ? 1u : 0u) + (inst.buffer_offen ? 1u : 0u); }
+			if (source == 0 && IsBufferLoad(inst.type)) { count = (inst.buffer_idxen ? 1u : 0u) + (inst.buffer_offen ? 1u : 0u); }
 			for (unsigned word = 0; word < count; ++word)
 			{
 				if (!VgprDefined(first + word)) { return Fail(inst, "VGPR read before it is defined on every path"); }

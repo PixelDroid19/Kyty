@@ -55,6 +55,7 @@ KYTY_SHADER_PARSER(shader_parse_ds);
 KYTY_SHADER_PARSER(shader_parse_mimg);
 KYTY_SHADER_PARSER(shader_parse_bvh);
 KYTY_SHADER_PARSER(shader_parse_mtbuf);
+KYTY_SHADER_PARSER(shader_parse_flat);
 KYTY_SHADER_PARSER(shader_parse_vintrp);
 
 } // namespace Kyty::Libs::Graphics

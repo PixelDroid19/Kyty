@@ -2557,7 +2557,7 @@ void Spirv::WriteInstructions()
 			WriteLabel(index);
 		}
 
-		String8 dst;
+		String8 dst = MaterializeAssembledDescriptors(inst);
 		String8 dst_debug;
 
 		bool ok = false;
@@ -2920,6 +2920,38 @@ void Spirv::FindConstants()
 		}
 	}
 	if (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog) { AddConstantUint(8u); }
+	if (UsesGuestDeviceAddress())
+	{
+		// Guest-pointer S_LOAD and GLOBAL lowering name their offsets, the
+		// sign extension of a negative immediate, the 48-bit address mask and
+		// the dword alignment mask.
+		AddConstantUint(0u);
+		AddConstantUint(0xffffu);
+		AddConstantUint(0xfffffffcu);
+		AddConstantUint(0xffffffffu);
+		// Typed loads through an unbound V#: element sizes and the decoded formats.
+		for (uint32_t value: {4u, 8u, 12u, 16u, 20u, 22u, 29u, 36u, 39u, 71u})
+		{
+			AddConstantUint(value);
+		}
+		for (const auto& inst: m_code.GetInstructions())
+		{
+			const auto name = Core::EnumName8(inst.type);
+			if (name.StartsWith("SLoad"))
+			{
+				const auto& offset = inst.src[1];
+				if (inst.src_num > 1 &&
+				    (offset.type == ShaderOperandType::LiteralConstant || offset.type == ShaderOperandType::IntegerInlineConstant))
+				{
+					AddConstantUint(offset.constant.u);
+				}
+				AddConstantUint(static_cast<uint32_t>(inst.smem_imm_offset));
+			} else if (name.StartsWith("GlobalLoad"))
+			{
+				AddConstantUint(static_cast<uint32_t>(static_cast<int32_t>(inst.flat_offset)));
+			}
+		}
+	}
 	AddConstantFloat(0.0f);
 	AddConstantFloat(0.5f);
 	AddConstantFloat(1.0f);

@@ -120,6 +120,10 @@ enum class ShaderInstructionType : uint32_t
 	SLshl2AddU32,
 	SLshl3AddU32,
 	Exp,
+	GlobalLoadDword,
+	GlobalLoadDwordx2,
+	GlobalLoadDwordx3,
+	GlobalLoadDwordx4,
 	ImageGetResinfo,
 	ImageGather4,
 	ImageLoad,
@@ -837,6 +841,9 @@ enum Format : uint64_t
 	VdataVaddr4StDmask                  = FormatDefine({DA, S0A4, S1A8, MimgDmask}),
 	Vdata1Vaddr2StVsrc2Dmask1           = FormatDefine({D, S0A2, S1A8, S2, Dmask1}),
 	Vdata4VaddrSvSoffsIdxen             = FormatDefine({DA4, S0, S1A4, S2, Idxen}),
+	// GLOBAL: a 64-bit VGPR address, or a 32-bit VGPR offset from a 64-bit SGPR base.
+	VdataVaddr2Off                      = FormatDefine({DA, S0A2, Off}),
+	VdataVaddrSaddr2                    = FormatDefine({DA, S0, S1A2}),
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
@@ -968,6 +975,8 @@ struct ShaderInstruction
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
+	// FLAT/GLOBAL: signed byte offset added to the 64-bit address.
+	int16_t flat_offset = 0;
 	// Preserve cache-control bits for exact SMEM admission. Unknown is fail-closed.
 	uint8_t smem_flags = 0xffu; // bit 0: GLC; bit 1: DLC; bit 7: undefined encoding bits set
 	// MUBUF/MTBUF byte-address controls. The instruction's 12-bit immediate is
@@ -1611,6 +1620,17 @@ struct ShaderDynamicSLoadMappings
 	Vector<ShaderDynamicSLoadMapping> records;
 };
 
+// A V# the shader assembles from user-data words with S_MOV copies: the
+// buffer instruction at consumer_pc reads storage resource resource_index
+// through the four SGPRs at register_id, which are written with that
+// resource's metadata right before the instruction.
+struct ShaderAssembledDescriptor
+{
+	uint32_t consumer_pc    = 0;
+	int      register_id    = 0;
+	int      resource_index = 0;
+};
+
 enum class ShaderTextureUsage
 {
 	Unknown,
@@ -1705,6 +1725,9 @@ struct ShaderBindResources;
 // indices at s8; negative stream sentinels never identify shader registers.
 [[nodiscard]] bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
                                                        int user_data_register_base = 0);
+// GLOBAL memory loads dereference per-lane guest addresses through the
+// guest device address table.
+[[nodiscard]] bool ShaderHasGlobalMemoryLoad(const ShaderCode& code);
 [[nodiscard]] bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind,
                                               int user_data_register_base = 0);
 struct ShaderComputeEmptyGate
@@ -1879,6 +1902,7 @@ struct ShaderBindResources
 	ShaderDirectSgprsResources direct_sgprs;
 	ShaderExtendedResources    extended;
 	ShaderDynamicSLoadMappings dynamic_sloads;
+	Vector<ShaderAssembledDescriptor> assembled_descriptors;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,

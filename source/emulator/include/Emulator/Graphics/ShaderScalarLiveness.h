@@ -3,6 +3,7 @@
 
 #include "Emulator/Graphics/Shader.h"
 
+#include <array>
 #include <bitset>
 #include <vector>
 
@@ -22,6 +23,14 @@ constexpr int kShaderScalarLivenessSgprs = 106;
 // on every path reaching that instruction. Empty sets when the CFG cannot be
 // resolved, so callers never treat a redefined register as user data.
 [[nodiscard]] std::vector<std::bitset<kShaderScalarLivenessSgprs>> ShaderSgprsHoldingEntryValue(const ShaderCode& code);
+
+// Per instruction index and SGPR: the SGPR whose entry value it holds on every
+// path reaching that instruction (itself while untouched, another one after
+// S_MOV copies), or kShaderSgprNoEntrySource. All unknown when the CFG cannot
+// be resolved.
+constexpr int8_t kShaderSgprNoEntrySource = -1;
+using ShaderSgprEntrySources              = std::array<int8_t, kShaderScalarLivenessSgprs>;
+[[nodiscard]] std::vector<ShaderSgprEntrySources> ShaderSgprEntrySourcesAt(const ShaderCode& code);
 
 } // namespace Kyty::Libs::Graphics
 

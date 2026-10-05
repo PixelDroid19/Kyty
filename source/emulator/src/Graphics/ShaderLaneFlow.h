@@ -47,6 +47,7 @@ constexpr uint8_t kWide     = 16; // a mask that may include helper lanes (reach
 [[nodiscard]] bool IsSelect(ShaderInstructionType type);
 // V_CMPX on RDNA writes only EXEC (EXEC &= compare); the decoder's VCC/SGPR destination is not written.
 [[nodiscard]] bool WritesExecOnly(ShaderInstructionType type);
+[[nodiscard]] bool IsBufferLoad(ShaderInstructionType type);
 [[nodiscard]] bool IsVectorLoad(ShaderInstructionType type);
 // Image reads whose result depends only on this lane's address and on scalar resources: explicit
 // LOD (or none, for loads), no derivatives, no write.

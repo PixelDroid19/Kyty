@@ -158,6 +158,9 @@ public:
 	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
 	                                                     uint32_t index, String8* output);
 	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
+	// Writes the metadata of each assembled V# the instruction consumes into its
+	// descriptor SGPRs (see ShaderAssembledDescriptor).
+	[[nodiscard]] String8 MaterializeAssembledDescriptors(const ShaderInstruction& inst) const;
 	[[nodiscard]] String8 EmitMetadataStore(int row, int field, const String8& reg) const;
 	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
 	[[nodiscard]] bool    UsesBlockDispatch() const;
@@ -280,6 +283,28 @@ public:
 		if (offset >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
 		*buffer = m_extended_mapping[offset][0];
 		*field  = m_extended_mapping[offset][1];
+	}
+
+	// First table dword that the PC-keyed descriptor S_LOAD at instruction_pc
+	// materializes; false when that load has no mapping.
+	[[nodiscard]] bool GetDynamicSLoadOffset(uint32_t instruction_pc, int* offset_dw) const
+	{
+		EXIT_IF(offset_dw == nullptr);
+		if (m_bind == nullptr)
+		{
+			return false;
+		}
+		bool found = false;
+		for (uint32_t mapping = 0; mapping < m_bind->dynamic_sloads.records.Size(); ++mapping)
+		{
+			const auto& record = m_bind->dynamic_sloads.records.At(mapping);
+			if (record.instruction_pc == instruction_pc && (!found || record.offset_dw < *offset_dw))
+			{
+				*offset_dw = record.offset_dw;
+				found      = true;
+			}
+		}
+		return found;
 	}
 
 	[[nodiscard]] bool GetDynamicSLoadMappedIndex(uint32_t instruction_pc, int offset, int* buffer, int* field) const

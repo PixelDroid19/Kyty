@@ -1,6 +1,7 @@
 #include "Emulator/Graphics/ShaderScalarLiveness.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
 #include <mutex>
 #include <unordered_map>
@@ -158,16 +159,48 @@ Sgprs ComputeSgprsLiveAtEntry(const ShaderCode& code)
 	return live_in[0];
 }
 
-std::vector<Sgprs> ComputeSgprsHoldingEntryValue(const ShaderCode& code)
+// Unvisited marker of the must-analysis below; never escapes it.
+constexpr int8_t kUnvisited = -2;
+
+using Sources = ShaderSgprEntrySources;
+
+// S_MOV_B32/B64 between SGPRs copies the provenance of each word; any other
+// definition loses it.
+void ApplyCopies(const ShaderInstruction& inst, const Sgprs& defs, const Sources& in, Sources* out)
+{
+	*out = in;
+	for (int r = 0; r < kShaderScalarLivenessSgprs; r++)
+	{
+		if (defs.test(static_cast<size_t>(r)))
+		{
+			(*out)[static_cast<size_t>(r)] = kShaderSgprNoEntrySource;
+		}
+	}
+	const int words = inst.type == ShaderInstructionType::SMovB32 ? 1 : (inst.type == ShaderInstructionType::SMovB64 ? 2 : 0);
+	if (words == 0 || inst.src_num != 1 || inst.dst.type != ShaderOperandType::Sgpr || inst.src[0].type != ShaderOperandType::Sgpr ||
+	    inst.dst.register_id < 0 || inst.src[0].register_id < 0 || inst.dst.register_id + words > kShaderScalarLivenessSgprs ||
+	    inst.src[0].register_id + words > kShaderScalarLivenessSgprs)
+	{
+		return;
+	}
+	for (int w = 0; w < words; w++)
+	{
+		(*out)[static_cast<size_t>(inst.dst.register_id + w)] = in[static_cast<size_t>(inst.src[0].register_id + w)];
+	}
+}
+
+// Must-analysis over the decoded CFG: an SGPR has a source only when every
+// path reaching the instruction leaves the same entry value in it.
+std::vector<Sources> ComputeSgprEntrySources(const ShaderCode& code)
 {
 	const uint32_t count = code.GetInstructions().Size();
-	ScalarFlow     flow;
+	Sources        unknown {};
+	unknown.fill(kShaderSgprNoEntrySource);
+	ScalarFlow flow;
 	if (count == 0 || !BuildScalarFlow(code, &flow))
 	{
-		return std::vector<Sgprs>(count);
+		return std::vector<Sources>(count, unknown);
 	}
-	// Must-analysis: entry holds everything; any other instruction holds the
-	// intersection of its predecessors' outputs. Start from "all hold".
 	std::vector<std::vector<uint32_t>> predecessors(count);
 	for (uint32_t i = 0; i < count; i++)
 	{
@@ -176,34 +209,65 @@ std::vector<Sgprs> ComputeSgprsHoldingEntryValue(const ShaderCode& code)
 			predecessors[succ].push_back(i);
 		}
 	}
-	std::vector<Sgprs> in(count);
-	for (auto& set: in)
+	Sources unvisited {};
+	unvisited.fill(kUnvisited);
+	std::vector<Sources> in(count, unvisited);
+	std::vector<Sources> out(count, unvisited);
+	for (int r = 0; r < kShaderScalarLivenessSgprs; r++)
 	{
-		set.set();
+		in[0][static_cast<size_t>(r)] = static_cast<int8_t>(r);
 	}
 	for (bool changed = true; changed;)
 	{
 		changed = false;
 		for (uint32_t i = 0; i < count; i++)
 		{
-			Sgprs updated;
-			updated.set();
+			Sources joined = i == 0 ? in[0] : unvisited;
 			for (auto pred: predecessors[i])
 			{
-				updated &= in[pred] & ~flow.defs[pred];
+				for (size_t r = 0; r < joined.size(); r++)
+				{
+					const int8_t value = out[pred][r];
+					if (value == kUnvisited)
+					{
+						continue;
+					}
+					joined[r] = (joined[r] == kUnvisited || joined[r] == value) ? value : kShaderSgprNoEntrySource;
+				}
 			}
-			if (i != 0 && predecessors[i].empty())
+			Sources updated {};
+			ApplyCopies(code.GetInstructions().At(i), flow.defs[i], joined, &updated);
+			if (joined != in[i] || updated != out[i])
 			{
-				continue;
-			}
-			if (updated != in[i])
-			{
-				in[i]   = updated;
+				in[i]   = joined;
+				out[i]  = updated;
 				changed = true;
 			}
 		}
 	}
+	// An instruction no path reaches keeps every entry value, as before any
+	// definition (the unreachable code never runs).
+	for (auto& sources: in)
+	{
+		if (sources == unvisited)
+		{
+			sources = in[0];
+		}
+	}
 	return in;
+}
+
+std::vector<Sgprs> HoldingOwnEntryValue(const std::vector<Sources>& sources)
+{
+	std::vector<Sgprs> holding(sources.size());
+	for (size_t i = 0; i < sources.size(); i++)
+	{
+		for (int r = 0; r < kShaderScalarLivenessSgprs; r++)
+		{
+			holding[i].set(static_cast<size_t>(r), sources[i][static_cast<size_t>(r)] == r);
+		}
+	}
+	return holding;
 }
 
 // Every instruction field the scalar flow reads, in order: equal signatures
@@ -244,6 +308,7 @@ struct FlowSummary
 {
 	std::vector<int64_t> signature;
 	Sgprs                live_at_entry;
+	std::vector<Sources> entry_sources;
 	std::vector<Sgprs>   holding_entry_value;
 };
 
@@ -266,8 +331,10 @@ std::shared_ptr<const FlowSummary> SummaryOf(const ShaderCode& code)
 			}
 		}
 	}
-	auto summary = std::make_shared<FlowSummary>(
-	    FlowSummary {std::move(signature), ComputeSgprsLiveAtEntry(code), ComputeSgprsHoldingEntryValue(code)});
+	auto entry_sources = ComputeSgprEntrySources(code);
+	auto holding       = HoldingOwnEntryValue(entry_sources);
+	auto summary       = std::make_shared<FlowSummary>(
+        FlowSummary {std::move(signature), ComputeSgprsLiveAtEntry(code), std::move(entry_sources), std::move(holding)});
 	std::lock_guard<std::mutex> lock(mutex);
 	if (summaries.size() >= kMaxPrograms)
 	{
@@ -287,6 +354,11 @@ Sgprs ShaderSgprsLiveAtEntry(const ShaderCode& code)
 std::vector<Sgprs> ShaderSgprsHoldingEntryValue(const ShaderCode& code)
 {
 	return SummaryOf(code)->holding_entry_value;
+}
+
+std::vector<ShaderSgprEntrySources> ShaderSgprEntrySourcesAt(const ShaderCode& code)
+{
+	return SummaryOf(code)->entry_sources;
 }
 
 } // namespace Kyty::Libs::Graphics

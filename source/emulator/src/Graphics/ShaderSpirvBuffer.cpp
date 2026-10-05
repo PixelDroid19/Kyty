@@ -518,21 +518,21 @@ static bool buffer_resource_is_bound(const Spirv* spirv, const ShaderOperand& re
 	return bind != nullptr && ShaderStorageBufferResourceIsBound(*bind, resource, user_data_base);
 }
 
-// MUBUF load through a V# that no binding describes: the descriptor's 48-bit
-// base plus the RDNA2 buffer offset (index * stride + voffset + soffset +
-// imm) is read through guest device addressing. Out-of-range accesses read
-// zero: structured (stride != 0 with IDXEN) checks the index against
-// NUM_RECORDS, raw checks the byte range.
-static bool emit_guest_buffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t dwords,
-                                   String8* dst_source)
+// Address of a MUBUF access through a V# that no binding describes: the
+// descriptor's 48-bit base plus the RDNA2 buffer offset (index * stride +
+// voffset + soffset + imm) in %<tag>_lo/%<tag>_hi, and %<tag>_in when the
+// access of `size` bytes (the name of an SSA uint, without '%') is in range: structured (stride != 0
+// with IDXEN) checks the index against NUM_RECORDS, raw checks the byte range.
+// Ends inside the in-range branch; the caller closes it with
+// emit_guest_buffer_access_end.
+static bool emit_guest_buffer_access_begin(Spirv* spirv, const ShaderInstruction& inst, const String8& tag, const String8& size,
+                                           String8* source)
 {
-	if (!spirv->UsesGuestDeviceAddress() || dwords == 0 || dwords > 4u || inst.src_num < 3 || inst.src[1].size < 4)
+	if (inst.src_num < 3 || inst.src[1].size < 4)
 	{
 		return false;
 	}
-	const auto tag  = String8::FromPrintf("gbl_%d", instruction_index);
-	const auto zero = spirv->GetConstantFloat(0.0f);
-	String8    loads;
+	String8 loads;
 	if (inst.buffer_idxen && !operand_load_uint(spirv, inst.src[0], tag + "_idx", tag, &loads, inst.buffer_offen ? 0 : -1))
 	{
 		return false;
@@ -547,10 +547,11 @@ static bool emit_guest_buffer_load(Spirv* spirv, const ShaderInstruction& inst, 
 	{
 		return false;
 	}
-	String8 source = loads + "\n" + voffset + "\n" + soffset + "\n";
-	source += String8(R"(%<t>_d0 = OpLoad %uint %<desc0>
+	*source += loads + "\n" + voffset + "\n" + soffset + "\n";
+	*source += String8(R"(%<t>_d0 = OpLoad %uint %<desc0>
 %<t>_d1 = OpLoad %uint %<desc1>
 %<t>_d2 = OpLoad %uint %<desc2>
+%<t>_d3 = OpLoad %uint %<desc3>
 %<t>_stride_raw = OpShiftRightLogical %uint %<t>_d1 %uint_16
 %<t>_stride = OpBitwiseAnd %uint %<t>_stride_raw %uint_0x00003fff
 %<t>_base_hi = OpBitwiseAnd %uint %<t>_d1 %<mask16>
@@ -574,36 +575,254 @@ OpSelectionMerge %<t>_merge None
 OpBranchConditional %<t>_in %<t>_then %<t>_oob
 %<t>_then = OpLabel
 )")
-	              .ReplaceStr("<t>", tag)
-	              .ReplaceStr("<desc0>", operand_variable_to_str(inst.src[1], 0).value)
-	              .ReplaceStr("<desc1>", operand_variable_to_str(inst.src[1], 1).value)
-	              .ReplaceStr("<desc2>", operand_variable_to_str(inst.src[1], 2).value)
-	              .ReplaceStr("<mask16>", spirv->GetConstantUint(0xffffu))
-	              .ReplaceStr("<index>", inst.buffer_idxen ? "%" + tag + "_idx" : String8("%uint_0"))
-	              .ReplaceStr("<voffset>", inst.buffer_offen ? "%" + tag + "_voff" : String8("%uint_0"))
-	              .ReplaceStr("<imm>", spirv->GetConstantUint(inst.buffer_imm_offset))
-	              .ReplaceStr("<idxen>", inst.buffer_idxen ? "true" : "false")
-	              .ReplaceStr("<size>", spirv->GetConstantUint(dwords * 4u));
-	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(dwords), tag + "_g", &source))
-	{
-		return false;
-	}
-	String8 zeros;
-	for (uint32_t component = 0; component < dwords; component++)
+	               .ReplaceStr("<t>", tag)
+	               .ReplaceStr("<desc0>", operand_variable_to_str(inst.src[1], 0).value)
+	               .ReplaceStr("<desc1>", operand_variable_to_str(inst.src[1], 1).value)
+	               .ReplaceStr("<desc2>", operand_variable_to_str(inst.src[1], 2).value)
+	               .ReplaceStr("<desc3>", operand_variable_to_str(inst.src[1], 3).value)
+	               .ReplaceStr("<mask16>", spirv->GetConstantUint(0xffffu))
+	               .ReplaceStr("<index>", inst.buffer_idxen ? "%" + tag + "_idx" : String8("%uint_0"))
+	               .ReplaceStr("<voffset>", inst.buffer_offen ? "%" + tag + "_voff" : String8("%uint_0"))
+	               .ReplaceStr("<imm>", spirv->GetConstantUint(inst.buffer_imm_offset))
+	               .ReplaceStr("<idxen>", inst.buffer_idxen ? "true" : "false")
+	               .ReplaceStr("<size>", size);
+	return true;
+}
+
+// Stores zero to every destination component out of range and merges.
+static bool emit_guest_buffer_access_end(Spirv* spirv, const ShaderInstruction& inst, const String8& tag, uint32_t components,
+                                         String8* source)
+{
+	const auto zero = spirv->GetConstantFloat(0.0f);
+	String8    zeros;
+	for (uint32_t component = 0; component < components; component++)
 	{
 		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
 		if (dst.type != SpirvType::Float)
 		{
 			return false;
 		}
-		source += String8::FromPrintf("%%%s_f%u = OpBitcast %%float %%%s_g_d%u\nOpStore %%%s %%%s_f%u\n", tag.c_str(), component, tag.c_str(),
-		                              component, dst.value.c_str(), tag.c_str(), component);
 		zeros += String8::FromPrintf("OpStore %%%s %%%s\n", dst.value.c_str(), zero.c_str());
 	}
-	source += String8::FromPrintf("OpBranch %%%s_merge\n%%%s_oob = OpLabel\n%sOpBranch %%%s_merge\n%%%s_merge = OpLabel\n", tag.c_str(),
-	                              tag.c_str(), zeros.c_str(), tag.c_str(), tag.c_str());
+	*source += String8::FromPrintf("OpBranch %%%s_merge\n%%%s_oob = OpLabel\n%sOpBranch %%%s_merge\n%%%s_merge = OpLabel\n", tag.c_str(),
+	                               tag.c_str(), zeros.c_str(), tag.c_str(), tag.c_str());
+	return true;
+}
+
+// Stores loaded dwords %<prefix>_d<i> as the instruction's float results.
+static bool emit_guest_store_words(const ShaderInstruction& inst, const String8& prefix, uint32_t components, String8* source)
+{
+	for (uint32_t component = 0; component < components; component++)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
+		if (dst.type != SpirvType::Float)
+		{
+			return false;
+		}
+		*source += String8::FromPrintf("%%%s_f%u = OpBitcast %%float %%%s_d%u\nOpStore %%%s %%%s_f%u\n", prefix.c_str(), component,
+		                               prefix.c_str(), component, dst.value.c_str(), prefix.c_str(), component);
+	}
+	return true;
+}
+
+// MUBUF load through a V# that no binding describes, read through guest
+// device addressing; out-of-range accesses read zero.
+static bool emit_guest_buffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t dwords,
+                                   String8* dst_source)
+{
+	if (!spirv->UsesGuestDeviceAddress() || dwords == 0 || dwords > 4u)
+	{
+		return false;
+	}
+	const auto tag = String8::FromPrintf("gbl_%d", instruction_index);
+	String8    source;
+	if (!emit_guest_buffer_access_begin(spirv, inst, tag, spirv->GetConstantUint(dwords * 4u), &source) ||
+	    !spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(dwords), tag + "_g", &source) ||
+	    !emit_guest_store_words(inst, tag + "_g", dwords, &source) || !emit_guest_buffer_access_end(spirv, inst, tag, dwords, &source))
+	{
+		return false;
+	}
 	*dst_source += source;
 	return true;
+}
+
+// Typed MUBUF load through a V# that no binding describes, for the formats
+// the bound lowering decodes: 32-bit components (a single one only for the
+// scalar formats 20, 22, 36 and 39), R16G16_FLOAT (29) and R16G16B16A16_FLOAT
+// (71). Any other format reads zero, as the bound lowering leaves it unread.
+static bool emit_guest_typed_buffer_load(Spirv* spirv, const ShaderInstruction& inst, int instruction_index, uint32_t components,
+                                         String8* dst_source)
+{
+	if (!spirv->UsesGuestDeviceAddress() || components == 0 || components > 4u)
+	{
+		return false;
+	}
+	const auto tag    = String8::FromPrintf("gtl_%d", instruction_index);
+	const auto t      = tag.c_str();
+	const auto zero   = spirv->GetConstantFloat(0.0f);
+	const auto words  = spirv->GetConstantUint(components * 4u);
+	String8    source = String8(R"(%<t>_fd3 = OpLoad %uint %<desc3>
+%<t>_fmt_s = OpShiftRightLogical %uint %<t>_fd3 %uint_12
+%<t>_fmt = OpBitwiseAnd %uint %<t>_fmt_s %uint_127
+%<t>_h2 = OpIEqual %bool %<t>_fmt %<f29>
+%<t>_h4 = OpIEqual %bool %<t>_fmt %<f71>
+%<t>_size_h = OpSelect %uint %<t>_h4 %<s8> %<words>
+%<t>_size = OpSelect %uint %<t>_h2 %<s4> %<t>_size_h
+)")
+	                        .ReplaceStr("<t>", tag)
+	                        .ReplaceStr("<desc3>", operand_variable_to_str(inst.src[1], 3).value)
+	                        .ReplaceStr("<f29>", spirv->GetConstantUint(29u))
+	                        .ReplaceStr("<f71>", spirv->GetConstantUint(71u))
+	                        .ReplaceStr("<s4>", spirv->GetConstantUint(4u))
+	                        .ReplaceStr("<s8>", spirv->GetConstantUint(8u))
+	                        .ReplaceStr("<words>", words);
+	if (!emit_guest_buffer_access_begin(spirv, inst, tag, tag + "_size", &source))
+	{
+		return false;
+	}
+	// Half formats unpack their dwords; 32-bit formats store them as read.
+	const uint32_t half_words = components <= 2u ? 1u : 2u;
+	source += String8::FromPrintf("OpSelectionMerge %%%s_fmerge None\n%%%s_half = OpLogicalOr %%bool %%%s_h2 %%%s_h4\n"
+	                              "OpBranchConditional %%%s_half %%%s_fhalf %%%s_f32\n%%%s_fhalf = OpLabel\n",
+	                              t, t, t, t, t, t, t, t);
+	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(half_words), tag + "_hw", &source))
+	{
+		return false;
+	}
+	for (uint32_t word = 0; word < half_words; word++)
+	{
+		source += String8::FromPrintf("%%%s_hp%u = OpExtInst %%v2float %%GLSL_std_450 UnpackHalf2x16 %%%s_hw_d%u\n", t, word, t, word);
+	}
+	for (uint32_t component = 0; component < components; component++)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
+		if (dst.type != SpirvType::Float)
+		{
+			return false;
+		}
+		source += String8::FromPrintf("%%%s_hc%u = OpCompositeExtract %%float %%%s_hp%u %u\nOpStore %%%s %%%s_hc%u\n", t, component, t,
+		                              component / 2u, component % 2u, dst.value.c_str(), t, component);
+	}
+	source += String8::FromPrintf("OpBranch %%%s_fmerge\n%%%s_f32 = OpLabel\n", t, t);
+	if (components == 1u)
+	{
+		// Only the 32-bit scalar formats decode for a single component.
+		source += String8::FromPrintf(R"(%%%s_s20 = OpIEqual %%bool %%%s_fmt %%%s
+%%%s_s22 = OpIEqual %%bool %%%s_fmt %%%s
+%%%s_s36 = OpIEqual %%bool %%%s_fmt %%%s
+%%%s_s39 = OpIEqual %%bool %%%s_fmt %%%s
+%%%s_sa = OpLogicalOr %%bool %%%s_s20 %%%s_s22
+%%%s_sb = OpLogicalOr %%bool %%%s_s36 %%%s_s39
+%%%s_scalar = OpLogicalOr %%bool %%%s_sa %%%s_sb
+OpSelectionMerge %%%s_smerge None
+OpBranchConditional %%%s_scalar %%%s_sload %%%s_szero
+%%%s_sload = OpLabel
+)",
+		                              t, t, spirv->GetConstantUint(20u).c_str(), t, t, spirv->GetConstantUint(22u).c_str(), t, t,
+		                              spirv->GetConstantUint(36u).c_str(), t, t, spirv->GetConstantUint(39u).c_str(), t, t, t, t, t, t, t,
+		                              t, t, t, t, t, t, t, t);
+	}
+	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", static_cast<int>(components), tag + "_w", &source) ||
+	    !emit_guest_store_words(inst, tag + "_w", components, &source))
+	{
+		return false;
+	}
+	if (components == 1u)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, 0);
+		source += String8::FromPrintf("OpBranch %%%s_smerge\n%%%s_szero = OpLabel\nOpStore %%%s %%%s\nOpBranch %%%s_smerge\n"
+		                              "%%%s_smerge = OpLabel\n",
+		                              t, t, dst.value.c_str(), zero.c_str(), t, t);
+	}
+	source += String8::FromPrintf("OpBranch %%%s_fmerge\n%%%s_fmerge = OpLabel\n", t, t);
+	if (!emit_guest_buffer_access_end(spirv, inst, tag, components, &source))
+	{
+		return false;
+	}
+	*dst_source += source;
+	return true;
+}
+
+// GLOBAL load: each lane reads at its own 64-bit address, a VGPR pair or a
+// 64-bit SGPR base plus a 32-bit VGPR offset, plus the signed immediate, through
+// guest device addressing.
+static bool emit_global_load(Spirv* spirv, const ShaderInstruction& inst, uint32_t instruction_index, String8* dst_source)
+{
+	const int dwords = inst.dst.size;
+	if (!spirv->UsesGuestDeviceAddress() || dwords < 1 || dwords > 4 || inst.src_num < 1 || inst.src_num > 2)
+	{
+		return false;
+	}
+	const auto tag         = String8::FromPrintf("glb_%u", instruction_index);
+	const bool scalar_base = inst.src_num == 2;
+	String8    source;
+	String8    part;
+	if (!operand_load_uint(spirv, inst.src[0], tag + "_v0", tag, &part, scalar_base ? -1 : 0))
+	{
+		return false;
+	}
+	source += part + "\n";
+	const ShaderOperand& high_source = scalar_base ? inst.src[1] : inst.src[0];
+	if (scalar_base)
+	{
+		part = String8();
+		if (!operand_load_uint(spirv, inst.src[1], tag + "_b0", tag, &part, 0))
+		{
+			return false;
+		}
+		source += part + "\n";
+	}
+	part = String8();
+	if (!operand_load_uint(spirv, high_source, tag + "_b1", tag, &part, 1))
+	{
+		return false;
+	}
+	source += part + "\n";
+
+	const auto imm    = static_cast<int32_t>(inst.flat_offset);
+	const auto imm_lo = static_cast<uint32_t>(imm);
+	const auto imm_hi = imm < 0 ? 0xffffffffu : 0u;
+	// 64-bit additions in 32-bit halves: the base (SGPR base plus the VGPR
+	// offset, or the VGPR pair), then the sign-extended immediate.
+	const char* base_text = scalar_base ? R"(%<t>_a_lo = OpIAdd %uint %<t>_b0 %<t>_v0
+%<t>_a_c = OpULessThan %bool %<t>_a_lo %<t>_b0
+%<t>_a_ci = OpSelect %uint %<t>_a_c %uint_1 %uint_0
+%<t>_a_hi = OpIAdd %uint %<t>_b1 %<t>_a_ci
+)"
+	                                    : R"(%<t>_a_lo = OpCopyObject %uint %<t>_v0
+%<t>_a_hi = OpCopyObject %uint %<t>_b1
+)";
+	source += String8(base_text).ReplaceStr("<t>", tag);
+	source += String8(R"(%<t>_lo = OpIAdd %uint %<t>_a_lo %<imm_lo>
+%<t>_i_c = OpULessThan %bool %<t>_lo %<t>_a_lo
+%<t>_i_ci = OpSelect %uint %<t>_i_c %uint_1 %uint_0
+%<t>_hi_s = OpIAdd %uint %<t>_a_hi %<imm_hi>
+%<t>_hi = OpIAdd %uint %<t>_hi_s %<t>_i_ci
+)")
+	              .ReplaceStr("<imm_lo>", spirv->GetConstantUint(imm_lo))
+	              .ReplaceStr("<imm_hi>", spirv->GetConstantUint(imm_hi))
+	              .ReplaceStr("<t>", tag);
+	if (!spirv->EmitGuestLoad(tag + "_lo", tag + "_hi", dwords, tag + "_g", &source))
+	{
+		return false;
+	}
+	for (int component = 0; component < dwords; component++)
+	{
+		const auto dst = operand_variable_to_str(inst.dst, component);
+		if (dst.type != SpirvType::Float)
+		{
+			return false;
+		}
+		source += String8::FromPrintf("%%%s_f%d = OpBitcast %%float %%%s_g_d%d\nOpStore %%%s %%%s_f%d\n", tag.c_str(), component, tag.c_str(),
+		                              component, dst.value.c_str(), tag.c_str(), component);
+	}
+	*dst_source += source;
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_GlobalLoad)
+{
+	return emit_global_load(spirv, code.GetInstructions().At(index), index, dst_source);
 }
 
 static bool emit_gen5_raw_buffer_store(Spirv* spirv, const ShaderInstruction& inst, int instruction_index,
@@ -1431,6 +1650,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatX_Vdata1VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
+	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	{
+		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 1u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -1499,6 +1722,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXy_Vdata2VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
+	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	{
+		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 2u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num <= 0 || !Config::IsNextGen())
 	{
@@ -1514,6 +1741,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
+	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	{
+		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 3u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 	if (bind_info == nullptr || bind_info->storage_buffers.buffers_num <= 0 || !Config::IsNextGen())
 	{
@@ -1528,6 +1759,10 @@ KYTY_RECOMPILER_FUNC(Recompile_BufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxen)
 {
 	const auto& inst      = code.GetInstructions().At(index);
 	if (!ShaderInstructionLoweringPreconditions(inst)) { return false; }
+	if (Config::IsNextGen() && !buffer_resource_is_bound(spirv, inst.src[1]) && spirv->UsesGuestDeviceAddress())
+	{
+		return emit_guest_typed_buffer_load(spirv, inst, static_cast<int>(index), 4u, dst_source);
+	}
 	const auto* bind_info = spirv->GetBindInfo();
 
 	if (bind_info != nullptr && bind_info->storage_buffers.buffers_num > 0)
@@ -3340,8 +3575,12 @@ KYTY_RECOMPILER_FUNC(Recompile_SBufferLoadDwordx16_Sdst16SvSoffset)
 
 static bool recompile_sload_from_extended(uint32_t index, const ShaderInstruction& inst, Spirv* spirv, String8* dst_source, int dword_count)
 {
-	const auto* bind_info = spirv->GetBindInfo();
-	if (bind_info == nullptr || !bind_info->extended.used)
+	// A PC-keyed mapping (an EUD or SRT pointer table load) names its table
+	// offset; other loads index the EUD by their SMEM offset.
+	const auto* bind_info     = spirv->GetBindInfo();
+	int         mapped_offset = 0;
+	const bool  pc_mapped     = spirv->GetDynamicSLoadOffset(inst.pc, &mapped_offset);
+	if (bind_info == nullptr || (!bind_info->extended.used && !pc_mapped))
 	{
 		return false;
 	}
@@ -3351,7 +3590,7 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 
 	if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
 	if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
-	if (inst.src[0].register_id != bind_info->extended.start_register) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].register_id != bind_info->extended.start_register condition ignored (continuing)\n"); }
+	if (!pc_mapped && inst.src[0].register_id != bind_info->extended.start_register) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].register_id != bind_info->extended.start_register condition ignored (continuing)\n"); }
 
 	// TODO() check pointer
 
@@ -3376,7 +3615,7 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 
 	auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
 	auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
-	int offset = static_cast<int>(inst.src[1].constant.u >> 2u);
+	const int offset = pc_mapped ? mapped_offset : static_cast<int>(inst.src[1].constant.u >> 2u);
 
 	if (src0_value0.type != SpirvType::Uint)
 	{
@@ -3449,6 +3688,34 @@ static bool recompile_sload_from_fetch_attrib(uint32_t index, const ShaderInstru
 	return true;
 }
 
+String8 Spirv::MaterializeAssembledDescriptors(const ShaderInstruction& inst) const
+{
+	String8 source;
+	if (m_bind == nullptr)
+	{
+		return source;
+	}
+	for (const auto& record: m_bind->assembled_descriptors)
+	{
+		if (record.consumer_pc != inst.pc)
+		{
+			continue;
+		}
+		for (int field = 0; field < 4; ++field)
+		{
+			ShaderOperand word;
+			word.type        = ShaderOperandType::Sgpr;
+			word.register_id = record.register_id + field;
+			word.size        = 1;
+			const auto variable = operand_variable_to_str(word);
+			const auto id       = String8::FromPrintf("assembled_vsharp_%u_%d", inst.pc, field);
+			source += EmitMetadataLoad(record.resource_index, field, id);
+			source += String8::FromPrintf("OpStore %%%s %%%s\n", variable.value.c_str(), id.c_str());
+		}
+	}
+	return source;
+}
+
 // fetch_buffer_reg SLoads feed DetectFetch buffer-descriptor tracking; destinations
 // are not consumed after BufferLoad→Fetch rewrite. Keep as recognized no-op.
 static bool recompile_sload_fetch_buffer_meta(const ShaderInstruction& inst, Spirv* spirv)
@@ -3467,9 +3734,14 @@ static bool recompile_sload_fetch_buffer_meta(const ShaderInstruction& inst, Spi
 // ADDR = SGPR[base][47:0] + offset with the low two bits cleared (RDNA2 SMEM).
 static bool recompile_sload_guest(uint32_t index, const ShaderInstruction& inst, Spirv* spirv, String8* dst_source, int dword_count)
 {
-	const auto* bind = spirv->GetBindInfo();
-	if (!spirv->UsesGuestDeviceAddress() || bind == nullptr || inst.src[0].type != ShaderOperandType::Sgpr ||
-	    (bind->extended.used && inst.src[0].register_id == bind->extended.start_register))
+	const auto* bind          = spirv->GetBindInfo();
+	int         mapped_offset = 0;
+	// The 64-bit base is an SGPR pair or VCC (a pointer an earlier load placed there).
+	const bool pair_base = inst.src[0].type == ShaderOperandType::Sgpr || inst.src[0].type == ShaderOperandType::VccLo;
+	if (!spirv->UsesGuestDeviceAddress() || bind == nullptr || !pair_base ||
+	    (bind->extended.used && inst.src[0].type == ShaderOperandType::Sgpr &&
+	     inst.src[0].register_id == bind->extended.start_register) ||
+	    spirv->GetDynamicSLoadOffset(inst.pc, &mapped_offset))
 	{
 		return false;
 	}

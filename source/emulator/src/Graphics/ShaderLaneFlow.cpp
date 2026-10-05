@@ -93,9 +93,14 @@ bool IsSelect(Type type)
 	return StartsWith(type, "SCselect");
 }
 
-bool IsVectorLoad(Type type)
+bool IsBufferLoad(Type type)
 {
 	return StartsWith(type, "BufferLoad") || StartsWith(type, "TBufferLoad");
+}
+
+bool IsVectorLoad(Type type)
+{
+	return IsBufferLoad(type) || StartsWith(type, "GlobalLoad");
 }
 
 bool IsLaneLocalImageRead(Type type)

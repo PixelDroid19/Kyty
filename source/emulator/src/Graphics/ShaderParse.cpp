@@ -120,6 +120,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 					words = shader_parse_vop3(pc, decode_src, decode_ptr, dst, next_gen);
 					break;
 				case 0x36: words = shader_parse_ds(pc, decode_src, decode_ptr, dst, next_gen); break;
+				case 0x37: words = shader_parse_flat(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x38: words = shader_parse_mubuf(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x3a: words = shader_parse_mtbuf(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x3c: words = shader_parse_mimg(pc, decode_src, decode_ptr, dst, next_gen); break;
