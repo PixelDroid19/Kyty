@@ -402,8 +402,19 @@ Third round (same day):
   fallback now computes that layout and each mip upload uses its own pitch; the rule reproduces all 2,135
   multi-level entries of the SDK-generated linear RGBA8 table (offsets, sizes, padded pitch and total).
 
+- **Device-address scans over writable storage only.** Before a draw or dispatch that reads guest addresses, GPU
+  memory looked for storage buffers with pending GPU writes by walking every live storage buffer, twice; JoJo keeps
+  about 4,000 alive and the ordered-set walk was the top host hotspot of its cutscene. The scans now walk the
+  in-use, writable subset.
+
 Investigated and left open:
 
+- JoJo's in-engine cutscenes run at about 5 fps. The guest spends most of its time spinning on GPU labels
+  (`while (*label != 1)` after an ACB submission, and two similar loops), so the frame rate is the round trip of its
+  compute work. Each of its ~20 dispatches per frame completes with a write-back of a 15 MB storage buffer of which
+  about 53 KB changed; the page comparison reads all 15 MB (3 ms per dispatch, 27% of the time). Skipping it is not
+  correct (the CPU may read the results); the planned fix copies GPU-written pages on demand. The dirty-page tracker
+  also accepts only 512 ranges, so most of JoJo's buffers fall back to full hashes (250 GB hashed in 2 minutes).
 - The .NET beat 'em up is not frozen: its black screen is a loading screen (its two sprite draws are black, vertex
   colour (0, 0, 0, 0.88), on a black target) while it uploads textures through compute image copies, about 20 per
   frame. Each copy uploads its source and destination images and writes the destination back, each a separate
