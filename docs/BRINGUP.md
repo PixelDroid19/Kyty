@@ -335,6 +335,24 @@ Third round (same day), mostly runtime-library correctness found by Unreal Engin
   state; `sceAgcDcbSetPredication` writes the SET_PREDICATION packet, and the command processor accepts clearing
   predication and stops on the query-dependent operations, which no title has issued yet.
 
+- **Clear-state scissors.** CLEAR_STATE and the context-state operations rebuilt the context with every scissor at
+  zero, an empty rectangle; the hardware clear state (and the AGC register defaults) cover 16384x16384 with the
+  window offset disabled. A title whose video and fade quads relied on the default state showed only its solid cyan
+  clear colour, and another title's 3D attract scenes were black.
+- **Adaptive mutexes refuse a relock by their owner** (EDEADLK, as error-checking ones do in the BSD thread library).
+  Kyty counted the relock as recursion, so a UE4 title that relocks an adaptive mutex and unlocks it once kept it
+  held while its game thread polled, and the worker threads that had to finish the polled work blocked forever.
+  Normal mutexes keep the recorded recursion behaviour.
+- **AGC jumps and predication.** `sceAgcDcbJump`/`sceAgcAcbJump` (INDIRECT_BUFFER with CHAIN) and their GetSize,
+  `sceAgcSetPacketPredication`, and SET_PREDICATION with the wait hint, which never skips a packet here because the
+  command processor runs ahead of the GPU work that writes the result.
+- **Images a UE4 title creates at boot:** 8_8_8_8_UINT and 16_UINT storage images, a BGRA view of an RGBA8 UNORM
+  storage image, one-element volumes in any swizzle mode, SW_256B_S (tile mode 1) single-level textures, and a
+  storage image created over a smaller sampled texture (linked; it seeds from guest memory).
+- **AvPlayer frames use 256-byte rows** in both NV12 planes, the row alignment GPU linear surfaces require; a UE4
+  title copies its movie frames with that pitch, and tight rows produced the image repeated about fifteen times
+  across the screen.
+
 Regression set after these repairs (run d406-d417, 90 s each, same host): GRIS 119 fps (104 before), Blasphemous 2
 85 (70), Dreaming Sarah 195 (89), Let's Build a Zoo 202 (83), The Messenger 320 (269), Dead Cells 94 (82), JoJo 87
 (54), ANIMAL WELL 22 (20), Formula Retro Racing back to its 3D views at about 110-120 fps in the race. A longer
@@ -342,9 +360,10 @@ Blasphemous 2 run reaches gameplay; its intro frames vary with load timing betwe
 
 Open blockers (one root cause each, none investigated past the point stated):
 
-- Both UE4 titles now boot past the pak and ICU stage and stop on AGC builders that are not registered yet
-  (`sceAgcDcbJump` next; the title imports about 110 AGC entry points Kyty lacks, mostly `*GetSize`).
-- The artillery title renders a solid cyan colour.
+- The UE4 fighting title now reaches its startup movie in some runs. Open, not yet root-caused: runs end
+  nondeterministically around 25 s, either on a guest `scePthreadMutexLock` of a null object plus 0x58 or in a
+  stall; a 400x5x5 R11G11B10 volume in SW_64KB_R_X (tile 27) is not laid out yet. About 100 AGC entry points it
+  imports (mostly `*GetSize`) are still missing and are added as they are called.
 - The isometric action title: a pixel shader loads its sampler through a user-data pointer
   (`s_load_dwordx4 s[16:19], s[0:1]`). Marking every pixel shader with a pointer load as a guest-device-address user
   was tried and reverted: the sampler stayed unresolved and every such pixel shader moved to the device-address path.
