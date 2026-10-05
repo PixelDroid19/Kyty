@@ -1571,6 +1571,12 @@ struct ShaderComputeUniformBufferFillEvidence
 	uint32_t workgroup_shift            = 0;
 	// Scalar source SGPRs in the component order consumed by the store.
 	int      value_registers[4]         = {-1, -1, -1, -1};
+	// Bytes one invocation stores. The four-byte form (the SDK pattern fill)
+	// stores record i as value_registers[i % period] for every i below count;
+	// it is uniform only when the live period is 1.
+	uint32_t record_bytes               = 16;
+	int      count_register             = -1;
+	int      period_register            = -1;
 };
 
 // Structural evidence for one narrowly defined compute metadata-fill family.

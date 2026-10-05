@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <unordered_map>
 #include <vector>
@@ -651,14 +652,168 @@ bool UniformBufferFillMatchesStore(const ShaderInstruction& inst, int index_regi
 	return true;
 }
 
+// The SDK pattern fill: invocation i below `count` stores the 32-bit word
+// values[i % period] with buffer_store_format_x. The remainder comes from the
+// compiler's reciprocal division sequence; branches select the stored value.
+ShaderComputeUniformBufferFillEvidence MatchPatternBufferFill(const ShaderCode& code)
+{
+	using T = ShaderInstructionType;
+	static constexpr T k_types[] = {
+	    T::VLshlAddU32, T::VCmpxGtU32, T::SCbranchExecz, T::VCvtF32U32, T::SCmpLgU32, T::SCselectB64, T::VRcpF32, T::VMulF32,
+	    T::VCvtU32F32, T::VMadU64U32, T::VCmpNeU32, T::VSubI32, T::VCndmaskB32, T::VMulHiU32, T::VSubI32, T::VAddI32,
+	    T::VCndmaskB32, T::VMulHiU32, T::VMulLoU32, T::VSubI32, T::VCmpGeU32, T::VCmpLeU32, T::SAndB64, T::VAddCoCiU32,
+	    T::VAddCoCiU32, T::VCndmaskB32, T::VMulLoU32, T::VSubI32, T::VCmpNeI32, T::SAndSaveexecB64, T::SCbranchExecz,
+	    T::VCmpNeI32, T::SAndSaveexecB64, T::SCbranchExecz, T::VCmpNeI32, T::SAndSaveexecB64, T::SCbranchExecz, T::VMovB32,
+	    T::BufferStoreFormatX, T::SAndn2B64, T::SCbranchExecz, T::VMovB32, T::BufferStoreFormatX, T::SMovB64, T::SAndn2B64,
+	    T::SCbranchExecz, T::VMovB32, T::BufferStoreFormatX, T::SMovB64, T::SAndn2B64, T::SCbranchExecz, T::VMovB32,
+	    T::BufferStoreFormatX, T::SEndpgm};
+	constexpr uint32_t k_count = sizeof(k_types) / sizeof(k_types[0]);
+	// Branch (template index) -> target (template index).
+	static constexpr uint32_t k_branches[][2] = {{2, 53}, {30, 49}, {33, 44}, {36, 39}, {40, 43}, {45, 48}, {50, 53}};
+	// Selectors comparing the remainder with 0, 1 and 2.
+	static constexpr uint32_t k_selects[][2] = {{28, 0}, {31, 1}, {34, 2}};
+	static constexpr uint32_t k_period_uses[] = {3, 9, 18, 21, 26};
+	static constexpr uint32_t k_moves[]       = {51, 46, 41, 37}; // value for remainder 0, 1, 2, 3
+
+	// Every conditional branch also records its fall-through as an indirect
+	// label, so only the template below bounds the control flow.
+	ShaderComputeUniformBufferFillEvidence result {};
+	const auto&                            instructions = code.GetInstructions();
+	if (code.GetType() != ShaderType::Compute)
+	{
+		return result;
+	}
+	uint32_t at[k_count] = {};
+	uint32_t n           = 0;
+	for (uint32_t i = 0; i < instructions.Size(); ++i)
+	{
+		if (UniformBufferFillInstructionIsPadding(instructions.At(i)))
+		{
+			continue;
+		}
+		if (n == k_count || instructions.At(i).type != k_types[n])
+		{
+			return result;
+		}
+		at[n++] = i;
+	}
+	if (n != k_count || at[k_count - 1] + 1u != instructions.Size())
+	{
+		return result;
+	}
+	const auto inst = [&](uint32_t index) -> const ShaderInstruction& { return instructions.At(at[index]); };
+	for (const auto& branch: k_branches)
+	{
+		const auto& b = inst(branch[0]);
+		if (b.src_num != 1 || b.pc + 4 + static_cast<uint32_t>(b.src[0].constant.i) != inst(branch[1]).pc)
+		{
+			return result;
+		}
+	}
+
+	int      index_register     = -1;
+	int      workgroup_register = -1;
+	uint32_t workgroup_shift    = 0;
+	if (!UniformBufferFillMatchesLinearIndex(inst(0), &index_register, &workgroup_register, &workgroup_shift))
+	{
+		return result;
+	}
+	const auto& count_compare = inst(1);
+	if (count_compare.src_num != 2 || !UniformBufferFillOperandIsSgpr(count_compare.src[0], count_compare.src[0].register_id, 1) ||
+	    !UniformBufferFillOperandIsVgpr(count_compare.src[1], index_register, 1))
+	{
+		return result;
+	}
+	const int count_register  = count_compare.src[0].register_id;
+	const int period_register = inst(4).src_num == 2 ? inst(4).src[1].register_id : -1;
+	if (!UniformBufferFillOperandIsSgpr(inst(4).src[1], period_register, 1))
+	{
+		return result;
+	}
+	for (const uint32_t use: k_period_uses)
+	{
+		if (inst(use).src_num < 1 || !UniformBufferFillOperandIsSgpr(inst(use).src[0], period_register, 1))
+		{
+			return result;
+		}
+	}
+	// remainder = index - period * quotient
+	const auto& remainder = inst(27);
+	if (remainder.src_num != 2 || remainder.dst.type != ShaderOperandType::Vgpr || remainder.dst.size != 1 ||
+	    !UniformBufferFillOperandIsVgpr(remainder.src[0], index_register, 1) || remainder.dst.register_id == index_register)
+	{
+		return result;
+	}
+	for (const auto& select: k_selects)
+	{
+		const auto& compare = inst(select[0]);
+		if (compare.src_num != 2 || compare.src[0].type != ShaderOperandType::IntegerInlineConstant ||
+		    compare.src[0].constant.u != select[1] || !UniformBufferFillOperandIsVgpr(compare.src[1], remainder.dst.register_id, 1))
+		{
+			return result;
+		}
+	}
+
+	int destination_start_register = -1;
+	int values[k_uniform_buffer_fill_descriptor_words] {};
+	for (int component = 0; component < k_uniform_buffer_fill_descriptor_words; ++component)
+	{
+		const auto& move  = inst(k_moves[component]);
+		const auto& store = inst(k_moves[component] + 1u);
+		if (move.src_num != 1 || move.dst.type != ShaderOperandType::Vgpr || move.dst.size != 1 ||
+		    !UniformBufferFillOperandIsSgpr(move.src[0], move.src[0].register_id, 1) ||
+		    store.format != ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen || store.src_num != 3 || !store.buffer_idxen ||
+		    store.buffer_offen || store.buffer_return_old_value || store.buffer_imm_offset != 0u ||
+		    !UniformBufferFillOperandIsVgpr(store.dst, move.dst.register_id, 1) ||
+		    !UniformBufferFillOperandIsVgpr(store.src[0], index_register, 1) ||
+		    !UniformBufferFillOperandIsSgpr(store.src[1], store.src[1].register_id, k_uniform_buffer_fill_descriptor_words) ||
+		    !UniformBufferFillOperandIsZeroSoffset(store.src[2]) ||
+		    (destination_start_register >= 0 && store.src[1].register_id != destination_start_register))
+		{
+			return result;
+		}
+		destination_start_register = store.src[1].register_id;
+		values[component]          = move.src[0].register_id;
+	}
+	// Every scalar input must reach its last use unmodified.
+	const auto overlaps = [](const ShaderOperand& dst, int first, int count)
+	{ return dst.type == ShaderOperandType::Sgpr && dst.register_id < first + count && first < dst.register_id + std::max(dst.size, 1); };
+	for (uint32_t i = 0; i < k_count; ++i)
+	{
+		const auto& dst = inst(i).dst;
+		if (overlaps(dst, destination_start_register, k_uniform_buffer_fill_descriptor_words) ||
+		    std::any_of(std::begin(values), std::end(values), [&](int value) { return overlaps(dst, value, 1); }) ||
+		    (i < 1u && overlaps(dst, count_register, 1)) || (i < 27u && overlaps(dst, period_register, 1)))
+		{
+			return result;
+		}
+	}
+
+	result.destination_start_register = destination_start_register;
+	result.workgroup_register         = workgroup_register;
+	result.workgroup_shift            = workgroup_shift;
+	result.record_bytes               = 4;
+	result.count_register             = count_register;
+	result.period_register            = period_register;
+	for (int component = 0; component < k_uniform_buffer_fill_descriptor_words; ++component)
+	{
+		result.value_registers[component] = values[component];
+	}
+	result.valid = true;
+	return result;
+}
+
 } // namespace
 
 ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(const ShaderCode& code)
 {
 	ShaderComputeUniformBufferFillEvidence result {};
 	const auto&                            instructions = code.GetInstructions();
-	if (code.GetType() != ShaderType::Compute || instructions.Size() == 0 || code.GetLabels().Size() != 0 ||
-	    code.GetIndirectLabels().Size() != 0)
+	if (code.GetLabels().Size() != 0)
+	{
+		return MatchPatternBufferFill(code);
+	}
+	if (code.GetType() != ShaderType::Compute || instructions.Size() == 0 || code.GetIndirectLabels().Size() != 0)
 	{
 		return result;
 	}

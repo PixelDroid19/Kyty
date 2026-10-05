@@ -211,26 +211,56 @@ bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32
 	if (buffers.start_register[0] != proof.destination_start_register || buffers.accesses[0] != ShaderStorageAccess::Typed ||
 	    (buffers.sources[0] != ShaderStorageBindingSource::DirectResource && buffers.sources[0] != ShaderStorageBindingSource::MetadataSharp) ||
 	    !buffers.code_available[0] || !buffers.exact_matches[0] || buffers.unbased_matches[0] || buffers.decoded_unknown[0] ||
-	    buffers.indirect_descriptor_use[0] || ShaderStorageUsageIsReadOnly(buffers.usages[0]) ||
-	    destination.Stride() != 16u || destination.Format() != 75u || destination.DstSelXYZW() != 0xfacu ||
-	    destination.SwizzleEnabled() || destination.IndexStride() != 0u || destination.AddTid() ||
-	    static_cast<uint64_t>(group_x) * input.threads_num[0] != destination.NumRecords())
+	    buffers.indirect_descriptor_use[0] || ShaderStorageUsageIsReadOnly(buffers.usages[0]) || destination.SwizzleEnabled() ||
+	    destination.IndexStride() != 0u || destination.AddTid())
 	{
 		return false;
 	}
-	std::array<uint32_t, 4> words {};
-	for (uint32_t component = 0; component < words.size(); ++component)
+	// Each live scalar input is one unique user-data SGPR.
+	const auto user_sgpr = [&](int reg, uint32_t* value)
 	{
-		if (proof.value_registers[component] == proof.workgroup_register) { return false; }
+		if (reg < 0 || reg == proof.workgroup_register) { return false; }
 		int found = -1;
 		for (int i = 0; i < input.bind.direct_sgprs.sgprs_num; ++i)
 		{
-			if (input.bind.direct_sgprs.start_register[i] != proof.value_registers[component]) { continue; }
+			if (input.bind.direct_sgprs.start_register[i] != reg) { continue; }
 			if (found != -1) { return false; }
 			found = i;
 		}
 		if (found < 0) { return false; }
-		words[component] = input.bind.direct_sgprs.sgprs[found].field;
+		*value = input.bind.direct_sgprs.sgprs[found].field;
+		return true;
+	};
+	const uint64_t invocations = static_cast<uint64_t>(group_x) * input.threads_num[0];
+	std::array<uint32_t, 4> words {};
+	if (proof.record_bytes == 16u)
+	{
+		// BUF_FMT_32_32_32_32_UINT, one record per invocation.
+		if (destination.Stride() != 16u || destination.Format() != 75u || destination.DstSelXYZW() != 0xfacu ||
+		    invocations != destination.NumRecords())
+		{
+			return false;
+		}
+		for (uint32_t component = 0; component < words.size(); ++component)
+		{
+			if (!user_sgpr(proof.value_registers[component], &words[component])) { return false; }
+		}
+	} else
+	{
+		// BUF_FMT_32_UINT. A period of 1 repeats the first value; the count must
+		// name every record and be whole 16-byte groups.
+		uint32_t count  = 0;
+		uint32_t period = 0;
+		uint32_t value  = 0;
+		// The store writes the X component only; it must land in X.
+		if (proof.record_bytes != 4u || destination.Stride() != 4u || destination.Format() != 20u || (destination.DstSelXYZW() & 7u) != 4u ||
+		    !user_sgpr(proof.count_register, &count) || !user_sgpr(proof.period_register, &period) ||
+		    !user_sgpr(proof.value_registers[0], &value) || period != 1u || count == 0u || count % 4u != 0u ||
+		    count != destination.NumRecords() || invocations < count)
+		{
+			return false;
+		}
+		words.fill(value);
 	}
 	fill->address = destination.Base48();
 	fill->size    = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
