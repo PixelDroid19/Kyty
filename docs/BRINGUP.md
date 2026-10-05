@@ -377,6 +377,24 @@ Third round (same day):
   walks only flexible ranges and ranges holding tracked snapshots instead of all ranges and chunks. Over 180 s the
   preparation total went from 32.7 s to 7.1 s (maximum 123 to 59 ms).
 
+- **Hades reaches gameplay.** Three independent defects stood between its title and the House of Hades:
+  - *Branch-heavy shader compile never finished.* After cross, the command processor sampled 70% of the process in
+    `ArmReachesBeforeJoin`: a 2,299-instruction pixel shader with 254 branches. Selection-join queries were repeated
+    for every label and branch during emission, located instructions by scanning the program, and ordered a join's
+    edges by recomputing nesting depth per comparison. Instructions are now found by bisection, reconvergence and
+    nesting results are kept per thread for one program and label state (disabled labels change them), and depths
+    are computed once per edge.
+  - *SW_64KB_S volumes.* A 32x32x32 RGBA8 lookup volume in the 64 KiB standard swizzle was rejected. The GFX10
+    64 KiB standard 3D pattern keeps the 4 KiB pattern in its low 12 bits and adds `X3 Z3 Y4 X4` (4-byte elements;
+    the table holds every element size), verified against the addrlib pattern tables.
+  - *Invisible menu text.* Tile 9 sampled textures uploaded guest bytes only for four formats; the menu's R8 glyph
+    atlases (CPU-written) stayed empty, so each label showed only its plate. The tile-9 host detiler matches the
+    GFX10 SW_64KB_S pattern for 1, 2, 4, 8 and 16-byte elements, so any such uncompressed format now uploads when no
+    live surface covers it.
+  Hades now shows its menus and walks in the House at about 10 fps (open: performance, and a crash at 8-11 s in
+  some runs where its GPU allocator returns a null block and a row copy writes to 0x40; its direct-memory allocate
+  and map calls do not fail in those runs).
+
 Investigated and left open:
 
 - The .NET beat 'em up is not frozen: its black screen is a loading screen (its two sprite draws are black, vertex
@@ -387,8 +405,7 @@ Investigated and left open:
   memory plus 4 GB of emulator heap) also exceeds the harness cgroup's 7 GiB `memory.high`, which throttles it.
 - Hades clears its 1080p targets with the SDK pattern-fill kernel (4-byte records, `values[i % period]` for `i` below
   a count). Treating period 1 as a uniform fill was tried and dropped: publishing fourteen 8 MB fills per frame cost
-  83 to 35 fps with no visible change. Hades still stops presenting after cross is pressed on its title, with or
-  without it.
+  83 to 35 fps with no visible change.
 - Dead Cells sometimes stops after about a minute of gameplay on a G-buffer pixel shader that needs fragment wave
   transport (a derivative fetch inside a lane-divergent loop at pc 0x114, 642x362, four targets); seen in runs d472,
   d721 and d729, so it predates this round.
