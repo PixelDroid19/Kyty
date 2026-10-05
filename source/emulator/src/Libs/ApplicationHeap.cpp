@@ -7,6 +7,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -31,13 +32,16 @@ struct RuntimeApi
 	ReallocFunc      realloc      = nullptr;
 	ReallocalignFunc reallocalign = nullptr;
 };
-std::mutex g_api_mutex;
-RuntimeApi g_api;
+// Every guest malloc/free reads the table, while it is published once per
+// startup. Readers take an immutable snapshot without a lock; a replaced
+// snapshot is never freed because a reader may still hold it.
+const RuntimeApi                g_empty_api {};
+std::mutex                      g_api_mutex; // serializes publication
+std::atomic<const RuntimeApi*>  g_api {&g_empty_api};
 
 RuntimeApi GetApi()
 {
-	std::lock_guard lock(g_api_mutex);
-	return g_api;
+	return *g_api.load(std::memory_order_acquire);
 }
 
 static thread_local bool g_in_guest_allocator = false;
@@ -127,15 +131,17 @@ void RegisterApi(void* const api[kApiSlotCount])
 	std::lock_guard lock(g_api_mutex);
 	if (!IsValidApi(table))
 	{
-		g_api = {};
+		g_api.store(&g_empty_api, std::memory_order_release);
 		return;
 	}
 
-	g_api.malloc     = reinterpret_cast<MallocFunc>(table->slots[kMallocSlot]);
-	g_api.free       = reinterpret_cast<FreeFunc>(table->slots[kFreeSlot]);
-	g_api.stats_fast = reinterpret_cast<StatsFunc>(table->slots[kMallocStatsFastSlot]);
-	g_api.realloc    = reinterpret_cast<ReallocFunc>(table->slots[kReallocSlot]);
-	g_api.reallocalign = reinterpret_cast<ReallocalignFunc>(table->slots[kReallocalignSlot]);
+	auto* next         = new RuntimeApi;
+	next->malloc       = reinterpret_cast<MallocFunc>(table->slots[kMallocSlot]);
+	next->free         = reinterpret_cast<FreeFunc>(table->slots[kFreeSlot]);
+	next->stats_fast   = reinterpret_cast<StatsFunc>(table->slots[kMallocStatsFastSlot]);
+	next->realloc      = reinterpret_cast<ReallocFunc>(table->slots[kReallocSlot]);
+	next->reallocalign = reinterpret_cast<ReallocalignFunc>(table->slots[kReallocalignSlot]);
+	g_api.store(next, std::memory_order_release);
 }
 
 bool InitializeProcessHeap(uint64_t process_parameters)

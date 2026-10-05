@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 
@@ -27,6 +28,9 @@ struct HostAllocationRecord
 
 static std::mutex                                      g_allocations_mutex;
 static std::unordered_map<void*, HostAllocationRecord> g_allocations;
+// Mirrors g_allocations.size(): once the application heap exists the registry
+// is normally empty and every free skips the lock.
+static std::atomic<size_t> g_allocations_count {0};
 
 static bool register_allocation(void* ptr, HostAllocationRecord record)
 {
@@ -36,12 +40,14 @@ static bool register_allocation(void* ptr, HostAllocationRecord record)
 	}
 
 	std::lock_guard lock(g_allocations_mutex);
-	return g_allocations.emplace(ptr, record).second;
+	const bool inserted = g_allocations.emplace(ptr, record).second;
+	g_allocations_count.store(g_allocations.size(), std::memory_order_release);
+	return inserted;
 }
 
 static bool claim_allocation(void* ptr, HostAllocationRecord* record)
 {
-	if (ptr == nullptr || record == nullptr)
+	if (ptr == nullptr || record == nullptr || g_allocations_count.load(std::memory_order_acquire) == 0)
 	{
 		return false;
 	}
@@ -55,6 +61,7 @@ static bool claim_allocation(void* ptr, HostAllocationRecord* record)
 
 	*record = it->second;
 	g_allocations.erase(it);
+	g_allocations_count.store(g_allocations.size(), std::memory_order_release);
 	return true;
 }
 
@@ -209,6 +216,8 @@ struct AlignedAllocation
 
 static std::mutex                                   g_aligned_allocations_mutex;
 static std::unordered_map<void*, AlignedAllocation> g_aligned_allocations;
+// Mirrors g_aligned_allocations.size() so a free with none outstanding skips the lock.
+static std::atomic<size_t> g_aligned_allocations_count {0};
 
 static bool register_aligned_allocation(void* ptr, const AlignedAllocation& allocation)
 {
@@ -218,7 +227,9 @@ static bool register_aligned_allocation(void* ptr, const AlignedAllocation& allo
 	}
 
 	std::lock_guard lock(g_aligned_allocations_mutex);
-	return g_aligned_allocations.emplace(ptr, allocation).second;
+	const bool inserted = g_aligned_allocations.emplace(ptr, allocation).second;
+	g_aligned_allocations_count.store(g_aligned_allocations.size(), std::memory_order_release);
+	return inserted;
 }
 
 // Transfers ownership out of the registry in one operation. Callers must not
@@ -226,7 +237,7 @@ static bool register_aligned_allocation(void* ptr, const AlignedAllocation& allo
 // independently safe. A failed realloc restores the claimed record.
 static bool claim_aligned_allocation(void* ptr, AlignedAllocation* allocation)
 {
-	if (ptr == nullptr || allocation == nullptr)
+	if (ptr == nullptr || allocation == nullptr || g_aligned_allocations_count.load(std::memory_order_acquire) == 0)
 	{
 		return false;
 	}
@@ -240,6 +251,7 @@ static bool claim_aligned_allocation(void* ptr, AlignedAllocation* allocation)
 
 	*allocation = it->second;
 	g_aligned_allocations.erase(it);
+	g_aligned_allocations_count.store(g_aligned_allocations.size(), std::memory_order_release);
 	return true;
 }
 
