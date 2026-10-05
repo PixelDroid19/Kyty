@@ -5,7 +5,9 @@
 
 #include "LibCInternal.h"
 
+#include <climits>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -211,6 +213,59 @@ KYTY_SYSV_ABI float c_FSinh(float x, float y)
 KYTY_SYSV_ABI float c_FCosh(float x, float y)
 {
 	return y * std::cosh(x);
+}
+
+namespace {
+
+// The guest struct lconv (Dinkumware): the LC_MONETARY strings, their 14 char
+// members, then the LC_NUMERIC strings and the library's extension strings.
+struct GuestLconv
+{
+	const char* monetary[7]; // currency_symbol .. positive_sign
+	char        monetary_values[14];
+	const char* decimal_point;
+	const char* grouping;
+	const char* thousands_sep;
+	const char* frac_grouping;
+	const char* frac_sep;
+	const char* false_name;
+	const char* true_name;
+	const char* no;
+	const char* yes;
+};
+
+static_assert(offsetof(GuestLconv, decimal_point) == 0x48, "titles read decimal_point at +0x48");
+
+GuestLconv MakeCLocaleConv()
+{
+	GuestLconv conv {};
+	for (auto& text: conv.monetary)
+	{
+		text = "";
+	}
+	for (auto& value: conv.monetary_values)
+	{
+		value = CHAR_MAX; // "not available" in the C locale
+	}
+	conv.decimal_point = ".";
+	conv.grouping      = "";
+	conv.thousands_sep = "";
+	conv.frac_grouping = "";
+	conv.frac_sep      = "";
+	conv.false_name    = "false";
+	conv.true_name     = "true";
+	conv.no            = "";
+	conv.yes           = "";
+	return conv;
+}
+
+} // namespace
+
+// The guest runs in the "C" locale.
+KYTY_SYSV_ABI void* c_localeconv()
+{
+	static GuestLconv conv = MakeCLocaleConv();
+	return &conv;
 }
 
 } // namespace Kyty::Libs::LibC

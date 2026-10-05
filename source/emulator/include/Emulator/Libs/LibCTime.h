@@ -37,6 +37,7 @@ KYTY_SYSV_ABI GuestTm* c_gmtime_s(const int64_t* t, GuestTm* result);
 KYTY_SYSV_ABI GuestTm* c_localtime(const int64_t* t);
 KYTY_SYSV_ABI GuestTm* c_localtime_s(const int64_t* t, GuestTm* result);
 KYTY_SYSV_ABI size_t c_strftime(char* s, size_t n, const char* f, const GuestTm* tmv);
+KYTY_SYSV_ABI size_t c_wcsftime(uint16_t* s, size_t n, const uint16_t* f, const GuestTm* tmv);
 KYTY_SYSV_ABI char* c_asctime(const GuestTm* tmv);
 
 } // namespace Kyty::Libs::LibC::Time

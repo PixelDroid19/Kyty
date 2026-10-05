@@ -234,6 +234,7 @@ KYTY_SYSV_ABI long      c_lrint(double x);
 KYTY_SYSV_ABI long      c_lrintf(float x);
 KYTY_SYSV_ABI double    c_nan(const char* tag);
 KYTY_SYSV_ABI float     c_nanf(const char* tag);
+KYTY_SYSV_ABI void*     c_localeconv();
 KYTY_SYSV_ABI double    c_scalbln(double x, long exponent);
 KYTY_SYSV_ABI float     c_scalbnf(float x, int exponent);
 KYTY_SYSV_ABI double    c_Sinh(double x, double y);

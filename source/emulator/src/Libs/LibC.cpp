@@ -14,6 +14,8 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/CxaDynamicCast.h"
 #include "Emulator/Libs/CxxLocale.h"
+#include "Emulator/Libs/CxxRtti.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Libs/CxxString.h"
 #include "Emulator/Libs/LibCTime.h"
 #include "Emulator/Libs/Libs.h"
@@ -938,6 +940,11 @@ static KYTY_SYSV_ABI unsigned long c_strtoul(const char* s, char** e, int b)
 {
 	return ::strtoul(s, e, b);
 }
+static KYTY_SYSV_ABI long long c_strtoll(const char* s, char** e, int b)
+{
+	return ::strtoll(s, e, b);
+}
+
 // Gen5 libc_v1 strtoull — NID 5OqszGpy7Mg.
 static KYTY_SYSV_ABI unsigned long long c_strtoull(const char* s, char** e, int b)
 {
@@ -1652,9 +1659,6 @@ static const char g_ti_name_bad_array_new_length[] = "St20bad_array_new_length";
 static const char g_ti_name_ios_base[]          = "St8ios_base";
 static const char g_ti_name_ios_failure[]       = "NSt8ios_base7failureE";
 static const char g_ti_name_num_put_char[]      = "St7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE";
-// Fundamental Itanium typeinfo names used by the guest C++ ABI.
-static const char g_ti_name_int[]  = "i";
-static const char g_ti_name_void[] = "v";
 
 static CxxSiTypeInfoLayout g_typeinfo_exception {g_si_class_type_info_vtable, g_ti_name_exception, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_domain_error {g_si_class_type_info_vtable, g_ti_name_domain_error, nullptr};
@@ -1684,9 +1688,6 @@ static CxxSiTypeInfoLayout g_typeinfo_bad_function_call {
 static CxxSiTypeInfoLayout g_typeinfo_ios_base {g_si_class_type_info_vtable, g_ti_name_ios_base, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_ios_failure {g_si_class_type_info_vtable, g_ti_name_ios_failure, nullptr};
 static CxxSiTypeInfoLayout g_typeinfo_num_put_char {g_si_class_type_info_vtable, g_ti_name_num_put_char, nullptr};
-// Fundamental type_info objects (class_type_info vtable + short name).
-static CxxTypeInfoLayout g_typeinfo_int {g_class_type_info_vtable, g_ti_name_int};
-static CxxTypeInfoLayout g_typeinfo_void {g_class_type_info_vtable, g_ti_name_void};
 static const char g_ti_name_num_get_char[] = "St7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE";
 static CxxSiTypeInfoLayout g_typeinfo_num_get_char {g_si_class_type_info_vtable, g_ti_name_num_get_char, nullptr};
 
@@ -3859,6 +3860,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("rcVv5ivMhY0", LibC::c_lrintf);
 	LIB_FUNC("zck+6bVj5pA", LibC::c_nan);
 	LIB_FUNC("DZU+K1wozGI", LibC::c_nanf);
+	LIB_FUNC("0hlfW1O4Aa4", LibC::c_localeconv);
 	LIB_FUNC("7Jp3g-qTgZw", LibC::c_scalbln);
 	LIB_FUNC("9fs1btfLoUs", LibC::c_scalbnf);
 	LIB_FUNC("MU25eqxSDTw", LibC::c_Sinh);
@@ -3953,8 +3955,11 @@ LIB_DEFINE(InitLibC_1)
 	LIB_OBJECT("yLE5H3058Ao", LibC::g_ios_failure_vtable);
 	LIB_OBJECT("1kZFcktOm+s", LibC::g_num_put_char_vtable);
 	// Fundamental RTTI objects.
-	LIB_OBJECT("St4apgcBNfo", &LibC::g_typeinfo_int);       // _ZTIi
-	LIB_OBJECT("JrUnjJ-PCTg", &LibC::g_typeinfo_void);      // _ZTIv
+	// Fundamental type_info objects and C++ runtime vtables, keyed by mangled name.
+	for (const auto& rtti: LibC::CxxRttiObjects())
+	{
+		LIB_OBJECT(Loader::EncodeNameAsNid(rtti.symbol), rtti.object);
+	}
 	LIB_OBJECT("KfcTPbeaOqg", LibC::g_num_get_char_vtable); // _ZTV std::num_get<char>
 	LIB_OBJECT("OwfBD-2nhJQ", LibC::g_time_put_char_vtable);
 	LIB_OBJECT("FQ9NFbBHb5Y", &LibC::g_bad_off);
@@ -4225,7 +4230,8 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("mXlxhmLNMPg", LibC::c_strtol);
 	// Gen5 strtoul: Kyty maps QxmSHBCuKTk / zlfEH8FmyUA; a guest
 	// Construct parser also hits VOBg+iNwB-4 (rdi=nptr, rsi=endptr, rdx=10).
-	LIB_FUNC_ALIASES(LibC::c_strtoul, "QxmSHBCuKTk", "zlfEH8FmyUA", "VOBg+iNwB-4");
+	LIB_FUNC_ALIASES(LibC::c_strtoul, "QxmSHBCuKTk", "zlfEH8FmyUA"); // strtoul, _Stoul
+	LIB_FUNC("VOBg+iNwB-4", LibC::c_strtoll);
 	// Gen5 libc_v1 strtoull — 5OqszGpy7Mg after TLS context factory.
 	LIB_FUNC("5OqszGpy7Mg", LibC::c_strtoull);
 	LIB_FUNC("SRI6S9B+-a4", LibC::c_atof);
@@ -4270,6 +4276,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("efhK-YSUYYQ", LibC::Time::c_localtime);
 	LIB_FUNC("fiiNDnNBKVY", LibC::Time::c_localtime_s);
 	LIB_FUNC("Av3zjWi64Kw", LibC::Time::c_strftime);
+	LIB_FUNC("XbVXpf5WF28", LibC::Time::c_wcsftime);
 	LIB_FUNC("jT3xiGpA3B4", LibC::Time::c_asctime);
 
 	// math (double)
