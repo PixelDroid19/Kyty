@@ -355,12 +355,34 @@ fraction and change of each capture, so a fix is checked on the affected title i
   an `8_8_8_8_UINT` vertex attribute, world creation a Linux `rename`-based file move and `_Thrd_sleep`, and its
   sockets BSD-to-host message flag translation. It now reaches the start screen, the first-run screens and world
   generation; in the harness (two cores) the world had not finished loading after 260 s.
+- **The same title's network loop and menu surfaces.** Its LAN transport binds an IPv6 UDP socket (family 28, 28-byte
+  address) and waits for it on a kernel event queue: sockets now carry both address families and apply socket
+  options, `sceKernelAddReadEvent`/`AddWriteEvent` accept sockets (level-triggered, a host watch triggers the event
+  when the socket becomes ready), and a receive buffer longer than any datagram is no longer refused with EMSGSIZE;
+  the loop now reads its packets. `s_bfe_i32` is implemented (it was a missing-emitter placeholder). A sampled
+  view with the depth swizzle (tile 24) whose address holds no depth buffer now reaches the render-target and
+  storage-image lookups: the menu samples a 1920x1080 `32_FLOAT` surface a dispatch writes, and reading guest bytes
+  instead left a dark rectangle behind the character preview.
 
 Investigated and left open:
 
-- The sandbox title's first-run screens (Ore UI) sometimes lose the world behind them: after a selection the
-  background goes black while the panels still draw, and the game-mode cards show their images without their text.
-  Not yet traced; its menu also drops to about 5 fps while character previews load.
+- The sandbox title stops advancing at a varying point (character select, its transition, or the world's
+  "Loading" at about half of the bar): presents continue at 40-50 fps and every frame submits its draws, but the
+  picture no longer changes and pad input has no effect. Sampled during the freeze: the main thread waits on the
+  frame task inside the frame builder (`MinecraftGame` update), one worker runs the render task, every job worker
+  waits for work, the network threads wait on their event queues and no level-server thread exists; the world
+  container never gets its `db/` directory. Excluded, with the evidence: a lost wakeup in the C11 `_Cnd`/`_Mtx`
+  layer (static objects are created under a lock; `_Xtime_get_ticks` is microseconds and the workers' timed waits
+  are 90 ms-10 s ahead), a failing file operation (savedata trace: no failed open/rename/mkdir; `/temp0` and
+  `/download0` are created by the title itself), a pending system service or dialog (per-frame HLE histogram: only
+  the usual pad/user/system/flip polls), and the socket event change (the freeze also happens with it disabled).
+  The same symptom shows in the remaining Unity title (below), so a shared cause is likely. The title also imports
+  `sceImeOpen`/`SetText`/`SetCaret`/`GetPanelSize`; a real IME session (open event through `sceImeUpdate`, text
+  input) is not implemented and these were not called on the first-run path.
+- The remaining Unity title sometimes stays on its autosave notice ("Begin") for the whole window (262 s, spinner
+  frozen, presents continue) with code identical to a run that advanced at about 75 s (d1027 vs d1072/d1073 on the
+  same sources, same environment and logs). This is not caused by the network changes: it never sets a socket
+  option or blocks in a receive on that screen.
 
 - The .NET beat 'em up stops at about 1.7 s in some runs (also before this work, runs d474 and d530): its runtime
   reads a null table pointer plus 0x120 (`mov r11, [rax + r10*8]` with rax = 0) while summing allocation statistics.
