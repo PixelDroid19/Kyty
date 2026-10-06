@@ -30,6 +30,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <utility>
 #include <vector>
 
 #define XXH_INLINE_ALL
@@ -68,13 +70,14 @@ constexpr VkDeviceSize kPoolMaxAllocation  = 4ull << 20u;
 
 struct PoolBlock
 {
-	VkDevice                               device = nullptr;
-	VkDeviceMemory                         memory = nullptr;
-	uint8_t*                               mapped = nullptr;
-	uint32_t                               type   = 0;
-	VulkanMemoryResource                   resource {};
-	VkDeviceSize                           used   = 0;
-	std::map<VkDeviceSize, VkDeviceSize>   free_ranges; // offset -> size, coalesced
+	VkDevice                                  device = nullptr;
+	VkDeviceMemory                            memory = nullptr;
+	uint8_t*                                  mapped = nullptr;
+	uint32_t                                  type   = 0;
+	VulkanMemoryResource                      resource {};
+	VkDeviceSize                              used   = 0;
+	std::map<VkDeviceSize, VkDeviceSize>      free_ranges; // offset -> size, coalesced
+	std::set<std::pair<VkDeviceSize, VkDeviceSize>> free_sizes; // (size, offset), same ranges
 };
 
 struct MemoryPool
@@ -89,31 +92,61 @@ MemoryPool& GetMemoryPool()
 	return pool;
 }
 
+void PoolAddFree(PoolBlock* block, VkDeviceSize offset, VkDeviceSize size)
+{
+	block->free_ranges.emplace(offset, size);
+	block->free_sizes.emplace(size, offset);
+}
+
+void PoolRemoveFree(PoolBlock* block, std::map<VkDeviceSize, VkDeviceSize>::iterator range)
+{
+	block->free_sizes.erase({range->second, range->first});
+	block->free_ranges.erase(range);
+}
+
+VkDeviceSize PoolLargestFree(const PoolBlock& block)
+{
+	return block.free_sizes.empty() ? 0 : block.free_sizes.rbegin()->first;
+}
+
+// Best fit through the size index: a range of at least size + alignment - 1
+// bytes always fits; a few smaller ones may fit when their start is aligned.
 bool PoolTakeRange(PoolBlock* block, VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize* offset)
 {
-	for (auto it = block->free_ranges.begin(); it != block->free_ranges.end(); ++it)
+	auto pick = block->free_sizes.end();
+	int  tries = 0;
+	for (auto it = block->free_sizes.lower_bound({size, 0}); it != block->free_sizes.end() && tries < 8; ++it, ++tries)
 	{
-		const VkDeviceSize start   = it->first;
-		const VkDeviceSize length  = it->second;
-		const VkDeviceSize aligned = (start + alignment - 1) / alignment * alignment;
-		if (aligned + size > start + length)
+		const VkDeviceSize aligned = (it->second + alignment - 1) / alignment * alignment;
+		if (aligned + size <= it->second + it->first)
 		{
-			continue;
+			pick = it;
+			break;
 		}
-		block->free_ranges.erase(it);
-		if (aligned > start)
-		{
-			block->free_ranges.emplace(start, aligned - start);
-		}
-		if (aligned + size < start + length)
-		{
-			block->free_ranges.emplace(aligned + size, start + length - aligned - size);
-		}
-		block->used += size;
-		*offset = aligned;
-		return true;
 	}
-	return false;
+	if (pick == block->free_sizes.end())
+	{
+		pick = block->free_sizes.lower_bound({size + alignment - 1, 0});
+		if (pick == block->free_sizes.end())
+		{
+			return false;
+		}
+	}
+	const VkDeviceSize start   = pick->second;
+	const VkDeviceSize length  = pick->first;
+	const VkDeviceSize aligned = (start + alignment - 1) / alignment * alignment;
+	PoolRemoveFree(block, block->free_ranges.find(start));
+	if (aligned > start)
+	{
+		PoolAddFree(block, start, aligned - start);
+	}
+	if (aligned + size < start + length)
+	{
+		PoolAddFree(block, aligned + size, start + length - aligned - size);
+	}
+	block->used += size;
+	*offset = aligned;
+	return true;
 }
 
 void PoolReturnRange(PoolBlock* block, VkDeviceSize offset, VkDeviceSize size)
@@ -127,15 +160,15 @@ void PoolReturnRange(PoolBlock* block, VkDeviceSize offset, VkDeviceSize size)
 		{
 			size += previous->second;
 			offset = previous->first;
-			block->free_ranges.erase(previous);
+			PoolRemoveFree(block, previous);
 		}
 	}
 	if (next != block->free_ranges.end() && offset + size == next->first)
 	{
 		size += next->second;
-		block->free_ranges.erase(next);
+		PoolRemoveFree(block, next);
 	}
-	block->free_ranges.emplace(offset, size);
+	PoolAddFree(block, offset, size);
 }
 
 // Returns false when the request should get its own allocation.
@@ -154,7 +187,7 @@ bool PoolAllocate(GraphicContext* ctx, VulkanMemory* mem, uint32_t type, VkMemor
 	{
 		VkDeviceSize offset = 0;
 		if (block->device == ctx->device && block->type == type && block->resource == resource &&
-		    kPoolBlockBytes - block->used >= mem->requirements.size &&
+		    PoolLargestFree(*block) >= mem->requirements.size &&
 		    PoolTakeRange(block.get(), mem->requirements.size, alignment, &offset))
 		{
 			mem->memory     = block->memory;
@@ -185,7 +218,7 @@ bool PoolAllocate(GraphicContext* ctx, VulkanMemory* mem, uint32_t type, VkMemor
 		}
 		block->mapped = static_cast<uint8_t*>(mapped);
 	}
-	block->free_ranges.emplace(0, kPoolBlockBytes);
+	PoolAddFree(block.get(), 0, kPoolBlockBytes);
 	VkDeviceSize offset = 0;
 	EXIT_IF(!PoolTakeRange(block.get(), mem->requirements.size, alignment, &offset));
 	mem->memory     = block->memory;
