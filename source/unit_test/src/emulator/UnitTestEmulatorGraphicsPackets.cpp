@@ -141,6 +141,60 @@ private:
 
 } // namespace
 
+TEST(EmulatorGraphicsPackets, RegisterDefaultsPreserveVersionedDepthValueLocations)
+{
+	InitCommandBufferTestRuntime();
+	for (const uint32_t version: {8u, 13u, 8u})
+	{
+		const auto* defaults = static_cast<const uint8_t*>(Gen5::GraphicsGetRegisterDefaults2(version));
+		ASSERT_NE(defaults, nullptr);
+		ShaderRegister** tables[4] {};
+		const uint32_t* types = nullptr;
+		uint32_t count = 0;
+		std::memcpy(tables, defaults, sizeof(tables));
+		std::memcpy(&types, defaults + 0x30u, sizeof(types));
+		std::memcpy(&count, defaults + 0x38u, sizeof(count));
+		ASSERT_NE(types, nullptr);
+		ASSERT_LT(count, 256u);
+		const ShaderRegister* depth = nullptr;
+		for (uint32_t index = 0; index < count; ++index)
+		{
+			if (types[index * 3u] != 0x67096014u) { continue; }
+			const uint32_t location = types[index * 3u + 1u];
+			ASSERT_NE(tables[location & 3u], nullptr);
+			depth = tables[location & 3u][(location & 0x3fcu) >> 2u];
+			break;
+		}
+		ASSERT_NE(depth, nullptr);
+		const uint32_t size_index = version == 8u ? 13u : 14u;
+		ASSERT_EQ(depth[size_index].offset, Pm4::DB_DEPTH_SIZE_XY);
+		ASSERT_EQ(depth[size_index + 1u].offset, Pm4::DB_DEPTH_CLEAR);
+		ASSERT_EQ(depth[size_index + 2u].offset, Pm4::DB_STENCIL_CLEAR);
+
+		// The guest copies the depth group, then patches the versioned size value.
+		ShaderRegister registers[17] {};
+		std::memcpy(registers, depth, (size_index + 3u) * sizeof(ShaderRegister));
+		registers[size_index].value = ((720u - 1u) << 16u) | (1280u - 1u);
+		if (version == 13u)
+		{
+			ASSERT_EQ(registers[13].offset, Pm4::DB_HTILE_SURFACE);
+			registers[13].value = (registers[13].value & 0xffe7ffffu) | 0x00100000u;
+			EXPECT_EQ(registers[size_index].value, ((720u - 1u) << 16u) | (1280u - 1u));
+		}
+		EXPECT_EQ(registers[size_index].offset, Pm4::DB_DEPTH_SIZE_XY);
+		EXPECT_EQ(registers[size_index + 1u].value, 0u);
+		EXPECT_EQ(registers[size_index + 2u].value, 0u);
+		HW::DepthRenderTarget target {};
+		target.size.valid = true;
+		target.size.x_max = registers[size_index].value & Pm4::DB_DEPTH_SIZE_XY_X_MAX_MASK;
+		target.size.y_max = (registers[size_index].value >> Pm4::DB_DEPTH_SIZE_XY_Y_MAX_SHIFT) & Pm4::DB_DEPTH_SIZE_XY_Y_MAX_MASK;
+		const auto extent = State::ResolveDepthTargetExtent(target, true);
+		EXPECT_TRUE(extent.valid);
+		EXPECT_EQ(extent.width, 1280u);
+		EXPECT_EQ(extent.height, 720u);
+	}
+}
+
 TEST(EmulatorGraphicsPackets, EncodesContiguousShRegisters)
 {
 	const ShaderRegister registers[] = {{0x20cu, 0x11111111u}, {0x20du, 0x22222222u}};

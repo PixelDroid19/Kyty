@@ -35,6 +35,7 @@
 #include "Emulator/VideoFrameMemory.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -1631,6 +1632,26 @@ static RegisterDefaults g_reg_defaults1 = { // @suppress("Invalid arguments")
 static RegisterDefaults g_reg_defaults2 = { // @suppress("Invalid arguments")
     g_tbl_cx2, g_tbl_sh2, g_tbl_uc2, nullptr, {0, 0}, g_tbl_index2, sizeof(g_tbl_index2) / 12};
 
+// Version 13 depth groups include HTILE control before the size and clear values.
+// Keep independent backing so older clients retain their sixteen-pair layout.
+static auto g_depth_reg_defaults13 = [] {
+	std::array<ShaderRegister, 17> registers {};
+	std::copy_n(g_cx_reg_info1[64].reg, 13, registers.begin());
+	registers[13] = {Pm4::DB_HTILE_SURFACE, 0x00040000u};
+	std::copy_n(g_cx_reg_info1[64].reg + 13, 3, registers.begin() + 14);
+	return registers;
+}();
+
+static auto g_tbl_cx13 = [] {
+	std::array<ShaderRegister*, sizeof(g_tbl_cx1) / sizeof(g_tbl_cx1[0])> table {};
+	std::copy_n(g_tbl_cx1, table.size(), table.begin());
+	table[64] = g_depth_reg_defaults13.data();
+	return table;
+}();
+
+static RegisterDefaults g_reg_defaults13 = {
+    g_tbl_cx13.data(), g_tbl_sh1, g_tbl_uc1, nullptr, {0, 0}, g_tbl_index1, sizeof(g_tbl_index1) / 12};
+
 namespace {
 
 constexpr int      GRAPHICS5_DRIVER_ERROR_INVALID_VALUE    = static_cast<int>(0x8a6c0033u);
@@ -1819,11 +1840,12 @@ int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver)
 {
 	PRINT_NAME();
+	auto* defaults = ver == 13u ? &g_reg_defaults13 : &g_reg_defaults1;
 
-	if (ver != 8) { KYTY_LOG_WARN("\t WARNING: AGC ver %u != 8\n", ver); }
+	if (ver != 8 && ver != 13) { KYTY_LOG_WARN("\t WARNING: AGC ver %u is neither 8 nor 13\n", ver); }
 	if (offsetof(RegisterDefaults, count) != 0x38) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offsetof(RegisterDefaults, count) != 0x38 condition ignored (continuing)\n"); }
 
-	return &g_reg_defaults1;
+	return defaults;
 }
 
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver)
