@@ -2758,9 +2758,20 @@ static CxxStringLayout* CxxStringConstruct(CxxStringLayout* result, const std::s
 	return result;
 }
 
+// std::future_category() messages of the guest's C++ library for the future_errc
+// values 1-4 (broken_promise, future_already_retrieved, promise_already_satisfied,
+// no_state); other values take the errno text, as there.
+static const char* const g_future_error_messages[] = {"broken promise", "future already retrieved", "promise already satisfied",
+                                                      "no state"};
+
 static KYTY_SYSV_ABI CxxStringLayout* c_error_category_message(CxxStringLayout* result, const CxxErrorCategoryLayout* self,
                                                                int32_t value)
 {
+	const bool future = self != nullptr && self->name != nullptr && ::strcmp(self->name, "future") == 0;
+	if (future && value >= 1 && value <= 4)
+	{
+		return CxxStringConstruct(result, g_future_error_messages[value - 1]);
+	}
 	const bool system = self != nullptr && self->name != nullptr && ::strcmp(self->name, "system") == 0;
 	const auto& category = system ? std::system_category() : std::generic_category();
 	return CxxStringConstruct(result, std::error_code(value, category).message());
@@ -2802,6 +2813,7 @@ static void* g_error_category_vtable[8] = {
 
 static CxxErrorCategoryLayout g_generic_error_category {g_error_category_vtable, "generic"};
 static CxxErrorCategoryLayout g_system_error_category {g_error_category_vtable, "system"};
+static CxxErrorCategoryLayout g_future_error_category {g_error_category_vtable, "future"};
 
 static KYTY_SYSV_ABI const CxxErrorCategoryLayout* c_generic_category()
 {
@@ -2811,6 +2823,11 @@ static KYTY_SYSV_ABI const CxxErrorCategoryLayout* c_generic_category()
 static KYTY_SYSV_ABI const CxxErrorCategoryLayout* c_system_category()
 {
 	return &g_system_error_category;
+}
+
+static KYTY_SYSV_ABI const CxxErrorCategoryLayout* c_future_category()
+{
+	return &g_future_error_category;
 }
 
 static const char g_ti_name_error_category[] = "St14error_category";
@@ -4284,6 +4301,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("N2f485TmJms", LibC::c_ios_base_failure_dtor);
 	LIB_FUNC("YxwfcCH5Q0I", LibC::c_generic_category);
 	LIB_FUNC("aotaAaQK6yc", LibC::c_system_category);
+	LIB_FUNC("vI85k3GQcz8", LibC::c_future_category);
 	LIB_FUNC("g8Jw7V6mn8k", LibC::c_error_category_dtor);
 	LIB_FUNC("3qWXO9GTUYU", LibC::c_system_error_dtor);
 	LIB_FUNC("8SDojuZyQaY", LibC::c_error_category_default_error_condition);
