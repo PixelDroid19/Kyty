@@ -12,6 +12,7 @@
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Log.h"
+#include "Emulator/Network.h"
 
 #include <limits>
 #include <unordered_map>
@@ -473,6 +474,93 @@ static void write_event_reset_func(KernelEqueueEvent* event)
 	event->triggered  = available;
 }
 
+// Socket read/write events are level-triggered like the file ones: readiness
+// is sampled when the event is added and after each delivery, and a one-shot
+// host watch triggers the event when a socket that was not ready becomes ready.
+struct SocketEventTarget
+{
+	KernelEqueueIdentity queue;
+};
+
+static void socket_ready_notify(uint64_t owner, uint64_t generation, int id, bool write)
+{
+	const auto pin = KernelAcquireEqueue(KernelEqueueIdentity {reinterpret_cast<KernelEqueue>(owner), generation});
+	if (pin)
+	{
+		(void)KernelTriggerEvent(pin, static_cast<uintptr_t>(id), write ? KERNEL_EVFILT_WRITE : KERNEL_EVFILT_READ, nullptr);
+	}
+}
+
+// Updates the event from the socket state. Returns true when the socket is
+// open but not ready, i.e. when the event needs a watch to be triggered later.
+static bool socket_event_sample(KernelEqueueEvent* event)
+{
+	bool    ready = false;
+	int64_t data  = 0;
+	if (Libs::Network::Net::NetSocketReadiness(static_cast<int>(event->event.ident), event->event.filter == KERNEL_EVFILT_WRITE, &ready,
+	                                           &data) != OK)
+	{
+		// Closed socket: nothing will make it ready again.
+		event->triggered = false;
+		return false;
+	}
+	event->event.data = static_cast<intptr_t>(data);
+	event->triggered  = ready;
+	return !ready;
+}
+
+static void socket_event_arm(const KernelEqueueEvent& event)
+{
+	const auto& queue = static_cast<const SocketEventTarget*>(event.filter.data)->queue;
+	(void)Libs::Network::Net::NetSocketWatch(static_cast<int>(event.event.ident), event.event.filter == KERNEL_EVFILT_WRITE,
+	                                         reinterpret_cast<uint64_t>(queue.eq), queue.generation, socket_ready_notify);
+}
+
+static void socket_event_refresh(KernelEqueueEvent* event)
+{
+	EXIT_IF(event == nullptr || event->filter.data == nullptr);
+	if (socket_event_sample(event))
+	{
+		socket_event_arm(*event);
+	}
+}
+
+static void socket_event_trigger_func(KernelEqueueEvent* event, void* /*trigger_data*/)
+{
+	socket_event_refresh(event);
+}
+
+static void socket_event_delete_func(KernelEqueue eq, KernelEqueueEvent* event)
+{
+	EXIT_IF(event == nullptr);
+	Libs::Network::Net::NetSocketUnwatch(static_cast<int>(event->event.ident), event->event.filter == KERNEL_EVFILT_WRITE,
+	                                     reinterpret_cast<uint64_t>(eq));
+	delete static_cast<SocketEventTarget*>(event->filter.data);
+	event->filter.data = nullptr;
+}
+
+static int KernelAddSocketEvent(KernelEqueue eq, KernelEqueueEvent* event)
+{
+	auto pin = KernelAcquireEqueue(eq);
+	if (!pin)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+	event->filter.data              = new SocketEventTarget {pin.GetIdentity()};
+	event->filter.trigger_func      = socket_event_trigger_func;
+	event->filter.reset_func        = socket_event_refresh;
+	event->filter.delete_event_func = socket_event_delete_func;
+	// The watch is armed only once the event is queued, so a socket that
+	// becomes ready right away still finds the event to trigger.
+	const bool needs_watch = socket_event_sample(event);
+	const int  result      = KernelAddEvent(pin, *event);
+	if (result == OK && needs_watch)
+	{
+		socket_event_arm(*event);
+	}
+	return result;
+}
+
 static int KernelAddIoEvent(KernelEqueue eq, int fd, int flags, void* udata, int16_t filter)
 {
 	if (fd < 0 || flags < 0 || flags > std::numeric_limits<uint16_t>::max())
@@ -485,6 +573,11 @@ static int KernelAddIoEvent(KernelEqueue eq, int fd, int flags, void* udata, int
 	event.event.filter = filter;
 	event.event.flags  = static_cast<uint16_t>(flags);
 	event.event.udata  = udata;
+
+	if (Libs::Network::Net::NetIsSocket(fd))
+	{
+		return KernelAddSocketEvent(eq, &event);
+	}
 
 	if (filter == KERNEL_EVFILT_READ)
 	{

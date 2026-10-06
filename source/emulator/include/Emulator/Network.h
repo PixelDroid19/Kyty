@@ -49,6 +49,16 @@ int KYTY_SYSV_ABI NetGetpeername(int id, void* addr, uint32_t* len);
 int KYTY_SYSV_ABI NetGetsockopt(int id, int level, int option, void* value, int* value_len);
 int KYTY_SYSV_ABI NetFcntl(int id, int command, int64_t argument);
 bool NetIsSocket(int id);
+
+// Socket readiness for the kernel event queue (EVFILT_READ / EVFILT_WRITE on a
+// socket). `data` receives the pending receive byte count for reads.
+int NetSocketReadiness(int id, bool write, bool* ready, int64_t* data);
+// One-shot host watch: `notify` runs once on the network watcher thread when
+// the socket becomes ready in that direction. Arming the same (id, write,
+// owner) again keeps a single watch; closing the socket cancels its watches.
+using NetReadinessNotify = void (*)(uint64_t owner, uint64_t generation, int id, bool write);
+int  NetSocketWatch(int id, bool write, uint64_t owner, uint64_t generation, NetReadinessNotify notify);
+void NetSocketUnwatch(int id, bool write, uint64_t owner);
 int KYTY_SYSV_ABI NetSelect(int nfds, void* readfds, void* writefds, void* exceptfds, void* timeout);
 const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, int size);
 uint32_t KYTY_SYSV_ABI NetHtonl(uint32_t hostlong);

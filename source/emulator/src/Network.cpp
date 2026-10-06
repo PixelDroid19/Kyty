@@ -32,6 +32,8 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #define KYTY_NET_HOST_POSIX 1
@@ -1310,6 +1312,127 @@ static int HostErrnoToNet(int host_errno)
 	}
 }
 
+// One-shot readiness watches for the kernel event queue. Each watch polls its
+// own duplicate of the host descriptor, so closing the guest socket never
+// leaves the watcher polling a reused descriptor number; only the watcher
+// thread closes those duplicates.
+struct SocketReadinessWatch
+{
+	int                id        = -1;
+	bool               write     = false;
+	uint64_t           owner     = 0;
+	uint64_t           generation = 0;
+	NetReadinessNotify notify    = nullptr;
+	int                host_fd   = -1;
+	bool               cancelled = false;
+};
+
+static std::mutex                        g_watch_mutex;
+static std::vector<SocketReadinessWatch> g_watches;
+static int                               g_watch_wake[2] = {-1, -1};
+
+static void WakeSocketWatcher()
+{
+	const uint8_t byte = 1;
+	(void)::write(g_watch_wake[1], &byte, sizeof(byte));
+}
+
+static void SocketWatcherThread(void* /*arg*/)
+{
+	std::vector<pollfd>               polled;
+	std::vector<SocketReadinessWatch> fired;
+	for (;;)
+	{
+		{
+			std::lock_guard lock(g_watch_mutex);
+			polled.assign(1, pollfd {g_watch_wake[0], POLLIN, 0});
+			for (const auto& watch: g_watches)
+			{
+				polled.push_back(pollfd {watch.host_fd, static_cast<short>(watch.write ? POLLOUT : POLLIN), 0});
+			}
+		}
+		if (::poll(polled.data(), polled.size(), -1) < 0)
+		{
+			EXIT_IF(errno != EINTR);
+			continue;
+		}
+		if (polled[0].revents != 0)
+		{
+			uint8_t drain[64];
+			while (::read(g_watch_wake[0], drain, sizeof(drain)) > 0)
+			{
+			}
+		}
+		fired.clear();
+		{
+			std::lock_guard lock(g_watch_mutex);
+			auto ready = [&polled](int host_fd)
+			{ return std::any_of(polled.begin() + 1, polled.end(), [host_fd](const pollfd& p) { return p.fd == host_fd && p.revents != 0; }); };
+			for (auto it = g_watches.begin(); it != g_watches.end();)
+			{
+				if (it->cancelled || ready(it->host_fd))
+				{
+					(void)::close(it->host_fd);
+					if (!it->cancelled)
+					{
+						fired.push_back(*it);
+					}
+					it = g_watches.erase(it);
+				} else
+				{
+					++it;
+				}
+			}
+		}
+		for (const auto& watch: fired)
+		{
+			watch.notify(watch.owner, watch.generation, watch.id, watch.write);
+		}
+	}
+}
+
+// Requires g_watch_mutex.
+static bool StartSocketWatcherLocked()
+{
+	if (g_watch_wake[0] >= 0)
+	{
+		return true;
+	}
+	int wake[2] = {-1, -1};
+	if (::pipe(wake) != 0)
+	{
+		return false;
+	}
+	for (const int fd: wake)
+	{
+		(void)::fcntl(fd, F_SETFD, FD_CLOEXEC);
+		(void)::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);
+	}
+	g_watch_wake[0] = wake[0];
+	g_watch_wake[1] = wake[1];
+	Core::Thread thread(SocketWatcherThread, nullptr);
+	thread.Detach();
+	return true;
+}
+
+static void CancelSocketWatches(int id)
+{
+	std::lock_guard lock(g_watch_mutex);
+	bool            any = false;
+	for (auto& watch: g_watches)
+	{
+		if (watch.id == id && !watch.cancelled)
+		{
+			watch.cancelled = true;
+			any             = true;
+		}
+	}
+	if (any)
+	{
+		WakeSocketWatcher();
+	}
+}
+
 static bool TranslateGuestSocketParams(int family, int type, int protocol, int* host_family, int* host_type,
                                        int* host_protocol)
 {
@@ -1468,6 +1591,7 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		host_fd        = state->host_fd;
 	}
 
+	CancelSocketWatches(id);
 	if (host_fd >= 0)
 	{
 		// shutdown wakes blocking accept/recv while the operation lease keeps
@@ -1498,6 +1622,119 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 #endif
 
 	return OK;
+}
+
+int NetSocketReadiness(int id, bool write, bool* ready, int64_t* data)
+{
+	if (ready == nullptr || data == nullptr)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	*ready         = false;
+	*data          = 0;
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+#if KYTY_NET_HOST_POSIX
+	int host_fd = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	pollfd    probe {host_fd, static_cast<short>(write ? POLLOUT : POLLIN), 0};
+	const int polled     = ::poll(&probe, 1, 0);
+	const int host_errno = errno;
+	int       pending    = 0;
+	if (polled > 0 && !write && ::ioctl(host_fd, FIONREAD, &pending) != 0)
+	{
+		pending = 0;
+	}
+	EndSocketOperation(state);
+	if (polled < 0)
+	{
+		return HostErrnoToNet(host_errno);
+	}
+	// An error or hang-up also wakes the waiter; the next socket call reports it.
+	*ready = polled > 0;
+	*data  = write ? 1 : pending;
+	return OK;
+#else
+	(void)write;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+int NetSocketWatch(int id, bool write, uint64_t owner, uint64_t generation, NetReadinessNotify notify)
+{
+	if (notify == nullptr)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+#if KYTY_NET_HOST_POSIX
+	int host_fd = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	const int watched    = ::fcntl(host_fd, F_DUPFD_CLOEXEC, 0);
+	const int host_errno = errno;
+	EndSocketOperation(state);
+	if (watched < 0)
+	{
+		return HostErrnoToNet(host_errno);
+	}
+
+	std::lock_guard lock(g_watch_mutex);
+	if (!StartSocketWatcherLocked())
+	{
+		(void)::close(watched);
+		return NET_ERROR_ENOBUFS;
+	}
+	for (auto& watch: g_watches)
+	{
+		if (!watch.cancelled && watch.id == id && watch.write == write && watch.owner == owner)
+		{
+			watch.generation = generation;
+			watch.notify     = notify;
+			(void)::close(watched);
+			return OK;
+		}
+	}
+	g_watches.push_back(SocketReadinessWatch {id, write, owner, generation, notify, watched, false});
+	WakeSocketWatcher();
+	return OK;
+#else
+	(void)write;
+	(void)owner;
+	(void)generation;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+void NetSocketUnwatch(int id, bool write, uint64_t owner)
+{
+#if KYTY_NET_HOST_POSIX
+	std::lock_guard lock(g_watch_mutex);
+	for (auto& watch: g_watches)
+	{
+		if (!watch.cancelled && watch.id == id && watch.write == write && watch.owner == owner)
+		{
+			watch.cancelled = true;
+			WakeSocketWatcher();
+		}
+	}
+#else
+	(void)id;
+	(void)write;
+	(void)owner;
+#endif
 }
 
 int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
