@@ -1385,15 +1385,6 @@ static KYTY_SYSV_ABI const char* c_error_exception_what(const SceErrorExceptionL
 	return reinterpret_cast<const char*>(self->shared_message) + sizeof(uint32_t);
 }
 
-// Itanium __cxa_dynamic_cast (NID hMAe+TWS9mQ). Observed at a guest JSON-load
-// call site: rdi=src, rsi/rdx=type_info ("17ConditionOrAction" /
-// "6Action"), rcx=src2dst (0 = unique base at offset 0). type_info vtables often
-// point at the unresolved-object sentinel, so only src2dst arithmetic runs.
-static KYTY_SYSV_ABI void* cxa_dynamic_cast(void* src, const void* /*src_type*/, const void* /*dst_type*/, int64_t src2dst)
-{
-	return CxaDynamicCastApply(src, src2dst);
-}
-
 // --- C++ locale / RTTI objects (guest Construct string path) -----------------
 // Quiet boot AV: mov (%r12),%rdi with r12 = INVALID_MEMORY because weak Object
 // Qoo175Ig+-k (_ZSt21_sceLibcClassicLocale) was never registered. The guest
@@ -1557,6 +1548,17 @@ static void* g_function_type_info_vtable[8]           = {reinterpret_cast<void*>
                                                          reinterpret_cast<void*>(&CxxVtableNoop)};
 static void* g_exception_vtable[8]           = {reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop),
                                                 reinterpret_cast<void*>(&CxxVtableNoop), reinterpret_cast<void*>(&CxxVtableNoop)};
+
+// Itanium __dynamic_cast (NID hMAe+TWS9mQ): rdi=src, rsi=static type_info,
+// rdx=destination type_info, rcx=src2dst hint. Guest type_info objects relocate
+// to the vtables above, so the guest RTTI is walked for the real result; the
+// hint alone is wrong whenever the dynamic type differs from the expected one
+// (a service returning either an alias string or the real object).
+static KYTY_SYSV_ABI void* cxa_dynamic_cast(void* src, const void* src_type, const void* dst_type, int64_t src2dst)
+{
+	static const CxaTypeInfoVtables vtables {g_class_type_info_vtable, g_si_class_type_info_vtable, g_vmi_class_type_info_vtable};
+	return CxaDynamicCastResolve(src, src_type, dst_type, src2dst, vtables);
+}
 
 // Exception / iostream RTTI Objects imported by a guest libc_v1 module.
 // NIDs come from the import table; names come from public symbol catalogs.
