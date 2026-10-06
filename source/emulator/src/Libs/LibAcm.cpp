@@ -5,9 +5,9 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <atomic>
 #include <cinttypes>
 #include <cstdint>
-#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -17,25 +17,23 @@ LIB_VERSION("Acm", 1, "Acm", 1, 1);
 
 namespace Acm {
 
-// sceAcmContextCreate — NID ZIXln2K3XMk.
-// Observed Astro SysV: rdi=preallocated guest buffer, rsi=0x10b (byte size),
-// rdx=0xe (type/flags). Zero the buffer when size is a plausible context size
-// and return success so boot can proceed; expand when more ACM surface is hit.
-static int KYTY_SYSV_ABI AcmContextCreate(void* ctx, uint64_t size, uint64_t type_or_flags)
+// sceAcmContextCreate — NID ZIXln2K3XMk. Its only argument is the context it
+// creates, a 32-bit handle: a title tests it with a 32-bit compare and creates
+// it while it is zero, tail-calling this function with the other argument
+// registers holding whatever the caller left there. Reading one of them as a
+// buffer size cleared that many bytes past the handle and destroyed the audio
+// engine globals that follow it in the title's data.
+static int KYTY_SYSV_ABI AcmContextCreate(uint32_t* ctx)
 {
 	PRINT_NAME();
-	KYTY_LOG_DEBUG("\t ctx           = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ctx));
-	KYTY_LOG_DEBUG("\t size          = 0x%016" PRIx64 "\n", size);
-	KYTY_LOG_DEBUG("\t type_or_flags = 0x%016" PRIx64 "\n", type_or_flags);
+	KYTY_LOG_DEBUG("\t ctx = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(ctx));
 
 	if (ctx == nullptr)
 	{
 		return -1;
 	}
-	if (size > 0 && size <= 0x10000)
-	{
-		std::memset(ctx, 0, static_cast<size_t>(size));
-	}
+	static std::atomic<uint32_t> next_context {1};
+	*ctx = next_context.fetch_add(1);
 	return OK;
 }
 
