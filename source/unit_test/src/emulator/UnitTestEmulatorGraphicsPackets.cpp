@@ -1578,6 +1578,9 @@ TEST(EmulatorGraphicsPackets, ResolvesVertexInputFormatAndComponentCountTogether
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(77).format, VK_FORMAT_R32G32B32A32_SFLOAT);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(56).format, VK_FORMAT_R8G8B8A8_UNORM);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(20).format, VK_FORMAT_R32_UINT);
+	// Gen5 format 60 is 8_8_8_8_UINT (a packed color fetched as integers).
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(60).format, VK_FORMAT_R8G8B8A8_UINT);
+	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(60).numeric_class, VulkanVertexInputNumericClass::Uint);
 	// Gen5 format 29 is R16G16_SFLOAT (shared with image sample path); used for UVs.
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).format, VK_FORMAT_R16G16_SFLOAT);
 	EXPECT_EQ(VulkanResolveGen5VertexInputFormat(29).component_count, 2u);

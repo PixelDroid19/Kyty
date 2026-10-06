@@ -4688,11 +4688,25 @@ KYTY_RECOMPILER_FUNC(Recompile_Fetch)
 
 		if (format.numeric_class == VulkanVertexInputNumericClass::Uint)
 		{
-			EXIT_IF(format.component_count != 1 || r.registers_num != 1 || inst.dst.size != 1);
-			*dst_source += String8::FromPrintf("%%tfetch_uint_%u = OpLoad %%uint %%attr%d\n"
-			                                  "%%tfetch_uint_bits_%u = OpBitcast %%float %%tfetch_uint_%u\n"
-			                                  "OpStore %%v%d %%tfetch_uint_bits_%u\n",
-			                                  index, attrib_id, index, index, inst.dst.register_id, index);
+			// Integer attributes land in the VGPRs as raw bits.
+			EXIT_IF(inst.dst.size < 1 || r.registers_num < inst.dst.size || r.registers_num > 4);
+			if (r.registers_num == 1)
+			{
+				*dst_source += String8::FromPrintf("%%tfetch_uint_%u = OpLoad %%uint %%attr%d\n"
+				                                  "%%tfetch_uint_bits_%u = OpBitcast %%float %%tfetch_uint_%u\n"
+				                                  "OpStore %%v%d %%tfetch_uint_bits_%u\n",
+				                                  index, attrib_id, index, index, inst.dst.register_id, index);
+				return true;
+			}
+			*dst_source += String8::FromPrintf("%%tfetch_uvec_%u = OpLoad %%v%duint %%attr%d\n", index, r.registers_num, attrib_id);
+			for (int component = 0; component < inst.dst.size; component++)
+			{
+				*dst_source += String8::FromPrintf("%%tfetch_uvec_%u_%d = OpCompositeExtract %%uint %%tfetch_uvec_%u %d\n"
+				                                  "%%tfetch_uvec_bits_%u_%d = OpBitcast %%float %%tfetch_uvec_%u_%d\n"
+				                                  "OpStore %%v%d %%tfetch_uvec_bits_%u_%d\n",
+				                                  index, component, index, component, index, component, index, component,
+				                                  inst.dst.register_id + component, index, component);
+			}
 			return true;
 		}
 
