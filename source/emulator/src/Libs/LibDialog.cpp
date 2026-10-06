@@ -56,6 +56,25 @@ LIB_DEFINE(InitDialog_1_ErrorDialog)
 
 } // namespace LibErrorDialog
 
+namespace LibSigninDialog {
+
+LIB_VERSION("SigninDialog", 1, "SigninDialog", 1, 1);
+
+namespace SigninDialog = Dialog::SigninDialog;
+
+LIB_DEFINE(InitDialog_1_SigninDialog)
+{
+	LIB_FUNC("mlYGfmqE3fQ", SigninDialog::SigninDialogInitialize);
+	LIB_FUNC("JlpJVoRWv7U", SigninDialog::SigninDialogOpen);
+	LIB_FUNC("2m077aeC+PA", SigninDialog::SigninDialogGetStatus);
+	LIB_FUNC("Bw31liTFT3A", SigninDialog::SigninDialogUpdateStatus);
+	LIB_FUNC("nqG7rqnYw1U", SigninDialog::SigninDialogGetResult);
+	LIB_FUNC("M3OkENHcyiU", SigninDialog::SigninDialogClose);
+	LIB_FUNC("LXlmS6PvJdU", SigninDialog::SigninDialogTerminate);
+}
+
+} // namespace LibSigninDialog
+
 namespace {
 
 constexpr LibraryIdentity SAVE_DATA_DIALOG        = {"SaveDataDialog", 1, "SaveDataDialog", 1, 1};
@@ -142,6 +161,7 @@ LIB_DEFINE(InitDialog_1)
 	LibCommonDialog::InitDialog_1_CommonDialog(s);
 	LibImeDialog::InitDialog_1_ImeDialog(s);
 	LibErrorDialog::InitDialog_1_ErrorDialog(s);
+	LibSigninDialog::InitDialog_1_SigninDialog(s);
 	LibSaveDataDialog::InitDialog_1_SaveDataDialog(s);
 	LibSaveDataDialogNative::InitDialog_1_SaveDataDialogNative(s);
 	LibMsgDialog::InitDialog_1_MsgDialog(s);

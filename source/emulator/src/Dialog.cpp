@@ -462,6 +462,108 @@ int KYTY_SYSV_ABI MsgDialogProgressBarSetValue(int target, uint32_t value)
 
 } // namespace MsgDialog
 
+namespace SigninDialog {
+
+LIB_NAME("SigninDialog", "SigninDialog");
+
+static std::atomic<int> g_status {CommonDialog::STATUS_NONE};
+
+int KYTY_SYSV_ABI SigninDialogInitialize()
+{
+	PRINT_NAME();
+
+	if (!CommonDialog::CommonDialogIsSystemInitialized())
+	{
+		return CommonDialog::ERROR_NOT_SYSTEM_INITIALIZED;
+	}
+
+	int expected = CommonDialog::STATUS_NONE;
+	if (!g_status.compare_exchange_strong(expected, CommonDialog::STATUS_INITIALIZED, std::memory_order_acq_rel))
+	{
+		return CommonDialog::ERROR_ALREADY_INITIALIZED;
+	}
+	return OK;
+}
+
+int KYTY_SYSV_ABI SigninDialogOpen(const SigninDialogParam* param)
+{
+	PRINT_NAME();
+
+	if (param == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+
+	const int status = g_status.load(std::memory_order_acquire);
+	if (status != CommonDialog::STATUS_INITIALIZED && status != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_INVALID_STATE;
+	}
+
+	KYTY_LOG_DEBUG("\t size    = %u\n", param->size);
+	KYTY_LOG_DEBUG("\t user_id = %d\n", param->user_id);
+
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI SigninDialogGetStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI SigninDialogUpdateStatus()
+{
+	PRINT_NAME();
+	return g_status.load(std::memory_order_acquire);
+}
+
+int KYTY_SYSV_ABI SigninDialogGetResult(SigninDialogResult* result)
+{
+	PRINT_NAME();
+
+	if (g_status.load(std::memory_order_acquire) != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_NOT_FINISHED;
+	}
+	if (result == nullptr)
+	{
+		return CommonDialog::ERROR_ARG_NULL;
+	}
+
+	*result        = SigninDialogResult {};
+	result->result = RESULT_USER_CANCELED;
+	return OK;
+}
+
+int KYTY_SYSV_ABI SigninDialogClose()
+{
+	PRINT_NAME();
+
+	const int status = g_status.load(std::memory_order_acquire);
+	if (status != CommonDialog::STATUS_RUNNING && status != CommonDialog::STATUS_FINISHED)
+	{
+		return CommonDialog::ERROR_NOT_RUNNING;
+	}
+
+	g_status.store(CommonDialog::STATUS_FINISHED, std::memory_order_release);
+	return OK;
+}
+
+int KYTY_SYSV_ABI SigninDialogTerminate()
+{
+	PRINT_NAME();
+
+	if (g_status.exchange(CommonDialog::STATUS_NONE, std::memory_order_acq_rel) == CommonDialog::STATUS_NONE)
+	{
+		return CommonDialog::ERROR_NOT_INITIALIZED;
+	}
+	return OK;
+}
+
+} // namespace SigninDialog
+
 } // namespace Kyty::Libs::Dialog
 
 #endif // KYTY_EMU_ENABLED
