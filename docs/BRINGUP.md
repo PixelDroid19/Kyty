@@ -363,6 +363,12 @@ fraction and change of each capture, so a fix is checked on the affected title i
   view with the depth swizzle (tile 24) whose address holds no depth buffer now reaches the render-target and
   storage-image lookups: the menu samples a 1920x1080 `32_FLOAT` surface a dispatch writes, and reading guest bytes
   instead left a dark rectangle behind the character preview.
+- **Its HTTP client.** `sceHttp2SendRequestAsync`/`ReadDataAsync` never signalled the completion target the title
+  passes (`{event queue, ident, udata}`, after `sceKernelAddUserEventEdge` for the request; its handler loop
+  dispatches on `sceKernelGetEventUserData` and then calls `sceHttp2WaitAsync`), so every request stayed pending
+  for the whole session. Finished operations now trigger that user event with its udata; the send ends with the
+  synchronous call's result, which the handler reports as a failed request. That path then needed
+  `std::future_category` (name and messages from the bundled C++ library).
 
 Investigated and left open:
 
@@ -375,7 +381,11 @@ Investigated and left open:
   layer (static objects are created under a lock; `_Xtime_get_ticks` is microseconds and the workers' timed waits
   are 90 ms-10 s ahead), a failing file operation (savedata trace: no failed open/rename/mkdir; `/temp0` and
   `/download0` are created by the title itself), a pending system service or dialog (per-frame HLE histogram: only
-  the usual pad/user/system/flip polls), and the socket event change (the freeze also happens with it disabled).
+  the usual pad/user/system/flip polls), the socket event change (the freeze also happens with it disabled), the
+  pending HTTP requests (they now complete; the freeze stays), the title's task-queue timer (no delayed submit
+  fails and every timed wait has a sane deadline: job workers 0-10 s, the RakNet loop 10 ms, the WebRTC thread 5 s
+  on its monotonic condition; the libHttpClient-style request path is not the one the title uses), and its
+  network/PSN view (NetCtl reports disconnected and NP signed out).
   The same symptom shows in the remaining Unity title (below), so a shared cause is likely. The title also imports
   `sceImeOpen`/`SetText`/`SetCaret`/`GetPanelSize`; a real IME session (open event through `sceImeUpdate`, text
   input) is not implemented and these were not called on the first-run path.
