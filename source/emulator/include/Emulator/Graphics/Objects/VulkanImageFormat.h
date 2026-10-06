@@ -60,6 +60,19 @@ enum class Gen5CatalogImageFormat: uint16_t
 
 [[nodiscard]] GuestImageNumericType VulkanGen5ImageNumericType(uint16_t fmt);
 
+// Texel size of an uncompressed color format of the guest format table; zero
+// for block-compressed, depth and unknown formats.
+[[nodiscard]] uint32_t VulkanColorTexelBytes(VkFormat format);
+
+// Guest memory is untyped: a storage image's bytes read through another
+// format of the same texel size are what the hardware samples. Such a view is
+// valid on an image created mutable with this format among its view formats.
+[[nodiscard]] bool VulkanColorFormatsShareTexels(VkFormat a, VkFormat b);
+
+// Every host format of the guest format table sharing the texel size of
+// format, format first; the view-format list of a mutable storage image.
+[[nodiscard]] uint32_t VulkanColorTexelFormatList(VkFormat format, VkFormat* out, uint32_t capacity);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

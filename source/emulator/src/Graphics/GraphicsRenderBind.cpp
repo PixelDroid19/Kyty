@@ -3393,6 +3393,8 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		bool         render_texture = false;
 		bool         depth_texture  = false;
 		const char*  materialize    = "unresolved";
+		// A live storage image read through another format of its texel size.
+		VkFormat     reinterpret_format = VK_FORMAT_UNDEFINED;
 
 		if (check_depth_texture)
 		{
@@ -3642,6 +3644,26 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 						}
 						tex = stex.At(static_cast<int>(alias_index));
 					}
+					// Guest memory is untyped: an image a dispatch wrote as R8_UINT
+					// holds the bytes a later R8_UNORM sample of the same range reads.
+					// Storage images are not written back, so the guest copy is stale;
+					// read the live image through a view in the sample's format.
+					const VkFormat sample_format =
+					    VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0u, 0u, static_cast<uint16_t>(fmt), use_srgb);
+					for (size_t ci = 0; reject_st && !textures.desc[i].textures2d_without_sampler && ci < cand_n; ci++)
+					{
+						auto* candidate = stex.At(static_cast<int>(ci));
+						if (candidate->mutable_format && VulkanColorFormatsShareTexels(candidate->format, sample_format) &&
+						    cand_w[ci] == static_cast<uint32_t>(width) && cand_h[ci] == static_cast<uint32_t>(height) &&
+						    cand_mips[ci] >= view_last_level + 1u && cand_layers[ci] >= view_layers)
+						{
+							tex                = candidate;
+							storage_texture    = true;
+							reinterpret_format = sample_format;
+							materialize        = "st-reinterpret";
+							break;
+						}
+					}
 				}
 			}
 			if (gen5)
@@ -3793,6 +3815,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				                                         (storage_seed_skip_mask & (1u << static_cast<uint32_t>(i))) != 0);
 				tex = static_cast<StorageTextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
+				if (tex != nullptr)
+				{
+					tex->storage_write_stamp = VulkanImageNextStamp();
+				}
 				materialize = "storage-create";
 			} else
 			{
@@ -3818,6 +3844,40 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				tex = static_cast<TextureVulkanImage*>(
 				    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, size.size, vulkan_texture_info));
 				materialize = skip_guest ? "guest-skip-live-cover" : "guest-upload";
+				// A block-compressed texture a dispatch uploads through a uint
+				// storage view of its blocks lives in that storage image: storage
+				// images are not written back, so neither the guest bytes nor an
+				// earlier copy carry a later upload. Copy again when the storage
+				// image was written after this texture's content was established;
+				// an older storage image must not replace a newer guest upload.
+				if (gen5 && tex != nullptr && levels == 1u && !arrayed_2d && !three_dimensional && Gen5BlockCompressedBlockBytes(fmt) != 0u)
+				{
+					const auto stex = FindStorageTexture(buffer, addr, size.size, true);
+					for (int ci = 0; ci < static_cast<int>(stex.Size()); ci++)
+					{
+						auto*      source       = stex.At(ci);
+						const auto source_shape = source->GetGuestExtent();
+						uint32_t   copy_width   = 0;
+						uint32_t   copy_height  = 0;
+						if (!Gen5BlockCompressedStorageCopyExtent(fmt, width, height, source->format, source_shape.width, source_shape.height,
+						                                          &copy_width, &copy_height))
+						{
+							continue;
+						}
+						if (source->storage_write_stamp > tex->content_stamp)
+						{
+							Vector<ImageImageCopy> regions(1);
+							regions[0]           = {};
+							regions[0].src_image = source;
+							regions[0].width     = copy_width;
+							regions[0].height    = copy_height;
+							UtilImageToImage(buffer, regions, tex, static_cast<uint64_t>(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+							tex->content_stamp = VulkanImageNextStamp();
+							materialize        = "st-block-copy";
+						}
+						break;
+					}
+				}
 			}
 		}
 
@@ -4009,6 +4069,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 					     static_cast<uint32_t>(tex->type), static_cast<uint32_t>(tex->format), tex->mip_levels, tex->array_layers,
 					     static_cast<uint32_t>(tex->usage), static_cast<uint32_t>(tex->image_type), tex->GetGuestExtent().width,
 					     tex->GetGuestExtent().height, static_cast<uint32_t>(width), static_cast<uint32_t>(height), levels);
+				}
+				if (reinterpret_format != VK_FORMAT_UNDEFINED)
+				{
+					sampled_descriptor.format = reinterpret_format;
+					sampled_descriptor.usage  = VK_IMAGE_USAGE_SAMPLED_BIT;
 				}
 				const int sampled_view = VulkanGetOrCreateSampledImageView(g_render_ctx->GetGraphicCtx()->device, tex,
 				                                                          sampled_descriptor);

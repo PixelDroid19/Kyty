@@ -356,9 +356,25 @@ bool NormalizeImageImageCopy(const ImageImageCopy& requested, const VulkanImage*
 	const bool scaled_block = src_block.width != dst_block.width || src_block.height != dst_block.height;
 	if (scaled_block)
 	{
-		// This is the one format-size conversion currently constructed by the
-		// renderer: one 128-bit storage texel carries one 4x4 BC3 block.
-		if (requested.src_image->format != VK_FORMAT_R32G32B32A32_UINT || dst_image->format != VK_FORMAT_BC3_UNORM_BLOCK ||
+		// The one format-size conversion the renderer constructs: one uint
+		// storage texel carries one 4x4 block, 64-bit for BC1/BC4 and 128-bit
+		// for BC2/BC3/BC5/BC6H/BC7.
+		const auto dst_block_bytes = [](VkFormat format) -> uint32_t
+		{
+			switch (format)
+			{
+				case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+				case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+				case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+				case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+				case VK_FORMAT_BC4_UNORM_BLOCK:
+				case VK_FORMAT_BC4_SNORM_BLOCK: return 8u;
+				default: return 16u;
+			}
+		};
+		const VkFormat block_texel =
+		    dst_block_bytes(dst_image->format) == 8u ? VK_FORMAT_R32G32_UINT : VK_FORMAT_R32G32B32A32_UINT;
+		if (src_block.width != 1u || src_block.height != 1u || requested.src_image->format != block_texel ||
 		    requested.width > src_width - src_x || requested.height > src_height - src_y)
 		{
 			return false;

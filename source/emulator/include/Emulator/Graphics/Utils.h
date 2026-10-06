@@ -36,14 +36,29 @@ struct VulkanSwapchain;
 
 VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 
-// A BC3 sample can be produced through a writable R32G32B32A32_UINT image:
-// one 128-bit storage texel is exactly one 4x4 BC3 block. Vulkan image copies
-// scale the destination extent according to the two formats' block extents.
+// Bytes of one 4x4 block of a Gen5 block-compressed format: 8 for BC1/BC4,
+// 16 for BC2/BC3/BC5/BC6H/BC7 (unorm, srgb and signed variants); zero otherwise.
+[[nodiscard]] inline uint32_t Gen5BlockCompressedBlockBytes(uint32_t ufmt)
+{
+	if (ufmt == 169u || ufmt == 170u || ufmt == 175u || ufmt == 176u)
+	{
+		return 8u;
+	}
+	return ufmt >= 171u && ufmt <= 182u ? 16u : 0u;
+}
+
+// A block-compressed sample can be produced through a writable uint image
+// whose texel is exactly one 4x4 block: R32G32_UINT for 8-byte blocks,
+// R32G32B32A32_UINT for 16-byte ones. Titles upload compressed textures
+// with such compute copies. Vulkan image copies scale the destination
+// extent according to the two formats' block extents.
 [[nodiscard]] inline bool Gen5BlockCompressedStorageCopyExtent(uint32_t sample_ufmt, uint32_t sample_width, uint32_t sample_height,
                                                                VkFormat storage_format, uint32_t storage_width, uint32_t storage_height,
                                                                uint32_t* copy_width, uint32_t* copy_height)
 {
-	if (copy_width == nullptr || copy_height == nullptr || sample_ufmt != 173u || storage_format != VK_FORMAT_R32G32B32A32_UINT)
+	const uint32_t block_bytes = Gen5BlockCompressedBlockBytes(sample_ufmt);
+	const VkFormat block_texel = block_bytes == 8u ? VK_FORMAT_R32G32_UINT : VK_FORMAT_R32G32B32A32_UINT;
+	if (copy_width == nullptr || copy_height == nullptr || block_bytes == 0u || storage_format != block_texel)
 	{
 		return false;
 	}

@@ -212,7 +212,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num != 1);
 
 	auto* vk_obj = static_cast<TextureVulkanImage*>(obj);
-	vk_obj->guest_size = *size;
+	vk_obj->guest_size    = *size;
+	vk_obj->content_stamp = VulkanImageNextStamp();
 
 	auto       tile              = params[TextureObject::PARAM_TILE];
 	auto       fmt               = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
@@ -1047,6 +1048,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	KYTY_PROFILER_BLOCK("TextureObject::update2_func");
 
 	EXIT_IF(obj == nullptr);
+	static_cast<VulkanImage*>(obj)->content_stamp = VulkanImageNextStamp();
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(params == nullptr);
 	EXIT_IF(objects.IsEmpty());
@@ -1186,8 +1188,8 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 					}
 				}
 			}
-			// The source extent is expressed in uncompressed uint4 texels.
-			// vkCmdCopyImage scales it to the BC3 destination's 4x4 block extent.
+			// The source extent is expressed in uncompressed one-block texels.
+			// vkCmdCopyImage scales it to the compressed destination's 4x4 block extent.
 			regions[0].src_image = src_obj;
 			regions[0].src_level = 0;
 			regions[0].dst_level = 0;

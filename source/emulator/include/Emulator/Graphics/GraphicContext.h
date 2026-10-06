@@ -14,6 +14,7 @@
 
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
 
+#include <atomic>
 #include <vector>
 
 // The ratified derivative feature has the same ABI as the NV structure in
@@ -227,6 +228,9 @@ struct VulkanImageViewDescriptor
 	uint32_t           level_count      = 1;
 	uint32_t           base_array_layer = 0;
 	uint32_t           layer_count      = 1;
+	// Zero inherits the image usage; a view in another format of a mutable
+	// image restricts itself to the usage its format supports.
+	VkImageUsageFlags usage = 0;
 };
 
 struct VulkanImage
@@ -294,7 +298,21 @@ struct VulkanImage
 	Graphics::VulkanMemory memory;
 	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.
 	uint64_t               guest_size           = 0;
+	// Created mutable with every same-size table format as a view format.
+	bool                   mutable_format       = false;
+	// Stamps from VulkanImageNextStamp: when a storage bind last let a
+	// dispatch write this image, and when this image's content was last
+	// established (guest upload, copy from its parents or a block refresh).
+	uint64_t               storage_write_stamp  = 0;
+	uint64_t               content_stamp        = 0;
 };
+
+// One process-wide order for the stamps above.
+[[nodiscard]] inline uint64_t VulkanImageNextStamp()
+{
+	static std::atomic<uint64_t> stamp {0};
+	return ++stamp;
+}
 
 struct VideoOutVulkanImage: public VulkanImage
 {

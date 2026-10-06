@@ -3458,6 +3458,10 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_EQ(copy_height, 30u);
 	EXPECT_FALSE(Kyty::Libs::Graphics::Gen5BlockCompressedStorageCopyExtent(173, 116, 120, VK_FORMAT_R32G32B32A32_UINT, 30, 30, &copy_width,
 	                                                                        &copy_height));
+	EXPECT_TRUE(Kyty::Libs::Graphics::Gen5BlockCompressedStorageCopyExtent(169, 4, 4, VK_FORMAT_R32G32_UINT, 1, 1, &copy_width,
+	                                                                       &copy_height));
+	EXPECT_FALSE(Kyty::Libs::Graphics::Gen5BlockCompressedStorageCopyExtent(169, 4, 4, VK_FORMAT_R32G32B32A32_UINT, 1, 1, &copy_width,
+	                                                                        &copy_height));
 }
 
 TEST(EmulatorGraphicsState, Gen5SampledTextureMetadataAddressMayBeInactive)

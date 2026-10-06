@@ -570,6 +570,28 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 		EXIT("format is not supported");
 	}
 
+	// Guest memory is untyped: a sampled descriptor may read these texels
+	// through another format of the same size. Create the image mutable over
+	// those formats when the device supports it, so such a sample views the
+	// live image instead of guest bytes the device never wrote back.
+	VkFormat                    view_formats[24] = {};
+	VkImageFormatListCreateInfo format_list {};
+	format_list.sType           = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO;
+	format_list.viewFormatCount = VulkanColorTexelFormatList(image_info.format, view_formats, 24);
+	format_list.pViewFormats    = view_formats;
+	bool mutable_format         = false;
+	if (format_list.viewFormatCount > 1u && image_info.pNext == nullptr)
+	{
+		auto mutable_info = image_info;
+		mutable_info.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+		mutable_info.pNext = &format_list;
+		if (VulkanImageFormatSupported(ctx, mutable_info))
+		{
+			image_info     = mutable_info;
+			mutable_format = true;
+		}
+	}
+
 	vk_obj->SetNativeExtent(width, height);
 	vk_obj->format     = image_info.format;
 	vk_obj->image      = nullptr;
@@ -577,6 +599,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->array_layers = image_descriptor.array_layers;
 	vk_obj->guest_vaddr = *vaddr;
 	vk_obj->guest_size = *size;
+	vk_obj->mutable_format = mutable_format;
 
 	for (auto& view: vk_obj->image_view)
 	{

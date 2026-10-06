@@ -1,6 +1,7 @@
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -46,8 +47,15 @@ VkImageViewCreateInfo VulkanBuildImageViewCreateInfo(const VulkanImageViewDescri
 bool VulkanCreateDeviceImageView(VkDevice device, const VulkanImageViewDescriptor& descriptor, VkImageView* view)
 {
 	EXIT_IF(device == nullptr || view == nullptr);
-	*view                = nullptr;
-	const auto view_info = VulkanBuildImageViewCreateInfo(descriptor);
+	*view          = nullptr;
+	auto view_info = VulkanBuildImageViewCreateInfo(descriptor);
+	VkImageViewUsageCreateInfo usage_info {};
+	if (descriptor.usage != 0u)
+	{
+		usage_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+		usage_info.usage = descriptor.usage;
+		view_info.pNext  = &usage_info;
+	}
 	return vkCreateImageView(device, &view_info, nullptr, view) == VK_SUCCESS && *view != nullptr;
 }
 
@@ -95,7 +103,7 @@ bool VulkanPlanSampledImageView(const VulkanImage& image, VkImageViewType view_t
 
 bool VulkanImageViewDescriptorsEqual(const VulkanImageViewDescriptor& a, const VulkanImageViewDescriptor& b)
 {
-	return a.image == b.image && a.view_type == b.view_type && a.format == b.format && a.aspect_mask == b.aspect_mask &&
+	return a.image == b.image && a.view_type == b.view_type && a.format == b.format && a.usage == b.usage && a.aspect_mask == b.aspect_mask &&
 	       a.components.r == b.components.r && a.components.g == b.components.g && a.components.b == b.components.b &&
 	       a.components.a == b.components.a && a.base_mip_level == b.base_mip_level && a.level_count == b.level_count &&
 	       a.base_array_layer == b.base_array_layer && a.layer_count == b.layer_count;
@@ -104,8 +112,15 @@ bool VulkanImageViewDescriptorsEqual(const VulkanImageViewDescriptor& a, const V
 int VulkanGetOrCreateSampledImageView(VkDevice device, VulkanImage* image, const VulkanImageViewDescriptor& descriptor,
                                      VulkanImageViewCreator create)
 {
-	if (image == nullptr || create == nullptr || descriptor.image != image->image || descriptor.format != image->format ||
-	    (image->usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u)
+	if (image == nullptr || create == nullptr || descriptor.image != image->image || (image->usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u)
+	{
+		return -1;
+	}
+	// Another format reads the same texels only on a mutable image, through a
+	// view limited to sampling.
+	if (descriptor.format != image->format &&
+	    (!image->mutable_format || descriptor.usage != VK_IMAGE_USAGE_SAMPLED_BIT ||
+	     !VulkanColorFormatsShareTexels(image->format, descriptor.format)))
 	{
 		return -1;
 	}

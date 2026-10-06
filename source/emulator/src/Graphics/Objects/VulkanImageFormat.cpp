@@ -208,6 +208,82 @@ GuestImageNumericType VulkanGen5ImageNumericType(uint16_t fmt)
 	return GuestImageNumericType::Unsupported;
 }
 
+uint32_t VulkanColorTexelBytes(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_R8_UNORM:
+		case VK_FORMAT_R8_UINT: return 1u;
+		case VK_FORMAT_R16_UNORM:
+		case VK_FORMAT_R16_UINT:
+		case VK_FORMAT_R16_SFLOAT:
+		case VK_FORMAT_R8G8_UNORM:
+		case VK_FORMAT_B5G6R5_UNORM_PACK16: return 2u;
+		case VK_FORMAT_R32_UINT:
+		case VK_FORMAT_R32_SFLOAT:
+		case VK_FORMAT_R16G16_SFLOAT:
+		case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+		case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+		case VK_FORMAT_R8G8B8A8_UNORM:
+		case VK_FORMAT_R8G8B8A8_SRGB:
+		case VK_FORMAT_R8G8B8A8_UINT:
+		case VK_FORMAT_B8G8R8A8_UNORM:
+		case VK_FORMAT_B8G8R8A8_SRGB: return 4u;
+		case VK_FORMAT_R32G32_UINT:
+		case VK_FORMAT_R32G32_SFLOAT:
+		case VK_FORMAT_R16G16B16A16_UNORM:
+		case VK_FORMAT_R16G16B16A16_SNORM:
+		case VK_FORMAT_R16G16B16A16_UINT:
+		case VK_FORMAT_R16G16B16A16_SINT:
+		case VK_FORMAT_R16G16B16A16_SFLOAT: return 8u;
+		case VK_FORMAT_R32G32B32A32_UINT:
+		case VK_FORMAT_R32G32B32A32_SFLOAT: return 16u;
+		default: return 0u;
+	}
+}
+
+bool VulkanColorFormatsShareTexels(VkFormat a, VkFormat b)
+{
+	const uint32_t bytes = VulkanColorTexelBytes(a);
+	return bytes != 0u && bytes == VulkanColorTexelBytes(b);
+}
+
+uint32_t VulkanColorTexelFormatList(VkFormat format, VkFormat* out, uint32_t capacity)
+{
+	if (out == nullptr || capacity == 0u || VulkanColorTexelBytes(format) == 0u)
+	{
+		return 0u;
+	}
+	uint32_t   count = 0;
+	const auto add   = [&](VkFormat candidate)
+	{
+		if (candidate == VK_FORMAT_UNDEFINED || count == capacity || !VulkanColorFormatsShareTexels(format, candidate))
+		{
+			return;
+		}
+		for (uint32_t i = 0; i < count; i++)
+		{
+			if (out[i] == candidate)
+			{
+				return;
+			}
+		}
+		out[count++] = candidate;
+	};
+	add(format);
+	for (const auto& entry: GEN5_IMAGE_FORMATS)
+	{
+		add(entry.sampled);
+		add(entry.sampled_srgb);
+		add(entry.storage);
+	}
+	for (const auto& alias: GEN5_SAMPLED_FORMAT_ALIASES)
+	{
+		add(alias.format);
+	}
+	return count;
+}
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

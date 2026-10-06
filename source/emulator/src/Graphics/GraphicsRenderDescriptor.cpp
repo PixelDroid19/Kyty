@@ -616,15 +616,31 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	int textures3d_sampled_num = !split_numeric_types || bind.textures2D.textures3d_sampled_uint_num < bind.textures2D.textures3d_sampled_num
 	                                 ? bind.textures2D.textures3d_sampled_num
 	                                 : 0;
-	int textures2d_sampled_uint_num = split_numeric_types && bind.textures2D.textures2d_sampled_uint_num > 0
-	                                          ? bind.textures2D.textures2d_sampled_num
-	                                          : 0;
-	int textures2d_array_sampled_uint_num = split_numeric_types && bind.textures2D.textures2d_array_sampled_uint_num > 0
-	                                                ? bind.textures2D.textures2d_array_sampled_num
-	                                                : 0;
-	int textures3d_sampled_uint_num = split_numeric_types && bind.textures2D.textures3d_sampled_uint_num > 0
-	                                         ? bind.textures2D.textures3d_sampled_num
-	                                         : 0;
+	// When every sampled image is unsigned, PrepareTextures files them in the
+	// primary banks, yet the shader's unsigned load and sample paths read the
+	// unsigned banks (the layout declares them and both share the element
+	// type). Mirror the primary banks there; unwritten, a copy kernel's
+	// image_load read zero.
+	const bool unsigned_only = sampled_uint_total > 0 && sampled_uint_total == sampled_total;
+	if (unsigned_only)
+	{
+		textures2d_sampled_uint            = textures2d_sampled;
+		textures2d_sampled_uint_view       = textures2d_sampled_view;
+		textures2d_array_sampled_uint      = textures2d_array_sampled;
+		textures2d_array_sampled_uint_view = textures2d_array_sampled_view;
+		textures3d_sampled_uint            = textures3d_sampled;
+		textures3d_sampled_uint_view       = textures3d_sampled_view;
+	}
+	int textures2d_sampled_uint_num = (split_numeric_types && bind.textures2D.textures2d_sampled_uint_num > 0) || unsigned_only
+	                                      ? bind.textures2D.textures2d_sampled_num
+	                                      : 0;
+	int textures2d_array_sampled_uint_num =
+	    (split_numeric_types && bind.textures2D.textures2d_array_sampled_uint_num > 0) || unsigned_only
+	        ? bind.textures2D.textures2d_array_sampled_num
+	        : 0;
+	int textures3d_sampled_uint_num = (split_numeric_types && bind.textures2D.textures3d_sampled_uint_num > 0) || unsigned_only
+	                                      ? bind.textures2D.textures3d_sampled_num
+	                                      : 0;
 	int        sampled_descriptor_num = sampled_total;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
