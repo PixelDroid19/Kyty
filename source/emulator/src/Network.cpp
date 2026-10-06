@@ -1212,6 +1212,39 @@ static bool WriteGuestSockaddrIn(void* addr, void* len, uint32_t max_len, uint16
 }
 
 #if KYTY_NET_HOST_POSIX
+// Guest message flags carry the BSD values. Linux numbers several differently (BSD MSG_DONTWAIT 0x80 is MSG_EOR
+// there and BSD MSG_WAITALL 0x40 is MSG_DONTWAIT), so a non-blocking receive blocked and a waiting one did not.
+// Sends never raise SIGPIPE on the host: a closed peer reports EPIPE instead of ending the emulator.
+static int GuestToHostMessageFlags(int guest_flags, bool sending)
+{
+	struct FlagPair
+	{
+		int guest;
+		int host;
+	};
+	static constexpr FlagPair kFlags[] = {{0x1, MSG_OOB},    {0x2, MSG_PEEK},    {0x4, MSG_DONTROUTE}, {0x8, MSG_EOR},
+	                                      {0x10, MSG_TRUNC}, {0x20, MSG_CTRUNC}, {0x40, MSG_WAITALL},  {0x80, MSG_DONTWAIT}};
+	int host_flags = 0;
+	for (const auto& pair: kFlags)
+	{
+		if ((guest_flags & pair.guest) != 0)
+		{
+			host_flags |= pair.host;
+		}
+	}
+#ifdef MSG_NOSIGNAL
+	if (sending)
+	{
+		host_flags |= MSG_NOSIGNAL;
+	}
+#else
+	(void)sending;
+#endif
+	return host_flags;
+}
+#endif
+
+#if KYTY_NET_HOST_POSIX
 static int HostErrnoToNet(int host_errno)
 {
 	switch (host_errno)
@@ -1668,7 +1701,7 @@ int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags)
 		{
 			return total != 0 ? static_cast<int64_t>(total) : NET_ERROR_EBADF;
 		}
-		const auto sent = ::send(host_fd, payload.Data(), payload.Size(), flags);
+		const auto sent = ::send(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true));
 		const int send_errno = errno;
 		EndSocketOperation(state);
 		if (sent < 0)
@@ -1729,7 +1762,8 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		{
 			return NET_ERROR_EBADF;
 		}
-		const auto sent = ::sendto(host_fd, nullptr, 0, flags, reinterpret_cast<const sockaddr*>(&host_addr), sizeof(host_addr));
+		const auto sent = ::sendto(host_fd, nullptr, 0, GuestToHostMessageFlags(flags, true), reinterpret_cast<const sockaddr*>(&host_addr),
+		                           sizeof(host_addr));
 		const int send_errno = errno;
 		EndSocketOperation(state);
 		return sent < 0 ? HostErrnoToNet(send_errno) : sent;
@@ -1752,7 +1786,7 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		{
 			return total != 0 ? static_cast<int64_t>(total) : NET_ERROR_EBADF;
 		}
-		const auto sent = ::sendto(host_fd, payload.Data(), payload.Size(), flags,
+		const auto sent = ::sendto(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true),
 		                           reinterpret_cast<const sockaddr*>(&host_addr), sizeof(host_addr));
 		const int send_errno = errno;
 		EndSocketOperation(state);
@@ -1813,7 +1847,7 @@ int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags)
 	{
 		return NET_ERROR_EBADF;
 	}
-	const auto received = ::recv(host_fd, payload.Data(), payload.Size(), flags);
+	const auto received = ::recv(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, false));
 	const int recv_errno = errno;
 	EndSocketOperation(state);
 	if (received < 0)
@@ -1890,7 +1924,7 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 	{
 		return NET_ERROR_EBADF;
 	}
-	const auto received = ::recvfrom(host_fd, payload.Data(), payload.Size(), flags,
+	const auto received = ::recvfrom(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, false),
 	                                 write_peer ? reinterpret_cast<sockaddr*>(&host_addr) : nullptr,
 	                                 write_peer ? &host_addr_len : nullptr);
 	const int recv_errno = errno;
