@@ -581,7 +581,8 @@ TEST(EmulatorNetwork, NetRejectsOversizedStagingBeforeGuestAccess)
 
 	EXPECT_EQ(NetSend(socket_id, invalid_guest, 65'508, 0), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 	EXPECT_EQ(NetSendto(socket_id, invalid_guest, 65'508, 0, guest_bytes, 8), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
-	EXPECT_EQ(NetRecv(socket_id, invalid_output, 65'508, 0), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
+	// A receive buffer longer than any datagram is valid; only its range is checked.
+	EXPECT_EQ(NetRecv(socket_id, invalid_output, 65'508, 0), Kyty::Libs::Network::NET_ERROR_EFAULT);
 	EXPECT_EQ(NetGetSockInfo(socket_id, invalid_output, 65'537, 0), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 	EXPECT_EQ(NetEpollWait(1, invalid_output, 1025, 0), Kyty::Libs::Network::NET_ERROR_EMSGSIZE);
 

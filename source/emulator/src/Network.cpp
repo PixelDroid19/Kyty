@@ -965,6 +965,9 @@ static std::unordered_map<int, SocketStatePtr> g_sockets;
 
 constexpr uint64_t kMaxIpv4UdpPayload  = 65'507; // IPv4 payload: 65,535 - 20-byte IP - 8-byte UDP header.
 constexpr size_t   kSocketIoChunkSize  = 64u * 1024u;
+// No UDP datagram is longer than this, so a larger receive buffer is only
+// ever partly filled.
+constexpr uint64_t kMaxUdpReceive      = 65'535;
 constexpr int      kMaxEpollEvents     = 1024;
 constexpr int      kMaxSocketInfoSize  = 64 * 1024;
 
@@ -1880,15 +1883,11 @@ int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags)
 		return NET_ERROR_EMSGSIZE;
 	}
 	const bool datagram = SocketIsDatagram(state);
-	if (datagram && len > kMaxIpv4UdpPayload)
-	{
-		return NET_ERROR_EMSGSIZE;
-	}
 	if (!IsGuestOutputRange(buf, len))
 	{
 		return NET_ERROR_EFAULT;
 	}
-	const uint64_t chunk_length = datagram ? len : std::min<uint64_t>(len, kSocketIoChunkSize);
+	const uint64_t chunk_length = std::min<uint64_t>(len, datagram ? kMaxUdpReceive : kSocketIoChunkSize);
 	HostArray<uint8_t> payload;
 	const int prepare_result = PrepareGuestOutput(buf, chunk_length, &payload);
 	if (prepare_result != OK)
@@ -1935,10 +1934,6 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 		return NET_ERROR_EMSGSIZE;
 	}
 	const bool datagram = SocketIsDatagram(state);
-	if (datagram && len > kMaxIpv4UdpPayload)
-	{
-		return NET_ERROR_EMSGSIZE;
-	}
 	if (len != 0 && !IsGuestOutputRange(buf, len))
 	{
 		return NET_ERROR_EFAULT;
@@ -1963,7 +1958,7 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 		return NET_ERROR_EINVAL;
 	}
 
-	const uint64_t chunk_length = datagram ? len : std::min<uint64_t>(len, kSocketIoChunkSize);
+	const uint64_t chunk_length = std::min<uint64_t>(len, datagram ? kMaxUdpReceive : kSocketIoChunkSize);
 	HostArray<uint8_t> payload;
 	const int prepare_result = PrepareGuestOutput(buf, chunk_length, &payload);
 	if (prepare_result != OK)
