@@ -27,7 +27,7 @@ static KYTY_RECOMPILER_FUNC(RecompileBitfieldExtract32)
 			return false;
 		}
 	}
-	return inst.type == ShaderInstructionType::SBfeU32 ?
+	return inst.type == ShaderInstructionType::SBfeU32 || inst.type == ShaderInstructionType::SBfeI32 ?
 	           Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1(index, code, dst_source, spirv, param, scc_check) :
 	           Recompile_V_XXX_U32_VdstVsrc0Vsrc1Vsrc2(index, code, dst_source, spirv, param, scc_check);
 }
@@ -315,6 +315,14 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SAddcU32,        ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%tscc_<index> = OpLoad %uint %scc", "%ts_<index> = OpFunctionCall %v2uint %addc %t0_<index> %t1_<index> %tscc_<index>", "%t_<index> = OpCompositeExtract %uint %ts_<index> 0", "%carry_<index> = OpCompositeExtract %uint %ts_<index> 1"}, SccCheck::CarryOut},
     {Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SAddU32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%ts_<index> = OpIAddCarry %ResTypeU %t0_<index> %t1_<index>", "%t_<index> = OpCompositeExtract %uint %ts_<index> 0", "%carry_<index> = OpCompositeExtract %uint %ts_<index> 1"}, SccCheck::CarryOut},
     {RecompileBitfieldExtract32,                ShaderInstructionType::SBfeU32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%to_<index> = OpBitFieldUExtract %uint %t1_<index> %uint_0  %uint_5", "%ts_<index> = OpBitFieldUExtract %uint %t1_<index> %uint_16 %uint_7", bitfield_extract_limit_b32, "%t_<index> = OpBitFieldUExtract %uint %t0_<index> %to_<index> %tbfe_count_<index>"}, SccCheck::NonZero},
+	// s_bfe_i32: signed form of s_bfe_u32 (same S1[4:0] offset and S1[22:16] width).
+	{RecompileBitfieldExtract32, ShaderInstructionType::SBfeI32, ShaderInstructionFormat::SVdstSVsrc0SVsrc1,
+	 {"%to_<index> = OpBitFieldUExtract %uint %t1_<index> %uint_0  %uint_5", "%ts_<index> = OpBitFieldUExtract %uint %t1_<index> %uint_16 %uint_7",
+	  bitfield_extract_limit_b32,
+	  "%ti0_<index> = OpBitcast %int %t0_<index>\n"
+	  "%tr_<index> = OpBitFieldSExtract %int %ti0_<index> %to_<index> %tbfe_count_<index>\n"
+	  "%t_<index> = OpBitcast %uint %tr_<index>"},
+	 SccCheck::NonZero},
     {Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SLshl4AddU32,    ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%ts_<index> = OpFunctionCall %v2uint %lshl_add %t0_<index> %t1_<index> %uint_4", "%t_<index> = OpCompositeExtract %uint %ts_<index> 0", "%carry_<index> = OpCompositeExtract %uint %ts_<index> 1"}, SccCheck::CarryOut},
     {Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SLshl1AddU32,    ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%ts_<index> = OpFunctionCall %v2uint %lshl_add %t0_<index> %t1_<index> %uint_1", "%t_<index> = OpCompositeExtract %uint %ts_<index> 0", "%carry_<index> = OpCompositeExtract %uint %ts_<index> 1"}, SccCheck::CarryOut},
     {Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1,       ShaderInstructionType::SLshl2AddU32,    ShaderInstructionFormat::SVdstSVsrc0SVsrc1,  {"%ts_<index> = OpFunctionCall %v2uint %lshl_add %t0_<index> %t1_<index> %uint_2", "%t_<index> = OpCompositeExtract %uint %ts_<index> 0", "%carry_<index> = OpCompositeExtract %uint %ts_<index> 1"}, SccCheck::CarryOut},

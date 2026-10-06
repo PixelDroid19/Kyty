@@ -163,6 +163,7 @@ enum class ShaderInstructionType : uint32_t
 	SOrn2SaveexecB64,
 	SXnorSaveexecB64,
 	SXorSaveexecB64,
+	SBfeI32,
 	SBfeU32,
 	SBfeU64,
 	SBfmB32,
