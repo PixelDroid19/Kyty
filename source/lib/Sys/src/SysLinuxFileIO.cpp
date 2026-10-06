@@ -14,6 +14,7 @@
 
 #include <cerrno>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utime.h>
@@ -771,21 +772,98 @@ void sys_file_get_dents(const String& path, Kyty::Vector<sys_dir_entry_t>& out)
 	closedir(dir);
 }
 
-bool sys_file_copy_file(const String& /*src*/, const String& /*dst*/)
+// Copies the bytes and permission bits of a regular file, replacing dst.
+bool sys_file_copy_file(const String& src, const String& dst)
 {
-	EXIT("not implemented\n");
-	return false;
+	const int in = open(src.utf8_str().GetData(), O_RDONLY | O_CLOEXEC);
+	if (in < 0)
+	{
+		return false;
+	}
+	struct stat info
+	{
+	};
+	if (fstat(in, &info) != 0 || !S_ISREG(info.st_mode))
+	{
+		close(in);
+		return false;
+	}
+	const int out = open(dst.utf8_str().GetData(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, info.st_mode & 0777);
+	if (out < 0)
+	{
+		close(in);
+		return false;
+	}
+	bool ok = true;
+	char buffer[64 * 1024];
+	for (;;)
+	{
+		const ssize_t got = read(in, buffer, sizeof(buffer));
+		if (got == 0)
+		{
+			break;
+		}
+		if (got < 0)
+		{
+			if (errno == EINTR)
+			{
+				continue;
+			}
+			ok = false;
+			break;
+		}
+		for (ssize_t done = 0; done < got;)
+		{
+			const ssize_t put = write(out, buffer + done, static_cast<size_t>(got - done));
+			if (put < 0 && errno == EINTR)
+			{
+				continue;
+			}
+			if (put <= 0)
+			{
+				ok = false;
+				break;
+			}
+			done += put;
+		}
+		if (!ok)
+		{
+			break;
+		}
+	}
+	close(in);
+	ok = close(out) == 0 && ok;
+	if (!ok)
+	{
+		unlink(dst.utf8_str().GetData());
+	}
+	return ok;
 }
 
-bool sys_file_move_file(const String& /*src*/, const String& /*dst*/)
+// rename() replaces dst atomically, as a guest rename does. A move across file
+// systems copies a regular file and removes the source.
+bool sys_file_move_file(const String& src, const String& dst)
 {
-	EXIT("not implemented\n");
-	return false;
+	if (rename(src.utf8_str().GetData(), dst.utf8_str().GetData()) == 0)
+	{
+		return true;
+	}
+	if (errno != EXDEV || !sys_file_copy_file(src, dst))
+	{
+		return false;
+	}
+	return unlink(src.utf8_str().GetData()) == 0;
 }
 
-void sys_file_remove_readonly(const String& /*name*/)
+void sys_file_remove_readonly(const String& name)
 {
-	EXIT("not implemented\n");
+	struct stat info
+	{
+	};
+	if (stat(name.utf8_str().GetData(), &info) == 0)
+	{
+		chmod(name.utf8_str().GetData(), info.st_mode | S_IWUSR);
+	}
 }
 
 } // namespace Kyty
