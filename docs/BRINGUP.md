@@ -369,7 +369,7 @@ Investigated and left open:
 - The sandbox title stops advancing at a varying point (character select, its transition, or the world's
   "Loading" at about half of the bar): presents continue at 40-50 fps and every frame submits its draws, but the
   picture no longer changes and pad input has no effect. Sampled during the freeze: the main thread waits on the
-  frame task inside the frame builder (`MinecraftGame` update), one worker runs the render task, every job worker
+  frame task inside the frame builder (the game class update), one worker runs the render task, every job worker
   waits for work, the network threads wait on their event queues and no level-server thread exists; the world
   container never gets its `db/` directory. Excluded, with the evidence: a lost wakeup in the C11 `_Cnd`/`_Mtx`
   layer (static objects are created under a lock; `_Xtime_get_ticks` is microseconds and the workers' timed waits
