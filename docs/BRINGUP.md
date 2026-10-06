@@ -340,7 +340,27 @@ Verification: `run-check.sh <n> <slug> [route] [seconds]` in the scratch harness
 (FATAL with the error line, FROZEN when the observer confirms no presents, BLACK, STATIC, or ADVANCING) with the lit
 fraction and change of each capture, so a fix is checked on the affected title instead of the whole set.
 
+- **C++ stream facets follow the guest library's slot order.** The block-building sandbox title saved its float
+  options (safe zone, UI scale, volumes) as `0xd` and `0x1000`: Kyty's classic-locale `num_put` listed `double`,
+  `long double` and the pointer overload before `long long`, so `ostream << double` reached `do_put(const void*)` and
+  printed an integer register. The title read the values back, laid its whole JSON-UI start screen out at one point
+  (logo, buttons and button glyphs had zero size; text still drew) and only the splash and helper labels were visible.
+  Every bundled `libc.prx` checked (20 titles) orders `num_put` bool, long, unsigned long, long long, unsigned long
+  long, double, long double, pointer, and `num_get` (17 entries) bool, unsigned short, unsigned int, long, unsigned
+  long, long long, unsigned long long, float, double, long double, pointer; Kyty's `num_get` had its only overload
+  in the float slot. Both tables now match the guest library, found by resolving the vtable relocations of the
+  bundled runtime, and the format helper's flag constants were checked against its `_Ffmt`/`_Ifmt` disassembly.
+- **The same title's first-run path.** Its pixel programs needed two flow-analysis admissions (derivative fetches in
+  lane-divergent loops, whose branches take quad votes, and AND/OR of uniform compare masks), its character previews
+  an `8_8_8_8_UINT` vertex attribute, world creation a Linux `rename`-based file move and `_Thrd_sleep`, and its
+  sockets BSD-to-host message flag translation. It now reaches the start screen, the first-run screens and world
+  generation; in the harness (two cores) the world had not finished loading after 260 s.
+
 Investigated and left open:
+
+- The sandbox title's first-run screens (Ore UI) sometimes lose the world behind them: after a selection the
+  background goes black while the panels still draw, and the game-mode cards show their images without their text.
+  Not yet traced; its menu also drops to about 5 fps while character previews load.
 
 - The .NET beat 'em up stops at about 1.7 s in some runs (also before this work, runs d474 and d530): its runtime
   reads a null table pointer plus 0x120 (`mov r11, [rax + r10*8]` with rax = 0) while summing allocation statistics.
