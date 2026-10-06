@@ -23,6 +23,10 @@ namespace Kyty::Libs::SaveData {
 // A missing title identity uses UNKNOWN until SFO metadata is available.
 [[nodiscard]] std::filesystem::path SaveDataBuildTitleRoot(const std::filesystem::path& save_data_root, const char* title_id);
 
+// Build the host-only per-title root for SaveDataMemory backing files, outside
+// the guest-enumerated title directory.
+[[nodiscard]] std::filesystem::path SaveDataBuildMemoryRoot(const std::filesystem::path& title_root);
+
 // Build the canonical persistent path for one SaveDataMemory identity. Invalid
 // roots and guest user identifiers are rejected instead of being redirected.
 [[nodiscard]] std::filesystem::path SaveDataBuildMemoryPath(const std::filesystem::path& title_root, int32_t user_id, uint32_t slot_id);
