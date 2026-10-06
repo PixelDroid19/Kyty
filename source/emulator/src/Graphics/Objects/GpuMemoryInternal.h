@@ -33,6 +33,7 @@
 #include "Emulator/Graphics/GraphicContext.h"
 
 #include <set>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -168,14 +169,12 @@ public:
 			// until mutation, so this preserves a stable result without rebuilding it.
 			return m_map.Get(first_page);
 		}
+		std::unordered_set<int> seen;
 		for (auto page = first_page; page <= last_page; page++)
 		{
 			for (int id: m_map.Get(page))
 			{
-				if (!ret.Contains(id))
-				{
-					ret.Add(id);
-				}
+				AddUnique(&ret, &seen, id);
 			}
 		}
 		return ret;
@@ -185,7 +184,8 @@ public:
 	{
 		EXIT_IF(vaddr == nullptr);
 		EXIT_IF(size == nullptr);
-		Vector<int> ret;
+		Vector<int>             ret;
+		std::unordered_set<int> seen;
 		for (int i = 0; i < vaddr_num; i++)
 		{
 			EXIT_IF(size[i] == 0);
@@ -196,10 +196,7 @@ public:
 			{
 				for (int id: m_map.Get(page))
 				{
-					if (!ret.Contains(id))
-					{
-						ret.Add(id);
-					}
+					AddUnique(&ret, &seen, id);
 				}
 			}
 		}
@@ -277,6 +274,31 @@ private:
 		EXIT_IF((vaddr >> (PAGE_BITS + 32u)) != 0);
 		return static_cast<uint32_t>(vaddr >> PAGE_BITS);
 	}
+
+	// Order-preserving union of page buckets. A query spanning buckets that
+	// hold thousands of small objects dedups through a set, not a scan per id.
+	static void AddUnique(Vector<int>* ret, std::unordered_set<int>* seen, int id)
+	{
+		constexpr uint32_t kLinearLimit = 32;
+		if (seen->empty())
+		{
+			if (ret->Contains(id))
+			{
+				return;
+			}
+			ret->Add(id);
+			if (ret->Size() == kLinearLimit)
+			{
+				seen->insert(ret->begin(), ret->end());
+			}
+			return;
+		}
+		if (seen->insert(id).second)
+		{
+			ret->Add(id);
+		}
+	}
+
 	Core::Hashmap<uint32_t, Vector<int>> m_map;
 };
 
