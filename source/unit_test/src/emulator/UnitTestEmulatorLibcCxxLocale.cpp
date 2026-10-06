@@ -1675,7 +1675,9 @@ TEST(EmulatorLibcCxxLocale, NumGetParsesUnsignedLongLongAndLeavesDelimiter)
 
 	auto** vtable_object = reinterpret_cast<void**>(rec->vaddr);
 	using DoGet = Iterator(KYTY_SYSV_ABI*)(const void*, Iterator, Iterator, void*, std::uint32_t*, std::uint64_t*);
-	auto* do_get = reinterpret_cast<DoGet>(vtable_object[13]);
+	// Guest libc order after the facet prefix: bool, unsigned short, unsigned int,
+	// long, unsigned long, long long, unsigned long long (slot 12), float, ...
+	auto* do_get = reinterpret_cast<DoGet>(vtable_object[12]);
 	ASSERT_NE(do_get, nullptr);
 	std::uint32_t state = 0;
 	std::uint64_t value = 0;

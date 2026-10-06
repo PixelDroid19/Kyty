@@ -29,6 +29,7 @@
 #include "Emulator/VideoFrameMemory.h"
 
 #include <cctype>
+#include <cerrno>
 #include <charconv>
 #include <algorithm>
 #include <array>
@@ -1638,6 +1639,38 @@ static KYTY_SYSV_ABI void c_facet_deleting_dtor(CxxFacetBase* self);
 static KYTY_SYSV_ABI void c_facet_incref(CxxFacetBase* self);
 static KYTY_SYSV_ABI CxxFacetBase* c_facet_decref(CxxFacetBase* self);
 
+// The fields used by num_put are part of the guest ios_base contract. Keep the
+// complete prefix opaque: it belongs to the stream implementation and is only
+// read by guest code, while these scalar formatting fields are consumed here.
+struct alignas(8) CxxIosBaseLayout
+{
+	std::byte      reserved[0x18];
+	std::uint32_t flags;
+	std::int32_t  precision;
+	std::int32_t  width;
+};
+
+static_assert(offsetof(CxxIosBaseLayout, flags) == 0x18);
+static_assert(offsetof(CxxIosBaseLayout, precision) == 0x1c);
+static_assert(offsetof(CxxIosBaseLayout, width) == 0x20);
+
+constexpr std::uint32_t kCxxIosLeft       = 0x02;
+constexpr std::uint32_t kCxxIosRight      = 0x04;
+constexpr std::uint32_t kCxxIosInternal   = 0x08;
+constexpr std::uint32_t kCxxIosAdjustMask = kCxxIosLeft | kCxxIosRight | kCxxIosInternal;
+constexpr std::uint32_t kCxxIosDec        = 0x10;
+constexpr std::uint32_t kCxxIosOct        = 0x20;
+constexpr std::uint32_t kCxxIosHex        = 0x40;
+constexpr std::uint32_t kCxxIosBaseMask   = kCxxIosDec | kCxxIosOct | kCxxIosHex;
+constexpr std::uint32_t kCxxIosShowBase   = 0x80;
+constexpr std::uint32_t kCxxIosShowPoint  = 0x100;
+constexpr std::uint32_t kCxxIosUppercase  = 0x200;
+constexpr std::uint32_t kCxxIosShowPos    = 0x400;
+constexpr std::uint32_t kCxxIosScientific = 0x800;
+constexpr std::uint32_t kCxxIosFixed      = 0x1000;
+constexpr std::uint32_t kCxxIosFloatMask  = kCxxIosScientific | kCxxIosFixed;
+constexpr std::uint32_t kCxxIosBoolAlpha  = 0x8000;
+
 struct CxxIstreamIterator
 {
 	void*         streambuf;
@@ -1675,62 +1708,273 @@ static int CxxIstreamAdvance(CxxIstreamIterator* iterator)
 	return reinterpret_cast<CxxIstreamRead>((*object)[8])(iterator->streambuf);
 }
 
-static KYTY_SYSV_ABI CxxIstreamIterator c_num_get_unimplemented(const CxxFacetBase* /*self*/, CxxIstreamIterator iterator,
-                                                                 CxxIstreamIterator /*last*/, void* /*ios_base*/,
-                                                                 std::uint32_t* /*state*/, void* /*value*/)
+constexpr std::uint32_t kCxxIosEofBit  = 0x1;
+constexpr std::uint32_t kCxxIosFailBit = 0x2;
+constexpr size_t        kCxxNumGetMax  = 128;
+
+// Stage 2 of num_get in the "C" locale: the characters of one number, read
+// while they can continue it. *base is the stream's basefield (0 when none is
+// set, which detects a 0x or 0 prefix like strtol) and becomes the base found.
+static size_t CxxIstreamCollectInteger(CxxIstreamIterator* iterator, int* base, char* buffer, std::uint32_t* state)
 {
-	EXIT("unsupported std::num_get<char> overload invoked\n");
-	return iterator;
+	size_t length  = 0;
+	int    current = CxxIstreamPeek(*iterator);
+	const auto take = [&]()
+	{
+		buffer[length++] = static_cast<char>(current);
+		(void)CxxIstreamAdvance(iterator);
+		current = CxxIstreamPeek(*iterator);
+	};
+	if (current == '+' || current == '-')
+	{
+		take();
+	}
+	if ((*base == 0 || *base == 16) && current == '0')
+	{
+		take();
+		if (current == 'x' || current == 'X')
+		{
+			take();
+			*base = 16;
+		} else if (*base == 0)
+		{
+			*base = 8;
+		}
+	}
+	if (*base == 0)
+	{
+		*base = 10;
+	}
+	for (; current >= 0 && length + 1 < kCxxNumGetMax; take())
+	{
+		const int digit = std::isdigit(current) != 0 ? current - '0'
+		                  : std::isxdigit(current) != 0 ? std::tolower(current) - 'a' + 10
+		                                                : 64;
+		if (digit >= *base)
+		{
+			break;
+		}
+	}
+	if (current < 0)
+	{
+		*state |= kCxxIosEofBit;
+	}
+	buffer[length] = '\0';
+	return length;
 }
 
-static KYTY_SYSV_ABI CxxIstreamIterator c_num_get_do_get_ulong_long(const CxxFacetBase* /*self*/, CxxIstreamIterator iterator,
-                                                                    CxxIstreamIterator /*last*/, void* /*ios_base*/,
-                                                                    std::uint32_t* state, std::uint64_t* value)
+static size_t CxxIstreamCollectFloat(CxxIstreamIterator* iterator, char* buffer, std::uint32_t* state)
 {
-	constexpr std::uint32_t kEofBit  = 0x1;
-	constexpr std::uint32_t kFailBit = 0x2;
-	if (state == nullptr || value == nullptr)
+	size_t length  = 0;
+	int    current = CxxIstreamPeek(*iterator);
+	const auto take = [&]()
 	{
-		if (state != nullptr) { *state |= kFailBit; }
+		buffer[length++] = static_cast<char>(current);
+		(void)CxxIstreamAdvance(iterator);
+		current = CxxIstreamPeek(*iterator);
+	};
+	const auto digits = [&]()
+	{
+		while (current >= '0' && current <= '9' && length + 1 < kCxxNumGetMax)
+		{
+			take();
+		}
+	};
+	if (current == '+' || current == '-')
+	{
+		take();
+	}
+	digits();
+	if (current == '.' && length + 1 < kCxxNumGetMax)
+	{
+		take();
+		digits();
+	}
+	if ((current == 'e' || current == 'E') && length + 2 < kCxxNumGetMax)
+	{
+		take();
+		if (current == '+' || current == '-')
+		{
+			take();
+		}
+		digits();
+	}
+	if (current < 0)
+	{
+		*state |= kCxxIosEofBit;
+	}
+	buffer[length] = '\0';
+	return length;
+}
+
+static int CxxNumGetBase(const CxxIosBaseLayout* ios_base)
+{
+	switch (ios_base->flags & kCxxIosBaseMask)
+	{
+		case kCxxIosDec: return 10;
+		case kCxxIosOct: return 8;
+		case kCxxIosHex: return 16;
+		default: return 0;
+	}
+}
+
+// Integers convert through strtoll/strtoull as the standard specifies; a value
+// outside the target type stores its nearest limit and sets failbit.
+template <typename Int>
+static CxxIstreamIterator CxxNumGetInteger(CxxIstreamIterator iterator, const CxxIosBaseLayout* ios_base, std::uint32_t* state,
+	                                       Int* value)
+{
+	if (ios_base == nullptr || state == nullptr || value == nullptr)
+	{
+		if (state != nullptr) { *state |= kCxxIosFailBit; }
 		return iterator;
 	}
-
-	std::uint64_t parsed = 0;
-	bool          any    = false;
-	bool          overflow = false;
-	for (;;)
+	char       buffer[kCxxNumGetMax];
+	int        base   = CxxNumGetBase(ios_base);
+	const auto length = CxxIstreamCollectInteger(&iterator, &base, buffer, state);
+	char*      end    = nullptr;
+	errno             = 0;
+	if constexpr (std::is_signed_v<Int>)
 	{
-		const int current = CxxIstreamPeek(iterator);
-		if (current < 0)
-		{
-			*state |= kEofBit;
-			break;
-		}
-		if (current < '0' || current > '9')
-		{
-			break;
-		}
-
-		any = true;
-		const std::uint64_t digit = static_cast<std::uint64_t>(current - '0');
-		if (parsed > (std::numeric_limits<std::uint64_t>::max() - digit) / 10u)
-		{
-			overflow = true;
-		} else if (!overflow)
-		{
-			parsed = parsed * 10u + digit;
-		}
-		(void)CxxIstreamAdvance(&iterator);
-	}
-
-	if (!any || overflow)
+		const long long parsed = std::strtoll(buffer, &end, base);
+		const bool range = errno != ERANGE && parsed >= std::numeric_limits<Int>::min() && parsed <= std::numeric_limits<Int>::max();
+		*value           = range ? static_cast<Int>(parsed) : (parsed < 0 ? std::numeric_limits<Int>::min() : std::numeric_limits<Int>::max());
+		if (length == 0 || end != buffer + length || !range) { *state |= kCxxIosFailBit; }
+	} else
 	{
-		*state |= kFailBit;
+		const unsigned long long parsed = std::strtoull(buffer, &end, base);
+		const bool range = errno != ERANGE && parsed <= std::numeric_limits<Int>::max();
+		*value           = range ? static_cast<Int>(parsed) : std::numeric_limits<Int>::max();
+		if (length == 0 || end != buffer + length || !range) { *state |= kCxxIosFailBit; }
 	}
-	*value = overflow ? std::numeric_limits<std::uint64_t>::max() : parsed;
+	if (length == 0)
+	{
+		*value = 0;
+	}
 	return iterator;
 }
 
+template <typename Float>
+static CxxIstreamIterator CxxNumGetFloat(CxxIstreamIterator iterator, std::uint32_t* state, Float* value)
+{
+	if (state == nullptr || value == nullptr)
+	{
+		if (state != nullptr) { *state |= kCxxIosFailBit; }
+		return iterator;
+	}
+	char       buffer[kCxxNumGetMax];
+	const auto length = CxxIstreamCollectFloat(&iterator, buffer, state);
+	char*      end    = nullptr;
+	errno             = 0;
+	Float      parsed = 0;
+	if constexpr (std::is_same_v<Float, float>)
+	{
+		parsed = std::strtof(buffer, &end);
+	} else if constexpr (std::is_same_v<Float, double>)
+	{
+		parsed = std::strtod(buffer, &end);
+	} else
+	{
+		parsed = std::strtold(buffer, &end);
+	}
+	*value = length == 0 ? Float {} : parsed;
+	if (length == 0 || end != buffer + length || errno == ERANGE)
+	{
+		*state |= kCxxIosFailBit;
+	}
+	return iterator;
+}
+
+#define KYTY_CXX_NUM_GET(name, type, body)                                                                                                 \
+	static KYTY_SYSV_ABI CxxIstreamIterator name(const CxxFacetBase* /*self*/, CxxIstreamIterator iterator,                              \
+	                                             CxxIstreamIterator /*last*/, CxxIosBaseLayout* ios_base, std::uint32_t* state,          \
+	                                             type* value)                                                                             \
+	{                                                                                                                                      \
+		return body;                                                                                                                   \
+	}
+
+KYTY_CXX_NUM_GET(c_num_get_do_get_ushort, std::uint16_t, CxxNumGetInteger(iterator, ios_base, state, value))
+KYTY_CXX_NUM_GET(c_num_get_do_get_uint, std::uint32_t, CxxNumGetInteger(iterator, ios_base, state, value))
+KYTY_CXX_NUM_GET(c_num_get_do_get_long, std::int64_t, CxxNumGetInteger(iterator, ios_base, state, value))
+KYTY_CXX_NUM_GET(c_num_get_do_get_ulong, std::uint64_t, CxxNumGetInteger(iterator, ios_base, state, value))
+KYTY_CXX_NUM_GET(c_num_get_do_get_float, float, CxxNumGetFloat(iterator, state, value))
+KYTY_CXX_NUM_GET(c_num_get_do_get_double, double, CxxNumGetFloat(iterator, state, value))
+KYTY_CXX_NUM_GET(c_num_get_do_get_long_double, long double, CxxNumGetFloat(iterator, state, value))
+#undef KYTY_CXX_NUM_GET
+
+// Without boolalpha a bool reads as a long that must be 0 or 1.
+static KYTY_SYSV_ABI CxxIstreamIterator c_num_get_do_get_bool(const CxxFacetBase* /*self*/, CxxIstreamIterator iterator,
+	                                                          CxxIstreamIterator /*last*/, CxxIosBaseLayout* ios_base,
+	                                                          std::uint32_t* state, bool* value)
+{
+	if (ios_base == nullptr || state == nullptr || value == nullptr)
+	{
+		if (state != nullptr) { *state |= kCxxIosFailBit; }
+		return iterator;
+	}
+	if ((ios_base->flags & kCxxIosBoolAlpha) == 0)
+	{
+		std::int64_t number = 0;
+		iterator            = CxxNumGetInteger(iterator, ios_base, state, &number);
+		if ((*state & kCxxIosFailBit) == 0 && number != 0 && number != 1)
+		{
+			*state |= kCxxIosFailBit;
+		}
+		*value = number != 0;
+		return iterator;
+	}
+	// "true" or "false" in the "C" locale: read while the input still matches one of them.
+	char   word[6] = {};
+	size_t length  = 0;
+	for (int current = CxxIstreamPeek(iterator); current >= 0 && length < 5; current = CxxIstreamPeek(iterator))
+	{
+		word[length] = static_cast<char>(current);
+		if (std::strncmp(word, "true", length + 1) != 0 && std::strncmp(word, "false", length + 1) != 0)
+		{
+			break;
+		}
+		length++;
+		(void)CxxIstreamAdvance(&iterator);
+		if (std::strcmp(word, "true") == 0 || std::strcmp(word, "false") == 0)
+		{
+			break;
+		}
+	}
+	word[length] = '\0';
+	*value       = std::strcmp(word, "true") == 0;
+	if (!*value && std::strcmp(word, "false") != 0)
+	{
+		*state |= kCxxIosFailBit;
+	}
+	if (CxxIstreamPeek(iterator) < 0)
+	{
+		*state |= kCxxIosEofBit;
+	}
+	return iterator;
+}
+
+// A pointer reads as the hexadecimal integer num_put writes for it.
+static KYTY_SYSV_ABI CxxIstreamIterator c_num_get_do_get_pointer(const CxxFacetBase* /*self*/, CxxIstreamIterator iterator,
+	                                                             CxxIstreamIterator /*last*/, CxxIosBaseLayout* ios_base,
+	                                                             std::uint32_t* state, void** value)
+{
+	if (ios_base == nullptr || state == nullptr || value == nullptr)
+	{
+		if (state != nullptr) { *state |= kCxxIosFailBit; }
+		return iterator;
+	}
+	CxxIosBaseLayout hex_base = *ios_base;
+	hex_base.flags            = (hex_base.flags & ~kCxxIosBaseMask) | kCxxIosHex;
+	std::uint64_t address     = 0;
+	iterator                  = CxxNumGetInteger(iterator, &hex_base, state, &address);
+	*value                    = reinterpret_cast<void*>(address);
+	return iterator;
+}
+
+// Itanium vtable object: offset-to-top, RTTI, two destructors, facet lifetime,
+// then the narrow-character extraction overloads in the guest library's order:
+// bool, unsigned short, unsigned int, long, unsigned long, long long,
+// unsigned long long, float, double, long double, void*.
 static void* g_num_get_char_vtable[] = {
     nullptr,
     &g_typeinfo_num_get_char,
@@ -1738,17 +1982,20 @@ static void* g_num_get_char_vtable[] = {
     reinterpret_cast<void*>(&c_facet_deleting_dtor),
     reinterpret_cast<void*>(&c_facet_incref),
     reinterpret_cast<void*>(&c_facet_decref),
-    reinterpret_cast<void*>(&c_num_get_unimplemented),
-    reinterpret_cast<void*>(&c_num_get_unimplemented),
-    reinterpret_cast<void*>(&c_num_get_unimplemented),
-    reinterpret_cast<void*>(&c_num_get_unimplemented),
-    reinterpret_cast<void*>(&c_num_get_unimplemented),
-    reinterpret_cast<void*>(&c_num_get_unimplemented),
-    reinterpret_cast<void*>(&c_num_get_unimplemented),
-    reinterpret_cast<void*>(&c_num_get_do_get_ulong_long),
+    reinterpret_cast<void*>(&c_num_get_do_get_bool),
+    reinterpret_cast<void*>(&c_num_get_do_get_ushort),
+    reinterpret_cast<void*>(&c_num_get_do_get_uint),
+    reinterpret_cast<void*>(&c_num_get_do_get_long),
+    reinterpret_cast<void*>(&c_num_get_do_get_ulong),
+    reinterpret_cast<void*>(&c_num_get_do_get_long),
+    reinterpret_cast<void*>(&c_num_get_do_get_ulong),
+    reinterpret_cast<void*>(&c_num_get_do_get_float),
+    reinterpret_cast<void*>(&c_num_get_do_get_double),
+    reinterpret_cast<void*>(&c_num_get_do_get_long_double),
+    reinterpret_cast<void*>(&c_num_get_do_get_pointer),
 };
 
-static_assert(std::size(g_num_get_char_vtable) == 14);
+static_assert(std::size(g_num_get_char_vtable) == 17);
 
 struct alignas(8) CxxFacetBase
 {
@@ -1765,37 +2012,6 @@ struct CxxOstreamIterator
 
 static_assert(sizeof(CxxOstreamIterator) == 16);
 
-// The fields used by num_put are part of the guest ios_base contract. Keep the
-// complete prefix opaque: it belongs to the stream implementation and is only
-// read by guest code, while these scalar formatting fields are consumed here.
-struct alignas(8) CxxIosBaseLayout
-{
-	std::byte      reserved[0x18];
-	std::uint32_t flags;
-	std::int32_t  precision;
-	std::int32_t  width;
-};
-
-static_assert(offsetof(CxxIosBaseLayout, flags) == 0x18);
-static_assert(offsetof(CxxIosBaseLayout, precision) == 0x1c);
-static_assert(offsetof(CxxIosBaseLayout, width) == 0x20);
-
-constexpr std::uint32_t kCxxIosLeft       = 0x02;
-constexpr std::uint32_t kCxxIosRight      = 0x04;
-constexpr std::uint32_t kCxxIosInternal   = 0x08;
-constexpr std::uint32_t kCxxIosAdjustMask = kCxxIosLeft | kCxxIosRight | kCxxIosInternal;
-constexpr std::uint32_t kCxxIosDec        = 0x10;
-constexpr std::uint32_t kCxxIosOct        = 0x20;
-constexpr std::uint32_t kCxxIosHex        = 0x40;
-constexpr std::uint32_t kCxxIosBaseMask   = kCxxIosDec | kCxxIosOct | kCxxIosHex;
-constexpr std::uint32_t kCxxIosShowBase   = 0x80;
-constexpr std::uint32_t kCxxIosShowPoint  = 0x100;
-constexpr std::uint32_t kCxxIosUppercase  = 0x200;
-constexpr std::uint32_t kCxxIosShowPos    = 0x400;
-constexpr std::uint32_t kCxxIosScientific = 0x800;
-constexpr std::uint32_t kCxxIosFixed      = 0x1000;
-constexpr std::uint32_t kCxxIosFloatMask  = kCxxIosScientific | kCxxIosFixed;
-constexpr std::uint32_t kCxxIosBoolAlpha  = 0x8000;
 constexpr std::int32_t  kCxxNumPutMaxWidth = 1 << 20;
 constexpr std::int32_t  kCxxNumPutMaxPrecision = 512;
 
@@ -2062,8 +2278,13 @@ static CxxOstreamIterator CxxNumPutFloat(CxxOstreamIterator iterator, CxxIosBase
 	{
 		*format++ = '#';
 	}
-	*format++ = '.';
-	*format++ = '*';
+	// hexfloat prints every significant digit: the guest formatter passes no precision.
+	const bool hexfloat = (flags & kCxxIosFloatMask) == kCxxIosFloatMask;
+	if (!hexfloat)
+	{
+		*format++ = '.';
+		*format++ = '*';
+	}
 	if constexpr (std::is_same_v<Float, long double>)
 	{
 		*format++ = 'L';
@@ -2079,7 +2300,8 @@ static CxxOstreamIterator CxxNumPutFloat(CxxOstreamIterator iterator, CxxIosBase
 	*format = '\0';
 
 	char output[1024];
-	const int output_size = ::snprintf(output, sizeof(output), format_buffer, precision, value);
+	const int output_size = hexfloat ? ::snprintf(output, sizeof(output), format_buffer, value)
+	                                 : ::snprintf(output, sizeof(output), format_buffer, precision, value);
 	if (output_size < 0 || static_cast<size_t>(output_size) >= sizeof(output))
 	{
 		ios_base->width = 0;
@@ -2176,7 +2398,10 @@ static KYTY_SYSV_ABI CxxOstreamIterator c_num_put_do_put_ulong_long(const CxxFac
 }
 
 // Itanium vtable object: offset-to-top, RTTI, two destructors, facet lifetime,
-// then the eight standard narrow-character numeric formatting overloads.
+// then the insertion overloads in the guest library's order: bool, long,
+// unsigned long, long long, unsigned long long, double, long double, void*.
+// Every title's bundled libc agrees; a double inserted through another order
+// printed an integer register as a pointer.
 static void* g_num_put_char_vtable[] = {
     nullptr,
     &g_typeinfo_num_put_char,
@@ -2187,11 +2412,11 @@ static void* g_num_put_char_vtable[] = {
     reinterpret_cast<void*>(&c_num_put_do_put_bool),
     reinterpret_cast<void*>(&c_num_put_do_put_long),
     reinterpret_cast<void*>(&c_num_put_do_put_ulong),
+    reinterpret_cast<void*>(&c_num_put_do_put_long_long),
+    reinterpret_cast<void*>(&c_num_put_do_put_ulong_long),
     reinterpret_cast<void*>(&c_num_put_do_put_double),
     reinterpret_cast<void*>(&c_num_put_do_put_long_double),
     reinterpret_cast<void*>(&c_num_put_do_put_pointer),
-    reinterpret_cast<void*>(&c_num_put_do_put_long_long),
-    reinterpret_cast<void*>(&c_num_put_do_put_ulong_long),
 };
 
 static_assert(std::size(g_num_put_char_vtable) == 14);
