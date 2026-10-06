@@ -433,6 +433,44 @@ Third round (same day):
   (12,546 heaps, ~16,000 objects, on every completion); they now visit an index of in-use writable objects (18 on
   average). Overlap queries walked every heap; the heap span index now lists every heap covering a span. Loading
   frames went from 18-23 to 30-36 fps on that title and Dead Cells' walk route from 47-63 to 86 fps.
+- **Unsigned-only shaders read the unsigned descriptor banks.** The .NET beat 'em up's logo video was a uniform
+  green screen: its Theora planes are written by a dispatch as R8_UINT storage images and sampled by a shader that
+  samples only unsigned textures, which bound the float banks and read zero (BT.709 of zero planes is (0, 77, 0)).
+  Such shaders now bind the unsigned banks. Storage images are created with `MUTABLE_FORMAT` and a format list of
+  the same-size table formats when supported, so an R8_UINT image can be sampled through an R8_UNORM view whose
+  usage is restricted to sampling (`st-reinterpret`).
+- **Every block-compressed format copies from its storage blocks.** The title uploads sprites and glyphs by a
+  dispatch that stores each 4x4 block through a uint view (R32G32B32A32_UINT for 16-byte blocks, R32G32_UINT for
+  8-byte ones). Only the 16-byte formats were copied into the sampled texture, so BC1 text drew black. A cached
+  texture is copied again when a dispatch wrote its storage image after the texture's content was established
+  (process-wide stamps), never when the texture is newer.
+- **Storage images the GPU wrote are not retired.** Frame retirement freed unlinked storage images idle for 120
+  frames. Storage images are not written back, so those holding uploaded sprite blocks took the only copy with them;
+  the sprites were then created again from guest memory that was still zero (BC3: transparent, so characters were
+  invisible; BC1: opaque black rectangles over the scenery). Logging every BC upload showed 142 all-zero guest
+  uploads per run before the change and none after. A storage image with a writable use now lives until the guest
+  releases or rewrites its range.
+- **`__dynamic_cast` walks the guest RTTI.** Continuing a save crashed with an execute fault in data: ICU's
+  `Calendar::makeInstance` asks its service for a calendar, which may return a `UnicodeString` alias, and tells the
+  two apart with `dynamic_cast`. The export only applied the `src2dst` hint, so with hint 0 every cast succeeded and
+  a calendar was read as a string; the second lookup returned the alias string and its "calendar" vtable slot 23
+  pointed past the string's 11-slot vtable into type_info data. The cast now finds the most-derived object, walks
+  the `__class_type_info`/`__si_class_type_info`/`__vmi_class_type_info` records that guest type_info objects
+  relocate to (the exported vtables) and applies the downcast and cross-cast rules; unknown kinds keep the hint.
+- **`sceAcmContextCreate` takes one argument.** It creates a 32-bit handle; the title tests it with a 32-bit compare
+  and tail-calls the export with leftover registers. Reading those as a size cleared 0x10b bytes past the handle,
+  wiping the audio engine's globals, and the title crashed about 117 s in.
+- **Overlap caches are sized to their heaps.** Each of the title's 12,500 heaps allocated a 4,096-entry overlap
+  cache up front (about 4.5 GiB, mostly empty), which tripped the host memory guard. The cache is created by the
+  first query and grows with the heap's object count.
+- **Allocation and invalidation costs.** Profiling the title's intro (gperftools, `CPUPROFILESIGNAL`) showed 41% of
+  CPU time in the driver's GPU virtual-address allocator and 19% in its ioctls: every upload created a staging buffer
+  with its own `vkAllocateMemory`. Allocations up to 4 MiB are now sub-allocated from 64 MiB blocks per memory type
+  and tiling kind (host-visible blocks stay mapped), bringing those to 13-16% and 4-5%. Releasing direct memory
+  invalidated the GPU view of the whole mapping and walked all 15,000 device-address ranges (22% of CPU time);
+  only the released pages are invalidated now, through the ordered range map, dropping only the imports that cover
+  them. Overlap candidates spanning several 1 MiB buckets are deduplicated through a set past 32 ids (the linear
+  dedup took 12%).
 
 Investigated and left open:
 
@@ -442,10 +480,11 @@ Investigated and left open:
   about 53 KB changed; the page comparison reads all 15 MB (3 ms per dispatch, 27% of the time). Skipping it is not
   correct (the CPU may read the results); the planned fix copies GPU-written pages on demand. The dirty-page tracker
   also accepts only 512 ranges, so most of JoJo's buffers fall back to full hashes (250 GB hashed in 2 minutes).
-- The .NET beat 'em up plays its logo video (`logos.ogv`, Theora decoded by the title) as a uniform green screen:
-  the three Y/U/V textures (R8, SW_4KB_S, 1920x1080 and 960x540) read as zero in guest memory for the whole clip,
-  and BT.709 of zero planes is (0, 77, 0). The decoded frames never reach those textures; the upload path (the
-  title's own GPU copies) is the next step.
+- The .NET beat 'em up now reaches gameplay with correct sprites, text and HUD glyphs, but runs at 7-25 fps under
+  the harness (two CPU cores, shader validation). Remaining host costs: every upload still waits on its own
+  util-queue fence (about 11 s of fence waits per minute), the device-address residency rescan after population
+  changes (about 10 s per minute across ~16,000 mappings, one `lseek(SEEK_DATA)` per unimported span), and
+  `PhysicalMemory::Find` scanning every mapping for `sceKernelQueryMemoryProtection`.
 - The .NET beat 'em up is not frozen: its black screen is a loading screen (its two sprite draws are black, vertex
   colour (0, 0, 0, 0.88), on a black target) while it uploads textures through compute image copies, about 20 per
   frame. Each copy uploads its source and destination images and writes the destination back, each a separate
