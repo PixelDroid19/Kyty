@@ -97,6 +97,9 @@ int KYTY_SYSV_ABI KernelTriggerEvent(KernelEqueue eq, uintptr_t ident, int16_t f
 int KYTY_SYSV_ABI KernelDeleteEvent(KernelEqueue eq, uintptr_t ident, int16_t filter);
 int               KernelAddEvent(const KernelEqueuePin& eq, const KernelEqueueEvent& event);
 int               KernelTriggerEvent(const KernelEqueuePin& eq, uintptr_t ident, int16_t filter, void* trigger_data);
+// Completes a system library's asynchronous operation: triggers the guest's user
+// event `ident` and makes `udata` the value sceKernelGetEventUserData returns.
+int KernelTriggerUserEventUserData(KernelEqueue eq, uintptr_t ident, void* udata);
 int               KernelDeleteEvent(const KernelEqueuePin& eq, uintptr_t ident, int16_t filter);
 
 [[nodiscard]] KernelEqueuePin KernelAcquireEqueue(KernelEqueue eq);

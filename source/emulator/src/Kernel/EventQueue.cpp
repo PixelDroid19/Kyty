@@ -165,6 +165,7 @@ public:
 
 	void AddEvent(const KernelEqueueEvent& event);
 	bool TriggerEvent(uintptr_t ident, int16_t filter, void* trigger_data);
+	bool TriggerUserEventUserData(uintptr_t ident, void* udata);
 	bool DeleteEvent(uintptr_t ident, int16_t filter);
 	void BeginClose();
 
@@ -319,6 +320,32 @@ bool KernelEqueuePrivate::TriggerEvent(uintptr_t ident, int16_t filter, void* tr
 		{
 			event.triggered = true;
 		}
+
+		m_cond_var.Signal();
+
+		return true;
+	}
+
+	return false;
+}
+
+bool KernelEqueuePrivate::TriggerUserEventUserData(uintptr_t ident, void* udata)
+{
+	Core::LockGuard lock(m_mutex);
+
+	if (auto index = m_events.Find(ident, KERNEL_EVFILT_USER,
+	                               [](auto e, auto ident, auto filter) { return e.event.ident == ident && e.event.filter == filter; });
+	    m_events.IndexValid(index))
+	{
+		auto& event = m_events[index];
+		if (event.filter.trigger_func != nullptr)
+		{
+			event.filter.trigger_func(&event, nullptr);
+		} else
+		{
+			event.triggered = true;
+		}
+		event.event.udata = udata;
 
 		m_cond_var.Signal();
 
@@ -748,6 +775,16 @@ int KernelTriggerEvent(const KernelEqueuePin& eq, uintptr_t ident, int16_t filte
 	}
 
 	return OK;
+}
+
+int KernelTriggerUserEventUserData(KernelEqueue eq, uintptr_t ident, void* udata)
+{
+	auto pin = KernelAcquireEqueue(eq);
+	if (!pin)
+	{
+		return KERNEL_ERROR_EBADF;
+	}
+	return pin.Get()->TriggerUserEventUserData(ident, udata) ? OK : KERNEL_ERROR_ENOENT;
 }
 
 int KYTY_SYSV_ABI KernelDeleteEvent(KernelEqueue eq, uintptr_t ident, int16_t filter)
