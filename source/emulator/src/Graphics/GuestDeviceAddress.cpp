@@ -12,10 +12,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -93,6 +95,57 @@ void DestroyChunk(VkDevice device, const Chunk& chunk)
 	if (chunk.registered)
 	{
 		(void)GpuDirtyPageTracker::Instance().UnregisterRange(chunk.guest, chunk.span);
+	}
+}
+
+// Registered ranges mirror live guest mappings and are disjoint, so the only
+// range starting before `vaddr` that can overlap it is its predecessor.
+std::map<uint64_t, Range>::iterator FirstOverlapCandidate(std::map<uint64_t, Range>* ranges, uint64_t vaddr)
+{
+	auto it = ranges->upper_bound(vaddr);
+	if (it != ranges->begin())
+	{
+		auto previous = std::prev(it);
+		if (vaddr - previous->first < previous->second.size)
+		{
+			return previous;
+		}
+	}
+	return it;
+}
+
+// Drops the imports of `range` that cover [vaddr, end); imports of the rest of
+// the range stay valid. Cleared pages are rediscovered by the next preparation.
+void DropChunks(VkDevice device, Registry* registry, uint64_t base, Range* range, uint64_t vaddr, uint64_t end)
+{
+	auto kept = range->chunks.begin();
+	for (auto chunk = range->chunks.begin(); chunk != range->chunks.end(); ++chunk)
+	{
+		if (!(chunk->guest < end && vaddr < chunk->guest + chunk->span))
+		{
+			if (kept != chunk)
+			{
+				*kept = *chunk;
+			}
+			++kept;
+			continue;
+		}
+		DestroyChunk(device, *chunk);
+		range->tracked_chunks -= chunk->tracked ? 1u : 0u;
+		const auto first = static_cast<size_t>((chunk->guest - base) / kPageBytes);
+		const auto last  = std::min(range->imported.size(), static_cast<size_t>((chunk->guest + chunk->span - base) / kPageBytes));
+		if (first < last)
+		{
+			std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(first),
+			          range->imported.begin() + static_cast<std::ptrdiff_t>(last), uint8_t {0});
+		}
+		registry->dirty              = true;
+		registry->population_scanned = false;
+	}
+	range->chunks.erase(kept, range->chunks.end());
+	if (range->tracked_chunks == 0)
+	{
+		registry->tracked.erase(base);
 	}
 }
 
@@ -438,22 +491,10 @@ void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vad
 {
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
-	for (auto& [base, range]: registry.ranges)
+	const uint64_t              end = vaddr + size;
+	for (auto it = FirstOverlapCandidate(&registry.ranges, vaddr); it != registry.ranges.end() && it->first < end; ++it)
 	{
-		if (!(base < vaddr + size && vaddr < base + range.size))
-		{
-			continue;
-		}
-		for (const auto& chunk: range.chunks)
-		{
-			DestroyChunk(ctx->device, chunk);
-		}
-		range.chunks.clear();
-		range.tracked_chunks = 0;
-		registry.tracked.erase(base);
-		range.imported.assign(range.imported.size(), 0);
-		registry.dirty              = true;
-		registry.population_scanned = false;
+		DropChunks(ctx->device, &registry, it->first, &it->second, vaddr, end);
 	}
 }
 
@@ -461,23 +502,40 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 {
 	auto&                       registry = GetRegistry();
 	std::lock_guard<std::mutex> lock(registry.mutex);
-	for (auto it = registry.ranges.begin(); it != registry.ranges.end();)
+	const uint64_t              end = vaddr + size;
+	// Pieces of a partially unmapped range stay mapped and stay registered.
+	std::vector<std::pair<uint64_t, Range>> survivors;
+	for (auto it = FirstOverlapCandidate(&registry.ranges, vaddr); it != registry.ranges.end() && it->first < end;)
 	{
-		const bool overlaps = it->first < vaddr + size && vaddr < it->first + it->second.size;
-		if (!overlaps)
-		{
-			++it;
-			continue;
-		}
+		const uint64_t base       = it->first;
+		const uint64_t range_end  = base + it->second.size;
+		const bool     physical   = it->second.physical_backing;
 		for (const auto& chunk: it->second.chunks)
 		{
 			DestroyChunk(ctx->device, chunk);
 		}
-		registry.flexible.erase(it->first);
-		registry.tracked.erase(it->first);
+		registry.flexible.erase(base);
+		registry.tracked.erase(base);
 		it              = registry.ranges.erase(it);
 		registry.dirty  = true;
 		registry.merged = nullptr;
+		if (base < vaddr)
+		{
+			survivors.push_back({base, Range {vaddr - base, {}, {}, physical, 0}});
+		}
+		if (end < range_end)
+		{
+			survivors.push_back({end, Range {range_end - end, {}, {}, physical, 0}});
+		}
+	}
+	for (auto& [base, range]: survivors)
+	{
+		if (!range.physical_backing)
+		{
+			registry.flexible.insert(base);
+		}
+		registry.ranges.emplace(base, std::move(range));
+		registry.population_scanned = false;
 	}
 	for (const auto& table: registry.retired)
 	{

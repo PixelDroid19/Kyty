@@ -2343,10 +2343,15 @@ static int release_direct_memory(int64_t start, size_t len)
 		{
 			return KERNEL_ERROR_EBUSY;
 		}
+		// Only the view of the released pages loses its contents; the rest of
+		// each mapping stays live (a partial release keeps it mapped).
+		const uint64_t release_end = static_cast<uint64_t>(start) + len;
 		for (const auto& mapping: mappings)
 		{
+			const uint64_t lo = std::max(static_cast<uint64_t>(start), mapping.phys_addr);
+			const uint64_t hi = std::min(release_end, mapping.phys_addr + mapping.map_size);
 			if (mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess &&
-			    !GetGpuMappingLifecyclePort().InvalidateRange(mapping.map_vaddr, mapping.map_size))
+			    !GetGpuMappingLifecyclePort().InvalidateRange(mapping.map_vaddr + (lo - mapping.phys_addr), hi - lo))
 			{
 				return KERNEL_ERROR_EBUSY;
 			}
