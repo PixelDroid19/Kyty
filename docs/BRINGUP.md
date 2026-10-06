@@ -254,6 +254,64 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Storage uploads and physical residency (2026-10-06, guest verified)
+
+Scope: strict runs on the reference host (two host cores, 8 GiB cgroup, shader validation on). Costs were measured
+with a temporary counter build (residency phases, tracker write faults, changed pages per upload, write-back waits
+by cause) next to the native `perf-snapshot`.
+
+- **Storage buffers upload only the pages the CPU wrote.** A storage buffer the guest rewrites in part was uploaded
+  whole whenever its range generation moved: the isometric roguelike re-uploaded a 7 MB buffer about 3,000 times in
+  180 s, and in one 10 s window only 216 of the 239,260 uploaded pages had changed. A storage buffer of two or more
+  pages now keeps the tracker generation of each page at its last upload; an in-place update copies only the pages
+  whose generation moved and refreshes the write-back snapshot for those pages. A page's generation moves on every
+  write after it was armed (a fault or a host notification, including the write-back of GPU results), so an unmoved
+  page still holds the uploaded bytes. A completed label publication, depth-metadata (HTILE) storage, a new backing,
+  or a hash change without any moved page keeps the whole upload. Over 120 s the title uploaded 7.0 GB instead of
+  19.8 GB (upload time 8.4 s to 6.5 s); its menu, intro and gameplay captures match.
+- **Physical residency is asked in one sweep of the backing.** After the direct-memory population changes, each
+  preparation asked whether every unimported span of every physical range was populated, one `lseek(SEEK_DATA)` per
+  span (about 13,000 spans in the .NET beat 'em up). The spans are now sorted by backing offset and swept: one query
+  clears every span before the next populated page. Ranges count their imported pages, so a range with none is one
+  span and a fully imported range is skipped without walking its bitmap. Residency time over a 200 s run went from
+  49.1 s to 45.9 s (10 s windows 15-35% lower). The roguelike gains nothing: its ~4,300 gaps alternate with imported,
+  populated runs, so each gap still needs its own query.
+
+Measured and not shipped:
+
+- `cachestat(2)` per physical range, to skip a range whose populated bytes equal its imported bytes: the call walks
+  the cached pages of the interval. On a 3 GiB memfd with 87,000 populated pages it costs 2.0 ms, the same as the
+  5,462 per-gap queries it would replace.
+- Device-side publication of every pending storage result whose guest bytes the CPU had not written (a copy on the
+  consumer's queue instead of the CPU write-back). In the sandbox title's menus the write-back waits fell from about
+  2,100 to 500 per 10 s, but the waiting time stayed at about 5.8 s per 10 s (one wait per frame for the whole
+  frame) and the frame rate did not change (49-52 fps). The remaining blockers are storage buffers aliased by
+  vertex buffers (equal 32-64 B objects, and 2 MB objects containing vertex buffers) and by other storage buffers;
+  those aliases need the in-order write-back. In the beat 'em up no pending object qualified.
+
+Open, measured:
+
+- The sandbox title waits for device-address write-backs about 56% of its menu time (2,100 waits per 10 s, 2.6 ms
+  each) and about 60% in its world: compute writes small storage buffers in direct memory that later draws read as
+  vertex buffers and through guest pointers, so each batch goes back to the CPU and is uploaded again. Direction: a
+  device-side copy from the written storage object into its aliasing vertex and storage objects, in queue order, so
+  those aliases no longer need the in-order write-back (`CommandProcessor::WaitDeviceAddressWriteBacks`,
+  `GpuMemory::MarkStorageGuestPublished`).
+- The roguelike: detiling takes 18% of the processor (about 0.2 GB/s) and residency 11%. Its documented null-block
+  crash at 8 s appeared in two consecutive runs of an intermediate build and in neither of two runs of the final one.
+- The Unity fishing title is not frozen: its autosave notice needs a held confirmation (a ring fills while the
+  button is held), so tap routes stay on it. With held confirmations it plays its opening and reaches the first
+  dialogue, at about 2 fps: vertex buffers of 2.4-3.2 MB are reclaimed and created again about 116,000 times in
+  180 s (each request overlaps 108-170 live objects, relations equal, contains and contained-within), and every
+  creation uploads the whole buffer (6-7 ms; 315 GB in the run). Next: reuse a live object that covers a requested
+  vertex range instead of reclaiming the overlapping set.
+
+Regression with both changes (runs d1228-d1236, 120-240 s each): the roguelike 12 and 14 fps (12 before) with no
+crash in either run, the action platformer 69 (70), the painterly platformer 144 (146), the pixel-art Metroidvania
+117 (124; its run streamed more textures, 5,023 texture changes against 3,371, a path these changes do not touch),
+the pixel-art exploration title 27 (26) now showing its world, the beat 'em up 8 (6), and the sandbox title's menus
+46 (49) with correct UI captures. Unit tests: 1,870 pass, none fail.
+
 ### CPU/GPU overlap and per-draw cost (2026-10-05, guest verified)
 
 Scope: same strict configuration on the reference host (Intel Arc A770, Mesa `xe`). Profiled with gperftools on the
