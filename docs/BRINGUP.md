@@ -370,9 +370,49 @@ fraction and change of each capture, so a fix is checked on the affected title i
   synchronous call's result, which the handler reports as a failed request. That path then needed
   `std::future_category` (name and messages from the bundled C++ library).
 
+- **Its menu surface: versioned register defaults.** The UI renderer repaints several dirty rectangles in one batch
+  and confines it with a stencil test. `GraphicsGetRegisterDefaults2` handed an AGC version-13 client the older
+  depth group (sixteen pairs) while that client reads seventeen, with `DB_HTILE_SURFACE` before the size and clear
+  values: the depth-size maxima landed in the clear register, the depth target resolved to 1x1 and the stencil test
+  was dropped. Full-screen translucent backgrounds were then blended over the whole surface (accumulating darkening,
+  missing tiles, text and buttons, menus that looked frozen but still accepted Back). Version 13 now gets its own
+  seventeen-pair group; other versions are unchanged. The HTILE control default is a secondary-reference lead, not an
+  observed driver value. An earlier exclusion of stencil had inspected only the derived attachment state: check the
+  guest's register state before excluding a mechanism.
+- **Its normal-menu vertex layout.** Vertex formats 11 (`16_UINT`) and 57 (`8_8_8_8_SNORM`) resolved to undefined
+  and aborted a five-attribute layout; both now map to their Vulkan equivalents (public GFX10 buffer formats).
+- **Its storage figures.** Savedata search and mount info reported a fixed 100000 blocks per directory, and the title
+  multiplies the search blocks by 64 KiB: three small saves appeared to use 18 GiB and it warned about storage. The
+  allocation a mount requests is now recorded beside the title roots (`.kyty-capacity`, outside the payload; 32 KiB
+  blocks for the standard mount calls, 64 KiB for the native one). Mount info and search report it with the blocks the
+  payload uses, and delete drops it. A directory without a record (created earlier) mounts normally and reports its
+  usage until a mount requests an allocation. SaveDataMemory backing moved out of the enumerated title directory
+  (`.kyty-memory/<title>/memory/`), where a search had listed it as a save named `memory`.
+- **Its sign-in dialog.** `libSceSigninDialog` was missing, so one variant of the first-run flow aborted when it
+  opened the sign-in dialog. It is now a common dialog that finishes as soon as it opens with the user-canceled
+  result, since there is no network account to sign in to. Contract from the title's wrapper: a 16-byte open parameter
+  (size `0x10`, user, reserved), status 1-3, and a 16-byte result whose first word is 0 (signed in), 1 (canceled) or
+  an error.
+- **Releasing part of an address reservation.** Consuming part of a reserved range released the whole block and then
+  re-reserved its prefix and suffix; a host mapping made by another thread in that window took the address, the
+  rollback could not re-reserve the block and the run aborted at `Memory.cpp` while the sandbox title loaded its
+  world. Where the host supports it (Linux), only the consumed part is now released (`VirtualMemory::FreeRange`);
+  hosts without partial release keep the previous path.
+
+With these the title passes its first-run screens with an intact interface, creates the world database and logs the
+player's connection and spawn within the 300 s harness window. Controllable gameplay and shared-path regressions are
+not yet verified.
+
 Investigated and left open:
 
-- The sandbox title stops advancing at a varying point (character select, its transition, or the world's
+- **Register-write routes (2026-10-06).** Nonzero Type-0 headers with a body reach `CommandProcessor::Run`
+  (`GraphicsRun.cpp`) but are consumed without applying registers, `cp_op_one_reg_write`
+  (`GraphicsRunOpParsers.cpp`) consumes its body without a setter, and the direct context table has no depth-size
+  callback. Establish their packet encodings before implementing dispatch; none occurred in the sampled menu window.
+- **Input method parameters (2026-10-06).** One path through the sandbox title's world list aborts on the unresolved
+  `sceImeParamInit` (`WmYDzdC4EHI`, `Ime_v1`). The IME library has no parameter initialization or real session yet;
+  its contract must come from evidence before it is implemented.
+- Earlier sandbox runs appeared to stop advancing at a varying point (character select, its transition, or the world's
   "Loading" at about half of the bar): presents continue at 40-50 fps and every frame submits its draws, but the
   picture no longer changes and pad input has no effect. Sampled during the freeze: the main thread waits on the
   frame task inside the frame builder (the game class update), one worker runs the render task, every job worker
@@ -386,7 +426,8 @@ Investigated and left open:
   fails and every timed wait has a sane deadline: job workers 0-10 s, the RakNet loop 10 ms, the WebRTC thread 5 s
   on its monotonic condition; the libHttpClient-style request path is not the one the title uses), and its
   network/PSN view (NetCtl reports disconnected and NP signed out).
-  The same symptom shows in the remaining Unity title (below), so a shared cause is likely. The title also imports
+  The static, darkened menus were the stencil defect above, not a stall (Back always worked). The remaining Unity
+  title has a similar visual symptom (below), but a shared cause has not been established. The title also imports
   `sceImeOpen`/`SetText`/`SetCaret`/`GetPanelSize`; a real IME session (open event through `sceImeUpdate`, text
   input) is not implemented and these were not called on the first-run path.
 - The remaining Unity title sometimes stays on its autosave notice ("Begin") for the whole window (262 s, spinner
