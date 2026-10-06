@@ -1128,7 +1128,17 @@ inline bool GpuMemoryCanShareReadOnlyStorageViews(uint64_t existing_addr, uint64
 	return incoming_addr >= existing_addr ? incoming_addr - existing_addr < existing_size : existing_addr - incoming_addr < incoming_size;
 }
 
-bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem);
+// Resources sharing a pooled block must not mix linear and optimal tiling
+// (bufferImageGranularity), so each kind has its own blocks.
+enum class VulkanMemoryResource
+{
+	Linear,
+	Optimal,
+};
+
+bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource resource = VulkanMemoryResource::Linear);
+// Frees the pooled blocks of ctx's device; call before destroying the device.
+void VulkanMemoryPoolRelease(GraphicContext* ctx);
 void VulkanFree(GraphicContext* ctx, VulkanMemory* mem);
 void VulkanMapMemory(GraphicContext* ctx, VulkanMemory* mem, void** data);
 void VulkanUnmapMemory(GraphicContext* ctx, VulkanMemory* mem);

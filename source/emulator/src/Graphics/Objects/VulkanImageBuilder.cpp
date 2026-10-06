@@ -339,7 +339,8 @@ bool VulkanCreateDeviceImage(GraphicContext* context, const VkImageCreateInfo& i
 	}
 	vkGetImageMemoryRequirements(context->device, image->image, &memory->requirements);
 	memory->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-	if (!VulkanAllocate(context, memory))
+	if (!VulkanAllocate(context, memory,
+	                    image_info.tiling == VK_IMAGE_TILING_OPTIMAL ? VulkanMemoryResource::Optimal : VulkanMemoryResource::Linear))
 	{
 		vkDestroyImage(context->device, image->image, nullptr);
 		image->image = nullptr;

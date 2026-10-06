@@ -160,6 +160,8 @@ public:
 				(void)vkDeviceWaitIdle(context.device);
 				(void)TileGpuDetileReleaseContext(&context);
 			}
+			(void)vkDeviceWaitIdle(context.device);
+			VulkanMemoryPoolRelease(&context);
 			vkDestroyDevice(context.device, nullptr);
 		}
 		if (instance != VK_NULL_HANDLE)

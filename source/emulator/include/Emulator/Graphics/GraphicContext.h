@@ -202,6 +202,7 @@ struct VulkanMemory
 	VkDeviceSize          offset       = 0;
 	uint32_t              type         = 0;
 	uint64_t              unique_id    = 0;
+	void*                 pool_block   = nullptr; // set when `memory` is a shared block sub-allocated at `offset`
 };
 
 enum class VulkanImageType
