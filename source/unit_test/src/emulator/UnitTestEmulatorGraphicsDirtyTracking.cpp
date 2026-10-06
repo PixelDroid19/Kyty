@@ -5,6 +5,7 @@
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/VideoFrameMemory.h"
 
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cstring>
@@ -765,6 +766,32 @@ TEST(EmulatorGraphicsDirtyTracking, HostNotificationMarksEveryOverlappingPage)
 	(void)tracker.NotifyWrite(mapping.address + mapping.size - 1u, 2u);
 	EXPECT_TRUE(tracker.ChangedSince(mapping.address, mapping.size, before));
 	EXPECT_EQ(tracker.Mode(mapping.address, mapping.size), GpuDirtyTrackingMode::PageFault);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+// Partial uploads copy only the pages whose generation moved: a write must
+// move exactly the pages it touched, a fault included, and nothing else.
+TEST(EmulatorGraphicsDirtyTracking, PageGenerationsMoveOnlyForWrittenPages)
+{
+	Mapping mapping(4u);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page = GetPageSize();
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.PrepareForRead(mapping.address, mapping.size));
+	ASSERT_EQ(tracker.PageCount(mapping.address + 1u, page), 2u);
+	std::array<uint64_t, 4> before {};
+	ASSERT_TRUE(tracker.PageGenerations(mapping.address, mapping.size, before.data(), before.size()));
+	EXPECT_FALSE(tracker.PageGenerations(mapping.address, mapping.size, before.data(), before.size() - 1u));
+
+	(void)tracker.NotifyWrite(mapping.address + page + 8u, 4u);
+	ASSERT_TRUE(tracker.HandleWriteFault(mapping.address + page * 3u));
+	std::array<uint64_t, 4> after {};
+	ASSERT_TRUE(tracker.PageGenerations(mapping.address, mapping.size, after.data(), after.size()));
+	EXPECT_EQ(after[0], before[0]);
+	EXPECT_NE(after[1], before[1]);
+	EXPECT_EQ(after[2], before[2]);
+	EXPECT_NE(after[3], before[3]);
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 

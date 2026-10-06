@@ -82,8 +82,8 @@ public:
 	[[nodiscard]] bool WriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
 	                                         GpuWritebackPageCache* page_cache, LabelStoragePublication* publication,
 	                                         GpuWritebackResult* result);
-	void StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
-	                   LabelStoragePublication* publication);
+	void StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
+	                   GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
 	[[nodiscard]] bool StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
 	void   ReleaseMappedRange(uint64_t addr, uint64_t bytes);
 
@@ -242,13 +242,25 @@ bool LabelFenceRegistry::NeedsUpload(uint64_t addr, uint64_t bytes, uint64_t acq
 }
 
 void LabelStoragePublication::Upload(const LabelFenceRegistry& registry, void* gpu_dst, const void* guest_src, uint64_t size,
-                                      GpuWritebackPageCache* page_cache)
+                                      const std::vector<GpuByteRun>& runs, GpuWritebackPageCache* page_cache)
 {
-	EXIT_IF(gpu_dst == nullptr || guest_src == nullptr || page_cache == nullptr || size == 0);
+	EXIT_IF(gpu_dst == nullptr || guest_src == nullptr || page_cache == nullptr || size == 0 || runs.empty());
 	const auto base = reinterpret_cast<uint64_t>(guest_src);
 	EXIT_IF(size > UINT64_MAX - base);
-	std::memcpy(gpu_dst, guest_src, size);
-	page_cache->Reset(gpu_dst, size);
+	const bool whole = runs.size() == 1u && runs[0].offset == 0u && runs[0].bytes == size;
+	for (const auto& run: runs)
+	{
+		EXIT_IF(run.bytes == 0u || run.offset > size || run.bytes > size - run.offset);
+		std::memcpy(static_cast<uint8_t*>(gpu_dst) + run.offset, static_cast<const uint8_t*>(guest_src) + run.offset, run.bytes);
+		if (!whole)
+		{
+			page_cache->Refresh(gpu_dst, run);
+		}
+	}
+	if (whole)
+	{
+		page_cache->Reset(gpu_dst, size);
+	}
 	m_version = registry.Version();
 	m_fences.clear();
 	m_cpu_conflict = false;
@@ -684,12 +696,12 @@ bool LabelManager::WriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, con
 	return publication->AdoptUniform(guest_addr, size, words, page_cache, notify_write, nullptr, result);
 }
 
-void LabelManager::StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
-                                  LabelStoragePublication* publication)
+void LabelManager::StorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
+                                  GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
 	EXIT_IF(publication == nullptr);
 	Core::LockGuard lock(m_mutex);
-	publication->Upload(m_fence_holes, gpu_dst, guest_src, size, page_cache);
+	publication->Upload(m_fence_holes, gpu_dst, guest_src, size, runs, page_cache);
 }
 
 bool LabelManager::StorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication)
@@ -968,11 +980,11 @@ bool LabelWriteBackAdoptUniform(uint64_t guest_addr, uint64_t size, const GpuWri
 	return g_label_manager->WriteBackAdoptUniform(guest_addr, size, words, page_cache, publication, result);
 }
 
-void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
-                        LabelStoragePublication* publication)
+void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
+                        GpuWritebackPageCache* page_cache, LabelStoragePublication* publication)
 {
 	EXIT_IF(g_label_manager == nullptr);
-	g_label_manager->StorageUpload(gpu_dst, guest_src, size, page_cache, publication);
+	g_label_manager->StorageUpload(gpu_dst, guest_src, size, runs, page_cache, publication);
 }
 
 bool LabelStorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication)

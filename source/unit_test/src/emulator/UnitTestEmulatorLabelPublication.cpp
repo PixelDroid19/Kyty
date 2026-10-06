@@ -23,7 +23,7 @@ struct Buffer
 	uint64_t Address(size_t offset = 0) { return reinterpret_cast<uint64_t>(guest.data()) + offset; }
 	void Upload(const LabelFenceRegistry& registry)
 	{
-		publication.Upload(registry, gpu.data(), guest.data(), sizeof(guest), &cache);
+		publication.Upload(registry, gpu.data(), guest.data(), sizeof(guest), {{0, sizeof(guest)}}, &cache);
 	}
 	GpuWritebackResult Copy(const LabelFenceRegistry& registry)
 	{
@@ -62,7 +62,8 @@ TEST(EmulatorLabelPublication, OlderBackingRemainsExcludedAfterNewerBackingPubli
 	GpuWritebackPageCache older_cache(16);
 	LabelStoragePublication older_publication;
 	std::array<uint64_t, 8> older_gpu {};
-	older_publication.Upload(registry, older_gpu.data(), buffer.guest.data(), sizeof(buffer.guest), &older_cache);
+	older_publication.Upload(registry, older_gpu.data(), buffer.guest.data(), sizeof(buffer.guest), {{0, sizeof(buffer.guest)}},
+	                         &older_cache);
 	ASSERT_EQ(registry.Register(buffer.Address(), 8), LabelFenceRegistrationStatus::Inserted);
 	buffer.guest[0] = 1;
 	registry.Complete(buffer.Address(), 8);

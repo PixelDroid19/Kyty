@@ -1245,6 +1245,35 @@ bool GpuDirtyPageTracker::ReadObservationIsStable(uintptr_t address, size_t size
 	return observation.tracked && !ChangedSince(address, size, observation.generation);
 }
 
+size_t GpuDirtyPageTracker::PageCount(uintptr_t address, size_t size) const noexcept
+{
+	const uintptr_t end = m_page_size == 0 || address == 0 || size == 0 ? 0 : RangeEnd(address, size);
+	if (end == 0)
+	{
+		return 0;
+	}
+	return static_cast<size_t>((PageStart(end - 1u) - PageStart(address)) / m_page_size) + 1u;
+}
+
+bool GpuDirtyPageTracker::PageGenerations(uintptr_t address, size_t size, uint64_t* generations, size_t count) const noexcept
+{
+	if (!Enabled() || generations == nullptr || count == 0 || PageCount(address, size) != count)
+	{
+		return false;
+	}
+	const uintptr_t first = PageStart(address);
+	for (size_t i = 0; i < count; i++)
+	{
+		const PageEntry* entry = FindPage(first + i * m_page_size);
+		if (entry == nullptr)
+		{
+			return false;
+		}
+		generations[i] = entry->generation.load(std::memory_order_acquire);
+	}
+	return true;
+}
+
 bool GpuDirtyPageTracker::Enabled() const noexcept
 {
 	return m_enabled && m_page_size != 0 && m_pages != nullptr && m_ranges != nullptr;

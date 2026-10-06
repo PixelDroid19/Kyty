@@ -40,6 +40,12 @@ public:
 [[nodiscard]] bool StorageBufferWriteBackPublishedUniform(void* obj, uint64_t vaddr, uint64_t size,
                                                           const GpuWritebackPageCache::UniformWords& words, GpuWritebackResult* result);
 
+// Uploads only `runs` of a storage object whose other bytes already match guest
+// memory. False when the object observes depth metadata, whose HTILE tracking
+// reads every uploaded byte: the caller must then upload the whole object.
+[[nodiscard]] bool StorageBufferUploadRuns(GraphicContext* ctx, void* obj, uint64_t vaddr, uint64_t size,
+                                           const std::vector<GpuByteRun>& runs);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

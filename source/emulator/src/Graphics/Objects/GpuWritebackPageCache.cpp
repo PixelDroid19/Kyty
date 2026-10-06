@@ -17,6 +17,13 @@ void GpuWritebackPageCache::Reset(const void* source, uint64_t size)
 	m_uniform = false;
 }
 
+void GpuWritebackPageCache::Refresh(const void* source, const GpuByteRun& run)
+{
+	EXIT_IF(source == nullptr || run.bytes == 0u || run.offset > m_snapshot.size() || run.bytes > m_snapshot.size() - run.offset);
+	Materialize();
+	std::memcpy(m_snapshot.data() + run.offset, static_cast<const uint8_t*>(source) + run.offset, static_cast<size_t>(run.bytes));
+}
+
 void GpuWritebackPageCache::Materialize()
 {
 	if (!m_uniform)

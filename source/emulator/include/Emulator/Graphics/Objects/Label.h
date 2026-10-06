@@ -71,8 +71,10 @@ private:
 class LabelStoragePublication
 {
 public:
+	// Copies the given runs of [guest_src, guest_src + size) to the GPU copy;
+	// one run covering the object is a full upload.
 	void Upload(const LabelFenceRegistry& registry, void* gpu_dst, const void* guest_src, uint64_t size,
-	            GpuWritebackPageCache* page_cache);
+	            const std::vector<GpuByteRun>& runs, GpuWritebackPageCache* page_cache);
 	[[nodiscard]] bool NeedsUpload(const LabelFenceRegistry& registry, uint64_t addr, uint64_t size) const;
 	[[nodiscard]] GpuWritebackResult Copy(const LabelFenceRegistry& registry, void* guest_dst, const void* gpu_src, uint64_t size,
 	                                    GpuWritebackPageCache* page_cache, GpuWritebackPageCache::NotifyWriteFunc notify_write,
@@ -117,8 +119,8 @@ void   LabelDrainCompleted();
 void LabelCompleteSubmission(SubmissionId submission);
 // Upload and writeback share label publication synchronization. Completion
 // versions remain in the registry until unmap so old backings stay excluded.
-void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, GpuWritebackPageCache* page_cache,
-                        LabelStoragePublication* publication);
+void LabelStorageUpload(void* gpu_dst, const void* guest_src, uint64_t size, const std::vector<GpuByteRun>& runs,
+                        GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);
 [[nodiscard]] bool LabelStorageNeedsUpload(uint64_t addr, uint64_t size, const LabelStoragePublication& publication);
 [[nodiscard]] GpuWritebackResult LabelWriteBackCopy(void* guest_dst, const void* gpu_src, uint64_t size,
                                                    GpuWritebackPageCache* page_cache, LabelStoragePublication* publication);

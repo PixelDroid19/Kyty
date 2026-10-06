@@ -7,6 +7,13 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Bytes [offset, offset + bytes) of a GPU object.
+struct GpuByteRun
+{
+	uint64_t offset = 0;
+	uint64_t bytes  = 0;
+};
+
 struct GpuWritebackResult
 {
 	uint64_t changed_pages   = 0;
@@ -25,6 +32,8 @@ public:
 	static constexpr uint64_t kUniformRecordBytes = sizeof(UniformWords);
 
 	void Reset(const void* source, uint64_t size);
+	// Replaces the snapshot bytes of one run of a same-sized source.
+	void Refresh(const void* source, const GpuByteRun& run);
 
 	[[nodiscard]] GpuWritebackResult CopyChangedPages(void* guest_dst, const void* gpu_src, uint64_t size,
 	                                                 const uint64_t* hole_begin, const uint64_t* hole_end, int hole_count,

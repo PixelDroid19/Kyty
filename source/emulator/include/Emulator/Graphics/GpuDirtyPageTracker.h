@@ -120,6 +120,13 @@ public:
 	                                                          const GpuDirtyReadObservation& observation) const noexcept;
 	[[nodiscard]] bool                 Enabled() const noexcept;
 	[[nodiscard]] GpuDirtyTrackingMode Mode(uintptr_t address, size_t size) const noexcept;
+	// Tracker pages spanned by [address, address + size); 0 for an invalid range.
+	[[nodiscard]] size_t               PageCount(uintptr_t address, size_t size) const noexcept;
+	// Write generation of each tracker page of [address, address + size). A
+	// page's generation advances on every write notification after it was
+	// armed, so a page whose generation is unchanged held its bytes. False when
+	// tracking is off, count is not the page count, or a page has no metadata.
+	[[nodiscard]] bool PageGenerations(uintptr_t address, size_t size, uint64_t* generations, size_t count) const noexcept;
 
 private:
 	struct PageEntry;

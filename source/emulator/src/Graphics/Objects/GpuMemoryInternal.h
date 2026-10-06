@@ -381,6 +381,9 @@ private:
 		bool                         dirty_registered                   = false;
 		bool                         depth_meta_bound                   = false;
 		uint64_t                     dirty_generation[VADDR_BLOCKS_MAX] = {};
+		// Tracker page generations at the last upload of a storage buffer; the
+		// next upload copies only the pages whose generation moved since.
+		std::vector<uint64_t>        page_generations;
 		uint64_t                     content_sequence                  = 0;
 		GpuMemoryContentOrigin       content_origin                    = GpuMemoryContentOrigin::Unknown;
 		GpuSubmissionHighWater       submission_uses;

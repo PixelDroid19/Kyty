@@ -19,6 +19,7 @@
 #include "Emulator/Graphics/Objects/GpuMemoryTransientBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
+#include "Emulator/Graphics/Objects/StorageBuffer.h"
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Window.h"
@@ -254,6 +255,38 @@ void GpuMemory::VersionBacking(GraphicContext* ctx, int heap_id, int obj_id, Vec
 	destructors->Add(retired);
 }
 
+// Object bytes of the tracker pages whose write generation moved since the
+// baseline, merged into runs. Empty without a comparable baseline.
+static std::vector<GpuByteRun> ChangedPageRuns(const std::vector<uint64_t>& baseline, const std::vector<uint64_t>& current,
+                                               uint64_t vaddr, uint64_t size)
+{
+	std::vector<GpuByteRun> runs;
+	if (baseline.empty() || baseline.size() != current.size())
+	{
+		return runs;
+	}
+	const uint64_t page_size  = Core::VirtualMemory::GetPageSize();
+	const uint64_t first_page = vaddr - vaddr % page_size;
+	for (size_t i = 0; i < current.size(); i++)
+	{
+		if (current[i] == baseline[i])
+		{
+			continue;
+		}
+		const uint64_t page  = first_page + i * page_size;
+		const uint64_t begin = std::max(page, vaddr) - vaddr;
+		const uint64_t end   = std::min(page + page_size, vaddr + size) - vaddr;
+		if (!runs.empty() && runs.back().offset + runs.back().bytes == begin)
+		{
+			runs.back().bytes += end - begin;
+		} else
+		{
+			runs.push_back({begin, end - begin});
+		}
+	}
+	return runs;
+}
+
 void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int obj_id, Vector<Destructor>* destructors)
 {
 	KYTY_PROFILER_BLOCK("GpuMemory::Update");
@@ -273,6 +306,8 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 		// bytes from an older GPU batch must not become a later batch's changes.
 		need_update = LabelStorageNeedsUpload(h.block.vaddr[0], h.block.size[0], storage->label_publication);
 	}
+	// A completed label publication rewrites the whole object.
+	const bool label_update = need_update;
 
 	bool mem_watch = false;
 
@@ -347,6 +382,20 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 			} else
 			{
 				hash[vi] = 0;
+			}
+		}
+
+		// Page generations are read after BeginRead armed every page, so a write
+		// racing the upload advances its page again and is copied next time.
+		std::vector<uint64_t> page_generations;
+		if (page_fault_tracking && o.object.type == GpuMemoryObjectType::StorageBuffer && dirty_read[0].tracked)
+		{
+			auto& tracker = GpuDirtyPageTracker::Instance();
+			page_generations.resize(tracker.PageCount(h.block.vaddr[0], h.block.size[0]));
+			if (page_generations.size() < 2u ||
+			    !tracker.PageGenerations(h.block.vaddr[0], h.block.size[0], page_generations.data(), page_generations.size()))
+			{
+				page_generations.clear();
 			}
 		}
 
@@ -434,8 +483,16 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 		} else if (mutation == GpuMemoryMutationAction::UpdateInPlace)
 		{
 			const auto update_start = std::chrono::steady_clock::now();
-			o.update_func(ctx, o.params, o.object.obj, stable_buffer_source_ready ? upload_vaddr : h.block.vaddr, h.block.size,
-			              h.block.vaddr_num);
+			// Pages whose generation did not move still hold the bytes uploaded
+			// last time; every GPU write to them was written back with a write
+			// notification, which advances their generation.
+			const auto runs = label_update ? std::vector<GpuByteRun> {}
+			                               : ChangedPageRuns(o.page_generations, page_generations, h.block.vaddr[0], h.block.size[0]);
+			if (runs.empty() || !StorageBufferUploadRuns(ctx, o.object.obj, h.block.vaddr[0], h.block.size[0], runs))
+			{
+				o.update_func(ctx, o.params, o.object.obj, stable_buffer_source_ready ? upload_vaddr : h.block.vaddr, h.block.size,
+				              h.block.vaddr_num);
+			}
 			const auto update_ns =
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - update_start).count();
 			DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::UpdateFunc, static_cast<uint64_t>(update_ns));
@@ -448,6 +505,7 @@ void GpuMemory::Update(uint64_t submit_id, GraphicContext* ctx, int heap_id, int
 		{
 			updated.hash[vi] = hash[vi];
 		}
+		updated.page_generations = std::move(page_generations);
 		updated.gpu_update_time  = GpuMemoryGetCurrentTime();
 		updated.content_origin   = GpuMemoryContentOrigin::CpuUpload;
 		updated.content_sequence = NextContentSequence();

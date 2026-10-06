@@ -29,11 +29,32 @@ static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* o
 	void*                      data = nullptr;
 	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
 	VulkanMapMemory(ctx, &vk_obj->memory, &data);
-	LabelStorageUpload(data, reinterpret_cast<void*>(*vaddr), *size, &vk_obj->writeback_cache, &vk_obj->label_publication);
+	LabelStorageUpload(data, reinterpret_cast<void*>(*vaddr), *size, {{0, *size}}, &vk_obj->writeback_cache, &vk_obj->label_publication);
 	// HTILE clears often arrive through GpuMemory Update before the world draw.
 	(void)DepthMetaObserveStorageWrite(vk_obj->depth_meta_addr, data, *size);
 	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
 	VulkanUnmapMemory(ctx, &vk_obj->memory);
+}
+
+bool StorageBufferUploadRuns(GraphicContext* ctx, void* obj, uint64_t vaddr, uint64_t size, const std::vector<GpuByteRun>& runs)
+{
+	EXIT_IF(ctx == nullptr || obj == nullptr || runs.empty());
+	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
+	if (vk_obj->depth_meta_addr != 0)
+	{
+		return false;
+	}
+	uint64_t bytes = 0;
+	for (const auto& run: runs)
+	{
+		bytes += run.bytes;
+	}
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, bytes);
+	void*                      data = nullptr;
+	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	LabelStorageUpload(data, reinterpret_cast<void*>(vaddr), size, runs, &vk_obj->writeback_cache, &vk_obj->label_publication);
+	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	return true;
 }
 
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
