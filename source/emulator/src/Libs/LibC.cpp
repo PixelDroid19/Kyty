@@ -3743,6 +3743,50 @@ static KYTY_SYSV_ABI int c_thrd_detach(Kernel::Pthread thread)
 	return result == OK ? 0 : Posix::POSIX_EINVAL;
 }
 
+// Gen5 libc_v1 _Thrd_sleep — NID jfRI3snge3o: int (const xtime* until,
+// xtime* remaining). The guest library sleeps until the absolute TIME_UTC time
+// `until`; when it wakes before it and `remaining` is given, it stores `until`
+// there and returns -1, otherwise it returns 0.
+struct GuestXtime
+{
+	int64_t sec;
+	int64_t nsec;
+};
+
+static KYTY_SYSV_ABI int c_thrd_sleep(const GuestXtime* until, GuestXtime* remaining)
+{
+	if (until == nullptr)
+	{
+		return 0;
+	}
+	Kernel::KernelTimespec now {};
+	if (Kernel::KernelClockGettime(0, &now) == OK)
+	{
+		int64_t sec  = until->sec - now.tv_sec;
+		int64_t nsec = until->nsec - now.tv_nsec;
+		if (nsec < 0)
+		{
+			nsec += 1000000000;
+			sec--;
+		}
+		if (sec > 0 || (sec == 0 && nsec > 0))
+		{
+			const Kernel::KernelTimespec duration {sec, nsec};
+			(void)Kernel::KernelNanosleep(&duration, nullptr);
+		}
+	}
+	if (Kernel::KernelClockGettime(0, &now) != OK || remaining == nullptr)
+	{
+		return 0;
+	}
+	if (now.tv_sec < until->sec || (now.tv_sec == until->sec && now.tv_nsec < until->nsec))
+	{
+		*remaining = *until;
+		return -1;
+	}
+	return 0;
+}
+
 // Gen5 libc_v1 _Assert — NID -QgqOT5u2Vk. A real assert failure: report and
 // stop structurally.
 static KYTY_SYSV_ABI void c_assert(const char* msg, const char* file, int line)
@@ -4350,6 +4394,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("nJz16JE1txM", LibC::c_swprintf);
 	// Gen5 libc_v1 thread detach + C++ runtime error paths.
 	LIB_FUNC("L7f7zYwBvZA", LibC::c_thrd_detach);
+	LIB_FUNC("jfRI3snge3o", LibC::c_thrd_sleep);
 	LIB_FUNC("-QgqOT5u2Vk", LibC::c_assert);
 	LIB_FUNC("W0j6vCxh9Pc", LibC::c_throw_cpp_error);
 	LIB_FUNC("qYhnoevd9bI", LibC::c_terminate);
