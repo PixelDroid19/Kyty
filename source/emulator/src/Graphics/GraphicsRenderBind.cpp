@@ -3445,7 +3445,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				}
 				tex = dtex.At(static_cast<int>(alias_index));
 			}
-		} else
+		}
+		// A depth-tiled view with no depth buffer behind it can still read a
+		// live color or storage image (a dispatch writing the depth-swizzled
+		// surface); only guest memory would miss that content.
+		if (!depth_texture)
 		{
 			auto rtex      = FindRenderTexture(buffer, addr, size.size, true);
 			render_texture = !rtex.IsEmpty();
