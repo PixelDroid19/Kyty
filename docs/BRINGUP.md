@@ -277,6 +277,20 @@ by cause) next to the native `perf-snapshot`.
   49.1 s to 45.9 s (10 s windows 15-35% lower). The roguelike gains nothing: its ~4,300 gaps alternate with imported,
   populated runs, so each gap still needs its own query.
 
+- **Vertex buffers reuse a covering object.** A draw requests the vertex bytes it reads (records times stride), so
+  draws over one mesh request different prefixes of the same allocation. Any overlap between vertex buffers reclaimed
+  the older object, so the Unity fishing title alternated a 2.4 MB and a 3.2 MB request on one base and reclaimed and
+  re-created the buffer about 116,000 times in 180 s, uploading it whole each time (6-7 ms, 315 GB in the run). A
+  live vertex buffer that starts at the requested address and covers the request is now reused, as index buffers
+  already were (bound at offset 0; the draw reads only its own records). Reclaims fell to 1,411 and covered reuses
+  rose to 238,689; vertex binding went from 68.8 s to 9.6 s and the title from 2 to 4 fps in its first dialogue.
+  Its next cost is hashing: about 17,000 live storage buffers exceed the dirty tracker's 512 ranges, so most fall
+  back to full hashes at every use (398 GB hashed, 172 GB still uploaded). A/B against the previous build on the
+  same routes (runs d1244-d1251): the pixel-art Metroidvania's 20 s windows match (139-75 fps before, 152-75 after,
+  14,534 presents against 14,139), the action platformer 65 and 65 fps, the beat 'em up 7 against 6, and two runs of
+  the roguelike at 15 and 13 fps without its 8 s crash. One earlier beat 'em up run lost the device at 166 s with
+  the driver reporting `execbuf` ENOMEM (memory pressure under the 7 GiB cgroup limit); its A/B rerun did not.
+
 Measured and not shipped:
 
 - `cachestat(2)` per physical range, to skip a range whose populated bytes equal its imported bytes: the call walks
@@ -301,10 +315,7 @@ Open, measured:
   crash at 8 s appeared in two consecutive runs of an intermediate build and in neither of two runs of the final one.
 - The Unity fishing title is not frozen: its autosave notice needs a held confirmation (a ring fills while the
   button is held), so tap routes stay on it. With held confirmations it plays its opening and reaches the first
-  dialogue, at about 2 fps: vertex buffers of 2.4-3.2 MB are reclaimed and created again about 116,000 times in
-  180 s (each request overlaps 108-170 live objects, relations equal, contains and contained-within), and every
-  creation uploads the whole buffer (6-7 ms; 315 GB in the run). Next: reuse a live object that covers a requested
-  vertex range instead of reclaiming the overlapping set.
+  dialogue (see the vertex-buffer entry below for its frame rate).
 
 Regression with both changes (runs d1228-d1236, 120-240 s each): the roguelike 12 and 14 fps (12 before) with no
 crash in either run, the action platformer 69 (70), the painterly platformer 144 (146), the pixel-art Metroidvania
