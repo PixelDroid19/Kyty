@@ -133,7 +133,8 @@ void GpuMemory::SetAllocatedRange(uint64_t vaddr, uint64_t size)
 	h.range.size    = size;
 	h.objects_map1  = new GpuMap1;
 	h.objects_map2  = new GpuMap2;
-	h.overlap_cache = new OverlapQueryCache;
+	// The overlap query cache is created by the first query and sized to the
+	// heap's objects: a title can register over 12,000 heaps.
 
 	m_heaps.Add(h);
 	RebuildHeapIndex();
@@ -438,7 +439,6 @@ void GpuMemory::Free(GraphicContext* ctx, uint64_t vaddr, uint64_t size, GpuMemo
 			{
 				EXIT_IF(a.objects_map1 == nullptr);
 				EXIT_IF(a.objects_map2 == nullptr);
-				EXIT_IF(a.overlap_cache == nullptr);
 				if (heap_id != index) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: heap_id != index condition ignored (continuing)\n"); }
 				if (a.objects_size != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: a.objects_size != 0 condition ignored (continuing)\n"); }
 				if (!a.objects_map1->IsEmpty()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !a.objects_map1->IsEmpty() condition ignored (continuing)\n"); }

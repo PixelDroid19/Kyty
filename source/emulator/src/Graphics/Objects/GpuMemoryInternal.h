@@ -388,7 +388,7 @@ private:
 		int         object_id = -1;
 	};
 
-	using OverlapQueryCache = GpuMemoryRangeQueryCache<Vector<OverlappedBlock>, 4096>;
+	using OverlapQueryCache = GpuMemoryAdaptiveRangeQueryCache<Vector<OverlappedBlock>, 4096>;
 
 	struct Materialization
 	{

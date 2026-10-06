@@ -946,7 +946,6 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			h.range.size    = cover_size;
 			h.objects_map1  = new GpuMap1;
 			h.objects_map2  = new GpuMap2;
-			h.overlap_cache = new OverlapQueryCache;
 			m_heaps.Add(h);
 			RebuildHeapIndex();
 			m_allocated_validation_cache.Invalidate();

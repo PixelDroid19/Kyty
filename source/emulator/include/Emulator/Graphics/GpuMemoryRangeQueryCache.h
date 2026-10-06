@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <vector>
 
 namespace Kyty::Libs::Graphics {
 
@@ -199,6 +200,84 @@ public:
 private:
 	std::array<std::optional<Entry>, Capacity> m_entries {};
 	uint64_t                                   m_epoch = 1u;
+};
+
+// The same memoization with a table that follows its owner's population. A
+// title can own thousands of nearly empty GPU heaps; a fixed table per heap
+// held gigabytes and made every range invalidation walk all of its slots.
+template <typename Value, size_t MaxCapacity = 4096>
+class GpuMemoryAdaptiveRangeQueryCache final
+{
+	static_assert(MaxCapacity != 0u && (MaxCapacity & (MaxCapacity - 1u)) == 0u, "cache capacity must be a power of two");
+
+	struct Entry
+	{
+		uint64_t               epoch = 0;
+		GpuMemoryRangeQueryKey key;
+		Value                  value;
+	};
+
+public:
+	static constexpr size_t MIN_CAPACITY = 16;
+
+	// Grow to four slots per indexed object, a power of two between
+	// MIN_CAPACITY and MaxCapacity. Growing drops every cached entry.
+	void Reserve(size_t population)
+	{
+		size_t wanted = MIN_CAPACITY;
+		while (wanted < MaxCapacity && wanted < population * 4u)
+		{
+			wanted <<= 1u;
+		}
+		if (wanted > m_entries.size())
+		{
+			m_entries.assign(wanted, std::nullopt);
+		}
+	}
+
+	[[nodiscard]] size_t Capacity() const { return m_entries.size(); }
+
+	[[nodiscard]] const Value* BorrowLookup(const GpuMemoryRangeQueryKey& key) const
+	{
+		if (!key.Valid() || m_entries.empty())
+		{
+			return nullptr;
+		}
+		const auto& slot = m_entries[static_cast<size_t>(key.Hash()) & (m_entries.size() - 1u)];
+		if (!slot.has_value() || slot->epoch != m_epoch || !(slot->key == key))
+		{
+			return nullptr;
+		}
+		return &slot->value;
+	}
+
+	void Store(const GpuMemoryRangeQueryKey& key, const Value& value)
+	{
+		if (!key.Valid() || m_entries.empty())
+		{
+			return;
+		}
+		m_entries[static_cast<size_t>(key.Hash()) & (m_entries.size() - 1u)] = Entry {m_epoch, key, value};
+	}
+
+	void InvalidateRange(uint64_t address, uint64_t size)
+	{
+		if (size == 0u)
+		{
+			return;
+		}
+		for (auto& entry: m_entries)
+		{
+			if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
+			{
+				entry.reset();
+			}
+		}
+	}
+
+private:
+	std::vector<std::optional<Entry>> m_entries;
+	uint64_t                          m_epoch = 1u;
 };
 
 } // namespace Kyty::Libs::Graphics

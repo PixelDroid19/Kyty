@@ -516,7 +516,11 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 	EXIT_IF(only_first && vaddr_num != 1);
 
 	Vector<GpuMemory::OverlappedBlock> ret;
-	EXIT_IF(heap.overlap_cache == nullptr);
+	if (heap.overlap_cache == nullptr)
+	{
+		heap.overlap_cache = new OverlapQueryCache;
+	}
+	heap.overlap_cache->Reserve(heap.objects.Size());
 	for (int i = 0; i < vaddr_num; ++i)
 	{
 		// An empty range cannot overlap a GPU object and must not enter the
@@ -565,7 +569,6 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 	EXIT_IF(vaddr == nullptr || size == nullptr);
 
 	auto& heap = m_heaps[heap_id];
-	EXIT_IF(heap.overlap_cache == nullptr);
 
 	Block nb {};
 	nb.vaddr_num = vaddr_num;
@@ -573,7 +576,10 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 	{
 		m_materialization_cache.InvalidateRange(vaddr[vi], size[vi]);
 		m_overlap_snapshot_cache.InvalidateRange(vaddr[vi], size[vi]);
-		heap.overlap_cache->InvalidateRange(vaddr[vi], size[vi]);
+		if (heap.overlap_cache != nullptr)
+		{
+			heap.overlap_cache->InvalidateRange(vaddr[vi], size[vi]);
+		}
 		nb.vaddr[vi] = vaddr[vi];
 		nb.size[vi]  = size[vi];
 		heap.objects_size += size[vi];
@@ -586,13 +592,15 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)
 {
 	auto& heap = m_heaps[heap_id];
-	EXIT_IF(heap.overlap_cache == nullptr);
 
 	for (int vi = 0; vi < b->vaddr_num; vi++)
 	{
 		m_materialization_cache.InvalidateRange(b->vaddr[vi], b->size[vi]);
 		m_overlap_snapshot_cache.InvalidateRange(b->vaddr[vi], b->size[vi]);
-		heap.overlap_cache->InvalidateRange(b->vaddr[vi], b->size[vi]);
+		if (heap.overlap_cache != nullptr)
+		{
+			heap.overlap_cache->InvalidateRange(b->vaddr[vi], b->size[vi]);
+		}
 		heap.objects_size -= b->size[vi];
 		heap.objects_map1->Erase(b->vaddr[vi], obj_id);
 		heap.objects_map2->Erase(b->vaddr[vi], b->size[vi], obj_id);
