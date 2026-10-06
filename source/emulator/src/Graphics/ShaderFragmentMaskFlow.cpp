@@ -134,8 +134,9 @@ private:
 	void                  TrackRegionSubset(const ShaderInstruction& inst, bool exec_subset_before);
 	void                  UpdateScc(const ShaderInstruction& inst, uint8_t source_taint);
 	bool                  UniformComparison(const ShaderInstruction& inst) const;
-	void                  TrackUniformMask(const ShaderInstruction& inst);
+	void                  TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources);
 	[[nodiscard]] bool    IsUniformMask(const ShaderOperand& operand) const;
+	[[nodiscard]] bool    IsUniformMaskIn(const std::bitset<kWords>& masks, const ShaderOperand& operand) const;
 	void                  SetUniformMask(const ShaderOperand& dst, bool uniform);
 	bool                  Step(const ShaderInstruction& inst);
 	[[nodiscard]] bool    IsScalarSpill(const ShaderInstruction& inst) const;
@@ -146,7 +147,6 @@ private:
 	void                  FindLoops();
 	ShaderFragmentMaskFlow Fixpoint();
 	bool                  RefineLoopExemptions(bool admitted);
-	bool                  InDivergentLoop(uint32_t pc) const;
 	void                  LeaveLoops(FlowState* state, uint32_t from_pc, uint32_t to_pc) const;
 	bool                  HasInstructionAt(uint32_t pc) const;
 	void                  MarkAcceptedExecWrites(const ShaderCode& code);
@@ -413,12 +413,17 @@ void Flow::UpdateScc(const ShaderInstruction& inst, uint8_t source_taint)
 // the same way for the whole wave (and for a one-lane host invocation), so it opens no divergent region.
 bool Flow::IsUniformMask(const ShaderOperand& operand) const
 {
+	return IsUniformMaskIn(m_state.uniform_mask, operand);
+}
+
+bool Flow::IsUniformMaskIn(const std::bitset<kWords>& masks, const ShaderOperand& operand) const
+{
 	unsigned first = 0;
 	unsigned count = 0;
 	if (!ScalarRange(operand, &first, &count)) { return false; }
 	for (unsigned word = 0; word < count; ++word)
 	{
-		if (!m_state.uniform_mask.test(first + word)) { return false; }
+		if (!masks.test(first + word)) { return false; }
 	}
 	return true;
 }
@@ -432,15 +437,21 @@ void Flow::SetUniformMask(const ShaderOperand& dst, bool uniform)
 	if (dst.type == Operand::VccLo) { m_state.vcc_uniform = uniform; } // wave32 compares define VCC_LO only
 }
 
-// Compare of uniform sources, a copy of such a mask, or EXEC narrowed by one (nonzero exactly when the compare holds).
-void Flow::TrackUniformMask(const ShaderInstruction& inst)
+// Compare of uniform sources, a copy of such a mask, EXEC narrowed by one (nonzero exactly when the compare holds),
+// or the AND/OR of two such masks: every active lane gets c1 && c2 (c1 || c2), the same bit. `sources` holds the
+// uniform words before the instruction wrote its destination, which may also be a source (S_AND VCC, VCC, ...).
+void Flow::TrackUniformMask(const ShaderInstruction& inst, const std::bitset<kWords>& sources)
 {
 	if (StartsWith(inst.type, "VCmp")) { SetUniformMask(inst.dst, UniformComparison(inst)); return; }
-	const bool copy = (inst.type == Type::SMovB64 || inst.type == Type::SMovB32) && inst.src_num == 1 && IsUniformMask(inst.src[0]);
+	const auto uniform = [&](const ShaderOperand& operand) { return IsUniformMaskIn(sources, operand); };
+	const bool copy     = (inst.type == Type::SMovB64 || inst.type == Type::SMovB32) && inst.src_num == 1 && uniform(inst.src[0]);
 	const bool narrowed = (inst.type == Type::SAndB64 || inst.type == Type::SAndB32) && inst.src_num == 2 &&
-	                      ((inst.src[0].type == Operand::ExecLo && IsUniformMask(inst.src[1])) ||
-	                       (inst.src[1].type == Operand::ExecLo && IsUniformMask(inst.src[0])));
-	if (copy || narrowed) { SetUniformMask(inst.dst, true); }
+	                      ((inst.src[0].type == Operand::ExecLo && uniform(inst.src[1])) ||
+	                       (inst.src[1].type == Operand::ExecLo && uniform(inst.src[0])));
+	const bool combined = (inst.type == Type::SAndB64 || inst.type == Type::SAndB32 || inst.type == Type::SOrB64 ||
+	                       inst.type == Type::SOrB32) &&
+	                      inst.src_num == 2 && uniform(inst.src[0]) && uniform(inst.src[1]);
+	if (copy || narrowed || combined) { SetUniformMask(inst.dst, true); }
 }
 
 // A vector compare of constants and scalar numbers gives every lane the same bit.
@@ -516,15 +527,6 @@ bool Flow::HasInstructionAt(uint32_t pc) const
 	for (const auto& candidate: m_code->GetInstructions())
 	{
 		if (candidate.pc == pc) { return true; }
-	}
-	return false;
-}
-
-bool Flow::InDivergentLoop(uint32_t pc) const
-{
-	for (const auto& loop: m_loops)
-	{
-		if (loop.divergent && loop.Contains(pc)) { return true; }
 	}
 	return false;
 }
@@ -692,13 +694,9 @@ bool Flow::Step(const ShaderInstruction& inst)
 		return true;
 	}
 	if (IsScalarSpill(inst)) { return ScalarSpill(inst); }
-	// Forward EXEC/VCC branches are emitted quad-uniform (helpers take their quad's vote), so a fetch inside such a
-	// region computes derivatives from its whole quad. Inside a loop exited by a lane mask the quad can still split
-	// across iterations, so implicit derivatives stay refused there.
-	if (InDivergentLoop(inst.pc) && UsesImplicitDerivatives(inst.type))
-	{
-		return Fail(inst, "derivative fetch inside a lane-divergent loop");
-	}
+	// EXEC/VCC branches, forward exits and back edges alike, are emitted quad-uniform (helpers take their quad's
+	// vote), so a quad enters every region and runs every loop iteration as one. A fetch inside them computes
+	// derivatives from its whole quad, whose masked lanes keep the register values the hardware reads.
 	// A select or conditional move reads SCC; a tainted SCC makes its choice lane dependent.
 	if (ReadsSccImplicitly(inst.type) && m_state.scalar[kSccWord] != kClean)
 	{
@@ -724,6 +722,7 @@ bool Flow::Step(const ShaderInstruction& inst)
 	const bool exec_subset_before = !m_regions.empty() && m_regions.back().exec_subset;
 	const bool one_outside_after  = ResultOneOutsideRegion(inst);
 	m_lane_preserving = PreservesLanesOutsideRegion(inst);
+	const auto uniform_sources = m_state.uniform_mask;
 	const bool defined = Define(inst, inst.dst, produced) && Define(inst, inst.dst2, produced);
 	m_lane_preserving = false;
 	if (!defined) { return false; }
@@ -737,7 +736,7 @@ bool Flow::Step(const ShaderInstruction& inst)
 		m_state.scalar[kExecLoWord]      = static_cast<uint8_t>(kMask | (wide ? kWide : kClean));
 		m_state.scalar[kExecLoWord + 1u] = m_state.scalar[kExecLoWord];
 	}
-	TrackUniformMask(inst);
+	TrackUniformMask(inst, uniform_sources);
 	// SCC = "result is nonzero": it is as wide as the mask the instruction produced, not as the
 	// sources it read (ANDN2 of a narrow mask by a wide one is narrow).
 	const uint8_t scc_source = (produced & kMask) != 0u ? static_cast<uint8_t>((source_taint & ~kWide) | (produced & kWide)) : source_taint;

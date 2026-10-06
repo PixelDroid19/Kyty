@@ -622,7 +622,7 @@ TEST(EmulatorFragmentMaskFlow, ABackEdgeCarriesWhatTheLoopBodyDoesToTheLoopHead)
 	})(), ::testing::ExitedWithCode(0), "");
 }
 
-TEST(EmulatorFragmentMaskFlow, ALoopOnAMaskDerivedSccOrWithADerivativeFetchInsideIsRefused)
+TEST(EmulatorFragmentMaskFlow, ALoopOnAMaskDerivedSccIsRefusedButADerivativeFetchInsideIsNot)
 {
 	ASSERT_EXIT(([] {
 		Initialize();
@@ -641,7 +641,8 @@ TEST(EmulatorFragmentMaskFlow, ALoopOnAMaskDerivedSccOrWithADerivativeFetchInsid
 
 		Words body;
 		Vop1(body, 1, 1, 256u + 0u);
-		// The bottom-tested loop opens no branch region: only the loop itself is divergent.
+		// The bottom-tested loop opens no branch region: only the loop itself is divergent. Its lane-dependent
+		// branches take their quad's vote, so the quad runs every iteration as one.
 		for (const auto& words: {LoopProgram(body, {}), BottomTestedLoop(body, {})})
 		{
 			auto inside = ParsePixel(AsSlots(words));
@@ -651,7 +652,7 @@ TEST(EmulatorFragmentMaskFlow, ALoopOnAMaskDerivedSccOrWithADerivativeFetchInsid
 			sample.pc = inside.GetInstructions().At(mov).pc - 1u;
 			inside.GetInstructions().InsertAt(mov, sample);
 			const auto derivative = ShaderAnalyzeFragmentMaskFlow(inside);
-			Check(!derivative.lane_local && Contains(derivative.reason, "derivative fetch"), "implicit derivatives inside a divergent loop");
+			Check(derivative.lane_local, "implicit derivatives inside a divergent loop see their whole quad");
 		}
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
