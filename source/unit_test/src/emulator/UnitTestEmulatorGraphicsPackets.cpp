@@ -1707,6 +1707,69 @@ TEST(EmulatorGraphicsPackets, BuildsPackedNormalized16BitVertexLayout)
 	EXPECT_FALSE(VulkanBuildVertexInputLayout(input, &layout));
 }
 
+TEST(EmulatorGraphicsPackets, BuildsFiveAttributeInterleavedMixedNumericVertexLayout)
+{
+	if (!Config::IsInitialized()) { Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance()); }
+	Config::SetNextGen(true);
+
+	ShaderVertexInputInfo input {};
+	input.resources_num = 5;
+	input.buffers_num   = 1;
+
+	auto& buffer           = input.buffers[0];
+	buffer.addr            = 0x0000000000010000ull;
+	buffer.stride          = 24u;
+	buffer.num_records     = 8u;
+	buffer.attr_num        = 5;
+	buffer.attr_indices[0] = 0;
+	buffer.attr_indices[1] = 1;
+	buffer.attr_indices[2] = 2;
+	buffer.attr_indices[3] = 3;
+	buffer.attr_indices[4] = 4;
+	buffer.attr_offsets[0] = 16u;
+	buffer.attr_offsets[1] = 20u;
+	buffer.attr_offsets[2] = 12u;
+	buffer.attr_offsets[3] = 0u;
+	buffer.attr_offsets[4] = 8u;
+
+	input.resources[0].fields[3] = (56u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[0]       = {0, 4};
+	input.resources[1].fields[3] = (11u << 12u) | DstSel(4, 0, 0, 1);
+	input.resources_dst[1]       = {4, 1};
+	input.resources[2].fields[3] = (57u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[2]       = {5, 4};
+	input.resources[3].fields[3] = (71u << 12u) | DstSel(4, 5, 6, 7);
+	input.resources_dst[3]       = {9, 3};
+	input.resources[4].fields[3] = (23u << 12u) | DstSel(4, 5, 0, 1);
+	input.resources_dst[4]       = {12, 2};
+
+	const auto r16_uint = VulkanResolveGen5VertexInputFormat(11u);
+	EXPECT_EQ(r16_uint.format, VK_FORMAT_R16_UINT);
+	EXPECT_EQ(r16_uint.component_count, 1u);
+	EXPECT_EQ(r16_uint.numeric_class, VulkanVertexInputNumericClass::Uint);
+	const auto rgba8_snorm = VulkanResolveGen5VertexInputFormat(57u);
+	EXPECT_EQ(rgba8_snorm.format, VK_FORMAT_R8G8B8A8_SNORM);
+	EXPECT_EQ(rgba8_snorm.component_count, 4u);
+	EXPECT_EQ(rgba8_snorm.numeric_class, VulkanVertexInputNumericClass::Float);
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	EXPECT_EQ(layout.binding_count, 1u);
+	EXPECT_EQ(layout.attribute_count, 5u);
+	EXPECT_EQ(layout.bindings[0].stride, 24u);
+
+	const VkFormat expected_formats[] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16_UINT, VK_FORMAT_R8G8B8A8_SNORM,
+	                                    VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16_UNORM};
+	const uint32_t expected_offsets[] = {16u, 20u, 12u, 0u, 8u};
+	for (uint32_t index = 0; index < 5u; ++index)
+	{
+		EXPECT_EQ(layout.attributes[index].binding, 0u);
+		EXPECT_EQ(layout.attributes[index].location, index);
+		EXPECT_EQ(layout.attributes[index].offset, expected_offsets[index]);
+		EXPECT_EQ(layout.attributes[index].format, expected_formats[index]);
+	}
+}
+
 // Interleaved mesh stream: position f32x3 + normal h16x4 + UV h16x2 in one stride-24 VB.
 // Without format 29 the whole Vulkan vertex input layout fails and 3D draws go black.
 TEST(EmulatorGraphicsPackets, BuildsInterleavedPosNormUvVertexLayoutWithFormat29)
