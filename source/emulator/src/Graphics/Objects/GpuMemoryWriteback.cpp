@@ -113,7 +113,11 @@ void GpuMemory::FrameDone(GraphicContext* ctx)
 		                              object.object.type == GpuMemoryObjectType::StorageBuffer;
 		const bool storage_buffer_safe =
 		    object.object.type != GpuMemoryObjectType::StorageBuffer || object.write_back_func == nullptr || !owns_device_content;
-		if (reclaimable_type && storage_buffer_safe && old_enough && dependencies_complete)
+		// Storage images are never written back: one a dispatch wrote holds the
+		// only copy of its content (texture uploads through a storage view of
+		// the blocks). It lives until the guest releases or rewrites the range.
+		const bool storage_texture_safe = object.object.type != GpuMemoryObjectType::StorageTexture || object.write_uses == 0u;
+		if (reclaimable_type && storage_buffer_safe && storage_texture_safe && old_enough && dependencies_complete)
 		{
 			destructors.Add(Free(heap_id, object_id));
 			retired++;
