@@ -837,8 +837,8 @@ bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_of
 	return true;
 }
 
-bool sys_virtual_is_shared_backing_range_unpopulated([[maybe_unused]] void* backing, [[maybe_unused]] uint64_t backing_offset,
-                                                    [[maybe_unused]] uint64_t size)
+bool sys_virtual_next_shared_backing_data([[maybe_unused]] void* backing, [[maybe_unused]] uint64_t backing_offset,
+                                          [[maybe_unused]] uint64_t* next)
 {
 	return false;
 }

@@ -146,9 +146,17 @@ void           DestroySharedBacking(SharedBacking* backing);
 // Reclaim host RAM for a released physical range (punch hole / discard pages).
 // Only call when no live map still covers [backing_offset, backing_offset+size).
 bool           DiscardSharedBackingRange(SharedBacking* backing, uint64_t backing_offset, uint64_t size);
-// True only for a positively identified, page-aligned unpopulated interval.
-// False includes unsupported hosts and query errors. The result is a snapshot.
-bool           IsSharedBackingRangeUnpopulated(SharedBacking* backing, uint64_t backing_offset, uint64_t size);
+struct SharedBackingSpan
+{
+	uint64_t offset      = 0;
+	uint64_t size        = 0;
+	bool     unpopulated = false;
+};
+// Snapshot query: marks each page-aligned span whose whole backing interval
+// holds no populated or swapped-out page. Spans are swept in backing order, so
+// one host query clears every span up to the next populated page. Unsupported
+// hosts and query errors leave spans unmarked.
+void           FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan* spans, size_t count);
 // The backing gains a page only when a view first touches it and loses pages
 // only through DiscardSharedBackingRange, so an unchanged population means no
 // page of any view became resident or was dropped in between.

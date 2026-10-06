@@ -29,7 +29,9 @@ void     sys_virtual_destroy_shared_backing(void* backing);
 // Drop host pages for a released direct-memory range without shrinking the
 // sparse backing file. Safe only when no live maps still cover the range.
 bool     sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_offset, uint64_t size);
-bool     sys_virtual_is_shared_backing_range_unpopulated(void* backing, uint64_t backing_offset, uint64_t size);
+// Offset of the first populated or swapped-out byte at or after backing_offset,
+// or the backing size when none follows. False when the host cannot tell.
+bool     sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next);
 // Bytes of the backing that hold a page (st_blocks). False when the host cannot tell.
 bool     sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes);
 uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,

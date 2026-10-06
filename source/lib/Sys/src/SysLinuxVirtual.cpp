@@ -900,25 +900,31 @@ bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_of
 #endif
 }
 
-bool sys_virtual_is_shared_backing_range_unpopulated(void* backing, uint64_t backing_offset, uint64_t size)
+bool sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next)
 {
 #if defined(__linux__) && defined(SEEK_DATA)
 	const auto* shared = static_cast<const SharedBacking*>(backing);
-	if (shared == nullptr || shared->fd < 0 || size == 0 || backing_offset > shared->size || size > shared->size - backing_offset)
+	if (shared == nullptr || shared->fd < 0 || next == nullptr || backing_offset > shared->size)
 	{
 		return false;
 	}
 	// The memfd's SEEK_DATA includes populated and swapped-out pages. None of
 	// its mapping operations consume the file position changed by this query.
 	const int   saved_errno = errno;
-	const off_t next_data   = ::lseek(shared->fd, static_cast<off_t>(backing_offset), SEEK_DATA);
+	const off_t data        = ::lseek(shared->fd, static_cast<off_t>(backing_offset), SEEK_DATA);
 	const int   query_errno = errno;
-	errno                  = saved_errno;
-	return next_data >= 0 ? static_cast<uint64_t>(next_data) >= backing_offset + size : query_errno == ENXIO;
+	errno                   = saved_errno;
+	if (data < 0)
+	{
+		*next = shared->size;
+		return query_errno == ENXIO;
+	}
+	*next = static_cast<uint64_t>(data);
+	return true;
 #else
 	(void)backing;
 	(void)backing_offset;
-	(void)size;
+	(void)next;
 	return false;
 #endif
 }

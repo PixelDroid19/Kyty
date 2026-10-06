@@ -240,7 +240,7 @@ public:
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	uint64_t MapAlias(uint64_t vaddr, uint64_t size);
-	bool     IsRangeUnpopulated(uint64_t vaddr, uint64_t size);
+	void     FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count);
 	uint64_t TotalAllocatedBytes();
 	void     FillSnapshot(KernelMemorySnapshot* snapshot);
 	bool     FindLargestAvailableSpan(uint64_t search_start, uint64_t search_end, uint64_t alignment, uint64_t* span_start,
@@ -1477,24 +1477,33 @@ uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size)
 	return 0;
 }
 
-bool PhysicalMemory::IsRangeUnpopulated(uint64_t vaddr, uint64_t size)
+void PhysicalMemory::FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count)
 {
-	if (vaddr == 0 || size == 0 || vaddr > UINT64_MAX - (size - 1u))
+	std::vector<VirtualMemory::SharedBackingSpan> backing_spans;
+	std::vector<size_t>                           owners;
+	Core::LockGuard                               lock(m_mutex);
+	for (size_t i = 0; i < count; i++)
 	{
-		return false;
+		auto& span       = spans[i];
+		span.unpopulated = false;
+		if (span.vaddr == 0 || span.size == 0 || span.vaddr > UINT64_MAX - (span.size - 1u))
+		{
+			continue;
+		}
+		const MappedBlock* mapping = FindLiveViewUnlocked(span.vaddr);
+		if (mapping == nullptr || span.size > mapping->map_size || span.vaddr - mapping->map_vaddr > mapping->map_size - span.size ||
+		    span.vaddr - mapping->map_vaddr > UINT64_MAX - mapping->phys_addr)
+		{
+			continue;
+		}
+		backing_spans.push_back({mapping->phys_addr + (span.vaddr - mapping->map_vaddr), span.size});
+		owners.push_back(i);
 	}
-	Core::LockGuard    lock(m_mutex);
-	const MappedBlock* mapping = FindLiveViewUnlocked(vaddr);
-	if (mapping == nullptr || size > mapping->map_size || vaddr - mapping->map_vaddr > mapping->map_size - size)
+	VirtualMemory::FindUnpopulatedSharedBackingSpans(m_backing, backing_spans.data(), backing_spans.size());
+	for (size_t i = 0; i < owners.size(); i++)
 	{
-		return false;
+		spans[owners[i]].unpopulated = backing_spans[i].unpopulated;
 	}
-	const uint64_t delta = vaddr - mapping->map_vaddr;
-	if (delta > UINT64_MAX - mapping->phys_addr)
-	{
-		return false;
-	}
-	return VirtualMemory::IsSharedBackingRangeUnpopulated(m_backing, mapping->phys_addr + delta, size);
 }
 
 const PhysicalMemory::MappedBlock* PhysicalMemory::FindLiveViewUnlocked(uint64_t vaddr)
@@ -2673,9 +2682,17 @@ bool KernelUnmapPhysicalAlias(uint64_t alias)
 	return alias != 0 && VirtualMemory::Free(alias);
 }
 
-bool KernelIsPhysicalRangeUnpopulated(uint64_t vaddr, uint64_t size)
+void KernelFindUnpopulatedPhysicalSpans(KernelPhysicalSpan* spans, size_t count)
 {
-	return g_physical_memory != nullptr && g_physical_memory->IsRangeUnpopulated(vaddr, size);
+	if (g_physical_memory == nullptr)
+	{
+		for (size_t i = 0; i < count; i++)
+		{
+			spans[i].unpopulated = false;
+		}
+		return;
+	}
+	g_physical_memory->FindUnpopulatedSpans(spans, count);
 }
 
 bool KernelQueryPhysicalPopulation(Core::VirtualMemory::SharedBackingPopulation* out)

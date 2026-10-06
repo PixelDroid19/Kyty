@@ -1936,15 +1936,38 @@ bool QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulatio
 	return sys_virtual_query_shared_backing_populated_bytes(backing->handle, &population->populated_bytes);
 }
 
-bool IsSharedBackingRangeUnpopulated(SharedBacking* backing, uint64_t backing_offset, uint64_t size)
+void FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan* spans, size_t count)
 {
-	const uint64_t page_size = GetPageSize();
-	if (!shared_range_is_valid(backing, backing_offset, size) || page_size == 0 || backing_offset % page_size != 0 ||
-	    size % page_size != 0)
+	const uint64_t                  page_size = GetPageSize();
+	std::vector<SharedBackingSpan*> order;
+	order.reserve(count);
+	for (size_t i = 0; i < count; i++)
 	{
-		return false;
+		auto& span       = spans[i];
+		span.unpopulated = false;
+		if (shared_range_is_valid(backing, span.offset, span.size) && page_size != 0 && span.offset % page_size == 0 &&
+		    span.size % page_size == 0)
+		{
+			order.push_back(&span);
+		}
 	}
-	return sys_virtual_is_shared_backing_range_unpopulated(backing->handle, backing_offset, size);
+	std::sort(order.begin(), order.end(), [](const SharedBackingSpan* a, const SharedBackingSpan* b) { return a->offset < b->offset; });
+	// Every span starting below next_data starts at or after the offset the
+	// last query began at, so [that offset, next_data) holds no page for it.
+	uint64_t next_data = 0;
+	bool     queried   = false;
+	for (auto* span: order)
+	{
+		if (!queried || span->offset >= next_data)
+		{
+			if (!sys_virtual_next_shared_backing_data(backing->handle, span->offset, &next_data))
+			{
+				return;
+			}
+			queried = true;
+		}
+		span->unpopulated = span->size <= next_data - span->offset;
+	}
 }
 
 uint64_t MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,

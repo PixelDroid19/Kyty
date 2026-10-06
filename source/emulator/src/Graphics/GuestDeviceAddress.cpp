@@ -52,6 +52,7 @@ struct Range
 	std::vector<uint8_t> imported; // one byte per page
 	bool                 physical_backing = false;
 	uint32_t             tracked_chunks   = 0;
+	uint64_t             imported_pages   = 0; // pages set in `imported`
 };
 
 struct Table
@@ -136,8 +137,10 @@ void DropChunks(VkDevice device, Registry* registry, uint64_t base, Range* range
 		const auto last  = std::min(range->imported.size(), static_cast<size_t>((chunk->guest + chunk->span - base) / kPageBytes));
 		if (first < last)
 		{
-			std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(first),
-			          range->imported.begin() + static_cast<std::ptrdiff_t>(last), uint8_t {0});
+			const auto begin = range->imported.begin() + static_cast<std::ptrdiff_t>(first);
+			const auto end   = range->imported.begin() + static_cast<std::ptrdiff_t>(last);
+			range->imported_pages -= static_cast<uint64_t>(std::count(begin, end, uint8_t {1}));
+			std::fill(begin, end, uint8_t {0});
 		}
 		registry->dirty              = true;
 		registry->population_scanned = false;
@@ -325,13 +328,6 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 	const uint64_t pages        = last - first;
 	const uint64_t span_address = base + first * kPageBytes;
 	const uint64_t span_size    = pages * kPageBytes;
-	// A wholly sparse physical interval cannot contain resident pages. Requery
-	// each preparation so a later guest write is discovered normally. Other
-	// ranges have no physical backing to ask about.
-	if (range->physical_backing && Kernel::Memory::KernelIsPhysicalRangeUnpopulated(span_address, span_size))
-	{
-		return true;
-	}
 	resident->resize(static_cast<size_t>(pages));
 	if (!Core::VirtualMemory::QueryResidentPages(span_address, span_size, resident->data()))
 	{
@@ -363,10 +359,33 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 		}
 		range->chunks.push_back(chunk);
 		range->tracked_chunks += chunk.tracked ? 1u : 0u;
+		range->imported_pages += end - page;
 		std::fill(range->imported.begin() + static_cast<std::ptrdiff_t>(first + page),
 		          range->imported.begin() + static_cast<std::ptrdiff_t>(first + end), 1);
 		*changed = true;
 		page     = end;
+	}
+	return true;
+}
+
+// Calls visit(first, last) for each maximal run of unimported pages; a visit
+// may import pages inside its own run only.
+template <typename Visit>
+bool ForEachUnimportedSpan(Range* range, const Visit& visit)
+{
+	range->imported.resize(static_cast<size_t>(range->size / kPageBytes), 0);
+	const auto begin = range->imported.begin();
+	const auto limit = range->imported.end();
+	for (auto cursor = begin; cursor != limit;)
+	{
+		const auto first = std::find(cursor, limit, uint8_t {0});
+		if (first == limit) { break; }
+		const auto last = std::find(first, limit, uint8_t {1});
+		if (!visit(static_cast<uint64_t>(first - begin), static_cast<uint64_t>(last - begin)))
+		{
+			return false;
+		}
+		cursor = last;
 	}
 	return true;
 }
@@ -377,20 +396,69 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 // Quiesced invalidation clears the bitmap when those imports cease to be valid.
 bool ImportResident(GraphicContext* ctx, uint64_t base, Range* range, bool* changed)
 {
-	range->imported.resize(static_cast<size_t>(range->size / kPageBytes), 0);
 	std::vector<uint8_t> resident;
-	const auto limit = range->imported.end();
-	for (auto cursor = range->imported.begin(); cursor != limit;)
+	return ForEachUnimportedSpan(range, [&](uint64_t first, uint64_t last)
+	                             { return ImportResidentSpan(ctx, base, range, first, last, &resident, changed); });
+}
+
+// Physical ranges number in the thousands and are mostly unpopulated. Their
+// unimported spans are asked about in one sweep of the backing, so a span
+// before the next populated page costs no host query and only spans holding
+// populated pages are scanned for resident ones.
+bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
+{
+	struct Pending
 	{
-		const auto first = std::find(cursor, limit, uint8_t {0});
-		if (first == limit) { break; }
-		const auto last = std::find(first, limit, uint8_t {1});
-		if (!ImportResidentSpan(ctx, base, range, static_cast<uint64_t>(first - range->imported.begin()),
-		                        static_cast<uint64_t>(last - range->imported.begin()), &resident, changed))
+		uint64_t base  = 0;
+		Range*   range = nullptr;
+		uint64_t first = 0;
+		uint64_t last  = 0;
+	};
+	std::vector<Pending>                            pending;
+	std::vector<Kernel::Memory::KernelPhysicalSpan> spans;
+	for (auto& [base, range]: registry->ranges)
+	{
+		const uint64_t pages = range.size / kPageBytes;
+		if (!range.physical_backing || range.imported_pages == pages)
+		{
+			continue;
+		}
+		range.imported.resize(static_cast<size_t>(pages), 0);
+		if (range.imported_pages == 0)
+		{
+			pending.push_back({base, &range, 0, pages});
+			spans.push_back({base, range.size});
+			continue;
+		}
+		const uint64_t range_base  = base;
+		Range*         range_entry = &range;
+		(void)ForEachUnimportedSpan(range_entry,
+		                            [&](uint64_t first, uint64_t last)
+		                            {
+			                            pending.push_back({range_base, range_entry, first, last});
+			                            spans.push_back({range_base + first * kPageBytes, (last - first) * kPageBytes});
+			                            return true;
+		                            });
+	}
+	Kernel::Memory::KernelFindUnpopulatedPhysicalSpans(spans.data(), spans.size());
+	std::vector<uint8_t> resident;
+	for (size_t i = 0; i < pending.size(); i++)
+	{
+		const auto& span    = pending[i];
+		bool        changed = false;
+		if (spans[i].unpopulated)
+		{
+			continue;
+		}
+		if (!ImportResidentSpan(ctx, span.base, span.range, span.first, span.last, &resident, &changed))
 		{
 			return false;
 		}
-		cursor = last;
+		registry->dirty = registry->dirty || changed;
+		if (span.range->tracked_chunks != 0)
+		{
+			registry->tracked.insert(span.base);
+		}
 	}
 	return true;
 }
@@ -678,23 +746,15 @@ bool GuestDeviceAddressPrepare(GraphicContext* ctx, uint64_t* table_address, uin
 			}
 			return true;
 		};
-		if (physical)
+		if (physical && !ImportPhysicalRanges(ctx, &registry))
 		{
-			for (auto& [base, range]: registry.ranges)
-			{
-				if (!revisit(base, &range))
-				{
-					return false;
-				}
-			}
-		} else
+			return false;
+		}
+		for (const uint64_t base: registry.flexible)
 		{
-			for (const uint64_t base: registry.flexible)
+			if (!revisit(base, &registry.ranges.at(base)))
 			{
-				if (!revisit(base, &registry.ranges.at(base)))
-				{
-					return false;
-				}
+				return false;
 			}
 		}
 	}
