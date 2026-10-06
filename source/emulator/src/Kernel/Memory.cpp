@@ -537,6 +537,15 @@ public:
 			{
 				return false;
 			}
+			// Release only the consumed part. Releasing the whole block and then
+			// re-reserving its remainder leaves a window in which another thread's
+			// host mapping can take the address, and the remainder is lost.
+			if (VirtualMemory::FreeRange(addr, size))
+			{
+				SplitConsumedBlock(index, block, addr, size);
+				return true;
+			}
+			// Hosts without partial release (Windows) re-reserve the remainder.
 			if (!VirtualMemory::Free(block.addr))
 			{
 				EXIT_IF(!VirtualMemory::RegisterDemandRange(addr, size));
