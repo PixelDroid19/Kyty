@@ -441,11 +441,12 @@ inline bool GpuMemoryAllowsIndexContainedInSurface(GpuMemoryObjectType existing_
 	       relation == GpuMemoryOverlapType::Equals || relation == GpuMemoryOverlapType::IsContainedWithin;
 }
 
-// A draw often requests a shorter prefix of the same guest index allocation.
+// Index and vertex buffers request the bytes one draw reads, so a draw often
+// requests a shorter prefix of the same guest allocation as an earlier one.
 // Reuse only an already-created buffer that starts at the exact same guest
 // address and fully covers the requested bytes. Offset views require an
 // explicit Vulkan bind offset and therefore remain a separate contract.
-inline bool GpuMemoryCanReuseIndexBacking(uint64_t existing_addr, uint64_t existing_size, uint64_t incoming_addr, uint64_t incoming_size)
+inline bool GpuMemoryCanReuseBufferPrefix(uint64_t existing_addr, uint64_t existing_size, uint64_t incoming_addr, uint64_t incoming_size)
 {
 	if (existing_size == 0 || incoming_size == 0 || existing_addr != incoming_addr)
 	{

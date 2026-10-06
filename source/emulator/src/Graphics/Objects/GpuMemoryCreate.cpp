@@ -535,8 +535,8 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 	uint64_t               exact_gpu_time      = 0;
 	int                    latest_surface_id   = -1;
 	uint64_t               latest_surface_time = 0;
-	int                    reusable_index_id   = -1;
-	uint64_t               reusable_index_size = UINT64_MAX;
+	int                    reusable_prefix_id   = -1;
+	uint64_t               reusable_prefix_size = UINT64_MAX;
 	int                    reusable_rt_id      = -1;
 	uint64_t               reusable_rt_layers  = UINT64_MAX;
 	*covered_reuse                             = false;
@@ -564,12 +564,13 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 			latest_surface_time = o.gpu_update_time;
 		}
 
-		if (vaddr_num == 1 && h.block.vaddr_num == 1 && h.scenario == GpuMemoryScenario::Common &&
-		    o.object.type == GpuMemoryObjectType::IndexBuffer && info.type == GpuMemoryObjectType::IndexBuffer && info.Equal(o.params) &&
-		    GpuMemoryCanReuseIndexBacking(h.block.vaddr[0], h.block.size[0], vaddr[0], size[0]) && h.block.size[0] < reusable_index_size)
+		const bool prefix_buffer = info.type == GpuMemoryObjectType::IndexBuffer || info.type == GpuMemoryObjectType::VertexBuffer;
+		if (vaddr_num == 1 && h.block.vaddr_num == 1 && h.scenario == GpuMemoryScenario::Common && prefix_buffer &&
+		    o.object.type == info.type && info.Equal(o.params) &&
+		    GpuMemoryCanReuseBufferPrefix(h.block.vaddr[0], h.block.size[0], vaddr[0], size[0]) && h.block.size[0] < reusable_prefix_size)
 		{
-			reusable_index_id   = obj.object_id;
-			reusable_index_size = h.block.size[0];
+			reusable_prefix_id   = obj.object_id;
+			reusable_prefix_size = h.block.size[0];
 		}
 
 		if (vaddr_num == 1 && h.block.vaddr_num == 1 && h.scenario == GpuMemoryScenario::Common &&
@@ -600,9 +601,9 @@ bool GpuMemory::create_existing(const Vector<OverlappedBlock>& others, const Gpu
 		return true;
 	}
 
-	if (reusable_index_id >= 0)
+	if (reusable_prefix_id >= 0)
 	{
-		*id            = reusable_index_id;
+		*id            = reusable_prefix_id;
 		*covered_reuse = true;
 		return true;
 	}

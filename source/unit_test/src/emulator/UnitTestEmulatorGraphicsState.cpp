@@ -5653,15 +5653,15 @@ TEST(EmulatorGraphicsState, AllowsIndexContainedInTextureSurface)
 	                                                    GpuMemoryObjectType::VertexBuffer));
 }
 
-TEST(EmulatorGraphicsState, ReusesOnlySameBaseCoveringIndexBacking)
+TEST(EmulatorGraphicsState, ReusesOnlySameBaseCoveringBufferBacking)
 {
 	constexpr uint64_t base = 0x100000;
 
-	EXPECT_TRUE(GpuMemoryCanReuseIndexBacking(base, 0x100, base, 0xe4));
-	EXPECT_TRUE(GpuMemoryCanReuseIndexBacking(base, 0x100, base, 0x100));
-	EXPECT_FALSE(GpuMemoryCanReuseIndexBacking(base, 0xe4, base, 0x100));
-	EXPECT_FALSE(GpuMemoryCanReuseIndexBacking(base, 0x100, base + 4, 0xfc));
-	EXPECT_FALSE(GpuMemoryCanReuseIndexBacking(base, 0, base, 0));
+	EXPECT_TRUE(GpuMemoryCanReuseBufferPrefix(base, 0x100, base, 0xe4));
+	EXPECT_TRUE(GpuMemoryCanReuseBufferPrefix(base, 0x100, base, 0x100));
+	EXPECT_FALSE(GpuMemoryCanReuseBufferPrefix(base, 0xe4, base, 0x100));
+	EXPECT_FALSE(GpuMemoryCanReuseBufferPrefix(base, 0x100, base + 4, 0xfc));
+	EXPECT_FALSE(GpuMemoryCanReuseBufferPrefix(base, 0, base, 0));
 }
 
 // Captured: VertexBuffer Contained by co-located StorageBuffer + RenderTexture.
