@@ -984,6 +984,7 @@ static bool ShaderInstructionUsesVectorBufferDescriptor(ShaderInstructionType ty
 		case ShaderInstructionType::BufferLoadFormatXyzw:
 		case ShaderInstructionType::TBufferLoadFormatX:
 		case ShaderInstructionType::TBufferLoadFormatXy:
+		case ShaderInstructionType::TBufferLoadFormatXyz:
 		case ShaderInstructionType::TBufferLoadFormatXyzw: return true;
 		default: return false;
 	}

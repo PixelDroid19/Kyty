@@ -30,9 +30,9 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 	uint32_t vdata   = (buffer[1] >> 8u) & 0xffu;
 	uint32_t vaddr   = (buffer[1] >> 0u) & 0xffu;
 
-	// No ordinary load or barrier is a substitute for XYZ, stores, or packed
-	// D16 results. Reject unsupported opcodes before constructing their tuple.
-	if (opcode != 0u && opcode != 1u && opcode != 3u) { KYTY_UNKNOWN_OP(); }
+	// No ordinary load or barrier is a substitute for stores or packed D16
+	// results. Reject unsupported opcodes before constructing their tuple.
+	if (opcode > 3u) { KYTY_UNKNOWN_OP(); }
 
 	// GCN and Gen5 encode the scalar 32-bit float typed-buffer view differently:
 	// legacy shaders use (4, 7), while Gen5 uses the packed BufferFormat value
@@ -40,8 +40,11 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 	const uint32_t encoded_format = (nfmt << 4u) | dfmt;
 	const bool float1_format = (!next_gen && dfmt == 4u && nfmt == 7u) || (next_gen && encoded_format == 22u);
 	const bool float2_format = (!next_gen && dfmt == 11u && nfmt == 7u) || (next_gen && encoded_format == 64u);
+	// XYZ returns the first three components of an RGB32F or RGBA32F element.
+	const bool float3_format = next_gen && (encoded_format == 74u || encoded_format == 77u);
 	const bool float4_format = (!next_gen && dfmt == 14u && nfmt == 7u) || (next_gen && encoded_format == 77u);
-	if ((opcode == 0u && !float1_format) || (opcode == 1u && !float2_format) || (opcode == 3u && !float4_format))
+	if ((opcode == 0u && !float1_format) || (opcode == 1u && !float2_format) || (opcode == 2u && !float3_format) ||
+	    (opcode == 3u && !float4_format))
 	{
 		EXIT("unsupported mtbuf format/component tuple: dfmt = %u, nfmt = %u, opcode = 0x%02" PRIx32 ", word0 = 0x%08" PRIx32
 		     " at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n",
@@ -86,6 +89,11 @@ KYTY_SHADER_PARSER(shader_parse_mtbuf)
 			inst.type   = ShaderInstructionType::TBufferLoadFormatXy;
 			inst.format = ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxenFloat2;
 			inst.dst.size = 2;
+			break;
+		case 0x02:
+			inst.type   = ShaderInstructionType::TBufferLoadFormatXyz;
+			inst.format = ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxenFloat3;
+			inst.dst.size = 3;
 			break;
 		case 0x03:
 			inst.type   = ShaderInstructionType::TBufferLoadFormatXyzw;

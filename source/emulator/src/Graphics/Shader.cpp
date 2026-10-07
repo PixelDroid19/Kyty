@@ -4787,6 +4787,8 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(storage ? r.BaseLevel() : 0u);
 		ret->ids.Add(storage ? r.LastLevel() : 0u);
 		ret->ids.Add(storage ? r.MaxMip() : 0u);
+		// Image stores apply a channel selection the storage view cannot express.
+		ret->ids.Add(storage && ShaderStorageImageSwizzleInShader(r.DstSelXYZW()) ? r.DstSelXYZW() : 0u);
 		// ret->ids.Add(r.Depth());
 		// ret->ids.Add(r.Pitch());
 		// ret->ids.Add(r.BaseArray());

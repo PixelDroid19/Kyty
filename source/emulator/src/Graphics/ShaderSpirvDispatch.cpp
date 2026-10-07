@@ -203,6 +203,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_ImageSample_Vdata3Vaddr3StSsDmaskD,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskD,         {""}},
     {Recompile_ImageSample_Vdata3Vaddr3StSsDmaskB,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB,         {""}},
 	{Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF,         ShaderInstructionType::ImageSample,         ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF,         {""}},
+    {Recompile_ImageSample_VdataVaddr3StSsMimgDmask,       ShaderInstructionType::ImageSample,         ShaderInstructionFormat::VdataVaddr3StSsMimgDmask,       {""}},
 	{Recompile_ImageSampleL_Vdata3Vaddr3StSsDmask7,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7,         {""}},
 	{Recompile_ImageSampleL_Vdata1Vaddr3StSsDmask1,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1,         {""}},
 	{Recompile_ImageSampleL_Vdata4Vaddr3StSsDmaskF,        ShaderInstructionType::ImageSampleL,        ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF,         {""}},
@@ -512,6 +513,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
 
     {Recompile_TBufferLoadFormatX_Vdata1VaddrSvSoffsIdxenFloat1,          ShaderInstructionType::TBufferLoadFormatX,    ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxenFloat1,  {""}},
     {Recompile_TBufferLoadFormatXy_Vdata2VaddrSvSoffsIdxenFloat2,         ShaderInstructionType::TBufferLoadFormatXy,   ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxenFloat2,  {""}},
+    {Recompile_TBufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxenFloat3,        ShaderInstructionType::TBufferLoadFormatXyz,  ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxenFloat3,  {""}},
     {Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdxenFloat4, ShaderInstructionType::TBufferLoadFormatXyzw, ShaderInstructionFormat::Vdata4Vaddr2SvSoffsOffenIdxenFloat4,  {""}},
     {Recompile_TBufferLoadFormatXyzw_Vdata4VaddrSvSoffsIdxenFloat4,       ShaderInstructionType::TBufferLoadFormatXyzw, ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxenFloat4,  {""}},
 

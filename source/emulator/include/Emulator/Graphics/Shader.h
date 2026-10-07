@@ -584,6 +584,7 @@ enum class ShaderInstructionType : uint32_t
 	VPermlane16B32,
 	VPermlanex16B32,
 	SSubU32,
+	TBufferLoadFormatXyz,
 
 	ZMax
 };
@@ -697,6 +698,7 @@ enum FormatByte : uint64_t
 	PixelZ, // pixel Z
 	NullTarget, // pixel valid mask without data
 	DsOff,  // byte offset carried by ShaderInstruction::ds_offset
+	Float3, // format:float3
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -818,6 +820,7 @@ enum Format : uint64_t
 	Vdata2Vaddr3StSsDmaskC              = FormatDefine({DA2, S0A3, S1A8, S2A4, DmaskC}),
 	Vdata2VaddrSvSoffsIdxen             = FormatDefine({DA2, S0, S1A4, S2, Idxen}),
 	Vdata2VaddrSvSoffsIdxenFloat2       = FormatDefine({DA2, S0, S1A4, S2, Idxen, Float2}),
+	Vdata3VaddrSvSoffsIdxenFloat3       = FormatDefine({DA3, S0, S1A4, S2, Idxen, Float3}),
 	Vdata3Vaddr3StSsDmask7              = FormatDefine({DA3, S0A3, S1A8, S2A4, Dmask7}),
 	Vdata3Vaddr3StSsDmaskB              = FormatDefine({DA3, S0A3, S1A8, S2A4, DmaskB}),
 	Vdata3Vaddr3StSsDmaskD              = FormatDefine({DA3, S0A3, S1A8, S2A4, DmaskD}),
@@ -1265,6 +1268,24 @@ struct ShaderSampledImageViewDecision
 inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 {
 	return (swizzle >> (channel * 3u)) & 0x7u;
+}
+
+// Formatted image stores put shader component i in memory channel DST_SEL[i].
+// Storage views keep identity components and BGRA selects a BGRA8 view, so
+// the image-store emitter applies any other selection of four distinct channels.
+inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle)
+{
+	uint32_t channels = 0;
+	for (uint32_t component = 0; component < 4; component++)
+	{
+		const uint32_t select = GetDstSel(swizzle, component);
+		if (select < 4u || (channels & (1u << (select - 4u))) != 0u)
+		{
+			return false;
+		}
+		channels |= 1u << (select - 4u);
+	}
+	return swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7);
 }
 
 struct ShaderBufferResource

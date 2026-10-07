@@ -278,7 +278,15 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 					inst.dst.size = 4;
 					break;
 				}
-				default:;
+				default:
+					// Any other enabled-component set (e.g. G+B) packs into consecutive VGPRs.
+					if (dmask != 0u)
+					{
+						inst.format     = ShaderInstructionFormat::VdataVaddr3StSsMimgDmask;
+						inst.mimg_dmask = static_cast<uint8_t>(dmask);
+						inst.dst.size   = MimgDmaskComponents(dmask);
+					}
+					break;
 			}
 			break;
 		case 0x21: KYTY_NI("image_sample_cl"); break;

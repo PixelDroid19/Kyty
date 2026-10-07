@@ -104,6 +104,11 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 		// image views must keep an identity component mapping.
 		return DstSel(4, 5, 6, 7);
 	}
+	if (ShaderStorageImageSwizzleInShader(swizzle))
+	{
+		// The image-store emitter places each component in its selected channel.
+		return DstSel(4, 5, 6, 7);
+	}
 	return swizzle;
 }
 

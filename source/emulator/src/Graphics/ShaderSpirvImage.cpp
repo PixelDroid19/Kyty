@@ -51,6 +51,27 @@ int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction
 	return storage_index < bind.textures2D.textures2d_storage_num ? storage_index : -1;
 }
 
+// The shader component each memory channel of a storage store receives:
+// identity, unless the emitter applies the descriptor's channel selection.
+static void StorageStoreComponentOrder(const ShaderCode& code, uint32_t instruction_index, const ShaderBindResources& bind,
+                                       int user_data_register_base, uint32_t order[4])
+{
+	const int      descriptor_index = ShaderFindImageStorageTextureDescriptor(code, instruction_index, bind, user_data_register_base);
+	const uint32_t swizzle          = bind.textures2D.desc[descriptor_index].texture.DstSelXYZW();
+	for (uint32_t channel = 0; channel < 4; channel++)
+	{
+		order[channel] = channel;
+	}
+	if (!ShaderStorageImageSwizzleInShader(swizzle))
+	{
+		return;
+	}
+	for (uint32_t component = 0; component < 4; component++)
+	{
+		order[GetDstSel(swizzle, component) - 4u] = component;
+	}
+}
+
 static ImageSampleLzPlan PlanImageSampleLz(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
 {
 	const int descriptor_index = ShaderFindImageSampledTextureDescriptor(inst, bind, user_data_register_base);
@@ -2034,6 +2055,44 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 // image_sample_b: RDNA address is {bias}{coords}. One multi-format emitter
 // keeps compact dmask stores and routes through the typed sample path
 // (descriptor shape selects flat / array / volume).
+// IMAGE_SAMPLE with an enabled-component set that has no dedicated tuple.
+KYTY_RECOMPILER_FUNC(Recompile_ImageSample_VdataVaddr3StSsMimgDmask)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+	// 1 = 2D (x,y); 5 = 2D array (x,y,slice).
+	if ((inst.mimg_dimension != 1 && inst.mimg_dimension != 5) || bind_info == nullptr || bind_info->samplers.samplers_num <= 0)
+	{
+		return false;
+	}
+
+	uint32_t components[4] = {};
+	int      num           = 0;
+	for (uint32_t component = 0; component < 4u; ++component)
+	{
+		if ((inst.mimg_dmask & (1u << component)) != 0u) { components[num++] = component; }
+	}
+	if (num == 0 || num != inst.dst.size) { return false; }
+
+	SpirvValue dst_value[4];
+	for (int i = 0; i < num; i++)
+	{
+		dst_value[i] = operand_variable_to_str(inst.dst, i);
+		if (dst_value[i].type != SpirvType::Float) { return false; }
+	}
+	const auto x       = mimg_address_to_str(inst, 0);
+	const auto y       = mimg_address_to_str(inst, 1);
+	const auto layer   = mimg_address_to_str(inst, 2);
+	const auto texture = operand_variable_to_str(inst.src[1], 0);
+	const auto sampler = operand_variable_to_str(inst.src[2], 0);
+	if (x.type != SpirvType::Float || y.type != SpirvType::Float || texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint)
+	{
+		return false;
+	}
+	return EmitTypedImageSample(dst_source, index, inst, spirv, x, y, layer, texture, sampler, dst_value, static_cast<uint32_t>(num),
+	                            components);
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleB_VdataVaddrStSsMimgDmask)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -3732,14 +3791,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 		}
 
 		String8 component_loads;
-		String8 component_values;
+		String8 values[4];
 		String8 coordinate_bounds;
 		int     source_component = 0;
 		for (uint32_t component = 0; component < 4; component++)
 		{
 			if ((dmask & (1u << component)) == 0)
 			{
-				component_values += String8::FromPrintf(" %%%s", zero_component.c_str());
+				values[component] = String8::FromPrintf(" %%%s", zero_component.c_str());
 				continue;
 			}
 
@@ -3753,7 +3812,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 			                                      index, component, source.value.c_str(), index, component,
 			                                      uint_images ? "OpBitcast" : "OpCopyObject", uint_images ? "uint" : "float", index,
 			                                      component);
-			component_values += String8::FromPrintf(" %%image_store_component_%u_%u", index, component);
+			values[component] = String8::FromPrintf(" %%image_store_component_%u_%u", index, component);
+		}
+		uint32_t order[4];
+		StorageStoreComponentOrder(code, index, *bind_info, user_data_register_base, order);
+		String8 component_values;
+		for (uint32_t channel = 0; channel < 4; channel++)
+		{
+			component_values += values[order[channel]];
 		}
 		const uint32_t coordinate_count = (arrayed || three_dimensional) ? 3u : 2u;
 		for (uint32_t component = 0; component < coordinate_count; component++)
@@ -3878,8 +3944,15 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
-		// TODO() swizzle channels
 		// TODO() convert SRGB -> LINEAR if SRGB format was replaced with UNORM
+
+		uint32_t order[4];
+		StorageStoreComponentOrder(code, index, *bind_info, user_data_register_base, order);
+		String8 channel_values;
+		for (uint32_t channel = 0; channel < 4; channel++)
+		{
+			channel_values += String8::FromPrintf(" %%t%u_<index>", 84u + order[channel]);
+		}
 
 		static const char* text = R"(
 		 %t25_<index> = OpLoad %uint %<src1_value2>
@@ -3904,13 +3977,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
          %t86_<index> = OpLoad %float %<dst_value2>
          %t87_<index> = OpLoad %float %<dst_value3>
          %t172_<index> = OpIAdd %v2uint %t160_<index> %t73_<index>
-         %image_store_mip_float_<index> = OpCompositeConstruct %v4float %t84_<index> %t85_<index> %t86_<index> %t87_<index>
+         %image_store_mip_float_<index> = OpCompositeConstruct %v4float<channel_values>
          %t88_<index> = <texel_conversion> %<image_vector> %image_store_mip_float_<index>
                 OpImageWrite %t27_<index> %t172_<index> %t88_<index>
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("ImageL", uint_alias ? "ImageLU" : "ImageL")
 		                   .ReplaceStr("textures2D_L", uint_alias ? "textures2D_LU" : "textures2D_L")
+		                   .ReplaceStr("<channel_values>", channel_values)
 		                   .ReplaceStr("<texel_conversion>", uint_images ? "OpBitcast" : "OpCopyObject")
 		                   .ReplaceStr("<image_vector>", uint_images ? "v4uint" : "v4float")
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
