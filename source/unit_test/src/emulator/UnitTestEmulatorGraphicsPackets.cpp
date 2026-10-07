@@ -2068,7 +2068,7 @@ TEST(EmulatorGraphicsPackets, ReportsDcbStallAndDmaDataPacketSizes)
 // Observed post-Play: guest encodes WaitMem/ReleaseMem with a placeholder then
 // patches the address through GetDataPacketPayloadAddress. WaitMem stores the
 // 64-bit address in the first body dwords (cmd+1); ReleaseMem stores it after
-// action/gcr (cmd+3). Default consumers keep the historical cmd+2 payload.
+// action/gcr (cmd+3). Register packets keep the historical cmd+2 payload.
 TEST(EmulatorGraphicsPackets, ResolvesDataPacketPayloadAddressByOpcode)
 {
 	if (!Config::IsInitialized())
@@ -2098,6 +2098,12 @@ TEST(EmulatorGraphicsPackets, ResolvesDataPacketPayloadAddressByOpcode)
 	write_data[0] = KYTY_PM4(6, Pm4::IT_NOP, Pm4::R_WRITE_DATA);
 	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, write_data, 1), 0);
 	EXPECT_EQ(payload, write_data + 2);
+
+	// A type-0 NOP data packet carries its payload right after the header: a
+	// 3-dword NOP holds exactly one 64-bit value.
+	uint32_t nop[3] = {KYTY_PM4(3, Pm4::IT_NOP, Pm4::R_ZERO)};
+	ASSERT_EQ(Gen5::GraphicsGetDataPacketPayloadAddress(&payload, nop, 0), 0);
+	EXPECT_EQ(payload, nop + 1);
 }
 
 // Post-Play load path: WriteData with cache_policy=2 packs into the same
