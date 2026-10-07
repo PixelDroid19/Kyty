@@ -164,19 +164,16 @@ dead end wastes hours.
 
 ## Git workflow
 
-- Work on the active feature branch. Never commit directly to `main` or
-  `release`, never force-push them, never create release tags by hand.
+- Work on the active feature branch. Never commit directly to `main`, never
+  force-push it, never create release tags by hand.
 - Never reset, stash, clean or check out over uncommitted work you did not
   create. Stage explicit paths so unrelated changes stay out of the commit.
 - Keep each commit to one logical change.
 
 ### Branch model
 
-- `feature/*`, `refactor/*`, `perf/*` and documentation branches start from
-  `main` and merge back into `main`.
-- `fix/*` and `hotfix/*` branches start from `release` and merge back into
-  `release`; accepted release fixes are brought forward to `main` without
-  rewriting published history.
+- Every branch (`feature/*`, `fix/*`, `perf/*`, `refactor/*`, documentation)
+  starts from `main` and merges back into `main` through a pull request.
 
 ### Commit messages
 
@@ -195,12 +192,12 @@ Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `build`, `ci`,
 `kernel`, `audio`, `net`, `libc`, `dialog`, `docs`, …). Breaking changes use
 `!` or a `BREAKING CHANGE:` footer. Commit messages never contain title names,
 local paths, secrets, unsupported compatibility claims or references to other
-emulator projects. Pull-request titles follow the same rules (squash merges).
+emulator projects. Pull-request titles follow the same rules.
 
 ## Versioning and builds
 
-Semantic Versioning: patch versions come from `release`; minor and major from
-`main`; breaking changes require a major version. Multiplatform binaries are
+Semantic Versioning: patch, minor and major versions are all cut from `main`;
+breaking changes require a major version. Multiplatform binaries are
 built only on explicit request or for an immutable `vMAJOR.MINOR.PATCH` tag,
 created through the **Create Version** workflow.
 

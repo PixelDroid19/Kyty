@@ -2,7 +2,7 @@ name: Pull Request Policy
 
 on:
   pull_request:
-    branches: [main, release]
+    branches: [main]
     types: [opened, edited, reopened, synchronize]
 
 permissions:
@@ -29,14 +29,4 @@ jobs:
             exit 1
           fi
 
-          if [[ "$BASE" == "release" && ! "$HEAD" =~ ^(fix|hotfix)/ ]]; then
-            echo "Pull requests into release must use a fix/* or hotfix/* branch." >&2
-            exit 1
-          fi
-
-          if [[ "$BASE" == "main" && "$HEAD" =~ ^(fix|hotfix)/ ]]; then
-            echo "Fix branches target release first, then the accepted fix is brought forward to main." >&2
-            exit 1
-          fi
-
-          echo "Conventional title and branch policy are valid."
+          echo "Conventional title policy is valid."

@@ -1,6 +1,6 @@
 name: Create Version
 
-run-name: Create ${{ inputs.bump }} version from ${{ inputs.bump == 'patch' && 'release' || 'main' }}
+run-name: Create ${{ inputs.bump }} version from main
 
 on:
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
     name: Tag ${{ inputs.bump }} release
     runs-on: ubuntu-latest
     env:
-      SOURCE_BRANCH: ${{ inputs.bump == 'patch' && 'release' || 'main' }}
+      SOURCE_BRANCH: main
     steps:
       - name: Checkout release source
         uses: actions/checkout@v7
