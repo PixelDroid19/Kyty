@@ -197,9 +197,10 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 			inst.src[1].size = 4;
 			inst.dst.size    = 3;
 			break;
-		case 0x30: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_swap treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x30:
+			inst.type        = ShaderInstructionType::BufferAtomicSwap;
+			inst.format      = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+			inst.src[1].size = 4;
 			break;
 		case 0x31: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_atomic_cmpswap treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;

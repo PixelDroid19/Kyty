@@ -962,7 +962,8 @@ static bool ShaderInstructionWritesVectorBufferDescriptor(ShaderInstructionType 
 		case ShaderInstructionType::BufferAtomicSub:
 		case ShaderInstructionType::BufferAtomicUmax:
 		case ShaderInstructionType::BufferAtomicUmin:
-		case ShaderInstructionType::BufferAtomicXor: return true;
+		case ShaderInstructionType::BufferAtomicXor:
+		case ShaderInstructionType::BufferAtomicSwap: return true;
 		default: return false;
 	}
 }

@@ -6,6 +6,7 @@
 #include "ShaderNativeWaveInternal.h"
 #include "ShaderSpirvInternal.h"
 
+#include <algorithm>
 #include <bitset>
 #include <iterator>
 #include <map>
@@ -147,6 +148,7 @@ private:
 	bool ScalarLoad(const ShaderInstruction& inst);
 	bool Vector(const ShaderInstruction& inst);
 	bool ScalarSpill(const ShaderInstruction& inst);
+	bool UniformReadFirstLane(const ShaderInstruction& inst);
 	bool VectorSources(const ShaderInstruction& inst);
 	bool VectorDestinations(const ShaderInstruction& inst, bool uniform_result);
 	bool Export(const ShaderInstruction& inst);
@@ -634,6 +636,20 @@ bool Body::ScalarSpill(const ShaderInstruction& inst)
 	return Fail(inst, "lane exchange");
 }
 
+// V_READFIRSTLANE of a VGPR holding one clean value in every lane reads that value whichever
+// lane is first: a uniform copy, not a lane exchange.
+bool Body::UniformReadFirstLane(const ShaderInstruction& inst)
+{
+	unsigned first = 0;
+	unsigned count = 0;
+	if (inst.src_num != 1 || !VgprRange(inst.src[0], &first, &count) || count != 1u || !VgprDefined(first) || !m_state.uniform[first])
+	{
+		return Fail(inst, "lane exchange");
+	}
+	Define(inst.dst, kClean);
+	return true;
+}
+
 bool Body::Vector(const ShaderInstruction& inst)
 {
 	const bool valu = StartsWith(inst.type, "V");
@@ -648,12 +664,20 @@ bool Body::Vector(const ShaderInstruction& inst)
 	return true;
 }
 
+// The address VGPRs an image load reads: its DIM's coordinates, then the level of a mip load.
+static int ImageLoadAddressCount(const ShaderInstruction& inst)
+{
+	static constexpr int kCoordinates[8] = {1, 2, 3, 3, 2, 3, 3, 4};
+	return kCoordinates[inst.mimg_dimension & 7u] + (inst.mimg_explicit_lod ? 1 : 0);
+}
+
 // An explicit-LOD image read: its address VGPRs (the NSA list or the contiguous range) must be
 // defined, its T#/S# must not depend on the launch; the result is a per-lane number.
 bool Body::ImageRead(const ShaderInstruction& inst)
 {
 	const bool nsa       = inst.mimg_address_num > 0;
-	const int  addresses = inst.src[0].size;
+	const int  addresses =
+	    inst.type == Type::ImageLoad ? std::min(inst.src[0].size, ImageLoadAddressCount(inst)) : inst.src[0].size;
 	if (nsa && addresses > inst.mimg_address_num) { return Fail(inst, "image address list shorter than its format"); }
 	for (int address = 0; address < addresses; ++address)
 	{
@@ -699,6 +723,7 @@ bool Body::Step(const ShaderInstruction& inst)
 	if (IsScalarAlu(inst.type)) { return ScalarAlu(inst); }
 	if (IsLaneLocalImageRead(inst.type)) { return ImageRead(inst); }
 	if (inst.type == Type::VWritelaneB32 || inst.type == Type::VReadlaneB32) { return ScalarSpill(inst); }
+	if (inst.type == Type::VReadfirstlaneB32) { return UniformReadFirstLane(inst); }
 	return Vector(inst);
 }
 

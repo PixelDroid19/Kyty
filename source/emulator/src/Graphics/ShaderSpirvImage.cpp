@@ -143,7 +143,8 @@ static bool UsesThreeDimensionalImages(const ShaderBindResources* bind)
 bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst)
 {
 	if ((inst.type == ShaderInstructionType::ImageGetResinfo && inst.format == ShaderInstructionFormat::VdataVaddrStDmask) ||
-	    (inst.type == ShaderInstructionType::ImageGather4 && inst.format == ShaderInstructionFormat::Vdata4Vaddr3StSsMimgDmask) ||
+	    (inst.type == ShaderInstructionType::ImageGather4 && (inst.format == ShaderInstructionFormat::Vdata4Vaddr3StSsMimgDmask ||
+	                                                          inst.format == ShaderInstructionFormat::VdataVaddr4StSsMimgDmask)) ||
 	    (inst.type == ShaderInstructionType::ImageLoad && inst.format == ShaderInstructionFormat::VdataVaddr3StDmask))
 	{
 		return true;
@@ -873,6 +874,7 @@ bool IsImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageSampleL:
 		case ShaderInstructionType::ImageSampleLz:
 		case ShaderInstructionType::ImageSampleLzO:
+		case ShaderInstructionType::ImageSampleO:
 		case ShaderInstructionType::ImageSampleB:
 		case ShaderInstructionType::ImageSampleDrefLz:
 		case ShaderInstructionType::ImageStore:
@@ -893,6 +895,7 @@ bool IsSampledImageInstruction(const ShaderInstruction& inst)
 		case ShaderInstructionType::ImageSampleL:
 		case ShaderInstructionType::ImageSampleLz:
 		case ShaderInstructionType::ImageSampleLzO:
+		case ShaderInstructionType::ImageSampleO:
 		case ShaderInstructionType::ImageSampleB:
 		case ShaderInstructionType::ImageSampleDrefLz: return true;
 		default: return false;
@@ -1912,9 +1915,14 @@ static bool RecompileImageSampleLzO(KYTY_RECOMPILER_ARGS)
         %141_<index> = OpFDiv %v2float %130_<index> %140_<index>
          %142_<index> = OpFAdd %v2float %t42_<index> %141_<index>
 
-         %t43_<index> = OpImageSampleExplicitLod %v4float %t38_<index> %142_<index> Lod %float_0_000000
+         %t43_<index> = <sample>
 )";
+		// image_sample_o takes the LOD from derivatives; the offset shift uses the base level size.
+		const char* sample = inst.type == ShaderInstructionType::ImageSampleO
+		                         ? "OpImageSampleImplicitLod %v4float %t38_<index> %142_<index>"
+		                         : "OpImageSampleExplicitLod %v4float %t38_<index> %142_<index> Lod %float_0_000000";
 		*dst_source += String8(text)
+		                   .ReplaceStr("<sample>", sample)
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 		                   .ReplaceStr("<src0_value0>", src0_value0.value)
 		                   .ReplaceStr("<src0_value1>", src0_value1.value)
@@ -3149,9 +3157,11 @@ static String8 ImageGatherResultName(uint32_t index, SampledImageShape shape)
 	return String8::FromPrintf("%%image_gather_%s_%u_result", GetSampledImageTypeInfo(shape).suffix, index);
 }
 
+// A non-empty offset is an int of packed texel offsets; the gather footprint
+// moves by that many texels of level 0, as the _O variants define.
 static String8 EmitImageGather(uint32_t index, SampledImageShape shape, const String8& descriptor_index,
 	                           const String8& sampler_index, const String8& x, const String8& y, const String8& z,
-	                           uint32_t component, bool uint_images)
+	                           uint32_t component, bool uint_images, const String8& offset = String8())
 {
 	if (shape == SampledImageShape::ThreeDimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shape == SampledImageShape::ThreeDimensional condition ignored (continuing)\n"); }
 	// This emitter's uint_images is the homogeneous-domain predicate, so its
@@ -3168,11 +3178,39 @@ static String8 EmitImageGather(uint32_t index, SampledImageShape shape, const St
 %<prefix>_sampler_ptr = OpAccessChain %_ptr_UniformConstant_Sampler %samplers <sampler_index>
 %<prefix>_sampler = OpLoad %Sampler %<prefix>_sampler_ptr
 %<prefix>_sampled = OpSampledImage %<sampled_image_type> %<prefix>_image %<prefix>_sampler
-%<prefix>_coordinate = OpCompositeConstruct %<float_coordinate_type> <x> <y><coordinate_tail>
+<offset_shift>%<prefix>_coordinate = OpCompositeConstruct %<float_coordinate_type> <shifted_x> <shifted_y><coordinate_tail>
 %<prefix>_result = OpImageGather %<image_vector> %<prefix>_sampled %<prefix>_coordinate <component>
 )";
+	String8 offset_shift;
+	String8 shifted_x = x;
+	String8 shifted_y = y;
+	if (!offset.IsEmpty())
+	{
+		offset_shift = String8(R"(
+%<prefix>_offset_x = OpBitFieldSExtract %int <offset> %int_0 %int_6
+%<prefix>_offset_y = OpBitFieldSExtract %int <offset> %int_8 %int_6
+%<prefix>_offset_xf = OpConvertSToF %float %<prefix>_offset_x
+%<prefix>_offset_yf = OpConvertSToF %float %<prefix>_offset_y
+%<prefix>_size = OpImageQuerySizeLod %<size_type> %<prefix>_image %int_0
+%<prefix>_width = OpCompositeExtract %int %<prefix>_size 0
+%<prefix>_height = OpCompositeExtract %int %<prefix>_size 1
+%<prefix>_width_f = OpConvertSToF %float %<prefix>_width
+%<prefix>_height_f = OpConvertSToF %float %<prefix>_height
+%<prefix>_shift_x = OpFDiv %float %<prefix>_offset_xf %<prefix>_width_f
+%<prefix>_shift_y = OpFDiv %float %<prefix>_offset_yf %<prefix>_height_f
+%<prefix>_shifted_x = OpFAdd %float <x> %<prefix>_shift_x
+%<prefix>_shifted_y = OpFAdd %float <y> %<prefix>_shift_y
+)");
+		shifted_x = String8("%<prefix>_shifted_x");
+		shifted_y = String8("%<prefix>_shifted_y");
+	}
 
 	return String8(text)
+	    .ReplaceStr("<offset_shift>", offset_shift)
+	    .ReplaceStr("<shifted_x>", shifted_x)
+	    .ReplaceStr("<shifted_y>", shifted_y)
+	    .ReplaceStr("<offset>", offset)
+	    .ReplaceStr("<size_type>", type_info.size_type)
 	    .ReplaceStr("<prefix>", prefix)
 	    .ReplaceStr("<pointer_type>", type_info.pointer_type)
 	    .ReplaceStr("<variable>", type_info.variable)
@@ -3208,9 +3246,10 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask)
 	if (inst.mimg_dmask == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.mimg_dmask == 0 condition ignored (continuing)\n"); }
 	if (inst.dst.size != 4) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.size != 4 condition ignored (continuing)\n"); }
 
-	const auto x          = mimg_address_to_str(inst, 0);
-	const auto y          = mimg_address_to_str(inst, 1);
-	const auto z          = mimg_address_to_str(inst, 2);
+	const int  first      = inst.mimg_offset ? 1 : 0;
+	const auto x          = mimg_address_to_str(inst, first);
+	const auto y          = mimg_address_to_str(inst, first + 1);
+	const auto z          = mimg_address_to_str(inst, first + 2);
 	const auto descriptor = operand_variable_to_str(inst.src[1], 0);
 	const auto sampler    = operand_variable_to_str(inst.src[2], 0);
 	if (x.type != SpirvType::Float || y.type != SpirvType::Float || z.type != SpirvType::Float ||
@@ -3232,6 +3271,15 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask)
 	                   .ReplaceStr("<x>", x.value)
 	                   .ReplaceStr("<y>", y.value)
 	                   .ReplaceStr("<z>", z.value);
+	String8 offset_value;
+	if (inst.mimg_offset)
+	{
+		const auto offset = mimg_address_to_str(inst, 0);
+		*dst_source += String8::FromPrintf("%%image_gather_offset_f_%u = OpLoad %%float %%%s\n"
+		                                   "%%image_gather_offset_%u = OpBitcast %%int %%image_gather_offset_f_%u\n",
+		                                   index, offset.value.c_str(), index, index);
+		offset_value = String8::FromPrintf("%%image_gather_offset_%u", index);
+	}
 
 	const auto descriptor_index = String8::FromPrintf("%%image_gather_descriptor_%u", index);
 	const auto sampler_index    = String8::FromPrintf("%%image_gather_sampler_%u", index);
@@ -3245,12 +3293,12 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageGather4_Vdata4Vaddr3StSsMimgDmask)
 	if (has_flat && !has_array)
 	{
 		*dst_source += EmitImageGather(index, SampledImageShape::Flat2d, descriptor_index, sampler_index, x_value, y_value,
-		                              z_value, component, uint_images);
+		                              z_value, component, uint_images, offset_value);
 		result = ImageGatherResultName(index, SampledImageShape::Flat2d);
 	} else if (!has_flat && has_array)
 	{
 		*dst_source += EmitImageGather(index, SampledImageShape::Array2d, descriptor_index, sampler_index, x_value, y_value,
-		                              z_value, component, uint_images);
+		                              z_value, component, uint_images, offset_value);
 		result = ImageGatherResultName(index, SampledImageShape::Array2d);
 	} else
 	{
@@ -3270,9 +3318,9 @@ OpBranchConditional %image_gather_is_array_<index> %image_gather_array_<index> %
 		                   .ReplaceStr("<index>", index_string)
 		                   .ReplaceStr("<result_type>", result_type)
 		                   .ReplaceStr("<flat_gather>", EmitImageGather(index, SampledImageShape::Flat2d, descriptor_index, sampler_index,
-		                                                                  x_value, y_value, z_value, component, uint_images))
+		                                                                  x_value, y_value, z_value, component, uint_images, offset_value))
 		                   .ReplaceStr("<array_gather>", EmitImageGather(index, SampledImageShape::Array2d, descriptor_index, sampler_index,
-		                                                                   x_value, y_value, z_value, component, uint_images));
+		                                                                   x_value, y_value, z_value, component, uint_images, offset_value));
 		result = String8::FromPrintf("%%image_gather_result_%u", index);
 	}
 

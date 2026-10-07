@@ -585,6 +585,8 @@ enum class ShaderInstructionType : uint32_t
 	VPermlanex16B32,
 	SSubU32,
 	TBufferLoadFormatXyz,
+	BufferAtomicSwap,
+	ImageSampleO,
 
 	ZMax
 };
@@ -981,6 +983,9 @@ struct ShaderInstruction
 	uint8_t mimg_dimension = 0;
 	// IMAGE_LOAD_MIP fetches the resource-view level carried after the coordinates.
 	bool mimg_explicit_lod = false;
+	// The _O variants carry 6-bit signed texel offsets (x in bits 5:0, y in bits
+	// 13:8) in the first address VGPR, before the coordinates.
+	bool mimg_offset = false;
 	// Image atomics replace VDATA with the pre-operation value only for GLC=1.
 	bool mimg_return_old_value = false;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
