@@ -6,6 +6,7 @@
 
 #include "Emulator/Graphics/AsyncJob.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Profiler.h"
 
@@ -704,12 +705,13 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 			}
 		}
 
-		// Fallback formula for non-table Gen5 dimensions (captured 642x362
-		// D32+S8 htile). Depth body matches table entries for z_format 3:
-		//   size = width * AlignUp(height, 128) * bpp, align 65536.
-		// Stencil plane: AlignUp(w,256)*AlignUp(h,256), align 65536.
-		// HTILE: coarse 8x8 cells * 8 bytes, aligned to 32 KiB (table density
-		// for 720p); keep table path preferred for known resolutions.
+		// Fallback formula for non-table Gen5 dimensions; it reproduces every
+		// table entry. Planes use 64 KiB swizzles: a 32-bit depth row pads to
+		// the 128-pixel block width (16-bit: 256) and the height to 128 rows;
+		// the 8-bit stencil plane pads both to 256. HTILE holds one 4-byte word
+		// per 8x8 tile over whole 1024x512-pixel metadata blocks (32 KiB each):
+		// guests clear exactly that range (2500x1400: 0x48000), and a larger
+		// estimate leaves the clear unmatched to its depth target.
 		const auto align_up = [](uint32_t v, uint32_t a) -> uint32_t { return (v + a - 1u) / a * a; };
 		uint32_t   bpp      = 0;
 		if (z_format == 3)
@@ -726,7 +728,7 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 			return false;
 		}
 		const uint32_t h_pad       = align_up(height, 128);
-		const uint32_t depth_pitch = (z_format == 1) ? align_up(width, 256) : width;
+		const uint32_t depth_pitch = (z_format == 1) ? align_up(width, 256) : align_up(width, 128);
 		depth_size->size           = (bpp == 0) ? 0 : depth_pitch * h_pad * bpp;
 		depth_size->align          = 65536;
 		if (stencil_format != 0)
@@ -739,10 +741,9 @@ bool TileGetDepthSize(uint32_t width, uint32_t height, uint32_t pitch, uint32_t 
 		}
 		if (htile)
 		{
-			const uint32_t cells_x = align_up(width, 8) / 8;
-			const uint32_t cells_y = h_pad / 8;
-			const uint32_t raw     = cells_x * cells_y * 8u;
-			htile_size->size       = align_up(raw, 32768);
+			const uint32_t tiles_x = align_up(width, 1024) / 8;
+			const uint32_t tiles_y = align_up(height, 512) / 8;
+			htile_size->size       = tiles_x * tiles_y * 4u;
 			htile_size->align      = 32768;
 		} else
 		{
@@ -911,6 +912,23 @@ void TileGetRenderTargetSize(uint32_t width, uint32_t height, uint32_t pitch, ui
 static uint32_t Sw64kRxWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
 {
 	uint32_t offset = 0;
+	if (bytes_per_element == 2u)
+	{
+		// The 256x128 block needs all 15 element-address bits. Reusing the
+		// eight-byte equation folds four distinct texels onto each offset.
+		offset |= (x & 0x7u) << 1u;
+		offset |= (y & 0x7u) << 4u;
+		offset |= (x & 0x8u) << 4u;
+		offset |= ((x ^ y) & 0x8u) << 5u;
+		offset |= ((x ^ y) & 0x10u) << 5u;
+		offset |= (((x >> 6u) ^ (y >> 5u)) & 1u) << 10u;
+		offset |= (((x >> 5u) ^ (y >> 6u)) & 1u) << 11u;
+		offset |= (y & 0x10u) << 8u;
+		offset |= (x & 0x40u) << 7u;
+		offset |= (y & 0x40u) << 8u;
+		offset |= (x & 0x80u) << 8u;
+		return offset;
+	}
 	if (bytes_per_element == 4u)
 	{
 		offset ^= (y << 3u) & 0x0008u;
@@ -1019,7 +1037,7 @@ static uint32_t Standard64KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t b
 
 uint64_t TileGetSw64kRxOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	if (bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes_per_element != 4u && bytes_per_element != 8u condition ignored (continuing)\n"); }
+	if (bytes_per_element != 2u && bytes_per_element != 4u && bytes_per_element != 8u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported SW_64KB_R_X element size (continuing)\n"); }
 	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
 
 	static constexpr uint32_t k_block_bytes = 65536u;
@@ -1129,7 +1147,8 @@ static uint32_t Depth64KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t byte
 	return x_offset ^ y_offset;
 }
 
-uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
+uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element,
+	                            uint32_t layer)
 {
 	EXIT_IF(bytes_per_element != 2u && bytes_per_element != 4u);
 	const uint32_t block_width = bytes_per_element == 2u ? 256u : 128u;
@@ -1141,12 +1160,17 @@ uint64_t TileGetDepth64KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, ui
 	const uint32_t            xb            = x / block_width;
 	const uint32_t            yb            = y / k_block_height;
 	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
+	// The matched 16-pipe GFX10 Z_X equation contributes Z3..Z0 to offset
+	// bits 8..11. Each array slice starts on a whole-block boundary, so only
+	// these within-block bits change with the layer index.
+	const uint32_t slice_xor = ((layer & 1u) << 11u) ^ ((layer & 2u) << 9u) ^ ((layer & 4u) << 7u) ^
+	                           ((layer & 8u) << 5u);
 	return (block_index * k_block_bytes) +
-	       Depth64KBWithinBlockOffset(x % block_width, y % k_block_height, bytes_per_element);
+	       (Depth64KBWithinBlockOffset(x % block_width, y % k_block_height, bytes_per_element) ^ slice_xor);
 }
 
 void TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
-	                              uint32_t bytes_per_element)
+	                              uint32_t bytes_per_element, uint32_t layer)
 {
 	EXIT_IF(dst == nullptr || src == nullptr);
 	TileDetileRequest request {};
@@ -1158,6 +1182,7 @@ void TileConvertDepth64KBToLinear(void* dst, const void* src, uint32_t width, ui
 	request.dst_pitch_elems   = width;
 	request.bytes_per_element = bytes_per_element;
 	request.layout            = TileDetileLayout::Depth64KB;
+	request.depth_layer       = layer;
 	if (!TileDetile(request))
 	{
 		EXIT("TileConvertDepth64KBToLinear unsupported request\n");
@@ -1244,6 +1269,42 @@ static uint32_t Standard4KB64WithinBlockOffset(uint32_t x, uint32_t y)
 	return offset;
 }
 
+static uint32_t Standard4KBWithinBlockOffset(uint32_t x, uint32_t y, uint32_t bytes_per_element)
+{
+	switch (bytes_per_element)
+	{
+		case 1u: return Standard4KB8WithinBlockOffset(x, y);
+		case 2u: return Standard4KB16WithinBlockOffset(x, y);
+		case 4u: return Standard4KB32WithinBlockOffset(x, y);
+		case 8u: return Standard4KB64WithinBlockOffset(x, y);
+		default: return Standard4KB128WithinBlockOffset(x, y);
+	}
+}
+
+bool TileGetStandard256BBlock(uint32_t bytes_per_element, uint32_t* width, uint32_t* height)
+{
+	EXIT_IF(width == nullptr || height == nullptr);
+	switch (bytes_per_element)
+	{
+		case 1u: *width = 16u; *height = 16u; return true;
+		case 2u: *width = 16u; *height = 8u; return true;
+		case 4u: *width = 8u; *height = 8u; return true;
+		case 8u: *width = 8u; *height = 4u; return true;
+		case 16u: *width = 4u; *height = 4u; return true;
+		default: return false;
+	}
+}
+
+uint64_t TileGetStandard256BOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
+{
+	uint32_t block_width  = 0;
+	uint32_t block_height = 0;
+	EXIT_IF(!TileGetStandard256BBlock(bytes_per_element, &block_width, &block_height));
+	const uint64_t blocks_x    = (pitch_elems + block_width - 1u) / block_width;
+	const uint64_t block_index = static_cast<uint64_t>(y / block_height) * blocks_x + x / block_width;
+	return block_index * 256u + Standard4KBWithinBlockOffset(x % block_width, y % block_height, bytes_per_element);
+}
+
 uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, uint32_t bytes_per_element)
 {
 	if (pitch_elems == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u condition ignored (continuing)\n"); }
@@ -1258,12 +1319,7 @@ uint64_t TileGetStandard4KBOffset(uint32_t x, uint32_t y, uint32_t pitch_elems, 
 	const uint64_t            block_index   = static_cast<uint64_t>(yb) * blocks_x + xb;
 	const uint32_t            local_x       = x % block_width;
 	const uint32_t            local_y       = y % block_height;
-	const uint32_t            within        = bytes_per_element == 1u   ? Standard4KB8WithinBlockOffset(local_x, local_y)
-	                                          : bytes_per_element == 2u ? Standard4KB16WithinBlockOffset(local_x, local_y)
-	                                          : bytes_per_element == 4u ? Standard4KB32WithinBlockOffset(local_x, local_y)
-	                                          : bytes_per_element == 8u ? Standard4KB64WithinBlockOffset(local_x, local_y)
-	                                                                    : Standard4KB128WithinBlockOffset(local_x, local_y);
-	return (block_index * k_block_bytes) + within;
+	return (block_index * k_block_bytes) + Standard4KBWithinBlockOffset(local_x, local_y, bytes_per_element);
 }
 
 uint64_t TileGetStandard4KB32Offset(uint32_t x, uint32_t y, uint32_t pitch_elems)
@@ -1331,84 +1387,204 @@ void TileConvertStandard4KBToLinear(void* dst, const void* src, uint32_t width, 
 	}
 }
 
+void TileConvertStandard256BToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
+                                     uint32_t bytes_per_element)
+{
+	EXIT_IF(dst == nullptr);
+	EXIT_IF(src == nullptr);
+	TileDetileRequest request {};
+	request.dst               = dst;
+	request.src               = src;
+	request.width             = width;
+	request.height            = height;
+	request.pitch_elems       = pitch_elems;
+	request.dst_pitch_elems   = pitch_elems;
+	request.bytes_per_element = bytes_per_element;
+	request.layout            = TileDetileLayout::Standard256B;
+	if (!TileDetile(request))
+	{
+		EXIT("TileConvertStandard256BToLinear unsupported request\n");
+	}
+}
+
 void TileConvertStandard4KB32ToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems)
 {
 	TileConvertStandard4KBToLinear(dst, src, width, height, pitch_elems, 4u);
 }
 
-static uint32_t Standard4KB32VolumeWithinBlockOffset(uint32_t x, uint32_t y, uint32_t z)
+namespace {
+
+enum class VolumeAxis : uint8_t
+{
+	Byte, // byte within the element
+	X,
+	Y,
+	Z,
+};
+
+struct VolumeAddressBit
+{
+	VolumeAxis axis;
+	uint8_t    bit;
+};
+
+// Which coordinate bit drives each byte-address bit of a SW_4KB_S / SW_64KB_S volume block (GFX10 3D standard
+// swizzle pattern tables). The 4 KiB pattern is the low 12 bits of the 64 KiB one; standard modes carry no pipe or
+// bank XOR, so every pipe count shares them.
+struct StandardVolumePattern
+{
+	uint32_t         bytes_per_element;
+	VolumeAddressBit bits[16];
+};
+
+constexpr VolumeAxis kB = VolumeAxis::Byte;
+constexpr VolumeAxis kX = VolumeAxis::X;
+constexpr VolumeAxis kY = VolumeAxis::Y;
+constexpr VolumeAxis kZ = VolumeAxis::Z;
+
+constexpr StandardVolumePattern kStandardVolumePatterns[] = {
+    {1u, {{kX, 0}, {kX, 1}, {kZ, 0}, {kY, 0}, {kZ, 1}, {kY, 1}, {kX, 2}, {kZ, 2}, {kY, 2}, {kX, 3}, {kZ, 3}, {kY, 3},
+          {kX, 4}, {kZ, 4}, {kY, 4}, {kX, 5}}},
+    {2u, {{kB, 0}, {kX, 0}, {kZ, 0}, {kY, 0}, {kZ, 1}, {kY, 1}, {kX, 1}, {kZ, 2}, {kY, 2}, {kX, 2}, {kZ, 3}, {kY, 3},
+          {kX, 3}, {kZ, 4}, {kY, 4}, {kX, 4}}},
+    {4u, {{kB, 0}, {kB, 1}, {kX, 0}, {kY, 0}, {kZ, 0}, {kY, 1}, {kX, 1}, {kZ, 1}, {kY, 2}, {kX, 2}, {kZ, 2}, {kY, 3},
+          {kX, 3}, {kZ, 3}, {kY, 4}, {kX, 4}}},
+    {8u, {{kB, 0}, {kB, 1}, {kB, 2}, {kX, 0}, {kZ, 0}, {kY, 0}, {kX, 1}, {kZ, 1}, {kY, 1}, {kX, 2}, {kZ, 2}, {kY, 2},
+          {kX, 3}, {kZ, 3}, {kY, 3}, {kX, 4}}},
+    {16u, {{kB, 0}, {kB, 1}, {kB, 2}, {kB, 3}, {kZ, 0}, {kY, 0}, {kX, 0}, {kZ, 1}, {kY, 1}, {kX, 1}, {kZ, 2}, {kY, 2},
+           {kX, 2}, {kZ, 3}, {kY, 3}, {kX, 3}}},
+};
+
+const StandardVolumePattern* FindStandardVolumePattern(uint32_t bytes_per_element)
+{
+	for (const auto& pattern: kStandardVolumePatterns)
+	{
+		if (pattern.bytes_per_element == bytes_per_element) { return &pattern; }
+	}
+	return nullptr;
+}
+
+// Address bits inside one block: 12 for 4 KiB, 16 for 64 KiB.
+uint32_t StandardVolumeAddressBits(uint32_t block_bytes)
+{
+	return block_bytes == 4096u ? 12u : (block_bytes == 65536u ? 16u : 0u);
+}
+
+uint32_t AxisBits(const StandardVolumePattern& pattern, uint32_t address_bits, VolumeAxis axis)
+{
+	uint32_t count = 0;
+	for (uint32_t address = 0; address < address_bits; ++address) { count += pattern.bits[address].axis == axis ? 1u : 0u; }
+	return count;
+}
+
+uint32_t StandardVolumeWithinBlockOffset(const StandardVolumePattern& pattern, uint32_t address_bits, uint32_t x, uint32_t y,
+                                         uint32_t z)
 {
 	uint32_t offset = 0;
-	offset ^= (x << 2u) & 0x004u;
-	offset ^= (x << 5u) & 0x040u;
-	offset ^= (x << 7u) & 0x200u;
-	offset ^= (y << 3u) & 0x008u;
-	offset ^= (y << 4u) & 0x020u;
-	offset ^= (y << 6u) & 0x100u;
-	offset ^= (y << 8u) & 0x800u;
-	offset ^= (z << 4u) & 0x010u;
-	offset ^= (z << 6u) & 0x080u;
-	offset ^= (z << 8u) & 0x400u;
+	for (uint32_t address = 0; address < address_bits; ++address)
+	{
+		const auto&    source = pattern.bits[address];
+		const uint32_t value  = source.axis == kX ? x : (source.axis == kY ? y : (source.axis == kZ ? z : 0u));
+		offset |= ((value >> source.bit) & 1u) << address;
+	}
 	return offset;
 }
 
-uint64_t TileGetStandard4KB32VolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height)
+uint64_t StandardVolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height, uint32_t bytes_per_element,
+                              uint32_t block_bytes)
 {
-	if (pitch_elems == 0u || height == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch_elems == 0u || height == 0u condition ignored (continuing)\n"); }
-
-	static constexpr uint32_t k_block_width  = 8u;
-	static constexpr uint32_t k_block_height = 16u;
-	static constexpr uint32_t k_block_depth  = 8u;
-	static constexpr uint32_t k_block_bytes  = 4096u;
-	const uint32_t            blocks_x       = (pitch_elems + k_block_width - 1u) / k_block_width;
-	const uint32_t            blocks_y       = (height + k_block_height - 1u) / k_block_height;
-	const uint64_t            block_index =
-	    ((static_cast<uint64_t>(z / k_block_depth) * blocks_y) + (y / k_block_height)) * blocks_x + (x / k_block_width);
-	return (block_index * k_block_bytes) + Standard4KB32VolumeWithinBlockOffset(x % k_block_width, y % k_block_height, z % k_block_depth);
+	const auto*    pattern      = FindStandardVolumePattern(bytes_per_element);
+	const uint32_t address_bits = StandardVolumeAddressBits(block_bytes);
+	EXIT_IF(pattern == nullptr || address_bits == 0u || pitch_elems == 0u || height == 0u);
+	uint32_t block_width = 0, block_height = 0, block_depth = 0;
+	EXIT_IF(!TileGetStandardVolumeBlock(bytes_per_element, block_bytes, &block_width, &block_height, &block_depth));
+	const uint64_t blocks_x    = (static_cast<uint64_t>(pitch_elems) + block_width - 1u) / block_width;
+	const uint64_t blocks_y    = (static_cast<uint64_t>(height) + block_height - 1u) / block_height;
+	const uint64_t block_index = ((static_cast<uint64_t>(z / block_depth) * blocks_y) + (y / block_height)) * blocks_x + (x / block_width);
+	return block_index * block_bytes +
+	       StandardVolumeWithinBlockOffset(*pattern, address_bits, x % block_width, y % block_height, z % block_depth);
 }
 
-void TileConvertStandard4KB32VolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
-                                            uint32_t pitch_elems)
-{
-	EXIT_IF(dst == nullptr);
-	EXIT_IF(src == nullptr);
-	if (width == 0u || height == 0u || depth == 0u || pitch_elems < width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u || depth == 0u || pitch_elems < width condition ignored (continuing)\n"); }
+} // namespace
 
-	auto*                      d     = static_cast<uint8_t*>(dst);
-	const auto*                s     = static_cast<const uint8_t*>(src);
-	static constexpr uint32_t  k_bpp = 4u;
-	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * depth * k_bpp);
+bool TileGetStandardVolumeBlock(uint32_t bytes_per_element, uint32_t block_bytes, uint32_t* width, uint32_t* height, uint32_t* depth)
+{
+	const auto*    pattern      = FindStandardVolumePattern(bytes_per_element);
+	const uint32_t address_bits = StandardVolumeAddressBits(block_bytes);
+	if (pattern == nullptr || address_bits == 0u || width == nullptr || height == nullptr || depth == nullptr) { return false; }
+	*width  = 1u << AxisBits(*pattern, address_bits, kX);
+	*height = 1u << AxisBits(*pattern, address_bits, kY);
+	*depth  = 1u << AxisBits(*pattern, address_bits, kZ);
+	return true;
+}
+
+bool TileGetStandard4KBVolumeBlock(uint32_t bytes_per_element, uint32_t* width, uint32_t* height, uint32_t* depth)
+{
+	return TileGetStandardVolumeBlock(bytes_per_element, 4096u, width, height, depth);
+}
+
+uint64_t TileGetStandard4KBVolumeOffset(uint32_t x, uint32_t y, uint32_t z, uint32_t pitch_elems, uint32_t height,
+                                        uint32_t bytes_per_element)
+{
+	return StandardVolumeOffset(x, y, z, pitch_elems, height, bytes_per_element, 4096u);
+}
+
+void TileConvertStandardVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
+                                       uint32_t pitch_elems, uint32_t bytes_per_element, uint32_t block_bytes)
+{
+	EXIT_IF(dst == nullptr || src == nullptr || FindStandardVolumePattern(bytes_per_element) == nullptr ||
+	        StandardVolumeAddressBits(block_bytes) == 0u);
+	EXIT_IF(width == 0u || height == 0u || depth == 0u || pitch_elems < width);
+	auto*                      d = static_cast<uint8_t*>(dst);
+	const auto*                s = static_cast<const uint8_t*>(src);
+	const DebugStatsScopedWork detile_work(DebugStatsRecordDetile, static_cast<uint64_t>(width) * height * depth * bytes_per_element);
 	for (uint32_t z = 0; z < depth; ++z)
 	{
 		for (uint32_t y = 0; y < height; ++y)
 		{
 			for (uint32_t x = 0; x < width; ++x)
 			{
-				const uint64_t tiled = TileGetStandard4KB32VolumeOffset(x, y, z, pitch_elems, height);
-				const uint64_t linear =
-				    ((static_cast<uint64_t>(z) * height * pitch_elems) + (static_cast<uint64_t>(y) * pitch_elems) + x) * k_bpp;
-				std::memcpy(d + linear, s + tiled, k_bpp);
+				const uint64_t tiled  = StandardVolumeOffset(x, y, z, pitch_elems, height, bytes_per_element, block_bytes);
+				const uint64_t linear = ((static_cast<uint64_t>(z) * height * pitch_elems) + (static_cast<uint64_t>(y) * pitch_elems) + x) *
+				                        bytes_per_element;
+				std::memcpy(d + linear, s + tiled, bytes_per_element);
 			}
 		}
 	}
 }
 
-void TileGetStandard4KB32VolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, TileSizeAlign* size)
+void TileConvertStandard4KBVolumeToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t depth,
+                                          uint32_t pitch_elems, uint32_t bytes_per_element)
 {
-	EXIT_IF(size == nullptr);
-	if (width == 0u || height == 0u || depth == 0u || pitch_elems < width) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0u || height == 0u || depth == 0u || pitch_elems < width condition ignored (continuing)\n"); }
+	TileConvertStandardVolumeToLinear(dst, src, width, height, depth, pitch_elems, bytes_per_element, 4096u);
+}
 
-	static constexpr uint32_t k_block_width  = 8u;
-	static constexpr uint32_t k_block_height = 16u;
-	static constexpr uint32_t k_block_depth  = 8u;
-	static constexpr uint32_t k_block_bytes  = 4096u;
-	const uint64_t            blocks_x       = (static_cast<uint64_t>(pitch_elems) + k_block_width - 1u) / k_block_width;
-	const uint64_t            blocks_y       = (static_cast<uint64_t>(height) + k_block_height - 1u) / k_block_height;
-	const uint64_t            blocks_z       = (static_cast<uint64_t>(depth) + k_block_depth - 1u) / k_block_depth;
-	const uint64_t            bytes          = blocks_x * blocks_y * blocks_z * k_block_bytes;
-	if (bytes > UINT32_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: bytes > UINT32_MAX condition ignored (continuing)\n"); }
-	size->size  = static_cast<uint32_t>(bytes);
-	size->align = k_block_bytes;
+bool TileTryGetStandardVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, uint32_t bytes_per_element,
+                                  uint32_t block_bytes, TileSizeAlign* size)
+{
+	if (size == nullptr) { return false; }
+	*size = {};
+	uint32_t block_width = 0, block_height = 0, block_depth = 0;
+	if (width == 0u || height == 0u || depth == 0u || pitch_elems < width ||
+	    !TileGetStandardVolumeBlock(bytes_per_element, block_bytes, &block_width, &block_height, &block_depth))
+	{
+		return false;
+	}
+	const uint64_t blocks_x = (static_cast<uint64_t>(pitch_elems) + block_width - 1u) / block_width;
+	const uint64_t blocks_y = (static_cast<uint64_t>(height) + block_height - 1u) / block_height;
+	const uint64_t blocks_z = (static_cast<uint64_t>(depth) + block_depth - 1u) / block_depth;
+	// Check before multiplication: even uint64_t can overflow for three
+	// guest-controlled dimensions. TileSizeAlign owns a 32-bit byte count.
+	if (blocks_x > UINT32_MAX / block_bytes / blocks_y / blocks_z) { return false; }
+	size->size  = static_cast<uint32_t>(blocks_x * blocks_y * blocks_z * block_bytes);
+	size->align = block_bytes;
+	return true;
+}
+
+bool TileTryGetStandard4KBVolumeSize(uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch_elems, uint32_t bytes_per_element,
+                                     TileSizeAlign* size)
+{
+	return TileTryGetStandardVolumeSize(width, height, depth, pitch_elems, bytes_per_element, 4096u, size);
 }
 
 void TileConvertStandard64KBToLinear(void* dst, const void* src, uint32_t width, uint32_t height, uint32_t pitch_elems,
@@ -1975,6 +2151,60 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 	bool pow2 = (IsPowerOfTwo(width) && IsPowerOfTwo(height) && IsPowerOfTwo(pitch));
 
 	EXIT_IF(levels == 0 || levels > 16);
+	if (tile == 9u && ShaderGen5TextureIsBlockCompressed(format))
+	{
+		Gen5TextureMipLayout mip_layout {};
+		if (!Gen5GetStandard64KBTextureMipLayout(format, width, height, pitch, levels, &mip_layout))
+		{
+			EXIT("unsupported Gen5 Standard64KB compressed layout: format=%u %ux%u pitch=%u levels=%u\n",
+			     format, width, height, pitch, levels);
+		}
+		if (total_size != nullptr) { *total_size = mip_layout.tiled; }
+		for (uint32_t level = 0u; level < levels; ++level)
+		{
+			const auto& mip = mip_layout.level[level];
+			if (level_sizes != nullptr)
+			{
+				level_sizes[level].offset = mip.tiled_offset;
+				level_sizes[level].size = mip.tiled_size;
+			}
+			if (padded_size != nullptr)
+			{
+				padded_size[level].width = mip.tiled_pitch * mip_layout.texels_per_element_x;
+				padded_size[level].height = mip.tiled_size / mip.tiled_pitch / mip_layout.bytes_per_element *
+				                            mip_layout.texels_per_element_y;
+			}
+		}
+		return;
+	}
+	if (tile == 0x18u && levels > 1u && (format == 7u || format == 22u))
+	{
+		Gen5TextureMipLayout mip_layout {};
+		if (!Gen5GetDepth64KBTextureMipLayout(format, width, height, pitch, levels, &mip_layout))
+		{
+			EXIT("unsupported Gen5 depth mip layout: format=%u %ux%u pitch=%u levels=%u\n", format, width, height, pitch,
+			     levels);
+		}
+		if (total_size != nullptr)
+		{
+			*total_size = mip_layout.tiled;
+		}
+		for (uint32_t level = 0u; level < levels; level++)
+		{
+			const auto& mip = mip_layout.level[level];
+			if (level_sizes != nullptr)
+			{
+				level_sizes[level].offset = mip.tiled_offset;
+				level_sizes[level].size   = mip.tiled_size;
+			}
+			if (padded_size != nullptr)
+			{
+				padded_size[level].width  = mip.tiled_pitch;
+				padded_size[level].height = mip.in_mip_tail ? 128u : ((mip.height + 127u) & ~127u);
+			}
+		}
+		return;
+	}
 
 	FindTextureInfo2(format, width, height, pitch, tile, levels, &infos, &num, pow2);
 
@@ -2030,12 +2260,15 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 
 			if (levels != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: levels != 1 condition ignored (continuing)\n"); }
 			if (tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: tile == 0x09u && ShaderGen5TextureIsBlockCompressed(format) condition ignored (continuing)\n"); }
-			if (tile == 0x18u && format != 7u && format != 22u)
+			// Tile 24 also carries the 8-bit stencil plane of a depth-stencil
+			// surface (the guest samples it as an 8-bit unsigned format). Its
+			// 64 KiB block grid uses the same sizing math as the depth formats.
+			if (tile == 0x18u && format != 5u && format != 7u && format != 22u)
 			{
 				EXIT("unsupported Gen5 depth tile format: tile=%u format=%u\n", tile, format);
 			}
 
-			const bool     bc1          = (format == 133u);
+			const bool     bc1          = (format == 169u || format == 170u);
 			const uint32_t elem_width   = bc1 ? std::max((width + 3u) / 4u, 1u) : width;
 			const uint32_t elem_height  = bc1 ? std::max((height + 3u) / 4u, 1u) : height;
 			const uint32_t pitch_texels = (pitch != 0 ? pitch : width);
@@ -2074,7 +2307,13 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// This path is intentionally limited to a single mip until the tail layout is
 		// independently exercised; it still covers any dimensions/pitches that
 		// fit the documented one-level block geometry.
-		if (tile == 0x05u)
+		// kStandard256B (tile 1) uses the same arithmetic with 256-byte blocks; its mip
+		// tail is not modelled, so it accepts one level only.
+		if (tile == 0x01u && levels != 1u)
+		{
+			EXIT("unsupported Gen5 SW_256B_S mip chain: format=%u %ux%u levels=%u\n", format, width, height, levels);
+		}
+		if (tile == 0x05u || tile == 0x01u)
 		{
 			const uint32_t bpp              = ShaderGen5TextureBytesPerElement(format);
 			const bool     block_compressed = ShaderGen5TextureIsBlockCompressed(format);
@@ -2083,8 +2322,12 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			const uint64_t element_height = (static_cast<uint64_t>(height) + texels_per_element - 1u) / texels_per_element;
 			const uint64_t pitch_texels   = (pitch != 0u ? pitch : width);
 			const uint64_t element_pitch  = (pitch_texels + texels_per_element - 1u) / texels_per_element;
-			const uint64_t block_width    = bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u);
-			const uint64_t block_height   = bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u);
+			uint32_t       small_width    = 0;
+			uint32_t       small_height   = 0;
+			const bool     small_block    = tile == 0x01u && TileGetStandard256BBlock(bpp, &small_width, &small_height);
+			EXIT_IF(tile == 0x01u && !small_block);
+			const uint64_t block_width    = small_block ? small_width : (bpp <= 2u ? 64u : (bpp <= 8u ? 32u : 16u));
+			const uint64_t block_height   = small_block ? small_height : (bpp == 1u ? 64u : (bpp <= 4u ? 32u : 16u));
 			const uint64_t padded_width   = (element_pitch + block_width - 1u) & ~(block_width - 1u);
 			const uint64_t padded_height  = (element_height + block_height - 1u) & ~(block_height - 1u);
 			const uint64_t bytes          = static_cast<uint64_t>(padded_width) * padded_height * bpp;
@@ -2093,7 +2336,7 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 			if (total_size != nullptr)
 			{
 				total_size->size  = static_cast<uint32_t>(bytes);
-				total_size->align = 4096u;
+				total_size->align = small_block ? 256u : 4096u;
 			}
 			if (level_sizes != nullptr)
 			{
@@ -2119,13 +2362,50 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// Linear layout: pitch already carries the row stride from the caller. Keep
 		// the estimate tight (no coarse dimension rounding) so it does not swallow
 		// neighbouring buffers in the GPU-memory overlap tracker.
-		uint32_t row   = (pitch != 0 ? pitch : width);
-		uint64_t total = 0;
+		// Block-compressed rows and columns count 4x4 blocks, not texels.
+		const uint32_t texels_per_element = ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u;
+		if (levels > 1u && bpp != 0u && 256u % bpp == 0u)
+		{
+			// GFX10 linear mip chains (addrlib HwlComputeSurfaceInfoLinear): each
+			// level's element pitch is aligned to 256 bytes and levels are stored
+			// from the smallest to level 0, so level 0 ends the allocation. Element
+			// (4x4 block) sizes halve independently of texel sizes.
+			const uint32_t pitch_align    = 256u / bpp;
+			const uint32_t element_width  = (width + texels_per_element - 1u) / texels_per_element;
+			const uint32_t element_height = (height + texels_per_element - 1u) / texels_per_element;
+			uint64_t       offset         = 0;
+			for (uint32_t l = levels; l-- > 0u;)
+			{
+				const uint64_t mip_width  = std::max(element_width >> l, 1u);
+				const uint64_t mip_height = std::max(element_height >> l, 1u);
+				const uint64_t mip_pitch  = align_up(mip_width, pitch_align);
+				const uint64_t mip_size   = mip_pitch * mip_height * bpp;
+				if (level_sizes != nullptr)
+				{
+					level_sizes[l].offset = static_cast<uint32_t>(offset);
+					level_sizes[l].size   = static_cast<uint32_t>(mip_size);
+				}
+				if (padded_size != nullptr)
+				{
+					padded_size[l].width  = static_cast<uint32_t>(mip_pitch * texels_per_element);
+					padded_size[l].height = static_cast<uint32_t>(mip_height * texels_per_element);
+				}
+				offset += mip_size;
+			}
+			if (total_size != nullptr)
+			{
+				total_size->size  = static_cast<uint32_t>(align_up(offset, 256));
+				total_size->align = 256;
+			}
+			return;
+		}
+		uint32_t       row                = (pitch != 0 ? pitch : width);
+		uint64_t       total              = 0;
 		for (uint32_t l = 0; l < levels; l++)
 		{
-			uint32_t lw  = row >> l;
-			uint32_t lh  = height >> l;
-			uint64_t lsz = static_cast<uint64_t>(lw == 0 ? 1 : lw) * (lh == 0 ? 1 : lh) * bpp;
+			const uint64_t lw  = std::max(row >> l, 1u);
+			const uint64_t lh  = std::max(height >> l, 1u);
+			uint64_t       lsz = ((lw + texels_per_element - 1u) / texels_per_element) * ((lh + texels_per_element - 1u) / texels_per_element) * bpp;
 			if (level_sizes != nullptr)
 			{
 				level_sizes[l].offset = total;

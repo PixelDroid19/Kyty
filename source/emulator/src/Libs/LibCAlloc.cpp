@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <mutex>
 #include <unordered_map>
 
@@ -27,6 +28,9 @@ struct HostAllocationRecord
 
 static std::mutex                                      g_allocations_mutex;
 static std::unordered_map<void*, HostAllocationRecord> g_allocations;
+// Mirrors g_allocations.size(): once the application heap exists the registry
+// is normally empty and every free skips the lock.
+static std::atomic<size_t> g_allocations_count {0};
 
 static bool register_allocation(void* ptr, HostAllocationRecord record)
 {
@@ -36,12 +40,14 @@ static bool register_allocation(void* ptr, HostAllocationRecord record)
 	}
 
 	std::lock_guard lock(g_allocations_mutex);
-	return g_allocations.emplace(ptr, record).second;
+	const bool inserted = g_allocations.emplace(ptr, record).second;
+	g_allocations_count.store(g_allocations.size(), std::memory_order_release);
+	return inserted;
 }
 
 static bool claim_allocation(void* ptr, HostAllocationRecord* record)
 {
-	if (ptr == nullptr || record == nullptr)
+	if (ptr == nullptr || record == nullptr || g_allocations_count.load(std::memory_order_acquire) == 0)
 	{
 		return false;
 	}
@@ -55,12 +61,15 @@ static bool claim_allocation(void* ptr, HostAllocationRecord* record)
 
 	*record = it->second;
 	g_allocations.erase(it);
+	g_allocations_count.store(g_allocations.size(), std::memory_order_release);
 	return true;
 }
 
+// Host heap memory may hold the emulator's own data; the guest sees it zeroed,
+// as it sees fresh pages of its own heap.
 static void* allocate_host_owned(size_t size)
 {
-	void* ptr = ::malloc(size);
+	void* ptr = ::calloc(1, size);
 	if (ptr != nullptr)
 	{
 		const bool registered = register_allocation(ptr, {size});
@@ -207,6 +216,8 @@ struct AlignedAllocation
 
 static std::mutex                                   g_aligned_allocations_mutex;
 static std::unordered_map<void*, AlignedAllocation> g_aligned_allocations;
+// Mirrors g_aligned_allocations.size() so a free with none outstanding skips the lock.
+static std::atomic<size_t> g_aligned_allocations_count {0};
 
 static bool register_aligned_allocation(void* ptr, const AlignedAllocation& allocation)
 {
@@ -216,7 +227,9 @@ static bool register_aligned_allocation(void* ptr, const AlignedAllocation& allo
 	}
 
 	std::lock_guard lock(g_aligned_allocations_mutex);
-	return g_aligned_allocations.emplace(ptr, allocation).second;
+	const bool inserted = g_aligned_allocations.emplace(ptr, allocation).second;
+	g_aligned_allocations_count.store(g_aligned_allocations.size(), std::memory_order_release);
+	return inserted;
 }
 
 // Transfers ownership out of the registry in one operation. Callers must not
@@ -224,7 +237,7 @@ static bool register_aligned_allocation(void* ptr, const AlignedAllocation& allo
 // independently safe. A failed realloc restores the claimed record.
 static bool claim_aligned_allocation(void* ptr, AlignedAllocation* allocation)
 {
-	if (ptr == nullptr || allocation == nullptr)
+	if (ptr == nullptr || allocation == nullptr || g_aligned_allocations_count.load(std::memory_order_acquire) == 0)
 	{
 		return false;
 	}
@@ -238,6 +251,7 @@ static bool claim_aligned_allocation(void* ptr, AlignedAllocation* allocation)
 
 	*allocation = it->second;
 	g_aligned_allocations.erase(it);
+	g_aligned_allocations_count.store(g_aligned_allocations.size(), std::memory_order_release);
 	return true;
 }
 
@@ -304,11 +318,17 @@ KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 	HostAllocationRecord record {};
 	if (!claim_allocation(p, &record))
 	{
-		if (LibKernel::ApplicationHeap::IsInitialized())
+		if (!LibKernel::ApplicationHeap::IsInitialized())
 		{
-			EXIT("libc HLE cannot realloc an unowned application-heap pointer\n");
+			return ::realloc(p, size);
 		}
-		return ::realloc(p, size);
+		// Once the title's allocator replacement exists, libc allocates from it,
+		// so a pointer the shim does not own belongs to that allocator.
+		if (!LibKernel::ApplicationHeap::HasRealloc())
+		{
+			EXIT("libc HLE cannot realloc an application-heap pointer without a replacement realloc\n");
+		}
+		return LibKernel::ApplicationHeap::Realloc(p, size);
 	}
 
 	void* replacement = ::realloc(p, size);
@@ -318,10 +338,82 @@ KYTY_SYSV_ABI void* c_realloc(void* p, size_t size)
 		EXIT_IF(!restored);
 		return nullptr;
 	}
+	if (size > record.size)
+	{
+		::memset(static_cast<uint8_t*>(replacement) + record.size, 0, size - record.size);
+	}
 
 	const bool registered = register_allocation(replacement, {size});
 	EXIT_IF(!registered);
 	return replacement;
+}
+
+// reallocalign(ptr, boundary, size): reallocate ptr into a boundary-aligned
+// block of size bytes. The public ordering mirrors memalign(boundary, size)
+// with the pointer prepended; the MallocReplace slot keeps the internal
+// mspace_realloc2 ordering (ptr, size, boundary), so delegation swaps the tail.
+KYTY_SYSV_ABI void* c_reallocalign(void* p, size_t boundary, size_t size)
+{
+	if (size == 0)
+	{
+		c_free(p);
+		return nullptr;
+	}
+
+	// Pointers this shim allocated are re-aligned here; the registered
+	// replacement only understands the application heap.
+	AlignedAllocation allocation {};
+	if (claim_aligned_allocation(p, &allocation))
+	{
+		void* replacement = c_memalign(boundary, size);
+		if (replacement == nullptr)
+		{
+			const bool restored = register_aligned_allocation(p, allocation);
+			EXIT_IF(!restored);
+			return nullptr;
+		}
+
+		::memcpy(replacement, p, (allocation.size < size ? allocation.size : size));
+		if (!free_by_owner(allocation.base))
+		{
+			EXIT("ApplicationHeap free failed during reallocalign\n");
+		}
+		return replacement;
+	}
+
+	HostAllocationRecord record {};
+	if (claim_allocation(p, &record))
+	{
+		void* replacement = c_memalign(boundary, size);
+		if (replacement == nullptr)
+		{
+			const bool restored = register_allocation(p, record);
+			EXIT_IF(!restored);
+			return nullptr;
+		}
+
+		::memcpy(replacement, p, (record.size < size ? record.size : size));
+		::free(p);
+		return replacement;
+	}
+
+	// nullptr or an application-heap pointer: the registered reallocalign slot
+	// owns these (nullptr allocates fresh on the application heap).
+	if (LibKernel::ApplicationHeap::HasReallocalign())
+	{
+		return LibKernel::ApplicationHeap::Reallocalign(p, size, boundary);
+	}
+
+	if (p == nullptr)
+	{
+		return c_memalign(boundary, size);
+	}
+
+	if (LibKernel::ApplicationHeap::IsInitialized())
+	{
+		EXIT("libc HLE cannot reallocalign an unowned application-heap pointer\n");
+	}
+	return nullptr;
 }
 
 KYTY_SYSV_ABI void c_free(void* p)

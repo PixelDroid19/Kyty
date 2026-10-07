@@ -1,9 +1,13 @@
 #include "ShaderSpirvInternal.h"
 
 #include "ShaderSpirvEmitters.h"
+#include "ShaderSpirvF16.h"
 #include "ShaderSpirvTemplates.h"
+#include "ShaderMaskAnalysis.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/ShaderComputeWaveAnalysis.h"
+#include "Emulator/Graphics/ShaderComputeWaveSdwa.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 
@@ -31,6 +35,10 @@ static uint32_t null_mrt_target(ShaderInstructionFormat::Format format)
 		case ShaderInstructionFormat::Mrt1OffOffComprVmDone: return 1;
 		case ShaderInstructionFormat::Mrt2OffOffComprVmDone: return 2;
 		case ShaderInstructionFormat::Mrt3OffOffComprVmDone: return 3;
+		case ShaderInstructionFormat::Mrt4OffOffComprVmDone: return 4;
+		case ShaderInstructionFormat::Mrt5OffOffComprVmDone: return 5;
+		case ShaderInstructionFormat::Mrt6OffOffComprVmDone: return 6;
+		case ShaderInstructionFormat::Mrt7OffOffComprVmDone: return 7;
 		KYTY_LOG_DEBUG("WARNING: not a null MRT done format (continuing)\n");
 	}
 	return 0;
@@ -86,6 +94,29 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone)
 	{
 		return false;
 	}
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_Exp_NullVmDone)
+{
+	if (code.GetType() != ShaderType::Pixel || code.GetInstructions().At(index).src_num != 0)
+	{
+		return false;
+	}
+	// Pixel EXEC is represented per invocation. Invalid pixels must not commit
+	// depth or stencil even though this export has no color/depth payload.
+	static const char* text = R"(
+         %null_exec_lo_<index> = OpLoad %uint %exec_lo
+         %null_exec_hi_<index> = OpLoad %uint %exec_hi
+         %null_exec_<index> = OpBitwiseOr %uint %null_exec_lo_<index> %null_exec_hi_<index>
+         %null_valid_<index> = OpINotEqual %bool %null_exec_<index> %uint_0
+               OpSelectionMerge %null_merge_<index> None
+               OpBranchConditional %null_valid_<index> %null_merge_<index> %null_kill_<index>
+         %null_kill_<index> = OpLabel
+               OpKill
+         %null_merge_<index> = OpLabel
+)";
+	*dst_source += String8(text).ReplaceStr("<index>", String8::FromPrintf("%u", index));
 	return true;
 }
 
@@ -284,7 +315,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 		 %t3_<index> = OpLoad %float %<src3>
 		 <export_value>
 		 <mrt_probe>
-		       OpStore %<mrt> %t11_<index>
+		 <store_value>
                OpBranch %exp_merge_<index>
          %exp_merge_<index> = OpLabel
 )";
@@ -296,6 +327,21 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 	const String8      export_value =
 	    String8::FromPrintf("%%t11_<index> = OpCompositeConstruct %%v4float %%%s_<index> %%%s_<index> %%%s_<index> %%%s_<index>",
 	                        source_names[component0], source_names[component1], source_names[component2], source_names[component3]);
+	String8 store_value = "OpStore %<mrt> %t11_<index>";
+	if ((inst.exp_enable_mask & 0xfu) != 0xfu)
+	{
+		// Partial enable masks accumulate per enabled logical channel without
+		// reading the framebuffer or supplying values for unexported ones.
+		const uint32_t mapped_sources[] = {component0, component1, component2, component3};
+		store_value                     = String8();
+		for (uint32_t component = 0; component < 4u; ++component)
+		{
+			if ((inst.exp_enable_mask & (1u << component)) == 0u) { continue; }
+			store_value += String8::FromPrintf("%%exp_component_%u_<index> = OpAccessChain %%_ptr_Output_float %%<mrt> "
+			                                   "%%uint_%u\n         OpStore %%exp_component_%u_<index> %%%s_<index>\n",
+			                                   component, component, component, source_names[mapped_sources[component]]);
+		}
+	}
 	String8 mrt_probe;
 	if (PixelMrtProbeSelectsExport(spirv, index, static_cast<uint32_t>(mrt)) &&
 	    !spirv->EmitPixelRgbaProbe(&mrt_probe, index, String8::FromPrintf("%%t11_%u", index), "pixel_mrt_probe", true))
@@ -306,6 +352,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 	*dst_source += String8(text)
 	                   .ReplaceStr("<export_value>", export_value)
 	                   .ReplaceStr("<mrt_probe>", mrt_probe)
+	                   .ReplaceStr("<store_value>", store_value)
 	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
 	                   .ReplaceStr("<src0>", src0_value.value)
 	                   .ReplaceStr("<src1>", src1_value.value)
@@ -672,6 +719,40 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos1OffOffVsrc0Off)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!Config::IsNextGen() || !spirv->UsesVertexLayerExport() || inst.exp_enable_mask != 4u ||
+	    inst.src_num != 1 || inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].size != 1)
+	{
+		return false;
+	}
+	const auto layer_mask = spirv->GetConstantUint(0x7ffu);
+	if (layer_mask == "unknown_uint_constant") { return false; }
+	// The miscellaneous position vector carries the render-target layer in
+	// Z[10:0]. Active lanes export it to the layer builtin; idle lanes keep
+	// whatever value the variable already holds.
+	static const char* text = R"(
+%layer_exec_<index> = OpLoad %uint %exec_lo
+%layer_active_<index> = OpINotEqual %bool %layer_exec_<index> %uint_0
+               OpSelectionMerge %layer_merge_<index> None
+               OpBranchConditional %layer_active_<index> %layer_export_<index> %layer_merge_<index>
+%layer_export_<index> = OpLabel
+%layer_source_<index> = OpLoad %float %<source>
+%layer_bits_<index> = OpBitcast %uint %layer_source_<index>
+%layer_unsigned_<index> = OpBitwiseAnd %uint %layer_bits_<index> %<mask>
+%layer_signed_<index> = OpBitcast %int %layer_unsigned_<index>
+               OpStore %gl_Layer %layer_signed_<index>
+               OpBranch %layer_merge_<index>
+%layer_merge_<index> = OpLabel
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+	                   .ReplaceStr("<source>", operand_variable_to_str(inst.src[0]).value)
+	                   .ReplaceStr("<mask>", layer_mask);
+	return true;
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_Exp_PrimVsrc0OffOffOffDone)
 {
 	const auto& inst    = code.GetInstructions().At(index);
@@ -692,12 +773,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
+	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
+	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
 
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-
-	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
 
 	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -717,11 +798,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_F32_SmaskVsrc0Vsrc1)
           %t2_<index> = <param> %bool %t0_<index> %t1_<index>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
           OpStore %<dst0> %t3_<index>
-          OpStore %<dst1> %uint_0
+          <clear_high>
 )";
+	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<param>", param[0])
@@ -740,12 +822,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
+	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
+	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
 
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-
-	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
 
 	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
@@ -767,11 +849,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_I32_SmaskVsrc0Vsrc1)
           %t2_<index> = <param> %bool %t0_<index> %t1_<index>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
           OpStore %<dst0> %t3_<index>
-          OpStore %<dst1> %uint_0
+          <clear_high>
 )";
+	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<param>", param[0])
@@ -790,12 +873,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
+	const bool single_vcc_hi = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1;
+	if (!operand_is_variable(inst.dst) || (!single_vcc_hi && inst.dst.size != 2)) { return false; }
 
-	auto dst_value0 = operand_variable_to_str(inst.dst, 0);
-	auto dst_value1 = operand_variable_to_str(inst.dst, 1);
-
-	if (dst_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	auto dst_value0 = single_vcc_hi ? operand_variable_to_str(inst.dst) : operand_variable_to_str(inst.dst, 0);
+	auto dst_value1 = single_vcc_hi ? SpirvValue {} : operand_variable_to_str(inst.dst, 1);
+	if (dst_value0.type != SpirvType::Uint || (!single_vcc_hi && dst_value1.type != SpirvType::Uint)) { return false; }
 
 	if (operand_is_exec(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst) condition ignored (continuing)\n"); }
 
@@ -817,11 +900,12 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmp_XXX_U32_SmaskVsrc0Vsrc1)
           %t2_<index> = <param> %bool %t0_<index> %t1_<index>
           %t3_<index> = OpSelect %uint %t2_<index> %uint_1 %uint_0
           OpStore %<dst0> %t3_<index>
-          OpStore %<dst1> %uint_0
+          <clear_high>
 )";
+	const auto clear_high = single_vcc_hi ? String8 {} : String8("OpStore %<dst1> %uint_0").ReplaceStr("<dst1>", dst_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst0>", dst_value0.value)
-	                   .ReplaceStr("<dst1>", dst_value1.value)
+	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<param>", param[0])
@@ -1047,12 +1131,11 @@ KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	if (!operand_is_variable(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.src[2]) condition ignored (continuing)\n"); }
+	const bool single_vcc_hi = inst.src[2].type == ShaderOperandType::VccHi && inst.src[2].size == 1;
+	if (!operand_is_variable(inst.src[2]) || (!single_vcc_hi && inst.src[2].size != 2)) { return false; }
 
-	auto src_bool_value0 = operand_variable_to_str(inst.src[2], 0);
-	auto src_bool_value1 = operand_variable_to_str(inst.src[2], 1);
-
-	if (src_bool_value0.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src_bool_value0.type != SpirvType::Uint condition ignored (continuing)\n"); }
+	auto src_bool_value0 = single_vcc_hi ? operand_variable_to_str(inst.src[2]) : operand_variable_to_str(inst.src[2], 0);
+	if (src_bool_value0.type != SpirvType::Uint) { return false; }
 
 	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
@@ -1069,7 +1152,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
     <load0>
     <load1>
     %t22_<index> = OpLoad %uint %<src0>
-    %t23_<index> = OpLoad %uint %<src1> ; unused
     %tb_<index> = OpBitwiseAnd %uint %t22_<index> %uint_1
     %t2_<index> = OpINotEqual %bool %tb_<index> %uint_0
     %t3_<index> = OpSelect %float %t2_<index> %t1_<index> %t0_<index>
@@ -1083,7 +1165,6 @@ KYTY_RECOMPILER_FUNC(Recompile_VCndmaskB32_VdstVsrc0Vsrc1Smask2)
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<src0>", src_bool_value0.value)
-	                   .ReplaceStr("<src1>", src_bool_value1.value)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<index>", index_str);
@@ -1223,58 +1304,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkrtzF16F32_SVdstSVsrc0SVsrc1)
 	return true;
 }
 
-/* Generalized f16 ALU: operands arrive packed as uint32 (low 16 bits carry the
- * binary16). Unpack to f32, apply the operation from param[0], repack and
- * store with EXEC predication. No Float16 capability required. */
+// Shared binary16 arithmetic, explicit narrowing and raw VGPR writeback.
 KYTY_RECOMPILER_FUNC(Recompile_VF16_XXX_VdstVsrc0Vsrc1)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-	String8 load1;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-    <load1>
-        %hf0v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
-        %hf1v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t1_<index>
-        %hf0_<index> = OpCompositeExtract %float %hf0v_<index> 0
-        %hf1_<index> = OpCompositeExtract %float %hf1v_<index> 0
-        <param0>
-        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %t_<index> %t_<index>
-        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<param0>", param[0])
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, F16Arithmetic::Operation::Binary);
 }
 
 /* Generalized packed-f16 compare: unpack both operands, compare as f32
@@ -1590,257 +1623,47 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF64I32_SVdst2SVsrc0)
 	return true;
 }
 
-/* v_cvt_f16_f32: unpack the f16 source (low 16 bits of a uint32) to f32. */
+// Both directions share operand/modifier handling; narrowing uses the explicit
+// half rounding mode, widening accepts every binary16 denormal exactly.
 KYTY_RECOMPILER_FUNC(Recompile_VCvtF16F32_SVdstSVsrc0)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-        %hv_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
-        %t_<index> = OpCompositeExtract %float %hv_<index> 0
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	const auto operation = code.GetInstructions().At(index).type == ShaderInstructionType::VCvtF32F16 ?
+	                           F16Arithmetic::Operation::ToFloat : F16Arithmetic::Operation::FromFloat;
+	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, operation);
 }
 
 /* Generalized f16 unary math (trunc/ceil/floor/rndne/rcp/sqrt): unpack to
  * f32, apply param[0], repack and store with EXEC predication. */
 KYTY_RECOMPILER_FUNC(Recompile_VF16_Unary_SVdstSVsrc0)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-        %hv_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
-        %h0_<index> = OpCompositeExtract %float %hv_<index> 0
-        <param0>
-        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %t_<index> %t_<index>
-        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<param0>", param[0])
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, F16Arithmetic::Operation::Unary);
 }
 
 /* v_cvt_f16_i16: sign-extend the i16 source (low 16 bits), convert to f32 and
  * pack as f16 into the destination. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtF16I16_SVdstSVsrc0)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-        %i16_<index> = OpBitcast %int %t0_<index>
-        %i16s_<index> = OpShiftLeftLogical %int %i16_<index> %int_16
-        %i16x_<index> = OpShiftRightArithmetic %int %i16s_<index> %int_16
-        %f_<index> = OpConvertSToF %float %i16x_<index>
-        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %f_<index> %f_<index>
-        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, F16Arithmetic::Operation::FromSigned);
 }
 
 /* v_cvt_f16_u16: zero-extend the u16 source, convert to f32, pack as f16. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtF16U16_SVdstSVsrc0)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-        %u16_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
-        %f_<index> = OpConvertUToF %float %u16_<index>
-        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %f_<index> %f_<index>
-        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, F16Arithmetic::Operation::FromUnsigned);
 }
 
 /* v_cvt_i16_f16: unpack the f16 source and store the signed 16-bit truncation
  * in the low bits of the destination. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtI16F16_SVdstSVsrc0)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-        %hv_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
-        %h0_<index> = OpCompositeExtract %float %hv_<index> 0
-        %i_<index> = OpConvertFToS %int %h0_<index>
-        %u_<index> = OpBitcast %uint %i_<index>
-        %masked_<index> = OpBitwiseAnd %uint %u_<index> %uint_0xffff
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %masked_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, F16Arithmetic::Operation::ToSigned);
 }
 
 /* v_cvt_u16_f16: unpack the f16 source and store the unsigned 16-bit
  * truncation in the low bits of the destination. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtU16F16_SVdstSVsrc0)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-        %hv_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
-        %h0_<index> = OpCompositeExtract %float %hv_<index> 0
-        %u_<index> = OpConvertFToU %uint %h0_<index>
-        %masked_<index> = OpBitwiseAnd %uint %u_<index> %uint_0xffff
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %masked_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, F16Arithmetic::Operation::ToUnsigned);
 }
 
 /* v_cvt_pk_u16_u32: truncate both u32 sources to u16 and pack into the
@@ -1938,8 +1761,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPkI16I32_SVdstSVsrc0SVsrc1)
 	return true;
 }
 
-/* v_cvt_pknorm_u16_f32: clamp both f32 sources to [0,1], scale to u16 and
- * pack. */
+/* v_cvt_pknorm_u16_f32: pack two f32 sources as unsigned normalized u16. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormU16F32_SVdstSVsrc0SVsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -1949,17 +1771,15 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormU16F32_SVdstSVsrc0SVsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	if (!operand_is_variable(inst.dst) || inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.vop3_op_sel != 0u ||
+	    inst.vop3_omod != 0u)
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	const auto zero = spirv->GetConstantFloat(0.0f);
-	const auto one  = spirv->GetConstantFloat(1.0f);
-	if (zero == "unknown_float_constant" || one == "unknown_float_constant")
+	if (dst_value.type != SpirvType::Float)
 	{
 		return false;
 	}
@@ -1976,31 +1796,24 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormU16F32_SVdstSVsrc0SVsrc1)
 	static const char* text = R"(
     <load0>
     <load1>
-        %c0_<index> = OpExtInst %float %GLSL_std_450 FClamp %t0_<index> <zero> <one>
-        %c1_<index> = OpExtInst %float %GLSL_std_450 FClamp %t1_<index> <zero> <one>
-        %u0_<index> = OpConvertFToU %uint %c0_<index>
-        %u1_<index> = OpConvertFToU %uint %c1_<index>
-        %lo_<index> = OpBitwiseAnd %uint %u0_<index> %uint_0xffff
-        %hi_<index> = OpBitwiseAnd %uint %u1_<index> %uint_0xffff
-        %t_<index> = OpBitFieldInsert %uint %lo_<index> %hi_<index> %uint_16 %uint_16
+        %packed_pair_<index> = OpCompositeConstruct %v2float %t0_<index> %t1_<index>
+        %packed_bits_<index> = OpExtInst %uint %GLSL_std_450 PackUnorm2x16 %packed_pair_<index>
+        %packed_value_<index> = OpBitcast %float %packed_bits_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
         %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %packed_value_<index> %tdst_<index>
                OpStore %<dst> %tval_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<zero>", zero)
-	                   .ReplaceStr("<one>", one)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
 
-/* v_cvt_pknorm_i16_f32: clamp both f32 sources to [-1,1], scale to i16 and
- * pack. */
+/* v_cvt_pknorm_i16_f32: pack two f32 sources as signed normalized i16. */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormI16F32_SVdstSVsrc0SVsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -2010,17 +1823,15 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormI16F32_SVdstSVsrc0SVsrc1)
 
 	String8 index_str = String8::FromPrintf("%u", index);
 
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	if (!operand_is_variable(inst.dst) || inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.vop3_op_sel != 0u ||
+	    inst.vop3_omod != 0u)
+	{
+		return false;
+	}
 
 	auto dst_value = operand_variable_to_str(inst.dst);
 
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	const auto neg_one = spirv->GetConstantFloat(-1.0f);
-	const auto one     = spirv->GetConstantFloat(1.0f);
-	if (neg_one == "unknown_float_constant" || one == "unknown_float_constant")
+	if (dst_value.type != SpirvType::Float)
 	{
 		return false;
 	}
@@ -2037,26 +1848,18 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtPknormI16F32_SVdstSVsrc0SVsrc1)
 	static const char* text = R"(
     <load0>
     <load1>
-        %c0_<index> = OpExtInst %float %GLSL_std_450 FClamp %t0_<index> <neg_one> <one>
-        %c1_<index> = OpExtInst %float %GLSL_std_450 FClamp %t1_<index> <neg_one> <one>
-        %i0_<index> = OpConvertFToS %int %c0_<index>
-        %i1_<index> = OpConvertFToS %int %c1_<index>
-        %u0_<index> = OpBitcast %uint %i0_<index>
-        %u1_<index> = OpBitcast %uint %i1_<index>
-        %lo_<index> = OpBitwiseAnd %uint %u0_<index> %uint_0xffff
-        %hi_<index> = OpBitwiseAnd %uint %u1_<index> %uint_0xffff
-        %t_<index> = OpBitFieldInsert %uint %lo_<index> %hi_<index> %uint_16 %uint_16
+        %packed_pair_<index> = OpCompositeConstruct %v2float %t0_<index> %t1_<index>
+        %packed_bits_<index> = OpExtInst %uint %GLSL_std_450 PackSnorm2x16 %packed_pair_<index>
+        %packed_value_<index> = OpBitcast %float %packed_bits_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
         %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %packed_value_<index> %tdst_<index>
                OpStore %<dst> %tval_<index>
 )";
 	*dst_source += String8(text)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<neg_one>", neg_one)
-	                   .ReplaceStr("<one>", one)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 	return true;
@@ -2447,62 +2250,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCmpx16_XXX_SmaskVsrc0Vsrc1)
  * three operands, apply param[0], repack and store. */
 KYTY_RECOMPILER_FUNC(Recompile_VF16_3Src_VdstVsrc0Vsrc1Vsrc2)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-	String8 load1;
-	String8 load2;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
-	{
-		return false;
-	}
-	if (!operand_load_uint(spirv, inst.src[2], "t2_<index>", index_str, &load2))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-    <load1>
-    <load2>
-        %h0v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t0_<index>
-        %h1v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t1_<index>
-        %h2v_<index> = OpExtInst %v2float %GLSL_std_450 UnpackHalf2x16 %t2_<index>
-        %h0_<index> = OpCompositeExtract %float %h0v_<index> 0
-        %h1_<index> = OpCompositeExtract %float %h1v_<index> 0
-        %h2_<index> = OpCompositeExtract %float %h2v_<index> 0
-        <param0>
-        %hpackv_<index> = OpExtInst %v2float %GLSL_std_450 PackHalf2x16 %t_<index> %t_<index>
-        %hpack_<index> = OpCompositeExtract %uint %hpackv_<index> 0
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %hpack_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<load2>", load2)
-	                   .ReplaceStr("<param0>", param[0])
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, F16Arithmetic::Operation::Ternary);
 }
 
 /* Generalized packed-f16 compare-to-exec: unpack both operands, compare as f32
@@ -2805,12 +2553,27 @@ KYTY_RECOMPILER_FUNC(Recompile_VInterpMovF32_VdstVsrcAttrChan)
 	if (!operand_is_constant(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[1]) condition ignored (continuing)\n"); }
 	if (!operand_is_constant(inst.src[2])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[2]) condition ignored (continuing)\n"); }
 
-	if (inst.src[0].constant.u != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].constant.u != 2 condition ignored (continuing)\n"); }
-
 	auto dst_value = operand_variable_to_str(inst.dst);
 
 	const auto* ps_info = spirv->GetPsInputInfo();
 	EXIT_IF(ps_info == nullptr);
+	const uint32_t input = inst.src[1].constant.u;
+	EXIT_IF(input >= ps_info->input_num || input >= 32u || inst.src[2].constant.u >= 4u);
+	if (ps_info->custom_interpolation.Enabled() && (ps_info->custom_interpolation.per_vertex_inputs & (1u << input)) != 0)
+	{
+		const uint32_t selector = inst.src[0].constant.u;
+		EXIT_IF(selector > 2u);
+		const uint32_t vertex = (selector + 1u) % 3u;
+		const uint32_t attribute = ShaderPixelCanonicalInterpolator(*ps_info, input);
+		*dst_source += String8::FromPrintf(
+		    "%%custom_ptr_%u = OpAccessChain %%_ptr_Input_uint %%attr%u %%uint_%u %%uint_%u\n"
+		    "%%custom_raw_%u = OpLoad %%uint %%custom_ptr_%u\n"
+		    "%%custom_float_%u = OpBitcast %%float %%custom_raw_%u\n"
+		    "OpStore %%%s %%custom_float_%u\n",
+		    index, attribute, vertex, inst.src[2].constant.u, index, index, index, index, dst_value.value.c_str(), index);
+		return true;
+	}
+	if (inst.src[0].constant.u != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].constant.u != 2 condition ignored (continuing)\n"); }
 	return RecompilePixelInterpolatorLoad(spirv, ps_info, inst.src[1].constant.u, inst.src[2].constant.u, index_str, dst_value.value,
 	                                      dst_source);
 }
@@ -3213,98 +2976,85 @@ KYTY_RECOMPILER_FUNC(Recompile_VCubeMaF32_VdstVsrc0Vsrc1Vsrc2)
 	return true;
 }
 
-static bool RecompileFragmentMbcnt(const ShaderInstruction& inst, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
+static bool RecompileNativeMbcnt(const ShaderInstruction& inst, uint32_t index, bool low_half, Spirv* spirv, String8* dst_source)
 {
 	EXIT_IF(spirv == nullptr || dst_source == nullptr);
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp || inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp || inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || !operand_is_variable(inst.dst) || inst.dst.clamp ||
+	    inst.dst.multiplier != 1.0f)
+	{
+		return false;
+	}
 
 	const auto dst_value = operand_variable_to_str(inst.dst);
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
+	if (dst_value.type != SpirvType::Float)
+	{
+		return false;
+	}
 
 	const String8 index_str = String8::FromPrintf("%u", index);
-	String8      mask_load;
-	String8      accumulator_load;
+	String8       mask_load;
+	String8       accumulator_load;
 	if (!operand_load_uint(spirv, inst.src[0], "mbcnt_mask_<index>", index_str, &mask_load) ||
 	    !operand_load_uint(spirv, inst.src[1], "mbcnt_acc_<index>", index_str, &accumulator_load))
 	{
 		return false;
 	}
 
+	// S0 is this invocation's numeric word, even when it names EXEC/VCC.
+	// Peer values and host participation never contribute to its population
+	// count. Native admission maps subgroup position to the logical guest lane.
 	static const char* text = R"(
         <mask_load>
         <accumulator_load>
         %mbcnt_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
-        %mbcnt_half_<index> = <half_test>
-        %mbcnt_lane_bit_<index> = <lane_bit>
-        %mbcnt_mask_bit_<index> = OpShiftLeftLogical %uint %uint_1 %mbcnt_lane_bit_<index>
-        %mbcnt_masked_<index> = OpBitwiseAnd %uint %mbcnt_mask_<index> %mbcnt_mask_bit_<index>
-        %mbcnt_source_active_<index> = OpINotEqual %bool %mbcnt_masked_<index> %uint_0
-        %mbcnt_selected_<index> = OpSelect %uint %mbcnt_source_active_<index> %uint_1 %uint_0
-        %mbcnt_prefix_<index> = OpGroupNonUniformIAdd %uint %uint_3 ExclusiveScan %mbcnt_selected_<index>
-        %mbcnt_result_<index> = OpIAdd %uint %mbcnt_acc_<index> %mbcnt_prefix_<index>
-        %mbcnt_result_float_<index> = OpBitcast %float %mbcnt_result_<index>
-        %mbcnt_exec_lane_lt32_<index> = OpULessThan %bool %mbcnt_lane_<index> %uint_32
-        %mbcnt_exec_lane_bit_<index> = OpBitwiseAnd %uint %mbcnt_lane_<index> %uint_31
+        <count>
+        %mbcnt_prefix_<index> = OpBitFieldInsert %uint %uint_0 %uint_0xffffffff %uint_0 %mbcnt_count_<index>
+        %mbcnt_masked_<index> = OpBitwiseAnd %uint %mbcnt_mask_<index> %mbcnt_prefix_<index>
+        %mbcnt_popcount_<index> = OpBitCount %uint %mbcnt_masked_<index>
+        %mbcnt_result_<index> = OpIAdd %uint %mbcnt_acc_<index> %mbcnt_popcount_<index>
         %mbcnt_exec_word_lo_<index> = OpLoad %uint %exec_lo
-        %mbcnt_exec_word_hi_<index> = OpLoad %uint %exec_hi
-        %mbcnt_exec_word_<index> = OpSelect %uint %mbcnt_exec_lane_lt32_<index> %mbcnt_exec_word_lo_<index> %mbcnt_exec_word_hi_<index>
-        %mbcnt_exec_mask_<index> = OpShiftLeftLogical %uint %uint_1 %mbcnt_exec_lane_bit_<index>
-        %mbcnt_exec_masked_<index> = OpBitwiseAnd %uint %mbcnt_exec_word_<index> %mbcnt_exec_mask_<index>
-        %mbcnt_exec_active_<index> = OpINotEqual %bool %mbcnt_exec_masked_<index> %uint_0
-        %mbcnt_old_<index> = OpLoad %float %<dst>
-        %mbcnt_value_<index> = OpSelect %float %mbcnt_exec_active_<index> %mbcnt_result_float_<index> %mbcnt_old_<index>
-               OpStore %<dst> %mbcnt_value_<index>
+        %mbcnt_exec_active_<index> = OpINotEqual %bool %mbcnt_exec_word_lo_<index> %uint_0
+        %mbcnt_old_float_<index> = OpLoad %float %<dst>
+        %mbcnt_old_<index> = OpBitcast %uint %mbcnt_old_float_<index>
+        %mbcnt_value_<index> = OpSelect %uint %mbcnt_exec_active_<index> %mbcnt_result_<index> %mbcnt_old_<index>
+        %mbcnt_value_float_<index> = OpBitcast %float %mbcnt_value_<index>
+               OpStore %<dst> %mbcnt_value_float_<index>
     )";
 
-	String8 half_test;
-	String8 lane_bit;
-	if (low_half)
-	{
-		half_test = String8("OpULessThan %bool %mbcnt_lane_<index> %uint_32");
-		lane_bit  = String8("OpBitwiseAnd %uint %mbcnt_lane_<index> %uint_31");
-	} else
-	{
-		half_test = String8("OpUGreaterThanEqual %bool %mbcnt_lane_<index> %uint_32");
-		lane_bit  = String8("OpBitwiseAnd %uint %mbcnt_lane_offset_<index> %uint_31");
-	}
-
-	String8 source = String8(text)
-	                    .ReplaceStr("<mask_load>", mask_load)
-	                    .ReplaceStr("<accumulator_load>", accumulator_load)
-	                    .ReplaceStr("<half_test>", half_test)
-	                    .ReplaceStr("<lane_bit>", lane_bit)
-	                    .ReplaceStr("<dst>", dst_value.value)
-	                    .ReplaceStr("<index>", index_str);
-	if (!low_half)
-	{
-		const String8 offset = String8("        %mbcnt_lane_offset_<index> = OpISub %uint %mbcnt_lane_<index> %uint_32\n")
-		                           .ReplaceStr("<index>", index_str);
-		source = offset + source;
-	}
-
-	*dst_source += source;
+	const String8 count = low_half ? String8("%mbcnt_count_<index> = OpExtInst %uint %GLSL_std_450 UMin %mbcnt_lane_<index> %uint_32")
+	    : String8("%mbcnt_lane_offset_<index> = OpISub %uint %mbcnt_lane_<index> %uint_32\n"
+	              "%mbcnt_upper_<index> = OpUGreaterThanEqual %bool %mbcnt_lane_<index> %uint_32\n"
+	              "%mbcnt_high_count_<index> = OpSelect %uint %mbcnt_upper_<index> %mbcnt_lane_offset_<index> %uint_0\n"
+	              "%mbcnt_count_<index> = OpExtInst %uint %GLSL_std_450 UMin %mbcnt_high_count_<index> %uint_32");
+	*dst_source += String8(text)
+	                   .ReplaceStr("<count>", count)
+	                   .ReplaceStr("<mask_load>", mask_load)
+	                   .ReplaceStr("<accumulator_load>", accumulator_load)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntHiU32B32_SVdstSVsrc0SVsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (code.GetType() != ShaderType::Pixel)
+	// Numeric counting uses the same logical-lane contract in both stages.
+	if (code.GetType() != ShaderType::Pixel && code.GetType() != ShaderType::Compute)
 	{
 		return false;
 	}
-	return RecompileFragmentMbcnt(inst, index, false, spirv, dst_source);
+	return RecompileNativeMbcnt(inst, index, false, spirv, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMbcntLoU32B32_SVdstSVsrc0SVsrc1)
 {
 	const auto& inst = code.GetInstructions().At(index);
-	if (code.GetType() != ShaderType::Pixel)
+	// Numeric counting uses the same logical-lane contract in both stages.
+	if (code.GetType() != ShaderType::Pixel && code.GetType() != ShaderType::Compute)
 	{
 		return false;
 	}
-	return RecompileFragmentMbcnt(inst, index, true, spirv, dst_source);
+	return RecompileNativeMbcnt(inst, index, true, spirv, dst_source);
 }
 
 /* XXX: Bfrev, Not */
@@ -3355,8 +3105,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VNop)
 }
 
 // v_readfirstlane_b32: SGPR := VGPR[first guest-EXEC-active lane].
-// Guest EXEC is a software mask, so SPIR-V "active" alone is insufficient;
-// ballot the per-lane EXEC bit and broadcast from its lowest set lane.
+// Guest EXEC is a packed architectural mask, independent of host participation.
 KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -3386,29 +3135,58 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadfirstlaneB32_SVdstSVsrc0)
 		return true;
 	}
 
+	// Both scalar and vector producers commit packed words. Do not ballot host
+	// activity here: that would silently drop scalar-written upper-half bits.
+	// Seed empty words before FindILsb; empty EXEC selects architectural lane 0.
 	static const char* text = R"(
         <load0>
-        %rfl_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
-        %rfl_exec_lo_<index> = OpLoad %uint %exec_lo
-        %rfl_exec_hi_<index> = OpLoad %uint %exec_hi
-        %rfl_lane_lt32_<index> = OpULessThan %bool %rfl_lane_<index> %uint_32
-        %rfl_lane_mod_<index> = OpBitwiseAnd %uint %rfl_lane_<index> %uint_31
-        %rfl_exec_word_<index> = OpSelect %uint %rfl_lane_lt32_<index> %rfl_exec_lo_<index> %rfl_exec_hi_<index>
-        %rfl_bit_<index> = OpShiftLeftLogical %uint %uint_1 %rfl_lane_mod_<index>
-        %rfl_masked_<index> = OpBitwiseAnd %uint %rfl_exec_word_<index> %rfl_bit_<index>
-        %rfl_active_<index> = OpINotEqual %bool %rfl_masked_<index> %uint_0
-        %rfl_ballot_<index> = OpGroupNonUniformBallot %v4uint %uint_3 %rfl_active_<index>
-        %rfl_any_<index> = OpGroupNonUniformBallotBitCount %uint %uint_3 Reduce %rfl_ballot_<index>
-        %rfl_empty_<index> = OpIEqual %bool %rfl_any_<index> %uint_0
-        %rfl_first_<index> = OpGroupNonUniformBallotFindLSB %uint %uint_3 %rfl_ballot_<index>
-        %rfl_lane_sel_<index> = OpSelect %uint %rfl_empty_<index> %uint_0 %rfl_first_<index>
-        %rfl_value_<index> = OpGroupNonUniformBroadcast %uint %uint_3 %t0_<index> %rfl_lane_sel_<index>
-        %rfl_result_<index> = OpSelect %uint %rfl_empty_<index> %uint_0 %rfl_value_<index>
-               OpStore %<dst> %rfl_result_<index>
+        %rfl_exec_lo_<index> = OpLoad %uint %packed_exec_lo
+        %rfl_exec_hi_<index> = <high_word>
+        %rfl_has_low_<index> = OpINotEqual %bool %rfl_exec_lo_<index> %uint_0
+        %rfl_has_high_<index> = OpINotEqual %bool %rfl_exec_hi_<index> %uint_0
+        %rfl_safe_low_<index> = OpSelect %uint %rfl_has_low_<index> %rfl_exec_lo_<index> %uint_1
+        %rfl_safe_high_<index> = OpSelect %uint %rfl_has_high_<index> %rfl_exec_hi_<index> %uint_1
+        %rfl_first_low_<index> = OpExtInst %uint %GLSL_std_450 FindILsb %rfl_safe_low_<index>
+        %rfl_first_high_<index> = OpExtInst %uint %GLSL_std_450 FindILsb %rfl_safe_high_<index>
+        %rfl_high_lane_<index> = OpIAdd %uint %rfl_first_high_<index> %uint_32
+        %rfl_high_or_zero_<index> = OpSelect %uint %rfl_has_high_<index> %rfl_high_lane_<index> %uint_0
+        %rfl_lane_sel_<index> = OpSelect %uint %rfl_has_low_<index> %rfl_first_low_<index> %rfl_high_or_zero_<index>
+        <exchange>
+               OpStore %<dst> %rfl_value_<index>
 )";
+	String8 exchange = "%rfl_value_<index> = OpGroupNonUniformBroadcast %uint %uint_3 %t0_<index> %rfl_lane_sel_<index>";
+	if (spirv->GetHostShaderType() == ShaderType::Pixel)
+	{
+		// If the first guest lane is a Vulkan helper, first gather its value
+		// into the other quad members. Broadcast from a participating member of
+		// that quad rather than asking a general collective to fetch a helper.
+		exchange = R"(
+%rfl_quad_index_<index> = OpBitwiseAnd %uint %rfl_lane_sel_<index> %uint_3
+%rfl_q0_<index> = OpGroupNonUniformQuadBroadcast %uint %uint_3 %t0_<index> %uint_0
+%rfl_q1_<index> = OpGroupNonUniformQuadBroadcast %uint %uint_3 %t0_<index> %uint_1
+%rfl_q2_<index> = OpGroupNonUniformQuadBroadcast %uint %uint_3 %t0_<index> %uint_2
+%rfl_q3_<index> = OpGroupNonUniformQuadBroadcast %uint %uint_3 %t0_<index> %uint_3
+%rfl_is0_<index> = OpIEqual %bool %rfl_quad_index_<index> %uint_0
+%rfl_is1_<index> = OpIEqual %bool %rfl_quad_index_<index> %uint_1
+%rfl_is2_<index> = OpIEqual %bool %rfl_quad_index_<index> %uint_2
+%rfl_pick23_<index> = OpSelect %uint %rfl_is2_<index> %rfl_q2_<index> %rfl_q3_<index>
+%rfl_pick123_<index> = OpSelect %uint %rfl_is1_<index> %rfl_q1_<index> %rfl_pick23_<index>
+%rfl_quad_value_<index> = OpSelect %uint %rfl_is0_<index> %rfl_q0_<index> %rfl_pick123_<index>
+%rfl_native_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+%rfl_native_quad_<index> = OpShiftRightLogical %uint %rfl_native_lane_<index> %uint_2
+%rfl_target_quad_<index> = OpShiftRightLogical %uint %rfl_lane_sel_<index> %uint_2
+%rfl_in_quad_<index> = OpIEqual %bool %rfl_native_quad_<index> %rfl_target_quad_<index>
+%rfl_members_<index> = OpGroupNonUniformBallot %v4uint %uint_3 %rfl_in_quad_<index>
+%rfl_representative_<index> = OpGroupNonUniformBallotFindLSB %uint %uint_3 %rfl_members_<index>
+%rfl_broadcast_<index> = OpGroupNonUniformBroadcast %uint %uint_3 %rfl_quad_value_<index> %rfl_representative_<index>
+)";
+		exchange += spirv->NativeQuadUniform("rfl_broadcast_<index>", "uint", "rfl_value_<index>");
+	}
 
 	*dst_source += String8(text)
 	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<high_word>", spirv->NativeWave32() ? "OpCopyObject %uint %uint_0" : "OpLoad %uint %packed_exec_hi")
+	                   .ReplaceStr("<exchange>", exchange)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 
@@ -3460,6 +3238,58 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 		return false;
 	}
 
+	// On the wave tier the guest wave64 is a partially populated host subgroup:
+	// a selector naming a lane the subgroup does not hold reads a ghost lane.
+	// Those lanes only carry the proven neutral zero, so the read is exact. The
+	// emitted select also keeps a 64-lane host correct: lanes inside the real
+	// subgroup shuffle the live value, only ghosts read zero.
+	if (spirv->UsesFragmentWaveTier())
+	{
+		const auto& source = inst.src[0];
+		const auto& select = inst.src[1];
+		const bool  scalar = select.type == ShaderOperandType::LiteralConstant ||
+		                    select.type == ShaderOperandType::IntegerInlineConstant;
+		const uint32_t lane = scalar ? select.constant.u : 0u;
+		const bool     ghost = !scalar || lane >= 32u;
+		if (ghost && ((scalar && lane >= 64u) || source.type != ShaderOperandType::Vgpr ||
+		              !ShaderFragmentWaveGhostZero(code, index, source.register_id)))
+		{
+			return false;
+		}
+		if (!ghost)
+		{
+			static const char* scalar_text = R"(
+        <load0>
+        <load1>
+        %readlane_<index> = OpGroupNonUniformShuffle %uint %uint_3 %t0_<index> %t1_<index>
+               OpStore %<dst> %readlane_<index>
+)";
+			*dst_source += String8(scalar_text)
+			                   .ReplaceStr("<load0>", load0)
+			                   .ReplaceStr("<load1>", load1)
+			                   .ReplaceStr("<dst>", dst_value.value)
+			                   .ReplaceStr("<index>", index_str);
+			return true;
+		}
+		static const char* tier_text = R"(
+        <load0>
+        <load1>
+        %readlane_size_<index> = OpLoad %uint %gl_SubgroupSize
+        %readlane_last_<index> = OpISub %uint %readlane_size_<index> %uint_1
+         %readlane_sel_<index> = OpExtInst %uint %GLSL_std_450 UMin %t1_<index> %readlane_last_<index>
+         %readlane_in_<index> = OpULessThan %bool %t1_<index> %readlane_size_<index>
+        %readlane_val_<index> = OpGroupNonUniformShuffle %uint %uint_3 %t0_<index> %readlane_sel_<index>
+        %readlane_<index> = OpSelect %uint %readlane_in_<index> %readlane_val_<index> %uint_0
+               OpStore %<dst> %readlane_<index>
+)";
+		*dst_source += String8(tier_text)
+		                   .ReplaceStr("<load0>", load0)
+		                   .ReplaceStr("<load1>", load1)
+		                   .ReplaceStr("<dst>", dst_value.value)
+		                   .ReplaceStr("<index>", index_str);
+		return true;
+	}
+
 	static const char* text = R"(
         <load0>
         <load1>
@@ -3474,6 +3304,87 @@ KYTY_RECOMPILER_FUNC(Recompile_VReadlaneB32_SVdstSVsrc0SVsrc1)
 	                   .ReplaceStr("<index>", index_str);
 
 	return true;
+}
+
+// v_permlane16_b32 gathers inside each 16-lane row and v_permlanex16_b32 swaps
+// the row with its alternate (ISA 12.12). Admitted only inside a proven
+// neutral region on the native wave tier: the nibble table picks a row lane,
+// the shuffle follows it, and targets past the host subgroup (the ghost lanes
+// of the guest wave64) read the proven zero. FI and BOUND_CTRL are irrelevant
+// there: the region runs with full EXEC and every target stays inside a row.
+static bool RecompilePermlane16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool x16)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (spirv->GetHostShaderType() != ShaderType::Pixel || !spirv->UsesFragmentWaveTier() ||
+	    !ShaderFragmentWaveInsideRegion(code, index))
+	{
+		return false;
+	}
+	if (!operand_is_variable(inst.dst) || inst.dst.type != ShaderOperandType::Vgpr || inst.src_num < 3 ||
+	    inst.src[0].type != ShaderOperandType::Vgpr || inst.vop3_omod != 0u || (inst.vop3_op_sel & ~3u) != 0u ||
+	    inst.vop_sdwa || inst.dst.clamp || inst.dst.multiplier != 1.0f)
+	{
+		return false;
+	}
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	String8      index_str = String8::FromPrintf("%u", index);
+	String8      load0;
+	String8      load1;
+	String8      load2;
+	if (!operand_load_uint(spirv, inst.src[0], "perm_src0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "perm_src1_<index>", index_str, &load1) ||
+	    !operand_load_uint(spirv, inst.src[2], "perm_src2_<index>", index_str, &load2))
+	{
+		return false;
+	}
+	static const char* text = R"(
+        <load0>
+        <load1>
+        <load2>
+          %perm_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
+         %perm_local_<index> = OpBitwiseAnd %uint %perm_lane_<index> %uint_15
+        %perm_second_<index> = OpUGreaterThanEqual %bool %perm_local_<index> %uint_8
+         %perm_table_<index> = OpSelect %uint %perm_second_<index> %perm_src2_<index> %perm_src1_<index>
+        %perm_nibble_<index> = OpBitwiseAnd %uint %perm_local_<index> %uint_7
+         %perm_shift_<index> = OpShiftLeftLogical %uint %perm_nibble_<index> %uint_2
+       %perm_shifted_<index> = OpShiftRightLogical %uint %perm_table_<index> %perm_shift_<index>
+      %perm_selected_<index> = OpBitwiseAnd %uint %perm_shifted_<index> %uint_15
+       %perm_row_id_<index> = OpBitwiseAnd %uint %perm_lane_<index> %<row_mask>
+       %perm_row_in_<index> = OpBitwiseXor %uint %perm_row_id_<index> %<row_xor>
+        %perm_target_<index> = OpBitwiseOr %uint %perm_row_in_<index> %perm_selected_<index>
+         %perm_size_<index> = OpLoad %uint %gl_SubgroupSize
+          %perm_in_<index> = OpULessThan %bool %perm_target_<index> %perm_size_<index>
+         %perm_last_<index> = OpISub %uint %perm_size_<index> %uint_1
+       %perm_clamped_<index> = OpExtInst %uint %GLSL_std_450 UMin %perm_target_<index> %perm_last_<index>
+         %perm_fetch_<index> = OpGroupNonUniformShuffle %uint %uint_3 %perm_src0_<index> %perm_clamped_<index>
+         %perm_value_<index> = OpSelect %uint %perm_in_<index> %perm_fetch_<index> %uint_0
+          %perm_exec_<index> = OpLoad %uint %exec_lo
+         %perm_write_<index> = OpINotEqual %bool %perm_exec_<index> %uint_0
+          %perm_old_<index> = OpLoad %float %<dst>
+        %perm_old_u_<index> = OpBitcast %uint %perm_old_<index>
+       %perm_result_<index> = OpSelect %uint %perm_write_<index> %perm_value_<index> %perm_old_u_<index>
+       %perm_result_<index>f = OpBitcast %float %perm_result_<index>
+               OpStore %<dst> %perm_result_<index>f
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<load2>", load2)
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<row_mask>", spirv->GetConstantUint(0xfffffff0u))
+	                   .ReplaceStr("<row_xor>", spirv->GetConstantUint(x16 ? 16u : 0u))
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_VPermlane16B32_VdstVsrc0Vsrc1Vsrc2)
+{
+	return RecompilePermlane16(index, code, dst_source, spirv, false);
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_VPermlanex16B32_VdstVsrc0Vsrc1Vsrc2)
+{
+	return RecompilePermlane16(index, code, dst_source, spirv, true);
 }
 
 // v_writelane_b32 updates only the invocation whose physical wave lane matches the selector.
@@ -3535,6 +3446,345 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 	return true;
 }
 
+// A movrels-family instruction reads or writes a VGPR whose index is offset by
+// M0. The register file is lowered to named variables, so the relative index
+// can only be resolved when M0 is a proven literal inside the same basic
+// block: the nearest preceding M0 write must be a literal s_mov_b32 and no
+// branch target may merge a different value in between.
+bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0)
+{
+	const auto merge_at = [&code](uint32_t pc) {
+		return code.GetLabels().Contains(pc, [](auto label, auto target) {
+			return !label.IsDisabled() && label.GetDst() == target;
+		});
+	};
+	if (index == 0u || merge_at(code.GetInstructions().At(index).pc))
+	{
+		return false;
+	}
+	for (uint32_t i = index; i-- > 0u;)
+	{
+		const auto& prev = code.GetInstructions().At(i);
+		if (merge_at(prev.pc))
+		{
+			return false;
+		}
+		if (prev.dst.type == ShaderOperandType::M0 && prev.dst.size == 1)
+		{
+			const auto& src0 = prev.src[0];
+			const bool  literal =
+			    (src0.type == ShaderOperandType::LiteralConstant || src0.type == ShaderOperandType::IntegerInlineConstant) &&
+			    !src0.negate && !src0.absolute && !src0.dpp && src0.multiplier == 1.0f;
+			if (prev.type == ShaderInstructionType::SMovB32 && prev.src_num >= 1 && literal)
+			{
+				*m0 = src0.constant.u;
+				return true;
+			}
+			return false;
+		}
+	}
+	return false;
+}
+
+// Every VGPR index statically named by the program at or above |base|. A
+// relative access can only observe registers that some instruction names —
+// on hardware an index landing outside them reads undefined register-file
+// contents, so the select chain below substitutes zero for those candidates.
+static Vector<int> MovrelCandidateRegisters(const ShaderCode& code, int base)
+{
+	Vector<int> regs;
+	auto        add = [&regs, base](const ShaderOperand& op) {
+        if (op.type != ShaderOperandType::Vgpr || op.register_id < 0)
+        {
+            return;
+        }
+        const int size = op.size > 0 ? op.size : 1;
+        for (int r = op.register_id; r < op.register_id + size && r <= 255; ++r)
+        {
+            if (r >= base && !regs.Contains(r))
+            {
+                regs.Add(r);
+            }
+        }
+	};
+	for (uint32_t i = 0; i < code.GetInstructions().Size(); ++i)
+	{
+		const auto& inst = code.GetInstructions().At(i);
+		add(inst.dst);
+		add(inst.dst2);
+		for (int s = 0; s < inst.src_num; ++s)
+		{
+			add(inst.src[s]);
+		}
+		for (int a = 0; a < inst.mimg_address_num; ++a)
+		{
+			add(inst.mimg_address[a]);
+		}
+		uint32_t m0 = 0;
+		if ((inst.type == ShaderInstructionType::VMovrelsB32 || inst.type == ShaderInstructionType::VMovreldB32 ||
+		     inst.type == ShaderInstructionType::VMovrelsdB32) &&
+		    MovrelProvenLiteralM0(code, i, &m0))
+		{
+			// Registers resolved through a proven-literal relative move are
+			// declared even though no operand names them.
+			if (inst.type != ShaderInstructionType::VMovreldB32 && inst.src_num > 0)
+			{
+				ShaderOperand resolved = inst.src[0];
+				resolved.register_id += static_cast<int>(m0);
+				add(resolved);
+			}
+			if (inst.type != ShaderInstructionType::VMovrelsB32)
+			{
+				ShaderOperand resolved = inst.dst;
+				resolved.register_id += static_cast<int>(m0);
+				add(resolved);
+			}
+		}
+	}
+	return regs;
+}
+
+// dst = VGPR[base + m0] lowered to a select chain over every named candidate.
+static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, const ShaderCode& code, String8* dst_source,
+                               Spirv* spirv)
+{
+	String8 acc   = "%" + spirv->GetConstantFloat(0.0f);
+	String8 chain;
+	for (const auto reg: MovrelCandidateRegisters(code, base))
+	{
+		chain += String8::FromPrintf("%%rel_eq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
+		                             "%%rel_v_%d_%d = OpLoad %%float %%v%d\n"
+		                             "%%rel_acc_%d_%d = OpSelect %%float %%rel_eq_%d_%d %%rel_v_%d_%d %s\n",
+		                             index, reg, index, reg - base, index, reg, reg, index, reg, index, reg, index, reg,
+		                             acc.c_str());
+		acc = String8::FromPrintf("%%rel_acc_%d_%d", index, reg);
+	}
+	if (acc.StartsWith("%float"))
+	{
+		return false;
+	}
+	auto dst_value = operand_variable_to_str(dst);
+	if (dst_value.type != SpirvType::Float)
+	{
+		return false;
+	}
+	*dst_source += String8::FromPrintf("%%rel_m0_%d = OpLoad %%uint %%m0\n"
+	                                   "%s"
+	                                   "%%rel_exec_%d = OpLoad %%uint %%exec_lo\n"
+	                                   "%%rel_execb_%d = OpINotEqual %%bool %%rel_exec_%d %%uint_0\n"
+	                                   "%%rel_old_%d = OpLoad %%float %%%s\n"
+	                                   "%%rel_out_%d = OpSelect %%float %%rel_execb_%d %s %%rel_old_%d\n"
+	                                   "OpStore %%%s %%rel_out_%d\n",
+	                                   index, chain.c_str(), index, index, index, index, dst_value.value.c_str(), index, index,
+	                                   acc.c_str(), index, dst_value.value.c_str(), index);
+	return true;
+}
+
+// VGPR[base + m0] = src lowered to a conditional store per named candidate.
+// |src_load| holds the operand fetch block (or the movrelsd select chain) and
+// |src_id| the float id it produces; it may reference the m0 load emitted
+// first, so the source is evaluated once before the gated stores.
+static bool EmitMovreldDynamic(int index, int base, const String8& src_load, const String8& src_id, const ShaderCode& code,
+                               String8* dst_source)
+{
+	String8 stores;
+	for (const auto reg: MovrelCandidateRegisters(code, base))
+	{
+		stores += String8::FromPrintf("%%rel_old_%d_%d = OpLoad %%float %%v%d\n"
+		                              "%%rel_eq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
+		                              "%%rel_gate_%d_%d = OpLogicalAnd %%bool %%rel_eq_%d_%d %%rel_execb_%d\n"
+		                              "%%rel_out_%d_%d = OpSelect %%float %%rel_gate_%d_%d %s %%rel_old_%d_%d\n"
+		                              "OpStore %%v%d %%rel_out_%d_%d\n",
+		                              index, reg, reg, index, reg, index, reg - base, index, reg, index, reg, index, index, reg,
+		                              index, reg, src_id.c_str(), index, reg, reg, index, reg);
+	}
+	if (stores.IsEmpty())
+	{
+		return false;
+	}
+	*dst_source += String8::FromPrintf("%%rel_m0_%d = OpLoad %%uint %%m0\n"
+	                                   "%%rel_exec_%d = OpLoad %%uint %%exec_lo\n"
+	                                   "%%rel_execb_%d = OpINotEqual %%bool %%rel_exec_%d %%uint_0\n"
+	                                   "%s"
+	                                   "%s",
+	                                   index, index, index, index, src_load.c_str(), stores.c_str());
+	return true;
+}
+
+static bool MovrelOperandBounds(const ShaderOperand& operand, uint32_t m0, uint64_t* adjusted)
+{
+	if (operand.type != ShaderOperandType::Vgpr)
+	{
+		return false;
+	}
+	const uint64_t rel = static_cast<uint64_t>(operand.register_id) + m0;
+	if (rel > 255u)
+	{
+		return false;
+	}
+	*adjusted = rel;
+	return true;
+}
+
+static bool EmitMovrelMove(int index, ShaderOperand dst, ShaderOperand src, String8* dst_source, Spirv* spirv)
+{
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	// A relative move writes a float-typed VGPR variable; any other destination
+	// has no result id to store to, so reject the instruction.
+	if (!operand_is_variable(dst))
+	{
+		return false;
+	}
+
+	auto dst_value = operand_variable_to_str(dst);
+
+	if (dst_value.type != SpirvType::Float)
+	{
+		return false;
+	}
+
+	String8 load0;
+
+	if (!operand_load_float(spirv, src, "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+    <load0>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %tdst_<index> = OpLoad %float %<dst>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t0_<index> %tdst_<index>
+               OpStore %<dst> %tval_<index>
+)";
+	*dst_source += String8(text).ReplaceStr("<dst>", dst_value.value).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_VMovrelsB32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	uint32_t m0 = 0;
+	if (inst.vop_sdwa || inst.src[0].dpp)
+	{
+		return false;
+	}
+	if (MovrelProvenLiteralM0(code, index, &m0))
+	{
+		uint64_t      rel = 0;
+		ShaderOperand src = inst.src[0];
+		if (!MovrelOperandBounds(src, m0, &rel))
+		{
+			return false;
+		}
+		src.register_id = static_cast<int>(rel);
+		return EmitMovrelMove(index, inst.dst, src, dst_source, spirv);
+	}
+
+	// Runtime m0: resolve through a select chain over the named register file.
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || inst.src[0].type != ShaderOperandType::Vgpr)
+	{
+		return false;
+	}
+	return EmitMovrelsDynamic(index, inst.dst, inst.src[0].register_id, code, dst_source, spirv);
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	uint32_t m0 = 0;
+	if (inst.vop_sdwa)
+	{
+		return false;
+	}
+	if (MovrelProvenLiteralM0(code, index, &m0))
+	{
+		uint64_t      rel = 0;
+		ShaderOperand dst = inst.dst;
+		if (!MovrelOperandBounds(dst, m0, &rel))
+		{
+			return false;
+		}
+		dst.register_id = static_cast<int>(rel);
+		return EmitMovrelMove(index, dst, inst.src[0], dst_source, spirv);
+	}
+
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1)
+	{
+		return false;
+	}
+	String8 src_load;
+	String8 index_str = String8::FromPrintf("%d", index);
+	if (!operand_load_float(spirv, inst.src[0], "rel_src_<index>", index_str, &src_load))
+	{
+		return false;
+	}
+	return EmitMovreldDynamic(index, inst.dst.register_id, src_load, "%rel_src_" + index_str, code, dst_source);
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_VMovrelsdB32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	uint32_t m0 = 0;
+	if (inst.vop_sdwa || inst.src[0].dpp)
+	{
+		return false;
+	}
+	if (MovrelProvenLiteralM0(code, index, &m0))
+	{
+		uint64_t      rel_src = 0;
+		ShaderOperand src     = inst.src[0];
+		if (!MovrelOperandBounds(src, m0, &rel_src))
+		{
+			return false;
+		}
+		src.register_id = static_cast<int>(rel_src);
+
+		uint64_t      rel_dst = 0;
+		ShaderOperand dst     = inst.dst;
+		if (!MovrelOperandBounds(dst, m0, &rel_dst))
+		{
+			return false;
+		}
+		dst.register_id = static_cast<int>(rel_dst);
+
+		return EmitMovrelMove(index, dst, src, dst_source, spirv);
+	}
+
+	// Both indices are runtime values: read through the source select chain,
+	// then write through the gated destination stores.
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || inst.src[0].type != ShaderOperandType::Vgpr)
+	{
+		return false;
+	}
+	const int src_base = inst.src[0].register_id;
+	String8   acc      = "%" + spirv->GetConstantFloat(0.0f);
+	String8   chain;
+	for (const auto reg: MovrelCandidateRegisters(code, src_base))
+	{
+		chain += String8::FromPrintf("%%rel_eq_%d_%d = OpIEqual %%bool %%rel_m0_%d %%uint_%d\n"
+		                             "%%rel_v_%d_%d = OpLoad %%float %%v%d\n"
+		                             "%%rel_acc_%d_%d = OpSelect %%float %%rel_eq_%d_%d %%rel_v_%d_%d %s\n",
+		                             index, reg, index, reg - src_base, index, reg, reg, index, reg, index, reg, index, reg,
+		                             acc.c_str());
+		acc = String8::FromPrintf("%%rel_acc_%d_%d", index, reg);
+	}
+	if (acc.StartsWith("%float"))
+	{
+		return false;
+	}
+	// EmitMovreldDynamic emits the m0 load first, so the select chain can
+	// consume %rel_m0_<index> directly.
+	return EmitMovreldDynamic(index, inst.dst.register_id, chain, acc, code, dst_source);
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VMovB32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
@@ -3549,52 +3799,10 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovB32_SVdstSVsrc0)
 
 	String8 load0;
 
-	if (!inst.src[0].dpp)
+	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
 	{
-		if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-		{
-			return false;
-		}
-	} else
-	{
-		// DPP quad-perm controls (0x000-0x0ff) select a lane within each
-		// four-lane quad. Full masks make every selected lane valid; bound_ctrl
-		// does not alter quad-perm routing. Other DPP modes require distinct
-		// row/bank semantics and must not silently become same-lane reads.
-		if (inst.src[0].dpp_ctrl > 0xffu || inst.src[0].dpp_row_mask != 0xfu ||
-		                     inst.src[0].dpp_bank_mask != 0xfu || inst.src[0].dpp_fetch_inactive) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.src[0].dpp_ctrl > 0xffu || inst.src[0].dpp_row_mask != 0xfu || condition ignored (continuing)\n"); }
-
-		if (!operand_load_float(spirv, inst.src[0], "dpp_src_<index>", index_str, &load0))
-		{
-			return false;
-		}
-
-		const auto ctrl      = spirv->GetConstantUint(inst.src[0].dpp_ctrl);
-		const auto quad_mask = spirv->GetConstantUint(0xfffffffcu);
-		const auto uint_1    = spirv->GetConstantUint(1u);
-		const auto uint_3    = spirv->GetConstantUint(3u);
-
-		static const char* dpp_quad_permute = R"(
-          %dpp_src_u_<index> = OpBitcast %uint %dpp_src_<index>
-          %dpp_lane_<index> = OpLoad %uint %gl_SubgroupInvocationID
-     %dpp_quad_base_<index> = OpBitwiseAnd %uint %dpp_lane_<index> %<quad_mask>
-     %dpp_quad_lane_<index> = OpBitwiseAnd %uint %dpp_lane_<index> %<uint_3>
-    %dpp_quad_shift_<index> = OpShiftLeftLogical %uint %dpp_quad_lane_<index> %<uint_1>
- %dpp_quad_select_bits_<index> = OpShiftRightLogical %uint %<ctrl> %dpp_quad_shift_<index>
-   %dpp_quad_select_<index> = OpBitwiseAnd %uint %dpp_quad_select_bits_<index> %<uint_3>
-       %dpp_target_<index> = OpBitwiseOr %uint %dpp_quad_base_<index> %dpp_quad_select_<index>
-      %dpp_value_u_<index> = OpGroupNonUniformShuffle %uint %uint_3 %dpp_src_u_<index> %dpp_target_<index>
-             %t0_<index> = OpBitcast %float %dpp_value_u_<index>
-)";
-
-		load0 += String8(dpp_quad_permute)
-		             .ReplaceStr("<index>", index_str)
-		             .ReplaceStr("<ctrl>", ctrl)
-		             .ReplaceStr("<quad_mask>", quad_mask)
-		             .ReplaceStr("<uint_1>", uint_1)
-		             .ReplaceStr("<uint_3>", uint_3);
+		return false;
 	}
-
 	// TODO() check VSKIP
 
 	static const char* text = R"(
@@ -3675,6 +3883,74 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_F32_SVdstSVsrc0SVsrc1)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<load_dst>", load_dst)
 	                   .ReplaceStr("<param>", param0)
+	                   .ReplaceStr("<index>", index_str);
+
+	return true;
+}
+
+/* v_ldexp_f32: dst = src0 * 2**src1 with src1 a signed integer exponent. The
+ * generic F32 emitter would load src1 as %float (bitcast), which Ldexp
+ * rejects: its 'exp' operand must be an integer. */
+KYTY_RECOMPILER_FUNC(Recompile_VLdexpF32_SVdstSVsrc0SVsrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+
+	String8 load0;
+	String8 load1;
+	String8 index_str = String8::FromPrintf("%u", index);
+
+	if (!operand_is_variable(inst.dst))
+	{
+		return false;
+	}
+
+	auto dst_value = operand_variable_to_str(inst.dst);
+
+	if (dst_value.type != SpirvType::Float)
+	{
+		return false;
+	}
+
+	if (!operand_load_float(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+	if (!operand_load_int(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	{
+		return false;
+	}
+
+	// VSKIP does not exist in RDNA2. The clamp modifier is lowered by
+	// FloatClampModifier, which applies the shader's DX10_CLAMP setting. Ldexp is
+	// exact apart from results in the denormal range, so the FP denorm and round
+	// modes (SP_DENORM, SP_ROUND) only matter there; those mode bits are not
+	// modeled by any emitter yet and are tracked as one shader-wide gap in
+	// docs/BRINGUP.md ("Shader float-mode bits"). IEEE mode only quiets
+	// signaling NaNs, which Ldexp passes through unchanged.
+
+	static const char* text = R"(
+              <load0>
+              <load1>
+        %t_<index> = OpExtInst %float %GLSL_std_450 Ldexp %t0_<index> %t1_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+               OpSelectionMerge %tl2_<index> None
+               OpBranchConditional %exec_lo_b_<index> %tl1_<index> %tl2_<index>
+         %tl1_<index> = OpLabel
+               OpStore %<dst> %t_<index>
+              <multiply>
+              <clamp>
+               OpBranch %tl2_<index>
+         %tl2_<index> = OpLabel
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<multiply>", (inst.dst.multiplier != 1.0f
+	                                                  ? String8(MULTIPLY).ReplaceStr("<mul>", spirv->GetConstantFloat(inst.dst.multiplier))
+	                                                  : ""))
+	                   .ReplaceStr("<clamp>", FloatClampModifier(spirv, inst.dst.clamp))
+	                   .ReplaceStr("<dst>", dst_value.value)
+	                   .ReplaceStr("<load0>", load0)
+	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<index>", index_str);
 
 	return true;
@@ -3945,6 +4221,28 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvt_XXX_F32_SVdstSVsrc0)
 	return true;
 }
 
+static bool LoadIntegerConversionSource(Spirv* spirv, const ShaderInstruction& instruction, const String8& index, String8* output)
+{
+	if (!instruction.vop_sdwa || (instruction.vop_sdwa_ctrl & (1u << 19u)) == 0u)
+	{
+		return operand_load_uint(spirv, instruction.src[0], "t0_<index>", index, output);
+	}
+	if (!ShaderComputeWaveSdwaSignedConvertSupported(instruction) ||
+	    !operand_load_uint(spirv, instruction.src[0], "sdwa_convert_bits_<index>", index, output))
+	{
+		return false;
+	}
+	const uint32_t select = instruction.src[0].swizzle;
+	const uint32_t width = select < 4u ? 8u : (select < 6u ? 16u : 32u);
+	// The unsigned loader has positioned the selected bits at bit zero.
+	// Extend their sign before the integer-to-float conversion, not afterwards.
+	*output += String8("\n%sdwa_convert_int_<index> = OpBitcast %int %sdwa_convert_bits_<index>\n"
+	                   "%sdwa_convert_signed_<index> = OpBitFieldSExtract %int %sdwa_convert_int_<index> %uint_0 %<width>\n"
+	                   "%t0_<index> = OpBitcast %uint %sdwa_convert_signed_<index>\n")
+	               .ReplaceStr("<index>", index).ReplaceStr("<width>", spirv->GetConstantUint(width));
+	return true;
+}
+
 /* XXX: U32, I32, UbyteX, F16 */
 KYTY_RECOMPILER_FUNC(Recompile_VCvtF32_XXX_SVdstSVsrc0)
 {
@@ -3962,7 +4260,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtF32_XXX_SVdstSVsrc0)
 
 	String8 load0;
 
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	if (!LoadIntegerConversionSource(spirv, inst, index_str, &load0))
 	{
 		return false;
 	}
@@ -4141,10 +4439,12 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1)
         %t208_<index> = OpCompositeExtract %uint %t_<index> 1
         %t209_<index> = OpCompositeExtract %uint %t_<index> 0
         %t210_<index> = OpBitcast %float %t209_<index>
-               OpStore %<dst> %t210_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %carry_old_<index> = OpLoad %float %<dst>
+        %carry_dst_<index> = OpSelect %float %exec_lo_b_<index> %t210_<index> %carry_old_<index>
+               OpStore %<dst> %carry_dst_<index>
         %t213_<index> = OpSelect %uint %exec_lo_b_<index> %t208_<index> %uint_0
                OpStore %<dst2_0> %t213_<index>
                OpStore %<dst2_1> %uint_0
@@ -4164,6 +4464,27 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1)
 KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 {
 	const auto& inst = code.GetInstructions().At(index);
+	const bool native_wave32 = spirv->NativeWave32();
+	if (inst.type == ShaderInstructionType::VSubrevCoCiU32 && !ShaderReverseBorrowMaskHasProvenance(code, index, native_wave32))
+	{
+		return false;
+	}
+	const bool single_source = inst.src[2].type == ShaderOperandType::VccHi && inst.src[2].size == 1;
+	const bool single_destination = inst.dst2.type == ShaderOperandType::VccHi && inst.dst2.size == 1;
+	if ((!native_wave32 && (single_source || single_destination)) || (!single_source && inst.src[2].size != 2) ||
+	    (!single_destination && inst.dst2.size != 2))
+	{
+		return false;
+	}
+	if (inst.type == ShaderInstructionType::VSubrevCoCiU32 &&
+	    (inst.dst.clamp || inst.dst.multiplier != 1.0f || inst.src[0].negate || inst.src[0].absolute || inst.src[1].negate ||
+	     inst.src[1].absolute || inst.src[2].negate || inst.src[2].absolute))
+	{
+		// V_SUBREV_CO_CI_U32 is integer arithmetic. Its VOP3B clamp and
+		// source/output modifiers have distinct ISA semantics, so do not
+		// silently inherit the shared emitter's warning-only behavior.
+		return false;
+	}
 
 	String8 load0;
 	String8 load1;
@@ -4176,8 +4497,8 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	if (inst.dst.clamp || inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp || inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
 
 	auto dst_value   = operand_variable_to_str(inst.dst);
-	auto dst2_value0 = operand_variable_to_str(inst.dst2, 0);
-	auto dst2_value1 = operand_variable_to_str(inst.dst2, 1);
+	auto dst2_value0 = single_destination ? operand_variable_to_str(inst.dst2) : operand_variable_to_str(inst.dst2, 0);
+	auto dst2_value1 = native_wave32 ? SpirvValue {} : operand_variable_to_str(inst.dst2, 1);
 
 	if (operand_is_exec(inst.dst2)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: operand_is_exec(inst.dst2) condition ignored (continuing)\n"); }
 	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
@@ -4191,14 +4512,14 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
 	{
 		return false;
 	}
-	if (!operand_load_uint(spirv, inst.src[2], "t2_<index>", index_str, &load2, 0))
+	if (!spirv->EmitNativeMaskBit(inst.src[2], "t2_" + index_str, &load2))
 	{
 		return false;
 	}
 
-	// V_ADD_CO_CI_U32 uses the VOP3B scalar source pair as a per-lane carry-in.
+	// V_ADD_CO_CI_U32 uses the VOP3B scalar source as a per-lane carry-in.
 	// The shared addc helper returns the modular sum and carry-out as uvec2.
-	static const char* text = R"(
+	static const char* add_text = R"(
               <load0>
               <load1>
               <load2>
@@ -4206,18 +4527,58 @@ KYTY_RECOMPILER_FUNC(Recompile_V_XXX_U32_VdstSdst2Vsrc0Vsrc1Ssrc2)
         %t208_<index> = OpCompositeExtract %uint %t_<index> 1
         %t209_<index> = OpCompositeExtract %uint %t_<index> 0
         %t210_<index> = OpBitcast %float %t209_<index>
-               OpStore %<dst> %t210_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %carry_old_<index> = OpLoad %float %<dst>
+        %carry_dst_<index> = OpSelect %float %exec_lo_b_<index> %t210_<index> %carry_old_<index>
+               OpStore %<dst> %carry_dst_<index>
         %t213_<index> = OpSelect %uint %exec_lo_b_<index> %t208_<index> %uint_0
                OpStore %<dst2_0> %t213_<index>
-               OpStore %<dst2_1> %uint_0
+               <clear_high>
 )";
+	// The mask accessor supplies the selected guest lane's borrow-in bit.
+	static const char* subrev_text = R"(
+              <load0>
+              <load1>
+              <load2>
+        %subrev_carry_nonzero_<index> = OpINotEqual %bool %t2_<index> %uint_0
+        %subrev_carry_<index> = OpSelect %uint %subrev_carry_nonzero_<index> %uint_1 %uint_0
+        %subrev_base_<index> = OpISubBorrow %ResTypeU %t1_<index> %t0_<index>
+        %subrev_value_<index> = OpCompositeExtract %uint %subrev_base_<index> 0
+        %subrev_base_borrow_<index> = OpCompositeExtract %uint %subrev_base_<index> 1
+        %subrev_adjusted_<index> = OpISubBorrow %ResTypeU %subrev_value_<index> %subrev_carry_<index>
+        %subrev_result_<index> = OpCompositeExtract %uint %subrev_adjusted_<index> 0
+        %subrev_adjusted_borrow_<index> = OpCompositeExtract %uint %subrev_adjusted_<index> 1
+        %subrev_borrow_<index> = OpBitwiseOr %uint %subrev_base_borrow_<index> %subrev_adjusted_borrow_<index>
+        %t_<index> = OpCompositeConstruct %v2uint %subrev_result_<index> %subrev_borrow_<index>
+        %t208_<index> = OpCompositeExtract %uint %t_<index> 1
+        %t209_<index> = OpCompositeExtract %uint %t_<index> 0
+        %t210_<index> = OpBitcast %float %t209_<index>
+        %exec_lo_u_<index> = OpLoad %uint %exec_lo
+        %exec_hi_u_<index> = OpLoad %uint %exec_hi ; unused
+        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
+        %subrev_old_dst_<index> = OpLoad %float %<dst>
+        %subrev_dst_<index> = OpSelect %float %exec_lo_b_<index> %t210_<index> %subrev_old_dst_<index>
+               OpStore %<dst> %subrev_dst_<index>
+        %t213_<index> = OpSelect %uint %exec_lo_b_<index> %t208_<index> %uint_0
+               OpStore %<dst2_0> %t213_<index>
+               <clear_high>
+)";
+	const char* text = nullptr;
+	switch (inst.type)
+	{
+		case ShaderInstructionType::VAddCoCiU32: text = add_text; break;
+		case ShaderInstructionType::VSubrevCoCiU32: text = subrev_text; break;
+		default: return false;
+	}
+	// A wave32 carry writes one word. The adjacent scalar word can hold
+	// another live mask, including a comparison explicitly stored in VCC_HI.
+	const auto clear_high = native_wave32 ? String8 {} : String8("OpStore %<dst2_1> %uint_0").ReplaceStr("<dst2_1>", dst2_value1.value);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<dst2_0>", dst2_value0.value)
-	                   .ReplaceStr("<dst2_1>", dst2_value1.value)
+	                   .ReplaceStr("<clear_high>", clear_high)
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
 	                   .ReplaceStr("<load2>", load2)
@@ -4327,11 +4688,25 @@ KYTY_RECOMPILER_FUNC(Recompile_Fetch)
 
 		if (format.numeric_class == VulkanVertexInputNumericClass::Uint)
 		{
-			EXIT_IF(format.component_count != 1 || r.registers_num != 1 || inst.dst.size != 1);
-			*dst_source += String8::FromPrintf("%%tfetch_uint_%u = OpLoad %%uint %%attr%d\n"
-			                                  "%%tfetch_uint_bits_%u = OpBitcast %%float %%tfetch_uint_%u\n"
-			                                  "OpStore %%v%d %%tfetch_uint_bits_%u\n",
-			                                  index, attrib_id, index, index, inst.dst.register_id, index);
+			// Integer attributes land in the VGPRs as raw bits.
+			EXIT_IF(inst.dst.size < 1 || r.registers_num < inst.dst.size || r.registers_num > 4);
+			if (r.registers_num == 1)
+			{
+				*dst_source += String8::FromPrintf("%%tfetch_uint_%u = OpLoad %%uint %%attr%d\n"
+				                                  "%%tfetch_uint_bits_%u = OpBitcast %%float %%tfetch_uint_%u\n"
+				                                  "OpStore %%v%d %%tfetch_uint_bits_%u\n",
+				                                  index, attrib_id, index, index, inst.dst.register_id, index);
+				return true;
+			}
+			*dst_source += String8::FromPrintf("%%tfetch_uvec_%u = OpLoad %%v%duint %%attr%d\n", index, r.registers_num, attrib_id);
+			for (int component = 0; component < inst.dst.size; component++)
+			{
+				*dst_source += String8::FromPrintf("%%tfetch_uvec_%u_%d = OpCompositeExtract %%uint %%tfetch_uvec_%u %d\n"
+				                                  "%%tfetch_uvec_bits_%u_%d = OpBitcast %%float %%tfetch_uvec_%u_%d\n"
+				                                  "OpStore %%v%d %%tfetch_uvec_bits_%u_%d\n",
+				                                  index, component, index, component, index, component, index, component,
+				                                  inst.dst.register_id + component, index, component);
+			}
 			return true;
 		}
 

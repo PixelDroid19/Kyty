@@ -19,8 +19,6 @@
 //
 // Public API remains in include/Emulator/Graphics/GraphicsRender.h
 
-#include "Emulator/Graphics/GraphicsRender.h"
-
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/File.h"
@@ -32,6 +30,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DepthStencilCopy.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/Objects/DepthStencilBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -42,16 +41,19 @@
 #include "Emulator/Graphics/RenderResolutionPlanner.h"
 #include "Emulator/Graphics/SampleLocations.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderDescriptorLayoutPlan.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Kernel/EventQueue.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -251,7 +253,7 @@ public:
 	static constexpr int SAMPLERS_MAX         = ShaderSamplerResources::RES_MAX;
 	static constexpr int PUSH_CONSTANTS_MAX   = static_cast<int>(ShaderBindResources::PORTABLE_PUSH_CONSTANT_BYTES / 4);
 	static constexpr int METADATA_DWORDS_MAX  = ShaderStorageResources::BUFFERS_MAX * 4 + ShaderTextureResources::RES_MAX * 8 +
-	                                            ShaderSamplerResources::RES_MAX * 4 + 4 + ShaderDirectSgprsResources::SGPRS_MAX;
+	                                            ShaderSamplerResources::RES_MAX * 4 + 4 + ShaderDirectSgprsResources::SGPRS_MAX + 4;
 	static constexpr int GDS_BUFFER_MAX       = 1;
 
 	DescriptorCache() { if (!Core::Thread::IsMainThread()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !Core::Thread::IsMainThread() condition ignored (continuing)\n"); } }
@@ -260,8 +262,7 @@ public:
 
 	VkDescriptorSetLayout GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind);
 
-	VulkanDescriptorSet* Allocate(Stage stage, int storage_buffers_num, int textures2d_sampled_num, int textures2d_storage_num,
-	                              int samplers_num, int gds_buffers_num, bool vsharp_uniform_buffer);
+	VulkanDescriptorSet* Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                 Free(VulkanDescriptorSet* set);
 
 	VulkanDescriptorSet* GetDescriptor(Stage stage, VulkanBuffer** storage_buffers, VulkanImage** textures2d_sampled,
@@ -284,6 +285,7 @@ private:
 		int                  next_free_set                                 = -1;
 		uint32_t             hash                                          = 0;
 		Stage                stage                                         = Stage::Unknown;
+		ShaderDescriptorLayoutPlan::Key layout_key = {};
 		int                  storage_buffers_num                           = 0;
 		VulkanBufferDescriptorKey storage_buffers[BUFFERS_MAX]             = {};
 		int                  textures2d_sampled_num                        = 0;
@@ -325,8 +327,7 @@ private:
 		bool             free           = true;
 	};
 
-	VkDescriptorSetLayout GetOrCreateLayout(Stage stage, int storage_buffers_num, int textures2d_sampled_num, int textures2d_storage_num,
-	                                        int samplers_num, int gds_buffers_num, bool vsharp_uniform_buffer);
+	VkDescriptorSetLayout GetOrCreateLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan);
 	void                  CreatePool();
 
 	static uint32_t CalcHash(const Set& s);
@@ -341,12 +342,7 @@ private:
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
 
-	VkDescriptorSetLayout m_descriptor_set_layout_vertex[BUFFERS_MAX + 1][TEXTURES_SAMPLED_MAX + 1][TEXTURES_STORAGE_MAX + 1]
-	                                                    [SAMPLERS_MAX + 1][GDS_BUFFER_MAX + 1][2] = {};
-	VkDescriptorSetLayout m_descriptor_set_layout_pixel[BUFFERS_MAX + 1][TEXTURES_SAMPLED_MAX + 1][TEXTURES_STORAGE_MAX + 1]
-	                                                   [SAMPLERS_MAX + 1][GDS_BUFFER_MAX + 1][2] = {};
-	VkDescriptorSetLayout m_descriptor_set_layout_compute[BUFFERS_MAX + 1][TEXTURES_SAMPLED_MAX + 1][TEXTURES_STORAGE_MAX + 1]
-	                                                     [SAMPLERS_MAX + 1][GDS_BUFFER_MAX + 1][2] = {};
+	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
 };
 
 class SamplerCache
@@ -423,6 +419,8 @@ private:
 		uint64_t           image_id[8]             = {};
 		uint32_t           base_array_layer[8]     = {};
 		uint32_t           layer_count[8]          = {};
+		VkFormat           color_format[8]         = {};
+		int                color_view[8]           = {};
 		uint64_t           depth_id                = 0;
 		bool               depth_clear_enable      = false;
 		bool               stencil_clear_enable    = false;
@@ -605,7 +603,10 @@ public:
 	void         PublishEopEqRegistration(void* registration);
 	void         CancelEopEqRegistration(void* registration);
 	void         DeleteEopEqRegistration(void* registration, Kernel::EventQueue::KernelEqueue eq, int id);
-	void         TriggerEopEvent();
+	// Signals the EOP-class graphics events. Their event data is the
+	// interrupt context id of the ReleaseMem that raised the interrupt
+	// (sceAgcDriverGetEqContextId reads it back).
+	void         TriggerEopEvent(uint32_t interrupt_context_id);
 	void         TriggerQueuedGraphicsInterrupt();
 	Core::Mutex& GetEopRegistrationMutex() { return m_eop_registration_mutex; }
 
@@ -624,7 +625,7 @@ private:
 		QueuedGraphicsInterrupt,
 	};
 
-	void TriggerRegisteredEvents(CompletionSignal signal);
+	void TriggerRegisteredEvents(CompletionSignal signal, uint32_t interrupt_context_id);
 
 	Core::Mutex             m_mutex;
 	PipelineCache*          m_pipeline_cache           = nullptr;
@@ -705,6 +706,8 @@ struct RenderColorAttachmentInfo
 	uint32_t              clear_word0             = 0;
 	uint32_t              clear_word1             = 0;
 	RenderTextureFormat   render_texture_format   = RenderTextureFormat::Unknown;
+	VkFormat              attachment_format       = VK_FORMAT_UNDEFINED;
+	int                   attachment_view         = VulkanImage::VIEW_DEFAULT;
 	VideoOutVulkanImage*  existing_video_image    = nullptr;
 	uint32_t              width                   = 0;
 	uint32_t              height                  = 0;
@@ -1506,6 +1509,22 @@ void hw_print(const HW::Context& hw);
 void get_stencil_state(PipelineStencilStaticState* s, PipelineStencilDynamicState* d, uint8_t func, uint8_t fail, uint8_t zpass,
                        uint8_t zfail, uint8_t testval, uint8_t mask, uint8_t writemask, uint8_t opval);
 Vector<RenderTextureVulkanImage*>  FindRenderTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
+// A dispatch proven to store `words` to every 16-byte record of its only
+// storage buffer, [address, address + size).
+struct ComputeUniformBufferFill
+{
+	uint64_t                address = 0;
+	uint64_t                size    = 0;
+	std::array<uint32_t, 4> words {};
+};
+[[nodiscard]] bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y,
+                                                   uint32_t group_z, ComputeUniformBufferFill* fill);
+// Copies the filled storage object into the guest device-address view in queue
+// order, so later device-address consumers on this queue need no CPU write-back.
+[[nodiscard]] bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
+// Ordered compute fills of color-image aliases (docs/graphics-compute-uniform-color-fill.md).
+void               InvalidateComputeColorFills(const ShaderBindResources& bind);
+[[nodiscard]] bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill);
 Vector<StorageTextureVulkanImage*> FindStorageTexture(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 Vector<DepthStencilVulkanImage*>   FindDepthStencil(CommandBuffer* buffer, uint64_t vaddr, uint64_t size, bool exact);
 
@@ -1519,6 +1538,7 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 void InvalidateMemoryObject(const RenderColorInfo& r);
 void InvalidateMemoryObject(const RenderDepthInfo& r);
 bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw);
+bool GraphicsRenderColorDecompress(CommandBuffer* buffer, const HW::Context& hw);
 RenderResolutionPlan PrepareDepthOnlyDisplayResolutionCohort(CommandBuffer* buffer, const RenderColorInfo& color,
                                                              const RenderDepthInfo& depth);
 RenderResolutionPlan PrepareDisplayResolutionCohort(CommandBuffer* buffer, RenderColorInfo* color, const RenderDepthInfo& depth,
@@ -1532,7 +1552,8 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 	                   uint32_t required_records);
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                     uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr);
+                     uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
+                     uint64_t shader_checksum = 0);
 void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
 void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
 	                                    const VulkanFramebuffer& framebuffer);
@@ -1545,6 +1566,17 @@ void TraceRenderTargetLifetimeDepthClearPass(uint64_t submit_id, const RenderDep
 	                                         const VulkanFramebuffer& framebuffer);
 void TraceRenderTargetLifetimeResolve(uint64_t submit_id, const RenderColorInfo& source, const RenderColorInfo& destination);
 void SetDynamicParams(VkCommandBuffer vk_buffer, VulkanPipeline* pipeline);
+
+// A pixel stage that needs the capture, shade and resolve strategy. The facts
+// text records host capabilities, program contract verdicts, plan sizing and
+// whether each generated module assembles, for a strict-mode stop.
+struct FragmentTransportRequirement
+{
+	bool    required = false;
+	String8 facts;
+};
+FragmentTransportRequirement FragmentTransportRequire(const ShaderCode& code, const ShaderPixelInputInfo& pixel, uint32_t user_sgpr_count,
+                                                      const PipelineStaticParameters& state, const VkExtent2D& extent);
 
 
 bool GraphicsResolvePrimitiveDrawPlan(uint32_t primitive_type, uint32_t guest_count, int vertex_buffers_num, bool indexed,

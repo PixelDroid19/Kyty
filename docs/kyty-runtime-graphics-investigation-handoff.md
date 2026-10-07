@@ -326,6 +326,1510 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Uninitialized constant-buffer V# in a Unity title's EUD (2026-10-04, open).
+  A colour-grading pixel shader loads its constant-buffer V# with `s_load_dwordx4
+  s[88:91], s[28:29], 160` and reads 208 bytes through it at immediate offsets
+  (0, 16, 80, 144, 208 with x16 loads). Its AGC metadata agrees: user SGPRs 30,
+  `eud_size_dw` 44, type-5 EUD pointer at SGPR 28, five 8-dword T# at API offsets
+  32-64 (EUD dwords 0-39) and one constant-buffer sharp at API offset 72 (EUD
+  dwords 40-43). The guest writes the five T# and never dwords 40-43: a 1 ms CPU
+  watcher saw one early heap write and none later; no CP, DMA, EOP or writeback
+  write reaches the slot; no DMA_DATA source or destination is rejected; the
+  indirect SH/CX/UC patch helpers only touch their packets. The slot holds two
+  64-bit guest pointers, e.g. `0x0000022a280000f0` and `0x000002122449c574`
+  (the same values on 2026-09-09 and today, sometimes one dword later), not a V#.
+  Since `290862c0` the bind requests only the proven SMEM span (0xd0 bytes, not
+  the 0x569000 the decoded V# declares), and `32a1b60c` copies a readable mapped
+  span; the base is unmapped in this tree, so the strict run stops after 12-71 s.
+  The 2026-09-08 binary compiles and binds the same shader and slot from the same
+  profile and runs 264 s; its address was readable in its layout, so its run
+  proves no correct constant data. Open: whether hardware ever executes this pass
+  with these words, or a guest/driver write is still missing. Intermittently the
+  title also stalls at boot: the main thread stops after `RequestThreadContext`
+  while another waits in `KernelWaitEventFlag`, with no flip pending.
+
+- Unintegrated `feature/reviewed-main` work (2026-10-04). That branch holds 72
+  commits (2026-08-27..09-20) absent from main; `d0cdd035`, `65edd72c`,
+  `290862c0` and `32a1b60c` are integrated (the libc port without its duplicate
+  malloc-replacement scan). The other commits conflict with the current tree
+  (388 hunks in 90 files when merged at once; most per commit), chiefly the
+  compute-colour-fill series (`025fc328`..`7a56abb4`), the Gen5 ISA/packet
+  repairs (`ccd3bb59`, `aef71d7d`, `107130e0`), descriptor/storage priorities
+  (`2596531a`), audio and user-service fixes, fused object names, the flip
+  drain (`ea6cf330`, superseded by GPU-queued flip accounting) and the
+  case-insensitive path resolver (`d41626ed`, superseded by
+  `Path::MatchCaseInsensitive`). Port each one only against a reproduced
+  failure; several reimplement logic the current tree changed.
+
+- Metadata-operation qualification (2026-10-03): same-context observations
+  identify fast-clear elimination and a newly created, undefined host color
+  image. Ordinary pixel exports and the existing expanded-image path cannot
+  establish this operation's result. Production-linked CPU parsing binds a
+  candidate 4 KiB zero-fill descriptor to the observed CMASK start, but neither
+  descriptor extent nor a readable zero prefix proves the whole metadata
+  plane, its layout, GPU completion or coherent materialization. The capture
+  ends at an observer output quota; it is partial evidence, not a completed
+  native failure replay. A later source-bound 119-suite build passes 1,742 cases
+  with the same 16 environmental skips. Its compact observer confirms the
+  requested/returned storage range and a post-dispatch marker for four
+  64-invocation workgroups, then reaches the original native-wave SIGILL after
+  10.11 seconds. Same-context backing remains undefined; no completed producer
+  fence is observed. Native input and all six cache containers match the earlier
+  complete-program build. Preserve the launch and observer obligations described
+  in [BRINGUP.md](BRINGUP.md). No gameplay acceptance follows.
+
+- Subgroup-reference exclusion (2026-10-03): the examined Intel tutorial and
+  pinned current/release vkd3d-proton sources provide subgroup selection and
+  portable wave-operation examples, not an exact native64-on32 NGG translator.
+  Required64 is rejected on max32 hardware. The audit also exposes a separate
+  SPIR-V 1.6 default-width assumption in local admission. Version/range-aware
+  selection now corrects that contract: the unchanged independent fixture goes
+  from 22 failures to 40 passes, preserving native64 and exact64/max32 refusal.
+  Full-tree qualification passes 119 isolated suites with 1,753 passes and the
+  same 16 environmental skips, plus the required CPU/static checks. Fresh
+  binary/device binding passes; the strict replay reaches the unchanged guest64
+  vertex refusal after 10.33 seconds, reporting actual SPIR-V 1.6 and host range
+  8..32. This correction establishes no narrower NGG execution or metadata
+  materialization proof, and the playable runtime gate remains unavailable.
+
+- Complete vertex-program binding (2026-10-03): an unchanged owned-memory
+  reproducer exposes front-only wave classification for back-only lane/EXEC
+  reads and a module-key collision between distinct neutral continuations.
+  Both wave cases and the collision fail before the correction; both neutral
+  controls pass. The corrected immutable program owner passes all five cases,
+  all 20 ownership regressions, and the source-bound 119-suite CPU gate with
+  1,737 passes and 16 exact environmental skips. The new suite and four adjacent
+  suites pass twice, and required CPU/static gates pass. Fresh schemas,
+  host-main and exact-device checks precede a strict replay that ends after
+  3.68 seconds at the same guest64 refusal. Draw/launch/output records and
+  program bytes match the preceding capture; all six cached SPIR-V payloads
+  are unchanged and validate for Vulkan 1.4. The new content fingerprint agrees
+  with the separately captured program, without establishing an atomic copy
+  history. The captured draw has no continuation, so correcting this proof/cache
+  prerequisite supplies neither its native launch model nor type-7 raster
+  equivalence. No present, action-response checkpoint or sustained gameplay is
+  established. Mapping-lifecycle and specialized depth-copy admission limits
+  are recorded in [BRINGUP.md](BRINGUP.md).
+
+- Reference-history follow-up (2026-10-03): immutable source citations and
+  publicly identified scene/build and controller-progression reports provide
+  useful implementation candidates. Their application-level observations do
+  not establish the retained draw's native wave populations, allocation owner,
+  primitive connectivity or all raster observers. Some reports use different
+  renderer routes or explicitly qualified diagnostic settings. Preserve each
+  report's exact revision, host, settings and scope; do not combine them into
+  an unsupported native launch certificate. The attached public ISA confirms
+  independent ES/GS count fields and allocation before primitive export, but
+  does not supply the missing same-mode population or type-7 raster rules.
+
+- Gameplay-branch route exclusion (2026-10-03): fresh normal shader decoding
+  in both inspected gameplay-associated integration revisions selects
+  Geometry/guest64 for the captured passthrough state, then rejects input type
+  7. Their mesh translator admits passthrough triangle inputs 4/6; their
+  three-record rectangle backend separately requires Vertex routing. Their
+  packet executors also report failed draws and advance. This is a static
+  exclusion of the captured shader route, not an observed skip count from a
+  recording. Metadata-only early returns do not execute the retained program.
+  The adjacent two-lane mesh implementation supplies an emulator launch model,
+  not native population, allocation-owner or raster evidence for this draw.
+  The next admission prerequisite remains a same-mode authoritative contract
+  or bound initialized-wave observation, followed by raster/observer proof.
+
+- Primitive-state producer observation (2026-10-03): three bounded captures
+  of the unchanged qualified executable each observe 31 complete constructor
+  returns. Thirteen calls use the first rejected draw's vertex program, request
+  input type 7 without a GS/HS output owner, and return output zero. An
+  independent production-linked owned-memory fixture reproduces 19 failures
+  out of 21; both explicit-GS controls pass. The corrected build passes the same
+  21-case fixture, 1,717 CPU cases with 16 exact environmental skips across 118
+  suites, and required CPU/static gates. Its 13 new pointer/ownership controls
+  and four adjacent suites pass twice. Two freshly bound strict observations
+  now retain known/written output primitive 3, with identical program and six
+  shader-cache-container bytes. The second observes the real register callback
+  write 3 and the report read 3 from the same Context. The intervening guest
+  command-memory copy/last-writer chain remains unobserved; matching values are
+  not a substitute. Both observations end after about 4.03 seconds at unchanged
+  native guest64 admission, with no observed present or gameplay. Launch
+  population/allocation and raster equivalence still require independent
+  evidence; the positive-count CPU proof does not supply that hardware contract.
+
+- Extended passthrough observation (2026-10-03): the 117-suite build passes
+  1,704 cases with 16 explicit environmental skips; all 18 conditional proof
+  controls and 16 input-snapshot controls also pass repeated execution.
+  Fresh exact-device and strict capture evidence retains identical program and
+  shader-cache bytes. Output primitive zero is now known and written, excluding
+  an unassigned-reset explanation. The count-specific CPU proof succeeds for
+  the complete captured program, while launch/output assembly and raster
+  equivalence remain unproved. Inspect the upstream primitive-state producer
+  before adopting any generation-specific ignore-zero hypothesis. No observed
+  present or action-response checkpoint is established.
+
+- Bounded vertex input capture (2026-10-03): the 116-suite diagnostic build
+  passes 1,684 CPU cases with 16 environmental skips and the native numerical
+  and exact-device gates. Its first input is a three-vertex NGG passthrough
+  rectangle draw, with a complete 288-byte program and no bound GS-back program.
+  This does not identify the later merged-geometry pair. Production parsing
+  admits all 26 decoded instructions; the runtime still refuses native guest64
+  on the subgroup32 host. Scalar EXEC construction from system counts needs
+  a real logical-launch/primitive-forwarding proof. A physical subgroup ballot
+  or the fixed `s3=1` prolog cannot provide that proof. No present, playable
+  checkpoint or action response is established by this short capture.
+
+- Revision-100 strict replay (2026-10-03): the EXP tail correction passes its
+  15 tests and 73 complete-module cases, the 115-suite CPU gate and static
+  checks. The native32 numerical probes and fresh native-device preflight pass.
+  The first strict failure advances to vertex guest64/`ExactSubgroup` admission
+  on a host without native64. Cached source shows the fixed GS system seed and
+  scalar EXEC shifts; lack of a general shuffle does not establish a narrower
+  proof. Capture the actual launch state and both programs before changing the
+  execution path. The short run reaches no observed present or GE skip report.
+
+- Revision-99 strict replay (2026-10-03): final-source CPU/static checks and
+  the rebound native32 numerical probes pass. Fresh layouts and an exact
+  Vulkan 1.4/Wayland device preflight pass; the guest then stops before GE
+  capture on the shared lowering precondition for a one-source `EXP PRIM`.
+  The EXP parser left three unused VGPR operands populated. A sanitized probe
+  reproduces this with the retained archives while its four-source export
+  control passes. Correct the producer tail, retain strict admission, then
+  recapture the first failure. The short failure is not a completed bounded
+  gameplay run, a GE program capture or evidence against the previous compiler
+  correction. The private observation helper's earlier missing-file message
+  obscured this failure; the native log and service duration remain authoritative.
+
+- Bounded selector controls (2026-10-02): both historical EXEC-representation
+  mismatches reproduce numerically on subgroup32, reach the explicit 64-iteration
+  exhaustion result and complete their real fences with zero validation errors.
+  Their matching-representation controls pass. See the current-frontier entry
+  in [BRINGUP.md](BRINGUP.md) for counts and scope. These are consumer-only
+  synthetic controls, not whole captured shader replays or proof of the game
+  device-loss cause. Native subgroup64 is unavailable on this host; no upper-half
+  fragment-wave equivalence follows from these results.
+
+- Distinct pending compute compilation (2026-10-01, unresolved): the current
+  timeout-disabled capture identifies the render-mutex owner in pipeline
+  creation, before the pending module has been dispatched. Valid Vulkan 1.4
+  modules and 842 flips do not establish menu, input or gameplay. Scalar/PC
+  broadcasts, real-CFG clearing, resource-slot folding and complete shared
+  register storage are bounded external experiments, not activated fixes.
+  Complete pipeline compilation still misses the two-GiB, sixty-second gate.
+  The graph itself builds in about 1.54 seconds; repeated failed allocation and
+  spill growth require further evidence. External allocator index, capacity and
+  reset corrections pass focused CPU tests but still do not complete this
+  pipeline or establish GPU preservation. See the current arithmetic-lowering
+  frontier in [the bring-up manual](BRINGUP.md) for the individual exclusions;
+  do not repeat completed variants or raise resource limits to hide this result.
+  Sparse membership and supported spill batching also fail the compilation
+  gate. Case caching and both masked shared-store representations are excluded
+  as sufficient fixes and remain undispatched. An external frontend candidate
+  preserves explicit uniform NIR register declarations as scalar32, reducing
+  the original interval peak to 1,016 units; seven CPU contracts pass, but its
+  compile stops at the unchanged capacity guard. No installed driver, guest
+  shader or runtime policy has been changed by this candidate. Tighter sparse
+  capacity growth also stops during spill emission with 74,688 actual nodes;
+  it is excluded as a sufficient fix. Invocation-private Function arrays also
+  fail the pre-graph capacity criterion (143,954 VGRFs); they remain external
+  and undispatched. Instruction-local spill-temporary reuse is the next host
+  seam; no larger graph is authorized by any of these results.
+  The subsequent reuse-plus-changed-region candidate completes the original
+  compute pipeline in 42.589 seconds under the unchanged resource and graph
+  guards, with no dispatch queued. Eight focused CPU contracts pass; GPU
+  preservation and the exact guest device remain unverified. This supersedes
+  the statement that no external candidate completes compilation, not any
+  image/input/gameplay exclusion. Subsequent synthetic GPU checks pass 69,704
+  components, including natural SIMD32 spilling, with no differences. Exact
+  captured runtime-device inputs also complete the original pipeline in 42.474
+  seconds without dispatch. Protected integration initially stops before the
+  first present in the already-documented X11 window-show blocker: the external
+  runner forced X11 and removed active Wayland variables, disabling the existing
+  host selection. Correct that runner environment before attributing the stop
+  to the compiler or guest wait policy. Full guest-compute equivalence, images
+  and gameplay remain unaccepted.
+  Native selection and normal driver-cache validation then pass. The protected
+  guest observes all 59 compute creations complete, including a real return
+  from the unchanged former pending pipeline, and continues presenting afterward.
+  The later native image is still black and no pad reads are observed. The first
+  dispatch-specific completion trace is the next diagnostic gate, not a reason
+  to alter waits, clear targets, omit shaders or claim gameplay. A new helper's
+  global-name collision also caused a separate instrumentation-only startup
+   failure; namespace isolation, a synthetic submit/fence/output check and a raw
+   host-main schema preflight now pass before the next guest run.
+
+- Late native color chain (2026-10-02, unresolved): a protected ordinary run
+  correlates the unchanged former pending compute pipeline with its real
+  dispatch, successful submit and observed fence completion. The bounded native
+  census then records 21 distinct pixel draws and their intermediate/final
+  bindings without shader instrumentation. A separate output-preserving sparse
+  probe of the final compositor's first scene-color sample records 259,200
+  elected samples, finite RGB zero and alpha one. Therefore the observed black
+  precedes that compositor's final color arithmetic; do not replace its output,
+  suppress draws, or treat the binding census as pixel execution proof. This
+  does not establish that every source texel is zero or that its producer is
+  correct. Both runs complete all 59 compute creations and the selected compute
+  submission, validate their 101/102 actual Vulkan 1.4 modules, fail all nine
+  native image gates and observe no guest pad reads. The snapshots find normal
+  read-only-buffer protection work in the render-mutex owner, not a demonstrated
+  GPU wait/deadlock. Guest waits and all resource guards remain unchanged. Follow
+  the upstream sampled-color boundary next; gameplay remains unaccepted.
+  That upstream consumer then records 104,576 elected samples with the same
+  finite RGB-zero/alpha-one result from an exact storage-texture binding.
+  Its 102 actual modules validate, all nine native image gates fail, and no pad
+  reads occur. Do not attribute this to the formerly pending compute module
+  without a producer/binding correlation, or infer that all texels are zero.
+  Observe the earlier HDR consumer next. Diagnostic stop-grace exhaustion ends
+  this run with a kill; the removed unit's subsequently queried default success
+  is not a guest success or a contradiction of its retained timeout journal.
+  Both selected conditional HDR reads subsequently have zero observations,
+  which is inconclusive for color. The paired vertex/resolver probe records
+  three exports but no finite post-divide extrema, and a GETPC-built raw buffer
+  base enters the descriptor-array resolver as a large slot. The metadata
+  classifier and raw-load emitter compare API register zero instead of its
+  Gen5 vertex register eight. This incorrectly marks s[0:3] as bound and fails
+  to classify the real s[8:11] binding consistently. Fix that shared namespace
+  seam only after a sanitized red regression; do not replace coordinates, color,
+  clears or shader outputs to compensate. All 103 diagnostic modules validate,
+  eight native captures fail their image gate, and no pad reads occur.
+  The namespace correction is now implemented through one shared binding
+  predicate used by input classification and all four raw-load widths, with
+  revision 92 cache invalidation. Nine focused tests pass, including the two
+  opposite-direction red assembly regressions. The original synthetic fixtures
+  lacked a terminator; their early assembly results did not prove validation.
+  Complete-fixture validation now passes the inline case but exposes the
+  undeclared s3 system destination in the bound-only prolog, separately recorded
+  in the bring-up manual. The actual guest modules remain valid.
+  Fresh binary-bound DWARF and exact native-device preflights pass; a protected
+  repeat of the same vertex/sample selectors is in progress. No color/input
+  advancement or normal guest exit is established by these preflights.
+  That repeat confirms finite fullscreen vertex positions (W=1, X/Y -1..3,
+  Z=0), varying parameters and zero erroneous array-resolver invocations. All
+  103 actual modules validate and the former pending compute execution still
+  completes. The selected alternate conditional read remains unobserved. Eight
+  native captures fail their gate, all before the delayed selected color draw;
+  final capture timeout is not a scored image. Follow the other conditional
+  read with the corrected geometry rather than inferring source black from
+  zero observations. Image, input and gameplay remain unaccepted.
+  The subsequent repeat stops at present 854, before its threshold, with no
+  delivered probe event. All 103 actual modules and the selected compute
+  completion pass; eight capture gates still fail and no pad read occurs.
+  Observe the same HDR instruction earlier rather than extending the deadline
+  or interpreting an undelivered probe as zero samples.
+  Earlier selection then yields 65,280 elected finite RGBA-zero samples with
+  valid fullscreen geometry; ten native capture gates still fail. The s3
+  declaration correction passes both explicitly validated complete fixtures
+  and all nine focused tests with revision 93, without changing its value.
+  Fresh schemas and native Wayland/device preflights pass for that binary.
+  The paired indexed HDR-producer probe records 1,361 finite vertex exports,
+  all with nonpositive W, zero MRT exports/coverage, and a full unchanged
+  RGBA16F attachment with no nonzero RGB pixels. Depth/stencil is disabled.
+  Its prolog never initializes the table-pointer SGPRs later read by native
+  S_LOAD: metadata parsing consumes their two-word API bindings. Record and
+  regression-test that missing initialization contract before correcting it;
+  retain real pointer values and loads. All 103 actual modules validate, the
+  original compute completes, nine capture gates fail and no pad reads occur.
+  Two sanitized parser-to-prolog tests reproduce the lost pointer words on the
+  old code. Retaining both real table pointers as direct API words fixes those
+  tests without replacing native S_LOAD. Eighteen focused controls now pass,
+  including explicit validation of the native-load fixture; an unrelated old
+  ENDPGM-only SRT-span fixture required a live consumer (the preserved old binary
+  fails it identically). Revision 94 invalidates cached layouts. Fresh DWARF and
+  native Wayland/exact-device preflights pass, and the same paired producer
+  diagnostic completes: all table-pointer stores now precede native S_LOAD,
+  but all 1,361 observed positions still have nonpositive W, no MRT export or
+  coverage is observed, and the unchanged zero attachment has the same hash.
+  All 103 modules validate and the selected compute completes. Ten native
+  capture gates fail and no pad read occurs. This excludes missing pointer
+  initialization as a sufficient cause of this producer's zero geometry; the
+  corrected contract remains independently proven. Observe the original scalar
+  buffer results and their input descriptors before changing matrix arithmetic.
+  An append-only eight-site scalar-buffer snapshot now passes two red-to-green
+  explicitly validated module tests, fourteen neighboring controls and the probe
+  layout/serialization integration. It preserves original instructions and
+  observes one elected invocation per load after the existing fence. Revision 95,
+  fresh binary-bound schemas and the native Wayland/device preflight pass. The
+  same first producer draw is the next diagnostic, without attachment retries;
+  GPU words and bounded CPU constants require direct correlation before a fix.
+  These tests/preflights are not guest image or gameplay evidence.
+  The native repeat observes six sites with all 73 scalar result words matching
+  the first draw's CPU constants bit for bit. All 103 modules validate, but eight
+  capture gates fail and pad reads remain zero. The same draw's packed vertex
+  stream has format 66 and reports a failed layout with zero attributes. That
+  SNORM format is absent from the vertex format table despite its established
+  image mapping; the pipeline continues after the rejected layout. This is the
+  next demonstrated input contract, not an excuse to replace vertex values.
+  Two sanitized mapping/packed-layout regressions fail before adding unified
+  format 66 and pass afterward, along with 22 neighboring controls. The fix is
+  one evidenced table entry, not a guessed alias or vertex-output substitute.
+  Revision 96, fresh schemas and native Wayland/exact-device preflight pass;
+  the same producer's post-fix layout and geometry/color remain to be observed.
+  That repeat confirms all three attributes, positive-W finite geometry and
+  2,073,600 finite MRT0 observations with nonzero RGB. The 73 scalar words still
+  match; all 103 modules validate and the original compute completes. None of
+  the nine scored captures follows the delayed selected draw, and the final
+  capture times out. Pad reads remain zero. The next run removes shader probes,
+  binding traces, shader dumps and GDB; producer color is not yet a verified
+  presented image, input response or gameplay acceptance.
+  The next uninstrumented run reaches a real `VK_ERROR_DEVICE_LOST` fence wait
+  on queue 8, slot 2. Its Xe coredump records a started but incomplete render
+  job and retains the entry/ACTHD batch allocations. IPEHR matches the preceding
+  PIPE_CONTROL ending at ACTHD, not the word at ACTHD. Offline batch decoding
+  and a bounded native submit-fault trail are the next correlation, not a
+  reason to skip the submission, replace outputs or expand resource limits.
+  The diagnostic repeat stops at frame 839 / present 838 before its native
+  census threshold, with no captured device-loss report or original target
+  exit. All 101 captured modules validate, eight image gates fail and no pad
+  read occurs. It does not exclude the uninstrumented fault. Repair the native
+  Silent-mode diagnostic before another protected correlation; do not raise
+  deadlines or resource limits to make the debugger repeat reach its threshold.
+  The subsequent native-only repeat delivers the bounded Silent-mode fault
+  JSON and reaches another real queue-8 device-loss fence. The failing caller
+  matches a successful submit return in the eight-entry trail; the correlated
+  kernel journal records a render-job timeout. Its census retains the first
+  occurrence of each of 21 shaders, not the later failing guest submission.
+  Recent draw/submission identity is therefore still missing. All eight image
+  gates fail and pad reads remain zero; 58 logged modules and 25 unique persisted
+  cache payloads validate but do not form a complete live census. The new dump
+  read times out with zero bytes. Do not attribute the older job's last kernel
+  to this fault or change shaders/driver policy without that missing correlation.
+  A bounded opt-in recent-draw ring now records every emitted guest draw and
+  dispatch with its command-buffer recording, keeping repeated shaders and
+  separating recording, submit call/return and observed fence signal. The
+  census deduplication is thereby bypassed, not repaired; do not repeat a
+  first-occurrence census to look for the failing submission's draws.
+  A protected run (d50) reproduced the device loss at the same queue-8 fence
+  and PM4 position as d48 and named 28 recorded draws in the failing
+  submission, 18 of one vertex/pixel pair. That pixel module contains three
+  `V_READFIRSTLANE` waterfall loops, and the lowering tested bit `1 << lane`
+  of lane-local EXEC, which only lane 0 can satisfy (fixed in translator 97;
+  see the bring-up manual). Two later runs (d52, d54) with the corrected
+  lowering complete 264 seconds without device loss where earlier runs lost
+  it at 214-221 seconds. That is consistent with, not proof of, the cause: no
+  isolated GPU replay exists and every capture is still black. The same runs
+  expose the next candidate: 4,458 skipped draws in a GE configuration
+  (`stages=0x00002030`, ES bound, legacy GS base zero) that `ShouldSkipUnsupportedGeShader`
+  does not model. Do not re-litigate the device loss before that frontier is
+  understood; do not reintroduce a bit test of lane-local EXEC in any
+  cross-lane lowering. A later source audit qualifies both observations:
+  scalar-written packed EXEC/VCC must also remain coherent with lane predicates,
+  and the original GE diagnostic inspected `gs_regs.data_addr` while GS program
+  registers populate `gs_back_addr`. Thus the retained report does not establish
+  an absent back program. The corrected skipped-draw report records both program
+  identities and the associated GE/resource state; that diagnostic alone does
+  not implement merged-stage execution.
+
+- Complete-quad transport and native resolve (2026-09-29): an original Vulkan
+  1.4 synthetic experiment exports helper values through one covered quad
+  writer, then preserves all 64 values in compute shared storage. Native
+  color inputs match bit for bit, fine derivatives match captured finite
+  differences, and complete-wave OR reductions match a CPU reference. At
+  1024 square, 10,745 groups have an upper-half contribution that changes the
+  aggregate, so the check detects a dropped half-wave. A second native draw
+  resolves compute-produced color, discard and depth through the original
+  attachment pipeline. Source-alpha blending, changing depth order and
+  overlapping primitives produce bit-identical color and D32 depth to direct
+  fragment execution across 1,048,576 pixels. This is a prerequisite proof,
+  not guest shader or gameplay acceptance; custom pixel inputs, architectural
+  masks, exports and side effects remain unconnected. The dense per-primitive
+  allocation is excluded for production use because its size scales with
+  primitive count and framebuffer area. See
+  [fragment execution design](fragment-wave-execution.md) for bounded-buffer
+  requirements, measured costs and remaining contracts. No runtime policy or
+  narrower guest-wave behavior is enabled by these experiments.
+
+- Fragment row reduction width and helper participation (2026-09-29): the
+  captured pixel program requests wave64 and reduces selected 32-bit lane
+  values through four OR row shifts, a cross-row permutation and reads of
+  lanes 31 and 63. Source values can vary by fragment; the upper half cannot
+  be discarded merely because the host offers at most 32 lanes. A canonical
+  reduction with lower-half contribution 1 and upper-half contribution 2
+  produces 3 in wave64 and 1 after dropping the upper half. This excludes an
+  unconditional narrower shuffle or selector mask as an equivalent lowering.
+  The aggregate reaches two later lighting branches, so its consumers have
+  not been proven width independent.
+
+  The compared partial-wave fragment reference deliberately excludes DPP row
+  reads, and a separate program-specific wave32 override does not match this
+  captured program. Neither establishes a general guest-width contract.
+  Vulkan's shader execution specification provides a distinct helper rule:
+  `MaximallyReconvergesKHR` keeps helpers active for group operations during
+  their quad scope; without that mode, non-quad operations may exclude them.
+  The captured host reports maximal reconvergence and quad control support,
+  but these features must be enabled before using their execution modes.
+  They address participation and reconvergence, not the missing 64-lane
+  storage or exchanges. Follow the complete guest-wave packing, inactive-lane
+  state and register-lifetime contract before admitting the row reduction.
+  A virtual partially populated wave remains a design hypothesis; it requires
+  a verified packing policy and proof for every ghost-lane read, not an assumed
+  zero tail. No narrower fragment behavior is implemented by this review.
+  [Vulkan shader execution and helper rules](https://docs.vulkan.org/spec/latest/chapters/shaders.html).
+
+
+- Mixed storage-image types at an atomic operation (2026-09-29): the strict
+  parser decodes all 1,429 instructions after admitting the observed integer
+  atomic addition. Its resource check then rejects the same operation because
+  it required every writable image to be 2D R32_UINT. The live binding census
+  contains two writable 2D images: four-channel floating-point format 71 for
+  the final store and R32_UINT format 20 for the atomic counter. This excludes
+  a single integer declaration for the whole storage array. Resolve each
+  access's complete descriptor and use the matching SPIR-V image type; the
+  atomic emitter and GPU completion remain unverified at this stop.
+
+- Storage-image descriptor identity (2026-09-29, `2cbcc6dc`): the first
+  title-transition store uses a complete T# relocated by four scalar pair
+  copies; another loads its T# from the extended table. Static destination
+  register matching loses both origins. The first replacement incorrectly
+  required a producing load's binding to be writable, although a distinct
+  writable binding contained the same eight guest words. Selecting the unique
+  complete writable alias removes that rejection. A second early rejection
+  came from treating a scalar load into VCC as an invalid ordinary SGPR load;
+  it cannot alter the tracked SGPR origins. The corrected flow analysis passes
+  both earlier programs, selects the expected two original bindings, validates
+  the complete SPIR-V module and reaches a completed dispatch. This excludes
+  missing image dimensionality for those two stores. The next first failure is
+  an unimplemented image atomic addition with an old-value return, recorded in
+  the bring-up manual. No gameplay acceptance follows from this dispatch.
+
+- Opening media preload and NULL export frontier (2026-09-29): a live call
+  trace shows an explicit guest pause after delivery of the first decoded
+  frame. The guest's media object then remains in its preloaded state, whose
+  update branch returns without polling or resuming playback. The decoder
+  retains six frames with no error. This excludes a spontaneous host decoder
+  pause; it does not identify the later scene condition that resumes playback.
+  A longer clean Silent/Native run reaches a new parser failure after 347
+  seconds: `ShaderParseEXP.cpp` rejects pixel target 9 with `DONE=1`, `VM=1`,
+  `COMPR=0`, `EN=0`. RDNA2 section 12.17 and Table 106 define this as a NULL
+  export carrying the valid EXEC mask without data. Treating it as a no-op
+  would lose its depth/stencil discard effect. The final-color shader's
+  constants are finite and populated and its three textures are bound;
+  captures at presents 41 and 262 remain black. This excludes an entirely
+  zero CPU constant block, not missing upstream texture content.
+  The correction admits only the evidenced NULL encoding, carries EXEC to
+  discard, omits fabricated color outputs and suppresses color writes for
+  NULL-only programs. Live state has nonzero CB masks even for that program,
+  so an outputless Vulkan shader alone would leave color writes undefined.
+  Both forms of its SPIR-V validate, and execution passes the old failure.
+  The first corrected run exits at the title transition after 969 seconds
+  on the missing const JSON array-index export; the final color-mask build
+  reaches present 324 with another black native capture.
+
+- Final-color export exclusion (2026-09-29): the native MRT aggregate at
+  present 100 sees 8,294,400 invocations spanning X 0.5 through 3839.5 and Y
+  0.5 through 2159.5. It counts 409,600 nonfinite results; the finite extrema
+  are RGB 0 and alpha 1. The pass has no depth or stencil attachment. This
+  excludes absent raster coverage or presentation alone hiding a nonblack
+  export for that occurrence. Inspect the sampled inputs and arithmetic;
+  do not change VideoOut selection on this evidence.
+  A subsequent output-preserving sample probe selects the first 2D zero-LOD
+  RGB sample at the same present threshold. All 8,294,400 sampled vectors are
+  finite RGB zero with alpha one. Both generated and optimized SPIR-V validate,
+  and a native capture at present 200 remains black. This excludes the final
+  shader's arithmetic as the first producer of zero RGB for that occurrence;
+  it does not explain the separate nonfinite final results. A second run
+  probes the RGBA overlay sample: 409,600 of 8,294,400 sampled vectors are
+  already nonfinite, and every finite vector is RGBA zero. Both SPIR-V forms
+  validate. Equal aggregate counts do not prove per-pixel identity across
+  runs, but invalid data is now observed before final composition. The HDR
+  input may legitimately be empty during a logo scene; prioritize the overlay
+  writer and lifetime. A format-only lifetime selector tracked two earlier
+  1024-square targets and therefore did not identify that producer.
+  A subsequent address-correlated trace identifies an indexed six-index
+  material draw and a three-vertex two-channel zero export writing the exact
+  sampled host image. This excludes the previously sampled context checksum
+  as sufficient evidence of an executed writer. The material writer uses
+  input control `0x424` and explicit `V_INTERP_MOV_F32` selectors 2, 0 and 1;
+  Kyty rejects that control but continues with an ordinary varying, loading
+  the same value for each selector. The custom-interpolation exclusion for
+  the older P1/P2-only workload does not apply to this program. Implement the
+  evidenced per-vertex contract and compare the same draw's results before
+  attributing the observed nonfinite values to that gap.
+  Its actual 89,132-byte cached pixel module fails Vulkan 1.2 SPIR-V validation
+  with conflicting fragment input location zero, component zero
+  (`VUID-StandaloneSpirv-OpEntryPoint-08721`), matching the failed decode's
+  default location. Preserve this red artifact outside the repository for the
+  corrected-module comparison.
+
+  The corrected route now passes the raw three-vertex values through a
+  generated geometry stage and supplies the requested manual interpolation
+  coordinates. Both actual cached modules validate (30,488-byte pixel,
+  1,868-byte geometry), as do pixel source and optimized disassembly. The
+  duplicate input location and collapsed selectors are corrected. Captures
+  at presents 93 and 184 are still black: this falsifies the sufficiency of
+  that correction for useful output, but does not tell whether the previously
+  nonfinite overlay samples are now finite. Probe the corrected material
+  output and its inputs before attributing the remaining black result.
+
+  That follow-up native MRT0 probe at the 100-present threshold now reports
+  409,600 invocations, all finite and RGBA zero. Its generated and optimized
+  Vulkan 1.2 modules validate; native capture 157 remains uniformly black.
+  Zero is therefore already present at this material's output. The probe
+  does not identify the first zero input, and the earlier sample probe is
+  not a per-pixel correspondence test. The live writer also selects the
+  integer front-face representation with `SPI_BARYC_CNTL=0x01000000`, while
+  the incoming register is read before initialization in the captured module;
+  its value is not proven to be zero. The separate system-input
+  contract and primary register reference are recorded in the bring-up manual.
+
+- Front-face input versus black output (2026-09-29): after initializing the
+  requested pixel VGPR from Vulkan `FrontFacing` with the guest-selected
+  integer representation, both live pixel variants and their geometry stages
+  pass Vulkan 1.2 validation. The material probe still counts 409,600 finite
+  RGBA-zero exports, and native capture 134 remains uniformly black. The
+  missing input was a translation defect, but its correction alone does not
+  resolve this output. A descriptor-bind snapshot of that probed draw shows
+  floating one at both scalar opacity offsets 16 and 24; the zero observed
+  at an earlier first draw does not explain this occurrence. Next trace the
+  sampled color/alpha and packed per-vertex values at the same material draw.
+
+- Implicit material sample (2026-09-29): a native probe immediately after the
+  selected 2D RGBA sample records 409,600 finite zero vectors. Its actual
+  cached SPIR-V and the ordinary pixel/geometry modules validate for Vulkan
+  1.2; generated and optimized diagnostic modules validate too. Capture 129
+  remains uniformly black. The exact descriptor bind identifies an eleven-
+  level Standard64KB BC7 sRGB image, and every vertex color is opaque white.
+  This puts zero before material arithmetic and excludes packed vertex alpha
+  as the first zero producer for this occurrence. The uncovered BC upload
+  exclusion and missing Standard64KB compressed mip layout are recorded in
+  the bring-up manual. A later cache snapshot does not retain the opening
+  image; capture its creation before claiming that the zero seed caused this
+  exact result.
+
+- Standard64KB package upload (2026-09-29): the retired opening-image record
+  confirms the old zero-seed path and incorrect texel-based footprint. After
+  using the compressed mip layout, a creation-time snapshot shows the correct
+  span and enabled upload, and the first detiled level agrees byte-for-byte
+  with independent decoding. The same material sample now produces finite
+  near-white RGB and varying alpha. Capture 173 contains a blue opening
+  caption and still fails the gameplay image gate. This closes the missing
+  package upload as the source of that zero sample. A correlated mode-six
+  DCC operation is still rasterized as a zero red/green export on the overlay;
+  the next correction must preserve the existing expanded surface rather
+  than interpret that export as ordinary pixel output.
+  That bounded handler is now verified on three existing expanded attachments.
+  After context restoration is repaired, native capture 89 shows the caption
+  in white; native and offline image scores still reject it as gameplay.
+
+- DCC dispatch classification (2026-09-29): an ordinary postprocess draw
+  inherits mode six and has no existing target backing. The original guest
+  indirect lists match their snapshots, excluding snapshot corruption in
+  this occurrence. A depth-default read overruns sixteen pairs by one, but
+  the ordinary color-control default is copied correctly. Correcting a
+  separate missing target-zero blend key repairs the live blend-register
+  write while leaving the same DCC failure. Neither the blend lookup nor
+  upper color-control type metadata explains this stale mode. A subsequent
+  guest-call trace finds context operations three and two around the utility;
+  their HLE import emitted padding and ignored the operation. Correcting the
+  context helper and its packet handler restores twenty saved contexts
+  byte-for-byte, including mode six returning to ordinary mode one, and
+  passes present 35 with expanded-surface DCC handling. This closes missing
+  context restoration as the stale-mode cause. A separate queue-reset helper
+  still encodes a non-hardware operation value; its contract is recorded in
+  the bring-up manual. No shader-pattern dispatch or fabricated backing is
+  needed for the observed utility.
+
+- Residency-query cost (2026-09-29): during the same run a stack
+  sample stops at `GuestDeviceAddress.cpp:259`, `ImportResident`, querying
+  2,113,929,216 bytes with `mincore` from a vertex descriptor bind. Over the
+  first 105 seconds, native timing attributes 47.2 seconds to draw descriptor
+  finalization, while all completed fence waits total 9.6 seconds. Repeated
+  address-table residency preparation is a measured CPU cost, not evidence
+  of GPU execution hanging. Investigate incremental residency discovery
+  without hiding pages faulted in or remapped between preparations; do not
+  reuse a stale residency snapshot merely to improve the frame rate.
+  The correction queries every remaining unimported interval on each
+  preparation. Already imported spans keep their alias/snapshot ownership;
+  invalidation still clears the bitmap. In a warm Silent/Native comparison,
+  the original 79-present window records 459.4 ms of descriptor finalization
+  per present, versus 426.8 ms across 73 presents afterward. Draw and dispatch
+  counts per present remain approximately 23 and 78. Throughput changes from
+  0.836 to 0.890 FPS, and the candidate passes 800 presents. This supports a
+  modest local reduction in CPU cost, not a broad benchmark or gameplay claim.
+
+- Later startup-video frontier (2026-09-29): after the async DMA correction,
+  a clean Silent/Native run reaches 344 presents. The lifetime trace observes
+  full-size packed-color writes to two alternating targets, and four live
+  VideoOut samples use those same guest addresses and host image identities.
+  Captures at presents 40 and 185 remain uniformly black. This excludes
+  selection of a different present target in that sample; it does not prove
+  the final shader's sampled inputs contain color. The live media player is
+  playing with `source_failed=true`, no decoder, no video frame buffers and
+  no delivered frames. A subsequent entry trace finds a complete four-function
+  file replacement table and a relative media URI. `AvPlayerInit` discards the
+  table, and `add_source` instead asks FFmpeg to open a nonexistent sandbox
+  path, then reports READY despite that failure. The correction retains the
+  table and streams through its open/size/read-offset/close callbacks with a
+  bounded host buffer; failed opens no longer announce READY or accept start.
+  Live inspection now finds a real 3840x2160 decoder, six queued NV12 frames
+  and one delivered frame, with no backend error. The guest then holds the
+  player paused, and native captures remain black at presents 36 and 103.
+  This advances media source opening, not visible playback. Trace the guest's
+  pause/resume sequence before altering frame delivery or the compositor.
+
+- Raw render alias and explicit mip-fetch frontier (2026-09-29): the first
+  partially written 960x540 RGBA16 UNORM storage image has overlapping
+  mixed-format render-target writers. Its first dispatch can touch at most
+  8,960 of 518,400 texels, excluding a full-overwrite seed bypass. Commit
+  `28db4aa3` composes intersecting 64 KiB raw blocks from write-ordered
+  parents; a live Vulkan byte comparison and focused classification tests
+  pass. A strict run crossed the old alias exit and exposed `IMAGE_LOAD_MIP`
+  opcode `0x01`. Commit `e169d95b` passes the level as `OpImageFetch Lod`;
+  focused SPIR-V and strict execution crossed the old parser exit. The
+  hypothesis that these two admission fixes alone restore visible color is
+  false: native captures at presents 20, 40, and 42 have the same uniform
+  black hash and score `entropy=0`. The next hypothesis is upstream of PNG
+  normalization if a bounded raw present-source readback is also all zero;
+  otherwise inspect the packed-format normalization. Do not infer alias
+  visual correctness from the synthetic byte test or presentation count.
+
+- Later Xe fence loss (2026-09-29): a separate longer strict run stopped after
+  40 presents at `GraphicsRenderCommandBuffer.cpp:823`, fence sequence 4640,
+  with `VK_ERROR_DEVICE_LOST`. The kernel reported an Xe timed-out job. Its
+  subsequent order-9 `GFP_ATOMIC` page-allocation warning arose in
+  `xe_guc_log_snapshot_capture` while taking a devcoredump, so it cannot be
+  used as proof that memory pressure caused the GPU timeout. This failure is
+  distinct from the earlier Mesa `execbuf` ENOMEM reports. Obtain the exact
+  timed-out GPU submission and host resource state before changing queue,
+  memory, or shader policy. A later authorized local copy of the devcoredump
+  identifies an RCS job with start sequence 14318 and completed sequence
+  14317; the GuC log snapshot was not allocated. It confirms the unfinished
+  job but does not identify the responsible guest draw or dispatch.
+
+- Guest-address self-induced residency (2026-09-29): repeated host-pointer
+  imports of a resident span plus a guard page populate one more guest page
+  per preparation even without guest writes. This was reproduced with a
+  synthetic Vulkan mapping and with the production importer. In a bounded
+  workload sample, 64,066 of 64,200 chunks were adjacent to another chunk at
+  preparation 500. Importing exact page spans and resolving a crossing load
+  through two page translations reduces that sample to 1,804 entries and
+  120 retained tables (76.5 ms mean preparation time). The native residency
+  and cross-page value tests both fail with the old implementation and pass
+  with the correction. The 120-second strict run ends at its time limit;
+  present 39 still scores uniform black. This does not establish that all Xe
+  device-loss paths or the visual frontier are fixed. The unvalidated
+  physical read-ahead experiment was removed before the corrected run.
+
+- Black VideoOut producer exclusion (2026-09-29): a one-shot packed-source
+  readback at present 20 counted zero RGB bits across 8,294,400 pixels and a
+  first raw word of `0xc0000000`. The capture normalizer therefore did not
+  create the black pixels. A bounded provenance query of the registered
+  VideoOut range found exactly one VideoOutBuffer and one equal StorageBuffer
+  with CPU-upload origin, with no RenderTexture view. The opt-in write-history
+  recorder covered that same range, retained 1,549 GPU guest-memory write
+  records overall, and matched zero writes to it. This excludes a direct
+  guest-memory color write to the presented range before present 20. Because
+  the agent still reported `loading`, it does not exclude a later compositor
+  or establish the absent color producer. The next targeted trace should join
+  final-color output and VideoOut range identity at one later scene boundary.
+
+- Intermittent guest-device import failure (2026-09-29): two short strict runs
+  stopped at `GraphicsRenderBind.cpp:4260` after
+  `GuestDeviceAddress.cpp:288` failed to import a resident, non-writable chunk
+  following level start. A stage probe on one fatal run produced no
+  `vkGetMemoryHostPointerPropertiesEXT`, buffer-create, allocation, or bind
+  failure, so the failure preceded the host-pointer import. A later bounded
+  run did not reproduce the fatal exit; it showed many optional guard-span
+  attempts whose next page was unreadable and whose unguarded retries
+  succeeded. Those normal retries do not identify the earlier fatal chunk.
+  Measure `CopyFromGuest`, per-page protection, and the exact unguarded retry
+  on a reproduced failure before changing the import or access contract. The
+  diagnostic code was removed.
+
+  After `d8950414` removed import guard pages, a clean run reproduced the
+  fatal import for a 24 KiB non-writable span after 64 seconds. A per-page
+  protection probe then completed 120 seconds without that failure, and
+  another run reached 45 presents before an Xe timed-out job and fence loss
+  at host sequence 4545. The latter's largest preceding successful fence
+  wait was 4.57 seconds. Thus guard-page removal does not establish that
+  either intermittent import failure or long-run GPU execution is fixed.
+  A later fatal probe resolves the import cause: a 16 KiB span crosses from
+  three CPU NoAccess host pages into one read/write page, all within the same
+  physical mapping. `PhysicalMemory::MapAlias` bounded the span by the first
+  protection segment; the snapshot then failed to read it. The correction
+  bounds the alias by the physical mapping under its mutex. The focused
+  byte/coherence/permissions regression fails before the correction and passes
+  after it. A strict 120-second rerun reaches black present 43 without that
+  exit. This does not clear the later Xe timeout.
+
+- Growing indirect work (2026-09-29): a bounded command/fence correlation
+  identifies four device-addressed compute dispatches with increasing X group
+  counts: 1/1/2/3, 4/5/6/7, 8/9/10/11 across consecutive cycles. The four
+  indirect argument buffers already contain those counts, and an observation
+  after the existing write-back has the same values. This excludes a change
+  made by that write-back as the immediate producer of the observed counts;
+  locate their writer before changing dispatch dimensions or shader code.
+  Instrumentation must not gate on `GraphicsRunGetFrameNum()` here: it stays
+  zero while native VideoOut presentation counts advance.
+
+  A hardware watchpoint on an argument count subsequently identifies GPU
+  storage-buffer write-back as its writer. A bounded binding probe locates a
+  one-invocation producer with four `DS_APPEND` instructions using the same
+  M0 descriptor and four distinct aligned byte offsets. The decoder loses
+  all four offsets, and both GDS emitters use M0's byte base directly as a
+  dword index. RDNA2 sections 3.7 and 12.13 establish the descriptor units
+  and base-plus-instruction-offset operation. The observed nonzero GDS
+  offsets also agree with independent implementations; do not infer that
+  they are zero from the compiler guidance in the ISA description.
+  Correcting the address calculation makes the four initial indirect group
+  counts all one. The first 120-second validation expires while creating
+  large compute pipelines, before a presentation; it is not runtime or
+  gameplay acceptance. Counter reset and sustained execution still need
+  observation before attributing the long-run Xe loss solely to this bug.
+  The longer bounded diagnostic run subsequently reaches presentations with
+  all four counters advancing separately by one per cycle. A scored capture
+  remains black. This verifies removal of the shared-counter error while
+  falsifying address correction alone as a cure for unbounded accumulation:
+  the observed DMA stream clears a different counter and never resets these
+  four. Both large pipeline creations eventually complete; the third takes
+  323 seconds in the driver.
+
+  Separate unresolved contract: `ShaderSpirvBuffer.cpp`'s ordinary
+  `Recompile_DsAppend_VdstGds` and consume emitter perform one atomic per
+  host invocation and do not honor EXEC. The paired compute-wave emitter
+  already counts architectural EXEC and broadcasts the old value. Audit
+  admission of multi-lane native and graphics-stage GDS programs before
+  claiming their wave semantics are correct; the address correction alone
+  does not fix that older limitation.
+
+  Cache qualification: the page-crossing shader load change in `d8950414`
+  did not advance `kShaderTranslatorVersion` from 56. A live cache audit
+  finds the same device-addressed compute program retained at 327,035
+  words in versions 51 through 56, while regeneration after invalidation
+  produces 334,074 words. The large increase includes the earlier
+  page-crossing loads, not just the GDS counter arithmetic. Previous cached
+  runtime observations therefore validate the host residency correction but
+  cannot validate the new shader-side split-load path. The captured current
+  module passes Vulkan 1.2 `spirv-val`; a host stack locates the subsequent
+  long stall inside `vkCreateComputePipelines`, before GPU submission.
+  Cache invalidation is required whenever emitted shader semantics change.
+
+  The reset producer is now identified: `GraphicsHleExports.cpp:99` binds
+  `sceAgcAcbDmaData` to the DCB implementation, whose ABI additionally takes
+  an engine selector before the destination. A live entry-register/stack
+  capture shows valid ACB immediate-zero clears of four bytes at the append
+  counters. The alias shifts the arguments and sees a one-byte request,
+  rejecting it before any PM4 packet is emitted. Independent implementations
+  agree on the ACB register/stack layout. Add the ACB-specific entry point
+  and route its decoded arguments through the existing DMA packet builder;
+  do not synthesize resets from dispatch counts or shader identity.
+
+  The async entry now has that distinct ABI and delegates only packet encoding
+  to the existing implementation. A subsequent bounded live trace observes
+  zero writes to all four counter cells before each producer cycle, and all
+  48 recorded indirect dispatches have group counts 1/1/1. A Silent/Native
+  five-minute run stops at its configured limit, advances to the first
+  startup scene, and retains black scored captures at presents 28, 172 and
+  222. Its sampled largest completed fence is about 65 ms. This verifies the
+  missing-reset mechanism; no image, input, or gameplay acceptance follows.
+
+- High VCC masks and vector bit counts (2026-09-29): a bounded shader trace
+  identified a one-word `VCC_HI` compare/conditional-mask tuple in a native
+  32-lane program. Treating the parser failure as proof of a wave64 dispatch
+  mismatch was excluded by the recorded native wave width. Commit `91cbf4a3`
+  fixes the tuple. A later failing compute pipeline's SPIR-V loaded a
+  float-typed VGPR as `%uint` and stored `%uint` through it in `V_MBCNT`.
+  `spirv-val` rejected that module. Commit `f9b56b0c` bitcasts the VGPR
+  boundary; the red/green toolchain test and strict rerun passed the former
+  pipeline failure. The rerun stopped at a storage-image format check, not at
+  another SPIR-V type error.
+
+- Four-channel 16-bit UNORM storage image (2026-09-29): Gen5 format 65 was
+  already mapped for sampling but rejected for storage. The host Vulkan format
+  query reported storage-image, sampled-image, and formatless read/write
+  features for `VK_FORMAT_R16G16B16A16_UNORM`; two independent local decoders
+  agree on its four normalized 16-bit components. The focused mapping test
+  failed before commit `f4db885b` and passes afterward. A strict Silent/Native
+  run crossed the former binding exit and reached a new mixed-parent storage
+  alias at `GpuMemoryCreate.cpp:1825`. Its frame-36 native capture had one
+  quantized color and `gameplay_like=false`.
+
+- Mixed storage-image ownership after the format-65 bind (2026-09-29): the
+  incoming `StorageTexture` is linear 960×540 RGBA16 UNORM, pitch 960, one
+  level, with `skip_seed=0`. It spans `0x3f4800` bytes and intersects 12 tracked
+  parents: two `StorageBuffer`, six `RenderTexture`, three `StorageTexture`,
+  and one `Texture`. A saved GPU-memory database shows one larger storage
+  image covering the entire new range and several GPU-written render
+  targets over parts of it. A bounded rerun recorded `Unknown` content origin
+  for those images and `CpuUpload` for the two storage buffers. Object-wide
+  update times and geometric containment do not establish per-byte ownership
+  or format-compatible copying. The first compute writer has two RGBA
+  `ImageStore` instructions guarded by a table entry and bounds checks. It
+  dispatches 140 groups of 8×8 threads; even without duplicate tile positions
+  or skipped entries, one destination receives at most 8,960 writes for
+  518,400 texels. This disproves the full-overwrite hypothesis and confirms
+  that `skip_seed=0` is necessary. The range crosses two recently GPU-written
+  render targets with distinct byte widths. A single covering image or an
+  object-wide timestamp cannot identify the source of all prior bytes.
+  Resolve ownership for each covered byte interval, including tile padding,
+  and prove a format-aware raw materialization path before changing
+  `GpuMemoryCreate.cpp:1654` or its alias classifier. Bounded temporary
+  diagnostics produced the tuple and dispatch evidence and were removed.
+
+- Intermittent Xe submission loss (2026-09-29): two bounded strict runs before
+  the mixed storage exit stopped at `GraphicsRenderCommandBuffer.cpp:656` when
+  Mesa reported repeated `execbuf` ENOMEM and `vkQueueSubmit` returned device
+  loss. Their cgroup memory peaks were below the configured 16 GiB limit; that
+  alone does not establish the Xe allocation failure's cause. Record live
+  VRAM/GTT and host-memory use at the failing submission before changing Kyty's
+  queue or memory policy. Do not treat a failed earlier run as an alias result.
+
+- Absolute async indirect dispatch (2026-09-28): the live lazy-call trace
+  showed an ACB pointer, a guest-built 64-bit argument address, and a
+  modifier. Independent local implementations agreed on a four-dword native
+  `IT_DISPATCH_INDIRECT` packet with low/high absolute address words and a
+  masked initiator; the existing DCB packet has a base-relative offset.
+  The synthetic full-address packet test failed before the export existed and
+  passes after implementation. The first strict run exposed a local parser
+  mistake: its `dw` argument counts all remaining stream words, not the
+  current packet body. Header-based size selection corrected that mistake.
+  The next strict run crossed the import and packet parser, reached the
+  logo-stage level, and stopped at unknown SOPC `0x12`; a native frame-28
+  capture had one color bin and scored `low_entropy`. This excludes a
+  compatibility or gameplay claim from packet progress alone.
+
+- Signed normalized pair conversion (2026-09-28): VOP3A opcode `0x368`
+  appeared after the unsigned pair conversion in the same program. The
+  observed tuple has a tied VGPR first source, an inline zero second source,
+  one VGPR destination, and no modifiers. Commit `6e0600ea` decodes that
+  form and uses validated SPIR-V `PackSnorm2x16`, replacing an emitter that
+  omitted the 32767 scale and selected a uint as a float. The synthetic test
+  failed before the parser change and passes with SPIR-V validation. One
+  strict run hit the known intermittent Xe `execbuf` ENOMEM/device-lost path;
+  a single retry passed the old parser exit and reached a new unresolved
+  lazy `Agc_v1.1` import at `RuntimeLinker.cpp:1081`. That import required
+  ABI evidence before implementation; no stub or guessed return was justified.
+
+- Unsigned normalized pair conversion (2026-09-28): a bounded shader trace
+  found VOP3A opcode `0x369` with two VGPR sources, one VGPR destination, and
+  zero input, output, clamp, and operand-select modifiers. The local RDNA2
+  ISA maps it to `V_CVT_PKNORM_U16_F32`. Commit `f41b2f06` decodes that
+  two-source form and uses the validated SPIR-V `PackUnorm2x16` operation;
+  the old shared emitter omitted the 65535 scale and used a uint as a float.
+  A synthetic red/green parser and SPIR-V validation test passed, and the
+  strict Silent/Native run passed this opcode. The new first failure is VOP3A
+  opcode `0x368` later in the same shader; the ISA calls it the signed
+  normalized pair conversion. This is still logo-stage execution.
+
+- Adjacent packed integer emitters (2026-09-28):
+  `ShaderSpirvVector.cpp:1899` and `:1946` lower the existing packed U16/U32
+  and I16/I32 instructions, respectively. When either is exercised, their
+  generated `OpSelect %float` receives an uncast `%uint` packed value, which
+  fails SPIR-V type validation. They are outside the current strict failure;
+  add a focused lowering test and bitcast the packed word before selection
+  when one becomes live. Do not infer their runtime use from this static
+  finding.
+
+- Paired linear single-store coverage (2026-09-28): the six-parent storage
+  image's first shader writes one full-channel pixel for each of 64 paired
+  wave64 lanes. Symbolic lane coordinates permute the 8x8 local tile without
+  gaps or duplicates; no path skips the store or reads the destination.
+  Commit `2c589a47` requires that exact proof, a resolved destination binding,
+  and matching dispatch coverage before omitting the initial seed. The focused
+  positive case failed before the change; 19 focused tests and source/table
+  gates passed afterward. A strict Silent/Native run crossed the alias and
+  stopped at an unrecognized Gen5 VOP3 opcode `0x369` in
+  `ShaderParseVOP3.cpp`. The local RDNA2 ISA calls it
+  `V_CVT_PKNORM_U16_F32`; verify the observed operands and conversion before
+  enabling it. The run reached only the logo, without gameplay evidence.
+
+- EUD base-pair lifetime (2026-09-28): rejecting every shader that writes
+  the former EUD pointer pair after any mapped scalar load was too broad.
+  A bounded 368-instruction trace had six mapped loads before one full-pair
+  replacement, two later ordinary reads, and 18 forward-only branch edges.
+  Commit `05832a6d` tracks possible and definite writes along those edges:
+  mapped loads require the original pair on all paths; ordinary reads require
+  both new words on all paths. Partial writes and unresolved targets still
+  fail. The next hypothesis lies after shader admission, not in permitting
+  EUD loads after an arbitrary pointer clobber.
+
+- Storage-image seed exclusion (2026-09-28): a direct write-only use is not
+  evidence that every destination texel is written. With zero symbolic tile
+  coverage, the old dispatch-size fallback skipped the seed and hid an
+  earlier three-parent alias. Commit `4f8f0719` removed that fallback and
+  proves one shared bounded-grid pattern with a per-dispatch read-only bounds
+  snapshot. Strict execution again passed that alias, then stopped at a
+  different nine-parent overlap. Commit `ce0ecfae` links older smaller views
+  only when skip-seed proof is present; it does not authorize copying their
+  different formats into a partially written destination. The next hypothesis
+  is the new image's writer coverage or live source ownership, not a blanket
+  multi-parent link.
+
+- Paired split-store coverage (2026-09-28): the next 8×8 paired-wave writer
+  uses a bijective permutation of local coordinates and two stores to one
+  storage descriptor. A scalar branch before the split bypasses only source
+  sampling; `VCmpxNeqF32` selects the first store's `EXEC` lanes, and
+  `SNotB64 exec,exec` selects their complement for the second store. All
+  sampled descriptors are distinct from the destination. Commit `69586773`
+  admits this general proof only with exact forward branch targets, unchanged
+  store coordinates, full required channel masks, a unique resolved image
+  binding, and a complete 64-lane tile. The positive test failed before the
+  change; focused tests, strict source-boundary and graphics-table gates, and
+  a Silent/Native strict run passed. That run crossed the former nine-parent
+  overlap and stopped at a later 768 KiB `StorageTexture` contained by six
+  parents in `GpuMemoryCreate.cpp:1825`. Determine its actual first writer and
+  authoritative old-byte source before any multi-parent alias rule change;
+  this is not visual or gameplay acceptance.
+
+- Intermittent guest device-address import (2026-09-28): one bounded strict
+  diagnostic failed at `GraphicsRenderBind.cpp:4260` with
+  `GuestDeviceAddressPrepare` reporting `host_writable=0`. A bounded retry
+  reached the later storage-image overlap. The triggering allocation state
+  and return path are unproved; capture `ImportResident`'s two import attempts
+  and resident-range ownership if this earlier failure recurs. Do not loosen
+  the address-import contract based on that single failure. A later bounded
+  import diagnostic did not reproduce the terminal failure. It observed
+  unsuccessful guarded copies across unreadable pages before the unguarded
+  retry succeeded and reached the storage overlap. Those guarded attempts do
+  not establish a Vulkan memory-type or allocation-size failure; the temporary
+  diagnostic was removed.
+
+- Inactive depth-image compute dispatch (2026-09-28): a mixed-parent R32
+  storage view with depth-64KB tiling was contained in two newer GPU-owned
+  color render targets and an older storage view. Their formats and tile
+  equations do not permit a raw color-to-depth alias copy. The consuming
+  shader's only side effect is an image store; a scalar parameter from an
+  exact read-only dynamic binding was zero in a stable guest snapshot. Its
+  unsigned comparison clears `EXEC`, and every path to the store passes that
+  comparison and a restore from the zero `VCC`. A conservative shader analyzer
+  and per-dispatch snapshot now skip that semantically empty dispatch. The
+  strict probe confirmed the gate fired and advanced to a different R32
+  depth-tile upload with eight mips. The tile-size fallback only describes mip
+  zero when no catalog entry matches. The per-level layout and next strict
+  frontier are recorded below; raw color-to-depth aliasing remains excluded.
+
+- Depth mip storage view exclusion (2026-09-28): the earlier 768 KiB R32
+  depth-tile size was only mip zero, not the eight-level allocation. The
+  1152 KiB chain has reverse-ordered ordinary mips and a shared 64 KiB tail.
+  An observed 8×8 compute shader executes `IMAGE_STORE` against a view whose
+  base and last levels are 6, then a second view requests level 7 of the same
+  backing. Treating either view as the origin of Kyty's one-level mip atlas
+  would write the wrong texels; creating two independent overlapping images
+  also lost their shared GPU state. Single-level Vulkan storage views now
+  select the guest base level on one mipmapped image. The first implementation
+  wrongly expected a 2D resource's normalized layer count to be zero; the
+  binding actually passes one. After correcting that and sharing the image,
+  a strict run passed both overlap exits and reached a distinct D16
+  depth-reference binding failure. Its native capture at present 30 was
+  uniform black. No gameplay or correct rendering follows from the presents.
+
+- D16 array source and slice frontier (2026-09-28): the rejected depth view
+  described three normalized layers occupying 24 MiB. One complete overlap
+  query found two Texture views inside that span; individual provenance found
+  both CPU-uploaded, with no write-back capability. The previous classifier
+  treated a grouped overlap entry count as an object count and rejected them.
+  It now requires matching provenance for every Texture object, including
+  when the bounded page scan reports truncation after finding the complete
+  count. A GFX10 16-pipe Z_X pattern matching Kyty's existing XY equation
+  supplies the four array-slice XOR terms. CPU depth upload uses that term on
+  every layer; the inline storage source stays single-layer only. Focused
+  tests passed, and one strict run advanced from the old D16 rejection to
+  present 32 before a paired compute-wave admission exit at PC 0x66c. The
+  instruction is represented as `SBarrier`. A bounded retry identified SOP2
+  opcode 0x25 (`S_BFM_B64`); the parser substitutes the barrier placeholder.
+  Implement the real bitfield-mask operation and validate its paired tuple.
+  Native equivalence also rejected a lane-crossing read at PC 0x208. The run
+  produced no new capture, so the latest scored image remains uniformly black.
+
+- Scalar bitfield mask follow-up (2026-09-28): SOP2 opcode 0x25 now decodes as
+  `S_BFM_B64` rather than a barrier placeholder. The two-word SPIR-V lowering
+  masks width and offset to six bits, builds the low-bit mask, shifts it, and
+  preserves SCC. Paired admission checks the exact scalar tuple, while real
+  SOPP `S_BARRIER` requires opcode 0x0a and the empty tuple. Focused tests were
+  red before the change and green afterward; the generated SPIR-V passed the
+  toolchain. A strict Silent/Native run passed the former PC 0x66c exit and
+  then rejected `BufferAtomicUmax` at PC 0x74c. Its automatic native frame-9
+  capture scored `entropy=0` and one color. Neither progress nor presents
+  establish correct rendering or gameplay.
+
+- Late Xe `execbuf` ENOMEM (2026-09-28): two bounded strict runs returned
+  `VK_ERROR_DEVICE_LOST` on compute submissions near sequences 2009 and 2052,
+  with the Intel driver reporting repeated `execbuf` ENOMEM. The hypothesis
+  that the same submission sequence deterministically exhausts Kyty's Vulkan
+  allocations was not reproduced: a third strict run with the same binary
+  passed that point and stopped at a later JSON import. Its agent snapshot
+  showed 159 live GPU memory objects, 2,391 submissions, and at most
+  three in flight; the process's Xe fdinfo showed about 1.58 GiB resident VRAM
+  and 665 MiB resident GTT near present 21. Neither those values nor the host's
+  available RAM prove the driver fault's cause. If ENOMEM recurs, capture the
+  exact submission and device memory budget or Xe fault data before changing
+  Kyty's queue or allocation policy.
+
+- First-flip host-window stall (2026-09-28): a bounded strict Silent/Native
+  run with the SDL X11 backend held at 78 draws, 133 dispatches, 549
+  submissions, and zero presents. GDB linked the guest submitter's decode
+  completion wait to a graphics worker in `cp_op_wait_flip_done`; the main
+  thread was in SDL's `X11_ShowWindow` waiting for an X11 map event while the
+  window remained unmapped. A minimal program linked to the bundled SDL
+  library blocked at `SDL_ShowWindow` with either a hidden Vulkan window or a
+  hidden non-Vulkan window. The same program returned with the Wayland backend.
+  One strict run using `SDL_VIDEODRIVER=wayland` and the active Wayland display
+  presented frames and reached the mixed-parent storage-image exit below. The
+  host window now prefers `wayland,x11` on a Linux Wayland session when the
+  driver is unset; a strict Silent/Native run with no driver override reached
+  the same mixed-parent exit. An explicit driver selection still takes priority.
+  Opening the window before the first flip did not map it and was reverted.
+  Do not interpret the X11 zero-present stall as an image-alias or GPU fence
+  failure. The exact X11/window-manager interaction remains unproven.
+
+- Empty blocking audio push (2026-09-28): a bounded strict probe observed
+  10,000 empty-PCM `AudioOut2ContextPush` calls in 529 ms from a blocking
+  context. A red/green focused test covers one grain of pacing; the wait drops
+  the context mutex and checks that the context still exists afterward. GDB
+  confirmed the strict guest exercises the new wait, but the X11 run still
+  stopped at the first flip. Audio pacing therefore did not cause or resolve
+  that graphics stall. The Wayland run reached the same mixed-parent exit as
+  earlier captures.
+
+- Mixed parents of the second partial storage output (2026-09-28): after the
+  first partial output's GPU tile copy, the strict Silent/Native run advanced
+  to `!create_all_the_same` in `GpuMemoryCreate.cpp:1691`. This output is a
+  single-channel storage image with `skip_seed=0`. It contains a small live
+  storage/sampled pair and crosses three live, GPU-newer render targets. Two
+  render targets are RGBA16F and one has a different packed-float format; all
+  are tiled and have no write-back callback. A generic same-format image copy
+  cannot seed this mixed layout. The shader has at most one store to this
+  output per invocation, with no backward branch around that store. Its
+  16×1 groups of 16×16 invocations can write at most 4,096 of 3,326,976
+  texels (0.12%), so a full-overwrite seed omission is excluded.
+  Determine which parent owns each byte range and whether the new output needs
+  those prior bytes before extending the overlap policy. Its two-byte tile-27
+  format previously reused the eight-byte equation, mapping 32,768 texels to
+  only 8,192 distinct offsets over a 256×128 block. A focused red/green test
+  established this collision and verifies that the revised 16-pipe equation
+  is bijective and two-byte aligned over a full 64 KiB block. A strict run
+  still stopped at this mixed-parent rejection; guest visual evidence for the
+  revised tiling and a raw cross-format transfer remain outstanding. A filtered
+  lifetime trace of the overlapping render address showed separate RGBA16F and packed
+  float host images, both bound with `CLEAR` and the packed image subsequently
+  sampled. Those whole-image bind events do not establish which host image
+  owns each guest byte at the later overlap. A later Wayland-backed GDB run
+  reached the rejection and found a two-megabyte prefix with no tracked image
+  parent, followed by a range covered by three render targets. Their GPU
+  update markers were ordered 252, 256, and 257; the newest whole-object
+  marker belongs to the packed-float render target, while the new storage
+  image is single-channel 16-bit float. The small storage/sampled pair inside
+  that range has older creation and GPU markers. Whole-object markers do not
+  prove the last writer of each byte or permit a typed Vulkan image copy
+  between the packed and 16-bit formats. A filtered strict Wayland trace then
+  followed that render address through the rejection: the latest packed-float
+  pass used `CLEAR` on a 1920×1080 attachment, drew a three-vertex primitive,
+  and the next pass sampled that host image. No later render-target write to
+  the filtered address appeared before the new storage view. The overlapping
+  source span is the first 78 whole 64 KiB blocks of a 15-block-wide surface;
+  those blocks lie within the attachment's valid 1080 rows. This identifies
+  the packed host image as the leading source candidate. A separate bounded
+  strict run stopped at the rejection under GDB and queried the existing
+  writer-history recorder for that entire overlapping span. The query reported
+  `enabled=1`, `covers=1`, `retained=0`, `dropped=0`, and `matching=0`.
+  Thus no recorded DMA, immediate WriteData, constant-RAM, addressed event,
+  or GPU write-back touched those bytes in that run. The packed parent had the
+  newest GPU update marker (259 versus 258 and 254 for the crossing render
+  peers); its CPU marker was 130. The recorder does not cover direct guest
+  CPU stores or render pass writes, which were observed separately. A temporary seed-skip diagnostic
+  still reached the same rejection because the existing full-overwrite policy
+  does not accept a `Texture IsContainedWithin` parent; the diagnostic was
+  removed and provides no evidence about later image reads. The filtered
+  trace and two GDB probes reached their run deadlines before the overlap;
+  do not interpret their missing tail as a writer or dependency result.
+  Extending the filtered trace to 300 seconds did not reach the overlap either:
+  agent counters stayed at 78 draws, 133 dispatches, 549 submissions, and zero
+  presents between the 155- and 207-second samples. Attaching GDB to that
+  process was denied by `ptrace`. A later launch under GDB found the X11 wait
+  chain above. This stall is not evidence of the alias's byte owner.
+  The first-present VideoOut source was confirmed as
+  `VK_FORMAT_A2R10G10B10_UNORM_PACK32`.
+  After adding packed-format capture, the strict run produced four native PNGs
+  from four presents and then reached the same mixed-parent exit. Each capture
+  scored `entropy=0`, one quantized color, and `gameplay_like=false`, so this is
+  capture-path progress only.
+
+- Raw mixed-format image alias (2026-09-28): the new R16F storage output's
+  guest selector was `0x204` (`R,0,0,1`); Kyty already forced identity for its
+  single-component Vulkan storage view, so that selector is now normalized
+  for R16/R16F cache identity and planning. A raw 32-bit packed-render to
+  paired 16-bit storage transfer uses 64 KiB guest block addresses to select
+  source words from the live image. It is admitted only when the source's
+  full host extent was cleared, its GPU marker is newer than every overlapping
+  parent's CPU/GPU marker, and its guest span covers all those parent
+  intersections. The transfer records source/destination image readbacks,
+  a bit-preserving compute mapping, and destination upload in the same command
+  buffer. A synthetic test verifies the full block's source/destination byte
+  equations and rejects partial source blocks; the embedded shader passed
+  `spirv-val`. The first strict Wayland run crossed the old mixed-parent exit,
+  reached present 17, and timed out at 180 seconds. A native present-17 capture
+  scored `entropy=0` and `gameplay_like=false`. A second strict run with the
+  full-clear gate reached present 9 and timed out at 110 seconds with no guest
+  error. Its performance snapshot recorded the five-parent storage creation
+  as `new_linked` in about 30 ms, while ordinary frames still took about
+  8 seconds. This excludes the alias creation itself as a sufficient
+  explanation for that sustained frame time. It does not establish correct
+  visual content, a real-hardware two-byte tiling match, or gameplay.
+
+- Empty audio-push pacing versus slow flips (2026-09-28): a temporary bounded
+  counter recorded 3,000 empty blocking pushes in about 34 seconds, with a
+  512-sample grain at 48 kHz. This is near the 93.75-push/s output cadence and
+  does not by itself attribute the roughly eight-second flip intervals to
+  audio. A strict GDB run placed the empty audio wait on thread 60 and the
+  internal flip on thread 6. The direct-sleep-on-flip-thread hypothesis is
+  excluded; an indirect dependency has not been demonstrated. The temporary
+  counter was removed and audio pacing was not changed.
+
+- Slow graphics-label waits (2026-09-28): two strict GDB samples five seconds
+  apart placed the graphics worker in `WaitForSuspendedRuns` while the guest
+  submitter waited for `DecodeCompletion` and audio independently paced its
+  output. A breakpoint counted 16 one-second fallback expirations during the
+  first three presents. Bounded packet traces found `WAIT_MEM64` equality
+  checks for `1` against zero-valued labels in one guest arena; the submission
+  tracker reported `ProducerNotFound`. A separate set of waits for an immediate
+  marker had a preceding `RELEASE_MEM` and found the current submission's
+  producer. A hardware watchpoint saw guest code set the first slow label to
+  `0` before the wait and `LabelManager::FireCallbacks` set it to `1` later,
+  after several fallback expirations. No tracked GPU writer or live storage
+  object covered the label at the first timeout. The first 40 dispatches ran
+  on the graphics queue with no ordinary storage descriptor spanning it; no
+  compute ring was mapped, notified, or run in the 20-second opening probe.
+  These observations exclude the storage-alias creation and direct audio sleep
+  as sufficient causes of the eight-second interval. They do not identify the
+  earlier producer or exclude an indirect shader/device-address route.
+  Signaling `DecodeCompletion` immediately after the PM4 snapshot was tried as
+  one bounded A/B experiment; present 2 still reported about 0.11 FPS and a
+  six-second gap, so the change was removed. The later paired-submit trace
+  below identifies the first slow label's producer. Do not shorten, extend,
+  or skip the wait as a performance fix.
+
+- Independent ACB queue and write-back frontier (2026-09-28): a bounded scan
+  of snapshot command buffers found the first slow `WAIT_MEM64` five times in
+  submission 0's ACB draw stream (1005 dwords, empty constant stream), with
+  its matching `RELEASE_MEM` in submission 4's DCB. The ACB used driver queue
+  handle 64; a second ACB used handle 72. Both had been submitted into the
+  single graphics ring, preventing the DCB producer from running until five
+  one-second fallback skips let the ACB finish. The production change routes
+  each ACB handle to a distinct ordered compute command processor. A first
+  strict trial reached a preexisting write-back guard: one `StorageBuffer`
+  was still used by compute queue 7 when graphics queue 8 completed. The
+  write-back gate now defers CPU publication until all recorded queue uses
+  complete, retaining the existing same-queue high-water check. Focused
+  queue-binding and two-queue publication tests passed; both changed targets
+  built with `-j2`; boundary and graphics-table gates passed. In the next
+  strict run, the agent reached present 15 in about 36 seconds with snapshot
+  FPS around 0.44 and 32 remaining wait suspensions. A native present-19
+  capture was still one-bin black (`entropy=0`, `healthy=false`). The later
+  strict exit was a missing `Json2_v1` `Parser::parse` import, not a queue or
+  Vulkan fault. The temporary submit-origin probe was removed. Continue with
+  a verified JSON parse/value contract, then recheck missing scene submission
+  and the remaining waits; there is still no playable result.
+
+- Viewport-bank overwrite and black-frame boundary (2026-09-28): a bounded
+  native readback found zero RGB in the packed VideoOut image before PNG
+  conversion, in its 2432×1368 RGBA16F input, and in the preceding 1920×1080
+  packed HDR target. The first color-chain census showed that the final
+  targets each had a full-screen, color-enabled writer and exact bound source
+  images. One source-writer trace showed an impossible generic scissor:
+  `left=1056964608`, `top=1065353216`, `right=bottom=0`, producing a zero-area
+  Vulkan scissor. The first two values are the bit patterns of `0.5f` and
+  `1.0f`. `GraphicsRunJmpTables.cpp` and the direct register parser accept all
+  16 viewport slots, while `HardwareContext.h:418` held `viewports[15]`.
+  Viewport-15 writes therefore overwrote the adjacent scissor state. The
+  focused red test reproduced the same two integers and now passes with 16
+  entries. A new strict trace resolves the HDR writer to `0,0,2432,1368`.
+  This fixes memory corruption, not the remaining black output: a 125-second
+  strict Silent/Native run reached present 15, retained captures were all
+  uniform black, and the frame rate stayed around 0.12 FPS. A post-fix
+  readback found the preceding 1920×1080 HDR image still all zero. Its writer
+  samples smaller HDR postprocess images; the first-frame shader census also
+  identified an earlier 1920×1080 float color target sampling a guest-uploaded
+  single-channel image. Establish which earliest input is nonzero and whether
+  its draw writes visible color before changing compositor or wait semantics.
+  Temporary capture/scissor probes were removed. A broad state-unit run passed
+  232 of 233 tests: `Gen5CodeAvailablePreservesUnmatchedDirectStorageDescriptor`
+  still reports zero bound storage buffers instead of one at
+  `UnitTestEmulatorGraphicsState.cpp:2552`. This is separate from the viewport
+  bank; inspect `ShaderParseUsage2` direct-resource retention and the test's
+  code-available contract before altering descriptor behavior.
+
+- First scene-source discriminator after the viewport fix (2026-09-28): the
+  existing vertex probe recorded three finite vertices for the first HDR
+  writer, with one inside clip and two forming the expected full-screen
+  triangle. The output-preserving MRT probe then counted 2,073,600 finite
+  fragment exports, all RGB-zero; an exact-fence attachment readback also
+  counted zero nonblack pixels. A temporary bounded guest-memory count found
+  zero nonzero words in the writer's readable 8,847,360-byte R32 input. The
+  exact target lifetime showed this writer followed only by a texture-free
+  shader and color-disabled draws before the first downstream sample.
+  A separate full-screen branch's MRT probe counted another 2,073,600
+  finite RGB-zero exports and an all-zero attachment. Its storage-image
+  writer was traced to a compute upscaler whose read-only input is the prior
+  1920×1080 HDR image, so that branch cannot create scene color from an empty
+  input. A fresh-cache shader-dump attempt failed to reach the first present
+  within its 70-second cap; a bounded local parse of the exact writer instead
+  confirmed image loads from that HDR input and image stores to the storage
+  output. All temporary source probes were removed and `fc_script` was rebuilt.
+  The first-draw shader census at the opening present and again at present 11
+  found the same 14 distinct pixel shaders. Each first occurrence was a
+  three-vertex nonindexed draw without depth; repeated occurrences are not
+  covered by that census. A diagnostic `cross` scheduled at present 2 was
+  delivered, but the present-6 native capture remained `entropy=0`, one color
+  bin, and `healthy=false`; the agent counted zero ordinary guest pad reads
+  and two state samples at present 5. This does not prove the input was
+  consumed or that an interactive phase was reached. Do not patch the final
+  compositor, invent a nonzero texture, or loosen the audio API on these
+  results. The next causally useful observation is the producer of the first
+  nonzero scene/depth source or the missing scene submission, correlated with
+  the first slow label wait and guest loading phase.
+
+- First partial storage output and tile-copy proof (2026-09-28): the former
+  `RenderTexture Crosses StorageTexture` exit in `GpuMemoryCreate.cpp:1203`
+  involved one live RGBA16F render target and a larger storage view with the
+  same format, sample count, and 64 KiB tile layout. The guest ranges overlapped
+  on whole tile boundaries. A focused red/green test checked that each copied
+  texel names the same guest byte under both layouts and rejected incompatible
+  format, partial-edge, and unaligned cases. The new materialization copies
+  only those shared tiles from the live GPU image, retaining guest upload for
+  the remainder. The strict run passed the former exit and stopped at the
+  separate mixed-parent output above. Reclaiming the live render target or
+  copying stale guest bytes had been excluded by its newer GPU update and
+  absent write-back callback.
+
+- Covered later storage-image overlaps (2026-09-27): a native 16×16 compute
+  shader samples one image, resets EXEC, selects even local coordinates, and
+  writes one R32 texel per 2×2 input block through a dynamically loaded
+  descriptor. The symbolic 8×8 tile proof rejects missing EXEC reset,
+  destination reads, and incomplete component stores. Its dispatches cover
+  both observed output sizes. A second 8×8 shader writes two images under
+  bounds read from a buffer; the live bounds equal the output extent, and
+  its dispatch covers the extent. `skip_seed` was set at both actual bindings.
+  The formerly rejected `Contains` render/storage and `Crosses` sampled/storage
+  parent views remain linked only under that full-overwrite contract. Focused
+  tests and successive strict runs advanced beyond those exits. This evidence
+  says nothing about the current partial writer above.
+
+- Bounded libc substring import (2026-09-27): local independent emulator
+  catalogs identify `Xnrfb2-WhVw` as `strnstr`. The guest passes a path,
+  a prefix needle, and the path's byte limit; the focused test covers matches,
+  bounds, misses, and the empty needle. The strict run passed the former
+  missing import and reached a later `StorageTexture` overlap with mixed
+  `Contains`, `Crosses`, and `IsContainedWithin` relations. Those parent types
+  and the writer were captured in the covered-image investigation above.
+  That import-stage run alone did not prove presentation or gameplay.
+
+- libc string NID correction (2026-09-27): the empty-basename `.agx` graph
+  lookup was caused by mapping `NC4MSB+BRQg` to a formatter. The guest's
+  four-argument calls append path pieces and test an errno-style return; a
+  second local emulator's export catalog identifies the NID as `strncat_s`.
+  Watching the graph name confirmed that the old handler replaced the existing
+  text with `.agx`. A focused red/green test and strict run passed the former
+  assertion. That run's next exit was bounded substring search NID
+  `Xnrfb2-WhVw`, addressed above. The prior format-wrapper hypothesis is
+  closed by this evidence. No gameplay is claimed.
+
+- Audio propagation and animation-graph frontier (2026-09-27): a CPU-only
+  `SystemQueryMemory`/`SystemCreate` implementation uses the 0x30-byte output
+  record's CPU size field and 64 bytes of caller-owned state. Room creation
+  returns a live opaque handle and checks system ownership; the focused test
+  passed, and a strict run passed both former missing imports. The next failure
+  is a guest animation-graph assertion for `.agx`. A breakpoint before lookup
+  showed that the guest graph object already contained that empty-basename
+  string; the content tree has other `.agx` files. The hypothesis that a host
+  file lookup simply dropped the name was not supported; the producer was the
+  wrong libc NID binding recorded above. No audio rendering or gameplay is
+  claimed.
+
+- AudioPropagation_v1 reference exclusion (2026-09-27): the current strict
+  `SystemQueryMemory` call passes a 0x38-byte option record first and a
+  0x30-byte memory record second. Its continuation reads the CPU-memory size
+  from memory-record offset `+0x18`, allocates that many bytes, and passes the
+  filled record to `SystemCreate`. Five related local C++ emulator variants
+  return success with zero CPU/GPU sizes and do not consume the options;
+  two other local implementations write an unverified 1 MiB/256 B pair into
+  the first 16 output bytes and return success without a working system.
+  Those writes collide with the observed descriptor header, and none of these
+  references supplies a usable size calculation or acoustics contract. An
+  older local Kyty prototype writes a fixed size at `+0x58` of the first
+  argument; that offset is outside the current 0x30-byte output record and
+  cannot establish this call's ABI. The reference-copying lead was closed in
+  `12f41a58`. Kyty's CPU-only lifecycle instead reports the bytes occupied
+  by its own caller-owned state, as described above; acoustic behavior still
+  requires independent implementation and validation.
+
+- AudioPropagation system-attribute identity exclusion (2026-09-28): after
+  material registration, the guest passed value `2` through a counted
+  24-byte `SystemSetAttributes` entry with ID `0x20000` and an eight-byte
+  value. The hypothesis that `2` was the just-registered material was false:
+  a bounded live-object probe matched it to a room in the same system and to
+  no registered material. The guest writes only the entry's ID dword; the
+  adjacent dword was stack residue, not a validated flag. Kyty now binds the
+  observed room attribute and passes the former import in a strict run. This
+  does not establish acoustic rendering; the next import is `SystemGetRays`.
+
+- AudioPropagation ray-query reference exclusion (2026-09-28): the live
+  `SystemGetRays` call presents capacity 64 and 64 caller-initialized
+  0x58-byte records. The guest later scans their coordinates. Local secondary
+  implementations either return success without output or force count zero;
+  they do not establish a ray-generation contract. Kyty's current CPU-only
+  system has no ray producer, so its own empty set reports count zero while
+  leaving the guest records intact. The strict run passed the import and
+  stopped later on a graphics MIMG decode, with a uniformly black capture.
+  Do not infer acoustic support from this query's success.
+
+- The second-module replay with a diagnostic 64-block bound and descriptor-slot
+  checks completed in 17 ms. No scalar buffer index was invalid before that
+  bound. Its subgroups remained at blocks 36/43 in the linked-list traversal;
+  captured list heads and the first node were zero. Filling only the captured
+  list-head input with the shader's tested end marker made the unchanged
+  complete module finish in 10 ms. This is an input control, not a permitted
+  runtime substitution. Producer tracing found a preceding shader that stores
+  to that same descriptor after loading it with S_LOAD. The dynamic resource
+  collector in `ShaderResources.cpp` assigned every such storage descriptor
+  ReadOnly, including vector stores. That permits transient snapshot storage
+  with no guest write-back owner, so a later reader can upload the unchanged
+  CPU zeros. The general correction records stores and atomics as ReadWrite,
+  merges writable usage across equal descriptors/load PCs, and updates
+  resource counts. A subsequent strict run passed this shader and advanced
+  through the storage-image alias and packed render-target frontiers to a
+  separate lazy audio import. Translator identity 54 prevents reuse of binaries
+  compiled under the former usage and offset image-sample translation.
+
+- After the phase correction, all three large modules completed standalone
+  zero-input replays in 5-7 ms with their own descriptor layouts. This does
+  not exclude data-dependent execution failures. A bounded diagnostic split
+  that submitted all preceding commands before each large dispatch, without
+  skipping any dispatch, completed the first module with live resources. The
+  second module lost the device after 791 ms; the third was not reached. Its
+  eight bound buffers and metadata were captured from their actual Vulkan
+  mappings, including persistent transient mappings, after the preceding fence.
+  A standalone replay of that second module with captured buffers, metadata,
+  and bounded guest-memory windows also lost the device after 747 ms. One
+  31.6 MiB buffer was captured only through its first MiB and zero-filled
+  thereafter; images remained synthetic, and 37 guest windows were omitted
+  at the 32 MiB capture limit. Both the program and system-pointer ranges were
+  present. This now isolates a reproducible data-dependent second-module
+  failure without the guest process; it does not identify the failing contract.
+  The temporary split and capture instrumentation was removed after collection.
+
+- An isolated Vulkan replay of the first large compute module also reset the
+  render engine without a guest process, HLE, imported guest views, or private
+  resource contents. It used zero-filled synthetic buffers, cleared images,
+  the required subgroup size of 32, and the captured module from the removed
+  table experiment. A sentinel scalar input taking the initial exit completed
+  in 3 ms; zero input lost the device after 647 ms with a timed-out replay job.
+  This localizes that replay failure to shader execution or its synthetic
+  inputs, but does not establish that every later guest instruction has valid
+  inputs or that the driver alone is responsible. The initial scalar buffer
+  load and the block-dispatch selector are already uniform in the driver's
+  intermediate representation; adding a broadcast there has no supporting
+  evidence. A reduced module containing only the first two workgroup barriers
+  and their preceding blocks also reset the engine. A bounded prefix ending
+  after two dispatcher iterations completed in 2 ms and recorded block 2 on
+  the first subgroup and block 3 (the first barrier) on the other three.
+  Removing execution synchronization from those two barriers completed the
+  reduced replay, while retaining subgroup barriers and memory ordering.
+  A phase loop that leaves the per-wave dispatcher at each guest barrier,
+  reconverges the entire host workgroup, and keeps terminated waves participating
+  in the host rendezvous completed the reduced replay in 2 ms and the complete
+  module in 6 ms. Both validated as Vulkan 1.2 SPIR-V. These synthetic controls
+  provide new evidence about barrier placement across loop iterations; the
+  earlier scope changes and software waits did not test this lowering. The
+  production generator now splits at each guest barrier and emits that phase
+  rendezvous, with one shared status word per guest wave and a host shared-memory
+  admission check. Its generated first module also completed the zero replay
+  in 7 ms. The affected executable built with two jobs, and all 18 emitted
+  modules in the strict run validated. That run still reset the same sequence-54
+  fence after 652 ms, exited with status 65, and presented zero frames. This is
+  a corrected host convergence contract, not resolution of the guest reset.
+  Translator identity 51 identifies the phase lowering. Investigate the later
+  executed paths and runtime descriptor interpretation next.
+
+- Recorded, not yet fixed: `Objects/StorageTexture.cpp:496` formats a 32-bit
+  swizzle argument with `PRIx64` when rejecting an unsupported swizzle. The
+  local build reports a format/type mismatch. Use a matching 32-bit format or
+  an explicit 64-bit argument so that this failure diagnostic has defined
+  behavior on each host ABI.
+
+- Replacing the binary search with a three-level, page-indexed address table
+  did not clear the compute reset. The generated modules passed Vulkan 1.2
+  SPIR-V validation; address lookup loops were gone, but the three large
+  SIMD32 programs still compiled to 173,387 / 187,933 / 205,099 instructions,
+  with 7,472 / 8,055 / 8,921 spills and 21,585 / 23,668 / 26,184 fills. The
+  strict Silent run reached the same sequence-54 fence, failed with result -4
+  after 646 ms, and logged a render-engine reset and timed-out job. The table
+  rewrite was removed. This excludes search-loop removal alone as sufficient;
+  it does not exclude register pressure elsewhere in the dispatcher. Translator
+  identity 50 was used by this removed experiment and must not be reused for
+  a different lowering. The next observation should isolate the actual shader
+  execution or the register-state traffic before another address-table change.
+
+- Recorded, not yet fixed: `GraphicsRunOpParsers.cpp:1284` calls a null
+  direct SH-register handler after `SET_SH_REG` writes two registers starting
+  at `SPI_SHADER_USER_DATA_ADDR_LO_GS` (0x82). A bounded debugger run with
+  device-address dispatches skipped stops at PC zero in the host parser, not
+  in a guest HLE callback. The suggested direction is to decode the evidenced
+  stage-data address through the same SH decoder for direct and indirect
+  packets, and reject unsupported registers before calling a handler. This
+  diagnostic route is not strict runtime or gameplay acceptance.
+
+- A block-dispatcher iteration cap of 67 still lost the device on the
+  device-addressed ray-tracing dispatches (`Engine reset engine_class=rcs`,
+  `Timedout job`, `vkWaitForFences` result -4). An infinite dispatcher loop is
+  excluded. Requiring each device-address load to end inside the imported
+  span (guest bytes plus the guard page) also still reset the engine, so an
+  access that merely overruns its chunk is excluded as this hang's cause.
+  The same dispatches are the ones that hang: skipping every dispatch whose
+  shader uses guest device addressing advances past them. Those programs do
+  reach `s_barrier` on some waves after other waves have exited, but neither
+  a subgroup-scope barrier nor a workgroup join that waits only for
+  invocations still inside the dispatch stopped the engine reset. The barrier
+  scope is excluded as this hang's cause. Guarding LDS reads and writes
+  with a per-access selection did not produce a finished pipeline within the
+  run limit (the process stayed CPU-bound, with no engine reset); that
+  attempt was reverted and does not clear an out-of-range LDS index.
+  Scalar loads whose descriptor base is a guest address, not a bind-time slot
+  index, use that word as a storage-buffer index and fault the device
+  (`ShaderSpirvBuffer.cpp`, the `sbuffer_load_dword*` helpers). A helper that
+  decodes the RDNA base, stride and record count and reads through guest
+  device addressing is valid SPIR-V, but pipeline creation of that compute
+  shader grows past 5 GB and does not finish; a branchless form of the same
+  lookup, inlined at the existing call sites, grows past 7 GB. Emitting the
+  load as straight-line arithmetic plus a call to the existing lookup, and
+  leaving the bind-time base as a guest address, also grows past 5 GB once
+  that shader is reached. The multi-block lookup already in the tree compiles
+  and still reaches the engine reset. Calling that lookup from only the
+  scalar loads whose base is built by scalar ALU, with no per-load bounds
+  select, also fails to finish pipeline creation: the process stays
+  CPU-bound, peaks near 8 GB, and the guest log stops at resident load with
+  no engine reset. Vulkan compute inlines every function, so each new call
+  duplicates the lookup into the dispatcher. Do not add further calls to
+  that lookup in this shader.
+  Enabling robustBufferAccess2 and robustImageAccess2 on the device still
+  resets the engine at the same fence (sequence 54, kernel seqno 165). A
+  defined-zero descriptor or image miss, as that feature implements it, is
+  not this hang. Requiring the device-address load to end inside the guest
+  byte count, rather than the imported span, also still resets that fence.
+  An access that only overruns the guest size is excluded.
+  Requesting robust buffer and image access on the pipeline
+  (`VkPipelineRobustnessCreateInfoEXT`, with robustBufferAccess2 enabled)
+  still resets that same fence. An out-of-range storage-buffer or image
+  index, as that request implements it, is excluded. Keeping every
+  local-data-share index inside the declared workgroup array still resets
+  that fence, and that pipeline did finish creation. An index past the
+  declared array is excluded. Do not add another copy of the address lookup.
+- Recorded, not yet fixed: `ShaderSpirvGenerator.cpp` exits at a vertex
+  `s_getpc_b64` (`stage=1 instruction=474 format=0x8 pc=0x5c`) once the
+  device-address dispatches are skipped. The compute emitter refuses a
+  non-compute stage (`ShaderSpirvProgramAddress.cpp`). Suggested direction:
+  publish the stage's guest program base and add the instruction's original
+  byte offset, including a fused continuation whose PCs were shifted.
+- Device-addressed ray-tracing workload, `vkQueueSubmit` result -4 about 30 s
+  after the first address table: -4 is `VK_ERROR_DEVICE_LOST`, not memory
+  exhaustion (1.5 GiB of imports is fine in a standalone repro). Excluded, in
+  order: an endless BVH traversal (the first TLAS pointer really is zero, but
+  a 67-iteration dispatcher cap still lost the device); a load crossing a
+  chunk end (a guard page did not help); the ray-tracing dispatches themselves
+  (skipping both still lost the device). No kernel reset was logged and no DRM
+  ioctl failed. `MESA_VK_ABORT_ON_DEVICE_LOSS=1` under gdb placed the loss
+  inside `vkAllocateMemory` of a host-pointer import of the guest view: a
+  pinned userptr cannot revalidate a page whose write access the dirty tracker
+  or guest mprotect removed. Closed by `fix(graphics): never import guest views
+  for device addressing` (alias or tracked snapshot only).
+- The first ray-tracing dispatch runs with a zero TLAS pointer and the ray
+  enable flag set; no GPU writer, storage buffer, CP packet or skipped
+  indirect dispatch targets it. The descriptor's size field (nodes - 1) makes
+  such traversal end, now honored by the BVH lowering.
 - Source atlas dumps contain meaningful alpha; the sampled descriptor used
   RGBA8 UNORM with identity swizzle and guest upload.
 - Blend factors, compressed MRT component order, and sampled alpha propagation
@@ -340,6 +1844,17 @@ against the same correct gameplay capture.
   while opaque early-Z shaders retain it.
 - Temporary MRT, descriptor, and frame-selection instrumentation was removed
   before the semantic commit.
+- A Gen5 pixel shader that loads its constant-buffer V# through the type-5 EUD
+  pointer was observed with matching metadata and ISA offsets: logical sharp
+  slot 72 and `s_load_dwordx4` byte offset 160 both select EUD dword 40. Two
+  consecutive full-table reads matched, and bounded GPU-writer history found
+  no overlapping DMA, WRITE_DATA, event, or write-back producer. This excludes
+  a torn table, a shifted EUD base, and an omitted GPU ordering edge for that
+  failure. At register decode the four supposed V# words were already PM4-like
+  register/value pairs, and the EUD address was adjacent to—but outside—the
+  copied command span. The remaining ownership frontier is submission-time
+  capture or relocation of referenced EUD storage; do not replace the invalid
+  V# with a null carrier or weaken range validation.
 - Retiring an idle `StorageTexture` by frame age can discard the only valid
   GPU-authored contents because that object has no GPU-to-guest write-back.
   Permanently excluding every storage image from retirement was also rejected:
@@ -4073,3 +5588,193 @@ false-negative interleaving has been demonstrated. The next occurrence must
 publish a signal-safe bounded snapshot of tracker page state, reference count,
 captured original mode/token and native protection before fatal termination.
 Until then this is a recorded runtime defect, not a graphics or allocator fix.
+
+## Color-load policy audit: outstanding structural risks
+
+A bounded CPU probe of `ResolveColorAttachmentLoadOps` in
+`source/emulator/include/Emulator/Graphics/Utils.h` confirms that a retained
+RGBA8 target selects `LOAD` while the identical target in
+`SHADER_READ_ONLY_OPTIMAL` selects `CLEAR`, with the fast-clear flag false and
+both clear words zero. Sampling does not by itself establish a guest discard
+or a new frame. A render-to-texture, sample, then partial-render sequence can
+therefore lose previously rendered pixels. Existing graphics-state tests
+explicitly expect this sample-rebind clear; their success is not independent
+evidence for that policy.
+
+Do not conflate this structural risk with the already traced damaged world
+writer: that writer had `LOAD`, so this audit does not reopen its excluded
+clear hypothesis. Before replacing the policy, capture an affected target's
+write/sample/rebind sequence and establish the guest clear or retention
+contract. A focused Vulkan integration should seed the target, sample it,
+render a partial region, and read back both changed and untouched regions.
+Clear requests must come from their evidenced producer, not a sampled layout.
+
+The missing `R32_SFLOAT` decoder is now corrected locally: WORD0 is preserved
+as a float payload, WORD1 is ignored for this one-component format, and no
+numeric conversion or clamp is applied. A bounded CPU reproduction previously
+returned zero for five of six explicit bit patterns; the corrected decoder
+preserves all six, including signed zero and nonfinite payloads. This changes
+clear-value decoding only, not the policy that decides when a clear occurs.
+
+`CommandBuffer::BeginRenderPass` now decodes
+clear values through `attachment.attachment_format`, matching framebuffer
+creation. Both paths resolve through the same attachment interpretation; the
+earlier divergence was numerically masked for compatible UNORM/sRGB pairs but
+mattered once the clear packing differs (e.g. R32 display-buffer clears).
+The fast-clear-enable register bit alone must not be assumed to be a new clear
+command; prove its metadata/event semantics before changing the load decision.
+
+The compute metadata-fill path already requires an exact instruction sequence
+and descriptor-use proof. A generic rule that substitutes a whole-surface
+clear merely because metadata is writable would weaken this implementation;
+retain the existing proof and normal dispatch execution.
+
+### Float-clear validation boundary
+
+A fresh Release build of `fc_script`, `kyty_unit_test`, and
+`kyty_graphics_diagnostics_integration` passed with two jobs, a 3-GiB hard
+memory limit, and swap disabled. The focused color-clear filter passed all ten
+tests; `KytyGraphicsDiagnosticsIntegration.ColorAttachmentTransfer` passed
+one CTest case with `--no-tests=error` and the automatic build fixture excluded.
+The graphics-table manifest check passed for all thirteen tables, and
+`git diff --check` was clean. Existing compiler/linker warnings remain; this
+was not a warning-free build.
+
+One subsequent strict Silent run, capped at 100 seconds, 2.5 GiB and one CPU,
+advanced beyond 11,000 presents with `last-error=null`. The diagnostic input
+route began after its intended present threshold and timed out waiting for
+100 more presents after the first delivered tap. Later status still showed
+presentation progress, so this was not proof of a deadlock. The retained native
+frame showed a coherent track and the PLAY prompt, not controllable gameplay.
+Native heuristic scoring was healthy, but offline scoring returned exit 1
+with `scene_ok=false`; neither score establishes material correctness. Final
+status reported 2.603 FPS during loading, not a gameplay benchmark. Recorded
+peak memory was 2,418,012,160 bytes, with zero swap, and the sole guest was
+stopped deliberately. No same-scene A/B links the float-clear correction to a
+visible improvement. Dark-surface correctness, sustained performance, and
+formal playability remain open; do not publish this as acceptance.
+
+### DPP arithmetic source routing (local, not visual acceptance)
+
+The float arithmetic emitter consumed a same-lane source even when the decoded
+VOP2 operand selected DPP. Only the move emitter implemented quad permutation.
+The RDNA2 ISA sections 6.9 and 13.3.9 specify that DPP transforms the source of
+the arithmetic instruction as well. A retained terrain-like fragment program
+uses broadcasts of quad lanes zero, one and two to form two position differences
+before a cross product and reciprocal square root. Losing the arithmetic
+permutations collapses those distinct differences into the same vector; changing
+brightness or the final clamp cannot restore the missing source values.
+
+The full-mask quad-permutation float path is now shared with move lowering.
+Unsupported controls, partial row/bank masks and fetch-inactive remain outside
+this subset and fail visibly rather than becoming same-lane arithmetic. This
+does not implement all DPP modes or resolve fragment helper-lane/EXEC semantics.
+Translator identity is advanced past the previously observed local cache
+versions so old same-lane modules cannot satisfy the new lookup.
+
+The focused regression failed before the change because the generated program
+contained only the move's shuffle, not the subtraction's. All three focused
+DPP cases pass afterward, including recompilation through the real shader
+toolchain. Both emulator and unit-test targets built with two jobs, a 3-GiB
+hard memory limit and no swap. Existing compiler/linker warnings remain.
+
+A subsequent bounded Silent run with shader validation reached a coherent track
+and vehicle frame with no last error. Its live shader dump confirms the six
+arithmetic quad permutations are present. However, the first 100-present input
+wait timed out during loading, so the route did not reach the selected terrain
+checkpoint. Native scoring was healthy while the offline gate returned exit 1
+with `scene_ok=false`. Final instantaneous rate was 11.257 FPS, not a comparable
+performance benchmark. Peak memory was 1,862,537,216 bytes, swap was zero, and
+the process was explicitly stopped. No visual improvement or gameplay acceptance
+is established by this run.
+
+The captured fragment variant also declares no interpolated input and emits
+zero for the three position interpolation results. This is a separate remaining
+lead: correlate its input metadata and upstream parameter exports with an actual
+terrain draw before changing interpolation defaults. Do not generalize an older
+depth-rejected writer exclusion to a different scene or shader-input variant.
+
+Independent review found no new blocker in the narrow full-mask F32 routing
+change, but confirmed inherited gaps that must not be presented as solved:
+`operand_load_uint` and `operand_load_int` in `ShaderSpirvOperands.cpp` now
+share the same validated full-mask quad-permutation subset as the float path
+(raw-bit `OpCopyObject`/`OpBitcast` into a `%uint` lane exchange, fail-closed
+outside the subset). The shared shuffle still lacks inactive-source zeroing
+for partial guest EXEC with FI=0. Trace source EXEC and fragment helper
+participation before expanding the support claim. The regression additionally checks the
+generated subtraction's actual source/control dependency and fail-closed
+handling of a partial bank mask. Ten shader-cache tests and all thirteen
+graphics-table provenance checks passed; the initial provenance invocation
+without its required manifest was a usage error, not a passing check.
+
+### Terrain input variant: output-producing draw verified
+
+A subsequent bounded main-checkout trace resolves the missing-interpolator
+lead above for the observed terrain program. In one submission, the indexed
+1,536-index / 289-vertex draw has two vertex exports, one pixel input mapped to
+parameter location one, an RGB write mask, and a full-resolution color target.
+The next draw with the same pixel program has a default `0x20` interpolator,
+one vertex export, no color attachment, and a zero color write mask. The
+zero-input variant is therefore not evidence that this terrain color writer
+lost its position varying. Do not replace the legitimate default or alter
+interpolation globally based on the checksum-only shader dump.
+
+The diagnostic file itself is not variant-specific: `ShaderProbeWrite` names
+the file by stage and guest checksum and recreates it for each write, including
+analysis-only writes. The runtime shader identity, in contrast, includes input
+count, system-input masks and all interpolator settings. A retained dump must
+be correlated with the draw's actual interface and attachment before it is
+used as an output-producing shader oracle. If this probe is extended, retain
+bounded variants with their interface identity rather than an unbounded dump.
+
+The first live attempt used a CLI from another checkout and failed protocol
+negotiation; it was stopped and contributes no graphics evidence. The matching
+CLI uses protocol eight. A later strict Silent run captured coherent track,
+vehicle and green terrain, but the first 100-present input wait timed out and
+the intended route was not completed. Native scoring was healthy; the offline
+gate returned exit one with `scene_ok=false`. The focused trace run captured a
+black transitional frame, despite observing the two draw interfaces above;
+that frame is not visual acceptance. Both guests reported no last error and
+were deliberately stopped, with peaks below 1.6 GiB and zero swap. These runs
+used the existing locally built runtime, not a fresh build of every pending
+change. Neither proves sustained playability, complete material correctness,
+nor a performance improvement. No renderer semantics were changed for this
+investigation.
+
+### Fragment quad helper participation and short shader termination
+
+The full-mask float DPP quad-permutation path now uses constant-index
+`OpGroupNonUniformQuadBroadcast` in pixel shaders. General subgroup shuffle
+does not guarantee helper-invocation participation; quad operations do under
+the Vulkan shader execution contract. Only distinct source lanes selected by
+the constant control are broadcast, followed by selection when required.
+Non-pixel shaders retain the prior shuffle path. The generated pixel capability
+is checked against fragment-stage and quad-operation support before module
+creation, including cached modules. Translator version 41 invalidates earlier
+modules. This addresses host helper participation only: guest source EXEC/FI
+semantics remain an open correctness concern in the existing DPP path.
+
+The expanded short-program regression also exposed an independent terminator
+bug in `Recompile_SEndpgm_Empty`: it indexed two instructions backward even
+when `s_endpgm` occurred before index two. Such programs cannot contain the
+two-instruction discard idiom; they now emit the ordinary return directly.
+The failure was reproduced under the debugger in that exact bounds check.
+
+The two original quad regressions failed before the helper change. After the
+terminator guard, all thirteen focused DPP and shader-cache tests passed,
+including real shader-toolchain compilation of uniform and non-uniform quad
+controls and a compute control retaining shuffle. Emulator and test builds
+passed with two jobs, a 3-GiB hard limit and no swap; existing warnings remain.
+All thirteen graphics-table checks passed and the diff whitespace check was
+clean.
+
+A subsequent strict Silent run captured coherent vehicle, bridge, road and
+green terrain with no structured runtime error. The first 100-present wait
+after input timed out, so the intended gameplay route did not complete. Native
+scoring reported `hot_corruption`; offline scoring reported `scene_ok=false`.
+The red bridge dominates the retained image, but that observation does not
+waive either gate. Peak memory was 2,169,917,440 bytes with zero swap, and the
+sole guest was explicitly stopped. There is no matched-scene visual A/B or
+sustained gameplay/performance acceptance for this change. Resolve the
+source-EXEC/FI concern and validate the actual scene before publishing a
+complete DPP or visual-correctness claim.

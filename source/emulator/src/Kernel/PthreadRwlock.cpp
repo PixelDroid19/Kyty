@@ -54,13 +54,14 @@ int KYTY_SYSV_ABI PthreadRwlockInit(PthreadRwlock* rwlock, const PthreadRwlockat
 		attr = g_pthread_context->GetDefaultRwlockattr();
 	}
 
-	*rwlock = new PthreadRwlockPrivate {};
+	// Publish the handle only once the object is complete (see PthreadMutexInit).
+	auto* created = new PthreadRwlockPrivate {};
+	created->name = name;
 
-	(*rwlock)->name = name;
+	int result = pthread_rwlock_init(&created->p, &(*attr)->p);
 
-	int result = pthread_rwlock_init(&(*rwlock)->p, &(*attr)->p);
-
-	KYTY_LOG_DEBUG("\trwlock init: %s, %d\n", (*rwlock)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\trwlock init: %s, %d\n", created->name.C_Str(), result);
+	__atomic_store_n(rwlock, created, __ATOMIC_RELEASE);
 
 	switch (result)
 	{

@@ -176,7 +176,7 @@ void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t
 }
 
 void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image,
-	                        uint64_t dst_layout)
+	                        uint64_t dst_layout, uint32_t dst_base_array_layer)
 {
 	EXIT_IF(buffer == nullptr || src_buffer == nullptr || src_buffer->buffer == nullptr || dst_image == nullptr ||
 	        dst_image->image == nullptr);
@@ -186,6 +186,7 @@ void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uin
 	VkBufferImageCopy region {};
 	region.bufferRowLength             = src_pitch != dst_image->extent.width ? src_pitch : 0u;
 	region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+	region.imageSubresource.baseArrayLayer = dst_base_array_layer;
 	region.imageSubresource.layerCount = 1u;
 	region.imageExtent                 = {dst_image->extent.width, dst_image->extent.height, 1u};
 	vkCmdCopyBufferToImage(vk_buffer, src_buffer->buffer, dst_image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1u, &region);
@@ -221,6 +222,19 @@ void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuff
 
 	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer, 1, &region);
 
+	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+	                 static_cast<VkImageLayout>(src_layout));
+}
+
+void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer,
+                       const Vector<VkBufferImageCopy>& regions, uint64_t src_layout)
+{
+	EXIT_IF(buffer == nullptr || src_image == nullptr || dst_buffer == nullptr || regions.IsEmpty());
+	EXIT_IF(src_image->image == VK_NULL_HANDLE || dst_buffer->buffer == VK_NULL_HANDLE);
+	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, src_image->layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	vkCmdCopyImageToBuffer(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst_buffer->buffer,
+	                       regions.Size(), regions.GetDataConst());
 	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 static_cast<VkImageLayout>(src_layout));
 }
@@ -342,9 +356,25 @@ bool NormalizeImageImageCopy(const ImageImageCopy& requested, const VulkanImage*
 	const bool scaled_block = src_block.width != dst_block.width || src_block.height != dst_block.height;
 	if (scaled_block)
 	{
-		// This is the one format-size conversion currently constructed by the
-		// renderer: one 128-bit storage texel carries one 4x4 BC3 block.
-		if (requested.src_image->format != VK_FORMAT_R32G32B32A32_UINT || dst_image->format != VK_FORMAT_BC3_UNORM_BLOCK ||
+		// The one format-size conversion the renderer constructs: one uint
+		// storage texel carries one 4x4 block, 64-bit for BC1/BC4 and 128-bit
+		// for BC2/BC3/BC5/BC6H/BC7.
+		const auto dst_block_bytes = [](VkFormat format) -> uint32_t
+		{
+			switch (format)
+			{
+				case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+				case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+				case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+				case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+				case VK_FORMAT_BC4_UNORM_BLOCK:
+				case VK_FORMAT_BC4_SNORM_BLOCK: return 8u;
+				default: return 16u;
+			}
+		};
+		const VkFormat block_texel =
+		    dst_block_bytes(dst_image->format) == 8u ? VK_FORMAT_R32G32_UINT : VK_FORMAT_R32G32B32A32_UINT;
+		if (src_block.width != 1u || src_block.height != 1u || requested.src_image->format != block_texel ||
 		    requested.width > src_width - src_x || requested.height > src_height - src_y)
 		{
 			return false;
@@ -426,17 +456,17 @@ void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regio
 	                 static_cast<VkImageLayout>(dst_layout));
 }
 
-void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter)
+void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_image, VkExtent2D dst_extent, VkFilter filter)
 {
 	EXIT_IF(src_image == nullptr);
 	EXIT_IF(src_image->image == nullptr);
-	EXIT_IF(dst_swapchain == nullptr);
+	EXIT_IF(dst_image == nullptr);
 
 	auto* vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
 
 	VulkanImage swapchain_image(VulkanImageType::Unknown);
 
-	swapchain_image.image  = dst_swapchain->swapchain_images[dst_swapchain->current_index];
+	swapchain_image.image  = dst_image;
 	swapchain_image.layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	// Use the tracked source layout; hardcoding COLOR_ATTACHMENT_OPTIMAL fails
@@ -484,8 +514,8 @@ void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchai
 	region.dstOffsets[0].x               = 0;
 	region.dstOffsets[0].y               = 0;
 	region.dstOffsets[0].z               = 0;
-	region.dstOffsets[1].x               = static_cast<int>(dst_swapchain->swapchain_extent.width);
-	region.dstOffsets[1].y               = static_cast<int>(dst_swapchain->swapchain_extent.height);
+	region.dstOffsets[1].x               = static_cast<int>(dst_extent.width);
+	region.dstOffsets[1].y               = static_cast<int>(dst_extent.height);
 	region.dstOffsets[1].z               = 1;
 
 	vkCmdBlitImage(vk_buffer, src_image->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapchain_image.image,
@@ -493,6 +523,12 @@ void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchai
 
 	set_image_layout(vk_buffer, src_image, 0, 1, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
 	                 VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+}
+
+void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter)
+{
+	EXIT_IF(dst_swapchain == nullptr);
+	UtilBlitImageTo(buffer, src_image, dst_swapchain->swapchain_images[dst_swapchain->current_index], dst_swapchain->swapchain_extent, filter);
 }
 
 void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffer)
@@ -581,7 +617,7 @@ void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_
 }
 
 void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
-	                    uint64_t dst_layout)
+	                    uint64_t dst_layout, uint32_t dst_base_array_layer)
 {
 	EXIT_IF(ctx == nullptr || dst_image == nullptr || src_data == nullptr);
 	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
@@ -595,7 +631,7 @@ void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void*
 	VulkanUnmapMemory(ctx, &staging_buffer.memory);
 	CommandBuffer buffer(GraphicContext::QUEUE_UTIL);
 	buffer.Begin();
-	UtilBufferToDepthImage(&buffer, &staging_buffer, src_pitch, dst_image, dst_layout);
+	UtilBufferToDepthImage(&buffer, &staging_buffer, src_pitch, dst_image, dst_layout, dst_base_array_layer);
 	buffer.End();
 	buffer.Execute();
 	buffer.WaitForFence();
@@ -680,19 +716,36 @@ bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const 
 	const bool rgba8         = image->format == VK_FORMAT_R8G8B8A8_SRGB || image->format == VK_FORMAT_R8G8B8A8_UNORM;
 	const bool bgra8         = image->format == VK_FORMAT_B8G8R8A8_SRGB || image->format == VK_FORMAT_B8G8R8A8_UNORM;
 	const bool rgba16_sfloat = image->format == VK_FORMAT_R16G16B16A16_SFLOAT;
-	if (!rgba8 && !bgra8 && !rgba16_sfloat)
-	{
-		return false;
-	}
 	const uint32_t w = image->extent.width;
 	const uint32_t h = image->extent.height;
 	if (w == 0 || h == 0 || w > 8192 || h > 8192)
 	{
 		return false;
 	}
+	if (image->format == VK_FORMAT_BC7_UNORM_BLOCK || image->format == VK_FORMAT_BC7_SRGB_BLOCK)
+	{
+		// 16-byte blocks of 4x4 texels, level 0 only, written raw next to where a PNG would go.
+		const uint64_t       blocks = static_cast<uint64_t>((w + 3u) / 4u) * ((h + 3u) / 4u);
+		std::vector<uint8_t> data(static_cast<size_t>(blocks * 16u));
+		UtilFillBuffer(ctx, data.data(), data.size(), w, image, static_cast<uint64_t>(image->layout), src_array_layer);
+		char path[256];
+		std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu-layer%u.bc7", path_prefix, (tag != nullptr ? tag : "img"), w, h,
+		              static_cast<unsigned long long>(image->memory.unique_id), src_array_layer);
+		if (FILE* file = std::fopen(path, "wb"); file != nullptr)
+		{
+			(void)std::fwrite(data.data(), 1, data.size(), file);
+			(void)std::fclose(file);
+			return true;
+		}
+		return false;
+	}
+	if (!rgba8 && !bgra8 && !rgba16_sfloat)
+	{
+		return false;
+	}
 	static std::set<std::string> dumped;
 	char                         key_buf[320];
-	std::snprintf(key_buf, sizeof(key_buf), "%s|%llu|%ux%u|%u", path_prefix,
+	std::snprintf(key_buf, sizeof(key_buf), "%s|%s|%llu|%ux%u|%u", path_prefix, tag != nullptr ? tag : "img",
 	              static_cast<unsigned long long>(image->memory.unique_id), w, h, src_array_layer);
 	if (!dumped.insert(key_buf).second || dumped.size() > 64u)
 	{

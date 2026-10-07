@@ -44,7 +44,7 @@ TEST(EmulatorNp, ResolvesSessionSignalingInitialize)
 TEST(EmulatorNp, ResolvesAlternateStateCallbackExport)
 {
 	Loader::SymbolDatabase symbols;
-	ASSERT_TRUE(Libs::Init(U"libNet_1", &symbols));
+	ASSERT_TRUE(Libs::Init(U"libNpManager_1", &symbols));
 
 	Loader::SymbolResolve query {};
 	query.name                 = U"qQJfO8HAiaY";

@@ -1,6 +1,8 @@
 #include "Emulator/Graphics/GraphicsRender.h"
+#include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
 
 #include "GraphicsRenderInternal.h"
+#include "GraphicsRenderPipelineLimits.h"
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
@@ -8,9 +10,11 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DiagnosticDump.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
@@ -33,6 +37,9 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include "spirv/unified1/spirv.hpp"
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cinttypes>
@@ -40,6 +47,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -66,6 +75,16 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	if (operation == State::ImageSampleOperation::Mixed)
 	{
 		EXIT("unsupported sampler contract: operation=mixed\n");
+	}
+	const auto& enabled_sampler = g_render_ctx->GetGraphicCtx()->enabled_sampler_features;
+	VkSamplerAddressMode address[3] {};
+	if (!VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampX()), enabled_sampler, r.ForceUnormCoords(), &address[0]) ||
+	    !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampY()), enabled_sampler, r.ForceUnormCoords(), &address[1]) ||
+	    !VulkanResolveSamplerAddressMode(State::ResolveSamplerAddressMode(r.ClampZ()), enabled_sampler, r.ForceUnormCoords(), &address[2]))
+	{
+		EXIT("unsupported sampler coordinate lowering: clamp=%u,%u,%u unnormalized=%u operation=%u mirror_clamp_enabled=%u\n",
+		     r.ClampX(), r.ClampY(), r.ClampZ(), r.ForceUnormCoords() ? 1u : 0u, static_cast<uint32_t>(operation),
+		     enabled_sampler.mirror_clamp_to_edge);
 	}
 	Core::LockGuard lock(m_mutex);
 	uint32_t        m_samplers_size = m_samplers.Size();
@@ -135,18 +154,6 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 		return VK_COMPARE_OP_NEVER;
 	};
 
-	auto get_warp = [](uint8_t clamp)
-	{
-		switch (State::ResolveSamplerAddressMode(clamp))
-		{
-			case State::SamplerAddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-			case State::SamplerAddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-			case State::SamplerAddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-			case State::SamplerAddressMode::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-		}
-		return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	};
-
 	VkBorderColor border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
 	switch (r.BorderColorType())
 	{
@@ -164,9 +171,9 @@ uint64_t SamplerCache::GetSamplerId(const ShaderSamplerResource& r, State::Image
 	sampler_info.magFilter               = (mag_filter == 0 || mag_filter == 2 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
 	sampler_info.minFilter               = (min_filter == 0 || min_filter == 2 ? VK_FILTER_NEAREST : VK_FILTER_LINEAR);
 	sampler_info.mipmapMode              = (mip_filter == 2 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST);
-	sampler_info.addressModeU            = get_warp(r.ClampX());
-	sampler_info.addressModeV            = get_warp(r.ClampY());
-	sampler_info.addressModeW            = get_warp(r.ClampZ());
+	sampler_info.addressModeU            = address[0];
+	sampler_info.addressModeV            = address[1];
+	sampler_info.addressModeW            = address[2];
 	sampler_info.mipLodBias              = lod_range.lod_bias;
 	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
 	sampler_info.maxAnisotropy           = aniso_ratio;
@@ -284,6 +291,7 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 		EXIT_IF(bind.descriptor_set_slot != *set_layouts_num);
 
 		set_layouts[*set_layouts_num] = g_render_ctx->GetDescriptorCache()->GetDescriptorSetLayout(stage, bind /*, bind_params*/);
+		EXIT_IF(set_layouts[*set_layouts_num] == VK_NULL_HANDLE);
 		(*set_layouts_num)++;
 	}
 }
@@ -291,7 +299,8 @@ static void CreateLayout(VkDescriptorSetLayout* set_layouts, uint32_t* set_layou
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const ShaderVertexInputInfo* vs_input_info,
                                               const Vector<uint32_t>& vs_shader, const ShaderPixelInputInfo* ps_input_info,
-                                              const Vector<uint32_t>& ps_shader, const PipelineStaticParameters* static_params,
+                                              const Vector<uint32_t>& ps_shader, const Vector<uint32_t>& geometry_shader,
+                                              const PipelineStaticParameters* static_params,
                                               PipelineDynamicParameters* dynamic_params)
 {
 	EXIT_IF(g_render_ctx == nullptr);
@@ -310,6 +319,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	VkShaderModule vert_shader_module = nullptr;
 	VkShaderModule frag_shader_module = nullptr;
+	VkShaderModule geometry_shader_module = nullptr;
 
 	VkShaderModuleCreateInfo create_info {};
 
@@ -317,11 +327,59 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	create_info.pNext = nullptr;
 	create_info.flags = 0;
 
+	const bool has_fragment_stage = !ps_shader.IsEmpty();
+	const auto check_subgroups = [gctx](const Vector<uint32_t>& binary, VkShaderStageFlagBits stage)
+	{
+		const auto check = ShaderCheckSubgroupModule(binary.GetDataConst(), binary.Size(), stage, gctx->subgroup_stages,
+		                                              gctx->subgroup_operations, gctx->compute_wave_vulkan_state,
+		                                              gctx->shader_maximal_reconvergence_enabled);
+		if (!check.supported)
+		{
+			EXIT("subgroup-module admission stage=0x%x word=%zu required_ops=0x%x reason=%s\n",
+			     static_cast<uint32_t>(stage), check.word, check.required_operations, check.reason);
+		}
+		return check.required_operations;
+	};
+	// Both cache hits and newly emitted modules pass through this boundary.
+	const auto vertex_ops = check_subgroups(vs_shader, VK_SHADER_STAGE_VERTEX_BIT);
+	const auto fragment_ops = has_fragment_stage ? check_subgroups(ps_shader, VK_SHADER_STAGE_FRAGMENT_BIT) : 0u;
+	if (!geometry_shader.IsEmpty()) { (void)check_subgroups(geometry_shader, VK_SHADER_STAGE_GEOMETRY_BIT); }
+	const auto select_native = [gctx](const ShaderNativeWaveInfo& wave, uint32_t requested, VkShaderStageFlagBits stage,
+	                                  uint32_t operations, uint32_t spirv_version, const String8& detail)
+	{
+		if (operations == 0u) { return ShaderNativeSubgroupSelection {true, 0, false}; } // Host-built embedded module.
+		// These stages use flags0. SPIR-V 1.6 itself permits varying widths.
+		const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, stage, gctx->subgroup_size,
+		                                                  wave.guest_wave_size, wave.proof == ShaderNativeWaveProof::LaneLocal ||
+		                                                  wave.proof == ShaderNativeWaveProof::QuadLocal,
+		                                                  wave.proof == ShaderNativeWaveProof::FragmentNeutral32,
+		                                                  spirv_version >= 0x00010600u);
+		const char* reason = wave.refusal_reason;
+		if (reason == nullptr && wave.proof == ShaderNativeWaveProof::Unclassified) { reason = "unclassified guest wave"; }
+		if (reason == nullptr && requested != 0 && requested != wave.guest_wave_size) { reason = "inconsistent guest width metadata"; }
+		if (reason == nullptr && !selection.supported) { reason = "exact guest lane map or explicit width-neutral proof unavailable"; }
+		if (reason != nullptr)
+		{
+			EXIT("native-wave admission stage=0x%x guest=%u proof=%u requested=%u host_default=%u host_range=%u..%u "
+			     "spirv=0x%08x pc=0x%x reason=%s %s\n",
+			     static_cast<uint32_t>(stage), wave.guest_wave_size, static_cast<uint32_t>(wave.proof), requested,
+			     gctx->subgroup_size, gctx->compute_wave_vulkan_state.min_subgroup_size,
+			     gctx->compute_wave_vulkan_state.max_subgroup_size, spirv_version, wave.refusal_pc, reason, detail.c_str());
+		}
+		return selection;
+	};
+	const auto vertex_mapping = select_native(vs_input_info->native_wave, vs_input_info->required_subgroup_size,
+	                                          VK_SHADER_STAGE_VERTEX_BIT, vertex_ops, vs_shader.At(1),
+	                                          ShaderVertexNggFrontRefusal(*vs_input_info));
+	ShaderNativeSubgroupSelection fragment_mapping;
+	if (has_fragment_stage)
+	{
+		fragment_mapping = select_native(ps_input_info->native_wave, ps_input_info->required_subgroup_size,
+		                                 VK_SHADER_STAGE_FRAGMENT_BIT, fragment_ops, ps_shader.At(1), String8());
+	}
 	create_info.codeSize = static_cast<size_t>(vs_shader.Size()) * 4;
 	create_info.pCode    = vs_shader.GetDataConst();
 	vkCreateShaderModule(gctx->device, &create_info, nullptr, &vert_shader_module);
-
-	const bool has_fragment_stage = !ps_shader.IsEmpty();
 	if (has_fragment_stage)
 	{
 		create_info.codeSize = static_cast<size_t>(ps_shader.Size()) * 4;
@@ -350,7 +408,32 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	frag_shader_stage_info.pName               = "main";
 	frag_shader_stage_info.pSpecializationInfo = nullptr;
 
-	VkPipelineShaderStageCreateInfo shader_stages[] = {vert_shader_stage_info, frag_shader_stage_info};
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT vert_required_subgroup_size {};
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT frag_required_subgroup_size {};
+	if (vertex_ops != 0u)
+	{
+		EXIT_IF(!ShaderAttachNativeSubgroup(gctx->compute_wave_vulkan_state, vertex_mapping, &vert_shader_stage_info,
+		                                    &vert_required_subgroup_size));
+	}
+	if (fragment_ops != 0u)
+	{
+		EXIT_IF(!ShaderAttachNativeSubgroup(gctx->compute_wave_vulkan_state, fragment_mapping, &frag_shader_stage_info,
+		                                    &frag_required_subgroup_size));
+	}
+
+	VkPipelineShaderStageCreateInfo shader_stages[3] = {vert_shader_stage_info, frag_shader_stage_info};
+	uint32_t shader_stage_count = has_fragment_stage ? 2u : 1u;
+	if (!geometry_shader.IsEmpty())
+	{
+		create_info.codeSize = static_cast<size_t>(geometry_shader.Size()) * sizeof(uint32_t);
+		create_info.pCode = geometry_shader.GetDataConst();
+		EXIT_IF(vkCreateShaderModule(gctx->device, &create_info, nullptr, &geometry_shader_module) != VK_SUCCESS);
+		auto& stage = shader_stages[shader_stage_count++];
+		stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stage.stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+		stage.module = geometry_shader_module;
+		stage.pName = "main";
+	}
 
 
 	VulkanVertexInputLayout input_layout {};
@@ -387,7 +470,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 				fclose(f);
 			}
 		}
-		if (!VulkanBuildVertexInputLayout(*vs_input_info, &input_layout)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanBuildVertexInputLayout(*vs_input_info, &input_layout) condition ignored (continuing)\n"); }
+		EXIT("unsupported vertex input layout: resources=%d buffers=%d\n", vs_input_info->resources_num,
+		     vs_input_info->buffers_num);
 	}
 
 	VkPipelineVertexInputStateCreateInfo vertex_input_info {};
@@ -455,6 +539,10 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	cull_mode |= (static_params->cull_back ? VK_CULL_MODE_BACK_BIT : 0u);
 	cull_mode |= (static_params->cull_front ? VK_CULL_MODE_FRONT_BIT : 0u);
 
+	// Diagnostic A/B only, never acceptance: KYTY_AB_NO_CULL=1 removes face culling for every pipeline.
+	static const bool ab_no_cull = [] { const char* v = std::getenv("KYTY_AB_NO_CULL"); return v != nullptr && v[0] == '1'; }();
+	if (ab_no_cull) { cull_mode = VK_CULL_MODE_NONE; }
+
 	VkFrontFace front_face = (static_params->face ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
 
 	const bool depth_clip_supported = g_render_ctx->GetGraphicCtx()->depth_clip_enable_supported;
@@ -464,12 +552,15 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	clip_ext.pNext           = nullptr;
 	clip_ext.flags           = 0;
 	clip_ext.depthClipEnable = (static_params->depth_clip_enable ? VK_TRUE : VK_FALSE);
+	// Diagnostic A/B only, never acceptance: KYTY_AB_NO_DEPTH_CLIP=1 clamps instead of clipping depth for every pipeline.
+	static const bool ab_no_depth_clip = [] { const char* v = std::getenv("KYTY_AB_NO_DEPTH_CLIP"); return v != nullptr && v[0] == '1'; }();
+	if (ab_no_depth_clip) { clip_ext.depthClipEnable = VK_FALSE; }
 
 	VkPipelineRasterizationStateCreateInfo rasterizer {};
 	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rasterizer.pNext                   = (depth_clip_supported ? &clip_ext : nullptr);
 	rasterizer.flags                   = 0;
-	rasterizer.depthClampEnable        = (static_params->depth_clamp_enable ? VK_TRUE : VK_FALSE);
+	rasterizer.depthClampEnable        = (static_params->depth_clamp_enable || ab_no_depth_clip ? VK_TRUE : VK_FALSE);
 	rasterizer.rasterizerDiscardEnable = VK_FALSE;
 	rasterizer.polygonMode             = VK_POLYGON_MODE_FILL;
 	rasterizer.cullMode                = cull_mode;
@@ -505,7 +596,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	}
 
 	// CB_TARGET_MASK: 4 bits per MRT (RGBA). One blend attachment per active target.
-	if (static_params->color_targets_num == 0 || static_params->color_targets_num > 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: static_params->color_targets_num == 0 || static_params->color_targets_num > 8 condition ignored (continuing)\n"); }
+	EXIT_IF(static_params->color_targets_num > 8u);
 	VkPipelineColorBlendAttachmentState color_blend_attachments[8] {};
 	VkBool32                            color_write_enables[8] {};
 	for (uint32_t rt = 0; rt < static_params->color_targets_num; rt++)
@@ -563,6 +654,24 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		}
 	}
 
+	// The current pixel emitter exports MRT locations, not Index=1 secondary
+	// colors. Enabling dualSrcBlend alone cannot supply those missing values.
+	uint32_t fragment_output_mask = has_fragment_stage ? 1u : 0u;
+	for (uint32_t rt = 1u; rt < 8u; ++rt)
+	{
+		if (ps_input_info->target_output_mode[rt] != 0u) { fragment_output_mask |= 1u << rt; }
+	}
+	const auto blend_admission = VulkanValidateBlendAttachments(gctx->blend_capabilities, color_blend_attachments,
+	                                                            static_params->color_targets_num, 0u, fragment_output_mask);
+	if (blend_admission != VulkanBlendAdmission::Supported)
+	{
+		EXIT("unsupported graphics blend state: reason=%u targets=%u independent_enabled=%u dual_source_enabled=%u "
+		     "max_targets=%u max_dual_source_targets=%u secondary_outputs=0\n",
+		     static_cast<uint32_t>(blend_admission), static_params->color_targets_num,
+		     gctx->blend_capabilities.enabled.independent_blend, gctx->blend_capabilities.enabled.dual_source_blend,
+		     gctx->blend_capabilities.max_color_attachments, gctx->blend_capabilities.max_dual_source_attachments);
+	}
+
 	VkPipelineColorBlendStateCreateInfo color_blending {};
 	color_blending.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 	color_blending.pNext           = (cwe_supported ? &color_write : nullptr);
@@ -614,9 +723,21 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
 
-	vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
-
-	if (pipeline->pipeline_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pipeline->pipeline_layout == nullptr condition ignored (continuing)\n"); }
+	const ShaderBindResources* descriptor_stages[] = {&vs_input_info->bind, &ps_input_info->bind};
+	// Match the generated fragment interface: Location 0 is always declared.
+	uint32_t fragment_outputs = 1;
+	for (uint32_t rt = 1; rt < 8; ++rt)
+	{
+		fragment_outputs += ps_input_info->target_output_mode[rt] != 0 ? 1u : 0u;
+	}
+	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 2,
+	                                 vs_input_info->clip_probe.enabled || ps_input_info->input0_probe.enabled,
+	                                 static_params->color_targets_num, fragment_outputs);
+	const auto layout_result = vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
+	if (layout_result != VK_SUCCESS || pipeline->pipeline_layout == VK_NULL_HANDLE)
+	{
+		EXIT("graphics pipeline layout creation failed: VkResult=%d\n", static_cast<int>(layout_result));
+	}
 
 	VkPipelineDepthStencilStateCreateInfo depth_stencil_info {};
 	depth_stencil_info.sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -694,7 +815,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	pipeline_info.pNext               = nullptr;
 	pipeline_info.flags               = 0;
-	pipeline_info.stageCount          = has_fragment_stage ? 2u : 1u;
+	pipeline_info.stageCount          = shader_stage_count;
 	pipeline_info.pStages             = shader_stages;
 	pipeline_info.pVertexInputState   = &vertex_input_info;
 	pipeline_info.pInputAssemblyState = &input_assembly;
@@ -734,21 +855,13 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 			if (dump_dir[0] != '\0')
 			{
 				const auto write_spv = [&](const char* name, const Vector<uint32_t>& words) {
-					char path[1024];
-					std::snprintf(path, sizeof(path), "%s/%s.spv", dump_dir, name);
-					if (FILE* f = std::fopen(path, "wb"))
-					{
-						if (!words.IsEmpty())
-						{
-							std::fwrite(words.GetDataConst(), sizeof(uint32_t), static_cast<size_t>(words.Size()), f);
-						}
-						std::fclose(f);
-						KYTY_LOG_DEBUG( "KYTY_PIPELINE_FAIL_DUMP wrote %s words=%u\n", path,
-						             static_cast<unsigned>(words.Size()));
-					}
+					const auto status = DiagnosticDumpProcessWriter().Write(dump_dir, name, words.IsEmpty() ? nullptr : words.GetDataConst(),
+					                                                        static_cast<size_t>(words.Size()) * sizeof(uint32_t));
+					KYTY_LOG_DEBUG("KYTY_PIPELINE_FAIL_DUMP %s words=%u status=%s\n", name, static_cast<unsigned>(words.Size()),
+					               DiagnosticDumpStatusName(status));
 				};
-				write_spv("fail_vs", vs_shader);
-				write_spv("fail_ps", ps_shader);
+				write_spv("fail_vs.spv", vs_shader);
+				write_spv("fail_ps.spv", ps_shader);
 				KYTY_LOG_DEBUG(
 				             "KYTY_PIPELINE_FAIL_DUMP result=%d vs_words=%u ps_words=%u stages=%u color_targets=%u depth=%d\n",
 				             static_cast<int>(create_result), static_cast<unsigned>(vs_shader.Size()),
@@ -765,6 +878,7 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		vkDestroyShaderModule(gctx->device, frag_shader_module, nullptr);
 	}
 	vkDestroyShaderModule(gctx->device, vert_shader_module, nullptr);
+	if (geometry_shader_module != VK_NULL_HANDLE) { vkDestroyShaderModule(gctx->device, geometry_shader_module, nullptr); }
 
 	return pipeline;
 }
@@ -794,6 +908,15 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 	create_info.flags    = 0;
 	create_info.codeSize = static_cast<size_t>(cs_shader.Size()) * 4;
 	create_info.pCode    = cs_shader.GetDataConst();
+	const auto subgroup_check = ShaderCheckSubgroupModule(cs_shader.GetDataConst(), cs_shader.Size(),
+	                                                       VK_SHADER_STAGE_COMPUTE_BIT, gctx->subgroup_stages,
+	                                                       gctx->subgroup_operations, gctx->compute_wave_vulkan_state,
+	                                                       gctx->shader_maximal_reconvergence_enabled);
+	if (!subgroup_check.supported)
+	{
+		EXIT("subgroup-module admission stage=compute word=%zu required_ops=0x%x reason=%s\n",
+		     subgroup_check.word, subgroup_check.required_operations, subgroup_check.reason);
+	}
 	vkCreateShaderModule(gctx->device, &create_info, nullptr, &comp_shader_module);
 
 	if (comp_shader_module == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: comp_shader_module == nullptr condition ignored (continuing)\n"); }
@@ -806,6 +929,21 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 	comp_shader_stage_info.module              = comp_shader_module;
 	comp_shader_stage_info.pName               = "main";
 	comp_shader_stage_info.pSpecializationInfo = nullptr;
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
+	if (input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
+	{
+		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
+		const uint64_t shared_dwords = static_cast<uint64_t>(input_info->lds_dwords) + input_info->barrier_workspace_dwords;
+		if (shared_dwords * sizeof(uint32_t) > capabilities.max_shared_bytes)
+		{
+			EXIT("paired-wave compute barrier workspace exceeds the Vulkan shared-memory limit\n");
+		}
+		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(input_info->wave_layout, capabilities,
+		                                                     &comp_shader_stage_info, &required_subgroup_size))
+		{
+			EXIT("paired-wave compute layout is unsupported by the enabled Vulkan subgroup features or limits\n");
+		}
+	}
 
 	VkDescriptorSetLayout set_layouts[1]  = {};
 	uint32_t              set_layouts_num = 0;
@@ -828,9 +966,13 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
 
-	vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
-
-	if (pipeline->pipeline_layout == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pipeline->pipeline_layout == nullptr condition ignored (continuing)\n"); }
+	const ShaderBindResources* descriptor_stages[] = {&input_info->bind};
+	ValidatePipelineDescriptorLimits(gctx, descriptor_stages, 1, false);
+	const auto layout_result = vkCreatePipelineLayout(gctx->device, &pipeline_layout_info, nullptr, &pipeline->pipeline_layout);
+	if (layout_result != VK_SUCCESS || pipeline->pipeline_layout == VK_NULL_HANDLE)
+	{
+		EXIT("compute pipeline layout creation failed: VkResult=%d\n", static_cast<int>(layout_result));
+	}
 
 	VkComputePipelineCreateInfo info {};
 	info.sType              = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
@@ -856,18 +998,10 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 		{
 			if (dump_dir[0] != '\0')
 			{
-				char path[1024];
-				std::snprintf(path, sizeof(path), "%s/fail_cs.spv", dump_dir);
-				if (FILE* f = std::fopen(path, "wb"))
-				{
-					if (!cs_shader.IsEmpty())
-					{
-						std::fwrite(cs_shader.GetDataConst(), sizeof(uint32_t), static_cast<size_t>(cs_shader.Size()), f);
-					}
-					std::fclose(f);
-					KYTY_LOG_DEBUG( "KYTY_PIPELINE_FAIL_DUMP wrote %s words=%u result=%d\n", path,
-					             static_cast<unsigned>(cs_shader.Size()), static_cast<int>(create_result));
-				}
+				const auto status = DiagnosticDumpProcessWriter().Write(dump_dir, "fail_cs.spv", cs_shader.IsEmpty() ? nullptr : cs_shader.GetDataConst(),
+				                                                        static_cast<size_t>(cs_shader.Size()) * sizeof(uint32_t));
+				KYTY_LOG_DEBUG("KYTY_PIPELINE_FAIL_DUMP fail_cs.spv words=%u result=%d status=%s\n", static_cast<unsigned>(cs_shader.Size()),
+				               static_cast<int>(create_result), DiagnosticDumpStatusName(status));
 			}
 		}
 		EXIT("vkCreateComputePipelines failed: result=%d pipeline=%p\n", static_cast<int>(create_result),
@@ -1103,6 +1237,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		ShaderDbgDumpInputInfo(ps_input_info);
 	}
 
+	ShaderRequireVertexProgram(&vs_regs, vs_input_info);
 	auto vs_id = ShaderGetIdVS(&vs_regs, vs_input_info);
 	auto ps_id = ShaderGetIdPS(&ps_regs, ps_input_info);
 	auto* gctx = g_render_ctx->GetGraphicCtx();
@@ -1213,7 +1348,9 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		if (p.static_params->color_targets_num > 8) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.static_params->color_targets_num > 8 condition ignored (continuing)\n"); }
 		for (uint32_t rt = 0; rt < p.static_params->color_targets_num; rt++)
 		{
-			if (!RenderColorSlotConfigured(*color, rt))
+			// A NULL export sends no color even when the guest leaves CB masks set.
+			// Vulkan must not write an undefined fragment output to those attachments.
+			if (!RenderColorSlotConfigured(*color, rt) || ps_input_info->has_only_null_exports)
 			{
 				p.static_params->color_mask[rt]   = 0;
 				p.static_params->blend_enable[rt] = false;
@@ -1274,6 +1411,39 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	}
 
 	const auto miss_start = std::chrono::steady_clock::now();
+	if (ps_input_info->custom_interpolation.Enabled())
+	{
+		EXIT_IF(!gctx->geometry_shader_supported);
+		EXIT_IF(p.static_params->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST &&
+		        p.static_params->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP &&
+		        p.static_params->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN);
+		VkPhysicalDeviceProperties properties {};
+		vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
+		const auto& limits = properties.limits;
+		const auto components = ps_input_info->custom_interpolation.location_count * 4u;
+		EXIT_IF(components > limits.maxFragmentInputComponents || components + 5u > limits.maxGeometryOutputComponents ||
+		        (components + 5u) * 3u > limits.maxGeometryTotalOutputComponents || limits.maxGeometryOutputVertices < 3u ||
+		        static_cast<uint32_t>(vs_input_info->export_count) * 4u + 4u > limits.maxGeometryInputComponents);
+	}
+
+	if (ps_input_info->stage_enabled)
+	{
+		const auto ps_transport_code = ShaderParsePS(&ps_regs, &sh_regs);
+		const auto requirement       = FragmentTransportRequire(ps_transport_code, *ps_input_info,
+                                                          static_cast<uint32_t>(ps_regs.ps_regs.rsrc2.user_sgpr), *p.static_params,
+                                                          framebuffer->extent);
+		if (requirement.required)
+		{
+			char dump_note[160] {};
+			if (const char* dump_dir = std::getenv("KYTY_TRANSPORT_DUMP"); dump_dir != nullptr && dump_dir[0] != '\0')
+			{
+				std::snprintf(dump_note, sizeof(dump_note), " (transport dump: %s)",
+				              ShaderDumpGuestProgram(dump_dir, "ps", ps_regs.ps_regs.chksum, ps_regs.ps_regs.data_addr, ps_transport_code).c_str());
+			}
+			EXIT("fragment wave transport is required by the pixel stage but the renderer does not select it yet: %s%s\n",
+			     requirement.facts.c_str(), dump_note);
+		}
+	}
 
 	auto* translation_cache = g_render_ctx->GetShaderTranslationCache();
 	EXIT_IF(translation_cache == nullptr);
@@ -1285,7 +1455,7 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	                                                           vs_input_info->clip_probe.diagnostic_identity),
 	                                    [&]
 	                                    {
-		                                    auto vs_code = ShaderParseVS(&vs_regs, &sh_regs);
+		                                    auto vs_code = ShaderParseVS(&vs_regs, &sh_regs, vs_input_info);
 		                                    return ShaderRecompileVS(vs_code, vs_input_info);
 	                                    });
 	DebugStatsRecordShaderTranslationCache(vs_translation.hit, vs_translation.evicted);
@@ -1314,9 +1484,18 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 		             ps_translation.hit ? 1u : 0u);
 	}
 	EXIT_IF(ps_input_info->stage_enabled && ps_translation.binary.IsEmpty());
+	ShaderTranslationCacheResult geometry_translation;
+	if (ps_input_info->custom_interpolation.Enabled())
+	{
+		geometry_translation = translation_cache->GetOrCompile(
+		    ShaderModuleKey::Create(ps_id, ShaderModuleStage::Geometry, optimization, next_gen),
+		    [&] { return ShaderCompileInterpolationGeometry(*ps_input_info); });
+		DebugStatsRecordShaderTranslationCache(geometry_translation.hit, geometry_translation.evicted);
+		EXIT_IF(geometry_translation.binary.IsEmpty());
+	}
 
 	p.pipeline = CreatePipelineInternal(framebuffer->render_pass, vs_input_info, vs_translation.binary, ps_input_info,
-	                                    ps_translation.binary, p.static_params, p.dynamic_params);
+	                                    ps_translation.binary, geometry_translation.binary, p.static_params, p.dynamic_params);
 
 	if (p.pipeline == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: p.pipeline == nullptr condition ignored (continuing)\n"); }
 	p.pipeline->framebuffer_extent = framebuffer->extent;

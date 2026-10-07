@@ -37,6 +37,14 @@
 #include <utility>
 #include <vector>
 
+// Host libgcc unwinder registration. Guest modules execute natively on the
+// host; publishing each module's .eh_frame lets the host unwinder find FDEs for
+// guest PCs so C++ exceptions can unwind guest frames (required by IL2CPP
+// titles, which throw/catch managed exceptions through __cxa_throw).
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+extern "C" void __register_frame(const void* begin);
+#endif
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader {
@@ -112,6 +120,43 @@ void RuntimeLinker::SetCurrentRuntimeAcquireHookForTesting(void (*hook)(void*), 
 	Core::LockGuard lock(g_guest_runtime_owner_mutex);
 	g_current_runtime_acquire_hook         = hook;
 	g_current_runtime_acquire_hook_context = context;
+}
+
+uint64_t RuntimeLinker::GetProcessParametersForPort()
+{
+	auto* runtime = AcquireCurrentRuntimeForUse();
+	if (runtime == nullptr) { return 0; }
+	const auto address = runtime->GetProcParam();
+	ReleaseCurrentRuntimeForUse(runtime);
+	return address;
+}
+
+bool RuntimeLinker::IsExecutableAddressForPort(uint64_t address)
+{
+	auto* runtime = AcquireCurrentRuntimeForUse();
+	if (runtime == nullptr) { return false; }
+	bool executable = false;
+	{
+		Core::LockGuard lock(runtime->m_mutex);
+		for (const auto* program: runtime->m_programs)
+		{
+			if (program->elf == nullptr || address < program->base_vaddr) { continue; }
+			const auto relative = address - program->base_vaddr;
+			const auto* phdr = program->elf->GetPhdr();
+			for (uint16_t i = 0; i < program->elf->GetEhdr()->e_phnum; ++i)
+			{
+				if (phdr[i].p_type == PT_LOAD && (phdr[i].p_flags & PF_X) != 0 &&
+				    relative >= phdr[i].p_vaddr && relative - phdr[i].p_vaddr < phdr[i].p_memsz)
+				{
+					executable = true;
+					break;
+				}
+			}
+			if (executable) { break; }
+		}
+	}
+	ReleaseCurrentRuntimeForUse(runtime);
+	return executable;
 }
 
 void RuntimeLinker::SetCurrentRuntimeUnpublishedHookForTesting(void (*hook)(void*), void* context)
@@ -1041,6 +1086,10 @@ static KYTY_SYSV_ABI uint64_t ResolveLazyPlt(void* program_ptr, uint64_t rel_ind
 		const auto requester = Log::IsColoredPrintf() ? program->file_name : Log::RemoveColors(program->file_name);
 		KYTY_LOG_DEBUG( "KYTY_LOADER: lazy_plt unresolved=%u value=%u requester=%s rel_index=%" PRIu64 " import=%s\n",
 		             ri.resolved ? 0u : 1u, ri.value != 0 ? 1u : 0u, requester.C_Str(), rel_index, clean_name.C_Str());
+		fprintf(stderr, "LAZYPLT-FAIL: resolved=%d value=%lx name=%s type=%d requester=%s rel_index=%llu jmprela=%p sz=%lu\n",
+		        (int)ri.resolved, (unsigned long)ri.value, clean_name.utf8_str().GetData(), (int)ri.type,
+		        requester.utf8_str().GetData(), (unsigned long long)rel_index,
+		        (void*)program->dynamic_info->jmprela_table, (unsigned long)program->dynamic_info->jmprela_table_size);
 		EXIT("can't resolve lazy PLT import: %s\n", clean_name.C_Str());
 	}
 	// PatchReplace reports whether the slot changed. A relocation that already
@@ -1266,7 +1315,14 @@ static uint64_t LoaderPatchNullRdiSanitizers(uint8_t* code, uint64_t size)
 		    code[i - 1] == 0x50 &&
 		    code[i + 0] == 0xf6 && code[i + 1] == 0x87 && code[i + 2] == 0x70 &&
 		    code[i + 3] == 0x03 && code[i + 4] == 0x00 && code[i + 5] == 0x00 &&
-		    code[i + 6] == 0x02)
+		    code[i + 6] == 0x02 &&
+		    // The patch's jnz target (+0x13) must land on the expected
+		    // `mov rbx,rsi; mov r14,rdi` pair, otherwise the overwrite falls
+		    // through into a mid-instruction stream and corrupts the callee
+		    // (an observed allocator lock acquire is destroyed by the
+		    // unconstrained pattern).
+		    code[i + 0x13] == 0x48 && code[i + 0x14] == 0x89 && code[i + 0x15] == 0xf3 &&
+		    code[i + 0x16] == 0x49 && code[i + 0x17] == 0x89 && code[i + 0x18] == 0xf6)
 		{
 			// Safe null check at entry:
 			// 0x00: test %rdi, %rdi (48 85 ff)
@@ -1497,7 +1553,8 @@ RuntimeLinker::RuntimeLinker(): m_symbols(new SymbolDatabase)
 	m_current_runtime_published    = true;
 	g_guest_runtime_owner          = this;
 	Emulator::GuestRuntimePort::Install(
-	    {FindProgramByAddrForPort, GuestCall::Invoke, GuestCall::Invoke4, GuestCall::InvokeOnStack, ReleaseCurrentThreadDynamicTls});
+	    {FindProgramByAddrForPort, GuestCall::Invoke, GuestCall::Invoke4, GuestCall::InvokeOnStack, ReleaseCurrentThreadDynamicTls,
+	     GetProcessParametersForPort, IsExecutableAddressForPort});
 }
 
 RuntimeLinker::~RuntimeLinker()
@@ -2957,6 +3014,57 @@ static void InstallRelocateHandler(Program* program)
 	}
 }
 
+// Publish a loaded module's .eh_frame to the host unwinder. Guest code runs
+// natively, so the real stack holds genuine guest frames; once their FDEs are
+// registered, the host _Unwind_RaiseException can unwind them and reach the
+// guest's own landing pads. Registered once per program (idempotent flag) after
+// relocations so the CIE personality indirection through the GOT is resolved.
+static void RegisterProgramEhFrame(Program* program)
+{
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+	if (program == nullptr || program->elf == nullptr || program->eh_frame_registered)
+	{
+		return;
+	}
+
+	const auto* ehdr = program->elf->GetEhdr();
+	const auto* phdr = program->elf->GetPhdr();
+	if (ehdr == nullptr || phdr == nullptr)
+	{
+		return;
+	}
+
+	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
+	{
+		if (phdr[i].p_type != PT_GNU_EH_FRAME || phdr[i].p_memsz < 8 ||
+		    phdr[i].p_vaddr > std::numeric_limits<uint64_t>::max() - program->base_vaddr)
+		{
+			continue;
+		}
+
+		const uint64_t header_addr  = program->base_vaddr + phdr[i].p_vaddr;
+		const uint64_t readable_end = program->base_vaddr + program->base_size;
+		if (header_addr >= readable_end)
+		{
+			continue;
+		}
+
+		EhFrameInfo decoded {};
+		if (!LoaderDecodeEhFrameHeader(reinterpret_cast<const uint8_t*>(header_addr), 8, header_addr, readable_end, &decoded) ||
+		    decoded.frame_addr == 0)
+		{
+			continue;
+		}
+
+		__register_frame(reinterpret_cast<const void*>(decoded.frame_addr));
+		program->eh_frame_vaddr      = decoded.frame_addr;
+		program->eh_frame_registered = true;
+	}
+#else
+	(void)program;
+#endif
+}
+
 void RuntimeLinker::Relocate(Program* program)
 {
 	KYTY_LOADER_PROFILE_FUNCTION();
@@ -2986,6 +3094,8 @@ void RuntimeLinker::Relocate(Program* program)
 
 	relocate_all(program->dynamic_info->rela_table, program->dynamic_info->rela_table_total_size, program, false);
 	relocate_all(program->dynamic_info->jmprela_table, program->dynamic_info->jmprela_table_size, program, true);
+
+	RegisterProgramEhFrame(program);
 
 	if (program->rt != nullptr)
 	{

@@ -2,10 +2,15 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Np.h"
+#include "Emulator/Network.h"
+#include "Emulator/Loader/AddcontInventory.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 #ifdef KYTY_EMU_ENABLED
@@ -279,6 +284,156 @@ int KYTY_SYSV_ABI EventPropertyArraySetUInt64(EventPropertyArray* array, uint64_
 	return (IsLiveArray(array) ? OK : error_invalid_argument);
 }
 
+int KYTY_SYSV_ABI Terminate()
+{
+	return OK;
+}
+
+int KYTY_SYSV_ABI DestroyContext(int32_t /*context*/)
+{
+	return OK;
+}
+
+int KYTY_SYSV_ABI DestroyHandle(int32_t /*handle*/)
+{
+	return OK;
+}
+
+// Offline there is no outstanding request on a handle to abort.
+int KYTY_SYSV_ABI AbortHandle(int32_t /*handle*/)
+{
+	return OK;
+}
+
+static int AcceptObjectValue(const EventPropertyObject* properties, const char* key)
+{
+	return (IsLivePropertyObject(properties) && key != nullptr && key[0] != '\0' ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetBool(EventPropertyObject* properties, const char* key, bool /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetUInt32(EventPropertyObject* properties, const char* key, uint32_t /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetInt64(EventPropertyObject* properties, const char* key, int64_t /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetUInt64(EventPropertyObject* properties, const char* key, uint64_t /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetFloat32(EventPropertyObject* properties, const char* key, float /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetFloat64(EventPropertyObject* properties, const char* key, double /*value*/)
+{
+	return AcceptObjectValue(properties, key);
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetBinary(EventPropertyObject* properties, const char* key, const void* data, size_t size)
+{
+	return (data != nullptr || size == 0 ? AcceptObjectValue(properties, key) : error_invalid_argument);
+}
+
+// A null value makes a child object owned by its parent and returns it through value_ptr.
+static int NestObject(const EventPropertyObject* value, EventPropertyObject** value_ptr)
+{
+	if (value_ptr == nullptr)
+	{
+		return OK;
+	}
+	if (value != nullptr)
+	{
+		if (!IsLivePropertyObject(value))
+		{
+			return error_invalid_argument;
+		}
+		*value_ptr = const_cast<EventPropertyObject*>(value);
+		return OK;
+	}
+	auto* child = new EventPropertyObject;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		g_properties.insert(child);
+		g_live_objects.insert(child);
+	}
+	*value_ptr = child;
+	return OK;
+}
+
+static int NestArray(const EventPropertyArray* value, EventPropertyArray** value_ptr)
+{
+	if (value_ptr == nullptr)
+	{
+		return OK;
+	}
+	if (value != nullptr)
+	{
+		if (!IsLiveArray(value))
+		{
+			return error_invalid_argument;
+		}
+		*value_ptr = const_cast<EventPropertyArray*>(value);
+		return OK;
+	}
+	auto* child = new EventPropertyArray;
+	{
+		std::lock_guard lock(g_objects_mutex);
+		g_arrays.insert(child);
+		g_live_objects.insert(child);
+	}
+	*value_ptr = child;
+	return OK;
+}
+
+int KYTY_SYSV_ABI EventPropertyObjectSetObject(EventPropertyObject* properties, const char* key, const EventPropertyObject* value,
+                                               EventPropertyObject** value_ptr)
+{
+	const int accepted = AcceptObjectValue(properties, key);
+	return accepted != OK ? accepted : NestObject(value, value_ptr);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetBool(EventPropertyArray* array, bool /*value*/)
+{
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetFloat32(EventPropertyArray* array, float /*value*/)
+{
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetFloat64(EventPropertyArray* array, double /*value*/)
+{
+	return (IsLiveArray(array) ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetBinary(EventPropertyArray* array, const void* data, size_t size)
+{
+	return (IsLiveArray(array) && (data != nullptr || size == 0) ? OK : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetArray(EventPropertyArray* array, const EventPropertyArray* value, EventPropertyArray** value_ptr)
+{
+	return (IsLiveArray(array) ? NestArray(value, value_ptr) : error_invalid_argument);
+}
+
+int KYTY_SYSV_ABI EventPropertyArraySetObject(EventPropertyArray* array, const EventPropertyObject* value,
+                                              EventPropertyObject** value_ptr)
+{
+	return (IsLiveArray(array) ? NestObject(value, value_ptr) : error_invalid_argument);
+}
+
 int KYTY_SYSV_ABI PostEvent(int32_t /*context*/, int32_t /*handle*/, Event* event, uint32_t /*options*/)
 {
 	return (IsLiveEvent(event) ? OK : error_invalid_argument);
@@ -306,8 +461,24 @@ int KYTY_SYSV_ABI DestroyEvent(Event* event)
 LIB_DEFINE(InitNpUniversalDataSystem_1)
 {
 	LIB_FUNC("sjaobBgqeB4", Initialize);
-	// Captured Gen5 TrophyManager thread: dual NID for Initialize.
-	LIB_FUNC("AUIHb7jUX3I", Initialize);
+	LIB_FUNC("47UAEuQl+iI", Terminate);
+	LIB_FUNC("wB7IWzGp2v0", DestroyContext);
+	LIB_FUNC("AUIHb7jUX3I", DestroyHandle);
+	LIB_FUNC("jZCqWFgMehE", AbortHandle);
+	LIB_FUNC("Fidd8vWgyVE", EventPropertyObjectSetBool);
+	LIB_FUNC("AzD4irAcKE4", EventPropertyObjectSetUInt32);
+	LIB_FUNC("56QLTqx911s", EventPropertyObjectSetInt64);
+	LIB_FUNC("xvsP5Yz6FmY", EventPropertyObjectSetUInt64);
+	LIB_FUNC("lbPlT4+QVcE", EventPropertyObjectSetFloat32);
+	LIB_FUNC("4Fu8tHW+u-k", EventPropertyObjectSetFloat64);
+	LIB_FUNC("wAcxBDLHj1M", EventPropertyObjectSetBinary);
+	LIB_FUNC("74ASEqxSnkM", EventPropertyObjectSetObject);
+	LIB_FUNC("0+l4QSWCM4E", EventPropertyArraySetBool);
+	LIB_FUNC("JmgwKm96Lq4", EventPropertyArraySetFloat32);
+	LIB_FUNC("sbSYZLR5AiE", EventPropertyArraySetFloat64);
+	LIB_FUNC("IEdUCV9j2Cw", EventPropertyArraySetBinary);
+	LIB_FUNC("rdi9BAfDLq8", EventPropertyArraySetArray);
+	LIB_FUNC("XY14n3jNIpE", EventPropertyArraySetObject);
 	LIB_FUNC("5zBnau1uIEo", CreateContext);
 	LIB_FUNC("hT0IAEvN+M0", CreateHandle);
 	LIB_FUNC("tpFJ8LIKvPw", RegisterContext);
@@ -448,27 +619,38 @@ int KYTY_SYSV_ABI GetSkuFlag(SkuFlag* sku_flag)
 	return OK;
 }
 
-int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel /*service_label*/, const UnifiedEntitlementLabel* entitlement_label,
+static void WriteEntitlementInfo(const Loader::AddcontEntry& entry, AddcontEntitlementInfo* info)
+{
+	std::memset(info, 0, sizeof(*info));
+	std::memcpy(info->entitlement_label.data, entry.entitlement_label.data(), entry.entitlement_label.size());
+	info->package_type    = static_cast<uint32_t>(entry.package_type);
+	info->download_status = entry.download_status;
+}
+
+// Both queries answer from the local add-on content inventory that AppContent
+// also reads; an unknown label is NO_ENTITLEMENT and leaves the output as is.
+int KYTY_SYSV_ABI GetAddcontEntitlementInfo(ServiceLabel service_label, const UnifiedEntitlementLabel* entitlement_label,
                                             AddcontEntitlementInfo* info)
 {
 	if (!g_entitlement_initialized.load(std::memory_order_acquire))
 	{
 		return ERROR_NOT_INITIALIZED;
 	}
-
-	// Null label/info or an ill-formed unified label are guest PARAMETER errors.
-	if (!IsValidUnifiedLabel(entitlement_label) || info == nullptr)
+	std::string label;
+	if (!IsValidUnifiedLabel(entitlement_label) || info == nullptr || !Loader::AddcontReadGuestLabel(entitlement_label->data, &label))
 	{
 		return ERROR_PARAMETER;
 	}
-
-	// No local entitlement catalog is registered. Base titles without addcont
-	// packages correctly receive NO_ENTITLEMENT; the output buffer is left
-	// untouched so residual guest data is not misinterpreted as a result.
-	return ERROR_NO_ENTITLEMENT;
+	Loader::AddcontEntry entry;
+	if (!Loader::AddcontInventoryFind(service_label, label, &entry))
+	{
+		return ERROR_NO_ENTITLEMENT;
+	}
+	WriteEntitlementInfo(entry, info);
+	return OK;
 }
 
-int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel /*service_label*/, AddcontEntitlementInfo* list, uint32_t list_num,
+int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel service_label, AddcontEntitlementInfo* list, uint32_t list_num,
                                                 uint32_t* hit_num)
 {
 	if (!g_entitlement_initialized.load(std::memory_order_acquire))
@@ -479,10 +661,38 @@ int KYTY_SYSV_ABI GetAddcontEntitlementInfoList(ServiceLabel /*service_label*/, 
 	{
 		return ERROR_PARAMETER;
 	}
+	if (Loader::AddcontInventoryGetState() == Loader::AddcontInventoryState::Invalid)
+	{
+		return ERROR_NO_ENTITLEMENT;
+	}
+	const auto     entries = Loader::AddcontInventoryList(service_label);
+	const uint32_t written = std::min<uint32_t>(list_num, static_cast<uint32_t>(entries.size()));
+	for (uint32_t i = 0; i < written; i++)
+	{
+		WriteEntitlementInfo(entries[i], &list[i]);
+	}
+	*hit_num = static_cast<uint32_t>(entries.size());
+	return OK;
+}
 
-	// This runtime has no registered add-on entitlement catalog. Report an
-	// empty enumeration explicitly; do not fabricate list records.
-	*hit_num = 0;
+// sceNpEntitlementAccessGetEntitlementKey: the 16-byte key of an owned label.
+int KYTY_SYSV_ABI GetEntitlementKey(ServiceLabel service_label, const UnifiedEntitlementLabel* entitlement_label, uint8_t* key)
+{
+	if (!g_entitlement_initialized.load(std::memory_order_acquire))
+	{
+		return ERROR_NOT_INITIALIZED;
+	}
+	std::string label;
+	if (!IsValidUnifiedLabel(entitlement_label) || key == nullptr || !Loader::AddcontReadGuestLabel(entitlement_label->data, &label))
+	{
+		return ERROR_PARAMETER;
+	}
+	Loader::AddcontEntry entry;
+	if (!Loader::AddcontInventoryFind(service_label, label, &entry))
+	{
+		return ERROR_NO_ENTITLEMENT;
+	}
+	std::memcpy(key, entry.entitlement_key.data(), entry.entitlement_key.size());
 	return OK;
 }
 
@@ -493,6 +703,7 @@ LIB_DEFINE(InitNpEntitlementAccess_1)
 	// sceNpEntitlementAccessGetAddcontEntitlementInfo
 	LIB_FUNC("xddD23+8TfQ", GetAddcontEntitlementInfo);
 	LIB_FUNC("TFyU+KFBv54", GetAddcontEntitlementInfoList);
+	LIB_FUNC("5LiMEPuW0DQ", GetEntitlementKey);
 }
 
 } // namespace Kyty::Libs::NpEntitlementAccess
@@ -546,14 +757,169 @@ static KYTY_SYSV_ABI int GetUserIdByAccountId(uint64_t account_id, int32_t* user
 	return kNpErrorSignedOut;
 }
 
+// The one NpManager export list: account queries here, sign-in state and
+// requests in Network.cpp.
 LIB_DEFINE(InitNpManager_1)
 {
 	LIB_FUNC("JT+t00a3TxA", GetAccountCountryA);
 	LIB_FUNC("rbknaUjpqWo", GetAccountIdA);
 	LIB_FUNC("VgYczPGB5ss", GetUserIdByAccountId);
+	LIB_FUNC("3Zl8BePTh9Y", Network::NpManager::NpCheckCallback);
+	LIB_FUNC("Ec63y59l9tw", Network::NpManager::NpSetNpTitleId);
+	LIB_FUNC("A2CQ3kgSopQ", Network::NpManager::NpSetContentRestriction);
+	LIB_FUNC("VfRSmPmj8Q8", Network::NpManager::NpRegisterStateCallback);
+	LIB_FUNC("qQJfO8HAiaY", Network::NpManager::NpRegisterStateCallback);
+	LIB_FUNC("uFJpaKNBAj4", Network::NpManager::NpRegisterGamePresenceCallback);
+	LIB_FUNC("GImICnh+boA", Network::NpManager::NpRegisterPlusEventCallback);
+	LIB_FUNC("hw5KNqAAels", Network::NpManager::NpRegisterNpReachabilityStateCallback);
+	LIB_FUNC("p-o74CnoNzY", Network::NpManager::NpGetNpId);
+	LIB_FUNC("XDncXQIJUSk", Network::NpManager::NpGetOnlineId);
+	LIB_FUNC("eiqMCt9UshI", Network::NpManager::NpCreateAsyncRequest);
+	LIB_FUNC("S7QTn72PrDw", Network::NpManager::NpDeleteRequest);
+	LIB_FUNC("2rsFmlGWleQ", Network::NpManager::NpCheckNpAvailability);
+	LIB_FUNC("uqcPJLWL08M", Network::NpManager::NpPollAsync);
+	LIB_FUNC("eQH7nWPcAgc", Network::NpManager::NpGetState);
+	LIB_FUNC("Oad3rvY-NJQ", Network::NpManager::NpHasSignedUp);
 }
 
 } // namespace Kyty::Libs::NpManager
+
+namespace Kyty::Libs::NpAuth {
+
+LIB_VERSION("NpAuth", 1, "NpAuth", 1, 1);
+
+// Offline NP: requests exist, and every credential they ask for fails the way a
+// signed-out account does. An async request reports that result through Poll/Wait.
+static constexpr int kNpErrorSignedOut       = static_cast<int>(0x80550006u);
+static constexpr int kNpErrorInvalidArgument = static_cast<int>(0x80550003u);
+static constexpr int kPollAsyncFinished      = 0;
+
+struct Request
+{
+	bool async  = false;
+	int  result = OK;
+};
+
+static std::mutex                        g_requests_mutex;
+static std::unordered_map<int, Request>  g_requests;
+static int                               g_next_request = 1;
+
+static int CreateRequestOf(bool async)
+{
+	std::lock_guard lock(g_requests_mutex);
+	const int id = g_next_request++;
+	g_requests[id] = {async, OK};
+	return id;
+}
+
+static KYTY_SYSV_ABI int CreateRequest()
+{
+	PRINT_NAME();
+	return CreateRequestOf(false);
+}
+
+static KYTY_SYSV_ABI int CreateAsyncRequest(const void* /*param*/)
+{
+	PRINT_NAME();
+	return CreateRequestOf(true);
+}
+
+static KYTY_SYSV_ABI int DeleteRequest(int request_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_requests_mutex);
+	return g_requests.erase(request_id) != 0 ? OK : kNpErrorInvalidArgument;
+}
+
+static KYTY_SYSV_ABI int AbortRequest(int request_id)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_requests_mutex);
+	return g_requests.count(request_id) != 0 ? OK : kNpErrorInvalidArgument;
+}
+
+static KYTY_SYSV_ABI int SetTimeout(int request_id, int32_t, int32_t, int32_t, int32_t)
+{
+	PRINT_NAME();
+	std::lock_guard lock(g_requests_mutex);
+	return g_requests.count(request_id) != 0 ? OK : kNpErrorInvalidArgument;
+}
+
+// A credential query: synchronous requests fail now, async ones record the failure.
+static int QueryCredential(int request_id, const void* param, const void* output)
+{
+	if (param == nullptr || output == nullptr)
+	{
+		return kNpErrorInvalidArgument;
+	}
+	std::lock_guard lock(g_requests_mutex);
+	auto            it = g_requests.find(request_id);
+	if (it == g_requests.end())
+	{
+		return kNpErrorInvalidArgument;
+	}
+	it->second.result = kNpErrorSignedOut;
+	return it->second.async ? OK : kNpErrorSignedOut;
+}
+
+static KYTY_SYSV_ABI int GetAuthorizationCodeV3(int request_id, const void* param, void* auth_code, int32_t* /*issuer_id*/)
+{
+	PRINT_NAME();
+	return QueryCredential(request_id, param, auth_code);
+}
+
+static KYTY_SYSV_ABI int GetIdTokenV3(int request_id, const void* param, void* id_token)
+{
+	PRINT_NAME();
+	return QueryCredential(request_id, param, id_token);
+}
+
+static KYTY_SYSV_ABI int GetAuthorizedAppCode(int request_id, const void* param, void* code)
+{
+	PRINT_NAME();
+	return QueryCredential(request_id, param, code);
+}
+
+static int FinishedResult(int request_id, int32_t* result)
+{
+	std::lock_guard lock(g_requests_mutex);
+	auto            it = g_requests.find(request_id);
+	if (it == g_requests.end() || result == nullptr)
+	{
+		return kNpErrorInvalidArgument;
+	}
+	*result = it->second.result;
+	return kPollAsyncFinished;
+}
+
+static KYTY_SYSV_ABI int PollAsync(int request_id, int32_t* result)
+{
+	PRINT_NAME();
+	return FinishedResult(request_id, result);
+}
+
+static KYTY_SYSV_ABI int WaitAsync(int request_id, int32_t* result)
+{
+	PRINT_NAME();
+	const int rc = FinishedResult(request_id, result);
+	return rc == kPollAsyncFinished ? OK : rc;
+}
+
+LIB_DEFINE(InitNpAuth_1)
+{
+	LIB_FUNC("6bwFkosYRQg", CreateRequest);
+	LIB_FUNC("N+mr7GjTvr8", CreateAsyncRequest);
+	LIB_FUNC("H8wG9Bk-nPc", DeleteRequest);
+	LIB_FUNC("cE7wIsqXdZ8", AbortRequest);
+	LIB_FUNC("PM3IZCw-7m0", SetTimeout);
+	LIB_FUNC("KI4dHLlTNl0", GetAuthorizationCodeV3);
+	LIB_FUNC("RdsFVsgSpZY", GetIdTokenV3);
+	LIB_FUNC("IDX0S5EsEh4", GetAuthorizedAppCode);
+	LIB_FUNC("gjSyfzSsDcE", PollAsync);
+	LIB_FUNC("SK-S7daqJSE", WaitAsync);
+}
+
+} // namespace Kyty::Libs::NpAuth
 
 namespace Kyty::Libs::NpProfileDialog {
 

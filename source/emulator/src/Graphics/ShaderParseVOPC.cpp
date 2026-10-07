@@ -42,7 +42,9 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 	if (src1_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_sext != 0 condition ignored (continuing)\n"); }
 
 	ShaderInstruction inst;
-	inst.pc      = pc;
+	inst.pc            = pc;
+	inst.vop_sdwa      = sdwa;
+	inst.vop_sdwa_ctrl = sdwa ? buffer[1] : 0u;
 	inst.src[0]  = operand_parse(src0 + ((dpp || s0 == 0) ? 256 : 0));
 	inst.src[1]  = operand_parse(vsrc1 + (s1 == 0 ? 256 : 0));
 	inst.src_num = 2;
@@ -59,12 +61,15 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 	inst.src[1].absolute = (src1_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
 	inst.src[1].negate   = (src1_neg != 0);
-	inst.src[0].dpp                = dpp;
-	inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
-	inst.src[0].dpp_fetch_inactive = dpp && ((buffer[1] & (1u << 18u)) != 0);
-	inst.src[0].dpp_bound_ctrl     = dpp && ((buffer[1] & (1u << 19u)) != 0);
-	inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
-	inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+	inst.src[0].dpp = dpp;
+	if (dpp)
+	{
+		inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
+		inst.src[0].dpp_fetch_inactive = ((buffer[1] & (1u << 18u)) != 0);
+		inst.src[0].dpp_bound_ctrl     = ((buffer[1] & (1u << 19u)) != 0);
+		inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
+		inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+	}
 
 	inst.format = ShaderInstructionFormat::SmaskVsrc0Vsrc1;
 	if (sd == 0)
@@ -74,7 +79,8 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 	{
 		inst.dst = operand_parse(sdst);
 	}
-	inst.dst.size = 2;
+	// SDWA can name VCC_HI directly; it is one scalar mask dword.
+	inst.dst.size = next_gen && inst.dst.type == ShaderOperandType::VccHi ? 1 : 2;
 
 	switch (opcode)
 	{
@@ -514,10 +520,7 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 		case 0x85: inst.type = ShaderInstructionType::VCmpNeI32; break;
 		case 0x86: inst.type = ShaderInstructionType::VCmpGeI32; break;
 		case 0x87: inst.type = ShaderInstructionType::VCmpTI32; break;
-		case 0x88: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_class_f32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
+		case 0x88: inst.type = ShaderInstructionType::VCmpClassF32; break;
 		case 0x89: inst.type = ShaderInstructionType::VCmpLtI16; break;
 		case 0x8A: inst.type = ShaderInstructionType::VCmpEqI16; break;
 		case 0x8B: inst.type = ShaderInstructionType::VCmpLeI16; break;
@@ -748,29 +751,41 @@ KYTY_SHADER_PARSER(shader_parse_vopc)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0xE1: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_lt_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE1:
+			inst.type        = ShaderInstructionType::VCmpLtU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE2: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_eq_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE2:
+			inst.type        = ShaderInstructionType::VCmpEqU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE3: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_le_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE3:
+			inst.type        = ShaderInstructionType::VCmpLeU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE4: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_gt_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE4:
+			inst.type        = ShaderInstructionType::VCmpGtU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE5: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_ne_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE5:
+			inst.type        = ShaderInstructionType::VCmpNeU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE6: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_ge_u64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE6:
+			inst.type        = ShaderInstructionType::VCmpGeU64;
+			inst.format      = ShaderInstructionFormat::Sdst2Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
 		case 0xE7: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_cmp_t_u64 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;

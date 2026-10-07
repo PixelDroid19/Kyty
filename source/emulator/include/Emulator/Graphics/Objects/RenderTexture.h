@@ -14,6 +14,7 @@ enum class RenderTextureFormat : uint64_t
 {
 	Unknown,
 	R8Unorm,
+	R8G8Unorm,
 	R8G8B8A8Unorm,
 	R8G8B8A8Srgb,
 	B8G8R8A8Unorm,
@@ -22,11 +23,13 @@ enum class RenderTextureFormat : uint64_t
 	R16G16Sfloat,
 	R32Sfloat,
 	B10G11R11Ufloat,
+	A2R10G10B10Unorm,
 	R16G16B16A16Unorm,
 	R16G16B16A16Snorm,
 	R16G16B16A16Uint,
 	R16G16B16A16Sint,
 	R16G16B16A16Sfloat,
+	A2B10G10R10Unorm,
 };
 
 struct RenderTextureFormatInfo
@@ -52,6 +55,7 @@ struct RenderTextureArrayView
 [[nodiscard]] bool RenderTextureCanReuseLargerBacking(const uint64_t* existing, const uint64_t* incoming);
 
 [[nodiscard]] RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t channel_type, uint32_t channel_order);
+[[nodiscard]] uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format);
 
 // GPU-owned tiled render targets without write-back never upload guest memory
 // during Update. Other variants may consume CPU data and must retain hashing.

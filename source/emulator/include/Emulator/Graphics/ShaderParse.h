@@ -23,6 +23,17 @@ void ShaderParseFusedFront(const uint32_t* src, uint32_t code_size_bytes, Shader
 // complete, reachable program terminator.
 [[nodiscard]] bool ShaderTryParseBounded(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst);
 
+enum class ShaderParseBoundary
+{
+	CompleteProgram,
+	RegisteredFront,
+};
+// Copied source has no guest address to query. RegisteredFront is valid only
+// after the caller binds a continuation under the shader-generation lease.
+// Instruction decoding and all ordinary terminator checks are shared.
+[[nodiscard]] bool ShaderTryParseBounded(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst,
+                                         ShaderParseBoundary boundary);
+
 } // namespace Kyty::Libs::Graphics
 
 #endif // KYTY_EMU_ENABLED

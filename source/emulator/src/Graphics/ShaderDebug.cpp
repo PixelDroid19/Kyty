@@ -16,6 +16,16 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 
 namespace Kyty::Libs::Graphics {
 
+std::string_view ShaderInstructionTypeName(ShaderInstructionType type)
+{
+	return magic_enum::enum_name(type);
+}
+
+bool ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix)
+{
+	return ShaderInstructionTypeName(type).substr(0, prefix.size()) == prefix;
+}
+
 static String8 operand_to_str(ShaderOperand op)
 {
 	String8 ret = "???";
@@ -138,15 +148,28 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Mrt1OffOffComprVmDone: return "Mrt1OffOffComprVmDone"; break;
 		case ShaderInstructionFormat::Mrt2OffOffComprVmDone: return "Mrt2OffOffComprVmDone"; break;
 		case ShaderInstructionFormat::Mrt3OffOffComprVmDone: return "Mrt3OffOffComprVmDone"; break;
+		case ShaderInstructionFormat::Mrt4OffOffComprVmDone: return "Mrt4OffOffComprVmDone"; break;
+		case ShaderInstructionFormat::Mrt5OffOffComprVmDone: return "Mrt5OffOffComprVmDone"; break;
+		case ShaderInstructionFormat::Mrt6OffOffComprVmDone: return "Mrt6OffOffComprVmDone"; break;
+		case ShaderInstructionFormat::Mrt7OffOffComprVmDone: return "Mrt7OffOffComprVmDone"; break;
 		case ShaderInstructionFormat::Mrt0Vsrc0Vsrc1ComprVmDone: return "Mrt0Vsrc0Vsrc1ComprVmDone"; break;
 		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1ComprVm: return "Mrt1Vsrc0Vsrc1ComprVm"; break;
 		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1ComprVm: return "Mrt2Vsrc0Vsrc1ComprVm"; break;
 		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1ComprVm: return "Mrt3Vsrc0Vsrc1ComprVm"; break;
+		case ShaderInstructionFormat::Mrt4Vsrc0Vsrc1ComprVm: return "Mrt4Vsrc0Vsrc1ComprVm"; break;
+		case ShaderInstructionFormat::Mrt5Vsrc0Vsrc1ComprVm: return "Mrt5Vsrc0Vsrc1ComprVm"; break;
+		case ShaderInstructionFormat::Mrt6Vsrc0Vsrc1ComprVm: return "Mrt6Vsrc0Vsrc1ComprVm"; break;
+		case ShaderInstructionFormat::Mrt7Vsrc0Vsrc1ComprVm: return "Mrt7Vsrc0Vsrc1ComprVm"; break;
 		case ShaderInstructionFormat::Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone: return "Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone"; break;
 		case ShaderInstructionFormat::Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
 		case ShaderInstructionFormat::Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
 		case ShaderInstructionFormat::Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
+		case ShaderInstructionFormat::Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
+		case ShaderInstructionFormat::Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
+		case ShaderInstructionFormat::Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
+		case ShaderInstructionFormat::Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
 		case ShaderInstructionFormat::PixelZVsrc0VmDone: return "PixelZVsrc0VmDone"; break;
+		case ShaderInstructionFormat::NullVmDone: return "NullVmDone"; break;
 		case ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3: return "Param0Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param1Vsrc0Vsrc1Vsrc2Vsrc3: return "Param1Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param2Vsrc0Vsrc1Vsrc2Vsrc3: return "Param2Vsrc0Vsrc1Vsrc2Vsrc3"; break;
@@ -155,7 +178,32 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Param5Vsrc0Vsrc1Vsrc2Vsrc3: return "Param5Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param6Vsrc0Vsrc1Vsrc2Vsrc3: return "Param6Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param7Vsrc0Vsrc1Vsrc2Vsrc3: return "Param7Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param8Vsrc0Vsrc1Vsrc2Vsrc3: return "Param8Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param9Vsrc0Vsrc1Vsrc2Vsrc3: return "Param9Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param10Vsrc0Vsrc1Vsrc2Vsrc3: return "Param10Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param11Vsrc0Vsrc1Vsrc2Vsrc3: return "Param11Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param12Vsrc0Vsrc1Vsrc2Vsrc3: return "Param12Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param13Vsrc0Vsrc1Vsrc2Vsrc3: return "Param13Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param14Vsrc0Vsrc1Vsrc2Vsrc3: return "Param14Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param15Vsrc0Vsrc1Vsrc2Vsrc3: return "Param15Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param16Vsrc0Vsrc1Vsrc2Vsrc3: return "Param16Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param17Vsrc0Vsrc1Vsrc2Vsrc3: return "Param17Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param18Vsrc0Vsrc1Vsrc2Vsrc3: return "Param18Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param19Vsrc0Vsrc1Vsrc2Vsrc3: return "Param19Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param20Vsrc0Vsrc1Vsrc2Vsrc3: return "Param20Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param21Vsrc0Vsrc1Vsrc2Vsrc3: return "Param21Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param22Vsrc0Vsrc1Vsrc2Vsrc3: return "Param22Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param23Vsrc0Vsrc1Vsrc2Vsrc3: return "Param23Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param24Vsrc0Vsrc1Vsrc2Vsrc3: return "Param24Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param25Vsrc0Vsrc1Vsrc2Vsrc3: return "Param25Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param26Vsrc0Vsrc1Vsrc2Vsrc3: return "Param26Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param27Vsrc0Vsrc1Vsrc2Vsrc3: return "Param27Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param28Vsrc0Vsrc1Vsrc2Vsrc3: return "Param28Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param29Vsrc0Vsrc1Vsrc2Vsrc3: return "Param29Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param30Vsrc0Vsrc1Vsrc2Vsrc3: return "Param30Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Param31Vsrc0Vsrc1Vsrc2Vsrc3: return "Param31Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done: return "Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done"; break;
+		case ShaderInstructionFormat::Pos1OffOffVsrc0Off: return "Pos1OffOffVsrc0Off"; break;
 		case ShaderInstructionFormat::PrimVsrc0OffOffOffDone: return "PrimVsrc0OffOffOffDone"; break;
 		case ShaderInstructionFormat::Saddr: return "Saddr"; break;
 		case ShaderInstructionFormat::SdstSbaseSoffset: return "SdstSbaseSoffset"; break;
@@ -168,6 +216,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Sdst16SvSoffset: return "Sdst16SvSoffset"; break;
 		case ShaderInstructionFormat::SVdstSVsrc0: return "SVdstSVsrc0"; break;
 		case ShaderInstructionFormat::Sdst2Ssrc02: return "Sdst2Ssrc02"; break;
+		case ShaderInstructionFormat::Sdst2: return "Sdst2"; break;
 		case ShaderInstructionFormat::Sdst2Ssrc02Ssrc1: return "Sdst2Ssrc02Ssrc1"; break;
 		case ShaderInstructionFormat::Sdst2Ssrc02Ssrc12: return "Sdst2Ssrc02Ssrc12"; break;
 		case ShaderInstructionFormat::SmaskVsrc0Vsrc1: return "SmaskVsrc0Vsrc1"; break;
@@ -179,6 +228,8 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen: return "Vdata3VaddrSvSoffsIdxen"; break;
 		case ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen: return "Vdata4VaddrSvSoffsIdxen"; break;
 		case ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxenFloat4: return "Vdata4VaddrSvSoffsIdxenFloat4"; break;
+		case ShaderInstructionFormat::VdataVaddr2Off: return "VdataVaddr2Off"; break;
+		case ShaderInstructionFormat::VdataVaddrSaddr2: return "VdataVaddrSaddr2"; break;
 		case ShaderInstructionFormat::Vdata4Vaddr2SvSoffsOffenIdxenFloat4: return "Vdata4Vaddr2SvSoffsOffenIdxenFloat4"; break;
 		case ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1: return "Vdata1Vaddr3StSsDmask1"; break;
 		case ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2: return "Vdata1Vaddr3StSsDmask2"; break;
@@ -190,6 +241,9 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7: return "Vdata3Vaddr3StSsDmask7"; break;
 		case ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB: return "Vdata3Vaddr3StSsDmaskB"; break;
 		case ShaderInstructionFormat::Vdata3Vaddr4StSsDmask7: return "Vdata3Vaddr4StSsDmask7"; break;
+		case ShaderInstructionFormat::VdataVaddr2StSsMimgDmask: return "VdataVaddr2StSsMimgDmask"; break;
+		case ShaderInstructionFormat::VdataVaddr3StSsMimgDmask: return "VdataVaddr3StSsMimgDmask"; break;
+		case ShaderInstructionFormat::VdataVaddr4StSsMimgDmask: return "VdataVaddr4StSsMimgDmask"; break;
 		case ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF: return "Vdata4Vaddr3StSsDmaskF"; break;
 		case ShaderInstructionFormat::Vdata4Vaddr3StSsMimgDmask: return "Vdata4Vaddr3StSsMimgDmask"; break;
 		case ShaderInstructionFormat::Vdata4Vaddr3StDmaskF: return "Vdata4Vaddr3StDmaskF"; break;
@@ -203,7 +257,10 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1: return "VdstSdst2Vsrc0Vsrc1"; break;
 		case ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2: return "VdstSdst2Vsrc0Vsrc1Ssrc2A2"; break;
 		case ShaderInstructionFormat::VdstGds: return "VdstGds"; break;
+		case ShaderInstructionFormat::VdataOffset: return "VdataOffset"; break;
+		case ShaderInstructionFormat::VdstOffset: return "VdstOffset"; break;
 		case ShaderInstructionFormat::Vdst2VaddrOffset01: return "Vdst2VaddrOffset01"; break;
+		case ShaderInstructionFormat::VaddrVdata2Offset01: return "VaddrVdata2Offset01"; break;
 		case ShaderInstructionFormat::Label: return "Label"; break;
 		default: return "????"; break;
 	}
@@ -212,8 +269,13 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 static String8 dbg_fmt_print(const ShaderInstruction& inst)
 {
 	uint64_t f = inst.format;
-	EXIT_IF(f == ShaderInstructionFormat::Unknown);
-	String8 str;
+	String8    str;
+	// Unsupported placeholders keep their first encoding word so a dump still
+	// names the guest instruction instead of aborting.
+	if (f == ShaderInstructionFormat::Unknown)
+	{
+		return String8::FromPrintf("raw=0x%08" PRIx32, inst.raw_word);
+	}
 	if (f == ShaderInstructionFormat::Empty)
 	{
 		return str;
@@ -230,13 +292,15 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 		switch (fu)
 		{
 			case ShaderInstructionFormat::D:
-				if (inst.dst.size != 1)
+				// ds_read_b64/b96/b128 decode as a dword-vector read; print the
+				// range. The invariant guards other unexpected widths.
+				if (inst.dst.size < 1 || inst.dst.size > 4)
 				{
 					EXIT("shader debug format requires scalar destination: type=%u format=%" PRIu64 " pc=0x%08" PRIx32
 					     " size=%d\n",
 					     static_cast<unsigned>(inst.type), static_cast<uint64_t>(inst.format), inst.pc, inst.dst.size);
 				}
-				s = operand_to_str(inst.dst);
+				s = (inst.dst.size == 1) ? operand_to_str(inst.dst) : operand_array_to_str(inst.dst, inst.dst.size);
 				break;
 			case ShaderInstructionFormat::DA: s = operand_array_to_str(inst.dst, inst.dst.size); break;
 			case ShaderInstructionFormat::D2: s = operand_to_str(inst.dst2); break;
@@ -250,12 +314,17 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 				const bool immediate = source.type == ShaderOperandType::LiteralConstant ||
 				                       source.type == ShaderOperandType::IntegerInlineConstant ||
 				                       source.type == ShaderOperandType::FloatInlineConstant;
-				if (inst.buffer_offen && source_index == 0)
+				if (inst.buffer_offen && source_index == 0 && source.type == ShaderOperandType::Vgpr)
 				{
-					// MUBUF/MTBUF widens VADDR to {voffset, index} when OFFEN is set.
-					// The addressing state is carried by the instruction rather than
-					// duplicated across every static buffer format.
-					EXIT_IF(source.type != ShaderOperandType::Vgpr || source.size != 2);
+					// VADDR holds {index, voffset} with IDXEN and OFFEN, or the voffset
+					// alone (MTBUF with OFFEN only). The addressing state is carried by
+					// the instruction rather than duplicated across every buffer format.
+					s = source.size > 1 ? operand_array_to_str(source, source.size) : operand_to_str(source);
+					break;
+				}
+				// Multi-dword DS data operands are consecutive VGPRs.
+				if (source.type == ShaderOperandType::Vgpr && source.size > 1)
+				{
 					s = operand_array_to_str(source, source.size);
 					break;
 				}
@@ -269,7 +338,10 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 				s = operand_to_str(source);
 				break;
 			}
-			case ShaderInstructionFormat::DA2: s = operand_array_to_str(inst.dst, 2); break;
+			case ShaderInstructionFormat::DA2:
+				s = inst.dst.type == ShaderOperandType::VccHi && inst.dst.size == 1 ? operand_to_str(inst.dst)
+				                                                                  : operand_array_to_str(inst.dst, 2);
+				break;
 			case ShaderInstructionFormat::DA3: s = operand_array_to_str(inst.dst, 3); break;
 			case ShaderInstructionFormat::DA4: s = operand_array_to_str(inst.dst, 4); break;
 			case ShaderInstructionFormat::DA8: s = operand_array_to_str(inst.dst, 8); break;
@@ -284,7 +356,11 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::S1A3: s = operand_array_to_str(inst.src[1], 3); break;
 			case ShaderInstructionFormat::S1A4: s = operand_array_to_str(inst.src[1], 4); break;
 			case ShaderInstructionFormat::S1A8: s = operand_array_to_str(inst.src[1], 8); break;
-			case ShaderInstructionFormat::S2A2: s = operand_array_to_str(inst.src[2], 2); break;
+			case ShaderInstructionFormat::S2A2:
+				s = inst.src[2].type == ShaderOperandType::VccHi && inst.src[2].size == 1
+				        ? operand_to_str(inst.src[2])
+				        : operand_array_to_str(inst.src[2], 2);
+				break;
 			case ShaderInstructionFormat::S2A3: s = operand_array_to_str(inst.src[2], 3); break;
 			case ShaderInstructionFormat::S2A4: s = operand_array_to_str(inst.src[2], 4); break;
 			case ShaderInstructionFormat::Attr: s = String8::FromPrintf("attr%u.%u", inst.src[1].constant.u, inst.src[2].constant.u); break;
@@ -303,11 +379,40 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Param5: s = "param5"; break;
 			case ShaderInstructionFormat::Param6: s = "param6"; break;
 			case ShaderInstructionFormat::Param7: s = "param7"; break;
+			case ShaderInstructionFormat::Param8: s = "param8"; break;
+			case ShaderInstructionFormat::Param9: s = "param9"; break;
+			case ShaderInstructionFormat::Param10: s = "param10"; break;
+			case ShaderInstructionFormat::Param11: s = "param11"; break;
+			case ShaderInstructionFormat::Param12: s = "param12"; break;
+			case ShaderInstructionFormat::Param13: s = "param13"; break;
+			case ShaderInstructionFormat::Param14: s = "param14"; break;
+			case ShaderInstructionFormat::Param15: s = "param15"; break;
+			case ShaderInstructionFormat::Param16: s = "param16"; break;
+			case ShaderInstructionFormat::Param17: s = "param17"; break;
+			case ShaderInstructionFormat::Param18: s = "param18"; break;
+			case ShaderInstructionFormat::Param19: s = "param19"; break;
+			case ShaderInstructionFormat::Param20: s = "param20"; break;
+			case ShaderInstructionFormat::Param21: s = "param21"; break;
+			case ShaderInstructionFormat::Param22: s = "param22"; break;
+			case ShaderInstructionFormat::Param23: s = "param23"; break;
+			case ShaderInstructionFormat::Param24: s = "param24"; break;
+			case ShaderInstructionFormat::Param25: s = "param25"; break;
+			case ShaderInstructionFormat::Param26: s = "param26"; break;
+			case ShaderInstructionFormat::Param27: s = "param27"; break;
+			case ShaderInstructionFormat::Param28: s = "param28"; break;
+			case ShaderInstructionFormat::Param29: s = "param29"; break;
+			case ShaderInstructionFormat::Param30: s = "param30"; break;
+			case ShaderInstructionFormat::Param31: s = "param31"; break;
 			case ShaderInstructionFormat::Mrt0: s = "mrt_color0"; break;
 			case ShaderInstructionFormat::Mrt1: s = "mrt_color1"; break;
 			case ShaderInstructionFormat::Mrt2: s = "mrt_color2"; break;
 			case ShaderInstructionFormat::Mrt3: s = "mrt_color3"; break;
+			case ShaderInstructionFormat::Mrt4: s = "mrt_color4"; break;
+			case ShaderInstructionFormat::Mrt5: s = "mrt_color5"; break;
+			case ShaderInstructionFormat::Mrt6: s = "mrt_color6"; break;
+			case ShaderInstructionFormat::Mrt7: s = "mrt_color7"; break;
 			case ShaderInstructionFormat::PixelZ: s = "pixel_z"; break;
+			case ShaderInstructionFormat::NullTarget: s = "null"; break;
 			case ShaderInstructionFormat::Prim: s = "prim"; break;
 			case ShaderInstructionFormat::Off: s = "off"; break;
 			case ShaderInstructionFormat::Compr: s = "compr"; break;
@@ -328,6 +433,7 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::DmaskF: s = "dmask:0xf"; break;
 			case ShaderInstructionFormat::Gds: s = "gds"; break;
 			case ShaderInstructionFormat::MimgDmask: s = String8::FromPrintf("dmask:0x%x", inst.mimg_dmask); break;
+			case ShaderInstructionFormat::DsOff: s = String8::FromPrintf("dsoff:0x%x", inst.ds_offset); break;
 			default: KYTY_LOG_DEBUG("WARNING: unknown shader code %u (continuing)\n", static_cast<uint32_t>(fu)); break;
 		}
 		switch (fu)

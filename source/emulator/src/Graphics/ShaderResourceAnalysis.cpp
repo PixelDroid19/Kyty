@@ -2,9 +2,31 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include <algorithm>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
+                                       int user_data_register_base)
+{
+	if (resource.type != ShaderOperandType::Sgpr || user_data_register_base < 0 ||
+	    resource.register_id < user_data_register_base)
+	{
+		return false;
+	}
+	const int api_register = resource.register_id - user_data_register_base;
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		const int start = bind.storage_buffers.start_register[i];
+		if (start >= 0 && start == api_register)
+		{
+			return true;
+		}
+	}
+	return false;
+}
 
 bool ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format)
 {
@@ -184,7 +206,11 @@ bool ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format)
 		case ShaderInstructionFormat::Mrt0OffOffComprVmDone:
 		case ShaderInstructionFormat::Mrt1OffOffComprVmDone:
 		case ShaderInstructionFormat::Mrt2OffOffComprVmDone:
-		case ShaderInstructionFormat::Mrt3OffOffComprVmDone: return true;
+		case ShaderInstructionFormat::Mrt3OffOffComprVmDone:
+		case ShaderInstructionFormat::Mrt4OffOffComprVmDone:
+		case ShaderInstructionFormat::Mrt5OffOffComprVmDone:
+		case ShaderInstructionFormat::Mrt6OffOffComprVmDone:
+		case ShaderInstructionFormat::Mrt7OffOffComprVmDone: return true;
 		default: return false;
 	}
 }
@@ -213,11 +239,15 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 		case 20: return 4;   // UFMT_32_UINT
 		case 22: return 4;   // UFMT_32_FLOAT
 		case 29: return 4;   // UFMT_16_16_FLOAT
+		case 11: return 2;   // UFMT_16_UINT
 		case 13: return 2;   // UFMT_16_FLOAT
 		case 14: return 2;   // UFMT_8_8_UNORM
 		case 36: return 4;   // UFMT_10_11_11_FLOAT
+		case 50: return 4;   // UFMT_2_10_10_10_UNORM
 		case 56: return 4;   // UFMT_8_8_8_8_UNORM
+		case 60: return 4;   // UFMT_8_8_8_8_UINT
 		case 62: return 8;   // UFMT_32_32_UINT
+		case 64: return 8;   // UFMT_32_32_FLOAT
 		case 65:             // UFMT_16_16_16_16_UNORM
 		case 66:             // UFMT_16_16_16_16_SNORM
 		case 67:             // UFMT_16_16_16_16_USCALED
@@ -225,11 +255,12 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 		case 69:             // UFMT_16_16_16_16_UINT
 		case 70:             // UFMT_16_16_16_16_SINT
 		case 71: return 8;   // UFMT_16_16_16_16_FLOAT
-		case 75: return 16;  // UFMT_32_32_32_32_UINT
+		case 75:             // UFMT_32_32_32_32_UINT
+		case 77: return 16;  // UFMT_32_32_32_32_FLOAT
 		case 128: return 1;  // UFMT_8_SRGB
 		case 129: return 2;  // UFMT_8_8_SRGB
 		case 130: return 4;  // UFMT_8_8_8_8_SRGB
-		case 133: return 8;  // UFMT_BC1_UNORM, 4x4 texels per block
+		case 133: return 2;  // UFMT_5_6_5_UNORM (raw T#, not historical catalog BC1)
 		case 169: return 8;  // UFMT_BC1_UNORM, 4x4 texels per block
 		case 170: return 8;  // UFMT_BC1_SRGB, 4x4 texels per block
 		case 171: return 16; // UFMT_BC2_UNORM, 4x4 texels per block
@@ -250,21 +281,21 @@ uint32_t ShaderGen5TextureBytesPerElement(uint32_t format)
 
 bool ShaderGen5TextureIsBlockCompressed(uint32_t format)
 {
-	return format == 133u || (format >= 169u && format <= 182u);
+	return format >= 169u && format <= 182u;
 }
 
 uint32_t ShaderGen5LinearTexturePitch(uint32_t width, uint32_t format)
 {
-	// GFX linear surfaces force a 256-byte row pitch alignment.
+	// GFX linear surfaces align each row of elements to 256 bytes. A block
+	// compressed element is one 4x4 block, so the alignment applies to block
+	// columns; the returned pitch is in texels.
 	const uint32_t bpp = ShaderGen5TextureBytesPerElement(format);
 	EXIT_IF(bpp == 0);
-	const uint32_t align_px = 256u / bpp;
-	EXIT_IF(align_px == 0);
-	if (width == 0)
-	{
-		return align_px;
-	}
-	return ((width + align_px - 1u) / align_px) * align_px;
+	const uint32_t align_elements = 256u / bpp;
+	EXIT_IF(align_elements == 0);
+	const uint32_t texels_per_element = ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u;
+	const uint32_t elements           = std::max((width + texels_per_element - 1u) / texels_per_element, 1u);
+	return ((elements + align_elements - 1u) / align_elements) * align_elements * texels_per_element;
 }
 
 uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t type, uint32_t word4)

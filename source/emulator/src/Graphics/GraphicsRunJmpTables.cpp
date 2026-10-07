@@ -3,6 +3,7 @@
 #include "GraphicsComputeRegisters.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GraphicsGeState.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Utils.h"
@@ -710,6 +711,10 @@ static void graphics_init_jmp_tables_sh_indirect()
 	{
 		func = nullptr;
 	}
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{ cp->GetShCtx()->SetGsUserDataAddressLow(value); };
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{ cp->GetShCtx()->SetGsUserDataAddressHigh(value); };
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_LO_ES] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -726,39 +731,19 @@ static void graphics_init_jmp_tables_sh_indirect()
 		base |= (static_cast<uint64_t>(value) & 0xffu) << 40u;
 		cp->GetShCtx()->SetEsShaderBase(base);
 	};
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC1_ES] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{ cp->GetShCtx()->SetEsShaderResource1(value); };
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_CHKSUM_GS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetGsShaderChksum(value); };
-
-	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC1_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	// RSRC3, PGM_LO, PGM_HI, RSRC1 and RSRC2 form one contiguous register window.
+	for (uint32_t reg = Pm4::SPI_SHADER_PGM_RSRC3_GS; reg <= Pm4::SPI_SHADER_PGM_RSRC2_GS; ++reg)
 	{
-		HW::GsShaderResource1 r1;
-		r1.vgprs                    = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, VGPRS);
-		r1.sgprs                    = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, SGPRS);
-		r1.priority                 = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, PRIORITY);
-		r1.float_mode               = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, FLOAT_MODE);
-		r1.dx10_clamp               = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, DX10_CLAMP) != 0;
-		r1.debug_mode               = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, DEBUG_MODE) != 0;
-		r1.ieee_mode                = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, IEEE_MODE) != 0;
-		r1.cu_group_enable          = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, CU_GROUP_ENABLE) != 0;
-		r1.require_forward_progress = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, FWD_PROGRESS) != 0;
-		r1.lds_configuration        = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, WGP_MODE) != 0;
-		r1.gs_vgpr_component_count  = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, GS_VGPR_COMP_CNT);
-		r1.fp16_overflow            = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_GS, FP16_OVFL) != 0;
-		cp->GetShCtx()->SetGsShaderResource1(r1);
-	};
-
-	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC2_GS] = [](KYTY_HW_SH_INDIRECT_ARGS)
-	{
-		HW::GsShaderResource2 r2;
-		r2.scratch_en = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC2_GS, SCRATCH_EN) != 0;
-		r2.user_sgpr =
-		    KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC2_GS, USER_SGPR) + (KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC2_GS, USER_SGPR_MSB) << 5u);
-		r2.es_vgpr_component_count = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC2_GS, ES_VGPR_COMP_CNT);
-		r2.offchip_lds             = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC2_GS, OC_LDS_EN) != 0;
-		r2.lds_size                = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC2_GS, LDS_SIZE);
-		r2.shared_vgprs            = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC2_GS, SHARED_VGPR_CNT);
-		cp->GetShCtx()->SetGsShaderResource2(r2);
-	};
+		g_hw_sh_indirect_func[reg] = [](KYTY_HW_SH_INDIRECT_ARGS)
+		{
+			const bool decoded = GraphicsDecodeGeShaderRegister(*cp->GetShCtx(), cmd_offset, value);
+			EXIT_IF(!decoded);
+		};
+	}
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_LO_PS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -777,6 +762,7 @@ static void graphics_init_jmp_tables_sh_indirect()
 	};
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_CHKSUM_PS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetPsShaderChksum(value); };
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC3_PS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetPsRsrc3(value); };
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC1_PS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -790,7 +776,9 @@ static void graphics_init_jmp_tables_sh_indirect()
 		r1.ieee_mode                = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_PS, IEEE_MODE) != 0;
 		r1.cu_group_disable         = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_PS, CU_GROUP_DISABLE) != 0;
 		r1.require_forward_progress = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_PS, FWD_PROGRESS) != 0;
-		r1.fp16_overflow            = KYTY_PM4_GET(value, SPI_SHADER_PGM_RSRC1_PS, FP16_OVFL) != 0;
+		const auto overflow    = GraphicsDecodeFp16Overflow(value, GraphicsFp16OverflowStage::Pixel);
+		r1.fp16_overflow       = overflow.enabled;
+		r1.fp16_overflow_known = overflow.known;
 		cp->GetShCtx()->SetPsShaderResource1(r1);
 	};
 
@@ -828,6 +816,9 @@ static void graphics_init_jmp_tables_sh_indirect()
 	g_hw_sh_indirect_func[Pm4::COMPUTE_RESOURCE_LIMITS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{ if (!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1) condition ignored (continuing)\n"); } };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3]     = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->CsRegs().rsrc3 = value; };
+	// Hull-shader RSRC3 (wave-packing hints). Recorded for completeness; the
+	// recompiler re-derives register allocation, so it does not affect output.
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC3_HS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetHsRsrc3(value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_SHADER_CHKSUM] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
 		auto& r  = cp->GetShCtx()->CsRegs();
@@ -841,12 +832,32 @@ static void graphics_init_jmp_tables_sh_indirect()
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_X] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadX(value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_Y] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadY(value); };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_NUM_THREAD_Z] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetCsNumThreadZ(value); };
+	// User data written through an indirect register list lands in the same
+	// slots as the direct SET_SH_REG forms (GS/VS/CS 16 dwords, PS 32).
 	for (uint32_t slot = 0; slot < 16; slot++)
 	{
 		g_hw_sh_indirect_func[Pm4::COMPUTE_USER_DATA_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
 		{
 			const uint32_t id = cmd_offset - Pm4::COMPUTE_USER_DATA_0;
 			cp->GetShCtx()->SetCsUserSgpr(id, value, cp->GetUserDataMarker());
+			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
+		};
+		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_GS_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
+		{
+			cp->GetShCtx()->SetGsUserSgpr(cmd_offset - Pm4::SPI_SHADER_USER_DATA_GS_0, value, cp->GetUserDataMarker());
+			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
+		};
+		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_VS_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
+		{
+			cp->GetShCtx()->SetVsUserSgpr(cmd_offset - Pm4::SPI_SHADER_USER_DATA_VS_0, value, cp->GetUserDataMarker());
+			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
+		};
+	}
+	for (uint32_t slot = 0; slot < 32; slot++)
+	{
+		g_hw_sh_indirect_func[Pm4::SPI_SHADER_USER_DATA_PS_0 + slot] = [](KYTY_HW_SH_INDIRECT_ARGS)
+		{
+			cp->GetShCtx()->SetPsUserSgpr(cmd_offset - Pm4::SPI_SHADER_USER_DATA_PS_0, value, cp->GetUserDataMarker());
 			cp->SetUserDataMarker(HW::UserSgprType::Unknown);
 		};
 	}
@@ -859,22 +870,14 @@ static void graphics_init_jmp_tables_uc_indirect()
 		func = nullptr;
 	}
 
-	g_hw_uc_indirect_func[Pm4::GE_CNTL] = [](KYTY_HW_UC_INDIRECT_ARGS)
+	for (uint32_t reg: {Pm4::GE_CNTL, Pm4::GE_USER_VGPR_EN})
 	{
-		HW::GeControl r;
-		r.primitive_group_size = KYTY_PM4_GET(value, GE_CNTL, PRIM_GRP_SIZE);
-		r.vertex_group_size    = KYTY_PM4_GET(value, GE_CNTL, VERT_GRP_SIZE);
-		cp->GetUcfg()->SetGeControl(r);
-	};
-
-	g_hw_uc_indirect_func[Pm4::GE_USER_VGPR_EN] = [](KYTY_HW_UC_INDIRECT_ARGS)
-	{
-		HW::GeUserVgprEn r;
-		r.vgpr1 = KYTY_PM4_GET(value, GE_USER_VGPR_EN, EN_USER_VGPR1) != 0;
-		r.vgpr2 = KYTY_PM4_GET(value, GE_USER_VGPR_EN, EN_USER_VGPR2) != 0;
-		r.vgpr3 = KYTY_PM4_GET(value, GE_USER_VGPR_EN, EN_USER_VGPR3) != 0;
-		cp->GetUcfg()->SetGeUserVgprEn(r);
-	};
+		g_hw_uc_indirect_func[reg] = [](KYTY_HW_UC_INDIRECT_ARGS)
+		{
+			const bool decoded = GraphicsDecodeGeUserConfigRegister(*cp->GetUcfg(), cmd_offset, value);
+			EXIT_IF(!decoded);
+		};
+	}
 
 	g_hw_uc_indirect_func[Pm4::VGT_PRIMITIVE_TYPE] = [](KYTY_HW_UC_INDIRECT_ARGS)
 	{
@@ -1021,6 +1024,20 @@ void graphics_init_jmp_tables()
 		g_hw_sh_func[Pm4::COMPUTE_USER_DATA_0 + slot * 1]       = hw_sh_set_cs_user_sgpr;
 		g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_GS_0 + slot * 1] = hw_sh_set_gs_user_sgpr;
 	}
+	g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS] = hw_sh_set_gs_user_data_address;
+	g_hw_sh_func[Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS] = hw_sh_set_gs_user_data_address;
+	g_hw_sh_func[Pm4::SPI_SHADER_PGM_RSRC1_ES]          = hw_sh_set_es_rsrc1;
+	for (uint32_t reg = Pm4::SPI_SHADER_PGM_RSRC3_GS; reg <= Pm4::SPI_SHADER_PGM_RSRC2_GS; ++reg)
+	{
+		g_hw_sh_func[reg] = [](KYTY_HW_SH_PARSER_ARGS)
+		{
+			const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
+			EXIT_IF(count + 1u > dw);
+			const bool decoded = GraphicsDecodeGeShaderRegisters(cp->GetShCtx(), cmd_offset, buffer, count);
+			EXIT_IF(!decoded);
+			return count;
+		};
+	}
 	// PS user data is 32 dwords on Gen5 (SPI_SHADER_USER_DATA_PS_0..31).
 	for (uint32_t slot = 0; slot < 32; slot++)
 	{
@@ -1045,6 +1062,17 @@ void graphics_init_jmp_tables()
 	}
 
 	g_hw_uc_func[Pm4::VGT_PRIMITIVE_TYPE] = hw_uc_set_primitive_type;
+	for (uint32_t reg: {Pm4::GE_CNTL, Pm4::GE_USER_VGPR_EN})
+	{
+		g_hw_uc_func[reg] = [](KYTY_HW_UC_PARSER_ARGS)
+		{
+			const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
+			EXIT_IF(count + 1u > dw);
+			const bool decoded = GraphicsDecodeGeUserConfigRegisters(cp->GetUcfg(), cmd_offset, buffer, count);
+			EXIT_IF(!decoded);
+			return count;
+		};
+	}
 
 	for (auto& func: g_hw_sh_custom_func)
 	{
@@ -1065,6 +1093,7 @@ void graphics_init_jmp_tables()
 	}
 
 	g_cp_op_func[Pm4::IT_NOP]                     = cp_op_nop;
+	g_cp_op_func[Pm4::IT_SET_PREDICATION]         = cp_op_set_predication;
 	g_cp_op_func[Pm4::IT_CLEAR_STATE]             = cp_op_clear_state;
 	g_cp_op_func[Pm4::IT_SET_BASE]                = cp_op_set_base;
 	g_cp_op_func[Pm4::IT_DISPATCH_INDIRECT]       = cp_op_dispatch_indirect;
@@ -1123,6 +1152,7 @@ void graphics_init_jmp_tables()
 	g_cp_op_custom_func[Pm4::R_FLIP]             = cp_op_flip;
 	g_cp_op_custom_func[Pm4::R_RELEASE_MEM]      = cp_op_release_mem;
 	g_cp_op_custom_func[Pm4::R_DMA_DATA]         = cp_op_custom_dma_data;
+	g_cp_op_custom_func[Pm4::R_CONTEXT_STATE]    = cp_op_context_state;
 
 	graphics_init_jmp_tables_cx_indirect();
 	graphics_init_jmp_tables_sh_indirect();

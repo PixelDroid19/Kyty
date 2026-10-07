@@ -406,6 +406,74 @@ TEST(CoreVirtualMemory, SharedBackingPreservesAliasCoherence)
 	DestroySharedBacking(backing);
 }
 
+// A view gains backing pages only when it first touches them and loses them
+// only through a discard, so the population summary changes exactly then.
+TEST(CoreVirtualMemory, SharedBackingPopulationChangesOnlyWhenPagesAreAddedOrDiscarded)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "population is reported by the Linux memfd backing";
+#else
+	constexpr uint64_t kSize     = 0x10000;
+	const uint64_t     page_size = GetPageSize();
+	SharedBacking*     backing   = CreateSharedBacking(kSize);
+	ASSERT_NE(backing, nullptr);
+	const uint64_t view = MapSharedAligned(backing, 0, 0, kSize, Mode::ReadWrite, page_size);
+	ASSERT_NE(view, 0u);
+
+	SharedBackingPopulation empty;
+	ASSERT_TRUE(QuerySharedBackingPopulation(backing, &empty));
+	reinterpret_cast<volatile uint8_t*>(view)[0] = 1;
+	SharedBackingPopulation touched;
+	ASSERT_TRUE(QuerySharedBackingPopulation(backing, &touched));
+	EXPECT_NE(touched, empty);
+	EXPECT_EQ(touched.populated_bytes, empty.populated_bytes + page_size);
+
+	reinterpret_cast<volatile uint8_t*>(view)[8] = 2;
+	SharedBackingPopulation retouched;
+	ASSERT_TRUE(QuerySharedBackingPopulation(backing, &retouched));
+	EXPECT_EQ(retouched, touched);
+
+	ASSERT_TRUE(Free(view));
+	ASSERT_TRUE(DiscardSharedBackingRange(backing, 0, kSize));
+	SharedBackingPopulation discarded;
+	ASSERT_TRUE(QuerySharedBackingPopulation(backing, &discarded));
+	EXPECT_NE(discarded, retouched);
+	EXPECT_EQ(discarded.discards, retouched.discards + 1u);
+	DestroySharedBacking(backing);
+#endif
+}
+
+// One sweep over spans in any order marks exactly the spans whose backing
+// holds no page: before, between and after populated pages, overlapping or not.
+TEST(CoreVirtualMemory, UnpopulatedSharedBackingSpansAreFoundInOneSweep)
+{
+#if !defined(__linux__)
+	GTEST_SKIP() << "population is reported by the Linux memfd backing";
+#else
+	const uint64_t page    = GetPageSize();
+	const uint64_t size    = page * 8u;
+	SharedBacking* backing = CreateSharedBacking(size);
+	ASSERT_NE(backing, nullptr);
+	const uint64_t view = MapSharedAligned(backing, 0, 0, size, Mode::ReadWrite, page);
+	ASSERT_NE(view, 0u);
+	reinterpret_cast<volatile uint8_t*>(view)[page * 2u] = 1;
+	reinterpret_cast<volatile uint8_t*>(view)[page * 5u] = 1;
+
+	SharedBackingSpan spans[] = {
+	    {page * 6u, page * 2u}, {page * 3u, page * 2u}, {0, page * 2u}, {page, page * 2u}, {page * 5u, page}, {page * 4u, page},
+	};
+	FindUnpopulatedSharedBackingSpans(backing, spans, std::size(spans));
+	EXPECT_TRUE(spans[0].unpopulated);
+	EXPECT_TRUE(spans[1].unpopulated);
+	EXPECT_TRUE(spans[2].unpopulated);
+	EXPECT_FALSE(spans[3].unpopulated);
+	EXPECT_FALSE(spans[4].unpopulated);
+	EXPECT_TRUE(spans[5].unpopulated);
+	ASSERT_TRUE(Free(view));
+	DestroySharedBacking(backing);
+#endif
+}
+
 // Large guest heaps must not create one host metadata node per page. This is
 // intentionally sparse so the test exercises the tracking contract without
 // requiring physical memory proportional to the guest reservation.

@@ -226,6 +226,33 @@ void SymbolDatabase::AddHleAliases(::Kyty::Hle::HleSymbolResolve s, std::initial
 	}
 }
 
+void SymbolDatabase::MirrorHleLibrary(const ::Kyty::Hle::HleSymbolResolve& from, const ::Kyty::Hle::HleSymbolResolve& to)
+{
+	const uint32_t count = m_symbols.Size();
+	for (const auto type: {SymbolType::Func, SymbolType::Object})
+	{
+		auto source = ToLoaderResolve(from);
+		auto target = ToLoaderResolve(to);
+		source.name = U"";
+		source.type = type;
+		target.type = type;
+		const String suffix = GenerateName(source);
+		for (uint32_t index = 0; index < count; index++)
+		{
+			const SymbolRecord symbol = m_symbols.At(index);
+			if (!symbol.name.EndsWith(suffix) || symbol.name.Size() == suffix.Size())
+			{
+				continue;
+			}
+			target.name = symbol.name.Left(symbol.name.Size() - suffix.Size());
+			if (Find(target) == nullptr)
+			{
+				AddHle(target, symbol.vaddr, symbol.dbg_name);
+			}
+		}
+	}
+}
+
 void SymbolDatabase::AddHle(const SymbolResolve& s, uint64_t vaddr)
 {
 	AddHle(s, vaddr, {});

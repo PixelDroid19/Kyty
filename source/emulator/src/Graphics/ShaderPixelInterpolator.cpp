@@ -6,6 +6,8 @@
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Log.h"
 
+#include <algorithm>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -61,7 +63,7 @@ uint32_t ShaderPixelCanonicalInterpolator(const ShaderPixelInputInfo& info, uint
 	const uint32_t setting = info.interpolator_settings[index];
 	for (uint32_t i = 0; i < index; ++i)
 	{
-		if (info.interpolator_settings[i] == setting)
+		if (ShaderPixelInputActive(info, i) && info.interpolator_settings[i] == setting)
 		{
 			return i;
 		}
@@ -84,6 +86,13 @@ bool ShaderDecodePixelInterpolator(uint32_t setting, ShaderPixelInterpolator* in
 	}
 
 	const uint32_t offset = setting & kOffsetMask;
+	if (offset > kDefaultOffset && (setting & kFlatMask) != 0 && (setting & kDefaultValueMask) == 0)
+	{
+		interpolator->source   = ShaderPixelInterpolatorSource::PerVertex;
+		interpolator->location = offset - kDefaultOffset;
+		interpolator->flat     = true;
+		return true;
+	}
 	if (offset < kDefaultOffset)
 	{
 		if ((setting & kDefaultValueMask) != 0)
@@ -118,6 +127,92 @@ float ShaderPixelInterpolatorDefaultComponent(const ShaderPixelInterpolator& int
 
 	const bool one = (component == 3u ? (interpolator.default_value & 0x1u) != 0 : (interpolator.default_value & 0x2u) != 0);
 	return (one ? 1.0f : 0.0f);
+}
+
+bool ShaderPixelInputActive(const ShaderPixelInputInfo& info, uint32_t index)
+{
+	EXIT_IF(index >= 32u);
+	ShaderPixelInterpolator decoded {};
+	if (!info.custom_interpolation.Enabled() && ShaderDecodePixelInterpolator(info.interpolator_settings[index], &decoded) &&
+	    decoded.source == ShaderPixelInterpolatorSource::PerVertex) { return false; }
+	return !info.custom_interpolation.Enabled() || (info.custom_interpolation.inputs & (1u << index)) != 0;
+}
+
+uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32_t field)
+{
+	EXIT_IF(field >= 16u);
+	uint32_t result = 0;
+	for (uint32_t i = 0; i < field; ++i)
+	{
+		if ((info.system_input_address & (1u << i)) == 0) { continue; }
+		result += i == 3u ? 3u : (i < 7u ? 2u : 1u);
+	}
+	return result;
+}
+
+void ShaderResolveCustomInterpolation(const ShaderCode& code, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info)
+{
+	auto& layout = info->custom_interpolation;
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.type != ShaderInstructionType::VInterpMovF32 && inst.type != ShaderInstructionType::VInterpP1F32 &&
+		    inst.type != ShaderInstructionType::VInterpP2F32) { continue; }
+		const uint32_t input = inst.src[1].constant.u;
+		EXIT_IF(input >= 32u);
+		layout.inputs |= 1u << input;
+		ShaderPixelInterpolator interpolator {};
+		if (!ShaderDecodePixelInterpolator(info->interpolator_settings[input], &interpolator)) { continue; }
+		if (interpolator.source == ShaderPixelInterpolatorSource::PerVertex)
+		{
+			EXIT_IF(inst.type != ShaderInstructionType::VInterpMovF32);
+			layout.per_vertex_inputs |= 1u << input;
+		}
+	}
+	EXIT_IF(info->input_num > 32u);
+	// A smooth and a flat view of one export cannot share a Vulkan input
+	// location. The geometry interface already preserves the export source
+	// while giving each distinct view its own location. Identical settings
+	// remain canonical aliases and need no additional host stage.
+	for (uint32_t input = 0; input < info->input_num; ++input)
+	{
+		ShaderPixelInterpolator current {};
+		if (!ShaderDecodePixelInterpolator(info->interpolator_settings[input], &current) ||
+		    current.source != ShaderPixelInterpolatorSource::Parameter) { continue; }
+		for (uint32_t previous = 0; previous < input; ++previous)
+		{
+			ShaderPixelInterpolator other {};
+			if (ShaderDecodePixelInterpolator(info->interpolator_settings[previous], &other) &&
+			    other.source == ShaderPixelInterpolatorSource::Parameter && current.location == other.location &&
+			    current.flat != other.flat)
+			{
+				layout.aliased_parameter_inputs |= (1u << input) | (1u << previous);
+			}
+		}
+	}
+	if (!layout.Enabled()) { return; }
+	// Pull-model and per-sample barycentrics need distinct host evaluation modes.
+	EXIT_IF(((info->system_input_enable | info->system_input_address) & 0x19u) != 0);
+	EXIT_IF((info->system_input_enable & ~info->system_input_address) != 0);
+	EXIT_IF(producer.position1_usage != ShaderVertexPosition1Usage::Unknown);
+	for (uint32_t input = 0; input < 32u; ++input)
+	{
+		if ((layout.inputs & (1u << input)) == 0) { continue; }
+		info->input_num = std::max(info->input_num, input + 1u);
+		const uint32_t canonical = ShaderPixelCanonicalInterpolator(*info, input);
+		if (canonical != input) { layout.locations[input] = layout.locations[canonical]; continue; }
+		ShaderPixelInterpolator interpolator {};
+		EXIT_IF(!ShaderDecodePixelInterpolator(info->interpolator_settings[input], &interpolator));
+		if (interpolator.source == ShaderPixelInterpolatorSource::Default) { continue; }
+		EXIT_IF(interpolator.location >= static_cast<uint32_t>(producer.export_count));
+		layout.locations[input] = layout.location_count;
+		layout.location_count += interpolator.source == ShaderPixelInterpolatorSource::PerVertex ? 3u : 1u;
+	}
+	for (uint32_t field: {1u, 2u, 5u, 6u})
+	{
+		if ((info->system_input_enable & (1u << field)) == 0) { continue; }
+		layout.barycentric_locations[field] = layout.location_count++;
+	}
+	EXIT_IF(layout.location_count > 32u);
 }
 
 } // namespace Kyty::Libs::Graphics

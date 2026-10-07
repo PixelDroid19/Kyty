@@ -3,6 +3,7 @@
 #include "GraphicsComputeRegisters.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GraphicsGeState.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/Label.h"
@@ -16,6 +17,34 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+bool GraphicsDecodeGeShaderRegisters(HW::Shader* shader, uint32_t offset, const uint32_t* values, uint32_t count)
+{
+	// The complete GS window is RSRC3, LO, HI, RSRC1, RSRC2. Check before
+	// subtracting/adding so a malformed range cannot wrap or partially apply.
+	if (shader == nullptr || values == nullptr || count == 0 || offset < Pm4::SPI_SHADER_PGM_RSRC3_GS ||
+	    offset > Pm4::SPI_SHADER_PGM_RSRC2_GS || count > Pm4::SPI_SHADER_PGM_RSRC2_GS - offset + 1u)
+	{
+		return false;
+	}
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		const bool decoded = GraphicsDecodeGeShaderRegister(*shader, offset + i, values[i]);
+		EXIT_IF(!decoded);
+	}
+	return true;
+}
+
+bool GraphicsDecodeGeUserConfigRegisters(HW::UserConfig* ucfg, uint32_t offset, const uint32_t* values, uint32_t count)
+{
+	// These two registers are not adjacent; intervening registers have their
+	// own contracts and must not disappear inside a GE control write.
+	if (ucfg == nullptr || values == nullptr || count != 1)
+	{
+		return false;
+	}
+	return GraphicsDecodeGeUserConfigRegister(*ucfg, offset, values[0]);
+}
 
 KYTY_HW_CTX_PARSER(hw_ctx_set_aa_config)
 {
@@ -805,7 +834,9 @@ KYTY_HW_SH_PARSER(hw_sh_set_ps_shader)
 	r1.ieee_mode                = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, IEEE_MODE) != 0;
 	r1.cu_group_disable         = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, CU_GROUP_DISABLE) != 0;
 	r1.require_forward_progress = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, FWD_PROGRESS) != 0;
-	r1.fp16_overflow            = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, FP16_OVFL) != 0;
+	const auto overflow    = GraphicsDecodeFp16Overflow(buffer[2], GraphicsFp16OverflowStage::Pixel);
+	r1.fp16_overflow       = overflow.enabled;
+	r1.fp16_overflow_known = overflow.known;
 
 	r2.scratch_en             = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, SCRATCH_EN);
 	r2.user_sgpr              = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR) +
@@ -910,7 +941,9 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_shader)
 	r1.vgpr_component_count     = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, VGPR_COMP_CNT);
 	r1.cu_group_enable          = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, CU_GROUP_ENABLE) != 0;
 	r1.require_forward_progress = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, FWD_PROGRESS) != 0;
-	r1.fp16_overflow            = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, FP16_OVFL) != 0;
+	const auto overflow    = GraphicsDecodeFp16Overflow(buffer[3], GraphicsFp16OverflowStage::Vertex);
+	r1.fp16_overflow       = overflow.enabled;
+	r1.fp16_overflow_known = overflow.known;
 
 	r2.scratch_en        = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SCRATCH_EN) != 0;
 	r2.user_sgpr         = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR) +
@@ -955,6 +988,31 @@ KYTY_HW_SH_PARSER(hw_sh_set_vs_user_sgpr)
 	return reg_num;
 }
 
+KYTY_HW_SH_PARSER(hw_sh_set_es_rsrc1)
+{
+	EXIT_IF(cmd_offset != Pm4::SPI_SHADER_PGM_RSRC1_ES || ((cmd_id >> 16u) & 0x3fffu) != 1u || dw < 2u);
+	cp->GetShCtx()->SetEsShaderResource1(buffer[0]);
+	return 1;
+}
+
+KYTY_HW_SH_PARSER(hw_sh_set_gs_user_data_address)
+{
+	const uint32_t count = (cmd_id >> 16u) & 0x3fffu;
+	EXIT_IF(cmd_offset < Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS || cmd_offset > Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS);
+	EXIT_IF(count == 0 || count > Pm4::SPI_SHADER_USER_DATA_ADDR_HI_GS - cmd_offset + 1u || count + 1u > dw);
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		if (cmd_offset + i == Pm4::SPI_SHADER_USER_DATA_ADDR_LO_GS)
+		{
+			cp->GetShCtx()->SetGsUserDataAddressLow(buffer[i]);
+		} else
+		{
+			cp->GetShCtx()->SetGsUserDataAddressHigh(buffer[i]);
+		}
+	}
+	return count;
+}
+
 KYTY_HW_SH_PARSER(hw_sh_set_gs_user_sgpr)
 {
 	if (!(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_GS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_GS_15)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !(cmd_offset >= Pm4::SPI_SHADER_USER_DATA_GS_0 && cmd_offset <= Pm4::SPI_SHADER_USER_DATA_GS_15) condition ignored (continuing)\n"); }
@@ -992,7 +1050,9 @@ KYTY_HW_SH_PARSER(hw_sh_update_ps_shader)
 	r1.ieee_mode                = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, IEEE_MODE) != 0;
 	r1.cu_group_disable         = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, CU_GROUP_DISABLE) != 0;
 	r1.require_forward_progress = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, FWD_PROGRESS) != 0;
-	r1.fp16_overflow            = KYTY_PM4_GET(buffer[2], SPI_SHADER_PGM_RSRC1_PS, FP16_OVFL) != 0;
+	const auto overflow    = GraphicsDecodeFp16Overflow(buffer[2], GraphicsFp16OverflowStage::Pixel);
+	r1.fp16_overflow       = overflow.enabled;
+	r1.fp16_overflow_known = overflow.known;
 
 	r2.scratch_en             = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, SCRATCH_EN);
 	r2.user_sgpr              = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC2_PS, USER_SGPR) +
@@ -1032,7 +1092,9 @@ KYTY_HW_SH_PARSER(hw_sh_update_vs_shader)
 	r1.vgpr_component_count     = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, VGPR_COMP_CNT);
 	r1.cu_group_enable          = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, CU_GROUP_ENABLE) != 0;
 	r1.require_forward_progress = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, FWD_PROGRESS) != 0;
-	r1.fp16_overflow            = KYTY_PM4_GET(buffer[3], SPI_SHADER_PGM_RSRC1_VS, FP16_OVFL) != 0;
+	const auto overflow    = GraphicsDecodeFp16Overflow(buffer[3], GraphicsFp16OverflowStage::Vertex);
+	r1.fp16_overflow       = overflow.enabled;
+	r1.fp16_overflow_known = overflow.known;
 
 	r2.scratch_en        = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, SCRATCH_EN) != 0;
 	r2.user_sgpr         = KYTY_PM4_GET(buffer[4], SPI_SHADER_PGM_RSRC2_VS, USER_SGPR) +

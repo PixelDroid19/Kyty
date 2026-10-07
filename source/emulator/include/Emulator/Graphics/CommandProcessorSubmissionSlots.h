@@ -25,7 +25,8 @@ public:
 	CommandProcessorSubmissionSlots& operator=(CommandProcessorSubmissionSlots&&)      = delete;
 
 	GpuSubmissionResult BeginRecording(uint32_t slot, SubmissionId* id, SubmissionDependency* blocking_dependency);
-	GpuSubmissionResult RegisterProducer(uint32_t slot, uint64_t address, uint32_t size_bytes, uint64_t value);
+	GpuSubmissionResult RegisterProducer(uint32_t slot, uint64_t address, uint32_t size_bytes, uint64_t value,
+	                                     GpuProducerEffect effects = GpuProducerEffect::GuestStore);
 	GpuSubmissionResult MarkSubmitted(uint32_t slot);
 	GpuSubmissionResult MarkFenceCompleted(uint32_t slot);
 	GpuSubmissionResult RetirePublished(SubmissionId id);

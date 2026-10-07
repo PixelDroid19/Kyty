@@ -30,13 +30,19 @@
 #include "Kyty/Core/Vector.h"
 
 #include <set>
+#include <vector>
 #include <string>
 
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderSpirv.h"
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+// Function-local array backing ds_*_addtid_b32 spill slots in non-compute
+// stages: indexed by (M0[15:0] + offset) >> 2 and private to each invocation.
+constexpr uint32_t kDsAddtidSpillDwords = 1024u;
 
 class Spirv;
 
@@ -71,6 +77,12 @@ struct SpirvValue
 	String8   value;
 };
 
+enum class ShaderWaveBank : uint32_t
+{
+	Low = 0u,
+	High = 1u
+};
+
 enum class PixelInterpolationMode
 {
 	Unused,
@@ -102,6 +114,89 @@ public:
 	void GenerateSource();
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
+	[[nodiscard]] bool UsesComputeWaveBanks() const;
+	// Architectural EXEC/VCC and SGPR mask destinations always contain packed
+	// words. Native templates' implicit EXEC loads use a separate lane view;
+	// explicit numeric operand loads are marked until the strategy is resolved.
+	[[nodiscard]] bool NativeWave32() const;
+	[[nodiscard]] String8 NativeExecRefresh(const String8& tag) const;
+	[[nodiscard]] String8 NativeQuadUniform(const String8& value, const String8& type, const String8& result) const;
+	[[nodiscard]] String8 NativeMaskBallot(const String8& predicate, const String8& result) const;
+	[[nodiscard]] String8 ResolveMaskAccesses(const ShaderInstruction& instruction, uint32_t index, const String8& source) const;
+	[[nodiscard]] bool EmitNativeMaskBit(const ShaderOperand& mask, const String8& result, String8* output) const;
+	// A guest Wave64 pixel program admitted as a partially populated wave on a
+	// host subgroup of at most 32 lanes: lane-indexed ops (row DPP, PERMLANE,
+	// READLANE over the ghost half) run only inside proven neutral regions or
+	// against proven-neutral sources.
+	[[nodiscard]] bool UsesFragmentWaveTier() const;
+	[[nodiscard]] bool UsesFragmentCompute() const { return m_fragment_compute_info != nullptr; }
+	// ds_*_addtid_b32: a per-lane LDS slot at M0[15:0] + offset + TID*4.
+	// Compute lowers it onto the shared %lds array; other stages carry it in
+	// a function-local spill array since only the writing lane can observe it.
+	[[nodiscard]] bool UsesDsAddtid() const;
+	[[nodiscard]] bool UsesDsAddtidLds() const;
+	[[nodiscard]] ShaderType GetHostShaderType() const { return UsesFragmentCompute() ? ShaderType::Compute : m_code.GetType(); }
+	void SetFragmentComputeInfo(const ShaderFragmentComputeInfo* info) { m_fragment_compute_info = info; }
+	[[nodiscard]] String8 FragmentTransportAnnotations() const;
+	[[nodiscard]] String8 FragmentTransportTypes() const;
+	[[nodiscard]] String8 FragmentTransportVariables() const;
+	[[nodiscard]] String8 FragmentLocalVariables() const;
+	[[nodiscard]] String8 FragmentProlog() const;
+	[[nodiscard]] String8 FragmentEpilog() const;
+	[[nodiscard]] bool EmitFragmentInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitFragmentInterpolation(const ShaderInstruction& instruction, ShaderWaveBank bank,
+	                                              const String8& tag, String8* output) const;
+	[[nodiscard]] bool EmitFragmentExport(const ShaderInstruction& instruction, uint32_t index, ShaderWaveBank bank,
+	                                       const String8& tag, String8* output) const;
+	void FindFragmentConstants();
+	[[nodiscard]] bool EmitComputeWaveLaneInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveDppInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWavePermutation(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveLdsInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveAluInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveBufferLoadInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveGenericInstruction(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
+	                                                     uint32_t index, String8* output);
+	[[nodiscard]] String8 EmitMetadataLoad(int row, int field, const String8& id) const;
+	// Writes the metadata of each assembled V# the instruction consumes into its
+	// descriptor SGPRs (see ShaderAssembledDescriptor).
+	[[nodiscard]] String8 MaterializeAssembledDescriptors(const ShaderInstruction& inst) const;
+	[[nodiscard]] String8 EmitMetadataStore(int row, int field, const String8& reg) const;
+	[[nodiscard]] String8 EmitThreadLimitLoad(uint32_t axis, const String8& id) const;
+	[[nodiscard]] bool    UsesBlockDispatch() const;
+	[[nodiscard]] bool    UsesBarrierPhases() const;
+	[[nodiscard]] String8 BarrierPhaseTypes() const;
+	[[nodiscard]] String8 BarrierPhaseJoin() const;
+	void                  BuildBlockDispatch();
+	[[nodiscard]] int     BlockId(uint32_t pc) const;
+	[[nodiscard]] String8 BlockDispatchProlog() const;
+	[[nodiscard]] String8 BlockDispatchBoundary(uint32_t index);
+	[[nodiscard]] bool    BlockDispatchControl(const ShaderInstruction& inst, uint32_t index, String8* output);
+	[[nodiscard]] String8 BlockDispatchEpilog() const;
+	[[nodiscard]] bool    UsesGuestDeviceAddress() const;
+	[[nodiscard]] String8 GuestDeviceAddressTypes(bool ulong_declared) const;
+	[[nodiscard]] String8 GuestDeviceAddressFunction() const;
+	[[nodiscard]] bool    EmitGuestLoad(const String8& lo, const String8& hi, int dwords, const String8& prefix, String8* output) const;
+	[[nodiscard]] String8 WrapVertexScalarBufferProbe(const ShaderInstruction& inst, uint32_t index,
+	                                                 uint32_t site, const String8& original);
+	[[nodiscard]] String8 EmitNativeThreadLimitExec() const;
+	[[nodiscard]] bool EmitComputeWaveCarryInstruction(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveMbcnt(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveAppend(const ShaderInstruction& instruction, uint32_t index, String8* output) const;
+	[[nodiscard]] String8 EmitGdsCounterPointer(uint16_t byte_offset, const String8& prefix) const;
+	[[nodiscard]] bool EmitComputeWaveGenericCompare(const struct RecompilerFunc* func, const ShaderInstruction& instruction,
+	                                                 uint32_t index, String8* output);
+	[[nodiscard]] SpirvValue GetComputeWaveRegister(ShaderOperand operand, ShaderWaveBank bank, int word) const;
+	[[nodiscard]] bool EmitComputeWaveOperandUint(const ShaderOperand& operand, ShaderWaveBank bank,
+	                                              const String8& result_id, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveProlog(String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveValidLanes(String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveMaskBit(const ShaderOperand& mask, ShaderWaveBank bank,
+	                                         const String8& result_id, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveBallot(const String8& low_predicate, const String8& high_predicate,
+	                                        const String8& low_result, const String8& high_result, String8* output) const;
+	[[nodiscard]] bool EmitComputeWaveCompareU32(const ShaderInstruction& instruction, uint32_t index,
+	                                            const char* predicate_op, String8* output) const;
 	[[nodiscard]] bool           CanLoadPackedHalfForExport(int export_index, ShaderOperand op) const;
 	[[nodiscard]] bool UsesVertexClipProbe() const
 	{
@@ -130,6 +225,22 @@ public:
 	[[nodiscard]] bool UsesGraphicsProbeStorage() const
 	{
 		return UsesVertexClipProbe() || UsesPixelInput0Probe() || UsesPixelSampleProbe() || UsesPixelMrtProbe();
+	}
+	[[nodiscard]] bool UsesVertexLayerExport() const
+	{
+		if (m_code.GetType() != ShaderType::Vertex || m_vs_input_info == nullptr ||
+		    m_vs_input_info->position1_usage != ShaderVertexPosition1Usage::RenderTargetLayer)
+		{
+			return false;
+		}
+		for (const auto& inst: m_code.GetInstructions())
+		{
+			if (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off)
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 	[[nodiscard]] uint32_t GetGraphicsProbeDescriptorSet() const;
 
@@ -174,6 +285,28 @@ public:
 		*field  = m_extended_mapping[offset][1];
 	}
 
+	// First table dword that the PC-keyed descriptor S_LOAD at instruction_pc
+	// materializes; false when that load has no mapping.
+	[[nodiscard]] bool GetDynamicSLoadOffset(uint32_t instruction_pc, int* offset_dw) const
+	{
+		EXIT_IF(offset_dw == nullptr);
+		if (m_bind == nullptr)
+		{
+			return false;
+		}
+		bool found = false;
+		for (uint32_t mapping = 0; mapping < m_bind->dynamic_sloads.records.Size(); ++mapping)
+		{
+			const auto& record = m_bind->dynamic_sloads.records.At(mapping);
+			if (record.instruction_pc == instruction_pc && (!found || record.offset_dw < *offset_dw))
+			{
+				*offset_dw = record.offset_dw;
+				found      = true;
+			}
+		}
+		return found;
+	}
+
 	[[nodiscard]] bool GetDynamicSLoadMappedIndex(uint32_t instruction_pc, int offset, int* buffer, int* field) const
 	{
 		EXIT_IF(buffer == nullptr || field == nullptr);
@@ -182,21 +315,22 @@ public:
 			return false;
 		}
 		const auto& dynamic_sloads = m_bind->dynamic_sloads;
-		for (int mapping = 0; mapping < dynamic_sloads.mappings_num; ++mapping)
+		for (uint32_t mapping = 0; mapping < dynamic_sloads.records.Size(); ++mapping)
 		{
-			if (dynamic_sloads.instruction_pc[mapping] != instruction_pc)
+			const auto& record = dynamic_sloads.records.At(mapping);
+			if (record.instruction_pc != instruction_pc)
 			{
 				continue;
 			}
-			const int first_dword = dynamic_sloads.offset_dw[mapping];
-			if (offset < first_dword || offset >= first_dword + dynamic_sloads.dword_count[mapping])
+			const int first_dword = record.offset_dw;
+			if (offset < first_dword || offset >= first_dword + record.dword_count)
 			{
 				continue;
 			}
 
-			const int resource_index = dynamic_sloads.resource_index[mapping];
-			const int resource_field = dynamic_sloads.resource_field_offset[mapping] + offset - first_dword;
-			switch (dynamic_sloads.kind[mapping])
+			const int resource_index = record.resource_index;
+			const int resource_field = record.resource_field_offset + offset - first_dword;
+			switch (record.kind)
 			{
 				case ShaderDynamicSLoadResourceKind::StorageBuffer:
 					if (resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_index < 0 || resource_index >= m_bind->storage_buffers.buffers_num condition ignored (continuing)\n"); }
@@ -219,6 +353,10 @@ public:
 	}
 
 private:
+	// Block dispatcher state (sorted guest block start PCs).
+	std::vector<uint32_t> m_block_starts;
+	bool                  m_block_terminated = false;
+
 	struct Variable
 	{
 		ShaderOperand op;
@@ -246,6 +384,11 @@ private:
 	void WriteGlobalVariables();
 	void WriteMainProlog();
 	void WriteLocalVariables();
+	void WriteCustomPixelInterface(Core::StringList8* variables) const;
+	void WriteCustomPixelAnnotations(Core::StringList8* annotations) const;
+	void WriteCustomPixelVariables(Core::StringList8* variables) const;
+	void WriteCustomPixelProlog();
+	void WritePixelFrontFaceProlog();
 	void WriteInstructions();
 	void WriteMainEpilog();
 	void WriteFunctions();
@@ -275,6 +418,8 @@ private:
 	const ShaderVertexInputInfo*  m_vs_input_info = nullptr;
 	const ShaderComputeInputInfo* m_cs_input_info = nullptr;
 	const ShaderPixelInputInfo*   m_ps_input_info = nullptr;
+	const ShaderFragmentComputeInfo* m_fragment_compute_info = nullptr;
+	mutable int                   m_native_wave_tier = -1;
 	const ShaderBindResources*    m_bind          = nullptr;
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;
@@ -305,6 +450,8 @@ bool FragmentTapQueryLodSelection(const ShaderCode& code, const ShaderFragmentTa
 String8 packed_half_shadow_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op);
 SpirvValue operand_variable_to_str(ShaderOperand op, int shift);
+// Read-only numeric pointer: protects packed EXEC words from lane adaptation.
+SpirvValue operand_numeric_variable_to_str(ShaderOperand op, int shift = -1);
 SpirvValue buffer_index_variable_to_str(const ShaderInstruction& inst);
 SpirvValue mimg_address_to_str(const ShaderInstruction& inst, int address);
 bool operand_is_exec(ShaderOperand op);
@@ -313,9 +460,14 @@ bool operand_load_uint(Spirv* spirv, ShaderOperand op, const String8& result_id,
 bool operand_load_float(Spirv* spirv, ShaderOperand op, const String8& result_id, const String8& index, String8* load);
 String8 get_scc_check(SccCheck scc_check, int dst_num);
 bool UsesArrayed2dImages(const ShaderBindResources* bind, ShaderTextureUsage usage);
+// True when the writable (storage) bank holds 3D images; the plan admits one shape per bank.
+bool UsesVolumeStorageImages(const ShaderBindResources* bind);
 bool UsesUnsignedIntegerImages(const ShaderBindResources* bind);
+bool UsesUnsignedIntegerStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
+int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction_index,
+                                   const ShaderBindResources& bind, int user_data_register_base);
 bool UsesMixedSampledImageNumericTypes(const ShaderBindResources* bind);
-bool UsesFormatlessStorageImages(const ShaderBindResources* bind);
+bool UsesFormatlessStorageImages(const ShaderCode& code, const ShaderBindResources* bind);
 bool IsImageInstruction(const ShaderInstruction& inst);
 bool IsSampledImageInstruction(const ShaderInstruction& inst);
 bool IsStorageImageInstruction(const ShaderInstruction& inst);
@@ -328,6 +480,9 @@ bool HasLiveScalarSpill(const ShaderCode& code, uint32_t instruction_index, int 
 bool HasInvalidatedScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool HasFutureScalarSpillRead(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool UsesNativeLaneExchange(const ShaderCode& code);
+// M0-relative moves lower to a named register only when M0 is a proven literal
+// in the same basic block. Returns the literal through m0 on success.
+bool MovrelProvenLiteralM0(const ShaderCode& code, uint32_t index, uint32_t* m0);
 extern const uint32_t SPIRV_DEVICE_MEMORY_ACQ_REL;
 extern const uint32_t SPIRV_WORKGROUP_MEMORY_ACQ_REL;
 const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFormat::Format format);

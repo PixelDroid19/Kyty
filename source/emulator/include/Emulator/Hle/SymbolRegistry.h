@@ -39,6 +39,9 @@ public:
 	virtual void AddHle(const HleSymbolResolve& symbol, uint64_t vaddr, const Core::String& dbg_name) = 0;
 	virtual void AddHleAliases(HleSymbolResolve symbol, std::initializer_list<const char*> names, uint64_t vaddr,
 	                          const Core::String& dbg_name) = 0;
+	// Publishes each symbol registered under `from`'s library and module that
+	// `to` does not export yet under `to`'s identity (names and types are kept).
+	virtual void MirrorHleLibrary(const HleSymbolResolve& from, const HleSymbolResolve& to) = 0;
 };
 
 } // namespace Kyty::Hle

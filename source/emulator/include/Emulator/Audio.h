@@ -62,6 +62,9 @@ int KYTY_SYSV_ABI AudioOut2PortSetAttributes(int32_t port, const void* attrs, ui
 int KYTY_SYSV_ABI AudioOut2PortGetState(int32_t port, void* state_out);
 int KYTY_SYSV_ABI AudioOut2UserCreate(uint32_t user_id, uintptr_t* user_out);
 int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user);
+// sceAudioOut2GetSpeakerInfo (NID DImz2Ft9E2g): flags is the speaker-set
+// selector (0 and 1 observed); the output is a 0x50-byte record.
+int KYTY_SYSV_ABI AudioOut2GetSpeakerInfo(void* info, uint32_t flags);
 
 // C++-only unit-test seam for host-state regression coverage. It is not a
 // guest export and must not be used to infer an AudioOut2 ContextCreate ABI.
@@ -439,6 +442,49 @@ int KYTY_SYSV_ABI  Audio3dPortAdvance(uint32_t port_id);
 int KYTY_SYSV_ABI  Audio3dPortPush(uint32_t port_id, uint32_t blocking);
 
 } // namespace Audio3d
+
+namespace AudioPropagation {
+
+struct StructDescriptor
+{
+	uint32_t id   = 0;
+	uint32_t pad  = 0;
+	uint64_t size = 0;
+};
+
+struct SystemOption
+{
+	StructDescriptor desc;
+	uint32_t         max_sources    = 0;
+	uint32_t         max_materials  = 0;
+	uint32_t         max_raycasts   = 0;
+	uint32_t         max_bounces    = 0;
+	uint32_t         update_grain   = 0;
+	float            speed_of_sound = 0;
+	float            max_distance   = 0;
+	uint32_t         flags          = 0;
+	uint32_t         pad            = 0;
+};
+
+struct SystemMemory
+{
+	StructDescriptor desc;
+	void*            cpu_memory      = nullptr;
+	uint64_t         cpu_memory_size = 0;
+	void*            gpu_memory      = nullptr;
+	uint64_t         gpu_memory_size = 0;
+};
+
+int KYTY_SYSV_ABI SystemQueryMemory(const SystemOption* option, SystemMemory* memory);
+int KYTY_SYSV_ABI SystemCreate(const SystemOption* option, const SystemMemory* memory, uint64_t* system_out);
+int KYTY_SYSV_ABI SystemDestroy(uint64_t system);
+int KYTY_SYSV_ABI RoomCreate(uint64_t system, uint64_t* room_out);
+int KYTY_SYSV_ABI RoomDestroy(uint64_t system, uint64_t room);
+int KYTY_SYSV_ABI SystemRegisterMaterial(uint64_t system, const void* material, uint64_t* material_out);
+int KYTY_SYSV_ABI SystemSetAttributes(uint64_t system, const void* attributes, uint32_t count);
+int KYTY_SYSV_ABI SystemGetRays(uint64_t system, void* rays, uint32_t* count);
+
+} // namespace AudioPropagation
 
 namespace Ngs2 {
 

@@ -1,6 +1,7 @@
 #include "Kyty/Core/File.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/UnitTest.h"
+#include "ScopedTestDirectory.h"
 
 #include "Emulator/Config.h"
 #include "Emulator/Dialog.h"
@@ -15,9 +16,12 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <memory>
 #include <string>
 
 UT_BEGIN(EmulatorSaveData);
@@ -29,7 +33,7 @@ TEST(EmulatorSaveData, BuildsPortablePerTitleSaveRoots)
 	EXPECT_EQ(Libs::SaveData::SaveDataBuildTitleRoot(std::filesystem::path("/portable/user/savedata"), nullptr),
 	          std::filesystem::path("/portable/user/savedata/UNKNOWN"));
 	EXPECT_EQ(Libs::SaveData::SaveDataBuildMemoryPath(root, 7, 3),
-	          std::filesystem::path("/portable/user/savedata/PPSA-12345/memory/user-7/slot-3.bin"));
+	          std::filesystem::path("/portable/user/savedata/.kyty-memory/PPSA-12345/memory/user-7/slot-3.bin"));
 	EXPECT_TRUE(Libs::SaveData::SaveDataBuildMemoryPath(root, -1, 3).empty());
 	EXPECT_TRUE(Libs::SaveData::SaveDataBuildMemoryPath(std::filesystem::path("relative"), 7, 3).empty());
 }
@@ -155,6 +159,26 @@ struct SaveDataMount2Layout
 	int32_t                                pad2;
 };
 
+struct SaveDataMount3Layout
+{
+	int32_t                                user_id;
+	int32_t                                pad;
+	const Libs::SaveData::SaveDataDirName* dir_name;
+	uint64_t                               blocks;
+	uint64_t                               system_blocks;
+	uint32_t                               mount_mode;
+	int32_t                                pad2;
+	int32_t                                resource;
+	uint8_t                                reserved[32];
+};
+
+static_assert(sizeof(SaveDataMount3Layout) == 80);
+static_assert(offsetof(SaveDataMount3Layout, dir_name) == 8);
+static_assert(offsetof(SaveDataMount3Layout, blocks) == 16);
+static_assert(offsetof(SaveDataMount3Layout, system_blocks) == 24);
+static_assert(offsetof(SaveDataMount3Layout, mount_mode) == 32);
+static_assert(offsetof(SaveDataMount3Layout, resource) == 40);
+
 struct SaveDataMountResultLayout
 {
 	Libs::SaveData::SaveDataMountPoint mount_point;
@@ -164,6 +188,19 @@ struct SaveDataMountResultLayout
 	uint8_t                            reserved[28];
 	int32_t                            pad;
 };
+
+struct SaveDataDeleteLayout
+{
+	int32_t                                user_id;
+	int32_t                                pad;
+	const Libs::SaveData::SaveDataTitleId* title_id;
+	const Libs::SaveData::SaveDataDirName* dir_name;
+	uint32_t                               unused;
+	uint8_t                                reserved[32];
+	int32_t                                pad2;
+};
+
+static_assert(offsetof(SaveDataDeleteLayout, dir_name) == 16);
 
 struct SaveDataMemoryDataLayout
 {
@@ -218,6 +255,41 @@ struct SaveDataMemorySyncLayout
 {
 	int32_t  user_id;
 	uint32_t slot_id;
+};
+
+class ScopedSaveDataMounts final
+{
+public:
+	using Umount = int(KYTY_SYSV_ABI*)(const Libs::SaveData::SaveDataMountPoint*);
+
+	explicit ScopedSaveDataMounts(Umount umount): m_umount(umount) {}
+
+	~ScopedSaveDataMounts()
+	{
+		for (size_t index = m_active.size(); index > 0; --index)
+		{
+			if (m_active[index - 1]) { (void)m_umount(&m_mount_points[index - 1]); }
+		}
+	}
+
+	void Track(size_t slot, const Libs::SaveData::SaveDataMountPoint& mount_point)
+	{
+		m_mount_points[slot] = mount_point;
+		m_active[slot]      = true;
+	}
+
+	int Unmount(size_t slot)
+	{
+		if (!m_active[slot]) { return Libs::SaveData::SAVE_DATA_ERROR_NOT_MOUNTED; }
+		const int result = m_umount(&m_mount_points[slot]);
+		if (result == 0) { m_active[slot] = false; }
+		return result;
+	}
+
+private:
+	Umount                                                  m_umount;
+	std::array<Libs::SaveData::SaveDataMountPoint, 2>       m_mount_points {};
+	std::array<bool, 2>                                    m_active {};
 };
 
 static_assert(sizeof(SaveDataMemoryDataLayout) == 64);
@@ -408,13 +480,14 @@ TEST(EmulatorSaveData, CreatesTransactionResourceThroughReturnValue)
 	EXPECT_GT(second, first);
 }
 
-TEST(EmulatorSaveData, SaveDataDialogInitializeRequiresCommonDialog)
+[[noreturn]] static void SaveDataDialogInitializationProbe()
 {
 	using namespace Libs::Dialog;
 
-	// Alphabetically early within the suite when process is fresh: common dialog
-	// may already be initialized by other suites in the same process. Exercise
-	// the documented contract that Initialize succeeds once system init is up.
+	EnsureLogSubsystem();
+	// CommonDialog initialization lasts for the process; SaveDataDialog's
+	// termination does not reset it. Verify first and repeated initialization
+	// in a fresh death-test child, including on a repeated suite iteration.
 	EXPECT_EQ(CommonDialog::CommonDialogInitialize(), 0);
 	// Second call is already-system-initialized.
 	EXPECT_EQ(CommonDialog::CommonDialogInitialize(), CommonDialog::ERROR_ALREADY_SYSTEM_INITIALIZED);
@@ -437,9 +510,15 @@ TEST(EmulatorSaveData, SaveDataDialogInitializeRequiresCommonDialog)
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogTerminate(), 0);
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogUpdateStatus(), CommonDialog::STATUS_NONE);
 	EXPECT_EQ(SaveDataDialog::SaveDataDialogTerminate(), CommonDialog::ERROR_NOT_INITIALIZED);
+	std::_Exit(::testing::Test::HasFailure() ? 1 : 0);
 }
 
-TEST(EmulatorSaveData, GetMountInfoValidatesAndReportsCapacity)
+TEST(EmulatorSaveData, SaveDataDialogInitializeRequiresCommonDialog)
+{
+	ASSERT_EXIT(SaveDataDialogInitializationProbe(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorSaveData, GetMountInfoValidatesArguments)
 {
 	using namespace Libs::SaveData;
 
@@ -447,13 +526,188 @@ TEST(EmulatorSaveData, GetMountInfoValidatesAndReportsCapacity)
 	EXPECT_EQ(SaveDataGetMountInfo(nullptr, &info), Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
 	EXPECT_EQ(SaveDataGetMountInfo(reinterpret_cast<const SaveDataMountPoint*>("/savedata0"), nullptr),
 	          Libs::SaveData::SAVE_DATA_ERROR_PARAMETER);
+	SaveDataMountPoint mount_point {};
+	std::memcpy(mount_point.data, "/savedata0", 11);
+	EXPECT_EQ(SaveDataGetMountInfo(&mount_point, &info), Libs::SaveData::SAVE_DATA_ERROR_NOT_MOUNTED);
+}
 
-	SaveDataMountPoint mount {};
-	std::memcpy(mount.data, "/savedata0", 11);
-	EXPECT_EQ(SaveDataGetMountInfo(&mount, &info), 0);
-	EXPECT_GT(info.blocks, 0u);
-	EXPECT_GT(info.free_blocks, 0u);
-	EXPECT_LE(info.free_blocks, info.blocks);
+TEST(EmulatorSaveData, MountAllocationPersistsAcrossReopenAndEnumeration)
+{
+	using namespace Libs::SaveData;
+	using Mount3        = int(KYTY_SYSV_ABI*)(const SaveDataMount3Layout*, SaveDataMountResultLayout*);
+	using GetMountInfo  = int(KYTY_SYSV_ABI*)(const SaveDataMountPoint*, SaveDataMountInfo*);
+	using DirNameSearch = int(KYTY_SYSV_ABI*)(const SaveDataDirNameSearchCond*, SaveDataDirNameSearchResult*);
+	using Umount        = int(KYTY_SYSV_ABI*)(const SaveDataMountPoint*);
+	using Delete        = int(KYTY_SYSV_ABI*)(const SaveDataDeleteLayout*);
+
+	EnsureLogSubsystem();
+	EnsureFileSystemSubsystem();
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libSaveData_1", &symbols));
+	const auto* mount_record  = symbols.Find(SaveDataNativeFunc(u"ZP4e7rlzOUk"));
+	const auto* info_record   = symbols.Find(SaveDataNativeFunc(u"65VH0Qaaz6s"));
+	const auto* search_record = symbols.Find(SaveDataNativeFunc(u"dyIhnXq-0SM"));
+	const auto* umount_record  = symbols.Find(SaveDataNativeFunc(u"BMR4F-Uek3E"));
+	const auto* delete_record  = symbols.Find(SaveDataNativeFunc(u"S1GkePI17zQ"));
+	ASSERT_NE(mount_record, nullptr);
+	ASSERT_NE(info_record, nullptr);
+	ASSERT_NE(search_record, nullptr);
+	ASSERT_NE(umount_record, nullptr);
+	ASSERT_NE(delete_record, nullptr);
+	const auto mount3   = reinterpret_cast<Mount3>(mount_record->vaddr);
+	const auto get_info = reinterpret_cast<GetMountInfo>(info_record->vaddr);
+	const auto search   = reinterpret_cast<DirNameSearch>(search_record->vaddr);
+	const auto umount   = reinterpret_cast<Umount>(umount_record->vaddr);
+	const auto delete_save = reinterpret_cast<Delete>(delete_record->vaddr);
+	ASSERT_NE(mount3, nullptr);
+	ASSERT_NE(get_info, nullptr);
+	ASSERT_NE(search, nullptr);
+	ASSERT_NE(umount, nullptr);
+
+	ScopedTestDirectory save_directory("savedata-capacity-lifecycle");
+	const auto          save_root = save_directory.Path();
+	ASSERT_FALSE(save_root.empty());
+	ScopedSaveDataRoot scoped_root(save_root);
+	ScopedSaveDataMounts mounted(umount);
+
+	constexpr std::array<uint64_t, 2> kRequestedBlocks {80u, 1535u};
+	constexpr std::array<const char*, 2> kSlotNames {"ut-capacity-small", "ut-capacity-other"};
+	std::array<SaveDataDirName, 2> slot_names {};
+	std::array<SaveDataMountPoint, 2> mount_points {};
+	for (size_t slot = 0; slot < slot_names.size(); ++slot)
+	{
+		std::memcpy(slot_names[slot].data, kSlotNames[slot], std::strlen(kSlotNames[slot]) + 1u);
+		SaveDataMount3Layout mount {};
+		mount.user_id      = 0;
+		mount.dir_name     = &slot_names[slot];
+		mount.blocks       = kRequestedBlocks[slot];
+		mount.mount_mode   = 0x30u;
+		SaveDataMountResultLayout result {};
+		ASSERT_EQ(mount3(&mount, &result), 0);
+		mounted.Track(slot, result.mount_point);
+		mount_points[slot] = result.mount_point;
+		EXPECT_EQ(result.mount_status, 1u);
+	}
+
+	const auto title_root = SaveDataBuildTitleRoot(save_root, nullptr);
+
+	auto read_mount_info = [&](const SaveDataMountPoint& mount_point) {
+		SaveDataMountInfo info {};
+		EXPECT_EQ(get_info(&mount_point, &info), 0);
+		return info;
+	};
+	auto search_slot = [&](const SaveDataDirName& name) {
+		SaveDataDirNameSearchCond cond {};
+		cond.user_id  = 0;
+		cond.dir_name = &name;
+		SaveDataDirName found_name {};
+		SaveDataSearchInfo info {};
+		SaveDataDirNameSearchResult result {};
+		result.dir_names     = &found_name;
+		result.dir_names_num = 1;
+		result.infos         = &info;
+		EXPECT_EQ(search(&cond, &result), 0);
+		EXPECT_EQ(result.hit_num, 1u);
+		EXPECT_EQ(result.set_num, 1u);
+		EXPECT_STREQ(found_name.data, name.data);
+		return info;
+	};
+
+	for (size_t slot = 0; slot < slot_names.size(); ++slot)
+	{
+		const auto info = read_mount_info(mount_points[slot]);
+		EXPECT_EQ(info.blocks, kRequestedBlocks[slot]);
+		EXPECT_EQ(info.free_blocks, kRequestedBlocks[slot]);
+		const auto search_info = search_slot(slot_names[slot]);
+		EXPECT_EQ(search_info.blocks, kRequestedBlocks[slot]);
+		EXPECT_EQ(search_info.free_blocks, kRequestedBlocks[slot]);
+	}
+
+	const auto payload_path = title_root / kSlotNames[0] / "capacity-payload.bin";
+	constexpr size_t kPayloadBytes = 65537u;
+	const std::array<uint8_t, kPayloadBytes> payload {};
+	std::ofstream payload_file(payload_path, std::ios::binary | std::ios::trunc);
+	ASSERT_TRUE(payload_file.is_open());
+	payload_file.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+	ASSERT_TRUE(payload_file.good());
+	payload_file.close();
+	ASSERT_EQ(std::filesystem::file_size(payload_path), kPayloadBytes);
+
+	constexpr uint64_t kNativeBlockBytes = 64u * 1024u;
+	constexpr uint64_t kPayloadBlocks = (kPayloadBytes + kNativeBlockBytes - 1u) / kNativeBlockBytes;
+	const auto        after_write = read_mount_info(mount_points[0]);
+	EXPECT_EQ(after_write.blocks, kRequestedBlocks[0]);
+	EXPECT_EQ(after_write.free_blocks, kRequestedBlocks[0] - kPayloadBlocks);
+	const auto other_after_write = read_mount_info(mount_points[1]);
+	EXPECT_EQ(other_after_write.blocks, kRequestedBlocks[1]);
+	EXPECT_EQ(other_after_write.free_blocks, kRequestedBlocks[1]);
+	const auto other_written_search_info = search_slot(slot_names[1]);
+	EXPECT_EQ(other_written_search_info.blocks, kRequestedBlocks[1]);
+	EXPECT_EQ(other_written_search_info.free_blocks, kRequestedBlocks[1]);
+	const auto written_search_info = search_slot(slot_names[0]);
+	EXPECT_EQ(written_search_info.blocks, kRequestedBlocks[0]);
+	EXPECT_EQ(written_search_info.free_blocks, kRequestedBlocks[0] - kPayloadBlocks);
+
+	ASSERT_EQ(mounted.Unmount(0), 0);
+	SaveDataMount3Layout reopen {};
+	reopen.user_id    = 0;
+	reopen.dir_name   = &slot_names[0];
+	reopen.blocks     = 0;
+	reopen.mount_mode = 1u;
+	SaveDataMountResultLayout reopen_result {};
+	ASSERT_EQ(mount3(&reopen, &reopen_result), 0);
+	mounted.Track(0, reopen_result.mount_point);
+	EXPECT_EQ(reopen_result.mount_status, 0u);
+	const auto reopened = read_mount_info(reopen_result.mount_point);
+	EXPECT_EQ(reopened.blocks, kRequestedBlocks[0]);
+	EXPECT_EQ(reopened.free_blocks, kRequestedBlocks[0] - kPayloadBlocks);
+	const auto reopened_search_info = search_slot(slot_names[0]);
+	EXPECT_EQ(reopened_search_info.blocks, kRequestedBlocks[0]);
+	EXPECT_EQ(reopened_search_info.free_blocks, kRequestedBlocks[0] - kPayloadBlocks);
+
+	ASSERT_EQ(mounted.Unmount(0), 0);
+	SaveDataDeleteLayout deletion {};
+	deletion.dir_name = &slot_names[0];
+	ASSERT_EQ(delete_save(&deletion), 0);
+	EXPECT_FALSE(std::filesystem::exists(payload_path));
+	SaveDataMount3Layout recreate {};
+	recreate.dir_name = &slot_names[0];
+	recreate.blocks = 96u;
+	recreate.mount_mode = 0x30u;
+	SaveDataMountResultLayout recreated_result {};
+	ASSERT_EQ(mount3(&recreate, &recreated_result), 0);
+	mounted.Track(0, recreated_result.mount_point);
+	EXPECT_EQ(recreated_result.mount_status, 1u);
+	const auto recreated = read_mount_info(recreated_result.mount_point);
+	EXPECT_EQ(recreated.blocks, 96u);
+	EXPECT_EQ(recreated.free_blocks, 96u);
+	const auto recreated_search = search_slot(slot_names[0]);
+	EXPECT_EQ(recreated_search.blocks, 96u);
+	EXPECT_EQ(recreated_search.free_blocks, 96u);
+	const auto other_after_delete = read_mount_info(mount_points[1]);
+	EXPECT_EQ(other_after_delete.blocks, kRequestedBlocks[1]);
+	EXPECT_EQ(other_after_delete.free_blocks, kRequestedBlocks[1]);
+
+	// A directory created before allocations were recorded mounts and enumerates
+	// by its usage instead of failing.
+	ASSERT_EQ(mounted.Unmount(1), 0);
+	SaveDataDirName unrecorded_name {};
+	std::memcpy(unrecorded_name.data, "ut-capacity-unrecorded", 23);
+	const auto unrecorded_payload = title_root / unrecorded_name.data / "payload.bin";
+	std::filesystem::create_directories(unrecorded_payload.parent_path());
+	std::ofstream(unrecorded_payload, std::ios::binary).write(reinterpret_cast<const char*>(payload.data()), 100);
+	const auto unrecorded_search = search_slot(unrecorded_name);
+	EXPECT_EQ(unrecorded_search.blocks, 1u);
+	EXPECT_EQ(unrecorded_search.free_blocks, 0u);
+	SaveDataMount3Layout unrecorded_open {};
+	unrecorded_open.dir_name   = &unrecorded_name;
+	unrecorded_open.mount_mode = 1u;
+	SaveDataMountResultLayout unrecorded_result {};
+	ASSERT_EQ(mount3(&unrecorded_open, &unrecorded_result), 0);
+	mounted.Track(1, unrecorded_result.mount_point);
+	const auto unrecorded_info = read_mount_info(unrecorded_result.mount_point);
+	EXPECT_EQ(unrecorded_info.blocks, 1u);
+	EXPECT_EQ(unrecorded_info.free_blocks, 0u);
 }
 
 TEST(EmulatorSaveData, Mount2CreatesMissingDirectoryForCreateIfMissingMode)
@@ -471,18 +725,33 @@ TEST(EmulatorSaveData, Mount2CreatesMissingDirectoryForCreateIfMissingMode)
 	ASSERT_NE(mount2, nullptr);
 
 	constexpr char     kDirectory[] = "ut-mount2-cim";
-	const auto         save_root    = std::filesystem::temp_directory_path() / "kyty-savedata-mount2-test";
+	// The parent owns a unique directory; a threadsafe death-test child must
+	// inherit that same path so the parent can verify persistence afterward.
+	std::unique_ptr<ScopedTestDirectory> owned_directory;
+	std::filesystem::path save_root;
+	if (::testing::internal::InDeathTestChild())
+	{
+		const char* inherited = std::getenv("KYTY_SAVEDATA_DIR");
+		ASSERT_NE(inherited, nullptr);
+		save_root = inherited;
+	} else
+	{
+		owned_directory = std::make_unique<ScopedTestDirectory>("savedata-mount2");
+		save_root = owned_directory->Path();
+	}
+	ASSERT_FALSE(save_root.empty());
 	ScopedSaveDataRoot scoped_root(save_root);
 	const auto         host_path      = Libs::SaveData::SaveDataBuildTitleRoot(save_root, nullptr) / kDirectory;
 	const auto         host_utf8      = host_path.u8string();
 	const String       host_directory = String::FromUtf8(host_utf8.c_str());
-	Core::File::DeleteDirectories(host_directory);
+	ASSERT_FALSE(Core::File::IsDirectoryExisting(host_directory));
 
 	Libs::SaveData::SaveDataDirName dir_name {};
 	std::memcpy(dir_name.data, kDirectory, sizeof(kDirectory));
 	SaveDataMount2Layout mount {};
 	mount.user_id    = 0;
 	mount.dir_name   = &dir_name;
+	mount.blocks     = 80;
 	mount.mount_mode = 0x30;
 	EXPECT_EXIT(
 	    {
@@ -496,8 +765,6 @@ TEST(EmulatorSaveData, Mount2CreatesMissingDirectoryForCreateIfMissingMode)
 	    },
 	    ::testing::ExitedWithCode(0), "");
 	EXPECT_TRUE(Core::File::IsDirectoryExisting(host_directory));
-
-	Core::File::DeleteDirectories(host_directory);
 }
 
 TEST(EmulatorSaveData, GetEventResultReportsEmptyQueue)

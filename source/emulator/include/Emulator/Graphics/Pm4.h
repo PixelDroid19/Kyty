@@ -104,6 +104,7 @@ constexpr uint32_t R_RELEASE_MEM      = 0x18;
 // Custom AGC DmaData builder (sceAgcDcbDmaData / sceAgcAcbDmaData). Packet is
 // IT_NOP + this register; CP copies guest bytes when src/dst are memory.
 constexpr uint32_t R_DMA_DATA         = 0x19;
+constexpr uint32_t R_CONTEXT_STATE    = 0x1A;
 
 constexpr uint32_t R_NUM = 0x3F + 1;
 
@@ -395,6 +396,8 @@ constexpr uint32_t SPI_BARYC_CNTL         = 0x1B8;
 constexpr uint32_t SPI_TMPRING_SIZE       = 0x1BA;
 constexpr uint32_t SPI_SHADER_IDX_FORMAT  = 0x1C2;
 constexpr uint32_t SPI_SHADER_POS_FORMAT  = 0x1C3;
+constexpr uint32_t SPI_SHADER_POS_FORMAT_POS1_SHIFT = 4;
+constexpr uint32_t SPI_SHADER_POS_FORMAT_POS1_MASK  = 0xf;
 constexpr uint32_t SPI_SHADER_Z_FORMAT    = 0x1C4;
 constexpr uint32_t SPI_SHADER_COL_FORMAT  = 0x1C5;
 
@@ -538,6 +541,10 @@ constexpr uint32_t PA_SU_SC_MODE_CNTL_PERSP_CORR_DIS_MASK            = 0x1;
 
 constexpr uint32_t PA_CL_VTE_CNTL               = 0x206;
 constexpr uint32_t PA_CL_VS_OUT_CNTL            = 0x207;
+constexpr uint32_t PA_CL_VS_OUT_CNTL_USE_VTX_RENDER_TARGET_INDX_SHIFT = 18;
+constexpr uint32_t PA_CL_VS_OUT_CNTL_USE_VTX_VIEWPORT_INDX_SHIFT      = 19;
+constexpr uint32_t PA_CL_VS_OUT_CNTL_USE_VTX_KILL_FLAG_SHIFT          = 20;
+constexpr uint32_t PA_CL_VS_OUT_CNTL_VS_OUT_MISC_VEC_ENA_SHIFT        = 21;
 constexpr uint32_t PA_SU_SMALL_PRIM_FILTER_CNTL = 0x20C;
 constexpr uint32_t PA_CL_OBJPRIM_ID_CNTL        = 0x20D;
 constexpr uint32_t PA_STEREO_CNTL               = 0x210;
@@ -906,6 +913,7 @@ constexpr uint32_t SPI_SHADER_USER_DATA_GS_15      = 0x9B;
 constexpr uint32_t SPI_SHADER_USER_ACCUM_ESGS_0    = 0xB2;
 constexpr uint32_t SPI_SHADER_PGM_LO_ES            = 0xC8;
 constexpr uint32_t SPI_SHADER_PGM_HI_ES            = 0xC9;
+constexpr uint32_t SPI_SHADER_PGM_RSRC1_ES         = 0xCA;
 constexpr uint32_t SPI_SHADER_PGM_CHKSUM_HS        = 0x100;
 constexpr uint32_t SPI_SHADER_PGM_RSRC4_HS         = 0x101;
 constexpr uint32_t SPI_SHADER_USER_DATA_ADDR_LO_HS = 0x102;

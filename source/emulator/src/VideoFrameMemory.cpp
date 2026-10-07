@@ -1,5 +1,6 @@
 #include "Emulator/VideoFrameMemory.h"
 
+#include <cerrno>
 #include <mutex>
 
 namespace Kyty::Emulator::VideoFrameMemory {
@@ -11,12 +12,14 @@ Callbacks  g_callbacks {};
 
 bool callbacks_are_empty(const Callbacks& callbacks)
 {
-	return callbacks.register_linear_frame == nullptr && callbacks.unregister_frame == nullptr && callbacks.notify_host_write == nullptr;
+	return callbacks.register_linear_frame == nullptr && callbacks.unregister_frame == nullptr && callbacks.notify_host_write == nullptr &&
+	       callbacks.begin_host_write == nullptr && callbacks.end_host_write == nullptr;
 }
 
 bool callbacks_are_complete(const Callbacks& callbacks)
 {
-	return callbacks.register_linear_frame != nullptr && callbacks.unregister_frame != nullptr && callbacks.notify_host_write != nullptr;
+	return callbacks.register_linear_frame != nullptr && callbacks.unregister_frame != nullptr && callbacks.notify_host_write != nullptr &&
+	       ((callbacks.begin_host_write == nullptr) == (callbacks.end_host_write == nullptr));
 }
 
 Callbacks copy_callbacks()
@@ -64,6 +67,28 @@ void NotifyHostWrite(uint64_t base, uint64_t size)
 	{
 		callbacks.notify_host_write(base, size);
 	}
+}
+
+HostWriteLease::HostWriteLease(uint64_t base, uint64_t size)
+{
+	const int saved_errno = errno;
+	const auto callbacks = copy_callbacks();
+	if (callbacks.begin_host_write != nullptr)
+	{
+		m_end = callbacks.end_host_write;
+		m_token = callbacks.begin_host_write(base, size);
+	} else if (callbacks.notify_host_write != nullptr)
+	{
+		callbacks.notify_host_write(base, size);
+	}
+	errno = saved_errno;
+}
+
+HostWriteLease::~HostWriteLease()
+{
+	const int saved_errno = errno;
+	if (m_end != nullptr) { m_end(m_token); }
+	errno = saved_errno;
 }
 
 } // namespace Kyty::Emulator::VideoFrameMemory

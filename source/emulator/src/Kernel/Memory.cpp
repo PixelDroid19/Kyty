@@ -26,6 +26,10 @@
 namespace Kyty::Kernel::Memory {
 
 namespace VirtualMemory = Core::VirtualMemory;
+
+// sceKernelMap* flags (BSD mmap layout): MAP_FIXED and MAP_NO_OVERWRITE.
+constexpr int kMapFixed       = 0x10;
+constexpr int kMapNoOverwrite = 0x80;
 KERNEL_LIB_NAME();
 
 static bool is_representable_range(uint64_t addr, uint64_t size)
@@ -193,7 +197,7 @@ public:
 	{
 		for (const auto& mapping: m_mapped)
 		{
-			(void)VirtualMemory::Free(mapping.map_vaddr);
+			(void)VirtualMemory::FreeRange(mapping.map_vaddr, mapping.map_size);
 		}
 		VirtualMemory::DestroySharedBacking(m_backing);
 	}
@@ -211,11 +215,23 @@ public:
 	bool     Alloc(uint64_t search_start, uint64_t search_end, size_t len, size_t alignment, uint64_t* phys_addr_out, int memory_type);
 	bool     Release(uint64_t start, size_t len);
 	bool     FindMappingsForPhysicalRelease(uint64_t start, size_t len, Vector<MappedBlock>* mappings);
-	bool     CanReplaceReleasedMapping(uint64_t vaddr, uint64_t size, uint64_t new_phys_addr, uint64_t new_phys_size);
+	struct MappedView
+	{
+		uint64_t vaddr    = 0;
+		uint64_t size     = 0;
+		bool     released = false;
+	};
+	// Live (not unmapping) views overlapping [vaddr, vaddr + size), in address order.
+	std::vector<MappedView> OverlappingViews(uint64_t vaddr, uint64_t size);
 	uint64_t Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode,
 	             uint64_t alignment, bool fixed, bool replace_owned_reservation, bool* physical_range_valid);
 	bool     ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
 	bool     CompleteUnmap(uint64_t vaddr, uint64_t size);
+	// Unmapping part of one mapping: the claim marks the mapping, the completion
+	// unmaps [cut_vaddr, cut_vaddr + cut_size) and keeps the rest as mappings.
+	bool     ClaimCut(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
+	bool     CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vaddr, uint64_t cut_size);
+	void     AbortCut(uint64_t vaddr, uint64_t size);
 	bool     DecommitRange(uint64_t vaddr, uint64_t size);
 	bool     ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
 	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode, uint64_t* mapping_addr,
@@ -223,6 +239,8 @@ public:
 	bool     Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode,
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
+	uint64_t MapAlias(uint64_t vaddr, uint64_t size);
+	void     FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count);
 	uint64_t TotalAllocatedBytes();
 	void     FillSnapshot(KernelMemorySnapshot* snapshot);
 	bool     FindLargestAvailableSpan(uint64_t search_start, uint64_t search_end, uint64_t alignment, uint64_t* span_start,
@@ -230,17 +248,41 @@ public:
 
 	[[nodiscard]] Core::Mutex&               GetMutex() { return m_mutex; }
 	[[nodiscard]] const Vector<MappedBlock>& GetMappedBlocks() const { return m_mapped; }
+	// The backing outlives every mapping, so the query needs no lock.
+	[[nodiscard]] bool QueryPopulation(VirtualMemory::SharedBackingPopulation* out) const
+	{
+		return VirtualMemory::QuerySharedBackingPopulation(m_backing, out);
+	}
 
 private:
 	static constexpr uint64_t kNextGenAutoMapBegin = 0x2000000000ull;
 	static constexpr uint64_t kNextGenAutoMapEnd   = 0x40000000000ull;
-	[[nodiscard]] bool IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len) const;
+	// Every byte of [start, start + len) belongs to an allocation; adjacent
+	// allocations may share the range. With memory_type, they must also share
+	// one memory type, which is returned.
+	[[nodiscard]] bool IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len, int* memory_type = nullptr) const;
+	// Live views never overlap, so the one holding an address is the nearest
+	// live view at or below it. Titles keep thousands of views; per-address
+	// queries search an index ordered by guest address instead of the list.
+	[[nodiscard]] const MappedBlock* FindLiveViewUnlocked(uint64_t vaddr);
+	void                             AddMappedUnlocked(const MappedBlock& block)
+	{
+		m_mapped.Add(block);
+		m_mapped_order_stale = true;
+	}
+	void RemoveMappedAtUnlocked(uint32_t index)
+	{
+		m_mapped.RemoveAt(index);
+		m_mapped_order_stale = true;
+	}
 
 	// Gen5 releases the physical reservation independently from its virtual mapping.
 	// KernelMunmap owns the mapping and host/GPU cleanup lifecycle.
 	// SharedBacking maps keep re-used physical ranges byte-coherent across aliases.
 	Vector<AllocatedBlock>             m_allocated;
 	Vector<MappedBlock>                m_mapped;
+	std::vector<uint32_t>              m_mapped_order; // m_mapped indices by guest address
+	bool                               m_mapped_order_stale = false;
 	std::vector<MemoryProtectionBlock> m_protections;
 	Core::Mutex                        m_mutex;
 	VirtualMemory::SharedBacking*      m_backing = nullptr;
@@ -278,6 +320,8 @@ public:
 	bool                            Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mode mode, KernelGpuMappingAccessMode gpu_mode);
 	bool                            ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode);
 	bool                            CompleteUnmap(uint64_t vaddr, uint64_t size);
+	// Live (not unmapping) mappings overlapping [vaddr, vaddr + size) as {vaddr, size}.
+	std::vector<std::pair<uint64_t, uint64_t>> OverlappingMappings(uint64_t vaddr, uint64_t size);
 	bool                            ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
 	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode, uint64_t* mapping_addr,
 	                                                uint64_t* mapping_size);
@@ -411,6 +455,23 @@ public:
 		return false;
 	}
 
+	// Parts of reserved blocks inside [addr, addr + size), as {addr, size}.
+	std::vector<std::pair<uint64_t, uint64_t>> OverlappingParts(uint64_t addr, uint64_t size)
+	{
+		std::vector<std::pair<uint64_t, uint64_t>> parts;
+		Core::LockGuard                             lock(m_mutex);
+		for (const auto& block: m_blocks)
+		{
+			const uint64_t start = std::max(addr, block.addr);
+			const uint64_t end   = std::min(addr + size, block.addr + block.size);
+			if (start < end)
+			{
+				parts.emplace_back(start, end - start);
+			}
+		}
+		return parts;
+	}
+
 	bool Contains(uint64_t addr, uint64_t size)
 	{
 		if (size == 0 || addr > std::numeric_limits<uint64_t>::max() - size)
@@ -476,6 +537,15 @@ public:
 			{
 				return false;
 			}
+			// Release only the consumed part. Releasing the whole block and then
+			// re-reserving its remainder leaves a window in which another thread's
+			// host mapping can take the address, and the remainder is lost.
+			if (VirtualMemory::FreeRange(addr, size))
+			{
+				SplitConsumedBlock(index, block, addr, size);
+				return true;
+			}
+			// Hosts without partial release (Windows) re-reserve the remainder.
 			if (!VirtualMemory::Free(block.addr))
 			{
 				EXIT_IF(!VirtualMemory::RegisterDemandRange(addr, size));
@@ -706,15 +776,16 @@ bool PhysicalMemory::Alloc(uint64_t search_start, uint64_t search_end, size_t le
 	return true;
 }
 
-bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len) const
+bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len, int* memory_type) const
 {
 	if (len == 0 || start > std::numeric_limits<uint64_t>::max() - len)
 	{
 		return false;
 	}
 
-	const uint64_t end    = start + len;
-	uint64_t       cursor = start;
+	const uint64_t        end    = start + len;
+	uint64_t              cursor = start;
+	const AllocatedBlock* first  = nullptr;
 	for (const auto& block: m_allocated)
 	{
 		const uint64_t block_end = block.start_addr + block.size;
@@ -722,9 +793,17 @@ bool PhysicalMemory::IsAllocatedRangeCoveredUnlocked(uint64_t start, size_t len)
 		{
 			continue;
 		}
-		if (block.start_addr > cursor)
+		if (block.start_addr > cursor || (memory_type != nullptr && first != nullptr && block.memory_type != first->memory_type))
 		{
 			return false;
+		}
+		if (first == nullptr)
+		{
+			first = &block;
+			if (memory_type != nullptr)
+			{
+				*memory_type = block.memory_type;
+			}
 		}
 		cursor = std::min(end, block_end);
 		if (cursor == end)
@@ -774,12 +853,56 @@ bool PhysicalMemory::Release(uint64_t start, size_t len)
 	}
 	m_allocated = std::move(remaining);
 
-	for (auto& mapped: m_mapped)
+	// Only the pages whose memory was released lose their backing. A view the
+	// release covers in part is split, so its other pages stay a live mapping
+	// of memory that is still allocated: a guest that shrinks a buffer by
+	// releasing its tail and maps new memory over that tail keeps its head.
+	std::vector<uint32_t> partial;
+	for (uint32_t index = 0; index < m_mapped.Size(); index++)
 	{
-		if (mapped.phys_addr < end && mapped.phys_addr + mapped.map_size > start)
+		auto& mapped = m_mapped[index];
+		if (mapped.phys_addr >= end || mapped.phys_addr + mapped.map_size <= start)
+		{
+			continue;
+		}
+		const bool covered = mapped.phys_addr >= start && mapped.phys_addr + mapped.map_size <= end;
+		if (covered || mapped.unmap_pending || mapped.physical_released)
 		{
 			mapped.physical_released = true;
+			continue;
 		}
+		partial.push_back(index);
+	}
+	std::vector<MappedBlock> pieces;
+	for (auto index = partial.rbegin(); index != partial.rend(); ++index)
+	{
+		const MappedBlock original = m_mapped[*index];
+		RemoveMappedAtUnlocked(*index);
+		const uint64_t original_end = original.phys_addr + original.map_size;
+		const uint64_t cut_begin    = std::max(original.phys_addr, start);
+		const uint64_t cut_end      = std::min(original_end, end);
+		const auto     piece        = [&](uint64_t phys_begin, uint64_t phys_end, bool released)
+		{
+			MappedBlock part       = original;
+			part.phys_addr         = phys_begin;
+			part.map_vaddr         = original.map_vaddr + (phys_begin - original.phys_addr);
+			part.map_size          = phys_end - phys_begin;
+			part.physical_released = released;
+			pieces.push_back(part);
+		};
+		if (original.phys_addr < cut_begin)
+		{
+			piece(original.phys_addr, cut_begin, false);
+		}
+		piece(cut_begin, cut_end, true);
+		if (cut_end < original_end)
+		{
+			piece(cut_end, original_end, false);
+		}
+	}
+	for (const auto& part: pieces)
+	{
+		AddMappedUnlocked(part);
 	}
 
 	const bool still_mapped = std::any_of(m_mapped.begin(), m_mapped.end(), [start, end](const MappedBlock& mapped)
@@ -816,27 +939,23 @@ bool PhysicalMemory::FindMappingsForPhysicalRelease(uint64_t start, size_t len, 
 	return true;
 }
 
-bool PhysicalMemory::CanReplaceReleasedMapping(uint64_t vaddr, uint64_t size, uint64_t new_phys_addr, uint64_t new_phys_size)
+std::vector<PhysicalMemory::MappedView> PhysicalMemory::OverlappingViews(uint64_t vaddr, uint64_t size)
 {
-	if (!is_representable_range(vaddr, size) || !is_representable_range(new_phys_addr, new_phys_size))
+	std::vector<MappedView> views;
+	if (!is_representable_range(vaddr, size))
 	{
-		return false;
+		return views;
 	}
-
 	Core::LockGuard lock(m_mutex);
-	const bool      new_range_allocated = std::any_of(m_allocated.begin(), m_allocated.end(),
-	                                                  [new_phys_addr, new_phys_size](const AllocatedBlock& block)
-	                                                  {
-		                                             return new_phys_addr >= block.start_addr && new_phys_size <= block.size &&
-		                                                    new_phys_addr - block.start_addr <= block.size - new_phys_size;
-	                                                  });
-	if (!new_range_allocated)
+	for (const auto& block: m_mapped)
 	{
-		return false;
+		if (!block.unmap_pending && block.map_vaddr < vaddr + size && vaddr < block.map_vaddr + block.map_size)
+		{
+			views.push_back({block.map_vaddr, block.map_size, block.physical_released});
+		}
 	}
-
-	return std::any_of(m_mapped.begin(), m_mapped.end(), [vaddr, size](const MappedBlock& block)
-	                   { return block.map_vaddr == vaddr && block.map_size == size && block.physical_released && !block.unmap_pending; });
+	std::sort(views.begin(), views.end(), [](const MappedView& a, const MappedView& b) { return a.vaddr < b.vaddr; });
+	return views;
 }
 
 uint64_t PhysicalMemory::TotalAllocatedBytes()
@@ -988,11 +1107,11 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 		return 0;
 	}
 
-	const uint64_t map_size   = len;
-	const auto     allocation = std::find_if(
-	    m_allocated.begin(), m_allocated.end(), [phys_addr, map_size](const auto& block)
-	    { return phys_addr >= block.start_addr && map_size <= block.size && phys_addr - block.start_addr <= block.size - map_size; });
-	if (allocation == m_allocated.end())
+	// A mapping may span physically adjacent allocations (titles allocate in
+	// chunks and map larger windows), as long as every byte is allocated.
+	const uint64_t map_size    = len;
+	int            memory_type = 0;
+	if (!IsAllocatedRangeCoveredUnlocked(phys_addr, map_size, &memory_type))
 	{
 		return 0;
 	}
@@ -1055,9 +1174,9 @@ uint64_t PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len, int
 	b.map_size         = map_size;
 	b.prot             = prot;
 	b.mode             = mode;
-	b.memory_type      = allocation->memory_type;
+	b.memory_type      = memory_type;
 	b.gpu_cleanup_mode = gpu_mode;
-	m_mapped.Add(b);
+	AddMappedUnlocked(b);
 	m_protections.push_back({map_vaddr, map_size, prot, mode});
 
 	return map_vaddr;
@@ -1126,15 +1245,17 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 		{
 			const uint64_t phys_addr = b.phys_addr;
 			const uint64_t map_size  = b.map_size;
-			if (!VirtualMemory::Free(vaddr))
+			// A view may be one piece of a host mapping that a partial physical
+			// release split; free exactly its pages.
+			if (!VirtualMemory::FreeRange(vaddr, size))
 			{
 				b.unmap_pending = false;
 				return false;
 			}
-			m_mapped.RemoveAt(index);
-			m_protections.erase(std::remove_if(m_protections.begin(), m_protections.end(), [vaddr, size](const MemoryProtectionBlock& block)
-			                                   { return block.address >= vaddr && block.address - vaddr < size; }),
-			                    m_protections.end());
+			RemoveMappedAtUnlocked(index);
+			// Trim, not only drop, the protection blocks: one recorded for a whole
+			// mapping still covers its other pieces when a piece goes alone.
+			remove_protection_blocks(&m_protections, vaddr, size);
 
 			// If the physical reservation was already released (Gen5 unmap after
 			// Release) and no alias maps remain, drop the host pages.
@@ -1169,6 +1290,108 @@ bool PhysicalMemory::CompleteUnmap(uint64_t vaddr, uint64_t size)
 	return false;
 }
 
+// Removes [start, end) from protection blocks, splitting a block that spans it.
+static void erase_protection_span(std::vector<MemoryProtectionBlock>* blocks, uint64_t start, uint64_t end)
+{
+	std::vector<MemoryProtectionBlock> kept;
+	for (const auto& block: *blocks)
+	{
+		const uint64_t block_end = block.address + block.size;
+		if (block_end <= start || block.address >= end)
+		{
+			kept.push_back(block);
+			continue;
+		}
+		if (block.address < start)
+		{
+			kept.push_back({block.address, start - block.address, block.prot, block.mode});
+		}
+		if (block_end > end)
+		{
+			kept.push_back({end, block_end - end, block.prot, block.mode});
+		}
+	}
+	*blocks = std::move(kept);
+}
+
+bool PhysicalMemory::ClaimCut(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
+{
+	EXIT_IF(gpu_mode == nullptr);
+	Core::LockGuard lock(m_mutex);
+	for (auto& b: m_mapped)
+	{
+		if (b.map_vaddr == vaddr && b.map_size == size && !b.unmap_pending)
+		{
+			*gpu_mode       = b.gpu_cleanup_mode;
+			b.unmap_pending = true;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool PhysicalMemory::CompleteCut(uint64_t vaddr, uint64_t size, uint64_t cut_vaddr, uint64_t cut_size)
+{
+	Core::LockGuard lock(m_mutex);
+	for (uint32_t index = 0; index < m_mapped.Size(); index++)
+	{
+		auto& b = m_mapped[index];
+		if (b.map_vaddr != vaddr || b.map_size != size || !b.unmap_pending)
+		{
+			continue;
+		}
+		if (!VirtualMemory::FreeRange(cut_vaddr, cut_size))
+		{
+			b.unmap_pending = false;
+			return false;
+		}
+		const MappedBlock original = b;
+		RemoveMappedAtUnlocked(index);
+		const uint64_t cut_end = cut_vaddr + cut_size;
+		const uint64_t end     = vaddr + size;
+		if (cut_vaddr > vaddr)
+		{
+			MappedBlock left   = original;
+			left.map_size      = cut_vaddr - vaddr;
+			left.unmap_pending = false;
+			AddMappedUnlocked(left);
+		}
+		if (cut_end < end)
+		{
+			MappedBlock right   = original;
+			right.map_vaddr     = cut_end;
+			right.map_size      = end - cut_end;
+			right.phys_addr     = original.phys_addr + (cut_end - vaddr);
+			right.unmap_pending = false;
+			AddMappedUnlocked(right);
+		}
+		erase_protection_span(&m_protections, cut_vaddr, cut_end);
+		const uint64_t cut_phys    = original.phys_addr + (cut_vaddr - vaddr);
+		const bool     allocated   = std::any_of(m_allocated.begin(), m_allocated.end(), [&](const AllocatedBlock& a)
+                                               { return cut_phys < a.start_addr + a.size && a.start_addr < cut_phys + cut_size; });
+		const bool     still_shown = std::any_of(m_mapped.begin(), m_mapped.end(), [&](const MappedBlock& m)
+                                                 { return cut_phys < m.phys_addr + m.map_size && m.phys_addr < cut_phys + cut_size; });
+		if (!allocated && !still_shown)
+		{
+			(void)VirtualMemory::DiscardSharedBackingRange(m_backing, cut_phys, cut_size);
+		}
+		return true;
+	}
+	return false;
+}
+
+void PhysicalMemory::AbortCut(uint64_t vaddr, uint64_t size)
+{
+	Core::LockGuard lock(m_mutex);
+	for (auto& b: m_mapped)
+	{
+		if (b.map_vaddr == vaddr && b.map_size == size)
+		{
+			b.unmap_pending = false;
+		}
+	}
+}
+
 bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 {
 	if (!is_representable_range(vaddr, size))
@@ -1193,7 +1416,7 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 			return false;
 		}
 
-		m_mapped.RemoveAt(index);
+		RemoveMappedAtUnlocked(index);
 		const uint64_t prefix_size = vaddr - mapping.map_vaddr;
 		const uint64_t end         = vaddr + size;
 		const uint64_t mapping_end = mapping.map_vaddr + mapping.map_size;
@@ -1201,7 +1424,7 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 		{
 			auto prefix     = mapping;
 			prefix.map_size = prefix_size;
-			m_mapped.Add(prefix);
+			AddMappedUnlocked(prefix);
 		}
 		if (end < mapping_end)
 		{
@@ -1209,7 +1432,7 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 			suffix.phys_addr += end - mapping.map_vaddr;
 			suffix.map_vaddr = end;
 			suffix.map_size  = mapping_end - end;
-			m_mapped.Add(suffix);
+			AddMappedUnlocked(suffix);
 		}
 		remove_protection_blocks(&m_protections, vaddr, size);
 		return true;
@@ -1221,6 +1444,92 @@ bool PhysicalMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, Vi
 {
 	Core::LockGuard lock(m_mutex);
 	return apply_protection_blocks(&m_protections, vaddr, size, prot, mode);
+}
+
+// Maps a read-write view of the backing pages behind [vaddr, vaddr + size) at
+// a host-chosen address. The view shares bytes with the guest mapping and
+// ignores its protection, which the dirty-page tracker may have lowered.
+uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size)
+{
+	if (size == 0)
+	{
+		return 0;
+	}
+	Core::LockGuard    lock(m_mutex);
+	const MappedBlock* live = FindLiveViewUnlocked(vaddr);
+	if (live != nullptr && size <= live->map_size && vaddr - live->map_vaddr <= live->map_size - size)
+	{
+		return VirtualMemory::MapSharedAligned(m_backing, 0, live->phys_addr + (vaddr - live->map_vaddr), size,
+		                                       VirtualMemory::Mode::ReadWrite, VirtualMemory::GetPageSize());
+	}
+	for (const auto& mapping: m_mapped)
+	{
+		if (vaddr < mapping.map_vaddr || size > mapping.map_size || vaddr - mapping.map_vaddr > mapping.map_size - size)
+		{
+			continue;
+		}
+		// CPU protection segments can split one physical mapping. The alias
+		// follows its backing bytes and must remain independent of those rights.
+		const uint64_t offset = mapping.phys_addr + (vaddr - mapping.map_vaddr);
+		return VirtualMemory::MapSharedAligned(m_backing, 0, offset, size, VirtualMemory::Mode::ReadWrite,
+		                                       VirtualMemory::GetPageSize());
+	}
+	return 0;
+}
+
+void PhysicalMemory::FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count)
+{
+	std::vector<VirtualMemory::SharedBackingSpan> backing_spans;
+	std::vector<size_t>                           owners;
+	Core::LockGuard                               lock(m_mutex);
+	for (size_t i = 0; i < count; i++)
+	{
+		auto& span       = spans[i];
+		span.unpopulated = false;
+		if (span.vaddr == 0 || span.size == 0 || span.vaddr > UINT64_MAX - (span.size - 1u))
+		{
+			continue;
+		}
+		const MappedBlock* mapping = FindLiveViewUnlocked(span.vaddr);
+		if (mapping == nullptr || span.size > mapping->map_size || span.vaddr - mapping->map_vaddr > mapping->map_size - span.size ||
+		    span.vaddr - mapping->map_vaddr > UINT64_MAX - mapping->phys_addr)
+		{
+			continue;
+		}
+		backing_spans.push_back({mapping->phys_addr + (span.vaddr - mapping->map_vaddr), span.size});
+		owners.push_back(i);
+	}
+	VirtualMemory::FindUnpopulatedSharedBackingSpans(m_backing, backing_spans.data(), backing_spans.size());
+	for (size_t i = 0; i < owners.size(); i++)
+	{
+		spans[owners[i]].unpopulated = backing_spans[i].unpopulated;
+	}
+}
+
+const PhysicalMemory::MappedBlock* PhysicalMemory::FindLiveViewUnlocked(uint64_t vaddr)
+{
+	if (m_mapped_order_stale)
+	{
+		m_mapped_order.resize(m_mapped.Size());
+		for (uint32_t index = 0; index < m_mapped.Size(); index++)
+		{
+			m_mapped_order[index] = index;
+		}
+		std::stable_sort(m_mapped_order.begin(), m_mapped_order.end(),
+		                 [this](uint32_t a, uint32_t b) { return m_mapped[a].map_vaddr < m_mapped[b].map_vaddr; });
+		m_mapped_order_stale = false;
+	}
+	auto next = std::upper_bound(m_mapped_order.begin(), m_mapped_order.end(), vaddr,
+	                             [this](uint64_t address, uint32_t index) { return address < m_mapped[index].map_vaddr; });
+	while (next != m_mapped_order.begin())
+	{
+		const MappedBlock& mapping = m_mapped[*--next];
+		if (!mapping.unmap_pending)
+		{
+			return vaddr - mapping.map_vaddr < mapping.map_size ? &mapping : nullptr;
+		}
+	}
+	return nullptr;
 }
 
 bool PhysicalMemory::Find(uint64_t phys_addr, bool next, AllocatedBlock* out)
@@ -1268,13 +1577,18 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                       std::find_if(m_protections.begin(), m_protections.end(), [vaddr](const MemoryProtectionBlock& block)
 			                                    { return vaddr >= block.address && vaddr - block.address < block.size; });
 			                   const bool has_protection = protection != m_protections.end();
+			                   // A region never extends past its mapping, whatever protection block covers it.
+			                   const uint64_t region_begin = has_protection ? std::max(protection->address, b.map_vaddr) : b.map_vaddr;
+			                   const uint64_t region_end   = has_protection
+			                                                     ? std::min(protection->address + protection->size, b.map_vaddr + b.map_size)
+			                                                     : b.map_vaddr + b.map_size;
 			                   if (base_addr != nullptr)
 			                   {
-				                   *base_addr = has_protection ? protection->address : b.map_vaddr;
+				                   *base_addr = region_begin;
 			                   }
 			                   if (len != nullptr)
 			                   {
-				                   *len = has_protection ? protection->size : b.map_size;
+				                   *len = region_end - region_begin;
 			                   }
 			                   if (prot != nullptr)
 			                   {
@@ -1290,7 +1604,7 @@ bool PhysicalMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                   }
 			                   if (phys_addr != nullptr)
 			                   {
-				                   *phys_addr = b.phys_addr + ((has_protection ? protection->address : b.map_vaddr) - b.map_vaddr);
+				                   *phys_addr = b.phys_addr + (region_begin - b.map_vaddr);
 			                   }
 			                   if (memory_type != nullptr)
 			                   {
@@ -1319,6 +1633,20 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, int prot, VirtualMemory::Mo
 	m_allocated_total += len;
 
 	return true;
+}
+
+std::vector<std::pair<uint64_t, uint64_t>> FlexibleMemory::OverlappingMappings(uint64_t vaddr, uint64_t size)
+{
+	std::vector<std::pair<uint64_t, uint64_t>> mappings;
+	Core::LockGuard                             lock(m_mutex);
+	for (const auto& b: m_allocated)
+	{
+		if (!b.unmap_pending && b.map_vaddr < vaddr + size && vaddr < b.map_vaddr + b.map_size)
+		{
+			mappings.emplace_back(b.map_vaddr, b.map_size);
+		}
+	}
+	return mappings;
 }
 
 bool FlexibleMemory::ClaimUnmap(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode* gpu_mode)
@@ -1421,13 +1749,18 @@ bool FlexibleMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int*
 			                       std::find_if(m_protections.begin(), m_protections.end(), [vaddr](const MemoryProtectionBlock& block)
 			                                    { return vaddr >= block.address && vaddr - block.address < block.size; });
 			                   const bool has_protection = protection != m_protections.end();
+			                   // A region never extends past its mapping, whatever protection block covers it.
+			                   const uint64_t region_begin = has_protection ? std::max(protection->address, b.map_vaddr) : b.map_vaddr;
+			                   const uint64_t region_end   = has_protection
+			                                                     ? std::min(protection->address + protection->size, b.map_vaddr + b.map_size)
+			                                                     : b.map_vaddr + b.map_size;
 			                   if (base_addr != nullptr)
 			                   {
-				                   *base_addr = has_protection ? protection->address : b.map_vaddr;
+				                   *base_addr = region_begin;
 			                   }
 			                   if (len != nullptr)
 			                   {
-				                   *len = has_protection ? protection->size : b.map_size;
+				                   *len = region_end - region_begin;
 			                   }
 			                   if (prot != nullptr)
 			                   {
@@ -1576,7 +1909,7 @@ int32_t KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t le
 			KYTY_LOG_DEBUG("[FlexMap] registering GPU mapping range addr=0x%016" PRIx64 " size=%" PRIu64 "\n", out_addr,
 			       static_cast<uint64_t>(len));
 		}
-		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len));
+		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len, KernelGpuMappingBacking::Flexible));
 	}
 
 	if (g_alloc_callback != nullptr)
@@ -1713,6 +2046,111 @@ static bool complete_pending_mapping_unmap(void* data)
 	return complete_mapping_unmap(*static_cast<const PendingUnmap*>(data));
 }
 
+struct PendingCut
+{
+	uint64_t vaddr     = 0;
+	uint64_t size      = 0;
+	uint64_t cut_vaddr = 0;
+	uint64_t cut_size  = 0;
+};
+
+static bool complete_pending_cut(void* data)
+{
+	EXIT_IF(data == nullptr);
+	const auto* cut = static_cast<const PendingCut*>(data);
+	return g_physical_memory->CompleteCut(cut->vaddr, cut->size, cut->cut_vaddr, cut->cut_size);
+}
+
+// Unmaps the part of the direct mapping {vaddr, size} inside [start, end),
+// keeping the rest mapped, as BSD munmap and fixed maps do.
+static int cut_physical_mapping(uint64_t vaddr, uint64_t size, uint64_t start, uint64_t end)
+{
+	const uint64_t cut_start = std::max(vaddr, start);
+	const uint64_t cut_end   = std::min(vaddr + size, end);
+	PendingCut     cut {vaddr, size, cut_start, cut_end - cut_start};
+	auto           gpu_mode = KernelGpuMappingAccessMode::NoAccess;
+	if (cut_start >= cut_end || !g_physical_memory->ClaimCut(vaddr, size, &gpu_mode))
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	const bool done = gpu_mode == KernelGpuMappingAccessMode::NoAccess
+	                      ? complete_pending_cut(&cut)
+	                      : GetGpuMappingLifecyclePort().ReleaseRange(cut.cut_vaddr, cut.cut_size, complete_pending_cut, &cut);
+	if (!done)
+	{
+		g_physical_memory->AbortCut(vaddr, size);
+		return KERNEL_ERROR_EBUSY;
+	}
+	return OK;
+}
+
+// A munmap range that covers several mappings and reservation blocks (an
+// allocator decommits pieces of a mapping by reserving over them, then frees
+// the whole span) unmaps every piece, as BSD munmap does. A direct mapping
+// that crosses the range edge is cut; a flexible one must lie inside it.
+static int unmap_spanning_range(uint64_t vaddr, uint64_t len)
+{
+	const auto physical = g_physical_memory->OverlappingViews(vaddr, len);
+	const auto flexible = g_flexible_memory->OverlappingMappings(vaddr, len);
+	const auto reserved = g_reserved_memory != nullptr ? g_reserved_memory->OverlappingParts(vaddr, len)
+	                                                   : std::vector<std::pair<uint64_t, uint64_t>> {};
+	if (physical.empty() && flexible.empty() && reserved.empty())
+	{
+		return KERNEL_ERROR_ENOENT;
+	}
+	const auto inside = [vaddr, len](uint64_t start, uint64_t size) { return start >= vaddr && start + size <= vaddr + len; };
+	for (const auto& [start, size]: flexible)
+	{
+		if (!inside(start, size))
+		{
+			return KERNEL_ERROR_EINVAL;
+		}
+	}
+	// Cuts first: they alone can be unsupported by the host, before any change.
+	for (const auto& view: physical)
+	{
+		if (!inside(view.vaddr, view.size))
+		{
+			const int cut = cut_physical_mapping(view.vaddr, view.size, vaddr, vaddr + len);
+			if (cut != OK)
+			{
+				return cut;
+			}
+		}
+	}
+	for (const auto& view: physical)
+	{
+		if (inside(view.vaddr, view.size))
+		{
+			const int unmapped = KernelMunmap(view.vaddr, view.size);
+			if (unmapped != OK)
+			{
+				return unmapped;
+			}
+		}
+	}
+	for (const auto& [start, size]: flexible)
+	{
+		const int unmapped = KernelMunmap(start, size);
+		if (unmapped != OK)
+		{
+			return unmapped;
+		}
+	}
+	for (const auto& [start, size]: reserved)
+	{
+		if (!g_reserved_memory->Consume(start, size))
+		{
+			return KERNEL_ERROR_EINVAL;
+		}
+	}
+	if (g_free_callback != nullptr)
+	{
+		g_free_callback(vaddr, len);
+	}
+	return OK;
+}
+
 int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 {
 	PRINT_NAME();
@@ -1753,10 +2191,9 @@ int KYTY_SYSV_ABI KernelMunmap(uint64_t vaddr, size_t len)
 		// Reserved NoAccess ranges never enter the GPU lifetime graph.
 		result = g_reserved_memory->Consume(vaddr, len);
 	}
-
 	if (!result)
 	{
-		return KERNEL_ERROR_ENOENT;
+		return mapping_claimed ? KERNEL_ERROR_ENOENT : unmap_spanning_range(vaddr, len);
 	}
 
 	if (g_free_callback != nullptr)
@@ -1924,10 +2361,15 @@ static int release_direct_memory(int64_t start, size_t len)
 		{
 			return KERNEL_ERROR_EBUSY;
 		}
+		// Only the view of the released pages loses its contents; the rest of
+		// each mapping stays live (a partial release keeps it mapped).
+		const uint64_t release_end = static_cast<uint64_t>(start) + len;
 		for (const auto& mapping: mappings)
 		{
+			const uint64_t lo = std::max(static_cast<uint64_t>(start), mapping.phys_addr);
+			const uint64_t hi = std::min(release_end, mapping.phys_addr + mapping.map_size);
 			if (mapping.gpu_cleanup_mode != KernelGpuMappingAccessMode::NoAccess &&
-			    !GetGpuMappingLifecyclePort().InvalidateRange(mapping.map_vaddr, mapping.map_size))
+			    !GetGpuMappingLifecyclePort().InvalidateRange(mapping.map_vaddr + (lo - mapping.phys_addr), hi - lo))
 			{
 				return KERNEL_ERROR_EBUSY;
 			}
@@ -1964,6 +2406,71 @@ int KYTY_SYSV_ABI KernelCheckedReleaseDirectMemory(int64_t start, size_t len)
 	return release_direct_memory(start, len);
 }
 
+// Returns [start, end) of the reservation to the guest reservation set.
+static bool restore_reservation(uint64_t start, uint64_t end)
+{
+	return start >= end ||
+	       (g_reserved_memory != nullptr && VirtualMemory::ReserveFixed(start, end - start) && g_reserved_memory->Add(start, end - start));
+}
+
+// A fixed map without NO_OVERWRITE replaces what its range holds, as the BSD
+// kernel does. A released view (its pages may already back another
+// allocation, so no one may use it) is dropped whole and its parts outside the
+// range return to the reservation; the part of a live view inside the range is
+// cut away; reservation parts inside the range are consumed. The range then
+// becomes one reservation the fixed-map transaction consumes. A range already
+// inside one reservation needs none of this.
+static int clear_fixed_map_target(uint64_t vaddr, uint64_t len)
+{
+	const auto views = g_physical_memory->OverlappingViews(vaddr, len);
+	if (views.empty() && (g_reserved_memory == nullptr || g_reserved_memory->Contains(vaddr, len)))
+	{
+		return OK;
+	}
+	// Cuts first: they alone can be unsupported by the host, before any change.
+	for (const auto& view: views)
+	{
+		const bool contained = view.vaddr >= vaddr && view.vaddr + view.size <= vaddr + len;
+		if (!view.released && !contained)
+		{
+			const int cut = cut_physical_mapping(view.vaddr, view.size, vaddr, vaddr + len);
+			if (cut != OK)
+			{
+				return cut;
+			}
+		}
+	}
+	for (const auto& view: views)
+	{
+		const bool contained = view.vaddr >= vaddr && view.vaddr + view.size <= vaddr + len;
+		if (!view.released && !contained)
+		{
+			continue;
+		}
+		const int unmapped = KernelMunmap(view.vaddr, view.size);
+		if (unmapped != OK)
+		{
+			return unmapped;
+		}
+		if (!restore_reservation(view.vaddr, std::min(view.vaddr + view.size, vaddr)) ||
+		    !restore_reservation(std::max(view.vaddr, vaddr + len), view.vaddr + view.size))
+		{
+			return KERNEL_ERROR_EBUSY;
+		}
+	}
+	if (g_reserved_memory != nullptr)
+	{
+		for (const auto& [start, size]: g_reserved_memory->OverlappingParts(vaddr, len))
+		{
+			if (!g_reserved_memory->Consume(start, size))
+			{
+				return KERNEL_ERROR_EBUSY;
+			}
+		}
+	}
+	return restore_reservation(vaddr, vaddr + len) ? OK : KERNEL_ERROR_EBUSY;
+}
+
 int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment)
 {
 	PRINT_NAME();
@@ -1983,9 +2490,8 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	// The fixed-address request is bit 0x10; accept any other flag bits rather than
-	// bailing (PS5 titles pass e.g. 0x11 = fixed + no-overwrite).
-	bool fixed = (flags & 0x10) != 0;
+	// MAP_FIXED is bit 0x10 and MAP_NO_OVERWRITE bit 0x80; other bits are accepted.
+	bool fixed = (flags & kMapFixed) != 0;
 	KYTY_LOG_DEBUG("\t flags        = 0x%x (fixed=%d)\n", flags, fixed ? 1 : 0);
 
 	VirtualMemory::Mode          mode     = VirtualMemory::Mode::NoAccess;
@@ -2010,25 +2516,12 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 		return KERNEL_ERROR_EBUSY;
 	}
 
-	if (fixed && g_physical_memory->CanReplaceReleasedMapping(in_addr, len, static_cast<uint64_t>(direct_memory_start), len))
+	if (fixed && (flags & kMapNoOverwrite) == 0)
 	{
-		const int unmap_result = KernelMunmap(in_addr, len);
-		if (unmap_result != OK)
+		const int cleared = clear_fixed_map_target(in_addr, len);
+		if (cleared != OK)
 		{
-			return unmap_result;
-		}
-
-		// The host range may still belong to a larger guest reservation (notably
-		// Windows' 64 KiB reservation granularity). Restore logical ownership so
-		// the normal fixed-map transaction can replace only this released view.
-		if (g_reserved_memory == nullptr || !VirtualMemory::ReserveFixed(in_addr, len))
-		{
-			return KERNEL_ERROR_EBUSY;
-		}
-		if (!g_reserved_memory->Add(in_addr, len))
-		{
-			EXIT_IF(!VirtualMemory::Free(in_addr));
-			return KERNEL_ERROR_EBUSY;
+			return cleared;
 		}
 	}
 
@@ -2082,7 +2575,7 @@ int KYTY_SYSV_ABI KernelMapDirectMemory(void** addr, size_t len, int prot, int f
 
 	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess)
 	{
-		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len));
+		EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(out_addr, len, KernelGpuMappingBacking::Physical));
 	}
 
 	if (g_alloc_callback != nullptr)
@@ -2175,6 +2668,38 @@ int KYTY_SYSV_ABI KernelQueryMemoryProtection(void* addr, void** start, void** e
 	return OK;
 }
 
+uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size)
+{
+	if (g_physical_memory == nullptr)
+	{
+		return 0;
+	}
+	return g_physical_memory->MapAlias(vaddr, size);
+}
+
+bool KernelUnmapPhysicalAlias(uint64_t alias)
+{
+	return alias != 0 && VirtualMemory::Free(alias);
+}
+
+void KernelFindUnpopulatedPhysicalSpans(KernelPhysicalSpan* spans, size_t count)
+{
+	if (g_physical_memory == nullptr)
+	{
+		for (size_t i = 0; i < count; i++)
+		{
+			spans[i].unpopulated = false;
+		}
+		return;
+	}
+	g_physical_memory->FindUnpopulatedSpans(spans, count);
+}
+
+bool KernelQueryPhysicalPopulation(Core::VirtualMemory::SharedBackingPopulation* out)
+{
+	return g_physical_memory != nullptr && out != nullptr && g_physical_memory->QueryPopulation(out);
+}
+
 bool KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* out)
 {
 	if (out == nullptr || vaddr == 0 || size == 0 || vaddr > UINT64_MAX - (size - 1u) || g_physical_memory == nullptr ||
@@ -2239,19 +2764,17 @@ int KYTY_SYSV_ABI KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, ui
 			return KERNEL_ERROR_EINVAL;
 		}
 
+		// [start, end) is searched as given: an empty range, like a range with no
+		// free span, has no available memory (ENOMEM). Titles split the address space
+		// recursively around each span and stop on ENOMEM.
 		const uint64_t search_start = search_start_raw < 0 ? 0ULL : static_cast<uint64_t>(search_start_raw);
-		uint64_t       search_end   = search_end_raw <= 0 ? direct_size : static_cast<uint64_t>(search_end_raw);
-		search_end                  = std::min(search_end, direct_size);
-		if (search_start >= search_end)
+		const uint64_t search_end   = std::min<uint64_t>(search_end_raw < 0 ? 0 : static_cast<uint64_t>(search_end_raw), direct_size);
+		uint64_t       span_start   = 0;
+		uint64_t       span_length  = 0;
+		if (search_start >= search_end ||
+		    !g_physical_memory->FindLargestAvailableSpan(search_start, search_end, alignment, &span_start, &span_length))
 		{
-			return KERNEL_ERROR_EINVAL;
-		}
-
-		uint64_t span_start  = 0;
-		uint64_t span_length = 0;
-		if (!g_physical_memory->FindLargestAvailableSpan(search_start, search_end, alignment, &span_start, &span_length))
-		{
-			return KERNEL_ERROR_ENOENT;
+			return KERNEL_ERROR_ENOMEM;
 		}
 
 		*out_address = span_start;
@@ -2356,6 +2879,12 @@ int KYTY_SYSV_ABI KernelBatchMap2(void* entries, int entry_count, int* processed
 	}
 
 	return result;
+}
+
+// sceKernelBatchMap places every mapping at its requested address (MAP_FIXED).
+int KYTY_SYSV_ABI KernelBatchMap(void* entries, int entry_count, int* processed_out)
+{
+	return KernelBatchMap2(entries, entry_count, processed_out, kMapFixed);
 }
 
 int KYTY_SYSV_ABI KernelAvailableFlexibleMemorySize(size_t* size)
@@ -2599,6 +3128,8 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 		uint64_t mapping_addr = 0;
 		uint64_t mapping_size = 0;
 		auto     promotion    = g_physical_memory->PromoteGpuRange(aligned_vaddr, aligned_len, gpu_mode, &mapping_addr, &mapping_size);
+		const auto backing    = promotion == KernelGpuMappingPromotionStatus::NotContained ? KernelGpuMappingBacking::Flexible
+		                                                                                     : KernelGpuMappingBacking::Physical;
 		if (promotion == KernelGpuMappingPromotionStatus::NotContained)
 		{
 			promotion = g_flexible_memory->PromoteGpuRange(aligned_vaddr, aligned_len, gpu_mode, &mapping_addr, &mapping_size);
@@ -2610,12 +3141,12 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 		}
 		if (registration_action == KernelGpuMappingRegistrationAction::RegisterOwnerMapping)
 		{
-			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(mapping_addr, mapping_size));
+			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(mapping_addr, mapping_size, backing));
 		} else if (registration_action == KernelGpuMappingRegistrationAction::RegisterProtectedRange)
 		{
 			// Guest-owned mappings outside the physical/flexible records still
 			// need lifecycle registration after their guest protection changes.
-			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(aligned_vaddr, aligned_len));
+			EXIT_IF(!GetGpuMappingLifecyclePort().RegisterRange(aligned_vaddr, aligned_len, KernelGpuMappingBacking::Flexible));
 		}
 	}
 

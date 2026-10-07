@@ -14,6 +14,10 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+#include <cstdlib>
+
+namespace Kyty::Kernel::FileSystem { struct FileStat; }
+
 namespace Kyty::Libs {
 
 class VaList;
@@ -40,6 +44,7 @@ char* KYTY_SYSV_ABI c_strdup(const char* source);
 void* KYTY_SYSV_ABI c_calloc(size_t count, size_t size);
 void* KYTY_SYSV_ABI c_memalign(size_t alignment, size_t size);
 void* KYTY_SYSV_ABI c_realloc(void* ptr, size_t size);
+void* KYTY_SYSV_ABI c_reallocalign(void* ptr, size_t boundary, size_t size);
 void  KYTY_SYSV_ABI c_free(void* ptr);
 void* KYTY_SYSV_ABI c_aligned_alloc(size_t alignment, size_t size);
 int   KYTY_SYSV_ABI c_posix_memalign(void** memptr, size_t alignment, size_t size);
@@ -81,6 +86,8 @@ int  KYTY_SYSV_ABI c_cxa_thread_atexit(cxa_destructor_func_t dtor, void* obj, vo
 // stdio guest shims — host FILE* remains opaque to the guest and mounted paths
 // are translated by the isolated implementation in LibCStdIo.cpp.
 FILE*  KYTY_SYSV_ABI c_fopen(const char* path, const char* mode);
+FILE*  KYTY_SYSV_ABI c_fdopen(int descriptor, const char* mode);
+FILE*  KYTY_SYSV_ABI c_freopen(const char* path, const char* mode, FILE* stream);
 int    KYTY_SYSV_ABI c_fclose(FILE* stream);
 size_t KYTY_SYSV_ABI c_fread(void* ptr, size_t size, size_t count, FILE* stream);
 char*  KYTY_SYSV_ABI c_fgets(char* buffer, int size, FILE* stream);
@@ -92,6 +99,10 @@ int    KYTY_SYSV_ABI c_feof(FILE* stream);
 int    KYTY_SYSV_ABI c_ferror(FILE* stream);
 int    KYTY_SYSV_ABI c_fileno(FILE* stream);
 int    KYTY_SYSV_ABI c_fputc(int character, FILE* stream);
+int    KYTY_SYSV_ABI c_fputs(const char* text, FILE* stream);
+int    KYTY_SYSV_ABI c_fgetc(FILE* stream);
+void   KYTY_SYSV_ABI c_rewind(FILE* stream);
+int    KYTY_SYSV_ABI c_fstat(int descriptor, Kernel::FileSystem::FileStat* status);
 int    KYTY_SYSV_ABI c_remove(const char* path);
 
 // Memory, string and guest UTF-16 shims. Their implementations live in
@@ -111,6 +122,7 @@ uint16_t*          KYTY_SYSV_ABI c_wcsncpy(uint16_t* dst, const uint16_t* src, s
 int                KYTY_SYSV_ABI c_Iswctype(uint32_t character, int character_class);
 int                KYTY_SYSV_ABI c_Wctombx(char* dst, uint32_t character, std::mbstate_t* state, const void* cvtvec);
 int                KYTY_SYSV_ABI c_Mbtowcx(uint16_t* dst, const char* src, size_t count, std::mbstate_t* state, const void* cvtvec);
+int                KYTY_SYSV_ABI c_wcstombs_s(size_t* converted_chars, char* dst, size_t dst_size, const uint16_t* src, size_t max_bytes);
 char*              KYTY_SYSV_ABI c_strcpy(char* dst, const char* src);
 wchar_t*           KYTY_SYSV_ABI c_wmemchr(const wchar_t* src, wchar_t value, size_t count);
 int                KYTY_SYSV_ABI c_wmemcmp(const wchar_t* lhs, const wchar_t* rhs, size_t count);
@@ -127,10 +139,12 @@ int                KYTY_SYSV_ABI c_strcasecmp(const char* lhs, const char* rhs);
 int                KYTY_SYSV_ABI c_strncasecmp(const char* lhs, const char* rhs, size_t count);
 char*              KYTY_SYSV_ABI c_strcat(char* dst, const char* src);
 char*              KYTY_SYSV_ABI c_strncat(char* dst, const char* src, size_t count);
+int                KYTY_SYSV_ABI c_strncat_s(char* dst, size_t dst_size, const char* src, size_t count);
 char*              KYTY_SYSV_ABI c_strpbrk(const char* value, const char* accept);
 char*              KYTY_SYSV_ABI c_strchr(const char* value, int character);
 char*              KYTY_SYSV_ABI c_strrchr(const char* value, int character);
 char*              KYTY_SYSV_ABI c_strstr(const char* value, const char* needle);
+char*              KYTY_SYSV_ABI c_strnstr(const char* value, const char* needle, size_t count);
 char*              KYTY_SYSV_ABI c_getenv(const char* name);
 char*              KYTY_SYSV_ABI c_setlocale(int category, const char* locale);
 unsigned __int128  KYTY_SYSV_ABI c_udivti3(unsigned __int128 numerator, unsigned __int128 denominator);
@@ -152,6 +166,7 @@ KYTY_SYSV_ABI double c_exp(double x);
 KYTY_SYSV_ABI double c_log(double x);
 KYTY_SYSV_ABI double c_pow(double x, double y);
 KYTY_SYSV_ABI double c_powidf2(double x, int y);
+KYTY_SYSV_ABI float  c_powisf2(float x, int y);
 KYTY_SYSV_ABI double c_fmod(double x, double y);
 KYTY_SYSV_ABI double c_ceil(double x);
 KYTY_SYSV_ABI double c_floor(double x);
@@ -165,6 +180,7 @@ KYTY_SYSV_ABI void c_sincos(double x, double* s, double* c);
 KYTY_SYSV_ABI float c_powf(float x, float y);
 KYTY_SYSV_ABI int c_isnanf(float x);
 KYTY_SYSV_ABI int c_isfinitef(float x);
+KYTY_SYSV_ABI int c_isinff(float x);
 KYTY_SYSV_ABI int c_isfinite(double x);
 KYTY_SYSV_ABI int c_isnan(double x);
 KYTY_SYSV_ABI int c_isinf(double x);
@@ -192,7 +208,46 @@ KYTY_SYSV_ABI float c_log2f(float x);
 KYTY_SYSV_ABI float c_exp2f(float x);
 KYTY_SYSV_ABI float c_expf(float x);
 KYTY_SYSV_ABI float c_ldexpf(float x, int e);
+KYTY_SYSV_ABI float c_modff(float x, float* ip);
 KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c);
+
+// LibCStandard.cpp
+KYTY_SYSV_ABI size_t    c_strspn(const char* s, const char* accept);
+KYTY_SYSV_ABI size_t    c_strcspn(const char* s, const char* reject);
+KYTY_SYSV_ABI int       c_strcoll(const char* s1, const char* s2);
+KYTY_SYSV_ABI size_t    c_strnlen_s(const char* s, size_t max_size);
+KYTY_SYSV_ABI uint16_t* c_wcschr(const uint16_t* s, uint16_t c);
+KYTY_SYSV_ABI uint16_t* c_wcsrchr(const uint16_t* s, uint16_t c);
+KYTY_SYSV_ABI uint16_t* c_wcscat(uint16_t* dst, const uint16_t* src);
+KYTY_SYSV_ABI int       c_wcscpy_s(uint16_t* dst, size_t dst_size, const uint16_t* src);
+KYTY_SYSV_ABI int       c_abs(int x);
+KYTY_SYSV_ABI div_t     c_div(int numerator, int denominator);
+KYTY_SYSV_ABI double    c_exp2(double x);
+KYTY_SYSV_ABI float     c_sinhf(float x);
+KYTY_SYSV_ABI float     c_coshf(float x);
+KYTY_SYSV_ABI float     c_tanhf(float x);
+KYTY_SYSV_ABI float     c_asinhf(float x);
+KYTY_SYSV_ABI float     c_acoshf(float x);
+KYTY_SYSV_ABI float     c_atanhf(float x);
+KYTY_SYSV_ABI float     c_cbrtf(float x);
+KYTY_SYSV_ABI float     c_fmaf(float x, float y, float z);
+KYTY_SYSV_ABI long      c_lrint(double x);
+KYTY_SYSV_ABI long      c_lrintf(float x);
+KYTY_SYSV_ABI double    c_nan(const char* tag);
+KYTY_SYSV_ABI float     c_nanf(const char* tag);
+KYTY_SYSV_ABI void*     c_localeconv();
+KYTY_SYSV_ABI float     c_wcstof(const uint16_t* s, uint16_t** end);
+KYTY_SYSV_ABI double    c_wcstod(const uint16_t* s, uint16_t** end);
+KYTY_SYSV_ABI int64_t   c_wcstol(const uint16_t* s, uint16_t** end, int base);
+KYTY_SYSV_ABI uint64_t  c_wcstoul(const uint16_t* s, uint16_t** end, int base);
+KYTY_SYSV_ABI int64_t   c_wcstoll(const uint16_t* s, uint16_t** end, int base);
+KYTY_SYSV_ABI uint64_t  c_wcstoull(const uint16_t* s, uint16_t** end, int base);
+KYTY_SYSV_ABI double    c_scalbln(double x, long exponent);
+KYTY_SYSV_ABI float     c_scalbnf(float x, int exponent);
+KYTY_SYSV_ABI double    c_Sinh(double x, double y);
+KYTY_SYSV_ABI double    c_Cosh(double x, double y);
+KYTY_SYSV_ABI float     c_FSinh(float x, float y);
+KYTY_SYSV_ABI float     c_FCosh(float x, float y);
 
 } // namespace LibC
 
@@ -215,6 +270,12 @@ void* KYTY_SYSV_ABI LibcMspaceCalloc(void* msp, size_t nelem, size_t size);
 int  KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats);
 int  KYTY_SYSV_ABI LibcMallocStatsFast(void* stats);
 void KYTY_SYSV_ABI LibcMspaceFree(void* msp, void* ptr);
+int  KYTY_SYSV_ABI LibcMspaceMallocStats(void* msp, void* stats);
+KYTY_SYSV_ABI int   LibcMspaceDestroy(void* msp);
+KYTY_SYSV_ABI void* LibcMspaceRealloc(void* msp, void* ptr, size_t size);
+KYTY_SYSV_ABI void* LibcMspaceReallocalign(void* msp, void* ptr, size_t boundary, size_t size);
+KYTY_SYSV_ABI void* LibcMspaceAlignedAlloc(void* msp, size_t alignment, size_t size);
+KYTY_SYSV_ABI int   LibcMspacePosixMemalign(void* msp, void** ptr, size_t boundary, size_t size);
 
 } // namespace LibcInternal
 

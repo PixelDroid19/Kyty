@@ -38,3 +38,16 @@ contract.
 opening/tutorial flow used to reproduce the first playable room. It is a
 diagnostic route, not a compatibility claim: visual or gameplay acceptance
 still requires a bounded guest run and a captured frame after the route.
+
+The playable runner's external scene/action checkpoint can use `pad_down` with
+an explicit `hold_s` (0.001–30 seconds), followed by `pad_up`. Hold-only milestones
+set `min_pad_taps` to zero and specify the expected `min_guest_read_samples` or
+`min_guest_read_state_samples`; each hold must be observed by a guest pad read.
+Every sequence attempts `pad_clear`, including error exits. Effective input
+acceptance additionally requires the checkpoint's expected native-image response;
+see [graphics captures](graphics-captures.md#playable-scene-and-action-checkpoints).
+
+Keyboard and active physical-controller button holds have separate ownership.
+Releasing or disconnecting one source preserves a button held by the other,
+including its transition history. Stick axes retain active-controller priority;
+script and agent overlays continue to merge after the host state.

@@ -2,13 +2,16 @@
 
 #include "GraphicsRenderInternal.h"
 
+#include "Kyty/Agent/Json.h"
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/Threads.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Agent/EventRing.h"
 #include "Emulator/Graphics/DebugStats.h"
+#include "Emulator/Graphics/DiagnosticDump.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -17,6 +20,8 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/SampleLocations.h"
+#include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderProgramSnapshot.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
@@ -24,11 +29,15 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include <array>
+#include <atomic>
 #include <chrono>
+#include <mutex>
 #include <cinttypes>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -54,7 +63,685 @@ const char* VulkanSubmitKindName(VulkanSubmitKind kind)
 	return "unknown";
 }
 
+std::string OptionalUnsigned(bool known, uint64_t value)
+{
+	return known ? std::to_string(value) : std::string("null");
+}
+
+std::string SubmitFaultContextJson(const VulkanSubmitAttempt& context)
+{
+	const bool guest = context.has_guest_context;
+	return "\"queue\":" + std::to_string(context.queue) + ",\"slot\":" + std::to_string(context.command_buffer_slot) +
+	       ",\"host_sequence\":" + OptionalUnsigned(context.has_host_submission, context.host_submission_sequence) +
+	       ",\"guest_submit\":" + OptionalUnsigned(guest, context.guest_submit) +
+	       ",\"presented_frame\":" + std::to_string(context.presented_frame) +
+	       ",\"pm4_op\":" + OptionalUnsigned(guest, context.pm4_op) + ",\"pm4_dw\":" + OptionalUnsigned(guest, context.pm4_dw);
+}
+
+std::string SubmitFaultAttemptJson(const VulkanSubmitAttempt& entry)
+{
+	return "{\"attempt\":" + std::to_string(entry.attempt) + ",\"kind\":" +
+	       ::Kyty::Agent::JsonString(VulkanSubmitKindName(entry.kind)) + ',' + SubmitFaultContextJson(entry) +
+	       ",\"semaphore\":" + (entry.signals_semaphore ? "true" : "false") +
+	       ",\"completed\":" + (entry.completed ? "true" : "false") +
+	       ",\"result\":" + std::to_string(static_cast<int>(entry.result)) + '}';
+}
+
+std::string SubmitFaultReportJson(const char* stage, VkResult result, const VulkanSubmitAttemptSnapshot& snapshot,
+                                 const VulkanSubmitAttempt* immediate, const VulkanSubmitAttempt* context)
+{
+	char bounded_stage[65] {};
+	std::snprintf(bounded_stage, sizeof(bounded_stage), "%.64s", stage != nullptr ? stage : "unknown");
+	std::string report = "{\"schema\":\"vulkan_submit_fault\",\"version\":2,\"stage\":" +
+	                     ::Kyty::Agent::JsonString(bounded_stage) + ",\"result\":" + std::to_string(static_cast<int>(result)) +
+	                     ",\"count\":" + std::to_string(snapshot.count) + ",\"dropped\":" + std::to_string(snapshot.dropped) +
+	                     ",\"completed_means\":\"submit_return_not_fence\",\"immediate_tracked\":" +
+	                     (immediate != nullptr && immediate->attempt != 0u ? "true" : "false") +
+	                     ",\"immediate\":" + (immediate != nullptr ? SubmitFaultAttemptJson(*immediate) : "null") +
+	                     ",\"command_buffer_context\":" + (context != nullptr ? '{' + SubmitFaultContextJson(*context) + '}' : "null") +
+	                     ",\"entries\":[";
+	for (uint32_t i = 0; i < snapshot.count; ++i)
+	{
+		if (i != 0u)
+		{
+			report += ',';
+		}
+		report += SubmitFaultAttemptJson(snapshot.entries[i]);
+	}
+	return report + "]}\n";
+}
+
+const char* WriteSubmitFaultReport(const char* stage, VkResult result, const VulkanSubmitAttemptSnapshot& snapshot,
+                                  const VulkanSubmitAttempt* immediate, const VulkanSubmitAttempt* context)
+{
+	const char* path = std::getenv("KYTY_SUBMIT_FAULT_REPORT");
+	if (path == nullptr || path[0] == '\0')
+	{
+		return "disabled";
+	}
+	const auto report = SubmitFaultReportJson(stage, result, snapshot, immediate, context);
+	if (report.size() > 8192u)
+	{
+		return "size_limit";
+	}
+	// Explicit process-local scratch path only. Never overwrite earlier evidence
+	// or follow an existing FIFO/symlink, and never retry the fatal operation.
+	auto* file = std::fopen(path, "wbx");
+	if (file == nullptr)
+	{
+		return "open_failed";
+	}
+	const bool written = std::fwrite(report.data(), 1, report.size(), file) == report.size();
+	const bool closed = std::fclose(file) == 0;
+	return written && closed ? "written" : "write_failed";
+}
+
+void PublishSubmitFaultEvent(VkResult result, const VulkanSubmitAttemptSnapshot& snapshot, const char* report_status,
+                             const char* draws_status, const VulkanSubmitAttempt* context)
+{
+	char message[Emulator::Agent::kAgentEventMessageMax] {};
+	if (context != nullptr)
+	{
+		const auto sequence = OptionalUnsigned(context->has_host_submission, context->host_submission_sequence);
+		std::snprintf(message, sizeof(message), "result=%d report=%s queue=%" PRIu32 " slot=%" PRIu32 " host_sequence=%s draws=%s",
+		              static_cast<int>(result), report_status, context->queue, context->command_buffer_slot, sequence.c_str(),
+		              draws_status);
+	} else
+	{
+		std::snprintf(message, sizeof(message), "result=%d report=%s count=%" PRIu32 " dropped=%" PRIu64 " draws=%s",
+		              static_cast<int>(result), report_status, snapshot.count, snapshot.dropped, draws_status);
+	}
+	Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Fatal, "device_lost", message);
+}
+
+constexpr uint32_t kRecentDrawDefaultCapacity = 64;
+
+std::atomic<uint64_t> g_skipped_invalid_vertex_shader {0};
+std::atomic<uint64_t> g_skipped_unsupported_ge_state {0};
+
+std::string WriteProgramSnapshotReport(const char* directory, const char* name, const ShaderProgramSnapshot& snapshot,
+                                      DiagnosticDumpWriter& writer)
+{
+	const auto status = snapshot.words.empty() ? DiagnosticDumpStatus::InvalidData :
+	    writer.Write(directory, name, snapshot.words.data(), snapshot.words.size() * sizeof(uint32_t));
+	return "{\"snapshot\":" + ::Kyty::Agent::JsonString(ShaderProgramSnapshotStatusName(snapshot.status)) +
+	       ",\"mapped_bytes\":" + std::to_string(snapshot.mapped_bytes) +
+	       ",\"captured_bytes\":" + std::to_string(snapshot.words.size() * sizeof(uint32_t)) +
+	       ",\"file\":" + ::Kyty::Agent::JsonString(name) +
+	       ",\"write\":" + ::Kyty::Agent::JsonString(DiagnosticDumpStatusName(status)) + '}';
+}
+
+std::string WriteSkippedProgramReport(const char* directory, const char* name, uint64_t address)
+{
+	return WriteProgramSnapshotReport(directory, name, ShaderSnapshotMappedProgram(address), DiagnosticDumpProcessWriter());
+}
+
+// Opt-in KYTY_SKIPPED_DRAW_REPORT=<prefix>: the first skip of each reason is
+// written once to <prefix>-<reason>.json with exclusive creation, so the
+// evidence survives an event ring that later rolls over.
+void WriteSkippedDrawReport(const char* reason, const char* detail, const GraphicsSkippedGeState* ge_state)
+{
+	const char* prefix = std::getenv("KYTY_SKIPPED_DRAW_REPORT");
+	if (prefix == nullptr || prefix[0] == '\0')
+	{
+		return;
+	}
+	const std::string path = std::string(prefix) + "-" + reason + ".json";
+	if (path.size() > 1023u)
+	{
+		return;
+	}
+	auto* file = std::fopen(path.c_str(), "wbx");
+	if (file == nullptr)
+	{
+		return;
+	}
+	const auto presented_frame = WindowGetPresentedFrameNum();
+	char bounded_detail[161] {};
+	std::snprintf(bounded_detail, sizeof(bounded_detail), "%.160s", detail != nullptr ? detail : "");
+	std::string programs = "null";
+	const char* program_directory = std::getenv("KYTY_SKIPPED_SHADER_DUMP");
+	if (ge_state != nullptr && program_directory != nullptr && program_directory[0] != '\0')
+	{
+		programs = "{\"es\":" + WriteSkippedProgramReport(program_directory, "skipped-ge-es.bin", ge_state->es_program) +
+		           ",\"gs_back\":" + WriteSkippedProgramReport(program_directory, "skipped-ge-gs-back.bin", ge_state->gs_back_program) + '}';
+	}
+	const std::string report = "{\"schema\":\"guest_draw_skipped\",\"version\":2,\"reason\":" + ::Kyty::Agent::JsonString(reason) +
+	                           ",\"detail\":" + ::Kyty::Agent::JsonString(bounded_detail) +
+	                           ",\"ge_state\":" + (ge_state != nullptr ? GraphicsSkippedGeStateJson(*ge_state) : "null") +
+	                           ",\"program_snapshots\":" + programs +
+	                           ",\"presented_frame\":" + std::to_string(presented_frame) + "}\n";
+	if (report.size() <= 8192u)
+	{
+		(void)std::fwrite(report.data(), 1, report.size(), file);
+	}
+	(void)std::fclose(file);
+}
+
+thread_local VulkanRecentDrawPacket g_recent_draw_packet;
+
+const char* VulkanRecentDrawKindName(VulkanRecentDrawKind kind)
+{
+	switch (kind)
+	{
+		case VulkanRecentDrawKind::DrawIndexed: return "draw_indexed";
+		case VulkanRecentDrawKind::Draw: return "draw";
+		case VulkanRecentDrawKind::Dispatch: return "dispatch";
+	}
+	return "unknown";
+}
+
+std::string OptionalChecksum(bool known, uint64_t value)
+{
+	if (!known)
+	{
+		return "null";
+	}
+	char data[24] {};
+	std::snprintf(data, sizeof(data), "\"0x%016" PRIx64 "\"", value);
+	return data;
+}
+
+bool NativeWaveInputSensitive(const ShaderNativeWaveInfo& wave)
+{
+	switch (wave.proof)
+	{
+		case ShaderNativeWaveProof::ExactSubgroup:
+		case ShaderNativeWaveProof::QuadLocal:
+		case ShaderNativeWaveProof::FragmentNeutral32: return true;
+		case ShaderNativeWaveProof::Unclassified:
+		case ShaderNativeWaveProof::LaneLocal: return false;
+	}
+	return false;
+}
+
+std::string NativeWaveDrawJson(const GraphicsNativeWaveDrawInfo& draw)
+{
+	return "{\"count\":" + OptionalUnsigned(draw.count.has_value(), draw.count.value_or(0)) +
+	       ",\"indexed\":" + (draw.indexed.has_value() ? (*draw.indexed ? "true" : "false") : "null") +
+	       ",\"index_type\":" + OptionalUnsigned(draw.index_type.has_value(), draw.index_type.value_or(0)) +
+	       ",\"first_instance\":" + OptionalUnsigned(draw.first_instance.has_value(), draw.first_instance.value_or(0)) +
+	       ",\"instance_count\":" + OptionalUnsigned(draw.instance_count.has_value(), draw.instance_count.value_or(0)) +
+	       ",\"index_address\":" + OptionalChecksum(draw.index_address.has_value(), draw.index_address.value_or(0)) +
+	       ",\"vertex_offset_add\":" + (draw.vertex_offset_add ? std::to_string(*draw.vertex_offset_add) : "null") +
+	       ",\"draw_modifier\":" + OptionalChecksum(draw.draw_modifier.has_value(), draw.draw_modifier.value_or(0)) +
+	       ",\"primitive_type\":" + OptionalUnsigned(draw.primitive_type.has_value(), draw.primitive_type.value_or(0)) +
+	       ",\"index_offset\":" + OptionalUnsigned(draw.index_offset.has_value(), draw.index_offset.value_or(0)) + '}';
+}
+
+std::string NativeWaveInputMetadataJson(const GraphicsSkippedGeState& state, const ShaderNativeWaveInfo& wave,
+                                        uint32_t requested_subgroup_size, const GraphicsNativeWaveDrawInfo& draw)
+{
+	char bounded_reason[162] {};
+	std::snprintf(bounded_reason, sizeof(bounded_reason), "%.161s", wave.refusal_reason != nullptr ? wave.refusal_reason : "");
+	const bool reason_truncated = std::strlen(bounded_reason) > 160u;
+	bounded_reason[160] = '\0';
+	return "{\"schema\":\"native_wave_input\",\"version\":1,\"stage\":\"vertex\","
+	       "\"recorded_means\":\"input_observed_not_admitted_or_executed\",\"native_wave\":{\"guest_wave_size\":" +
+	       std::to_string(wave.guest_wave_size) + ",\"proof\":" + std::to_string(static_cast<uint32_t>(wave.proof)) +
+	       ",\"requested_subgroup_size\":" + std::to_string(requested_subgroup_size) +
+	       ",\"refusal_pc\":" + std::to_string(wave.refusal_pc) +
+	       ",\"refusal_reason\":" + (wave.refusal_reason != nullptr ? ::Kyty::Agent::JsonString(bounded_reason) : "null") +
+	       ",\"refusal_reason_truncated\":" + (reason_truncated ? "true" : "false") +
+	       "},\"draw\":" + NativeWaveDrawJson(draw) + ",\"ge_state\":" + GraphicsSkippedGeStateJson(state);
+}
+
+std::string RecentDrawArgumentsJson(const VulkanRecentDraw& draw)
+{
+	const bool dispatch = draw.kind == VulkanRecentDrawKind::Dispatch;
+	if (dispatch)
+	{
+		return ",\"primitive\":null,\"count\":null,\"instances\":null,\"vertex_offset\":null,\"first_instance\":null,\"groups\":[" +
+		       std::to_string(draw.groups[0]) + ',' + std::to_string(draw.groups[1]) + ',' + std::to_string(draw.groups[2]) + ']';
+	}
+	return ",\"primitive\":" + std::to_string(draw.primitive_type) + ",\"count\":" + std::to_string(draw.count) +
+	       ",\"instances\":" + std::to_string(draw.instances) + ",\"vertex_offset\":" + std::to_string(draw.vertex_offset) +
+	       ",\"first_instance\":" + std::to_string(draw.first_instance) + ",\"groups\":null";
+}
+
+std::string RecentDrawJson(const VulkanRecentDraw& draw)
+{
+	const bool dispatch = draw.kind == VulkanRecentDrawKind::Dispatch;
+	// recorded is the only stage this record proves by itself; later stages are
+	// joined from the same host submission and stay null until observed.
+	return "{\"record\":" + std::to_string(draw.record) + ",\"kind\":" + ::Kyty::Agent::JsonString(VulkanRecentDrawKindName(draw.kind)) +
+	       ",\"queue\":" + std::to_string(draw.queue) + ",\"slot\":" + std::to_string(draw.command_buffer_slot) +
+	       ",\"host_sequence\":" + OptionalUnsigned(draw.has_host_submission, draw.host_submission_sequence) +
+	       ",\"guest_submit\":" + std::to_string(draw.guest_submit) + ",\"pm4_op\":" + OptionalUnsigned(draw.has_pm4, draw.pm4_op) +
+	       ",\"pm4_dw\":" + OptionalUnsigned(draw.has_pm4, draw.pm4_dw) + ",\"vs\":" + OptionalChecksum(!dispatch, draw.vs_checksum) +
+	       ",\"ps\":" + OptionalChecksum(!dispatch, draw.ps_checksum) + ",\"cs\":" + OptionalChecksum(dispatch, draw.cs_checksum) +
+	       RecentDrawArgumentsJson(draw) + ",\"host_commands\":" + std::to_string(draw.host_commands) +
+	       ",\"recorded\":true,\"submit_called\":" + (draw.submit_called ? "true" : "null") +
+	       ",\"submit_result\":" + (draw.submit_returned ? std::to_string(static_cast<int>(draw.submit_result)) : "null") +
+	       ",\"gpu_completed\":" + (draw.fence_completed ? "true" : "null") + '}';
+}
+
+uint32_t RecentDrawCapacityFromEnvironment()
+{
+	const char* value = std::getenv("KYTY_RECENT_DRAW_CAPACITY");
+	if (value == nullptr || value[0] == '\0')
+	{
+		return kRecentDrawDefaultCapacity;
+	}
+	char*      end    = nullptr;
+	const auto parsed = std::strtoul(value, &end, 10);
+	const bool valid  = value[0] >= '0' && value[0] <= '9' && *end == '\0' && parsed >= 1u &&
+	                   parsed <= VulkanRecentDrawTrail::CAPACITY_MAX;
+	return valid ? static_cast<uint32_t>(parsed) : 0u;
+}
+
+VulkanRecentDrawFault MakeRecentDrawFault(const char* stage, VkResult result, const VulkanSubmitAttempt* context)
+{
+	VulkanRecentDrawFault fault;
+	fault.stage  = stage;
+	fault.result = result;
+	if (context != nullptr)
+	{
+		fault.has_context         = true;
+		fault.queue               = context->queue;
+		fault.command_buffer_slot = context->command_buffer_slot;
+		fault.has_host_submission = context->has_host_submission;
+		fault.host_sequence       = context->host_submission_sequence;
+	}
+	return fault;
+}
+
+const char* WriteRecentDrawFaultReport(const char* stage, VkResult result, const VulkanSubmitAttempt* context,
+                                      const VulkanFaultSnapshot& snapshot)
+{
+	if (snapshot.draw_capacity == 0u)
+	{
+		return "disabled";
+	}
+	const auto report = VulkanRecentDrawReportJson(MakeRecentDrawFault(stage, result, context), snapshot.draw_capacity,
+	                                               snapshot.draws.data(), snapshot.draw_count, snapshot.draw_dropped, snapshot.skipped);
+	return VulkanWriteRecentDrawReport(std::getenv("KYTY_RECENT_DRAW_REPORT"), report);
+}
+
 } // namespace
+
+std::string VulkanRecentDrawReportJson(const VulkanRecentDrawFault& fault, uint32_t capacity, const VulkanRecentDraw* draws,
+                                       uint32_t count, uint64_t dropped, const GraphicsSkippedDrawCounts& skipped)
+{
+	char bounded_stage[65] {};
+	std::snprintf(bounded_stage, sizeof(bounded_stage), "%.64s", fault.stage != nullptr ? fault.stage : "unknown");
+	const std::string context =
+	    fault.has_context ? "{\"queue\":" + std::to_string(fault.queue) + ",\"slot\":" + std::to_string(fault.command_buffer_slot) +
+	                            ",\"host_sequence\":" + OptionalUnsigned(fault.has_host_submission, fault.host_sequence) + '}'
+	                      : std::string("null");
+	std::string report = "{\"schema\":\"vulkan_recent_draws\",\"version\":1,\"recorded_means\":\"command_recorded_not_executed\""
+	                     ",\"gpu_completed_means\":\"command_buffer_fence_observed_signaled\",\"stage\":" +
+	                     ::Kyty::Agent::JsonString(bounded_stage) + ",\"result\":" + std::to_string(static_cast<int>(fault.result)) +
+	                     ",\"capacity\":" + std::to_string(capacity) + ",\"count\":" + std::to_string(count) +
+	                     ",\"dropped\":" + std::to_string(dropped) + ",\"skipped_draws\":{\"invalid_vertex_shader\":" +
+	                     std::to_string(skipped.invalid_vertex_shader) +
+	                     ",\"unsupported_ge_state\":" + std::to_string(skipped.unsupported_ge_state) +
+	                     "},\"command_buffer_context\":" + context + ",\"draws\":[";
+	for (uint32_t i = 0; i < count && draws != nullptr; ++i)
+	{
+		if (i != 0u)
+		{
+			report += ',';
+		}
+		report += RecentDrawJson(draws[i]);
+		if (report.size() > RECENT_DRAW_REPORT_BYTES_MAX)
+		{
+			return {};
+		}
+	}
+	report += "]}\n";
+	return report.size() <= RECENT_DRAW_REPORT_BYTES_MAX ? report : std::string {};
+}
+
+const char* VulkanWriteRecentDrawReport(const char* path, const std::string& report)
+{
+	if (path == nullptr || path[0] == '\0')
+	{
+		return "disabled";
+	}
+	if (report.empty())
+	{
+		return "size_limit";
+	}
+	// Same evidence policy as the submit-fault report: exclusive creation, no
+	// overwrite, no retry and no effect on the original fatal path.
+	auto* file = std::fopen(path, "wbx");
+	if (file == nullptr)
+	{
+		return "open_failed";
+	}
+	const bool written = std::fwrite(report.data(), 1, report.size(), file) == report.size();
+	const bool closed  = std::fclose(file) == 0;
+	return written && closed ? "written" : "write_failed";
+}
+
+VulkanRecentDrawTrail* VulkanRecentDrawTraceTrail()
+{
+	static VulkanRecentDrawTrail* trail = []() -> VulkanRecentDrawTrail*
+	{
+		const char* path = std::getenv("KYTY_RECENT_DRAW_REPORT");
+		if (!VulkanSubmitFaultTraceEnabled() || path == nullptr || path[0] == '\0')
+		{
+			return nullptr;
+		}
+		const uint32_t capacity = RecentDrawCapacityFromEnvironment();
+		if (capacity == 0u)
+		{
+			return nullptr;
+		}
+		static VulkanRecentDrawTrail instance(capacity);
+		return &instance;
+	}();
+	return trail;
+}
+
+VulkanRecentDrawPacket VulkanRecentDrawSetPacket(VulkanRecentDrawPacket packet)
+{
+	const auto previous  = g_recent_draw_packet;
+	g_recent_draw_packet = packet;
+	return previous;
+}
+
+void VulkanRecentDrawRecord(const CommandBuffer* buffer, VulkanRecentDraw draw)
+{
+	auto* trail = VulkanRecentDrawTraceTrail();
+	if (trail == nullptr || buffer == nullptr)
+	{
+		return;
+	}
+	buffer->DescribeRecentDrawRecording(&draw);
+	draw.has_pm4 = g_recent_draw_packet.valid;
+	draw.pm4_op  = g_recent_draw_packet.valid ? g_recent_draw_packet.pm4_op : 0u;
+	draw.pm4_dw  = g_recent_draw_packet.valid ? g_recent_draw_packet.pm4_dw : 0u;
+	(void)trail->Record(draw);
+}
+
+std::string GraphicsSkippedGeStateJson(const GraphicsSkippedGeState& s)
+{
+	const auto raw_register = [](const GraphicsGeRawRegister& raw)
+	{
+		return "{\"value\":" + OptionalUnsigned(raw.known, raw.value) +
+		       ",\"written\":" + (raw.written ? "true" : "false") +
+		       ",\"known\":" + (raw.known ? "true" : "false") + '}';
+	};
+	std::string report = "{\"stages\":" + std::to_string(s.stages) +
+	                     ",\"raw_registers\":{\"stages\":" + raw_register(s.stages_raw) +
+	                     ",\"ge_control\":" + raw_register(s.ge_control_raw) +
+	                     ",\"ge_user_vgpr_en\":" + raw_register(s.ge_user_vgpr_raw) +
+	                     ",\"gs_resource1\":" + raw_register(s.gs_resource1_raw) +
+	                     ",\"gs_resource2\":" + raw_register(s.gs_resource2_raw) +
+	                     ",\"gs_resource3\":" + raw_register(s.gs_resource3_raw) + '}' +
+	                     ",\"es_program\":" + OptionalChecksum(true, s.es_program) +
+	                     ",\"gs_back_program\":" + OptionalChecksum(true, s.gs_back_program) +
+	                     ",\"legacy_gs_program\":" + OptionalChecksum(true, s.legacy_gs_program) +
+	                     ",\"gs_checksum\":" + OptionalChecksum(true, s.gs_checksum) +
+	                     ",\"gs_user_data_address\":" + OptionalChecksum(true, s.gs_user_data_address) +
+	                     ",\"es_resource1\":" + std::to_string(s.es_resource1) +
+	                     ",\"gs_resource3\":" + std::to_string(s.gs_resource3) +
+	                     ",\"gs_vgprs\":" + std::to_string(s.gs_vgprs) +
+	                     ",\"gs_sgprs\":" + std::to_string(s.gs_sgprs) +
+	                     ",\"float_mode\":" + std::to_string(s.float_mode) +
+	                     ",\"lds_size\":" + std::to_string(s.lds_size) +
+	                     ",\"es_vgpr_components\":" + std::to_string(s.es_vgpr_components) +
+	                     ",\"gs_vgpr_components\":" + std::to_string(s.gs_vgpr_components) +
+	                     ",\"user_sgpr_count\":" + std::to_string(s.user_sgpr_count) +
+	                     ",\"max_vertex_out\":" + std::to_string(s.max_vertex_out) +
+	                     ",\"output_primitive\":" + std::to_string(s.output_primitive) +
+	                     ",\"ngg_subgroup_control\":" + std::to_string(s.ngg_subgroup_control) +
+	                     ",\"max_output_per_subgroup\":" + std::to_string(s.max_output_per_subgroup) +
+	                     ",\"gs_instance_count\":" + std::to_string(s.gs_instance_count) +
+	                     ",\"gs_onchip_control\":" + std::to_string(s.gs_onchip_control) +
+	                     ",\"esgs_ring_item_size\":" + std::to_string(s.esgs_ring_item_size) +
+	                     ",\"index_format\":" + std::to_string(s.index_format) +
+	                     ",\"primitive_group_size\":" + std::to_string(s.primitive_group_size) +
+	                     ",\"vertex_group_size\":" + std::to_string(s.vertex_group_size) + ",\"user_sgprs\":[";
+	for (size_t i = 0; i < s.user_sgprs.size(); ++i)
+	{
+		if (i != 0u)
+		{
+			report += ',';
+		}
+		report += std::to_string(s.user_sgprs[i]);
+	}
+	report += "],\"output_state\":";
+	if (!s.output_state)
+	{
+		return report + "null}";
+	}
+	const auto& output = *s.output_state;
+	report += "{\"effective_state_means\":\"emulator_state_not_raw_assignment\",\"raw_registers\":{\"vs_out_config\":" +
+	          raw_register(output.vs_out_config_raw) + ",\"position_format\":" + raw_register(output.position_format_raw) +
+	          ",\"output_control\":" + raw_register(output.output_control_raw) +
+	          ",\"output_primitive\":" + raw_register(output.output_primitive_raw) +
+	          "},\"pixel_program\":" + OptionalChecksum(true, output.pixel_program) +
+	          ",\"pixel_checksum\":" + OptionalChecksum(true, output.pixel_checksum) +
+	          ",\"pixel_embedded\":" + (output.pixel_embedded ? "true" : "false") +
+	          ",\"pixel_embedded_id\":" + std::to_string(output.pixel_embedded_id) +
+	          ",\"effective\":{\"vs_out_config\":" + std::to_string(output.vs_out_config) +
+	          ",\"position_format\":" + std::to_string(output.position_format) +
+	          ",\"output_control\":" + std::to_string(output.output_control) +
+	          ",\"output_primitive\":" + std::to_string(output.output_primitive) +
+	          ",\"pixel_input_enable\":" + std::to_string(output.pixel_input_enable) +
+	          ",\"pixel_input_address\":" + std::to_string(output.pixel_input_address) +
+	          ",\"pixel_input_control\":" + std::to_string(output.pixel_input_control) +
+	          ",\"barycentric_control\":" + std::to_string(output.barycentric_control) +
+	          ",\"interpolator_written_mask\":" + std::to_string(output.interpolator_written_mask) + ",\"interpolators\":[";
+	for (size_t i = 0; i < output.interpolators.size(); ++i)
+	{
+		if (i != 0u) { report += ','; }
+		report += std::to_string(output.interpolators[i]);
+	}
+	constexpr std::array<const char*, 11> mode_names = {"cull_front", "cull_back", "face", "poly_mode", "polymode_front_ptype",
+	                                                  "polymode_back_ptype", "poly_offset_front_enable", "poly_offset_back_enable",
+	                                                  "vtx_window_offset_enable", "provoking_vtx_last", "persp_corr_dis"};
+	constexpr std::array<const char*, 12> clip_names = {"user_clip_planes", "user_clip_plane_mode", "dx_clip_space", "vertex_kill_any",
+	                                                  "min_z_clip_disable", "max_z_clip_disable", "user_clip_plane_negate_y", "clip_disable",
+	                                                  "user_clip_plane_cull_only", "cull_on_clipping_error_disable",
+	                                                  "linear_attribute_clip_enable", "force_viewport_index_from_vs_enable"};
+	const auto named_values = [&report](const auto& names, const auto& values)
+	{
+		for (size_t i = 0; i < names.size(); ++i)
+		{
+			if (i != 0u) { report += ','; }
+			report += ::Kyty::Agent::JsonString(names[i]) + ':' + std::to_string(values[i]);
+		}
+	};
+	report += "],\"raster_mode\":{";
+	named_values(mode_names, output.raster_mode);
+	report += "},\"clip_control\":{";
+	named_values(clip_names, output.clip_control);
+	return report + "}}}}";
+}
+
+const char* GraphicsNativeWaveInputReporter::Report(const char* prefix, const char* program_directory,
+                                                   const GraphicsSkippedGeState& state, const ShaderNativeWaveInfo& wave,
+                                                   uint32_t requested_subgroup_size, const GraphicsNativeWaveDrawInfo& draw)
+{
+	if (prefix == nullptr || prefix[0] == '\0')
+	{
+		return "disabled";
+	}
+	if (!NativeWaveInputSensitive(wave))
+	{
+		return "not_wave_sensitive";
+	}
+	if (m_claimed.exchange(true, std::memory_order_relaxed))
+	{
+		return "already_reported";
+	}
+	char path[1024] {};
+	const int length = std::snprintf(path, sizeof(path), "%s-native-wave-input.json", prefix);
+	if (length < 0 || static_cast<size_t>(length) >= sizeof(path))
+	{
+		return "path_too_long";
+	}
+
+	// Own the scalar metadata and both bounded program copies before filesystem
+	// work. No memory lease is held across a write, and a back program is never
+	// replaced with the legacy pseudo-stage address or an unbounded scan.
+	std::string report = NativeWaveInputMetadataJson(state, wave, requested_subgroup_size, draw);
+	const uint64_t es_address = state.es_program;
+	const uint64_t gs_back_address = state.gs_back_program;
+	std::string programs = "null";
+	if (program_directory != nullptr && program_directory[0] != '\0')
+	{
+		const auto capture = [this](uint64_t address)
+		{
+			return m_capture != nullptr ? m_capture(address, kShaderProgramSnapshotBytesMax, m_capture_context) :
+			                              ShaderSnapshotMappedProgram(address, kShaderProgramSnapshotBytesMax);
+		};
+		const auto es = capture(es_address);
+		const auto gs_back = capture(gs_back_address);
+		const auto es_report = WriteProgramSnapshotReport(program_directory, "native-wave-es.bin", es, m_writer);
+		const auto gs_back_report = WriteProgramSnapshotReport(program_directory, "native-wave-gs-back.bin", gs_back, m_writer);
+		programs = "{\"es\":" + es_report + ",\"gs_back\":" + gs_back_report + '}';
+	}
+	report += ",\"program_snapshots\":" + programs + "}\n";
+	if (report.size() > NATIVE_WAVE_REPORT_BYTES_MAX)
+	{
+		return "size_limit";
+	}
+	// The shared report writer creates exclusively and returns the actual write
+	// and close outcome. This does not count a skipped draw or publish an event.
+	return VulkanWriteRecentDrawReport(path, report);
+}
+
+const char* GraphicsReportNativeWaveInput(const GraphicsSkippedGeState& state, const ShaderNativeWaveInfo& wave,
+                                          uint32_t requested_subgroup_size, const GraphicsNativeWaveDrawInfo& draw)
+{
+	const char* prefix = std::getenv("KYTY_NATIVE_WAVE_REPORT");
+	if (prefix == nullptr || prefix[0] == '\0')
+	{
+		return "disabled";
+	}
+	static GraphicsNativeWaveInputReporter reporter(DiagnosticDumpProcessWriter());
+	return reporter.Report(prefix, std::getenv("KYTY_NATIVE_WAVE_SHADER_DUMP"), state, wave, requested_subgroup_size, draw);
+}
+
+namespace {
+
+// Distinct skipped GE programs with their draw counts. The table is bounded:
+// draws of further programs are counted in `overflow`.
+struct SkippedProgramCensusEntry
+{
+	uint64_t gs_checksum     = 0;
+	uint64_t es_program      = 0;
+	uint64_t gs_back_program = 0;
+	uint32_t stages          = 0;
+	uint32_t max_vertex_out  = 0;
+	uint32_t output_primitive = 0;
+	uint32_t primitive_group = 0;
+	uint32_t vertex_group    = 0;
+	uint64_t draws           = 0;
+};
+
+constexpr size_t kSkippedProgramCensusMax = 32;
+
+std::mutex                                                             g_skipped_census_mutex;
+std::array<SkippedProgramCensusEntry, kSkippedProgramCensusMax> g_skipped_census {};
+size_t                                                                 g_skipped_census_size = 0;
+uint64_t                                                               g_skipped_census_overflow = 0;
+
+void CountSkippedProgram(const GraphicsSkippedGeState& state)
+{
+	std::lock_guard<std::mutex> lock(g_skipped_census_mutex);
+	for (size_t i = 0; i < g_skipped_census_size; ++i)
+	{
+		auto& entry = g_skipped_census[i];
+		if (entry.gs_checksum == state.gs_checksum && entry.es_program == state.es_program &&
+		    entry.gs_back_program == state.gs_back_program && entry.stages == state.stages)
+		{
+			++entry.draws;
+			return;
+		}
+	}
+	if (g_skipped_census_size == kSkippedProgramCensusMax)
+	{
+		++g_skipped_census_overflow;
+		return;
+	}
+	g_skipped_census[g_skipped_census_size++] = {state.gs_checksum, state.es_program, state.gs_back_program, state.stages,
+	                                              state.max_vertex_out, state.output_primitive, state.primitive_group_size,
+	                                              state.vertex_group_size, 1u};
+}
+
+// Opt-in KYTY_SKIPPED_DRAW_REPORT=<prefix>: <prefix>-skipped-census.json is
+// rewritten at every milestone with the per-program draw counts seen so far.
+void WriteSkippedProgramCensus()
+{
+	const char* prefix = std::getenv("KYTY_SKIPPED_DRAW_REPORT");
+	if (prefix == nullptr || prefix[0] == '\0')
+	{
+		return;
+	}
+	const std::string path = std::string(prefix) + "-skipped-census.json";
+	if (path.size() > 1023u)
+	{
+		return;
+	}
+	std::string report = "{\"schema\":\"guest_draw_skipped_census\",\"version\":1,\"programs\":[";
+	{
+		std::lock_guard<std::mutex> lock(g_skipped_census_mutex);
+		for (size_t i = 0; i < g_skipped_census_size; ++i)
+		{
+			const auto& e = g_skipped_census[i];
+			char        row[384] {};
+			std::snprintf(row, sizeof(row),
+			              "%s{\"gs_checksum\":\"0x%016llx\",\"es\":\"0x%llx\",\"gs_back\":\"0x%llx\",\"stages\":%u,"
+			              "\"max_vertex_out\":%u,\"output_primitive\":%u,\"primitive_group\":%u,\"vertex_group\":%u,\"draws\":%llu}",
+			              i == 0 ? "" : ",", static_cast<unsigned long long>(e.gs_checksum), static_cast<unsigned long long>(e.es_program),
+			              static_cast<unsigned long long>(e.gs_back_program), e.stages, e.max_vertex_out, e.output_primitive,
+			              e.primitive_group, e.vertex_group, static_cast<unsigned long long>(e.draws));
+			report += row;
+		}
+		report += "],\"overflow\":" + std::to_string(g_skipped_census_overflow) + "}\n";
+	}
+	if (auto* file = std::fopen(path.c_str(), "wb"); file != nullptr)
+	{
+		(void)std::fwrite(report.data(), 1, report.size(), file);
+		(void)std::fclose(file);
+	}
+}
+
+} // namespace
+
+void GraphicsRecordSkippedDraw(GraphicsSkippedDrawReason reason, const char* detail, const GraphicsSkippedGeState* ge_state)
+{
+	const bool invalid_vs = reason == GraphicsSkippedDrawReason::InvalidVertexShader;
+	auto&      counter    = invalid_vs ? g_skipped_invalid_vertex_shader : g_skipped_unsupported_ge_state;
+	const uint64_t count  = counter.fetch_add(1, std::memory_order_relaxed) + 1u;
+	if (ge_state != nullptr)
+	{
+		CountSkippedProgram(*ge_state);
+	}
+	if (!GraphicsSkippedDrawEventDue(count))
+	{
+		return;
+	}
+	WriteSkippedProgramCensus();
+	const char* reason_name = invalid_vs ? "invalid_vertex_shader" : "unsupported_ge_state";
+	char        message[Emulator::Agent::kAgentEventMessageMax] {};
+	if (count == 1u)
+	{
+		std::snprintf(message, sizeof(message), "reason=%s %s", reason_name, detail != nullptr ? detail : "");
+	} else
+	{
+		std::snprintf(message, sizeof(message), "reason=%s count=%llu", reason_name, static_cast<unsigned long long>(count));
+	}
+	Emulator::Agent::EventRing::Instance().Push(Emulator::Agent::EventKind::Warn, "draw_skipped", message);
+	if (count == 1u)
+	{
+		WriteSkippedDrawReport(reason_name, detail, ge_state);
+	}
+}
+
+GraphicsSkippedDrawCounts GraphicsGetSkippedDrawCounts()
+{
+	GraphicsSkippedDrawCounts counts;
+	counts.invalid_vertex_shader = g_skipped_invalid_vertex_shader.load(std::memory_order_relaxed);
+	counts.unsupported_ge_state  = g_skipped_unsupported_ge_state.load(std::memory_order_relaxed);
+	return counts;
+}
 
 bool VulkanSubmitFaultTraceEnabled()
 {
@@ -71,45 +758,47 @@ VulkanSubmitAttemptTrail* VulkanSubmitFaultTraceTrail()
 	return VulkanSubmitFaultTraceEnabled() ? &g_submit_fault_trail : nullptr;
 }
 
-void VulkanSubmitFaultReport(const char* stage, VkResult result, const VulkanSubmitAttempt* immediate)
+bool VulkanLatchFaultSnapshot(VulkanSubmitAttemptTrail* submits, VulkanRecentDrawTrail* draws, VkResult result,
+                              VulkanFaultSnapshot* snapshot)
 {
-	auto* trail = VulkanSubmitFaultTraceTrail();
-	if (trail == nullptr)
+	if (submits == nullptr || snapshot == nullptr || !submits->LatchDeviceLost(result, &snapshot->submits))
 	{
-		return;
+		return false;
 	}
-	VulkanSubmitAttemptSnapshot snapshot;
-	if (!trail->LatchDeviceLost(result, &snapshot))
+	snapshot->draw_capacity = draws != nullptr ? draws->Capacity() : 0u;
+	snapshot->draw_count    = 0u;
+	snapshot->draw_dropped  = 0u;
+	if (draws != nullptr)
+	{
+		snapshot->draw_count = draws->Snapshot(snapshot->draws.data(), snapshot->draw_capacity, &snapshot->draw_dropped);
+	}
+	snapshot->skipped = GraphicsGetSkippedDrawCounts();
+	return true;
+}
+
+void VulkanSubmitFaultReport(const char* stage, VkResult result, const VulkanSubmitAttempt* immediate,
+                             const VulkanSubmitAttempt* command_buffer_context)
+{
+	VulkanFaultSnapshot captured;
+	if (!VulkanLatchFaultSnapshot(VulkanSubmitFaultTraceTrail(), VulkanRecentDrawTraceTrail(), result, &captured))
 	{
 		return;
 	}
 
-	if (immediate != nullptr)
-	{
-		KYTY_LOG_ERROR(
-		    "KYTY_SUBMIT_FAULT stage=%s result=%d count=%" PRIu32 " dropped=%" PRIu64
-		    " immediate_tracked=%d immediate_kind=%s immediate_queue=%" PRIu32 " immediate_slot=%" PRIu32
-		    " immediate_host_sequence=%" PRIu64 " immediate_guest_submit=%" PRIu64 " immediate_frame=%" PRId32
-		    " immediate_pm4_op=%" PRIu32 " immediate_pm4_dw=%" PRIu32 " immediate_semaphore=%d\n",
-		    stage != nullptr ? stage : "unknown", static_cast<int>(result), snapshot.count, snapshot.dropped,
-		    immediate->attempt != 0u ? 1 : 0, VulkanSubmitKindName(immediate->kind), immediate->queue,
-		    immediate->command_buffer_slot, immediate->host_submission_sequence, immediate->guest_submit, immediate->frame,
-		    immediate->pm4_op, immediate->pm4_dw, immediate->signals_semaphore ? 1 : 0);
-	} else
-	{
-		KYTY_LOG_ERROR("KYTY_SUBMIT_FAULT stage=%s result=%d count=%" PRIu32 " dropped=%" PRIu64 "\n",
-		               stage != nullptr ? stage : "unknown", static_cast<int>(result), snapshot.count, snapshot.dropped);
-	}
+	const auto& snapshot      = captured.submits;
+	const auto* context       = command_buffer_context != nullptr ? command_buffer_context : immediate;
+	const char* report_status = WriteSubmitFaultReport(stage, result, snapshot, immediate, command_buffer_context);
+	const char* draws_status  = WriteRecentDrawFaultReport(stage, result, context, captured);
+	PublishSubmitFaultEvent(result, snapshot, report_status, draws_status, context);
+
+	// Console mirror of the JSON report; unknown fields stay null here as well.
+	const auto immediate_json = immediate != nullptr ? SubmitFaultAttemptJson(*immediate) : std::string("null");
+	KYTY_LOG_ERROR("KYTY_SUBMIT_FAULT stage=%s result=%d count=%" PRIu32 " dropped=%" PRIu64 " immediate=%s\n",
+	               stage != nullptr ? stage : "unknown", static_cast<int>(result), snapshot.count, snapshot.dropped,
+	               immediate_json.c_str());
 	for (uint32_t i = 0; i < snapshot.count; ++i)
 	{
-		const auto& entry = snapshot.entries[i];
-		KYTY_LOG_ERROR(
-		    "KYTY_SUBMIT_FAULT_ENTRY attempt=%" PRIu64 " kind=%s queue=%" PRIu32 " slot=%" PRIu32
-		    " host_sequence=%" PRIu64 " guest_submit=%" PRIu64 " frame=%" PRId32 " pm4_op=%" PRIu32 " pm4_dw=%" PRIu32
-		    " semaphore=%d completed=%d result=%d\n",
-		    entry.attempt, VulkanSubmitKindName(entry.kind), entry.queue, entry.command_buffer_slot,
-		    entry.host_submission_sequence, entry.guest_submit, entry.frame, entry.pm4_op, entry.pm4_dw,
-		    entry.signals_semaphore ? 1 : 0, entry.completed ? 1 : 0, static_cast<int>(entry.result));
+		KYTY_LOG_ERROR("KYTY_SUBMIT_FAULT_ENTRY %s\n", SubmitFaultAttemptJson(snapshot.entries[i]).c_str());
 	}
 }
 
@@ -596,15 +1285,51 @@ VulkanSubmitAttempt CommandBuffer::MakeSubmitAttempt(VulkanSubmitKind kind, bool
 {
 	VulkanSubmitAttempt attempt;
 	attempt.kind                     = kind;
+	attempt.has_host_submission      = m_has_submission;
 	attempt.host_submission_sequence = m_has_submission ? m_submission.sequence : 0u;
+	attempt.has_guest_context        = m_has_guest_context;
 	attempt.guest_submit             = m_guest_submit;
 	attempt.queue                    = static_cast<uint32_t>(m_queue);
 	attempt.command_buffer_slot      = m_index;
-	attempt.frame                    = GraphicsRunGetFrameNum();
+	attempt.presented_frame          = WindowGetPresentedFrameNum();
 	attempt.pm4_op                   = m_pm4_op;
 	attempt.pm4_dw                   = m_pm4_dw;
 	attempt.signals_semaphore        = signals_semaphore;
 	return attempt;
+}
+
+void CommandBuffer::ReportSubmitFault(const char* stage, VkResult result) const
+{
+	if (result != VK_ERROR_DEVICE_LOST || !VulkanSubmitFaultTraceEnabled())
+	{
+		return;
+	}
+	const auto context = MakeSubmitAttempt(VulkanSubmitKind::CommandBuffer, false);
+	VulkanSubmitFaultReport(stage, result, nullptr, &context);
+}
+
+void CommandBuffer::MarkRecentDrawsSubmitCalled() const
+{
+	if (auto* trail = VulkanRecentDrawTraceTrail(); trail != nullptr && m_has_submission)
+	{
+		trail->MarkSubmitCalled(static_cast<uint32_t>(m_queue), m_submission.sequence);
+	}
+}
+
+void CommandBuffer::MarkRecentDrawsSubmitReturned(VkResult result) const
+{
+	if (auto* trail = VulkanRecentDrawTraceTrail(); trail != nullptr && m_has_submission)
+	{
+		trail->MarkSubmitReturned(static_cast<uint32_t>(m_queue), m_submission.sequence, result);
+	}
+}
+
+void CommandBuffer::MarkRecentDrawsFenceCompleted() const
+{
+	if (auto* trail = VulkanRecentDrawTraceTrail(); trail != nullptr && m_has_submission)
+	{
+		trail->MarkFenceCompleted(static_cast<uint32_t>(m_queue), m_submission.sequence);
+	}
 }
 
 void CommandBuffer::Execute()
@@ -642,6 +1367,7 @@ void CommandBuffer::Execute()
 	    {
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
+		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
 		                                    &observed);
 	    },
@@ -650,6 +1376,7 @@ void CommandBuffer::Execute()
 		    DebugStatsRecordSubmit();
 		    m_execute = true;
 	    });
+	MarkRecentDrawsSubmitReturned(result);
 	if (result != VK_SUCCESS)
 	{
 		VulkanSubmitFaultReport("queue_submit", result, trail != nullptr ? &observed : nullptr);
@@ -694,6 +1421,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 	    {
 		    EXIT_IF(queue.mutex == nullptr);
 		    Core::LockGuard queue_lock(*queue.mutex);
+		    MarkRecentDrawsSubmitCalled();
 		    return VulkanTraceSubmitAttempt(trail, attempt, [&] { return vkQueueSubmit(queue.vk_queue, 1, &submit_info, fence); },
 		                                    &observed);
 	    },
@@ -702,6 +1430,7 @@ void CommandBuffer::ExecuteWithSemaphore(VkSemaphore signal_semaphore)
 		    DebugStatsRecordSubmit();
 		    m_execute = true;
 	    });
+	MarkRecentDrawsSubmitReturned(result);
 	if (result != VK_SUCCESS)
 	{
 		VulkanSubmitFaultReport("queue_submit_semaphore", result, trail != nullptr ? &observed : nullptr);
@@ -744,11 +1473,12 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 	    [&]
 	    {
 		    DebugStatsRecordSubmissionComplete();
+		    MarkRecentDrawsFenceCompleted();
 		    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
 		    const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
 		    if (fence_reset_result != VK_SUCCESS)
 		    {
-			    VulkanSubmitFaultReport("fence_status_reset", fence_reset_result);
+			    ReportSubmitFault("fence_status_reset", fence_reset_result);
 			    EXIT("vkResetFences failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(fence_reset_result), m_queue,
 			         m_index);
 		    }
@@ -756,7 +1486,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 		        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 		    if (command_reset_result != VK_SUCCESS)
 		    {
-			    VulkanSubmitFaultReport("fence_status_command_reset", command_reset_result);
+			    ReportSubmitFault("fence_status_command_reset", command_reset_result);
 			    EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(command_reset_result),
 			         m_queue, m_index);
 		    }
@@ -768,7 +1498,7 @@ bool CommandBuffer::TryCompleteFenceAndResetWithoutLabelCallbacks()
 	}
 	if (status != VK_SUCCESS)
 	{
-		VulkanSubmitFaultReport("fence_status", status);
+		ReportSubmitFault("fence_status", status);
 		EXIT("vkGetFenceStatus failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(status), m_queue, m_index);
 	}
 	return true;
@@ -789,6 +1519,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 		    [&]
 		    {
 			    DebugStatsRecordSubmissionComplete();
+			    MarkRecentDrawsFenceCompleted();
 			    g_render_ctx->GetVertexClipProbeRenderer()->Complete(this);
 			    if (drain_label_callbacks)
 			    {
@@ -797,7 +1528,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 			    const auto fence_reset_result = vkResetFences(device, 1, &m_pool->fences[m_index]);
 			    if (fence_reset_result != VK_SUCCESS)
 			    {
-				    VulkanSubmitFaultReport("fence_wait_reset", fence_reset_result);
+				    ReportSubmitFault("fence_wait_reset", fence_reset_result);
 				    EXIT("vkResetFences failed: result=%d queue=%d slot=%" PRIu32 "\n", static_cast<int>(fence_reset_result),
 				         m_queue, m_index);
 			    }
@@ -807,7 +1538,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 				        vkResetCommandBuffer(m_pool->buffers[m_index], VK_COMMAND_BUFFER_RESET_RELEASE_RESOURCES_BIT);
 				    if (command_reset_result != VK_SUCCESS)
 				    {
-					    VulkanSubmitFaultReport("fence_wait_command_reset", command_reset_result);
+					    ReportSubmitFault("fence_wait_command_reset", command_reset_result);
 					    EXIT("vkResetCommandBuffer failed: result=%d queue=%d slot=%" PRIu32 "\n",
 					         static_cast<int>(command_reset_result), m_queue, m_index);
 				    }
@@ -819,7 +1550,7 @@ void CommandBuffer::WaitForFence(bool drain_label_callbacks, bool reset_command_
 		if (wait_result != VK_SUCCESS)
 		{
 			const uint64_t sequence = m_has_submission ? m_submission.sequence : 0u;
-			VulkanSubmitFaultReport("fence_wait", wait_result);
+			ReportSubmitFault("fence_wait", wait_result);
 			EXIT("vkWaitForFences failed: result=%d queue=%d slot=%" PRIu32 " sequence=%" PRIu64 " after=%" PRId64 "ns\n",
 			     static_cast<int>(wait_result), m_queue, m_index, sequence, static_cast<int64_t>(wait_ns));
 		}
@@ -876,8 +1607,12 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 			// render pass/pipeline for every animated clear color and stalls loading
 			// on Metal pipeline compilation.
 			const auto& attachment = color->attachment[slot];
+			// The clear value must be decoded with the same format the render
+			// pass/framebuffer bind the attachment as — attachment_format — not
+			// the backing image format. They differ for compatible-view binds
+			// (UNORM image viewed as sRGB, R32 display buffers).
 			const auto clear = ResolveColorAttachmentLoadOps(attachment.vulkan_buffer->layout, attachment.cmask_fast_clear_enable,
-			                                                  attachment.clear_word0, attachment.clear_word1, attachment.vulkan_buffer->format);
+			                                                  attachment.clear_word0, attachment.clear_word1, attachment.attachment_format);
 			clears[clear_attachment].color = {{clear.clear_r, clear.clear_g, clear.clear_b, clear.clear_a}};
 		} else
 		{
@@ -1006,6 +1741,24 @@ void CommandBuffer::BeginRenderPass(VulkanFramebuffer* framebuffer, RenderColorI
 	}
 
 	vkCmdBeginRenderPass(buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
+	for (uint32_t slot = 0; slot < color_count; slot++)
+	{
+		if (!with_color || color->attachment[slot].vulkan_buffer == nullptr ||
+		    color->attachment[slot].vulkan_buffer->type != VulkanImageType::RenderTexture)
+		{
+			continue;
+		}
+		auto* image = static_cast<RenderTextureVulkanImage*>(color->attachment[slot].vulkan_buffer);
+		if (framebuffer->color_load_op[slot] == VK_ATTACHMENT_LOAD_OP_CLEAR &&
+		    extent.width == image->extent.width && extent.height == image->extent.height &&
+		    color->attachment[slot].base_array_layer == 0u && color->attachment[slot].layer_count == 1u)
+		{
+			image->fully_defined_from_clear = true;
+		} else if (framebuffer->color_load_op[slot] == VK_ATTACHMENT_LOAD_OP_DONT_CARE)
+		{
+			image->fully_defined_from_clear = false;
+		}
+	}
 
 	// The render pass final layout is COLOR_ATTACHMENT_OPTIMAL. Keep the
 	// emulator-side tracker in sync so a later sampled use emits the required

@@ -39,7 +39,49 @@ int KYTY_SYSV_ABI CommonDialogIsUsed();
 
 namespace ImeDialog {
 
+// sceImeDialog status and end-status values (distinct from the common-dialog ones).
+constexpr int      STATUS_NONE              = 0;
+constexpr int      STATUS_RUNNING           = 1;
+constexpr int      STATUS_FINISHED          = 2;
+constexpr uint32_t END_STATUS_OK            = 0;
+constexpr uint32_t END_STATUS_USER_CANCELED = 1;
+constexpr uint32_t END_STATUS_ABORTED       = 2;
+
+struct ImeDialogParam
+{
+	int32_t         user_id;
+	uint32_t        type;
+	uint64_t        supported_languages;
+	uint32_t        enter_label;
+	uint32_t        input_method;
+	uint64_t        filter;
+	uint32_t        option;
+	uint32_t        max_text_length;
+	char16_t*       input_text_buffer;
+	float           position_x;
+	float           position_y;
+	uint32_t        horizontal_alignment;
+	uint32_t        vertical_alignment;
+	const char16_t* placeholder;
+	const char16_t* title;
+	int8_t          reserved[16];
+};
+static_assert(sizeof(ImeDialogParam) == 0x60);
+
+struct ImeDialogResult
+{
+	uint32_t end_status;
+	int8_t   reserved[12];
+};
+static_assert(sizeof(ImeDialogResult) == 0x10);
+
+// The emulator has no on-screen keyboard: an opened dialog is confirmed at once
+// with the text the title placed in its buffer, as a user accepting the default.
+int KYTY_SYSV_ABI ImeDialogInit(const ImeDialogParam* param, const void* extended);
 int KYTY_SYSV_ABI ImeDialogGetStatus();
+int KYTY_SYSV_ABI ImeDialogGetResult(ImeDialogResult* result);
+int KYTY_SYSV_ABI ImeDialogAbort();
+int KYTY_SYSV_ABI ImeDialogTerm();
 
 } // namespace ImeDialog
 
@@ -115,6 +157,40 @@ int KYTY_SYSV_ABI MsgDialogProgressBarSetMsg(int target, const char* msg);
 int KYTY_SYSV_ABI MsgDialogProgressBarSetValue(int target, uint32_t value);
 
 } // namespace MsgDialog
+
+namespace SigninDialog {
+
+// Observed caller layout: the structure size (0x10), the user, eight reserved bytes.
+struct SigninDialogParam
+{
+	uint32_t size;
+	int32_t  user_id;
+	uint8_t  reserved[8];
+};
+static_assert(sizeof(SigninDialogParam) == 0x10);
+
+// The caller reads the first word: 0 signed in, 1 canceled by the user, anything else an error.
+constexpr int32_t RESULT_OK            = 0;
+constexpr int32_t RESULT_USER_CANCELED = 1;
+
+struct SigninDialogResult
+{
+	int32_t result;
+	uint8_t reserved[12];
+};
+static_assert(sizeof(SigninDialogResult) == 0x10);
+
+// The emulator has no network account to sign in to: an opened dialog
+// finishes at once as a user dismissing it.
+int KYTY_SYSV_ABI SigninDialogInitialize();
+int KYTY_SYSV_ABI SigninDialogOpen(const SigninDialogParam* param);
+int KYTY_SYSV_ABI SigninDialogGetStatus();
+int KYTY_SYSV_ABI SigninDialogUpdateStatus();
+int KYTY_SYSV_ABI SigninDialogGetResult(SigninDialogResult* result);
+int KYTY_SYSV_ABI SigninDialogClose();
+int KYTY_SYSV_ABI SigninDialogTerminate();
+
+} // namespace SigninDialog
 
 } // namespace Kyty::Libs::Dialog
 

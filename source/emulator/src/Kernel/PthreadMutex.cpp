@@ -131,17 +131,19 @@ int KYTY_SYSV_ABI PthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* 
 		attr = g_pthread_context->GetDefaultMutexattr();
 	}
 
-	*mutex = new PthreadMutexPrivate {};
+	// Publish the handle only once the object is complete: lock paths read it
+	// without the static-object registry lock.
+	auto* created = new PthreadMutexPrivate {};
+	created->name = name;
+	created->type = (*attr)->type;
 
-	(*mutex)->name = name;
-	(*mutex)->type = (*attr)->type;
-
-	int result = pthread_mutex_init(&(*mutex)->p, &(*attr)->p);
+	int result = pthread_mutex_init(&created->p, &(*attr)->p);
 
 	if (name != nullptr)
 	{
-		KYTY_LOG_DEBUG("\tmutex init: %s, %d\n", (*mutex)->name.C_Str(), result);
+		KYTY_LOG_DEBUG("\tmutex init: %s, %d\n", created->name.C_Str(), result);
 	}
+	__atomic_store_n(mutex, created, __ATOMIC_RELEASE);
 
 	switch (result)
 	{
@@ -198,30 +200,34 @@ int KYTY_SYSV_ABI PthreadMutexLock(PthreadMutex* mutex)
 	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* private_mutex = *mutex;
+	if (PthreadMutexHeldByCaller(private_mutex))
 	{
-		std::lock_guard lock(private_mutex->state_mutex);
-		if (private_mutex->recursion_count != 0 && pthread_equal(private_mutex->owner, pthread_self()) != 0)
+		// Error-checking and adaptive mutexes refuse a lock by their owner, as in
+		// the BSD thread library. A title that relocks an adaptive mutex and then
+		// unlocks it once expects it released; counting depth kept it held.
+		if (private_mutex->type == MUTEX_TYPE_ERRORCHECK || private_mutex->type == MUTEX_TYPE_ADAPTIVE)
 		{
-			if (private_mutex->type == MUTEX_TYPE_ERRORCHECK)
-			{
-				return KERNEL_ERROR_EDEADLK;
-			}
-
-			// Some guest runtimes layer normal or adaptive lock calls within one
-			// logical critical section. Keep their depth in the guest object so a
-			// host normal mutex cannot deadlock the owning guest thread.
-			private_mutex->recursion_count++;
-			return OK;
+			return KERNEL_ERROR_EDEADLK;
 		}
+
+		// Some guest runtimes layer normal lock calls within one logical critical
+		// section. Keep their depth in the guest object so a host normal mutex
+		// cannot deadlock the owning guest thread.
+		private_mutex->recursion_count++;
+		return OK;
 	}
 
-	int result = pthread_mutex_lock(&private_mutex->p);
+	// Only a contended lock is recorded as a wait; the uncontended path stays cheap.
+	int result = pthread_mutex_trylock(&private_mutex->p);
+	if (result == EBUSY)
+	{
+		KYTY_GUEST_WAIT(PthreadWaitKind::Mutex, mutex);
+		result = pthread_mutex_lock(&private_mutex->p);
+	}
 
 	if (result == 0)
 	{
-		std::lock_guard lock(private_mutex->state_mutex);
-		private_mutex->owner           = pthread_self();
-		private_mutex->recursion_count = 1;
+		PthreadMutexTakeOwnership(private_mutex);
 	}
 
 	// KYTY_LOG_DEBUG("\tmutex lock: %s, %d\n", (*mutex)->name.C_Str(), result);
@@ -253,26 +259,21 @@ int KYTY_SYSV_ABI PthreadMutexTrylock(PthreadMutex* mutex)
 	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* private_mutex = *mutex;
+	if (PthreadMutexHeldByCaller(private_mutex))
 	{
-		std::lock_guard lock(private_mutex->state_mutex);
-		if (private_mutex->recursion_count != 0 && pthread_equal(private_mutex->owner, pthread_self()) != 0)
+		if (private_mutex->type == MUTEX_TYPE_RECURSIVE)
 		{
-			if (private_mutex->type == MUTEX_TYPE_RECURSIVE)
-			{
-				private_mutex->recursion_count++;
-				return OK;
-			}
-			return KERNEL_ERROR_EBUSY;
+			private_mutex->recursion_count++;
+			return OK;
 		}
+		return KERNEL_ERROR_EBUSY;
 	}
 
 	int result = pthread_mutex_trylock(&private_mutex->p);
 
 	if (result == 0)
 	{
-		std::lock_guard lock(private_mutex->state_mutex);
-		private_mutex->owner           = pthread_self();
-		private_mutex->recursion_count = 1;
+		PthreadMutexTakeOwnership(private_mutex);
 	}
 
 	// KYTY_LOG_DEBUG("\tmutex trylock: %s, %d\n", (*mutex)->name.C_Str(), result);
@@ -303,14 +304,10 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* private_mutex = *mutex;
+	if (PthreadMutexHeldByCaller(private_mutex) && private_mutex->type == MUTEX_TYPE_RECURSIVE)
 	{
-		std::lock_guard lock(private_mutex->state_mutex);
-		if (private_mutex->recursion_count != 0 && pthread_equal(private_mutex->owner, pthread_self()) != 0 &&
-		    private_mutex->type == MUTEX_TYPE_RECURSIVE)
-		{
-			private_mutex->recursion_count++;
-			return OK;
-		}
+		private_mutex->recursion_count++;
+		return OK;
 	}
 
 #ifdef __APPLE__
@@ -327,9 +324,7 @@ int KYTY_SYSV_ABI PthreadMutexTimedlock(PthreadMutex* mutex, KernelUseconds usec
 #endif
 	if (result == 0)
 	{
-		std::lock_guard lock(private_mutex->state_mutex);
-		private_mutex->owner           = pthread_self();
-		private_mutex->recursion_count = 1;
+		PthreadMutexTakeOwnership(private_mutex);
 	}
 	switch (result)
 	{
@@ -362,8 +357,7 @@ int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex)
 	if (*mutex == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 
 	auto* private_mutex = *mutex;
-	std::lock_guard lock(private_mutex->state_mutex);
-	if (private_mutex->recursion_count == 0 || pthread_equal(private_mutex->owner, pthread_self()) == 0)
+	if (!PthreadMutexHeldByCaller(private_mutex))
 	{
 		return KERNEL_ERROR_EPERM;
 	}
@@ -374,11 +368,13 @@ int KYTY_SYSV_ABI PthreadMutexUnlock(PthreadMutex* mutex)
 		return OK;
 	}
 
+	// Drop ownership before the host unlock: the next owner stores its own id
+	// as soon as it acquires the mutex.
+	PthreadMutexDropOwnership(private_mutex);
 	int result = pthread_mutex_unlock(&private_mutex->p);
-	if (result == 0)
+	if (result != 0)
 	{
-		private_mutex->owner           = {};
-		private_mutex->recursion_count = 0;
+		PthreadMutexTakeOwnership(private_mutex);
 	}
 
 	// KYTY_LOG_DEBUG("\tmutex unlock: %s, %d\n", (*mutex)->name.C_Str(), result);
@@ -406,8 +402,7 @@ bool KYTY_SYSV_ABI PthreadMutexCurrentOwns(PthreadMutex* mutex)
 		return false;
 	}
 
-	std::lock_guard lock(private_mutex->state_mutex);
-	return private_mutex->recursion_count != 0 && pthread_equal(private_mutex->owner, pthread_self()) != 0;
+	return PthreadMutexHeldByCaller(private_mutex);
 }
 
 } // namespace Kyty::Kernel

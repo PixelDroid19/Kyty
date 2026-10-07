@@ -92,6 +92,8 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 			decode_ptr = bounded_words;
 		}
 
+		const uint32_t instructions_before = dst->GetInstructions().Size();
+
 		uint32_t words = 0;
 		if ((instruction & 0x80000000u) == 0x00000000)
 		{
@@ -108,6 +110,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 			switch (instruction >> 26u)
 			{
 				case 0x32: words = shader_parse_vintrp(pc, decode_src, decode_ptr, dst, next_gen); break;
+				case 0x33: words = shader_parse_vop3p(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x34:
 					if (next_gen) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: next_gen guard ignored (continuing)\n"); }
 					words = shader_parse_vop3(pc, decode_src, decode_ptr, dst, next_gen);
@@ -117,6 +120,7 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 					words = shader_parse_vop3(pc, decode_src, decode_ptr, dst, next_gen);
 					break;
 				case 0x36: words = shader_parse_ds(pc, decode_src, decode_ptr, dst, next_gen); break;
+				case 0x37: words = shader_parse_flat(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x38: words = shader_parse_mubuf(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x3a: words = shader_parse_mtbuf(pc, decode_src, decode_ptr, dst, next_gen); break;
 				case 0x3c: words = shader_parse_mimg(pc, decode_src, decode_ptr, dst, next_gen); break;
@@ -137,6 +141,10 @@ bool shader_parse_range(const uint32_t* src, const uint32_t* end, ShaderCode* ds
 		if (end != nullptr && words > static_cast<uint32_t>(end - ptr))
 		{
 			return false;
+		}
+		for (uint32_t index = instructions_before; index < dst->GetInstructions().Size(); ++index)
+		{
+			dst->GetInstructions()[index].raw_word = instruction;
 		}
 		ptr += words;
 		if (!dst->GetInstructions().IsEmpty() &&
@@ -181,12 +189,18 @@ void ShaderParse(const uint32_t* src, ShaderCode* dst)
 
 bool ShaderTryParseBounded(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst)
 {
+	return ShaderTryParseBounded(src, code_size_bytes, dst, ShaderParseBoundary::CompleteProgram);
+}
+
+bool ShaderTryParseBounded(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst, ShaderParseBoundary boundary)
+{
 	if (src == nullptr || dst == nullptr || code_size_bytes == 0u || (code_size_bytes & 3u) != 0u)
 	{
 		return false;
 	}
 	uint32_t parsed_words = 0;
-	return shader_parse_range(src, src + code_size_bytes / sizeof(uint32_t), dst, Config::IsNextGen(), false, &parsed_words);
+	return shader_parse_range(src, src + code_size_bytes / sizeof(uint32_t), dst, Config::IsNextGen(),
+	                          boundary == ShaderParseBoundary::RegisteredFront, &parsed_words);
 }
 
 void ShaderParse(const uint32_t* src, uint32_t code_size_bytes, ShaderCode* dst)
@@ -235,8 +249,7 @@ void ShaderParseFusedFront(const uint32_t* src, uint32_t code_size_bytes, Shader
 	{
 		EXIT("invalid or unregistered fused shader code range\n");
 	}
-	uint32_t parsed_words = 0;
-	if (!shader_parse_range(src, src + code_size_bytes / sizeof(uint32_t), dst, Config::IsNextGen(), true, &parsed_words))
+	if (!ShaderTryParseBounded(src, code_size_bytes, dst, ShaderParseBoundary::RegisteredFront))
 	{
 		EXIT("fused shader code range ended without a complete reachable terminator: size=%u hash0=0x%08" PRIx32
 		     " crc32=0x%08" PRIx32 "\n",

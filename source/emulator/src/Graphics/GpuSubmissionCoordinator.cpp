@@ -32,10 +32,11 @@ GpuSubmissionResult GpuSubmissionCoordinator::AddCompletionAction(SubmissionId i
 	return m_tracker.AddCompletionAction(id, phase, token);
 }
 
-GpuSubmissionResult GpuSubmissionCoordinator::RegisterProducer(SubmissionId id, uint64_t address, uint32_t size_bytes, uint64_t value)
+GpuSubmissionResult GpuSubmissionCoordinator::RegisterProducer(SubmissionId id, uint64_t address, uint32_t size_bytes, uint64_t value,
+                                                               GpuProducerEffect effects)
 {
 	Core::LockGuard lock(m_mutex);
-	return m_tracker.RegisterProducer(id, address, size_bytes, value);
+	return m_tracker.RegisterProducer(id, address, size_bytes, value, effects);
 }
 
 GpuSubmissionResult GpuSubmissionCoordinator::MarkSubmitted(SubmissionId id)

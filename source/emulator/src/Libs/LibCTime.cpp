@@ -3,6 +3,9 @@
 #include "Kyty/Core/DbgAssert.h"
 
 #include <ctime>
+#include <cwchar>
+#include <string>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -129,6 +132,29 @@ KYTY_SYSV_ABI size_t c_strftime(char* s, size_t n, const char* f, const GuestTm*
 	}
 	const std::tm host = GuestToHostTm(*tmv);
 	return ::strftime(s, n, f, &host);
+}
+
+// The guest wchar_t is 16 bits; the host formats in its own wide encoding and
+// the result is narrowed back unit by unit (the "C" locale emits ASCII).
+KYTY_SYSV_ABI size_t c_wcsftime(uint16_t* s, size_t n, const uint16_t* f, const GuestTm* tmv)
+{
+	if (s == nullptr || f == nullptr || tmv == nullptr || n == 0)
+	{
+		return 0;
+	}
+	std::wstring format;
+	for (const uint16_t* unit = f; *unit != 0; unit++)
+	{
+		format.push_back(static_cast<wchar_t>(*unit));
+	}
+	std::vector<wchar_t> output(n);
+	const std::tm        host    = GuestToHostTm(*tmv);
+	const size_t         written = ::wcsftime(output.data(), n, format.c_str(), &host);
+	for (size_t i = 0; written != 0 && i <= written; i++)
+	{
+		s[i] = static_cast<uint16_t>(output[i]);
+	}
+	return written;
 }
 
 KYTY_SYSV_ABI char* c_asctime(const GuestTm* tmv)

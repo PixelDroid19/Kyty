@@ -26,6 +26,7 @@
 #include "Emulator/Kernel/Memory.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/AddcontInventory.h"
 #include "Emulator/Loader/Elf.h"
 #include "Emulator/Loader/ModuleLoad.h"
 #include "Emulator/Loader/RuntimeLinker.h"
@@ -78,7 +79,7 @@ private:
 
 static bool get_system_content_param_string(const char* name, char* value, size_t value_size)
 {
-	return Loader::SystemContentParamSfoGetString(name, value, value_size);
+	return Loader::SystemContentGetParamString(name, value, value_size);
 }
 
 static void load_symbols(const String& id, Loader::RuntimeLinker* rt)
@@ -349,6 +350,28 @@ KYTY_SCRIPT_FUNC(kyty_load_param_json_func)
 	return 0;
 }
 
+// kyty_load_addcont(app0_root, packages_root): the title's installed add-on
+// content, from <app0_root>/dlc_emu.ini and <packages_root>/<TITLE_ID>/*.
+// Call after kyty_load_param_json; packages_root may be empty.
+KYTY_SCRIPT_FUNC(kyty_load_addcont_func)
+{
+	if (Scripts::ArgGetVarCount() != 2)
+	{
+		EXIT("invalid args\n");
+	}
+
+	String title_id;
+	String app_version;
+	if (!Loader::SystemContentGetMetadata(&title_id, &app_version) || title_id.IsEmpty())
+	{
+		EXIT("kyty_load_addcont needs the title id: call kyty_load_param_json first\n");
+	}
+	Loader::AddcontInventoryLoad(Scripts::ArgGetVar(0).ToString().utf8_str().GetData(),
+	                             Scripts::ArgGetVar(1).ToString().utf8_str().GetData(), title_id.utf8_str().GetData());
+
+	return 0;
+}
+
 KYTY_SCRIPT_FUNC(kyty_dbg_dump_func)
 {
 	if (Scripts::ArgGetVarCount() != 1)
@@ -554,6 +577,7 @@ void kyty_reg()
 	Scripts::RegisterFunc("kyty_load_symbols_all", LuaFunc::kyty_load_symbols_all_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_load_param_sfo", LuaFunc::kyty_load_param_sfo_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_load_param_json", LuaFunc::kyty_load_param_json_func, LuaFunc::kyty_help);
+	Scripts::RegisterFunc("kyty_load_addcont", LuaFunc::kyty_load_addcont_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_dbg_dump", LuaFunc::kyty_dbg_dump_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_dbg_dump_symbols", LuaFunc::kyty_dbg_dump_symbols_func, LuaFunc::kyty_help);
 	Scripts::RegisterFunc("kyty_execute", LuaFunc::kyty_execute_func, LuaFunc::kyty_help);

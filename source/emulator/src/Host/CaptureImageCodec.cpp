@@ -17,7 +17,9 @@ uint64_t HostCaptureImageBytesPerPixel(HostCaptureImagePixelFormat format)
 	switch (format)
 	{
 		case HostCaptureImagePixelFormat::Rgba8:
-		case HostCaptureImagePixelFormat::Bgra8: return 4;
+		case HostCaptureImagePixelFormat::Bgra8:
+		case HostCaptureImagePixelFormat::A2R10G10B10Unorm:
+		case HostCaptureImagePixelFormat::A2B10G10R10Unorm: return 4;
 		case HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat: return 8;
 	}
 	return 0;
@@ -182,6 +184,23 @@ bool HostCaptureImageCodecNormalizeRgba8(const HostCaptureImageView& source, std
 					dst[1]         = src[1];
 					dst[2]         = src[0];
 					dst[3]         = src[3];
+				}
+				break;
+			case HostCaptureImagePixelFormat::A2R10G10B10Unorm:
+			case HostCaptureImagePixelFormat::A2B10G10R10Unorm:
+				for (uint32_t x = 0; x < source.extent.width; x++)
+				{
+					uint32_t packed = 0;
+					std::memcpy(&packed, src_row + static_cast<size_t>(x) * 4u, sizeof(packed));
+					const uint32_t low  = packed & 0x3ffu;
+					const uint32_t high = (packed >> 20u) & 0x3ffu;
+					const uint32_t red  = source.format == HostCaptureImagePixelFormat::A2R10G10B10Unorm ? high : low;
+					const uint32_t blue = source.format == HostCaptureImagePixelFormat::A2R10G10B10Unorm ? low : high;
+					auto*          dst  = dst_row + static_cast<size_t>(x) * 4u;
+					dst[0]              = static_cast<uint8_t>((red * 255u + 511u) / 1023u);
+					dst[1]              = static_cast<uint8_t>((((packed >> 10u) & 0x3ffu) * 255u + 511u) / 1023u);
+					dst[2]              = static_cast<uint8_t>((blue * 255u + 511u) / 1023u);
+					dst[3]              = static_cast<uint8_t>((packed >> 30u) * 85u);
 				}
 				break;
 			case HostCaptureImagePixelFormat::Rgba16G16B16A16Sfloat:

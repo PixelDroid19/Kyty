@@ -29,7 +29,6 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
-#include <vulkan/vk_enum_string_helper.h>
 
 #define XXH_INLINE_ALL
 #include <xxhash/xxhash.h>
@@ -200,41 +199,17 @@ bool GpuMemory::QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size,
 		return true;
 	}
 
-	const auto ranges_overlap = [](uint64_t a, uint64_t a_size, uint64_t b, uint64_t b_size)
-	{ return a <= b ? b - a < a_size : a - b < b_size; };
-	const auto intersects_heap = [&](const Heap& heap)
-	{
-		for (int i = 0; i < vaddr_num; ++i)
-		{
-			if (ranges_overlap(vaddr[i], size[i], heap.range.vaddr, heap.range.size))
-			{
-				return true;
-			}
-		}
-		return false;
-	};
-	bool intersects_allocated_range = false;
-	for (const auto& heap: m_heaps)
-	{
-		if (intersects_heap(heap))
-		{
-			intersects_allocated_range = true;
-			break;
-		}
-	}
-	if (!intersects_allocated_range)
+	std::vector<int> heap_ids;
+	HeapsIntersecting(vaddr, size, vaddr_num, &heap_ids);
+	if (heap_ids.empty())
 	{
 		m_overlap_snapshot_cache.Store(query, *out);
 		return true;
 	}
 
-	for (uint32_t heap_id = 0; heap_id < m_heaps.Size(); heap_id++)
+	for (const int heap_id: heap_ids)
 	{
 		const auto& heap    = m_heaps[heap_id];
-		if (!intersects_heap(heap))
-		{
-			continue;
-		}
 		const auto  objects = FindBlocks(static_cast<int>(heap_id), vaddr, size, vaddr_num);
 		for (const auto& object: objects)
 		{
@@ -344,30 +319,20 @@ bool GpuMemory::CaptureSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, voi
 			return false;
 		}
 	}
-	auto& dirty_tracker = GpuDirtyPageTracker::Instance();
-	if (!dirty_tracker.RegisterRange(vaddr, size))
-	{
-		finish_validation();
-		return false;
-	}
-	const auto dirty_read = dirty_tracker.BeginRead(vaddr, size);
-	if (!dirty_read.tracked)
-	{
-		(void)dirty_tracker.UnregisterRange(vaddr, size);
-		finish_validation();
-		return false;
-	}
-
 	finish_validation();
 	const auto copy_start = std::chrono::steady_clock::now();
+	// A copy that a second pass reads back unchanged is a consistent snapshot
+	// unless a store restored a byte's old value in between: every byte held
+	// its value from the end of the copy to the start of the check. This costs
+	// a second pass over a small buffer instead of arming page protection (two
+	// mprotect calls and a TLB shootdown per draw-time snapshot).
 	std::memcpy(dst, reinterpret_cast<const void*>(vaddr), static_cast<size_t>(size));
-	const bool stable_copy = dirty_tracker.ReadObservationIsStable(vaddr, size, dirty_read);
+	const bool stable_copy = std::memcmp(dst, reinterpret_cast<const void*>(vaddr), static_cast<size_t>(size)) == 0;
 	if (copy_ns != nullptr)
 	{
 		*copy_ns = static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - copy_start).count());
 	}
-	(void)dirty_tracker.UnregisterRange(vaddr, size);
 	return stable_copy;
 }
 
@@ -427,36 +392,18 @@ bool GpuMemory::CompareSnapshotReadOnlyBuffer(uint64_t vaddr, uint64_t size, con
 			return false;
 		}
 	}
-	auto& dirty_tracker = GpuDirtyPageTracker::Instance();
-	if (!dirty_tracker.RegisterRange(vaddr, size))
-	{
-		finish_validation();
-		return false;
-	}
-	const auto dirty_read = dirty_tracker.BeginRead(vaddr, size);
-	if (!dirty_read.tracked)
-	{
-		(void)dirty_tracker.UnregisterRange(vaddr, size);
-		finish_validation();
-		return false;
-	}
-
 	finish_validation();
 	const auto compare_start = std::chrono::steady_clock::now();
+	// No page protection: a CPU store racing this comparison can make it match
+	// a state memory never held at one instant, the same race the console GPU
+	// has when the guest writes a buffer a pending draw reads. Guests order
+	// such stores with labels, which complete before the draw is recorded.
 	*matches = std::memcmp(reinterpret_cast<const void*>(vaddr), snapshot, static_cast<size_t>(size)) == 0;
-	const bool stable_compare = dirty_tracker.ReadObservationIsStable(vaddr, size, dirty_read);
 	if (compare_ns != nullptr)
 	{
 		*compare_ns = static_cast<uint64_t>(
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - compare_start).count());
 	}
-	if (!stable_compare)
-	{
-		(void)dirty_tracker.UnregisterRange(vaddr, size);
-		*matches = false;
-		return false;
-	}
-	(void)dirty_tracker.UnregisterRange(vaddr, size);
 	return true;
 }
 
@@ -496,7 +443,8 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 				       ", new_hash = 0x%016" PRIx64 "\n",
 				       Core::EnumName(o.object.type).C_Str(), vaddr[vi], size[vi], o.hash[vi], new_hash);
 			}
-			o.gpu_update_time = GpuMemoryGetCurrentTime();
+			o.gpu_update_time   = GpuMemoryGetCurrentTime();
+			o.device_write_time = o.gpu_update_time;
 
 			return;
 		}
@@ -522,7 +470,8 @@ void GpuMemory::ResetHash(const uint64_t* vaddr, const uint64_t* size, int vaddr
 					       ", new_hash = 0x%016" PRIx64 "\n",
 					       Core::EnumName(o.object.type).C_Str(), vaddr[vi], size[vi], o.hash[vi], new_hash);
 				}
-				o.gpu_update_time = GpuMemoryGetCurrentTime();
+				o.gpu_update_time   = GpuMemoryGetCurrentTime();
+				o.device_write_time = o.gpu_update_time;
 			}
 		}
 	}
@@ -567,7 +516,11 @@ Vector<GpuMemory::OverlappedBlock> GpuMemory::FindBlocks(int heap_id, const uint
 	EXIT_IF(only_first && vaddr_num != 1);
 
 	Vector<GpuMemory::OverlappedBlock> ret;
-	EXIT_IF(heap.overlap_cache == nullptr);
+	if (heap.overlap_cache == nullptr)
+	{
+		heap.overlap_cache = new OverlapQueryCache;
+	}
+	heap.overlap_cache->Reserve(heap.objects.Size());
 	for (int i = 0; i < vaddr_num; ++i)
 	{
 		// An empty range cannot overlap a GPU object and must not enter the
@@ -616,7 +569,6 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 	EXIT_IF(vaddr == nullptr || size == nullptr);
 
 	auto& heap = m_heaps[heap_id];
-	EXIT_IF(heap.overlap_cache == nullptr);
 
 	Block nb {};
 	nb.vaddr_num = vaddr_num;
@@ -624,7 +576,10 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 	{
 		m_materialization_cache.InvalidateRange(vaddr[vi], size[vi]);
 		m_overlap_snapshot_cache.InvalidateRange(vaddr[vi], size[vi]);
-		heap.overlap_cache->InvalidateRange(vaddr[vi], size[vi]);
+		if (heap.overlap_cache != nullptr)
+		{
+			heap.overlap_cache->InvalidateRange(vaddr[vi], size[vi]);
+		}
 		nb.vaddr[vi] = vaddr[vi];
 		nb.size[vi]  = size[vi];
 		heap.objects_size += size[vi];
@@ -637,13 +592,15 @@ GpuMemory::Block GpuMemory::CreateBlock(const uint64_t* vaddr, const uint64_t* s
 void GpuMemory::DeleteBlock(Block* b, int heap_id, int obj_id)
 {
 	auto& heap = m_heaps[heap_id];
-	EXIT_IF(heap.overlap_cache == nullptr);
 
 	for (int vi = 0; vi < b->vaddr_num; vi++)
 	{
 		m_materialization_cache.InvalidateRange(b->vaddr[vi], b->size[vi]);
 		m_overlap_snapshot_cache.InvalidateRange(b->vaddr[vi], b->size[vi]);
-		heap.overlap_cache->InvalidateRange(b->vaddr[vi], b->size[vi]);
+		if (heap.overlap_cache != nullptr)
+		{
+			heap.overlap_cache->InvalidateRange(b->vaddr[vi], b->size[vi]);
+		}
 		heap.objects_size -= b->size[vi];
 		heap.objects_map1->Erase(b->vaddr[vi], obj_id);
 		heap.objects_map2->Erase(b->vaddr[vi], b->size[vi], obj_id);

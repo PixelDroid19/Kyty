@@ -32,6 +32,11 @@
 #include "Emulator/Graphics/GpuMemoryRangeQueryCache.h"
 #include "Emulator/Graphics/GraphicContext.h"
 
+#include <set>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -164,14 +169,12 @@ public:
 			// until mutation, so this preserves a stable result without rebuilding it.
 			return m_map.Get(first_page);
 		}
+		std::unordered_set<int> seen;
 		for (auto page = first_page; page <= last_page; page++)
 		{
 			for (int id: m_map.Get(page))
 			{
-				if (!ret.Contains(id))
-				{
-					ret.Add(id);
-				}
+				AddUnique(&ret, &seen, id);
 			}
 		}
 		return ret;
@@ -181,7 +184,8 @@ public:
 	{
 		EXIT_IF(vaddr == nullptr);
 		EXIT_IF(size == nullptr);
-		Vector<int> ret;
+		Vector<int>             ret;
+		std::unordered_set<int> seen;
 		for (int i = 0; i < vaddr_num; i++)
 		{
 			EXIT_IF(size[i] == 0);
@@ -192,10 +196,7 @@ public:
 			{
 				for (int id: m_map.Get(page))
 				{
-					if (!ret.Contains(id))
-					{
-						ret.Add(id);
-					}
+					AddUnique(&ret, &seen, id);
 				}
 			}
 		}
@@ -273,6 +274,31 @@ private:
 		EXIT_IF((vaddr >> (PAGE_BITS + 32u)) != 0);
 		return static_cast<uint32_t>(vaddr >> PAGE_BITS);
 	}
+
+	// Order-preserving union of page buckets. A query spanning buckets that
+	// hold thousands of small objects dedups through a set, not a scan per id.
+	static void AddUnique(Vector<int>* ret, std::unordered_set<int>* seen, int id)
+	{
+		constexpr uint32_t kLinearLimit = 32;
+		if (seen->empty())
+		{
+			if (ret->Contains(id))
+			{
+				return;
+			}
+			ret->Add(id);
+			if (ret->Size() == kLinearLimit)
+			{
+				seen->insert(ret->begin(), ret->end());
+			}
+			return;
+		}
+		if (seen->insert(id).second)
+		{
+			ret->Add(id);
+		}
+	}
+
 	Core::Hashmap<uint32_t, Vector<int>> m_map;
 };
 
@@ -311,8 +337,11 @@ public:
 	// Sync: GPU -> CPU
 	void WriteBackCompletedSubmission(GraphicContext* ctx, SubmissionId submission);
 	void WriteBackAllCompleted(GraphicContext* ctx);
-	// Write back StorageBuffers that overlap a sample range before CPU detile.
-	void WriteBackStorageRange(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
+	void               WriteBackStorageRanges(GraphicContext* ctx, const GpuMemoryGuestRanges& ranges, GpuQueueId consumer);
+	[[nodiscard]] bool PendingStorageWriteBack(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer, SubmissionId* dependency);
+	[[nodiscard]] bool FindExactWritableStorage(uint64_t vaddr, uint64_t size, GpuMemoryStorageWriteIdentity* identity);
+	[[nodiscard]] bool MarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
+	                                             const GpuWritebackPageCache::UniformWords* uniform_words);
 
 	// Sync: CPU -> GPU
 	void Flush(GraphicContext* ctx, uint64_t vaddr, uint64_t size);
@@ -352,9 +381,23 @@ private:
 		bool                         dirty_registered                   = false;
 		bool                         depth_meta_bound                   = false;
 		uint64_t                     dirty_generation[VADDR_BLOCKS_MAX] = {};
+		// Tracker page generations at the last upload of a storage buffer; the
+		// next upload copies only the pages whose generation moved since.
+		std::vector<uint64_t>        page_generations;
 		uint64_t                     content_sequence                  = 0;
 		GpuMemoryContentOrigin       content_origin                    = GpuMemoryContentOrigin::Unknown;
 		GpuSubmissionHighWater       submission_uses;
+		// Writable uses since creation, and the count a device-side publication
+		// to the guest device-address view covered (0: none) with its queue.
+		uint64_t                            write_uses                 = 0;
+		// Logical times (GpuMemoryGetCurrentTime) of the latest writable use and
+		// of the latest device write recorded into this object.
+		uint64_t                            write_time                 = 0;
+		uint64_t                            device_write_time          = 0;
+		uint64_t                            guest_published_write_uses = 0;
+		uint32_t                            guest_published_queue      = 0;
+		bool                                guest_published_uniform    = false;
+		GpuWritebackPageCache::UniformWords guest_published_words {};
 		// Incarnation of the host Vulkan backing, not a content revision.
 		// In-place uploads retain it; an atomic COW swap advances it.
 		uint64_t backing_generation = 1;
@@ -370,7 +413,7 @@ private:
 		int         object_id = -1;
 	};
 
-	using OverlapQueryCache = GpuMemoryRangeQueryCache<Vector<OverlappedBlock>, 4096>;
+	using OverlapQueryCache = GpuMemoryAdaptiveRangeQueryCache<Vector<OverlappedBlock>, 4096>;
 
 	struct Materialization
 	{
@@ -445,11 +488,17 @@ private:
 	void  DeleteBlock(Block* b, int heap_id, int obj_id);
 	void  Link(int heap_id, int id1, int id2, OverlapType rel, GpuMemoryScenario scenario);
 	[[nodiscard]] uint64_t NextContentSequence();
-	[[nodiscard]] bool CollectRetireableLinkedBufferComponent(int heap_id, int object_id, uint64_t retire_after_frames,
-	                                                          uint32_t* scan_budget, Vector<int>* component);
 	[[nodiscard]] DebugStatsGpuMemoryLinkedTopology ClassifyLinkedStorageTopology(
 	    int heap_id, const Vector<OverlappedBlock>& parents, const GpuObject& incoming) const;
-	int   GetHeapId(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] int GetHeapId(uint64_t vaddr, uint64_t size) const;
+	[[nodiscard]] int HeapAt(uint64_t address) const;
+	void              HeapsIntersecting(const uint64_t* vaddr, const uint64_t* size, int vaddr_num, std::vector<int>* out) const;
+	void              RebuildHeapIndex();
+	void              ForgetHeapStorageObjects(int removed_heap_id);
+	// (heap id, object id) of each in-use writable StorageBuffer overlapping a range
+	// whose writes are not published to the guest device-address view on `consumer`.
+	// The ranges are sorted by address and disjoint.
+	[[nodiscard]] std::vector<std::pair<int, int>> CollectWritableStorage(const GpuMemoryGuestRanges& ranges, GpuQueueId consumer) const;
 	GpuMemoryRangeValidationStatus ValidateAllocatedRangeLocked(uint64_t vaddr, uint64_t size,
 	                                                            const GpuMemoryRangeQueryKey& query);
 	bool QueryOverlapsLocked(const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
@@ -462,11 +511,16 @@ private:
 	                     const uint64_t* size, int vaddr_num, int* id, bool* covered_reuse, int* stale_reuse_id);
 	bool create_generate_mips(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_texture_triplet(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
+	bool create_cpu_texture_storage_alias(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id,
+	                                     const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const;
 	bool create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_all_the_same(const Vector<OverlappedBlock>& others, int heap_id);
 
 	[[nodiscard]] String create_dbg_exit(const String& msg, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
 	                                     const Vector<OverlappedBlock>& others, GpuMemoryObjectType type);
+	// One line per overlapping parent (type, relation, scenario, parent count, range, raw parameters)
+	// plus the parameters of the object being created: what a refused overlap needs to be classified.
+	[[nodiscard]] String create_dbg_parents(int heap_id, const Vector<OverlappedBlock>& others, const GpuObject& info);
 
 	Core::Mutex m_mutex;
 	// Serializes logical object graph mutations while VersionBacking temporarily
@@ -474,6 +528,32 @@ private:
 	Core::Mutex m_backing_mutation_mutex;
 
 	Vector<Heap> m_heaps;
+	// [begin, end) address spans, sorted and disjoint, each naming the lowest heap
+	// index that covers it: GetHeapId's first-match answer by binary search.
+	// Every covering heap, ascending, is m_heap_index_open[open_first, +open_count).
+	struct HeapSpan
+	{
+		uint64_t begin      = 0;
+		uint64_t end        = 0;
+		int      heap_id    = -1;
+		uint32_t open_first = 0;
+		uint32_t open_count = 0;
+	};
+	std::vector<HeapSpan> m_heap_index;
+	std::vector<int>      m_heap_index_open;
+	// (heap id, object id) of every live StorageBuffer object with a write-back:
+	// the only objects a device-address write-back or its wait can touch.
+	std::set<std::pair<int, int>> m_storage_objects;
+	// The in-use, writable subset of m_storage_objects: the only candidates of
+	// the per-draw pending-write scans, which titles with thousands of live
+	// storage buffers otherwise pay in full for every device-address draw.
+	std::set<std::pair<int, int>> m_writable_storage;
+	// (heap id, object id) of every live object whose GPU writes are not yet
+	// written back (in use, writable, with a write-back): the only candidates
+	// of a completed-submission write-back, which otherwise visits every object
+	// of every heap on each completion.
+	std::set<std::pair<int, int>> m_pending_write_back;
+	void                          SyncWriteBackIndexes(int heap_id, int object_id);
 
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;

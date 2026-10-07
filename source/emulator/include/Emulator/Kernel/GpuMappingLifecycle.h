@@ -22,8 +22,16 @@ enum class KernelGpuMappingAccessMode : uint8_t
 	ReadWrite,
 };
 
+// Physical mappings view the kernel's shared backing, whose population
+// KernelQueryPhysicalPopulation reports; flexible ones are private anonymous memory.
+enum class KernelGpuMappingBacking : uint8_t
+{
+	Physical,
+	Flexible,
+};
+
 using KernelGpuMappingCompletion      = bool (*)(void*);
-using KernelGpuMappingRegisterRange   = void (*)(void* context, uint64_t vaddr, uint64_t size);
+using KernelGpuMappingRegisterRange   = void (*)(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingBacking backing);
 using KernelGpuMappingInvalidateRange = bool (*)(void* context, uint64_t vaddr, uint64_t size);
 using KernelGpuMappingReleaseRange    = bool (*)(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion,
                                                  void* completion_data);
@@ -47,7 +55,7 @@ public:
 	[[nodiscard]] bool Install(const GpuMappingLifecycleCallbacks& callbacks);
 	[[nodiscard]] bool IsInstalled() const;
 
-	[[nodiscard]] bool RegisterRange(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool RegisterRange(uint64_t vaddr, uint64_t size, KernelGpuMappingBacking backing);
 	[[nodiscard]] bool InvalidateRange(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool ReleaseRange(uint64_t vaddr, uint64_t size, KernelGpuMappingCompletion completion, void* completion_data);
 

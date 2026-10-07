@@ -176,6 +176,7 @@ struct DebugStatsSnapshot
 	uint32_t present_dst_w      = 0;
 	uint32_t present_dst_h      = 0;
 	uint32_t present_src_layout = 0; // VkImageLayout as uint
+	uint32_t present_src_format = 0; // VkFormat as uint
 };
 
 enum class DebugStatsWaitRegMemClass: uint8_t
@@ -239,6 +240,18 @@ struct DebugStatsPerformanceSnapshot
 	uint64_t dispatch_processor_calls     = 0;
 	uint64_t dispatch_processor_ns        = 0;
 	uint64_t dispatch_processor_max_ns    = 0;
+	uint64_t dispatch_writeback_calls = 0;
+	uint64_t dispatch_writeback_ns = 0;
+	uint64_t dispatch_writeback_max_ns = 0;
+	uint64_t guest_address_prepare_calls = 0;
+	uint64_t guest_address_prepare_ns = 0;
+	uint64_t guest_address_prepare_max_ns = 0;
+	uint64_t guest_address_residency_calls = 0;
+	uint64_t guest_address_residency_ns = 0;
+	uint64_t guest_address_residency_max_ns = 0;
+	uint64_t guest_address_refresh_calls = 0;
+	uint64_t guest_address_refresh_ns = 0;
+	uint64_t guest_address_refresh_max_ns = 0;
 	uint64_t draw_render_lock_wait_ns       = 0;
 	uint64_t draw_render_lock_wait_max_ns   = 0;
 	uint64_t draw_state_setup_ns            = 0;
@@ -293,6 +306,7 @@ struct DebugStatsPerformanceSnapshot
 	uint32_t present_dst_w         = 0;
 	uint32_t present_dst_h         = 0;
 	uint32_t present_src_layout    = 0;
+	uint32_t present_src_format    = 0; // VkFormat of the guest display buffer
 	uint64_t wait_reg_mem          = 0;
 	uint64_t wait_reg_mem_ns       = 0;
 	uint64_t wait_reg_mem_max_ns   = 0;
@@ -420,6 +434,10 @@ void DebugStatsRecordCommandBuffer();
 void DebugStatsRecordCommandProcessorRun(uint64_t elapsed_ns);
 void DebugStatsRecordDrawProcessor(uint64_t elapsed_ns);
 void DebugStatsRecordDispatchProcessor(uint64_t elapsed_ns);
+void DebugStatsRecordDispatchWriteBack(uint64_t elapsed_ns);
+void DebugStatsRecordGuestAddressPrepare(uint64_t elapsed_ns);
+void DebugStatsRecordGuestAddressResidency(uint64_t elapsed_ns);
+void DebugStatsRecordGuestAddressRefresh(uint64_t elapsed_ns);
 void DebugStatsRecordDrawRenderLockWait(uint64_t elapsed_ns);
 void DebugStatsRecordDrawStateSetup(uint64_t elapsed_ns);
 void DebugStatsRecordDrawMaterialization(uint64_t elapsed_ns);
@@ -511,7 +529,8 @@ private:
 };
 
 // Call from WindowDrawBuffer with the guest display image and swapchain extent.
-void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout);
+void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout,
+                                   uint32_t src_format);
 
 // Refresh one-second rates and host CPU/RSS. Call from the window/present thread.
 DebugStatsSnapshot DebugStatsTick(double now_seconds);

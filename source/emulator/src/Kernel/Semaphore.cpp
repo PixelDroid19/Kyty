@@ -1,4 +1,5 @@
 #include "Emulator/Kernel/Semaphore.h"
+#include "Emulator/Kernel/Pthread.h"
 
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/String.h"
@@ -397,6 +398,7 @@ int KYTY_SYSV_ABI KernelDeleteSema(KernelSema sem)
 
 int KYTY_SYSV_ABI KernelWaitSema(KernelSema sem, int need, KernelUseconds* time)
 {
+	KYTY_GUEST_WAIT(PthreadWaitKind::Semaphore, sem);
 	auto object = AcquireSema(sem);
 	if (!object)
 	{

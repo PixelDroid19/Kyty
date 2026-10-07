@@ -11,11 +11,13 @@
 #include "Emulator/Libs/LibraryRegistration.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/SaveData.h"
+#include "Emulator/Libs/SaveDataCapacity.h"
 #include "Emulator/Libs/SaveDataMemoryStore.h"
 #include "Emulator/Libs/SaveDataMountCoordinator.h"
 #include "Emulator/Libs/SaveDataPaths.h"
 #include "Emulator/Loader/SystemContent.h"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
@@ -23,7 +25,9 @@
 #include <cstring>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -40,6 +44,12 @@ static std::mutex                  g_transaction_mutex;
 static std::unordered_set<int32_t> g_transaction_resources;
 static std::mutex                  g_mount_mutex;
 static SaveDataMountCoordinator    g_mount_coordinator;
+struct SaveDataMountedDirectory
+{
+	std::filesystem::path path;
+	uint64_t              block_size = 0;
+};
+static std::array<SaveDataMountedDirectory, SaveDataMountCoordinator::SlotCount> g_mounted {};
 
 static std::filesystem::path ResolveSaveDataRoot(const char* title_id)
 {
@@ -91,6 +101,39 @@ static bool ResolveSaveDataSlot(const char* title_id, const char* directory_name
 	const auto path = (root / std::filesystem::u8path(directory_name)).lexically_normal().u8string();
 	*out            = String::FromUtf8(path.c_str());
 	return !out->IsEmpty();
+}
+
+static std::filesystem::path SaveDataFilesystemPath(const String& path)
+{
+	const auto utf8 = path.utf8_str();
+	return std::filesystem::u8path(utf8.GetData());
+}
+
+// Guest title ids and directory names are fixed arrays: a missing terminator is
+// a malformed argument, never a name to read past.
+using SaveDataTitleIdBuffer = std::array<char, sizeof(SaveDataTitleId::data) + 1u>;
+
+static bool SaveDataCopyTitleId(const SaveDataTitleId* title_id, SaveDataTitleIdBuffer* buffer, const char** out)
+{
+	*out = nullptr;
+	if (title_id == nullptr)
+	{
+		return true;
+	}
+	const auto* end = static_cast<const char*>(std::memchr(title_id->data, '\0', sizeof(title_id->data)));
+	if (end == nullptr)
+	{
+		return false;
+	}
+	*buffer = {};
+	std::memcpy(buffer->data(), title_id->data, static_cast<size_t>(end - title_id->data));
+	*out = buffer->data();
+	return true;
+}
+
+static bool SaveDataDirNameTerminated(const SaveDataDirName* name)
+{
+	return name != nullptr && std::memchr(name->data, '\0', sizeof(name->data)) != nullptr;
 }
 
 // SaveDataMountPoint / SaveDataMountInfo / SaveDataDirName* search types
@@ -151,7 +194,7 @@ static_assert(offsetof(SaveDataMountResult, required_blocks) == 16);
 static_assert(offsetof(SaveDataMountResult, mount_status) == 28);
 
 static int MountSaveDataDirectory(const char* directory_name, const String& mount_dir, uint32_t mount_mode,
-                                  SaveDataMountResult* mount_result)
+                                  uint64_t requested_blocks, uint64_t block_size, SaveDataMountResult* mount_result)
 {
 	if (directory_name == nullptr || mount_result == nullptr)
 	{
@@ -177,7 +220,9 @@ static int MountSaveDataDirectory(const char* directory_name, const String& moun
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	const bool existed = Core::File::IsDirectoryExisting(mount_dir);
+	const auto      mount_directory_path = SaveDataFilesystemPath(mount_dir);
+	std::error_code error;
+	const bool      existed = std::filesystem::is_directory(mount_directory_path, error);
 	if (open && !existed)
 	{
 		return SAVE_DATA_ERROR_NOT_FOUND;
@@ -186,17 +231,23 @@ static int MountSaveDataDirectory(const char* directory_name, const String& moun
 	{
 		return SAVE_DATA_ERROR_EXISTS;
 	}
-
-	bool created = false;
+	if (!existed && block_size != 0 && requested_blocks == 0)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
 	if (!existed)
 	{
-		Core::File::CreateDirectories(mount_dir);
-		if (!Core::File::IsDirectoryExisting(mount_dir))
+		std::filesystem::create_directories(mount_directory_path, error);
+		if (error)
 		{
 			return SAVE_DATA_ERROR_INTERNAL;
 		}
-		created = true;
 	}
+	if (const int result = SaveDataRecordAllocation(mount_directory_path, requested_blocks, block_size); result != OK)
+	{
+		return result;
+	}
+	const bool created = !existed;
 
 	const auto   mount_point_utf8 = SaveDataMountCoordinator::MountPoint(acquisition.slot);
 	const String mount_point      = String::FromUtf8(mount_point_utf8.c_str());
@@ -209,6 +260,7 @@ static int MountSaveDataDirectory(const char* directory_name, const String& moun
 		return SAVE_DATA_ERROR_INTERNAL;
 	}
 
+	g_mounted[acquisition.slot] = {mount_directory_path, block_size};
 	g_mount_coordinator.Commit(acquisition.slot, directory_name);
 	mount_result->mount_status = created ? 1u : 0u;
 	return OK;
@@ -323,79 +375,77 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, S
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
+	SaveDataTitleIdBuffer title_id_buffer {};
+	const char*           title_id = nullptr;
+	if (!SaveDataCopyTitleId(cond->title_id, &title_id_buffer, &title_id))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	if (cond->dir_name != nullptr && !SaveDataDirNameTerminated(cond->dir_name))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const char* filter        = cond->dir_name != nullptr ? cond->dir_name->data : nullptr;
+	const bool  filter_active = filter != nullptr && filter[0] != '\0';
+	if (filter_active && !SaveDataDirectoryNameValid(filter))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
 
 	KYTY_LOG_DEBUG("\t user_id       = %d\n", cond->user_id);
-	KYTY_LOG_DEBUG("\t title_id      = %s\n", (cond->title_id != nullptr ? cond->title_id->data : "(null)"));
-	KYTY_LOG_DEBUG("\t dir_name_pat  = %s\n", (cond->dir_name != nullptr ? cond->dir_name->data : "(null)"));
+	KYTY_LOG_DEBUG("\t title_id      = %s\n", title_id != nullptr ? title_id : "(null)");
+	KYTY_LOG_DEBUG("\t dir_name_pat  = %s\n", filter != nullptr ? filter : "(null)");
 	KYTY_LOG_DEBUG("\t key/order     = %u/%u\n", cond->key, cond->order);
 	KYTY_LOG_DEBUG("\t dir_names_num = %u\n", result->dir_names_num);
 
 	result->hit_num = 0;
 	result->set_num = 0;
 
-	const auto root_path = ResolveSaveDataRoot(cond->title_id != nullptr ? cond->title_id->data : nullptr);
+	const auto root_path = ResolveSaveDataRoot(title_id);
 	if (root_path.empty())
 	{
 		return SAVE_DATA_ERROR_INTERNAL;
 	}
-	const auto   root_utf8 = root_path.u8string();
-	const String root      = String::FromUtf8(root_utf8.c_str());
-	if (!Core::File::IsDirectoryExisting(root))
+	std::error_code error;
+	if (!std::filesystem::is_directory(root_path, error))
 	{
 		return OK;
 	}
 
-	const char* filter        = (cond->dir_name != nullptr ? cond->dir_name->data : nullptr);
-	const bool  filter_active = (filter != nullptr && filter[0] != '\0');
-	if (filter_active && !SaveDataDirectoryNameValid(filter))
+	uint32_t written = 0;
+	for (std::filesystem::directory_iterator entry(root_path, error), end; !error && entry != end; entry.increment(error))
 	{
-		return SAVE_DATA_ERROR_PARAMETER;
-	}
-
-	const auto entries = Core::File::GetDirEntries(root);
-	uint32_t   written = 0;
-
-	for (const auto& entry: entries)
-	{
-		if (entry.is_file)
+		const auto name = entry->path().filename().u8string();
+		if (!entry->is_directory(error) || name.rfind("sce_", 0) == 0 || !SaveDataDirectoryNameValid(name.c_str()) ||
+		    (filter_active && name != filter))
 		{
 			continue;
-		}
-
-		const String name = entry.name;
-		if (name.IsEmpty() || name == U"." || name == U".." || name.StartsWith(U"sce_"))
-		{
-			continue;
-		}
-
-		// utf8_str() owns the buffer; C_Str macro would dangle after the expression.
-		const auto  name_utf8 = name.utf8_str();
-		const char* name_c    = name_utf8.GetData();
-		if (name_c == nullptr)
-		{
-			continue;
-		}
-		if (filter_active)
-		{
-			// Exact match; wildcard filter not required for first-boot enumeration.
-			if (std::strcmp(name_c, filter) != 0)
-			{
-				continue;
-			}
 		}
 
 		result->hit_num++;
-		if (result->dir_names != nullptr && written < result->dir_names_num)
+		if (result->dir_names == nullptr || written >= result->dir_names_num)
 		{
-			std::memset(&result->dir_names[written], 0, sizeof(SaveDataDirName));
-			std::snprintf(result->dir_names[written].data, sizeof(result->dir_names[written].data), "%s", name_c);
-			if (result->infos != nullptr)
-			{
-				result->infos[written].blocks      = 100000;
-				result->infos[written].free_blocks = 100000;
-			}
-			written++;
+			continue;
 		}
+		std::memset(&result->dir_names[written], 0, sizeof(SaveDataDirName));
+		std::snprintf(result->dir_names[written].data, sizeof(result->dir_names[written].data), "%s", name.c_str());
+		if (result->infos != nullptr)
+		{
+			SaveDataCapacity capacity {};
+			if (const int capacity_result = SaveDataQueryCapacity(entry->path(), kSaveDataNativeBlockSize, &capacity);
+			    capacity_result != OK)
+			{
+				return capacity_result;
+			}
+			std::memset(&result->infos[written], 0, sizeof(result->infos[written]));
+			result->infos[written].blocks      = capacity.blocks;
+			result->infos[written].free_blocks = capacity.free_blocks;
+		}
+		written++;
+	}
+	if (error)
+	{
+		return SAVE_DATA_ERROR_INTERNAL;
 	}
 
 	result->set_num = written;
@@ -424,7 +474,8 @@ int KYTY_SYSV_ABI SaveDataMount(const SaveDataMount* mount, SaveDataMountResult*
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	return MountSaveDataDirectory(mount->dir_name, mount_dir, mount->mount_mode, mount_result);
+	return MountSaveDataDirectory(mount->dir_name, mount_dir, mount->mount_mode, mount->blocks, kSaveDataLegacyBlockSize,
+	                              mount_result);
 }
 
 int KYTY_SYSV_ABI SaveDataMount2(const SaveDataMount2* mount, SaveDataMountResult* mount_result)
@@ -440,13 +491,18 @@ int KYTY_SYSV_ABI SaveDataMount2(const SaveDataMount2* mount, SaveDataMountResul
 	KYTY_LOG_DEBUG("\t dir_name   = %s\n", mount->dir_name->data);
 	KYTY_LOG_DEBUG("\t blocks     = %" PRIu64 "\n", mount->blocks);
 	KYTY_LOG_DEBUG("\t mount_mode = %" PRIu32 "\n", mount->mount_mode);
+	if (!SaveDataDirNameTerminated(mount->dir_name))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
 
 	String mount_dir;
 	if (!ResolveSaveDataSlot(nullptr, mount->dir_name->data, &mount_dir))
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, mount->mount_mode, mount_result);
+	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, mount->mount_mode, mount->blocks,
+	                              kSaveDataLegacyBlockSize, mount_result);
 }
 
 int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult* mount_result)
@@ -457,13 +513,18 @@ int KYTY_SYSV_ABI SaveDataMount3(const SaveDataMount3* mount, SaveDataMountResul
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
+	if (!SaveDataDirNameTerminated(mount->dir_name))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
 
 	String mount_dir;
 	if (!ResolveSaveDataSlot(nullptr, mount->dir_name->data, &mount_dir))
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, mount->mount_mode, mount_result);
+	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, mount->mount_mode, mount->blocks,
+	                              kSaveDataNativeBlockSize, mount_result);
 }
 
 // sceSaveDataTransferringMount — NID WAzWTZm1H+I / RjMlsR8EXrw (SaveData_native).
@@ -489,18 +550,24 @@ int KYTY_SYSV_ABI SaveDataTransferringMount(const SaveDataTransferringMountParam
 	{
 		return SAVE_DATA_ERROR_INVALID_LOGIN_USER;
 	}
+	SaveDataTitleIdBuffer title_id_buffer {};
+	const char*           title_id = nullptr;
+	if (!SaveDataDirNameTerminated(mount->dir_name) || !SaveDataCopyTitleId(mount->title_id, &title_id_buffer, &title_id))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
 
 	String mount_dir;
-	if (!ResolveSaveDataSlot(mount->title_id != nullptr ? mount->title_id->data : nullptr, mount->dir_name->data, &mount_dir))
+	if (!ResolveSaveDataSlot(title_id, mount->dir_name->data, &mount_dir))
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
 	KYTY_LOG_DEBUG("\t user_id  = %d\n", mount->user_id);
-	KYTY_LOG_DEBUG("\t title_id = %s\n", mount->title_id != nullptr ? mount->title_id->data : "<null>");
+	KYTY_LOG_DEBUG("\t title_id = %.*s\n", title_id != nullptr ? 10 : 6, title_id != nullptr ? title_id : "<null>");
 	KYTY_LOG_DEBUG("\t dir_name = %s\n", mount->dir_name->data);
 
-	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, 0x20u, mount_result);
+	return MountSaveDataDirectory(mount->dir_name->data, mount_dir, 0x20u, 0, 0, mount_result);
 }
 
 static int UnmountSaveDataPoint(const SaveDataMountPoint* mount_point)
@@ -518,6 +585,7 @@ static int UnmountSaveDataPoint(const SaveDataMountPoint* mount_point)
 	}
 
 	Kernel::FileSystem::Umount(String::FromUtf8(mount_point->data));
+	g_mounted[*slot] = {};
 	g_mount_coordinator.Release(*slot);
 	return OK;
 }
@@ -556,30 +624,78 @@ int KYTY_SYSV_ABI SaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount
 	return OK;
 }
 
+struct SaveDataParamField
+{
+	size_t offset;
+	size_t size;
+};
+
+// SCE_SAVE_DATA_PARAM_TYPE_*: ALL, TITLE, SUB_TITLE, DETAIL, USER_PARAM, MTIME.
+static bool SaveDataParamFieldOf(uint32_t param_type, SaveDataParamField* field)
+{
+	switch (param_type)
+	{
+		case 0: *field = {0, sizeof(SaveDataParam)}; return true;
+		case 1: *field = {offsetof(SaveDataParam, title), sizeof(SaveDataParam::title)}; return true;
+		case 2: *field = {offsetof(SaveDataParam, sub_title), sizeof(SaveDataParam::sub_title)}; return true;
+		case 3: *field = {offsetof(SaveDataParam, detail), sizeof(SaveDataParam::detail)}; return true;
+		case 4: *field = {offsetof(SaveDataParam, user_param), sizeof(SaveDataParam::user_param)}; return true;
+		case 5: *field = {offsetof(SaveDataParam, mtime), sizeof(SaveDataParam::mtime)}; return true;
+		default: return false;
+	}
+}
+
+// The parameters live with the save directory, so a later mount reads what an
+// earlier one set. The file holds the guest SaveDataParam layout.
+static int SaveDataParamFile(const SaveDataMountPoint* mount_point, std::filesystem::path* file)
+{
+	std::lock_guard lock(g_mount_mutex);
+	if (!g_mount_coordinator.Find(mount_point->data).has_value())
+	{
+		return SAVE_DATA_ERROR_NOT_MOUNTED;
+	}
+	const String guest = String::FromUtf8(mount_point->data) + U"/sce_sys/param.kyty";
+	*file              = std::filesystem::path(Kernel::FileSystem::GetRealFilename(guest).utf8_str().GetData());
+	return OK;
+}
+
+static SaveDataParam LoadSaveDataParam(const std::filesystem::path& file)
+{
+	SaveDataParam param {};
+	std::ifstream stream(file, std::ios::binary);
+	stream.read(reinterpret_cast<char*>(&param), sizeof(param));
+	if (stream.gcount() != static_cast<std::streamsize>(sizeof(param)))
+	{
+		param = {};
+	}
+	return param;
+}
+
+static bool StoreSaveDataParam(const std::filesystem::path& file, const SaveDataParam& param)
+{
+	std::error_code ec;
+	std::filesystem::create_directories(file.parent_path(), ec);
+	std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+	stream.write(reinterpret_cast<const char*>(&param), sizeof(param));
+	return !ec && stream.good();
+}
+
 int KYTY_SYSV_ABI SaveDataSetParam(const SaveDataMountPoint* mount_point, uint32_t param_type, const void* param_buf, size_t param_buf_size)
 {
 	PRINT_NAME();
-
-	if (mount_point == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	KYTY_LOG_DEBUG("\t mount_point    = %s\n", mount_point->data);
-	KYTY_LOG_DEBUG("\t param_type     = %u\n", param_type);
-	KYTY_LOG_DEBUG("\t param_buf_size = %" PRIu64 "\n", param_buf_size);
-
-	if (param_type == 0)
+	SaveDataParamField field {};
+	if (mount_point == nullptr || param_buf == nullptr || !SaveDataParamFieldOf(param_type, &field) || param_buf_size < field.size)
 	{
-		const auto* p = static_cast<const SaveDataParam*>(param_buf);
-
-		KYTY_LOG_DEBUG("\t title      = %s\n", p->title);
-		KYTY_LOG_DEBUG("\t sub_title  = %s\n", p->sub_title);
-		KYTY_LOG_DEBUG("\t detail     = %s\n", p->detail);
-		KYTY_LOG_DEBUG("\t user_param = %u\n", p->user_param);
-	} else
-	{
-		KYTY_NOT_IMPLEMENTED;
+		return SAVE_DATA_ERROR_PARAMETER;
 	}
-
-	return OK;
+	std::filesystem::path file;
+	if (const int result = SaveDataParamFile(mount_point, &file); result != OK)
+	{
+		return result;
+	}
+	SaveDataParam param = LoadSaveDataParam(file);
+	std::memcpy(reinterpret_cast<uint8_t*>(&param) + field.offset, param_buf, field.size);
+	return StoreSaveDataParam(file, param) ? OK : SAVE_DATA_ERROR_INTERNAL;
 }
 
 int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, SaveDataMountInfo* info)
@@ -591,27 +707,44 @@ int KYTY_SYSV_ABI SaveDataGetMountInfo(const SaveDataMountPoint* mount_point, Sa
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 
-	KYTY_LOG_DEBUG("\t mount_point = %s\n", mount_point->data);
+	const auto* terminator = static_cast<const char*>(std::memchr(mount_point->data, '\0', sizeof(mount_point->data)));
+	if (terminator == nullptr)
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	const std::string_view mount_name(mount_point->data, static_cast<size_t>(terminator - mount_point->data));
+	KYTY_LOG_DEBUG("\t mount_point = %.*s\n", static_cast<int>(mount_name.size()), mount_name.data());
 
-	// Mounted save capacity reported to the guest. Values are large enough for
-	// typical title save slots; free_blocks tracks remaining capacity.
-	info->blocks      = 100000;
-	info->free_blocks = 100000;
-
+	std::lock_guard lock(g_mount_mutex);
+	const auto      slot = g_mount_coordinator.Find(mount_name);
+	if (!slot.has_value() || *slot >= g_mounted.size() || g_mounted[*slot].path.empty())
+	{
+		return SAVE_DATA_ERROR_NOT_MOUNTED;
+	}
+	const auto&      mounted    = g_mounted[*slot];
+	const uint64_t   block_size = mounted.block_size != 0 ? mounted.block_size : kSaveDataNativeBlockSize;
+	SaveDataCapacity capacity {};
+	if (const int result = SaveDataQueryCapacity(mounted.path, block_size, &capacity); result != OK)
+	{
+		return result;
+	}
+	std::memset(info, 0, sizeof(*info));
+	info->blocks      = capacity.blocks;
+	info->free_blocks = capacity.free_blocks;
 	return OK;
 }
 
 static SaveDataMemoryStore g_save_memory_store;
 
-static bool ResolveSaveDataMemorySlot(int32_t user_id, uint32_t slot_id, std::filesystem::path* path)
+static int ResolveSaveDataMemorySlot(int32_t user_id, uint32_t slot_id, std::filesystem::path* path)
 {
-	if (path == nullptr)
-	{
-		return false;
-	}
 	const auto title_root = ResolveSaveDataRoot(nullptr);
-	*path                 = SaveDataBuildMemoryPath(title_root, user_id, slot_id);
-	return !path->empty();
+	if (title_root.empty())
+	{
+		return SAVE_DATA_ERROR_INTERNAL;
+	}
+	*path = SaveDataBuildMemoryPath(title_root, user_id, slot_id);
+	return path->empty() ? SAVE_DATA_ERROR_PARAMETER : OK;
 }
 
 static int SaveDataMemoryError(SaveDataMemoryStoreResult result)
@@ -703,9 +836,9 @@ int KYTY_SYSV_ABI SaveDataSyncSaveDataMemory(const SaveDataMemorySync* sync)
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
 	std::filesystem::path path;
-	if (!ResolveSaveDataMemorySlot(sync->user_id, sync->slot_id, &path))
+	if (const int resolve_result = ResolveSaveDataMemorySlot(sync->user_id, sync->slot_id, &path); resolve_result != OK)
 	{
-		return SAVE_DATA_ERROR_PARAMETER;
+		return resolve_result;
 	}
 
 	KYTY_LOG_DEBUG("\t user_id = %d slot=%u\n", sync->user_id, sync->slot_id);
@@ -875,9 +1008,9 @@ int KYTY_SYSV_ABI SaveDataSetupSaveDataMemory2(void* setup_param, void* result_o
 	       static_cast<uint64_t>(setup->memory_size), setup->slot_id);
 
 	std::filesystem::path path;
-	if (!ResolveSaveDataMemorySlot(setup->user_id, setup->slot_id, &path))
+	if (const int resolve_result = ResolveSaveDataMemorySlot(setup->user_id, setup->slot_id, &path); resolve_result != OK)
 	{
-		return SAVE_DATA_ERROR_PARAMETER;
+		return resolve_result;
 	}
 	size_t     existed_size = 0;
 	const auto status       = g_save_memory_store.Setup(path, setup->memory_size, &existed_size);
@@ -907,9 +1040,9 @@ int KYTY_SYSV_ABI SaveDataGetSaveDataMemory2(void* get_param)
 	KYTY_LOG_DEBUG("\t user_id=%d data=%p slot=%u\n", get->user_id, static_cast<void*>(get->data), get->slot_id);
 
 	std::filesystem::path path;
-	if (!ResolveSaveDataMemorySlot(get->user_id, get->slot_id, &path))
+	if (const int resolve_result = ResolveSaveDataMemorySlot(get->user_id, get->slot_id, &path); resolve_result != OK)
 	{
-		return SAVE_DATA_ERROR_PARAMETER;
+		return resolve_result;
 	}
 	SaveDataMemoryStoreResult status = SaveDataMemoryStoreResult::Success;
 	if (get->data != nullptr)
@@ -939,8 +1072,11 @@ int KYTY_SYSV_ABI SaveDataSetSaveDataMemory2(void* set_param)
 	KYTY_LOG_DEBUG("\t user_id=%d data=%p data_num=%u slot=%u\n", set->user_id, static_cast<const void*>(set->data), set->data_num, set->slot_id);
 
 	std::filesystem::path path;
-	if (!ResolveSaveDataMemorySlot(set->user_id, set->slot_id, &path) || set->data_num > SaveDataMemoryStore::MaximumWriteRanges() ||
-	    (set->data == nullptr && set->data_num != 0))
+	if (const int resolve_result = ResolveSaveDataMemorySlot(set->user_id, set->slot_id, &path); resolve_result != OK)
+	{
+		return resolve_result;
+	}
+	if (set->data_num > SaveDataMemoryStore::MaximumWriteRanges() || (set->data == nullptr && set->data_num != 0))
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
@@ -966,6 +1102,52 @@ int KYTY_SYSV_ABI SaveDataAbort()
 	return OK;
 }
 
+struct SaveDataDelete
+{
+	int32_t                user_id;
+	int32_t                pad;
+	const SaveDataTitleId* title_id;
+	const SaveDataDirName* dir_name;
+	uint32_t               unused;
+	uint8_t                reserved[32];
+	int32_t                pad2;
+};
+static_assert(offsetof(SaveDataDelete, dir_name) == 16);
+
+// NID S1GkePI17zQ — sceSaveDataDelete: removes one unmounted save directory.
+int KYTY_SYSV_ABI SaveDataDelete(const SaveDataDelete* del)
+{
+	if (del == nullptr || del->user_id < 0 || !SaveDataDirNameTerminated(del->dir_name))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	SaveDataTitleIdBuffer title_id_buffer {};
+	const char*           title_id = nullptr;
+	String                slot;
+	if (!SaveDataCopyTitleId(del->title_id, &title_id_buffer, &title_id) || !ResolveSaveDataSlot(title_id, del->dir_name->data, &slot))
+	{
+		return SAVE_DATA_ERROR_PARAMETER;
+	}
+	std::lock_guard lock(g_mount_mutex);
+	if (g_mount_coordinator.Acquire(del->dir_name->data).result == SaveDataMountCoordinator::AcquireResult::AlreadyMounted)
+	{
+		return SAVE_DATA_ERROR_BUSY;
+	}
+	const auto      slot_path = SaveDataFilesystemPath(slot);
+	std::error_code error;
+	if (!std::filesystem::is_directory(slot_path, error))
+	{
+		return SAVE_DATA_ERROR_NOT_FOUND;
+	}
+	std::filesystem::remove_all(slot_path, error);
+	if (error)
+	{
+		return SAVE_DATA_ERROR_INTERNAL;
+	}
+	// The allocation belongs to the deleted directory; a later create records its own.
+	return SaveDataRemoveAllocation(slot_path);
+}
+
 int KYTY_SYSV_ABI SaveDataIsMounted(uint32_t* mounted)
 {
 	PRINT_NAME();
@@ -980,14 +1162,18 @@ int KYTY_SYSV_ABI SaveDataIsMounted(uint32_t* mounted)
 int KYTY_SYSV_ABI SaveDataGetParam(const SaveDataMountPoint* mount_point, uint32_t param_type, void* param_buf, size_t param_buf_size)
 {
 	PRINT_NAME();
-	if (mount_point == nullptr || param_buf == nullptr)
+	SaveDataParamField field {};
+	if (mount_point == nullptr || param_buf == nullptr || !SaveDataParamFieldOf(param_type, &field) || param_buf_size < field.size)
 	{
 		return SAVE_DATA_ERROR_PARAMETER;
 	}
-	KYTY_LOG_DEBUG("\t mount_point    = %s\n", mount_point->data);
-	KYTY_LOG_DEBUG("\t param_type     = %u\n", param_type);
-	KYTY_LOG_DEBUG("\t param_buf_size = %" PRIu64 "\n", static_cast<uint64_t>(param_buf_size));
-	std::memset(param_buf, 0, param_buf_size);
+	std::filesystem::path file;
+	if (const int result = SaveDataParamFile(mount_point, &file); result != OK)
+	{
+		return result;
+	}
+	const SaveDataParam param = LoadSaveDataParam(file);
+	std::memcpy(param_buf, reinterpret_cast<const uint8_t*>(&param) + field.offset, field.size);
 	return OK;
 }
 
@@ -1028,6 +1214,7 @@ void RegisterSaveDataFunctions(::Kyty::Hle::HleSymbolRegistry* symbols, const Li
 	RegisterLibraryFunction(symbols, identity, "yKDy8S5yLA0", SaveDataTerminate, U"SaveData::SaveDataTerminate");
 	RegisterLibraryFunction(symbols, identity, "dQ2GohUHXzk", SaveDataAbort, U"SaveData::SaveDataAbort");
 	RegisterLibraryFunction(symbols, identity, "ieP6jP138Qo", SaveDataIsMounted, U"SaveData::SaveDataIsMounted");
+	RegisterLibraryFunction(symbols, identity, "S1GkePI17zQ", SaveDataDelete, U"SaveData::SaveDataDelete");
 	RegisterLibraryFunction(symbols, identity, "XgvSuIdnMlw", SaveDataGetParam, U"SaveData::SaveDataGetParam");
 	RegisterLibraryFunction(symbols, identity, "lJUQuaKqoKY", SaveDataDeleteTransactionResource,
 	                        U"SaveData::SaveDataDeleteTransactionResource");

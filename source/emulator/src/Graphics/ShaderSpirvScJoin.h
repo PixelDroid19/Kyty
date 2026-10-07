@@ -19,6 +19,26 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Source PCs are word aligned and may be zero (the entry instruction).
+inline constexpr uint32_t kScJoinNoSource = UINT32_MAX;
+
+struct SpirvSBranchLoop
+{
+	uint32_t header = 0;
+	uint32_t latch  = 0;
+	uint32_t merge  = 0;
+	uint32_t exit   = 0;
+
+	[[nodiscard]] String8 HeaderName() const;
+	[[nodiscard]] String8 MergeName() const;
+};
+
+// A single-entry interval loop ending in SBranch, with one exit destination.
+// Several guest back edges share its final latch and structured continue block.
+bool ScJoinFindSBranchLoop(const ShaderCode& code, uint32_t header, SpirvSBranchLoop* loop);
+bool ScJoinFindSBranchLoopContaining(const ShaderCode& code, uint32_t pc, SpirvSBranchLoop* loop);
+bool ScJoinFindSBranchLoopExit(const ShaderCode& code, const ShaderInstruction& inst, SpirvSBranchLoop* loop);
+
 // Static branch edges (SBranch / SCbranch*) that land on pc.
 int ScJoinCountLabelSources(const ShaderCode& code, uint32_t pc);
 
@@ -41,13 +61,14 @@ bool ScJoinEdgeTakenDst(const ShaderCode& code, uint32_t src_pc, uint32_t join_p
 // Nested cascade / skip-over: child_src sits under parent_src at the same join.
 bool ScJoinIsNestedIn(const ShaderCode& code, uint32_t parent_src, uint32_t child_src, uint32_t join_pc);
 
-// Owner sc_join source for a terminator/fallthrough pc at join_pc.
+// Owner sc_join source for a terminator/fallthrough pc, or kScJoinNoSource.
 uint32_t ScJoinFindOwner(const ShaderCode& code, uint32_t pc, uint32_t join_pc, const Vector<uint32_t>& sc_join_srcs);
 
-// Tightest enclosing parent among sc_join_srcs, or 0 (guest join).
+// Tightest enclosing parent among sc_join_srcs, or kScJoinNoSource (guest join).
 uint32_t ScJoinFindParent(const ShaderCode& code, uint32_t src, uint32_t join_pc, const Vector<uint32_t>& sc_join_srcs);
 
-// Collect every forward conditional edge that reconverges at join_pc.
+// Collect forward conditional edges that own a synthetic merge at join_pc.
+// Terminating discard arms and loop exits use different merge ownership.
 void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint32_t>* out_srcs);
 
 // Synthetic merge name: sc_join_<join>_<src>.

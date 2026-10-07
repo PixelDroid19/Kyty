@@ -49,6 +49,7 @@ LIB_DEFINE(InitAudio_1_AudioOut2)
 	LIB_FUNC("gatEUKG+Ea4", AudioOut2::AudioOut2PortGetState);         // PortGetState
 	LIB_FUNC("xywYcRB7nbQ", AudioOut2::AudioOut2UserCreate);           // UserCreate
 	LIB_FUNC("IaZXJ9M79uo", AudioOut2::AudioOut2UserDestroy);          // UserDestroy
+	LIB_FUNC("DImz2Ft9E2g", AudioOut2::AudioOut2GetSpeakerInfo);       // GetSpeakerInfo
 }
 
 } // namespace LibAudioOut2
@@ -70,7 +71,7 @@ LIB_DEFINE(InitAudio_1_AudioIn)
 
 namespace LibVoiceQoS {
 
-LIB_VERSION("VoiceQoS", 1, "VoiceQoS", 0, 0);
+LIB_VERSION("VoiceQoS", 1, "VoiceQoS", 1, 1);
 
 namespace VoiceQoS = Audio::VoiceQoS;
 
@@ -230,6 +231,26 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 
 } // namespace LibNgs2
 
+namespace LibAudioPropagation {
+
+LIB_VERSION("AudioPropagation", 1, "AudioPropagation", 1, 0);
+
+namespace AudioPropagation = Audio::AudioPropagation;
+
+LIB_DEFINE(InitAudio_1_AudioPropagation)
+{
+	LIB_FUNC("7xyAxrusLko", AudioPropagation::SystemQueryMemory);
+	LIB_FUNC("aNEqtSHdUSo", AudioPropagation::SystemCreate);
+	LIB_FUNC("x5VPqg5iyAk", AudioPropagation::SystemDestroy);
+	LIB_FUNC("8bI5h8req30", AudioPropagation::RoomCreate);
+	LIB_FUNC("S0JwP2AFTTE", AudioPropagation::RoomDestroy);
+	LIB_FUNC("CPLV6G-eXmk", AudioPropagation::SystemRegisterMaterial);
+	LIB_FUNC("kIdb+iQUzCs", AudioPropagation::SystemSetAttributes);
+	LIB_FUNC("ht-QXT3zGxo", AudioPropagation::SystemGetRays);
+}
+
+} // namespace LibAudioPropagation
+
 LIB_DEFINE(InitAudio_1)
 {
 	LibAudioOut::InitAudio_1_AudioOut(s);
@@ -240,6 +261,7 @@ LIB_DEFINE(InitAudio_1)
 	LibAvPlayer::InitAudio_1_AvPlayer(s);
 	LibAudio3d::InitAudio_1_Audio3d(s);
 	LibNgs2::InitAudio_1_Ngs2(s);
+	LibAudioPropagation::InitAudio_1_AudioPropagation(s);
 }
 
 } // namespace Kyty::Libs

@@ -3,16 +3,21 @@
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Core/Vector.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Gen5TextureArrayLayout.h"
+#include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/Label.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Log.h"
 
 #include "../../../emulator/src/Graphics/GraphicsRenderInternal.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -155,6 +160,8 @@ public:
 				(void)vkDeviceWaitIdle(context.device);
 				(void)TileGpuDetileReleaseContext(&context);
 			}
+			(void)vkDeviceWaitIdle(context.device);
+			VulkanMemoryPoolRelease(&context);
 			vkDestroyDevice(context.device, nullptr);
 		}
 		if (instance != VK_NULL_HANDLE)
@@ -195,7 +202,7 @@ public:
 	{
 		VkApplicationInfo app_info {};
 		app_info.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-		app_info.apiVersion = VK_API_VERSION_1_0;
+		app_info.apiVersion = VK_API_VERSION_1_4;
 
 		const char* validation_layer = nullptr;
 		uint32_t    layer_count      = 0;
@@ -241,6 +248,9 @@ public:
 
 		for (const auto physical_device: physical_devices)
 		{
+			VkPhysicalDeviceProperties properties {};
+			vkGetPhysicalDeviceProperties(physical_device, &properties);
+			if (properties.apiVersion < VK_API_VERSION_1_4) { continue; }
 			uint32_t queue_family_count = 0;
 			vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &queue_family_count, nullptr);
 			std::vector<VkQueueFamilyProperties> queue_families(queue_family_count);
@@ -418,6 +428,84 @@ public:
 
 private:
 	GraphicContext*     m_context = nullptr;
+	TextureVulkanImage m_image;
+};
+
+class ScopedRawAliasImage
+{
+public:
+	explicit ScopedRawAliasImage(GraphicContext* context): m_context(context) {}
+	~ScopedRawAliasImage() { Reset(); }
+	KYTY_CLASS_NO_COPY(ScopedRawAliasImage);
+
+	[[nodiscard]] bool Create(VkFormat format, uint32_t width, uint32_t height)
+	{
+		if (m_context == nullptr || m_context->device == VK_NULL_HANDLE)
+		{
+			return false;
+		}
+		m_image.format = format;
+		m_image.SetNativeExtent(width, height);
+		VkImageCreateInfo info {};
+		info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+		info.imageType = VK_IMAGE_TYPE_2D;
+		info.format = format;
+		info.extent = {width, height, 1u};
+		info.mipLevels = 1u;
+		info.arrayLayers = 1u;
+		info.samples = VK_SAMPLE_COUNT_1_BIT;
+		info.tiling = VK_IMAGE_TILING_OPTIMAL;
+		info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		if (vkCreateImage(m_context->device, &info, nullptr, &m_image.image) != VK_SUCCESS)
+		{
+			return false;
+		}
+		vkGetImageMemoryRequirements(m_context->device, m_image.image, &m_image.memory.requirements);
+		uint32_t memory_type = 0u;
+		if (!FindTestMemoryType(m_context, m_image.memory.requirements.memoryTypeBits,
+		                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &memory_type))
+		{
+			Reset();
+			return false;
+		}
+		VkMemoryAllocateInfo allocation {};
+		allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		allocation.allocationSize = m_image.memory.requirements.size;
+		allocation.memoryTypeIndex = memory_type;
+		if (vkAllocateMemory(m_context->device, &allocation, nullptr, &m_image.memory.memory) != VK_SUCCESS ||
+		    vkBindImageMemory(m_context->device, m_image.image, m_image.memory.memory, 0u) != VK_SUCCESS)
+		{
+			Reset();
+			return false;
+		}
+		m_image.usage = info.usage;
+		return true;
+	}
+
+	void Reset()
+	{
+		if (m_context == nullptr || m_context->device == VK_NULL_HANDLE)
+		{
+			return;
+		}
+		if (m_image.image != VK_NULL_HANDLE)
+		{
+			vkDestroyImage(m_context->device, m_image.image, nullptr);
+			m_image.image = VK_NULL_HANDLE;
+		}
+		if (m_image.memory.memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(m_context->device, m_image.memory.memory, nullptr);
+			m_image.memory.memory = VK_NULL_HANDLE;
+		}
+	}
+
+	[[nodiscard]] VulkanImage* Get() { return &m_image; }
+
+private:
+	GraphicContext* m_context = nullptr;
 	TextureVulkanImage m_image;
 };
 
@@ -692,6 +780,51 @@ TEST(EmulatorTileDetile, Depth64KB16ProductionMatchesIndependentReference)
 	EXPECT_EQ(production, linear);
 }
 
+TEST(EmulatorTileDetile, Depth64KBArraySlicesApplyTheMatchedGfx10ZEquation)
+{
+	// The GFX10 16-pipe Z_X pattern matching Kyty's XY equation puts Z3..Z0
+	// into byte-offset bits 8..11. Every slice must permute data within its
+	// own 64 KiB block; merely adding sliceBytes * layer is insufficient.
+	constexpr uint32_t height = 128u;
+	constexpr uint64_t slice_bytes = 65536u;
+	const std::array<uint32_t, 4> layers {0u, 1u, 2u, 8u};
+	const std::array<uint32_t, 4> slice_xors {0u, 0x800u, 0x400u, 0x100u};
+	for (const uint32_t bpe: {2u, 4u})
+	{
+		const uint32_t width = static_cast<uint32_t>(slice_bytes / height / bpe);
+		for (size_t index = 0; index < layers.size(); ++index)
+		{
+			std::vector<uint8_t> tiled(slice_bytes, 0u);
+			std::vector<uint8_t> expected(slice_bytes, 0u);
+			for (uint32_t y = 0u; y < height; y++)
+			{
+				for (uint32_t x = 0u; x < width; x++)
+				{
+					const uint32_t value = x * 131u + y * 17u + layers[index] * 103u;
+					const uint64_t tiled_offset = TileGetDepth64KBOffset(x, y, width, bpe) ^ slice_xors[index];
+					const uint64_t linear_offset = (static_cast<uint64_t>(y) * width + x) * bpe;
+					std::memcpy(tiled.data() + tiled_offset, &value, bpe);
+					std::memcpy(expected.data() + linear_offset, &value, bpe);
+				}
+			}
+			std::vector<uint8_t> actual(slice_bytes, 0u);
+			auto request = MakeRequest(actual.data(), tiled.data(), width, height, width, width, bpe,
+			                           TileDetileLayout::Depth64KB, slice_bytes);
+			request.depth_layer = layers[index];
+			ASSERT_TRUE(TileDetileIsSupported(request));
+			ASSERT_TRUE(TileDetile(request));
+			EXPECT_EQ(actual, expected) << "bpe=" << bpe << " layer=" << layers[index];
+			std::fill(actual.begin(), actual.end(), 0u);
+			ASSERT_TRUE(TileDetileReference(request));
+			EXPECT_EQ(actual, expected) << "reference bpe=" << bpe << " layer=" << layers[index];
+		}
+	}
+	uint8_t byte = 0u;
+	auto invalid = MakeRequest(&byte, &byte, 1u, 1u, 1u, 1u, 1u, TileDetileLayout::Standard4KB, 4096u);
+	invalid.depth_layer = 1u;
+	EXPECT_FALSE(TileDetileIsSupported(invalid));
+}
+
 TEST(EmulatorTileDetile, RejectsUnsupportedRequests)
 {
 	uint8_t dst[16] {};
@@ -870,6 +1003,84 @@ TEST(EmulatorTileDetile, ProductionBc1UploadRoundTripsPaddedBlockRows)
 		std::memcpy(expected.data() + 8u, k_block_01.data(), k_block_01.size());
 		std::memcpy(expected.data() + k_row_bytes, k_block_10.data(), k_block_10.size());
 		std::memcpy(expected.data() + k_row_bytes + 8u, k_block_11.data(), k_block_11.size());
+		EXPECT_EQ(actual, expected);
+	}
+	EXPECT_TRUE(vulkan.ReleaseProductionUploadPath());
+}
+
+TEST(EmulatorTileDetile, GpuRawRenderAliasCompositionPreservesMixedFormatBytes)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	VulkanDetileTestContext vulkan {};
+	if (!vulkan.Initialize())
+	{
+		GTEST_SKIP() << "no Vulkan graphics+compute device is available";
+	}
+	constexpr VkFormat formats[] = {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R8G8_UNORM,
+	                                VK_FORMAT_R16G16B16A16_UNORM};
+	for (VkFormat format: formats)
+	{
+		VkFormatProperties properties {};
+		vkGetPhysicalDeviceFormatProperties(vulkan.context.physical_device, format, &properties);
+		constexpr auto required = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+		if ((properties.optimalTilingFeatures & required) != required)
+		{
+			GTEST_SKIP() << "Vulkan device lacks required image transfer support";
+		}
+	}
+	ASSERT_TRUE(vulkan.InitializeProductionUploadPath());
+	{
+		ScopedRawAliasImage baseline(&vulkan.context);
+		ScopedRawAliasImage overlay(&vulkan.context);
+		ScopedRawAliasImage destination(&vulkan.context);
+		ASSERT_TRUE(baseline.Create(formats[0], 128u, 128u));
+		ASSERT_TRUE(overlay.Create(formats[1], 256u, 128u));
+		ASSERT_TRUE(destination.Create(formats[2], 128u, 128u));
+
+		std::vector<uint8_t> baseline_linear(128u * 128u * 8u);
+		for (size_t index = 0; index < baseline_linear.size() / 2u; ++index)
+		{
+			const uint16_t bits = static_cast<uint16_t>(0x3c00u + index % 512u);
+			baseline_linear[index * 2u] = static_cast<uint8_t>(bits);
+			baseline_linear[index * 2u + 1u] = static_cast<uint8_t>(bits >> 8u);
+		}
+		std::vector<uint8_t> overlay_linear(256u * 128u * 2u);
+		for (size_t index = 0; index < overlay_linear.size(); ++index)
+		{
+			overlay_linear[index] = static_cast<uint8_t>((index * 7u + 31u) & 0xffu);
+		}
+		UtilFillImage(&vulkan.context, baseline.Get(), baseline_linear.data(), baseline_linear.size(), 128u,
+		              static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+		UtilFillImage(&vulkan.context, overlay.Get(), overlay_linear.data(), overlay_linear.size(), 256u,
+		              static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+
+		std::vector<uint8_t> expected(baseline_linear.size(), 0u);
+		FillTiledFromLinear(&expected, baseline_linear, 128u, 128u, 128u, 8u, TileDetileLayout::Sw64kRx);
+		std::vector<uint8_t> overlay_raw(overlay_linear.size(), 0u);
+		FillTiledFromLinear(&overlay_raw, overlay_linear, 256u, 128u, 256u, 2u, TileDetileLayout::Sw64kRx);
+		std::memcpy(expected.data() + 65536u, overlay_raw.data(), overlay_raw.size());
+
+		constexpr uint64_t base = 0x100000u;
+		Vector<StorageTextureRawRenderSource> sources;
+		sources.Add({baseline.Get(), base, expected.size(), 128u, 128u, 128u, 8u});
+		sources.Add({overlay.Get(), base + 65536u, overlay_raw.size(), 256u, 128u, 256u, 2u});
+		CommandBuffer command(GraphicContext::QUEUE_UTIL);
+		ASSERT_FALSE(command.IsInvalid());
+		command.Begin();
+		ASSERT_TRUE(StorageTextureCompositeRawRenderAliases(&vulkan.context, &command, sources, destination.Get(),
+		                                                  base, expected.size()));
+		command.End();
+		command.Execute();
+		command.WaitForFence();
+
+		std::vector<uint8_t> actual(expected.size(), 0u);
+		UtilFillBuffer(&vulkan.context, actual.data(), actual.size(), 128u, destination.Get(),
+		               static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
 		EXPECT_EQ(actual, expected);
 	}
 	EXPECT_TRUE(vulkan.ReleaseProductionUploadPath());
@@ -1591,6 +1802,71 @@ TEST(EmulatorTileDetile, Standard4KBBc1WorldAlbedoMipChainMatchesGuestSize)
 		++covered;
 	}
 	EXPECT_EQ(covered, k_levels);
+}
+
+TEST(EmulatorTileDetile, Depth64KBR32MipChainSizeIncludesTail)
+{
+	TileSizeAlign size {};
+	TileSizeOffset levels[8] {};
+	TileGetTextureSize2(22u, 480u, 270u, 512u, 8u, 24u, &size, levels, nullptr);
+	EXPECT_EQ(size.size, 0x120000u);
+	EXPECT_EQ(levels[0].offset, 0x60000u);
+	EXPECT_EQ(levels[1].offset, 0x20000u);
+	EXPECT_EQ(levels[2].offset, 0x10000u);
+}
+
+TEST(EmulatorTileDetile, Depth64KBR32MipChainHasPhysicalTailAndFullBacking)
+{
+	Gen5TextureMipLayout layout {};
+	ASSERT_TRUE(Gen5GetDepth64KBTextureMipLayout(22u, 480u, 270u, 512u, 8u, &layout));
+	EXPECT_EQ(layout.tiled.size, 0x120000u);
+	EXPECT_EQ(layout.tiled.align, 65536u);
+	EXPECT_EQ(layout.first_tail_level, 3u);
+
+	constexpr uint32_t k_offsets[] = {0x60000u, 0x20000u, 0x10000u, 0u, 0u, 0u, 0u, 0u};
+	constexpr uint32_t k_pitches[] = {512u, 256u, 128u, 128u, 128u, 128u, 128u, 128u};
+	constexpr uint32_t k_tail_x[]  = {0u, 0u, 0u, 64u, 0u, 32u, 0u, 16u};
+	constexpr uint32_t k_tail_y[]  = {0u, 0u, 0u, 0u, 64u, 0u, 32u, 0u};
+	std::vector<uint8_t> tiled(layout.tiled.size, 0u);
+	for (uint32_t level = 0; level < 8u; ++level)
+	{
+		const auto& mip = layout.level[level];
+		EXPECT_EQ(mip.width, std::max(1u, 480u >> level));
+		EXPECT_EQ(mip.height, std::max(1u, 270u >> level));
+		EXPECT_EQ(mip.tiled_offset, k_offsets[level]);
+		EXPECT_EQ(mip.tiled_pitch, k_pitches[level]);
+		EXPECT_EQ(mip.tail_x, k_tail_x[level]);
+		EXPECT_EQ(mip.tail_y, k_tail_y[level]);
+		EXPECT_EQ(mip.in_mip_tail, level >= 3u);
+		for (uint32_t sample = 0; sample < 3u; ++sample)
+		{
+			const uint32_t x = sample == 0u ? 0u : sample == 1u ? mip.width / 2u : mip.width - 1u;
+			const uint32_t y = sample == 0u ? 0u : sample == 1u ? mip.height / 2u : mip.height - 1u;
+			const uint64_t source = static_cast<uint64_t>(k_offsets[level]) +
+			                        TileGetDepth64KBOffset(x + k_tail_x[level], y + k_tail_y[level], k_pitches[level], 4u);
+			ASSERT_LE(source + 4u, tiled.size());
+			const uint32_t value = 0x3f000000u | (level << 12u) | (sample << 8u) | 0x5au;
+			std::memcpy(tiled.data() + source, &value, sizeof(value));
+		}
+	}
+
+	std::vector<uint8_t> linear(static_cast<size_t>(layout.linear_size), 0u);
+	ASSERT_TRUE(Gen5DetileDepth64KBTextureMipChain(linear.data(), linear.size(), tiled.data(), tiled.size(), layout));
+	for (uint32_t level = 0; level < 8u; ++level)
+	{
+		const auto& mip = layout.level[level];
+		for (uint32_t sample = 0; sample < 3u; ++sample)
+		{
+			const uint32_t x = sample == 0u ? 0u : sample == 1u ? mip.width / 2u : mip.width - 1u;
+			const uint32_t y = sample == 0u ? 0u : sample == 1u ? mip.height / 2u : mip.height - 1u;
+			const uint64_t dest = static_cast<uint64_t>(mip.linear_offset) + (static_cast<uint64_t>(y) * mip.width + x) * 4u;
+			uint32_t value = 0u;
+			std::memcpy(&value, linear.data() + dest, sizeof(value));
+			EXPECT_EQ(value, 0x3f000000u | (level << 12u) | (sample << 8u) | 0x5au);
+		}
+	}
+	EXPECT_FALSE(Gen5DetileDepth64KBTextureMipChain(linear.data(), linear.size(), tiled.data(), tiled.size() - 1u, layout));
+	EXPECT_FALSE(Gen5GetDepth64KBTextureMipLayout(22u, 480u, 270u, 480u, 8u, &layout));
 }
 
 TEST(EmulatorTileDetile, ParsesDrawPsTraceCensusAndExactChecksum)

@@ -23,7 +23,20 @@ enum class GuestImageNumericType
 	SignedInteger,
 };
 
-// Resolve both legacy dfmt/nfmt and Gen5 unified image formats from one table.
+// Historical BC1 package fixtures use catalog identifier 133, which is
+// RGB565 in the raw T# namespace. Only catalog readers/fixtures may
+// translate this value; descriptor consumers always pass the raw hardware ID.
+enum class Gen5CatalogImageFormat: uint16_t
+{
+	Bc1Unorm = 133,
+};
+
+[[nodiscard]] constexpr uint16_t Gen5ImageFormatFromCatalog(Gen5CatalogImageFormat format)
+{
+	return format == Gen5CatalogImageFormat::Bc1Unorm ? 169u : 0u;
+}
+
+// fmt is the raw nine-bit Gen5 T# FORMAT field. fmt=0 selects legacy dfmt/nfmt.
 // Unsupported usage/format combinations return VK_FORMAT_UNDEFINED; callers
 // must reject them instead of substituting another host format.
 [[nodiscard]] VkFormat VulkanResolveGuestImageFormat(GuestImageUsage usage, uint8_t dfmt, uint8_t nfmt, uint16_t fmt);
@@ -46,6 +59,19 @@ enum class GuestImageNumericType
 [[nodiscard]] bool VulkanGen5SampleFormatMatchesEffective(uint16_t fmt, bool use_srgb, VkFormat format);
 
 [[nodiscard]] GuestImageNumericType VulkanGen5ImageNumericType(uint16_t fmt);
+
+// Texel size of an uncompressed color format of the guest format table; zero
+// for block-compressed, depth and unknown formats.
+[[nodiscard]] uint32_t VulkanColorTexelBytes(VkFormat format);
+
+// Guest memory is untyped: a storage image's bytes read through another
+// format of the same texel size are what the hardware samples. Such a view is
+// valid on an image created mutable with this format among its view formats.
+[[nodiscard]] bool VulkanColorFormatsShareTexels(VkFormat a, VkFormat b);
+
+// Every host format of the guest format table sharing the texel size of
+// format, format first; the view-format list of a mutable storage image.
+[[nodiscard]] uint32_t VulkanColorTexelFormatList(VkFormat format, VkFormat* out, uint32_t capacity);
 
 } // namespace Kyty::Libs::Graphics
 

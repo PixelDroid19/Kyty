@@ -154,6 +154,26 @@ TEST(EmulatorGpuSubmissionTracker, FindsNewestPendingProducerWhenValueMatchesWai
 	EXPECT_EQ(tracker.FindPendingProducer(0x2000, 8, 0x10, UINT64_MAX, &dependency), GpuSubmissionResult::ProducerNotFound);
 }
 
+TEST(EmulatorGpuSubmissionTracker, AMatchingProducerReportsItsHostEffects)
+{
+	GpuSubmissionTracker tracker;
+	SubmissionId         id;
+	SubmissionDependency dependency;
+
+	ASSERT_EQ(tracker.BeginRecording(GpuQueueId(0), 0, &id, nullptr), GpuSubmissionResult::Success);
+	ASSERT_EQ(tracker.RegisterProducer(id, 0x1000, 4, 1), GpuSubmissionResult::Success);
+	ASSERT_EQ(tracker.RegisterProducer(id, 0x2000, 8, 2, GpuProducerEffect::GuestStore | GpuProducerEffect::WriteBack),
+	          GpuSubmissionResult::Success);
+	EXPECT_EQ(tracker.RegisterProducer(id, 0x3000, 4, 3, GpuProducerEffect::None), GpuSubmissionResult::InvalidArgument);
+
+	ASSERT_EQ(tracker.FindPendingProducer(0x1000, 4, 1, UINT32_MAX, &dependency), GpuSubmissionResult::Success);
+	EXPECT_EQ(dependency.effects, GpuProducerEffect::GuestStore);
+	ASSERT_EQ(tracker.FindPendingProducer(0x2000, 8, 2, UINT64_MAX, &dependency), GpuSubmissionResult::Success);
+	EXPECT_EQ(dependency.effects, GpuProducerEffect::GuestStore | GpuProducerEffect::WriteBack);
+	EXPECT_EQ(tracker.FindPendingProducer(0x2000, 8, 9, UINT64_MAX, &dependency), GpuSubmissionResult::ProducerValueMismatch);
+	EXPECT_EQ(dependency.effects, GpuProducerEffect::None);
+}
+
 TEST(EmulatorGpuSubmissionTracker, NewerProducerShadowsOlderMatchingValue)
 {
 	GpuSubmissionTracker tracker;

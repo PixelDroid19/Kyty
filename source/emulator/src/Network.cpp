@@ -31,6 +31,9 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #define KYTY_NET_HOST_POSIX 1
@@ -112,6 +115,7 @@ public:
 
 	Id   SslInit(uint64_t pool_size);
 	bool SslTerm(Id ssl_ctx_id);
+	bool SslIsActive(Id ssl_ctx_id);
 
 	Id   HttpInit(int memid, Id ssl_ctx_id, uint64_t pool_size);
 	bool HttpTerm(Id http_ctx_id);
@@ -138,6 +142,8 @@ public:
 	bool HttpSetAuthEnabled(Id id, int enable);
 
 private:
+	[[nodiscard]] bool SslIsActiveLocked(Id ssl_ctx_id) const;
+
 	struct Pool
 	{
 		bool   used = false;
@@ -284,11 +290,23 @@ Network::Id Network::SslInit(uint64_t pool_size)
 	return Id::Invalid();
 }
 
+bool Network::SslIsActiveLocked(Id ssl_ctx_id) const
+{
+	return ssl_ctx_id.GetType() == Id::Type::Ssl && ssl_ctx_id.GetId() >= 0 && ssl_ctx_id.GetId() < SSL_MAX &&
+	       m_ssl[ssl_ctx_id.GetId()].used;
+}
+
+bool Network::SslIsActive(Id ssl_ctx_id)
+{
+	Core::LockGuard lock(m_mutex);
+	return SslIsActiveLocked(ssl_ctx_id);
+}
+
 bool Network::SslTerm(Id ssl_ctx_id)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (ssl_ctx_id.GetType() == Id::Type::Ssl && ssl_ctx_id.GetId() >= 0 && ssl_ctx_id.GetId() < SSL_MAX && m_ssl[ssl_ctx_id.GetId()].used)
+	if (SslIsActiveLocked(ssl_ctx_id))
 	{
 		m_ssl[ssl_ctx_id.GetId()].used = false;
 
@@ -302,8 +320,7 @@ Network::Id Network::HttpInit(int memid, Id ssl_ctx_id, uint64_t pool_size)
 {
 	Core::LockGuard lock(m_mutex);
 
-	if (ssl_ctx_id.GetType() == Id::Type::Ssl && ssl_ctx_id.GetId() >= 0 && ssl_ctx_id.GetId() < SSL_MAX &&
-	    m_ssl[ssl_ctx_id.GetId()].used && memid >= 0 && memid < POOLS_MAX && m_pools[memid].used)
+	if (SslIsActiveLocked(ssl_ctx_id) && memid >= 0 && memid < POOLS_MAX && m_pools[memid].used)
 	{
 		for (int id = 0; id < HTTP_MAX; id++)
 		{
@@ -908,6 +925,22 @@ int KYTY_SYSV_ABI NetGetMacAddress(NetEtherAddr* addr, int flags)
 	return OK;
 }
 
+// A guest socket address: a BSD sockaddr_in (16 bytes, family 2) or sockaddr_in6
+// (28 bytes, family 28). Both start with a length byte and a family byte.
+struct GuestSockaddr
+{
+	uint8_t  family = 2;
+	uint16_t port   = 0;
+	uint8_t  addr[16] {}; // IPv4 uses the first four bytes
+	uint32_t flowinfo = 0;
+	uint32_t scope_id = 0;
+};
+
+constexpr uint8_t  kGuestAfInet       = 2;
+constexpr uint8_t  kGuestAfInet6      = 28;
+constexpr uint32_t kGuestSockaddrIn   = 16;
+constexpr uint32_t kGuestSockaddrIn6  = 28;
+
 struct SocketState
 {
 	std::mutex              mutex;
@@ -917,8 +950,7 @@ struct SocketState
 	bool                    datagram   = false;
 	bool                    bound      = false;
 	uint32_t                status_flags = 0;
-	uint16_t                port       = 0;
-	uint8_t                 addr[4] {};
+	GuestSockaddr           local;
 #if KYTY_NET_HOST_POSIX
 	int host_fd = -1;
 #endif
@@ -935,6 +967,9 @@ static std::unordered_map<int, SocketStatePtr> g_sockets;
 
 constexpr uint64_t kMaxIpv4UdpPayload  = 65'507; // IPv4 payload: 65,535 - 20-byte IP - 8-byte UDP header.
 constexpr size_t   kSocketIoChunkSize  = 64u * 1024u;
+// No UDP datagram is longer than this, so a larger receive buffer is only
+// ever partly filled.
+constexpr uint64_t kMaxUdpReceive      = 65'535;
 constexpr int      kMaxEpollEvents     = 1024;
 constexpr int      kMaxSocketInfoSize  = 64 * 1024;
 
@@ -1150,52 +1185,94 @@ static int CopyGuestOutput(void* output, const uint8_t* source, size_t length)
 	return Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(output), source, length) ? OK : NET_ERROR_EFAULT;
 }
 
-struct GuestSockaddrIn
+static bool ReadGuestSockaddr(const void* addr, uint32_t len, GuestSockaddr* out)
 {
-	uint16_t port = 0;
-	uint8_t  addr[4] {};
-};
-
-static bool ReadGuestSockaddrIn(const void* addr, uint32_t len, GuestSockaddrIn* out)
-{
-	constexpr uint32_t min_sockaddr_size = 8;
-	if (addr == nullptr || len < min_sockaddr_size || out == nullptr || !IsGuestReadableRange(addr, min_sockaddr_size))
+	uint8_t bytes[kGuestSockaddrIn6] {};
+	if (addr == nullptr || out == nullptr || len < 8 || !IsGuestReadableRange(addr, 2) ||
+	    !Core::VirtualMemory::CopyFromGuest(bytes, reinterpret_cast<uint64_t>(addr), 2))
 	{
 		return false;
 	}
-
-	uint8_t bytes[min_sockaddr_size] {};
-	if (!Core::VirtualMemory::CopyFromGuest(bytes, reinterpret_cast<uint64_t>(addr), sizeof(bytes)))
+	const uint32_t need = bytes[1] == kGuestAfInet ? 8u : bytes[1] == kGuestAfInet6 ? kGuestSockaddrIn6 : 0u;
+	if (need == 0 || len < need || !IsGuestReadableRange(addr, need) ||
+	    !Core::VirtualMemory::CopyFromGuest(bytes, reinterpret_cast<uint64_t>(addr), need))
 	{
 		return false;
 	}
-	if (bytes[1] != 2)
+	*out        = {};
+	out->family = bytes[1];
+	out->port   = static_cast<uint16_t>((static_cast<uint16_t>(bytes[2]) << 8u) | bytes[3]);
+	if (out->family == kGuestAfInet)
 	{
-		return false;
+		std::memcpy(out->addr, bytes + 4, 4);
+	} else
+	{
+		std::memcpy(&out->flowinfo, bytes + 4, 4);
+		std::memcpy(out->addr, bytes + 8, 16);
+		std::memcpy(&out->scope_id, bytes + 24, 4);
 	}
-	out->port = static_cast<uint16_t>((static_cast<uint16_t>(bytes[2]) << 8u) | bytes[3]);
-	std::memcpy(out->addr, bytes + 4, sizeof(out->addr));
 	return true;
 }
 
-static bool WriteGuestSockaddrIn(void* addr, void* len, uint32_t max_len, uint16_t port, const uint8_t ip[4])
+// Writes as much of the address as the caller's buffer holds and stores its full size.
+static bool WriteGuestSockaddr(void* addr, void* len, uint32_t max_len, const GuestSockaddr& in)
 {
-	constexpr uint32_t min_sockaddr_size = 8;
-	if (addr == nullptr || len == nullptr || max_len < min_sockaddr_size || ip == nullptr ||
-	    !IsGuestOutputRange(addr, min_sockaddr_size) || !IsGuestOutputRange(len, sizeof(uint32_t)))
+	if (addr == nullptr || len == nullptr || max_len < 8 || !IsGuestOutputRange(len, sizeof(uint32_t)))
 	{
 		return false;
 	}
-	uint8_t out[min_sockaddr_size] {};
-	out[0] = 16;
-	out[1] = 2;
-	out[2] = static_cast<uint8_t>((port >> 8u) & 0xffu);
-	out[3] = static_cast<uint8_t>(port & 0xffu);
-	std::memcpy(out + 4, ip, 4);
-	const uint32_t write_len = std::min(max_len, 16u);
-	return Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(addr), out, sizeof(out)) &&
+	uint8_t        out[kGuestSockaddrIn6] {};
+	const uint32_t size = in.family == kGuestAfInet6 ? kGuestSockaddrIn6 : kGuestSockaddrIn;
+	out[0]              = static_cast<uint8_t>(size);
+	out[1]              = in.family;
+	out[2]              = static_cast<uint8_t>((in.port >> 8u) & 0xffu);
+	out[3]              = static_cast<uint8_t>(in.port & 0xffu);
+	if (in.family == kGuestAfInet6)
+	{
+		std::memcpy(out + 4, &in.flowinfo, 4);
+		std::memcpy(out + 8, in.addr, 16);
+		std::memcpy(out + 24, &in.scope_id, 4);
+	} else
+	{
+		std::memcpy(out + 4, in.addr, 4);
+	}
+	const uint32_t write_len = std::min(max_len, size);
+	return IsGuestOutputRange(addr, write_len) && Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(addr), out, write_len) &&
 	       Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(len), &write_len, sizeof(write_len));
 }
+
+#if KYTY_NET_HOST_POSIX
+// Guest message flags carry the BSD values. Linux numbers several differently (BSD MSG_DONTWAIT 0x80 is MSG_EOR
+// there and BSD MSG_WAITALL 0x40 is MSG_DONTWAIT), so a non-blocking receive blocked and a waiting one did not.
+// Sends never raise SIGPIPE on the host: a closed peer reports EPIPE instead of ending the emulator.
+static int GuestToHostMessageFlags(int guest_flags, bool sending)
+{
+	struct FlagPair
+	{
+		int guest;
+		int host;
+	};
+	static constexpr FlagPair kFlags[] = {{0x1, MSG_OOB},    {0x2, MSG_PEEK},    {0x4, MSG_DONTROUTE}, {0x8, MSG_EOR},
+	                                      {0x10, MSG_TRUNC}, {0x20, MSG_CTRUNC}, {0x40, MSG_WAITALL},  {0x80, MSG_DONTWAIT}};
+	int host_flags = 0;
+	for (const auto& pair: kFlags)
+	{
+		if ((guest_flags & pair.guest) != 0)
+		{
+			host_flags |= pair.host;
+		}
+	}
+#ifdef MSG_NOSIGNAL
+	if (sending)
+	{
+		host_flags |= MSG_NOSIGNAL;
+	}
+#else
+	(void)sending;
+#endif
+	return host_flags;
+}
+#endif
 
 #if KYTY_NET_HOST_POSIX
 static int HostErrnoToNet(int host_errno)
@@ -1232,6 +1309,127 @@ static int HostErrnoToNet(int host_errno)
 		case ECONNREFUSED: return NET_ERROR_ECONNREFUSED;
 		case EPIPE: return NET_ERROR_EPIPE;
 		default: return NET_ERROR_EINVAL;
+	}
+}
+
+// One-shot readiness watches for the kernel event queue. Each watch polls its
+// own duplicate of the host descriptor, so closing the guest socket never
+// leaves the watcher polling a reused descriptor number; only the watcher
+// thread closes those duplicates.
+struct SocketReadinessWatch
+{
+	int                id        = -1;
+	bool               write     = false;
+	uint64_t           owner     = 0;
+	uint64_t           generation = 0;
+	NetReadinessNotify notify    = nullptr;
+	int                host_fd   = -1;
+	bool               cancelled = false;
+};
+
+static std::mutex                        g_watch_mutex;
+static std::vector<SocketReadinessWatch> g_watches;
+static int                               g_watch_wake[2] = {-1, -1};
+
+static void WakeSocketWatcher()
+{
+	const uint8_t byte = 1;
+	(void)::write(g_watch_wake[1], &byte, sizeof(byte));
+}
+
+static void SocketWatcherThread(void* /*arg*/)
+{
+	std::vector<pollfd>               polled;
+	std::vector<SocketReadinessWatch> fired;
+	for (;;)
+	{
+		{
+			std::lock_guard lock(g_watch_mutex);
+			polled.assign(1, pollfd {g_watch_wake[0], POLLIN, 0});
+			for (const auto& watch: g_watches)
+			{
+				polled.push_back(pollfd {watch.host_fd, static_cast<short>(watch.write ? POLLOUT : POLLIN), 0});
+			}
+		}
+		if (::poll(polled.data(), polled.size(), -1) < 0)
+		{
+			EXIT_IF(errno != EINTR);
+			continue;
+		}
+		if (polled[0].revents != 0)
+		{
+			uint8_t drain[64];
+			while (::read(g_watch_wake[0], drain, sizeof(drain)) > 0)
+			{
+			}
+		}
+		fired.clear();
+		{
+			std::lock_guard lock(g_watch_mutex);
+			auto ready = [&polled](int host_fd)
+			{ return std::any_of(polled.begin() + 1, polled.end(), [host_fd](const pollfd& p) { return p.fd == host_fd && p.revents != 0; }); };
+			for (auto it = g_watches.begin(); it != g_watches.end();)
+			{
+				if (it->cancelled || ready(it->host_fd))
+				{
+					(void)::close(it->host_fd);
+					if (!it->cancelled)
+					{
+						fired.push_back(*it);
+					}
+					it = g_watches.erase(it);
+				} else
+				{
+					++it;
+				}
+			}
+		}
+		for (const auto& watch: fired)
+		{
+			watch.notify(watch.owner, watch.generation, watch.id, watch.write);
+		}
+	}
+}
+
+// Requires g_watch_mutex.
+static bool StartSocketWatcherLocked()
+{
+	if (g_watch_wake[0] >= 0)
+	{
+		return true;
+	}
+	int wake[2] = {-1, -1};
+	if (::pipe(wake) != 0)
+	{
+		return false;
+	}
+	for (const int fd: wake)
+	{
+		(void)::fcntl(fd, F_SETFD, FD_CLOEXEC);
+		(void)::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);
+	}
+	g_watch_wake[0] = wake[0];
+	g_watch_wake[1] = wake[1];
+	Core::Thread thread(SocketWatcherThread, nullptr);
+	thread.Detach();
+	return true;
+}
+
+static void CancelSocketWatches(int id)
+{
+	std::lock_guard lock(g_watch_mutex);
+	bool            any = false;
+	for (auto& watch: g_watches)
+	{
+		if (watch.id == id && !watch.cancelled)
+		{
+			watch.cancelled = true;
+			any             = true;
+		}
+	}
+	if (any)
+	{
+		WakeSocketWatcher();
 	}
 }
 
@@ -1277,17 +1475,48 @@ static bool TranslateGuestSocketParams(int family, int type, int protocol, int* 
 	return true;
 }
 
-static bool GuestToHostSockaddrIn(const GuestSockaddrIn& guest, sockaddr_in* out)
+static socklen_t GuestToHostSockaddr(const GuestSockaddr& guest, sockaddr_storage* out)
 {
-	if (out == nullptr)
-	{
-		return false;
-	}
 	std::memset(out, 0, sizeof(*out));
-	out->sin_family = AF_INET;
-	out->sin_port   = htons(guest.port);
-	std::memcpy(&out->sin_addr, guest.addr, sizeof(guest.addr));
-	return true;
+	if (guest.family == kGuestAfInet6)
+	{
+		auto* in6            = reinterpret_cast<sockaddr_in6*>(out);
+		in6->sin6_family     = AF_INET6;
+		in6->sin6_port       = htons(guest.port);
+		in6->sin6_flowinfo   = guest.flowinfo;
+		in6->sin6_scope_id   = guest.scope_id;
+		std::memcpy(&in6->sin6_addr, guest.addr, 16);
+		return sizeof(sockaddr_in6);
+	}
+	auto* in4       = reinterpret_cast<sockaddr_in*>(out);
+	in4->sin_family = AF_INET;
+	in4->sin_port   = htons(guest.port);
+	std::memcpy(&in4->sin_addr, guest.addr, 4);
+	return sizeof(sockaddr_in);
+}
+
+static bool HostToGuestSockaddr(const sockaddr_storage& host, GuestSockaddr* out)
+{
+	*out = {};
+	if (host.ss_family == AF_INET6)
+	{
+		const auto* in6 = reinterpret_cast<const sockaddr_in6*>(&host);
+		out->family     = kGuestAfInet6;
+		out->port       = ntohs(in6->sin6_port);
+		out->flowinfo   = in6->sin6_flowinfo;
+		out->scope_id   = in6->sin6_scope_id;
+		std::memcpy(out->addr, &in6->sin6_addr, 16);
+		return true;
+	}
+	if (host.ss_family == AF_INET)
+	{
+		const auto* in4 = reinterpret_cast<const sockaddr_in*>(&host);
+		out->family     = kGuestAfInet;
+		out->port       = ntohs(in4->sin_port);
+		std::memcpy(out->addr, &in4->sin_addr, 4);
+		return true;
+	}
+	return false;
 }
 #endif
 
@@ -1311,6 +1540,14 @@ int KYTY_SYSV_ABI NetSocket(const char* name, int family, int type, int protocol
 	if (state->host_fd < 0)
 	{
 		return HostErrnoToNet(errno);
+	}
+	state->local.family = host_family == AF_INET6 ? kGuestAfInet6 : kGuestAfInet;
+	if (host_family == AF_INET6)
+	{
+		// The guest kernel's IPv6 sockets default to IPv6-only (FreeBSD v6only=1), so
+		// a title can bind the same port for IPv4 and IPv6. Linux defaults to dual stack.
+		const int v6only = 1;
+		(void)::setsockopt(state->host_fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
 	}
 #else
 	(void)family;
@@ -1354,6 +1591,7 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 		host_fd        = state->host_fd;
 	}
 
+	CancelSocketWatches(id);
 	if (host_fd >= 0)
 	{
 		// shutdown wakes blocking accept/recv while the operation lease keeps
@@ -1386,6 +1624,119 @@ int KYTY_SYSV_ABI NetSocketClose(int id)
 	return OK;
 }
 
+int NetSocketReadiness(int id, bool write, bool* ready, int64_t* data)
+{
+	if (ready == nullptr || data == nullptr)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	*ready         = false;
+	*data          = 0;
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+#if KYTY_NET_HOST_POSIX
+	int host_fd = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	pollfd    probe {host_fd, static_cast<short>(write ? POLLOUT : POLLIN), 0};
+	const int polled     = ::poll(&probe, 1, 0);
+	const int host_errno = errno;
+	int       pending    = 0;
+	if (polled > 0 && !write && ::ioctl(host_fd, FIONREAD, &pending) != 0)
+	{
+		pending = 0;
+	}
+	EndSocketOperation(state);
+	if (polled < 0)
+	{
+		return HostErrnoToNet(host_errno);
+	}
+	// An error or hang-up also wakes the waiter; the next socket call reports it.
+	*ready = polled > 0;
+	*data  = write ? 1 : pending;
+	return OK;
+#else
+	(void)write;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+int NetSocketWatch(int id, bool write, uint64_t owner, uint64_t generation, NetReadinessNotify notify)
+{
+	if (notify == nullptr)
+	{
+		return NET_ERROR_EINVAL;
+	}
+	const auto state = FindSocketState(id);
+	if (state == nullptr)
+	{
+		return NET_ERROR_EBADF;
+	}
+#if KYTY_NET_HOST_POSIX
+	int host_fd = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	const int watched    = ::fcntl(host_fd, F_DUPFD_CLOEXEC, 0);
+	const int host_errno = errno;
+	EndSocketOperation(state);
+	if (watched < 0)
+	{
+		return HostErrnoToNet(host_errno);
+	}
+
+	std::lock_guard lock(g_watch_mutex);
+	if (!StartSocketWatcherLocked())
+	{
+		(void)::close(watched);
+		return NET_ERROR_ENOBUFS;
+	}
+	for (auto& watch: g_watches)
+	{
+		if (!watch.cancelled && watch.id == id && watch.write == write && watch.owner == owner)
+		{
+			watch.generation = generation;
+			watch.notify     = notify;
+			(void)::close(watched);
+			return OK;
+		}
+	}
+	g_watches.push_back(SocketReadinessWatch {id, write, owner, generation, notify, watched, false});
+	WakeSocketWatcher();
+	return OK;
+#else
+	(void)write;
+	(void)owner;
+	(void)generation;
+	return NET_ERROR_EOPNOTSUPP;
+#endif
+}
+
+void NetSocketUnwatch(int id, bool write, uint64_t owner)
+{
+#if KYTY_NET_HOST_POSIX
+	std::lock_guard lock(g_watch_mutex);
+	for (auto& watch: g_watches)
+	{
+		if (!watch.cancelled && watch.id == id && watch.write == write && watch.owner == owner)
+		{
+			watch.cancelled = true;
+			WakeSocketWatcher();
+		}
+	}
+#else
+	(void)id;
+	(void)write;
+	(void)owner;
+#endif
+}
+
 int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 {
 	PRINT_NAME();
@@ -1395,24 +1746,21 @@ int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 	{
 		return NET_ERROR_EBADF;
 	}
-	GuestSockaddrIn guest_addr {};
-	if (len < 0 || !ReadGuestSockaddrIn(addr, static_cast<uint32_t>(len), &guest_addr))
+	GuestSockaddr guest_addr {};
+	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr))
 	{
 		return NET_ERROR_EINVAL;
 	}
 
 #if KYTY_NET_HOST_POSIX
-	sockaddr_in host_addr {};
-	if (!GuestToHostSockaddrIn(guest_addr, &host_addr))
-	{
-		return NET_ERROR_EINVAL;
-	}
+	sockaddr_storage host_addr {};
+	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
 	int host_fd = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
 		return NET_ERROR_EBADF;
 	}
-	const int bind_result = ::bind(host_fd, reinterpret_cast<sockaddr*>(&host_addr), sizeof(host_addr));
+	const int bind_result = ::bind(host_fd, reinterpret_cast<sockaddr*>(&host_addr), host_addr_len);
 	const int bind_errno  = errno;
 	EndSocketOperation(state);
 	if (bind_result != 0)
@@ -1427,8 +1775,7 @@ int KYTY_SYSV_ABI NetBind(int id, const void* addr, int len)
 		return NET_ERROR_EBADF;
 	}
 	state->bound = true;
-	state->port  = guest_addr.port;
-	std::memcpy(state->addr, guest_addr.addr, sizeof(guest_addr.addr));
+	state->local = guest_addr;
 	return OK;
 }
 
@@ -1441,23 +1788,20 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
 	{
 		return NET_ERROR_EBADF;
 	}
-	GuestSockaddrIn guest_addr {};
-	if (len < 0 || !ReadGuestSockaddrIn(addr, static_cast<uint32_t>(len), &guest_addr))
+	GuestSockaddr guest_addr {};
+	if (len < 0 || !ReadGuestSockaddr(addr, static_cast<uint32_t>(len), &guest_addr))
 	{
 		return NET_ERROR_EINVAL;
 	}
 #if KYTY_NET_HOST_POSIX
-	sockaddr_in host_addr {};
-	if (!GuestToHostSockaddrIn(guest_addr, &host_addr))
-	{
-		return NET_ERROR_EINVAL;
-	}
+	sockaddr_storage host_addr {};
+	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
 	int host_fd = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
 		return NET_ERROR_EBADF;
 	}
-	const int connect_result = ::connect(host_fd, reinterpret_cast<sockaddr*>(&host_addr), sizeof(host_addr));
+	const int connect_result = ::connect(host_fd, reinterpret_cast<sockaddr*>(&host_addr), host_addr_len);
 	const int connect_errno  = errno;
 	EndSocketOperation(state);
 	if (connect_result != 0)
@@ -1472,8 +1816,7 @@ int KYTY_SYSV_ABI NetConnect(int id, const void* addr, int len)
 		return NET_ERROR_EBADF;
 	}
 	state->bound = true;
-	state->port  = guest_addr.port;
-	std::memcpy(state->addr, guest_addr.addr, sizeof(guest_addr.addr));
+	state->local = guest_addr;
 	return OK;
 }
 
@@ -1540,8 +1883,8 @@ int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
 
 	auto accepted_state = std::make_shared<SocketState>();
 #if KYTY_NET_HOST_POSIX
-	sockaddr_in peer {};
-	socklen_t   peer_len = sizeof(peer);
+	sockaddr_storage peer {};
+	socklen_t        peer_len = sizeof(peer);
 	int host_fd = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
@@ -1555,9 +1898,10 @@ int KYTY_SYSV_ABI NetAccept(int id, void* addr, int* len)
 		return HostErrnoToNet(accept_errno);
 	}
 	accepted_state->bound = true;
-	accepted_state->port  = ntohs(peer.sin_port);
-	std::memcpy(accepted_state->addr, &peer.sin_addr, sizeof(accepted_state->addr));
-	if (write_peer && !WriteGuestSockaddrIn(addr, len, max_len, accepted_state->port, accepted_state->addr))
+	GuestSockaddr peer_addr {};
+	const bool    peer_known = HostToGuestSockaddr(peer, &peer_addr);
+	accepted_state->local    = peer_addr;
+	if (write_peer && (!peer_known || !WriteGuestSockaddr(addr, len, max_len, peer_addr)))
 	{
 		(void)::close(accepted_state->host_fd);
 		accepted_state->host_fd = -1;
@@ -1654,7 +1998,7 @@ int64_t KYTY_SYSV_ABI NetSend(int id, const void* buf, uint64_t len, int flags)
 		{
 			return total != 0 ? static_cast<int64_t>(total) : NET_ERROR_EBADF;
 		}
-		const auto sent = ::send(host_fd, payload.Data(), payload.Size(), flags);
+		const auto sent = ::send(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true));
 		const int send_errno = errno;
 		EndSocketOperation(state);
 		if (sent < 0)
@@ -1684,8 +2028,8 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 	{
 		return NET_ERROR_EBADF;
 	}
-	GuestSockaddrIn guest_addr {};
-	if (!ReadGuestSockaddrIn(addr, addr_len, &guest_addr))
+	GuestSockaddr guest_addr {};
+	if (!ReadGuestSockaddr(addr, addr_len, &guest_addr))
 	{
 		return NET_ERROR_EINVAL;
 	}
@@ -1703,11 +2047,8 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		return NET_ERROR_EFAULT;
 	}
 #if KYTY_NET_HOST_POSIX
-	sockaddr_in host_addr {};
-	if (!GuestToHostSockaddrIn(guest_addr, &host_addr))
-	{
-		return NET_ERROR_EINVAL;
-	}
+	sockaddr_storage host_addr {};
+	const socklen_t  host_addr_len = GuestToHostSockaddr(guest_addr, &host_addr);
 	if (len == 0)
 	{
 		int host_fd = -1;
@@ -1715,7 +2056,8 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		{
 			return NET_ERROR_EBADF;
 		}
-		const auto sent = ::sendto(host_fd, nullptr, 0, flags, reinterpret_cast<const sockaddr*>(&host_addr), sizeof(host_addr));
+		const auto sent = ::sendto(host_fd, nullptr, 0, GuestToHostMessageFlags(flags, true), reinterpret_cast<const sockaddr*>(&host_addr),
+		                           host_addr_len);
 		const int send_errno = errno;
 		EndSocketOperation(state);
 		return sent < 0 ? HostErrnoToNet(send_errno) : sent;
@@ -1738,8 +2080,8 @@ int64_t KYTY_SYSV_ABI NetSendto(int id, const void* buf, uint64_t len, int flags
 		{
 			return total != 0 ? static_cast<int64_t>(total) : NET_ERROR_EBADF;
 		}
-		const auto sent = ::sendto(host_fd, payload.Data(), payload.Size(), flags,
-		                           reinterpret_cast<const sockaddr*>(&host_addr), sizeof(host_addr));
+		const auto sent = ::sendto(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, true),
+		                           reinterpret_cast<const sockaddr*>(&host_addr), host_addr_len);
 		const int send_errno = errno;
 		EndSocketOperation(state);
 		if (sent < 0)
@@ -1778,15 +2120,11 @@ int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags)
 		return NET_ERROR_EMSGSIZE;
 	}
 	const bool datagram = SocketIsDatagram(state);
-	if (datagram && len > kMaxIpv4UdpPayload)
-	{
-		return NET_ERROR_EMSGSIZE;
-	}
 	if (!IsGuestOutputRange(buf, len))
 	{
 		return NET_ERROR_EFAULT;
 	}
-	const uint64_t chunk_length = datagram ? len : std::min<uint64_t>(len, kSocketIoChunkSize);
+	const uint64_t chunk_length = std::min<uint64_t>(len, datagram ? kMaxUdpReceive : kSocketIoChunkSize);
 	HostArray<uint8_t> payload;
 	const int prepare_result = PrepareGuestOutput(buf, chunk_length, &payload);
 	if (prepare_result != OK)
@@ -1799,7 +2137,7 @@ int64_t KYTY_SYSV_ABI NetRecv(int id, void* buf, uint64_t len, int flags)
 	{
 		return NET_ERROR_EBADF;
 	}
-	const auto received = ::recv(host_fd, payload.Data(), payload.Size(), flags);
+	const auto received = ::recv(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, false));
 	const int recv_errno = errno;
 	EndSocketOperation(state);
 	if (received < 0)
@@ -1833,10 +2171,6 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 		return NET_ERROR_EMSGSIZE;
 	}
 	const bool datagram = SocketIsDatagram(state);
-	if (datagram && len > kMaxIpv4UdpPayload)
-	{
-		return NET_ERROR_EMSGSIZE;
-	}
 	if (len != 0 && !IsGuestOutputRange(buf, len))
 	{
 		return NET_ERROR_EFAULT;
@@ -1861,7 +2195,7 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 		return NET_ERROR_EINVAL;
 	}
 
-	const uint64_t chunk_length = datagram ? len : std::min<uint64_t>(len, kSocketIoChunkSize);
+	const uint64_t chunk_length = std::min<uint64_t>(len, datagram ? kMaxUdpReceive : kSocketIoChunkSize);
 	HostArray<uint8_t> payload;
 	const int prepare_result = PrepareGuestOutput(buf, chunk_length, &payload);
 	if (prepare_result != OK)
@@ -1869,14 +2203,14 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 		return prepare_result;
 	}
 #if KYTY_NET_HOST_POSIX
-	sockaddr_in host_addr {};
-	socklen_t   host_addr_len = sizeof(host_addr);
+	sockaddr_storage host_addr {};
+	socklen_t        host_addr_len = sizeof(host_addr);
 	int         host_fd       = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
 		return NET_ERROR_EBADF;
 	}
-	const auto received = ::recvfrom(host_fd, payload.Data(), payload.Size(), flags,
+	const auto received = ::recvfrom(host_fd, payload.Data(), payload.Size(), GuestToHostMessageFlags(flags, false),
 	                                 write_peer ? reinterpret_cast<sockaddr*>(&host_addr) : nullptr,
 	                                 write_peer ? &host_addr_len : nullptr);
 	const int recv_errno = errno;
@@ -1894,13 +2228,12 @@ int64_t KYTY_SYSV_ABI NetRecvfrom(int id, void* buf, uint64_t len, int flags, vo
 	{
 		return received;
 	}
-	if (host_addr.sin_family != AF_INET)
+	GuestSockaddr peer {};
+	if (!HostToGuestSockaddr(host_addr, &peer))
 	{
 		return NET_ERROR_EAFNOSUPPORT;
 	}
-	uint8_t ip[4] {};
-	std::memcpy(ip, &host_addr.sin_addr, sizeof(ip));
-	return WriteGuestSockaddrIn(addr, addr_len, max_addr_len, ntohs(host_addr.sin_port), ip) ? received : NET_ERROR_EFAULT;
+	return WriteGuestSockaddr(addr, addr_len, max_addr_len, peer) ? received : NET_ERROR_EFAULT;
 #else
 	(void)flags;
 	(void)write_peer;
@@ -1936,8 +2269,7 @@ int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
 	{
 		return NET_ERROR_EBADF;
 	}
-	uint16_t stored_port = 0;
-	uint8_t  stored_addr[4] {};
+	GuestSockaddr stored {};
 	{
 		std::lock_guard lock(state->mutex);
 		if (state->closing)
@@ -1948,12 +2280,11 @@ int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
 		{
 			return NET_ERROR_EINVAL;
 		}
-		stored_port = state->port;
-		std::memcpy(stored_addr, state->addr, sizeof(stored_addr));
+		stored = state->local;
 	}
 #if KYTY_NET_HOST_POSIX
-	sockaddr_in host_addr {};
-	socklen_t   host_len = sizeof(host_addr);
+	sockaddr_storage host_addr {};
+	socklen_t        host_len = sizeof(host_addr);
 	int host_fd = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
@@ -1961,15 +2292,13 @@ int KYTY_SYSV_ABI NetGetsockname(int id, void* addr, int* len)
 	}
 	const int getsockname_result = ::getsockname(host_fd, reinterpret_cast<sockaddr*>(&host_addr), &host_len);
 	EndSocketOperation(state);
-	if (getsockname_result == 0 &&
-	    host_addr.sin_family == AF_INET)
+	GuestSockaddr local {};
+	if (getsockname_result == 0 && HostToGuestSockaddr(host_addr, &local))
 	{
-		uint8_t ip[4] {};
-		std::memcpy(ip, &host_addr.sin_addr, 4);
-		return WriteGuestSockaddrIn(addr, len, max_len, ntohs(host_addr.sin_port), ip) ? OK : NET_ERROR_EFAULT;
+		return WriteGuestSockaddr(addr, len, max_len, local) ? OK : NET_ERROR_EFAULT;
 	}
 #endif
-	return WriteGuestSockaddrIn(addr, len, max_len, stored_port, stored_addr) ? OK : NET_ERROR_EFAULT;
+	return WriteGuestSockaddr(addr, len, max_len, stored) ? OK : NET_ERROR_EFAULT;
 }
 
 int KYTY_SYSV_ABI NetGetpeername(int id, void* addr, uint32_t* len)
@@ -1999,9 +2328,9 @@ int KYTY_SYSV_ABI NetGetpeername(int id, void* addr, uint32_t* len)
 		return NET_ERROR_EINVAL;
 	}
 #if KYTY_NET_HOST_POSIX
-	sockaddr_in host_addr {};
-	socklen_t   host_len = sizeof(host_addr);
-	int         host_fd  = -1;
+	sockaddr_storage host_addr {};
+	socklen_t        host_len = sizeof(host_addr);
+	int              host_fd  = -1;
 	if (!BeginSocketOperation(state, &host_fd))
 	{
 		return NET_ERROR_EBADF;
@@ -2013,13 +2342,12 @@ int KYTY_SYSV_ABI NetGetpeername(int id, void* addr, uint32_t* len)
 	{
 		return HostErrnoToNet(getpeer_errno);
 	}
-	if (host_addr.sin_family != AF_INET)
+	GuestSockaddr peer {};
+	if (!HostToGuestSockaddr(host_addr, &peer))
 	{
 		return NET_ERROR_EAFNOSUPPORT;
 	}
-	uint8_t ip[4] {};
-	std::memcpy(ip, &host_addr.sin_addr, sizeof(ip));
-	return WriteGuestSockaddrIn(addr, len, max_len, ntohs(host_addr.sin_port), ip) ? OK : NET_ERROR_EFAULT;
+	return WriteGuestSockaddr(addr, len, max_len, peer) ? OK : NET_ERROR_EFAULT;
 #else
 	return NET_ERROR_EOPNOTSUPP;
 #endif
@@ -2207,7 +2535,35 @@ const char* KYTY_SYSV_ABI NetInetNtop(int af, const void* src, char* dst, int si
 #endif
 }
 
-int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* /*value*/, int /*value_len*/)
+#if KYTY_NET_HOST_POSIX
+// Guest (BSD) socket option levels and names mapped to the host's. Values with
+// the same layout on both sides (int, linger, timeval, ip_mreq, ipv6_mreq) are
+// copied as they are.
+struct SocketOptionMapping
+{
+	int guest_level;
+	int guest_option;
+	int host_level;
+	int host_option;
+};
+
+static constexpr SocketOptionMapping kSocketOptions[] = {
+    {0xffff, 0x0004, SOL_SOCKET, SO_REUSEADDR},      {0xffff, 0x0008, SOL_SOCKET, SO_KEEPALIVE},
+    {0xffff, 0x0020, SOL_SOCKET, SO_BROADCAST},      {0xffff, 0x0080, SOL_SOCKET, SO_LINGER},
+    {0xffff, 0x0200, SOL_SOCKET, SO_REUSEPORT},      {0xffff, 0x1001, SOL_SOCKET, SO_SNDBUF},
+    {0xffff, 0x1002, SOL_SOCKET, SO_RCVBUF},         {0xffff, 0x1005, SOL_SOCKET, SO_SNDTIMEO},
+    {0xffff, 0x1006, SOL_SOCKET, SO_RCVTIMEO},       {6, 0x01, IPPROTO_TCP, TCP_NODELAY},
+    {0, 2, IPPROTO_IP, IP_HDRINCL},                  {0, 3, IPPROTO_IP, IP_TOS},
+    {0, 4, IPPROTO_IP, IP_TTL},                      {0, 10, IPPROTO_IP, IP_MULTICAST_TTL},
+    {0, 11, IPPROTO_IP, IP_MULTICAST_LOOP},          {0, 12, IPPROTO_IP, IP_ADD_MEMBERSHIP},
+    {0, 13, IPPROTO_IP, IP_DROP_MEMBERSHIP},         {41, 4, IPPROTO_IPV6, IPV6_UNICAST_HOPS},
+    {41, 10, IPPROTO_IPV6, IPV6_MULTICAST_HOPS},     {41, 11, IPPROTO_IPV6, IPV6_MULTICAST_LOOP},
+    {41, 12, IPPROTO_IPV6, IPV6_JOIN_GROUP},         {41, 13, IPPROTO_IPV6, IPV6_LEAVE_GROUP},
+    {41, 27, IPPROTO_IPV6, IPV6_V6ONLY},
+};
+#endif
+
+int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* value, int value_len)
 {
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t id = %d level = %d option = %d\n", id, level, option);
@@ -2216,8 +2572,72 @@ int KYTY_SYSV_ABI NetSetsockopt(int id, int level, int option, const void* /*val
 	{
 		return NET_ERROR_EBADF;
 	}
-	std::lock_guard lock(state->mutex);
-	return state->closing ? NET_ERROR_EBADF : OK;
+	{
+		std::lock_guard lock(state->mutex);
+		if (state->closing)
+		{
+			return NET_ERROR_EBADF;
+		}
+	}
+#if KYTY_NET_HOST_POSIX
+	constexpr int kGuestSoNbio = 0x1200; // SO_NBIO: non-blocking I/O as an int option
+	if (value_len < 0 || value_len > 64 || (value_len > 0 && (value == nullptr || !IsGuestReadableRange(value, value_len))))
+	{
+		return NET_ERROR_EINVAL;
+	}
+	uint8_t bytes[64] {};
+	if (value_len > 0 && !Core::VirtualMemory::CopyFromGuest(bytes, reinterpret_cast<uint64_t>(value), static_cast<size_t>(value_len)))
+	{
+		return NET_ERROR_EFAULT;
+	}
+	int host_fd = -1;
+	if (!BeginSocketOperation(state, &host_fd))
+	{
+		return NET_ERROR_EBADF;
+	}
+	int result = 0;
+	int host_errno = 0;
+	if (level == 0xffff && option == kGuestSoNbio && value_len >= static_cast<int>(sizeof(int)))
+	{
+		int enable = 0;
+		std::memcpy(&enable, bytes, sizeof(enable));
+		const int flags = ::fcntl(host_fd, F_GETFL);
+		result          = flags < 0 ? -1 : ::fcntl(host_fd, F_SETFL, enable != 0 ? (flags | O_NONBLOCK) : (flags & ~O_NONBLOCK));
+		host_errno      = errno;
+	} else
+	{
+		for (const auto& mapping: kSocketOptions)
+		{
+			if (mapping.guest_level == level && mapping.guest_option == option)
+			{
+				result     = ::setsockopt(host_fd, mapping.host_level, mapping.host_option, bytes, static_cast<socklen_t>(value_len));
+				host_errno = errno;
+				break;
+			}
+		}
+		// Options with no host meaning (send/receive low-water marks, SCE-only
+		// statistics) keep their previous accepted-and-ignored behavior.
+	}
+	EndSocketOperation(state);
+	if (result != 0)
+	{
+		return HostErrnoToNet(host_errno);
+	}
+	if (level == 0xffff && option == kGuestSoNbio && value_len >= static_cast<int>(sizeof(int)))
+	{
+		int enable = 0;
+		std::memcpy(&enable, bytes, sizeof(enable));
+		std::lock_guard lock(state->mutex);
+		state->status_flags = enable != 0 ? (state->status_flags | 0x0004u) : (state->status_flags & ~0x0004u);
+	}
+	return OK;
+#else
+	(void)level;
+	(void)option;
+	(void)value;
+	(void)value_len;
+	return OK;
+#endif
 }
 
 uint32_t KYTY_SYSV_ABI NetHtonl(uint32_t hostlong)
@@ -2946,6 +3366,36 @@ int KYTY_SYSV_ABI SslClose(int ssl_id)
 	return OK;
 }
 
+// The emulator exposes no system certificate store, so a valid context
+// receives an empty CA list; certificate verification then fails as it would
+// against an unknown issuer.
+static int ssl_reset_ca_certs(int ssl_ctx_id, SslCaCerts* certs)
+{
+	EXIT_IF(g_net == nullptr);
+	if (certs == nullptr)
+	{
+		return SSL_ERROR_INVALID_VALUE;
+	}
+	if (!g_net->SslIsActive(Network::Id(ssl_ctx_id)))
+	{
+		return SSL_ERROR_INVALID_ID;
+	}
+	*certs = SslCaCerts {};
+	return OK;
+}
+
+int KYTY_SYSV_ABI SslGetCaCerts(int ssl_ctx_id, SslCaCerts* certs)
+{
+	PRINT_NAME();
+	return ssl_reset_ca_certs(ssl_ctx_id, certs);
+}
+
+int KYTY_SYSV_ABI SslFreeCaCerts(int ssl_ctx_id, SslCaCerts* certs)
+{
+	PRINT_NAME();
+	return ssl_reset_ca_certs(ssl_ctx_id, certs);
+}
+
 } // namespace Ssl
 
 namespace Http {
@@ -3464,6 +3914,8 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 			memset(output.ether_addr.data, 0, sizeof(output.ether_addr.data));
 			output_size = sizeof(output.ether_addr);
 			break;
+		// LINK: the cable or radio link, consistent with the disconnected NetCtl state.
+		case 4: output.link = 0; output_size = sizeof(output.link); break;
 		case 11: output.ip_config = 0; output_size = sizeof(output.ip_config); break;
 		case 14:
 			memcpy(output.ip_address, "127.0.0.1", sizeof("127.0.0.1"));

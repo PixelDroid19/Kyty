@@ -9,6 +9,7 @@
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
 #include "Emulator/Graphics/Gen5TextureVolumeLayout.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GuestTextureLayout.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
@@ -35,13 +36,18 @@
 
 namespace Kyty::Libs::Graphics {
 
-uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format)
+uint32_t TextureGetGen5TiledSampleBytesPerElement(uint16_t format, uint32_t tile)
 {
+	const uint32_t bytes = ShaderGen5TextureBytesPerElement(format);
+	if (tile == 9u && !ShaderGen5TextureIsBlockCompressed(format) && Gen5Standard64KBDetilesElementBytes(bytes))
+	{
+		return bytes;
+	}
 	if (format != 56u && format != 71u && format != 130u && !Gen5IsBc1PackageFormat(format))
 	{
 		return 0u;
 	}
-	return ShaderGen5TextureBytesPerElement(format);
+	return bytes;
 }
 
 static uint32_t resolve_host_mip_count(uint16_t fmt, uint32_t width, uint32_t height, uint32_t guest_levels)
@@ -51,6 +57,29 @@ static uint32_t resolve_host_mip_count(uint16_t fmt, uint32_t width, uint32_t he
 		return guest_levels;
 	}
 	return Gen5CompressedHostMipCount(width, height, guest_levels);
+}
+
+// Pitches are in texels. A guest-registered linear row stride (video planes)
+// overrides the descriptor pitch; a block-compressed element spans 4 texels.
+static uint32_t resolve_linear_upload_pitch(uint32_t fmt, uint32_t width, uint32_t pitch, uint64_t vaddr)
+{
+	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(fmt);
+	if (bytes_per_element == 0u)
+	{
+		return pitch;
+	}
+	const uint32_t texels_per_element = ShaderGen5TextureIsBlockCompressed(fmt) ? 4u : 1u;
+	const uint64_t row_bytes          = static_cast<uint64_t>((width + texels_per_element - 1u) / texels_per_element) * bytes_per_element;
+	if (row_bytes > std::numeric_limits<uint32_t>::max())
+	{
+		return pitch;
+	}
+	const uint32_t registered_pitch = GuestTextureLayoutGetLinearRowPitch(vaddr, static_cast<uint32_t>(row_bytes));
+	if (registered_pitch == 0u || registered_pitch % bytes_per_element != 0u)
+	{
+		return pitch;
+	}
+	return registered_pitch / bytes_per_element * texels_per_element;
 }
 
 bool TextureBlockDumpSpecMatches(const char* spec, uint32_t width, uint32_t height, uint64_t vaddr)
@@ -152,6 +181,27 @@ static VkImageUsageFlags get_usage()
 	return vk_usage;
 }
 
+// Layered depth surfaces stack whole 64 KiB-blocked slices contiguously;
+// each layer detiles into `linear` and fills its own array layer.
+static void upload_depth_layers(GraphicContext* ctx, TextureVulkanImage* image, uint64_t vaddr, uint64_t size,
+                                std::vector<uint8_t>* linear, uint32_t fmt, uint32_t width, uint32_t height, uint32_t pitch,
+                                uint32_t layers, uint64_t layout)
+{
+	const uint64_t layer_bytes = State::Gen5DepthSampleLayerBytes(fmt, pitch, height);
+	if (layer_bytes == 0u || layers == 0u || layers > size / layer_bytes)
+	{
+		EXIT("depth upload exceeds its source: format=%u %ux%u pitch=%u layers=%u size=0x%" PRIx64 "\n", fmt, width, height, pitch, layers,
+		     size);
+	}
+	const uint32_t bytes = State::Gen5DepthSampleBytesPerElement(fmt);
+	for (uint32_t layer = 0; layer < layers; layer++)
+	{
+		TileConvertDepth64KBToLinear(linear->data(), reinterpret_cast<const void*>(vaddr + layer * layer_bytes), width, height, pitch,
+		                            bytes, layer);
+		UtilFillDepthImage(ctx, image, linear->data(), linear->size(), width, layout, layer);
+	}
+}
+
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("TextureObject::update_func");
@@ -162,7 +212,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num != 1);
 
 	auto* vk_obj = static_cast<TextureVulkanImage*>(obj);
-	vk_obj->guest_size = *size;
+	vk_obj->guest_size    = *size;
+	vk_obj->content_stamp = VulkanImageNextStamp();
 
 	auto       tile              = params[TextureObject::PARAM_TILE];
 	auto       fmt               = (params[TextureObject::PARAM_FORMAT] >> 16u) & 0xffffu;
@@ -200,32 +251,23 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	if (three_dimensional)
 	{
 		Gen5TextureVolumeLayout volume_layout {};
-		const bool              is_standard = Gen5GetStandard4KBVolumeTextureLayout(
+		const bool              layout_valid = Gen5GetVolumeTextureLayout(
 		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
 		    static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), &volume_layout);
-		if (!is_standard)
+		if (!layout_valid || !Gen5ValidateTextureVolumeUpload(volume_layout, *size))
 		{
-			const uint32_t bpe        = std::max(1u, ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt)));
-			volume_layout.linear_size = static_cast<uint64_t>(pitch) * height * depth * bpe;
-			volume_layout.tiled.size  = std::max(4096u, static_cast<uint32_t>(volume_layout.linear_size));
-			volume_layout.tiled.align = 4096;
+			EXIT("unsupported Gen5 volume upload: format=%u %ux%ux%u pitch=%u levels=%u tile=%u size=%" PRIu64 "\n",
+			     static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), depth,
+			     static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels), static_cast<uint32_t>(tile), *size);
 		}
 		std::vector<uint8_t> linear(static_cast<size_t>(volume_layout.linear_size));
-		if (is_standard && !linear.empty())
-		{
-			TileConvertStandard4KB32VolumeToLinear(linear.data(), reinterpret_cast<void*>(*vaddr), static_cast<uint32_t>(width),
-			                                       static_cast<uint32_t>(height), static_cast<uint32_t>(depth),
-			                                       static_cast<uint32_t>(pitch));
-		} else if (!linear.empty())
-		{
-			std::memcpy(linear.data(), reinterpret_cast<void*>(*vaddr), linear.size());
-		}
+		EXIT_IF(!Gen5DetileTextureVolume(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, volume_layout));
 		Vector<BufferImageCopy> regions(1);
 		regions[0].offset    = 0;
-		regions[0].pitch     = static_cast<uint32_t>(pitch);
-		regions[0].width     = static_cast<uint32_t>(width);
-		regions[0].height    = static_cast<uint32_t>(height);
-		regions[0].depth     = static_cast<uint32_t>(depth);
+		regions[0].pitch     = volume_layout.pitch;
+		regions[0].width     = volume_layout.width;
+		regions[0].height    = volume_layout.height;
+		regions[0].depth     = volume_layout.depth;
 		regions[0].dst_level = 0;
 		regions[0].dst_x     = 0;
 		regions[0].dst_y     = 0;
@@ -257,8 +299,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		// Stream one layer at a time. A 4096^2 x6 BC7 cube is ~128 MiB linear;
 		// allocating every face plus a padded mip0 temp stalls the load path.
 		std::vector<uint8_t> slice(static_cast<size_t>(array_layout.linear_slice_size));
+		const uint32_t host_levels = resolve_host_mip_count(static_cast<uint16_t>(fmt), static_cast<uint32_t>(width),
+		                                                       static_cast<uint32_t>(height), static_cast<uint32_t>(levels));
 		uint32_t             layer_region_count = 0;
-		if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, 0u, nullptr, 0u, &layer_region_count) ||
+		if (!Gen5FillTextureArrayLayerUploadRegionsForLevels(array_layout, 0u, host_levels, nullptr, 0u, &layer_region_count) ||
 		    layer_region_count == 0u)
 		{
 			EXIT("Gen5 2D-array layer upload regions are invalid: layers=%u levels=%u\n", array_layout.layers, array_layout.levels);
@@ -314,7 +358,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				}
 			}
 			uint32_t filled = layer_region_count;
-			if (!Gen5FillTextureArrayLayerUploadRegions(array_layout, layer, upload_regions.data(), layer_region_count, &filled) ||
+			if (!Gen5FillTextureArrayLayerUploadRegionsForLevels(array_layout, layer, host_levels, upload_regions.data(),
+			                                                    layer_region_count, &filled) ||
 			    filled != layer_region_count)
 			{
 				EXIT("Gen5 2D-array layer upload region fill failed: layer=%u layers=%u levels=%u\n", layer, array_layout.layers,
@@ -366,19 +411,20 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		}
 		return;
 	}
-	if (fmt != 0u && tile == 5u && levels > 1u)
+	const bool standard64_bc = tile == 9u && ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt));
+	if ((fmt != 0u && tile == 5u && levels > 1u) || (standard64_bc && !skip_guest))
 	{
 		Gen5TextureMipLayout mip_layout {};
-		const bool mip_layout_ok = Gen5GetStandard4KBTextureMipLayout(
+		const auto get_layout = standard64_bc ? Gen5GetStandard64KBTextureMipLayout : Gen5GetStandard4KBTextureMipLayout;
+		const auto detile_chain = standard64_bc ? Gen5DetileStandard64KBTextureMipChain : Gen5DetileStandard4KBTextureMipChain;
+		const bool mip_layout_ok = get_layout(
 		    static_cast<uint32_t>(fmt), static_cast<uint32_t>(width), static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
 		    static_cast<uint32_t>(levels), &mip_layout);
-		if (!mip_layout_ok) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Gen5 mip layout failed (continuing)\n"); }
-		if (*size != mip_layout.tiled.size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: *size != mip_layout.tiled.size condition ignored (continuing)\n"); }
+		EXIT_IF(!mip_layout_ok || *size != mip_layout.tiled.size);
 
 		std::vector<uint8_t> linear(static_cast<size_t>(mip_layout.linear_size));
-		const bool mip_detile_ok = mip_layout_ok && Gen5DetileStandard4KBTextureMipChain(
-		                                                linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, mip_layout);
-		if (!mip_detile_ok) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Gen5 mip detile failed (continuing)\n"); }
+		const bool mip_detile_ok = detile_chain(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size, mip_layout);
+		EXIT_IF(!mip_detile_ok);
 
 		const char* block_dump_spec = std::getenv("KYTY_DUMP_TILED_BLOCKS");
 		const bool  block_dump_matches = mip_detile_ok && ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt)) &&
@@ -459,6 +505,42 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
 		return;
 	}
+	if (tile == 24u && levels > 1u)
+	{
+		if ((fmt != 7u && fmt != 22u) || depth_view || arrayed_2d || skip_guest)
+		{
+			EXIT("unsupported Gen5 depth mip upload: format=%u levels=%u depth_view=%u array=%u skip_guest=%u\n",
+			     static_cast<unsigned>(fmt), static_cast<unsigned>(levels), depth_view ? 1u : 0u,
+			     arrayed_2d ? 1u : 0u, skip_guest ? 1u : 0u);
+		}
+		Gen5TextureMipLayout mip_layout {};
+		if (!Gen5GetDepth64KBTextureMipLayout(static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+		                                     static_cast<uint32_t>(height), static_cast<uint32_t>(pitch),
+		                                     static_cast<uint32_t>(levels), &mip_layout) || *size != mip_layout.tiled.size)
+		{
+			EXIT("Gen5 depth mip backing mismatch: format=%u levels=%u size=0x%" PRIx64 "\n",
+			     static_cast<unsigned>(fmt), static_cast<unsigned>(levels), *size);
+		}
+		std::vector<uint8_t> linear(static_cast<size_t>(mip_layout.linear_size));
+		if (!Gen5DetileDepth64KBTextureMipChain(linear.data(), linear.size(), reinterpret_cast<const void*>(*vaddr), *size,
+		                                        mip_layout))
+		{
+			EXIT("Gen5 depth mip detile failed: format=%u levels=%u size=0x%" PRIx64 "\n",
+			     static_cast<unsigned>(fmt), static_cast<unsigned>(levels), *size);
+		}
+		Vector<BufferImageCopy> regions(static_cast<int>(levels));
+		for (uint32_t level = 0u; level < levels; level++)
+		{
+			const auto& mip        = mip_layout.level[level];
+			regions[level].offset    = mip.linear_offset;
+			regions[level].pitch     = mip.width;
+			regions[level].width     = mip.width;
+			regions[level].height    = mip.height;
+			regions[level].dst_level = level;
+		}
+		UtilFillImage(ctx, vk_obj, linear.data(), linear.size(), regions, static_cast<uint64_t>(vk_layout));
+		return;
+	}
 
 	// GPU-owned range under a live color surface that could not be bound as an
 	// alias: never detile guest (period-16 bands). Transparent black clear.
@@ -491,18 +573,21 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	}
 
 	TileSizeOffset level_sizes[16];
+	TilePaddedSize padded_sizes[16];
 
 	if (fmt != 0)
 	{
-		// Gen5: tile 0 = linear; 5 = kStandard4KB; 9 = kStandard64KB;
+		// Gen5: tile 0 = linear; 1 = kStandard256B; 5 = kStandard4KB; 9 = kStandard64KB;
 		// 24 = depth; 27 = render target.
 		// Other modes remain unsupported until their layout is evidenced.
-		if (tile != 0 && tile != 5 && tile != 9 && tile != 24 && tile != 27)
+		if (tile != 0 && tile != 1 && tile != 5 && tile != 9 && tile != 24 && tile != 27)
 		{
-			KYTY_LOG_DEBUG("WARNING: skipped check: tile != 0 && tile != 5 && tile != 27 && tile != 9\n");
+			KYTY_LOG_LIMIT(Log::Level::Warn, 64, "WARNING: unsupported Gen5 texture swizzle mode %u: format=%u %ux%u pitch=%u levels=%u\n",
+			               static_cast<unsigned>(tile), static_cast<unsigned>(fmt), static_cast<unsigned>(width),
+			               static_cast<unsigned>(height), static_cast<unsigned>(pitch), static_cast<unsigned>(levels));
 		}
 
-		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, nullptr);
+		TileGetTextureSize2(fmt, width, height, pitch, levels, tile, nullptr, level_sizes, padded_sizes);
 	} else
 	{
 		// SKIPPED: tile != 8 && tile != 13 && tile != 10
@@ -532,7 +617,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 		regions[i].offset    = level_sizes[i].offset;
 		regions[i].width     = mip_width;
 		regions[i].height    = mip_height;
-		regions[i].pitch     = mip_pitch;
+		// Gen5 linear mip levels keep their own 256-byte-aligned row pitch.
+		regions[i].pitch     = (fmt != 0 && tile == 0 && levels > 1) ? padded_sizes[i].width : mip_pitch;
 		regions[i].dst_level = i;
 		regions[i].dst_x     = 0;
 		regions[i].dst_y     = 0;
@@ -559,17 +645,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	{
 		if (!skip_guest)
 		{
-			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-			uint32_t       upload_pitch      = static_cast<uint32_t>(pitch);
-			if (bytes_per_element != 0u && width <= std::numeric_limits<uint32_t>::max() / bytes_per_element)
-			{
-				const uint32_t row_bytes = static_cast<uint32_t>(width) * bytes_per_element;
-				if (const uint32_t registered_pitch = GuestTextureLayoutGetLinearRowPitch(*vaddr, row_bytes);
-				    registered_pitch != 0u && registered_pitch % bytes_per_element == 0u)
-				{
-					upload_pitch = registered_pitch / bytes_per_element;
-				}
-			}
+			const uint32_t upload_pitch = resolve_linear_upload_pitch(fmt, width, pitch, *vaddr);
 			regions[0].offset = 0;
 			regions[0].width  = static_cast<uint32_t>(width);
 			regions[0].height = static_cast<uint32_t>(height);
@@ -669,16 +745,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 	{
 		if (tile == 0)
 		{
-			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
-			if (bytes_per_element != 0u && width <= std::numeric_limits<uint32_t>::max() / bytes_per_element)
-			{
-				const uint32_t row_bytes = static_cast<uint32_t>(width) * bytes_per_element;
-				if (const uint32_t registered_pitch = GuestTextureLayoutGetLinearRowPitch(*vaddr, row_bytes);
-				    registered_pitch != 0u && registered_pitch % bytes_per_element == 0u)
-				{
-					regions[0].pitch = registered_pitch / bytes_per_element;
-				}
-			}
+			regions[0].pitch = resolve_linear_upload_pitch(fmt, width, pitch, *vaddr);
 			// Opt-in dump for linear Gen5 sample investigation (scratch only).
 			// KYTY_DUMP_LINEAR_SAMPLE=WxH writes one RGBA8 PNG under /tmp.
 			if (fmt == 56u && levels == 1u)
@@ -712,8 +779,9 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				}
 			}
 			UtilFillImage(ctx, vk_obj, reinterpret_cast<void*>(*vaddr), *size, regions, static_cast<uint64_t>(vk_layout));
-		} else if (tile == 5)
+		} else if (tile == 5 || tile == 1)
 		{
+			// kStandard4KB (5) and kStandard256B (1) share the element arithmetic.
 			const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(static_cast<uint32_t>(fmt));
 			const bool     block_compressed  = ShaderGen5TextureIsBlockCompressed(static_cast<uint32_t>(fmt));
 			// SKIPPED: bytes_per_element == 0u || levels != 1u
@@ -731,8 +799,8 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				KYTY_LOG_DEBUG("WARNING: skipped check: linear_bytes == 0u || linear_bytes > *size\n");
 			}
 			std::vector<uint8_t> temp_buf(static_cast<size_t>(linear_bytes));
-			TileConvertStandard4KBToLinear(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch,
-			                               bytes_per_element);
+			const auto           detile = tile == 1 ? TileConvertStandard256BToLinear : TileConvertStandard4KBToLinear;
+			detile(temp_buf.data(), reinterpret_cast<void*>(*vaddr), element_width, element_height, element_pitch, bytes_per_element);
 			const char* block_dump_spec = std::getenv("KYTY_DUMP_TILED_BLOCKS");
 			const bool  block_dump_matches = block_compressed &&
 			                                 TextureBlockDumpSpecMatches(block_dump_spec, static_cast<uint32_t>(width),
@@ -790,8 +858,18 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			UtilFillImage(ctx, vk_obj, temp_buf.data(), linear_bytes, regions, static_cast<uint64_t>(vk_layout));
 		} else if (tile == 24)
 		{
-			const uint32_t bytes_per_element = depth_view ? 2u : 4u;
-			if ((depth_view && fmt != 7u) || (!depth_view && fmt != 22u) || levels != 1u)
+			// Format 5 on a depth tile is the stencil plane of a depth-stencil
+			// surface (1 byte per element). The 8bpp depth-64KB block equation
+			// is not implemented; an all-zero guest plane detiles to zeros
+			// under any equation, so the upload stays exact while the plane is
+			// untouched. Nonzero stencil contents still fail loudly instead of
+			// uploading an invented pattern.
+			// A 16-bit depth surface (format 7) keeps its depth tiling when sampled
+			// through a color view; only the upload target differs.
+			const bool     stencil_plane     = !depth_view && fmt == 5u;
+			const uint32_t depth_bytes       = State::Gen5DepthSampleBytesPerElement(static_cast<uint32_t>(fmt));
+			const uint32_t bytes_per_element = stencil_plane ? 1u : depth_bytes;
+			if ((!stencil_plane && depth_bytes == 0u) || levels != 1u)
 			{
 				EXIT("unsupported depth tile upload: format=%u levels=%u depth_view=%u\n", static_cast<unsigned>(fmt),
 				     static_cast<unsigned>(levels), depth_view ? 1u : 0u);
@@ -799,13 +877,28 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			const uint64_t linear_bytes = static_cast<uint64_t>(width) * height * bytes_per_element;
 			if (linear_bytes == 0u || linear_bytes > *size) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: linear_bytes == 0u || linear_bytes > *size condition ignored (continuing)\n"); }
 			std::vector<uint8_t> linear(static_cast<size_t>(linear_bytes));
-			TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
-			                            static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
-			if (depth_view)
+			if (stencil_plane)
 			{
-				UtilFillDepthImage(ctx, vk_obj, linear.data(), linear.size(), static_cast<uint32_t>(width),
-				                   static_cast<uint64_t>(vk_layout));
+				const auto* guest = reinterpret_cast<const uint8_t*>(*vaddr);
+				for (uint64_t i = 0; i < *size; ++i)
+				{
+					if (guest[i] != 0)
+					{
+						EXIT("unimplemented 8bpp depth-64KB equation: nonzero stencil plane addr=0x%012" PRIx64 "\n", *vaddr);
+					}
+				}
+			} else if (depth_view)
+			{
+				upload_depth_layers(ctx, vk_obj, *vaddr, *size, &linear, static_cast<uint32_t>(fmt), static_cast<uint32_t>(width),
+				                    static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), arrayed_2d ? static_cast<uint32_t>(depth) : 1u,
+				                    static_cast<uint64_t>(vk_layout));
+				return;
 			} else
+			{
+				TileConvertDepth64KBToLinear(linear.data(), reinterpret_cast<const void*>(*vaddr), static_cast<uint32_t>(width),
+				                            static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), bytes_per_element);
+			}
+			if (!depth_view)
 			{
 				regions[0].offset = 0;
 				regions[0].width  = static_cast<uint32_t>(width);
@@ -818,15 +911,10 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 			// Tiled sample texture: detile into tightly packed linear rows then
 			// upload. Render-target aliases still prefer FindRenderTexture
 			// before create; this path covers pure CPU-backed sample textures.
-			// tile 27 = kRenderTarget layout; tile 9 = kStandard64KB
-			// (RGBA8/RGBA8-sRGB/RGBA16F package data).
-			// BC1 (catalog 133 / guest 169 UNORM / 170 SRGB) detiles compressed
+			// tile 27 = kRenderTarget layout (RGBA8/RGBA8-sRGB/RGBA16F package
+			// data); tile 9 = kStandard64KB (any 1-16 byte uncompressed element).
+			// BC1 (raw 169 UNORM / 170 SRGB) detiles compressed
 			// 4x4 blocks as 8-byte elements on tile 27 only.
-			// SKIPPED: tile == 9 && fmt != 56 && fmt != 71 && fmt != 130
-			if (tile == 9 && fmt != 56 && fmt != 71 && fmt != 130)
-			{
-				KYTY_LOG_DEBUG("WARNING: skipped check: tile == 9 && fmt != 56 && fmt != 71 && fmt != 130\n");
-			}
 			// SKIPPED: fmt != 56 && fmt != 71 && fmt != 130 && !Gen5IsBc1PackageFormat(fmt)
 			if (fmt != 56 && fmt != 71 && fmt != 130 && !Gen5IsBc1PackageFormat(static_cast<uint32_t>(fmt)))
 			{
@@ -838,7 +926,7 @@ static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, 
 				KYTY_LOG_DEBUG("WARNING: skipped check: levels != 1\n");
 			}
 			const bool bc1 = Gen5IsBc1PackageFormat(static_cast<uint32_t>(fmt));
-			const uint32_t bpp = TextureGetGen5TiledSampleBytesPerElement(fmt);
+			const uint32_t bpp = TextureGetGen5TiledSampleBytesPerElement(fmt, static_cast<uint32_t>(tile));
 			if (bpp == 0u)
 			{
 				EXIT("unsupported Gen5 tiled sample format: tile=%u fmt=%u\n", static_cast<unsigned>(tile),
@@ -960,6 +1048,7 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	KYTY_PROFILER_BLOCK("TextureObject::update2_func");
 
 	EXIT_IF(obj == nullptr);
+	static_cast<VulkanImage*>(obj)->content_stamp = VulkanImageNextStamp();
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(params == nullptr);
 	EXIT_IF(objects.IsEmpty());
@@ -1099,8 +1188,8 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 					}
 				}
 			}
-			// The source extent is expressed in uncompressed uint4 texels.
-			// vkCmdCopyImage scales it to the BC3 destination's 4x4 block extent.
+			// The source extent is expressed in uncompressed one-block texels.
+			// vkCmdCopyImage scales it to the compressed destination's 4x4 block extent.
 			regions[0].src_image = src_obj;
 			regions[0].src_level = 0;
 			regions[0].dst_level = 0;
@@ -1406,6 +1495,18 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	view_config->three_dimensional = resource_type == 10u;
 	view_config->arrayed_2d        = resource_type == 13u || resource_type == 11u;
 	view_config->depth_view        = params[TextureObject::PARAM_DEPTH_VIEW] != 0u;
+	if (view_config->three_dimensional)
+	{
+		Gen5TextureVolumeLayout volume_layout {};
+		if (!Gen5GetVolumeTextureLayout(fmt, width, height, view_config->depth,
+		                                          static_cast<uint32_t>(params[TextureObject::PARAM_PITCH]), guest_levels,
+		                                          static_cast<uint32_t>(params[TextureObject::PARAM_TILE]), &volume_layout) ||
+		    view_config->base_level != 0u)
+		{
+			EXIT("unsupported Gen5 volume image: format=%u %ux%ux%u levels=%u base=%u\n", fmt, width, height,
+			     view_config->depth, guest_levels, view_config->base_level);
+		}
+	}
 
 	if (resource_type != 8u && resource_type != 9u && !view_config->arrayed_2d && !view_config->three_dimensional) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resource_type != 8u && resource_type != 9u && !view_config->arrayed_2d && !view_config->three_dimensional condition ignored (continuing)\n"); }
 	if (width == 0 || height == 0 || levels == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: width == 0 || height == 0 || levels == 0 condition ignored (continuing)\n"); }
@@ -1414,7 +1515,7 @@ static TextureVulkanImage* create_texture_image(GraphicContext* ctx, const uint6
 	if (
 	    !VulkanDecodeComponentMapping(static_cast<uint32_t>(params[TextureObject::PARAM_SWIZZLE]), &view_config->components)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanDecodeComponentMapping(static_cast<uint32_t>(params[TextureObject::PARAM_ condition ignored (continuing)\n"); }
 
-	const auto pixel_format = view_config->depth_view ? VK_FORMAT_D16_UNORM :
+	const auto pixel_format = view_config->depth_view ? (fmt == 22u ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D16_UNORM) :
 	                                                  VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, dfmt, nfmt, fmt, force_degamma);
 	if (pixel_format == VK_FORMAT_UNDEFINED) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pixel_format == VK_FORMAT_UNDEFINED condition ignored (continuing)\n"); }
 
@@ -1461,7 +1562,20 @@ static void create_texture_image_views(GraphicContext* ctx, TextureVulkanImage* 
 		descriptor.aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
 		if (!VulkanCreateDeviceImageView(ctx->device, descriptor, &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE]))
 		{
-			EXIT("failed to create D16 sampled-depth image view\n");
+			EXIT("failed to create sampled-depth image view\n");
+		}
+		if (config.arrayed_2d && config.depth > 1u)
+		{
+			// Layered depth arrays sample through the array view; layers stack
+			// whole 64 KiB-blocked slices contiguously from the base layer.
+			descriptor.view_type        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+			descriptor.base_array_layer = config.base_array;
+			descriptor.layer_count      = config.depth - config.base_array;
+			if (!VulkanCreateDeviceImageView(ctx->device, descriptor,
+			                                 &vk_obj->image_view[VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY]))
+			{
+				EXIT("failed to create sampled-depth array image view\n");
+			}
 		}
 		return;
 	}

@@ -77,8 +77,12 @@ uint64_t KYTY_SYSV_ABI InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t ar
 
 	uint64_t result = 0;
 
-	const uintptr_t guest_rsp = reinterpret_cast<uintptr_t>(stack_top) & ~static_cast<uintptr_t>(0xf);
-	const uintptr_t guest_rbp = guest_rsp - 4u * sizeof(uint64_t);
+	// The terminating frame record {saved rbp 0, return address 0} sits above
+	// the stack the guest receives, so the callee's pushes cannot overwrite it
+	// and a frame-pointer walk stops on the zero return address.
+	const uintptr_t stack_end = reinterpret_cast<uintptr_t>(stack_top) & ~static_cast<uintptr_t>(0xf);
+	const uintptr_t guest_rbp = stack_end - 2u * sizeof(uint64_t);
+	const uintptr_t guest_rsp = guest_rbp;
 	auto* const     root      = reinterpret_cast<uintptr_t*>(guest_rbp);
 	root[0]                   = 0;
 	root[1]                   = 0;

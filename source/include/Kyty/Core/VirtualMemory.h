@@ -146,6 +146,32 @@ void           DestroySharedBacking(SharedBacking* backing);
 // Reclaim host RAM for a released physical range (punch hole / discard pages).
 // Only call when no live map still covers [backing_offset, backing_offset+size).
 bool           DiscardSharedBackingRange(SharedBacking* backing, uint64_t backing_offset, uint64_t size);
+struct SharedBackingSpan
+{
+	uint64_t offset      = 0;
+	uint64_t size        = 0;
+	bool     unpopulated = false;
+};
+// Snapshot query: marks each page-aligned span whose whole backing interval
+// holds no populated or swapped-out page. Spans are swept in backing order, so
+// one host query clears every span up to the next populated page. Unsupported
+// hosts and query errors leave spans unmarked.
+void           FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan* spans, size_t count);
+// The backing gains a page only when a view first touches it and loses pages
+// only through DiscardSharedBackingRange, so an unchanged population means no
+// page of any view became resident or was dropped in between.
+struct SharedBackingPopulation
+{
+	uint64_t populated_bytes = 0;
+	uint64_t discards        = 0;
+	bool     operator==(const SharedBackingPopulation& other) const
+	{
+		return populated_bytes == other.populated_bytes && discards == other.discards;
+	}
+	bool operator!=(const SharedBackingPopulation& other) const { return !(*this == other); }
+};
+// False when the host cannot report the population.
+bool           QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulation* population);
 uint64_t       MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                 uint64_t alignment);
 bool           MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode);
@@ -159,6 +185,8 @@ bool SupportsSharedFixedOwnedReservationReplacement();
 uint64_t MapSharedFixedOrRelocated(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                    uint64_t alignment);
 bool           Free(uint64_t address);
+// Unmaps a page-aligned part of one mapping; the rest stays mapped.
+bool           FreeRange(uint64_t address, uint64_t size);
 bool           Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode = nullptr);
 // Guest-only protection transition. Ownership validation, the host operation,
 // and protection tracking are one transaction with Free() and guest copies.
@@ -173,6 +201,10 @@ bool           IsRangeGuestOwned(uint64_t address, uint64_t size);
 // protection permits reads. The range must also be guest-owned. It does not
 // probe memory or install a fault guard.
 bool           IsRangeReadable(uint64_t address, uint64_t size);
+// One byte per page of [address, address + size): nonzero when the page is
+// resident (populated). Platforms without a residency query report every page
+// resident. address and size must be page aligned.
+bool           QueryResidentPages(uint64_t address, uint64_t size, uint8_t* resident);
 // Returns true only when every byte belongs to a committed mapping whose host
 // protection permits writes. The range must also be guest-owned. It does not
 // probe memory or install a fault guard.

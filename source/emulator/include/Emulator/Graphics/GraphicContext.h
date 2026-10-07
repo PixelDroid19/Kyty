@@ -6,9 +6,25 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/GpuWritebackPageCache.h"
+#include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/SampleLocations.h"
+#include "Emulator/Graphics/ShaderComputeWaveVulkan.h"
+#include "Emulator/Graphics/VulkanBlend.h"
+#include "Emulator/Graphics/VulkanSampler.h"
 
 #include <vulkan/vulkan_core.h> // IWYU pragma: export
+
+#include <atomic>
+#include <vector>
+
+// The ratified derivative feature has the same ABI as the NV structure in
+// older headers. Device creation still enables the KHR extension explicitly.
+#ifndef VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME
+#define VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME "VK_KHR_compute_shader_derivatives"
+#define VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR \
+	VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_NV
+using VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR = VkPhysicalDeviceComputeShaderDerivativesFeaturesNV;
+#endif
 
 // Vendored vulkan_core.h may predate VK_EXT_depth_clip_control; define the ABI
 // locally when the header lacks it so capability-driven hosts can enable it.
@@ -53,6 +69,8 @@ namespace Kyty::Libs::Graphics {
 	return VK_ATTACHMENT_STORE_OP_NONE_QCOM;
 }
 
+struct PresentationEncodeStage;
+
 struct VulkanSwapchain
 {
 	VkSwapchainKHR swapchain                  = nullptr;
@@ -64,6 +82,8 @@ struct VulkanSwapchain
 	VkSemaphore*   render_finished_semaphores = nullptr;
 	VkFence        present_complete_fence     = nullptr;
 	uint32_t       current_index              = 0;
+	// sRGB encoding stage for linear-light present sources; owned by PresentationScaler.
+	PresentationEncodeStage* encode_stage = nullptr;
 };
 
 struct VulkanCommandPool
@@ -118,6 +138,9 @@ struct GraphicContext
 	// on Apple Silicon). When false, color write masking falls back to being
 	// baked into the pipeline instead of set as dynamic state.
 	bool color_write_enable_supported = true;
+	VulkanBlendCapabilities blend_capabilities;
+	// Published only after successful logical-device creation.
+	VulkanSamplerFeatures enabled_sampler_features;
 
 	// VK_EXT_depth_clip_enable is likewise absent on MoltenVK.
 	bool depth_clip_enable_supported = true;
@@ -142,6 +165,14 @@ struct GraphicContext
 	// Per-sample fragment execution is optional and must be enabled explicitly
 	// before a graphics pipeline can request sample shading.
 	bool sample_rate_shading_supported = false;
+	bool geometry_shader_supported = false;
+	bool compute_derivative_group_linear_supported = false;
+	bool compute_derivative_group_linear_enabled = false;
+	// VK_KHR_shader_maximal_reconvergence lets a fragment shader keep every
+	// active lane in subgroup scope; the wave-tier admission needs it so the
+	// guest wave64 neutral region sees all lanes a partial wave carries.
+	bool shader_maximal_reconvergence_supported = false;
+	bool shader_maximal_reconvergence_enabled   = false;
 
 	// Vulkan subgroup limits used to validate shaders that require an exact guest
 	// wave width. A zero maximum means the physical-device query was unavailable.
@@ -150,13 +181,18 @@ struct GraphicContext
 	uint32_t subgroup_max_size              = 0;
 	VkShaderStageFlags subgroup_stages      = 0;
 	VkSubgroupFeatureFlags subgroup_operations = 0;
-	bool subgroup_size_control_supported    = false;
+	// Extension advertisement is diagnostic only; wave execution consumes the
+	// separate support and enabled fields in compute_wave_vulkan_state.
+	bool subgroup_size_control_supported = false;
+	// Guest memory is importable as device-addressable buffers (host pointer
+	// import, buffer device address and 64-bit shader integers).
+	bool guest_device_address_supported = false;
+	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that
 	// programs custom guest locations is rejected when the selected host cannot
 	// represent the exact state.
 	VulkanSampleLocationCapabilities sample_location_capabilities;
-	PFN_vkAllocateMemory allocate_memory = vkAllocateMemory;
 };
 
 struct VulkanMemory
@@ -167,9 +203,7 @@ struct VulkanMemory
 	VkDeviceSize          offset       = 0;
 	uint32_t              type         = 0;
 	uint64_t              unique_id    = 0;
-	// Optional placement only. Required flags and their original allocation
-	// remain the fallback if the preferred memory type is absent or exhausted.
-	VkMemoryPropertyFlags preferred_property = 0;
+	void*                 pool_block   = nullptr; // set when `memory` is a shared block sub-allocated at `offset`
 };
 
 enum class VulkanImageType
@@ -182,9 +216,31 @@ enum class VulkanImageType
 	RenderTexture
 };
 
+struct VulkanImageViewDescriptor
+{
+	VkImage            image            = nullptr;
+	VkImageViewType    view_type        = VK_IMAGE_VIEW_TYPE_2D;
+	VkFormat           format           = VK_FORMAT_UNDEFINED;
+	VkComponentMapping components       = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+	                                       VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+	VkImageAspectFlags aspect_mask      = VK_IMAGE_ASPECT_COLOR_BIT;
+	uint32_t           base_mip_level   = 0;
+	uint32_t           level_count      = 1;
+	uint32_t           base_array_layer = 0;
+	uint32_t           layer_count      = 1;
+	// Zero inherits the image usage; a view in another format of a mutable
+	// image restricts itself to the usage its format supports.
+	VkImageUsageFlags usage = 0;
+};
+
 struct VulkanImage
 {
-	static constexpr int VIEW_MAX                   = 9;
+	static constexpr int VIEW_STORAGE_MIP_BASE  = 11;
+	static constexpr int VIEW_STORAGE_MIP_COUNT = 16;
+	static constexpr int VIEW_MAX               = VIEW_STORAGE_MIP_BASE + VIEW_STORAGE_MIP_COUNT;
+	// Descriptor-cache keys store view indices in one byte. Never evict a view
+	// while a cached/in-flight descriptor can refer to it; retire with its image.
+	static constexpr int VIEW_CACHE_LIMIT       = 256;
 	static constexpr int VIEW_DEFAULT       = 0;
 	static constexpr int VIEW_BGRA          = 1;
 	static constexpr int VIEW_DEPTH_TEXTURE = 2;
@@ -194,6 +250,8 @@ struct VulkanImage
 	static constexpr int VIEW_STENCIL_TEXTURE = 6;
 	static constexpr int VIEW_DEPTH_TEXTURE_ARRAY = 7;
 	static constexpr int VIEW_STORAGE_ARRAY       = 8;
+	static constexpr int VIEW_COLOR_UNORM         = 9;
+	static constexpr int VIEW_COLOR_SRGB          = 10;
 
 	explicit VulkanImage(VulkanImageType type): type(type) {}
 
@@ -229,7 +287,9 @@ struct VulkanImage
 	// logical extent when storage mips are packed into one host image.
 	VkExtent3D             physical_extent      = {};
 	VkImage                image                = nullptr;
-	VkImageView            image_view[VIEW_MAX] = {};
+	std::vector<VkImageView> image_view = std::vector<VkImageView>(VIEW_MAX, nullptr);
+	std::vector<VulkanImageViewDescriptor> sampled_view_descriptors;
+	VkImageType           image_type           = VK_IMAGE_TYPE_2D;
 	VkImageUsageFlags      usage                = 0;
 	VkImageLayout          layout               = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkSampleCountFlagBits  samples               = VK_SAMPLE_COUNT_1_BIT;
@@ -238,7 +298,21 @@ struct VulkanImage
 	Graphics::VulkanMemory memory;
 	// Guest allocation size used by PreferGpuMemoryAliasIndex when sampling.
 	uint64_t               guest_size           = 0;
+	// Created mutable with every same-size table format as a view format.
+	bool                   mutable_format       = false;
+	// Stamps from VulkanImageNextStamp: when a storage bind last let a
+	// dispatch write this image, and when this image's content was last
+	// established (guest upload, copy from its parents or a block refresh).
+	uint64_t               storage_write_stamp  = 0;
+	uint64_t               content_stamp        = 0;
 };
+
+// One process-wide order for the stamps above.
+[[nodiscard]] inline uint64_t VulkanImageNextStamp()
+{
+	static std::atomic<uint64_t> stamp {0};
+	return ++stamp;
+}
 
 struct VideoOutVulkanImage: public VulkanImage
 {
@@ -276,6 +350,7 @@ struct StorageTextureVulkanImage: public VulkanImage
 struct RenderTextureVulkanImage: public VulkanImage
 {
 	RenderTextureVulkanImage(): VulkanImage(VulkanImageType::RenderTexture) {}
+	bool fully_defined_from_clear = false;
 };
 
 struct VulkanBufferDescriptorKey
@@ -317,12 +392,12 @@ struct VulkanBuffer
 
 struct StorageVulkanBuffer: public VulkanBuffer
 {
-	void*                 mapped          = nullptr;
 	uint64_t              guest_addr      = 0;
 	uint64_t              guest_size      = 0;
 	uint64_t              depth_meta_addr = 0;
 	uint64_t              depth_meta_size = 0;
 	GpuWritebackPageCache writeback_cache;
+	LabelStoragePublication label_publication;
 };
 
 } // namespace Kyty::Libs::Graphics

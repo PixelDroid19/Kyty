@@ -10,6 +10,29 @@
 
 namespace Kyty::Libs::Graphics {
 
+// Captured at admission under the VideoOut context mutex and retained by the
+// flip's lifecycle reservation. A matching accepted request may consume its
+// registration during close; new lookups and stale generations may not.
+struct VideoOutRegistrationIdentity
+{
+	const void* owner        = nullptr;
+	uint64_t    session      = 0;
+	uint64_t    registration = 0;
+
+	[[nodiscard]] bool CanAccess(bool opened, bool closing, VideoOutRegistrationIdentity accepted) const
+	{
+		if (!opened || owner == nullptr || session == 0 || registration == 0)
+		{
+			return false;
+		}
+		if (accepted.owner == nullptr && accepted.session == 0 && accepted.registration == 0)
+		{
+			return !closing;
+		}
+		return owner == accepted.owner && session == accepted.session && registration == accepted.registration;
+	}
+};
+
 class VideoOutFlipLifecycleGate final
 {
 public:

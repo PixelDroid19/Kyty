@@ -3,6 +3,8 @@
 #include "Kyty/Math/Rand.h"
 #include "Kyty/UnitTest.h"
 
+#include <cstring>
+
 UT_BEGIN(CoreMSpace);
 
 using Core::MSpaceCreate;
@@ -43,12 +45,28 @@ TEST(CoreMSpace, NullMspMallocReturnsNull)
 static size_t   g_size = 0;
 static uint8_t* g_ptr  = nullptr;
 
+static void*          g_reentrant_create_backing   = nullptr;
+static size_t         g_reentrant_create_capacity  = 0;
+static Core::mspace_t g_reentrant_created_child    = nullptr;
+static bool           g_reentrant_create_attempted = false;
+static uint32_t       g_reentrant_callback_count   = 0;
+
 static void test_callback(Core::mspace_t m, size_t /*free_size*/, size_t size)
 {
 	g_size = size;
 	if (g_ptr != nullptr)
 	{
 		EXPECT_TRUE(MSpaceFree(m, g_ptr));
+	}
+}
+
+static void test_realloc_create_callback(Core::mspace_t /*m*/, size_t /*free_size*/, size_t /*size*/)
+{
+	g_reentrant_callback_count++;
+	if (!g_reentrant_create_attempted)
+	{
+		g_reentrant_create_attempted = true;
+		g_reentrant_created_child = MSpaceCreate("reentrant-child", g_reentrant_create_backing, g_reentrant_create_capacity, true, nullptr);
 	}
 }
 
@@ -263,6 +281,272 @@ TEST(CoreMSpace, MallocStatsFastReportsCapacity)
 	EXPECT_TRUE(MSpaceFree(m, p));
 	EXPECT_TRUE(MSpaceDestroy(m));
 	delete[] buf;
+}
+
+TEST(CoreMSpace, NestedHeapUsesLiveParentAllocation)
+{
+	constexpr size_t kParentCapacity = 0x40000;
+	constexpr size_t kChildCapacity  = 0x8000;
+	auto*            storage         = new uint8_t[kParentCapacity];
+	auto*            parent          = MSpaceCreate("nested-parent", storage, kParentCapacity, true, nullptr);
+	EXPECT_NE(parent, nullptr);
+	if (parent == nullptr)
+	{
+		delete[] storage;
+		return;
+	}
+
+	auto* backing = MSpaceMalloc(parent, kChildCapacity);
+	EXPECT_NE(backing, nullptr);
+	if (backing == nullptr)
+	{
+		EXPECT_TRUE(MSpaceDestroy(parent));
+		delete[] storage;
+		return;
+	}
+	EXPECT_GE(Core::MSpaceMallocUsableSize(backing), kChildCapacity);
+
+	auto* child = MSpaceCreate("nested-child", backing, kChildCapacity, true, nullptr);
+	EXPECT_NE(child, nullptr);
+	if (child == nullptr)
+	{
+		EXPECT_TRUE(MSpaceDestroy(parent));
+		delete[] storage;
+		return;
+	}
+	EXPECT_GE(Core::MSpaceMallocUsableSize(backing), kChildCapacity);
+
+	auto* child_block = static_cast<uint8_t*>(MSpaceMalloc(child, 96));
+	EXPECT_NE(child_block, nullptr);
+	if (child_block != nullptr)
+	{
+		EXPECT_GE(Core::MSpaceMallocUsableSize(child_block), 96u);
+		std::memset(child_block, 0, 96);
+		EXPECT_EQ(Core::MSpaceMallocUsableSize(child_block + 8), 0u);
+		EXPECT_EQ(Core::MSpaceMallocUsableSize(static_cast<uint8_t*>(backing) + 8), 0u);
+		EXPECT_EQ(Core::MSpaceMallocUsableSize(storage + kParentCapacity), 0u);
+		EXPECT_TRUE(MSpaceFree(child, child_block));
+	}
+
+	EXPECT_FALSE(MSpaceFree(parent, backing));
+	EXPECT_EQ(MSpaceRealloc(parent, backing, kChildCapacity + 0x1000), nullptr);
+	EXPECT_FALSE(MSpaceDestroy(parent));
+	EXPECT_TRUE(MSpaceDestroy(child));
+	EXPECT_TRUE(MSpaceFree(parent, backing));
+
+	auto* parent_block = MSpaceMalloc(parent, 96);
+	EXPECT_NE(parent_block, nullptr);
+	if (parent_block != nullptr)
+	{
+		EXPECT_TRUE(MSpaceFree(parent, parent_block));
+	}
+
+	EXPECT_TRUE(MSpaceDestroy(parent));
+	delete[] storage;
+}
+
+TEST(CoreMSpace, NestedHeapRejectsOverlapsWithoutMutatingRegisteredHeaps)
+{
+	constexpr size_t kParentCapacity = 0x40000;
+	constexpr size_t kChildCapacity  = 0x8000;
+	auto*            storage         = new uint8_t[kParentCapacity];
+	auto*            parent          = MSpaceCreate("overlap-parent", storage, kParentCapacity, true, nullptr);
+	EXPECT_NE(parent, nullptr);
+	if (parent == nullptr)
+	{
+		delete[] storage;
+		return;
+	}
+
+	auto* backing = MSpaceMalloc(parent, kChildCapacity);
+	EXPECT_NE(backing, nullptr);
+	if (backing == nullptr)
+	{
+		EXPECT_TRUE(MSpaceDestroy(parent));
+		delete[] storage;
+		return;
+	}
+
+	auto* child = MSpaceCreate("overlap-child", backing, kChildCapacity, true, nullptr);
+	EXPECT_NE(child, nullptr);
+	if (child == nullptr)
+	{
+		EXPECT_TRUE(MSpaceDestroy(parent));
+		delete[] storage;
+		return;
+	}
+
+	auto* child_snapshot = new uint8_t[kChildCapacity];
+	std::memcpy(child_snapshot, backing, kChildCapacity);
+	EXPECT_EQ(MSpaceCreate("duplicate-child", backing, kChildCapacity, true, nullptr), nullptr);
+	EXPECT_EQ(std::memcmp(child_snapshot, backing, kChildCapacity), 0);
+	EXPECT_EQ(MSpaceCreate("partial-child", static_cast<uint8_t*>(backing) + 8, kChildCapacity - 8, true, nullptr), nullptr);
+	EXPECT_EQ(std::memcmp(child_snapshot, backing, kChildCapacity), 0);
+
+	auto* control_snapshot = new uint8_t[256];
+	std::memcpy(control_snapshot, storage, 256);
+	EXPECT_EQ(MSpaceCreate("parent-control", storage, kParentCapacity, true, nullptr), nullptr);
+	EXPECT_EQ(std::memcmp(control_snapshot, storage, 256), 0);
+
+	auto* free_backing = MSpaceMalloc(parent, kChildCapacity);
+	EXPECT_NE(free_backing, nullptr);
+	if (free_backing != nullptr)
+	{
+		EXPECT_TRUE(MSpaceFree(parent, free_backing));
+		auto* free_snapshot = new uint8_t[kChildCapacity];
+		std::memcpy(free_snapshot, free_backing, kChildCapacity);
+		EXPECT_EQ(MSpaceCreate("free-child", free_backing, kChildCapacity, true, nullptr), nullptr);
+		EXPECT_EQ(std::memcmp(free_snapshot, free_backing, kChildCapacity), 0);
+		delete[] free_snapshot;
+	}
+
+	delete[] control_snapshot;
+	delete[] child_snapshot;
+	EXPECT_TRUE(MSpaceDestroy(child));
+	EXPECT_TRUE(MSpaceFree(parent, backing));
+	EXPECT_TRUE(MSpaceDestroy(parent));
+	delete[] storage;
+}
+
+TEST(CoreMSpace, NestedHeapRejectsForgedParentPrefixes)
+{
+	constexpr size_t kParentCapacity  = 0x40000;
+	constexpr size_t kBackingCapacity = 0x10000;
+	constexpr size_t kChildCapacity   = 0x8000;
+	constexpr size_t kOffset          = 0x40;
+	auto*            storage          = new uint8_t[kParentCapacity];
+	auto*            parent           = MSpaceCreate("prefix-parent", storage, kParentCapacity, true, nullptr);
+	EXPECT_NE(parent, nullptr);
+	if (parent == nullptr)
+	{
+		delete[] storage;
+		return;
+	}
+
+	auto* backing = static_cast<uint8_t*>(MSpaceMalloc(parent, kBackingCapacity));
+	EXPECT_NE(backing, nullptr);
+	if (backing == nullptr)
+	{
+		EXPECT_TRUE(MSpaceDestroy(parent));
+		delete[] storage;
+		return;
+	}
+
+	const size_t backing_usable_size = Core::MSpaceMallocUsableSize(backing);
+	EXPECT_GT(backing_usable_size, kOffset + kChildCapacity);
+	if (backing_usable_size <= kOffset + kChildCapacity)
+	{
+		EXPECT_TRUE(MSpaceFree(parent, backing));
+		EXPECT_TRUE(MSpaceDestroy(parent));
+		delete[] storage;
+		return;
+	}
+
+	uint8_t backing_snapshot[64] {};
+	std::memcpy(backing_snapshot, backing, sizeof(backing_snapshot));
+	const size_t too_large_capacity = backing_usable_size + (8u - backing_usable_size % 8u);
+	EXPECT_EQ(MSpaceCreate("prefix-too-large", backing, too_large_capacity, true, nullptr), nullptr);
+	EXPECT_EQ(std::memcmp(backing_snapshot, backing, sizeof(backing_snapshot)), 0);
+
+	auto* copied_base = backing + kOffset;
+	std::memcpy(copied_base - sizeof(uint64_t), backing - sizeof(uint64_t), sizeof(uint64_t));
+	uint8_t copied_snapshot[64] {};
+	std::memcpy(copied_snapshot, copied_base, sizeof(copied_snapshot));
+
+	auto* copied_child = MSpaceCreate("prefix-copied", copied_base, kChildCapacity, true, nullptr);
+	EXPECT_EQ(copied_child, nullptr);
+	EXPECT_EQ(std::memcmp(copied_snapshot, copied_base, sizeof(copied_snapshot)), 0);
+	if (copied_child != nullptr)
+	{
+		EXPECT_TRUE(MSpaceDestroy(copied_child));
+	}
+	EXPECT_TRUE(MSpaceFree(parent, backing));
+
+	auto* second_backing = static_cast<uint8_t*>(MSpaceMalloc(parent, kBackingCapacity));
+	EXPECT_NE(second_backing, nullptr);
+	if (second_backing != nullptr)
+	{
+		const uint64_t raw_address = reinterpret_cast<uint64_t*>(second_backing)[-1];
+		auto*          raw_base    = reinterpret_cast<uint8_t*>(static_cast<uintptr_t>(raw_address));
+		auto*          raw_offset  = raw_base + sizeof(uint64_t);
+		std::memcpy(raw_offset - sizeof(uint64_t), &raw_address, sizeof(raw_address));
+
+		auto* raw_child = MSpaceCreate("prefix-raw", raw_offset, kChildCapacity, true, nullptr);
+		EXPECT_EQ(raw_child, nullptr);
+		if (raw_child != nullptr)
+		{
+			EXPECT_TRUE(MSpaceDestroy(raw_child));
+		}
+	}
+
+	EXPECT_TRUE(MSpaceDestroy(parent));
+	delete[] storage;
+}
+
+TEST(CoreMSpace, NestedHeapRejectsReallocCallbackBacking)
+{
+	constexpr size_t kParentCapacity  = 0x20000;
+	constexpr size_t kBackingCapacity = 0x10000;
+	constexpr size_t kChildCapacity   = 0x8000;
+	constexpr size_t kReallocSize     = 0x18000;
+	auto*            storage          = new uint8_t[kParentCapacity];
+	auto*            parent           = MSpaceCreate("reentrant-parent", storage, kParentCapacity, true, test_realloc_create_callback);
+	EXPECT_NE(parent, nullptr);
+	if (parent == nullptr)
+	{
+		delete[] storage;
+		return;
+	}
+
+	auto* backing = MSpaceMalloc(parent, kBackingCapacity);
+	EXPECT_NE(backing, nullptr);
+	if (backing == nullptr)
+	{
+		EXPECT_TRUE(MSpaceDestroy(parent));
+		delete[] storage;
+		return;
+	}
+
+	g_reentrant_create_backing   = backing;
+	g_reentrant_create_capacity  = kChildCapacity;
+	g_reentrant_created_child    = nullptr;
+	g_reentrant_create_attempted = false;
+	g_reentrant_callback_count   = 0;
+
+	auto* reallocated = MSpaceRealloc(parent, backing, kReallocSize);
+	EXPECT_GT(g_reentrant_callback_count, 0u);
+	EXPECT_TRUE(g_reentrant_create_attempted);
+	EXPECT_EQ(g_reentrant_created_child, nullptr);
+	EXPECT_EQ(reallocated, nullptr);
+
+	if (g_reentrant_created_child != nullptr)
+	{
+		EXPECT_TRUE(MSpaceDestroy(g_reentrant_created_child));
+	}
+	if (g_reentrant_created_child == nullptr && reallocated == nullptr)
+	{
+		auto* child_after_realloc = MSpaceCreate("reentrant-after", backing, kChildCapacity, true, nullptr);
+		EXPECT_NE(child_after_realloc, nullptr);
+		if (child_after_realloc != nullptr)
+		{
+			EXPECT_TRUE(MSpaceDestroy(child_after_realloc));
+		}
+	}
+	if (reallocated != nullptr)
+	{
+		EXPECT_TRUE(MSpaceFree(parent, reallocated));
+	} else
+	{
+		EXPECT_TRUE(MSpaceFree(parent, backing));
+	}
+
+	g_reentrant_create_backing   = nullptr;
+	g_reentrant_create_capacity  = 0;
+	g_reentrant_created_child    = nullptr;
+	g_reentrant_create_attempted = false;
+	g_reentrant_callback_count   = 0;
+	EXPECT_TRUE(MSpaceDestroy(parent));
+	delete[] storage;
 }
 
 UT_END();

@@ -315,6 +315,11 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	image_descriptor.initial_layout = vk_obj->layout;
 	image_descriptor.usage          = static_cast<VkImageUsageFlags>(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
 	                                                                 VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT);
+	if (vk_obj->format == VK_FORMAT_R8G8B8A8_SRGB || vk_obj->format == VK_FORMAT_B8G8R8A8_SRGB ||
+	    vk_obj->format == VK_FORMAT_R8G8B8A8_UNORM || vk_obj->format == VK_FORMAT_B8G8R8A8_UNORM)
+	{
+		image_descriptor.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+	}
 	const auto image_info           = VulkanBuildImageCreateInfo(image_descriptor);
 	if (!VulkanCreateDeviceImage(ctx, image_info, vk_obj, &vk_obj->memory)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateDeviceImage(ctx, image_info, vk_obj, &vk_obj->memory) condition ignored (continuing)\n"); }
 
@@ -327,6 +332,7 @@ void VideoOutBufferEnsureMaterialized(GraphicContext* ctx, VideoOutVulkanImage* 
 	upload_guest_contents(ctx, vk_obj);
 
 	if (!VulkanCreateStandardColorImageViews(ctx, vk_obj)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateStandardColorImageViews(ctx, vk_obj) condition ignored (continuing)\n"); }
+	if (!VulkanCreateCompatibleColorAttachmentViews(ctx, vk_obj)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !VulkanCreateCompatibleColorAttachmentViews(ctx, vk_obj) condition ignored (continuing)\n"); }
 }
 
 static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size, int vaddr_num)

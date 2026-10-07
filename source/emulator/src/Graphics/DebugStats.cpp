@@ -87,6 +87,10 @@ struct TimedMetric
 TimedMetric g_command_processor_run;
 TimedMetric g_draw_processor;
 TimedMetric g_dispatch_processor;
+TimedMetric g_dispatch_writeback;
+TimedMetric g_guest_address_prepare;
+TimedMetric g_guest_address_residency;
+TimedMetric g_guest_address_refresh;
 TimedMetric g_draw_render_lock_wait;
 TimedMetric g_draw_state_setup;
 TimedMetric g_draw_materialization;
@@ -243,6 +247,7 @@ std::atomic<uint32_t>                                  g_present_src_h {0};
 std::atomic<uint32_t>                                  g_present_dst_w {0};
 std::atomic<uint32_t>                                  g_present_dst_h {0};
 std::atomic<uint32_t>                                  g_present_src_layout {0};
+std::atomic<uint32_t>                                  g_present_src_format {0};
 
 std::atomic<double> g_last_fps {0.0};
 std::atomic<double> g_last_frame_ms {0.0};
@@ -698,6 +703,10 @@ void DebugStatsInit()
 	ResetTimed(&g_command_processor_run);
 	ResetTimed(&g_draw_processor);
 	ResetTimed(&g_dispatch_processor);
+	ResetTimed(&g_dispatch_writeback);
+	ResetTimed(&g_guest_address_prepare);
+	ResetTimed(&g_guest_address_residency);
+	ResetTimed(&g_guest_address_refresh);
 	ResetTimed(&g_draw_render_lock_wait);
 	ResetTimed(&g_draw_state_setup);
 	ResetTimed(&g_draw_materialization);
@@ -917,6 +926,26 @@ void DebugStatsRecordDrawProcessor(uint64_t elapsed_ns)
 void DebugStatsRecordDispatchProcessor(uint64_t elapsed_ns)
 {
 	RecordTimed(&g_dispatch_processor, elapsed_ns);
+}
+
+void DebugStatsRecordDispatchWriteBack(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_dispatch_writeback, elapsed_ns);
+}
+
+void DebugStatsRecordGuestAddressPrepare(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_guest_address_prepare, elapsed_ns);
+}
+
+void DebugStatsRecordGuestAddressResidency(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_guest_address_residency, elapsed_ns);
+}
+
+void DebugStatsRecordGuestAddressRefresh(uint64_t elapsed_ns)
+{
+	RecordTimed(&g_guest_address_refresh, elapsed_ns);
 }
 
 void DebugStatsRecordDrawRenderLockWait(uint64_t elapsed_ns)
@@ -1317,8 +1346,10 @@ void DebugStatsRecordGpuMemoryHashComparison(uint32_t type_index, bool tracked, 
 	counter.fetch_add(1, std::memory_order_relaxed);
 }
 
-void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout)
+void DebugStatsRecordPresentSource(uint32_t src_w, uint32_t src_h, uint32_t dst_w, uint32_t dst_h, uint32_t src_layout,
+                                   uint32_t src_format)
 {
+	g_present_src_format.store(src_format, std::memory_order_relaxed);
 	g_present_src_w.store(src_w, std::memory_order_relaxed);
 	g_present_src_h.store(src_h, std::memory_order_relaxed);
 	g_present_dst_w.store(dst_w, std::memory_order_relaxed);
@@ -1379,6 +1410,7 @@ DebugStatsSnapshot DebugStatsTick(double now_seconds)
 	snap.present_dst_w          = g_present_dst_w.load(std::memory_order_relaxed);
 	snap.present_dst_h          = g_present_dst_h.load(std::memory_order_relaxed);
 	snap.present_src_layout     = g_present_src_layout.load(std::memory_order_relaxed);
+	snap.present_src_format     = g_present_src_format.load(std::memory_order_relaxed);
 
 	g_last_snapshot        = snap;
 	g_window_start_seconds = now_seconds;
@@ -1456,6 +1488,7 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	snapshot.present_dst_w      = g_present_dst_w.load(std::memory_order_relaxed);
 	snapshot.present_dst_h      = g_present_dst_h.load(std::memory_order_relaxed);
 	snapshot.present_src_layout = g_present_src_layout.load(std::memory_order_relaxed);
+	snapshot.present_src_format = g_present_src_format.load(std::memory_order_relaxed);
 	snapshot.wait_reg_mem    = wait_reg_mem - g_performance_baseline.wait_reg_mem;
 	snapshot.wait_reg_mem_ns = wait_reg_mem_ns - g_performance_baseline.wait_reg_mem_ns;
 	snapshot.wait_reg_mem_max_ns =
@@ -1539,6 +1572,10 @@ DebugStatsPerformanceSnapshot DebugStatsGetPerformanceSnapshot(bool reset)
 	take_timed(g_draw_processor, &snapshot.draw_processor_calls, &snapshot.draw_processor_ns, &snapshot.draw_processor_max_ns);
 	take_timed(g_dispatch_processor, &snapshot.dispatch_processor_calls, &snapshot.dispatch_processor_ns,
 	           &snapshot.dispatch_processor_max_ns);
+	take_timed(g_dispatch_writeback, &snapshot.dispatch_writeback_calls, &snapshot.dispatch_writeback_ns, &snapshot.dispatch_writeback_max_ns);
+	take_timed(g_guest_address_prepare, &snapshot.guest_address_prepare_calls, &snapshot.guest_address_prepare_ns, &snapshot.guest_address_prepare_max_ns);
+	take_timed(g_guest_address_residency, &snapshot.guest_address_residency_calls, &snapshot.guest_address_residency_ns, &snapshot.guest_address_residency_max_ns);
+	take_timed(g_guest_address_refresh, &snapshot.guest_address_refresh_calls, &snapshot.guest_address_refresh_ns, &snapshot.guest_address_refresh_max_ns);
 	auto take_draw_stage = [&take_timed](TimedMetric& metric, uint64_t* total_ns, uint64_t* max_ns) {
 		uint64_t ignored_count = 0;
 		take_timed(metric, &ignored_count, total_ns, max_ns);

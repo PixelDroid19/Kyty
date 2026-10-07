@@ -246,23 +246,48 @@ enum class ImageSampleOperation
 	                                                                                : ImageSampleOperation::Regular;
 }
 
-[[nodiscard]] constexpr bool CanMaterializeGen5Depth16Sample(
+// Depth surfaces sampled from guest memory: 16_UNORM (format 7) and 32_FLOAT
+// (format 22) are the depth-compatible single-channel layouts.
+[[nodiscard]] constexpr uint32_t Gen5DepthSampleBytesPerElement(uint32_t format)
+{
+	return format == 7u ? 2u : (format == 22u ? 4u : 0u);
+}
+
+// Bytes of one layer on the 64 KiB depth tile: a block covers 65536 bytes of
+// elements, 128 rows high. Zero when the format or pitch does not fit.
+[[nodiscard]] constexpr uint64_t Gen5DepthSampleLayerBytes(uint32_t format, uint32_t pitch, uint32_t height)
+{
+	const uint32_t bytes = Gen5DepthSampleBytesPerElement(format);
+	if (bytes == 0u || height == 0u)
+	{
+		return 0u;
+	}
+	const uint32_t block_width = 65536u / bytes / 128u;
+	if (pitch == 0u || (pitch % block_width) != 0u)
+	{
+		return 0u;
+	}
+	const uint64_t blocks_x = pitch / block_width;
+	const uint64_t blocks_y = (static_cast<uint64_t>(height) + 127u) / 128u;
+	return blocks_x <= UINT64_MAX / 65536u / blocks_y ? blocks_x * blocks_y * 65536u : 0u;
+}
+
+[[nodiscard]] constexpr bool CanMaterializeGen5DepthSample(
     uint32_t format, uint32_t tile, uint32_t resource_type, uint32_t depth, uint32_t base_array, uint32_t base_level,
     uint32_t last_level, uint32_t max_mip, uint32_t bc_swizzle, uint32_t swizzle, bool msaa, bool has_metadata,
     uint64_t address, uint32_t width, uint32_t height, uint32_t pitch, uint64_t source_size, ImageSampleOperation operation)
 {
 	const bool supported_swizzle = swizzle == 0x924u || swizzle == 0x004u || swizzle == 0x204u;
-	if (format != 7u || tile != 24u || (resource_type != 8u && resource_type != 9u) || depth != 0u || base_array != 0u || base_level != 0u ||
-	    last_level != 0u || max_mip != 0u || bc_swizzle != 0u || !supported_swizzle || msaa || has_metadata ||
-	    operation != ImageSampleOperation::DepthReference || address == 0u || (address & 0xffffu) != 0u ||
-	    width == 0u || height == 0u || pitch < width || (pitch % 256u) != 0u)
-	{
-		return false;
-	}
-	const uint64_t blocks_x = pitch / 256u;
-	const uint64_t blocks_y = (static_cast<uint64_t>(height) + 127u) / 128u;
-	return blocks_x <= UINT64_MAX / blocks_y && blocks_x * blocks_y <= UINT64_MAX / 65536u &&
-	       source_size >= blocks_x * blocks_y * 65536u;
+	// Layered depth arrays carry the last slice in depth (depth 0 means one
+	// layer); only the 2D resource types use depth 0, and array layers stay
+	// bounded so the caller can verify the full span mapping.
+	const bool single_layer = (resource_type == 8u || resource_type == 9u) && depth == 0u && base_array == 0u;
+	const bool array_layers = resource_type == 13u && depth >= 1u && depth <= 2048u && base_array == 0u;
+	const auto layer_bytes  = Gen5DepthSampleLayerBytes(format, pitch, height);
+	return tile == 24u && (single_layer || array_layers) && base_level == 0u && last_level == 0u && max_mip == 0u &&
+	       bc_swizzle == 0u && supported_swizzle && !msaa && !has_metadata && operation == ImageSampleOperation::DepthReference &&
+	       address != 0u && (address & 0xffffu) == 0u && width != 0u && pitch >= width && layer_bytes != 0u &&
+	       source_size >= layer_bytes;
 }
 
 enum class SamplerAddressMode
@@ -271,6 +296,10 @@ enum class SamplerAddressMode
 	MirroredRepeat,
 	ClampToEdge,
 	ClampToBorder,
+	MirrorOnceLastTexel,
+	ClampHalfBorder,
+	MirrorOnceHalfBorder,
+	MirrorOnceBorder,
 };
 
 enum class SamplerCompareOp
@@ -302,6 +331,8 @@ struct UnnormalizedSamplerPolicy
 };
 
 [[nodiscard]] SamplerAddressMode ResolveSamplerAddressMode(uint8_t sq_tex_clamp);
+[[nodiscard]] bool SamplerAddressModeHasExactHostMapping(SamplerAddressMode mode, bool mirror_clamp_to_edge_enabled = false,
+                                                        bool force_unnormalized = false);
 [[nodiscard]] SamplerCompareOp    ResolveSamplerCompareOp(uint8_t depth_compare_function);
 // Vulkan requires sampler comparison state to agree with the SPIR-V image instruction.
 [[nodiscard]] SamplerComparison         ResolveSamplerComparison(uint8_t depth_compare_function, ImageSampleOperation operation);

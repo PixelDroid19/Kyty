@@ -5,6 +5,7 @@
 #include "Kyty/Core/String.h"
 
 #include "Emulator/Kernel/Pthread.h"
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Libs/Printf.h"
@@ -47,9 +48,7 @@ int KYTY_SYSV_ABI fflush(FILE* stream)
 {
 	PRINT_NAME();
 
-	if (stream != stdout && stream != stderr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
-
-	return ::fflush(stream);
+	return Kernel::FileSystem::FlushStreams(stream);
 }
 
 void* KYTY_SYSV_ABI memset(void* s, int c, size_t n)
@@ -166,6 +165,30 @@ struct LibcMallocManagedSize
 };
 static_assert(sizeof(LibcMallocManagedSize) == 0x28, "SceLibcMallocManagedSize");
 
+static void WriteManagedSize(const Core::MSpaceSize& sizes, void* stats)
+{
+	auto* out                = static_cast<LibcMallocManagedSize*>(stats);
+	out->size_version        = 0x00010028u;
+	out->reserved            = 0;
+	out->max_system_size     = sizes.max_system_size;
+	out->current_system_size = sizes.current_system_size;
+	out->max_inuse_size      = sizes.max_inuse_size;
+	out->current_inuse_size  = sizes.current_inuse_size;
+}
+
+// sceLibcMspaceMallocStats — NID mfHdJTIvhuo; the exact form of the fast query.
+int KYTY_SYSV_ABI LibcMspaceMallocStats(void* msp, void* stats)
+{
+	PRINT_NAME();
+	Core::MSpaceSize sizes {};
+	if (msp == nullptr || stats == nullptr || !Core::MSpaceIsManaged(msp) || !Core::MSpaceMallocStats(msp, &sizes))
+	{
+		return -1;
+	}
+	WriteManagedSize(sizes, stats);
+	return 0;
+}
+
 int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 {
 	PRINT_NAME();
@@ -177,19 +200,20 @@ int KYTY_SYSV_ABI LibcMspaceMallocStatsFast(void* msp, void* stats)
 	}
 
 	Core::MSpaceSize sizes {};
-	if (!Core::MSpaceMallocStatsFast(msp, &sizes))
+	if (!Core::MSpaceIsManaged(msp))
+	{
+		// Not an mspace this libc created (e.g. the title's own allocator or the
+		// internally-managed default heap). Report the host allocator snapshot so
+		// the managed-size pre-check still sees real bounds, as the public
+		// malloc_stats_fast bootstrap path does.
+		LibC::collect_host_malloc_stats(&sizes);
+	} else if (!Core::MSpaceMallocStatsFast(msp, &sizes))
 	{
 		return -1;
 	}
 
-	auto* out                = static_cast<LibcMallocManagedSize*>(stats);
-	out->size_version        = 0x00010028u;
-	out->reserved            = 0;
-	out->max_system_size     = sizes.max_system_size;
-	out->current_system_size = sizes.current_system_size;
-	out->max_inuse_size      = sizes.max_inuse_size;
-	out->current_inuse_size  = sizes.current_inuse_size;
-	KYTY_LOG_DEBUG("\t system = 0x%016" PRIx64 " inuse = 0x%016" PRIx64 "\n", out->current_system_size, out->current_inuse_size);
+	WriteManagedSize(sizes, stats);
+	KYTY_LOG_DEBUG("\t system = 0x%016" PRIx64 " inuse = 0x%016" PRIx64 "\n", sizes.current_system_size, sizes.current_inuse_size);
 	return 0;
 }
 
@@ -215,14 +239,7 @@ int KYTY_SYSV_ABI LibcMallocStatsFast(void* stats)
 
 	Core::MSpaceSize sizes {};
 	LibC::collect_host_malloc_stats(&sizes);
-
-	auto* out                = static_cast<LibcMallocManagedSize*>(stats);
-	out->size_version        = 0x00010028u;
-	out->reserved            = 0;
-	out->max_system_size     = sizes.max_system_size;
-	out->current_system_size = sizes.current_system_size;
-	out->max_inuse_size      = sizes.max_inuse_size;
-	out->current_inuse_size  = sizes.current_inuse_size;
+	WriteManagedSize(sizes, stats);
 	return 0;
 }
 
@@ -245,8 +262,8 @@ LIB_DEFINE(InitLibcInternal_1)
 	LIB_OBJECT("ZT4ODD2Ts9o", &LibcInternal::g_need_flag);
 	// stdin Object triad: guest import tables list 1TDo-ImqkJc immediately before
 	// the registered stdout NID 2sWzhYqFH4E and stderr H8AprKeZtNg (libc_v1).
-	LIB_OBJECT("1TDo-ImqkJc", stdin);
-	LIB_OBJECT("2sWzhYqFH4E", stdout);
+	LIB_OBJECT("1TDo-ImqkJc", Kernel::FileSystem::StandardStream(0));
+	LIB_OBJECT("2sWzhYqFH4E", Kernel::FileSystem::StandardStream(1));
 
 	LIB_FUNC("GMpvxPFW924", LibcInternal::vprintf);
 	LIB_FUNC("MUjC4lbHrK4", LibcInternal::fflush);

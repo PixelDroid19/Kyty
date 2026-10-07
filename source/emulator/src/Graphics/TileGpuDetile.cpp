@@ -5,14 +5,18 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/GraphicsRun.h"
+#include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
+#include "Emulator/Graphics/Window.h"
 #include "GraphicsRenderInternal.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <limits>
 #include <new>
+#include <utility>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -62,6 +66,12 @@ struct DetilePushConstants
 	uint32_t src_u32_count     = 0;
 	uint32_t dst_u32_count     = 0;
 	uint32_t src_byte_offset   = 0;
+	uint32_t source_width      = 0;
+	uint32_t source_blocks_x   = 0;
+	uint32_t destination_blocks_x = 0;
+	uint32_t source_first_block = 0;
+	uint32_t destination_first_block = 0;
+	uint32_t alias_block_count = 0;
 };
 
 constexpr uint64_t k_max_shader_byte_range = std::numeric_limits<uint32_t>::max();
@@ -128,7 +138,8 @@ uint32_t LayoutKind(TileDetileLayout layout)
 
 bool GpuLayoutSupported(const TileDetileRequest& request)
 {
-	if (!TileDetileIsSupported(request) || request.src_bytes == 0u || request.src_bytes > k_max_shader_byte_range ||
+	if (!TileDetileIsSupported(request) || request.depth_layer != 0u || request.src_bytes == 0u ||
+	    request.src_bytes > k_max_shader_byte_range ||
 	    (request.src_bytes % 4u) != 0u || (request.bytes_per_element % 4u) != 0u)
 	{
 		return false;
@@ -714,7 +725,7 @@ TileGpuDetileStatus SubmitAndWait(GraphicContext* ctx, GpuDetileContext* state, 
 		attempt.kind                = VulkanSubmitKind::TileDetile;
 		attempt.queue               = static_cast<uint32_t>(GraphicContext::QUEUE_GFX);
 		attempt.command_buffer_slot = UINT32_MAX;
-		attempt.frame               = GraphicsRunGetFrameNum();
+		attempt.presented_frame     = WindowGetPresentedFrameNum();
 	}
 	{
 		Core::LockGuard queue_lock(*state->queue_mutex);
@@ -1049,6 +1060,312 @@ TileGpuDetileStatus TileGpuDetileDepthD16Inline(GraphicContext* ctx, CommandBuff
 	                     nullptr, 0u, nullptr);
 	UtilBufferToDepthImage(command_buffer, scratch, width, dst_image, VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL);
 	return TileGpuDetileStatus::Success;
+}
+
+bool StorageTextureCopyRawRenderAlias(GraphicContext* ctx, CommandBuffer* command_buffer, VulkanImage* source,
+                                      VulkanImage* destination, const StorageTextureRawRenderAliasPlan& plan)
+{
+	if (ctx == nullptr || command_buffer == nullptr || command_buffer->IsInvalid() || source == nullptr || destination == nullptr ||
+	    source->image == VK_NULL_HANDLE || destination->image == VK_NULL_HANDLE ||
+	    source->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || destination->format != VK_FORMAT_R16_SFLOAT ||
+	    source->samples != VK_SAMPLE_COUNT_1_BIT || destination->samples != VK_SAMPLE_COUNT_1_BIT ||
+	    source->extent.width != source->guest_extent.width || source->extent.height != source->guest_extent.height ||
+	    destination->extent.width != destination->guest_extent.width ||
+	    destination->extent.height != destination->guest_extent.height ||
+	    (source->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+	    (destination->usage & (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) !=
+	        (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
+	    plan.block_count == 0u || plan.source_blocks_x == 0u || plan.destination_blocks_x == 0u ||
+	    destination->extent.width % 2u != 0u)
+	{
+		return false;
+	}
+	const uint64_t source_bytes = static_cast<uint64_t>(source->extent.width) * source->extent.height * 4u;
+	const uint64_t destination_bytes = static_cast<uint64_t>(destination->extent.width) * destination->extent.height * 2u;
+	if (source_bytes == 0u || destination_bytes == 0u || source_bytes > k_max_shader_byte_range ||
+	    destination_bytes > k_max_shader_byte_range || ctx->physical_device == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
+	const uint32_t groups_x = (destination->extent.width / 2u + 7u) / 8u;
+	const uint32_t groups_y = (destination->extent.height + 7u) / 8u;
+	if (source_bytes > properties.limits.maxStorageBufferRange || destination_bytes > properties.limits.maxStorageBufferRange ||
+	    sizeof(DetilePushConstants) > properties.limits.maxPushConstantsSize ||
+	    groups_x > properties.limits.maxComputeWorkGroupCount[0] || groups_y > properties.limits.maxComputeWorkGroupCount[1] ||
+	    properties.limits.maxComputeWorkGroupSize[0] < 8u || properties.limits.maxComputeWorkGroupSize[1] < 8u ||
+	    properties.limits.maxComputeWorkGroupInvocations < 64u)
+	{
+		return false;
+	}
+	// Distinct usage masks force separate scratch allocations in this command buffer.
+	auto* source_buffer = command_buffer->AllocateTransientScratchBuffer(
+	    source_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	auto* destination_buffer = command_buffer->AllocateTransientScratchBuffer(
+	    destination_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	if (source_buffer == nullptr || destination_buffer == nullptr || source_buffer == destination_buffer)
+	{
+		return false;
+	}
+	Core::LockGuard lock(ctx->gpu_detile_mutex);
+	GpuDetileContext* state = nullptr;
+	if (GetGpuDetileContext(ctx, &state) != TileGpuDetileStatus::Success || state == nullptr || !state->resources_ready)
+	{
+		return false;
+	}
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num = 2;
+	ShaderCalcBindingIndices(&bind);
+	VulkanBuffer* descriptor_buffers[2]                                    = {source_buffer, destination_buffer};
+	VulkanImage*  no_images[DescriptorCache::TEXTURES_SAMPLED_MAX]          = {};
+	int           no_views[DescriptorCache::TEXTURES_SAMPLED_MAX]           = {};
+	VulkanImage*  no_storage_images[DescriptorCache::TEXTURES_STORAGE_MAX]  = {};
+	int           no_storage_views[DescriptorCache::TEXTURES_STORAGE_MAX]   = {};
+	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
+	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
+	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
+	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
+	    no_samplers, no_gds, nullptr, bind);
+	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	const VkImageLayout source_layout = source->layout;
+	const VkImageLayout destination_layout = destination->layout;
+	UtilImageToBuffer(command_buffer, source, source_buffer, source->extent.width, source_layout);
+	UtilImageToBuffer(command_buffer, destination, destination_buffer, destination->extent.width, destination_layout);
+	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	VkMemoryBarrier before_compute {};
+	before_compute.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	before_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	before_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u, 1u,
+	                     &before_compute, 0u, nullptr, 0u, nullptr);
+	DetilePushConstants push {};
+	push.width                   = destination->extent.width / 2u;
+	push.height                  = destination->extent.height;
+	push.layout_kind             = 4u;
+	push.src_u32_count           = static_cast<uint32_t>(source_bytes / 4u);
+	push.dst_u32_count           = static_cast<uint32_t>(destination_bytes / 4u);
+	push.source_width            = source->extent.width;
+	push.source_blocks_x         = plan.source_blocks_x;
+	push.destination_blocks_x    = plan.destination_blocks_x;
+	push.source_first_block      = plan.source_first_block;
+	push.destination_first_block = plan.destination_first_block;
+	push.alias_block_count       = plan.block_count;
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, state->pipeline);
+	vkCmdBindDescriptorSets(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, state->pipeline_layout, 0u, 1u, &descriptor->set, 0u, nullptr);
+	vkCmdPushConstants(vk_buffer, state->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
+	vkCmdDispatch(vk_buffer, groups_x, groups_y, 1u);
+	VkMemoryBarrier before_copy {};
+	before_copy.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	before_copy.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	before_copy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u, &before_copy, 0u,
+	                     nullptr, 0u, nullptr);
+	UtilBufferToImage(command_buffer, destination_buffer, destination->extent.width, destination,
+	                  static_cast<uint64_t>(destination_layout));
+	return true;
+}
+
+struct RawRenderSourceWindow
+{
+	uint32_t first_block = 0u;
+	uint32_t block_count = 0u;
+	uint64_t bytes       = 0u;
+	Vector<VkBufferImageCopy> regions;
+};
+
+static bool PlanRawRenderSourceWindow(const StorageTextureRawRenderSource& source,
+                                      uint64_t address, uint64_t size, RawRenderSourceWindow* window)
+{
+	if (window == nullptr || source.guest_address > UINT64_MAX - source.guest_size || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+	*window = {};
+	const uint64_t overlap_begin = std::max(source.guest_address, address);
+	const uint64_t overlap_end   = std::min(source.guest_address + source.guest_size, address + size);
+	if (overlap_begin >= overlap_end || source.bytes_per_pixel == 0u || source.pitch == 0u)
+	{
+		return false;
+	}
+	const uint32_t block_width  = TileGet64KBBlockWidth(source.bytes_per_pixel);
+	const uint32_t block_height = source.bytes_per_pixel == 8u ? 64u : 128u;
+	if (block_width == 0u || source.pitch % block_width != 0u)
+	{
+		return false;
+	}
+	const uint64_t first = (overlap_begin - source.guest_address) / 65536u;
+	const uint64_t last  = (overlap_end - 1u - source.guest_address) / 65536u;
+	const uint64_t count = last - first + 1u;
+	if (first > UINT32_MAX || count > UINT32_MAX || count > INT32_MAX / 65536u)
+	{
+		return false;
+	}
+	window->first_block = static_cast<uint32_t>(first);
+	window->block_count = static_cast<uint32_t>(count);
+	window->bytes       = count * 65536u;
+	const uint64_t blocks_x = source.pitch / block_width;
+	for (uint64_t block = first; block <= last; ++block)
+	{
+		const uint64_t x = (block % blocks_x) * block_width;
+		const uint64_t y = (block / blocks_x) * block_height;
+		if (x >= source.width || y >= source.height)
+		{
+			continue;
+		}
+		VkBufferImageCopy region {};
+		region.bufferOffset = (block - first) * 65536u;
+		region.bufferRowLength = block_width;
+		region.bufferImageHeight = block_height;
+		region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		region.imageSubresource.layerCount = 1u;
+		region.imageOffset = {static_cast<int32_t>(x), static_cast<int32_t>(y), 0};
+		region.imageExtent = {static_cast<uint32_t>(std::min<uint64_t>(block_width, source.width - x)),
+		                      static_cast<uint32_t>(std::min<uint64_t>(block_height, source.height - y)), 1u};
+		window->regions.Add(region);
+	}
+	return !window->regions.IsEmpty();
+}
+
+bool StorageTextureCompositeRawRenderAliases(GraphicContext* ctx, CommandBuffer* command_buffer,
+                                             const Vector<StorageTextureRawRenderSource>& sources,
+                                             VulkanImage* destination, uint64_t address, uint64_t size)
+{
+	if (ctx == nullptr || command_buffer == nullptr || command_buffer->IsInvalid() || sources.IsEmpty() ||
+	    destination == nullptr || destination->image == VK_NULL_HANDLE ||
+	    destination->format != VK_FORMAT_R16G16B16A16_UNORM || destination->samples != VK_SAMPLE_COUNT_1_BIT ||
+	    destination->array_layers != 1u || destination->mip_levels != 1u ||
+	    destination->extent.width != destination->guest_extent.width ||
+	    destination->extent.height != destination->guest_extent.height ||
+	    (destination->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u ||
+	    size != static_cast<uint64_t>(destination->extent.width) * destination->extent.height * 8u ||
+	    size == 0u || size > INT32_MAX || address > INT64_MAX || (size & 3u) != 0u ||
+	    !StorageTextureRawRenderSourceCovers(sources.At(0), address, size) || ctx->physical_device == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(ctx->physical_device, &properties);
+	if (size > properties.limits.maxStorageBufferRange || sizeof(DetilePushConstants) > properties.limits.maxPushConstantsSize ||
+	    properties.limits.maxComputeWorkGroupSize[0] < 8u || properties.limits.maxComputeWorkGroupSize[1] < 8u ||
+	    properties.limits.maxComputeWorkGroupInvocations < 64u)
+	{
+		return false;
+	}
+	uint64_t maximum_source_bytes = 0u;
+	std::vector<RawRenderSourceWindow> windows;
+	for (const auto& source: sources)
+	{
+		const uint64_t bytes = static_cast<uint64_t>(source.width) * source.height * source.bytes_per_pixel;
+		const int64_t delta = static_cast<int64_t>(source.guest_address) - static_cast<int64_t>(address);
+		const VkFormat expected = source.bytes_per_pixel == 2u ? VK_FORMAT_R8G8_UNORM :
+		                          source.bytes_per_pixel == 4u ? VK_FORMAT_R8G8B8A8_UNORM :
+		                          source.bytes_per_pixel == 8u ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_UNDEFINED;
+		if (source.image == nullptr || source.image->image == VK_NULL_HANDLE || source.image->format != expected ||
+		    source.image->samples != VK_SAMPLE_COUNT_1_BIT || source.image->array_layers != 1u || source.image->mip_levels != 1u ||
+		    source.image->extent.width != source.width || source.image->extent.height != source.height ||
+		    source.image->guest_extent.width != source.width || source.image->guest_extent.height != source.height ||
+		    (source.image->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) == 0u ||
+		    bytes == 0u || bytes > INT32_MAX || (bytes & 3u) != 0u || bytes > properties.limits.maxStorageBufferRange ||
+		    source.guest_size > INT32_MAX || source.guest_address > INT64_MAX || delta < INT32_MIN || delta > INT32_MAX ||
+		    (source.guest_address & 65535u) != 0u || source.pitch == 0u ||
+		    source.pitch % TileGet64KBBlockWidth(source.bytes_per_pixel) != 0u ||
+		    (source.width + 7u) / 8u > properties.limits.maxComputeWorkGroupCount[0] ||
+		    (source.height + 7u) / 8u > properties.limits.maxComputeWorkGroupCount[1])
+		{
+			return false;
+		}
+		RawRenderSourceWindow window {};
+		if (!PlanRawRenderSourceWindow(source, address, size, &window) ||
+		    window.bytes > properties.limits.maxStorageBufferRange)
+		{
+			return false;
+		}
+		maximum_source_bytes = std::max(maximum_source_bytes, window.bytes);
+		windows.push_back(std::move(window));
+	}
+	auto* source_buffer = command_buffer->AllocateTransientScratchBuffer(
+	    maximum_source_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	auto* destination_buffer = command_buffer->AllocateTransientScratchBuffer(
+	    size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+	if (source_buffer == nullptr || destination_buffer == nullptr || source_buffer == destination_buffer)
+	{
+		return false;
+	}
+	Core::LockGuard lock(ctx->gpu_detile_mutex);
+	GpuDetileContext* state = nullptr;
+	if (GetGpuDetileContext(ctx, &state) != TileGpuDetileStatus::Success || state == nullptr || !state->resources_ready)
+	{
+		return false;
+	}
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num = 2;
+	ShaderCalcBindingIndices(&bind);
+	VulkanBuffer* descriptor_buffers[2]                                    = {source_buffer, destination_buffer};
+	VulkanImage*  no_images[DescriptorCache::TEXTURES_SAMPLED_MAX]          = {};
+	int           no_views[DescriptorCache::TEXTURES_SAMPLED_MAX]           = {};
+	VulkanImage*  no_storage_images[DescriptorCache::TEXTURES_STORAGE_MAX]  = {};
+	int           no_storage_views[DescriptorCache::TEXTURES_STORAGE_MAX]   = {};
+	uint64_t      no_samplers[DescriptorCache::SAMPLERS_MAX]                = {};
+	VulkanBuffer* no_gds[DescriptorCache::GDS_BUFFER_MAX]                   = {};
+	auto* descriptor = g_render_ctx->GetDescriptorCache()->GetDescriptor(
+	    DescriptorCache::Stage::Compute, descriptor_buffers, no_images, no_views, no_images, no_views, no_images, no_views,
+	    no_images, no_views, no_images, no_views, no_images, no_views, no_images, no_views, no_storage_images, no_storage_views,
+	    no_samplers, no_gds, nullptr, bind);
+	if (descriptor == nullptr || descriptor->set == VK_NULL_HANDLE)
+	{
+		return false;
+	}
+	auto vk_buffer = command_buffer->GetPool()->buffers[command_buffer->GetIndex()];
+	for (uint32_t index = 0u; index < sources.Size(); ++index)
+	{
+		const auto& source = sources.At(index);
+		const auto& window = windows[index];
+		VkMemoryBarrier before_copy {};
+		before_copy.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		before_copy.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		before_copy.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u,
+		                     1u, &before_copy, 0u, nullptr, 0u, nullptr);
+		UtilImageToBuffer(command_buffer, source.image, source_buffer, window.regions, source.image->layout);
+		VkMemoryBarrier before_compute {};
+		before_compute.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+		before_compute.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		before_compute.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+		                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0u, 1u, &before_compute, 0u, nullptr, 0u, nullptr);
+		DetilePushConstants push {};
+		push.width             = source.width;
+		push.height            = source.height;
+		push.bytes_per_element = source.bytes_per_pixel;
+		push.layout_kind       = 5u;
+		push.src_u32_count     = static_cast<uint32_t>(window.bytes / 4u);
+		push.dst_u32_count     = static_cast<uint32_t>(size / 4u);
+		push.src_byte_offset   = static_cast<uint32_t>(static_cast<int32_t>(
+		    static_cast<int64_t>(source.guest_address) - static_cast<int64_t>(address)));
+		push.source_width      = source.width;
+		push.source_blocks_x   = source.pitch / TileGet64KBBlockWidth(source.bytes_per_pixel);
+		push.source_first_block = window.first_block;
+		push.alias_block_count = window.block_count;
+		vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, state->pipeline);
+		vkCmdBindDescriptorSets(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, state->pipeline_layout,
+		                        0u, 1u, &descriptor->set, 0u, nullptr);
+		vkCmdPushConstants(vk_buffer, state->pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u, sizeof(push), &push);
+		vkCmdDispatch(vk_buffer, (source.width + 7u) / 8u, (source.height + 7u) / 8u, 1u);
+	}
+	VkMemoryBarrier before_upload {};
+	before_upload.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	before_upload.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+	before_upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u,
+	                     1u, &before_upload, 0u, nullptr, 0u, nullptr);
+	UtilBufferToImage(command_buffer, destination_buffer, destination->extent.width, destination,
+	                  static_cast<uint64_t>(VK_IMAGE_LAYOUT_GENERAL));
+	return true;
 }
 
 bool TileGpuDetileReleaseContext(GraphicContext* ctx)

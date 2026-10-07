@@ -27,6 +27,7 @@ bool instruction_is_conditional_branch(const ShaderInstruction& inst)
 	switch (inst.type)
 	{
 		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchExecnz:
 		case ShaderInstructionType::SCbranchScc0:
 		case ShaderInstructionType::SCbranchScc1:
 		case ShaderInstructionType::SCbranchVccz:
@@ -52,7 +53,7 @@ String8 pick_guest_join_label(uint32_t join_pc, const Vector<ShaderLabel*>& gues
 	return String8::FromPrintf("label_%04" PRIx32, join_pc);
 }
 
-// Outermost selection merge (parent == 0). Nested loop merges branch here.
+// Outermost selection merge (no parent). Nested loop merges branch here.
 String8 pick_sc_join_root(const ShaderCode& code, uint32_t join_pc, const Vector<uint32_t>& order,
                           const Vector<uint32_t>& sc_join_srcs)
 {
@@ -63,7 +64,7 @@ String8 pick_sc_join_root(const ShaderCode& code, uint32_t join_pc, const Vector
 	for (int i = order.Size(); i > 0; i--)
 	{
 		const uint32_t src = order[i - 1];
-		if (ScJoinFindParent(code, src, join_pc, sc_join_srcs) == 0)
+		if (ScJoinFindParent(code, src, join_pc, sc_join_srcs) == kScJoinNoSource)
 		{
 			return ScJoinMergeName(join_pc, src);
 		}
@@ -119,7 +120,7 @@ void classify_backward_loop_header(const ShaderCode& code, const ShaderLabel& la
 
 void Spirv::WriteLabel(int index)
 {
-	if (index <= 0)
+	if (index < 0)
 	{
 		return;
 	}
@@ -127,7 +128,8 @@ void Spirv::WriteLabel(int index)
 	const auto& instructions = m_code.GetInstructions();
 	const auto& inst         = instructions.At(index);
 	auto&       labels       = m_code.GetLabels();
-	const auto& prev         = instructions.At(index - 1);
+	const ShaderInstruction entry;
+	const auto& prev         = index == 0 ? entry : instructions.At(index - 1);
 
 	// Partition guest labels at this PC.
 	Vector<ShaderLabel*> loop_merges;
@@ -155,10 +157,33 @@ void Spirv::WriteLabel(int index)
 	{
 		ScJoinOrderForEmission(m_code, inst.pc, sc_join_srcs, &sc_join_order);
 	}
+	SpirvSBranchLoop loop;
+	const bool structured_loop_header = ScJoinFindSBranchLoop(m_code, inst.pc, &loop);
+	if (structured_loop_header && guest_labels.Size() > 0)
+	{
+		for (uint32_t g = 0; g < guest_labels.Size(); ++g)
+		{
+			if (guest_labels[g]->GetSrc() == loop.latch)
+			{
+				auto* first = guest_labels[0];
+				guest_labels[0] = guest_labels[g];
+				guest_labels[g] = first;
+				break;
+			}
+		}
+	}
 
 	const String8 guest_join   = pick_guest_join_label(inst.pc, guest_labels);
 	const String8 sc_join_root = pick_sc_join_root(m_code, inst.pc, sc_join_order, sc_join_srcs);
-	const String8 after_loop   = !sc_join_root.IsEmpty() ? sc_join_root : guest_join;
+	String8 after_loop = !sc_join_root.IsEmpty() ? sc_join_root : guest_join;
+	if (loop_merges.Size() > 0 && sc_join_srcs.Size() > 0)
+	{
+		const uint32_t owner = ScJoinFindOwner(m_code, loop_merges[loop_merges.Size() - 1]->GetSrc(), inst.pc, sc_join_srcs);
+		if (owner != kScJoinNoSource)
+		{
+			after_loop = ScJoinMergeName(inst.pc, owner);
+		}
+	}
 
 	// pending_branch: previous block still needs a terminator OpBranch %next.
 	// skip_branch_to_next: next OpLabel is already the target of a prior OpBranch
@@ -209,7 +234,7 @@ void Spirv::WriteLabel(int index)
 		{
 			const uint32_t owner = ScJoinFindOwner(m_code, prev.pc, inst.pc, sc_join_srcs);
 			const uint32_t entry_src =
-			    (owner != 0) ? owner : sc_join_order[sc_join_order.Size() - 1];
+			    (owner != kScJoinNoSource) ? owner : sc_join_order[sc_join_order.Size() - 1];
 			m_source += String8::FromPrintf("               OpBranch %%%s\n",
 			                                ScJoinMergeName(inst.pc, entry_src).c_str());
 			skip_branch_to_next = true;
@@ -225,7 +250,7 @@ void Spirv::WriteLabel(int index)
 			const uint32_t parent = ScJoinFindParent(m_code, src, inst.pc, sc_join_srcs);
 			// Root closes onto a real guest label when one exists; otherwise the
 			// root hosts the guest instruction body (no synthetic branch target).
-			const String8 next = (parent != 0)   ? ScJoinMergeName(inst.pc, parent)
+			const String8 next = (parent != kScJoinNoSource) ? ScJoinMergeName(inst.pc, parent)
 			                     : (guest_labels.Size() > 0) ? guest_join
 			                                                : String8();
 
@@ -250,7 +275,7 @@ void Spirv::WriteLabel(int index)
 				m_source += String8::FromPrintf("               OpBranch %%%s\n", next.c_str());
 			}
 			labels_num++;
-			if (parent == 0 && !next.IsEmpty())
+			if (parent == kScJoinNoSource && !next.IsEmpty())
 			{
 				sc_joins_branch_to_guest = true;
 				skip_branch_to_next      = true; // guest_join OpLabel is next
@@ -279,6 +304,17 @@ void Spirv::WriteLabel(int index)
 		}
 		m_source += String8::FromPrintf("       %%%s = OpLabel\n", label.ToString().c_str());
 		labels_num++;
+		if (structured_loop_header)
+		{
+			if (g == 0)
+			{
+				m_source += String8::FromPrintf("OpLoopMerge %%%s %%loop_continue_%04" PRIx32 " None\n"
+				                                "OpBranch %%loop_body_%04" PRIx32 "\n"
+				                                "%%loop_body_%04" PRIx32 " = OpLabel\n",
+				                                loop.MergeName().c_str(), loop.latch, loop.latch, loop.latch);
+			}
+			continue;
+		}
 
 		// Backward SBranch / SCbranch targets are loop headers: emit OpLoopMerge.
 		bool backward_loop_source    = false;

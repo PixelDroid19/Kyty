@@ -324,14 +324,16 @@ bool Gen5FillTextureArrayUploadRegions(const Gen5TextureArrayLayout& layout, Gen
 	return index == *region_count;
 }
 
-bool Gen5FillTextureArrayLayerUploadRegions(const Gen5TextureArrayLayout& layout, uint32_t layer,
-                                            Gen5TextureArrayUploadRegion* regions, uint32_t region_capacity, uint32_t* region_count)
+bool Gen5FillTextureArrayLayerUploadRegionsForLevels(const Gen5TextureArrayLayout& layout, uint32_t layer, uint32_t upload_levels,
+                                                     Gen5TextureArrayUploadRegion* regions, uint32_t region_capacity,
+                                                     uint32_t* region_count)
 {
-	if (region_count == nullptr || layer >= layout.layers || layout.levels == 0u || layout.levels > 16u)
+	if (region_count == nullptr || layer >= layout.layers || upload_levels == 0u || upload_levels > layout.levels ||
+	    layout.levels > 16u)
 	{
 		return false;
 	}
-	const uint32_t needed = layout.has_mip_layout ? layout.levels : 1u;
+	const uint32_t needed = layout.has_mip_layout ? upload_levels : 1u;
 	if (needed == 0u)
 	{
 		return false;
@@ -352,7 +354,7 @@ bool Gen5FillTextureArrayLayerUploadRegions(const Gen5TextureArrayLayout& layout
 		{
 			return false;
 		}
-		for (uint32_t level = 0; level < layout.levels; ++level)
+		for (uint32_t level = 0; level < upload_levels; ++level)
 		{
 			const auto&    level_layout = layout.mip_layout.level[level];
 			const uint64_t offset       = level_layout.linear_offset;
@@ -384,6 +386,12 @@ bool Gen5FillTextureArrayLayerUploadRegions(const Gen5TextureArrayLayout& layout
 	regions[0].dst_level       = 0;
 	regions[0].dst_array_layer = layer;
 	return true;
+}
+
+bool Gen5FillTextureArrayLayerUploadRegions(const Gen5TextureArrayLayout& layout, uint32_t layer,
+                                            Gen5TextureArrayUploadRegion* regions, uint32_t region_capacity, uint32_t* region_count)
+{
+	return Gen5FillTextureArrayLayerUploadRegionsForLevels(layout, layer, layout.levels, regions, region_capacity, region_count);
 }
 
 uint32_t Gen5Bc6hUfloatMode(const uint8_t* block, uint32_t byte_count)

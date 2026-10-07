@@ -8,14 +8,13 @@
 #include "Emulator/Agent/AgentServer.h"
 #include "Emulator/Agent/EventRing.h"
 #include "Emulator/Config.h"
-#include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/Graphics.h"
+#include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/NativeCapture.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
-#include "Emulator/Graphics/Objects/IndexBuffer.h"
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
@@ -585,6 +584,18 @@ void VerifyRenderTargetIndexAliasContract()
 	GpuMemoryFree(&ctx, heap_addr, guest.size());
 }
 
+void VerifyColorAttachmentTransferContract()
+{
+	Expect(VulkanResolveColorAttachmentView(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_UNORM) ==
+	           VulkanImage::VIEW_COLOR_UNORM &&
+	           VulkanResolveColorAttachmentView(VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB) ==
+	               VulkanImage::VIEW_COLOR_SRGB &&
+	           VulkanResolveColorAttachmentView(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_B8G8R8A8_SRGB) ==
+	               VulkanImage::VIEW_DEFAULT &&
+	           VulkanResolveColorAttachmentView(VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R8G8B8A8_UNORM) < 0,
+	       "color attachment views preserve exact compatible UNORM/sRGB transfer domains");
+}
+
 void VerifyVertexClipProbeContract()
 {
 	ShaderInstruction clamped_add {};
@@ -1035,11 +1046,18 @@ void VerifyVertexClipProbeContract()
 	           PixelMrtProbeDiagnosticIdentity(0u, 0u, 229u) != PixelMrtProbeDiagnosticIdentity(0u, 0u, 228u),
 	       "pixel MRT target and export ordinal have a distinct diagnostic identity");
 
-	static_assert(sizeof(VertexClipProbeRawStats) == sizeof(uint32_t) * 51u);
+	static_assert(sizeof(VertexClipProbeRawStats) == sizeof(uint32_t) * (51u + kVertexScalarBufferProbeSites * kVertexScalarBufferProbeWords));
+	static_assert(offsetof(VertexClipProbeRawStats, scalar_buffer) == sizeof(uint32_t) * 51u);
 	static_assert(offsetof(VertexClipProbeRawStats, min_pixel_frag_x) == sizeof(uint32_t) * 47u);
 	static_assert(offsetof(VertexClipProbeRawStats, max_pixel_frag_x) == sizeof(uint32_t) * 48u);
 	static_assert(offsetof(VertexClipProbeRawStats, min_pixel_frag_y) == sizeof(uint32_t) * 49u);
 	static_assert(offsetof(VertexClipProbeRawStats, max_pixel_frag_y) == sizeof(uint32_t) * 50u);
+	const VertexClipProbeRawStats scalar_initial {};
+	for (const auto& load: scalar_initial.scalar_buffer)
+	{
+		Expect(load.claimed == 0u && load.components == 0u,
+		       "unobserved scalar-load sites start unclaimed, not fabricated samples");
+	}
 	const auto initial_stats = VertexClipProbeInitialRawStats();
 	Expect(initial_stats.invocations == 0u && initial_stats.nonfinite == 0u && initial_stats.max_w == 0u &&
 	           initial_stats.max_x_w == 0u && initial_stats.max_y_w == 0u && initial_stats.max_z_w == 0u &&
@@ -1429,6 +1447,10 @@ void VerifyVertexClipProbeContract()
 		Expect(probe_source.FindIndex(decoration) != Kyty::Core::STRING8_INVALID_INDEX,
 		       "vertex clip probe lays out every raw-stat uint at its explicit byte offset");
 	}
+	Expect(probe_source.FindIndex("OpMemberDecorate %VertexClipProbeRawStats 51 Offset 204") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           probe_source.FindIndex("OpDecorate %VertexScalarBufferProbeWords ArrayStride 4") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           probe_source.FindIndex("%vertex_scalar_probe_word_count = OpConstant %uint 192") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "scalar-load observations append an explicitly bounded word array without moving prior fields");
 	Expect(probe_source.FindIndex("OpAtomicIAdd") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "vertex clip probe counts invocations and nonfinite observations with uint atomics");
 	Expect(probe_source.FindIndex("vertex_clip_probe_w_nonpositive_ptr_2") != Kyty::Core::STRING8_INVALID_INDEX &&
@@ -2084,7 +2106,7 @@ void VerifyEventWritePacketContract()
 
 std::vector<uint32_t> AssembleValidSpirv(const Kyty::Core::String8& source, const char* message)
 {
-	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_4);
 	std::vector<uint32_t> binary;
 	tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t& position, const char* detail)
 	{
@@ -2102,7 +2124,7 @@ void ExpectValidSpirv(const Kyty::Core::String8& source, const char* message)
 
 void ExpectValidSpirv(const Kyty::Vector<uint32_t>& binary, const char* message)
 {
-	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_4);
 	tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t& position, const char* detail)
 	{
 		std::fprintf(stderr, "SPIR-V validation at %zu:%zu: %s\n", position.line, position.column, detail);
@@ -2210,6 +2232,22 @@ void VerifyDepthStencilAttachmentAccess(bool load_store_op_none_supported)
 
 void VerifyImageCopyNormalization()
 {
+	Gen5TextureArrayLayout cube_layout {};
+	Expect(Gen5GetTextureArrayLayout(181u, 4096u, 4096u, 4096u, 13u, 5u, 6u, &cube_layout),
+	       "BC7 cube layout resolves for the host mip containment contract");
+	uint32_t cube_region_count = 0u;
+	Expect(Gen5FillTextureArrayLayerUploadRegionsForLevels(cube_layout, 2u, 11u, nullptr, 0u, &cube_region_count) &&
+	           cube_region_count == 11u,
+	       "array upload exposes only mip levels created in the host image");
+	std::vector<Gen5TextureArrayUploadRegion> cube_regions(cube_region_count);
+	Expect(Gen5FillTextureArrayLayerUploadRegionsForLevels(cube_layout, 2u, 11u, cube_regions.data(), cube_region_count,
+	                                                      &cube_region_count) &&
+	           cube_region_count == 11u && cube_regions.back().dst_level == 10u && cube_regions.back().dst_array_layer == 2u,
+	       "bounded array upload retains exact destination levels and layer identity");
+	Expect(!Gen5FillTextureArrayLayerUploadRegionsForLevels(cube_layout, 0u, 0u, nullptr, 0u, &cube_region_count) &&
+	           !Gen5FillTextureArrayLayerUploadRegionsForLevels(cube_layout, 0u, 14u, nullptr, 0u, &cube_region_count),
+	       "array upload rejects empty or nonexistent host mip ranges");
+
 	VulkanImage source(VulkanImageType::StorageTexture);
 	VulkanImage destination(VulkanImageType::Texture);
 	source.SetNativeExtent(256u, 128u);
@@ -2571,6 +2609,113 @@ void VerifyGuestReadVisitSerializesProtection()
 	Expect(Kyty::Core::VirtualMemory::ProtectGuest(address, page_size, Kyty::Core::VirtualMemory::Mode::ReadWrite),
 	       "guest read visit restores page access for cleanup");
 	Expect(Kyty::Core::VirtualMemory::Free(address), "guest read visit releases its guest page");
+}
+
+void VerifyGen5EudSnapshotCoherence()
+{
+	using Kyty::Core::VirtualMemory::Alloc;
+	using Kyty::Core::VirtualMemory::CopyToGuest;
+	using Kyty::Core::VirtualMemory::Free;
+	using Kyty::Core::VirtualMemory::GetPageSize;
+	using Kyty::Core::VirtualMemory::Mode;
+
+	const uint64_t eud_address = Alloc(0u, GetPageSize(), Mode::ReadWrite);
+	Expect(eud_address != 0u, "Gen5 EUD snapshot fixture allocates guest table storage");
+
+	std::array<uint32_t, 44> first_table {};
+	std::array<uint32_t, 44> replacement_table {};
+	first_table[40]       = 0x00001000u;
+	first_table[41]       = 0x00000010u;
+	first_table[42]       = 0x00000020u;
+	first_table[43]       = 0x00000030u;
+	replacement_table[40] = 0x00002000u;
+	replacement_table[41] = 0x00000011u;
+	replacement_table[42] = 0x00000022u;
+	replacement_table[43] = 0x00000033u;
+	Expect(CopyToGuest(eud_address, first_table.data(), sizeof(first_table)),
+	       "Gen5 EUD snapshot fixture writes the first descriptor table");
+
+	std::array<uint16_t, 6> direct_offsets {};
+	direct_offsets.fill(0xffffu);
+	constexpr uint32_t eud_direct_type = 5u;
+	direct_offsets[eud_direct_type] = 28u;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets.data();
+	user_data.eud_size_dw            = 4u;
+	user_data.direct_resource_count  = static_cast<uint16_t>(direct_offsets.size());
+
+	HW::UserSgprInfo user_sgpr {};
+	user_sgpr.value[28] = static_cast<uint32_t>(eud_address);
+	user_sgpr.value[29] = static_cast<uint32_t>(eud_address >> 32u);
+
+	ShaderInstruction eud_load {};
+	eud_load.pc                = 0u;
+	eud_load.type              = ShaderInstructionType::SLoadDwordx4;
+	eud_load.format            = ShaderInstructionFormat::Sdst4SbaseSoffset;
+	eud_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 76, .size = 4};
+	eud_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 28, .size = 2};
+	eud_load.src[1].type       = ShaderOperandType::LiteralConstant;
+	eud_load.src[1].constant.u = 40u * sizeof(uint32_t);
+	eud_load.src_num           = 2;
+
+	ShaderInstruction storage_consumer {};
+	storage_consumer.pc                = 4u;
+	storage_consumer.type              = ShaderInstructionType::SBufferLoadDword;
+	storage_consumer.format            = ShaderInstructionFormat::SdstSbaseSoffset;
+	storage_consumer.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 1};
+	storage_consumer.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 76, .size = 4};
+	storage_consumer.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+	storage_consumer.src[1].constant.u = 0u;
+	storage_consumer.src_num           = 2;
+
+	ShaderInstruction end {};
+	end.pc     = 8u;
+	end.type   = ShaderInstructionType::SEndpgm;
+	end.format = ShaderInstructionFormat::Empty;
+	ShaderCode code {};
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(eud_load);
+	code.GetInstructions().Add(storage_consumer);
+	code.GetInstructions().Add(end);
+
+	uint32_t required_end_dw = 0u;
+	Expect(ShaderGen5EudRequiredEndDwords(&user_data, 30, 28, &code, 0, &required_end_dw) && required_end_dw == 44u,
+	       "Gen5 EUD snapshot includes the dynamic descriptor span at dword 40");
+
+	struct SnapshotMutation
+	{
+		uint64_t        address     = 0u;
+		const uint32_t* replacement = nullptr;
+		uint64_t        bytes       = 0u;
+		bool            changed     = false;
+		bool            write_ok    = false;
+	} mutation {eud_address, replacement_table.data(), sizeof(replacement_table)};
+	ShaderSetGen5EudSnapshotTestHook(
+	    [](void* opaque)
+	    {
+		    auto* state = static_cast<SnapshotMutation*>(opaque);
+		    if (!state->changed)
+		    {
+			    state->write_ok = Kyty::Core::VirtualMemory::CopyToGuest(state->address, state->replacement, state->bytes);
+			    state->changed  = true;
+		    }
+	    },
+	    &mutation);
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 30, &code, 0, false);
+	ShaderSetGen5EudSnapshotTestHook(nullptr, nullptr);
+
+	Expect(mutation.changed && mutation.write_ok, "Gen5 EUD snapshot fixture changes the guest table during capture");
+	Expect(bind.storage_buffers.buffers_num == 1 && bind.storage_buffers.dynamic_sload[0],
+	       "Gen5 EUD snapshot materializes the dynamic storage descriptor");
+	for (int field = 0; field < 4; ++field)
+	{
+		Expect(bind.storage_buffers.buffers[0].fields[field] == replacement_table[40 + field],
+		       "Gen5 EUD snapshot never combines descriptor words from two guest-table versions");
+	}
+	Expect(Free(eud_address), "Gen5 EUD snapshot fixture releases guest table storage");
 }
 
 void VerifyFusedShaderUsesEffectiveBackEntry()
@@ -4061,7 +4206,7 @@ public:
 	{
 		VkApplicationInfo application {};
 		application.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-		application.apiVersion = VK_API_VERSION_1_0;
+		application.apiVersion = VK_API_VERSION_1_4;
 		VkInstanceCreateInfo instance_info {};
 		instance_info.sType            = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
 		instance_info.pApplicationInfo = &application;
@@ -4083,6 +4228,9 @@ public:
 
 		for (const auto physical: physical_devices)
 		{
+			VkPhysicalDeviceProperties properties {};
+			vkGetPhysicalDeviceProperties(physical, &properties);
+			if (properties.apiVersion < VK_API_VERSION_1_4) { continue; }
 			uint32_t extension_count = 0;
 			if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, nullptr) != VK_SUCCESS)
 			{
@@ -5194,183 +5342,6 @@ private:
 	VkDescriptorSet       set      = VK_NULL_HANDLE;
 };
 
-uint32_t g_rejected_allocation_type = UINT32_MAX;
-uint32_t g_rejected_allocation_calls = 0u;
-
-VkResult VKAPI_CALL RejectPreferredAllocation(VkDevice device, const VkMemoryAllocateInfo* info,
-                                             const VkAllocationCallbacks* callbacks, VkDeviceMemory* memory)
-{
-	if (info->memoryTypeIndex == g_rejected_allocation_type)
-	{
-		g_rejected_allocation_calls++;
-		*memory = VK_NULL_HANDLE;
-		return VK_ERROR_OUT_OF_DEVICE_MEMORY;
-	}
-	return vkAllocateMemory(device, info, callbacks, memory);
-}
-
-void VerifyIndexBufferInitialUpload()
-{
-	VulkanSamplerContext vulkan;
-	Expect(vulkan.Initialize(), "initial index upload initializes Vulkan");
-	GpuMemoryInit();
-	LabelInit();
-	IndexBufferInit();
-	HostNanRasterTarget target(&vulkan.context);
-	Expect(target.Create(), "index upload creates its raster control");
-	const auto vertex = CreateHostNanRasterShaderModule(vulkan.context.device, HostNanRasterVertexShaderSource(false),
-	                                                   "index upload vertex shader validates");
-	const auto fragment = CreateHostNanRasterShaderModule(vulkan.context.device, HostNanRasterFragmentShaderSource(),
-	                                                     "index upload fragment shader validates");
-	VkPipelineLayoutCreateInfo layout_info {};
-	layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	VkPipelineLayout layout = VK_NULL_HANDLE;
-	Expect(vkCreatePipelineLayout(vulkan.context.device, &layout_info, nullptr, &layout) == VK_SUCCESS,
-	       "index upload creates a pipeline layout");
-	const auto pipeline = CreateHostNanRasterPipeline(vulkan.context.device, target.render_pass, layout, vertex, fragment);
-	Expect(pipeline != VK_NULL_HANDLE, "index upload creates a raster pipeline");
-	VkQueryPoolCreateInfo query_info {};
-	query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-	query_info.queryType = VK_QUERY_TYPE_OCCLUSION;
-	query_info.queryCount = 1u;
-	VkQueryPool query = VK_NULL_HANDLE;
-	Expect(vkCreateQueryPool(vulkan.context.device, &query_info, nullptr, &query) == VK_SUCCESS,
-	       "index upload creates a bounded coverage query");
-	std::array<uint16_t, 3> values {0u, 1u, 2u};
-	std::array<uint16_t, 3> fallback_values {0u, 1u, 2u};
-	const uint64_t address = reinterpret_cast<uint64_t>(values.data());
-	const uint64_t fallback_address = reinterpret_cast<uint64_t>(fallback_values.data());
-	const uint64_t size = sizeof(values);
-	GpuMemorySetAllocatedRange(address, size);
-	VkPhysicalDeviceMemoryProperties properties {};
-	vkGetPhysicalDeviceMemoryProperties(vulkan.context.physical_device, &properties);
-	uint32_t legacy_type = properties.memoryTypeCount;
-	uint32_t preferred_type = properties.memoryTypeCount;
-	constexpr auto preferred_flags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-	                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-	VulkanBuffer* index = nullptr;
-	VkMemoryRequirements index_requirements {};
-	for (uint32_t pass = 0u; pass < 4u; ++pass)
-	{
-		const bool force_fallback = pass == 3u;
-		if (force_fallback)
-		{
-			if (preferred_type == properties.memoryTypeCount || legacy_type == preferred_type)
-			{
-				std::fprintf(stderr, "index_allocation_retry_integration=unavailable no distinct preferred type\n");
-				break;
-			}
-			GpuMemorySetAllocatedRange(fallback_address, size);
-			g_rejected_allocation_type = preferred_type;
-			g_rejected_allocation_calls = 0u;
-			vulkan.context.allocate_memory = RejectPreferredAllocation;
-		} else if (pass != 0u)
-		{
-			values = pass == 1u ? std::array<uint16_t, 3> {0u, 0u, 0u} : std::array<uint16_t, 3> {0u, 1u, 2u};
-		}
-		CommandBuffer commands(GraphicContext::QUEUE_GFX);
-		const SubmissionId submission {GpuQueueId {static_cast<uint32_t>(GraphicContext::QUEUE_GFX)}, pass + 1u};
-		commands.SetSubmissionId(submission);
-		commands.Begin();
-		(void)DebugStatsGetPerformanceSnapshot(true);
-		const auto bytes_before = VulkanAllocatedBytes();
-		auto* previous = index;
-		index = static_cast<VulkanBuffer*>(GpuMemoryCreateObject(
-		    pass + 1u, &vulkan.context, &commands, force_fallback ? fallback_address : address, size, IndexBufferGpuObject()));
-		Expect(index != nullptr, "registry materializes guest indices");
-		vulkan.context.allocate_memory = vkAllocateMemory;
-		const auto stats = DebugStatsGetPerformanceSnapshot(false);
-		// This interval covers only materialization; no draw has been submitted.
-		const auto copies = stats.fence_waits;
-		if (pass == 0u)
-		{
-			index_requirements = index->memory.requirements;
-			for (uint32_t i = 0u; i < properties.memoryTypeCount; ++i)
-			{
-				if ((index_requirements.memoryTypeBits & (1u << i)) == 0u) { continue; }
-				if (legacy_type == properties.memoryTypeCount &&
-				    (properties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0u)
-				{
-					legacy_type = i;
-				}
-				if (preferred_type == properties.memoryTypeCount &&
-				    (properties.memoryTypes[i].propertyFlags & preferred_flags) == preferred_flags)
-				{
-					preferred_type = i;
-				}
-			}
-			const bool coherent_placement = index->memory.type < properties.memoryTypeCount &&
-			    (properties.memoryTypes[index->memory.type].propertyFlags & preferred_flags) == preferred_flags;
-			Expect(copies == 1u || (copies == 0u && coherent_placement),
-			       "fresh indices use either coherent direct initialization or one synchronized fallback copy");
-			std::fprintf(stderr, "index_initial_upload_path=%s\n", copies == 0u ? "direct" : "staged");
-			std::fprintf(stderr, "index_initial_direct_coverage=%s\n", copies == 0u ? "exercised" : "not exercised");
-		} else if (force_fallback)
-		{
-			Expect(g_rejected_allocation_calls == 1u && index->memory.type == legacy_type && copies == 1u,
-			       "fresh index allocation retries the ordinary type and initializes it with one staged copy");
-			Expect(VulkanAllocatedBytes() == bytes_before + index->memory.requirements.size,
-			       "failed preferred allocation is not counted and the existing staging allocation is reused");
-		} else
-		{
-			Expect(index == previous && copies == 1u,
-			       "registry updates of completed published indices retain the synchronized copy path");
-		}
-		Expect(stats.upload_bytes == size, "each index initialization or update uploads its bytes exactly once");
-		auto vk_commands = commands.GetPool()->buffers[commands.GetIndex()];
-		vkCmdResetQueryPool(vk_commands, query, 0u, 1u);
-		VkRenderPassBeginInfo begin {};
-		begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-		begin.renderPass = target.render_pass;
-		begin.framebuffer = target.framebuffer;
-		begin.renderArea.extent = {HostNanRasterTarget::kExtent, HostNanRasterTarget::kExtent};
-		vkCmdBeginRenderPass(vk_commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
-		vkCmdBindPipeline(vk_commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-		vkCmdBindIndexBuffer(vk_commands, index->buffer, 0u, VK_INDEX_TYPE_UINT16);
-		vkCmdBeginQuery(vk_commands, query, 0u, 0u);
-		vkCmdDrawIndexed(vk_commands, 3u, 1u, 0u, 0, 0u);
-		vkCmdEndQuery(vk_commands, query, 0u);
-		vkCmdEndRenderPass(vk_commands);
-		commands.End();
-		commands.Execute();
-		Expect(CompleteFenceWithoutBlockingSleep(&commands), "index draw fence completes");
-		GpuMemoryCompleteSubmission(submission);
-		uint64_t samples = 0u;
-		Expect(vkGetQueryPoolResults(vulkan.context.device, query, 0u, 1u, sizeof(samples), &samples, sizeof(samples),
-		                            VK_QUERY_RESULT_64_BIT) == VK_SUCCESS, "index coverage is available after its fence");
-		Expect((samples != 0u) == (pass != 1u), "GPU reads distinguish triangle, degenerate update and restored triangle");
-		if (force_fallback)
-		{
-			GpuMemoryFree(&vulkan.context, fallback_address, size);
-			std::fprintf(stderr, "index_allocation_retry_integration=passed\n");
-		}
-	}
-	if (preferred_type != properties.memoryTypeCount && legacy_type != preferred_type)
-	{
-		VulkanMemory allocation {};
-		allocation.requirements = index_requirements;
-		allocation.property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-		allocation.preferred_property = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-		g_rejected_allocation_calls = 0u;
-		vulkan.context.allocate_memory = RejectPreferredAllocation;
-		allocation.requirements.memoryTypeBits = 1u << legacy_type;
-		Expect(VulkanAllocate(&vulkan.context, &allocation) && allocation.type == legacy_type && g_rejected_allocation_calls == 0u,
-		       "a disallowed preferred type uses the permitted required-only type without attempting it");
-		VulkanFree(&vulkan.context, &allocation);
-		vulkan.context.allocate_memory = vkAllocateMemory;
-	}
-	GpuMemoryFree(&vulkan.context, address, size);
-	IndexBufferDeleteAll(&vulkan.context);
-	Expect(VulkanAllocatedBytes() == 0u, "index initialization and updates release their tracked allocations");
-	vkDestroyQueryPool(vulkan.context.device, query, nullptr);
-	vkDestroyPipeline(vulkan.context.device, pipeline, nullptr);
-	vkDestroyPipelineLayout(vulkan.context.device, layout, nullptr);
-	vkDestroyShaderModule(vulkan.context.device, fragment, nullptr);
-	vkDestroyShaderModule(vulkan.context.device, vertex, nullptr);
-	std::fprintf(stderr, "index_map_failure_injection=not exercised\n");
-	std::fprintf(stderr, "index_initial_upload_integration=passed\n");
-}
-
 void VerifyEventWriteExecutionContract()
 {
 	VulkanSamplerContext vulkan;
@@ -5498,11 +5469,6 @@ void VerifyComparisonSamplerCacheIdentity()
 int main(int argc, char** argv)
 {
 	InitializeGraphicsConfig();
-	if (argc == 2 && std::strcmp(argv[1], "--index-initial-upload-only") == 0)
-	{
-		VerifyIndexBufferInitialUpload();
-		return 0;
-	}
 	VerifyRenderTargetLifetimeAgentArmServerPublication();
 	VerifyRenderTargetLifetimeAgentArmGate();
 	VerifyRenderTargetLifetimeDepthFilter();
@@ -5514,6 +5480,11 @@ int main(int argc, char** argv)
 	if (argc == 2 && std::strcmp(argv[1], "--render-target-index-alias-only") == 0)
 	{
 		VerifyRenderTargetIndexAliasContract();
+		return 0;
+	}
+	if (argc == 2 && std::strcmp(argv[1], "--color-attachment-transfer-only") == 0)
+	{
+		VerifyColorAttachmentTransferContract();
 		return 0;
 	}
 	if (argc == 2 && std::strcmp(argv[1], "--vertex-clip-probe-contract-only") == 0)
@@ -5569,7 +5540,9 @@ int main(int argc, char** argv)
 		return 0;
 	}
 	VerifyGuestReadVisitSerializesProtection();
+	VerifyGen5EudSnapshotCoherence();
 	VerifyImageCopyNormalization();
+	VerifyColorAttachmentTransferContract();
 	VerifyBoundedShaderDecode();
 	VerifyScalarConditionalMoves();
 	VerifyFusedShaderUsesEffectiveBackEntry();

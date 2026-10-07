@@ -9,6 +9,7 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Config.h"
+#include "Emulator/Kernel/Aio.h"
 #include "Emulator/Kernel/EventFlag.h"
 #include "Emulator/Kernel/EventQueue.h"
 #include "Emulator/Kernel/FileSystem.h"
@@ -16,7 +17,6 @@
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Kernel/RetailKernel.h"
 #include "Emulator/Kernel/Semaphore.h"
-#include "Emulator/Kernel/SyncOnAddress.h"
 #include "Emulator/Kernel/Time.h"
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Libs/Errno.h"
@@ -1878,6 +1878,7 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 	// Gen5 pthread_getthreadid_np / rename / schedparam / mutexattr_setprotocol.
 	LIB_FUNC("3eqs37G74-s", Posix::pthread_getthreadid_np);
 	LIB_FUNC("9vyP6Z7bqzc", Posix::pthread_rename_np);
+	LIB_FUNC("9HzfhdtESio", Posix::pthread_getname_np);
 	LIB_FUNC("FIs3-UQT9sg", Posix::pthread_getschedparam);
 	LIB_FUNC("Xs9hdiD7sAA", Posix::pthread_setschedparam);
 	LIB_FUNC("5txKfcMUAok", Posix::pthread_mutexattr_setprotocol);
@@ -1887,10 +1888,21 @@ LIB_DEFINE(InitLibKernel_1_Posix)
 
 namespace FileSystem    = Kernel::FileSystem;
 namespace Memory        = Kernel::Memory;
-namespace SyncOnAddress = Kernel::SyncOnAddress;
 namespace EventQueue    = Kernel::EventQueue;
 namespace EventFlag     = Kernel::EventFlag;
 namespace Semaphore     = Kernel::Semaphore;
+
+// The APR entry points are raw system calls: a failure returns -1 with errno
+// set, and the SDK wrapper linked into each title rebuilds the
+// SCE_KERNEL_ERROR_* code from errno (a zero errno reads as success).
+template <auto Func>
+struct AprSyscall;
+
+template <typename... Args, int (*Func)(Args...)>
+struct AprSyscall<Func>
+{
+	static int KYTY_SYSV_ABI Call(Args... args) { return POSIX_N_CALL(Func(args...)); }
+};
 
 LIB_DEFINE(InitLibKernel_1_FS)
 {
@@ -1899,6 +1911,18 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("Cg4srZ6TKbU", FileSystem::KernelRead);
 	LIB_FUNC("4wSze92BhLI", FileSystem::KernelWrite);
 	LIB_FUNC("+r3rMFwItV4", FileSystem::KernelPread);
+	LIB_FUNC("nu4a0-arQis", Kernel::Aio::AioInitializeParam);
+	LIB_FUNC("vYU8P9Td2Zo", Kernel::Aio::AioInitializeImpl);
+	LIB_FUNC("HgX7+AORI58", Kernel::Aio::AioSubmitReadCommands);
+	LIB_FUNC("lXT0m3P-vs4", Kernel::Aio::AioSubmitReadCommandsMultiple);
+	LIB_FUNC("XQ8C8y+de+E", Kernel::Aio::AioSubmitWriteCommands);
+	LIB_FUNC("xT3Cpz0yh6Y", Kernel::Aio::AioSubmitWriteCommandsMultiple);
+	LIB_FUNC("2pOuoWoCxdk", Kernel::Aio::AioPollRequest);
+	LIB_FUNC("o7O4z3jwKzo", Kernel::Aio::AioPollRequests);
+	LIB_FUNC("KOF-oJbQVvc", Kernel::Aio::AioWaitRequest);
+	LIB_FUNC("lgK+oIWkJyA", Kernel::Aio::AioWaitRequests);
+	LIB_FUNC("5TgME6AYty4", Kernel::Aio::AioDeleteRequest);
+	LIB_FUNC("Ft3EtsZzAoY", Kernel::Aio::AioDeleteRequests);
 	LIB_FUNC("nKWi-N2HBV4", FileSystem::KernelPwrite);
 	LIB_FUNC("eV9wAD2riIA", FileSystem::KernelStat);
 	LIB_FUNC("kBwCPsYX-m4", FileSystem::KernelFstat);
@@ -1911,21 +1935,21 @@ LIB_DEFINE(InitLibKernel_1_FS)
 	LIB_FUNC("j2AIqSqJP0w", FileSystem::KernelGetdents);
 	LIB_FUNC("1-LFLmRFxxM", FileSystem::KernelMkdir);
 	LIB_FUNC("naInUjYt3so", FileSystem::KernelRmdir);
-	// Gen5 APR path resolution / submit / wait (libkernel APR family).
-	LIB_FUNC("gEpBkcwxUjw", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes);
-	LIB_FUNC("WT-5NKy42fw", FileSystem::KernelAprResolveFilepathsToIds);
-	LIB_FUNC("i3HWvW35jao", FileSystem::KernelAprResolveFilepathsWithPrefixToIds);
-	LIB_FUNC("w5fcCG+t31g", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes);
-	LIB_FUNC("eYAh2vlCY-U", FileSystem::KernelAprResolveFilepathsToIdsForEach);
-	LIB_FUNC("QzB4O+bJQyA", FileSystem::KernelAprResolveFilepathsToIdsAndFileSizesForEach);
-	LIB_FUNC("VB-BtuIW8Xc", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsForEach);
-	LIB_FUNC("C+Khtbbx2g8", FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach);
-	LIB_FUNC("ApkYaHb8Sek", FileSystem::KernelAprGetFileStat);
-	LIB_FUNC("WvEu7yl3Ivg", FileSystem::KernelAprGetFileSize);
-	LIB_FUNC("eE4Szl8sil8", FileSystem::KernelAprSubmitCommandBuffer);
-	LIB_FUNC("ASoW5WE-UPo", FileSystem::KernelAprSubmitCommandBufferAndGetResult);
-	LIB_FUNC("qvMUCyyaCSI", FileSystem::KernelAprSubmitCommandBufferAndGetId);
-	LIB_FUNC("rqwFKI4PAiM", FileSystem::KernelAprWaitCommandBuffer);
+	// Gen5 APR path resolution / submit / wait (raw system calls, see AprSyscall).
+	LIB_FUNC("gEpBkcwxUjw", AprSyscall<FileSystem::KernelAprResolveFilepathsToIdsAndFileSizes>::Call);
+	LIB_FUNC("WT-5NKy42fw", AprSyscall<FileSystem::KernelAprResolveFilepathsToIds>::Call);
+	LIB_FUNC("i3HWvW35jao", AprSyscall<FileSystem::KernelAprResolveFilepathsWithPrefixToIds>::Call);
+	LIB_FUNC("w5fcCG+t31g", AprSyscall<FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizes>::Call);
+	LIB_FUNC("eYAh2vlCY-U", AprSyscall<FileSystem::KernelAprResolveFilepathsToIdsForEach>::Call);
+	LIB_FUNC("QzB4O+bJQyA", AprSyscall<FileSystem::KernelAprResolveFilepathsToIdsAndFileSizesForEach>::Call);
+	LIB_FUNC("VB-BtuIW8Xc", AprSyscall<FileSystem::KernelAprResolveFilepathsWithPrefixToIdsForEach>::Call);
+	LIB_FUNC("C+Khtbbx2g8", AprSyscall<FileSystem::KernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach>::Call);
+	LIB_FUNC("ApkYaHb8Sek", AprSyscall<FileSystem::KernelAprGetFileStat>::Call);
+	LIB_FUNC("WvEu7yl3Ivg", AprSyscall<FileSystem::KernelAprGetFileSize>::Call);
+	LIB_FUNC("eE4Szl8sil8", AprSyscall<FileSystem::KernelAprSubmitCommandBuffer>::Call);
+	LIB_FUNC("ASoW5WE-UPo", AprSyscall<FileSystem::KernelAprSubmitCommandBufferAndGetResult>::Call);
+	LIB_FUNC("qvMUCyyaCSI", AprSyscall<FileSystem::KernelAprSubmitCommandBufferAndGetId>::Call);
+	LIB_FUNC("rqwFKI4PAiM", AprSyscall<FileSystem::KernelAprWaitCommandBuffer>::Call);
 
 	// Gen5 kernel mode / fd flush.
 	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
@@ -1949,6 +1973,7 @@ LIB_DEFINE(InitLibKernel_1_Mem)
 	LIB_FUNC("BHouLQzh0X0", Memory::KernelDirectMemoryQuery);
 	LIB_FUNC("C0f7TJcbfac", Memory::KernelAvailableDirectMemorySize);
 	LIB_FUNC("kBJzF8x4SyE", Memory::KernelBatchMap2);
+	LIB_FUNC("2SKEx6bSq-4", Memory::KernelBatchMap);
 	LIB_FUNC("aNz11fnnzi4", Memory::KernelAvailableFlexibleMemorySize);
 	LIB_FUNC("n1-v6FgU7MQ", Memory::KernelConfiguredFlexibleMemorySize);
 	LIB_FUNC("DGMG3JshrZU", Memory::KernelSetVirtualRangeName);
@@ -2165,8 +2190,6 @@ LIB_DEFINE(InitLibKernel_1)
 	LIB_FUNC("kUpgrXIrz7Q", LibKernel::KernelGetModuleInfo);
 	LIB_FUNC("IuxnUuXk6Bg", LibKernel::KernelGetModuleList);
 	LIB_FUNC("uvT2iYBBnkY", LibKernel::KernelSync);
-	LIB_FUNC("Hc4CaR6JBL0", Kernel::SyncOnAddress::KernelSyncOnAddressWait);
-	LIB_FUNC("q2y-wDIVWZA", Kernel::SyncOnAddress::KernelSyncOnAddressWake);
 	LIB_FUNC("Fjc4-n1+y2g", LibKernel::elf_phdr_match_addr);
 	LIB_FUNC("FxVZqBAA7ks", LibKernel::write);
 	LIB_FUNC("kbw4UHHSYy0", LibKernel::pthread_cxa_finalize);

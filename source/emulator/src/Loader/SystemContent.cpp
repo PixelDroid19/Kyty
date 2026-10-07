@@ -10,6 +10,8 @@
 
 #include "Emulator/Log.h"
 
+#include <cstring>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Loader {
@@ -83,6 +85,7 @@ struct SystemContent
 	Psf                    psf;
 	String                 title_id;
 	String                 app_version;
+	String                 title_name;
 	String                 playgo_path;
 	PlayGo                 playgo;
 	String                 icon_path;
@@ -384,6 +387,16 @@ void SystemContentLoadParamSfo(const String& file_name)
 	}
 }
 
+// localizedParameters.<defaultLanguage>.titleName; empty when any level is missing.
+static String ParamJsonTitleName(const Core::Json& json)
+{
+	const auto* localized = json.GetItem("localizedParameters");
+	if (localized == nullptr || !localized->IsObject()) { return {}; }
+	const auto  language = localized->GetString("defaultLanguage");
+	const auto* entry    = language.IsEmpty() ? nullptr : localized->GetItem(language.utf8_str().GetData());
+	return entry != nullptr && entry->IsObject() ? entry->GetString("titleName") : String();
+}
+
 bool SystemContentLoadParamJson(const String& file_name)
 {
 	if (!Core::File::IsFileExisting(file_name))
@@ -402,6 +415,7 @@ bool SystemContentLoadParamJson(const String& file_name)
 
 	const auto title_id    = json->GetString("titleId");
 	const auto app_version = json->GetString("contentVersion");
+	const auto title_name  = ParamJsonTitleName(*json);
 	delete json;
 
 	if (title_id.IsEmpty() && app_version.IsEmpty())
@@ -413,6 +427,7 @@ bool SystemContentLoadParamJson(const String& file_name)
 	auto* sc          = Core::Singleton<SystemContent>::Instance();
 	sc->title_id      = title_id;
 	sc->app_version   = app_version;
+	sc->title_name    = title_name;
 	return true;
 }
 
@@ -474,6 +489,23 @@ bool SystemContentGetMetadata(String* title_id, String* app_version)
 	}
 
 	return !title_id->IsEmpty() || !app_version->IsEmpty();
+}
+
+bool SystemContentGetParamString(const char* name, char* value, size_t value_size)
+{
+	if (name == nullptr || value == nullptr || value_size == 0) { return false; }
+	auto* sc = Core::Singleton<SystemContent>::Instance();
+	if (sc->psf.GetParamString(name, value, value_size)) { return true; }
+	const String* source = nullptr;
+	if (strcmp(name, "TITLE") == 0) { source = &sc->title_name; }
+	if (strcmp(name, "TITLE_ID") == 0) { source = &sc->title_id; }
+	if (strcmp(name, "APP_VER") == 0) { source = &sc->app_version; }
+	if (source == nullptr || source->IsEmpty()) { return false; }
+	const auto   utf8   = source->utf8_str();
+	const size_t length = std::strlen(utf8.GetDataConst());
+	if (length + 1u > value_size) { return false; }
+	std::memcpy(value, utf8.GetDataConst(), length + 1u);
+	return true;
 }
 
 bool SystemContentGetIconPath(String* path)

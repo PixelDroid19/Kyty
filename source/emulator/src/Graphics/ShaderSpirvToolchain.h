@@ -1,6 +1,7 @@
 #ifndef EMULATOR_SRC_GRAPHICS_SHADERSPIRVTOOLCHAIN_H_
 #define EMULATOR_SRC_GRAPHICS_SHADERSPIRVTOOLCHAIN_H_
 
+#include "Emulator/Common.h"
 #include "Kyty/Core/String8.h"
 #include "Kyty/Core/Vector.h"
 

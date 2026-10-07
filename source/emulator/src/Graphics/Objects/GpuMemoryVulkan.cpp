@@ -27,7 +27,12 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <vulkan/vk_enum_string_helper.h>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <utility>
+#include <vector>
 
 #define XXH_INLINE_ALL
 #include <xxhash/xxhash.h>
@@ -44,17 +49,6 @@ struct VulkanMemoryStat
 
 static VulkanMemoryStat* g_mem_stat = nullptr;
 
-uint64_t VulkanAllocatedBytes()
-{
-	if (g_mem_stat == nullptr) { return 0; }
-	uint64_t bytes = 0;
-	for (uint32_t i = 0; i < VK_MAX_MEMORY_TYPES; ++i)
-	{
-		bytes += g_mem_stat->allocated[i].load(std::memory_order_relaxed);
-	}
-	return bytes;
-}
-
 void GpuMemoryVulkanStatsInit()
 {
 	g_mem_stat = new VulkanMemoryStat;
@@ -66,7 +60,227 @@ void GpuMemoryVulkanStatsInit()
 	}
 }
 
-bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
+// Small allocations share large device-memory blocks. Every vkAllocateMemory
+// costs the driver a GPU VA allocation and a VM bind; per-upload staging
+// buffers and small objects made that the dominant CPU cost.
+namespace {
+
+constexpr VkDeviceSize kPoolBlockBytes     = 64ull << 20u;
+constexpr VkDeviceSize kPoolMaxAllocation  = 4ull << 20u;
+
+struct PoolBlock
+{
+	VkDevice                                  device = nullptr;
+	VkDeviceMemory                            memory = nullptr;
+	uint8_t*                                  mapped = nullptr;
+	uint32_t                                  type   = 0;
+	VulkanMemoryResource                      resource {};
+	VkDeviceSize                              used   = 0;
+	std::map<VkDeviceSize, VkDeviceSize>      free_ranges; // offset -> size, coalesced
+	std::set<std::pair<VkDeviceSize, VkDeviceSize>> free_sizes; // (size, offset), same ranges
+};
+
+struct MemoryPool
+{
+	std::mutex                              mutex;
+	std::vector<std::unique_ptr<PoolBlock>> blocks;
+};
+
+MemoryPool& GetMemoryPool()
+{
+	static MemoryPool pool;
+	return pool;
+}
+
+void PoolAddFree(PoolBlock* block, VkDeviceSize offset, VkDeviceSize size)
+{
+	block->free_ranges.emplace(offset, size);
+	block->free_sizes.emplace(size, offset);
+}
+
+void PoolRemoveFree(PoolBlock* block, std::map<VkDeviceSize, VkDeviceSize>::iterator range)
+{
+	block->free_sizes.erase({range->second, range->first});
+	block->free_ranges.erase(range);
+}
+
+VkDeviceSize PoolLargestFree(const PoolBlock& block)
+{
+	return block.free_sizes.empty() ? 0 : block.free_sizes.rbegin()->first;
+}
+
+// Best fit through the size index: a range of at least size + alignment - 1
+// bytes always fits; a few smaller ones may fit when their start is aligned.
+bool PoolTakeRange(PoolBlock* block, VkDeviceSize size, VkDeviceSize alignment, VkDeviceSize* offset)
+{
+	auto pick = block->free_sizes.end();
+	int  tries = 0;
+	for (auto it = block->free_sizes.lower_bound({size, 0}); it != block->free_sizes.end() && tries < 8; ++it, ++tries)
+	{
+		const VkDeviceSize aligned = (it->second + alignment - 1) / alignment * alignment;
+		if (aligned + size <= it->second + it->first)
+		{
+			pick = it;
+			break;
+		}
+	}
+	if (pick == block->free_sizes.end())
+	{
+		pick = block->free_sizes.lower_bound({size + alignment - 1, 0});
+		if (pick == block->free_sizes.end())
+		{
+			return false;
+		}
+	}
+	const VkDeviceSize start   = pick->second;
+	const VkDeviceSize length  = pick->first;
+	const VkDeviceSize aligned = (start + alignment - 1) / alignment * alignment;
+	PoolRemoveFree(block, block->free_ranges.find(start));
+	if (aligned > start)
+	{
+		PoolAddFree(block, start, aligned - start);
+	}
+	if (aligned + size < start + length)
+	{
+		PoolAddFree(block, aligned + size, start + length - aligned - size);
+	}
+	block->used += size;
+	*offset = aligned;
+	return true;
+}
+
+void PoolReturnRange(PoolBlock* block, VkDeviceSize offset, VkDeviceSize size)
+{
+	block->used -= size;
+	auto next = block->free_ranges.lower_bound(offset);
+	if (next != block->free_ranges.begin())
+	{
+		auto previous = std::prev(next);
+		if (previous->first + previous->second == offset)
+		{
+			size += previous->second;
+			offset = previous->first;
+			PoolRemoveFree(block, previous);
+		}
+	}
+	if (next != block->free_ranges.end() && offset + size == next->first)
+	{
+		size += next->second;
+		PoolRemoveFree(block, next);
+	}
+	PoolAddFree(block, offset, size);
+}
+
+// Returns false when the request should get its own allocation.
+bool PoolAllocate(GraphicContext* ctx, VulkanMemory* mem, uint32_t type, VkMemoryPropertyFlags type_flags, VulkanMemoryResource resource)
+{
+	const bool host_visible = (type_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
+	if (mem->requirements.size > kPoolMaxAllocation ||
+	    (host_visible && (type_flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0))
+	{
+		return false;
+	}
+	const VkDeviceSize alignment = std::max<VkDeviceSize>(mem->requirements.alignment, 1);
+	auto&              pool      = GetMemoryPool();
+	std::lock_guard    lock(pool.mutex);
+	for (auto& block: pool.blocks)
+	{
+		VkDeviceSize offset = 0;
+		if (block->device == ctx->device && block->type == type && block->resource == resource &&
+		    PoolLargestFree(*block) >= mem->requirements.size &&
+		    PoolTakeRange(block.get(), mem->requirements.size, alignment, &offset))
+		{
+			mem->memory     = block->memory;
+			mem->offset     = offset;
+			mem->pool_block = block.get();
+			return true;
+		}
+	}
+	auto block      = std::make_unique<PoolBlock>();
+	block->device   = ctx->device;
+	block->type     = type;
+	block->resource = resource;
+	VkMemoryAllocateInfo alloc_info {};
+	alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	alloc_info.allocationSize  = kPoolBlockBytes;
+	alloc_info.memoryTypeIndex = type;
+	if (vkAllocateMemory(ctx->device, &alloc_info, nullptr, &block->memory) != VK_SUCCESS)
+	{
+		return false;
+	}
+	if (host_visible)
+	{
+		void* mapped = nullptr;
+		if (vkMapMemory(ctx->device, block->memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+		{
+			vkFreeMemory(ctx->device, block->memory, nullptr);
+			return false;
+		}
+		block->mapped = static_cast<uint8_t*>(mapped);
+	}
+	PoolAddFree(block.get(), 0, kPoolBlockBytes);
+	VkDeviceSize offset = 0;
+	EXIT_IF(!PoolTakeRange(block.get(), mem->requirements.size, alignment, &offset));
+	mem->memory     = block->memory;
+	mem->offset     = offset;
+	mem->pool_block = block.get();
+	pool.blocks.push_back(std::move(block));
+	return true;
+}
+
+void PoolFree(GraphicContext* ctx, VulkanMemory* mem)
+{
+	auto&           pool = GetMemoryPool();
+	std::lock_guard lock(pool.mutex);
+	auto*           block = static_cast<PoolBlock*>(mem->pool_block);
+	PoolReturnRange(block, mem->offset, mem->requirements.size);
+	if (block->used != 0)
+	{
+		return;
+	}
+	// Keep one empty block per kind so steady churn does not reallocate it.
+	const bool other_empty = std::any_of(pool.blocks.begin(), pool.blocks.end(),
+	                                     [block](const auto& other)
+	                                     {
+		                                     return other.get() != block && other->used == 0 && other->device == block->device &&
+		                                            other->type == block->type && other->resource == block->resource;
+	                                     });
+	if (!other_empty)
+	{
+		return;
+	}
+	if (block->mapped != nullptr)
+	{
+		vkUnmapMemory(ctx->device, block->memory);
+	}
+	vkFreeMemory(ctx->device, block->memory, nullptr);
+	pool.blocks.erase(std::find_if(pool.blocks.begin(), pool.blocks.end(), [block](const auto& other) { return other.get() == block; }));
+}
+
+} // namespace
+
+void VulkanMemoryPoolRelease(GraphicContext* ctx)
+{
+	EXIT_IF(ctx == nullptr);
+	auto&           pool = GetMemoryPool();
+	std::lock_guard lock(pool.mutex);
+	for (auto it = pool.blocks.begin(); it != pool.blocks.end();)
+	{
+		if ((*it)->device != ctx->device)
+		{
+			++it;
+			continue;
+		}
+		if ((*it)->mapped != nullptr)
+		{
+			vkUnmapMemory(ctx->device, (*it)->memory);
+		}
+		vkFreeMemory(ctx->device, (*it)->memory, nullptr);
+		it = pool.blocks.erase(it);
+	}
+}
+
+bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource resource)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -75,7 +289,6 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(mem->memory != nullptr);
-	EXIT_IF(ctx->allocate_memory == nullptr);
 	if (mem->requirements.size == 0)
 	{
 		mem->requirements.size = 4096;
@@ -94,24 +307,18 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 		}
 	}
 
-	EXIT_IF(index == memory_properties.memoryTypeCount);
-	const uint32_t required_index = index;
-	if (mem->preferred_property != 0u)
-	{
-		const auto preferred = mem->property | mem->preferred_property;
-		for (uint32_t candidate = 0u; candidate < memory_properties.memoryTypeCount; ++candidate)
-		{
-			if ((mem->requirements.memoryTypeBits & (uint32_t {1} << candidate)) != 0u &&
-			    (memory_properties.memoryTypes[candidate].propertyFlags & preferred) == preferred)
-			{
-				index = candidate;
-				break;
-			}
-		}
-	}
+	mem->type       = index;
+	mem->offset     = 0;
+	mem->pool_block = nullptr;
 
-	mem->type   = index;
-	mem->offset = 0;
+	if (index < memory_properties.memoryTypeCount &&
+	    PoolAllocate(ctx, mem, index, memory_properties.memoryTypes[index].propertyFlags, resource))
+	{
+		mem->unique_id = ++seq;
+		g_mem_stat->allocated[index] += mem->requirements.size;
+		g_mem_stat->count[index]++;
+		return true;
+	}
 
 	VkMemoryAllocateInfo alloc_info {};
 	alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -122,17 +329,7 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 	mem->unique_id = ++seq;
 
 	const auto allocate_start = std::chrono::steady_clock::now();
-	auto       result         = ctx->allocate_memory(ctx->device, &alloc_info, nullptr, &mem->memory);
-	if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY && index != required_index)
-	{
-		// A limited host-visible local heap must not make an optional placement
-		// preference fail an allocation that the ordinary local heap can serve.
-		index = required_index;
-		mem->type = index;
-		mem->memory = VK_NULL_HANDLE;
-		alloc_info.memoryTypeIndex = index;
-		result = ctx->allocate_memory(ctx->device, &alloc_info, nullptr, &mem->memory);
-	}
+	auto       result         = vkAllocateMemory(ctx->device, &alloc_info, nullptr, &mem->memory);
 	const auto allocate_ns =
 	    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - allocate_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanAllocate, static_cast<uint64_t>(allocate_ns),
@@ -154,7 +351,7 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem)
 	}
 	g_gpu_memory->DbgDbDump();
 	g_gpu_memory->DbgDbSave(U"_gpu_memory.db");
-	EXIT("size = %" PRIu64 ", index = %u, error: %s:%s\n", mem->requirements.size, index, string_VkResult(result),
+	EXIT("size = %" PRIu64 ", index = %u, VkResult=%d:%s\n", mem->requirements.size, index, static_cast<int>(result),
 	     stat.Concat(U'\n').C_Str());
 
 	return false;
@@ -167,7 +364,14 @@ void VulkanFree(GraphicContext* ctx, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
 
-	vkFreeMemory(ctx->device, mem->memory, nullptr);
+	if (mem->pool_block != nullptr)
+	{
+		PoolFree(ctx, mem);
+		mem->pool_block = nullptr;
+	} else
+	{
+		vkFreeMemory(ctx->device, mem->memory, nullptr);
+	}
 
 	g_mem_stat->allocated[mem->type] -= mem->requirements.size;
 	g_mem_stat->count[mem->type]--;
@@ -183,6 +387,13 @@ void VulkanMapMemory(GraphicContext* ctx, VulkanMemory* mem, void** data)
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(data == nullptr);
 
+	if (mem->pool_block != nullptr)
+	{
+		auto* block = static_cast<const PoolBlock*>(mem->pool_block);
+		EXIT_IF(block->mapped == nullptr);
+		*data = block->mapped + mem->offset;
+		return;
+	}
 	vkMapMemory(ctx->device, mem->memory, mem->offset, mem->requirements.size, 0, data);
 }
 
@@ -193,7 +404,11 @@ void VulkanUnmapMemory(GraphicContext* ctx, VulkanMemory* mem)
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
 
-	vkUnmapMemory(ctx->device, mem->memory);
+	// Pooled host-visible blocks stay persistently mapped.
+	if (mem->pool_block == nullptr)
+	{
+		vkUnmapMemory(ctx->device, mem->memory);
+	}
 }
 
 void VulkanBindImageMemory(GraphicContext* ctx, VulkanImage* image, VulkanMemory* mem)

@@ -15,6 +15,7 @@ static bool instruction_is_conditional_branch(const ShaderInstruction& inst)
 	switch (inst.type)
 	{
 		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchExecnz:
 		case ShaderInstructionType::SCbranchScc0:
 		case ShaderInstructionType::SCbranchScc1:
 		case ShaderInstructionType::SCbranchVccz:
@@ -29,6 +30,7 @@ static bool instruction_changes_control_flow(const ShaderInstruction& inst)
 	{
 		case ShaderInstructionType::SBranch:
 		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchExecnz:
 		case ShaderInstructionType::SCbranchScc0:
 		case ShaderInstructionType::SCbranchScc1:
 		case ShaderInstructionType::SCbranchVccz:
@@ -96,6 +98,11 @@ static uint32_t find_backward_loop_for_exit(const ShaderCode& code, const Shader
 		}
 
 		const auto backedge = ShaderLabel(inst);
+		SpirvSBranchLoop loop;
+		if (ScJoinFindSBranchLoop(code, backedge.GetDst(), &loop))
+		{
+			continue;
+		}
 		if (backedge.GetDst() >= backedge.GetSrc() || find_backward_loop_merge(code, backedge) != exit.ToString())
 		{
 			continue;
@@ -106,6 +113,28 @@ static uint32_t find_backward_loop_for_exit(const ShaderCode& code, const Shader
 	}
 
 	return owner;
+}
+
+static String8 selection_merge_name(const ShaderCode& code, uint32_t source_pc, const String8& guest_merge)
+{
+	for (const auto& label: code.GetLabels())
+	{
+		if (label.IsDisabled() || label.ToString() != guest_merge)
+		{
+			continue;
+		}
+		Vector<uint32_t> sources;
+		ScJoinCollectSources(code, label.GetDst(), &sources);
+		for (uint32_t source: sources)
+		{
+			if (source == source_pc)
+			{
+				return ScJoinMergeName(label.GetDst(), source_pc);
+			}
+		}
+		break;
+	}
+	return guest_merge;
 }
 
 
@@ -122,6 +151,17 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 
 	if (branch.GetDst() < inst.pc)
 	{
+		SpirvSBranchLoop loop;
+		if (ScJoinFindSBranchLoop(code, branch.GetDst(), &loop))
+		{
+			*dst_source += String8::FromPrintf("OpBranch %%loop_continue_%04" PRIx32 "\n", loop.latch);
+			if (inst.pc == loop.latch)
+			{
+				*dst_source += String8::FromPrintf("%%loop_continue_%04" PRIx32 " = OpLabel\nOpBranch %%%s\n",
+				                                  loop.latch, loop.HeaderName().c_str());
+			}
+			return true;
+		}
 		String8 continue_label = String8::FromPrintf("loop_continue_%04" PRIx32, inst.pc);
 		String8 merge_label    = find_backward_loop_merge(code, branch);
 		const bool has_exit    = merge_label.Size() != 0;
@@ -147,6 +187,13 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 		return true;
 	}
 
+	SpirvSBranchLoop exit_loop;
+	if (ScJoinFindSBranchLoopExit(code, inst, &exit_loop))
+	{
+		*dst_source += String8::FromPrintf("OpBranch %%%s\n", exit_loop.MergeName().c_str());
+		return true;
+	}
+
 	// Retarget SBranch to a multi-predecessor join onto the sc_join merge that
 	// owns this case/default, so each selection reconverges before the guest join.
 	{
@@ -155,7 +202,7 @@ KYTY_RECOMPILER_FUNC(Recompile_SBranch_Label)
 			Vector<uint32_t> sc_join_srcs;
 			ScJoinCollectSources(code, join_pc, &sc_join_srcs);
 			const uint32_t owner_pc = ScJoinFindOwner(code, inst.pc, join_pc, sc_join_srcs);
-			if (owner_pc != 0)
+			if (owner_pc != kScJoinNoSource)
 			{
 				label = ScJoinMergeName(join_pc, owner_pc);
 			}
@@ -180,15 +227,48 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	const auto& next_inst = code.GetInstructions().At(index + 1);
 
 	if (!operand_is_constant(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[0]) condition ignored (continuing)\n"); }
+	// EXECNZ was previously an unsupported parser placeholder. Native mode has
+	// no verified high-word wave representation, so keep it fail-closed there.
+	if (inst.type == ShaderInstructionType::SCbranchExecnz && !spirv->UsesComputeWaveBanks())
+	{
+		return false;
+	}
 
 	const char* branch_param[2] = {param[0], param[1]};
-	if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
-	    ShaderVccBranchIsWaveUniform(code, index))
+	const bool exec_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz;
+	const bool vcc_branch  = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;
+	if (spirv->UsesComputeWaveBanks() && (exec_branch || vcc_branch))
+	{
+		// Each physical subgroup owns one complete guest wave. The packed mask
+		// pair is uniform within it, so no subgroup vote or low-half shortcut is
+		// needed to decide this wave's branch.
+		branch_param[0] = exec_branch ? "%cc_lo_<index> = OpLoad %uint %exec_lo\n"
+		                                "%cc_hi_<index> = OpLoad %uint %exec_hi\n"
+		                                "%cc_mask_<index> = OpBitwiseOr %uint %cc_lo_<index> %cc_hi_<index>"
+		                              : "%cc_lo_<index> = OpLoad %uint %vcc_lo\n"
+		                                "%cc_hi_<index> = OpLoad %uint %vcc_hi\n"
+		                                "%cc_mask_<index> = OpBitwiseOr %uint %cc_lo_<index> %cc_hi_<index>";
+		const bool zero_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchVccz;
+		branch_param[1] = zero_branch ? "%cc_b_<index> = OpIEqual %bool %cc_mask_<index> %uint_0"
+		                              : "%cc_b_<index> = OpINotEqual %bool %cc_mask_<index> %uint_0";
+	} else if ((inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz) &&
+	           ShaderVccBranchIsWaveUniform(code, index))
 	{
 		branch_param[0] = inst.type == ShaderInstructionType::SCbranchVccz
-		                     ? "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpIEqual %bool %cc_u_<index> %uint_0"
-		                     : "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpINotEqual %bool %cc_u_<index> %uint_0";
+		                      ? "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpIEqual %bool %cc_u_<index> %uint_0"
+		                      : "%cc_u_<index> = OpLoad %uint %vcc_lo\n%cc_b_<index> = OpINotEqual %bool %cc_u_<index> %uint_0";
 		branch_param[1] = "";
+	}
+	String8 quad_uniform_vote;
+	if (!spirv->UsesComputeWaveBanks() && spirv->GetHostShaderType() == ShaderType::Pixel && (exec_branch || vcc_branch) &&
+	    String8(branch_param[0]).ContainsStr("OpGroupNonUniformAny"))
+	{
+		// Helpers may sit out non-quad collectives and read an undefined vote. Hand them the vote of a real
+		// fragment of their quad, so every quad takes this branch as one: an implicit-derivative fetch inside
+		// the region then sees its whole quad, whose masked lanes keep the register values the hardware reads.
+		quad_uniform_vote = String8(branch_param[0]).ReplaceStr("%cc_any_<index> = ", "%cc_vote_<index> = ") + "\n" +
+		                    spirv->NativeQuadUniform("cc_vote_<index>", "bool", "cc_any_<index>");
+		branch_param[0] = quad_uniform_vote.c_str();
 	}
 
 	// TODO(): analyze control flow graph
@@ -260,7 +340,9 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 			label_merge = "";
 		}
 	}
-	const uint32_t loop_backedge = find_backward_loop_for_exit(code, label);
+	SpirvSBranchLoop exit_loop;
+	const bool structured_loop_exit = ScJoinFindSBranchLoopExit(code, inst, &exit_loop);
+	const uint32_t loop_backedge = structured_loop_exit ? 0 : find_backward_loop_for_exit(code, label);
 
 	// Promote a forward conditional to if/else only for a true diamond: the
 	// block before the taken target is an unconditional branch to a join that
@@ -360,6 +442,15 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
                OpBranchConditional %cc_b_<index> %<label> %t230_<index>
         %t230_<index> = OpLabel
 )";
+	static const char* text_loop_selection = R"(
+        <param0>
+        <param1>
+               OpSelectionMerge %sc_exit_<index> None
+               OpBranchConditional %cc_b_<index> %<label> %t230_<index>
+        %sc_exit_<index> = OpLabel
+               OpUnreachable
+        %t230_<index> = OpLabel
+)";
 
 	// Forward SCbranch (not a loop exit): never use a shared guest label as
 	// OpSelectionMerge. variant_a with merge=taken creates illegal nested
@@ -397,6 +488,22 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		}
 	}
 
+	// Branches and WriteLabel reconverge through the selection's synthetic
+	// join, including standalone diamonds. Declare that same block as the
+	// merge: maximal reconvergence forbids an undeclared multi-predecessor
+	// intermediate block. Redirect only when WriteLabel will emit this link.
+	if (if_else && loop_backedge == 0 && label_merge.Size() != 0)
+	{
+		label_merge = selection_merge_name(code, inst.pc, label_merge);
+		if (label_merge == ScJoinMergeName(label.GetDst(), inst.pc))
+		{
+			// An empty taken arm reaches the same guest PC as the merge.
+			// Enter its synthetic merge first, just like the nonempty arm;
+			// the raw guest continuation may itself begin another selection.
+			label_str = label_merge;
+		}
+	}
+
 	const char* text = text_variant_a;
 	if (discard)
 	{
@@ -424,6 +531,24 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	{
 		// Guest label is the structured loop merge (not sc_join).
 		text      = text_loop_exit;
+		label_str = label.ToString();
+	}
+	if (structured_loop_exit)
+	{
+		// A break leaves the innermost loop; the non-breaking arm is this
+		// selection's merge. The loop header already owns OpLoopMerge.
+		text      = text_variant_b;
+		label_str = exit_loop.MergeName();
+	}
+	SpirvSBranchLoop enclosing_loop;
+	if (!structured_loop_exit && !discard && label.GetDst() > inst.pc &&
+	    ScJoinFindSBranchLoopContaining(code, inst.pc, &enclosing_loop) &&
+	    ScJoinFindReconvergence(code, label.GetDst(), next_inst.pc) >= enclosing_loop.merge)
+	{
+		// Both arms leave through the loop's break/continue edges. A selection
+		// inside the loop cannot own a merge after that loop; its local merge
+		// is unreachable, while the real guest edges stay intact.
+		text      = text_loop_selection;
 		label_str = label.ToString();
 	}
 
@@ -553,16 +678,27 @@ KYTY_RECOMPILER_FUNC(Recompile_SEndpgm_Empty)
        OpReturn
 )";
 
-	if (index < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: index < 2 condition ignored (continuing)\n"); }
+	// A short program cannot contain the two-instruction discard sequence.
+	if (index < 2)
+	{
+		*dst_source += String8(text);
+		return true;
+	}
 
 	const auto& prev_prev_inst = code.GetInstructions().At(index - 2);
 	const auto& prev_inst      = code.GetInstructions().At(index - 1);
 
-	bool after_kill =
-	    (prev_prev_inst.type == ShaderInstructionType::SMovB64 && prev_prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
+	const bool exec_zeroed =
+	    (prev_prev_inst.type == ShaderInstructionType::SMovB64 &&
+	     prev_prev_inst.format == ShaderInstructionFormat::Sdst2Ssrc02 &&
 	     prev_prev_inst.dst.type == ShaderOperandType::ExecLo && prev_prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
-	     prev_prev_inst.src[0].constant.i == 0 && prev_inst.type == ShaderInstructionType::Exp &&
-	     ShaderIsNullMrtDoneFormat(prev_inst.format));
+	     prev_prev_inst.src[0].constant.i == 0) ||
+	    (prev_prev_inst.type == ShaderInstructionType::SMovB32 &&
+	     prev_prev_inst.format == ShaderInstructionFormat::SVdstSVsrc0 &&
+	     prev_prev_inst.dst.type == ShaderOperandType::ExecLo && prev_prev_inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
+	     prev_prev_inst.src[0].constant.i == 0);
+	bool after_kill = exec_zeroed && prev_inst.type == ShaderInstructionType::Exp &&
+	                  ShaderIsNullMrtDoneFormat(prev_inst.format);
 
 	if (!after_kill)
 	{

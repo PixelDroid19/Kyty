@@ -15,12 +15,10 @@ struct StorageVulkanBuffer;
 class StorageBufferGpuObject: public GpuObject
 {
 public:
-	static constexpr uint32_t PARAM_INITIAL_READ_ONLY = 2;
 	StorageBufferGpuObject(uint64_t stride, uint64_t num_records, bool ronly)
 	{
 		params[0]  = stride;
 		params[1]  = num_records;
-		params[PARAM_INITIAL_READ_ONLY] = ronly ? 1u : 0u;
 		check_hash = true;
 		read_only  = ronly;
 		type       = Graphics::GpuMemoryObjectType::StorageBuffer;
@@ -35,9 +33,18 @@ public:
 	[[nodiscard]] update_func_t              GetUpdateFunc() const override;
 };
 
-// Establish the comparison baseline before the first writable use. The factory
-// guard excludes other implementations that share the storage object type.
-void StorageBufferPrepareWriteback(void* object, GpuObject::create_func_t factory);
+// Write-back of a storage object whose only pending GPU write was published to
+// guest memory on the device as `words` repeated over its whole range. Guest
+// memory already holds the result, so the GPU copy is not read. False: the
+// caller must use the byte write-back.
+[[nodiscard]] bool StorageBufferWriteBackPublishedUniform(void* obj, uint64_t vaddr, uint64_t size,
+                                                          const GpuWritebackPageCache::UniformWords& words, GpuWritebackResult* result);
+
+// Uploads only `runs` of a storage object whose other bytes already match guest
+// memory. False when the object observes depth metadata, whose HTILE tracking
+// reads every uploaded byte: the caller must then upload the whole object.
+[[nodiscard]] bool StorageBufferUploadRuns(GraphicContext* ctx, void* obj, uint64_t vaddr, uint64_t size,
+                                           const std::vector<GpuByteRun>& runs);
 
 } // namespace Kyty::Libs::Graphics
 

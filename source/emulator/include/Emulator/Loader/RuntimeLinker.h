@@ -135,6 +135,8 @@ struct Program
 	uint64_t                               proc_param_vaddr            = 0;
 	uint64_t                               custom_call_plt_vaddr       = 0;
 	uint32_t                               custom_call_plt_num         = 0;
+	uint64_t                               eh_frame_vaddr              = 0;
+	bool                                   eh_frame_registered         = false;
 };
 
 // Immutable data copied while RuntimeLinker owns m_mutex. Consumers can inspect
@@ -297,6 +299,8 @@ private:
 	static void DeleteProgram(Program* program);
 	static void SetupTlsHandler(Program* program);
 	static const void* FindProgramByAddrForPort(uint64_t vaddr);
+	static uint64_t GetProcessParametersForPort();
+	static bool IsExecutableAddressForPort(uint64_t address);
 	static RuntimeLinker* AcquireCurrentRuntimeForUse();
 	static void ReleaseCurrentRuntimeForUse(RuntimeLinker* runtime);
 	static void SetCurrentRuntimeAcquireHookForTesting(void (*hook)(void*), void* context);

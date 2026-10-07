@@ -2,6 +2,7 @@
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -23,6 +24,7 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/mathematics.h>
+#include <libavutil/mem.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 #include <libswresample/swresample.h>
@@ -45,6 +47,7 @@ struct Decoder::State
 	Status     status = Status::Unavailable;
 	std::string error;
 	StreamInfo info;
+	std::unique_ptr<InputSource> source;
 
 	mutable std::mutex mutex;
 	std::condition_variable condition;
@@ -52,6 +55,9 @@ struct Decoder::State
 
 #if defined(KYTY_HAVE_FFMPEG)
 	AVFormatContext* format = nullptr;
+	AVIOContext*    input_io = nullptr;
+	int64_t         input_size = 0;
+	int64_t         input_position = 0;
 	AVCodecContext*  video  = nullptr;
 	AVCodecContext*  audio  = nullptr;
 	AVPacket*        packet = nullptr;
@@ -243,6 +249,12 @@ static void FreeState(Decoder::State* state)
 	{
 		avformat_close_input(&state->format);
 	}
+	if (state->input_io != nullptr)
+	{
+		av_freep(&state->input_io->buffer);
+		avio_context_free(&state->input_io);
+	}
+	state->source.reset();
 	if (state->output_layout.nb_channels != 0)
 	{
 		av_channel_layout_uninit(&state->output_layout);
@@ -643,6 +655,11 @@ static bool Pump(Decoder::State* state)
 	const int result = av_read_frame(state->format, state->packet);
 	if (result < 0)
 	{
+		if (result != AVERROR_EOF)
+		{
+			SetFfmpegError(state, Status::DecodeFailed, result, "read media packet");
+			return false;
+		}
 		state->demux_eof = true;
 		return FlushCodecs(state);
 	}
@@ -724,25 +741,119 @@ Decoder::~Decoder()
 	Close();
 }
 
+#if defined(KYTY_HAVE_FFMPEG)
+static int ReadInputSource(void* opaque, uint8_t* destination, int size)
+{
+	auto* state = static_cast<Decoder::State*>(opaque);
+	if (size <= 0 || destination == nullptr)
+	{
+		return AVERROR(EINVAL);
+	}
+	if (state->input_position == state->input_size)
+	{
+		return AVERROR_EOF;
+	}
+	const auto requested = static_cast<uint32_t>(std::min<int64_t>(size, state->input_size - state->input_position));
+	const int read = state->source->ReadAt(static_cast<uint64_t>(state->input_position), destination, requested);
+	if (read < 0 || static_cast<uint32_t>(read) > requested)
+	{
+		return AVERROR(EIO);
+	}
+	state->input_position += read;
+	return read == 0 ? AVERROR_EOF : read;
+}
+
+static int64_t SeekInputSource(void* opaque, int64_t offset, int whence)
+{
+	auto* state = static_cast<Decoder::State*>(opaque);
+	whence &= ~AVSEEK_FORCE;
+	if (whence == AVSEEK_SIZE)
+	{
+		return state->input_size;
+	}
+	int64_t origin = 0;
+	switch (whence)
+	{
+		case SEEK_SET: break;
+		case SEEK_CUR: origin = state->input_position; break;
+		case SEEK_END: origin = state->input_size; break;
+		default: return AVERROR(EINVAL);
+	}
+	if (offset < -origin || offset > state->input_size - origin)
+	{
+		return AVERROR(EINVAL);
+	}
+	state->input_position = origin + offset;
+	return state->input_position;
+}
+
+static bool OpenInputSource(Decoder::State* state, const char* host_path)
+{
+	if (state->source == nullptr)
+	{
+		if (host_path == nullptr || host_path[0] == '\0')
+		{
+			SetError(state, Status::InvalidArgument, "empty media path");
+			return false;
+		}
+		const int result = avformat_open_input(&state->format, host_path, nullptr, nullptr);
+		if (result < 0) { SetFfmpegError(state, Status::OpenFailed, result, "open media file"); }
+		return result >= 0;
+	}
+	const uint64_t size = state->source->Size();
+	if (size == 0 || size > static_cast<uint64_t>(INT64_MAX))
+	{
+		SetError(state, Status::InvalidArgument, "invalid media source size");
+		return false;
+	}
+	state->input_size = static_cast<int64_t>(size);
+	state->format = avformat_alloc_context();
+	constexpr int kInputBufferSize = 64 * 1024;
+	auto* bytes = static_cast<uint8_t*>(av_malloc(kInputBufferSize));
+	if (state->format == nullptr || bytes == nullptr)
+	{
+		av_free(bytes);
+		SetError(state, Status::OpenFailed, "allocate media source buffer");
+		return false;
+	}
+	state->input_io = avio_alloc_context(bytes, kInputBufferSize, 0, state, ReadInputSource, nullptr, SeekInputSource);
+	if (state->input_io == nullptr)
+	{
+		av_free(bytes);
+		SetError(state, Status::OpenFailed, "allocate media source context");
+		return false;
+	}
+	state->format->pb = state->input_io;
+	state->format->flags |= AVFMT_FLAG_CUSTOM_IO;
+	const int result = avformat_open_input(&state->format, nullptr, nullptr, nullptr);
+	if (result < 0) { SetFfmpegError(state, Status::OpenFailed, result, "open media source"); }
+	return result >= 0;
+}
+#endif
+
 std::unique_ptr<Decoder> Decoder::Open(const char* host_path, std::string* error)
 {
+	return OpenInput(host_path, nullptr, error);
+}
+
+std::unique_ptr<Decoder> Decoder::OpenSource(std::unique_ptr<InputSource> source, std::string* error)
+{
+	return OpenInput(nullptr, std::move(source), error);
+}
+
+std::unique_ptr<Decoder> Decoder::OpenInput(const char* host_path, std::unique_ptr<InputSource> source, std::string* error)
+{
 	auto decoder = std::unique_ptr<Decoder>(new Decoder);
+	decoder->state_->source = std::move(source);
 #if !defined(KYTY_HAVE_FFMPEG)
 	SetError(decoder->state_.get(), Status::Unavailable, "FFmpeg backend is not available");
 #else
-	if (host_path == nullptr || host_path[0] == '\0')
-	{
-		SetError(decoder->state_.get(), Status::InvalidArgument, "empty media path");
-	}
-	else if (avformat_open_input(&decoder->state_->format, host_path, nullptr, nullptr) < 0)
-	{
-		SetError(decoder->state_.get(), Status::OpenFailed, "open media file");
-	}
-	else if (avformat_find_stream_info(decoder->state_->format, nullptr) < 0)
+	const bool opened = OpenInputSource(decoder->state_.get(), host_path);
+	if (opened && avformat_find_stream_info(decoder->state_->format, nullptr) < 0)
 	{
 		SetError(decoder->state_.get(), Status::OpenFailed, "read media stream information");
 	}
-	else
+	else if (opened)
 	{
 		auto* state = decoder->state_.get();
 		const AVCodec* video_codec = nullptr;

@@ -301,6 +301,69 @@ KYTY_RECOMPILER_FUNC(Recompile_S_Bfe_U64_Sdst2Ssrc02Ssrc1)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_S_Bfm_B64_Sdst2Ssrc0Ssrc1)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!operand_is_variable(inst.dst) || inst.dst.size != 2)
+	{
+		return false;
+	}
+	const auto dst_lo = operand_variable_to_str(inst.dst, 0);
+	const auto dst_hi = operand_variable_to_str(inst.dst, 1);
+	if (dst_lo.type != SpirvType::Uint || dst_hi.type != SpirvType::Uint)
+	{
+		return false;
+	}
+
+	const String8 index_str = String8::FromPrintf("%u", index);
+	String8 width_load;
+	String8 offset_load;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &width_load) ||
+	    !operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &offset_load))
+	{
+		return false;
+	}
+
+	// S_BFM_B64 builds width low bits and shifts the resulting 64-bit mask
+	// by offset. The ISA masks both source words to six bits and leaves SCC
+	// unchanged. Split the mask into dwords for SPIR-V without Int64.
+	static const char* text = R"(
+<width_load>
+<offset_load>
+<param0>
+<param1>
+<param2>
+<param3>
+%bfm_count_<index> = OpBitwiseAnd %uint %t0_<index> %uint_63
+%bfm_offset_<index> = OpBitwiseAnd %uint %t1_<index> %uint_63
+%bfm_low_count_<index> = OpExtInst %uint %GLSL_std_450 UMin %bfm_count_<index> %uint_32
+%bfm_high_count_<index> = OpISub %uint %bfm_count_<index> %bfm_low_count_<index>
+%bfm_initial_lo_<index> = OpBitFieldInsert %uint %uint_0 %uint_0xffffffff %uint_0 %bfm_low_count_<index>
+%bfm_initial_hi_<index> = OpBitFieldInsert %uint %uint_0 %uint_0xffffffff %uint_0 %bfm_high_count_<index>
+OpStore %temp_uint_2 %bfm_initial_lo_<index>
+OpStore %temp_uint_3 %bfm_initial_hi_<index>
+OpStore %temp_uint_4 %bfm_offset_<index>
+%bfm_shift_<index> = OpFunctionCall %void %shift_left %temp_uint_0 %temp_uint_1 %temp_uint_2 %temp_uint_3 %temp_uint_4
+%bfm_result_lo_<index> = OpLoad %uint %temp_uint_0
+%bfm_result_hi_<index> = OpLoad %uint %temp_uint_1
+OpStore %<dst_lo> %bfm_result_lo_<index>
+OpStore %<dst_hi> %bfm_result_hi_<index>
+<execz>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<width_load>", width_load)
+	                   .ReplaceStr("<offset_load>", offset_load)
+	                   .ReplaceStr("<param0>", param[0])
+	                   .ReplaceStr("<param1>", param[1] == nullptr ? "" : param[1])
+	                   .ReplaceStr("<param2>", param[2] == nullptr ? "" : param[2])
+	                   .ReplaceStr("<param3>", param[3] == nullptr ? "" : param[3])
+	                   .ReplaceStr("<dst_lo>", dst_lo.value)
+	                   .ReplaceStr("<dst_hi>", dst_hi.value)
+	                   .ReplaceStr("<execz>", operand_is_exec(inst.dst) ? EXECZ : "")
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 /* XXX: And, Lshl, Lshr, CSelect, Or */
 KYTY_RECOMPILER_FUNC(Recompile_S_XXX_B32_SVdstSVsrc0SVsrc1)
 {
@@ -445,6 +508,42 @@ KYTY_RECOMPILER_FUNC(Recompile_S_XXX_U32_SVdstSVsrc0SVsrc1)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_SSaveexecB32_SVdstSVsrc0)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (!operand_is_variable(inst.dst) || inst.dst.size != 1 || inst.src_num != 1)
+	{
+		return false;
+	}
+	const auto destination = operand_variable_to_str(inst.dst);
+	if (destination.type != SpirvType::Uint) { return false; }
+	const auto index_string = String8::FromPrintf("%u", index);
+	String8 load;
+	if (!operand_load_uint(spirv, inst.src[0], "saveexec_source_<index>", index_string, &load))
+	{
+		return false;
+	}
+	// Read both operands before saving EXEC, including when source and destination alias.
+	// The B32 form preserves EXEC_HI and derives SCC from the new EXEC_LO alone.
+	*dst_source += String8(R"(
+<load>
+%saveexec_old_<index> = OpLoad %uint %exec_lo
+<operation>
+OpStore %<destination> %saveexec_old_<index>
+OpStore %exec_lo %saveexec_new_<index>
+<execz>
+%saveexec_nonzero_<index> = OpINotEqual %bool %saveexec_new_<index> %uint_0
+%saveexec_scc_<index> = OpSelect %uint %saveexec_nonzero_<index> %uint_1 %uint_0
+OpStore %scc %saveexec_scc_<index>
+)")
+	                   .ReplaceStr("<load>", load)
+	                   .ReplaceStr("<operation>", param[0])
+	                   .ReplaceStr("<destination>", destination.value)
+	                   .ReplaceStr("<execz>", EXECZ)
+	                   .ReplaceStr("<index>", index_string);
 	return true;
 }
 
@@ -778,6 +877,47 @@ KYTY_RECOMPILER_FUNC(Recompile_SMovB64_Sdst2Ssrc02)
 	return true;
 }
 
+KYTY_RECOMPILER_FUNC(Recompile_SAbsI32)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	const bool discard = inst.dst.type == ShaderOperandType::Null;
+	if (!discard && !operand_is_variable(inst.dst))
+	{
+		return false;
+	}
+	const auto dst = discard ? SpirvValue {} : operand_variable_to_str(inst.dst);
+	if (!discard && dst.type != SpirvType::Uint)
+	{
+		return false;
+	}
+	const auto index_str = String8::FromPrintf("%u", index);
+	String8 load;
+	if (!operand_load_int(spirv, inst.src[0], "abs_source_<index>", index_str, &load))
+	{
+		return false;
+	}
+	// Unsigned subtraction preserves the ISA's INT_MIN result without signed
+	// overflow. SCC observes the result even when the destination is null.
+	static const char* text = R"(
+<load>
+%abs_negative_<index> = OpSLessThan %bool %abs_source_<index> %int_0
+%abs_bits_<index> = OpBitcast %uint %abs_source_<index>
+%abs_negated_<index> = OpISub %uint %uint_0 %abs_bits_<index>
+%abs_result_<index> = OpSelect %uint %abs_negative_<index> %abs_negated_<index> %abs_bits_<index>
+<store>
+<execz>
+%abs_nonzero_<index> = OpINotEqual %bool %abs_result_<index> %uint_0
+%abs_scc_<index> = OpSelect %uint %abs_nonzero_<index> %uint_1 %uint_0
+OpStore %scc %abs_scc_<index>
+)";
+	*dst_source += String8(text)
+	                   .ReplaceStr("<load>", load)
+	                   .ReplaceStr("<store>", discard ? "" : String8("OpStore %<dst> %abs_result_<index>").ReplaceStr("<dst>", dst.value))
+	                   .ReplaceStr("<execz>", operand_is_exec(inst.dst) ? EXECZ : "")
+	                   .ReplaceStr("<index>", index_str);
+	return true;
+}
+
 static const char* ScalarUnaryB32Operation(ShaderInstructionType type)
 {
 	switch (type)
@@ -941,14 +1081,58 @@ KYTY_RECOMPILER_FUNC(Recompile_SSwappcB64_Sdst2Ssrc02)
 	return false;
 }
 
-KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
+// WQM is a numeric operation on a packed architectural word, independent of
+// the register that holds it. The native adapter refreshes the EXEC lane view
+// after a mask destination write, just as it does for any other scalar ALU.
+KYTY_RECOMPILER_FUNC(Recompile_SWqmB32_SVdstSVsrc0)
 {
 	const auto& inst = code.GetInstructions().At(index);
 
-	if (inst.dst.type == ShaderOperandType::ExecLo && inst.src[0].type == ShaderOperandType::ExecLo)
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	if (dst_value.type != SpirvType::Uint)
 	{
-		return true;
+		return false;
 	}
+
+	String8 index_str = String8::FromPrintf("%u", index);
+	String8 load0;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
+	{
+		return false;
+	}
+
+	static const char* text = R"(
+        <load0>
+        %wqm_q0_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_0 %uint_15
+        %wqm_r0_<index> = OpBitwiseOr %uint %uint_0 %wqm_q0_<index>
+        %wqm_q1_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_4 %uint_240
+        %wqm_r1_<index> = OpBitwiseOr %uint %wqm_r0_<index> %wqm_q1_<index>
+        %wqm_q2_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_8 %uint_0x00000f00
+        %wqm_r2_<index> = OpBitwiseOr %uint %wqm_r1_<index> %wqm_q2_<index>
+        %wqm_q3_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_12 %uint_0x0000f000
+        %wqm_r3_<index> = OpBitwiseOr %uint %wqm_r2_<index> %wqm_q3_<index>
+        %wqm_q4_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_16 %uint_0x000f0000
+        %wqm_r4_<index> = OpBitwiseOr %uint %wqm_r3_<index> %wqm_q4_<index>
+        %wqm_q5_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_20 %uint_0x00f00000
+        %wqm_r5_<index> = OpBitwiseOr %uint %wqm_r4_<index> %wqm_q5_<index>
+        %wqm_q6_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_24 %uint_0x0f000000
+        %wqm_r6_<index> = OpBitwiseOr %uint %wqm_r5_<index> %wqm_q6_<index>
+        %wqm_q7_<index> = OpFunctionCall %uint %wqm %t0_<index> %uint_28 %uint_0xf0000000
+        %wqm_r7_<index> = OpBitwiseOr %uint %wqm_r6_<index> %wqm_q7_<index>
+)";
+
+	*dst_source += String8(text).ReplaceStr("<load0>", load0).ReplaceStr("<index>", index_str);
+
+	*dst_source += String8("OpStore %<dst> %wqm_r7_<index>\n<scc>\n<execz>\n")
+	                   .ReplaceStr("<scc>", get_scc_check(scc_check, 1))
+	                   .ReplaceStr("<execz>", operand_is_exec(inst.dst) ? EXECZ : "")
+	                   .ReplaceStr("<dst>", dst_value.value).ReplaceStr("<index>", index_str);
+	return true;
+}
+
+KYTY_RECOMPILER_FUNC(Recompile_SWqmB64_Sdst2Ssrc02)
+{
+	const auto& inst = code.GetInstructions().At(index);
 
 	String8 index_str = String8::FromPrintf("%u", index);
 

@@ -3,6 +3,7 @@
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/Libs.h"
 
+#include <cstring>
 #include <cstddef>
 #include <cstdint>
 
@@ -481,6 +482,24 @@ int KYTY_SYSV_ABI pthread_rename_np(Kernel::Pthread thread, const char* name)
 {
 	PRINT_NAME();
 	return POSIX_PTHREAD_CALL(Kernel::PthreadRename(thread, name));
+}
+
+// ERANGE when the name and its terminator do not fit in size bytes.
+int KYTY_SYSV_ABI pthread_getname_np(Kernel::Pthread thread, char* name, size_t size)
+{
+	PRINT_NAME();
+	char current[32] {};
+	if (const int result = POSIX_PTHREAD_CALL(Kernel::PthreadGetname(thread, current)); result != 0)
+	{
+		return result;
+	}
+	const size_t length = std::strlen(current);
+	if (length >= size)
+	{
+		return POSIX_ERANGE;
+	}
+	std::memcpy(name, current, length + 1);
+	return 0;
 }
 
 int KYTY_SYSV_ABI pthread_getthreadid_np()

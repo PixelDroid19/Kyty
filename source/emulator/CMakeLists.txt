@@ -24,6 +24,7 @@ file(GLOB hle_domain_src CONFIGURE_DEPENDS
 	src/NetworkHttpUri.cpp
 	src/Audio.cpp
 	src/Audio3d.cpp
+	src/AudioPropagation.cpp
 	src/AudioAjm.cpp
 	src/AudioAvPlayer.cpp
 	src/AudioHost.cpp
@@ -276,7 +277,6 @@ get_property(inc_headers TARGET emulator PROPERTY INCLUDE_DIRECTORIES)
 
 list(APPEND inc_headers
 	${CMAKE_SOURCE_DIR}/3rdparty/sdl2/sdl2/include
-	${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include
 	${CMAKE_SOURCE_DIR}/3rdparty/easy_profiler/include
 	${CMAKE_SOURCE_DIR}/3rdparty/imgui
 	${CMAKE_SOURCE_DIR}/3rdparty/imgui/backends

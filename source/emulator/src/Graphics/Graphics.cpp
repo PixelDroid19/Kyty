@@ -1,3 +1,4 @@
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/Graphics.h"
 
 #include "Kyty/Core/DbgAssert.h"
@@ -34,6 +35,7 @@
 #include "Emulator/VideoFrameMemory.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstring>
 #include <limits>
@@ -61,10 +63,11 @@ struct GpuMappingInvalidationTransaction
 	uint64_t size  = 0;
 };
 
-void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size)
+void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingBacking backing)
 {
 	(void)context;
 	GpuMemorySetAllocatedRange(vaddr, size);
+	GuestDeviceAddressRegisterRange(vaddr, size, backing == Kernel::Memory::KernelGpuMappingBacking::Physical);
 }
 
 bool GraphicsCompleteGpuMappingRelease(void* data)
@@ -79,6 +82,7 @@ bool GraphicsCompleteGpuMappingRelease(void* data)
 		    EXIT_IF(action_data == nullptr);
 		    auto* transaction = static_cast<GpuMappingReleaseTransaction*>(action_data);
 		    GpuMemoryFreeMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+		    GuestDeviceAddressReleaseRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
 		    return transaction->completion(transaction->completion_data);
 	    },
 	    transaction);
@@ -96,6 +100,7 @@ bool GraphicsCompleteGpuMappingInvalidation(void* data)
 		    EXIT_IF(action_data == nullptr);
 		    auto* transaction = static_cast<GpuMappingInvalidationTransaction*>(action_data);
 		    GpuMemoryInvalidateMappedRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+		    GuestDeviceAddressInvalidateRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
 		    return true;
 	    },
 	    transaction);
@@ -195,7 +200,9 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	const Kyty::Emulator::VideoFrameMemory::Callbacks video_frame_memory_callbacks {
 	    GuestTextureLayoutRegisterLinear,
 	    GuestTextureLayoutUnregister,
-	    [](uint64_t base, uint64_t size) { (void)GpuMemoryNotifyHostWrite(base, size); }};
+	    [](uint64_t base, uint64_t size) { (void)GpuMemoryNotifyHostWrite(base, size); },
+	    [](uint64_t base, uint64_t size) { return GpuDirtyPageTracker::Instance().BeginHostWrite(base, size); },
+	    [](uint64_t token) { GpuDirtyPageTracker::Instance().EndHostWrite(token); }};
 	EXIT_IF(!Kyty::Emulator::VideoFrameMemory::InstallCallbacks(video_frame_memory_callbacks));
 	const Kyty::Emulator::PresentationStats::Callbacks presentation_stats_callbacks {nullptr, GraphicsQueryPresentationStats};
 	EXIT_IF(!Kyty::Emulator::PresentationStats::GetPort().Install(presentation_stats_callbacks));
@@ -1389,6 +1396,7 @@ static RegisterDefaultInfo g_cx_reg_info1[] = {
          {Pm4::PA_SC_WINDOW_SCISSOR_TL, 0x80000000},
          {Pm4::PA_SC_WINDOW_SCISSOR_BR, 0x40004000},
      }},
+    /* 78 */ {0xA6D12629, {{Pm4::CB_BLEND0_CONTROL, 0x20010001}}},
 
 };
 
@@ -1571,7 +1579,7 @@ static ShaderRegister* g_tbl_cx1[] = {
     KYTY_REG_CX1(56), KYTY_REG_CX1(57), KYTY_REG_CX1(58), KYTY_REG_CX1(59), KYTY_REG_CX1(60), KYTY_REG_CX1(61), KYTY_REG_CX1(62),
     KYTY_REG_CX1(63), KYTY_REG_CX1(64), KYTY_REG_CX1(65), KYTY_REG_CX1(66), KYTY_REG_CX1(67), KYTY_REG_CX1(68), KYTY_REG_CX1(69),
     KYTY_REG_CX1(70), KYTY_REG_CX1(71), KYTY_REG_CX1(72), KYTY_REG_CX1(73), KYTY_REG_CX1(74), KYTY_REG_CX1(75), KYTY_REG_CX1(76),
-    KYTY_REG_CX1(77)};
+    KYTY_REG_CX1(77), KYTY_REG_CX1(78)};
 
 static ShaderRegister* g_tbl_sh1[]    = {KYTY_REG_SH1(0),  KYTY_REG_SH1(1),  KYTY_REG_SH1(2),  KYTY_REG_SH1(3),  KYTY_REG_SH1(4),
                                          KYTY_REG_SH1(5),  KYTY_REG_SH1(6),  KYTY_REG_SH1(7),  KYTY_REG_SH1(8),  KYTY_REG_SH1(9),
@@ -1597,6 +1605,7 @@ static uint32_t        g_tbl_index1[] = {
            KYTY_INDEX_CX1(60), KYTY_INDEX_CX1(61), KYTY_INDEX_CX1(62), KYTY_INDEX_CX1(63), KYTY_INDEX_CX1(64), KYTY_INDEX_CX1(65),
            KYTY_INDEX_CX1(66), KYTY_INDEX_CX1(67), KYTY_INDEX_CX1(68), KYTY_INDEX_CX1(69), KYTY_INDEX_CX1(70), KYTY_INDEX_CX1(71),
            KYTY_INDEX_CX1(72), KYTY_INDEX_CX1(73), KYTY_INDEX_CX1(74), KYTY_INDEX_CX1(75), KYTY_INDEX_CX1(76), KYTY_INDEX_CX1(77),
+           KYTY_INDEX_CX1(78),
            KYTY_INDEX_SH1(0),  KYTY_INDEX_SH1(1),  KYTY_INDEX_SH1(2),  KYTY_INDEX_SH1(3),  KYTY_INDEX_SH1(4),  KYTY_INDEX_SH1(5),
            KYTY_INDEX_SH1(6),  KYTY_INDEX_SH1(7),  KYTY_INDEX_SH1(8),  KYTY_INDEX_SH1(9),  KYTY_INDEX_SH1(10), KYTY_INDEX_SH1(11),
            KYTY_INDEX_SH1(12), KYTY_INDEX_SH1(13), KYTY_INDEX_SH1(14), KYTY_INDEX_SH1(15), KYTY_INDEX_SH1(16), KYTY_INDEX_SH1(17),
@@ -1622,6 +1631,26 @@ static RegisterDefaults g_reg_defaults1 = { // @suppress("Invalid arguments")
     g_tbl_cx1, g_tbl_sh1, g_tbl_uc1, nullptr, {0, 0}, g_tbl_index1, sizeof(g_tbl_index1) / 12};
 static RegisterDefaults g_reg_defaults2 = { // @suppress("Invalid arguments")
     g_tbl_cx2, g_tbl_sh2, g_tbl_uc2, nullptr, {0, 0}, g_tbl_index2, sizeof(g_tbl_index2) / 12};
+
+// Version 13 depth groups include HTILE control before the size and clear values.
+// Keep independent backing so older clients retain their sixteen-pair layout.
+static auto g_depth_reg_defaults13 = [] {
+	std::array<ShaderRegister, 17> registers {};
+	std::copy_n(g_cx_reg_info1[64].reg, 13, registers.begin());
+	registers[13] = {Pm4::DB_HTILE_SURFACE, 0x00040000u};
+	std::copy_n(g_cx_reg_info1[64].reg + 13, 3, registers.begin() + 14);
+	return registers;
+}();
+
+static auto g_tbl_cx13 = [] {
+	std::array<ShaderRegister*, sizeof(g_tbl_cx1) / sizeof(g_tbl_cx1[0])> table {};
+	std::copy_n(g_tbl_cx1, table.size(), table.begin());
+	table[64] = g_depth_reg_defaults13.data();
+	return table;
+}();
+
+static RegisterDefaults g_reg_defaults13 = {
+    g_tbl_cx13.data(), g_tbl_sh1, g_tbl_uc1, nullptr, {0, 0}, g_tbl_index1, sizeof(g_tbl_index1) / 12};
 
 namespace {
 
@@ -1811,11 +1840,12 @@ int KYTY_SYSV_ABI GraphicsInit(uint32_t* state, uint32_t ver)
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2(uint32_t ver)
 {
 	PRINT_NAME();
+	auto* defaults = ver == 13u ? &g_reg_defaults13 : &g_reg_defaults1;
 
-	if (ver != 8) { KYTY_LOG_WARN("\t WARNING: AGC ver %u != 8\n", ver); }
+	if (ver != 8 && ver != 13) { KYTY_LOG_WARN("\t WARNING: AGC ver %u is neither 8 nor 13\n", ver); }
 	if (offsetof(RegisterDefaults, count) != 0x38) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offsetof(RegisterDefaults, count) != 0x38 condition ignored (continuing)\n"); }
 
-	return &g_reg_defaults1;
+	return defaults;
 }
 
 void* KYTY_SYSV_ABI GraphicsGetRegisterDefaults2Internal(uint32_t ver)
@@ -2395,6 +2425,52 @@ int KYTY_SYSV_ABI GraphicsSetUcRegIndirectPatchAddRegisters(uint32_t* cmd, uint3
 	return OK;
 }
 
+static ShaderSpecialRegs GraphicsSnapshotPrimSpecials(const Shader* shader, uint8_t expected_type, const char* role)
+{
+	Shader header {};
+	if (!Core::VirtualMemory::CopyFromGuest(&header, reinterpret_cast<uint64_t>(shader), sizeof(header)))
+	{
+		EXIT("GraphicsCreatePrimState: unreadable %s header at 0x%016" PRIx64, role, reinterpret_cast<uint64_t>(shader));
+	}
+	if (header.type != expected_type || header.special_sizes_bytes < sizeof(ShaderSpecialRegs))
+	{
+		EXIT("GraphicsCreatePrimState: invalid %s metadata type=%u expected=%u specials_size=%u required=%zu", role,
+		     static_cast<unsigned>(header.type), static_cast<unsigned>(expected_type),
+		     static_cast<unsigned>(header.special_sizes_bytes), sizeof(ShaderSpecialRegs));
+	}
+	ShaderSpecialRegs specials {};
+	if (!Core::VirtualMemory::CopyFromGuest(&specials, reinterpret_cast<uint64_t>(header.specials), sizeof(specials)))
+	{
+		EXIT("GraphicsCreatePrimState: unreadable %s specials at 0x%016" PRIx64, role,
+		     reinterpret_cast<uint64_t>(header.specials));
+	}
+	return specials;
+}
+
+static bool GraphicsMapPrimInputToOutput(uint32_t input, uint32_t* output)
+{
+	switch (input)
+	{
+		case 1: *output = 0; return true; // points
+		case 2:
+		case 3:
+		case 10:
+		case 11:
+		case 18: *output = 1; return true; // lines
+		case 4:
+		case 5:
+		case 6:
+		case 12:
+		case 13:
+		case 19:
+		case 20:
+		case 21: *output = 2; return true; // triangles
+		case 7: *output = 3; return true;  // GFX10+ bounding rectangle
+		case 17: *output = 4; return true; // GFX10+ three-corner rectangle
+		default: return false;
+	}
+}
+
 int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegister* uc_regs, const Shader* hs, const Shader* gs,
                                           uint32_t prim_type)
 {
@@ -2406,24 +2482,94 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 			KYTY_LOG_DEBUG("\t gs        = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(gs));
 			KYTY_LOG_DEBUG("\t prim_type = %" PRIu32 "\n", prim_type);
 
-	if (hs != nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: hs != nullptr condition ignored (continuing)\n"); }
-	if (gs == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs == nullptr condition ignored (continuing)\n"); }
-	if (cx_regs == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cx_regs == nullptr condition ignored (continuing)\n"); }
-	if (uc_regs == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: uc_regs == nullptr condition ignored (continuing)\n"); }
+	if (cx_regs == nullptr && uc_regs == nullptr)
+	{
+		return OK;
+	}
 
-	if (gs->type != 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->type != 2 condition ignored (continuing)\n"); }
-	if (gs->specials->vgt_shader_stages_en.offset != Pm4::VGT_SHADER_STAGES_EN) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->specials->vgt_shader_stages_en.offset != Pm4::VGT_SHADER_STAGES_EN condition ignored (continuing)\n"); }
-	if (gs->specials->vgt_gs_out_prim_type.offset != Pm4::VGT_GS_OUT_PRIM_TYPE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->specials->vgt_gs_out_prim_type.offset != Pm4::VGT_GS_OUT_PRIM_TYPE condition ignored (continuing)\n"); }
-	if (gs->specials->ge_cntl.offset != Pm4::GE_CNTL) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->specials->ge_cntl.offset != Pm4::GE_CNTL condition ignored (continuing)\n"); }
-	if (gs->specials->ge_user_vgpr_en.offset != Pm4::GE_USER_VGPR_EN) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: gs->specials->ge_user_vgpr_en.offset != Pm4::GE_USER_VGPR_EN condition ignored (continuing)\n"); }
+	// Snapshot both fixed objects before publishing any output, including aliases.
+	const auto gs_specials = GraphicsSnapshotPrimSpecials(gs, 2, "GS");
+	const auto hs_specials = hs != nullptr ? GraphicsSnapshotPrimSpecials(hs, 3, "HS") : ShaderSpecialRegs {};
+	constexpr uint32_t gs_enable = 1u << 5u;
+	constexpr uint32_t hs_enable = 1u << 2u;
+	constexpr uint32_t ls_hs_enable = 0x7u;
+	const uint32_t gs_stages = gs_specials.vgt_shader_stages_en.value;
+	const uint32_t hs_stages = hs_specials.vgt_shader_stages_en.value;
+	if (gs_specials.vgt_shader_stages_en.offset != Pm4::VGT_SHADER_STAGES_EN ||
+	    (hs != nullptr && hs_specials.vgt_shader_stages_en.offset != Pm4::VGT_SHADER_STAGES_EN))
+	{
+		EXIT("GraphicsCreatePrimState: invalid stage register offsets GS=0x%x HS=0x%x",
+		     gs_specials.vgt_shader_stages_en.offset, hs_specials.vgt_shader_stages_en.offset);
+	}
+	if ((hs == nullptr && (gs_stages & ls_hs_enable) != 0u) ||
+	    (hs != nullptr && ((hs_stages & gs_enable) != 0u || (hs_stages & hs_enable) == 0u)))
+	{
+		EXIT("GraphicsCreatePrimState: unsupported stage ownership GS=0x%08x HS=0x%08x has_hs=%u",
+		     gs_stages, hs_stages, static_cast<unsigned>(hs != nullptr));
+	}
+	uint32_t mapped_output = 0;
+	if (!GraphicsMapPrimInputToOutput(prim_type, &mapped_output) && !(prim_type == 9u && hs != nullptr))
+	{
+		// PATCH requires an HS owner; NONE and reserved/unknown inputs have no mapping.
+		EXIT("GraphicsCreatePrimState: unsupported input primitive=%u has_hs=%u", prim_type,
+		     static_cast<unsigned>(hs != nullptr));
+	}
 
-	cx_regs[0] = gs->specials->vgt_shader_stages_en;
-	cx_regs[1] = gs->specials->vgt_gs_out_prim_type;
-
-	uc_regs[0]        = gs->specials->ge_cntl;
-	uc_regs[1]        = gs->specials->ge_user_vgpr_en;
-	uc_regs[2].offset = Pm4::VGT_PRIMITIVE_TYPE;
-	uc_regs[2].value  = prim_type;
+	ShaderRegister cx[2] {};
+	ShaderRegister uc[3] {};
+	if (cx_regs != nullptr)
+	{
+		cx[0] = {Pm4::VGT_SHADER_STAGES_EN, gs_stages | hs_stages};
+		// Stage ownership, never the numeric output value, selects the full pair.
+		if ((gs_stages & gs_enable) != 0u)
+		{
+			cx[1] = gs_specials.vgt_gs_out_prim_type;
+		} else if (hs != nullptr)
+		{
+			cx[1] = hs_specials.vgt_gs_out_prim_type;
+		} else
+		{
+			cx[1] = {Pm4::VGT_GS_OUT_PRIM_TYPE, mapped_output};
+		}
+		if (cx[1].offset != Pm4::VGT_GS_OUT_PRIM_TYPE)
+		{
+			EXIT("GraphicsCreatePrimState: invalid selected output register=0x%x", cx[1].offset);
+		}
+	}
+	if (uc_regs != nullptr)
+	{
+		uc[0] = gs_specials.ge_cntl;
+		uc[1] = hs != nullptr ? hs_specials.ge_user_vgpr_en : gs_specials.ge_user_vgpr_en;
+		uc[2] = {Pm4::VGT_PRIMITIVE_TYPE, prim_type};
+		if (uc[0].offset != Pm4::GE_CNTL || uc[1].offset != Pm4::GE_USER_VGPR_EN)
+		{
+			EXIT("GraphicsCreatePrimState: invalid selected UC registers GE_CNTL=0x%x GE_USER_VGPR_EN=0x%x",
+			     uc[0].offset, uc[1].offset);
+		}
+	}
+	const auto cx_address = reinterpret_cast<uint64_t>(cx_regs);
+	const auto uc_address = reinterpret_cast<uint64_t>(uc_regs);
+	if ((cx_regs != nullptr && !Core::VirtualMemory::IsRangeWritable(cx_address, sizeof(cx))) ||
+	    (uc_regs != nullptr && !Core::VirtualMemory::IsRangeWritable(uc_address, sizeof(uc))))
+	{
+		EXIT("GraphicsCreatePrimState: unwritable output ranges CX=0x%016" PRIx64 " UC=0x%016" PRIx64,
+		     cx_address, uc_address);
+	}
+	if (cx_regs != nullptr && uc_regs != nullptr &&
+	    (cx_address <= uc_address ? uc_address - cx_address < sizeof(cx) : cx_address - uc_address < sizeof(uc)))
+	{
+		EXIT("GraphicsCreatePrimState: overlapping CX and UC output ranges");
+	}
+	// Each copy revalidates under the VM lock. Two separate outputs are not an
+	// atomic transaction: callers must keep both mappings stable through return.
+	if (cx_regs != nullptr && !Core::VirtualMemory::CopyToGuest(cx_address, cx, sizeof(cx)))
+	{
+		EXIT("GraphicsCreatePrimState: CX output invalidated during publication at 0x%016" PRIx64, cx_address);
+	}
+	if (uc_regs != nullptr && !Core::VirtualMemory::CopyToGuest(uc_address, uc, sizeof(uc)))
+	{
+		EXIT("GraphicsCreatePrimState: UC output invalidated during publication at 0x%016" PRIx64, uc_address);
+	}
 
 	return OK;
 }
@@ -3219,6 +3365,19 @@ uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize()
 	return 2u * sizeof(uint32_t);
 }
 
+// sceAgcDcbWaitOnAddressGetSize / sceAgcAcbWaitOnAddressGetSize: bytes the
+// WaitOnAddress builder emits for a 32-bit (0) or 64-bit (1) label; titles
+// use it to reserve command space.
+uint32_t KYTY_SYSV_ABI GraphicsCbWaitOnAddressGetSize(uint32_t label_size)
+{
+	switch (label_size)
+	{
+		case 0: return 14u * sizeof(uint32_t);
+		case 1: return 16u * sizeof(uint32_t);
+		default: return 0;
+	}
+}
+
 // sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w).
 uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize()
 {
@@ -4006,6 +4165,16 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t engine, u
 	return cmd;
 }
 
+uint32_t* KYTY_SYSV_ABI GraphicsAcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy,
+                                        uint64_t destination_address, uint8_t source, uint8_t source_cache_policy,
+                                        uint64_t source_address, uint32_t byte_count, uint8_t wait_for_previous,
+                                        uint8_t write_confirm)
+{
+	// The compute queue has no caller-supplied engine selector or parser-block flag.
+	return GraphicsDcbDmaData(buf, 0, destination, destination_cache_policy, destination_address, source,
+	                         source_cache_policy, source_address, byte_count, wait_for_previous, write_confirm, 0);
+}
+
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles)
 {
@@ -4060,24 +4229,67 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine
 	return cmd;
 }
 
-// Gen5 NID qj7QZpgr9Uw: append a single Type-2 PM4 pad dword (0x80000000).
-// Observed after compute/context setup; CP treats Type-2 as header-only filler.
-uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf)
+struct ContextStatePacketLayout
+{
+	uint32_t segment_dw[6];
+	uint32_t reserve_before;
+};
+
+// The save/restore sequence reserves 22 dwords together. Preserve its
+// callback boundaries and the complete helper size around the HLE operation.
+static constexpr ContextStatePacketLayout g_context_state_layout[] = {
+    {{5, 0, 0, 0, 0, 0}, 6}, // clear
+    {{5, 8, 9, 3, 2, 0}, 0}, // push
+    {{3, 5, 8, 9, 2, 0}, 1}, // pop
+    {{5, 8, 9, 3, 2, 5}, 0}, // push-clear
+};
+
+uint64_t KYTY_SYSV_ABI GraphicsDcbContextStateOpGetSize(uint32_t operation)
 {
 	PRINT_NAME();
+	if (operation >= std::size(g_context_state_layout))
+	{
+		return 0;
+	}
+	uint64_t dwords = 0;
+	for (auto count: g_context_state_layout[operation].segment_dw)
+	{
+		dwords += count;
+	}
+	return dwords * sizeof(uint32_t);
+}
 
-	if (buf == nullptr)
+uint32_t* KYTY_SYSV_ABI GraphicsDcbContextStateOp(CommandBuffer* buf, uint32_t operation)
+{
+	PRINT_NAME();
+	if (buf == nullptr || operation >= std::size(g_context_state_layout))
 	{
 		return nullptr;
 	}
 
-		auto* cmd = buf->AllocateDW(1);
-	if (cmd == nullptr)
+	const auto& layout = g_context_state_layout[operation];
+	uint32_t* first = nullptr;
+	for (uint32_t i = 0; i < std::size(layout.segment_dw) && layout.segment_dw[i] != 0; i++)
 	{
-		return nullptr;
+		if (i == layout.reserve_before && !buf->ReserveDW(22))
+		{
+			return nullptr;
+		}
+		const auto count = layout.segment_dw[i];
+		auto* packet = buf->AllocateDW(count);
+		if (packet == nullptr)
+		{
+			return nullptr;
+		}
+		std::fill_n(packet, count, 0u);
+		packet[0] = KYTY_PM4(count, Pm4::IT_NOP, i == 0 ? Pm4::R_CONTEXT_STATE : Pm4::R_ZERO);
+		if (i == 0)
+		{
+			first = packet;
+			packet[1] = operation;
+		}
 	}
-	cmd[0] = 0x80000000u;
-	return cmd;
+	return first;
 }
 
 // sceAgcDcbSetBaseIndirectArgs: IT_SET_BASE for indirect argument buffers.
@@ -4128,6 +4340,29 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t
 	cmd[0] = KYTY_PM4(3, Pm4::IT_DISPATCH_INDIRECT, 0u);
 	cmd[1] = data_offset;
 	cmd[2] = (modifier & 0xa038u) | 0x41u;
+	return cmd;
+}
+
+uint32_t* KYTY_SYSV_ABI GraphicsAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirect_args, uint32_t modifier)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+
+	auto* cmd = buf->AllocateDW(4);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+
+	const auto address = reinterpret_cast<uint64_t>(indirect_args);
+	cmd[0] = KYTY_PM4(4, Pm4::IT_DISPATCH_INDIRECT, 0u);
+	cmd[1] = static_cast<uint32_t>(address);
+	cmd[2] = static_cast<uint32_t>(address >> 32u);
+	cmd[3] = (modifier & 0xa038u) | 0x41u;
 	return cmd;
 }
 
@@ -4503,6 +4738,72 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t 
 	}
 	cmd[0] = KYTY_PM4(2, Pm4::IT_NUM_INSTANCES, 0u);
 	cmd[1] = num_instances;
+	return cmd;
+}
+
+// INDIRECT_BUFFER for sceAgcDcbJump/sceAgcAcbJump: the target address, then its
+// size in dwords (bits 0-19), CHAIN (bit 20: mode 1 ends the current buffer at the
+// jump, mode 0 returns after the target), VALID (bit 23) and the cache policy.
+uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32_t cache_policy, const void* target, uint32_t size_dw)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr || mode > 1u || cache_policy > 3u || size_dw > 0xfffffu)
+	{
+		return nullptr;
+	}
+	auto* cmd = buf->AllocateDW(4);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	const auto address = reinterpret_cast<uint64_t>(target);
+	cmd[0]             = KYTY_PM4(4, Pm4::IT_INDIRECT_BUFFER, 0u);
+	cmd[1]             = static_cast<uint32_t>(address);
+	cmd[2]             = static_cast<uint32_t>(address >> 32u) & 0xffffu;
+	cmd[3]             = size_dw | (mode << 20u) | (1u << 23u) | (cache_policy << 28u);
+	return cmd;
+}
+
+uint32_t KYTY_SYSV_ABI GraphicsCbJumpGetSize()
+{
+	return 4u * sizeof(uint32_t);
+}
+
+// sceAgcSetPacketPredication: bit 0 of a packet header marks it predicated (1) or not.
+int KYTY_SYSV_ABI GraphicsSetPacketPredication(uint32_t* packet, uint32_t predication)
+{
+	PRINT_NAME();
+
+	if (packet == nullptr)
+	{
+		return Kernel::KERNEL_ERROR_EINVAL;
+	}
+	packet[0] = (packet[0] & ~1u) | (predication == 1u ? 1u : 0u);
+	return OK;
+}
+
+// SET_PREDICATION: condition (bit 8), wait hint (bit 12) and operation (bits 16-18),
+// then the 16-byte aligned address of the result the operation reads.
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetPredication(CommandBuffer* buf, uint32_t condition, uint32_t operation, uint32_t wait,
+                                                  const volatile void* address)
+{
+	PRINT_NAME();
+
+	if (buf == nullptr)
+	{
+		return nullptr;
+	}
+	auto* cmd = buf->AllocateDW(4);
+	if (cmd == nullptr)
+	{
+		return nullptr;
+	}
+	const auto result = reinterpret_cast<uint64_t>(address);
+	cmd[0]            = KYTY_PM4(4, Pm4::IT_SET_PREDICATION, 0u);
+	cmd[1]            = ((condition & 0x1u) << 8u) | ((wait & 0x1u) << 12u) | ((operation & 0x7u) << 16u);
+	cmd[2]            = static_cast<uint32_t>(result) & 0xfffffff0u;
+	cmd[3]            = static_cast<uint32_t>(result >> 32u);
 	return cmd;
 }
 

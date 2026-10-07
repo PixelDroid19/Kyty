@@ -30,6 +30,18 @@ ocultar entradas no soportadas.
 | Ventana e input host | `HostWindowControls` | F11, Alt+Enter, doble clic, pausa, foco y supresión de aristas se deciden en una política testeable. |
 | PCM de AudioOut | `AudioPcm` | S16/F32 comparten volumen por canal y cálculo temporal de cola; SDL realiza una única conversión al dispositivo real. |
 
+## Centralizations (October 2026)
+
+| Area | Canonical implementation | Removed copies or migrated consumers |
+| --- | --- | --- |
+| Add-on content | `Loader::AddcontInventory` | AppContent and NpEntitlementAccess each answered "nothing installed" on their own; both now read one inventory. |
+| C++ RTTI objects | `LibC::CxxRttiObjects()` (`LibCxxRtti.cpp`), keyed by mangled name | Loose `_ZTIi`/`_ZTIv` NID entries; every fundamental `T`, `T*`, `const T*` comes from one table. |
+| Linear row pitch | `ShaderGen5LinearTexturePitch` (block columns for BC formats) and one `resolve_linear_upload_pitch` in `Texture.cpp` | Two copies of the registered-row-pitch lookup in the tile-0 upload paths. |
+| Middleware modules a title ships | The title's own PRX, loaded as a package sidecar | An HLE library with the same module name claimed ownership, so the loader never loaded the real module and only a handful of its exports (zlib, one heuristic for four functions) existed. |
+| libc conversions | Distinct `strtoll` entry | `strtoll` was an alias of `strtoul`. |
+| Dynamic descriptor spans | `ShaderDynamicSLoadScalarSpan` (next to the consumer scan in `ShaderResources.cpp`) | The binding span was rebuilt from the last consumer in `Shader.cpp`, separately from the scan that accepts every consumer. |
+| Indirect SH user data | `GraphicsRunJmpTables.cpp` indirect table for CS, GS, VS and PS | Only compute user data was decoded from indirect register lists. |
+
 ## Contratos estrictos resultantes
 
 - Una importación desconocida no se resuelve por coincidencia de NID en otra

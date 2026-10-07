@@ -28,12 +28,16 @@ uint64_t KYTY_SYSV_ABI FallbackInvokeOnStack(uint64_t /*target*/, uint64_t /*arg
 }
 
 void FallbackReleaseThreadDynamicTls(int /*thread_id*/) {}
+uint64_t FallbackGetProcessParameters() { return 0; }
+bool FallbackIsExecutableAddress(uint64_t /*address*/) { return false; }
 
 std::atomic<FindProgramByAddrFunction> g_find_program_by_addr {FallbackFindProgramByAddr};
 std::atomic<InvokeFunction>            g_invoke {FallbackInvoke};
 std::atomic<Invoke4Function>           g_invoke4 {FallbackInvoke4};
 std::atomic<InvokeOnStackFunction>     g_invoke_on_stack {FallbackInvokeOnStack};
 std::atomic<ReleaseThreadDynamicTlsFunction> g_release_thread_dynamic_tls {FallbackReleaseThreadDynamicTls};
+std::atomic<GetProcessParametersFunction>    g_get_process_parameters {FallbackGetProcessParameters};
+std::atomic<IsExecutableAddressFunction>     g_is_executable_address {FallbackIsExecutableAddress};
 
 } // namespace
 
@@ -48,6 +52,12 @@ void Install(const Provider& provider) noexcept
 	g_release_thread_dynamic_tls.store(provider.release_thread_dynamic_tls != nullptr ? provider.release_thread_dynamic_tls :
 	                                                                            FallbackReleaseThreadDynamicTls,
 	                                   std::memory_order_release);
+	g_get_process_parameters.store(provider.get_process_parameters != nullptr ? provider.get_process_parameters :
+	                                                                            FallbackGetProcessParameters,
+	                               std::memory_order_release);
+	g_is_executable_address.store(provider.is_executable_address != nullptr ? provider.is_executable_address :
+	                                                                           FallbackIsExecutableAddress,
+	                              std::memory_order_release);
 }
 
 ProgramHandle FindProgramByAddr(uint64_t vaddr) noexcept
@@ -73,6 +83,16 @@ uint64_t InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t a
 void ReleaseThreadDynamicTls(int thread_id) noexcept
 {
 	g_release_thread_dynamic_tls.load(std::memory_order_acquire)(thread_id);
+}
+
+uint64_t GetProcessParameters() noexcept
+{
+	return g_get_process_parameters.load(std::memory_order_acquire)();
+}
+
+bool IsExecutableAddress(uint64_t address) noexcept
+{
+	return g_is_executable_address.load(std::memory_order_acquire)(address);
 }
 
 } // namespace Kyty::Emulator::GuestRuntimePort

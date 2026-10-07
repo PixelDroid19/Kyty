@@ -55,9 +55,37 @@ KYTY_SYSV_ABI double c_pow(double x, double y)
 {
 	return ::pow(x, y);
 }
+// Compiler runtime integer powers: square-and-multiply over the exponent's
+// magnitude, then one reciprocal for a negative exponent, as the guest's own
+// runtime computes them (rounding differs from pow()).
+template <typename T>
+static T powi_by_squaring(T base, int exponent)
+{
+	const bool reciprocal = exponent < 0;
+	T          result     = 1;
+	for (;;)
+	{
+		if ((exponent & 1) != 0)
+		{
+			result *= base;
+		}
+		exponent /= 2;
+		if (exponent == 0)
+		{
+			break;
+		}
+		base *= base;
+	}
+	return reciprocal ? 1 / result : result;
+}
+
 KYTY_SYSV_ABI double c_powidf2(double x, int y)
 {
-	return ::pow(x, y);
+	return powi_by_squaring(x, y);
+}
+KYTY_SYSV_ABI float c_powisf2(float x, int y)
+{
+	return powi_by_squaring(x, y);
 }
 KYTY_SYSV_ABI double c_fmod(double x, double y)
 {
@@ -115,6 +143,10 @@ KYTY_SYSV_ABI int c_isnanf(float x)
 KYTY_SYSV_ABI int c_isfinitef(float x)
 {
 	return std::isfinite(x) ? 1 : 0;
+}
+KYTY_SYSV_ABI int c_isinff(float x)
+{
+	return std::isinf(x) ? 1 : 0;
 }
 // Gen5 libc_v1 isfinite(double) — NID dhK16CKwhQg. Dreaming Sarah Construct
 // number parser after strtod: store double, call, test %eax; non-zero keeps value.
@@ -247,6 +279,10 @@ KYTY_SYSV_ABI float c_expf(float x)
 KYTY_SYSV_ABI float c_ldexpf(float x, int e)
 {
 	return ::ldexpf(x, e);
+}
+KYTY_SYSV_ABI float c_modff(float x, float* ip)
+{
+	return ::modff(x, ip);
 }
 KYTY_SYSV_ABI void c_sincosf(float x, float* s, float* c)
 {

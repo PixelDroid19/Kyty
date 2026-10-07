@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/BringUp.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -509,14 +510,23 @@ KYTY_CP_OP_PARSER(cp_op_set_base)
 	return 3;
 }
 
-// Gen5 IT_DISPATCH_INDIRECT: header + data_offset + modifier.
-// Full GPU dispatch from the SetBaseIndirect arg buffer is future work;
-// consuming the packet keeps the command stream aligned.
+// DCB uses a base-relative offset; ACB carries an absolute 64-bit address.
 KYTY_CP_OP_PARSER(cp_op_dispatch_indirect)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (dw < 2) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw < 2 condition ignored (continuing)\n"); }
+	if (Config::IsNextGen() && cmd_id == KYTY_PM4(4, Pm4::IT_DISPATCH_INDIRECT, 0u))
+	{
+		EXIT_IF(dw < 4u);
+		const uint64_t address = static_cast<uint64_t>(buffer[0]) | (static_cast<uint64_t>(buffer[1]) << 32u);
+		cp->DispatchIndirectAbsolute(address, buffer[2]);
+		return 3;
+	}
+	if (cmd_id != KYTY_PM4(3, Pm4::IT_DISPATCH_INDIRECT, 0u))
+	{
+		EXIT("unsupported dispatch-indirect header: 0x%08" PRIx32 "\n", cmd_id);
+	}
+	EXIT_IF(dw < 3u);
 	cp->DispatchIndirect(buffer[0], buffer[1]);
 
 	return 2;
@@ -548,6 +558,22 @@ KYTY_CP_OP_PARSER(cp_op_clear_state)
 	cp->GetCtx()->Reset();
 
 	return 1;
+}
+
+KYTY_CP_OP_PARSER(cp_op_context_state)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	EXIT_IF(dw < 3);
+	const auto operation = buffer[0];
+	const uint32_t packet_dw = operation == 2 ? 3 : 5;
+	EXIT_IF(operation > 3 || dw < packet_dw || cmd_id != KYTY_PM4(packet_dw, Pm4::IT_NOP, Pm4::R_CONTEXT_STATE));
+	for (uint32_t i = 1; i < packet_dw - 1; i++)
+	{
+		EXIT_IF(buffer[i] != 0);
+	}
+	cp->ApplyContextState(operation);
+	return packet_dw - 1;
 }
 
 KYTY_CP_OP_PARSER(cp_op_dump_const_ram)
@@ -610,8 +636,9 @@ KYTY_CP_OP_PARSER(cp_op_event_write_eop)
 	auto*    dst_gpu_addr       = reinterpret_cast<void*>(buffer[1] | (static_cast<uint64_t>(buffer[2] & 0xffffu) << 32u));
 	uint64_t value              = (buffer[3] | (static_cast<uint64_t>(buffer[4]) << 32u));
 
+	// EVENT_WRITE_EOP carries no interrupt context id.
 	cp->WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index, event_write_source, dst_gpu_addr,
-	                       value, interrupt_selector);
+	                       value, interrupt_selector, 0);
 
 	return 5;
 }
@@ -724,9 +751,8 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 {
 	KYTY_PROFILER_FUNCTION();
 
-	if (cmd_id != 0xc0023f02) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd_id != 0xc0023f02 condition ignored (continuing)\n"); }
-
-	if ((buffer[2] & 0xff00000u) != 0x1800000u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: (buffer[2] & 0xff00000u) != 0x1800000u condition ignored (continuing)\n"); }
+	EXIT_IF(KYTY_PM4_LEN(cmd_id) != 4u);
+	if ((buffer[2] & (1u << 23u)) == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: INDIRECT_BUFFER without VALID (continuing)\n"); }
 
 	auto*    indirect_buffer = reinterpret_cast<uint32_t*>(buffer[0] | (static_cast<uint64_t>(buffer[1] & 0xffffu) << 32u));
 	uint32_t indirect_num_dw = buffer[2] & 0xfffffu;
@@ -738,7 +764,9 @@ KYTY_CP_OP_PARSER(cp_op_indirect_buffer)
 
 	cp->Run(indirect_buffer, indirect_num_dw, indirect_buffer);
 
-	return 3;
+	// A chained buffer replaces the rest of the current one.
+	const bool chain = (buffer[2] & (1u << 20u)) != 0u;
+	return chain ? dw - 1u : 3u;
 }
 
 KYTY_CP_OP_PARSER(cp_op_indirect_buffer_end)
@@ -1026,6 +1054,25 @@ KYTY_CP_OP_PARSER(cp_op_num_instances)
 	return 1;
 }
 
+// SET_PREDICATION. Clearing predication reads no result. With the wait hint set
+// (bit 12), packets run unpredicated while the result is not ready; the command
+// processor runs ahead of the GPU work that writes the result, so a predicate
+// set that way never skips here. Predicates that must wait for their result
+// are not implemented yet.
+KYTY_CP_OP_PARSER(cp_op_set_predication)
+{
+	KYTY_PROFILER_FUNCTION();
+
+	const uint32_t operation  = (buffer[0] >> 16u) & 0x7u;
+	const bool     draw_early = ((buffer[0] >> 12u) & 0x1u) != 0u;
+	if (operation != 0u && !draw_early)
+	{
+		EXIT("SET_PREDICATION operation %u is not implemented: condition=%u wait=%u address=0x%08x%08x\n", operation,
+		     (buffer[0] >> 8u) & 0x1u, (buffer[0] >> 12u) & 0x1u, buffer[2], buffer[1]);
+	}
+	return KYTY_PM4_LEN(cmd_id) - 1u;
+}
+
 KYTY_CP_OP_PARSER(cp_op_pop_marker)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -1214,7 +1261,7 @@ KYTY_CP_OP_PARSER(cp_op_release_mem)
 	}
 
 	cp->WriteAtEndOfPipe64(cache_policy, event_write_dest, eop_event_type, cache_action, event_index, event_write_source, dst_gpu_addr,
-	                       value, interrupt_selector);
+	                       value, interrupt_selector, GraphicsAgcReleaseMemInterruptContextId(cmd_id, buffer));
 
 	// Body dwords after the Type-3 header: 6 for the 7-DW form, 7 when the
 	// packet carries interrupt_ctx_id as an eighth dword.

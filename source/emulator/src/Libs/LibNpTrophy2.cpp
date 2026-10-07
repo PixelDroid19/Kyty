@@ -18,7 +18,7 @@ static constexpr int error_invalid_argument = static_cast<int32_t>(0x80551604u);
 static std::atomic<int32_t> g_next_context {0};
 static std::atomic<int32_t> g_next_handle {0};
 
-// sceNpTrophy2CreateContext — NID Fbshr7OQ6Q
+// sceNpTrophy2CreateContext — NID Bagshr7OQ6Q
 int KYTY_SYSV_ABI CreateContext(int32_t* context, int32_t /*user_id*/, uint32_t /*service_label*/, uint64_t options)
 {
 	if (context == nullptr || options != 0)
@@ -113,6 +113,20 @@ int KYTY_SYSV_ABI GetTrophyInfo(int32_t context, int32_t handle, int32_t trophy_
 	return OK;
 }
 
+// sceNpTrophy2GetTrophyInfoArray(context, handle, first_trophy_id, count,
+// details[], data[], written*) as titles call it (either array may be null).
+// No trophy set is installed, as GetGameInfo reports, so no record is written.
+int KYTY_SYSV_ABI GetTrophyInfoArray(int32_t context, int32_t handle, int32_t first_trophy_id, uint32_t /*count*/, void* details,
+                                     void* data, uint32_t* written)
+{
+	if (context <= 0 || handle <= 0 || first_trophy_id < 0 || written == nullptr || (details == nullptr && data == nullptr))
+	{
+		return error_invalid_argument;
+	}
+	*written = 0;
+	return OK;
+}
+
 int KYTY_SYSV_ABI ShowTrophyList(int32_t context, int32_t handle, uint32_t /*flags*/)
 {
 	return (context > 0 && handle > 0 ? OK : error_invalid_argument);
@@ -121,7 +135,6 @@ int KYTY_SYSV_ABI ShowTrophyList(int32_t context, int32_t handle, uint32_t /*fla
 LIB_DEFINE(InitNpTrophy2_1)
 {
 	LIB_FUNC("Bagshr7OQ6Q", CreateContext);
-	LIB_FUNC("Fbshr7OQ6Q", CreateContext);
 	LIB_FUNC("Gz1rmUZpROM", CreateHandle);
 	LIB_FUNC("bIDov3wBu5Q", RegisterContext);
 	LIB_FUNC("sUXGfNMalIo", RegisterUnlockCallback);
@@ -131,6 +144,7 @@ LIB_DEFINE(InitNpTrophy2_1)
 	LIB_FUNC("wVqxM58sIKs", UnregisterUnlockCallback);
 	LIB_FUNC("4IzqhhUQ3nk", GetGameInfo);
 	LIB_FUNC("EwNylPdWUTM", GetTrophyInfo);
+	LIB_FUNC("y3zHpdZO6ME", GetTrophyInfoArray);
 	LIB_FUNC("EHQEDVXZ0TI", ShowTrophyList);
 }
 

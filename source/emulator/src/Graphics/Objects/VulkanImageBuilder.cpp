@@ -1,6 +1,7 @@
 #include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/Graphics/Objects/VulkanImageFormat.h"
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -46,9 +47,103 @@ VkImageViewCreateInfo VulkanBuildImageViewCreateInfo(const VulkanImageViewDescri
 bool VulkanCreateDeviceImageView(VkDevice device, const VulkanImageViewDescriptor& descriptor, VkImageView* view)
 {
 	EXIT_IF(device == nullptr || view == nullptr);
-	*view                = nullptr;
-	const auto view_info = VulkanBuildImageViewCreateInfo(descriptor);
+	*view          = nullptr;
+	auto view_info = VulkanBuildImageViewCreateInfo(descriptor);
+	VkImageViewUsageCreateInfo usage_info {};
+	if (descriptor.usage != 0u)
+	{
+		usage_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+		usage_info.usage = descriptor.usage;
+		view_info.pNext  = &usage_info;
+	}
 	return vkCreateImageView(device, &view_info, nullptr, view) == VK_SUCCESS && *view != nullptr;
+}
+
+bool VulkanPlanSampledImageView(const VulkanImage& image, VkImageViewType view_type, VkImageAspectFlags aspect,
+                                uint32_t base_mip, uint32_t mip_count, uint32_t base_layer, uint32_t layer_count,
+                                uint32_t selectors, VulkanImageViewDescriptor* descriptor)
+{
+	if (descriptor == nullptr)
+	{
+		return false;
+	}
+	*descriptor = {};
+	VkComponentMapping components {};
+	if (image.image == VK_NULL_HANDLE || image.format == VK_FORMAT_UNDEFINED ||
+	    (image.usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u ||
+	    !VulkanDecodeComponentMapping(selectors, &components) ||
+	    base_mip >= image.mip_levels || mip_count == 0u || mip_count > image.mip_levels - base_mip ||
+	    base_layer >= image.array_layers || layer_count == 0u || layer_count > image.array_layers - base_layer)
+	{
+		return false;
+	}
+	const bool volume = view_type == VK_IMAGE_VIEW_TYPE_3D;
+	if ((view_type != VK_IMAGE_VIEW_TYPE_2D && view_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY && !volume) ||
+	    (volume ? image.image_type != VK_IMAGE_TYPE_3D || base_layer != 0u || layer_count != 1u
+	            : image.image_type != VK_IMAGE_TYPE_2D) ||
+	    (view_type == VK_IMAGE_VIEW_TYPE_2D && layer_count != 1u))
+	{
+		return false;
+	}
+	const bool depth_format = image.format == VK_FORMAT_D16_UNORM || image.format == VK_FORMAT_D32_SFLOAT ||
+	                          image.format == VK_FORMAT_D16_UNORM_S8_UINT || image.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+	                          image.format == VK_FORMAT_D32_SFLOAT_S8_UINT || image.format == VK_FORMAT_X8_D24_UNORM_PACK32;
+	const bool stencil_format = image.format == VK_FORMAT_S8_UINT || image.format == VK_FORMAT_D16_UNORM_S8_UINT ||
+	                            image.format == VK_FORMAT_D24_UNORM_S8_UINT || image.format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+	if ((aspect == VK_IMAGE_ASPECT_COLOR_BIT && (depth_format || stencil_format)) ||
+	    (aspect == VK_IMAGE_ASPECT_DEPTH_BIT && !depth_format) ||
+	    (aspect == VK_IMAGE_ASPECT_STENCIL_BIT && !stencil_format) ||
+	    (aspect != VK_IMAGE_ASPECT_COLOR_BIT && aspect != VK_IMAGE_ASPECT_DEPTH_BIT && aspect != VK_IMAGE_ASPECT_STENCIL_BIT))
+	{
+		return false;
+	}
+	*descriptor = {image.image, view_type, image.format, components, aspect, base_mip, mip_count, base_layer, layer_count};
+	return true;
+}
+
+bool VulkanImageViewDescriptorsEqual(const VulkanImageViewDescriptor& a, const VulkanImageViewDescriptor& b)
+{
+	return a.image == b.image && a.view_type == b.view_type && a.format == b.format && a.usage == b.usage && a.aspect_mask == b.aspect_mask &&
+	       a.components.r == b.components.r && a.components.g == b.components.g && a.components.b == b.components.b &&
+	       a.components.a == b.components.a && a.base_mip_level == b.base_mip_level && a.level_count == b.level_count &&
+	       a.base_array_layer == b.base_array_layer && a.layer_count == b.layer_count;
+}
+
+int VulkanGetOrCreateSampledImageView(VkDevice device, VulkanImage* image, const VulkanImageViewDescriptor& descriptor,
+                                     VulkanImageViewCreator create)
+{
+	if (image == nullptr || create == nullptr || descriptor.image != image->image || (image->usage & VK_IMAGE_USAGE_SAMPLED_BIT) == 0u)
+	{
+		return -1;
+	}
+	// Another format reads the same texels only on a mutable image, through a
+	// view limited to sampling.
+	if (descriptor.format != image->format &&
+	    (!image->mutable_format || descriptor.usage != VK_IMAGE_USAGE_SAMPLED_BIT ||
+	     !VulkanColorFormatsShareTexels(image->format, descriptor.format)))
+	{
+		return -1;
+	}
+	for (size_t i = 0; i < image->sampled_view_descriptors.size(); ++i)
+	{
+		if (VulkanImageViewDescriptorsEqual(image->sampled_view_descriptors[i], descriptor))
+		{
+			return VulkanImage::VIEW_MAX + static_cast<int>(i);
+		}
+	}
+	if (image->image_view.size() >= VulkanImage::VIEW_CACHE_LIMIT)
+	{
+		return -1;
+	}
+	VkImageView view = VK_NULL_HANDLE;
+	if (!create(device, descriptor, &view) || view == VK_NULL_HANDLE)
+	{
+		return -1;
+	}
+	const int index = static_cast<int>(image->image_view.size());
+	image->image_view.push_back(view);
+	image->sampled_view_descriptors.push_back(descriptor);
+	return index;
 }
 
 bool VulkanCreateStandardColorImageViews(GraphicContext* context, VulkanImage* image)
@@ -96,7 +191,60 @@ fail:
 	return false;
 }
 
-bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index)
+int VulkanResolveColorAttachmentView(VkFormat image_format, VkFormat attachment_format)
+{
+	if (image_format == attachment_format)
+	{
+		return VulkanImage::VIEW_DEFAULT;
+	}
+	if ((image_format == VK_FORMAT_R8G8B8A8_SRGB && attachment_format == VK_FORMAT_R8G8B8A8_UNORM) ||
+	    (image_format == VK_FORMAT_B8G8R8A8_SRGB && attachment_format == VK_FORMAT_B8G8R8A8_UNORM))
+	{
+		return VulkanImage::VIEW_COLOR_UNORM;
+	}
+	if ((image_format == VK_FORMAT_R8G8B8A8_UNORM && attachment_format == VK_FORMAT_R8G8B8A8_SRGB) ||
+	    (image_format == VK_FORMAT_B8G8R8A8_UNORM && attachment_format == VK_FORMAT_B8G8R8A8_SRGB))
+	{
+		return VulkanImage::VIEW_COLOR_SRGB;
+	}
+	return -1;
+}
+
+bool VulkanCreateCompatibleColorAttachmentViews(GraphicContext* context, VulkanImage* image)
+{
+	EXIT_IF(context == nullptr || image == nullptr || image->image == nullptr);
+
+	VkFormat alternate = VK_FORMAT_UNDEFINED;
+	int      index     = -1;
+	switch (image->format)
+	{
+		case VK_FORMAT_R8G8B8A8_SRGB:
+			alternate = VK_FORMAT_R8G8B8A8_UNORM;
+			index     = VulkanImage::VIEW_COLOR_UNORM;
+			break;
+		case VK_FORMAT_B8G8R8A8_SRGB:
+			alternate = VK_FORMAT_B8G8R8A8_UNORM;
+			index     = VulkanImage::VIEW_COLOR_UNORM;
+			break;
+		case VK_FORMAT_R8G8B8A8_UNORM:
+			alternate = VK_FORMAT_R8G8B8A8_SRGB;
+			index     = VulkanImage::VIEW_COLOR_SRGB;
+			break;
+		case VK_FORMAT_B8G8R8A8_UNORM:
+			alternate = VK_FORMAT_B8G8R8A8_SRGB;
+			index     = VulkanImage::VIEW_COLOR_SRGB;
+			break;
+		default: return true;
+	}
+
+	VulkanImageViewDescriptor descriptor {};
+	descriptor.image  = image->image;
+	descriptor.format = alternate;
+	return VulkanCreateDeviceImageView(context->device, descriptor, &image->image_view[index]);
+}
+
+bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index,
+                                   uint32_t base_mip_level)
 {
 	if (image == nullptr || view_index == nullptr || (image->usage & VK_IMAGE_USAGE_STORAGE_BIT) == 0u)
 	{
@@ -110,7 +258,17 @@ bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensio
 		*view_index = image->type == VulkanImageType::RenderTexture ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_STORAGE_ARRAY;
 	} else
 	{
-		*view_index = VulkanImage::VIEW_DEFAULT;
+		if (image->type == VulkanImageType::StorageTexture && image->mip_levels > 1u)
+		{
+			if (base_mip_level >= image->mip_levels || base_mip_level >= VulkanImage::VIEW_STORAGE_MIP_COUNT)
+			{
+				return false;
+			}
+			*view_index = VulkanImage::VIEW_STORAGE_MIP_BASE + static_cast<int>(base_mip_level);
+		} else
+		{
+			*view_index = VulkanImage::VIEW_DEFAULT;
+		}
 	}
 	return image->image_view[*view_index] != nullptr;
 }
@@ -164,14 +322,16 @@ bool VulkanNormalizeStorageComponentMapping(VkFormat* format, VkComponentMapping
 	{
 		return true;
 	}
-	if (mapping->r == VK_COMPONENT_SWIZZLE_B && mapping->g == VK_COMPONENT_SWIZZLE_G && mapping->b == VK_COMPONENT_SWIZZLE_R &&
-	    mapping->a == VK_COMPONENT_SWIZZLE_A && *format == VK_FORMAT_R8G8B8A8_SRGB)
+	// A BGRA selection of an RGBA8 image is the same bytes as a BGRA8 image read with identity.
+	const bool bgra = mapping->r == VK_COMPONENT_SWIZZLE_B && mapping->g == VK_COMPONENT_SWIZZLE_G &&
+	                  mapping->b == VK_COMPONENT_SWIZZLE_R && mapping->a == VK_COMPONENT_SWIZZLE_A;
+	if (!bgra || (*format != VK_FORMAT_R8G8B8A8_SRGB && *format != VK_FORMAT_R8G8B8A8_UNORM))
 	{
-		*format  = VK_FORMAT_B8G8R8A8_SRGB;
-		*mapping = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
-		return true;
+		return false;
 	}
-	return false;
+	*format  = *format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
+	*mapping = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+	return true;
 }
 
 bool VulkanImageFormatSupported(const GraphicContext* context, const VkImageCreateInfo& image_info)
@@ -194,7 +354,8 @@ bool VulkanCreateDeviceImage(GraphicContext* context, const VkImageCreateInfo& i
 	}
 	vkGetImageMemoryRequirements(context->device, image->image, &memory->requirements);
 	memory->property = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-	if (!VulkanAllocate(context, memory))
+	if (!VulkanAllocate(context, memory,
+	                    image_info.tiling == VK_IMAGE_TILING_OPTIMAL ? VulkanMemoryResource::Optimal : VulkanMemoryResource::Linear))
 	{
 		vkDestroyImage(context->device, image->image, nullptr);
 		image->image = nullptr;
@@ -206,6 +367,7 @@ bool VulkanCreateDeviceImage(GraphicContext* context, const VkImageCreateInfo& i
 	image->physical_extent = image_info.extent;
 	image->mip_levels      = image_info.mipLevels;
 	image->array_layers    = image_info.arrayLayers;
+	image->image_type      = image_info.imageType;
 	return true;
 }
 

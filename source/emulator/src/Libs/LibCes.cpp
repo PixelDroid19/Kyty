@@ -16,11 +16,19 @@ static KYTY_SYSV_ABI void* CesUcsProfileInitSjis1997Cp932(void* sheet)
 	return sheet;
 }
 
+static KYTY_SYSV_ABI int CesMbcsUcsContextInit(void* context)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t context             = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(context));
+	return 0;
+}
+
 } // namespace Ces
 
 LIB_DEFINE(InitCes_1)
 {
 	LIB_FUNC("ZiDCxUUGbec", Ces::CesUcsProfileInitSjis1997Cp932);
+	LIB_FUNC("538bRGc6Zo8", Ces::CesMbcsUcsContextInit);
 }
 
 } // namespace Kyty::Libs

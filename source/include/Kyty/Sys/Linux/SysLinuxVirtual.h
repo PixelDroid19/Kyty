@@ -29,6 +29,11 @@ void     sys_virtual_destroy_shared_backing(void* backing);
 // Drop host pages for a released direct-memory range without shrinking the
 // sparse backing file. Safe only when no live maps still cover the range.
 bool     sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_offset, uint64_t size);
+// Offset of the first populated or swapped-out byte at or after backing_offset,
+// or the backing size when none follows. False when the host cannot tell.
+bool     sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next);
+// Bytes of the backing that hold a page (st_blocks). False when the host cannot tell.
+bool     sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes);
 uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                         VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
@@ -39,6 +44,8 @@ bool     sys_virtual_supports_shared_fixed_owned_reservation_replacement();
 uint64_t sys_virtual_map_shared_fixed_or_relocated(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                                    VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_free(uint64_t address);
+// Unmaps a page-aligned part of one allocation, which keeps its other parts.
+bool     sys_virtual_free_range(uint64_t address, uint64_t size);
 bool     sys_virtual_protect(uint64_t address, uint64_t size, VirtualMemory::Mode mode, VirtualMemory::Mode* old_mode = nullptr);
 bool     sys_virtual_protect_guest(uint64_t address, uint64_t size, VirtualMemory::Mode mode,
                                    VirtualMemory::Mode* old_mode = nullptr);

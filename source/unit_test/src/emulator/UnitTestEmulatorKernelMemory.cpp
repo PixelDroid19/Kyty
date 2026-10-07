@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -141,6 +142,7 @@ struct GpuMappingLifecycleTestState
 	uint32_t                 event_count      = 0;
 	uint64_t                 register_vaddr   = 0;
 	uint64_t                 register_size    = 0;
+	KernelGpuMappingBacking  register_backing = KernelGpuMappingBacking::Flexible;
 	uint64_t                 invalidate_vaddr = 0;
 	uint64_t                 invalidate_size  = 0;
 	uint64_t                 release_vaddr    = 0;
@@ -153,11 +155,12 @@ struct GpuMappingLifecycleTestState
 		events[event_count++] = event;
 	}
 
-	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size)
+	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size, KernelGpuMappingBacking backing)
 	{
-		auto* state           = static_cast<GpuMappingLifecycleTestState*>(context);
-		state->register_vaddr = vaddr;
-		state->register_size  = size;
+		auto* state             = static_cast<GpuMappingLifecycleTestState*>(context);
+		state->register_vaddr   = vaddr;
+		state->register_size    = size;
+		state->register_backing = backing;
 		state->Record(Event::Register);
 	}
 
@@ -192,7 +195,7 @@ struct GpuMappingLifecycleTestState
 		state->release_vaddr = vaddr;
 		state->release_size  = size;
 		state->Record(Event::Release);
-		if (!state->lifecycle->RegisterRange(vaddr + size, size))
+		if (!state->lifecycle->RegisterRange(vaddr + size, size, KernelGpuMappingBacking::Flexible))
 		{
 			return false;
 		}
@@ -211,7 +214,7 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	partial.register_range = GpuMappingLifecycleTestState::RegisterRange;
 	EXPECT_FALSE(lifecycle.Install(partial));
 	EXPECT_FALSE(lifecycle.IsInstalled());
-	EXPECT_FALSE(lifecycle.RegisterRange(0x100000u, 0x4000u));
+	EXPECT_FALSE(lifecycle.RegisterRange(0x100000u, 0x4000u, KernelGpuMappingBacking::Physical));
 	EXPECT_FALSE(lifecycle.InvalidateRange(0x100000u, 0x4000u));
 	EXPECT_FALSE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, nullptr));
 
@@ -223,12 +226,13 @@ TEST(EmulatorKernelMemory, GpuMappingLifecyclePortForwardsReleaseCompletionInAda
 	callbacks.release_range    = GpuMappingLifecycleTestState::ReleaseRange;
 	ASSERT_TRUE(lifecycle.Install(callbacks));
 
-	ASSERT_TRUE(lifecycle.RegisterRange(0x100000u, 0x4000u));
+	ASSERT_TRUE(lifecycle.RegisterRange(0x100000u, 0x4000u, KernelGpuMappingBacking::Physical));
 	ASSERT_TRUE(lifecycle.InvalidateRange(0x100000u, 0x4000u));
 	ASSERT_TRUE(lifecycle.ReleaseRange(0x100000u, 0x4000u, GpuMappingLifecycleTestState::Complete, &state));
 
 	EXPECT_EQ(state.register_vaddr, 0x100000u);
 	EXPECT_EQ(state.register_size, 0x4000u);
+	EXPECT_EQ(state.register_backing, KernelGpuMappingBacking::Physical);
 	EXPECT_EQ(state.invalidate_vaddr, 0x100000u);
 	EXPECT_EQ(state.invalidate_size, 0x4000u);
 	EXPECT_EQ(state.release_vaddr, 0x100000u);
@@ -310,6 +314,50 @@ TEST(EmulatorKernelMemory, AutomaticDirectMapUsesPs5UserAddressRange)
 	}
 
 	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical_address, kSize), OK);
+	Config::SetNextGen(false);
+}
+
+TEST(EmulatorKernelMemory, PhysicalAliasSpansProtectionSegmentsWithoutChangingGuestRights)
+{
+	EnsureMemorySubsystemInitialized();
+	Config::SetNextGen(true);
+	constexpr size_t kSize = 0x8000;
+	constexpr size_t kSpan = 0x4000;
+	constexpr size_t kOffset = 0x1000;
+	int64_t physical = 0;
+	ASSERT_EQ(KernelAllocateMainDirectMemory(kSize, 0x4000, 12, &physical), OK);
+	void* mapping = nullptr;
+	ASSERT_EQ(KernelMapDirectMemory(&mapping, kSize, 0x02, 0, physical, 0x4000), OK);
+	auto* bytes = static_cast<uint8_t*>(mapping);
+	std::array<uint8_t, kSpan> expected {};
+	for (size_t i = 0; i < expected.size(); ++i)
+	{
+		expected[i] = static_cast<uint8_t>((i * 13u) ^ (i >> 8u));
+	}
+	std::memcpy(bytes + kOffset, expected.data(), expected.size());
+	ASSERT_EQ(KernelMprotect(mapping, 0x4000, 0x00), OK);
+	const auto base = reinterpret_cast<uint64_t>(mapping);
+	EXPECT_FALSE(Core::VirtualMemory::IsRangeReadable(base + kOffset, 0x1000));
+	EXPECT_TRUE(Core::VirtualMemory::IsRangeWritable(base + 0x4000, 0x1000));
+
+	// Three host pages have no CPU access; the fourth page is writable.
+	// All four still refer to consecutive bytes of the same direct mapping.
+	const auto alias = KernelMapPhysicalAlias(base + kOffset, kSpan);
+	EXPECT_NE(alias, 0u);
+	if (alias != 0)
+	{
+		EXPECT_EQ(std::memcmp(reinterpret_cast<const void*>(alias), expected.data(), kSpan), 0);
+		*reinterpret_cast<uint8_t*>(alias) = 0x5au;
+		EXPECT_FALSE(Core::VirtualMemory::IsRangeReadable(base + kOffset, 0x1000));
+		EXPECT_TRUE(Core::VirtualMemory::IsRangeWritable(base + 0x4000, 0x1000));
+		EXPECT_TRUE(KernelUnmapPhysicalAlias(alias));
+		ASSERT_EQ(KernelMprotect(mapping, 0x4000, 0x02), OK);
+		EXPECT_EQ(bytes[kOffset], 0x5au);
+	}
+	EXPECT_EQ(KernelMapPhysicalAlias(base + kOffset, kSize), 0u);
+	EXPECT_EQ(KernelMapPhysicalAlias(base, 0), 0u);
+	EXPECT_EQ(KernelMunmap(base, kSize), OK);
+	EXPECT_EQ(KernelCheckedReleaseDirectMemory(physical, kSize), OK);
 	Config::SetNextGen(false);
 }
 
@@ -1473,12 +1521,14 @@ TEST(EmulatorKernelMemory, CondWaitDiagnosticsStayInactiveWithoutOptIn)
 
 TEST(EmulatorKernelMemory, ThreadDiagnosticsAreUnavailableWithoutPthreadContext)
 {
-	Kernel::PthreadThreadDiagnostics diagnostics {};
-
-	EXPECT_FALSE(Kernel::PthreadGetThreadDiagnostics(&diagnostics));
-	EXPECT_FALSE(diagnostics.available);
-	EXPECT_EQ(diagnostics.allocated_count, 0u);
-	EXPECT_EQ(diagnostics.thread_count, 0u);
+	// The pthread context is process-wide and other suites create it, so the
+	// check runs in a freshly executed (threadsafe death test) process.
+	ASSERT_EXIT(([] {
+		Kernel::PthreadThreadDiagnostics diagnostics {};
+		const bool available = Kernel::PthreadGetThreadDiagnostics(&diagnostics);
+		const bool empty     = !diagnostics.available && diagnostics.allocated_count == 0u && diagnostics.thread_count == 0u;
+		std::_Exit(!available && empty ? 0 : 1);
+	})(), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorKernelMemory, SyncOnAddressReturnsImmediatelyWhenValueDiffers)
@@ -1608,6 +1658,33 @@ TEST(EmulatorKernelMemory, EventFlagRejectsUnregisteredHandles)
 	EXPECT_EQ(KernelDeleteEventFlag(ef), OK);
 	// After delete, same pointer is no longer live.
 	EXPECT_EQ(KernelWaitEventFlag(ef, 1, 0x01, nullptr, nullptr), LibKernel::KERNEL_ERROR_ESRCH);
+}
+
+// A proven scalar-SMEM span of a few dwords must be accepted even when the V#
+// declares hundreds of megabytes. The oversized declaration cannot be used as
+// the mapping query size.
+TEST(EmulatorKernelMemory, QueryMappedRangeAcceptsContainedSmemSpanAndRejectsDeclaredVsharp)
+{
+	EnsureMemorySubsystemInitialized();
+
+	constexpr size_t   kMappingSize    = 0x4000;
+	constexpr uint64_t kSpanOffset     = 0xf0u;
+	constexpr uint64_t kProvenSpan     = 0xd0u;
+	constexpr uint64_t kDeclaredVsharp = 0x2449c574u;
+	void*              mapping         = nullptr;
+	ASSERT_EQ(KernelReserveVirtualRange(&mapping, kMappingSize, 0, kMappingSize), OK);
+	ASSERT_EQ(KernelMapNamedFlexibleMemory(&mapping, kMappingSize, 0x03, 0x10, "smem-span-query"), OK);
+	ASSERT_NE(mapping, nullptr);
+	const auto base = reinterpret_cast<uint64_t>(mapping);
+
+	KernelMappedRange span {};
+	KernelMappedRange declared {};
+	EXPECT_TRUE(KernelQueryMappedRange(base + kSpanOffset, kProvenSpan, &span));
+	EXPECT_EQ(span.base, base);
+	EXPECT_EQ(span.size, kMappingSize);
+	EXPECT_FALSE(KernelQueryMappedRange(base + kSpanOffset, kDeclaredVsharp, &declared));
+
+	EXPECT_EQ(KernelMunmap(base, kMappingSize), OK);
 }
 
 UT_END();

@@ -33,6 +33,9 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-vulkan-headers
+            mingw-w64-x86_64-vulkan-loader
+            mingw-w64-x86_64-spirv-tools
 
       - name: Configure
         shell: msys2 {0}
@@ -57,6 +60,13 @@ jobs:
           Copy-Item build/fc_script.exe dist/
           Copy-Item source/3rdparty/winpthread/bin/libwinpthread-1.dll dist/
           Copy-Item scripts/run_guest.lua,README.md,CHANGELOG.md,LICENSE dist/
+
+      - name: Stage shader toolchain runtime libraries
+        shell: msys2 {0}
+        run: |
+          for library in /mingw64/bin/libSPIRV-Tools*.dll; do
+            if [ -f "$library" ]; then cp "$library" dist/; fi
+          done
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -88,11 +98,18 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build libvulkan-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libasound2-dev libpulse-dev
+          sudo apt-get install -y ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev libasound2-dev libpulse-dev
 
       - name: Install macOS dependencies
         if: runner.os == 'macOS'
         run: brew install ninja
+
+      - name: Build Vulkan 1.4 SDK components
+        uses: humbletim/setup-vulkan-sdk@c25f41106918cde0bf347e6f201277392b3a9e9d # v1.2.1
+        with:
+          vulkan-query-version: 1.4.357.0
+          vulkan-components: Vulkan-Headers, Vulkan-Loader, SPIRV-Headers, SPIRV-Tools
+          vulkan-use-cache: true
 
       - name: Configure
         run: >-
@@ -115,7 +132,8 @@ jobs:
           cp build/fc_script scripts/run_guest.lua README.md CHANGELOG.md LICENSE dist/
           chmod +x dist/fc_script
           if [ "${RUNNER_OS}" = "macOS" ]; then
-            cp source/3rdparty/vulkan/lib/macos/libMoltenVK.dylib dist/
+            cp -L "$VULKAN_SDK/lib/libvulkan.1.dylib" dist/
+            install_name_tool -add_rpath @executable_path dist/fc_script
           fi
 
       - name: Upload artifact

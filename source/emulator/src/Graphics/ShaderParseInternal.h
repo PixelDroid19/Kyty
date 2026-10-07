@@ -30,8 +30,8 @@
 	     type_str, i, opcode, pc, dst->GetHash0(), dst->GetCrc32());
 #define KYTY_UNKNOWN_OP()                                                                                                                  \
 	KYTY_LOG_DEBUG("%s", dst->DbgDump().c_str());                                                                                                  \
-	EXIT("unknown %s opcode: 0x%" PRIx32 " at addr 0x%08" PRIx32 " (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n", type_str,        \
-	     opcode, pc, dst->GetHash0(), dst->GetCrc32());
+	EXIT("unknown %s opcode: 0x%" PRIx32 " at addr 0x%08" PRIx32 " stage=%d (hash0 = 0x%08" PRIx32 ", crc32 = 0x%08" PRIx32 ")\n",         \
+	     type_str, opcode, pc, static_cast<int>(dst->GetType()), dst->GetHash0(), dst->GetCrc32());
 
 namespace Kyty::Libs::Graphics {
 
@@ -46,13 +46,16 @@ KYTY_SHADER_PARSER(shader_parse_vopc);
 KYTY_SHADER_PARSER(shader_parse_vop1);
 KYTY_SHADER_PARSER(shader_parse_vop2);
 KYTY_SHADER_PARSER(shader_parse_vop3);
+KYTY_SHADER_PARSER(shader_parse_vop3p);
 KYTY_SHADER_PARSER(shader_parse_exp);
 KYTY_SHADER_PARSER(shader_parse_smem);
 KYTY_SHADER_PARSER(shader_parse_smrd);
 KYTY_SHADER_PARSER(shader_parse_mubuf);
 KYTY_SHADER_PARSER(shader_parse_ds);
 KYTY_SHADER_PARSER(shader_parse_mimg);
+KYTY_SHADER_PARSER(shader_parse_bvh);
 KYTY_SHADER_PARSER(shader_parse_mtbuf);
+KYTY_SHADER_PARSER(shader_parse_flat);
 KYTY_SHADER_PARSER(shader_parse_vintrp);
 
 } // namespace Kyty::Libs::Graphics

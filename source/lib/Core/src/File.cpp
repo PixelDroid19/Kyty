@@ -11,6 +11,8 @@
 #include "SDL_rwops.h"
 #include "SDL_stdinc.h"
 
+#include <cerrno>
+
 // IWYU pragma: no_include <fileapi.h>
 // IWYU pragma: no_include <windows.h>
 // IWYU pragma: no_include <winbase.h>
@@ -234,14 +236,19 @@ uint64_t File::Tell() const
 	return sys_file_tell(*m_p->f);
 }
 
-void File::Read(void* data, uint32_t size, uint32_t* bytes_read)
+int File::Read(void* data, uint32_t size, uint32_t* bytes_read)
 {
 	EXIT_IF(m_p->f == nullptr);
 
 	if (m_p->f != nullptr)
 	{
-		sys_file_read(data, size, *m_p->f, bytes_read);
+		return sys_file_read(data, size, *m_p->f, bytes_read);
 	}
+	if (bytes_read != nullptr)
+	{
+		*bytes_read = 0;
+	}
+	return EBADF;
 }
 
 void File::Write(const void* data, uint32_t size, uint32_t* bytes_written)

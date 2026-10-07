@@ -52,11 +52,30 @@ struct PthreadMutexPrivate
 	uint8_t         reserved[256];
 	String          name;
 	pthread_mutex_t p;
-	std::mutex      state_mutex;
-	pthread_t       owner {};
-	uint32_t        recursion_count = 0;
-	int             type            = MUTEX_TYPE_ERRORCHECK;
+	// Written only by the owning thread (after acquiring p, before releasing
+	// it). Any thread may compare owner with itself: the answer is exact
+	// because no other thread ever stores the caller's id.
+	std::atomic<pthread_t> owner {};
+	uint32_t               recursion_count = 0;
+	int                    type            = MUTEX_TYPE_ERRORCHECK;
 };
+
+inline bool PthreadMutexHeldByCaller(const PthreadMutexPrivate* mutex)
+{
+	return pthread_equal(mutex->owner.load(std::memory_order_relaxed), pthread_self()) != 0 && mutex->recursion_count != 0;
+}
+
+inline void PthreadMutexTakeOwnership(PthreadMutexPrivate* mutex)
+{
+	mutex->recursion_count = 1;
+	mutex->owner.store(pthread_self(), std::memory_order_relaxed);
+}
+
+inline void PthreadMutexDropOwnership(PthreadMutexPrivate* mutex)
+{
+	mutex->owner.store(pthread_t {}, std::memory_order_relaxed);
+	mutex->recursion_count = 0;
+}
 
 struct PthreadMutexattrPrivate
 {
@@ -99,6 +118,11 @@ struct PthreadPrivate
 	std::atomic_int      guest_priority {700};
 	uint64_t             guest_stack_base = 0;
 	uint64_t             guest_stack_size = 0;
+	// The HLE wait the thread is blocked in (see PthreadWaitScope).
+	std::atomic_uint8_t  wait_kind {0};
+	std::atomic_uint64_t wait_object {0};
+	std::atomic_uint64_t wait_return {0};
+	std::atomic_uint64_t wait_callers[PthreadWaitScope::kCallers] {};
 };
 
 struct PthreadRwlockPrivate
@@ -256,6 +280,10 @@ private:
 };
 
 extern thread_local Pthread g_pthread_self;
+extern Pthread              g_pthread_main;
+
+// Copies a thread's lifecycle and current HLE wait into a diagnostics entry.
+void PthreadSnapshotDiagnostic(const PthreadPrivate* thread, PthreadThreadDiagnostic* snapshot);
 extern thread_local bool    g_pthread_key_destructors_active;
 extern PThreadContext*      g_pthread_context;
 

@@ -59,7 +59,6 @@ target_link_libraries(unit_test math)
 target_link_libraries(unit_test kyty_devtools_core)
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/devtools/include")
 target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/emulator/include")
-target_include_directories(unit_test PRIVATE "${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include")
 
 #target_include_directories(unit_test PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 

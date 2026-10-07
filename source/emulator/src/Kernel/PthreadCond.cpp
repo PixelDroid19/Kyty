@@ -347,6 +347,12 @@ bool PthreadGetThreadDiagnostics(PthreadThreadDiagnostics* out)
 	}
 
 	out->available = true;
+	if (g_pthread_main != nullptr)
+	{
+		auto& main = out->threads[out->thread_count++];
+		PthreadSnapshotDiagnostic(g_pthread_main, &main);
+		main.main = true;
+	}
 	pthread_pool->GetDiagnostics(out);
 	return true;
 }
@@ -525,14 +531,15 @@ int KYTY_SYSV_ABI PthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr
 		attr = g_pthread_context->GetDefaultCondattr();
 	}
 
-	*cond = new PthreadCondPrivate {};
+	// Publish the handle only once the object is complete (see PthreadMutexInit).
+	auto* created     = new PthreadCondPrivate {};
+	created->name     = name;
+	created->clock_id = (*attr)->clock_id;
 
-	(*cond)->name     = name;
-	(*cond)->clock_id = (*attr)->clock_id;
+	int result = pthread_cond_init(&created->p, &(*attr)->p);
 
-	int result = pthread_cond_init(&(*cond)->p, &(*attr)->p);
-
-	KYTY_LOG_DEBUG("\tcond init: %s, %d\n", (*cond)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tcond init: %s, %d\n", created->name.C_Str(), result);
+	__atomic_store_n(cond, created, __ATOMIC_RELEASE);
 
 	switch (result)
 	{
@@ -603,9 +610,7 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
 
 static int pthread_cond_release_mutex_state(PthreadMutexPrivate* mutex)
 {
-	std::lock_guard lock(mutex->state_mutex);
-
-	if (mutex->recursion_count == 0 || pthread_equal(mutex->owner, pthread_self()) == 0)
+	if (!PthreadMutexHeldByCaller(mutex))
 	{
 		return EPERM;
 	}
@@ -614,16 +619,13 @@ static int pthread_cond_release_mutex_state(PthreadMutexPrivate* mutex)
 		return EINVAL;
 	}
 
-	mutex->owner           = {};
-	mutex->recursion_count = 0;
+	PthreadMutexDropOwnership(mutex);
 	return 0;
 }
 
 static void pthread_cond_restore_mutex_state(PthreadMutexPrivate* mutex)
 {
-	std::lock_guard lock(mutex->state_mutex);
-	mutex->owner           = pthread_self();
-	mutex->recursion_count = 1;
+	PthreadMutexTakeOwnership(mutex);
 }
 
 struct ResolvedCondWait
@@ -678,6 +680,7 @@ static int wait_on_resolved_cond(const ResolvedCondWait& resolved, const timespe
 int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::Cond, cond);
 
 	ResolvedCondWait resolved {};
 	const int        resolve_result = resolve_cond_wait(cond, mutex, &resolved);
@@ -698,6 +701,7 @@ int KYTY_SYSV_ABI PthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, K
 int KYTY_SYSV_ABI PthreadCondTimedwaitAbsolute(PthreadCond* cond, PthreadMutex* mutex, const KernelTimespec* abstime)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::Cond, cond);
 
 	ResolvedCondWait resolved {};
 	const int        resolve_result = resolve_cond_wait(cond, mutex, &resolved);
@@ -773,6 +777,7 @@ int KYTY_SYSV_ABI PthreadOnce(int* once_control, void (*init_routine)(void))
 int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 {
 	PRINT_NAME();
+	KYTY_GUEST_WAIT(PthreadWaitKind::Cond, cond);
 
 	EXIT_IF(g_pthread_context == nullptr);
 

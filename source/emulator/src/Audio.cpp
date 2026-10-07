@@ -146,7 +146,12 @@ int KYTY_SYSV_ABI AudioOutOpen(int user_id, int type, int index, uint32_t len, u
 
 	KYTY_LOG_DEBUG("\t param   = %u (%s)\n", param, Core::EnumName(format).C_Str());
 
-	if (format == HostAudio::Format::Unknown) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	// The host layer refuses an unknown format as well; report it as the format error it is
+	// instead of a full port table.
+	if (format == HostAudio::Format::Unknown)
+	{
+		return AUDIO_OUT_ERROR_INVALID_FORMAT;
+	}
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr)
@@ -189,7 +194,10 @@ int KYTY_SYSV_ABI AudioOutGetPortState(int handle, AudioOutPortState* state)
 		return AUDIO_OUT_ERROR_INVALID_PORT;
 	}
 
-	if (state == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (state == nullptr)
+	{
+		return AUDIO_OUT_ERROR_INVALID_POINTER;
+	}
 
 	state->reroute_counter = 0;
 	state->volume          = 127;
@@ -230,7 +238,10 @@ int KYTY_SYSV_ABI AudioOutSetVolume(int handle, uint32_t flag, int* vol)
 	KYTY_LOG_DEBUG("\t handle = %d\n", handle);
 	KYTY_LOG_DEBUG("\t flag   = %u\n", flag);
 
-	if (vol == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
+	if (vol == nullptr)
+	{
+		return AUDIO_OUT_ERROR_INVALID_POINTER;
+	}
 
 	auto audio = std::atomic_load(&g_host_audio);
 	if (audio == nullptr || !audio->AudioOutSetVolume(HostAudio::Id(handle), flag, vol))
@@ -302,14 +313,16 @@ LIB_NAME("AudioOut2", "AudioOut");
 // Host-side AudioOut2 object table. Guest receives opaque positive handles.
 // Contracts reimplemented from public Gen5 export names and live-observed
 // parameter layouts and call order: PortSetAttributes → Advance → Push.
-constexpr int32_t  kMaxContexts         = 8;
-constexpr int32_t  kMaxPorts            = 32;
-constexpr int32_t  kMaxUsers            = 8;
-constexpr uint64_t kDefaultContextBytes = 0x10000;
-constexpr size_t   kContextParamBytes   = 0x40;
-constexpr uint32_t kDefaultQueueDepth   = 4;
-constexpr uint32_t kDefaultGrain        = 256;
-constexpr uint32_t kDefaultSampleRate   = 48000;
+constexpr int32_t kMaxContexts = 8;
+constexpr int32_t kMaxPorts    = 32;
+constexpr int32_t kMaxUsers    = 8;
+// Shared opaque workspace reservation for the host-backed implementation.
+// This is an HLE policy, not the native workspace layout/size for every profile.
+constexpr uint64_t kHleContextWorkspaceBytes = 0x10000;
+constexpr size_t   kContextParamBytes        = 0x40;
+constexpr uint32_t kDefaultQueueDepth        = 4;
+constexpr uint32_t kDefaultGrain             = 256;
+constexpr uint32_t kDefaultSampleRate        = 48000;
 // Port flag bit 1 reserves ~20 dB of digital headroom for platform mastering;
 // restore it at the host boundary so MAIN beds are not 10× quieter.
 constexpr uint32_t kPortFlag20DbHeadroom = 1u << 1;
@@ -466,18 +479,35 @@ static bool CopyToGuest(void* destination, const void* source, size_t size)
 	       Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
 }
 
-static bool ReadSupportedContextParam(const void* param)
+struct CapturedContextProfile
+{
+	std::array<uint64_t, kContextParamBytes / sizeof(uint64_t)> parameters;
+	uint32_t                                                    frames_per_submission;
+};
+
+static const CapturedContextProfile* ReadSupportedContextParam(const void* param)
 {
 	std::array<uint64_t, kContextParamBytes / sizeof(uint64_t)> words {};
 	if (!CopyFromGuest(words.data(), param, sizeof(words)))
 	{
-		return false;
+		return nullptr;
 	}
-	// Live Gen5 call-site evidence establishes this 0x40-byte profile. Keep the
-	// remainder zero and reject other layouts until they are independently
-	// measured instead of guessing their workspace contract.
-	return words[0] == 0x0000008000000012ull && words[1] == 0x0000000100000000ull && words[2] == 0x0000000100000100ull &&
-	       std::all_of(words.begin() + 3, words.end(), [](uint64_t word) { return word == 0; });
+	// Match complete live-observed parameter blocks, including their zero tail.
+	// The headers remain opaque; do not infer generic ranges from these values.
+	// The 512-frame producer/consumer trace establishes the PCM count and stride
+	// corresponding to the 32-bit input at +0x10 in the second configuration.
+	static constexpr CapturedContextProfile profiles[] = {
+	    {{0x0000008000000012ull, 0x0000000100000000ull, 0x0000000100000100ull}, 256},
+	    {{0x0000020000000014ull, 0x0000000100000000ull, 0x0000000100000200ull}, 512},
+	};
+	for (const auto& profile: profiles)
+	{
+		if (words == profile.parameters)
+		{
+			return &profile;
+		}
+	}
+	return nullptr;
 }
 
 static bool CalculatePcmGrainBytes(uint32_t grain, uint32_t channels, uint32_t sample_bytes, size_t* bytes_out)
@@ -643,7 +673,7 @@ int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
-	const uint64_t required_size = kDefaultContextBytes;
+	const uint64_t required_size = kHleContextWorkspaceBytes;
 	return CopyToGuest(size_out, &required_size, sizeof(required_size)) ? OK : LibKernel::KERNEL_ERROR_EINVAL;
 }
 
@@ -655,7 +685,8 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	KYTY_LOG_DEBUG("\t buffer     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
 	KYTY_LOG_DEBUG("\t size       = 0x%016" PRIx64 "\n", size);
 	KYTY_LOG_DEBUG("\t handle_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handle_out));
-	if (!ReadSupportedContextParam(param) || size != kDefaultContextBytes || !IsGuestWritableRange(buffer, static_cast<size_t>(size)) ||
+	const auto* profile = ReadSupportedContextParam(param);
+	if (profile == nullptr || size != kHleContextWorkspaceBytes || !IsGuestWritableRange(buffer, static_cast<size_t>(size)) ||
 	    !IsGuestWritableRange(handle_out, sizeof(*handle_out)))
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
@@ -669,6 +700,7 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	}
 	g_contexts[id - 1].buffer = buffer;
 	g_contexts[id - 1].size   = size;
+	g_contexts[id - 1].grain  = profile->frames_per_submission;
 	if (!CopyToGuest(handle_out, &id, sizeof(id)))
 	{
 		g_contexts[id - 1] = ContextSlot {};
@@ -777,8 +809,11 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 	const uint32_t grain = (ctx.grain >= 64 && ctx.grain <= 4096) ? ctx.grain : kDefaultGrain;
 	const uint32_t sample_rate = ctx.sample_rate != 0 ? ctx.sample_rate : kDefaultSampleRate;
 	const uint32_t queue_depth = ctx.queue_depth != 0 ? ctx.queue_depth : kDefaultQueueDepth;
+	const auto grain_duration =
+	    std::chrono::nanoseconds(static_cast<int64_t>(grain) * 1'000'000'000LL / static_cast<int64_t>(sample_rate));
 
 	// Blocking-when-full: wait one grain when the emulated queue is saturated.
+	bool waited_for_queue = false;
 	while (ctx.queue_used >= queue_depth)
 	{
 		if (blocking == 0)
@@ -786,9 +821,8 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 			return AUDIO_OUT_ERROR_PORT_FULL;
 		}
 		lock.unlock();
-		const auto ns = std::chrono::nanoseconds(static_cast<int64_t>(grain) * 1'000'000'000LL /
-		                                         static_cast<int64_t>(sample_rate));
-		std::this_thread::sleep_for(ns);
+		std::this_thread::sleep_for(grain_duration);
+		waited_for_queue = true;
 		lock.lock();
 		if (!ctx.used || ctx.generation != context_generation)
 		{
@@ -840,6 +874,18 @@ int KYTY_SYSV_ABI AudioOut2ContextPush(int32_t handle, uint32_t blocking)
 
 	if (consumed_ports.empty())
 	{
+		// With no PCM to submit, a blocking push still advances one output grain.
+		// Otherwise a silent feeder can spin without a hardware queue or sink.
+		if (blocking != 0 && !waited_for_queue)
+		{
+			lock.unlock();
+			std::this_thread::sleep_for(grain_duration);
+			lock.lock();
+			if (!ctx.used || ctx.generation != context_generation)
+			{
+				return LibKernel::KERNEL_ERROR_EINVAL;
+			}
+		}
 		return OK;
 	}
 	// Keeping the context lock through submission prevents close/recreate from
@@ -1131,6 +1177,53 @@ int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user)
 	}
 	g_users[user - 1] = UserSlot {};
 	return OK;
+}
+
+// sceAudioOut2GetSpeakerInfo output record. The 0x50-byte layout is
+// corroborated by two independent HLE implementations (type @0,
+// available_bits @4, flags @8, then 16 {azimuth, elevation} int16 pairs at
+// @0x10) and by call-site usage of this title: one caller reads the type
+// byte and normalizes it to 0/1/2, another reads bit 0 of available_bits
+// per channel, and a third consumes the azimuth pairs. The observed caller
+// keeps the record on its stack and ignores the return value.
+struct SpeakerAngle
+{
+	int16_t azimuth;
+	int16_t elevation;
+};
+
+struct SpeakerInfo
+{
+	uint8_t      type;
+	uint8_t      reserved1;
+	uint16_t     reserved2;
+	uint32_t     available_bits;
+	uint32_t     flags;
+	uint32_t     reserved3;
+	SpeakerAngle speaker_angle[16];
+};
+static_assert(sizeof(SpeakerInfo) == 0x50);
+
+// sceAudioOut2GetSpeakerInfo (NID DImz2Ft9E2g): (info_out, selector).
+// Observed callers pass selector values 0 and 1 against the same single
+// host output, so both describe the same stereo record.
+int KYTY_SYSV_ABI AudioOut2GetSpeakerInfo(void* info, uint32_t flags)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t info  = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(info));
+	KYTY_LOG_DEBUG("\t flags = 0x%08" PRIx32 "\n", flags);
+	if (!IsGuestWritableRange(info, sizeof(SpeakerInfo)))
+	{
+		return LibKernel::KERNEL_ERROR_EINVAL;
+	}
+	// Host stereo output: channels 0/1 report available (available_bits
+	// 0x3), azimuth +30/-30 as in the guest's own six-channel fallback table;
+	// every other field stays zero and nothing past 0x50 bytes is written.
+	SpeakerInfo out {};
+	out.available_bits           = 0x3;
+	out.speaker_angle[0].azimuth = 30;
+	out.speaker_angle[1].azimuth = -30;
+	return CopyToGuest(info, &out, sizeof(out)) ? OK : LibKernel::KERNEL_ERROR_EINVAL;
 }
 
 } // namespace AudioOut2

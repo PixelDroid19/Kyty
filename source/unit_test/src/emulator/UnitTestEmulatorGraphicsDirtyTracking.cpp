@@ -3,12 +3,20 @@
 
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/VideoFrameMemory.h"
 
+#include <array>
 #include <atomic>
+#include <cerrno>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <thread>
 #include <vector>
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#include <unistd.h>
+#endif
 
 UT_BEGIN(EmulatorGraphicsDirtyTracking);
 
@@ -30,6 +38,35 @@ using Kyty::Libs::Graphics::GpuMemoryCheckAccessViolation;
 using Kyty::Libs::Graphics::GpuMemoryNotifyHostWrite;
 
 namespace {
+
+GpuDirtyPageTracker* g_host_write_tracker = nullptr;
+
+struct HostWriteCallbacks
+{
+	bool installed = false;
+	explicit HostWriteCallbacks(GpuDirtyPageTracker* tracker)
+	{
+		g_host_write_tracker = tracker;
+		installed = Kyty::Emulator::VideoFrameMemory::InstallCallbacks({
+		    [](uint64_t, size_t, uint32_t) {}, [](uint64_t) {},
+		    [](uint64_t address, uint64_t size) { (void)g_host_write_tracker->NotifyWrite(address, size); },
+		    [](uint64_t address, uint64_t size)
+		    {
+			    errno = ERANGE;
+			    return g_host_write_tracker->BeginHostWrite(address, size);
+		    },
+		    [](uint64_t token)
+		    {
+			    g_host_write_tracker->EndHostWrite(token);
+			    errno = ERANGE;
+		    }});
+	}
+	~HostWriteCallbacks()
+	{
+		(void)Kyty::Emulator::VideoFrameMemory::InstallCallbacks({});
+		g_host_write_tracker = nullptr;
+	}
+};
 
 TEST(EmulatorGraphicsDirtyTracking, ArmingWindowIsHandledAsTrackerFault)
 {
@@ -732,6 +769,32 @@ TEST(EmulatorGraphicsDirtyTracking, HostNotificationMarksEveryOverlappingPage)
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
 }
 
+// Partial uploads copy only the pages whose generation moved: a write must
+// move exactly the pages it touched, a fault included, and nothing else.
+TEST(EmulatorGraphicsDirtyTracking, PageGenerationsMoveOnlyForWrittenPages)
+{
+	Mapping mapping(4u);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page = GetPageSize();
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.PrepareForRead(mapping.address, mapping.size));
+	ASSERT_EQ(tracker.PageCount(mapping.address + 1u, page), 2u);
+	std::array<uint64_t, 4> before {};
+	ASSERT_TRUE(tracker.PageGenerations(mapping.address, mapping.size, before.data(), before.size()));
+	EXPECT_FALSE(tracker.PageGenerations(mapping.address, mapping.size, before.data(), before.size() - 1u));
+
+	(void)tracker.NotifyWrite(mapping.address + page + 8u, 4u);
+	ASSERT_TRUE(tracker.HandleWriteFault(mapping.address + page * 3u));
+	std::array<uint64_t, 4> after {};
+	ASSERT_TRUE(tracker.PageGenerations(mapping.address, mapping.size, after.data(), after.size()));
+	EXPECT_EQ(after[0], before[0]);
+	EXPECT_NE(after[1], before[1]);
+	EXPECT_EQ(after[2], before[2]);
+	EXPECT_NE(after[3], before[3]);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
 TEST(EmulatorGraphicsDirtyTracking, OverlappingRangesShareGenerationEvidence)
 {
 	Mapping mapping;
@@ -996,6 +1059,319 @@ TEST(EmulatorGraphicsDirtyTracking, InvalidRangeFallsBack)
 	EXPECT_FALSE(tracker.RegisterRange(0, 1));
 	EXPECT_EQ(tracker.Mode(0, 1), GpuDirtyTrackingMode::HashFallback);
 }
+
+TEST(EmulatorGraphicsDirtyTracking, HostWriteLeaseBlocksDisjointBytesOnSharedPage)
+{
+	Mapping mapping(2);
+	ASSERT_NE(mapping.address, 0u);
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, 64));
+	const auto before = tracker.BeginRead(mapping.address, 64);
+	ASSERT_TRUE(before.tracked);
+	const auto lease = tracker.BeginHostWrite(mapping.address + 128, mapping.size - 128);
+	ASSERT_NE(lease, 0u);
+	EXPECT_FALSE(tracker.BeginRead(mapping.address, 64).tracked);
+	EXPECT_FALSE(tracker.ReadObservationIsStable(mapping.address, 64, before));
+	std::memset(reinterpret_cast<void*>(mapping.address + 128), 0x5a, mapping.size - 128);
+	tracker.EndHostWrite(lease);
+	const auto after = tracker.BeginRead(mapping.address, 64);
+	EXPECT_TRUE(after.tracked);
+	EXPECT_GT(after.generation, before.generation);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, 64));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, HostWriteLeaseCoversNewRegistrationsAndNestedPageSpans)
+{
+	Mapping mapping(3);
+	ASSERT_NE(mapping.address, 0u);
+	GpuDirtyPageTracker tracker;
+	const auto first = tracker.BeginHostWrite(mapping.address + 64, GetPageSize());
+	const auto nested = tracker.BeginHostWrite(mapping.address + 128, GetPageSize());
+	const auto overlap = tracker.BeginHostWrite(mapping.address + GetPageSize() + 64, GetPageSize());
+	ASSERT_NE(first, 0u);
+	ASSERT_EQ(nested, first);
+	ASSERT_NE(overlap, first);
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	EXPECT_FALSE(tracker.BeginRead(mapping.address, mapping.size).tracked);
+	tracker.EndHostWrite(first);
+	EXPECT_FALSE(tracker.Rearm(mapping.address, GetPageSize()));
+	tracker.EndHostWrite(nested);
+	EXPECT_TRUE(tracker.Rearm(mapping.address, GetPageSize()));
+	EXPECT_FALSE(tracker.Rearm(mapping.address + GetPageSize(), GetPageSize()));
+	tracker.EndHostWrite(overlap);
+	EXPECT_TRUE(tracker.BeginRead(mapping.address, mapping.size).tracked);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, HostWriteLeaseWaitsForNativeRearmCommit)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	FakeProtection protection(mapping.address, GetPageSize(), {Mode::ReadWrite});
+	GpuDirtyPageTracker tracker(protection.Ops());
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	ASSERT_TRUE(tracker.NotifyWrite(mapping.address, 1));
+	protection.block_next_protect.store(true);
+	std::thread rearm([&] { (void)tracker.Rearm(mapping.address, mapping.size); });
+	while (!protection.protect_entered.load()) { std::this_thread::yield(); }
+	uint64_t token = 0;
+	std::thread writer([&] { token = tracker.BeginHostWrite(mapping.address + 128, 64); });
+	// The native protection call is held at its commit boundary. The lease
+	// must restore its result before acquisition returns, in either schedule.
+	protection.release_protect.store(true);
+	rearm.join();
+	writer.join();
+	ASSERT_NE(token, 0u);
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_FALSE(tracker.Rearm(mapping.address, 64));
+	tracker.EndHostWrite(token);
+	EXPECT_TRUE(tracker.Rearm(mapping.address, 64));
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, HostWriteLeaseDisabledAndEmptyRangesAreNoOps)
+{
+	GpuDirtyPageTracker disabled(false);
+	EXPECT_EQ(disabled.BeginHostWrite(1, 1), 0u);
+	disabled.EndHostWrite(0);
+	GpuDirtyPageTracker enabled;
+	EXPECT_EQ(enabled.BeginHostWrite(0, 1), 0u);
+	EXPECT_EQ(enabled.BeginHostWrite(1, 0), 0u);
+	EXPECT_EQ(enabled.BeginHostWrite(UINTPTR_MAX - 1, 4), 0u);
+}
+
+TEST(EmulatorGraphicsDirtyTracking, WideNotifyWritePreservesSparsePageEffectsAndSpanBoundaries)
+{
+	Mapping mapping(3);
+	ASSERT_NE(mapping.address, 0u);
+	const uintptr_t page_size = GetPageSize();
+	const size_t huge = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+	const uintptr_t start = mapping.address + page_size + 128;
+	ASSERT_LE(start, UINTPTR_MAX - huge);
+	ASSERT_LT(mapping.address + mapping.size, static_cast<uintptr_t>(huge) + 1u);
+	FakeProtection protection(mapping.address, page_size, {Mode::ReadWrite, Mode::ExecuteReadWrite, Mode::ReadWrite});
+	GpuDirtyPageTracker tracker(protection.Ops());
+	const uintptr_t watched[] = {mapping.address, mapping.address + page_size, mapping.address + page_size + 512,
+	                             mapping.address + 2 * page_size};
+	for (const auto address: watched)
+	{
+		ASSERT_TRUE(tracker.RegisterRange(address, 64));
+		ASSERT_TRUE(tracker.BeginRead(address, 64).tracked);
+	}
+	const auto outside_generation = tracker.SnapshotGeneration(watched[0], 64);
+
+	// The I/O bytes begin after the first watched resource on page 1. Both
+	// resources on that page must be dirtied/restored; page 0 remains protected.
+	ASSERT_TRUE(tracker.NotifyWrite(start, huge));
+	EXPECT_EQ(protection.current_modes[0], Mode::Read);
+	EXPECT_EQ(protection.current_modes[1], Mode::ExecuteReadWrite);
+	EXPECT_EQ(protection.current_modes[2], Mode::ReadWrite);
+	EXPECT_EQ(protection.signal_safe_calls, 2u);
+	EXPECT_EQ(tracker.SnapshotGeneration(watched[0], 64), outside_generation);
+	for (size_t i = 1; i < 4; ++i) { EXPECT_GT(tracker.SnapshotGeneration(watched[i], 64), 0u); }
+
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	// All watched pages are far from this span's start. Limiting notifications
+	// to a prefix would return quickly but lose the actual permission effects.
+	ASSERT_TRUE(tracker.NotifyWrite(1, huge));
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_EQ(protection.current_modes[1], Mode::ExecuteReadWrite);
+	EXPECT_EQ(protection.current_modes[2], Mode::ReadWrite);
+	EXPECT_EQ(protection.signal_safe_calls, 5u);
+	EXPECT_GT(tracker.SnapshotGeneration(watched[0], 64), outside_generation);
+	for (const auto address: watched) { EXPECT_TRUE(tracker.UnregisterRange(address, 64)); }
+}
+
+TEST(EmulatorGraphicsDirtyTracking, WideHostWriteLeaseCoversLateRegistrationAndNestedSpans)
+{
+	Mapping mapping(4);
+	ASSERT_NE(mapping.address, 0u);
+	const uintptr_t page_size = GetPageSize();
+	const size_t huge = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+	const uintptr_t overlapping_start = mapping.address + page_size + 128;
+	ASSERT_LE(overlapping_start, UINTPTR_MAX - huge);
+	ASSERT_LT(mapping.address + mapping.size, static_cast<uintptr_t>(huge) + 1u);
+	FakeProtection protection(mapping.address, page_size, std::vector<Mode>(4, Mode::ReadWrite));
+	GpuDirtyPageTracker tracker(protection.Ops());
+	const uintptr_t late = mapping.address + 2 * page_size;
+	const uintptr_t last = mapping.address + 3 * page_size;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, 64));
+	ASSERT_TRUE(tracker.RegisterRange(last, 64));
+	ASSERT_TRUE(tracker.BeginRead(mapping.address, 64).tracked);
+	ASSERT_TRUE(tracker.BeginRead(last, 64).tracked);
+	const auto first = tracker.BeginHostWrite(1, huge);
+	const auto nested = tracker.BeginHostWrite(1, huge);
+	const auto overlap = tracker.BeginHostWrite(overlapping_start, huge);
+	ASSERT_NE(first, 0u);
+	EXPECT_EQ(first, nested);
+	EXPECT_NE(first, overlap);
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_EQ(protection.current_modes[3], Mode::ReadWrite);
+	ASSERT_TRUE(tracker.RegisterRange(late, 64));
+	EXPECT_FALSE(tracker.BeginRead(late, 64).tracked);
+	EXPECT_EQ(tracker.SnapshotGeneration(late, 64), 0u);
+	EXPECT_EQ(protection.current_modes[2], Mode::ReadWrite);
+
+	tracker.EndHostWrite(first);
+	// Completion must still visit a newly registered page even though the
+	// original byte address rounded down to page zero and another lease remains.
+	const auto first_completion = tracker.SnapshotGeneration(late, 64);
+	EXPECT_GT(first_completion, 0u);
+	EXPECT_FALSE(tracker.BeginRead(mapping.address, 64).tracked);
+	EXPECT_FALSE(tracker.BeginRead(late, 64).tracked);
+	tracker.EndHostWrite(nested);
+	EXPECT_GT(tracker.SnapshotGeneration(late, 64), first_completion);
+	const auto outside = tracker.BeginRead(mapping.address, 64);
+	EXPECT_TRUE(outside.tracked);
+	EXPECT_FALSE(tracker.BeginRead(late, 64).tracked);
+	const auto before_last_completion = tracker.SnapshotGeneration(late, 64);
+	tracker.EndHostWrite(overlap);
+	EXPECT_GT(tracker.SnapshotGeneration(late, 64), before_last_completion);
+	EXPECT_TRUE(tracker.ReadObservationIsStable(mapping.address, 64, outside));
+	EXPECT_TRUE(tracker.BeginRead(late, 64).tracked);
+	EXPECT_TRUE(tracker.BeginRead(last, 64).tracked);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, 64));
+	EXPECT_TRUE(tracker.UnregisterRange(late, 64));
+	EXPECT_TRUE(tracker.UnregisterRange(last, 64));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, WideNotifyWriteRetainsNativeArmingRollbackHandshake)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	const size_t huge = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+	ASSERT_LT(mapping.address + mapping.size, static_cast<uintptr_t>(huge) + 1u);
+	FakeProtection protection(mapping.address, GetPageSize(), {Mode::ReadWrite});
+	GpuDirtyPageTracker tracker(protection.Ops());
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, 64));
+	ASSERT_TRUE(tracker.BeginRead(mapping.address, 64).tracked);
+	ASSERT_TRUE(tracker.NotifyWrite(mapping.address, 64));
+	const auto before = tracker.SnapshotGeneration(mapping.address, 64);
+	const auto restores_before = protection.signal_safe_calls;
+	protection.block_next_protect.store(true);
+	std::thread rearm([&] { (void)tracker.Rearm(mapping.address, 64); });
+	while (!protection.protect_entered.load()) { std::this_thread::yield(); }
+	// The native protect is paused while holding the registration mutex. The
+	// wide notification must not take that mutex or wait for this rearm to end.
+	EXPECT_TRUE(tracker.NotifyWrite(1, huge));
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_GT(tracker.SnapshotGeneration(mapping.address, 64), before);
+	protection.release_protect.store(true);
+	rearm.join();
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_EQ(protection.signal_safe_calls, restores_before + 2u);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, 64));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, WideHostWriteLeaseAtAddressLimitDoesNotWrap)
+{
+	const uintptr_t page_size = GetPageSize();
+	const uintptr_t last_page = UINTPTR_MAX - page_size + 1u;
+	const uintptr_t start = UINTPTR_MAX / 2u + 1u;
+	const size_t huge = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+	ASSERT_EQ(start + huge, UINTPTR_MAX);
+	// Only one fake protection page and the fixed tracker metadata are needed;
+	// the large virtual request is never mapped, allocated or dereferenced.
+	FakeProtection protection(last_page, page_size, {Mode::ReadWrite});
+	GpuDirtyPageTracker tracker(protection.Ops());
+	ASSERT_TRUE(tracker.RegisterRange(last_page, page_size - 1u));
+	ASSERT_TRUE(tracker.BeginRead(last_page, page_size - 1u).tracked);
+	const auto lease = tracker.BeginHostWrite(start, huge);
+	ASSERT_NE(lease, 0u);
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_FALSE(tracker.BeginRead(last_page, page_size - 1u).tracked);
+	const auto before_end = tracker.SnapshotGeneration(last_page, page_size - 1u);
+	tracker.EndHostWrite(lease);
+	EXPECT_GT(tracker.SnapshotGeneration(last_page, page_size - 1u), before_end);
+	EXPECT_EQ(protection.signal_safe_calls, 1u);
+	EXPECT_TRUE(tracker.BeginRead(last_page, page_size - 1u).tracked);
+	EXPECT_TRUE(tracker.UnregisterRange(last_page, page_size - 1u));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, HostWriteLeaseScopePreservesErrnoAndPairedCallbackIdentity)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	GpuDirtyPageTracker tracker;
+	HostWriteCallbacks callbacks(&tracker);
+	ASSERT_TRUE(callbacks.installed);
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, 64));
+	errno = EDOM;
+	{
+		const Kyty::Emulator::VideoFrameMemory::HostWriteLease lease(mapping.address + 128, 64);
+		EXPECT_EQ(errno, EDOM);
+		EXPECT_FALSE(tracker.Rearm(mapping.address, 64));
+		// Completion uses the captured end callback even if dispatch is replaced
+		// during a blocking operation. A removed bundle must not leak the lease.
+		EXPECT_TRUE(Kyty::Emulator::VideoFrameMemory::InstallCallbacks({}));
+		errno = EIO;
+	}
+	EXPECT_EQ(errno, EIO);
+	EXPECT_TRUE(tracker.Rearm(mapping.address, 64));
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, 64));
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+TEST(EmulatorGraphicsDirtyTracking, WideHostWriteLeaseReachesHostErrorWithoutAllocatingRequestedSpan)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	const size_t huge = static_cast<size_t>(std::numeric_limits<int64_t>::max());
+	ASSERT_LE(mapping.address + 128, UINTPTR_MAX - huge);
+	GpuDirtyPageTracker tracker;
+	HostWriteCallbacks callbacks(&tracker);
+	ASSERT_TRUE(callbacks.installed);
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, 64));
+	const auto before = tracker.BeginRead(mapping.address, 64);
+	ASSERT_TRUE(before.tracked);
+	{
+		const Kyty::Emulator::VideoFrameMemory::HostWriteLease lease(mapping.address + 128, huge);
+		EXPECT_FALSE(tracker.BeginRead(mapping.address, 64).tracked);
+		// The host decides the actual transfer result. The lease neither walks
+		// nor allocates the requested span, and it must let this syscall execute.
+		errno = 0;
+		EXPECT_EQ(::read(-1, reinterpret_cast<void*>(mapping.address + 128), huge), -1);
+		EXPECT_EQ(errno, EBADF);
+	}
+	EXPECT_EQ(errno, EBADF);
+	const auto after = tracker.BeginRead(mapping.address, 64);
+	EXPECT_TRUE(after.tracked);
+	EXPECT_GT(after.generation, before.generation);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, 64));
+}
+
+TEST(EmulatorGraphicsDirtyTracking, HostWriteLeaseAllowsDirectKernelCopyAndReleasesOnShortReadAndError)
+{
+	Mapping mapping(2);
+	ASSERT_NE(mapping.address, 0u);
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, 64));
+	ASSERT_TRUE(tracker.BeginRead(mapping.address, 64).tracked);
+	HostWriteCallbacks callbacks(&tracker);
+	ASSERT_TRUE(callbacks.installed);
+	int descriptors[2] {};
+	ASSERT_EQ(::pipe(descriptors), 0);
+	const char payload[] = "direct kernel copy";
+	EXPECT_EQ(::write(descriptors[1], payload, sizeof(payload)), static_cast<ssize_t>(sizeof(payload)));
+	EXPECT_EQ(::close(descriptors[1]), 0);
+	{
+		const Kyty::Emulator::VideoFrameMemory::HostWriteLease lease(mapping.address + 128, mapping.size - 128);
+		EXPECT_FALSE(tracker.BeginRead(mapping.address, 64).tracked);
+		EXPECT_EQ(::read(descriptors[0], reinterpret_cast<void*>(mapping.address + 128), mapping.size - 128),
+		          static_cast<ssize_t>(sizeof(payload)));
+		EXPECT_EQ(std::memcmp(reinterpret_cast<void*>(mapping.address + 128), payload, sizeof(payload)), 0);
+		EXPECT_EQ(::read(descriptors[0], reinterpret_cast<void*>(mapping.address + 128), mapping.size - 128), 0);
+		EXPECT_EQ(::close(descriptors[0]), 0);
+		errno = 0;
+		EXPECT_EQ(::read(-1, reinterpret_cast<void*>(mapping.address + 128), 64), -1);
+		EXPECT_EQ(errno, EBADF);
+	}
+	EXPECT_EQ(errno, EBADF);
+	EXPECT_TRUE(tracker.BeginRead(mapping.address, 64).tracked);
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, 64));
+}
+#endif
 
 TEST(EmulatorGraphicsDirtyTracking, DisabledTrackerFallsBackWithoutMetadata)
 {

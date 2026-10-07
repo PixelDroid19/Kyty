@@ -16,6 +16,8 @@ bool                   SystemContentParamSfoGetInt(const char* name, int32_t* va
 bool                   SystemContentParamSfoGetString(const char* name, String* value);
 bool                   SystemContentParamSfoGetString(const char* name, char* value, size_t value_size);
 bool                   SystemContentGetMetadata(String* title_id, String* app_version);
+// TITLE / TITLE_ID / APP_VER from param.sfo, or from the PS5 param.json when the SFO has none.
+bool                   SystemContentGetParamString(const char* name, char* value, size_t value_size);
 bool                   SystemContentGetIconPath(String* path);
 bool                   SystemContentGetChunksNum(uint32_t* num);
 

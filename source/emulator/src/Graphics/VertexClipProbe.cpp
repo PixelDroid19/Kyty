@@ -13,9 +13,9 @@ namespace Kyty::Libs::Graphics {
 
 namespace {
 
-// VCPROB8 plus a reserved low byte for descriptor-set variants. Revision 8
-// expands the shared host-only raw aggregate with post-sample RGBA statistics.
-constexpr uint64_t kVertexClipProbeDiagnosticRevision = 0x564350524f423800ull;
+// VCPROB9 plus a reserved low byte for descriptor-set variants. Revision 9
+// appends bounded scalar-buffer snapshots without changing guest outputs.
+constexpr uint64_t kVertexClipProbeDiagnosticRevision = 0x564350524f423900ull;
 // PSPR keeps sample-result variants separate from both ordinary modules and
 // coordinate-input probes. Bits [39:8] hold the explicit ImageSampleB ordinal.
 constexpr uint64_t kPixelSampleProbeDiagnosticRevision = 0x5053505200000000ull;

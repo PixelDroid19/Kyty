@@ -14,6 +14,7 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 
 	uint32_t opcode = (buffer[0] >> 18u) & 0xffu;
 	uint32_t lds    = (buffer[0] >> 16u) & 0x1u;
+	uint32_t bit15  = (buffer[0] >> 15u) & 0x1u;
 	uint32_t glc    = (buffer[0] >> 14u) & 0x1u;
 	uint32_t idxen  = (buffer[0] >> 13u) & 0x1u;
 	uint32_t offen  = (buffer[0] >> 12u) & 0x1u;
@@ -44,6 +45,11 @@ KYTY_SHADER_PARSER(shader_parse_mubuf)
 	inst.buffer_idxen      = idxen == 1;
 	inst.buffer_offen      = offen == 1;
 	inst.buffer_return_old_value = glc == 1;
+	// RDNA2 table 98: bit 15 is DLC. The legacy GCN encoding uses ADDR64
+	// there, which this address tuple cannot represent; retain its rejection.
+	const uint32_t dlc = next_gen ? bit15 : 0u;
+	const uint32_t unmodeled = (next_gen ? 0u : bit15) | ((buffer[0] >> 17u) & 1u) | ((buffer[1] >> 21u) & 1u);
+	inst.buffer_flags = static_cast<uint8_t>(lds | (slc << 1u) | (tfe << 2u) | (dlc << 3u) | (unmodeled << 7u));
 	inst.src[0].size += static_cast<int>(offen);
 
 	if (inst.src[2].type == ShaderOperandType::LiteralConstant)

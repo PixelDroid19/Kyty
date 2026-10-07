@@ -22,7 +22,6 @@
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Kernel/Errors.h"
 #include "Emulator/Kernel/EventQueue.h"
-#include "Emulator/Kernel/TimePort.h"
 #include "Emulator/Log.h"
 
 #include <atomic>
@@ -236,17 +235,18 @@ void RenderContext::DeleteEopEqRegistration(void* registration_ptr, Kernel::Even
 	delete release;
 }
 
-void RenderContext::TriggerEopEvent()
+void RenderContext::TriggerEopEvent(uint32_t interrupt_context_id)
 {
-	TriggerRegisteredEvents(CompletionSignal::EndOfPipe);
+	TriggerRegisteredEvents(CompletionSignal::EndOfPipe, interrupt_context_id);
 }
 
 void RenderContext::TriggerQueuedGraphicsInterrupt()
 {
-	TriggerRegisteredEvents(CompletionSignal::QueuedGraphicsInterrupt);
+	// A driver submission completion has no ReleaseMem context id.
+	TriggerRegisteredEvents(CompletionSignal::QueuedGraphicsInterrupt, 0);
 }
 
-void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
+void RenderContext::TriggerRegisteredEvents(CompletionSignal signal, uint32_t interrupt_context_id)
 {
 	struct PendingTrigger
 	{
@@ -272,13 +272,9 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal)
 		}
 	}
 
+	auto* trigger_data = reinterpret_cast<void*>(static_cast<uintptr_t>(interrupt_context_id));
 	for (auto& trigger: triggers)
 	{
-		void* trigger_data = nullptr;
-		if (signal == CompletionSignal::EndOfPipe)
-		{
-		trigger_data = reinterpret_cast<void*>(Kernel::TimePort::GetCounter());
-		}
 		const auto result = Kernel::EventQueue::KernelTriggerEvent(trigger.pin, static_cast<uintptr_t>(trigger.id),
 		                                                              Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS,
 		                                                              trigger_data);

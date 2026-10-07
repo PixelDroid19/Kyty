@@ -1,5 +1,7 @@
 #include "Emulator/Agent/AgentServer.h"
 
+#include "Kyty/Core/MagicEnum.h"
+#include "Kyty/Core/Singleton.h"
 #include "Kyty/Core/Threads.h"
 
 #include "Emulator/Agent/AgentLifecycle.h"
@@ -292,6 +294,18 @@ std::string PerformanceResult(bool reset)
 	out += ",\"dispatch_processor_calls\":" + std::to_string(stats.dispatch_processor_calls);
 	out += ",\"dispatch_processor_ns\":" + std::to_string(stats.dispatch_processor_ns);
 	out += ",\"dispatch_processor_max_ns\":" + std::to_string(stats.dispatch_processor_max_ns);
+	out += ",\"dispatch_writeback_calls\":" + std::to_string(stats.dispatch_writeback_calls);
+	out += ",\"dispatch_writeback_ns\":" + std::to_string(stats.dispatch_writeback_ns);
+	out += ",\"dispatch_writeback_max_ns\":" + std::to_string(stats.dispatch_writeback_max_ns);
+	out += ",\"guest_address_prepare_calls\":" + std::to_string(stats.guest_address_prepare_calls);
+	out += ",\"guest_address_prepare_ns\":" + std::to_string(stats.guest_address_prepare_ns);
+	out += ",\"guest_address_prepare_max_ns\":" + std::to_string(stats.guest_address_prepare_max_ns);
+	out += ",\"guest_address_residency_calls\":" + std::to_string(stats.guest_address_residency_calls);
+	out += ",\"guest_address_residency_ns\":" + std::to_string(stats.guest_address_residency_ns);
+	out += ",\"guest_address_residency_max_ns\":" + std::to_string(stats.guest_address_residency_max_ns);
+	out += ",\"guest_address_refresh_calls\":" + std::to_string(stats.guest_address_refresh_calls);
+	out += ",\"guest_address_refresh_ns\":" + std::to_string(stats.guest_address_refresh_ns);
+	out += ",\"guest_address_refresh_max_ns\":" + std::to_string(stats.guest_address_refresh_max_ns);
 	out += ",\"draw_render_lock_wait_ns\":" + std::to_string(stats.draw_render_lock_wait_ns);
 	out += ",\"draw_render_lock_wait_max_ns\":" + std::to_string(stats.draw_render_lock_wait_max_ns);
 	out += ",\"draw_state_setup_ns\":" + std::to_string(stats.draw_state_setup_ns);
@@ -345,6 +359,8 @@ std::string PerformanceResult(bool reset)
 	out += std::to_string(stats.present_src_h);
 	out += ",\"layout\":";
 	out += std::to_string(stats.present_src_layout);
+	out += ",\"format\":";
+	out += std::to_string(stats.present_src_format);
 	out += "},\"present_destination\":{\"width\":";
 	out += std::to_string(stats.present_dst_w);
 	out += ",\"height\":";
@@ -467,13 +483,29 @@ std::string ThreadsResult()
 			out += ',';
 		}
 		const auto& thread = diagnostics.threads[i];
-		char        item[256];
+		char        item[512];
 		std::snprintf(item, sizeof(item),
 		              "{\"entry\":\"0x%016llx\",\"argument\":\"0x%016llx\",\"unique_id\":%d,\"started\":%s,"
-		              "\"detached\":%s,\"almost_done\":%s,\"free\":%s}",
+		              "\"detached\":%s,\"almost_done\":%s,\"free\":%s,\"main\":%s,\"wait\":\"%s\",\"wait_object\":\"0x%016llx\","
+		              "\"wait_return\":\"0x%016llx\",\"wait_callers\":[\"0x%016llx\",\"0x%016llx\",\"0x%016llx\"]}",
 		              static_cast<unsigned long long>(thread.entry), static_cast<unsigned long long>(thread.argument), thread.unique_id,
 		              thread.started ? "true" : "false", thread.detached ? "true" : "false", thread.almost_done ? "true" : "false",
-		              thread.free ? "true" : "false");
+		              thread.free ? "true" : "false", thread.main ? "true" : "false", Core::EnumName8(thread.wait_kind).c_str(),
+		              static_cast<unsigned long long>(thread.wait_object), static_cast<unsigned long long>(thread.wait_return),
+		              static_cast<unsigned long long>(thread.wait_callers[0]), static_cast<unsigned long long>(thread.wait_callers[1]),
+		              static_cast<unsigned long long>(thread.wait_callers[2]));
+		out += item;
+	}
+	// Module bases tie each wait's guest return address to its module.
+	out += "],\"modules\":[";
+	const auto modules = Core::Singleton<Loader::RuntimeLinker>::Instance()->SnapshotLoadedModules();
+	for (uint32_t i = 0; i < modules.Size(); ++i)
+	{
+		const auto& module = modules.At(i);
+		char        item[512];
+		std::snprintf(item, sizeof(item), "%s{\"name\":%s,\"base\":\"0x%016llx\",\"size\":\"0x%llx\"}", i != 0 ? "," : "",
+		              JsonString(module.file_name.C_Str()).c_str(), static_cast<unsigned long long>(module.base_vaddr),
+		              static_cast<unsigned long long>(module.base_size));
 		out += item;
 	}
 	out += "]}";

@@ -70,7 +70,9 @@ struct sys_dir_entry_t
 	bool   is_file;
 };
 
-void sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read = nullptr);           // NOLINT(google-runtime-references)
+// Zero means no read error (EOF is not an error); otherwise a positive host errno
+// class translated from GetLastError. The optional count is the actual transfer.
+int  sys_file_read(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read = nullptr);           // NOLINT(google-runtime-references)
 void sys_file_write(const void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_written = nullptr); // NOLINT(google-runtime-references)
 void sys_file_read_r(void* data, uint32_t size, sys_file_t& f);                                         // NOLINT(google-runtime-references)
 void sys_file_write_r(const void* data, uint32_t size, sys_file_t& f);                                  // NOLINT(google-runtime-references)

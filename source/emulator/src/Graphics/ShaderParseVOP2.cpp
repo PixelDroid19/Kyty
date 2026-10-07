@@ -45,6 +45,14 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 	uint32_t src1_abs  = (sdwa ? (buffer[1] >> 29u) & 0x1u : 0);
 	uint32_t s1        = (sdwa ? (buffer[1] >> 31u) & 0x1u : 0);
 
+	// These controls are not represented by the reverse-borrow lowering.
+	// Reject them before the generic parser can discard their semantics.
+	if (next_gen && opcode == 0x2au && sdwa &&
+	    (dst_sel != 6u || dst_u != 0u || src0_sel > 6u || src1_sel > 6u || src0_sext != 0u || src1_sext != 0u))
+	{
+		EXIT("unsupported SDWA reverse-borrow selection");
+	}
+
 	if (dst_sel != 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_sel != 6 condition ignored (continuing)\n"); }
 	if (sdwa && dst_sel == 6 && dst_u != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: sdwa && dst_sel == 6 && dst_u != 0 condition ignored (continuing)\n"); }
 	if (src0_sel > 6) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_sel > 6 condition ignored (continuing)\n"); }
@@ -56,7 +64,9 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 	if (src1_sext != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src1_sext != 0 condition ignored (continuing)\n"); }
 
 	ShaderInstruction inst;
-	inst.pc      = pc;
+	inst.pc            = pc;
+	inst.vop_sdwa      = sdwa;
+	inst.vop_sdwa_ctrl = sdwa ? buffer[1] : 0u;
 	inst.src[0]  = operand_parse(src0 + ((dpp || s0 == 0) ? 256 : 0));
 	inst.src[1]  = operand_parse(vsrc1 + (s1 == 0 ? 256 : 0));
 	inst.dst     = operand_parse(vdst + 256);
@@ -83,12 +93,15 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 	inst.src[1].absolute = (src1_abs != 0);
 	inst.src[0].negate   = (src0_neg != 0);
 	inst.src[1].negate   = (src1_neg != 0);
-	inst.src[0].dpp                = dpp;
-	inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
-	inst.src[0].dpp_fetch_inactive = dpp && ((buffer[1] & (1u << 18u)) != 0);
-	inst.src[0].dpp_bound_ctrl     = dpp && ((buffer[1] & (1u << 19u)) != 0);
-	inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
-	inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+	inst.src[0].dpp = dpp;
+	if (dpp)
+	{
+		inst.src[0].dpp_ctrl           = static_cast<uint16_t>((buffer[1] >> 8u) & 0x1ffu);
+		inst.src[0].dpp_fetch_inactive = ((buffer[1] & (1u << 18u)) != 0);
+		inst.src[0].dpp_bound_ctrl     = ((buffer[1] & (1u << 19u)) != 0);
+		inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
+		inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+	}
 
 	inst.dst.clamp = (clmp != 0);
 
@@ -301,7 +314,13 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		case 0x2A:
 			if (next_gen)
 			{
-				KYTY_UNKNOWN_OP();
+				inst.type        = ShaderInstructionType::VSubrevCoCiU32;
+				inst.format      = ShaderInstructionFormat::VdstSdst2Vsrc0Vsrc1Ssrc2A2;
+				inst.src[2].type = ShaderOperandType::VccLo;
+				inst.src[2].size = 2;
+				inst.src_num     = 3;
+				inst.dst2.type   = ShaderOperandType::VccLo;
+				inst.dst2.size   = 2;
 			} else
 			{
 				KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: v_subbrev_u32 treated as SBarrier (continuing)\n");

@@ -18,8 +18,10 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 
 	ShaderInstruction inst;
 	inst.pc      = pc;
-	inst.src[0]  = operand_parse(ssrc0);
-	inst.src_num = 1;
+	// GETPC has no source and is always one word, even if the unused field
+	// resembles a literal selector.
+	inst.src[0]  = (opcode == 0x1fu ? ShaderOperand {} : operand_parse(ssrc0));
+	inst.src_num = (opcode == 0x1fu ? 0 : 1);
 	inst.dst     = operand_parse(sdst);
 
 	uint32_t size = 1;
@@ -67,9 +69,9 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
-		case 0x09: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_wqm_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x09:
+			inst.type   = ShaderInstructionType::SWqmB32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
 			break;
 		case 0x0a:
 			inst.type        = ShaderInstructionType::SWqmB64;
@@ -85,21 +87,23 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x0D: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bcnt0_i32_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x0D:
+			inst.type   = ShaderInstructionType::SBcnt0I32B32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
 			break;
-		case 0x0E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bcnt0_i32_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x0E:
+			inst.type   = ShaderInstructionType::SBcnt0I32B64;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc02;
+			inst.src[0].size = 2;
 			break;
-		case 0x0F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bcnt1_i32_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x0F:
+			inst.type   = ShaderInstructionType::SBcnt1I32B32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
 			break;
-		case 0x10: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bcnt1_i32_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x10:
+			inst.type   = ShaderInstructionType::SBcnt1I32B64;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc02;
+			inst.src[0].size = 2;
 			break;
 		case 0x11: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_ff0_i32_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
@@ -109,13 +113,14 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x13: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_ff1_i32_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x13:
+			inst.type   = ShaderInstructionType::SFf1I32B32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
 			break;
-		case 0x14: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_ff1_i32_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x14:
+			inst.type        = ShaderInstructionType::SFf1I32B64;
+			inst.format      = ShaderInstructionFormat::SVdstSVsrc02;
+			inst.src[0].size = 2;
 			break;
 		case 0x15: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_flbit_i32_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
@@ -149,17 +154,20 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x1D: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitset1_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x1D:
+			inst.type    = ShaderInstructionType::SBitset1B32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src[1]  = inst.dst;
+			inst.src_num = 2;
 			break;
 		case 0x1E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitset1_b64 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x1F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getpc_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x1F:
+			inst.type     = ShaderInstructionType::SGetpcB64;
+			inst.format   = ShaderInstructionFormat::Sdst2;
+			inst.dst.size = 2;
 			break;
 		case 0x20:
 			inst.type        = ShaderInstructionType::SSetpcB64;
@@ -256,9 +264,9 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x34: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_abs_i32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x34:
+			inst.type   = ShaderInstructionType::SAbsI32;
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
 			break;
 		case 0x35: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_mov_fed_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
@@ -270,6 +278,28 @@ KYTY_SHADER_PARSER(shader_parse_sop1)
 			inst.dst.size    = 2;
 			inst.src[0].size = 2;
 			break;
+		case 0x3c:
+		case 0x3d:
+		case 0x3e:
+		case 0x3f:
+		case 0x40:
+		case 0x41:
+		case 0x42:
+		case 0x43:
+		case 0x44:
+		case 0x45:
+		{
+			if (!next_gen) { KYTY_UNKNOWN_OP(); }
+			static constexpr ShaderInstructionType types[] = {
+			    ShaderInstructionType::SAndSaveexecB32, ShaderInstructionType::SOrSaveexecB32,
+			    ShaderInstructionType::SXorSaveexecB32, ShaderInstructionType::SAndn2SaveexecB32,
+			    ShaderInstructionType::SOrn2SaveexecB32, ShaderInstructionType::SNandSaveexecB32,
+			    ShaderInstructionType::SNorSaveexecB32, ShaderInstructionType::SXnorSaveexecB32,
+			    ShaderInstructionType::SAndn1SaveexecB32, ShaderInstructionType::SOrn1SaveexecB32};
+			inst.type   = types[opcode - 0x3c];
+			inst.format = ShaderInstructionFormat::SVdstSVsrc0;
+			break;
+		}
 
 		default: KYTY_UNKNOWN_OP();
 	}

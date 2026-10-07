@@ -11,6 +11,8 @@ enum class HostCaptureImagePixelFormat: uint8_t
 {
 	Rgba8,
 	Bgra8,
+	A2R10G10B10Unorm,
+	A2B10G10R10Unorm,
 	Rgba16G16B16A16Sfloat,
 };
 

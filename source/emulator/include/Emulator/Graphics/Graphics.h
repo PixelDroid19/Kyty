@@ -186,6 +186,8 @@ int KYTY_SYSV_ABI GraphicsWriteDataPatchSetDst(uint32_t* cmd, uintptr_t arg1);
 int KYTY_SYSV_ABI GraphicsWriteDataPatchSetAddressOrOffset(uint32_t* cmd, uint64_t address_or_offset);
 // sceAgcDcbStallCommandBufferParserGetSize (NID +u6dKSLWM2o): fixed 2-dword packet.
 uint32_t KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParserGetSize();
+// sceAgcDcbWaitOnAddressGetSize (43WJ08sSugE) / sceAgcAcbWaitOnAddressGetSize (idlaArvdXEs).
+uint32_t KYTY_SYSV_ABI GraphicsCbWaitOnAddressGetSize(uint32_t label_size);
 // sceAgcDcbDmaDataGetSize (NID 2ccJz9LQI+w): fixed 7-dword packet.
 uint32_t KYTY_SYSV_ABI GraphicsDcbDmaDataGetSize();
 // libSceAgc helper observed before first DrawIndex on Gen5 titles (returns SCE_OK).
@@ -239,21 +241,26 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndex(CommandBuffer* buf, uint32_t index_
 uint32_t* KYTY_SYSV_ABI GraphicsDcbEventWrite(CommandBuffer* buf, uint8_t event_type, const volatile void* address);
 // sceAgcDcbStallCommandBufferParser: fixed EVENT_WRITE with CS partial flush (0x07).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbStallCommandBufferParser(CommandBuffer* buf);
-// sceAgcDcbDmaData / sceAgcAcbDmaData: encode the hardware IT_DMA_DATA packet.
+// Graphics and async compute entry points share IT_DMA_DATA encoding but have distinct ABIs.
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDmaData(CommandBuffer* buf, uint8_t engine, uint8_t destination,
                                            uint8_t destination_cache_policy, uint64_t destination_address, uint8_t source,
                                            uint8_t source_cache_policy, uint64_t source_address, uint32_t byte_count,
                                            uint8_t wait_for_previous, uint8_t write_confirm, uint8_t block_engine);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbDmaData(CommandBuffer* buf, uint8_t destination, uint8_t destination_cache_policy,
+                                         uint64_t destination_address, uint8_t source, uint8_t source_cache_policy,
+                                         uint64_t source_address, uint32_t byte_count, uint8_t wait_for_previous,
+                                         uint8_t write_confirm);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbAcquireMem(CommandBuffer* buf, uint8_t engine, uint32_t cb_db_op, uint32_t gcr_cntl,
                                               const volatile void* base, uint64_t size_bytes, uint32_t poll_cycles);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWriteData(CommandBuffer* buf, uint8_t dst, uint8_t cache_policy, uint64_t address_or_offset,
                                              const void* data, uint32_t num_dwords, uint8_t increment, uint8_t write_confirm);
-// Gen5 type-2 pad dword (NID qj7QZpgr9Uw): allocates one 0x80000000 filler.
-uint32_t* KYTY_SYSV_ABI GraphicsCbType2Pad(CommandBuffer* buf);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbContextStateOp(CommandBuffer* buf, uint32_t operation);
+uint64_t KYTY_SYSV_ABI GraphicsDcbContextStateOpGetSize(uint32_t operation);
 // sceAgcDcbSetBaseIndirectArgs (NID RmaJwLtc8rY).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetBaseIndirectArgs(CommandBuffer* buf, uint32_t base_index, uint64_t address);
 // sceAgcDcbDispatchIndirect (NID CtB+A9-VxO0).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDispatchIndirect(CommandBuffer* buf, uint32_t data_offset, uint32_t modifier);
+uint32_t* KYTY_SYSV_ABI GraphicsAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirect_args, uint32_t modifier);
 // sceAgcDcbDrawIndexIndirect (NID t1vNu082-jM).
 uint32_t* KYTY_SYSV_ABI GraphicsDcbDrawIndexIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbWaitRegMem(CommandBuffer* buf, uint8_t size, uint8_t compare_function, uint8_t op, uint8_t cache_policy,
@@ -285,6 +292,11 @@ uint32_t* KYTY_SYSV_ABI GraphicsDcbPopMarker(CommandBuffer* buf);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexBuffer(CommandBuffer* buf, uint64_t index_addr);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbSetNumInstances(CommandBuffer* buf, uint32_t num_instances);
+uint32_t* KYTY_SYSV_ABI GraphicsCbJump(CommandBuffer* buf, uint32_t mode, uint32_t cache_policy, const void* target, uint32_t size_dw);
+uint32_t KYTY_SYSV_ABI  GraphicsCbJumpGetSize();
+int KYTY_SYSV_ABI       GraphicsSetPacketPredication(uint32_t* packet, uint32_t predication);
+uint32_t* KYTY_SYSV_ABI GraphicsDcbSetPredication(CommandBuffer* buf, uint32_t condition, uint32_t operation, uint32_t wait,
+                                                  const volatile void* address);
 uint32_t* KYTY_SYSV_ABI GraphicsDcbGetLodStats(CommandBuffer* buf, uint8_t cache_policy, const volatile void* buffer,
                                                uint32_t buffer_size_in_bytes, uint32_t reset_count, uint8_t force_reset,
                                                uint8_t report_and_reset, uint32_t reporting_interval_in_100k_clocks);
@@ -300,6 +312,7 @@ int KYTY_SYSV_ABI GraphicsDriverSubmitMultiDcbs(uint32_t* const* dcb_gpu_addrs, 
                                                  uint32_t count);
 int KYTY_SYSV_ABI GraphicsDriverSubmitAcb(uint32_t queue, const Packet* packet);
 int KYTY_SYSV_ABI GraphicsDriverAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata);
+uint32_t KYTY_SYSV_ABI GraphicsDriverGetEqContextId(const Kernel::EventQueue::KernelEvent* ev);
 int KYTY_SYSV_ABI GraphicsDriverQueryResourceRegistrationUserMemoryRequirements(size_t* size, uint32_t max_resources,
                                                                                  uint32_t max_owners);
 int KYTY_SYSV_ABI GraphicsDriverInitResourceRegistration(void* memory, size_t size, uint32_t max_owners);

@@ -8,9 +8,15 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderComputeWaveLayout.h"
 #include "Emulator/Graphics/RenderResolutionShaderScale.h"
 #include "Emulator/Graphics/VertexClipProbe.h"
 
+#include <bitset>
+#include <memory>
+#include <mutex>
+#include <string_view>
+#include <vector>
 #include <algorithm>
 #ifdef KYTY_EMU_ENABLED
 
@@ -83,8 +89,42 @@ enum class ShaderInstructionType : uint32_t
 	DsXorB32,
 	DsReadB32,
 	DsRead2B32,
+	DsRead2St64B32,
 	DsWriteB32,
+	// ds_write2[st64]_b32: two dwords at ADDR + OFFSET0 * 4 and ADDR + OFFSET1 * 4 (times 64 for st64).
+	DsWrite2B32,
+	DsWrite2St64B32,
+	// ds_write_addtid_b32 / ds_read_addtid_b32: per-lane LDS slot at
+	// M0[15:0] + offset + TID*4 (RDNA2 ISA 10.4). In graphics stages the
+	// slot is private to the invocation (compiler spill/reload idiom).
+	DsWriteAddtidB32,
+	DsReadAddtidB32,
+	DsWrxchgRtnB32,
+	SBitcmp0B32,
+	SBitcmp1B32,
+	SBitcmp0B64,
+	SBitcmp1B64,
+	SBcnt0I32B32,
+	SBcnt0I32B64,
+	SBcnt1I32B32,
+	SBcnt1I32B64,
+	SFf1I32B32,
+	SFf1I32B64,
+	STrap,
+	VCmpLtU64,
+	VCmpEqU64,
+	VCmpLeU64,
+	VCmpGtU64,
+	VCmpNeU64,
+	VCmpGeU64,
+	SLshl1AddU32,
+	SLshl2AddU32,
+	SLshl3AddU32,
 	Exp,
+	GlobalLoadDword,
+	GlobalLoadDwordx2,
+	GlobalLoadDwordx3,
+	GlobalLoadDwordx4,
 	ImageGetResinfo,
 	ImageGather4,
 	ImageLoad,
@@ -104,6 +144,16 @@ enum class ShaderInstructionType : uint32_t
 	SAndn2B32,
 	SAndn2B64,
 	SAshrI32,
+	SAndSaveexecB32,
+	SOrSaveexecB32,
+	SXorSaveexecB32,
+	SAndn2SaveexecB32,
+	SOrn2SaveexecB32,
+	SNandSaveexecB32,
+	SNorSaveexecB32,
+	SXnorSaveexecB32,
+	SAndn1SaveexecB32,
+	SOrn1SaveexecB32,
 	SAndSaveexecB64,
 	SAndn1SaveexecB64,
 	SAndn2SaveexecB64,
@@ -113,9 +163,11 @@ enum class ShaderInstructionType : uint32_t
 	SOrn2SaveexecB64,
 	SXnorSaveexecB64,
 	SXorSaveexecB64,
+	SBfeI32,
 	SBfeU32,
 	SBfeU64,
 	SBfmB32,
+	SBfmB64,
 	SBarrier,
 	SBranch,
 	SBufferLoadDword,
@@ -183,6 +235,8 @@ enum class ShaderInstructionType : uint32_t
 	SSwappcB64,
 	SSubI32,
 	SWaitcnt,
+	SWaitcntDepctr,
+	SWqmB32,
 	SWqmB64,
 	SXnorB32,
 	SXorB32,
@@ -385,8 +439,7 @@ enum class ShaderInstructionType : uint32_t
 	VFmaF32,
 	VFmaF64,
 	VFmaF16,
-	// VOP3P v_fma_mix_f32: mixed-precision FMA used by Unity HDR/URP shaders.
-	// Computes fma(a,b,c) with per-operand f16↔f32 conversion via op_sel_hi.
+	// VOP3P fused multiply-add with independently selected input precision.
 	VFmaMixF32,
 	// RDNA2 dot-product with accumulation in destination register
 	VDot2cF32F16,
@@ -398,8 +451,12 @@ enum class ShaderInstructionType : uint32_t
 	VInterpP2F32,
 	VLogF32,
 	VLogF16,
+	// VOP3 0x362: dst.f = src0.f * 2**src1.i; src1 is a signed integer exponent.
+	VLdexpF32,
 	VAddLshlU32,
 	VLshlAddU32,
+	// VOP3 0x345: dst = (src0 ^ src1) + src2 (u32, SHA256 idiom).
+	VXadU32,
 	VLshlB32,
 	VLshlOrB32,
 	VLshlrevB32,
@@ -449,6 +506,12 @@ enum class ShaderInstructionType : uint32_t
 	VMinI32,
 	VMinU32,
 	VMovB32,
+	// M0-relative VGPR moves. The source and/or destination register index is
+	// offset by M0 at run time; lowering resolves M0 only when provably literal.
+	VMovrelsB32,
+	VMovreldB32,
+	VMovrelsdB32,
+	VMovrelsd2B32,
 	// VOP1/VOP3 v_nop: padding; SPIR-V emits nothing.
 	VNop,
 	VMulF32,
@@ -463,6 +526,7 @@ enum class ShaderInstructionType : uint32_t
 	VMulU32U24,
 	VNotB32,
 	VOrB32,
+	VOr3B32,
 	VXnorB32,
 	VRcpF32,
 	VRcpF64,
@@ -503,8 +567,32 @@ enum class ShaderInstructionType : uint32_t
 	FetchXyz,
 	FetchXyzw,
 
+	// Gen5 VOP2/VOP3B V_SUBREV_CO_CI_U32: src1 - src0 - borrow-in.
+	// Keep this at the end so existing instruction ids remain stable.
+	VSubrevCoCiU32,
+	ImageBvhIntersectRay,
+	SBitset1B32,
+	SCmpLgU64,
+	SPackLlB32B16,
+	SGetpcB64,
+	DsAddRtnU32,
+	SCbranchExecnz,
+	SCmpEqU64,
+	SAbsI32,
+	ImageAtomicAdd,
+	VCmpClassF32,
+	VPermlane16B32,
+	VPermlanex16B32,
+	SSubU32,
+
 	ZMax
 };
+
+// Mnemonic of an instruction type without allocating. Only ShaderDebug.cpp
+// declares the full enum range, so every name lookup must go through these
+// helpers rather than instantiating magic_enum in other translation units.
+[[nodiscard]] std::string_view ShaderInstructionTypeName(ShaderInstructionType type);
+[[nodiscard]] bool             ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix);
 
 namespace ShaderInstructionFormat {
 
@@ -550,12 +638,40 @@ enum FormatByte : uint64_t
 	Param3, // param3
 	Param4, // param4
 	Param5, // param5 — Gen5 VS export target 0x25
-	Param6, // param6 — Gen5 VS export target 0x26 (EXP range 0x20+N)
-	Param7, // param7 — Gen5 VS export target 0x27 (EXP range 0x20+N)
+	Param6,  // param6 — Gen5 VS export target 0x26 (EXP range 0x20+N)
+	Param7,  // param7 — Gen5 VS export target 0x27 (EXP range 0x20+N)
+	Param8,  // param8 — Gen5 VS export target 0x28 (EXP range 0x20+N)
+	Param9,  // param9 — Gen5 VS export target 0x29 (EXP range 0x20+N)
+	Param10, // param10 — Gen5 VS export target 0x2a (EXP range 0x20+N)
+	Param11, // param11 — Gen5 VS export target 0x2b (EXP range 0x20+N)
+	Param12, // param12 — Gen5 VS export target 0x2c (EXP range 0x20+N)
+	Param13, // param13 — Gen5 VS export target 0x2d (EXP range 0x20+N)
+	Param14, // param14 — Gen5 VS export target 0x2e (EXP range 0x20+N)
+	Param15, // param15 — Gen5 VS export target 0x2f (EXP range 0x20+N)
+	Param16, // param16 — Gen5 VS export target 0x30 (EXP range 0x20+N)
+	Param17, // param17 — Gen5 VS export target 0x31 (EXP range 0x20+N)
+	Param18, // param18 — Gen5 VS export target 0x32 (EXP range 0x20+N)
+	Param19, // param19 — Gen5 VS export target 0x33 (EXP range 0x20+N)
+	Param20, // param20 — Gen5 VS export target 0x34 (EXP range 0x20+N)
+	Param21, // param21 — Gen5 VS export target 0x35 (EXP range 0x20+N)
+	Param22, // param22 — Gen5 VS export target 0x36 (EXP range 0x20+N)
+	Param23, // param23 — Gen5 VS export target 0x37 (EXP range 0x20+N)
+	Param24, // param24 — Gen5 VS export target 0x38 (EXP range 0x20+N)
+	Param25, // param25 — Gen5 VS export target 0x39 (EXP range 0x20+N)
+	Param26, // param26 — Gen5 VS export target 0x3a (EXP range 0x20+N)
+	Param27, // param27 — Gen5 VS export target 0x3b (EXP range 0x20+N)
+	Param28, // param28 — Gen5 VS export target 0x3c (EXP range 0x20+N)
+	Param29, // param29 — Gen5 VS export target 0x3d (EXP range 0x20+N)
+	Param30, // param30 — Gen5 VS export target 0x3e (EXP range 0x20+N)
+	Param31, // param31 — Gen5 VS export target 0x3f (EXP range 0x20+N)
 	Mrt0,   // mrt_color0
 	Mrt1,   // mrt_color1
 	Mrt2,   // mrt_color2
 	Mrt3,   // mrt_color3 — captured EXP target 0x03
+	Mrt4,   // mrt_color4 — EXP target 0x04
+	Mrt5,   // mrt_color5
+	Mrt6,   // mrt_color6
+	Mrt7,   // mrt_color7
 	Prim,   // prim
 	Off,    // off
 	Compr,  // compr
@@ -575,9 +691,12 @@ enum FormatByte : uint64_t
 	DmaskC, // dmask:0xc (B+A, two components)
 	DmaskD, // dmask:0xd (R+B+A, three components)
 	Gds,    // gds
+	Pos1,   // position miscellaneous vector
 	DA,     // operand_array_to_str(inst.dst, inst.dst.size)
 	MimgDmask, // dmask carried by ShaderInstruction::mimg_dmask
 	PixelZ, // pixel Z
+	NullTarget, // pixel valid mask without data
+	DsOff,  // byte offset carried by ShaderInstruction::ds_offset
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -596,6 +715,7 @@ enum Format : uint64_t
 	Empty                 = FormatDefine({N}),
 	Imm                   = FormatDefine({S0}),
 	Label                 = FormatDefine({L}),
+	NullVmDone            = FormatDefine({NullTarget, Vm, Done}),
 	Mrt0OffOffComprVmDone = FormatDefine({Mrt0, Off, Off, Compr, Vm, Done}),
 	// Null MRT export (en=0): no channels written; often ends the export sequence.
 	// Any MRT target is a discard when bracketed by exec=0 and endpgm; otherwise
@@ -603,16 +723,28 @@ enum Format : uint64_t
 	Mrt1OffOffComprVmDone = FormatDefine({Mrt1, Off, Off, Compr, Vm, Done}),
 	Mrt2OffOffComprVmDone = FormatDefine({Mrt2, Off, Off, Compr, Vm, Done}),
 	Mrt3OffOffComprVmDone = FormatDefine({Mrt3, Off, Off, Compr, Vm, Done}),
+	Mrt4OffOffComprVmDone = FormatDefine({Mrt4, Off, Off, Compr, Vm, Done}),
+	Mrt5OffOffComprVmDone = FormatDefine({Mrt5, Off, Off, Compr, Vm, Done}),
+	Mrt6OffOffComprVmDone = FormatDefine({Mrt6, Off, Off, Compr, Vm, Done}),
+	Mrt7OffOffComprVmDone = FormatDefine({Mrt7, Off, Off, Compr, Vm, Done}),
 	// Compressed half2 MRT export (en=0xf, compr=1). Done may be 0 or 1;
 	// the "Done" token in the Mrt0 format name is historical.
 	Mrt0Vsrc0Vsrc1ComprVmDone           = FormatDefine({Mrt0, S0, S1, Compr, Vm, Done}),
 	Mrt1Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt1, S0, S1, Compr, Vm}),
 	Mrt2Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt2, S0, S1, Compr, Vm}),
 	Mrt3Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt3, S0, S1, Compr, Vm}),
+	Mrt4Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt4, S0, S1, Compr, Vm}),
+	Mrt5Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt5, S0, S1, Compr, Vm}),
+	Mrt6Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt6, S0, S1, Compr, Vm}),
+	Mrt7Vsrc0Vsrc1ComprVm               = FormatDefine({Mrt7, S0, S1, Compr, Vm}),
 	Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone      = FormatDefine({Mrt0, S0, S1, S2, S3, Vm, Done}),
 	Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt1, S0, S1, S2, S3, Vm}),
 	Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt2, S0, S1, S2, S3, Vm}),
 	Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt3, S0, S1, S2, S3, Vm}),
+	Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt4, S0, S1, S2, S3, Vm}),
+	Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt5, S0, S1, S2, S3, Vm}),
+	Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt6, S0, S1, S2, S3, Vm}),
+	Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt7, S0, S1, S2, S3, Vm}),
 	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1, done=1.
 	PixelZVsrc0VmDone                    = FormatDefine({PixelZ, S0, Vm, Done}),
 	Param0Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param0, S0, S1, S2, S3}),
@@ -623,13 +755,39 @@ enum Format : uint64_t
 	Param5Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param5, S0, S1, S2, S3}),
 	Param6Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param6, S0, S1, S2, S3}),
 	Param7Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param7, S0, S1, S2, S3}),
+	Param8Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param8, S0, S1, S2, S3}),
+	Param9Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param9, S0, S1, S2, S3}),
+	Param10Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param10, S0, S1, S2, S3}),
+	Param11Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param11, S0, S1, S2, S3}),
+	Param12Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param12, S0, S1, S2, S3}),
+	Param13Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param13, S0, S1, S2, S3}),
+	Param14Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param14, S0, S1, S2, S3}),
+	Param15Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param15, S0, S1, S2, S3}),
+	Param16Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param16, S0, S1, S2, S3}),
+	Param17Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param17, S0, S1, S2, S3}),
+	Param18Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param18, S0, S1, S2, S3}),
+	Param19Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param19, S0, S1, S2, S3}),
+	Param20Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param20, S0, S1, S2, S3}),
+	Param21Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param21, S0, S1, S2, S3}),
+	Param22Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param22, S0, S1, S2, S3}),
+	Param23Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param23, S0, S1, S2, S3}),
+	Param24Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param24, S0, S1, S2, S3}),
+	Param25Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param25, S0, S1, S2, S3}),
+	Param26Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param26, S0, S1, S2, S3}),
+	Param27Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param27, S0, S1, S2, S3}),
+	Param28Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param28, S0, S1, S2, S3}),
+	Param29Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param29, S0, S1, S2, S3}),
+	Param30Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param30, S0, S1, S2, S3}),
+	Param31Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param31, S0, S1, S2, S3}),
 	Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done        = FormatDefine({Pos0, S0, S1, S2, S3, Done}),
+	Pos1OffOffVsrc0Off                = FormatDefine({Pos1, Off, Off, S0, Off}),
 	PrimVsrc0OffOffOffDone              = FormatDefine({Prim, S0, Off, Off, Off, Done}),
 	Saddr                               = FormatDefine({S0A2}),
 	SdstSbaseSoffset                    = FormatDefine({D, S0A2, S1}),
 	Sdst16SbaseSoffset                  = FormatDefine({DA16, S0A2, S1}),
 	Sdst16SvSoffset                     = FormatDefine({DA16, S0A4, S1}),
 	Sdst2Ssrc02                         = FormatDefine({DA2, S0A2}),
+	Sdst2                              = FormatDefine({DA2}),
 	Sdst2Ssrc02Ssrc1                    = FormatDefine({DA2, S0A2, S1}),
 	Sdst2Ssrc02Ssrc12                   = FormatDefine({DA2, S0A2, S1A2}),
 	Sdst2SvSoffset                      = FormatDefine({DA2, S0A4, S1}),
@@ -640,6 +798,9 @@ enum Format : uint64_t
 	SdstSvSoffset                       = FormatDefine({D, S0A4, S1}),
 	SmaskVsrc0Vsrc1                     = FormatDefine({DA2, S0, S1}),
 	Ssrc0Ssrc1                          = FormatDefine({S0, S1}),
+	Ssrc02Ssrc12                        = FormatDefine({S0A2, S1A2}),
+	Ssrc02Ssrc1                         = FormatDefine({S0A2, S1}),
+	SVdstSVsrc02                        = FormatDefine({D, S0A2}),
 	SVdstSVsrc0                         = FormatDefine({D, S0}),
 	SVdstSVsrc0SVsrc1                   = FormatDefine({D, S0, S1}),
 	Vdata1Vaddr3StSsDmask1              = FormatDefine({D, S0A3, S1A8, S2A4, Dmask1}),
@@ -668,29 +829,12 @@ enum Format : uint64_t
 	Vdata4Vaddr2StSsDmaskF              = FormatDefine({DA4, S0A2, S1A8, S2A4, DmaskF}),
 
 	Vdata1Vaddr2StSsDmask1                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask1}),
-	Vdata1Vaddr2StSsDmask2                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask2}),
-	Vdata2Vaddr2StSsDmask3                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask3}),
-	Vdata1Vaddr2StSsDmask4                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask4}),
-	Vdata2Vaddr2StSsDmask5                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask5}),
-	Vdata3Vaddr2StSsDmask7                  = FormatDefine({DA3, S0A2, S1A8, S2A4, Dmask7}),
-	Vdata1Vaddr2StSsDmask8                  = FormatDefine({D, S0A2, S1A8, S2A4, Dmask8}),
-	Vdata2Vaddr2StSsDmask9                  = FormatDefine({DA2, S0A2, S1A8, S2A4, Dmask9}),
-	Vdata2Vaddr2StSsDmaskA                  = FormatDefine({DA2, S0A2, S1A8, S2A4, DmaskA}),
-	Vdata3Vaddr2StSsDmaskB                  = FormatDefine({DA3, S0A2, S1A8, S2A4, DmaskB}),
-	Vdata2Vaddr2StSsDmaskC                  = FormatDefine({DA2, S0A2, S1A8, S2A4, DmaskC}),
-	Vdata3Vaddr2StSsDmaskD                  = FormatDefine({DA3, S0A2, S1A8, S2A4, DmaskD}),
 	Vdata1Vaddr4StSsDmask1                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask1}),
-	Vdata1Vaddr4StSsDmask2                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask2}),
-	Vdata2Vaddr4StSsDmask3                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask3}),
-	Vdata1Vaddr4StSsDmask4                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask4}),
-	Vdata2Vaddr4StSsDmask5                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask5}),
-	Vdata1Vaddr4StSsDmask8                  = FormatDefine({D, S0A4, S1A8, S2A4, Dmask8}),
-	Vdata2Vaddr4StSsDmask9                  = FormatDefine({DA2, S0A4, S1A8, S2A4, Dmask9}),
-	Vdata2Vaddr4StSsDmaskA                  = FormatDefine({DA2, S0A4, S1A8, S2A4, DmaskA}),
 	Vdata3Vaddr4StSsDmaskB                  = FormatDefine({DA3, S0A4, S1A8, S2A4, DmaskB}),
-	Vdata2Vaddr4StSsDmaskC                  = FormatDefine({DA2, S0A4, S1A8, S2A4, DmaskC}),
-	Vdata3Vaddr4StSsDmaskD                  = FormatDefine({DA3, S0A4, S1A8, S2A4, DmaskD}),
 	Vdata4Vaddr4StSsDmaskF                  = FormatDefine({DA4, S0A4, S1A8, S2A4, DmaskF}),
+	VdataVaddr2StSsMimgDmask                = FormatDefine({DA, S0A2, S1A8, S2A4, MimgDmask}),
+	VdataVaddr3StSsMimgDmask                = FormatDefine({DA, S0A3, S1A8, S2A4, MimgDmask}),
+	VdataVaddr4StSsMimgDmask                = FormatDefine({DA, S0A4, S1A8, S2A4, MimgDmask}),
 	Vdata4Vaddr4StDmaskF                = FormatDefine({DA4, S0A4, S1A8, DmaskF}),
 	// image_gather4 returns four values from the selected component. The MIMG
 	// component mask selects that component; it does not alter result width.
@@ -702,20 +846,32 @@ enum Format : uint64_t
 	// image_load has the same dynamic destination mask but carries up to three
 	// integer image coordinates rather than the scalar LOD used by resinfo.
 	VdataVaddr3StDmask                  = FormatDefine({DA, S0A3, S1A8, MimgDmask}),
+	VdataVaddr4StDmask                  = FormatDefine({DA, S0A4, S1A8, MimgDmask}),
+	Vdata1Vaddr2StVsrc2Dmask1           = FormatDefine({D, S0A2, S1A8, S2, Dmask1}),
 	Vdata4VaddrSvSoffsIdxen             = FormatDefine({DA4, S0, S1A4, S2, Idxen}),
+	// GLOBAL: a 64-bit VGPR address, or a 32-bit VGPR offset from a 64-bit SGPR base.
+	VdataVaddr2Off                      = FormatDefine({DA, S0A2, Off}),
+	VdataVaddrSaddr2                    = FormatDefine({DA, S0, S1A2}),
 	Vdata4VaddrSvSoffsIdxenFloat4       = FormatDefine({DA4, S0, S1A4, S2, Idxen, Float4}),
 	VdstGds                             = FormatDefine({D, Gds}),
 	VaddrVdataOffset                    = FormatDefine({S0, S1}),
 	VaddrOffset                         = FormatDefine({S0}),
+	// ds_*_addtid_b32: no ADDR field; S0 carries DATA0 for the write.
+	VdataOffset                         = FormatDefine({S0, DsOff}),
+	VdstOffset                          = FormatDefine({D, DsOff}),
 	VdstVaddrOffset                     = FormatDefine({D, S0}),
+	VdstVaddrVdataOffset                = FormatDefine({D, S0, S1}),
 	// ds_read2_b32: vdst is a VGPR pair; offsets live in ds_offset (see field comment).
 	Vdst2VaddrOffset01            = FormatDefine({DA2, S0}),
+	// ds_write2_b32: S0 = ADDR, S1 = DATA0, S2 = DATA1; offsets live in ds_offset.
+	VaddrVdata2Offset01           = FormatDefine({S0, S1, S2}),
 	VdstSdst2Vsrc0Vsrc1           = FormatDefine({D, D2A2, S0, S1}),
 	VdstSdst2Vsrc0Vsrc1Ssrc2A2    = FormatDefine({D, D2A2, S0, S1, S2A2}),
 	Vdst2Sdst2Vsrc0Vsrc1Vsrc2Pair = FormatDefine({DA2, D2A2, S0, S1, S2A2}),
 	VdstVsrc0Vsrc1Smask2          = FormatDefine({D, S0, S1, S2A2}),
 	VdstVsrc0Vsrc1Vsrc2           = FormatDefine({D, S0, S1, S2}),
 	VdstVsrcAttrChan              = FormatDefine({D, S0, Attr}),
+	Vdata4BvhAddressSrsrc4        = FormatDefine({DA4, S0, S1A4}),
 };
 
 } // namespace ShaderInstructionFormat
@@ -788,10 +944,27 @@ struct ShaderInstruction
 	uint32_t                        pc     = 0;
 	ShaderInstructionType           type   = ShaderInstructionType::Unknown;
 	ShaderInstructionFormat::Format format = ShaderInstructionFormat::Unknown;
+	// Keep the original SOPP opcode when several encodings share one IR type.
+	uint8_t                         sopp_opcode = 0xffu;
+	// First raw encoding word, so unsupported placeholders remain identifiable.
+	uint32_t raw_word = 0;
 	ShaderOperand                   src[4];
 	int                             src_num = 0;
+	// EXP control bits: VM, DONE, COMPR. Unknown for other instruction families.
+	uint8_t                         exp_control = 0xffu;
 	ShaderOperand                   dst;
 	ShaderOperand                   dst2;
+	// Preserve VOP3 source-selection controls for exact backend admission.
+	uint8_t vop3_op_sel = 0;
+	uint8_t vop3_omod   = 0;
+	// VOP3P uses three additional precision/select bits instead of OMOD.
+	// The sentinel distinguishes instructions decoded from other families.
+	uint8_t vop3p_op_sel_hi = 0xffu;
+	// SDWA destination/sign controls are not fully represented by operands.
+	bool vop_sdwa = false;
+	// Raw SDWA control dword (the encoding's second word) so admission can
+	// verify every select/sext/neg/abs/dst field and the reserved bits exactly.
+	uint32_t vop_sdwa_ctrl = 0;
 	// Encoded MIMG NSA address slots in order, including VADDR as address 0.
 	// Empty for the normal sequential encoding; trailing slots may be unused by
 	// the selected opcode and resource dimension.
@@ -803,9 +976,17 @@ struct ShaderInstruction
 	// MIMG DIM field. It defines the instruction's coordinate contract and is
 	// independent from the set of descriptors bound by the pipeline.
 	uint8_t mimg_dimension = 0;
+	// IMAGE_LOAD_MIP fetches the resource-view level carried after the coordinates.
+	bool mimg_explicit_lod = false;
+	// Image atomics replace VDATA with the pre-operation value only for GLC=1.
+	bool mimg_return_old_value = false;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
 	// (addr = sbase + soffset + imm). Zero when offset is fully represented in src[1].
 	int32_t smem_imm_offset = 0;
+	// FLAT/GLOBAL: signed byte offset added to the 64-bit address.
+	int16_t flat_offset = 0;
+	// Preserve cache-control bits for exact SMEM admission. Unknown is fail-closed.
+	uint8_t smem_flags = 0xffu; // bit 0: GLC; bit 1: DLC; bit 7: undefined encoding bits set
 	// MUBUF/MTBUF byte-address controls. The instruction's 12-bit immediate is
 	// deliberately separate from src[2] (S_OFFSET): Gen5 swizzle applies to
 	// index * stride + (imm + V_OFFSET), and adds S_OFFSET afterwards.
@@ -815,6 +996,14 @@ struct ShaderInstruction
 	// MUBUF atomics replace VDATA with the pre-operation value only when GLC
 	// requests that result.
 	bool buffer_return_old_value = false;
+	// Preserve MUBUF/MTBUF controls for exact admission. Unknown is fail-closed.
+	// Bit 7 also rejects legacy ADDR64, whose bit 15 must not become Gen5 DLC.
+	uint8_t buffer_flags = 0xffu; // bit 0: LDS; bit 1: SLC; bit 2: TFE; bit 3: DLC; bit 7: reserved/unmodeled encoding
+	// MTBUF memory format is independent of the opcode's result component count.
+	// Gen5 uses a unified 7-bit format; legacy packs NFMT:DFMT in the same bits.
+	uint8_t mtbuf_format         = 0xffu;
+	uint8_t mtbuf_components     = 0;
+	bool    mtbuf_format_is_gen5 = false;
 	// DS addressing:
 	// - DsAddU32: byte offset added to the byte address in src[0].
 	// - DsWriteB32: byte offset added to the byte address in src[0].
@@ -822,6 +1011,10 @@ struct ShaderInstruction
 	// - DsRead2B32: packed as (offset1 << 8) | offset0; each offset is dword-scaled
 	//   while src[0] remains a byte address (addr_i = vaddr + offset_i * 4).
 	uint16_t ds_offset = 0;
+	// Retain exact DS encoding for admission: legacy aliases and ignored
+	// controls must not become evidence that a different operation is supported.
+	uint32_t ds_encoding_control   = 0;
+	uint32_t ds_encoding_registers = 0;
 	// EXP channel enable mask. Compressed exports map bits 0..1 to the two
 	// halves of src0 and bits 2..3 to src1.
 	uint8_t exp_enable_mask = 0x0f;
@@ -923,8 +1116,13 @@ public:
 	void                   SetCrc32(uint32_t c) { this->m_crc32 = c; }
 	[[nodiscard]] uint32_t GetHash0() const { return m_hash0; }
 	void                   SetHash0(uint32_t h) { this->m_hash0 = h; }
+	// First PC of an appended continuation; earlier PCs are offsets from the
+	// program's own base address.
+	[[nodiscard]] uint32_t GetContinuationPc() const { return m_continuation_pc; }
+	void                   SetContinuationPc(uint32_t pc) { m_continuation_pc = pc; }
 
 private:
+	uint32_t                  m_continuation_pc = UINT32_MAX;
 	uint32_t                  m_hash0 = 0;
 	uint32_t                  m_crc32 = 0;
 	Vector<ShaderInstruction> m_instructions;
@@ -963,9 +1161,24 @@ constexpr uint32_t DstSel(uint32_t x, uint32_t y = 0, uint32_t z = 0, uint32_t w
 bool     ShaderIsGen5FourComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsGen5SingleComponent32BitBufferFormat(uint8_t format);
 bool     ShaderIsNullMrtDoneFormat(ShaderInstructionFormat::Format format);
+
+// Opt-in evidence dump of a guest program a refusal is about: the decoded listing (<kind>_<id>.txt) and the raw
+// bytes (<kind>_<id>.bin) through the bounded exclusive process writer. `dump_dir` is the operator's directory
+// (null or empty disables). Returns the per-file outcome for the fatal message, which Silent logging would hide.
+[[nodiscard]] std::string ShaderDumpGuestProgram(const char* dump_dir, const char* kind, uint64_t id, uint64_t program_addr,
+                                                 const ShaderCode& code);
 uint32_t ShaderColorExportSourceComponent(uint32_t channel_order, uint32_t output_component);
 // Bytes per element for Gen5 sampled formats; compressed formats use block elements (0 if unknown).
 uint32_t ShaderGen5TextureBytesPerElement(uint32_t format);
+
+enum class ShaderVertexPosition1Usage : uint32_t
+{
+	Unknown,
+	RenderTargetLayer,
+};
+
+[[nodiscard]] ShaderVertexPosition1Usage ShaderDecodeVertexPosition1Usage(uint32_t position_format, uint32_t output_control,
+                                                                         bool next_gen);
 // True when one texture element represents a 4x4 compressed texel block.
 bool ShaderGen5TextureIsBlockCompressed(uint32_t format);
 // Linear Gen5 texture row pitch in texels: 256-byte aligned rows (GFX linear surface rule).
@@ -1005,6 +1218,17 @@ constexpr ShaderGen5SampledTextureShape ShaderGen5SampledTextureShapeForType(uin
 
 [[nodiscard]] bool ShaderGen5SampledTextureShapeForMimgDimension(uint8_t dimension,
                                                                  ShaderGen5SampledTextureShape* shape);
+
+// MIMG DIM selects the address layout the instruction supplies; the T# type selects the
+// addressing the texture unit performs. A volume DIM therefore cannot turn a resource
+// whose type is not 3D into a volume: a 2D or array resource ignores the extra
+// coordinate, so the descriptor keeps the shape of its own type. (The other
+// instruction-derived shapes stay: an array resource read as a plain 2D slice, for
+// example, is a usage the renderer resolves per instruction.)
+constexpr bool ShaderGen5InstructionShapeAppliesToType(uint8_t type, ShaderGen5SampledTextureShape shape)
+{
+	return shape != ShaderGen5SampledTextureShape::ThreeDimensional || type == 10u;
+}
 
 constexpr uint8_t ShaderGen5HostSampledTextureType(uint8_t guest_type, ShaderGen5SampledTextureShape shape)
 {
@@ -1335,6 +1559,27 @@ struct ShaderStorageUseEvidence
 	bool                raw_smem_dynamic_offset = false;
 };
 
+// Structural evidence for a compute kernel that writes one uniform four-word
+// value to a typed buffer at one linear invocation index. `valid` proves only
+// the decoded instruction/dataflow shape; callers must still validate live
+// bindings, value words, ranges, and dispatch coverage before assigning any
+// resource semantics.
+struct ShaderComputeUniformBufferFillEvidence
+{
+	bool     valid                      = false;
+	int      destination_start_register = -1;
+	int      workgroup_register         = -1;
+	uint32_t workgroup_shift            = 0;
+	// Scalar source SGPRs in the component order consumed by the store.
+	int      value_registers[4]         = {-1, -1, -1, -1};
+	// Bytes one invocation stores. The four-byte form (the SDK pattern fill)
+	// stores record i as value_registers[i % period] for every i below count;
+	// it is uniform only when the live period is 1.
+	uint32_t record_bytes               = 16;
+	int      count_register             = -1;
+	int      period_register            = -1;
+};
+
 // Structural evidence for one narrowly defined compute metadata-fill family.
 // `valid` establishes only the decoded instruction/dataflow proof below; the
 // caller still has to validate the live descriptors, parameter/source words,
@@ -1371,20 +1616,33 @@ enum class ShaderDynamicSLoadResourceKind : uint8_t
 	Sampler,
 };
 
+struct ShaderDynamicSLoadMapping
+{
+	ShaderDynamicSLoadResourceKind kind                  = ShaderDynamicSLoadResourceKind::StorageBuffer;
+	int                            resource_index        = 0;
+	int                            destination_register  = 0;
+	uint32_t                       instruction_pc        = 0;
+	int                            offset_dw             = 0;
+	int                            dword_count           = 0;
+	int                            resource_field_offset = 0;
+	uint32_t                       last_consumer_pc      = 0;
+	bool                           raw_vmem_oob_guarded  = false;
+};
+
 struct ShaderDynamicSLoadMappings
 {
-	static constexpr int MAPPINGS_MAX = 64;
+	Vector<ShaderDynamicSLoadMapping> records;
+};
 
-	ShaderDynamicSLoadResourceKind kind[MAPPINGS_MAX]                 = {};
-	int                            resource_index[MAPPINGS_MAX]       = {};
-	int                            destination_register[MAPPINGS_MAX] = {};
-	uint32_t                       instruction_pc[MAPPINGS_MAX]       = {};
-	int                            offset_dw[MAPPINGS_MAX]            = {};
-	int                            dword_count[MAPPINGS_MAX]          = {};
-	int                            resource_field_offset[MAPPINGS_MAX] = {};
-	uint32_t                       last_consumer_pc[MAPPINGS_MAX]     = {};
-	bool                           raw_vmem_oob_guarded[MAPPINGS_MAX] = {};
-	int                            mappings_num                        = 0;
+// A V# the shader assembles from user-data words with S_MOV copies: the
+// buffer instruction at consumer_pc reads storage resource resource_index
+// through the four SGPRs at register_id, which are written with that
+// resource's metadata right before the instruction.
+struct ShaderAssembledDescriptor
+{
+	uint32_t consumer_pc    = 0;
+	int      register_id    = 0;
+	int      resource_index = 0;
 };
 
 enum class ShaderTextureUsage
@@ -1473,9 +1731,43 @@ struct ShaderZeroSBufferResources
                                                                              ShaderStorageAccess unbased_match, bool decoded_unknown,
                                                                              bool indirect_descriptor_use);
 [[nodiscard]] ShaderStorageUseEvidence    AnalyzeShaderStorageUse(const ShaderCode& code, int start_register);
+[[nodiscard]] ShaderComputeUniformBufferFillEvidence AnalyzeShaderComputeUniformBufferFill(const ShaderCode& code);
 [[nodiscard]] ShaderComputeMetaFillEvidence AnalyzeShaderComputeMetaFill(const ShaderCode& code, int source_start_register,
 	                                                                      int destination_start_register, int parameter_start_register);
-[[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register);
+struct ShaderBindResources;
+// Metadata uses API user-data indices. The fused Gen5 vertex front emits those
+// indices at s8; negative stream sentinels never identify shader registers.
+[[nodiscard]] bool ShaderStorageBufferResourceIsBound(const ShaderBindResources& bind, const ShaderOperand& resource,
+                                                       int user_data_register_base = 0);
+// GLOBAL memory loads dereference per-lane guest addresses through the
+// guest device address table.
+[[nodiscard]] bool ShaderHasGlobalMemoryLoad(const ShaderCode& code);
+[[nodiscard]] bool ShaderHasUnboundBufferLoad(const ShaderCode& code, const ShaderBindResources& bind,
+                                              int user_data_register_base = 0);
+struct ShaderComputeEmptyGate
+{
+	int      storage_buffer_index = -1;
+	uint32_t byte_offset          = 0;
+};
+[[nodiscard]] ShaderComputeEmptyGate AnalyzeShaderComputeEmptyGate(const ShaderCode& code, const ShaderBindResources& bind);
+// With entry_values (see ShaderSgprsHoldingEntryValue), only instructions whose
+// descriptor SGPRs still hold their user-data value count as direct uses.
+[[nodiscard]] ShaderDirectImageUse         AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register,
+                                                                       const std::vector<std::bitset<106>>* entry_values = nullptr);
+struct ShaderStorageImageTileCoverage
+{
+	uint32_t width  = 0;
+	uint32_t height = 0;
+	// A nonnegative index requires a validated, read-only runtime snapshot of
+	// the exact image width and height before the seed may be skipped.
+	int bounds_storage_buffer_index = -1;
+};
+[[nodiscard]] ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code,
+                                                                                   const ShaderBindResources& bind, int texture_index,
+                                                                                   int workgroup_register, const uint32_t threads[3],
+                                                                                   bool native_xy_thread_ids = false,
+                                                                                   bool group_xy_enabled = false,
+                                                                                   bool paired_xy_thread_ids = false);
 [[nodiscard]] State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register);
 void                                      ExcludeUnusedMetadataStorage(ShaderStorageResources* resources);
 
@@ -1506,7 +1798,10 @@ constexpr ShaderGen5SampledTextureShape ShaderResolvedSampledTextureShape(const 
 
 struct ShaderTextureResources
 {
-	static constexpr int RES_MAX = 16;
+	// This table combines sampled and storage images. The host descriptor
+	// classes have separate limits, checked when constructing their layouts.
+	static constexpr int RES_MAX = 32;
+	static_assert(RES_MAX <= 32, "storage-image write-only masks use one uint32_t bit per logical resource");
 	// A virtual sampled-texture descriptor carries a local index and the
 	// SPIR-V image shape of its target descriptor array. Vulkan descriptor
 	// arrays are statically typed, so 2D, 2D-array and 3D images cannot share
@@ -1571,10 +1866,11 @@ struct ShaderGdsResources
 
 struct ShaderDirectSgprsResources
 {
-	static constexpr int SGPRS_MAX = 32;
+	static constexpr int SGPRS_MAX = 34;
 
 	ShaderDirectSgprResource sgprs[SGPRS_MAX];
 	int                      start_register[SGPRS_MAX] = {0};
+	bool                     absolute_register[SGPRS_MAX] = {};
 	int                      sgprs_num                 = 0;
 };
 
@@ -1600,6 +1896,18 @@ struct ShaderBindResources
 	uint32_t                   descriptor_set_slot   = 0;
 	bool                       vsharp_uniform_buffer = false;
 	int                        vsharp_binding_index  = -1;
+	// Address values are per-dispatch data, never part of shader identity.
+	bool                       program_base_used      = false;
+	uint32_t                   program_base_offset_dw = 0;
+	uint64_t                   program_base           = 0;
+	// Guest-memory device addressing: a metadata block {table_lo, table_hi,
+	// entries, 0} filled at bind time (see GuestDeviceAddress.h).
+	bool     device_address_used      = false;
+	uint32_t device_address_offset_dw = 0;
+	// Per-dispatch global thread limits (USE_THREAD_DIMENSIONS), runtime data.
+	bool     thread_limits_used      = false;
+	uint32_t thread_limits_offset_dw = 0;
+	uint32_t thread_limits[3]        = {0, 0, 0};
 	ShaderStorageResources     storage_buffers;
 	ShaderZeroSBufferResources zero_sbuffer_resources;
 	ShaderTextureResources     textures2D;
@@ -1608,13 +1916,24 @@ struct ShaderBindResources
 	ShaderDirectSgprsResources direct_sgprs;
 	ShaderExtendedResources    extended;
 	ShaderDynamicSLoadMappings dynamic_sloads;
+	Vector<ShaderAssembledDescriptor> assembled_descriptors;
 };
 
 [[nodiscard]] int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                       int user_data_register_base);
+[[nodiscard]] int ShaderFindImageStorageTextureDescriptor(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind,
+                                                         int user_data_register_base);
+[[nodiscard]] bool ShaderImageAtomicAddSupported(const ShaderInstruction& instruction);
+[[nodiscard]] bool ShaderImageAtomicResourceSupported(const ShaderCode& code, uint32_t index, const ShaderBindResources& bind);
+[[nodiscard]] bool ShaderFloatClassComparisonSupported(const ShaderInstruction& instruction);
 [[nodiscard]] int ShaderFindImageSamplerDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                                int user_data_register_base);
 void ShaderAssociateSampledTextureSamplers(const ShaderCode& code, ShaderBindResources* bind, int user_data_register_base);
+// Bytes read through a dynamically loaded buffer descriptor: the union of every
+// scalar buffer load that consumes the mapping. False when a consumer reads the
+// descriptor another way or at a non-constant offset.
+[[nodiscard]] bool ShaderDynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping,
+                                                uint64_t* required_bytes);
 
 [[nodiscard]] constexpr bool ShaderBindRequiresDescriptorSet(const ShaderBindResources& bind)
 {
@@ -1641,6 +1960,50 @@ struct ShaderParsedUsage
 	int  direct_sgprs              = 0;
 };
 
+// Guest architecture and proof are independent of the eventual host size.
+// In particular FragmentNeutral32 never changes a guest64 mask into wave32.
+enum class ShaderNativeWaveProof : uint32_t
+{
+	Unclassified,
+	LaneLocal,
+	QuadLocal,
+	ExactSubgroup,
+	FragmentNeutral32,
+};
+
+struct ShaderNativeWaveInfo
+{
+	uint32_t guest_wave_size = 0;
+	ShaderNativeWaveProof proof = ShaderNativeWaveProof::Unclassified;
+	uint32_t refusal_pc = 0;
+	const char* refusal_reason = nullptr;
+};
+
+struct GraphicsGeRawRegister;
+[[nodiscard]] uint32_t ShaderVertexGuestWaveSize(const GraphicsGeRawRegister& stages, bool next_gen, bool gs_front);
+[[nodiscard]] bool ShaderUsesNativeWaveState(const ShaderCode& code);
+[[nodiscard]] ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t guest_wave_size);
+
+// ShaderAnalyzeNativeWave once per immutable program and guest width. The analysis walks the
+// whole program (mask flow to a fixpoint, 0.1-3 ms) and must not run per draw.
+class ShaderNativeWaveVerdict
+{
+public:
+	[[nodiscard]] ShaderNativeWaveInfo Get(const ShaderCode& code, uint32_t guest_wave_size) const;
+
+private:
+	struct Slot
+	{
+		std::once_flag       once;
+		ShaderNativeWaveInfo info;
+	};
+	mutable Slot m_wave32;
+	mutable Slot m_wave64;
+};
+
+
+struct ShaderVertexProgram;
+
 struct ShaderVertexInputInfo
 {
 	static constexpr int RES_MAX = 16;
@@ -1659,6 +2022,7 @@ struct ShaderVertexInputInfo
 	int      fetch_buffer_reg           = 0;
 	int      buffers_num                = 0;
 	int      export_count               = 0;
+	ShaderVertexPosition1Usage position1_usage = ShaderVertexPosition1Usage::Unknown;
 	int32_t  vertex_offset_sgpr         = -1;
 	uint32_t vertex_offset_value        = 0;
 	bool     fetch_external             = false;
@@ -1669,6 +2033,13 @@ struct ShaderVertexInputInfo
 	uint8_t  float_mode                 = 0;
 	bool     dx10_clamp                 = false;
 	bool     ieee_mode                  = false;
+	bool     fp16_overflow              = false;
+	bool     fp16_overflow_known        = false;
+	ShaderNativeWaveInfo native_wave;
+	uint32_t required_subgroup_size = 0;
+	// Gen5 proof, cache identity and emission share this immutable linked IR.
+	// The definition is private to Shader.cpp; resource ABI queries retain its front view.
+	std::shared_ptr<const ShaderVertexProgram> program;
 	// Immutable diagnostic selection resolved at the draw boundary. The host
 	// descriptor set is assigned by the renderer after both stages are known.
 	ShaderVertexClipProbeConfig clip_probe;
@@ -1680,6 +2051,11 @@ struct ShaderVertexInputInfo
 // onto semantic 0. start_register stays negative so bind-time UpdateAddress48
 // leaves the guest base in the descriptor word.
 void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info);
+
+// Why the fused NGG front of this vertex stage was not proven width neutral at its guest
+// width ("" when it was, or when the stage has no fused front). For the native-wave
+// admission diagnostic, which otherwise cannot tell a refused proof from a missing one.
+[[nodiscard]] Kyty::Core::String8 ShaderVertexNggFrontRefusal(const ShaderVertexInputInfo& info);
 
 // Remap an embedded MUBUF format-load to resources[i] only when the V# was
 // tracked as a buffer whose attrib_id came from the attribute table. A default
@@ -1774,15 +2150,39 @@ struct ShaderGen5MubufStreamSpan
 
 struct ShaderComputeInputInfo
 {
+	// Initial wave FP controls copied from CS RSRC1. Mode-sensitive emission
+	// requires fp_mode_known; F16 also requires fp16_overflow_known. Defaults
+	// represent unavailable evidence, including an unwritten overflow bit.
+	uint8_t float_mode    = 0;
+	bool    dx10_clamp    = false;
+	bool    ieee_mode     = false;
+	bool    fp_mode_known = false;
+	bool    fp16_overflow       = false;
+	bool    fp16_overflow_known = false;
+	ShaderComputeWaveLayout wave_layout;
+	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
+	bool                    native_equivalent_valid = false;
+	ShaderComputeWaveLayout native_equivalent_layout;
+	bool                    native_equivalence_required = false;
+	bool                    thread_limits_used          = false;
+	uint32_t                thread_limits[3]            = {0, 0, 0};
+	uint32_t            dispatch_mode      = 0;
 	uint32_t            threads_num[3]     = {0, 0, 0};
 	uint32_t            lds_dwords         = 0;
+	uint32_t            barrier_workspace_dwords = 0;
 	bool                group_id[3]        = {false, false, false};
 	int                 thread_ids_num     = 0;
 	int                 workgroup_register = 0;
 	uint32_t            storage_image_write_only_mask = 0;
+	ShaderStorageImageTileCoverage storage_image_tile_coverage[ShaderTextureResources::RES_MAX] {};
+	ShaderComputeEmptyGate empty_gate;
 	ShaderComputeMetaFillEvidence meta_fill;
+	ShaderComputeUniformBufferFillEvidence uniform_buffer_fill;
 	ShaderBindResources bind;
 };
+
+[[nodiscard]] uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen,
+                                                       uint32_t groups_x, uint32_t groups_y, uint32_t groups_z);
 
 [[nodiscard]] constexpr uint32_t ShaderComputeLdsDwords(uint16_t granulated_lds_size)
 {
@@ -1800,6 +2200,20 @@ struct ShaderFragmentTapConfig
 	uint64_t diagnostic_identity  = 0;
 };
 
+struct ShaderPixelCustomInterpolation
+{
+	uint32_t inputs = 0;
+	uint32_t per_vertex_inputs = 0;
+	// Different interpolation qualifiers may consume the same guest export,
+	// but Vulkan requires a separate location for each such input view.
+	uint32_t aliased_parameter_inputs = 0;
+	uint32_t locations[32] {};
+	uint32_t barycentric_locations[7] {};
+	uint32_t location_count = 0;
+
+	[[nodiscard]] bool Enabled() const { return per_vertex_inputs != 0 || aliased_parameter_inputs != 0; }
+};
+
 struct ShaderPixelInputInfo
 {
 	bool                   stage_enabled             = true;
@@ -1807,28 +2221,40 @@ struct ShaderPixelInputInfo
 	uint32_t               input_num                 = 0;
 	uint32_t               system_input_enable       = 0;
 	uint32_t               system_input_address      = 0;
+	ShaderPixelCustomInterpolation custom_interpolation;
 	uint8_t                target_output_mode[8]     = {};
 	uint8_t                target_output_order[8]    = {};
 	RenderHostToGuestScale host_to_guest_scale;
 	bool                   ps_pos_xy                 = false;
+	bool                   front_face_all_bits       = false;
 	bool                   integer_image_coordinates = false;
 	bool                   image_size_query          = false;
 	bool                   ps_pixel_kill_enable      = false;
 	bool                   ps_early_z                = false;
 	bool                   ps_execute_on_noop        = false;
+	bool                   has_only_null_exports     = false;
 	uint8_t                float_mode                = 0;
 	bool                   dx10_clamp                = false;
 	bool                   ieee_mode                 = false;
+	bool                   fp16_overflow             = false;
+	bool                   fp16_overflow_known       = false;
 	// Immutable diagnostic configuration resolved once at the draw boundary.
 	ShaderFragmentTapConfig fragment_tap;
 	// Immutable host-only aggregate selection resolved at the draw boundary.
 	// The renderer assigns the descriptor set only after both stage layouts are known.
 	ShaderPixelInput0ProbeConfig input0_probe;
 	uint32_t                     input0_probe_descriptor_set = kVertexClipProbeInvalidDescriptorSet;
-	// Non-zero when the translated fragment program uses guest-wave operations
-	// whose exact width must be available in the host Vulkan subgroup.
+	// Preferred width for wave-sensitive lowering. native_wave may prove a
+	// smaller physical subgroup valid; architectural width always comes from
+	// native_wave.guest_wave_size, never from a host-size selection.
 	uint32_t               required_subgroup_size    = 0;
+	ShaderNativeWaveInfo    native_wave;
 	ShaderBindResources    bind;
+
+	[[nodiscard]] bool FrontFaceEnabled() const
+	{
+		return (system_input_enable & system_input_address & (1u << 12u)) != 0;
+	}
 };
 
 [[nodiscard]] ShaderFragmentTapConfig ShaderResolveFragmentTapConfig(uint64_t code_id, bool indexed, uint32_t guest_count);
@@ -1836,6 +2262,7 @@ struct ShaderPixelInputInfo
 enum class ShaderPixelInterpolatorSource
 {
 	Parameter,
+	PerVertex,
 	Default
 };
 
@@ -1853,6 +2280,10 @@ struct ShaderPixelInterpolator
 [[nodiscard]] uint32_t ShaderPixelCanonicalInterpolator(const ShaderPixelInputInfo& info, uint32_t index);
 [[nodiscard]] bool ShaderDecodePixelInterpolator(uint32_t setting, ShaderPixelInterpolator* interpolator);
 [[nodiscard]] float ShaderPixelInterpolatorDefaultComponent(const ShaderPixelInterpolator& interpolator, uint32_t component);
+[[nodiscard]] bool ShaderPixelInputActive(const ShaderPixelInputInfo& info, uint32_t index);
+[[nodiscard]] uint32_t ShaderPixelSystemInputRegister(const ShaderPixelInputInfo& info, uint32_t field);
+void ShaderResolveCustomInterpolation(const ShaderCode& code, const ShaderVertexInputInfo& producer, ShaderPixelInputInfo* info);
+[[nodiscard]] Vector<uint32_t> ShaderCompileInterpolationGeometry(const ShaderPixelInputInfo& info);
 
 struct ShaderSharp
 {
@@ -1873,6 +2304,19 @@ struct ShaderUserData
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
                        int user_data_register_base = 0, bool vertex_resource_types = true);
+
+[[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
+                                                   int eud_pointer_register, const ShaderCode* code,
+                                                   int user_data_register_base, uint32_t* required_end_dw);
+[[nodiscard]] bool ShaderGen5EudExpandEndDwordsForSharpImages(const ShaderUserData* user_data, int user_sgpr_num,
+                                                               const uint32_t* eud_snapshot, uint32_t snapshot_dwords,
+                                                               uint32_t* required_end_dw);
+
+// Test-only hook invoked between the two guest reads of a Gen5 EUD snapshot.
+// Lets focused tests mutate the table mid-capture to prove no descriptor words
+// are assembled from two different guest-memory versions.
+using ShaderGen5EudSnapshotTestHook = void (*)(void*);
+void ShaderSetGen5EudSnapshotTestHook(ShaderGen5EudSnapshotTestHook hook, void* context);
 
 // Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
 // guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
@@ -1988,19 +2432,33 @@ void                  ShaderCalcBindingIndices(ShaderBindResources* bind);
 [[nodiscard]] int32_t ShaderDetectVertexOffsetSgpr(const ShaderCode& code, uint32_t user_data_base, uint32_t user_data_count);
 [[nodiscard]] bool    ShaderResolveVertexOffset(uint32_t index_offset, const ShaderVertexInputInfo& input_info,
 	                                             int32_t* resolved_offset, int32_t vertex_offset_add = 0);
+// Records a host vertex stream starts after the guest buffer base. An embedded
+// fetch adds a user-data base vertex to the vertex index in the shader itself
+// (v_sad_u32/v_add of the index VGPR); host attribute fetches index by
+// gl_VertexIndex, so the stream is shifted instead of the vertex index.
+[[nodiscard]] uint32_t ShaderVertexStreamRecordOffset(const ShaderVertexInputInfo& input_info);
 [[nodiscard]] bool    ShaderPreventsNoopPixelElision(const ShaderCode& code);
+[[nodiscard]] bool    ShaderHasOnlyNullPixelExports(const ShaderCode& code);
 ShaderStorageUsage    ShaderGetDirectStorageUsage(const ShaderCode& code, int start_register);
 bool                  ShaderCanBindDirectSgpr(const ShaderUserData* user_data, int start_register, HW::UserSgprType type);
-void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info);
+void                  ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderVertexInputInfo* info,
+                                          const GraphicsGeRawRegister* shader_stages = nullptr);
 void             ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh, const ShaderVertexInputInfo* vs_info,
                                       ShaderPixelInputInfo* ps_info, bool allow_noop_stage_disable = false);
-void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, ShaderComputeInputInfo* info);
+void             ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh, uint32_t dispatch_mode,
+                                      ShaderComputeInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderVertexInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderPixelInputInfo* info);
 void             ShaderDbgDumpInputInfo(const ShaderComputeInputInfo* info);
 ShaderId         ShaderGetIdVS(const HW::VertexShaderInfo* regs, const ShaderVertexInputInfo* input_info);
 ShaderId         ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputInfo* input_info);
 ShaderId         ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInputInfo* input_info);
+// Renderers call this before ANY pipeline/module cache lookup. Metadata-only
+// identity fixtures may omit an owner; Gen5 production may not.
+void             ShaderRequireVertexProgram(const HW::VertexShaderInfo* regs, const ShaderVertexInputInfo* input_info);
+ShaderCode       ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh,
+                              const ShaderVertexInputInfo* input_info);
+// Standalone diagnostic/parser path. Not a substitute for the bound renderer overload.
 ShaderCode       ShaderParseVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegisters* sh);
 ShaderCode       ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegisters* sh);
 ShaderCode       ShaderParseCS(const HW::ComputeShaderInfo* regs, const HW::ShaderRegisters* sh);

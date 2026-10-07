@@ -8,8 +8,11 @@
 #include "Kyty/Core/Vector.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/ComputeColorFill.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsState.h"
+#include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/HardwareContext.h"
 #include "Emulator/Graphics/RenderResolutionCoordinator.h"
 #include "Emulator/Graphics/Objects/DepthMeta.h"
@@ -18,6 +21,7 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/RenderTexture.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
+#include "Emulator/Graphics/Objects/VulkanImageBuilder.h"
 #include "Emulator/Graphics/RenderResolutionAlias.h"
 #include "Emulator/Graphics/RenderResolutionImageCapability.h"
 #include "Emulator/Graphics/RenderResolutionPlanner.h"
@@ -37,12 +41,283 @@
 #include <cinttypes>
 #include <cmath>
 #include <cstdlib>
+#include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+
+static ComputeColorFillEvents g_compute_color_fills;
+static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, VkImageLayout new_layout, VkAccessFlags dst_access,
+                                 VkPipelineStageFlags dst_stage);
+
+static bool ComputeColorFillUsesGraphicsQueue(CommandBuffer* buffer)
+{
+	const int queue = buffer->GetQueueIndex();
+	const auto* context = g_render_ctx->GetGraphicCtx();
+	if (queue < 0 || queue >= GraphicContext::QUEUES_NUM) { return false; }
+	const auto& recording = context->queues[queue];
+	const auto& graphics = context->queues[GraphicContext::QUEUE_GFX];
+	// Images use exclusive ownership. A virtual compute queue is supported
+	// here only when it records onto the very same physical graphics queue;
+	// neither queue-family ownership nor cross-queue dependencies are inferred.
+	return recording.vk_queue != nullptr && recording.vk_queue == graphics.vk_queue && recording.family == graphics.family;
+}
+
+static bool ResolveComputeColorFillIdentity(uint64_t address, uint64_t size, ComputeColorFillIdentity* identity,
+                                           bool require_bound)
+{
+	*identity = {address, size};
+	GpuMemoryRangeProvenance provenance {};
+	if (address == 0u || size == 0u || address > UINT64_MAX - size ||
+	    !GpuMemoryQueryRangeProvenance(address, size, &provenance) || provenance.truncated)
+	{
+		return false;
+	}
+	const GpuMemoryRangeProvenanceEntry* storage = nullptr;
+	for (uint32_t i = 0; i < provenance.entry_count; ++i)
+	{
+		const auto& entry = provenance.entries[i];
+		// Exact color-image aliases (render targets and sampled copies of the same bytes) receive the fill;
+		// any other or partial alias has no proven representation of it.
+		const bool image_alias = entry.type == GpuMemoryObjectType::RenderTexture || entry.type == GpuMemoryObjectType::Texture;
+		if (entry.type != GpuMemoryObjectType::StorageBuffer && !image_alias)
+		{
+			return false;
+		}
+		if (image_alias && entry.relation != GpuMemoryOverlapType::Equals)
+		{
+			return false;
+		}
+		if (entry.type != GpuMemoryObjectType::StorageBuffer) { continue; }
+		if (entry.read_only) { return false; }
+		if (storage != nullptr || entry.relation != GpuMemoryOverlapType::Equals) { return false; }
+		storage = &entry;
+	}
+	if (storage == nullptr || !storage->write_back_capable || (require_bound && !storage->in_use) ||
+	    storage->logical_generation == 0u || storage->backing_generation == 0u || storage->content_sequence == 0u)
+	{
+		return false;
+	}
+	identity->logical_generation = storage->logical_generation;
+	identity->backing_generation = storage->backing_generation;
+	identity->content_sequence = storage->content_sequence;
+	return true;
+}
+
+// Every exact color-image alias of the filled range: render targets and sampled texture copies.
+static Vector<VulkanImage*> FindComputeColorFillImages(CommandBuffer* buffer, uint64_t address, uint64_t size)
+{
+	Vector<VulkanImage*> images;
+	for (auto* image: FindRenderTexture(buffer, address, size, true)) { images.Add(image); }
+	for (const auto& object: GpuMemoryFindObjectsForSubmission(buffer, address, size, GpuMemoryObjectType::Texture, true, false))
+	{
+		if (object.type == GpuMemoryObjectType::Texture) { images.Add(static_cast<TextureVulkanImage*>(object.obj)); }
+	}
+	return images;
+}
+
+static bool ApplyComputeColorFillImages(CommandBuffer* buffer, const ComputeColorFillIdentity& identity,
+                                        const std::array<uint32_t, 4>& words, const Vector<VulkanImage*>& images)
+{
+	if (!ComputeColorFillUsesGraphicsQueue(buffer) || images.IsEmpty()) { return false; }
+	// Validate the entire alias set before emitting anything. Partial success
+	// would leave two host representations of the same guest fill inconsistent.
+	std::vector<VkClearColorValue> clears(images.Size());
+	for (uint32_t i = 0; i < images.Size(); ++i)
+	{
+		const auto* image = images[i];
+		if (image == nullptr || image->image == nullptr || !DecodeGuestUniformFillTexel(words, image->format, &clears[i]) ||
+		    image->guest_size != identity.size || image->samples != VK_SAMPLE_COUNT_1_BIT ||
+		    (image->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) == 0u)
+		{
+			return false;
+		}
+	}
+	auto vk_buffer = buffer->GetPool()->buffers[buffer->GetIndex()];
+	// Also order same-layout TRANSFER_DST WAW, for which the layout helper
+	// deliberately emits no transition, and the preceding normal CS stores.
+	VkMemoryBarrier write_barrier {};
+	write_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+	write_barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+	write_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u,
+	                     1u, &write_barrier, 0u, nullptr, 0u, nullptr);
+	for (uint32_t i = 0; i < images.Size(); ++i)
+	{
+		auto* image = images[i];
+		bool duplicate = false;
+		for (uint32_t j = 0; j < i; ++j) { duplicate = duplicate || images[j]->image == image->image; }
+		if (duplicate) { continue; }
+		const auto restore_layout = image->layout == VK_IMAGE_LAYOUT_UNDEFINED ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : image->layout;
+		TransitionColorImage(vk_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+		                     VK_PIPELINE_STAGE_TRANSFER_BIT);
+		// A uniform fill gives every texel of every level and layer the same value.
+		const VkImageSubresourceRange range {VK_IMAGE_ASPECT_COLOR_BIT, 0u, image->mip_levels, 0u, image->array_layers};
+		vkCmdClearColorImage(vk_buffer, image->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clears[i], 1u, &range);
+		TransitionColorImage(vk_buffer, image, restore_layout, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+		                     VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+	}
+	GpuMemoryResetHash(&identity.address, &identity.size, 1, GpuMemoryObjectType::RenderTexture);
+	GpuMemoryResetHash(&identity.address, &identity.size, 1, GpuMemoryObjectType::Texture);
+	return true;
+}
+
+void InvalidateComputeColorFills(const ShaderBindResources& bind)
+{
+	if (g_compute_color_fills.Empty()) { return; }
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		if (ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[i])) { continue; }
+		const auto& resource = bind.storage_buffers.buffers[i];
+		const uint64_t size = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+		if (resource.Base48() == 0u || size == 0u || resource.Base48() > UINT64_MAX - size)
+		{
+			g_compute_color_fills.DiscardAll();
+			return;
+		}
+		g_compute_color_fills.DiscardOverlaps(resource.Base48(), size);
+	}
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		if (bind.textures2D.desc[i].usage != ShaderTextureUsage::ReadOnly)
+		{
+			// No exact writable-image range proof is available at this seam.
+			g_compute_color_fills.DiscardAll();
+			return;
+		}
+	}
+}
+
+bool ResolveComputeUniformBufferFill(const ShaderComputeInputInfo& input, uint32_t group_x, uint32_t group_y, uint32_t group_z,
+                                     ComputeUniformBufferFill* fill)
+{
+	EXIT_IF(fill == nullptr);
+	const auto& proof = input.uniform_buffer_fill;
+	const auto& buffers = input.bind.storage_buffers;
+
+	if (!proof.valid || buffers.buffers_num != 1 || input.bind.textures2D.textures_num != 0 ||
+	    input.bind.samplers.samplers_num != 0 || input.bind.gds_pointers.pointers_num != 0 ||
+	    proof.workgroup_shift > 10u || proof.workgroup_register != input.workgroup_register ||
+	    input.threads_num[0] != (1u << proof.workgroup_shift) || input.threads_num[1] != 1u || input.threads_num[2] != 1u ||
+	    !input.group_id[0] || input.group_id[1] || input.group_id[2] || input.thread_ids_num != 1 ||
+	    group_x == 0u || group_y != 1u || group_z != 1u)
+	{
+		return false;
+	}
+	const auto& destination = buffers.buffers[0];
+	if (buffers.start_register[0] != proof.destination_start_register || buffers.accesses[0] != ShaderStorageAccess::Typed ||
+	    (buffers.sources[0] != ShaderStorageBindingSource::DirectResource && buffers.sources[0] != ShaderStorageBindingSource::MetadataSharp) ||
+	    !buffers.code_available[0] || !buffers.exact_matches[0] || buffers.unbased_matches[0] || buffers.decoded_unknown[0] ||
+	    buffers.indirect_descriptor_use[0] || ShaderStorageUsageIsReadOnly(buffers.usages[0]) || destination.SwizzleEnabled() ||
+	    destination.IndexStride() != 0u || destination.AddTid())
+	{
+		return false;
+	}
+	// Each live scalar input is one unique user-data SGPR.
+	const auto user_sgpr = [&](int reg, uint32_t* value)
+	{
+		if (reg < 0 || reg == proof.workgroup_register) { return false; }
+		int found = -1;
+		for (int i = 0; i < input.bind.direct_sgprs.sgprs_num; ++i)
+		{
+			if (input.bind.direct_sgprs.start_register[i] != reg) { continue; }
+			if (found != -1) { return false; }
+			found = i;
+		}
+		if (found < 0) { return false; }
+		*value = input.bind.direct_sgprs.sgprs[found].field;
+		return true;
+	};
+	const uint64_t invocations = static_cast<uint64_t>(group_x) * input.threads_num[0];
+	std::array<uint32_t, 4> words {};
+	if (proof.record_bytes == 16u)
+	{
+		// BUF_FMT_32_32_32_32_UINT, one record per invocation.
+		if (destination.Stride() != 16u || destination.Format() != 75u || destination.DstSelXYZW() != 0xfacu ||
+		    invocations != destination.NumRecords())
+		{
+			return false;
+		}
+		for (uint32_t component = 0; component < words.size(); ++component)
+		{
+			if (!user_sgpr(proof.value_registers[component], &words[component])) { return false; }
+		}
+	} else
+	{
+		// BUF_FMT_32_UINT. A period of 1 repeats the first value; the count must
+		// name every record and be whole 16-byte groups.
+		uint32_t count  = 0;
+		uint32_t period = 0;
+		uint32_t value  = 0;
+		// The store writes the X component only; it must land in X.
+		if (proof.record_bytes != 4u || destination.Stride() != 4u || destination.Format() != 20u || (destination.DstSelXYZW() & 7u) != 4u ||
+		    !user_sgpr(proof.count_register, &count) || !user_sgpr(proof.period_register, &period) ||
+		    !user_sgpr(proof.value_registers[0], &value) || period != 1u || count == 0u || count % 4u != 0u ||
+		    count != destination.NumRecords() || invocations < count)
+		{
+			return false;
+		}
+		words.fill(value);
+	}
+	fill->address = destination.Base48();
+	fill->size    = ShaderBufferByteSize(destination.Stride(), destination.NumRecords());
+	fill->words   = words;
+	return true;
+}
+
+bool PublishComputeUniformFillToGuestAddress(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	// The fill rewrites every byte of the bound range, so the whole storage
+	// object is the guest result; a wider object could hold older pending writes.
+	GpuMemoryStorageWriteIdentity identity {};
+	if (buffer == nullptr || !GpuMemoryFindExactWritableStorage(fill.address, fill.size, &identity) ||
+	    !GuestDeviceAddressRecordPublication(g_render_ctx->GetGraphicCtx(), buffer->GetPool()->buffers[buffer->GetIndex()],
+	                                         *identity.buffer, fill.address, fill.size))
+	{
+		return false;
+	}
+	return GpuMemoryMarkStorageGuestPublished(identity, GpuQueueId(static_cast<uint32_t>(buffer->GetQueueIndex())), &fill.words);
+}
+
+bool PropagateComputeUniformColorFill(CommandBuffer* buffer, const ComputeUniformBufferFill& fill)
+{
+	if (!ComputeColorFillUsesGraphicsQueue(buffer)) { return false; }
+	const auto& words = fill.words;
+	ComputeColorFillIdentity identity {};
+	if (!ResolveComputeColorFillIdentity(fill.address, fill.size, &identity, true)) { return false; }
+	g_compute_color_fills.DiscardOverlaps(identity.address, identity.size);
+	const auto images = FindComputeColorFillImages(buffer, identity.address, identity.size);
+	if (!images.IsEmpty()) { return ApplyComputeColorFillImages(buffer, identity, words, images); }
+	SubmissionId submission;
+	if (!buffer->GetSubmissionId(&submission)) { return false; }
+	// content_sequence changes at materialization/writeback, not at every CPU
+	// store. Retain an armed exact range observation to reject intervening host
+	// writes even when there is no subsequent storage rebind or flush.
+	const auto observation = GpuDirtyPageTracker::Instance().BeginRead(identity.address, identity.size);
+	return observation.tracked && g_compute_color_fills.Publish(identity, submission, words, observation);
+}
+
+static void ConsumeComputeColorFill(CommandBuffer* buffer, uint64_t address, uint64_t size)
+{
+	if (g_compute_color_fills.Empty()) { return; }
+	ComputeColorFillIdentity identity {};
+	SubmissionId submission;
+	if (!ResolveComputeColorFillIdentity(address, size, &identity, false) || !buffer->GetSubmissionId(&submission))
+	{
+		g_compute_color_fills.DiscardOverlaps(address, size);
+		return;
+	}
+	ComputeColorFillEvent event {};
+	if (g_compute_color_fills.Consume(identity, submission, &event) &&
+	    GpuDirtyPageTracker::Instance().ReadObservationIsStable(address, size, event.cpu_observation))
+	{
+		(void)ApplyComputeColorFillImages(buffer, identity, event.words, FindComputeColorFillImages(buffer, address, size));
+	}
+}
+
 
 // barriers, describe/materialize color/depth, resolution cohort
 
@@ -110,8 +385,9 @@ static bool ConsumeDepthMetaClear(uint64_t submit_id, const RenderDepthInfo& dep
 	// from UNDEFINED. Only translate the captured zero-fill family when the
 	// guest also initializes stencil in the same first use; otherwise Vulkan
 	// could discard a stencil plane whose metadata semantics are not modeled.
-	if (depth.format != VK_FORMAT_D32_SFLOAT_S8_UINT || depth.samples != VK_SAMPLE_COUNT_1_BIT ||
-	    snapshot.pending_event.pattern.kind != DepthMetaPatternKind::UniformZero ||
+	// A zero HTILE word marks every sample of its 8x8 tile cleared, and the
+	// attachment clear covers every sample, so multisampled targets qualify.
+	if (depth.format != VK_FORMAT_D32_SFLOAT_S8_UINT || snapshot.pending_event.pattern.kind != DepthMetaPatternKind::UniformZero ||
 	    snapshot.pending_event.pattern.first_word != 0u || depth.depth_clear_value != 0.0f ||
 	    std::signbit(depth.depth_clear_value) || !depth.stencil_clear_enable || depth.stencil_clear_value != 0u)
 	{
@@ -698,9 +974,9 @@ static bool DescribeRenderColorSlotInfo(CommandBuffer* buffer, const HW::RenderT
 	auto video_image       = VideoOut::VideoOutGetImageMetadataForSubmission(rt.base.addr, buffer);
 	bool render_to_texture = (video_image.image == nullptr);
 
+	attachment.render_texture_format = render_format.format;
 	if (render_to_texture)
 	{
-		attachment.render_texture_format = render_format.format;
 		attachment.type                  = RenderColorType::RenderTexture;
 		attachment.base_addr             = rt.base.addr;
 	} else
@@ -843,10 +1119,21 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		auto& attachment = r->attachment[slot];
 		if (attachment.type == RenderColorType::DisplayBuffer)
 		{
+			g_compute_color_fills.DiscardOverlaps(attachment.base_addr, attachment.size);
 			const auto video_image = VideoOut::VideoOutGetImageForSubmission(attachment.base_addr, buffer);
 			if (video_image.image != attachment.existing_video_image) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: video_image.image != attachment.existing_video_image condition ignored (continuing)\n"); }
 			attachment.vulkan_buffer = video_image.image;
 			if (attachment.vulkan_buffer == nullptr || attachment.vulkan_buffer->samples != attachment.samples) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: attachment.vulkan_buffer == nullptr || attachment.vulkan_buffer->samples != attachment.samples condition ignored (continuing)\n"); }
+			attachment.attachment_format =
+			    static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
+			attachment.attachment_view = VulkanResolveColorAttachmentView(attachment.vulkan_buffer->format, attachment.attachment_format);
+			if (attachment.attachment_view < 0 || attachment.attachment_view >= VulkanImage::VIEW_MAX ||
+			    attachment.vulkan_buffer->image_view[attachment.attachment_view] == nullptr)
+			{
+				EXIT("display-buffer attachment view unavailable: image_format=%u attachment_format=%u view=%d\n",
+				     static_cast<uint32_t>(attachment.vulkan_buffer->format), static_cast<uint32_t>(attachment.attachment_format),
+				     attachment.attachment_view);
+			}
 			continue;
 		}
 
@@ -857,7 +1144,10 @@ void MaterializeRenderColorInfo(uint64_t submit_id, CommandBuffer* buffer, Rende
 		auto* buffer_vulkan = static_cast<Graphics::RenderTextureVulkanImage*>(Graphics::GpuMemoryCreateObject(
 		    submit_id, g_render_ctx->GetGraphicCtx(), buffer, attachment.base_addr, attachment.size, vulkan_buffer_info));
 		if (buffer_vulkan == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer_vulkan == nullptr condition ignored (continuing)\n"); }
-		attachment.vulkan_buffer = buffer_vulkan;
+		attachment.vulkan_buffer     = buffer_vulkan;
+		attachment.attachment_format = buffer_vulkan->format;
+		attachment.attachment_view   = VulkanImage::VIEW_DEFAULT;
+		ConsumeComputeColorFill(buffer, attachment.base_addr, attachment.size);
 	}
 }
 
@@ -901,6 +1191,70 @@ static void TransitionColorImage(VkCommandBuffer vk_buffer, VulkanImage* image, 
 
 	vkCmdPipelineBarrier(vk_buffer, src_stage, dst_stage, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
 	image->layout = new_layout;
+}
+
+static void PreserveExpandedDccAttachment(CommandBuffer* buffer, const HW::RenderTarget& rt)
+{
+	if (rt.base.addr == 0u || rt.dcc_addr.addr == 0u ||
+	    rt.info.cmask_fast_clear_enable || rt.dcc.dcc_clear_key_enable || rt.attrib.num_samples != 0u ||
+	    rt.attrib.num_fragments != 0u || rt.view.current_mip_level != 0u || rt.view.base_array_slice_index != 0u ||
+	    rt.view.last_array_slice_index != 0u || rt.attrib3.dimension != 1u || rt.attrib3.depth != 0u)
+	{
+		EXIT("unsupported color DCC decompression state: dcc=%u cmask_clear=%u dcc_clear=%u "
+		     "samples=%u fragments=%u mip=%u layers=%u..%u dimension=%u depth=%u\n",
+		     rt.info.dcc_compression_enable, rt.info.cmask_fast_clear_enable,
+		     rt.dcc.dcc_clear_key_enable, rt.attrib.num_samples, rt.attrib.num_fragments, rt.view.current_mip_level,
+		     rt.view.base_array_slice_index, rt.view.last_array_slice_index, rt.attrib3.dimension, rt.attrib3.depth);
+	}
+
+	RenderColorInfo color {};
+	EXIT_IF(!DescribeRenderColorSlotInfo(buffer, rt, &color));
+	const auto& attachment = color.attachment[0];
+	if (attachment.type != RenderColorType::RenderTexture)
+	{
+		EXIT("DCC decompression requires an existing render texture\n");
+	}
+	const auto images = FindRenderTexture(buffer, attachment.base_addr, attachment.size, true);
+	if (images.Size() != 1u)
+	{
+		EXIT("DCC decompression has no unique expanded backing: size=%" PRIu64 " matches=%u\n",
+		     attachment.size, images.Size());
+	}
+	const auto* image = images[0];
+	const auto format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(attachment.render_texture_format));
+	if (image == nullptr || image->image == nullptr || image->layout == VK_IMAGE_LAYOUT_UNDEFINED ||
+	    !image->MatchesGuestExtent(attachment.width, attachment.height) || image->format != format ||
+	    image->samples != VK_SAMPLE_COUNT_1_BIT || image->array_layers != 1u || image->mip_levels != 1u)
+	{
+		EXIT("DCC decompression backing is not an initialized matching single-sample image\n");
+	}
+	// The host render texture already stores expanded color. Retain its exact
+	// backing and submission use; rasterizing the metadata shader would replace
+	// those pixels with an export used only to drive the guest color block.
+}
+
+bool GraphicsRenderColorDecompress(CommandBuffer* buffer, const HW::Context& hw)
+{
+	if (hw.GetColorControl().mode != 6u)
+	{
+		return false;
+	}
+	EXIT_IF(buffer == nullptr || buffer->IsInvalid());
+	if (!Config::IsNextGen() || hw.GetColorControl().op != 0xccu)
+	{
+		EXIT("unsupported color DCC decompression control: op=0x%x\n", hw.GetColorControl().op);
+	}
+	const auto mask = hw.GetRenderTargetMask() & hw.GetShaderRegisters().m_cbShaderMask;
+	for (uint32_t slot = 0; slot < RenderColorInfo::TARGETS_MAX; ++slot)
+	{
+		const auto& rt = hw.GetRenderTarget(slot);
+		if (((mask >> (slot * 4u)) & 0xfu) == 0u || !rt.info.dcc_compression_enable)
+		{
+			continue;
+		}
+		PreserveExpandedDccAttachment(buffer, rt);
+	}
+	return true;
 }
 
 bool GraphicsRenderColorResolve(uint64_t submit_id, CommandBuffer* buffer, const HW::Context& hw)
@@ -1395,6 +1749,7 @@ void InvalidateMemoryObject(const RenderColorInfo& r)
 			continue;
 		}
 		const auto& attachment = r.attachment[slot];
+		g_compute_color_fills.DiscardOverlaps(attachment.base_addr, attachment.size);
 		if (attachment.type == RenderColorType::RenderTexture)
 		{
 			GpuMemoryResetHash(&attachment.base_addr, &attachment.size, 1, GpuMemoryObjectType::RenderTexture);
@@ -1411,6 +1766,10 @@ void InvalidateMemoryObject(const RenderDepthInfo& r)
 
 	if (with_depth)
 	{
+		for (int i = 0; i < r.vaddr_num; ++i)
+		{
+			g_compute_color_fills.DiscardOverlaps(r.vaddr[i], r.size[i]);
+		}
 		GpuMemoryResetHash(r.vaddr, r.size, r.vaddr_num, GpuMemoryObjectType::DepthStencilBuffer);
 	}
 }

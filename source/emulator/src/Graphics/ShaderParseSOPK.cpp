@@ -39,9 +39,13 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 	{
 		case 0x00: inst.type = ShaderInstructionType::SMovkI32; break;
 
-		case 0x02: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cmovk_i32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x02:
+			// if (SCC) D.i32 = signext(SIMM16): s_cmov_b32 with the constant as S0 and the
+			// old destination as the value kept when SCC is clear.
+			inst.type    = ShaderInstructionType::SCmovB32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src[1]  = inst.dst;
+			inst.src_num = 2;
 			break;
 		case 0x03: set_compare(ShaderInstructionType::SCmpEqI32); break;
 		case 0x04: set_compare(ShaderInstructionType::SCmpLgI32); break;
@@ -55,30 +59,78 @@ KYTY_SHADER_PARSER(shader_parse_sopk)
 		case 0x0C: set_compare(ShaderInstructionType::SCmpGeU32); break;
 		case 0x0D: set_compare(ShaderInstructionType::SCmpLtU32); break;
 		case 0x0E: set_compare(ShaderInstructionType::SCmpLeU32); break;
-		case 0x0F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_addk_i32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x0F:
+			// RDNA2 ISA: tmp = D.i32; D.i32 += signext(SIMM16); SCC = (tmp[31] == SIMM16[15] &&
+			// tmp[31] != D.i32[31]). That is s_add_i32 D, D, imm with its signed-overflow SCC.
+			inst.type    = ShaderInstructionType::SAddI32;
+			inst.format  = ShaderInstructionFormat::SVdstSVsrc0SVsrc1;
+			inst.src[1]  = inst.src[0];
+			inst.src[0]  = inst.dst;
+			inst.src_num = 2;
 			break;
 		case 0x10: inst.type = ShaderInstructionType::SMulkI32; break;
-		case 0x11: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_i_fork treated as SBarrier (continuing)\n");
+		case 0x11:
+			if (next_gen)
+			{
+				// The RDNA2 SOPK table has no opcode 17.
+				KYTY_UNKNOWN_OP();
+			}
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_i_fork treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x12: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getreg_b32 treated as SBarrier (continuing)\n");
+		case 0x12:
+			if (next_gen)
+			{
+				// Hardware-register access (MODE, STATUS, HW_ID, ...) is not modeled, and
+				// dropping it would silently change rounding, denormal or ID behavior.
+				KYTY_UNKNOWN_OP();
+			}
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getreg_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x13: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setreg_b32 treated as SBarrier (continuing)\n");
+		case 0x13:
+			if (next_gen)
+			{
+				// Hardware-register access (MODE, STATUS, HW_ID, ...) is not modeled, and
+				// dropping it would silently change rounding, denormal or ID behavior.
+				KYTY_UNKNOWN_OP();
+			}
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setreg_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x14: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getreg_regrd_b32 treated as SBarrier (continuing)\n");
+		case 0x14:
+			if (next_gen)
+			{
+				// The RDNA2 SOPK table has no opcode 20.
+				KYTY_UNKNOWN_OP();
+			}
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_getreg_regrd_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0x15: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setreg_imm32_b32 treated as SBarrier (continuing)\n");
+		case 0x15:
+			if (next_gen)
+			{
+				// Hardware-register access (MODE, STATUS, HW_ID, ...) is not modeled, and
+				// dropping it would silently change rounding, denormal or ID behavior.
+				KYTY_UNKNOWN_OP();
+			}
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setreg_imm32_b32 treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
+			break;
+		case 0x17:
+			// s_waitcnt_depctr: VALU/VS dependency-counter wait; a scheduling
+			// constraint on guest hardware with no host-side value semantics.
+			inst.type              = ShaderInstructionType::SWaitcntDepctr;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = static_cast<uint16_t>(buffer[0] & 0xffffu);
+			inst.src_num           = 1;
+			inst.dst               = {};
 			break;
 
 		default: KYTY_UNKNOWN_OP();

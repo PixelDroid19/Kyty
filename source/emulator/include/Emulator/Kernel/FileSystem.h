@@ -8,6 +8,9 @@
 #include "Emulator/Common.h"
 #include "Emulator/Kernel/Pthread.h"
 
+#include <cstdio>
+#include <memory>
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Kernel::FileSystem {
@@ -57,6 +60,35 @@ void   Mount(const String& folder, const String& point);
 void   Umount(const String& folder_or_point);
 bool   IsMounted();
 String GetRealFilename(const String& mounted_file_name);
+String GetExistingFilename(const String& mounted_file_name);
+
+// Streams retain the host libc's opaque FILE layout. Only guest descriptors
+// enter/leave this bridge; buffering follows POSIX active-handle rules (fflush
+// before descriptor I/O, then reposition the stream before resuming stdio).
+FILE* OpenStream(const char* path, const char* mode);
+FILE* OpenDescriptorStream(int descriptor, const char* mode);
+FILE* ReopenStream(const char* path, const char* mode, FILE* stream);
+int CloseStream(FILE* stream);
+int StreamDescriptor(FILE* stream);
+FILE* StandardStream(int descriptor);
+int SetStreamBuffer(FILE* stream, char* buffer, int host_mode, size_t size);
+int FlushStreams(FILE* stream);
+
+// Serializes registered buffer changes and holds a write lease through the
+// native operation, including waits for libc's FILE lock. Host-only streams
+// retain their legacy use, but cannot acquire caller buffers via SetStreamBuffer.
+class StreamOperation final
+{
+public:
+	explicit StreamOperation(FILE* stream);
+	~StreamOperation();
+	bool IsValid() const;
+	KYTY_CLASS_NO_COPY(StreamOperation);
+
+private:
+	struct State;
+	std::unique_ptr<State> m_state;
+};
 
 // Score a same-directory package font candidate against a missing request.
 // Higher is better; negative means the candidate is not a font file.

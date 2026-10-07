@@ -19,6 +19,7 @@
 #include <map>
 #include <pthread.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <cstdlib>
 #include <chrono>
@@ -899,6 +900,48 @@ bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_of
 #endif
 }
 
+bool sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next)
+{
+#if defined(__linux__) && defined(SEEK_DATA)
+	const auto* shared = static_cast<const SharedBacking*>(backing);
+	if (shared == nullptr || shared->fd < 0 || next == nullptr || backing_offset > shared->size)
+	{
+		return false;
+	}
+	// The memfd's SEEK_DATA includes populated and swapped-out pages. None of
+	// its mapping operations consume the file position changed by this query.
+	const int   saved_errno = errno;
+	const off_t data        = ::lseek(shared->fd, static_cast<off_t>(backing_offset), SEEK_DATA);
+	const int   query_errno = errno;
+	errno                   = saved_errno;
+	if (data < 0)
+	{
+		*next = shared->size;
+		return query_errno == ENXIO;
+	}
+	*next = static_cast<uint64_t>(data);
+	return true;
+#else
+	(void)backing;
+	(void)backing_offset;
+	(void)next;
+	return false;
+#endif
+}
+
+bool sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes)
+{
+	const auto* shared = static_cast<const SharedBacking*>(backing);
+	struct stat status {};
+	if (shared == nullptr || shared->fd < 0 || bytes == nullptr || ::fstat(shared->fd, &status) != 0)
+	{
+		return false;
+	}
+	// st_blocks counts 512-byte units for every page the memfd holds.
+	*bytes = static_cast<uint64_t>(status.st_blocks) * 512u;
+	return true;
+}
+
 static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t prefer, uint64_t backing_offset, uint64_t size,
 	                                     int protect, uint64_t alignment)
 {
@@ -1321,6 +1364,56 @@ bool sys_virtual_alloc_fixed_replacing_owned_reservation(uint64_t address, uint6
 	}
 	assign_protection_range(page_start, page_end, protect);
 	EXIT_IF(!assign_guest_mapping_range_locked(addr, size));
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+bool sys_virtual_free_range(uint64_t address, uint64_t size)
+{
+	EXIT_IF(g_allocs == nullptr);
+
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (page_size == 0 || size == 0 || address % page_size != 0 || size % page_size != 0 || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+	const auto addr = static_cast<uintptr_t>(address);
+	const auto end  = static_cast<uintptr_t>(address + size);
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	auto allocation = g_allocs->upper_bound(addr);
+	if (allocation == g_allocs->begin())
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	--allocation;
+	const uintptr_t owner     = allocation->first;
+	const uintptr_t owner_end = owner + allocation->second;
+	if (addr < owner || end > owner_end || !range_is_guest_owned_locked(addr, size) ||
+	    munmap(reinterpret_cast<void*>(addr), size) != 0)
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	g_allocs->erase(allocation);
+	if (addr > owner)
+	{
+		(*g_allocs)[owner] = addr - owner;
+	}
+	if (end < owner_end)
+	{
+		(*g_allocs)[end] = owner_end - end;
+	}
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	EXIT_IF(!get_host_page_range(addr, size, &page_start, &page_end));
+	erase_protection_range(page_start, page_end);
+	(void)erase_guest_mapping_range_locked(addr, size);
+	if (g_guest_map_cursor > addr)
+	{
+		g_guest_map_cursor = addr;
+	}
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return true;
 }

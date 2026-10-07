@@ -130,6 +130,7 @@ void AgentPadGetReadStats(AgentPadReadStats* out);
 void AgentPadApplyReadStateSample(uint32_t* buttons);
 
 int KYTY_SYSV_ABI PadInit();
+int KYTY_SYSV_ABI PadUnnamedInitStep();
 int KYTY_SYSV_ABI PadOpen(int user_id, int type, int index, const void* param);
 int KYTY_SYSV_ABI PadOpenExt(int user_id, int type, int index, const void* param);
 int KYTY_SYSV_ABI PadClose(int handle);

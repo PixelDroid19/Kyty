@@ -41,6 +41,23 @@ Creating a render-texture object for such a surface without materializing its
 guest data leaves the image undefined. Typical symptoms are smeared glyphs,
 oversized logos, or blank atlas regions.
 
+## Linear block-compressed textures
+
+Gen5 linear (tile 0) surfaces pad each row of *elements* to 256 bytes. For
+BC1-BC7 an element is one 4x4 block, so the row pitch is aligned in block
+columns: a 560-texel BC3 row is 140 blocks, padded to 144 blocks (576 texels).
+Aligning the texel width instead (560 is already a multiple of 16) shifts every
+block row by a few blocks, which shows up as diagonally sheared logos and text
+that are otherwise recognisable. Pitches stay in texels at the Vulkan boundary
+(`bufferRowLength` counts texels and must be a multiple of the block width);
+size estimates count block rows and block columns, never texels times bytes per
+block. `ShaderGen5LinearTexturePitch` is the single place that computes the
+padded linear pitch.
+
+To confirm a suspected linear layout, dump the guest bytes and decode them at
+candidate pitches (tight, 4/8/16-block alignment); the correct pitch produces an
+upright image.
+
 ## Regression coverage
 
 Any change to image descriptor decoding or display-thin detiling should verify

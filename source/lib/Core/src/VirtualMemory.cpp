@@ -9,6 +9,8 @@
 #define _XOPEN_SOURCE 1
 #endif
 
+#include <cstring>
+#include <vector>
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Kyty/Sys/SysVirtual.h"
@@ -29,7 +31,9 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
 #include <mutex>
+#include <thread>
 
 #ifdef KYTY_HAS_SIGNAL_EXCEPTIONS
 #include <csignal>
@@ -649,7 +653,7 @@ static void kyty_sigprof_handler(int /*sig*/, siginfo_t* /*info*/, void* ucontex
 	auto*    uc  = static_cast<ucontext_t*>(ucontext);
 	uint64_t rip = uc_get_rip(uc);
 	static volatile sig_atomic_t n = 0;
-	if (n++ < 200)
+	if (n++ < 1000)
 	{
 		const char* tag = IsGuestCodeAddress(rip)                              ? "PROF-GUEST"
 		                  : (rip >= 0x100000000ull && rip < 0x110000000ull) ? "PROF-FC"
@@ -1747,6 +1751,21 @@ bool ExceptionHandler::InstallVectored(handler_func_t func)
 		sigaction(SIGTRAP, &sat, nullptr);
 #endif
 
+		// Diagnostic only: KYTY_GUEST_PROFILE_AFTER=<seconds> starts sampling the
+		// instruction pointer of running threads then, to locate a spinning loop
+		// in a frozen title without an external profiler.
+		if (const char* after = std::getenv("KYTY_GUEST_PROFILE_AFTER"); after != nullptr && after[0] != '\0')
+		{
+			const auto seconds = std::strtoul(after, nullptr, 10);
+			std::thread(
+			    [seconds]
+			    {
+				    std::this_thread::sleep_for(std::chrono::seconds(seconds));
+				    StartGuestProfiler();
+			    })
+			    .detach();
+		}
+
 		return true;
 	}
 	return false;
@@ -1857,8 +1876,9 @@ bool ReserveFixed(uint64_t address, uint64_t size)
 class SharedBacking
 {
 public:
-	void*    handle = nullptr;
-	uint64_t size   = 0;
+	void*                 handle = nullptr;
+	uint64_t              size   = 0;
+	std::atomic<uint64_t> discards {0};
 };
 
 SharedBacking* CreateSharedBacking(uint64_t size)
@@ -1900,7 +1920,54 @@ bool DiscardSharedBackingRange(SharedBacking* backing, uint64_t backing_offset, 
 	{
 		return false;
 	}
+	// Count every attempt: a partial punch may already have dropped pages.
+	backing->discards.fetch_add(1, std::memory_order_acq_rel);
 	return sys_virtual_discard_shared_backing_range(backing->handle, backing_offset, size);
+}
+
+bool QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulation* population)
+{
+	if (backing == nullptr || backing->handle == nullptr || population == nullptr)
+	{
+		return false;
+	}
+	// Read the discard count first: a discard racing the size query changes it.
+	population->discards = backing->discards.load(std::memory_order_acquire);
+	return sys_virtual_query_shared_backing_populated_bytes(backing->handle, &population->populated_bytes);
+}
+
+void FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan* spans, size_t count)
+{
+	const uint64_t                  page_size = GetPageSize();
+	std::vector<SharedBackingSpan*> order;
+	order.reserve(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		auto& span       = spans[i];
+		span.unpopulated = false;
+		if (shared_range_is_valid(backing, span.offset, span.size) && page_size != 0 && span.offset % page_size == 0 &&
+		    span.size % page_size == 0)
+		{
+			order.push_back(&span);
+		}
+	}
+	std::sort(order.begin(), order.end(), [](const SharedBackingSpan* a, const SharedBackingSpan* b) { return a->offset < b->offset; });
+	// Every span starting below next_data starts at or after the offset the
+	// last query began at, so [that offset, next_data) holds no page for it.
+	uint64_t next_data = 0;
+	bool     queried   = false;
+	for (auto* span: order)
+	{
+		if (!queried || span->offset >= next_data)
+		{
+			if (!sys_virtual_next_shared_backing_data(backing->handle, span->offset, &next_data))
+			{
+				return;
+			}
+			queried = true;
+		}
+		span->unpopulated = span->size <= next_data - span->offset;
+	}
 }
 
 uint64_t MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
@@ -1953,6 +2020,11 @@ bool Free(uint64_t address)
 	return sys_virtual_free(address);
 }
 
+bool FreeRange(uint64_t address, uint64_t size)
+{
+	return sys_virtual_free_range(address, size);
+}
+
 bool Protect(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 {
 	return sys_virtual_protect(address, size, mode, old_mode);
@@ -1984,6 +2056,33 @@ bool IsRangeGuestOwned(uint64_t address, uint64_t size)
 bool IsRangeReadable(uint64_t address, uint64_t size)
 {
 	return sys_virtual_is_range_readable(address, size);
+}
+
+bool QueryResidentPages(uint64_t address, uint64_t size, uint8_t* resident)
+{
+	if (resident == nullptr || size == 0)
+	{
+		return false;
+	}
+	const uint64_t page  = GetPageSize();
+	const uint64_t pages = (size + page - 1) / page;
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	std::memset(resident, 1, static_cast<size_t>(pages));
+	return true;
+#else
+	// mincore reports populated pages; never-touched anonymous or memfd pages
+	// read as zero and are not resident.
+	std::vector<unsigned char> vec(static_cast<size_t>(pages));
+	if (::mincore(reinterpret_cast<void*>(address), static_cast<size_t>(size), reinterpret_cast<decltype(&vec[0])>(vec.data())) != 0)
+	{
+		return false;
+	}
+	for (uint64_t i = 0; i < pages; i++)
+	{
+		resident[i] = (vec[i] & 1u) != 0 ? 1u : 0u;
+	}
+	return true;
+#endif
 }
 
 bool IsRangeWritable(uint64_t address, uint64_t size)

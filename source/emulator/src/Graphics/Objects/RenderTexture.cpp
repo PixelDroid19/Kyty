@@ -92,6 +92,10 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R16Sfloat, 2};
 	}
+	if (format == 0x3u && channel_type == 0x0u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R8G8Unorm, 2};
+	}
 	if (format == 0x4u && channel_type == 0x7u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::R32Sfloat, 4};
@@ -106,6 +110,16 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	if ((format == 0x6u || format == 0x7u) && channel_type == 0x7u && channel_order == 0x0u)
 	{
 		return {RenderTextureFormat::B10G11R11Ufloat, 4};
+	}
+	// CB COLOR_2_10_10_10 packs channel 0 in the low ten bits: the standard
+	// swap is R10G10B10A2 (Vulkan A2B10G10R10); the alternate swap exchanges R and B.
+	if (format == 0x9u && channel_type == 0x0u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::A2B10G10R10Unorm, 4};
+	}
+	if (format == 0x9u && channel_type == 0x0u && channel_order == 0x1u)
+	{
+		return {RenderTextureFormat::A2R10G10B10Unorm, 4};
 	}
 	if (format == 0xau && channel_type == 0x0u && channel_order == 0x0u)
 	{
@@ -329,11 +343,12 @@ static void update2_func(GraphicContext* ctx, CommandBuffer* buffer, const uint6
 	}
 }
 
-static VkFormat resolve_render_texture_format(uint64_t format)
+uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 {
-	switch (static_cast<RenderTextureFormat>(format))
+	switch (format)
 	{
 		case RenderTextureFormat::R8Unorm: return VK_FORMAT_R8_UNORM;
+		case RenderTextureFormat::R8G8Unorm: return VK_FORMAT_R8G8_UNORM;
 		case RenderTextureFormat::R8G8B8A8Unorm: return VK_FORMAT_R8G8B8A8_UNORM;
 		case RenderTextureFormat::R8G8B8A8Srgb: return VK_FORMAT_R8G8B8A8_SRGB;
 		case RenderTextureFormat::B8G8R8A8Unorm: return VK_FORMAT_B8G8R8A8_UNORM;
@@ -342,6 +357,8 @@ static VkFormat resolve_render_texture_format(uint64_t format)
 		case RenderTextureFormat::R16G16Sfloat: return VK_FORMAT_R16G16_SFLOAT;
 		case RenderTextureFormat::R32Sfloat: return VK_FORMAT_R32_SFLOAT;
 		case RenderTextureFormat::B10G11R11Ufloat: return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+		case RenderTextureFormat::A2R10G10B10Unorm: return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+		case RenderTextureFormat::A2B10G10R10Unorm: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 		case RenderTextureFormat::R16G16B16A16Unorm: return VK_FORMAT_R16G16B16A16_UNORM;
 		case RenderTextureFormat::R16G16B16A16Snorm: return VK_FORMAT_R16G16B16A16_SNORM;
 		case RenderTextureFormat::R16G16B16A16Uint: return VK_FORMAT_R16G16B16A16_UINT;
@@ -359,7 +376,8 @@ static RenderTextureVulkanImage* create_render_texture_image(GraphicContext* ctx
 
 	const auto width     = params[RenderTextureObject::PARAM_WIDTH];
 	const auto height    = params[RenderTextureObject::PARAM_HEIGHT];
-	const auto vk_format = resolve_render_texture_format(params[RenderTextureObject::PARAM_FORMAT]);
+	const auto vk_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(
+	    static_cast<RenderTextureFormat>(params[RenderTextureObject::PARAM_FORMAT])));
 	const auto samples    = static_cast<VkSampleCountFlagBits>(params[RenderTextureObject::PARAM_SAMPLES]);
 	const auto array_layers = static_cast<uint32_t>(params[RenderTextureObject::PARAM_ARRAY_LAYERS]);
 	if (vk_format == VK_FORMAT_UNDEFINED || width == 0 || height == 0 || array_layers == 0)

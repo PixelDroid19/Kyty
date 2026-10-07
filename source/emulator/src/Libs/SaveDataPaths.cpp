@@ -68,13 +68,33 @@ std::filesystem::path SaveDataBuildTitleRoot(const std::filesystem::path& save_d
 	return save_data_root / normalized_title_id;
 }
 
-std::filesystem::path SaveDataBuildMemoryPath(const std::filesystem::path& title_root, int32_t user_id, uint32_t slot_id)
+std::filesystem::path SaveDataBuildMemoryRoot(const std::filesystem::path& title_root)
 {
-	if (title_root.empty() || !title_root.is_absolute() || user_id < 0)
+	if (title_root.empty() || !title_root.is_absolute())
 	{
 		return {};
 	}
-	return title_root.lexically_normal() / "memory" / ("user-" + std::to_string(user_id)) / ("slot-" + std::to_string(slot_id) + ".bin");
+	const auto normalized_title_root = title_root.lexically_normal();
+	const auto title_name            = normalized_title_root.filename().u8string();
+	if (normalized_title_root.parent_path().empty() || title_name.empty() || SaveDataNormalizeTitleId(title_name.c_str()) != title_name)
+	{
+		return {};
+	}
+	return normalized_title_root.parent_path() / ".kyty-memory" / title_name / "memory";
+}
+
+std::filesystem::path SaveDataBuildMemoryPath(const std::filesystem::path& title_root, int32_t user_id, uint32_t slot_id)
+{
+	if (user_id < 0)
+	{
+		return {};
+	}
+	const auto memory_root = SaveDataBuildMemoryRoot(title_root);
+	if (memory_root.empty())
+	{
+		return {};
+	}
+	return memory_root / ("user-" + std::to_string(user_id)) / ("slot-" + std::to_string(slot_id) + ".bin");
 }
 
 } // namespace Kyty::Libs::SaveData

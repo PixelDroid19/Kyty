@@ -28,6 +28,11 @@ libc_vprintf_func_t      GetVprintfFunc();
 // guest's register-save area to the host libc formatter.
 int Format(char* out, size_t out_size, const char* format, VaList* va_list);
 
+// Wide (16-bit guest wchar_t) counterpart of Format: the same conversions, with
+// %ls/%lc taking wide arguments and %s/%c narrow ones. Writes at most
+// out_count units including the terminator and returns the full length.
+int FormatWide(uint16_t* out, size_t out_count, const uint16_t* format, VaList* va_list);
+
 } // namespace Kyty::Libs
 
 #endif // KYTY_EMU_ENABLED

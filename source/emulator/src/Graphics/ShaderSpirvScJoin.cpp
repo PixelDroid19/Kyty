@@ -5,6 +5,11 @@
 #include "Kyty/Core/DbgAssert.h"
 
 #include <cinttypes>
+#include <map>
+#include <tuple>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -12,11 +17,83 @@ namespace Kyty::Libs::Graphics {
 
 namespace {
 
+// Instructions are decoded in address order, so a PC is found by bisection;
+// a miss falls back to a scan in case a pass appended out of order.
+uint32_t instruction_index(const ShaderCode& code, uint32_t pc)
+{
+	const auto& instructions = code.GetInstructions();
+	uint32_t    lo           = 0;
+	uint32_t    hi           = instructions.Size();
+	while (lo < hi)
+	{
+		const uint32_t mid = lo + (hi - lo) / 2u;
+		if (instructions.At(mid).pc < pc)
+		{
+			lo = mid + 1u;
+		} else
+		{
+			hi = mid;
+		}
+	}
+	if (lo < instructions.Size() && instructions.At(lo).pc == pc)
+	{
+		return lo;
+	}
+	for (uint32_t i = 0; i < instructions.Size(); i++)
+	{
+		if (instructions.At(i).pc == pc)
+		{
+			return i;
+		}
+	}
+	return instructions.Size();
+}
+
+// The join queries below are pure functions of the program and of which labels
+// are still enabled (discard emission disables labels). Emission repeats them
+// for every label and branch, which on programs with hundreds of branches never
+// finished; results are kept per thread for one program and label state.
+struct ScJoinMemo
+{
+	const ShaderCode*                                          code         = nullptr;
+	uint32_t                                                   crc32        = 0;
+	uint32_t                                                   hash0        = 0;
+	uint32_t                                                   instructions = 0;
+	uint32_t                                                   labels       = 0;
+	uint32_t                                                   disabled     = 0;
+	std::unordered_map<uint64_t, uint32_t>                     reconvergence;
+	std::map<std::tuple<uint32_t, uint32_t, uint32_t>, bool>   nested;
+};
+
+ScJoinMemo& sc_join_memo(const ShaderCode& code)
+{
+	thread_local ScJoinMemo memo;
+	uint32_t                disabled = 0;
+	for (const auto& label: code.GetLabels())
+	{
+		disabled += label.IsDisabled() ? 1u : 0u;
+	}
+	if (memo.code != &code || memo.crc32 != code.GetCrc32() || memo.hash0 != code.GetHash0() ||
+	    memo.instructions != code.GetInstructions().Size() || memo.labels != code.GetLabels().Size() || memo.disabled != disabled)
+	{
+		memo.code         = &code;
+		memo.crc32        = code.GetCrc32();
+		memo.hash0        = code.GetHash0();
+		memo.instructions = code.GetInstructions().Size();
+		memo.labels       = code.GetLabels().Size();
+		memo.disabled     = disabled;
+		memo.reconvergence.clear();
+		memo.nested.clear();
+	}
+	return memo;
+}
+
 bool instruction_is_conditional_branch(const ShaderInstruction& inst)
 {
 	switch (inst.type)
 	{
 		case ShaderInstructionType::SCbranchExecz:
+		case ShaderInstructionType::SCbranchExecnz:
 		case ShaderInstructionType::SCbranchScc0:
 		case ShaderInstructionType::SCbranchScc1:
 		case ShaderInstructionType::SCbranchVccz:
@@ -31,7 +108,132 @@ bool instruction_is_block_terminator(const ShaderInstruction& inst)
 	       inst.type == ShaderInstructionType::SEndpgm || inst.type == ShaderInstructionType::SSetpcB64;
 }
 
+uint32_t loop_last_backedge(const ShaderCode& code, uint32_t header)
+{
+	uint32_t last = header;
+	for (const auto& label: code.GetLabels())
+	{
+		if (!label.IsDisabled() && label.GetDst() == header && label.GetSrc() > last)
+		{
+			last = label.GetSrc();
+		}
+	}
+	return last;
+}
+
+bool loop_has_unconditional_backedges(const ShaderCode& code, const SpirvSBranchLoop& loop)
+{
+	for (const auto& inst: code.GetInstructions())
+	{
+		if (inst.pc < loop.header || inst.pc > loop.latch)
+		{
+			continue;
+		}
+		if (inst.type == ShaderInstructionType::SSetpcB64 || inst.type == ShaderInstructionType::SSwappcB64)
+		{
+			return false;
+		}
+		if (instruction_is_conditional_branch(inst) && ShaderLabel(inst).GetDst() == loop.header)
+		{
+			return false;
+		}
+		if (inst.pc == loop.latch)
+		{
+			return inst.type == ShaderInstructionType::SBranch && ShaderLabel(inst).GetDst() == loop.header;
+		}
+	}
+	return false;
+}
+
 } // namespace
+
+String8 SpirvSBranchLoop::HeaderName() const
+{
+	return String8::FromPrintf("label_%04" PRIx32 "_%04" PRIx32, header, latch);
+}
+
+String8 SpirvSBranchLoop::MergeName() const
+{
+	return String8::FromPrintf("label_%04" PRIx32 "_%04" PRIx32, merge, exit);
+}
+
+bool ScJoinFindSBranchLoop(const ShaderCode& code, uint32_t header, SpirvSBranchLoop* loop)
+{
+	SpirvSBranchLoop candidate {header, loop_last_backedge(code, header), 0, 0};
+	if (candidate.latch == header || !loop_has_unconditional_backedges(code, candidate))
+	{
+		return false;
+	}
+	for (const auto& label: code.GetLabels())
+	{
+		if (label.IsDisabled())
+		{
+			continue;
+		}
+		const bool inside = label.GetSrc() >= header && label.GetSrc() <= candidate.latch;
+		const bool target_inside = label.GetDst() >= header && label.GetDst() <= candidate.latch;
+		// Incoming branches into the interval need a separate canonical-entry
+		// transformation. Admit only a fallthrough entry here.
+		if (!inside && target_inside)
+		{
+			return false;
+		}
+		if (!inside || target_inside)
+		{
+			continue;
+		}
+		if (label.GetDst() <= candidate.latch ||
+		    (candidate.merge != 0 && candidate.merge != label.GetDst()))
+		{
+			return false;
+		}
+		candidate.merge = label.GetDst();
+		candidate.exit = candidate.exit > label.GetSrc() ? candidate.exit : label.GetSrc();
+	}
+	// The final unconditional branch has no fallthrough. The following guest
+	// block is reached only through the loop's explicit break edges.
+	if (candidate.merge == 0 || static_cast<uint64_t>(candidate.latch) + 4 != candidate.merge)
+	{
+		return false;
+	}
+	*loop = candidate;
+	return true;
+}
+
+bool ScJoinFindSBranchLoopContaining(const ShaderCode& code, uint32_t pc, SpirvSBranchLoop* loop)
+{
+	bool found = false;
+	for (const auto& backedge: code.GetLabels())
+	{
+		if (backedge.IsDisabled() || backedge.GetDst() > pc || backedge.GetSrc() < pc ||
+		    (found && backedge.GetDst() <= loop->header))
+		{
+			continue;
+		}
+		SpirvSBranchLoop candidate;
+		if (ScJoinFindSBranchLoop(code, backedge.GetDst(), &candidate))
+		{
+			*loop = candidate;
+			found = true;
+		}
+	}
+	return found;
+}
+
+bool ScJoinFindSBranchLoopExit(const ShaderCode& code, const ShaderInstruction& inst, SpirvSBranchLoop* loop)
+{
+	if ((!instruction_is_conditional_branch(inst) && inst.type != ShaderInstructionType::SBranch) ||
+	    !operand_is_constant(inst.src[0]))
+	{
+		return false;
+	}
+	const auto edge = ShaderLabel(inst);
+	if (edge.GetDst() <= inst.pc)
+	{
+		return false;
+	}
+	return ScJoinFindSBranchLoopContaining(code, inst.pc, loop) && loop->merge == edge.GetDst();
+}
 
 // True when this forward conditional is a structured loop exit (jumps past a
 // backward SBranch that closes a loop containing the exit).
@@ -58,7 +260,8 @@ bool ScJoinIsLoopExitEdge(const ShaderCode& code, const ShaderInstruction& exit_
 			continue;
 		}
 		// Exit sits in the loop body and targets past the back-edge (loop merge).
-		if (exit_inst.pc > backedge.GetDst() && exit_inst.pc < backedge.GetSrc() && exit.GetDst() > backedge.GetSrc())
+		if (exit_inst.pc > backedge.GetDst() && exit_inst.pc < backedge.GetSrc() &&
+		    exit.GetDst() > loop_last_backedge(code, backedge.GetDst()))
 		{
 			return true;
 		}
@@ -73,6 +276,11 @@ bool ScJoinIsLoopMergeLabel(const ShaderCode& code, const ShaderLabel& label)
 		if (inst.pc != label.GetSrc())
 		{
 			continue;
+		}
+		SpirvSBranchLoop loop;
+		if (ScJoinFindSBranchLoopExit(code, inst, &loop))
+		{
+			return label.GetSrc() == loop.exit;
 		}
 		return ScJoinIsLoopExitEdge(code, inst);
 	}
@@ -95,18 +303,9 @@ int ScJoinCountLabelSources(const ShaderCode& code, uint32_t pc)
 uint32_t ScJoinFindTakenPathMultiJoin(const ShaderCode& code, uint32_t start_pc)
 {
 	const auto& instructions = code.GetInstructions();
-	bool        started      = false;
-	for (uint32_t i = 0; i < instructions.Size(); i++)
+	for (uint32_t i = instruction_index(code, start_pc); i < instructions.Size(); i++)
 	{
 		const auto& inst = instructions.At(i);
-		if (inst.pc == start_pc)
-		{
-			started = true;
-		}
-		if (!started)
-		{
-			continue;
-		}
 		// Multi-join at or after the taken entry is the reconvergence target
 		// when the path reaches it by fallthrough.
 		// >=2 predecessors: if/else reconvergence and multi-way joins.
@@ -138,18 +337,9 @@ uint32_t ScJoinFindTakenPathMultiJoin(const ShaderCode& code, uint32_t start_pc)
 uint32_t ScJoinFindNextMultiJoin(const ShaderCode& code, uint32_t start_pc)
 {
 	const auto& instructions = code.GetInstructions();
-	bool        started      = false;
-	for (uint32_t i = 0; i < instructions.Size(); i++)
+	for (uint32_t i = instruction_index(code, start_pc); i < instructions.Size(); i++)
 	{
 		const auto& inst = instructions.At(i);
-		if (inst.pc == start_pc)
-		{
-			started = true;
-		}
-		if (!started)
-		{
-			continue;
-		}
 		if (ScJoinCountLabelSources(code, inst.pc) >= 2)
 		{
 			return inst.pc;
@@ -166,18 +356,9 @@ static void CollectForwardSBranchTargets(const ShaderCode& code, uint32_t start_
 {
 	EXIT_IF(out == nullptr);
 	const auto& instructions = code.GetInstructions();
-	bool        started      = false;
-	for (uint32_t i = 0; i < instructions.Size(); i++)
+	for (uint32_t i = instruction_index(code, start_pc); i < instructions.Size(); i++)
 	{
 		const auto& inst = instructions.At(i);
-		if (inst.pc == start_pc)
-		{
-			started = true;
-		}
-		if (!started)
-		{
-			continue;
-		}
 		if (end_pc != 0 && inst.pc >= end_pc)
 		{
 			break;
@@ -259,22 +440,14 @@ static bool PathCanReachPc(const ShaderCode& code, uint32_t start_pc, uint32_t t
 		}
 		visited.Add(pc);
 
-		int idx = -1;
-		for (uint32_t i = 0; i < instructions.Size(); i++)
-		{
-			if (instructions.At(i).pc == pc)
-			{
-				idx = static_cast<int>(i);
-				break;
-			}
-		}
-		if (idx < 0)
+		const uint32_t idx = instruction_index(code, pc);
+		if (idx >= instructions.Size())
 		{
 			return false;
 		}
 
 		bool advanced = false;
-		for (uint32_t i = static_cast<uint32_t>(idx); i < instructions.Size(); i++)
+		for (uint32_t i = idx; i < instructions.Size(); i++)
 		{
 			const auto& inst = instructions.At(i);
 			if (inst.pc == target_pc)
@@ -341,7 +514,23 @@ static bool PathCanReachPc(const ShaderCode& code, uint32_t start_pc, uint32_t t
 	return false;
 }
 
+static uint32_t FindReconvergence(const ShaderCode& code, uint32_t taken_dst, uint32_t fallthrough_pc);
+
 uint32_t ScJoinFindReconvergence(const ShaderCode& code, uint32_t taken_dst, uint32_t fallthrough_pc)
+{
+	auto&          memo = sc_join_memo(code);
+	const uint64_t key  = (static_cast<uint64_t>(taken_dst) << 32u) | fallthrough_pc;
+	if (const auto found = memo.reconvergence.find(key); found != memo.reconvergence.end())
+	{
+		return found->second;
+	}
+	const uint32_t result = FindReconvergence(code, taken_dst, fallthrough_pc);
+	// FindReconvergence leaves labels unchanged, so the memo is still current.
+	sc_join_memo(code).reconvergence.emplace(key, result);
+	return result;
+}
+
+static uint32_t FindReconvergence(const ShaderCode& code, uint32_t taken_dst, uint32_t fallthrough_pc)
 {
 	// Return value contract:
 	//   taken_dst — soft empty-case: fallthrough reaches taken (merge at taken)
@@ -421,10 +610,10 @@ uint32_t ScJoinFindReconvergence(const ShaderCode& code, uint32_t taken_dst, uin
 bool ScJoinEdgeTakenDst(const ShaderCode& code, uint32_t src_pc, uint32_t join_pc, uint32_t* taken_dst)
 {
 	const auto& instructions = code.GetInstructions();
-	for (uint32_t i = 0; i < instructions.Size(); i++)
+	for (uint32_t i = instruction_index(code, src_pc); i < instructions.Size(); i = instructions.Size())
 	{
 		const auto& cand = instructions.At(i);
-		if (cand.pc != src_pc || !instruction_is_conditional_branch(cand) || !operand_is_constant(cand.src[0]))
+		if (!instruction_is_conditional_branch(cand) || !operand_is_constant(cand.src[0]))
 		{
 			continue;
 		}
@@ -458,7 +647,63 @@ bool ScJoinEdgeTakenDst(const ShaderCode& code, uint32_t src_pc, uint32_t join_p
 	return false;
 }
 
+static uint32_t InstructionIndex(const ShaderCode& code, uint32_t pc)
+{
+	return instruction_index(code, pc);
+}
+
+static bool ArmReachesBeforeJoin(const ShaderCode& code, uint32_t start, uint32_t target, uint32_t join)
+{
+	const auto& instructions = code.GetInstructions();
+	std::vector<uint32_t> pending {InstructionIndex(code, start)};
+	std::vector<bool> visited(instructions.Size(), false);
+	while (!pending.empty())
+	{
+		const uint32_t index = pending.back();
+		pending.pop_back();
+		if (index >= instructions.Size() || visited[index])
+		{
+			continue;
+		}
+		visited[index] = true;
+		const auto& inst = instructions.At(index);
+		if (inst.pc < start || inst.pc >= join)
+		{
+			continue;
+		}
+		if (inst.pc == target)
+		{
+			return true;
+		}
+		if (inst.type == ShaderInstructionType::SBranch || instruction_is_conditional_branch(inst))
+		{
+			pending.push_back(InstructionIndex(code, ShaderLabel(inst).GetDst()));
+		}
+		if (inst.type != ShaderInstructionType::SBranch && inst.type != ShaderInstructionType::SEndpgm &&
+		    inst.type != ShaderInstructionType::SSetpcB64)
+		{
+			pending.push_back(index + 1);
+		}
+	}
+	return false;
+}
+
+static bool IsNestedIn(const ShaderCode& code, uint32_t parent_src, uint32_t child_src, uint32_t join_pc);
+
 bool ScJoinIsNestedIn(const ShaderCode& code, uint32_t parent_src, uint32_t child_src, uint32_t join_pc)
+{
+	auto&      memo = sc_join_memo(code);
+	const auto key  = std::make_tuple(parent_src, child_src, join_pc);
+	if (const auto found = memo.nested.find(key); found != memo.nested.end())
+	{
+		return found->second;
+	}
+	const bool result = IsNestedIn(code, parent_src, child_src, join_pc);
+	sc_join_memo(code).nested.emplace(key, result);
+	return result;
+}
+
+static bool IsNestedIn(const ShaderCode& code, uint32_t parent_src, uint32_t child_src, uint32_t join_pc)
 {
 	if (parent_src >= child_src || child_src >= join_pc)
 	{
@@ -472,7 +717,7 @@ bool ScJoinIsNestedIn(const ShaderCode& code, uint32_t parent_src, uint32_t chil
 	// False-path / cascade arm: child sits before the parent's taken target.
 	if (child_src < parent_taken)
 	{
-		return true;
+		return ArmReachesBeforeJoin(code, parent_src + 4, child_src, join_pc);
 	}
 	// Taken arm: child is at/after the mid-label. Nest only for skip-over parents
 	// (mid body continues to join and can host further same-join edges).
@@ -480,18 +725,9 @@ bool ScJoinIsNestedIn(const ShaderCode& code, uint32_t parent_src, uint32_t chil
 	// sibling edges on divergent outer paths.
 	if (parent_taken < join_pc && child_src >= parent_taken)
 	{
-		const auto taken_block = code.ReadBlock(parent_taken);
-		if (taken_block.is_valid && taken_block.last.type == ShaderInstructionType::SBranch &&
-		    operand_is_constant(taken_block.last.src[0]))
-		{
-			const uint32_t case_join = ShaderLabel(taken_block.last).GetDst();
-			if (case_join == join_pc)
-			{
-				return false;
-			}
-		}
-		// Skip-over mid: parent already reconverges at join_pc past taken.
-		return true;
+		// A sibling case can lie in the same address interval while every path
+		// from this arm branches over it. Follow both conditional successors.
+		return ArmReachesBeforeJoin(code, parent_taken, child_src, join_pc);
 	}
 	return false;
 }
@@ -499,20 +735,9 @@ bool ScJoinIsNestedIn(const ShaderCode& code, uint32_t parent_src, uint32_t chil
 // Fallthrough PC of the conditional edge at src_pc, or 0 if not found.
 static uint32_t EdgeFallthroughPc(const ShaderCode& code, uint32_t src_pc)
 {
-	const auto& instructions = code.GetInstructions();
-	for (uint32_t i = 0; i < instructions.Size(); i++)
-	{
-		if (instructions.At(i).pc != src_pc)
-		{
-			continue;
-		}
-		if (i + 1 < instructions.Size())
-		{
-			return instructions.At(i + 1).pc;
-		}
-		return 0;
-	}
-	return 0;
+	const auto&    instructions = code.GetInstructions();
+	const uint32_t i            = instruction_index(code, src_pc);
+	return i + 1 < instructions.Size() ? instructions.At(i + 1).pc : 0;
 }
 
 uint32_t ScJoinFindOwner(const ShaderCode& code, uint32_t pc, uint32_t join_pc, const Vector<uint32_t>& sc_join_srcs)
@@ -591,7 +816,7 @@ uint32_t ScJoinFindOwner(const ShaderCode& code, uint32_t pc, uint32_t join_pc, 
 	}
 	if (candidates.Size() == 0)
 	{
-		return 0;
+		return kScJoinNoSource;
 	}
 	// Deepest nesting first; tie-break highest src (innermost cascade).
 	uint32_t best      = candidates[0];
@@ -611,7 +836,7 @@ uint32_t ScJoinFindOwner(const ShaderCode& code, uint32_t pc, uint32_t join_pc, 
 
 uint32_t ScJoinFindParent(const ShaderCode& code, uint32_t src, uint32_t join_pc, const Vector<uint32_t>& sc_join_srcs)
 {
-	uint32_t parent = 0;
+	uint32_t parent = kScJoinNoSource;
 	for (int i = 0; i < sc_join_srcs.Size(); i++)
 	{
 		const uint32_t cand = sc_join_srcs[i];
@@ -621,7 +846,7 @@ uint32_t ScJoinFindParent(const ShaderCode& code, uint32_t src, uint32_t join_pc
 		}
 		if (ScJoinIsNestedIn(code, cand, src, join_pc))
 		{
-			if (parent == 0 || cand > parent)
+			if (parent == kScJoinNoSource || cand > parent)
 			{
 				parent = cand;
 			}
@@ -634,6 +859,11 @@ void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint3
 {
 	EXIT_IF(out_srcs == nullptr);
 	out_srcs->Clear();
+	// Zero denotes an unresolved forward reconvergence, never a forward join.
+	if (join_pc == 0)
+	{
+		return;
+	}
 	const auto& instructions = code.GetInstructions();
 	for (uint32_t i = 0; i < instructions.Size(); i++)
 	{
@@ -644,6 +874,13 @@ void ScJoinCollectSources(const ShaderCode& code, uint32_t join_pc, Vector<uint3
 		}
 		const auto taken = ShaderLabel(cand);
 		if (taken.GetDst() <= cand.pc)
+		{
+			continue;
+		}
+		// A terminating discard arm uses a local fallthrough merge, not a
+		// reconvergence at its destination. Publishing an orphan sc_join there
+		// would add an extra predecessor to a real, separately emitted kill body.
+		if (code.ReadBlock(taken.GetDst()).is_discard)
 		{
 			continue;
 		}
@@ -687,18 +924,23 @@ void ScJoinOrderForEmission(const ShaderCode& code, uint32_t join_pc, const Vect
 	{
 		out_order->Add(sc_join_srcs[i]);
 	}
-	// Deepest first; tie-break higher src pc (innermost cascade).
+	// Deepest first; tie-break higher src pc (innermost cascade). Depths are
+	// computed once per source rather than once per comparison.
+	std::vector<int> depth(static_cast<size_t>(out_order->Size()));
+	for (int i = 0; i < out_order->Size(); i++)
+	{
+		depth[static_cast<size_t>(i)] = ScJoinNestingDepth(code, (*out_order)[i], join_pc, sc_join_srcs);
+	}
 	for (int a = 0; a < out_order->Size(); a++)
 	{
 		for (int b = a + 1; b < out_order->Size(); b++)
 		{
-			const int da = ScJoinNestingDepth(code, (*out_order)[a], join_pc, sc_join_srcs);
-			const int db = ScJoinNestingDepth(code, (*out_order)[b], join_pc, sc_join_srcs);
+			const int da = depth[static_cast<size_t>(a)];
+			const int db = depth[static_cast<size_t>(b)];
 			if (db > da || (db == da && (*out_order)[b] > (*out_order)[a]))
 			{
-				const auto tmp   = (*out_order)[a];
-				(*out_order)[a]  = (*out_order)[b];
-				(*out_order)[b]  = tmp;
+				std::swap((*out_order)[a], (*out_order)[b]);
+				std::swap(depth[static_cast<size_t>(a)], depth[static_cast<size_t>(b)]);
 			}
 		}
 	}

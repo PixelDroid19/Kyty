@@ -25,33 +25,42 @@ struct VulkanImageDescriptor
 
 [[nodiscard]] VkImageCreateInfo VulkanBuildImageCreateInfo(const VulkanImageDescriptor& descriptor);
 
-struct VulkanImageViewDescriptor
-{
-	VkImage            image            = nullptr;
-	VkImageViewType    view_type        = VK_IMAGE_VIEW_TYPE_2D;
-	VkFormat           format           = VK_FORMAT_UNDEFINED;
-	VkComponentMapping components       = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-	                                       VK_COMPONENT_SWIZZLE_IDENTITY};
-	VkImageAspectFlags aspect_mask      = VK_IMAGE_ASPECT_COLOR_BIT;
-	uint32_t           base_mip_level   = 0;
-	uint32_t           level_count      = 1;
-	uint32_t           base_array_layer = 0;
-	uint32_t           layer_count      = 1;
-};
-
 [[nodiscard]] VkImageViewCreateInfo VulkanBuildImageViewCreateInfo(const VulkanImageViewDescriptor& descriptor);
 
 // Create one view and publish it only on success.
 [[nodiscard]] bool VulkanCreateDeviceImageView(VkDevice device, const VulkanImageViewDescriptor& descriptor, VkImageView* view);
 
+// Sampled views are descriptor-specific, even when their live backing belongs
+// to an attachment or a storage descriptor with identity write components.
+[[nodiscard]] bool VulkanPlanSampledImageView(const VulkanImage& image, VkImageViewType view_type,
+                                             VkImageAspectFlags aspect, uint32_t base_mip, uint32_t mip_count,
+                                             uint32_t base_layer, uint32_t layer_count, uint32_t selectors,
+                                             VulkanImageViewDescriptor* descriptor);
+[[nodiscard]] bool VulkanImageViewDescriptorsEqual(const VulkanImageViewDescriptor& a, const VulkanImageViewDescriptor& b);
+
+using VulkanImageViewCreator = bool (*)(VkDevice, const VulkanImageViewDescriptor&, VkImageView*);
+// Called under the renderer's resource lock. Injectable creation permits a CPU
+// contract test of cache identity/lifetime without a Vulkan device.
+[[nodiscard]] int VulkanGetOrCreateSampledImageView(VkDevice device, VulkanImage* image,
+                                                   const VulkanImageViewDescriptor& descriptor,
+                                                   VulkanImageViewCreator create = VulkanCreateDeviceImageView);
+
 // Canonical color-image view set used by render targets and video buffers.
 // Creation is atomic: a partial set is destroyed and cleared on failure.
 [[nodiscard]] bool VulkanCreateStandardColorImageViews(GraphicContext* context, VulkanImage* image);
 
+// Create the alternate UNORM/sRGB attachment view for a mutable color image.
+[[nodiscard]] bool VulkanCreateCompatibleColorAttachmentViews(GraphicContext* context, VulkanImage* image);
+
+// Resolve the view that preserves the guest color-attachment transfer domain.
+// Returns -1 when the image and attachment formats are not view-compatible.
+[[nodiscard]] int VulkanResolveColorAttachmentView(VkFormat image_format, VkFormat attachment_format);
+
 // Resolve the descriptor view for a storage-image bind. Render-target arrays
 // reuse their canonical identity array view; storage textures keep their
 // dedicated normalized storage view.
-[[nodiscard]] bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index);
+[[nodiscard]] bool VulkanResolveStorageImageView(const VulkanImage* image, bool three_dimensional, bool arrayed_2d, int* view_index,
+                                                 uint32_t base_mip_level = 0u);
 
 // Decode the four guest 3-bit selectors. Unknown selector values are rejected;
 // they are never rewritten to IDENTITY.

@@ -9,7 +9,7 @@
 
 namespace Kyty::Libs::Graphics {
 
-// One guest level may live in the shared 4 KiB mip tail. The physical source
+// One guest level may live in a shared mip tail. The physical source
 // range and the compact linear upload range deliberately remain separate.
 struct Gen5TextureMipLevelLayout
 {
@@ -27,8 +27,7 @@ struct Gen5TextureMipLevelLayout
 	bool     in_mip_tail    = false;
 };
 
-// Layout and CPU detiler for GFX10 kStandard4KB 2D resources. The helper
-// handles ordinary levels and the shared tail used by smaller mip levels.
+// Per-level physical and compact upload ranges for GFX10 2D mip chains.
 struct Gen5TextureMipLayout
 {
 	TileSizeAlign             tiled {};
@@ -69,6 +68,20 @@ struct Gen5TextureMipLayout
 
 [[nodiscard]] bool Gen5DetileStandard4KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
                                                          uint64_t src_size, const Gen5TextureMipLayout& layout);
+
+[[nodiscard]] bool Gen5GetStandard64KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height,
+                                                        uint32_t pitch, uint32_t levels,
+                                                        Gen5TextureMipLayout* layout);
+
+[[nodiscard]] bool Gen5DetileStandard64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
+                                                          uint64_t src_size, const Gen5TextureMipLayout& layout);
+
+[[nodiscard]] bool Gen5GetDepth64KBTextureMipLayout(uint32_t format, uint32_t width, uint32_t height,
+                                                    uint32_t pitch, uint32_t levels,
+                                                    Gen5TextureMipLayout* layout);
+
+[[nodiscard]] bool Gen5DetileDepth64KBTextureMipChain(void* dst, uint64_t dst_size, const void* src,
+                                                      uint64_t src_size, const Gen5TextureMipLayout& layout);
 
 } // namespace Kyty::Libs::Graphics
 

@@ -2,6 +2,7 @@
 
 #include "Kyty/Core/DbgAssert.h"
 
+#include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/ProcessEnvironment.h"
 #include "Emulator/VideoFrameMemory.h"
 
@@ -93,24 +94,42 @@ KYTY_SYSV_ABI uint16_t* c_wcsncpy(uint16_t* destination, const uint16_t* source,
 	}
 	return destination;
 }
+// Dinkumware wctype_t values, as the iswxxx macros of the guest headers pass
+// them: 1 alnum, 2 alpha, 3 cntrl, 4 digit, 5 graph, 6 lower, 7 print, 8 punct,
+// 9 space, 10 upper, 11 xdigit, 12 blank. Titles scan format specifications
+// with class 2 (stop at the conversion letter) and trim with class 9.
+static bool AsciiClassMember(uint32_t c, int character_class)
+{
+	const bool upper = c >= 'A' && c <= 'Z';
+	const bool lower = c >= 'a' && c <= 'z';
+	const bool digit = c >= '0' && c <= '9';
+	const bool graph = c > 0x20 && c < 0x7f;
+	switch (character_class)
+	{
+		case 1: return upper || lower || digit;
+		case 2: return upper || lower;
+		case 3: return c < 0x20 || c == 0x7f;
+		case 4: return digit;
+		case 5: return graph;
+		case 6: return lower;
+		case 7: return graph || c == ' ';
+		case 8: return graph && !upper && !lower && !digit;
+		case 9: return c == ' ' || (c >= '\t' && c <= '\r');
+		case 10: return upper;
+		case 11: return digit || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f');
+		case 12: return c == ' ' || c == '\t';
+		default: return false;
+	}
+}
+
+// The guest runs in the "C" locale, which classifies only the ASCII range.
 KYTY_SYSV_ABI int c_Iswctype(uint32_t character, int character_class)
 {
-	if (character > 0x7f)
+	if (character_class < 1 || character_class > 12)
 	{
-		EXIT_NOT_IMPLEMENTED(character > 0x7f);
-		return 0;
+		EXIT("_Iswctype: unknown character class %d\n", character_class);
 	}
-
-	// The verified descriptor scans decimal width characters. Do not delegate to
-	// the host locale or accept unrelated descriptor values: either behavior can
-	// change guest control flow without an established ABI contract.
-	if (character_class != 2)
-	{
-		EXIT_NOT_IMPLEMENTED(character_class != 2);
-		return 0;
-	}
-
-	return character >= '0' && character <= '9' ? 1 : 0;
+	return character <= 0x7f && AsciiClassMember(character, character_class) ? 1 : 0;
 }
 KYTY_SYSV_ABI int c_Wctombx(char* dst, uint32_t character, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
 {
@@ -121,6 +140,45 @@ KYTY_SYSV_ABI int c_Wctombx(char* dst, uint32_t character, std::mbstate_t* /*sta
 	if (character > 0x7f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: condition ignored (continuing)\n"); }
 	dst[0] = static_cast<char>(character);
 	return 1;
+}
+// Gen5 libc_v1 wcstombs_s — bounded wide->multibyte (C11 Annex K form). The
+// guest wide character is a 16-bit code unit; Kyty's locale model is
+// single-byte, so each code unit maps to one byte.
+KYTY_SYSV_ABI int c_wcstombs_s(size_t* pConvertedChars, char* dst, size_t dstSizeInBytes,
+                               const uint16_t* src, size_t maxBytesIn)
+{
+	if (pConvertedChars != nullptr)
+	{
+		*pConvertedChars = 0;
+	}
+	if (dst == nullptr || dstSizeInBytes == 0 || src == nullptr)
+	{
+		return -1;
+	}
+	dst[0] = 0;
+	for (size_t i = 0; i < maxBytesIn; ++i)
+	{
+		const uint16_t ch = src[i];
+		if (ch == 0)
+		{
+			if (i + 1 > dstSizeInBytes)
+			{
+				return -1;
+			}
+			dst[i] = 0;
+			if (pConvertedChars != nullptr)
+			{
+				*pConvertedChars = i + 1;
+			}
+			return 0;
+		}
+		if (i + 1 >= dstSizeInBytes)
+		{
+			return -1;
+		}
+		dst[i] = ch <= 0xff ? static_cast<char>(ch) : '?';
+	}
+	return -1;
 }
 KYTY_SYSV_ABI int c_Mbtowcx(uint16_t* dst, const char* src, size_t count, std::mbstate_t* /*state*/, const void* /*cvtvec*/)
 {
@@ -265,6 +323,42 @@ KYTY_SYSV_ABI char* c_strncat(char* d, const char* s, size_t n)
 {
 	return ::strncat(d, s, n);
 }
+KYTY_SYSV_ABI int c_strncat_s(char* d, size_t destsz, const char* s, size_t count)
+{
+	if (d == nullptr || s == nullptr)
+	{
+		return Posix::POSIX_EINVAL;
+	}
+	if (destsz == 0)
+	{
+		return Posix::POSIX_ERANGE;
+	}
+
+	size_t used = 0;
+	while (used < destsz && d[used] != '\0')
+	{
+		used++;
+	}
+	if (used == destsz)
+	{
+		return Posix::POSIX_EINVAL;
+	}
+
+	size_t appended = 0;
+	while (appended < count && s[appended] != '\0')
+	{
+		if (appended >= destsz - used - 1)
+		{
+			return Posix::POSIX_ERANGE;
+		}
+		appended++;
+	}
+
+	Emulator::VideoFrameMemory::NotifyHostWrite(reinterpret_cast<uint64_t>(d + used), appended + 1);
+	std::memcpy(d + used, s, appended);
+	d[used + appended] = '\0';
+	return 0;
+}
 KYTY_SYSV_ABI char* c_strpbrk(const char* string, const char* accept)
 {
 	return const_cast<char*>(::strpbrk(string, accept));
@@ -276,6 +370,30 @@ KYTY_SYSV_ABI char* c_strchr(const char* s, int c)
 KYTY_SYSV_ABI char* c_strstr(const char* haystack, const char* needle)
 {
 	return const_cast<char*>(::strstr(haystack, needle));
+}
+KYTY_SYSV_ABI char* c_strnstr(const char* haystack, const char* needle, size_t count)
+{
+	if (haystack == nullptr || needle == nullptr)
+	{
+		return nullptr;
+	}
+	if (*needle == '\0')
+	{
+		return const_cast<char*>(haystack);
+	}
+
+	const size_t needle_size = std::strlen(needle);
+	const char*  current     = haystack;
+	while (count >= needle_size && *current != '\0')
+	{
+		if (*current == *needle && std::strncmp(current, needle, needle_size) == 0)
+		{
+			return const_cast<char*>(current);
+		}
+		current++;
+		count--;
+	}
+	return nullptr;
 }
 KYTY_SYSV_ABI char* c_getenv(const char* name)
 {

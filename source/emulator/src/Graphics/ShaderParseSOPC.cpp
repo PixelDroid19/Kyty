@@ -52,25 +52,45 @@ KYTY_SHADER_PARSER(shader_parse_sopc)
 		case 0x09: inst.type = ShaderInstructionType::SCmpGeU32; break;
 		case 0x0a: inst.type = ShaderInstructionType::SCmpLtU32; break;
 		case 0x0b: inst.type = ShaderInstructionType::SCmpLeU32; break;
-		case 0xC: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitcmp0_b32 treated as SBarrier (continuing)\n");
+		case 0xC:
+			inst.type = ShaderInstructionType::SBitcmp0B32;
+			break;
+		case 0xD:
+			inst.type = ShaderInstructionType::SBitcmp1B32;
+			break;
+		case 0xE:
+			inst.type        = ShaderInstructionType::SBitcmp0B64;
+			inst.format      = ShaderInstructionFormat::Ssrc02Ssrc1;
+			inst.src[0].size = 2;
+			break;
+		case 0xF:
+			inst.type        = ShaderInstructionType::SBitcmp1B64;
+			inst.format      = ShaderInstructionFormat::Ssrc02Ssrc1;
+			inst.src[0].size = 2;
+			break;
+		case 0x10:
+			if (next_gen)
+			{
+				// The RDNA2 SOPC table skips from opcode 15 to 18, and the ISA has no VSKIP.
+				KYTY_UNKNOWN_OP();
+			}
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setvskip treated as SBarrier (continuing)\n");
 			inst.type = ShaderInstructionType::SBarrier;
 			inst.format = ShaderInstructionFormat::Unknown;
 			break;
-		case 0xD: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitcmp1_b32 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x12:
+			EXIT_NOT_IMPLEMENTED(!next_gen);
+			inst.type        = ShaderInstructionType::SCmpEqU64;
+			inst.format      = ShaderInstructionFormat::Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
-		case 0xE: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitcmp0_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0xF: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_bitcmp1_b64 treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
-		case 0x10: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setvskip treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x13:
+			EXIT_NOT_IMPLEMENTED(!next_gen);
+			inst.type        = ShaderInstructionType::SCmpLgU64;
+			inst.format      = ShaderInstructionFormat::Ssrc02Ssrc12;
+			inst.src[0].size = 2;
+			inst.src[1].size = 2;
 			break;
 
 		default: KYTY_UNKNOWN_OP();

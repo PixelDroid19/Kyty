@@ -8,11 +8,11 @@ set(imgui_src
 )
 
 add_library(imgui STATIC ${imgui_src})
+target_link_libraries(imgui PUBLIC vulkan-1)
 
 target_include_directories(imgui PUBLIC
 	"${CMAKE_CURRENT_SOURCE_DIR}"
 	"${CMAKE_CURRENT_SOURCE_DIR}/backends"
-	"${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include"
 	"${CMAKE_SOURCE_DIR}/3rdparty/sdl2/sdl2/include"
 )
 
@@ -30,11 +30,11 @@ target_compile_definitions(imgui PRIVATE IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
 # Keep the host-window adapter out of the generic archive.  The emulator owns
 # this object so static consumers link SDL after the adapter that references it.
 add_library(imgui_sdl_backend_obj OBJECT backends/imgui_impl_sdl2.cpp)
+target_link_libraries(imgui_sdl_backend_obj PRIVATE Vulkan::Headers)
 
 target_include_directories(imgui_sdl_backend_obj PRIVATE
 	"${CMAKE_CURRENT_SOURCE_DIR}"
 	"${CMAKE_CURRENT_SOURCE_DIR}/backends"
-	"${CMAKE_SOURCE_DIR}/3rdparty/vulkan/include"
 	"${CMAKE_SOURCE_DIR}/3rdparty/sdl2/sdl2/include"
 )
 

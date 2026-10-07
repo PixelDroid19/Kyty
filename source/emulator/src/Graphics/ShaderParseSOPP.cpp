@@ -16,7 +16,8 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 	uint32_t simm   = (buffer[0] >> 0u) & 0xffffu;
 
 	ShaderInstruction inst;
-	inst.pc = pc;
+	inst.pc          = pc;
+	inst.sopp_opcode = static_cast<uint8_t>(opcode);
 
 	inst.format            = ShaderInstructionFormat::Label;
 	inst.src[0].type       = ShaderOperandType::LiteralConstant;
@@ -36,6 +37,7 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 		case 0x06: inst.type = ShaderInstructionType::SCbranchVccz; break;
 		case 0x07: inst.type = ShaderInstructionType::SCbranchVccnz; break;
 		case 0x08: inst.type = ShaderInstructionType::SCbranchExecz; break;
+		case 0x09: inst.type = ShaderInstructionType::SCbranchExecnz; break;
 		case 0x0c:
 			inst.type              = ShaderInstructionType::SWaitcnt;
 			inst.format            = ShaderInstructionFormat::Imm;
@@ -66,51 +68,68 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.src[0].constant.u = simm;
 			inst.src_num           = 1;
 			break;
-		case 0x9: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_execnz treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
-			break;
 		case 0xA:
 			if (simm != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: simm != 0 condition ignored (continuing)\n"); }
 			inst.type    = ShaderInstructionType::SBarrier;
 			inst.format  = ShaderInstructionFormat::Empty;
 			inst.src_num = 0;
+			inst.src[0]  = {};
 			break;
-		case 0xB: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setkill treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xB: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setkill skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0xD: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sethalt treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xD: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sethalt skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0xE: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sleep treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xE: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sleep skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0xF: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setprio treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0xF: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_setprio skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0x11: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sendmsghalt treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x11: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_sendmsghalt skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0x12: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_trap treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x12:
+			// Traps are not taken without a trap handler (STATUS.TRAP_EN = 0).
+			inst.type              = ShaderInstructionType::STrap;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
+			inst.src_num           = 1;
 			break;
-		case 0x13: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_icache_inv treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x13: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_icache_inv skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0x14: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_incperflevel treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x14: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_incperflevel skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0x15: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_decperflevel treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x15: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_decperflevel skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
 		case 0x16:
 			// s_ttracedata only feeds the hardware thread-trace stream. It has no
@@ -121,21 +140,31 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 			inst.src[0].constant.u = simm;
 			inst.src_num           = 1;
 			break;
-		case 0x17: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x17: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys skipped (continuing)\n");
+			// No attached GPU system debugger leaves COND_DBG_SYS clear, so the
+			// conditional branch is never taken and linearizes to a no-op.
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0x18: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbguser treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x18: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbguser skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0x19: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys_or_user treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x19: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys_or_user skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
-		case 0x1A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys_and_user treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x1A: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: s_cbranch_cdbgsys_and_user skipped (continuing)\n");
+			inst.type              = ShaderInstructionType::SBarrier;
+			inst.format            = ShaderInstructionFormat::Imm;
+			inst.src[0].type       = ShaderOperandType::LiteralConstant;
+			inst.src[0].constant.u = simm;
 			break;
 
 		default: KYTY_UNKNOWN_OP();
@@ -145,7 +174,8 @@ KYTY_SHADER_PARSER(shader_parse_sopp)
 
 	if (inst.type == ShaderInstructionType::SCbranchScc0 || inst.type == ShaderInstructionType::SCbranchScc1 ||
 	    inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz ||
-	    inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SBranch)
+	    inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz ||
+	    inst.type == ShaderInstructionType::SBranch)
 	{
 		dst->GetLabels().Add(ShaderLabel(inst));
 

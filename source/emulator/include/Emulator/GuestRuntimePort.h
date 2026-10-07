@@ -21,6 +21,8 @@ using InvokeFunction            = uint64_t KYTY_SYSV_ABI (*)(uint64_t target, ui
 using Invoke4Function           = uint64_t KYTY_SYSV_ABI (*)(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3);
 using InvokeOnStackFunction = uint64_t KYTY_SYSV_ABI (*)(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, void* stack_top);
 using ReleaseThreadDynamicTlsFunction = void (*)(int thread_id);
+using GetProcessParametersFunction    = uint64_t (*)();
+using IsExecutableAddressFunction     = bool (*)(uint64_t address);
 
 struct Provider
 {
@@ -29,6 +31,8 @@ struct Provider
 	Invoke4Function           invoke4             = nullptr;
 	InvokeOnStackFunction     invoke_on_stack     = nullptr;
 	ReleaseThreadDynamicTlsFunction release_thread_dynamic_tls = nullptr;
+	GetProcessParametersFunction    get_process_parameters     = nullptr;
+	IsExecutableAddressFunction     is_executable_address      = nullptr;
 };
 
 // RuntimeLinker installs the provider during construction. Empty callbacks
@@ -40,6 +44,8 @@ void Install(const Provider& provider) noexcept;
 [[nodiscard]] uint64_t      Invoke4(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3) noexcept;
 [[nodiscard]] uint64_t      InvokeOnStack(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2, void* stack_top) noexcept;
 void                         ReleaseThreadDynamicTls(int thread_id) noexcept;
+[[nodiscard]] uint64_t      GetProcessParameters() noexcept;
+[[nodiscard]] bool          IsExecutableAddress(uint64_t address) noexcept;
 
 } // namespace Kyty::Emulator::GuestRuntimePort
 

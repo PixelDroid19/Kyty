@@ -2,6 +2,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/GuestRuntimePort.h"
+#include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Kernel/Pthread.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Libs/CxxLocale.h"
@@ -27,6 +28,7 @@
 #include <thread>
 #include <utility>
 #include <vector>
+#include <unwind.h>
 
 UT_BEGIN(EmulatorLibcCxxLocale);
 
@@ -438,7 +440,7 @@ TEST(EmulatorLibcCxxLocale, FlushesCapturedStandardErrorStream)
 	EXPECT_EQ(flush(stderr), 0);
 }
 
-TEST(EmulatorLibcCxxLocale, FilenoReturnsHostDescriptorForGuestStream)
+TEST(EmulatorLibcCxxLocale, FilenoSeparatesGuestDescriptorsFromUnregisteredHostStreams)
 {
 	EnsureLog();
 
@@ -454,13 +456,15 @@ TEST(EmulatorLibcCxxLocale, FilenoReturnsHostDescriptorForGuestStream)
 
 	FILE* stream = std::tmpfile();
 	ASSERT_NE(stream, nullptr);
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	EXPECT_EQ(fileno_guest(stream), ::_fileno(stream));
-#else
-	EXPECT_EQ(fileno_guest(stream), ::fileno(stream));
-#endif
+	// A native FILE is not implicitly a registered guest descriptor. Leaking
+	// its host number can alias an unrelated entry in the guest table.
+	EXPECT_EQ(fileno_guest(stream), -1);
 	EXPECT_EQ(fileno_guest(nullptr), -1);
 	EXPECT_EQ(std::fclose(stream), 0);
+	FILE* guest_output = Kernel::FileSystem::StandardStream(1);
+	ASSERT_NE(guest_output, nullptr);
+	EXPECT_NE(guest_output, stdout);
+	EXPECT_EQ(fileno_guest(guest_output), 1);
 }
 
 TEST(EmulatorLibcCxxLocale, DecrementExceptionRefcountAcceptsNullException)
@@ -1143,7 +1147,7 @@ TEST(EmulatorLibcCxxLocale, ResolvesBaseExceptionDoraiseAsVoidFunction)
 	fn(reinterpret_cast<const void*>(0x840000000));
 }
 
-TEST(EmulatorLibcCxxLocale, ResolvesGxxPersonalityAndContinuesUnwind)
+TEST(EmulatorLibcCxxLocale, ResolvesGxxPersonalityAndRejectsMissingContext)
 {
 	EnsureLog();
 
@@ -1156,7 +1160,47 @@ TEST(EmulatorLibcCxxLocale, ResolvesGxxPersonalityAndContinuesUnwind)
 
 	using GxxPersonality = KYTY_SYSV_ABI int (*)(int, int, uint64_t, void*, void*);
 	auto* fn              = reinterpret_cast<GxxPersonality>(rec->vaddr);
-	EXPECT_EQ(fn(1, 0, 0, nullptr, nullptr), 8);
+	// Null is not an opaque context supplied by the unwinder. The previous
+	// expectation described the removed unconditional continue-unwind stub.
+	EXPECT_EQ(fn(1, 0, 0, nullptr, nullptr), _URC_FATAL_PHASE1_ERROR);
+	_Unwind_Exception exception {};
+	EXPECT_EQ(fn(1, _UA_SEARCH_PHASE, 0, &exception, nullptr), _URC_FATAL_PHASE1_ERROR);
+	EXPECT_EQ(fn(0, _UA_SEARCH_PHASE, 0, nullptr, nullptr), _URC_FATAL_PHASE1_ERROR);
+}
+
+TEST(EmulatorLibcCxxLocale, ContinuesPersonalitySearchAndCleanupForRealFrameWithoutLsda)
+{
+	EnsureLog();
+	Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Libs::Init(U"libc_1", &symbols));
+	const auto* rec = ResolveLibcFunction(&symbols, u"XwLA5cTHjt4");
+	ASSERT_NE(rec, nullptr);
+	using GxxPersonality = KYTY_SYSV_ABI int (*)(int, int, uint64_t, void*, void*);
+	struct Probe
+	{
+		GxxPersonality fn;
+		_Unwind_Exception exception {};
+		bool visited = false;
+		int search = -1;
+		int cleanup = -1;
+	} probe {reinterpret_cast<GxxPersonality>(rec->vaddr)};
+	// Do not fabricate the layout of _Unwind_Context: borrow a real frame from
+	// the host unwinder and choose one with no language-specific landing pads.
+	_Unwind_Backtrace([](_Unwind_Context* context, void* opaque) -> _Unwind_Reason_Code
+	{
+		auto* state = static_cast<Probe*>(opaque);
+		if (_Unwind_GetLanguageSpecificData(context) != nullptr)
+		{
+			return _URC_NO_REASON;
+		}
+		state->search = state->fn(1, _UA_SEARCH_PHASE, 0, &state->exception, context);
+		state->cleanup = state->fn(1, _UA_CLEANUP_PHASE, 0, &state->exception, context);
+		state->visited = true;
+		return _URC_END_OF_STACK;
+	}, &probe);
+	ASSERT_TRUE(probe.visited);
+	EXPECT_EQ(probe.search, _URC_CONTINUE_UNWIND);
+	EXPECT_EQ(probe.cleanup, _URC_CONTINUE_UNWIND);
 }
 
 TEST(EmulatorLibcCxxLocale, ResolvesIosBaseFailureCompleteDestructor)
@@ -1631,7 +1675,9 @@ TEST(EmulatorLibcCxxLocale, NumGetParsesUnsignedLongLongAndLeavesDelimiter)
 
 	auto** vtable_object = reinterpret_cast<void**>(rec->vaddr);
 	using DoGet = Iterator(KYTY_SYSV_ABI*)(const void*, Iterator, Iterator, void*, std::uint32_t*, std::uint64_t*);
-	auto* do_get = reinterpret_cast<DoGet>(vtable_object[13]);
+	// Guest libc order after the facet prefix: bool, unsigned short, unsigned int,
+	// long, unsigned long, long long, unsigned long long (slot 12), float, ...
+	auto* do_get = reinterpret_cast<DoGet>(vtable_object[12]);
 	ASSERT_NE(do_get, nullptr);
 	std::uint32_t state = 0;
 	std::uint64_t value = 0;

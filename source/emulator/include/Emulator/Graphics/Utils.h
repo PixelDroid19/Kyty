@@ -5,10 +5,13 @@
 
 #include "Emulator/Common.h"
 #include "Emulator/Graphics/Objects/VulkanImageFormat.h"
+#include "Emulator/Graphics/Shader.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -33,14 +36,29 @@ struct VulkanSwapchain;
 
 VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 
-// A BC3 sample can be produced through a writable R32G32B32A32_UINT image:
-// one 128-bit storage texel is exactly one 4x4 BC3 block. Vulkan image copies
-// scale the destination extent according to the two formats' block extents.
+// Bytes of one 4x4 block of a Gen5 block-compressed format: 8 for BC1/BC4,
+// 16 for BC2/BC3/BC5/BC6H/BC7 (unorm, srgb and signed variants); zero otherwise.
+[[nodiscard]] inline uint32_t Gen5BlockCompressedBlockBytes(uint32_t ufmt)
+{
+	if (ufmt == 169u || ufmt == 170u || ufmt == 175u || ufmt == 176u)
+	{
+		return 8u;
+	}
+	return ufmt >= 171u && ufmt <= 182u ? 16u : 0u;
+}
+
+// A block-compressed sample can be produced through a writable uint image
+// whose texel is exactly one 4x4 block: R32G32_UINT for 8-byte blocks,
+// R32G32B32A32_UINT for 16-byte ones. Titles upload compressed textures
+// with such compute copies. Vulkan image copies scale the destination
+// extent according to the two formats' block extents.
 [[nodiscard]] inline bool Gen5BlockCompressedStorageCopyExtent(uint32_t sample_ufmt, uint32_t sample_width, uint32_t sample_height,
                                                                VkFormat storage_format, uint32_t storage_width, uint32_t storage_height,
                                                                uint32_t* copy_width, uint32_t* copy_height)
 {
-	if (copy_width == nullptr || copy_height == nullptr || sample_ufmt != 173u || storage_format != VK_FORMAT_R32G32B32A32_UINT)
+	const uint32_t block_bytes = Gen5BlockCompressedBlockBytes(sample_ufmt);
+	const VkFormat block_texel = block_bytes == 8u ? VK_FORMAT_R32G32_UINT : VK_FORMAT_R32G32B32A32_UINT;
+	if (copy_width == nullptr || copy_height == nullptr || block_bytes == 0u || storage_format != block_texel)
 	{
 		return false;
 	}
@@ -61,20 +79,28 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 //   1) the surface format exactly matches the resolved immutable sample
 //      interpretation (including gamma), and
 //   2) Vulkan extent equals the sample descriptor (exact width×height).
+//   3) the surface holds every mip level the descriptor views: a render target
+//      or storage image is one level, so a view of a mip chain (BASE_LEVEL to
+//      LAST_LEVEL) over it would read levels the image does not have. Such a
+//      sample is built as a texture from its parents instead.
+//   4) the surface holds every array layer the descriptor views, for the same reason.
 // Binding a larger parent without a crop view samples the wrong tiles and
 // leaves horizontal bands or false-color geometry. Zero exact+format matches
 // rejects the alias; never fall back to a different gamma or extent.
 //
-// formats[i]/extents_w[i]/extents_h[i] describe candidate i of candidate_count
-// (capped at 16). On success, out_indices[0..out_count) are candidate indices
-// in preference order; out_count==0 && !reject means "use full unfiltered list".
+// formats[i]/extents_w[i]/extents_h[i]/mip_levels[i]/array_layers[i] describe candidate i
+// of candidate_count (capped at 16); sample_levels is the number of levels the view
+// needs from level 0 (LAST_LEVEL + 1) and sample_layers the number of layers from layer 0. On success, out_indices[0..out_count) are
+// candidate indices in preference order; out_count==0 && !reject means "use full
+// unfiltered list".
 [[nodiscard]] inline bool Gen5PickSampleSurfaceAliases(uint32_t sample_ufmt, bool use_srgb, uint32_t sample_width,
-	                                                   uint32_t sample_height,
+	                                                   uint32_t sample_height, uint32_t sample_levels, uint32_t sample_layers,
                                                        size_t candidate_count, const VkFormat* formats, const uint32_t* extents_w,
-                                                       const uint32_t* extents_h, int* out_indices, size_t* out_count, bool* reject)
+                                                       const uint32_t* extents_h, const uint32_t* mip_levels,
+                                                       const uint32_t* array_layers, int* out_indices, size_t* out_count, bool* reject)
 {
-	if (formats == nullptr || extents_w == nullptr || extents_h == nullptr || out_indices == nullptr || out_count == nullptr ||
-	    reject == nullptr)
+	if (formats == nullptr || extents_w == nullptr || extents_h == nullptr || mip_levels == nullptr || array_layers == nullptr ||
+	    out_indices == nullptr || out_count == nullptr || reject == nullptr || sample_levels == 0u || sample_layers == 0u)
 	{
 		return false;
 	}
@@ -89,15 +115,17 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 		{
 			continue;
 		}
-		if (extents_w[i] == sample_width && extents_h[i] == sample_height)
+		if (extents_w[i] == sample_width && extents_h[i] == sample_height && mip_levels[i] >= sample_levels &&
+		    array_layers[i] >= sample_layers)
 		{
 			exact_ok[exact_n++] = static_cast<int>(i);
 		}
 	}
 	if (exact_n == 0)
 	{
-		// No format+extent match. Reject rather than bind a larger parent
-		// without a crop view (horizontal bands / false-color props).
+		// No format+extent+levels+layers match. Reject rather than bind a larger parent
+		// without a crop view (horizontal bands / false-color props) or a view of
+		// mip levels the surface does not have.
 		*reject = true;
 		return true;
 	}
@@ -124,14 +152,23 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 //
 // Tile 27 is kRenderTarget layout. Catalog evidence: fmt 56/71 samples on tile 27
 // are GPU intermediates (also appear as path=rt); CPU detile of those pages is
-// always wrong even when FindRenderTexture misses on the first bind. BC1 (ufmt
-// 133) package textures may still detile from guest when uncovered.
-// Tile 9 (kStandard64KB) remains package RGBA8/RGBA16F when uncovered.
-// Guest T# BC1 is RDNA2 ufmt 169 (UNORM) / 170 (SRGB). Catalog 133 is the
-// same 8-byte 4x4 block family used by older tile-27 package fixtures.
+// always wrong even when FindRenderTexture misses on the first bind. BC1
+// package textures may still detile from guest when uncovered.
+// Uncovered Standard64KB package images also admit block-compressed data;
+// their footprint and upload must both use the compressed mip layout.
+// Guest T# BC1 is RDNA2 ufmt 169 (UNORM) / 170 (SRGB). Historical catalog
+// fixtures must translate their separate ID before entering this raw-ID path.
 [[nodiscard]] inline bool Gen5IsBc1PackageFormat(uint32_t ufmt)
 {
-	return ufmt == 133u || ufmt == 169u || ufmt == 170u;
+	return ufmt == 169u || ufmt == 170u;
+}
+
+// The SW_64KB_S (tile 9) host detiler covers every element size of the GFX10
+// standard pattern, so any uncompressed format of that size is detilable.
+[[nodiscard]] inline bool Gen5Standard64KBDetilesElementBytes(uint32_t bytes_per_element)
+{
+	return bytes_per_element == 1u || bytes_per_element == 2u || bytes_per_element == 4u || bytes_per_element == 8u ||
+	       bytes_per_element == 16u;
 }
 
 [[nodiscard]] inline bool Gen5SampleMayGuestUploadTiled(uint32_t tile, uint32_t ufmt, bool live_color_surface_covers)
@@ -151,7 +188,9 @@ VkImageLayout UtilGetImageUploadSourceLayout(const VulkanImage* image);
 	}
 	if (tile == 9u)
 	{
-		return ufmt == 56u || ufmt == 71u || ufmt == 130u;
+		// Without a live surface over the range the guest bytes are the content
+		// (CPU-written atlases, written-back storage); detile them.
+		return ShaderGen5TextureIsBlockCompressed(ufmt) || Gen5Standard64KBDetilesElementBytes(ShaderGen5TextureBytesPerElement(ufmt));
 	}
 	return true;
 }
@@ -455,9 +494,7 @@ enum class GraphicsWaitRegMemForm : uint8_t
 	}
 }
 
-// Prefer B8G8R8A8 SRGB + SRGB_NONLINEAR: the presentation blit decodes an
-// sRGB source and needs an sRGB destination to encode display values again.
-// Never pick a host-HDR color space when
+// Prefer B8G8R8A8 UNORM/SRGB + SRGB_NONLINEAR. Never pick a host-HDR color space when
 // any LDR SRGB_NONLINEAR candidate exists. Last resort: first non-HDR entry, else [0].
 [[nodiscard]] inline VkSurfaceFormatKHR SelectDefaultSwapchainSurfaceFormat(const VkSurfaceFormatKHR* formats, uint32_t count)
 {
@@ -471,7 +508,6 @@ enum class GraphicsWaitRegMemForm : uint8_t
 
 	const VkSurfaceFormatKHR* unorm_srgb = nullptr;
 	const VkSurfaceFormatKHR* srgb_srgb  = nullptr;
-	const VkSurfaceFormatKHR* rgba_srgb  = nullptr;
 	const VkSurfaceFormatKHR* any_srgb   = nullptr;
 	const VkSurfaceFormatKHR* any_ldr    = nullptr;
 
@@ -500,24 +536,16 @@ enum class GraphicsWaitRegMemForm : uint8_t
 			{
 				srgb_srgb = &f;
 			}
-			if (f.format == VK_FORMAT_R8G8B8A8_SRGB && rgba_srgb == nullptr)
-			{
-				rgba_srgb = &f;
-			}
 		}
 	}
 
-	if (srgb_srgb != nullptr)
-	{
-		return *srgb_srgb;
-	}
-	if (rgba_srgb != nullptr)
-	{
-		return *rgba_srgb;
-	}
 	if (unorm_srgb != nullptr)
 	{
 		return *unorm_srgb;
+	}
+	if (srgb_srgb != nullptr)
+	{
+		return *srgb_srgb;
 	}
 	if (any_srgb != nullptr)
 	{
@@ -632,13 +660,21 @@ struct ColorAttachmentLoadOps
 // Do not invent B=0/A=1 by bitcasting WORD0/1 as float32 R/G.
 [[nodiscard]] inline bool ColorClearWordsHaveKnownPacking(VkFormat format)
 {
-	return format == VK_FORMAT_R16G16B16A16_SFLOAT || format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB ||
-	       format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
+	return format == VK_FORMAT_R32_SFLOAT || format == VK_FORMAT_R16G16B16A16_SFLOAT || format == VK_FORMAT_R8G8B8A8_UNORM ||
+	       format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
 }
 
 [[nodiscard]] inline VkClearColorValue DecodeGuestColorClearWords(uint32_t word0, uint32_t word1, VkFormat format)
 {
 	VkClearColorValue value {};
+	if (format == VK_FORMAT_R32_SFLOAT)
+	{
+		// A single 32-bit floating component occupies WORD0; WORD1 is not
+		// another channel. Preserve the payload, including signed zero.
+		std::memcpy(&value.float32[0], &word0, sizeof(word0));
+		value.float32[3] = 1.0f;
+		return value;
+	}
 	if (format == VK_FORMAT_R16G16B16A16_SFLOAT)
 	{
 		value.float32[0] = Float16BitsToFloat32(static_cast<uint16_t>(word0 & 0xffffu));
@@ -670,6 +706,46 @@ struct ColorAttachmentLoadOps
 	value.float32[2] = 0.0f;
 	value.float32[3] = 1.0f;
 	return value;
+}
+
+// A uniform compute fill stores one 16-byte word quad per invocation. Over a color image whose texel
+// repeats exactly within that quad the fill is independent of tiling, so an image clear reproduces the
+// guest memory contents. Returns false for formats without an evidenced packing or a non-repeating quad.
+[[nodiscard]] inline uint32_t GuestUniformFillTexelBytes(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_R16G16B16A16_SFLOAT: return 8u;
+		case VK_FORMAT_R8G8B8A8_UNORM:
+		case VK_FORMAT_R8G8B8A8_SRGB:
+		case VK_FORMAT_B8G8R8A8_UNORM:
+		case VK_FORMAT_B8G8R8A8_SRGB:
+		case VK_FORMAT_R32_SFLOAT: return 4u;
+		default: return 0u;
+	}
+}
+
+[[nodiscard]] inline bool DecodeGuestUniformFillTexel(const std::array<uint32_t, 4>& words, VkFormat format, VkClearColorValue* clear)
+{
+	const uint32_t texel   = GuestUniformFillTexelBytes(format);
+	const bool     repeats = texel == 8u ? (words[0] == words[2] && words[1] == words[3])
+	                                     : (texel == 4u && words[0] == words[1] && words[0] == words[2] && words[0] == words[3]);
+	if (clear == nullptr || !repeats) { return false; }
+	*clear = DecodeGuestColorClearWords(words[0], words[1], format);
+	// vkCmdClearColorImage encodes sRGB images from linear input: decode the stored bytes first.
+	if (format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_SRGB)
+	{
+		for (int channel = 0; channel < 3; ++channel)
+		{
+			const float encoded       = clear->float32[channel];
+			clear->float32[channel] = encoded <= 0.04045f ? encoded / 12.92f : std::pow((encoded + 0.055f) / 1.055f, 2.4f);
+		}
+	}
+	for (float component: clear->float32)
+	{
+		if (!std::isfinite(component)) { return false; }
+	}
+	return true;
 }
 
 [[nodiscard]] inline ColorAttachmentLoadOps ResolveColorAttachmentLoadOps(VkImageLayout tracked_layout, bool guest_fast_clear,
@@ -745,17 +821,21 @@ struct ImageImageCopy
 
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBufferToDepthImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, uint32_t src_pitch, VulkanImage* dst_image,
-                            uint64_t dst_layout);
+                            uint64_t dst_layout, uint32_t dst_base_array_layer = 0);
 void UtilBufferToImage(CommandBuffer* buffer, VulkanBuffer* src_buffer, VulkanImage* dst_image, const Vector<BufferImageCopy>& regions,
                        uint64_t dst_layout);
 void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer, uint32_t dst_pitch, uint64_t src_layout,
                        uint32_t src_array_layer = 0);
+void UtilImageToBuffer(CommandBuffer* buffer, VulkanImage* src_image, VulkanBuffer* dst_buffer,
+                       const Vector<VkBufferImageCopy>& regions, uint64_t src_layout);
 void UtilImageToImage(CommandBuffer* buffer, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
 void UtilBlitImage(CommandBuffer* buffer, VulkanImage* src_image, VulkanSwapchain* dst_swapchain, VkFilter filter);
+// Blit the whole source into [0, dst_extent) of dst_image, which ends in TRANSFER_DST_OPTIMAL (its prior contents are discarded).
+void UtilBlitImageTo(CommandBuffer* buffer, VulkanImage* src_image, VkImage dst_image, VkExtent2D dst_extent, VkFilter filter);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
                    uint64_t dst_layout);
 void UtilFillDepthImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, uint32_t src_pitch,
-                        uint64_t dst_layout);
+                        uint64_t dst_layout, uint32_t dst_base_array_layer = 0);
 void UtilFillImage(GraphicContext* ctx, VulkanImage* dst_image, const void* src_data, uint64_t size, const Vector<BufferImageCopy>& regions,
                    uint64_t dst_layout);
 void UtilFillImage(GraphicContext* ctx, const Vector<ImageImageCopy>& regions, VulkanImage* dst_image, uint64_t dst_layout);
@@ -842,6 +922,30 @@ enum class LabelForceCompleteKind : uint8_t
 [[nodiscard]] inline bool GraphicsBatchNeedsSubmissionCompletion(bool completion_callback_issued)
 {
 	return completion_callback_issued;
+}
+
+[[nodiscard]] inline bool GraphicsWaitRegMemCanConsolidateCurrentProducer(bool current_submission, uint8_t producer_effects)
+{
+	// Only a plain label store can rely on same-queue GPU ordering until one
+	// end-of-batch fence publishes it. Write-back and notification callbacks
+	// have host-visible effects that must stay synchronous at their wait packet.
+	constexpr uint8_t guest_store = 1u;
+	return current_submission && producer_effects == guest_store;
+}
+
+// Completion callbacks a command-processor batch can record.
+constexpr uint8_t kGraphicsCompletionEndOfPipeInterrupt = 1u << 0u;
+constexpr uint8_t kGraphicsCompletionFlip               = 1u << 1u;
+constexpr uint8_t kGraphicsCompletionQueuedInterrupt    = 1u << 2u;
+
+[[nodiscard]] inline bool GraphicsBatchCanDeferSubmissionCompletion(uint8_t completion_callback_sources)
+{
+	// Completion payloads (labels, interrupts, flips) are asynchronous on the
+	// guest: it observes them through memory, event queues and flip status,
+	// never by its submit call blocking. The fence poll of a later submission or
+	// the ring's idle pump publishes them, so the processor records the next
+	// batch while the device executes this one.
+	return completion_callback_sources != 0u;
 }
 
 // GPU→CPU buffer write-back with absolute holes [hole_begin[i], hole_end[i]).

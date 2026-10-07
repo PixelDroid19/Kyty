@@ -124,9 +124,27 @@ int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void*
 // Internal, side-effect-free range query. Returns true only when the entire
 // requested range lies inside one currently mapped protection segment.
 [[nodiscard]] bool   KernelQueryMappedRange(uint64_t vaddr, uint64_t size, KernelMappedRange* out);
+// Population of the shared backing behind every Physical mapping; see
+// VirtualMemory::SharedBackingPopulation. False before the kernel exists.
+[[nodiscard]] bool   KernelQueryPhysicalPopulation(Core::VirtualMemory::SharedBackingPopulation* out);
+// Read-write host view of the direct-memory pages behind a physical guest
+// mapping, for importing guest memory into a device independently of the
+// guest view's protection. Returns 0 for non-physical or partial ranges.
+[[nodiscard]] uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size);
+bool                 KernelUnmapPhysicalAlias(uint64_t alias);
+struct KernelPhysicalSpan
+{
+	uint64_t vaddr       = 0;
+	uint64_t size        = 0;
+	bool     unpopulated = false;
+};
+// Snapshot query: marks each span that one physical mapping covers and whose
+// entire backing interval is known to contain no populated host pages.
+void KernelFindUnpopulatedPhysicalSpans(KernelPhysicalSpan* spans, size_t count);
 int KYTY_SYSV_ABI    KernelDirectMemoryQuery(int64_t offset, int flags, void* info, size_t info_size);
 int KYTY_SYSV_ABI    KernelAvailableDirectMemorySize(int64_t arg0, int64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 int KYTY_SYSV_ABI    KernelBatchMap2(void* entries, int entry_count, int* processed_out, int flags);
+int KYTY_SYSV_ABI    KernelBatchMap(void* entries, int entry_count, int* processed_out);
 int KYTY_SYSV_ABI    KernelAvailableFlexibleMemorySize(size_t* size);
 // Configured flexible size for Gen5 queries (same budget as available for now).
 int KYTY_SYSV_ABI    KernelConfiguredFlexibleMemorySize(uint64_t* size);

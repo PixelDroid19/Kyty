@@ -14,29 +14,47 @@
 
 namespace Kyty::Libs::Graphics {
 
-static void update_func(GraphicContext* ctx, const uint64_t* params, void* obj, const uint64_t* vaddr, const uint64_t* size,
+static void update_func(GraphicContext* ctx, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr, const uint64_t* size,
                         int vaddr_num)
 {
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::update_func");
 
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(obj == nullptr);
-	EXIT_IF(params == nullptr);
 	EXIT_IF(vaddr == nullptr || size == nullptr || vaddr_num != 1);
 
 	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
 
 	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, *size);
-	EXIT_IF(vk_obj->mapped == nullptr);
-	memcpy(vk_obj->mapped, reinterpret_cast<void*>(*vaddr), *size);
-	// Only proven non-writing uses may omit the baseline. Unknown access is
-	// writable; after promotion retain the snapshot for this backing's lifetime.
-	if (params[StorageBufferGpuObject::PARAM_INITIAL_READ_ONLY] == 0u || vk_obj->writeback_cache.IsInitialized())
-	{
-		vk_obj->writeback_cache.Reset(vk_obj->mapped, *size);
-	}
+	void*                      data = nullptr;
+	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
+	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	LabelStorageUpload(data, reinterpret_cast<void*>(*vaddr), *size, {{0, *size}}, &vk_obj->writeback_cache, &vk_obj->label_publication);
 	// HTILE clears often arrive through GpuMemory Update before the world draw.
-	(void)DepthMetaObserveStorageWrite(vk_obj->depth_meta_addr, vk_obj->mapped, *size);
+	(void)DepthMetaObserveStorageWrite(vk_obj->depth_meta_addr, data, *size);
+	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
+	VulkanUnmapMemory(ctx, &vk_obj->memory);
+}
+
+bool StorageBufferUploadRuns(GraphicContext* ctx, void* obj, uint64_t vaddr, uint64_t size, const std::vector<GpuByteRun>& runs)
+{
+	EXIT_IF(ctx == nullptr || obj == nullptr || runs.empty());
+	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
+	if (vk_obj->depth_meta_addr != 0)
+	{
+		return false;
+	}
+	uint64_t bytes = 0;
+	for (const auto& run: runs)
+	{
+		bytes += run.bytes;
+	}
+	const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, bytes);
+	void*                      data = nullptr;
+	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	LabelStorageUpload(data, reinterpret_cast<void*>(vaddr), size, runs, &vk_obj->writeback_cache, &vk_obj->label_publication);
+	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	return true;
 }
 
 static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint64_t* vaddr, const uint64_t* size, int vaddr_num,
@@ -53,33 +71,18 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	vk_obj->guest_addr = *vaddr;
 	vk_obj->guest_size = *size;
 
-	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+	// Transfer source: a proven full fill is copied into the guest device-address view.
+	vk_obj->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 	vk_obj->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	vk_obj->buffer = nullptr;
 
 	VulkanCreateBuffer(ctx, *size, vk_obj);
 	if (vk_obj->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: vk_obj->buffer == nullptr condition ignored (continuing)\n"); }
-	VulkanMapMemory(ctx, &vk_obj->memory, &vk_obj->mapped);
-	EXIT_IF(vk_obj->mapped == nullptr);
 
 	update_func(ctx, params, vk_obj, vaddr, size, vaddr_num);
 
 	return vk_obj;
-}
-
-void StorageBufferPrepareWriteback(void* object, GpuObject::create_func_t factory)
-{
-	if (factory != create_func)
-	{
-		return;
-	}
-	auto* storage = static_cast<StorageVulkanBuffer*>(object);
-	EXIT_IF(storage == nullptr || storage->mapped == nullptr || storage->guest_size == 0u);
-	if (!storage->writeback_cache.IsInitialized())
-	{
-		storage->writeback_cache.Reset(storage->mapped, storage->guest_size);
-	}
 }
 
 static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
@@ -91,10 +94,7 @@ static void delete_func(GraphicContext* ctx, void* obj, VulkanMemory* /*mem*/)
 	EXIT_IF(vk_obj == nullptr);
 	EXIT_IF(vk_obj->buffer == nullptr);
 	EXIT_IF(ctx == nullptr);
-	EXIT_IF(vk_obj->mapped == nullptr);
 
-	VulkanUnmapMemory(ctx, &vk_obj->memory);
-	vk_obj->mapped = nullptr;
 	VulkanDeleteBuffer(ctx, vk_obj);
 
 	delete vk_obj;
@@ -111,12 +111,16 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 
 	auto* vk_obj = reinterpret_cast<StorageVulkanBuffer*>(obj);
 
-	void* data = vk_obj->mapped;
-	EXIT_IF(data == nullptr);
+	void* data = nullptr;
+
+	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::vkMapMemory");
+	// vkMapMemory(ctx->device, vk_obj->memory.memory, vk_obj->memory.offset, *size, 0, &data);
+	VulkanMapMemory(ctx, &vk_obj->memory, &data);
+	KYTY_PROFILER_END_BLOCK;
 
 	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::memcpy");
 	const auto result =
-	    LabelWriteBackCopy(reinterpret_cast<void*>(*vaddr), data, *size, &vk_obj->writeback_cache);
+	    LabelWriteBackCopy(reinterpret_cast<void*>(*vaddr), data, *size, &vk_obj->writeback_cache, &vk_obj->label_publication);
 	if (vk_obj->depth_meta_addr != 0 && DepthMetaIsClearPattern(data, *size))
 	{
 		DepthMetaPatternSnapshot pattern {};
@@ -127,7 +131,24 @@ static GpuWritebackResult write_back(GraphicContext* ctx, const uint64_t* /*para
 	}
 	KYTY_PROFILER_END_BLOCK;
 
+	KYTY_PROFILER_BLOCK("StorageBufferGpuObject::write_back::vkUnmapMemory");
+	// vkUnmapMemory(ctx->device, vk_obj->memory.memory);
+	VulkanUnmapMemory(ctx, &vk_obj->memory);
+	KYTY_PROFILER_END_BLOCK;
 	return result;
+}
+
+bool StorageBufferWriteBackPublishedUniform(void* obj, uint64_t vaddr, uint64_t size, const GpuWritebackPageCache::UniformWords& words,
+                                            GpuWritebackResult* result)
+{
+	auto* vk_obj = static_cast<StorageVulkanBuffer*>(obj);
+	EXIT_IF(vk_obj == nullptr || result == nullptr);
+	// Depth metadata clears are recognized from the written bytes.
+	if (vk_obj->depth_meta_addr != 0 || vk_obj->guest_addr != vaddr || vk_obj->guest_size != size)
+	{
+		return false;
+	}
+	return LabelWriteBackAdoptUniform(vaddr, size, words, &vk_obj->writeback_cache, &vk_obj->label_publication, result);
 }
 
 bool StorageBufferGpuObject::Equal(const uint64_t* other) const

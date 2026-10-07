@@ -6,6 +6,9 @@
 #include "Emulator/Libs/Libs.h"
 #include "Emulator/Network.h"
 #include "Emulator/Network/HttpUri.h"
+#include "Emulator/Kernel/EventQueue.h"
+
+#include "Kyty/Core/VirtualMemory.h"
 
 #include <cinttypes>
 #include <cstddef>
@@ -160,6 +163,8 @@ LIB_DEFINE(InitNet_1_Ssl)
 	LIB_FUNC("hdpVEUDFW3s", Ssl::SslInit);
 	LIB_FUNC("0K1yQ6Lv-Yc", Ssl::SslTerm);
 	LIB_FUNC("viRXSHZYd0c", Ssl::SslClose);
+	LIB_FUNC("TDfQqO-gMbY", Ssl::SslGetCaCerts);
+	LIB_FUNC("qIvLs0gYxi0", Ssl::SslFreeCaCerts);
 }
 
 } // namespace LibSsl
@@ -219,34 +224,6 @@ LIB_DEFINE(InitNet_1_NetCtl)
 }
 
 } // namespace LibNetCtl
-
-namespace LibNpManager {
-
-LIB_VERSION("NpManager", 1, "NpManager", 1, 1);
-
-namespace NpManager = Network::NpManager;
-
-LIB_DEFINE(InitNet_1_NpManager)
-{
-	LIB_FUNC("3Zl8BePTh9Y", NpManager::NpCheckCallback);
-	LIB_FUNC("Ec63y59l9tw", NpManager::NpSetNpTitleId);
-	LIB_FUNC("A2CQ3kgSopQ", NpManager::NpSetContentRestriction);
-	LIB_FUNC("VfRSmPmj8Q8", NpManager::NpRegisterStateCallback);
-	LIB_FUNC("qQJfO8HAiaY", NpManager::NpRegisterStateCallback);
-	LIB_FUNC("uFJpaKNBAj4", NpManager::NpRegisterGamePresenceCallback);
-	LIB_FUNC("GImICnh+boA", NpManager::NpRegisterPlusEventCallback);
-	LIB_FUNC("hw5KNqAAels", NpManager::NpRegisterNpReachabilityStateCallback);
-	LIB_FUNC("p-o74CnoNzY", NpManager::NpGetNpId);
-	LIB_FUNC("XDncXQIJUSk", NpManager::NpGetOnlineId);
-	LIB_FUNC("eiqMCt9UshI", NpManager::NpCreateAsyncRequest);
-	LIB_FUNC("S7QTn72PrDw", NpManager::NpDeleteRequest);
-	LIB_FUNC("2rsFmlGWleQ", NpManager::NpCheckNpAvailability);
-	LIB_FUNC("uqcPJLWL08M", NpManager::NpPollAsync);
-	LIB_FUNC("eQH7nWPcAgc", NpManager::NpGetState);
-	LIB_FUNC("Oad3rvY-NJQ", NpManager::NpHasSignedUp);
-}
-
-} // namespace LibNpManager
 
 namespace LibNpManagerForToolkit {
 
@@ -645,6 +622,45 @@ struct Http2AsyncResult
 	uint64_t reserved1 {};
 };
 
+// Completion target of an asynchronous request: the caller's event queue, the
+// user event it registered there (sceKernelAddUserEvent*) and the value it reads
+// back with sceKernelGetEventUserData.
+struct Http2KqueueOption
+{
+	Kernel::EventQueue::KernelEqueue eq;
+	int32_t                          ident;
+	uint8_t                          reserved[4];
+	void*                            udata;
+};
+
+struct Http2Completion
+{
+	bool              armed = false;
+	Http2KqueueOption target {};
+};
+
+static Http2Completion Http2ReadCompletion(const void* kqueue_option)
+{
+	Http2Completion completion {};
+	if (kqueue_option != nullptr &&
+	    Core::VirtualMemory::CopyFromGuest(&completion.target, reinterpret_cast<uint64_t>(kqueue_option), sizeof(completion.target)))
+	{
+		completion.armed = completion.target.eq != nullptr;
+	}
+	return completion;
+}
+
+// Signals the finished operation once the registry lock is released: the
+// guest's handler calls back into sceHttp2WaitAsync.
+static void Http2SignalCompletion(const Http2Completion& completion)
+{
+	if (completion.armed)
+	{
+		(void)Kernel::EventQueue::KernelTriggerUserEventUserData(completion.target.eq, static_cast<uintptr_t>(completion.target.ident),
+		                                                         completion.target.udata);
+	}
+}
+
 struct Http2Registry
 {
 	std::mutex                   mutex;
@@ -1025,16 +1041,22 @@ static int KYTY_SYSV_ABI Http2SendRequestAsync(int request_id, const void* post_
 		return HTTP2_ERROR_NULL_POINTER;
 	}
 
-	std::lock_guard lock(g_http2_registry.mutex);
-	auto            request = g_http2_registry.requests.find(request_id);
-	if (request == g_http2_registry.requests.end())
+	const auto completion = Http2ReadCompletion(kqueue_option);
 	{
-		return HTTP2_ERROR_INVALID_ID;
-	}
+		std::lock_guard lock(g_http2_registry.mutex);
+		auto            request = g_http2_registry.requests.find(request_id);
+		if (request == g_http2_registry.requests.end())
+		{
+			return HTTP2_ERROR_INVALID_ID;
+		}
 
-	request->second.send_result  = HTTP2_ERROR_TIMEOUT;
-	request->second.async_result = HTTP2_ERROR_TIMEOUT;
-	request->second.async_event  = 0;
+		// No host connection is made: the send finishes at once with the same
+		// result as the synchronous call, reported through the async result.
+		request->second.send_result  = HTTP2_ERROR_TIMEOUT;
+		request->second.async_result = HTTP2_ERROR_TIMEOUT;
+		request->second.async_event  = completion.armed ? 1 : 0;
+	}
+	Http2SignalCompletion(completion);
 	return 0;
 }
 
@@ -1173,35 +1195,38 @@ static int KYTY_SYSV_ABI Http2ReadData(int request_id, void* data, size_t size)
 
 static int KYTY_SYSV_ABI Http2ReadDataAsync(int request_id, void* data, size_t size, void* kqueue_option, void* option)
 {
-	(void) kqueue_option;
 	(void) option;
 	if (data == nullptr && size != 0u)
 	{
 		return HTTP2_ERROR_NULL_POINTER;
 	}
-	std::lock_guard lock(g_http2_registry.mutex);
-	auto            request = g_http2_registry.requests.find(request_id);
-	if (request == g_http2_registry.requests.end())
+	const auto completion = Http2ReadCompletion(kqueue_option);
 	{
-		return HTTP2_ERROR_INVALID_ID;
+		std::lock_guard lock(g_http2_registry.mutex);
+		auto            request = g_http2_registry.requests.find(request_id);
+		if (request == g_http2_registry.requests.end())
+		{
+			return HTTP2_ERROR_INVALID_ID;
+		}
+		if (request->second.send_result != 0)
+		{
+			request->second.async_result = request->second.send_result;
+		} else
+		{
+			const auto remaining = request->second.read_offset < request->second.response_body.size()
+			                           ? request->second.response_body.size() - request->second.read_offset
+			                           : 0;
+			const auto to_copy = std::min(size, remaining);
+			if (to_copy != 0)
+			{
+				std::memcpy(data, request->second.response_body.data() + request->second.read_offset, to_copy);
+				request->second.read_offset += to_copy;
+			}
+			request->second.async_result = static_cast<int>(to_copy);
+		}
+		request->second.async_event = 1;
 	}
-	if (request->second.send_result != 0)
-	{
-		request->second.async_result = request->second.send_result;
-		request->second.async_event  = 1;
-		return 0;
-	}
-	const auto remaining = request->second.read_offset < request->second.response_body.size()
-	                           ? request->second.response_body.size() - request->second.read_offset
-	                           : 0;
-	const auto to_copy = std::min(size, remaining);
-	if (to_copy != 0)
-	{
-		std::memcpy(data, request->second.response_body.data() + request->second.read_offset, to_copy);
-		request->second.read_offset += to_copy;
-	}
-	request->second.async_result = static_cast<int>(to_copy);
-	request->second.async_event  = 1;
+	Http2SignalCompletion(completion);
 	return 0;
 }
 
@@ -1260,7 +1285,6 @@ LIB_DEFINE(InitNet_1)
 	LibHttp::InitNet_1_Http(s);
 	LibHttp2::InitNet_1_Http2(s);
 	LibNetCtl::InitNet_1_NetCtl(s);
-	LibNpManager::InitNet_1_NpManager(s);
 	LibNpManagerForToolkit::InitNet_1_NpManagerForToolkit(s);
 	LibNpSessionSignaling::InitNet_1_NpSessionSignaling(s);
 	LibNpTrophy::InitNet_1_NpTrophy(s);

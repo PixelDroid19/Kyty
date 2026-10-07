@@ -18,10 +18,16 @@ layout(push_constant) uniform PushConstants
 	uint pitch_elems;
 	uint dst_pitch_elems;
 	uint bytes_per_element;
-	uint layout_kind; // 0 Sw64kRx, 1 Standard64KB, 2 Standard4KB, 3 Depth64KB32
+	uint layout_kind; // 0 Sw64kRx, 1 Standard64KB, 2 Standard4KB, 3 Depth64KB32, 4 raw image alias, 5 raw render scatter
 	uint src_u32_count;
 	uint dst_u32_count;
 	uint src_byte_offset;
+	uint source_width;
+	uint source_blocks_x;
+	uint destination_blocks_x;
+	uint source_first_block;
+	uint destination_first_block;
+	uint alias_block_count;
 }
 pc;
 
@@ -72,6 +78,105 @@ uint sw64k_rx_within(uint x, uint y, uint bpe)
 	offset ^= (x << 10u) & 0x2000u;
 	offset ^= (x << 9u) & 0x8000u;
 	return offset;
+}
+
+uint sw64k_rx_within_2(uint x, uint y)
+{
+	uint offset = 0u;
+	offset |= (x & 0x7u) << 1u;
+	offset |= (y & 0x7u) << 4u;
+	offset |= (x & 0x8u) << 4u;
+	offset |= ((x ^ y) & 0x8u) << 5u;
+	offset |= ((x ^ y) & 0x10u) << 5u;
+	offset |= (((x >> 6u) ^ (y >> 5u)) & 1u) << 10u;
+	offset |= (((x >> 5u) ^ (y >> 6u)) & 1u) << 11u;
+	offset |= (y & 0x10u) << 8u;
+	offset |= (x & 0x40u) << 7u;
+	offset |= (y & 0x40u) << 8u;
+	offset |= (x & 0x80u) << 8u;
+	return offset;
+}
+
+uvec2 sw64k_rx_coords_4(uint offset)
+{
+	uint y3 = (offset >> 12u) & 1u;
+	uint x4 = (offset >> 13u) & 1u;
+	uint x6 = (offset >> 15u) & 1u;
+	uint y6 = (offset >> 14u) & 1u;
+	uint x = ((offset >> 2u) & 1u) | (((offset >> 4u) & 1u) << 1u) | (((offset >> 6u) & 1u) << 2u) |
+	         ((((offset >> 8u) & 1u) ^ y3) << 3u) | (x4 << 4u) |
+	         (((((offset >> 11u) & 1u) ^ y6)) << 5u) | (x6 << 6u);
+	uint y = ((offset >> 3u) & 1u) | (((offset >> 5u) & 1u) << 1u) | (((offset >> 7u) & 1u) << 2u) |
+	         (y3 << 3u) | ((((offset >> 9u) & 1u) ^ x4) << 4u) |
+	         ((((offset >> 10u) & 1u) ^ x6) << 5u) | (y6 << 6u);
+	return uvec2(x, y);
+}
+
+void copy_raw_image_alias(uint word_x, uint y)
+{
+	uint destination_x = word_x * 2u;
+	uint destination_block = (y / 128u) * pc.destination_blocks_x + destination_x / 256u;
+	if (destination_block < pc.destination_first_block ||
+	    destination_block - pc.destination_first_block >= pc.alias_block_count)
+	{
+		return;
+	}
+	uint within = sw64k_rx_within_2(destination_x % 256u, y % 128u);
+	uint source_block = pc.source_first_block + destination_block - pc.destination_first_block;
+	uvec2 source_local = sw64k_rx_coords_4(within);
+	uint source_x = (source_block % pc.source_blocks_x) * 128u + source_local.x;
+	uint source_y = (source_block / pc.source_blocks_x) * 128u + source_local.y;
+	uint source_word = source_y * pc.source_width + source_x;
+	uint destination_word = y * pc.width + word_x;
+	if (source_word < pc.src_u32_count && destination_word < pc.dst_u32_count)
+	{
+		buffers[1].words[destination_word] = buffers[0].words[source_word];
+	}
+}
+
+void scatter_raw_render(uint x, uint y)
+{
+	uint bpe = pc.bytes_per_element;
+	uint block_w = block_width_64kb(bpe);
+	uint block_h = bpe == 8u ? 64u : 128u;
+	uint block = (y / block_h) * pc.source_blocks_x + x / block_w;
+	if (block < pc.source_first_block || block - pc.source_first_block >= pc.alias_block_count)
+	{
+		return;
+	}
+	uint within = bpe == 2u ? sw64k_rx_within_2(x % block_w, y % block_h)
+	                        : sw64k_rx_within(x % block_w, y % block_h, bpe);
+	int destination_byte = int(pc.src_byte_offset) + int(block * 65536u + within);
+	if (destination_byte < 0 || uint(destination_byte) > pc.dst_u32_count * 4u - bpe)
+	{
+		return;
+	}
+	uint source_byte = (block - pc.source_first_block) * 65536u +
+	                   ((y % block_h) * block_w + (x % block_w)) * bpe;
+	uint source_word = source_byte / 4u;
+	uint destination_word = uint(destination_byte) / 4u;
+	if (source_word >= pc.src_u32_count)
+	{
+		return;
+	}
+	if (bpe == 2u)
+	{
+		uint value = (buffers[0].words[source_word] >> ((source_byte & 2u) * 8u)) & 0xffffu;
+		uint shift = (uint(destination_byte) & 2u) * 8u;
+		uint mask = 0xffffu << shift;
+		atomicAnd(buffers[1].words[destination_word], ~mask);
+		atomicOr(buffers[1].words[destination_word], value << shift);
+		return;
+	}
+	uint count = bpe / 4u;
+	if (count > pc.src_u32_count - source_word || count > pc.dst_u32_count - destination_word)
+	{
+		return;
+	}
+	for (uint word = 0u; word < count; ++word)
+	{
+		buffers[1].words[destination_word + word] = buffers[0].words[source_word + word];
+	}
 }
 
 uint standard64_within(uint x, uint y, uint bpe)
@@ -252,6 +357,16 @@ void main()
 	uint y = gl_GlobalInvocationID.y;
 	if (x >= pc.width || y >= pc.height)
 	{
+		return;
+	}
+	if (pc.layout_kind == 4u)
+	{
+		copy_raw_image_alias(x, y);
+		return;
+	}
+	if (pc.layout_kind == 5u)
+	{
+		scatter_raw_render(x, y);
 		return;
 	}
 

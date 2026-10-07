@@ -28,6 +28,23 @@ export KYTY_AGENT_ENDPOINT=/tmp/kyty-agent-dev.sock
 
 ## Diagnostic workflow
 
+For an early vertex native-wave admission failure, opt in before launch with
+`KYTY_NATIVE_WAVE_REPORT=<private prefix>` and optionally
+`KYTY_NATIVE_WAVE_SHADER_DUMP=<existing private directory>`. The first
+wave-sensitive vertex input writes `<prefix>-native-wave-input.json` (at most
+8 KiB), with actual draw arguments, input primitive type and raw index offset,
+architectural-width/proof metadata and raw GE register provenance.
+Its optional `ge_state.output_state` also records four
+output-register words with assignment provenance, the pixel-program identity,
+and bounded effective pixel-input/raster state. Effective values are explicitly
+emulator state, not proof of raw assignment; an absent output snapshot is null.
+Unknown arguments remain null. ES and GS-back copies
+use separate metadata/readable-range leases, at most 256 KiB each, and complete
+before filesystem writes. The exclusive files are `native-wave-es.bin` and
+`native-wave-gs-back.bin`; each has its own copy/write status. This works with
+Silent printf. It observes inputs before pipeline admission, does not count a
+skipped draw and does not establish execution or a linked-program proof.
+
 Use condition-based commands instead of fixed sleeps:
 
 1. `wait-ready` proves the native transport and protocol are live.
@@ -125,6 +142,72 @@ After a fatal exit, inspect the bounded report through the local CLI:
 kyty_agent crash-context --path /absolute/scratch/crash-context.json
 ```
 
+Vulkan device-loss evidence is separate from a host crash context. Start the
+process with `KYTY_SUBMIT_FAULT_TRACE=1` to retain eight submit attempts and
+publish the first `device_lost` fatal event, even with `PrintfDirection=Silent`.
+Optionally set `KYTY_SUBMIT_FAULT_REPORT` to a new scratch file for a durable
+JSON report (at most 8 KiB). The runtime creates no directories and never
+overwrites an existing file. These settings are process-local opt-ins, not
+agent-supplied paths or commands.
+
+Use `events`, `last-error` or `wait-event --kind fatal --code device_lost` while
+the process is live. The event's `report` field distinguishes disabled, written
+and failed file output. The JSON preserves the failing command-buffer context
+separately from the bounded attempt trail: `completed` means the submit call
+returned, **not** that its fence completed. A missing context or rolled-out
+attempt remains unknown. Report failure never retries a Vulkan call, publishes
+GPU completion or replaces the original fatal exit. Keep raw reports outside
+Git; they are diagnostic evidence, not playability acceptance.
+
+To identify the work inside the failing submission, also set
+`KYTY_RECENT_DRAW_REPORT` to another new scratch file (it requires
+`KYTY_SUBMIT_FAULT_TRACE=1`). A ring of the newest recorded guest draws and
+dispatches — `KYTY_RECENT_DRAW_CAPACITY`, 1–256, default 64; an invalid value
+disables it — is written once, at the same first device loss, at most 128 KiB.
+Unlike the first-occurrence draw census, repeated draws of one shader are kept.
+Each record carries the queue, slot and host sequence of its command buffer,
+the guest submit and PM4 packet when known, the guest shader checksums and
+only the draw/dispatch arguments needed for correlation; no guest buffer is
+copied. `recorded` is the only stage a record proves by itself.
+`submit_called`, `submit_result` and `gpu_completed` are joined from that
+host submission and stay `null` until observed; `gpu_completed` means the
+command buffer's fence was observed signaled. The event's `draws` field
+reports `disabled`, `written`, `size_limit`, `open_failed` or `write_failed`.
+Internal depth/stencil copy draws are not recorded.
+
+The first-failure latch copies both bounded trails before serializing or writing
+either report. Peer recording during slow file output cannot evict entries from
+those copies. Their separate lock acquisitions are not an atomic GPU snapshot.
+Offline joins require a known nonzero host sequence; two unknown sequences do
+not identify the same submission. An immediate submit report can instead identify
+its exact nonzero attempt ID. Generated interpolation geometry cache candidates
+use the pixel shader identity, not the vertex identity.
+
+The fault report is version 2: fields the failing command buffer never had
+(no host submission, no command-processor context) are `null`, and
+`presented_frame` replaces the former `frame` counter. Independently of these
+opt-ins, every guest draw the renderer declines to emit is counted by reason;
+the first of each reason is published as a `warn` event with code
+`draw_skipped`, and the counts appear as `skipped_draws` in the recent-draw
+report. A skipped draw is a strict-mode omission to fix, not a valid result.
+
+`KYTY_SKIPPED_DRAW_REPORT=<scratch-prefix>` optionally retains the first event
+per reason as an exclusively created `<scratch-prefix>-<reason>.json`. Version 2
+adds bounded `ge_state` metadata for unsupported GE draws: ES, merged GS back and
+legacy GS bases, checksums, resource fields, user SGPR words and GE controls. It
+does not dereference program or resource addresses. A zero legacy GS base does
+not imply an absent merged back program. No directory is created or existing
+evidence overwritten; these process-local reports belong outside Git.
+
+With that report enabled, `KYTY_SKIPPED_SHADER_DUMP=<existing-scratch-directory>`
+also copies the first unsupported GE draw's registered ES and GS-back program
+spans to `skipped-ge-es.bin` and `skipped-ge-gs-back.bin`. Each copy is capped at
+256 KiB, uses a guest readable-range lease, and goes through the shared diagnostic
+dump budget/exclusive writer. The report distinguishes unmapped, unreadable,
+complete and truncated snapshots and records file-write status. This additional
+opt-in captures private workload code; keep the files outside Git. It is never
+an agent-protocol memory reader or a substitute shader.
+
 `wait_event` returns `event_cursor_lost` when `--after-seq` predates the
 bounded retained event history; reacquire a fresh snapshot before waiting.
 
@@ -153,6 +236,15 @@ that target is cancelled rather than delayed; `status.pad` exposes
 
 It is evidence for reaching and exercising a runtime frontier, not by itself a
 gameplay compatibility claim.
+
+Address-coherency timing in `diagnostics.performance` includes
+`dispatch_writeback`, `guest_address_prepare`, `guest_address_residency` and
+`guest_address_refresh`, each with `_calls`, `_ns` and `_max_ns` fields.
+Dispatch write-back measures the processor drain before guest-address work;
+prepare includes registry locking and table preparation, while residency and
+refresh measure its nested page-discovery and snapshot stages. Counts and
+times use the same snapshot window as other performance metrics. Nested times
+and concurrent processors overlap; do not add them as exclusive frame costs.
 
 ## Stable behavior
 

@@ -17,12 +17,16 @@
 #include "Emulator/Graphics/Objects/Label.h"
 #include "Emulator/Graphics/Objects/VideoOutBuffer.h"
 #include "Emulator/Graphics/Shader.h"
+#include "GraphicsRenderDescriptorLimits.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VideoOut.h"
 #include "Emulator/Graphics/VulkanRenderResolutionCapability.h"
 #include "Emulator/Graphics/Window.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
+
+#include <cinttypes>
+#include <limits>
 
 
 // IWYU pragma: no_forward_declare VkImageView_T
@@ -38,232 +42,179 @@ static bool IsDepthSampledView(int view)
 	return view == VulkanImage::VIEW_DEPTH_TEXTURE || view == VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY;
 }
 
-static void create_layout(GraphicContext* gctx, int storage_buffers_num, int sampled_descriptor_num, int textures2d_storage_num,
-                          int samplers_num, int gds_buffers_num, bool vsharp_uniform_buffer, VkShaderStageFlags stage,
-                          VkDescriptorSetLayout* dst)
+// A sampled image that is also bound as a storage image in the same bind
+// must be declared GENERAL in both descriptors: GENERAL serves sampled
+// reads as well as storage access, while READ_ONLY would contradict the
+// GENERAL layout the storage transition leaves behind. Depth-stencil images
+// keep their existing views (that alias class stays a hard error at bind).
+static bool IsStorageAliasedSampledImage(const VulkanImage* image, VulkanImage* const* storage_images, int storage_num)
 {
-	uint32_t binding_num = 0;
-
-	ShaderBindResources tmp {};
-	tmp.storage_buffers.buffers_num = storage_buffers_num;
-	tmp.textures2D.textures_num     = sampled_descriptor_num + textures2d_storage_num;
-	tmp.samplers.samplers_num       = samplers_num;
-	tmp.gds_pointers.pointers_num   = gds_buffers_num;
-
-	ShaderCalcBindingIndices(&tmp);
-
-	constexpr uint32_t B_MAX = 13;
-
-	VkDescriptorSetLayoutBinding ubo_layout_binding[B_MAX] = {};
-
-	if (storage_buffers_num > 0)
+	if (image == nullptr || image->type == VulkanImageType::DepthStencil)
 	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.storage_buffers.binding_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		ubo_layout_binding[binding_num].descriptorCount    = storage_buffers_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
+		return false;
 	}
-
-	if (sampled_descriptor_num > 0)
+	for (int i = 0; i < storage_num; i++)
 	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (sampled_descriptor_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_depth_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (sampled_descriptor_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_uint_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (sampled_descriptor_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_array_uint_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (sampled_descriptor_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_3d_uint_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (textures2d_storage_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_storage_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = textures2d_storage_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (samplers_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.samplers.binding_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLER;
-		ubo_layout_binding[binding_num].descriptorCount    = samplers_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (gds_buffers_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.gds_pointers.binding_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-		ubo_layout_binding[binding_num].descriptorCount    = gds_buffers_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (sampled_descriptor_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_array_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (sampled_descriptor_num > 0)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		ubo_layout_binding[binding_num].binding            = tmp.textures2D.binding_sampled_3d_index;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-		ubo_layout_binding[binding_num].descriptorCount    = sampled_descriptor_num;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
-	}
-
-	if (vsharp_uniform_buffer)
-	{
-		EXIT_IF(binding_num >= B_MAX);
-		// Texture descriptors reserve three consecutive bindings even when this
-		// particular shader stage only uses sampled or storage images. Keep that
-		// sparse numbering for the metadata UBO; using the count of layout entries
-		// would collide with a storage-image binding.
-		uint32_t vsharp_binding = 0;
-		if (storage_buffers_num > 0)
+		const auto* storage_image = storage_images[i];
+		if (storage_image == nullptr)
 		{
-			vsharp_binding = tmp.storage_buffers.binding_index + 1;
+			continue;
 		}
-		if (tmp.textures2D.textures_num > 0)
+		if (image == storage_image || image->image == storage_image->image)
 		{
-			vsharp_binding = tmp.textures2D.binding_sampled_depth_index + 1;
+			return true;
 		}
-		if (samplers_num > 0)
-		{
-			vsharp_binding = tmp.samplers.binding_index + 1;
-		}
-		if (gds_buffers_num > 0)
-		{
-			vsharp_binding = tmp.gds_pointers.binding_index + 1;
-		}
-		ubo_layout_binding[binding_num].binding            = vsharp_binding;
-		ubo_layout_binding[binding_num].descriptorType     = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		ubo_layout_binding[binding_num].descriptorCount    = 1;
-		ubo_layout_binding[binding_num].stageFlags         = stage;
-		ubo_layout_binding[binding_num].pImmutableSamplers = nullptr;
-		binding_num++;
 	}
+	return false;
+}
 
-	if (binding_num > 0)
-	{
-		VkDescriptorSetLayoutCreateInfo layout_info {};
-		layout_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-		layout_info.pNext        = nullptr;
-		layout_info.flags        = 0;
-		layout_info.bindingCount = binding_num;
-		layout_info.pBindings    = ubo_layout_binding;
-
-		EXIT_IF(*dst != nullptr);
-
-		vkCreateDescriptorSetLayout(gctx->device, &layout_info, nullptr, dst);
-
-		if (*dst == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: *dst == nullptr condition ignored (continuing)\n"); }
-	} else
-	{
-		*dst = nullptr;
-	}
-};
-
-VkDescriptorSetLayout DescriptorCache::GetOrCreateLayout(Stage stage, int storage_buffers_num, int sampled_descriptor_num,
-                                                         int textures2d_storage_num, int samplers_num, int gds_buffers_num,
-                                                         bool vsharp_uniform_buffer)
+static const char* DescriptorStageName(VkShaderStageFlags stage)
 {
-	auto* gctx = g_render_ctx->GetGraphicCtx();
-	EXIT_IF(gctx == nullptr);
+	if (stage == VK_SHADER_STAGE_VERTEX_BIT) { return "vertex"; }
+	if (stage == VK_SHADER_STAGE_FRAGMENT_BIT) { return "fragment"; }
+	if (stage == VK_SHADER_STAGE_COMPUTE_BIT) { return "compute"; }
+	return "unknown";
+}
 
-	VkDescriptorSetLayout* layout = nullptr;
-	VkShaderStageFlags     vk_stage {};
+static bool DescriptorCountsMatch(const ShaderDescriptorLimits::DescriptorCounts& a,
+                                  const ShaderDescriptorLimits::DescriptorCounts& b)
+{
+	return a.sampled_images == b.sampled_images && a.storage_images == b.storage_images && a.samplers == b.samplers &&
+	       a.storage_buffers == b.storage_buffers && a.uniform_buffers == b.uniform_buffers;
+}
+
+static void LogDescriptorLimitFailure(const ShaderDescriptorLimits::Check& check, const char* stage, const char* device)
+{
+	KYTY_LOG_ERROR("KYTY_VULKAN_DESCRIPTOR_LIMIT stage=%s device=\"%s\" limit=%s requested=%" PRIu64 " supported=%" PRIu64
+	               " recoverable=0\n",
+	               stage, device, ShaderDescriptorLimits::FailureName(check.failure), check.requested, check.limit);
+}
+
+static VkDescriptorType DescriptorTypeToVulkan(ShaderDescriptorLimits::DescriptorType type)
+{
+	switch (type)
+	{
+		case ShaderDescriptorLimits::DescriptorType::StorageBuffer: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		case ShaderDescriptorLimits::DescriptorType::SampledImage: return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+		case ShaderDescriptorLimits::DescriptorType::StorageImage: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		case ShaderDescriptorLimits::DescriptorType::Sampler: return VK_DESCRIPTOR_TYPE_SAMPLER;
+		case ShaderDescriptorLimits::DescriptorType::UniformBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		default: return VK_DESCRIPTOR_TYPE_MAX_ENUM;
+	}
+}
+
+static VkShaderStageFlags DescriptorStageFlags(DescriptorCache::Stage stage)
+{
 	switch (stage)
 	{
-		case Stage::Vertex:
-			layout   = &m_descriptor_set_layout_vertex[storage_buffers_num][sampled_descriptor_num][textures2d_storage_num][samplers_num]
-			                                          [gds_buffers_num][vsharp_uniform_buffer ? 1 : 0];
-			vk_stage = VK_SHADER_STAGE_VERTEX_BIT;
-			break;
-		case Stage::Pixel:
-			layout   = &m_descriptor_set_layout_pixel[storage_buffers_num][sampled_descriptor_num][textures2d_storage_num][samplers_num]
-			                                         [gds_buffers_num][vsharp_uniform_buffer ? 1 : 0];
-			vk_stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-			break;
-		case Stage::Compute:
-			layout   = &m_descriptor_set_layout_compute[storage_buffers_num][sampled_descriptor_num][textures2d_storage_num][samplers_num]
-			                                           [gds_buffers_num][vsharp_uniform_buffer ? 1 : 0];
-			vk_stage = VK_SHADER_STAGE_COMPUTE_BIT;
-			break;
-		default: KYTY_LOG_DEBUG("WARNING: unknown shader stage (continuing)\n"); break;
+		case DescriptorCache::Stage::Vertex: return VK_SHADER_STAGE_VERTEX_BIT;
+		case DescriptorCache::Stage::Pixel: return VK_SHADER_STAGE_FRAGMENT_BIT;
+		case DescriptorCache::Stage::Compute: return VK_SHADER_STAGE_COMPUTE_BIT;
+		default: return 0;
+	}
+}
+
+static bool create_layout(GraphicContext* gctx, const ShaderDescriptorLayoutPlan& plan, VkShaderStageFlags stage,
+                          VkDescriptorSetLayout* dst)
+{
+	if (gctx == nullptr || dst == nullptr || gctx->physical_device == nullptr || gctx->device == nullptr || stage == 0)
+	{
+		KYTY_LOG_ERROR("KYTY_VULKAN_DESCRIPTOR_LIMIT stage=%s reason=missing_graphics_device_context recoverable=0\n",
+		               DescriptorStageName(stage));
+		return false;
+	}
+	*dst = VK_NULL_HANDLE;
+	ShaderDescriptorLimits::DescriptorCounts expected_counts {};
+	const auto                               expected_result = ShaderCountDescriptorLayoutPlan(plan, &expected_counts);
+	if (expected_result.failure != ShaderDescriptorLimits::Failure::None)
+	{
+		LogDescriptorLimitFailure(expected_result, DescriptorStageName(stage), "unknown");
+		return false;
+	}
+	if (plan.binding_count == 0)
+	{
+		return true;
 	}
 
-	if (*layout == nullptr)
+	std::array<VkDescriptorSetLayoutBinding, ShaderDescriptorLayoutPlan::MAX_BINDINGS>                   bindings {};
+	std::array<ShaderDescriptorLimits::DescriptorBindingCount, ShaderDescriptorLayoutPlan::MAX_BINDINGS> counted {};
+	for (size_t i = 0; i < plan.binding_count; ++i)
 	{
-		create_layout(gctx, storage_buffers_num, sampled_descriptor_num, textures2d_storage_num, samplers_num, gds_buffers_num,
-		              vsharp_uniform_buffer, vk_stage, layout);
+		const auto& binding = plan.bindings[i];
+		const auto  type    = DescriptorTypeToVulkan(binding.type);
+		if (type == VK_DESCRIPTOR_TYPE_MAX_ENUM || binding.count == 0)
+		{
+			return false;
+		}
+		bindings[i] = {binding.binding, type, binding.count, stage, nullptr};
+		counted[i]  = {binding.type, bindings[i].descriptorCount};
 	}
-	return *layout;
+	ShaderDescriptorLimits::DescriptorCounts actual_counts {};
+	const auto actual_result = ShaderDescriptorLimits::CountBindings(counted.data(), plan.binding_count, &actual_counts);
+	if (actual_result.failure != ShaderDescriptorLimits::Failure::None || !DescriptorCountsMatch(expected_counts, actual_counts))
+	{
+		KYTY_LOG_ERROR("KYTY_VULKAN_DESCRIPTOR_LAYOUT_MISMATCH stage=%s recoverable=0\n", DescriptorStageName(stage));
+		return false;
+	}
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(gctx->physical_device, &properties);
+	const auto limits         = ShaderDescriptorLimitsFromVulkan(properties.limits);
+	const auto stage_check    = ShaderDescriptorLimits::CheckPerStage(actual_counts, limits);
+	const auto pipeline_check = ShaderDescriptorLimits::CheckPipelineLayout(actual_counts, limits);
+	if (stage_check.failure != ShaderDescriptorLimits::Failure::None)
+	{
+		LogDescriptorLimitFailure(stage_check, DescriptorStageName(stage), properties.deviceName);
+		return false;
+	}
+	if (pipeline_check.failure != ShaderDescriptorLimits::Failure::None)
+	{
+		LogDescriptorLimitFailure(pipeline_check, DescriptorStageName(stage), properties.deviceName);
+		return false;
+	}
+	// The caller also validates aggregate descriptors across the pipeline's sets.
+	VkDescriptorSetLayoutCreateInfo info {};
+	info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+	info.bindingCount = static_cast<uint32_t>(plan.binding_count);
+	info.pBindings    = bindings.data();
+	const auto result = vkCreateDescriptorSetLayout(gctx->device, &info, nullptr, dst);
+	if (result != VK_SUCCESS || *dst == VK_NULL_HANDLE)
+	{
+		*dst = VK_NULL_HANDLE;
+		KYTY_LOG_ERROR("KYTY_VULKAN_DESCRIPTOR_LAYOUT_CREATE stage=%s device=\"%s\" result=%d recoverable=0\n", DescriptorStageName(stage),
+		               properties.deviceName, static_cast<int>(result));
+		return false;
+	}
+	return true;
+}
+
+VkDescriptorSetLayout DescriptorCache::GetOrCreateLayout(Stage stage, const ShaderDescriptorLayoutPlan& plan)
+{
+	if (plan.binding_count > plan.bindings.size())
+	{
+		return VK_NULL_HANDLE;
+	}
+	const auto key   = plan.CacheKey(static_cast<uint32_t>(stage));
+	const auto found = m_descriptor_set_layouts.find(key);
+	if (found != m_descriptor_set_layouts.end())
+	{
+		return found->second;
+	}
+	// Retain layouts for the lifetime of their descriptor sets and pipelines.
+	// Bound host growth without evicting a handle still referenced by either.
+	constexpr size_t MAX_LAYOUTS = 65536;
+	if (m_descriptor_set_layouts.size() >= MAX_LAYOUTS)
+	{
+		KYTY_LOG_ERROR("KYTY_VULKAN_DESCRIPTOR_LAYOUT_CAPACITY layouts=%zu limit=%zu recoverable=0\n", m_descriptor_set_layouts.size(),
+		               MAX_LAYOUTS);
+		return VK_NULL_HANDLE;
+	}
+	VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+	if (!create_layout(g_render_ctx->GetGraphicCtx(), plan, DescriptorStageFlags(stage), &layout))
+	{
+		return VK_NULL_HANDLE;
+	}
+	m_descriptor_set_layouts.emplace(key, layout);
+	return layout;
 }
 
 void DescriptorCache::CreatePool()
@@ -308,24 +259,17 @@ void DescriptorCache::CreatePool()
 	m_pools.Add(pool);
 }
 
-VulkanDescriptorSet* DescriptorCache::Allocate(Stage stage, int storage_buffers_num, int textures2d_sampled_num, int textures2d_storage_num,
-                                               int samplers_num, int gds_buffers_num, bool vsharp_uniform_buffer)
+VulkanDescriptorSet* DescriptorCache::Allocate(Stage stage, const ShaderDescriptorLayoutPlan& plan)
 {
 	KYTY_PROFILER_BLOCK("DescriptorCache::Allocate");
-
-	EXIT_IF(storage_buffers_num < 0 || storage_buffers_num > BUFFERS_MAX);
-	EXIT_IF(textures2d_sampled_num < 0 || textures2d_sampled_num > TEXTURES_SAMPLED_MAX);
-	EXIT_IF(textures2d_storage_num < 0 || textures2d_storage_num > TEXTURES_STORAGE_MAX);
-	EXIT_IF(samplers_num < 0 || samplers_num > SAMPLERS_MAX);
-	EXIT_IF(gds_buffers_num < 0 || gds_buffers_num > GDS_BUFFER_MAX);
-
 	Core::LockGuard lock(m_mutex);
-
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 	EXIT_IF(gctx == nullptr);
-
-	const VkDescriptorSetLayout layout = GetOrCreateLayout(stage, storage_buffers_num, textures2d_sampled_num, textures2d_storage_num,
-	                                                       samplers_num, gds_buffers_num, vsharp_uniform_buffer);
+	const VkDescriptorSetLayout layout = GetOrCreateLayout(stage, plan);
+	if (layout == VK_NULL_HANDLE)
+	{
+		return nullptr;
+	}
 
 	auto* ret = new VulkanDescriptorSet;
 
@@ -400,6 +344,10 @@ void DescriptorCache::Free(VulkanDescriptorSet* set)
 uint32_t DescriptorCache::CalcHash(const Set& s)
 {
 	uint32_t hash = 0;
+	for (uint32_t word: s.layout_key)
+	{
+		hash = (hash * 33u) ^ Core::hash32(word);
+	}
 	hash += Core::hash8(static_cast<uint8_t>(s.stage));
 	hash ^= Core::hash8(static_cast<uint8_t>(s.storage_buffers_num));
 	hash += Core::hash8(static_cast<uint8_t>(s.textures2d_sampled_num));
@@ -484,15 +432,14 @@ VulkanDescriptorSet* DescriptorCache::FindSet(const Set& s)
 		{
 			auto& set = m_sets[index];
 
-			if (set.set != nullptr && set.stage == s.stage && set.storage_buffers_num == s.storage_buffers_num &&
-			    set.textures2d_sampled_num == s.textures2d_sampled_num &&
+			if (set.set != nullptr && set.stage == s.stage && set.layout_key == s.layout_key &&
+			    set.storage_buffers_num == s.storage_buffers_num && set.textures2d_sampled_num == s.textures2d_sampled_num &&
 			    set.textures2d_sampled_depth_num == s.textures2d_sampled_depth_num &&
 			    set.textures2d_array_sampled_num == s.textures2d_array_sampled_num &&
 			    set.textures2d_storage_num == s.textures2d_storage_num && set.textures3d_sampled_num == s.textures3d_sampled_num &&
 			    set.textures2d_sampled_uint_num == s.textures2d_sampled_uint_num &&
 			    set.textures2d_array_sampled_uint_num == s.textures2d_array_sampled_uint_num &&
-			    set.textures3d_sampled_uint_num == s.textures3d_sampled_uint_num &&
-			    set.samplers_num == s.samplers_num &&
+			    set.textures3d_sampled_uint_num == s.textures3d_sampled_uint_num && set.samplers_num == s.samplers_num &&
 			    set.gds_buffers_num == s.gds_buffers_num)
 			{
 				bool match = true;
@@ -669,15 +616,31 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	int textures3d_sampled_num = !split_numeric_types || bind.textures2D.textures3d_sampled_uint_num < bind.textures2D.textures3d_sampled_num
 	                                 ? bind.textures2D.textures3d_sampled_num
 	                                 : 0;
-	int textures2d_sampled_uint_num = split_numeric_types && bind.textures2D.textures2d_sampled_uint_num > 0
-	                                          ? bind.textures2D.textures2d_sampled_num
-	                                          : 0;
-	int textures2d_array_sampled_uint_num = split_numeric_types && bind.textures2D.textures2d_array_sampled_uint_num > 0
-	                                                ? bind.textures2D.textures2d_array_sampled_num
-	                                                : 0;
-	int textures3d_sampled_uint_num = split_numeric_types && bind.textures2D.textures3d_sampled_uint_num > 0
-	                                         ? bind.textures2D.textures3d_sampled_num
-	                                         : 0;
+	// When every sampled image is unsigned, PrepareTextures files them in the
+	// primary banks, yet the shader's unsigned load and sample paths read the
+	// unsigned banks (the layout declares them and both share the element
+	// type). Mirror the primary banks there; unwritten, a copy kernel's
+	// image_load read zero.
+	const bool unsigned_only = sampled_uint_total > 0 && sampled_uint_total == sampled_total;
+	if (unsigned_only)
+	{
+		textures2d_sampled_uint            = textures2d_sampled;
+		textures2d_sampled_uint_view       = textures2d_sampled_view;
+		textures2d_array_sampled_uint      = textures2d_array_sampled;
+		textures2d_array_sampled_uint_view = textures2d_array_sampled_view;
+		textures3d_sampled_uint            = textures3d_sampled;
+		textures3d_sampled_uint_view       = textures3d_sampled_view;
+	}
+	int textures2d_sampled_uint_num = (split_numeric_types && bind.textures2D.textures2d_sampled_uint_num > 0) || unsigned_only
+	                                      ? bind.textures2D.textures2d_sampled_num
+	                                      : 0;
+	int textures2d_array_sampled_uint_num =
+	    (split_numeric_types && bind.textures2D.textures2d_array_sampled_uint_num > 0) || unsigned_only
+	        ? bind.textures2D.textures2d_array_sampled_num
+	        : 0;
+	int textures3d_sampled_uint_num = (split_numeric_types && bind.textures2D.textures3d_sampled_uint_num > 0) || unsigned_only
+	                                      ? bind.textures2D.textures3d_sampled_num
+	                                      : 0;
 	int        sampled_descriptor_num = sampled_total;
 	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
 	int        samplers_num           = bind.samplers.samplers_num;
@@ -695,6 +658,8 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	EXIT_IF(samplers_num < 0 || samplers_num > SAMPLERS_MAX);
 	EXIT_IF(storage_buffers == nullptr);
 	EXIT_IF(vsharp_uniform_buffer && vsharp_buffer == nullptr);
+	ShaderDescriptorLayoutPlan layout_plan {};
+	EXIT_IF(!ShaderBuildDescriptorLayoutPlan(bind, &layout_plan));
 
 	Core::LockGuard lock(m_mutex);
 
@@ -716,6 +681,7 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	nset.gds_buffers_num        = gds_buffers_num;
 	nset.vsharp_uniform_buffer  = vsharp_uniform_buffer;
 	nset.stage                  = stage;
+	nset.layout_key = layout_plan.CacheKey(static_cast<uint32_t>(stage));
 	for (int i = 0; i < storage_buffers_num; i++)
 	{
 		nset.storage_buffers[i] = storage_buffers[i] != nullptr ? storage_buffers[i]->DescriptorKey() : VulkanBufferDescriptorKey {};
@@ -783,9 +749,8 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 
 	KYTY_PROFILER_BLOCK("DescriptorCache::GetDescriptor::create");
 
-	auto* new_set = Allocate(stage, storage_buffers_num, sampled_descriptor_num, textures2d_storage_num, samplers_num, gds_buffers_num,
-	                         vsharp_uniform_buffer);
-	if (new_set == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: new_set == nullptr condition ignored (continuing)\n"); }
+	auto* new_set = Allocate(stage, layout_plan);
+	EXIT_IF(new_set == nullptr);
 
 	VkDescriptorBufferInfo buffer_info[BUFFERS_MAX] {};
 	for (int i = 0; i < storage_buffers_num; i++)
@@ -806,7 +771,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		texture2d_sampled_info[i].imageView = textures2d_sampled[i]->image_view[textures2d_sampled_view[i]];
 		texture2d_sampled_info[i].imageLayout = IsDepthSampledView(textures2d_sampled_view[i])
 		                                             ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-		                                             : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		                                             : (IsStorageAliasedSampledImage(textures2d_sampled[i], textures2d_storage,
+		                                                                                textures2d_storage_num)
+		                                                    ? VK_IMAGE_LAYOUT_GENERAL
+		                                                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
 	VkDescriptorImageInfo texture2d_sampled_depth_info[TEXTURES_SAMPLED_MAX] {};
@@ -824,7 +792,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		texture2d_array_sampled_info[i].imageView = textures2d_array_sampled[i]->image_view[textures2d_array_sampled_view[i]];
 		texture2d_array_sampled_info[i].imageLayout = IsDepthSampledView(textures2d_array_sampled_view[i])
 		                                                   ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-		                                                   : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		                                                   : (IsStorageAliasedSampledImage(textures2d_array_sampled[i], textures2d_storage,
+		                                                                                      textures2d_storage_num)
+		                                                          ? VK_IMAGE_LAYOUT_GENERAL
+		                                                          : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
 	VkDescriptorImageInfo texture2d_storage_info[TEXTURES_STORAGE_MAX] {};
@@ -856,7 +827,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		texture3d_sampled_info[i].sampler     = nullptr;
 		texture3d_sampled_info[i].imageView   = textures3d_sampled[i]->image_view[textures3d_sampled_view[i]];
-		texture3d_sampled_info[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		texture3d_sampled_info[i].imageLayout = IsStorageAliasedSampledImage(textures3d_sampled[i], textures2d_storage,
+		                                                           textures2d_storage_num)
+		                                                  ? VK_IMAGE_LAYOUT_GENERAL
+		                                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
 	VkDescriptorImageInfo texture2d_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
@@ -866,7 +840,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		texture2d_sampled_uint_info[i].imageView = textures2d_sampled_uint[i]->image_view[textures2d_sampled_uint_view[i]];
 		texture2d_sampled_uint_info[i].imageLayout = IsDepthSampledView(textures2d_sampled_uint_view[i])
 		                                                  ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-		                                                  : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		                                                  : (IsStorageAliasedSampledImage(textures2d_sampled_uint[i], textures2d_storage,
+		                                                                                     textures2d_storage_num)
+		                                                         ? VK_IMAGE_LAYOUT_GENERAL
+		                                                         : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
 	VkDescriptorImageInfo texture2d_array_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
@@ -877,7 +854,11 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 		    textures2d_array_sampled_uint[i]->image_view[textures2d_array_sampled_uint_view[i]];
 		texture2d_array_sampled_uint_info[i].imageLayout = IsDepthSampledView(textures2d_array_sampled_uint_view[i])
 		                                                        ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
-		                                                        : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		                                                        : (IsStorageAliasedSampledImage(textures2d_array_sampled_uint[i],
+		                                                                                           textures2d_storage,
+		                                                                                           textures2d_storage_num)
+		                                                               ? VK_IMAGE_LAYOUT_GENERAL
+		                                                               : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 	}
 
 	VkDescriptorImageInfo texture3d_sampled_uint_info[TEXTURES_SAMPLED_MAX] {};
@@ -885,7 +866,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		texture3d_sampled_uint_info[i].sampler     = nullptr;
 		texture3d_sampled_uint_info[i].imageView   = textures3d_sampled_uint[i]->image_view[textures3d_sampled_uint_view[i]];
-		texture3d_sampled_uint_info[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		texture3d_sampled_uint_info[i].imageLayout = IsStorageAliasedSampledImage(textures3d_sampled_uint[i], textures2d_storage,
+		                                                            textures2d_storage_num)
+		                                                   ? VK_IMAGE_LAYOUT_GENERAL
+		                                                   : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	}
 
 	VkDescriptorBufferInfo vsharp_buffer_info {};
@@ -1222,29 +1206,10 @@ void DescriptorCache::FreeDescriptor(VulkanImage* image)
 
 VkDescriptorSetLayout DescriptorCache::GetDescriptorSetLayout(Stage stage, const ShaderBindResources& bind)
 {
-	int        storage_buffers_num    = bind.storage_buffers.buffers_num;
-	int        textures2d_sampled_num = bind.textures2D.textures2d_sampled_num + bind.textures2D.textures2d_sampled_depth_num +
-	                                   bind.textures2D.textures2d_array_sampled_num + bind.textures2D.textures3d_sampled_num;
-	int        textures2d_storage_num = bind.textures2D.textures2d_storage_num;
-	int        samplers_num           = bind.samplers.samplers_num;
-	int        gds_buffers_num        = bind.gds_pointers.pointers_num;
-	const bool vsharp_uniform_buffer  = bind.vsharp_uniform_buffer;
-
-	EXIT_IF(storage_buffers_num < 0 || storage_buffers_num > BUFFERS_MAX);
-	EXIT_IF(textures2d_sampled_num < 0 || textures2d_sampled_num > TEXTURES_SAMPLED_MAX);
-	EXIT_IF(textures2d_storage_num < 0 || textures2d_storage_num > TEXTURES_STORAGE_MAX);
-	EXIT_IF(samplers_num < 0 || samplers_num > SAMPLERS_MAX);
-	EXIT_IF(gds_buffers_num < 0 || gds_buffers_num > GDS_BUFFER_MAX);
-
-	// Image and sampler descriptors are valid for every graphics stage. Vertex
-	// layouts are cached separately below and use VK_SHADER_STAGE_VERTEX_BIT, so
-	// do not reject a vertex shader merely because it reads a texture or sampler.
-	// This path is also required by titles which perform texture fetches while
-	// building vertex positions.
-
+	ShaderDescriptorLayoutPlan plan {};
+	EXIT_IF(!ShaderBuildDescriptorLayoutPlan(bind, &plan));
 	Core::LockGuard lock(m_mutex);
-	return GetOrCreateLayout(stage, storage_buffers_num, textures2d_sampled_num, textures2d_storage_num, samplers_num, gds_buffers_num,
-	                         vsharp_uniform_buffer);
+	return GetOrCreateLayout(stage, plan);
 }
 
 void DeleteFramebuffer(VideoOutVulkanImage* image)

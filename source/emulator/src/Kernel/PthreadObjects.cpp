@@ -12,20 +12,28 @@ namespace Kyty::Kernel {
 
 namespace GuestRuntimePort = ::Kyty::Emulator::GuestRuntimePort;
 
+// A statically-initialized pthread object holds a small sentinel, not a real
+// handle: 0 = default initializer, 1 = adaptive, etc. (matches the FreeBSD/Orbis
+// PTHREAD_*_INITIALIZER values). Once initialized, the slot holds a real heap
+// pointer (a large address). Treating the sentinel 1 as a pointer would fault.
+static bool IsCreatedHandle(const void* addr)
+{
+	return __atomic_load_n(static_cast<const uint64_t*>(addr), __ATOMIC_ACQUIRE) >= 0x100000;
+}
+
 void* PthreadStaticObjects::CreateObject(void* addr, PthreadStaticObject::Type type)
 {
-	Core::LockGuard lock(m_mutex);
-
-	// A statically-initialized pthread object holds a small sentinel, not a real
-	// handle: 0 = default initializer, 1 = adaptive, etc. (matches the FreeBSD/Orbis
-	// PTHREAD_*_INITIALIZER values). Once initialized, the slot holds a real heap
-	// pointer (a large address). Initialize on any sentinel; treat a large value as
-	// an already-created object. Treating the sentinel 1 as a pointer would fault.
-	if (addr == nullptr)
+	// Every lock/unlock of a guest object passes here: an object that already
+	// exists is returned without the registry lock (the handle is published
+	// only after the object is complete).
+	if (addr == nullptr || IsCreatedHandle(addr))
 	{
 		return addr;
 	}
-	if (uint64_t v = *static_cast<uint64_t*>(addr); v >= 0x100000)
+
+	Core::LockGuard lock(m_mutex);
+
+	if (IsCreatedHandle(addr))
 	{
 		return addr;
 	}
@@ -149,14 +157,26 @@ void PthreadPool::GetDiagnostics(PthreadThreadDiagnostics* out)
 			continue;
 		}
 
-		auto& snapshot = out->threads[out->thread_count++];
-		snapshot.entry = reinterpret_cast<uint64_t>(thread->entry);
-		snapshot.argument = reinterpret_cast<uint64_t>(thread->arg);
-		snapshot.unique_id = thread->unique_id;
-		snapshot.started = thread->started.load();
-		snapshot.detached = thread->detached.load();
-		snapshot.almost_done = thread->almost_done.load();
-		snapshot.free = thread->free.load();
+		PthreadSnapshotDiagnostic(thread, &out->threads[out->thread_count++]);
+	}
+}
+
+void PthreadSnapshotDiagnostic(const PthreadPrivate* thread, PthreadThreadDiagnostic* snapshot)
+{
+	EXIT_IF(thread == nullptr || snapshot == nullptr);
+	snapshot->entry       = reinterpret_cast<uint64_t>(thread->entry);
+	snapshot->argument    = reinterpret_cast<uint64_t>(thread->arg);
+	snapshot->unique_id   = thread->unique_id;
+	snapshot->started     = thread->started.load();
+	snapshot->detached    = thread->detached.load();
+	snapshot->almost_done = thread->almost_done.load();
+	snapshot->free        = thread->free.load();
+	snapshot->wait_kind   = static_cast<PthreadWaitKind>(thread->wait_kind.load(std::memory_order_acquire));
+	snapshot->wait_object = thread->wait_object.load(std::memory_order_relaxed);
+	snapshot->wait_return = thread->wait_return.load(std::memory_order_relaxed);
+	for (int i = 0; i < PthreadWaitScope::kCallers; i++)
+	{
+		snapshot->wait_callers[i] = thread->wait_callers[i].load(std::memory_order_relaxed);
 	}
 }
 

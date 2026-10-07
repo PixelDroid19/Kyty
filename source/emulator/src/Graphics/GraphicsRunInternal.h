@@ -16,12 +16,14 @@
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/HardwareContext.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -132,6 +134,8 @@ KYTY_HW_SH_PARSER(hw_sh_set_cs_rsrc);
 KYTY_HW_SH_PARSER(hw_sh_set_cs_shader);
 KYTY_HW_SH_PARSER(hw_sh_set_cs_user_sgpr);
 KYTY_HW_SH_PARSER(hw_sh_set_gs_user_sgpr);
+KYTY_HW_SH_PARSER(hw_sh_set_gs_user_data_address);
+KYTY_HW_SH_PARSER(hw_sh_set_es_rsrc1);
 KYTY_HW_SH_PARSER(hw_sh_set_ps_embedded);
 KYTY_HW_SH_PARSER(hw_sh_set_ps_shader);
 KYTY_HW_SH_PARSER(hw_sh_set_ps_user_sgpr);
@@ -146,6 +150,7 @@ KYTY_HW_UC_PARSER(hw_uc_set_primitive_type);
 // and is registered into the jump tables at startup.
 KYTY_CP_OP_PARSER(cp_op_acquire_mem);
 KYTY_CP_OP_PARSER(cp_op_clear_state);
+KYTY_CP_OP_PARSER(cp_op_context_state);
 KYTY_CP_OP_PARSER(cp_op_custom_dma_data);
 KYTY_CP_OP_PARSER(cp_op_dispatch_direct);
 KYTY_CP_OP_PARSER(cp_op_dispatch_indirect);
@@ -174,6 +179,7 @@ KYTY_CP_OP_PARSER(cp_op_indirect_sh_regs);
 KYTY_CP_OP_PARSER(cp_op_indirect_uc_regs);
 KYTY_CP_OP_PARSER(cp_op_nop);
 KYTY_CP_OP_PARSER(cp_op_num_instances);
+KYTY_CP_OP_PARSER(cp_op_set_predication);
 KYTY_CP_OP_PARSER(cp_op_one_reg_write);
 KYTY_CP_OP_PARSER(cp_op_pop_marker);
 KYTY_CP_OP_PARSER(cp_op_push_marker);
@@ -243,11 +249,13 @@ public:
 	KYTY_CLASS_NO_COPY(CommandProcessor);
 
 	void Reset();
+	void ApplyContextState(uint32_t operation);
 
 	void               BufferInit();
 	SubmissionId       BufferFlush();
 	void               BufferWait();
-	void               PumpCompletedSubmissions();
+	// True while a submitted command buffer has not completed yet.
+	[[nodiscard]] bool PumpCompletedSubmissions();
 	void               SubmitAndWait();
 	void               WaitSubmission(SubmissionId submission);
 	[[nodiscard]] bool OwnsSubmissionQueue(SubmissionId submission) const
@@ -276,17 +284,19 @@ public:
 	                        uint32_t interrupt_selector);
 	void WriteAtEndOfPipe64(uint32_t cache_policy, uint32_t event_write_dest, uint32_t eop_event_type, uint32_t cache_action,
 	                        uint32_t event_index, uint32_t event_write_source, void* dst_gpu_addr, uint64_t value,
-	                        uint32_t interrupt_selector);
+	                        uint32_t interrupt_selector, uint32_t interrupt_context_id);
 	void Flip();
 	void Flip(void* dst_gpu_addr, uint32_t value);
 	void FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action, void* dst_gpu_addr, uint32_t value);
 	void QueueQueuedGraphicsInterrupt();
 	void WriteBack();
+	void WaitDeviceAddressWriteBacks();
 	void MemoryBarrier();
 	void RenderTextureBarrier(uint64_t vaddr, uint64_t size);
 	void DepthStencilBarrier(uint64_t vaddr, uint64_t size);
 	void DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y, uint32_t thread_group_z, uint32_t mode);
 	void DispatchIndirect(uint32_t data_offset, uint32_t mode);
+	void DispatchIndirectAbsolute(uint64_t address, uint32_t mode);
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);
 	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);
 
@@ -313,20 +323,19 @@ public:
 	{
 		uint32_t*   data             = nullptr;
 		uint32_t    num_dw           = 0;
-		uint32_t*   resume_data      = nullptr;
-		uint32_t    resume_num_dw    = 0;
 		const void* address          = nullptr;
 		uint64_t    reference        = 0;
 		uint64_t    mask             = 0;
 		uint32_t    function         = 0;
 		uint32_t    size             = 0;
 		uint64_t    blocked_since_ns = 0;
-		bool        skip_wait        = false;
 	};
 
 	void WaitRegMem32(uint32_t func, const uint32_t* addr, uint32_t ref, uint32_t mask, uint32_t poll);
 	void WaitRegMem64(uint32_t func, const uint64_t* addr, uint64_t ref, uint64_t mask, uint32_t poll);
 	void WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num, uint32_t write_control, bool custom, bool matching_wait_mem64);
+	[[nodiscard]] bool HasPendingDeferredWrite(const uint32_t* dst, uint32_t size_bytes) const;
+	void DeferWriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num);
 
 	void Run(uint32_t* data, uint32_t num_dw, const uint32_t* source_data);
 	[[nodiscard]] bool TakeSuspendedRun(SuspendedRun* run);
@@ -336,17 +345,27 @@ public:
 	[[nodiscard]] const FlipInfo& GetFlip() const { return m_flip; }
 	void                          SetFlip(const FlipInfo& flip)
 	{
-		m_flip                       = flip;
-		m_flip_issued                = false;
-		m_completion_callback_issued = false;
+		m_flip                        = flip;
+		m_flip_issued                 = false;
+		m_completion_callback_sources = 0u;
 	}
-	[[nodiscard]] bool FlipIssued() const { return m_flip_issued; }
-	[[nodiscard]] bool CompletionCallbackIssued() const { return m_completion_callback_issued; }
+	[[nodiscard]] bool    FlipIssued() const { return m_flip_issued; }
+	[[nodiscard]] bool    CompletionCallbackIssued() const { return m_completion_callback_sources != 0u; }
+	[[nodiscard]] uint8_t CompletionCallbackSources() const { return m_completion_callback_sources; }
+	// A wait on a plain label store of the current submission was answered by
+	// queue order; the batch still retires that submission before it ends.
+	[[nodiscard]] bool TakeConsolidatedPlainWait()
+	{
+		const bool pending        = m_consolidated_plain_wait;
+		m_consolidated_plain_wait = false;
+		return pending;
+	}
 
 	[[nodiscard]] uint64_t GetSumbitId() const { return m_sumbit_id; }
 	void                   SetSumbitId(uint64_t sumbit_id) { m_sumbit_id = sumbit_id; }
 
 private:
+	void DispatchIndirectAtAddress(uint64_t address, uint32_t mode);
 	static constexpr int VK_BUFFERS_NUM = static_cast<int>(CommandProcessorSubmissionSlots::SlotCount);
 	void                 CompleteSubmittedThroughLocked(SubmissionId target, SubmissionId* latest_completed);
 	void                 TryCompleteSubmittedLocked(SubmissionId* latest_completed);
@@ -363,6 +382,7 @@ private:
 	};
 
 	HW::Context      m_ctx;
+	std::optional<HW::Context> m_saved_ctx;
 	HW::UserConfig   m_ucfg;
 	HW::Shader       m_sh_ctx;
 	HW::UserSgprType m_user_data_marker    = HW::UserSgprType::Unknown;
@@ -389,7 +409,19 @@ private:
 
 	FlipInfo m_flip;
 	bool     m_flip_issued                 = false;
-	bool     m_completion_callback_issued  = false;
+	// Submission that recorded the latest GPU flip to each display buffer
+	// index. Its flip request reaches the flip queue only on completion.
+	struct RecordedFlip
+	{
+		int          handle = 0;
+		SubmissionId submission;
+		bool         valid = false;
+	};
+	std::array<RecordedFlip, 16> m_recorded_flips {};
+	void                         RecordFlipSubmissionLocked();
+	// Which completion callbacks the batch recorded (GraphicsBatchCanDeferSubmissionCompletion bits).
+	uint8_t  m_completion_callback_sources = 0u;
+	bool     m_consolidated_plain_wait     = false;
 	uint64_t m_sumbit_id                   = 0;
 	uint64_t m_synthetic_occlusion_counter = 0;
 	uint32_t m_last_pm4_op                 = 0;
@@ -493,6 +525,8 @@ private:
 	CmdBatch GetCmdBatch();
 
 	Core::Mutex          m_mutex;
+	// Only the ring thread touches it: a deferred completion it still pumps while idle.
+	bool                 m_async_completion_pending = false;
 	Core::CondVar        m_cond_var;
 	Core::CondVar        m_idle_cond_var;
 	Core::List<CmdBatch> m_cmd_batches;
@@ -545,6 +579,9 @@ private:
 	Core::CondVar m_idle_cond_var;
 	bool          m_done = true;
 	bool          m_idle = true;
+	// Submitted work whose completions (end-of-pipe labels, interrupts) the
+	// idle loop still has to publish; nothing else polls this queue's fences.
+	bool          m_completion_pending = false;
 
 	CommandProcessor* m_cp       = nullptr;
 	int               m_queue_id = -1;
@@ -572,6 +609,7 @@ public:
 
 	void     Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw,
 	                GraphicsSubmissionCompletion completion);
+	bool     SubmitAgcAsync(uint32_t queue_handle, uint32_t* cmd_buffer, uint32_t num_dw);
 	void     SubmitAndFlip(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint32_t* cmd_const_buffer, uint32_t num_const_dw, int handle,
 	                       int index, int flip_mode, int64_t flip_arg);
 	uint32_t MapComputeQueue(uint32_t pipe_id, uint32_t queue_id, uint32_t* ring_addr, uint32_t ring_size_dw, uint32_t* read_ptr_addr);
@@ -599,6 +637,8 @@ private:
 
 	CommandProcessor* m_compute_cp[8]    = {};
 	ComputeRing*      m_compute_ring[64] = {};
+	GraphicsAgcAsyncQueueSlots m_agc_async_queue_slots;
+	GraphicsRing*              m_agc_async_ring[GraphicsAgcAsyncQueueSlots::Capacity] = {};
 
 	std::atomic_int m_done_num = 0;
 };

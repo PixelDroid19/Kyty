@@ -16,6 +16,7 @@
 
 #include <cfloat>
 #include <cmath>
+#include <cstring>
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -842,6 +843,37 @@ static int kyty_printf_internal(bool sn, char* sn_s, size_t sn_n, const char* fo
 
 			case 's':
 			{
+				if ((flags & FLAGS_LONG) != 0u)
+				{
+					// %ls: a 16-bit guest wide string, narrowed one code unit per
+					// byte (Kyty's single-byte locale model, as wctomb).
+					const auto* w = VaArg_ptr<const uint16_t>(va_list);
+					static constexpr uint16_t kNullWide[] = {'(', 'n', 'u', 'l', 'l', ')', 0};
+					if (w == nullptr)
+					{
+						w = kNullWide;
+					}
+					unsigned int l = 0;
+					while (w[l] != 0 && ((flags & FLAGS_PRECISION) == 0u || l < precision))
+					{
+						l++;
+					}
+					const unsigned int pad = width > l ? width - l : 0u;
+					for (unsigned int i = 0; (flags & FLAGS_LEFT) == 0u && i < pad; i++)
+					{
+						out(' ', &buffer, idx++, maxlen);
+					}
+					for (unsigned int i = 0; i < l; i++)
+					{
+						out(static_cast<char>(w[i]), &buffer, idx++, maxlen);
+					}
+					for (unsigned int i = 0; (flags & FLAGS_LEFT) != 0u && i < pad; i++)
+					{
+						out(' ', &buffer, idx++, maxlen);
+					}
+					format++;
+					break;
+				}
 				// const char*  p = va_arg(va, char*);
 				const char* p = VaArg_ptr<const char>(va_list);
 				// The C library renders a null %s argument as the literal "(null)"
@@ -990,6 +1022,242 @@ libc_vprintf_func_t GetVprintfFunc()
 int Format(char* out, size_t out_size, const char* format, VaList* va_list)
 {
 	return kyty_printf_internal(true, out, out_size, format, va_list);
+}
+
+namespace {
+
+// One conversion specification: %[flags][width][.precision][length]conversion.
+struct WideSpec
+{
+	char     text[40] = {}; // the specification in ASCII, as the narrow engine reads it
+	size_t   units    = 0;  // guest code units it occupies in the format
+	bool     wide_arg = false;
+	char     conversion = 0;
+};
+
+bool IsSpecUnit(uint16_t unit)
+{
+	return unit != 0 && unit < 0x80 && std::strchr("-+ #0123456789.*hljztLq", static_cast<char>(unit)) != nullptr;
+}
+
+bool ParseWideSpec(const uint16_t* format, WideSpec* spec)
+{
+	size_t length = 1; // the '%'
+	while (IsSpecUnit(format[length]) && length + 2 < sizeof(spec->text))
+	{
+		length++;
+	}
+	const uint16_t conversion = format[length];
+	if (conversion == 0 || conversion >= 0x80 || length + 2 >= sizeof(spec->text))
+	{
+		return false;
+	}
+	for (size_t i = 0; i <= length; i++)
+	{
+		spec->text[i] = static_cast<char>(format[i]);
+	}
+	spec->units      = length + 1;
+	spec->conversion = static_cast<char>(conversion);
+	spec->wide_arg   = conversion == 'S' || conversion == 'C' || std::strchr(spec->text, 'l') != nullptr;
+	return true;
+}
+
+class WideSink
+{
+public:
+	WideSink(uint16_t* out, size_t out_count): m_out(out), m_count(out_count) {}
+	void Put(uint16_t unit)
+	{
+		if (m_out != nullptr && m_written + 1 < m_count)
+		{
+			m_out[m_written] = unit;
+		}
+		m_written++;
+	}
+	void Pad(uint32_t count)
+	{
+		for (uint32_t i = 0; i < count; i++)
+		{
+			Put(' ');
+		}
+	}
+	void Terminate()
+	{
+		if (m_out != nullptr && m_count != 0)
+		{
+			m_out[m_written < m_count ? m_written : m_count - 1] = 0;
+		}
+	}
+	[[nodiscard]] size_t Written() const { return m_written; }
+
+private:
+	uint16_t* m_out;
+	size_t    m_count;
+	size_t    m_written = 0;
+};
+
+struct WideField
+{
+	bool     left      = false;
+	uint32_t width     = 0;
+	bool     precise   = false;
+	uint32_t precision = 0;
+};
+
+// Width and precision of a %ls/%lc specification; '*' consumes guest arguments.
+WideField ParseWideField(const char* text, VaList* va_list)
+{
+	WideField field;
+	const char* cursor = text + 1;
+	for (; *cursor != 0 && std::strchr("-+ #0", *cursor) != nullptr; cursor++)
+	{
+		field.left = field.left || *cursor == '-';
+	}
+	if (*cursor == '*')
+	{
+		const int w = VaArg_int(va_list);
+		field.left  = field.left || w < 0;
+		field.width = static_cast<uint32_t>(w < 0 ? -w : w);
+		cursor++;
+	}
+	for (; _is_digit(*cursor); cursor++)
+	{
+		field.width = field.width * 10u + static_cast<uint32_t>(*cursor - '0');
+	}
+	if (*cursor == '.')
+	{
+		field.precise = true;
+		cursor++;
+		if (*cursor == '*')
+		{
+			const int p     = VaArg_int(va_list);
+			field.precision = static_cast<uint32_t>(p < 0 ? 0 : p);
+			field.precise   = p >= 0;
+		}
+		for (; _is_digit(*cursor); cursor++)
+		{
+			field.precision = field.precision * 10u + static_cast<uint32_t>(*cursor - '0');
+		}
+	}
+	return field;
+}
+
+void PutWideString(WideSink* sink, const WideField& field, const uint16_t* text)
+{
+	static constexpr uint16_t kNull[] = {'(', 'n', 'u', 'l', 'l', ')', 0};
+	const uint16_t*           value   = text != nullptr ? text : kNull;
+	size_t                    length  = 0;
+	while (value[length] != 0 && (!field.precise || length < field.precision))
+	{
+		length++;
+	}
+	const uint32_t pad = field.width > length ? field.width - static_cast<uint32_t>(length) : 0u;
+	if (!field.left) { sink->Pad(pad); }
+	for (size_t i = 0; i < length; i++)
+	{
+		sink->Put(value[i]);
+	}
+	if (field.left) { sink->Pad(pad); }
+}
+
+void PutWideChar(WideSink* sink, const WideField& field, uint16_t unit)
+{
+	const uint32_t pad = field.width > 1 ? field.width - 1 : 0u;
+	if (!field.left) { sink->Pad(pad); }
+	sink->Put(unit);
+	if (field.left) { sink->Pad(pad); }
+}
+
+void PutNarrowString(WideSink* sink, const WideField& field, const char* text)
+{
+	const char* value  = text != nullptr ? text : "(null)";
+	size_t      length = 0;
+	while (value[length] != 0 && (!field.precise || length < field.precision))
+	{
+		length++;
+	}
+	const uint32_t pad = field.width > length ? field.width - static_cast<uint32_t>(length) : 0u;
+	if (!field.left) { sink->Pad(pad); }
+	for (size_t i = 0; i < length; i++)
+	{
+		sink->Put(static_cast<uint8_t>(value[i])); // the "C" locale maps bytes one to one
+	}
+	if (field.left) { sink->Pad(pad); }
+}
+
+// Numeric, floating and pointer conversions reuse the narrow engine for exactly
+// one specification, so the guest arguments are consumed identically.
+void PutNumericConversion(WideSink* sink, const WideSpec& spec, VaList* va_list)
+{
+	char      narrow[4096];
+	const int length = Format(narrow, sizeof(narrow), spec.text, va_list);
+	if (length < 0)
+	{
+		return;
+	}
+	if (static_cast<size_t>(length) >= sizeof(narrow))
+	{
+		EXIT("wide printf conversion %s produced %d units\n", spec.text, length);
+	}
+	for (int i = 0; i < length; i++)
+	{
+		sink->Put(static_cast<uint8_t>(narrow[i]));
+	}
+}
+
+void PutConversion(WideSink* sink, const WideSpec& spec, VaList* va_list)
+{
+	const bool is_string = spec.conversion == 's' || spec.conversion == 'S';
+	const bool is_char   = spec.conversion == 'c' || spec.conversion == 'C';
+	if (spec.conversion == 'n')
+	{
+		*VaArg_ptr<int>(va_list) = static_cast<int>(sink->Written());
+		return;
+	}
+	if (!is_string && !is_char)
+	{
+		PutNumericConversion(sink, spec, va_list);
+		return;
+	}
+	const auto field = ParseWideField(spec.text, va_list);
+	if (is_string)
+	{
+		spec.wide_arg ? PutWideString(sink, field, VaArg_ptr<const uint16_t>(va_list))
+		              : PutNarrowString(sink, field, VaArg_ptr<const char>(va_list));
+		return;
+	}
+	const auto unit = spec.wide_arg ? static_cast<uint16_t>(VaArg_int(va_list)) : static_cast<uint8_t>(VaArg_int(va_list));
+	PutWideChar(sink, field, unit);
+}
+
+} // namespace
+
+int FormatWide(uint16_t* out, size_t out_count, const uint16_t* format, VaList* va_list)
+{
+	if (format == nullptr)
+	{
+		return -1;
+	}
+	WideSink sink(out, out_count);
+	for (const uint16_t* cursor = format; *cursor != 0;)
+	{
+		WideSpec spec;
+		if (*cursor != '%' || !ParseWideSpec(cursor, &spec))
+		{
+			sink.Put(*cursor++);
+			continue;
+		}
+		if (spec.conversion == '%')
+		{
+			sink.Put('%');
+		} else
+		{
+			PutConversion(&sink, spec, va_list);
+		}
+		cursor += spec.units;
+	}
+	sink.Terminate();
+	return static_cast<int>(sink.Written());
 }
 
 } // namespace Kyty::Libs
