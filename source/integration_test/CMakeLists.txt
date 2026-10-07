@@ -339,25 +339,18 @@ set_tests_properties(KytyLibcLocaleIntegration.ClassificationContract PROPERTIES
 	TIMEOUT 120
 )
 
-foreach(scenario IN ITEMS reject_class reject_non_ascii)
-	if(scenario STREQUAL "reject_class")
-		set(expected_diagnostic "character_class != 2")
-	else()
-		set(expected_diagnostic "character > 0x7f")
-	endif()
-	add_test(
-		NAME "KytyLibcWideIntegration.${scenario}"
-		COMMAND "${CMAKE_COMMAND}"
-			-DTEST_EXECUTABLE=$<TARGET_FILE:kyty_libc_wide_integration>
-			-DSCENARIO=${scenario}
-			"-DEXPECTED_DIAGNOSTIC=${expected_diagnostic}"
-			-P "${CMAKE_CURRENT_SOURCE_DIR}/RunLibcWideRejection.cmake"
-	)
-	set_tests_properties("KytyLibcWideIntegration.${scenario}" PROPERTIES
-		FIXTURES_REQUIRED KytyIntegrationBinaries
-		TIMEOUT 120
-	)
-endforeach()
+add_test(
+	NAME KytyLibcWideIntegration.reject_class
+	COMMAND "${CMAKE_COMMAND}"
+		-DTEST_EXECUTABLE=$<TARGET_FILE:kyty_libc_wide_integration>
+		-DSCENARIO=reject_class
+		"-DEXPECTED_DIAGNOSTIC=unknown character class"
+		-P "${CMAKE_CURRENT_SOURCE_DIR}/RunLibcWideRejection.cmake"
+)
+set_tests_properties(KytyLibcWideIntegration.reject_class PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+)
 
 # The real shared host→guest call boundary must terminate the guest RBP chain
 # before the native host tail. Exercise both main-style and pthread-style ABI

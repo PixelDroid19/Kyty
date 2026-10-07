@@ -32,7 +32,7 @@ DOMAIN_SOURCE_GLOBS = {
         "src/VideoFrameMemory.cpp",
         "src/Ports/*.cpp",
     ),
-    "kyty_kernel": ("src/Kernel/*.cpp",),
+    "kyty_kernel": ("src/Kernel/*.cpp", "src/Kernel/*.S"),
     "kyty_diagnostics": ("src/Agent/EventRing.cpp", "src/Agent/AgentLifecycle.cpp"),
     "kyty_loader": (
         "src/Loader/*.cpp",
@@ -49,6 +49,7 @@ DOMAIN_SOURCE_GLOBS = {
         "src/NetworkHttpUri.cpp",
         "src/Audio.cpp",
         "src/Audio3d.cpp",
+        "src/AudioPropagation.cpp",
         "src/AudioAjm.cpp",
         "src/AudioAvPlayer.cpp",
         "src/AudioHost.cpp",

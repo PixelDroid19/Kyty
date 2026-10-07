@@ -90,21 +90,22 @@ int main(int argc, char** argv)
 
 	if (argc == 2 && std::strcmp(argv[1], "reject_class") == 0)
 	{
-		return iswctype('0', 3);
-	}
-	if (argc == 2 && std::strcmp(argv[1], "reject_non_ascii") == 0)
-	{
-		return iswctype(0x80, 2);
+		return iswctype('0', 13);
 	}
 	Expect(argc == 1, "unknown integration scenario");
 
+	// Guest format scanners copy a specification while class 2 (alpha) is clear
+	// and stop at the conversion letter; class 4 is the digit class.
 	const char* captured_sequence = "08x  size: %%ld";
 	for (const char* cursor = captured_sequence; *cursor != '\0'; cursor++)
 	{
-		const bool expected_digit = *cursor >= '0' && *cursor <= '9';
-		Expect((iswctype(static_cast<uint8_t>(*cursor), 2) != 0) == expected_digit,
-		       "class 2 must classify only decimal digits in the verified formatter sequence");
+		const auto c              = static_cast<uint8_t>(*cursor);
+		const bool expected_alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+		const bool expected_digit = c >= '0' && c <= '9';
+		Expect((iswctype(c, 2) != 0) == expected_alpha, "class 2 must classify only letters in the formatter sequence");
+		Expect((iswctype(c, 4) != 0) == expected_digit, "class 4 must classify only decimal digits in the formatter sequence");
 	}
+	Expect(iswctype(0x80, 2) == 0 && iswctype(0xe9, 1) == 0, "the C locale classifies no character outside ASCII");
 
 	const uint16_t text[] = {'A', 'b', 'c', 0};
 	Expect(wcslen(text) == 3, "wcslen must count UTF-16 code units");
@@ -138,8 +139,7 @@ int main(int argc, char** argv)
 	Expect(written == static_cast<int>(std::strlen(expected_output)), "vswprintf must report UTF-16 units written");
 	Expect(WideEquals(output, expected_output), "vswprintf must preserve %% and format the observed %08x argument");
 
-	const uint16_t unsupported[] = {'%', 's', 0};
-	Expect(vsw(output, 64, unsupported, &args) == -1, "unsupported wide string conversion must fail explicitly");
-	Expect(output[0] == 0, "failed conversion must clear output");
+	const uint16_t long_text[] = {'A', 'B', 'C', 'D', 'E', 'F', 0};
+	Expect(vsw(output, 4, long_text, &args) == -1, "vswprintf must fail when the result and terminator do not fit");
 	return 0;
 }

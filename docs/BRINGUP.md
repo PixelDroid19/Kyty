@@ -258,21 +258,32 @@ When switching private fixtures (or adding a second root):
 
 Every integration target failed to link: the kernel event queue called the network HLE directly, and archives
 link the kernel after the HLE. The calls now go through `SocketEventPort`, which the composition root installs,
-and `scripts/check_emulator_boundaries.py` rejects the network header in kernel sources. Of the 67 registered
-integration tests, 59 pass. The 8 failures were never runnable before and are open:
+and `scripts/check_emulator_boundaries.py` rejects the network header in kernel sources.
 
-- `KytyShaderComputeIntegration.ScalarContracts`: the probe's SPIR-V text joins two lines (`OpStore %s9
-  %probe_seed_sgpr_9%native_initial_exec = ...`), so assembly fails before the contract runs.
-- `KytyGraphicsDiagnosticsIntegration.SerializationAndBounds` and `.VertexClipProbe`: their fixture programs hit
-  `shader emitter missing ... reason=lowering-preconditions` (`ShaderSpirvGenerator.cpp:212`); the fixtures predate
-  the current lowering preconditions.
-- `KytyGraphicsDiagnosticsIntegration.RenderTargetIndexAlias`: the index-to-render-target alias contract no longer
-  admits the unobserved partial overlap the test expects.
-- `KytyLibcWideIntegration.ExactImports`, `.reject_class`, `.reject_non_ascii`: class 2 classification and the
-  rejection scenarios disagree with the test's expectations; the guest behavior needs evidence before either side
-  changes.
-- `KytyArchiveDagIntegration.Repository`: the expected archive membership predates `FiberContext.S` in the kernel
-  archive and `AudioPropagation.cpp` in the HLE archive.
+All 66 registered integration tests pass. The 8 that failed once they could run again found one emulator defect;
+the rest had drifted from contracts the emulator had since changed on guest evidence:
+
+- **Emulator fix: 64-bit status sources.** `S_CMOV_B64` (and every scalar 64-bit operation) can read SCC, EXECZ or
+  VCCZ as a 64-bit source whose high dword is zero; the operand loader already emitted that, but the lowering
+  preconditions admitted these operands only as one dword, so such a shader aborted with `reason=lowering-preconditions`.
+  M0 keeps the one-dword rule.
+- Shader probes (`ScalarContracts`): seeds are whole SPIR-V lines placed after the native initial-EXEC setup, which
+  derives EXEC from the live lanes, and the direct SGPR count is the probe's own fixed 32.
+- Shader fixtures (`SerializationAndBounds`, `VertexClipProbe`): synthetic buffer instructions set their cache
+  flags (`buffer_flags` defaults to unknown, which fails closed); compute inputs give a nonzero workgroup size; MIMG
+  sample fixtures use the dmask-driven formats the decoder produces. Assertions follow the current lowering: CMPX
+  writes the packed ballot to both EXEC words in wave64, `V_BFM` computes `((1 << count) - 1) << offset` without
+  `OpBitFieldInsert` (undefined for offset + count > 32), and a wave-uniform `V_READFIRSTLANE` is a plain copy (the
+  subgroup invocation builtin now comes from the initial EXEC setup).
+- Index-to-render-target alias (`RenderTargetIndexAlias`): a render target allocated over two cached index views,
+  one inside it and one crossing its end, aborted object creation in a guest; index views are read-only fetch
+  caches, so crossing, contained and containing views link. Equality stays rejected.
+- Wide classification (`LibcWide*`): the guest's format-specification scanner copies characters while
+  `_Iswctype(c, 2)` is clear and stops at the conversion letter, and titles also call class 4, so the Dinkumware
+  table holds (2 alpha, 4 digit). The C locale classifies nothing above 0x7f instead of rejecting it, `%s` in
+  `vswprintf` is a narrow string, and a result that does not fit returns -1. Only an unknown class is rejected.
+- Archive membership (`ArchiveDag`): the kernel archive owns `FiberContext.S` and the HLE archive owns
+  `AudioPropagation.cpp`.
 
 ### Storage uploads and physical residency (2026-10-06, guest verified)
 
