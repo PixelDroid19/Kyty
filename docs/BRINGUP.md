@@ -254,6 +254,47 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### A roguelike reaches gameplay (2026-10-07)
+
+A 2D roguelike froze after its second frame: the main thread waited on an event flag that its render thread only
+sets after the GPU copies a frame label, and the render thread polled that label forever. Three general fixes take
+it through the title menu into its first areas (walking verified, about 140 fps under the harness limits):
+
+- **Data packet payloads.** `GetDataPacketPayloadAddress` type 0 describes a NOP data packet whose payload starts
+  right after the header. The guest sizes it exactly: a 3-dword NOP carries one 64-bit value that a DMA copies into
+  the label the render thread polls; larger payloads are aligned by the guest itself. The payload was returned one
+  dword later, so the 64-bit store overwrote the next packet's header and the copy never ran. Type 1 (register
+  packets, values after the offset dword) is unchanged.
+- **Ngs2 waveform parsing.** `ParseWaveformData` and `CalcWaveformBlock` are implemented for VAG (including the
+  HEVAG flag layout, loop start/repeat/end bits in the low flag nibble) and RIFF WAVE with an ATRAC9 extensible
+  format (`fact` gives the sample count and decoder delay, `smpl` the loop). The info is 232 bytes: a 24-byte
+  format, u32 offsets and counts, `numBlocks` at +0x44 and four 40-byte blocks with 64-bit offset and size. A
+  looped waveform splits into lead-in, a loop block repeating forever (the guest replaces that count with its own)
+  and the tail. Header-only buffers parse (streams pass the first 0xa8 bytes). Playback of these formats is still
+  silent; the sampler rack only renders the custom PCM path.
+- **`image_sample_o`** shares the offset path of `image_sample_lz_o` with an implicit LOD; the offset is applied
+  in base-level texels.
+
+### UE4 JRPG startup frontier (2026-10-07, not gameplay)
+
+An Unreal Engine 4 JRPG aborted on missing imports and shader forms one after another. Fixed so far, in the order
+the runs hit them:
+
+- **Videodec2.** The compute-queue and decoder entry points are implemented over the FFmpeg elementary decoder
+  (AVC and HEVC, slice threads). Every structure carries its `thisSize` (compute memory 0x18, compute config 0x10,
+  decoder config and memory 0x48, input 0x30, frame buffer 0x20, output 0x30); decoded pictures are written as
+  linear NV12 with a 256-byte aligned pitch into the guest frame buffer. Movie playback itself is not verified yet.
+- **`buffer_atomic_swap`** lowers to `OpAtomicExchange` (it was decoded as a barrier).
+- **Image format 23** (R16G16 UNORM) samples, and color target format 14 with FLOAT channels is RGBA32F.
+- **NGG image loads** read the address VGPRs of their dimension (plus the level of a mip load), not the decoder's
+  padded operand width.
+- **`image_gather4_lz_o`** takes its texel offset from the first address VGPR (two signed 6-bit fields), shifting
+  the coordinates by offset / level size.
+- **`v_readfirstlane` of a uniform VGPR** in a fused vertex front is a uniform copy, not a lane exchange.
+
+Next: a wave64 vertex shader indexes VGPRs with a waterfall loop (`v_readfirstlane`, `v_cmpx_eq`, `s_mov m0`,
+`v_movrels`), which the native-wave admission refuses as a lane exchange.
+
 ### Two Unity titles reach their menus and gameplay (2026-10-07)
 
 A 2D action title stopped at boot and a first-person perspective-puzzle title on its loading screen. Each fix
