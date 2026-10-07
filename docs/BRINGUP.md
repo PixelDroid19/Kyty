@@ -254,6 +254,26 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Integration tests link again (2026-10-06)
+
+Every integration target failed to link: the kernel event queue called the network HLE directly, and archives
+link the kernel after the HLE. The calls now go through `SocketEventPort`, which the composition root installs,
+and `scripts/check_emulator_boundaries.py` rejects the network header in kernel sources. Of the 67 registered
+integration tests, 59 pass. The 8 failures were never runnable before and are open:
+
+- `KytyShaderComputeIntegration.ScalarContracts`: the probe's SPIR-V text joins two lines (`OpStore %s9
+  %probe_seed_sgpr_9%native_initial_exec = ...`), so assembly fails before the contract runs.
+- `KytyGraphicsDiagnosticsIntegration.SerializationAndBounds` and `.VertexClipProbe`: their fixture programs hit
+  `shader emitter missing ... reason=lowering-preconditions` (`ShaderSpirvGenerator.cpp:212`); the fixtures predate
+  the current lowering preconditions.
+- `KytyGraphicsDiagnosticsIntegration.RenderTargetIndexAlias`: the index-to-render-target alias contract no longer
+  admits the unobserved partial overlap the test expects.
+- `KytyLibcWideIntegration.ExactImports`, `.reject_class`, `.reject_non_ascii`: class 2 classification and the
+  rejection scenarios disagree with the test's expectations; the guest behavior needs evidence before either side
+  changes.
+- `KytyArchiveDagIntegration.Repository`: the expected archive membership predates `FiberContext.S` in the kernel
+  archive and `AudioPropagation.cpp` in the HLE archive.
+
 ### Storage uploads and physical residency (2026-10-06, guest verified)
 
 Scope: strict runs on the reference host (two host cores, 8 GiB cgroup, shader validation on). Costs were measured

@@ -225,6 +225,7 @@ PROFILER_INCLUDE_PATHS = (
 KERNEL_GUEST_INCLUDE_PATHS = (
     "Emulator/Libs/Errno.h",
     "Emulator/Libs/Libs.h",
+    "Emulator/Network.h",
 )
 KERNEL_LOADER_INCLUDE_PREFIXES = (
     "Emulator/Loader/",

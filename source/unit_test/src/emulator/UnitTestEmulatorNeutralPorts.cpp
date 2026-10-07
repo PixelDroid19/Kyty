@@ -4,6 +4,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Ports/AudioPausePort.h"
 #include "Emulator/Ports/ControllerInputPort.h"
+#include "Emulator/Ports/SocketEventPort.h"
 #include "Emulator/PresentationStats.h"
 #include "Emulator/VideoFrameMemory.h"
 
@@ -183,6 +184,41 @@ TEST(EmulatorNeutralPorts, ControllerInputPortDeliversInstalledCallbacks)
 	::Kyty::Emulator::Ports::ControllerInputPort::Install({});
 	::Kyty::Emulator::Ports::ControllerInputPort::Button(1, 1, true);
 	EXPECT_EQ(g_button_count, 1);
+}
+
+// Before install the kernel must treat every descriptor as a file and fail
+// socket calls closed; after install it reaches the network implementation.
+TEST(EmulatorNeutralPorts, SocketEventPortFailsClosedBeforeInstall)
+{
+	using ::Kyty::Emulator::Ports::SocketEventPort;
+	SocketEventPort::Install({});
+	bool    ready = true;
+	int64_t data  = 0;
+	EXPECT_FALSE(SocketEventPort::IsSocket(5));
+	EXPECT_EQ(SocketEventPort::Readiness(5, false, &ready, &data), SocketEventPort::NOT_INSTALLED);
+	EXPECT_EQ(SocketEventPort::Watch(5, false, 1, 1, nullptr), SocketEventPort::NOT_INSTALLED);
+	SocketEventPort::Unwatch(5, false, 1);
+
+	SocketEventPort::Install({[](int id) { return id == 5; },
+	                          [](int /*id*/, bool write, bool* is_ready, int64_t* bytes)
+	                          {
+		                          *is_ready = write;
+		                          *bytes    = 64;
+		                          return 0;
+	                          },
+	                          [](int id, bool /*write*/, uint64_t owner, uint64_t /*generation*/,
+	                             ::Kyty::Emulator::Ports::SocketReadyNotify /*notify*/) { return static_cast<int>(owner) + id; },
+	                          nullptr});
+	EXPECT_TRUE(SocketEventPort::IsSocket(5));
+	EXPECT_FALSE(SocketEventPort::IsSocket(6));
+	EXPECT_EQ(SocketEventPort::Readiness(5, true, &ready, &data), 0);
+	EXPECT_TRUE(ready);
+	EXPECT_EQ(data, 64);
+	EXPECT_EQ(SocketEventPort::Watch(5, false, 2, 1, nullptr), 7);
+	SocketEventPort::Unwatch(5, false, 2);
+
+	SocketEventPort::Install({});
+	EXPECT_FALSE(SocketEventPort::IsSocket(5));
 }
 
 TEST(EmulatorNeutralPorts, AudioPausePortDeliversInstalledCallback)
