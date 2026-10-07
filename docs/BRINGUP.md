@@ -298,8 +298,24 @@ imports that worked before (those paths aborted).
 
 Both titles now reach gameplay: the 2D title in its first area, the puzzle title in its first room after the
 intro (about 35 fps under the harness limits). Open: the 2D title's menus draw text from an 8-bit atlas as
-solid quads; the puzzle title shows large black shapes behind its menu and speckled, unblurred darkening along
-creases in gameplay. All three are under investigation.
+translucent boxes (atlas, swizzle, vertex fetch and clamps are verified; the text shader's camera-space
+branch is next).
+
+Follow-up the same day, the puzzle title's deferred passes:
+
+- **Render targets written with the alternate swap alias their samples.** A G-buffer target written with the
+  alternate component swap is a BGRA8 (or A2R10G10B10) image whose bytes are the guest's; its sampled view is an
+  RGBA8 sRGB (or 10_10_10_2) T# with a BGRA selection. The alias was rejected, so each sample built a separate
+  texture that skips its guest upload and was cleared to transparent black: ambient occlusion and lighting read
+  stale or empty normals and albedo (speckled, unblurred darkening along creases). Such a surface is now a
+  sample alias; its view exchanges the red and blue selectors (an RGBA8 sample with a BGRA selection reads the
+  BGRA image with identity). The existing RGBA8 UNORM case now composes the selectors the same way.
+- **`V_LOG_F32` of zero is negative infinity**, as the ISA defines; GLSL `Log2` leaves it undefined. `pow` lowers
+  to log, multiply and exp, so a zero base (a vignette outside its ellipse) needs it.
+- **Recycled allocations.** A storage view over memory another storage view or render target used with a
+  different format (or over the exact range with another extent) is linked and seeds from guest bytes; a
+  storage view over several GPU-written targets of its element size seeds from their blocks in write order.
+- The image dumps keep the last eight remembered targets and run for every present format.
 
 ### Integration tests link again (2026-10-06)
 
