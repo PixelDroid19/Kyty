@@ -51,6 +51,27 @@ int ResolveStorageTextureArrayIndex(const ShaderCode& code, uint32_t instruction
 	return storage_index < bind.textures2D.textures2d_storage_num ? storage_index : -1;
 }
 
+// The shader component each memory channel of a storage store receives:
+// identity, unless the emitter applies the descriptor's channel selection.
+static void StorageStoreComponentOrder(const ShaderCode& code, uint32_t instruction_index, const ShaderBindResources& bind,
+                                       int user_data_register_base, uint32_t order[4])
+{
+	const int      descriptor_index = ShaderFindImageStorageTextureDescriptor(code, instruction_index, bind, user_data_register_base);
+	const uint32_t swizzle          = bind.textures2D.desc[descriptor_index].texture.DstSelXYZW();
+	for (uint32_t channel = 0; channel < 4; channel++)
+	{
+		order[channel] = channel;
+	}
+	if (!ShaderStorageImageSwizzleInShader(swizzle))
+	{
+		return;
+	}
+	for (uint32_t component = 0; component < 4; component++)
+	{
+		order[GetDstSel(swizzle, component) - 4u] = component;
+	}
+}
+
 static ImageSampleLzPlan PlanImageSampleLz(const ShaderInstruction& inst, const ShaderBindResources& bind, int user_data_register_base)
 {
 	const int descriptor_index = ShaderFindImageSampledTextureDescriptor(inst, bind, user_data_register_base);
@@ -140,7 +161,7 @@ bool SupportsArrayed2dImageInstruction(const ShaderInstruction& inst)
 	{
 		return true;
 	}
-	if (inst.type == ShaderInstructionType::ImageSampleL && inst.mimg_dimension == 3u)
+	if (inst.type == ShaderInstructionType::ImageSampleL && (inst.mimg_dimension == 3u || inst.mimg_dimension == 5u))
 	{
 		return true;
 	}
@@ -2034,6 +2055,44 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSample_Vdata4Vaddr3StSsDmaskF)
 // image_sample_b: RDNA address is {bias}{coords}. One multi-format emitter
 // keeps compact dmask stores and routes through the typed sample path
 // (descriptor shape selects flat / array / volume).
+// IMAGE_SAMPLE with an enabled-component set that has no dedicated tuple.
+KYTY_RECOMPILER_FUNC(Recompile_ImageSample_VdataVaddr3StSsMimgDmask)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+	// 1 = 2D (x,y); 5 = 2D array (x,y,slice).
+	if ((inst.mimg_dimension != 1 && inst.mimg_dimension != 5) || bind_info == nullptr || bind_info->samplers.samplers_num <= 0)
+	{
+		return false;
+	}
+
+	uint32_t components[4] = {};
+	int      num           = 0;
+	for (uint32_t component = 0; component < 4u; ++component)
+	{
+		if ((inst.mimg_dmask & (1u << component)) != 0u) { components[num++] = component; }
+	}
+	if (num == 0 || num != inst.dst.size) { return false; }
+
+	SpirvValue dst_value[4];
+	for (int i = 0; i < num; i++)
+	{
+		dst_value[i] = operand_variable_to_str(inst.dst, i);
+		if (dst_value[i].type != SpirvType::Float) { return false; }
+	}
+	const auto x       = mimg_address_to_str(inst, 0);
+	const auto y       = mimg_address_to_str(inst, 1);
+	const auto layer   = mimg_address_to_str(inst, 2);
+	const auto texture = operand_variable_to_str(inst.src[1], 0);
+	const auto sampler = operand_variable_to_str(inst.src[2], 0);
+	if (x.type != SpirvType::Float || y.type != SpirvType::Float || texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint)
+	{
+		return false;
+	}
+	return EmitTypedImageSample(dst_source, index, inst, spirv, x, y, layer, texture, sampler, dst_value, static_cast<uint32_t>(num),
+	                            components);
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_ImageSampleB_VdataVaddrStSsMimgDmask)
 {
 	const auto& inst      = code.GetInstructions().At(index);
@@ -2122,8 +2181,7 @@ static String8 EmitImageSampleCLzCompare(uint32_t index, uint8_t compare_func)
 
 static bool SupportsArrayComparisonSampler(const ShaderSamplerResource& sampler)
 {
-	return !sampler.ForceUnormCoords() && sampler.MinLod() == 0u && sampler.FilterMode() == 0u &&
-	       sampler.XyMagFilter() <= 1u && sampler.XyMinFilter() <= 1u;
+	return !sampler.ForceUnormCoords() && sampler.MinLod() == 0u && sampler.FilterMode() == 0u;
 }
 
 static String8 EmitArrayComparisonFilter(uint32_t index, uint8_t compare_func)
@@ -2191,7 +2249,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 	{
 		return false;
 	}
-	const bool manual_linear = arrayed && sampler.XyMagFilter() == 1u;
+	// A level-zero sample has no derivatives and magnifies, so an anisotropic
+	// filter reduces to its point or linear base filter.
+	const bool manual_linear = arrayed && (sampler.XyMagFilter() & 1u) != 0u;
 	if ((!flat && !arrayed) || (flat && inst.mimg_dimension != 1u) ||
 	    (arrayed && inst.mimg_dimension != 3u && inst.mimg_dimension != 5u))
 	{
@@ -2488,55 +2548,6 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleLz_Vdata4Vaddr3StSsDmaskF)
 	}
 
 	return false;
-}
-
-KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_Vdata1Vaddr3StSsDmask1)
-{
-	const auto& inst = code.GetInstructions().At(index);
-	const auto* bind = spirv->GetBindInfo();
-	if (inst.mimg_dimension != 1u || bind == nullptr || bind->textures2D.textures2d_sampled_num <= 0 || bind->samplers.samplers_num <= 0)
-	{
-		return false;
-	}
-
-	const auto dst     = operand_variable_to_str(inst.dst);
-	const auto x       = mimg_address_to_str(inst, 0);
-	const auto y       = mimg_address_to_str(inst, 1);
-	const auto lod     = mimg_address_to_str(inst, 2);
-	const auto texture = operand_variable_to_str(inst.src[1], 0);
-	const auto sampler = operand_variable_to_str(inst.src[2], 0);
-	if (dst.type != SpirvType::Float || x.type != SpirvType::Float || y.type != SpirvType::Float || lod.type != SpirvType::Float ||
-	    texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint)
-	{
-		return false;
-	}
-
-	static const char* source = R"(
-%sample_l_scalar_descriptor_raw_<index> = OpLoad %uint %<texture>
-%sample_l_scalar_descriptor_<index> = OpBitwiseAnd %uint %sample_l_scalar_descriptor_raw_<index> %uint_0x1fffffff
-%sample_l_scalar_image_ptr_<index> = OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S %sample_l_scalar_descriptor_<index>
-%sample_l_scalar_image_<index> = OpLoad %ImageS %sample_l_scalar_image_ptr_<index>
-%sample_l_scalar_sampler_index_<index> = OpLoad %uint %<sampler>
-%sample_l_scalar_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %sample_l_scalar_sampler_index_<index>
-%sample_l_scalar_sampler_<index> = OpLoad %Sampler %sample_l_scalar_sampler_ptr_<index>
-%sample_l_scalar_sampled_<index> = OpSampledImage %SampledImage %sample_l_scalar_image_<index> %sample_l_scalar_sampler_<index>
-%sample_l_scalar_x_<index> = OpLoad %float %<x>
-%sample_l_scalar_y_<index> = OpLoad %float %<y>
-%sample_l_scalar_lod_<index> = OpLoad %float %<lod>
-%sample_l_scalar_coordinate_<index> = OpCompositeConstruct %v2float %sample_l_scalar_x_<index> %sample_l_scalar_y_<index>
-%sample_l_scalar_value_<index> = OpImageSampleExplicitLod %v4float %sample_l_scalar_sampled_<index> %sample_l_scalar_coordinate_<index> Lod %sample_l_scalar_lod_<index>
-%sample_l_scalar_red_<index> = OpCompositeExtract %float %sample_l_scalar_value_<index> 0
-OpStore %<dst> %sample_l_scalar_red_<index>
-)";
-	*dst_source += String8(source)
-	                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
-	                   .ReplaceStr("<texture>", texture.value)
-	                   .ReplaceStr("<sampler>", sampler.value)
-	                   .ReplaceStr("<x>", x.value)
-	                   .ReplaceStr("<y>", y.value)
-	                   .ReplaceStr("<lod>", lod.value)
-	                   .ReplaceStr("<dst>", dst.value);
-	return true;
 }
 
 static bool RecompileCubeImageSampleL(uint32_t destination_num, KYTY_RECOMPILER_ARGS)
@@ -2872,6 +2883,133 @@ static SampledImageTypeInfo GetSampledImageTypeInfo(SampledImageShape shape, boo
 	}
 	EXIT("unknown sampled image shape\n");
 	return {};
+}
+
+// IMAGE_SAMPLE_L with an enabled-component set that has no dedicated tuple.
+// The address is the DIM's coordinates followed by the LOD; the T# shape
+// selects the descriptor bank and a cube samples its faces as array layers.
+KYTY_RECOMPILER_FUNC(Recompile_ImageSampleL_VdataVaddrStSsMimgDmask)
+{
+	const auto& inst = code.GetInstructions().At(index);
+	if (inst.mimg_dimension == 3u)
+	{
+		return RecompileCubeImageSampleL(static_cast<uint32_t>(inst.dst.size), index, code, dst_source, spirv, param, scc_check);
+	}
+
+	const auto* bind = spirv->GetBindInfo();
+	if (bind == nullptr || bind->samplers.samplers_num <= 0)
+	{
+		return false;
+	}
+	const auto* vs_info                 = spirv->GetVsInputInfo();
+	const int   user_data_register_base = (vs_info != nullptr && vs_info->gs_prolog ? 8 : 0);
+	const int   descriptor_index        = ShaderFindImageSampledTextureDescriptor(inst, *bind, user_data_register_base);
+	if (descriptor_index < 0)
+	{
+		return false;
+	}
+	const auto descriptor_shape = ShaderResolvedSampledTextureShape(bind->textures2D.desc[descriptor_index]);
+
+	// 1 = 2D (x, y); 2 = 3D (x, y, z); 5 = 2D array (x, y, slice).
+	SampledImageShape shape       = SampledImageShape::Flat2d;
+	int               sampled_num = 0;
+	if (inst.mimg_dimension == 1u && descriptor_shape == ShaderGen5SampledTextureShape::TwoDimensional)
+	{
+		sampled_num = bind->textures2D.textures2d_sampled_num;
+	} else if (inst.mimg_dimension == 2u && descriptor_shape == ShaderGen5SampledTextureShape::ThreeDimensional)
+	{
+		shape       = SampledImageShape::ThreeDimensional;
+		sampled_num = bind->textures2D.textures3d_sampled_num;
+	} else if (inst.mimg_dimension == 5u && descriptor_shape == ShaderGen5SampledTextureShape::TwoDimensionalArray)
+	{
+		shape       = SampledImageShape::Array2d;
+		sampled_num = bind->textures2D.textures2d_array_sampled_num;
+	}
+	if (sampled_num <= 0)
+	{
+		return false;
+	}
+	const auto type_info      = GetSampledImageTypeInfo(shape);
+	const int  coordinate_num = type_info.has_third_dimension ? 3 : 2;
+
+	const auto texture = operand_variable_to_str(inst.src[1], 0);
+	const auto sampler = operand_variable_to_str(inst.src[2], 0);
+	const auto lod     = mimg_address_to_str(inst, coordinate_num);
+	if (texture.type != SpirvType::Uint || sampler.type != SpirvType::Uint || lod.type != SpirvType::Float)
+	{
+		return false;
+	}
+
+	const auto index_string = String8::FromPrintf("%u", index);
+	String8    coordinate_ids;
+	String8    source;
+	for (int coordinate = 0; coordinate < coordinate_num; ++coordinate)
+	{
+		const auto value = mimg_address_to_str(inst, coordinate);
+		if (value.type != SpirvType::Float)
+		{
+			return false;
+		}
+		source += String8::FromPrintf("%%sample_l_coordinate_%s_%d = OpLoad %%float %%%s\n", index_string.c_str(), coordinate,
+		                              value.value.c_str());
+		coordinate_ids += String8::FromPrintf(" %%sample_l_coordinate_%s_%d", index_string.c_str(), coordinate);
+	}
+	source += String8(R"(
+%sample_l_descriptor_raw_<index> = OpLoad %uint %<texture>
+%sample_l_descriptor_<index> = OpBitwiseAnd %uint %sample_l_descriptor_raw_<index> %uint_0x1fffffff
+%sample_l_image_ptr_<index> = OpAccessChain %<pointer_type> %<variable> %sample_l_descriptor_<index>
+%sample_l_image_<index> = OpLoad %<image_type> %sample_l_image_ptr_<index>
+%sample_l_sampler_index_<index> = OpLoad %uint %<sampler>
+%sample_l_sampler_ptr_<index> = OpAccessChain %_ptr_UniformConstant_Sampler %samplers %sample_l_sampler_index_<index>
+%sample_l_sampler_<index> = OpLoad %Sampler %sample_l_sampler_ptr_<index>
+%sample_l_sampled_<index> = OpSampledImage %<sampled_image_type> %sample_l_image_<index> %sample_l_sampler_<index>
+%sample_l_lod_<index> = OpLoad %float %<lod>
+%sample_l_coordinate_<index> = OpCompositeConstruct %<coordinate_type><coordinates>
+%sample_l_value_<index> = OpImageSampleExplicitLod %v4float %sample_l_sampled_<index> %sample_l_coordinate_<index> Lod %sample_l_lod_<index>
+)")
+	              .ReplaceStr("<index>", index_string)
+	              .ReplaceStr("<texture>", texture.value)
+	              .ReplaceStr("<sampler>", sampler.value)
+	              .ReplaceStr("<lod>", lod.value)
+	              .ReplaceStr("<pointer_type>", type_info.pointer_type)
+	              .ReplaceStr("<variable>", type_info.variable)
+	              .ReplaceStr("<image_type>", type_info.image_type)
+	              .ReplaceStr("<sampled_image_type>", type_info.sampled_image_type)
+	              .ReplaceStr("<coordinate_type>", type_info.float_coordinate_type)
+	              .ReplaceStr("<coordinates>", coordinate_ids);
+
+	// DMASK enables components in R, G, B, A order; the results pack into consecutive VGPRs.
+	int destination = 0;
+	for (uint32_t component = 0; component < 4u; ++component)
+	{
+		if ((inst.mimg_dmask & (1u << component)) == 0u)
+		{
+			continue;
+		}
+		if (destination >= inst.dst.size)
+		{
+			return false;
+		}
+		const auto dst = operand_variable_to_str(inst.dst, destination++);
+		if (dst.type != SpirvType::Float)
+		{
+			return false;
+		}
+		source += String8(R"(
+%sample_l_component_<index>_<component> = OpCompositeExtract %float %sample_l_value_<index> <component>
+OpStore %<dst> %sample_l_component_<index>_<component>
+)")
+		              .ReplaceStr("<index>", index_string)
+		              .ReplaceStr("<component>", String8::FromPrintf("%u", component))
+		              .ReplaceStr("<dst>", dst.value);
+	}
+	if (destination != inst.dst.size)
+	{
+		return false;
+	}
+
+	*dst_source += source;
+	return true;
 }
 
 static String8 EmitImageResinfoQuery(uint32_t index, SampledImageShape shape, const String8& descriptor_index,
@@ -3732,14 +3870,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 		}
 
 		String8 component_loads;
-		String8 component_values;
+		String8 values[4];
 		String8 coordinate_bounds;
 		int     source_component = 0;
 		for (uint32_t component = 0; component < 4; component++)
 		{
 			if ((dmask & (1u << component)) == 0)
 			{
-				component_values += String8::FromPrintf(" %%%s", zero_component.c_str());
+				values[component] = String8::FromPrintf(" %%%s", zero_component.c_str());
 				continue;
 			}
 
@@ -3753,7 +3891,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStore_VdataVaddr3StDmask)
 			                                      index, component, source.value.c_str(), index, component,
 			                                      uint_images ? "OpBitcast" : "OpCopyObject", uint_images ? "uint" : "float", index,
 			                                      component);
-			component_values += String8::FromPrintf(" %%image_store_component_%u_%u", index, component);
+			values[component] = String8::FromPrintf(" %%image_store_component_%u_%u", index, component);
+		}
+		uint32_t order[4];
+		StorageStoreComponentOrder(code, index, *bind_info, user_data_register_base, order);
+		String8 component_values;
+		for (uint32_t channel = 0; channel < 4; channel++)
+		{
+			component_values += values[order[channel]];
 		}
 		const uint32_t coordinate_count = (arrayed || three_dimensional) ? 3u : 2u;
 		for (uint32_t component = 0; component < coordinate_count; component++)
@@ -3878,8 +4023,15 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
 
 		// TODO() check VSKIP
 		// TODO() check LOD_CLAMPED
-		// TODO() swizzle channels
 		// TODO() convert SRGB -> LINEAR if SRGB format was replaced with UNORM
+
+		uint32_t order[4];
+		StorageStoreComponentOrder(code, index, *bind_info, user_data_register_base, order);
+		String8 channel_values;
+		for (uint32_t channel = 0; channel < 4; channel++)
+		{
+			channel_values += String8::FromPrintf(" %%t%u_<index>", 84u + order[channel]);
+		}
 
 		static const char* text = R"(
 		 %t25_<index> = OpLoad %uint %<src1_value2>
@@ -3904,13 +4056,14 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageStoreMip_Vdata4Vaddr4StDmaskF)
          %t86_<index> = OpLoad %float %<dst_value2>
          %t87_<index> = OpLoad %float %<dst_value3>
          %t172_<index> = OpIAdd %v2uint %t160_<index> %t73_<index>
-         %image_store_mip_float_<index> = OpCompositeConstruct %v4float %t84_<index> %t85_<index> %t86_<index> %t87_<index>
+         %image_store_mip_float_<index> = OpCompositeConstruct %v4float<channel_values>
          %t88_<index> = <texel_conversion> %<image_vector> %image_store_mip_float_<index>
                 OpImageWrite %t27_<index> %t172_<index> %t88_<index>
 )";
 		*dst_source += String8(text)
 		                   .ReplaceStr("ImageL", uint_alias ? "ImageLU" : "ImageL")
 		                   .ReplaceStr("textures2D_L", uint_alias ? "textures2D_LU" : "textures2D_L")
+		                   .ReplaceStr("<channel_values>", channel_values)
 		                   .ReplaceStr("<texel_conversion>", uint_images ? "OpBitcast" : "OpCopyObject")
 		                   .ReplaceStr("<image_vector>", uint_images ? "v4uint" : "v4float")
 		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))

@@ -479,6 +479,7 @@ String8 ScalarSpillSlotName(int register_id, int lane);
 bool HasLiveScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool HasInvalidatedScalarSpill(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool HasFutureScalarSpillRead(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
+bool IsScalarSpillStore(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane);
 bool UsesNativeLaneExchange(const ShaderCode& code);
 // M0-relative moves lower to a named register only when M0 is a proven literal
 // in the same basic block. Returns the literal through m0 on success.

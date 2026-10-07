@@ -3411,7 +3411,7 @@ KYTY_RECOMPILER_FUNC(Recompile_VWritelaneB32_SVdstSVsrc0SVsrc1)
 	int spill_register = 0;
 	int spill_lane     = 0;
 	if (IsStaticScalarSpillWrite(inst, &spill_register, &spill_lane) &&
-	    HasFutureScalarSpillRead(code, index, spill_register, spill_lane))
+	    IsScalarSpillStore(code, index, spill_register, spill_lane))
 	{
 		const String8 slot = ScalarSpillSlotName(spill_register, spill_lane);
 		static const char* text = R"(

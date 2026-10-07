@@ -2064,7 +2064,7 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 		const auto* image   = texture.image;
 		std::fprintf(out,
 		    "KYTY_TRACE_DRAW_PS_TEXTURE ordinal=%u descriptor=%d slot=%d sgpr=%d usage=%u operation=%u shape=%u"
-		    " addr=0x%012" PRIx64 " format=%u tile=%u type=%u extent=%ux%u pitch=%u depth=%u"
+		    " addr=0x%012" PRIx64 " format=%u tile=%u type=%u extent=%ux%u pitch=%u depth=%u dst_sel=0x%03x"
 		    " base_level=%u last_level=%u max_mip=%u materialize=%s host_id=%" PRIu64 " host_type=%u host_format=%u"
 		    " host_layout=%u view=%d host_extent=%ux%u guest_size=%" PRIu64 " array_pitch=%u bound=%u"
 		    " sampler=%u sampler_slot=%d sampler_op=%u compare=%u force_unorm=%u allow_unorm=%u"
@@ -2073,7 +2073,8 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 		    static_cast<uint32_t>(texture.usage), static_cast<uint32_t>(texture.operation), static_cast<uint32_t>(texture.shape),
 		    texture.guest_addr, static_cast<uint32_t>(texture.guest.Format()), static_cast<uint32_t>(texture.guest.TileMode()),
 		    static_cast<uint32_t>(texture.guest.Type()), texture.guest_width, texture.guest_height, texture.guest_pitch,
-		    texture.guest_depth, static_cast<uint32_t>(texture.guest.BaseLevel()), static_cast<uint32_t>(texture.guest.LastLevel()),
+		    texture.guest_depth, texture.guest.DstSelXYZW(), static_cast<uint32_t>(texture.guest.BaseLevel()),
+		    static_cast<uint32_t>(texture.guest.LastLevel()),
 		    static_cast<uint32_t>(texture.guest.MaxMip()), texture.provenance,
 		    image != nullptr ? image->memory.unique_id : 0u, image != nullptr ? static_cast<uint32_t>(image->type) : 0u,
 		    image != nullptr ? static_cast<uint32_t>(image->format) : 0u,
@@ -3062,7 +3063,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
                             int* images_sampled_uint_view, VulkanImage** images_sampled_array_uint,
                             int* images_sampled_array_uint_view, VulkanImage** images_sampled_3d_uint,
                             int* images_sampled_3d_uint_view, int* images_storage_view, uint32_t storage_seed_skip_mask,
-                            uint32_t** sgprs, DrawMaterialTraceSession* material_trace)
+                            uint32_t** sgprs, DrawMaterialTraceSession* material_trace, const VulkanImage* stencil_attached_depth)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -4053,6 +4054,10 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			         ? VulkanImage::VIEW_3D
 			         : (depth_texture ? (arrayed_2d ? VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY : VulkanImage::VIEW_DEPTH_TEXTURE)
 			                          : (arrayed_2d ? VulkanImage::VIEW_ARRAY : VulkanImage::VIEW_DEFAULT)));
+			if (depth_texture && tex == stencil_attached_depth)
+			{
+				sampled_views[*sampled_index] |= VulkanImage::VIEW_STENCIL_ATTACHED_DEPTH;
+			}
 			if (!depth_texture && (tex->type == VulkanImageType::RenderTexture || tex->type == VulkanImageType::StorageTexture ||
 			                       tex->type == VulkanImageType::VideoOut))
 			{
@@ -4351,7 +4356,8 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
-                     uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum)
+                     uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
+                     const VulkanImage* stencil_attached_depth)
 {
 	KYTY_PROFILER_FUNCTION();
 	InvalidateComputeColorFills(bind);
@@ -4426,7 +4432,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 			                textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
 			                textures3d_sampled_view, textures2d_sampled_uint, textures2d_sampled_uint_view,
 			                textures2d_array_sampled_uint, textures2d_array_sampled_uint_view, textures3d_sampled_uint,
-			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr, &trace_session);
+			                textures3d_sampled_uint_view, textures2d_storage_view, storage_seed_skip_mask, &sgprs_ptr, &trace_session,
+			                stencil_attached_depth);
 			if (record_draw_timing) { DebugStatsRecordDrawDescriptorTexture(BindingStageElapsedNs(stage_start)); }
 			need_descriptor = true;
 		}

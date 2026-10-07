@@ -1145,6 +1145,7 @@ ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int sta
 			// bounds only, so descriptor validation follows the raw-buffer contract.
 			case ShaderInstructionType::TBufferLoadFormatX:
 			case ShaderInstructionType::TBufferLoadFormatXy:
+			case ShaderInstructionType::TBufferLoadFormatXyz:
 			case ShaderInstructionType::TBufferLoadFormatXyzw:
 				candidate_raw         = true;
 				candidate_raw_tbuffer = true;

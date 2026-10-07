@@ -115,6 +115,16 @@ bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures
 	return matched;
 }
 
+State::ImageSampleOperation ShaderTextureSampleOperation(const ShaderTextureResource& texture, State::ImageSampleOperation operation)
+{
+	if (Config::IsNextGen() && operation == State::ImageSampleOperation::DepthReference &&
+	    (texture.TileMode() != 24u || State::Gen5DepthSampleBytesPerElement(texture.Format()) == 0u))
+	{
+		return State::ImageSampleOperation::Regular;
+	}
+	return operation;
+}
+
 ShaderSampledImageViewDecision ResolveDepthReferenceImageView(State::ImageSampleOperation operation,
                                                               ShaderGen5SampledTextureShape shape, bool floating_point,
                                                               ShaderSampledImageViewKind resolved_view)
@@ -3159,7 +3169,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 			if (image.texture != ShaderTextureUsage::Unknown)
 			{
-				descriptor.sample_operation = image.sample_operation;
+				descriptor.sample_operation = ShaderTextureSampleOperation(descriptor.texture, image.sample_operation);
 				ApplyDirectImageShape(image, &descriptor);
 			}
 		}
@@ -4787,6 +4797,8 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(storage ? r.BaseLevel() : 0u);
 		ret->ids.Add(storage ? r.LastLevel() : 0u);
 		ret->ids.Add(storage ? r.MaxMip() : 0u);
+		// Image stores apply a channel selection the storage view cannot express.
+		ret->ids.Add(storage && ShaderStorageImageSwizzleInShader(r.DstSelXYZW()) ? r.DstSelXYZW() : 0u);
 		// ret->ids.Add(r.Depth());
 		// ret->ids.Add(r.Pitch());
 		// ret->ids.Add(r.BaseArray());

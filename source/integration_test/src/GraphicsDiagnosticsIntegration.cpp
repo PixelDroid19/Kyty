@@ -2221,8 +2221,12 @@ void VerifyDepthStencilAttachmentAccess(bool load_store_op_none_supported)
 	depth.stencil_test_enable               = true;
 	depth.stencil_dynamic_front.writeMask   = 0xffu;
 	depth.stencil_static_front.passOp       = VK_STENCIL_OP_REPLACE;
-	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::Unsupported,
-	       "sampled depth alias rejects simultaneous stencil writes");
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::ReadOnly,
+	       "stencil writes without a stencil plane stay read-only");
+	depth.format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::DepthReadOnly,
+	       "sampled depth alias keeps the stencil plane writable");
+	depth.format = VK_FORMAT_D32_SFLOAT;
 	depth.stencil_dynamic_front.writeMask = 0u;
 	Expect(ResolveDepthStencilAttachmentAccess(depth, true, true) == DepthStencilAttachmentAccess::ReadOnly,
 	       "masked stencil operation stays read-only");

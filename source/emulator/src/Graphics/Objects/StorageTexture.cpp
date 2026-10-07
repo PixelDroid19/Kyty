@@ -104,6 +104,11 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 		// image views must keep an identity component mapping.
 		return DstSel(4, 5, 6, 7);
 	}
+	if (ShaderStorageImageSwizzleInShader(swizzle))
+	{
+		// The image-store emitter places each component in its selected channel.
+		return DstSel(4, 5, 6, 7);
+	}
 	return swizzle;
 }
 
@@ -831,6 +836,12 @@ uint32_t StorageTextureMipBackingLevels(const uint64_t* params, bool gen5)
 	return std::min(full, static_cast<uint32_t>(VulkanImage::VIEW_STORAGE_MIP_COUNT));
 }
 
+bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming)
+{
+	return existing[StorageTextureObject::PARAM_FORMAT] != incoming[StorageTextureObject::PARAM_FORMAT] ||
+	       existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT];
+}
+
 bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming)
 {
 	if (existing == nullptr || incoming == nullptr)
@@ -872,6 +883,20 @@ bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_
 	       NormalizeStorageTextureSwizzle(incoming_fmt, incoming[StorageTextureObject::PARAM_SWIZZLE]);
 }
 
+// A render-target alias copies texel bytes unchanged. Equal formats alias, and so
+// do the 8-bit four-channel formats, whose texels store the guest bytes in order
+// whatever their channel order or sRGB encoding.
+static bool RenderAliasFormatsMatch(VkFormat render_format, VkFormat storage_format)
+{
+	const auto rgba8 = [](VkFormat format)
+	{
+		return format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB || format == VK_FORMAT_B8G8R8A8_UNORM ||
+		       format == VK_FORMAT_B8G8R8A8_SRGB;
+	};
+	return render_format != VK_FORMAT_UNDEFINED &&
+	       (render_format == storage_format || (rgba8(render_format) && rgba8(storage_format)));
+}
+
 static uint32_t RenderAliasBytesPerElement(const uint64_t* render_params, const uint64_t* storage_params)
 {
 	if (render_params == nullptr || storage_params == nullptr)
@@ -896,22 +921,25 @@ static uint32_t RenderAliasBytesPerElement(const uint64_t* render_params, const 
 
 	const uint32_t guest_format = static_cast<uint32_t>(storage_params[StorageTextureObject::PARAM_FORMAT] >> 16u);
 	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(guest_format);
-	if ((bytes_per_element != 4u && bytes_per_element != 8u) ||
-	    NormalizeStorageTextureSwizzle(guest_format, storage_params[StorageTextureObject::PARAM_SWIZZLE]) !=
-	        DstSel(4, 5, 6, 7))
+	if (bytes_per_element != 4u && bytes_per_element != 8u)
 	{
 		return 0u;
 	}
-	const auto storage_format = VulkanResolveGuestImageFormat(
+	// The storage image format as created: a BGRA selection becomes a BGRA8 image.
+	auto storage_format = VulkanResolveGuestImageFormat(
 	    GuestImageUsage::Storage, static_cast<uint8_t>(storage_params[StorageTextureObject::PARAM_FORMAT] >> 8u),
 	    static_cast<uint8_t>(storage_params[StorageTextureObject::PARAM_FORMAT]), static_cast<uint16_t>(guest_format));
-	const auto render_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(
-	    static_cast<RenderTextureFormat>(render_params[RenderTextureObject::PARAM_FORMAT])));
-	if (storage_format == VK_FORMAT_UNDEFINED || storage_format != render_format)
+	VkComponentMapping components {};
+	if (storage_format == VK_FORMAT_UNDEFINED ||
+	    !VulkanDecodeComponentMapping(NormalizeStorageTextureSwizzle(guest_format, storage_params[StorageTextureObject::PARAM_SWIZZLE]),
+	                                  &components) ||
+	    !VulkanNormalizeStorageComponentMapping(&storage_format, &components))
 	{
 		return 0u;
 	}
-	return bytes_per_element;
+	const auto render_format = static_cast<VkFormat>(VulkanResolveRenderTextureFormat(
+	    static_cast<RenderTextureFormat>(render_params[RenderTextureObject::PARAM_FORMAT])));
+	return RenderAliasFormatsMatch(render_format, storage_format) ? bytes_per_element : 0u;
 }
 
 struct RenderAliasLayout
@@ -990,14 +1018,18 @@ bool StorageTexturePlanRenderAlias(const uint64_t* render_params, uint64_t rende
 		const uint64_t source_y = (render_index / render.blocks_x) * block_height;
 		const uint64_t destination_x = (storage_index % storage.blocks_x) * block_width;
 		const uint64_t destination_y = (storage_index / storage.blocks_x) * block_height;
-		if (source_x + block_width > render.width || source_y + block_height > render.height ||
-		    destination_x + block_width > storage.width || destination_y + block_height > storage.height)
+		// An edge block holds texels past an image's extent; copy only those both images cover.
+		const uint64_t width  = std::min({block_width, render.width - std::min(source_x, render.width),
+		                                  storage.width - std::min(destination_x, storage.width)});
+		const uint64_t height = std::min({block_height, render.height - std::min(source_y, render.height),
+		                                  storage.height - std::min(destination_y, storage.height)});
+		if (width == 0u || height == 0u)
 		{
-			return false;
+			continue;
 		}
 		StorageTextureRenderAliasCopy copy {static_cast<uint32_t>(source_x), static_cast<uint32_t>(source_y),
 		                                    static_cast<uint32_t>(destination_x), static_cast<uint32_t>(destination_y),
-		                                    static_cast<uint32_t>(block_width), static_cast<uint32_t>(block_height)};
+		                                    static_cast<uint32_t>(width), static_cast<uint32_t>(height)};
 		if (!plan.IsEmpty() && plan.At(plan.Size() - 1).source_y == copy.source_y &&
 		    plan.At(plan.Size() - 1).destination_y == copy.destination_y &&
 		    plan.At(plan.Size() - 1).source_x + plan.At(plan.Size() - 1).width == copy.source_x &&
@@ -1181,7 +1213,7 @@ void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, V
                                    const Vector<StorageTextureRenderAliasCopy>& copies)
 {
 	EXIT_IF(buffer == nullptr || source == nullptr || destination == nullptr || copies.IsEmpty());
-	EXIT_IF(source->format != destination->format || source->samples != VK_SAMPLE_COUNT_1_BIT ||
+	EXIT_IF(!RenderAliasFormatsMatch(source->format, destination->format) || source->samples != VK_SAMPLE_COUNT_1_BIT ||
 	        destination->samples != VK_SAMPLE_COUNT_1_BIT ||
 	        source->extent.width != source->guest_extent.width || source->extent.height != source->guest_extent.height ||
 	        destination->extent.width != destination->guest_extent.width ||

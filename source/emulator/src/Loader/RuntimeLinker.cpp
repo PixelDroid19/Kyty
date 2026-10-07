@@ -433,7 +433,7 @@ bool LoaderModuleUsesNativeStartParam(const String& file_name)
 {
 	const String name = file_name.FilenameWithoutDirectory();
 	return name.EqualNoCase(U"PSN.prx") || name.EqualNoCase(U"PSNCore.prx") || name.EqualNoCase(U"PSNCommon.prx") ||
-	       name.EqualNoCase(U"SaveData.prx") || name.EqualNoCase(U"PS5EntitlementsPlugin.prx");
+	       name.EqualNoCase(U"SaveData.prx") || name.EqualNoCase(U"Share.prx") || name.EqualNoCase(U"PS5EntitlementsPlugin.prx");
 }
 
 static bool NeedsNativeModuleStartParam(const Program* program)

@@ -37,9 +37,22 @@ namespace Kyty::Libs::Graphics {
 
 // DescriptorCache, DeleteFramebuffer/Descriptor, stencil + Find* helpers
 
+static int SampledViewIndex(int view)
+{
+	return view & ~VulkanImage::VIEW_STENCIL_ATTACHED_DEPTH;
+}
+
 static bool IsDepthSampledView(int view)
 {
-	return view == VulkanImage::VIEW_DEPTH_TEXTURE || view == VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY;
+	return SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE || SampledViewIndex(view) == VulkanImage::VIEW_DEPTH_TEXTURE_ARRAY;
+}
+
+// A depth plane sampled while the same image's stencil is a writable attachment
+// is in the combined depth-read-only/stencil-attachment layout.
+static VkImageLayout SampledDepthLayout(int view)
+{
+	return (view & VulkanImage::VIEW_STENCIL_ATTACHED_DEPTH) != 0 ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
+	                                                              : VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
 }
 
 // A sampled image that is also bound as a storage image in the same bind
@@ -768,9 +781,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	for (int i = 0; i < textures2d_sampled_num; i++)
 	{
 		texture2d_sampled_info[i].sampler   = nullptr;
-		texture2d_sampled_info[i].imageView = textures2d_sampled[i]->image_view[textures2d_sampled_view[i]];
+		texture2d_sampled_info[i].imageView = textures2d_sampled[i]->image_view[SampledViewIndex(textures2d_sampled_view[i])];
 		texture2d_sampled_info[i].imageLayout = IsDepthSampledView(textures2d_sampled_view[i])
-		                                             ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                             ? SampledDepthLayout(textures2d_sampled_view[i])
 		                                             : (IsStorageAliasedSampledImage(textures2d_sampled[i], textures2d_storage,
 		                                                                                textures2d_storage_num)
 		                                                    ? VK_IMAGE_LAYOUT_GENERAL
@@ -781,17 +794,19 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	for (int i = 0; i < nset.textures2d_sampled_depth_num; i++)
 	{
 		texture2d_sampled_depth_info[i].sampler     = nullptr;
-		texture2d_sampled_depth_info[i].imageView   = textures2d_sampled_depth[i]->image_view[textures2d_sampled_depth_view[i]];
-		texture2d_sampled_depth_info[i].imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+		texture2d_sampled_depth_info[i].imageView =
+		    textures2d_sampled_depth[i]->image_view[SampledViewIndex(textures2d_sampled_depth_view[i])];
+		texture2d_sampled_depth_info[i].imageLayout = SampledDepthLayout(textures2d_sampled_depth_view[i]);
 	}
 
 	VkDescriptorImageInfo texture2d_array_sampled_info[TEXTURES_SAMPLED_MAX] {};
 	for (int i = 0; i < textures2d_array_sampled_num; i++)
 	{
 		texture2d_array_sampled_info[i].sampler   = nullptr;
-		texture2d_array_sampled_info[i].imageView = textures2d_array_sampled[i]->image_view[textures2d_array_sampled_view[i]];
+		texture2d_array_sampled_info[i].imageView =
+		    textures2d_array_sampled[i]->image_view[SampledViewIndex(textures2d_array_sampled_view[i])];
 		texture2d_array_sampled_info[i].imageLayout = IsDepthSampledView(textures2d_array_sampled_view[i])
-		                                                   ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                                   ? SampledDepthLayout(textures2d_array_sampled_view[i])
 		                                                   : (IsStorageAliasedSampledImage(textures2d_array_sampled[i], textures2d_storage,
 		                                                                                      textures2d_storage_num)
 		                                                          ? VK_IMAGE_LAYOUT_GENERAL
@@ -837,9 +852,10 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	for (int i = 0; i < textures2d_sampled_uint_num; i++)
 	{
 		texture2d_sampled_uint_info[i].sampler   = nullptr;
-		texture2d_sampled_uint_info[i].imageView = textures2d_sampled_uint[i]->image_view[textures2d_sampled_uint_view[i]];
+		texture2d_sampled_uint_info[i].imageView =
+		    textures2d_sampled_uint[i]->image_view[SampledViewIndex(textures2d_sampled_uint_view[i])];
 		texture2d_sampled_uint_info[i].imageLayout = IsDepthSampledView(textures2d_sampled_uint_view[i])
-		                                                  ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                                  ? SampledDepthLayout(textures2d_sampled_uint_view[i])
 		                                                  : (IsStorageAliasedSampledImage(textures2d_sampled_uint[i], textures2d_storage,
 		                                                                                     textures2d_storage_num)
 		                                                         ? VK_IMAGE_LAYOUT_GENERAL
@@ -851,9 +867,9 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		texture2d_array_sampled_uint_info[i].sampler   = nullptr;
 		texture2d_array_sampled_uint_info[i].imageView =
-		    textures2d_array_sampled_uint[i]->image_view[textures2d_array_sampled_uint_view[i]];
+		    textures2d_array_sampled_uint[i]->image_view[SampledViewIndex(textures2d_array_sampled_uint_view[i])];
 		texture2d_array_sampled_uint_info[i].imageLayout = IsDepthSampledView(textures2d_array_sampled_uint_view[i])
-		                                                        ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+		                                                        ? SampledDepthLayout(textures2d_array_sampled_uint_view[i])
 		                                                        : (IsStorageAliasedSampledImage(textures2d_array_sampled_uint[i],
 		                                                                                           textures2d_storage,
 		                                                                                           textures2d_storage_num)

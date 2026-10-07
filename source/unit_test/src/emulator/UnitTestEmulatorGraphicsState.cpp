@@ -2835,33 +2835,39 @@ TEST(EmulatorGraphicsState, RenderTargetStorageAliasCopiesOnlyMatchingGuestBlock
 	constexpr uint64_t source_address      = 0x100000u;
 	constexpr uint64_t destination_address = source_address + 2u * block_bytes;
 	Vector<StorageTextureRenderAliasCopy> copies;
-	ASSERT_TRUE(StorageTexturePlanRenderAlias(source.params, source_address, 8u * block_bytes, destination.params,
-	                                          destination_address, 15u * block_bytes, &copies));
-	uint64_t copied_texels = 0;
-	for (const auto& copy: copies)
+	const auto copied_texels = [&]()
 	{
-		for (uint32_t y = 0; y < copy.height; ++y)
+		uint64_t texels = 0;
+		for (const auto& copy: copies)
 		{
-			for (uint32_t x = 0; x < copy.width; ++x)
+			for (uint32_t y = 0; y < copy.height; ++y)
 			{
-				const uint64_t source_byte = source_address +
-				    TileGetSw64kRxOffset(copy.source_x + x, copy.source_y + y, 4u * block_width, 8u);
-				const uint64_t destination_byte = destination_address +
-				    TileGetSw64kRxOffset(copy.destination_x + x, copy.destination_y + y, 5u * block_width, 8u);
-				EXPECT_EQ(source_byte, destination_byte);
-				++copied_texels;
+				for (uint32_t x = 0; x < copy.width; ++x)
+				{
+					const uint64_t source_byte = source_address +
+					    TileGetSw64kRxOffset(copy.source_x + x, copy.source_y + y, 4u * block_width, 8u);
+					const uint64_t destination_byte = destination_address +
+					    TileGetSw64kRxOffset(copy.destination_x + x, copy.destination_y + y, 5u * block_width, 8u);
+					EXPECT_EQ(source_byte, destination_byte);
+					++texels;
+				}
 			}
 		}
-	}
-	EXPECT_EQ(copied_texels, 6u * block_width * block_height);
+		return texels;
+	};
+	ASSERT_TRUE(StorageTexturePlanRenderAlias(source.params, source_address, 8u * block_bytes, destination.params,
+	                                          destination_address, 15u * block_bytes, &copies));
+	EXPECT_EQ(copied_texels(), 6u * block_width * block_height);
 	const RenderTextureObject wrong_format(RenderTextureFormat::R16G16B16A16Unorm, 4u * block_width,
 	                                       2u * block_height, true, false, 4u * block_width, false);
 	EXPECT_FALSE(StorageTexturePlanRenderAlias(wrong_format.params, source_address, 8u * block_bytes, destination.params,
 	                                           destination_address, 15u * block_bytes, &copies));
+	// Edge blocks copy only the texels inside the render target's extent.
 	const RenderTextureObject partial_edge(RenderTextureFormat::R16G16B16A16Sfloat, 4u * block_width - 1u,
 	                                       2u * block_height, true, false, 4u * block_width, false);
-	EXPECT_FALSE(StorageTexturePlanRenderAlias(partial_edge.params, source_address, 8u * block_bytes, destination.params,
-	                                           destination_address, 15u * block_bytes, &copies));
+	ASSERT_TRUE(StorageTexturePlanRenderAlias(partial_edge.params, source_address, 8u * block_bytes, destination.params,
+	                                          destination_address, 15u * block_bytes, &copies));
+	EXPECT_EQ(copied_texels(), 6u * block_width * block_height - 2u * block_height);
 	EXPECT_FALSE(StorageTexturePlanRenderAlias(source.params, source_address, 8u * block_bytes, destination.params,
 	                                           destination_address + 1u, 15u * block_bytes, &copies));
 }
@@ -3877,7 +3883,9 @@ TEST(EmulatorGraphicsState, ClassifiesDirectDepthReferenceSamplerBinding)
 	{
 		user_sgpr.type[i] = HW::UserSgprType::Region;
 	}
-	user_sgpr.value[3] = 9u << 28u;
+	// A 32_FLOAT depth surface (depth tile mode 24) of type 2D.
+	user_sgpr.value[1] = 22u << 20u;
+	user_sgpr.value[3] = (9u << 28u) | (24u << 20u);
 
 	uint16_t       direct_offsets[2] = {0xffffu, 0u};
 	ShaderUserData user_data {};
@@ -7369,7 +7377,7 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBind
 
 	alignas(16) uint32_t eud[64] = {};
 	eud[33]                      = 22u << 20u;
-	eud[35]                      = 9u << 28u;
+	eud[35]                      = (9u << 28u) | (24u << 20u);
 	HW::UserSgprInfo user_sgpr {};
 	for (int i = 0; i < 16; ++i)
 	{

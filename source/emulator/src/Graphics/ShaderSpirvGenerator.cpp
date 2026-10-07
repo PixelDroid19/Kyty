@@ -338,7 +338,7 @@ static bool spirv_uses_buffer_descriptor_addressing(const ShaderCode& code)
 	                      ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX,
 	                      ShaderInstructionType::BufferStoreFormatXy, ShaderInstructionType::BufferStoreFormatXyzw,
 	                      ShaderInstructionType::TBufferLoadFormatX, ShaderInstructionType::TBufferLoadFormatXy,
-	                      ShaderInstructionType::TBufferLoadFormatXyzw});
+	                      ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
 }
 
 static bool spirv_uses_mbcnt(const ShaderCode& code)
@@ -2817,11 +2817,11 @@ void Spirv::WriteFunctions()
 	    ShaderInstructionType::BufferLoadDword, ShaderInstructionType::BufferLoadDwordx2, ShaderInstructionType::BufferLoadDwordx3,
 	    ShaderInstructionType::BufferLoadDwordx4, ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy,
 	    ShaderInstructionType::BufferLoadFormatXyz, ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX,
-	    ShaderInstructionType::TBufferLoadFormatXy, ShaderInstructionType::TBufferLoadFormatXyzw});
+	    ShaderInstructionType::TBufferLoadFormatXy, ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
 	const bool needs_tbuffer_load_helpers = m_code.HasAnyOf({
 	    ShaderInstructionType::BufferLoadFormatX, ShaderInstructionType::BufferLoadFormatXy, ShaderInstructionType::BufferLoadFormatXyz,
 	    ShaderInstructionType::BufferLoadFormatXyzw, ShaderInstructionType::TBufferLoadFormatX, ShaderInstructionType::TBufferLoadFormatXy,
-	    ShaderInstructionType::TBufferLoadFormatXyzw});
+	    ShaderInstructionType::TBufferLoadFormatXyz, ShaderInstructionType::TBufferLoadFormatXyzw});
 	const bool needs_buffer_store_helpers = m_code.HasAnyOf({
 	    ShaderInstructionType::BufferStoreDword, ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
 	    ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX, ShaderInstructionType::BufferStoreFormatXy,
@@ -3073,6 +3073,10 @@ void Spirv::FindConstants()
 		if (inst.type == ShaderInstructionType::TBufferLoadFormatXy)
 		{
 			AddConstantInt(64);
+		}
+		if (inst.type == ShaderInstructionType::TBufferLoadFormatXyz)
+		{
+			AddConstantInt(inst.mtbuf_format);
 		}
 		switch (inst.type)
 		{

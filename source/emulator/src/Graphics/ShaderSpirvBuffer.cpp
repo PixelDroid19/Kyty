@@ -3888,6 +3888,7 @@ static bool TBufferFloatLoadSupported(const ShaderInstruction& inst, uint8_t com
 	{
 		case 1: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 22u : 0x74u);
 		case 2: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 64u : 0x7bu);
+		case 3: return inst.mtbuf_format_is_gen5 && (inst.mtbuf_format == 74u || inst.mtbuf_format == 77u);
 		case 4: return inst.mtbuf_format == (inst.mtbuf_format_is_gen5 ? 77u : 0x7eu);
 		default: return false;
 	}
@@ -4064,6 +4065,18 @@ OpStore %temp_int_5 %int_64
 	                   .ReplaceStr("<dst0>", dst0.value)
 	                   .ReplaceStr("<dst1>", dst1.value);
 	return true;
+}
+
+// Gen5 three-component float typed load of an RGB32F (74) or RGBA32F (77) element.
+KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyz_Vdata3VaddrSvSoffsIdxenFloat3)
+{
+	const auto& inst      = code.GetInstructions().At(index);
+	const auto* bind_info = spirv->GetBindInfo();
+	if (!TBufferFloatLoadSupported(inst, 3) || bind_info == nullptr || bind_info->storage_buffers.buffers_num == 0)
+	{
+		return false;
+	}
+	return emit_gen5_tbuffer_load(spirv, inst, static_cast<int>(index), "tbuffer_load_format_xyz", inst.mtbuf_format, 3, dst_source);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_TBufferLoadFormatXyzw_Vdata4Vaddr2SvSoffsOffenIdxenFloat4)

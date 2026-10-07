@@ -252,6 +252,10 @@ struct VulkanImage
 	static constexpr int VIEW_STORAGE_ARRAY       = 8;
 	static constexpr int VIEW_COLOR_UNORM         = 9;
 	static constexpr int VIEW_COLOR_SRGB          = 10;
+	// Flag on a sampled depth view id: the image is the draw's depth attachment
+	// with a writable stencil plane, so the descriptor declares
+	// DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL. Strip it before indexing.
+	static constexpr int VIEW_STENCIL_ATTACHED_DEPTH = 1 << 30;
 
 	explicit VulkanImage(VulkanImageType type): type(type) {}
 

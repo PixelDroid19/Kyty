@@ -225,6 +225,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxenFloat1: return "Vdata1VaddrSvSoffsIdxenFloat1"; break;
 		case ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxen: return "Vdata2VaddrSvSoffsIdxen"; break;
 		case ShaderInstructionFormat::Vdata2VaddrSvSoffsIdxenFloat2: return "Vdata2VaddrSvSoffsIdxenFloat2"; break;
+		case ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxenFloat3: return "Vdata3VaddrSvSoffsIdxenFloat3"; break;
 		case ShaderInstructionFormat::Vdata3VaddrSvSoffsIdxen: return "Vdata3VaddrSvSoffsIdxen"; break;
 		case ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxen: return "Vdata4VaddrSvSoffsIdxen"; break;
 		case ShaderInstructionFormat::Vdata4VaddrSvSoffsIdxenFloat4: return "Vdata4VaddrSvSoffsIdxenFloat4"; break;
@@ -368,6 +369,7 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::Offen: s = "offen"; break;
 			case ShaderInstructionFormat::Float1: s = "format:float1"; break;
 			case ShaderInstructionFormat::Float2: s = "format:float2"; break;
+			case ShaderInstructionFormat::Float3: s = "format:float3"; break;
 			case ShaderInstructionFormat::Float4: s = "format:float4"; break;
 			case ShaderInstructionFormat::Pos0: s = "pos0"; break;
 			case ShaderInstructionFormat::Done: s = "done"; break;

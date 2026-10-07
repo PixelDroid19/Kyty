@@ -646,6 +646,7 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 	{
 		resource.fields[field] = extended_buffer[offset_dw + field];
 	}
+	operation = ShaderTextureSampleOperation(resource, operation);
 
 	sampled_shape_known = sampled_shape_known && ShaderGen5InstructionShapeAppliesToType(resource.Type(), sampled_shape);
 	int texture_index = -1;
@@ -824,6 +825,7 @@ static int ShaderAddSplitTextureResource(ShaderBindResources* bind, const Shader
 	EXIT_IF(bind == nullptr);
 	EXIT_IF(added_resource == nullptr);
 	*added_resource    = false;
+	operation          = ShaderTextureSampleOperation(resource, operation);
 	const int existing = ShaderFindTextureResource(*bind, resource, usage, operation, shape, shape_known);
 	if (existing >= 0)
 	{
@@ -984,6 +986,7 @@ static bool ShaderInstructionUsesVectorBufferDescriptor(ShaderInstructionType ty
 		case ShaderInstructionType::BufferLoadFormatXyzw:
 		case ShaderInstructionType::TBufferLoadFormatX:
 		case ShaderInstructionType::TBufferLoadFormatXy:
+		case ShaderInstructionType::TBufferLoadFormatXyz:
 		case ShaderInstructionType::TBufferLoadFormatXyzw: return true;
 		default: return false;
 	}

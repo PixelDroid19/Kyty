@@ -1008,7 +1008,7 @@ TEST(EmulatorShaderLdsBounds, MtbufRejectsEveryUnimplementedOpcodeAndFormatCompo
 {
 	for (uint32_t opcode = 0; opcode < 16; ++opcode)
 	{
-		if (opcode == 0 || opcode == 1 || opcode == 3) { continue; }
+		if (opcode <= 3) { continue; }
 		EXPECT_EXIT(RunRejectedMtbuf(opcode, 22, true), ::testing::ExitedWithCode(kRejectedExit), MtbufRejection(opcode));
 		if (opcode < 8)
 		{
@@ -1017,13 +1017,16 @@ TEST(EmulatorShaderLdsBounds, MtbufRejectsEveryUnimplementedOpcodeAndFormatCompo
 	}
 	for (bool next_gen: {false, true})
 	{
-		for (uint32_t opcode: {0u, 1u, 3u})
+		for (uint32_t opcode: {0u, 1u, 2u, 3u})
 		{
-			const uint32_t expected = next_gen ? (opcode == 0 ? 22u : (opcode == 1 ? 64u : 77u))
-			                                  : (opcode == 0 ? 0x74u : (opcode == 1 ? 0x7bu : 0x7eu));
-			for (uint32_t format: {0u, 22u, 64u, 77u, 0x74u, 0x7bu, 0x7eu})
+			// Legacy has no three-component float tuple, so every format rejects opcode 2.
+			const uint32_t gen5[]   = {22u, 64u, 74u, 77u};
+			const uint32_t legacy[] = {0x74u, 0x7bu, UINT32_MAX, 0x7eu};
+			const uint32_t expected = next_gen ? gen5[opcode] : legacy[opcode];
+			for (uint32_t format: {0u, 22u, 64u, 74u, 77u, 0x74u, 0x7bu, 0x7eu})
 			{
-				if (format == expected) { continue; }
+				// Gen5 XYZ also reads the first three components of an RGBA32F element.
+				if (format == expected || (next_gen && opcode == 2u && format == 77u)) { continue; }
 				EXPECT_EXIT(RunRejectedMtbuf(opcode, format, next_gen), ::testing::ExitedWithCode(kRejectedExit), MtbufRejection(opcode, true));
 			}
 		}

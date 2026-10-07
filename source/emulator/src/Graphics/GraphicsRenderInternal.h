@@ -383,6 +383,7 @@ struct VulkanFramebuffer
 	VkAttachmentLoadOp        depth_load_op                     = VK_ATTACHMENT_LOAD_OP_LOAD;
 	VkImageLayout             depth_initial_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkImageLayout             depth_stencil_layout              = VK_IMAGE_LAYOUT_UNDEFINED;
+	VkImageLayout             depth_final_layout                = VK_IMAGE_LAYOUT_UNDEFINED;
 	VkExtent2D                 extent                            = {};
 	VkImageView                owned_color_view[TARGETS_MAX]     = {};
 };
@@ -391,6 +392,8 @@ enum class DepthStencilAttachmentAccess
 {
 	Writable,
 	ReadOnly,
+	// The draw samples the depth plane and writes the stencil plane.
+	DepthReadOnly,
 	Unsupported,
 };
 
@@ -424,7 +427,7 @@ private:
 		uint64_t           depth_id                = 0;
 		bool               depth_clear_enable      = false;
 		bool               stencil_clear_enable    = false;
-		bool               depth_stencil_read_only = false;
+		DepthStencilAttachmentAccess depth_stencil_access = DepthStencilAttachmentAccess::Writable;
 		VkAttachmentLoadOp color_load_op[8]        = {};
 		VkImageLayout      color_initial_layout[8] = {};
 		VkAttachmentLoadOp depth_load_op           = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -1553,7 +1556,7 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
-                     uint64_t shader_checksum = 0);
+                     uint64_t shader_checksum = 0, const VulkanImage* stencil_attached_depth = nullptr);
 void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
 void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
 	                                    const VulkanFramebuffer& framebuffer);

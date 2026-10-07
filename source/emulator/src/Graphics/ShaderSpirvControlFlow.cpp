@@ -24,6 +24,32 @@ static bool instruction_is_conditional_branch(const ShaderInstruction& inst)
 	}
 }
 
+// A forward conditional branch inside a do-while loop (closed by a conditional
+// back edge) that targets the instruction right after that back edge is a
+// break: the loop merge block falls through to the same guest instruction.
+// Returns the back edge PC of the innermost such loop, or 0.
+static uint32_t find_conditional_loop_break(const ShaderCode& code, const ShaderInstruction& inst)
+{
+	const auto exit     = ShaderLabel(inst);
+	uint32_t   backedge = 0;
+	uint32_t   header   = 0;
+	for (const auto& candidate: code.GetInstructions())
+	{
+		if (!instruction_is_conditional_branch(candidate))
+		{
+			continue;
+		}
+		const auto loop = ShaderLabel(candidate);
+		if (loop.GetDst() < candidate.pc && loop.GetDst() <= inst.pc && inst.pc < candidate.pc &&
+		    exit.GetDst() == candidate.pc + 4u && (backedge == 0 || loop.GetDst() > header))
+		{
+			backedge = candidate.pc;
+			header   = loop.GetDst();
+		}
+	}
+	return backedge;
+}
+
 static bool instruction_changes_control_flow(const ShaderInstruction& inst)
 {
 	switch (inst.type)
@@ -227,13 +253,8 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	const auto& next_inst = code.GetInstructions().At(index + 1);
 
 	if (!operand_is_constant(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[0]) condition ignored (continuing)\n"); }
-	// EXECNZ was previously an unsupported parser placeholder. Native mode has
-	// no verified high-word wave representation, so keep it fail-closed there.
-	if (inst.type == ShaderInstructionType::SCbranchExecnz && !spirv->UsesComputeWaveBanks())
-	{
-		return false;
-	}
-
+	// Native mode decides EXECZ and EXECNZ on the packed EXEC pair: the mask
+	// adapter (ResolveMaskAccesses) replaces the per-lane vote with lo | hi.
 	const char* branch_param[2] = {param[0], param[1]};
 	const bool exec_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz;
 	const bool vcc_branch  = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;
@@ -540,8 +561,17 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 		text      = text_variant_b;
 		label_str = exit_loop.MergeName();
 	}
+	const uint32_t loop_break = (!structured_loop_exit && loop_backedge == 0 && !discard && label.GetDst() > inst.pc)
+	                                ? find_conditional_loop_break(code, inst)
+	                                : 0;
+	if (loop_break != 0)
+	{
+		// The non-breaking arm is this selection's merge; the header owns OpLoopMerge.
+		text      = text_variant_b;
+		label_str = String8::FromPrintf("loop_merge_%04" PRIx32, loop_break);
+	}
 	SpirvSBranchLoop enclosing_loop;
-	if (!structured_loop_exit && !discard && label.GetDst() > inst.pc &&
+	if (loop_break == 0 && !structured_loop_exit && !discard && label.GetDst() > inst.pc &&
 	    ScJoinFindSBranchLoopContaining(code, inst.pc, &enclosing_loop) &&
 	    ScJoinFindReconvergence(code, label.GetDst(), next_inst.pc) >= enclosing_loop.merge)
 	{
