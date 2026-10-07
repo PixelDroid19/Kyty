@@ -4065,12 +4065,18 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// Keep attachment/storage views intact and cache the complete sampled
 				// view identity so two simultaneous aliases can use different DST_SEL.
 				const uint32_t last_level = view_last_level;
+				// A reinterpreting view reads in the sample's format; otherwise the
+				// surface may store the sample's bytes with red and blue exchanged.
+				const uint32_t alias_swizzle =
+				    gen5 && reinterpret_format == VK_FORMAT_UNDEFINED
+				        ? VulkanGen5SampleSurfaceSelectors(static_cast<uint16_t>(fmt), use_srgb, tex->format, view_swizzle)
+				        : view_swizzle;
 				VulkanImageViewDescriptor sampled_descriptor {};
 				if (last_level < base_level ||
 				    !VulkanPlanSampledImageView(*tex, three_dimensional ? VK_IMAGE_VIEW_TYPE_3D :
 				                                  (arrayed_2d ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D),
 				                                VK_IMAGE_ASPECT_COLOR_BIT, base_level, last_level - base_level + 1u,
-				                                base_array, arrayed_2d ? depth - base_array : 1u, view_swizzle, &sampled_descriptor))
+				                                base_array, arrayed_2d ? depth - base_array : 1u, alias_swizzle, &sampled_descriptor))
 				{
 					EXIT("unsupported sampled alias view: format=%u swizzle=0x%03x mip=%u..%u layers=%u..%u type=%u "
 					     "backing{kind=%u vk_format=%u mips=%u layers=%u usage=0x%08x image_type=%u guest=%ux%u} sample{%ux%u levels=%u}\n",

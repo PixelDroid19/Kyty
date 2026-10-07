@@ -55,8 +55,15 @@ enum class Gen5CatalogImageFormat: uint16_t
 // variants declared by the central format table.
 [[nodiscard]] bool VulkanGen5SampleFormatMatches(uint16_t fmt, VkFormat format);
 
-// Exact immutable-image compatibility for one resolved sampler gamma mode.
+// Immutable-image compatibility for one resolved sampler gamma mode: the
+// resolved format, or the host format that stores the same texel bytes with
+// red and blue exchanged (a render target written with the alternate swap).
 [[nodiscard]] bool VulkanGen5SampleFormatMatchesEffective(uint16_t fmt, bool use_srgb, VkFormat format);
+
+// The selectors a sampled view of `surface` needs to read what the guest
+// selectors read from the sample format: red and blue are exchanged when the
+// surface stores the sample's bytes with those channels exchanged.
+[[nodiscard]] uint32_t VulkanGen5SampleSurfaceSelectors(uint16_t fmt, bool use_srgb, VkFormat surface, uint32_t selectors);
 
 [[nodiscard]] GuestImageNumericType VulkanGen5ImageNumericType(uint16_t fmt);
 
