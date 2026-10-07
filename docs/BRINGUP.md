@@ -254,6 +254,53 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Two Unity titles reach their menus and gameplay (2026-10-07)
+
+A 2D action title stopped at boot and a first-person perspective-puzzle title on its loading screen. Each fix
+below is general and was found on the first blocker of a real run; nothing changes for shaders, objects or
+imports that worked before (those paths aborted).
+
+- **HLE.** `sceNetShutdown` is exported by libSceNet over the existing socket shutdown.
+  `sceKernelGetOperationMode(mode, submode)` reports a base console (0, 0); the observed caller zeroes both and
+  only acts on submode 1. The Unity `Share.prx` service plugin validates the same 16-byte `module_start`
+  descriptor as the other native service plugins (size 0x10, version 0x200, callback).
+- **Command processor.** An indirect `COMPUTE_TMPRING_SIZE` is scratch-ring metadata, like `SPI_TMPRING_SIZE`.
+- **Primitive state.** `sceAgcCreatePrimState` outputs can lie in GPU-visible pages the dirty tracker keeps
+  read-only; the host protection table then reports them unwritable although the guest kernel maps them
+  CPU-writable (seen with protection 0xf2). Such a tracked range is validated against the guest mapping and
+  written through the tracker's host-write ownership.
+- **Shaders.** `TBUFFER_LOAD_FORMAT_XYZ` (Gen5 RGB32F and RGBA32F elements); `IMAGE_SAMPLE` with any
+  enabled-component set through the dmask-driven format; formatted image stores apply a four-channel
+  `DST_SEL` selection the storage view cannot express (BGRA stays a BGRA8 view); native `S_CBRANCH_EXECNZ`
+  decides on the packed EXEC pair, as EXECZ does; forward branches inside a do-while loop to the instruction
+  after its conditional back edge are breaks into the loop merge. `IMAGE_SAMPLE_L` takes any enabled-component
+  set on 2D, 3D, cube and 2D-array addresses; the T# shape selects the descriptor bank.
+- **Comparison samples.** `IMAGE_SAMPLE_C_LZ` on an arrayed (cube-face) descriptor compares the gathered
+  texels in the shader; an anisotropic filter there reduces to its point or linear base filter, since a
+  level-zero sample has no derivatives. A comparison sample of a color surface compares in the shader on every
+  descriptor path, including descriptors the shader loads from memory.
+- **Wave64 pixel shaders on a 32-wide host.** A compiler spill VGPR may receive a `V_WRITELANE` whose slot is
+  never read back while its other lanes are; that write is a dead spill store, not a lane exchange, so the
+  shader keeps the lane-local proof and runs on the host's 32-wide subgroups.
+- **Bindings.** A draw that samples its own depth attachment while writing stencil uses
+  `DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL` (depth store NONE, stencil STORE) and its sampled descriptor
+  declares the same layout. A depth-comparison sample of a color surface (no depth tile or format) samples the
+  texture and compares in the shader, with a non-comparison sampler.
+- **Memory objects.** A storage view of one mip level of a mip-chained surface is linked to the chain's sampled
+  texture and level-0 render target; the texture's per-level copy takes each level from the surface of that
+  extent. A 3D texture in the 64 KiB render-target swizzle is thin: each depth slice is a 2D render-target
+  slice, laid out like a 2D-array layer (the addressing library keeps thick 3D blocks for the Z and standard
+  swizzles only; titles carry its 64 KiB 3D block table). A storage view of a GPU-written render target's
+  surface (a compute pass on the rendered image, viewed as UNORM while the target is sRGB) seeds from the
+  target's pixels; 8-bit four-channel formats alias byte for byte, and edge blocks copy only the texels both
+  images cover. Sampled views of that surface stay linked, and a texture that skipped its guest upload under a
+  live surface no longer counts as newer guest data.
+
+Both titles now reach gameplay: the 2D title in its first area, the puzzle title in its first room after the
+intro (about 35 fps under the harness limits). Open: the 2D title's menus draw text from an 8-bit atlas as
+solid quads; the puzzle title shows large black shapes behind its menu and speckled, unblurred darkening along
+creases in gameplay. All three are under investigation.
+
 ### Integration tests link again (2026-10-06)
 
 Every integration target failed to link: the kernel event queue called the network HLE directly, and archives
