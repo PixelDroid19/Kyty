@@ -3153,6 +3153,11 @@ void Spirv::FindConstants()
 			AddConstantUint(local[1]);
 			AddConstantUint(local[0] * local[1]);
 		}
+		if (inst.type == ShaderInstructionType::VLogF32)
+		{
+			// V_LOG_F32 of +-0 is -infinity; GLSL Log2 leaves it undefined.
+			AddConstantUint(0xff800000u);
+		}
 		if (inst.type == ShaderInstructionType::VCmpClassF32)
 		{
 			for (uint32_t value = 0; value < 10u; ++value) { AddConstantUint(value); }
