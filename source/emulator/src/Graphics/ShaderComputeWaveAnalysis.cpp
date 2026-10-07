@@ -664,10 +664,11 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 			case ShaderOperandType::ExecLo: return operand.register_id == 0 && (operand.size == 1 || operand.size == 2);
 			case ShaderOperandType::VccHi:
 			case ShaderOperandType::ExecHi:
+			case ShaderOperandType::M0: return operand.register_id == 0 && operand.size == 1;
+			// Status bits can feed 64-bit scalar sources; the high dword reads as zero.
 			case ShaderOperandType::VccZ:
 			case ShaderOperandType::ExecZ:
-			case ShaderOperandType::Scc:
-			case ShaderOperandType::M0: return operand.register_id == 0 && operand.size == 1;
+			case ShaderOperandType::Scc: return operand.register_id == 0 && (operand.size == 1 || operand.size == 2);
 			case ShaderOperandType::Unknown: return operand.size == 0 && ComputeWaveOperandIsPlain(operand);
 			case ShaderOperandType::Null: return operand.size >= 0 && operand.size <= 2;
 			case ShaderOperandType::LiteralConstant:
