@@ -1593,8 +1593,8 @@ with an explicit unsupported diagnostic before the null call.
 An independent native-homebrew write-up of the input libraries (GPL, console
 firmware 6.02; a lead, not a dependency) agrees field by field with our 120-byte
 `ScePadData`, the 96-byte keyboard record and the 40-byte mouse record, and
-differs in four places that the HLE now follows; shadPS4's `scePad` sources
-(read locally, behavior only) corroborate the first three.
+differs in four places that the HLE now follows; another emulator's `scePad`
+sources (read locally, behavior only) corroborate the first three.
 
 - `ScePadControllerInformation` is 28 bytes: the structure ends in `reserve[8]`,
   which ours lacked, so the trailing bytes of the guest buffer were never
