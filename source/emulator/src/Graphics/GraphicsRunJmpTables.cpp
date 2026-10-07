@@ -816,6 +816,9 @@ static void graphics_init_jmp_tables_sh_indirect()
 	g_hw_sh_indirect_func[Pm4::COMPUTE_RESOURCE_LIMITS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{ if (!GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !GraphicsDecodeComputeResourceLimits(&cp->GetShCtx()->CsRegs(), cmd_offset, &value, 1) condition ignored (continuing)\n"); } };
 	g_hw_sh_indirect_func[Pm4::COMPUTE_PGM_RSRC3]     = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->CsRegs().rsrc3 = value; };
+	// Scratch ring allocation, like SPI_TMPRING_SIZE: the recompiler provides
+	// shader private memory itself, so the size is metadata.
+	g_hw_sh_indirect_func[Pm4::COMPUTE_TMPRING_SIZE] = [](KYTY_HW_SH_INDIRECT_ARGS) {};
 	// Hull-shader RSRC3 (wave-packing hints). Recorded for completeness; the
 	// recompiler re-derives register allocation, so it does not affect output.
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC3_HS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetHsRsrc3(value); };

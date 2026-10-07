@@ -2471,6 +2471,42 @@ static bool GraphicsMapPrimInputToOutput(uint32_t input, uint32_t* output)
 	}
 }
 
+// Prim-state outputs can live in GPU-visible memory whose host pages the dirty
+// tracker keeps read-only; that is not the guest's protection. Such a range is
+// writable when the guest kernel maps it CPU-writable, and is written as a
+// tracked host writer.
+static bool GraphicsGuestRangeWritable(uint64_t address, uint64_t size)
+{
+	if (Core::VirtualMemory::IsRangeWritable(address, size))
+	{
+		return true;
+	}
+	auto&        tracker = GpuDirtyPageTracker::Instance();
+	uint64_t     generations[2] {};
+	const size_t pages = tracker.PageCount(address, size);
+	if (pages == 0 || pages > 2 || !tracker.PageGenerations(address, size, generations, pages))
+	{
+		return false;
+	}
+	void* start = nullptr;
+	void* end   = nullptr;
+	int   prot  = 0;
+	auto  mode  = Core::VirtualMemory::Mode::NoAccess;
+	auto  gpu   = Kyty::Kernel::Memory::KernelGpuMappingAccessMode::NoAccess;
+	return address <= UINT64_MAX - size && Core::VirtualMemory::IsRangeGuestOwned(address, size) &&
+	       Kernel::Memory::KernelQueryMemoryProtection(reinterpret_cast<void*>(address), &start, &end, &prot) == OK &&
+	       address + size - 1u <= reinterpret_cast<uint64_t>(end) && Kernel::Memory::KernelDecodeMprotectProt(prot, &mode, &gpu) &&
+	       (mode == Core::VirtualMemory::Mode::ReadWrite || mode == Core::VirtualMemory::Mode::ExecuteReadWrite);
+}
+
+static void GraphicsWriteGuest(uint64_t address, const void* data, size_t size)
+{
+	auto&          tracker = GpuDirtyPageTracker::Instance();
+	const uint64_t token   = tracker.BeginHostWrite(address, size);
+	std::memcpy(reinterpret_cast<void*>(address), data, size);
+	tracker.EndHostWrite(token);
+}
+
 int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegister* uc_regs, const Shader* hs, const Shader* gs,
                                           uint32_t prim_type)
 {
@@ -2549,8 +2585,8 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 	}
 	const auto cx_address = reinterpret_cast<uint64_t>(cx_regs);
 	const auto uc_address = reinterpret_cast<uint64_t>(uc_regs);
-	if ((cx_regs != nullptr && !Core::VirtualMemory::IsRangeWritable(cx_address, sizeof(cx))) ||
-	    (uc_regs != nullptr && !Core::VirtualMemory::IsRangeWritable(uc_address, sizeof(uc))))
+	if ((cx_regs != nullptr && !GraphicsGuestRangeWritable(cx_address, sizeof(cx))) ||
+	    (uc_regs != nullptr && !GraphicsGuestRangeWritable(uc_address, sizeof(uc))))
 	{
 		EXIT("GraphicsCreatePrimState: unwritable output ranges CX=0x%016" PRIx64 " UC=0x%016" PRIx64,
 		     cx_address, uc_address);
@@ -2560,15 +2596,15 @@ int KYTY_SYSV_ABI GraphicsCreatePrimState(ShaderRegister* cx_regs, ShaderRegiste
 	{
 		EXIT("GraphicsCreatePrimState: overlapping CX and UC output ranges");
 	}
-	// Each copy revalidates under the VM lock. Two separate outputs are not an
-	// atomic transaction: callers must keep both mappings stable through return.
-	if (cx_regs != nullptr && !Core::VirtualMemory::CopyToGuest(cx_address, cx, sizeof(cx)))
+	// Two separate outputs are not an atomic transaction: callers must keep
+	// both mappings stable through return.
+	if (cx_regs != nullptr)
 	{
-		EXIT("GraphicsCreatePrimState: CX output invalidated during publication at 0x%016" PRIx64, cx_address);
+		GraphicsWriteGuest(cx_address, cx, sizeof(cx));
 	}
-	if (uc_regs != nullptr && !Core::VirtualMemory::CopyToGuest(uc_address, uc, sizeof(uc)))
+	if (uc_regs != nullptr)
 	{
-		EXIT("GraphicsCreatePrimState: UC output invalidated during publication at 0x%016" PRIx64, uc_address);
+		GraphicsWriteGuest(uc_address, uc, sizeof(uc));
 	}
 
 	return OK;
