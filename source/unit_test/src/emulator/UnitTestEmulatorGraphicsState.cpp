@@ -3877,7 +3877,9 @@ TEST(EmulatorGraphicsState, ClassifiesDirectDepthReferenceSamplerBinding)
 	{
 		user_sgpr.type[i] = HW::UserSgprType::Region;
 	}
-	user_sgpr.value[3] = 9u << 28u;
+	// A 32_FLOAT depth surface (depth tile mode 24) of type 2D.
+	user_sgpr.value[1] = 22u << 20u;
+	user_sgpr.value[3] = (9u << 28u) | (24u << 20u);
 
 	uint16_t       direct_offsets[2] = {0xffffu, 0u};
 	ShaderUserData user_data {};

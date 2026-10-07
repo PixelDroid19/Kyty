@@ -3160,6 +3160,13 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			if (image.texture != ShaderTextureUsage::Unknown)
 			{
 				descriptor.sample_operation = image.sample_operation;
+				// A comparison sample of a color surface compares its first channel in
+				// the shader: Vulkan depth-reference sampling requires a depth view.
+				if (Config::IsNextGen() && descriptor.sample_operation == State::ImageSampleOperation::DepthReference &&
+				    (descriptor.texture.TileMode() != 24u || State::Gen5DepthSampleBytesPerElement(descriptor.texture.Format()) == 0u))
+				{
+					descriptor.sample_operation = State::ImageSampleOperation::Regular;
+				}
 				ApplyDirectImageShape(image, &descriptor);
 			}
 		}
