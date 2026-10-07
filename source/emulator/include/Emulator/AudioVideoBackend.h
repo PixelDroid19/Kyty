@@ -99,6 +99,42 @@ private:
 	std::unique_ptr<State> state_;
 };
 
+enum class VideoCodec : uint8_t
+{
+	Avc,
+	Hevc,
+};
+
+// Decodes a video elementary stream one access unit (Annex B) at a time and
+// returns its pictures in display order as tightly packed NV12. The value
+// sent with an access unit comes back with the picture it produced.
+class ElementaryVideoDecoder final
+{
+public:
+	struct State;
+
+	static std::unique_ptr<ElementaryVideoDecoder> Open(VideoCodec codec, std::string* error = nullptr);
+
+	~ElementaryVideoDecoder();
+
+	ElementaryVideoDecoder(const ElementaryVideoDecoder&)            = delete;
+	ElementaryVideoDecoder& operator=(const ElementaryVideoDecoder&) = delete;
+
+	bool Send(const uint8_t* data, size_t size, int64_t tag);
+	// Ends the stream: the pictures the decoder still holds become available.
+	bool Drain();
+	// The next picture and its tag, or false when none is ready.
+	bool Receive(VideoFrame* frame, int64_t* tag);
+	// Drops every held picture and starts a new stream.
+	void Reset();
+	[[nodiscard]] const char* LastError() const;
+
+private:
+	ElementaryVideoDecoder();
+
+	std::unique_ptr<State> state_;
+};
+
 } // namespace Kyty::Emulator::AudioVideoBackend
 
 

@@ -80,6 +80,7 @@ LIB_DEFINE(InitPs5Util_1);
 LIB_DEFINE(InitTextToSpeech2_1);
 LIB_DEFINE(InitWriteThrottling_1);
 LIB_DEFINE(InitSyncOnAddress_1);
+LIB_DEFINE(InitVideodec2_1);
 
 bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 {
@@ -123,6 +124,7 @@ bool Init(const String& id, ::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_CHECK(U"libRudp_1", InitRudp_1);
 	LIB_CHECK(U"libNpCppWebApi_1", InitNpCppWebApi_1);
 	LIB_CHECK(U"libJson2_1", InitJson2_1);
+	LIB_CHECK(U"libVideodec2_1", InitVideodec2_1);
 	LIB_CHECK(U"libFont_1", InitFont_1);
 	LIB_CHECK(U"libFontFt_1", InitFontFt_1);
 	LIB_CHECK(U"libIme_1", InitIme_1);
@@ -194,6 +196,7 @@ void InitAll(::Kyty::Hle::HleSymbolRegistry* s)
 	LIB_LOAD(InitTextToSpeech2_1);
 	LIB_LOAD(InitWriteThrottling_1);
 	LIB_LOAD(InitSyncOnAddress_1);
+	LIB_LOAD(InitVideodec2_1);
 
 	// libSceLibcInternal exports the system C runtime that libc is built on;
 	// modules that link it directly import the same NIDs under its identity.
