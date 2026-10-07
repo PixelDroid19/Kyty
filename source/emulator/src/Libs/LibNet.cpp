@@ -116,6 +116,11 @@ static int KYTY_SYSV_ABI NetGetSockInfo(int socket, void* info, int info_size, i
 	return NET_CALL(Net::NetGetSockInfo(socket, info, info_size, flags));
 }
 
+static int KYTY_SYSV_ABI NetShutdown(int socket, int how)
+{
+	return NET_CALL(Net::NetShutdown(socket, how));
+}
+
 LIB_DEFINE(InitNet_1_Net)
 {
 	LIB_FUNC("Nlev7Lg8k3A", LibNet::NetInit);
@@ -128,6 +133,7 @@ LIB_DEFINE(InitNet_1_Net)
 	LIB_FUNC("bErx49PgxyY", Net::NetBind);
 	LIB_FUNC("kOj1HiAGE54", Net::NetListen);
 	LIB_FUNC("PIWqhn9oSxc", Net::NetAccept);
+	LIB_FUNC("TSM6whtekok", LibNet::NetShutdown);
 	LIB_FUNC("2mKX2Spso7I", Net::NetSetsockopt);
 	LIB_FUNC("xphrZusl78E", Net::NetGetsockopt);
 	LIB_FUNC("9T2pDF2Ryqg", Net::NetHtonl);

@@ -1359,6 +1359,22 @@ static int KYTY_SYSV_ABI KernelIsTrinityMode()
 	return 0;
 }
 
+// sceKernelGetOperationMode — NID NH6xARDOVv8: (int* mode, int* submode). Callers
+// zero both and act only on submode 1; a base PS5 reports 0 for both.
+static int KYTY_SYSV_ABI KernelGetOperationMode(int* mode, int* submode)
+{
+	PRINT_NAME();
+	if (mode != nullptr)
+	{
+		*mode = 0;
+	}
+	if (submode != nullptr)
+	{
+		*submode = 0;
+	}
+	return OK;
+}
+
 // sceKernelFsync — NID fTx66l5iWIA. Host has no guest-fd flush; accept valid fd.
 static int KYTY_SYSV_ABI KernelFsync(int fd)
 {
@@ -1953,6 +1969,7 @@ LIB_DEFINE(InitLibKernel_1_FS)
 
 	// Gen5 kernel mode / fd flush.
 	LIB_FUNC("tU5e3f9gSiU", LibKernel::KernelIsTrinityMode);
+	LIB_FUNC("NH6xARDOVv8", LibKernel::KernelGetOperationMode);
 	LIB_FUNC("fTx66l5iWIA", LibKernel::KernelFsync);
 }
 
