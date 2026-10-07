@@ -56,10 +56,13 @@ public:
 };
 
 [[nodiscard]] bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_t* incoming);
-// A storage view that re-describes the exact range of another with a different
-// format or extent: a recycled allocation whose texels mean nothing in the other
-// layout.
-[[nodiscard]] bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming);
+// A storage view that re-describes memory of another view with a different
+// format, or the exact range with a different extent: a recycled allocation
+// whose texels mean nothing in the other layout.
+[[nodiscard]] bool StorageTextureRedescribesRange(const uint64_t* existing, const uint64_t* incoming, bool exact_range);
+// The same over a render target: a different texel size, or the exact range
+// with a different extent.
+[[nodiscard]] bool StorageTextureRedescribesRenderTarget(const uint64_t* render, const uint64_t* storage, bool exact_range);
 // A 2D single-layer image with several levels is one mipmapped backing: each level is written through
 // its own single-level view (the descriptor's BASE_LEVEL picks it) and the whole chain is sampled
 // through another. Depth-tiled R32 chains established this contract; Gen5 colour chains in the

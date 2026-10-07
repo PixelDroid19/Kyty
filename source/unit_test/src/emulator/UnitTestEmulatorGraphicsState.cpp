@@ -3429,6 +3429,20 @@ TEST(EmulatorGraphicsState, Gen5SampledRgba8FormatUsesUnormByDefault)
 	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, false, VK_FORMAT_R8G8B8A8_SRGB));
 	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, true, VK_FORMAT_R8G8B8A8_SRGB));
 	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, true, VK_FORMAT_R8G8B8A8_UNORM));
+	// A render target written with the alternate swap stores the same bytes as
+	// BGRA8 or A2R10G10B10: a BGRA selection of the sample reads it with identity.
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, true, VK_FORMAT_B8G8R8A8_SRGB));
+	EXPECT_FALSE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(130, true, VK_FORMAT_B8G8R8A8_UNORM));
+	EXPECT_TRUE(Kyty::Libs::Graphics::VulkanGen5SampleFormatMatchesEffective(50, false, VK_FORMAT_A2R10G10B10_UNORM_PACK32));
+	EXPECT_EQ(Kyty::Libs::Graphics::VulkanGen5SampleSurfaceSelectors(130, true, VK_FORMAT_B8G8R8A8_SRGB, DstSel(6, 5, 4, 7)),
+	          DstSel(4, 5, 6, 7));
+	EXPECT_EQ(Kyty::Libs::Graphics::VulkanGen5SampleSurfaceSelectors(50, false, VK_FORMAT_A2R10G10B10_UNORM_PACK32,
+	                                                                  DstSel(6, 5, 4, 7)),
+	          DstSel(4, 5, 6, 7));
+	EXPECT_EQ(Kyty::Libs::Graphics::VulkanGen5SampleSurfaceSelectors(56, false, VK_FORMAT_B8G8R8A8_UNORM, DstSel(4, 5, 6, 1)),
+	          DstSel(6, 5, 4, 1));
+	EXPECT_EQ(Kyty::Libs::Graphics::VulkanGen5SampleSurfaceSelectors(130, true, VK_FORMAT_R8G8B8A8_SRGB, DstSel(6, 5, 4, 7)),
+	          DstSel(6, 5, 4, 7));
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 13), VK_FORMAT_R16_SFLOAT);
 	EXPECT_EQ(Kyty::Libs::Graphics::ShaderGen5TextureBytesPerElement(13), 2u);
 	EXPECT_EQ(VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0, 0, 14), VK_FORMAT_R8G8_UNORM);

@@ -1462,7 +1462,7 @@ extern thread_local CommandPool g_command_pool;
 
 
 // --- Dump globals (Core) ---
-constexpr uint32_t k_dump_rt_slots = 4;
+constexpr uint32_t k_dump_rt_slots = 8;
 extern VulkanImage* g_dump_rt_images[k_dump_rt_slots];
 extern VulkanImage* g_dump_depth_image;
 extern uint32_t     g_dump_rt_count;

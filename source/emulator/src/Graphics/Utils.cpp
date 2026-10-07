@@ -722,15 +722,16 @@ bool UtilDumpVulkanImageRgba8Png(GraphicContext* ctx, VulkanImage* image, const 
 	{
 		return false;
 	}
-	if (image->format == VK_FORMAT_BC7_UNORM_BLOCK || image->format == VK_FORMAT_BC7_SRGB_BLOCK)
+	const bool bc7 = image->format == VK_FORMAT_BC7_UNORM_BLOCK || image->format == VK_FORMAT_BC7_SRGB_BLOCK;
+	if (bc7 || image->format == VK_FORMAT_R8_UNORM)
 	{
-		// 16-byte blocks of 4x4 texels, level 0 only, written raw next to where a PNG would go.
+		// Level 0 written raw next to where a PNG would go: 16-byte blocks of 4x4 texels, or one byte per texel.
 		const uint64_t       blocks = static_cast<uint64_t>((w + 3u) / 4u) * ((h + 3u) / 4u);
-		std::vector<uint8_t> data(static_cast<size_t>(blocks * 16u));
+		std::vector<uint8_t> data(static_cast<size_t>(bc7 ? blocks * 16u : static_cast<uint64_t>(w) * h));
 		UtilFillBuffer(ctx, data.data(), data.size(), w, image, static_cast<uint64_t>(image->layout), src_array_layer);
 		char path[256];
-		std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu-layer%u.bc7", path_prefix, (tag != nullptr ? tag : "img"), w, h,
-		              static_cast<unsigned long long>(image->memory.unique_id), src_array_layer);
+		std::snprintf(path, sizeof(path), "%s-%s-%ux%u-id%llu-layer%u.%s", path_prefix, (tag != nullptr ? tag : "img"), w, h,
+		              static_cast<unsigned long long>(image->memory.unique_id), src_array_layer, bc7 ? "bc7" : "r8");
 		if (FILE* file = std::fopen(path, "wb"); file != nullptr)
 		{
 			(void)std::fwrite(data.data(), 1, data.size(), file);

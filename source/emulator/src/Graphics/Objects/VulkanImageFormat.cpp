@@ -179,21 +179,42 @@ bool VulkanGen5SampleFormatMatches(uint16_t fmt, VkFormat format)
 	return false;
 }
 
+// The host format storing the same texel bytes with red and blue exchanged.
+static VkFormat RedBlueExchangedFormat(VkFormat format)
+{
+	switch (format)
+	{
+		case VK_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+		case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+		case VK_FORMAT_R8G8B8A8_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
+		case VK_FORMAT_B8G8R8A8_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+		case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+		case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+		default: return VK_FORMAT_UNDEFINED;
+	}
+}
+
 bool VulkanGen5SampleFormatMatchesEffective(uint16_t fmt, bool use_srgb, VkFormat format)
 {
 	const VkFormat expected = VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0u, 0u, fmt, use_srgb);
-	if (expected == VK_FORMAT_UNDEFINED)
+	return expected != VK_FORMAT_UNDEFINED && (format == expected || format == RedBlueExchangedFormat(expected));
+}
+
+uint32_t VulkanGen5SampleSurfaceSelectors(uint16_t fmt, bool use_srgb, VkFormat surface, uint32_t selectors)
+{
+	const VkFormat expected = VulkanResolveGuestImageFormat(GuestImageUsage::Sampled, 0u, 0u, fmt, use_srgb);
+	if (expected == VK_FORMAT_UNDEFINED || surface != RedBlueExchangedFormat(expected))
 	{
-		return false;
+		return selectors;
 	}
-	if (format == expected)
+	uint32_t exchanged = 0;
+	for (uint32_t channel = 0; channel < 4u; channel++)
 	{
-		return true;
+		uint32_t select = (selectors >> (channel * 3u)) & 0x7u;
+		select          = select == 4u ? 6u : (select == 6u ? 4u : select);
+		exchanged |= select << (channel * 3u);
 	}
-	// RGBA8 resources may be backed by the byte-compatible BGRA host family;
-	// keep gamma interpretation exact while component mapping handles channels.
-	return fmt == 56u && ((expected == VK_FORMAT_R8G8B8A8_UNORM && format == VK_FORMAT_B8G8R8A8_UNORM) ||
-	                      (expected == VK_FORMAT_R8G8B8A8_SRGB && format == VK_FORMAT_B8G8R8A8_SRGB));
+	return exchanged;
 }
 
 GuestImageNumericType VulkanGen5ImageNumericType(uint16_t fmt)
