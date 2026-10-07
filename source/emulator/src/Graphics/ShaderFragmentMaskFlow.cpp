@@ -659,7 +659,7 @@ bool Flow::IsScalarSpill(const ShaderInstruction& inst) const
 {
 	int vgpr = 0;
 	int lane = 0;
-	return (IsStaticScalarSpillWrite(inst, &vgpr, &lane) && HasFutureScalarSpillRead(*m_code, m_index, vgpr, lane)) ||
+	return (IsStaticScalarSpillWrite(inst, &vgpr, &lane) && IsScalarSpillStore(*m_code, m_index, vgpr, lane)) ||
 	       (IsStaticScalarSpillRead(inst, &vgpr, &lane) && HasLiveScalarSpill(*m_code, m_index, vgpr, lane));
 }
 

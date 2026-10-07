@@ -105,6 +105,7 @@ bool HasInvalidatedScalarSpill(const ShaderCode& code, uint32_t instruction_inde
 	return invalidated && !live;
 }
 
+// A negative lane matches a read of any lane of the register.
 static bool HasForwardScalarSpillRead(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane)
 {
 	const auto& instructions = code.GetInstructions();
@@ -115,7 +116,7 @@ static bool HasForwardScalarSpillRead(const ShaderCode& code, uint32_t instructi
 		int         read_lane     = 0;
 		if (IsStaticScalarSpillRead(inst, &read_register, &read_lane))
 		{
-			if (read_register == register_id && read_lane == lane)
+			if (read_register == register_id && (lane < 0 || read_lane == lane))
 			{
 				return true;
 			}
@@ -197,6 +198,14 @@ bool HasFutureScalarSpillRead(const ShaderCode& code, uint32_t instruction_index
 	       HasLoopCarriedScalarSpillRead(code, instruction_index, register_id, lane);
 }
 
+// A static write is a spill store when a later READLANE reads its slot, or when
+// it fills a dead slot of a VGPR whose other lanes still carry spills read later.
+bool IsScalarSpillStore(const ShaderCode& code, uint32_t instruction_index, int register_id, int lane)
+{
+	return HasFutureScalarSpillRead(code, instruction_index, register_id, lane) ||
+	       HasForwardScalarSpillRead(code, instruction_index, register_id, -1);
+}
+
 bool UsesNativeLaneExchange(const ShaderCode& code)
 {
 	const auto& instructions = code.GetInstructions();
@@ -228,8 +237,7 @@ bool UsesNativeLaneExchange(const ShaderCode& code)
 			{
 				int register_id = 0;
 				int lane         = 0;
-				if (!IsStaticScalarSpillWrite(inst, &register_id, &lane) ||
-				    !HasFutureScalarSpillRead(code, index, register_id, lane))
+				if (!IsStaticScalarSpillWrite(inst, &register_id, &lane) || !IsScalarSpillStore(code, index, register_id, lane))
 				{
 					return true;
 				}

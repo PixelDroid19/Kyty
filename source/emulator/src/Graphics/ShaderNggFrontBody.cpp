@@ -619,7 +619,7 @@ bool Body::ScalarSpill(const ShaderInstruction& inst)
 {
 	int vgpr = 0;
 	int lane = 0;
-	if (IsStaticScalarSpillWrite(inst, &vgpr, &lane) && HasFutureScalarSpillRead(*m_code, m_index, vgpr, lane))
+	if (IsStaticScalarSpillWrite(inst, &vgpr, &lane) && IsScalarSpillStore(*m_code, m_index, vgpr, lane))
 	{
 		m_spills[{vgpr, lane}] |= Taint(inst.src[0]);
 		return true;
