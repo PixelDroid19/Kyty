@@ -227,13 +227,8 @@ KYTY_RECOMPILER_FUNC(Recompile_SCbranch_XXX_Label)
 	const auto& next_inst = code.GetInstructions().At(index + 1);
 
 	if (!operand_is_constant(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_constant(inst.src[0]) condition ignored (continuing)\n"); }
-	// EXECNZ was previously an unsupported parser placeholder. Native mode has
-	// no verified high-word wave representation, so keep it fail-closed there.
-	if (inst.type == ShaderInstructionType::SCbranchExecnz && !spirv->UsesComputeWaveBanks())
-	{
-		return false;
-	}
-
+	// Native mode decides EXECZ and EXECNZ on the packed EXEC pair: the mask
+	// adapter (ResolveMaskAccesses) replaces the per-lane vote with lo | hi.
 	const char* branch_param[2] = {param[0], param[1]};
 	const bool exec_branch = inst.type == ShaderInstructionType::SCbranchExecz || inst.type == ShaderInstructionType::SCbranchExecnz;
 	const bool vcc_branch  = inst.type == ShaderInstructionType::SCbranchVccz || inst.type == ShaderInstructionType::SCbranchVccnz;

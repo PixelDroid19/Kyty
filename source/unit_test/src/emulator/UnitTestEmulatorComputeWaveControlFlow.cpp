@@ -61,33 +61,27 @@ TEST(EmulatorComputeWaveControlFlow, ExecNonzeroSignExtendsBackwardDisplacement)
 	EXPECT_EQ(code.GetIndirectLabels().At(0).GetDst(), 8u);
 }
 
-TEST(EmulatorComputeWaveControlFlow, NativeExecNonzeroFailsClosedUntilWaveWidthIsRepresented)
+TEST(EmulatorComputeWaveControlFlow, NativeExecNonzeroDecidesOnBothExecWords)
 {
-	// Native mode has no proof that EXEC_HI can be ignored. This previously
-	// decoded as an unsupported placeholder, so the new parser must not turn
-	// it into an unguarded low-word-only branch.
+	// A native wave64 EXECNZ must not decide on the low EXEC word alone: the
+	// mask adapter branches on the packed EXEC_LO | EXEC_HI pair.
 	constexpr uint32_t words[] = {0xbf890002u, 0xbe880381u, 0xbf820001u, 0xbe880382u, 0xbf810000u};
-	ASSERT_EXIT(
-	    {
-		    if (!Config::IsInitialized())
-		    {
-			    Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-		    }
-		    Config::SetNextGen(true);
-		    Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
-		    ShaderCode code;
-		    code.SetType(ShaderType::Compute);
-		    if (!ShaderTryParseBounded(words, sizeof(words), &code))
-		    {
-			    std::_Exit(2);
-		    }
-		    ShaderComputeInputInfo input {};
-		    input.threads_num[0] = 64u;
-		    input.threads_num[1] = input.threads_num[2] = 1u;
-		    (void)SpirvGenerateSource(code, nullptr, nullptr, &input);
-		    std::_Exit(0);
-	    },
-	    ::testing::ExitedWithCode(65), "");
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ASSERT_TRUE(ShaderTryParseBounded(words, sizeof(words), &code));
+	ShaderComputeInputInfo input {};
+	input.threads_num[0] = 64u;
+	input.threads_num[1] = input.threads_num[2] = 1u;
+	const auto source = SpirvGenerateSource(code, nullptr, nullptr, &input);
+	EXPECT_TRUE(source.ContainsStr("%branch_mask_hi_0 = OpLoad %uint %exec_hi"));
+	EXPECT_TRUE(source.ContainsStr("OpBitwiseOr %uint %branch_mask_lo_0 %branch_mask_hi_0"));
+	EXPECT_FALSE(source.ContainsStr("OpGroupNonUniformAny %bool %uint_3 %cc_lane_b_0"));
 }
 
 // Since 704f4ad3 guest control flow runs as a block dispatcher, exact for any CFG
