@@ -511,6 +511,7 @@ private:
 	                     const uint64_t* size, int vaddr_num, int* id, bool* covered_reuse, int* stale_reuse_id);
 	bool create_generate_mips(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_texture_triplet(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
+	bool create_mip_level_storage(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);
 	bool create_cpu_texture_storage_alias(const Vector<OverlappedBlock>& others, const GpuObject& info, int heap_id,
 	                                     const uint64_t* vaddr, const uint64_t* size, int vaddr_num) const;
 	bool create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id);

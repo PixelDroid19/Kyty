@@ -714,6 +714,32 @@ bool GpuMemory::create_texture_triplet(const Vector<OverlappedBlock>& others, Gp
 	return false;
 }
 
+// A storage view of one level of a mip-chained surface: a compute pass that
+// builds the chain writes each level through its own T#, inside the range of
+// the chain's sampled Texture and its level-0 RenderTexture. Link them; the
+// per-level copy of Texture::CreateFromObjects takes each level from the
+// surface of that exact extent.
+bool GpuMemory::create_mip_level_storage(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id)
+{
+	if (type != GpuMemoryObjectType::StorageTexture || others.IsEmpty())
+	{
+		return false;
+	}
+	const auto& heap  = m_heaps[heap_id];
+	bool        chain = false;
+	for (const auto& r: others)
+	{
+		const auto& o = heap.objects[r.object_id].info;
+		if (r.relation != OverlapType::Contains ||
+		    (o.object.type != GpuMemoryObjectType::Texture && o.object.type != GpuMemoryObjectType::RenderTexture))
+		{
+			return false;
+		}
+		chain = chain || (o.object.type == GpuMemoryObjectType::Texture && (o.params[TextureObject::PARAM_LEVELS] & 0xffffffffu) > 1u);
+	}
+	return chain;
+}
+
 bool GpuMemory::create_maybe_deleted(const Vector<OverlappedBlock>& others, GpuMemoryObjectType type, int heap_id)
 {
 	auto& heap = m_heaps[heap_id];
@@ -2035,6 +2061,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				overlap  = true;
 				scenario = GpuMemoryScenario::TextureTriplet;
+			} else if (create_mip_level_storage(others, info.type, heap_id))
+			{
+				overlap = true;
 			} else if (create_maybe_deleted(others, info.type, heap_id))
 			{
 				delete_all = true;
