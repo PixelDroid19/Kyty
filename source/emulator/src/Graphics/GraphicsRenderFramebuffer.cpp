@@ -85,20 +85,26 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 			}
 		}
 	}
-	const bool depth_stencil_read_only = (with_depth && depth_stencil_access == DepthStencilAttachmentAccess::ReadOnly);
+	const auto access                  = with_depth ? depth_stencil_access : DepthStencilAttachmentAccess::Writable;
+	const bool depth_read_only         = access == DepthStencilAttachmentAccess::ReadOnly || access == DepthStencilAttachmentAccess::DepthReadOnly;
+	const bool depth_stencil_read_only = access == DepthStencilAttachmentAccess::ReadOnly;
 	const auto attachment_samples = resolve_render_attachment_sample_count(*color, *depth);
 	const auto depth_tracked_layout =
 	    (with_depth && depth->vulkan_buffer != nullptr) ? depth->vulkan_buffer->layout : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 	const auto depth_load_ops =
 	    ResolveDepthAttachmentLoadOps(depth->format, depth->depth_clear_enable, depth->stencil_clear_enable, depth_tracked_layout);
-	if (depth_stencil_read_only &&
+	if (depth_read_only &&
 	    (depth_load_ops.depth_load == VK_ATTACHMENT_LOAD_OP_CLEAR || depth_load_ops.stencil_load == VK_ATTACHMENT_LOAD_OP_CLEAR))
 	{
 		EXIT("read-only depth/stencil attachments cannot clear during the same render pass\n");
 	}
 	const auto depth_stencil_layout =
-	    (depth_stencil_read_only ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
-	const auto depth_initial_layout = (depth_stencil_read_only ? depth_tracked_layout : depth_load_ops.initial_layout);
+	    (depth_stencil_read_only ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+	                             : (depth_read_only ? VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL
+	                                                : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL));
+	// A sampled depth plane leaves the pass read-only, like the fully read-only form.
+	const auto depth_final_layout   = (depth_read_only ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : depth_stencil_layout);
+	const auto depth_initial_layout = (depth_read_only ? depth_tracked_layout : depth_load_ops.initial_layout);
 
 	for (auto& f: m_framebuffers)
 	{
@@ -125,7 +131,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 		}
 		if (f.framebuffer != nullptr && same_colors && f.depth_id == (with_depth ? depth->vulkan_buffer->memory.unique_id : 0) &&
 		    f.depth_clear_enable == depth->depth_clear_enable && f.stencil_clear_enable == depth->stencil_clear_enable &&
-		    f.depth_stencil_read_only == depth_stencil_read_only && f.depth_load_op == depth_load_ops.depth_load &&
+		    f.depth_stencil_access == access && f.depth_load_op == depth_load_ops.depth_load &&
 		    f.depth_initial_layout == depth_initial_layout)
 		{
 			return f.framebuffer;
@@ -139,11 +145,10 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	auto* gctx = g_render_ctx->GetGraphicCtx();
 
 	EXIT_IF(gctx == nullptr);
-	if (depth_stencil_read_only && !gctx->load_store_op_none_supported)
+	if (depth_read_only && !gctx->load_store_op_none_supported)
 	{
 		EXIT("read-only sampled depth attachments require load-store-op-none support\n");
 	}
-	const bool depth_stencil_store_none = depth_stencil_read_only;
 
 	if (!with_depth && !with_color) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !with_depth && !with_color condition ignored (continuing)\n"); }
 
@@ -231,12 +236,12 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	attachments[attachment_count].samples = with_depth ? depth->vulkan_buffer->samples : VK_SAMPLE_COUNT_1_BIT;
 	attachments[attachment_count].loadOp  = depth_load_ops.depth_load;
 	attachments[attachment_count].storeOp =
-	    depth_stencil_store_none ? VulkanAttachmentStoreOpNone() : VK_ATTACHMENT_STORE_OP_STORE;
+	    depth_read_only ? VulkanAttachmentStoreOpNone() : VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[attachment_count].stencilLoadOp  = depth_load_ops.stencil_load;
 	attachments[attachment_count].stencilStoreOp =
-	    depth_stencil_store_none ? VulkanAttachmentStoreOpNone() : VK_ATTACHMENT_STORE_OP_STORE;
+	    depth_stencil_read_only ? VulkanAttachmentStoreOpNone() : VK_ATTACHMENT_STORE_OP_STORE;
 	attachments[attachment_count].initialLayout  = depth_initial_layout;
-	attachments[attachment_count].finalLayout    = depth_stencil_layout;
+	attachments[attachment_count].finalLayout    = depth_final_layout;
 	framebuffer->depth_load_op          = depth_load_ops.depth_load;
 	framebuffer->depth_initial_layout   = depth_initial_layout;
 
@@ -244,6 +249,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	depth_attachment_ref.attachment = attachment_count;
 	depth_attachment_ref.layout     = depth_stencil_layout;
 	framebuffer->depth_stencil_layout = depth_stencil_layout;
+	framebuffer->depth_final_layout   = depth_final_layout;
 
 	VkSubpassDescription subpass {};
 	subpass.flags                   = 0;
@@ -328,7 +334,7 @@ VulkanFramebuffer* FramebufferCache::CreateFramebuffer(RenderColorInfo* color, R
 	fnew.depth_id             = (with_depth ? depth->vulkan_buffer->memory.unique_id : 0);
 	fnew.depth_clear_enable   = depth->depth_clear_enable;
 	fnew.stencil_clear_enable = depth->stencil_clear_enable;
-	fnew.depth_stencil_read_only = depth_stencil_read_only;
+	fnew.depth_stencil_access    = access;
 	fnew.depth_load_op           = depth_load_ops.depth_load;
 	fnew.depth_initial_layout    = depth_initial_layout;
 	for (uint32_t slot = 0; slot < color->targets_num; slot++)

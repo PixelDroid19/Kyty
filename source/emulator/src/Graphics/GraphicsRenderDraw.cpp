@@ -1410,6 +1410,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	const auto pipeline_setup_start = DrawStageClock::now();
 	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind);
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
+	const VulkanImage* stencil_attached_depth =
+	    depth_access == DepthStencilAttachmentAccess::DepthReadOnly ? depth_info.vulkan_buffer : nullptr;
 
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
@@ -1461,7 +1463,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
-	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum);
+	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum,
+	                stencil_attached_depth);
 
 	uint32_t declared_vertex_records = 0;
 	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
@@ -1545,7 +1548,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	                                                                 ps_input_info.interpolator_settings[6],
 	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum,
+	                stencil_attached_depth);
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 
 	const uint64_t index_addr_u64 = reinterpret_cast<uint64_t>(index_addr);
@@ -2345,6 +2349,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	const auto pipeline_setup_start = DrawStageClock::now();
 	const auto depth_access = ResolveDrawDepthStencilAccess(buffer, depth_info, vs_input_info.bind, ps_input_info.bind);
 	auto* framebuffer = g_render_ctx->GetFramebufferCache()->CreateFramebuffer(&color_info, &depth_info, depth_access);
+	const VulkanImage* stencil_attached_depth =
+	    depth_access == DepthStencilAttachmentAccess::DepthReadOnly ? depth_info.vulkan_buffer : nullptr;
 
 	if (framebuffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer == nullptr condition ignored (continuing)\n"); }
 	if (framebuffer->render_pass == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: framebuffer->render_pass == nullptr condition ignored (continuing)\n"); }
@@ -2416,7 +2422,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	DebugStatsRecordDrawVertexBufferBinding(DrawStageElapsedNs(vertex_buffer_binding_start));
 
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, vs_input_info.bind,
-	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum);
+	                VK_SHADER_STAGE_VERTEX_BIT, DescriptorCache::Stage::Vertex, 0, nullptr, sh_ctx->GetVs().gs_regs.chksum,
+	                stencil_attached_depth);
 
 	uint32_t declared_vertex_records = 0;
 	for (int buffer_index = 0; buffer_index < vs_input_info.buffers_num; ++buffer_index)
@@ -2500,7 +2507,8 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	                                                                 ps_input_info.interpolator_settings[6],
 	                                                                 ps_input_info.interpolator_settings[7]}};
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline_layout, ps_input_info.bind,
-	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum);
+	                VK_SHADER_STAGE_FRAGMENT_BIT, DescriptorCache::Stage::Pixel, 0, &material_trace, sh_ctx->GetPs().ps_regs.chksum,
+	                stencil_attached_depth);
 	TraceRenderTargetLifetimeDraw(submit_id, material_trace);
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
 

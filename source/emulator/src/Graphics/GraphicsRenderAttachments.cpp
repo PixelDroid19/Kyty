@@ -855,11 +855,13 @@ DepthStencilAttachmentAccess ResolveDepthStencilAttachmentAccess(const RenderDep
 	                            (stencil_face_writes(depth.stencil_static_front, depth.stencil_dynamic_front) ||
 	                             stencil_face_writes(depth.stencil_static_back, depth.stencil_dynamic_back));
 
-	if (depth.depth_clear_enable || depth.stencil_clear_enable || depth_writes || stencil_writes || !load_store_op_none_supported)
+	if (depth.depth_clear_enable || depth.stencil_clear_enable || depth_writes || !load_store_op_none_supported)
 	{
 		return DepthStencilAttachmentAccess::Unsupported;
 	}
-	return DepthStencilAttachmentAccess::ReadOnly;
+	// Sampling reads the depth plane; stencil writes keep the stencil plane an attachment.
+	const bool has_stencil = (DepthFormatAspectMask(depth.format) & VK_IMAGE_ASPECT_STENCIL_BIT) != 0u;
+	return stencil_writes && has_stencil ? DepthStencilAttachmentAccess::DepthReadOnly : DepthStencilAttachmentAccess::ReadOnly;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
