@@ -303,6 +303,11 @@ Measured and not shipped:
   vertex buffers (equal 32-64 B objects, and 2 MB objects containing vertex buffers) and by other storage buffers;
   those aliases need the in-order write-back. In the beat 'em up no pending object qualified.
 
+- Persistent mapping of storage buffers with the write-back baseline deferred to the first writable use (from
+  another integration line): the beat 'em up presented 1,240 frames in 181 s, and 867 without the deferral, against
+  1,580-1,682 with per-use mapping on the same route. Index buffers placed in host-coherent memory mapped pooled
+  blocks a second time, and an sRGB swapchain re-encodes UNORM sources the presentation scaler copies directly.
+
 Open, measured:
 
 - The sandbox title waits for device-address write-backs about 56% of its menu time (2,100 waits per 10 s, 2.6 ms
