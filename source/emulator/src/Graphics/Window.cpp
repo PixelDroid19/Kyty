@@ -3525,11 +3525,12 @@ void WindowDrawBuffer(VideoOutVulkanImage* image)
 						if (UtilWriteRgba8Png(path, rgba.data(), w, h, w))
 						{
 							KYTY_LOG_DEBUG( "KYTY_DUMP_VIDEOOUT wrote %s\n", path);
-							char rt_prefix[128];
-							std::snprintf(rt_prefix, sizeof(rt_prefix), "/tmp/kyty-dump-rt-at-f%d", frame);
-							GraphicsDumpRememberedRts(&g_window_ctx->graphic_ctx, rt_prefix);
 						}
 					}
+					// The remembered render targets of this frame, whatever the present format.
+					char rt_prefix[128];
+					std::snprintf(rt_prefix, sizeof(rt_prefix), "/tmp/kyty-dump-rt-at-f%d", frame);
+					GraphicsDumpRememberedRts(&g_window_ctx->graphic_ctx, rt_prefix);
 				}
 			}
 		}
