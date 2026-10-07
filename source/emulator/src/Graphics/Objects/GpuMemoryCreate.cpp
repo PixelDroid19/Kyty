@@ -886,10 +886,12 @@ String GpuMemory::create_dbg_parents(int heap_id, const Vector<OverlappedBlock>&
 	for (const auto& d: others)
 	{
 		const auto& h = heap.objects[d.object_id];
-		list.Add(String::FromPrintf("\t parent id=%d type=%s rel=%s scenario=%s parents=%u read_only=%d vaddr=0x%016" PRIx64
-		                            " size=0x%016" PRIx64 " params:%s",
+		list.Add(String::FromPrintf("\t parent id=%d type=%s rel=%s scenario=%s parents=%u read_only=%d in_use=%d origin=%s"
+		                            " cpu_time=%" PRIu64 " gpu_time=%" PRIu64 " vaddr=0x%016" PRIx64 " size=0x%016" PRIx64 " params:%s",
 		                            d.object_id, Core::EnumName(h.info.object.type).C_Str(), Core::EnumName(d.relation).C_Str(),
 		                            Core::EnumName(h.scenario).C_Str(), static_cast<unsigned>(h.others.Size()), h.info.read_only ? 1 : 0,
+		                            h.info.in_use ? 1 : 0, Core::EnumName(h.info.content_origin).C_Str(),
+		                            static_cast<uint64_t>(h.info.cpu_update_time), static_cast<uint64_t>(h.info.gpu_update_time),
 		                            h.block.vaddr[0], h.block.size[0], params(h.info.params).C_Str()));
 	}
 	return list.Concat(U'\n');
@@ -1250,13 +1252,16 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				create_from_objects = true;
 				retire_after_copy_ids.Add(obj.object_id);
 			} else if (buffer != nullptr && o.object.type == GpuMemoryObjectType::RenderTexture &&
-			           info.type == GpuMemoryObjectType::StorageTexture && obj.relation == OverlapType::Crosses &&
+			           info.type == GpuMemoryObjectType::StorageTexture &&
+			           (obj.relation == OverlapType::Crosses || obj.relation == OverlapType::Equals ||
+			            obj.relation == OverlapType::IsContainedWithin) &&
 			           o.in_use && o.gpu_update_time > o.cpu_update_time && h.block.vaddr_num == 1 && vaddr_num == 1 &&
 			           StorageTexturePlanRenderAlias(o.params, h.block.vaddr[0], h.block.size[0], info.params, vaddr[0], size[0],
 			                                         &render_alias_copies))
 			{
-				// This partially written image aliases whole 64 KiB blocks of a
-				// GPU-owned render target. Keep its live pixels before compute writes.
+				// This image aliases 64 KiB blocks of a GPU-owned render target (part
+				// of it, all of it, or all of a smaller one). Keep its live pixels
+				// before compute writes.
 				overlap                = true;
 				render_alias_parent_id = obj.object_id;
 			} else if (GpuMemoryAllowsStorageTextureContainedInRenderTarget(o.object.type, obj.relation, info.type))
@@ -1275,6 +1280,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				overlap = true;
 			} else if (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type))
 			{
+				overlap = true;
+			} else if (o.object.type == GpuMemoryObjectType::StorageTexture && info.type == GpuMemoryObjectType::StorageTexture &&
+			           obj.relation == OverlapType::Equals && StorageTextureRedescribesRange(o.params, info.params))
+			{
+				// A recycled allocation (captured: a 1x1 R32F view, then a 32x32 RGBA16F
+				// view of one 64 KiB block). Link both; the new view seeds from guest bytes.
 				overlap = true;
 			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
 			{
@@ -1351,6 +1362,10 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				// not a stricter contract than several, so share instead of failing
 				// (captured full-screen RenderTexture Crossing a stale Texture).
 				overlap = true;
+			} else if (GpuMemoryAllowsTextureLinkDepthMetadata(o.object.type, obj.relation, info.type))
+			{
+				// Same link as the mixed-parent form: the texture uploads guest bytes.
+				overlap = true;
 			} else if (GpuMemoryAllowsDepthStencilReclaimSurface(o.object.type, obj.relation, info.type))
 			{
 				delete_all = true;
@@ -1393,7 +1408,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 					{
 						auto msg = String::FromPrintf("unknown relation: %s - %s - %s\n", Core::EnumName(o.object.type).C_Str(),
 						                              Core::EnumName(obj.relation).C_Str(), Core::EnumName(info.type).C_Str());
-						EXIT("%s\n", create_dbg_exit(msg, vaddr, size, vaddr_num, others, info.type).C_Str());
+						EXIT("%s\n%s\n", create_dbg_exit(msg, vaddr, size, vaddr_num, others, info.type).C_Str(),
+						     create_dbg_parents(heap_id, others, info).C_Str());
 					}
 				}
 		} else
@@ -1630,6 +1646,50 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 						render_alias_parent_id = candidate.object_id;
 						break;
 					}
+				}
+			}
+
+			// A storage view over a GPU-written render target (a compute pass on the
+			// rendered image) seeds from its pixels. Sampled views of the same range
+			// stay linked unless they uploaded guest bytes newer than its last write.
+			bool multi_render_alias = !multi_raw_render_alias && info.type == GpuMemoryObjectType::StorageTexture &&
+			                          buffer != nullptr && vaddr_num == 1 &&
+			                          info.params[StorageTextureObject::PARAM_SKIP_SEED] == 0u;
+			if (multi_render_alias)
+			{
+				int render_id = -1;
+				for (const auto& candidate: others)
+				{
+					const auto& parent = heap.objects[candidate.object_id].info;
+					if (parent.object.type == GpuMemoryObjectType::RenderTexture && render_id < 0)
+					{
+						render_id = candidate.object_id;
+					} else if (!GpuMemoryAllowsTextureStorageAlias(parent.object.type, candidate.relation, info.type))
+					{
+						multi_render_alias = false;
+						break;
+					}
+				}
+				if (multi_render_alias && render_id >= 0)
+				{
+					const auto& source = heap.objects[render_id];
+					multi_render_alias = source.info.in_use && source.info.object.obj != nullptr && source.block.vaddr_num == 1 &&
+					                     source.info.gpu_update_time > source.info.cpu_update_time &&
+					                     StorageTexturePlanRenderAlias(source.info.params, source.block.vaddr[0], source.block.size[0],
+					                                                   info.params, vaddr[0], size[0], &render_alias_copies);
+					for (const auto& candidate: others)
+					{
+						const auto& parent = heap.objects[candidate.object_id].info;
+						multi_render_alias = multi_render_alias && !(parent.content_origin == GpuMemoryContentOrigin::CpuUpload &&
+						                                             parent.cpu_update_time > source.info.gpu_update_time);
+					}
+					if (multi_render_alias)
+					{
+						render_alias_parent_id = render_id;
+					}
+				} else
+				{
+					multi_render_alias = false;
 				}
 			}
 
@@ -1914,7 +1974,7 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			{
 				overlap = true;
 			} else if (multi_ro_storage_share || multi_vertex_storage_alias || multi_mixed_storage_alias || multi_raw_render_alias ||
-			           multi_raw_render_composite ||
+			           multi_render_alias || multi_raw_render_composite ||
 			           multi_overwritten_storage_texture || multi_depth_mip_storage_guest || multi_vertex_in_surface ||
 			           multi_render_target_alias)
 			{
@@ -2351,6 +2411,12 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	o.content_origin = render_alias_parent_id >= 0 || !mixed_raw_render_source_ids.empty() ? GpuMemoryContentOrigin::GpuAliasMaterialization
 	                                                : GpuMemoryCreationContentOrigin(info.type, create_from_objects,
 	                                                                                 create_from_objects_fell_back_to_cpu);
+	if (o.content_origin == GpuMemoryContentOrigin::CpuUpload && info.type == GpuMemoryObjectType::Texture &&
+	    info.params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0u)
+	{
+		// A texture under a live surface skips its guest upload: it holds no guest bytes.
+		o.content_origin = GpuMemoryContentOrigin::Unknown;
+	}
 	o.content_sequence = NextContentSequence();
 	o.use_num         = 1;
 	o.use_last_frame  = m_current_frame;
