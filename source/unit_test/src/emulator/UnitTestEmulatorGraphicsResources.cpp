@@ -855,9 +855,12 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 					Gen5TextureVolumeLayout layout {};
 					const bool admitted = Gen5GetVolumeTextureLayout(format, 8u, 16u, depth, 8u, levels, tile, &layout);
 					// SW mode 0 (linear) is a byte-for-byte layout and SW modes 5 and 9 the SW_4KB_S and
-					// SW_64KB_S volume patterns of every element size. Any other tile mode, or a mip chain,
-					// must stay rejected instead of being read as linear.
-					EXPECT_EQ(admitted, levels == 1u && (tile == 0u || tile == 5u || tile == 9u));
+					// SW_64KB_S volume patterns of every element size. SW mode 27 is a thin volume whose
+					// slices are 2D-array layers. Any other tile mode, or a mip chain, must stay rejected
+					// instead of being read as linear.
+					Gen5TextureArrayLayout slices {};
+					const bool thin = tile == 27u && Gen5GetTextureArrayLayout(format, 8u, 16u, 8u, 1u, 27u, depth, &slices);
+					EXPECT_EQ(admitted, levels == 1u && (tile == 0u || tile == 5u || tile == 9u || thin));
 					if (!admitted)
 					{
 						EXPECT_EQ(layout.tiled.size, 0u);
@@ -878,6 +881,12 @@ TEST(EmulatorGraphicsResources, VolumeAdmissionNeverTurnsRejectedTilingIntoLinea
 						EXPECT_EQ(layout.pitch, pitch);
 						EXPECT_EQ(layout.tiled.size, blocks * block_bytes);
 						EXPECT_EQ(layout.linear_size, static_cast<uint64_t>(pitch) * 16u * depth * bytes);
+					} else if (tile == 27u)
+					{
+						EXPECT_TRUE(layout.thin);
+						EXPECT_FALSE(layout.linear);
+						EXPECT_EQ(layout.tiled.size, slices.tiled_size);
+						EXPECT_EQ(layout.linear_size, slices.linear_size);
 					} else
 					{
 						EXPECT_TRUE(layout.linear);

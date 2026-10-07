@@ -1,6 +1,7 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GEN5TEXTUREVOLUMELAYOUT_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GEN5TEXTUREVOLUMELAYOUT_H_
 
+#include "Emulator/Graphics/Gen5TextureArrayLayout.h"
 #include "Emulator/Graphics/Tile.h"
 
 #ifdef KYTY_EMU_ENABLED
@@ -18,7 +19,11 @@ namespace Kyty::Libs::Graphics {
 //  - 0, linear: rows of `pitch` elements, `height` rows per slice, slices back to
 //    back (slice stride = pitch * height * element bytes), the allocation rounded
 //    up to 256 bytes like the 2D linear estimate. The T# stores no slice stride for
-//    a linear surface, so this is the tight convention, not a measured padding.
+//    a linear surface, so this is the tight convention, not a measured padding;
+//  - 27, render target 64KB (SW_64KB_R_X): the addressing library keeps 3D thick
+//    blocks for the Z and standard swizzles only (titles carry its 64 KiB 3D block
+//    table), so a render-target volume is thin: every depth slice is a complete 2D
+//    render-target slice, laid out like the layers of a 2D array.
 struct Gen5TextureVolumeLayout
 {
 	TileSizeAlign tiled {};
@@ -30,6 +35,8 @@ struct Gen5TextureVolumeLayout
 	uint32_t      pitch             = 0;
 	uint32_t      block_bytes       = 0;     // 4096 or 65536 for the standard swizzles
 	bool          linear            = false; // SW mode 0: upload is a plain copy
+	bool          thin              = false; // SW mode 27: depth slices as 2D-array layers
+	Gen5TextureArrayLayout slices {};
 };
 
 [[nodiscard]] bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height,

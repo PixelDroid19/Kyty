@@ -13,6 +13,7 @@ namespace {
 constexpr uint32_t kSwModeLinear     = 0u;
 constexpr uint32_t kSwModeStandard4K  = 5u;
 constexpr uint32_t kSwModeStandard64K = 9u;
+constexpr uint32_t kSwModeRender64K   = 27u;
 constexpr uint64_t kLinearAlign      = 256u; // T# base address granularity
 
 // A swizzled surface has no descriptor pitch (word4 belongs to linear resources): rows are the width rounded up
@@ -71,6 +72,24 @@ bool LinearLayout(uint32_t format, uint32_t height, uint32_t depth, uint32_t pit
 	return true;
 }
 
+bool ThinRenderTargetLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t depth, uint32_t pitch,
+                            Gen5TextureVolumeLayout* layout)
+{
+	Gen5TextureArrayLayout slices {};
+	if (!Gen5GetTextureArrayLayout(format, width, height, pitch, 1u, kSwModeRender64K, depth, &slices) ||
+	    slices.tiled_size > UINT32_MAX)
+	{
+		return false;
+	}
+	layout->tiled             = {static_cast<uint32_t>(slices.tiled_size), slices.tiled_slice.align};
+	layout->linear_size       = slices.linear_size;
+	layout->bytes_per_element = slices.bytes_per_element;
+	layout->pitch             = slices.host_pitch;
+	layout->thin              = true;
+	layout->slices            = slices;
+	return true;
+}
+
 bool ValidateLinearUpload(const Gen5TextureVolumeLayout& layout, uint64_t source_size)
 {
 	const uint64_t linear_size = LinearVolumeBytes(layout.bytes_per_element, layout.height, layout.depth, layout.pitch);
@@ -90,6 +109,7 @@ bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height
 	bool                    supported = false;
 	if (tile == kSwModeStandard4K) { supported = StandardLayout(format, width, height, depth, 4096u, &result); }
 	if (tile == kSwModeStandard64K) { supported = StandardLayout(format, width, height, depth, 65536u, &result); }
+	if (tile == kSwModeRender64K) { supported = ThinRenderTargetLayout(format, width, height, depth, pitch, &result); }
 	if (tile == kSwModeLinear)
 	{
 		supported    = LinearLayout(format, height, depth, pitch, &result);
@@ -113,6 +133,7 @@ bool Gen5GetVolumeTextureLayout(uint32_t format, uint32_t width, uint32_t height
 bool Gen5ValidateTextureVolumeUpload(const Gen5TextureVolumeLayout& layout, uint64_t source_size)
 {
 	if (layout.linear) { return ValidateLinearUpload(layout, source_size); }
+	if (layout.thin) { return Gen5ValidateTextureArrayUpload(layout.slices, 0u, source_size); }
 	TileSizeAlign tiled {};
 	if (!TileTryGetStandardVolumeSize(layout.width, layout.height, layout.depth, layout.pitch, layout.bytes_per_element,
 	                                  layout.block_bytes, &tiled))
@@ -135,6 +156,10 @@ bool Gen5DetileTextureVolume(void* destination, uint64_t destination_size, const
 	{
 		std::memcpy(destination, source, static_cast<size_t>(layout.linear_size));
 		return true;
+	}
+	if (layout.thin)
+	{
+		return Gen5DetileTextureArray(destination, destination_size, source, source_size, layout.slices);
 	}
 	TileConvertStandardVolumeToLinear(destination, source, layout.width, layout.height, layout.depth, layout.pitch,
 	                                  layout.bytes_per_element, layout.block_bytes);
