@@ -1425,6 +1425,11 @@ struct ShaderTextureResource
 	}
 };
 
+// A comparison sample of a Gen5 color surface compares its first channel in the
+// shader: Vulkan depth-reference sampling requires a depth view.
+[[nodiscard]] State::ImageSampleOperation ShaderTextureSampleOperation(const ShaderTextureResource& texture,
+                                                                       State::ImageSampleOperation operation);
+
 // A Gen5 sampled descriptor may carry a metadata address even when compression
 // is disabled. Such an address is inert for the uncompressed sampling path;
 // only descriptors with compression metadata flags require DCC handling.

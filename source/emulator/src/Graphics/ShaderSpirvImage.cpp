@@ -2181,8 +2181,7 @@ static String8 EmitImageSampleCLzCompare(uint32_t index, uint8_t compare_func)
 
 static bool SupportsArrayComparisonSampler(const ShaderSamplerResource& sampler)
 {
-	return !sampler.ForceUnormCoords() && sampler.MinLod() == 0u && sampler.FilterMode() == 0u &&
-	       sampler.XyMagFilter() <= 1u && sampler.XyMinFilter() <= 1u;
+	return !sampler.ForceUnormCoords() && sampler.MinLod() == 0u && sampler.FilterMode() == 0u;
 }
 
 static String8 EmitArrayComparisonFilter(uint32_t index, uint8_t compare_func)
@@ -2250,7 +2249,9 @@ KYTY_RECOMPILER_FUNC(Recompile_ImageSampleDrefLz_Vdata1Vaddr3StSsDmask1)
 	{
 		return false;
 	}
-	const bool manual_linear = arrayed && sampler.XyMagFilter() == 1u;
+	// A level-zero sample has no derivatives and magnifies, so an anisotropic
+	// filter reduces to its point or linear base filter.
+	const bool manual_linear = arrayed && (sampler.XyMagFilter() & 1u) != 0u;
 	if ((!flat && !arrayed) || (flat && inst.mimg_dimension != 1u) ||
 	    (arrayed && inst.mimg_dimension != 3u && inst.mimg_dimension != 5u))
 	{

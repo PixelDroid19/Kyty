@@ -115,6 +115,16 @@ bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures
 	return matched;
 }
 
+State::ImageSampleOperation ShaderTextureSampleOperation(const ShaderTextureResource& texture, State::ImageSampleOperation operation)
+{
+	if (Config::IsNextGen() && operation == State::ImageSampleOperation::DepthReference &&
+	    (texture.TileMode() != 24u || State::Gen5DepthSampleBytesPerElement(texture.Format()) == 0u))
+	{
+		return State::ImageSampleOperation::Regular;
+	}
+	return operation;
+}
+
 ShaderSampledImageViewDecision ResolveDepthReferenceImageView(State::ImageSampleOperation operation,
                                                               ShaderGen5SampledTextureShape shape, bool floating_point,
                                                               ShaderSampledImageViewKind resolved_view)
@@ -3159,14 +3169,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			}
 			if (image.texture != ShaderTextureUsage::Unknown)
 			{
-				descriptor.sample_operation = image.sample_operation;
-				// A comparison sample of a color surface compares its first channel in
-				// the shader: Vulkan depth-reference sampling requires a depth view.
-				if (Config::IsNextGen() && descriptor.sample_operation == State::ImageSampleOperation::DepthReference &&
-				    (descriptor.texture.TileMode() != 24u || State::Gen5DepthSampleBytesPerElement(descriptor.texture.Format()) == 0u))
-				{
-					descriptor.sample_operation = State::ImageSampleOperation::Regular;
-				}
+				descriptor.sample_operation = ShaderTextureSampleOperation(descriptor.texture, image.sample_operation);
 				ApplyDirectImageShape(image, &descriptor);
 			}
 		}

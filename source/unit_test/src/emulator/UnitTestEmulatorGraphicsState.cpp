@@ -7371,7 +7371,7 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBind
 
 	alignas(16) uint32_t eud[64] = {};
 	eud[33]                      = 22u << 20u;
-	eud[35]                      = 9u << 28u;
+	eud[35]                      = (9u << 28u) | (24u << 20u);
 	HW::UserSgprInfo user_sgpr {};
 	for (int i = 0; i < 16; ++i)
 	{
