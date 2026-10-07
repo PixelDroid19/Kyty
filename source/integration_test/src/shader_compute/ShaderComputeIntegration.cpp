@@ -131,7 +131,9 @@ ProgramBaseProbe MakeProgramBaseProbe(const char* name, bool use_uniform_buffer)
 	{
 		// Model the real 32 direct SGPR entries used by the 144-byte metadata
 		// layout; the test SSBO is allocated at the next descriptor binding.
-		bind.direct_sgprs.sgprs_num = Kyty::Libs::Graphics::ShaderDirectSgprsResources::SGPRS_MAX;
+		constexpr int kDirectSgprs = 32;
+		static_assert(kDirectSgprs <= Kyty::Libs::Graphics::ShaderDirectSgprsResources::SGPRS_MAX);
+		bind.direct_sgprs.sgprs_num = kDirectSgprs;
 		for (int i = 0; i < bind.direct_sgprs.sgprs_num; ++i)
 		{
 			bind.direct_sgprs.start_register[i] = i;

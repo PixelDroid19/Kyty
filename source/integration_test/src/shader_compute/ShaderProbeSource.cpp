@@ -119,8 +119,11 @@ bool BuildScalarProbeSource(const uint32_t* shader_words, size_t shader_word_cou
 	constants += "%probe_index_6 = OpConstant %uint 6\n";
 	constants += "%probe_index_7 = OpConstant %uint 7\n";
 	constants += Kyty::Core::String8::FromPrintf("%%probe_seed_scc = OpConstant %%uint %u\n", kStatusScc).GetDataConst();
-	constants += Kyty::Core::String8::FromPrintf("%%probe_seed_exec_lo = OpConstant %%uint %u\n", nonempty_exec ? 1u : kStatusExecLo).GetDataConst();
+	const uint32_t exec_lo = nonempty_exec ? 1u : kStatusExecLo;
+	constants += Kyty::Core::String8::FromPrintf("%%probe_seed_exec_lo = OpConstant %%uint %u\n", exec_lo).GetDataConst();
 	constants += Kyty::Core::String8::FromPrintf("%%probe_seed_exec_hi = OpConstant %%uint %u\n", kStatusExecHi).GetDataConst();
+	constants += Kyty::Core::String8::FromPrintf("%%probe_seed_execz = OpConstant %%uint %u\n", (exec_lo | kStatusExecHi) == 0u ? 1u : 0u)
+	                 .GetDataConst();
 	for (const auto& seed: register_seeds)
 	{
 		constants += Kyty::Core::String8::FromPrintf("%%probe_seed_sgpr_%u = OpConstant %%uint %u\n", seed.reg, seed.value)
@@ -142,11 +145,13 @@ bool BuildScalarProbeSource(const uint32_t* shader_words, size_t shader_word_cou
 		*error = "generated SPIR-V source is missing main function";
 		return false;
 	}
-	const std::string common_scc = "OpStore %scc %uint_0";
-	const size_t       common_init = text.find(common_scc, main_start);
+	// The program sets EXEC to the wave's live lanes; seed after that, so the
+	// seeded EXEC (and its lane bit and EXECZ mirrors) is the state under test.
+	const std::string initial_exec = "OpStore %execz %mask_exec_z_initial";
+	const size_t       common_init  = text.find(initial_exec, main_start);
 	if (common_init == std::string::npos)
 	{
-		*error = "generated SPIR-V source is missing common SCC initialization";
+		*error = "generated SPIR-V source is missing the initial EXEC setup";
 		return false;
 	}
 	const size_t seed_position = text.find('\n', common_init);
@@ -155,10 +160,12 @@ bool BuildScalarProbeSource(const uint32_t* shader_words, size_t shader_word_cou
 		*error = "generated SPIR-V source has truncated common initialization";
 		return false;
 	}
-	std::string seeds = "\nOpStore %scc %probe_seed_scc\nOpStore %exec_lo %probe_seed_exec_lo\nOpStore %exec_hi %probe_seed_exec_hi";
+	// Whole lines inserted after a line break, so the next line starts on its own.
+	std::string seeds = "OpStore %scc %probe_seed_scc\nOpStore %exec_lo %probe_seed_exec_lo\nOpStore %exec_hi %probe_seed_exec_hi\n"
+	                    "OpStore %exec_lane_lo %probe_seed_exec_lo\nOpStore %execz %probe_seed_execz\n";
 	for (const auto& seed: register_seeds)
 	{
-		seeds += Kyty::Core::String8::FromPrintf("\nOpStore %%s%u %%probe_seed_sgpr_%u", seed.reg, seed.reg).GetDataConst();
+		seeds += Kyty::Core::String8::FromPrintf("OpStore %%s%u %%probe_seed_sgpr_%u\n", seed.reg, seed.reg).GetDataConst();
 	}
 	text.insert(seed_position + 1u, seeds);
 

@@ -490,14 +490,14 @@ void VerifyRenderTargetIndexAliasContract()
 	               GpuMemoryContentOrigin::Unknown,
 	       "creation provenance distinguishes guest upload, GPU alias materialization, fallback, and unknown origins");
 
-	Expect(!GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	Expect(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Crosses,
+	                                               GpuMemoryObjectType::RenderTexture) &&
+	           GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
+	                                                   GpuMemoryObjectType::RenderTexture),
+	       "the index-to-render-target alias contract links crossing and containing read-only index views");
+	Expect(!GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Equals,
 	                                                GpuMemoryObjectType::RenderTexture),
-	       "the index-to-render-target alias contract does not admit an unobserved partial overlap");
-	Expect(!GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Contains,
-	                                                GpuMemoryObjectType::RenderTexture) &&
-	           !GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::IndexBuffer, GpuMemoryOverlapType::Equals,
-	                                                    GpuMemoryObjectType::RenderTexture),
-	       "the index-to-render-target alias contract keeps reverse containment and equality strict");
+	       "the index-to-render-target alias contract keeps equality strict");
 
 	GpuMemoryInit();
 	GraphicContext       ctx {};
@@ -521,7 +521,7 @@ void VerifyRenderTargetIndexAliasContract()
 	Expect(GpuMemoryAllowsRenderTargetSurfaceAlias(GpuMemoryObjectType::IndexBuffer,
 	                                               GpuMemoryOverlapType::IsContainedWithin,
 	                                               GpuMemoryObjectType::RenderTexture),
-	       "the derived contained-index relation is the only accepted render-target alias form");
+	       "the derived contained-index relation is an accepted render-target alias form");
 
 	GpuMemoryOverlapSnapshot overlaps {};
 	Expect(GpuMemoryQueryOverlaps(&target_addr, &target_size, 1, &overlaps) && !overlaps.truncated && overlaps.total_count == 2u,
@@ -1500,6 +1500,7 @@ void VerifyVertexClipProbeContract()
 	resolver_load.src[2].constant.u   = 0u;
 	resolver_load.src_num             = 3;
 	resolver_load.buffer_idxen        = true;
+	resolver_load.buffer_flags        = 0u;
 	ShaderCode resolver_code {};
 	resolver_code.SetType(ShaderType::Vertex);
 	resolver_code.GetInstructions().Add(resolver_load);
@@ -1597,7 +1598,7 @@ void VerifyVertexClipProbeContract()
 	interp_y.src[2].constant.u   = 1;
 	ShaderInstruction sample {};
 	sample.type                  = ShaderInstructionType::ImageSampleB;
-	sample.format                = ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3;
+	sample.format                = ShaderInstructionFormat::VdataVaddr3StSsMimgDmask;
 	sample.dst                   = {.type = ShaderOperandType::Vgpr, .register_id = 8, .size = 2};
 	sample.src[0]                = {.type = ShaderOperandType::Vgpr, .register_id = 3, .size = 3};
 	sample.src[1]                = {.type = ShaderOperandType::Sgpr, .register_id = 8, .size = 8};
@@ -1664,8 +1665,8 @@ void VerifyVertexClipProbeContract()
 	       "readfirstlane uniformity analysis follows scalar-derived VGPR input");
 	Expect(uniform_readfirstlane_source.FindIndex("OpGroupNonUniformBallot") == Kyty::Core::STRING8_INVALID_INDEX,
 	       "wave-uniform readfirstlane emits no native subgroup ballot");
-	Expect(uniform_readfirstlane_source.FindIndex("BuiltIn SubgroupLocalInvocationId") == Kyty::Core::STRING8_INVALID_INDEX,
-	       "wave-uniform readfirstlane emits no subgroup invocation builtin");
+	Expect(uniform_readfirstlane_source.FindIndex("%rfl_") == Kyty::Core::STRING8_INVALID_INDEX,
+	       "wave-uniform readfirstlane emits no first-lane selection or exchange");
 	Expect(uniform_readfirstlane_source.FindIndex("OpStore %vcc_lo %t0_2") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "wave-uniform readfirstlane stores the scalar-derived source directly");
 	ExpectValidSpirv(uniform_readfirstlane_source, "wave-uniform readfirstlane source validates");
@@ -2006,6 +2007,7 @@ void VerifyVertexClipProbeContract()
 	guest_atomic.src[2].constant.u = 0;
 	guest_atomic.src_num           = 3;
 	guest_atomic.buffer_idxen      = true;
+	guest_atomic.buffer_flags      = 0u;
 	ShaderCode side_effect_pixel_code {};
 	side_effect_pixel_code.SetType(ShaderType::Pixel);
 	side_effect_pixel_code.GetInstructions().Add(interp_x);
@@ -3119,7 +3121,8 @@ void VerifyUnsignedExecLessThanComparison()
 	auto source = SpirvGenerateSource(ParseUnsignedExecLessThan(false), nullptr, nullptr, nullptr);
 	Expect(std::strstr(source.c_str(), "OpULessThan") != nullptr, "unsigned less-than emits unsigned SPIR-V compare");
 	Expect(std::strstr(source.c_str(), "OpStore %exec_lo") != nullptr, "exec comparison updates exec low mask");
-	Expect(std::strstr(source.c_str(), "OpStore %exec_hi %uint_0") != nullptr, "exec comparison clears exec high mask");
+	Expect(std::strstr(source.c_str(), "OpStore %exec_hi %mask_out_hi_0") != nullptr,
+	       "exec comparison writes the packed high execution mask");
 }
 
 ShaderCode ParseFloatExecNotLessEqual(bool vop3)
@@ -3164,7 +3167,8 @@ void VerifyFloatExecNotLessEqualComparison()
 	Expect(std::strstr(source.c_str(), "OpFUnordGreaterThan") != nullptr,
 	       "not-less-equal uses unordered-greater-than for IEEE NaN semantics");
 	Expect(std::strstr(source.c_str(), "OpStore %exec_lo") != nullptr, "float exec comparison updates exec low mask");
-	Expect(std::strstr(source.c_str(), "OpStore %exec_hi %uint_0") != nullptr, "float exec comparison clears exec high mask");
+	Expect(std::strstr(source.c_str(), "OpStore %exec_hi %mask_out_hi_0") != nullptr,
+	       "float exec comparison writes the packed high execution mask");
 }
 
 void VerifyGen5FloatExecNotLessThanSdwa()
@@ -3211,14 +3215,14 @@ void VerifyGen5FloatExecNotLessThanSdwa()
 	const auto source = SpirvGenerateSource(code, nullptr, nullptr, nullptr);
 	Expect(source.FindIndex("OpFUnordGreaterThanEqual") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "not-less-than preserves unordered-or-greater-equal NaN semantics");
-	Expect(source.FindIndex("%texec_0 = OpLoad %uint %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX,
-	       "CMPX reads the prior execution mask");
+	Expect(source.FindIndex("%texec_0 = OpLoad %uint %exec_lane_lo") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "CMPX reads the prior execution mask of its lane");
 	Expect(source.FindIndex("%tmasked_0 = OpBitwiseAnd %uint %t3_0 %texec_0") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "CMPX cannot reactivate an inactive lane");
 	Expect(source.FindIndex("OpStore %exec_lo") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "Gen5 CMPX updates the low execution mask");
-	Expect(source.FindIndex("OpStore %exec_hi %uint_0") != Kyty::Core::STRING8_INVALID_INDEX,
-	       "Gen5 CMPX clears the unused high execution mask");
+	Expect(source.FindIndex("OpStore %exec_hi %mask_out_hi_0") != Kyty::Core::STRING8_INVALID_INDEX,
+	       "Gen5 CMPX writes the packed high execution mask");
 }
 
 ShaderCode ParseUnsignedByteBufferLoad()
@@ -3255,6 +3259,9 @@ void VerifyUnsignedByteBufferLoad()
 	       "unsigned byte load remains a known raw storage consumer");
 
 	ShaderComputeInputInfo input {};
+	input.threads_num[0]                         = 1;
+	input.threads_num[1]                         = 1;
+	input.threads_num[2]                         = 1;
 	input.bind.storage_buffers.buffers_num       = 1;
 	input.bind.storage_buffers.start_register[0] = 8;
 	input.bind.storage_buffers.usages[0]         = ShaderStorageUsage::ReadOnly;
@@ -3534,7 +3541,8 @@ void VerifyGen5XnorVop2()
 
 	Expect(legacy_code.GetInstructions().At(0).type == ShaderInstructionType::VBfmB32, "legacy VOP2 opcode 0x1e remains v_bfm_b32");
 	const auto legacy_source = SpirvGenerateSource(legacy_code, nullptr, nullptr, nullptr);
-	Expect(legacy_source.FindIndex("OpBitFieldInsert %uint") != Kyty::Core::STRING8_INVALID_INDEX,
+	Expect(legacy_source.FindIndex("%tmask_0 = OpISub %uint %tlimit_0 %uint_1") != Kyty::Core::STRING8_INVALID_INDEX &&
+	           legacy_source.FindIndex("%t_0 = OpShiftLeftLogical %uint %tmask_0 %toffset_0") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "legacy VOP2 opcode 0x1e retains bit-field-mask semantics");
 }
 
@@ -3961,8 +3969,8 @@ void VerifyGen5ImageSampleLzDmask3()
 
 	const auto& sample = code.GetInstructions().At(1);
 	Expect(sample.type == ShaderInstructionType::ImageSampleLz, "image_sample_lz dmask 3 decodes the captured opcode");
-	Expect(sample.format == ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3,
-	       "image_sample_lz dmask 3 uses the two-component MIMG format");
+	Expect(sample.format == ShaderInstructionFormat::VdataVaddr3StSsMimgDmask && sample.mimg_dmask == 0x3u,
+	       "image_sample_lz dmask 3 uses the dmask-driven MIMG format");
 	Expect(sample.dst.type == ShaderOperandType::Vgpr && sample.dst.register_id == 55 && sample.dst.size == 2,
 	       "image_sample_lz dmask 3 writes two consecutive VGPRs");
 	Expect(sample.mimg_address_num == 5 && sample.mimg_address[0].register_id == 64 && sample.mimg_address[1].register_id == 6,
@@ -3987,8 +3995,8 @@ void VerifyGen5ImageSampleLzDmask3()
 	input.bind.samplers.start_register[0]             = 8;
 	const auto source                                 = SpirvGenerateSource(code, nullptr, nullptr, &input);
 
-	Expect(source.FindIndex("OpImageSampleExplicitLod %v4float %t38_1 %t42_1 Lod %float_0_000000") !=
-	           Kyty::Core::STRING8_INVALID_INDEX,
+	Expect(source.FindIndex("OpImageSampleExplicitLod %v4float %image_sample_lz_scalar_sampled_1 "
+	                        "%image_sample_lz_scalar_coordinate_1 Lod %float_0_000000") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "image_sample_lz dmask 3 samples at explicit LOD");
 	Expect(source.FindIndex("OpStore %v55") != Kyty::Core::STRING8_INVALID_INDEX &&
 	           source.FindIndex("OpStore %v56") != Kyty::Core::STRING8_INVALID_INDEX,
@@ -4005,8 +4013,8 @@ void VerifyGen5ImageSampleLzDmask1()
 
 	const auto& sample = code.GetInstructions().At(1);
 	Expect(sample.type == ShaderInstructionType::ImageSampleLz, "image_sample_lz opcode is decoded");
-	Expect(sample.format == ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1,
-	       "image_sample_lz dmask 1 uses the single-component MIMG format");
+	Expect(sample.format == ShaderInstructionFormat::VdataVaddr3StSsMimgDmask && sample.mimg_dmask == 0x1u,
+	       "image_sample_lz dmask 1 uses the dmask-driven MIMG format");
 	Expect(sample.dst.type == ShaderOperandType::Vgpr && sample.dst.register_id == 166 && sample.dst.size == 1,
 	       "image_sample_lz dmask 1 writes one VDATA component");
 	Expect(sample.src[0].type == ShaderOperandType::Vgpr && sample.src[0].register_id == 108 && sample.src[0].size == 3,
