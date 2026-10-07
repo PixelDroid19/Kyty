@@ -1949,7 +1949,7 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 					             event.submit_id, event.object_type, event.content_sequence);
 				}
 			}
-			for (int ai = 0; ai < vertex.attr_num && ai < 4; ++ai)
+			for (int ai = 0; ai < vertex.attr_num; ++ai)
 			{
 				const int idx = vertex.attr_indices[ai];
 				const int semantic = (idx >= 0 && idx < draw.vertex_input->resources_num) ? draw.vertex_input->resources_dst[idx].semantic : -1;
