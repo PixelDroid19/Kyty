@@ -12,7 +12,7 @@
 #include "Emulator/Kernel/Trace.h"
 #include "Emulator/Kernel/FileSystem.h"
 #include "Emulator/Log.h"
-#include "Emulator/Network.h"
+#include "Emulator/Ports/SocketEventPort.h"
 
 #include <limits>
 #include <unordered_map>
@@ -524,8 +524,8 @@ static bool socket_event_sample(KernelEqueueEvent* event)
 {
 	bool    ready = false;
 	int64_t data  = 0;
-	if (Libs::Network::Net::NetSocketReadiness(static_cast<int>(event->event.ident), event->event.filter == KERNEL_EVFILT_WRITE, &ready,
-	                                           &data) != OK)
+	if (::Kyty::Emulator::Ports::SocketEventPort::Readiness(static_cast<int>(event->event.ident),
+	                                                        event->event.filter == KERNEL_EVFILT_WRITE, &ready, &data) != OK)
 	{
 		// Closed socket: nothing will make it ready again.
 		event->triggered = false;
@@ -539,8 +539,8 @@ static bool socket_event_sample(KernelEqueueEvent* event)
 static void socket_event_arm(const KernelEqueueEvent& event)
 {
 	const auto& queue = static_cast<const SocketEventTarget*>(event.filter.data)->queue;
-	(void)Libs::Network::Net::NetSocketWatch(static_cast<int>(event.event.ident), event.event.filter == KERNEL_EVFILT_WRITE,
-	                                         reinterpret_cast<uint64_t>(queue.eq), queue.generation, socket_ready_notify);
+	(void)::Kyty::Emulator::Ports::SocketEventPort::Watch(static_cast<int>(event.event.ident), event.event.filter == KERNEL_EVFILT_WRITE,
+	                                                      reinterpret_cast<uint64_t>(queue.eq), queue.generation, socket_ready_notify);
 }
 
 static void socket_event_refresh(KernelEqueueEvent* event)
@@ -560,8 +560,8 @@ static void socket_event_trigger_func(KernelEqueueEvent* event, void* /*trigger_
 static void socket_event_delete_func(KernelEqueue eq, KernelEqueueEvent* event)
 {
 	EXIT_IF(event == nullptr);
-	Libs::Network::Net::NetSocketUnwatch(static_cast<int>(event->event.ident), event->event.filter == KERNEL_EVFILT_WRITE,
-	                                     reinterpret_cast<uint64_t>(eq));
+	::Kyty::Emulator::Ports::SocketEventPort::Unwatch(static_cast<int>(event->event.ident), event->event.filter == KERNEL_EVFILT_WRITE,
+	                                                  reinterpret_cast<uint64_t>(eq));
 	delete static_cast<SocketEventTarget*>(event->filter.data);
 	event->filter.data = nullptr;
 }
@@ -601,7 +601,7 @@ static int KernelAddIoEvent(KernelEqueue eq, int fd, int flags, void* udata, int
 	event.event.flags  = static_cast<uint16_t>(flags);
 	event.event.udata  = udata;
 
-	if (Libs::Network::Net::NetIsSocket(fd))
+	if (::Kyty::Emulator::Ports::SocketEventPort::IsSocket(fd))
 	{
 		return KernelAddSocketEvent(eq, &event);
 	}

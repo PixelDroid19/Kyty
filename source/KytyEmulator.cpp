@@ -19,6 +19,7 @@
 #include "Emulator/Libs/ApplicationHeap.h"
 #include "Emulator/Ports/AudioPausePort.h"
 #include "Emulator/Ports/ControllerInputPort.h"
+#include "Emulator/Ports/SocketEventPort.h"
 #include "Emulator/Graphics/Graphics.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Window.h"
@@ -179,12 +180,15 @@ static void Init(const Scripts::ScriptVar& cfg)
 	}
 
 	// Composition root wiring: the HLE implementations of the host-facing
-	// input and audio-pause bridges are installed here, after their
-	// subsystems exist and before any window can forward events.
+	// input and audio-pause bridges and of the kernel's socket events are
+	// installed here, after their subsystems exist and before any window can
+	// forward events or any guest event queue can watch a socket.
 	::Kyty::Emulator::Ports::ControllerInputPort::Install(
 	    {&Libs::Controller::ControllerConnect, &Libs::Controller::ControllerDisconnect, &Libs::Controller::ControllerButton,
 	     &Libs::Controller::ControllerAxis});
 	::Kyty::Emulator::Ports::AudioPausePort::Install(&Libs::Audio::AudioOut::AudioOutSetHostPaused);
+	::Kyty::Emulator::Ports::SocketEventPort::Install({&Libs::Network::Net::NetIsSocket, &Libs::Network::Net::NetSocketReadiness,
+	                                                   &Libs::Network::Net::NetSocketWatch, &Libs::Network::Net::NetSocketUnwatch});
 }
 
 KYTY_SCRIPT_FUNC(kyty_load_cfg_func)
