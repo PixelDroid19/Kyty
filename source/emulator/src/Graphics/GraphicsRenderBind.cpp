@@ -2064,7 +2064,7 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 		const auto* image   = texture.image;
 		std::fprintf(out,
 		    "KYTY_TRACE_DRAW_PS_TEXTURE ordinal=%u descriptor=%d slot=%d sgpr=%d usage=%u operation=%u shape=%u"
-		    " addr=0x%012" PRIx64 " format=%u tile=%u type=%u extent=%ux%u pitch=%u depth=%u"
+		    " addr=0x%012" PRIx64 " format=%u tile=%u type=%u extent=%ux%u pitch=%u depth=%u dst_sel=0x%03x"
 		    " base_level=%u last_level=%u max_mip=%u materialize=%s host_id=%" PRIu64 " host_type=%u host_format=%u"
 		    " host_layout=%u view=%d host_extent=%ux%u guest_size=%" PRIu64 " array_pitch=%u bound=%u"
 		    " sampler=%u sampler_slot=%d sampler_op=%u compare=%u force_unorm=%u allow_unorm=%u"
@@ -2073,7 +2073,8 @@ static void EmitDrawMaterialTrace(uint64_t submit_id, const DrawMaterialTraceSes
 		    static_cast<uint32_t>(texture.usage), static_cast<uint32_t>(texture.operation), static_cast<uint32_t>(texture.shape),
 		    texture.guest_addr, static_cast<uint32_t>(texture.guest.Format()), static_cast<uint32_t>(texture.guest.TileMode()),
 		    static_cast<uint32_t>(texture.guest.Type()), texture.guest_width, texture.guest_height, texture.guest_pitch,
-		    texture.guest_depth, static_cast<uint32_t>(texture.guest.BaseLevel()), static_cast<uint32_t>(texture.guest.LastLevel()),
+		    texture.guest_depth, texture.guest.DstSelXYZW(), static_cast<uint32_t>(texture.guest.BaseLevel()),
+		    static_cast<uint32_t>(texture.guest.LastLevel()),
 		    static_cast<uint32_t>(texture.guest.MaxMip()), texture.provenance,
 		    image != nullptr ? image->memory.unique_id : 0u, image != nullptr ? static_cast<uint32_t>(image->type) : 0u,
 		    image != nullptr ? static_cast<uint32_t>(image->format) : 0u,
