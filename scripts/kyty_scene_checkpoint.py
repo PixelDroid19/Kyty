@@ -109,10 +109,23 @@ class SceneCheckpoint:
         if "min_pad_taps" not in milestones:
             raise ValueError("checkpoint must declare its tap count (zero for holds)")
         for step in action["pad_sequence"]:
-            if step["tool"] not in ("pad_tap", "pad_down", "pad_up") or not isinstance(step["button"], str) or not step["button"]:
+            tool = step["tool"]
+            if tool in ("pad_tap", "pad_down", "pad_up"):
+                if not isinstance(step["button"], str) or not step["button"]:
+                    raise ValueError("invalid checkpoint action")
+                if tool == "pad_down":
+                    number(step["hold_s"], 0.001, 30)
+            elif tool == "pad_axis":
+                axis = step.get("axis")
+                value = step.get("value")
+                if axis not in ("left_x", "left_y", "right_x", "right_y"):
+                    raise ValueError("invalid checkpoint axis")
+                if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255:
+                    raise ValueError("invalid checkpoint axis value")
+                if "hold_s" in step:
+                    number(step["hold_s"], 0, 30)
+            else:
                 raise ValueError("invalid checkpoint action")
-            if step["tool"] == "pad_down":
-                number(step["hold_s"], 0.001, 30)
         if sum(step["tool"] == "pad_tap" for step in action["pad_sequence"]) != milestones["min_pad_taps"]:
             raise ValueError("checkpoint tap count does not match its sequence")
         self.capture_mod = capture_mod

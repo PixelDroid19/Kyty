@@ -351,7 +351,7 @@ def deliver_pad_sequence(
     clock = clock or time.monotonic
     events: list[dict[str, Any]] = []
     success = True
-    supported = frozenset(("pad_tap", "pad_down", "pad_up"))
+    supported = frozenset(("pad_tap", "pad_down", "pad_up", "pad_axis"))
     action_deadline = deadline
     if deadline is not None:
         initial_budget = max(0.0, deadline - clock())
@@ -370,14 +370,39 @@ def deliver_pad_sequence(
                 break
             tool = str(step.get("tool") or "pad_tap")
             button = str(step.get("button") or "cross")
+            axis = step.get("axis")
+            value = step.get("value")
             if tool not in supported:
                 events.append({"event": tool, "button": button, "ok": False})
                 success = False
                 break
 
-            hold_s = float(step.get("hold_s", 0.0))
-            if not 0.0 <= hold_s <= 30.0 or (hold_s and tool != "pad_down"):
-                events.append({"event": tool, "button": button, "ok": False, "error": "invalid_hold"})
+            if tool == "pad_axis" and (
+                not isinstance(axis, str)
+                or axis not in ("left_x", "left_y", "right_x", "right_y")
+                or isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 0 <= value <= 255
+            ):
+                events.append({"event": tool, "axis": axis if isinstance(axis, str) else "",
+                               "value": value if isinstance(value, int) and not isinstance(value, bool) else None,
+                               "ok": False, "error": "invalid_axis"})
+                success = False
+                break
+
+            hold_value = step.get("hold_s", 0.0)
+            if tool == "pad_axis" and (isinstance(hold_value, bool) or not isinstance(hold_value, (int, float))):
+                hold_s = -1.0
+            else:
+                try:
+                    hold_s = float(hold_value)
+                except (TypeError, ValueError, OverflowError):
+                    hold_s = -1.0
+            if not 0.0 <= hold_s <= 30.0 or (hold_s and tool not in ("pad_down", "pad_axis")):
+                if tool == "pad_axis":
+                    events.append({"event": tool, "axis": axis, "value": value, "ok": False, "error": "invalid_hold"})
+                else:
+                    events.append({"event": tool, "button": button, "ok": False, "error": "invalid_hold"})
                 success = False
                 break
             hold_before = None
@@ -393,15 +418,19 @@ def deliver_pad_sequence(
             if budget <= 0:
                 success = False
                 break
-            code, _obj = call(sock, tool, {"button": button}, timeout=budget)
-            events.append({"event": tool, "button": button, "ok": code == 0})
+            action_args = {"axis": axis, "value": value} if tool == "pad_axis" else {"button": button}
+            code, _obj = call(sock, tool, action_args, timeout=budget)
+            if tool == "pad_axis":
+                events.append({"event": tool, "axis": axis, "value": value, "ok": code == 0})
+            else:
+                events.append({"event": tool, "button": button, "ok": code == 0})
             if code != 0:
                 success = False
                 break
 
-            # A down/up pair without an observed hold can be cleared before a
-            # guest ever polls it. Keep the requested overlay active while
-            # observing guest input counters; the delivery gate checks them.
+            # A held input can be cleared before the guest polls it. Keep the
+            # requested input active while observing guest input counters; the
+            # delivery gate checks them.
             hold_until = clock() + hold_s
             hold_after = hold_before
             while clock() < hold_until:
@@ -422,8 +451,13 @@ def deliver_pad_sequence(
             if hold_before is not None and hold_after is not None:
                 consumed = (hold_after["guest_read_state_samples"] + hold_after["guest_read_samples"]
                             > hold_before["guest_read_state_samples"] + hold_before["guest_read_samples"])
-                events.append({"event": "hold_observed", "button": button, "hold_s": hold_s,
-                               "input_before": hold_before, "input_after": hold_after, "ok": success and consumed})
+                hold_event = {"event": "hold_observed", "hold_s": hold_s}
+                if tool == "pad_axis":
+                    hold_event.update(axis=axis, value=value)
+                else:
+                    hold_event["button"] = button
+                hold_event.update(input_before=hold_before, input_after=hold_after, ok=success and consumed)
+                events.append(hold_event)
                 success = success and consumed
             if action_deadline is not None and clock() > action_deadline:
                 success = False

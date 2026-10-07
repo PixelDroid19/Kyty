@@ -88,6 +88,59 @@ class CheckpointFixture:
         return SceneCheckpoint(self.path, capture).evaluate(self.record("before", 10), self.record(after, 30), action)
 
 
+class SceneCheckpointSchemaTests(unittest.TestCase):
+    def test_axis_actions_are_valid_and_only_pad_taps_count_toward_milestone(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = CheckpointFixture(Path(td))
+            fixture.contract["action"]["pad_sequence"] = [
+                {"tool": "pad_axis", "axis": "left_x", "value": 0, "hold_s": 0},
+                {"tool": "pad_axis", "axis": "left_y", "value": 128},
+                {"tool": "pad_axis", "axis": "right_x", "value": 200},
+                {"tool": "pad_axis", "axis": "right_y", "value": 255, "hold_s": 30},
+                {"tool": "pad_tap", "button": "cross"},
+            ]
+            fixture.contract["action"]["milestones"]["min_pad_taps"] = 1
+            fixture.write()
+
+            checkpoint = SceneCheckpoint(fixture.path, capture)
+
+        self.assertEqual(checkpoint.contract["action"]["milestones"]["min_pad_taps"], 1)
+
+    def test_axis_actions_reject_invalid_axis_value_and_hold_fields(self):
+        invalid_steps = (
+            {"tool": "pad_axis", "axis": "trigger_left", "value": 128},
+            {"tool": "pad_axis", "axis": "left_x", "value": -1},
+            {"tool": "pad_axis", "axis": "left_y", "value": 256},
+            {"tool": "pad_axis", "axis": "right_x", "value": True},
+            {"tool": "pad_axis", "axis": "right_x", "value": 128.0},
+            {"tool": "pad_axis", "axis": "right_y", "value": 128, "hold_s": -0.1},
+            {"tool": "pad_axis", "axis": "left_x", "value": 128, "hold_s": 30.1},
+            {"tool": "pad_axis", "axis": "left_x", "value": 128, "hold_s": "0.5"},
+            {"tool": "pad_shell", "button": "cross"},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            fixture = CheckpointFixture(Path(td))
+            for step in invalid_steps:
+                with self.subTest(step=step):
+                    fixture.contract["action"]["pad_sequence"] = [step]
+                    fixture.contract["action"]["milestones"]["min_pad_taps"] = 0
+                    fixture.write()
+                    with self.assertRaises(ValueError):
+                        SceneCheckpoint(fixture.path, capture)
+
+    def test_axis_only_sequence_cannot_claim_a_tap(self):
+        with tempfile.TemporaryDirectory() as td:
+            fixture = CheckpointFixture(Path(td))
+            fixture.contract["action"]["pad_sequence"] = [
+                {"tool": "pad_axis", "axis": "left_y", "value": 200},
+            ]
+            fixture.contract["action"]["milestones"]["min_pad_taps"] = 1
+            fixture.write()
+
+            with self.assertRaisesRegex(ValueError, "tap count"):
+                SceneCheckpoint(fixture.path, capture)
+
+
 class StrictEnvTests(unittest.TestCase):
     def test_playable_environment_strips_forbidden(self) -> None:
         base = {
@@ -663,6 +716,91 @@ class PadSequenceTests(unittest.TestCase):
         self.assertFalse(reg.advance_post_input_wait(state, True, "interactive", 1, 4.0, 10, 2.0))
         self.assertTrue(reg.advance_post_input_wait(state, True, "loading", 11, 6.0, 10, 2.0))
 
+
+    def test_axis_sequence_sends_exact_json_and_requires_a_consumed_hold(self):
+        now = [0.0]
+        reads = [0]
+        axis_started = [False]
+        calls = []
+
+        def call(_sock, tool, args, timeout):
+            self.assertGreater(timeout, 0)
+            calls.append((tool, args))
+            if tool == "status":
+                if axis_started[0]:
+                    reads[0] += 1
+                return 0, {"result": {"pad": {"delivered_taps": 0, "guest_read_samples": reads[0]}}}
+            if tool == "pad_axis":
+                axis_started[0] = True
+            return 0, {"ok": True}
+
+        ok, events = reg.deliver_pad_sequence(
+            Path("test.sock"), [{"tool": "pad_axis", "axis": "left_y", "value": 210, "hold_s": 0.1}],
+            call=call, clock=lambda: now[0],
+            pause=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        )
+
+        self.assertTrue(ok)
+        self.assertIn(("pad_axis", {"axis": "left_y", "value": 210}), calls)
+        self.assertEqual([event["event"] for event in events], ["pad_axis", "hold_observed", "pad_clear"])
+        self.assertTrue(events[1]["ok"])
+        self.assertFalse(any(tool == "pad_tap" for tool, _args in calls))
+
+    def test_invalid_axis_is_not_sent_and_still_clears_input(self):
+        calls = []
+
+        def call(_sock, tool, args, timeout):
+            del args, timeout
+            calls.append(tool)
+            return 0, {"ok": True}
+
+        ok, events = reg.deliver_pad_sequence(
+            Path("test.sock"), [{"tool": "pad_axis", "axis": "left_x", "value": 256}], call=call,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(calls, ["pad_clear"])
+        self.assertEqual(events[0]["error"], "invalid_axis")
+        self.assertEqual(events[-1]["event"], "pad_clear")
+
+    def test_axis_action_error_still_clears_input(self):
+        calls = []
+
+        def call(_sock, tool, args, timeout):
+            del args, timeout
+            calls.append(tool)
+            return (1 if tool == "pad_axis" else 0), {"ok": tool != "pad_axis"}
+
+        ok, events = reg.deliver_pad_sequence(
+            Path("test.sock"), [{"tool": "pad_axis", "axis": "right_x", "value": 255}], call=call,
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(calls, ["pad_axis", "pad_clear"])
+        self.assertEqual(events[-1]["event"], "pad_clear")
+        self.assertTrue(events[-1]["ok"])
+
+    def test_axis_hold_deadline_still_clears_input(self):
+        now = [0.0]
+        calls = []
+
+        def call(_sock, tool, args, timeout):
+            del args
+            calls.append((tool, timeout))
+            if tool == "status":
+                return 0, {"result": {"pad": {"guest_read_samples": 0}}}
+            return 0, {"ok": True}
+
+        ok, _events = reg.deliver_pad_sequence(
+            Path("test.sock"), [{"tool": "pad_axis", "axis": "right_y", "value": 100, "hold_s": 5}],
+            call=call, deadline=1.0, clock=lambda: now[0],
+            pause=lambda seconds: now.__setitem__(0, now[0] + seconds),
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("pad_axis", [tool for tool, _timeout in calls])
+        self.assertEqual([tool for tool, _timeout in calls][-1], "pad_clear")
+        self.assertLessEqual(calls[-1][1], 1.0)
 
 class CompareWiringTests(unittest.TestCase):
     def test_playable_compare_preserves_raw_checks(self) -> None:
