@@ -4006,10 +4006,10 @@ TEST(EmulatorGraphicsPackets, Gen5ScalarImageSampleLUsesExplicitLodAndNsaCoordin
 	ShaderCalcBindingIndices(&input.bind);
 
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
-	EXPECT_NE(source.FindIndex("%sample_l_scalar_lod_0 = OpLoad %float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("%sample_l_lod_0 = OpLoad %float"), Core::STRING8_INVALID_INDEX);
 	EXPECT_NE(source.FindIndex("OpImageSampleExplicitLod %v4float"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("Lod %sample_l_scalar_lod_0"), Core::STRING8_INVALID_INDEX);
-	EXPECT_NE(source.FindIndex("OpCompositeExtract %float %sample_l_scalar_value_0 0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("Lod %sample_l_lod_0"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpCompositeExtract %float %sample_l_value_0 0"), Core::STRING8_INVALID_INDEX);
 	EXPECT_EQ(source.FindIndex("OpImageSampleImplicitLod"), Core::STRING8_INVALID_INDEX);
 }
 

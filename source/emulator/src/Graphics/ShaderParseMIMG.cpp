@@ -328,7 +328,17 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 						}
 						inst.dst.size = 4;
 						break;
-				default: break;
+				default:
+					// Other enabled-component sets pack into consecutive VGPRs. The
+					// address is the DIM's coordinates (2D, 3D, cube, 2D array) and the LOD.
+					if (dmask != 0u && (dim == 1u || dim == 2u || dim == 3u || dim == 5u))
+					{
+						inst.src[0].size = (dim == 1u ? 3 : 4);
+						inst.format      = dim == 1u ? ShaderInstructionFormat::VdataVaddr3StSsMimgDmask
+						                             : ShaderInstructionFormat::VdataVaddr4StSsMimgDmask;
+						inst.dst.size    = MimgDmaskComponents(dmask);
+					}
+					break;
 			}
 			break;
 		case 0x25:
@@ -557,7 +567,8 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 	if (inst.format == ShaderInstructionFormat::Unknown)
 	{
 		KYTY_LOG_DEBUG("%s", dst->DbgDump().c_str());
-		EXIT("unknown mimg format for opcode: 0x%02" PRIx32 " at addr 0x%08" PRIx32 ", dmask: 0x%" PRIx32 "\n", opcode, pc, dmask);
+		EXIT("unknown mimg format for opcode: 0x%02" PRIx32 " at addr 0x%08" PRIx32 ", dmask: 0x%" PRIx32 ", dim: %" PRIu32 "\n", opcode,
+		     pc, dmask, dim);
 	}
 
 	dst->GetInstructions().Add(inst);
