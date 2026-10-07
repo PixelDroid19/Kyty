@@ -1127,6 +1127,8 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	bool        create_from_objects    = false;
 	int         render_alias_parent_id = -1;
 	Vector<StorageTextureRenderAliasCopy> render_alias_copies;
+	// Render targets whose blocks seed a new storage view, oldest write first.
+	std::vector<std::pair<uint64_t, int>> render_alias_sources;
 	StorageTextureRawRenderAliasPlan raw_render_alias_plan {};
 	bool raw_render_alias = false;
 	std::vector<int> mixed_raw_render_source_ids;
@@ -1281,11 +1283,15 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			} else if (GpuMemoryAllowsStorageTextureOverSampledTexture(o.object.type, obj.relation, info.type))
 			{
 				overlap = true;
-			} else if (o.object.type == GpuMemoryObjectType::StorageTexture && info.type == GpuMemoryObjectType::StorageTexture &&
-			           obj.relation == OverlapType::Equals && StorageTextureRedescribesRange(o.params, info.params))
+			} else if (info.type == GpuMemoryObjectType::StorageTexture &&
+			           ((o.object.type == GpuMemoryObjectType::StorageTexture &&
+			             StorageTextureRedescribesRange(o.params, info.params, obj.relation == OverlapType::Equals)) ||
+			            (o.object.type == GpuMemoryObjectType::RenderTexture &&
+			             StorageTextureRedescribesRenderTarget(o.params, info.params, obj.relation == OverlapType::Equals))))
 			{
-				// A recycled allocation (captured: a 1x1 R32F view, then a 32x32 RGBA16F
-				// view of one 64 KiB block). Link both; the new view seeds from guest bytes.
+				// A recycled allocation (captured: a 1x1 R32F view of one 64 KiB block after
+				// a 32x32 RGBA16F view and an 8x8 RGBA16F target there, and inside a
+				// 256x256 RGBA16F view). Link both; the new view seeds from guest bytes.
 				overlap = true;
 			} else if (GpuMemoryAllowsTextureStorageAlias(o.object.type, obj.relation, info.type))
 			{
@@ -1649,48 +1655,44 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				}
 			}
 
-			// A storage view over a GPU-written render target (a compute pass on the
-			// rendered image) seeds from its pixels. Sampled views of the same range
-			// stay linked unless they uploaded guest bytes newer than its last write.
+			// A storage view over GPU-written render targets (a compute pass on a
+			// rendered image, or a recycled allocation over several targets) seeds
+			// from their blocks in write order. Sampled views of the same range stay
+			// linked unless they uploaded guest bytes newer than the targets' writes.
 			bool multi_render_alias = !multi_raw_render_alias && info.type == GpuMemoryObjectType::StorageTexture &&
 			                          buffer != nullptr && vaddr_num == 1 &&
 			                          info.params[StorageTextureObject::PARAM_SKIP_SEED] == 0u;
-			if (multi_render_alias)
+			uint64_t oldest_render_write = UINT64_MAX;
+			for (const auto& candidate: others)
 			{
-				int render_id = -1;
-				for (const auto& candidate: others)
+				if (!multi_render_alias)
 				{
-					const auto& parent = heap.objects[candidate.object_id].info;
-					if (parent.object.type == GpuMemoryObjectType::RenderTexture && render_id < 0)
-					{
-						render_id = candidate.object_id;
-					} else if (!GpuMemoryAllowsTextureStorageAlias(parent.object.type, candidate.relation, info.type))
-					{
-						multi_render_alias = false;
-						break;
-					}
+					break;
 				}
-				if (multi_render_alias && render_id >= 0)
+				const auto& source = heap.objects[candidate.object_id];
+				if (source.info.object.type != GpuMemoryObjectType::RenderTexture)
 				{
-					const auto& source = heap.objects[render_id];
-					multi_render_alias = source.info.in_use && source.info.object.obj != nullptr && source.block.vaddr_num == 1 &&
-					                     source.info.gpu_update_time > source.info.cpu_update_time &&
-					                     StorageTexturePlanRenderAlias(source.info.params, source.block.vaddr[0], source.block.size[0],
-					                                                   info.params, vaddr[0], size[0], &render_alias_copies);
-					for (const auto& candidate: others)
-					{
-						const auto& parent = heap.objects[candidate.object_id].info;
-						multi_render_alias = multi_render_alias && !(parent.content_origin == GpuMemoryContentOrigin::CpuUpload &&
-						                                             parent.cpu_update_time > source.info.gpu_update_time);
-					}
-					if (multi_render_alias)
-					{
-						render_alias_parent_id = render_id;
-					}
-				} else
-				{
-					multi_render_alias = false;
+					multi_render_alias = GpuMemoryAllowsTextureStorageAlias(source.info.object.type, candidate.relation, info.type);
+					continue;
 				}
+				Vector<StorageTextureRenderAliasCopy> plan;
+				multi_render_alias = source.info.in_use && source.info.object.obj != nullptr && source.block.vaddr_num == 1 &&
+				                     source.info.gpu_update_time > source.info.cpu_update_time &&
+				                     StorageTexturePlanRenderAlias(source.info.params, source.block.vaddr[0], source.block.size[0],
+				                                                   info.params, vaddr[0], size[0], &plan);
+				render_alias_sources.emplace_back(source.info.gpu_update_time, candidate.object_id);
+				oldest_render_write = std::min(oldest_render_write, source.info.gpu_update_time);
+			}
+			for (const auto& candidate: others)
+			{
+				const auto& parent = heap.objects[candidate.object_id].info;
+				multi_render_alias = multi_render_alias && !(parent.content_origin == GpuMemoryContentOrigin::CpuUpload &&
+				                                             parent.cpu_update_time > oldest_render_write);
+			}
+			multi_render_alias = multi_render_alias && !render_alias_sources.empty();
+			if (!multi_render_alias)
+			{
+				render_alias_sources.clear();
 			}
 
 			// A linear image may reinterpret bytes written by several tiled render
@@ -2351,6 +2353,17 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - create_start).count();
 		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::CreateFunc, static_cast<uint64_t>(create_ns));
 	}
+	std::sort(render_alias_sources.begin(), render_alias_sources.end());
+	for (const auto& source: render_alias_sources)
+	{
+		auto&                                 parent = heap.objects[source.second];
+		Vector<StorageTextureRenderAliasCopy> copies;
+		EXIT_IF(!StorageTexturePlanRenderAlias(parent.info.params, parent.block.vaddr[0], parent.block.size[0], o.params, vaddr[0],
+		                                       size[0], &copies));
+		RecordUse(&parent.info, buffer);
+		StorageTextureCopyRenderAlias(buffer, static_cast<RenderTextureVulkanImage*>(parent.info.object.obj),
+		                              static_cast<StorageTextureVulkanImage*>(o.object.obj), copies);
+	}
 	if (render_alias_parent_id >= 0)
 	{
 		auto& parent = heap.objects[render_alias_parent_id].info;
@@ -2408,9 +2421,9 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 	o.write_back_func = info.GetWriteBackFunc();
 	o.delete_func     = info.GetDeleteFunc();
 	o.update_func     = info.GetUpdateFunc();
-	o.content_origin = render_alias_parent_id >= 0 || !mixed_raw_render_source_ids.empty() ? GpuMemoryContentOrigin::GpuAliasMaterialization
-	                                                : GpuMemoryCreationContentOrigin(info.type, create_from_objects,
-	                                                                                 create_from_objects_fell_back_to_cpu);
+	o.content_origin = render_alias_parent_id >= 0 || !render_alias_sources.empty() || !mixed_raw_render_source_ids.empty()
+	                       ? GpuMemoryContentOrigin::GpuAliasMaterialization
+	                       : GpuMemoryCreationContentOrigin(info.type, create_from_objects, create_from_objects_fell_back_to_cpu);
 	if (o.content_origin == GpuMemoryContentOrigin::CpuUpload && info.type == GpuMemoryObjectType::Texture &&
 	    info.params[TextureObject::PARAM_SKIP_GUEST_UPLOAD] != 0u)
 	{
