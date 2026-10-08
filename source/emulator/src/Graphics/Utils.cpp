@@ -13,6 +13,7 @@
 #include "Emulator/Profiler.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -546,21 +547,23 @@ void VulkanCreateBuffer(GraphicContext* gctx, uint64_t size, VulkanBuffer* buffe
 	buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	buffer->descriptor_range = size;
 
-	vkCreateBuffer(gctx->device, &buffer_info, nullptr, &buffer->buffer);
-	if (buffer->buffer == nullptr)
+	VkBuffer handle = nullptr;
+	const auto create_result = vkCreateBuffer(gctx->device, &buffer_info, nullptr, &handle);
+	if (create_result != VK_SUCCESS)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: buffer->buffer == nullptr condition ignored (continuing)\n");
+		EXIT("vkCreateBuffer failed: size = %" PRIu64 ", VkResult=%d\n", size, static_cast<int>(create_result));
 	}
+	buffer->buffer = handle;
 
 	vkGetBufferMemoryRequirements(gctx->device, buffer->buffer, &buffer->memory.requirements);
 
-	bool allocated = VulkanAllocate(gctx, &buffer->memory);
-	if (!allocated)
+	if (!VulkanAllocate(gctx, &buffer->memory))
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !allocated condition ignored (continuing)\n");
+		vkDestroyBuffer(gctx->device, buffer->buffer, nullptr);
+		buffer->buffer = nullptr;
+		EXIT("VulkanAllocate failed for buffer: size = %" PRIu64 "\n", size);
 	}
 
-	// vkBindBufferMemory(gctx->device, buffer->buffer, buffer->memory.memory, buffer->memory.offset);
 	VulkanBindBufferMemory(gctx, buffer, &buffer->memory);
 }
 

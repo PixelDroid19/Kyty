@@ -290,10 +290,6 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 	EXIT_IF(ctx == nullptr);
 	EXIT_IF(mem == nullptr);
 	EXIT_IF(mem->memory != nullptr);
-	if (mem->requirements.size == 0)
-	{
-		mem->requirements.size = 4096;
-	}
 
 	VkPhysicalDeviceMemoryProperties memory_properties {};
 	vkGetPhysicalDeviceMemoryProperties(ctx->physical_device, &memory_properties);
@@ -308,12 +304,22 @@ bool VulkanAllocate(GraphicContext* ctx, VulkanMemory* mem, VulkanMemoryResource
 		}
 	}
 
+	// No memory type matches the requested flags: fail before any state or driver call changes.
+	if (index == memory_properties.memoryTypeCount)
+	{
+		return false;
+	}
+
+	if (mem->requirements.size == 0)
+	{
+		mem->requirements.size = 4096;
+	}
+
 	mem->type       = index;
 	mem->offset     = 0;
 	mem->pool_block = nullptr;
 
-	if (index < memory_properties.memoryTypeCount &&
-	    PoolAllocate(ctx, mem, index, memory_properties.memoryTypes[index].propertyFlags, resource))
+	if (PoolAllocate(ctx, mem, index, memory_properties.memoryTypes[index].propertyFlags, resource))
 	{
 		mem->unique_id = ++seq;
 		g_mem_stat->allocated[index] += mem->requirements.size;
@@ -435,9 +441,15 @@ void VulkanBindBufferMemory(GraphicContext* ctx, VulkanBuffer* buffer, VulkanMem
 	EXIT_IF(buffer == nullptr);
 
 	const auto bind_start = std::chrono::steady_clock::now();
-	vkBindBufferMemory(ctx->device, buffer->buffer, mem->memory, mem->offset);
+	const auto result     = vkBindBufferMemory(ctx->device, buffer->buffer, mem->memory, mem->offset);
 	const auto bind_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - bind_start).count();
 	DebugStatsGpuMemoryCreateTrace::AddCurrentPhase(DebugStatsGpuMemoryCreatePhase::VulkanBind, static_cast<uint64_t>(bind_ns));
+
+	if (result != VK_SUCCESS)
+	{
+		EXIT("vkBindBufferMemory failed: size = %" PRIu64 ", offset = %" PRIu64 ", VkResult=%d\n", mem->requirements.size, mem->offset,
+		     static_cast<int>(result));
+	}
 }
 
 // GDS sources: texture-type objects keep device content in an image layout, so their
