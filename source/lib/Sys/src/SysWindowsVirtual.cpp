@@ -1321,6 +1321,29 @@ static bool guest_mapping_snapshot_matches_locked(const VirtualMemory::GuestMapp
 	return true;
 }
 
+bool sys_virtual_protect_guest_if_mapping_matches(uint64_t address, uint64_t size, VirtualMemory::Mode mode,
+                                                  uint64_t mapping_identity, VirtualMemory::Mode* old_mode)
+{
+	const uint64_t page_size   = sys_virtual_get_page_size();
+	const uint64_t pointer_max = static_cast<uint64_t>(std::numeric_limits<uintptr_t>::max());
+	if (mapping_identity == 0 || address == 0 || size == 0 || page_size == 0 ||
+	    address > pointer_max || size > pointer_max - address || address % page_size != 0 || size % page_size != 0 ||
+	    static_cast<uint32_t>(mode) > static_cast<uint32_t>(VirtualMemory::Mode::ExecuteReadWrite))
+	{
+		return false;
+	}
+
+	VirtualMemory::GuestMappingSnapshot snapshot {};
+	snapshot.address       = address;
+	snapshot.size          = size;
+	snapshot.segment_count = 1;
+	snapshot.segments[0]   = {address, size, mapping_identity};
+
+	std::scoped_lock transaction(g_protection_transaction_mutex);
+	const bool matches = guest_mapping_snapshot_matches_locked(snapshot);
+	return matches && protect_range_locked(address, size, mode, old_mode, true);
+}
+
 // Metadata only: ownership and identity, never protection. Write access is
 // checked by the conditional copy that uses the snapshot.
 bool sys_virtual_capture_guest_mapping_snapshot(uint64_t address, uint64_t size, VirtualMemory::GuestMappingSnapshot* snapshot)

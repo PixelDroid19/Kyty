@@ -508,6 +508,78 @@ static void track_alloc(uintptr_t ret_addr, uint64_t size, int protect)
 	pthread_mutex_unlock(&g_virtual_mutex);
 }
 
+#ifndef KYTY_FIXED_NOREPLACE
+static bool reserve_mapping_span(uintptr_t address, uint64_t size)
+{
+	if (address == 0 || size == 0 || size > std::numeric_limits<size_t>::max() || size > UINTPTR_MAX ||
+	    address > UINTPTR_MAX - static_cast<uintptr_t>(size))
+	{
+		return false;
+	}
+
+#ifdef __APPLE__
+	mach_vm_address_t reservation = address;
+	const kern_return_t result =
+	    mach_vm_allocate(mach_task_self(), &reservation, static_cast<mach_vm_size_t>(size), VM_FLAGS_FIXED);
+	if (result != KERN_SUCCESS)
+	{
+		return false;
+	}
+	if (reservation != address)
+	{
+		(void)mach_vm_deallocate(mach_task_self(), reservation, static_cast<mach_vm_size_t>(size));
+		return false;
+	}
+	return true;
+#else
+	// A hint may be relocated, so accept it only when the entire requested span
+	// was reserved at its exact address. This is the no-replace operation.
+	void* reservation = mmap(reinterpret_cast<void*>(address), static_cast<size_t>(size), PROT_NONE, MAP_PRIVATE | MAP_ANON, -1,
+	                         0);
+	if (reservation == MAP_FAILED)
+	{
+		return false;
+	}
+	if (reinterpret_cast<uintptr_t>(reservation) != address)
+	{
+		(void)munmap(reservation, static_cast<size_t>(size));
+		return false;
+	}
+	return true;
+#endif
+}
+
+static void release_mapping_reservation(uintptr_t address, uint64_t size)
+{
+#ifdef __APPLE__
+	(void)mach_vm_deallocate(mach_task_self(), address, static_cast<mach_vm_size_t>(size));
+#else
+	(void)munmap(reinterpret_cast<void*>(address), static_cast<size_t>(size));
+#endif
+}
+
+static void* map_reserved_span(uintptr_t address, uint64_t size, int protect, int flags, int descriptor, off_t offset)
+{
+	if (!reserve_mapping_span(address, size))
+	{
+		return MAP_FAILED;
+	}
+	// MAP_FIXED replaces only the reservation acquired by this operation.
+	// NOLINTNEXTLINE
+	void* ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED | flags, descriptor, offset);
+	if (ptr != MAP_FAILED && reinterpret_cast<uintptr_t>(ptr) == address)
+	{
+		return ptr;
+	}
+	if (ptr != MAP_FAILED)
+	{
+		munmap(ptr, size);
+	}
+	release_mapping_reservation(address, size);
+	return MAP_FAILED;
+}
+#endif // KYTY_FIXED_NOREPLACE
+
 static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, uint64_t alignment)
 {
 	if (alignment == 0)
@@ -565,13 +637,7 @@ static void* mmap_in_guest_window(uintptr_t prefer, uint64_t size, int protect, 
 		// NOLINTNEXTLINE
 		void* ptr = mmap(reinterpret_cast<void*>(a), size, protect, MAP_FIXED_NOREPLACE | flags_base, -1, 0);
 #else
-		// NOLINTNEXTLINE
-		void* ptr = mmap(reinterpret_cast<void*>(a), size, protect, MAP_FIXED | flags_base, -1, 0);
-		if (ptr != MAP_FAILED && reinterpret_cast<uintptr_t>(ptr) != a)
-		{
-			munmap(ptr, size);
-			ptr = MAP_FAILED;
-		}
+		void* ptr = map_reserved_span(a, size, protect, flags_base, -1, 0);
 #endif
 		if (ptr != MAP_FAILED)
 		{
@@ -796,57 +862,6 @@ static MappedRangeState get_mapped_range_state(void* ptr, size_t length, uintptr
 	return MappedRangeState::Available;
 }
 
-static bool reserve_shared_mapping(uintptr_t address, uint64_t size)
-{
-	mach_vm_address_t reservation = address;
-	return mach_vm_allocate(mach_task_self(), &reservation, size, VM_FLAGS_FIXED) == KERN_SUCCESS && reservation == address;
-}
-
-static void release_shared_mapping_reservation(uintptr_t address, uint64_t size)
-{
-	(void)mach_vm_deallocate(mach_task_self(), address, size);
-}
-
-[[maybe_unused]] static bool is_mmaped(void* ptr, size_t length)
-{
-	uintptr_t occupied_end = 0;
-	return get_mapped_range_state(ptr, length, &occupied_end) != MappedRangeState::Available;
-}
-
-#else
-
-[[maybe_unused]] static bool is_mmaped(void* ptr, size_t length)
-{
-	FILE* file = fopen("/proc/self/maps", "r");
-	char  line[1024];
-	bool  ret  = false;
-	auto  addr = reinterpret_cast<uintptr_t>(ptr);
-
-	[[maybe_unused]] int result = 0;
-
-	while (feof(file) == 0)
-	{
-		if (fgets(line, 1024, file) == nullptr)
-		{
-			break;
-		}
-		uint64_t start = 0;
-		uint64_t end   = 0;
-		// NOLINTNEXTLINE(cert-err34-c)
-		if (sscanf(line, "%" SCNx64 "-%" SCNx64, &start, &end) != 2)
-		{
-			continue;
-		}
-		if (addr >= start && addr + length <= end)
-		{
-			ret = true;
-			break;
-		}
-	}
-	result = fclose(file);
-	return ret;
-}
-
 #endif
 
 void* sys_virtual_create_shared_backing(uint64_t size)
@@ -1038,53 +1053,30 @@ static void* mmap_shared_in_guest_window(const SharedBacking* backing, uintptr_t
 		ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, backing->fd,
 		           static_cast<off_t>(backing_offset));
 #else
+		ptr = map_reserved_span(address, size, protect, MAP_SHARED, backing->fd, static_cast<off_t>(backing_offset));
 #ifdef __APPLE__
-		if (!reserve_shared_mapping(address, size))
+		if (ptr == MAP_FAILED)
 		{
-		uintptr_t occupied_end = 0;
-		const auto range_state = get_mapped_range_state(reinterpret_cast<void*>(address), size, &occupied_end);
-		if (range_state == MappedRangeState::QueryFailed)
-		{
-			return MAP_FAILED;
-		}
-		if (range_state == MappedRangeState::Occupied)
-		{
-			uintptr_t next_address = 0;
-			if (!try_align_up(occupied_end, alignment, &next_address) || next_address <= address || next_address > last_address)
+			uintptr_t occupied_end = 0;
+			const auto range_state =
+			    get_mapped_range_state(reinterpret_cast<void*>(address), static_cast<size_t>(size), &occupied_end);
+			if (range_state == MappedRangeState::QueryFailed)
 			{
-				break;
+				return MAP_FAILED;
 			}
-			address = next_address;
-			continue;
-		}
-			if (alignment > last_address - address)
+			if (range_state == MappedRangeState::Occupied)
 			{
-				break;
+				uintptr_t next_address = 0;
+				if (!try_align_up(occupied_end, alignment, &next_address) || next_address <= address || next_address > last_address)
+				{
+					break;
+				}
+				address = next_address;
+				continue;
 			}
-			address += alignment;
-			continue;
 		}
-		// NOLINTNEXTLINE
-		ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED | MAP_SHARED, backing->fd,
-		           static_cast<off_t>(backing_offset));
-		if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != address)
-		{
-			if (ptr != MAP_FAILED)
-			{
-				munmap(ptr, size);
-			}
-			release_shared_mapping_reservation(address, size);
-			ptr = MAP_FAILED;
-		}
-#else
-		if (!is_mmaped(reinterpret_cast<void*>(address), size))
-		{
-			// NOLINTNEXTLINE
-			ptr = mmap(reinterpret_cast<void*>(address), size, protect, MAP_FIXED | MAP_SHARED, backing->fd,
-			           static_cast<off_t>(backing_offset));
-		}
-#endif
-#endif
+#endif // __APPLE__
+#endif // KYTY_FIXED_NOREPLACE
 		if (ptr != MAP_FAILED)
 		{
 			if (reinterpret_cast<uintptr_t>(ptr) == address)
@@ -1164,33 +1156,7 @@ bool sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t back
 	ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED_NOREPLACE | MAP_SHARED, shared->fd,
 	           static_cast<off_t>(backing_offset));
 #else
-#ifdef __APPLE__
-	// macOS has no MAP_FIXED_NOREPLACE. Reserve the exact interval first so the
-	// MAP_FIXED call replaces only a reservation created by this process, never
-	// an unrelated host mapping (including a Rosetta reservation).
-	if (reserve_shared_mapping(addr, size))
-	{
-		// NOLINTNEXTLINE
-		ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_SHARED, shared->fd,
-		           static_cast<off_t>(backing_offset));
-		if (ptr == MAP_FAILED || reinterpret_cast<uintptr_t>(ptr) != addr)
-		{
-			if (ptr != MAP_FAILED)
-			{
-				munmap(ptr, size);
-			}
-			release_shared_mapping_reservation(addr, size);
-			ptr = MAP_FAILED;
-		}
-	}
-#else
-	if (!is_mmaped(reinterpret_cast<void*>(addr), size))
-	{
-		// NOLINTNEXTLINE
-		ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_SHARED, shared->fd,
-		           static_cast<off_t>(backing_offset));
-	}
-#endif
+	ptr = map_reserved_span(addr, size, protect, MAP_SHARED, shared->fd, static_cast<off_t>(backing_offset));
 #endif
 
 	if (ptr == MAP_FAILED)
@@ -1335,17 +1301,8 @@ bool sys_virtual_alloc_fixed(uint64_t address, uint64_t size, VirtualMemory::Mod
 #ifdef KYTY_FIXED_NOREPLACE
 	// NOLINTNEXTLINE
 	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED_NOREPLACE | MAP_PRIVATE | MAP_ANON, -1, 0);
-#elif defined(__APPLE__)
-	// macOS ignores a plain address hint (only MAP_FIXED honours a specific
-	// address) and has no MAP_FIXED_NOREPLACE. The PS5 guest address space is
-	// managed by Kyty, so the requested address is free on the host; MAP_FIXED
-	// there is safe. The return value is validated against `addr` below.
-	void* ptr = mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
 #else
-	// NOLINTNEXTLINE
-	void* ptr = (is_mmaped(reinterpret_cast<void*>(addr), size)
-	                 ? MAP_FAILED
-	                 : mmap(reinterpret_cast<void*>(addr), size, protect, MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0));
+	void* ptr = map_reserved_span(addr, size, protect, MAP_PRIVATE | MAP_ANON, -1, 0);
 #endif
 
 	auto ret_addr = reinterpret_cast<uintptr_t>(ptr);
@@ -1871,6 +1828,30 @@ static bool guest_mapping_snapshot_matches_locked(const VirtualMemory::GuestMapp
 		}
 	}
 	return true;
+}
+
+bool sys_virtual_protect_guest_if_mapping_matches(uint64_t address, uint64_t size, VirtualMemory::Mode mode,
+                                                  uint64_t mapping_identity, VirtualMemory::Mode* old_mode)
+{
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (mapping_identity == 0 || address == 0 || size == 0 || page_size == 0 || address > UINTPTR_MAX ||
+	    size > UINTPTR_MAX - address || address % page_size != 0 || size % page_size != 0 ||
+	    static_cast<uint32_t>(mode) > static_cast<uint32_t>(VirtualMemory::Mode::ExecuteReadWrite))
+	{
+		return false;
+	}
+
+	VirtualMemory::GuestMappingSnapshot snapshot {};
+	snapshot.address       = address;
+	snapshot.size          = size;
+	snapshot.segment_count = 1;
+	snapshot.segments[0]   = {address, size, mapping_identity};
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool matches = guest_mapping_snapshot_matches_locked(snapshot);
+	const bool result  = matches && protect_range_locked(address, size, mode, old_mode, true);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return result;
 }
 
 // Metadata only: ownership and identity, never protection. Write access is

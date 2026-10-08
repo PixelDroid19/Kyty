@@ -330,6 +330,76 @@ TEST(CoreVirtualMemory, GuestOwnershipTracksSplitReservationAndCrossPageCopy)
 #endif
 }
 
+// AllocFixed must refuse a range already occupied by a guest mapping without
+// replacing its bytes, rights, or mapping identity.
+TEST(CoreVirtualMemory, AllocFixedRefusesFullGuestMappingCollision)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t size    = page_size * 2u;
+	const uint64_t address = Alloc(0, size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+
+	std::array<uint8_t, 64> expected {};
+	for (size_t i = 0; i < expected.size(); ++i)
+	{
+		expected[i] = static_cast<uint8_t>(0x31u + i);
+	}
+	ASSERT_TRUE(CopyToGuest(address, expected.data(), expected.size()));
+	GuestMappingSnapshot before;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(address, 1u, &before));
+	const uint64_t identity = before.segments[0].identity;
+	ASSERT_NE(identity, 0u);
+
+	const bool replaced = AllocFixed(address, size, Mode::Read);
+	EXPECT_FALSE(replaced);
+	EXPECT_TRUE(IsRangeGuestOwned(address, size));
+	EXPECT_TRUE(IsRangeWritable(address, size));
+	GuestMappingSnapshot after;
+	EXPECT_TRUE(CaptureGuestMappingSnapshot(address, 1u, &after));
+	EXPECT_EQ(after.segments[0].identity, identity);
+	std::array<uint8_t, 64> actual {};
+	EXPECT_TRUE(CopyFromGuest(actual.data(), address, actual.size()));
+	EXPECT_EQ(actual, expected);
+	EXPECT_TRUE(Free(address));
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+// The live head and released tail are not contained by one /proc mapping row.
+// A fixed allocation spanning both must still refuse the collision atomically.
+TEST(CoreVirtualMemory, AllocFixedRefusesPartialGuestMappingCollision)
+{
+	const uint64_t page_size = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t size    = page_size * 2u;
+	const uint64_t address = Alloc(0, size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+
+	std::array<uint8_t, 64> expected {};
+	expected.fill(0xa7u);
+	ASSERT_TRUE(CopyToGuest(address, expected.data(), expected.size()));
+	GuestMappingSnapshot before;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(address, 1u, &before));
+	const uint64_t identity = before.segments[0].identity;
+	ASSERT_NE(identity, 0u);
+	ASSERT_TRUE(FreeRange(address + page_size, page_size));
+	ASSERT_FALSE(IsRangeGuestOwned(address + page_size, page_size));
+
+	const bool replaced = AllocFixed(address, size, Mode::Read);
+	EXPECT_FALSE(replaced);
+	EXPECT_TRUE(IsRangeGuestOwned(address, page_size));
+	EXPECT_FALSE(IsRangeGuestOwned(address + page_size, page_size));
+	EXPECT_TRUE(IsRangeWritable(address, page_size));
+	GuestMappingSnapshot after;
+	EXPECT_TRUE(CaptureGuestMappingSnapshot(address, 1u, &after));
+	EXPECT_EQ(after.segments[0].identity, identity);
+	std::array<uint8_t, 64> actual {};
+	EXPECT_TRUE(CopyFromGuest(actual.data(), address, actual.size()));
+	EXPECT_EQ(actual, expected);
+	EXPECT_TRUE(Free(address));
+}
+#endif
+
 TEST(CoreVirtualMemory, ExternalMmapProtectDoesNotAuthorizeGuestAccess)
 {
 #if KYTY_PLATFORM != KYTY_PLATFORM_LINUX || defined(__APPLE__)
@@ -625,6 +695,148 @@ TEST(CoreVirtualMemory, GuestMappingSnapshotSurvivesProtectionLeaseAndSplit)
 	ASSERT_TRUE(FreeRange(address + page_size * 2u, page_size));
 	EXPECT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
 #endif
+	EXPECT_TRUE(Free(address));
+}
+
+// Identity-qualified guest protection shares the mapping identity across
+// protection transitions, a partial split, and write-lease handling. Its
+// protection range is larger than the deferred-copy snapshot byte budget.
+TEST(CoreVirtualMemory, ProtectGuestIfMappingMatchesAcceptsLargeRangeAcrossProtectionLeaseAndSplit)
+{
+	const uint64_t page_size  = GetPageSize();
+	ASSERT_NE(page_size, 0u);
+	const uint64_t range_size = (GuestMappingSnapshot::kMaxBytes / page_size + 1u) * page_size;
+	const uint64_t address    = Alloc(0, range_size * 3u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(address, 1u, &snapshot));
+	ASSERT_EQ(snapshot.segment_count, 1u);
+	const uint64_t identity = snapshot.segments[0].identity;
+	ASSERT_NE(identity, 0u);
+
+	Mode old_mode = Mode::ExecuteWrite;
+	ASSERT_TRUE(ProtectGuestIfMappingMatches(address, range_size, Mode::Read, identity, &old_mode));
+	EXPECT_EQ(old_mode, Mode::ReadWrite);
+	ASSERT_TRUE(ProtectGuestIfMappingMatches(address, range_size, Mode::ReadWrite, identity, &old_mode));
+	EXPECT_EQ(old_mode, Mode::Read);
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	ASSERT_TRUE(FreeRange(address + range_size * 2u, page_size));
+#endif
+
+	LeaseRecorder             recorder;
+	const WriteLeaseAuthority authority {&recorder, &LeaseRecorder::Begin, &LeaseRecorder::Decide, &LeaseRecorder::End};
+	ProtectionCapture         capture;
+	const auto lease = RemoveWriteAndCapture(address + page_size, page_size, &CaptureProtection, &capture, &authority);
+	ASSERT_TRUE(lease.Succeeded());
+	ASSERT_EQ(capture.size, 1u);
+	ASSERT_TRUE(ProtectGuestIfMappingMatches(address, range_size, Mode::Read, identity, &old_mode));
+	EXPECT_EQ(old_mode, Mode::ReadWrite);
+	EXPECT_EQ(recorder.ends, 1u);
+	EXPECT_EQ(recorder.last.kind, WriteLeaseChangeKind::Protect);
+	EXPECT_EQ(recorder.last.mode, Mode::Read);
+	EXPECT_FALSE(IsRangeWritable(address, range_size));
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	ASSERT_TRUE(Free(address));
+	ASSERT_TRUE(Free(address + range_size * 2u + page_size));
+#else
+	ASSERT_TRUE(Free(address));
+#endif
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+// A same-address replacement in the middle of a larger guest mapping must
+// refuse the whole identity-qualified protection without changing any page.
+TEST(CoreVirtualMemory, ProtectGuestIfMappingMatchesRefusesPartialReplacementAtomically)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size * 3u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	ASSERT_TRUE(ProtectGuest(address, page_size * 3u, Mode::Read));
+
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(address, 1u, &snapshot));
+	const uint64_t identity = snapshot.segments[0].identity;
+	ASSERT_NE(identity, 0u);
+	ASSERT_TRUE(FreeRange(address + page_size, page_size));
+	if (!AllocFixed(address + page_size, page_size, Mode::ReadWrite))
+	{
+		ASSERT_TRUE(Free(address));
+		ASSERT_TRUE(Free(address + page_size * 2u));
+		GTEST_SKIP() << "the host could not map the replacement page at the released address";
+	}
+
+	EXPECT_FALSE(IsRangeWritable(address, page_size));
+	EXPECT_TRUE(IsRangeWritable(address + page_size, page_size));
+	EXPECT_FALSE(IsRangeWritable(address + page_size * 2u, page_size));
+	EXPECT_TRUE(IsRangeReadable(address, page_size));
+	EXPECT_TRUE(IsRangeReadable(address + page_size, page_size));
+	EXPECT_TRUE(IsRangeReadable(address + page_size * 2u, page_size));
+
+	Mode old_mode = Mode::ExecuteWrite;
+	EXPECT_FALSE(ProtectGuestIfMappingMatches(address, page_size * 3u, Mode::ExecuteReadWrite, identity, &old_mode));
+	EXPECT_EQ(old_mode, Mode::ExecuteWrite);
+	EXPECT_FALSE(IsRangeWritable(address, page_size));
+	EXPECT_TRUE(IsRangeWritable(address + page_size, page_size));
+	EXPECT_FALSE(IsRangeWritable(address + page_size * 2u, page_size));
+	EXPECT_TRUE(IsRangeReadable(address, page_size));
+	EXPECT_TRUE(IsRangeReadable(address + page_size, page_size));
+	EXPECT_TRUE(IsRangeReadable(address + page_size * 2u, page_size));
+
+	ASSERT_TRUE(Free(address));
+	ASSERT_TRUE(Free(address + page_size));
+	ASSERT_TRUE(Free(address + page_size * 2u));
+}
+#endif
+
+// Releasing and reusing an entire address creates a new guest mapping instance;
+// malformed ranges and ordinary host pointers are rejected before protection.
+TEST(CoreVirtualMemory, ProtectGuestIfMappingMatchesRejectsReplacementsAndInvalidInput)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(address, 1u, &snapshot));
+	const uint64_t identity = snapshot.segments[0].identity;
+	ASSERT_NE(identity, 0u);
+
+	const auto rejected_without_output_change = [&](uint64_t candidate_address, uint64_t candidate_size, Mode mode,
+	                                               uint64_t candidate_identity)
+	{
+		Mode old_mode = Mode::ExecuteWrite;
+		EXPECT_FALSE(ProtectGuestIfMappingMatches(candidate_address, candidate_size, mode, candidate_identity, &old_mode));
+		EXPECT_EQ(old_mode, Mode::ExecuteWrite);
+	};
+
+	rejected_without_output_change(address, page_size, Mode::Read, 0u);
+	rejected_without_output_change(address + 1u, page_size, Mode::Read, identity);
+	rejected_without_output_change(address, page_size + 1u, Mode::Read, identity);
+	rejected_without_output_change(address, 0u, Mode::Read, identity);
+	rejected_without_output_change(address, page_size, static_cast<Mode>(8u), identity);
+	const uint64_t host_max       = static_cast<uint64_t>(UINTPTR_MAX);
+	const uint64_t overflow_start = host_max - host_max % page_size;
+	rejected_without_output_change(overflow_start, page_size, Mode::Read, identity);
+
+	std::array<uint8_t, 32> host_bytes {};
+	const uint64_t          host_address = reinterpret_cast<uint64_t>(host_bytes.data());
+	const uint64_t          foreign_page = host_address - host_address % page_size;
+	rejected_without_output_change(foreign_page, page_size, Mode::Read, identity);
+	EXPECT_TRUE(IsRangeWritable(address, page_size));
+
+	ASSERT_TRUE(Free(address));
+	if (!AllocFixed(address, page_size, Mode::ReadWrite))
+	{
+		GTEST_SKIP() << "the host could not remap the released address for the stale-identity check";
+	}
+	Mode old_mode = Mode::ExecuteWrite;
+	EXPECT_FALSE(ProtectGuestIfMappingMatches(address, page_size, Mode::Read, identity, &old_mode));
+	EXPECT_EQ(old_mode, Mode::ExecuteWrite);
+	EXPECT_TRUE(IsRangeWritable(address, page_size));
+	reinterpret_cast<volatile uint8_t*>(address)[0] = 0x5au;
+	EXPECT_EQ(reinterpret_cast<const volatile uint8_t*>(address)[0], 0x5au);
 	EXPECT_TRUE(Free(address));
 }
 

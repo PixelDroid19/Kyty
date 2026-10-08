@@ -2035,6 +2035,19 @@ bool ProtectGuest(uint64_t address, uint64_t size, Mode mode, Mode* old_mode)
 	return sys_virtual_protect_guest(address, size, mode, old_mode);
 }
 
+bool ProtectGuestIfMappingMatches(uint64_t address, uint64_t size, Mode mode, uint64_t mapping_identity, Mode* old_mode)
+{
+	const uint64_t page_size   = GetPageSize();
+	const uint64_t pointer_max = static_cast<uint64_t>(UINTPTR_MAX);
+	if (mapping_identity == 0 || address == 0 || size == 0 || page_size == 0 || address % page_size != 0 ||
+	    size % page_size != 0 || address > pointer_max || size > pointer_max - address ||
+	    static_cast<uint32_t>(mode) > static_cast<uint32_t>(Mode::ExecuteReadWrite))
+	{
+		return false;
+	}
+	return sys_virtual_protect_guest_if_mapping_matches(address, size, mode, mapping_identity, old_mode);
+}
+
 bool DecommitGuestRange(uint64_t address, uint64_t size)
 {
 	if (address == 0 || size == 0 || address > UINT64_MAX - size)
