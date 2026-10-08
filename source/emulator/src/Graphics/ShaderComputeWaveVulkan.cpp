@@ -175,11 +175,14 @@ ShaderSubgroupModuleCheck ShaderCheckSubgroupModule(const uint32_t* words, size_
 ShaderComputeWaveCapabilities ShaderComputeWaveVulkanBuildCapabilities(const ShaderComputeWaveVulkanState& state) noexcept
 {
 	ShaderComputeWaveCapabilities capabilities {};
-	const bool extension_v2_enabled = state.extension_advertised && state.extension_revision >= 2 && state.extension_enabled;
-	capabilities.size_control_enabled = extension_v2_enabled && state.size_control_feature_supported && state.size_control_feature_enabled;
+	// Size control is core since Vulkan 1.3; extension advertisement and revision
+	// are diagnostics only. Admission needs queried support, enabled features and
+	// a genuinely queried size range.
+	const bool range_valid = SubgroupSizeRangeValid(state);
+	capabilities.size_control_enabled = range_valid && state.size_control_feature_supported && state.size_control_feature_enabled;
 	capabilities.full_subgroups_enabled =
-	    extension_v2_enabled && state.full_subgroups_feature_supported && state.full_subgroups_feature_enabled;
-	capabilities.compute_required_size_supported = extension_v2_enabled && state.compute_required_size_supported;
+	    range_valid && state.full_subgroups_feature_supported && state.full_subgroups_feature_enabled;
+	capabilities.compute_required_size_supported = range_valid && state.compute_required_size_supported;
 	capabilities.compute_ballot_shuffle_supported = state.compute_ballot_shuffle_supported;
 	capabilities.min_subgroup_size = state.min_subgroup_size;
 	capabilities.max_subgroup_size = state.max_subgroup_size;

@@ -2125,14 +2125,15 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	color_write_ext.pNext            = nullptr;
 	color_write_ext.colorWriteEnable = VK_TRUE;
 
-	VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_control_features {};
-	subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
-	if (compute_wave_state != nullptr && compute_wave_state->extension_enabled)
+	// Planned core subgroup size control features: request exactly what the
+	// Vulkan 1.3 aggregate reported. No promoted 1.3 feature structure may share
+	// this chain with the aggregate (VUID-VkDeviceCreateInfo-pNext-06532).
+	VkPhysicalDeviceVulkan13Features device_features_13 {};
+	device_features_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	if (compute_wave_state != nullptr)
 	{
-		subgroup_size_control_features.subgroupSizeControl =
-		    compute_wave_state->size_control_feature_supported ? VK_TRUE : VK_FALSE;
-		subgroup_size_control_features.computeFullSubgroups =
-		    compute_wave_state->full_subgroups_feature_supported ? VK_TRUE : VK_FALSE;
+		device_features_13.subgroupSizeControl = compute_wave_state->size_control_feature_supported ? VK_TRUE : VK_FALSE;
+		device_features_13.computeFullSubgroups = compute_wave_state->full_subgroups_feature_supported ? VK_TRUE : VK_FALSE;
 	}
 
 	// Use the Vulkan 1.2 aggregate for both core features. Its pNext chain may
@@ -2162,6 +2163,8 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	}
 	device_features_12.pNext = device_feature_chain;
 	device_feature_chain = &device_features_12;
+	device_features_13.pNext = device_feature_chain;
+	device_feature_chain = &device_features_13;
 	if (depth_clip_control_supported)
 	{
 		depth_clip_control_ext.pNext = device_feature_chain;
@@ -2176,11 +2179,6 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	{
 		color_write_ext.pNext = device_feature_chain;
 		device_feature_chain  = &color_write_ext;
-	}
-	if (compute_wave_state != nullptr && compute_wave_state->extension_enabled)
-	{
-		subgroup_size_control_features.pNext = device_feature_chain;
-		device_feature_chain                = &subgroup_size_control_features;
 	}
 
 	VkDeviceCreateInfo create_info {};
@@ -2198,19 +2196,21 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	VkDevice device = nullptr;
 
 	const auto result = vkCreateDevice(physical_device, &create_info, nullptr, &device);
-	if (result == VK_SUCCESS && device != VK_NULL_HANDLE)
+	const bool created = result == VK_SUCCESS && device != VK_NULL_HANDLE;
+	if (compute_wave_state != nullptr)
 	{
-		*enabled_blend_features = blend_features;
-		*enabled_sampler_features = sampler_features;
-		if (compute_wave_state != nullptr)
-		{
-			compute_wave_state->subgroup_broadcast_dynamic_id_enabled =
-			    device_features_12.subgroupBroadcastDynamicId == VK_TRUE;
-		}
-	} else
+		compute_wave_state->extension_enabled = false;
+		compute_wave_state->subgroup_broadcast_dynamic_id_enabled =
+		    created && device_features_12.subgroupBroadcastDynamicId == VK_TRUE;
+		compute_wave_state->size_control_feature_enabled = created && device_features_13.subgroupSizeControl == VK_TRUE;
+		compute_wave_state->full_subgroups_feature_enabled = created && device_features_13.computeFullSubgroups == VK_TRUE;
+	}
+	if (!created)
 	{
 		return VK_NULL_HANDLE;
 	}
+	*enabled_blend_features = blend_features;
+	*enabled_sampler_features = sampler_features;
 
 	return device;
 }
@@ -2870,17 +2870,16 @@ static void VulkanCreate(WindowContext* ctx)
 		depth_clip_enable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT;
 		VkPhysicalDeviceDepthClipControlFeaturesEXT depth_clip_control {};
 		depth_clip_control.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT;
-		VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_size_control_features {};
-		subgroup_size_control_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
+		// Vulkan 1.4 is required, so the core aggregate is authoritative for the
+		// promoted subgroup size control features with or without the extension name.
+		VkPhysicalDeviceVulkan13Features features_13 {};
+		features_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR derivatives {};
 		derivatives.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR;
 		VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR maximal_reconvergence {};
 		maximal_reconvergence.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR;
-		const uint32_t subgroup_size_control_revision = extension_revision(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
-		const bool subgroup_size_control_revision2 =
-		    subgroup_size_control_revision >= VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION;
 
-		void* query_chain = nullptr;
+		void* query_chain = &features_13;
 		if (has_ext(VK_KHR_COMPUTE_SHADER_DERIVATIVES_EXTENSION_NAME))
 		{
 			derivatives.pNext = query_chain;
@@ -2900,11 +2899,6 @@ static void VulkanCreate(WindowContext* ctx)
 		{
 			depth_clip_control.pNext = query_chain;
 			query_chain              = &depth_clip_control;
-		}
-		if (subgroup_size_control_revision2)
-		{
-			subgroup_size_control_features.pNext = query_chain;
-			query_chain                          = &subgroup_size_control_features;
 		}
 		if (has_ext(VK_KHR_SHADER_MAXIMAL_RECONVERGENCE_EXTENSION_NAME))
 		{
@@ -3005,26 +2999,14 @@ static void VulkanCreate(WindowContext* ctx)
 		ctx->graphic_ctx.subgroup_size_control_supported = has_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 		auto& wave_state = ctx->graphic_ctx.compute_wave_vulkan_state;
 		wave_state.extension_advertised = ctx->graphic_ctx.subgroup_size_control_supported;
-		wave_state.extension_revision = subgroup_size_control_revision;
-		wave_state.size_control_feature_supported = subgroup_size_control_revision2 &&
-		                                           subgroup_size_control_features.subgroupSizeControl == VK_TRUE;
-		wave_state.full_subgroups_feature_supported = subgroup_size_control_revision2 &&
-		                                              subgroup_size_control_features.computeFullSubgroups == VK_TRUE;
-		wave_state.extension_enabled = subgroup_size_control_revision2 &&
-		                               (wave_state.size_control_feature_supported || wave_state.full_subgroups_feature_supported);
-		wave_state.size_control_feature_enabled = wave_state.extension_enabled && wave_state.size_control_feature_supported;
-		wave_state.full_subgroups_feature_enabled = wave_state.extension_enabled && wave_state.full_subgroups_feature_supported;
-		if (wave_state.extension_enabled)
-		{
-			if (!device_extensions.Contains(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME,
-			                               [](auto s, auto l) { return strcmp(s, l) == 0; }))
-			{
-				device_extensions.Add(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
-			}
-		} else
-		{
-			drop_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
-		}
+		wave_state.extension_revision = extension_revision(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+		// The core features are enabled instead of the extension; the enabled
+		// values are published only by a successful vkCreateDevice.
+		wave_state.extension_enabled = false;
+		wave_state.size_control_feature_supported = features_13.subgroupSizeControl == VK_TRUE;
+		wave_state.full_subgroups_feature_supported = features_13.computeFullSubgroups == VK_TRUE;
+		wave_state.size_control_feature_enabled = false;
+		wave_state.full_subgroups_feature_enabled = false;
 
 		ctx->graphic_ctx.sample_location_capabilities.extension_enabled = has_ext(VK_EXT_SAMPLE_LOCATIONS_EXTENSION_NAME) ? 1u : 0u;
 		if (ctx->graphic_ctx.sample_location_capabilities.extension_enabled == 0)

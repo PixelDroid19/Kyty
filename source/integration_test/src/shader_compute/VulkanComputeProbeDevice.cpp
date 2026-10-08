@@ -50,25 +50,24 @@ bool FindComputeQueue(VkPhysicalDevice device, uint32_t* queue_family_index)
 	return false;
 }
 
+// Candidates are Vulkan 1.4 devices, so the core 1.3 features and properties are
+// authoritative; the extension name and revision are recorded as diagnostics only.
+// Enabled features stay false until a device is actually created with them.
 bool QueryWaveState(VkPhysicalDevice device, ShaderComputeWaveVulkanState* state)
 {
 	if (state == nullptr) { return false; }
 	uint32_t revision = 0;
-	if (!FindExtensionRevision(device, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME, &revision) ||
-	    revision < VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION)
-	{
-		return false;
-	}
+	if (!FindExtensionRevision(device, VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME, &revision)) { return false; }
 
-	VkPhysicalDeviceSubgroupSizeControlFeaturesEXT subgroup_features {};
-	subgroup_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
+	VkPhysicalDeviceVulkan13Features features_13 {};
+	features_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 	VkPhysicalDeviceFeatures2 features {};
 	features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-	features.pNext = &subgroup_features;
+	features.pNext = &features_13;
 	vkGetPhysicalDeviceFeatures2(device, &features);
 
-	VkPhysicalDeviceSubgroupSizeControlPropertiesEXT size_properties {};
-	size_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT;
+	VkPhysicalDeviceSubgroupSizeControlProperties size_properties {};
+	size_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
 	VkPhysicalDeviceSubgroupProperties subgroup_properties {};
 	subgroup_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
 	subgroup_properties.pNext = &size_properties;
@@ -77,13 +76,11 @@ bool QueryWaveState(VkPhysicalDevice device, ShaderComputeWaveVulkanState* state
 	properties.pNext = &subgroup_properties;
 	vkGetPhysicalDeviceProperties2(device, &properties);
 
-	state->extension_advertised = true;
+	*state = {};
+	state->extension_advertised = revision != 0;
 	state->extension_revision = revision;
-	state->extension_enabled = true;
-	state->size_control_feature_supported = subgroup_features.subgroupSizeControl == VK_TRUE;
-	state->full_subgroups_feature_supported = subgroup_features.computeFullSubgroups == VK_TRUE;
-	state->size_control_feature_enabled = state->size_control_feature_supported;
-	state->full_subgroups_feature_enabled = state->full_subgroups_feature_supported;
+	state->size_control_feature_supported = features_13.subgroupSizeControl == VK_TRUE;
+	state->full_subgroups_feature_supported = features_13.computeFullSubgroups == VK_TRUE;
 	state->compute_required_size_supported =
 	    (size_properties.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
 	state->compute_ballot_shuffle_supported = (subgroup_properties.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
@@ -103,9 +100,19 @@ bool QueryWaveState(VkPhysicalDevice device, ShaderComputeWaveVulkanState* state
 	return true;
 }
 
-bool SupportsWaveProbe(const ShaderComputeWaveVulkanState& state)
+// The features vkCreateDevice will request: every queried core feature.
+ShaderComputeWaveVulkanState PlanWaveFeatures(const ShaderComputeWaveVulkanState& queried)
 {
-	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(state);
+	auto planned = queried;
+	planned.size_control_feature_enabled = queried.size_control_feature_supported;
+	planned.full_subgroups_feature_enabled = queried.full_subgroups_feature_supported;
+	return planned;
+}
+
+// Candidate preflight only: admission against the planned, not yet enabled, features.
+bool SupportsWaveProbe(const ShaderComputeWaveVulkanState& planned)
+{
+	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(planned);
 	const ShaderComputeWaveRequest request {{64, 1, 1}, {1, 1, 1}, 0x41, 0, ShaderGuestLaneOrder::LinearXFirst};
 	ShaderComputeWaveLayout layout {};
 	return ShaderBuildPairedComputeWaveLayout(request, capabilities, &layout) == ShaderComputeWaveLayoutStatus::Supported;
@@ -193,6 +200,7 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 	}
 
 	uint32_t selected_queue_family = 0;
+	ShaderComputeWaveVulkanState selected_wave_state {};
 	for (const VkPhysicalDevice candidate: physical_devices)
 	{
 		VkPhysicalDeviceProperties properties {};
@@ -206,7 +214,8 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 		if (!FindComputeQueue(candidate, &queue_family)) { continue; }
 
 		ShaderComputeWaveVulkanState candidate_wave_state {};
-		if (request_wave_features && (!QueryWaveState(candidate, &candidate_wave_state) || !SupportsWaveProbe(candidate_wave_state)))
+		if (request_wave_features &&
+		    (!QueryWaveState(candidate, &candidate_wave_state) || !SupportsWaveProbe(PlanWaveFeatures(candidate_wave_state))))
 		{
 			continue;
 		}
@@ -215,13 +224,13 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 		selected_queue_family = queue_family;
 		queue_family_index_ = queue_family;
 		max_storage_buffer_range_ = properties.limits.maxStorageBufferRange;
-		if (request_wave_features) { wave_capabilities_ = ShaderComputeWaveVulkanBuildCapabilities(candidate_wave_state); }
+		selected_wave_state = candidate_wave_state;
 		break;
 	}
 	if (physical_device_ == VK_NULL_HANDLE)
 	{
 		*message = request_wave_features ?
-		                "no Vulkan 1.4 compute device supports revision-2 subgroup size control, full compute subgroups and the paired size-32 layout" :
+		                "no Vulkan 1.4 compute device supports core subgroup size control, full compute subgroups and the paired size-32 layout" :
 		                "no Vulkan 1.4 device exposes a compute queue with a 32-byte storage buffer limit";
 		return Result::Unavailable;
 	}
@@ -246,27 +255,30 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 	queue_info.queueCount       = 1;
 	queue_info.pQueuePriorities = &queue_priority;
 
-	VkPhysicalDeviceSubgroupSizeControlFeaturesEXT wave_features {};
-	wave_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT;
-	wave_features.subgroupSizeControl = wave_capabilities_.size_control_enabled ? VK_TRUE : VK_FALSE;
-	wave_features.computeFullSubgroups = wave_capabilities_.full_subgroups_enabled ? VK_TRUE : VK_FALSE;
+	const auto planned_wave_state = PlanWaveFeatures(selected_wave_state);
+	VkPhysicalDeviceVulkan13Features wave_features {};
+	wave_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+	wave_features.subgroupSizeControl = planned_wave_state.size_control_feature_enabled ? VK_TRUE : VK_FALSE;
+	wave_features.computeFullSubgroups = planned_wave_state.full_subgroups_feature_enabled ? VK_TRUE : VK_FALSE;
 	VkDeviceCreateInfo device_info {};
 	device_info.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	device_info.queueCreateInfoCount = 1;
 	device_info.pQueueCreateInfos    = &queue_info;
-	const char* extension_name = VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
-	if (request_wave_features)
-	{
-		device_info.pNext = &wave_features;
-		device_info.enabledExtensionCount = 1;
-		device_info.ppEnabledExtensionNames = &extension_name;
-	}
+	if (request_wave_features) { device_info.pNext = &wave_features; }
 	result = vkCreateDevice(physical_device_, &device_info, nullptr, &device_);
 	if (result != VK_SUCCESS)
 	{
 		VulkanComputeProbeInternal::SetVkError(message, "vkCreateDevice", result);
 		wave_capabilities_ = {};
 		return Result::Failure;
+	}
+	// Publish only the features this device was actually created with.
+	if (request_wave_features)
+	{
+		auto enabled_wave_state = selected_wave_state;
+		enabled_wave_state.size_control_feature_enabled = wave_features.subgroupSizeControl == VK_TRUE;
+		enabled_wave_state.full_subgroups_feature_enabled = wave_features.computeFullSubgroups == VK_TRUE;
+		wave_capabilities_ = ShaderComputeWaveVulkanBuildCapabilities(enabled_wave_state);
 	}
 	vkGetDeviceQueue(device_, queue_family_index_, 0, &queue_);
 	if (queue_ == VK_NULL_HANDLE)

@@ -10,7 +10,9 @@
 namespace Kyty::Libs::Graphics {
 
 // Captures the distinction between device advertisement, queried support and
-// the feature values explicitly enabled at vkCreateDevice time.
+// the feature values explicitly enabled at vkCreateDevice time. Subgroup size
+// control is core since Vulkan 1.3: the extension fields are diagnostics, and
+// extension_enabled stays false when the core features are enabled instead.
 struct ShaderComputeWaveVulkanState
 {
 	bool     extension_advertised = false;
