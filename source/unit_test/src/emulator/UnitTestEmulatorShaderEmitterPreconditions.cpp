@@ -7,7 +7,10 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
+#include "../../../emulator/src/Graphics/ShaderControlFlowGraph.h"
+
 #include <cstdlib>
+#include <limits>
 
 UT_BEGIN(EmulatorShaderEmitterPreconditions);
 
@@ -138,7 +141,14 @@ void ParseMovrels(ShaderInstruction* mov_m0, ShaderInstruction* movrels)
 	{
 		code.GetInstructions().Add(*second);
 	}
-	code.GetInstructions().Add(EndProgram());
+	const auto& instructions = code.GetInstructions();
+	if (instructions.IsEmpty()) { std::_Exit(4); }
+	const uint32_t last_pc = instructions.At(instructions.Size() - 1u).pc;
+	if (last_pc > std::numeric_limits<uint32_t>::max() - 4u) { std::_Exit(4); }
+	auto end = EndProgram();
+	end.pc = last_pc + 4u;
+	code.GetInstructions().Add(end);
+	if (!ShaderBuildControlFlowGraph(code).Structurable()) { std::_Exit(4); }
 	const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
 	std::_Exit(source.IsEmpty() ? 3 : 0);
 }
