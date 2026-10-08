@@ -30,6 +30,7 @@
 #include "ShaderSpirvInternal.h"
 #include "ShaderSpirvToolchain.h"
 #include "ShaderStorageAnalysis.h"
+#include "ShaderResourceFoldCapture.h"
 #include "ShaderDebugInternal.h"
 #include "ShaderLogInternal.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
@@ -2496,6 +2497,30 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 	}
 }
 
+static thread_local ShaderGuestDescriptorReader* g_shader_guest_descriptor_reader = nullptr;
+
+ScopedShaderGuestDescriptorReader::ScopedShaderGuestDescriptorReader(ShaderGuestDescriptorReader* reader)
+    : m_previous(g_shader_guest_descriptor_reader)
+{
+	g_shader_guest_descriptor_reader = reader;
+}
+
+ScopedShaderGuestDescriptorReader::~ScopedShaderGuestDescriptorReader()
+{
+	g_shader_guest_descriptor_reader = m_previous;
+}
+
+// Every descriptor-table word that influences ShaderParseUsage2 output comes
+// through this read, so a scoped reader sees the exact production request order.
+static bool ShaderReadGuestDescriptorWords(uint64_t guest_address, uint32_t dwords, uint32_t* words)
+{
+	if (g_shader_guest_descriptor_reader != nullptr)
+	{
+		return g_shader_guest_descriptor_reader->Read(guest_address, dwords, words);
+	}
+	return Core::VirtualMemory::CopyFromGuest(words, guest_address, static_cast<uint64_t>(dwords) * sizeof(uint32_t));
+}
+
 bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
                                         std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS>* snapshot)
 {
@@ -2513,12 +2538,12 @@ bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
 	constexpr uint32_t attempts = 2u;
 	for (uint32_t attempt = 0; attempt < attempts; ++attempt)
 	{
-		if (!Core::VirtualMemory::CopyFromGuest(snapshot->data(), guest_address, bytes))
+		if (!ShaderReadGuestDescriptorWords(guest_address, dwords, snapshot->data()))
 		{
 			return false;
 		}
 		ShaderNotifyGen5EudSnapshotTestHook();
-		if (!Core::VirtualMemory::CopyFromGuest(verification.data(), guest_address, bytes))
+		if (!ShaderReadGuestDescriptorWords(guest_address, dwords, verification.data()))
 		{
 			return false;
 		}
@@ -2544,6 +2569,9 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 
 	EXIT_IF(bind == nullptr);
 	EXIT_IF(info == nullptr);
+	// Default-off: inert unless KYTY_RESOURCE_FOLD_CAPTURE_DIR is set.
+	const ShaderResourceFoldCaptureScope fold_capture(user_data, info, bind, user_sgpr, user_sgpr_num, code, user_data_register_base,
+	                                                  vertex_resource_types);
 
 	info->fetch                     = false;
 	info->fetch_reg                 = 0;

@@ -54,6 +54,33 @@ void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindR
                                              int user_sgpr_num, int user_data_register_base);
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base);
+// Source of guest descriptor-table words for ShaderSnapshotGuestDescriptorTable.
+// Without an active scope the production read is Core::VirtualMemory::CopyFromGuest.
+class ShaderGuestDescriptorReader
+{
+public:
+	ShaderGuestDescriptorReader()                                              = default;
+	ShaderGuestDescriptorReader(const ShaderGuestDescriptorReader&)            = delete;
+	ShaderGuestDescriptorReader& operator=(const ShaderGuestDescriptorReader&) = delete;
+	virtual ~ShaderGuestDescriptorReader()                                     = default;
+
+	// Fills exactly `dwords` words; false means the read was refused.
+	[[nodiscard]] virtual bool Read(uint64_t guest_address, uint32_t dwords, uint32_t* words) = 0;
+};
+
+// Installs a reader for the current thread only and restores the previous one on destruction.
+class ScopedShaderGuestDescriptorReader
+{
+public:
+	explicit ScopedShaderGuestDescriptorReader(ShaderGuestDescriptorReader* reader);
+	ScopedShaderGuestDescriptorReader(const ScopedShaderGuestDescriptorReader&)            = delete;
+	ScopedShaderGuestDescriptorReader& operator=(const ScopedShaderGuestDescriptorReader&) = delete;
+	~ScopedShaderGuestDescriptorReader();
+
+private:
+	ShaderGuestDescriptorReader* m_previous;
+};
+
 // Copies a descriptor table from guest memory, retrying until two reads agree.
 bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
                                         std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS>* snapshot);
