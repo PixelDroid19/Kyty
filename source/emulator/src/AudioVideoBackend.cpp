@@ -1293,4 +1293,213 @@ const char* ElementaryVideoDecoder::LastError() const
 	return state_->error.c_str();
 }
 
+struct ElementaryAudioDecoder::State
+{
+	std::string error;
+	uint32_t    channels    = 0;
+	uint32_t    block_align = 0;
+#if defined(KYTY_HAVE_FFMPEG)
+	AVCodecContext* context = nullptr;
+	AVPacket*       packet  = nullptr;
+	AVFrame*        frame   = nullptr;
+#endif
+};
+
+ElementaryAudioDecoder::ElementaryAudioDecoder(): state_(std::make_unique<State>()) {}
+
+ElementaryAudioDecoder::~ElementaryAudioDecoder()
+{
+#if defined(KYTY_HAVE_FFMPEG)
+	av_frame_free(&state_->frame);
+	av_packet_free(&state_->packet);
+	avcodec_free_context(&state_->context);
+#endif
+}
+
+std::unique_ptr<ElementaryAudioDecoder> ElementaryAudioDecoder::Open(AudioCodec codec, const uint8_t* extradata, size_t extradata_size,
+                                                                     uint32_t block_align, uint32_t channels, uint32_t sample_rate,
+                                                                     std::string* error)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)codec;
+	(void)extradata;
+	(void)extradata_size;
+	(void)block_align;
+	(void)channels;
+	(void)sample_rate;
+	if (error != nullptr)
+	{
+		*error = "FFmpeg is not available";
+	}
+	return nullptr;
+#else
+	auto fail = [error](const char* message) -> std::unique_ptr<ElementaryAudioDecoder>
+	{
+		if (error != nullptr)
+		{
+			*error = message;
+		}
+		return nullptr;
+	};
+	if (codec != AudioCodec::Atrac9)
+	{
+		return fail("unsupported audio codec");
+	}
+	if (extradata == nullptr || extradata_size != kAtrac9ExtradataSize)
+	{
+		return fail("ATRAC9 extradata must be 12 bytes");
+	}
+	if (block_align == 0 || block_align > kAtrac9MaxSuperframeBytes)
+	{
+		return fail("ATRAC9 block align must be 1 to 8192 bytes");
+	}
+	if (channels == 0 || channels > kAtrac9MaxChannels || sample_rate == 0 || sample_rate > kAtrac9MaxSampleRate)
+	{
+		return fail("ATRAC9 channels or sample rate out of range");
+	}
+	const AVCodec* av_codec = avcodec_find_decoder(AV_CODEC_ID_ATRAC9);
+	if (av_codec == nullptr)
+	{
+		return fail("ATRAC9 decoder is unavailable");
+	}
+
+	std::unique_ptr<ElementaryAudioDecoder> decoder(new ElementaryAudioDecoder());
+	auto*                                   state = decoder->state_.get();
+	state->context                                = avcodec_alloc_context3(av_codec);
+	state->packet                                 = av_packet_alloc();
+	state->frame                                  = av_frame_alloc();
+	if (state->context == nullptr || state->packet == nullptr || state->frame == nullptr)
+	{
+		return fail("allocate ATRAC9 decoder");
+	}
+
+	// The context owns this copy and frees it with avcodec_free_context.
+	auto* owned_extradata = static_cast<uint8_t*>(av_mallocz(kAtrac9ExtradataSize + AV_INPUT_BUFFER_PADDING_SIZE));
+	if (owned_extradata == nullptr)
+	{
+		return fail("allocate ATRAC9 extradata");
+	}
+	std::memcpy(owned_extradata, extradata, kAtrac9ExtradataSize);
+	state->context->extradata      = owned_extradata;
+	state->context->extradata_size = static_cast<int>(kAtrac9ExtradataSize);
+	state->context->block_align    = static_cast<int>(block_align);
+	if (avcodec_open2(state->context, av_codec, nullptr) < 0)
+	{
+		return fail("open ATRAC9 decoder: extradata or block align rejected");
+	}
+	// The config, not the container, defines the channel layout and rate.
+	if (state->context->ch_layout.nb_channels != static_cast<int>(channels) ||
+	    state->context->sample_rate != static_cast<int>(sample_rate))
+	{
+		return fail("ATRAC9 config does not match the waveform format");
+	}
+	if (state->context->sample_fmt != AV_SAMPLE_FMT_FLTP)
+	{
+		return fail("ATRAC9 decoder output is not planar float");
+	}
+	state->channels    = channels;
+	state->block_align = block_align;
+	return decoder;
+#endif
+}
+
+#if defined(KYTY_HAVE_FFMPEG)
+// Appends one planar float frame to the interleaved output. A packet never
+// yields more than one superframe of samples per channel.
+static bool AppendInterleavedFrame(ElementaryAudioDecoder::State* state, std::vector<float>* interleaved)
+{
+	const AVFrame* frame = state->frame;
+	if (frame->format != AV_SAMPLE_FMT_FLTP || frame->ch_layout.nb_channels != static_cast<int>(state->channels) || frame->nb_samples <= 0 ||
+	    static_cast<uint32_t>(frame->nb_samples) > ElementaryAudioDecoder::kAtrac9MaxSuperframeSamples)
+	{
+		state->error = "ATRAC9 frame layout does not match the decoder";
+		return false;
+	}
+	const auto channels = static_cast<int>(state->channels);
+	const auto limit    = static_cast<size_t>(ElementaryAudioDecoder::kAtrac9MaxSuperframeSamples) * state->channels;
+	if (interleaved->size() + static_cast<size_t>(frame->nb_samples) * state->channels > limit)
+	{
+		state->error = "ATRAC9 packet produced more than one superframe";
+		return false;
+	}
+	for (int channel = 0; channel < channels; channel++)
+	{
+		if (frame->data[channel] == nullptr)
+		{
+			state->error = "ATRAC9 frame is missing a channel plane";
+			return false;
+		}
+	}
+	for (int sample = 0; sample < frame->nb_samples; sample++)
+	{
+		for (int channel = 0; channel < channels; channel++)
+		{
+			interleaved->push_back(reinterpret_cast<const float*>(frame->data[channel])[sample]);
+		}
+	}
+	return true;
+}
+#endif
+
+bool ElementaryAudioDecoder::Decode(const uint8_t* packet, size_t size, std::vector<float>* interleaved)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)packet;
+	(void)size;
+	(void)interleaved;
+	return false;
+#else
+	auto* state = state_.get();
+	if (packet == nullptr || interleaved == nullptr || size != state->block_align)
+	{
+		state->error = "ATRAC9 packet must be exactly one superframe";
+		return false;
+	}
+	interleaved->clear();
+	av_packet_unref(state->packet);
+	if (av_new_packet(state->packet, static_cast<int>(size)) < 0)
+	{
+		state->error = "allocate ATRAC9 packet";
+		return false;
+	}
+	std::memcpy(state->packet->data, packet, size);
+	if (avcodec_send_packet(state->context, state->packet) < 0)
+	{
+		state->error = "decode ATRAC9 packet";
+		return false;
+	}
+	for (;;)
+	{
+		const int result = avcodec_receive_frame(state->context, state->frame);
+		if (result == AVERROR(EAGAIN) || result == AVERROR_EOF)
+		{
+			return true;
+		}
+		if (result < 0)
+		{
+			state->error = "receive ATRAC9 frame";
+			return false;
+		}
+		const bool appended = AppendInterleavedFrame(state, interleaved);
+		av_frame_unref(state->frame);
+		if (!appended)
+		{
+			return false;
+		}
+	}
+#endif
+}
+
+void ElementaryAudioDecoder::Reset()
+{
+#if defined(KYTY_HAVE_FFMPEG)
+	avcodec_flush_buffers(state_->context);
+#endif
+}
+
+const char* ElementaryAudioDecoder::LastError() const
+{
+	return state_->error.c_str();
+}
+
 } // namespace Kyty::Emulator::AudioVideoBackend

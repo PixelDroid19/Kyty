@@ -135,6 +135,51 @@ private:
 	std::unique_ptr<State> state_;
 };
 
+enum class AudioCodec : uint8_t
+{
+	Atrac9,
+};
+
+// Decodes one superframe at a time into interleaved float PCM at the source
+// rate. The extradata is the 12-byte tail of the RIFF WAVEFORMATEXTENSIBLE
+// format: a version dword (at most 2), the FE-prefixed config dword, and a
+// reserved dword. Open fails unless the decoder derives the channel count and
+// sample rate that the caller expects from the config.
+class ElementaryAudioDecoder final
+{
+public:
+	struct State;
+
+	static constexpr size_t kAtrac9ExtradataSize = 12;
+	// Limits fixed by the ATRAC9 config: up to 8 channels (7.1), 192 kHz, frames
+	// of at most 256 samples and 2048 bytes, and 1 or 4 frames per superframe.
+	static constexpr uint32_t kAtrac9MaxChannels          = 8;
+	static constexpr uint32_t kAtrac9MaxSampleRate        = 192000;
+	static constexpr uint32_t kAtrac9MaxSuperframeBytes   = 8192;
+	static constexpr uint32_t kAtrac9MaxSuperframeSamples = 1024;
+
+	static std::unique_ptr<ElementaryAudioDecoder> Open(AudioCodec codec, const uint8_t* extradata, size_t extradata_size,
+	                                                    uint32_t block_align, uint32_t channels, uint32_t sample_rate,
+	                                                    std::string* error = nullptr);
+
+	~ElementaryAudioDecoder();
+
+	ElementaryAudioDecoder(const ElementaryAudioDecoder&)            = delete;
+	ElementaryAudioDecoder& operator=(const ElementaryAudioDecoder&) = delete;
+
+	// Decodes exactly one packet of block_align bytes. The interleaved samples
+	// replace the contents of interleaved; a packet may produce no samples.
+	bool Decode(const uint8_t* packet, size_t size, std::vector<float>* interleaved);
+	// Drops the overlap state so that the next packet starts a new stream.
+	void Reset();
+	[[nodiscard]] const char* LastError() const;
+
+private:
+	ElementaryAudioDecoder();
+
+	std::unique_ptr<State> state_;
+};
+
 } // namespace Kyty::Emulator::AudioVideoBackend
 
 

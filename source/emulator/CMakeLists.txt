@@ -29,6 +29,7 @@ file(GLOB hle_domain_src CONFIGURE_DEPENDS
 	src/AudioAvPlayer.cpp
 	src/AudioHost.cpp
 	src/AudioNgs2.cpp
+	src/AudioNgs2Sampler.cpp
 	src/Dialog.cpp
 	src/Controller.cpp
 )

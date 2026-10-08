@@ -2,9 +2,11 @@
 #include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Audio.h"
+#include "Emulator/AudioNgs2Sampler.h"
 #include "Emulator/AudioVideoBackend.h"
 #include "Emulator/AudioPcm.h"
 #include "Emulator/Config.h"
+#include "Emulator/GuestRuntimePort.h"
 #include "Emulator/Libs/Errno.h"
 #include "Emulator/Log.h"
 
@@ -13,13 +15,18 @@
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <chrono>
+#include <cmath>
+#include <fstream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <type_traits>
 #include <thread>
+#include <vector>
 
 UT_BEGIN(EmulatorAudio);
 
@@ -70,6 +77,104 @@ public:
 private:
 	GuestReadableBlock m_storage;
 };
+
+// Generic host stand-in for the guest runtime: it calls the target as an ordinary
+// function with the forwarded arguments, so AvPlayer file and event callbacks run
+// in-process. This is the same dispatch the real runtime performs, not a bypass.
+inline uint64_t KYTY_SYSV_ABI HostRuntimeInvoke(uint64_t target, uint64_t a0, uint64_t a1, uint64_t a2)
+{
+	return reinterpret_cast<uint64_t(KYTY_SYSV_ABI*)(uint64_t, uint64_t, uint64_t)>(target)(a0, a1, a2);
+}
+
+inline uint64_t KYTY_SYSV_ABI HostRuntimeInvoke4(uint64_t target, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+	return reinterpret_cast<uint64_t(KYTY_SYSV_ABI*)(uint64_t, uint64_t, uint64_t, uint64_t)>(target)(a0, a1, a2, a3);
+}
+
+inline bool HostRuntimeIsExecutable(uint64_t /*address*/)
+{
+	return true;
+}
+
+// Installs the host runtime dispatch for the lifetime of the scope so the guest
+// callbacks the player invokes actually run.
+class ScopedHostRuntime
+{
+public:
+	ScopedHostRuntime()
+	{
+		::Kyty::Emulator::GuestRuntimePort::Provider provider {};
+		provider.invoke                = HostRuntimeInvoke;
+		provider.invoke4               = HostRuntimeInvoke4;
+		provider.is_executable_address = HostRuntimeIsExecutable;
+		::Kyty::Emulator::GuestRuntimePort::Install(provider);
+	}
+	~ScopedHostRuntime() { ::Kyty::Emulator::GuestRuntimePort::Install({}); }
+	ScopedHostRuntime(const ScopedHostRuntime&)            = delete;
+	ScopedHostRuntime& operator=(const ScopedHostRuntime&) = delete;
+};
+
+// A host file exposed through the AvPlayer file-replacement callbacks, which is
+// the production hook the guest uses to supply media bytes. open receives the URI
+// after the player sanitizes it, records it, and opens exactly that name, so a
+// sanitizer regression fails both the open and the recorded-URI assertion.
+struct HostFileReplacement
+{
+	std::string opened_uri;
+	std::FILE*  file = nullptr;
+};
+
+inline int KYTY_SYSV_ABI HostFileOpen(void* object, const char* uri)
+{
+	auto* self       = static_cast<HostFileReplacement*>(object);
+	self->opened_uri = uri != nullptr ? uri : "";
+	self->file       = uri != nullptr ? std::fopen(uri, "rb") : nullptr;
+	return self->file != nullptr ? 0 : -1;
+}
+
+inline int KYTY_SYSV_ABI HostFileClose(void* object)
+{
+	auto* self = static_cast<HostFileReplacement*>(object);
+	if (self->file != nullptr)
+	{
+		std::fclose(self->file);
+		self->file = nullptr;
+	}
+	return 0;
+}
+
+inline int KYTY_SYSV_ABI HostFileReadOffset(void* object, uint8_t* destination, uint64_t offset, uint32_t size)
+{
+	auto* self = static_cast<HostFileReplacement*>(object);
+	if (self->file == nullptr || destination == nullptr || std::fseek(self->file, static_cast<long>(offset), SEEK_SET) != 0)
+	{
+		return -1;
+	}
+	return static_cast<int>(std::fread(destination, 1, size, self->file));
+}
+
+inline uint64_t KYTY_SYSV_ABI HostFileSize(void* object)
+{
+	auto* self = static_cast<HostFileReplacement*>(object);
+	if (self->file == nullptr || std::fseek(self->file, 0, SEEK_END) != 0)
+	{
+		return 0;
+	}
+	const long end = std::ftell(self->file);
+	std::fseek(self->file, 0, SEEK_SET);
+	return end > 0 ? static_cast<uint64_t>(end) : 0;
+}
+
+inline AvPlayer::AvPlayerFileReplacement MakeHostFileReplacement(HostFileReplacement* object)
+{
+	AvPlayer::AvPlayerFileReplacement file {};
+	file.object_pointer = object;
+	file.open           = HostFileOpen;
+	file.close          = HostFileClose;
+	file.read_offset    = HostFileReadOffset;
+	file.size           = HostFileSize;
+	return file;
+}
 
 } // namespace
 
@@ -940,14 +1045,23 @@ TEST(EmulatorAudio, AvPlayerUsesConfiguredMediaBackend)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
+	// The media is supplied through the production file-replacement callbacks, so
+	// the raw host path never has to pass the guest filesystem policy.
+	HostFileReplacement host_file;
+	ScopedHostRuntime   runtime;
+
 	AvPlayer::AvPlayerInitDataEx init {};
-	init.this_size = sizeof(init);
+	init.this_size        = sizeof(init);
+	init.file_replacement = MakeHostFileReplacement(&host_file);
 	AvPlayer::AvPlayerInternal* handle = nullptr;
 	ASSERT_EQ(AvPlayer::AvPlayerInitEx(&init, &handle), 0);
 	ASSERT_NE(handle, nullptr);
 	ASSERT_EQ(AvPlayer::AvPlayerAddSource(handle, media_path), 0);
+	// The file callback received the name the player passed on, unchanged.
+	EXPECT_EQ(host_file.opened_uri, std::string(media_path));
 	AvPlayer::AvPlayerStreamInfoEx stream {};
 	ASSERT_EQ(AvPlayer::AvPlayerGetStreamInfoEx(handle, 0, &stream), 0);
+	// Dimensions come from the fixture's own stream, not a hardcoded resolution.
 	EXPECT_GT(stream.details.video.width, 0u);
 	EXPECT_GT(stream.details.video.height, 0u);
 	ASSERT_EQ(AvPlayer::AvPlayerStart(handle), 0);
@@ -2230,8 +2344,9 @@ TEST(EmulatorAudio, AvPlayerInitExReturnsZeroAndPopulatesHandle)
 	EXPECT_EQ(AvPlayer::AvPlayerClose(handle), 0);
 }
 
-static int g_avplayer_test_ready_events = 0;
-static int g_avplayer_test_stop_events  = 0;
+// Written by the player's event callback, possibly from its own thread.
+static std::atomic<int> g_avplayer_test_ready_events {0};
+static std::atomic<int> g_avplayer_test_stop_events {0};
 
 static void KYTY_SYSV_ABI avplayer_test_event_cb(void* obj_ptr, uint32_t event_id, int32_t source_id, void* data)
 {
@@ -2261,13 +2376,20 @@ TEST(EmulatorAudio, AvPlayerSanitizesFileUriAndFiresEvents)
 	}
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	g_avplayer_test_ready_events = 0;
-	g_avplayer_test_stop_events  = 0;
+	g_avplayer_test_ready_events.store(0);
+	g_avplayer_test_stop_events.store(0);
+
+	// The event and file callbacks run through the host runtime dispatch; the file
+	// callback supplies the owned fixture, so the encoded URI only exercises the
+	// player's sanitizer, not the guest filesystem.
+	HostFileReplacement host_file;
+	ScopedHostRuntime   runtime;
 
 	AvPlayer::AvPlayerInitDataEx init_ex {};
-	init_ex.this_size                     = sizeof(init_ex);
+	init_ex.this_size                        = sizeof(init_ex);
+	init_ex.file_replacement                 = MakeHostFileReplacement(&host_file);
 	init_ex.event_replacement.event_callback = avplayer_test_event_cb;
-	init_ex.num_output_video_framebuffers = 2;
+	init_ex.num_output_video_framebuffers    = 2;
 
 	AvPlayer::AvPlayerInternal* handle = nullptr;
 	ASSERT_EQ(AvPlayer::AvPlayerInitEx(&init_ex, &handle), 0);
@@ -2290,28 +2412,69 @@ TEST(EmulatorAudio, AvPlayerSanitizesFileUriAndFiresEvents)
 	details.source_type = AvPlayer::AvPlayerSourceFileMp4;
 
 	ASSERT_EQ(AvPlayer::AvPlayerAddSourceEx(handle, AvPlayer::AvPlayerUriTypeSource, &details), 0);
-	EXPECT_EQ(g_avplayer_test_ready_events, 1);
+	// Functional sanitizer contract: the file:// prefix is removed and %20 is
+	// decoded, so the file callback receives exactly the original host name.
+	EXPECT_EQ(host_file.opened_uri, std::string(media_path));
+	EXPECT_EQ(g_avplayer_test_ready_events.load(), 1);
 	EXPECT_EQ(AvPlayer::AvPlayerStreamCount(handle), 2);
 
 	AvPlayer::AvPlayerStreamInfoEx video_stream {};
 	ASSERT_EQ(AvPlayer::AvPlayerGetStreamInfoEx(handle, 0, &video_stream), 0);
 	EXPECT_EQ(video_stream.type, AvPlayer::AvPlayerStreamVideo);
-	EXPECT_EQ(video_stream.details.video.width, 1920u);
-	EXPECT_EQ(video_stream.details.video.height, 1080u);
+	// Dimensions are read from the fixture's stream, not hardcoded.
+	const uint32_t stream_width  = video_stream.details.video.width;
+	const uint32_t stream_height = video_stream.details.video.height;
+	EXPECT_GT(stream_width, 0u);
+	EXPECT_GT(stream_height, 0u);
 
 	ASSERT_EQ(AvPlayer::AvPlayerStart(handle), 0);
 	EXPECT_EQ(AvPlayer::AvPlayerIsActive(handle), 1);
 
+	// Decoding is asynchronous: a pull that returns "not ready" is not the end of
+	// the stream. Poll until the player reports itself inactive, pulling video and
+	// audio so neither bounded decode queue holds the other back. The bound is the
+	// stream duration plus a margin, capped at 10 seconds (the owned fixture is 6 s).
+	const uint64_t duration_ms = video_stream.duration;
+	const auto     budget      = std::chrono::milliseconds(duration_ms == 0 ? 10000 : std::min<uint64_t>(duration_ms + 3000, 10000));
+	const auto     deadline    = std::chrono::steady_clock::now() + budget;
 	AvPlayer::AvPlayerFrameInfoEx frame {};
-	uint32_t frame_count = 0;
-	while (AvPlayer::AvPlayerGetVideoDataEx(handle, &frame) != 0)
+	AvPlayer::AvPlayerFrameInfo   audio {};
+	uint32_t                      frame_count = 0;
+	while (AvPlayer::AvPlayerIsActive(handle) != 0 && std::chrono::steady_clock::now() < deadline)
 	{
-		frame_count++;
+		bool progressed = false;
+		if (AvPlayer::AvPlayerGetVideoDataEx(handle, &frame) != 0)
+		{
+			EXPECT_EQ(frame.details.video.width, stream_width);
+			EXPECT_EQ(frame.details.video.height, stream_height);
+			frame_count++;
+			progressed = true;
+		}
+		if (AvPlayer::AvPlayerGetAudioData(handle, &audio) != 0)
+		{
+			progressed = true;
+		}
+		if (!progressed)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		}
+	}
+	// The end event may follow the inactive state from the player's thread.
+	while (g_avplayer_test_stop_events.load() == 0 && std::chrono::steady_clock::now() < deadline)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	const bool reached_end = AvPlayer::AvPlayerIsActive(handle) == 0;
+	if (!reached_end)
+	{
+		// Reclaim only this player on timeout, then fail.
+		ADD_FAILURE() << "player still active after " << budget.count() << " ms";
+		EXPECT_EQ(AvPlayer::AvPlayerStop(handle), 0);
 	}
 
-	EXPECT_EQ(frame_count, 90u);
-	EXPECT_EQ(AvPlayer::AvPlayerIsActive(handle), 0);
-	EXPECT_EQ(g_avplayer_test_stop_events, 1);
+	EXPECT_TRUE(reached_end);
+	EXPECT_GT(frame_count, 0u);
+	EXPECT_EQ(g_avplayer_test_stop_events.load(), 1);
 
 	EXPECT_EQ(AvPlayer::AvPlayerClose(handle), 0);
 }
@@ -2324,5 +2487,1826 @@ TEST(EmulatorAudio, AudioOutRejectsUnknownFormatsAndNullPointersBeforeTouchingTh
 	EXPECT_EQ(AudioOut::AudioOutSetVolume(1, 0u, nullptr), AUDIO_OUT_ERROR_INVALID_POINTER);
 }
 
+
+namespace {
+
+// Standard sampler red fixture. Layouts and IDs are candidates that are not
+// yet verified on a guest.
+constexpr uint32_t kSamplerRackId         = 0x1000;
+constexpr size_t   kSamplerOptionSize     = 0xd8;
+constexpr uint32_t kSamplerGrainFrames    = 256;
+constexpr uint32_t kSamplerSetupId        = 0x10000000u;
+constexpr uint32_t kSamplerBlocksId       = 0x10000001u;
+constexpr uint32_t kSamplerPlayEvent      = 1;
+constexpr uint32_t kCallbackParamId       = 0x7u;
+constexpr uint32_t kCallbackFlagEnd       = 0x1u;
+constexpr uint32_t kCallbackFlagRepeat    = 0x2u;
+// The blocks flag a native call site passes for a one-shot waveform (reset).
+constexpr uint32_t kBlocksFlagReset       = 0x4u;
+constexpr uint32_t kWaveformPcmI16        = 0x12u;
+constexpr uint32_t kWaveformPcmF32        = 0x18u;
+constexpr uint32_t kMaxSamplerCallbacks   = 4;
+constexpr int32_t  kSamplerInvalidControl = static_cast<int32_t>(0x804a0309u);
+
+// Ngs2WaveformBlock: 40 bytes, repeat count at +0x10.
+struct SamplerBlock
+{
+	uint64_t  data_offset;
+	uint64_t  data_size;
+	uint32_t  num_repeats;
+	uint32_t  num_skip_samples;
+	uint32_t  num_samples;
+	uint32_t  reserved;
+	uintptr_t user_data;
+};
+static_assert(sizeof(SamplerBlock) == 40);
+
+struct SamplerHeaderParam
+{
+	uint16_t size;
+	int16_t  next;
+	uint32_t id;
+};
+static_assert(sizeof(SamplerHeaderParam) == 8);
+
+// Setup param: header, the 24-byte format at +8, then a caller word at +0x20 and
+// a zero word at +0x24. The guest's builder writes size 0x28 (40).
+struct SamplerSetupParam
+{
+	SamplerHeaderParam header;
+	uint32_t           waveform_type;
+	uint32_t           num_channels;
+	uint32_t           sample_rate;
+	uint32_t           config_data;
+	uint32_t           frame_offset;
+	uint32_t           frame_margin;
+	uint32_t           flags;
+	uint32_t           reserved;
+};
+static_assert(sizeof(SamplerSetupParam) == 40);
+
+struct SamplerBlocksParam
+{
+	SamplerHeaderParam  header;
+	const void*         data;
+	uint32_t            flags;
+	uint32_t            num_blocks;
+	const SamplerBlock* blocks;
+};
+static_assert(sizeof(SamplerBlocksParam) == 32);
+
+struct SamplerCallbackParam
+{
+	SamplerHeaderParam header;
+	uintptr_t          callback;
+	uintptr_t          callback_data;
+	uint32_t           flags;
+	uint32_t           reserved;
+};
+static_assert(sizeof(SamplerCallbackParam) == 32);
+
+// Ngs2VoiceCallbackInfo: 56 bytes.
+struct SamplerCallbackInfo
+{
+	uintptr_t   callback_data;
+	uintptr_t   voice_handle;
+	uint32_t    flag;
+	uint32_t    reserved;
+	uintptr_t   user_data;
+	const void* block_data;
+	uint32_t    block_size;
+	uint32_t    num_repeated;
+	uint32_t    attributes;
+	uint32_t    reserved2;
+};
+static_assert(sizeof(SamplerCallbackInfo) == 56);
+
+struct SamplerCallbackRecord
+{
+	uint32_t  flag         = 0;
+	uint32_t  num_repeated = 0;
+	uintptr_t user_data    = 0;
+	uint32_t  block_size   = 0;
+};
+
+SamplerCallbackRecord g_sampler_callbacks[kMaxSamplerCallbacks] {};
+uint32_t              g_sampler_callback_count = 0;
+
+void KYTY_SYSV_ABI SamplerRecordCallback(const SamplerCallbackInfo* info)
+{
+	if (info != nullptr && g_sampler_callback_count < kMaxSamplerCallbacks)
+	{
+		g_sampler_callbacks[g_sampler_callback_count++] = {info->flag, info->num_repeated, info->user_data, info->block_size};
+	}
+}
+
+// Stands in for the guest runtime: the handler receives the info pointer.
+uint64_t KYTY_SYSV_ABI SamplerInvokeHandler(uint64_t target, uint64_t arg0, uint64_t arg1, uint64_t arg2)
+{
+	(void)arg1;
+	(void)arg2;
+	reinterpret_cast<void(KYTY_SYSV_ABI*)(const SamplerCallbackInfo*)>(target)(reinterpret_cast<const SamplerCallbackInfo*>(arg0));
+	return 0;
+}
+
+// Owns a sampler system, its rack and the first voice. The rack and system are
+// destroyed before their guest workspaces are released.
+struct SamplerRig
+{
+	std::unique_ptr<GuestReadableBlock> system_workspace;
+	std::unique_ptr<GuestReadableBlock> rack_workspace;
+	uintptr_t                           system = 0;
+	uintptr_t                           rack   = 0;
+	uintptr_t                           voice  = 0;
+
+	SamplerRig()                             = default;
+	SamplerRig(const SamplerRig&)            = delete;
+	SamplerRig& operator=(const SamplerRig&) = delete;
+	~SamplerRig()
+	{
+		if (rack != 0)
+		{
+			(void)Ngs2::Ngs2RackDestroy(rack, nullptr);
+		}
+		if (system != 0)
+		{
+			(void)Ngs2::Ngs2SystemDestroy(system);
+		}
+	}
+};
+
+bool CreateSamplerRigVoices(SamplerRig* rig, uint32_t voice_count)
+{
+	GuestReadableBlock    option_storage(kSamplerOptionSize);
+	GuestReadableBlock    system_info_storage(sizeof(uint64_t) * 8);
+	GuestReadableBlock    rack_info_storage(sizeof(uint64_t) * 8);
+	GuestValue<uintptr_t> system_handle_storage;
+	GuestValue<uintptr_t> rack_handle_storage;
+	GuestValue<uintptr_t> voice_handle_storage;
+	if (!option_storage.IsValid() || !system_info_storage.IsValid() || !rack_info_storage.IsValid() || !system_handle_storage.IsValid() ||
+	    !rack_handle_storage.IsValid() || !voice_handle_storage.IsValid())
+	{
+		return false;
+	}
+
+	// Candidate option layout: byte size at +0 and max_voices at +0x50.
+	auto* raw_option = static_cast<uint8_t*>(option_storage.Data());
+	std::memset(raw_option, 0, kSamplerOptionSize);
+	*reinterpret_cast<size_t*>(raw_option)          = kSamplerOptionSize;
+	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = voice_count;
+	const auto* option                              = reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option);
+
+	auto* raw_system_info = static_cast<uint64_t*>(system_info_storage.Data());
+	std::memset(raw_system_info, 0, sizeof(uint64_t) * 8);
+	auto* system_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_system_info);
+	if (Ngs2::Ngs2SystemQueryBufferSize(nullptr, system_info) != 0)
+	{
+		return false;
+	}
+	rig->system_workspace = std::make_unique<GuestReadableBlock>(raw_system_info[1]);
+	if (!rig->system_workspace->IsValid())
+	{
+		return false;
+	}
+	raw_system_info[0] = reinterpret_cast<uintptr_t>(rig->system_workspace->Data());
+	if (Ngs2::Ngs2SystemCreate(nullptr, system_info, system_handle_storage.Data()) != 0)
+	{
+		return false;
+	}
+	rig->system = *system_handle_storage.Data();
+
+	auto* raw_rack_info = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	if (Ngs2::Ngs2RackQueryBufferSize(kSamplerRackId, option, rack_info) != 0)
+	{
+		return false;
+	}
+	rig->rack_workspace = std::make_unique<GuestReadableBlock>(raw_rack_info[1]);
+	if (!rig->rack_workspace->IsValid())
+	{
+		return false;
+	}
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rig->rack_workspace->Data());
+	if (Ngs2::Ngs2RackCreate(rig->system, kSamplerRackId, option, rack_info, rack_handle_storage.Data()) != 0)
+	{
+		return false;
+	}
+	rig->rack = *rack_handle_storage.Data();
+	if (Ngs2::Ngs2RackGetVoiceHandle(rig->rack, 0, voice_handle_storage.Data()) != 0)
+	{
+		return false;
+	}
+	rig->voice = *voice_handle_storage.Data();
+	return rig->voice != 0;
+}
+
+bool CreateSamplerRig(SamplerRig* rig)
+{
+	return CreateSamplerRigVoices(rig, 1);
+}
+
+// Every parameter is copied into guest-readable storage first, as the guest does.
+template <typename T> int32_t VoiceControlWith(uintptr_t voice, const T& param)
+{
+	GuestReadableBlock storage(sizeof(T));
+	if (!storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	*static_cast<T*>(storage.Data()) = param;
+	return Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(storage.Data()));
+}
+
+SamplerHeaderParam MakeSamplerHeader(size_t size, uint32_t id)
+{
+	return {static_cast<uint16_t>(size), 0, id};
+}
+
+int32_t SetSamplerFormat(uintptr_t voice, uint32_t waveform_type, uint32_t channels, uint32_t sample_rate, uint32_t frame_offset = 0)
+{
+	SamplerSetupParam param {};
+	param.header        = MakeSamplerHeader(sizeof(param), kSamplerSetupId);
+	param.waveform_type = waveform_type;
+	param.num_channels  = channels;
+	param.sample_rate   = sample_rate;
+	param.frame_offset  = frame_offset;
+	return VoiceControlWith(voice, param);
+}
+
+int32_t AddSamplerBlocks(uintptr_t voice, const void* data, uint32_t flags, const SamplerBlock* blocks, uint32_t count)
+{
+	GuestReadableBlock block_storage(sizeof(SamplerBlock) * count);
+	if (!block_storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	std::memcpy(block_storage.Data(), blocks, sizeof(SamplerBlock) * count);
+	SamplerBlocksParam param {};
+	param.header     = MakeSamplerHeader(sizeof(param), kSamplerBlocksId);
+	param.data       = data;
+	param.flags      = flags;
+	param.num_blocks = count;
+	param.blocks     = static_cast<const SamplerBlock*>(block_storage.Data());
+	return VoiceControlWith(voice, param);
+}
+
+int32_t AddSamplerBlock(uintptr_t voice, const void* data, uint32_t flags, const SamplerBlock& block)
+{
+	return AddSamplerBlocks(voice, data, flags, &block, 1);
+}
+
+int32_t SetSamplerCallbackHandler(uintptr_t voice, uintptr_t handler, uint32_t flags)
+{
+	SamplerCallbackParam param {};
+	param.header        = MakeSamplerHeader(sizeof(param), kCallbackParamId);
+	param.callback      = handler;
+	param.callback_data = 0x1234;
+	param.flags         = flags;
+	return VoiceControlWith(voice, param);
+}
+
+int32_t SetSamplerCallback(uintptr_t voice, uint32_t flags)
+{
+	return SetSamplerCallbackHandler(voice, reinterpret_cast<uintptr_t>(&SamplerRecordCallback), flags);
+}
+
+int32_t RunSamplerEvent(uintptr_t voice, uint32_t event)
+{
+	GuestReadableBlock command_storage(sizeof(uint32_t) * 3);
+	if (!command_storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	auto* command = static_cast<uint32_t*>(command_storage.Data());
+	command[0]    = 2;     // event command
+	command[1]    = 0x400; // unsigned value type
+	command[2]    = event;
+	return Ngs2::Ngs2VoiceRunCommands(voice, command, 1);
+}
+
+// Renders one system grain of stereo float into guest memory.
+int32_t RenderSamplerGrain(uintptr_t system, void* output)
+{
+	GuestReadableBlock info_storage(sizeof(uint64_t) * 3);
+	if (!info_storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	auto* info = static_cast<uint64_t*>(info_storage.Data());
+	info[0]    = reinterpret_cast<uintptr_t>(output);
+	info[1]    = sizeof(float) * kSamplerGrainFrames * 2;
+	info[2]    = (uint64_t {2} << 32u) | kWaveformPcmF32;
+	return Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(info), 1);
+}
+
+} // namespace
+
+TEST(EmulatorAudio, StandardSamplerRendersLinearlyResampledPcm)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+
+	// Mono ramp at 24 kHz: sample i is i / 8 of full scale.
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 8);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	for (int16_t i = 0; i < 8; i++)
+	{
+		pcm[i] = static_cast<int16_t>(i * 4096);
+	}
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 24000), 0);
+	SamplerBlock block {};
+	block.data_size   = sizeof(int16_t) * 8;
+	block.num_samples = 8;
+	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	const auto* output = static_cast<const float*>(output_storage.Data());
+
+	// Output frame k reads source position k / 2. Odd frames interpolate toward
+	// the next sample; the last sample has no successor and repeats itself.
+	for (uint32_t k = 0; k < 16; k++)
+	{
+		const auto  half     = static_cast<float>(k / 2);
+		const float expected = (k % 2 == 1 && k < 15 ? half + 0.5f : half) * 0.125f;
+		EXPECT_NEAR(output[2 * k], expected, 1e-5f);
+		EXPECT_NEAR(output[2 * k + 1], expected, 1e-5f);
+	}
+	// The voice ends after its last sample, so the rest of the grain is silent.
+	for (uint32_t k = 16; k < kSamplerGrainFrames; k++)
+	{
+		EXPECT_EQ(output[2 * k], 0.0f);
+		EXPECT_EQ(output[2 * k + 1], 0.0f);
+	}
+}
+
+TEST(EmulatorAudio, StandardSamplerRefusesRepeatCallbacksAndReportsTheEndAfterRepeats)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+
+	// Four samples at the system rate, played twice before the block ends.
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 4);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	pcm[0]    = 1000;
+	pcm[1]    = 2000;
+	pcm[2]    = 3000;
+	pcm[3]    = 4000;
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000), 0);
+	SamplerBlock block {};
+	block.data_size   = sizeof(int16_t) * 4;
+	block.num_repeats = 1;
+	block.num_samples = 4;
+	block.user_data   = 0x5a5a;
+	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, block), 0);
+
+	// The repeat flag and its callback layout are not confirmed on a guest, so a
+	// registration asking for it is refused rather than accepted and dropped.
+	EXPECT_EQ(SetSamplerCallback(rig.voice, kCallbackFlagEnd | kCallbackFlagRepeat), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerCallback(rig.voice, kCallbackFlagRepeat), kSamplerInvalidControl);
+	ASSERT_EQ(SetSamplerCallback(rig.voice, kCallbackFlagEnd), 0);
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	::Kyty::Emulator::GuestRuntimePort::Provider provider {};
+	provider.invoke = SamplerInvokeHandler;
+	::Kyty::Emulator::GuestRuntimePort::Install(provider);
+	g_sampler_callback_count    = 0;
+	const int32_t play_result   = RunSamplerEvent(rig.voice, kSamplerPlayEvent);
+	const int32_t render_result = RenderSamplerGrain(rig.system, output_storage.Data());
+	::Kyty::Emulator::GuestRuntimePort::Install({});
+	ASSERT_EQ(play_result, 0);
+	ASSERT_EQ(render_result, 0);
+
+	// The repeat pass plays; the end of the block is reported once. flag (+0x10)
+	// and user data (+0x18) are at confirmed offsets. num_repeated (+0x2c) and
+	// block_size (+0x28) sit at inferred classic offsets: this checks Kyty's own
+	// round-trip of that layout, not a confirmed native ABI.
+	ASSERT_EQ(g_sampler_callback_count, 1u);
+	EXPECT_EQ(g_sampler_callbacks[0].flag, kCallbackFlagEnd);
+	EXPECT_EQ(g_sampler_callbacks[0].num_repeated, 1u);
+	EXPECT_EQ(g_sampler_callbacks[0].user_data, 0x5a5au);
+	EXPECT_EQ(g_sampler_callbacks[0].block_size, sizeof(int16_t) * 4);
+
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	for (uint32_t k = 0; k < 8; k++)
+	{
+		const float expected = static_cast<float>(pcm[k % 4]) / 32768.0f;
+		EXPECT_NEAR(output[2 * k], expected, 1e-5f);
+		EXPECT_NEAR(output[2 * k + 1], expected, 1e-5f);
+	}
+	EXPECT_EQ(output[2 * 8], 0.0f);
+}
+
+TEST(EmulatorAudio, StandardSamplerRejectsUnsupportedContractsWithoutChangingVoice)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 4);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	pcm[0]    = 1000;
+	pcm[1]    = 2000;
+	pcm[2]    = 3000;
+	pcm[3]    = 4000;
+	SamplerBlock valid {};
+	valid.data_size   = sizeof(int16_t) * 4;
+	valid.num_samples = 4;
+
+	// Setup accepts PCM16 and PCM float with one or two channels, a nonzero rate,
+	// no frame offset and zero trailing words.
+	EXPECT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmF32, 3, 48000), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerFormat(rig.voice, 0x13u, 1, 48000), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 0, 48000), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 3, 48000), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 0), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000, 16), kSamplerInvalidControl);
+	SamplerSetupParam flagged {};
+	flagged.header        = MakeSamplerHeader(sizeof(flagged), kSamplerSetupId);
+	flagged.waveform_type = kWaveformPcmI16;
+	flagged.num_channels  = 1;
+	flagged.sample_rate   = 48000;
+	flagged.flags         = 1;
+	EXPECT_EQ(VoiceControlWith(rig.voice, flagged), kSamplerInvalidControl);
+
+	// Blocks need a configured format.
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, valid), kSamplerInvalidControl);
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000), 0);
+
+	// Only the reset flag has a native caller; other flag values are refused.
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), 0, valid), kSamplerInvalidControl);
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), 0x1, valid), kSamplerInvalidControl);
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), 0x2, valid), kSamplerInvalidControl);
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset | 0x1, valid), kSamplerInvalidControl);
+
+	// Blocks must be non-empty spans inside readable data.
+	SamplerBlock empty = valid;
+	empty.num_samples  = 0;
+	empty.data_size    = 0;
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, empty), kSamplerInvalidControl);
+	SamplerBlock overrun = valid;
+	overrun.num_samples  = 5;
+	EXPECT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, overrun), kSamplerInvalidControl);
+	EXPECT_EQ(AddSamplerBlock(rig.voice, reinterpret_cast<const void*>(uintptr_t {1}), kBlocksFlagReset, valid), kSamplerInvalidControl);
+
+	// Play without queued samples fails.
+	EXPECT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), kSamplerInvalidControl);
+
+	// Rejected calls leave the queue unchanged: the one valid block plays exactly.
+	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, valid), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	for (uint32_t k = 0; k < 4; k++)
+	{
+		EXPECT_NEAR(output[2 * k], static_cast<float>(pcm[k]) / 32768.0f, 1e-5f);
+	}
+	EXPECT_EQ(output[2 * 4], 0.0f);
+
+	// Unknown sampler controls fail instead of being ignored.
+	const SamplerHeaderParam unknown = MakeSamplerHeader(sizeof(SamplerHeaderParam), 0x10000002u);
+	EXPECT_EQ(VoiceControlWith(rig.voice, unknown), kSamplerInvalidControl);
+}
+
+namespace {
+
+namespace AudioVideoBackend = ::Kyty::Emulator::AudioVideoBackend;
+
+constexpr uint32_t kSamplerPitchId = 0x10000005u;
+constexpr uint32_t kWaveformAtrac9 = 0x40u;
+// Mono, 48 kHz (rate index 7), 256-byte frames, four frames per superframe. The
+// decoder derives 1024 samples per 1024-byte superframe from it.
+constexpr uint8_t  kSyntheticAtrac9Config[4]  = {0xfe, 0x70, 0x1f, 0xf0};
+constexpr uint32_t kSyntheticAtrac9ConfigData = 0xf01f70feu; // config bytes as a little-endian word
+constexpr uint32_t kSyntheticAtrac9Rate       = 48000;
+constexpr uint32_t kSyntheticAtrac9Superframe = 1024;
+
+struct SamplerPitchParam
+{
+	SamplerHeaderParam header;
+	float              ratio;
+	uint32_t           reserved;
+};
+static_assert(sizeof(SamplerPitchParam) == 16);
+
+int32_t SetSamplerPitch(uintptr_t voice, float ratio)
+{
+	SamplerPitchParam param {};
+	param.header = MakeSamplerHeader(sizeof(param), kSamplerPitchId);
+	param.ratio  = ratio;
+	return VoiceControlWith(voice, param);
+}
+
+int32_t RunSamplerGain(uintptr_t voice, float gain)
+{
+	GuestReadableBlock command_storage(sizeof(uint32_t) * 3);
+	if (!command_storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	auto* command = static_cast<uint32_t*>(command_storage.Data());
+	command[0]    = 6;     // port volume
+	command[1]    = 0x100; // float value type
+	std::memcpy(&command[2], &gain, sizeof(gain));
+	return Ngs2::Ngs2VoiceRunCommands(voice, command, 1);
+}
+
+void AppendLe(std::vector<uint8_t>* out, uint64_t value, size_t bytes)
+{
+	for (size_t i = 0; i < bytes; i++)
+	{
+		out->push_back(static_cast<uint8_t>(value >> (8u * i)));
+	}
+}
+
+void AppendBytes(std::vector<uint8_t>* out, const void* data, size_t size)
+{
+	const auto* bytes = static_cast<const uint8_t*>(data);
+	out->insert(out->end(), bytes, bytes + size);
+}
+
+// RIFF/WAVE with an ATRAC9 extensible fmt (52 bytes), a fact chunk and an empty
+// data chunk. The 12-byte format tail is version, config, reserved.
+std::vector<uint8_t> BuildSyntheticAtrac9Riff(uint32_t channels, uint32_t rate, uint32_t fact_samples)
+{
+	const uint8_t kGuid[16] = {0xd2, 0x42, 0xe1, 0x47, 0xba, 0x36, 0x8d, 0x4d, 0x88, 0xfc, 0x61, 0x65, 0x4f, 0x8c, 0x83, 0x6c};
+	std::vector<uint8_t> riff;
+	AppendBytes(&riff, "RIFF", 4);
+	AppendLe(&riff, 0, 4);
+	AppendBytes(&riff, "WAVE", 4);
+	AppendBytes(&riff, "fmt ", 4);
+	AppendLe(&riff, 52, 4);
+	AppendLe(&riff, 0xfffe, 2);
+	AppendLe(&riff, channels, 2);
+	AppendLe(&riff, rate, 4);
+	AppendLe(&riff, 0, 4);
+	AppendLe(&riff, kSyntheticAtrac9Superframe, 2);
+	AppendLe(&riff, 0, 2);
+	AppendLe(&riff, 34, 2);
+	AppendLe(&riff, kSyntheticAtrac9Superframe, 2);
+	AppendLe(&riff, 0, 4);
+	AppendBytes(&riff, kGuid, sizeof(kGuid));
+	AppendLe(&riff, 0, 4);
+	AppendBytes(&riff, kSyntheticAtrac9Config, sizeof(kSyntheticAtrac9Config));
+	AppendLe(&riff, 0, 4);
+	AppendBytes(&riff, "fact", 4);
+	AppendLe(&riff, 12, 4);
+	AppendLe(&riff, fact_samples, 4);
+	AppendLe(&riff, 0, 4);
+	AppendLe(&riff, 0, 4);
+	AppendBytes(&riff, "data", 4);
+	AppendLe(&riff, 0, 4);
+	const auto riff_size = static_cast<uint64_t>(riff.size() - 8);
+	for (size_t i = 0; i < 4; i++)
+	{
+		riff[4 + i] = static_cast<uint8_t>(riff_size >> (8u * i));
+	}
+	return riff;
+}
+
+// Writes bits most significant first, as the ATRAC9 bitstream reads them.
+class BitWriter
+{
+public:
+	void Put(uint32_t value, uint32_t count)
+	{
+		for (uint32_t i = count; i-- > 0;)
+		{
+			m_bits.push_back(static_cast<uint8_t>((value >> i) & 1u));
+		}
+	}
+	void Align()
+	{
+		while (m_bits.size() % 8 != 0)
+		{
+			m_bits.push_back(0);
+		}
+	}
+	[[nodiscard]] std::vector<uint8_t> Bytes() const
+	{
+		std::vector<uint8_t> bytes(m_bits.size() / 8, 0);
+		for (size_t i = 0; i < bytes.size() * 8; i++)
+		{
+			bytes[i / 8] = static_cast<uint8_t>(bytes[i / 8] | (m_bits[i] << (7u - i % 8u)));
+		}
+		return bytes;
+	}
+
+private:
+	std::vector<uint8_t> m_bits;
+};
+
+// One silent mono frame, built from the decoder's public bitstream rules: new
+// block parameters with three bands, no band extension, a gradient whose curve
+// starts past the ten coded units (gradient 0 everywhere), fixed-length
+// scalefactors of 9 (coarse precision 9, so coefficients are 10-bit fixed
+// fields), and 24 zero coefficients.
+void PutSilentAtrac9Frame(BitWriter* writer)
+{
+	writer->Put(0, 1);  // first block in the packet
+	writer->Put(0, 1);  // parameters not reused
+	writer->Put(0, 4);  // band count 3
+	writer->Put(0, 1);  // no band extension
+	writer->Put(0, 2);  // gradient mode 0
+	writer->Put(30, 6); // gradient range start
+	writer->Put(30, 6); // gradient range end - 1
+	writer->Put(0, 5);  // gradient value start
+	writer->Put(0, 5);  // gradient value end
+	writer->Put(0, 4);  // gradient boundary
+	writer->Put(0, 1);  // no band extension data
+	writer->Put(1, 2);  // scalefactors: fixed length
+	writer->Put(2, 2);  // length 4
+	writer->Put(9, 5);  // base 9
+	for (int unit = 0; unit < 10; unit++)
+	{
+		writer->Put(0, 4);
+	}
+	for (int coefficient = 0; coefficient < 24; coefficient++)
+	{
+		writer->Put(0, 10);
+	}
+	writer->Align();
+}
+
+std::vector<uint8_t> BuildSilentAtrac9Superframe()
+{
+	BitWriter writer;
+	for (int frame = 0; frame < 4; frame++)
+	{
+		PutSilentAtrac9Frame(&writer);
+	}
+	auto bytes = writer.Bytes();
+	bytes.resize(kSyntheticAtrac9Superframe, 0);
+	return bytes;
+}
+
+int32_t SetSamplerAtrac9Format(uintptr_t voice, uint32_t channels, uint32_t sample_rate, uint32_t config_data)
+{
+	SamplerSetupParam param {};
+	param.header        = MakeSamplerHeader(sizeof(param), kSamplerSetupId);
+	param.waveform_type = kWaveformAtrac9;
+	param.num_channels  = channels;
+	param.sample_rate   = sample_rate;
+	param.config_data   = config_data;
+	return VoiceControlWith(voice, param);
+}
+
+// Targets of callbacks that destroy their own objects from the dispatch step.
+struct SamplerReentryTarget
+{
+	uintptr_t system = 0;
+	uintptr_t rack   = 0;
+};
+
+SamplerReentryTarget g_sampler_reentry {};
+
+void KYTY_SYSV_ABI SamplerDestroySystemCallback(const SamplerCallbackInfo* info)
+{
+	SamplerRecordCallback(info);
+	(void)Ngs2::Ngs2SystemDestroy(g_sampler_reentry.system);
+}
+
+void KYTY_SYSV_ABI SamplerDestroyRackCallback(const SamplerCallbackInfo* info)
+{
+	SamplerRecordCallback(info);
+	(void)Ngs2::Ngs2RackDestroy(g_sampler_reentry.rack, nullptr);
+}
+
+// Queues two 2-frame blocks (user data 1 and 2) in one reset add, so a single
+// grain ends both and queues two callbacks for handler, then renders that grain
+// with the guest route installed. Returns the render result.
+int32_t RenderTwoBlockEnds(SamplerRig* rig, uintptr_t handler, GuestReadableBlock* pcm_storage, GuestReadableBlock* output_storage)
+{
+	auto* pcm = static_cast<int16_t*>(pcm_storage->Data());
+	pcm[0]    = 1000;
+	pcm[1]    = 2000;
+	pcm[2]    = 3000;
+	pcm[3]    = 4000;
+	SamplerBlock blocks[2] {};
+	blocks[0].data_offset = 0;
+	blocks[0].data_size   = sizeof(int16_t) * 2;
+	blocks[0].num_samples = 2;
+	blocks[0].user_data   = 1;
+	blocks[1].data_offset = sizeof(int16_t) * 2;
+	blocks[1].data_size   = sizeof(int16_t) * 2;
+	blocks[1].num_samples = 2;
+	blocks[1].user_data   = 2;
+	if (SetSamplerFormat(rig->voice, kWaveformPcmI16, 1, 48000) != 0 ||
+	    AddSamplerBlocks(rig->voice, pcm_storage->Data(), kBlocksFlagReset, blocks, 2) != 0 ||
+	    SetSamplerCallbackHandler(rig->voice, handler, kCallbackFlagEnd) != 0 || RunSamplerEvent(rig->voice, kSamplerPlayEvent) != 0)
+	{
+		return kSamplerInvalidControl;
+	}
+	g_sampler_reentry        = {rig->system, rig->rack};
+	g_sampler_callback_count = 0;
+	::Kyty::Emulator::GuestRuntimePort::Provider provider {};
+	provider.invoke = SamplerInvokeHandler;
+	::Kyty::Emulator::GuestRuntimePort::Install(provider);
+	const int32_t result = RenderSamplerGrain(rig->system, output_storage->Data());
+	::Kyty::Emulator::GuestRuntimePort::Install({});
+	g_sampler_reentry = {};
+	return result;
+}
+
+} // namespace
+
+TEST(EmulatorAudio, StandardSamplerDeliversEveryBlockEndInQueueOrder)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 4);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(pcm_storage.IsValid() && output_storage.IsValid());
+	ASSERT_EQ(RenderTwoBlockEnds(&rig, reinterpret_cast<uintptr_t>(&SamplerRecordCallback), &pcm_storage, &output_storage), 0);
+
+	// Without any destroy both ends are delivered, in order, with their own user data.
+	ASSERT_EQ(g_sampler_callback_count, 2u);
+	EXPECT_EQ(g_sampler_callbacks[0].user_data, 1u);
+	EXPECT_EQ(g_sampler_callbacks[1].user_data, 2u);
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	EXPECT_NEAR(output[2 * 2], 3000.0f / 32768.0f, 1e-5f);
+}
+
+TEST(EmulatorAudio, StandardSamplerSkipsQueuedCallbacksAfterACallbackDestroysTheSystem)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 4);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(pcm_storage.IsValid() && output_storage.IsValid());
+	const int32_t result =
+	    RenderTwoBlockEnds(&rig, reinterpret_cast<uintptr_t>(&SamplerDestroySystemCallback), &pcm_storage, &output_storage);
+
+	// The output reached the guest before dispatch. The first callback destroyed
+	// the system, so the second queued callback did not run.
+	EXPECT_EQ(result, 0);
+	ASSERT_EQ(g_sampler_callback_count, 1u);
+	EXPECT_EQ(g_sampler_callbacks[0].user_data, 1u);
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	EXPECT_NEAR(output[0], 1000.0f / 32768.0f, 1e-5f);
+	EXPECT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), static_cast<int32_t>(0x804a0201u));
+	rig.system = 0;
+	rig.rack   = 0;
+}
+
+TEST(EmulatorAudio, StandardSamplerSkipsQueuedCallbacksAfterACallbackDestroysTheRack)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 4);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(pcm_storage.IsValid() && output_storage.IsValid());
+	const int32_t result =
+	    RenderTwoBlockEnds(&rig, reinterpret_cast<uintptr_t>(&SamplerDestroyRackCallback), &pcm_storage, &output_storage);
+
+	EXPECT_EQ(result, 0);
+	ASSERT_EQ(g_sampler_callback_count, 1u);
+	EXPECT_EQ(g_sampler_callbacks[0].user_data, 1u);
+	GuestValue<uintptr_t> voice_storage;
+	ASSERT_TRUE(voice_storage.IsValid());
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rig.rack, 0, voice_storage.Data()), static_cast<int32_t>(0x804a0261u));
+	// The system outlives its destroyed rack and still renders.
+	EXPECT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	rig.rack = 0;
+}
+
+TEST(EmulatorAudio, StandardSamplerBoundsPitchAndKeepsTheMixFinite)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmF32, 1, 48000), 0);
+
+	// A finite pitch such as FLT_MAX would mean about 1e38 source frames per output
+	// frame. The host limit is 16.
+	EXPECT_EQ(SetSamplerPitch(rig.voice, std::numeric_limits<float>::max()), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerPitch(rig.voice, 16.5f), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerPitch(rig.voice, -1.0f), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerPitch(rig.voice, std::numeric_limits<float>::quiet_NaN()), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerPitch(rig.voice, 16.0f), 0);
+	EXPECT_EQ(SetSamplerPitch(rig.voice, 1.0f), 0);
+
+	// Non-finite float samples are refused when the block is added.
+	GuestReadableBlock float_storage(sizeof(float) * 4);
+	ASSERT_TRUE(float_storage.IsValid());
+	auto* samples = static_cast<float*>(float_storage.Data());
+	SamplerBlock block {};
+	block.data_size   = sizeof(float) * 4;
+	block.num_samples = 4;
+	samples[0]        = 0.5f;
+	samples[1]        = std::numeric_limits<float>::quiet_NaN();
+	samples[2]        = 0.0f;
+	samples[3]        = 0.0f;
+	EXPECT_EQ(AddSamplerBlock(rig.voice, float_storage.Data(), kBlocksFlagReset, block), kSamplerInvalidControl);
+	samples[1] = std::numeric_limits<float>::infinity();
+	EXPECT_EQ(AddSamplerBlock(rig.voice, float_storage.Data(), kBlocksFlagReset, block), kSamplerInvalidControl);
+
+	// A finite gain far above full scale still yields a finite, clamped mix.
+	samples[0] = 0.5f;
+	samples[1] = 0.5f;
+	samples[2] = -0.5f;
+	samples[3] = -0.5f;
+	ASSERT_EQ(AddSamplerBlock(rig.voice, float_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(RunSamplerGain(rig.voice, std::numeric_limits<float>::max()), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	for (uint32_t i = 0; i < kSamplerGrainFrames * 2; i++)
+	{
+		ASSERT_TRUE(std::isfinite(output[i]));
+	}
+	EXPECT_EQ(output[0], 1.0f);
+	EXPECT_EQ(output[2 * 2], -1.0f);
+}
+
+TEST(EmulatorAudio, StandardSamplerRefusesWaveformsAboveTheSampleBudgetAtomically)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 2, 48000), 0);
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 8);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	for (int i = 0; i < 8; i++)
+	{
+		pcm[i] = static_cast<int16_t>(1000 * (i + 1));
+	}
+	SamplerBlock small {};
+	small.data_size   = sizeof(int16_t) * 8;
+	small.num_samples = 4;
+	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, small), 0);
+
+	// Three blocks of 1.5M stereo frames take 36 MiB of float frames, above the
+	// 32 MiB voice budget. The headers alone decide it; the add changes nothing.
+	SamplerBlock large[3] {};
+	for (auto& block: large)
+	{
+		block.num_samples = 1572864;
+		block.data_size   = static_cast<uint64_t>(block.num_samples) * 2 * sizeof(int16_t);
+	}
+	EXPECT_EQ(AddSamplerBlocks(rig.voice, pcm_storage.Data(), kBlocksFlagReset, large, 3), kSamplerInvalidControl);
+
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	EXPECT_NEAR(output[0], 1000.0f / 32768.0f, 1e-5f);
+	EXPECT_NEAR(output[1], 2000.0f / 32768.0f, 1e-5f);
+}
+
+TEST(EmulatorAudio, Ngs2SamplerPlaybackResamplesToTheGivenOutputRate)
+{
+	Ngs2Sampler::Playback playback;
+	ASSERT_TRUE(playback.Configure(1, 48000));
+	std::vector<Ngs2Sampler::Block> blocks(1);
+	blocks[0].frames      = {0.0f, 0.25f, 0.5f, 0.75f};
+	blocks[0].num_samples = 4;
+	ASSERT_TRUE(playback.ReplaceQueue(std::move(blocks)));
+	playback.SetPlaying(true);
+
+	// A 48 kHz source mixed at 24 kHz advances two source frames per output frame.
+	std::vector<double>             stereo(16, 0.0);
+	std::vector<Ngs2Sampler::Event> events;
+	ASSERT_TRUE(playback.Render(8, 24000, stereo.data(), &events));
+	EXPECT_DOUBLE_EQ(stereo[0], 0.0);
+	EXPECT_DOUBLE_EQ(stereo[2], 0.5);
+	EXPECT_DOUBLE_EQ(stereo[3], 0.5);
+	EXPECT_EQ(stereo[4], 0.0);
+	ASSERT_EQ(events.size(), 1u);
+	EXPECT_EQ(events[0].user_data, 0u);
+	EXPECT_TRUE(playback.Ended());
+	EXPECT_EQ(playback.DecodedFrames(), 4u);
+}
+
+TEST(EmulatorAudio, Ngs2SamplerPlaybackRefusesUnboundedSteps)
+{
+	Ngs2Sampler::Playback playback;
+	ASSERT_TRUE(playback.Configure(1, 192000));
+	EXPECT_FALSE(playback.SetPitch(std::numeric_limits<float>::max()));
+	EXPECT_FALSE(playback.SetPitch(std::numeric_limits<float>::infinity()));
+	EXPECT_FALSE(playback.SetPitch(std::numeric_limits<float>::quiet_NaN()));
+	ASSERT_TRUE(playback.SetPitch(16.0f));
+	std::vector<Ngs2Sampler::Block> blocks(1);
+	blocks[0].frames      = {0.25f, 0.25f, 0.25f, 0.25f};
+	blocks[0].num_samples = 4;
+	ASSERT_TRUE(playback.ReplaceQueue(std::move(blocks)));
+	playback.SetPlaying(true);
+
+	// 192 kHz at pitch 16 is 64 source frames per output frame at 48 kHz, the
+	// limit. At 24 kHz it would be 128, so nothing is rendered and no state moves.
+	std::vector<double>             stereo(8, 0.0);
+	std::vector<Ngs2Sampler::Event> events;
+	EXPECT_FALSE(playback.Render(4, 24000, stereo.data(), &events));
+	EXPECT_TRUE(events.empty());
+	EXPECT_EQ(playback.DecodedFrames(), 0u);
+	EXPECT_EQ(stereo[0], 0.0);
+
+	ASSERT_TRUE(playback.Render(4, 48000, stereo.data(), &events));
+	EXPECT_DOUBLE_EQ(stereo[0], 0.25);
+	EXPECT_EQ(stereo[2], 0.0);
+	ASSERT_EQ(events.size(), 1u);
+	EXPECT_TRUE(playback.Ended());
+}
+
+TEST(EmulatorAudio, Ngs2Atrac9ParseReportsSuperframeInfoFromRiffHeader)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	const auto riff = BuildSyntheticAtrac9Riff(1, kSyntheticAtrac9Rate, 2048);
+	GuestReadableBlock data_storage(riff.size());
+	ASSERT_TRUE(data_storage.IsValid());
+	std::memcpy(data_storage.Data(), riff.data(), riff.size());
+	GuestReadableBlock info_storage(232);
+	ASSERT_TRUE(info_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2ParseWaveformData(data_storage.Data(), riff.size(), reinterpret_cast<Ngs2::Ngs2WaveformInfo*>(info_storage.Data())), 0);
+
+	// Ngs2WaveformInfo offsets: format at 0, num_samples 0x28, audio unit 0x2c,
+	// audio frame 0x38 and 0x3c, num_blocks 0x44.
+	const auto* words = static_cast<const uint32_t*>(info_storage.Data());
+	EXPECT_EQ(words[0], kWaveformAtrac9);
+	EXPECT_EQ(words[1], 1u);
+	EXPECT_EQ(words[2], kSyntheticAtrac9Rate);
+	EXPECT_EQ(words[3], kSyntheticAtrac9ConfigData);
+	EXPECT_EQ(words[0x28 / 4], 2048u);
+	EXPECT_EQ(words[0x2c / 4], 256u);
+	EXPECT_EQ(words[0x38 / 4], kSyntheticAtrac9Superframe);
+	EXPECT_EQ(words[0x3c / 4], kSyntheticAtrac9Superframe);
+	EXPECT_EQ(words[0x44 / 4], 1u);
+}
+
+TEST(EmulatorAudio, ElementaryAudioDecoderOpensOnlyWithAMatchingTwelveByteConfig)
+{
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		return;
+	}
+	using AudioVideoBackend::AudioCodec;
+	using AudioVideoBackend::ElementaryAudioDecoder;
+
+	const uint8_t extradata[12] = {0, 0, 0, 0, 0xfe, 0x70, 0x1f, 0xf0, 0, 0, 0, 0};
+	std::string   error;
+	auto          decoder = ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, sizeof(extradata), 1024, 1, kSyntheticAtrac9Rate, &error);
+	EXPECT_TRUE(decoder != nullptr) << error;
+	if (decoder != nullptr)
+	{
+		std::vector<float> pcm;
+		EXPECT_FALSE(decoder->Decode(extradata, 11, &pcm));
+	}
+
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, 11, 1024, 1, kSyntheticAtrac9Rate, &error));
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, 13, 1024, 1, kSyntheticAtrac9Rate, &error));
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, sizeof(extradata), 0, 1, kSyntheticAtrac9Rate, &error));
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, sizeof(extradata), 8193, 1, kSyntheticAtrac9Rate, &error));
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, sizeof(extradata), 1024, 2, kSyntheticAtrac9Rate, &error));
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, sizeof(extradata), 1024, 9, kSyntheticAtrac9Rate, &error));
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, sizeof(extradata), 1024, 1, 44100, &error));
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, sizeof(extradata), 1024, 1, 192001, &error));
+
+	uint8_t bad_version[12] = {};
+	std::memcpy(bad_version, extradata, sizeof(extradata));
+	bad_version[0] = 3;
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, bad_version, sizeof(bad_version), 1024, 1, kSyntheticAtrac9Rate, &error));
+
+	uint8_t bad_sync[12] = {};
+	std::memcpy(bad_sync, extradata, sizeof(extradata));
+	bad_sync[4] = 0x00;
+	EXPECT_FALSE(ElementaryAudioDecoder::Open(AudioCodec::Atrac9, bad_sync, sizeof(bad_sync), 1024, 1, kSyntheticAtrac9Rate, &error));
+}
+
+TEST(EmulatorAudio, ElementaryAudioDecoderDecodesAGeneratedSilentSuperframe)
+{
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		return;
+	}
+	using AudioVideoBackend::AudioCodec;
+	using AudioVideoBackend::ElementaryAudioDecoder;
+
+	const uint8_t extradata[12] = {0, 0, 0, 0, 0xfe, 0x70, 0x1f, 0xf0, 0, 0, 0, 0};
+	std::string   error;
+	auto decoder = ElementaryAudioDecoder::Open(AudioCodec::Atrac9, extradata, sizeof(extradata), kSyntheticAtrac9Superframe, 1,
+	                                            kSyntheticAtrac9Rate, &error);
+	ASSERT_TRUE(decoder != nullptr) << error;
+
+	const auto         superframe = BuildSilentAtrac9Superframe();
+	std::vector<float> pcm;
+	ASSERT_TRUE(decoder->Decode(superframe.data(), superframe.size(), &pcm)) << decoder->LastError();
+	ASSERT_EQ(pcm.size(), static_cast<size_t>(kSyntheticAtrac9Superframe));
+	for (const float sample: pcm)
+	{
+		ASSERT_EQ(sample, 0.0f);
+	}
+	// After a reset the same superframe starts a new stream and decodes the same way.
+	decoder->Reset();
+	ASSERT_TRUE(decoder->Decode(superframe.data(), superframe.size(), &pcm)) << decoder->LastError();
+	EXPECT_EQ(pcm.size(), static_cast<size_t>(kSyntheticAtrac9Superframe));
+
+	// Bytes that are not a superframe fail instead of decoding to silence.
+	const std::vector<uint8_t> zeros(kSyntheticAtrac9Superframe, 0);
+	EXPECT_FALSE(decoder->Decode(zeros.data(), zeros.size(), &pcm));
+}
+
+TEST(EmulatorAudio, StandardSamplerAtrac9SetupRequiresConfigThatMatchesTheFormat)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		return;
+	}
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	EXPECT_EQ(SetSamplerAtrac9Format(rig.voice, 2, kSyntheticAtrac9Rate, kSyntheticAtrac9ConfigData), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerAtrac9Format(rig.voice, 1, 44100, kSyntheticAtrac9ConfigData), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerAtrac9Format(rig.voice, 1, kSyntheticAtrac9Rate, 0u), kSamplerInvalidControl);
+	EXPECT_EQ(SetSamplerAtrac9Format(rig.voice, 1, kSyntheticAtrac9Rate, kSyntheticAtrac9ConfigData), 0);
+}
+
+TEST(EmulatorAudio, StandardSamplerPlaysGeneratedAtrac9Superframes)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	if (!AudioVideoBackend::Decoder::IsAvailable())
+	{
+		return;
+	}
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	ASSERT_EQ(SetSamplerAtrac9Format(rig.voice, 1, kSyntheticAtrac9Rate, kSyntheticAtrac9ConfigData), 0);
+
+	const auto         superframe = BuildSilentAtrac9Superframe();
+	GuestReadableBlock data_storage(superframe.size() * 3);
+	ASSERT_TRUE(data_storage.IsValid());
+	for (size_t i = 0; i < 3; i++)
+	{
+		std::memcpy(static_cast<uint8_t*>(data_storage.Data()) + i * superframe.size(), superframe.data(), superframe.size());
+	}
+
+	// Skip 100 frames and play 1500: the block needs two superframes. The frames
+	// are silent, so this exercises the two-superframe decode path and frame count;
+	// it does not prove the skip lands at the right sample (content is all zero).
+	SamplerBlock block {};
+	block.data_size        = superframe.size() * 3;
+	block.num_skip_samples = 100;
+	block.num_samples      = 1500;
+	ASSERT_EQ(AddSamplerBlock(rig.voice, data_storage.Data(), kBlocksFlagReset, block), 0);
+
+	// A block needing more superframes than its data holds is refused, and the
+	// queued waveform stays.
+	SamplerBlock too_long = block;
+	too_long.num_samples  = 4000;
+	EXPECT_EQ(AddSamplerBlock(rig.voice, data_storage.Data(), kBlocksFlagReset, too_long), kSamplerInvalidControl);
+
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	for (uint32_t i = 0; i < kSamplerGrainFrames * 2; i++)
+	{
+		ASSERT_EQ(output[i], 0.0f);
+	}
+
+	// The voice state reports the decoded frames at +0x10.
+	GuestReadableBlock state_storage(48);
+	ASSERT_TRUE(state_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2VoiceGetState(rig.voice, static_cast<Ngs2::Ngs2VoiceState*>(state_storage.Data()), 48), 0);
+	uint64_t decoded = 0;
+	std::memcpy(&decoded, static_cast<const uint8_t*>(state_storage.Data()) + 0x10, sizeof(decoded));
+	EXPECT_EQ(decoded, static_cast<uint64_t>(kSamplerGrainFrames));
+}
+
+TEST(EmulatorAudio, StandardSamplerPlaysAtrac9FixtureWhenProvided)
+{
+	const char* fixture_path = std::getenv("KYTY_NGS2_ATRAC9_TEST_WAVEFORM");
+	if (fixture_path == nullptr || fixture_path[0] == '\0' || !AudioVideoBackend::Decoder::IsAvailable())
+	{
+		return;
+	}
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	std::ifstream file(fixture_path, std::ios::binary | std::ios::ate);
+	ASSERT_TRUE(file.is_open());
+	const auto        size = static_cast<size_t>(file.tellg());
+	std::vector<char> host(size);
+	file.seekg(0);
+	ASSERT_TRUE(static_cast<bool>(file.read(host.data(), static_cast<std::streamsize>(size))));
+	GuestReadableBlock data_storage(size);
+	ASSERT_TRUE(data_storage.IsValid());
+	std::memcpy(data_storage.Data(), host.data(), size);
+
+	GuestReadableBlock info_storage(232);
+	ASSERT_TRUE(info_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2ParseWaveformData(data_storage.Data(), size, reinterpret_cast<Ngs2::Ngs2WaveformInfo*>(info_storage.Data())), 0);
+	const auto* words = static_cast<const uint32_t*>(info_storage.Data());
+	ASSERT_EQ(words[0], kWaveformAtrac9);
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	ASSERT_EQ(SetSamplerAtrac9Format(rig.voice, words[1], words[2], words[3]), 0);
+	SamplerBlock block {};
+	block.data_offset = words[0x18 / 4];
+	block.data_size   = words[0x1c / 4];
+	block.num_samples = std::min<uint32_t>(words[0x28 / 4], 4096);
+	ASSERT_EQ(AddSamplerBlock(rig.voice, data_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	float peak = 0.0f;
+	for (int grain = 0; grain < 96; grain++)
+	{
+		ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+		const auto* output = static_cast<const float*>(output_storage.Data());
+		for (uint32_t i = 0; i < kSamplerGrainFrames * 2; i++)
+		{
+			ASSERT_TRUE(std::isfinite(output[i]));
+			peak = std::max(peak, std::abs(output[i]));
+		}
+	}
+	EXPECT_GT(peak, 0.0f);
+	EXPECT_LE(peak, 1.0f);
+}
+
+namespace {
+
+// Two voices that would each saturate a per-voice clip but cancel when summed in
+// double: +full*100 and -full*98 leave +2 before the single final clamp to 1.
+void AccumulateConstantVoice(std::vector<double>* mix, float sample, float gain)
+{
+	Ngs2Sampler::Playback playback;
+	ASSERT_TRUE(playback.Configure(1, 48000));
+	std::vector<Ngs2Sampler::Block> blocks(1);
+	blocks[0].frames      = {sample};
+	blocks[0].num_samples = 1;
+	blocks[0].num_repeats = Ngs2Sampler::kRepeatForever;
+	ASSERT_TRUE(playback.ReplaceQueue(std::move(blocks)));
+	playback.SetGain(gain);
+	playback.SetPlaying(true);
+	std::vector<Ngs2Sampler::Event> events;
+	ASSERT_TRUE(playback.Render(static_cast<uint32_t>(mix->size() / 2), 48000, mix->data(), &events));
+	EXPECT_TRUE(events.empty());
+}
+
+} // namespace
+
+TEST(EmulatorAudio, Ngs2SamplerSumsVoicesInDoubleAndCancelsBeforeTheSingleClamp)
+{
+	// Forward order: +1.0*100 then -1.0*98.
+	std::vector<double> forward(8, 0.0);
+	AccumulateConstantVoice(&forward, 1.0f, 100.0f);
+	AccumulateConstantVoice(&forward, -1.0f, 98.0f);
+	// Reverse order: the double sum is order independent.
+	std::vector<double> reverse(8, 0.0);
+	AccumulateConstantVoice(&reverse, -1.0f, 98.0f);
+	AccumulateConstantVoice(&reverse, 1.0f, 100.0f);
+
+	for (size_t i = 0; i < forward.size(); i++)
+	{
+		// A per-voice +/-64 clip would have made each term cancel to 0; the double
+		// sum keeps +2, which the system clamp then limits to +1.
+		EXPECT_DOUBLE_EQ(forward[i], 2.0);
+		EXPECT_DOUBLE_EQ(reverse[i], 2.0);
+		EXPECT_DOUBLE_EQ(std::clamp(forward[i], -1.0, 1.0), 1.0);
+	}
+}
+
+TEST(EmulatorAudio, Ngs2SamplerShortLoopingBlockStaysBoundedWithoutEvents)
+{
+	Ngs2Sampler::Playback playback;
+	ASSERT_TRUE(playback.Configure(1, 192000));
+	ASSERT_TRUE(playback.SetPitch(16.0f));
+	std::vector<Ngs2Sampler::Block> blocks(1);
+	blocks[0].frames      = {0.25f};
+	blocks[0].num_samples = 1;
+	blocks[0].num_repeats = Ngs2Sampler::kRepeatForever;
+	ASSERT_TRUE(playback.ReplaceQueue(std::move(blocks)));
+	playback.SetPlaying(true);
+
+	// The worst case for allocation: one-frame forever loop, 192 kHz, pitch 16,
+	// a large grain. It advances 64 source frames per output frame but a repeat
+	// emits no event, so the event list stays empty and nothing is allocated.
+	std::vector<double>             stereo(8192 * 2, 0.0);
+	std::vector<Ngs2Sampler::Event> events;
+	ASSERT_TRUE(playback.Render(8192, 48000, stereo.data(), &events));
+	EXPECT_TRUE(events.empty());
+	EXPECT_EQ(playback.DecodedFrames(), static_cast<uint64_t>(8192) * 64u);
+	EXPECT_FALSE(playback.Ended());
+	EXPECT_DOUBLE_EQ(stereo[0], 0.25);
+}
+
+TEST(EmulatorAudio, Ngs2SamplerFiniteRepeatReportsOneEndWithTheRepeatCount)
+{
+	Ngs2Sampler::Playback playback;
+	ASSERT_TRUE(playback.Configure(1, 48000));
+	std::vector<Ngs2Sampler::Block> blocks(1);
+	blocks[0].frames      = {0.5f};
+	blocks[0].num_samples = 1;
+	blocks[0].num_repeats = 5;
+	blocks[0].user_data   = 0x77;
+	ASSERT_TRUE(playback.ReplaceQueue(std::move(blocks)));
+	playback.SetPlaying(true);
+
+	// One sample played six times (first pass plus five repeats) ends once.
+	std::vector<double>             stereo(16, 0.0);
+	std::vector<Ngs2Sampler::Event> events;
+	ASSERT_TRUE(playback.Render(8, 48000, stereo.data(), &events));
+	ASSERT_EQ(events.size(), 1u);
+	EXPECT_EQ(events[0].num_repeated, 5u);
+	EXPECT_EQ(events[0].user_data, 0x77u);
+	EXPECT_EQ(playback.DecodedFrames(), 6u);
+	EXPECT_TRUE(playback.Ended());
+}
+
+TEST(EmulatorAudio, Ngs2SamplerPhaseContinuesAcrossRenderCalls)
+{
+	Ngs2Sampler::Playback playback;
+	ASSERT_TRUE(playback.Configure(1, 48000));
+	ASSERT_TRUE(playback.SetPitch(0.5f));
+	std::vector<Ngs2Sampler::Block> blocks(1);
+	blocks[0].frames      = {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f};
+	blocks[0].num_samples = 8;
+	ASSERT_TRUE(playback.ReplaceQueue(std::move(blocks)));
+	playback.SetPlaying(true);
+
+	// A ramp at half speed reads positions 0, 0.5, 1.0, ... The second grain must
+	// continue at 2.0, not restart, so the two grains form one ramp.
+	std::vector<double>             first(8, 0.0);
+	std::vector<Ngs2Sampler::Event> events;
+	ASSERT_TRUE(playback.Render(4, 48000, first.data(), &events));
+	std::vector<double> second(8, 0.0);
+	ASSERT_TRUE(playback.Render(4, 48000, second.data(), &events));
+	const double expected[] = {0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5};
+	for (uint32_t frame = 0; frame < 4; frame++)
+	{
+		EXPECT_NEAR(first[2 * frame], expected[frame], 1e-9);
+		EXPECT_NEAR(second[2 * frame], expected[frame + 4], 1e-9);
+	}
+}
+
+TEST(EmulatorAudio, Ngs2SamplerInterpolatesAcrossANonRepeatingBlockBoundary)
+{
+	Ngs2Sampler::Playback playback;
+	ASSERT_TRUE(playback.Configure(1, 48000));
+	ASSERT_TRUE(playback.SetPitch(0.5f));
+	std::vector<Ngs2Sampler::Block> blocks(2);
+	blocks[0].frames      = {0.0f, 1.0f};
+	blocks[0].num_samples = 2;
+	blocks[1].frames      = {3.0f, 3.0f};
+	blocks[1].num_samples = 2;
+	ASSERT_TRUE(playback.ReplaceQueue(std::move(blocks)));
+	playback.SetPlaying(true);
+
+	// At the last sample of block 0 the next sample is the first of block 1, so
+	// the seam interpolates 1.0 -> 3.0 rather than clamping to the block edge.
+	std::vector<double>             stereo(10, 0.0);
+	std::vector<Ngs2Sampler::Event> events;
+	ASSERT_TRUE(playback.Render(5, 48000, stereo.data(), &events));
+	const double expected[] = {0.0, 0.5, 1.0, 2.0, 3.0};
+	for (uint32_t frame = 0; frame < 5; frame++)
+	{
+		EXPECT_NEAR(stereo[2 * frame], expected[frame], 1e-9);
+	}
+	ASSERT_EQ(events.size(), 1u);
+}
+
+TEST(EmulatorAudio, Ngs2SamplerSystemMixCancelsTwoOppositeVoicesBeforeClamp)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRigVoices(&rig, 2));
+	GuestValue<uintptr_t> voice1_storage;
+	ASSERT_TRUE(voice1_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rig.rack, 1, voice1_storage.Data()), 0);
+	const uintptr_t voice1 = *voice1_storage.Data();
+
+	GuestReadableBlock positive_storage(sizeof(float) * 2);
+	GuestReadableBlock negative_storage(sizeof(float) * 2);
+	ASSERT_TRUE(positive_storage.IsValid() && negative_storage.IsValid());
+	auto* positive = static_cast<float*>(positive_storage.Data());
+	auto* negative = static_cast<float*>(negative_storage.Data());
+	positive[0] = positive[1] = 1.0f;
+	negative[0] = negative[1] = -1.0f;
+	SamplerBlock block {};
+	block.data_size   = sizeof(float) * 2;
+	block.num_samples = 2;
+
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmF32, 1, 48000), 0);
+	ASSERT_EQ(AddSamplerBlock(rig.voice, positive_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(RunSamplerGain(rig.voice, 100.0f), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+	ASSERT_EQ(SetSamplerFormat(voice1, kWaveformPcmF32, 1, 48000), 0);
+	ASSERT_EQ(AddSamplerBlock(voice1, negative_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(RunSamplerGain(voice1, 98.0f), 0);
+	ASSERT_EQ(RunSamplerEvent(voice1, kSamplerPlayEvent), 0);
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	// +100 and -98 sum to +2 in the double accumulator, clamped once to +1. A
+	// per-voice clip would have cancelled to 0.
+	EXPECT_FLOAT_EQ(output[0], 1.0f);
+	EXPECT_FLOAT_EQ(output[1], 1.0f);
+}
+
+TEST(EmulatorAudio, StandardSamplerDefersCallbacksUntilSystemUnlock)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 2);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	pcm[0]    = 1000;
+	pcm[1]    = 2000;
+	SamplerBlock block {};
+	block.data_size   = sizeof(int16_t) * 2;
+	block.num_samples = 2;
+	block.user_data   = 0x11;
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000), 0);
+	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(SetSamplerCallbackHandler(rig.voice, reinterpret_cast<uintptr_t>(&SamplerRecordCallback), kCallbackFlagEnd), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+
+	ScopedHostRuntime runtime;
+	g_sampler_callback_count = 0;
+	// While the system is explicitly locked, the render must not run the callback
+	// (it would hold the state lock across a guest call). It runs at unlock.
+	ASSERT_EQ(Ngs2::Ngs2SystemLock(rig.system), 0);
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	EXPECT_EQ(g_sampler_callback_count, 0u);
+	ASSERT_EQ(Ngs2::Ngs2SystemUnlock(rig.system), 0);
+	ASSERT_EQ(g_sampler_callback_count, 1u);
+	EXPECT_EQ(g_sampler_callbacks[0].user_data, 0x11u);
+}
+
+namespace {
+
+using SteadyClock = std::chrono::steady_clock;
+constexpr auto kBarrierTimeout = std::chrono::seconds(10);
+
+// Shared with the worker threads. Only globals and values are shared, so a
+// worker detached after a timeout never touches a destroyed test frame.
+std::atomic<bool>    g_barrier_entered {false};
+std::atomic<bool>    g_barrier_release {false};
+std::atomic<bool>    g_barrier_render_done {false};
+std::atomic<int32_t> g_barrier_render_result {-1};
+std::atomic<bool>    g_barrier_destroy_done {false};
+std::atomic<int32_t> g_barrier_destroy_result {-1};
+
+// Waits until flag is set or deadline passes, yielding between checks.
+bool WaitForFlag(const std::atomic<bool>& flag, SteadyClock::time_point deadline)
+{
+	while (!flag.load())
+	{
+		if (SteadyClock::now() >= deadline)
+		{
+			return false;
+		}
+		std::this_thread::yield();
+	}
+	return true;
+}
+
+// Holds the dispatching render thread inside the guest callback until the
+// controller releases it. The wait is bounded so a failure cannot hang the test.
+void KYTY_SYSV_ABI SamplerBarrierCallback(const SamplerCallbackInfo* info)
+{
+	SamplerRecordCallback(info);
+	g_barrier_entered.store(true);
+	(void)WaitForFlag(g_barrier_release, SteadyClock::now() + kBarrierTimeout);
+}
+
+std::atomic<uint32_t> g_deferred_end_count {0};
+
+void KYTY_SYSV_ABI SamplerCountCallback(const SamplerCallbackInfo* info)
+{
+	(void)info;
+	g_deferred_end_count.fetch_add(1);
+}
+
+} // namespace
+
+TEST(EmulatorAudio, StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	auto rig = std::make_unique<SamplerRig>();
+	ASSERT_TRUE(CreateSamplerRig(rig.get()));
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * 2);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	pcm[0]    = 1000;
+	pcm[1]    = 2000;
+	SamplerBlock block {};
+	block.data_size   = sizeof(int16_t) * 2;
+	block.num_samples = 2;
+	ASSERT_EQ(SetSamplerFormat(rig->voice, kWaveformPcmI16, 1, 48000), 0);
+	ASSERT_EQ(AddSamplerBlock(rig->voice, pcm_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(SetSamplerCallbackHandler(rig->voice, reinterpret_cast<uintptr_t>(&SamplerBarrierCallback), kCallbackFlagEnd), 0);
+	ASSERT_EQ(RunSamplerEvent(rig->voice, kSamplerPlayEvent), 0);
+
+	ScopedHostRuntime runtime;
+	g_sampler_callback_count = 0;
+	g_barrier_entered.store(false);
+	g_barrier_release.store(false);
+	g_barrier_render_done.store(false);
+	g_barrier_render_result.store(-1);
+	g_barrier_destroy_done.store(false);
+	g_barrier_destroy_result.store(-1);
+
+	// The render thread enters the end callback and is held there.
+	const uintptr_t system = rig->system;
+	const uintptr_t rack   = rig->rack;
+	std::thread     renderer(
+        [system]()
+        {
+            GuestReadableBlock output(sizeof(float) * kSamplerGrainFrames * 2);
+            g_barrier_render_result.store(output.IsValid() ? RenderSamplerGrain(system, output.Data()) : -1);
+            g_barrier_render_done.store(true);
+        });
+	const auto  deadline = SteadyClock::now() + kBarrierTimeout;
+	const bool  entered  = WaitForFlag(g_barrier_entered, deadline);
+	std::thread destroyer;
+	bool        closing_seen            = false;
+	bool        destroy_done_while_held = true;
+	if (entered)
+	{
+		// The destroy starts while the callback is still running.
+		destroyer = std::thread(
+		    [rack]()
+		    {
+			    g_barrier_destroy_result.store(Ngs2::Ngs2RackDestroy(rack, nullptr));
+			    g_barrier_destroy_done.store(true);
+		    });
+		// The destroy has begun once the guest sees the rack as invalid.
+		GuestValue<uintptr_t> voice_storage;
+		while (voice_storage.IsValid() && SteadyClock::now() < deadline)
+		{
+			if (Ngs2::Ngs2RackGetVoiceHandle(rack, 0, voice_storage.Data()) == static_cast<int32_t>(0x804a0261u))
+			{
+				closing_seen = true;
+				break;
+			}
+			std::this_thread::yield();
+		}
+		// With the callback still held, the destroy must not have completed.
+		destroy_done_while_held = g_barrier_destroy_done.load();
+	}
+
+	// Release in every path, then wait for both threads within a bound.
+	g_barrier_release.store(true);
+	const bool render_finished  = WaitForFlag(g_barrier_render_done, SteadyClock::now() + kBarrierTimeout);
+	const bool destroy_finished = !destroyer.joinable() || WaitForFlag(g_barrier_destroy_done, SteadyClock::now() + kBarrierTimeout);
+	if (render_finished && destroy_finished)
+	{
+		renderer.join();
+		if (destroyer.joinable())
+		{
+			destroyer.join();
+		}
+	} else
+	{
+		// A stuck worker may still use the rig: leak it rather than free it under them.
+		renderer.detach();
+		if (destroyer.joinable())
+		{
+			destroyer.detach();
+		}
+		(void)rig.release();
+	}
+	ASSERT_TRUE(entered);
+	ASSERT_TRUE(render_finished);
+	ASSERT_TRUE(destroy_finished);
+	EXPECT_TRUE(closing_seen);
+	EXPECT_FALSE(destroy_done_while_held);
+	EXPECT_EQ(g_barrier_render_result.load(), 0);
+	EXPECT_EQ(g_barrier_destroy_result.load(), 0);
+	EXPECT_EQ(g_sampler_callback_count, 1u);
+	rig->rack = 0;
+}
+
+TEST(EmulatorAudio, Ngs2RackDestroyIsRefusedWhileThisThreadHoldsTheSystemLock)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	GuestValue<uintptr_t> voice_storage;
+	ASSERT_TRUE(voice_storage.IsValid());
+
+	// Refused at once instead of waiting on pins only the lock holder can free;
+	// nothing is marked closing, so the rack stays usable.
+	ASSERT_EQ(Ngs2::Ngs2SystemLock(rig.system), 0);
+	EXPECT_EQ(Ngs2::Ngs2RackDestroy(rig.rack, nullptr), static_cast<int32_t>(0x804a0261u));
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rig.rack, 0, voice_storage.Data()), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemUnlock(rig.system), 0);
+
+	EXPECT_EQ(Ngs2::Ngs2RackDestroy(rig.rack, nullptr), 0);
+	rig.rack = 0;
+}
+
+TEST(EmulatorAudio, StandardSamplerRefusesALockedRenderWhenDeferredCallbacksAreFull)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	constexpr uint32_t kBlocks   = 64;
+	constexpr uint32_t kCapacity = 64u * 256u;
+	SamplerRig         rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * kBlocks);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto*        pcm = static_cast<int16_t*>(pcm_storage.Data());
+	SamplerBlock blocks[kBlocks] {};
+	for (uint32_t i = 0; i < kBlocks; i++)
+	{
+		pcm[i]                = 1000;
+		blocks[i].data_offset = sizeof(int16_t) * i;
+		blocks[i].data_size   = sizeof(int16_t);
+		blocks[i].num_samples = 1;
+		blocks[i].user_data   = i;
+	}
+	ASSERT_EQ(SetSamplerCallbackHandler(rig.voice, reinterpret_cast<uintptr_t>(&SamplerCountCallback), kCallbackFlagEnd), 0);
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	GuestReadableBlock state_storage(48);
+	ASSERT_TRUE(output_storage.IsValid() && state_storage.IsValid());
+
+	// Setup returns the voice to Empty, so each queued play starts a new pass.
+	auto queue_waveform = [&]()
+	{
+		return SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000) == 0 &&
+		       AddSamplerBlocks(rig.voice, pcm_storage.Data(), kBlocksFlagReset, blocks, kBlocks) == 0 &&
+		       RunSamplerEvent(rig.voice, kSamplerPlayEvent) == 0;
+	};
+
+	ScopedHostRuntime runtime;
+	g_deferred_end_count.store(0);
+	ASSERT_EQ(Ngs2::Ngs2SystemLock(rig.system), 0);
+	// Each locked render ends 64 blocks and defers their callbacks; 256 renders
+	// fill the deferred list exactly.
+	for (uint32_t i = 0; i < kCapacity / kBlocks; i++)
+	{
+		ASSERT_TRUE(queue_waveform());
+		ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	}
+	EXPECT_EQ(g_deferred_end_count.load(), 0u);
+
+	// The next locked render could end 64 more blocks: it is refused before any
+	// voice state changes, and no callback is dropped or delivered.
+	ASSERT_TRUE(queue_waveform());
+	EXPECT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), kSamplerInvalidControl);
+	ASSERT_EQ(Ngs2::Ngs2VoiceGetState(rig.voice, static_cast<Ngs2::Ngs2VoiceState*>(state_storage.Data()), 48), 0);
+	uint64_t decoded = 0;
+	std::memcpy(&decoded, static_cast<const uint8_t*>(state_storage.Data()) + 0x10, sizeof(decoded));
+	EXPECT_EQ(decoded, 0u);
+	EXPECT_EQ(g_deferred_end_count.load(), 0u);
+
+	// Unlock delivers every deferred callback.
+	ASSERT_EQ(Ngs2::Ngs2SystemUnlock(rig.system), 0);
+	EXPECT_EQ(g_deferred_end_count.load(), kCapacity);
+
+	// The refused waveform is intact and plays once the lock is gone.
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	EXPECT_EQ(g_deferred_end_count.load(), kCapacity + kBlocks);
+}
+
+namespace {
+
+// Creates one more sampler rack with voice_count voices on an existing system,
+// through the same query/create calls the guest makes. workspace keeps the rack
+// buffer alive and must outlive the rack.
+bool CreateExtraSamplerRack(uintptr_t system, uint32_t voice_count, std::unique_ptr<GuestReadableBlock>* workspace, uintptr_t* rack)
+{
+	GuestReadableBlock    option_storage(kSamplerOptionSize);
+	GuestReadableBlock    rack_info_storage(sizeof(uint64_t) * 8);
+	GuestValue<uintptr_t> rack_handle_storage;
+	if (!option_storage.IsValid() || !rack_info_storage.IsValid() || !rack_handle_storage.IsValid())
+	{
+		return false;
+	}
+	auto* raw_option = static_cast<uint8_t*>(option_storage.Data());
+	std::memset(raw_option, 0, kSamplerOptionSize);
+	*reinterpret_cast<size_t*>(raw_option)          = kSamplerOptionSize;
+	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = voice_count;
+	const auto* option                              = reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option);
+	auto*       raw_rack_info                       = static_cast<uint64_t*>(rack_info_storage.Data());
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	if (Ngs2::Ngs2RackQueryBufferSize(kSamplerRackId, option, rack_info) != 0)
+	{
+		return false;
+	}
+	*workspace = std::make_unique<GuestReadableBlock>(raw_rack_info[1]);
+	if (!(*workspace)->IsValid())
+	{
+		return false;
+	}
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>((*workspace)->Data());
+	if (Ngs2::Ngs2RackCreate(system, kSamplerRackId, option, rack_info, rack_handle_storage.Data()) != 0)
+	{
+		return false;
+	}
+	*rack = *rack_handle_storage.Data();
+	return *rack != 0;
+}
+
+// Gives a voice a 64-block waveform of one-frame blocks with an end callback, and
+// queues play. Every block ends in the first 64 frames of the next render.
+bool QueueEndingWaveform(uintptr_t voice, const void* data, const SamplerBlock* blocks, uint32_t count)
+{
+	return SetSamplerFormat(voice, kWaveformPcmI16, 1, 48000) == 0 &&
+	       AddSamplerBlocks(voice, data, kBlocksFlagReset, blocks, count) == 0 &&
+	       SetSamplerCallbackHandler(voice, reinterpret_cast<uintptr_t>(&SamplerCountCallback), kCallbackFlagEnd) == 0 &&
+	       RunSamplerEvent(voice, kSamplerPlayEvent) == 0;
+}
+
+} // namespace
+
+TEST(EmulatorAudio, StandardSamplerRefusesAnUnlockedRenderAboveTheCallbackBatchLimit)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	constexpr uint32_t kBlocks     = 64;
+	constexpr uint32_t kRackVoices = 256;
+	constexpr uint32_t kLimit      = kBlocks * kRackVoices;
+
+	// Declared before the rig so it is freed after the system destroy.
+	std::unique_ptr<GuestReadableBlock> extra_workspace;
+	SamplerRig                          rig;
+	ASSERT_TRUE(CreateSamplerRigVoices(&rig, kRackVoices));
+	uintptr_t extra_rack = 0;
+	ASSERT_TRUE(CreateExtraSamplerRack(rig.system, 1, &extra_workspace, &extra_rack));
+
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * kBlocks);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto*        pcm = static_cast<int16_t*>(pcm_storage.Data());
+	SamplerBlock blocks[kBlocks] {};
+	for (uint32_t i = 0; i < kBlocks; i++)
+	{
+		pcm[i]                = 1000;
+		blocks[i].data_offset = sizeof(int16_t) * i;
+		blocks[i].data_size   = sizeof(int16_t);
+		blocks[i].num_samples = 1;
+	}
+
+	// Rack 1: 256 voices x 64 ending blocks, exactly the limit (64 KiB of queued
+	// frames, far inside the sample budget). Rack 2 adds one more ending block.
+	GuestValue<uintptr_t> voice_storage;
+	ASSERT_TRUE(voice_storage.IsValid());
+	uintptr_t first_voice = 0;
+	for (uint32_t id = 0; id < kRackVoices; id++)
+	{
+		ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rig.rack, id, voice_storage.Data()), 0);
+		if (id == 0)
+		{
+			first_voice = *voice_storage.Data();
+		}
+		ASSERT_TRUE(QueueEndingWaveform(*voice_storage.Data(), pcm_storage.Data(), blocks, kBlocks));
+	}
+	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(extra_rack, 0, voice_storage.Data()), 0);
+	const uintptr_t extra_voice = *voice_storage.Data();
+	ASSERT_TRUE(QueueEndingWaveform(extra_voice, pcm_storage.Data(), blocks, 1));
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	GuestReadableBlock state_storage(48);
+	ASSERT_TRUE(output_storage.IsValid() && state_storage.IsValid());
+	auto* output = static_cast<float*>(output_storage.Data());
+	std::fill_n(output, kSamplerGrainFrames * 2, 0.25f);
+
+	ScopedHostRuntime runtime;
+	g_deferred_end_count.store(0);
+
+	// No explicit lock is held, yet one render could end 16385 blocks. It is
+	// refused before any voice advances, any callback runs or the output is written.
+	EXPECT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), kSamplerInvalidControl);
+	EXPECT_EQ(g_deferred_end_count.load(), 0u);
+	EXPECT_EQ(output[0], 0.25f);
+	EXPECT_EQ(output[kSamplerGrainFrames * 2 - 1], 0.25f);
+	for (const uintptr_t voice: {first_voice, extra_voice})
+	{
+		ASSERT_EQ(Ngs2::Ngs2VoiceGetState(voice, static_cast<Ngs2::Ngs2VoiceState*>(state_storage.Data()), 48), 0);
+		uint32_t flags   = 0;
+		uint64_t decoded = 0;
+		std::memcpy(&flags, state_storage.Data(), sizeof(flags));
+		std::memcpy(&decoded, static_cast<const uint8_t*>(state_storage.Data()) + 0x10, sizeof(decoded));
+		EXPECT_EQ(decoded, 0u);
+		// The queued play was not applied: the voice is still Empty.
+		EXPECT_EQ(flags, 0u);
+	}
+
+	// A setup on the second rack's voice empties its queue; the batch is then at
+	// the limit, the same render succeeds and delivers every end callback.
+	ASSERT_EQ(SetSamplerFormat(extra_voice, kWaveformPcmI16, 1, 48000), 0);
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	EXPECT_EQ(g_deferred_end_count.load(), kLimit);
+	// 256 voices of 1000/32768 sum to about 7.8 and are clamped once to full scale.
+	EXPECT_EQ(output[0], 1.0f);
+
+	EXPECT_EQ(Ngs2::Ngs2RackDestroy(extra_rack, nullptr), 0);
+}
 
 UT_END();
