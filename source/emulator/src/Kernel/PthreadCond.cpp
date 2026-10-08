@@ -608,24 +608,22 @@ int KYTY_SYSV_ABI PthreadCondSignalto(PthreadCond* cond, Pthread thread)
 	return KERNEL_ERROR_EINVAL;
 }
 
-static int pthread_cond_release_mutex_state(PthreadMutexPrivate* mutex)
+static int pthread_cond_release_mutex_state(PthreadMutexPrivate* mutex, uint32_t* recursion_count)
 {
-	if (!PthreadMutexHeldByCaller(mutex))
+	if (!PthreadMutexHeldByCaller(mutex) || recursion_count == nullptr)
 	{
 		return EPERM;
 	}
-	if (mutex->recursion_count != 1)
-	{
-		return EINVAL;
-	}
 
+	*recursion_count = mutex->recursion_count;
 	PthreadMutexDropOwnership(mutex);
 	return 0;
 }
 
-static void pthread_cond_restore_mutex_state(PthreadMutexPrivate* mutex)
+static void pthread_cond_restore_mutex_state(PthreadMutexPrivate* mutex, uint32_t recursion_count)
 {
 	PthreadMutexTakeOwnership(mutex);
+	mutex->recursion_count = recursion_count;
 }
 
 struct ResolvedCondWait
@@ -660,11 +658,14 @@ static int resolve_cond_wait(PthreadCond* cond, PthreadMutex* mutex, ResolvedCon
 
 static int wait_on_resolved_cond(const ResolvedCondWait& resolved, const timespec& deadline)
 {
-	int result = pthread_cond_release_mutex_state(resolved.mutex);
+	uint32_t recursion_count = 0;
+	int      result          = pthread_cond_release_mutex_state(resolved.mutex, &recursion_count);
 	if (result == 0)
 	{
 		result = pthread_cond_timedwait(&resolved.cond->p, &resolved.mutex->p, &deadline);
-		pthread_cond_restore_mutex_state(resolved.mutex);
+		// Condition waits reacquire the native mutex on success and timeout. Other
+		// validation errors leave it unchanged, so guest ownership is restored on every return.
+		pthread_cond_restore_mutex_state(resolved.mutex, recursion_count);
 	}
 
 	switch (result)
@@ -813,12 +814,13 @@ int KYTY_SYSV_ABI PthreadCondWait(PthreadCond* cond, PthreadMutex* mutex)
 		waiter_slot = slot_trace_register_waiter(cond_addr, mutex_addr, ret_addr, cond_h, mutex_h);
 	}
 
-	auto* private_mutex = *mutex;
-	int   result        = pthread_cond_release_mutex_state(private_mutex);
+	auto*    private_mutex   = *mutex;
+	uint32_t recursion_count = 0;
+	int      result          = pthread_cond_release_mutex_state(private_mutex, &recursion_count);
 	if (result == 0)
 	{
 		result = pthread_cond_wait(&(*cond)->p, &private_mutex->p);
-		pthread_cond_restore_mutex_state(private_mutex);
+		pthread_cond_restore_mutex_state(private_mutex, recursion_count);
 	}
 
 	slot_trace_unregister_waiter(waiter_slot);
