@@ -269,7 +269,7 @@ public:
 	[[nodiscard]] bool IsShared() const;
 	[[nodiscard]] GuestPlatform GetGuestPlatform() const;
 
-	void LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size);
+	[[nodiscard]] bool LoadSegment(uint64_t vaddr, uint64_t file_offset, uint64_t size);
 
 	uint64_t GetEntry();
 
@@ -288,11 +288,15 @@ public:
 	template <class T>
 	[[nodiscard]] T GetDynamicData(uint64_t offset) const
 	{
-		return (m_dynamic_data == nullptr ? nullptr : reinterpret_cast<T>(static_cast<uint8_t*>(m_dynamic_data) + offset));
+		return (m_dynamic_data == nullptr || offset > m_dynamic_data_size ? nullptr :
+		        reinterpret_cast<T>(static_cast<uint8_t*>(m_dynamic_data) + offset));
 	}
 
 private:
 	void Clear();
+	[[nodiscard]] bool IsHeaderValid() const;
+	[[nodiscard]] bool ResolveSegmentFileOffset(uint64_t file_offset, uint64_t size, uint64_t* physical_offset) const;
+	[[nodiscard]] bool ValidateDynamicRanges() const;
 
 	Core::File*  m_f             = nullptr;
 	SelfHeader*  m_self          = nullptr;
@@ -301,8 +305,11 @@ private:
 	Elf64_Phdr*  m_phdr          = nullptr;
 	Elf64_Shdr*  m_shdr          = nullptr;
 	void*        m_dynamic       = nullptr;
+	uint64_t     m_dynamic_size  = 0;
 	void*        m_dynamic_data  = nullptr;
+	uint64_t     m_dynamic_data_size = 0;
 	char*        m_str_table     = nullptr;
+	bool         m_valid         = false;
 	// uint64_t    m_base_vaddr   = 0;
 };
 

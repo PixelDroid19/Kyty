@@ -18,12 +18,19 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 #ifdef KYTY_EMU_ENABLED
 
@@ -83,6 +90,94 @@ void AppendPod(std::vector<uint8_t>* out, const T& value)
 	out->insert(out->end(), bytes, bytes + sizeof(T));
 }
 
+struct ElfSegmentFixture
+{
+	Elf64_Phdr header {};
+	std::vector<uint8_t> bytes;
+};
+
+Elf64_Ehdr MakeElfHeader(Elf64_Half type = ET_DYNEXEC)
+{
+	Elf64_Ehdr ehdr {};
+	ehdr.e_ident[EI_MAG0]    = 0x7f;
+	ehdr.e_ident[EI_MAG1]    = 'E';
+	ehdr.e_ident[EI_MAG2]    = 'L';
+	ehdr.e_ident[EI_MAG3]    = 'F';
+	ehdr.e_ident[EI_CLASS]   = ELFCLASS64;
+	ehdr.e_ident[EI_DATA]    = ELFDATA2LSB;
+	ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+	ehdr.e_ident[EI_OSABI]   = ELFOSABI_FREEBSD;
+	ehdr.e_ident[EI_ABIVERSION] = 2;
+	ehdr.e_type                 = type;
+	ehdr.e_machine              = EM_X86_64;
+	ehdr.e_version              = EV_CURRENT;
+	ehdr.e_ehsize               = sizeof(Elf64_Ehdr);
+	ehdr.e_phentsize            = sizeof(Elf64_Phdr);
+	return ehdr;
+}
+
+std::vector<uint8_t> MakeRawElfHeader()
+{
+	std::vector<uint8_t> out;
+	AppendPod(&out, MakeElfHeader());
+	return out;
+}
+
+std::vector<uint8_t> MakeRawElf(std::vector<ElfSegmentFixture> segments)
+{
+	auto ehdr    = MakeElfHeader();
+	ehdr.e_phoff = sizeof(Elf64_Ehdr);
+	ehdr.e_phnum = static_cast<Elf64_Half>(segments.size());
+
+	uint64_t file_offset = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr) * segments.size();
+	for (auto& segment: segments)
+	{
+		segment.header.p_offset = file_offset;
+		segment.header.p_filesz = segment.bytes.size();
+		if (segment.header.p_memsz == 0)
+		{
+			segment.header.p_memsz = segment.bytes.size();
+		}
+		file_offset += segment.bytes.size();
+	}
+
+	std::vector<uint8_t> out;
+	AppendPod(&out, ehdr);
+	for (const auto& segment: segments)
+	{
+		AppendPod(&out, segment.header);
+	}
+	out.resize(file_offset);
+	uint64_t data_offset = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr) * segments.size();
+	for (const auto& segment: segments)
+	{
+		if (!segment.bytes.empty())
+		{
+			std::memcpy(out.data() + data_offset, segment.bytes.data(), segment.bytes.size());
+		}
+		data_offset += segment.bytes.size();
+	}
+	return out;
+}
+
+Elf64_Dyn MakeDyn(Elf64_Sxword tag, Elf64_Xword value)
+{
+	Elf64_Dyn dyn {};
+	dyn.d_tag       = tag;
+	dyn.d_un.d_val = value;
+	return dyn;
+}
+
+std::vector<uint8_t> MakeDynamicBytes(const std::vector<Elf64_Dyn>& entries)
+{
+	std::vector<uint8_t> out;
+	for (const auto& entry: entries)
+	{
+		AppendPod(&out, entry);
+	}
+	return out;
+}
+
 std::vector<uint8_t> MakeSelfWrappedElf(Elf64_Half type, uint8_t abi_version = 2, bool alternate_signature = false,
                                         bool unstored_sections = false)
 {
@@ -138,6 +233,96 @@ bool WriteBinary(const String& path, const std::vector<uint8_t>& data)
 	f.Close();
 	return bytes_written == data.size();
 }
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+bool WriteSparseBinary(const String& path, const std::vector<uint8_t>& prefix, uint64_t file_size, uint64_t suffix_offset,
+                       const std::vector<uint8_t>& suffix)
+{
+	if (prefix.size() > std::numeric_limits<uint32_t>::max() || suffix.size() > std::numeric_limits<uint32_t>::max() ||
+	    prefix.size() > file_size || suffix_offset > file_size || suffix.size() > file_size - suffix_offset)
+	{
+		return false;
+	}
+
+	Kyty::Core::File file;
+	if (!file.Create(path)) { return false; }
+
+	uint64_t written_end = 0;
+	if (!prefix.empty())
+	{
+		uint32_t bytes_written = 0;
+		file.Write(prefix.data(), static_cast<uint32_t>(prefix.size()), &bytes_written);
+		if (bytes_written != prefix.size())
+		{
+			file.Close();
+			return false;
+		}
+		written_end = prefix.size();
+	}
+
+	if (!suffix.empty())
+	{
+		if (!file.Seek(suffix_offset))
+		{
+			file.Close();
+			return false;
+		}
+		uint32_t bytes_written = 0;
+		file.Write(suffix.data(), static_cast<uint32_t>(suffix.size()), &bytes_written);
+		if (bytes_written != suffix.size())
+		{
+			file.Close();
+			return false;
+		}
+		written_end = suffix_offset + suffix.size();
+	}
+
+	if (written_end < file_size)
+	{
+		const uint8_t marker = 0;
+		if (!file.Seek(file_size - 1))
+		{
+			file.Close();
+			return false;
+		}
+		uint32_t bytes_written = 0;
+		file.Write(&marker, sizeof(marker), &bytes_written);
+		if (bytes_written != sizeof(marker))
+		{
+			file.Close();
+			return false;
+		}
+	}
+
+	file.Close();
+	return true;
+}
+
+bool SetChildAddressSpaceLimit(uint64_t headroom)
+{
+	struct rlimit limit {};
+	if (::getrlimit(RLIMIT_AS, &limit) != 0) { return false; }
+	const int statm_fd = ::open("/proc/self/statm", O_RDONLY);
+	if (statm_fd < 0) { return false; }
+	char statm[64] {};
+	const auto statm_size = ::read(statm_fd, statm, sizeof(statm) - 1);
+	::close(statm_fd);
+	if (statm_size <= 0) { return false; }
+	char* statm_end = nullptr;
+	const uint64_t virtual_pages = std::strtoull(statm, &statm_end, 10);
+	const long page_size = ::sysconf(_SC_PAGESIZE);
+	if (statm_end == statm || page_size <= 0 ||
+	    virtual_pages > (std::numeric_limits<uint64_t>::max() - headroom) / static_cast<uint64_t>(page_size))
+	{
+		return false;
+	}
+	const uint64_t current_address_space = virtual_pages * static_cast<uint64_t>(page_size);
+	uint64_t address_space_cap = current_address_space + headroom;
+	if (limit.rlim_max != RLIM_INFINITY && address_space_cap > limit.rlim_max) { address_space_cap = limit.rlim_max; }
+	limit.rlim_cur = static_cast<rlim_t>(address_space_cap);
+	return ::setrlimit(RLIMIT_AS, &limit) == 0;
+}
+#endif
 
 struct TempPackageRoot
 {
@@ -448,6 +633,685 @@ TEST(EmulatorModuleLoad, ElfPlatformComesFromAbiVersion)
 	EXPECT_EQ(ps5.GetGuestPlatform(), Kyty::GuestPlatform::Ps5);
 }
 
+TEST(EmulatorModuleLoad, ElfRejectsProgramHeaderTablesOutsideFile)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_phdr_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	auto absent_table = MakeRawElfHeader();
+	auto ehdr         = MakeElfHeader();
+	ehdr.e_phoff      = 4096;
+	ehdr.e_phnum      = 1;
+	std::memcpy(absent_table.data(), &ehdr, sizeof(ehdr));
+
+	std::vector<uint8_t> truncated_table = MakeRawElfHeader();
+	ehdr.e_phoff                           = sizeof(Elf64_Ehdr);
+	ehdr.e_phnum                           = 1;
+	std::memcpy(truncated_table.data(), &ehdr, sizeof(ehdr));
+	truncated_table.resize(sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr) - 1);
+
+	auto overflowed_self = MakeSelfWrappedElf(ET_DYNEXEC);
+	std::memcpy(&ehdr, overflowed_self.data() + sizeof(SelfHeader), sizeof(ehdr));
+	ehdr.e_phoff = std::numeric_limits<uint64_t>::max() - (sizeof(SelfHeader) - 1);
+	ehdr.e_phnum = 1;
+	std::memcpy(overflowed_self.data() + sizeof(SelfHeader), &ehdr, sizeof(ehdr));
+
+	const auto absent_path    = temp.root + U"absent.bin";
+	const auto truncated_path = temp.root + U"truncated.bin";
+	const auto overflow_path  = temp.root + U"overflow.bin";
+	const auto valid_path     = temp.root + U"valid.bin";
+	ASSERT_TRUE(WriteBinary(absent_path, absent_table));
+	ASSERT_TRUE(WriteBinary(truncated_path, truncated_table));
+	ASSERT_TRUE(WriteBinary(overflow_path, overflowed_self));
+	ASSERT_TRUE(WriteBinary(valid_path, MakeRawElfHeader()));
+
+	Elf64 absent;
+	absent.Open(absent_path);
+	EXPECT_FALSE(absent.IsValid());
+	absent.Open(valid_path);
+	EXPECT_TRUE(absent.IsValid());
+
+	Elf64 truncated;
+	truncated.Open(truncated_path);
+	EXPECT_FALSE(truncated.IsValid());
+
+	Elf64 overflowed;
+	overflowed.Open(overflow_path);
+	EXPECT_FALSE(overflowed.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsTruncatedSectionHeaderTable)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_shdr_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	auto image      = MakeRawElfHeader();
+	auto ehdr       = MakeElfHeader();
+	ehdr.e_shoff    = sizeof(Elf64_Ehdr);
+	ehdr.e_shentsize = sizeof(Elf64_Shdr);
+	ehdr.e_shnum    = 1;
+	std::memcpy(image.data(), &ehdr, sizeof(ehdr));
+
+	const auto path = temp.root + U"truncated.bin";
+	ASSERT_TRUE(WriteBinary(path, image));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsDynamicTableWithoutTerminator)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_dynamic_termination_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_vaddr = 0x1000;
+	load.header.p_memsz = 0x100;
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes         = MakeDynamicBytes({MakeDyn(DT_RELA, 0x1000)});
+
+	const auto path = temp.root + U"unterminated.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({load, dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsPartialDynamicEntry)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_dynamic_stride_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes         = MakeDynamicBytes({MakeDyn(DT_NULL, 0)});
+	dynamic.bytes.pop_back();
+
+	const auto path = temp.root + U"partial.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsDynamicSegmentPastFileEnd)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_dynamic_segment_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes         = MakeDynamicBytes({MakeDyn(DT_NULL, 0)});
+	auto image            = MakeRawElf({dynamic});
+	image.pop_back();
+
+	const auto path = temp.root + U"truncated.bin";
+	ASSERT_TRUE(WriteBinary(path, image));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRetainsLastDynamicAndDynlibdataSegments)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_repeated_dynamic_segments_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture empty_dynamic {};
+	empty_dynamic.header.p_type = PT_DYNAMIC;
+	ElfSegmentFixture first_dynamic {};
+	first_dynamic.header.p_type = PT_DYNAMIC;
+	first_dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_DEBUG, 0x1111), MakeDyn(DT_NULL, 0)});
+	ElfSegmentFixture first_dynlibdata {};
+	first_dynlibdata.header.p_type = PT_OS_DYNLIBDATA;
+	first_dynlibdata.bytes = {0x11, 0x22};
+	ElfSegmentFixture last_dynamic {};
+	last_dynamic.header.p_type = PT_DYNAMIC;
+	last_dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_DEBUG, 0x2222), MakeDyn(DT_NULL, 0)});
+	ElfSegmentFixture last_dynlibdata {};
+	last_dynlibdata.header.p_type = PT_OS_DYNLIBDATA;
+	last_dynlibdata.bytes = {0x91, 0x92};
+
+	const auto path = temp.root + U"repeated.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({empty_dynamic, first_dynamic, first_dynlibdata, last_dynamic, last_dynlibdata})));
+
+	Elf64 elf;
+	elf.Open(path);
+	ASSERT_TRUE(elf.IsValid());
+	const auto* debug = elf.GetDynValue(DT_DEBUG);
+	ASSERT_NE(debug, nullptr);
+	EXPECT_EQ(debug->d_un.d_val, 0x2222u);
+	const auto* data = elf.GetDynamicData<const uint8_t*>(0);
+	ASSERT_NE(data, nullptr);
+	EXPECT_EQ(data[0], 0x91u);
+}
+
+TEST(EmulatorModuleLoad, ElfAcceptsRelocationRangesEndingAtMappedImageBoundary)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_rela_boundary_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_vaddr = 0x1000;
+	load.header.p_memsz = 0x200;
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_RELA, 0x11d0), MakeDyn(DT_RELASZ, sizeof(Elf64_Rela)),
+	                                  MakeDyn(DT_RELAENT, sizeof(Elf64_Rela)), MakeDyn(DT_JMPREL, 0x11e8),
+	                                  MakeDyn(DT_PLTRELSZ, sizeof(Elf64_Rela)), MakeDyn(DT_PLTREL, DT_RELA), MakeDyn(DT_NULL, 0)});
+
+	const auto path = temp.root + U"bounded.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({load, dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_TRUE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsEmptyRelocationPointerOutsideMappedImage)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_empty_rela_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_vaddr = 0x1000;
+	load.header.p_memsz = 0x100;
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_RELA, 0x2000), MakeDyn(DT_RELASZ, 0),
+	                                  MakeDyn(DT_RELAENT, sizeof(Elf64_Rela)), MakeDyn(DT_NULL, 0)});
+
+	const auto path = temp.root + U"outside.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({load, dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsJmprelRangePastMappedImage)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_jmprel_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_vaddr = 0x1000;
+	load.header.p_memsz = 0x100;
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_JMPREL, 0x10f0), MakeDyn(DT_PLTRELSZ, sizeof(Elf64_Rela)),
+	                                  MakeDyn(DT_PLTREL, DT_RELA), MakeDyn(DT_RELAENT, sizeof(Elf64_Rela)),
+	                                  MakeDyn(DT_NULL, 0)});
+
+	const auto path = temp.root + U"outside.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({load, dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsRelocationEntryStrideMismatch)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_rela_stride_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_vaddr = 0x1000;
+	load.header.p_memsz = 0x100;
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_RELA, 0x1010), MakeDyn(DT_RELASZ, sizeof(Elf64_Rela)),
+	                                  MakeDyn(DT_RELAENT, sizeof(Elf64_Rela) - 1), MakeDyn(DT_NULL, 0)});
+
+	const auto path = temp.root + U"stride.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({load, dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfAcceptsOsRelocationRangeEndingAtDynlibdataBoundary)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_os_rela_boundary_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture dynlibdata {};
+	dynlibdata.header.p_type  = PT_OS_DYNLIBDATA;
+	dynlibdata.header.p_vaddr = 0x7000;
+	dynlibdata.bytes.resize(sizeof(Elf64_Rela) + 8);
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_OS_RELA, 0), MakeDyn(DT_OS_RELASZ, sizeof(Elf64_Rela)),
+	                                  MakeDyn(DT_OS_RELAENT, sizeof(Elf64_Rela)), MakeDyn(DT_OS_JMPREL, 8),
+	                                  MakeDyn(DT_OS_PLTRELSZ, sizeof(Elf64_Rela)), MakeDyn(DT_OS_PLTREL, DT_RELA),
+	                                  MakeDyn(DT_NULL, 0)});
+
+	const auto path = temp.root + U"bounded.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({dynlibdata, dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_TRUE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsEmptyOsJmprelOffsetPastDynlibdata)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_os_empty_rela_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture dynlibdata {};
+	dynlibdata.header.p_type = PT_OS_DYNLIBDATA;
+	dynlibdata.bytes.resize(32);
+
+	ElfSegmentFixture dynamic {};
+	dynamic.header.p_type = PT_DYNAMIC;
+	dynamic.bytes = MakeDynamicBytes({MakeDyn(DT_OS_JMPREL, 33), MakeDyn(DT_OS_PLTRELSZ, 0),
+	                                  MakeDyn(DT_OS_PLTREL, DT_RELA), MakeDyn(DT_OS_RELAENT, sizeof(Elf64_Rela)),
+	                                  MakeDyn(DT_NULL, 0)});
+
+	const auto path = temp.root + U"outside.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeRawElf({dynlibdata, dynamic})));
+
+	Elf64 elf;
+	elf.Open(path);
+	EXPECT_FALSE(elf.IsValid());
+}
+
+TEST(EmulatorModuleLoad, ElfAcceptsSelfWithUnstoredSectionPayloadAndAlternateSignature)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_module_load_unstored_self_sections_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	const String path = temp.root + U"eboot.bin";
+	const String saved_path = temp.root + U"unsupported-save.bin";
+	ASSERT_TRUE(WriteBinary(path, MakeSelfWrappedElf(ET_DYNEXEC, 2, true, true)));
+
+	Elf64 elf;
+	elf.Open(path);
+	ASSERT_TRUE(elf.IsSelf());
+	ASSERT_TRUE(elf.IsValid());
+	EXPECT_EQ(elf.GetEhdr()->e_shoff, 0x10000u);
+	EXPECT_EQ(elf.GetEhdr()->e_shnum, 2u);
+	elf.Save(saved_path);
+	EXPECT_FALSE(Kyty::Core::File::IsFileExisting(saved_path));
+}
+
+TEST(EmulatorModuleLoad, ElfSaveRoundTripsOrdinaryImageAndSegmentContents)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_save_roundtrip_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+
+	ElfSegmentFixture load {};
+	load.header.p_type  = PT_LOAD;
+	load.header.p_vaddr = 0x1000;
+	load.bytes          = {0x10, 0x20, 0x30, 0x40};
+
+	const auto input_path  = temp.root + U"input.bin";
+	const auto saved_path  = temp.root + U"saved.bin";
+	const auto input_image = MakeRawElf({load});
+	ASSERT_TRUE(WriteBinary(input_path, input_image));
+
+	Elf64 input;
+	input.Open(input_path);
+	ASSERT_TRUE(input.IsValid());
+	input.Save(saved_path);
+	ASSERT_TRUE(Kyty::Core::File::IsFileExisting(saved_path));
+
+	Elf64 saved;
+	saved.Open(saved_path);
+	ASSERT_TRUE(saved.IsValid());
+
+	Kyty::Core::File saved_file;
+	ASSERT_TRUE(saved_file.Open(saved_path, Kyty::Core::File::Mode::Read));
+	const auto saved_image = saved_file.ReadWholeBuffer();
+	saved_file.Close();
+	ASSERT_EQ(saved_image.Size(), input_image.size());
+	EXPECT_EQ(std::memcmp(saved_image.GetDataConst(), input_image.data(), input_image.size()), 0);
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+TEST(EmulatorModuleLoad, ElfExportPreflightRejectsOversizedSparseRanges)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_export_sparse_bounds_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	constexpr uint64_t too_large = static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1;
+
+	auto create_sparse_file = [](const String& path, const std::vector<uint8_t>& prefix, uint64_t sparse_size,
+	                             uint64_t suffix_offset, const std::vector<uint8_t>& suffix) {
+		if (prefix.size() > std::numeric_limits<uint32_t>::max() || suffix.size() > std::numeric_limits<uint32_t>::max())
+		{
+			return false;
+		}
+		Kyty::Core::File file;
+		if (!file.Create(path)) { return false; }
+		uint32_t bytes_written = 0;
+		file.Write(prefix.data(), static_cast<uint32_t>(prefix.size()), &bytes_written);
+		if (bytes_written != prefix.size())
+		{
+			file.Close();
+			return false;
+		}
+		uint64_t written_end = prefix.size();
+		if (!suffix.empty())
+		{
+			if (suffix_offset > sparse_size || suffix.size() > sparse_size - suffix_offset || !file.Seek(suffix_offset))
+			{
+				file.Close();
+				return false;
+			}
+			bytes_written = 0;
+			file.Write(suffix.data(), static_cast<uint32_t>(suffix.size()), &bytes_written);
+			if (bytes_written != suffix.size())
+			{
+				file.Close();
+				return false;
+			}
+			written_end = suffix_offset + suffix.size();
+		}
+		if (written_end < sparse_size)
+		{
+			const uint8_t marker = 0;
+			if (!file.Seek(sparse_size - 1))
+			{
+				file.Close();
+				return false;
+			}
+			bytes_written = 0;
+			file.Write(&marker, sizeof(marker), &bytes_written);
+			if (bytes_written != sizeof(marker))
+			{
+				file.Close();
+				return false;
+			}
+		}
+		file.Close();
+		return true;
+	};
+
+	Elf64_Ehdr segment_ehdr = MakeElfHeader();
+	segment_ehdr.e_phoff    = sizeof(Elf64_Ehdr);
+	segment_ehdr.e_phnum    = 1;
+	Elf64_Phdr segment_phdr {};
+	segment_phdr.p_type  = PT_LOAD;
+	segment_phdr.p_offset = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
+	segment_phdr.p_vaddr = 0x1000;
+	segment_phdr.p_filesz = too_large;
+	segment_phdr.p_memsz  = too_large;
+	std::vector<uint8_t> segment_prefix;
+	AppendPod(&segment_prefix, segment_ehdr);
+	AppendPod(&segment_prefix, segment_phdr);
+	const String segment_path = temp.root + U"oversized-segment.bin";
+	ASSERT_TRUE(create_sparse_file(segment_path, segment_prefix, segment_phdr.p_offset + too_large, 0, {}));
+
+	Elf64_Ehdr section_ehdr = MakeElfHeader();
+	section_ehdr.e_shoff    = sizeof(Elf64_Ehdr) + too_large;
+	section_ehdr.e_shentsize = sizeof(Elf64_Shdr);
+	section_ehdr.e_shnum     = 2;
+	section_ehdr.e_shstrndx  = 1;
+	Elf64_Shdr large_section {};
+	large_section.sh_type   = 1;
+	large_section.sh_offset = sizeof(Elf64_Ehdr);
+	large_section.sh_size   = too_large;
+	Elf64_Shdr empty_strings {};
+	empty_strings.sh_type = 3;
+	std::vector<uint8_t> section_headers;
+	AppendPod(&section_headers, large_section);
+	AppendPod(&section_headers, empty_strings);
+	std::vector<uint8_t> section_prefix;
+	AppendPod(&section_prefix, section_ehdr);
+	const uint64_t section_file_size = section_ehdr.e_shoff + section_headers.size();
+	const String section_path = temp.root + U"oversized-section.bin";
+	ASSERT_TRUE(create_sparse_file(section_path, section_prefix, section_file_size, section_ehdr.e_shoff, section_headers));
+
+	Elf64 oversized_segment;
+	oversized_segment.Open(segment_path);
+	ASSERT_TRUE(oversized_segment.IsValid());
+	Elf64 oversized_section;
+	oversized_section.Open(section_path);
+	ASSERT_TRUE(oversized_section.IsValid());
+
+	const String segment_output = temp.root + U"segment-output.bin";
+	const String section_output = temp.root + U"section-output.bin";
+	const String segment_dump = temp.root + U"segment-dump/";
+	const String section_dump = temp.root + U"section-dump/";
+	EXPECT_EXIT(
+	    {
+		    struct rlimit limit {};
+		    if (::getrlimit(RLIMIT_AS, &limit) != 0) { std::_Exit(1); }
+		    const int statm_fd = ::open("/proc/self/statm", O_RDONLY);
+		    if (statm_fd < 0) { std::_Exit(2); }
+		    char statm[64] {};
+		    const auto statm_size = ::read(statm_fd, statm, sizeof(statm) - 1);
+		    ::close(statm_fd);
+		    if (statm_size <= 0) { std::_Exit(3); }
+		    char* statm_end = nullptr;
+		    const uint64_t virtual_pages = std::strtoull(statm, &statm_end, 10);
+		    const long page_size = ::sysconf(_SC_PAGESIZE);
+		    constexpr uint64_t address_space_headroom = 512ull * 1024ull * 1024ull;
+		    if (statm_end == statm || page_size <= 0 ||
+		        virtual_pages > (std::numeric_limits<uint64_t>::max() - address_space_headroom) / static_cast<uint64_t>(page_size))
+		    {
+			    std::_Exit(4);
+		    }
+		    const uint64_t current_address_space = virtual_pages * static_cast<uint64_t>(page_size);
+		    uint64_t address_space_cap = current_address_space + address_space_headroom;
+		    if (limit.rlim_max != RLIM_INFINITY && address_space_cap > limit.rlim_max) { address_space_cap = limit.rlim_max; }
+		    limit.rlim_cur = static_cast<rlim_t>(address_space_cap);
+		    if (::setrlimit(RLIMIT_AS, &limit) != 0) { std::_Exit(2); }
+		    oversized_segment.Save(segment_output);
+		    oversized_segment.DbgDump(segment_dump);
+		    oversized_section.Save(section_output);
+		    oversized_section.DbgDump(section_dump);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+	EXPECT_FALSE(Kyty::Core::File::IsFileExisting(segment_output));
+	EXPECT_FALSE(Kyty::Core::File::IsFileExisting(section_output));
+	EXPECT_FALSE(Kyty::Core::File::IsDirectoryExisting(segment_dump));
+	EXPECT_FALSE(Kyty::Core::File::IsDirectoryExisting(section_dump));
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsOverBudgetEagerMetadataAndCanReopen)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_metadata_budget_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	constexpr uint64_t metadata_budget = 64ull * 1024ull * 1024ull;
+	constexpr uint64_t large_dynamic_size = metadata_budget + sizeof(Elf64_Dyn);
+	constexpr uint64_t large_opaque_size = metadata_budget + 1;
+
+	auto write_segment = [](const String& path, Elf64_Word type, uint64_t size) {
+		Elf64_Ehdr ehdr = MakeElfHeader();
+		ehdr.e_phoff = sizeof(Elf64_Ehdr);
+		ehdr.e_phnum = 1;
+		Elf64_Phdr phdr {};
+		phdr.p_type = type;
+		phdr.p_offset = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
+		phdr.p_filesz = size;
+		std::vector<uint8_t> prefix;
+		AppendPod(&prefix, ehdr);
+		AppendPod(&prefix, phdr);
+		return WriteSparseBinary(path, prefix, phdr.p_offset + size, 0, {});
+	};
+
+	const String dynamic_path = temp.root + U"large-dynamic.bin";
+	const String dynlibdata_path = temp.root + U"large-dynlibdata.bin";
+	ASSERT_TRUE(write_segment(dynamic_path, PT_DYNAMIC, large_dynamic_size));
+	ASSERT_TRUE(write_segment(dynlibdata_path, PT_OS_DYNLIBDATA, large_opaque_size));
+
+	Elf64_Ehdr section_ehdr = MakeElfHeader();
+	section_ehdr.e_shoff = sizeof(Elf64_Ehdr);
+	section_ehdr.e_shentsize = sizeof(Elf64_Shdr);
+	section_ehdr.e_shnum = 2;
+	section_ehdr.e_shstrndx = 1;
+	const uint64_t string_offset = section_ehdr.e_shoff + 2 * sizeof(Elf64_Shdr);
+	Elf64_Shdr empty_section {};
+	Elf64_Shdr string_section {};
+	string_section.sh_type = 3;
+	string_section.sh_offset = string_offset;
+	string_section.sh_size = large_opaque_size;
+	std::vector<uint8_t> section_headers;
+	AppendPod(&section_headers, empty_section);
+	AppendPod(&section_headers, string_section);
+	std::vector<uint8_t> section_prefix;
+	AppendPod(&section_prefix, section_ehdr);
+	const String section_names_path = temp.root + U"large-section-names.bin";
+	ASSERT_TRUE(WriteSparseBinary(section_names_path, section_prefix, string_offset + large_opaque_size,
+	                              section_ehdr.e_shoff, section_headers));
+
+	const String valid_path = temp.root + U"small-valid.bin";
+	ASSERT_TRUE(WriteBinary(valid_path, MakeRawElf({})));
+	const String* rejected_paths[] = {&dynamic_path, &dynlibdata_path, &section_names_path};
+	EXPECT_EXIT(
+	    {
+		    constexpr uint64_t address_space_headroom = 128ull * 1024ull * 1024ull;
+		    if (!SetChildAddressSpaceLimit(address_space_headroom)) { std::_Exit(1); }
+		    Elf64 elf;
+		    for (uint32_t i = 0; i < 3; i++)
+		    {
+			    elf.Open(*rejected_paths[i]);
+			    if (elf.IsValid()) { std::_Exit(10 + static_cast<int>(i)); }
+			    elf.Open(valid_path);
+			    if (!elf.IsValid()) { std::_Exit(20 + static_cast<int>(i)); }
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorModuleLoad, ElfRejectsCumulativeEagerMetadataOverBudget)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_metadata_cumulative_budget_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	constexpr uint64_t metadata_part = 24ull * 1024ull * 1024ull;
+
+	Elf64_Ehdr ehdr = MakeElfHeader();
+	ehdr.e_phoff = sizeof(Elf64_Ehdr);
+	ehdr.e_phnum = 2;
+	ehdr.e_shoff = sizeof(Elf64_Ehdr) + 2 * sizeof(Elf64_Phdr);
+	ehdr.e_shentsize = sizeof(Elf64_Shdr);
+	ehdr.e_shnum = 2;
+	ehdr.e_shstrndx = 1;
+	const uint64_t dynamic_offset = ehdr.e_shoff + 2 * sizeof(Elf64_Shdr);
+	const uint64_t dynlibdata_offset = dynamic_offset + metadata_part;
+	const uint64_t string_offset = dynlibdata_offset + metadata_part;
+	Elf64_Phdr dynamic {};
+	dynamic.p_type = PT_DYNAMIC;
+	dynamic.p_offset = dynamic_offset;
+	dynamic.p_filesz = metadata_part;
+	Elf64_Phdr dynlibdata {};
+	dynlibdata.p_type = PT_OS_DYNLIBDATA;
+	dynlibdata.p_offset = dynlibdata_offset;
+	dynlibdata.p_filesz = metadata_part;
+	Elf64_Shdr empty_section {};
+	Elf64_Shdr string_section {};
+	string_section.sh_type = 3;
+	string_section.sh_offset = string_offset;
+	string_section.sh_size = metadata_part;
+	std::vector<uint8_t> prefix;
+	AppendPod(&prefix, ehdr);
+	AppendPod(&prefix, dynamic);
+	AppendPod(&prefix, dynlibdata);
+	std::vector<uint8_t> section_headers;
+	AppendPod(&section_headers, empty_section);
+	AppendPod(&section_headers, string_section);
+	const String cumulative_path = temp.root + U"cumulative.bin";
+	ASSERT_TRUE(WriteSparseBinary(cumulative_path, prefix, string_offset + metadata_part, ehdr.e_shoff, section_headers));
+
+	const String valid_path = temp.root + U"small-valid.bin";
+	ASSERT_TRUE(WriteBinary(valid_path, MakeRawElf({})));
+	EXPECT_EXIT(
+	    {
+		    constexpr uint64_t address_space_headroom = 128ull * 1024ull * 1024ull;
+		    if (!SetChildAddressSpaceLimit(address_space_headroom)) { std::_Exit(1); }
+		    Elf64 elf;
+		    elf.Open(cumulative_path);
+		    if (elf.IsValid()) { std::_Exit(10); }
+		    elf.Open(valid_path);
+		    if (!elf.IsValid()) { std::_Exit(11); }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorModuleLoad, ElfRepeatedMetadataSegmentsReplaceRetainedBudget)
+{
+	const TempPackageRoot temp(U"/tmp/kyty_elf_metadata_replacement_budget_test/");
+	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
+	constexpr uint64_t segment_size = 32ull * 1024ull * 1024ull + sizeof(Elf64_Dyn);
+
+	auto write_repeated_segments = [&](const String& path, Elf64_Word type, bool dynamic_data) {
+		Elf64_Ehdr ehdr = MakeElfHeader();
+		ehdr.e_phoff = sizeof(Elf64_Ehdr);
+		ehdr.e_phnum = 2;
+		const uint64_t first_offset = sizeof(Elf64_Ehdr) + 2 * sizeof(Elf64_Phdr);
+		const uint64_t second_offset = first_offset + segment_size;
+		Elf64_Phdr first {};
+		first.p_type = type;
+		first.p_offset = first_offset;
+		first.p_filesz = segment_size;
+		Elf64_Phdr second = first;
+		second.p_offset = second_offset;
+		std::vector<uint8_t> prefix;
+		AppendPod(&prefix, ehdr);
+		AppendPod(&prefix, first);
+		AppendPod(&prefix, second);
+		if (dynamic_data)
+		{
+			const uint8_t initial_byte = 0x11;
+			prefix.push_back(initial_byte);
+		} else
+		{
+			AppendPod(&prefix, MakeDyn(DT_DEBUG, 0x1111));
+		}
+		std::vector<uint8_t> final_entry;
+		if (dynamic_data)
+		{
+			final_entry.push_back(0x91);
+		} else
+		{
+			AppendPod(&final_entry, MakeDyn(DT_DEBUG, 0x2222));
+		}
+		return WriteSparseBinary(path, prefix, second_offset + segment_size, second_offset, final_entry);
+	};
+
+	const String dynamic_path = temp.root + U"repeated-dynamic.bin";
+	const String dynlibdata_path = temp.root + U"repeated-dynlibdata.bin";
+	ASSERT_TRUE(write_repeated_segments(dynamic_path, PT_DYNAMIC, false));
+	ASSERT_TRUE(write_repeated_segments(dynlibdata_path, PT_OS_DYNLIBDATA, true));
+	EXPECT_EXIT(
+	    {
+		    constexpr uint64_t address_space_headroom = 128ull * 1024ull * 1024ull;
+		    if (!SetChildAddressSpaceLimit(address_space_headroom)) { std::_Exit(1); }
+		    Elf64 elf;
+		    elf.Open(dynamic_path);
+		    const auto* debug = elf.GetDynValue(DT_DEBUG);
+		    if (!elf.IsValid() || debug == nullptr || debug->d_un.d_val != 0x2222) { std::_Exit(10); }
+		    elf.Open(dynlibdata_path);
+		    const auto* data = elf.GetDynamicData<const uint8_t*>(0);
+		    if (!elf.IsValid() || data == nullptr || data[0] != 0x91) { std::_Exit(11); }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+#endif
+
 TEST(EmulatorModuleLoad, BuildPlanRejectsCrossPlatformAdjacentPrx)
 {
 	const TempPackageRoot temp(U"/tmp/kyty_module_load_cross_platform_test/");
@@ -538,20 +1402,6 @@ TEST(EmulatorModuleLoad, FtruncateRejectsInvalidArguments)
 	EnsureFileSystemSubsystem();
 	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelFtruncate(-1, 0), Kyty::Libs::LibKernel::KERNEL_ERROR_EBADF);
 	EXPECT_EQ(Kyty::Kernel::FileSystem::KernelFtruncate(3, -1), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
-}
-
-TEST(EmulatorModuleLoad, RecognizesAlternateGen5SelfSignature)
-{
-	EnsureFileSystemSubsystem();
-	const TempPackageRoot temp(U"/tmp/kyty_module_load_alternate_self_test/");
-	ASSERT_TRUE(Kyty::Core::File::CreateDirectories(temp.root));
-	const String path = temp.root + U"eboot.bin";
-	ASSERT_TRUE(WriteBinary(path, MakeSelfWrappedElf(ET_DYNEXEC, 2, true, true)));
-
-	Elf64 elf;
-	elf.Open(path);
-	EXPECT_TRUE(elf.IsSelf());
-	EXPECT_TRUE(elf.IsValid());
 }
 
 TEST(EmulatorModuleLoad, BuildPlanRejectsExtensionOnlyAdjacentJunk)

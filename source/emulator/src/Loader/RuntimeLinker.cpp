@@ -723,6 +723,10 @@ static void get_dyn_data(Elf64* elf, uint64_t base_vaddr, T* out, Elf64_Sxword t
 {
 	if (const auto* dyn = elf->GetDynValue(tag); dyn != nullptr)
 	{
+		if (dyn->d_un.d_ptr > std::numeric_limits<uint64_t>::max() - base_vaddr)
+		{
+			EXIT("ELF dynamic pointer overflows the mapped image address\n");
+		}
 		*out = reinterpret_cast<T>(base_vaddr + dyn->d_un.d_ptr);
 	}
 }
@@ -1059,10 +1063,13 @@ static void relocate_all(Elf64_Rela* records, uint64_t size, Program* program, b
 {
 	KYTY_LOADER_PROFILE_FUNCTION();
 
-	uint32_t index = 0;
-	for (auto* r = records; reinterpret_cast<uint8_t*>(r) < reinterpret_cast<uint8_t*>(records) + size; r++, index++)
+	if (size == 0) { return; }
+	EXIT_IF(records == nullptr || size % sizeof(Elf64_Rela) != 0);
+	const uint64_t count = size / sizeof(Elf64_Rela);
+	EXIT_IF(count > std::numeric_limits<uint32_t>::max());
+	for (uint64_t index = 0; index < count; index++)
 	{
-		relocate(index, r, program, jmprela_table);
+		relocate(static_cast<uint32_t>(index), records + index, program, jmprela_table);
 	}
 }
 
@@ -2281,14 +2288,19 @@ uint64_t RuntimeLinker::ReadFromElf(Program* program, uint64_t vaddr)
 
 	for (Elf64_Half i = 0; i < ehdr->e_phnum; i++)
 	{
-		if (phdr[i].p_memsz != 0 && (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_OS_RELRO))
+		if (phdr[i].p_memsz != 0 && (phdr[i].p_type == PT_LOAD || phdr[i].p_type == PT_OS_RELRO) &&
+		    phdr[i].p_vaddr <= std::numeric_limits<uint64_t>::max() - program->base_vaddr)
 		{
-			uint64_t segment_addr      = phdr[i].p_vaddr + program->base_vaddr;
-			uint64_t segment_file_size = phdr[i].p_filesz;
-
-			if (vaddr >= segment_addr && vaddr < segment_addr + segment_file_size)
+			const uint64_t segment_addr = phdr[i].p_vaddr + program->base_vaddr;
+			if (vaddr < segment_addr) { continue; }
+			const uint64_t segment_offset = vaddr - segment_addr;
+			if (segment_offset < phdr[i].p_filesz && sizeof(ret) <= phdr[i].p_filesz - segment_offset &&
+			    phdr[i].p_offset <= std::numeric_limits<uint64_t>::max() - segment_offset)
 			{
-				program->elf->LoadSegment(reinterpret_cast<uint64_t>(&ret), phdr[i].p_offset + vaddr - segment_addr, sizeof(ret));
+				if (!program->elf->LoadSegment(reinterpret_cast<uint64_t>(&ret), phdr[i].p_offset + segment_offset, sizeof(ret)))
+				{
+					return 0;
+				}
 				break;
 			}
 		}
@@ -2763,7 +2775,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program)
 			KYTY_LOG_DEBUG("[%d] memory_size = %" PRIu64 "\n", i, segment_memory_size);
 			KYTY_LOG_DEBUG("[%d] mode        = %s\n", i, Core::EnumName(mode).C_Str());
 
-			program->elf->LoadSegment(segment_addr, phdr[i].p_offset, segment_file_size);
+			EXIT_IF(!program->elf->LoadSegment(segment_addr, phdr[i].p_offset, segment_file_size));
 
 			bool skip_protect = (phdr[i].p_type == PT_LOAD && is_next_gen && mode == Core::VirtualMemory::Mode::NoAccess);
 
