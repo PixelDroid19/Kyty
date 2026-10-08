@@ -30,6 +30,63 @@ bool CheckVk(VkResult result, const char* operation, std::string* message)
 	return false;
 }
 
+bool FindMemoryType(const VkPhysicalDeviceMemoryProperties& properties, uint32_t memory_type_bits,
+                    VkMemoryPropertyFlags required, uint32_t* memory_type)
+{
+	for (uint32_t index = 0; index < properties.memoryTypeCount; ++index)
+	{
+		if ((memory_type_bits & (1u << index)) != 0 && (properties.memoryTypes[index].propertyFlags & required) == required)
+		{
+			*memory_type = index;
+			return true;
+		}
+	}
+	return false;
+}
+
+// Covers the whole allocation, so flush and invalidate need no atom-alignment arithmetic.
+VkMappedMemoryRange WholeMemoryRange(VkDeviceMemory memory)
+{
+	VkMappedMemoryRange range {};
+	range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+	range.memory = memory;
+	range.offset = 0;
+	range.size = VK_WHOLE_SIZE;
+	return range;
+}
+
+// Allocates, binds and maps host-visible memory for the buffer. A compatible HOST_COHERENT type is preferred;
+// otherwise a compatible noncoherent type is used and reported through `coherent`.
+VulkanComputeProbe::Result AllocateHostVisibleMemory(VkDevice device, VkPhysicalDevice physical_device, VkBuffer buffer,
+                                                     VkDeviceMemory* memory, void** mapped, bool* coherent, std::string* message)
+{
+	VkMemoryRequirements requirements {};
+	vkGetBufferMemoryRequirements(device, buffer, &requirements);
+	VkPhysicalDeviceMemoryProperties properties {};
+	vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
+	const auto host_visible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+	uint32_t memory_type = 0;
+	if (!FindMemoryType(properties, requirements.memoryTypeBits, host_visible | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, &memory_type) &&
+	    !FindMemoryType(properties, requirements.memoryTypeBits, host_visible, &memory_type))
+	{
+		*message = "no buffer-compatible host-visible Vulkan memory type";
+		return VulkanComputeProbe::Result::Unavailable;
+	}
+	*coherent = (properties.memoryTypes[memory_type].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+
+	VkMemoryAllocateInfo allocation {};
+	allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocation.allocationSize = requirements.size;
+	allocation.memoryTypeIndex = memory_type;
+	if (!CheckVk(vkAllocateMemory(device, &allocation, nullptr, memory), "vkAllocateMemory", message) ||
+	    !CheckVk(vkBindBufferMemory(device, buffer, *memory, 0), "vkBindBufferMemory", message) ||
+	    !CheckVk(vkMapMemory(device, *memory, 0, requirements.size, 0, mapped), "vkMapMemory", message))
+	{
+		return VulkanComputeProbe::Result::Failure;
+	}
+	return VulkanComputeProbe::Result::Success;
+}
+
 } // namespace
 
 DispatchObjects::~DispatchObjects()
@@ -76,38 +133,11 @@ VulkanComputeProbe::Result CreateProbeBuffer(VkDevice device, VkPhysicalDevice p
 		return VulkanComputeProbe::Result::Failure;
 	}
 
-	VkMemoryRequirements requirements {};
-	vkGetBufferMemoryRequirements(device, objects->buffer, &requirements);
-	VkPhysicalDeviceMemoryProperties properties {};
-	vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
-	uint32_t memory_type = std::numeric_limits<uint32_t>::max();
-	const auto required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-	for (uint32_t index = 0; index < properties.memoryTypeCount; ++index)
-	{
-		if ((requirements.memoryTypeBits & (1u << index)) != 0 &&
-		    (properties.memoryTypes[index].propertyFlags & required) == required)
-		{
-			memory_type = index;
-			break;
-		}
-	}
-	if (memory_type == std::numeric_limits<uint32_t>::max())
-	{
-		*message = "no buffer-compatible host-visible, host-coherent Vulkan memory type";
-		return VulkanComputeProbe::Result::Unavailable;
-	}
-
-	VkMemoryAllocateInfo allocation {};
-	allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocation.allocationSize = requirements.size;
-	allocation.memoryTypeIndex = memory_type;
-	if (!CheckVk(vkAllocateMemory(device, &allocation, nullptr, &objects->memory), "vkAllocateMemory", message) ||
-	    !CheckVk(vkBindBufferMemory(device, objects->buffer, objects->memory, 0), "vkBindBufferMemory", message) ||
-	    !CheckVk(vkMapMemory(device, objects->memory, 0, buffer_size, 0, &objects->mapped), "vkMapMemory", message))
-	{
-		return VulkanComputeProbe::Result::Failure;
-	}
+	const auto allocated = AllocateHostVisibleMemory(device, physical_device, objects->buffer, &objects->memory,
+	                                                 &objects->mapped, &objects->memory_coherent, message);
+	if (allocated != VulkanComputeProbe::Result::Success) { return allocated; }
 	std::memcpy(objects->mapped, initial_data, buffer_size);
+	objects->output_host_dirty = true;
 	return VulkanComputeProbe::Result::Success;
 }
 
@@ -124,38 +154,8 @@ VulkanComputeProbe::Result CreateMetadataBuffer(VkDevice device, VkPhysicalDevic
 		return VulkanComputeProbe::Result::Failure;
 	}
 
-	VkMemoryRequirements requirements {};
-	vkGetBufferMemoryRequirements(device, objects->metadata_buffer, &requirements);
-	VkPhysicalDeviceMemoryProperties properties {};
-	vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
-	uint32_t memory_type = std::numeric_limits<uint32_t>::max();
-	const auto required = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-	for (uint32_t index = 0; index < properties.memoryTypeCount; ++index)
-	{
-		if ((requirements.memoryTypeBits & (1u << index)) != 0 &&
-		    (properties.memoryTypes[index].propertyFlags & required) == required)
-		{
-			memory_type = index;
-			break;
-		}
-	}
-	if (memory_type == std::numeric_limits<uint32_t>::max())
-	{
-		*message = "no uniform-buffer-compatible host-visible, host-coherent Vulkan memory type";
-		return VulkanComputeProbe::Result::Unavailable;
-	}
-
-	VkMemoryAllocateInfo allocation {};
-	allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-	allocation.allocationSize = requirements.size;
-	allocation.memoryTypeIndex = memory_type;
-	if (!CheckVk(vkAllocateMemory(device, &allocation, nullptr, &objects->metadata_memory), "vkAllocateMemory(metadata)", message) ||
-	    !CheckVk(vkBindBufferMemory(device, objects->metadata_buffer, objects->metadata_memory, 0), "vkBindBufferMemory(metadata)", message) ||
-	    !CheckVk(vkMapMemory(device, objects->metadata_memory, 0, size, 0, &objects->metadata_mapped), "vkMapMemory(metadata)", message))
-	{
-		return VulkanComputeProbe::Result::Failure;
-	}
-	return VulkanComputeProbe::Result::Success;
+	return AllocateHostVisibleMemory(device, physical_device, objects->metadata_buffer, &objects->metadata_memory,
+	                                 &objects->metadata_mapped, &objects->metadata_coherent, message);
 }
 
 VulkanComputeProbe::Result CreateProbePipeline(VkDevice device, const uint32_t* spirv, size_t word_count,
@@ -367,6 +367,27 @@ VulkanComputeProbe::Result SubmitAndRead(VkDevice device, VkQueue queue, uint32_
 			return VulkanComputeProbe::Result::Failure;
 		}
 		std::memcpy(objects->metadata_mapped, metadata->data(), bind->push_constant_size);
+		if (!objects->metadata_coherent)
+		{
+			const auto range = WholeMemoryRange(objects->metadata_memory);
+			if (!CheckVk(vkFlushMappedMemoryRanges(device, 1, &range), "vkFlushMappedMemoryRanges(metadata)", message))
+			{
+				return VulkanComputeProbe::Result::Failure;
+			}
+		}
+	}
+	// The seed is written only at creation, so it is flushed once; later submissions keep the device-written contents.
+	if (objects->output_host_dirty)
+	{
+		if (!objects->memory_coherent)
+		{
+			const auto range = WholeMemoryRange(objects->memory);
+			if (!CheckVk(vkFlushMappedMemoryRanges(device, 1, &range), "vkFlushMappedMemoryRanges", message))
+			{
+				return VulkanComputeProbe::Result::Failure;
+			}
+		}
+		objects->output_host_dirty = false;
 	}
 	if (objects->command_pool == VK_NULL_HANDLE)
 	{
@@ -444,6 +465,14 @@ VulkanComputeProbe::Result SubmitAndRead(VkDevice device, VkQueue queue, uint32_
 		std::_Exit(EXIT_FAILURE);
 	}
 	if (!CheckVk(waited, "vkWaitForFences", message)) { return VulkanComputeProbe::Result::Failure; }
+	if (!objects->memory_coherent)
+	{
+		const auto range = WholeMemoryRange(objects->memory);
+		if (!CheckVk(vkInvalidateMappedMemoryRanges(device, 1, &range), "vkInvalidateMappedMemoryRanges", message))
+		{
+			return VulkanComputeProbe::Result::Failure;
+		}
+	}
 	std::memcpy(result_words, objects->mapped, output_size);
 	return VulkanComputeProbe::Result::Success;
 }

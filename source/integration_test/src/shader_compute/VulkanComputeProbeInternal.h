@@ -35,6 +35,11 @@ struct DispatchObjects
 	VkFence                   fence           = VK_NULL_HANDLE;
 	void*                     mapped          = nullptr;
 	void*                     metadata_mapped = nullptr;
+	// False when the selected host-visible type is not HOST_COHERENT; such memory needs explicit flush and invalidate.
+	bool                      memory_coherent   = true;
+	bool                      metadata_coherent = true;
+	// The output seed is host-written once at creation and must be flushed before the first submission.
+	bool                      output_host_dirty = false;
 
 	~DispatchObjects();
 };
