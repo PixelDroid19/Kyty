@@ -71,6 +71,9 @@
 #include <unwind.h>
 
 extern "C" {
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+int __isoc99_vsscanf(const char* s, const char* format, __gnuc_va_list args) __THROW;
+#endif
 [[noreturn]] void         __cxa_throw(void* thrown_exception, const std::type_info* tinfo, void (*dest)(void*));
 void*                     __cxa_begin_catch(void* exception_object);
 void                      __cxa_end_catch();
@@ -815,12 +818,23 @@ static KYTY_SYSV_ABI int c_vfprintf(VA_ARGS)
 // scanf parses a guest input string into guest output pointers. Kyty has no input
 // converter yet; forward to the host, which reads the guest string and writes back
 // through the pointer arguments. This is input parsing, not output formatting.
+static int c_vsscanf_classic(const char* s, const char* fmt, va_list args)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+	// The C23 glibc entry point accepts binary constants for %i. The retained
+	// ISO C99 symbol preserves the classic input boundary.
+	return __isoc99_vsscanf(s, fmt, args);
+#else
+	return ::vsscanf(s, fmt, args);
+#endif
+}
+
 static KYTY_SYSV_ABI int c_sscanf(VA_ARGS)
 {
 	VA_CONTEXT(ctx);
 	const char* s   = VaArg_ptr<const char>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
-	return ::vsscanf(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+	return c_vsscanf_classic(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
 }
 // Gen5 sscanf_s — NID 24m4Z4bUaoY. Annex K requires rsize after %s/%c/%[ destinations;
 // integer formats match sscanf. Forward identically for now; refine if a title
@@ -830,7 +844,7 @@ static KYTY_SYSV_ABI int c_sscanf_s(VA_ARGS)
 	VA_CONTEXT(ctx);
 	const char* s   = VaArg_ptr<const char>(&ctx.va_list);
 	const char* fmt = VaArg_ptr<const char>(&ctx.va_list);
-	return ::vsscanf(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
+	return c_vsscanf_classic(s, fmt, *reinterpret_cast<va_list*>(&ctx.va_list));
 }
 
 // Gen5 clock — NID QZP6I9ZZxpE. Observed as seed input XOR rdtscp.
@@ -882,23 +896,70 @@ static KYTY_SYSV_ABI float c_strtof(const char* s, char** e)
 {
 	return ::strtof(s, e);
 }
-static KYTY_SYSV_ABI long c_strtol(const char* s, char** e, int b)
+
+// Orbis uses an x86-64 LP64 ABI. Keep this independent of the host's `long`
+// width, and preserve the pre-C23 base-0/base-2 boundary for a leading 0b.
+static bool c_strto_stops_at_classic_binary_prefix(const char* s, char** end, int base)
 {
-	return ::strtol(s, e, b);
+	if (s == nullptr || (base != 0 && base != 2))
+	{
+		return false;
+	}
+
+	const char* cursor = s;
+	while (std::isspace(static_cast<unsigned char>(*cursor)) != 0)
+	{
+		cursor++;
+	}
+	if (*cursor == '+' || *cursor == '-')
+	{
+		cursor++;
+	}
+	if (*cursor != '0' || (cursor[1] != 'b' && cursor[1] != 'B'))
+	{
+		return false;
+	}
+
+	if (end != nullptr)
+	{
+		*end = const_cast<char*>(cursor + 1);
+	}
+	return true;
 }
-static KYTY_SYSV_ABI unsigned long c_strtoul(const char* s, char** e, int b)
+
+static KYTY_SYSV_ABI int64_t c_strtol(const char* s, char** e, int b)
 {
-	return ::strtoul(s, e, b);
+	if (c_strto_stops_at_classic_binary_prefix(s, e, b))
+	{
+		return 0;
+	}
+	return static_cast<int64_t>(std::strtoll(s, e, b));
 }
-static KYTY_SYSV_ABI long long c_strtoll(const char* s, char** e, int b)
+static KYTY_SYSV_ABI uint64_t c_strtoul(const char* s, char** e, int b)
 {
-	return ::strtoll(s, e, b);
+	if (c_strto_stops_at_classic_binary_prefix(s, e, b))
+	{
+		return 0;
+	}
+	return static_cast<uint64_t>(std::strtoull(s, e, b));
+}
+static KYTY_SYSV_ABI int64_t c_strtoll(const char* s, char** e, int b)
+{
+	if (c_strto_stops_at_classic_binary_prefix(s, e, b))
+	{
+		return 0;
+	}
+	return static_cast<int64_t>(std::strtoll(s, e, b));
 }
 
 // Gen5 libc_v1 strtoull — NID 5OqszGpy7Mg.
-static KYTY_SYSV_ABI unsigned long long c_strtoull(const char* s, char** e, int b)
+static KYTY_SYSV_ABI uint64_t c_strtoull(const char* s, char** e, int b)
 {
-	return ::strtoull(s, e, b);
+	if (c_strto_stops_at_classic_binary_prefix(s, e, b))
+	{
+		return 0;
+	}
+	return static_cast<uint64_t>(std::strtoull(s, e, b));
 }
 static KYTY_SYSV_ABI double c_atof(const char* s)
 {

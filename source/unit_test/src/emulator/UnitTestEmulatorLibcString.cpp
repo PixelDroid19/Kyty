@@ -2,8 +2,12 @@
 
 #include "Emulator/VideoFrameMemory.h"
 #include "Emulator/Libs/VaContext.h"
+#include "Emulator/Libs/Libs.h"
+#include "Emulator/Loader/SymbolDatabase.h"
 #include "Kyty/Core/VirtualMemory.h"
 
+#include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -40,7 +44,179 @@ void PrepareStdioDestination(uint64_t base, uint64_t /*size*/)
 	g_stdio_made_writable = Core::VirtualMemory::Protect(base, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
 }
 
+template <typename Function>
+Function ResolveLibcExport(Kyty::Loader::SymbolDatabase* symbols, const char* name)
+{
+	Kyty::Loader::SymbolResolve query {};
+	query.name                 = Kyty::Loader::EncodeNameAsNid(name);
+	query.library              = U"libc";
+	query.library_version      = 1;
+	query.module               = U"libc";
+	query.module_version_major = 1;
+	query.module_version_minor = 1;
+	query.type                 = Kyty::Loader::SymbolType::Func;
+	const auto* record = symbols->Find(query);
+	return record != nullptr ? reinterpret_cast<Function>(record->vaddr) : nullptr;
+}
+
+template <typename Function, typename Result>
+void ExpectClassicBinaryPrefix(Function convert)
+{
+	const char input[] = "0b101";
+	for (const int base: std::array {0, 2})
+	{
+		char* end = nullptr;
+		errno     = 0;
+		EXPECT_EQ(convert(input, &end, base), Result {});
+		EXPECT_EQ(end, input + 1);
+		EXPECT_EQ(errno, 0);
+	}
+
+	char* end = nullptr;
+	errno     = 0;
+	EXPECT_EQ(convert(input, &end, 16), static_cast<Result>(45313));
+	EXPECT_EQ(end, input + 5);
+	EXPECT_EQ(errno, 0);
+
+	const char signed_input[] = " \t-0B101";
+	for (const int base: std::array {0, 2})
+	{
+		end   = nullptr;
+		errno = 0;
+		EXPECT_EQ(convert(signed_input, &end, base), Result {});
+		EXPECT_EQ(end, signed_input + 4);
+		EXPECT_EQ(errno, 0);
+	}
+}
+
 } // namespace
+
+TEST(EmulatorLibcString, ResolvedIntegerConversionsKeepClassicPrefixAndGuestLongWidth)
+{
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	using SignedConversion   = int64_t(KYTY_SYSV_ABI*)(const char*, char**, int);
+	using UnsignedConversion = uint64_t(KYTY_SYSV_ABI*)(const char*, char**, int);
+	const auto strtol   = ResolveLibcExport<SignedConversion>(&symbols, "strtol");
+	const auto strtoul  = ResolveLibcExport<UnsignedConversion>(&symbols, "strtoul");
+	const auto strtoll  = ResolveLibcExport<SignedConversion>(&symbols, "strtoll");
+	const auto strtoull = ResolveLibcExport<UnsignedConversion>(&symbols, "strtoull");
+	ASSERT_NE(strtol, nullptr);
+	ASSERT_NE(strtoul, nullptr);
+	ASSERT_NE(strtoll, nullptr);
+	ASSERT_NE(strtoull, nullptr);
+
+	ExpectClassicBinaryPrefix<SignedConversion, int64_t>(strtol);
+	ExpectClassicBinaryPrefix<UnsignedConversion, uint64_t>(strtoul);
+	ExpectClassicBinaryPrefix<SignedConversion, int64_t>(strtoll);
+	ExpectClassicBinaryPrefix<UnsignedConversion, uint64_t>(strtoull);
+
+	const char signed_above_32_bit[] = "2147483648";
+	char*     end                    = nullptr;
+	errno                            = 0;
+	EXPECT_EQ(strtol(signed_above_32_bit, &end, 10), INT64_C(2147483648));
+	EXPECT_EQ(end, signed_above_32_bit + sizeof(signed_above_32_bit) - 1);
+	EXPECT_EQ(errno, 0);
+	errno = 0;
+	EXPECT_EQ(strtoll(signed_above_32_bit, &end, 10), INT64_C(2147483648));
+	EXPECT_EQ(end, signed_above_32_bit + sizeof(signed_above_32_bit) - 1);
+	EXPECT_EQ(errno, 0);
+	errno = 0;
+	EXPECT_EQ(strtoul(signed_above_32_bit, &end, 10), UINT64_C(2147483648));
+	EXPECT_EQ(end, signed_above_32_bit + sizeof(signed_above_32_bit) - 1);
+	EXPECT_EQ(errno, 0);
+	errno = 0;
+	EXPECT_EQ(strtoull(signed_above_32_bit, &end, 10), UINT64_C(2147483648));
+	EXPECT_EQ(end, signed_above_32_bit + sizeof(signed_above_32_bit) - 1);
+	EXPECT_EQ(errno, 0);
+}
+
+TEST(EmulatorLibcString, ResolvedIntegerConversionsPreserveErrnoAndSignedness)
+{
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	using SignedConversion   = int64_t(KYTY_SYSV_ABI*)(const char*, char**, int);
+	using UnsignedConversion = uint64_t(KYTY_SYSV_ABI*)(const char*, char**, int);
+	const auto strtol   = ResolveLibcExport<SignedConversion>(&symbols, "strtol");
+	const auto strtoul  = ResolveLibcExport<UnsignedConversion>(&symbols, "strtoul");
+	const auto strtoll  = ResolveLibcExport<SignedConversion>(&symbols, "strtoll");
+	const auto strtoull = ResolveLibcExport<UnsignedConversion>(&symbols, "strtoull");
+	ASSERT_NE(strtol, nullptr);
+	ASSERT_NE(strtoul, nullptr);
+	ASSERT_NE(strtoll, nullptr);
+	ASSERT_NE(strtoull, nullptr);
+
+	const char invalid_base_input[] = "42";
+	char*     end                   = nullptr;
+	errno                           = 0;
+	EXPECT_EQ(strtol(invalid_base_input, &end, 1), 0);
+	EXPECT_EQ(errno, EINVAL);
+	errno = ERANGE;
+	const char classic_prefix[] = "0b101";
+	EXPECT_EQ(strtol(classic_prefix, &end, 0), 0);
+	EXPECT_EQ(end, classic_prefix + 1);
+	EXPECT_EQ(errno, ERANGE);
+
+	const char negative_unsigned[] = "-1";
+	errno                         = 0;
+	EXPECT_EQ(strtoul(negative_unsigned, &end, 10), UINT64_MAX);
+	EXPECT_EQ(errno, 0);
+	EXPECT_EQ(strtoull(negative_unsigned, &end, 10), UINT64_MAX);
+	EXPECT_EQ(errno, 0);
+
+	const char signed_overflow[] = "9223372036854775808";
+	errno                        = 0;
+	EXPECT_EQ(strtol(signed_overflow, &end, 10), INT64_MAX);
+	EXPECT_EQ(end, signed_overflow + sizeof(signed_overflow) - 1);
+	EXPECT_EQ(errno, ERANGE);
+	errno = 0;
+	EXPECT_EQ(strtoll(signed_overflow, &end, 10), INT64_MAX);
+	EXPECT_EQ(end, signed_overflow + sizeof(signed_overflow) - 1);
+	EXPECT_EQ(errno, ERANGE);
+
+	const char unsigned_overflow[] = "18446744073709551616";
+	errno                          = 0;
+	EXPECT_EQ(strtoul(unsigned_overflow, &end, 10), UINT64_MAX);
+	EXPECT_EQ(end, unsigned_overflow + sizeof(unsigned_overflow) - 1);
+	EXPECT_EQ(errno, ERANGE);
+	errno = 0;
+	EXPECT_EQ(strtoull(unsigned_overflow, &end, 10), UINT64_MAX);
+	EXPECT_EQ(end, unsigned_overflow + sizeof(unsigned_overflow) - 1);
+	EXPECT_EQ(errno, ERANGE);
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && defined(__GLIBC__)
+TEST(EmulatorLibcString, ResolvedScanfExportsKeepClassicIntegerTokenBoundary)
+{
+	Kyty::Loader::SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	using Sscanf = int(KYTY_SYSV_ABI*)(const char*, const char*, ...);
+	const auto sscanf_export   = ResolveLibcExport<Sscanf>(&symbols, "sscanf");
+	const auto sscanf_s_export = ResolveLibcExport<Sscanf>(&symbols, "sscanf_s");
+	ASSERT_NE(sscanf_export, nullptr);
+	ASSERT_NE(sscanf_s_export, nullptr);
+
+	const char input[] = "0b101x";
+	int       value    = -1;
+	int       consumed = -1;
+	char      next     = '\0';
+	EXPECT_EQ(sscanf_export(input, "%i%n%c", &value, &consumed, &next), 2);
+	EXPECT_EQ(value, 0);
+	EXPECT_EQ(consumed, 1);
+	EXPECT_EQ(next, 'b');
+
+	value    = -1;
+	consumed = -1;
+	next     = '\0';
+	EXPECT_EQ(sscanf_s_export(input, "%i%n%c", &value, &consumed, &next, sizeof(next)), 2);
+	EXPECT_EQ(value, 0);
+	EXPECT_EQ(consumed, 1);
+	EXPECT_EQ(next, 'b');
+}
+#endif
 
 TEST(EmulatorLibcString, StdioReadsPrepareProtectedGuestDestinations)
 {
