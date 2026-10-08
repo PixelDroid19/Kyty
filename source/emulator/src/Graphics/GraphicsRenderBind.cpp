@@ -3227,6 +3227,19 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		bool           neo        = Config::IsNeo();
 		auto           width      = (gen5 ? r.Width5() : r.Width4()) + 1;
 		auto           height     = (gen5 ? r.Height5() : r.Height4()) + 1;
+		// A 1D array is one texel row per slice; its layout and Vulkan image use height 1. Only the
+		// linear uncompressed layout derives from width, format and slice count; tiled and
+		// block-compressed 1D arrays have no evidenced layout.
+		if (gen5 && r.Type() == 12u)
+		{
+			height = 1;
+			if (r.TileMode() != 0u || ShaderGen5TextureIsBlockCompressed(r.Format()))
+			{
+				EXIT("unsupported Gen5 1D-array texture layout: tile=%u format=%u width=%u slices=%u base=0x%012" PRIx64 "\n",
+				     static_cast<uint32_t>(r.TileMode()), static_cast<uint32_t>(r.Format()), static_cast<uint32_t>(width),
+				     static_cast<uint32_t>(r.Depth()) + 1u, r.Base40());
+			}
+		}
 		const uint32_t depth      = ((three_dimensional || arrayed_2d) ? static_cast<uint32_t>(r.Depth()) + 1u : 1u);
 		const uint32_t base_array = (arrayed_2d ? static_cast<uint32_t>(r.BaseArray5()) : 0u);
 		auto           tile       = r.TileMode();
@@ -4454,7 +4467,7 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.gds_pointers.pointers_num > 0)
 		{
 			PrepareGdsPointers(bind.gds_pointers, &sgprs_ptr);
-			gds_buffer      = g_render_ctx->GetGdsBuffer()->GetBuffer(g_render_ctx->GetGraphicCtx());
+			gds_buffer      = g_render_ctx->GetGdsBuffer()->GetBuffer(g_render_ctx->GetGraphicCtx(), buffer);
 			need_descriptor = true;
 		}
 		if (bind.direct_sgprs.sgprs_num > 0)

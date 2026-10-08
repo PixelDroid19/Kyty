@@ -29,6 +29,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/DepthStencilCopy.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 #include "Emulator/Graphics/HardwareContext.h"
@@ -446,18 +447,41 @@ public:
 	virtual ~GdsBuffer() { KYTY_NOT_IMPLEMENTED; }
 	KYTY_CLASS_NO_COPY(GdsBuffer);
 
-	void Clear(GraphicContext* ctx, uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
-	void Read(GraphicContext* ctx, uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);
+	// GDS is only touched through recorded commands, outside any render pass, so transfers keep
+	// their stream order against dispatches. Each recorder validates its spans first and returns
+	// false, recording nothing, when a span is outside the guest window. Empty spans record nothing.
+	[[nodiscard]] bool RecordFill(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, uint64_t dw_count, uint32_t value);
+	[[nodiscard]] bool RecordUpdate(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, const uint32_t* src, uint64_t dw_count);
+	// `src` holds GPU-owned guest bytes at byte offset `src_offset`.
+	[[nodiscard]] bool RecordCopyFromBuffer(CommandBuffer* buffer, GraphicContext* ctx, const VulkanBuffer* src, uint64_t src_offset,
+	                                        uint64_t dw_offset, uint64_t dw_count);
+	[[nodiscard]] bool RecordCopy(CommandBuffer* buffer, GraphicContext* ctx, uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count);
+	// Copies a span to offset 0 of host-visible `dst`, readable by the host once the fence completes.
+	[[nodiscard]] bool RecordCopyToHost(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, const VulkanBuffer* dst,
+	                                    uint64_t dw_count);
 
-	VulkanBuffer* GetBuffer(GraphicContext* ctx);
+	// Bounded publication staging: reserved when a GDS read is recorded and returned by the
+	// deferred release of that read's submission.
+	[[nodiscard]] bool TryReserveStaging(uint64_t bytes);
+	void               ReleaseStaging(uint64_t bytes);
+	// Publications recorded and not yet released.
+	[[nodiscard]] uint64_t PendingPublications();
+
+	VulkanBuffer* GetBuffer(GraphicContext* ctx, CommandBuffer* buffer);
+	// Test contexts only: frees the backing after every submission using it has completed.
+	void ReleaseForTesting(GraphicContext* ctx);
 
 private:
-	static constexpr uint64_t DW_SIZE = 0x3000;
+	static constexpr uint64_t kStagingRecordsMax = 64;
+	static constexpr uint64_t kStagingBytesMax   = 16u * kGraphicsGdsDwords * 4u;
 
-	void Init(GraphicContext* ctx);
+	void Init(GraphicContext* ctx, CommandBuffer* buffer);
 
 	Core::Mutex   m_mutex;
-	VulkanBuffer* m_buffer = nullptr;
+	VulkanBuffer* m_buffer          = nullptr;
+	uint32_t      m_queue_family    = VK_QUEUE_FAMILY_IGNORED;
+	uint64_t      m_staging_records = 0;
+	uint64_t      m_staging_bytes   = 0;
 };
 
 class VertexClipProbeRenderer

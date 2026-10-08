@@ -1025,11 +1025,12 @@ bool EmptyMimgOperand(const ShaderOperand& operand)
 	return operand == ShaderOperand {} && operand.multiplier == 1.0f && !operand.absolute && !operand.negate && !operand.clamp;
 }
 
+// The MIMG DIM field is word 0 bits [5:3]; 1 selects 2D and 4 selects a 1D array.
 ShaderCode ParseMimgTailInstruction(uint32_t opcode, uint32_t ssamp = 0u, uint32_t nsa = 0u, uint32_t dmask = 0xfu,
-                                   ShaderType stage = ShaderType::Pixel, uint32_t flags = 0u)
+                                   ShaderType stage = ShaderType::Pixel, uint32_t flags = 0u, uint32_t dim = 1u)
 {
 	std::array<uint32_t, 6> words = {
-	    (0x3cu << 26u) | (opcode << 18u) | (dmask << 8u) | (1u << 3u) | (nsa << 1u) | flags,
+	    (0x3cu << 26u) | (opcode << 18u) | (dmask << 8u) | (dim << 3u) | (nsa << 1u) | flags,
 	    (ssamp << 21u) | (8u << 16u) | (8u << 8u) | 4u,
 	    0xfffd0911u, 0x17130f0bu, 0x27231f1bu, 0u};
 	words[2u + nsa] = 0xbf810000u;
@@ -1053,22 +1054,29 @@ void EnableMimgModuleValidation()
 	RequireMimgTail(Config::ShaderValidationEnabled(), "full-module validation must be enabled");
 }
 
-Core::String8 EmitValidatedMimgTailModule(const ShaderCode& code, bool writable, bool sampler = false)
+// The descriptor is registered as the T# type defines it: types 12 and 13 in the array bank,
+// 8 and 9 in the flat bank. Format 22 is R32_FLOAT and 20 is R32_UINT.
+Core::String8 EmitValidatedMimgTailModule(const ShaderCode& code, bool writable, bool sampler = false, uint32_t texture_type = 9u,
+                                          uint32_t texture_format = 22u)
 {
 	ShaderPixelInputInfo pixel {};
 	ShaderComputeInputInfo compute {};
 	compute.threads_num[0] = compute.threads_num[1] = compute.threads_num[2] = 1;
 	auto& bind = code.GetType() == ShaderType::Pixel ? pixel.bind : compute.bind;
+	const auto shape = ShaderGen5SampledTextureShapeForType(static_cast<uint8_t>(texture_type));
+	const bool array = shape == ShaderGen5SampledTextureShape::TwoDimensionalArray;
 	bind.textures2D.textures_num = 1;
-	bind.textures2D.textures2d_sampled_num = writable ? 0 : 1;
+	bind.textures2D.textures2d_sampled_num       = writable || array ? 0 : 1;
+	bind.textures2D.textures2d_array_sampled_num = !writable && array ? 1 : 0;
 	bind.textures2D.textures2d_storage_num = writable ? 1 : 0;
 	auto& descriptor = bind.textures2D.desc[0];
 	descriptor.start_register = 32;
 	descriptor.usage = writable ? ShaderTextureUsage::ReadWrite : ShaderTextureUsage::ReadOnly;
 	descriptor.textures2d_without_sampler = writable;
+	descriptor.sampled_shape = shape;
 	descriptor.texture.fields[0] = 0x100u;
-	descriptor.texture.fields[1] = 22u << 20u; // raw R32_FLOAT, independent of the sampler field
-	descriptor.texture.fields[3] = (9u << 28u) | 4u | (5u << 3u) | (6u << 6u) | (7u << 9u);
+	descriptor.texture.fields[1] = texture_format << 20u; // raw format, independent of the sampler field
+	descriptor.texture.fields[3] = (texture_type << 28u) | 4u | (5u << 3u) | (6u << 6u) | (7u << 9u);
 	if (sampler)
 	{
 		bind.samplers.samplers_num = 1;
@@ -1290,6 +1298,213 @@ TEST(EmulatorShaderMimg, EmitsAndValidatesParsedSampleWithRealSampler)
 		    const auto source = EmitValidatedMimgTailModule(code, false, true);
 		    RequireMimgTail(source.ContainsStr("OpLoad %Sampler") && source.ContainsStr("OpSampledImage") &&
 		                   source.ContainsStr("OpImageSampleExplicitLod"), "parsed sample consumes its real sampler");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// RDNA2 ISA tables 43 and 44: a DIM 4 (1D array) sample, sample_lz and sample_l supply x, then
+// slice, then the sample_l LOD; sample_b and the _o forms put their bias or packed offset first.
+// The address VGPRs start at v4. The emitted coordinate keeps x and the slice in place and pins
+// the row of the one-row host array.
+TEST(EmulatorShaderMimg, EmitsAndValidatesOneDimensionalArraySampling)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    struct Form
+		    {
+			    uint32_t    opcode;
+			    uint32_t    dmask;
+			    ShaderType  stage;
+			    const char* x;
+			    const char* slice;
+			    const char* operand;
+			    const char* operation;
+		    };
+		    const Form forms[] = {
+		        {0x20u, 0xfu, ShaderType::Pixel, "%v4", "%v5", nullptr,
+		         "%image_1da_value_0 = OpImageSampleImplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0\n"},
+		        {0x27u, 0xfu, ShaderType::Compute, "%v4", "%v5", nullptr,
+		         "%image_1da_value_0 = OpImageSampleExplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0 Lod %float_0_000000\n"},
+		        {0x24u, 0xfu, ShaderType::Compute, "%v4", "%v5", "%image_1da_lod_0 = OpLoad %float %v6\n",
+		         "%image_1da_value_0 = OpImageSampleExplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0 Lod %image_1da_lod_0\n"},
+		        {0x25u, 0xfu, ShaderType::Pixel, "%v5", "%v6", "%image_1da_bias_0 = OpLoad %float %v4\n",
+		         "%image_1da_value_0 = OpImageSampleImplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0 Bias %image_1da_bias_0\n"},
+		        {0x37u, 0x1u, ShaderType::Compute, "%v5", "%v6", "%image_1da_offset_f_0 = OpLoad %float %v4\n",
+		         "%image_1da_value_0 = OpImageSampleExplicitLod %v4float %image_1da_sampled_0 %image_1da_coord_0 Lod %float_0_000000\n"},
+		    };
+		    for (const auto& form: forms)
+		    {
+			    const auto code   = ParseMimgTailInstruction(form.opcode, 5u, 0u, form.dmask, form.stage, 0u, 4u);
+			    const auto source = EmitValidatedMimgTailModule(code, false, true, 12u);
+			    RequireMimgTail(source.ContainsStr(Core::String8::FromPrintf("%%image_1da_x_raw_0 = OpLoad %%float %s\n", form.x)) &&
+			                        source.ContainsStr(Core::String8::FromPrintf("%%image_1da_slice_0 = OpLoad %%float %s\n", form.slice)),
+			                    "x and slice come from their published address dwords");
+			    RequireMimgTail(source.ContainsStr("%image_1da_coord_0 = OpCompositeConstruct %v3float %image_1da_x_0 %float_0_500000 "
+			                                       "%image_1da_slice_0\n"),
+			                    "the slice stays the array layer and the only row is pinned");
+			    RequireMimgTail(source.ContainsStr("OpAccessChain %_ptr_UniformConstant_ImageSA %textures2DA_S"),
+			                    "a 1D array samples through the 2D-array bank");
+			    RequireMimgTail(form.operand == nullptr || source.ContainsStr(form.operand), "bias, LOD or offset address is read");
+			    RequireMimgTail(source.ContainsStr(form.operation), "sampling operation matches the instruction");
+			    const bool four = form.dmask == 0xfu;
+			    RequireMimgTail(source.ContainsStr("%image_1da_component_0_0 = OpCompositeExtract %float %image_1da_value_0 0") &&
+			                        (four == source.ContainsStr("%image_1da_component_0_3 = OpCompositeExtract %float %image_1da_value_0 3")),
+			                    "exactly the enabled components are extracted");
+		    }
+		    // _LZ_O: only the signed six-bit x field [5:0] moves the coordinate, by texels of level 0.
+		    const auto offset = EmitValidatedMimgTailModule(ParseMimgTailInstruction(0x37u, 5u, 0u, 1u, ShaderType::Compute, 0u, 4u),
+		                                                    false, true, 12u);
+		    RequireMimgTail(offset.ContainsStr("OpBitFieldSExtract %int %image_1da_offset_bits_0 %int_0 %int_6") &&
+		                        offset.ContainsStr("%image_1da_size_0 = OpImageQuerySizeLod %v3int %image_1da_image_0 %int_0") &&
+		                        offset.ContainsStr("%image_1da_x_0 = OpFAdd %float %image_1da_x_raw_0 %image_1da_shift_0") &&
+		                        !offset.ContainsStr("OpBitFieldSExtract %int %image_1da_offset_bits_0 %int_8"),
+		                    "the 1D offset uses the x field only");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// RDNA2 ISA table 42: a DIM 4 load supplies (x, slice). It fetches the slice's layer at row 0 and
+// keeps the integer and float result types of the descriptor format.
+TEST(EmulatorShaderMimg, EmitsAndValidatesOneDimensionalArrayIntegerLoad)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    for (auto stage: {ShaderType::Pixel, ShaderType::Compute})
+		    {
+			    for (uint32_t format: {22u, 20u})
+			    {
+				    const auto code   = ParseMimgTailInstruction(0x00u, 0u, 0u, 0xfu, stage, 0u, 4u);
+				    const auto source = EmitValidatedMimgTailModule(code, false, false, 12u, format);
+				    RequireMimgTail(source.ContainsStr("%image_load_x_f_0 = OpLoad %float %v4\n") &&
+				                        source.ContainsStr("%image_load_y_f_0 = OpCopyObject %float %float_0_000000\n") &&
+				                        source.ContainsStr("%image_load_z_f_0 = OpLoad %float %v5\n"),
+				                    "x and slice come from v4 and v5; the row is zero");
+				    RequireMimgTail(source.ContainsStr("OpCompositeConstruct %v3uint %image_load_x_0 %image_load_y_0 %image_load_z_0"),
+				                    "the fetch addresses (x, row, layer)");
+				    RequireMimgTail(source.ContainsStr(format == 20u ? "OpImageFetch %v4uint" : "OpImageFetch %v4float"),
+				                    "integer formats fetch integer texels");
+				    RequireMimgTail(!source.ContainsStr("%image_load_array_tag_0"), "a 1D array needs no runtime shape selection");
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// RDNA2 ISA tables 42 and 43: a DIM 4 load_mip addresses (x, slice, mip) and a DIM 4 sample_l
+// addresses (x, slice, lod) for any enabled-component set. Raw words parse to those three
+// addresses and the production emitter reads the level from the third.
+TEST(EmulatorShaderMimg, ParsesAndEmitsOneDimensionalArrayExplicitLevelForms)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    for (auto stage: {ShaderType::Pixel, ShaderType::Compute})
+		    {
+			    const auto mip_load = ParseMimgTailInstruction(0x01u, 0u, 0u, 0xfu, stage, 0u, 4u);
+			    const auto& load    = mip_load.GetInstructions().At(0);
+			    RequireMimgTail(load.type == ShaderInstructionType::ImageLoad && load.mimg_explicit_lod && load.mimg_dimension == 4u &&
+			                        load.src[0].size == 3 && load.format == ShaderInstructionFormat::VdataVaddr3StDmask,
+			                    "a 1D-array load_mip decodes three address VGPRs");
+			    const auto load_source = EmitValidatedMimgTailModule(mip_load, false, false, 12u);
+			    RequireMimgTail(load_source.ContainsStr("%image_load_z_f_0 = OpLoad %float %v5\n") &&
+			                        load_source.ContainsStr("%image_load_lod_f_0 = OpLoad %float %v6\n") &&
+			                        load_source.ContainsStr(" Lod %image_load_lod_0") && load_source.ContainsStr("OpImageFetch %v4float"),
+			                    "the slice is v5 and the level is v6");
+		    }
+		    for (uint32_t dmask: {0x1u, 0x6u, 0xbu})
+		    {
+			    const auto code = ParseMimgTailInstruction(0x24u, 5u, 0u, dmask, ShaderType::Compute, 0u, 4u);
+			    const auto& inst = code.GetInstructions().At(0);
+			    RequireMimgTail(inst.format == ShaderInstructionFormat::VdataVaddr3StSsMimgDmask && inst.src[0].size == 3 &&
+			                        inst.dst.size == (dmask == 0xbu ? 3 : dmask == 0x6u ? 2 : 1),
+			                    "a 1D-array sample_l decodes every enabled-component set");
+			    const auto source = EmitValidatedMimgTailModule(code, false, true, 12u);
+			    RequireMimgTail(source.ContainsStr("%image_1da_lod_0 = OpLoad %float %v6\n") &&
+			                        source.ContainsStr("%image_1da_slice_0 = OpLoad %float %v5\n"),
+			                    "sample_l reads slice and LOD from the second and third addresses");
+			    for (uint32_t component = 0; component < 4u; ++component)
+			    {
+				    const auto extract =
+				        Core::String8::FromPrintf("%%image_1da_component_0_%u = OpCompositeExtract %%float %%image_1da_value_0 %u", component, component);
+				    RequireMimgTail(source.ContainsStr(extract) == ((dmask & (1u << component)) != 0u), "exactly the enabled components");
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+// The 1D-array contract admits only DIM 4 reads of a type-12 T#. Forms without a published
+// 1D-array result, DIM 4 on another type, a type-12 T# under DIM 1 or DIM 5, and every type-12
+// store stop at the emitter instead of reading the slice as y, dropping the layer or inventing a result.
+TEST(EmulatorShaderMimg, RejectsOneDimensionalArrayFormsWithoutAContract)
+{
+	struct Rejection
+	{
+		uint32_t opcode;
+		uint32_t ssamp;
+		uint32_t dmask;
+		uint32_t dim;
+		uint32_t type;
+		uint32_t format;
+		bool     writable;
+	};
+	const Rejection rejections[] = {
+	    {0x47u, 5u, 0x1u, 4u, 12u, 22u, false}, // gather4_lz: no 1D-array gather in table 43
+	    {0x30u, 5u, 0x1u, 4u, 12u, 22u, false}, // sample_o: offset in texels of a derivative-selected level
+	    {0x20u, 5u, 0xfu, 4u, 13u, 22u, false}, // DIM 4 on a 2D-array T#
+	    {0x20u, 5u, 0xfu, 4u, 12u, 20u, false}, // filtered sample of an integer 1D array
+	    {0x0eu, 0u, 0xfu, 1u, 12u, 22u, false}, // get_resinfo: 1D-array result layout unpublished
+	    {0x20u, 5u, 0xfu, 1u, 12u, 22u, false}, // type-12 sample under DIM 1
+	    {0x20u, 5u, 0xfu, 5u, 12u, 22u, false}, // type-12 sample under DIM 5
+	    {0x24u, 5u, 0xfu, 5u, 12u, 22u, false}, // type-12 sample_l under DIM 5
+	    {0x47u, 5u, 0x1u, 1u, 12u, 22u, false}, // type-12 gather4_lz under DIM 1
+	    {0x47u, 5u, 0x1u, 5u, 12u, 22u, false}, // type-12 gather4_lz under DIM 5
+	    {0x2fu, 5u, 0x1u, 1u, 12u, 22u, false}, // type-12 compare sample under DIM 1
+	    {0x00u, 0u, 0xfu, 1u, 12u, 22u, false}, // type-12 load under DIM 1
+	    {0x00u, 0u, 0xfu, 5u, 12u, 22u, false}, // type-12 load under DIM 5
+	    {0x01u, 0u, 0xfu, 5u, 12u, 22u, false}, // type-12 load_mip under DIM 5
+	    {0x00u, 0u, 0xfu, 4u, 13u, 22u, false}, // DIM 4 load of a 2D-array T#
+	    {0x08u, 0u, 0xfu, 1u, 12u, 22u, true},  // type-12 store under DIM 1
+	    {0x08u, 0u, 0xfu, 5u, 12u, 22u, true},  // type-12 store under DIM 5
+	    {0x08u, 0u, 0xfu, 4u, 12u, 22u, true},  // DIM 4 store: no 1D-array storage contract
+	};
+	for (const auto& rejection: rejections)
+	{
+		ASSERT_EXIT(
+		    {
+			    InitMimgParser();
+			    CaptureMimgRejectionDiagnostic();
+			    const auto code = ParseMimgTailInstruction(rejection.opcode, rejection.ssamp, 0u, rejection.dmask, ShaderType::Pixel, 0u,
+			                                               rejection.dim);
+			    (void)EmitValidatedMimgTailModule(code, rejection.writable, rejection.ssamp != 0u, rejection.type, rejection.format);
+			    std::_Exit(0);
+		    },
+		    ::testing::ExitedWithCode(kMimgRejectedExit), "shader emitter missing");
+	}
+}
+
+// Inverse control: the contract leaves 2D and 2D-array T#s under their own DIMs on their existing paths.
+TEST(EmulatorShaderMimg, KeepsTwoDimensionalAndArrayShapesOutsideTheOneDimensionalContract)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitMimgParser();
+		    EnableMimgModuleValidation();
+		    const auto flat = EmitValidatedMimgTailModule(ParseMimgTailInstruction(0x00u, 0u, 0u, 0xfu, ShaderType::Compute, 0u, 1u),
+		                                                  false, false, 9u);
+		    const auto array = EmitValidatedMimgTailModule(ParseMimgTailInstruction(0x00u, 0u, 0u, 0xfu, ShaderType::Compute, 0u, 5u),
+		                                                   false, false, 13u);
+		    RequireMimgTail(flat.ContainsStr("OpImageFetch %v4float") && !flat.ContainsStr("%image_1da_"), "2D load keeps its path");
+		    RequireMimgTail(array.ContainsStr("%image_load_z_f_0 = OpLoad %float %v6\n"), "2D-array load keeps (x, y, slice)");
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");

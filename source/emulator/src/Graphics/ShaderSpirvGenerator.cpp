@@ -237,6 +237,20 @@ void Spirv::GenerateSource()
 		m_source = "OpKytyPixelDepthControlFlowRejected\n";
 		return;
 	}
+	if (!UsesComputeWaveBanks())
+	{
+		// Structured emission derives loops and merges from the guest CFG. Fail
+		// closed on transfers it cannot express instead of emitting invalid SPIR-V;
+		// the banked block dispatcher needs no structurization.
+		m_control_flow = ShaderBuildControlFlowGraph(m_code);
+		if (!m_control_flow.Structurable())
+		{
+			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: structured control flow rejected: pc=0x%08" PRIx32 " reason=%s\n",
+			               m_control_flow.reject_pc, ShaderCfgRejectName(m_control_flow.reject));
+			m_source = "OpKytyControlFlowRejected\n";
+			return;
+		}
+	}
 
 	switch (m_code.GetType())
 	{

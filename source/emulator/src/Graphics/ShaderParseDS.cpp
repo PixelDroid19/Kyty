@@ -532,9 +532,10 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			inst.dst       = operand_parse(vdst + 256);
 			inst.ds_offset = DsSingleOffset(offset0, offset1);
 			break;
-		case 0x3F: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_ordered_count treated as SBarrier (continuing)\n");
-			inst.type = ShaderInstructionType::SBarrier;
-			inst.format = ShaderInstructionFormat::Unknown;
+		case 0x3F:
+			// Ordered-count results (VDST and the per-wave counter) are not evidenced. Refuse strictly
+			// instead of lowering to a barrier that leaves both unchanged.
+			KYTY_NI("ds_ordered_count");
 			break;
 		case 0x40: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_add_u64 treated as DsAddU32 (continuing)\n");
 			inst.type = ShaderInstructionType::DsAddU32;

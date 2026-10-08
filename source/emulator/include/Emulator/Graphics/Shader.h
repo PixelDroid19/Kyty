@@ -1197,8 +1197,14 @@ uint32_t ShaderGen5ResolveLinearPitch(uint32_t width, uint32_t format, uint8_t t
 // Color3D has a separate volume layout and must not be validated as an array.
 constexpr bool ShaderGen5TextureTypeUsesArrayAddressing(uint8_t type)
 {
-	// 13 = 2D array; 11 = cube (six faces addressed like layers).
-	return type == 13u || type == 11u;
+	// 12 = 1D array; 13 = 2D array; 11 = cube (six faces addressed like layers).
+	return type == 12u || type == 13u || type == 11u;
+}
+
+// T# types that the sampled and storage image path can bind (8 = 1D through 13 = 2D array).
+constexpr bool ShaderGen5TextureTypeIsImage(uint8_t type)
+{
+	return type == 8u || type == 9u || type == 10u || type == 11u || type == 12u || type == 13u;
 }
 
 // Sampled-image descriptor arrays have a static SPIR-V view type. Classify
@@ -1826,6 +1832,11 @@ constexpr ShaderGen5SampledTextureShape ShaderResolvedSampledTextureShape(const 
 	return descriptor.sampled_shape_from_instruction ? descriptor.sampled_shape
 	                                                 : ShaderGen5SampledTextureShapeForType(descriptor.texture.Type());
 }
+
+struct ShaderTextureResources;
+// Sets the instruction-derived shape of a read-only sampled descriptor and moves its bank count
+// from the shape it was registered with to the resolved shape.
+void ShaderSetSampledTextureInstructionShape(ShaderTextureResources* textures, int index, ShaderGen5SampledTextureShape shape);
 
 struct ShaderTextureResources
 {

@@ -782,6 +782,22 @@ void RunRejectedDs(uint32_t control, ShaderInstructionType expected, bool paired
 	std::_Exit(source.IsEmpty() ? 3 : 0);
 }
 
+// ds_ordered_count (DS opcode 0x3f) is GDS-only and its VDST/counter contract is
+// not evidenced. It must be refused at its own PC, never lowered to a barrier
+// that leaves VDST and the ordered counter unchanged.
+void RunOrderedCount(uint32_t control)
+{
+	Initialize();
+	const uint32_t words[] = {control, 0x00000100u, 0xbf810000u};
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	if (!ShaderTryParseBounded(words, sizeof(words), &code)) { std::_Exit(2); }
+	CheckTerminator(code, 8);
+	// Parsing must refuse the unsupported operation itself. A later emitter
+	// refusal would also pass this test while retaining the lossy decode.
+	std::_Exit(0);
+}
+
 void RunSdwa(uint32_t control, bool paired)
 {
 	Initialize();
@@ -1114,6 +1130,12 @@ TEST(EmulatorShaderLdsBounds, NativeAndPairedDsRejectGdsReservedAndLossyAliases)
 			EXPECT_EXIT(RunRejectedDs(test.control, test.type, paired), ::testing::ExitedWithCode(kRejectedExit), reason);
 		}
 	}
+}
+
+TEST(EmulatorShaderLdsBounds, OrderedCountDsIsRefusedNotLoweredToBarrier)
+{
+	// DS opcode 0x3f with gds=1: 0xd8000000 | (0x3f << 18) | (1 << 17).
+	EXPECT_EXIT(RunOrderedCount(0xd8fe0000u), ::testing::ExitedWithCode(kRejectedExit), "");
 }
 
 TEST(EmulatorShaderLdsBounds, CanonicalEndAndVop3UsedSourcesPassWithoutLiveTailExceptions)

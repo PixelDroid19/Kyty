@@ -3138,8 +3138,10 @@ TEST(EmulatorGraphicsPackets, PacksColor3DTextureMetadataWithinObjectParameterBu
 TEST(EmulatorGraphicsPackets, DistinguishesLayerAddressingFromColor3DDescriptorState)
 {
 	EXPECT_TRUE(ShaderGen5TextureTypeUsesArrayAddressing(13u));
+	EXPECT_TRUE(ShaderGen5TextureTypeUsesArrayAddressing(12u));
 	EXPECT_FALSE(ShaderGen5TextureTypeUsesArrayAddressing(10u));
 	EXPECT_FALSE(ShaderGen5TextureTypeUsesArrayAddressing(9u));
+	EXPECT_EQ(ShaderGen5SampledTextureShapeForType(12u), ShaderGen5SampledTextureShape::TwoDimensionalArray);
 }
 
 // Captured first fail after GPU chain: format 56, 800x320, tile 27 → 0x150000.
@@ -3675,6 +3677,23 @@ TEST(EmulatorGraphicsPackets, ResolvesGen5LinearPitchFromDescriptorWord4)
 	r.fields[4] = 1279u;
 	EXPECT_EQ(r.Pitch5(980u), 1280u);
 	EXPECT_EQ(ShaderGen5ResolveLinearPitch(980u, 56u, k_type_2d, r.fields[4]), 1280u);
+}
+
+// RDNA2 ISA table 45: word4[12:0] is the last array slice of a 1D array (type 12) and its base array
+// is word4[28:16]; pitch is defined only for 1D, 2D and 2D-MSAA. A 1D-array row pitch therefore
+// derives from width and format alone.
+TEST(EmulatorGraphicsPackets, ResolvesGen5OneDimensionalArrayPitchFromWidth)
+{
+	constexpr uint8_t k_type_1d_array = 12u;
+	constexpr uint32_t k_word4        = (1u << 16u) | 1279u; // base array 1, last slice 1279
+	// 8 RGBA8 texels are 32 bytes; the 256-byte row holds 64 texels.
+	EXPECT_EQ(ShaderGen5ResolveLinearPitch(8u, 56u, k_type_1d_array, k_word4), 64u);
+	ShaderTextureResource r {};
+	r.fields[3] = (static_cast<uint32_t>(k_type_1d_array) << 28u);
+	r.fields[4] = k_word4;
+	EXPECT_EQ(r.Pitch5(8u), 8u);
+	EXPECT_EQ(r.Depth(), 1279u);
+	EXPECT_EQ(r.BaseArray5(), 1u);
 }
 
 TEST(EmulatorGraphicsPackets, DecodesGen5WidthHeightFullIsaFields)

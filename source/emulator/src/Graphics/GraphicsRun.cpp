@@ -2165,18 +2165,93 @@ void CommandProcessor::DrawIndexAuto(uint32_t index_count, uint64_t draw_modifie
 	                            m_num_instances);
 }
 
-void CommandProcessor::ClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value)
+void CommandProcessor::ClearGds(uint64_t dw_offset, uint64_t dw_count, uint32_t clear_value)
 {
 	Core::LockGuard lock(m_mutex);
 
-	GraphicsRenderClearGds(dw_offset, dw_num, clear_value);
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+
+	const auto result = GraphicsRenderClearGds(m_buffer[m_current_buffer], dw_offset, dw_count, clear_value);
+	if (result != GraphicsGdsTransferResult::Recorded)
+	{
+		EXIT("GDS clear rejected: offset=%" PRIu64 " count=%" PRIu64 " result=%u\n", dw_offset, dw_count, static_cast<uint32_t>(result));
+	}
 }
 
-void CommandProcessor::ReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size)
+void CommandProcessor::WriteGds(uint64_t dw_offset, uint64_t src_vaddr, uint64_t dw_count)
+{
+	// The same admission as a device-address dispatch: a source owned by this recording is
+	// written back by submitting it, and one owned by another queue is waited for. Neither
+	// processor nor render locks are held while waiting.
+	SubmissionId dependency;
+	for (uint32_t attempt = 0; attempt < 64u; ++attempt)
+	{
+		GraphicsGdsTransferResult result = GraphicsGdsTransferResult::InvalidRange;
+		{
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			result = GraphicsRenderWriteGdsFromMemory(m_buffer[m_current_buffer], dw_offset, src_vaddr, dw_count, &dependency);
+		}
+		switch (result)
+		{
+			case GraphicsGdsTransferResult::Recorded: return;
+			case GraphicsGdsTransferResult::ProcessorWriteBackRequired: WriteBack(); continue;
+			case GraphicsGdsTransferResult::SubmissionCompletionRequired:
+				if (OwnsSubmissionQueue(dependency))
+				{
+					WaitSubmission(dependency);
+				} else
+				{
+					EXIT_IF(g_gpu == nullptr);
+					g_gpu->WaitSubmission(dependency);
+				}
+				continue;
+			default:
+				EXIT("memory to GDS rejected: src=0x%016" PRIx64 " offset=%" PRIu64 " count=%" PRIu64 " result=%u\n", src_vaddr, dw_offset,
+				     dw_count, static_cast<uint32_t>(result));
+		}
+	}
+	EXIT("memory to GDS source did not stabilize: src=0x%016" PRIx64 " queue=%u sequence=%" PRIu64 "\n", src_vaddr,
+	     dependency.queue.Value(), dependency.sequence);
+}
+
+void CommandProcessor::CopyGds(uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count)
 {
 	Core::LockGuard lock(m_mutex);
 
-	GraphicsRenderReadGds(dst, dw_offset, dw_size);
+	EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+
+	const auto result = GraphicsRenderCopyGds(m_buffer[m_current_buffer], src_dw_offset, dst_dw_offset, dw_count);
+	if (result != GraphicsGdsTransferResult::Recorded)
+	{
+		EXIT("GDS copy rejected: src=%" PRIu64 " dst=%" PRIu64 " count=%" PRIu64 " result=%u\n", src_dw_offset, dst_dw_offset, dw_count,
+		     static_cast<uint32_t>(result));
+	}
+}
+
+void CommandProcessor::ReadGds(uint32_t* dst, uint64_t dw_offset, uint64_t dw_count)
+{
+	// Staging is returned when earlier submissions publish, so one submit-and-wait of this queue
+	// frees it unless other queues hold the whole budget.
+	for (uint32_t attempt = 0; attempt < 2u; ++attempt)
+	{
+		GraphicsGdsTransferResult result = GraphicsGdsTransferResult::InvalidRange;
+		{
+			Core::LockGuard lock(m_mutex);
+			EXIT_IF(m_current_buffer < 0 || m_current_buffer >= VK_BUFFERS_NUM);
+			result = GraphicsRenderReadGds(m_buffer[m_current_buffer], dst, dw_offset, dw_count);
+		}
+		if (result == GraphicsGdsTransferResult::Recorded)
+		{
+			return;
+		}
+		if (result != GraphicsGdsTransferResult::StagingBudgetExhausted || attempt != 0u)
+		{
+			EXIT("GDS read rejected: offset=%" PRIu64 " count=%" PRIu64 " result=%u\n", dw_offset, dw_count, static_cast<uint32_t>(result));
+		}
+		BufferFlush();
+		BufferWait();
+	}
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index)

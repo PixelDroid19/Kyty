@@ -357,20 +357,16 @@ bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, in
 {
 	EXIT_IF(info == nullptr);
 
-	if (info->buffers_num < 0 || info->buffers_num >= ShaderStorageResources::BUFFERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->buffers_num < 0 || info->buffers_num >= ShaderStorageResources::BUFFERS_MAX condition ignored (continuing)\n"); }
-
 	int  index    = info->buffers_num;
 	bool extended = (extended_buffer != nullptr);
 
 	// With Gen5 32-user-SGPR windows, slots 16..31 are direct user SGPRs (not
 	// necessarily a separate EUD pointer). Only require extended when an
-	// extended_buffer is supplied.
-	if (extended)
+	// extended_buffer is supplied. A start outside the source window would read
+	// past user_sgpr or before the EUD snapshot, so it is refused.
+	if (extended ? start_index < 16 : (start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX))
 	{
-		if (start_index < 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 16 condition ignored (continuing)\n"); }
-	} else
-	{
-		if (start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
+		EXIT("shader storage descriptor outside its source window: register=%d extended=%d\n", start_index, extended ? 1 : 0);
 	}
 
 	ShaderBufferResource resource;
@@ -385,6 +381,13 @@ bool ShaderGetStorageBuffer(ShaderStorageResources* info, bool* direct_sgprs, in
 	    (resource.Base48() == 0 && resource.NumRecords() == 0))
 	{
 		return false;
+	}
+
+	// Null descriptors above are not stored, so capacity is checked only for a real write.
+	if (index < 0 || index >= ShaderStorageResources::BUFFERS_MAX)
+	{
+		EXIT("shader storage resource capacity exceeded: count=%d capacity=%d register=%d slot=%d\n", index,
+		     ShaderStorageResources::BUFFERS_MAX, start_index, slot);
 	}
 
 	info->start_register[index] = start_index;

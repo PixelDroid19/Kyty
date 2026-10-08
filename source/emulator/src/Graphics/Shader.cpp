@@ -1857,25 +1857,53 @@ static void AddZeroSBufferResource(ShaderZeroSBufferResources* resources, int st
 		}
 	}
 
-	if (resources->buffers_num >= ShaderZeroSBufferResources::BUFFERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: resources->buffers_num >= ShaderZeroSBufferResources::BUFFERS_MAX condition ignored (continuing)\n"); }
+	if (resources->buffers_num < 0 || resources->buffers_num >= ShaderZeroSBufferResources::BUFFERS_MAX)
+	{
+		EXIT("shader zero scalar-buffer capacity exceeded: count=%d capacity=%d register=%d\n", resources->buffers_num,
+		     ShaderZeroSBufferResources::BUFFERS_MAX, start_register);
+	}
 	resources->start_register[resources->buffers_num++] = start_register;
 }
 
-static void ApplyDirectImageShape(const ShaderDirectImageUse& image, ShaderTextureDescriptor* descriptor)
+// A read-only sampled descriptor is counted in the bank of the shape it was registered with. An
+// instruction shape moves that count, so the bank sizes always match the shape the emitter selects.
+void ShaderSetSampledTextureInstructionShape(ShaderTextureResources* textures, int index, ShaderGen5SampledTextureShape shape)
 {
-	EXIT_IF(descriptor == nullptr);
+	EXIT_IF(textures == nullptr || index < 0 || index >= textures->textures_num);
+	auto& descriptor = textures->desc[index];
+	if (descriptor.usage == ShaderTextureUsage::ReadOnly && descriptor.sampled_shape != shape)
+	{
+		switch (descriptor.sampled_shape)
+		{
+			case ShaderGen5SampledTextureShape::ThreeDimensional: textures->textures3d_sampled_num--; break;
+			case ShaderGen5SampledTextureShape::TwoDimensionalArray: textures->textures2d_array_sampled_num--; break;
+			case ShaderGen5SampledTextureShape::TwoDimensional: textures->textures2d_sampled_num--; break;
+		}
+		switch (shape)
+		{
+			case ShaderGen5SampledTextureShape::ThreeDimensional: textures->textures3d_sampled_num++; break;
+			case ShaderGen5SampledTextureShape::TwoDimensionalArray: textures->textures2d_array_sampled_num++; break;
+			case ShaderGen5SampledTextureShape::TwoDimensional: textures->textures2d_sampled_num++; break;
+		}
+	}
+	descriptor.sampled_shape                  = shape;
+	descriptor.sampled_shape_from_instruction = true;
+}
+
+static void ApplyDirectImageShape(const ShaderDirectImageUse& image, ShaderTextureResources* textures, int index)
+{
+	const auto& descriptor = textures->desc[index];
 	if (image.sampled_shape_conflict)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8,
 		               "WARNING: sampled image resource uses multiple MIMG dimensions; descriptor shape retained\n");
 		return;
 	}
-	if (!image.sampled_shape_known || !ShaderGen5InstructionShapeAppliesToType(descriptor->texture.Type(), image.sampled_shape))
+	if (!image.sampled_shape_known || !ShaderGen5InstructionShapeAppliesToType(descriptor.texture.Type(), image.sampled_shape))
 	{
 		return;
 	}
-	descriptor->sampled_shape                  = image.sampled_shape;
-	descriptor->sampled_shape_from_instruction = true;
+	ShaderSetSampledTextureInstructionShape(textures, index, image.sampled_shape);
 }
 
 void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, int start_index, int slot, ShaderTextureUsage usage,
@@ -1893,12 +1921,11 @@ void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, in
 	int  index    = info->textures_num;
 	bool extended = (extended_buffer != nullptr);
 
-	if (extended)
+	// An 8-dword T# outside its source window would read past user_sgpr (and mark
+	// direct_sgprs past its end) or before the EUD snapshot; refuse it.
+	if (extended ? start_index < 16 : (start_index < 0 || start_index + 7 >= HW::UserSgprInfo::SGPRS_MAX))
 	{
-		if (start_index < 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 16 condition ignored (continuing)\n"); }
-	} else
-	{
-		if (start_index < 0 || start_index + 7 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 0 || start_index + 7 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
+		EXIT("shader texture descriptor outside its source window: register=%d extended=%d\n", start_index, extended ? 1 : 0);
 	}
 
 	info->desc[index].start_register = start_index;
@@ -1952,18 +1979,21 @@ void ShaderGetSampler(ShaderSamplerResources* info, bool* direct_sgprs, int star
 {
 	EXIT_IF(info == nullptr);
 
-	if (info->samplers_num < 0 || info->samplers_num >= ShaderSamplerResources::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->samplers_num < 0 || info->samplers_num >= ShaderSamplerResources::RES_MAX condition ignored (continuing)\n"); }
+	// Capacity and source-window violations would write or read outside fixed
+	// arrays; refuse them like the texture path does.
+	if (info->samplers_num < 0 || info->samplers_num >= ShaderSamplerResources::RES_MAX)
+	{
+		EXIT("shader sampler resource capacity exceeded: count=%d capacity=%d register=%d slot=%d\n", info->samplers_num,
+		     ShaderSamplerResources::RES_MAX, start_index, slot);
+	}
 	// EXIT_NOT_IMPLEMENTED(info->samplers_num != slot);
 
 	int  index    = info->samplers_num;
 	bool extended = (extended_buffer != nullptr);
 
-	if (extended)
+	if (extended ? start_index < 16 : (start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX))
 	{
-		if (start_index < 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 16 condition ignored (continuing)\n"); }
-	} else
-	{
-		if (start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_index < 0 || start_index + 3 >= HW::UserSgprInfo::SGPRS_MAX condition ignored (continuing)\n"); }
+		EXIT("shader sampler descriptor outside its source window: register=%d extended=%d\n", start_index, extended ? 1 : 0);
 	}
 
 	info->start_register[index] = start_index;
@@ -1994,14 +2024,23 @@ static void ShaderGetGdsPointer(ShaderGdsResources* info, bool* direct_sgprs, in
 {
 	EXIT_IF(info == nullptr);
 
-	if (info->pointers_num < 0 || info->pointers_num >= ShaderGdsResources::POINTERS_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->pointers_num < 0 || info->pointers_num >= ShaderGdsResources::POINTERS_MAX condition ignored (continuing)\n"); }
+	// Capacity and source-window violations would write past the pointer array or
+	// read outside user_sgpr / before the EUD snapshot; refuse them.
+	if (info->pointers_num < 0 || info->pointers_num >= ShaderGdsResources::POINTERS_MAX)
+	{
+		EXIT("shader GDS pointer capacity exceeded: count=%d capacity=%d register=%d slot=%d\n", info->pointers_num,
+		     ShaderGdsResources::POINTERS_MAX, start_index, slot);
+	}
 	// EXIT_NOT_IMPLEMENTED(info->pointers_num != slot);
 
 	int  index    = info->pointers_num;
 	bool extended = (extended_buffer != nullptr);
 
+	if (extended ? start_index < 16 : (start_index < 0 || start_index >= HW::UserSgprInfo::SGPRS_MAX))
+	{
+		EXIT("shader GDS pointer outside its source window: register=%d extended=%d\n", start_index, extended ? 1 : 0);
+	}
 	if (!extended && start_index >= 16) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !extended && start_index >= 16 condition ignored (continuing)\n"); }
-	if (extended && !(start_index >= 16)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: extended && !(start_index >= 16) condition ignored (continuing)\n"); }
 
 	info->start_register[index] = start_index;
 	info->extended[index]       = extended;
@@ -3171,7 +3210,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			if (image.texture != ShaderTextureUsage::Unknown)
 			{
 				descriptor.sample_operation = ShaderTextureSampleOperation(descriptor.texture, image.sample_operation);
-				ApplyDirectImageShape(image, &descriptor);
+				ApplyDirectImageShape(image, &bind->textures2D, i);
 			}
 		}
 		for (int i = 0; i < bind->samplers.samplers_num; ++i)

@@ -61,6 +61,46 @@ add_kyty_bringup_case(EmptyModeRejected empty_mode_rejected 125)
 add_kyty_bringup_case(EmptyFeaturesRejected empty_features_rejected 125)
 add_kyty_bringup_case(EmptyBurstLimitRejected empty_burst_limit_rejected 125)
 
+add_executable(kyty_gds_transfer_integration
+	src/GdsTransferIntegration.cpp
+)
+target_link_libraries(kyty_gds_transfer_integration PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_gds_transfer_integration PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+add_test(NAME KytyGraphicsIntegration.GdsTransfers
+	COMMAND $<TARGET_FILE:kyty_gds_transfer_integration>)
+set_tests_properties(KytyGraphicsIntegration.GdsTransfers PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
+
+add_test(NAME KytyGraphicsIntegration.GdsProductionAppend
+	COMMAND $<TARGET_FILE:kyty_gds_transfer_integration> --append)
+set_tests_properties(KytyGraphicsIntegration.GdsProductionAppend PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
+
+add_executable(kyty_texture_one_dimensional_array_integration
+	src/TextureOneDimensionalArrayIntegration.cpp
+)
+target_link_libraries(kyty_texture_one_dimensional_array_integration PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_texture_one_dimensional_array_integration PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+add_test(NAME KytyTextureIntegration.OneDimensionalArray
+	COMMAND $<TARGET_FILE:kyty_texture_one_dimensional_array_integration>)
+set_tests_properties(KytyTextureIntegration.OneDimensionalArray PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 90
+	SKIP_RETURN_CODE 77
+)
+
 # --- Domain validation architecture (pure validators, four outcome classes) ---
 
 add_executable(kyty_domain_validation_integration
@@ -749,6 +789,8 @@ set(KYTY_INTEGRATION_TEST_TARGETS
 	kyty_graphics_diagnostics_integration
 	kyty_shader_compute_integration
 	kyty_shader_wave64_integration
+	kyty_texture_one_dimensional_array_integration
+	kyty_gds_transfer_integration
 	kyty_libc_wide_integration
 	kyty_libc_time_integration
 	kyty_libc_locale_integration

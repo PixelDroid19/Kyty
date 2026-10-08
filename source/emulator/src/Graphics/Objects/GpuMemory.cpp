@@ -870,9 +870,9 @@ bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& ide
 	return g_gpu_memory != nullptr && g_gpu_memory->MarkStorageGuestPublished(identity, queue, uniform_words);
 }
 
-bool GpuMemoryCheckAccessViolation(uint64_t vaddr)
+bool GpuMemoryCheckAccessViolation(uint64_t vaddr, Core::VirtualMemory::ExceptionHandler::AccessViolationType access)
 {
-	return GpuDirtyPageTracker::Instance().HandleWriteFault(vaddr);
+	return GpuDirtyPageTrackerHandleAccessFault(vaddr, access);
 }
 
 bool GpuMemoryNotifyHostWrite(uint64_t vaddr, uint64_t size)

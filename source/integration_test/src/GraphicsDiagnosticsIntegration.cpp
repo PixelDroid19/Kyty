@@ -4150,6 +4150,20 @@ ShaderCode ParseGen5SAndn1SaveexecB64()
 	return code;
 }
 
+// The captured window ends before its s_cbranch_execz target (PC 0x1c), so the
+// structured emitter refuses that window as unresolved control flow. Lower the
+// same captured saveexec word in a complete program instead: the saveexec at PC
+// 0 (instruction index 0, as in the window) followed by its own s_endpgm.
+ShaderCode ParseGen5SAndn1SaveexecB64Program()
+{
+	const uint32_t shader[] = {0xbe96376au, 0xbf810000u};
+
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	ShaderParse(shader, &code);
+	return code;
+}
+
 void VerifyGen5SAndn1SaveexecB64()
 {
 	auto code = ParseGen5SAndn1SaveexecB64();
@@ -4163,7 +4177,16 @@ void VerifyGen5SAndn1SaveexecB64()
 	Expect(saveexec.src[0].type == ShaderOperandType::VccLo && saveexec.src[0].register_id == 0 && saveexec.src[0].size == 2,
 	       "saveexec preserves the captured source pair");
 
-	const auto source = SpirvGenerateSource(code, nullptr, nullptr, nullptr);
+	const auto& branch = code.GetInstructions().At(1);
+	Expect(branch.type == ShaderInstructionType::SCbranchExecz && ShaderLabel(branch).GetDst() == 0x1cu,
+	       "captured window keeps its execz branch to PC 0x1c beyond the window");
+
+	const auto program = ParseGen5SAndn1SaveexecB64Program();
+	Expect(program.GetInstructions().Size() == 2 && program.GetInstructions().At(0).type == ShaderInstructionType::SAndn1SaveexecB64 &&
+	           program.GetInstructions().At(1).type == ShaderInstructionType::SEndpgm && program.GetLabels().IsEmpty(),
+	       "saveexec lowering program is the captured saveexec followed by endpgm");
+	const auto source = SpirvGenerateSource(program, nullptr, nullptr, nullptr);
+	Expect(!source.StartsWith("OpKyty"), "saveexec lowering program is accepted by the structured emitter");
 	Expect(source.FindIndex("OpNot %uint %t0_0") != Kyty::Core::STRING8_INVALID_INDEX, "andn1 negates the scalar source");
 	Expect(source.FindIndex("OpBitwiseAnd %uint %t193_0 %t190_0") != Kyty::Core::STRING8_INVALID_INDEX,
 	       "andn1 intersects the negated source with EXEC");

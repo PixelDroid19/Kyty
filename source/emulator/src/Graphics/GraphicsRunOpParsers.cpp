@@ -3,6 +3,7 @@
 #include "Kyty/Core/BringUp.h"
 
 #include "Emulator/Config.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/GpuWriteHistory.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
@@ -236,6 +237,82 @@ KYTY_CP_OP_PARSER(cp_op_dispatch_reset)
 	return 1;
 }
 
+// DMA_DATA with a GDS endpoint. Selector decoding (0/3 memory, 1 GDS, 2 immediate source) is the
+// established one. Every other GDS combination, span, count or memory endpoint is refused
+// strictly; GDS work is never skipped.
+static uint32_t DmaDataWithGds(CommandProcessor* cp, const GraphicsHardwareDmaData& packet, bool destination_is_memory,
+                               bool destination_is_gds, bool source_is_memory, bool source_is_gds, bool source_is_immediate)
+{
+	const auto refuse = [&packet](const char* reason)
+	{
+		EXIT("DMA_DATA with a GDS endpoint refused (%s): src_sel=%u dst_sel=%u src=0x%016" PRIx64 " dst=0x%016" PRIx64
+		     " bytes=%" PRIu32 "\n",
+		     reason, static_cast<uint32_t>(packet.source), static_cast<uint32_t>(packet.destination), packet.source_address,
+		     packet.destination_address, packet.byte_count);
+	};
+	if (packet.byte_count == 0 || (packet.byte_count & 3u) != 0)
+	{
+		refuse("byte count");
+		return 6;
+	}
+	const uint64_t dw_count = packet.byte_count / 4u;
+
+	if (destination_is_gds)
+	{
+		if (!GraphicsGdsByteRangeValid(packet.destination_address, packet.byte_count))
+		{
+			refuse("GDS destination span");
+			return 6;
+		}
+		const uint64_t dst_dw_offset = packet.destination_address / 4u;
+		if (source_is_immediate)
+		{
+			cp->ClearGds(dst_dw_offset, dw_count, static_cast<uint32_t>(packet.source_address));
+			return 6;
+		}
+		if (source_is_gds)
+		{
+			if (!GraphicsGdsByteRangeValid(packet.source_address, packet.byte_count))
+			{
+				refuse("GDS source span");
+				return 6;
+			}
+			// A same-buffer copy needs disjoint spans; overlap has no established contract.
+			if (GraphicsGdsDwordRangesOverlap(packet.source_address / 4u, dst_dw_offset, dw_count))
+			{
+				refuse("overlapping GDS spans");
+				return 6;
+			}
+			cp->CopyGds(packet.source_address / 4u, dst_dw_offset, dw_count);
+			return 6;
+		}
+		if (!source_is_memory || (packet.source_address & 3u) != 0u ||
+		    GpuMemoryValidateAllocatedRange(packet.source_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
+		{
+			refuse("memory source");
+			return 6;
+		}
+		cp->WriteGds(dst_dw_offset, packet.source_address, dw_count);
+		return 6;
+	}
+
+	if (!destination_is_memory || !GraphicsGdsByteRangeValid(packet.source_address, packet.byte_count))
+	{
+		refuse("GDS source to memory");
+		return 6;
+	}
+	if ((packet.destination_address & 3u) != 0u ||
+	    GpuMemoryValidateAllocatedRange(packet.destination_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)
+	{
+		refuse("memory destination");
+		return 6;
+	}
+	// The destination is written when this recording's submission is published, under a host-write lease.
+	cp->ReadGds(reinterpret_cast<uint32_t*>(packet.destination_address), packet.source_address / 4u, dw_count);
+	GpuWriteHistoryRecord(GpuWriteHistoryKind::DmaData, packet.destination_address, packet.byte_count, 0u, 0u, 0u);
+	return 6;
+}
+
 KYTY_CP_OP_PARSER(cp_op_dma_data)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -255,46 +332,24 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		return 6;
 	}
 
-	if (packet.byte_count == 0 || (packet.byte_count & 3u) != 0)
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA byte count ignored\n");
-		return 6;
-	}
-
 	const bool destination_is_memory = packet.destination == 0u || packet.destination == 3u;
 	const bool destination_is_gds    = packet.destination == 1u;
 	const bool source_is_memory      = packet.source == 0u || packet.source == 3u;
 	const bool source_is_gds         = packet.source == 1u;
 	const bool source_is_immediate   = packet.source == 2u;
-	if ((!destination_is_memory && !destination_is_gds) || (!source_is_memory && !source_is_gds && !source_is_immediate))
+	if (destination_is_gds || source_is_gds)
+	{
+		return DmaDataWithGds(cp, packet, destination_is_memory, destination_is_gds, source_is_memory, source_is_gds, source_is_immediate);
+	}
+
+	if (packet.byte_count == 0 || (packet.byte_count & 3u) != 0)
+	{
+		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA byte count ignored\n");
+		return 6;
+	}
+	if (!destination_is_memory || (!source_is_memory && !source_is_immediate))
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unsupported DMA_DATA selector ignored\n");
-		return 6;
-	}
-
-	constexpr uint64_t kGdsSizeBytes   = 0x3000u * sizeof(uint32_t);
-	auto               valid_gds_range = [&](uint64_t offset)
-	{ return (offset & 3u) == 0u && offset <= kGdsSizeBytes && packet.byte_count <= kGdsSizeBytes - offset; };
-	if (destination_is_gds && !valid_gds_range(packet.destination_address))
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA GDS destination ignored\n");
-		return 6;
-	}
-	if (source_is_gds && !valid_gds_range(packet.source_address))
-	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: invalid DMA_DATA GDS source ignored\n");
-		return 6;
-	}
-
-	if (destination_is_gds)
-	{
-		if (source_is_immediate)
-		{
-			cp->ClearGds(packet.destination_address / 4u, packet.byte_count / 4u, static_cast<uint32_t>(packet.source_address));
-		} else
-		{
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: DMA_DATA copy into GDS is not supported\n");
-		}
 		return 6;
 	}
 
@@ -313,15 +368,6 @@ KYTY_CP_OP_PARSER(cp_op_dma_data)
 		{
 			memcpy(dst + offset, &value, sizeof(value));
 		}
-	} else if (source_is_gds)
-	{
-		if ((packet.destination_address & 3u) != 0u)
-		{
-			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: unaligned DMA_DATA GDS read destination ignored\n");
-			return 6;
-		}
-		cp->ReadGds(reinterpret_cast<uint32_t*>(packet.destination_address), static_cast<uint32_t>(packet.source_address / 4u),
-		            packet.byte_count / 4u);
 	} else
 	{
 		if (GpuMemoryValidateAllocatedRange(packet.source_address, packet.byte_count) != GpuMemoryRangeValidationStatus::Valid)

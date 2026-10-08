@@ -769,8 +769,38 @@ void DeleteDescriptor(RenderTextureVulkanImage* image);
 int GraphicsRenderAddEqEvent(Kernel::EventQueue::KernelEqueue eq, int id, void* udata);
 int GraphicsRenderDeleteEqEvent(Kernel::EventQueue::KernelEqueue eq, int id);
 
-void GraphicsRenderClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
-void GraphicsRenderReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);
+// GDS transfers are recorded into a command-processor recording at its stream position, so they
+// are ordered behind earlier work on that queue and ahead of later work. Anything but Recorded
+// recorded nothing. Empty in-window spans record nothing and report Recorded.
+enum class GraphicsGdsTransferResult : uint8_t
+{
+	Recorded,
+	// A GDS span is outside the guest window, or a same-buffer copy overlaps.
+	InvalidRange,
+	// The guest source is unaligned or not a registered GPU mapping.
+	InvalidSource,
+	// The guest destination is not a registered GPU mapping.
+	InvalidDestination,
+	// Publication staging is exhausted: complete earlier submissions, then retry.
+	StagingBudgetExhausted,
+	// The recording owns the source in another form: submit and wait, then retry.
+	ProcessorWriteBackRequired,
+	// Another queue's incomplete submission owns the source: wait for it, then retry.
+	SubmissionCompletionRequired,
+	// A texture-type writer owns the source; no byte conversion is established.
+	UnsupportedSource,
+};
+
+[[nodiscard]] GraphicsGdsTransferResult GraphicsRenderClearGds(CommandBuffer* buffer, uint64_t dw_offset, uint64_t dw_count,
+                                                               uint32_t clear_value);
+// The source is read where it is current: the guest bytes, or the device buffer whose writes on
+// the recording queue are not yet written back.
+[[nodiscard]] GraphicsGdsTransferResult GraphicsRenderWriteGdsFromMemory(CommandBuffer* buffer, uint64_t dw_offset, uint64_t src_vaddr,
+                                                                         uint64_t dw_count, SubmissionId* dependency);
+[[nodiscard]] GraphicsGdsTransferResult GraphicsRenderCopyGds(CommandBuffer* buffer, uint64_t src_dw_offset, uint64_t dst_dw_offset,
+                                                              uint64_t dw_count);
+// Publishes a GDS span to guest memory when the recording's submission is published.
+[[nodiscard]] GraphicsGdsTransferResult GraphicsRenderReadGds(CommandBuffer* buffer, uint32_t* dst, uint64_t dw_offset, uint64_t dw_count);
 
 } // namespace Kyty::Libs::Graphics
 

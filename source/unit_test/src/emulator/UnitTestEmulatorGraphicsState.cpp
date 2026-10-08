@@ -38,6 +38,7 @@
 #include "Emulator/Graphics/Pm4.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "../../../emulator/src/Graphics/ShaderStorageAnalysis.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/Tile.h"
@@ -7342,6 +7343,123 @@ TEST(EmulatorGraphicsState, AVolumeDimensionDoesNotMakeAFlatDescriptorAVolume)
 		EXPECT_EQ(bind.textures2D.textures3d_sampled_num, volume ? 1 : 0);
 		EXPECT_EQ(bind.textures2D.textures2d_sampled_num, volume ? 0 : 1);
 	}
+}
+
+TEST(EmulatorGraphicsState, RecognizesOneDimensionalArrayTextureSharpAsTextureDescriptor)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// SizeFlag clear selects an 8-dword T#. Type nibble 12 (1D array) is an image
+	// descriptor, as the 2D array (13) already is.
+	HW::UserSgprInfo user_sgpr {};
+	user_sgpr.value[3] = 12u << 28u;
+	EXPECT_TRUE(Gen5SharpUseTextureDescriptor(false, 0, 16, user_sgpr, nullptr));
+	user_sgpr.value[3] = 13u << 28u;
+	EXPECT_TRUE(Gen5SharpUseTextureDescriptor(false, 0, 16, user_sgpr, nullptr));
+}
+
+TEST(EmulatorGraphicsState, ClassifiesOneDimensionalArrayDynamicDescriptorByInstructionShape)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// MIMG DIM 4 (1D array) supplies (x, slice). T# type 12 (1D array) must select
+	// the array descriptor bank, as type 13 does.
+	ShaderInstruction texture_load {};
+	texture_load.pc                = 0x8;
+	texture_load.type              = ShaderInstructionType::SLoadDwordx8;
+	texture_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+	texture_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = 0, .size = 2};
+	texture_load.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+	texture_load.src[1].constant.u = 128u;
+	texture_load.src_num           = 2;
+
+	ShaderInstruction image_load {};
+	image_load.pc             = 0x10;
+	image_load.type           = ShaderInstructionType::ImageLoad;
+	image_load.format         = ShaderInstructionFormat::VdataVaddr3StDmask;
+	image_load.dst            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 4};
+	image_load.src[0]         = {.type = ShaderOperandType::Vgpr, .register_id = 8, .size = 2};
+	image_load.src[1]         = {.type = ShaderOperandType::Sgpr, .register_id = 4, .size = 8};
+	image_load.src_num        = 2;
+	image_load.mimg_dimension = 4;
+	image_load.mimg_dmask     = 15;
+
+	ShaderInstruction end {};
+	end.pc   = 0x18;
+	end.type = ShaderInstructionType::SEndpgm;
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	code.GetInstructions().Add(texture_load);
+	code.GetInstructions().Add(image_load);
+	code.GetInstructions().Add(end);
+
+	alignas(16) uint32_t eud[64] = {};
+	eud[33]                      = 22u << 20u;
+	eud[35]                      = 12u << 28u;
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 16; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	const uint64_t eud_ptr =
+	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+	ASSERT_NE(eud_ptr, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
+	user_sgpr.value[0] = static_cast<uint32_t>(eud_ptr);
+	user_sgpr.value[1] = static_cast<uint32_t>(eud_ptr >> 32u);
+
+	uint16_t direct_offsets[6];
+	for (auto& offset: direct_offsets)
+	{
+		offset = 0xffffu;
+	}
+	direct_offsets[5] = 0;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.eud_size_dw            = 48;
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
+	EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
+
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	const auto& descriptor = bind.textures2D.desc[0];
+	EXPECT_EQ(descriptor.texture.Type(), 12u);
+	EXPECT_EQ(ShaderResolvedSampledTextureShape(descriptor), ShaderGen5SampledTextureShape::TwoDimensionalArray);
+	EXPECT_EQ(ShaderGen5HostSampledTextureType(descriptor.texture.Type(), ShaderResolvedSampledTextureShape(descriptor)), 13u);
+}
+
+TEST(EmulatorGraphicsState, MovesSampledBankCountWhenInstructionShapeResolves)
+{
+	// A read-only descriptor is counted in the bank of the shape it was registered with. An
+	// instruction shape that differs moves the count, so bank sizes follow the emitted shape.
+	ShaderTextureResources textures {};
+	textures.textures_num                = 1;
+	textures.desc[0].usage               = ShaderTextureUsage::ReadOnly;
+	textures.desc[0].sampled_shape       = ShaderGen5SampledTextureShape::TwoDimensionalArray;
+	textures.textures2d_array_sampled_num = 1;
+
+	ShaderSetSampledTextureInstructionShape(&textures, 0, ShaderGen5SampledTextureShape::TwoDimensional);
+	EXPECT_EQ(textures.textures2d_array_sampled_num, 0);
+	EXPECT_EQ(textures.textures2d_sampled_num, 1);
+	EXPECT_TRUE(textures.desc[0].sampled_shape_from_instruction);
+
+	ShaderSetSampledTextureInstructionShape(&textures, 0, ShaderGen5SampledTextureShape::TwoDimensionalArray);
+	EXPECT_EQ(textures.textures2d_array_sampled_num, 1);
+	EXPECT_EQ(textures.textures2d_sampled_num, 0);
+	EXPECT_EQ(ShaderResolvedSampledTextureShape(textures.desc[0]), ShaderGen5SampledTextureShape::TwoDimensionalArray);
 }
 
 TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBindings)

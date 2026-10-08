@@ -36,6 +36,8 @@
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 
+#include "ShaderControlFlowGraph.h"
+
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
@@ -114,6 +116,8 @@ public:
 	void GenerateSource();
 
 	[[nodiscard]] const String8& GetSource() const { return m_source; }
+	// Built by GenerateSource for the structured (non-banked) emission path.
+	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
 	[[nodiscard]] bool UsesComputeWaveBanks() const;
 	// Architectural EXEC/VCC and SGPR mask destinations always contain packed
 	// words. Native templates' implicit EXEC loads use a separate lane view;
@@ -413,6 +417,7 @@ private:
 	// the already-emitted join (discard tails are dead code after the first
 	// OpKill anyway).
 	std::set<std::string>         m_emitted_sc_joins;
+	ShaderControlFlowGraph        m_control_flow;
 	Vector<Constant>              m_constants;
 	Vector<Variable>              m_variables;
 	const ShaderVertexInputInfo*  m_vs_input_info = nullptr;

@@ -1,3 +1,5 @@
+#include "Emulator/Graphics/GdsRange.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GpuSubmissionTracker.h"
 #include "Emulator/Graphics/GraphicsRender.h"
 
@@ -6,6 +8,7 @@
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/DbgAssert.h"
 #include "Kyty/Core/Threads.h"
+#include "Kyty/Core/VirtualMemory.h"
 
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -18,7 +21,9 @@
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cinttypes>
+#include <vector>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -83,32 +88,135 @@ void GraphicsRenderWriteAtEndOfPipe32(uint64_t /*submit_id*/, CommandBuffer* buf
 	RecordTransientLabel32(buffer, dst_gpu_addr, value, 1u, nullptr, nullptr, nullptr);
 }
 
+// One GDS read publication. The deferred release of the recording's submission owns it: that
+// release runs at publication after the label has fired. The label only borrows it.
+// Production command processors drain their recordings; discarding a recording
+// would additionally require cancellation of its bound label.
+struct GdsPublication
+{
+	VulkanBuffer staging;
+	void*        mapped = nullptr;
+	uint32_t*    dst    = nullptr;
+	uint64_t     bytes  = 0;
+};
+
+static bool GdsPublishLabelCallback(SubmissionId /*submission*/, const uint64_t* args)
+{
+	const auto* record  = reinterpret_cast<const GdsPublication*>(args[0]);
+	const auto  address = reinterpret_cast<uint64_t>(record->dst);
+
+	// Releasing or invalidating a GPU mapping first drains every command processor, which publishes
+	// this submission while the destination still exists. A destination that is no longer a GPU
+	// mapping, or that the guest unmapped or made read-only directly, never receives stale bytes.
+	bool written = GpuMemoryValidateAllocatedRange(address, record->bytes) == GpuMemoryRangeValidationStatus::Valid;
+	if (written)
+	{
+		// The lease lifts tracker protection and keeps it from rearming during the copy, and publishes
+		// the write generation when it ends. The guest copy validates ownership and write access in
+		// one transaction with unmap and protection changes.
+		auto&          tracker = GpuDirtyPageTracker::Instance();
+		const uint64_t token   = tracker.BeginHostWrite(address, record->bytes);
+		written                = Core::VirtualMemory::CopyToGuest(address, record->mapped, record->bytes);
+		tracker.EndHostWrite(token);
+	}
+	if (!written)
+	{
+		EXIT("GDS publication destination is no longer a writable guest GPU mapping: address=0x%016" PRIx64 " bytes=%" PRIu64 "\n",
+		     address, record->bytes);
+	}
+	GraphicsRenderMemoryFlush(address, record->bytes);
+
+	// The label's own value must not overwrite the published destination.
+	return false;
+}
+
+static void GdsReleasePublication(GdsPublication* record)
+{
+	GraphicContext* ctx = g_render_ctx->GetGraphicCtx();
+	VulkanUnmapMemory(ctx, &record->staging.memory);
+	VulkanDeleteBuffer(ctx, &record->staging);
+	g_render_ctx->GetGdsBuffer()->ReleaseStaging(record->bytes);
+	delete record;
+}
+
+static GraphicsGdsTransferResult GdsPublishToGuest(CommandBuffer* buffer, uint64_t dw_offset, uint32_t* dst, uint64_t dw_count)
+{
+	EXIT_IF(buffer == nullptr);
+	if (!GraphicsGdsDwordRangeValid(dw_offset, dw_count))
+	{
+		return GraphicsGdsTransferResult::InvalidRange;
+	}
+	if (dw_count == 0)
+	{
+		return GraphicsGdsTransferResult::Recorded;
+	}
+	const uint64_t bytes = dw_count * sizeof(*dst);
+	if (!ValidateTransientLabelDestination(dst, bytes))
+	{
+		return GraphicsGdsTransferResult::InvalidDestination;
+	}
+	// Labels complete exactly only on a command-processor recording with a submission.
+	SubmissionId recording;
+	if (buffer->GetParent() == nullptr || !buffer->GetSubmissionId(&recording))
+	{
+		EXIT("GDS publication requires a command-processor recording with a submission\n");
+	}
+	auto* gds = g_render_ctx->GetGdsBuffer();
+	if (!gds->TryReserveStaging(bytes))
+	{
+		return GraphicsGdsTransferResult::StagingBudgetExhausted;
+	}
+
+	GraphicContext* ctx    = g_render_ctx->GetGraphicCtx();
+	auto*           record = new GdsPublication;
+	record->staging.usage           = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	record->staging.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
+	                                  VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+	record->staging.buffer          = nullptr;
+	record->dst                     = dst;
+	record->bytes                   = bytes;
+	VulkanCreateBuffer(ctx, bytes, &record->staging);
+	if (record->staging.buffer == nullptr)
+	{
+		EXIT("GDS publication staging allocation failed: bytes=%" PRIu64 "\n", bytes);
+	}
+	VulkanMapMemory(ctx, &record->staging.memory, &record->mapped);
+	if (record->mapped == nullptr)
+	{
+		EXIT("GDS publication staging map failed\n");
+	}
+	// Ownership passes to the deferred release before any command can reference the record.
+	GpuMemoryDeferUntilSubmissionComplete(recording, [record]() { GdsReleasePublication(record); });
+
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+
+	if (!gds->RecordCopyToHost(buffer, ctx, dw_offset, &record->staging, dw_count))
+	{
+		EXIT("GDS publication copy rejected: offset=%" PRIu64 " count=%" PRIu64 "\n", dw_offset, dw_count);
+	}
+	uint64_t args[LABEL_ARGS_MAX] = {reinterpret_cast<uint64_t>(record), 0, 0, 0};
+	RecordTransientLabel32(buffer, dst, 0, static_cast<uint32_t>(dw_count), GdsPublishLabelCallback, nullptr, args);
+	return GraphicsGdsTransferResult::Recorded;
+}
+
 void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t /*submit_id*/, CommandBuffer* buffer, uint32_t* dst_gpu_addr, uint32_t dw_offset,
                                          uint32_t dw_num)
 {
 	EXIT_IF(g_render_ctx == nullptr);
-	const uint64_t write_size = std::max<uint64_t>(sizeof(*dst_gpu_addr), static_cast<uint64_t>(dw_num) * sizeof(*dst_gpu_addr));
-	if (!ValidateTransientLabelDestination(dst_gpu_addr, write_size))
+	// The packed EOP value must name a span inside the guest window. Refusing here keeps the label from
+	// being recorded, so no GDS read can run past the buffer.
+	if (!GraphicsGdsDwordRangeValid(dw_offset, dw_num))
+	{
+		EXIT("EOP GDS range outside the guest window: offset=%" PRIu32 " count=%" PRIu32 "\n", dw_offset, dw_num);
+	}
+	const auto result = GdsPublishToGuest(buffer, dw_offset, dst_gpu_addr, dw_num);
+	// An unregistered destination receives nothing, as for every other end-of-pipe write.
+	if (result == GraphicsGdsTransferResult::Recorded || result == GraphicsGdsTransferResult::InvalidDestination)
 	{
 		return;
 	}
-
-	Core::LockGuard lock(g_render_ctx->GetMutex());
-
-	uint64_t args[LABEL_ARGS_MAX] = {static_cast<uint64_t>(dw_offset), static_cast<uint64_t>(dw_num),
-	                                 reinterpret_cast<uint64_t>(dst_gpu_addr), 0};
-
-	RecordTransientLabel32(
-	    buffer, dst_gpu_addr, 0, dw_num,
-	    [](SubmissionId /*submission*/, const uint64_t* args)
-	    {
-		    auto  dw_offset    = static_cast<uint32_t>(args[0]);
-		    auto  dw_num       = static_cast<uint32_t>(args[1]);
-		    auto* dst_gpu_addr = reinterpret_cast<uint32_t*>(args[2]);
-		    g_render_ctx->GetGdsBuffer()->Read(g_render_ctx->GetGraphicCtx(), dst_gpu_addr, dw_offset, dw_num);
-		    return false;
-	    },
-	    nullptr, args);
+	EXIT("EOP GDS publication rejected: offset=%" PRIu32 " count=%" PRIu32 " result=%u\n", dw_offset, dw_num,
+	     static_cast<uint32_t>(result));
 }
 
 void GraphicsRenderWriteAtEndOfPipe64(uint64_t /*submit_id*/, CommandBuffer* buffer, uint64_t* dst_gpu_addr, uint64_t value)
@@ -467,20 +575,88 @@ int GraphicsRenderDeleteEqEvent(Kernel::EventQueue::KernelEqueue eq, int id)
 	return Kernel::EventQueue::KernelDeleteEvent(eq, static_cast<uintptr_t>(id), Kernel::EventQueue::KERNEL_EVFILT_GRAPHICS);
 }
 
-void GraphicsRenderClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value)
+GraphicsGdsTransferResult GraphicsRenderClearGds(CommandBuffer* buffer, uint64_t dw_offset, uint64_t dw_count, uint32_t clear_value)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(g_render_ctx->GetGdsBuffer() == nullptr);
 
-	g_render_ctx->GetGdsBuffer()->Clear(g_render_ctx->GetGraphicCtx(), dw_offset, dw_num, clear_value);
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+
+	return g_render_ctx->GetGdsBuffer()->RecordFill(buffer, g_render_ctx->GetGraphicCtx(), dw_offset, dw_count, clear_value)
+	           ? GraphicsGdsTransferResult::Recorded
+	           : GraphicsGdsTransferResult::InvalidRange;
 }
 
-void GraphicsRenderReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size)
+GraphicsGdsTransferResult GraphicsRenderWriteGdsFromMemory(CommandBuffer* buffer, uint64_t dw_offset, uint64_t src_vaddr, uint64_t dw_count,
+                                                           SubmissionId* dependency)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+	EXIT_IF(g_render_ctx->GetGdsBuffer() == nullptr);
+	EXIT_IF(dependency == nullptr);
+	*dependency = {};
+	if (!GraphicsGdsDwordRangeValid(dw_offset, dw_count))
+	{
+		return GraphicsGdsTransferResult::InvalidRange;
+	}
+	if (dw_count == 0)
+	{
+		return GraphicsGdsTransferResult::Recorded;
+	}
+	const uint64_t bytes = dw_count * 4u;
+	if ((src_vaddr & 3u) != 0u || GpuMemoryValidateAllocatedRange(src_vaddr, bytes) != GpuMemoryRangeValidationStatus::Valid)
+	{
+		return GraphicsGdsTransferResult::InvalidSource;
+	}
+
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+
+	GraphicContext* ctx    = g_render_ctx->GetGraphicCtx();
+	auto*           gds    = g_render_ctx->GetGdsBuffer();
+	const auto      source = GpuMemoryAcquireGdsSource(ctx, buffer, src_vaddr, bytes);
+	switch (source.status)
+	{
+		case GpuMemoryGdsSourceStatus::GuestBytesCurrent:
+		{
+			// No GPU writer owns the bytes, so the record-time snapshot is the source.
+			std::vector<uint32_t> snapshot(static_cast<size_t>(dw_count));
+			if (!Core::VirtualMemory::CopyFromGuest(snapshot.data(), src_vaddr, bytes))
+			{
+				return GraphicsGdsTransferResult::InvalidSource;
+			}
+			return gds->RecordUpdate(buffer, ctx, dw_offset, snapshot.data(), dw_count)
+			           ? GraphicsGdsTransferResult::Recorded
+			           : GraphicsGdsTransferResult::InvalidRange;
+		}
+		case GpuMemoryGdsSourceStatus::DeviceBuffer:
+			return gds->RecordCopyFromBuffer(buffer, ctx, source.buffer, source.offset, dw_offset, dw_count)
+			           ? GraphicsGdsTransferResult::Recorded
+			           : GraphicsGdsTransferResult::InvalidSource;
+		case GpuMemoryGdsSourceStatus::ProcessorWriteBackRequired: return GraphicsGdsTransferResult::ProcessorWriteBackRequired;
+		case GpuMemoryGdsSourceStatus::SubmissionCompletionRequired:
+			*dependency = source.dependency;
+			return GraphicsGdsTransferResult::SubmissionCompletionRequired;
+		case GpuMemoryGdsSourceStatus::Unsupported: return GraphicsGdsTransferResult::UnsupportedSource;
+	}
+	return GraphicsGdsTransferResult::UnsupportedSource;
+}
+
+GraphicsGdsTransferResult GraphicsRenderCopyGds(CommandBuffer* buffer, uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count)
 {
 	EXIT_IF(g_render_ctx == nullptr);
 	EXIT_IF(g_render_ctx->GetGdsBuffer() == nullptr);
 
-	g_render_ctx->GetGdsBuffer()->Read(g_render_ctx->GetGraphicCtx(), dst, dw_offset, dw_size);
+	Core::LockGuard lock(g_render_ctx->GetMutex());
+
+	return g_render_ctx->GetGdsBuffer()->RecordCopy(buffer, g_render_ctx->GetGraphicCtx(), src_dw_offset, dst_dw_offset, dw_count)
+	           ? GraphicsGdsTransferResult::Recorded
+	           : GraphicsGdsTransferResult::InvalidRange;
+}
+
+GraphicsGdsTransferResult GraphicsRenderReadGds(CommandBuffer* buffer, uint32_t* dst, uint64_t dw_offset, uint64_t dw_count)
+{
+	EXIT_IF(g_render_ctx == nullptr);
+
+	return GdsPublishToGuest(buffer, dw_offset, dst, dw_count);
 }
 
 void GraphicsRenderMemoryFree(uint64_t vaddr, uint64_t size)

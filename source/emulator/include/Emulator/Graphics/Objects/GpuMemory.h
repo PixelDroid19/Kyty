@@ -3,7 +3,9 @@
 
 #include "Kyty/Core/Common.h"
 #include "Kyty/Core/Vector.h"
+#include "Kyty/Core/VirtualMemory.h"
 
+#include <functional>
 #include <utility>
 #include <vector>
 
@@ -1082,9 +1084,41 @@ struct GpuMemoryStorageWriteIdentity
 // completed submission then writes back without reading the GPU copy.
 [[nodiscard]] bool GpuMemoryMarkStorageGuestPublished(const GpuMemoryStorageWriteIdentity& identity, GpuQueueId queue,
                                                       const GpuWritebackPageCache::UniformWords* uniform_words);
+// Source of a memory->GDS transfer recorded at the current position of `buffer`.
+// A range owns device content while an object over it has GPU writes not yet
+// written back; only then are the guest bytes stale.
+enum class GpuMemoryGdsSourceStatus : uint8_t
+{
+	// No GPU writer owns the range: the guest bytes are the source.
+	GuestBytesCurrent,
+	// One writable storage buffer, written only on the recording queue, holds the
+	// range; earlier commands on that queue precede the copy in submission order.
+	DeviceBuffer,
+	// The recording owns the range in another form: submit and wait, then retry.
+	ProcessorWriteBackRequired,
+	// Another queue's incomplete submission owns the range: wait for it, then retry.
+	SubmissionCompletionRequired,
+	// A texture-type writer owns the range; no byte conversion is established.
+	Unsupported,
+};
+struct GpuMemoryGdsSource
+{
+	GpuMemoryGdsSourceStatus status = GpuMemoryGdsSourceStatus::Unsupported;
+	// DeviceBuffer: the backing, kept alive by a use recorded for the recording submission.
+	const VulkanBuffer* buffer = nullptr;
+	uint64_t            offset = 0;
+	// SubmissionCompletionRequired: the submission to wait for.
+	SubmissionId dependency;
+	// The owning object's type for a refused or flushed range.
+	GpuMemoryObjectType writer = GpuMemoryObjectType::Invalid;
+};
+[[nodiscard]] GpuMemoryGdsSource GpuMemoryAcquireGdsSource(GraphicContext* ctx, CommandBuffer* buffer, uint64_t vaddr, uint64_t size);
+// Runs `task` when `submission` is published, after its labels have fired. A
+// discarded recording's task runs once a later submission on its queue completes.
+void GpuMemoryDeferUntilSubmissionComplete(SubmissionId submission, std::function<void()> task);
 // Exception handling accepts only a page fault caused by an armed tracker
 // protection. Known host/HLE writers use the explicit range notification.
-bool GpuMemoryCheckAccessViolation(uint64_t vaddr);
+bool GpuMemoryCheckAccessViolation(uint64_t vaddr, Core::VirtualMemory::ExceptionHandler::AccessViolationType access);
 bool GpuMemoryNotifyHostWrite(uint64_t vaddr, uint64_t size);
 bool GpuMemoryWatcherEnabled();
 

@@ -95,13 +95,16 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		{
 			EXIT_NOT_IMPLEMENTED(dmask == 0);
 			const bool mip = opcode == 0x01u;
-			EXIT_NOT_IMPLEMENTED(mip && dim != 1u && dim != 2u && dim != 5u);
+			EXIT_NOT_IMPLEMENTED(mip && dim != 1u && dim != 2u && dim != 4u && dim != 5u);
+			// RDNA2 ISA table 42: load_mip addresses are 2D (x, y, mip), 1D array (x, slice, mip),
+			// 3D and 2D array (x, y, z or slice, mip).
+			const bool four_addresses = mip && dim != 1u && dim != 4u;
 			inst.type        = ShaderInstructionType::ImageLoad;
 			inst.mimg_explicit_lod = mip;
-			inst.src[0].size = mip && dim != 1u ? 4 : 3;
+			inst.src[0].size = four_addresses ? 4 : 3;
 			inst.src[1].size = 8;
 			inst.src_num     = 2;
-			inst.format      = mip && dim != 1u ? ShaderInstructionFormat::VdataVaddr4StDmask
+			inst.format      = four_addresses ? ShaderInstructionFormat::VdataVaddr4StDmask
 			                                     : ShaderInstructionFormat::VdataVaddr3StDmask;
 			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
 			inst.dst.size    = 0;
@@ -298,6 +301,17 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 				inst.src[1].size = 8;
 				inst.src[2].size = 4;
 				inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+				if (dim == 4u)
+				{
+					// RDNA2 ISA table 43: a 1D-array sample_l addresses (x, slice, lod). Every
+					// enabled-component set packs into consecutive VGPRs.
+					if (dmask != 0u)
+					{
+						inst.format   = ShaderInstructionFormat::VdataVaddr3StSsMimgDmask;
+						inst.dst.size = MimgDmaskComponents(dmask);
+					}
+					break;
+				}
 			switch (dmask)
 			{
 					case 0x1:

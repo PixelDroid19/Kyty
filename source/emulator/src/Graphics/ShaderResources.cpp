@@ -183,14 +183,13 @@ static uint32_t Gen5SharpUserSgprDword(int offset_dw, int user_sgpr_num, const H
 	return extended_buffer[offset_dw - eud_base];
 }
 
-// Gen5 texture type nibble: 8 = 1D, 9 = 2D, 10 = 3D, 13 = 2D array. SizeFlag clear
+// Gen5 texture type nibble: 8 = 1D, 9 = 2D, 10 = 3D, 12 = 1D array, 13 = 2D array. SizeFlag clear
 // selects an 8-dword T#; other type values in this path are 4-dword V#.
 static bool Gen5SharpIsImageDescriptor(int offset_dw, int user_sgpr_num, const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer)
 {
 	const uint32_t word3 = Gen5SharpUserSgprDword(offset_dw + 3, user_sgpr_num, user_sgpr, extended_buffer);
 	const uint8_t  type  = static_cast<uint8_t>((word3 >> 28u) & 0xFu);
-	// 8/9/10 = 1D/2D/3D; 11 = cube (faces as layers); 13 = 2D array.
-	return type == 8u || type == 9u || type == 10u || type == 11u || type == 13u;
+	return ShaderGen5TextureTypeIsImage(type);
 }
 
 bool Gen5SharpUseTextureDescriptor(bool size_flag, int offset_dw, int user_sgpr_num, const HW::UserSgprInfo& user_sgpr,
@@ -411,7 +410,7 @@ bool ShaderGen5EudExpandEndDwordsForSharpImages(const ShaderUserData* user_data,
 				return false;
 			}
 			const uint8_t type = static_cast<uint8_t>((eud_snapshot[table_offset + 3u] >> 28u) & 0xfu);
-			const bool is_image = type == 8u || type == 9u || type == 10u || type == 11u || type == 13u;
+			const bool is_image = ShaderGen5TextureTypeIsImage(type);
 			if (is_image && !ShaderGen5EudAddRequiredSpan(table_offset, 8u, &required))
 			{
 				return false;
@@ -674,8 +673,7 @@ static bool ShaderAddDynamicTextureResource(ShaderBindResources* bind, const Sha
 		bind->textures2D.desc[texture_index].dynamic_sload = true;
 		if (usage == ShaderTextureUsage::ReadOnly && sampled_shape_known)
 		{
-			bind->textures2D.desc[texture_index].sampled_shape                  = sampled_shape;
-			bind->textures2D.desc[texture_index].sampled_shape_from_instruction = true;
+			ShaderSetSampledTextureInstructionShape(&bind->textures2D, texture_index, sampled_shape);
 		}
 		*added_resource = true;
 	}

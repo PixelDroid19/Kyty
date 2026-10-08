@@ -11,6 +11,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/CommandProcessorSubmissionSlots.h"
 #include "Emulator/Graphics/GraphicContext.h"
+#include "Emulator/Graphics/GdsRange.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/Graphics/Objects/IndexBuffer.h"
@@ -25,6 +26,7 @@
 #include "Emulator/Log.h"
 
 #include <atomic>
+#include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
 #include <utility>
@@ -87,8 +89,9 @@ bool GraphicsRenderUnbindContextForTesting(GraphicContext* ctx)
 	{
 		return false;
 	}
-	// The caller-owned VkDevice remains live throughout pool/sampler teardown;
+	// The caller-owned VkDevice remains live throughout GDS/pool/sampler teardown;
 	// only then clear the global binding.
+	g_render_ctx->GetGdsBuffer()->ReleaseForTesting(ctx);
 	g_command_pool.DeleteAllForTesting();
 	g_render_ctx->GetSamplerCache()->DeleteAllForTesting(ctx);
 	g_render_ctx->SetGraphicCtx(nullptr);
@@ -293,81 +296,290 @@ void RenderContext::TriggerRegisteredEvents(CompletionSignal signal, uint32_t in
 	}
 }
 
-void GdsBuffer::Init(GraphicContext* ctx)
+void GdsBuffer::Init(GraphicContext* ctx, CommandBuffer* buffer)
 {
+	EXIT_IF(ctx == nullptr || buffer == nullptr);
+	const int queue_index = buffer->GetQueueIndex();
+	EXIT_IF(queue_index < 0 || queue_index >= GraphicContext::QUEUES_NUM);
+	const uint32_t family = ctx->queues[queue_index].family;
+	if (m_queue_family == VK_QUEUE_FAMILY_IGNORED)
+	{
+		m_queue_family = family;
+	}
+	if (m_queue_family != family)
+	{
+		EXIT("GDS queue-family migration is unsupported: owner=%u requested=%u\n", m_queue_family, family);
+	}
 	if (m_buffer == nullptr)
 	{
 		m_buffer = new VulkanBuffer;
 
-		m_buffer->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		m_buffer->usage           = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 		m_buffer->memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 		                            VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 		m_buffer->buffer          = nullptr;
 
-		VulkanCreateBuffer(ctx, DW_SIZE * 4, m_buffer);
-		if (m_buffer->buffer == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_buffer->buffer == nullptr condition ignored (continuing)\n"); }
+		VulkanCreateBuffer(ctx, kGraphicsGdsDwords * 4, m_buffer);
+		if (m_buffer->buffer == nullptr)
+		{
+			EXIT("GDS buffer allocation failed\n");
+		}
 	}
 }
 
-void GdsBuffer::Clear(GraphicContext* ctx, uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value)
+// GDS is only accessed through recorded commands, so the host never maps it while submitted work
+// may still use it. CP packets are recorded between render helpers, each of which ends the render
+// pass it begins, so these transfers are never inside a render pass.
+static VkCommandBuffer GdsCommandBuffer(CommandBuffer* buffer)
 {
-	EXIT_IF(ctx == nullptr);
+	return buffer->GetPool()->buffers[buffer->GetIndex()];
+}
 
-	Core::LockGuard lock(m_mutex);
+static void GdsRangeBarrier(VkCommandBuffer cmd, VkBuffer target, uint64_t offset, uint64_t size, VkPipelineStageFlags src_stage,
+                            VkAccessFlags src_access, VkPipelineStageFlags dst_stage, VkAccessFlags dst_access)
+{
+	VkBufferMemoryBarrier barrier {};
+	barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	barrier.srcAccessMask       = src_access;
+	barrier.dstAccessMask       = dst_access;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.buffer              = target;
+	barrier.offset              = offset;
+	barrier.size                = size;
+	vkCmdPipelineBarrier(cmd, src_stage, dst_stage, 0, 0, nullptr, 1, &barrier, 0, nullptr);
+}
 
-	Init(ctx);
+constexpr VkAccessFlags kGdsAnyAccess =
+    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
 
-	if (dw_offset >= DW_SIZE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_offset >= DW_SIZE condition ignored (continuing)\n"); }
-	if (dw_offset + dw_num > DW_SIZE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_offset + dw_num > DW_SIZE condition ignored (continuing)\n"); }
+// Earlier shader or transfer access to the span completes, and its writes are visible, before a
+// transfer reads or writes it.
+static void GdsBeforeTransfer(VkCommandBuffer cmd, VkBuffer target, uint64_t offset, uint64_t size)
+{
+	GdsRangeBarrier(cmd, target, offset, size, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, kGdsAnyAccess, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	                VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+}
 
-	EXIT_IF(m_buffer == nullptr);
+// A transfer write to the span is visible to every later access.
+static void GdsAfterTransferWrite(VkCommandBuffer cmd, VkBuffer target, uint64_t offset, uint64_t size)
+{
+	GdsRangeBarrier(cmd, target, offset, size, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+	                VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, kGdsAnyAccess);
+}
 
-	void* data = nullptr;
-	VulkanMapMemory(ctx, &m_buffer->memory, &data);
+// Later writes to the span wait for the transfer that read it (write-after-read needs only an
+// execution dependency).
+static void GdsAfterTransferRead(VkCommandBuffer cmd, VkBuffer target, uint64_t offset, uint64_t size)
+{
+	GdsRangeBarrier(cmd, target, offset, size, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0);
+}
 
-	EXIT_IF(data == nullptr);
-
-	for (uint32_t i = 0; i < dw_num; i++)
+bool GdsBuffer::RecordFill(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, uint64_t dw_count, uint32_t value)
+{
+	EXIT_IF(buffer == nullptr);
+	if (!GraphicsGdsDwordRangeValid(dw_offset, dw_count))
 	{
-		static_cast<uint32_t*>(data)[dw_offset + i] = clear_value;
+		return false;
 	}
-
-	VulkanUnmapMemory(ctx, &m_buffer->memory);
-}
-
-void GdsBuffer::Read(GraphicContext* ctx, uint32_t* dst, uint32_t dw_offset, uint32_t dw_size)
-{
-	EXIT_IF(dst == nullptr);
-
-	Core::LockGuard lock(m_mutex);
-
-	Init(ctx);
-
-	if (dw_offset >= DW_SIZE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_offset >= DW_SIZE condition ignored (continuing)\n"); }
-	if (dw_offset + dw_size > DW_SIZE) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dw_offset + dw_size > DW_SIZE condition ignored (continuing)\n"); }
-
-	EXIT_IF(m_buffer == nullptr);
-
-	void* data = nullptr;
-	VulkanMapMemory(ctx, &m_buffer->memory, &data);
-
-	EXIT_IF(data == nullptr);
-
-	for (uint32_t i = 0; i < dw_size; i++)
+	if (dw_count == 0)
 	{
-		dst[i] = static_cast<uint32_t*>(data)[dw_offset + i];
+		return true;
 	}
 
-	VulkanUnmapMemory(ctx, &m_buffer->memory);
+	Core::LockGuard lock(m_mutex);
+
+	Init(ctx, buffer);
+
+	const VkCommandBuffer cmd    = GdsCommandBuffer(buffer);
+	const uint64_t        offset = dw_offset * 4u;
+	const uint64_t        size   = dw_count * 4u;
+	GdsBeforeTransfer(cmd, m_buffer->buffer, offset, size);
+	vkCmdFillBuffer(cmd, m_buffer->buffer, offset, size, value);
+	GdsAfterTransferWrite(cmd, m_buffer->buffer, offset, size);
+	return true;
 }
 
-VulkanBuffer* GdsBuffer::GetBuffer(GraphicContext* ctx)
+bool GdsBuffer::RecordUpdate(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, const uint32_t* src, uint64_t dw_count)
+{
+	EXIT_IF(buffer == nullptr);
+	if (!GraphicsGdsDwordRangeValid(dw_offset, dw_count) || (dw_count != 0 && src == nullptr))
+	{
+		return false;
+	}
+	if (dw_count == 0)
+	{
+		return true;
+	}
+
+	Core::LockGuard lock(m_mutex);
+
+	Init(ctx, buffer);
+
+	// vkCmdUpdateBuffer copies its inline data at record time, so src only has to stay valid for this call.
+	// The whole window is within the 64 KiB inline-data limit of that command.
+	static_assert(kGraphicsGdsDwords * 4u <= 65536u, "vkCmdUpdateBuffer inline data limit");
+	const VkCommandBuffer cmd    = GdsCommandBuffer(buffer);
+	const uint64_t        offset = dw_offset * 4u;
+	const uint64_t        size   = dw_count * 4u;
+	GdsBeforeTransfer(cmd, m_buffer->buffer, offset, size);
+	vkCmdUpdateBuffer(cmd, m_buffer->buffer, offset, size, src);
+	GdsAfterTransferWrite(cmd, m_buffer->buffer, offset, size);
+	return true;
+}
+
+bool GdsBuffer::RecordCopyFromBuffer(CommandBuffer* buffer, GraphicContext* ctx, const VulkanBuffer* src, uint64_t src_offset,
+                                     uint64_t dw_offset, uint64_t dw_count)
+{
+	EXIT_IF(buffer == nullptr);
+	EXIT_IF(src == nullptr || src->buffer == nullptr);
+	if (!GraphicsGdsDwordRangeValid(dw_offset, dw_count) || (src_offset & 3u) != 0u)
+	{
+		return false;
+	}
+	if (dw_count == 0)
+	{
+		return true;
+	}
+
+	Core::LockGuard lock(m_mutex);
+
+	Init(ctx, buffer);
+
+	const VkCommandBuffer cmd  = GdsCommandBuffer(buffer);
+	const uint64_t        size = dw_count * 4u;
+	VkBufferCopy          region {};
+	region.srcOffset = src_offset;
+	region.dstOffset = dw_offset * 4u;
+	region.size      = size;
+
+	// The producer's shader or transfer writes to the source span are visible to the copy.
+	GdsRangeBarrier(cmd, src->buffer, src_offset, size, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+	                VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+	                VK_ACCESS_TRANSFER_READ_BIT);
+	GdsBeforeTransfer(cmd, m_buffer->buffer, region.dstOffset, size);
+	vkCmdCopyBuffer(cmd, src->buffer, m_buffer->buffer, 1, &region);
+	GdsAfterTransferRead(cmd, src->buffer, src_offset, size);
+	GdsAfterTransferWrite(cmd, m_buffer->buffer, region.dstOffset, size);
+	return true;
+}
+
+bool GdsBuffer::RecordCopy(CommandBuffer* buffer, GraphicContext* ctx, uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count)
+{
+	EXIT_IF(buffer == nullptr);
+	// A same-buffer copy requires non-overlapping regions. Overlap is refused, not clamped.
+	if (!GraphicsGdsDwordRangeValid(src_dw_offset, dw_count) || !GraphicsGdsDwordRangeValid(dst_dw_offset, dw_count) ||
+	    GraphicsGdsDwordRangesOverlap(src_dw_offset, dst_dw_offset, dw_count))
+	{
+		return false;
+	}
+	if (dw_count == 0)
+	{
+		return true;
+	}
+
+	Core::LockGuard lock(m_mutex);
+
+	Init(ctx, buffer);
+
+	const VkCommandBuffer cmd  = GdsCommandBuffer(buffer);
+	const uint64_t        size = dw_count * 4u;
+	VkBufferCopy          region {};
+	region.srcOffset = src_dw_offset * 4u;
+	region.dstOffset = dst_dw_offset * 4u;
+	region.size      = size;
+
+	GdsBeforeTransfer(cmd, m_buffer->buffer, region.srcOffset, size);
+	GdsBeforeTransfer(cmd, m_buffer->buffer, region.dstOffset, size);
+	vkCmdCopyBuffer(cmd, m_buffer->buffer, m_buffer->buffer, 1, &region);
+	GdsAfterTransferRead(cmd, m_buffer->buffer, region.srcOffset, size);
+	GdsAfterTransferWrite(cmd, m_buffer->buffer, region.dstOffset, size);
+	return true;
+}
+
+bool GdsBuffer::RecordCopyToHost(CommandBuffer* buffer, GraphicContext* ctx, uint64_t dw_offset, const VulkanBuffer* dst, uint64_t dw_count)
+{
+	EXIT_IF(buffer == nullptr);
+	EXIT_IF(dst == nullptr || dst->buffer == nullptr);
+	if (!GraphicsGdsDwordRangeValid(dw_offset, dw_count))
+	{
+		return false;
+	}
+	if (dw_count == 0)
+	{
+		return true;
+	}
+
+	Core::LockGuard lock(m_mutex);
+
+	Init(ctx, buffer);
+
+	const VkCommandBuffer cmd  = GdsCommandBuffer(buffer);
+	const uint64_t        size = dw_count * 4u;
+	VkBufferCopy          region {};
+	region.srcOffset = dw_offset * 4u;
+	region.dstOffset = 0;
+	region.size      = size;
+
+	GdsBeforeTransfer(cmd, m_buffer->buffer, region.srcOffset, size);
+	vkCmdCopyBuffer(cmd, m_buffer->buffer, dst->buffer, 1, &region);
+	// Shader writes recorded after this read cannot reach the snapshot.
+	GdsAfterTransferRead(cmd, m_buffer->buffer, region.srcOffset, size);
+	// Fence completion alone does not make device writes available to host reads.
+	GdsRangeBarrier(cmd, dst->buffer, 0, size, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+	                VK_ACCESS_HOST_READ_BIT);
+	return true;
+}
+
+bool GdsBuffer::TryReserveStaging(uint64_t bytes)
+{
+	Core::LockGuard lock(m_mutex);
+	if (m_staging_records >= kStagingRecordsMax || bytes > kStagingBytesMax - m_staging_bytes)
+	{
+		return false;
+	}
+	m_staging_records++;
+	m_staging_bytes += bytes;
+	return true;
+}
+
+void GdsBuffer::ReleaseStaging(uint64_t bytes)
+{
+	Core::LockGuard lock(m_mutex);
+	EXIT_IF(m_staging_records == 0 || m_staging_bytes < bytes);
+	m_staging_records--;
+	m_staging_bytes -= bytes;
+}
+
+uint64_t GdsBuffer::PendingPublications()
+{
+	Core::LockGuard lock(m_mutex);
+	return m_staging_records;
+}
+
+VulkanBuffer* GdsBuffer::GetBuffer(GraphicContext* ctx, CommandBuffer* buffer)
 {
 	Core::LockGuard lock(m_mutex);
 
-	Init(ctx);
+	Init(ctx, buffer);
 
 	return m_buffer;
+}
+
+void GdsBuffer::ReleaseForTesting(GraphicContext* ctx)
+{
+	Core::LockGuard lock(m_mutex);
+	if (m_staging_records != 0)
+	{
+		EXIT("GDS release with %" PRIu64 " publications still pending\n", m_staging_records);
+	}
+	if (m_buffer != nullptr)
+	{
+		VulkanDeleteBuffer(ctx, m_buffer);
+		delete m_buffer;
+		m_buffer = nullptr;
+	}
+	m_queue_family = VK_QUEUE_FAMILY_IGNORED;
 }
 
 void CommandPool::Create(int id)

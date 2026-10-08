@@ -307,8 +307,17 @@ public:
 	void                           PopMarker() {}
 
 	void PrefetchL2(void* addr, uint32_t size) {}
-	void ClearGds(uint64_t dw_offset, uint32_t dw_num, uint32_t clear_value);
-	void ReadGds(uint32_t* dst, uint32_t dw_offset, uint32_t dw_size);
+	void ClearGds(uint64_t dw_offset, uint64_t dw_count, uint32_t clear_value);
+	void WriteGds(uint64_t dw_offset, uint64_t src_vaddr, uint64_t dw_count);
+	void CopyGds(uint64_t src_dw_offset, uint64_t dst_dw_offset, uint64_t dw_count);
+	void ReadGds(uint32_t* dst, uint64_t dw_offset, uint64_t dw_count);
+	// Integration seam: the open recording, so a fixture can record a production GPU writer ahead
+	// of a packet. Not for runtime use.
+	[[nodiscard]] CommandBuffer* RecordingBufferForTesting()
+	{
+		Core::LockGuard lock(m_mutex);
+		return m_current_buffer >= 0 ? m_buffer[m_current_buffer] : nullptr;
+	}
 
 	void ResetDeCe();
 	void WaitCe();
