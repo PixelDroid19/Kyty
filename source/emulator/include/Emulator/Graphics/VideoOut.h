@@ -48,6 +48,7 @@ constexpr int VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE          = -2144796647; /*
 constexpr int VIDEO_OUT_ERROR_INVALID_OPTION                   = -2144796646; /* 0x8029001A */
 constexpr int VIDEO_OUT_ERROR_PORT_UNSUPPORTED_FUNCTION        = -2144796645; /* 0x8029001B */
 constexpr int VIDEO_OUT_ERROR_UNSUPPORTED_OPERATION            = -2144796644; /* 0x8029001C */
+constexpr int VIDEO_OUT_ERROR_INVALID_OUTPUT_MODE              = -2144796642; /* 0x8029001E */
 constexpr int VIDEO_OUT_ERROR_FATAL                            = -2144796417; /* 0x802900FF */
 constexpr int VIDEO_OUT_ERROR_UNKNOWN                          = -2144796418; /* 0x802900FE */
 constexpr int VIDEO_OUT_ERROR_ENOMEM                           = -2144792564; /* 0x8029100C */
@@ -112,7 +113,7 @@ KYTY_SYSV_ABI int  VideoOutDeleteVblankEvent(Kernel::EventQueue::KernelEqueue eq
 KYTY_SYSV_ABI int  VideoOutDeleteFlipEvent(Kernel::EventQueue::KernelEqueue eq, int handle);
 KYTY_SYSV_ABI int  VideoOutGetEventId(const Kernel::EventQueue::KernelEvent* ev);
 KYTY_SYSV_ABI int  VideoOutGetEventData(const Kernel::EventQueue::KernelEvent* ev, uint64_t* data);
-KYTY_SYSV_ABI int  VideoOutConfigureOutput(int handle);
+KYTY_SYSV_ABI int  VideoOutConfigureOutput(int handle, uint64_t mode, const void* options, const void* reserved_pointer, uint64_t reserved);
 KYTY_SYSV_ABI int  VideoOutInitializeOutputOptions(void* options);
 KYTY_SYSV_ABI int  VideoOutIsOutputSupported(int handle, uint64_t mode, const void* options, const void* reserved_pointer,
                                                uint64_t reserved);
