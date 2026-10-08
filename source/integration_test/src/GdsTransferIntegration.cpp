@@ -248,6 +248,8 @@ private:
 		vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, nullptr);
 		std::vector<VkExtensionProperties> extensions(extension_count);
 		vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, extensions.data());
+		// Subgroup size control is core since Vulkan 1.3. As in the window device, its features are
+		// enabled through the Vulkan 1.3 aggregate above and the extension is recorded as a diagnostic.
 		uint32_t size_control_revision = 0;
 		for (const auto& extension: extensions)
 		{
@@ -256,7 +258,6 @@ private:
 				size_control_revision = extension.specVersion;
 			}
 		}
-		const char* size_control_extension = VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME;
 
 		uint32_t family_count = 0;
 		vkGetPhysicalDeviceQueueFamilyProperties(physical, &family_count, nullptr);
@@ -280,8 +281,6 @@ private:
 			device_info.pNext                   = &features;
 			device_info.queueCreateInfoCount    = 1;
 			device_info.pQueueCreateInfos       = &queue_info;
-			device_info.enabledExtensionCount   = size_control_revision != 0 ? 1u : 0u;
-			device_info.ppEnabledExtensionNames = size_control_revision != 0 ? &size_control_extension : nullptr;
 			if (vkCreateDevice(physical, &device_info, nullptr, &context.device) != VK_SUCCESS)
 			{
 				continue;
@@ -326,7 +325,7 @@ private:
 		auto& wave                  = context.compute_wave_vulkan_state;
 		wave.extension_advertised   = size_control_revision != 0;
 		wave.extension_revision     = size_control_revision;
-		wave.extension_enabled      = size_control_revision != 0;
+		wave.extension_enabled      = false;
 		wave.size_control_feature_supported   = features13.subgroupSizeControl == VK_TRUE;
 		wave.full_subgroups_feature_supported = features13.computeFullSubgroups == VK_TRUE;
 		wave.size_control_feature_enabled     = wave.size_control_feature_supported;
@@ -539,6 +538,32 @@ void VerifyArmedDestinationPublication(Fixture* f)
 	Expect(tracker.UnregisterRange(destination.Address(), destination.Size()), "destination unregisters");
 }
 
+// Write access is a publication-time requirement. A destination the guest keeps read-only when the
+// read is recorded and makes writable again, as the same mapping, before the submission completes
+// receives exactly the GDS span; its neighbouring dwords keep their bytes.
+void VerifyReadOnlyAtRecordDestinationPublishes(Fixture* f)
+{
+	GuestPages source(f->vulkan.Context(), 16);
+	GuestPages destination(f->vulkan.Context(), 24);
+	for (uint32_t i = 0; i < 4; ++i)
+	{
+		source.Words()[i] = 0xd00du + i;
+	}
+	for (uint32_t i = 0; i < 6; ++i)
+	{
+		destination.Words()[i] = 0xa5a5a5a5u;
+	}
+	Dma(f->processor, kSelMemory, source.Address(), kSelGds, GdsByte(192), 16);
+	Expect(Kyty::Core::VirtualMemory::ProtectGuest(destination.Address(), destination.Size(), Kyty::Core::VirtualMemory::Mode::Read),
+	       "destination is read-only when the read is recorded");
+	Dma(f->processor, kSelGds, GdsByte(192), kSelMemory, destination.Address() + 4u, 16);
+	Expect(Kyty::Core::VirtualMemory::ProtectGuest(destination.Address(), destination.Size(), Kyty::Core::VirtualMemory::Mode::ReadWrite),
+	       "the same destination mapping becomes writable before completion");
+	f->processor->SubmitAndWait();
+	Expect(std::equal(source.Words(), source.Words() + 4, destination.Words() + 1), "the GDS span is published at completion");
+	Expect(destination.Words()[0] == 0xa5a5a5a5u && destination.Words()[5] == 0xa5a5a5a5u, "neighbouring dwords keep their bytes");
+}
+
 // A producer whose submission has completed and been published leaves guest bytes that are
 // current: memory->GDS reads the new value it wrote, not the value it replaced.
 void VerifyCompletedProducerIsCurrent(Fixture* f)
@@ -733,13 +758,31 @@ void RefuseUnmappedDestinationAtPublication(Fixture* f)
 	f->processor->SubmitAndWait();
 }
 
+// The destination is released and a new writable mapping takes its address before the publication
+// completes. The new mapping passes the GPU-range, ownership and write checks; only the mapping
+// identity recorded with the read tells it apart, so the publication must refuse rather than write
+// the earlier destination's bytes into it.
+void RefuseRemappedDestinationAtPublication(Fixture* f)
+{
+	GuestPages     destination(f->vulkan.Context(), 16);
+	const uint64_t address = destination.Address();
+	const uint64_t size    = destination.Size();
+	Dma(f->processor, kSelData, 0x5au, kSelGds, GdsByte(0), 16);
+	Dma(f->processor, kSelGds, GdsByte(0), kSelMemory, address, 16);
+	destination.Abandon();
+	Expect(Kyty::Core::VirtualMemory::AllocFixed(address, size, Kyty::Core::VirtualMemory::Mode::ReadWrite),
+	       "a new mapping takes the released destination address");
+	std::memset(reinterpret_cast<void*>(address), 0xa5, size);
+	f->processor->SubmitAndWait();
+}
+
 struct Scenario
 {
 	const char* name;
 	void (*run)(Fixture*);
 };
 
-constexpr std::array<Scenario, 8> kRefusals {{
+constexpr std::array<Scenario, 9> kRefusals {{
     {"--refuse-destination-past-window", RefuseDestinationPastWindow},
     {"--refuse-overlapping-gds-copy", RefuseOverlappingGdsCopy},
     {"--refuse-unaligned-memory-source", RefuseUnalignedMemorySource},
@@ -748,6 +791,7 @@ constexpr std::array<Scenario, 8> kRefusals {{
     {"--refuse-zero-byte-gds-packet", RefuseZeroByteGdsPacket},
     {"--refuse-read-only-destination", RefuseReadOnlyDestinationAtPublication},
     {"--refuse-unmapped-destination", RefuseUnmappedDestinationAtPublication},
+    {"--refuse-remapped-destination", RefuseRemappedDestinationAtPublication},
 }};
 
 #if !defined(_WIN32)
@@ -805,6 +849,7 @@ int main(int argc, char** argv)
 	VerifyStreamOrderSnapshotIsolation(fixture);
 	VerifyGdsToGdsCopies(fixture);
 	VerifyArmedDestinationPublication(fixture);
+	VerifyReadOnlyAtRecordDestinationPublishes(fixture);
 	VerifyCompletedProducerIsCurrent(fixture);
 	VerifyGpuProducerSourceIsDeviceBuffer(fixture);
 	delete fixture;

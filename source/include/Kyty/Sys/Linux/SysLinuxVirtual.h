@@ -57,6 +57,8 @@ bool     sys_virtual_visit_readable_guest_range(uint64_t address, uint64_t size,
 	                                            VirtualMemory::ReadableGuestRangeVisitor visitor, void* context);
 bool     sys_virtual_copy_from_guest(void* destination, uint64_t source, uint64_t size);
 bool     sys_virtual_copy_to_guest(uint64_t destination, const void* source, uint64_t size);
+bool     sys_virtual_capture_guest_mapping_snapshot(uint64_t address, uint64_t size, VirtualMemory::GuestMappingSnapshot* snapshot);
+bool     sys_virtual_copy_to_guest_if_mapping_matches(const VirtualMemory::GuestMappingSnapshot& snapshot, const void* source);
 VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
 	                                                                      VirtualMemory::CapturedProtectionVisitor visitor,
 	                                                                      void* context,

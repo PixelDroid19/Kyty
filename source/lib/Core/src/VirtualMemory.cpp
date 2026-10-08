@@ -2105,6 +2105,59 @@ bool CopyToGuest(uint64_t destination, const void* source, uint64_t size)
 	return source != nullptr && sys_virtual_copy_to_guest(destination, source, size);
 }
 
+static bool guest_mapping_range_in_budget(uint64_t address, uint64_t size)
+{
+	return size != 0 && size <= GuestMappingSnapshot::kMaxBytes && address <= UINT64_MAX - size;
+}
+
+// Structural check only: segments must tile the range exactly, in order, each with a nonzero
+// identity. An empty or structurally invalid token is rejected here before the VM is consulted.
+// This is not authentication: whether each identity still covers its bytes is checked by the
+// backend, and a well-formed token that splits one mapping into adjacent segments is harmless.
+static bool guest_mapping_snapshot_well_formed(const GuestMappingSnapshot& snapshot)
+{
+	if (!guest_mapping_range_in_budget(snapshot.address, snapshot.size) || snapshot.segment_count == 0 ||
+	    snapshot.segment_count > GuestMappingSnapshot::kMaxSegments)
+	{
+		return false;
+	}
+	const uint64_t end    = snapshot.address + snapshot.size;
+	uint64_t       cursor = snapshot.address;
+	for (uint32_t i = 0; i < snapshot.segment_count; ++i)
+	{
+		const auto& segment = snapshot.segments[i];
+		if (segment.address != cursor || segment.size == 0 || segment.size > end - cursor || segment.identity == 0)
+		{
+			return false;
+		}
+		cursor += segment.size;
+	}
+	return cursor == end;
+}
+
+bool CaptureGuestMappingSnapshot(uint64_t address, uint64_t size, GuestMappingSnapshot* snapshot)
+{
+	if (snapshot == nullptr)
+	{
+		return false;
+	}
+	*snapshot = {};
+	GuestMappingSnapshot captured;
+	if (!guest_mapping_range_in_budget(address, size) || !sys_virtual_capture_guest_mapping_snapshot(address, size, &captured) ||
+	    !guest_mapping_snapshot_well_formed(captured))
+	{
+		return false;
+	}
+	*snapshot = captured;
+	return true;
+}
+
+bool CopyToGuestIfMappingMatches(const GuestMappingSnapshot& snapshot, const void* source, uint64_t size)
+{
+	return source != nullptr && size == snapshot.size && guest_mapping_snapshot_well_formed(snapshot) &&
+	       sys_virtual_copy_to_guest_if_mapping_matches(snapshot, source);
+}
+
 ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor, void* context,
 	                                         const WriteLeaseAuthority* authority) noexcept
 {

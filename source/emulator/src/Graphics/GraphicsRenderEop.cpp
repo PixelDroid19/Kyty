@@ -88,6 +88,9 @@ void GraphicsRenderWriteAtEndOfPipe32(uint64_t /*submit_id*/, CommandBuffer* buf
 	RecordTransientLabel32(buffer, dst_gpu_addr, value, 1u, nullptr, nullptr, nullptr);
 }
 
+static_assert(kGraphicsGdsDwords * sizeof(uint32_t) <= Core::VirtualMemory::GuestMappingSnapshot::kMaxBytes,
+              "a GDS publication destination must fit one guest mapping snapshot");
+
 // One GDS read publication. The deferred release of the recording's submission owns it: that
 // release runs at publication after the label has fired. The label only borrows it.
 // Production command processors drain their recordings; discarding a recording
@@ -96,32 +99,35 @@ struct GdsPublication
 {
 	VulkanBuffer staging;
 	void*        mapped = nullptr;
-	uint32_t*    dst    = nullptr;
 	uint64_t     bytes  = 0;
+	// The guest mapping instances the destination named when the read was recorded.
+	Core::VirtualMemory::GuestMappingSnapshot destination;
 };
 
 static bool GdsPublishLabelCallback(SubmissionId /*submission*/, const uint64_t* args)
 {
 	const auto* record  = reinterpret_cast<const GdsPublication*>(args[0]);
-	const auto  address = reinterpret_cast<uint64_t>(record->dst);
+	const auto  address = record->destination.address;
 
 	// Releasing or invalidating a GPU mapping first drains every command processor, which publishes
 	// this submission while the destination still exists. A destination that is no longer a GPU
-	// mapping, or that the guest unmapped or made read-only directly, never receives stale bytes.
+	// mapping, that the guest unmapped or made read-only directly, or whose address a new mapping
+	// took over since recording, never receives stale bytes.
 	bool written = GpuMemoryValidateAllocatedRange(address, record->bytes) == GpuMemoryRangeValidationStatus::Valid;
 	if (written)
 	{
 		// The lease lifts tracker protection and keeps it from rearming during the copy, and publishes
-		// the write generation when it ends. The guest copy validates ownership and write access in
-		// one transaction with unmap and protection changes.
+		// the write generation when it ends. The guest copy validates the recorded mapping identity and
+		// write access in one transaction with map, unmap and protection changes.
 		auto&          tracker = GpuDirtyPageTracker::Instance();
 		const uint64_t token   = tracker.BeginHostWrite(address, record->bytes);
-		written                = Core::VirtualMemory::CopyToGuest(address, record->mapped, record->bytes);
+		written                = Core::VirtualMemory::CopyToGuestIfMappingMatches(record->destination, record->mapped, record->bytes);
 		tracker.EndHostWrite(token);
 	}
 	if (!written)
 	{
-		EXIT("GDS publication destination is no longer a writable guest GPU mapping: address=0x%016" PRIx64 " bytes=%" PRIu64 "\n",
+		EXIT("GDS publication destination is not the recorded guest GPU mapping or is not writable: address=0x%016" PRIx64
+		     " bytes=%" PRIu64 "\n",
 		     address, record->bytes);
 	}
 	GraphicsRenderMemoryFlush(address, record->bytes);
@@ -155,6 +161,15 @@ static GraphicsGdsTransferResult GdsPublishToGuest(CommandBuffer* buffer, uint64
 	{
 		return GraphicsGdsTransferResult::InvalidDestination;
 	}
+	// Bind the publication to the guest mapping instances the destination names now, before anything
+	// is reserved or recorded, so a later remap of the same address cannot receive these bytes. This
+	// needs ownership only: write access is a completion-time requirement, as the guest may make the
+	// same mapping writable before the submission completes.
+	Core::VirtualMemory::GuestMappingSnapshot destination;
+	if (!Core::VirtualMemory::CaptureGuestMappingSnapshot(reinterpret_cast<uint64_t>(dst), bytes, &destination))
+	{
+		return GraphicsGdsTransferResult::InvalidDestination;
+	}
 	// Labels complete exactly only on a command-processor recording with a submission.
 	SubmissionId recording;
 	if (buffer->GetParent() == nullptr || !buffer->GetSubmissionId(&recording))
@@ -173,8 +188,8 @@ static GraphicsGdsTransferResult GdsPublishToGuest(CommandBuffer* buffer, uint64
 	record->staging.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
 	                                  VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 	record->staging.buffer          = nullptr;
-	record->dst                     = dst;
 	record->bytes                   = bytes;
+	record->destination             = destination;
 	VulkanCreateBuffer(ctx, bytes, &record->staging);
 	if (record->staging.buffer == nullptr)
 	{
@@ -209,9 +224,14 @@ void GraphicsRenderWriteAtEndOfPipeGds32(uint64_t /*submit_id*/, CommandBuffer* 
 	{
 		EXIT("EOP GDS range outside the guest window: offset=%" PRIu32 " count=%" PRIu32 "\n", dw_offset, dw_num);
 	}
+	// An unregistered destination receives nothing, as for every other end-of-pipe write. A registered
+	// destination that is not entirely guest-owned memory is a refusal, not a skipped publication.
+	if (dw_num != 0 && !ValidateTransientLabelDestination(dst_gpu_addr, static_cast<uint64_t>(dw_num) * sizeof(*dst_gpu_addr)))
+	{
+		return;
+	}
 	const auto result = GdsPublishToGuest(buffer, dw_offset, dst_gpu_addr, dw_num);
-	// An unregistered destination receives nothing, as for every other end-of-pipe write.
-	if (result == GraphicsGdsTransferResult::Recorded || result == GraphicsGdsTransferResult::InvalidDestination)
+	if (result == GraphicsGdsTransferResult::Recorded)
 	{
 		return;
 	}

@@ -217,6 +217,42 @@ bool VisitReadableGuestRange(uint64_t address, uint64_t size, ReadableGuestRange
 // and the copy. This serializes the transfer with Free() and Protect().
 bool           CopyFromGuest(void* destination, uint64_t source, uint64_t size);
 bool           CopyToGuest(uint64_t destination, const void* source, uint64_t size);
+// The guest mapping instances that covered a guest range at one instant. Every successful map,
+// shared view, commit, decommit, or reservation (re)publication gives its interval a fresh
+// identity, even when it reuses the address or the backing bytes of an earlier mapping.
+// Splitting a mapping (a partial unmap or replacement elsewhere in it), guest protection changes,
+// and write-lease removal or rearm keep the identity; unmapping drops it. Identities are never
+// reused within the process. A snapshot is a fixed-size value: it owns no host resources and
+// needs no release. The byte budget covers the largest deferred host publication (the 48 KiB
+// guest GDS window); kMaxSegments covers that budget at 4 KiB host pages from any start offset.
+struct GuestMappingSnapshot
+{
+	static constexpr uint64_t kMaxBytes    = 48u * 1024u;
+	static constexpr uint32_t kMaxSegments = 16;
+
+	struct Segment
+	{
+		uint64_t address  = 0;
+		uint64_t size     = 0;
+		uint64_t identity = 0;
+	};
+
+	uint64_t address                = 0;
+	uint64_t size                   = 0;
+	uint32_t segment_count          = 0;
+	Segment  segments[kMaxSegments] = {};
+};
+// Captures, in one VM transaction, the mapping identities of a range that is entirely guest owned.
+// Capture is metadata only: it does not consult protection, so a read-only or NoAccess range of a
+// guest mapping is captured, and a write lease's native protection is irrelevant. Fails, leaving an
+// empty snapshot that every copy refuses, when any byte is not guest owned, or when the range
+// exceeds the byte or segment budget.
+bool CaptureGuestMappingSnapshot(uint64_t address, uint64_t size, GuestMappingSnapshot* snapshot);
+// Copies `size` bytes to the snapshot's range only when `size` equals its size, every byte still
+// belongs to the captured mapping instance, and the guest protection permits writes now. Identity,
+// write access, and the copy are one transaction with unmap, map, and protection changes. A
+// refusal copies nothing. Like CopyToGuest, it does not lift a write lease's native protection.
+bool CopyToGuestIfMappingMatches(const GuestMappingSnapshot& snapshot, const void* source, uint64_t size);
 enum class ProtectionChangeStatus : uint32_t
 {
 	Success,

@@ -69,13 +69,16 @@ static std::map<uintptr_t, ProtectionRange>* g_protects = nullptr;
 
 struct GuestMappingRange
 {
-	uintptr_t end = 0;
+	uintptr_t end      = 0;
+	uint64_t  identity = 0;
 };
 
 // This is deliberately independent from protection metadata. Host mprotect()
 // can be used by internal runtime code, but it must never turn an arbitrary
 // host mapping into a guest buffer accepted by HLE entry points.
 static std::map<uintptr_t, GuestMappingRange>* g_guest_mappings = nullptr;
+// Next mapping identity. Zero is never issued, and identities are never reused.
+static uint64_t g_next_guest_mapping_identity = 1;
 
 struct SharedBacking
 {
@@ -325,9 +328,33 @@ static void split_guest_mapping_range_locked(uintptr_t address)
 		return;
 	}
 
-	const GuestMappingRange right {it->second.end};
-	it->second.end = address;
+	// Both halves stay the same mapping instance.
+	const GuestMappingRange right = it->second;
+	it->second.end                = address;
 	g_guest_mappings->emplace(address, right);
+}
+
+// A reused identity could let a snapshot of a released mapping match its
+// replacement, so exhausting the 64-bit space is fatal instead of wrapping.
+static uint64_t take_guest_mapping_identity_locked()
+{
+	if (g_next_guest_mapping_identity == 0)
+	{
+		EXIT("guest mapping identities exhausted\n");
+	}
+	return g_next_guest_mapping_identity++;
+}
+
+// The guest mapping containing `address`, or end() when the byte is not guest owned.
+static std::map<uintptr_t, GuestMappingRange>::const_iterator find_guest_mapping_locked(uintptr_t address)
+{
+	std::map<uintptr_t, GuestMappingRange>::const_iterator it = g_guest_mappings->upper_bound(address);
+	if (it == g_guest_mappings->cbegin())
+	{
+		return g_guest_mappings->cend();
+	}
+	--it;
+	return address < it->second.end ? it : g_guest_mappings->cend();
 }
 
 static bool range_is_guest_owned_locked(uintptr_t address, uint64_t size)
@@ -370,7 +397,7 @@ static bool assign_guest_mapping_range_locked(uintptr_t address, uint64_t size)
 	{
 		it = g_guest_mappings->erase(it);
 	}
-	g_guest_mappings->emplace(address, GuestMappingRange {end});
+	g_guest_mappings->emplace(address, GuestMappingRange {end, take_guest_mapping_identity_locked()});
 	return true;
 }
 
@@ -1789,6 +1816,95 @@ bool sys_virtual_copy_to_guest(uint64_t destination, const void* source, uint64_
 		return false;
 	}
 	std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(destination)), source, static_cast<size_t>(size));
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return true;
+}
+
+// Records one segment per mapping instance, clipped to [address, address + size).
+// Fails when a byte is not guest owned or the segment budget is exceeded.
+static bool capture_guest_mapping_snapshot_locked(uintptr_t address, uint64_t size, VirtualMemory::GuestMappingSnapshot* snapshot)
+{
+	const uintptr_t end     = address + static_cast<uintptr_t>(size);
+	snapshot->address       = address;
+	snapshot->size          = size;
+	snapshot->segment_count = 0;
+	for (uintptr_t cursor = address; cursor < end;)
+	{
+		const auto mapping = find_guest_mapping_locked(cursor);
+		if (mapping == g_guest_mappings->cend())
+		{
+			return false;
+		}
+		const uintptr_t next = std::min(mapping->second.end, end);
+		auto*           last = snapshot->segment_count == 0 ? nullptr : &snapshot->segments[snapshot->segment_count - 1u];
+		if (last != nullptr && last->identity == mapping->second.identity)
+		{
+			last->size += next - cursor;
+		} else
+		{
+			if (snapshot->segment_count == VirtualMemory::GuestMappingSnapshot::kMaxSegments)
+			{
+				return false;
+			}
+			snapshot->segments[snapshot->segment_count++] = {cursor, next - cursor, mapping->second.identity};
+		}
+		cursor = next;
+	}
+	return true;
+}
+
+// Every byte of every segment still belongs to the mapping instance captured for it.
+static bool guest_mapping_snapshot_matches_locked(const VirtualMemory::GuestMappingSnapshot& snapshot)
+{
+	for (uint32_t i = 0; i < snapshot.segment_count; ++i)
+	{
+		const auto&     segment = snapshot.segments[i];
+		const uintptr_t end     = static_cast<uintptr_t>(segment.address + segment.size);
+		for (auto cursor = static_cast<uintptr_t>(segment.address); cursor < end;)
+		{
+			const auto mapping = find_guest_mapping_locked(cursor);
+			if (mapping == g_guest_mappings->cend() || mapping->second.identity != segment.identity)
+			{
+				return false;
+			}
+			cursor = std::min(mapping->second.end, end);
+		}
+	}
+	return true;
+}
+
+// Metadata only: ownership and identity, never protection. Write access is
+// checked by the conditional copy that uses the snapshot.
+bool sys_virtual_capture_guest_mapping_snapshot(uint64_t address, uint64_t size, VirtualMemory::GuestMappingSnapshot* snapshot)
+{
+	if (snapshot == nullptr || size == 0 || address > UINTPTR_MAX - size)
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	const bool captured = capture_guest_mapping_snapshot_locked(static_cast<uintptr_t>(address), size, snapshot);
+	pthread_mutex_unlock(&g_virtual_mutex);
+	return captured;
+}
+
+bool sys_virtual_copy_to_guest_if_mapping_matches(const VirtualMemory::GuestMappingSnapshot& snapshot, const void* source)
+{
+	uintptr_t page_start = 0;
+	uintptr_t page_end   = 0;
+	if (source == nullptr || snapshot.size > std::numeric_limits<size_t>::max() ||
+	    !get_host_page_range(static_cast<uintptr_t>(snapshot.address), snapshot.size, &page_start, &page_end))
+	{
+		return false;
+	}
+
+	pthread_mutex_lock(&g_virtual_mutex);
+	if (!guest_mapping_snapshot_matches_locked(snapshot) || !range_has_protection_locked(page_start, page_end, PROT_WRITE))
+	{
+		pthread_mutex_unlock(&g_virtual_mutex);
+		return false;
+	}
+	std::memcpy(reinterpret_cast<void*>(static_cast<uintptr_t>(snapshot.address)), source, static_cast<size_t>(snapshot.size));
 	pthread_mutex_unlock(&g_virtual_mutex);
 	return true;
 }

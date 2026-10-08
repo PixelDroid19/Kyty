@@ -1,6 +1,7 @@
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -553,6 +554,283 @@ TEST(CoreVirtualMemory, FixedMapFreeKeepsOwnershipCoherent)
 	EXPECT_GT(rejected.load(std::memory_order_relaxed), 0u);
 	EXPECT_TRUE(Free(address));
 #endif
+}
+
+// A snapshot accepts copies while its mapping is unchanged. A size other than its
+// own, a token that was never captured, and an altered token copy nothing.
+TEST(CoreVirtualMemory, GuestMappingSnapshotAcceptsUnchangedMappingAndRefusesMalformedTokens)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size * 2u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	const uint64_t          cross_page = address + page_size - 8u;
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(cross_page, input.size(), &snapshot));
+	EXPECT_EQ(snapshot.segment_count, 1u);
+	ASSERT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	EXPECT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+
+	std::array<uint8_t, 16> other {};
+	other.fill(0xc3);
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, other.data(), other.size() - 4u));
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(GuestMappingSnapshot {}, other.data(), other.size()));
+	auto forged = snapshot;
+	forged.segments[0].identity++;
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(forged, other.data(), other.size()));
+	auto gapped = snapshot;
+	gapped.segments[0].address += 4u;
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(gapped, other.data(), other.size()));
+	auto overcounted          = snapshot;
+	overcounted.segment_count = GuestMappingSnapshot::kMaxSegments + 1u;
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(overcounted, other.data(), other.size()));
+
+	std::array<uint8_t, 16> output {};
+	ASSERT_TRUE(CopyFromGuest(output.data(), cross_page, output.size()));
+	EXPECT_EQ(output, input);
+	EXPECT_TRUE(Free(address));
+}
+
+// Capture needs ownership only, so a read-only range is captured. Guest
+// protection changes, write-lease removal and rearm, and a partial unmap
+// elsewhere keep the mapping instance; each copy needs write access at its time.
+TEST(CoreVirtualMemory, GuestMappingSnapshotSurvivesProtectionLeaseAndSplit)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size * 3u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	const uint64_t          target = address + page_size;
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	ASSERT_TRUE(ProtectGuest(target, page_size, Mode::Read));
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(target, input.size(), &snapshot));
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	EXPECT_EQ(reinterpret_cast<const volatile uint8_t*>(target)[0], 0u);
+
+	ASSERT_TRUE(ProtectGuest(target, page_size, Mode::ReadWrite));
+	EXPECT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	ASSERT_TRUE(ProtectGuest(target, page_size, Mode::NoAccess));
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	ASSERT_TRUE(ProtectGuest(target, page_size, Mode::ReadWrite));
+	EXPECT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+
+	ProtectionCapture capture;
+	ASSERT_TRUE(RemoveWriteAndCapture(target, page_size, &CaptureProtection, &capture).Succeeded());
+	ASSERT_TRUE(RestoreProtection(target, page_size, capture.runs[0].restore_token));
+	EXPECT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+
+#if !defined(_WIN32)
+	ASSERT_TRUE(FreeRange(address + page_size * 2u, page_size));
+	EXPECT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+#endif
+	EXPECT_TRUE(Free(address));
+}
+
+// A new writable mapping at a released address passes ownership and write
+// checks, but it is not the captured instance: the copy leaves it untouched.
+TEST(CoreVirtualMemory, GuestMappingSnapshotRefusesAMappingThatReplacedTheAddress)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(address, input.size(), &snapshot));
+	ASSERT_TRUE(Free(address));
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+
+	if (!AllocFixed(address, page_size, Mode::ReadWrite))
+	{
+		GTEST_SKIP() << "the host reused the released address";
+	}
+	auto* bytes = reinterpret_cast<uint8_t*>(address);
+	std::fill(bytes, bytes + page_size, uint8_t {0xa5});
+	ASSERT_TRUE(IsRangeWritable(address, input.size()));
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	EXPECT_TRUE(std::all_of(bytes, bytes + page_size, [](uint8_t value) { return value == 0xa5u; }));
+	EXPECT_TRUE(Free(address));
+}
+
+// Replacing one of the two mappings a snapshot spans refuses the whole copy,
+// including the bytes that still belong to the unchanged mapping.
+TEST(CoreVirtualMemory, GuestMappingSnapshotRefusesAPartlyReplacedRangeWholly)
+{
+	const uint64_t page_size   = GetPageSize();
+	const uint64_t reservation = Reserve(0, page_size * 3u);
+	ASSERT_NE(reservation, 0u);
+	const uint64_t first  = reservation + page_size;
+	const uint64_t second = reservation + page_size * 2u;
+	ASSERT_TRUE(AllocFixedReplacingOwnedReservation(first, page_size, Mode::ReadWrite));
+	ASSERT_TRUE(AllocFixedReplacingOwnedReservation(second, page_size, Mode::ReadWrite));
+	const uint64_t          target = second - 8u;
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(target, input.size(), &snapshot));
+	EXPECT_EQ(snapshot.segment_count, 2u);
+
+	ASSERT_TRUE(Free(second));
+#if defined(_WIN32)
+	ASSERT_TRUE(AllocFixedReplacingOwnedReservation(second, page_size, Mode::ReadWrite));
+#else
+	ASSERT_TRUE(AllocFixed(second, page_size, Mode::ReadWrite));
+#endif
+	auto* bytes = reinterpret_cast<uint8_t*>(target);
+	std::fill(bytes, bytes + input.size(), uint8_t {0xa5});
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	EXPECT_TRUE(std::all_of(bytes, bytes + input.size(), [](uint8_t value) { return value == 0xa5u; }));
+
+#if defined(_WIN32)
+	ASSERT_TRUE(Free(first));
+	ASSERT_TRUE(Free(second));
+	ASSERT_TRUE(Free(reservation));
+#else
+	ASSERT_TRUE(Free(reservation));
+	ASSERT_TRUE(Free(first));
+	ASSERT_TRUE(Free(second));
+#endif
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+// Decommit and a later commit of the same interval are each a new mapping instance.
+TEST(CoreVirtualMemory, GuestMappingSnapshotRefusesDecommittedAndRecommittedRange)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(address, input.size(), &snapshot));
+	ASSERT_TRUE(DecommitGuestRange(address, page_size));
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+
+	ASSERT_TRUE(AllocFixedReplacingOwnedReservation(address, page_size, Mode::ReadWrite));
+	auto* bytes = reinterpret_cast<uint8_t*>(address);
+	std::fill(bytes, bytes + input.size(), uint8_t {0xa5});
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	EXPECT_TRUE(std::all_of(bytes, bytes + input.size(), [](uint8_t value) { return value == 0xa5u; }));
+	EXPECT_TRUE(Free(address));
+}
+#endif
+
+// Capture needs every byte guest owned, within the byte budget, whatever its
+// protection. A NoAccess reservation is captured, but committing it is a new
+// mapping instance that the snapshot refuses.
+TEST(CoreVirtualMemory, GuestMappingSnapshotCaptureRequiresOwnershipWithinBudget)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, GuestMappingSnapshot::kMaxBytes + page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	GuestMappingSnapshot snapshot;
+	EXPECT_TRUE(CaptureGuestMappingSnapshot(address, GuestMappingSnapshot::kMaxBytes, &snapshot));
+	EXPECT_FALSE(CaptureGuestMappingSnapshot(address, GuestMappingSnapshot::kMaxBytes + 1u, &snapshot));
+	EXPECT_EQ(snapshot.segment_count, 0u);
+	EXPECT_FALSE(CaptureGuestMappingSnapshot(address, 0, &snapshot));
+	EXPECT_FALSE(CaptureGuestMappingSnapshot(address, 16, nullptr));
+	ASSERT_TRUE(ProtectGuest(address, page_size, Mode::Read));
+	EXPECT_TRUE(CaptureGuestMappingSnapshot(address + page_size - 8u, 16, &snapshot));
+	EXPECT_TRUE(Free(address));
+
+	const uint64_t reservation = Reserve(0, page_size);
+	ASSERT_NE(reservation, 0u);
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(reservation, input.size(), &snapshot));
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	ASSERT_TRUE(AllocFixedReplacingOwnedReservation(reservation, page_size, Mode::ReadWrite));
+	ASSERT_TRUE(IsRangeWritable(reservation, input.size()));
+	EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	EXPECT_EQ(reinterpret_cast<const volatile uint8_t*>(reservation)[0], 0u);
+#if defined(_WIN32)
+	EXPECT_TRUE(Free(reservation));
+#endif
+	EXPECT_TRUE(Free(reservation));
+
+	std::array<uint8_t, 16> host {};
+	EXPECT_FALSE(CaptureGuestMappingSnapshot(reinterpret_cast<uint64_t>(host.data()), host.size(), &snapshot));
+}
+
+// An armed write lease removes write natively while the guest protection stays
+// authoritative: capture succeeds without fencing the lease authority. The
+// conditional copy does not lift the lease, so it runs only after the
+// authority restores native write, and then succeeds for the same instance.
+TEST(CoreVirtualMemory, GuestMappingSnapshotCapturesDuringAnArmedWriteLease)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	LeaseRecorder             recorder;
+	const WriteLeaseAuthority authority {&recorder, &LeaseRecorder::Begin, &LeaseRecorder::Decide, &LeaseRecorder::End};
+	ProtectionCapture         capture;
+	ASSERT_TRUE(RemoveWriteAndCapture(address, page_size, &CaptureProtection, &capture, &authority).Succeeded());
+	ASSERT_EQ(capture.size, 1u);
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	EXPECT_FALSE(NativeWritable(address));
+#endif
+	EXPECT_TRUE(IsRangeWritable(address, 16));
+
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(address, input.size(), &snapshot));
+	EXPECT_EQ(recorder.begins, 0u);
+
+	ASSERT_TRUE(RestoreProtection(capture.runs[0].address, capture.runs[0].size, capture.runs[0].restore_token));
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	EXPECT_TRUE(NativeWritable(address));
+#endif
+	ASSERT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	std::array<uint8_t, 16> output {};
+	ASSERT_TRUE(CopyFromGuest(output.data(), address, output.size()));
+	EXPECT_EQ(output, input);
+	EXPECT_EQ(recorder.begins, 0u);
+
+	EXPECT_TRUE(ReleaseWriteLeases(&authority));
+	EXPECT_TRUE(Free(address));
+}
+
+// Another view of the same backing, its release, and fixed mappings refused over
+// the captured range leave the snapshot valid. A new view of the same backing
+// bytes at the same address is a new mapping instance.
+TEST(CoreVirtualMemory, GuestMappingSnapshotFollowsMappingInstanceNotBackingBytes)
+{
+	const uint64_t page_size = GetPageSize();
+	SharedBacking* backing   = CreateSharedBacking(page_size);
+	SharedBacking* other     = CreateSharedBacking(page_size);
+	ASSERT_NE(backing, nullptr);
+	ASSERT_NE(other, nullptr);
+	const uint64_t view = MapSharedAligned(backing, 0, 0, page_size, Mode::ReadWrite, page_size);
+	ASSERT_NE(view, 0u);
+	std::array<uint8_t, 16> input {};
+	input.fill(0x5a);
+	GuestMappingSnapshot snapshot;
+	ASSERT_TRUE(CaptureGuestMappingSnapshot(view, input.size(), &snapshot));
+
+	const uint64_t alias = MapSharedAligned(backing, 0, 0, page_size, Mode::ReadWrite, page_size);
+	ASSERT_NE(alias, 0u);
+	ASSERT_NE(alias, view);
+	EXPECT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+	EXPECT_EQ(reinterpret_cast<const volatile uint8_t*>(alias)[0], 0x5au);
+	ASSERT_TRUE(Free(alias));
+	EXPECT_FALSE(MapSharedFixed(other, view, 0, page_size, Mode::ReadWrite));
+	EXPECT_FALSE(AllocFixedReplacingOwnedReservation(view, page_size, Mode::ReadWrite));
+	EXPECT_TRUE(CopyToGuestIfMappingMatches(snapshot, input.data(), input.size()));
+
+	ASSERT_TRUE(Free(view));
+	if (MapSharedFixed(backing, view, 0, page_size, Mode::ReadWrite))
+	{
+		std::array<uint8_t, 16> replacement {};
+		replacement.fill(0xc3);
+		EXPECT_FALSE(CopyToGuestIfMappingMatches(snapshot, replacement.data(), replacement.size()));
+		EXPECT_EQ(reinterpret_cast<const volatile uint8_t*>(view)[0], 0x5au);
+		EXPECT_TRUE(Free(view));
+	}
+	DestroySharedBacking(other);
+	DestroySharedBacking(backing);
 }
 
 // Shared host backing must keep alias views byte-coherent: a write through one
