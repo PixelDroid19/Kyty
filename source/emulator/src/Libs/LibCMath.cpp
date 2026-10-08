@@ -111,6 +111,10 @@ KYTY_SYSV_ABI double c_fabs(double x)
 {
 	return ::fabs(x);
 }
+KYTY_SYSV_ABI double c_hypot(double x, double y)
+{
+	return ::hypot(x, y);
+}
 KYTY_SYSV_ABI double c_modf(double x, double* ip)
 {
 	return ::modf(x, ip);

@@ -16,9 +16,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -1428,6 +1430,38 @@ TEST(EmulatorModuleLoad, LibkernelReadAliasReadsRegularFileDescriptor)
 	FileSystem::Umount(U"/app0/");
 }
 
+TEST(EmulatorModuleLoad, LibcHypotFollowsStandardDoubleContract)
+{
+	EXPECT_EQ(EncodeNameAsNid("hypot"), U"YFoOw5GkkK0");
+
+	SymbolDatabase symbols;
+	ASSERT_TRUE(Kyty::Libs::Init(U"libc_1", &symbols));
+
+	const auto* record = symbols.Find(LibcFunc(u"YFoOw5GkkK0"));
+	ASSERT_NE(record, nullptr);
+	ASSERT_NE(record->vaddr, 0u);
+	using HypotFn = double(KYTY_SYSV_ABI*)(double, double);
+	auto hypot_fn = reinterpret_cast<HypotFn>(record->vaddr);
+
+	const double inf = std::numeric_limits<double>::infinity();
+	const double nan = std::numeric_limits<double>::quiet_NaN();
+
+	EXPECT_EQ(hypot_fn(5.0, 12.0), 13.0);
+	EXPECT_EQ(hypot_fn(-0.0, -0.0), 0.0);
+	EXPECT_FALSE(std::signbit(hypot_fn(-0.0, -0.0)));
+
+	const double scaled = hypot_fn(3e200, 4e200);
+	EXPECT_TRUE(std::isfinite(scaled));
+	EXPECT_NEAR(scaled, 5e200, 5e200 * 1e-15);
+
+	const double tiny = hypot_fn(3e-200, 4e-200);
+	EXPECT_GT(tiny, 0.0);
+	EXPECT_NEAR(tiny, 5e-200, 5e-200 * 1e-15);
+
+	EXPECT_EQ(hypot_fn(-inf, nan), inf);
+	EXPECT_EQ(hypot_fn(nan, inf), inf);
+	EXPECT_TRUE(std::isnan(hypot_fn(1.0, nan)));
+}
 UT_END();
 
 #endif // KYTY_EMU_ENABLED

@@ -4592,6 +4592,7 @@ LIB_DEFINE(InitLibC_1)
 	LIB_FUNC("nlaojL9hDtA", LibC::c_round);
 	LIB_FUNC("MXRNWnosNlM", LibC::c_sqrt);
 	LIB_FUNC("388LcMWHRCA", LibC::c_fabs);
+	LIB_FUNC("YFoOw5GkkK0", LibC::c_hypot);
 	LIB_FUNC("0WMHDb5Dt94", LibC::c_modf);
 	LIB_FUNC("JrwFIMzKNr0", LibC::c_ldexp);
 	LIB_FUNC("kA-TdiOCsaY", LibC::c_frexp);
