@@ -428,6 +428,110 @@ CPU-demand publication remain subject to the evidence limits in the preceding
 section. Exclusive GDS queue-family migration also requires a proven ordering
 contract; changing resource sharing alone would not establish synchronization.
 
+### Flexible snapshot lifetime and standard math (2026-10-08)
+
+A production device-address-table fixture reproduced stale data after a
+GPU-visible flexible owner changed from CPU read-only to writable: a Vulkan
+load retained the previous marker instead of the new CPU-written marker. A
+second fixture reproduced the same defect through a CPU-only writable interval
+followed by restored GPU read access. Existing residency and cross-page load
+controls passed. The double-precision standard distance-function export was
+also absent from the real symbol database.
+
+The bounded fix makes a non-writable interval within one previously GPU-visible
+flexible owner writable through a lifecycle completion while GPU admission is
+closed and submissions are drained. Successful completion updates guest rights
+and protection records under the owner lock, then invalidates only its
+device-address imports before admission reopens. Ordinary GPU objects and
+VideoOut registrations retain their lifetime. Writable snapshot runs end where
+CPU write eligibility changes, so a read-only neighbour does not prevent ongoing
+write tracking. Retired address tables are destroyed at quiesced invalidation
+or release; the current table remains available until its next rebuild.
+
+Deferred writable protection also retains the original mapping identity. The
+completion validates every page of the requested interval under the same VM
+transaction that changes rights, without the deferred-copy size budget. Two
+executed race fixtures first demonstrated that a completed unmap and same-address
+replacement could receive an old owner's protection change. Both now refuse
+with ENOENT, preserving the replacement's bytes and rights and performing no
+snapshot invalidation. A pending unmap instead returns EBUSY without mutation.
+
+The POSIX fixed-allocation path without native no-replace support now reserves
+the exact free interval before committing its mapping. A frozen production
+backend with native no-replace disabled reproduced a partial-overlap allocation
+that replaced live bytes, rights and identity. The corrected backend refuses
+that overlap and preserves all three. Private and shared mappings use the same
+reservation operation; the Apple native reservation does not request overwrite.
+
+The missing double export delegates to the standard host operation through the
+existing C calling convention. Its symbol-database fixture checks a finite
+5-12-13 result, large and small scaling, positive zero, infinity and NaN.
+
+**Verification status:** the original stale-marker and missing-export failures
+and both replacement races were executed before their fixes. The final eight
+affected Linux targets build with two jobs. The focused contract suite passes
+170 cases with three existing platform-specific omissions. All six actual
+Vulkan device-address fixtures pass, including repeated permission cycles,
+partial ranges, ongoing CPU writes and refused pending-unmap protection. The
+forced no-replace-absent backend passes its five collision and identity cases.
+Its full VM suite also passes 40 cases with the same three omissions. Six
+sequential kernel, GDS copy/append, compute, graphics and host integrations exit
+successfully. The strict emulator-boundary check and all 13 graphics-table
+provenance checks pass. The GDS integration's armed-destination case remains
+unexercised there; the device-address fixtures install the real write-fault
+route and exercise tracked CPU writes. Independent reviews found no remaining
+blocker in the permission transaction or native reservation. Retired-table
+reclamation has no measured host-memory improvement. Windows and macOS behavior
+and AMD/NVIDIA hardware have not been executed in this audit.
+
+The precommit Linux snapshot is based on `565287d7`, with the changes in this
+entry present and reported as dirty. Execution used Linux 7.2.9-arch1-1,
+GCC 16.2.1, an Intel Arc A770 (DG2), Mesa 26.2.4 with Xe KMD, two-job builds,
+silent guest output and strict masks of zero. The Nix runtime was unavailable;
+the existing host build environment was retained. A bounded roguelike route
+still reports `gfx_storage_frontier` and fails
+the gameplay gate because scene/action evidence is absent. Three input edges
+were consumed; its detailed opening capture passes the offline material-health
+gate, with entropy 3.9678 and 459 quantized colours. This does not establish
+scene equivalence or gameplay. A separate 17-second startup run reaches a
+visually inspected detailed title menu, advances 9098 presents during a
+15-second watch and records no last-error event. Its menu capture passes the
+offline material-health check (entropy 6.8164, 628 colours); the native heuristic
+still warns about hot-colour regions. No matched visual reference or gameplay
+action was exercised. Its 15026 ms steady interval has zero writebacks, which
+does not establish a publication speedup or a CPU-demand bottleneck.
+
+Focused validation uses:
+
+```text
+cmake --build <owned-build> --parallel 2 --target kyty_unit_test fc_script kyty_agent kyty_kernel_memory_integration kyty_gds_transfer_integration kyty_shader_compute_integration kyty_graphics_diagnostics_integration kyty_host_platform_integration
+<owned-build>/kyty_unit_test --gtest_filter='CoreVirtualMemory.*:EmulatorGuestDeviceAddress.*:EmulatorKernelMemory.*:EmulatorGraphicsDirtyTracking.*:EmulatorGpuMemoryFault.*:EmulatorGuestMemory.*:EmulatorModuleLoad.Libc*'
+<owned-build>/integration_test/kyty_kernel_memory_integration
+<owned-build>/integration_test/kyty_gds_transfer_integration
+<owned-build>/integration_test/kyty_gds_transfer_integration --append
+<owned-build>/integration_test/kyty_shader_compute_integration
+<owned-build>/integration_test/kyty_graphics_diagnostics_integration
+<owned-build>/integration_test/kyty_host_platform_integration
+python3 scripts/check_emulator_boundaries.py --strict source
+python3 scripts/check_graphics_tables.py source/emulator/src/Graphics/Tables/manifest.sha256
+python3 scripts/kyty_capture.py score <private-capture>
+```
+
+The strict gameplay gate uses `scripts/kyty_playable_regression.py`; private
+guest arguments, scripted routes and native-backend proof artifacts stay
+outside Git.
+
+**Limits:** the permission transaction covers a writable request contained in
+one flexible owner with a retained GPU cleanup obligation. A request spanning
+multiple owners still follows the generic path in `KernelMprotect` in
+`source/emulator/src/Kernel/Memory.cpp:3259` and can retain an immutable flexible
+import. Extending it requires an interval-wide owner and permission transaction.
+Physical aliases, broader GPU permission transitions and NoAccess snapshot
+semantics are unchanged. Unknown audio timestamp, null-drain and mastering
+contracts and conflicting zero-count save-memory rules remain unimplemented.
+The existing evidence limits for indexed resources, compression metadata and
+CPU-demand publication continue to apply.
+
 ### A roguelike reaches gameplay (2026-10-07)
 
 A 2D roguelike froze after its second frame: the main thread waited on an event flag that its render thread only

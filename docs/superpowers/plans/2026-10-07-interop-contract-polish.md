@@ -159,3 +159,56 @@ read-only-at-record destinations. The final Linux build and focused/integration
 results are recorded in `docs/BRINGUP.md`; other vendor and platform hardware
 coverage remains unavailable. Evidence-limited resource-table, compression and
 CPU-demand work remains an investigation rather than a guessed implementation.
+
+### Incremental mapping and standard-library audit (2026-10-08)
+
+1. Reproduce a retained flexible mapping imported while CPU-read-only, followed
+   by a successful writable protection change. Read distinct markers through
+   the production device-address table before and after the transition. Include
+   partial ranges, unchanged neighbours and a CPU-only transition on an owner
+   whose GPU cleanup obligation is retained. Establish the cache invalidation
+   and submission-quiescence ordering before altering the kernel path. Failed
+   protection changes must not expose new rights or discard a valid import.
+2. Complete the missing double-precision standard distance-function export from
+   the established C ABI and independently confirmed symbol identity. Resolve
+   and call it through the real symbol database; cover finite scaling, signed
+   zero, infinity and NaN rather than an overflow-prone squared-sum formula.
+3. Keep audio timestamp/null-drain semantics, unknown mastering parameters and
+   conflicting zero-count save-memory rules unresolved until guest evidence
+   establishes their contract. Existing atomic save persistence and internal
+   flexible-memory hints do not need duplicate implementations.
+
+The GPU fixture and library fixture have distinct file ownership. Reproduce
+failures first, then implement the smallest proven fixes in separate sessions.
+Build and execute the affected contracts serially, obtain independent review,
+then perform bounded strict runs on workloads sharing the changed kernel path.
+
+The reproduced snapshot defect is scoped to previously GPU-visible flexible
+owners becoming CPU-writable. Keep the owner lock through pending-unmap checks,
+protection and metadata changes, then drop only the affected device-address
+imports while submission admission stays closed. Do not detach VideoOut buffers
+or ordinary GPU resources for this snapshot-policy change. Split copied imports
+by CPU write eligibility, so mixed protected spans retain ongoing write tracking.
+The partial-range fixture must include another CPU write after its first refresh.
+Physical aliases and broader GPU permission semantics remain outside this fix.
+
+Deferred protection must retain the original mapping identity across GPU
+quiescence, then validate the full requested interval atomically with the host
+rights change. A first-byte token capture cannot replace full-range validation;
+protection ranges are not subject to the bounded deferred-copy byte budget.
+Completed unmap/reuse must preserve the new owner's rights and data and return
+ENOENT without snapshot invalidation; an unmap already pending returns EBUSY.
+
+Native fixed allocations must also obey that identity transaction: hosts without
+no-replace mapping support reserve the exact free interval before MAP_FIXED
+commits only over that reservation. Compare frozen production backends with
+native no-replace disabled using full and partial collisions, plus identity
+and write-lease cases. Keep this compilation control and artifacts outside Git.
+
+This audit is implemented and independently reviewed within its single-owner
+scope. Its executed red fixtures cover stale Vulkan markers, absent double
+exports, both same-address replacement races and fixed-map partial collisions.
+The final focused suite, forced native-backend suite, six integrations and
+architecture/provenance gates pass; bounded strict runs retain the recorded
+frontiers. Commands, results and untested platform, vendor, visual and
+multi-owner limits are recorded in `docs/BRINGUP.md`. No new dependency is added.
