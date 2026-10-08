@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <array>
+#include <cinttypes>
 #include <cstdio>
 #include <fstream>
 #include <string>
@@ -41,6 +42,57 @@ bool CaptureProtection(void* context, const CapturedProtectionRun& run) noexcept
 	capture->runs[capture->size++] = run;
 	return true;
 }
+
+// Records the lease notifications and answers every protection change with
+// one decision for the whole run.
+struct LeaseRecorder
+{
+	uint32_t         begins       = 0;
+	uint32_t         decisions    = 0;
+	uint32_t         ends         = 0;
+	bool             remove_write = true;
+	WriteLeaseChange last {};
+
+	static void Begin(void* context, uint64_t /*address*/, uint64_t /*size*/) noexcept
+	{
+		static_cast<LeaseRecorder*>(context)->begins++;
+	}
+
+	static void Decide(void* context, const WriteLeaseChange& change, WriteLeaseDecision decision, void* decision_context) noexcept
+	{
+		auto* self = static_cast<LeaseRecorder*>(context);
+		self->decisions++;
+		(void)decision(decision_context, change.address, change.size, self->remove_write);
+	}
+
+	static void End(void* context, const WriteLeaseChange& change) noexcept
+	{
+		auto* self = static_cast<LeaseRecorder*>(context);
+		self->ends++;
+		self->last = change;
+	}
+};
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+// Whether the host mapping containing `address` is writable, from the kernel's
+// own view of the process.
+bool NativeWritable(uint64_t address)
+{
+	std::ifstream maps("/proc/self/maps");
+	std::string   line;
+	while (std::getline(maps, line))
+	{
+		uint64_t begin    = 0;
+		uint64_t end      = 0;
+		char     perms[5] = {};
+		if (std::sscanf(line.c_str(), "%" SCNx64 "-%" SCNx64 " %4s", &begin, &end, perms) == 3 && address >= begin && address < end)
+		{
+			return perms[1] == 'w';
+		}
+	}
+	return false;
+}
+#endif
 
 #if !defined(_WIN32)
 void FatalFromSignal(const ExceptionHandler::ExceptionInfo* info)
@@ -88,6 +140,131 @@ TEST(CoreVirtualMemory, UniformLargeRangeUsesOneProtectionTransition)
 	EXPECT_TRUE(RestoreProtection(capture.runs[0].address, capture.runs[0].size, capture.runs[0].restore_token));
 	EXPECT_TRUE(Free(address));
 }
+
+// A lease removes write natively but never the guest's own protection: guest
+// queries keep the guest view, every guest change over the leased page reaches
+// the authority inside the transaction, and unmapping reports a revocation.
+TEST(CoreVirtualMemory, WriteLeaseReportsGuestChangesAndKeepsGuestProtectionAuthoritative)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size * 2u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	LeaseRecorder             recorder;
+	const WriteLeaseAuthority authority {&recorder, &LeaseRecorder::Begin, &LeaseRecorder::Decide, &LeaseRecorder::End};
+	ProtectionCapture         capture;
+	ASSERT_TRUE(RemoveWriteAndCapture(address, page_size, &CaptureProtection, &capture, &authority).Succeeded());
+	EXPECT_TRUE(IsRangeWritable(address, page_size * 2u));
+	EXPECT_EQ(recorder.ends, 0u);
+
+	ASSERT_TRUE(ProtectGuest(address, page_size * 2u, Mode::Read));
+	EXPECT_EQ(recorder.begins, 1u);
+	EXPECT_EQ(recorder.decisions, 1u);
+	EXPECT_EQ(recorder.ends, 1u);
+	EXPECT_EQ(recorder.last.kind, WriteLeaseChangeKind::Protect);
+	EXPECT_EQ(recorder.last.mode, Mode::Read);
+	EXPECT_EQ(recorder.last.address, address);
+	EXPECT_EQ(recorder.last.size, page_size);
+	EXPECT_TRUE(recorder.last.committed);
+	EXPECT_FALSE(IsRangeWritable(address, page_size));
+
+	ASSERT_TRUE(ProtectGuest(address, page_size * 2u, Mode::ReadWrite));
+	EXPECT_EQ(recorder.ends, 2u);
+	EXPECT_EQ(recorder.last.mode, Mode::ReadWrite);
+	EXPECT_TRUE(IsRangeWritable(address, page_size * 2u));
+
+	// The authoritative guest protection, not a holder token, is restored.
+	EXPECT_TRUE(RestoreProtection(address, page_size, 0u));
+	auto* bytes      = reinterpret_cast<volatile uint8_t*>(address);
+	bytes[0]         = 0x5a;
+	bytes[page_size] = 0xc3;
+
+	ASSERT_TRUE(Free(address));
+	EXPECT_EQ(recorder.begins, 3u);
+	EXPECT_EQ(recorder.ends, 3u);
+	EXPECT_EQ(recorder.last.kind, WriteLeaseChangeKind::Unmap);
+	EXPECT_TRUE(recorder.last.committed);
+}
+
+TEST(CoreVirtualMemory, ReleasedWriteLeasesRestoreGuestProtectionAndStopReporting)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	LeaseRecorder             recorder;
+	const WriteLeaseAuthority authority {&recorder, &LeaseRecorder::Begin, &LeaseRecorder::Decide, &LeaseRecorder::End};
+	ProtectionCapture         capture;
+	ASSERT_TRUE(RemoveWriteAndCapture(address, page_size, &CaptureProtection, &capture, &authority).Succeeded());
+
+	ASSERT_TRUE(ReleaseWriteLeases(&authority));
+	EXPECT_EQ(recorder.ends, 1u);
+	EXPECT_FALSE(recorder.last.committed);
+	reinterpret_cast<volatile uint8_t*>(address)[0] = 0x5a;
+
+	ASSERT_TRUE(ProtectGuest(address, page_size, Mode::Read));
+	ASSERT_TRUE(Free(address));
+	EXPECT_EQ(recorder.ends, 1u);
+}
+
+// A lease without an authority has nobody to decide for it: the next guest
+// protection change applies the guest protection and ends the lease.
+TEST(CoreVirtualMemory, GuestProtectionReplacesAnUnownedWriteLease)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	ProtectionCapture capture;
+	ASSERT_TRUE(RemoveWriteAndCapture(address, page_size, &CaptureProtection, &capture).Succeeded());
+	ASSERT_TRUE(ProtectGuest(address, page_size, Mode::ReadWrite));
+	reinterpret_cast<volatile uint8_t*>(address)[0] = 0x5a;
+	EXPECT_TRUE(Free(address));
+}
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+// A host protection change over a range that is partly guest memory and partly
+// untracked host memory still reports the leased guest page to its authority
+// and records the guest protection, while the host page only receives the
+// native protection.
+TEST(CoreVirtualMemory, MixedGuestAndHostProtectionKeepsLeaseAuthority)
+{
+	const uint64_t page_size = GetPageSize();
+	void*          host      = mmap(nullptr, page_size * 2u, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	ASSERT_NE(host, MAP_FAILED);
+	const auto guest = reinterpret_cast<uint64_t>(host);
+	ASSERT_EQ(munmap(host, page_size), 0);
+	if (!AllocFixed(guest, page_size, Mode::ReadWrite))
+	{
+		(void)munmap(reinterpret_cast<void*>(guest + page_size), page_size);
+		GTEST_SKIP() << "the host placed the probe outside the guest window";
+	}
+	ASSERT_TRUE(IsRangeGuestOwned(guest, page_size));
+	ASSERT_FALSE(IsRangeGuestOwned(guest + page_size, page_size));
+
+	LeaseRecorder             recorder;
+	const WriteLeaseAuthority authority {&recorder, &LeaseRecorder::Begin, &LeaseRecorder::Decide, &LeaseRecorder::End};
+	ProtectionCapture         capture;
+	ASSERT_TRUE(RemoveWriteAndCapture(guest, page_size, &CaptureProtection, &capture, &authority).Succeeded());
+	EXPECT_FALSE(NativeWritable(guest));
+
+	ASSERT_TRUE(Protect(guest, page_size * 2u, Mode::ReadWrite));
+	EXPECT_EQ(recorder.ends, 1u);
+	EXPECT_TRUE(recorder.last.committed);
+	EXPECT_EQ(recorder.last.address, guest);
+	EXPECT_EQ(recorder.last.size, page_size);
+	EXPECT_FALSE(NativeWritable(guest));
+	EXPECT_TRUE(NativeWritable(guest + page_size));
+	EXPECT_TRUE(IsRangeWritable(guest, page_size));
+
+	ASSERT_TRUE(Protect(guest, page_size * 2u, Mode::Read));
+	EXPECT_EQ(recorder.ends, 2u);
+	EXPECT_EQ(recorder.last.mode, Mode::Read);
+	EXPECT_FALSE(IsRangeWritable(guest, page_size));
+	EXPECT_FALSE(NativeWritable(guest + page_size));
+
+	EXPECT_TRUE(ReleaseWriteLeases(&authority));
+	EXPECT_TRUE(Free(guest));
+	EXPECT_EQ(munmap(reinterpret_cast<void*>(guest + page_size), page_size), 0);
+}
+#endif
 
 TEST(CoreVirtualMemory, GuestCopiesRespectWritableRangesAcrossPages)
 {

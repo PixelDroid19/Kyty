@@ -659,11 +659,16 @@ static void kyty_exception_handler(const Core::VirtualMemory::ExceptionHandler::
 	// (which terminate the process anyway) use printf.
 	if (info->type == Core::VirtualMemory::ExceptionHandler::ExceptionType::AccessViolation)
 	{
-		// On macOS ARM/Rosetta, access-type bits are not always reliable.
-		// Attempt GPU watch handling for any access violation before treating it
-		// as fatal; this preserves write handling when the signal classification
-		// can only be inferred from the faulting context.
-		if (Kyty::Emulator::GpuMemoryFault::GetPort().HandleAccessViolation(info->access_violation_vaddr))
+		// On macOS ARM/Rosetta, access-type bits are not always reliable, so the
+		// GPU watch sees an Unknown access there and treats it as a possible
+		// write. Elsewhere the decoded kind is passed through: write tracking
+		// never claims a read or execute fault.
+#if defined(__APPLE__)
+		constexpr auto access = Core::VirtualMemory::ExceptionHandler::AccessViolationType::Unknown;
+#else
+		const auto access = info->access_violation_type;
+#endif
+		if (Kyty::Emulator::GpuMemoryFault::GetPort().HandleAccessViolation(info->access_violation_vaddr, access))
 		{
 			return;
 		}

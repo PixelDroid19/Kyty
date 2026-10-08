@@ -58,10 +58,13 @@ bool     sys_virtual_copy_from_guest(void* destination, uint64_t source, uint64_
 bool     sys_virtual_copy_to_guest(uint64_t destination, const void* source, uint64_t size);
 VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
 	                                                                      VirtualMemory::CapturedProtectionVisitor visitor,
-	                                                                      void* context) noexcept;
-bool     sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+	                                                                      void* context,
+	                                                                      const VirtualMemory::WriteLeaseAuthority* authority) noexcept;
+bool     sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token,
+                                                  const VirtualMemory::WriteLeaseAuthority* authority) noexcept;
 bool     sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
 bool     sys_virtual_restore_protection_signal_safe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+bool     sys_virtual_release_write_leases(const VirtualMemory::WriteLeaseAuthority* authority) noexcept;
 bool     sys_virtual_protect_write_signal_safe(uint64_t address, uint64_t size);
 bool     sys_virtual_flush_instruction_cache(uint64_t address, uint64_t size);
 bool     sys_virtual_patch_replace(uint64_t vaddr, uint64_t value);

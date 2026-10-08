@@ -241,15 +241,67 @@ struct ProtectionChangeResult
 	uint64_t applied_bytes = 0;
 	[[nodiscard]] bool Succeeded() const noexcept { return status == ProtectionChangeStatus::Success; }
 };
+// Write leases. RemoveWriteAndCapture() and RemoveWriteFromProtection() lease the write permission of
+// guest pages to an authority (for example a dirty-page tracker) that restores it from a fault
+// handler with RestoreProtectionSignalSafe(). The guest's own protection stays authoritative: guest
+// queries and copies see it, RestoreProtection() reapplies it, and the lease never outlives the
+// mapping. Every later protection change or mapping removal over a leased page is reported to its
+// authority inside the same VM transaction:
+//  - begin_change fences the authority: it must stop starting signal-safe restores and wait for the
+//    restores already in flight, so no stale token is applied after the change.
+//  - decide (protection changes only) reports, for every byte of the given run in ascending order,
+//    whether write stays removed under the new protection. It must not publish anything: the change
+//    may still fail and be rolled back.
+//  - end_change publishes the outcome and releases the fence. A committed protection change replaces
+//    the run's tokens; a committed removal (kind Unmap) revokes them; an uncommitted change leaves the
+//    authority's state as it was.
+// All callbacks run with the VM transaction locked: they must not lock, allocate, or call
+// VirtualMemory, and the fence holder never touches leased guest memory. A lease without an authority
+// is dropped by the next guest protection change.
+enum class WriteLeaseChangeKind : uint32_t
+{
+	Protect,
+	Unmap
+};
+struct WriteLeaseChange
+{
+	uint64_t             address     = 0;
+	uint64_t             size        = 0;
+	WriteLeaseChangeKind kind        = WriteLeaseChangeKind::Protect;
+	Mode                 mode        = Mode::NoAccess;
+	uint32_t             guest_token = 0;
+	bool                 committed   = false;
+};
+using WriteLeaseDecision = bool (*)(void* decision_context, uint64_t address, uint64_t size, bool remove_write) noexcept;
+struct WriteLeaseAuthority
+{
+	void* context = nullptr;
+	void (*begin_change)(void* context, uint64_t address, uint64_t size) noexcept = nullptr;
+	void (*decide)(void* context, const WriteLeaseChange& change, WriteLeaseDecision decision, void* decision_context) noexcept = nullptr;
+	void (*end_change)(void* context, const WriteLeaseChange& change) noexcept = nullptr;
+};
 // The visitor runs synchronously while the host protection transaction is locked. It must not call
 // Protect(), RemoveWriteAndCapture(), or RestoreProtection(). Returning false aborts before native
 // protection changes, but does not undo side effects produced by earlier visitor calls. Every run
 // is visited before write access is removed so fault handlers can always restore a published token.
-ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,
-	                                         void* context) noexcept;
-bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+// The captured runs are leased to `authority` (which may be null).
+ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor, void* context,
+	                                         const WriteLeaseAuthority* authority = nullptr) noexcept;
+// Removes write from the current guest protection of a mapped range and leases it to `authority`. The
+// guest protection is authoritative; restore_token is the holder's last known token and is not trusted.
+// A page whose guest protection has no write access keeps it and stays leased.
+bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token,
+	                           const WriteLeaseAuthority* authority = nullptr) noexcept;
+// Reapplies the authoritative guest protection of a mapped range; restore_token is not trusted. The
+// lease remains, so later guest changes are still reported to its authority.
 bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+// Applies restore_token natively without the VM lock. Only a lease authority that is fenced against
+// guest protection changes (see above) may call it.
 bool RestoreProtectionSignalSafe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept;
+// Ends every lease of `authority` and reapplies the guest protection of those pages. When a page's
+// protection cannot be reapplied, its lease stays without an authority and the call fails; in every
+// case the VM no longer refers to `authority` afterwards.
+[[nodiscard]] bool ReleaseWriteLeases(const WriteLeaseAuthority* authority) noexcept;
 // Write-enable a page from an access-violation handler without taking Kyty's
 // virtual-memory bookkeeping lock. This is intentionally narrow: callers must
 // restore tracked protection with Protect() outside the handler.

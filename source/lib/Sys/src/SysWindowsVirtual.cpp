@@ -8,6 +8,7 @@
 #include "Kyty/Core/String.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/Sys/SysVirtual.h"
+#include "Kyty/Sys/SysWriteLease.h"
 
 #include "cpuinfo.h"
 
@@ -34,6 +35,7 @@ namespace Kyty::Core {
 static DWORD    get_protection_flag(VirtualMemory::Mode mode);
 static uint64_t align_up(uint64_t addr, uint64_t alignment);
 static bool     try_align_up(uint64_t addr, uint64_t alignment, uint64_t* result);
+static bool     remove_write_protection(DWORD original, DWORD* target) noexcept;
 
 namespace {
 
@@ -240,6 +242,62 @@ bool range_is_uncommitted(uint64_t address, uint64_t size)
 	return true;
 }
 
+bool lease_protect(uint64_t address, uint64_t size, uint32_t token) noexcept
+{
+	DWORD old_protect = 0;
+	return size != 0 && VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, token, &old_protect) != 0;
+}
+
+uint32_t lease_remove_write(uint32_t guest_token) noexcept
+{
+	DWORD target = PAGE_NOACCESS;
+	return remove_write_protection(guest_token, &target) ? target : guest_token;
+}
+
+constexpr SysWriteLeaseNative kLeaseNative {&lease_protect, &lease_remove_write};
+
+// Never destroyed: mappings can still change while static objects are torn down.
+SysWriteLeases& write_leases()
+{
+	static auto* leases = new SysWriteLeases;
+	return *leases;
+}
+
+// Guest protection of the run that starts at `cursor`: a write lease's recorded guest token, otherwise
+// the host protection. The run ends at the next lease boundary, the host region end, or `end`.
+bool guest_protection_run_locked(uint64_t cursor, uint64_t end, DWORD* protect, DWORD* state, uint64_t* run_end)
+{
+	SysWriteLeaseRun lease;
+	if (write_leases().Find(cursor, &lease))
+	{
+		*protect = lease.guest_token;
+		*state   = MEM_COMMIT;
+		*run_end = std::min(end, lease.end);
+		return true;
+	}
+	MEMORY_BASIC_INFORMATION info {};
+	if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(cursor)), &info, sizeof(info)) == 0)
+	{
+		return false;
+	}
+	const uint64_t region_start = reinterpret_cast<uint64_t>(info.BaseAddress);
+	if (info.RegionSize == 0 || region_start > std::numeric_limits<uint64_t>::max() - info.RegionSize)
+	{
+		return false;
+	}
+	uint64_t limit = std::min(end, region_start + info.RegionSize);
+	std::vector<SysWriteLeaseRun> leases;
+	write_leases().Collect(cursor, limit, &leases);
+	if (!leases.empty())
+	{
+		limit = leases.front().address;
+	}
+	*protect = info.Protect;
+	*state   = info.State;
+	*run_end = limit;
+	return limit > cursor;
+}
+
 bool range_has_access_locked(uint64_t address, uint64_t size, bool writable)
 {
 	if (size == 0 || address > std::numeric_limits<uint64_t>::max() - size)
@@ -250,31 +308,22 @@ bool range_has_access_locked(uint64_t address, uint64_t size, bool writable)
 	const uint64_t end = address + size;
 	for (uint64_t cursor = address; cursor < end;)
 	{
-		MEMORY_BASIC_INFORMATION info {};
-		if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(cursor)), &info, sizeof(info)) == 0 ||
-		    info.State != MEM_COMMIT || (info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+		DWORD    protect = PAGE_NOACCESS;
+		DWORD    state   = 0;
+		uint64_t next    = 0;
+		if (!guest_protection_run_locked(cursor, end, &protect, &state, &next) || state != MEM_COMMIT ||
+		    (protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
 		{
 			return false;
 		}
 
-		const DWORD access = info.Protect & 0xffu;
+		const DWORD access = protect & 0xffu;
 		const bool allowed = writable ? (access == PAGE_READWRITE || access == PAGE_WRITECOPY ||
 		                                 access == PAGE_EXECUTE_READWRITE || access == PAGE_EXECUTE_WRITECOPY)
 		                              : (access == PAGE_READONLY || access == PAGE_READWRITE || access == PAGE_WRITECOPY ||
 		                                 access == PAGE_EXECUTE_READ || access == PAGE_EXECUTE_READWRITE ||
 		                                 access == PAGE_EXECUTE_WRITECOPY);
 		if (!allowed)
-		{
-			return false;
-		}
-
-		const uint64_t region_start = reinterpret_cast<uint64_t>(info.BaseAddress);
-		if (info.RegionSize == 0 || region_start > std::numeric_limits<uint64_t>::max() - info.RegionSize)
-		{
-			return false;
-		}
-		const uint64_t next = std::min(end, region_start + info.RegionSize);
-		if (next <= cursor)
 		{
 			return false;
 		}
@@ -965,7 +1014,11 @@ bool sys_virtual_free(uint64_t address)
 			{
 				return false;
 			}
-			if (UnmapViewOfFile(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(view->second.mapped_address))) == 0)
+			std::vector<SysWriteLeaseRun> leases;
+			write_leases().BeginUnmap(address, address + view->second.visible_size, &leases);
+			const bool unmapped = UnmapViewOfFile(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(view->second.mapped_address))) != 0;
+			write_leases().EndUnmap(address, address + view->second.visible_size, leases, unmapped);
+			if (!unmapped)
 			{
 				printf("UnmapViewOfFile() failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
 				return false;
@@ -985,8 +1038,12 @@ bool sys_virtual_free(uint64_t address)
 			{
 				return false;
 			}
-			if (VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)),
-			                static_cast<SIZE_T>(private_size), MEM_DECOMMIT) == 0)
+			std::vector<SysWriteLeaseRun> leases;
+			write_leases().BeginUnmap(address, address + private_size, &leases);
+			const bool decommitted =
+			    VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), static_cast<SIZE_T>(private_size), MEM_DECOMMIT) != 0;
+			write_leases().EndUnmap(address, address + private_size, leases, decommitted);
+			if (!decommitted)
 			{
 				printf("VirtualFree(private shared view) failed: 0x%08" PRIx32 "\n",
 				       static_cast<uint32_t>(GetLastError()));
@@ -1006,11 +1063,25 @@ bool sys_virtual_free(uint64_t address)
 			{
 				// Logical sub-ranges of a Windows reservation cannot be released
 				// independently. Keep the host reservation and release ownership
-				// in Kyty's ReservedMemory bookkeeping.
-				return erase_guest_mapping_at_locked(address);
+				// in Kyty's ReservedMemory bookkeeping. The guest identity still ends.
+				const auto mapping = g_guest_mappings.find(address);
+				if (mapping == g_guest_mappings.end())
+				{
+					return false;
+				}
+				const uint64_t                mapping_end = mapping->second.end;
+				std::vector<SysWriteLeaseRun> leases;
+				write_leases().BeginUnmap(address, mapping_end, &leases);
+				const bool erased = erase_guest_mapping_at_locked(address);
+				write_leases().EndUnmap(address, mapping_end, leases, erased);
+				return erased;
 			}
 			const ReservationRoot root = *reservation;
-			if (VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), 0, MEM_RELEASE) == 0)
+			std::vector<SysWriteLeaseRun> leases;
+			write_leases().BeginUnmap(root.address, root.address + root.size, &leases);
+			const bool released = VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), 0, MEM_RELEASE) != 0;
+			write_leases().EndUnmap(root.address, root.address + root.size, leases, released);
+			if (!released)
 			{
 				printf("VirtualFree(reservation) failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
 				return false;
@@ -1025,7 +1096,12 @@ bool sys_virtual_free(uint64_t address)
 	{
 		return false;
 	}
-	if (VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), 0, MEM_RELEASE) == 0)
+	const uint64_t                mapping_end = mapping->second.end;
+	std::vector<SysWriteLeaseRun> leases;
+	write_leases().BeginUnmap(address, mapping_end, &leases);
+	const bool released = VirtualFree(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), 0, MEM_RELEASE) != 0;
+	write_leases().EndUnmap(address, mapping_end, leases, released);
+	if (!released)
 	{
 		printf("VirtualFree() failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
 		return false;
@@ -1041,15 +1117,45 @@ static bool protect_range_locked(uint64_t address, uint64_t size, VirtualMemory:
 	{
 		return false;
 	}
-	DWORD old_protect = 0;
-	if (VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, get_protection_flag(mode), &old_protect) == 0)
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (size == 0 || page_size == 0 || address > std::numeric_limits<uint64_t>::max() - size)
+	{
+		return false;
+	}
+	const uint64_t begin = address - address % page_size;
+	uint64_t       end   = 0;
+	if (!try_align_up(address + size, page_size, &end))
+	{
+		return false;
+	}
+	DWORD      old_protect = PAGE_NOACCESS;
+	DWORD      old_state   = 0;
+	uint64_t   old_end     = 0;
+	const bool queried     = guest_protection_run_locked(begin, end, &old_protect, &old_state, &old_end);
+	// Committed pages change as one transaction and their leased pages are
+	// decided by their write-lease authority; any other host pages follow.
+	std::vector<SysProtectionSpan> spans;
+	for (uint64_t cursor = begin; cursor < end;)
+	{
+		DWORD    current = PAGE_NOACCESS;
+		DWORD    state   = 0;
+		uint64_t run_end = 0;
+		if (!guest_protection_run_locked(cursor, end, &current, &state, &run_end))
+		{
+			return false;
+		}
+		spans.push_back({cursor, run_end, current, state == MEM_COMMIT});
+		cursor = run_end;
+	}
+	const DWORD protect = get_protection_flag(mode);
+	if (!write_leases().Protect(spans, protect, get_protection_flag(protect), kLeaseNative))
 	{
 		printf("VirtualProtect() failed: 0x%08" PRIx32 "\n", static_cast<uint32_t>(GetLastError()));
 		return false;
 	}
 	if (old_mode != nullptr)
 	{
-		*old_mode = get_protection_flag(old_protect);
+		*old_mode = queried ? get_protection_flag(old_protect) : VirtualMemory::Mode::NoAccess;
 	}
 	// This generic host operation intentionally stays usable by internal runtime
 	// callers. It never adds ownership, so an unmanaged heap, stack, or mmap
@@ -1152,8 +1258,9 @@ static bool remove_write_protection(DWORD original, DWORD* target) noexcept
 	}
 }
 
-VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(
-	uint64_t address, uint64_t size, VirtualMemory::CapturedProtectionVisitor visitor, void* context) noexcept
+VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(uint64_t address, uint64_t size,
+                                                                           VirtualMemory::CapturedProtectionVisitor visitor, void* context,
+                                                                           const VirtualMemory::WriteLeaseAuthority* authority) noexcept
 {
 	using Status = VirtualMemory::ProtectionChangeStatus;
 	VirtualMemory::ProtectionChangeResult result {};
@@ -1174,27 +1281,21 @@ VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(
 	std::scoped_lock transaction(g_protection_transaction_mutex);
 	for (uint64_t cursor = address; cursor < end;)
 	{
-		MEMORY_BASIC_INFORMATION info {};
-		if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(cursor)), &info, sizeof(info)) == 0 ||
-		    info.State != MEM_COMMIT)
+		DWORD    original = PAGE_NOACCESS;
+		DWORD    state    = 0;
+		uint64_t run_end  = 0;
+		if (!guest_protection_run_locked(cursor, end, &original, &state, &run_end) || state != MEM_COMMIT)
 		{
 			result.status = Status::UnmappedRange;
 			return result;
 		}
-		const uint64_t region_start = reinterpret_cast<uint64_t>(info.BaseAddress);
-		if (region_start > std::numeric_limits<uint64_t>::max() - info.RegionSize)
-		{
-			result.status = Status::InvalidRange;
-			return result;
-		}
-		const uint64_t run_end = std::min(end, region_start + info.RegionSize);
 		DWORD target = PAGE_NOACCESS;
-		if (!remove_write_protection(info.Protect, &target) || run_end <= cursor)
+		if (!remove_write_protection(original, &target))
 		{
 			result.status = Status::UnsupportedProtection;
 			return result;
 		}
-		runs.push_back({cursor, run_end - cursor, info.Protect, target});
+		runs.push_back({cursor, run_end - cursor, original, target});
 		cursor = run_end;
 	}
 
@@ -1229,27 +1330,94 @@ VirtualMemory::ProtectionChangeResult sys_virtual_remove_write_and_capture(
 		result.applied_runs++;
 		result.applied_bytes += run.size;
 	}
+	// The guest protection stays recorded; the lease remembers who removed write.
+	for (const auto& run: runs)
+	{
+		write_leases().Add(run.address, run.address + run.size, run.original, authority);
+	}
 	result.status = Status::Success;
 	return result;
 }
 
-bool sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+struct GuestProtectionRun
 {
-	DWORD target = PAGE_NOACCESS;
-	if (size == 0 || !remove_write_protection(restore_token, &target))
+	uint64_t address = 0;
+	uint64_t end     = 0;
+	DWORD    protect = PAGE_NOACCESS;
+};
+
+// The guest protection of committed [address, address + size); false when a byte is not committed.
+static bool collect_guest_protection_locked(uint64_t address, uint64_t size, std::vector<GuestProtectionRun>* runs)
+{
+	if (size == 0 || address > std::numeric_limits<uint64_t>::max() - size)
 	{
 		return false;
 	}
-	std::scoped_lock transaction(g_protection_transaction_mutex);
-	DWORD old_protect = 0;
-	return VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, target, &old_protect) != 0;
+	const uint64_t end = address + size;
+	for (uint64_t cursor = address; cursor < end;)
+	{
+		DWORD    protect = PAGE_NOACCESS;
+		DWORD    state   = 0;
+		uint64_t run_end = 0;
+		if (!guest_protection_run_locked(cursor, end, &protect, &state, &run_end) || state != MEM_COMMIT)
+		{
+			return false;
+		}
+		runs->push_back({cursor, run_end, protect});
+		cursor = run_end;
+	}
+	return true;
 }
 
-bool sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+bool sys_virtual_remove_write_from_protection(uint64_t address, uint64_t size, uint32_t /*restore_token*/,
+                                              const VirtualMemory::WriteLeaseAuthority* authority) noexcept
+{
+	std::vector<GuestProtectionRun> runs;
+	std::scoped_lock transaction(g_protection_transaction_mutex);
+	if (!collect_guest_protection_locked(address, size, &runs))
+	{
+		return false;
+	}
+	bool applied = true;
+	for (const auto& run: runs)
+	{
+		applied = applied && lease_protect(run.address, run.end - run.address, lease_remove_write(run.protect));
+	}
+	if (!applied)
+	{
+		// The caller claimed these pages writable; return all of them to it.
+		for (const auto& run: runs)
+		{
+			if (!lease_protect(run.address, run.end - run.address, run.protect))
+			{
+				EXIT("write removal rollback failed: address=0x%016" PRIx64 "\n", run.address);
+			}
+		}
+		return false;
+	}
+	for (const auto& run: runs)
+	{
+		write_leases().Add(run.address, run.end, run.protect, authority);
+	}
+	return true;
+}
+
+bool sys_virtual_restore_protection(uint64_t address, uint64_t size, uint32_t /*restore_token*/) noexcept
+{
+	std::vector<GuestProtectionRun> runs;
+	std::scoped_lock transaction(g_protection_transaction_mutex);
+	bool restored = collect_guest_protection_locked(address, size, &runs);
+	for (const auto& run: runs)
+	{
+		restored = lease_protect(run.address, run.end - run.address, run.protect) && restored;
+	}
+	return restored;
+}
+
+bool sys_virtual_release_write_leases(const VirtualMemory::WriteLeaseAuthority* authority) noexcept
 {
 	std::scoped_lock transaction(g_protection_transaction_mutex);
-	DWORD old_protect = 0;
-	return VirtualProtect(reinterpret_cast<LPVOID>(static_cast<uintptr_t>(address)), size, restore_token, &old_protect) != 0;
+	return write_leases().Release(authority, kLeaseNative);
 }
 
 bool sys_virtual_restore_protection_signal_safe(uint64_t address, uint64_t size, uint32_t restore_token) noexcept

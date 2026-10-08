@@ -6,8 +6,10 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace Kyty::Libs::Graphics {
@@ -64,20 +66,30 @@ struct GpuDirtyReadObservation
 	bool     tracked    = false;
 };
 
+// Native protection operations. The tracker leases removed write access to its authority, which the
+// virtual-memory layer notifies about guest protection and mapping changes over those pages.
 struct GpuDirtyPageProtectionOps
 {
 	void* context = nullptr;
 	Core::VirtualMemory::ProtectionChangeResult (*remove_write_and_capture)(
-	    void* context, uintptr_t address, size_t size, Core::VirtualMemory::CapturedProtectionVisitor visitor,
-	    void* visitor_context) noexcept = nullptr;
-	bool (*remove_write)(void* context, uintptr_t address, size_t size, uint32_t restore_token) noexcept = nullptr;
+	    void* context, uintptr_t address, size_t size, Core::VirtualMemory::CapturedProtectionVisitor visitor, void* visitor_context,
+	    const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept = nullptr;
+	bool (*remove_write)(void* context, uintptr_t address, size_t size, uint32_t restore_token,
+	                     const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept = nullptr;
 	bool (*restore)(void* context, uintptr_t address, size_t size, uint32_t restore_token) noexcept = nullptr;
 	bool (*restore_signal_safe)(void* context, uintptr_t address, size_t size, uint32_t restore_token) noexcept = nullptr;
+	// Ends every lease of the authority (see VirtualMemory::ReleaseWriteLeases). Optional for
+	// operations that never lease through the VM.
+	bool (*release_leases)(void* context, const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept = nullptr;
 };
 
-// Fixed-capacity, signal-safe dirty-page metadata. Registration and protection
-// changes happen on normal threads; HandleWriteFault and NotifyWrite only use
-// atomics, bounded table scans, and the raw write-enable VM primitive.
+// Bounded dirty-page metadata. Registration and protection changes happen on
+// normal threads. HandleWriteFault and NotifyWrite touch only fixed page and
+// block tables with atomics plus the raw restore VM primitive; range records
+// are never visited on that path. Every write-permission restore is fenced
+// against guest protection and mapping changes (see WriteLeaseAuthority) and
+// against page slots changing identity, so a token the guest replaced, a
+// mapping it removed, or another page's metadata is never applied.
 class GpuDirtyPageTracker
 {
 public:
@@ -100,12 +112,22 @@ public:
 	[[nodiscard]] bool                    PrepareForRead(uintptr_t address, size_t size) noexcept;
 	[[nodiscard]] bool                    Rearm(uintptr_t address, size_t size) noexcept;
 
-	// Called by the exception handler for a write fault. It must remain
-	// async-signal-safe and returns false for untracked/unarmed addresses.
+	// Called by the exception handler for a write fault. It is async-signal-safe
+	// and never waits: while a fence is held it reports the fault handled without
+	// any change, so the access is executed again. It returns false for
+	// untracked/unarmed addresses and for pages whose guest protection denies
+	// the write.
 	[[nodiscard]] bool HandleWriteFault(uintptr_t address) noexcept;
+	// Access-classified entry from the exception boundary. Write-only tracking
+	// never claims a read or execute fault; Unknown is treated as a write and is
+	// meant only for hosts whose access classification is unreliable.
+	[[nodiscard]] bool HandleAccessFault(uintptr_t                                                 address,
+	                                     Core::VirtualMemory::ExceptionHandler::AccessViolationType access) noexcept;
 
-	// Host/HLE writers call this before writing a protected destination. Work
-	// for wide spans is bounded by tracked metadata, not the requested byte count.
+	// Host/HLE writers call this before writing a protected destination. It is
+	// lock-free but waits for a held fence, so it runs on normal threads only.
+	// Work for wide spans is bounded by tracked metadata, not the requested byte
+	// count.
 	[[nodiscard]] bool NotifyWrite(uintptr_t address, size_t size) noexcept;
 
 	// Normal-thread host I/O ownership. A token excludes rearming on every
@@ -130,14 +152,58 @@ public:
 
 private:
 	struct PageEntry;
-	struct RangeEntry;
+	struct BlockEntry;
 
-	// Fixed, bounded metadata with 262,144 slots and a 131,072-page limit per
-	// registered range (512 MiB on a 4 KiB host). Large texture atlases
-	// otherwise exhaust the old cover and force stable full-range hashes.
+	struct RangeEvidence
+	{
+		uint64_t write_epoch    = 0;
+		uint64_t fallback_epoch = 0;
+		bool     complete       = true;
+	};
+
+	// Evidence of the range's pages in a partially covered block. It stays
+	// valid while the block's change count is unchanged.
+	struct EdgeEvidence
+	{
+		uint64_t      changes = 0;
+		RangeEvidence evidence {};
+		bool          valid = false;
+	};
+
+	// Exact registered range [begin, end). Write and fallback evidence lives in
+	// page and block metadata; a range is HashFallback once any of its pages was
+	// marked after the range registered. The edge caches are query state, used
+	// only under the registration mutex.
+	struct RangeRecord
+	{
+		uint32_t             refs             = 0;
+		uint64_t             registered_epoch = 0;
+		mutable EdgeEvidence head {};
+		mutable EdgeEvidence tail {};
+	};
+	using RangeKey = std::pair<uintptr_t, uintptr_t>;
+
+	enum class RestoreResult : uint32_t
+	{
+		Restored,
+		Failed,
+		// The guest protection grants no write, or the mapping was replaced.
+		Denied
+	};
+
+	// Fixed, bounded page metadata with 262,144 slots and a 131,072-page limit
+	// per registered range (512 MiB on a 4 KiB host). Large texture atlases
+	// otherwise exhaust the cover and force stable full-range hashes.
 	static constexpr size_t kPageTableSize = 1u << 18u;
 	static constexpr size_t kMaxPages      = kPageTableSize / 2u;
-	static constexpr size_t kMaxRanges     = 512u;
+	// Summaries of kBlockPages consecutive pages answer queries over fully
+	// covered blocks; edge pages are always checked individually.
+	static constexpr size_t   kBlockPages     = 64u;
+	static constexpr size_t   kBlockTableSize = 1u << 17u;
+	static constexpr uint32_t kNoBlock        = UINT32_MAX;
+	// Range records are ordinary heap metadata, used only under the
+	// registration mutex. Each registration needs at least one page entry.
+	static constexpr size_t kMaxRanges = kMaxPages;
 	// Keep tiny writes on the hash lookup path. Larger spans scan the fixed
 	// table once, including sparse spans extending over unmapped guest memory.
 	static constexpr size_t kDirectWritePages = 64u;
@@ -148,13 +214,34 @@ private:
 	[[nodiscard]] PageEntry*        FindPage(uintptr_t page) noexcept;
 	[[nodiscard]] const PageEntry*  FindPage(uintptr_t page) const noexcept;
 	[[nodiscard]] PageEntry*        FindOrCreatePage(uintptr_t page) noexcept;
-	[[nodiscard]] RangeEntry*       FindRange(uintptr_t address, size_t size) noexcept;
-	[[nodiscard]] const RangeEntry* FindRange(uintptr_t address, size_t size) const noexcept;
+	void                            ReleasePageSlot(PageEntry* entry) noexcept;
+	[[nodiscard]] uintptr_t         BlockKey(uintptr_t page) const noexcept;
+	[[nodiscard]] const BlockEntry* FindBlock(uintptr_t page) const noexcept;
+	[[nodiscard]] uint32_t          FindOrCreateBlock(uintptr_t page) noexcept;
+	[[nodiscard]] BlockEntry*       BlockOf(const PageEntry* page) noexcept;
+	[[nodiscard]] RangeEvidence     SegmentEvidence(uintptr_t first_index, uintptr_t last_index) const noexcept;
+	[[nodiscard]] RangeEvidence     RangeEvidenceOf(const RangeKey& range, const RangeRecord& record) const noexcept;
+	[[nodiscard]] bool              RangeIsFallback(const RangeKey& range, const RangeRecord& record) const noexcept;
+	template <typename Visitor> void VisitOverlappingRangesLocked(uintptr_t begin, uintptr_t end, const Visitor& visitor) const;
 	void                            ClaimPageForRetirement(PageEntry* entry) noexcept;
 	[[nodiscard]] bool              RestoreRetirementRun(uintptr_t first, uintptr_t last, uint32_t token) noexcept;
-	[[nodiscard]] bool              HasCover(uintptr_t page, uintptr_t end, bool* fallback) const noexcept;
 	void                            MarkFallback(uintptr_t page, uintptr_t end) noexcept;
+	void                            MarkPageFallback(PageEntry* page) noexcept;
 	void                            MarkPageWrite(PageEntry* page) noexcept;
+	[[nodiscard]] bool              TryEnterRestorer() noexcept;
+	void                            LeaveRestorer() noexcept;
+	void                            EnterRestorer() noexcept;
+	void                            RaiseFence() noexcept;
+	void                            LowerFence() noexcept;
+	[[nodiscard]] RestoreResult     RestoreFromAuthority(PageEntry* entry, uintptr_t page) noexcept;
+	[[nodiscard]] bool              FaultMayBeTracked(const PageEntry* entry, uintptr_t page_address) const noexcept;
+	[[nodiscard]] bool              HandleWriteFaultEntered(uintptr_t page_address) noexcept;
+	[[nodiscard]] bool              NotifyPageWriteEntered(PageEntry* entry, uintptr_t page_address, bool* handled) noexcept;
+	void                            PublishAuthorityChange(const Core::VirtualMemory::WriteLeaseChange& change) noexcept;
+	static void AuthorityBeginChange(void* context, uint64_t address, uint64_t size) noexcept;
+	static void AuthorityDecide(void* context, const Core::VirtualMemory::WriteLeaseChange& change,
+	                            Core::VirtualMemory::WriteLeaseDecision decision, void* decision_context) noexcept;
+	static void AuthorityEndChange(void* context, const Core::VirtualMemory::WriteLeaseChange& change) noexcept;
 	template <typename Visitor> void VisitWritePages(uintptr_t first, uintptr_t last, const Visitor& visitor) noexcept;
 	[[nodiscard]] bool              NotifyPageWrite(PageEntry* entry, uintptr_t page_address) noexcept;
 	[[nodiscard]] bool              NotifyWritePages(uintptr_t first, uintptr_t last) noexcept;
@@ -176,19 +263,33 @@ private:
 
 	uint64_t                      m_page_size = 0;
 	std::unique_ptr<PageEntry[]>  m_pages;
-	std::unique_ptr<RangeEntry[]> m_ranges;
+	std::unique_ptr<BlockEntry[]> m_blocks;
+	std::map<RangeKey, RangeRecord> m_ranges;
+	uintptr_t                     m_max_range_bytes    = 0;
 	mutable std::mutex*           m_registration_mutex = nullptr;
 	std::atomic<uint64_t>*        m_epoch              = nullptr;
 	GpuDirtyPageProtectionOps     m_protection_ops {};
+	// Guest protection authority. Restorers announce themselves in m_restorers
+	// and back off while m_authority_fences is nonzero; a VM change or a slot
+	// identity change raises the fence and waits for announced restorers.
+	Core::VirtualMemory::WriteLeaseAuthority m_authority {};
+	std::atomic<uint32_t>         m_restorers {0};
+	std::atomic<uint32_t>         m_authority_fences {0};
 	bool                          m_enabled = true;
 };
 
-// Process-wide tracker used by the exception/HLE seams. Its fixed metadata is
-// allocated once outside signal context. Tracking is enabled by default and
-// can be disabled for diagnosis with KYTY_DISABLE_GPU_DIRTY_TRACKING=1.
-// The runtime must publish its fault handler before first use.
+// Process-wide tracker used by the exception/HLE seams. The startup thread
+// creates it once the process fault handler is installed, and it then lives,
+// like that handler, for the rest of the process. Tracking is enabled by
+// default and can be disabled for diagnosis with
+// KYTY_DISABLE_GPU_DIRTY_TRACKING=1. Before installation GetGpuDirtyPageTracker
+// returns a disabled tracker that is never published.
 void                 GpuDirtyPageTrackerNotifyFaultHandlerInstalled() noexcept;
 GpuDirtyPageTracker& GetGpuDirtyPageTracker() noexcept;
+// Signal route: looks the published tracker up without initializing anything
+// and returns false while none is published.
+[[nodiscard]] bool GpuDirtyPageTrackerHandleAccessFault(uintptr_t                                                 address,
+                                                        Core::VirtualMemory::ExceptionHandler::AccessViolationType access) noexcept;
 
 } // namespace Kyty::Libs::Graphics
 

@@ -1,6 +1,8 @@
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
+#include "Kyty/Sys/SysWriteLease.h"
+
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
 #include "Emulator/VideoFrameMemory.h"
@@ -8,9 +10,15 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <fstream>
 #include <limits>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -20,9 +28,14 @@
 
 UT_BEGIN(EmulatorGraphicsDirtyTracking);
 
+using Kyty::Core::VirtualMemory::Alloc;
+using Kyty::Core::VirtualMemory::AllocFixed;
 using Kyty::Core::VirtualMemory::CreateSharedBacking;
 using Kyty::Core::VirtualMemory::DestroySharedBacking;
 using Kyty::Core::VirtualMemory::Free;
+using Kyty::Core::VirtualMemory::IsRangeReadable;
+using Kyty::Core::VirtualMemory::IsRangeWritable;
+using Kyty::Core::VirtualMemory::ProtectGuest;
 using Kyty::Core::VirtualMemory::GetPageSize;
 using Kyty::Core::VirtualMemory::MapSharedAligned;
 using Kyty::Core::VirtualMemory::Mode;
@@ -33,11 +46,41 @@ using Kyty::Libs::Graphics::GpuDirtyProtectionState;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateHandlesFault;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateNeedsArmingRollback;
 using Kyty::Libs::Graphics::GpuDirtyTrackingEnabledForProcess;
+using Kyty::Libs::Graphics::GetGpuDirtyPageTracker;
+using Kyty::Libs::Graphics::GpuDirtyPageTrackerHandleAccessFault;
+using Kyty::Libs::Graphics::GpuDirtyPageTrackerNotifyFaultHandlerInstalled;
 using Kyty::Libs::Graphics::GpuDirtyTrackingMode;
 using Kyty::Libs::Graphics::GpuMemoryCheckAccessViolation;
 using Kyty::Libs::Graphics::GpuMemoryNotifyHostWrite;
+using Access = Kyty::Core::VirtualMemory::ExceptionHandler::AccessViolationType;
 
 namespace {
+
+// Whether the host mapping containing `address` is writable, from the kernel's
+// own view of the process. Hosts without that view report `fallback`, which
+// keeps the assertion neutral there.
+bool NativeWritable(uint64_t address, bool fallback)
+{
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX && !defined(__APPLE__)
+	(void)fallback;
+	std::ifstream maps("/proc/self/maps");
+	std::string   line;
+	while (std::getline(maps, line))
+	{
+		uint64_t begin     = 0;
+		uint64_t end       = 0;
+		char     perms[5]  = {};
+		if (std::sscanf(line.c_str(), "%" SCNx64 "-%" SCNx64 " %4s", &begin, &end, perms) == 3 && address >= begin && address < end)
+		{
+			return perms[1] == 'w';
+		}
+	}
+	return false;
+#else
+	(void)address;
+	return fallback;
+#endif
+}
 
 GpuDirtyPageTracker* g_host_write_tracker = nullptr;
 
@@ -147,6 +190,9 @@ struct FakeProtection
 	std::atomic<bool>           restore_entered {false};
 	std::atomic<bool>           release_restore {false};
 	uint32_t                    fail_capture_after_runs = 0;
+	bool                        fail_release            = false;
+	// The tracker's lease authority, as handed to the last write removal.
+	const Core::VirtualMemory::WriteLeaseAuthority* authority = nullptr;
 
 	FakeProtection(uintptr_t address, size_t size, std::vector<Mode> modes)
 	    : base(address), page_size(size), original_modes(std::move(modes)), current_modes(original_modes)
@@ -157,9 +203,11 @@ struct FakeProtection
 		}
 	}
 
-	static bool RemoveWrite(void* context, uintptr_t address, size_t size, uint32_t restore_token) noexcept
+	static bool RemoveWrite(void* context, uintptr_t address, size_t size, uint32_t restore_token,
+	                        const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept
 	{
 		auto*        self  = static_cast<FakeProtection*>(context);
+		self->authority    = authority;
 		const size_t first = (address - self->base) / self->page_size;
 		const auto   bits  = static_cast<uint32_t>(self->original_modes[first]) & ~static_cast<uint32_t>(Mode::Write);
 		const Mode   mode  = static_cast<Mode>(bits == 0u ? static_cast<uint32_t>(Mode::Read) : bits);
@@ -215,9 +263,10 @@ struct FakeProtection
 
 	static Core::VirtualMemory::ProtectionChangeResult RemoveWriteAndCapture(
 	    void* context, uintptr_t address, size_t size, Core::VirtualMemory::CapturedProtectionVisitor visitor,
-	    void* visitor_context) noexcept
+	    void* visitor_context, const Core::VirtualMemory::WriteLeaseAuthority* authority) noexcept
 	{
-		auto* self = static_cast<FakeProtection*>(context);
+		auto* self      = static_cast<FakeProtection*>(context);
+		self->authority = authority;
 		Core::VirtualMemory::ProtectionChangeResult result {};
 		if (visitor == nullptr || size == 0)
 		{
@@ -334,11 +383,69 @@ struct FakeProtection
 		return !fail;
 	}
 
+	static bool ReleaseLeases(void* context, const Core::VirtualMemory::WriteLeaseAuthority* /*authority*/) noexcept
+	{
+		return !static_cast<FakeProtection*>(context)->fail_release;
+	}
+
 	[[nodiscard]] GpuDirtyPageProtectionOps Ops() noexcept
 	{
-		return {this, &RemoveWriteAndCapture, &RemoveWrite, &Restore, &RestoreSignalSafe};
+		return {this, &RemoveWriteAndCapture, &RemoveWrite, &Restore, &RestoreSignalSafe, &ReleaseLeases};
 	}
 };
+
+
+// Native protection over a FakeProtection's pages, for driving a test-owned
+// write-lease registry with the tracker as its authority. One chosen step can
+// fail, either after changing its first page or without changing anything.
+struct FakeLeaseNative
+{
+	static inline FakeProtection* protection = nullptr;
+	static inline uint32_t        calls      = 0;
+	static inline uint32_t        fail_call  = 0;
+	static inline bool            partial    = true;
+
+	static void Use(FakeProtection* target, uint32_t failing_call, bool partially = true)
+	{
+		protection = target;
+		calls      = 0;
+		fail_call  = failing_call;
+		partial    = partially;
+	}
+
+	static bool Protect(uint64_t address, uint64_t size, uint32_t token) noexcept
+	{
+		calls++;
+		const bool   fail    = calls == fail_call;
+		const size_t first   = (address - protection->base) / protection->page_size;
+		const size_t pages   = size / protection->page_size;
+		const size_t changed = fail ? (partial ? 1u : 0u) : pages;
+		for (size_t page = 0; page < changed; page++)
+		{
+			protection->current_modes[first + page] = static_cast<Mode>(token);
+		}
+		return !fail;
+	}
+
+	static uint32_t RemoveWrite(uint32_t token) noexcept
+	{
+		const auto write = static_cast<uint32_t>(Mode::Write);
+		if ((token & write) == 0u)
+		{
+			return token;
+		}
+		const uint32_t bits = token & ~write;
+		return bits == 0u ? static_cast<uint32_t>(Mode::Read) : bits;
+	}
+
+	static constexpr Kyty::Core::SysWriteLeaseNative kNative {&Protect, &RemoveWrite};
+};
+
+#if defined(_WIN32)
+constexpr int kExitStatus = 321;
+#else
+constexpr int kExitStatus = 65;
+#endif
 
 } // namespace
 
@@ -1053,6 +1160,519 @@ TEST(EmulatorGraphicsDirtyTracking, NotifyWriteWaitsForConcurrentRetirement)
 	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
 }
 
+// Range admission is bounded by page metadata, not by a fixed range count.
+// Each disjoint range keeps exact generation evidence for its own pages.
+TEST(EmulatorGraphicsDirtyTracking, RegistersMoreThanFiveHundredTwelveDisjointRanges)
+{
+	constexpr uint64_t kRanges = 600;
+	Mapping            mapping(kRanges);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	GpuDirtyPageTracker tracker;
+	for (uint64_t i = 0; i < kRanges; i++)
+	{
+		ASSERT_TRUE(tracker.RegisterRange(mapping.address + i * page_size, page_size)) << "range " << i;
+	}
+	ASSERT_TRUE(tracker.PrepareForRead(mapping.address, mapping.size));
+	std::vector<uint64_t> snapshots(kRanges);
+	for (uint64_t i = 0; i < kRanges; i++)
+	{
+		EXPECT_EQ(tracker.Mode(mapping.address + i * page_size, page_size), GpuDirtyTrackingMode::PageFault) << "range " << i;
+		snapshots[i] = tracker.SnapshotGeneration(mapping.address + i * page_size, page_size);
+	}
+
+	constexpr uint64_t kWritten = 550;
+	ASSERT_TRUE(tracker.NotifyWrite(mapping.address + kWritten * page_size, 1u));
+	EXPECT_TRUE(tracker.ChangedSince(mapping.address + kWritten * page_size, page_size, snapshots[kWritten]));
+	EXPECT_FALSE(tracker.ChangedSince(mapping.address + (kWritten - 1u) * page_size, page_size, snapshots[kWritten - 1u]));
+	EXPECT_FALSE(tracker.ChangedSince(mapping.address + (kWritten + 1u) * page_size, page_size, snapshots[kWritten + 1u]));
+	EXPECT_FALSE(tracker.ChangedSince(mapping.address, page_size, snapshots[0]));
+
+	for (uint64_t i = 0; i < kRanges; i++)
+	{
+		EXPECT_TRUE(tracker.UnregisterRange(mapping.address + i * page_size, page_size)) << "range " << i;
+	}
+}
+
+// The tracker may restore only the write permission it removed. A guest
+// protection change while a page is armed is authoritative: neither a write
+// fault nor the final unregister may re-enable a write the guest denied.
+TEST(EmulatorGraphicsDirtyTracking, GuestProtectionChangeWhileArmedIsNotRestored)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Kyty::Core::VirtualMemory::Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	{
+		GpuDirtyPageTracker tracker;
+		ASSERT_TRUE(tracker.RegisterRange(address, page_size));
+		ASSERT_TRUE(tracker.Rearm(address, page_size));
+		ASSERT_TRUE(Kyty::Core::VirtualMemory::ProtectGuest(address, page_size, Mode::Read));
+
+		EXPECT_FALSE(tracker.HandleWriteFault(address));
+		(void)tracker.UnregisterRange(address, page_size);
+		EXPECT_FALSE(Kyty::Core::VirtualMemory::IsRangeWritable(address, page_size));
+	}
+	EXPECT_TRUE(Free(address));
+}
+
+// A guest change to an executable read-only protection is equally authoritative:
+// the write fault is the guest's, and no evidence or permission is invented.
+TEST(EmulatorGraphicsDirtyTracking, GuestExecuteReadProtectionWhileArmedDeniesTheWrite)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	{
+		GpuDirtyPageTracker tracker;
+		ASSERT_TRUE(tracker.RegisterRange(address, page_size));
+		ASSERT_TRUE(tracker.Rearm(address, page_size));
+		const uint64_t before = tracker.SnapshotGeneration(address, page_size);
+		ASSERT_TRUE(ProtectGuest(address, page_size, Mode::ExecuteRead));
+
+		EXPECT_FALSE(tracker.HandleWriteFault(address));
+		EXPECT_FALSE(tracker.ChangedSince(address, page_size, before));
+		EXPECT_TRUE(IsRangeReadable(address, page_size));
+		EXPECT_FALSE(IsRangeWritable(address, page_size));
+		EXPECT_TRUE(tracker.UnregisterRange(address, page_size));
+		EXPECT_FALSE(IsRangeWritable(address, page_size));
+		EXPECT_FALSE(NativeWritable(address, false));
+	}
+	EXPECT_TRUE(Free(address));
+}
+
+// A writable re-protection over an armed page keeps write removed there, so
+// tracking continues, while untracked neighbours receive the guest protection.
+TEST(EmulatorGraphicsDirtyTracking, WritableReprotectWhileArmedKeepsTrackingAndSparesNeighbours)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size * 3u, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	const uint64_t tracked = address + page_size;
+	{
+		GpuDirtyPageTracker tracker;
+		ASSERT_TRUE(tracker.RegisterRange(tracked, page_size));
+		const auto observation = tracker.BeginRead(tracked, page_size);
+		ASSERT_TRUE(observation.tracked);
+
+		ASSERT_TRUE(ProtectGuest(address, page_size * 3u, Mode::ReadWrite));
+		EXPECT_FALSE(NativeWritable(tracked, false));
+		EXPECT_TRUE(NativeWritable(address, true));
+		EXPECT_TRUE(NativeWritable(address + page_size * 2u, true));
+		EXPECT_TRUE(IsRangeWritable(address, page_size * 3u));
+		EXPECT_TRUE(tracker.ReadObservationIsStable(tracked, page_size, observation));
+
+		ASSERT_TRUE(tracker.HandleWriteFault(tracked));
+		*reinterpret_cast<volatile uint8_t*>(tracked) = 0x5a;
+		EXPECT_TRUE(tracker.ChangedSince(tracked, page_size, observation.generation));
+		EXPECT_TRUE(tracker.UnregisterRange(tracked, page_size));
+	}
+	EXPECT_TRUE(Free(address));
+}
+
+// Unmapping an armed page revokes its token: a fault on a new mapping at the
+// same address is not the tracker's, and a writable remap is captured afresh.
+TEST(EmulatorGraphicsDirtyTracking, UnmapRevokesArmedTokensAndRemapIsRecaptured)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(address, page_size));
+	ASSERT_TRUE(tracker.Rearm(address, page_size));
+
+	ASSERT_TRUE(Free(address));
+	ASSERT_TRUE(AllocFixed(address, page_size, Mode::Read));
+	EXPECT_FALSE(tracker.HandleWriteFault(address));
+	EXPECT_FALSE(NativeWritable(address, false));
+	EXPECT_FALSE(IsRangeWritable(address, page_size));
+
+	ASSERT_TRUE(ProtectGuest(address, page_size, Mode::ReadWrite));
+	ASSERT_TRUE(tracker.Rearm(address, page_size));
+	EXPECT_FALSE(NativeWritable(address, false));
+	ASSERT_TRUE(tracker.HandleWriteFault(address));
+	EXPECT_TRUE(NativeWritable(address, true));
+	EXPECT_TRUE(tracker.UnregisterRange(address, page_size));
+	EXPECT_TRUE(NativeWritable(address, true));
+	EXPECT_TRUE(Free(address));
+}
+
+// Restores race guest protection changes from another thread. Every restore
+// either completes before a change or reads the changed token, so once the
+// guest's last change denies writes nothing makes the page writable again.
+TEST(EmulatorGraphicsDirtyTracking, ConcurrentRestoresNeverOutliveAGuestProtectionChange)
+{
+	const uint64_t page_size = GetPageSize();
+	const uint64_t address   = Alloc(0, page_size, Mode::ReadWrite);
+	ASSERT_NE(address, 0u);
+	{
+		GpuDirtyPageTracker tracker;
+		ASSERT_TRUE(tracker.RegisterRange(address, page_size));
+		ASSERT_TRUE(tracker.Rearm(address, page_size));
+		std::atomic<bool> stop {false};
+		std::thread       restorer(
+		    [&]
+		    {
+			    while (!stop.load(std::memory_order_acquire))
+			    {
+				    (void)tracker.HandleWriteFault(address);
+				    (void)tracker.NotifyWrite(address, 1u);
+				    (void)tracker.Rearm(address, page_size);
+			    }
+		    });
+		bool protected_all = true;
+		for (uint32_t i = 0; i < 2000u; i++)
+		{
+			protected_all = ProtectGuest(address, page_size, (i & 1u) == 0u ? Mode::Read : Mode::ReadWrite) && protected_all;
+		}
+		protected_all = ProtectGuest(address, page_size, Mode::Read) && protected_all;
+		for (uint32_t i = 0; i < 200u; i++)
+		{
+			std::this_thread::yield();
+		}
+		stop.store(true, std::memory_order_release);
+		restorer.join();
+
+		EXPECT_TRUE(protected_all);
+		EXPECT_FALSE(tracker.HandleWriteFault(address));
+		EXPECT_FALSE(IsRangeWritable(address, page_size));
+		EXPECT_FALSE(NativeWritable(address, false));
+		(void)tracker.UnregisterRange(address, page_size);
+		EXPECT_FALSE(NativeWritable(address, false));
+	}
+	EXPECT_TRUE(Free(address));
+}
+
+// Write tracking removes only write access, so a read or execute fault on an
+// armed page is never the tracker's and leaves its evidence untouched.
+TEST(EmulatorGraphicsDirtyTracking, ReadAndExecuteFaultsAreNeverClaimedByWriteTracking)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, mapping.size));
+	const auto observation = tracker.BeginRead(mapping.address, mapping.size);
+	ASSERT_TRUE(observation.tracked);
+
+	EXPECT_FALSE(tracker.HandleAccessFault(mapping.address, Access::Read));
+	EXPECT_FALSE(tracker.HandleAccessFault(mapping.address, Access::Execute));
+	EXPECT_TRUE(tracker.ReadObservationIsStable(mapping.address, mapping.size, observation));
+	EXPECT_FALSE(NativeWritable(mapping.address, false));
+
+	EXPECT_TRUE(tracker.HandleAccessFault(mapping.address, Access::Write));
+	EXPECT_FALSE(tracker.ReadObservationIsStable(mapping.address, mapping.size, observation));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, mapping.size));
+	// Hosts that cannot classify the access report Unknown, handled as a write.
+	EXPECT_TRUE(tracker.HandleAccessFault(mapping.address, Access::Unknown));
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, mapping.size));
+}
+
+// Fully covered 64-page blocks answer from their summaries; pages in partially
+// covered edge blocks are checked one by one, so a neighbour's write in the
+// same block never reaches the range.
+TEST(EmulatorGraphicsDirtyTracking, BlockSummariesKeepNeighbourWritesOutOfARange)
+{
+	constexpr uint64_t kPages = 224;
+	Mapping            mapping(kPages);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t page_size = GetPageSize();
+	uint64_t       start     = mapping.address / page_size + 1u;
+	while (start % 64u != 32u)
+	{
+		start++;
+	}
+	const uint64_t range   = start * page_size;
+	const uint64_t size    = 150u * page_size;
+	const uint64_t before  = range - page_size;
+	const uint64_t after   = range + size;
+	const uint64_t inside  = range + 40u * page_size;
+	const uint64_t edge    = range + 149u * page_size;
+	GpuDirtyPageTracker tracker;
+	ASSERT_TRUE(tracker.RegisterRange(range, size));
+	ASSERT_TRUE(tracker.RegisterRange(before, page_size));
+	ASSERT_TRUE(tracker.RegisterRange(after, page_size));
+	const auto observed = tracker.BeginRead(range, size);
+	ASSERT_TRUE(observed.tracked);
+	ASSERT_TRUE(tracker.BeginRead(before, page_size).tracked);
+	ASSERT_TRUE(tracker.BeginRead(after, page_size).tracked);
+	EXPECT_EQ(tracker.Mode(range, size), GpuDirtyTrackingMode::PageFault);
+
+	ASSERT_TRUE(tracker.NotifyWrite(before + page_size - 1u, 1u));
+	ASSERT_TRUE(tracker.NotifyWrite(after, 1u));
+	EXPECT_FALSE(tracker.ChangedSince(range, size, observed.generation));
+
+	ASSERT_TRUE(tracker.NotifyWrite(inside, 1u));
+	EXPECT_TRUE(tracker.ChangedSince(range, size, observed.generation));
+	const uint64_t interior = tracker.SnapshotGeneration(range, size);
+	ASSERT_TRUE(tracker.NotifyWrite(edge, 1u));
+	EXPECT_TRUE(tracker.ChangedSince(range, size, interior));
+
+	EXPECT_TRUE(tracker.UnregisterRange(range, size));
+	EXPECT_TRUE(tracker.UnregisterRange(before, page_size));
+	EXPECT_TRUE(tracker.UnregisterRange(after, page_size));
+}
+
+// A protection change that fails part way returns every run, leased or not, to
+// the protection it had, and the tracker publishes nothing: its armed page
+// still restores the old token on the next fault. A committed change replaces
+// the tokens and keeps the armed page's write removed.
+TEST(EmulatorGraphicsDirtyTracking, FailedLeasedProtectionRollsBackEveryRunAndPublishesNothing)
+{
+	Mapping mapping(4);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	FakeProtection      protection(mapping.address, page_size, std::vector<Mode>(4, Mode::ReadWrite));
+	GpuDirtyPageTracker tracker(protection.Ops());
+	protection.tracker   = &tracker;
+	const uint64_t armed = mapping.address + page_size;
+	const uint64_t idle  = mapping.address + page_size * 2u;
+	ASSERT_TRUE(tracker.RegisterRange(armed, page_size));
+	ASSERT_TRUE(tracker.RegisterRange(idle, page_size));
+	ASSERT_TRUE(tracker.Rearm(armed, page_size));
+	ASSERT_TRUE(tracker.Rearm(idle, page_size));
+	ASSERT_TRUE(tracker.HandleWriteFault(idle));
+	ASSERT_NE(protection.authority, nullptr);
+	ASSERT_EQ(protection.current_modes, (std::vector<Mode> {Mode::ReadWrite, Mode::Read, Mode::ReadWrite, Mode::ReadWrite}));
+
+	const auto                            read_write = static_cast<uint32_t>(Mode::ReadWrite);
+	const auto                            read       = static_cast<uint32_t>(Mode::Read);
+	Kyty::Core::SysWriteLeases            leases;
+	const std::vector<Kyty::Core::SysProtectionSpan> spans {{mapping.address, mapping.address + mapping.size, read_write, true}};
+	leases.Add(armed, idle + page_size, read_write, protection.authority);
+
+	// Steps: page 0, the armed page, the idle page (fails after changing it), page 3.
+	FakeLeaseNative::Use(&protection, 3u);
+	EXPECT_FALSE(leases.Protect(spans, read, Mode::Read, FakeLeaseNative::kNative));
+	EXPECT_EQ(protection.current_modes, (std::vector<Mode> {Mode::ReadWrite, Mode::Read, Mode::ReadWrite, Mode::ReadWrite}));
+	Kyty::Core::SysWriteLeaseRun run;
+	ASSERT_TRUE(leases.Find(armed, &run));
+	EXPECT_EQ(run.guest_token, read_write);
+	EXPECT_TRUE(tracker.HandleWriteFault(armed));
+	EXPECT_EQ(protection.current_modes[1], Mode::ReadWrite);
+
+	ASSERT_TRUE(tracker.Rearm(armed, page_size));
+	FakeLeaseNative::Use(&protection, 0u);
+	EXPECT_TRUE(leases.Protect(spans, read, Mode::Read, FakeLeaseNative::kNative));
+	EXPECT_EQ(protection.current_modes, std::vector<Mode>(4, Mode::Read));
+	ASSERT_TRUE(leases.Find(armed, &run));
+	EXPECT_EQ(run.guest_token, read);
+	EXPECT_FALSE(tracker.HandleWriteFault(armed));
+	EXPECT_FALSE(tracker.HandleWriteFault(idle));
+	EXPECT_EQ(protection.current_modes[1], Mode::Read);
+
+	EXPECT_TRUE(leases.Release(protection.authority, FakeLeaseNative::kNative));
+	EXPECT_TRUE(tracker.UnregisterRange(armed, page_size));
+	EXPECT_TRUE(tracker.UnregisterRange(idle, page_size));
+}
+
+// A fault in flight owns its page's identity: neither a slot that changes
+// identity (unregistration) nor a mapping removal can complete until the fault
+// left, and afterwards the revoked page is never restored again while a
+// re-registered page is tracked afresh.
+TEST(EmulatorGraphicsDirtyTracking, SlotAndMappingChangesWaitForAFaultInFlight)
+{
+	Mapping mapping(2);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	FakeProtection      protection(mapping.address, page_size, std::vector<Mode>(2, Mode::ReadWrite));
+	GpuDirtyPageTracker tracker(protection.Ops());
+	const uint64_t      faulting = mapping.address;
+	const uint64_t      recycled = mapping.address + page_size;
+	ASSERT_TRUE(tracker.RegisterRange(faulting, page_size));
+	ASSERT_TRUE(tracker.RegisterRange(recycled, page_size));
+	ASSERT_TRUE(tracker.Rearm(faulting, page_size));
+	ASSERT_NE(protection.authority, nullptr);
+	Kyty::Core::SysWriteLeases leases;
+	leases.Add(faulting, faulting + page_size, static_cast<uint32_t>(Mode::ReadWrite), protection.authority);
+
+	protection.block_signal_safe.store(true);
+	bool        fault_result = false;
+	std::thread fault([&] { fault_result = tracker.HandleWriteFault(faulting); });
+	while (!protection.signal_safe_entered.load())
+	{
+		std::this_thread::yield();
+	}
+
+	std::atomic<bool>                          unregistered {false};
+	std::atomic<bool>                          fenced {false};
+	std::vector<Kyty::Core::SysWriteLeaseRun> unmapped;
+	std::thread unregister([&]
+	                       {
+		                       EXPECT_TRUE(tracker.UnregisterRange(recycled, page_size));
+		                       unregistered.store(true);
+	                       });
+	std::thread unmap([&]
+	                  {
+		                  leases.BeginUnmap(faulting, faulting + page_size, &unmapped);
+		                  fenced.store(true);
+	                  });
+	for (uint32_t spin = 0; spin < 20000u; spin++)
+	{
+		std::this_thread::yield();
+	}
+	EXPECT_FALSE(unregistered.load());
+	EXPECT_FALSE(fenced.load());
+
+	protection.release_signal_safe.store(true);
+	fault.join();
+	unregister.join();
+	unmap.join();
+	EXPECT_TRUE(fault_result);
+	EXPECT_TRUE(unregistered.load());
+	leases.EndUnmap(faulting, faulting + page_size, unmapped, true);
+	EXPECT_FALSE(leases.Find(faulting, nullptr));
+
+	// The revoked page is not the tracker's any more.
+	const uint32_t restores = protection.signal_safe_calls;
+	EXPECT_FALSE(tracker.HandleWriteFault(faulting));
+	EXPECT_EQ(protection.signal_safe_calls, restores);
+
+	// The recycled page is registered and armed afresh.
+	ASSERT_TRUE(tracker.RegisterRange(recycled, page_size));
+	const auto observation = tracker.BeginRead(recycled, page_size);
+	ASSERT_TRUE(observation.tracked);
+	EXPECT_TRUE(tracker.HandleWriteFault(recycled));
+	EXPECT_TRUE(tracker.ChangedSince(recycled, page_size, observation.generation));
+	EXPECT_TRUE(tracker.UnregisterRange(recycled, page_size));
+	EXPECT_TRUE(tracker.UnregisterRange(faulting, page_size));
+}
+
+// A lease whose guest protection cannot be reapplied at release stays write
+// protected and is never reported to the released authority again: the next
+// guest change applies the guest protection on its own.
+TEST(EmulatorGraphicsDirtyTracking, FailedLeaseReleaseDetachesTheAuthorityAndKeepsWriteRemoved)
+{
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	FakeProtection      protection(mapping.address, page_size, {Mode::ReadWrite});
+	GpuDirtyPageTracker tracker(protection.Ops());
+	ASSERT_TRUE(tracker.RegisterRange(mapping.address, page_size));
+	ASSERT_TRUE(tracker.Rearm(mapping.address, page_size));
+	ASSERT_NE(protection.authority, nullptr);
+	const auto                 read_write = static_cast<uint32_t>(Mode::ReadWrite);
+	Kyty::Core::SysWriteLeases leases;
+	leases.Add(mapping.address, mapping.address + page_size, read_write, protection.authority);
+
+	FakeLeaseNative::Use(&protection, 1u, false);
+	EXPECT_FALSE(leases.Release(protection.authority, FakeLeaseNative::kNative));
+	EXPECT_EQ(protection.current_modes[0], Mode::Read);
+	Kyty::Core::SysWriteLeaseRun run;
+	ASSERT_TRUE(leases.Find(mapping.address, &run));
+	EXPECT_EQ(run.authority, nullptr);
+
+	// Were the tracker still consulted, its armed page would keep write removed.
+	FakeLeaseNative::Use(&protection, 0u);
+	EXPECT_TRUE(leases.Protect({{mapping.address, mapping.address + page_size, read_write, true}}, read_write, Mode::ReadWrite,
+	                           FakeLeaseNative::kNative));
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_FALSE(leases.Find(mapping.address, nullptr));
+	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, page_size));
+}
+
+// A tracker that cannot give its leased pages back must not disappear quietly:
+// those pages would stay write protected with nobody to restore them.
+TEST(EmulatorGraphicsDirtyTracking, TrackerTeardownFailsWhenLeasedPagesCannotBeRestored)
+{
+	EXPECT_EXIT(
+	    {
+		    Mapping        mapping(1);
+		    FakeProtection protection(mapping.address, GetPageSize(), {Mode::ReadWrite});
+		    protection.fail_release = true;
+		    {
+			    GpuDirtyPageTracker tracker(protection.Ops());
+			    (void)tracker.RegisterRange(mapping.address, mapping.size);
+			    (void)tracker.Rearm(mapping.address, mapping.size);
+		    }
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(kExitStatus), "");
+}
+
+// While a fence is held the handler never waits. A fault the tracker owns is
+// reported handled without any change so the access runs again; a fault on a
+// page whose guest protection denies the write, or on a page the tracker never
+// armed, stays the guest's.
+TEST(EmulatorGraphicsDirtyTracking, FencedFaultsRetryOnlyWhenTheTrackerOwnsThePermission)
+{
+	Mapping mapping(3);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	FakeProtection      protection(mapping.address, page_size, std::vector<Mode>(3, Mode::ReadWrite));
+	GpuDirtyPageTracker tracker(protection.Ops());
+	const uint64_t      owned    = mapping.address;
+	const uint64_t      denied   = mapping.address + page_size;
+	const uint64_t      unarmed  = mapping.address + page_size * 2u;
+	for (const auto page: {owned, denied, unarmed})
+	{
+		ASSERT_TRUE(tracker.RegisterRange(page, page_size));
+	}
+	ASSERT_TRUE(tracker.Rearm(owned, page_size));
+	ASSERT_TRUE(tracker.Rearm(denied, page_size));
+	ASSERT_NE(protection.authority, nullptr);
+	const auto                 read_write = static_cast<uint32_t>(Mode::ReadWrite);
+	Kyty::Core::SysWriteLeases leases;
+	leases.Add(owned, denied + page_size, read_write, protection.authority);
+	FakeLeaseNative::Use(&protection, 0u);
+	ASSERT_TRUE(leases.Protect({{denied, denied + page_size, read_write, true}}, static_cast<uint32_t>(Mode::Read), Mode::Read,
+	                           FakeLeaseNative::kNative));
+	const auto observation = tracker.BeginRead(owned, page_size);
+	ASSERT_TRUE(observation.tracked);
+
+	// Holding the fence of a pending mapping change.
+	std::vector<Kyty::Core::SysWriteLeaseRun> fenced;
+	leases.BeginUnmap(owned, owned + page_size, &fenced);
+	const uint32_t restores = protection.signal_safe_calls;
+	EXPECT_TRUE(tracker.HandleWriteFault(owned));
+	EXPECT_FALSE(tracker.HandleWriteFault(denied));
+	EXPECT_FALSE(tracker.HandleWriteFault(unarmed));
+	EXPECT_EQ(protection.signal_safe_calls, restores);
+	EXPECT_EQ(protection.current_modes[0], Mode::Read);
+	leases.EndUnmap(owned, owned + page_size, fenced, false);
+
+	EXPECT_TRUE(tracker.ReadObservationIsStable(owned, page_size, observation));
+	EXPECT_TRUE(tracker.HandleWriteFault(owned));
+	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+	EXPECT_FALSE(tracker.ReadObservationIsStable(owned, page_size, observation));
+	EXPECT_TRUE(leases.Release(protection.authority, FakeLeaseNative::kNative));
+	for (const auto page: {owned, denied, unarmed})
+	{
+		EXPECT_TRUE(tracker.UnregisterRange(page, page_size));
+	}
+}
+
+// The process-wide tracker exists only after the startup thread reports the
+// fault handler installed. Before that the fault route creates nothing and
+// claims nothing, and early normal callers get a disabled tracker that does
+// not decide the published one. Runs in its own process: publication is
+// permanent by design.
+TEST(EmulatorGraphicsDirtyTracking, ProcessTrackerIsPublishedOnlyAfterFaultHandlerInstallation)
+{
+	EXPECT_EXIT(
+	    {
+		    Mapping mapping(1);
+		    bool    ok = mapping.address != 0u;
+		    ok         = ok && !GpuDirtyPageTrackerHandleAccessFault(mapping.address, Access::Write);
+		    auto& early = GetGpuDirtyPageTracker();
+		    ok          = ok && !early.Enabled() && !early.RegisterRange(mapping.address, mapping.size);
+
+		    GpuDirtyPageTrackerNotifyFaultHandlerInstalled();
+		    auto&      published = GetGpuDirtyPageTracker();
+		    const bool expected  = GpuDirtyTrackingEnabledForProcess(std::getenv("KYTY_DISABLE_GPU_DIRTY_TRACKING"), true);
+		    ok = ok && &published != &early && &GpuDirtyPageTracker::Instance() == &published && published.Enabled() == expected;
+		    GpuDirtyPageTrackerNotifyFaultHandlerInstalled();
+		    ok = ok && &GetGpuDirtyPageTracker() == &published;
+		    if (ok && expected)
+		    {
+			    ok = published.RegisterRange(mapping.address, mapping.size) && published.Rearm(mapping.address, mapping.size) &&
+			         !GpuDirtyPageTrackerHandleAccessFault(mapping.address, Access::Read) &&
+			         GpuDirtyPageTrackerHandleAccessFault(mapping.address, Access::Write) &&
+			         published.UnregisterRange(mapping.address, mapping.size);
+		    }
+		    std::_Exit(ok ? 0 : 1);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorGraphicsDirtyTracking, InvalidRangeFallsBack)
 {
 	GpuDirtyPageTracker tracker;
@@ -1248,20 +1868,110 @@ TEST(EmulatorGraphicsDirtyTracking, WideNotifyWriteRetainsNativeArmingRollbackHa
 	ASSERT_TRUE(tracker.BeginRead(mapping.address, 64).tracked);
 	ASSERT_TRUE(tracker.NotifyWrite(mapping.address, 64));
 	const auto before = tracker.SnapshotGeneration(mapping.address, 64);
+	uint64_t   page_before = 0;
+	ASSERT_TRUE(tracker.PageGenerations(mapping.address, 64, &page_before, 1u));
 	const auto restores_before = protection.signal_safe_calls;
 	protection.block_next_protect.store(true);
 	std::thread rearm([&] { (void)tracker.Rearm(mapping.address, 64); });
 	while (!protection.protect_entered.load()) { std::this_thread::yield(); }
-	// The native protect is paused while holding the registration mutex. The
-	// wide notification must not take that mutex or wait for this rearm to end.
-	EXPECT_TRUE(tracker.NotifyWrite(1, huge));
-	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
-	EXPECT_GT(tracker.SnapshotGeneration(mapping.address, 64), before);
+	// The native protect is paused while the rearm holds the registration
+	// mutex. The wide notification neither takes that mutex nor waits for the
+	// rearm: it restores the page and publishes the write at once. Range
+	// queries do take the registration mutex, so while the rearm is paused the
+	// evidence is read from the lock-free page generations. A notification that
+	// waited would only miss the deadline; the controller still releases the
+	// rearm, so the test cannot hang.
+	std::atomic<bool> notified {false};
+	bool              notify_result = false;
+	std::thread       notifier([&]
+	                     {
+		                     notify_result = tracker.NotifyWrite(1, huge);
+		                     notified.store(true, std::memory_order_release);
+	                     });
+	const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+	while (!notified.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
+	{
+		std::this_thread::yield();
+	}
+	const bool notified_while_paused = notified.load(std::memory_order_acquire);
+	EXPECT_TRUE(notified_while_paused);
+	if (notified_while_paused)
+	{
+		uint64_t page_after = 0;
+		EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
+		EXPECT_TRUE(tracker.PageGenerations(mapping.address, 64, &page_after, 1u));
+		EXPECT_GT(page_after, page_before);
+	}
 	protection.release_protect.store(true);
 	rearm.join();
+	notifier.join();
+	EXPECT_TRUE(notify_result);
+	EXPECT_GT(tracker.SnapshotGeneration(mapping.address, 64), before);
 	EXPECT_EQ(protection.current_modes[0], Mode::ReadWrite);
 	EXPECT_EQ(protection.signal_safe_calls, restores_before + 2u);
 	EXPECT_TRUE(tracker.UnregisterRange(mapping.address, 64));
+}
+
+// Host notifications are ordinary writers: they never undo the guest's own
+// protection. A page whose guest protection denies writes stays protected, and
+// a notification that arrives during a mapping removal waits for it to publish
+// and then finds the token revoked, so nothing is restored over the new
+// mapping.
+TEST(EmulatorGraphicsDirtyTracking, HostNotificationsNeverRestoreWriteTheGuestDeniedOrRevoked)
+{
+	Mapping mapping(2);
+	ASSERT_NE(mapping.address, 0u);
+	const uint64_t      page_size = GetPageSize();
+	FakeProtection      protection(mapping.address, page_size, std::vector<Mode>(2, Mode::ReadWrite));
+	GpuDirtyPageTracker tracker(protection.Ops());
+	const uint64_t      denied  = mapping.address;
+	const uint64_t      revoked = mapping.address + page_size;
+	ASSERT_TRUE(tracker.RegisterRange(denied, page_size));
+	ASSERT_TRUE(tracker.RegisterRange(revoked, page_size));
+	ASSERT_TRUE(tracker.Rearm(denied, page_size));
+	ASSERT_TRUE(tracker.Rearm(revoked, page_size));
+	ASSERT_NE(protection.authority, nullptr);
+	const auto                 read_write = static_cast<uint32_t>(Mode::ReadWrite);
+	Kyty::Core::SysWriteLeases leases;
+	leases.Add(denied, revoked + page_size, read_write, protection.authority);
+	FakeLeaseNative::Use(&protection, 0u);
+	ASSERT_TRUE(leases.Protect({{denied, denied + page_size, read_write, true}}, static_cast<uint32_t>(Mode::Read), Mode::Read,
+	                           FakeLeaseNative::kNative));
+	const uint32_t restores = protection.signal_safe_calls;
+
+	EXPECT_TRUE(tracker.NotifyWrite(denied, 1u));
+	EXPECT_EQ(protection.current_modes[0], Mode::Read);
+	EXPECT_EQ(protection.signal_safe_calls, restores);
+
+	std::vector<Kyty::Core::SysWriteLeaseRun> fenced;
+	leases.BeginUnmap(revoked, revoked + page_size, &fenced);
+	std::atomic<bool> started {false};
+	std::atomic<bool> done {false};
+	std::thread       notifier([&]
+	                     {
+		                     started.store(true, std::memory_order_release);
+		                     (void)tracker.NotifyWrite(revoked, 1u);
+		                     done.store(true, std::memory_order_release);
+	                     });
+	while (!started.load(std::memory_order_acquire))
+	{
+		std::this_thread::yield();
+	}
+	for (uint32_t spin = 0; spin < 10000u && !done.load(std::memory_order_acquire); spin++)
+	{
+		std::this_thread::yield();
+	}
+	// The fence is held until the removal publishes, so the writer cannot be done.
+	EXPECT_FALSE(done.load(std::memory_order_acquire));
+	leases.EndUnmap(revoked, revoked + page_size, fenced, true);
+	notifier.join();
+	EXPECT_TRUE(done.load(std::memory_order_acquire));
+	EXPECT_EQ(protection.current_modes[1], Mode::Read);
+	EXPECT_EQ(protection.signal_safe_calls, restores);
+
+	EXPECT_TRUE(leases.Release(protection.authority, FakeLeaseNative::kNative));
+	EXPECT_TRUE(tracker.UnregisterRange(denied, page_size));
+	EXPECT_TRUE(tracker.UnregisterRange(revoked, page_size));
 }
 
 TEST(EmulatorGraphicsDirtyTracking, WideHostWriteLeaseAtAddressLimitDoesNotWrap)
@@ -1400,7 +2110,7 @@ TEST(EmulatorGraphicsDirtyTracking, DefaultPolicyRequiresAnExplicitDisableValue)
 
 TEST(EmulatorGraphicsDirtyTracking, PublicWriteRoutesRejectInvalidRanges)
 {
-	EXPECT_FALSE(GpuMemoryCheckAccessViolation(0));
+	EXPECT_FALSE(GpuMemoryCheckAccessViolation(0, Access::Write));
 	EXPECT_FALSE(GpuMemoryNotifyHostWrite(0, 0));
 }
 

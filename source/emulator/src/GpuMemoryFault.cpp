@@ -25,10 +25,10 @@ bool Port::Install(const Callbacks& callbacks)
 	return true;
 }
 
-bool Port::HandleAccessViolation(uint64_t address) const noexcept
+bool Port::HandleAccessViolation(uint64_t address, AccessViolationKind access) const noexcept
 {
 	const auto* callbacks = m_callbacks.load(std::memory_order_acquire);
-	return callbacks != nullptr && callbacks->access_violation != nullptr && callbacks->access_violation(address);
+	return callbacks != nullptr && callbacks->access_violation != nullptr && callbacks->access_violation(address, access);
 }
 
 void Port::NotifyFaultHandlerInstalled() const noexcept
@@ -42,8 +42,10 @@ void Port::NotifyFaultHandlerInstalled() const noexcept
 
 Port& GetPort()
 {
-	static Port port;
-	return port;
+	// Installation initializes this on a normal thread before the fault handler
+	// can dispatch. The installed handler remains live through runtime shutdown.
+	static auto* port = new Port;
+	return *port;
 }
 
 } // namespace Kyty::Emulator::GpuMemoryFault

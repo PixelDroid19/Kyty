@@ -2105,15 +2105,20 @@ bool CopyToGuest(uint64_t destination, const void* source, uint64_t size)
 	return source != nullptr && sys_virtual_copy_to_guest(destination, source, size);
 }
 
-ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor,
-	                                         void* context) noexcept
+ProtectionChangeResult RemoveWriteAndCapture(uint64_t address, uint64_t size, CapturedProtectionVisitor visitor, void* context,
+	                                         const WriteLeaseAuthority* authority) noexcept
 {
-	return sys_virtual_remove_write_and_capture(address, size, visitor, context);
+	return sys_virtual_remove_write_and_capture(address, size, visitor, context, authority);
 }
 
-bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
+bool RemoveWriteFromProtection(uint64_t address, uint64_t size, uint32_t restore_token, const WriteLeaseAuthority* authority) noexcept
 {
-	return sys_virtual_remove_write_from_protection(address, size, restore_token);
+	return sys_virtual_remove_write_from_protection(address, size, restore_token, authority);
+}
+
+bool ReleaseWriteLeases(const WriteLeaseAuthority* authority) noexcept
+{
+	return authority == nullptr || sys_virtual_release_write_leases(authority);
 }
 
 bool RestoreProtection(uint64_t address, uint64_t size, uint32_t restore_token) noexcept
