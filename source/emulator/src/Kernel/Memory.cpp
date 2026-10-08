@@ -302,6 +302,15 @@ public:
 		bool                    unmap_pending = false;
 	};
 
+	enum class GpuOwnerProtection : uint8_t
+	{
+		Applied,
+		NotOwner,
+		UnmapPending,
+		NeedsQuiescence,
+		Failed,
+	};
+
 	FlexibleMemory() { EXIT_IF(!Core::Thread::IsMainThread()); }
 	virtual ~FlexibleMemory()
 	{
@@ -323,6 +332,8 @@ public:
 	// Live (not unmapping) mappings overlapping [vaddr, vaddr + size) as {vaddr, size}.
 	std::vector<std::pair<uint64_t, uint64_t>> OverlappingMappings(uint64_t vaddr, uint64_t size);
 	bool                            ApplyProtection(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode);
+	GpuOwnerProtection ProtectGpuOwner(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode, bool quiesced,
+	                                   uint64_t* mapping_identity);
 	KernelGpuMappingPromotionStatus PromoteGpuRange(uint64_t vaddr, uint64_t size, KernelGpuMappingAccessMode gpu_mode, uint64_t* mapping_addr,
 	                                                uint64_t* mapping_size);
 	bool Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode, KernelGpuMappingAccessMode* gpu_mode);
@@ -331,6 +342,8 @@ public:
 	[[nodiscard]] const Vector<AllocatedBlock>& GetBlocks() const { return m_allocated; }
 
 private:
+	bool ProtectionCoversLocked(uint64_t vaddr, uint64_t size, bool* writable) const;
+
 	Vector<AllocatedBlock>             m_allocated;
 	std::vector<MemoryProtectionBlock> m_protections;
 	uint64_t                           m_allocated_total = 0;
@@ -1735,6 +1748,83 @@ bool FlexibleMemory::ApplyProtection(uint64_t vaddr, uint64_t size, int prot, Vi
 	return apply_protection_blocks(&m_protections, vaddr, size, prot, mode);
 }
 
+static bool is_cpu_writable(VirtualMemory::Mode mode)
+{
+	return (static_cast<uint32_t>(mode) & static_cast<uint32_t>(VirtualMemory::Mode::Write)) != 0;
+}
+
+// Protection records are disjoint, so they cover the range when the bytes
+// they hold inside it add up to its size.
+bool FlexibleMemory::ProtectionCoversLocked(uint64_t vaddr, uint64_t size, bool* writable) const
+{
+	const uint64_t end     = vaddr + size;
+	uint64_t       covered = 0;
+	*writable              = true;
+	for (const auto& block: m_protections)
+	{
+		const uint64_t begin_in = std::max(vaddr, block.address);
+		const uint64_t end_in   = std::min(end, block.address + block.size);
+		if (begin_in < end_in)
+		{
+			covered += end_in - begin_in;
+			*writable = *writable && is_cpu_writable(block.mode);
+		}
+	}
+	return covered == size;
+}
+
+// Applies a CPU-writable protection inside one GPU-visible flexible owner in a
+// single step under the owner lock: the owner must cover the whole range and
+// must not be unmapping before host rights or records change. Device-address
+// imports of non-writable pages are immutable copies, so when any page of the
+// range is non-writable the change runs only `quiesced`, inside the lifecycle
+// protection that drops those copies. The mapping identity captured before
+// quiescence prevents the completion from changing a replacement at this VA.
+FlexibleMemory::GpuOwnerProtection FlexibleMemory::ProtectGpuOwner(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode,
+                                                                   bool quiesced, uint64_t* mapping_identity)
+{
+	EXIT_IF(!is_cpu_writable(mode) || !is_representable_range(vaddr, size) || mapping_identity == nullptr);
+
+	Core::LockGuard lock(m_mutex);
+	const auto owner = std::find_if(m_allocated.begin(), m_allocated.end(), [vaddr, size](const AllocatedBlock& b)
+	                                { return vaddr >= b.map_vaddr && size <= b.map_size && vaddr - b.map_vaddr <= b.map_size - size; });
+	bool       writable = false;
+	if (owner == m_allocated.end() || owner->gpu_cleanup_mode == KernelGpuMappingAccessMode::NoAccess ||
+	    !ProtectionCoversLocked(vaddr, size, &writable))
+	{
+		return GpuOwnerProtection::NotOwner;
+	}
+	if (owner->unmap_pending)
+	{
+		return GpuOwnerProtection::UnmapPending;
+	}
+	if (!writable && !quiesced)
+	{
+		VirtualMemory::GuestMappingSnapshot snapshot {};
+		if (!VirtualMemory::CaptureGuestMappingSnapshot(vaddr, 1, &snapshot) || snapshot.segment_count != 1 ||
+		    snapshot.segments[0].identity == 0)
+		{
+			return GpuOwnerProtection::Failed;
+		}
+		*mapping_identity = snapshot.segments[0].identity;
+		return GpuOwnerProtection::NeedsQuiescence;
+	}
+	if (quiesced && *mapping_identity == 0)
+	{
+		return GpuOwnerProtection::Failed;
+	}
+	VirtualMemory::Mode old_mode {};
+	const bool protected_guest = quiesced
+	                                 ? VirtualMemory::ProtectGuestIfMappingMatches(vaddr, size, mode, *mapping_identity, &old_mode)
+	                                 : VirtualMemory::ProtectGuest(vaddr, size, mode, &old_mode);
+	if (!protected_guest)
+	{
+		return GpuOwnerProtection::Failed;
+	}
+	EXIT_IF(!apply_protection_blocks(&m_protections, vaddr, size, prot, mode));
+	return GpuOwnerProtection::Applied;
+}
+
 bool FlexibleMemory::Find(uint64_t vaddr, uint64_t* base_addr, size_t* len, int* prot, VirtualMemory::Mode* mode,
                           KernelGpuMappingAccessMode* gpu_mode)
 {
@@ -3073,6 +3163,59 @@ bool KernelDecodeMprotectProt(int prot, Core::VirtualMemory::Mode* mode, KernelG
 	}
 }
 
+struct FlexibleGpuOwnerProtection
+{
+	uint64_t                           vaddr                = 0;
+	uint64_t                           size                 = 0;
+	int                                prot                 = 0;
+	VirtualMemory::Mode                mode                 = VirtualMemory::Mode::NoAccess;
+	uint64_t                           mapping_identity     = 0;
+	FlexibleMemory::GpuOwnerProtection status               = FlexibleMemory::GpuOwnerProtection::NeedsQuiescence;
+	bool                               quiescence_requested = false;
+};
+
+static bool complete_flexible_gpu_owner_protection(void* data)
+{
+	EXIT_IF(data == nullptr);
+	auto* protection   = static_cast<FlexibleGpuOwnerProtection*>(data);
+	protection->status = g_flexible_memory->ProtectGpuOwner(protection->vaddr, protection->size, protection->prot, protection->mode, true,
+	                                                         &protection->mapping_identity);
+	return protection->status == FlexibleMemory::GpuOwnerProtection::Applied;
+}
+
+// A CPU-writable protection inside one GPU-visible flexible owner. Making a
+// non-writable page writable completes under quiesced GPU submissions, which
+// then drop the GPU's copies of the range. Only an initial non-owner falls
+// through to generic protection; if the owner disappears or changes after
+// quiescence was requested, the deferred operation fails without fallback.
+static bool protect_flexible_gpu_owner(uint64_t vaddr, uint64_t size, int prot, VirtualMemory::Mode mode, int* result)
+{
+	FlexibleGpuOwnerProtection protection {vaddr, size, prot, mode};
+	protection.status = g_flexible_memory->ProtectGpuOwner(vaddr, size, prot, mode, false, &protection.mapping_identity);
+	if (protection.status == FlexibleMemory::GpuOwnerProtection::NeedsQuiescence)
+	{
+		protection.quiescence_requested = true;
+		// The status records whether the completion ran and what it found.
+		(void)GetGpuMappingLifecyclePort().ProtectRange(vaddr, size, complete_flexible_gpu_owner_protection, &protection);
+	}
+	switch (protection.status)
+	{
+		case FlexibleMemory::GpuOwnerProtection::Applied: *result = OK; return true;
+		case FlexibleMemory::GpuOwnerProtection::NotOwner:
+			if (!protection.quiescence_requested)
+			{
+				return false;
+			}
+			*result = KERNEL_ERROR_ENOENT;
+			return true;
+		case FlexibleMemory::GpuOwnerProtection::UnmapPending:
+		case FlexibleMemory::GpuOwnerProtection::NeedsQuiescence: *result = KERNEL_ERROR_EBUSY; return true;
+		case FlexibleMemory::GpuOwnerProtection::Failed: *result = KERNEL_ERROR_ENOENT; return true;
+	}
+	EXIT("Unknown flexible GPU owner protection status\n");
+	return false;
+}
+
 int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 {
 	PRINT_NAME();
@@ -3107,6 +3250,10 @@ int KYTY_SYSV_ABI KernelMprotect(const void* addr, size_t len, int prot)
 	if (gpu_mode != KernelGpuMappingAccessMode::NoAccess && !GetGpuMappingLifecyclePort().IsInstalled())
 	{
 		return KERNEL_ERROR_EBUSY;
+	}
+	if (int owner_result = OK; is_cpu_writable(mode) && protect_flexible_gpu_owner(aligned_vaddr, aligned_len, prot, mode, &owner_result))
+	{
+		return owner_result;
 	}
 
 	VirtualMemory::Mode old_mode {};

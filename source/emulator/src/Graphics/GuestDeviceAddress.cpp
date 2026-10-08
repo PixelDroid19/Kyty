@@ -183,6 +183,15 @@ void DestroyTable(VkDevice device, const Table& table)
 	}
 }
 
+void DestroyRetiredTables(VkDevice device, Registry* registry)
+{
+	for (const auto& table: registry->retired)
+	{
+		DestroyTable(device, table);
+	}
+	registry->retired.clear();
+}
+
 // Picks a memory type allowed by type_bits that has all `required` flags.
 bool FindMemoryType(VkPhysicalDevice physical, uint32_t type_bits, VkMemoryPropertyFlags required, uint32_t* index)
 {
@@ -300,8 +309,9 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	void* copy = std::aligned_alloc(kPageBytes, span);
 	// Writable memory: a snapshot refreshed when the dirty tracker sees CPU
 	// writes; the chunk registers the range so the tracker covers it.
-	// Memory the host keeps non-writable (guest mprotect to read-only) cannot
-	// change until another mprotect, which invalidates the import.
+	// Memory the guest keeps non-writable (guest mprotect to read-only) cannot
+	// change until a guest mprotect makes it writable, which for a GPU-visible
+	// flexible owner invalidates the import under quiesced submissions.
 	auto&      tracker   = GpuDirtyPageTracker::Instance();
 	const bool writable  = Core::VirtualMemory::IsRangeWritable(guest, span);
 	out->registered      = copy != nullptr && writable && tracker.RegisterRange(guest, span);
@@ -333,6 +343,11 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 	{
 		return false;
 	}
+	// A snapshot chunk is either tracked or immutable as a whole, so a run of a
+	// flexible range ends where CPU write access changes; physical runs import
+	// through an alias whatever the guest view's protection.
+	const auto writable = [&](uint64_t page)
+	{ return !range->physical_backing && Core::VirtualMemory::IsRangeWritable(base + (first + page) * kPageBytes, kPageBytes); };
 	for (uint64_t page = 0; page < pages;)
 	{
 		if ((*resident)[page] == 0)
@@ -340,8 +355,9 @@ bool ImportResidentSpan(GraphicContext* ctx, uint64_t base, Range* range, uint64
 			page++;
 			continue;
 		}
-		uint64_t end = page;
-		while (end < pages && (*resident)[end] != 0 && (end - page) * kPageBytes < kChunkBytes)
+		const bool run_writable = writable(page);
+		uint64_t   end          = page + 1;
+		while (end < pages && (*resident)[end] != 0 && (end - page) * kPageBytes < kChunkBytes && writable(end) == run_writable)
 		{
 			end++;
 		}
@@ -464,7 +480,7 @@ bool ImportPhysicalRanges(GraphicContext* ctx, Registry* registry)
 }
 
 // Writes a fresh host-visible table; the previous one stays alive until the
-// next quiesced release because in-flight work may still read it.
+// next quiesced invalidation or release because in-flight work may still read it.
 bool RebuildTable(GraphicContext* ctx, Registry* registry)
 {
 	// The device lookup binary-searches entries by guest base.
@@ -564,6 +580,7 @@ void GuestDeviceAddressInvalidateRangeQuiesced(GraphicContext* ctx, uint64_t vad
 	{
 		DropChunks(ctx->device, &registry, it->first, &it->second, vaddr, end);
 	}
+	DestroyRetiredTables(ctx->device, &registry);
 }
 
 void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr, uint64_t size)
@@ -605,11 +622,7 @@ void GuestDeviceAddressReleaseRangeQuiesced(GraphicContext* ctx, uint64_t vaddr,
 		registry.ranges.emplace(base, std::move(range));
 		registry.population_scanned = false;
 	}
-	for (const auto& table: registry.retired)
-	{
-		DestroyTable(ctx->device, table);
-	}
-	registry.retired.clear();
+	DestroyRetiredTables(ctx->device, &registry);
 }
 
 static std::shared_ptr<const GpuMemoryGuestRanges> MergedRanges(const std::map<uint64_t, Range>& ranges)

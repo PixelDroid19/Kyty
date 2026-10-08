@@ -1,19 +1,28 @@
 #include "Kyty/UnitTest.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Emulator/Config.h"
+#include "Emulator/GpuMemoryFault.h"
+#include "Emulator/Graphics/GpuDirtyPageTracker.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GuestDeviceAddress.h"
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderParse.h"
+#include "Emulator/Kernel/Errors.h"
+#include "Emulator/Kernel/Memory.h"
 #include "Emulator/Log.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvInternal.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cinttypes>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 #if defined(__linux__)
@@ -350,6 +359,400 @@ int PageBoundaryLoadProbe()
 	return 0;
 }
 
+// The owner's markers sit on the last host page of its first 16 KiB guest page
+// and the first host page of the next, so they are resident and contiguous
+// across the boundary of a protection change of the first guest page.
+constexpr uint64_t kOwnerBytes      = 0x10000; // four 16 KiB guest pages
+constexpr uint64_t kGuestPageBytes  = 0x4000;
+constexpr uint64_t kWritableOffset  = kGuestPageBytes - kGuestDeviceAddressPageBytes;
+constexpr uint64_t kNeighbourOffset = kGuestPageBytes;
+constexpr uint32_t kMarkerA         = 0xa1a10000u;
+constexpr uint32_t kMarkerB         = 0xb2b20000u;
+constexpr uint32_t kNeighbourA      = 0xc3c30000u;
+constexpr uint32_t kNeighbourB      = 0xd4d40000u;
+
+// Routes the kernel's GPU-mapping lifecycle to the device-address registry of
+// one owned device, as the graphics adapter does; the queue drains before any
+// import is dropped, and a protection drops imports only once Kernel applied it.
+struct LifecycleBridge
+{
+	Device   device;
+	uint32_t releases       = 0;
+	uint64_t released_vaddr = 0;
+	uint64_t released_size  = 0;
+	uint32_t protections    = 0;
+
+	// When `race_owner` is set, a protection first has another thread unmap
+	// that owner; its release waits until `release_permitted`, as an unmap
+	// waits for the submission gate a protection holds.
+	uint64_t                race_owner        = 0;
+	int                     unmap_result      = -1;
+	bool                    release_entered   = false;
+	bool                    release_permitted = true;
+	std::mutex              mutex;
+	std::condition_variable changed;
+	std::thread             unmapper;
+
+	bool UnmapConcurrently()
+	{
+		unmapper = std::thread([this] { unmap_result = Kernel::Memory::KernelMunmap(race_owner, kOwnerBytes); });
+		std::unique_lock<std::mutex> lock(mutex);
+		return changed.wait_for(lock, std::chrono::seconds(5), [this] { return release_entered; });
+	}
+
+	void PermitRelease()
+	{
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			release_permitted = true;
+		}
+		changed.notify_all();
+		if (unmapper.joinable()) { unmapper.join(); }
+	}
+
+	static void Register(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingBacking backing)
+	{
+		(void)context;
+		GuestDeviceAddressRegisterRange(vaddr, size, backing == Kernel::Memory::KernelGpuMappingBacking::Physical);
+	}
+
+	static bool Invalidate(void* context, uint64_t vaddr, uint64_t size)
+	{
+		auto* bridge = static_cast<LifecycleBridge*>(context);
+		if (vkQueueWaitIdle(bridge->device.queue) != VK_SUCCESS) { return false; }
+		GuestDeviceAddressInvalidateRangeQuiesced(&bridge->device.context, vaddr, size);
+		return true;
+	}
+
+	static bool Release(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingCompletion completion, void* data)
+	{
+		auto* bridge = static_cast<LifecycleBridge*>(context);
+		{
+			std::unique_lock<std::mutex> lock(bridge->mutex);
+			bridge->release_entered = true;
+			bridge->changed.notify_all();
+			if (!bridge->changed.wait_for(lock, std::chrono::seconds(5), [bridge] { return bridge->release_permitted; })) { return false; }
+		}
+		if (vkQueueWaitIdle(bridge->device.queue) != VK_SUCCESS) { return false; }
+		GuestDeviceAddressReleaseRangeQuiesced(&bridge->device.context, vaddr, size);
+		bridge->releases++;
+		bridge->released_vaddr = vaddr;
+		bridge->released_size  = size;
+		return completion(data);
+	}
+
+	static bool Protect(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingCompletion completion, void* data)
+	{
+		auto* bridge = static_cast<LifecycleBridge*>(context);
+		bridge->protections++;
+		if (vkQueueWaitIdle(bridge->device.queue) != VK_SUCCESS) { return false; }
+		if (bridge->race_owner != 0 && !bridge->UnmapConcurrently()) { return false; }
+		if (!completion(data)) { return false; }
+		GuestDeviceAddressInvalidateRangeQuiesced(&bridge->device.context, vaddr, size);
+		return true;
+	}
+};
+
+// The probe shader against the production table: each Expect dispatches one
+// 32-word load of a guest address and compares it with a marker payload.
+struct GuestLoad
+{
+	Device*          device   = nullptr;
+	Buffer           output;
+	VkPipelineLayout layout   = VK_NULL_HANDLE;
+	VkPipeline       pipeline = VK_NULL_HANDLE;
+	VkCommandBuffer  command  = VK_NULL_HANDLE;
+	VkFence          fence    = VK_NULL_HANDLE;
+
+	int Init(Device* owner)
+	{
+		device = owner;
+		Vector<uint32_t> binary;
+		String8          error;
+		if (!ShaderToolchain::Run(LoadProbeSource(), &binary, &error))
+		{
+			std::fprintf(stderr, "%s\n", error.c_str());
+			return 10;
+		}
+		if (!output.Init(*device, 128)) { return 11; }
+		const VkDevice vk = device->context.device;
+		VkShaderModuleCreateInfo module_info {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+		module_info.codeSize = binary.Size() * sizeof(uint32_t);
+		module_info.pCode = binary.GetDataConst();
+		VkShaderModule module = VK_NULL_HANDLE;
+		if (vkCreateShaderModule(vk, &module_info, nullptr, &module) != VK_SUCCESS) { return 12; }
+		VkPushConstantRange push_range {VK_SHADER_STAGE_COMPUTE_BIT, 0, 32};
+		VkPipelineLayoutCreateInfo layout_info {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+		layout_info.pushConstantRangeCount = 1;
+		layout_info.pPushConstantRanges = &push_range;
+		if (vkCreatePipelineLayout(vk, &layout_info, nullptr, &layout) != VK_SUCCESS) { return 13; }
+		VkComputePipelineCreateInfo pipeline_info {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+		pipeline_info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		pipeline_info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		pipeline_info.stage.module = module;
+		pipeline_info.stage.pName = "main";
+		pipeline_info.layout = layout;
+		if (vkCreateComputePipelines(vk, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &pipeline) != VK_SUCCESS) { return 14; }
+		VkCommandPoolCreateInfo pool_info {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+		pool_info.queueFamilyIndex = device->family;
+		pool_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+		VkCommandPool pool = VK_NULL_HANDLE;
+		if (vkCreateCommandPool(vk, &pool_info, nullptr, &pool) != VK_SUCCESS) { return 15; }
+		VkCommandBufferAllocateInfo command_info {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+		command_info.commandPool = pool;
+		command_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+		command_info.commandBufferCount = 1;
+		if (vkAllocateCommandBuffers(vk, &command_info, &command) != VK_SUCCESS) { return 16; }
+		VkFenceCreateInfo fence_info {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+		return vkCreateFence(vk, &fence_info, nullptr, &fence) == VK_SUCCESS ? 0 : 17;
+	}
+
+	bool Dispatch(uint64_t table, uint32_t entries, uint64_t guest)
+	{
+		const VkDevice vk = device->context.device;
+		const uint32_t push[] = {static_cast<uint32_t>(table), static_cast<uint32_t>(table >> 32), entries, 0,
+		                         static_cast<uint32_t>(guest), static_cast<uint32_t>(guest >> 32),
+		                         static_cast<uint32_t>(output.address), static_cast<uint32_t>(output.address >> 32)};
+		std::fill(output.words, output.words + 32, 0xdeadbeefu);
+		VkCommandBufferBeginInfo begin {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+		if (vkResetFences(vk, 1, &fence) != VK_SUCCESS || vkResetCommandBuffer(command, 0) != VK_SUCCESS ||
+		    vkBeginCommandBuffer(command, &begin) != VK_SUCCESS) { return false; }
+		vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+		vkCmdPushConstants(command, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push);
+		vkCmdDispatch(command, 1, 1, 1);
+		VkMemoryBarrier barrier {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+		barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+		vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+		if (vkEndCommandBuffer(command) != VK_SUCCESS) { return false; }
+		VkSubmitInfo submit {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+		submit.commandBufferCount = 1;
+		submit.pCommandBuffers = &command;
+		return vkQueueSubmit(device->queue, 1, &submit, fence) == VK_SUCCESS &&
+		       vkWaitForFences(vk, 1, &fence, VK_TRUE, 5000000000ull) == VK_SUCCESS;
+	}
+
+	int Expect(const char* stage, uint64_t table, uint32_t entries, uint64_t guest, uint32_t marker)
+	{
+		if (!Dispatch(table, entries, guest))
+		{
+			std::fprintf(stderr, "%s: dispatch failed\n", stage);
+			return 20;
+		}
+		for (unsigned word = 0; word < 32; ++word)
+		{
+			if (output.words[word] != (marker | word))
+			{
+				std::fprintf(stderr, "%s: word=%u actual=0x%08x expected=0x%08x\n", stage, word, output.words[word], marker | word);
+				return 21;
+			}
+		}
+		return 0;
+	}
+};
+
+void WriteMarker(uint64_t guest, uint32_t marker)
+{
+	auto* words = reinterpret_cast<uint32_t*>(guest);
+	for (unsigned word = 0; word < 32; ++word) { words[word] = marker | word; }
+}
+
+void RouteGuestFault(const Core::VirtualMemory::ExceptionHandler::ExceptionInfo* info)
+{
+	if (info->type == Core::VirtualMemory::ExceptionHandler::ExceptionType::AccessViolation &&
+	    Kyty::Emulator::GpuMemoryFault::GetPort().HandleAccessViolation(info->access_violation_vaddr, info->access_violation_type)) { return; }
+	Core::VirtualMemory::FatalFault(info);
+}
+
+// Brings up in this child what a runtime gives a GPU-visible mapping: Config
+// and Log (through the probe source), kernel memory, the write-fault route
+// that enables dirty tracking, and the process-lifetime lifecycle port.
+int StartGpuMappingRuntime(LifecycleBridge* bridge, GuestLoad* load)
+{
+	if (!bridge->device.Init()) { return 77; }
+	if (const int status = load->Init(&bridge->device); status != 0) { return status; }
+	Kernel::Memory::MemorySubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	const Kyty::Emulator::GpuMemoryFault::Callbacks fault {
+	    [](uint64_t address, Kyty::Emulator::GpuMemoryFault::AccessViolationKind access)
+	    { return GpuDirtyPageTrackerHandleAccessFault(address, access); },
+	    GpuDirtyPageTrackerNotifyFaultHandlerInstalled};
+	if (!Kyty::Emulator::GpuMemoryFault::GetPort().Install(fault) || !Core::VirtualMemory::ExceptionHandler::InstallVectored(RouteGuestFault))
+	{
+		return 2;
+	}
+	Kyty::Emulator::GpuMemoryFault::GetPort().NotifyFaultHandlerInstalled();
+	const Kernel::Memory::GpuMappingLifecycleCallbacks callbacks {bridge, LifecycleBridge::Register, LifecycleBridge::Invalidate,
+	                                                             LifecycleBridge::Release, LifecycleBridge::Protect};
+	return Kernel::Memory::GetGpuMappingLifecyclePort().Install(callbacks) ? 0 : 3;
+}
+
+// A CPU-writable flexible owner aligned to its own size, seeded with markers.
+uint64_t MapSeededOwner()
+{
+	void* owner = nullptr;
+	if (Kernel::Memory::KernelReserveVirtualRange(&owner, kOwnerBytes, 0, kOwnerBytes) != 0 ||
+	    Kernel::Memory::KernelMapNamedFlexibleMemory(&owner, kOwnerBytes, 0x03, 0x10, "device-address-owner") != 0) { return 0; }
+	const auto base = reinterpret_cast<uint64_t>(owner);
+	WriteMarker(base + kWritableOffset, kMarkerA);
+	WriteMarker(base + kNeighbourOffset, kNeighbourA);
+	return base;
+}
+
+// Unmapping an owner that was ever GPU-visible releases it through the port
+// exactly once, after which the table maps nothing.
+int ExpectOwnerReleased(LifecycleBridge* bridge, uint64_t base)
+{
+	if (Kernel::Memory::KernelMunmap(base, kOwnerBytes) != 0) { return 50; }
+	if (bridge->releases != 1 || bridge->released_vaddr != base || bridge->released_size != kOwnerBytes)
+	{
+		std::fprintf(stderr, "releases=%u vaddr=0x%" PRIx64 " size=0x%" PRIx64 "\n", bridge->releases, bridge->released_vaddr,
+		             bridge->released_size);
+		return 51;
+	}
+	uint64_t table   = 0;
+	uint32_t entries = 0;
+	if (!GuestDeviceAddressPrepare(&bridge->device.context, &table, &entries) || entries != 0) { return 52; }
+	return 0;
+}
+
+// A read-only GPU-visible owner is imported as a copy that cannot change until
+// another mprotect. Making its first guest page CPU-writable again must stop the
+// GPU from reading that copy and keep following every later CPU write there,
+// while the read-only neighbour on the adjacent resident page keeps its own
+// contents and preparation stays stable, until the whole owner becomes writable.
+int WritableTransitionProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+	const uint64_t base = MapSeededOwner();
+	if (base == 0) { return 40; }
+	auto* const    owner     = reinterpret_cast<void*>(base);
+	auto* const    ctx       = &bridge.device.context;
+	const uint64_t writable  = base + kWritableOffset;
+	const uint64_t neighbour = base + kNeighbourOffset;
+	uint64_t       table     = 0;
+	uint32_t       entries   = 0;
+	if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x11) != 0) { return 41; }
+	if (!GuestDeviceAddressPrepare(ctx, &table, &entries)) { return 42; }
+	if (const int status = load.Expect("read-only", table, entries, writable, kMarkerA); status != 0) { return status; }
+	if (const int status = load.Expect("read-only neighbour", table, entries, neighbour, kNeighbourA); status != 0) { return status; }
+
+	if (Kernel::Memory::KernelMprotect(owner, kGuestPageBytes, 0x12) != 0) { return 43; }
+	uint32_t stable = 0;
+	uint32_t marker = kMarkerB;
+	for (unsigned round = 0; round < 3; ++round)
+	{
+		// Every round writes after the previous preparation imported the page.
+		marker = kMarkerB + (round << 8u);
+		WriteMarker(writable, marker);
+		if (!GuestDeviceAddressPrepare(ctx, &table, &entries)) { return 44; }
+		if (round != 0 && entries != stable)
+		{
+			std::fprintf(stderr, "round=%u entries=%u expected=%u\n", round, entries, stable);
+			return 45;
+		}
+		stable = entries;
+		if (const int status = load.Expect("partial writable", table, entries, writable, marker); status != 0) { return status; }
+		if (const int status = load.Expect("unchanged neighbour", table, entries, neighbour, kNeighbourA); status != 0) { return status; }
+	}
+
+	if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x12) != 0) { return 46; }
+	WriteMarker(neighbour, kNeighbourB);
+	if (!GuestDeviceAddressPrepare(ctx, &table, &entries)) { return 47; }
+	if (const int status = load.Expect("writable", table, entries, writable, marker); status != 0) { return status; }
+	if (const int status = load.Expect("writable neighbour", table, entries, neighbour, kNeighbourB); status != 0) { return status; }
+	// Repeated permission changes retire and rebuild tables at quiescence. Every
+	// rebuilt import must still follow writes and preserve its neighbour.
+	for (unsigned cycle = 0; cycle < 4; ++cycle)
+	{
+		if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x11) != 0) { return 48; }
+		if (!GuestDeviceAddressPrepare(ctx, &table, &entries)) { return 49; }
+		if (const int status = load.Expect("read-only cycle", table, entries, writable, marker); status != 0) { return status; }
+		if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x12) != 0) { return 53; }
+		marker = kMarkerB + ((cycle + 4u) << 8u);
+		WriteMarker(writable, marker);
+		if (!GuestDeviceAddressPrepare(ctx, &table, &entries)) { return 54; }
+		if (const int status = load.Expect("writable cycle", table, entries, writable, marker); status != 0) { return status; }
+		if (const int status = load.Expect("cycle neighbour", table, entries, neighbour, kNeighbourB); status != 0) { return status; }
+	}
+	return ExpectOwnerReleased(&bridge, base);
+}
+
+// CPU-only protection keeps the owner's GPU cleanup obligation and lets the CPU
+// write it; once GPU read access returns, the GPU reads those writes.
+int CpuOnlyTransitionProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+	const uint64_t base = MapSeededOwner();
+	if (base == 0) { return 40; }
+	auto* const    owner    = reinterpret_cast<void*>(base);
+	auto* const    ctx      = &bridge.device.context;
+	const uint64_t writable = base + kWritableOffset;
+	uint64_t       table    = 0;
+	uint32_t       entries  = 0;
+	if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x11) != 0) { return 41; }
+	if (!GuestDeviceAddressPrepare(ctx, &table, &entries)) { return 42; }
+	if (const int status = load.Expect("read-only", table, entries, writable, kMarkerA); status != 0) { return status; }
+
+	if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x3) != 0) { return 43; }
+	WriteMarker(writable, kMarkerB);
+	if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x11) != 0) { return 44; }
+	if (!GuestDeviceAddressPrepare(ctx, &table, &entries)) { return 45; }
+	if (const int status = load.Expect("read-only after cpu-only", table, entries, writable, kMarkerB); status != 0) { return status; }
+	return ExpectOwnerReleased(&bridge, base);
+}
+
+// An unmap claimed while a writable protection waits for quiescence makes the
+// protection fail: the owner keeps its read-only rights, the GPU keeps reading
+// the same imports through the same table, and the unmap then completes.
+int PendingUnmapProtectionProbe()
+{
+	static LifecycleBridge bridge;
+	GuestLoad              load;
+	if (const int status = StartGpuMappingRuntime(&bridge, &load); status != 0) { return status; }
+	const uint64_t base = MapSeededOwner();
+	if (base == 0) { return 40; }
+	auto* const    owner     = reinterpret_cast<void*>(base);
+	auto* const    ctx       = &bridge.device.context;
+	const uint64_t writable  = base + kWritableOffset;
+	const uint64_t neighbour = base + kNeighbourOffset;
+	uint64_t       table     = 0;
+	uint32_t       entries   = 0;
+	if (Kernel::Memory::KernelMprotect(owner, kOwnerBytes, 0x11) != 0) { return 41; }
+	if (!GuestDeviceAddressPrepare(ctx, &table, &entries)) { return 42; }
+	if (const int status = load.Expect("read-only", table, entries, writable, kMarkerA); status != 0) { return status; }
+	const uint64_t imported_table   = table;
+	const uint32_t imported_entries = entries;
+
+	bridge.race_owner        = base;
+	bridge.release_permitted = false;
+	const int protect_result = Kernel::Memory::KernelMprotect(owner, kGuestPageBytes, 0x12);
+	int       status         = 0;
+	if (protect_result != Kernel::KERNEL_ERROR_EBUSY || bridge.protections != 1 || !bridge.release_entered)
+	{
+		std::fprintf(stderr, "protect=%d protections=%u release_entered=%d\n", protect_result, bridge.protections,
+		             bridge.release_entered ? 1 : 0);
+		status = 43;
+	} else if (Core::VirtualMemory::IsRangeWritable(base, kGuestPageBytes))
+	{
+		status = 44;
+	} else if (!GuestDeviceAddressPrepare(ctx, &table, &entries) || table != imported_table || entries != imported_entries)
+	{
+		std::fprintf(stderr, "entries=%u expected=%u table_changed=%d\n", entries, imported_entries, table != imported_table ? 1 : 0);
+		status = 45;
+	} else if (status = load.Expect("refused protection", table, entries, writable, kMarkerA); status == 0)
+	{
+		status = load.Expect("refused protection neighbour", table, entries, neighbour, kNeighbourA);
+	}
+	bridge.PermitRelease();
+	if (status != 0) { return status; }
+	if (bridge.unmap_result != 0 || bridge.releases != 1 || bridge.released_vaddr != base) { return 46; }
+	return GuestDeviceAddressPrepare(ctx, &table, &entries) && entries == 0 ? 0 : 47;
+}
+
 void RunIsolated(int (*probe)())
 {
 #if defined(__linux__)
@@ -372,5 +775,8 @@ void RunIsolated(int (*probe)())
 TEST(EmulatorGuestDeviceAddress, RepeatedPrepareDoesNotImportUntouchedNeighbours) { RunIsolated(StableResidencyProbe); }
 TEST(EmulatorGuestDeviceAddress, VulkanLoadPreservesWordsAcrossImportedPageBoundary) { RunIsolated(PageBoundaryLoadProbe); }
 TEST(EmulatorGuestDeviceAddress, AnAnonymousRangeImportsATouchedPageOnTheNextPreparation) { RunIsolated(AnonymousResidencyProbe); }
+TEST(EmulatorGuestDeviceAddress, AWritableGpuProtectionStopsReadingTheReadOnlyCopy) { RunIsolated(WritableTransitionProbe); }
+TEST(EmulatorGuestDeviceAddress, RestoredGpuReadAfterCpuOnlyProtectionSeesCpuWrites) { RunIsolated(CpuOnlyTransitionProbe); }
+TEST(EmulatorGuestDeviceAddress, AProtectionRefusedForAPendingUnmapKeepsRightsAndImports) { RunIsolated(PendingUnmapProtectionProbe); }
 
 UT_END();

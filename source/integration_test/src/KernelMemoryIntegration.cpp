@@ -119,9 +119,12 @@ struct GpuMappingPortProbe
 	uint64_t invalidate_size  = 0;
 	uint64_t release_vaddr    = 0;
 	uint64_t release_size     = 0;
+	uint64_t protect_vaddr    = 0;
+	uint64_t protect_size     = 0;
 	uint32_t register_count   = 0;
 	uint32_t invalidate_count = 0;
 	uint32_t release_count    = 0;
+	uint32_t protect_count    = 0;
 
 	static void RegisterRange(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingBacking /*backing*/)
 	{
@@ -149,6 +152,16 @@ struct GpuMappingPortProbe
 		probe->release_count += 1;
 		return completion(completion_data);
 	}
+
+	static bool ProtectRange(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingCompletion completion,
+	                         void* completion_data)
+	{
+		auto* probe          = static_cast<GpuMappingPortProbe*>(context);
+		probe->protect_vaddr = vaddr;
+		probe->protect_size  = size;
+		probe->protect_count += 1;
+		return completion(completion_data);
+	}
 };
 
 int GpuMappingLifecycleContract()
@@ -174,6 +187,8 @@ int GpuMappingLifecycleContract()
 	callbacks.register_range   = GpuMappingPortProbe::RegisterRange;
 	callbacks.invalidate_range = GpuMappingPortProbe::InvalidateRange;
 	callbacks.release_range    = GpuMappingPortProbe::ReleaseRange;
+	Expect(!port.Install(callbacks), "lifecycle port must refuse a bundle without the protection callback");
+	callbacks.protect_range = GpuMappingPortProbe::ProtectRange;
 	Expect(port.Install(callbacks), "complete GPU mapping lifecycle port must install");
 
 	void* mapping = nullptr;
@@ -188,6 +203,22 @@ int GpuMappingLifecycleContract()
 	Expect(probe.release_count == 1, "GPU-visible unmap must release exactly once through the lifecycle port");
 	Expect(probe.release_vaddr == reinterpret_cast<uint64_t>(mapping) && probe.release_size == kSize,
 	       "GPU-visible unmap must release its exact range");
+
+	void* owner = nullptr;
+	Expect(KernelReserveVirtualRange(&owner, kSize, 0, kSize) == 0 &&
+	           KernelMapNamedFlexibleMemory(&owner, kSize, 0x11, 0x10, "gpu-port-protect") == 0,
+	       "aligned GPU-visible owner must map");
+	const auto owner_vaddr = reinterpret_cast<uint64_t>(owner);
+	Expect(KernelMprotect(owner, kSize, 0x3) == 0, "CPU-only writable protection of a GPU-visible owner must succeed");
+	Expect(probe.protect_count == 1 && probe.protect_vaddr == owner_vaddr && probe.protect_size == kSize,
+	       "making a read-only GPU-visible owner writable must protect its range once through the lifecycle port");
+	Expect(Core::VirtualMemory::IsRangeWritable(owner_vaddr, kSize), "completed lifecycle protection must apply the writable rights");
+	Expect(KernelMprotect(owner, kSize, 0x12) == 0 && probe.protect_count == 1,
+	       "an already writable GPU-visible owner must not need lifecycle protection");
+	Expect(KernelMprotect(owner, kSize, 0x11) == 0 && KernelMprotect(owner, kSize, 0x12) == 0 && probe.protect_count == 2,
+	       "a GPU-visible owner made read-only again must protect through the lifecycle port when it becomes writable");
+	Expect(probe.register_count == 2, "protection changes must not register the retained owner again");
+	Expect(KernelMunmap(owner_vaddr, kSize) == 0 && probe.release_count == 2, "protected GPU-visible owner must still release once");
 
 	Config::SetNextGen(true);
 	int64_t physical = 0;
@@ -205,7 +236,7 @@ int GpuMappingLifecycleContract()
 	       "physical lifetime release must preserve the guest virtual mapping");
 	Expect(KernelMunmap(reinterpret_cast<uint64_t>(direct_mapping), kSize) == 0,
 	       "released direct mapping must remain explicitly unmapable");
-	Expect(probe.release_count == 2, "explicit direct unmap must use the mapping release transaction");
+	Expect(probe.release_count == 3, "explicit direct unmap must use the mapping release transaction");
 	Config::SetNextGen(false);
 	return 0;
 }

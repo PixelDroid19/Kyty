@@ -63,6 +63,14 @@ struct GpuMappingInvalidationTransaction
 	uint64_t size  = 0;
 };
 
+struct GpuMappingProtectionTransaction
+{
+	uint64_t                         vaddr           = 0;
+	uint64_t                         size            = 0;
+	Kernel::Memory::KernelGpuMappingCompletion completion = nullptr;
+	void*                            completion_data = nullptr;
+};
+
 void GraphicsRegisterGpuMappingRange(void* context, uint64_t vaddr, uint64_t size, Kernel::Memory::KernelGpuMappingBacking backing)
 {
 	(void)context;
@@ -131,6 +139,35 @@ bool GraphicsReleaseGpuMappingRange(void* context, uint64_t vaddr, uint64_t size
 	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingRelease, &transaction);
 }
 
+// The guest mapping and every ordinary GPU object over it stay; only the
+// device-address copies taken under the old rights go, once Kernel has applied
+// the new ones and before any submission can read them again.
+bool GraphicsCompleteGpuMappingProtection(void* data)
+{
+	EXIT_IF(data == nullptr);
+
+	auto* transaction = static_cast<GpuMappingProtectionTransaction*>(data);
+	if (!transaction->completion(transaction->completion_data))
+	{
+		return false;
+	}
+	GuestDeviceAddressInvalidateRangeQuiesced(WindowGetGraphicContext(), transaction->vaddr, transaction->size);
+	return true;
+}
+
+bool GraphicsProtectGpuMappingRange(void* context, uint64_t vaddr, uint64_t size,
+	                                Kernel::Memory::KernelGpuMappingCompletion completion, void* completion_data)
+{
+	(void)context;
+	if (vaddr == 0 || size == 0 || vaddr > std::numeric_limits<uint64_t>::max() - size || completion == nullptr)
+	{
+		return false;
+	}
+
+	GpuMappingProtectionTransaction transaction {vaddr, size, completion, completion_data};
+	return GraphicsRunWithQuiescedSubmissions(GraphicsCompleteGpuMappingProtection, &transaction);
+}
+
 bool GraphicsQueryPresentationStats(void* context, Kyty::Emulator::PresentationStats::Snapshot* out)
 {
 	(void)context;
@@ -193,6 +230,7 @@ void GraphicsSubsystem::Init([[maybe_unused]] Core::SubsystemsList* parent)
 	    GraphicsRegisterGpuMappingRange,
 	    GraphicsInvalidateGpuMappingRange,
 	    GraphicsReleaseGpuMappingRange,
+	    GraphicsProtectGpuMappingRange,
 	};
 	EXIT_IF(!Kernel::Memory::GetGpuMappingLifecyclePort().Install(gpu_mapping_lifecycle_callbacks));
 	const Kyty::Emulator::GuestMemory::Callbacks guest_memory_callbacks {GraphicsQueryMappedRange, GraphicsQueryProtection};
