@@ -336,6 +336,98 @@ generation contract. Raw compression metadata still lacks its plane, encoding,
 ownership and first-write completion contract. These remain investigation items;
 no guessed fallback or metadata write was introduced.
 
+### Portable resource completion (2026-10-08)
+
+The follow-up removes host capability assumptions and closes a deferred write
+lifetime defect. Admission depends on queried and successfully enabled Vulkan
+features, memory type bits and mapping ownership, without vendor selection.
+The implementation source is recorded at `ae228c7746527f3f6eeba0332efda0d8a5f57363`.
+Validation compiled the identical source before those commits were recorded;
+the private run metadata therefore reports `f2795437` with pending changes.
+
+- **Core subgroup features.** The window device and compute probe query and
+  enable subgroup size control through one Vulkan 1.3 feature aggregate. The
+  existing Vulkan 1.4 floor makes the older extension name and revision
+  diagnostic only. Enabled state is published after device creation succeeds.
+  Exact subgroup width, full subgroup, stage and operation requirements remain
+  enforced. A compiled comparison of the previous and current capability
+  helpers refuses and then admits the same core-enabled, extension-absent
+  paired request. Modeled admission also covers ranges containing 32 and a
+  64-only native request; it is not execution evidence on those hosts.
+- **Probe cache maintenance.** The integration compute probe prefers compatible
+  coherent host-visible memory and can use compatible noncoherent memory. It
+  maps the entire dedicated allocation, flushes the output seed once and each
+  metadata write before submission, and invalidates output after the host
+  barrier and successful fence wait. Failed cache maintenance refuses the
+  submission or read. A native-call model compiled the actual probe and checked
+  separate host/device views, repeated submissions, incompatible type bits and
+  flush, wait and invalidate failures. Available hardware exposes only coherent
+  host-visible types; actual noncoherent hardware remains untested. This change
+  does not add noncoherent support to production resource pools.
+- **Allocation refusals.** The production allocator refuses an unsatisfied
+  memory-type request before modifying allocation state or calling the native
+  allocator. Buffer creation, allocation and binding errors stop before an
+  invalid resource can be used. A native-call model linked the production
+  implementations and verified rejected requests, successful type selection,
+  cleanup and the strict native error paths. Requested production memory flags
+  remain requirements; they are not silently relaxed.
+- **Deferred guest ownership.** A bounded snapshot records the mapping
+  instances covering a GDS destination. Mapping replacement, commit and
+  decommit issue fresh identities; splits and protection changes retain them.
+  Publication checks all identities and current guest write access in the same
+  VM transaction as the copy, so a partial mismatch copies nothing. Capture
+  requires ownership only: a read-only destination that becomes writable before
+  completion still receives its bytes. A GPU fixture using the previous
+  callback accepted an unmap/remap before completion; the current fixture
+  strictly refuses it. Normal, armed and read-only-at-record publications and
+  their neighbouring bytes pass. The existing tracker lease and write-generation
+  update remain unchanged. Unregistered end-of-pipe destinations still receive
+  nothing, while unsafe registered destinations refuse.
+
+**Validation:** a dedicated Linux Release build of all affected executables
+passed with two compilation jobs. Focused validation passed 1079 cases with
+three expected host/platform skips. Nine sequential production-path integration
+executions passed, including nine GDS refusal scenarios, append, layered images,
+compute, graphics diagnostics, memory and audio. The logical-wave fixture passed
+on the GPU, and five integer operations again matched the host reference over
+460 edge and seeded pairs. Architecture and all 13 table provenance gates pass.
+The available device is an Intel Arc A770, Mesa 26.2.4 with Xe. AMD and NVIDIA
+hardware, Windows and macOS execution remain untested. No dependency was added
+by this follow-up.
+
+**Strict guest recheck:** the approximately 32-second opening route again
+delivered three input edges, advanced presentation and stopped without a host
+crash, while retaining the baseline's first `gfx_storage_frontier`. Its scored
+capture was darker than the preceding run. A bounded repeat retained four
+non-stripey detailed opening images (entropy 3.73–3.89, 504–572 quantized colours),
+including the earlier subtitle, before a flat final image. This excludes a
+persistent loss of opening detail in that repeat; the brightness variance and
+later flat output remain unlocalized. Both gameplay gates fail for the known
+resource frontier and absent scene/action checkpoint. These observations do not
+establish complete visual equivalence, additional title support or a performance
+improvement.
+
+A separate 17-second startup run had no last-error event and advanced 7518
+presents during a 15-second watch. Its captures showed branding and then a
+visually inspected detailed introductory scene; no input/action gameplay
+checkpoint was exercised. In the subsequent 15028 ms performance interval,
+497 writebacks transferred 6115328 bytes in 15430055 ns. Unlike the earlier
+loading-only interval, this one has steady publication activity, but it still
+does not establish a CPU-demand publication bottleneck or an A/B speedup.
+
+The focused commands are `cmake --build <owned-build> --parallel 2`,
+`<owned-build>/kyty_unit_test --gtest_filter='CoreVirtualMemory.*:EmulatorComputeWave*.*:EmulatorNativeWave*.*'`,
+`<owned-build>/integration_test/kyty_gds_transfer_integration`, its `--append`
+mode, `kyty_shader_compute_integration`, `kyty_shader_wave64_integration`,
+`check_emulator_boundaries.py --strict source`, and
+`check_graphics_tables.py source/emulator/src/Graphics/Tables/manifest.sha256`.
+Private guest routes, native captures and call-model artifacts stay outside Git.
+
+Runtime-indexed sampled tables, raw compression metadata publication and
+CPU-demand publication remain subject to the evidence limits in the preceding
+section. Exclusive GDS queue-family migration also requires a proven ordering
+contract; changing resource sharing alone would not establish synchronization.
+
 ### A roguelike reaches gameplay (2026-10-07)
 
 A 2D roguelike froze after its second frame: the main thread waited on an event flag that its render thread only

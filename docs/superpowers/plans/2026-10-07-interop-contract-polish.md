@@ -119,3 +119,43 @@ and bounded dependency/arithmetic tools. The dependency declaration is pinned;
 its evaluation and native AMD measurements remain unavailable. The qualified
 investigation limits above are deferred, rather than implemented from assumptions.
 Final verification and strict guest limits are recorded in `docs/BRINGUP.md`.
+
+### Portable completion follow-up (2026-10-08)
+
+The follow-up explicitly requires capability-based behavior across GPU vendors.
+The available machine has one physical Vulkan device; hardware coverage on other
+vendors must remain distinct from tested feature-selection contracts.
+
+1. Remove the coherent-only memory admission in compute probes. Select a
+   buffer-compatible host-visible memory type, prefer coherence, and otherwise
+   flush host writes before submission and invalidate device writes after the
+   existing host barrier and successful fence wait. Map the entire dedicated
+   allocation so whole-allocation maintenance obeys atom alignment.
+2. Preserve the identity of recorded guest destinations until GDS publication.
+   Capturing only a virtual address allows an old submission to overwrite a new
+   writable mapping at the same address. Capture bounded mapping identities and
+   validate them under the same VM transaction as the copy. Protection changes
+   retain identity; replacing backing or unmapping revokes it. Cover partial
+   replacement and unchanged neighbours with meaningful regression fixtures.
+3. Audit subgroup query and enablement for promoted core functionality as well
+   as advertised extensions. Do not infer enabled features from a vendor name or
+   default subgroup width. Preserve strict width and operation admission.
+4. Refuse unsatisfied production memory-type requests before native allocation
+   or allocator-state changes, and stop after buffer creation, allocation or
+   binding failures. Keep requested property flags explicit.
+5. Recheck runtime-indexed resources and compression metadata against consumed
+   guest evidence. An SGPR descriptor width establishes neither table stride nor
+   extent. Any remaining unestablished contract stays explicitly unresolved.
+
+Memory probe and VM publication writers own disjoint files. Core feature routing
+is integrated only after its query, enablement and emitted-module requirements
+are established. Final builds and GPU executions remain serialized and bounded.
+
+The four demonstrated follow-up defects are implemented. Core-only subgroup
+admission, noncoherent probe cache maintenance and allocation error ordering have
+compiled behavioral comparisons or native-call models. Mapping identities have
+unit and actual GDS completion fixtures, including same-address replacement and
+read-only-at-record destinations. The final Linux build and focused/integration
+results are recorded in `docs/BRINGUP.md`; other vendor and platform hardware
+coverage remains unavailable. Evidence-limited resource-table, compression and
+CPU-demand work remains an investigation rather than a guessed implementation.
