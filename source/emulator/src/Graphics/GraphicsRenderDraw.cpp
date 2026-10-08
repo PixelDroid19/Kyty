@@ -12,6 +12,7 @@
 #include "Emulator/Graphics/DepthStencilCopy.h"
 #include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/GuestDeviceAddress.h"
+#include "Emulator/Graphics/GraphicsOperationTrace.h"
 #include "Emulator/Graphics/GraphicsRun.h"
 #include "Emulator/Graphics/GraphicsState.h"
 #include "Emulator/Graphics/Gen5TextureMipLayout.h"
@@ -1176,6 +1177,37 @@ static void RecordRecentGuestDraw(uint64_t submit_id, const CommandBuffer* buffe
 	VulkanRecentDrawRecord(buffer, draw);
 }
 
+// Operation trace descriptions. A plane that is not attached yields no flags, so nothing is guessed.
+static OperationTraceDepthTarget OperationTraceDepthOf(const RenderDepthInfo& depth)
+{
+	if (depth.depth_buffer_vaddr == 0 && depth.depth_buffer_size == 0)
+	{
+		return {};
+	}
+	OperationTraceDepthTarget target {};
+	target.address         = depth.depth_buffer_vaddr;
+	target.size            = depth.depth_buffer_size;
+	target.reads           = depth.depth_test_enable;
+	target.writes          = depth.depth_write_enable && !depth.suppress_depth_write;
+	target.htile_present   = depth.htile;
+	target.stencil_present = depth.stencil_buffer_size != 0;
+	target.clear_present   = depth.depth_clear_enable;
+	return target;
+}
+
+static uint32_t OperationTraceColorOutputs(const RenderColorInfo& color)
+{
+	uint32_t outputs = 0;
+	for (uint32_t i = 0; i < color.targets_num && i < RenderColorInfo::TARGETS_MAX; ++i)
+	{
+		if (color.attachment[i].type != RenderColorType::NoColorOutput)
+		{
+			++outputs;
+		}
+	}
+	return outputs;
+}
+
 void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Context* ctx, HW::UserConfig* ucfg, HW::Shader* sh_ctx,
                              uint32_t index_type_and_size, uint32_t index_count, const void* index_addr, uint64_t draw_modifier,
                              uint32_t type, uint32_t instance_count, int32_t vertex_offset_add, uint32_t first_instance)
@@ -1565,6 +1597,8 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	vkCmdBindIndexBuffer(vk_buffer, indices->buffer, 0, index_type);
 	DebugStatsRecordDrawIndexBufferBinding(DrawStageElapsedNs(index_buffer_binding_start));
 	DebugStatsRecordDrawResourceBinding(DrawStageElapsedNs(resource_binding_start));
+	GraphicsOperationTraceIndexedDraw(index_addr_u64, index_size, index_type_and_size <= 1u, vs_input_info, ps_input_info,
+	                                  OperationTraceColorOutputs(color_info), OperationTraceDepthOf(depth_info));
 
 	const auto command_emission_start = DrawStageClock::now();
 	if (vertex_clip_probe != nullptr)
@@ -2928,6 +2962,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	// Materialization may dispatch a host compute kernel. Restore the guest
 	// pipeline after all preparation has completed.
 	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+	GraphicsOperationTraceDispatch(input_info.bind);
 	vkCmdDispatch(vk_buffer, thread_group_x, thread_group_y, thread_group_z);
 	// The buffer write always executes. A proven full uniform fill additionally updates its exact
 	// color-image aliases in this recording; partial thread groups would leave the range uncovered.

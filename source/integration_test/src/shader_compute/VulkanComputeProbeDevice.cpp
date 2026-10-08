@@ -133,6 +133,8 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 		return Result::Failure;
 	}
 	wave_capabilities_ = {};
+	physical_device_name_.clear();
+	default_subgroup_size_ = 0;
 
 	{
 		const auto enumerate_instance_version = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
@@ -228,6 +230,14 @@ VulkanComputeProbe::Result VulkanComputeProbe::InitializeInternal(std::string* m
 	vkGetPhysicalDeviceProperties(physical_device_, &selected_properties);
 	std::printf("Compute probe device: %s (type=%u, vendor=0x%x, driver=%u)\n", selected_properties.deviceName,
 	            static_cast<unsigned>(selected_properties.deviceType), selected_properties.vendorID, selected_properties.driverVersion);
+	physical_device_name_ = selected_properties.deviceName;
+	VkPhysicalDeviceSubgroupProperties selected_subgroup {};
+	selected_subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+	VkPhysicalDeviceProperties2 selected_properties2 {};
+	selected_properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+	selected_properties2.pNext = &selected_subgroup;
+	vkGetPhysicalDeviceProperties2(physical_device_, &selected_properties2);
+	default_subgroup_size_ = selected_subgroup.subgroupSize;
 
 	const float queue_priority = 1.0f;
 	VkDeviceQueueCreateInfo queue_info {};

@@ -195,6 +195,23 @@ set_tests_properties(KytyShaderComputeIntegration.PairedWave64 PROPERTIES
 	SKIP_RETURN_CODE 77
 )
 
+# External operand endpoint for the integer instruction oracle (scripts/kyty_hardware_oracle.py).
+# Deliberately not a CTest case: it needs a Vulkan 1.4 device with paired-wave capability and
+# exits 77 when that is absent. Run it through the oracle CLI.
+add_executable(kyty_shader_arithmetic_oracle
+	src/shader_compute/ShaderArithmeticOracle.cpp
+	src/shader_compute/ShaderWaveProbeSource.cpp
+	src/shader_compute/VulkanComputeProbe.cpp
+	src/shader_compute/VulkanComputeProbeDevice.cpp
+	src/shader_compute/VulkanProgramBaseProbe.cpp
+	src/shader_compute/VulkanWaveProbe.cpp
+)
+target_link_libraries(kyty_shader_arithmetic_oracle PRIVATE core emulator vulkan-1)
+target_include_directories(kyty_shader_arithmetic_oracle PRIVATE
+	"${CMAKE_SOURCE_DIR}/include"
+	"${CMAKE_SOURCE_DIR}/emulator/include"
+)
+
 add_executable(kyty_graphics_diagnostics_integration
 	src/GraphicsDiagnosticsIntegration.cpp
 )

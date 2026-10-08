@@ -36,6 +36,11 @@ public:
 	// feature chain; scalar probes continue to use Initialize's Vulkan 1.0 path.
 	[[nodiscard]] Result InitializeWave(std::string* message);
 	[[nodiscard]] const ShaderComputeWaveCapabilities& WaveCapabilities() const noexcept { return wave_capabilities_; }
+	// Metadata of the physical device chosen by the last successful initialization. Empty and zero before it.
+	[[nodiscard]] const std::string& PhysicalDeviceName() const noexcept { return physical_device_name_; }
+	// Default subgroup size the driver reports for the selected device (VkPhysicalDeviceSubgroupProperties).
+	// This is not the size a paired layout runs at; the paired layout always requires 32 physical lanes.
+	[[nodiscard]] uint32_t DefaultSubgroupSize() const noexcept { return default_subgroup_size_; }
 	[[nodiscard]] Result Dispatch(const uint32_t* spirv, size_t word_count, const std::array<uint32_t, 4>& initial_words,
 	                              std::array<uint32_t, 4>* result_words, std::string* message) const;
 	// Creates one pipeline and reuses it for two submissions with different
@@ -74,6 +79,8 @@ private:
 	uint32_t         queue_family_index_ = 0;
 	VkDeviceSize     max_storage_buffer_range_ = 0;
 	ShaderComputeWaveCapabilities wave_capabilities_ {};
+	std::string                   physical_device_name_;
+	uint32_t                      default_subgroup_size_ = 0;
 };
 
 } // namespace Kyty::Libs::Graphics
