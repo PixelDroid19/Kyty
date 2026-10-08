@@ -872,13 +872,8 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 			inst.src_num = 1;
 			inst.ds_offset = static_cast<uint16_t>((offset1 << 8u) | offset0);
 			break;
-		case 0x7E: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_condxchg32_rtn_b64 treated as DsAddU32 (continuing)\n");
-			inst.type = ShaderInstructionType::DsAddU32;
-			inst.format = ShaderInstructionFormat::VaddrVdataOffset;
-			inst.src[0] = operand_parse(addr + 256);
-			inst.src[1] = operand_parse(data0 + 256);
-			inst.src_num = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+		case 0x7E:
+			EXIT("unsupported DS conditional exchange: opcode=0x%02x next_gen=%u\n", opcode, next_gen ? 1u : 0u);
 			break;
 		case 0x80: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_add_src2_u32 treated as DsAddU32 (continuing)\n");
 			inst.type = ShaderInstructionType::DsAddU32;
@@ -1139,13 +1134,8 @@ KYTY_SHADER_PARSER(shader_parse_ds)
 		case 0xDF:
 			DecodeDsWrite(&inst, addr, data0, DsSingleOffset(offset0, offset1), 4);
 			break;
-		case 0xFD: KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: ds_condxchg32_rtn_b128 treated as DsAddU32 (continuing)\n");
-			inst.type = ShaderInstructionType::DsAddU32;
-			inst.format = ShaderInstructionFormat::VaddrVdataOffset;
-			inst.src[0] = operand_parse(addr + 256);
-			inst.src[1] = operand_parse(data0 + 256);
-			inst.src_num = 2;
-			inst.ds_offset = static_cast<uint16_t>(offset0);
+		case 0xFD:
+			EXIT("unsupported DS conditional exchange: opcode=0x%02x next_gen=%u\n", opcode, next_gen ? 1u : 0u);
 			break;
 		case 0xFE:
 			DecodeDsRead(&inst, vdst, addr, DsSingleOffset(offset0, offset1), 3);
