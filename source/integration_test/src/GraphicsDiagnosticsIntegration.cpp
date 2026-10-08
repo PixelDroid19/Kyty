@@ -23,6 +23,7 @@
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
+#include "Emulator/Graphics/VulkanBlend.h"
 
 #include "../../emulator/src/Graphics/GraphicsRenderInternal.h"
 #include "../../emulator/src/Graphics/GraphicsRunInternal.h"
@@ -4237,7 +4238,7 @@ public:
 		}
 	}
 
-	[[nodiscard]] bool Initialize()
+	[[nodiscard]] bool Initialize(bool dual_source = false)
 	{
 		VkApplicationInfo application {};
 		application.sType      = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -4266,6 +4267,11 @@ public:
 			VkPhysicalDeviceProperties properties {};
 			vkGetPhysicalDeviceProperties(physical, &properties);
 			if (properties.apiVersion < VK_API_VERSION_1_4) { continue; }
+			VkPhysicalDeviceFeatures supported_features {};
+			vkGetPhysicalDeviceFeatures(physical, &supported_features);
+			if (dual_source && supported_features.dualSrcBlend == VK_FALSE) { continue; }
+			VkPhysicalDeviceFeatures enabled_features {};
+			enabled_features.dualSrcBlend = dual_source ? VK_TRUE : VK_FALSE;
 			uint32_t extension_count = 0;
 			if (vkEnumerateDeviceExtensionProperties(physical, nullptr, &extension_count, nullptr) != VK_SUCCESS)
 			{
@@ -4310,6 +4316,7 @@ public:
 				device_info.sType                = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 				device_info.queueCreateInfoCount = 1;
 				device_info.pQueueCreateInfos    = &queue_info;
+				device_info.pEnabledFeatures        = dual_source ? &enabled_features : nullptr;
 				device_info.enabledExtensionCount   = load_store_op_none_extension != nullptr ? 1u : 0u;
 				device_info.ppEnabledExtensionNames =
 				    load_store_op_none_extension != nullptr ? &load_store_op_none_extension : nullptr;
@@ -4331,6 +4338,10 @@ public:
 				context.queues[GraphicContext::QUEUE_UTIL].index    = 0;
 				context.queues[GraphicContext::QUEUE_UTIL].mutex    = &context.queue_mutexes[0];
 				context.queue_mutex_count                           = 1;
+				// Published only after device creation: the enabled bit is the feature that was actually requested.
+				context.blend_capabilities.enabled.dual_source_blend  = enabled_features.dualSrcBlend;
+				context.blend_capabilities.max_color_attachments      = properties.limits.maxColorAttachments;
+				context.blend_capabilities.max_dual_source_attachments = properties.limits.maxFragmentDualSrcAttachments;
 				bound = GraphicsRenderBindContextForTesting(&context);
 				return bound;
 			}
@@ -4487,7 +4498,10 @@ class HostNanRasterTarget
 public:
 	static constexpr uint32_t kExtent = 8u;
 
-	explicit HostNanRasterTarget(GraphicContext* context): m_context(context) {}
+	[[nodiscard]] VkImage ImageHandle() const { return image; }
+
+	// readback keeps the color image transferable and clears it, so the raster can be copied to host memory.
+	explicit HostNanRasterTarget(GraphicContext* context, bool readback = false): m_context(context), m_readback(readback) {}
 	~HostNanRasterTarget() { Done(); }
 
 	[[nodiscard]] bool Create()
@@ -4513,7 +4527,7 @@ public:
 		image_info.arrayLayers   = 1u;
 		image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
 		image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-		image_info.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+		image_info.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | (m_readback ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
 		image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
 		image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		if (vkCreateImage(m_context->device, &image_info, nullptr, &image) != VK_SUCCESS)
@@ -4556,8 +4570,8 @@ public:
 		VkAttachmentDescription attachment {};
 		attachment.format         = VK_FORMAT_R8G8B8A8_UNORM;
 		attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
-		attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		attachment.storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachment.loadOp         = m_readback ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachment.storeOp        = m_readback ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -4632,6 +4646,7 @@ private:
 	VkImage         image     = VK_NULL_HANDLE;
 	VkDeviceMemory  memory    = VK_NULL_HANDLE;
 	VkImageView     view      = VK_NULL_HANDLE;
+	bool            m_readback = false;
 };
 
 Kyty::Core::String8 HostNanRasterVertexShaderSource(bool nan_position_z)
@@ -4726,7 +4741,8 @@ VkShaderModule CreateHostNanRasterShaderModule(VkDevice device, const Kyty::Core
 }
 
 VkPipeline CreateHostNanRasterPipeline(VkDevice device, VkRenderPass render_pass, VkPipelineLayout pipeline_layout,
-	                                   VkShaderModule vertex_shader, VkShaderModule fragment_shader)
+	                                   VkShaderModule vertex_shader, VkShaderModule fragment_shader,
+	                                   const VkPipelineColorBlendAttachmentState* blend_attachment = nullptr)
 {
 	if (device == VK_NULL_HANDLE || render_pass == VK_NULL_HANDLE || pipeline_layout == VK_NULL_HANDLE ||
 	    vertex_shader == VK_NULL_HANDLE || fragment_shader == VK_NULL_HANDLE)
@@ -4784,7 +4800,7 @@ VkPipeline CreateHostNanRasterPipeline(VkDevice device, VkRenderPass render_pass
 	VkPipelineColorBlendStateCreateInfo color_blend {};
 	color_blend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 	color_blend.attachmentCount = 1u;
-	color_blend.pAttachments    = &color_blend_attachment;
+	color_blend.pAttachments    = blend_attachment != nullptr ? blend_attachment : &color_blend_attachment;
 	VkGraphicsPipelineCreateInfo pipeline_info {};
 	pipeline_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	pipeline_info.stageCount          = 2u;
@@ -5499,6 +5515,427 @@ void VerifyComparisonSamplerCacheIdentity()
 	}
 }
 
+// Offscreen dual-source raster. MRT1 is the secondary color of Location 0. Both guest encodings carry the same logical colors:
+// MRT0 = (1, 0, 1, 1) and MRT1 = (0.5, 0.25, 0.75, 1).
+constexpr int      kDualSourceUnavailableExit = 77;
+constexpr VkFormat kDualSourceFormat          = VK_FORMAT_R8G8B8A8_UNORM;
+constexpr uint32_t kDualSourceReadbackBytes   = HostNanRasterTarget::kExtent * HostNanRasterTarget::kExtent * 4u;
+
+uint32_t DualSourceExportWord(uint32_t target, uint32_t enable, uint32_t control)
+{
+	// Same EXP encoding as the shader export tests: VM, DONE and COMPR are control bits 0, 1 and 2.
+	return 0xf8000000u | (target << 4u) | enable | ((control & 1u) << 12u) | ((control & 2u) << 10u) | ((control & 4u) << 8u);
+}
+
+void AppendDualSourceLiteral(std::vector<uint32_t>* words, uint32_t reg, uint32_t value)
+{
+	words->push_back(0x7e0002ffu | (reg << 17u)); // v_mov_b32 vN, literal
+	words->push_back(value);
+}
+
+// Full exports carry binary32 colors in v0..v7. COMPR exports carry binary16 pairs in v0..v3.
+std::vector<uint32_t> DualSourceGuestWords(bool packed)
+{
+	std::vector<uint32_t> words;
+	if (packed)
+	{
+		AppendDualSourceLiteral(&words, 0u, 0x00003c00u); // MRT0 XY = (1, 0)
+		AppendDualSourceLiteral(&words, 1u, 0x3c003c00u); // MRT0 ZW = (1, 1)
+		AppendDualSourceLiteral(&words, 2u, 0x34003800u); // MRT1 XY = (0.5, 0.25)
+		AppendDualSourceLiteral(&words, 3u, 0x3c003a00u); // MRT1 ZW = (0.75, 1)
+		words.push_back(DualSourceExportWord(1u, 15u, 4u)); // MRT1 COMPR, secondary
+		words.push_back(2u | (3u << 8u));
+		words.push_back(DualSourceExportWord(0u, 15u, 7u)); // MRT0 COMPR with VM and DONE
+		words.push_back(0u | (1u << 8u));
+	} else
+	{
+		AppendDualSourceLiteral(&words, 0u, 0x3f800000u); // MRT0 = (1, 0, 1, 1)
+		AppendDualSourceLiteral(&words, 1u, 0x00000000u);
+		AppendDualSourceLiteral(&words, 2u, 0x3f800000u);
+		AppendDualSourceLiteral(&words, 3u, 0x3f800000u);
+		AppendDualSourceLiteral(&words, 4u, 0x3f000000u); // MRT1 = (0.5, 0.25, 0.75, 1)
+		AppendDualSourceLiteral(&words, 5u, 0x3e800000u);
+		AppendDualSourceLiteral(&words, 6u, 0x3f400000u);
+		AppendDualSourceLiteral(&words, 7u, 0x3f800000u);
+		words.push_back(DualSourceExportWord(1u, 15u, 0u)); // MRT1 full, secondary
+		words.push_back(4u | (5u << 8u) | (6u << 16u) | (7u << 24u));
+		words.push_back(DualSourceExportWord(0u, 15u, 3u)); // MRT0 full with VM and DONE
+		words.push_back(0u | (1u << 8u) | (2u << 16u) | (3u << 24u));
+	}
+	words.push_back(0xbf810000u); // s_endpgm
+	return words;
+}
+
+// Parses the guest words with the production parser. Nothing here is a pre-parsed instruction.
+ShaderCode ParseDualSourceGuestProgram(bool packed)
+{
+	const auto words = DualSourceGuestWords(packed);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	Expect(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code),
+	       "dual-source guest pixel program parses with the production parser");
+	return code;
+}
+
+// Pixel input for one variant. The color summary comes from the parsed instructions.
+ShaderPixelInputInfo DualSourceVariantInput(const ShaderCode& code, bool packed)
+{
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = packed ? 4 : 9;
+	input.target_output_mode[1] = packed ? 4 : 9;
+	input.color_exports         = ShaderSummarizePixelColorExports(code);
+	return input;
+}
+
+// Guest blend: SRC1_COLOR source, ONE_MINUS_SRC1_COLOR destination, ADD, no separate alpha.
+HW::BlendControl DualSourceGuestBlend()
+{
+	HW::BlendControl blend;
+	blend.enable          = true;
+	blend.color_srcblend  = 0x0f;
+	blend.color_destblend = 0x10;
+	blend.color_comb_fcn  = 0;
+	return blend;
+}
+
+// Host attachment for that blend. Alpha inherits the color factors because separate_alpha_blend is false, as in the production mapping.
+VkPipelineColorBlendAttachmentState DualSourceHostAttachment()
+{
+	VkPipelineColorBlendAttachmentState attachment {};
+	attachment.blendEnable         = VK_TRUE;
+	attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC1_COLOR;
+	attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+	attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+	attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC1_COLOR;
+	attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+	attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+	attachment.colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+	                            VK_COLOR_COMPONENT_A_BIT;
+	return attachment;
+}
+
+bool FormatBlendable(VkPhysicalDevice physical_device, VkFormat format)
+{
+	VkFormatProperties properties {};
+	vkGetPhysicalDeviceFormatProperties(physical_device, format, &properties);
+	return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0u;
+}
+
+// Production admission on the real capability, limits and format query. The parsed program is a stage-enabled pixel program.
+State::DualSourceBlendDecision ResolveDualSourceRaster(const GraphicContext& context, const ShaderPixelInputInfo& input, VkFormat format)
+{
+	State::DualSourceBlendInputs in;
+	in.blend0                           = DualSourceGuestBlend();
+	in.slot0_active                     = true;
+	in.targets_num                      = 1u;
+	in.program_admitted                 = true;
+	in.exports                          = &input.color_exports;
+	in.output_mode                      = input.target_output_mode;
+	in.output_order                     = input.target_output_order;
+	in.host_dual_source_enabled         = context.blend_capabilities.enabled.dual_source_blend == VK_TRUE;
+	in.host_max_dual_source_attachments = context.blend_capabilities.max_dual_source_attachments;
+	in.target0_blendable                = FormatBlendable(context.physical_device, format);
+	return State::ResolveDualSourceBlend(in);
+}
+
+// Finds a host-visible memory type for the readback. Coherent memory is preferred.
+bool FindHostReadbackMemoryType(VkPhysicalDevice physical_device, uint32_t type_bits, uint32_t* type_index, bool* coherent)
+{
+	VkPhysicalDeviceMemoryProperties properties {};
+	vkGetPhysicalDeviceMemoryProperties(physical_device, &properties);
+	const VkMemoryPropertyFlags required_flags[2] = {VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+	                                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT};
+	for (const auto required: required_flags)
+	{
+		for (uint32_t index = 0u; index < properties.memoryTypeCount; ++index)
+		{
+			if ((type_bits & (1u << index)) != 0u && (properties.memoryTypes[index].propertyFlags & required) == required)
+			{
+				*type_index = index;
+				*coherent   = (properties.memoryTypes[index].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0u;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+// Host-visible destination for the copy. A non-coherent read invalidates the range after the exact fence.
+class HostReadbackBuffer
+{
+public:
+	HostReadbackBuffer(GraphicContext* context, VkDeviceSize size): m_context(context), m_size(size) {}
+	~HostReadbackBuffer()
+	{
+		if (m_mapped != nullptr)
+		{
+			vkUnmapMemory(m_context->device, m_memory);
+		}
+		if (m_memory != VK_NULL_HANDLE)
+		{
+			vkFreeMemory(m_context->device, m_memory, nullptr);
+		}
+		if (m_buffer != VK_NULL_HANDLE)
+		{
+			vkDestroyBuffer(m_context->device, m_buffer, nullptr);
+		}
+	}
+	HostReadbackBuffer(const HostReadbackBuffer&)            = delete;
+	HostReadbackBuffer& operator=(const HostReadbackBuffer&) = delete;
+
+	[[nodiscard]] bool Create()
+	{
+		VkBufferCreateInfo buffer_info {};
+		buffer_info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+		buffer_info.size        = m_size;
+		buffer_info.usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+		buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		if (vkCreateBuffer(m_context->device, &buffer_info, nullptr, &m_buffer) != VK_SUCCESS)
+		{
+			return false;
+		}
+		VkMemoryRequirements requirements {};
+		vkGetBufferMemoryRequirements(m_context->device, m_buffer, &requirements);
+		uint32_t memory_type = 0u;
+		if (!FindHostReadbackMemoryType(m_context->physical_device, requirements.memoryTypeBits, &memory_type, &m_coherent))
+		{
+			return false;
+		}
+		VkMemoryAllocateInfo memory_info {};
+		memory_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+		memory_info.allocationSize  = requirements.size;
+		memory_info.memoryTypeIndex = memory_type;
+		if (vkAllocateMemory(m_context->device, &memory_info, nullptr, &m_memory) != VK_SUCCESS ||
+		    vkBindBufferMemory(m_context->device, m_buffer, m_memory, 0u) != VK_SUCCESS)
+		{
+			return false;
+		}
+		return vkMapMemory(m_context->device, m_memory, 0u, m_size, 0u, &m_mapped) == VK_SUCCESS;
+	}
+
+	[[nodiscard]] VkBuffer Handle() const { return m_buffer; }
+
+	// Call only after the exact fence of the copy has completed.
+	void Read(uint8_t* destination) const
+	{
+		if (!m_coherent)
+		{
+			VkMappedMemoryRange range {};
+			range.sType  = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+			range.memory = m_memory;
+			range.size   = VK_WHOLE_SIZE;
+			Expect(vkInvalidateMappedMemoryRanges(m_context->device, 1u, &range) == VK_SUCCESS,
+			       "non-coherent readback memory invalidates before the host read");
+		}
+		std::memcpy(destination, m_mapped, static_cast<size_t>(m_size));
+	}
+
+private:
+	GraphicContext* m_context  = nullptr;
+	VkDeviceSize    m_size     = 0u;
+	VkBuffer        m_buffer   = VK_NULL_HANDLE;
+	VkDeviceMemory  m_memory   = VK_NULL_HANDLE;
+	void*           m_mapped   = nullptr;
+	bool            m_coherent = false;
+};
+
+// Records the clear, the partial triangle, the transfer barrier and the copy. Returns the 8x8 RGBA bytes.
+void RenderDualSourceTriangle(GraphicContext* context, const HostNanRasterTarget& target, VkPipeline pipeline, uint8_t* pixels)
+{
+	HostReadbackBuffer readback(context, kDualSourceReadbackBytes);
+	Expect(readback.Create(), "dual-source readback buffer is created host-visible");
+	CommandBuffer command_buffer(GraphicContext::QUEUE_GFX);
+	command_buffer.Begin();
+	auto* vk_buffer = command_buffer.GetPool()->buffers[command_buffer.GetIndex()];
+	Expect(vk_buffer != VK_NULL_HANDLE, "dual-source raster resolves its exact Vulkan command buffer");
+
+	VkClearValue clear {};
+	clear.color.float32[0] = 0.0f;
+	clear.color.float32[1] = 1.0f;
+	clear.color.float32[2] = 0.0f;
+	clear.color.float32[3] = 0.0f;
+	VkRenderPassBeginInfo begin {};
+	begin.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	begin.renderPass      = target.render_pass;
+	begin.framebuffer     = target.framebuffer;
+	begin.renderArea.extent = {HostNanRasterTarget::kExtent, HostNanRasterTarget::kExtent};
+	begin.clearValueCount = 1u;
+	begin.pClearValues    = &clear;
+	vkCmdBeginRenderPass(vk_buffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBindPipeline(vk_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	vkCmdDraw(vk_buffer, 3u, 1u, 0u, 0u);
+	vkCmdEndRenderPass(vk_buffer);
+
+	// The render pass does not order its color writes before the transfer read, so the barrier is explicit.
+	VkImageMemoryBarrier barrier {};
+	barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+	barrier.srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	barrier.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+	barrier.oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	barrier.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	barrier.image               = target.ImageHandle();
+	barrier.subresourceRange    = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 1u, 0u, 1u};
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 0u, nullptr,
+	                     0u, nullptr, 1u, &barrier);
+
+	VkBufferImageCopy region {};
+	region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0u, 0u, 1u};
+	region.imageExtent      = {HostNanRasterTarget::kExtent, HostNanRasterTarget::kExtent, 1u};
+	vkCmdCopyImageToBuffer(vk_buffer, target.ImageHandle(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback.Handle(), 1u, &region);
+
+	// The host read is ordered after the copy by this barrier. The exact fence wait is still required before reading.
+	VkBufferMemoryBarrier buffer_barrier {};
+	buffer_barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+	buffer_barrier.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+	buffer_barrier.dstAccessMask       = VK_ACCESS_HOST_READ_BIT;
+	buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	buffer_barrier.buffer              = readback.Handle();
+	buffer_barrier.offset              = 0u;
+	buffer_barrier.size                = VK_WHOLE_SIZE;
+	vkCmdPipelineBarrier(vk_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0u, 0u, nullptr, 1u, &buffer_barrier,
+	                     0u, nullptr);
+	command_buffer.End();
+	command_buffer.Execute();
+	Expect(CompleteFenceWithoutBlockingSleep(&command_buffer), "dual-source raster reaches its exact command-buffer fence");
+	readback.Read(pixels);
+}
+
+// Inside (4,4) must be the blended color within rounding. Corners (0,0) and (7,0) lie outside the triangle and keep the clear color.
+void ExpectDualSourceRasterPixels(const uint8_t* pixels, const char* variant)
+{
+	constexpr uint32_t kRowBytes = HostNanRasterTarget::kExtent * 4u;
+	const uint8_t*     inside    = pixels + 4u * kRowBytes + 4u * 4u;
+	const uint8_t*     corner_00 = pixels;
+	const uint8_t*     corner_70 = pixels + 7u * 4u;
+	std::fprintf(stderr, "dual_source_blend_raster variant=%s inside=(%u,%u,%u,%u) corner00=(%u,%u,%u,%u) corner70=(%u,%u,%u,%u)\n",
+	             variant, inside[0], inside[1], inside[2], inside[3], corner_00[0], corner_00[1], corner_00[2], corner_00[3],
+	             corner_70[0], corner_70[1], corner_70[2], corner_70[3]);
+	constexpr uint8_t kBlended[4] = {128, 191, 191, 255};
+	for (uint32_t channel = 0u; channel < 4u; ++channel)
+	{
+		const int difference = static_cast<int>(inside[channel]) - static_cast<int>(kBlended[channel]);
+		Expect(difference >= -1 && difference <= 1, "inside pixel matches the blended color within one unit");
+	}
+	constexpr uint8_t kClear[4] = {0, 255, 0, 0};
+	Expect(std::memcmp(corner_00, kClear, 4) == 0 && std::memcmp(corner_70, kClear, 4) == 0,
+	       "outside corners keep the clear color exactly");
+}
+
+// One guest variant through the production path. Only an Eligible decision sets the dual-source flag.
+void RenderDualSourceVariant(VulkanSamplerContext* vulkan, bool packed, uint8_t* pixels)
+{
+	const auto code     = ParseDualSourceGuestProgram(packed);
+	auto       input    = DualSourceVariantInput(code, packed);
+	const auto decision = ResolveDualSourceRaster(vulkan->context, input, kDualSourceFormat);
+	Expect(decision == State::DualSourceBlendDecision::Eligible, "dual-source guest variant is eligible under production admission");
+	input.dual_source_blend = decision == State::DualSourceBlendDecision::Eligible;
+
+	const auto attachment = DualSourceHostAttachment();
+	Expect(VulkanValidateBlendAttachments(vulkan->context.blend_capabilities, &attachment, 1u, 1u, 1u) == VulkanBlendAdmission::Supported,
+	       "production blend admission accepts the Location 0 secondary pair");
+
+	const auto binary = ShaderRecompilePS(code, &input);
+	Expect(!binary.IsEmpty(), "dual-source guest pixel program recompiles");
+	ExpectValidSpirv(binary, "dual-source recompiled pixel module validates");
+	VkShaderModuleCreateInfo module_info {};
+	module_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+	module_info.codeSize = binary.Size() * sizeof(uint32_t);
+	module_info.pCode    = binary.GetData();
+	VkShaderModule fragment_shader = VK_NULL_HANDLE;
+	Expect(vkCreateShaderModule(vulkan->context.device, &module_info, nullptr, &fragment_shader) == VK_SUCCESS,
+	       "dual-source recompiled pixel module creates a shader module");
+
+	HostNanRasterTarget target(&vulkan->context, true);
+	Expect(target.Create(), "dual-source raster creates a clearable and transferable color target");
+	const auto vertex_shader = CreateHostNanRasterShaderModule(vulkan->context.device, HostNanRasterVertexShaderSource(false),
+	                                                          "dual-source raster vertex shader assembles and validates");
+	VkPipelineLayoutCreateInfo layout_info {};
+	layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+	VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+	Expect(vkCreatePipelineLayout(vulkan->context.device, &layout_info, nullptr, &pipeline_layout) == VK_SUCCESS,
+	       "dual-source raster creates an empty pipeline layout");
+	const auto pipeline = CreateHostNanRasterPipeline(vulkan->context.device, target.render_pass, pipeline_layout, vertex_shader,
+	                                                  fragment_shader, &attachment);
+	Expect(pipeline != VK_NULL_HANDLE, "dual-source raster pipeline creates with the admitted blend state");
+
+	RenderDualSourceTriangle(&vulkan->context, target, pipeline, pixels);
+
+	vkDestroyPipeline(vulkan->context.device, pipeline, nullptr);
+	vkDestroyPipelineLayout(vulkan->context.device, pipeline_layout, nullptr);
+	vkDestroyShaderModule(vulkan->context.device, vertex_shader, nullptr);
+	vkDestroyShaderModule(vulkan->context.device, fragment_shader, nullptr);
+}
+
+// Real R32G32B32A32_UINT target on the enabled device: nonblendable, so admission refuses it as HostCapability.
+void ExpectNonblendableIntegerRefusal(const VulkanSamplerContext& vulkan)
+{
+	constexpr VkFormat kIntegerFormat = VK_FORMAT_R32G32B32A32_UINT;
+	Expect(!FormatBlendable(vulkan.context.physical_device, kIntegerFormat), "R32G32B32A32_UINT is nonblendable on this device");
+	const auto input    = DualSourceVariantInput(ParseDualSourceGuestProgram(false), false);
+	const auto decision = ResolveDualSourceRaster(vulkan.context, input, kIntegerFormat);
+	Expect(decision == State::DualSourceBlendDecision::HostCapability, "nonblendable integer target is refused as HostCapability");
+	const bool dual_flag = decision == State::DualSourceBlendDecision::Eligible;
+	Expect(!dual_flag, "nonblendable integer target keeps the dual-source flag false");
+}
+
+// Real context created without dualSrcBlend: the resolver and VulkanBlend admission must both refuse the dual variant.
+void ExpectDualSourceDisabledRefusal(const VulkanSamplerContext& vulkan)
+{
+	Expect(vulkan.context.blend_capabilities.enabled.dual_source_blend == VK_FALSE,
+	       "feature-disabled context publishes no dual-source feature");
+	const auto input = DualSourceVariantInput(ParseDualSourceGuestProgram(false), false);
+	Expect(ResolveDualSourceRaster(vulkan.context, input, kDualSourceFormat) == State::DualSourceBlendDecision::HostCapability,
+	       "pure resolver refuses dual-source without the enabled feature");
+	const auto attachment = DualSourceHostAttachment();
+	Expect(VulkanValidateBlendAttachments(vulkan.context.blend_capabilities, &attachment, 1u, 1u, 1u) ==
+	           VulkanBlendAdmission::DualSourceBlendNotEnabled,
+	       "VulkanBlend admission refuses dual-source with the feature disabled");
+}
+
+// Exit 77 when the host has no device with dualSrcBlend. That is a skip, never a pass.
+int VerifyDualSourceBlendRaster()
+{
+	// The disabled context is bound and destroyed before the enabled one, because only one context can be bound.
+	{
+		VulkanSamplerContext disabled;
+		if (!disabled.Initialize(false))
+		{
+			std::fprintf(stderr, "dual_source_blend_raster unavailable: no Vulkan graphics+compute device\n");
+			return kDualSourceUnavailableExit;
+		}
+		ExpectDualSourceDisabledRefusal(disabled);
+	}
+
+	VulkanSamplerContext vulkan;
+	if (!vulkan.Initialize(true))
+	{
+		std::fprintf(stderr, "dual_source_blend_raster unavailable: no device with dualSrcBlend\n");
+		return kDualSourceUnavailableExit;
+	}
+	GpuMemoryInit();
+	VkPhysicalDeviceProperties properties {};
+	vkGetPhysicalDeviceProperties(vulkan.context.physical_device, &properties);
+	std::fprintf(stderr,
+	             "dual_source_blend_raster device=\"%s\" vendor=0x%04x device_id=0x%04x api=%u.%u.%u "
+	             "maxFragmentDualSrcAttachments=%u\n",
+	             properties.deviceName, properties.vendorID, properties.deviceID, VK_API_VERSION_MAJOR(properties.apiVersion),
+	             VK_API_VERSION_MINOR(properties.apiVersion), VK_API_VERSION_PATCH(properties.apiVersion),
+	             properties.limits.maxFragmentDualSrcAttachments);
+
+	uint8_t full_pixels[kDualSourceReadbackBytes] {};
+	uint8_t packed_pixels[kDualSourceReadbackBytes] {};
+	RenderDualSourceVariant(&vulkan, false, full_pixels);
+	ExpectDualSourceRasterPixels(full_pixels, "full");
+	RenderDualSourceVariant(&vulkan, true, packed_pixels);
+	ExpectDualSourceRasterPixels(packed_pixels, "compressed");
+	ExpectNonblendableIntegerRefusal(vulkan);
+	std::fprintf(stderr, "dual_source_blend_raster passed\n");
+	return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -5507,6 +5944,10 @@ int main(int argc, char** argv)
 	VerifyRenderTargetLifetimeAgentArmServerPublication();
 	VerifyRenderTargetLifetimeAgentArmGate();
 	VerifyRenderTargetLifetimeDepthFilter();
+	if (argc == 2 && std::strcmp(argv[1], "--dual-source-blend-raster-only") == 0)
+	{
+		return VerifyDualSourceBlendRaster();
+	}
 	if (argc == 2 && std::strcmp(argv[1], "--host-nan-raster-baseline-only") == 0)
 	{
 		VerifyHostNanRasterBaseline();

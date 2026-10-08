@@ -358,6 +358,40 @@ void GraphicsRenderDepthStencilCopy(uint64_t submit_id, CommandBuffer* buffer, H
                                            HW::Shader* sh_ctx, uint32_t index_count, uint32_t index_type_and_size,
 	                                       const void* index_addr, uint32_t instance_count, int32_t vertex_offset_add,
 	                                       uint32_t first_instance);
+// Selects the dual-source (SRC1) lowering for one draw. Guest state is resolved first. The format
+// query runs only for a candidate on a device where dual-source blending is enabled.
+static bool ResolveDrawDualSourceBlend(const HW::Context* ctx, const HW::PixelShaderInfo& ps, const RenderColorInfo& color,
+                                const ShaderPixelInputInfo& ps_input_info)
+{
+	const auto* gctx = g_render_ctx->GetGraphicCtx();
+	if (gctx == nullptr)
+	{
+		return false;
+	}
+	State::DualSourceBlendInputs in;
+	in.blend0                           = ctx->GetBlendControl(0);
+	in.blend_bypass0                    = ctx->GetRenderTarget(0).info.blend_bypass;
+	in.slot0_active                     = RenderColorSlotActive(color, 0) && color.attachment[0].attachment_format != VK_FORMAT_UNDEFINED;
+	in.targets_num                      = color.targets_num;
+	in.program_admitted                 = Config::IsNextGen() && ps_input_info.stage_enabled && !ps.ps_embedded;
+	in.null_exports_only                = ps_input_info.has_only_null_exports;
+	in.exports                          = &ps_input_info.color_exports;
+	in.output_mode                      = ps_input_info.target_output_mode;
+	in.output_order                     = ps_input_info.target_output_order;
+	in.host_dual_source_enabled         = gctx->blend_capabilities.enabled.dual_source_blend == VK_TRUE;
+	in.host_max_dual_source_attachments = gctx->blend_capabilities.max_dual_source_attachments;
+	// Optimistic first pass: every host input except the format is checked without a driver query.
+	in.target0_blendable = true;
+	if (State::ResolveDualSourceBlend(in) != State::DualSourceBlendDecision::Eligible)
+	{
+		return false;
+	}
+	VkFormatProperties format_properties {};
+	vkGetPhysicalDeviceFormatProperties(gctx->physical_device, color.attachment[0].attachment_format, &format_properties);
+	in.target0_blendable = (format_properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0u;
+	return State::ResolveDualSourceBlend(in) == State::DualSourceBlendDecision::Eligible;
+}
+
 static bool vertex_shader_is_disabled(HW::Shader* sh_ctx)
 {
 	if (const auto& vs = sh_ctx->GetVs();
@@ -1437,6 +1471,7 @@ void GraphicsRenderDrawIndex(uint64_t submit_id, CommandBuffer* buffer, HW::Cont
 	// Guest depth size 0 can materialize as 1x1 while color is full-screen; drop it
 	// before framebuffer/pipeline creation so Xe does not hang on illegal FB extent.
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
+	ps_input_info.dual_source_blend = ResolveDrawDualSourceBlend(ctx, sh_ctx->GetPs(), color_info, ps_input_info);
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
 	const auto pipeline_setup_start = DrawStageClock::now();
@@ -2378,6 +2413,7 @@ void GraphicsRenderDrawIndexAuto(uint64_t submit_id, CommandBuffer* buffer, HW::
 	// Guest depth size 0 can materialize as 1x1 while color is full-screen; drop it
 	// before framebuffer/pipeline creation so Xe does not hang on illegal FB extent.
 	SanitizeRenderDepthAgainstColor(&color_info, &depth_info);
+	ps_input_info.dual_source_blend = ResolveDrawDualSourceBlend(ctx, sh_ctx->GetPs(), color_info, ps_input_info);
 	DebugStatsRecordDrawMaterialization(DrawStageElapsedNs(materialization_start));
 
 	const auto pipeline_setup_start = DrawStageClock::now();

@@ -225,6 +225,28 @@ Program Parse(const ExportCase& test, bool position_before = false, bool positio
 	return result;
 }
 
+// Two color exports in program order. Producers and source words match Parse.
+Program ParseColorPair(const ExportCase& first, const ExportCase& second)
+{
+	g_case = String8::FromPrintf("pair first=0x%08" PRIx32 " second=0x%08" PRIx32, first.word, second.word).c_str();
+	std::vector<uint32_t> words;
+	for (unsigned source = 0; source < 4; ++source)
+	{
+		words.push_back(0x7e0002ffu | (static_cast<uint32_t>(kRegisters[source]) << 17u)); // v_mov_b32 vN, literal
+		words.push_back(kValues[source]);
+	}
+	words.insert(words.end(), {first.word, kSourceWord, second.word, kSourceWord, kEndpgm});
+	Program result;
+	result.code.SetType(ShaderType::Pixel);
+	Require(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &result.code),
+	        "complete bounded parser input");
+	const auto& instructions = result.code.GetInstructions();
+	Require(instructions.Size() == 7u, "four literal producers, two exports and the terminator");
+	CheckExport(instructions.At(4), first, 32u);
+	CheckExport(instructions.At(5), second, 40u);
+	return result;
+}
+
 std::string Instructions(const String8& source)
 {
 	std::istringstream input(source.c_str());
@@ -600,6 +622,93 @@ TEST(EmulatorShaderExport, ValidatesFullAndSparseMrtAndFullParameterDataflow)
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderExport, DualSourceSecondaryUsesLocation0Index1)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    for (const bool packed: {false, true})
+		    {
+			    // Guest MRT1 carries the secondary color; MRT0 stays the primary output.
+			    const auto secondary = packed ? Mrt(1, 15, 4u) : Mrt(1, 15, 0u);
+			    const auto primary   = packed ? Mrt(0, 15, 7u) : Mrt(0, 15, 3u);
+			    const uint8_t mode   = packed ? 4 : 9;
+			    for (const bool dual: {false, true})
+			    {
+				    const auto program = ParseColorPair(secondary, primary);
+				    ShaderPixelInputInfo input {};
+				    input.target_output_mode[0] = mode;
+				    input.target_output_mode[1] = mode;
+				    input.dual_source_blend     = dual;
+				    const auto source = Validate(program, nullptr, &input);
+				    if (dual)
+				    {
+					    Has(source, "OpDecorate %outColor1 Location 0");
+					    Has(source, "OpDecorate %outColor1 Index 1");
+					    Require(source.find("OpDecorate %outColor1 Location 1") == std::string::npos,
+					            "secondary export has no Location 1 decoration");
+				    } else
+				    {
+					    Has(source, "OpDecorate %outColor1 Location 1");
+					    Require(source.find("OpDecorate %outColor1 Index") == std::string::npos,
+					            "ordinary MRT1 has no dual-source index");
+				    }
+				    Require(source.find("\nOpStore %outColor1 ") != std::string::npos, "MRT1 store is preserved");
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderExport, DualSourceModuleRejectsTargetsBeyondTheSecondaryPair)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    const auto program = ParseColorPair(Mrt(1, 15, 0u), Mrt(0, 15, 3u));
+		    ShaderPixelInputInfo input {};
+		    input.target_output_mode[0] = 9;
+		    input.target_output_mode[1] = 9;
+		    input.target_output_mode[2] = 9;
+		    input.dual_source_blend     = true;
+		    (void)SpirvGenerateSource(program.code, nullptr, &input, nullptr);
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(kRejectedExit), ::testing::ContainsRegex("requires MRT0 and MRT1 color exports only"));
+}
+
+TEST(EmulatorShaderExport, DualSourceModuleRejectsMissingSecondaryMode)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    const auto program = ParseColorPair(Mrt(1, 15, 0u), Mrt(0, 15, 3u));
+		    ShaderPixelInputInfo input {};
+		    input.target_output_mode[0] = 9;
+		    input.dual_source_blend     = true;
+		    (void)SpirvGenerateSource(program.code, nullptr, &input, nullptr);
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(kRejectedExit), ::testing::ContainsRegex("requires MRT0 and MRT1 color exports only"));
+}
+
+TEST(EmulatorShaderExport, DualSourceModuleRejectsNullOnlyProgram)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    const auto program = Parse(kNull);
+		    ShaderPixelInputInfo input {};
+		    input.target_output_mode[0] = 9;
+		    input.target_output_mode[1] = 9;
+		    input.dual_source_blend     = true;
+		    (void)SpirvGenerateSource(program.code, nullptr, &input, nullptr);
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(kRejectedExit), ::testing::ContainsRegex("requires MRT0 and MRT1 color exports only"));
 }
 
 TEST(EmulatorShaderExport, HandConstructedStaleTailSlotsRemainRejected)

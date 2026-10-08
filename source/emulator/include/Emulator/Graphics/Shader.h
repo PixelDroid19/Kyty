@@ -2261,6 +2261,17 @@ struct ShaderPixelCustomInterpolation
 	[[nodiscard]] bool Enabled() const { return per_vertex_inputs != 0 || aliased_parameter_inputs != 0; }
 };
 
+// Non-null color exports per guest MRT, summarized from the parsed pixel program.
+struct ShaderPixelColorExports
+{
+	uint8_t enable[8]       = {}; // OR of export EN bits; 0 = target never exported
+	uint8_t packed          = 0;  // bit per target with a COMPR export
+	uint8_t full            = 0;  // bit per target with a non-COMPR export
+	uint8_t partial_targets = 0;  // bit per target with any color export whose EN is not 0xF
+};
+
+[[nodiscard]] ShaderPixelColorExports ShaderSummarizePixelColorExports(const ShaderCode& code);
+
 struct ShaderPixelInputInfo
 {
 	bool                   stage_enabled             = true;
@@ -2285,6 +2296,10 @@ struct ShaderPixelInputInfo
 	bool                   ieee_mode                 = false;
 	bool                   fp16_overflow             = false;
 	bool                   fp16_overflow_known       = false;
+	// Summary of the parsed color exports. Filled only for admitted Gen5 pixel programs.
+	ShaderPixelColorExports color_exports;
+	// Guest MRT1 is lowered to Location 0 Index 1 for blend0's SRC1 factors.
+	bool                   dual_source_blend         = false;
 	// Immutable diagnostic configuration resolved once at the draw boundary.
 	ShaderFragmentTapConfig fragment_tap;
 	// Immutable host-only aggregate selection resolved at the draw boundary.

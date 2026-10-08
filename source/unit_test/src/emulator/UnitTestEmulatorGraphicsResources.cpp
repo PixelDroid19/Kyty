@@ -670,6 +670,32 @@ TEST(EmulatorGraphicsResources, DualSourceLimitTracksUsedOutputsRatherThanUnused
 	EXPECT_EQ(VulkanValidateBlendAttachments(capabilities, attachments, 2u, 0u, 3u), VulkanBlendAdmission::Supported);
 }
 
+TEST(EmulatorGraphicsResources, DualSourceProductionMasksAdmitOnlyTheSecondaryVariant)
+{
+	VkPipelineColorBlendAttachmentState attachment {};
+	attachment.blendEnable         = VK_TRUE;
+	attachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC1_COLOR;
+	attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+	attachment.colorBlendOp        = VK_BLEND_OP_ADD;
+	attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC1_ALPHA;
+	attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
+	attachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+	const VulkanBlendCapabilities enabled {{VK_TRUE, VK_TRUE}, 8u, 1u};
+	const VulkanBlendCapabilities host_disabled {{VK_TRUE, VK_FALSE}, 8u, 1u};
+	const VulkanBlendCapabilities host_limit_zero {{VK_TRUE, VK_TRUE}, 8u, 0u};
+
+	// The dual variant declares only Location 0 (fragment mask 1); MRT1 is the secondary of attachment 0.
+	EXPECT_EQ(VulkanValidateBlendAttachments(enabled, &attachment, 1u, 1u, 1u), VulkanBlendAdmission::Supported);
+	EXPECT_EQ(VulkanValidateBlendAttachments(host_disabled, &attachment, 1u, 1u, 1u),
+	          VulkanBlendAdmission::DualSourceBlendNotEnabled);
+	EXPECT_EQ(VulkanValidateBlendAttachments(host_limit_zero, &attachment, 1u, 1u, 1u),
+	          VulkanBlendAdmission::DualSourceAttachmentLimit);
+	// An ordinary MRT1 is a second Location: it exceeds the one-location limit, and nothing supplies a secondary.
+	EXPECT_EQ(VulkanValidateBlendAttachments(enabled, &attachment, 1u, 0u, 3u), VulkanBlendAdmission::DualSourceAttachmentLimit);
+	EXPECT_EQ(VulkanValidateBlendAttachments(VulkanBlendCapabilities {{VK_TRUE, VK_TRUE}, 8u, 8u}, &attachment, 1u, 0u, 3u),
+	          VulkanBlendAdmission::MissingSecondaryOutput);
+}
+
 TEST(EmulatorGraphicsResources, RawFormat5PreservesUnsignedByteValuesAndAliasType)
 {
 	ShaderTextureResource descriptor {};

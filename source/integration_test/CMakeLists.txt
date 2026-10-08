@@ -326,6 +326,16 @@ set_tests_properties(KytyGraphicsDiagnosticsIntegration.HostNanRasterBaseline PR
 	TIMEOUT 120
 )
 
+add_test(
+	NAME KytyGraphicsDiagnosticsIntegration.DualSourceBlendRaster
+	COMMAND $<TARGET_FILE:kyty_graphics_diagnostics_integration> --dual-source-blend-raster-only
+)
+set_tests_properties(KytyGraphicsDiagnosticsIntegration.DualSourceBlendRaster PROPERTIES
+	FIXTURES_REQUIRED KytyIntegrationBinaries
+	TIMEOUT 120
+	SKIP_RETURN_CODE 77
+)
+
 add_executable(kyty_libc_wide_integration
 	src/LibcWideIntegration.cpp
 )

@@ -350,12 +350,70 @@ The coordinate fixture observes initial EXEC and thread-limit masking; later
 guest EXEC writes and possible reactivation of initially inactive lanes remain
 unqualified.
 
-Secondary blend outputs still need a consumed guest trigger/format contract.
+Secondary blend outputs have bounded translation and offscreen host coverage; a consumed guest pass is still needed to qualify compatibility.
 Sampled-parent freshness and depth reuse need producer/owner/content evidence;
 indexed tables need a nonzero consumed index, extent, stride and generation;
 compression metadata needs its plane, encoding and completed first write.
 PCM/ATRAC9 append needs observed cursor, starvation, lifetime and completion
 transitions. None of those behaviors is inferred from another implementation.
+
+### Bounded secondary blend translation (2026-10-08)
+
+Admission (all required): Gen5 pixel program, stage enabled and not embedded;
+effective blend0 uses an SRC1 factor (0x0f..0x12) after the paired SRC_ALPHA
+override rule; one active physical color destination; the only color exports are
+MRT0 and MRT1, each non-null export to both targets has EN=0xF, and each target
+uses one packing. Full (32_ABGR, mode 9) and COMPR (FP16_ABGR, mode 4) are both
+admitted when the modes match. Operations are ADD, SUBTRACT or REVERSE_SUBTRACT.
+Standard component order is required. Union enable masks alone are insufficient,
+because partial writes can leave secondary components undefined.
+
+Resolution uses the parsed program and the materialized draw state before the
+shader, module and pipeline keys, on both indexed and auto draw paths. MRT1 is
+emitted as Location 0 Index 1; the primary output remains Location 0. The DSB1
+identity word is added only to the dual variant, so ordinary identities and
+decorations are unchanged. Location admission counts one destination, while
+combined-output resource accounting keeps both declared Output variables.
+
+Host admission queries enabled dualSrcBlend, maxFragmentDualSrcAttachments and
+COLOR_ATTACHMENT_BLEND_BIT of the actual optimal format. There are no vendor or
+title branches, no new DB_SHADER_CONTROL selector and no EXP lowerer changes.
+Every other case keeps strict refusal, and no secondary values are synthesized.
+
+Verification on this host: red tests reproduced the missing secondary decoration,
+the missing cache distinction and the unsafe partial and split enables before the
+fixes. A fresh Linux Release build passed. The 68 focused contract tests passed.
+The script host run reported 2137 tests, 2129 passing, 8 skipped (three platform
+memory cases and five media-fixture cases) and no failures. The compute, wave64,
+host and memory integrations passed, as did the graphics default and NaN baseline.
+24 loader, table and raster CTests passed. The strict architecture gate and the
+13-table provenance gate passed.
+
+The offscreen Vulkan integration runs encoded guest FP32 and FP16 programs
+through the parser, the production resolver, ShaderRecompilePS, SPIR-V
+validation and a real pipeline. On an Intel Arc A770 (DG2) with Mesa 26.2.4
+vulkan-intel on Linux 7.2.9, the interior pixel is RGBA(128,191,191,255) and the
+untouched corners are (0,255,0,0) for both variants. A disabled real feature and
+a nonblendable integer format are both refused. Readback uses a color-to-transfer
+layout transition, a transfer-to-host visibility barrier, an exact fence and a
+non-coherent invalidate. This proves the bounded host translation only, not a
+consumed SRC1 pass in a game.
+
+Strict runtime evidence: a 32.9-second roguelike replay delivered 3 taps and 6
+guest read-state samples, and it keeps the gfx_storage_frontier and the failed
+playable gate. Two streaming runs of about 17 seconds each had no runtime error;
+the first final frame was a loading scene and is not a menu comparison. The repeat
+shows comparable menu composition and keeps the native hot_corruption
+classification. This makes no new gameplay, clean-render or performance claim and
+records no consumed SRC1 pass.
+
+Not performed: AMD or NVIDIA physical execution, Windows and macOS runs, and
+Vulkan VUID or synchronization-layer validation. The validation layer and Nix
+are unavailable on this host; the existing development definition is retained and
+no dependencies were introduced. Indexed tables need a consumed nonzero index,
+extent, stride and generation. DCC needs the guest layout, the full metadata plane
+and the writer completion. APPEND needs flags, cursor, lifetime, starvation and a
+callback oracle. These were investigated and not activated.
 
 ### Shared runtime and resource contracts (2026-10-08, bounded validation)
 

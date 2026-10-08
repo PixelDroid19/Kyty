@@ -4,6 +4,7 @@
 
 #include "Emulator/Config.h"
 #include "Emulator/Graphics/Pm4.h"
+#include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/Utils.h"
 
 #include <algorithm>
@@ -321,6 +322,130 @@ uint8_t ResolveColorWriteAgainstDepth(uint8_t channel_mask, bool disable_color_o
 		return 0;
 	}
 	return channel_mask;
+}
+
+namespace {
+
+// Guest blend factor codes. The paired codes 0x0b/0x0c replace both factors with SRC_ALPHA forms.
+constexpr uint8_t kBlendSrc1First          = 0x0f;
+constexpr uint8_t kBlendSrc1Last           = 0x12;
+constexpr uint8_t kBlendBothSrcAlpha       = 0x0b;
+constexpr uint8_t kBlendBothInverseSrcAlpha = 0x0c;
+
+bool BlendFactorUsesSrc1(uint8_t factor)
+{
+	return factor >= kBlendSrc1First && factor <= kBlendSrc1Last;
+}
+
+// Mirrors the pipeline's factor mapping: a paired source code overrides the destination too.
+bool BlendPairConsumesSrc1(uint8_t src, uint8_t dst)
+{
+	if (src == kBlendBothSrcAlpha || src == kBlendBothInverseSrcAlpha)
+	{
+		return false;
+	}
+	return BlendFactorUsesSrc1(src) || BlendFactorUsesSrc1(dst);
+}
+
+// COMB_FCN codes ADD (0), SUBTRACT (1) and REVERSE_SUBTRACT (4) have exact Vulkan equivalents.
+bool BlendOperationSupported(uint8_t op)
+{
+	return op == 0u || op == 1u || op == 4u;
+}
+
+// True when exactly one of the two packing masks has the target bit set.
+bool TargetHasOnePacking(uint8_t packed, uint8_t full, uint32_t target)
+{
+	return ((packed >> target) & 1u) != ((full >> target) & 1u);
+}
+
+} // namespace
+
+DualSourceBlendDecision ResolveDualSourceBlend(const DualSourceBlendInputs& in)
+{
+	const auto& blend = in.blend0;
+	if (!blend.enable || in.blend_bypass0)
+	{
+		return DualSourceBlendDecision::NotConsumed;
+	}
+	const bool color_consumes = BlendPairConsumesSrc1(blend.color_srcblend, blend.color_destblend);
+	const bool alpha_consumes = blend.separate_alpha_blend && BlendPairConsumesSrc1(blend.alpha_srcblend, blend.alpha_destblend);
+	if (!color_consumes && !alpha_consumes)
+	{
+		return DualSourceBlendDecision::NotConsumed;
+	}
+	if (!BlendOperationSupported(blend.color_comb_fcn) || (blend.separate_alpha_blend && !BlendOperationSupported(blend.alpha_comb_fcn)))
+	{
+		return DualSourceBlendDecision::Operation;
+	}
+	if (in.targets_num != 1u || !in.slot0_active)
+	{
+		return DualSourceBlendDecision::Targets;
+	}
+
+	const auto* exports = in.exports;
+	if (!in.program_admitted || in.null_exports_only || exports == nullptr)
+	{
+		return DualSourceBlendDecision::Exports;
+	}
+	for (uint32_t target = 2u; target < 8u; target++)
+	{
+		if (exports->enable[target] != 0u || (((exports->packed | exports->full) >> target) & 1u) != 0u)
+		{
+			return DualSourceBlendDecision::Exports;
+		}
+	}
+	// MRT0 and MRT1 must each carry exactly one packing, and both must enable the same channels.
+	for (uint32_t target = 0u; target < 2u; target++)
+	{
+		if (exports->enable[target] == 0u || !TargetHasOnePacking(exports->packed, exports->full, target))
+		{
+			return DualSourceBlendDecision::Exports;
+		}
+	}
+	// A disabled component of a secondary export is an undefined output. The union of enables is not
+	// enough: every MRT0 and MRT1 export must write all four components.
+	if (exports->enable[0] != 0xfu || exports->enable[1] != 0xfu || (exports->partial_targets & 0x3u) != 0u)
+	{
+		return DualSourceBlendDecision::Exports;
+	}
+
+	if (in.output_mode == nullptr)
+	{
+		return DualSourceBlendDecision::Modes;
+	}
+	const uint8_t mode = in.output_mode[0];
+	if (in.output_mode[1] != mode || (mode != 4u && mode != 9u))
+	{
+		return DualSourceBlendDecision::Modes;
+	}
+	for (uint32_t target = 2u; target < 8u; target++)
+	{
+		if (in.output_mode[target] != 0u)
+		{
+			return DualSourceBlendDecision::Modes;
+		}
+	}
+	// Mode 4 is FP16_ABGR with COMPR exports; mode 9 is 32_ABGR with full exports.
+	for (uint32_t target = 0u; target < 2u; target++)
+	{
+		const bool packed = ((exports->packed >> target) & 1u) != 0u;
+		if (packed != (mode == 4u))
+		{
+			return DualSourceBlendDecision::Modes;
+		}
+	}
+
+	if (in.output_order == nullptr || in.output_order[0] != 0u || in.output_order[1] != 0u)
+	{
+		return DualSourceBlendDecision::ComponentOrder;
+	}
+
+	if (!in.host_dual_source_enabled || in.host_max_dual_source_attachments < 1u || !in.target0_blendable)
+	{
+		return DualSourceBlendDecision::HostCapability;
+	}
+	return DualSourceBlendDecision::Eligible;
 }
 
 bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader, const HW::DepthControl& depth)

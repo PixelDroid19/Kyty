@@ -3740,6 +3740,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		ps_info->native_wave = analysis.native_wave->Get(*analysis.code, ps_wave32 ? 32u : 64u);
 		ps_info->required_subgroup_size = ShaderUsesNativeWaveState(*analysis.code) ? ps_info->native_wave.guest_wave_size : 0u;
 		ps_info->has_only_null_exports     = ShaderHasOnlyNullPixelExports(*analysis.code);
+		ps_info->color_exports             = ShaderSummarizePixelColorExports(*analysis.code);
 		if (allow_noop_stage_disable && !ShaderPreventsNoopPixelElision(*analysis.code))
 		{
 			ps_info->stage_enabled = false;
@@ -5174,6 +5175,10 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 		ret.ids.Add(input_info->target_output_mode[i]);
 		ret.ids.Add(input_info->target_output_order[i]);
 	}
+	if (input_info->dual_source_blend)
+	{
+		ret.ids.Add(0x44534231u); // DSB1: MRT1 is emitted as Location 0 Index 1.
+	}
 
 	for (uint32_t i = 0; i < 32u; i++)
 	{
@@ -5220,6 +5225,33 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	return ret;
 }
 
+// Maps a color MRT export to its guest target and packing. Null and non-MRT exports are rejected.
+static bool ShaderPixelMrtExportTarget(const ShaderInstruction& inst, uint32_t* target, bool* compressed)
+{
+	using namespace ShaderInstructionFormat;
+	switch (inst.format)
+	{
+		case Mrt0Vsrc0Vsrc1ComprVmDone: *target = 0u; *compressed = true; break;
+		case Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone: *target = 0u; *compressed = false; break;
+		case Mrt1Vsrc0Vsrc1ComprVm: *target = 1u; *compressed = true; break;
+		case Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm: *target = 1u; *compressed = false; break;
+		case Mrt2Vsrc0Vsrc1ComprVm: *target = 2u; *compressed = true; break;
+		case Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm: *target = 2u; *compressed = false; break;
+		case Mrt3Vsrc0Vsrc1ComprVm: *target = 3u; *compressed = true; break;
+		case Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm: *target = 3u; *compressed = false; break;
+		case Mrt4Vsrc0Vsrc1ComprVm: *target = 4u; *compressed = true; break;
+		case Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm: *target = 4u; *compressed = false; break;
+		case Mrt5Vsrc0Vsrc1ComprVm: *target = 5u; *compressed = true; break;
+		case Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm: *target = 5u; *compressed = false; break;
+		case Mrt6Vsrc0Vsrc1ComprVm: *target = 6u; *compressed = true; break;
+		case Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm: *target = 6u; *compressed = false; break;
+		case Mrt7Vsrc0Vsrc1ComprVm: *target = 7u; *compressed = true; break;
+		case Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm: *target = 7u; *compressed = false; break;
+		default: return false;
+	}
+	return true;
+}
+
 bool ShaderPixelMrtProbeMatchesInstruction(const ShaderCode& code, const ShaderPixelInputInfo& input_info,
 	                                         const ShaderPixelInput0ProbeConfig& config)
 {
@@ -5233,29 +5265,40 @@ bool ShaderPixelMrtProbeMatchesInstruction(const ShaderCode& code, const ShaderP
 	{
 		return false;
 	}
-	uint32_t target = 4u;
-	using namespace ShaderInstructionFormat;
-	switch (inst.format)
+	uint32_t target     = 0u;
+	bool     compressed = false;
+	if (!ShaderPixelMrtExportTarget(inst, &target, &compressed))
 	{
-		case Mrt0Vsrc0Vsrc1ComprVmDone:
-		case Mrt0Vsrc0Vsrc1Vsrc2Vsrc3VmDone: target = 0u; break;
-		case Mrt1Vsrc0Vsrc1ComprVm:
-		case Mrt1Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 1u; break;
-		case Mrt2Vsrc0Vsrc1ComprVm:
-		case Mrt2Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 2u; break;
-		case Mrt3Vsrc0Vsrc1ComprVm:
-		case Mrt3Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 3u; break;
-		case Mrt4Vsrc0Vsrc1ComprVm:
-		case Mrt4Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 4u; break;
-		case Mrt5Vsrc0Vsrc1ComprVm:
-		case Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 5u; break;
-		case Mrt6Vsrc0Vsrc1ComprVm:
-		case Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 6u; break;
-		case Mrt7Vsrc0Vsrc1ComprVm:
-		case Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm: target = 7u; break;
-		default: return false;
+		return false;
 	}
 	return target == config.mrt_target && input_info.target_output_mode[target] != 0u;
+}
+
+ShaderPixelColorExports ShaderSummarizePixelColorExports(const ShaderCode& code)
+{
+	ShaderPixelColorExports summary;
+	if (code.GetType() != ShaderType::Pixel)
+	{
+		return summary;
+	}
+	for (uint32_t i = 0; i < code.GetInstructions().Size(); i++)
+	{
+		const auto& inst = code.GetInstructions().At(i);
+		uint32_t    target     = 0u;
+		bool        compressed = false;
+		if (inst.type != ShaderInstructionType::Exp || inst.exp_enable_mask == 0u ||
+		    !ShaderPixelMrtExportTarget(inst, &target, &compressed))
+		{
+			continue;
+		}
+		summary.enable[target] |= inst.exp_enable_mask;
+		(compressed ? summary.packed : summary.full) |= static_cast<uint8_t>(1u << target);
+		if (inst.exp_enable_mask != 0xfu)
+		{
+			summary.partial_targets |= static_cast<uint8_t>(1u << target);
+		}
+	}
+	return summary;
 }
 
 bool ShaderPixelSampleProbeMatchesInstruction(const ShaderCode& code, const ShaderPixelInput0ProbeConfig& config)

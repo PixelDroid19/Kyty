@@ -7,6 +7,10 @@
 
 #ifdef KYTY_EMU_ENABLED
 
+namespace Kyty::Libs::Graphics {
+struct ShaderPixelColorExports;
+} // namespace Kyty::Libs::Graphics
+
 namespace Kyty::Libs::Graphics::State {
 
 struct ScissorRect
@@ -212,6 +216,39 @@ struct ColorTargetLayout
 // The latter are verified from decoded shader code before disabling the stage.
 [[nodiscard]] bool PixelShaderStageRequired(uint32_t target_mask, const HW::ShaderRegisters& shader,
                                             const HW::DepthControl& depth);
+
+// Dual-source (SRC1) admission for blend0 with its guest decision reasons. Guest state is checked
+// before host capability, so each refusal names the first failing input.
+enum class DualSourceBlendDecision : uint8_t
+{
+	NotConsumed,
+	Eligible,
+	Operation,
+	Targets,
+	Exports,
+	Modes,
+	ComponentOrder,
+	HostCapability,
+};
+
+struct DualSourceBlendInputs
+{
+	HW::BlendControl                                     blend0;
+	bool                                                 blend_bypass0    = false;
+	bool                                                 slot0_active     = false; // configured, active, defined format
+	uint32_t                                             targets_num      = 0;
+	bool                                                 program_admitted = false; // Gen5, stage enabled, not embedded
+	bool                                                 null_exports_only = false;
+	const Kyty::Libs::Graphics::ShaderPixelColorExports* exports          = nullptr;
+	const uint8_t*                                       output_mode      = nullptr; // eight guest modes
+	const uint8_t*                                       output_order     = nullptr; // eight COMP_SWAP orders
+	bool                                                 host_dual_source_enabled         = false;
+	uint32_t                                             host_max_dual_source_attachments = 0;
+	// Plain flag so the resolver stays pure. The caller computes it only after the other host inputs pass.
+	bool target0_blendable = false;
+};
+
+[[nodiscard]] DualSourceBlendDecision ResolveDualSourceBlend(const DualSourceBlendInputs& in);
 
 // A sampled surface may reuse a render target or storage texture when
 // FindRenderTexture / FindStorageTexture found a live object (Equals, non-exact

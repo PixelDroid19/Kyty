@@ -303,6 +303,23 @@ void Spirv::GenerateSource()
 	WriteFunctions();
 }
 
+// A dual-source pixel module is exactly the MRT0 and MRT1 color pair, both with supported mode 4 (COMPR) or 9 (full).
+// The program must have real color exports, and no other target may be declared.
+static bool DualSourcePixelVariantMalformed(const ShaderPixelInputInfo& input, bool only_null_exports)
+{
+	const uint8_t mode = input.target_output_mode[0];
+	if (only_null_exports || (mode != 4 && mode != 9) || input.target_output_mode[1] != mode)
+	{
+		return true;
+	}
+	uint8_t extra_modes = 0;
+	for (int rt = 2; rt < 8; rt++)
+	{
+		extra_modes |= input.target_output_mode[rt];
+	}
+	return extra_modes != 0;
+}
+
 static bool spirv_uses_dpp(const ShaderCode& code)
 {
 	for (const auto& inst: code.GetInstructions())
@@ -863,6 +880,11 @@ void Spirv::WriteAnnotations()
 	{
 		case ShaderType::Pixel:
 			if (!ShaderHasOnlyNullPixelExports(m_code)) { vars.Add("OpDecorate %outColor Location 0"); }
+			if (m_ps_input_info != nullptr && m_ps_input_info->dual_source_blend &&
+			    DualSourcePixelVariantMalformed(*m_ps_input_info, ShaderHasOnlyNullPixelExports(m_code)))
+			{
+				EXIT("dual-source pixel module requires MRT0 and MRT1 color exports only\n");
+			}
 			if (ShaderCodeHasSafePixelDepthExport(m_code))
 			{
 				vars.Add("OpDecorate %fragDepth BuiltIn FragDepth");
@@ -873,7 +895,10 @@ void Spirv::WriteAnnotations()
 				{
 					if (m_ps_input_info->target_output_mode[rt] != 0 && !ShaderHasOnlyNullPixelExports(m_code))
 					{
-						vars.Add(String8::FromPrintf("OpDecorate %%outColor%d Location %d", rt, rt));
+						// SRC1 consumers read MRT1 as the secondary color of Location 0.
+						const bool secondary = rt == 1 && m_ps_input_info->dual_source_blend;
+						vars.Add(String8::FromPrintf("OpDecorate %%outColor%d Location %d", rt, secondary ? 0 : rt));
+						if (secondary) { vars.Add("OpDecorate %outColor1 Index 1"); }
 					}
 				}
 				for (uint32_t i = 0; i < m_ps_input_info->input_num; i++)

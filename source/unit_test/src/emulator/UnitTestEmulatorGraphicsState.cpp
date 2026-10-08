@@ -62,6 +62,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <vector>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -69,6 +70,213 @@
 UT_BEGIN(EmulatorGraphicsState);
 
 using namespace Libs::Graphics;
+
+namespace {
+
+// Guest pixel exports are encoded like the shader export tests: literal producers, then EXP words.
+constexpr std::array<int, 4>      kDualRegisters = {17, 61, 173, 239};
+constexpr std::array<uint32_t, 4> kDualValues    = {0x3c003800u, 0x44004000u, 0x40a00537u, 0x3f800000u};
+constexpr uint32_t                kDualSourceWord = 0xefad3d11u;
+constexpr uint32_t                kDualEndpgm     = 0xbf810000u;
+
+struct GuestExport
+{
+	uint32_t target;
+	uint8_t  enable;
+	bool     packed;
+};
+
+uint32_t GuestExportWord(const GuestExport& exp)
+{
+	const uint32_t control = exp.target == 0u ? (exp.packed ? 7u : 3u) : (exp.packed ? 4u : 0u);
+	return 0xf8000000u | (exp.target << 4u) | exp.enable | ((control & 1u) << 12u) | ((control & 2u) << 10u) | ((control & 4u) << 8u);
+}
+
+// Parses the guest program with the production parser, then summarizes its color exports.
+ShaderPixelColorExports SummarizeGuestExports(const std::vector<GuestExport>& exports, bool* parsed)
+{
+	std::vector<uint32_t> words;
+	for (unsigned source = 0; source < 4; ++source)
+	{
+		words.push_back(0x7e0002ffu | (static_cast<uint32_t>(kDualRegisters[source]) << 17u)); // v_mov_b32 vN, literal
+		words.push_back(kDualValues[source]);
+	}
+	for (const auto& exp: exports)
+	{
+		words.push_back(GuestExportWord(exp));
+		words.push_back(kDualSourceWord);
+	}
+	words.push_back(kDualEndpgm);
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	*parsed = ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code);
+	return ShaderSummarizePixelColorExports(code);
+}
+
+// Eligible blend0: SRC1_COLOR source, ONE_MINUS_SRC1_COLOR destination, ADD, separate alpha off.
+HW::BlendControl DualSourceBlend()
+{
+	HW::BlendControl blend;
+	blend.enable          = true;
+	blend.color_srcblend  = 0x0f;
+	blend.color_destblend = 0x10;
+	blend.color_comb_fcn  = 0;
+	return blend;
+}
+
+struct DualSourceFixture
+{
+	HW::BlendControl         blend            = DualSourceBlend();
+	bool                     blend_bypass     = false;
+	bool                     slot0_active     = true;
+	uint32_t                 targets_num      = 1;
+	bool                     program_admitted = true;
+	bool                     null_only        = false;
+	std::vector<GuestExport> exports          = {{0u, 15, false}, {1u, 15, false}};
+	uint8_t                  output_mode[8]   = {9, 9, 0, 0, 0, 0, 0, 0};
+	uint8_t                  output_order[8]  = {};
+	bool                     host_enabled     = true;
+	uint32_t                 host_max         = 1;
+	bool                     blendable        = true;
+};
+
+State::DualSourceBlendDecision DecideDualSource(const DualSourceFixture& fixture)
+{
+	// The parser and the next-gen Gen5 summary depend on the configuration, so set it per case.
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	bool parsed = false;
+	const auto exports = SummarizeGuestExports(fixture.exports, &parsed);
+	EXPECT_TRUE(parsed);
+	State::DualSourceBlendInputs in;
+	in.blend0                           = fixture.blend;
+	in.blend_bypass0                    = fixture.blend_bypass;
+	in.slot0_active                     = fixture.slot0_active;
+	in.targets_num                      = fixture.targets_num;
+	in.program_admitted                 = fixture.program_admitted;
+	in.null_exports_only                = fixture.null_only;
+	in.exports                          = &exports;
+	in.output_mode                      = fixture.output_mode;
+	in.output_order                     = fixture.output_order;
+	in.host_dual_source_enabled         = fixture.host_enabled;
+	in.host_max_dual_source_attachments = fixture.host_max;
+	in.target0_blendable                = fixture.blendable;
+	return State::ResolveDualSourceBlend(in);
+}
+
+struct DualSourceCase
+{
+	const char*                      name;
+	void                             (*mutate)(DualSourceFixture&);
+	State::DualSourceBlendDecision expected;
+};
+
+} // namespace
+
+TEST(EmulatorGraphicsState, ResolvesDualSourceBlendFromParsedGuestExports)
+{
+	const DualSourceCase cases[] = {
+	    {"eligible full pair", [](DualSourceFixture&) {}, State::DualSourceBlendDecision::Eligible},
+	    {"eligible packed pair with mode 4",
+	     [](DualSourceFixture& f) {
+		     f.exports     = {{0u, 15, true}, {1u, 15, true}};
+		     f.output_mode[0] = 4;
+		     f.output_mode[1] = 4;
+	     },
+	     State::DualSourceBlendDecision::Eligible},
+	    {"partial enable EN5 on both targets leaves secondary components undefined",
+	     [](DualSourceFixture& f) { f.exports = {{0u, 5, false}, {1u, 5, false}}; }, State::DualSourceBlendDecision::Exports},
+	    {"MRT1 partial EN7 with full MRT0",
+	     [](DualSourceFixture& f) { f.exports = {{0u, 15, false}, {1u, 7, false}}; }, State::DualSourceBlendDecision::Exports},
+	    {"MRT1 union EN15 split across two full exports",
+	     [](DualSourceFixture& f) { f.exports = {{0u, 15, false}, {1u, 7, false}, {1u, 8, false}}; },
+	     State::DualSourceBlendDecision::Exports},
+	    {"eligible reverse subtract",
+	     [](DualSourceFixture& f) { f.blend.color_comb_fcn = 4; }, State::DualSourceBlendDecision::Eligible},
+	    {"separate alpha consumes SRC1 when color does not",
+	     [](DualSourceFixture& f) {
+		     f.blend.color_srcblend  = 0x01;
+		     f.blend.color_destblend = 0x05;
+		     f.blend.separate_alpha_blend = true;
+		     f.blend.alpha_srcblend       = 0x0f;
+		     f.blend.alpha_destblend      = 0x10;
+	     },
+	     State::DualSourceBlendDecision::Eligible},
+	    {"separate alpha factors ignored without separate alpha",
+	     [](DualSourceFixture& f) {
+		     f.blend.color_srcblend  = 0x01;
+		     f.blend.color_destblend = 0x05;
+		     f.blend.alpha_srcblend  = 0x0f;
+		     f.blend.alpha_destblend = 0x10;
+	     },
+	     State::DualSourceBlendDecision::NotConsumed},
+	    {"BothSrcAlpha pair overrides the SRC1 destination",
+	     [](DualSourceFixture& f) { f.blend.color_srcblend = 0x0b; }, State::DualSourceBlendDecision::NotConsumed},
+	    {"BothInverseSrcAlpha pair overrides the SRC1 source",
+	     [](DualSourceFixture& f) { f.blend.color_srcblend = 0x0c; f.blend.color_destblend = 0x0f; },
+	     State::DualSourceBlendDecision::NotConsumed},
+	    {"no SRC1 factor", [](DualSourceFixture& f) { f.blend.color_srcblend = 0x01; f.blend.color_destblend = 0x05; },
+	     State::DualSourceBlendDecision::NotConsumed},
+	    {"blend disabled", [](DualSourceFixture& f) { f.blend.enable = false; }, State::DualSourceBlendDecision::NotConsumed},
+	    {"blend bypass", [](DualSourceFixture& f) { f.blend_bypass = true; }, State::DualSourceBlendDecision::NotConsumed},
+	    {"MIN operation", [](DualSourceFixture& f) { f.blend.color_comb_fcn = 2; }, State::DualSourceBlendDecision::Operation},
+	    {"MAX operation", [](DualSourceFixture& f) { f.blend.color_comb_fcn = 3; }, State::DualSourceBlendDecision::Operation},
+	    {"separate alpha MAX operation",
+	     [](DualSourceFixture& f) {
+		     f.blend.separate_alpha_blend = true;
+		     f.blend.alpha_comb_fcn       = 3;
+	     },
+	     State::DualSourceBlendDecision::Operation},
+	    {"two physical targets", [](DualSourceFixture& f) { f.targets_num = 2; }, State::DualSourceBlendDecision::Targets},
+	    {"slot 0 inactive", [](DualSourceFixture& f) { f.slot0_active = false; }, State::DualSourceBlendDecision::Targets},
+	    {"MRT1 export missing", [](DualSourceFixture& f) { f.exports = {{0u, 15, false}}; }, State::DualSourceBlendDecision::Exports},
+	    {"MRT2 exported",
+	     [](DualSourceFixture& f) { f.exports.push_back({2u, 15, false}); }, State::DualSourceBlendDecision::Exports},
+	    {"EN mismatch between MRT0 and MRT1", [](DualSourceFixture& f) { f.exports = {{0u, 15, false}, {1u, 3, false}}; },
+	     State::DualSourceBlendDecision::Exports},
+	    {"mixed packing on MRT0",
+	     [](DualSourceFixture& f) { f.exports = {{0u, 15, false}, {0u, 15, true}, {1u, 15, false}}; },
+	     State::DualSourceBlendDecision::Exports},
+	    {"null exports only",
+	     [](DualSourceFixture& f) {
+		     f.exports   = {{0u, 0, true}};
+		     f.null_only = true;
+	     },
+	     State::DualSourceBlendDecision::Exports},
+	    {"program not admitted (not Gen5 or embedded)", [](DualSourceFixture& f) { f.program_admitted = false; },
+	     State::DualSourceBlendDecision::Exports},
+	    {"MRT1 mode differs from MRT0", [](DualSourceFixture& f) { f.output_mode[1] = 4; }, State::DualSourceBlendDecision::Modes},
+	    {"packed export with full mode",
+	     [](DualSourceFixture& f) {
+		     f.exports = {{0u, 15, true}, {1u, 15, true}};
+	     },
+	     State::DualSourceBlendDecision::Modes},
+	    {"declared MRT2 mode", [](DualSourceFixture& f) { f.output_mode[2] = 9; }, State::DualSourceBlendDecision::Modes},
+	    {"component order on MRT1", [](DualSourceFixture& f) { f.output_order[1] = 1; },
+	     State::DualSourceBlendDecision::ComponentOrder},
+	    {"host dual-source feature disabled", [](DualSourceFixture& f) { f.host_enabled = false; },
+	     State::DualSourceBlendDecision::HostCapability},
+	    {"host attachment limit zero", [](DualSourceFixture& f) { f.host_max = 0; }, State::DualSourceBlendDecision::HostCapability},
+	    {"target format not blendable", [](DualSourceFixture& f) { f.blendable = false; },
+	     State::DualSourceBlendDecision::HostCapability},
+	    {"guest refusal precedes host refusal",
+	     [](DualSourceFixture& f) {
+		     f.blend.color_comb_fcn = 2;
+		     f.host_enabled         = false;
+	     },
+	     State::DualSourceBlendDecision::Operation},
+	};
+	for (const auto& test: cases)
+	{
+		DualSourceFixture fixture;
+		test.mutate(fixture);
+		EXPECT_EQ(DecideDualSource(fixture), test.expected) << test.name;
+	}
+}
+
 using namespace GraphicsRetirementHelpers;
 
 TEST(EmulatorGraphicsState, AgcAsyncQueueHandlesKeepSeparateOrderedSlots)

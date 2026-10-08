@@ -654,22 +654,23 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 		}
 	}
 
-	// The current pixel emitter exports MRT locations, not Index=1 secondary
-	// colors. Enabling dualSrcBlend alone cannot supply those missing values.
-	uint32_t fragment_output_mask = has_fragment_stage ? 1u : 0u;
+	// A dual-source variant writes MRT1 as Location 0 Index 1, so only Location 0 is a fragment output location.
+	const uint32_t secondary_output_mask = ps_input_info->dual_source_blend ? 1u : 0u;
+	uint32_t       fragment_output_mask  = has_fragment_stage ? 1u : 0u;
 	for (uint32_t rt = 1u; rt < 8u; ++rt)
 	{
-		if (ps_input_info->target_output_mode[rt] != 0u) { fragment_output_mask |= 1u << rt; }
+		if (ps_input_info->target_output_mode[rt] != 0u && !(secondary_output_mask != 0u && rt == 1u)) { fragment_output_mask |= 1u << rt; }
 	}
 	const auto blend_admission = VulkanValidateBlendAttachments(gctx->blend_capabilities, color_blend_attachments,
-	                                                            static_params->color_targets_num, 0u, fragment_output_mask);
+	                                                            static_params->color_targets_num, secondary_output_mask, fragment_output_mask);
 	if (blend_admission != VulkanBlendAdmission::Supported)
 	{
 		EXIT("unsupported graphics blend state: reason=%u targets=%u independent_enabled=%u dual_source_enabled=%u "
-		     "max_targets=%u max_dual_source_targets=%u secondary_outputs=0\n",
+		     "max_targets=%u max_dual_source_targets=%u secondary_outputs=%u\n",
 		     static_cast<uint32_t>(blend_admission), static_params->color_targets_num,
 		     gctx->blend_capabilities.enabled.independent_blend, gctx->blend_capabilities.enabled.dual_source_blend,
-		     gctx->blend_capabilities.max_color_attachments, gctx->blend_capabilities.max_dual_source_attachments);
+		     gctx->blend_capabilities.max_color_attachments, gctx->blend_capabilities.max_dual_source_attachments,
+		     secondary_output_mask);
 	}
 
 	VkPipelineColorBlendStateCreateInfo color_blending {};
@@ -724,7 +725,8 @@ static VulkanPipeline* CreatePipelineInternal(VkRenderPass render_pass, const Sh
 	EXIT_IF(pipeline->pipeline_layout != nullptr);
 
 	const ShaderBindResources* descriptor_stages[] = {&vs_input_info->bind, &ps_input_info->bind};
-	// Match the generated fragment interface: Location 0 is always declared.
+	// Declared color Output variables, including a dual-source Index 1 secondary.
+	// maxFragmentCombinedOutputResources is not a Location count.
 	uint32_t fragment_outputs = 1;
 	for (uint32_t rt = 1; rt < 8; ++rt)
 	{

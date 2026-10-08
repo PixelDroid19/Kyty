@@ -18,6 +18,7 @@
 #include "Emulator/Graphics/ShaderComputeWaveLds.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Graphics/ShaderTranslationCache.h"
 #include "Emulator/Graphics/Tile.h"
 #include "Emulator/Graphics/Utils.h"
 #include "Emulator/Graphics/VulkanVertexInputFormat.h"
@@ -6897,6 +6898,30 @@ TEST(EmulatorGraphicsPackets, PixelShaderIdentityIncludesTextureSampleOperation)
 	EXPECT_NE(regular_id, depth_reference_id);
 	EXPECT_NE(regular_id, mixed_id);
 	EXPECT_NE(depth_reference_id, mixed_id);
+}
+
+TEST(EmulatorGraphicsPackets, PixelShaderIdentityAndModuleKeyIncludeDualSourceBlend)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+
+	HW::PixelShaderInfo regs {};
+	regs.ps_regs.chksum = 0x0123456789abcdefu;
+
+	ShaderPixelInputInfo ordinary {};
+	auto                 dual = ordinary;
+	dual.dual_source_blend    = true;
+
+	const auto ordinary_id = ShaderGetIdPS(&regs, &ordinary);
+	const auto dual_id     = ShaderGetIdPS(&regs, &dual);
+	EXPECT_NE(ordinary_id, dual_id);
+
+	const auto ordinary_key = ShaderModuleKey::Create(ordinary_id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true);
+	const auto dual_key     = ShaderModuleKey::Create(dual_id, ShaderModuleStage::Pixel, Config::ShaderOptimizationType::Performance, true);
+	EXPECT_NE(ordinary_key, dual_key);
 }
 
 TEST(EmulatorGraphicsPackets, VertexShaderIdentityIncludesGen5FetchRegistersAndProlog)
