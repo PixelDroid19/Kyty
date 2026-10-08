@@ -322,9 +322,9 @@ VulkanComputeProbe::Result CreateProbePipeline(VkDevice device, const uint32_t* 
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
 	if (wave_layout != nullptr &&
 	    !ShaderComputeWaveVulkanAttachRequiredSubgroupSize(*wave_layout, *wave_capabilities, &stage,
-	                                                     &required_subgroup_size))
+	                                                     &required_subgroup_size, true, spirv[1]))
 	{
-		*message = "paired-wave compute stage failed subgroup-size or host-limit validation";
+		*message = "wave compute stage failed subgroup-size or host-limit validation";
 		return VulkanComputeProbe::Result::Unavailable;
 	}
 	VkComputePipelineCreateInfo pipeline_info {};

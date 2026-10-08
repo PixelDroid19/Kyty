@@ -3841,6 +3841,8 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 	info->bind                = {};
 	info->meta_fill           = {};
 	info->uniform_buffer_fill = {};
+	info->native_wave_sensitive = false;
+	info->required_subgroup_size = 0;
 	info->threads_num[0] = regs->cs_regs.num_thread_x;
 	info->threads_num[1] = regs->cs_regs.num_thread_y;
 	info->threads_num[2] = regs->cs_regs.num_thread_z;
@@ -3882,6 +3884,11 @@ void ShaderGetInputInfoCS(const HW::ComputeShaderInfo* regs, const HW::ShaderReg
 		const auto user_sgpr_num =
 		    ShaderResolveGen5UserSgprCount(regs->cs_regs.user_sgpr, regs->cs_user_sgpr.count, data.user_data->eud_size_dw);
 		ShaderParseUsage2(data.user_data, &usage, &info->bind, regs->cs_user_sgpr, static_cast<int>(user_sgpr_num), &code, 0, false);
+		if (info->wave_layout.strategy == ShaderComputeWaveStrategy::Native && info->wave_layout.guest_wave_size == 32u)
+		{
+			info->native_wave_sensitive = ShaderUsesNativeWaveState(code);
+			info->required_subgroup_size = info->native_wave_sensitive ? 32u : 0u;
+		}
 		// Resource-coupled S_LOAD admission needs the exact per-PC EUD mapping.
 		// This is still before shader-cache, pipeline and descriptor preparation.
 		if (info->native_equivalence_required)
@@ -5374,6 +5381,8 @@ ShaderId ShaderGetIdCS(const HW::ComputeShaderInfo* regs, const ShaderComputeInp
 	ret.ids.Add(input_info->wave_layout.native_subgroup_size);
 	ret.ids.Add(input_info->wave_layout.banks);
 	ret.ids.Add(input_info->wave_layout.waves);
+	ret.ids.Add(static_cast<uint32_t>(input_info->native_wave_sensitive));
+	ret.ids.Add(input_info->required_subgroup_size);
 
 	for (int i = 0; i < 3; i++)
 	{

@@ -2202,6 +2202,11 @@ struct ShaderComputeInputInfo
 	bool    fp16_overflow       = false;
 	bool    fp16_overflow_known = false;
 	ShaderComputeWaveLayout wave_layout;
+	// A native Gen5 wave32 shader needs exact physical lanes only when its guest
+	// instructions observe wave state. Generated subgroup operations by
+	// themselves do not establish guest sensitivity.
+	bool                    native_wave_sensitive = false;
+	uint32_t                required_subgroup_size = 0;
 	// See ShaderComputeWaveDispatchPlan::native_equivalent_layout.
 	bool                    native_equivalent_valid = false;
 	ShaderComputeWaveLayout native_equivalent_layout;

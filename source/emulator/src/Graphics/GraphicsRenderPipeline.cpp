@@ -930,7 +930,32 @@ static VulkanPipeline* CreatePipelineInternal(const ShaderComputeInputInfo* inpu
 	comp_shader_stage_info.pName               = "main";
 	comp_shader_stage_info.pSpecializationInfo = nullptr;
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required_subgroup_size {};
-	if (input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
+	if (input_info->native_wave_sensitive)
+	{
+		if (input_info->wave_layout.strategy != ShaderComputeWaveStrategy::Native ||
+		    input_info->wave_layout.guest_wave_size != 32u || input_info->required_subgroup_size != 32u)
+		{
+			EXIT("native-wave compute sensitivity has inconsistent guest-width metadata\n");
+		}
+		const auto selection = ShaderSelectNativeSubgroup(gctx->compute_wave_vulkan_state, VK_SHADER_STAGE_COMPUTE_BIT,
+		                                                   gctx->subgroup_size, input_info->required_subgroup_size,
+		                                                   false, false, cs_shader.At(1) >= 0x00010600u);
+		if (!selection.supported)
+		{
+			EXIT("native-wave compute shader requires exact subgroup width 32, unavailable from the default width or enabled compute subgroup-size control\n");
+		}
+		auto native_layout = input_info->wave_layout;
+		native_layout.native_subgroup_size = input_info->required_subgroup_size;
+		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
+		if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(native_layout, capabilities, &comp_shader_stage_info,
+		                                                     &required_subgroup_size, selection.require_size, cs_shader.At(1)))
+		{
+			EXIT("native-wave compute layout lacks full subgroups or exceeds exact-width workgroup limits\n");
+		}
+	} else if (input_info->required_subgroup_size != 0u)
+	{
+		EXIT("compute subgroup-size metadata requires a native-wave sensitivity proof\n");
+	} else if (input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32)
 	{
 		const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(gctx->compute_wave_vulkan_state);
 		const uint64_t shared_dwords = static_cast<uint64_t>(input_info->lds_dwords) + input_info->barrier_workspace_dwords;

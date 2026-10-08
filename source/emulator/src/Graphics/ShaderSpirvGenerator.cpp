@@ -226,6 +226,10 @@ void Spirv::GenerateSource()
 			     analysis.unsupported_pc, analysis.reason.c_str());
 		}
 	}
+	if (UsesNativeComputeWave() && !NativeComputeWaveLayoutIsValid())
+	{
+		EXIT("native-wave compute coordinate layout unsupported or inconsistent\n");
+	}
 
 	if (ShaderCodeHasPixelDepthExport(m_code) && !ShaderCodeHasSafePixelDepthExport(m_code))
 	{
@@ -471,7 +475,7 @@ void Spirv::WriteHeader()
 	}
 
 	if (spirv_uses_subgroup_invocation(m_code) || UsesSparsePixelSampleProbe() || UsesComputeWaveBanks() ||
-	    UsesFragmentWaveTier())
+	    UsesNativeComputeWave() || UsesFragmentWaveTier())
 	{
 		capabilities.Add("OpCapability GroupNonUniform");
 		if ((spirv_uses_dpp(m_code) && GetHostShaderType() != ShaderType::Pixel) || spirv_uses_dpp_row(m_code) ||
@@ -484,7 +488,7 @@ void Spirv::WriteHeader()
 			capabilities.Add("OpCapability GroupNonUniformQuad");
 			vars.Add("%gl_HelperInvocation");
 		}
-		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks())
+		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks() || UsesNativeComputeWave())
 		{
 			capabilities.Add("OpCapability GroupNonUniformBallot");
 		}
@@ -492,7 +496,7 @@ void Spirv::WriteHeader()
 		{
 			capabilities.Add("OpCapability GroupNonUniformArithmetic");
 		}
-		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks() || UsesFragmentWaveTier())
+		if (spirv_uses_subgroup_invocation(m_code) || UsesComputeWaveBanks() || UsesNativeComputeWave() || UsesFragmentWaveTier())
 		{
 			vars.Add("%gl_SubgroupInvocationID");
 		}
@@ -500,7 +504,7 @@ void Spirv::WriteHeader()
 		{
 			vars.Add("%gl_SubgroupSize");
 		}
-		if (UsesComputeWaveBanks())
+		if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 		{
 			vars.Add("%gl_SubgroupID");
 		}
@@ -850,7 +854,7 @@ void Spirv::WriteAnnotations()
 		vars.Add("OpDecorate %gl_SubgroupSize BuiltIn SubgroupSize");
 		vars.Add("OpDecorate %gl_SubgroupSize Flat");
 	}
-	if (UsesComputeWaveBanks())
+	if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 	{
 		vars.Add("OpDecorate %gl_SubgroupID BuiltIn SubgroupId");
 	}
@@ -1591,7 +1595,7 @@ void Spirv::WriteGlobalVariables()
 	{
 		vars.Add("%gl_SubgroupSize = OpVariable %_ptr_Input_uint Input");
 	}
-	if (UsesComputeWaveBanks())
+	if (UsesComputeWaveBanks() || UsesNativeComputeWave())
 	{
 		vars.Add("%gl_SubgroupID = OpVariable %_ptr_Input_uint Input");
 	}
@@ -2024,6 +2028,12 @@ void Spirv::WriteLocalVariables()
 				{
 					EXIT("paired-wave compute prolog contract unsupported\n");
 				}
+			} else if (UsesNativeComputeWave())
+			{
+				if (!EmitNativeComputeWaveProlog(&m_source))
+				{
+					EXIT("native-wave compute prolog contract unsupported\n");
+				}
 			} else
 			{
 				for (int i = 0; i < m_cs_input_info->thread_ids_num; i++)
@@ -2308,20 +2318,28 @@ String8 Spirv::EmitThreadLimitLoad(uint32_t axis, const String8&id) const
 String8 Spirv::EmitNativeThreadLimitExec() const
 {
 	String8 source;
+	static const char* const coordinate_names[3] = {"x", "y", "z"};
 	for (uint32_t axis = 0; axis < 3u; axis++)
 	{
 		const auto a = String8::FromPrintf("tl_native_%u", axis);
 		source += EmitThreadLimitLoad(axis, a + "_limit");
 		source += String8::FromPrintf("%%%s_group_ptr = OpAccessChain %%_ptr_Input_uint %%gl_WorkGroupID %%uint_%u\n"
 		                              "%%%s_group = OpLoad %%uint %%%s_group_ptr\n"
-		                              "%%%s_local_ptr = OpAccessChain %%_ptr_Input_uint %%gl_LocalInvocationID %%uint_%u\n"
-		                              "%%%s_local = OpLoad %%uint %%%s_local_ptr\n"
-		                              "%%%s_base = OpIMul %%uint %%%s_group %%%s\n"
-		                              "%%%s_global = OpIAdd %%uint %%%s_base %%%s_local\n"
+		                              "%%%s_base = OpIMul %%uint %%%s_group %%%s\n",
+		                              a.c_str(), axis, a.c_str(), a.c_str(), a.c_str(), a.c_str(),
+		                              GetConstantUint(m_cs_input_info->threads_num[axis]).c_str());
+		if (UsesNativeComputeWave())
+		{
+			source += String8::FromPrintf("%%%s_local = OpCopyObject %%uint %%native_wave_coord_%s\n", a.c_str(), coordinate_names[axis]);
+		} else
+		{
+			source += String8::FromPrintf("%%%s_local_ptr = OpAccessChain %%_ptr_Input_uint %%gl_LocalInvocationID %%uint_%u\n"
+			                              "%%%s_local = OpLoad %%uint %%%s_local_ptr\n",
+			                              a.c_str(), axis, a.c_str(), a.c_str());
+		}
+		source += String8::FromPrintf("%%%s_global = OpIAdd %%uint %%%s_base %%%s_local\n"
 		                              "%%%s_ok = OpULessThan %%bool %%%s_global %%%s_limit\n",
-		                              a.c_str(), axis, a.c_str(), a.c_str(), a.c_str(), axis, a.c_str(), a.c_str(), a.c_str(), a.c_str(),
-		                              GetConstantUint(m_cs_input_info->threads_num[axis]).c_str(), a.c_str(), a.c_str(), a.c_str(),
-		                              a.c_str(), a.c_str(), a.c_str());
+		                              a.c_str(), a.c_str(), a.c_str(), a.c_str(), a.c_str(), a.c_str());
 	}
 	source += "%tl_native_xy = OpLogicalAnd %bool %tl_native_0_ok %tl_native_1_ok\n"
 	          "%tl_native_ok = OpLogicalAnd %bool %tl_native_xy %tl_native_2_ok\n"
@@ -3357,6 +3375,12 @@ void Spirv::FindConstants()
 			{
 				AddConstantUint(dimension);
 			}
+		}
+		if (UsesNativeComputeWave())
+		{
+			const auto& local = m_cs_input_info->wave_layout.guest_local;
+			AddConstantUint(32u);
+			AddConstantUint(local[0] * local[1]);
 		}
 	}
 	FindFragmentConstants();

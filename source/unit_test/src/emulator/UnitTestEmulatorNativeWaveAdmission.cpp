@@ -637,6 +637,59 @@ TEST(EmulatorNativeWaveAdmission, QuadDppAfterADirectBranchStillSeesItsWholeQuad
 	}
 }
 
+TEST(EmulatorNativeWaveAdmission, GuestComputeSensitivityComesFromGuestInstructions)
+{
+	auto ordinary = Unary(ShaderInstructionType::SMovB32, Operand(ShaderOperandType::Sgpr, 0),
+	                      Operand(ShaderOperandType::Sgpr, 1));
+	EXPECT_FALSE(ShaderUsesNativeWaveState(Program({ordinary}, ShaderType::Compute)));
+
+	auto exec_read = Unary(ShaderInstructionType::SMovB64, Operand(ShaderOperandType::Sgpr, 4, 2),
+	                       Operand(ShaderOperandType::ExecLo, 0, 2), true);
+	EXPECT_TRUE(ShaderUsesNativeWaveState(Program({exec_read}, ShaderType::Compute)));
+
+	ShaderInstruction mbcnt {};
+	mbcnt.type = ShaderInstructionType::VMbcntLoU32B32;
+	EXPECT_TRUE(ShaderUsesNativeWaveState(Program({mbcnt}, ShaderType::Compute)));
+
+	ordinary.src[0].dpp = true;
+	EXPECT_TRUE(ShaderUsesNativeWaveState(Program({ordinary}, ShaderType::Compute)));
+}
+
+TEST(EmulatorNativeWaveAdmission, NativeComputeWave32SelectionUsesDefaultOrEnabledSizeControl)
+{
+	// Width selection alone needs no size-control feature for a non-varying
+	// native-32 default. Coordinate admission separately requires full subgroups.
+	auto state = Host();
+	state.max_subgroup_size = 32;
+	state.size_control_feature_supported = state.size_control_feature_enabled = false;
+	state.full_subgroups_feature_supported = state.full_subgroups_feature_enabled = false;
+	const auto default32 = ShaderSelectNativeSubgroup(state, VK_SHADER_STAGE_COMPUTE_BIT, 32, 32, false, false, false);
+	ASSERT_TRUE(default32.supported);
+	EXPECT_EQ(default32.size, 32u);
+	EXPECT_FALSE(default32.require_size);
+
+	// A default-64 device must refuse when it cannot enable the compute-stage
+	// size request, even though its advertised range contains 32.
+	state = Host();
+	state.min_subgroup_size = 32;
+	state.size_control_feature_supported = state.size_control_feature_enabled = false;
+	state.full_subgroups_feature_supported = state.full_subgroups_feature_enabled = false;
+	EXPECT_FALSE(ShaderSelectNativeSubgroup(state, VK_SHADER_STAGE_COMPUTE_BIT, 64, 32, false, false, false).supported);
+
+	state = Host();
+	state.full_subgroups_feature_supported = state.full_subgroups_feature_enabled = false;
+	const auto requested32 = ShaderSelectNativeSubgroup(state, VK_SHADER_STAGE_COMPUTE_BIT, 64, 32, false, false, false);
+	ASSERT_TRUE(requested32.supported);
+	EXPECT_EQ(requested32.size, 32u);
+	EXPECT_TRUE(requested32.require_size);
+	VkPipelineShaderStageCreateInfo stage {};
+	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
+	ASSERT_TRUE(ShaderAttachNativeSubgroup(state, requested32, &stage, &required));
+	EXPECT_EQ(required.requiredSubgroupSize, 32u);
+	EXPECT_EQ(stage.flags, 0u);
+}
+
 TEST(EmulatorNativeWaveAdmission, QuadDppAfterAnExportOrAnIndirectJumpLacksItsQuad)
 {
 	// An export kills each invocation whose own EXEC bit is clear, and an indirect jump is not lowered
@@ -703,6 +756,12 @@ TEST(EmulatorNativeWaveAdmission, GuestWidthProofAndPreferredSizeArePartOfBothPi
 	vertex.required_subgroup_size = pixel.required_subgroup_size = 64;
 	EXPECT_NE(vertex64, ShaderGetIdVS(&vs, &vertex));
 	EXPECT_NE(pixel64, ShaderGetIdPS(&ps, &pixel));
+	HW::ComputeShaderInfo cs {};
+	ShaderComputeInputInfo compute {};
+	const auto compute_neutral = ShaderGetIdCS(&cs, &compute);
+	compute.native_wave_sensitive = true;
+	compute.required_subgroup_size = 32u;
+	EXPECT_NE(compute_neutral, ShaderGetIdCS(&cs, &compute));
 	Config::ResetGuestPlatform();
 	if (previous_platform != Kyty::GuestPlatform::Unknown)
 	{
@@ -735,6 +794,99 @@ TEST(EmulatorNativeWaveAdmission, PairedGuestCeilRejectsUint64BoundaryWithoutMut
 	layout.waves = 2;
 	layout.physical_local[0] = 64;
 	EXPECT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
+}
+
+TEST(EmulatorNativeWaveAdmission, NativeWave32RequiresFullSubgroupsForLogicalLaneMapping)
+{
+	auto state = Host();
+	state.full_subgroups_feature_supported = state.full_subgroups_feature_enabled = false;
+	auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(state);
+	ShaderComputeWaveLayout layout {};
+	layout.strategy = ShaderComputeWaveStrategy::Native;
+	layout.guest_wave_size = 32;
+	layout.native_subgroup_size = 32;
+	layout.banks = 1;
+	layout.guest_local[0] = layout.physical_local[0] = 64;
+	layout.guest_local[1] = layout.physical_local[1] = 1;
+	layout.guest_local[2] = layout.physical_local[2] = 1;
+	VkPipelineShaderStageCreateInfo stage {};
+	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
+	EXPECT_FALSE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
+	EXPECT_EQ(stage.pNext, nullptr);
+	EXPECT_EQ(stage.flags, 0u);
+
+	state.full_subgroups_feature_supported = state.full_subgroups_feature_enabled = true;
+	capabilities = ShaderComputeWaveVulkanBuildCapabilities(state);
+	ASSERT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
+	EXPECT_EQ(required.requiredSubgroupSize, 32u);
+	EXPECT_EQ(stage.flags, VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT_EXT);
+	EXPECT_EQ(stage.pNext, &required);
+
+	// The queried maximum-compute-workgroup-subgroups limit is part of native
+	// exact-width admission: 64 invocations cannot fit within one 32-lane slot.
+	capabilities.max_subgroups = 1;
+	stage = {};
+	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	required = {};
+	EXPECT_FALSE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
+	EXPECT_EQ(stage.pNext, nullptr);
+	EXPECT_EQ(stage.flags, 0u);
+
+	// Exact size alone cannot launch a full trailing wave or prove its index.
+	capabilities.max_subgroups = 32;
+	layout.guest_local[0] = layout.physical_local[0] = 48;
+	stage = {};
+	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	required = {};
+	EXPECT_FALSE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required));
+	EXPECT_EQ(stage.pNext, nullptr);
+	EXPECT_EQ(stage.flags, 0u);
+}
+
+TEST(EmulatorNativeWaveAdmission, NativeWave32Spirv16FullSubgroupsUseActualModuleVersion)
+{
+	auto state = Host();
+	state.full_subgroups_feature_supported = state.full_subgroups_feature_enabled = false;
+	const auto capabilities = ShaderComputeWaveVulkanBuildCapabilities(state);
+	ShaderComputeWaveLayout layout {};
+	layout.strategy = ShaderComputeWaveStrategy::Native;
+	layout.guest_wave_size = layout.native_subgroup_size = 32;
+	layout.banks = 1;
+	layout.guest_local[0] = layout.physical_local[0] = 32;
+	layout.guest_local[1] = layout.physical_local[1] = 2;
+	layout.guest_local[2] = layout.physical_local[2] = 1;
+	VkPipelineShaderStageCreateInfo stage {};
+	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT required {};
+	EXPECT_FALSE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required, true, 0x00010500u));
+	ASSERT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &stage, &required, true, 0x00010600u));
+	EXPECT_EQ(stage.pNext, &required);
+	EXPECT_EQ(required.requiredSubgroupSize, 32u);
+	EXPECT_EQ(stage.flags, 0u);
+
+	// A singleton queried range fixes width even for SPIR-V 1.6 without the
+	// size-control feature, so the full-subgroup guarantee needs no flags/node.
+	state.min_subgroup_size = state.max_subgroup_size = 32;
+	state.size_control_feature_supported = state.size_control_feature_enabled = false;
+	const auto fixed_capabilities = ShaderComputeWaveVulkanBuildCapabilities(state);
+	const auto fixed_selection = ShaderSelectNativeSubgroup(state, VK_SHADER_STAGE_COMPUTE_BIT, 32u, 32u, false, false, true);
+	ASSERT_TRUE(fixed_selection.supported);
+	EXPECT_FALSE(fixed_selection.require_size);
+	stage = {};
+	stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	required = {};
+	ASSERT_TRUE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, fixed_capabilities, &stage, &required,
+	                                                           fixed_selection.require_size, 0x00010600u));
+	EXPECT_EQ(stage.pNext, nullptr);
+	EXPECT_EQ(stage.flags, 0u);
+
+	// Total workgroup size being divisible by 32 does not prove full subgroups
+	// when X itself is not a multiple of the effective subgroup size.
+	layout.guest_local[0] = layout.physical_local[0] = 16;
+	layout.guest_local[1] = layout.physical_local[1] = 4;
+	EXPECT_FALSE(ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, fixed_capabilities, &stage, &required,
+	                                                            false, 0x00010600u));
 }
 
 UT_END();

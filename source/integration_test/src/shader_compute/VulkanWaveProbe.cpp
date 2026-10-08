@@ -28,7 +28,7 @@ VulkanComputeProbe::Result DispatchInternal(VkPhysicalDevice physical_device,
 {
 	if (message == nullptr) { return VulkanComputeProbe::Result::Failure; }
 	*message = "";
-	if (result_words == nullptr || spirv == nullptr || word_count == 0 ||
+	if (result_words == nullptr || spirv == nullptr || word_count < 5u ||
 	    word_count > std::numeric_limits<size_t>::max() / sizeof(uint32_t) ||
 	    !ShaderComputeWaveVulkanProbeOutputWordCountValid(initial_words.size()) ||
 	    !ShaderComputeWaveVulkanProbeOutputWordCountValid(result_words->size()) ||
@@ -67,11 +67,17 @@ VulkanComputeProbe::Result DispatchInternal(VkPhysicalDevice physical_device,
 		}
 	}
 
-	if (layout.strategy != ShaderComputeWaveStrategy::Paired64On32 || layout.guest_wave_size != 64 ||
-	    layout.native_subgroup_size != 32 || layout.banks != 2 || layout.waves == 0 ||
-	    layout.physical_local[0] == 0 || layout.physical_local[1] != 1 || layout.physical_local[2] != 1)
+	const bool paired_layout = layout.strategy == ShaderComputeWaveStrategy::Paired64On32 && layout.guest_wave_size == 64u &&
+	                           layout.native_subgroup_size == 32u && layout.banks == 2u && layout.waves != 0u &&
+	                           layout.physical_local[0] != 0u && layout.physical_local[1] == 1u && layout.physical_local[2] == 1u;
+	const bool native_w32_layout = layout.strategy == ShaderComputeWaveStrategy::Native && layout.guest_wave_size == 32u &&
+	                               layout.native_subgroup_size == 32u && layout.banks == 1u &&
+	                               layout.guest_local[0] != 0u && layout.guest_local[0] == layout.physical_local[0] &&
+	                               layout.guest_local[1] != 0u && layout.guest_local[1] == layout.physical_local[1] &&
+	                               layout.guest_local[2] != 0u && layout.guest_local[2] == layout.physical_local[2];
+	if (!paired_layout && !native_w32_layout)
 	{
-		*message = "wave probe received an invalid paired compute-wave layout";
+		*message = "wave probe received an invalid paired or native wave32 compute layout";
 		return VulkanComputeProbe::Result::InvalidArgument;
 	}
 	if (groups[0] == 0 || groups[1] == 0 || groups[2] == 0)
@@ -126,7 +132,8 @@ VulkanComputeProbe::Result DispatchInternal(VkPhysicalDevice physical_device,
 	preflight_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	preflight_stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
 	VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT preflight_required {};
-	if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &preflight_stage, &preflight_required))
+	if (!ShaderComputeWaveVulkanAttachRequiredSubgroupSize(layout, capabilities, &preflight_stage, &preflight_required,
+	                                                     true, spirv[1]))
 	{
 		*message = "wave probe layout is unsupported by enabled subgroup features or host limits";
 		return VulkanComputeProbe::Result::Unavailable;

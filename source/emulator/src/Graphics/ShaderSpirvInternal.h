@@ -119,6 +119,9 @@ public:
 	// Built by GenerateSource for the structured (non-banked) emission path.
 	[[nodiscard]] const ShaderControlFlowGraph& GetControlFlow() const { return m_control_flow; }
 	[[nodiscard]] bool UsesComputeWaveBanks() const;
+	[[nodiscard]] bool UsesNativeComputeWave() const;
+	[[nodiscard]] bool NativeComputeWaveLayoutIsValid() const;
+	[[nodiscard]] bool EmitNativeComputeWaveProlog(String8* output) const;
 	// Architectural EXEC/VCC and SGPR mask destinations always contain packed
 	// words. Native templates' implicit EXEC loads use a separate lane view;
 	// explicit numeric operand loads are marked until the strategy is resolved.

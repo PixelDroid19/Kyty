@@ -97,6 +97,53 @@ bool ComputeWaveLayoutIsValid(const ShaderComputeInputInfo* input)
 	       input->threads_num[2] == layout.guest_local[2] && input->lds_dwords == layout.lds_dwords;
 }
 
+bool NativeComputeWaveInputIsValid(const ShaderComputeInputInfo* input)
+{
+	if (input == nullptr || !input->native_wave_sensitive || input->required_subgroup_size != kNativeSubgroupSize ||
+	    input->thread_ids_num < 0 || input->thread_ids_num > 3 || input->thread_limits_used != input->bind.thread_limits_used)
+	{
+		return false;
+	}
+
+	const auto& layout = input->wave_layout;
+	if (layout.strategy != ShaderComputeWaveStrategy::Native || layout.guest_wave_size != kNativeSubgroupSize ||
+	    (layout.native_subgroup_size != 0u && layout.native_subgroup_size != kNativeSubgroupSize) || layout.banks != 1u ||
+	    layout.waves != 0u || layout.lds_dwords != input->lds_dwords)
+	{
+		return false;
+	}
+
+	uint64_t local_xy = 0;
+	uint64_t local_size = 0;
+	if (layout.guest_local[0] == 0u || layout.guest_local[0] % kNativeSubgroupSize != 0u || layout.guest_local[1] == 0u ||
+	    layout.guest_local[2] == 0u || !MultiplyU64(layout.guest_local[0], layout.guest_local[1], &local_xy) ||
+	    !MultiplyU64(local_xy, layout.guest_local[2], &local_size) || local_xy > UINT32_MAX || local_size > UINT32_MAX)
+	{
+		return false;
+	}
+
+	for (uint32_t axis = 0; axis < 3u; axis++)
+	{
+		if (layout.guest_local[axis] != input->threads_num[axis] || layout.physical_local[axis] != layout.guest_local[axis])
+		{
+			return false;
+		}
+	}
+
+	if (input->thread_limits_used)
+	{
+		const uint32_t push_constant_dwords = input->bind.push_constant_size / sizeof(uint32_t);
+		if ((input->bind.push_constant_size & 15u) != 0u || (input->bind.thread_limits_offset_dw & 3u) != 0u ||
+		    push_constant_dwords < 4u ||
+		    input->bind.thread_limits_offset_dw > push_constant_dwords - 4u)
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
 bool IsKnownUintConstant(const String8& value)
 {
 	return !value.IsEmpty() && value != "unknown_uint_constant";
@@ -123,12 +170,68 @@ void AppendComputeWaveCoordinate(String8* output, const char* coordinate_name, c
 	                        coordinate_name, bank_name.c_str(), register_id, bank_name.c_str(), coordinate_name, bank_name.c_str());
 }
 
+void AppendNativeComputeWaveCoordinate(String8* output, const char* coordinate_name, uint32_t register_id)
+{
+	*output += String8::FromPrintf("%%native_wave_coord_%s_float = OpBitcast %%float %%native_wave_coord_%s\n"
+	                               "               OpStore %%v%u %%native_wave_coord_%s_float\n",
+	                               coordinate_name, coordinate_name, register_id, coordinate_name);
+}
+
 } // namespace
 
 bool Spirv::UsesComputeWaveBanks() const
 {
 	return (m_code.GetType() == ShaderType::Compute || UsesFragmentCompute()) && m_cs_input_info != nullptr &&
 	       m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Paired64On32;
+}
+
+bool Spirv::UsesNativeComputeWave() const
+{
+	return m_code.GetType() == ShaderType::Compute && m_cs_input_info != nullptr && m_cs_input_info->native_wave_sensitive &&
+	       m_cs_input_info->wave_layout.strategy == ShaderComputeWaveStrategy::Native &&
+	       m_cs_input_info->wave_layout.guest_wave_size == kNativeSubgroupSize;
+}
+
+bool Spirv::NativeComputeWaveLayoutIsValid() const
+{
+	return UsesNativeComputeWave() && NativeComputeWaveInputIsValid(m_cs_input_info);
+}
+
+bool Spirv::EmitNativeComputeWaveProlog(String8* output) const
+{
+	if (output == nullptr || !NativeComputeWaveLayoutIsValid())
+	{
+		return false;
+	}
+
+	const auto& local   = m_cs_input_info->wave_layout.guest_local;
+	const auto  wave    = GetConstantUint(kNativeSubgroupSize);
+	const auto  size_x  = GetConstantUint(local[0]);
+	const auto  size_y  = GetConstantUint(local[1]);
+	const auto  size_xy = GetConstantUint(local[0] * local[1]);
+	if (!IsKnownUintConstant(wave) || !IsKnownUintConstant(size_x) || !IsKnownUintConstant(size_y) || !IsKnownUintConstant(size_xy))
+	{
+		return false;
+	}
+
+	*output += String8(R"(
+%native_wave_lane_id = OpLoad %uint %gl_SubgroupInvocationID
+%native_wave_subgroup_id = OpLoad %uint %gl_SubgroupID
+%native_wave_logical_base = OpIMul %uint %native_wave_subgroup_id %<wave>
+%native_wave_logical_index = OpIAdd %uint %native_wave_logical_base %native_wave_lane_id
+%native_wave_coord_x = OpUMod %uint %native_wave_logical_index %<size_x>
+%native_wave_coord_y_div = OpUDiv %uint %native_wave_logical_index %<size_x>
+%native_wave_coord_y = OpUMod %uint %native_wave_coord_y_div %<size_y>
+%native_wave_coord_z = OpUDiv %uint %native_wave_logical_index %<size_xy>
+)")
+	                .ReplaceStr("<wave>", wave)
+	                .ReplaceStr("<size_x>", size_x)
+	                .ReplaceStr("<size_y>", size_y)
+	                .ReplaceStr("<size_xy>", size_xy);
+	if (m_cs_input_info->thread_ids_num >= 1) { AppendNativeComputeWaveCoordinate(output, "x", 0u); }
+	if (m_cs_input_info->thread_ids_num >= 2) { AppendNativeComputeWaveCoordinate(output, "y", 1u); }
+	if (m_cs_input_info->thread_ids_num >= 3) { AppendNativeComputeWaveCoordinate(output, "z", 2u); }
+	return true;
 }
 
 bool Spirv::UsesFragmentWaveTier() const
