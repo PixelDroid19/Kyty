@@ -254,6 +254,109 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Classic runtime and input boundaries (2026-10-08)
+
+This slice completes observed parser/runtime failures and the native compute
+wave-width gap. It does not establish new title compatibility.
+
+- Failed or busy mutex destruction retains the guest object and handle.
+  Condition waits save and restore the guest recursion depth around the single
+  native lock, including timeout returns. A depth-two signaling flow and a
+  depth-two timeout exercise the public APIs; this is historical BSD/POSIX
+  compatibility evidence, not a new console measurement.
+- Resolved integer conversions preserve the classic base-0/base-2 `0b` token
+  boundary and use 64-bit guest LP64 results independently of host `long`.
+  Linux/glibc scanf forwarding explicitly uses the retained C99 entry point,
+  avoiding the host's C23 `%i` binary-prefix extension. Other scanf host ABI
+  paths, Annex K sized strings and non-glibc C23 behavior remain unqualified.
+- ELF input reads check physical file extent, seek/read status and exact byte
+  count. Program/section tables and dynamic termination are bounded. RELA and
+  image-relative JMPREL are checked against a declared loadable memory extent;
+  OS relocation offsets are checked against the separate dynlibdata buffer.
+  Empty tables retain valid end-boundary pointers. SELF containers may omit
+  declared section payloads. Export preflight refuses ranges larger than its
+  32-bit write interface before creating output, and omitted SELF sections
+  cannot be saved as a complete ordinary ELF. Failed input cleanup is reusable;
+  repeated dynamic segments retain the prior last-entry behavior without leaking
+  superseded buffers. Eager dynamic, dynlibdata and section-name buffers share
+  a 64 MiB aggregate host resource budget, checked before allocation with
+  replacement accounting. This is an implementation policy, not an ELF ABI
+  limit; modules exceeding it are refused. Adjacent-segment relocation tables
+  are refused; symbol/string/hash/PLTGOT bounds are outside this slice.
+- Native Gen5 wave32 compute derives sensitivity from guest wave-state uses,
+  then selects exact width 32 from the queried default or enabled compute
+  subgroup-size control. Local dimensions, invocation count, shared memory
+  and subgroup-count limits are checked. Full subgroups and X divisible by 32
+  are required for sensitive native programs. The actual SPIR-V 1.6 module
+  supplies that guarantee; older modules need the enabled full-subgroup feature
+  and stage flag. Guest coordinates are reconstructed from subgroup ID and
+  lane, including dispatch thread-limit masks; Vulkan does not prescribe their
+  equality to LocalInvocationId. Partial native workgroups remain unsupported.
+  The paired wave64 path keeps its separate requirements. Sensitivity and
+  required width enter cache identity; translator version 103 invalidates older
+  coordinate emission. These conditions follow the published
+  [subgroup index](https://docs.vulkan.org/refpages/latest/refpages/source/SubgroupLocalInvocationId.html)
+  and [full subgroup](https://docs.vulkan.org/spec/latest/chapters/shaders.html#shaders-full-subgroups)
+  contracts.
+- Output options initialize exactly 64 bytes with byte 2 set to `0xff`.
+  Validation checks handle, reserved arguments, mode, then option words; word 3
+  is caller controlled. ConfigureOutput consumes the full five-argument ABI.
+  Full-range option copies hold the guest VM mapping lock and validate ownership,
+  permissions and overflow. Invalid non-null pointers return INVALID_ADDRESS
+  as a host-safety decision; that return has not been measured on the console.
+  The default cadence is supported; high refresh is reported unavailable and
+  configuration refuses it until the presentation clock implements it.
+  Console observations disagree on selector 18's error (`0x80290016` versus
+  `0x8029001e`); current unknown-selector classification follows the latter
+  observation and is not established across firmware revisions.
+- POSIX host-unreachable socket failures retain the corresponding guest error.
+- Conditional LDS exchange opcodes no longer execute as ordinary additions.
+  Both widths refuse before lowering. Opcode availability is documented, but
+  exact older-target operational semantics and pair atomicity remain unproved.
+
+The owned Linux Release build passes with parallelism limited to two. The
+focused runtime/parser/graphics suite passes 209 tests; five direct integration
+binaries and 22 loader/table CTests pass. Native wave32 execution on an Intel Arc
+host produces two distinct full-wave ballot masks. A production-emitter fixture
+with local shape 32x2 verifies seeded X/Y coordinates and initial EXEC masks
+`0xffffffff`/`0x00000000` for a Y thread limit of one. Paired-wave fixtures remain
+green. Sparse metadata-budget cases fail with the preceding loader object, and
+the invalid-options-pointer case faults with the preceding video object; both
+pass with the corrected objects. A process-local host-connect failure probe
+verifies the public socket error path. Emulator-boundary and table-provenance
+gates pass.
+The emitter-precondition fixture now gives its synthetic end instruction a
+forward PC and checks CFG validity: its previous backward PC returned a
+nonempty rejection token before exercising the intended emitter. All ten
+precondition cases pass after this test-only correction.
+The complete suite through the script host passes 2,122 tests with eight skips:
+three Windows/macOS mapping cases and five media-fixture cases were not exercised.
+The development supervisor's live lifecycle cases run and pass through this
+host entry point. Nix is unavailable on this host; the existing development
+definition is retained and no dependency is introduced by this slice.
+
+A strict 31.6-second roguelike replay delivers three taps and records six guest
+read-state samples, but retains the prior `gfx_storage_frontier` failure. Its
+playable regression gate fails; the scene/action checkpoints remain unproved.
+A second strict run holds the streaming title's menu for 17 seconds with no
+runtime error. Its scored menu capture retains the prior `hot_corruption`
+classification and comparable composition on visual inspection. Neither run
+establishes gameplay acceptance, clean rendering, or a performance improvement.
+
+No AMD, NVIDIA, Windows or macOS execution has been performed for this slice.
+The direct GPU mask fixture currently requires the paired probe's enabled
+size-control path; no-node default-width behavior has modeled coverage only.
+The coordinate fixture observes initial EXEC and thread-limit masking; later
+guest EXEC writes and possible reactivation of initially inactive lanes remain
+unqualified.
+
+Secondary blend outputs still need a consumed guest trigger/format contract.
+Sampled-parent freshness and depth reuse need producer/owner/content evidence;
+indexed tables need a nonzero consumed index, extent, stride and generation;
+compression metadata needs its plane, encoding and completed first write.
+PCM/ATRAC9 append needs observed cursor, starvation, lifetime and completion
+transitions. None of those behaviors is inferred from another implementation.
+
 ### Shared runtime and resource contracts (2026-10-08, bounded validation)
 
 This change set starts from committed feature HEAD `b208fb3e` in a separate
