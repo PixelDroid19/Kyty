@@ -131,6 +131,15 @@ over all samples. The compare command uses that aggregate and relative
 thresholds to catch a collapse without pretending that a single screenshot
 proves rendering correctness.
 
+The native `hot_corruption` verdict can be triggered by an intended warm palette.
+A classifier verdict alone is not proof of a renderer defect. Compare the same
+scene with expected reference images before changing graphics behavior. The
+label fires when `hot_block_ratio >= 0.08` or `blowout_ratio >= 0.20`
+(`source/emulator/src/Agent/FrameScore.cpp:91`), without any scene or reference
+knowledge. A maintainer-provided menu reference established a false positive
+from this rule. The suggested direction is reference- and scene-aware
+interpretation, not a per-title color override.
+
 ## Playable scene and action checkpoints
 
 `kyty_playable_regression.py --scene-checkpoint <external-contract.json>` requires

@@ -339,9 +339,12 @@ A strict 31.6-second roguelike replay delivers three taps and records six guest
 read-state samples, but retains the prior `gfx_storage_frontier` failure. Its
 playable regression gate fails; the scene/action checkpoints remain unproved.
 A second strict run holds the streaming title's menu for 17 seconds with no
-runtime error. Its scored menu capture retains the prior `hot_corruption`
-classification and comparable composition on visual inspection. Neither run
-establishes gameplay acceptance, clean rendering, or a performance improvement.
+runtime error. Its scored menu capture was labelled `hot_corruption` by the
+native heuristic. That raw label is a palette false positive: the
+maintainer-supplied expected menu reference shows the same warm yellow, orange
+and red palette, and the composition is visually consistent with it. The menu
+comparison establishes neither gameplay acceptance nor a performance improvement,
+and it does not qualify the whole title's rendering.
 
 No AMD, NVIDIA, Windows or macOS execution has been performed for this slice.
 The direct GPU mask fixture currently requires the paired probe's enabled
@@ -350,7 +353,8 @@ The coordinate fixture observes initial EXEC and thread-limit masking; later
 guest EXEC writes and possible reactivation of initially inactive lanes remain
 unqualified.
 
-Secondary blend outputs have bounded translation and offscreen host coverage; a consumed guest pass is still needed to qualify compatibility.
+Secondary blend outputs have bounded translation and offscreen host coverage; a
+consumed guest pass is still needed to qualify compatibility.
 Sampled-parent freshness and depth reuse need producer/owner/content evidence;
 indexed tables need a nonzero consumed index, extent, stride and generation;
 compression metadata needs its plane, encoding and completed first write.
@@ -378,7 +382,8 @@ combined-output resource accounting keeps both declared Output variables.
 Host admission queries enabled dualSrcBlend, maxFragmentDualSrcAttachments and
 COLOR_ATTACHMENT_BLEND_BIT of the actual optimal format. There are no vendor or
 title branches, no new DB_SHADER_CONTROL selector and no EXP lowerer changes.
-Every other case keeps strict refusal, and no secondary values are synthesized.
+Other unqualified SRC1 states retain strict refusal. Ordinary non-SRC1 draws
+retain their existing admission rules. No secondary values are synthesized.
 
 Verification on this host: red tests reproduced the missing secondary decoration,
 the missing cache distinction and the unsafe partial and split enables before the
@@ -402,10 +407,11 @@ consumed SRC1 pass in a game.
 Strict runtime evidence: a 32.9-second roguelike replay delivered 3 taps and 6
 guest read-state samples, and it keeps the gfx_storage_frontier and the failed
 playable gate. Two streaming runs of about 17 seconds each had no runtime error;
-the first final frame was a loading scene and is not a menu comparison. The repeat
-shows comparable menu composition and keeps the native hot_corruption
-classification. This makes no new gameplay, clean-render or performance claim and
-records no consumed SRC1 pass.
+the first final frame was a loading scene and is not comparable with a menu
+reference. The repeated menu shows the expected composition and warm palette. Its
+native `hot_corruption` label is a palette false positive for this menu. The
+reference qualifies the observed menu appearance only; gameplay, performance
+and a consumed SRC1 pass remain unverified.
 
 Not performed: AMD or NVIDIA physical execution, Windows and macOS runs, and
 Vulkan VUID or synchronization-layer validation. The validation layer and Nix
