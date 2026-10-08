@@ -254,6 +254,88 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Shared runtime and resource contracts (2026-10-08, bounded validation)
+
+This change set starts from committed feature HEAD `b208fb3e` in a separate
+checkout. The source checkout's uncommitted work was not imported or changed.
+The results below describe shared contracts; they do not establish additional
+title support or supersede the earlier gameplay reports.
+
+- **Sampler audio.** Standard PCM8/16/24/32 and float blocks render through the
+  existing NGS2 lifecycle, with source-rate conversion, pitch, gain, queue reset,
+  repeat/end handling and bounded callback dispatch. Mixing accumulates before
+  one final clamp. A bounded ATRAC9 decoder uses the existing FFmpeg dependency.
+  The owned compressed fixture is silent: non-silent quality, skip placement and
+  block seams remain unverified. VAG/HEVAG playback is not added. Audio/video URI
+  replacement callbacks are exercised with an owned media file; this does not
+  establish general guest-VFS-backed decoding. See `docs/AUDIO.md`.
+- **Dirty memory.** Sparse, bounded range metadata admits more than 512 disjoint
+  ranges. Write-watch leases retain guest permission authority across protect,
+  unmap, aliases and concurrent restorers. Signal handling performs no lazy
+  tracker initialization and never waits on a permission fence. Normal writers
+  wait for permission publication; range queries are serialized with registration.
+  Read and execute faults are not claimed as writes on the verified Linux path.
+  Process-wide fault state remains alive until process termination.
+- **Layered sampled images.** Type-12 descriptors retain the one-dimensional
+  coordinate and array slice through classification, bank counts, Vulkan views
+  and image emission. The GPU fixture covers 12 load/sample cases, including
+  mip level, base slice and wrap/edge/border addressing. Production guest upload
+  is qualified only for linear uncompressed, single-level data; the host fixture's
+  mip chain does not prove a general guest mip-upload contract.
+- **Shared GDS transfers.** Command DMA and shader access use one backing store,
+  with checked windows, recorded transfer barriers, bounded publication and labels
+  ordered after completion. The production append fixture seeds a counter with
+  41, adds 16 active lanes, publishes 57 and preserves the neighbouring word.
+  GPU-produced source bytes replace stale CPU bytes in the transfer fixture.
+  Eight malformed/protected/unmapped cases refuse strictly. Raw image sources,
+  exclusive queue-family migration and discard semantics remain unqualified.
+- **Structured shader flow.** Canonical block, edge, dominator and loop analysis
+  replaces three local loop decisions for the non-banked emitter. Nested loops,
+  shared continues and terminating/discard tails validate; unresolved targets,
+  irreducible or unsupported multi-level control flow refuse. Analysis budgets
+  are explicit. Existing wave-bank, EXEC and lane analyses remain separate.
+- **Exact replay and diagnostics.** Schema-v3 resource-fold capture records the
+  owned evaluator inputs, five caller-provided output seeds and ordered guest
+  reads. Other prepopulated bind state is unrepresentable. Eight fresh private
+  captures replayed byte-equal, including a pixel-stage layout offset and slot;
+  these eight captures contained no descriptor-table reads. Synthetic contracts
+  cover missing, reordered, unused and failed reads. Operation records are
+  default-off and bounded; an owned producer-to-file-to-Python flow preserves its
+  dependency edge and external input. This is not synchronization evidence.
+
+**Validation environment:** Linux x86_64, GCC 16.2.1, Vulkan 1.4.363, Intel Arc
+A770 (DG2), Mesa Xe driver version 109060100. A dedicated Release build used at
+most two compilation jobs. All affected Linux executable targets built. Windows and macOS were not
+compiled. Focused C++
+validation passed 887 cases with three expected host/platform skips; the Python
+tool suites passed 115 cases, and nine wrapper/real replay CLI cases passed.
+Nine production-path integration executions passed, including GDS append, the
+layered-image fixture, graphics diagnostics, compute, kernel memory and audio.
+The paired logical-wave fixture also executed on the GPU. Architecture and all
+13 graphics-table provenance gates passed.
+
+The integer endpoint runs the production ISA parser, emitter and Vulkan path.
+Five operations matched an independent host integer reference over 460 edge and
+seeded pairs; a further 1024-pair run used all 64 admitted dispatches, and an
+external 67-pair input completed. The physical subgroup was 32 and the logical
+wave 64. This is Vulkan execution evidence, not a native AMD comparison. AMD
+hardware/HIP and Nix were unavailable; the exact dependency declaration was
+source-checked but neither entered nor evaluated.
+
+**Strict guest limits:** a 33-second scripted opening route delivered all three
+input edges and produced a scored, visually inspected opening image. It retained
+the baseline's first `gfx_storage_frontier`; both baseline and changed runs failed
+the gameplay gate because no scene/action checkpoint was reached. A separate
+roughly 18-second startup held presentation with no runtime error; its captures
+showed branding/loading and a flat transitional image, not gameplay. No cross-run
+performance improvement or additional compatibility claim follows from these runs.
+
+CPU-demand publication still lacks a measured steady-state bottleneck. Indexed
+sampled tables still lack a consumed runtime-key pattern, extent, stride and
+generation contract. Raw compression metadata still lacks its plane, encoding,
+ownership and first-write completion contract. These remain investigation items;
+no guessed fallback or metadata write was introduced.
+
 ### A roguelike reaches gameplay (2026-10-07)
 
 A 2D roguelike froze after its second frame: the main thread waited on an event flag that its render thread only
