@@ -1100,6 +1100,23 @@ void GraphicsRing::Submit(uint32_t* cmd_draw_buffer, uint32_t num_draw_dw, uint3
 	}
 }
 
+// The command processor reads through the GPU's contiguous virtual space, so the range may cross from one
+// mapping into an adjacent one.
+static bool GpuRangeMapped(uint64_t address, uint64_t size)
+{
+	while (size != 0u)
+	{
+		const uint64_t prefix = GpuMemoryGetAllocatedRangePrefix(address, size);
+		if (prefix == 0u)
+		{
+			return false;
+		}
+		address += prefix;
+		size -= prefix;
+	}
+	return true;
+}
+
 GraphicsRing::CmdBuffer GraphicsRing::SnapshotCommandBuffer(uint32_t* data, uint32_t num_dw)
 {
 	CmdBuffer result {};
@@ -1158,7 +1175,7 @@ GraphicsRing::CmdBuffer GraphicsRing::SnapshotCommandBuffer(uint32_t* data, uint
 					const uint64_t address = snapshot->words[offset + 2u] |
 					                         (static_cast<uint64_t>(snapshot->words[offset + 3u]) << 32u);
 					const uint64_t byte_count = static_cast<uint64_t>(count) * 2u * sizeof(uint32_t);
-					if (address == 0u || GpuMemoryValidateAllocatedRange(address, byte_count) != GpuMemoryRangeValidationStatus::Valid)
+					if (address == 0u || !GpuRangeMapped(address, byte_count))
 					{
 						EXIT("indirect register packet references invalid guest storage: class=0x%02" PRIx32
 						     " address=0x%016" PRIx64 " count=%" PRIu32 "\n",
