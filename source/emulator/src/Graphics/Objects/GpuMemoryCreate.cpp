@@ -2155,23 +2155,40 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 				OverlapType         rel  = others.At(0).relation;
 				GpuMemoryObjectType type = heap.objects[others.At(0).object_id].info.object.type;
 
-				switch (ObjectsRelation(type, rel, info.type))
+				// A recycled allocation under several storage views of another format: link them all, as the
+				// single-overlap path does; the new view seeds from guest bytes.
+				bool redescribes_storage = type == GpuMemoryObjectType::StorageTexture &&
+				                           info.type == GpuMemoryObjectType::StorageTexture && rel == OverlapType::IsContainedWithin;
+				for (const auto& parent: others)
 				{
-					// Same policy as the single-overlap path: Texture reclaiming
-					// memory previously tracked as VertexBuffers.
-					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
-					case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::Texture):
-						delete_all = true;
-						break;
-					case ObjectsRelation(GpuMemoryObjectType::RenderTexture, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
-						overlap             = true;
-						create_from_objects = true;
-						break;
-					default:
+					redescribes_storage = redescribes_storage &&
+					                      StorageTextureRedescribesRange(heap.objects[parent.object_id].info.params, info.params, false);
+				}
+
+				if (redescribes_storage)
+				{
+					overlap = true;
+				} else
+				{
+					switch (ObjectsRelation(type, rel, info.type))
 					{
-						auto msg = String::FromPrintf("unknown relation: %s - %s - %s\n", Core::EnumName(type).C_Str(),
-						                              Core::EnumName(rel).C_Str(), Core::EnumName(info.type).C_Str());
-						EXIT("%s\n", create_dbg_exit(msg, vaddr, size, vaddr_num, others, info.type).C_Str());
+						// Same policy as the single-overlap path: Texture reclaiming
+						// memory previously tracked as VertexBuffers.
+						case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
+						case ObjectsRelation(GpuMemoryObjectType::VertexBuffer, OverlapType::Crosses, GpuMemoryObjectType::Texture):
+							delete_all = true;
+							break;
+						case ObjectsRelation(GpuMemoryObjectType::RenderTexture, OverlapType::IsContainedWithin, GpuMemoryObjectType::Texture):
+							overlap             = true;
+							create_from_objects = true;
+							break;
+						default:
+						{
+							auto msg = String::FromPrintf("unknown relation: %s - %s - %s\n", Core::EnumName(type).C_Str(),
+							                              Core::EnumName(rel).C_Str(), Core::EnumName(info.type).C_Str());
+							EXIT("%s\n%s\n", create_dbg_exit(msg, vaddr, size, vaddr_num, others, info.type).C_Str(),
+							     create_dbg_parents(heap_id, others, info).C_Str());
+						}
 					}
 				}
 			}

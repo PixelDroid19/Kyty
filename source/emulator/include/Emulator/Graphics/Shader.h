@@ -1298,9 +1298,10 @@ inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 }
 
 // Formatted image stores put shader component i in memory channel DST_SEL[i].
-// Storage views keep identity components and BGRA selects a BGRA8 view, so
-// the image-store emitter applies any other selection of four distinct channels.
-inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle)
+// Storage views keep identity components and, for formats with a red/blue-exchanged
+// host format, BGRA selects that view; the image-store emitter applies any other
+// selection of four distinct channels.
+inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle, bool red_blue_view)
 {
 	uint32_t channels = 0;
 	for (uint32_t component = 0; component < 4; component++)
@@ -1312,7 +1313,7 @@ inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle)
 		}
 		channels |= 1u << (select - 4u);
 	}
-	return swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7);
+	return swizzle != DstSel(4, 5, 6, 7) && !(red_blue_view && swizzle == DstSel(6, 5, 4, 7));
 }
 
 struct ShaderBufferResource
@@ -1451,6 +1452,9 @@ struct ShaderTextureResource
 		return ((fields[1] >> 6u) & 0x3u) | ((fields[1] >> 30u) << 2u) | ((fields[3] & 0x04000000u) == 0 ? 0x60u : 0x10u);
 	}
 };
+
+// ShaderStorageImageSwizzleInShader for a bound T#, with the red/blue view decided by its storage format.
+[[nodiscard]] bool ShaderStorageTextureSwizzleInShader(const ShaderTextureResource& texture);
 
 // A comparison sample of a Gen5 color surface compares its first channel in the
 // shader: Vulkan depth-reference sampling requires a depth view.

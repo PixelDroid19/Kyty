@@ -41,7 +41,7 @@ constexpr std::array GEN5_IMAGE_FORMATS = {
     // RDNA2 ISA Table 47: 5=8_UINT. Storage uses the exact R8ui declaration
     // with StorageImageExtendedFormats, subject to the host format query.
     Gen5ImageFormat {5, VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, GuestImageNumericType::UnsignedInteger},
-    Gen5ImageFormat {7, VK_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, VK_FORMAT_UNDEFINED, GuestImageNumericType::FloatingPoint},
+    Gen5ImageFormat {7, VK_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, VK_FORMAT_R16_UNORM, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {11, VK_FORMAT_R16_UINT, VK_FORMAT_R16_UINT, VK_FORMAT_R16_UINT, GuestImageNumericType::UnsignedInteger},
     Gen5ImageFormat {13, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, VK_FORMAT_R16_SFLOAT, GuestImageNumericType::FloatingPoint},
     Gen5ImageFormat {14, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8_UNORM, GuestImageNumericType::FloatingPoint},
@@ -193,6 +193,12 @@ static VkFormat RedBlueExchangedFormat(VkFormat format)
 		case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
 		default: return VK_FORMAT_UNDEFINED;
 	}
+}
+
+bool VulkanStorageHasRedBlueView(uint8_t dfmt, uint8_t nfmt, uint16_t fmt)
+{
+	const VkFormat storage = VulkanResolveGuestImageFormat(GuestImageUsage::Storage, dfmt, nfmt, fmt);
+	return storage == VK_FORMAT_R8G8B8A8_UNORM || storage == VK_FORMAT_R8G8B8A8_SRGB;
 }
 
 bool VulkanGen5SampleFormatMatchesEffective(uint16_t fmt, bool use_srgb, VkFormat format)

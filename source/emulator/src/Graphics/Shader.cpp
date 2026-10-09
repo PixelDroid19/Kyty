@@ -115,6 +115,14 @@ bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures
 	return matched;
 }
 
+bool ShaderStorageTextureSwizzleInShader(const ShaderTextureResource& texture)
+{
+	const bool gen5 = Config::IsNextGen();
+	return ShaderStorageImageSwizzleInShader(texture.DstSelXYZW(),
+	                                         VulkanStorageHasRedBlueView(gen5 ? 0u : texture.Dfmt(), gen5 ? 0u : texture.Nfmt(),
+	                                                                     gen5 ? texture.Format() : 0u));
+}
+
 State::ImageSampleOperation ShaderTextureSampleOperation(const ShaderTextureResource& texture, State::ImageSampleOperation operation)
 {
 	if (Config::IsNextGen() && operation == State::ImageSampleOperation::DepthReference &&
@@ -4825,7 +4833,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(storage ? r.LastLevel() : 0u);
 		ret->ids.Add(storage ? r.MaxMip() : 0u);
 		// Image stores apply a channel selection the storage view cannot express.
-		ret->ids.Add(storage && ShaderStorageImageSwizzleInShader(r.DstSelXYZW()) ? r.DstSelXYZW() : 0u);
+		ret->ids.Add(storage && ShaderStorageTextureSwizzleInShader(r) ? r.DstSelXYZW() : 0u);
 		// ret->ids.Add(r.Depth());
 		// ret->ids.Add(r.Pitch());
 		// ret->ids.Add(r.BaseArray());

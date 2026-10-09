@@ -58,12 +58,13 @@ static void StorageStoreComponentOrder(const ShaderCode& code, uint32_t instruct
                                        int user_data_register_base, uint32_t order[4])
 {
 	const int      descriptor_index = ShaderFindImageStorageTextureDescriptor(code, instruction_index, bind, user_data_register_base);
-	const uint32_t swizzle          = bind.textures2D.desc[descriptor_index].texture.DstSelXYZW();
+	const auto&    texture          = bind.textures2D.desc[descriptor_index].texture;
+	const uint32_t swizzle          = texture.DstSelXYZW();
 	for (uint32_t channel = 0; channel < 4; channel++)
 	{
 		order[channel] = channel;
 	}
-	if (!ShaderStorageImageSwizzleInShader(swizzle))
+	if (!ShaderStorageTextureSwizzleInShader(texture))
 	{
 		return;
 	}

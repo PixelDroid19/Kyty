@@ -304,6 +304,48 @@ TEST(EmulatorGraphicsResources, EmitsAndValidatesFloatSampledWithUintStorage)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorGraphicsResources, EmitsAndValidatesFormat7FloatFormatlessStorage)
+{
+	ASSERT_EXIT(
+	    {
+		    InitializeImageModuleTest();
+		    auto fixture = MakeImageModule(71u, 7u);
+		    auto& instructions = fixture.code.GetInstructions();
+		    auto store       = instructions.At(1);
+		    auto end         = instructions.At(2);
+		    instructions.Clear();
+		    store.pc = 0;
+		    instructions.Add(store);
+		    end.pc = 8;
+		    instructions.Add(end);
+
+		    auto& textures = fixture.input.bind.textures2D;
+		    textures.desc[0] = textures.desc[1];
+		    textures.desc[0].slot = 0;
+		    textures.textures_num = 1;
+		    textures.textures2d_sampled_num = 0;
+		    textures.textures2d_sampled_uint_num = 0;
+		    textures.textures2d_storage_num = 1;
+
+		    const auto plan = ShaderPlanStorageImages(fixture.code, &fixture.input.bind);
+		    RequireImageModule(plan.supported && plan.formatless && !plan.unsigned_primary && !plan.extended_formats &&
+		                           std::strcmp(plan.image_format, "Unknown") == 0,
+		                       "format 7 uses the existing float, formatless storage bank");
+		    const auto source = EmitValidatedImageModule(fixture);
+		    RequireImageModule(source.ContainsStr("%ImageL = OpTypeImage %float 2D 0 0 0 2 Unknown"),
+		                       "format 7 writable declaration remains float and formatless");
+		    RequireImageModule(source.ContainsStr("OpCapability StorageImageReadWithoutFormat") &&
+		                           source.ContainsStr("OpCapability StorageImageWriteWithoutFormat"),
+		                       "formatless read and write capabilities");
+		    RequireImageModule(!source.ContainsStr("OpCapability StorageImageExtendedFormats"),
+		                       "formatless declaration does not invent an extended typed format");
+		    RequireImageModule(source.ContainsStr("OpImageWrite %t27_0 %t73_0 %t88_0") && source.ContainsStr("%t88_0 = OpCompositeConstruct %v4float"),
+		                       "float storage write");
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorGraphicsResources, EmitsAndValidatesExactHomogeneousUintStorageFormats)
 {
 	ASSERT_EXIT(
