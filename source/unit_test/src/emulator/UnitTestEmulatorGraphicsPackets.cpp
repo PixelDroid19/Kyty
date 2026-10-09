@@ -1770,6 +1770,90 @@ TEST(EmulatorGraphicsPackets, BuildsFiveAttributeInterleavedMixedNumericVertexLa
 	}
 }
 
+TEST(EmulatorGraphicsPackets, BuildsTwoBufferRgb32AndR8UintStreamsAndUintFetch)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderVertexInputInfo input {};
+	input.resources_num = 2;
+	input.buffers_num   = 2;
+
+	auto& position_buffer           = input.buffers[0];
+	position_buffer.addr            = 0x1000;
+	position_buffer.stride          = 12;
+	position_buffer.num_records     = 16;
+	position_buffer.attr_num        = 1;
+	position_buffer.attr_indices[0] = 0;
+	position_buffer.attr_offsets[0] = 0;
+
+	auto& index_buffer           = input.buffers[1];
+	index_buffer.addr            = 0x2000;
+	index_buffer.stride          = 4;
+	index_buffer.num_records     = 16;
+	index_buffer.attr_num        = 1;
+	index_buffer.attr_indices[0] = 1;
+	index_buffer.attr_offsets[0] = 0;
+
+	input.resources[0].fields[3] = (74u << 12u) | DstSel(4, 5, 6, 1);
+	input.resources_dst[0]       = {0, 4};
+	input.resources[1].fields[3] = (5u << 12u) | DstSel(4, 0, 0, 1);
+	input.resources_dst[1]       = {4, 1};
+
+	const auto r8_uint = VulkanResolveGen5VertexInputFormat(5u);
+	EXPECT_EQ(r8_uint.format, VK_FORMAT_R8_UINT);
+	EXPECT_EQ(r8_uint.component_count, 1u);
+	EXPECT_EQ(r8_uint.numeric_class, VulkanVertexInputNumericClass::Uint);
+
+	VulkanVertexInputLayout layout {};
+	ASSERT_TRUE(VulkanBuildVertexInputLayout(input, &layout));
+	ASSERT_EQ(layout.binding_count, 2u);
+	ASSERT_EQ(layout.attribute_count, 2u);
+	EXPECT_EQ(layout.bindings[0].binding, 0u);
+	EXPECT_EQ(layout.bindings[0].stride, 12u);
+	EXPECT_EQ(layout.bindings[1].binding, 1u);
+	EXPECT_EQ(layout.bindings[1].stride, 4u);
+	EXPECT_EQ(layout.attributes[0].binding, 0u);
+	EXPECT_EQ(layout.attributes[0].location, 0u);
+	EXPECT_EQ(layout.attributes[0].offset, 0u);
+	EXPECT_EQ(layout.attributes[0].format, VK_FORMAT_R32G32B32_SFLOAT);
+	EXPECT_EQ(layout.attributes[1].binding, 1u);
+	EXPECT_EQ(layout.attributes[1].location, 1u);
+	EXPECT_EQ(layout.attributes[1].offset, 0u);
+	EXPECT_EQ(layout.attributes[1].format, VK_FORMAT_R8_UINT);
+
+	ShaderInstruction fetch {};
+	fetch.type               = ShaderInstructionType::FetchX;
+	fetch.format             = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	fetch.dst.type           = ShaderOperandType::Vgpr;
+	fetch.dst.register_id    = 0;
+	fetch.dst.size           = 1;
+	fetch.src[0].type        = ShaderOperandType::Vgpr;
+	fetch.src[0].register_id = 4;
+	fetch.src[0].size        = 1;
+	fetch.src[1].type        = ShaderOperandType::Sgpr;
+	fetch.src[1].register_id = 0;
+	fetch.src[1].size        = 4;
+	fetch.src[2].type        = ShaderOperandType::IntegerInlineConstant;
+	fetch.src[2].constant.i  = 1;
+	fetch.src_num            = 3;
+
+	ShaderCode code;
+	code.SetType(ShaderType::Vertex);
+	code.GetInstructions().Add(fetch);
+	input.fetch_embedded = true;
+
+	const auto source = SpirvGenerateSource(code, &input, nullptr, nullptr);
+	EXPECT_NE(source.FindIndex("%attr1 = OpVariable %_ptr_Input_uint Input"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpLoad %uint %attr1"), Core::STRING8_INVALID_INDEX);
+	EXPECT_NE(source.FindIndex("OpBitcast %float"), Core::STRING8_INVALID_INDEX);
+	EXPECT_EQ(source.FindIndex("%attr1 = OpVariable %_ptr_Input_float Input"), Core::STRING8_INVALID_INDEX);
+}
+
 // Interleaved mesh stream: position f32x3 + normal h16x4 + UV h16x2 in one stride-24 VB.
 // Without format 29 the whole Vulkan vertex input layout fails and 3D draws go black.
 TEST(EmulatorGraphicsPackets, BuildsInterleavedPosNormUvVertexLayoutWithFormat29)
