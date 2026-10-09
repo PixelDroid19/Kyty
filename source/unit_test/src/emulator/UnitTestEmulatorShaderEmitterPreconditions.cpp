@@ -7,6 +7,8 @@
 #include "Emulator/Graphics/ShaderSpirv.h"
 #include "Emulator/Log.h"
 
+#include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
+
 #include <cstdlib>
 
 UT_BEGIN(EmulatorShaderEmitterPreconditions);
@@ -98,6 +100,205 @@ ShaderInstruction SampleLzDmaskB()
 	sample.src_num        = 3;
 	sample.mimg_dimension = 1;
 	return sample;
+}
+
+struct ImplicitSampleFormat
+{
+	ShaderInstructionFormat::Format format;
+	uint8_t                         dmask;
+	uint32_t                        destination_num;
+};
+
+constexpr ImplicitSampleFormat kImplicitSampleFormats[] = {
+	{ShaderInstructionFormat::Vdata1Vaddr3StSsDmask1, 0x1u, 1u},
+	{ShaderInstructionFormat::Vdata1Vaddr3StSsDmask2, 0x2u, 1u},
+	{ShaderInstructionFormat::Vdata2Vaddr3StSsDmask3, 0x3u, 2u},
+	{ShaderInstructionFormat::Vdata1Vaddr3StSsDmask4, 0x4u, 1u},
+	{ShaderInstructionFormat::Vdata2Vaddr3StSsDmask5, 0x5u, 2u},
+	{ShaderInstructionFormat::VdataVaddr3StSsMimgDmask, 0x6u, 2u},
+	{ShaderInstructionFormat::Vdata3Vaddr3StSsDmask7, 0x7u, 3u},
+	{ShaderInstructionFormat::Vdata1Vaddr3StSsDmask8, 0x8u, 1u},
+	{ShaderInstructionFormat::Vdata2Vaddr3StSsDmask9, 0x9u, 2u},
+	{ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskA, 0xau, 2u},
+	{ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskB, 0xbu, 3u},
+	{ShaderInstructionFormat::Vdata2Vaddr3StSsDmaskC, 0xcu, 2u},
+	{ShaderInstructionFormat::Vdata3Vaddr3StSsDmaskD, 0xdu, 3u},
+	{ShaderInstructionFormat::VdataVaddr3StSsMimgDmask, 0xeu, 3u},
+	{ShaderInstructionFormat::Vdata4Vaddr3StSsDmaskF, 0xfu, 4u},
+};
+
+ShaderPixelInputInfo ImplicitSampleInput(bool include_flat, bool include_array, bool include_volume)
+{
+	ShaderPixelInputInfo input {};
+	input.target_output_mode[0] = 4;
+	input.bind.push_constant_size = 128;
+	input.bind.textures2D.textures_num =
+	    static_cast<int>(include_flat) + static_cast<int>(include_array) + static_cast<int>(include_volume);
+	input.bind.textures2D.textures2d_sampled_num = include_flat ? 1 : 0;
+	input.bind.textures2D.textures2d_array_sampled_num = include_array ? 1 : 0;
+	input.bind.textures2D.textures3d_sampled_num = include_volume ? 1 : 0;
+	input.bind.samplers.samplers_num = 1;
+	input.bind.samplers.start_register[0] = 32;
+
+	int descriptor = 0;
+	int start_register = 8;
+	if (include_flat)
+	{
+		auto& flat = input.bind.textures2D.desc[descriptor++];
+		flat.start_register = start_register;
+		flat.usage = ShaderTextureUsage::ReadOnly;
+		flat.texture.fields[1] = 1u << 20u;
+		flat.texture.fields[3] = (9u << 28u) | DstSel(4, 4, 4, 4);
+		start_register += 8;
+	}
+	if (include_array)
+	{
+		auto& array = input.bind.textures2D.desc[descriptor++];
+		array.start_register = start_register;
+		array.usage = ShaderTextureUsage::ReadOnly;
+		array.texture.fields[1] = 1u << 20u;
+		array.texture.fields[3] = (13u << 28u) | DstSel(4, 4, 4, 4);
+		start_register += 8;
+	}
+	if (include_volume)
+	{
+		auto& volume = input.bind.textures2D.desc[descriptor];
+		volume.start_register = start_register;
+		volume.usage = ShaderTextureUsage::ReadOnly;
+		volume.texture.fields[1] = 1u << 20u;
+		volume.texture.fields[3] = (10u << 28u) | DstSel(4, 4, 4, 4);
+	}
+	ShaderCalcBindingIndices(&input.bind);
+	return input;
+}
+
+ShaderInstruction ImplicitSample(const ImplicitSampleFormat& sample_format, uint32_t dimension, int texture_register)
+{
+	ShaderInstruction sample {};
+	sample.type = ShaderInstructionType::ImageSample;
+	sample.format = sample_format.format;
+	sample.dst = Operand(ShaderOperandType::Vgpr, 20, static_cast<int>(sample_format.destination_num));
+	sample.src[0] = Operand(ShaderOperandType::Vgpr, 4, 3);
+	sample.src[1] = Operand(ShaderOperandType::Sgpr, texture_register, 8);
+	sample.src[2] = Operand(ShaderOperandType::Sgpr, 32, 4);
+	sample.src_num = 3;
+	sample.mimg_dimension = static_cast<uint8_t>(dimension);
+	sample.mimg_dmask = sample_format.format == ShaderInstructionFormat::VdataVaddr3StSsMimgDmask ? sample_format.dmask : 0;
+	// Model the captured NSA order (v4, v7, v6), where v6 supplies z.
+	sample.mimg_address_num = 3;
+	sample.mimg_address[0] = Operand(ShaderOperandType::Vgpr, 4);
+	sample.mimg_address[1] = Operand(ShaderOperandType::Vgpr, 7);
+	sample.mimg_address[2] = Operand(ShaderOperandType::Vgpr, 6);
+	return sample;
+}
+
+String8 GenerateImplicitSample(const ImplicitSampleFormat& sample_format, bool include_flat, bool include_volume,
+	                               bool sample_volume, uint32_t dimension, bool next_gen = true, bool include_array = false,
+	                               bool sample_array = false)
+{
+	InitializeEmitterTest();
+	Config::SetNextGen(next_gen);
+	const int texture_register = sample_volume ? 8 + (include_flat ? 8 : 0) + (include_array ? 8 : 0) :
+	                             (sample_array ? 8 + (include_flat ? 8 : 0) : 8);
+	auto input = ImplicitSampleInput(include_flat, include_array, include_volume);
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+	code.GetInstructions().Add(ImplicitSample(sample_format, dimension, texture_register));
+	code.GetInstructions().Add(EndProgram());
+	return SpirvGenerateSource(code, nullptr, &input, nullptr);
+}
+
+bool HasPackedImageSampleContract(const String8& source, const ImplicitSampleFormat& sample_format)
+{
+	uint32_t destination_offset = 0;
+	for (uint32_t component = 0; component < 4u; ++component)
+	{
+		if ((sample_format.dmask & (1u << component)) == 0u)
+		{
+			continue;
+		}
+		const auto extract = String8::FromPrintf(
+		    "%%image_sample_component_0_%u = OpCompositeExtract %%float %%image_sample_value_0 %u", component,
+		    component);
+		const auto select = String8::FromPrintf(
+		    "%%image_exec_value_0_%u = OpSelect %%float %%image_exec_active_0 %%image_sample_component_0_%u %%image_exec_old_0_%u",
+		    destination_offset, component, destination_offset);
+		const auto store = String8::FromPrintf("OpStore %%v%u %%image_exec_value_0_%u", 20u + destination_offset,
+		                                       destination_offset);
+		if (source.FindIndex(extract) == Core::STRING8_INVALID_INDEX || source.FindIndex(select) == Core::STRING8_INVALID_INDEX ||
+		    source.FindIndex(store) == Core::STRING8_INVALID_INDEX)
+		{
+			return false;
+		}
+		++destination_offset;
+	}
+	return destination_offset == sample_format.destination_num;
+}
+
+bool HasVolumeSampleContract(const String8& source, const ImplicitSampleFormat& sample_format)
+{
+	return source.FindIndex("%image_sample_image_ptr_0 = OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S") !=
+	           Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("%image_sample_x_0 = OpLoad %float %v4") != Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("%image_sample_y_0 = OpLoad %float %v7") != Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("%image_sample_layer_0 = OpLoad %float %v6") != Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("%image_sample_coord_0 = OpCompositeConstruct %v3float %image_sample_x_0 %image_sample_y_0 "
+	                        "%image_sample_layer_0") != Core::STRING8_INVALID_INDEX &&
+	       HasPackedImageSampleContract(source, sample_format);
+}
+
+bool HasArraySampleContract(const String8& source, const ImplicitSampleFormat& sample_format)
+{
+	return source.FindIndex("%image_sample_image_ptr_0 = OpAccessChain %_ptr_UniformConstant_ImageSA %textures2DA_S") !=
+	           Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("%image_sample_x_0 = OpLoad %float %v4") != Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("%image_sample_y_0 = OpLoad %float %v7") != Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("%image_sample_layer_0 = OpLoad %float %v6") != Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("%image_sample_coord_0 = OpCompositeConstruct %v3float %image_sample_x_0 %image_sample_y_0 "
+	                        "%image_sample_layer_0") != Core::STRING8_INVALID_INDEX &&
+	       HasPackedImageSampleContract(source, sample_format);
+}
+
+bool HasFlatSampleContract(const String8& source)
+{
+	return source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageS %textures2D_S") != Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("OpCompositeConstruct %v2float") != Core::STRING8_INVALID_INDEX &&
+	       source.FindIndex("OpAccessChain %_ptr_UniformConstant_ImageS3D %textures3D_S") == Core::STRING8_INVALID_INDEX;
+}
+
+[[noreturn]] void RunVolumeOnlyImplicitSampleAndExit()
+{
+	const auto& sample_format = kImplicitSampleFormats[6]; // RGB dmask 0x7, the captured form.
+	const auto source = GenerateImplicitSample(sample_format, false, true, true, 2u);
+	if (!HasVolumeSampleContract(source, sample_format))
+	{
+		std::_Exit(2);
+	}
+	Vector<uint32_t> binary;
+	String8 error;
+	if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+	{
+		std::_Exit(3);
+	}
+	std::_Exit(0);
+}
+
+[[noreturn]] void RunGenericVolumeSampleAndExit(uint8_t dmask, uint32_t destination_num)
+{
+	const ImplicitSampleFormat sample_format {ShaderInstructionFormat::VdataVaddr3StSsMimgDmask, dmask, destination_num};
+	const auto source = GenerateImplicitSample(sample_format, true, true, true, 2u);
+	if (!HasVolumeSampleContract(source, sample_format))
+	{
+		std::_Exit(2);
+	}
+	Vector<uint32_t> binary;
+	String8 error;
+	if (!ShaderToolchain::Run(source, &binary, &error) || binary.IsEmpty())
+	{
+		std::_Exit(3);
+	}
+	std::_Exit(0);
 }
 
 ShaderInstruction Ldexp()
@@ -216,6 +417,41 @@ TEST(EmulatorShaderEmitterPreconditions, ControlsEmitValidOperandKinds)
 	ASSERT_EXIT(RunLdexp(Operand(ShaderOperandType::Vgpr, 1)), ::testing::ExitedWithCode(0), "");
 	ASSERT_EXIT(RunMovrels(Operand(ShaderOperandType::Vgpr, 5)), ::testing::ExitedWithCode(0), "");
 	ASSERT_EXIT(RunSample(SampleOperand::None), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderEmitterPreconditions, ImplicitImageSampleUsesBoundShapeAndPacksEnabledComponents)
+{
+	for (const auto& sample_format: kImplicitSampleFormats)
+	{
+		if (sample_format.format == ShaderInstructionFormat::VdataVaddr3StSsMimgDmask)
+		{
+			continue;
+		}
+		const auto source = GenerateImplicitSample(sample_format, true, true, true, 2u);
+		EXPECT_TRUE(HasVolumeSampleContract(source, sample_format)) << String8::FromPrintf("dmask=0x%x", sample_format.dmask).c_str();
+
+		if (sample_format.dmask == 0x7u)
+		{
+			Vector<uint32_t> binary;
+			String8          error;
+			EXPECT_TRUE(ShaderToolchain::Run(source, &binary, &error)) << error.c_str();
+			EXPECT_FALSE(binary.IsEmpty());
+		}
+	}
+
+	const auto flat_source = GenerateImplicitSample(kImplicitSampleFormats[6], true, false, false, 1u, false);
+	EXPECT_TRUE(HasFlatSampleContract(flat_source));
+	const auto mixed_flat_source = GenerateImplicitSample(kImplicitSampleFormats[6], true, true, false, 1u);
+	EXPECT_TRUE(HasFlatSampleContract(mixed_flat_source));
+
+	const auto array_source = GenerateImplicitSample(kImplicitSampleFormats[4], false, false, false, 5u, true, true, true);
+	EXPECT_TRUE(HasArraySampleContract(array_source, kImplicitSampleFormats[4]));
+
+	// Volume-only and generic-dmask cases used to reject before reaching the
+	// typed emitter; keep them isolated so the expected failure stays local.
+	EXPECT_EXIT(RunVolumeOnlyImplicitSampleAndExit(), ::testing::ExitedWithCode(0), "");
+	EXPECT_EXIT(RunGenericVolumeSampleAndExit(0x6u, 2u), ::testing::ExitedWithCode(0), "");
+	EXPECT_EXIT(RunGenericVolumeSampleAndExit(0xeu, 3u), ::testing::ExitedWithCode(0), "");
 }
 
 TEST(EmulatorShaderEmitterPreconditions, LdexpRejectsNonRegisterDestination)

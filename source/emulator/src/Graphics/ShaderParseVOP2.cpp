@@ -101,6 +101,7 @@ KYTY_SHADER_PARSER(shader_parse_vop2)
 		inst.src[0].dpp_bound_ctrl     = ((buffer[1] & (1u << 19u)) != 0);
 		inst.src[0].dpp_bank_mask      = static_cast<uint8_t>((buffer[1] >> 24u) & 0xfu);
 		inst.src[0].dpp_row_mask       = static_cast<uint8_t>((buffer[1] >> 28u) & 0xfu);
+		inst.src[0].dpp_unmodeled_bits = buffer[1] & 0x00f20000u;
 	}
 
 	inst.dst.clamp = (clmp != 0);

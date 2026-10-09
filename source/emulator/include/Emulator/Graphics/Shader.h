@@ -135,6 +135,7 @@ enum class ShaderInstructionType : uint32_t
 	ImageSampleLzO,
 	ImageSampleB,
 	ImageSampleDrefLz,
+	ImageSampleCd,
 	ImageStore,
 	ImageStoreMip,
 	SAddcU32,
@@ -702,6 +703,7 @@ enum FormatByte : uint64_t
 	NullTarget, // pixel valid mask without data
 	DsOff,  // byte offset carried by ShaderInstruction::ds_offset
 	Float3, // format:float3
+	S0A6,   // operand_array_to_str(inst.src[0], 6)
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -841,6 +843,7 @@ enum Format : uint64_t
 	VdataVaddr2StSsMimgDmask                = FormatDefine({DA, S0A2, S1A8, S2A4, MimgDmask}),
 	VdataVaddr3StSsMimgDmask                = FormatDefine({DA, S0A3, S1A8, S2A4, MimgDmask}),
 	VdataVaddr4StSsMimgDmask                = FormatDefine({DA, S0A4, S1A8, S2A4, MimgDmask}),
+	VdataVaddr6StSsMimgDmask                = FormatDefine({DA, S0A6, S1A8, S2A4, MimgDmask}),
 	Vdata4Vaddr4StDmaskF                = FormatDefine({DA4, S0A4, S1A8, DmaskF}),
 	// image_gather4 returns four values from the selected component. The MIMG
 	// component mask selects that component; it does not alter result width.
@@ -935,13 +938,15 @@ struct ShaderOperand
 	uint8_t  dpp_bank_mask      = 0;
 	bool     dpp_fetch_inactive = false;
 	bool     dpp_bound_ctrl     = false;
+	// DPP control-dword bits without an established lowering contract.
+	uint32_t dpp_unmodeled_bits = 0;
 
 	bool operator==(const ShaderOperand& other) const
 	{
 		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
 		       swizzle == other.swizzle && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
 		       dpp_bank_mask == other.dpp_bank_mask && dpp_fetch_inactive == other.dpp_fetch_inactive &&
-		       dpp_bound_ctrl == other.dpp_bound_ctrl;
+		       dpp_bound_ctrl == other.dpp_bound_ctrl && dpp_unmodeled_bits == other.dpp_unmodeled_bits;
 	}
 };
 

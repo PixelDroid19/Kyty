@@ -353,6 +353,9 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::S0A2: s = operand_array_to_str(inst.src[0], 2); break;
 			case ShaderInstructionFormat::S0A3: s = operand_array_to_str(inst.src[0], 3); break;
 			case ShaderInstructionFormat::S0A4: s = operand_array_to_str(inst.src[0], 4); break;
+			case ShaderInstructionFormat::S0A6:
+				s = inst.mimg_address_num > 0 ? operand_to_str(inst.src[0]) : operand_array_to_str(inst.src[0], 6);
+				break;
 			case ShaderInstructionFormat::S1A2: s = operand_array_to_str(inst.src[1], 2); break;
 			case ShaderInstructionFormat::S1A3: s = operand_array_to_str(inst.src[1], 3); break;
 			case ShaderInstructionFormat::S1A4: s = operand_array_to_str(inst.src[1], 4); break;
@@ -444,7 +447,8 @@ static String8 dbg_fmt_print(const ShaderInstruction& inst)
 			case ShaderInstructionFormat::S0:
 			case ShaderInstructionFormat::S0A2:
 			case ShaderInstructionFormat::S0A3:
-			case ShaderInstructionFormat::S0A4: src_num = std::max(src_num, 1); break;
+			case ShaderInstructionFormat::S0A4:
+			case ShaderInstructionFormat::S0A6: src_num = std::max(src_num, 1); break;
 			case ShaderInstructionFormat::S1:
 			case ShaderInstructionFormat::S1A2:
 			case ShaderInstructionFormat::S1A3:

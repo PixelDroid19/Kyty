@@ -521,7 +521,19 @@ KYTY_SHADER_PARSER(shader_parse_mimg)
 		case 0x5E: KYTY_NI("image_gather4_c_b_cl_o"); break;
 		case 0x5F: KYTY_NI("image_gather4_c_lz_o"); break;
 		case 0x60: KYTY_NI("image_get_lod"); break;
-		case 0x68: KYTY_NI("image_sample_cd"); break;
+		case 0x68:
+			// Two-dimensional coarse samples supply four slopes followed by x,y.
+			// Other dimensions and unmodeled address/data controls stay refused.
+			EXIT_NOT_IMPLEMENTED(!next_gen || dim != 1u || dmask == 0u || nsa == 1u ||
+			                     (buffer[0] & 0xc0u) != 0u || (buffer[1] & 0xfc000000u) != 0u);
+			inst.type        = ShaderInstructionType::ImageSampleCd;
+			inst.format      = ShaderInstructionFormat::VdataVaddr6StSsMimgDmask;
+			inst.src[0].size = nsa == 0u ? 6 : 1;
+			inst.src[1].size = 8;
+			inst.src[2].size = 4;
+			inst.mimg_dmask  = static_cast<uint8_t>(dmask);
+			inst.dst.size    = MimgDmaskComponents(dmask);
+			break;
 		case 0x69: KYTY_NI("image_sample_cd_cl"); break;
 		case 0x6A: KYTY_NI("image_sample_c_cd"); break;
 		case 0x6B: KYTY_NI("image_sample_c_cd_cl"); break;
