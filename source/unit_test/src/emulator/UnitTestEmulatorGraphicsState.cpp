@@ -51,6 +51,7 @@
 #include "Emulator/Loader/SymbolDatabase.h"
 #include "Emulator/Log.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -2014,6 +2015,27 @@ private:
 	uint64_t                         m_base;
 	uint64_t                         m_size;
 	const std::array<SubmissionId, 2> m_submissions;
+};
+
+class ScopedVirtualMemoryFixtureAllocation final
+{
+public:
+	explicit ScopedVirtualMemoryFixtureAllocation(uint64_t size)
+	    : m_address(Core::VirtualMemory::Alloc(0, size, Core::VirtualMemory::Mode::ReadWrite))
+	{}
+
+	~ScopedVirtualMemoryFixtureAllocation()
+	{
+		if (m_address != 0u) { EXPECT_TRUE(Core::VirtualMemory::Free(m_address)); }
+	}
+
+	ScopedVirtualMemoryFixtureAllocation(const ScopedVirtualMemoryFixtureAllocation&)            = delete;
+	ScopedVirtualMemoryFixtureAllocation& operator=(const ScopedVirtualMemoryFixtureAllocation&) = delete;
+
+	[[nodiscard]] uint64_t Address() const { return m_address; }
+
+private:
+	uint64_t m_address = 0;
 };
 
 } // namespace
@@ -5286,6 +5308,157 @@ TEST(EmulatorGraphicsState, RequiresTileProofBeforeSkippingStorageImageSeed)
 	descriptor.texture.fields[1] = (36u << 20u) | (3u << 30u);
 	descriptor.texture.fields[2] = 119u | (269u << 14u);
 	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 60u, 34u, 1u), 1u);
+}
+
+TEST(EmulatorGraphicsState, RequiresCoherentOriginBoundsAndDisjointInputsBeforeSkippingStorageSeed)
+{
+	EnsureGpuMemoryForTests();
+
+	GraphicContext ctx {};
+	const uint64_t heap_size = 0x20000ull;
+	const ScopedVirtualMemoryFixtureAllocation guest_memory(heap_size);
+	const uint64_t heap_base = guest_memory.Address();
+	ASSERT_NE(heap_base, 0u);
+	const ScopedGpuMemoryFixtureRange heap(&ctx, heap_base, heap_size);
+
+	const uint64_t input_address      = heap_base + 0x6000ull;
+	const uint64_t parameters_address = heap_base + 0x4000ull;
+	const uint64_t image_address      = heap_base + 0x10000ull;
+	constexpr uint32_t parameter_words[8] = {32u, 1u, 0u, 0u, 0u, 0u, 32u, 18u};
+	std::memcpy(reinterpret_cast<void*>(parameters_address), parameter_words, sizeof(parameter_words));
+	std::memcpy(reinterpret_cast<void*>(image_address), parameter_words, sizeof(parameter_words));
+	std::memset(reinterpret_cast<void*>(input_address), 0, 64u);
+	ASSERT_NE(GpuMemoryCreateObject(1, &ctx, nullptr, input_address, 64u,
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true, true)),
+	          nullptr);
+	ASSERT_NE(GpuMemoryCreateObject(2, &ctx, nullptr, parameters_address, sizeof(parameter_words),
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true, true)),
+	          nullptr);
+
+	ShaderComputeInputInfo input {};
+	input.storage_image_write_only_mask = 1u;
+	input.dispatch_mode = 0x41u;
+	input.threads_num[0] = 4u;
+	input.threads_num[1] = 4u;
+	input.threads_num[2] = 1u;
+	input.bind.storage_buffers.buffers_num = 2;
+	auto configure_buffer = [](ShaderBufferResource& resource, uint64_t address, uint32_t stride, uint32_t records)
+	{
+		resource.UpdateAddress48(address);
+		resource.fields[1] = (resource.fields[1] & 0xffffu) | (stride << 16u);
+		resource.fields[2] = records;
+		resource.fields[3] = DstSel(4, 0, 0, 1);
+	};
+	configure_buffer(input.bind.storage_buffers.buffers[0], input_address, 1u, 64u);
+	configure_buffer(input.bind.storage_buffers.buffers[1], parameters_address, 16u, 2u);
+	input.bind.storage_buffers.usages[0] = ShaderStorageUsage::ReadOnly;
+	input.bind.storage_buffers.usages[1] = ShaderStorageUsage::Constant;
+	input.bind.storage_buffers.accesses[0] = ShaderStorageAccess::Raw;
+	input.bind.storage_buffers.accesses[1] = ShaderStorageAccess::Raw;
+	input.bind.storage_buffers.sources[0] = ShaderStorageBindingSource::DirectResource;
+	input.bind.storage_buffers.sources[1] = ShaderStorageBindingSource::MetadataSharp;
+	input.bind.storage_buffers.code_available[0] = true;
+	input.bind.storage_buffers.code_available[1] = true;
+	input.bind.storage_buffers.exact_matches[0] = true;
+	input.bind.storage_buffers.exact_matches[1] = true;
+	input.bind.textures2D.textures_num = 1;
+	auto& descriptor = input.bind.textures2D.desc[0];
+	descriptor.usage = ShaderTextureUsage::ReadWrite;
+	descriptor.textures2d_without_sampler = true;
+	descriptor.texture.fields[1] = (5u << 20u) | ((31u & 3u) << 30u);
+	descriptor.texture.fields[2] = (17u << 14u) | (31u >> 2u);
+	descriptor.texture.fields[3] = 9u << 28u;
+	descriptor.texture.UpdateAddress40(image_address >> 8u);
+	auto& coverage = input.storage_image_tile_coverage[0];
+	coverage = {4u, 4u, 1, 24u, 16};
+
+	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(parameters_address, sizeof(parameter_words)));
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 1u);
+
+	// The same coherent parameter block must describe a zero origin and the
+	// complete target extent; either component diverging keeps initialization.
+	auto* parameters = reinterpret_cast<uint32_t*>(parameters_address);
+	for (const uint32_t origin_component: {4u, 5u})
+	{
+		parameters[origin_component] = 1u;
+		EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+		parameters[origin_component] = 0u;
+	}
+	for (const uint32_t extent_component: {6u, 7u})
+	{
+		parameters[extent_component]--;
+		EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+		parameters[extent_component]++;
+	}
+
+	// Offset evidence and descriptor extent must contain the full 16-byte
+	// origin-plus-bounds read, with its declared layout intact.
+	coverage.bounds_byte_offset = 25u;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	coverage.bounds_byte_offset = 24u;
+	coverage.origin_byte_offset = -1;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	coverage.origin_byte_offset = 16;
+	auto& parameter_resource = input.bind.storage_buffers.buffers[1];
+	const uint32_t parameter_stride = parameter_resource.fields[1] & 0xffff0000u;
+	parameter_resource.fields[1] = (parameter_resource.fields[1] & 0xffffu) | (12u << 16u);
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	parameter_resource.fields[1] = (parameter_resource.fields[1] & 0xffffu) | parameter_stride;
+
+	// A nonzero bound input cannot overlap any byte of the canonical target
+	// image, and every bound storage buffer must remain read-only and sized.
+	parameter_resource.UpdateAddress48(image_address);
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	parameter_resource.UpdateAddress48(parameters_address);
+	auto& input_resource = input.bind.storage_buffers.buffers[0];
+	input_resource.fields[2] = 0u;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	input_resource.fields[2] = 64u;
+	input.bind.storage_buffers.usages[0] = ShaderStorageUsage::ReadWrite;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	input.bind.storage_buffers.usages[0] = ShaderStorageUsage::ReadOnly;
+
+	// A writable GPU overlap makes the parameter snapshot ineligible.
+	GpuMemoryFree(&ctx, parameters_address, sizeof(parameter_words));
+	ASSERT_NE(GpuMemoryCreateObject(3, &ctx, nullptr, parameters_address, sizeof(parameter_words),
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, false, true)),
+	          nullptr);
+	EXPECT_FALSE(GpuMemoryCanSnapshotReadOnlyBuffer(parameters_address, sizeof(parameter_words)));
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	GpuMemoryFree(&ctx, parameters_address, sizeof(parameter_words));
+	ASSERT_NE(GpuMemoryCreateObject(4, &ctx, nullptr, parameters_address, sizeof(parameter_words),
+	                                TestGpuObject(GpuMemoryObjectType::StorageBuffer, true, true)),
+	          nullptr);
+	EXPECT_TRUE(GpuMemoryCanSnapshotReadOnlyBuffer(parameters_address, sizeof(parameter_words)));
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 1u);
+
+	// The dispatch proof requires a complete grid and an enabled, non-partial
+	// mode without guest thread limits.
+	input.dispatch_mode = 0x40u;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	input.dispatch_mode = 0x43u;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	input.dispatch_mode = 0x41u;
+	input.thread_limits_used = true;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	input.thread_limits_used = false;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 7u, 5u, 1u), 0u);
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 4u, 1u), 0u);
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 1u);
+
+	// An unknown texel format must reject the proof before pitch arithmetic.
+	const uint32_t image_format_word = descriptor.texture.fields[1];
+	descriptor.texture.fields[1] &= ~(0x1ffu << 20u);
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
+	descriptor.texture.fields[1] = image_format_word;
+
+	// The existing offset-zero bounds contract still uses its two-word read.
+	coverage.bounds_byte_offset = 0u;
+	coverage.origin_byte_offset = -1;
+	parameters[1] = 18u;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 1u);
+	parameters[1] = 17u;
+	EXPECT_EQ(ShaderComputeStorageSeedSkipMask(input, true, 8u, 5u, 1u), 0u);
 }
 
 // Storage view reused inside a live render target allocation (worldmap load:

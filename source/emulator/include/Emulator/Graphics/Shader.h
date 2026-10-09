@@ -1818,6 +1818,10 @@ struct ShaderStorageImageTileCoverage
 	// A nonnegative index requires a validated, read-only runtime snapshot of
 	// the exact image width and height before the seed may be skipped.
 	int bounds_storage_buffer_index = -1;
+	uint32_t bounds_byte_offset = 0;
+	// A nonnegative origin offset requires one coherent origin/bounds snapshot
+	// and a zero origin before whole-image coverage can skip initialization.
+	int origin_byte_offset = -1;
 };
 [[nodiscard]] ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code,
                                                                                    const ShaderBindResources& bind, int texture_index,

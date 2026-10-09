@@ -49,6 +49,35 @@ static ShaderOperand TileConstant(uint32_t value)
 	return operand;
 }
 
+static ShaderInstruction* FirstWaitcntInstruction(ShaderCode& code)
+{
+	for (auto& instruction: code.GetInstructions())
+	{
+		if (instruction.type == ShaderInstructionType::SWaitcnt) { return &instruction; }
+	}
+	return nullptr;
+}
+
+static void ExpectExactWaitcntTuple(const ShaderInstruction& instruction, uint32_t immediate)
+{
+	EXPECT_EQ(instruction.type, ShaderInstructionType::SWaitcnt);
+	EXPECT_EQ(instruction.format, ShaderInstructionFormat::Imm);
+	EXPECT_EQ(instruction.sopp_opcode, 0x0cu);
+	EXPECT_EQ(instruction.src_num, 1);
+	EXPECT_EQ(instruction.dst.type, ShaderOperandType::Unknown);
+	EXPECT_EQ(instruction.dst.size, 0);
+	EXPECT_EQ(instruction.dst2.type, ShaderOperandType::Unknown);
+	EXPECT_EQ(instruction.dst2.size, 0);
+	EXPECT_EQ(instruction.src[0].type, ShaderOperandType::LiteralConstant);
+	EXPECT_EQ(instruction.src[0].size, 0);
+	EXPECT_EQ(instruction.src[0].constant.u, immediate);
+	for (int source = 1; source < 4; ++source)
+	{
+		EXPECT_EQ(instruction.src[source].type, ShaderOperandType::Unknown);
+		EXPECT_EQ(instruction.src[source].size, 0);
+	}
+}
+
 static ShaderCode MakeFourQuadrantTileShader(bool omit_last_store = false, bool read_destination = false)
 {
 	ShaderCode code;
@@ -416,6 +445,486 @@ TEST(EmulatorShaderMimg, RejectsUnprovenBoundedGridStorageOverwrite)
 	rejects(MakeBoundedGridStoreShader(), bind);
 	EXPECT_EQ(AnalyzeShaderStorageImageTileCoverage(code, BoundedGridStoreBinding(code), 0, 14, threads, true, false).width,
 	          0u);
+}
+
+// Sanitized offset-grid shape: origin and extent come from a static raw
+// metadata V#, while the write-only R8 target is a separate static T#.
+static ShaderCode MakeMetadataOffsetBoundedGridStoreShader(bool overwrite_parameters = false,
+                                                           bool overwrite_target = false,
+                                                           bool clobber_coordinate = false,
+                                                           bool read_target = false,
+                                                           bool y_inplace_prelude = false,
+                                                           bool restore_exec_before_store = false,
+                                                           int optional_coefficient_byte_offset = -1,
+                                                           uint32_t tile_shift = 2)
+{
+	ShaderCode code;
+	code.SetType(ShaderType::Compute);
+	auto add = [&code](ShaderInstructionType type, ShaderOperand dst, std::initializer_list<ShaderOperand> sources)
+	{
+		ShaderInstruction inst {};
+		inst.pc      = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		inst.type    = type;
+		inst.dst     = dst;
+		inst.src_num = static_cast<int>(sources.size());
+		int source_index = 0;
+		for (const auto source: sources) { inst.src[source_index++] = source; }
+		code.GetInstructions().Add(inst);
+	};
+	const ShaderOperand vcc {.type = ShaderOperandType::VccLo, .size = 2};
+	auto add_waitcnt = [&code](uint32_t immediate)
+	{
+		ShaderInstruction wait {};
+		wait.pc          = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		wait.type        = ShaderInstructionType::SWaitcnt;
+		wait.format      = ShaderInstructionFormat::Imm;
+		wait.sopp_opcode = 0x0cu;
+		wait.src_num     = 1;
+		wait.src[0].type = ShaderOperandType::LiteralConstant;
+		wait.src[0].constant.u = immediate;
+		code.GetInstructions().Add(wait);
+	};
+	const int x_register = y_inplace_prelude ? 3 : 10;
+	const int y_register = y_inplace_prelude ? 1 : 11;
+	if (y_inplace_prelude)
+	{
+		// Match the observed ordering shape: form Y in place, load the metadata
+		// parameters, then form X in a different VGPR.
+		add(ShaderInstructionType::VLshlAddU32, TileVgpr(1), {TileSgpr(7), TileConstant(tile_shift), TileVgpr(1)});
+	} else
+	{
+		add(ShaderInstructionType::VLshlAddU32, TileVgpr(x_register), {TileSgpr(6), TileConstant(tile_shift), TileVgpr(0)});
+		add(ShaderInstructionType::VLshlAddU32, TileVgpr(y_register), {TileSgpr(7), TileConstant(tile_shift), TileVgpr(1)});
+	}
+	if (overwrite_parameters) { add(ShaderInstructionType::SMovB32, TileSgpr(12), {TileConstant(0)}); }
+	add(ShaderInstructionType::SBufferLoadDwordx4, TileSgpr(20, 4), {TileSgpr(12, 4), TileConstant(16)});
+	if (y_inplace_prelude)
+	{
+		add(ShaderInstructionType::VLshlAddU32, TileVgpr(x_register), {TileSgpr(6), TileConstant(tile_shift), TileVgpr(0)});
+	}
+	add_waitcnt(0xc07fu);
+	add(ShaderInstructionType::VCmpxGtU32, vcc, {TileSgpr(22), TileVgpr(x_register)});
+	add(ShaderInstructionType::VCmpxGtU32, vcc, {TileSgpr(23), TileVgpr(y_register)});
+	const int branch_index = code.GetInstructions().Size();
+	add(ShaderInstructionType::SCbranchExecz, {}, {TileConstant(0)});
+	if (restore_exec_before_store)
+	{
+		const ShaderOperand exec {.type = ShaderOperandType::ExecLo, .size = 2};
+		add(ShaderInstructionType::SMovB64, exec, {TileConstant(UINT32_MAX)});
+	}
+	if (optional_coefficient_byte_offset >= 0)
+	{
+		add(ShaderInstructionType::SBufferLoadDwordx2, vcc,
+		    {TileSgpr(12, 4), TileConstant(static_cast<uint32_t>(optional_coefficient_byte_offset))});
+		add_waitcnt(0xc07fu);
+	}
+	if (overwrite_target) { add(ShaderInstructionType::SMovB32, TileSgpr(40), {TileConstant(0)}); }
+	add(ShaderInstructionType::VAddI32, TileVgpr(12), {TileSgpr(20), TileVgpr(x_register)});
+	add(ShaderInstructionType::VAddI32, TileVgpr(13), {TileSgpr(21), TileVgpr(y_register)});
+	if (clobber_coordinate) { add(ShaderInstructionType::VMovB32, TileVgpr(12), {TileConstant(0)}); }
+	if (read_target)
+	{
+		ShaderInstruction load {};
+		load.pc               = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+		load.type             = ShaderInstructionType::ImageLoad;
+		load.dst              = TileVgpr(14);
+		load.src[0]           = TileVgpr(12);
+		load.src[0].size      = 2;
+		load.src[1]           = TileSgpr(40, 8);
+		load.src_num          = 2;
+		load.mimg_dimension   = 1;
+		load.mimg_dmask       = 1;
+		load.mimg_address_num = 2;
+		load.mimg_address[0]  = TileVgpr(12);
+		load.mimg_address[1]  = TileVgpr(13);
+		code.GetInstructions().Add(load);
+	}
+	// Keep one unrelated typed buffer read in the sanitized data body. The
+	// coverage proof must distinguish it from a read of the target image.
+	ShaderInstruction typed_read {};
+	typed_read.pc                   = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+	typed_read.type                 = ShaderInstructionType::BufferLoadFormatX;
+	typed_read.format               = ShaderInstructionFormat::Vdata1VaddrSvSoffsIdxen;
+	typed_read.dst                  = TileVgpr(18);
+	typed_read.src[0]               = TileVgpr(0);
+	typed_read.src[1]               = TileSgpr(28, 4);
+	typed_read.src[2]               = TileConstant(0);
+	typed_read.src_num              = 3;
+	typed_read.buffer_idxen         = true;
+	typed_read.buffer_imm_offset    = 0;
+	code.GetInstructions().Add(typed_read);
+	ShaderInstruction store {};
+	store.pc               = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+	store.type             = ShaderInstructionType::ImageStore;
+	store.src[0]           = TileVgpr(12);
+	store.src[0].size      = 2;
+	store.src[1]           = TileSgpr(40, 8);
+	store.src_num          = 2;
+	store.mimg_dimension   = 1;
+	store.mimg_dmask       = 0xf;
+	store.mimg_address_num = 2;
+	store.mimg_address[0]  = TileVgpr(12);
+	store.mimg_address[1]  = TileVgpr(13);
+	code.GetInstructions().Add(store);
+	ShaderInstruction end {};
+	end.pc   = static_cast<uint32_t>(code.GetInstructions().Size() * 4);
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(end);
+	code.GetInstructions()[branch_index].src[0].constant.u =
+	    code.GetInstructions().At(code.GetInstructions().Size() - 1).pc -
+	    code.GetInstructions().At(branch_index).pc - 4u;
+	return code;
+}
+
+static ShaderBindResources MetadataOffsetBoundedGridStoreBinding()
+{
+	ShaderBindResources bind {};
+	bind.storage_buffers.buffers_num                    = 2;
+	bind.storage_buffers.usages[0]                     = ShaderStorageUsage::ReadOnly;
+	bind.storage_buffers.accesses[0]                   = ShaderStorageAccess::Typed;
+	bind.storage_buffers.sources[0]                    = ShaderStorageBindingSource::DirectResource;
+	bind.storage_buffers.code_available[0]             = true;
+	bind.storage_buffers.exact_matches[0]              = true;
+	bind.storage_buffers.start_register[0]              = 28;
+	bind.storage_buffers.buffers[0].fields[0]           = 0x2000u;
+	bind.storage_buffers.buffers[0].fields[1]           = 4u << 16u;
+	bind.storage_buffers.buffers[0].fields[2]           = 4u;
+	bind.storage_buffers.buffers[0].fields[3]           = DstSel(4, 0, 0, 1) | (5u << 12u);
+	bind.storage_buffers.usages[1]                     = ShaderStorageUsage::Constant;
+	bind.storage_buffers.accesses[1]                   = ShaderStorageAccess::Raw;
+	bind.storage_buffers.sources[1]                    = ShaderStorageBindingSource::MetadataSharp;
+	bind.storage_buffers.code_available[1]             = true;
+	bind.storage_buffers.exact_matches[1]              = true;
+	bind.storage_buffers.start_register[1]              = 12;
+	bind.storage_buffers.buffers[1].fields[0]           = 0x1000u;
+	bind.storage_buffers.buffers[1].fields[1]           = 16u << 16u;
+	bind.storage_buffers.buffers[1].fields[2]           = 2u;
+	bind.storage_buffers.raw_smem_use[1]                = true;
+	bind.storage_buffers.raw_smem_required_bytes[1]      = 32u;
+	bind.textures2D.textures_num                        = 1;
+	bind.textures2D.desc[0].usage                       = ShaderTextureUsage::ReadWrite;
+	bind.textures2D.desc[0].textures2d_without_sampler  = true;
+	bind.textures2D.desc[0].start_register              = 40;
+	bind.textures2D.desc[0].texture.fields[1]            = (5u << 20u) | ((31u & 3u) << 30u);
+	bind.textures2D.desc[0].texture.fields[2]            = (17u << 14u) | (31u >> 2u);
+	bind.textures2D.desc[0].texture.fields[3]            = 9u << 28u;
+	return bind;
+}
+
+static bool ParseSanitizedMetadataOffsetImageStore(uint32_t nsa, uint32_t explicit_y_register, uint32_t dimension,
+                                                  ShaderInstruction* store)
+{
+	if (store == nullptr || nsa > 1u) { return false; }
+
+	// Exercise coordinate representation within the parser's admitted flag
+	// subset; this fixture does not establish complete ISA flag conformance.
+	std::array<uint32_t, 4> words {};
+	words[0] = (0x3cu << 26u) | (0x08u << 18u) | (0xfu << 8u) | (dimension << 3u) | (nsa << 1u);
+	words[1] = (10u << 16u) | (8u << 8u) | 4u; // T#40, VDATA v8, VADDR v4.
+	uint32_t word_count = 2u;
+	if (nsa != 0u)
+	{
+		words[word_count++] = explicit_y_register | (7u << 8u) | (8u << 16u) | (9u << 24u);
+	}
+	words[word_count++] = 0xbf810000u; // s_endpgm
+
+	ShaderCode parsed;
+	parsed.SetType(ShaderType::Compute);
+	if (!ShaderTryParseBounded(words.data(), static_cast<uint32_t>(word_count * sizeof(words[0])), &parsed) ||
+	    parsed.GetInstructions().Size() != 2u)
+	{
+		return false;
+	}
+	const auto& instruction = parsed.GetInstructions().At(0);
+	if (instruction.type != ShaderInstructionType::ImageStore ||
+	    parsed.GetInstructions().At(1).type != ShaderInstructionType::SEndpgm ||
+	    !ShaderInstructionLoweringPreconditions(instruction))
+	{
+		return false;
+	}
+	*store = instruction;
+	return true;
+}
+
+static bool ReplaceMetadataOffsetGridStoreWithParsedAddress(ShaderCode* code, uint32_t nsa = 0u,
+                                                            uint32_t explicit_y_register = 5u,
+                                                            uint32_t sequential_y_register = 5u, uint32_t dimension = 1u)
+{
+	if (code == nullptr || code->GetInstructions().Size() < 2u) { return false; }
+
+	uint32_t x_add_count = 0;
+	uint32_t y_add_count = 0;
+	for (auto& instruction: code->GetInstructions())
+	{
+		if (instruction.type != ShaderInstructionType::VAddI32 || instruction.src_num != 2) { continue; }
+		if (instruction.src[0].type == ShaderOperandType::Sgpr && instruction.src[0].register_id == 20 &&
+		    instruction.src[1].type == ShaderOperandType::Vgpr && instruction.src[1].register_id == 10)
+		{
+			instruction.dst = TileVgpr(4);
+			x_add_count++;
+		} else if (instruction.src[0].type == ShaderOperandType::Sgpr && instruction.src[0].register_id == 21 &&
+		           instruction.src[1].type == ShaderOperandType::Vgpr && instruction.src[1].register_id == 11)
+		{
+			instruction.dst = TileVgpr(sequential_y_register);
+			y_add_count++;
+		}
+	}
+	if (x_add_count != 1u || y_add_count != 1u) { return false; }
+
+	const uint32_t store_index = code->GetInstructions().Size() - 2u;
+	auto& store = code->GetInstructions()[store_index];
+	if (store.type != ShaderInstructionType::ImageStore) { return false; }
+	const uint32_t store_pc = store.pc;
+	ShaderInstruction parsed_store {};
+	if (!ParseSanitizedMetadataOffsetImageStore(nsa, explicit_y_register, dimension, &parsed_store)) { return false; }
+	parsed_store.pc = store_pc;
+	store            = parsed_store;
+	return true;
+}
+
+TEST(EmulatorShaderMimg, ProvesMetadataOffsetBoundedR8StorageImageCoverage)
+{
+	auto code = MakeMetadataOffsetBoundedGridStoreShader();
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	const auto* metadata_wait = FirstWaitcntInstruction(code);
+	ASSERT_NE(metadata_wait, nullptr);
+	ExpectExactWaitcntTuple(*metadata_wait, 0xc07fu);
+	const uint32_t store_index = code.GetInstructions().Size() - 2u;
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Format(), 5u);
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Width5() + 1u, 32u);
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Height5() + 1u, 18u);
+	ASSERT_EQ(ShaderFindImageStorageTextureDescriptor(code, store_index, bind, 0), 0);
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 4u);
+	EXPECT_EQ(coverage.height, 4u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 1);
+	EXPECT_EQ(coverage.bounds_byte_offset, 24u);
+	EXPECT_EQ(coverage.origin_byte_offset, 16);
+}
+
+TEST(EmulatorShaderMimg, ProvesMetadataOffsetCoverageForParsedSequentialImageAddress)
+{
+	InitMimgParser();
+	auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+	ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code));
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {8, 8, 1};
+	const uint32_t store_index = code.GetInstructions().Size() - 2u;
+	const auto& store = code.GetInstructions().At(store_index);
+	ASSERT_EQ(store.type, ShaderInstructionType::ImageStore);
+	ASSERT_EQ(store.src_num, 2);
+	EXPECT_EQ(store.mimg_address_num, 0);
+	EXPECT_EQ(store.mimg_dimension, 1u);
+	EXPECT_EQ(store.mimg_dmask, 0xfu);
+	ASSERT_EQ(store.src[0].type, ShaderOperandType::Vgpr);
+	EXPECT_EQ(store.src[0].register_id, 4);
+	EXPECT_EQ(store.src[0].size, 3);
+	EXPECT_EQ(store.src[1].type, ShaderOperandType::Sgpr);
+	EXPECT_EQ(store.src[1].register_id, 40);
+	EXPECT_EQ(store.src[1].size, 8);
+	ASSERT_TRUE(ShaderInstructionLoweringPreconditions(store));
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Format(), 5u);
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Width5() + 1u, 32u);
+	ASSERT_EQ(bind.textures2D.desc[0].texture.Height5() + 1u, 18u);
+	ASSERT_EQ(ShaderFindImageStorageTextureDescriptor(code, store_index, bind, 0), 0);
+
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 8u);
+	EXPECT_EQ(coverage.height, 8u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 1);
+	EXPECT_EQ(coverage.bounds_byte_offset, 24u);
+	EXPECT_EQ(coverage.origin_byte_offset, 16);
+}
+
+TEST(EmulatorShaderMimg, RejectsMalformedMetadataOffsetParsedImageAddress)
+{
+	InitMimgParser();
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {8, 8, 1};
+	const auto rejects = [&](const ShaderCode& code)
+	{
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		ASSERT_TRUE(ShaderInstructionLoweringPreconditions(code.GetInstructions().At(store_index)));
+		ASSERT_EQ(ShaderFindImageStorageTextureDescriptor(code, store_index, bind, 0), 0);
+		const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+		EXPECT_EQ(coverage.width, 0u);
+		EXPECT_EQ(coverage.height, 0u);
+	};
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		auto& store = code.GetInstructions()[store_index];
+		ASSERT_EQ(store.mimg_address_num, 0);
+		ASSERT_EQ(store.src[0].size, 3);
+		// An IR-only short span provides X but not the implicit adjacent Y VGPR.
+		store.src[0].size = 1;
+		ASSERT_TRUE(ShaderInstructionLoweringPreconditions(store));
+		rejects(code);
+	}
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code, 1u, 6u));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		const auto& store = code.GetInstructions().At(store_index);
+		ASSERT_EQ(store.mimg_address_num, 5);
+		ASSERT_EQ(store.mimg_address[0].register_id, 4);
+		ASSERT_EQ(store.mimg_address[1].register_id, 6);
+		rejects(code);
+	}
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code, 0u, 5u, 6u));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		const auto& store = code.GetInstructions().At(store_index);
+		ASSERT_EQ(store.mimg_address_num, 0);
+		ASSERT_EQ(store.src[0].register_id, 4);
+		rejects(code);
+	}
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code, 0u, 5u, 5u, 2u));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		EXPECT_EQ(code.GetInstructions().At(store_index).mimg_dimension, 2u);
+		rejects(code);
+	}
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, -1, 3);
+		ASSERT_TRUE(ReplaceMetadataOffsetGridStoreWithParsedAddress(&code));
+		const uint32_t store_index = code.GetInstructions().Size() - 2u;
+		// MIMG VADDR has no encoded modifier; this models malformed internal IR.
+		code.GetInstructions()[store_index].src[0].negate = true;
+		rejects(code);
+	}
+}
+
+TEST(EmulatorShaderMimg, ProvesMetadataOffsetCoverageWithYInplacePreludeOrdering)
+{
+	const auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, true);
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	const uint32_t store_index = code.GetInstructions().Size() - 2u;
+	ASSERT_EQ(ShaderFindImageStorageTextureDescriptor(code, store_index, bind, 0), 0);
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 4u);
+	EXPECT_EQ(coverage.height, 4u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 1);
+	EXPECT_EQ(coverage.bounds_byte_offset, 24u);
+	EXPECT_EQ(coverage.origin_byte_offset, 16);
+}
+
+TEST(EmulatorShaderMimg, ProvesMetadataOffsetCoverageWithOptionalCoefficientLoad)
+{
+	const auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, 0);
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	uint32_t wait_count = 0;
+	for (const auto& instruction: code.GetInstructions())
+	{
+		if (instruction.type == ShaderInstructionType::SWaitcnt)
+		{
+			ExpectExactWaitcntTuple(instruction, 0xc07fu);
+			wait_count++;
+		}
+	}
+	EXPECT_EQ(wait_count, 2u);
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 4u);
+	EXPECT_EQ(coverage.height, 4u);
+	EXPECT_EQ(coverage.bounds_storage_buffer_index, 1);
+	EXPECT_EQ(coverage.bounds_byte_offset, 24u);
+	EXPECT_EQ(coverage.origin_byte_offset, 16);
+}
+
+TEST(EmulatorShaderMimg, RejectsOutOfRangeOptionalMetadataCoefficientLoad)
+{
+	const auto code = MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, false, 32);
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 0u);
+	EXPECT_EQ(coverage.height, 0u);
+}
+
+TEST(EmulatorShaderMimg, RejectsMetadataWaitWithLgkmcntOne)
+{
+	auto code = MakeMetadataOffsetBoundedGridStoreShader();
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	ASSERT_EQ(coverage.width, 4u);
+	ASSERT_EQ(coverage.height, 4u);
+	auto* metadata_wait = FirstWaitcntInstruction(code);
+	ASSERT_NE(metadata_wait, nullptr);
+	ExpectExactWaitcntTuple(*metadata_wait, 0xc07fu);
+	metadata_wait->src[0].constant.u = 0xc17fu;
+	ExpectExactWaitcntTuple(*metadata_wait, 0xc17fu);
+	coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 0u);
+	EXPECT_EQ(coverage.height, 0u);
+}
+
+TEST(EmulatorShaderMimg, RejectsMetadataWaitWithLgkmcntFifteen)
+{
+	auto code = MakeMetadataOffsetBoundedGridStoreShader();
+	const auto bind = MetadataOffsetBoundedGridStoreBinding();
+	const uint32_t threads[3] = {4, 4, 1};
+	auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	ASSERT_EQ(coverage.width, 4u);
+	ASSERT_EQ(coverage.height, 4u);
+	auto* metadata_wait = FirstWaitcntInstruction(code);
+	ASSERT_NE(metadata_wait, nullptr);
+	ExpectExactWaitcntTuple(*metadata_wait, 0xc07fu);
+	metadata_wait->src[0].constant.u = 0xcf70u;
+	ExpectExactWaitcntTuple(*metadata_wait, 0xcf70u);
+	coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+	EXPECT_EQ(coverage.width, 0u);
+	EXPECT_EQ(coverage.height, 0u);
+}
+
+TEST(EmulatorShaderMimg, RejectsUnprovenMetadataOffsetBoundedR8Coverage)
+{
+	const uint32_t threads[3] = {4, 4, 1};
+	const auto rejects = [&](const ShaderCode& code, const ShaderBindResources& bind)
+	{
+		const auto coverage = AnalyzeShaderStorageImageTileCoverage(code, bind, 0, 6, threads, true, true);
+		EXPECT_EQ(coverage.width, 0u);
+		EXPECT_EQ(coverage.height, 0u);
+	};
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader();
+		for (auto& inst: code.GetInstructions())
+		{
+			if (inst.type == ShaderInstructionType::VCmpxGtU32) { inst.type = ShaderInstructionType::VCmpGtU32; }
+		}
+		rejects(code, MetadataOffsetBoundedGridStoreBinding());
+	}
+	rejects(MakeMetadataOffsetBoundedGridStoreShader(false, false, true), MetadataOffsetBoundedGridStoreBinding());
+	rejects(MakeMetadataOffsetBoundedGridStoreShader(true), MetadataOffsetBoundedGridStoreBinding());
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader(false, true);
+		const auto bind = MetadataOffsetBoundedGridStoreBinding();
+		EXPECT_EQ(ShaderFindImageStorageTextureDescriptor(code, code.GetInstructions().Size() - 2u, bind, 0), -1);
+		rejects(code, bind);
+	}
+	rejects(MakeMetadataOffsetBoundedGridStoreShader(false, false, false, true), MetadataOffsetBoundedGridStoreBinding());
+	{
+		auto code = MakeMetadataOffsetBoundedGridStoreShader();
+		code.GetInstructions()[code.GetInstructions().Size() - 2].mimg_dmask = 0u;
+		rejects(code, MetadataOffsetBoundedGridStoreBinding());
+	}
+	// The metadata V# must still be the resource bound at the shader's load
+	// register; matching descriptor bytes alone do not establish provenance.
+	{
+		auto bind = MetadataOffsetBoundedGridStoreBinding();
+		bind.storage_buffers.start_register[1]++;
+		rejects(MakeMetadataOffsetBoundedGridStoreShader(), bind);
+	}
+	// Restoring EXEC after the bounds guard re-enables lanes that the guard
+	// excluded, so the store no longer proves the analyzed tile coverage.
+	rejects(MakeMetadataOffsetBoundedGridStoreShader(false, false, false, false, false, true),
+	        MetadataOffsetBoundedGridStoreBinding());
 }
 
 static ShaderCode MakePairedSplitStoreShader(bool omit_first_store = false, bool clobber_coordinate = false,

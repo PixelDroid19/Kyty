@@ -865,6 +865,8 @@ static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, u
 
 class TransientBufferPool
 {
+	static constexpr uint64_t kMaxSnapshotReadSize = 16u;
+
 	struct Entry
 	{
 		VulkanBuffer buffer;
@@ -986,6 +988,35 @@ public:
 		Commit(entry, size);
 		finish_upload_time();
 		return &entry->buffer;
+	}
+
+	bool ReadSnapshot(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset, uint64_t size, void* dst) const
+	{
+		if (storage_buffer == nullptr || dst == nullptr || size == 0u || size > kMaxSnapshotReadSize)
+		{
+			return false;
+		}
+
+		for (const auto* entry: m_entries)
+		{
+			if (entry == nullptr || &entry->buffer != storage_buffer)
+			{
+				continue;
+			}
+
+			if (!entry->used || entry->scratch || !entry->snapshot_valid || entry->mapped == nullptr ||
+			    entry->snapshot_vaddr != expected_vaddr || entry->snapshot_size == 0u || entry->snapshot_size > entry->size ||
+			    offset > entry->snapshot_size || size > entry->snapshot_size - offset || offset > storage_buffer->descriptor_range ||
+			    size > storage_buffer->descriptor_range - offset || offset > entry->size || size > entry->size - offset)
+			{
+				return false;
+			}
+
+			std::memcpy(dst, static_cast<const uint8_t*>(entry->mapped) + offset, static_cast<size_t>(size));
+			return true;
+		}
+
+		return false;
 	}
 
 	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage)
@@ -1295,6 +1326,13 @@ VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint
 		m_transient_buffers = new TransientBufferPool;
 	}
 	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, usage, validation_ns, upload_ns, compare_ns, reused);
+}
+
+bool CommandBuffer::ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
+	                                               uint64_t size, void* dst) const
+{
+	return m_transient_buffers != nullptr &&
+	       m_transient_buffers->ReadSnapshot(storage_buffer, expected_vaddr, offset, size, dst);
 }
 
 VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint32_t usage)

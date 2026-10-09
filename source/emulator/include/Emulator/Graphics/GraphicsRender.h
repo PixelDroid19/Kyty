@@ -672,6 +672,10 @@ public:
 	VulkanBuffer* UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage);
 	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
 	                                             uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
+	// Reads at most 16 bytes from the immutable guest snapshot already uploaded for this command buffer.
+	// This never rereads guest memory; the buffer must still belong to the current recording.
+	[[nodiscard]] bool ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
+	                                               uint64_t size, void* dst) const;
 	// Reusable scratch for commands recorded in this buffer. Callers must order
 	// write/read/write hazards explicitly; lifetime extends through its fence.
 	VulkanBuffer* AllocateTransientScratchBuffer(uint64_t size, uint32_t usage);

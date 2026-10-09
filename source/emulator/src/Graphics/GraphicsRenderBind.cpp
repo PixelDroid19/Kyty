@@ -4519,10 +4519,53 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 	}
 }
 
+static uint32_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const ShaderBindResources& bind,
+                                                    VulkanBuffer* const* uploaded_buffers, uint32_t mask,
+                                                    const ShaderStorageImageTileCoverage* coverage)
+{
+	if (coverage == nullptr)
+	{
+		return mask;
+	}
+	if (bind.textures2D.textures_num < 0 || bind.textures2D.textures_num > ShaderTextureResources::RES_MAX ||
+	    bind.storage_buffers.buffers_num < 0 || bind.storage_buffers.buffers_num > DescriptorCache::BUFFERS_MAX)
+	{
+		return 0u;
+	}
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		const uint32_t bit = 1u << static_cast<uint32_t>(i);
+		if ((mask & bit) == 0u || coverage[i].origin_byte_offset < 0)
+		{
+			continue;
+		}
+		const int index = coverage[i].bounds_storage_buffer_index;
+		if (index < 0 || index >= bind.storage_buffers.buffers_num || index >= DescriptorCache::BUFFERS_MAX)
+		{
+			mask &= ~bit;
+			continue;
+		}
+		uint32_t origin_and_bounds[4] {};
+		const auto& texture = bind.textures2D.desc[i].texture;
+		// The proof must describe the immutable bytes actually bound for this
+		// dispatch, even if guest memory changed after the eligibility snapshot.
+		if (!buffer->ReadTransientSnapshotBuffer(uploaded_buffers[index], bind.storage_buffers.buffers[index].Base48(),
+		                                          static_cast<uint32_t>(coverage[i].origin_byte_offset),
+		                                          sizeof(origin_and_bounds), origin_and_bounds) ||
+		    origin_and_bounds[0] != 0u || origin_and_bounds[1] != 0u ||
+		    origin_and_bounds[2] != static_cast<uint32_t>(texture.Width5()) + 1u ||
+		    origin_and_bounds[3] != static_cast<uint32_t>(texture.Height5()) + 1u)
+		{
+			mask &= ~bit;
+		}
+	}
+	return mask;
+}
+
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
-                     const VulkanImage* stencil_attached_depth)
+                     const VulkanImage* stencil_attached_depth, const ShaderStorageImageTileCoverage* storage_seed_coverage)
 {
 	KYTY_PROFILER_FUNCTION();
 	InvalidateComputeColorFills(bind);
@@ -4592,6 +4635,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.textures2D.textures_num > 0)
 		{
 			const auto stage_start = BindingStageClock::now();
+			storage_seed_skip_mask = ValidateUploadedStorageSeedCoverage(buffer, bind, storage_buffers,
+			                                                             storage_seed_skip_mask, storage_seed_coverage);
 			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
 			                textures2d_sampled_view, textures2d_sampled_depth, textures2d_sampled_depth_view,
 			                textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,
