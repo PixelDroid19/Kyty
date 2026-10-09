@@ -3599,9 +3599,10 @@ static Vector<int> MovrelCandidateRegisters(const ShaderCode& code, int base)
 	return regs;
 }
 
-// dst = VGPR[base + m0] lowered to a select chain over every named candidate.
-static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, const ShaderCode& code, String8* dst_source,
-                               Spirv* spirv)
+// dst = VGPR[base + offset] lowered to a select chain over every named candidate. |offset_load| defines
+// %rel_m0_<index>: M0, or the lane's own index for a lowered waterfall loop.
+static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, const String8& offset_load, const ShaderCode& code,
+                               String8* dst_source, Spirv* spirv)
 {
 	String8 acc   = "%" + spirv->GetConstantFloat(0.0f);
 	String8 chain;
@@ -3623,14 +3624,14 @@ static bool EmitMovrelsDynamic(int index, const ShaderOperand& dst, int base, co
 	{
 		return false;
 	}
-	*dst_source += String8::FromPrintf("%%rel_m0_%d = OpLoad %%uint %%m0\n"
-	                                   "%s"
+	*dst_source += offset_load;
+	*dst_source += String8::FromPrintf("%s"
 	                                   "%%rel_exec_%d = OpLoad %%uint %%exec_lo\n"
 	                                   "%%rel_execb_%d = OpINotEqual %%bool %%rel_exec_%d %%uint_0\n"
 	                                   "%%rel_old_%d = OpLoad %%float %%%s\n"
 	                                   "%%rel_out_%d = OpSelect %%float %%rel_execb_%d %s %%rel_old_%d\n"
 	                                   "OpStore %%%s %%rel_out_%d\n",
-	                                   index, chain.c_str(), index, index, index, index, dst_value.value.c_str(), index, index,
+	                                   chain.c_str(), index, index, index, index, dst_value.value.c_str(), index, index,
 	                                   acc.c_str(), index, dst_value.value.c_str(), index);
 	return true;
 }
@@ -3746,7 +3747,8 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovrelsB32_SVdstSVsrc0)
 	{
 		return false;
 	}
-	return EmitMovrelsDynamic(index, inst.dst, inst.src[0].register_id, code, dst_source, spirv);
+	return EmitMovrelsDynamic(static_cast<int>(index), inst.dst, inst.src[0].register_id,
+	                          String8::FromPrintf("%%rel_m0_%u = OpLoad %%uint %%m0\n", index), code, dst_source, spirv);
 }
 
 KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
@@ -3757,6 +3759,19 @@ KYTY_RECOMPILER_FUNC(Recompile_VMovreldB32_SVdstSVsrc0)
 	if (inst.vop_sdwa)
 	{
 		return false;
+	}
+	// A lowered waterfall loop indexes with the lane's own VGPR (src[1]) instead of M0.
+	if (inst.format == ShaderInstructionFormat::SVdstSVsrc0SVsrc1)
+	{
+		if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || inst.src[0].type != ShaderOperandType::Vgpr ||
+		    inst.src[1].type != ShaderOperandType::Vgpr)
+		{
+			return false;
+		}
+		const auto offset_load = String8::FromPrintf("%%rel_lane_%u = OpLoad %%float %%v%d\n"
+		                                             "%%rel_m0_%u = OpBitcast %%uint %%rel_lane_%u\n",
+		                                             index, inst.src[1].register_id, index, index);
+		return EmitMovrelsDynamic(static_cast<int>(index), inst.dst, inst.src[0].register_id, offset_load, code, dst_source, spirv);
 	}
 	if (MovrelProvenLiteralM0(code, index, &m0))
 	{

@@ -464,6 +464,7 @@ const RecompilerFunc* RecompFunc(ShaderInstructionType type, ShaderInstructionFo
     {Recompile_VFractF64_SVdst2SVsrc0,         ShaderInstructionType::VFractF64,          ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_VMovB32_SVdstSVsrc0,            ShaderInstructionType::VMovB32,             ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_VMovrelsB32_SVdstSVsrc0,        ShaderInstructionType::VMovrelsB32,         ShaderInstructionFormat::SVdstSVsrc0, {""}},
+    {Recompile_VMovrelsB32_SVdstSVsrc0,        ShaderInstructionType::VMovrelsB32,         ShaderInstructionFormat::SVdstSVsrc0SVsrc1, {""}},
     {Recompile_VMovreldB32_SVdstSVsrc0,        ShaderInstructionType::VMovreldB32,         ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_VMovrelsdB32_SVdstSVsrc0,       ShaderInstructionType::VMovrelsdB32,        ShaderInstructionFormat::SVdstSVsrc0, {""}},
     {Recompile_VReadfirstlaneB32_SVdstSVsrc0,  ShaderInstructionType::VReadfirstlaneB32,   ShaderInstructionFormat::SVdstSVsrc0, {""}},
