@@ -3152,12 +3152,17 @@ static bool RecompileZeroSBufferLoad(const ShaderInstruction& inst, uint32_t com
 	{
 		return false;
 	}
+	String8 source;
 	for (uint32_t component = 0; component < components; ++component)
 	{
 		const auto dst = operand_variable_to_str(inst.dst, static_cast<int>(component));
-		if (dst.type != SpirvType::Uint) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst.type != SpirvType::Uint condition ignored (continuing)\n"); }
-		*dst_source += String8::FromPrintf("               OpStore %%%s %%uint_0\n", dst.value.c_str());
+		if (dst.type != SpirvType::Uint || dst.value.IsEmpty())
+		{
+			return false;
+		}
+		source += String8::FromPrintf("               OpStore %%%s %%uint_0\n", dst.value.c_str());
 	}
+	*dst_source += source;
 	return true;
 }
 
