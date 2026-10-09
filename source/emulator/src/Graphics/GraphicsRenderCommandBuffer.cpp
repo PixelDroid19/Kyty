@@ -827,6 +827,42 @@ static ImageTransitionSource ResolveImageTransitionSource(VkImageLayout layout)
 	}
 }
 
+static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, uint32_t usage, uint32_t usage_entries,
+                                                      uint32_t total_entries, uint64_t total_bytes)
+{
+	const auto critical_class = GpuMemoryTransientBufferAllocationClass::Critical;
+	const bool usage_cap_failed = !GpuMemoryTransientBufferPoolCanAllocate(usage_entries, 0u, 0u, 1u, critical_class);
+	const bool entry_cap_failed =
+	    !GpuMemoryTransientBufferPoolCanAllocate(0u, total_entries, 0u, 1u, critical_class);
+	const bool byte_cap_failed =
+	    !GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, total_bytes, requested_size, critical_class);
+	const uint64_t max_bytes = kGpuMemoryTransientBufferPoolMaxBytes;
+	static std::atomic<uint32_t> reports_remaining {8u};
+	uint32_t report_number = 0u;
+	uint32_t remaining = reports_remaining.load(std::memory_order_relaxed);
+	while (remaining != 0u)
+	{
+		const uint32_t event_number = 9u - remaining;
+		if (reports_remaining.compare_exchange_weak(remaining, remaining - 1u, std::memory_order_relaxed,
+		                                          std::memory_order_relaxed))
+		{
+			report_number = event_number;
+			break;
+		}
+	}
+	if (report_number == 0u)
+	{
+		return;
+	}
+
+	std::fprintf(stderr,
+	             "KYTY_TRANSIENT_POOL_CAPACITY_REJECT event=%" PRIu32 " class=critical(%u) requested=%" PRIu64
+	             " usage=0x%08" PRIx32 " usage_entries=%" PRIu32 " total_entries=%" PRIu32 " total_bytes=%" PRIu64
+	             " max_bytes=%" PRIu64 " usage_cap_failed=%d entry_cap_failed=%d byte_cap_failed=%d\n",
+	             report_number, static_cast<unsigned>(critical_class), requested_size, usage, usage_entries, total_entries,
+	             total_bytes, max_bytes, usage_cap_failed ? 1 : 0, entry_cap_failed ? 1 : 0, byte_cap_failed ? 1 : 0);
+}
+
 class TransientBufferPool
 {
 	struct Entry
@@ -1078,6 +1114,11 @@ private:
 			if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size,
 			                                                   allocation_class))
 			{
+				if (allocation_class == GpuMemoryTransientBufferAllocationClass::Critical)
+				{
+					ReportCriticalTransientPoolCapacityReject(size, usage, usage_entries,
+					                                          static_cast<uint32_t>(m_entries.size()), m_total_bytes);
+				}
 				return nullptr;
 			}
 
