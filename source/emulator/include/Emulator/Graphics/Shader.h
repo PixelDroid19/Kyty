@@ -1109,6 +1109,15 @@ public:
 	[[nodiscard]] ShaderType GetType() const { return m_type; }
 	void                     SetType(ShaderType type) { this->m_type = type; }
 
+	// Pixel spill admission needs the launch allocation, not only the instruction bytes.
+	void SetPixelLdsAllocation(uint32_t extra_dwords, int parameter_sgpr)
+	{
+		m_pixel_extra_lds_dwords = extra_dwords;
+		m_pixel_parameter_sgpr   = parameter_sgpr;
+	}
+	[[nodiscard]] uint32_t GetPixelExtraLdsDwords() const { return m_pixel_extra_lds_dwords; }
+	[[nodiscard]] int      GetPixelParameterSgpr() const { return m_pixel_parameter_sgpr; }
+
 	[[nodiscard]] bool HasAnyOf(std::initializer_list<ShaderInstructionType> types) const
 	{
 		return std::any_of(types.begin(), types.end(), [this](auto type)
@@ -1147,6 +1156,8 @@ private:
 	Vector<ShaderLabel>       m_labels;
 	Vector<ShaderLabel>       m_indirect_labels;
 	ShaderType                m_type = ShaderType::Unknown;
+	uint32_t                  m_pixel_extra_lds_dwords = 0;
+	int                       m_pixel_parameter_sgpr = -1;
 	Vector<ShaderDebugPrintf> m_debug_printfs;
 	uint32_t                  m_vs_embedded_id = 0;
 	uint32_t                  m_ps_embedded_id = 0;

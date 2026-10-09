@@ -5,6 +5,7 @@
 #include "ShaderSpirvInternal.h"
 
 #include <map>
+#include <set>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -108,6 +109,159 @@ void CollectWrites(const ShaderInstruction& inst, std::bitset<kWords>* written)
 	if (IsCompare(inst.type) || (IsScalarAlu(inst.type) && WritesScc(inst.type))) { written->set(kSccWord); }
 }
 
+bool IsAddtid(Type type)
+{
+	return type == Type::DsWriteAddtidB32 || type == Type::DsReadAddtidB32;
+}
+
+bool PlainWord(const ShaderOperand& operand)
+{
+	return Plain(operand) && operand.multiplier == 1.0f && operand.swizzle == 6u && operand.size == 1;
+}
+
+enum class ScalarOriginKind : uint8_t
+{
+	Unknown,
+	Number,
+	PixelParameter,
+};
+
+struct ScalarOrigin
+{
+	ScalarOriginKind kind = ScalarOriginKind::Unknown;
+	uint32_t        number = 0;
+};
+
+// Track exact scalar moves only. Arithmetic and joins discard provenance; a
+// saved parameter M0 remains identifiable even after its entry SGPR is reused.
+class PixelScalarOrigins
+{
+public:
+	explicit PixelScalarOrigins(int parameter_sgpr)
+	{
+		if (parameter_sgpr >= 0 && parameter_sgpr <= 32)
+		{
+			m_words[static_cast<unsigned>(parameter_sgpr)].kind = ScalarOriginKind::PixelParameter;
+		}
+	}
+	void Reset() { m_words = {}; }
+	[[nodiscard]] ScalarOrigin M0() const { return m_words[kM0Word]; }
+
+	void Step(const ShaderInstruction& inst)
+	{
+		ScalarOrigin moved;
+		if ((inst.type == Type::SMovB32 || inst.type == Type::SMovkI32) && inst.src_num == 1 && PlainWord(inst.dst))
+		{
+			moved = Source(inst.src[0]);
+		}
+		for (const ShaderOperand* dst: {&inst.dst, &inst.dst2})
+		{
+			unsigned first = 0;
+			unsigned count = 0;
+			if (!ScalarRange(*dst, &first, &count)) { continue; }
+			for (unsigned word = 0; word < count; ++word) { m_words[first + word] = {}; }
+		}
+		unsigned first = 0;
+		unsigned count = 0;
+		if (ScalarRange(inst.dst, &first, &count) && count == 1u) { m_words[first] = moved; }
+	}
+
+private:
+	[[nodiscard]] ScalarOrigin Source(const ShaderOperand& operand) const
+	{
+		if (!Plain(operand) || operand.multiplier != 1.0f || operand.swizzle != 6u) { return {}; }
+		if (operand.type == Operand::LiteralConstant || operand.type == Operand::IntegerInlineConstant)
+		{
+			return {ScalarOriginKind::Number, operand.constant.u};
+		}
+		unsigned first = 0;
+		unsigned count = 0;
+		return PlainWord(operand) && ScalarRange(operand, &first, &count) && count == 1u ? m_words[first] : ScalarOrigin {};
+	}
+	std::array<ScalarOrigin, kWords> m_words {};
+};
+
+bool AddtidSlot(const ShaderInstruction& inst, ScalarOrigin m0, uint64_t reserved_bytes, std::map<uint32_t, bool>* pending)
+{
+	if (m0.kind != ScalarOriginKind::Number || (m0.number & 3u) != 0u) { return false; }
+	const bool write = inst.type == Type::DsWriteAddtidB32;
+	const auto& data = write ? inst.src[0] : inst.dst;
+	if (!PlainWord(data) || data.type != Operand::Vgpr || data.register_id < 0 || data.register_id >= kVgprs ||
+	    inst.src_num != (write ? 1 : 0) ||
+	    inst.format != (write ? ShaderInstructionFormat::VdataOffset : ShaderInstructionFormat::VdstOffset)) { return false; }
+	// A complete wave64 plane has one dword per TID. Disjoint planes guarantee
+	// that omitting TID in the invocation-private emitter cannot alias another lane.
+	constexpr uint32_t plane_bytes = 64u * sizeof(uint32_t);
+	const uint64_t base = static_cast<uint64_t>(m0.number) + inst.ds_offset;
+	if ((base & 3u) != 0u || base + plane_bytes > reserved_bytes) { return false; }
+	const auto slot = pending->find(static_cast<uint32_t>(base));
+	if (slot == pending->end())
+	{
+		if (!write) { return false; }
+		for (const auto& [other, unread]: *pending)
+		{
+			(void)unread;
+			if (base < static_cast<uint64_t>(other) + plane_bytes && other < base + plane_bytes) { return false; }
+		}
+		pending->emplace(static_cast<uint32_t>(base), true);
+	} else
+	{
+		slot->second = write;
+	}
+	return true;
+}
+
+// Prove a bounded compiler spill interval, not arbitrary pixel LDS. Every read
+// has a same-lane store under unchanged EXEC/M0, and no other LDS instruction
+// can observe its bytes. Subsequent interpolation must restore the original
+// launch parameter M0, outside the reserved extra-LDS prefix.
+bool HasPrivatePixelAddtidSpills(const ShaderCode& code)
+{
+	const auto& instructions = code.GetInstructions();
+	uint32_t first = UINT32_MAX;
+	uint32_t last = 0;
+	std::set<uint32_t> joins;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if ((StartsWith(inst.type, "Ds") && !IsAddtid(inst.type)) || inst.type == Type::SSetpcB64 ||
+		    inst.type == Type::SSwappcB64 ||
+		    (AnyPrefix(inst.type, {"Buffer", "TBuffer"}) && (inst.buffer_flags & 1u) != 0u)) { return false; }
+		if (inst.type == Type::SBranch || IsConditionalBranch(inst.type))
+		{
+			uint32_t target = 0;
+			if (!BranchTarget(inst, &target)) { return false; }
+			joins.insert(target);
+		}
+		if (!IsAddtid(inst.type)) { continue; }
+		if (first == UINT32_MAX) { first = index; }
+		last = index;
+	}
+	if (first == UINT32_MAX || code.GetPixelExtraLdsDwords() == 0u) { return false; }
+	const uint64_t reserved_bytes = std::min(static_cast<uint64_t>(code.GetPixelExtraLdsDwords()) * sizeof(uint32_t),
+	                                         static_cast<uint64_t>(kDsAddtidSpillDwords) * sizeof(uint32_t));
+	PixelScalarOrigins origins(code.GetPixelParameterSgpr());
+	std::map<uint32_t, bool> pending;
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		const bool inside = index >= first && index <= last;
+		if (inside && (joins.count(inst.pc) != 0u || ShaderInstructionIsControlFlowBoundary(inst) ||
+		               ShaderInstructionWritesExec(inst) || inst.dst.type == Operand::M0 || inst.dst2.type == Operand::M0))
+		{
+			return false;
+		}
+		if (joins.count(inst.pc) != 0u || ShaderInstructionIsControlFlowBoundary(inst)) { origins.Reset(); }
+		if (IsAddtid(inst.type) && !AddtidSlot(inst, origins.M0(), reserved_bytes, &pending)) { return false; }
+		if (index >= first && StartsWith(inst.type, "VInterp") && origins.M0().kind != ScalarOriginKind::PixelParameter)
+		{
+			return false;
+		}
+		origins.Step(inst);
+	}
+	return std::all_of(pending.begin(), pending.end(), [](const auto& slot) { return !slot.second; });
+}
+
 class Flow
 {
 public:
@@ -161,6 +315,7 @@ private:
 	std::vector<Loop>             m_loops;
 	bool                          m_changed = false; // a back edge changed a loop-head state during this walk
 	bool                          m_lane_preserving = false; // the write being defined keeps every inactive lane's bit
+	bool                          m_addtid_spills = false;
 	// Taint of every word a static spill wrote to a (VGPR, lane) slot; it only grows across walks.
 	std::map<std::pair<int, int>, uint8_t> m_spills;
 	const ShaderCode*             m_code    = nullptr;
@@ -684,7 +839,10 @@ bool Flow::ScalarSpill(const ShaderInstruction& inst)
 
 bool Flow::Step(const ShaderInstruction& inst)
 {
-	if (WritesMemory(inst.type)) { return Fail(inst, "memory write: helper lanes would be observable"); }
+	if (WritesMemory(inst.type) && !(m_addtid_spills && IsAddtid(inst.type)))
+	{
+		return Fail(inst, "memory write: helper lanes would be observable");
+	}
 	if (inst.type == Type::Exp && ExecWide()) { return Fail(inst, "export while EXEC may include helper lanes"); }
 	if (inst.type == Type::SBarrier) { return Fail(inst, "barrier"); }
 	if (inst.type == Type::SBranch || IsConditionalBranch(inst.type)) { return Branch(inst); }
@@ -793,6 +951,7 @@ ShaderFragmentMaskFlow Flow::Run(const ShaderCode& code)
 		m_result.reason = "not a pixel program ending in S_ENDPGM";
 		return m_result;
 	}
+	m_addtid_spills = HasPrivatePixelAddtidSpills(code);
 	FindLoops();
 	// Each word enters a loop's exemption at most once and leaves it at most once.
 	for (unsigned attempt = 0; attempt <= 2u * kWords; ++attempt)

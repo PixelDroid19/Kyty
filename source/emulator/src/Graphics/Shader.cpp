@@ -887,7 +887,10 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 	// accounts for EXEC writes (a WQM widening and its restore) that the monotone one cannot.
 	const bool monotone_masks = ShaderMasksStayLaneLocal(code, regions, &mask_pc);
 	const auto mask_flow      = ShaderAnalyzeFragmentMaskFlow(code);
-	const bool local_masks    = monotone_masks || mask_flow.lane_local;
+	// ADDTID uses a per-invocation spill array in the pixel emitter. Mask
+	// monotonicity alone cannot establish the stores, reads and lane ownership.
+	const bool addtid = code.HasAnyOf({ShaderInstructionType::DsWriteAddtidB32, ShaderInstructionType::DsReadAddtidB32});
+	const bool local_masks = (monotone_masks || mask_flow.lane_local) && (!addtid || mask_flow.lane_local);
 	bool has_region = false;
 	bool writes_exec_outside_region = false;
 	bool cross_lane = UsesNativeLaneExchange(code);
@@ -3666,7 +3669,9 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		if (data.user_data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.user_data == nullptr condition ignored (continuing)\n"); }
 
 		const auto analysis = g_shader_resolution_usage_cache.GetOrAnalyze(
-		    {regs->ps_regs.data_addr, regs->ps_regs.chksum, kShaderTranslatorVersion},
+		    {regs->ps_regs.data_addr, regs->ps_regs.chksum, kShaderTranslatorVersion,
+		     static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u,
+		     static_cast<int>(regs->ps_regs.rsrc2.user_sgpr)},
 		    [regs]()
 		    {
 			    auto code = std::make_shared<ShaderCode>();
@@ -3677,6 +3682,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 				    DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
 				    ShaderParseMapped(regs->ps_regs.data_addr, code.get());
 			    }
+			    code->SetPixelLdsAllocation(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u,
+			                                static_cast<int>(regs->ps_regs.rsrc2.user_sgpr));
 			    ShaderProbeWrite("ps", *code, nullptr, nullptr);
 			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code, std::make_shared<ShaderNativeWaveVerdict>()};
 		    });
@@ -4466,6 +4473,13 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
 			ShaderParseMapped(regs->ps_regs.data_addr, &code);
 		}
+		if (Config::IsNextGen())
+		{
+			// GFX10 EXTRA_LDS_SIZE is encoded in blocks of 128 dwords. The
+			// implicit parameter scalar follows the user-provided SGPR words.
+			code.SetPixelLdsAllocation(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u,
+			                           static_cast<int>(regs->ps_regs.rsrc2.user_sgpr));
+		}
 
 		ShaderCopyDebugPrintfs(&code);
 	}
@@ -5054,6 +5068,9 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	{
 		ret.hash0 = (regs->ps_regs.chksum >> 32u) & 0xffffffffu;
 		ret.crc32 = regs->ps_regs.chksum & 0xffffffffu;
+		ret.ids.Add(0x504c4431u); // PLD1: reserved pixel LDS and implicit parameter scalar.
+		ret.ids.Add(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u);
+		ret.ids.Add(regs->ps_regs.rsrc2.user_sgpr);
 	} else
 	{
 		const auto* src = reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr);

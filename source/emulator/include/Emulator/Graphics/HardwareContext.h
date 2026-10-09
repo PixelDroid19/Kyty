@@ -506,6 +506,8 @@ struct PsStageRegisters
 	// Wave-packing hints (shared VGPR count, instruction prefetch). Recorded
 	// for completeness; the recompiler re-derives register allocation.
 	uint32_t rsrc3 = 0;
+	// Raw PS CU-eligibility state. Host shader placement remains backend-owned.
+	uint32_t rsrc4 = 0;
 };
 
 struct CsStageRegisters
@@ -1141,6 +1143,7 @@ public:
 		m_ps.ps_regs.chksum |= value;
 	}
 	void SetPsRsrc3(uint32_t value) { m_ps.ps_regs.rsrc3 = value; }
+	void SetPsRsrc4(uint32_t value) { m_ps.ps_regs.rsrc4 = value; }
 
 	void SetCsShader(const CsStageRegisters& cs_regs, uint32_t shader_modifier)
 	{
