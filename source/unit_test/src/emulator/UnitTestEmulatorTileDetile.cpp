@@ -1486,11 +1486,179 @@ TEST(EmulatorTileDetile, SizesSingleMipStandard4KBBcArraysInBlocks)
 	EXPECT_EQ(actual, expected);
 }
 
-TEST(EmulatorTileDetile, RejectsMultiMipArrayOnNonStandard4KBTiles)
+TEST(EmulatorTileDetile, RejectsMultiMipArrayOnTilesWithoutMipLayouts)
 {
 	Gen5TextureArrayLayout layout {};
+	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 1u, 2u, &layout));
 	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 9u, 2u, &layout));
 	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 128u, 128u, 128u, 4u, 27u, 2u, &layout));
+}
+
+TEST(EmulatorTileDetile, RejectsUnrepresentableStandard256BArrayByteCounts)
+{
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(56u, 16384u, 16384u, 16384u, 1u, 1u, 1u, &layout));
+	EXPECT_EQ(layout.tiled_size, 1ull << 30u);
+	EXPECT_EQ(layout.linear_size, 1ull << 30u);
+
+	// Six otherwise valid 1 GiB slices exceed the helper's 32-bit byte-size domain.
+	EXPECT_FALSE(Gen5GetTextureArrayLayout(56u, 16384u, 16384u, 16384u, 1u, 1u, 6u, &layout));
+
+	// The byte product is 2^64 + 4 MiB, which must not wrap into an accepted 4 MiB layout.
+	EXPECT_FALSE(Gen5GetTextureArrayLayout(75u, 1073807360u, 1073676292u, 1073807360u, 1u, 1u, 1u, &layout));
+}
+
+TEST(EmulatorTileDetile, DetilesSingleLevelStandard256BArrayPerLayer)
+{
+	constexpr uint32_t k_format = 56u; // RGBA8 UNORM
+	constexpr uint32_t k_width  = 1u;
+	constexpr uint32_t k_height = 1u;
+	constexpr uint32_t k_pitch  = 1u;
+	constexpr uint32_t k_levels = 1u;
+	constexpr uint32_t k_tile   = 1u;
+	constexpr uint32_t k_layers = 6u;
+	constexpr uint32_t k_bpe    = 4u;
+
+	Gen5TextureArrayLayout layout {};
+	ASSERT_TRUE(Gen5GetTextureArrayLayout(k_format, k_width, k_height, k_pitch, k_levels, k_tile, k_layers, &layout));
+	EXPECT_FALSE(layout.has_mip_layout);
+	EXPECT_EQ(layout.tiled_slice.size, 256u);
+	EXPECT_EQ(layout.tiled_slice.align, 256u);
+	EXPECT_EQ(layout.tiled_size, 1536u);
+	EXPECT_EQ(layout.host_pitch, k_width);
+	EXPECT_EQ(layout.linear_slice_size, k_bpe);
+	EXPECT_EQ(layout.linear_size, k_layers * k_bpe);
+
+	const std::array<std::array<uint8_t, k_bpe>, k_layers> colors = {{{0x11u, 0x22u, 0x33u, 0x44u},
+	                                                                  {0x51u, 0x62u, 0x73u, 0x84u},
+	                                                                  {0x91u, 0xA2u, 0xB3u, 0xC4u},
+	                                                                  {0xD1u, 0xE2u, 0xF3u, 0x04u},
+	                                                                  {0x15u, 0x26u, 0x37u, 0x48u},
+	                                                                  {0x59u, 0x6Au, 0x7Bu, 0x8Cu}}};
+	std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0xA5u);
+	std::vector<uint8_t> expected(static_cast<size_t>(layout.linear_size));
+	for (uint32_t layer = 0; layer < k_layers; ++layer)
+	{
+		const uint64_t tiled_offset = static_cast<uint64_t>(layer) * layout.tiled_slice.size +
+		                              TileGetStandard256BOffset(0u, 0u, k_pitch, k_bpe);
+		const uint64_t linear_offset = static_cast<uint64_t>(layer) * layout.linear_slice_size;
+		ASSERT_LE(tiled_offset + k_bpe, tiled.size());
+		ASSERT_LE(linear_offset + k_bpe, expected.size());
+		std::memcpy(tiled.data() + tiled_offset, colors[layer].data(), k_bpe);
+		std::memcpy(expected.data() + linear_offset, colors[layer].data(), k_bpe);
+	}
+
+	EXPECT_TRUE(Gen5ValidateTextureArrayUpload(layout, 0u, tiled.size()));
+	std::vector<uint8_t> actual(static_cast<size_t>(layout.linear_size), 0xCCu);
+	ASSERT_TRUE(Gen5DetileTextureArray(actual.data(), actual.size(), tiled.data(), tiled.size(), layout));
+	EXPECT_EQ(actual, expected);
+
+	std::vector<uint8_t> slice(static_cast<size_t>(layout.linear_slice_size), 0xCCu);
+	for (uint32_t layer = 0; layer < k_layers; ++layer)
+	{
+		ASSERT_TRUE(Gen5DetileTextureArrayLayer(slice.data(), slice.size(), tiled.data(), tiled.size(), layout, layer));
+		EXPECT_EQ(std::memcmp(slice.data(), colors[layer].data(), k_bpe), 0);
+
+		uint32_t region_count = 0;
+		ASSERT_TRUE(Gen5FillTextureArrayLayerUploadRegions(layout, layer, nullptr, 0u, &region_count));
+		ASSERT_EQ(region_count, 1u);
+		Gen5TextureArrayUploadRegion region {};
+		ASSERT_TRUE(Gen5FillTextureArrayLayerUploadRegions(layout, layer, &region, 1u, &region_count));
+		EXPECT_EQ(region.offset, 0u);
+		EXPECT_EQ(region.pitch_texels, k_width);
+		EXPECT_EQ(region.width, k_width);
+		EXPECT_EQ(region.height, k_height);
+		EXPECT_EQ(region.dst_level, 0u);
+		EXPECT_EQ(region.dst_array_layer, layer);
+	}
+
+	std::vector<uint8_t> truncated(tiled.begin(), tiled.end() - 1);
+	EXPECT_FALSE(Gen5ValidateTextureArrayUpload(layout, 0u, truncated.size()));
+	EXPECT_FALSE(Gen5DetileTextureArray(actual.data(), actual.size(), truncated.data(), truncated.size(), layout));
+	EXPECT_FALSE(Gen5DetileTextureArrayLayer(slice.data(), slice.size(), truncated.data(), truncated.size(), layout, k_layers - 1u));
+}
+
+TEST(EmulatorTileDetile, DetilesStandard256BArrayAcrossBlockBoundariesForAllElementSizes)
+{
+	struct GoldenCase
+	{
+		uint32_t format;
+		uint32_t bytes_per_element;
+		uint32_t block_width;
+		uint32_t block_height;
+		uint32_t x_one_offset;
+		uint32_t y_one_offset;
+	};
+	constexpr std::array<GoldenCase, 5> cases = {{{1u, 1u, 16u, 16u, 1u, 16u},
+	                                              {7u, 2u, 16u, 8u, 2u, 16u},
+	                                              {56u, 4u, 8u, 8u, 4u, 16u},
+	                                              {71u, 8u, 8u, 4u, 8u, 16u},
+	                                              {75u, 16u, 4u, 4u, 64u, 16u}}};
+	constexpr uint32_t k_layers = 2u;
+
+	for (const auto& test: cases)
+	{
+		const uint32_t width  = test.block_width + 1u;
+		const uint32_t height = test.block_height + 1u;
+		const uint64_t expected_slice_bytes = static_cast<uint64_t>(width) * height * test.bytes_per_element;
+
+		Gen5TextureArrayLayout layout {};
+		ASSERT_TRUE(Gen5GetTextureArrayLayout(test.format, width, height, width, 1u, 1u, k_layers, &layout));
+		EXPECT_EQ(layout.tiled_slice.size, 1024u);
+		EXPECT_EQ(layout.tiled_slice.align, 256u);
+		EXPECT_EQ(layout.tiled_size, 2048u);
+		EXPECT_EQ(layout.layers, k_layers);
+		EXPECT_EQ(layout.host_pitch, width);
+		EXPECT_EQ(layout.bytes_per_element, test.bytes_per_element);
+		EXPECT_EQ(layout.linear_slice_size, expected_slice_bytes);
+		EXPECT_EQ(layout.linear_size, expected_slice_bytes * k_layers);
+
+		// These offsets are independent golden values for within-block texels and the four block origins.
+		const std::array<uint32_t, 7> sample_x = {0u, 1u, 0u, test.block_width - 1u, test.block_width, 0u, test.block_width};
+		const std::array<uint32_t, 7> sample_y = {0u, 0u, 1u, test.block_height - 1u, 0u, test.block_height, test.block_height};
+		const std::array<uint32_t, 7> tiled_offsets = {0u, test.x_one_offset, test.y_one_offset,
+		                                              256u - test.bytes_per_element, 256u, 512u, 768u};
+		std::vector<uint8_t> tiled(static_cast<size_t>(layout.tiled_size), 0xA5u);
+		std::vector<uint8_t> expected(static_cast<size_t>(layout.linear_size), 0xA5u);
+		for (uint32_t layer = 0u; layer < k_layers; ++layer)
+		{
+			for (uint32_t sample = 0u; sample < sample_x.size(); ++sample)
+			{
+				const uint8_t sentinel = static_cast<uint8_t>(0x20u + layer * 0x40u + sample * 0x08u);
+				const uint64_t tiled_offset = static_cast<uint64_t>(layer) * layout.tiled_slice.size + tiled_offsets[sample];
+				const uint64_t linear_offset = static_cast<uint64_t>(layer) * layout.linear_slice_size +
+				                              (static_cast<uint64_t>(sample_y[sample]) * width + sample_x[sample]) *
+				                                  test.bytes_per_element;
+				ASSERT_LE(tiled_offset + test.bytes_per_element, tiled.size());
+				ASSERT_LE(linear_offset + test.bytes_per_element, expected.size());
+				std::fill_n(tiled.data() + tiled_offset, test.bytes_per_element, sentinel);
+				std::fill_n(expected.data() + linear_offset, test.bytes_per_element, sentinel);
+			}
+		}
+
+		std::vector<uint8_t> actual(static_cast<size_t>(layout.linear_size), 0u);
+		ASSERT_TRUE(Gen5DetileTextureArray(actual.data(), actual.size(), tiled.data(), tiled.size(), layout));
+		EXPECT_EQ(actual, expected);
+
+		std::vector<uint8_t> slice(static_cast<size_t>(layout.linear_slice_size), 0u);
+		for (uint32_t layer = 0u; layer < k_layers; ++layer)
+		{
+			ASSERT_TRUE(Gen5DetileTextureArrayLayer(slice.data(), slice.size(), tiled.data(), tiled.size(), layout, layer));
+			const auto* expected_layer = expected.data() + static_cast<uint64_t>(layer) * layout.linear_slice_size;
+			EXPECT_EQ(std::memcmp(slice.data(), expected_layer, slice.size()), 0);
+
+			Gen5TextureArrayUploadRegion region {};
+			uint32_t                      region_count = 0u;
+			ASSERT_TRUE(Gen5FillTextureArrayLayerUploadRegions(layout, layer, &region, 1u, &region_count));
+			EXPECT_EQ(region_count, 1u);
+			EXPECT_EQ(region.offset, 0u);
+			EXPECT_EQ(region.pitch_texels, width);
+			EXPECT_EQ(region.width, width);
+			EXPECT_EQ(region.height, height);
+			EXPECT_EQ(region.dst_level, 0u);
+			EXPECT_EQ(region.dst_array_layer, layer);
+		}
+	}
 }
 
 TEST(EmulatorTileDetile, LayoutsBc6hCubeStandard4KBWithMipTail)
@@ -1802,6 +1970,58 @@ TEST(EmulatorTileDetile, Standard4KBBc1WorldAlbedoMipChainMatchesGuestSize)
 		++covered;
 	}
 	EXPECT_EQ(covered, k_levels);
+}
+
+TEST(EmulatorTileDetile, Standard256BMipChainStoresSmallestLevelFirstWithoutTail)
+{
+	// 4-byte elements use 8x8-element 256-byte blocks; every level pads to whole
+	// blocks and level 0 ends the allocation.
+	Gen5TextureMipLayout layout {};
+	ASSERT_TRUE(Gen5GetStandard256BTextureMipLayout(56u, 16u, 16u, 16u, 5u, &layout));
+	constexpr uint32_t k_offsets[5] = {1024u, 768u, 512u, 256u, 0u};
+	constexpr uint32_t k_sizes[5]   = {1024u, 256u, 256u, 256u, 256u};
+	for (uint32_t level = 0; level < 5u; ++level)
+	{
+		EXPECT_EQ(layout.level[level].tiled_offset, k_offsets[level]);
+		EXPECT_EQ(layout.level[level].tiled_size, k_sizes[level]);
+		EXPECT_FALSE(layout.level[level].in_mip_tail);
+	}
+	EXPECT_EQ(layout.tiled.size, 2048u);
+	EXPECT_EQ(layout.tiled.align, 256u);
+
+	TileSizeAlign  size {};
+	TileSizeOffset levels[5] {};
+	TileGetTextureSize2(56u, 16u, 16u, 16u, 5u, 1u, &size, levels, nullptr);
+	EXPECT_EQ(size.size, 2048u);
+	EXPECT_EQ(levels[0].offset, 1024u);
+	EXPECT_EQ(levels[4].offset, 0u);
+
+	std::vector<uint32_t> tiled(layout.tiled.size / 4u, 0u);
+	for (uint32_t level = 0; level < layout.levels; ++level)
+	{
+		const auto& entry = layout.level[level];
+		for (uint32_t y = 0; y < entry.element_height; ++y)
+		{
+			for (uint32_t x = 0; x < entry.element_width; ++x)
+			{
+				const uint64_t offset = entry.tiled_offset + TileGetStandard256BOffset(x, y, entry.tiled_pitch, 4u);
+				tiled[offset / 4u]    = (level << 16u) | (y << 8u) | x;
+			}
+		}
+	}
+	std::vector<uint32_t> linear(layout.linear_size / 4u, 0xffffffffu);
+	ASSERT_TRUE(Gen5DetileStandard256BTextureMipChain(linear.data(), layout.linear_size, tiled.data(), layout.tiled.size, layout));
+	for (uint32_t level = 0; level < layout.levels; ++level)
+	{
+		const auto& entry = layout.level[level];
+		for (uint32_t y = 0; y < entry.element_height; ++y)
+		{
+			for (uint32_t x = 0; x < entry.element_width; ++x)
+			{
+				EXPECT_EQ(linear[entry.linear_offset / 4u + y * entry.element_width + x], (level << 16u) | (y << 8u) | x);
+			}
+		}
+	}
 }
 
 TEST(EmulatorTileDetile, Depth64KBR32MipChainSizeIncludesTail)

@@ -3404,11 +3404,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			pitch = TileAlign64KBPitch(width, ShaderGen5TextureBytesPerElement(r.Format()));
 			if (pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch == 0u condition ignored (continuing)\n"); }
-		} else if (tile == 5 && !three_dimensional)
+		} else if (!three_dimensional && (tile == 5u || (tile == 1u && (arrayed_2d || r.MaxMip() != 0u))))
 		{
-			// Standard4KB resources (each array slice alike) use a canonical
-			// tiled pitch. Word4 and the 256-byte row rule apply to linear
-			// resources only and must not expand the tiled layout.
+			// Standard4KB resources and Standard256B arrays and mip chains use a
+			// canonical tiled pitch. Array word4 holds the last slice, not a row
+			// pitch; the linear row rule must not expand the tiled allocation.
 			pitch = width;
 		} else
 		{
@@ -3438,12 +3438,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			                     swizzle != DstSel(4, 0, 0, 1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) && condition ignored (continuing)\n"); }
 		}
 
-		if (gen5 && !three_dimensional && !arrayed_2d && tile == 5u && levels > 1u)
+		if (gen5 && !three_dimensional && !arrayed_2d && (tile == 5u || tile == 1u) && levels > 1u)
 		{
 			Gen5TextureMipLayout mip_layout {};
-			if (!Gen5GetStandard4KBTextureMipLayout(fmt, width, height, pitch, levels, &mip_layout))
+			const auto get_layout = tile == 5u ? Gen5GetStandard4KBTextureMipLayout : Gen5GetStandard256BTextureMipLayout;
+			if (!get_layout(fmt, width, height, pitch, levels, &mip_layout))
 			{
-				EXIT("Unsupported Gen5 Standard4KB mip texture layout: format=%u width=%u height=%u pitch=%u levels=%u\n", fmt, width,
+				EXIT("Unsupported Gen5 tile %u mip texture layout: format=%u width=%u height=%u pitch=%u levels=%u\n", tile, fmt, width,
 				     height, pitch, levels);
 			}
 			size = mip_layout.tiled;
@@ -3453,10 +3454,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (!Gen5GetVolumeTextureLayout(fmt, width, height, depth, pitch, levels, tile, &volume_layout))
 			{
 				EXIT("unsupported Gen5 volume layout: format=%u %ux%ux%u pitch=%u levels=%u tile=%u type=%u base_array=%u usage=%u "
-				     "shape_from_instruction=%u start_register=%d\n",
+				     "shape_from_instruction=%u start_register=%d addr=0x%012" PRIx64 " descriptor=%08x %08x %08x %08x %08x %08x %08x %08x\n",
 				     fmt, width, height, depth, pitch, levels, tile, static_cast<uint32_t>(r.Type()),
 				     static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(textures.desc[i].usage),
-				     textures.desc[i].sampled_shape_from_instruction ? 1u : 0u, textures.desc[i].start_register);
+				     textures.desc[i].sampled_shape_from_instruction ? 1u : 0u, textures.desc[i].start_register,
+				     static_cast<uint64_t>(addr), r.fields[0], r.fields[1], r.fields[2], r.fields[3], r.fields[4], r.fields[5],
+				     r.fields[6], r.fields[7]);
 			}
 			size = volume_layout.tiled;
 		} else if (arrayed_2d && !check_depth_texture)
@@ -3464,8 +3467,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			Gen5TextureArrayLayout array_layout {};
 			if (!Gen5GetTextureArrayLayout(fmt, width, height, pitch, levels, tile, depth, &array_layout))
 			{
-				EXIT("Unsupported Gen5 2D-array layout: format=%u width=%u height=%u pitch=%u levels=%u tile=%u layers=%u base_array=%u\\n",
-				     fmt, width, height, pitch, levels, tile, depth, base_array);
+				EXIT("Unsupported Gen5 2D-array layout: format=%u width=%u height=%u pitch=%u levels=%u tile=%u layers=%u base_array=%u "
+				     "type=%u array_pitch=%u usage=%u shape_from_instruction=%u descriptor=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+				     fmt, width, height, pitch, levels, tile, depth, base_array, static_cast<uint32_t>(r.Type()),
+				     static_cast<uint32_t>(r.ArrayPitch()), static_cast<uint32_t>(textures.desc[i].usage),
+				     textures.desc[i].sampled_shape_from_instruction ? 1u : 0u, r.fields[0], r.fields[1], r.fields[2], r.fields[3],
+				     r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
 			}
 			size.size  = static_cast<uint32_t>(array_layout.tiled_size);
 			size.align = array_layout.tiled_slice.align;
