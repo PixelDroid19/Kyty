@@ -3553,6 +3553,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		bool         render_texture = false;
 		bool         depth_texture  = false;
 		const char*  materialize    = "unresolved";
+		char         depth_refusal[192] = "";
 		// A live storage image read through another format of its texel size.
 		VkFormat     reinterpret_format = VK_FORMAT_UNDEFINED;
 
@@ -3907,13 +3908,26 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// The storage-backed detile is a 16-bit equation.
 				const bool source_ok = depth_source == GpuMemoryDepthD16Source::Guest ||
 				                       (depth_source == GpuMemoryDepthD16Source::StorageBuffer && fmt == 7u && depth == 1u);
-				materialize_depth    = physical_ok && source_ok &&
-				                    State::CanMaterializeGen5DepthSample(
-				                        fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
-				                        static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
-				                        static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
-				                        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u, addr, width,
-				                        height, pitch, size.size, textures.desc[i].sample_operation);
+				const bool shape_ok =
+				    State::CanMaterializeGen5DepthSample(
+				        fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
+				        static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
+				        static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
+				        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u, addr, width,
+				        height, pitch, size.size, textures.desc[i].sample_operation);
+				materialize_depth = physical_ok && source_ok && shape_ok;
+				// The overlapping objects decide whether guest bytes can be trusted; keep them for the refusal below.
+				int written = std::snprintf(depth_refusal, sizeof(depth_refusal), " physical=%d mapped_kind=%u source=%u shape=%d overlaps=%u:",
+				                            physical_ok ? 1 : 0, static_cast<uint32_t>(mapped.kind), static_cast<uint32_t>(depth_source),
+				                            shape_ok ? 1 : 0, overlaps_ok ? overlaps.total_count : 0u);
+				for (uint32_t entry = 0; overlaps_ok && entry < overlaps.entry_count && written > 0 &&
+				                         static_cast<size_t>(written) < sizeof(depth_refusal);
+				     entry++)
+				{
+					written += std::snprintf(depth_refusal + written, sizeof(depth_refusal) - static_cast<size_t>(written), " %u/%u/%u",
+					                         static_cast<uint32_t>(overlaps.entries[entry].type),
+					                         static_cast<uint32_t>(overlaps.entries[entry].relation), overlaps.entries[entry].count);
+				}
 			}
 			if (materialize_depth)
 			{
@@ -4063,12 +4077,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (!decision.compatible)
 			{
 				EXIT("unsupported depth-reference image binding: operation=%u shape=%u numeric=%u view=%u format=%u tile=%u "
-				     "materialize=%s addr=0x%012" PRIx64 " size=0x%" PRIx64 " %ux%u pitch=%u levels=%u depth=%u base_array=%u\n",
+				     "materialize=%s addr=0x%012" PRIx64 " size=0x%" PRIx64 " %ux%u pitch=%u levels=%u depth=%u base_array=%u%s\n",
 				     static_cast<uint32_t>(textures.desc[i].sample_operation), static_cast<uint32_t>(sampled_shape),
 				     static_cast<uint32_t>(numeric_type), static_cast<uint32_t>(resolved_view), fmt, tile, materialize,
 				     static_cast<uint64_t>(addr), static_cast<uint64_t>(size.size), static_cast<uint32_t>(width),
 				     static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels),
-				     static_cast<uint32_t>(r.Depth()), static_cast<uint32_t>(r.BaseArray5()));
+				     static_cast<uint32_t>(r.Depth()), static_cast<uint32_t>(r.BaseArray5()), depth_refusal);
 			}
 		}
 		if (const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
