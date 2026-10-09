@@ -195,7 +195,9 @@ TEST(EmulatorShaderResourcePointers, SparseSharpSlotsDoNotConsumeDescriptorStora
 	end = snapshot.size();
 	EXPECT_TRUE(ShaderGen5EudExpandEndDwordsForSharpImages(&data, 16, snapshot.data(), snapshot.size(), &end));
 	EXPECT_EQ(end, snapshot.size());
-	sharps.back().offset_dw = 32 + SHADER_GEN5_EUD_MAX_DWORDS;
+	// Offset 30 lies between the 16-word user-SGPR window and EUD base 32.
+	// A descriptor starting in that gap is unsupported.
+	sharps.back().offset_dw = 30;
 	EXPECT_FALSE(ShaderGen5EudRequiredEndDwords(&data, 16, 14, nullptr, 0, &end));
 	EXPECT_FALSE(ShaderGen5EudExpandEndDwordsForSharpImages(&data, 16, snapshot.data(), snapshot.size(), &end));
 }

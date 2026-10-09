@@ -2457,10 +2457,10 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 	}
 }
 
-bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
-                                        std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS>* snapshot)
+bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords, std::vector<uint32_t>* snapshot)
 {
-	if (snapshot == nullptr || guest_address == 0u || dwords == 0u || dwords > SHADER_GEN5_EUD_MAX_DWORDS)
+	if (snapshot == nullptr || guest_address == 0u || dwords == 0u || dwords > SHADER_GEN5_EUD_MAX_DWORDS ||
+	    snapshot->size() != static_cast<size_t>(dwords))
 	{
 		return false;
 	}
@@ -2470,7 +2470,7 @@ bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
 		return false;
 	}
 
-	std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS> verification {};
+	std::vector<uint32_t> verification(dwords);
 	constexpr uint32_t attempts = 2u;
 	for (uint32_t attempt = 0; attempt < attempts; ++attempt)
 	{
@@ -2499,7 +2499,7 @@ bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code, int user_data_register_base,
-                       bool vertex_resource_types)
+                       bool vertex_resource_types, const ShaderCode* eud_descriptor_code)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2527,6 +2527,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// 2) Type-5 pointer: overflow sharp offsets are fetched from guest memory
 	//    at that pointer (post-detile: S#@0x20/0x24 in a 12-dword EUD).
 	const bool has_eud_ptr = Gen5HasEudPointer(user_data);
+	const auto* eud_code = eud_descriptor_code != nullptr ? eud_descriptor_code : code;
 	if (has_eud_ptr)
 	{
 		bind->extended.eud_user_sgpr_num = user_sgpr_num;
@@ -2747,11 +2748,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// Every resource in this draw/dispatch must come from one observed EUD
 	// table version. Reading descriptor words directly from guest memory lets a
 	// concurrent table update combine two versions into a valid-looking V#/T#.
-	std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS> eud_snapshot {};
+	std::vector<uint32_t> eud_snapshot;
 	if (eud_pointer_valid)
 	{
 		uint32_t required_end_dw = 0u;
-		if (!ShaderGen5EudRequiredEndDwords(user_data, user_sgpr_num, bind->extended.start_register, code,
+		if (!ShaderGen5EudRequiredEndDwords(user_data, user_sgpr_num, bind->extended.start_register, eud_code,
 		                                      user_data_register_base, &required_end_dw))
 		{
 			EXIT("invalid Gen5 EUD snapshot span: eud_dw=%u pointer_reg=%d\n",
@@ -2760,6 +2761,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bool snapshot_ready = false;
 		for (uint32_t pass = 0; pass < 2u; ++pass)
 		{
+			if (required_end_dw == 0u || required_end_dw > SHADER_GEN5_EUD_MAX_DWORDS)
+			{
+				EXIT("invalid Gen5 EUD snapshot size: dwords=%u\n", static_cast<unsigned>(required_end_dw));
+			}
+			eud_snapshot.resize(required_end_dw);
 			if (!ShaderSnapshotGuestDescriptorTable(eud_guest_address, required_end_dw, &eud_snapshot))
 			{
 				EXIT("unstable or unreadable Gen5 EUD snapshot: dwords=%u\n", static_cast<unsigned>(required_end_dw));
@@ -2975,7 +2981,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	if (code != nullptr && has_eud_ptr && extended_buffer != nullptr)
 	{
 		ShaderPruneUnusedMetadataStorage(*code, &bind->storage_buffers, user_sgpr_num, user_data_register_base);
-		ShaderCollectDynamicScalarResources(*code, bind, user_sgpr, info, extended_buffer, user_data->eud_size_dw);
+	}
+	if (eud_code != nullptr && has_eud_ptr && extended_buffer != nullptr)
+	{
+		ShaderCollectDynamicScalarResources(*eud_code, bind, user_sgpr, info, extended_buffer, user_data->eud_size_dw,
+		                                    user_data_register_base);
 	}
 	if (code != nullptr && !vertex_resource_types)
 	{
@@ -3101,7 +3111,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					continue;
 				}
 				exact_evidence.raw_smem_use = true;
-				if (!ShaderDynamicSLoadScalarSpan(*code, record, &exact_evidence.raw_smem_required_bytes))
+				if (eud_code == nullptr || !ShaderDynamicSLoadScalarSpan(*eud_code, record, &exact_evidence.raw_smem_required_bytes))
 				{
 					exact_evidence.raw_smem_dynamic_offset = true;
 				}
@@ -3113,7 +3123,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		{
 			unbased_evidence = AnalyzeShaderStorageUse(*code, bind->storage_buffers.start_register[i]);
 		}
-		const auto evidence = ResolveShaderStorageAccessEvidence(code != nullptr, bind->storage_buffers.sources[i], exact,
+		const bool code_available = code != nullptr || (has_dynamic_sload && eud_code != nullptr);
+		const auto evidence = ResolveShaderStorageAccessEvidence(code_available, bind->storage_buffers.sources[i], exact,
 		                                                         unbased_evidence.access,
 		                                                         exact_evidence.decoded_unknown, exact_evidence.indirect_descriptor_use);
 		bind->storage_buffers.accesses[i]                = evidence.access;
@@ -3380,11 +3391,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			RebaseNggConstantSharps(&rebased_user, vs_isa, user_sgpr, static_cast<int>(user_sgpr_num));
 			usage_user = &rebased_user;
 		}
-		// Do not pass the ISA into ParseUsage2 here: the instruction-stream
-		// fallback AddZeroSBufferResource on a reused s[16:19] V# zeros the
-		// projection CBV. Rebase the metadata sharp table instead.
+		// Keep general ISA analysis disabled: the scalar-buffer fallback on a
+		// reused s[16:19] V# zeros the projection CBV. EUD load destinations
+		// are resolved separately from the rebased metadata sharp table.
 		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
-		                  kGen5GsFrontUserDataBase);
+		                  kGen5GsFrontUserDataBase, true, vs_isa);
 		if (vs_isa != nullptr)
 		{
 			info->native_wave = info->program->native_wave.Get(info->program->code, guest_wave_size);

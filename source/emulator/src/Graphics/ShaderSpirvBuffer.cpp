@@ -3601,7 +3601,7 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 
 	if (dword_count <= 0 || dword_count > 16)
 	{
-		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dword_count <= 0 || dword_count > 8 condition ignored (continuing)\n");
+		return false;
 	}
 	if (inst.dst.size != dword_count)
 	{
@@ -3621,6 +3621,10 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 	auto src0_value0 = operand_variable_to_str(inst.src[0], 0);
 	auto src0_value1 = operand_variable_to_str(inst.src[0], 1);
 	const int offset = pc_mapped ? mapped_offset : static_cast<int>(inst.src[1].constant.u >> 2u);
+	if (offset < 0 || offset > SHADER_GEN5_EUD_MAX_DWORDS - dword_count)
+	{
+		return false;
+	}
 
 	if (src0_value0.type != SpirvType::Uint)
 	{
@@ -3631,17 +3635,30 @@ static bool recompile_sload_from_extended(uint32_t index, const ShaderInstructio
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: src0_value1.type != SpirvType::Uint condition ignored (continuing)\n");
 	}
 
+	// Resolve every source dword before emitting any loads. A missing static
+	// descriptor field must not silently read row zero or leave partial output.
+	std::array<std::array<int, 2>, 16> mapped_fields {};
 	for (int i = 0; i < dword_count; i++)
 	{
-		int buffer = 0;
-		int field = 0;
-		if (!spirv->GetDynamicSLoadMappedIndex(inst.pc, offset + i, &buffer, &field))
+		int  buffer = 0;
+		int  field  = 0;
+		bool mapped = spirv->GetDynamicSLoadMappedIndex(inst.pc, offset + i, &buffer, &field);
+		if (!mapped)
 		{
-			spirv->GetMappedIndex(offset + i, &buffer, &field);
+			mapped = spirv->GetMappedIndex(offset + i, &buffer, &field);
 		}
+		if (!mapped)
+		{
+			return false;
+		}
+		mapped_fields[i] = {buffer, field};
+	}
 
+	for (int i = 0; i < dword_count; i++)
+	{
+		const auto& mapping = mapped_fields[i];
 		const auto id = String8::FromPrintf("vsharp_%u_%d_value_%s", index, i, dst_value[i].value.c_str());
-		*dst_source += spirv->EmitMetadataLoad(buffer, field, id);
+		*dst_source += spirv->EmitMetadataLoad(mapping[0], mapping[1], id);
 		*dst_source += String8::FromPrintf("OpStore %%%s %%%s\n", dst_value[i].value.c_str(), id.c_str());
 	}
 

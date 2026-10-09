@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/VertexClipProbe.h"
 
 #include <bitset>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -2334,7 +2335,8 @@ struct ShaderUserData
 
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
-                       int user_data_register_base = 0, bool vertex_resource_types = true);
+                       int user_data_register_base = 0, bool vertex_resource_types = true,
+                       const ShaderCode* eud_descriptor_code = nullptr);
 
 [[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
                                                    int eud_pointer_register, const ShaderCode* code,
@@ -2349,20 +2351,19 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 using ShaderGen5EudSnapshotTestHook = void (*)(void*);
 void ShaderSetGen5EudSnapshotTestHook(ShaderGen5EudSnapshotTestHook hook, void* context);
 
-// Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
-// guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
-// api is the ShaderGet* start index (16 + eud_index). Hard-cap runaway offsets.
-constexpr int             SHADER_GEN5_EUD_MAX_DWORDS = 256;
+// Gen5 EUD table extent is bounded by the guest metadata field's representation.
+constexpr int             SHADER_GEN5_EUD_MAX_DWORDS = std::numeric_limits<uint16_t>::max();
 [[nodiscard]] int         ShaderGen5EudOffsetBase(int user_sgpr_num);
 [[nodiscard]] uint32_t    ShaderResolveGen5UserSgprCount(uint32_t declared_count, uint32_t written_count, uint16_t eud_size_dw);
-[[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t eud_size_dw)
+// Metadata eud_size_dw is a lower bound; api is the ShaderGet* start index
+// (16 + EUD dword offset). Reject spans that exceed the table's representable extent.
+[[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t /*eud_size_dw*/)
 {
-	const int need = api - 16 + dwords;
-	if (need <= static_cast<int>(eud_size_dw))
+	if (api < 16 || dwords <= 0 || dwords > SHADER_GEN5_EUD_MAX_DWORDS)
 	{
-		return true;
+		return false;
 	}
-	return need <= SHADER_GEN5_EUD_MAX_DWORDS;
+	return api - 16 <= SHADER_GEN5_EUD_MAX_DWORDS - dwords;
 }
 
 struct ShaderRegisterRange

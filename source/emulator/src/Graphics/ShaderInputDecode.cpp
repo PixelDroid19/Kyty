@@ -165,7 +165,8 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 	const auto& insts = code.GetInstructions();
 	uint32_t    size  = insts.Size();
 	// int         temp_register = 0;
-	uint32_t temp_value[104] = {0};
+	constexpr int kSgprs = 106;
+	uint32_t temp_value[kSgprs] = {0};
 	int      s_num           = 0;
 	int      v_num           = 0;
 
@@ -181,6 +182,7 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 
 			uint32_t index    = inst.src[1].constant.u >> 2u;
 			int      t        = inst.dst.register_id;
+			EXIT_IF(t < 0 || t + 3 >= kSgprs);
 			temp_value[t + 0] = buffer[index + 0];
 			temp_value[t + 1] = buffer[index + 1];
 			temp_value[t + 2] = buffer[index + 2];
@@ -212,6 +214,7 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 			if (info->resources_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->resources_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 
 			int t = inst.src[1].register_id;
+			EXIT_IF(t < 0 || t + 3 >= kSgprs);
 
 			auto& r           = info->resources[info->resources_num];
 			auto& rd          = info->resources_dst[info->resources_num];

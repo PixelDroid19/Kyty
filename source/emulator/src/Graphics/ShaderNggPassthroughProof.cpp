@@ -17,10 +17,10 @@ using Kind = ShaderNggPassthroughStepKind;
 using Type = ShaderInstructionType;
 using Operand = ShaderOperandType;
 
-constexpr unsigned kVccLo = 104;
-constexpr unsigned kExecLo = 106;
-constexpr unsigned kM0 = 108;
-constexpr unsigned kScc = 109;
+constexpr unsigned kVccLo = 106;
+constexpr unsigned kExecLo = 108;
+constexpr unsigned kM0 = 110;
+constexpr unsigned kScc = 111;
 
 uint64_t LowMask(unsigned bits)
 {
@@ -179,7 +179,7 @@ int ScalarIndex(const ShaderOperand& op)
 {
 	switch (op.type)
 	{
-		case Operand::Sgpr: return op.register_id;
+		case Operand::Sgpr: return op.register_id >= 0 && op.register_id < static_cast<int>(kVccLo) ? op.register_id : -1;
 		case Operand::VccLo: return kVccLo;
 		case Operand::VccHi: return kVccLo + 1;
 		case Operand::ExecLo: return kExecLo;

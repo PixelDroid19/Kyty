@@ -7462,6 +7462,187 @@ TEST(EmulatorGraphicsState, ClassifiesDynamicDepthReferenceTextureAndSamplerBind
 	    gamma_bind.samplers.samplers[0].SkipDegamma()));
 }
 
+TEST(EmulatorGraphicsState, Gen5GsFrontDynamicSampledDescriptorsUseApiPointerAndShaderBase)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	const auto make_code = [](ShaderCode* code, int pointer_register, int overwritten_pointer_word) {
+		if (overwritten_pointer_word >= 0)
+		{
+			ShaderInstruction overwrite_pointer_word {};
+			overwrite_pointer_word.pc                 = 0;
+			overwrite_pointer_word.type               = ShaderInstructionType::SMovB32;
+			overwrite_pointer_word.format             = ShaderInstructionFormat::SVdstSVsrc0;
+			overwrite_pointer_word.dst.type           = ShaderOperandType::Sgpr;
+			overwrite_pointer_word.dst.register_id    = overwritten_pointer_word;
+			overwrite_pointer_word.dst.size           = 1;
+			overwrite_pointer_word.src_num            = 1;
+			overwrite_pointer_word.src[0].type        = ShaderOperandType::IntegerInlineConstant;
+			overwrite_pointer_word.src[0].constant.u  = 0;
+			code->GetInstructions().Add(overwrite_pointer_word);
+		}
+
+		ShaderInstruction texture_load {};
+		texture_load.pc                = 0x8;
+		texture_load.type              = ShaderInstructionType::SLoadDwordx8;
+		texture_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 72, .size = 8};
+		texture_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = pointer_register, .size = 2};
+		texture_load.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+		texture_load.src[1].constant.u = 0u;
+		texture_load.src_num           = 2;
+
+		ShaderInstruction sampler_load {};
+		sampler_load.pc                = 0x10;
+		sampler_load.type              = ShaderInstructionType::SLoadDwordx4;
+		sampler_load.dst               = {.type = ShaderOperandType::Sgpr, .register_id = 96, .size = 4};
+		sampler_load.src[0]            = {.type = ShaderOperandType::Sgpr, .register_id = pointer_register, .size = 2};
+		sampler_load.src[1].type       = ShaderOperandType::IntegerInlineConstant;
+		sampler_load.src[1].constant.u = 160u;
+		sampler_load.src_num           = 2;
+
+		ShaderInstruction sample {};
+		sample.pc                = 0x18;
+		sample.type              = ShaderInstructionType::ImageSampleLz;
+		sample.format            = ShaderInstructionFormat::VdataVaddr3StSsMimgDmask;
+		sample.mimg_dmask        = 0x8;
+		sample.dst               = {.type = ShaderOperandType::Vgpr, .register_id = 3, .size = 1};
+		sample.src[0]            = {.type = ShaderOperandType::Vgpr, .register_id = 0, .size = 3};
+		sample.src[1]            = {.type = ShaderOperandType::Sgpr, .register_id = 72, .size = 8};
+		sample.src[2]            = {.type = ShaderOperandType::Sgpr, .register_id = 96, .size = 4};
+		sample.src_num           = 3;
+		sample.mimg_dimension    = 1;
+
+		ShaderInstruction end {};
+		end.pc   = 0x20;
+		end.type = ShaderInstructionType::SEndpgm;
+
+		code->SetType(ShaderType::Vertex);
+		code->GetInstructions().Add(texture_load);
+		code->GetInstructions().Add(sampler_load);
+		code->GetInstructions().Add(sample);
+		code->GetInstructions().Add(end);
+	};
+
+	ShaderCode code;
+	make_code(&code, 32, -1); // API pointer s24:s25 appears as shader s32:s33 in the fused front.
+	ShaderCode base_zero_code;
+	make_code(&base_zero_code, 24, -1);
+	ShaderCode wrong_source_code;
+	make_code(&wrong_source_code, 24, -1);
+
+	uint16_t direct_offsets[6];
+	for (auto& offset: direct_offsets)
+	{
+		offset = 0xffffu;
+	}
+	direct_offsets[5] = 24;
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.eud_size_dw            = 4;
+	user_data.srt_size_dw            = 0;
+
+	uint32_t required_end_dw = 0;
+	EXPECT_TRUE(ShaderGen5EudRequiredEndDwords(&user_data, 26, 24, &base_zero_code, 0, &required_end_dw));
+	EXPECT_EQ(required_end_dw, 44u);
+	required_end_dw = 0;
+	EXPECT_TRUE(ShaderGen5EudRequiredEndDwords(&user_data, 26, 24, &code, 8, &required_end_dw));
+	EXPECT_EQ(required_end_dw, 44u);
+	required_end_dw = 0;
+	EXPECT_TRUE(ShaderGen5EudRequiredEndDwords(&user_data, 26, 24, &wrong_source_code, 8, &required_end_dw));
+	EXPECT_EQ(required_end_dw, 4u);
+
+	alignas(16) uint32_t eud[44] = {};
+	eud[1]  = 130u << 20u;
+	eud[3]  = (9u << 28u) | (24u << 20u);
+	eud[40] = 1u << 31u;
+	struct ScopedGuestPage
+	{
+		uint64_t address = Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+		~ScopedGuestPage()
+		{
+			if (address != 0u) { Core::VirtualMemory::Free(address); }
+		}
+	} guest_page;
+	ASSERT_NE(guest_page.address, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(guest_page.address, eud, sizeof(eud)));
+
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 26; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	user_sgpr.value[24] = static_cast<uint32_t>(guest_page.address);
+	user_sgpr.value[25] = static_cast<uint32_t>(guest_page.address >> 32u);
+
+	ShaderParsedUsage   usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 26, nullptr, 8, true, &code);
+	ShaderAssociateSampledTextureSamplers(code, &bind, 8);
+
+	ASSERT_EQ(bind.textures2D.textures_num, 1);
+	EXPECT_TRUE(bind.textures2D.desc[0].dynamic_sload);
+	EXPECT_EQ(bind.textures2D.desc[0].slot, 0);
+	ASSERT_EQ(bind.samplers.samplers_num, 1);
+	EXPECT_TRUE(bind.samplers.dynamic_sload[0]);
+	EXPECT_EQ(bind.samplers.slots[0], 40);
+	EXPECT_EQ(bind.textures2D.desc[0].sampler_indices_mask, 0x1u);
+	ASSERT_EQ(bind.dynamic_sloads.records.Size(), 2u);
+	bool texture_mapping = false;
+	bool sampler_mapping = false;
+	for (uint32_t i = 0; i < bind.dynamic_sloads.records.Size(); ++i)
+	{
+		const auto& record = bind.dynamic_sloads.records.At(i);
+		if (record.kind == ShaderDynamicSLoadResourceKind::Texture)
+		{
+			texture_mapping = true;
+			EXPECT_EQ(record.destination_register, 72);
+			EXPECT_EQ(record.instruction_pc, 0x8u);
+			EXPECT_EQ(record.offset_dw, 0);
+			EXPECT_EQ(record.last_consumer_pc, 0x18u);
+		} else if (record.kind == ShaderDynamicSLoadResourceKind::Sampler)
+		{
+			sampler_mapping = true;
+			EXPECT_EQ(record.destination_register, 96);
+			EXPECT_EQ(record.instruction_pc, 0x10u);
+			EXPECT_EQ(record.offset_dw, 40);
+			EXPECT_EQ(record.last_consumer_pc, 0x18u);
+		} else
+		{
+			ADD_FAILURE() << "unexpected dynamic S_LOAD resource kind";
+		}
+	}
+	EXPECT_TRUE(texture_mapping);
+	EXPECT_TRUE(sampler_mapping);
+
+	// A write to either physical word of the fused-front EUD pointer before
+	// the descriptor S_LOAD invalidates the entry-value pair. The declared
+	// four-dword span is then sufficient because no EUD descriptor is consumed.
+	for (int overwritten_pointer_word: {32, 33})
+	{
+		ShaderCode overwritten_pointer_code;
+		make_code(&overwritten_pointer_code, 32, overwritten_pointer_word);
+
+		uint32_t overwritten_required_end_dw = 0;
+		ASSERT_TRUE(ShaderGen5EudRequiredEndDwords(&user_data, 26, 24, &overwritten_pointer_code, 8,
+		                                          &overwritten_required_end_dw));
+		EXPECT_EQ(overwritten_required_end_dw, 4u);
+
+		ShaderParsedUsage   overwritten_usage {};
+		ShaderBindResources overwritten_bind {};
+		ShaderParseUsage2(&user_data, &overwritten_usage, &overwritten_bind, user_sgpr, 26, nullptr, 8, true,
+		                  &overwritten_pointer_code);
+		EXPECT_EQ(overwritten_bind.textures2D.textures_num, 0);
+		EXPECT_EQ(overwritten_bind.samplers.samplers_num, 0);
+		EXPECT_EQ(overwritten_bind.dynamic_sloads.records.Size(), 0u);
+	}
+}
+
 // Captured failure: S_LOAD_DWORDX4 from EUD @offset_dw=40 of a null V#, then
 // S_BUFFER_LOAD of that destination. Materialization must not EXIT; it registers
 // a dynamic mapping so AlwaysOutOfBounds lowers consumers through zero_sbuffer.
@@ -7474,94 +7655,195 @@ TEST(EmulatorGraphicsState, DynamicSLoadNullEudStorageMaterializesWithoutExit)
 	Config::SetNextGen(true);
 	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
 
-	ShaderCode code;
-	code.SetType(ShaderType::Compute);
+	const auto make_code = [](ShaderCode* code, ShaderType type, int pointer_register, int descriptor_register) {
+		code->SetType(type);
 
-	ShaderInstruction sload {};
-	sload.pc                 = 0x8;
-	sload.type               = ShaderInstructionType::SLoadDwordx4;
-	sload.format             = ShaderInstructionFormat::Sdst4SbaseSoffset;
-	sload.dst.type           = ShaderOperandType::Sgpr;
-	sload.dst.register_id    = 4;
-	sload.dst.size           = 4;
-	sload.src_num            = 2;
-	sload.src[0].type        = ShaderOperandType::Sgpr;
-	sload.src[0].register_id = 0; // type-5 EUD pointer
-	sload.src[0].size        = 2;
-	sload.src[1].type        = ShaderOperandType::IntegerInlineConstant;
-	sload.src[1].constant.u  = 160u; // offset_dw = 40
-	code.GetInstructions().Add(sload);
+		ShaderInstruction sload {};
+		sload.pc                 = 0x8;
+		sload.type               = ShaderInstructionType::SLoadDwordx4;
+		sload.format             = ShaderInstructionFormat::Sdst4SbaseSoffset;
+		sload.dst.type           = ShaderOperandType::Sgpr;
+		sload.dst.register_id    = descriptor_register;
+		sload.dst.size           = 4;
+		sload.src_num            = 2;
+		sload.src[0].type        = ShaderOperandType::Sgpr;
+		sload.src[0].register_id = pointer_register;
+		sload.src[0].size        = 2;
+		sload.src[1].type        = ShaderOperandType::IntegerInlineConstant;
+		sload.src[1].constant.u  = 160u; // offset_dw = 40
+		code->GetInstructions().Add(sload);
 
-	ShaderInstruction sbuf {};
-	sbuf.pc                 = 0x10;
-	sbuf.type               = ShaderInstructionType::SBufferLoadDwordx4;
-	sbuf.format             = ShaderInstructionFormat::Sdst4SvSoffset;
-	sbuf.dst.type           = ShaderOperandType::Sgpr;
-	sbuf.dst.register_id    = 8;
-	sbuf.dst.size           = 4;
-	sbuf.src_num            = 2;
-	sbuf.src[0].type        = ShaderOperandType::Sgpr;
-	sbuf.src[0].register_id = 4;
-	sbuf.src[0].size        = 4;
-	sbuf.src[1].type        = ShaderOperandType::IntegerInlineConstant;
-	sbuf.src[1].constant.u  = 0;
-	code.GetInstructions().Add(sbuf);
+		ShaderInstruction sbuf {};
+		sbuf.pc                 = 0x10;
+		sbuf.type               = ShaderInstructionType::SBufferLoadDwordx4;
+		sbuf.format             = ShaderInstructionFormat::Sdst4SvSoffset;
+		sbuf.dst.type           = ShaderOperandType::Sgpr;
+		sbuf.dst.register_id    = descriptor_register + 4;
+		sbuf.dst.size           = 4;
+		sbuf.src_num            = 2;
+		sbuf.src[0].type        = ShaderOperandType::Sgpr;
+		sbuf.src[0].register_id = descriptor_register;
+		sbuf.src[0].size        = 4;
+		sbuf.src[1].type        = ShaderOperandType::IntegerInlineConstant;
+		sbuf.src[1].constant.u  = 0;
+		code->GetInstructions().Add(sbuf);
 
-	ShaderInstruction end {};
-	end.pc   = 0x18;
-	end.type = ShaderInstructionType::SEndpgm;
-	code.GetInstructions().Add(end);
+		ShaderInstruction end {};
+		end.pc   = 0x18;
+		end.type = ShaderInstructionType::SEndpgm;
+		code->GetInstructions().Add(end);
+	};
 
 	// Null V# at EUD dword 40 (guest leaves unused slots zeroed). The snapshot
 	// path requires the table in real guest memory, not a host stack array.
 	alignas(16) uint32_t eud[64] = {};
 
 	HW::UserSgprInfo user_sgpr {};
-	for (int i = 0; i < 16; i++)
+	for (int i = 0; i < 26; i++)
 	{
 		user_sgpr.type[i] = HW::UserSgprType::Region;
 	}
-	const uint64_t eud_ptr =
-	    Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
-	ASSERT_NE(eud_ptr, 0u);
-	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud, sizeof(eud)));
-	user_sgpr.value[0]     = static_cast<uint32_t>(eud_ptr);
-	user_sgpr.value[1]     = static_cast<uint32_t>(eud_ptr >> 32u);
+	struct ScopedGuestPage
+	{
+		uint64_t address = Core::VirtualMemory::Alloc(0, Core::VirtualMemory::GetPageSize(), Core::VirtualMemory::Mode::ReadWrite);
+		~ScopedGuestPage()
+		{
+			if (address != 0u) { Core::VirtualMemory::Free(address); }
+		}
+	} guest_page;
+	ASSERT_NE(guest_page.address, 0u);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(guest_page.address, eud, sizeof(eud)));
+	user_sgpr.value[0]  = static_cast<uint32_t>(guest_page.address);
+	user_sgpr.value[1]  = static_cast<uint32_t>(guest_page.address >> 32u);
+	user_sgpr.value[24] = static_cast<uint32_t>(guest_page.address);
+	user_sgpr.value[25] = static_cast<uint32_t>(guest_page.address >> 32u);
+	// Non-null V# for the static projection metadata at API s8:s11.
+	user_sgpr.value[8]  = 0x00100000u;
+	user_sgpr.value[9]  = 16u << 16u;
+	user_sgpr.value[10] = 64u;
+	user_sgpr.value[11] = 0u;
 
-	// Type-5 direct resource is the EUD pointer at SGPR 0.
-	uint16_t direct_offsets[6];
+	uint16_t base_zero_direct_offsets[6];
 	for (int i = 0; i < 6; i++)
 	{
-		direct_offsets[i] = 0xffffu;
+		base_zero_direct_offsets[i] = 0xffffu;
 	}
-	direct_offsets[5] = 0;
+	base_zero_direct_offsets[5] = 0;
 
-	ShaderUserData user_data {};
-	user_data.direct_resource_offset = direct_offsets;
-	user_data.direct_resource_count  = 6;
-	user_data.eud_size_dw            = 48;
-	user_data.srt_size_dw            = 0;
+	ShaderUserData base_zero_user_data {};
+	base_zero_user_data.direct_resource_offset = base_zero_direct_offsets;
+	base_zero_user_data.direct_resource_count  = 6;
+	base_zero_user_data.eud_size_dw            = 48;
+	base_zero_user_data.srt_size_dw            = 0;
 
-	ShaderParsedUsage   usage {};
-	ShaderBindResources bind {};
-	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 16, &code);
-	EXPECT_TRUE(Core::VirtualMemory::Free(eud_ptr));
+	// Ordinary base-zero control keeps its descriptor analysis on the same
+	// instruction stream, proving the 16-byte SMEM evidence without the GS base.
+	ShaderCode base_zero_code;
+	make_code(&base_zero_code, ShaderType::Compute, 0, 4);
+	ShaderParsedUsage   base_zero_usage {};
+	ShaderBindResources base_zero_bind {};
+	ShaderParseUsage2(&base_zero_user_data, &base_zero_usage, &base_zero_bind, user_sgpr, 16, &base_zero_code, 0, false);
 
-	ASSERT_TRUE(bind.extended.used);
-	EXPECT_EQ(bind.extended.start_register, 0);
-	ASSERT_GE(bind.storage_buffers.buffers_num, 1);
-	EXPECT_TRUE(bind.storage_buffers.dynamic_sload[0]);
-	ASSERT_GE(bind.dynamic_sloads.records.Size(), 1u);
-	EXPECT_EQ(bind.dynamic_sloads.records.At(0).offset_dw, 40);
-	EXPECT_EQ(bind.dynamic_sloads.records.At(0).destination_register, 4);
-	EXPECT_EQ(bind.dynamic_sloads.records.At(0).kind, ShaderDynamicSLoadResourceKind::StorageBuffer);
+	ASSERT_TRUE(base_zero_bind.extended.used);
+	EXPECT_EQ(base_zero_bind.extended.start_register, 0);
+	ASSERT_EQ(base_zero_bind.storage_buffers.buffers_num, 1);
+	EXPECT_TRUE(base_zero_bind.storage_buffers.dynamic_sload[0]);
+	EXPECT_EQ(base_zero_bind.storage_buffers.sources[0], ShaderStorageBindingSource::DynamicScalarLoad);
+	EXPECT_TRUE(base_zero_bind.storage_buffers.code_available[0]);
+	EXPECT_TRUE(base_zero_bind.storage_buffers.exact_matches[0]);
+	EXPECT_EQ(base_zero_bind.storage_buffers.accesses[0], ShaderStorageAccess::Raw);
+	EXPECT_TRUE(base_zero_bind.storage_buffers.raw_smem_use[0]);
+	EXPECT_FALSE(base_zero_bind.storage_buffers.raw_smem_dynamic_offset[0]);
+	EXPECT_EQ(base_zero_bind.storage_buffers.raw_smem_required_bytes[0], 16u);
+	ASSERT_EQ(base_zero_bind.dynamic_sloads.records.Size(), 1u);
+	EXPECT_EQ(base_zero_bind.dynamic_sloads.records.At(0).offset_dw, 40);
+	EXPECT_EQ(base_zero_bind.dynamic_sloads.records.At(0).destination_register, 4);
+	EXPECT_EQ(base_zero_bind.dynamic_sloads.records.At(0).instruction_pc, 0x8u);
+	EXPECT_EQ(base_zero_bind.dynamic_sloads.records.At(0).last_consumer_pc, 0x10u);
+	EXPECT_EQ(base_zero_bind.dynamic_sloads.records.At(0).kind, ShaderDynamicSLoadResourceKind::StorageBuffer);
 	// Null NumRecords → zero_sbuffer lowering for S_BUFFER consumers of s[4:7].
-	bool zero_dst = false;
-	for (int i = 0; i < bind.zero_sbuffer_resources.buffers_num; ++i)
+	bool base_zero_destination = false;
+	for (int i = 0; i < base_zero_bind.zero_sbuffer_resources.buffers_num; ++i)
 	{
-		zero_dst = zero_dst || bind.zero_sbuffer_resources.start_register[i] == 4;
+		base_zero_destination = base_zero_destination || base_zero_bind.zero_sbuffer_resources.start_register[i] == 4;
 	}
-	EXPECT_TRUE(zero_dst);
+	EXPECT_TRUE(base_zero_destination);
+
+	// In the fused GS-front, API s24:s25 is shader s32:s33. Keep the ordinary
+	// code null so metadata-only projection storage remains CodeUnavailable;
+	// the separate ISA stream is used only for EUD descriptor discovery.
+	uint16_t gs_front_direct_offsets[6];
+	for (int i = 0; i < 6; i++)
+	{
+		gs_front_direct_offsets[i] = 0xffffu;
+	}
+	gs_front_direct_offsets[5] = 24;
+	ShaderSharp projection_sharp {};
+	projection_sharp.offset_dw = 8;
+	projection_sharp.size      = 1;
+	ShaderUserData gs_front_user_data {};
+	gs_front_user_data.direct_resource_offset = gs_front_direct_offsets;
+	gs_front_user_data.direct_resource_count  = 6;
+	gs_front_user_data.sharp_resource_offset[3] = &projection_sharp;
+	gs_front_user_data.sharp_resource_count[3]  = 1;
+	gs_front_user_data.eud_size_dw              = 48;
+	gs_front_user_data.srt_size_dw              = 0;
+
+	ShaderCode gs_front_code;
+	make_code(&gs_front_code, ShaderType::Vertex, 32, 72);
+	ShaderParsedUsage   gs_front_usage {};
+	ShaderBindResources gs_front_bind {};
+	ShaderParseUsage2(&gs_front_user_data, &gs_front_usage, &gs_front_bind, user_sgpr, 26, nullptr, 8, true, &gs_front_code);
+
+	ASSERT_TRUE(gs_front_bind.extended.used);
+	EXPECT_EQ(gs_front_bind.extended.start_register, 24);
+	ASSERT_EQ(gs_front_bind.storage_buffers.buffers_num, 2);
+	ASSERT_EQ(gs_front_bind.dynamic_sloads.records.Size(), 1u);
+	const auto& mapping = gs_front_bind.dynamic_sloads.records.At(0);
+	EXPECT_EQ(mapping.offset_dw, 40);
+	EXPECT_EQ(mapping.destination_register, 72);
+	EXPECT_EQ(mapping.instruction_pc, 0x8u);
+	EXPECT_EQ(mapping.last_consumer_pc, 0x10u);
+	EXPECT_EQ(mapping.kind, ShaderDynamicSLoadResourceKind::StorageBuffer);
+
+	int dynamic_storage_index = -1;
+	int projection_storage_index = -1;
+	for (int i = 0; i < gs_front_bind.storage_buffers.buffers_num; ++i)
+	{
+		if (gs_front_bind.storage_buffers.sources[i] == ShaderStorageBindingSource::DynamicScalarLoad)
+		{
+			dynamic_storage_index = i;
+		} else if (gs_front_bind.storage_buffers.sources[i] == ShaderStorageBindingSource::MetadataSharp)
+		{
+			projection_storage_index = i;
+		}
+	}
+	ASSERT_NE(dynamic_storage_index, -1);
+	EXPECT_EQ(mapping.resource_index, dynamic_storage_index);
+	EXPECT_TRUE(gs_front_bind.storage_buffers.dynamic_sload[dynamic_storage_index]);
+	EXPECT_TRUE(gs_front_bind.storage_buffers.code_available[dynamic_storage_index]);
+	EXPECT_TRUE(gs_front_bind.storage_buffers.exact_matches[dynamic_storage_index]);
+	EXPECT_EQ(gs_front_bind.storage_buffers.accesses[dynamic_storage_index], ShaderStorageAccess::Raw);
+	EXPECT_TRUE(gs_front_bind.storage_buffers.raw_smem_use[dynamic_storage_index]);
+	EXPECT_FALSE(gs_front_bind.storage_buffers.raw_smem_dynamic_offset[dynamic_storage_index]);
+	EXPECT_EQ(gs_front_bind.storage_buffers.raw_smem_required_bytes[dynamic_storage_index], 16u);
+
+	ASSERT_NE(projection_storage_index, -1);
+	EXPECT_EQ(gs_front_bind.storage_buffers.start_register[projection_storage_index], 8);
+	EXPECT_FALSE(gs_front_bind.storage_buffers.extended[projection_storage_index]);
+	EXPECT_FALSE(gs_front_bind.storage_buffers.code_available[projection_storage_index]);
+	EXPECT_FALSE(gs_front_bind.storage_buffers.exact_matches[projection_storage_index]);
+	EXPECT_EQ(gs_front_bind.storage_buffers.sources[projection_storage_index], ShaderStorageBindingSource::MetadataSharp);
+	EXPECT_EQ(gs_front_bind.storage_buffers.accesses[projection_storage_index], ShaderStorageAccess::Unknown);
+	EXPECT_EQ(gs_front_bind.storage_buffers.unknown_reasons[projection_storage_index], ShaderStorageUnknownReason::CodeUnavailable);
+	EXPECT_NE(gs_front_bind.storage_buffers.buffers[projection_storage_index].Base48(), 0u);
+	// The null dynamic V# still lowers S_BUFFER consumers through s[72:75].
+	bool gs_front_zero_destination = false;
+	for (int i = 0; i < gs_front_bind.zero_sbuffer_resources.buffers_num; ++i)
+	{
+		gs_front_zero_destination = gs_front_zero_destination || gs_front_bind.zero_sbuffer_resources.start_register[i] == 72;
+	}
+	EXPECT_TRUE(gs_front_zero_destination);
 }
 
 TEST(EmulatorGraphicsState, DynamicSLoadFeedsVectorBufferDescriptor)
@@ -7758,6 +8040,194 @@ TEST(EmulatorGraphicsState, DynamicSLoadConstantSmemOffsetKeepsRequiredBytes)
 	EXPECT_EQ(declared < bind.storage_buffers.raw_smem_required_bytes[0] ? declared
 	                                                                    : bind.storage_buffers.raw_smem_required_bytes[0],
 	          16u);
+}
+
+// Sanitized Gen5 EUD regression: a category-3 V# occupies EUD[264..267], and
+// an S_LOAD_DWORDX4 from that slot feeds an S_BUFFER_LOAD_DWORDX4. A sampler
+// occupies EUD[252..255]. The table ends at a protected page boundary so a
+// one-dword snapshot overread faults.
+TEST(EmulatorGraphicsState, Gen5Eud268SnapshotFeedsConstantSLoad)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Config::SetNextGen(true);
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	ShaderCode code;
+	code.SetType(ShaderType::Pixel);
+
+	ShaderInstruction sload {};
+	sload.pc                 = 0x8;
+	sload.type               = ShaderInstructionType::SLoadDwordx4;
+	sload.format             = ShaderInstructionFormat::Sdst4SbaseSoffset;
+	sload.dst.type           = ShaderOperandType::Sgpr;
+	sload.dst.register_id    = 88;
+	sload.dst.size           = 4;
+	sload.src_num            = 2;
+	sload.src[0].type        = ShaderOperandType::Sgpr;
+	sload.src[0].register_id = 28;
+	sload.src[0].size        = 2;
+	sload.src[1].type        = ShaderOperandType::IntegerInlineConstant;
+	sload.src[1].constant.u  = 264u * 4u;
+	code.GetInstructions().Add(sload);
+
+	ShaderInstruction high_consumer {};
+	high_consumer.pc                 = 0x10;
+	high_consumer.type               = ShaderInstructionType::SBufferLoadDwordx4;
+	high_consumer.format             = ShaderInstructionFormat::Sdst4SvSoffset;
+	high_consumer.dst.type           = ShaderOperandType::Sgpr;
+	high_consumer.dst.register_id    = 8;
+	high_consumer.dst.size           = 4;
+	high_consumer.src_num            = 2;
+	high_consumer.src[0].type        = ShaderOperandType::Sgpr;
+	high_consumer.src[0].register_id = 88;
+	high_consumer.src[0].size        = 4;
+	high_consumer.src[1].type        = ShaderOperandType::IntegerInlineConstant;
+	high_consumer.src[1].constant.u  = 0;
+	code.GetInstructions().Add(high_consumer);
+
+	ShaderInstruction end {};
+	end.pc   = 0x18;
+	end.type = ShaderInstructionType::SEndpgm;
+	code.GetInstructions().Add(end);
+
+	const std::array<uint32_t, 4> high_descriptor {
+	    0x00100000u, 16u << 16u, 64u, DstSel(4, 5, 6, 7) | (75u << 12u)};
+	const std::array<uint32_t, 4> sampler_descriptor {0x00000001u, 0x00001000u, 0x00000002u, 0u};
+	std::array<uint32_t, 268> eud {};
+	std::copy(sampler_descriptor.begin(), sampler_descriptor.end(), eud.begin() + 252);
+	std::copy(high_descriptor.begin(), high_descriptor.end(), eud.begin() + 264);
+
+	struct ScopedGuestPages
+	{
+		uint64_t address = 0;
+		~ScopedGuestPages()
+		{
+			if (address != 0u) { Core::VirtualMemory::Free(address); }
+		}
+	} guest_pages {Core::VirtualMemory::Alloc(0, 2 * Core::VirtualMemory::GetPageSize(),
+	                                          Core::VirtualMemory::Mode::ReadWrite)};
+	ASSERT_NE(guest_pages.address, 0u);
+	const uint64_t page_size = Core::VirtualMemory::GetPageSize();
+	ASSERT_TRUE(Core::VirtualMemory::Protect(guest_pages.address + page_size, page_size,
+	                                         Core::VirtualMemory::Mode::NoAccess));
+	const uint64_t eud_ptr = guest_pages.address + page_size - sizeof(eud);
+	ASSERT_TRUE(Core::VirtualMemory::CopyToGuest(eud_ptr, eud.data(), sizeof(eud)));
+
+	HW::UserSgprInfo user_sgpr {};
+	for (int i = 0; i < 30; ++i)
+	{
+		user_sgpr.type[i] = HW::UserSgprType::Region;
+	}
+	user_sgpr.value[28] = static_cast<uint32_t>(eud_ptr);
+	user_sgpr.value[29] = static_cast<uint32_t>(eud_ptr >> 32u);
+
+	uint16_t direct_offsets[6];
+	for (auto& offset: direct_offsets)
+	{
+		offset = 0xffffu;
+	}
+	direct_offsets[5] = 28;
+
+	ShaderSharp sampler_sharp[1] {};
+	sampler_sharp[0].offset_dw = 284;
+	sampler_sharp[0].size      = 1;
+	ShaderSharp high_storage_sharp[1] {};
+	high_storage_sharp[0].offset_dw = 296;
+	high_storage_sharp[0].size      = 1;
+
+	ShaderUserData user_data {};
+	user_data.direct_resource_offset = direct_offsets;
+	user_data.direct_resource_count  = 6;
+	user_data.sharp_resource_offset[2] = sampler_sharp;
+	user_data.sharp_resource_count[2] = 1;
+	user_data.sharp_resource_offset[3] = high_storage_sharp;
+	user_data.sharp_resource_count[3] = 1;
+	user_data.eud_size_dw = 268;
+	user_data.srt_size_dw = 0;
+
+	uint32_t required_end_dw = 0;
+	ASSERT_TRUE(ShaderGen5EudRequiredEndDwords(&user_data, 30, 28, &code, 0, &required_end_dw));
+	EXPECT_EQ(required_end_dw, 268u);
+
+	struct SnapshotMutation
+	{
+		uint64_t word_address = 0;
+		uint32_t word3 = 0;
+		uint32_t hook_calls = 0;
+		bool     write_succeeded = false;
+	} mutation {eud_ptr + 267u * sizeof(uint32_t), DstSel(6, 5, 4, 7) | (75u << 12u)};
+	struct ScopedSnapshotHookReset
+	{
+		~ScopedSnapshotHookReset() { ShaderSetGen5EudSnapshotTestHook(nullptr, nullptr); }
+	} reset_hook;
+	ShaderSetGen5EudSnapshotTestHook(
+	    [](void* context) {
+		    auto& state = *static_cast<SnapshotMutation*>(context);
+		    ++state.hook_calls;
+		    if (state.hook_calls == 1)
+		    {
+			    state.write_succeeded = Core::VirtualMemory::CopyToGuest(state.word_address, &state.word3, sizeof(state.word3));
+		    }
+	    },
+	    &mutation);
+
+	ShaderParsedUsage usage {};
+	ShaderBindResources bind {};
+	ShaderParseUsage2(&user_data, &usage, &bind, user_sgpr, 30, &code);
+	EXPECT_EQ(mutation.hook_calls, 2u);
+	ASSERT_TRUE(mutation.write_succeeded);
+	EXPECT_TRUE(bind.extended.used);
+	EXPECT_EQ(bind.extended.start_register, 28);
+	EXPECT_EQ(bind.extended.eud_user_sgpr_num, 30);
+	EXPECT_EQ(bind.extended.eud_offset_base, 32);
+	EXPECT_EQ(bind.extended.eud_size_dw, 268u);
+
+	const auto find_storage = [&](const std::array<uint32_t, 4>& descriptor) {
+		for (int index = 0; index < bind.storage_buffers.buffers_num; ++index)
+		{
+			bool equal = true;
+			for (int field = 0; field < 4; ++field)
+			{
+				equal = equal && bind.storage_buffers.buffers[index].fields[field] == descriptor[field];
+			}
+			if (equal) { return index; }
+		}
+		return -1;
+	};
+	ASSERT_EQ(bind.storage_buffers.buffers_num, 1);
+	auto expected_high_descriptor = high_descriptor;
+	expected_high_descriptor[3] = mutation.word3;
+	const int high_index = find_storage(expected_high_descriptor);
+	ASSERT_GE(high_index, 0);
+	EXPECT_EQ(bind.storage_buffers.sources[high_index], ShaderStorageBindingSource::DynamicScalarLoad);
+	EXPECT_EQ(bind.storage_buffers.start_register[high_index], 88);
+	EXPECT_FALSE(bind.storage_buffers.extended[high_index]);
+	EXPECT_TRUE(bind.storage_buffers.dynamic_sload[high_index]);
+	EXPECT_EQ(bind.storage_buffers.buffers[high_index].fields[3], mutation.word3);
+	EXPECT_TRUE(bind.storage_buffers.raw_smem_use[high_index]);
+	EXPECT_FALSE(bind.storage_buffers.raw_smem_dynamic_offset[high_index]);
+	EXPECT_EQ(bind.storage_buffers.raw_smem_required_bytes[high_index], 16u);
+
+	ASSERT_EQ(bind.samplers.samplers_num, 1);
+	EXPECT_EQ(bind.samplers.start_register[0], 268);
+	EXPECT_TRUE(bind.samplers.extended[0]);
+	for (int field = 0; field < 4; ++field)
+	{
+		EXPECT_EQ(bind.samplers.samplers[0].fields[field], sampler_descriptor[field]);
+	}
+
+	ASSERT_EQ(bind.dynamic_sloads.records.Size(), 1u);
+	const auto& mapping = bind.dynamic_sloads.records.At(0);
+	EXPECT_EQ(mapping.kind, ShaderDynamicSLoadResourceKind::StorageBuffer);
+	EXPECT_EQ(mapping.resource_index, high_index);
+	EXPECT_EQ(mapping.destination_register, 88);
+	EXPECT_EQ(mapping.instruction_pc, 0x8u);
+	EXPECT_EQ(mapping.offset_dw, 264);
+	EXPECT_EQ(mapping.dword_count, 4);
+	EXPECT_EQ(mapping.last_consumer_pc, 0x10u);
 }
 
 UT_END();

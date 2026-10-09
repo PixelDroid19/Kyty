@@ -2039,10 +2039,7 @@ void Spirv::WriteLocalVariables()
 
 		int shift_regs = (m_vs_input_info != nullptr && m_vs_input_info->gs_prolog ? 8 : 0);
 
-		for (auto& m: m_extended_mapping)
-		{
-			m[0] = m[1] = 0;
-		}
+		m_extended_mapping.clear();
 
 		for (int i = 0; i < m_bind->storage_buffers.buffers_num; i++)
 		{
@@ -2063,9 +2060,7 @@ void Spirv::WriteLocalVariables()
 				{
 					EXIT_IF(start_reg < 16);
 					if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
-					if (start_reg - 16 + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-					m_extended_mapping[start_reg - 16 + f][0] = buffer_index + i;
-					m_extended_mapping[start_reg - 16 + f][1] = f;
+					EXIT_IF(!SetMappedIndex(static_cast<int64_t>(start_reg) - 16 + f, buffer_index + i, f));
 				} else
 				{
 					String8 reg = String8::FromPrintf("s%d", start_reg + f + shift_regs);
@@ -2095,9 +2090,7 @@ void Spirv::WriteLocalVariables()
 					{
 						EXIT_IF(start_reg < 16);
 						if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
-						if (start_reg - 16 + 4 * ti + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + 4 * ti + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-						m_extended_mapping[start_reg - 16 + 4 * ti + f][0] = buffer_index + i * 2 + ti;
-						m_extended_mapping[start_reg - 16 + 4 * ti + f][1] = f;
+						EXIT_IF(!SetMappedIndex(static_cast<int64_t>(start_reg) - 16 + 4 * ti + f, buffer_index + i * 2 + ti, f));
 					} else
 					{
 						String8 reg = String8::FromPrintf("s%d", start_reg + 4 * ti + f + shift_regs);
@@ -2126,9 +2119,7 @@ void Spirv::WriteLocalVariables()
 				{
 					EXIT_IF(start_reg < 16);
 					if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
-					if (start_reg - 16 + f >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 + f >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-					m_extended_mapping[start_reg - 16 + f][0] = buffer_index + i;
-					m_extended_mapping[start_reg - 16 + f][1] = f;
+					EXIT_IF(!SetMappedIndex(static_cast<int64_t>(start_reg) - 16 + f, buffer_index + i, f));
 				} else
 				{
 					String8 reg = String8::FromPrintf("s%d", start_reg + f + shift_regs);
@@ -2150,9 +2141,7 @@ void Spirv::WriteLocalVariables()
 			{
 				EXIT_IF(start_reg < 16);
 				if (shift_regs != 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: shift_regs != 0 condition ignored (continuing)\n"); }
-				if (start_reg - 16 >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: start_reg - 16 >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-				m_extended_mapping[start_reg - 16][0] = buffer_index + i / 4;
-				m_extended_mapping[start_reg - 16][1] = i % 4;
+				EXIT_IF(!SetMappedIndex(static_cast<int64_t>(start_reg) - 16, buffer_index + i / 4, i % 4));
 			} else
 			{
 				String8 reg = String8::FromPrintf("s%d", start_reg + shift_regs);
@@ -2214,9 +2203,9 @@ void Spirv::WriteLocalVariables()
 			// TODO() load pointer
 
 			KYTY_LOG_DEBUG("Extended mapping: ");
-			for (auto& m: m_extended_mapping)
+			for (const auto& [offset, mapping]: m_extended_mapping)
 			{
-				KYTY_LOG_DEBUG("{%d, %d} ", m[0], m[1]);
+				KYTY_LOG_DEBUG("%d={%d, %d} ", offset, mapping[0], mapping[1]);
 			}
 			KYTY_LOG_DEBUG("\n");
 		}

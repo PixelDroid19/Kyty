@@ -25,7 +25,7 @@ struct ShaderNggPassthroughCounts
 // Conservative dependencies on INITIAL scalar words: SGPR 0..103, VCC_LO,
 // VCC_HI, EXEC_LO, EXEC_HI, M0, SCC, in that order. A dependency may remain
 // after an operation makes its value known; it is not a liveness certificate.
-using ShaderNggScalarDependencies = std::bitset<110>;
+using ShaderNggScalarDependencies = std::bitset<112>;
 
 struct ShaderNggKnownBits
 {

@@ -5534,8 +5534,7 @@ TEST(EmulatorGraphicsPackets, EudWithoutSrtUsesUserSgprWindow)
 	EXPECT_EQ(0, 0); // srt_size_dw == 0
 }
 
-// Type-5 guest EUD tables may exceed metadata eud_size_dw. Astro: api=40,
-// dwords=4, eud_size=24 → need=28 still allowed under the hard 256 cap.
+// Type-5 guest EUD tables may exceed the declared lower bound.
 TEST(EmulatorGraphicsPackets, Gen5EudSpanAllowsModestMetadataOverrun)
 {
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16, 4, 24));          // fully inside metadata
@@ -5543,6 +5542,46 @@ TEST(EmulatorGraphicsPackets, Gen5EudSpanAllowsModestMetadataOverrun)
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + 24 - 4, 4, 24)); // last in-bound
 	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + SHADER_GEN5_EUD_MAX_DWORDS - 4, 4, 24));
 	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16 + SHADER_GEN5_EUD_MAX_DWORDS - 3, 4, 24));
+	EXPECT_TRUE(ShaderGen5EudSpanAllowed(16 + 264, 4, 268));
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(15, 4, 268));
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16, 0, 268));
+	EXPECT_FALSE(ShaderGen5EudSpanAllowed(16, -1, 268));
+}
+
+TEST(EmulatorGraphicsPackets, ExtendedMetadataMapIncludesDescriptorPastDword256)
+{
+	ASSERT_EXIT(
+	    {
+		    InitCommandBufferTestRuntime();
+		    Config::SetNextGen(true);
+		    ShaderCode code;
+		    code.SetType(ShaderType::Pixel);
+		    ShaderInstruction end {};
+		    end.type = ShaderInstructionType::SEndpgm;
+		    end.format = ShaderInstructionFormat::Empty;
+		    code.GetInstructions().Add(end);
+		    ShaderPixelInputInfo input {};
+		    input.bind.push_constant_size = 16;
+		    input.bind.storage_buffers.buffers_num = 1;
+		    input.bind.storage_buffers.extended[0] = true;
+		    input.bind.storage_buffers.start_register[0] = 16 + 264;
+		    input.bind.storage_buffers.sources[0] = ShaderStorageBindingSource::MetadataSharp;
+		    input.bind.extended.used = true;
+		    input.bind.extended.start_register = 28;
+		    input.bind.extended.eud_size_dw = 268;
+		    Spirv spirv;
+		    spirv.SetCode(code);
+		    spirv.SetPsInputInfo(&input);
+		    spirv.GenerateSource();
+		    int buffer = -1;
+		    int field = -1;
+		    const bool mapped = spirv.GetMappedIndex(267, &buffer, &field);
+		    const bool missing = spirv.GetMappedIndex(263, &buffer, &field);
+		    const bool negative = spirv.GetMappedIndex(-1, &buffer, &field);
+		    const bool beyond = spirv.GetMappedIndex(SHADER_GEN5_EUD_MAX_DWORDS, &buffer, &field);
+		    std::_Exit(mapped && buffer == 0 && field == 3 && !missing && !negative && !beyond ? 0 : 1);
+	    },
+	    ::testing::ExitedWithCode(0), "");
 }
 
 // Captured EXP target 0x03: MRT3 compressed (half2), done may be 0.

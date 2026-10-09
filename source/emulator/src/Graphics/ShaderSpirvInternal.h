@@ -29,9 +29,12 @@
 #include "Kyty/Core/String8.h"
 #include "Kyty/Core/Vector.h"
 
+#include <array>
+#include <cstdint>
 #include <set>
-#include <vector>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 #include "Emulator/Graphics/Shader.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
@@ -278,11 +281,32 @@ public:
 	[[nodiscard]] String8 GetConstantFloat(float f) const;
 	[[nodiscard]] String8 GetConstant(ShaderOperand op) const;
 
-	void GetMappedIndex(int offset, int* buffer, int* field) const
+	[[nodiscard]] bool SetMappedIndex(int64_t offset, int buffer, int field)
 	{
-		if (offset >= m_extended_mapping.Size()) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: offset >= m_extended_mapping.Size() condition ignored (continuing)\n"); }
-		*buffer = m_extended_mapping[offset][0];
-		*field  = m_extended_mapping[offset][1];
+		if (offset < 0 || offset >= SHADER_GEN5_EUD_MAX_DWORDS || buffer < 0 || field < 0 || field >= 4)
+		{
+			return false;
+		}
+		// Overlapping descriptor rows retain the last resource in binding order.
+		m_extended_mapping[static_cast<int>(offset)] = {buffer, field};
+		return true;
+	}
+
+	[[nodiscard]] bool GetMappedIndex(int offset, int* buffer, int* field) const
+	{
+		EXIT_IF(buffer == nullptr || field == nullptr);
+		if (offset < 0 || offset >= SHADER_GEN5_EUD_MAX_DWORDS)
+		{
+			return false;
+		}
+		const auto mapped = m_extended_mapping.find(offset);
+		if (mapped == m_extended_mapping.end())
+		{
+			return false;
+		}
+		*buffer = mapped->second[0];
+		*field  = mapped->second[1];
+		return true;
 	}
 
 	// First table dword that the PC-keyed descriptor S_LOAD at instruction_pc
@@ -424,11 +448,9 @@ private:
 	PixelInterpolationMode        m_pixel_interpolation[32] {};
 	// ShaderBindParameters          m_bind_params;
 
-	// Extended user data is addressed relative to SGPR 16. Keep the emitted
-	// mapping aligned with the shared EUD span policy rather than the old 64-dw
-	// local assumption; Gen5 descriptor tables may legitimately address later
-	// entries through the EUD pointer.
-	Core::Array2<int, SHADER_GEN5_EUD_MAX_DWORDS, 2> m_extended_mapping {};
+	// Extended user data is addressed relative to SGPR 16. Sparse descriptor
+	// fields avoid coupling translation to the snapshot's bounded dword count.
+	std::unordered_map<int, std::array<int, 2>> m_extended_mapping;
 };
 
 // NOLINTNEXTLINE(clang-analyzer-optin.performance.Padding)
