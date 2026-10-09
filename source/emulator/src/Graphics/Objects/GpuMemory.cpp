@@ -49,6 +49,99 @@ uint64_t GpuMemory::NextContentSequence()
 	return ++m_content_sequence;
 }
 
+namespace {
+
+enum class GuestSpanStatus : uint8_t
+{
+	Readable,
+	Unmapped,
+	Incomplete,
+	NotReadable,
+};
+
+const char* GuestSpanStatusName(GuestSpanStatus status)
+{
+	switch (status)
+	{
+		case GuestSpanStatus::Unmapped: return "unmapped";
+		case GuestSpanStatus::Incomplete: return "incompletely mapped";
+		case GuestSpanStatus::NotReadable: return "non-CPU-readable";
+		case GuestSpanStatus::Readable: break;
+	}
+	return "readable";
+}
+
+// Validates the single run that starts at cursor. The mapped record and the
+// protection record must both contain cursor; the run ends at the nearer of
+// their exclusive ends or at end. On success *next is always beyond cursor.
+GuestSpanStatus GpuMemoryGuestSpanStep(const Emulator::GuestMemory::Port& guest_memory, uint64_t cursor, uint64_t end, uint64_t* next)
+{
+	// Asking for one byte returns the record that contains cursor, not one that spans the whole request.
+	Emulator::GuestMemory::MappedRange mapped {};
+	if (!guest_memory.QueryMappedRange(cursor, 1, &mapped) || mapped.kind == Emulator::GuestMemory::MappedRangeKind::None)
+	{
+		return GuestSpanStatus::Unmapped;
+	}
+	const bool kind_ok = mapped.kind == Emulator::GuestMemory::MappedRangeKind::Physical ||
+	                     mapped.kind == Emulator::GuestMemory::MappedRangeKind::Flexible;
+	if (!kind_ok || mapped.base == 0 || mapped.size == 0 || cursor < mapped.base || cursor - mapped.base >= mapped.size ||
+	    mapped.size > UINT64_MAX - mapped.base)
+	{
+		return GuestSpanStatus::Incomplete;
+	}
+
+	void* protection_start = nullptr;
+	void* protection_end   = nullptr;
+	int   protection       = 0;
+	if (guest_memory.QueryProtection(reinterpret_cast<void*>(cursor), &protection_start, &protection_end, &protection) != 0)
+	{
+		return GuestSpanStatus::NotReadable;
+	}
+	// QueryProtection reports an inclusive end; an end at UINT64_MAX has no exclusive form.
+	const uint64_t start = reinterpret_cast<uint64_t>(protection_start);
+	const uint64_t last  = reinterpret_cast<uint64_t>(protection_end);
+	if (protection_start == nullptr || protection_end == nullptr || start > cursor || last < cursor || last == UINT64_MAX)
+	{
+		return GuestSpanStatus::Incomplete;
+	}
+	if ((protection & 0x3) == 0)
+	{
+		return GuestSpanStatus::NotReadable;
+	}
+
+	const uint64_t bound = std::min(std::min(end, mapped.base + mapped.size), last + 1);
+	if (bound <= cursor)
+	{
+		return GuestSpanStatus::Incomplete;
+	}
+	*next = bound;
+	return GuestSpanStatus::Readable;
+}
+
+// Every byte of [addr, addr + size) must lie in a CPU-readable guest segment
+// before the range may be hashed. Adjacent segments join; a hole stops the walk.
+GuestSpanStatus GpuMemoryValidateCpuReadableSpan(const Emulator::GuestMemory::Port& guest_memory, uint64_t addr, uint64_t size)
+{
+	if (size > UINT64_MAX - addr)
+	{
+		return GuestSpanStatus::Incomplete;
+	}
+	const uint64_t end = addr + size;
+	for (uint64_t cursor = addr; cursor < end;)
+	{
+		uint64_t next     = cursor;
+		const auto status = GpuMemoryGuestSpanStep(guest_memory, cursor, end, &next);
+		if (status != GuestSpanStatus::Readable)
+		{
+			return status;
+		}
+		cursor = next;
+	}
+	return GuestSpanStatus::Readable;
+}
+
+} // namespace
+
 uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_t size)
 {
 	KYTY_PROFILER_FUNCTION();
@@ -63,44 +156,18 @@ uint64_t GpuMemoryCalcHash(GpuMemoryObjectType type, const uint8_t* buf, uint64_
 	// installed and retain the historical direct-hash path.
 	{
 		auto&                              guest_memory = Emulator::GuestMemory::GetPort();
-		Emulator::GuestMemory::MappedRange mapped {};
 		const uint64_t                     addr = reinterpret_cast<uint64_t>(buf);
 		// Guest malloc memory served from the host heap (no application heap yet) is
 		// host-readable and not a guest mapping; its content must still be hashed or
 		// buffers the title rewrites every frame never look changed.
 		if (guest_memory.IsInstalled() && !GpuMemoryIsHostGuestMallocRange(addr, size))
 		{
-			const bool range_known = guest_memory.QueryMappedRange(addr, size, &mapped);
-			if (!range_known)
+			const auto status = GpuMemoryValidateCpuReadableSpan(guest_memory, addr, size);
+			if (status != GuestSpanStatus::Readable)
 			{
 				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: GpuMemoryCalcHash skipping unmapped guest range type=%u buf=0x%012" PRIx64
-				               " size=0x%012" PRIx64 "\n",
-				               static_cast<unsigned>(type), addr, size);
-				return 0;
-			}
-			const bool covered = mapped.base != 0 && mapped.size != 0 && size <= mapped.size && addr >= mapped.base &&
-			                     addr - mapped.base <= mapped.size - size;
-			if (!covered)
-			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: GpuMemoryCalcHash skipping incompletely mapped range type=%u buf=0x%012" PRIx64
-				               " size=0x%012" PRIx64 "\n",
-				               static_cast<unsigned>(type), addr, size);
-				return 0;
-			}
-
-			void* protection_start = nullptr;
-			void* protection_end   = nullptr;
-			int   protection       = 0;
-			const int protection_result =
-			    guest_memory.QueryProtection(const_cast<uint8_t*>(buf), &protection_start, &protection_end, &protection);
-			if (protection_result != 0 || (protection & 0x3) == 0)
-			{
-				KYTY_LOG_LIMIT(Log::Level::Warn, 8,
-				               "WARNING: GpuMemoryCalcHash skipping non-CPU-readable range type=%u buf=0x%012" PRIx64
-				               " size=0x%012" PRIx64 " prot=0x%x result=%d\n",
-				               static_cast<unsigned>(type), addr, size, protection, protection_result);
+				               "WARNING: GpuMemoryCalcHash skipping %s guest range type=%u buf=0x%012" PRIx64 " size=0x%012" PRIx64 "\n",
+				               GuestSpanStatusName(status), static_cast<unsigned>(type), addr, size);
 				return 0;
 			}
 		}

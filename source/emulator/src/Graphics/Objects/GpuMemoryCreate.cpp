@@ -23,6 +23,7 @@
 #include "Emulator/Graphics/Objects/StorageTexture.h"
 #include "Emulator/Graphics/Objects/Texture.h"
 #include "Emulator/Graphics/Window.h"
+#include "Emulator/GuestMemory.h"
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
@@ -30,10 +31,7 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -2285,6 +2283,65 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 		DebugStatsRecordStableBufferSource(true, size[0], stable_create_ready);
 	}
 
+	// Observe before the initial hash and the create callback read guest bytes. A
+	// write during either one then advances a page generation past this
+	// observation, so Update re-uploads it; a snapshot taken after create hides it.
+	GpuDirtyReadObservation create_dirty_read[VADDR_BLOCKS_MAX] {};
+	bool                    create_dirty_owned[VADDR_BLOCKS_MAX] {};
+	bool                    create_tracked     = info.check_hash && GpuDirtyPageTracker::Instance().Enabled();
+	uint64_t                dirty_track_pre_ns = 0;
+	if (create_tracked)
+	{
+		auto&      tracker              = GpuDirtyPageTracker::Instance();
+		const auto dirty_track_start    = std::chrono::steady_clock::now();
+		const auto dirty_register_start = std::chrono::steady_clock::now();
+		for (int vi = 0; create_tracked && vi < vaddr_num; vi++)
+		{
+			// The stable staging block already registered and observed vi 0.
+			if (stable_create_registered && vi == 0)
+			{
+				create_dirty_owned[vi] = true;
+				continue;
+			}
+			create_tracked         = tracker.RegisterRange(vaddr[vi], size[vi]);
+			create_dirty_owned[vi] = create_tracked;
+		}
+		const auto dirty_register_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_register_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyRegister, static_cast<uint64_t>(dirty_register_ns));
+		const auto dirty_prepare_start = std::chrono::steady_clock::now();
+		if (stable_create_ready)
+		{
+			create_dirty_read[0] = stable_create_read;
+		}
+		for (int vi = 0; create_tracked && vi < vaddr_num; vi++)
+		{
+			if (stable_create_ready && vi == 0)
+			{
+				continue;
+			}
+			create_dirty_read[vi] = tracker.BeginRead(vaddr[vi], size[vi]);
+			create_tracked        = create_dirty_read[vi].tracked;
+		}
+		const auto dirty_prepare_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_prepare_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyPrepare, static_cast<uint64_t>(dirty_prepare_ns));
+		if (!create_tracked)
+		{
+			// Release only the ranges this create acquired. A failed RegisterRange holds no reference.
+			for (int vi = 0; vi < vaddr_num; vi++)
+			{
+				if (create_dirty_owned[vi])
+				{
+					(void)tracker.UnregisterRange(vaddr[vi], size[vi]);
+					create_dirty_owned[vi] = false;
+				}
+			}
+		}
+		dirty_track_pre_ns = static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_track_start).count());
+	}
+
 	for (int vi = 0; vi < vaddr_num; vi++)
 	{
 		uint64_t cur_size = (size[vi] != 0 ? size[vi] : 4096);
@@ -2487,50 +2544,20 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 
 	if (info.check_hash)
 	{
-		const auto dirty_track_start    = std::chrono::steady_clock::now();
-		auto&      created              = heap.objects[index];
-		GpuDirtyReadObservation dirty_read[VADDR_BLOCKS_MAX] {};
-		bool       tracked              = stable_create_ready || GpuDirtyPageTracker::Instance().Enabled();
-		bool       attempted            = stable_create_registered;
-		const auto dirty_register_start = std::chrono::steady_clock::now();
-		for (int vi = 0; tracked && !stable_create_registered && vi < created.block.vaddr_num; vi++)
+		const auto dirty_publish_start = std::chrono::steady_clock::now();
+		if (create_tracked)
 		{
-			attempted = true;
-			tracked   = GpuDirtyPageTracker::Instance().RegisterRange(created.block.vaddr[vi], created.block.size[vi]);
-		}
-		const auto dirty_register_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_register_start).count();
-		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyRegister, static_cast<uint64_t>(dirty_register_ns));
-		const auto dirty_prepare_start = std::chrono::steady_clock::now();
-		if (stable_create_ready)
-		{
-			dirty_read[0] = stable_create_read;
-		}
-		for (int vi = 0; tracked && !stable_create_ready && vi < created.block.vaddr_num; vi++)
-		{
-			dirty_read[vi] = GpuDirtyPageTracker::Instance().BeginRead(created.block.vaddr[vi], created.block.size[vi]);
-			tracked        = dirty_read[vi].tracked;
-		}
-		const auto dirty_prepare_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_prepare_start).count();
-		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyPrepare, static_cast<uint64_t>(dirty_prepare_ns));
-		if (tracked)
-		{
+			// Publish the pre-create observations. A later BeginRead would hide writes made during create.
+			auto& created                 = heap.objects[index];
 			created.info.dirty_registered = true;
 			for (int vi = 0; vi < created.block.vaddr_num; vi++)
 			{
-				created.info.dirty_generation[vi] = dirty_read[vi].generation;
-			}
-		} else if (attempted)
-		{
-			for (int vi = 0; vi < created.block.vaddr_num; vi++)
-			{
-				(void)GpuDirtyPageTracker::Instance().UnregisterRange(created.block.vaddr[vi], created.block.size[vi]);
+				created.info.dirty_generation[vi] = create_dirty_read[vi].generation;
 			}
 		}
-		const auto dirty_track_ns =
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_track_start).count();
-		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyTrack, static_cast<uint64_t>(dirty_track_ns));
+		const auto dirty_publish_ns =
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dirty_publish_start).count();
+		create_stats.AddPhase(DebugStatsGpuMemoryCreatePhase::DirtyTrack, dirty_track_pre_ns + static_cast<uint64_t>(dirty_publish_ns));
 	}
 
 	cache_materialization(index);
