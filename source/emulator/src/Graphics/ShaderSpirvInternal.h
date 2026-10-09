@@ -245,6 +245,24 @@ public:
 		}
 		return false;
 	}
+	[[nodiscard]] bool UsesVertexClipDistance0Export() const
+	{
+		if (m_code.GetType() != ShaderType::Vertex || m_vs_input_info == nullptr ||
+		    m_vs_input_info->position1_usage != ShaderVertexPosition1Usage::ClipDistance0)
+		{
+			return false;
+		}
+		for (const auto& inst: m_code.GetInstructions())
+		{
+			if (inst.type == ShaderInstructionType::Exp &&
+			    (inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff ||
+			     inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
 	[[nodiscard]] uint32_t GetGraphicsProbeDescriptorSet() const;
 
 	void                                       SetVsInputInfo(const ShaderVertexInputInfo* input_info) { m_vs_input_info = input_info; }

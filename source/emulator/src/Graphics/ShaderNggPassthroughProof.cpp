@@ -335,10 +335,11 @@ private:
 
 	ShaderNggPassthroughProof result;
 	ShaderNggPassthroughStep step;
-	std::array<Bits, 110> scalar {};
+	std::array<Bits, kScc + 1u> scalar {};
 	std::array<VectorValue, 256> vector {};
 	std::bitset<256> pending_export_sources;
 	bool pending_export = false;
+	bool position_exports_closed = false;
 	bool primitive_input_intact = true;
 	bool ended = false;
 	bool prologue_only_ = false;
@@ -594,6 +595,16 @@ bool Analyzer::Immediate(const ShaderInstruction& inst, uint32_t* value)
 
 bool Analyzer::Export(const ShaderInstruction& inst)
 {
+	const auto target = (inst.raw_word >> 4u) & 0x3fu;
+	const bool position0 = inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done ||
+	                       inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3;
+	const bool position1 = inst.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off ||
+	                       inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff ||
+	                       inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone;
+	if (position0 != (target == 12u) || position1 != (target == 13u))
+	{
+		return Fail(Reject::InvalidExport, "position format disagrees with its raw export target");
+	}
 	if (!Empty(inst.dst) || inst.sopp_opcode != 0xffu)
 	{
 		return Fail(Reject::InvalidExport, "export has an unexpected destination or scalar control identity");
@@ -629,29 +640,51 @@ bool Analyzer::Export(const ShaderInstruction& inst)
 		if (!ExecMask(result.vertex_mask)) { return false; }
 		Kind kind;
 		const int parameter = ParameterIndex(inst.format);
-		if (inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
+		if (inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done ||
+		    inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3)
 		{
 			if (result.position_export_index != ShaderNggPassthroughNoInstruction)
 			{
 				return Fail(Reject::DuplicateExport, "POS0 must occur exactly once");
 			}
-			if (inst.exp_enable_mask != 15u || inst.exp_control != 2u || inst.src_num != 4)
+			if (position_exports_closed)
 			{
-				return Fail(Reject::InvalidExport, "POS0 requires four defined full-precision channels and DONE without VM");
+				return Fail(Reject::InvalidExport, "position export follows the final position DONE");
 			}
+			const bool final_pos0 = inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done;
+			if (target != 12u || inst.exp_enable_mask != 15u || inst.exp_control != (final_pos0 ? 2u : 0u) ||
+			    inst.src_num != 4 || (inst.raw_word & 0xfu) != inst.exp_enable_mask ||
+			    ((inst.raw_word >> 10u) & 7u) != inst.exp_control)
+			{
+				return Fail(Reject::InvalidExport, "POS0 requires full EN and control matching its final or nonfinal format");
+			}
+			position_exports_closed = final_pos0;
 			kind = Kind::PositionExport;
-		} else if (inst.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off)
+		} else if (inst.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off ||
+		           inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff ||
+		           inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone)
 		{
-			if (result.layer_export_index != ShaderNggPassthroughNoInstruction)
+			if (result.layer_export_index != ShaderNggPassthroughNoInstruction ||
+			    result.clip_distance_export_index != ShaderNggPassthroughNoInstruction)
 			{
 				return Fail(Reject::DuplicateExport, "POS1 may occur at most once");
 			}
-			if (inst.exp_enable_mask != 4u || inst.exp_control != 0u || inst.src_num != 1 ||
-			    result.position_export_index != ShaderNggPassthroughNoInstruction)
+			if (position_exports_closed)
 			{
-				return Fail(Reject::InvalidExport, "POS1 requires the EN=4 layer form before final DONE position export");
+				return Fail(Reject::InvalidExport, "position export follows the final position DONE");
 			}
-			kind = Kind::LayerExport;
+			const bool clip = inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff ||
+			                   inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone;
+			const bool final_clip = inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone;
+			if (target != 13u || inst.exp_enable_mask != (clip ? 1u : 4u) || inst.exp_control != (final_clip ? 2u : 0u) ||
+			    inst.src_num != 1 || (inst.raw_word & 0xfu) != inst.exp_enable_mask ||
+			    ((inst.raw_word >> 10u) & 7u) != inst.exp_control ||
+			    (!clip && result.position_export_index != ShaderNggPassthroughNoInstruction))
+			{
+				return Fail(Reject::InvalidExport, "POS1 X may close the position sequence; POS1.Z remains nonfinal");
+			}
+			position_exports_closed = final_clip;
+			kind = clip ? Kind::ClipDistanceExport : Kind::LayerExport;
 		} else if (parameter >= 0)
 		{
 			if ((result.parameter_mask & (1u << parameter)) != 0u)
@@ -681,6 +714,11 @@ bool Analyzer::Export(const ShaderInstruction& inst)
 		{
 			result.layer_export_index = step.instruction_index;
 			result.requires_layer_output_contract = true;
+		}
+		if (kind == Kind::ClipDistanceExport)
+		{
+			result.clip_distance_export_index = step.instruction_index;
+			result.requires_clip_distance_output_contract = true;
 		}
 		if (kind == Kind::ParameterExport) { result.parameter_mask |= 1u << parameter; }
 		Retain(kind);
@@ -769,6 +807,10 @@ bool Analyzer::Instruction(const ShaderInstruction& inst)
 			if (result.position_export_index == ShaderNggPassthroughNoInstruction)
 			{
 				return Fail(Reject::MissingPosition, "program terminates without a defined full POS0 export");
+			}
+			if (!position_exports_closed)
+			{
+				return Fail(Reject::InvalidExport, "position exports must close with DONE on the final position export");
 			}
 			pending_export = false; // ISA 12.5: implicit S_WAITCNT 0.
 			pending_export_sources.reset();

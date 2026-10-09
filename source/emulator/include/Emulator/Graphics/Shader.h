@@ -752,7 +752,8 @@ enum Format : uint64_t
 	Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt5, S0, S1, S2, S3, Vm}),
 	Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt6, S0, S1, S2, S3, Vm}),
 	Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt7, S0, S1, S2, S3, Vm}),
-	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1, done=1.
+	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1; done=0 when color exports follow.
+	PixelZVsrc0Vm                        = FormatDefine({PixelZ, S0, Vm}),
 	PixelZVsrc0VmDone                    = FormatDefine({PixelZ, S0, Vm, Done}),
 	Param0Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param0, S0, S1, S2, S3}),
 	Param1Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param1, S0, S1, S2, S3}),
@@ -786,8 +787,11 @@ enum Format : uint64_t
 	Param29Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param29, S0, S1, S2, S3}),
 	Param30Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param30, S0, S1, S2, S3}),
 	Param31Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param31, S0, S1, S2, S3}),
+	Pos0Vsrc0Vsrc1Vsrc2Vsrc3           = FormatDefine({Pos0, S0, S1, S2, S3}),
 	Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done        = FormatDefine({Pos0, S0, S1, S2, S3, Done}),
 	Pos1OffOffVsrc0Off                = FormatDefine({Pos1, Off, Off, S0, Off}),
+	Pos1Vsrc0OffOffOff                 = FormatDefine({Pos1, S0, Off, Off, Off}),
+	Pos1Vsrc0OffOffOffDone             = FormatDefine({Pos1, S0, Off, Off, Off, Done}),
 	PrimVsrc0OffOffOffDone              = FormatDefine({Prim, S0, Off, Off, Off, Done}),
 	Saddr                               = FormatDefine({S0A2}),
 	SdstSbaseSoffset                    = FormatDefine({D, S0A2, S1}),
@@ -1189,6 +1193,7 @@ enum class ShaderVertexPosition1Usage : uint32_t
 {
 	Unknown,
 	RenderTargetLayer,
+	ClipDistance0,
 };
 
 [[nodiscard]] ShaderVertexPosition1Usage ShaderDecodeVertexPosition1Usage(uint32_t position_format, uint32_t output_control,
@@ -2261,6 +2266,7 @@ struct ShaderPixelInputInfo
 	ShaderPixelCustomInterpolation custom_interpolation;
 	uint8_t                target_output_mode[8]     = {};
 	uint8_t                target_output_order[8]    = {};
+	uint8_t                target_output_number[8]   = {};
 	RenderHostToGuestScale host_to_guest_scale;
 	bool                   ps_pos_xy                 = false;
 	bool                   front_face_all_bits       = false;

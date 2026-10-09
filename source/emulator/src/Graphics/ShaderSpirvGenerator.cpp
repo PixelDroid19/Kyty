@@ -4,6 +4,7 @@
 
 #include "ShaderSpirvEmitters.h"
 #include "ShaderSpirvTemplates.h"
+#include "ShaderNativeWaveInternal.h"
 #include "ShaderStorageAnalysis.h"
 
 #include "Emulator/Config.h"
@@ -114,6 +115,12 @@ static bool ShaderCodeCanDiscard(const ShaderCode& code)
 	return false;
 }
 
+static bool ShaderIsPixelDepthExport(const ShaderInstruction& inst)
+{
+	return inst.type == ShaderInstructionType::Exp && (inst.format == ShaderInstructionFormat::PixelZVsrc0Vm ||
+	                                                   inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone);
+}
+
 static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
 {
 	if (code.GetType() != ShaderType::Pixel)
@@ -122,7 +129,7 @@ static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
 	}
 	for (const auto& inst: code.GetInstructions())
 	{
-		if (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone)
+		if (ShaderIsPixelDepthExport(inst))
 		{
 			return true;
 		}
@@ -130,62 +137,72 @@ static bool ShaderCodeHasPixelDepthExport(const ShaderCode& code)
 	return false;
 }
 
-static bool ShaderInstructionChangesControlFlow(const ShaderInstruction& inst)
-{
-	switch (inst.type)
-	{
-		case ShaderInstructionType::SBranch:
-		case ShaderInstructionType::SCbranchExecz:
-		case ShaderInstructionType::SCbranchExecnz:
-		case ShaderInstructionType::SCbranchScc0:
-		case ShaderInstructionType::SCbranchScc1:
-		case ShaderInstructionType::SCbranchVccz:
-		case ShaderInstructionType::SCbranchVccnz:
-		case ShaderInstructionType::SSetpcB64:
-		case ShaderInstructionType::SSwappcB64: return true;
-		default: return false;
-	}
-}
-
-// FragDepth requires an exact depth write on every non-discard exit. The
-// current emitter has no general depth-export CFG lowering, so admit only the
-// linear graph we can prove: one exact export followed by the sole terminal
-// s_endpgm. Any explicit label or control transfer could introduce a bypass
-// (including an early return), and is rejected rather than guessed.
+// FragDepth requires an exact depth write on every exit that keeps an
+// invocation alive. Each S_ENDPGM must close a straight-line block that either
+// holds the exact Pixel-Z export or is a discard tail (EXEC cleared, then the
+// valid-mask-only export). A branch target may be entered from any branch, so it
+// starts a new block; a conditional branch's fall-through only continues its
+// own block. Indirect jumps have no static target and are rejected.
 static bool ShaderCodeHasSafePixelDepthExport(const ShaderCode& code)
 {
-	if (code.GetType() != ShaderType::Pixel || code.GetLabels().Size() != 0 || code.GetIndirectLabels().Size() != 0)
+	if (code.GetType() != ShaderType::Pixel)
 	{
 		return false;
 	}
 
+	const auto label_at = [&code](uint32_t pc)
+	{
+		for (const auto& label: code.GetLabels())
+		{
+			if (label.GetDst() == pc) { return true; }
+		}
+		return false;
+	};
 	const auto& instructions = code.GetInstructions();
-	bool        has_depth    = false;
+	bool        any_depth    = false;
+	bool        block_depth  = false;
+	bool        exec_cleared = false;
 	for (uint32_t index = 0; index < instructions.Size(); ++index)
 	{
 		const auto& inst = instructions.At(index);
-		if (inst.type == ShaderInstructionType::Unknown || ShaderInstructionChangesControlFlow(inst))
+		if (label_at(inst.pc))
+		{
+			block_depth  = false;
+			exec_cleared = false;
+		}
+		if (inst.type == ShaderInstructionType::Unknown || inst.type == ShaderInstructionType::SSetpcB64 ||
+		    inst.type == ShaderInstructionType::SSwappcB64)
 		{
 			return false;
 		}
-		if (inst.type == ShaderInstructionType::Exp && inst.format == ShaderInstructionFormat::PixelZVsrc0VmDone)
+		if (ShaderIsPixelDepthExport(inst))
 		{
-			if (has_depth || inst.src_num != 1 || inst.exp_enable_mask != 0x1u || inst.src[0].type != ShaderOperandType::Vgpr ||
-			    inst.src[0].size != 1)
+			if (inst.src_num != 1 || inst.exp_enable_mask != 0x1u || inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].size != 1)
 			{
 				return false;
 			}
-			has_depth = true;
+			any_depth   = true;
+			block_depth = true;
+		}
+		if (ShaderInstructionWritesExec(inst))
+		{
+			exec_cleared = inst.type == ShaderInstructionType::SMovB64 && inst.src[0].type == ShaderOperandType::IntegerInlineConstant &&
+			               inst.src[0].constant.i == 0;
 		}
 		if (inst.type == ShaderInstructionType::SEndpgm)
 		{
-			// The only exit must be terminal and follows the exact Pixel-Z export,
-			// which establishes dominance for every reachable non-discard exit.
-			return has_depth && inst.format == ShaderInstructionFormat::Empty && index + 1 == instructions.Size();
+			const bool discard_tail = exec_cleared && index > 0 && instructions.At(index - 1).type == ShaderInstructionType::Exp &&
+			                          instructions.At(index - 1).format == ShaderInstructionFormat::NullVmDone;
+			if (inst.format != ShaderInstructionFormat::Empty || (!block_depth && !discard_tail))
+			{
+				return false;
+			}
+			block_depth  = false;
+			exec_cleared = false;
 		}
 	}
 
-	return false;
+	return any_depth && !instructions.IsEmpty() && instructions.At(instructions.Size() - 1).type == ShaderInstructionType::SEndpgm;
 }
 
 uint32_t Spirv::GetGraphicsProbeDescriptorSet() const
@@ -449,6 +466,7 @@ void Spirv::WriteHeader()
 		capabilities.Add("OpCapability ShaderLayer");
 		vars.Add("%gl_Layer");
 	}
+	if (UsesVertexClipDistance0Export()) { capabilities.Add("OpCapability ClipDistance"); }
 
 	if (Config::SpirvDebugPrintfEnabled())
 	{

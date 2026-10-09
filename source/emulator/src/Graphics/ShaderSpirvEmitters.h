@@ -57,7 +57,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_MrtNullDone);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_NullVmDone);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3);
-KYTY_RECOMPILER_FUNC(Recompile_Exp_PixelZ_Vsrc0VmDone);
+KYTY_RECOMPILER_FUNC(Recompile_Exp_PixelZ_Vsrc0Vm);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done);
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos1OffOffVsrc0Off);

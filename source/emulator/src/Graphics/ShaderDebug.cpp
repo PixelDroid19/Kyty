@@ -168,6 +168,7 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
 		case ShaderInstructionFormat::Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
 		case ShaderInstructionFormat::Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm: return "Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm"; break;
+		case ShaderInstructionFormat::PixelZVsrc0Vm: return "PixelZVsrc0Vm"; break;
 		case ShaderInstructionFormat::PixelZVsrc0VmDone: return "PixelZVsrc0VmDone"; break;
 		case ShaderInstructionFormat::NullVmDone: return "NullVmDone"; break;
 		case ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3: return "Param0Vsrc0Vsrc1Vsrc2Vsrc3"; break;
@@ -202,8 +203,11 @@ static String8 dbg_fmt_to_str(const ShaderInstruction& inst)
 		case ShaderInstructionFormat::Param29Vsrc0Vsrc1Vsrc2Vsrc3: return "Param29Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param30Vsrc0Vsrc1Vsrc2Vsrc3: return "Param30Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Param31Vsrc0Vsrc1Vsrc2Vsrc3: return "Param31Vsrc0Vsrc1Vsrc2Vsrc3"; break;
+		case ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3: return "Pos0Vsrc0Vsrc1Vsrc2Vsrc3"; break;
 		case ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done: return "Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done"; break;
 		case ShaderInstructionFormat::Pos1OffOffVsrc0Off: return "Pos1OffOffVsrc0Off"; break;
+		case ShaderInstructionFormat::Pos1Vsrc0OffOffOff: return "Pos1Vsrc0OffOffOff"; break;
+		case ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone: return "Pos1Vsrc0OffOffOffDone"; break;
 		case ShaderInstructionFormat::PrimVsrc0OffOffOffDone: return "PrimVsrc0OffOffOffDone"; break;
 		case ShaderInstructionFormat::Saddr: return "Saddr"; break;
 		case ShaderInstructionFormat::SdstSbaseSoffset: return "SdstSbaseSoffset"; break;

@@ -3647,6 +3647,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	{
 		ps_info->target_output_mode[i]  = sh->target_output_mode[i];
 		ps_info->target_output_order[i] = sh->target_output_order[i];
+		ps_info->target_output_number[i] = sh->target_output_number[i];
 	}
 
 	bool ps5 = Config::IsNextGen();
@@ -4506,8 +4507,8 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 	spirv_ok         = ShaderToolchain::Run(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
-		KYTY_LOG_WARN("WARNING: pixel SpirvRun failed: %s\n", err_msg.c_str());
-		return {};
+		EXIT("pixel shader translation failed: hash=0x%08" PRIx32 " crc=0x%08" PRIx32 " %.512s\n", code.GetHash0(), code.GetCrc32(),
+		     err_msg.c_str());
 	}
 
 	log.DumpOptimizedShader(ret);
@@ -5103,13 +5104,14 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 
-	// The export declarations and component order are part of the generated
-	// SPIR-V interface. They must distinguish pipelines that use the same guest
-	// shader with different render-target formats or COMP_SWAP values.
+	// The export declarations, component order and channel type are part of the
+	// generated SPIR-V interface. They must distinguish pipelines that use the
+	// same guest shader with different render-target formats or COMP_SWAP values.
 	for (int i = 0; i < 8; i++)
 	{
 		ret.ids.Add(input_info->target_output_mode[i]);
 		ret.ids.Add(input_info->target_output_order[i]);
+		ret.ids.Add(input_info->target_output_number[i]);
 	}
 
 	for (uint32_t i = 0; i < 32u; i++)

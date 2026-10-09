@@ -155,7 +155,6 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Compr_Vsrc0Vsrc1)
 	auto src1_value = operand_variable_to_str(inst.src[1]);
 
 	// TODO() check VSKIP
-	// TODO() check EXEC
 
 	const auto index_str = String8::FromPrintf("%u", index);
 	String8    load_src0;
@@ -299,7 +298,6 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 	auto src3_value = operand_variable_to_str(inst.src[3]);
 
 	// TODO() check VSKIP
-	// TODO() check EXEC
 
 	static const char* text           = R"(
          %exp_exec_u_<index> = OpLoad %uint %exec_lo
@@ -366,7 +364,7 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Mrt_Full_Vsrc0Vsrc1Vsrc2Vsrc3)
 // RDNA2 EXP target 8 is the fragment depth export. The parser admits only the
 // evidenced one-channel, full-precision VM form. Reuse the established export
 // control flow so inactive EXEC invocations terminate without writing depth.
-KYTY_RECOMPILER_FUNC(Recompile_Exp_PixelZ_Vsrc0VmDone)
+KYTY_RECOMPILER_FUNC(Recompile_Exp_PixelZ_Vsrc0Vm)
 {
 	const auto& inst = code.GetInstructions().At(index);
 	if (!operand_is_variable(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.src[0]) condition ignored (continuing)\n"); }
@@ -500,6 +498,20 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Param_XXX_Vsrc0Vsrc1Vsrc2Vsrc3)
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
 {
 	const auto& inst = code.GetInstructions().At(index);
+	const bool nonfinal_position = inst.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3;
+	if (nonfinal_position)
+	{
+		if (!Config::IsNextGen() || code.GetType() != ShaderType::Vertex || inst.exp_control != 0u ||
+		    inst.exp_enable_mask != 15u || inst.src_num != 4 || ((inst.raw_word >> 4u) & 0x3fu) != 12u ||
+		    (inst.raw_word & 0xfu) != 15u || ((inst.raw_word >> 10u) & 7u) != 0u)
+		{
+			return false;
+		}
+		for (const auto& source: inst.src)
+		{
+			if (source.type != ShaderOperandType::Vgpr || source.size != 1) { return false; }
+		}
+	}
 
 	if (!operand_is_variable(inst.src[0])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.src[0]) condition ignored (continuing)\n"); }
 	if (!operand_is_variable(inst.src[1])) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.src[1]) condition ignored (continuing)\n"); }
@@ -512,7 +524,6 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
 	auto src3_value = operand_variable_to_str(inst.src[3]);
 
 	// TODO() check VSKIP
-	// TODO() check EXEC
 
 	static const char* text = R"(
          %t0_<index> = OpLoad %float %<src0>
@@ -525,6 +536,17 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
 )";
 
 	const auto index_str = String8::FromPrintf("%u", index);
+	const auto zero_uint = spirv->GetConstantUint(0u);
+	if (zero_uint == "unknown_uint_constant") { return false; }
+	// EXP observes EXEC for its stores and probe side effects; idle lanes do none of them.
+	static const char* position_exec = R"(
+%position_exec_<index> = OpLoad %uint %exec_lo
+%position_active_<index> = OpINotEqual %bool %position_exec_<index> %<zero_uint>
+               OpSelectionMerge %position_merge_<index> None
+               OpBranchConditional %position_active_<index> %position_export_<index> %position_merge_<index>
+%position_export_<index> = OpLabel
+)";
+	*dst_source += String8(position_exec).ReplaceStr("<index>", index_str).ReplaceStr("<zero_uint>", zero_uint);
 	*dst_source += String8(text)
 	                   .ReplaceStr("<index>", index_str)
 	                   .ReplaceStr("<src0>", src0_value.value)
@@ -715,6 +737,11 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
 		                   .ReplaceStr("<clip_inside_negative_one_to_one_member>",
 		                               clip_inside_negative_one_to_one_member);
 	}
+	static const char* position_exec_merge = R"(
+               OpBranch %position_merge_<index>
+%position_merge_<index> = OpLabel
+)";
+	*dst_source += String8(position_exec_merge).ReplaceStr("<index>", index_str);
 
 	return true;
 }
@@ -722,6 +749,34 @@ KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done)
 KYTY_RECOMPILER_FUNC(Recompile_Exp_Pos1OffOffVsrc0Off)
 {
 	const auto& inst = code.GetInstructions().At(index);
+	if (inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff ||
+	    inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone)
+	{
+		const bool final_clip_distance = inst.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone;
+		if (!Config::IsNextGen() || !spirv->UsesVertexClipDistance0Export() || inst.exp_enable_mask != 1u ||
+		    inst.exp_control != (final_clip_distance ? 2u : 0u) || inst.src_num != 1 || inst.src[0].type != ShaderOperandType::Vgpr ||
+		    inst.src[0].size != 1 || ((inst.raw_word >> 4u) & 0x3fu) != 13u || (inst.raw_word & 0xfu) != 1u ||
+		    ((inst.raw_word >> 10u) & 7u) != inst.exp_control)
+		{
+			return false;
+		}
+		static const char* clip_distance = R"(
+%clip_exec_<index> = OpLoad %uint %exec_lo
+%clip_active_<index> = OpINotEqual %bool %clip_exec_<index> %uint_0
+               OpSelectionMerge %clip_merge_<index> None
+               OpBranchConditional %clip_active_<index> %clip_export_<index> %clip_merge_<index>
+%clip_export_<index> = OpLabel
+%clip_source_<index> = OpLoad %float %<source>
+%clip_target_<index> = OpAccessChain %_ptr_Output_float %outPerVertex %int_2 %int_0
+               OpStore %clip_target_<index> %clip_source_<index>
+               OpBranch %clip_merge_<index>
+%clip_merge_<index> = OpLabel
+)";
+		*dst_source += String8(clip_distance)
+		                   .ReplaceStr("<index>", String8::FromPrintf("%u", index))
+		                   .ReplaceStr("<source>", operand_variable_to_str(inst.src[0]).value);
+		return true;
+	}
 	if (!Config::IsNextGen() || !spirv->UsesVertexLayerExport() || inst.exp_enable_mask != 4u ||
 	    inst.src_num != 1 || inst.src[0].type != ShaderOperandType::Vgpr || inst.src[0].size != 1)
 	{

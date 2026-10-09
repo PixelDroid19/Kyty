@@ -3668,8 +3668,8 @@ TEST(EmulatorGraphicsState, Gen5OrderedAppendGdsBindsObservedM0Source)
 
 TEST(EmulatorGraphicsState, Gen5Position1LayerRouteNeedsLayerPlusMiscOnly)
 {
-	// POS1 field 4 selects the miscellaneous position vector; the layer-only
-	// route additionally requires render-target-index + misc-vec enables with
+	// POS1 field 4 enables its full-precision vector; the layer-only
+	// route requires render-target-index + misc-vec enables with
 	// viewport-index and kill-flag off.
 	const uint32_t pos1_z = 4u << 4u;
 	const uint32_t layer  = 1u << 18u;
@@ -3682,6 +3682,19 @@ TEST(EmulatorGraphicsState, Gen5Position1LayerRouteNeedsLayerPlusMiscOnly)
 	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, layer | misc | (1u << 20u), true),
 	          ShaderVertexPosition1Usage::Unknown);
 	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, layer, true), ShaderVertexPosition1Usage::Unknown);
+	const uint32_t clip0 = (1u << 22u) | 1u;
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, clip0, true), ShaderVertexPosition1Usage::ClipDistance0);
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, clip0, false), ShaderVertexPosition1Usage::Unknown);
+	EXPECT_EQ(ShaderDecodeVertexPosition1Usage(0u, clip0, true), ShaderVertexPosition1Usage::Unknown);
+	for (uint32_t required: {1u, 1u << 22u})
+	{
+		EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, clip0 & ~required, true), ShaderVertexPosition1Usage::Unknown);
+	}
+	for (uint32_t bit = 0; bit < 32u; ++bit)
+	{
+		if ((clip0 & (1u << bit)) != 0) { continue; }
+		EXPECT_EQ(ShaderDecodeVertexPosition1Usage(pos1_z, clip0 | (1u << bit), true), ShaderVertexPosition1Usage::Unknown);
+	}
 }
 
 TEST(EmulatorGraphicsState, Gen5CodeUnavailableSkipsInvalidDirectStorageDescriptor)
