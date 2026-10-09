@@ -1721,99 +1721,85 @@ KYTY_RECOMPILER_FUNC(Recompile_VCvtU16F16_SVdstSVsrc0)
 	return F16Arithmetic::Emit(index, code, dst_source, spirv, param, F16Arithmetic::Operation::ToUnsigned);
 }
 
-/* v_cvt_pk_u16_u32: truncate both u32 sources to u16 and pack into the
- * destination (src0 low, src1 high). */
-KYTY_RECOMPILER_FUNC(Recompile_VCvtPkU16U32_SVdstSVsrc0SVsrc1)
+static bool IntegerPackOperandIsPlain(const ShaderOperand& operand)
+{
+	return operand.size <= 1 && !operand.absolute && !operand.negate && !operand.clamp && operand.multiplier == 1.0f &&
+	       operand.swizzle == 6u && !operand.dpp && operand.dpp_ctrl == 0u && operand.dpp_row_mask == 0u &&
+	       operand.dpp_bank_mask == 0u && !operand.dpp_fetch_inactive && !operand.dpp_bound_ctrl;
+}
+
+/* v_cvt_pk_u16_u32 / v_cvt_pk_i16_i32: convert both 32-bit sources to 16 bits
+ * and pack them into the destination (src0 low, src1 high). The conversion
+ * saturates to the 16-bit range instead of truncating. */
+static bool EmitIntegerPack16(uint32_t index, const ShaderCode& code, String8* dst_source, Spirv* spirv, bool sign)
 {
 	const auto& inst = code.GetInstructions().At(index);
 
-	String8 load0;
-	String8 load1;
+	if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || inst.src_num != 2 ||
+	    inst.dst2.type != ShaderOperandType::Unknown || !IntegerPackOperandIsPlain(inst.dst) ||
+	    !IntegerPackOperandIsPlain(inst.src[0]) || !IntegerPackOperandIsPlain(inst.src[1]) || inst.vop3_op_sel != 0u ||
+	    inst.vop3_omod != 0u || inst.vop3p_op_sel_hi != 0xffu || inst.vop_sdwa || inst.vop_sdwa_ctrl != 0u)
+	{
+		return false;
+	}
+
+	const auto dst_value = operand_variable_to_str(inst.dst);
+	const auto low_min   = spirv->GetConstantUint(0xffff8000u);
+	const auto low_max   = spirv->GetConstantUint(sign ? 0x7fffu : 0xffffu);
+	if (dst_value.type != SpirvType::Float || low_max == "unknown_uint_constant" ||
+	    (sign && low_min == "unknown_uint_constant"))
+	{
+		return false;
+	}
 
 	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
+	String8 load0;
+	String8 load1;
+	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0) ||
+	    !operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
 	{
 		return false;
 	}
 
-	static const char* text = R"(
+	static const char* load_text = R"(
     <load0>
     <load1>
-        %lo_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
-        %hi_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0xffff
+)";
+	static const char* unsigned_text = R"(
+        %lo_<index> = OpExtInst %uint %GLSL_std_450 UMin %t0_<index> %<low_max>
+        %hi_<index> = OpExtInst %uint %GLSL_std_450 UMin %t1_<index> %<low_max>
+)";
+	static const char* signed_text = R"(
+        %lo_<index> = OpExtInst %uint %GLSL_std_450 SClamp %t0_<index> %<low_min> %<low_max>
+        %hi_<index> = OpExtInst %uint %GLSL_std_450 SClamp %t1_<index> %<low_min> %<low_max>
+)";
+	static const char* pack_text = R"(
         %t_<index> = OpBitFieldInsert %uint %lo_<index> %hi_<index> %uint_16 %uint_16
+        %packed_float_<index> = OpBitcast %float %t_<index>
         %exec_lo_u_<index> = OpLoad %uint %exec_lo
         %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
         %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
+        %tval_<index> = OpSelect %float %exec_lo_b_<index> %packed_float_<index> %tdst_<index>
                OpStore %<dst> %tval_<index>
 )";
-	*dst_source += String8(text)
+	*dst_source += (String8(load_text) + String8(sign ? signed_text : unsigned_text) + String8(pack_text))
 	                   .ReplaceStr("<load0>", load0)
 	                   .ReplaceStr("<load1>", load1)
+	                   .ReplaceStr("<low_min>", low_min)
+	                   .ReplaceStr("<low_max>", low_max)
 	                   .ReplaceStr("<dst>", dst_value.value)
 	                   .ReplaceStr("<index>", index_str);
 	return true;
 }
 
-/* v_cvt_pk_i16_i32: truncate both i32 sources to i16 and pack. */
+KYTY_RECOMPILER_FUNC(Recompile_VCvtPkU16U32_SVdstSVsrc0SVsrc1)
+{
+	return EmitIntegerPack16(index, code, dst_source, spirv, false);
+}
+
 KYTY_RECOMPILER_FUNC(Recompile_VCvtPkI16I32_SVdstSVsrc0SVsrc1)
 {
-	const auto& inst = code.GetInstructions().At(index);
-
-	String8 load0;
-	String8 load1;
-
-	String8 index_str = String8::FromPrintf("%u", index);
-
-	if (!operand_is_variable(inst.dst)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !operand_is_variable(inst.dst) condition ignored (continuing)\n"); }
-	if (inst.dst.clamp) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.clamp condition ignored (continuing)\n"); }
-	if (inst.dst.multiplier != 1.0f) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: inst.dst.multiplier != 1.0f condition ignored (continuing)\n"); }
-
-	auto dst_value = operand_variable_to_str(inst.dst);
-
-	if (dst_value.type != SpirvType::Float) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: dst_value.type != SpirvType::Float condition ignored (continuing)\n"); }
-
-	if (!operand_load_uint(spirv, inst.src[0], "t0_<index>", index_str, &load0))
-	{
-		return false;
-	}
-	if (!operand_load_uint(spirv, inst.src[1], "t1_<index>", index_str, &load1))
-	{
-		return false;
-	}
-
-	static const char* text = R"(
-    <load0>
-    <load1>
-        %lo_<index> = OpBitwiseAnd %uint %t0_<index> %uint_0xffff
-        %hi_<index> = OpBitwiseAnd %uint %t1_<index> %uint_0xffff
-        %t_<index> = OpBitFieldInsert %uint %lo_<index> %hi_<index> %uint_16 %uint_16
-        %exec_lo_u_<index> = OpLoad %uint %exec_lo
-        %exec_lo_b_<index> = OpINotEqual %bool %exec_lo_u_<index> %uint_0
-        %tdst_<index> = OpLoad %float %<dst>
-        %tval_<index> = OpSelect %float %exec_lo_b_<index> %t_<index> %tdst_<index>
-               OpStore %<dst> %tval_<index>
-)";
-	*dst_source += String8(text)
-	                   .ReplaceStr("<load0>", load0)
-	                   .ReplaceStr("<load1>", load1)
-	                   .ReplaceStr("<dst>", dst_value.value)
-	                   .ReplaceStr("<index>", index_str);
-	return true;
+	return EmitIntegerPack16(index, code, dst_source, spirv, true);
 }
 
 /* v_cvt_pknorm_u16_f32: pack two f32 sources as unsigned normalized u16. */

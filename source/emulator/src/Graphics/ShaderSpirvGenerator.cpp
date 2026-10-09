@@ -2887,6 +2887,12 @@ void Spirv::WriteFunctions()
 void Spirv::FindConstants()
 {
 	m_constants.Clear();
+	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkU16U32})) { AddConstantUint(0xffffu); }
+	if (m_code.HasAnyOf({ShaderInstructionType::VCvtPkI16I32}))
+	{
+		AddConstantUint(0x7fffu);
+		AddConstantUint(0xffff8000u);
+	}
 	if (m_bind != nullptr)
 	{
 		constexpr int rows = ShaderStorageResources::BUFFERS_MAX + ShaderTextureResources::RES_MAX * 2 + ShaderSamplerResources::RES_MAX;
