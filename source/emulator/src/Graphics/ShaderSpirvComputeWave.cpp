@@ -11,7 +11,7 @@ namespace {
 
 constexpr uint32_t kGuestWaveSize      = 64u;
 constexpr uint32_t kNativeSubgroupSize = 32u;
-constexpr int      kMaxSgpr            = 103;
+constexpr int      kMaxSgpr            = 105; // RDNA2 SGPR0..SGPR105
 constexpr int      kMaxVgpr            = 255;
 
 bool ComputeWaveOperandIsPlain(const ShaderOperand& operand)

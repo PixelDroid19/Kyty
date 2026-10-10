@@ -512,6 +512,13 @@ SpirvValue operand_variable_to_str(ShaderOperand op, int shift)
 				ret.type  = SpirvType::Uint;
 			}
 			break;
+		case ShaderOperandType::VccHi:
+			if (op.size == 1 && shift == 0)
+			{
+				ret.value = "vcc_hi";
+				ret.type  = SpirvType::Uint;
+			}
+			break;
 		case ShaderOperandType::ExecLo:
 			if (shift == 0)
 			{

@@ -295,6 +295,130 @@ bool Gen5GetStandard64KBTextureMipLayout(uint32_t format, uint32_t width, uint32
 	return get_standard_texture_mip_layout(format, width, height, pitch, levels, 65536u, layout);
 }
 
+bool Gen5GetStandard256BTextureMipLayout(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch,
+                                          uint32_t levels, Gen5TextureMipLayout* layout)
+{
+	if (layout == nullptr)
+	{
+		return false;
+	}
+	*layout = {};
+	if (width == 0u || height == 0u || pitch < width || levels == 0u || levels > 16u)
+	{
+		return false;
+	}
+	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(format);
+	uint32_t       block_width       = 0;
+	uint32_t       block_height      = 0;
+	if (bytes_per_element == 0u || !TileGetStandard256BBlock(bytes_per_element, &block_width, &block_height))
+	{
+		return false;
+	}
+	uint32_t maximum_levels = 1u;
+	for (uint32_t dimension = std::max(width, height); dimension > 1u; dimension >>= 1u)
+	{
+		maximum_levels++;
+	}
+	const uint32_t texels_per_element  = (ShaderGen5TextureIsBlockCompressed(format) ? 4u : 1u);
+	uint32_t       base_element_width  = 0;
+	uint32_t       base_element_height = 0;
+	uint32_t       base_element_pitch  = 0;
+	if (levels > maximum_levels || !ceil_div(width, texels_per_element, &base_element_width) ||
+	    !ceil_div(height, texels_per_element, &base_element_height) || !ceil_div(pitch, texels_per_element, &base_element_pitch))
+	{
+		return false;
+	}
+
+	Gen5TextureMipLayout result {};
+	result.bytes_per_element    = bytes_per_element;
+	result.texels_per_element_x = texels_per_element;
+	result.texels_per_element_y = texels_per_element;
+	result.levels               = levels;
+	result.first_tail_level     = levels;
+
+	uint64_t tiled_offset = 0u;
+	for (uint32_t level = levels; level-- > 0u;)
+	{
+		auto& entry  = result.level[level];
+		entry.width  = max_one(width >> level);
+		entry.height = max_one(height >> level);
+		uint32_t padded_width  = 0;
+		uint32_t padded_height = 0;
+		if (!shift_ceil(base_element_width, level, &entry.element_width) ||
+		    !shift_ceil(base_element_height, level, &entry.element_height) ||
+		    !align_up(level == 0u ? base_element_pitch : entry.element_width, block_width, &padded_width) ||
+		    !align_up(entry.element_height, block_height, &padded_height))
+		{
+			return false;
+		}
+		const uint64_t tiled_size = static_cast<uint64_t>(padded_width) * padded_height * bytes_per_element;
+		if (tiled_size > UINT32_MAX - tiled_offset)
+		{
+			return false;
+		}
+		entry.tiled_pitch  = padded_width;
+		entry.tiled_offset = static_cast<uint32_t>(tiled_offset);
+		entry.tiled_size   = static_cast<uint32_t>(tiled_size);
+		tiled_offset += tiled_size;
+	}
+
+	uint64_t linear_offset = 0u;
+	for (uint32_t level = 0; level < levels; level++)
+	{
+		auto& entry = result.level[level];
+		linear_offset = (linear_offset + 3u) & ~uint64_t {3u};
+		const uint64_t linear_size = static_cast<uint64_t>(entry.element_width) * entry.element_height * bytes_per_element;
+		if (linear_size > UINT32_MAX || linear_offset > UINT32_MAX - linear_size)
+		{
+			return false;
+		}
+		entry.linear_offset = static_cast<uint32_t>(linear_offset);
+		entry.linear_size   = static_cast<uint32_t>(linear_size);
+		linear_offset += linear_size;
+	}
+
+	result.tiled.size  = static_cast<uint32_t>(tiled_offset);
+	result.tiled.align = 256u;
+	result.linear_size = linear_offset;
+	*layout            = result;
+	return true;
+}
+
+bool Gen5DetileStandard256BTextureMipChain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
+                                           const Gen5TextureMipLayout& layout)
+{
+	if (dst == nullptr || src == nullptr || layout.levels == 0u || layout.levels > 16u || layout.bytes_per_element == 0u ||
+	    src_size < layout.tiled.size || dst_size < layout.linear_size)
+	{
+		return false;
+	}
+	for (uint32_t level = 0; level < layout.levels; level++)
+	{
+		const auto& entry = layout.level[level];
+		if (entry.in_mip_tail || entry.element_width == 0u || entry.element_height == 0u ||
+		    entry.tiled_pitch < entry.element_width || static_cast<uint64_t>(entry.linear_offset) + entry.linear_size > dst_size ||
+		    static_cast<uint64_t>(entry.tiled_offset) + entry.tiled_size > src_size)
+		{
+			return false;
+		}
+		TileDetileRequest request {};
+		request.dst               = static_cast<uint8_t*>(dst) + entry.linear_offset;
+		request.src               = static_cast<const uint8_t*>(src) + entry.tiled_offset;
+		request.width             = entry.element_width;
+		request.height            = entry.element_height;
+		request.pitch_elems       = entry.tiled_pitch;
+		request.dst_pitch_elems   = entry.element_width;
+		request.bytes_per_element = layout.bytes_per_element;
+		request.layout            = TileDetileLayout::Standard256B;
+		request.src_bytes         = entry.tiled_size;
+		if (!TileDetile(request))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 bool Gen5DetileStandard4KBTextureMipChain(void* dst, uint64_t dst_size, const void* src, uint64_t src_size,
 	                                       const Gen5TextureMipLayout& layout)
 {

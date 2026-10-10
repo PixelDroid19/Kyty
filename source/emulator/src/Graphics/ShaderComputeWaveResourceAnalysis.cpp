@@ -7,7 +7,7 @@
 namespace Kyty::Libs::Graphics {
 namespace {
 
-constexpr int kMaxSgpr = 103;
+constexpr int kMaxSgpr = 105; // RDNA2 SGPR0..SGPR105
 
 static bool ShaderPairedEudOperandIsPlain(const ShaderOperand& operand) noexcept
 {
@@ -38,7 +38,7 @@ bool ShaderPairedEudStorageLoadSupported(const ShaderInstruction& instruction, c
 	    instruction.format != ShaderInstructionFormat::Sdst4SbaseSoffset || instruction.src_num != 2 ||
 	    instruction.smem_imm_offset != 0 || instruction.smem_flags != 0u || !ShaderPairedEudInstructionHasOnlySmemControls(instruction) ||
 	    !bind.extended.used || bind.extended.slot != k_gen5_eud_direct_type || bind.extended.eud_size_dw == 0u ||
-	    bind.extended.eud_size_dw > SHADER_GEN5_EUD_MAX_DWORDS || bind.extended.data.Base() == 0u ||
+	    bind.extended.data.Base() == 0u ||
 	    bind.extended.eud_user_sgpr_num <= 1 || bind.extended.eud_user_sgpr_num > HW::UserSgprInfo::SGPRS_MAX ||
 	    bind.extended.eud_offset_base < 0x20 || (bind.extended.eud_offset_base & 3) != 0)
 	{

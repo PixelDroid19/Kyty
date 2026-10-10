@@ -495,6 +495,8 @@ struct Ngs2VoiceParamHeader;
 struct Ngs2RenderBufferInfo;
 struct Ngs2ContextBufferInfo;
 struct Ngs2VoiceState;
+struct Ngs2WaveformInfo;
+struct Ngs2WaveformBlock;
 
 int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption* option, Ngs2ContextBufferInfo* buffer_info);
 int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2ContextBufferInfo* buffer_info);
@@ -523,6 +525,9 @@ int KYTY_SYSV_ABI Ngs2SystemSetGrainSamples(uintptr_t system_handle, uint32_t gr
 int KYTY_SYSV_ABI Ngs2SystemSetSampleRate(uintptr_t system_handle, uint32_t sample_rate);
 int KYTY_SYSV_ABI Ngs2PanInit(void* pan_param);
 // 3D geometry helpers (positional audio). Observed NIDs: ResetSource/Listener, CalcListener, Apply.
+int KYTY_SYSV_ABI Ngs2ParseWaveformData(const void* data, size_t data_size, Ngs2WaveformInfo* info);
+int KYTY_SYSV_ABI Ngs2CalcWaveformBlock(const Ngs2WaveformInfo* info, uint32_t sample_pos, uint32_t num_samples,
+                                        Ngs2WaveformBlock* block);
 int KYTY_SYSV_ABI Ngs2GeomResetSourceParam(void* out_source_param);
 int KYTY_SYSV_ABI Ngs2GeomResetListenerParam(void* out_listener_param);
 int KYTY_SYSV_ABI Ngs2GeomCalcListener(const void* listener_param, void* out_work, uint32_t flags);

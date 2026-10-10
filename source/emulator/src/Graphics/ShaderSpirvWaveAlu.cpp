@@ -11,7 +11,7 @@
 namespace Kyty::Libs::Graphics {
 namespace {
 
-constexpr int kMaxSgpr = 103;
+constexpr int kMaxSgpr = 105; // RDNA2 SGPR0..SGPR105
 constexpr int kMaxVgpr = 255;
 
 bool ComputeWaveAluOperandIsPlain(const ShaderOperand& operand)

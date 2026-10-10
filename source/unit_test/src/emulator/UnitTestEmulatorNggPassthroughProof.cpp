@@ -8,6 +8,7 @@
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <initializer_list>
@@ -24,6 +25,9 @@ using namespace NggFixture;
 using Type = ShaderInstructionType;
 using Reject = ShaderNggPassthroughRejection;
 using Kind = ShaderNggPassthroughStepKind;
+
+constexpr auto kPos0NoDoneFormat = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3;
+constexpr auto kPos1XDoneFormat = ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone;
 
 uint32_t Find(const ShaderCode& code, Type type, unsigned occurrence = 0)
 {
@@ -88,6 +92,20 @@ void Refuse(const ShaderCode& code, Reject rejection, uint32_t index, ShaderNggP
 	if (index != UINT32_MAX) { Check(result.rejection_pc == code.GetInstructions().At(index).pc, "original refusal PC preserved"); }
 }
 
+void RefuseAny(const ShaderCode& code, ShaderNggPassthroughCounts counts = {64, 3, 1})
+{
+	const auto result = ShaderAnalyzeNggPassthrough(code, counts);
+	Check(!result.proven && !result.primitive_forwarding_proved && !result.independent_vertex_transforms_proved,
+	      "a position-sequence rejection never becomes a partial proof");
+	Check(result.rejection != Reject::None && !result.reason.IsEmpty(), "position-sequence refusal remains structured");
+	if (result.rejection_index != UINT32_MAX)
+	{
+		Check(result.rejection_index < code.GetInstructions().Size() &&
+		          result.rejection_pc == code.GetInstructions().At(result.rejection_index).pc,
+		      "position-sequence refusal retains an original instruction location");
+	}
+}
+
 ShaderCode WithPrefix(const Words& prefix)
 {
 	auto words = Fixture();
@@ -103,6 +121,31 @@ ShaderCode InsertBefore(const ShaderCode& original, const Words& words, uint32_t
 	const auto offset = original.GetInstructions().At(index).pc / 4u;
 	changed.insert(changed.begin() + offset, inserted.begin(), inserted.end());
 	return Parse(changed);
+}
+
+Words PositionSequence(bool pos0_done, bool pos1_done, uint32_t second_target = 13u, bool pos1_z = false)
+{
+	Check(second_target == 12u || second_target == 13u, "position sequence uses a defined position target");
+	Check(!pos1_z || second_target == 13u, "typed Z sequence uses the POS1 target");
+	Words words = Fixture();
+	const auto original = Parse(words);
+	const uint32_t first_position = Find(original, Type::Exp, 1);
+	const uint32_t second_position = Find(original, Type::Exp, 2);
+	Words pos0;
+	Words second;
+	Exp(pos0, 12u, 15u, pos0_done, 17u, 19u, 23u, 25u);
+	if (second_target == 12u)
+	{
+		Exp(second, 12u, 15u, pos1_done, 25u, 23u, 19u, 17u);
+	} else
+	{
+		Exp(second, 13u, pos1_z ? 4u : 1u, pos1_done, 8u, 101u, 173u, 239u);
+	}
+	const auto first_word = original.GetInstructions().At(first_position).pc / 4u;
+	const auto second_word = original.GetInstructions().At(second_position).pc / 4u;
+	std::copy(pos0.begin(), pos0.end(), words.begin() + first_word);
+	std::copy(second.begin(), second.end(), words.begin() + second_word);
+	return words;
 }
 
 } // namespace
@@ -161,6 +204,160 @@ TEST(EmulatorNggPassthroughProof, RetainsEveryIndependentVertexInstructionAndExp
 		code.SetHash0(0);
 		code.SetCrc32(UINT32_MAX);
 		Check(Accept(code).retained_instruction_indices == expected, "proof depends on semantics, not PC/hash identity");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggPassthroughProof, RetainsPhysicalXPositionOutputWithoutWeakeningAllocationOrMasks)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		auto words = Fixture();
+		const auto original = Parse(words);
+		const auto pos1 = Find(original, Type::Exp, 1);
+		const auto offset = original.GetInstructions().At(pos1).pc / 4u;
+		words[offset] = 0xf80000d1u;
+		words[offset + 1u] = 0xefad6508u; // X=v8; every disabled physical slot remains distinct.
+		const auto code = Parse(words);
+		Check(code.GetInstructions().At(pos1).src[0].register_id == 8, "physical X is the defined input");
+		for (const auto counts: {ShaderNggPassthroughCounts {32, 3, 1}, ShaderNggPassthroughCounts {64, 3, 1},
+		                        ShaderNggPassthroughCounts {64, 33, 3}, ShaderNggPassthroughCounts {64, 64, 64}})
+		{
+			const auto result = Accept(code, counts);
+			Check(result.requires_clip_distance_output_contract && !result.requires_layer_output_contract,
+			      "clipping metadata remains a separate output obligation");
+			Check(result.clip_distance_export_index == pos1 && result.layer_export_index == UINT32_MAX,
+			      "no invented layer export");
+			const auto& step = result.steps[pos1];
+			Check(step.kind == Kind::ClipDistanceExport && step.retain && step.active_mask == Mask(counts.es_vertex_count),
+			      "the exact export and vertex activity are retained");
+		}
+		auto final = code;
+		final.GetInstructions()[pos1].exp_control = 2u;
+		Refuse(final, Reject::InvalidExport, pos1);
+		Words repeated;
+		Exp(repeated, 13, 1, false, 8, 101, 173, 239);
+		Refuse(InsertBefore(code, words, pos1 + 1u, repeated), Reject::DuplicateExport, pos1 + 1u);
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggPassthroughProof, PositionDoneClosesOnlyPositionExportsAndRetainsParameterSuffix)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto words = PositionSequence(false, true);
+		const auto code = Parse(words);
+		const uint32_t pos0 = Find(code, Type::Exp, 1);
+		const uint32_t pos1_x = Find(code, Type::Exp, 2);
+		const uint32_t parameter = Find(code, Type::Exp, 3);
+		const uint32_t end = Find(code, Type::SEndpgm);
+		Check(pos0 < pos1_x && pos1_x < parameter && parameter < end, "position DONE precedes the parameter and terminal suffix");
+
+		const auto& pos0_inst = code.GetInstructions().At(pos0);
+		Check(pos0_inst.format == kPos0NoDoneFormat && pos0_inst.raw_word == 0xf80000cfu && pos0_inst.exp_enable_mask == 15u &&
+		          pos0_inst.exp_control == 0u && pos0_inst.src_num == 4,
+		      "full POS0 retains its no-DONE raw format and physical sources");
+		for (int source = 0; source < 4; ++source)
+		{
+			Check(pos0_inst.src[source].type == ShaderOperandType::Vgpr && pos0_inst.src[source].size == 1 &&
+			          pos0_inst.src[source].register_id == std::array<int, 4> {17, 19, 23, 25}[source],
+			      "POS0 physical VGPR source order survives decoding");
+		}
+		const auto& pos1_inst = code.GetInstructions().At(pos1_x);
+		Check(pos1_inst.format == kPos1XDoneFormat && pos1_inst.raw_word == 0xf80008d1u && pos1_inst.exp_enable_mask == 1u &&
+		          pos1_inst.exp_control == 2u && pos1_inst.src_num == 1 && pos1_inst.src[0].type == ShaderOperandType::Vgpr &&
+		          pos1_inst.src[0].register_id == 8,
+		      "final POS1.X retains DONE and the physical X source");
+		for (int source = 1; source < 4; ++source)
+		{
+			Check(pos1_inst.src[source].type == ShaderOperandType::Unknown && pos1_inst.src[source].size == 0,
+			      "disabled POS1.X physical tail remains empty");
+		}
+		const auto& parameter_inst = code.GetInstructions().At(parameter);
+		Check(parameter_inst.raw_word == 0xf800020fu && parameter_inst.exp_control == 0u && parameter_inst.exp_enable_mask == 15u,
+		      "full parameter export after position DONE retains its controls");
+
+		const auto result = Accept(code);
+		Check(result.position_export_index == pos0 && result.clip_distance_export_index == pos1_x &&
+		          result.layer_export_index == UINT32_MAX && result.requires_clip_distance_output_contract &&
+		          !result.requires_layer_output_contract,
+		      "proof records only the typed clip-distance obligation");
+		Check(result.steps[pos0].kind == Kind::PositionExport && result.steps[pos0].retain &&
+		          result.steps[pos1_x].kind == Kind::ClipDistanceExport && result.steps[pos1_x].retain &&
+		          result.steps[parameter].kind == Kind::ParameterExport && result.steps[parameter].retain &&
+		          result.retained_instruction_indices.back() == end &&
+		          std::find(result.retained_instruction_indices.begin(), result.retained_instruction_indices.end(), parameter) !=
+		              result.retained_instruction_indices.end(),
+		      "all ordered exports and S_ENDPGM remain in the residual program");
+
+		const auto z_final_code = Parse(PositionSequence(false, true, 13u, true));
+		const uint32_t z_pos0 = Find(z_final_code, Type::Exp, 1);
+		const uint32_t z_pos1 = Find(z_final_code, Type::Exp, 2);
+		const auto& z_inst = z_final_code.GetInstructions().At(z_pos1);
+		Check(z_pos0 < z_pos1 && z_inst.format == ShaderInstructionFormat::Pos1OffOffVsrc0Off &&
+		          z_inst.raw_word == 0xf80008d4u && z_inst.exp_control == 2u && z_inst.src_num == 1 &&
+		          z_inst.src[0].register_id == 173,
+		      "unsupported final POS1.Z retains its parsed DONE and physical Z source");
+		Refuse(z_final_code, Reject::InvalidExport, z_pos1);
+
+		const auto missing_done = Parse(PositionSequence(false, false));
+		RefuseAny(missing_done);
+		const auto position_after_done = Parse(PositionSequence(true, false));
+		RefuseAny(position_after_done);
+		const auto final_clip_words = PositionSequence(false, true);
+		const auto final_clip_code = Parse(final_clip_words);
+		Words position_after_clip_done;
+		Exp(position_after_clip_done, 12u, 15u, false, 31u, 37u, 41u, 43u);
+		const auto after_clip_done = InsertBefore(final_clip_code, final_clip_words,
+		                                          Find(final_clip_code, Type::Exp, 3), position_after_clip_done);
+		Refuse(after_clip_done, Reject::DuplicateExport, Find(after_clip_done, Type::Exp, 3));
+		const auto duplicate_pos0 = Parse(PositionSequence(false, true, 12u));
+		Refuse(duplicate_pos0, Reject::DuplicateExport, Find(duplicate_pos0, Type::Exp, 2));
+
+		const auto missing_done_words = PositionSequence(false, false);
+		const auto missing_done_code = Parse(missing_done_words);
+		Words duplicate_pos1;
+		Exp(duplicate_pos1, 13u, 4u, true, 91u, 101u, 8u, 201u);
+		const auto duplicate_pos1_code = InsertBefore(missing_done_code, missing_done_words,
+		                                               Find(missing_done_code, Type::Exp, 3), duplicate_pos1);
+		Refuse(duplicate_pos1_code, Reject::DuplicateExport, Find(duplicate_pos1_code, Type::Exp, 3));
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorNggPassthroughProof, RefusesRawParameterTargetWithPositionFormat)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto words = PositionSequence(false, true);
+		const auto valid = Parse(words);
+		const uint32_t pos0 = Find(valid, Type::Exp, 1);
+		const auto& parsed_pos0 = valid.GetInstructions().At(pos0);
+		Check(parsed_pos0.format == kPos0NoDoneFormat && parsed_pos0.raw_word == 0xf80000cfu &&
+		          parsed_pos0.exp_enable_mask == 15u && parsed_pos0.exp_control == 0u && parsed_pos0.src_num == 4,
+		      "the parser establishes the valid full non-final POS0 tuple");
+		Accept(valid);
+
+		auto changed = valid;
+		auto& mutated_pos0 = changed.GetInstructions()[pos0];
+		mutated_pos0.raw_word = (mutated_pos0.raw_word & ~(0x3fu << 4u)) | (32u << 4u);
+		Check(mutated_pos0.format == kPos0NoDoneFormat && mutated_pos0.raw_word == 0xf800020fu &&
+		          mutated_pos0.exp_enable_mask == 15u && mutated_pos0.exp_control == 0u && mutated_pos0.src_num == 4,
+		      "only the raw export target changes from POS0 to PARAM0");
+		Check(ShaderInstructionLoweringPreconditions(mutated_pos0), "raw-target mutation remains valid generic IR");
+		Refuse(changed, Reject::InvalidExport, pos0);
+
+		const uint32_t parameter = Find(valid, Type::Exp, 3);
+		changed = valid;
+		auto& mutated_parameter = changed.GetInstructions()[parameter];
+		mutated_parameter.raw_word = (mutated_parameter.raw_word & ~(0x3fu << 4u)) | (12u << 4u);
+		Check(mutated_parameter.format == ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3 &&
+		          mutated_parameter.raw_word == 0xf80000cfu && mutated_parameter.exp_enable_mask == 15u &&
+		          mutated_parameter.exp_control == 0u && mutated_parameter.src_num == 4,
+		      "the post-DONE parameter keeps its format while its raw target changes to POS0");
+		Check(ShaderInstructionLoweringPreconditions(mutated_parameter), "the inverse mismatch remains valid generic IR");
+		Refuse(changed, Reject::InvalidExport, parameter);
 		std::_Exit(0);
 	})(), ::testing::ExitedWithCode(0), "");
 }

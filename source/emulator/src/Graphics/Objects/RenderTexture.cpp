@@ -153,6 +153,11 @@ RenderTextureFormatInfo ResolveRenderTextureFormat(uint32_t format, uint32_t cha
 	{
 		return {RenderTextureFormat::R16G16B16A16Sfloat, 8};
 	}
+	// CB COLOR_32_32_32_32 (format 14) with FLOAT.
+	if (format == 0xeu && channel_type == 0x7u && channel_order == 0x0u)
+	{
+		return {RenderTextureFormat::R32G32B32A32Sfloat, 16};
+	}
 	return {};
 }
 
@@ -364,6 +369,7 @@ uint32_t VulkanResolveRenderTextureFormat(RenderTextureFormat format)
 		case RenderTextureFormat::R16G16B16A16Uint: return VK_FORMAT_R16G16B16A16_UINT;
 		case RenderTextureFormat::R16G16B16A16Sint: return VK_FORMAT_R16G16B16A16_SINT;
 		case RenderTextureFormat::R16G16B16A16Sfloat: return VK_FORMAT_R16G16B16A16_SFLOAT;
+		case RenderTextureFormat::R32G32B32A32Sfloat: return VK_FORMAT_R32G32B32A32_SFLOAT;
 		case RenderTextureFormat::Unknown: break;
 	}
 	return VK_FORMAT_UNDEFINED;

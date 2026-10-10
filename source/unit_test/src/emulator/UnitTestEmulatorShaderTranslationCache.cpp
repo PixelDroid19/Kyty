@@ -1,5 +1,6 @@
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Graphics/RenderResolutionShaderUsageCache.h"
 #include "Emulator/Graphics/SpirvBinaryCacheStore.h"
 #include "Emulator/Graphics/ShaderTranslationCache.h"
 
@@ -214,6 +215,34 @@ TEST(EmulatorShaderTranslationCache, ExactMissCompilesOnceAndHitDoesNotInvokeCom
 	EXPECT_EQ(compiles.load(), 1u);
 	ASSERT_EQ(miss.binary.Size(), 1u);
 	EXPECT_EQ(hit.binary, miss.binary);
+}
+
+TEST(EmulatorShaderTranslationCache, PixelLdsInputsInvalidateShaderUsageAnalysis)
+{
+	RenderResolutionShaderUsageCache cache(4);
+	RenderResolutionShaderUsageKey   base_key;
+	base_key.address           = 0x1000;
+	base_key.checksum          = 0x2000;
+	base_key.translator_version = 29;
+	uint32_t analyses = 0;
+	auto     analyze = [&analyses]
+	{
+		++analyses;
+		return RenderResolutionShaderAnalysis {};
+	};
+
+	EXPECT_FALSE(cache.GetOrAnalyze(base_key, analyze).hit);
+	EXPECT_TRUE(cache.GetOrAnalyze(base_key, analyze).hit);
+
+	auto with_extra_lds = base_key;
+	with_extra_lds.pixel_extra_lds_dwords = 2;
+	EXPECT_FALSE(cache.GetOrAnalyze(with_extra_lds, analyze).hit);
+
+	auto with_parameter_sgpr = base_key;
+	with_parameter_sgpr.pixel_parameter_sgpr = 30;
+	EXPECT_FALSE(cache.GetOrAnalyze(with_parameter_sgpr, analyze).hit);
+
+	EXPECT_EQ(analyses, 3u);
 }
 
 TEST(EmulatorShaderTranslationCache, PersistentModuleHitSkipsCompilerAcrossCacheInstances)

@@ -160,6 +160,26 @@ TEST(EmulatorShaderSopkDecode, Rdna2RejectsHardwareRegisterAccess)
 	ASSERT_EXIT(ParseAndExit(Sopk(21, 5, 0u)), ::testing::ExitedWithCode(kRejectedExit), "");
 }
 
+TEST(EmulatorShaderSopkDecode, ScalarOperandsCoverSgpr104And105BeforeVcc)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    InitializeDecodeTest(true);
+		    // s_cmp_eq_u32 s104, s105 and s_cmp_eq_u32 vcc_lo, s104.
+		    const uint32_t words[] = {Sopc(6u, 104u, 105u), Sopc(6u, 106u, 104u), kSEndpgm};
+		    const ShaderCode code = Parse(words);
+		    if (code.GetInstructions().Size() != 3u) { std::_Exit(2); }
+		    const auto& sgprs = code.GetInstructions().At(0);
+		    const auto& vcc   = code.GetInstructions().At(1);
+		    const bool  ok    = sgprs.src[0].type == ShaderOperandType::Sgpr && sgprs.src[0].register_id == 104 &&
+		                    sgprs.src[1].type == ShaderOperandType::Sgpr && sgprs.src[1].register_id == 105 &&
+		                    vcc.src[0].type == ShaderOperandType::VccLo && vcc.src[1].type == ShaderOperandType::Sgpr &&
+		                    vcc.src[1].register_id == 104;
+		    std::_Exit(ok ? 0 : 3);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorShaderSopkDecode, Rdna2RejectsSopcOpcodeSixteen)
 {
 	// The RDNA2 SOPC table skips from opcode 15 to 18 and the ISA has no VSKIP.

@@ -215,6 +215,11 @@ public:
 				const auto& ext = t.at(5);
 				if (ext == "UMin") { r = std::min(arg(6), arg(7)); }
 				else if (ext == "UMax") { r = std::max(arg(6), arg(7)); }
+				else if (ext == "SClamp")
+				{
+					const auto signed_arg = [&](size_t index) { return static_cast<int32_t>(arg(index)); };
+					r = static_cast<uint32_t>(std::min(std::max(signed_arg(6), signed_arg(7)), signed_arg(8)));
+				}
 				else if (ext == "FindUMsb")
 				{
 					uint32_t word = arg(6);

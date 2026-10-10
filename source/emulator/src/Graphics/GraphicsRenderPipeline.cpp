@@ -1231,6 +1231,16 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	const HW::ScanModeControl& smc     = ctx->GetScanModeControl();
 	const HW::ModeControl&     mc      = ctx->GetModeControl();
 
+	if (ps_regs.ps_embedded && ps_input_info->stage_enabled && RenderColorSlotActive(*color, 0u))
+	{
+		const auto format = color->attachment[0].attachment_format;
+		if (format == VK_FORMAT_R16_UINT || format == VK_FORMAT_R16G16_UINT || format == VK_FORMAT_R16G16B16A16_UINT)
+		{
+			// The embedded pixel template writes a floating-point output at location zero.
+			EXIT("embedded pixel shader has no unsigned color export interface: format=%u\n", static_cast<unsigned>(format));
+		}
+	}
+
 	if (Config::GetPrintfDirection() != Log::Direction::Silent)
 	{
 		ShaderDbgDumpInputInfo(vs_input_info);
@@ -1411,6 +1421,12 @@ VulkanPipeline* PipelineCache::CreatePipeline(VulkanFramebuffer* framebuffer, Re
 	}
 
 	const auto miss_start = std::chrono::steady_clock::now();
+	if (vs_input_info->position1_usage == ShaderVertexPosition1Usage::ClipDistance0)
+	{
+		VkPhysicalDeviceFeatures features {};
+		vkGetPhysicalDeviceFeatures(gctx->physical_device, &features);
+		EXIT_IF(features.shaderClipDistance != VK_TRUE);
+	}
 	if (ps_input_info->custom_interpolation.Enabled())
 	{
 		EXIT_IF(!gctx->geometry_shader_supported);

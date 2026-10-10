@@ -98,6 +98,8 @@ UT_LINK(EmulatorLoaderUnwind);
 UT_LINK(EmulatorLog);
 UT_LINK(EmulatorModuleDiscovery);
 UT_LINK(EmulatorShaderMimg);
+UT_LINK(EmulatorShaderWaterfall);
+UT_LINK(EmulatorImageGradientProof);
 UT_LINK(EmulatorShaderExport);
 UT_LINK(EmulatorShaderScalarCompare);
 UT_LINK(EmulatorShaderScalarBit);

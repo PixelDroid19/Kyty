@@ -451,7 +451,7 @@ TEST(EmulatorComputeWaveAnalysis, RejectsExtendedBasePairOutsideSgprRange)
 	end.format = ShaderInstructionFormat::Empty;
 	code.GetInstructions().Add(end);
 	auto input = Type5EudInput();
-	input.bind.extended.start_register = 104;
+	input.bind.extended.start_register = 106; // past SGPR105
 	const auto result                  = ShaderAnalyzeComputeWaveCode(code, input);
 	EXPECT_FALSE(result.supported);
 	EXPECT_EQ(result.unsupported_pc, 0u);
@@ -622,7 +622,7 @@ TEST(EmulatorComputeWaveAnalysis, GenericFallbackRequiresValidOperandSpans)
 			case 0: invalid.dst.register_id = 256; break;
 			case 1: invalid.dst.size = 2; break; // crosses v255
 			case 2: invalid.src[0].register_id = -1; break;
-			case 3: invalid.src[1].size = 2; break; // crosses s103
+			case 3: invalid.src[1] = {.type = ShaderOperandType::Sgpr, .register_id = 105, .size = 2}; break; // crosses s105
 			case 4: invalid.src_num = 1; break; // live source outside the tuple
 			case 5: invalid.src_num = 5; break;
 		}

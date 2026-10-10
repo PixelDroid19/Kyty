@@ -23,17 +23,25 @@ namespace Kyty::Libs::Graphics {
 
 ShaderVertexPosition1Usage ShaderDecodeVertexPosition1Usage(uint32_t position_format, uint32_t output_control, bool next_gen)
 {
-	// In the Gen5 miscellaneous position vector, Z packs the render-target
-	// layer and viewport index. Only the independently evidenced layer-only
-	// route is implemented; other uses must not be silently dropped.
+	// With a miscellaneous vector, Z packs the layer and viewport index.
+	// Without it, the first clipping vector can occupy POS1 instead.
 	const uint32_t layer    = 1u << Pm4::PA_CL_VS_OUT_CNTL_USE_VTX_RENDER_TARGET_INDX_SHIFT;
 	const uint32_t viewport = 1u << Pm4::PA_CL_VS_OUT_CNTL_USE_VTX_VIEWPORT_INDX_SHIFT;
 	const uint32_t kill     = 1u << Pm4::PA_CL_VS_OUT_CNTL_USE_VTX_KILL_FLAG_SHIFT;
 	const uint32_t misc     = 1u << Pm4::PA_CL_VS_OUT_CNTL_VS_OUT_MISC_VEC_ENA_SHIFT;
 	const uint32_t format   = (position_format >> Pm4::SPI_SHADER_POS_FORMAT_POS1_SHIFT) & Pm4::SPI_SHADER_POS_FORMAT_POS1_MASK;
-	return next_gen && format == 4u && (output_control & (layer | viewport | kill | misc)) == (layer | misc)
-	           ? ShaderVertexPosition1Usage::RenderTargetLayer
-	           : ShaderVertexPosition1Usage::Unknown;
+	if (!next_gen || format != 4u) { return ShaderVertexPosition1Usage::Unknown; }
+	if ((output_control & (layer | viewport | kill | misc)) == (layer | misc))
+	{
+		return ShaderVertexPosition1Usage::RenderTargetLayer;
+	}
+
+	// Admit only the first clip plane: exactly ClipDist0 plus CCDIST0. Equality
+	// also rejects enabled cull/other clip vectors, point size, layer/viewport,
+	// kill, misc side bus, GS cut, line width, VRS, and unmodeled controls.
+	const uint32_t clip0 = 1u << Pm4::PA_CL_VS_OUT_CNTL_CLIP_DIST_ENA_0_SHIFT;
+	const uint32_t cc0   = 1u << Pm4::PA_CL_VS_OUT_CNTL_VS_OUT_CCDIST0_VEC_ENA_SHIFT;
+	return output_control == (clip0 | cc0) ? ShaderVertexPosition1Usage::ClipDistance0 : ShaderVertexPosition1Usage::Unknown;
 }
 
 const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code)
@@ -165,7 +173,8 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 	const auto& insts = code.GetInstructions();
 	uint32_t    size  = insts.Size();
 	// int         temp_register = 0;
-	uint32_t temp_value[104] = {0};
+	constexpr int kSgprs = 106;
+	uint32_t temp_value[kSgprs] = {0};
 	int      s_num           = 0;
 	int      v_num           = 0;
 
@@ -181,6 +190,7 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 
 			uint32_t index    = inst.src[1].constant.u >> 2u;
 			int      t        = inst.dst.register_id;
+			EXIT_IF(t < 0 || t + 3 >= kSgprs);
 			temp_value[t + 0] = buffer[index + 0];
 			temp_value[t + 1] = buffer[index + 1];
 			temp_value[t + 2] = buffer[index + 2];
@@ -212,6 +222,7 @@ void ShaderParseFetch(ShaderVertexInputInfo* info, const uint32_t* fetch, const 
 			if (info->resources_num >= ShaderVertexInputInfo::RES_MAX) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: info->resources_num >= ShaderVertexInputInfo::RES_MAX condition ignored (continuing)\n"); }
 
 			int t = inst.src[1].register_id;
+			EXIT_IF(t < 0 || t + 3 >= kSgprs);
 
 			auto& r           = info->resources[info->resources_num];
 			auto& rd          = info->resources_dst[info->resources_num];

@@ -59,6 +59,8 @@ enum class Gen5CatalogImageFormat: uint16_t
 // resolved format, or the host format that stores the same texel bytes with
 // red and blue exchanged (a render target written with the alternate swap).
 [[nodiscard]] bool VulkanGen5SampleFormatMatchesEffective(uint16_t fmt, bool use_srgb, VkFormat format);
+// A BGRA selection of this guest storage format is the red/blue-exchanged host image with identity components.
+[[nodiscard]] bool VulkanStorageHasRedBlueView(uint8_t dfmt, uint8_t nfmt, uint16_t fmt);
 
 // The selectors a sampled view of `surface` needs to read what the guest
 // selectors read from the sample format: red and blue are exchanged when the

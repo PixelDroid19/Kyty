@@ -13,8 +13,9 @@ namespace Kyty::Libs::Graphics {
 // A Color2DArray resource has one complete tiled allocation per layer. The
 // guest allocation and host staging layout intentionally remain separate:
 // 64 KiB sample and render-target layouts use padded guest rows but upload
-// compact host rows. Multi-mip Standard4KB arrays store one full mip chain
-// per layer (including the shared 4 KiB mip tail).
+// compact host rows. Single-level Standard256B arrays use one block-aligned
+// slice per layer. Multi-mip Standard4KB arrays store one full mip chain per
+// layer (including the shared 4 KiB mip tail).
 struct Gen5TextureArrayLayout
 {
 	TileSizeAlign        tiled_slice {};

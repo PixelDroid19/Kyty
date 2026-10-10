@@ -825,7 +825,7 @@ void RunParsedInteger(bool next_gen, bool vop3, bool subtract, uint32_t sdst, bo
 	switch (corrupt)
 	{
 		case 0: break;
-		case 1: inst.dst2 = {.type = ShaderOperandType::Sgpr, .register_id = 103, .size = 2}; break;
+		case 1: inst.dst2 = {.type = ShaderOperandType::Sgpr, .register_id = 105, .size = 2}; break;
 		case 2: inst.dst2 = {.type = ShaderOperandType::ExecLo, .size = 2}; break;
 		case 3: inst.dst2.size = 1; break;
 		case 4: inst.src[0].negate = true; break;

@@ -343,7 +343,42 @@ TEST(EmulatorKernelProcess, NormalPthreadMutexNestedLockCompletes)
 #endif
 }
 
-TEST(EmulatorKernelProcess, PthreadCondWaitReleasesRecursiveMutex)
+TEST(EmulatorKernelProcess, PthreadMutexBusyDestroyPreservesHandleUntilUnlockAndDestroy)
+{
+	EnsureKernelProcessSubsystems();
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	EXPECT_EXIT(
+	    {
+		    ::alarm(2);
+
+		    Kernel::PthreadMutexattr attr  = nullptr;
+		    Kernel::PthreadMutex     mutex = nullptr;
+		    if (Kernel::PthreadMutexattrInit(&attr) != OK || Kernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
+		        Kernel::PthreadMutexLock(&mutex) != OK)
+		    {
+			    std::_Exit(1);
+		    }
+
+		    const auto original = mutex;
+		    if (Kernel::PthreadMutexDestroy(&mutex) != LibKernel::KERNEL_ERROR_EBUSY || mutex != original)
+		    {
+			    std::_Exit(2);
+		    }
+		    if (Kernel::PthreadMutexUnlock(&mutex) != OK || Kernel::PthreadMutexDestroy(&mutex) != OK || mutex != nullptr)
+		    {
+			    std::_Exit(3);
+		    }
+		    (void)Kernel::PthreadMutexattrDestroy(&attr);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+#else
+	GTEST_SKIP() << "requires a bounded process watchdog";
+#endif
+}
+
+TEST(EmulatorKernelProcess, PthreadCondWaitReleasesAndRestoresTwoLevelRecursiveMutex)
 {
 	EnsureKernelProcessSubsystems();
 
@@ -361,7 +396,8 @@ TEST(EmulatorKernelProcess, PthreadCondWaitReleasesRecursiveMutex)
 		    if (Kernel::PthreadMutexattrInit(&attr) != OK ||
 		        Kernel::PthreadMutexattrSettype(&attr, 2) != OK ||
 		        Kernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
-		        Kernel::PthreadCondInit(&cond, nullptr, nullptr) != OK || Kernel::PthreadMutexLock(&mutex) != OK)
+		        Kernel::PthreadCondInit(&cond, nullptr, nullptr) != OK || Kernel::PthreadMutexLock(&mutex) != OK ||
+		        Kernel::PthreadMutexLock(&mutex) != OK)
 		    {
 			    std::_Exit(1);
 		    }
@@ -391,11 +427,53 @@ TEST(EmulatorKernelProcess, PthreadCondWaitReleasesRecursiveMutex)
 			    }
 		    }
 
-		    if (Kernel::PthreadMutexUnlock(&mutex) != OK)
+		    if (Kernel::PthreadMutexUnlock(&mutex) != OK || Kernel::PthreadMutexUnlock(&mutex) != OK ||
+		        Kernel::PthreadMutexUnlock(&mutex) != LibKernel::KERNEL_ERROR_EPERM)
 		    {
 			    std::_Exit(5);
 		    }
 		    worker.join();
+		    (void)Kernel::PthreadCondDestroy(&cond);
+		    (void)Kernel::PthreadMutexDestroy(&mutex);
+		    (void)Kernel::PthreadMutexattrDestroy(&attr);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(0), "");
+#else
+	GTEST_SKIP() << "requires a bounded process watchdog";
+#endif
+}
+
+TEST(EmulatorKernelProcess, PthreadCondTimedwaitTimeoutRestoresTwoLevelRecursiveMutex)
+{
+	EnsureKernelProcessSubsystems();
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+	EXPECT_EXIT(
+	    {
+		    ::alarm(2);
+
+		    Kernel::PthreadMutexattr attr  = nullptr;
+		    Kernel::PthreadMutex     mutex = nullptr;
+		    Kernel::PthreadCond      cond  = nullptr;
+		    if (Kernel::PthreadMutexattrInit(&attr) != OK ||
+		        Kernel::PthreadMutexattrSettype(&attr, 2) != OK ||
+		        Kernel::PthreadMutexInit(&mutex, &attr, nullptr) != OK ||
+		        Kernel::PthreadCondInit(&cond, nullptr, nullptr) != OK || Kernel::PthreadMutexLock(&mutex) != OK ||
+		        Kernel::PthreadMutexLock(&mutex) != OK)
+		    {
+			    std::_Exit(1);
+		    }
+
+		    if (Kernel::PthreadCondTimedwait(&cond, &mutex, 25000) != LibKernel::KERNEL_ERROR_ETIMEDOUT)
+		    {
+			    std::_Exit(2);
+		    }
+		    if (Kernel::PthreadMutexUnlock(&mutex) != OK || Kernel::PthreadMutexUnlock(&mutex) != OK ||
+		        Kernel::PthreadMutexUnlock(&mutex) != LibKernel::KERNEL_ERROR_EPERM)
+		    {
+			    std::_Exit(3);
+		    }
 		    (void)Kernel::PthreadCondDestroy(&cond);
 		    (void)Kernel::PthreadMutexDestroy(&mutex);
 		    (void)Kernel::PthreadMutexattrDestroy(&attr);

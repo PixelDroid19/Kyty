@@ -506,6 +506,8 @@ struct PsStageRegisters
 	// Wave-packing hints (shared VGPR count, instruction prefetch). Recorded
 	// for completeness; the recompiler re-derives register allocation.
 	uint32_t rsrc3 = 0;
+	// Raw PS CU-eligibility state. Host shader placement remains backend-owned.
+	uint32_t rsrc4 = 0;
 };
 
 struct CsStageRegisters
@@ -634,6 +636,7 @@ struct ShaderRegisters
 	uint32_t shader_z_format       = 0;
 	uint8_t  target_output_mode[8]  = {};
 	uint8_t  target_output_order[8] = {};
+	uint8_t  target_output_number[8] = {};
 	uint32_t ps_input_ena          = 0;
 	uint32_t ps_input_addr         = 0;
 	uint32_t ps_in_control         = 0;
@@ -746,6 +749,7 @@ public:
 	{
 		m_render_targets[slot].info          = info;
 		m_sh_regs.target_output_order[slot] = static_cast<uint8_t>(info.channel_order);
+		m_sh_regs.target_output_number[slot] = static_cast<uint8_t>(info.channel_type);
 	}
 	void SetColorAttrib(uint32_t slot, const ColorAttrib& attrib) { m_render_targets[slot].attrib = attrib; }
 	void SetColorAttrib2(uint32_t slot, const ColorAttrib2& attrib2) { m_render_targets[slot].attrib2 = attrib2; }
@@ -1139,6 +1143,7 @@ public:
 		m_ps.ps_regs.chksum |= value;
 	}
 	void SetPsRsrc3(uint32_t value) { m_ps.ps_regs.rsrc3 = value; }
+	void SetPsRsrc4(uint32_t value) { m_ps.ps_regs.rsrc4 = value; }
 
 	void SetCsShader(const CsStageRegisters& cs_regs, uint32_t shader_modifier)
 	{

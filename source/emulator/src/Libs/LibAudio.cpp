@@ -223,6 +223,8 @@ LIB_DEFINE(InitAudio_1_Ngs2)
 	LIB_FUNC("-tbc2SxQD60", Ngs2::Ngs2SystemSetSampleRate);
 	LIB_FUNC("xa8oL9dmXkM", Ngs2::Ngs2PanInit);
 	// Positional audio geometry (Ngs2 geom exports used on Gen5 boot).
+	LIB_FUNC("hyVLT2VlOYk", Ngs2::Ngs2ParseWaveformData);
+	LIB_FUNC("3pCNbVM11UA", Ngs2::Ngs2CalcWaveformBlock);
 	LIB_FUNC("0lbbayqDNoE", Ngs2::Ngs2GeomResetSourceParam);
 	LIB_FUNC("7Lcfo8SmpsU", Ngs2::Ngs2GeomResetListenerParam);
 	LIB_FUNC("1WsleK-MTkE", Ngs2::Ngs2GeomCalcListener);

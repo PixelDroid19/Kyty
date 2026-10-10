@@ -827,8 +827,46 @@ static ImageTransitionSource ResolveImageTransitionSource(VkImageLayout layout)
 	}
 }
 
+static void ReportCriticalTransientPoolCapacityReject(uint64_t requested_size, uint32_t usage, uint32_t usage_entries,
+                                                      uint32_t total_entries, uint64_t total_bytes)
+{
+	const auto critical_class = GpuMemoryTransientBufferAllocationClass::Critical;
+	const bool usage_cap_failed = !GpuMemoryTransientBufferPoolCanAllocate(usage_entries, 0u, 0u, 1u, critical_class);
+	const bool entry_cap_failed =
+	    !GpuMemoryTransientBufferPoolCanAllocate(0u, total_entries, 0u, 1u, critical_class);
+	const bool byte_cap_failed =
+	    !GpuMemoryTransientBufferPoolCanAllocate(0u, 0u, total_bytes, requested_size, critical_class);
+	const uint64_t max_bytes = kGpuMemoryTransientBufferPoolMaxBytes;
+	static std::atomic<uint32_t> reports_remaining {8u};
+	uint32_t report_number = 0u;
+	uint32_t remaining = reports_remaining.load(std::memory_order_relaxed);
+	while (remaining != 0u)
+	{
+		const uint32_t event_number = 9u - remaining;
+		if (reports_remaining.compare_exchange_weak(remaining, remaining - 1u, std::memory_order_relaxed,
+		                                          std::memory_order_relaxed))
+		{
+			report_number = event_number;
+			break;
+		}
+	}
+	if (report_number == 0u)
+	{
+		return;
+	}
+
+	std::fprintf(stderr,
+	             "KYTY_TRANSIENT_POOL_CAPACITY_REJECT event=%" PRIu32 " class=critical(%u) requested=%" PRIu64
+	             " usage=0x%08" PRIx32 " usage_entries=%" PRIu32 " total_entries=%" PRIu32 " total_bytes=%" PRIu64
+	             " max_bytes=%" PRIu64 " usage_cap_failed=%d entry_cap_failed=%d byte_cap_failed=%d\n",
+	             report_number, static_cast<unsigned>(critical_class), requested_size, usage, usage_entries, total_entries,
+	             total_bytes, max_bytes, usage_cap_failed ? 1 : 0, entry_cap_failed ? 1 : 0, byte_cap_failed ? 1 : 0);
+}
+
 class TransientBufferPool
 {
+	static constexpr uint64_t kMaxSnapshotReadSize = 16u;
+
 	struct Entry
 	{
 		VulkanBuffer buffer;
@@ -950,6 +988,35 @@ public:
 		Commit(entry, size);
 		finish_upload_time();
 		return &entry->buffer;
+	}
+
+	bool ReadSnapshot(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset, uint64_t size, void* dst) const
+	{
+		if (storage_buffer == nullptr || dst == nullptr || size == 0u || size > kMaxSnapshotReadSize)
+		{
+			return false;
+		}
+
+		for (const auto* entry: m_entries)
+		{
+			if (entry == nullptr || &entry->buffer != storage_buffer)
+			{
+				continue;
+			}
+
+			if (!entry->used || entry->scratch || !entry->snapshot_valid || entry->mapped == nullptr ||
+			    entry->snapshot_vaddr != expected_vaddr || entry->snapshot_size == 0u || entry->snapshot_size > entry->size ||
+			    offset > entry->snapshot_size || size > entry->snapshot_size - offset || offset > storage_buffer->descriptor_range ||
+			    size > storage_buffer->descriptor_range - offset || offset > entry->size || size > entry->size - offset)
+			{
+				return false;
+			}
+
+			std::memcpy(dst, static_cast<const uint8_t*>(entry->mapped) + offset, static_cast<size_t>(size));
+			return true;
+		}
+
+		return false;
 	}
 
 	VulkanBuffer* Scratch(GraphicContext* ctx, uint64_t size, uint32_t usage)
@@ -1078,6 +1145,11 @@ private:
 			if (!GpuMemoryTransientBufferPoolCanAllocate(usage_entries, static_cast<uint32_t>(m_entries.size()), m_total_bytes, size,
 			                                                   allocation_class))
 			{
+				if (allocation_class == GpuMemoryTransientBufferAllocationClass::Critical)
+				{
+					ReportCriticalTransientPoolCapacityReject(size, usage, usage_entries,
+					                                          static_cast<uint32_t>(m_entries.size()), m_total_bytes);
+				}
 				return nullptr;
 			}
 
@@ -1254,6 +1326,13 @@ VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint
 		m_transient_buffers = new TransientBufferPool;
 	}
 	return m_transient_buffers->Capture(g_render_ctx->GetGraphicCtx(), vaddr, size, usage, validation_ns, upload_ns, compare_ns, reused);
+}
+
+bool CommandBuffer::ReadTransientSnapshotBuffer(const VulkanBuffer* storage_buffer, uint64_t expected_vaddr, uint64_t offset,
+	                                               uint64_t size, void* dst) const
+{
+	return m_transient_buffers != nullptr &&
+	       m_transient_buffers->ReadSnapshot(storage_buffer, expected_vaddr, offset, size, dst);
 }
 
 VulkanBuffer* CommandBuffer::AllocateTransientScratchBuffer(uint64_t size, uint32_t usage)

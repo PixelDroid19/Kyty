@@ -387,6 +387,62 @@ static bool OpenCodec(AVFormatContext* format, int stream_index, AVCodecContext*
 	return true;
 }
 
+// Copies a decoded picture into tightly packed NV12 (the pitch is the width).
+static bool CopyNv12Picture(const AVFrame* source, uint32_t width, uint32_t height, SwsContext** scaler, VideoFrame* frame,
+                            const char** error)
+{
+	const size_t chroma_height = (static_cast<size_t>(height) + 1u) / 2u;
+	if (width == 0 || height == 0 || static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / height)
+	{
+		*error = "decoded video dimensions overflow";
+		return false;
+	}
+	const size_t luma_bytes = static_cast<size_t>(width) * height;
+	if (static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / chroma_height ||
+	    luma_bytes > std::numeric_limits<size_t>::max() - static_cast<size_t>(width) * chroma_height)
+	{
+		*error = "decoded video buffer size overflow";
+		return false;
+	}
+	frame->width  = width;
+	frame->height = height;
+	frame->pitch  = width;
+	frame->data.resize(luma_bytes + static_cast<size_t>(width) * chroma_height);
+	const bool copied_nv12 = source->format == AV_PIX_FMT_NV12 && source->width == static_cast<int>(width) &&
+	                         source->height == static_cast<int>(height) && source->data[0] != nullptr && source->data[1] != nullptr &&
+	                         source->linesize[0] >= static_cast<int>(width) && source->linesize[1] >= static_cast<int>(width);
+	if (copied_nv12)
+	{
+		for (uint32_t row = 0; row < height; ++row)
+		{
+			std::memcpy(frame->data.data() + static_cast<size_t>(row) * width,
+			            source->data[0] + static_cast<size_t>(row) * source->linesize[0], width);
+		}
+		for (size_t row = 0; row < chroma_height; ++row)
+		{
+			std::memcpy(frame->data.data() + luma_bytes + row * width,
+			            source->data[1] + row * static_cast<size_t>(source->linesize[1]), width);
+		}
+		return true;
+	}
+	*scaler = sws_getCachedContext(*scaler, source->width, source->height, static_cast<AVPixelFormat>(source->format),
+	                               static_cast<int>(width), static_cast<int>(height), AV_PIX_FMT_NV12, SWS_BILINEAR, nullptr, nullptr,
+	                               nullptr);
+	if (*scaler == nullptr)
+	{
+		*error = "initialize video scaler";
+		return false;
+	}
+	uint8_t* destination[4]       = {frame->data.data(), frame->data.data() + luma_bytes, nullptr, nullptr};
+	int      destination_pitch[4] = {static_cast<int>(width), static_cast<int>(width), 0, 0};
+	if (sws_scale(*scaler, source->data, source->linesize, 0, source->height, destination, destination_pitch) <= 0)
+	{
+		*error = "convert video frame to NV12";
+		return false;
+	}
+	return true;
+}
+
 static bool ConvertVideo(Decoder::State* state)
 {
 	AVFrame* source = state->video_frame;
@@ -411,72 +467,17 @@ static bool ConvertVideo(Decoder::State* state)
 		}
 		source = state->transferred_video_frame;
 	}
-	const uint32_t width  = static_cast<uint32_t>(state->info.video_width);
-	const uint32_t height = static_cast<uint32_t>(state->info.video_height);
-	const size_t chroma_height = (static_cast<size_t>(height) + 1u) / 2u;
-	if (width == 0 || height == 0 || static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / height)
+	VideoFrame  frame;
+	const char* copy_error = nullptr;
+	if (!CopyNv12Picture(source, static_cast<uint32_t>(state->info.video_width), static_cast<uint32_t>(state->info.video_height),
+	                     &state->scaler, &frame, &copy_error))
 	{
-		SetError(state, Status::DecodeFailed, "decoded video dimensions overflow");
+		SetError(state, Status::DecodeFailed, copy_error);
 		return false;
 	}
-	const size_t luma_bytes = static_cast<size_t>(width) * height;
-	if (static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / chroma_height ||
-	    luma_bytes > std::numeric_limits<size_t>::max() - static_cast<size_t>(width) * chroma_height)
-	{
-		SetError(state, Status::DecodeFailed, "decoded video buffer size overflow");
-		return false;
-	}
-
-	VideoFrame frame;
-	frame.width       = width;
-	frame.height      = height;
-	frame.pitch       = width;
 	frame.timestamp_ms = TimestampMilliseconds(source->best_effort_timestamp,
 	                                            state->format->streams[state->video_stream]->time_base,
 	                                            state->next_video_timestamp);
-	frame.data.resize(luma_bytes + static_cast<size_t>(width) * chroma_height);
-	bool copied_nv12 = source->format == AV_PIX_FMT_NV12 && source->width == static_cast<int>(width) &&
-	                   source->height == static_cast<int>(height) && source->data[0] != nullptr && source->data[1] != nullptr &&
-	                   source->linesize[0] >= static_cast<int>(width) && source->linesize[1] >= static_cast<int>(width);
-	if (copied_nv12)
-	{
-		for (uint32_t row = 0; row < height; ++row)
-		{
-			std::memcpy(frame.data.data() + static_cast<size_t>(row) * width,
-			            source->data[0] + static_cast<size_t>(row) * source->linesize[0], width);
-		}
-		for (size_t row = 0; row < chroma_height; ++row)
-		{
-			std::memcpy(frame.data.data() + luma_bytes + row * width,
-			            source->data[1] + row * static_cast<size_t>(source->linesize[1]), width);
-		}
-	}
-	else
-	{
-		state->scaler = sws_getCachedContext(state->scaler,
-		                                      source->width,
-		                                      source->height,
-		                                      static_cast<AVPixelFormat>(source->format),
-		                                      static_cast<int>(width),
-		                                      static_cast<int>(height),
-		                                      AV_PIX_FMT_NV12,
-		                                      SWS_BILINEAR,
-		                                      nullptr,
-		                                      nullptr,
-		                                      nullptr);
-		if (state->scaler == nullptr)
-		{
-			SetError(state, Status::DecodeFailed, "initialize video scaler");
-			return false;
-		}
-		uint8_t* destination[4] = {frame.data.data(), frame.data.data() + luma_bytes, nullptr, nullptr};
-		int destination_pitch[4] = {static_cast<int>(width), static_cast<int>(width), 0, 0};
-		if (sws_scale(state->scaler, source->data, source->linesize, 0, source->height, destination, destination_pitch) <= 0)
-		{
-			SetError(state, Status::DecodeFailed, "convert video frame to NV12");
-			return false;
-		}
-	}
 	state->next_video_timestamp = frame.timestamp_ms +
 	                              (state->info.video_frame_rate > 0.0
 	                                   ? static_cast<uint64_t>(1000.0 / state->info.video_frame_rate + 0.5)
@@ -1094,6 +1095,224 @@ void Decoder::Close()
 		std::lock_guard<std::mutex> lock(state_->mutex);
 		state_->status = Status::Closed;
 	}
+}
+
+struct ElementaryVideoDecoder::State
+{
+	std::string error;
+	int32_t     max_frame_width  = 0;
+	int32_t     max_frame_height = 0;
+#if defined(KYTY_HAVE_FFMPEG)
+	AVCodecContext* context  = nullptr;
+	AVPacket*       packet   = nullptr;
+	AVFrame*        frame    = nullptr;
+	SwsContext*     scaler   = nullptr;
+	bool            drained  = false;
+	std::deque<std::pair<VideoFrame, int64_t>> pictures;
+#endif
+};
+
+ElementaryVideoDecoder::ElementaryVideoDecoder(): state_(std::make_unique<State>()) {}
+
+ElementaryVideoDecoder::~ElementaryVideoDecoder()
+{
+#if defined(KYTY_HAVE_FFMPEG)
+	sws_freeContext(state_->scaler);
+	av_frame_free(&state_->frame);
+	av_packet_free(&state_->packet);
+	avcodec_free_context(&state_->context);
+#endif
+}
+
+#if defined(KYTY_HAVE_FFMPEG)
+// Moves every picture the codec has finished into the queue.
+static bool CollectPictures(ElementaryVideoDecoder::State* state)
+{
+	for (;;)
+	{
+		const int result = avcodec_receive_frame(state->context, state->frame);
+		if (result == AVERROR(EAGAIN) || result == AVERROR_EOF)
+		{
+			return true;
+		}
+		if (result < 0)
+		{
+			state->error = "receive decoded picture";
+			return false;
+		}
+		if (state->frame->width <= 0 || state->frame->height <= 0 || state->frame->width > state->max_frame_width ||
+		    state->frame->height > state->max_frame_height)
+		{
+			state->error = "decoded picture exceeds configured maximum dimensions";
+			av_frame_unref(state->frame);
+			return false;
+		}
+		VideoFrame  picture;
+		const char* copy_error = nullptr;
+		const bool  copied     = CopyNv12Picture(state->frame, static_cast<uint32_t>(state->frame->width),
+		                                         static_cast<uint32_t>(state->frame->height), &state->scaler, &picture, &copy_error);
+		const int64_t tag = state->frame->pts;
+		av_frame_unref(state->frame);
+		if (!copied)
+		{
+			state->error = copy_error;
+			return false;
+		}
+		state->pictures.emplace_back(std::move(picture), tag);
+	}
+}
+#endif
+
+std::unique_ptr<ElementaryVideoDecoder> ElementaryVideoDecoder::Open(VideoCodec codec, int32_t max_frame_width,
+	                                                                 int32_t max_frame_height, std::string* error)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)codec;
+	(void)max_frame_width;
+	(void)max_frame_height;
+	if (error != nullptr)
+	{
+		*error = "FFmpeg is not available";
+	}
+	return nullptr;
+#else
+	if (max_frame_width <= 0 || max_frame_height <= 0)
+	{
+		if (error != nullptr)
+		{
+			*error = "invalid maximum video dimensions";
+		}
+		return nullptr;
+	}
+	std::unique_ptr<ElementaryVideoDecoder> decoder(new ElementaryVideoDecoder());
+	auto*                                   state = decoder->state_.get();
+	state->max_frame_width                   = max_frame_width;
+	state->max_frame_height                  = max_frame_height;
+	const AVCodec* av_codec = avcodec_find_decoder(codec == VideoCodec::Hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
+	state->context          = av_codec != nullptr ? avcodec_alloc_context3(av_codec) : nullptr;
+	state->packet           = av_packet_alloc();
+	state->frame            = av_frame_alloc();
+	if (state->context == nullptr || state->packet == nullptr || state->frame == nullptr)
+	{
+		if (error != nullptr)
+		{
+			*error = "allocate video decoder";
+		}
+		return nullptr;
+	}
+	// Slice threads add no picture latency beyond the stream's own reordering.
+	state->context->thread_type  = FF_THREAD_SLICE;
+	state->context->thread_count = 0;
+	if (avcodec_open2(state->context, av_codec, nullptr) < 0)
+	{
+		if (error != nullptr)
+		{
+			*error = "open video decoder";
+		}
+		return nullptr;
+	}
+	return decoder;
+#endif
+}
+
+bool ElementaryVideoDecoder::Send(const uint8_t* data, size_t size, int64_t tag)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)data;
+	(void)size;
+	(void)tag;
+	return false;
+#else
+	auto* state = state_.get();
+	if (data == nullptr || size == 0 || size > static_cast<size_t>(std::numeric_limits<int>::max()))
+	{
+		state->error = "invalid access unit";
+		return false;
+	}
+	if (state->drained)
+	{
+		avcodec_flush_buffers(state->context);
+		state->drained = false;
+	}
+	av_packet_unref(state->packet);
+	if (av_new_packet(state->packet, static_cast<int>(size)) < 0)
+	{
+		state->error = "allocate access unit";
+		return false;
+	}
+	std::memcpy(state->packet->data, data, size);
+	state->packet->pts = tag;
+	for (;;)
+	{
+		const int result = avcodec_send_packet(state->context, state->packet);
+		if (result == AVERROR(EAGAIN))
+		{
+			if (!CollectPictures(state))
+			{
+				return false;
+			}
+			continue;
+		}
+		if (result < 0)
+		{
+			state->error = "decode access unit";
+			return false;
+		}
+		return CollectPictures(state);
+	}
+#endif
+}
+
+bool ElementaryVideoDecoder::Drain()
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	return false;
+#else
+	auto* state = state_.get();
+	if (!state->drained)
+	{
+		state->drained = true;
+		if (avcodec_send_packet(state->context, nullptr) < 0)
+		{
+			state->error = "drain video decoder";
+			return false;
+		}
+	}
+	return CollectPictures(state);
+#endif
+}
+
+bool ElementaryVideoDecoder::Receive(VideoFrame* frame, int64_t* tag)
+{
+#if !defined(KYTY_HAVE_FFMPEG)
+	(void)frame;
+	(void)tag;
+	return false;
+#else
+	auto* state = state_.get();
+	if (frame == nullptr || tag == nullptr || state->pictures.empty())
+	{
+		return false;
+	}
+	*frame = std::move(state->pictures.front().first);
+	*tag   = state->pictures.front().second;
+	state->pictures.pop_front();
+	return true;
+#endif
+}
+
+void ElementaryVideoDecoder::Reset()
+{
+#if defined(KYTY_HAVE_FFMPEG)
+	avcodec_flush_buffers(state_->context);
+	state_->drained = false;
+	state_->pictures.clear();
+#endif
+}
+
+const char* ElementaryVideoDecoder::LastError() const
+{
+	return state_->error.c_str();
 }
 
 } // namespace Kyty::Emulator::AudioVideoBackend
