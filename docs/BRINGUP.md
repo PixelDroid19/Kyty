@@ -254,6 +254,64 @@ When switching private fixtures (or adding a second root):
 
 ## Current verified frontier
 
+### Dirty-page lookup and admission during a camp transition (2026-10-09)
+
+Observed on a Ryzen 5 7600 and Arc A770 with Mesa 26.2.3, native render
+resolution, silent console output, shader optimization disabled and shader
+validation enabled. Ten saved captures from the 303-second strict baseline
+showed no camp or dialogue; the final image was almost black with a small gold
+sliver. The reference feature revision reached the camp conversation in a
+separate strict run.
+
+Debugger samples of the lookup-only candidate before adding the admission
+budget found all 262,144 page-table slots occupied, including roughly 100,000
+retired protection tokens. The page lookup can scan every slot for a missing
+host-write address. Retiring a page does not imply its token can be discarded.
+
+The correction retains exact page-presence bits per block and checks at most
+eight speculative page and block probes for normal-thread small writes. A
+positive or inconclusive block lookup restarts the exact page lookup. Identity
+publication excludes block-slot reuse during the negative check; the signal
+fault path keeps its original exact lookup and does not acquire this gate.
+
+Registration now shares the existing 131,072-page budget across active and
+retired identities. It checks the complete cover before changing references
+or reactivating retired protection. Refusal leaves late-fault evidence intact;
+Objects with readable mapped guest data continue through the existing
+content-hash update path on later submissions. No table capacity was increased,
+retirement token discarded, wait skipped or workload condition added.
+
+Validation: 114 focused tracker, lookup and VM cases ran (111 passed, three
+host-platform skips); seven label-publication cases passed. The boundary and
+13-table provenance gates passed, as did 77 playable-harness tests. The
+standalone playable guest gate was not run; the native checkpoint below uses
+scripted diagnostic input and does not establish gameplay or audio support.
+
+Native A/B: no saved baseline capture showed camp or dialogue at the
+303-second stop. The same baseline plus this selected change reached it in two
+cold-cache runs, by sampled times of 223 and 163 seconds. The first retained
+that dialogue for at least 82 seconds; the repeat advanced to a visible HUD
+and characters and remained live until the 307-second stop. Both runs ended
+without a fatal or memory-guard stop (312 and 307 seconds). A fresh reference
+feature control also reached the camp/HUD and remained live for 304 seconds.
+Camera positions differed after the scripted route; this proves the camp
+checkpoint, not equivalent rendering or complete playable behavior.
+
+A shared-path roguelike control and candidate each ran for 183 seconds. Both
+reached the house interior with character/HUD and healthy final capture
+metrics. Both retained storage-frontier errors and early capture warnings;
+no fatal, guard stop or WAIT_REG_MEM suspension was recorded. The comparison
+does not establish complete controls, audio or visual correctness.
+
+Limits: tombstones retain probe history, so admission does not guarantee an
+empty slot or a short exact lookup under arbitrary churn. Retired identities
+remain counted even after a later unmap invalidates their protection token;
+new registrations can therefore use hashing until identities are safely
+reused. This preserves lifetime evidence at a capacity and performance cost.
+Long-session performance, other GPUs, complete gameplay and audio remain
+unverified. Dark camp captures also receive a low-entropy heuristic verdict,
+including the reference capture; scene recognition requires visual inspection.
+
 ### Classic runtime and input boundaries (2026-10-08)
 
 This slice completes observed parser/runtime failures and the native compute

@@ -34,6 +34,9 @@ struct GpuDirtyPageTracker::BlockEntry
 {
 	std::atomic<uintptr_t> key {0};
 	std::atomic<uint32_t>  pages {0};
+	// Exact page identities, including retained late-fault metadata.
+	// Identity-gate admission protects readers from block-slot reuse.
+	std::atomic<uint64_t>  page_mask {0};
 	std::atomic<uint64_t>  write_epoch {0};
 	std::atomic<uint64_t>  fallback_epoch {0};
 	// Advanced after each mark is published; edge caches compare it.
@@ -41,6 +44,8 @@ struct GpuDirtyPageTracker::BlockEntry
 };
 
 namespace {
+
+constexpr size_t kLookupProbeLimit = 8u;
 
 constexpr uintptr_t kTombstoneKey      = 1u;
 constexpr uintptr_t kBlockTombstoneKey = std::numeric_limits<uintptr_t>::max();
@@ -122,6 +127,63 @@ GpuDirtyPageTracker::~GpuDirtyPageTracker()
 	}
 	delete m_epoch;
 	delete m_registration_mutex;
+}
+
+void GpuDirtyPageTracker::AcquirePublisher() noexcept
+{
+	uint32_t state = m_identity_gate.load(std::memory_order_acquire);
+	for (;;)
+	{
+		const uint32_t publishers     = state & kIdentityPublisherCountMask;
+		const bool     writer_pending = (state & kIdentityWriterPending) != 0u;
+		// Protect and BeginUnmap announce every run before ending any. Let those
+		// callbacks join while the publisher count is nonzero. Per-run callback
+		// pairs may drain to zero; a pending writer then owns admission.
+		if (publishers == kIdentityPublisherCountMask || (writer_pending && publishers == 0u))
+		{
+			std::this_thread::yield();
+			state = m_identity_gate.load(std::memory_order_acquire);
+			continue;
+		}
+		if (m_identity_gate.compare_exchange_weak(state, state + 1u, std::memory_order_acq_rel, std::memory_order_acquire))
+		{
+			return;
+		}
+	}
+}
+
+void GpuDirtyPageTracker::ReleasePublisher() noexcept
+{
+	m_identity_gate.fetch_sub(1u, std::memory_order_release);
+}
+
+void GpuDirtyPageTracker::AcquireIdentityWriter() noexcept
+{
+	uint32_t state = m_identity_gate.load(std::memory_order_acquire);
+	for (;;)
+	{
+		if ((state & kIdentityWriterPending) != 0u)
+		{
+			std::this_thread::yield();
+			state = m_identity_gate.load(std::memory_order_acquire);
+			continue;
+		}
+		if (m_identity_gate.compare_exchange_weak(state, state | kIdentityWriterPending, std::memory_order_acq_rel,
+		                                          std::memory_order_acquire))
+		{
+			break;
+		}
+	}
+	while ((m_identity_gate.load(std::memory_order_acquire) & kIdentityPublisherCountMask) != 0u)
+	{
+		std::this_thread::yield();
+	}
+}
+
+void GpuDirtyPageTracker::ReleaseIdentityWriter() noexcept
+{
+	EXIT_IF(m_identity_gate.load(std::memory_order_relaxed) != kIdentityWriterPending);
+	m_identity_gate.store(0u, std::memory_order_release);
 }
 
 // Restorers are the paths that apply a captured token without the VM lock.
@@ -218,15 +280,103 @@ const GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindPage(uintptr_t pa
 	return const_cast<GpuDirtyPageTracker*>(this)->FindPage(page);
 }
 
+GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindWritePage(uintptr_t page) noexcept
+{
+	if (page == 0 || m_pages == nullptr)
+	{
+		return nullptr;
+	}
+	const size_t start = GpuDirtyPageTableIndex(page, kPageTableSize - 1u);
+	// Preserve shallow hits without admission. A saturated table otherwise
+	// makes every notification for an untracked page walk the entire table.
+	for (size_t i = 0; i < kLookupProbeLimit; ++i)
+	{
+		auto&           entry = m_pages[(start + i) & (kPageTableSize - 1u)];
+		const uintptr_t key   = entry.key.load(std::memory_order_acquire);
+		if (key == page)
+		{
+			return &entry;
+		}
+		if (key == 0)
+		{
+			return nullptr;
+		}
+	}
+
+	// Normal-thread lookups try admission once and never join a pending
+	// identity writer. Contention retains the ordinary exact lookup. The
+	// signal handler uses FindPage directly and never takes this gate.
+	uint32_t state = m_identity_gate.load(std::memory_order_acquire);
+	if ((state & kIdentityWriterPending) != 0u || (state & kIdentityPublisherCountMask) == kIdentityPublisherCountMask ||
+	    !m_identity_gate.compare_exchange_strong(state, state + 1u, std::memory_order_acq_rel, std::memory_order_acquire))
+	{
+		return FindPage(page);
+	}
+	const auto may_contain_page = [this, page]() noexcept
+	{
+		const uintptr_t key   = BlockKey(page);
+		const size_t    start = GpuDirtyPageTableIndex(key << 12u, kBlockTableSize - 1u);
+		const uint64_t  bit   = uint64_t {1} << ((page / m_page_size) % kBlockPages);
+		for (size_t i = 0; i < kLookupProbeLimit; ++i)
+		{
+			const auto&     block   = m_blocks[(start + i) & (kBlockTableSize - 1u)];
+			const uintptr_t current = block.key.load(std::memory_order_acquire);
+			if (current == key)
+			{
+				return (block.page_mask.load(std::memory_order_acquire) & bit) != 0u;
+			}
+			if (current == 0)
+			{
+				return false;
+			}
+		}
+		// A deep block collision is inconclusive. Never turn a short page
+		// miss into a full secondary-table scan, or skip a hidden identity.
+		return true;
+	};
+	const bool exists = may_contain_page();
+	ReleasePublisher();
+	// Release admission before a notification can wait on a page transition.
+	// Restart a positive lookup: an identity writer may now reuse any slot.
+	return exists ? FindPage(page) : nullptr;
+}
+
+void GpuDirtyPageTracker::ReactivateRetiredPage(PageEntry* entry) noexcept
+{
+	if (entry->refs.load(std::memory_order_acquire) != 0u ||
+	    entry->protection_state.load(std::memory_order_acquire) != static_cast<uint32_t>(GpuDirtyProtectionState::Retired))
+	{
+		return;
+	}
+	AcquireIdentityWriter();
+	// A late fault may still be resolving the retired protection token.
+	RaiseFence();
+	if (entry->refs.load(std::memory_order_acquire) == 0u &&
+	    entry->protection_state.load(std::memory_order_acquire) == static_cast<uint32_t>(GpuDirtyProtectionState::Retired))
+	{
+		entry->generation.store(0, std::memory_order_relaxed);
+		entry->write_epoch.store(0, std::memory_order_relaxed);
+		entry->fallback_epoch.store(0, std::memory_order_relaxed);
+		entry->original_mode.store(0, std::memory_order_relaxed);
+		entry->original_token.store(0, std::memory_order_relaxed);
+		entry->original_mode_valid.store(0, std::memory_order_relaxed);
+		entry->protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_release);
+	}
+	LowerFence();
+	ReleaseIdentityWriter();
+}
+
 GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t page) noexcept
 {
 	const size_t start = GpuDirtyPageTableIndex(page, kPageTableSize - 1u);
 	PageEntry*   first_tombstone = nullptr;
-	auto initialize = [this, page](PageEntry* entry) noexcept -> PageEntry*
+	auto         initialize      = [this, page](PageEntry* entry) noexcept -> PageEntry*
 	{
+		AcquireIdentityWriter();
 		const uint32_t block = FindOrCreateBlock(page);
 		if (block == kNoBlock)
 		{
+			ReleaseIdentityWriter();
 			return nullptr;
 		}
 		m_blocks[block].pages.fetch_add(1, std::memory_order_relaxed);
@@ -239,7 +389,10 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 		entry->original_mode.store(0, std::memory_order_relaxed);
 		entry->original_token.store(0, std::memory_order_relaxed);
 		entry->original_mode_valid.store(0, std::memory_order_relaxed);
+		m_blocks[block].page_mask.fetch_or(uint64_t {1} << ((page / m_page_size) % kBlockPages), std::memory_order_relaxed);
 		entry->key.store(page, std::memory_order_release);
+		++m_page_identity_count;
+		ReleaseIdentityWriter();
 		return entry;
 	};
 	for (size_t i = 0; i < kPageTableSize; i++)
@@ -248,20 +401,7 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 		const uintptr_t key   = entry.key.load(std::memory_order_relaxed);
 		if (key == page)
 		{
-			if (entry.refs.load(std::memory_order_acquire) == 0u &&
-			    entry.protection_state.load(std::memory_order_acquire) == static_cast<uint32_t>(GpuDirtyProtectionState::Retired))
-			{
-				// A late fault may still be resolving the retired page.
-				RaiseFence();
-				entry.generation.store(0, std::memory_order_relaxed);
-				entry.write_epoch.store(0, std::memory_order_relaxed);
-				entry.fallback_epoch.store(0, std::memory_order_relaxed);
-				entry.original_mode.store(0, std::memory_order_relaxed);
-				entry.original_token.store(0, std::memory_order_relaxed);
-				entry.original_mode_valid.store(0, std::memory_order_relaxed);
-				entry.protection_state.store(static_cast<uint32_t>(GpuDirtyProtectionState::Writable), std::memory_order_release);
-				LowerFence();
-			}
+			ReactivateRetiredPage(&entry);
 			return &entry;
 		}
 		if (key == kTombstoneKey)
@@ -280,18 +420,26 @@ GpuDirtyPageTracker::PageEntry* GpuDirtyPageTracker::FindOrCreatePage(uintptr_t 
 	return first_tombstone != nullptr ? initialize(first_tombstone) : nullptr;
 }
 
-// A slot changes identity only while no restorer can hold it: a fault that
-// resolved the old page finishes first, and later lookups skip the tombstone.
+// A slot changes identity only while publishers and restorers cannot hold it.
+// Later fault lookups skip the tombstone and will resolve any reused key anew.
 void GpuDirtyPageTracker::ReleasePageSlot(PageEntry* entry) noexcept
 {
+	AcquireIdentityWriter();
 	RaiseFence();
+	const uintptr_t page  = entry->key.load(std::memory_order_relaxed);
 	const uint32_t block = entry->block.exchange(kNoBlock, std::memory_order_acq_rel);
 	entry->key.store(kTombstoneKey, std::memory_order_release);
-	LowerFence();
-	if (block < kBlockTableSize && m_blocks[block].pages.fetch_sub(1, std::memory_order_acq_rel) == 1u)
+	--m_page_identity_count;
+	if (block < kBlockTableSize)
 	{
-		m_blocks[block].key.store(kBlockTombstoneKey, std::memory_order_release);
+		m_blocks[block].page_mask.fetch_and(~(uint64_t {1} << ((page / m_page_size) % kBlockPages)), std::memory_order_relaxed);
+		if (m_blocks[block].pages.fetch_sub(1, std::memory_order_acq_rel) == 1u)
+		{
+			m_blocks[block].key.store(kBlockTombstoneKey, std::memory_order_release);
+		}
 	}
+	LowerFence();
+	ReleaseIdentityWriter();
 }
 
 uintptr_t GpuDirtyPageTracker::BlockKey(uintptr_t page) const noexcept
@@ -332,6 +480,7 @@ uint32_t GpuDirtyPageTracker::FindOrCreateBlock(uintptr_t page) noexcept
 	{
 		auto& entry = m_blocks[index];
 		entry.pages.store(0, std::memory_order_relaxed);
+		entry.page_mask.store(0, std::memory_order_relaxed);
 		entry.write_epoch.store(0, std::memory_order_relaxed);
 		entry.fallback_epoch.store(0, std::memory_order_relaxed);
 		entry.changes.fetch_add(1, std::memory_order_relaxed);
@@ -461,7 +610,10 @@ void GpuDirtyPageTracker::VisitWritePages(uintptr_t first, uintptr_t last, const
 	{
 		for (uintptr_t page = first;; page += m_page_size)
 		{
-			if (auto* entry = FindPage(page); entry != nullptr) { visitor(entry, page); }
+			if (auto* entry = FindWritePage(page); entry != nullptr)
+			{
+				visitor(entry, page);
+			}
 			if (page == last) { break; }
 		}
 		return;
@@ -527,6 +679,29 @@ bool GpuDirtyPageTracker::RestoreRetirementRun(uintptr_t first, uintptr_t last, 
 	return batch_restored;
 }
 
+// Preflight the complete cover before changing refs or retired protection. A
+// refused optimization must not discard a token still needed by a late fault.
+bool GpuDirtyPageTracker::HasPageCapacity(uintptr_t first, uintptr_t last) const noexcept
+{
+	size_t remaining = kMaxPages - m_page_identity_count;
+	for (uintptr_t page = first;; page += m_page_size)
+	{
+		if (FindPage(page) == nullptr)
+		{
+			if (remaining == 0u)
+			{
+				return false;
+			}
+			--remaining;
+		}
+		if (page == last || page > last - m_page_size)
+		{
+			break;
+		}
+	}
+	return true;
+}
+
 bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 {
 	if (!m_enabled || m_page_size == 0 || address == 0 || size == 0)
@@ -553,6 +728,10 @@ bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 		return true;
 	}
 	if (m_ranges.size() >= kMaxRanges)
+	{
+		return false;
+	}
+	if (!HasPageCapacity(first, last))
 	{
 		return false;
 	}
@@ -1645,7 +1824,9 @@ GpuDirtyTrackingMode GpuDirtyPageTracker::Mode(uintptr_t address, size_t size) c
 
 void GpuDirtyPageTracker::AuthorityBeginChange(void* context, uint64_t /*address*/, uint64_t /*size*/) noexcept
 {
-	static_cast<GpuDirtyPageTracker*>(context)->RaiseFence();
+	auto* self = static_cast<GpuDirtyPageTracker*>(context);
+	self->AcquirePublisher();
+	self->RaiseFence();
 }
 
 // Reports which pages keep write removed under the new protection: the pages
@@ -1696,6 +1877,7 @@ void GpuDirtyPageTracker::AuthorityEndChange(void* context, const Core::VirtualM
 	{
 		self->PublishAuthorityChange(change);
 	}
+	self->ReleasePublisher();
 	self->LowerFence();
 }
 

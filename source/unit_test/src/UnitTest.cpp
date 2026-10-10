@@ -42,6 +42,7 @@ UT_LINK(EmulatorShaderArithmetic);
 UT_LINK(EmulatorShaderMaskValues);
 UT_LINK(EmulatorShaderLdsBounds);
 UT_LINK(EmulatorGraphicsDirtyTracking);
+UT_LINK(EmulatorGraphicsDirtyLookup);
 UT_LINK(EmulatorGraphicsGdsRange);
 UT_LINK(EmulatorGraphicsOperationTrace);
 UT_LINK(EmulatorShaderResourceFoldReplay);

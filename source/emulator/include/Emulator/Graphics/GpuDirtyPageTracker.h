@@ -151,6 +151,8 @@ public:
 	[[nodiscard]] bool PageGenerations(uintptr_t address, size_t size, uint64_t* generations, size_t count) const noexcept;
 
 private:
+	friend struct GpuDirtyPageTrackerTestAccess;
+
 	struct PageEntry;
 	struct BlockEntry;
 
@@ -191,9 +193,10 @@ private:
 		Denied
 	};
 
-	// Fixed, bounded page metadata with 262,144 slots and a 131,072-page limit
-	// per registered range (512 MiB on a 4 KiB host). Large texture atlases
-	// otherwise exhaust the cover and force stable full-range hashes.
+	// Fixed, bounded page metadata with 262,144 slots. Active and retired
+	// identities share a 131,072-page admission budget. Tombstones retain probe
+	// history; the normal-write hint bounds conclusive missing-page lookups.
+	// Each range has the same page bound (512 MiB on a 4 KiB host).
 	static constexpr size_t kPageTableSize = 1u << 18u;
 	static constexpr size_t kMaxPages      = kPageTableSize / 2u;
 	// Summaries of kBlockPages consecutive pages answer queries over fully
@@ -201,6 +204,10 @@ private:
 	static constexpr size_t   kBlockPages     = 64u;
 	static constexpr size_t   kBlockTableSize = 1u << 17u;
 	static constexpr uint32_t kNoBlock        = UINT32_MAX;
+	// The high bit reserves the gate for a page/block identity writer after the
+	// current VM publisher transaction drains the low-bit callback count.
+	static constexpr uint32_t kIdentityWriterPending      = 0x80000000u;
+	static constexpr uint32_t kIdentityPublisherCountMask = kIdentityWriterPending - 1u;
 	// Range records are ordinary heap metadata, used only under the
 	// registration mutex. Each registration needs at least one page entry.
 	static constexpr size_t kMaxRanges = kMaxPages;
@@ -213,7 +220,10 @@ private:
 	[[nodiscard]] uintptr_t         RangeEnd(uintptr_t address, size_t size) const noexcept;
 	[[nodiscard]] PageEntry*        FindPage(uintptr_t page) noexcept;
 	[[nodiscard]] const PageEntry*  FindPage(uintptr_t page) const noexcept;
+	[[nodiscard]] PageEntry*         FindWritePage(uintptr_t page) noexcept;
 	[[nodiscard]] PageEntry*        FindOrCreatePage(uintptr_t page) noexcept;
+	[[nodiscard]] bool               HasPageCapacity(uintptr_t first, uintptr_t last) const noexcept;
+	void                             ReactivateRetiredPage(PageEntry* entry) noexcept;
 	void                            ReleasePageSlot(PageEntry* entry) noexcept;
 	[[nodiscard]] uintptr_t         BlockKey(uintptr_t page) const noexcept;
 	[[nodiscard]] const BlockEntry* FindBlock(uintptr_t page) const noexcept;
@@ -228,6 +238,12 @@ private:
 	void                            MarkFallback(uintptr_t page, uintptr_t end) noexcept;
 	void                            MarkPageFallback(PageEntry* page) noexcept;
 	void                            MarkPageWrite(PageEntry* page) noexcept;
+	// Normal-thread admission uses the same yield-based wait as the restorer
+	// fence and adds no mutex acquisition to VM callbacks.
+	void                             AcquirePublisher() noexcept;
+	void                             ReleasePublisher() noexcept;
+	void                             AcquireIdentityWriter() noexcept;
+	void                             ReleaseIdentityWriter() noexcept;
 	[[nodiscard]] bool              TryEnterRestorer() noexcept;
 	void                            LeaveRestorer() noexcept;
 	void                            EnterRestorer() noexcept;
@@ -265,6 +281,9 @@ private:
 	std::unique_ptr<PageEntry[]>  m_pages;
 	std::unique_ptr<BlockEntry[]> m_blocks;
 	std::map<RangeKey, RangeRecord> m_ranges;
+	// Counts every keyed identity, including retained late-fault evidence.
+	// Read and changed only under m_registration_mutex.
+	size_t                        m_page_identity_count = 0;
 	uintptr_t                     m_max_range_bytes    = 0;
 	mutable std::mutex*           m_registration_mutex = nullptr;
 	std::atomic<uint64_t>*        m_epoch              = nullptr;
@@ -273,6 +292,12 @@ private:
 	// and back off while m_authority_fences is nonzero; a VM change or a slot
 	// identity change raises the fence and waits for announced restorers.
 	Core::VirtualMemory::WriteLeaseAuthority m_authority {};
+	// Native VM publishers share the page table. The backend serializes
+	// Protect/BeginUnmap transactions; they can announce several runs before
+	// ending any. Release pairs callbacks per run, so its count may drain between
+	// runs; owner lifetime excludes concurrent slot users during destruction.
+	// An identity writer drains active callbacks, then uses the restorer fence.
+	std::atomic<uint32_t>         m_identity_gate {0};
 	std::atomic<uint32_t>         m_restorers {0};
 	std::atomic<uint32_t>         m_authority_fences {0};
 	bool                          m_enabled = true;
