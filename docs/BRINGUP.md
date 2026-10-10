@@ -294,6 +294,72 @@ The adjacent-mapping indirect-register snapshot change retains a separate range 
 It bounds register count and validates the complete allocated span, but does not prove atomicity against a concurrent
 guest free/remap. Submission-time guest ownership remains an unresolved condition; this is not a lifetime-race fix.
 
+### Loading regression under expanded dirty-page admission (2026-10-09, unresolved)
+
+A fresh strict run of the selected published source above reached the beat 'em
+up's camp cinematic at about 184 seconds. The maintainer confirmed manually
+closing that run at about 200 seconds; exit zero was not an unexplained guest
+termination. A bounded scripted route and one observed agent tap were used.
+This establishes that cinematic checkpoint, not combat, audible audio,
+sustained playability or native-like performance.
+
+Two immutable binaries from a separate dirty integration candidate continued
+presenting the loading glyph in bounded runs of about 284 and 304 seconds,
+without a recorded fatal error. Those binaries include uncommitted changes;
+the observation cannot be attributed to the candidate's committed HEAD alone.
+The second run used debugger profiling. All runs used Native resolution,
+Silent logging, shader validation, no shader optimization, isolated cold shader
+caches, and the same private route and Intel Vulkan driver. These settings and
+debugger pauses are not a normal-performance benchmark.
+
+A paired, read-only debugger probe sampled dirty-page metadata using each
+binary's own type layout. It persisted aggregate counts, not guest bytes:
+
+| Approximately 75-second diagnostic sample | Published source | Dirty integration candidate |
+| --- | ---: | ---: |
+| Page-table capacity | 262,144 | 262,144 |
+| Occupied slots | 123,195 | 262,144 |
+| Empty slots | 138,949 | 0 |
+| Pages with active references | 87,519 | 161,538 |
+| Token-valid retired pages without references | 35,676 | 100,606 |
+
+The integration candidate already had no empty slots at the 35-second sample.
+At the owned stop its loading thread was in `FindPage`, reached through
+`VisitWritePages`, `NotifyWrite` and `c_memcpy` for a 16-byte write. The actual
+binary's lookup loop was inspected separately. `GpuDirtyPageTracker::FindPage`
+(`source/emulator/src/Graphics/GpuDirtyPageTracker.cpp:113` in the selected
+source) stops on an empty key or a match, otherwise scans the full table.
+Consequently every absent-page lookup costs 262,144 probes when no empty key
+remains. The expanded candidate permits many more registered ranges while
+retaining that fixed page-table capacity. The published source's smaller range
+admission was full at 512 entries at its owned stop. Restoring that cap would
+not establish a correct scalability repair.
+
+Table saturation and lookup activity were observed on the loading path. The
+sampled call's hit/miss, cost and frequency remain unmeasured; its causal
+contribution to the branch difference is still a hypothesis. Loading
+allocation/release counters continued to advance. A later-window sample recorded
+256 distinct direct memory releases, all returning zero, with a maximum duration below 380 ms.
+Seeing the same release caller in two stack samples therefore did not establish
+one permanently blocked release or an infinite GPU wait.
+
+Do not erase token-bearing retired slots merely because their reference count
+is zero: unregistration attempts to restore ordinary permissions, and
+`UnregisterRetainsLateWritableFaultEvidence` requires a later write fault to
+remain handled after a successful restore. Failed or uncertain restores must
+retain the corresponding authority and fault evidence. A repair must bound
+absent-page lookup cost while preserving late-fault evidence, mapping identity, authority fencing and denied-protection
+behavior. Reclamation inside a VM authority callback must not wait on the
+publisher count held by that callback. Next acceptance requires a deterministic
+saturated-table reproducer with a bounded lookup-cost contract and checks for
+active, re-registered and retired pages, denied-write/unmap transitions, failed
+restores and changed authority. Any early reclamation proposal also needs a
+deterministic pending-fault test paused after page lookup and before restorer
+announcement. A controlled A/B must establish the repair's loading effect, followed by a strict run reaching and holding the cinematic
+checkpoint and continuing beyond it without a fatal error. Native captures and
+real action-response evidence remain required before any gameplay claim. No
+runtime repair was made by this investigation.
+
 ### Mechanical-fist platformer startup frontier (2026-10-08, not gameplay)
 
 These runs used the full local candidate, including changes held from publication. They used Silent logging,
