@@ -464,19 +464,19 @@ static bool DecodeDataFormat(uint32_t data_format, uint32_t* channels_out, uint3
 static bool IsGuestWritableRange(const void* pointer, size_t size)
 {
 	return pointer != nullptr && size != 0 &&
-	       Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(pointer), static_cast<uint64_t>(size));
+	       Core::VirtualMemory::IsRangeWritableOrLent(reinterpret_cast<uint64_t>(pointer), static_cast<uint64_t>(size));
 }
 
 static bool CopyFromGuest(void* destination, const void* source, size_t size)
 {
 	return destination != nullptr && source != nullptr && size != 0 &&
-	       Core::VirtualMemory::CopyFromGuest(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
+	       Core::VirtualMemory::CopyFromGuestOrLent(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
 }
 
 static bool CopyToGuest(void* destination, const void* source, size_t size)
 {
 	return destination != nullptr && source != nullptr && size != 0 &&
-	       Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
+	       Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
 }
 
 struct CapturedContextProfile

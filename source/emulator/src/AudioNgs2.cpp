@@ -413,13 +413,13 @@ constexpr size_t kNgs2VoiceWorkspaceSlotBytes   = sizeof(uintptr_t);
 static bool Ngs2CopyFromGuest(void* destination, const void* source, size_t size)
 {
 	return destination != nullptr && source != nullptr && size != 0 &&
-	       Core::VirtualMemory::CopyFromGuest(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
+	       Core::VirtualMemory::CopyFromGuestOrLent(destination, reinterpret_cast<uint64_t>(source), static_cast<uint64_t>(size));
 }
 
 static bool Ngs2CopyToGuest(void* destination, const void* source, size_t size)
 {
 	return destination != nullptr && source != nullptr && size != 0 &&
-	       Core::VirtualMemory::CopyToGuest(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
+	       Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
 }
 
 template <typename T> static bool Ngs2ReadGuest(T* destination, const T* source)
@@ -435,7 +435,7 @@ template <typename T> static bool Ngs2WriteGuest(T* destination, const T& source
 static bool Ngs2IsGuestWritable(const void* pointer, size_t size)
 {
 	return pointer != nullptr && size != 0 &&
-	       Core::VirtualMemory::IsRangeWritable(reinterpret_cast<uint64_t>(pointer), static_cast<uint64_t>(size));
+	       Core::VirtualMemory::IsRangeWritableOrLent(reinterpret_cast<uint64_t>(pointer), static_cast<uint64_t>(size));
 }
 
 static bool Ngs2CalculatePcmBytes(uint64_t frames, uint32_t channels, size_t* bytes_out)
@@ -1607,7 +1607,7 @@ static bool Ngs2ReadPcmBlock(const Ngs2SamplerSetup& setup, uintptr_t guest_data
 	const bool     is_float = setup.waveform_type == kNgs2WaveformTypePcmF32;
 	const uint64_t samples  = static_cast<uint64_t>(entry.num_skip_samples) + entry.num_samples;
 	const uint64_t bytes    = samples * channels * (is_float ? sizeof(float) : sizeof(int16_t));
-	if (bytes > entry.data_size || !Ngs2GuestSpanInRange(guest_data, bytes) || !Core::VirtualMemory::IsRangeReadable(guest_data, bytes))
+	if (bytes > entry.data_size || !Ngs2GuestSpanInRange(guest_data, bytes) || !Core::VirtualMemory::IsRangeReadableOrLent(guest_data, bytes))
 	{
 		return false;
 	}
@@ -1666,7 +1666,7 @@ static bool Ngs2DecodeAtrac9Block(AudioVideoBackend::ElementaryAudioDecoder* dec
 			return false;
 		}
 		const uintptr_t address = guest_data + static_cast<uintptr_t>(offset);
-		if (!Core::VirtualMemory::IsRangeReadable(address, superframe) ||
+		if (!Core::VirtualMemory::IsRangeReadableOrLent(address, superframe) ||
 		    !Ngs2CopyFromGuest(bytes.data(), reinterpret_cast<const void*>(address), bytes.size()) ||
 		    !decoder->Decode(bytes.data(), bytes.size(), &packet_pcm) || packet_pcm.empty())
 		{

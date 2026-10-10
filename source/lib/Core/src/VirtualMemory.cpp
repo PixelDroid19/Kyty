@@ -10,6 +10,7 @@
 #endif
 
 #include <cstring>
+#include <map>
 #include <vector>
 #include "Kyty/Core/VirtualMemory.h"
 
@@ -2116,6 +2117,88 @@ bool CopyFromGuest(void* destination, uint64_t source, uint64_t size)
 bool CopyToGuest(uint64_t destination, const void* source, uint64_t size)
 {
 	return source != nullptr && sys_virtual_copy_to_guest(destination, source, size);
+}
+
+// Lent host allocations keyed by start address, mapped to their end. Copies hold the lock, so a reclaim (and the free
+// after it) never races a transfer.
+static std::mutex                   g_lent_mutex;
+static std::map<uint64_t, uint64_t> g_lent_allocations;
+
+void LendHostAllocation(uint64_t address, uint64_t size)
+{
+	EXIT_IF(address == 0 || size == 0 || address > UINT64_MAX - size);
+	std::lock_guard lock(g_lent_mutex);
+	const auto      next = g_lent_allocations.lower_bound(address);
+	EXIT_IF(next != g_lent_allocations.end() && next->first < address + size);
+	EXIT_IF(next != g_lent_allocations.begin() && std::prev(next)->second > address);
+	g_lent_allocations.emplace(address, address + size);
+}
+
+void ReclaimHostAllocation(uint64_t address)
+{
+	std::lock_guard lock(g_lent_mutex);
+	EXIT_IF(g_lent_allocations.erase(address) != 1);
+}
+
+static bool lent_range_contains_locked(uint64_t address, uint64_t size)
+{
+	if (size == 0 || address > UINT64_MAX - size)
+	{
+		return false;
+	}
+	auto it = g_lent_allocations.upper_bound(address);
+	if (it == g_lent_allocations.begin())
+	{
+		return false;
+	}
+	--it;
+	return address + size <= it->second;
+}
+
+static bool is_range_lent(uint64_t address, uint64_t size)
+{
+	std::lock_guard lock(g_lent_mutex);
+	return lent_range_contains_locked(address, size);
+}
+
+bool IsRangeReadableOrLent(uint64_t address, uint64_t size)
+{
+	return IsRangeReadable(address, size) || is_range_lent(address, size);
+}
+
+bool IsRangeWritableOrLent(uint64_t address, uint64_t size)
+{
+	return IsRangeWritable(address, size) || is_range_lent(address, size);
+}
+
+bool CopyFromGuestOrLent(void* destination, uint64_t source, uint64_t size)
+{
+	if (CopyFromGuest(destination, source, size))
+	{
+		return true;
+	}
+	std::lock_guard lock(g_lent_mutex);
+	if (destination == nullptr || !lent_range_contains_locked(source, size))
+	{
+		return false;
+	}
+	std::memcpy(destination, reinterpret_cast<const void*>(source), size);
+	return true;
+}
+
+bool CopyToGuestOrLent(uint64_t destination, const void* source, uint64_t size)
+{
+	if (CopyToGuest(destination, source, size))
+	{
+		return true;
+	}
+	std::lock_guard lock(g_lent_mutex);
+	if (source == nullptr || !lent_range_contains_locked(destination, size))
+	{
+		return false;
+	}
+	std::memcpy(reinterpret_cast<void*>(destination), source, size);
+	return true;
 }
 
 static bool guest_mapping_range_in_budget(uint64_t address, uint64_t size)

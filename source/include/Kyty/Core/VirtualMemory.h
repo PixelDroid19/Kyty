@@ -224,6 +224,16 @@ bool VisitReadableGuestRange(uint64_t address, uint64_t size, ReadableGuestRange
 // and the copy. This serializes the transfer with Free() and Protect().
 bool           CopyFromGuest(void* destination, uint64_t source, uint64_t size);
 bool           CopyToGuest(uint64_t destination, const void* source, uint64_t size);
+// Host allocations an HLE allocator hands to the guest (libc before the application heap exists). They are guest
+// memory by contract but never guest mappings: protection, tracking and mapping identities do not apply to them.
+// Lend after allocating; reclaim before freeing, which waits for copies in flight. Lent ranges must not overlap.
+void           LendHostAllocation(uint64_t address, uint64_t size);
+void           ReclaimHostAllocation(uint64_t address);
+// HLE argument access: the guest-owned checks and copies above, or a range inside one lent host allocation.
+bool           IsRangeReadableOrLent(uint64_t address, uint64_t size);
+bool           IsRangeWritableOrLent(uint64_t address, uint64_t size);
+bool           CopyFromGuestOrLent(void* destination, uint64_t source, uint64_t size);
+bool           CopyToGuestOrLent(uint64_t destination, const void* source, uint64_t size);
 // The guest mapping instances that covered a guest range at one instant. Every successful map,
 // shared view, commit, decommit, or reservation (re)publication gives its interval a fresh
 // identity, even when it reuses the address or the backing bytes of an earlier mapping.
