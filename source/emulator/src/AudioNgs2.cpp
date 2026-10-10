@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -206,9 +207,11 @@ struct Ngs2CustomSamplerFormatParam
 };
 static_assert(sizeof(Ngs2CustomSamplerFormatParam) == 40);
 
+// The guest starts a block part-way by offsetting into the data it submits: offset_bytes skips the first frames, and
+// data_size and frame_count count only what follows.
 struct Ngs2CustomSamplerWaveformContext
 {
-	uint64_t offset_frames;
+	uint64_t offset_bytes;
 	uint64_t data_size;
 	uint64_t reserved;
 	uint64_t frame_count;
@@ -401,6 +404,10 @@ constexpr uint32_t kNgs2DefaultGrainSamples    = 256;
 constexpr uint32_t kNgs2DefaultSampleRate      = 48000;
 constexpr uint32_t kNgs2MaxGrainSamples        = 8192;
 constexpr uint32_t kNgs2MaxRackVoices          = 256;
+// Host bounds on the blocks one custom sampler voice holds: their count matches the end callback budget per voice, and
+// their frames cap the snapshot copies (16 MiB of stereo PCM16).
+constexpr size_t   kNgs2MaxCustomQueuedBlocks  = 64;
+constexpr uint64_t kNgs2MaxCustomQueuedFrames  = 1ull << 22u;
 constexpr size_t   kNgs2MaxRackOptionBytes     = 0x518;
 
 // Workspaces are guest ABI identities only. These opaque slots are never
@@ -792,16 +799,28 @@ static bool Ngs2SnapshotRackConfig(uint32_t rack_id, const Ngs2RackOption* optio
 	return true;
 }
 
+// One custom sampler block, snapshotted when the guest submits it.
+struct Ngs2PcmBlock
+{
+	std::vector<int16_t> samples;
+	uint32_t             channels    = 0;
+	uint64_t             frame_count = 0;
+	// The guest's block address and user data, returned unchanged by the block end callback.
+	uintptr_t            guest_data = 0;
+	uintptr_t            user_data  = 0;
+};
+
 struct Ngs2PcmStream
 {
-	uint32_t             format_id   = 0;
-	uint32_t             channels    = 0;
-	uint32_t             sample_rate = 0;
-	float                gain        = 1.0f;
-	bool                 playing     = false;
-	std::vector<int16_t> samples;
-	uint64_t             frame_count  = 0;
-	double               source_frame = 0.0;
+	uint32_t                 format_id   = 0;
+	uint32_t                 channels    = 0;
+	uint32_t                 sample_rate = 0;
+	float                    gain        = 1.0f;
+	bool                     playing     = false;
+	// Blocks play in submission order; the cursor is in the front one.
+	std::deque<Ngs2PcmBlock> blocks;
+	uint64_t                 queued_frames = 0;
+	double                   source_frame  = 0.0;
 };
 
 namespace AudioVideoBackend = ::Kyty::Emulator::AudioVideoBackend;
@@ -897,37 +916,40 @@ static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceRecord& voice)
 	return 0;
 }
 
+// Mixes the queued blocks in order, so consecutive blocks play without a gap. A block that plays to its last frame moves
+// to finished; the stream ends when no block is left.
 static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, double* output, uint32_t output_frames, uint32_t output_channels,
-	                            uint32_t output_rate)
+                             uint32_t output_rate, std::vector<Ngs2PcmBlock>* finished)
 {
-	if (stream == nullptr || output == nullptr || (stream->channels != 1 && stream->channels != 2) || output_channels != 2 ||
-	    stream->sample_rate == 0 || output_rate == 0 || stream->frame_count == 0)
+	if (stream->sample_rate == 0 || output_rate == 0 || output_channels != 2)
 	{
 		return false;
 	}
-	size_t expected_bytes = 0;
-	if (!Ngs2CalculatePcmBytes(stream->frame_count, stream->channels, &expected_bytes) ||
-	    stream->samples.size() != expected_bytes / sizeof(int16_t))
-	{
-		return false;
-	}
-
 	const double step = static_cast<double>(stream->sample_rate) / static_cast<double>(output_rate);
 	for (uint32_t frame = 0; frame < output_frames; ++frame)
 	{
-		if (stream->source_frame >= static_cast<double>(stream->frame_count))
+		while (!stream->blocks.empty() && stream->source_frame >= static_cast<double>(stream->blocks.front().frame_count))
 		{
-			stream->playing = false;
+			stream->source_frame -= static_cast<double>(stream->blocks.front().frame_count);
+			stream->queued_frames -= stream->blocks.front().frame_count;
+			finished->push_back(std::move(stream->blocks.front()));
+			stream->blocks.pop_front();
+		}
+		if (stream->blocks.empty())
+		{
+			stream->playing      = false;
+			stream->source_frame = 0.0;
 			return false;
 		}
-		const auto  index      = static_cast<uint64_t>(stream->source_frame);
-		const float fraction   = static_cast<float>(stream->source_frame - static_cast<double>(index));
-		const auto  next_index = index + 1 < stream->frame_count ? index + 1 : index;
+		const Ngs2PcmBlock& block      = stream->blocks.front();
+		const auto          index      = static_cast<uint64_t>(stream->source_frame);
+		const float         fraction   = static_cast<float>(stream->source_frame - static_cast<double>(index));
+		const auto          next_index = index + 1 < block.frame_count ? index + 1 : index;
 		for (uint32_t channel = 0; channel < output_channels; ++channel)
 		{
-			const uint32_t source_channel = stream->channels == 1 ? 0 : channel;
-			const float current = static_cast<float>(stream->samples[index * stream->channels + source_channel]) / 32768.0f;
-			const float next = static_cast<float>(stream->samples[next_index * stream->channels + source_channel]) / 32768.0f;
+			const uint32_t source_channel = block.channels == 1 ? 0 : channel;
+			const float current = static_cast<float>(block.samples[index * block.channels + source_channel]) / 32768.0f;
+			const float next = static_cast<float>(block.samples[next_index * block.channels + source_channel]) / 32768.0f;
 			// Gained but not clipped: the system mix sums in double and clamps once,
 			// so opposite-sign voices still cancel before the final clamp.
 			output[frame * output_channels + channel] += static_cast<double>(current + (next - current) * fraction) * static_cast<double>(stream->gain);
@@ -1822,6 +1844,17 @@ static int32_t Ngs2SetVoiceCallback(Ngs2VoiceRecord& voice, const Ngs2VoiceCallb
 	return OK;
 }
 
+// Callback registration shared by the standard and custom sampler voices: one layout, block end only.
+static int32_t Ngs2ControlVoiceCallback(Ngs2VoiceRecord& voice, const Ngs2VoiceParamHeader& header, const Ngs2VoiceParamHeader* param_list)
+{
+	Ngs2VoiceCallbackParam param {};
+	if (header.size != sizeof(param) || !Ngs2ReadGuest(&param, reinterpret_cast<const Ngs2VoiceCallbackParam*>(param_list)))
+	{
+		return kNgs2InvalidControl;
+	}
+	return Ngs2SetVoiceCallback(voice, param);
+}
+
 // Standard sampler controls. Any other ID is refused, never ignored.
 static int32_t Ngs2SamplerControl(Ngs2VoiceRecord& voice, const Ngs2VoiceParamHeader& header, const Ngs2VoiceParamHeader* param_list)
 {
@@ -1851,14 +1884,23 @@ static int32_t Ngs2SamplerControl(Ngs2VoiceRecord& voice, const Ngs2VoiceParamHe
 			}
 			return Ngs2SetSamplerPitch(voice, param);
 		}
-		case kNgs2VoiceParamCallback: {
-			Ngs2VoiceCallbackParam param {};
-			if (header.size != sizeof(param) || !Ngs2ReadGuest(&param, reinterpret_cast<const Ngs2VoiceCallbackParam*>(param_list)))
-			{
-				return kNgs2InvalidControl;
-			}
-			return Ngs2SetVoiceCallback(voice, param);
-		}
+		case kNgs2VoiceParamCallback: return Ngs2ControlVoiceCallback(voice, header, param_list);
+		default: return kNgs2InvalidControl;
+	}
+}
+
+// Event commands of a voice that only routes other voices (mastering, submixer, reverb). It has no source data, so
+// play and immediate stop change only its state.
+static int32_t Ngs2MixerRunCommand(Ngs2VoiceRecord& voice, const std::array<uint32_t, 3>& command)
+{
+	if (command[0] != 2u || command[1] != 0x400u)
+	{
+		return kNgs2InvalidControl;
+	}
+	switch (command[2])
+	{
+		case 1u: voice.event = Ngs2VoicePlayEvent::Play; return OK;
+		case 8u: voice.event = Ngs2VoicePlayEvent::StopImm; return OK;
 		default: return kNgs2InvalidControl;
 	}
 }
@@ -1923,6 +1965,16 @@ static void Ngs2QueueSamplerEvent(const std::shared_ptr<Ngs2VoiceRecord>& voice,
 	pending->push_back(std::move(callback));
 }
 
+// Queues the end callback of a custom sampler block that played to its last frame.
+static void Ngs2QueueBlockEnd(const std::shared_ptr<Ngs2VoiceRecord>& voice, const Ngs2PcmBlock& block, std::vector<Ngs2PendingCallback>* pending)
+{
+	Ngs2Sampler::Event event {};
+	event.user_data  = block.user_data;
+	event.guest_data = block.guest_data;
+	event.guest_size = block.samples.size() * sizeof(int16_t);
+	Ngs2QueueSamplerEvent(voice, event, pending);
+}
+
 // Renders one grain of a standard sampler voice into the stereo sum.
 static void Ngs2RenderSamplerVoice(const std::shared_ptr<Ngs2VoiceRecord>& voice, uint32_t grain, uint32_t output_rate, double* mixed,
                                    std::vector<Ngs2PendingCallback>* pending)
@@ -1961,16 +2013,17 @@ static uint64_t Ngs2MaxEndCallbacks(const Ngs2SystemRecord& system)
 	for (const auto& [unused_workspace, rack]: system.racks)
 	{
 		(void)unused_workspace;
-		if (rack->type != Ngs2RackType::Sampler)
+		if (rack->type != Ngs2RackType::Sampler && rack->type != Ngs2RackType::CustomSampler)
 		{
 			continue;
 		}
 		for (const auto& voice: rack->voices)
 		{
-			if (voice->callback.handler != 0 && (voice->callback.flags & kNgs2VoiceCallbackFlagEnd) != 0)
+			if (voice->callback.handler == 0 || (voice->callback.flags & kNgs2VoiceCallbackFlagEnd) == 0)
 			{
-				count += voice->sampler.QueuedBlocks();
+				continue;
 			}
+			count += rack->type == Ngs2RackType::Sampler ? voice->sampler.QueuedBlocks() : voice->stream.blocks.size();
 		}
 	}
 	return count;
@@ -2050,8 +2103,17 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 				Ngs2RenderSamplerVoice(voice, grain, system->option.sample_rate, accumulator.data(), pending);
 				continue;
 			}
-			if (voice->state == Ngs2VoicePlayState::Playing && voice->stream.playing &&
-			    !Ngs2MixPcmStream(&voice->stream, accumulator.data(), grain, 2, system->option.sample_rate))
+			if (voice->state != Ngs2VoicePlayState::Playing || !voice->stream.playing)
+			{
+				continue;
+			}
+			std::vector<Ngs2PcmBlock> finished;
+			const bool playing = Ngs2MixPcmStream(&voice->stream, accumulator.data(), grain, 2, system->option.sample_rate, &finished);
+			for (const auto& block: finished)
+			{
+				Ngs2QueueBlockEnd(voice, block, pending);
+			}
+			if (!playing)
 			{
 				voice->state = Ngs2VoicePlayState::Stopped;
 			}
@@ -2552,6 +2614,11 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 		return kNgs2InvalidControl;
 	}
 
+	if (header.id == kNgs2VoiceParamCallback)
+	{
+		return Ngs2ControlVoiceCallback(*voice.Get(), header, param_list);
+	}
+
 	if (header.id == 0x40010000u)
 	{
 		Ngs2CustomSamplerFormatParam format {};
@@ -2580,25 +2647,32 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 		}
 
 		Ngs2CustomSamplerWaveformContext context {};
-		if (!Ngs2ReadGuest(&context, waveform.context) || context.offset_frames != 0 || context.frame_count == 0 ||
-		    context.frame_count > voice->system->option.max_grain_samples || context.frame_count > kNgs2MaxGrainSamples)
+		// A block lasts as many grains as its frames; only the queued host copies are bounded.
+		if (!Ngs2ReadGuest(&context, waveform.context) || context.frame_count == 0 ||
+		    voice->stream.blocks.size() >= kNgs2MaxCustomQueuedBlocks ||
+		    context.frame_count > kNgs2MaxCustomQueuedFrames - voice->stream.queued_frames)
 		{
 			return kNgs2InvalidControl;
 		}
-		size_t pcm_bytes = 0;
-		if (!Ngs2CalculatePcmBytes(context.frame_count, voice->stream.channels, &pcm_bytes) || context.data_size != pcm_bytes)
+		size_t pcm_bytes   = 0;
+		size_t frame_bytes = 0;
+		if (!Ngs2CalculatePcmBytes(context.frame_count, voice->stream.channels, &pcm_bytes) || context.data_size != pcm_bytes ||
+		    !Ngs2CalculatePcmBytes(1, voice->stream.channels, &frame_bytes) || context.offset_bytes % frame_bytes != 0 ||
+		    context.offset_bytes > std::numeric_limits<uint64_t>::max() - pcm_bytes ||
+		    !Ngs2GuestSpanInRange(reinterpret_cast<uintptr_t>(waveform.data), context.offset_bytes + pcm_bytes))
 		{
 			return kNgs2InvalidControl;
 		}
 		std::vector<int16_t> samples(pcm_bytes / sizeof(int16_t));
-		if (!Ngs2CopyFromGuest(samples.data(), waveform.data, pcm_bytes))
+		if (!Ngs2CopyFromGuest(samples.data(), reinterpret_cast<const uint8_t*>(waveform.data) + context.offset_bytes, pcm_bytes))
 		{
 			return kNgs2InvalidControl;
 		}
-		voice->stream.samples      = std::move(samples);
-		voice->stream.frame_count  = context.frame_count;
-		voice->stream.source_frame = 0.0;
-		voice->stream.playing      = false;
+		// Blocks queue behind the one playing: the guest streams by submitting the next blocks ahead and refilling on
+		// each block end callback.
+		voice->stream.blocks.push_back({std::move(samples), voice->stream.channels, context.frame_count,
+		                                reinterpret_cast<uintptr_t>(waveform.data), static_cast<uintptr_t>(context.user_data)});
+		voice->stream.queued_frames += context.frame_count;
 		return OK;
 	}
 
@@ -2632,7 +2706,15 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 		}
 		return Ngs2SamplerRunCommand(*voice.Get(), command);
 	}
-	if (rack == nullptr || rack->type != Ngs2RackType::CustomSampler)
+	if (rack != nullptr && rack->type != Ngs2RackType::CustomSampler)
+	{
+		for (size_t i = 0; i < command.size(); ++i)
+		{
+			voice->last_command[i] = command[i];
+		}
+		return Ngs2MixerRunCommand(*voice.Get(), command);
+	}
+	if (rack == nullptr)
 	{
 		return kNgs2InvalidControl;
 	}
@@ -2644,7 +2726,7 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 	{
 		if (command[2] == 1u)
 		{
-			if (voice->stream.format_id != 0x12u || voice->stream.samples.empty() || voice->stream.frame_count == 0)
+			if (voice->stream.format_id != 0x12u || voice->stream.blocks.empty())
 			{
 				return kNgs2InvalidControl;
 			}
@@ -2654,9 +2736,12 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 		}
 		if (command[2] == 8u)
 		{
-			voice->event              = Ngs2VoicePlayEvent::StopImm;
-			voice->stream.playing      = false;
-			voice->stream.source_frame = 0.0;
+			// An immediate stop drops the queued blocks as well.
+			voice->event                = Ngs2VoicePlayEvent::StopImm;
+			voice->stream.playing       = false;
+			voice->stream.blocks.clear();
+			voice->stream.queued_frames = 0;
+			voice->stream.source_frame  = 0.0;
 			return OK;
 		}
 		return kNgs2InvalidControl;

@@ -28,6 +28,11 @@
 #include <thread>
 #include <vector>
 
+namespace Kyty::Libs::LibC {
+void* KYTY_SYSV_ABI c_malloc(size_t size);
+void KYTY_SYSV_ABI  c_free(void* ptr);
+} // namespace Kyty::Libs::LibC
+
 UT_BEGIN(EmulatorAudio);
 
 using namespace Libs::Audio;
@@ -1606,6 +1611,86 @@ TEST(EmulatorAudio, Ngs2RackGetInfoRejectsAnUnmeasuredLayoutWithoutWriting)
 
 	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, nullptr), 0);
 	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
+}
+
+TEST(EmulatorAudio, Ngs2StartsLibcBackedMasteringVoiceBeforeTheApplicationHeap)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	// A title without a malloc replacement builds its NGS2 objects in libc memory, which is host-backed until the
+	// application heap exists. It is guest memory by contract even though it is not a guest mapping.
+	auto* raw_system_info = static_cast<uint64_t*>(Libs::LibC::c_malloc(sizeof(uint64_t) * 8));
+	ASSERT_NE(raw_system_info, nullptr);
+	auto* system_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_system_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, system_info), 0);
+	void* system_storage = Libs::LibC::c_malloc(raw_system_info[1]);
+	ASSERT_NE(system_storage, nullptr);
+	EXPECT_FALSE(Core::VirtualMemory::IsRangeGuestOwned(reinterpret_cast<uint64_t>(system_storage), raw_system_info[1]));
+	raw_system_info[0]    = reinterpret_cast<uintptr_t>(system_storage);
+	auto* handle_storage  = static_cast<uintptr_t*>(Libs::LibC::c_malloc(sizeof(uintptr_t) * 2));
+	ASSERT_NE(handle_storage, nullptr);
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, system_info, &handle_storage[0]), 0);
+	const uintptr_t system = handle_storage[0];
+
+	auto* raw_option = static_cast<uint8_t*>(Libs::LibC::c_malloc(0x518));
+	ASSERT_NE(raw_option, nullptr);
+	std::memset(raw_option, 0, 0x518);
+	*reinterpret_cast<size_t*>(raw_option)          = 0x518;
+	*reinterpret_cast<uint32_t*>(raw_option + 0x50) = 1;
+	auto* raw_rack_info = static_cast<uint64_t*>(Libs::LibC::c_malloc(sizeof(uint64_t) * 8));
+	ASSERT_NE(raw_rack_info, nullptr);
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	auto* rack_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info), 0);
+	void* rack_storage = Libs::LibC::c_malloc(raw_rack_info[1]);
+	ASSERT_NE(rack_storage, nullptr);
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage);
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(raw_option), rack_info,
+	                               &handle_storage[1]),
+	          0);
+	const uintptr_t sampler_rack = handle_storage[1];
+
+	// The mastering voice the title routes everything to is started with a play event before its output thread runs.
+	std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x3000, nullptr, rack_info), 0);
+	void* mastering_storage = Libs::LibC::c_malloc(raw_rack_info[1]);
+	ASSERT_NE(mastering_storage, nullptr);
+	raw_rack_info[0] = reinterpret_cast<uintptr_t>(mastering_storage);
+	ASSERT_EQ(Ngs2::Ngs2RackCreate(system, 0x3000, nullptr, rack_info, &handle_storage[1]), 0);
+	auto* mastering_voice = static_cast<uintptr_t*>(Libs::LibC::c_malloc(sizeof(uintptr_t)));
+	ASSERT_NE(mastering_voice, nullptr);
+	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(handle_storage[1], 0, mastering_voice), 0);
+	auto* play_command = static_cast<uint32_t*>(Libs::LibC::c_malloc(sizeof(uint32_t) * 3));
+	ASSERT_NE(play_command, nullptr);
+	play_command[0] = 2;
+	play_command[1] = 0x400;
+	play_command[2] = 1;
+	EXPECT_EQ(Ngs2::Ngs2VoiceRunCommands(*mastering_voice, play_command, 1), 0);
+	play_command[2] = 2;
+	EXPECT_EQ(Ngs2::Ngs2VoiceRunCommands(*mastering_voice, play_command, 1), static_cast<int32_t>(0x804a0309u));
+
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(handle_storage[1], nullptr), 0);
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(sampler_rack, nullptr), 0);
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
+	Libs::LibC::c_free(play_command);
+	Libs::LibC::c_free(mastering_voice);
+	Libs::LibC::c_free(mastering_storage);
+
+	// Freed libc memory is no longer accepted.
+	const auto freed_info = reinterpret_cast<uint64_t>(raw_system_info);
+	Libs::LibC::c_free(raw_system_info);
+	EXPECT_FALSE(Core::VirtualMemory::IsRangeWritableOrLent(freed_info, sizeof(uint64_t)));
+	EXPECT_TRUE(Core::VirtualMemory::IsRangeWritableOrLent(reinterpret_cast<uint64_t>(raw_rack_info) + 8, 8));
+	EXPECT_FALSE(Core::VirtualMemory::IsRangeWritableOrLent(reinterpret_cast<uint64_t>(raw_rack_info) + 8, sizeof(uint64_t) * 8));
+	Libs::LibC::c_free(rack_storage);
+	Libs::LibC::c_free(raw_rack_info);
+	Libs::LibC::c_free(raw_option);
+	Libs::LibC::c_free(handle_storage);
+	Libs::LibC::c_free(system_storage);
 }
 
 TEST(EmulatorAudio, Ngs2SystemRenderRejectsInvalidBuffers)
