@@ -1589,6 +1589,116 @@ TEST(EmulatorAudio, Ngs2CreatesRacksFromDefaultAndExpandedOptions)
 	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
 }
 
+
+namespace {
+
+// Stands in for a guest allocator: each request gets a guest-readable block, and each call is recorded.
+struct Ngs2AllocatorLog
+{
+	std::vector<std::unique_ptr<GuestReadableBlock>> blocks;
+	std::vector<uint64_t>                            requested;
+	std::vector<uint64_t>                            freed;
+	std::vector<uint64_t>                            user_data;
+};
+Ngs2AllocatorLog g_ngs2_allocator_log;
+
+// The handlers take the 64-byte buffer info: host_buffer at +0, host_buffer_size at +8, user_data at +56.
+uint64_t KYTY_SYSV_ABI Ngs2TestAlloc(uint64_t info_address, uint64_t /*unused1*/, uint64_t /*unused2*/)
+{
+	auto* info = reinterpret_cast<uint64_t*>(info_address);
+	auto  block = std::make_unique<GuestReadableBlock>(info[1]);
+	if (!block->IsValid())
+	{
+		return 1;
+	}
+	info[0] = reinterpret_cast<uintptr_t>(block->Data());
+	g_ngs2_allocator_log.requested.push_back(info[1]);
+	g_ngs2_allocator_log.user_data.push_back(info[7]);
+	g_ngs2_allocator_log.blocks.push_back(std::move(block));
+	return 0;
+}
+
+uint64_t KYTY_SYSV_ABI Ngs2TestFree(uint64_t info_address, uint64_t /*unused1*/, uint64_t /*unused2*/)
+{
+	const auto* info = reinterpret_cast<const uint64_t*>(info_address);
+	g_ngs2_allocator_log.freed.push_back(info[0]);
+	g_ngs2_allocator_log.user_data.push_back(info[7]);
+	return 0;
+}
+
+} // namespace
+
+TEST(EmulatorAudio, Ngs2AllocatorCreatesTakeAndReturnGuestWorkspaces)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	ScopedHostRuntime runtime;
+	g_ngs2_allocator_log = {};
+
+	// {alloc_handler, free_handler, user_data}
+	GuestReadableBlock allocator_storage(sizeof(uint64_t) * 3);
+	GuestReadableBlock info_storage(sizeof(uint64_t) * 8);
+	GuestValue<uintptr_t> handle_storage;
+	ASSERT_TRUE(allocator_storage.IsValid());
+	ASSERT_TRUE(info_storage.IsValid());
+	ASSERT_TRUE(handle_storage.IsValid());
+	auto* allocator = static_cast<uint64_t*>(allocator_storage.Data());
+	allocator[0]    = 0;
+	allocator[1]    = reinterpret_cast<uintptr_t>(&Ngs2TestFree);
+	allocator[2]    = 0x1234;
+	const auto* guest_allocator = reinterpret_cast<const Ngs2::Ngs2BufferAllocator*>(allocator);
+	auto*       info            = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(info_storage.Data());
+	auto*       raw_info        = static_cast<uint64_t*>(info_storage.Data());
+
+	// Both handlers are required; nothing is allocated otherwise.
+	EXPECT_EQ(Ngs2::Ngs2SystemCreateWithAllocator(nullptr, guest_allocator, handle_storage.Data()), static_cast<int32_t>(0x804a0206u));
+	EXPECT_TRUE(g_ngs2_allocator_log.requested.empty());
+	allocator[0] = reinterpret_cast<uintptr_t>(&Ngs2TestAlloc);
+
+	// The handler is asked for the size the buffer-info variants report, with the allocator's user data.
+	std::memset(raw_info, 0, sizeof(uint64_t) * 8);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, info), 0);
+	const uint64_t system_size = raw_info[1];
+	ASSERT_EQ(Ngs2::Ngs2SystemCreateWithAllocator(nullptr, guest_allocator, handle_storage.Data()), 0);
+	const uintptr_t system = *handle_storage.Data();
+	ASSERT_EQ(g_ngs2_allocator_log.requested.size(), 1u);
+	EXPECT_EQ(g_ngs2_allocator_log.requested[0], system_size);
+	EXPECT_EQ(system, reinterpret_cast<uintptr_t>(g_ngs2_allocator_log.blocks[0]->Data()));
+
+	std::memset(raw_info, 0, sizeof(uint64_t) * 8);
+	ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x1000u, nullptr, info), 0);
+	const uint64_t rack_size = raw_info[1];
+	ASSERT_EQ(Ngs2::Ngs2RackCreateWithAllocator(system, 0x1000u, nullptr, guest_allocator, handle_storage.Data()), 0);
+	const uintptr_t rack = *handle_storage.Data();
+	ASSERT_EQ(g_ngs2_allocator_log.requested.size(), 2u);
+	EXPECT_EQ(g_ngs2_allocator_log.requested[1], rack_size);
+	GuestValue<uintptr_t> voice_storage;
+	ASSERT_TRUE(voice_storage.IsValid());
+	EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, voice_storage.Data()), 0);
+
+	// A create that fails after the allocation hands the buffer straight back.
+	EXPECT_EQ(Ngs2::Ngs2RackCreateWithAllocator(0x10, 0x1000u, nullptr, guest_allocator, handle_storage.Data()),
+	          static_cast<int32_t>(0x804a0201u));
+	ASSERT_EQ(g_ngs2_allocator_log.freed.size(), 1u);
+	EXPECT_EQ(g_ngs2_allocator_log.freed[0], reinterpret_cast<uintptr_t>(g_ngs2_allocator_log.blocks[2]->Data()));
+
+	// Destroys return each workspace to the allocator.
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, nullptr), 0);
+	ASSERT_EQ(g_ngs2_allocator_log.freed.size(), 2u);
+	EXPECT_EQ(g_ngs2_allocator_log.freed[1], rack);
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
+	ASSERT_EQ(g_ngs2_allocator_log.freed.size(), 3u);
+	EXPECT_EQ(g_ngs2_allocator_log.freed[2], system);
+	for (const uint64_t user_data: g_ngs2_allocator_log.user_data)
+	{
+		EXPECT_EQ(user_data, 0x1234u);
+	}
+	g_ngs2_allocator_log = {};
+}
+
 TEST(EmulatorAudio, Ngs2RejectsUnreadableDescriptorAndHandleBlocks)
 {
 	constexpr auto kInvalidOut = static_cast<int32_t>(0x804a0053u);
@@ -1620,22 +1730,24 @@ TEST(EmulatorAudio, Ngs2PanOperationsRejectUnmeasuredContracts)
 	EXPECT_EQ(Ngs2::Ngs2PanInit(nullptr), static_cast<int32_t>(0x804a0309u));
 }
 
-TEST(EmulatorAudio, Ngs2RejectsUnmeasuredAllocatorAndGeometryContractsWithoutWrites)
+TEST(EmulatorAudio, Ngs2RejectsUnreadableAllocatorOptionsAndUnmeasuredGeometryWithoutWrites)
 {
-	constexpr auto kUnsupported = static_cast<int32_t>(0x804a0309u);
+	constexpr auto kUnsupported   = static_cast<int32_t>(0x804a0309u);
+	constexpr auto kInvalidOption = static_cast<int32_t>(0x804a0081u);
 	GuestValue<uintptr_t> handle_storage;
 	ASSERT_TRUE(handle_storage.IsValid());
 	*handle_storage.Data() = UINTPTR_MAX;
 	uint8_t        output[256];
 	std::memset(output, 0xa5, sizeof(output));
 
+	// An unreadable option is refused before the allocator is called.
 	EXPECT_EQ(Ngs2::Ngs2SystemCreateWithAllocator(reinterpret_cast<const Ngs2::Ngs2SystemOption*>(uintptr_t {1}),
 	                                               reinterpret_cast<const Ngs2::Ngs2BufferAllocator*>(uintptr_t {1}), handle_storage.Data()),
-	          kUnsupported);
+	          kInvalidOption);
 	EXPECT_EQ(*handle_storage.Data(), UINTPTR_MAX);
 	EXPECT_EQ(Ngs2::Ngs2RackCreateWithAllocator(1, 0x4001, reinterpret_cast<const Ngs2::Ngs2RackOption*>(uintptr_t {1}),
 	                                             reinterpret_cast<const Ngs2::Ngs2BufferAllocator*>(uintptr_t {1}), handle_storage.Data()),
-	          kUnsupported);
+	          kInvalidOption);
 	EXPECT_EQ(*handle_storage.Data(), UINTPTR_MAX);
 
 	EXPECT_EQ(Ngs2::Ngs2GeomResetSourceParam(output), kUnsupported);

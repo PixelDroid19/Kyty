@@ -946,6 +946,8 @@ struct Ngs2SystemRecord
 	Ngs2SystemOption                                               option {};
 	uintptr_t                                                      workspace = 0;
 	size_t                                                         workspace_size = 0;
+	// Set when the workspace came from the guest's allocator, which takes it back at destroy.
+	Ngs2BufferAllocator                                            allocator {};
 	std::unordered_map<uintptr_t, std::shared_ptr<Ngs2RackRecord>> racks;
 	// Callbacks produced by a render that ran while its thread held the explicit
 	// system lock. They run at unlock, never under the lock. deferred_mutex is a
@@ -959,6 +961,7 @@ struct Ngs2RackRecord
 	std::shared_ptr<Ngs2SystemRecord>                   system;
 	uintptr_t                                            workspace = 0;
 	size_t                                               workspace_size = 0;
+	Ngs2BufferAllocator                                  allocator {};
 	Ngs2RackType                                         type = Ngs2RackType::Sampler;
 	uint32_t                                             max_voices = 0;
 	size_t                                               option_size = 0;
@@ -2602,15 +2605,45 @@ int KYTY_SYSV_ABI Ngs2SystemQueryBufferSize(const Ngs2SystemOption* option, Ngs2
 	return Ngs2WriteGuest(buffer_info, output) ? OK : kNgs2InvalidOut;
 }
 
-int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption* option, const Ngs2ContextBufferInfo* buffer_info, uintptr_t* handle)
+// The allocator variants ask the guest's alloc handler for the workspace the buffer-info variants take: the handler
+// receives {null, size, user_data} and fills host_buffer. The free handler gets the buffer back, with the same
+// user_data, when the create fails after the allocation and when the object is destroyed.
+static int32_t Ngs2AllocateWorkspace(const Ngs2BufferAllocator* allocator, size_t size, Ngs2BufferAllocator* allocator_out,
+                                     Ngs2ContextBufferInfo* info)
 {
-	PRINT_NAME();
-
-	Ngs2ContextBufferInfo info {};
-	if (!Ngs2ReadGuest(&info, buffer_info))
+	if (!Ngs2ReadGuest(allocator_out, allocator) || allocator_out->alloc_handler == nullptr || allocator_out->free_handler == nullptr)
 	{
 		return kNgs2InvalidBufferInfo;
 	}
+	*info                  = {};
+	info->host_buffer_size = size;
+	info->user_data        = allocator_out->user_data;
+	const uint64_t handler = reinterpret_cast<uint64_t>(allocator_out->alloc_handler);
+	const auto     result  = static_cast<int32_t>(::Kyty::Emulator::GuestRuntimePort::Invoke(handler, reinterpret_cast<uint64_t>(info), 0, 0));
+	if (result != OK)
+	{
+		return result;
+	}
+	return info->host_buffer != nullptr ? OK : kNgs2InvalidBufferAddress;
+}
+
+static void Ngs2FreeWorkspace(const Ngs2BufferAllocator& allocator, uintptr_t workspace, size_t size)
+{
+	if (allocator.free_handler == nullptr)
+	{
+		return;
+	}
+	Ngs2ContextBufferInfo info {};
+	info.host_buffer      = reinterpret_cast<void*>(workspace);
+	info.host_buffer_size = size;
+	info.user_data        = allocator.user_data;
+	const uint64_t handler = reinterpret_cast<uint64_t>(allocator.free_handler);
+	(void)::Kyty::Emulator::GuestRuntimePort::Invoke(handler, reinterpret_cast<uint64_t>(&info), 0, 0);
+}
+
+static int32_t Ngs2CreateSystem(const Ngs2SystemOption* option, const Ngs2ContextBufferInfo& info, const Ngs2BufferAllocator& allocator,
+                                uintptr_t* handle)
+{
 	if (handle == nullptr || !Ngs2IsGuestWritable(handle, sizeof(*handle)))
 	{
 		return kNgs2InvalidOut;
@@ -2634,6 +2667,7 @@ int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption* option, const Ngs2Con
 	system->option              = system_option;
 	system->workspace           = public_handle;
 	system->workspace_size      = kNgs2SystemWorkspaceBytes;
+	system->allocator           = allocator;
 	if (!Ngs2ReserveSystem(public_handle, system))
 	{
 		return kNgs2InvalidBufferAddress;
@@ -2651,6 +2685,41 @@ int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption* option, const Ngs2Con
 	return OK;
 }
 
+int KYTY_SYSV_ABI Ngs2SystemCreate(const Ngs2SystemOption* option, const Ngs2ContextBufferInfo* buffer_info, uintptr_t* handle)
+{
+	PRINT_NAME();
+	Ngs2ContextBufferInfo info {};
+	if (!Ngs2ReadGuest(&info, buffer_info))
+	{
+		return kNgs2InvalidBufferInfo;
+	}
+	return Ngs2CreateSystem(option, info, {}, handle);
+}
+
+int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, const Ngs2BufferAllocator* allocator,
+                                                 uintptr_t* handle)
+{
+	PRINT_NAME();
+	Ngs2SystemOption system_option {};
+	if (!Ngs2SnapshotSystemOption(option, &system_option))
+	{
+		return kNgs2InvalidOption;
+	}
+	Ngs2BufferAllocator   guest_allocator {};
+	Ngs2ContextBufferInfo info {};
+	const int32_t         allocated = Ngs2AllocateWorkspace(allocator, kNgs2SystemWorkspaceBytes, &guest_allocator, &info);
+	if (allocated != OK)
+	{
+		return allocated;
+	}
+	const int32_t created = Ngs2CreateSystem(option, info, guest_allocator, handle);
+	if (created != OK)
+	{
+		Ngs2FreeWorkspace(guest_allocator, reinterpret_cast<uintptr_t>(info.host_buffer), kNgs2SystemWorkspaceBytes);
+	}
+	return created;
+}
+
 int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle)
 {
 	PRINT_NAME();
@@ -2665,8 +2734,22 @@ int KYTY_SYSV_ABI Ngs2SystemDestroy(uintptr_t system_handle)
 	}
 	auto record = system.Shared();
 	Ngs2WaitAndEraseSystem(&system);
-	std::lock_guard lock(record->state_mutex);
-	record->racks.clear();
+	std::vector<std::shared_ptr<Ngs2RackRecord>> racks;
+	{
+		std::lock_guard lock(record->state_mutex);
+		for (auto& [unused_workspace, rack]: record->racks)
+		{
+			(void)unused_workspace;
+			racks.push_back(std::move(rack));
+		}
+		record->racks.clear();
+	}
+	// The racks go with their system; guest-allocated workspaces return to their allocators, outside the state lock.
+	for (const auto& rack: racks)
+	{
+		Ngs2FreeWorkspace(rack->allocator, rack->workspace, rack->workspace_size);
+	}
+	Ngs2FreeWorkspace(record->allocator, record->workspace, record->workspace_size);
 	return OK;
 }
 
@@ -2780,27 +2863,9 @@ int KYTY_SYSV_ABI Ngs2RackQueryBufferSize(uint32_t rack_id, const Ngs2RackOption
 	return Ngs2WriteGuest(buffer_info, output) ? OK : kNgs2InvalidOut;
 }
 
-int KYTY_SYSV_ABI Ngs2SystemCreateWithAllocator(const Ngs2SystemOption* option, const Ngs2BufferAllocator* allocator,
-                                                 uintptr_t* handle)
+static int32_t Ngs2CreateRack(uintptr_t system_handle, uint32_t rack_id, const Ngs2RackOption* option, const Ngs2ContextBufferInfo& info,
+                              const Ngs2BufferAllocator& allocator, uintptr_t* handle)
 {
-	PRINT_NAME();
-	(void)option;
-	(void)allocator;
-	(void)handle;
-	// Allocator function-pointer invocation/lifetime is not established.
-	return kNgs2InvalidControl;
-}
-
-int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, const Ngs2RackOption* option,
-	                                 const Ngs2ContextBufferInfo* buffer_info, uintptr_t* handle)
-{
-	PRINT_NAME();
-
-	Ngs2ContextBufferInfo info {};
-	if (!Ngs2ReadGuest(&info, buffer_info))
-	{
-		return kNgs2InvalidBufferInfo;
-	}
 	if (handle == nullptr || !Ngs2IsGuestWritable(handle, sizeof(*handle)))
 	{
 		return kNgs2InvalidOut;
@@ -2833,6 +2898,7 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 	rack->system          = system.Shared();
 	rack->workspace       = reinterpret_cast<uintptr_t>(info.host_buffer);
 	rack->workspace_size  = workspace_size;
+	rack->allocator       = allocator;
 	rack->type            = config.type;
 	rack->max_voices      = config.max_voices;
 	rack->option_size     = config.option_size;
@@ -2890,16 +2956,41 @@ int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, cons
 	return OK;
 }
 
+int KYTY_SYSV_ABI Ngs2RackCreate(uintptr_t system_handle, uint32_t rack_id, const Ngs2RackOption* option,
+	                                 const Ngs2ContextBufferInfo* buffer_info, uintptr_t* handle)
+{
+	PRINT_NAME();
+	Ngs2ContextBufferInfo info {};
+	if (!Ngs2ReadGuest(&info, buffer_info))
+	{
+		return kNgs2InvalidBufferInfo;
+	}
+	return Ngs2CreateRack(system_handle, rack_id, option, info, {}, handle);
+}
+
 int KYTY_SYSV_ABI Ngs2RackCreateWithAllocator(uintptr_t system_handle, uint32_t rack_id, const Ngs2RackOption* option,
                                               const Ngs2BufferAllocator* allocator, uintptr_t* handle)
 {
 	PRINT_NAME();
-	(void)system_handle;
-	(void)rack_id;
-	(void)option;
-	(void)allocator;
-	(void)handle;
-	return kNgs2InvalidControl;
+	Ngs2RackConfig config {};
+	size_t         workspace_size = 0;
+	if (!Ngs2SnapshotRackConfig(rack_id, option, &config) || !Ngs2CalculateRackWorkspaceSize(config.max_voices, &workspace_size))
+	{
+		return kNgs2InvalidOption;
+	}
+	Ngs2BufferAllocator   guest_allocator {};
+	Ngs2ContextBufferInfo info {};
+	const int32_t         allocated = Ngs2AllocateWorkspace(allocator, workspace_size, &guest_allocator, &info);
+	if (allocated != OK)
+	{
+		return allocated;
+	}
+	const int32_t created = Ngs2CreateRack(system_handle, rack_id, option, info, guest_allocator, handle);
+	if (created != OK)
+	{
+		Ngs2FreeWorkspace(guest_allocator, reinterpret_cast<uintptr_t>(info.host_buffer), workspace_size);
+	}
+	return created;
 }
 
 int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* buffer_info)
@@ -2945,6 +3036,7 @@ int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* 
 	output.host_buffer      = reinterpret_cast<void*>(record->workspace);
 	output.host_buffer_size = record->workspace_size;
 	Ngs2WaitAndEraseRack(&rack);
+	Ngs2FreeWorkspace(record->allocator, record->workspace, record->workspace_size);
 	if (buffer_info != nullptr && !Ngs2WriteGuest(buffer_info, output))
 	{
 		return kNgs2InvalidOut;
