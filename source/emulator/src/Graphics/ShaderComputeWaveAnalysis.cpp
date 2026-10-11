@@ -743,8 +743,7 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 	{
 		if (!operand_valid(instruction.mimg_address[address])) { return false; }
 	}
-	const auto name = Core::EnumName8(instruction.type);
-	if ((name.StartsWith("Buffer") || name.StartsWith("TBuffer")) && (instruction.buffer_flags & ~0x0au) != 0u)
+	if (ShaderInstructionIsVectorBufferAccess(instruction.type) && (instruction.buffer_flags & ~0x0au) != 0u)
 	{
 		// SLC/DLC are cache hints (ISA tables 96/98). LDS changes the destination, TFE adds a
 		// status result, and unknown/reserved bits cannot mean an ordinary access.
@@ -753,7 +752,7 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 	if (instruction.vop_sdwa)
 	{
 		const uint32_t control = instruction.vop_sdwa_ctrl;
-		const bool compare = name.StartsWith("VCmp");
+		const bool compare = ShaderInstructionTypeStartsWith(instruction.type, "VCmp");
 		if (instruction.src_num < 1 || instruction.src_num > 3 || instruction.vop3_op_sel != 0u || instruction.vop3_omod != 0u ||
 		    ((control >> 16u) & 7u) == 7u || (control & (1u << 22u)) != 0u ||
 		    instruction.src[0].swizzle != ((control >> 16u) & 7u) ||
@@ -825,7 +824,7 @@ bool ShaderInstructionLoweringPreconditions(const ShaderInstruction& instruction
 			}
 		}
 	}
-	if (!name.IsEmpty() && name.At(0) == 'S')
+	if (ShaderInstructionTypeStartsWith(instruction.type, "S"))
 	{
 		// Scalar 64-bit data needs even SGPR pairs (ISA 3.6.3). Do not apply
 		// this to VALU mask destinations, whose SDST can name an odd SGPR.

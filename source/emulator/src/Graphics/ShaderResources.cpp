@@ -1417,24 +1417,6 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 	}
 }
 
-// MUBUF and MTBUF instruction types, classified once by name: this runs for
-// every instruction of every draw.
-static bool ShaderInstructionIsVectorBufferAccess(ShaderInstructionType type)
-{
-	static const auto kVectorBuffer = []
-	{
-		std::array<bool, static_cast<size_t>(ShaderInstructionType::ZMax) + 1> table {};
-		for (size_t i = 0; i < table.size(); ++i)
-		{
-			const auto candidate = static_cast<ShaderInstructionType>(i);
-			table[i] = ShaderInstructionTypeStartsWith(candidate, "Buffer") || ShaderInstructionTypeStartsWith(candidate, "TBuffer");
-		}
-		return table;
-	}();
-	const auto index = static_cast<size_t>(type);
-	return index < kVectorBuffer.size() && kVectorBuffer[index];
-}
-
 // The V# operand of a MUBUF/MTBUF access, or nullptr.
 static const ShaderOperand* ShaderVectorBufferDescriptor(const ShaderInstruction& inst)
 {

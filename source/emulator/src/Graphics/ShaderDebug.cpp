@@ -8,6 +8,7 @@
 #include "Emulator/Log.h"
 
 #include <algorithm>
+#include <array>
 #include <cinttypes>
 
 #ifdef KYTY_EMU_ENABLED
@@ -24,6 +25,23 @@ std::string_view ShaderInstructionTypeName(ShaderInstructionType type)
 bool ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix)
 {
 	return ShaderInstructionTypeName(type).substr(0, prefix.size()) == prefix;
+}
+
+// Classified once by name: shader analyses ask for every instruction of every draw.
+bool ShaderInstructionIsVectorBufferAccess(ShaderInstructionType type)
+{
+	static const auto kVectorBuffer = []
+	{
+		std::array<bool, static_cast<size_t>(ShaderInstructionType::ZMax) + 1> table {};
+		for (size_t i = 0; i < table.size(); ++i)
+		{
+			const auto candidate = static_cast<ShaderInstructionType>(i);
+			table[i] = ShaderInstructionTypeStartsWith(candidate, "Buffer") || ShaderInstructionTypeStartsWith(candidate, "TBuffer");
+		}
+		return table;
+	}();
+	const auto index = static_cast<size_t>(type);
+	return index < kVectorBuffer.size() && kVectorBuffer[index];
 }
 
 static String8 operand_to_str(ShaderOperand op)

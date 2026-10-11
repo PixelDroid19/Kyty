@@ -9,6 +9,32 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Atomic container reference counts (2026-10-11)
+
+- In the Unity fishing title's gameplay profile, mutex lock, trylock and
+  unlock were 10.8% of the command-processor thread. Most callers were
+  `Core::Vector::Add`, `String8` construction and container copies.
+- `RefCounter`, the base of every `SimpleArray`, took a `Core::Mutex`
+  around each reference-count read or change. Each array also heap-allocated
+  that mutex when it was constructed.
+- The count is now one `std::atomic`.
+  - Copy-on-write copies before it drops its reference. The old order
+    released first and copied afterwards, which could read a freed array if
+    another owner released at the same time.
+  - The lock never protected the array contents, so concurrent mutation of
+    one container was not synchronized before either.
+- `ShaderInstructionLoweringPreconditions`, which runs for every instruction
+  of every NGG front proof, built an allocated mnemonic string per
+  instruction. It now uses the shared MUBUF/MTBUF table and non-allocating
+  prefix tests.
+- The two changes were measured together. Same route, gameplay windows 5-7:
+  - The title went from 8.2-9.4 to 9.6-10.7 fps (p50 104-114 to 93-99 ms),
+    and the capture is correct.
+  - The racing title's race window rose from 82.9 to 88.3 fps.
+  - The beat 'em up rose from 11.1 to 11.9 fps.
+  - Both captures are correct.
+  - The full unit suite passes (2377 tests).
+
 ## Vertex snapshots from the first fetched record (2026-10-11)
 
 - The Unity fishing title copied about 48 GB of guest memory per 26 s

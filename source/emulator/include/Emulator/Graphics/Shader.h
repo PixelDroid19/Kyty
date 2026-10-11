@@ -603,6 +603,8 @@ enum class ShaderInstructionType : uint32_t
 // helpers rather than instantiating magic_enum in other translation units.
 [[nodiscard]] std::string_view ShaderInstructionTypeName(ShaderInstructionType type);
 [[nodiscard]] bool             ShaderInstructionTypeStartsWith(ShaderInstructionType type, std::string_view prefix);
+// MUBUF or MTBUF instruction type (mnemonic "Buffer*" or "TBuffer*"), from a table built once.
+[[nodiscard]] bool             ShaderInstructionIsVectorBufferAccess(ShaderInstructionType type);
 
 namespace ShaderInstructionFormat {
 

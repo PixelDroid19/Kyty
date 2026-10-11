@@ -176,8 +176,7 @@ bool VgprRange(const ShaderOperand& operand, RegisterRange* range)
 bool CollectVgprWrites(const ShaderInstruction& instruction, std::array<RegisterRange, 2>* ranges, unsigned* count)
 {
 	*count = 0;
-	const bool buffer_instruction = ShaderInstructionTypeStartsWith(instruction.type, "Buffer") ||
-	                               ShaderInstructionTypeStartsWith(instruction.type, "TBuffer");
+	const bool buffer_instruction = ShaderInstructionIsVectorBufferAccess(instruction.type);
 	constexpr uint8_t unmodeled_buffer_write_flags = 0x85u; // LDS reroutes data; TFE adds status; bit 7 is unmodeled.
 	if (buffer_instruction && (instruction.buffer_flags & unmodeled_buffer_write_flags) != 0u) { return false; }
 	for (const auto* destination: {&instruction.dst, &instruction.dst2})
