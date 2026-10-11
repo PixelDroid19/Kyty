@@ -386,10 +386,82 @@ static const char* shader_disable_reason(HW::Shader* sh_ctx)
 	return nullptr;
 }
 
+static bool StorageSeedOffsetBoundsMatch(const ShaderStorageImageTileCoverage& coverage,
+                                         const ShaderBufferResource& resource, uint64_t width, uint64_t height)
+{
+	const uint64_t address = resource.Base48();
+	const uint64_t declared_size = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+	if (coverage.origin_byte_offset == -1 && coverage.bounds_byte_offset == 0u)
+	{
+		uint32_t bounds[2] {};
+		return address != 0u && declared_size >= sizeof(bounds) &&
+		       GpuMemoryCaptureSnapshotReadOnlyBuffer(address, sizeof(bounds), bounds) &&
+		       bounds[0] == width && bounds[1] == height;
+	}
+	if (coverage.origin_byte_offset < 0 || coverage.bounds_byte_offset < 8u ||
+	    (coverage.bounds_byte_offset & 3u) != 0u)
+	{
+		return false;
+	}
+	const uint64_t origin_offset = static_cast<uint32_t>(coverage.origin_byte_offset);
+	uint32_t origin_and_bounds[4] {};
+	if (origin_offset != static_cast<uint64_t>(coverage.bounds_byte_offset) - 8u ||
+	    address == 0u || (address & 3u) != 0u || origin_offset > declared_size ||
+	    sizeof(origin_and_bounds) > declared_size - origin_offset || address > UINT64_MAX - origin_offset)
+	{
+		return false;
+	}
+	return GpuMemoryCaptureSnapshotReadOnlyBuffer(address + origin_offset, sizeof(origin_and_bounds), origin_and_bounds) &&
+	       origin_and_bounds[0] == 0u && origin_and_bounds[1] == 0u &&
+	       origin_and_bounds[2] == width && origin_and_bounds[3] == height;
+}
+
+static bool StorageSeedInputsAreDisjoint(const ShaderBindResources& bind, const ShaderTextureResource& texture,
+                                         uint32_t width, uint32_t height)
+{
+	// This proof covers a single linear image. Its inputs must retain their
+	// original bytes rather than alias an image whose initialization is omitted.
+	if (texture.Type() != 9u || texture.TileMode() != 0u || texture.MaxMip() != 0u ||
+	    texture.BCSwizzle() != 0u || texture.MetaCompress() || texture.WriteCompress() ||
+	    ShaderGen5TextureIsBlockCompressed(texture.Format()))
+	{
+		return false;
+	}
+	const uint32_t bytes_per_element = ShaderGen5TextureBytesPerElement(texture.Format());
+	if (bytes_per_element == 0u)
+	{
+		return false;
+	}
+	const uint32_t pitch = ShaderGen5ResolveLinearPitch(width, texture.Format(), texture.Type(), texture.fields[4]);
+	const uint64_t image_address = texture.Base40();
+	const uint64_t image_size = static_cast<uint64_t>(pitch) * height * bytes_per_element;
+	if (pitch < width || image_address == 0u || image_size == 0u ||
+	    image_address > UINT64_MAX - image_size)
+	{
+		return false;
+	}
+	for (int i = 0; i < bind.storage_buffers.buffers_num; ++i)
+	{
+		const auto& resource = bind.storage_buffers.buffers[i];
+		const uint64_t address = resource.Base48();
+		const uint64_t size = ShaderBufferByteSize(resource.Stride(), resource.NumRecords());
+		if (!ShaderStorageUsageIsReadOnly(bind.storage_buffers.usages[i]) || address == 0u || size == 0u ||
+		    address > UINT64_MAX - size || (address < image_address + image_size && image_address < address + size))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_info, bool next_gen, uint32_t groups_x,
                                           uint32_t groups_y, uint32_t groups_z)
 {
-	if (!next_gen || input_info.storage_image_write_only_mask == 0u)
+	if (!next_gen || input_info.storage_image_write_only_mask == 0u ||
+	    input_info.bind.textures2D.textures_num < 0 ||
+	    input_info.bind.textures2D.textures_num > ShaderTextureResources::RES_MAX ||
+	    input_info.bind.storage_buffers.buffers_num < 0 ||
+	    input_info.bind.storage_buffers.buffers_num > ShaderStorageResources::BUFFERS_MAX)
 	{
 		return 0u;
 	}
@@ -417,6 +489,19 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 		const uint64_t height = static_cast<uint64_t>(descriptor.texture.Height5()) + 1u;
 		const uint64_t depth  = shape == ShaderGen5SampledTextureShape::TwoDimensional ? 1u :
 		                       static_cast<uint64_t>(descriptor.texture.Depth()) + 1u;
+		if (coverage.origin_byte_offset >= 0 &&
+		    ((input_info.dispatch_mode & 1u) == 0u || (input_info.dispatch_mode & 2u) != 0u || input_info.thread_limits_used ||
+		     shape != ShaderGen5SampledTextureShape::TwoDimensional ||
+		     !StorageSeedInputsAreDisjoint(input_info.bind, descriptor.texture, static_cast<uint32_t>(width),
+		                                   static_cast<uint32_t>(height))))
+		{
+			continue;
+		}
+		if (coverage.bounds_storage_buffer_index < 0 &&
+		    (coverage.origin_byte_offset != -1 || coverage.bounds_byte_offset != 0u))
+		{
+			continue;
+		}
 		if (coverage.bounds_storage_buffer_index >= 0)
 		{
 			const auto& buffers = input_info.bind.storage_buffers;
@@ -425,12 +510,7 @@ uint32_t ShaderComputeStorageSeedSkipMask(const ShaderComputeInputInfo& input_in
 			{
 				continue;
 			}
-			const auto& bounds_resource = buffers.buffers[bounds_index];
-			const uint64_t address = bounds_resource.Base48();
-			uint32_t bounds[2] {};
-			if (address == 0u || ShaderBufferByteSize(bounds_resource.Stride(), bounds_resource.NumRecords()) < sizeof(bounds) ||
-			    !GpuMemoryCaptureSnapshotReadOnlyBuffer(address, sizeof(bounds), bounds) ||
-			    bounds[0] != width || bounds[1] != height)
+			if (!StorageSeedOffsetBoundsMatch(coverage, buffers.buffers[bounds_index], width, height))
 			{
 				continue;
 			}
@@ -2922,7 +3002,7 @@ ComputeDispatchResult GraphicsRenderDispatchDirect(
 	    ShaderComputeStorageSeedSkipMask(input_info, Config::IsNextGen(), thread_group_x, thread_group_y, thread_group_z);
 	BindDescriptors(submit_id, buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline_layout, input_info.bind,
 	                VK_SHADER_STAGE_COMPUTE_BIT, DescriptorCache::Stage::Compute, storage_seed_skip_mask, nullptr,
-	                cs_regs.cs_regs.chksum);
+	                cs_regs.cs_regs.chksum, nullptr, input_info.storage_image_tile_coverage);
 	(void)TryPublishComputeDepthMetaFill(submit_id, input_info, thread_group_x, thread_group_y, thread_group_z);
 
 	// Materialization may dispatch a host compute kernel. Restore the guest

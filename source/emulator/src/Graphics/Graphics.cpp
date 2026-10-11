@@ -2870,8 +2870,9 @@ int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t*
 
 	if (addr == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: addr == nullptr condition ignored (continuing)\n"); }
 	if (cmd == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: cmd == nullptr condition ignored (continuing)\n"); }
-	// type 1: payload at cmd+2 (existing). type 0 observed on the post-logo
-	// path with the same relative payload offset.
+	// type 0: a NOP data packet whose payload follows the header. Guests size it
+	// exactly (a 3-dword NOP carries one 64-bit value) and align larger payloads
+	// themselves. type 1: a register packet whose values follow the offset dword.
 	if (type != 0 && type != 1) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: type != 0 && type != 1 condition ignored (continuing)\n"); }
 
 	const uint32_t header = cmd[0];
@@ -2891,7 +2892,7 @@ int KYTY_SYSV_ABI GraphicsGetDataPacketPayloadAddress(uint32_t** addr, uint32_t*
 	}
 	else
 	{
-		*addr = cmd + 2;
+		*addr = type == 0 ? cmd + 1 : cmd + 2;
 	}
 
 	return OK;
@@ -2960,6 +2961,7 @@ uint64_t* GraphicsResolveWaitMemAddressFromPrecedingRelease(const uint32_t* wait
 int KYTY_SYSV_ABI GraphicsAgcQueueEndOfPipeActionPatchAddress(uint32_t* cmd, uint64_t address)
 {
 	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t cmd = 0x%016" PRIx64 " addr = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(cmd), address);
 
 	if (cmd == nullptr)
 	{

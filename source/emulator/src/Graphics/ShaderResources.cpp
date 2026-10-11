@@ -19,6 +19,11 @@
 #ifdef KYTY_EMU_ENABLED
 
 namespace Kyty::Libs::Graphics {
+namespace {
+
+constexpr uint32_t kMaxSrtPointerTableDwords = 256u;
+
+} // namespace
 
 int ShaderFindImageSampledTextureDescriptor(const ShaderInstruction& inst, const ShaderBindResources& bind,
 	                                        int user_data_register_base)
@@ -271,17 +276,27 @@ static bool ShaderGetSmemConstantDwordOffset(const ShaderInstruction& instructio
 	return true;
 }
 
+// Materialize the entry table only while both shader pointer words retain
+// the API pair's entry values on every incoming path.
+static bool ShaderMatchesEudPointer(const ShaderOperand& source, int pointer_register, int user_data_register_base,
+                                    const std::bitset<kShaderScalarLivenessSgprs>& entry_values)
+{
+	return source.type == ShaderOperandType::Sgpr && source.size == 2 && pointer_register >= 0 &&
+	       user_data_register_base >= 0 && source.register_id >= user_data_register_base &&
+	       source.register_id < kShaderScalarLivenessSgprs - 1 &&
+	       source.register_id - user_data_register_base == pointer_register &&
+	       entry_values.test(static_cast<size_t>(source.register_id)) &&
+	       entry_values.test(static_cast<size_t>(source.register_id + 1));
+}
+
 static bool ShaderGen5EudAddRequiredSpan(uint32_t offset_dw, uint32_t dwords, uint32_t* required_end_dw)
 {
-	if (required_end_dw == nullptr || dwords == 0u || offset_dw > UINT32_MAX - dwords)
+	if (required_end_dw == nullptr || dwords == 0u || dwords > SHADER_GEN5_EUD_MAX_DWORDS ||
+	    offset_dw > SHADER_GEN5_EUD_MAX_DWORDS - dwords)
 	{
 		return false;
 	}
 	const uint32_t end_dw = offset_dw + dwords;
-	if (end_dw > SHADER_GEN5_EUD_MAX_DWORDS)
-	{
-		return false;
-	}
 	*required_end_dw = std::max(*required_end_dw, end_dw);
 	return true;
 }
@@ -310,11 +325,9 @@ static bool ShaderGen5EudAddSharpSpan(int offset_dw, int dwords, int user_sgpr_n
 bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num, int eud_pointer_register,
                                     const ShaderCode* code, int user_data_register_base, uint32_t* required_end_dw)
 {
-	(void)user_data_register_base;
 	if (user_data == nullptr || required_end_dw == nullptr || user_sgpr_num < 0 ||
 	    user_sgpr_num > HW::UserSgprInfo::SGPRS_MAX || eud_pointer_register < 0 ||
-	    eud_pointer_register > user_sgpr_num - 2 || user_data->eud_size_dw == 0u ||
-	    user_data->eud_size_dw > SHADER_GEN5_EUD_MAX_DWORDS)
+	    eud_pointer_register > user_sgpr_num - 2 || user_data_register_base < 0 || user_data->eud_size_dw == 0u)
 	{
 		return false;
 	}
@@ -347,13 +360,15 @@ bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sg
 
 	if (code != nullptr)
 	{
-		for (const auto& inst: code->GetInstructions())
+		const auto  flow         = ShaderScalarFlowOf(*code);
+		const auto& entry_values = flow->holding_entry_value;
+		for (uint32_t index = 0; index < code->GetInstructions().Size() && index < entry_values.size(); ++index)
 		{
+			const auto& inst = code->GetInstructions().At(index);
 			const int dwords = inst.type == ShaderInstructionType::SLoadDwordx4 ? 4 :
 			                   (inst.type == ShaderInstructionType::SLoadDwordx8 ? 8 : 0);
 			if (dwords == 0 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != dwords || inst.src_num < 2 ||
-			    inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].register_id != eud_pointer_register ||
-			    inst.src[0].size != 2)
+			    !ShaderMatchesEudPointer(inst.src[0], eud_pointer_register, user_data_register_base, entry_values[index]))
 			{
 				continue;
 			}
@@ -733,13 +748,14 @@ struct ShaderSplitTextureLoad
 };
 
 static bool ShaderTryGetExtendedLoadOffset(const ShaderInstruction& load, const ShaderBindResources& bind, int dword_count,
-                                           uint16_t eud_size_dw, int* offset_dw)
+                                           uint16_t eud_size_dw, int user_data_register_base,
+                                           const std::bitset<kShaderScalarLivenessSgprs>& entry_values, int* offset_dw)
 {
 	if (offset_dw == nullptr || load.dst.type != ShaderOperandType::Sgpr || load.dst.size != dword_count || load.src_num < 2)
 	{
 		return false;
 	}
-	if (load.src[0].type != ShaderOperandType::Sgpr || load.src[0].register_id != bind.extended.start_register || load.src[0].size != 2)
+	if (!ShaderMatchesEudPointer(load.src[0], bind.extended.start_register, user_data_register_base, entry_values))
 	{
 		return false;
 	}
@@ -747,11 +763,16 @@ static bool ShaderTryGetExtendedLoadOffset(const ShaderInstruction& load, const 
 	{
 		return false;
 	}
-	return ShaderGen5EudSpanAllowed(16 + *offset_dw, dword_count, eud_size_dw);
+	const uint32_t span_dw = static_cast<uint32_t>(dword_count);
+	return span_dw <= SHADER_GEN5_EUD_MAX_DWORDS &&
+	       static_cast<uint32_t>(*offset_dw) <= SHADER_GEN5_EUD_MAX_DWORDS - span_dw &&
+	       ShaderGen5EudSpanAllowed(16 + *offset_dw, dword_count, eud_size_dw);
 }
 
 static bool ShaderFindSplitTextureLoads(const ShaderCode& code, uint32_t consumer_index, const ShaderBindResources& bind,
-                                        uint16_t eud_size_dw, ShaderSplitTextureLoad* low, ShaderSplitTextureLoad* high)
+                                        uint16_t eud_size_dw, int user_data_register_base,
+                                        const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values,
+                                        ShaderSplitTextureLoad* low, ShaderSplitTextureLoad* high)
 {
 	if (low == nullptr || high == nullptr || consumer_index >= code.GetInstructions().Size())
 	{
@@ -787,8 +808,9 @@ static bool ShaderFindSplitTextureLoads(const ShaderCode& code, uint32_t consume
 		{
 			half = high;
 		}
-		if (half == nullptr || half->instruction != nullptr ||
-		    !ShaderTryGetExtendedLoadOffset(candidate, bind, 4, eud_size_dw, &half->offset_dw))
+		if (half == nullptr || half->instruction != nullptr || cursor >= entry_values.size() ||
+		    !ShaderTryGetExtendedLoadOffset(candidate, bind, 4, eud_size_dw, user_data_register_base,
+		                                   entry_values[cursor], &half->offset_dw))
 		{
 			return false;
 		}
@@ -866,7 +888,8 @@ static int ShaderAddSplitTextureResource(ShaderBindResources* bind, const Shader
 }
 
 static void ShaderCollectSplitTextureResources(const ShaderCode& code, ShaderBindResources* bind, ShaderParsedUsage* info,
-                                               const uint32_t* extended_buffer, uint16_t eud_size_dw)
+                                               const uint32_t* extended_buffer, uint16_t eud_size_dw, int user_data_register_base,
+                                               const std::vector<std::bitset<kShaderScalarLivenessSgprs>>& entry_values)
 {
 	EXIT_IF(bind == nullptr || info == nullptr || extended_buffer == nullptr);
 	const uint32_t instruction_count = code.GetInstructions().Size();
@@ -881,7 +904,7 @@ static void ShaderCollectSplitTextureResources(const ShaderCode& code, ShaderBin
 		}
 		ShaderSplitTextureLoad low {};
 		ShaderSplitTextureLoad high {};
-		if (!ShaderFindSplitTextureLoads(code, index, *bind, eud_size_dw, &low, &high))
+		if (!ShaderFindSplitTextureLoads(code, index, *bind, eud_size_dw, user_data_register_base, entry_values, &low, &high))
 		{
 			continue;
 		}
@@ -962,7 +985,8 @@ static bool ShaderInstructionWritesVectorBufferDescriptor(ShaderInstructionType 
 		case ShaderInstructionType::BufferAtomicSub:
 		case ShaderInstructionType::BufferAtomicUmax:
 		case ShaderInstructionType::BufferAtomicUmin:
-		case ShaderInstructionType::BufferAtomicXor: return true;
+		case ShaderInstructionType::BufferAtomicXor:
+		case ShaderInstructionType::BufferAtomicSwap: return true;
 		default: return false;
 	}
 }
@@ -1205,7 +1229,7 @@ static bool ShaderAddDynamicScalarResource(ShaderBindResources* bind, ShaderPars
 // keyed by the S_LOAD PC because the destination registers can be reused.
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind,
 	                                             const HW::UserSgprInfo& user_sgpr, ShaderParsedUsage* info,
-	                                             const uint32_t* extended_buffer, uint16_t eud_size_dw)
+	                                             const uint32_t* extended_buffer, uint16_t eud_size_dw, int user_data_register_base)
 {
 	EXIT_IF(bind == nullptr || info == nullptr);
 	if (!bind->extended.used || extended_buffer == nullptr)
@@ -1213,13 +1237,16 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		return;
 	}
 	const uint32_t instruction_count = code.GetInstructions().Size();
-	ShaderCollectSplitTextureResources(code, bind, info, extended_buffer, eud_size_dw);
+	const auto    flow              = ShaderScalarFlowOf(code);
+	const auto&   entry_values      = flow->holding_entry_value;
+	ShaderCollectSplitTextureResources(code, bind, info, extended_buffer, eud_size_dw, user_data_register_base, entry_values);
 
-	for (uint32_t index = 0; index < instruction_count; ++index)
+	for (uint32_t index = 0; index < instruction_count && index < entry_values.size(); ++index)
 	{
 		const auto& sload       = code.GetInstructions().At(index);
 		const int   dword_count = ShaderDescriptorSLoadDwords(sload);
-		if (dword_count == 0 || sload.src[0].register_id != bind->extended.start_register)
+		if (dword_count == 0 ||
+		    !ShaderMatchesEudPointer(sload.src[0], bind->extended.start_register, user_data_register_base, entry_values[index]))
 		{
 			continue;
 		}
@@ -1231,7 +1258,10 @@ void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResou
 		}
 		// offset_dw is the EUD table index (byte_offset/4). Metadata eud_size_dw is a
 		// lower bound — same overrun policy as ShaderGen5EudSpanAllowed (api = 16+idx).
-		if (!ShaderGen5EudSpanAllowed(16 + offset_dw, dword_count, eud_size_dw))
+		const uint32_t span_dw = static_cast<uint32_t>(dword_count);
+		if (span_dw > SHADER_GEN5_EUD_MAX_DWORDS ||
+		    static_cast<uint32_t>(offset_dw) > SHADER_GEN5_EUD_MAX_DWORDS - span_dw ||
+		    !ShaderGen5EudSpanAllowed(16 + offset_dw, dword_count, eud_size_dw))
 		{
 			continue;
 		}
@@ -1334,7 +1364,8 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 		std::vector<ShaderDescriptorBlock> blocks;
 		if (dword_count == 0 || !ShaderLoadsThroughSrtPointer(sload, entry_values[index], srt_size_dw, user_data_register_base, *bind) ||
 		    !ShaderGetSmemConstantDwordOffset(sload, &offset_dw) || offset_dw < 0 ||
-		    offset_dw > SHADER_GEN5_EUD_MAX_DWORDS - dword_count ||
+		    static_cast<uint32_t>(dword_count) > kMaxSrtPointerTableDwords ||
+		    static_cast<uint32_t>(offset_dw) > kMaxSrtPointerTableDwords - static_cast<uint32_t>(dword_count) ||
 		    !ShaderPartitionDescriptorLoad(code, index, sload, 0, dword_count, &blocks))
 		{
 			continue;
@@ -1342,8 +1373,9 @@ void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResour
 
 		const int      pointer = sload.src[0].register_id - user_data_register_base;
 		const uint64_t address = ((static_cast<uint64_t>(user_sgpr.value[pointer + 1]) & 0xffffu) << 32u) | user_sgpr.value[pointer];
-		std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS> table {};
-		if (!ShaderSnapshotGuestDescriptorTable(address, static_cast<uint32_t>(offset_dw + dword_count), &table))
+		const uint32_t table_dwords = static_cast<uint32_t>(offset_dw) + static_cast<uint32_t>(dword_count);
+		std::vector<uint32_t> table(table_dwords);
+		if (!ShaderSnapshotGuestDescriptorTable(address, table_dwords, &table))
 		{
 			EXIT("unreadable descriptor table behind an SRT pointer: pc=0x%08" PRIx32 " sgpr=%d address=0x%016" PRIx64
 			     " dwords=%d\n",

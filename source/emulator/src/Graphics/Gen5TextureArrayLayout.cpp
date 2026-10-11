@@ -18,15 +18,16 @@ bool FillSingleLevelSlice(uint32_t format, uint32_t width, uint32_t height, uint
 		return false;
 	}
 
-	TileGetTextureSize2(format, width, height, pitch, 1u, tile, tiled_slice, nullptr, nullptr);
-	if (tiled_slice->size == 0u || tiled_slice->align == 0u)
+	const uint32_t resolved_host_pitch = (tile == 9u || tile == 27u ? width : pitch);
+	const uint64_t row_bytes = static_cast<uint64_t>(resolved_host_pitch) * bytes_per_element;
+	if (row_bytes == 0u || row_bytes > UINT32_MAX || height > UINT32_MAX / row_bytes)
 	{
 		return false;
 	}
+	const uint64_t linear = row_bytes * height;
 
-	const uint32_t resolved_host_pitch = (tile == 9u || tile == 27u ? width : pitch);
-	const uint64_t linear = static_cast<uint64_t>(resolved_host_pitch) * height * bytes_per_element;
-	if (linear == 0u || linear > UINT32_MAX)
+	TileGetTextureSize2(format, width, height, pitch, 1u, tile, tiled_slice, nullptr, nullptr);
+	if (tiled_slice->size == 0u || tiled_slice->align == 0u)
 	{
 		return false;
 	}
@@ -82,6 +83,12 @@ bool DetileOneLayer(uint8_t* output_layer, const uint8_t* input_layer, const Gen
 	{
 		return DetileOneStandard4KBLayer(output_layer, input_layer, layout);
 	}
+	if (layout.tile == 1u)
+	{
+		TileConvertStandard256BToLinear(output_layer, input_layer, layout.width, layout.height, layout.guest_pitch,
+		                                layout.bytes_per_element);
+		return true;
+	}
 	if (layout.tile == 9u && layout.host_pitch == layout.width)
 	{
 		TileConvertStandard64KBToLinear(output_layer, input_layer, layout.width, layout.height, layout.guest_pitch,
@@ -120,13 +127,16 @@ bool Gen5GetTextureArrayLayout(uint32_t format, uint32_t width, uint32_t height,
 	}
 
 	const bool linear             = tile == 0u;
+	const bool standard_256b       = tile == 1u && bytes_per_element <= 16u &&
+	                                (bytes_per_element & (bytes_per_element - 1u)) == 0u &&
+	                                !ShaderGen5TextureIsBlockCompressed(format);
 	const bool standard_4kb       = tile == 5u;
 	const bool standard_64kb      = tile == 9u && TileGet64KBBlockWidth(bytes_per_element) != 0u &&
 	                                !ShaderGen5TextureIsBlockCompressed(format);
 	const bool render_target_64kb = tile == 27u && (bytes_per_element == 4u || bytes_per_element == 8u) &&
 	                                !ShaderGen5TextureIsBlockCompressed(format);
 
-	if (!linear && !standard_4kb && !standard_64kb && !render_target_64kb)
+	if (!linear && !standard_256b && !standard_4kb && !standard_64kb && !render_target_64kb)
 	{
 		return false;
 	}

@@ -1556,7 +1556,8 @@ void BindVertexBuffers(uint64_t submit_id, CommandBuffer* buffer, VkCommandBuffe
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask = 0, const DrawMaterialTraceContext* material_trace = nullptr,
-                     uint64_t shader_checksum = 0, const VulkanImage* stencil_attached_depth = nullptr);
+                     uint64_t shader_checksum = 0, const VulkanImage* stencil_attached_depth = nullptr,
+                     const ShaderStorageImageTileCoverage* storage_seed_coverage = nullptr);
 void TraceRenderTargetLifetimeDraw(uint64_t submit_id, const DrawMaterialTraceContext& draw);
 void TraceRenderTargetLifetimePassBegin(uint64_t submit_id, const RenderColorInfo& color,
 	                                    const VulkanFramebuffer& framebuffer);

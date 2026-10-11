@@ -107,6 +107,7 @@ bool IsLaneLocalImageRead(Type type)
 		case Type::ImageSampleL:
 		case Type::ImageSampleLz:
 		case Type::ImageSampleLzO:
+		case Type::ImageSampleCd:
 		case Type::ImageSampleDrefLz: return true;
 		default: return false;
 	}
@@ -124,7 +125,7 @@ bool IsLaneBit(const ShaderInstruction& inst, int source)
 
 bool UsesImplicitDerivatives(Type type)
 {
-	return type == Type::ImageSample || type == Type::ImageSampleB || StartsWith(type, "ImageGather4");
+	return type == Type::ImageSample || type == Type::ImageSampleO || type == Type::ImageSampleB || StartsWith(type, "ImageGather4");
 }
 
 bool WritesMemory(Type type)

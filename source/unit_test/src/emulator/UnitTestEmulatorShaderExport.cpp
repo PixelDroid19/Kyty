@@ -10,10 +10,13 @@
 #include "Emulator/Log.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 
+#include <algorithm>
 #include <array>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -38,6 +41,7 @@ constexpr int kRejectedExit = 65;
 
 constexpr uint32_t kEndpgm = 0xbf810000u;
 constexpr uint32_t kExecZero = 0xbefe0480u; // s_mov_b64 exec, 0
+constexpr uint32_t kExecFull = 0xbefe04c1u; // s_mov_b64 exec, -1
 // Every physical field is distinct, including unused and disabled fields.
 // Packed sources contain half pairs (0.5, 1) and (2, 4); Z also has nonzero
 // layer bits. These are synthetic values, unrelated to a captured program.
@@ -59,9 +63,17 @@ struct ExportCase
 constexpr ExportCase kPrim = {ShaderType::Vertex, 0xf8000941u, ShaderInstructionFormat::PrimVsrc0OffOffOffDone, 1, 1, 2};
 constexpr ExportCase kPos1 = {ShaderType::Vertex, 0xf80000d4u, ShaderInstructionFormat::Pos1OffOffVsrc0Off, 1, 4, 0, 2};
 constexpr ExportCase kPos1Done = {ShaderType::Vertex, 0xf80008d4u, ShaderInstructionFormat::Pos1OffOffVsrc0Off, 1, 4, 2, 2};
+constexpr ExportCase kPos1X = {ShaderType::Vertex, 0xf80000d1u, ShaderInstructionFormat::Pos1Vsrc0OffOffOff, 1, 1, 0};
 constexpr ExportCase kPixelZ = {ShaderType::Pixel, 0xf8001881u, ShaderInstructionFormat::PixelZVsrc0VmDone, 1, 1, 3};
+constexpr ExportCase kPixelZNoDone = {ShaderType::Pixel, 0xf8001081u, ShaderInstructionFormat::PixelZVsrc0Vm, 1, 1, 1};
 constexpr ExportCase kNull = {ShaderType::Pixel, 0xf8001890u, ShaderInstructionFormat::NullVmDone, 0, 0, 3};
+constexpr ExportCase kPixelZNull = {ShaderType::Pixel, 0xf8001880u, ShaderInstructionFormat::NullVmDone, 0, 0, 3};
 constexpr ExportCase kPos0 = {ShaderType::Vertex, 0xf80008cfu, ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done, 4, 15, 2};
+constexpr auto kPos0NoDoneFormat = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3;
+constexpr auto kPos1XDoneFormat = ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone;
+constexpr ExportCase kPos0NoDone = {ShaderType::Vertex, 0xf80000cfu, kPos0NoDoneFormat, 4, 15, 0};
+constexpr ExportCase kPos1XDone = {ShaderType::Vertex, 0xf80008d1u, kPos1XDoneFormat, 1, 1, 2};
+constexpr ExportCase kParam0 = {ShaderType::Vertex, 0xf800020fu, ShaderInstructionFormat::Param0Vsrc0Vsrc1Vsrc2Vsrc3, 4, 15, 0};
 
 std::string g_case;
 
@@ -225,6 +237,40 @@ Program Parse(const ExportCase& test, bool position_before = false, bool positio
 	return result;
 }
 
+Program ParsePositionSequence(std::initializer_list<ExportCase> exports)
+{
+	std::vector<uint32_t> words;
+	for (unsigned source = 0; source < 4; ++source)
+	{
+		words.push_back(0x7e0002ffu | (static_cast<uint32_t>(kRegisters[source]) << 17u)); // v_mov_b32 vN, literal
+		words.push_back(kValues[source]);
+	}
+	for (const auto& test: exports) { words.insert(words.end(), {test.word, kSourceWord}); }
+	words.push_back(kEndpgm);
+	g_case = "synthetic full POS0(no DONE), POS1.X(DONE), PARAM0 suffix";
+
+	Program result;
+	result.export_index = 4u;
+	result.export_pc = 32u;
+	result.code.SetType(ShaderType::Vertex);
+	Require(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &result.code),
+	        "complete bounded position sequence parses");
+	const auto& instructions = result.code.GetInstructions();
+	Require(instructions.Size() == 5u + exports.size(), "all ordered exports and the real terminator remain separate instructions");
+	uint32_t index = result.export_index;
+	for (const auto& test: exports)
+	{
+		CheckExport(instructions.At(index), test, result.export_pc + (index - result.export_index) * 8u);
+		++index;
+	}
+	const auto& end = instructions.At(instructions.Size() - 1u);
+	Require(end.type == ShaderInstructionType::SEndpgm && end.format == ShaderInstructionFormat::Empty &&
+	            end.raw_word == kEndpgm && end.pc == (words.size() - 1u) * sizeof(uint32_t),
+	        "terminal PC/raw word follows the complete export suffix");
+	for (const auto& inst: instructions) { Require(ShaderInstructionLoweringPreconditions(inst), "sequence instruction satisfies shared preconditions"); }
+	return result;
+}
+
 std::string Instructions(const String8& source)
 {
 	std::istringstream input(source.c_str());
@@ -279,6 +325,70 @@ std::string Validate(const Program& program, const ShaderVertexInputInfo* vertex
 	return source;
 }
 
+void RequirePositionStoreGuard(const std::string& source, uint32_t index, bool require_clip_probe = false)
+{
+	std::istringstream input(Instructions(String8(source.c_str())));
+	std::vector<std::string> lines;
+	for (std::string line; std::getline(input, line);) { lines.push_back(line); }
+	const auto store = "OpStore %t5_" + std::to_string(index) + " %t4_" + std::to_string(index);
+	const auto store_it = std::find(lines.begin(), lines.end(), store);
+	Require(store_it != lines.end(), "position output store is emitted");
+	const auto store_index = static_cast<uint32_t>(std::distance(lines.begin(), store_it));
+
+	uint32_t branch_index = UINT32_MAX;
+	for (uint32_t line = 0; line < store_index; ++line)
+	{
+		if (lines[line].find("OpBranchConditional ") != std::string::npos) { branch_index = line; }
+	}
+	Require(branch_index != UINT32_MAX, "position store has a preceding structured conditional");
+	std::istringstream branch_stream(lines[branch_index]);
+	std::string branch_op;
+	std::string condition;
+	std::string active_target;
+	std::string merge_target;
+	branch_stream >> branch_op >> condition >> active_target >> merge_target;
+	Require(branch_op == "OpBranchConditional" && !condition.empty() && !active_target.empty() && !merge_target.empty() &&
+	            active_target != merge_target,
+	        "position conditional has distinct active and merge successors");
+
+	const auto condition_prefix = condition + " = OpINotEqual %bool ";
+	uint32_t condition_index = UINT32_MAX;
+	for (uint32_t line = 0; line < branch_index; ++line)
+	{
+		if (lines[line].compare(0, condition_prefix.size(), condition_prefix) == 0) { condition_index = line; }
+	}
+	Require(condition_index != UINT32_MAX, "position branch condition compares active EXEC with zero");
+	std::istringstream condition_stream(lines[condition_index]);
+	std::string condition_result;
+	std::string equals;
+	std::string compare;
+	std::string boolean_type;
+	std::string exec_value;
+	std::string zero_value;
+	condition_stream >> condition_result >> equals >> compare >> boolean_type >> exec_value >> zero_value;
+	Require(condition_result == condition && equals == "=" && compare == "OpINotEqual" && boolean_type == "%bool" &&
+	            zero_value == "%uint_0",
+	        "position branch predicate is EXEC != 0");
+	const auto exec_load = exec_value + " = OpLoad %uint %exec_lane_lo";
+	Require(std::find(lines.begin(), lines.begin() + condition_index, exec_load) != lines.begin() + condition_index,
+	        "position branch reads the resolved per-invocation EXEC lane");
+
+	const auto active_label = active_target + " = OpLabel";
+	const auto merge_label = merge_target + " = OpLabel";
+	const auto active_it = std::find(lines.begin() + branch_index + 1u, store_it, active_label);
+	const auto merge_it = std::find(store_it + 1u, lines.end(), merge_label);
+	Require(active_it != store_it && merge_it != lines.end(), "position store is in the active successor before the merge");
+	if (require_clip_probe)
+	{
+		const auto probe = "%vertex_clip_probe_invocations_prior_" + std::to_string(index) + " = OpAtomicIAdd";
+		const auto probe_it = std::find_if(active_it, merge_it, [&probe](const std::string& line) {
+			return line.compare(0, probe.size(), probe) == 0 && (line.size() == probe.size() || line[probe.size()] == ' ');
+		});
+		Require(probe_it != merge_it,
+		        "position clip-probe invocation update shares the active EXEC region");
+	}
+}
+
 ShaderInstruction HandConstructed(const ExportCase& test)
 {
 	ShaderInstruction inst {};
@@ -291,6 +401,45 @@ ShaderInstruction HandConstructed(const ExportCase& test)
 	inst.exp_control = test.control;
 	for (int source = 0; source < test.sources; ++source) { inst.src[source] = Vgpr(kRegisters[source + test.first_physical]); }
 	return inst;
+}
+
+enum class NonFinalPositionMutation
+{
+	EnableMask,
+	SourceCount,
+	SourceShape,
+	RawControl,
+};
+
+[[noreturn]] void RejectMalformedNonFinalPosition(NonFinalPositionMutation mutation)
+{
+	Initialize();
+	auto program = ParsePositionSequence({kPos0NoDone, kPos1XDone, kParam0});
+	auto& pos0  = program.code.GetInstructions()[program.export_index];
+	Require(pos0.format == kPos0NoDoneFormat && pos0.raw_word == kPos0NoDone.word && pos0.exp_enable_mask == 15u &&
+	            pos0.exp_control == 0u && pos0.src_num == 4,
+	        "the real parser establishes the valid non-final POS0 tuple before mutation");
+	switch (mutation)
+	{
+		case NonFinalPositionMutation::EnableMask:
+			pos0.exp_enable_mask = 7u;
+			pos0.raw_word = (pos0.raw_word & ~0xfu) | 7u;
+			break;
+		case NonFinalPositionMutation::SourceCount:
+			pos0.src_num = 3;
+			pos0.src[3]  = {};
+			break;
+		case NonFinalPositionMutation::SourceShape:
+			pos0.src[2].type        = ShaderOperandType::Sgpr;
+			pos0.src[2].register_id = 34;
+			break;
+		case NonFinalPositionMutation::RawControl: pos0.raw_word |= 0x800u; break;
+	}
+	Require(ShaderInstructionLoweringPreconditions(pos0), "malformed export tuple remains within generic lowering preconditions");
+	ShaderVertexInputInfo vertex {};
+	vertex.position1_usage = ShaderVertexPosition1Usage::ClipDistance0;
+	(void)SpirvGenerateSource(program.code, &vertex, nullptr, nullptr);
+	std::_Exit(0);
 }
 
 [[noreturn]] void RejectStaleTail(const ExportCase& test)
@@ -325,10 +474,144 @@ TEST(EmulatorShaderExport, ParsesReducedNonColorExportsWithExactEmptyTails)
 	ASSERT_EXIT(
 	    ([] {
 		    Initialize();
-		    for (const auto& test: {kPrim, kPos1, kPos1Done, kPixelZ, kNull}) { (void)Parse(test); }
+		    for (const auto& test: {kPrim, kPos1, kPos1Done, kPixelZ, kPixelZNoDone, kNull, kPixelZNull}) { (void)Parse(test); }
 		    std::_Exit(0);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderExport, ParsesPos1XEnableBeforeFinalPositionExport)
+{
+	EXPECT_EXIT(
+	    ([] {
+		    Initialize();
+		    g_case = "vertex Gen5 target 13 EN=1 before final POS0";
+		    std::vector<uint32_t> words;
+		    for (unsigned source = 0; source < 4; ++source)
+		    {
+			    words.push_back(0x7e0002ffu | (static_cast<uint32_t>(kRegisters[source]) << 17u));
+			    words.push_back(kValues[source]);
+		    }
+		    const uint32_t pos1_word = ExportWord(13u, 1u, 0u);
+		    words.insert(words.end(), {pos1_word, kSourceWord, kPos0.word, kSourceWord, kEndpgm});
+
+		    ShaderCode code;
+		    code.SetType(ShaderType::Vertex);
+		    Require(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &code),
+		            "complete bounded POS1-X program parses");
+		    const auto& instructions = code.GetInstructions();
+		    Require(instructions.Size() == 7u, "POS1, final POS0, and S_ENDPGM remain separate instructions");
+
+		    const auto& pos1 = instructions.At(4);
+		    Require(pos1.type == ShaderInstructionType::Exp && pos1.format == ShaderInstructionFormat::Pos1Vsrc0OffOffOff &&
+		                pos1.pc == 32u && pos1.raw_word == pos1_word &&
+		                pos1.exp_enable_mask == 1u && pos1.exp_control == 0u && pos1.src_num == 1 &&
+		                ExactOperand(pos1.src[0], Vgpr(kRegisters[0])),
+		            "EN=1 preserves its physical X source, raw word, and control bits");
+		    for (int source = 1; source < 4; ++source)
+		    {
+			    Require(pos1.src[source].type == ShaderOperandType::Unknown && pos1.src[source].size == 0 &&
+			                ExactOperand(pos1.src[source], {}),
+			            "disabled POS1 source tail is canonical");
+		    }
+
+		    const auto& pos0 = instructions.At(5);
+		    Require(pos0.type == ShaderInstructionType::Exp &&
+			            pos0.format == ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done && pos0.pc == 40u &&
+			            pos0.raw_word == kPos0.word && pos0.exp_enable_mask == 0x0fu && pos0.exp_control == 2u && pos0.src_num == 4,
+			        "following full DONE POS0 is retained");
+		    const auto& end = instructions.At(6);
+		    Require(end.type == ShaderInstructionType::SEndpgm && end.format == ShaderInstructionFormat::Empty &&
+			            end.raw_word == kEndpgm && end.pc == 48u,
+		            "following S_ENDPGM is retained");
+		    const auto usage = ShaderDecodeVertexPosition1Usage(4u << 4u, (1u << 22u) | 1u, true);
+		    Require(usage == ShaderVertexPosition1Usage::ClipDistance0, "output state establishes first-plane clipping");
+		    for (bool gs_prolog: {false, true})
+		    {
+			    for (bool exec_zero: {false, true})
+			    {
+				    const auto program = Parse(kPos1X, false, true, exec_zero);
+				    ShaderVertexInputInfo input {};
+				    input.gs_prolog = gs_prolog;
+				    input.position1_usage = usage;
+				    const auto source = Validate(program, &input, nullptr);
+				    const auto index = program.export_index;
+				    Has(source, "OpCapability ClipDistance");
+				    Has(source, "OpMemberDecorate %gl_PerVertex 2 BuiltIn ClipDistance");
+				    Has(source, String8::FromPrintf(
+				        "%%clip_active_%u = OpINotEqual %%bool %%clip_exec_%u %%uint_0\n"
+				        "OpSelectionMerge %%clip_merge_%u None\n"
+				        "OpBranchConditional %%clip_active_%u %%clip_export_%u %%clip_merge_%u\n"
+				        "%%clip_export_%u = OpLabel\n"
+				        "%%clip_source_%u = OpLoad %%float %%v17\n"
+				        "%%clip_target_%u = OpAccessChain %%_ptr_Output_float %%outPerVertex %%int_2 %%int_0\n"
+				        "OpStore %%clip_target_%u %%clip_source_%u\n"
+				        "OpBranch %%clip_merge_%u\n%%clip_merge_%u = OpLabel",
+				        index, index, index, index, index, index, index, index, index, index, index, index, index));
+			    }
+		    }
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderExport, ValidatesPositionSequenceWithDoneOnFinalTypedPositionExport)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    const auto program = ParsePositionSequence({kPos0NoDone, kPos1XDone, kParam0});
+		    const auto& instructions = program.code.GetInstructions();
+		    const uint32_t pos0_index = program.export_index;
+		    const uint32_t pos1_index = pos0_index + 1u;
+		    const uint32_t param_index = pos1_index + 1u;
+		    CheckExport(instructions.At(pos0_index), kPos0NoDone, 32u);
+		    CheckExport(instructions.At(pos1_index), kPos1XDone, 40u);
+		    CheckExport(instructions.At(param_index), kParam0, 48u);
+		    Require(instructions.At(pos0_index).raw_word == 0xf80000cfu && instructions.At(pos0_index).exp_control == 0u &&
+		                instructions.At(pos1_index).raw_word == 0xf80008d1u && instructions.At(pos1_index).exp_control == 2u &&
+		                instructions.At(param_index).raw_word == 0xf800020fu && instructions.At(param_index).exp_control == 0u,
+		            "POS0 no-DONE, POS1.X DONE, and the post-DONE parameter keep their raw control order");
+
+		    const auto usage = ShaderDecodeVertexPosition1Usage(4u << 4u, (1u << 22u) | 1u, true);
+		    Require(usage == ShaderVertexPosition1Usage::ClipDistance0, "output state establishes only supported clip distance zero");
+		    ShaderVertexInputInfo input {};
+		    input.position1_usage = usage;
+		    const auto source = Validate(program, &input, nullptr);
+		    RequirePositionStoreGuard(source, pos0_index);
+		    Has(source, "%t0_4 = OpLoad %float %v17\n%t1_4 = OpLoad %float %v61\n"
+		                "%t2_4 = OpLoad %float %v173\n%t3_4 = OpLoad %float %v239\n"
+		                "%t4_4 = OpCompositeConstruct %v4float %t0_4 %t1_4 %t2_4 %t3_4\n"
+		                "%t5_4 = OpAccessChain %_ptr_Output_v4float %outPerVertex %int_per_vertex_0\nOpStore %t5_4 %t4_4");
+		    Has(source, String8::FromPrintf(
+		        "%%clip_active_%u = OpINotEqual %%bool %%clip_exec_%u %%uint_0\n"
+		        "OpSelectionMerge %%clip_merge_%u None\n"
+		        "OpBranchConditional %%clip_active_%u %%clip_export_%u %%clip_merge_%u\n"
+		        "%%clip_export_%u = OpLabel\n"
+		        "%%clip_source_%u = OpLoad %%float %%v17\n"
+		        "%%clip_target_%u = OpAccessChain %%_ptr_Output_float %%outPerVertex %%int_2 %%int_0\n"
+		        "OpStore %%clip_target_%u %%clip_source_%u\n"
+		        "OpBranch %%clip_merge_%u\n%%clip_merge_%u = OpLabel",
+		        pos1_index, pos1_index, pos1_index, pos1_index, pos1_index, pos1_index, pos1_index, pos1_index,
+		        pos1_index, pos1_index, pos1_index, pos1_index, pos1_index));
+		    Has(source, String8::FromPrintf("%%t0_%u = OpLoad %%float %%v17\n%%t1_%u = OpLoad %%float %%v61\n"
+		                                   "%%t2_%u = OpLoad %%float %%v173\n%%t3_%u = OpLoad %%float %%v239\n"
+		                                   "%%t4_%u = OpCompositeConstruct %%v4float %%t0_%u %%t1_%u %%t2_%u %%t3_%u\n"
+		                                   "OpStore %%param0 %%t4_%u",
+		                                   param_index, param_index, param_index, param_index, param_index,
+		                                   param_index, param_index, param_index, param_index, param_index));
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderExport, RejectsMalformedNonFinalPositionExportTuples)
+{
+	for (const auto mutation: {NonFinalPositionMutation::EnableMask, NonFinalPositionMutation::SourceCount,
+	                           NonFinalPositionMutation::SourceShape, NonFinalPositionMutation::RawControl})
+	{
+		ASSERT_EXIT(RejectMalformedNonFinalPosition(mutation), ::testing::ExitedWithCode(kRejectedExit), "pc=0x00000020");
+	}
 }
 
 TEST(EmulatorShaderExport, CompressedMrtKeepsBothPhysicalSlotsForPartialEn)
@@ -424,6 +707,43 @@ TEST(EmulatorShaderExport, ValidatesCurrentlyAdmittedPrimGsPrologModule)
 	    ::testing::ExitedWithCode(0), "");
 }
 
+TEST(EmulatorShaderExport, PositionStoreAndClipProbeAreGuardedByResolvedExec)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    for (bool gs_prolog: {false, true})
+		    {
+			    for (bool exec_zero: {false, true})
+			    {
+				    const auto program = Parse(kPos0, false, false, exec_zero);
+				    const auto& instructions = program.code.GetInstructions();
+				    if (exec_zero)
+				    {
+					    Require(program.export_index == 5u && instructions.At(4).raw_word == kExecZero,
+					            "zero-EXEC instruction precedes the final POS0 export");
+				    } else
+				    {
+					    Require(program.export_index == 4u, "full-EXEC fixture reaches the final POS0 export directly");
+				    }
+				    ShaderVertexInputInfo input {};
+				    input.gs_prolog = gs_prolog;
+				    const auto source = Validate(program, &input, nullptr);
+				    RequirePositionStoreGuard(source, program.export_index);
+			    }
+		    }
+
+		    const auto probed = Parse(kPos0);
+		    ShaderVertexInputInfo probe_input {};
+		    probe_input.clip_probe.enabled = true;
+		    probe_input.clip_probe_descriptor_set = 1u;
+		    const auto probe_source = Validate(probed, &probe_input, nullptr);
+		    RequirePositionStoreGuard(probe_source, probed.export_index, true);
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
 TEST(EmulatorShaderExport, ValidatesPos1LayerFromPhysicalZForBothDoneValues)
 {
 	ASSERT_EXIT(
@@ -470,6 +790,89 @@ TEST(EmulatorShaderExport, ValidatesPixelZSourceAndDepthControlFlow)
 		    Has(source, "OpBranchConditional %exp_exec_b_4 %exp_store_4 %exp_kill_4\n%exp_kill_4 = OpLabel\nOpKill\n"
 		                "%exp_store_4 = OpLabel\n%t0_4 = OpLoad %float %v17\nOpStore %fragDepth %t0_4");
 		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderExport, ValidatesNonFinalPixelZAheadOfColorExport)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    std::vector<uint32_t> words;
+		    for (unsigned source = 0; source < 4; ++source)
+		    {
+			    words.push_back(0x7e0002ffu | (static_cast<uint32_t>(kRegisters[source]) << 17u)); // v_mov_b32 vN, literal
+			    words.push_back(kValues[source]);
+		    }
+		    const auto color = Mrt(0u, 15u, 3u);
+		    words.insert(words.end(), {kPixelZNoDone.word, kSourceWord, color.word, kSourceWord, kEndpgm});
+		    Program program;
+		    program.code.SetType(ShaderType::Pixel);
+		    Require(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &program.code),
+		            "complete bounded parser input");
+		    CheckExport(program.code.GetInstructions().At(4), kPixelZNoDone, 32u);
+		    CheckExport(program.code.GetInstructions().At(5), color, 40u);
+
+		    ShaderPixelInputInfo input {};
+		    input.target_output_mode[0] = 9u;
+		    const auto source = Validate(program, nullptr, &input);
+		    Has(source, "OpExecutionMode %main DepthReplacing");
+		    Has(source, "%t0_4 = OpLoad %float %v17\nOpStore %fragDepth %t0_4");
+		    Require(source.find("OpStore %outColor") != std::string::npos, "the following color export still stores MRT0");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+Program ParseDepthWithDiscardTail(bool clear_exec)
+{
+	// Movs, s_cbranch_scc0 to the tail, MRTZ (no DONE), full MRT0 (DONE),
+	// s_endpgm; tail: s_mov_b64 exec, 0 (or a NOP), MRTZ with no channel
+	// (valid mask only, DONE), s_endpgm.
+	std::vector<uint32_t> words;
+	for (unsigned source = 0; source < 4; ++source)
+	{
+		words.push_back(0x7e0002ffu | (static_cast<uint32_t>(kRegisters[source]) << 17u)); // v_mov_b32 vN, literal
+		words.push_back(kValues[source]);
+	}
+	const auto color = Mrt(0u, 15u, 3u);
+	words.insert(words.end(), {0xbf840005u, kPixelZNoDone.word, kSourceWord, color.word, kSourceWord, kEndpgm,
+	                           clear_exec ? 0xbefe0480u : 0xbf800000u, kPixelZNull.word, kSourceWord, kEndpgm});
+	Program program;
+	program.code.SetType(ShaderType::Pixel);
+	Require(ShaderTryParseBounded(words.data(), static_cast<uint32_t>(words.size() * sizeof(uint32_t)), &program.code),
+	        "complete bounded parser input");
+	return program;
+}
+
+TEST(EmulatorShaderExport, PixelZWithDiscardTailWritesDepthOnEveryLiveExit)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    const auto program = ParseDepthWithDiscardTail(true);
+		    Require(program.code.GetInstructions().At(9).format == ShaderInstructionFormat::NullVmDone, "MRTZ with no channel is a null export");
+		    ShaderPixelInputInfo input {};
+		    input.target_output_mode[0] = 9u;
+		    const auto source = Validate(program, nullptr, &input);
+		    Has(source, "OpExecutionMode %main DepthReplacing");
+		    Has(source, "%t0_5 = OpLoad %float %v17\nOpStore %fragDepth %t0_5");
+		    std::_Exit(0);
+	    }()),
+	    ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorShaderExport, PixelZRejectsTailThatKeepsLanesWithoutDepth)
+{
+	ASSERT_EXIT(
+	    ([] {
+		    Initialize();
+		    const auto program = ParseDepthWithDiscardTail(false);
+		    ShaderPixelInputInfo input {};
+		    input.target_output_mode[0] = 9u;
+		    const auto assembly = SpirvGenerateSource(program.code, nullptr, &input, nullptr);
+		    std::_Exit(assembly.FindIndex("OpKytyPixelDepthControlFlowRejected") != Core::STRING8_INVALID_INDEX ? 0 : 3);
 	    }()),
 	    ::testing::ExitedWithCode(0), "");
 }
@@ -638,7 +1041,14 @@ TEST(EmulatorShaderExport, RetainsExistingParserControlAndStageRejections)
 	    {ShaderType::Pixel, 8, 1, 2, true}, {ShaderType::Pixel, 8, 3, 3, true}, {ShaderType::Pixel, 8, 1, 7, true},
 	    {ShaderType::Pixel, 9, 1, 3, true}, {ShaderType::Pixel, 9, 0, 3, false}, {ShaderType::Vertex, 9, 0, 3, true},
 	    {ShaderType::Pixel, 13, 4, 0, true}, {ShaderType::Vertex, 13, 4, 1, true}, {ShaderType::Vertex, 13, 4, 0, false},
-	    {ShaderType::Vertex, 20, 1, 0, true}, {ShaderType::Vertex, 20, 3, 2, true}, {ShaderType::Vertex, 12, 15, 0, true}};
+	    {ShaderType::Pixel, 13, 1, 0, true}, {ShaderType::Vertex, 13, 1, 1, true}, {ShaderType::Vertex, 13, 1, 3, true},
+	    {ShaderType::Vertex, 13, 1, 4, true}, {ShaderType::Vertex, 13, 1, 6, true},
+	    {ShaderType::Vertex, 13, 0, 2, true}, {ShaderType::Vertex, 13, 2, 2, true},
+	    {ShaderType::Vertex, 13, 15, 2, true}, {ShaderType::Vertex, 13, 1, 0, false},
+	    {ShaderType::Pixel, 12, 15, 0, true}, {ShaderType::Vertex, 12, 15, 1, true},
+	    {ShaderType::Vertex, 12, 15, 4, true}, {ShaderType::Vertex, 12, 14, 0, true},
+	    {ShaderType::Vertex, 12, 15, 0, false},
+	    {ShaderType::Vertex, 20, 1, 0, true}, {ShaderType::Vertex, 20, 3, 2, true}};
 	for (const auto& test: cases)
 	{
 		const auto diagnostic = String8::FromPrintf("unknown exp target: 0x%02x done=%u compr=%u vm=%u en=0x%x at addr 0x00000020",
@@ -657,7 +1067,7 @@ TEST(EmulatorShaderExport, RetainsExistingParserControlAndStageRejections)
 
 TEST(EmulatorShaderExport, RetainsGsPrologLayerMetadataAndStandaloneMrt0Gates)
 {
-	for (const auto& test: {kPrim, kPos1, Mrt(0, 0, 7)})
+	for (const auto& test: {kPrim, kPos1, kPos1X, Mrt(0, 0, 7)})
 	{
 		const auto diagnostic = String8::FromPrintf("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64
 		                                            " pc=0x00000020 sampled=0/0/0 inst=.*sopp=0xff raw=0x%08" PRIx32,
@@ -676,6 +1086,24 @@ TEST(EmulatorShaderExport, RetainsGsPrologLayerMetadataAndStandaloneMrt0Gates)
 		    },
 		    ::testing::ExitedWithCode(kRejectedExit), diagnostic.c_str());
 	}
+}
+
+TEST(EmulatorShaderExport, FinalClipDistanceStillRequiresSupportedOutputMetadata)
+{
+	const auto diagnostic = String8::FromPrintf("shader emitter missing: stage=%u instruction=%u format=0x%016" PRIx64
+	                                            " pc=0x00000028 sampled=0/0/0 inst=.*sopp=0xff raw=0x%08" PRIx32,
+	                                            static_cast<unsigned>(ShaderType::Vertex),
+	                                            static_cast<unsigned>(ShaderInstructionType::Exp),
+	                                            static_cast<uint64_t>(kPos1XDone.format), kPos1XDone.word);
+	ASSERT_EXIT(
+	    {
+		    Initialize();
+		    const auto program = ParsePositionSequence({kPos0NoDone, kPos1XDone, kParam0});
+		    ShaderVertexInputInfo vertex {}; // ClipDistance0 metadata is deliberately absent.
+		    (void)SpirvGenerateSource(program.code, &vertex, nullptr, nullptr);
+		    std::_Exit(0);
+	    },
+	    ::testing::ExitedWithCode(kRejectedExit), diagnostic.c_str());
 }
 
 UT_END();

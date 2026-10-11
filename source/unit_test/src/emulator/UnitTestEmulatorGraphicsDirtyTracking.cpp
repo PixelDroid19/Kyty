@@ -1,20 +1,34 @@
+#include "Kyty/Core/Subsystems.h"
 #include "Kyty/Core/VirtualMemory.h"
 #include "Kyty/UnitTest.h"
 
+#include "Emulator/Config.h"
 #include "Emulator/Graphics/GpuDirtyPageTracker.h"
+#include "Emulator/Graphics/GraphicContext.h"
 #include "Emulator/Graphics/Objects/GpuMemory.h"
+#include "Emulator/GuestMemory.h"
+#include "Emulator/Log.h"
 #include "Emulator/VideoFrameMemory.h"
+
+// Test-only private include: GpuMemoryCalcHash is declared in this internal header,
+// not in the public GpuMemory.h. It adds no production test API; the hash-span probes
+// need the exact function that owns the guard.
+#include "../../../emulator/src/Graphics/Objects/GpuMemoryInternal.h"
 
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <limits>
 #include <thread>
 #include <vector>
 
-#if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -25,17 +39,30 @@ using Kyty::Core::VirtualMemory::DestroySharedBacking;
 using Kyty::Core::VirtualMemory::Free;
 using Kyty::Core::VirtualMemory::GetPageSize;
 using Kyty::Core::VirtualMemory::MapSharedAligned;
+using Kyty::Core::VirtualMemory::MapSharedFixed;
 using Kyty::Core::VirtualMemory::Mode;
+using Kyty::Core::VirtualMemory::Protect;
 using Kyty::Libs::Graphics::GpuDirtyPageProtectionOps;
 using Kyty::Libs::Graphics::GpuDirtyPageTableIndex;
 using Kyty::Libs::Graphics::GpuDirtyPageTracker;
+using Kyty::Libs::Graphics::GpuDirtyPageTrackerNotifyFaultHandlerInstalled;
 using Kyty::Libs::Graphics::GpuDirtyProtectionState;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateHandlesFault;
 using Kyty::Libs::Graphics::GpuDirtyProtectionStateNeedsArmingRollback;
 using Kyty::Libs::Graphics::GpuDirtyTrackingEnabledForProcess;
 using Kyty::Libs::Graphics::GpuDirtyTrackingMode;
+using Kyty::Libs::Graphics::GpuMemoryCalcHash;
 using Kyty::Libs::Graphics::GpuMemoryCheckAccessViolation;
+using Kyty::Libs::Graphics::GpuMemoryCreateObject;
+using Kyty::Libs::Graphics::GpuMemoryFree;
+using Kyty::Libs::Graphics::GpuMemoryInit;
+using Kyty::Libs::Graphics::GpuMemoryIsHostGuestMallocRange;
 using Kyty::Libs::Graphics::GpuMemoryNotifyHostWrite;
+using Kyty::Libs::Graphics::GpuMemoryObjectType;
+using Kyty::Libs::Graphics::GpuMemorySetAllocatedRange;
+using Kyty::Libs::Graphics::GpuObject;
+using Kyty::Libs::Graphics::GraphicContext;
+using Kyty::Libs::Graphics::VulkanMemory;
 
 namespace {
 
@@ -1402,6 +1429,467 @@ TEST(EmulatorGraphicsDirtyTracking, PublicWriteRoutesRejectInvalidRanges)
 {
 	EXPECT_FALSE(GpuMemoryCheckAccessViolation(0));
 	EXPECT_FALSE(GpuMemoryNotifyHostWrite(0, 0));
+}
+
+namespace {
+
+// Byte held by a fake backend after create or update: what a later draw reads.
+struct UploadedByteBacking
+{
+	uint8_t uploaded = 0;
+};
+
+// Armed by the probe. The first create callback performs one host write: it
+// announces the write with NotifyWrite and then stores the new guest byte.
+struct CreateRaceState
+{
+	uint8_t write_value     = 0;
+	bool    write_on_create = false;
+};
+
+CreateRaceState g_create_race;
+
+// Non-staged check_hash object: VertexBuffer without read_only skips the
+// stable-create staging path. The write window under test is inside create_func:
+// after it has copied the guest byte into its backing, and before the create
+// returns, a host write lands. The reuse must refresh from the byte left behind.
+struct CreateRaceGpuObject final: public GpuObject
+{
+	CreateRaceGpuObject()
+	{
+		type       = GpuMemoryObjectType::VertexBuffer;
+		params[0]  = 1u;
+		read_only  = false;
+		check_hash = true;
+	}
+
+	bool Equal(const uint64_t* other) const override { return other != nullptr && other[0] == params[0]; }
+
+	create_func_t GetCreateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, const uint64_t* vaddr, const uint64_t* /*size*/, int /*vaddr_num*/,
+		          VulkanMemory* /*mem*/) -> void*
+		{
+			auto* backing     = new UploadedByteBacking;
+			backing->uploaded = *reinterpret_cast<const uint8_t*>(vaddr[0]);
+			if (g_create_race.write_on_create)
+			{
+				g_create_race.write_on_create = false;
+				(void)GpuDirtyPageTracker::Instance().NotifyWrite(vaddr[0], 1u);
+				*reinterpret_cast<uint8_t*>(vaddr[0]) = g_create_race.write_value;
+			}
+			return backing;
+		};
+	}
+
+	create_from_objects_func_t GetCreateFromObjectsFunc() const override { return nullptr; }
+
+	write_back_func_t GetWriteBackFunc() const override { return nullptr; }
+
+	delete_func_t GetDeleteFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, void* obj, VulkanMemory* /*mem*/) { delete static_cast<UploadedByteBacking*>(obj); };
+	}
+
+	update_func_t GetUpdateFunc() const override
+	{
+		return [](GraphicContext* /*ctx*/, const uint64_t* /*params*/, void* obj, const uint64_t* vaddr, const uint64_t* /*size*/,
+		          int /*vaddr_num*/)
+		{ static_cast<UploadedByteBacking*>(obj)->uploaded = *reinterpret_cast<const uint8_t*>(vaddr[0]); };
+	}
+};
+
+// Runs in a fresh process. The tracker singleton reads its fault-handler gate
+// once, and GpuMemory is process-global with a one-shot init, so neither can be
+// reset between tests in this binary.
+void RunNonStagedCreateRaceProbe()
+{
+	// Child stdout is not captured by the death test. Route it to stderr, unbuffered,
+	// so the probe's diagnostics appear in the captured output.
+	std::fflush(stdout);
+#if defined(_WIN32)
+	if (::_dup2(::_fileno(stderr), ::_fileno(stdout)) < 0) { std::_Exit(125); }
+#else
+	if (::dup2(::fileno(stderr), ::fileno(stdout)) < 0) { std::_Exit(125); }
+#endif
+	std::setvbuf(stdout, nullptr, _IONBF, 0);
+	GpuDirtyPageTrackerNotifyFaultHandlerInstalled();
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	GpuMemoryInit();
+
+	Mapping mapping(1);
+	ASSERT_NE(mapping.address, 0u);
+	GpuMemorySetAllocatedRange(mapping.address, mapping.size);
+	ASSERT_TRUE(GpuDirtyPageTracker::Instance().Enabled());
+	std::fprintf(stderr, "[dirty-tracking-evidence] preconditions enabled=1 mapping=set\n");
+	std::fflush(stderr);
+	*reinterpret_cast<uint8_t*>(mapping.address) = 0x11;
+	g_create_race.write_value                    = 0x22;
+	g_create_race.write_on_create                = true;
+
+	GraphicContext      ctx {};
+	const CreateRaceGpuObject info;
+	void* const first = GpuMemoryCreateObject(1u, &ctx, nullptr, mapping.address, mapping.size, info);
+	ASSERT_TRUE(first != nullptr);
+	ASSERT_EQ(GpuDirtyPageTracker::Instance().Mode(mapping.address, mapping.size), GpuDirtyTrackingMode::PageFault);
+	ASSERT_EQ(static_cast<unsigned>(*reinterpret_cast<const uint8_t*>(mapping.address)), 0x22u);
+	std::fprintf(stderr, "[dirty-tracking-evidence] afterfirstcreation guest=%u\n",
+	             static_cast<unsigned>(*reinterpret_cast<const uint8_t*>(mapping.address)));
+	std::fflush(stderr);
+
+	// A newer submit on the same exact range reuses the object. Its upload must
+	// match the guest byte that the create-time write left behind.
+	void* const second = GpuMemoryCreateObject(2u, &ctx, nullptr, mapping.address, mapping.size, info);
+	ASSERT_EQ(second, first);
+	const auto guest    = *reinterpret_cast<const uint8_t*>(mapping.address);
+	const auto uploaded = static_cast<const UploadedByteBacking*>(second)->uploaded;
+	std::fprintf(stderr, "[dirty-tracking-evidence] reuse uploaded=%u guest=%u\n", static_cast<unsigned>(uploaded),
+	             static_cast<unsigned>(guest));
+	std::fflush(stderr);
+	EXPECT_EQ(static_cast<unsigned>(uploaded), static_cast<unsigned>(guest));
+
+	GpuMemoryFree(&ctx, mapping.address, mapping.size);
+}
+
+} // namespace
+
+TEST(EmulatorGraphicsDirtyTracking, NonStagedCreateWriteDuringCreateIsRefreshedOnReuse)
+{
+	ASSERT_EXIT({ RunNonStagedCreateRaceProbe(); std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
+}
+
+namespace {
+
+// Test-owned synthetic guest-memory state for the split-readable contract. The
+// port callbacks are plain function pointers, so they read this file-scope state.
+// Two adjacent single-page segments are CPU-readable; no single record covers both.
+constexpr uint64_t kSplitFixtureAddress = 0x0000'1000'0000'0000ull;
+constexpr uint32_t kSplitCpuReadWrite   = 0x3u; // production treats either low CPU bit as readable
+
+struct SplitGuestSegment
+{
+	uint64_t base = 0;
+	uint64_t size = 0;
+};
+
+std::array<SplitGuestSegment, 2> g_split_segments {};
+
+const SplitGuestSegment* FindSplitSegment(uint64_t address)
+{
+	for (const auto& segment: g_split_segments)
+	{
+		if (segment.size != 0 && address >= segment.base && address - segment.base < segment.size)
+		{
+			return &segment;
+		}
+	}
+	return nullptr;
+}
+
+bool SplitQueryMappedRange(uint64_t address, uint64_t size, Kyty::Emulator::GuestMemory::MappedRange* out)
+{
+	const SplitGuestSegment* segment = FindSplitSegment(address);
+	// A request crossing the segment boundary is rejected, as the production query
+	// rejects it: one record never describes both pages.
+	if (segment == nullptr || out == nullptr || size == 0 || size > segment->size - (address - segment->base))
+	{
+		return false;
+	}
+	out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::Flexible;
+	out->base = segment->base;
+	out->size = segment->size;
+	return true;
+}
+
+int SplitQueryProtection(void* address, void** start, void** end, int* protection)
+{
+	const SplitGuestSegment* segment = FindSplitSegment(reinterpret_cast<uint64_t>(address));
+	if (segment == nullptr)
+	{
+		return -1;
+	}
+	if (start != nullptr)
+	{
+		*start = reinterpret_cast<void*>(segment->base);
+	}
+	// Inclusive end, as KernelQueryMemoryProtection reports it.
+	if (end != nullptr)
+	{
+		*end = reinterpret_cast<void*>(segment->base + segment->size - 1u);
+	}
+	if (protection != nullptr)
+	{
+		*protection = static_cast<int>(kSplitCpuReadWrite);
+	}
+	return 0;
+}
+
+// Runs in a fresh process: the guest-memory port installs once per process.
+void RunSplitReadableRefreshProbe()
+{
+	// Child stdout is not captured by the death test. Route it to stderr, unbuffered,
+	// so the probe's diagnostics appear in the captured output.
+	std::fflush(stdout);
+#if defined(_WIN32)
+	if (::_dup2(::_fileno(stderr), ::_fileno(stdout)) < 0) { std::_Exit(125); }
+#else
+	if (::dup2(::fileno(stderr), ::fileno(stdout)) < 0) { std::_Exit(125); }
+#endif
+	std::setvbuf(stdout, nullptr, _IONBF, 0);
+	GpuDirtyPageTrackerNotifyFaultHandlerInstalled();
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	GpuMemoryInit();
+
+	const uint64_t page    = GetPageSize();
+	const uint64_t size    = page * 2u;
+	const uint64_t address = kSplitFixtureAddress;
+	// Inside the host-heap window of GpuMemoryIsHostGuestMallocRange the port is
+	// never consulted and the hash runs directly, which would mask this contract.
+	ASSERT_FALSE(GpuMemoryIsHostGuestMallocRange(address, size));
+	Kyty::Core::VirtualMemory::SharedBacking* const backing = CreateSharedBacking(size);
+	ASSERT_TRUE(backing != nullptr);
+	ASSERT_TRUE(MapSharedFixed(backing, address, 0, size, Mode::ReadWrite));
+	GpuMemorySetAllocatedRange(address, size);
+	ASSERT_TRUE(GpuDirtyPageTracker::Instance().Enabled());
+
+	g_split_segments = {SplitGuestSegment {address, page}, SplitGuestSegment {address + page, page}};
+	Kyty::Emulator::GuestMemory::Callbacks callbacks;
+	callbacks.query_mapped_range = &SplitQueryMappedRange;
+	callbacks.query_protection   = &SplitQueryProtection;
+	auto& guest_memory           = Kyty::Emulator::GuestMemory::GetPort();
+	ASSERT_TRUE(guest_memory.Install(callbacks));
+	Kyty::Emulator::GuestMemory::MappedRange whole {};
+	ASSERT_FALSE(guest_memory.QueryMappedRange(address, size, &whole));
+	Kyty::Emulator::GuestMemory::MappedRange first_page {};
+	ASSERT_TRUE(guest_memory.QueryMappedRange(address, 1u, &first_page));
+	ASSERT_EQ(first_page.base, address);
+	ASSERT_EQ(first_page.size, page);
+
+	// The initial create copies 0x11 and performs no callback write.
+	g_create_race.write_on_create = false;
+	*reinterpret_cast<uint8_t*>(address) = 0x11;
+	GraphicContext ctx {};
+	const CreateRaceGpuObject info;
+	void* const first = GpuMemoryCreateObject(1u, &ctx, nullptr, address, size, info);
+	ASSERT_TRUE(first != nullptr);
+	ASSERT_EQ(GpuDirtyPageTracker::Instance().Mode(address, size), GpuDirtyTrackingMode::PageFault);
+	ASSERT_EQ(static_cast<unsigned>(static_cast<const UploadedByteBacking*>(first)->uploaded), 0x11u);
+
+	// The tracker learns of the host write before the guest byte changes to 0x22.
+	ASSERT_TRUE(GpuDirtyPageTracker::Instance().NotifyWrite(address, 1u));
+	*reinterpret_cast<uint8_t*>(address) = 0x22;
+
+	// A newer submit on the same exact range reuses the object. Every byte is
+	// CPU-readable, so the refresh must upload the guest byte 0x22.
+	void* const second = GpuMemoryCreateObject(2u, &ctx, nullptr, address, size, info);
+	ASSERT_EQ(second, first);
+	const auto guest    = *reinterpret_cast<const uint8_t*>(address);
+	const auto uploaded = static_cast<const UploadedByteBacking*>(second)->uploaded;
+	std::fprintf(stderr, "[dirty-tracking-evidence] split-readable-refresh uploaded=%u guest=%u\n", static_cast<unsigned>(uploaded),
+	             static_cast<unsigned>(guest));
+	std::fflush(stderr);
+	EXPECT_EQ(static_cast<unsigned>(uploaded), static_cast<unsigned>(guest));
+
+	GpuMemoryFree(&ctx, address, size);
+	Free(address);
+	DestroySharedBacking(backing);
+}
+
+} // namespace
+
+TEST(EmulatorGraphicsDirtyTracking, SplitReadableMappingRefreshesOnReuse)
+{
+	ASSERT_EXIT({ RunSplitReadableRefreshProbe(); std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
+}
+
+namespace {
+
+// GpuMemoryCalcHash probes over two test-owned pages. Page 1 is CPU-readable; page 2
+// is made NoAccess with the real VM API after the port is installed. A guard that
+// checks protection only at the first byte and then hashes the whole span faults on
+// page 2 instead of returning 0.
+enum class HashSpanProbeMode : uint8_t
+{
+	// One port record describes both pages while the tail page is NoAccess.
+	WholeRecordNoAccessTail,
+	// The port has no record covering the tail page, so the cursor query fails there.
+	// The protection query still reports the tail as CPU-readable. This is a deliberately
+	// different mock, not native kernel metadata: it isolates the mapped-range guard from
+	// the protection guard. The real OS tail page stays NoAccess, so a walker that ignores
+	// the missing mapping and hashes the tail faults instead of returning 0.
+	MetadataHoleNoAccessTail,
+};
+
+struct HashSpanPortState
+{
+	uint64_t base              = 0;
+	uint64_t page              = 0;
+	uint64_t record_size       = 0;
+	bool     tail_cpu_readable = false;
+};
+
+HashSpanPortState g_hash_span {};
+
+bool HashSpanQueryMappedRange(uint64_t address, uint64_t size, Kyty::Emulator::GuestMemory::MappedRange* out)
+{
+	const HashSpanPortState& s = g_hash_span;
+	if (out == nullptr || size == 0 || address < s.base || address - s.base >= s.record_size ||
+	    size > s.record_size - (address - s.base))
+	{
+		return false;
+	}
+	out->kind = Kyty::Emulator::GuestMemory::MappedRangeKind::Flexible;
+	out->base = s.base;
+	out->size = s.record_size;
+	return true;
+}
+
+int HashSpanQueryProtection(void* address, void** start, void** end, int* protection)
+{
+	const HashSpanPortState& s    = g_hash_span;
+	const auto               addr = reinterpret_cast<uint64_t>(address);
+	if (addr < s.base || addr - s.base >= s.page * 2u)
+	{
+		return -1;
+	}
+	const bool     first     = addr - s.base < s.page;
+	const uint64_t page_base = first ? s.base : s.base + s.page;
+	if (start != nullptr)
+	{
+		*start = reinterpret_cast<void*>(page_base);
+	}
+	// Inclusive end, as KernelQueryMemoryProtection reports it.
+	if (end != nullptr)
+	{
+		*end = reinterpret_cast<void*>(page_base + s.page - 1u);
+	}
+	if (protection != nullptr)
+	{
+		*protection = first || s.tail_cpu_readable ? static_cast<int>(kSplitCpuReadWrite) : 0;
+	}
+	return 0;
+}
+
+// Owns the two-page fixture of one hash-span probe. Teardown restores the tail page
+// to ReadWrite before Free, so no protection outlives the probe.
+struct HashSpanFixture
+{
+	uint64_t                                  address        = 0;
+	uint64_t                                  page           = 0;
+	Kyty::Core::VirtualMemory::SharedBacking* backing        = nullptr;
+	bool                                      tail_protected = false;
+
+	~HashSpanFixture()
+	{
+		if (tail_protected)
+		{
+			(void)Protect(address + page, page, Mode::ReadWrite);
+		}
+		if (address != 0)
+		{
+			(void)Free(address);
+		}
+		if (backing != nullptr)
+		{
+			DestroySharedBacking(backing);
+		}
+	}
+};
+
+// Runs in a fresh process: the guest-memory port installs once per process. These
+// probes install no fault handler and enable no GPU tracking, so only the guard
+// inside GpuMemoryCalcHash is under test. Outcome is the exit code; the stderr
+// marker is debug evidence only.
+void RunHashSpanProbe(HashSpanProbeMode mode)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	const uint64_t page    = GetPageSize();
+	const uint64_t size    = page * 2u;
+	const uint64_t address = kSplitFixtureAddress;
+	// Outside the host-heap exemption, so GpuMemoryCalcHash must consult the port.
+	ASSERT_FALSE(GpuMemoryIsHostGuestMallocRange(address, size));
+
+	HashSpanFixture fixture;
+	fixture.page    = page;
+	fixture.backing = CreateSharedBacking(size);
+	ASSERT_TRUE(fixture.backing != nullptr);
+	ASSERT_TRUE(MapSharedFixed(fixture.backing, address, 0, size, Mode::ReadWrite));
+	fixture.address                      = address;
+	*reinterpret_cast<uint8_t*>(address) = 0x5a;
+
+	g_hash_span.base        = address;
+	g_hash_span.page        = page;
+	g_hash_span.record_size       = mode == HashSpanProbeMode::WholeRecordNoAccessTail ? size : page;
+	g_hash_span.tail_cpu_readable = mode == HashSpanProbeMode::MetadataHoleNoAccessTail;
+
+	Kyty::Emulator::GuestMemory::Callbacks callbacks;
+	callbacks.query_mapped_range = &HashSpanQueryMappedRange;
+	callbacks.query_protection   = &HashSpanQueryProtection;
+	auto& guest_memory           = Kyty::Emulator::GuestMemory::GetPort();
+	ASSERT_TRUE(guest_memory.Install(callbacks));
+	ASSERT_TRUE(guest_memory.IsInstalled());
+
+	// Real VM state: the tail page moves from ReadWrite to NoAccess through the owned-page API.
+	Mode old_mode = Mode::NoAccess;
+	ASSERT_TRUE(Protect(address + page, page, Mode::NoAccess, &old_mode));
+	fixture.tail_protected = true;
+	ASSERT_EQ(old_mode, Mode::ReadWrite);
+
+	// The probe must reach the branch under test. The first page is a valid query that
+	// contains it, the tail protection matches the mode, and the metadata shape matches the mode.
+	void* prot_start = nullptr;
+	void* prot_end   = nullptr;
+	int   protection = 0;
+	ASSERT_EQ(guest_memory.QueryProtection(reinterpret_cast<void*>(address), &prot_start, &prot_end, &protection), 0);
+	ASSERT_LE(reinterpret_cast<uint64_t>(prot_start), address);
+	ASSERT_GE(reinterpret_cast<uint64_t>(prot_end), address + page - 1u);
+	ASSERT_NE(protection & 0x3, 0);
+	ASSERT_EQ(guest_memory.QueryProtection(reinterpret_cast<void*>(address + page), &prot_start, &prot_end, &protection), 0);
+	const int expected_tail_protection = mode == HashSpanProbeMode::MetadataHoleNoAccessTail ? static_cast<int>(kSplitCpuReadWrite) : 0;
+	ASSERT_EQ(protection, expected_tail_protection);
+	Kyty::Emulator::GuestMemory::MappedRange mapped {};
+	const bool whole_known  = guest_memory.QueryMappedRange(address, size, &mapped);
+	const bool tail_known   = guest_memory.QueryMappedRange(address + page, 1u, &mapped);
+	const bool whole_record = mode == HashSpanProbeMode::WholeRecordNoAccessTail;
+	ASSERT_EQ(whole_known, whole_record);
+	ASSERT_EQ(tail_known, whole_record);
+
+	// Positive control: the same entry point still hashes the readable first page, so a
+	// walker that refuses everything cannot satisfy the zero expectation below.
+	EXPECT_NE(GpuMemoryCalcHash(GpuMemoryObjectType::VertexBuffer, reinterpret_cast<const uint8_t*>(address), page), 0u);
+
+	// Whole span with a NoAccess tail. The refusal must return 0 before any byte is
+	// hashed; a walker that hashes the span faults here rather than returning.
+	const uint64_t hash = GpuMemoryCalcHash(GpuMemoryObjectType::VertexBuffer, reinterpret_cast<const uint8_t*>(address), size);
+	std::fprintf(stderr, "[dirty-tracking-evidence] hash-span mode=%u hash=%llu\n", static_cast<unsigned>(mode),
+	             static_cast<unsigned long long>(hash));
+	std::fflush(stderr);
+	EXPECT_EQ(hash, 0u);
+}
+
+} // namespace
+
+TEST(EmulatorGraphicsDirtyTracking, HashSpanWalkerRefusesWholeRecordWithNoAccessTail)
+{
+	ASSERT_EXIT({ RunHashSpanProbe(HashSpanProbeMode::WholeRecordNoAccessTail); std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorGraphicsDirtyTracking, HashSpanWalkerRefusesMetadataHoleAtNoAccessTail)
+{
+	ASSERT_EXIT({ RunHashSpanProbe(HashSpanProbeMode::MetadataHoleNoAccessTail); std::_Exit(::testing::Test::HasFailure() ? 1 : 0); }, ::testing::ExitedWithCode(0), "");
 }
 
 UT_END();

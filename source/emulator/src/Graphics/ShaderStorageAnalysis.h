@@ -8,8 +8,8 @@
 
 #include "ShaderDebugInternal.h"
 
-#include <array>
 #include <cstdint>
+#include <vector>
 
 namespace Kyty::Libs::Graphics {
 
@@ -49,14 +49,14 @@ bool ShaderInstructionIsScalarBufferLoad(const ShaderInstruction& inst);
 bool ShaderScalarBufferUsesRuntimeDescriptor(const ShaderBindResources& bind, const ShaderInstruction& inst);
 void ShaderAccumulateScalarBufferLoadSpan(const ShaderInstruction& inst, uint64_t* required_bytes, bool* dynamic_offset);
 void ShaderCollectDynamicScalarResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
-                                         ShaderParsedUsage* info, const uint32_t* extended_buffer, uint16_t eud_size_dw);
+                                         ShaderParsedUsage* info, const uint32_t* extended_buffer, uint16_t eud_size_dw,
+                                         int user_data_register_base);
 void ShaderCollectAssembledBufferDescriptors(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                              int user_sgpr_num, int user_data_register_base);
 void ShaderCollectPointerTableResources(const ShaderCode& code, ShaderBindResources* bind, const HW::UserSgprInfo& user_sgpr,
                                         ShaderParsedUsage* info, uint16_t srt_size_dw, int user_data_register_base);
 // Copies a descriptor table from guest memory, retrying until two reads agree.
-bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
-                                        std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS>* snapshot);
+bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords, std::vector<uint32_t>* snapshot);
 bool ShaderIsDynamicScalarStorageConsumer(const ShaderBindResources& bind, const ShaderInstruction& inst);
 bool ShaderStorageResourceHasDynamicSLoad(const ShaderBindResources& bind, int storage_index);
 void ShaderPruneUnusedMetadataStorage(const ShaderCode& code, ShaderStorageResources* resources, int user_sgpr_num,

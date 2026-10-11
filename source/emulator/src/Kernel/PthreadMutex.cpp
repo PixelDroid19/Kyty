@@ -164,16 +164,20 @@ int KYTY_SYSV_ABI PthreadMutexDestroy(PthreadMutex* mutex)
 		return KERNEL_ERROR_EINVAL;
 	}
 
-	int result = pthread_mutex_destroy(&(*mutex)->p);
+	auto* private_mutex = *mutex;
+	int   result        = pthread_mutex_destroy(&private_mutex->p);
 
-	KYTY_LOG_DEBUG("\tmutex destroy: %s, %d\n", (*mutex)->name.C_Str(), result);
+	KYTY_LOG_DEBUG("\tmutex destroy: %s, %d\n", private_mutex->name.C_Str(), result);
 
-	delete *mutex;
-	*mutex = nullptr;
+	if (result == 0)
+	{
+		delete private_mutex;
+		*mutex = nullptr;
+		return OK;
+	}
 
 	switch (result)
 	{
-		case 0: return OK;
 		case EBUSY: return KERNEL_ERROR_EBUSY;
 		case EINVAL:
 		default: return KERNEL_ERROR_EINVAL;

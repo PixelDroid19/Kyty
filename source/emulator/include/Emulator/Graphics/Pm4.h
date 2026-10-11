@@ -541,10 +541,12 @@ constexpr uint32_t PA_SU_SC_MODE_CNTL_PERSP_CORR_DIS_MASK            = 0x1;
 
 constexpr uint32_t PA_CL_VTE_CNTL               = 0x206;
 constexpr uint32_t PA_CL_VS_OUT_CNTL            = 0x207;
+constexpr uint32_t PA_CL_VS_OUT_CNTL_CLIP_DIST_ENA_0_SHIFT           = 0;
 constexpr uint32_t PA_CL_VS_OUT_CNTL_USE_VTX_RENDER_TARGET_INDX_SHIFT = 18;
 constexpr uint32_t PA_CL_VS_OUT_CNTL_USE_VTX_VIEWPORT_INDX_SHIFT      = 19;
 constexpr uint32_t PA_CL_VS_OUT_CNTL_USE_VTX_KILL_FLAG_SHIFT          = 20;
 constexpr uint32_t PA_CL_VS_OUT_CNTL_VS_OUT_MISC_VEC_ENA_SHIFT        = 21;
+constexpr uint32_t PA_CL_VS_OUT_CNTL_VS_OUT_CCDIST0_VEC_ENA_SHIFT     = 22;
 constexpr uint32_t PA_SU_SMALL_PRIM_FILTER_CNTL = 0x20C;
 constexpr uint32_t PA_CL_OBJPRIM_ID_CNTL        = 0x20D;
 constexpr uint32_t PA_STEREO_CNTL               = 0x210;

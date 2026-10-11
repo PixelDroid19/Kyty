@@ -13,6 +13,7 @@
 #include "Emulator/Graphics/VertexClipProbe.h"
 
 #include <bitset>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string_view>
@@ -134,6 +135,7 @@ enum class ShaderInstructionType : uint32_t
 	ImageSampleLzO,
 	ImageSampleB,
 	ImageSampleDrefLz,
+	ImageSampleCd,
 	ImageStore,
 	ImageStoreMip,
 	SAddcU32,
@@ -585,6 +587,8 @@ enum class ShaderInstructionType : uint32_t
 	VPermlanex16B32,
 	SSubU32,
 	TBufferLoadFormatXyz,
+	BufferAtomicSwap,
+	ImageSampleO,
 
 	ZMax
 };
@@ -699,6 +703,7 @@ enum FormatByte : uint64_t
 	NullTarget, // pixel valid mask without data
 	DsOff,  // byte offset carried by ShaderInstruction::ds_offset
 	Float3, // format:float3
+	S0A6,   // operand_array_to_str(inst.src[0], 6)
 };
 
 constexpr uint64_t FormatDefine(std::initializer_list<uint64_t> f)
@@ -747,7 +752,8 @@ enum Format : uint64_t
 	Mrt5Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt5, S0, S1, S2, S3, Vm}),
 	Mrt6Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt6, S0, S1, S2, S3, Vm}),
 	Mrt7Vsrc0Vsrc1Vsrc2Vsrc3Vm          = FormatDefine({Mrt7, S0, S1, S2, S3, Vm}),
-	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1, done=1.
+	// RDNA2 pixel Z export (target 0x08): en=0x1, compr=0, vm=1; done=0 when color exports follow.
+	PixelZVsrc0Vm                        = FormatDefine({PixelZ, S0, Vm}),
 	PixelZVsrc0VmDone                    = FormatDefine({PixelZ, S0, Vm, Done}),
 	Param0Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param0, S0, S1, S2, S3}),
 	Param1Vsrc0Vsrc1Vsrc2Vsrc3          = FormatDefine({Param1, S0, S1, S2, S3}),
@@ -781,8 +787,11 @@ enum Format : uint64_t
 	Param29Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param29, S0, S1, S2, S3}),
 	Param30Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param30, S0, S1, S2, S3}),
 	Param31Vsrc0Vsrc1Vsrc2Vsrc3         = FormatDefine({Param31, S0, S1, S2, S3}),
+	Pos0Vsrc0Vsrc1Vsrc2Vsrc3           = FormatDefine({Pos0, S0, S1, S2, S3}),
 	Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done        = FormatDefine({Pos0, S0, S1, S2, S3, Done}),
 	Pos1OffOffVsrc0Off                = FormatDefine({Pos1, Off, Off, S0, Off}),
+	Pos1Vsrc0OffOffOff                 = FormatDefine({Pos1, S0, Off, Off, Off}),
+	Pos1Vsrc0OffOffOffDone             = FormatDefine({Pos1, S0, Off, Off, Off, Done}),
 	PrimVsrc0OffOffOffDone              = FormatDefine({Prim, S0, Off, Off, Off, Done}),
 	Saddr                               = FormatDefine({S0A2}),
 	SdstSbaseSoffset                    = FormatDefine({D, S0A2, S1}),
@@ -838,6 +847,7 @@ enum Format : uint64_t
 	VdataVaddr2StSsMimgDmask                = FormatDefine({DA, S0A2, S1A8, S2A4, MimgDmask}),
 	VdataVaddr3StSsMimgDmask                = FormatDefine({DA, S0A3, S1A8, S2A4, MimgDmask}),
 	VdataVaddr4StSsMimgDmask                = FormatDefine({DA, S0A4, S1A8, S2A4, MimgDmask}),
+	VdataVaddr6StSsMimgDmask                = FormatDefine({DA, S0A6, S1A8, S2A4, MimgDmask}),
 	Vdata4Vaddr4StDmaskF                = FormatDefine({DA4, S0A4, S1A8, DmaskF}),
 	// image_gather4 returns four values from the selected component. The MIMG
 	// component mask selects that component; it does not alter result width.
@@ -932,13 +942,15 @@ struct ShaderOperand
 	uint8_t  dpp_bank_mask      = 0;
 	bool     dpp_fetch_inactive = false;
 	bool     dpp_bound_ctrl     = false;
+	// DPP control-dword bits without an established lowering contract.
+	uint32_t dpp_unmodeled_bits = 0;
 
 	bool operator==(const ShaderOperand& other) const
 	{
 		return type == other.type && constant.u == other.constant.u && register_id == other.register_id && size == other.size &&
 		       swizzle == other.swizzle && dpp == other.dpp && dpp_ctrl == other.dpp_ctrl && dpp_row_mask == other.dpp_row_mask &&
 		       dpp_bank_mask == other.dpp_bank_mask && dpp_fetch_inactive == other.dpp_fetch_inactive &&
-		       dpp_bound_ctrl == other.dpp_bound_ctrl;
+		       dpp_bound_ctrl == other.dpp_bound_ctrl && dpp_unmodeled_bits == other.dpp_unmodeled_bits;
 	}
 };
 
@@ -981,6 +993,9 @@ struct ShaderInstruction
 	uint8_t mimg_dimension = 0;
 	// IMAGE_LOAD_MIP fetches the resource-view level carried after the coordinates.
 	bool mimg_explicit_lod = false;
+	// The _O variants carry 6-bit signed texel offsets (x in bits 5:0, y in bits
+	// 13:8) in the first address VGPR, before the coordinates.
+	bool mimg_offset = false;
 	// Image atomics replace VDATA with the pre-operation value only for GLC=1.
 	bool mimg_return_old_value = false;
 	// SMEM: signed immediate offset added to SGPR soffset when both are present
@@ -1094,6 +1109,15 @@ public:
 	[[nodiscard]] ShaderType GetType() const { return m_type; }
 	void                     SetType(ShaderType type) { this->m_type = type; }
 
+	// Pixel spill admission needs the launch allocation, not only the instruction bytes.
+	void SetPixelLdsAllocation(uint32_t extra_dwords, int parameter_sgpr)
+	{
+		m_pixel_extra_lds_dwords = extra_dwords;
+		m_pixel_parameter_sgpr   = parameter_sgpr;
+	}
+	[[nodiscard]] uint32_t GetPixelExtraLdsDwords() const { return m_pixel_extra_lds_dwords; }
+	[[nodiscard]] int      GetPixelParameterSgpr() const { return m_pixel_parameter_sgpr; }
+
 	[[nodiscard]] bool HasAnyOf(std::initializer_list<ShaderInstructionType> types) const
 	{
 		return std::any_of(types.begin(), types.end(), [this](auto type)
@@ -1132,6 +1156,8 @@ private:
 	Vector<ShaderLabel>       m_labels;
 	Vector<ShaderLabel>       m_indirect_labels;
 	ShaderType                m_type = ShaderType::Unknown;
+	uint32_t                  m_pixel_extra_lds_dwords = 0;
+	int                       m_pixel_parameter_sgpr = -1;
 	Vector<ShaderDebugPrintf> m_debug_printfs;
 	uint32_t                  m_vs_embedded_id = 0;
 	uint32_t                  m_ps_embedded_id = 0;
@@ -1178,6 +1204,7 @@ enum class ShaderVertexPosition1Usage : uint32_t
 {
 	Unknown,
 	RenderTargetLayer,
+	ClipDistance0,
 };
 
 [[nodiscard]] ShaderVertexPosition1Usage ShaderDecodeVertexPosition1Usage(uint32_t position_format, uint32_t output_control,
@@ -1271,9 +1298,10 @@ inline uint8_t GetDstSel(uint32_t swizzle, uint32_t channel)
 }
 
 // Formatted image stores put shader component i in memory channel DST_SEL[i].
-// Storage views keep identity components and BGRA selects a BGRA8 view, so
-// the image-store emitter applies any other selection of four distinct channels.
-inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle)
+// Storage views keep identity components and, for formats with a red/blue-exchanged
+// host format, BGRA selects that view; the image-store emitter applies any other
+// selection of four distinct channels.
+inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle, bool red_blue_view)
 {
 	uint32_t channels = 0;
 	for (uint32_t component = 0; component < 4; component++)
@@ -1285,7 +1313,7 @@ inline bool ShaderStorageImageSwizzleInShader(uint32_t swizzle)
 		}
 		channels |= 1u << (select - 4u);
 	}
-	return swizzle != DstSel(4, 5, 6, 7) && swizzle != DstSel(6, 5, 4, 7);
+	return swizzle != DstSel(4, 5, 6, 7) && !(red_blue_view && swizzle == DstSel(6, 5, 4, 7));
 }
 
 struct ShaderBufferResource
@@ -1424,6 +1452,9 @@ struct ShaderTextureResource
 		return ((fields[1] >> 6u) & 0x3u) | ((fields[1] >> 30u) << 2u) | ((fields[3] & 0x04000000u) == 0 ? 0x60u : 0x10u);
 	}
 };
+
+// ShaderStorageImageSwizzleInShader for a bound T#, with the red/blue view decided by its storage format.
+[[nodiscard]] bool ShaderStorageTextureSwizzleInShader(const ShaderTextureResource& texture);
 
 // A comparison sample of a Gen5 color surface compares its first channel in the
 // shader: Vulkan depth-reference sampling requires a depth view.
@@ -1787,6 +1818,10 @@ struct ShaderStorageImageTileCoverage
 	// A nonnegative index requires a validated, read-only runtime snapshot of
 	// the exact image width and height before the seed may be skipped.
 	int bounds_storage_buffer_index = -1;
+	uint32_t bounds_byte_offset = 0;
+	// A nonnegative origin offset requires one coherent origin/bounds snapshot
+	// and a zero origin before whole-image coverage can skip initialization.
+	int origin_byte_offset = -1;
 };
 [[nodiscard]] ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const ShaderCode& code,
                                                                                    const ShaderBindResources& bind, int texture_index,
@@ -2250,6 +2285,7 @@ struct ShaderPixelInputInfo
 	ShaderPixelCustomInterpolation custom_interpolation;
 	uint8_t                target_output_mode[8]     = {};
 	uint8_t                target_output_order[8]    = {};
+	uint8_t                target_output_number[8]   = {};
 	RenderHostToGuestScale host_to_guest_scale;
 	bool                   ps_pos_xy                 = false;
 	bool                   front_face_all_bits       = false;
@@ -2329,7 +2365,8 @@ struct ShaderUserData
 
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
-                       int user_data_register_base = 0, bool vertex_resource_types = true);
+                       int user_data_register_base = 0, bool vertex_resource_types = true,
+                       const ShaderCode* eud_descriptor_code = nullptr);
 
 [[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
                                                    int eud_pointer_register, const ShaderCode* code,
@@ -2344,20 +2381,19 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 using ShaderGen5EudSnapshotTestHook = void (*)(void*);
 void ShaderSetGen5EudSnapshotTestHook(ShaderGen5EudSnapshotTestHook hook, void* context);
 
-// Gen5 EUD sharp span policy: metadata eud_size_dw is a lower bound. Type-5
-// guest pointer tables may extend past it (Astro: eud=24, sharp@40 needs 28).
-// api is the ShaderGet* start index (16 + eud_index). Hard-cap runaway offsets.
-constexpr int             SHADER_GEN5_EUD_MAX_DWORDS = 256;
+// Gen5 EUD table extent is bounded by the guest metadata field's representation.
+constexpr int             SHADER_GEN5_EUD_MAX_DWORDS = std::numeric_limits<uint16_t>::max();
 [[nodiscard]] int         ShaderGen5EudOffsetBase(int user_sgpr_num);
 [[nodiscard]] uint32_t    ShaderResolveGen5UserSgprCount(uint32_t declared_count, uint32_t written_count, uint16_t eud_size_dw);
-[[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t eud_size_dw)
+// Metadata eud_size_dw is a lower bound; api is the ShaderGet* start index
+// (16 + EUD dword offset). Reject spans that exceed the table's representable extent.
+[[nodiscard]] inline bool ShaderGen5EudSpanAllowed(int api, int dwords, uint16_t /*eud_size_dw*/)
 {
-	const int need = api - 16 + dwords;
-	if (need <= static_cast<int>(eud_size_dw))
+	if (api < 16 || dwords <= 0 || dwords > SHADER_GEN5_EUD_MAX_DWORDS)
 	{
-		return true;
+		return false;
 	}
-	return need <= SHADER_GEN5_EUD_MAX_DWORDS;
+	return api - 16 <= SHADER_GEN5_EUD_MAX_DWORDS - dwords;
 }
 
 struct ShaderRegisterRange

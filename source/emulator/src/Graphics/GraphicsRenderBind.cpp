@@ -2781,6 +2781,124 @@ static Emulator::Agent::Lifecycle::StorageEudSnapshotContext ReportStorageRange(
 	return eud;
 }
 
+struct StorageBufferMaterializationTrace
+{
+	const char*   path                   = "unresolved";
+	uint64_t      requested_size         = 0;
+	uint64_t      allocated_prefix       = 0;
+	uint64_t      transient_bytes_arg    = 0;
+	uint64_t      gpu_create_size_arg    = 0;
+	bool          read_only              = false;
+	bool          smem_copy_attempted    = false;
+	bool          smem_copy_succeeded    = false;
+	bool          transient_attempted    = false;
+	bool          gpu_create_attempted   = false;
+	VulkanBuffer* transient_buffer       = nullptr;
+	VulkanBuffer* gpu_created_buffer     = nullptr;
+};
+
+static void ExitStorageBufferMaterializationFailure(uint64_t submit_id, uint64_t shader_checksum, VkShaderStageFlags stage,
+	                                                int index, const ShaderBufferResource& resource, uint32_t usage,
+	                                                uint64_t addr, uint64_t declared_size,
+	                                                const StorageBufferMaterializationTrace& trace, VulkanBuffer* final_buffer)
+{
+	const uint64_t fresh_allocated_prefix = GpuMemoryGetAllocatedRangePrefix(addr, trace.requested_size);
+	const auto     requested_validation  = GpuMemoryValidateAllocatedRange(addr, trace.requested_size);
+	const auto     materialized_validation = GpuMemoryValidateAllocatedRange(addr, trace.allocated_prefix);
+	const bool     range_valid = trace.requested_size > 0u && addr <= UINT64_MAX - (trace.requested_size - 1u);
+
+	Kernel::Memory::KernelMappedRange base_mapping {};
+	Kernel::Memory::KernelMappedRange full_mapping {};
+	const bool base_mapped = Kernel::Memory::KernelQueryMappedRange(addr, 1u, &base_mapping);
+	const bool full_mapped = range_valid && Kernel::Memory::KernelQueryMappedRange(addr, trace.requested_size, &full_mapping);
+
+	GpuMemoryOverlapSnapshot overlaps {};
+	const bool overlap_query_ok = range_valid && GpuMemoryQueryOverlaps(&addr, &trace.requested_size, 1, &overlaps);
+	char       overlap_entries[512] {};
+	size_t     overlap_used = 0;
+	bool       overlap_text_truncated = false;
+	if (overlap_query_ok)
+	{
+		const uint32_t count = std::min(overlaps.entry_count, GpuMemoryOverlapSnapshot::ENTRIES_MAX);
+		for (uint32_t entry = 0; entry < count; ++entry)
+		{
+			const auto& item = overlaps.entries[entry];
+			const int written = std::snprintf(overlap_entries + overlap_used, sizeof(overlap_entries) - overlap_used,
+			                                  "%s%u/%u/%u", entry == 0u ? "" : ",",
+			                                  static_cast<uint32_t>(item.type), static_cast<uint32_t>(item.relation), item.count);
+			if (written < 0 || static_cast<size_t>(written) >= sizeof(overlap_entries) - overlap_used)
+			{
+				overlap_text_truncated = true;
+				break;
+			}
+			overlap_used += static_cast<size_t>(written);
+		}
+		overlap_text_truncated = overlap_text_truncated || overlaps.truncated || overlaps.entry_count > count;
+	}
+
+	GpuMemoryRangeProvenance provenance {};
+	const bool have_provenance = overlap_query_ok && overlaps.total_count != 0u &&
+	                             GpuMemoryQueryRangeProvenance(addr, trace.requested_size, &provenance);
+	char   provenance_entries[2048] {};
+	size_t provenance_used = 0;
+	bool   provenance_text_truncated = false;
+	if (have_provenance)
+	{
+		const uint32_t count = std::min(provenance.entry_count, GpuMemoryRangeProvenance::ENTRIES_MAX);
+		for (uint32_t entry = 0; entry < count; ++entry)
+		{
+			const auto& item = provenance.entries[entry];
+			const int written = std::snprintf(
+			    provenance_entries + provenance_used, sizeof(provenance_entries) - provenance_used,
+			    "%s%u/%u/%d/%d/%" PRIu64 "/%u/%" PRIu64 "/%" PRIu64 "/%d/%d/%d", entry == 0u ? "" : ",",
+			    static_cast<uint32_t>(item.type), static_cast<uint32_t>(item.relation), item.heap_id, item.object_id,
+			    item.logical_generation, static_cast<uint32_t>(item.content_origin), item.submit_id, item.gpu_update_time,
+			    item.in_use ? 1 : 0, item.write_back_capable ? 1 : 0, item.dependencies_complete ? 1 : 0);
+			if (written < 0 || static_cast<size_t>(written) >= sizeof(provenance_entries) - provenance_used)
+			{
+				provenance_text_truncated = true;
+				break;
+			}
+			provenance_used += static_cast<size_t>(written);
+		}
+		provenance_text_truncated = provenance_text_truncated || provenance.truncated || provenance.entry_count > count;
+	}
+
+	EXIT("storage buffer materialization failed: shader=%016" PRIx64 " stage=0x%x index=%d submit=%" PRIu64
+	     " path=%s addr=0x%012" PRIx64 " usage=%u stride=%u records=%u declared=%" PRIu64 " requested=%" PRIu64
+	     " allocated_prefix=%" PRIu64 " fresh_prefix=%" PRIu64 " requested_validation=%u materialized_validation=%u"
+	     " range_valid=%d read_only=%d words=%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32
+	     " base_mapped=%d base_kind=%u base_prot=%d full_mapped=%d full_kind=%u full_prot=%d"
+	     " smem_copy_attempted=%d smem_copy_succeeded=%d transient_attempted=%d transient_bytes_arg=%" PRIu64
+	     " transient_wrapper_nonnull=%d transient_vk_buffer_nonnull=%d"
+	     " gpu_create_attempted=%d gpu_create_size_arg=%" PRIu64 " gpu_create_wrapper_nonnull=%d gpu_create_vk_buffer_nonnull=%d"
+	     " final_wrapper_nonnull=%d final_vk_buffer_nonnull=%d"
+	     " overlaps_ok=%d overlaps=%u/%u/truncated:%d/text_truncated:%d/[type/relation/count:%s]"
+	     " provenance_ok=%d provenance=%u/%u/truncated:%d/text_truncated:%d/"
+	     "[type/relation/heap/object/generation/origin/submit/gpu_update/in_use/writeback/dependencies:%s]\n",
+	     shader_checksum, static_cast<unsigned>(stage), index, submit_id, trace.path, addr, usage,
+	     static_cast<uint32_t>(resource.Stride()), resource.NumRecords(), declared_size, trace.requested_size,
+	     trace.allocated_prefix, fresh_allocated_prefix, static_cast<uint32_t>(requested_validation),
+	     static_cast<uint32_t>(materialized_validation), range_valid ? 1 : 0, trace.read_only ? 1 : 0,
+	     resource.fields[0], resource.fields[1], resource.fields[2], resource.fields[3], base_mapped ? 1 : 0,
+	     static_cast<uint32_t>(base_mapped ? base_mapping.kind : Kernel::Memory::KernelMappedRangeKind::None),
+	     base_mapped ? base_mapping.protection : 0, full_mapped ? 1 : 0,
+	     static_cast<uint32_t>(full_mapped ? full_mapping.kind : Kernel::Memory::KernelMappedRangeKind::None),
+	     full_mapped ? full_mapping.protection : 0, trace.smem_copy_attempted ? 1 : 0, trace.smem_copy_succeeded ? 1 : 0,
+	     trace.transient_attempted ? 1 : 0, trace.transient_bytes_arg,
+	     trace.transient_buffer != nullptr ? 1 : 0,
+	     trace.transient_buffer != nullptr && trace.transient_buffer->buffer != nullptr ? 1 : 0,
+	     trace.gpu_create_attempted ? 1 : 0, trace.gpu_create_size_arg,
+	     trace.gpu_created_buffer != nullptr ? 1 : 0,
+	     trace.gpu_created_buffer != nullptr && trace.gpu_created_buffer->buffer != nullptr ? 1 : 0,
+	     final_buffer != nullptr ? 1 : 0,
+	     final_buffer != nullptr && final_buffer->buffer != nullptr ? 1 : 0, overlap_query_ok ? 1 : 0,
+	     overlap_query_ok ? overlaps.total_count : 0u, overlap_query_ok ? overlaps.entry_count : 0u,
+	     overlap_query_ok && overlaps.truncated ? 1 : 0, overlap_text_truncated ? 1 : 0, overlap_entries,
+	     have_provenance ? 1 : 0, have_provenance ? provenance.total_count : 0u, have_provenance ? provenance.entry_count : 0u,
+	     have_provenance && provenance.truncated ? 1 : 0, provenance_text_truncated ? 1 : 0, provenance_entries);
+}
+
 static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkShaderStageFlags stage,
 	                              const ShaderBindResources& bind, VulkanBuffer** buffers, uint32_t** sgprs,
 	                              uint64_t shader_checksum)
@@ -2852,6 +2970,8 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 		auto           addr        = (gen5 ? r.Base48() : r.Base44());
 		auto           stride      = r.Stride();
 		auto           num_records = r.NumRecords();
+		const uint64_t declared_size = ShaderBufferByteSize(stride, num_records);
+		const bool read_only = ShaderStorageUsageIsReadOnly(storage_buffers.usages[i]);
 		const bool raw_vmem_empty_oob = storage_buffers.raw_vmem_oob_guarded[i] && ShaderGen5RawDescriptorAlwaysOutOfBounds(r);
 		const bool raw_smem_empty_oob = storage_buffers.raw_smem_use[i] && ShaderGen5SBufferDescriptorAlwaysOutOfBounds(r);
 		const bool raw_empty_oob = gen5 && storage_buffers.accesses[i] == ShaderStorageAccess::Raw &&
@@ -2860,26 +2980,31 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 		                           (!storage_buffers.raw_vmem_oob_guarded[i] || raw_vmem_empty_oob) &&
 		                           (!storage_buffers.raw_smem_use[i] || raw_smem_empty_oob);
 
+		StorageBufferMaterializationTrace trace {};
+		trace.requested_size = declared_size;
+		trace.read_only = read_only;
 		VulkanBuffer* buf = nullptr;
 		if (raw_empty_oob)
 		{
+			trace.path = "raw_empty_oob_carrier";
 			// Every known raw consumer is proven out of range: MUBUF is guarded in
 			// SPIR-V and S_BUFFER_LOAD is lowered to zero. Vulkan still requires a
 			// valid SSBO array element, so bind a minimal carrier with no guest-memory
 			// ownership or observable data path.
 			static constexpr uint32_t kEmptyRawStorageDescriptorCarrier = 0;
+			trace.transient_attempted = true;
+			trace.transient_bytes_arg = sizeof(kEmptyRawStorageDescriptorCarrier);
 			buf = buffer->UploadTransientBuffer(&kEmptyRawStorageDescriptorCarrier, sizeof(kEmptyRawStorageDescriptorCarrier),
 			                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			trace.transient_buffer = buf;
 		} else
 		{
-			const uint64_t declared_size = ShaderBufferByteSize(stride, num_records);
 			if (declared_size == 0)
 			{
 				(void)ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, 0);
 				if (true) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: true condition ignored (continuing)\n"); }
 			}
 
-			const bool read_only = ShaderStorageUsageIsReadOnly(storage_buffers.usages[i]);
 			if (read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly ||
 			                                    storage_buffers.usages[i] == ShaderStorageUsage::Constant)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: read_only && !(storage_buffers.usages[i] == ShaderStorageUsage::ReadOnly || condition ignored (continuing)\n"); }
 			const bool exact_static_smem = gen5 && storage_buffers.accesses[i] == ShaderStorageAccess::Raw &&
@@ -2887,9 +3012,11 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			                               !storage_buffers.indirect_descriptor_use[i] && storage_buffers.raw_smem_use[i] &&
 			                               !storage_buffers.raw_vmem_oob_guarded[i] && !storage_buffers.raw_tbuffer_use[i] &&
 			                               !storage_buffers.raw_smem_dynamic_offset[i] && storage_buffers.raw_smem_required_bytes[i] != 0;
-			const uint64_t requested_size =
+			trace.requested_size =
 			    exact_static_smem ? std::min(declared_size, storage_buffers.raw_smem_required_bytes[i]) : declared_size;
-			const uint64_t materialized_size = GpuMemoryGetAllocatedRangePrefix(addr, requested_size);
+			trace.allocated_prefix = GpuMemoryGetAllocatedRangePrefix(addr, trace.requested_size);
+			const uint64_t requested_size = trace.requested_size;
+			const uint64_t materialized_size = trace.allocated_prefix;
 
 			// Executable images and other CPU mappings may sit outside the GPU heap.
 			// A statically addressed scalar load can safely use a per-submit copy of
@@ -2900,6 +3027,7 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 			bool                copied_smem_span = false;
 			if (materialized_size == 0 && exact_static_smem && read_only && requested_size > 0 && requested_size <= 0x1000u)
 			{
+				trace.smem_copy_attempted = true;
 				copied_smem_span = Core::VirtualMemory::CopyFromGuest(smem_span, addr, requested_size);
 				if (!copied_smem_span)
 				{
@@ -2915,13 +3043,19 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 						copied_smem_span = true;
 					}
 				}
+				trace.smem_copy_succeeded = copied_smem_span;
 			}
 			if (copied_smem_span)
 			{
+				trace.path = "copied_static_smem";
+				trace.transient_attempted = true;
+				trace.transient_bytes_arg = requested_size;
 				buf = buffer->UploadTransientBuffer(smem_span, requested_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				trace.transient_buffer = buf;
 			} else if (Kernel::Memory::KernelMappedRange guest_mapping {};
 			           materialized_size == 0 && !Kernel::Memory::KernelQueryMappedRange(addr, 1, &guest_mapping))
 			{
+				trace.path = "unmapped_base_carrier";
 				// The console cannot read through a descriptor whose base no guest
 				// mapping contains either, so a title that runs there never
 				// dereferences it in this draw (a slot holding other data behind a
@@ -2931,10 +3065,14 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				               " index=%d addr=0x%016" PRIx64 " words=%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32 ":%08" PRIx32 "\n",
 				               shader_checksum, i, addr, r.fields[0], r.fields[1], r.fields[2], r.fields[3]);
 				static constexpr uint32_t kUnmappedDescriptorCarrier = 0;
+				trace.transient_attempted = true;
+				trace.transient_bytes_arg = sizeof(kUnmappedDescriptorCarrier);
 				buf = buffer->UploadTransientBuffer(&kUnmappedDescriptorCarrier, sizeof(kUnmappedDescriptorCarrier),
 				                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				trace.transient_buffer = buf;
 			} else if (materialized_size == 0)
 			{
+				trace.path = "unmaterialized_range";
 				const auto eud = ReportStorageRange(submit_id, stage, bind, i, r, addr, declared_size, materialized_size);
 				uint32_t   eud_near[8] = {};
 				const bool eud_near_readable =
@@ -2974,19 +3112,33 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 				}
 				if (materialized_size == 0) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: materialized_size == 0 condition ignored (continuing)\n"); }
 
+				trace.path = "persistent_range";
 				StorageBufferGpuObject buf_info(stride, num_records, read_only);
-				buf = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				trace.transient_attempted = true;
+				trace.transient_bytes_arg = materialized_size;
+				trace.transient_buffer = TryUploadTransientReadOnlyBuffer(buffer, addr, materialized_size, read_only,
+				                                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+				buf = trace.transient_buffer;
 				if (buf == nullptr)
 				{
-					buf = static_cast<StorageVulkanBuffer*>(
-					    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, materialized_size, buf_info));
+					trace.gpu_create_attempted = true;
+					trace.gpu_create_size_arg  = materialized_size;
+					trace.gpu_created_buffer   = static_cast<StorageVulkanBuffer*>(
+					    GpuMemoryCreateObject(submit_id, g_render_ctx->GetGraphicCtx(), buffer, addr, materialized_size,
+					                         buf_info));
+					buf = trace.gpu_created_buffer;
 				}
 			}
 		}
 
 		// Descriptor writes require a real VkBuffer. Only proven empty/OOB
 		// descriptors receive a zero carrier; all materialization failures stay strict.
-		EXIT_IF(buf == nullptr || buf->buffer == nullptr);
+		if (buf == nullptr || buf->buffer == nullptr)
+		{
+			ExitStorageBufferMaterializationFailure(submit_id, shader_checksum, stage, i, r,
+				                                       static_cast<uint32_t>(storage_buffers.usages[i]), addr, declared_size,
+				                                       trace, buf);
+		}
 
 		buffers[i] = buf;
 
@@ -3252,11 +3404,11 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		{
 			pitch = TileAlign64KBPitch(width, ShaderGen5TextureBytesPerElement(r.Format()));
 			if (pitch == 0u) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: pitch == 0u condition ignored (continuing)\n"); }
-		} else if (tile == 5 && !three_dimensional)
+		} else if (!three_dimensional && (tile == 5u || (tile == 1u && (arrayed_2d || r.MaxMip() != 0u))))
 		{
-			// Standard4KB resources (each array slice alike) use a canonical
-			// tiled pitch. Word4 and the 256-byte row rule apply to linear
-			// resources only and must not expand the tiled layout.
+			// Standard4KB resources and Standard256B arrays and mip chains use a
+			// canonical tiled pitch. Array word4 holds the last slice, not a row
+			// pitch; the linear row rule must not expand the tiled allocation.
 			pitch = width;
 		} else
 		{
@@ -3286,12 +3438,13 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			                     swizzle != DstSel(4, 0, 0, 1)) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: swizzle != DstSel(4, 4, 4, 4) && swizzle != DstSel(4, 0, 0, 0) && condition ignored (continuing)\n"); }
 		}
 
-		if (gen5 && !three_dimensional && !arrayed_2d && tile == 5u && levels > 1u)
+		if (gen5 && !three_dimensional && !arrayed_2d && (tile == 5u || tile == 1u) && levels > 1u)
 		{
 			Gen5TextureMipLayout mip_layout {};
-			if (!Gen5GetStandard4KBTextureMipLayout(fmt, width, height, pitch, levels, &mip_layout))
+			const auto get_layout = tile == 5u ? Gen5GetStandard4KBTextureMipLayout : Gen5GetStandard256BTextureMipLayout;
+			if (!get_layout(fmt, width, height, pitch, levels, &mip_layout))
 			{
-				EXIT("Unsupported Gen5 Standard4KB mip texture layout: format=%u width=%u height=%u pitch=%u levels=%u\n", fmt, width,
+				EXIT("Unsupported Gen5 tile %u mip texture layout: format=%u width=%u height=%u pitch=%u levels=%u\n", tile, fmt, width,
 				     height, pitch, levels);
 			}
 			size = mip_layout.tiled;
@@ -3301,10 +3454,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (!Gen5GetVolumeTextureLayout(fmt, width, height, depth, pitch, levels, tile, &volume_layout))
 			{
 				EXIT("unsupported Gen5 volume layout: format=%u %ux%ux%u pitch=%u levels=%u tile=%u type=%u base_array=%u usage=%u "
-				     "shape_from_instruction=%u start_register=%d\n",
+				     "shape_from_instruction=%u start_register=%d addr=0x%012" PRIx64 " descriptor=%08x %08x %08x %08x %08x %08x %08x %08x\n",
 				     fmt, width, height, depth, pitch, levels, tile, static_cast<uint32_t>(r.Type()),
 				     static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(textures.desc[i].usage),
-				     textures.desc[i].sampled_shape_from_instruction ? 1u : 0u, textures.desc[i].start_register);
+				     textures.desc[i].sampled_shape_from_instruction ? 1u : 0u, textures.desc[i].start_register,
+				     static_cast<uint64_t>(addr), r.fields[0], r.fields[1], r.fields[2], r.fields[3], r.fields[4], r.fields[5],
+				     r.fields[6], r.fields[7]);
 			}
 			size = volume_layout.tiled;
 		} else if (arrayed_2d && !check_depth_texture)
@@ -3312,8 +3467,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			Gen5TextureArrayLayout array_layout {};
 			if (!Gen5GetTextureArrayLayout(fmt, width, height, pitch, levels, tile, depth, &array_layout))
 			{
-				EXIT("Unsupported Gen5 2D-array layout: format=%u width=%u height=%u pitch=%u levels=%u tile=%u layers=%u base_array=%u\\n",
-				     fmt, width, height, pitch, levels, tile, depth, base_array);
+				EXIT("Unsupported Gen5 2D-array layout: format=%u width=%u height=%u pitch=%u levels=%u tile=%u layers=%u base_array=%u "
+				     "type=%u array_pitch=%u usage=%u shape_from_instruction=%u descriptor=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+				     fmt, width, height, pitch, levels, tile, depth, base_array, static_cast<uint32_t>(r.Type()),
+				     static_cast<uint32_t>(r.ArrayPitch()), static_cast<uint32_t>(textures.desc[i].usage),
+				     textures.desc[i].sampled_shape_from_instruction ? 1u : 0u, r.fields[0], r.fields[1], r.fields[2], r.fields[3],
+				     r.fields[4], r.fields[5], r.fields[6], r.fields[7]);
 			}
 			size.size  = static_cast<uint32_t>(array_layout.tiled_size);
 			size.align = array_layout.tiled_slice.align;
@@ -3394,6 +3553,7 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 		bool         render_texture = false;
 		bool         depth_texture  = false;
 		const char*  materialize    = "unresolved";
+		char         depth_refusal[192] = "";
 		// A live storage image read through another format of its texel size.
 		VkFormat     reinterpret_format = VK_FORMAT_UNDEFINED;
 
@@ -3748,13 +3908,26 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 				// The storage-backed detile is a 16-bit equation.
 				const bool source_ok = depth_source == GpuMemoryDepthD16Source::Guest ||
 				                       (depth_source == GpuMemoryDepthD16Source::StorageBuffer && fmt == 7u && depth == 1u);
-				materialize_depth    = physical_ok && source_ok &&
-				                    State::CanMaterializeGen5DepthSample(
-				                        fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
-				                        static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
-				                        static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
-				                        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u, addr, width,
-				                        height, pitch, size.size, textures.desc[i].sample_operation);
+				const bool shape_ok =
+				    State::CanMaterializeGen5DepthSample(
+				        fmt, tile, static_cast<uint32_t>(r.Type()), static_cast<uint32_t>(r.Depth()),
+				        static_cast<uint32_t>(r.BaseArray5()), static_cast<uint32_t>(r.BaseLevel()),
+				        static_cast<uint32_t>(r.LastLevel()), static_cast<uint32_t>(r.MaxMip()),
+				        static_cast<uint32_t>(r.BCSwizzle()), swizzle, r.MsaaDepth(), r.MetaAddr() != 0u, addr, width,
+				        height, pitch, size.size, textures.desc[i].sample_operation);
+				materialize_depth = physical_ok && source_ok && shape_ok;
+				// The overlapping objects decide whether guest bytes can be trusted; keep them for the refusal below.
+				int written = std::snprintf(depth_refusal, sizeof(depth_refusal), " physical=%d mapped_kind=%u source=%u shape=%d overlaps=%u:",
+				                            physical_ok ? 1 : 0, static_cast<uint32_t>(mapped.kind), static_cast<uint32_t>(depth_source),
+				                            shape_ok ? 1 : 0, overlaps_ok ? overlaps.total_count : 0u);
+				for (uint32_t entry = 0; overlaps_ok && entry < overlaps.entry_count && written > 0 &&
+				                         static_cast<size_t>(written) < sizeof(depth_refusal);
+				     entry++)
+				{
+					written += std::snprintf(depth_refusal + written, sizeof(depth_refusal) - static_cast<size_t>(written), " %u/%u/%u",
+					                         static_cast<uint32_t>(overlaps.entries[entry].type),
+					                         static_cast<uint32_t>(overlaps.entries[entry].relation), overlaps.entries[entry].count);
+				}
 			}
 			if (materialize_depth)
 			{
@@ -3904,12 +4077,12 @@ static void PrepareTextures(uint64_t submit_id, CommandBuffer* buffer, const Sha
 			if (!decision.compatible)
 			{
 				EXIT("unsupported depth-reference image binding: operation=%u shape=%u numeric=%u view=%u format=%u tile=%u "
-				     "materialize=%s addr=0x%012" PRIx64 " size=0x%" PRIx64 " %ux%u pitch=%u levels=%u depth=%u base_array=%u\n",
+				     "materialize=%s addr=0x%012" PRIx64 " size=0x%" PRIx64 " %ux%u pitch=%u levels=%u depth=%u base_array=%u%s\n",
 				     static_cast<uint32_t>(textures.desc[i].sample_operation), static_cast<uint32_t>(sampled_shape),
 				     static_cast<uint32_t>(numeric_type), static_cast<uint32_t>(resolved_view), fmt, tile, materialize,
 				     static_cast<uint64_t>(addr), static_cast<uint64_t>(size.size), static_cast<uint32_t>(width),
 				     static_cast<uint32_t>(height), static_cast<uint32_t>(pitch), static_cast<uint32_t>(levels),
-				     static_cast<uint32_t>(r.Depth()), static_cast<uint32_t>(r.BaseArray5()));
+				     static_cast<uint32_t>(r.Depth()), static_cast<uint32_t>(r.BaseArray5()), depth_refusal);
 			}
 		}
 		if (const char* dump_texture_bind = std::getenv("KYTY_DUMP_TEXTURE_BIND"); dump_texture_bind != nullptr)
@@ -4360,10 +4533,53 @@ static void PrepareDirectSgprs(const ShaderDirectSgprsResources& direct_sgprs, u
 	}
 }
 
+static uint32_t ValidateUploadedStorageSeedCoverage(CommandBuffer* buffer, const ShaderBindResources& bind,
+                                                    VulkanBuffer* const* uploaded_buffers, uint32_t mask,
+                                                    const ShaderStorageImageTileCoverage* coverage)
+{
+	if (coverage == nullptr)
+	{
+		return mask;
+	}
+	if (bind.textures2D.textures_num < 0 || bind.textures2D.textures_num > ShaderTextureResources::RES_MAX ||
+	    bind.storage_buffers.buffers_num < 0 || bind.storage_buffers.buffers_num > DescriptorCache::BUFFERS_MAX)
+	{
+		return 0u;
+	}
+	for (int i = 0; i < bind.textures2D.textures_num; ++i)
+	{
+		const uint32_t bit = 1u << static_cast<uint32_t>(i);
+		if ((mask & bit) == 0u || coverage[i].origin_byte_offset < 0)
+		{
+			continue;
+		}
+		const int index = coverage[i].bounds_storage_buffer_index;
+		if (index < 0 || index >= bind.storage_buffers.buffers_num || index >= DescriptorCache::BUFFERS_MAX)
+		{
+			mask &= ~bit;
+			continue;
+		}
+		uint32_t origin_and_bounds[4] {};
+		const auto& texture = bind.textures2D.desc[i].texture;
+		// The proof must describe the immutable bytes actually bound for this
+		// dispatch, even if guest memory changed after the eligibility snapshot.
+		if (!buffer->ReadTransientSnapshotBuffer(uploaded_buffers[index], bind.storage_buffers.buffers[index].Base48(),
+		                                          static_cast<uint32_t>(coverage[i].origin_byte_offset),
+		                                          sizeof(origin_and_bounds), origin_and_bounds) ||
+		    origin_and_bounds[0] != 0u || origin_and_bounds[1] != 0u ||
+		    origin_and_bounds[2] != static_cast<uint32_t>(texture.Width5()) + 1u ||
+		    origin_and_bounds[3] != static_cast<uint32_t>(texture.Height5()) + 1u)
+		{
+			mask &= ~bit;
+		}
+	}
+	return mask;
+}
+
 void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPoint pipeline_bind_point, VkPipelineLayout layout,
                      const ShaderBindResources& bind, VkShaderStageFlags vk_stage, DescriptorCache::Stage stage,
                      uint32_t storage_seed_skip_mask, const DrawMaterialTraceContext* material_trace, uint64_t shader_checksum,
-                     const VulkanImage* stencil_attached_depth)
+                     const VulkanImage* stencil_attached_depth, const ShaderStorageImageTileCoverage* storage_seed_coverage)
 {
 	KYTY_PROFILER_FUNCTION();
 	InvalidateComputeColorFills(bind);
@@ -4433,6 +4649,8 @@ void BindDescriptors(uint64_t submit_id, CommandBuffer* buffer, VkPipelineBindPo
 		if (bind.textures2D.textures_num > 0)
 		{
 			const auto stage_start = BindingStageClock::now();
+			storage_seed_skip_mask = ValidateUploadedStorageSeedCoverage(buffer, bind, storage_buffers,
+			                                                             storage_seed_skip_mask, storage_seed_coverage);
 			PrepareTextures(submit_id, buffer, bind.textures2D, bind.samplers, textures2d_sampled, textures2d_storage,
 			                textures2d_sampled_view, textures2d_sampled_depth, textures2d_sampled_depth_view,
 			                textures2d_array_sampled, textures2d_array_sampled_view, textures3d_sampled,

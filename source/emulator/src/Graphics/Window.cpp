@@ -2105,6 +2105,7 @@ static VkDevice VulkanCreateDevice(VkPhysicalDevice physical_device, VkSurfaceKH
 	device_features.sampleRateShading = supported_features.sampleRateShading;
 	device_features.geometryShader = supported_features.geometryShader;
 	device_features.depthClamp = supported_features.depthClamp;
+	device_features.shaderClipDistance = supported_features.shaderClipDistance;
 	const auto blend_features = VulkanPlanBlendFeatures(supported_features, true, true);
 	device_features.independentBlend = blend_features.independent_blend;
 	device_features.dualSrcBlend = blend_features.dual_source_blend;

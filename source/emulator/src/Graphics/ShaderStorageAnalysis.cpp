@@ -1,4 +1,6 @@
 #include "Emulator/Graphics/Shader.h"
+#include "Emulator/Graphics/ShaderComputeWaveWaitcnt.h"
+#include "Emulator/Graphics/ShaderScalarLiveness.h"
 
 #include "ShaderStorageAnalysis.h"
 
@@ -245,8 +247,9 @@ bool ShaderInstructionReadsImageResource(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::ImageGetResinfo || type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageLoad || type == ShaderInstructionType::ImageSample ||
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
-	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleB ||
-	       type == ShaderInstructionType::ImageSampleDrefLz;
+	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleO ||
+	       type == ShaderInstructionType::ImageSampleB || type == ShaderInstructionType::ImageSampleDrefLz ||
+	       type == ShaderInstructionType::ImageSampleCd;
 }
 
 bool ShaderInstructionWritesImageResource(ShaderInstructionType type)
@@ -259,8 +262,9 @@ bool ShaderInstructionUsesImageSampler(ShaderInstructionType type)
 {
 	return type == ShaderInstructionType::ImageGather4 || type == ShaderInstructionType::ImageSample ||
 	       type == ShaderInstructionType::ImageSampleL || type == ShaderInstructionType::ImageSampleLz ||
-	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleB ||
-	       type == ShaderInstructionType::ImageSampleDrefLz;
+	       type == ShaderInstructionType::ImageSampleLzO || type == ShaderInstructionType::ImageSampleO ||
+	       type == ShaderInstructionType::ImageSampleB || type == ShaderInstructionType::ImageSampleDrefLz ||
+	       type == ShaderInstructionType::ImageSampleCd;
 }
 
 State::ImageSampleOperation ShaderInstructionSamplerOperation(ShaderInstructionType type)
@@ -1633,6 +1637,18 @@ bool ShaderBoundedGridPlainRegister(const ShaderOperand& operand, ShaderOperandT
 	       !operand.absolute && !operand.negate && !operand.clamp && operand.swizzle == 6 && !operand.dpp;
 }
 
+bool ShaderBoundedGridStoreCoordinatesMatch(const ShaderInstruction& inst, int x_register, int y_register)
+{
+	if (inst.mimg_address_num >= 2)
+	{
+		return ShaderBoundedGridPlainRegister(inst.mimg_address[0], ShaderOperandType::Vgpr, x_register, 1) &&
+		       ShaderBoundedGridPlainRegister(inst.mimg_address[1], ShaderOperandType::Vgpr, y_register, 1);
+	}
+	return inst.mimg_address_num == 0 && static_cast<int64_t>(y_register) == static_cast<int64_t>(x_register) + 1 &&
+	       inst.src[0].size >= 2 &&
+	       ShaderBoundedGridPlainRegister(inst.src[0], ShaderOperandType::Vgpr, x_register, inst.src[0].size);
+}
+
 bool ShaderBoundedGridConstant(const ShaderOperand& operand, uint32_t value)
 {
 	return (operand.type == ShaderOperandType::IntegerInlineConstant || operand.type == ShaderOperandType::LiteralConstant) &&
@@ -1683,6 +1699,472 @@ bool ShaderBoundedGridPostGuardInstructionAllowed(ShaderInstructionType type)
 		case ShaderInstructionType::ImageStore: return true;
 		default: return false;
 	}
+}
+
+static bool ShaderMetadataOriginEntryRange(const ShaderScalarFlow& flow, uint32_t instruction_index, int first_register,
+                                           int registers_num)
+{
+	if (instruction_index >= flow.holding_entry_value.size() || first_register < 0 || registers_num <= 0 ||
+	    static_cast<int64_t>(first_register) + registers_num > kShaderScalarLivenessSgprs)
+	{
+		return false;
+	}
+	const auto& entry = flow.holding_entry_value[instruction_index];
+	for (int reg = first_register; reg < first_register + registers_num; ++reg)
+	{
+		if (!entry.test(static_cast<size_t>(reg))) { return false; }
+	}
+	return true;
+}
+
+static int ShaderMetadataOriginStorageIndex(const ShaderBindResources& bind, int start_register)
+{
+	const auto& buffers = bind.storage_buffers;
+	if (buffers.buffers_num <= 0 || buffers.buffers_num > ShaderStorageResources::BUFFERS_MAX) { return -1; }
+	int result = -1;
+	for (int index = 0; index < buffers.buffers_num; ++index)
+	{
+		if (buffers.start_register[index] != start_register) { continue; }
+		if (result >= 0) { return -1; }
+		result = index;
+	}
+	return result;
+}
+
+static bool ShaderMetadataOriginStorageIsStatic(const ShaderBindResources& bind, const ShaderScalarFlow& flow,
+                                                uint32_t instruction_index, int storage_index, int start_register,
+                                                ShaderStorageAccess access, bool require_metadata_sharp)
+{
+	const auto& buffers = bind.storage_buffers;
+	if (storage_index < 0 || storage_index >= buffers.buffers_num || buffers.start_register[storage_index] != start_register ||
+	    !ShaderStorageUsageIsReadOnly(buffers.usages[storage_index]) || buffers.accesses[storage_index] != access ||
+	    !buffers.code_available[storage_index] || !buffers.exact_matches[storage_index] || buffers.unbased_matches[storage_index] ||
+	    buffers.decoded_unknown[storage_index] || buffers.indirect_descriptor_use[storage_index] ||
+	    buffers.dynamic_sload[storage_index] || ShaderStorageResourceHasDynamicSLoad(bind, storage_index) ||
+	    !ShaderMetadataOriginEntryRange(flow, instruction_index, start_register, 4))
+	{
+		return false;
+	}
+	const auto source = buffers.sources[storage_index];
+	if (require_metadata_sharp)
+	{
+		if (source != ShaderStorageBindingSource::MetadataSharp) { return false; }
+	} else if (source != ShaderStorageBindingSource::DirectResource && source != ShaderStorageBindingSource::MetadataSharp)
+	{
+		return false;
+	}
+	for (const auto& assembled: bind.assembled_descriptors)
+	{
+		if (assembled.resource_index == storage_index || assembled.register_id == start_register) { return false; }
+	}
+	return true;
+}
+
+static int ShaderMetadataOriginBufferInstructionIndex(const ShaderInstruction& inst, const ShaderBindResources& bind,
+                                                      const ShaderScalarFlow& flow, uint32_t instruction_index,
+                                                      ShaderStorageAccess access)
+{
+	if (inst.src_num <= 0 || inst.src_num > 4) { return -1; }
+	int result = -1;
+	for (int source = 0; source < inst.src_num; ++source)
+	{
+		const auto& operand = inst.src[source];
+		if (operand.type != ShaderOperandType::Sgpr || operand.size != 4 ||
+		    !ShaderBoundedGridPlainRegister(operand, ShaderOperandType::Sgpr, operand.register_id, 4))
+		{
+			continue;
+		}
+		const int index = ShaderMetadataOriginStorageIndex(bind, operand.register_id);
+		if (index < 0) { continue; }
+		if (result >= 0 || !ShaderMetadataOriginStorageIsStatic(bind, flow, instruction_index, index, operand.register_id,
+		                                                        access, false))
+		{
+			return -1;
+		}
+		result = index;
+	}
+	return result;
+}
+
+static bool ShaderMetadataOriginVgprWriteOverlaps(const ShaderInstruction& inst, int first_register, int registers_num)
+{
+	const auto overlaps = [&](const ShaderOperand& operand)
+	{
+		if (operand.type != ShaderOperandType::Vgpr || operand.size <= 0) { return false; }
+		const int64_t operand_start = operand.register_id;
+		const int64_t operand_end = operand_start + operand.size;
+		const int64_t range_start = first_register;
+		const int64_t range_end = range_start + registers_num;
+		return operand_start < range_end && range_start < operand_end;
+	};
+	return overlaps(inst.dst) || overlaps(inst.dst2);
+}
+
+static bool ShaderMetadataOriginSgprRangeOverlaps(const ShaderOperand& operand, int first_register, int registers_num)
+{
+	if (operand.type != ShaderOperandType::Sgpr || operand.size <= 0 || registers_num <= 0) { return false; }
+	const int64_t operand_start = operand.register_id;
+	const int64_t operand_end = operand_start + operand.size;
+	const int64_t range_start = first_register;
+	const int64_t range_end = range_start + registers_num;
+	return operand_start < range_end && range_start < operand_end;
+}
+
+static bool ShaderMetadataOriginSgprWriteOverlaps(const ShaderInstruction& inst, int first_register, int registers_num)
+{
+	return ShaderMetadataOriginSgprRangeOverlaps(inst.dst, first_register, registers_num) ||
+	       ShaderMetadataOriginSgprRangeOverlaps(inst.dst2, first_register, registers_num);
+}
+
+static bool ShaderMetadataOriginGridAluAllowed(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::VAddI32 || type == ShaderInstructionType::VMulLoU32 ||
+	       type == ShaderInstructionType::VMovB32;
+}
+
+static bool ShaderMetadataOriginTypedBufferLoad(ShaderInstructionType type)
+{
+	return type == ShaderInstructionType::BufferLoadFormatX || type == ShaderInstructionType::BufferLoadFormatXy ||
+	       type == ShaderInstructionType::BufferLoadFormatXyz || type == ShaderInstructionType::BufferLoadFormatXyzw ||
+	       type == ShaderInstructionType::TBufferLoadFormatX || type == ShaderInstructionType::TBufferLoadFormatXy ||
+	       type == ShaderInstructionType::TBufferLoadFormatXyzw;
+}
+
+static bool ShaderMetadataOriginScalarLoadOffset(const ShaderInstruction& inst, uint32_t byte_count, uint32_t* byte_offset)
+{
+	if (byte_offset == nullptr || inst.src_num != 2 || inst.src[0].type != ShaderOperandType::Sgpr || inst.src[0].size != 4 ||
+	    !ShaderBoundedGridPlainRegister(inst.src[0], ShaderOperandType::Sgpr, inst.src[0].register_id, 4) ||
+	    (inst.src[1].type != ShaderOperandType::LiteralConstant && inst.src[1].type != ShaderOperandType::IntegerInlineConstant) ||
+	    inst.smem_imm_offset != 0 || inst.src[1].constant.i < 0 ||
+	    inst.src[1].constant.i > std::numeric_limits<int>::max() || (inst.src[1].constant.i & 3) != 0 ||
+	    inst.dst.size != static_cast<int>(byte_count / sizeof(uint32_t))) { return false; }
+	*byte_offset = static_cast<uint32_t>(inst.src[1].constant.i);
+	return true;
+}
+
+// Prove an origin-adjusted, bounds-guarded tile store through immutable
+// metadata. Runtime binding validates the captured origin and bounds values.
+static ShaderStorageImageTileCoverage AnalyzeShaderStorageImageMetadataOriginGridCoverage(
+	const ShaderCode& code, const ShaderBindResources& bind, int texture_index, int workgroup_register, const uint32_t threads[3],
+	bool group_xy_enabled)
+{
+	if (code.GetType() != ShaderType::Compute || !group_xy_enabled || threads == nullptr || threads[0] < 2u || threads[0] > 16u ||
+	    threads[1] < 2u || threads[1] > 16u || threads[2] != 1u || (threads[0] & (threads[0] - 1u)) != 0u ||
+	    (threads[1] & (threads[1] - 1u)) != 0u || workgroup_register < 0 ||
+	    workgroup_register >= kShaderScalarLivenessSgprs - 1 ||
+	    texture_index < 0 || texture_index >= bind.textures2D.textures_num ||
+	    !bind.textures2D.desc[texture_index].textures2d_without_sampler || bind.textures2D.desc[texture_index].dynamic_sload ||
+	    ShaderResolvedSampledTextureShape(bind.textures2D.desc[texture_index]) != ShaderGen5SampledTextureShape::TwoDimensional)
+	{
+		return {};
+	}
+	const auto& texture = bind.textures2D.desc[texture_index].texture;
+	if (texture.Type() != 9u || texture.TileMode() != 0u || texture.BaseLevel() != 0u || texture.LastLevel() != 0u ||
+	    texture.MaxMip() != 0u || texture.BaseArray5() != 0u || texture.BCSwizzle() != 0u ||
+	    texture.MaxUncompBlkSize() != 0u || texture.MaxCompBlkSize() != 0u || texture.MetaPipeAligned() || texture.WriteCompress() ||
+	    texture.MetaCompress() || texture.DccAlphaPos() || texture.DccColorTransf() || texture.MetaAddr() != 0u)
+	{
+		return {};
+	}
+	const uint8_t full_store_mask = ShaderBoundedGridFullStoreMask(texture.Format());
+	if (full_store_mask == 0u) { return {}; }
+
+	const auto& instructions = code.GetInstructions();
+	if (instructions.Size() < 10u || instructions.At(instructions.Size() - 1u).type != ShaderInstructionType::SEndpgm)
+	{
+		return {};
+	}
+	const auto flow = ShaderScalarFlowOf(code);
+	if (flow == nullptr) { return {}; }
+
+	uint32_t branch_index = UINT32_MAX;
+	uint32_t compare_indices[2] = {UINT32_MAX, UINT32_MAX};
+	uint32_t compare_count = 0;
+	for (uint32_t index = 0; index + 1u < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (inst.type == ShaderInstructionType::VCmpxGtU32)
+		{
+			if (compare_count >= 2u) { return {}; }
+			compare_indices[compare_count++] = index;
+		}
+		if (ShaderInstructionHasStaticBranchTarget(inst.type))
+		{
+			if (inst.type != ShaderInstructionType::SCbranchExecz || branch_index != UINT32_MAX) { return {}; }
+			branch_index = index;
+		}
+	}
+	if (compare_count != 2u || branch_index == UINT32_MAX || compare_indices[0] + 1u != compare_indices[1] ||
+	    compare_indices[1] + 1u != branch_index || branch_index + 1u >= instructions.Size())
+	{
+		return {};
+	}
+	const auto& branch = instructions.At(branch_index);
+	if (branch.src_num != 1 || ShaderLabel(branch).GetDst() != instructions.At(instructions.Size() - 1u).pc)
+	{
+		return {};
+	}
+
+	uint32_t shift_x = 0;
+	uint32_t shift_y = 0;
+	while ((1u << shift_x) < threads[0]) { ++shift_x; }
+	while ((1u << shift_y) < threads[1]) { ++shift_y; }
+	int x_grid_register = -1;
+	int y_grid_register = -1;
+	uint32_t x_grid_index = UINT32_MAX;
+	uint32_t y_grid_index = UINT32_MAX;
+	uint32_t parameter_load_index = UINT32_MAX;
+	int parameter_buffer_index = -1;
+	int parameter_start_register = -1;
+	int parameter_value_register = -1;
+	uint32_t parameter_origin_byte_offset = 0;
+	uint32_t parameter_bounds_byte_offset = 0;
+	for (uint32_t index = 0; index < compare_indices[0]; ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (inst.type == ShaderInstructionType::VLshlAddU32)
+		{
+			if (inst.src_num != 3 || inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size != 1 || inst.src[0].type != ShaderOperandType::Sgpr ||
+			    !ShaderBoundedGridPlainRegister(inst.dst, ShaderOperandType::Vgpr, inst.dst.register_id, 1) ||
+			    !ShaderBoundedGridPlainRegister(inst.src[0], ShaderOperandType::Sgpr, inst.src[0].register_id, 1) ||
+			    !ShaderBoundedGridPlainRegister(inst.src[2], ShaderOperandType::Vgpr, inst.src[2].register_id, 1) ||
+			    inst.src[2].register_id < 0 || inst.src[2].register_id > 1 || inst.vop_sdwa || inst.vop3_op_sel != 0u ||
+			    inst.vop3_omod != 0u)
+			{
+				return {};
+			}
+			const bool is_x = inst.src[0].register_id == workgroup_register && inst.src[2].register_id == 0 &&
+			                  ShaderBoundedGridConstant(inst.src[1], shift_x);
+			const bool is_y = inst.src[0].register_id == workgroup_register + 1 && inst.src[2].register_id == 1 &&
+			                  ShaderBoundedGridConstant(inst.src[1], shift_y);
+			if (is_x == is_y || !ShaderMetadataOriginEntryRange(*flow, index, inst.src[0].register_id, 1)) { return {}; }
+			if (is_x)
+			{
+				if (x_grid_index != UINT32_MAX) { return {}; }
+				x_grid_index = index;
+				x_grid_register = inst.dst.register_id;
+			} else
+			{
+				if (y_grid_index != UINT32_MAX) { return {}; }
+				y_grid_index = index;
+				y_grid_register = inst.dst.register_id;
+			}
+		} else if (inst.type == ShaderInstructionType::SBufferLoadDwordx4)
+		{
+			if (parameter_load_index != UINT32_MAX || inst.src_num != 2 || inst.dst.type != ShaderOperandType::Sgpr || inst.dst.size != 4 ||
+			    inst.dst.register_id < 0 || inst.dst.register_id > kShaderScalarLivenessSgprs - 4 ||
+			    !ShaderBoundedGridPlainRegister(inst.dst, ShaderOperandType::Sgpr, inst.dst.register_id, 4) ||
+			    !ShaderMetadataOriginScalarLoadOffset(inst, 16u, &parameter_origin_byte_offset) ||
+			    static_cast<uint64_t>(parameter_origin_byte_offset) + 8u > std::numeric_limits<uint32_t>::max())
+			{
+				return {};
+			}
+			parameter_start_register = inst.src[0].register_id;
+			parameter_value_register = inst.dst.register_id;
+			parameter_bounds_byte_offset = parameter_origin_byte_offset + 8u;
+			parameter_buffer_index = ShaderMetadataOriginStorageIndex(bind, parameter_start_register);
+			if (!ShaderMetadataOriginStorageIsStatic(bind, *flow, index, parameter_buffer_index, parameter_start_register,
+			                                           ShaderStorageAccess::Raw, true))
+			{
+				return {};
+			}
+			const auto& buffers = bind.storage_buffers;
+			const uint64_t byte_size = ShaderBufferByteSize(buffers.buffers[parameter_buffer_index].Stride(),
+			                                               buffers.buffers[parameter_buffer_index].NumRecords());
+			const uint64_t parameter_span_end = static_cast<uint64_t>(parameter_origin_byte_offset) + 16u;
+			if (!buffers.raw_smem_use[parameter_buffer_index] || buffers.raw_smem_dynamic_offset[parameter_buffer_index] ||
+			    buffers.raw_smem_required_bytes[parameter_buffer_index] < parameter_span_end || byte_size < parameter_span_end ||
+			    !ShaderRawStorageDescriptorSupported(buffers.buffers[parameter_buffer_index]) ||
+			    ShaderMetadataOriginSgprRangeOverlaps(inst.dst, parameter_start_register, 4))
+			{
+				return {};
+			}
+			parameter_load_index = index;
+		} else if (inst.type != ShaderInstructionType::SWaitcnt && inst.type != ShaderInstructionType::SInstPrefetch)
+		{
+			return {};
+		}
+	}
+	if (x_grid_index == UINT32_MAX || y_grid_index == UINT32_MAX || x_grid_register < 0 || y_grid_register < 0 ||
+	    x_grid_register == y_grid_register || parameter_load_index == UINT32_MAX)
+	{
+		return {};
+	}
+	for (uint32_t index = 0; index < instructions.Size(); ++index)
+	{
+		if (index < y_grid_index && ShaderMetadataOriginVgprWriteOverlaps(instructions.At(index), 1, 1)) { return {}; }
+		if (index < x_grid_index && ShaderMetadataOriginVgprWriteOverlaps(instructions.At(index), 0, 1)) { return {}; }
+	}
+	bool wait_after_parameters = false;
+	for (uint32_t index = parameter_load_index + 1u; index < compare_indices[0]; ++index)
+	{
+		wait_after_parameters = wait_after_parameters || ShaderComputeWaveIsLgkmZeroOnlyWait(instructions.At(index));
+	}
+	if (!wait_after_parameters) { return {}; }
+
+	bool x_compare = false;
+	bool y_compare = false;
+	for (uint32_t index: compare_indices)
+	{
+		const auto& compare = instructions.At(index);
+		if (compare.src_num != 2 || !ShaderBoundedGridPlainRegister(compare.dst, ShaderOperandType::VccLo, 0, 2) ||
+		    compare.vop_sdwa || compare.vop3_op_sel != 0u || compare.vop3_omod != 0u)
+		{
+			return {};
+		}
+		const bool is_x = ShaderBoundedGridPlainRegister(compare.src[0], ShaderOperandType::Sgpr,
+		                                                parameter_value_register + 2, 1) &&
+		                  ShaderBoundedGridPlainRegister(compare.src[1], ShaderOperandType::Vgpr, x_grid_register, 1);
+		const bool is_y = ShaderBoundedGridPlainRegister(compare.src[0], ShaderOperandType::Sgpr,
+		                                                parameter_value_register + 3, 1) &&
+		                  ShaderBoundedGridPlainRegister(compare.src[1], ShaderOperandType::Vgpr, y_grid_register, 1);
+		if (is_x == is_y || (is_x && x_compare) || (is_y && y_compare)) { return {}; }
+		x_compare = x_compare || is_x;
+		y_compare = y_compare || is_y;
+	}
+	if (!x_compare || !y_compare) { return {}; }
+	uint32_t x_compare_index = UINT32_MAX;
+	uint32_t y_compare_index = UINT32_MAX;
+	for (uint32_t index: compare_indices)
+	{
+		const auto& compare = instructions.At(index);
+		if (ShaderBoundedGridPlainRegister(compare.src[0], ShaderOperandType::Sgpr, parameter_value_register + 2, 1))
+		{
+			x_compare_index = index;
+		} else
+		{
+			y_compare_index = index;
+		}
+	}
+	if (x_compare_index == UINT32_MAX || y_compare_index == UINT32_MAX) { return {}; }
+	for (uint32_t index = x_grid_index + 1u; index < x_compare_index; ++index)
+	{
+		if (ShaderMetadataOriginVgprWriteOverlaps(instructions.At(index), x_grid_register, 1)) { return {}; }
+	}
+	for (uint32_t index = y_grid_index + 1u; index < y_compare_index; ++index)
+	{
+		if (ShaderMetadataOriginVgprWriteOverlaps(instructions.At(index), y_grid_register, 1)) { return {}; }
+	}
+	for (uint32_t index = parameter_load_index + 1u; index < x_compare_index; ++index)
+	{
+		if (ShaderMetadataOriginSgprWriteOverlaps(instructions.At(index), parameter_value_register + 2, 1)) { return {}; }
+	}
+	for (uint32_t index = parameter_load_index + 1u; index < y_compare_index; ++index)
+	{
+		if (ShaderMetadataOriginSgprWriteOverlaps(instructions.At(index), parameter_value_register + 3, 1)) { return {}; }
+	}
+
+	int x_final_register = -1;
+	int y_final_register = -1;
+	uint32_t x_add_index = UINT32_MAX;
+	uint32_t y_add_index = UINT32_MAX;
+	uint32_t target_store_index = UINT32_MAX;
+	uint32_t typed_read_count = 0;
+	uint32_t metadata_scalar_read_count = 0;
+	for (uint32_t index = branch_index + 1u; index + 1u < instructions.Size(); ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if (!ShaderTileControlFlowIsLinear(inst, false)) { return {}; }
+		if (inst.type == ShaderInstructionType::SBufferLoadDwordx2)
+		{
+			uint32_t scalar_load_byte_offset = 0;
+			if (metadata_scalar_read_count != 0 || !ShaderMetadataOriginScalarLoadOffset(inst, 8u, &scalar_load_byte_offset) ||
+			    (inst.dst.type != ShaderOperandType::Sgpr && inst.dst.type != ShaderOperandType::VccLo) ||
+			    inst.src[0].register_id != parameter_start_register ||
+			    !ShaderMetadataOriginStorageIsStatic(bind, *flow, index, parameter_buffer_index, parameter_start_register,
+			                                           ShaderStorageAccess::Raw, true))
+			{
+				return {};
+			}
+			const auto& parameter_buffer = bind.storage_buffers.buffers[parameter_buffer_index];
+			const uint64_t scalar_read_offset = scalar_load_byte_offset;
+			const uint64_t scalar_read_required = bind.storage_buffers.raw_smem_required_bytes[parameter_buffer_index];
+			const uint64_t scalar_read_buffer_size = ShaderBufferByteSize(parameter_buffer.Stride(), parameter_buffer.NumRecords());
+			if (!bind.storage_buffers.raw_smem_use[parameter_buffer_index] ||
+			    bind.storage_buffers.raw_smem_dynamic_offset[parameter_buffer_index] ||
+			    scalar_read_required < scalar_read_offset || scalar_read_required - scalar_read_offset < 8u ||
+			    scalar_read_buffer_size < scalar_read_offset || scalar_read_buffer_size - scalar_read_offset < 8u)
+			{
+				return {};
+			}
+			metadata_scalar_read_count++;
+		} else if (ShaderMetadataOriginTypedBufferLoad(inst.type))
+		{
+			if (inst.dst.type != ShaderOperandType::Vgpr || inst.dst.size <= 0 ||
+			    !ShaderBoundedGridPlainRegister(inst.dst, ShaderOperandType::Vgpr, inst.dst.register_id, inst.dst.size))
+			{
+				return {};
+			}
+			const int data_index = ShaderMetadataOriginBufferInstructionIndex(inst, bind, *flow, index, ShaderStorageAccess::Typed);
+			if (data_index < 0 || data_index == parameter_buffer_index) { return {}; }
+			typed_read_count++;
+		} else if (inst.type == ShaderInstructionType::ImageStore)
+		{
+			if (target_store_index != UINT32_MAX || inst.mimg_dimension != 1 ||
+			    inst.mimg_dmask == 0u || (inst.mimg_dmask & 0xf0u) != 0u || (inst.mimg_dmask & full_store_mask) != full_store_mask ||
+			    !ShaderBoundedGridStoreCoordinatesMatch(inst, x_final_register, y_final_register) ||
+			    ShaderFindImageStorageTextureDescriptor(code, index, bind, 0) != texture_index)
+			{
+				return {};
+			}
+			target_store_index = index;
+		} else if (ShaderInstructionReadsImageResource(inst.type) || ShaderInstructionWritesImageResource(inst.type))
+		{
+			return {};
+		} else if (inst.type != ShaderInstructionType::SWaitcnt && !ShaderMetadataOriginTypedBufferLoad(inst.type) &&
+		           !ShaderMetadataOriginGridAluAllowed(inst.type))
+		{
+			return {};
+		}
+		if (inst.type == ShaderInstructionType::VAddI32 && inst.src_num == 2 &&
+		    inst.dst.type == ShaderOperandType::Vgpr && inst.dst.size == 1 &&
+		    ShaderBoundedGridPlainRegister(inst.dst, ShaderOperandType::Vgpr, inst.dst.register_id, 1) && !inst.vop_sdwa &&
+		    inst.vop3_op_sel == 0u && inst.vop3_omod == 0u)
+		{
+			const auto matches_origin = [&](int origin_offset, int grid_register)
+			{
+				return (ShaderBoundedGridPlainRegister(inst.src[0], ShaderOperandType::Sgpr,
+				                                       parameter_value_register + origin_offset, 1) &&
+				        ShaderBoundedGridPlainRegister(inst.src[1], ShaderOperandType::Vgpr, grid_register, 1)) ||
+				       (ShaderBoundedGridPlainRegister(inst.src[1], ShaderOperandType::Sgpr,
+				                                       parameter_value_register + origin_offset, 1) &&
+				        ShaderBoundedGridPlainRegister(inst.src[0], ShaderOperandType::Vgpr, grid_register, 1));
+			};
+			if (matches_origin(0, x_grid_register))
+			{
+				if (x_add_index != UINT32_MAX) { return {}; }
+				x_add_index = index;
+				x_final_register = inst.dst.register_id;
+			} else if (matches_origin(1, y_grid_register))
+			{
+				if (y_add_index != UINT32_MAX) { return {}; }
+				y_add_index = index;
+				y_final_register = inst.dst.register_id;
+			}
+		}
+	}
+	if (typed_read_count == 0u || target_store_index == UINT32_MAX || x_add_index == UINT32_MAX || y_add_index == UINT32_MAX ||
+	    x_add_index >= target_store_index || y_add_index >= target_store_index || x_final_register == y_final_register)
+	{
+		return {};
+	}
+	for (uint32_t index = branch_index + 1u; index < target_store_index; ++index)
+	{
+		const auto& inst = instructions.At(index);
+		if ((index < x_add_index && ShaderMetadataOriginVgprWriteOverlaps(inst, x_grid_register, 1)) ||
+		    (index < y_add_index && ShaderMetadataOriginVgprWriteOverlaps(inst, y_grid_register, 1)) ||
+		    (index > x_add_index && ShaderMetadataOriginVgprWriteOverlaps(inst, x_final_register, 1)) ||
+		    (index > y_add_index && ShaderMetadataOriginVgprWriteOverlaps(inst, y_final_register, 1)) ||
+		    (index < x_add_index && index > parameter_load_index &&
+		     ShaderMetadataOriginSgprWriteOverlaps(inst, parameter_value_register, 1)) ||
+		    (index < y_add_index && index > parameter_load_index &&
+		     ShaderMetadataOriginSgprWriteOverlaps(inst, parameter_value_register + 1, 1)))
+		{
+			return {};
+		}
+	}
+	return {threads[0], threads[1], parameter_buffer_index, parameter_bounds_byte_offset,
+	        static_cast<int>(parameter_origin_byte_offset)};
 }
 
 // Prove a common whole-grid store with an EXEC guard that excludes only pixels
@@ -1852,14 +2334,8 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageBoundedGridCoverage(cons
 			}
 			if (inst.type == ShaderInstructionType::ImageStore && image_index == texture_index)
 			{
-				const bool explicit_xy = inst.mimg_address_num >= 2 &&
-				    ShaderBoundedGridPlainRegister(inst.mimg_address[0], ShaderOperandType::Vgpr, x_reg, 1) &&
-				    ShaderBoundedGridPlainRegister(inst.mimg_address[1], ShaderOperandType::Vgpr, y_reg, 1);
-				const bool sequential_xy = inst.mimg_address_num == 0 && y_reg == x_reg + 1 &&
-				    inst.src[0].type == ShaderOperandType::Vgpr && inst.src[0].register_id == x_reg && inst.src[0].size >= 2 &&
-				    inst.src[0].multiplier == 1.0f && inst.src[0].swizzle == 6 && !inst.src[0].absolute &&
-				    !inst.src[0].negate && !inst.src[0].clamp && !inst.src[0].dpp;
-				if (inst.mimg_dimension != 1 || inst.mimg_dmask != full_mask || (!explicit_xy && !sequential_xy))
+				if (inst.mimg_dimension != 1 || inst.mimg_dmask != full_mask ||
+				    !ShaderBoundedGridStoreCoordinatesMatch(inst, x_reg, y_reg))
 				{
 					return {};
 				}
@@ -2382,6 +2858,12 @@ ShaderStorageImageTileCoverage AnalyzeShaderStorageImageTileCoverage(const Shade
 	if (threads != nullptr && texture_index >= 0 && texture_index < bind.textures2D.textures_num && workgroup_register >= 0 &&
 	    bind.textures2D.desc[texture_index].textures2d_without_sampler && native_xy_thread_ids)
 	{
+		const auto metadata_origin_coverage = AnalyzeShaderStorageImageMetadataOriginGridCoverage(
+		    code, bind, texture_index, workgroup_register, threads, group_xy_enabled);
+		if (metadata_origin_coverage.width != 0)
+		{
+			return metadata_origin_coverage;
+		}
 		const auto bounded_coverage = AnalyzeShaderStorageImageBoundedGridCoverage(code, bind, texture_index,
 		                                                                            workgroup_register, threads, group_xy_enabled);
 		if (bounded_coverage.width != 0)

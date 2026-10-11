@@ -23,7 +23,7 @@ bool Scalar(const ShaderOperand& operand)
 	if (!Plain(operand)) { return false; }
 	switch (operand.type)
 	{
-		case ShaderOperandType::Sgpr: return operand.size == 1 && operand.register_id >= 0 && operand.register_id <= 103;
+		case ShaderOperandType::Sgpr: return operand.size == 1 && operand.register_id >= 0 && operand.register_id <= 105;
 		case ShaderOperandType::VccLo:
 		case ShaderOperandType::VccHi: return operand.size == 1 && operand.register_id == 0;
 		case ShaderOperandType::LiteralConstant:

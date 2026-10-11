@@ -12,7 +12,8 @@ ShaderOperand operand_parse(uint32_t code)
 
 	ret.size = 1;
 
-	if (code >= 0 && code <= 103)
+	// RDNA2 scalar operands 0..105 are SGPR0..SGPR105; VCC follows at 106/107.
+	if (code >= 0 && code <= 105)
 	{
 		ret.type        = ShaderOperandType::Sgpr;
 		ret.register_id = static_cast<int>(code);

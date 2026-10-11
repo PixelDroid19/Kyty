@@ -115,6 +115,14 @@ bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures
 	return matched;
 }
 
+bool ShaderStorageTextureSwizzleInShader(const ShaderTextureResource& texture)
+{
+	const bool gen5 = Config::IsNextGen();
+	return ShaderStorageImageSwizzleInShader(texture.DstSelXYZW(),
+	                                         VulkanStorageHasRedBlueView(gen5 ? 0u : texture.Dfmt(), gen5 ? 0u : texture.Nfmt(),
+	                                                                     gen5 ? texture.Format() : 0u));
+}
+
 State::ImageSampleOperation ShaderTextureSampleOperation(const ShaderTextureResource& texture, State::ImageSampleOperation operation)
 {
 	if (Config::IsNextGen() && operation == State::ImageSampleOperation::DepthReference &&
@@ -887,7 +895,10 @@ ShaderNativeWaveInfo ShaderAnalyzeNativeWave(const ShaderCode& code, uint32_t gu
 	// accounts for EXEC writes (a WQM widening and its restore) that the monotone one cannot.
 	const bool monotone_masks = ShaderMasksStayLaneLocal(code, regions, &mask_pc);
 	const auto mask_flow      = ShaderAnalyzeFragmentMaskFlow(code);
-	const bool local_masks    = monotone_masks || mask_flow.lane_local;
+	// ADDTID uses a per-invocation spill array in the pixel emitter. Mask
+	// monotonicity alone cannot establish the stores, reads and lane ownership.
+	const bool addtid = code.HasAnyOf({ShaderInstructionType::DsWriteAddtidB32, ShaderInstructionType::DsReadAddtidB32});
+	const bool local_masks = (monotone_masks || mask_flow.lane_local) && (!addtid || mask_flow.lane_local);
 	bool has_region = false;
 	bool writes_exec_outside_region = false;
 	bool cross_lane = UsesNativeLaneExchange(code);
@@ -2293,7 +2304,8 @@ bool ShaderPreventsNoopPixelElision(const ShaderCode& code)
 	                      ShaderInstructionType::BufferAtomicOr, ShaderInstructionType::BufferAtomicSmax,
 	                      ShaderInstructionType::BufferAtomicSmin, ShaderInstructionType::BufferAtomicSub,
 	                      ShaderInstructionType::BufferAtomicUmax, ShaderInstructionType::BufferAtomicUmin,
-	                      ShaderInstructionType::BufferAtomicXor, ShaderInstructionType::BufferStoreDword,
+	                      ShaderInstructionType::BufferAtomicXor, ShaderInstructionType::BufferAtomicSwap,
+	                      ShaderInstructionType::BufferStoreDword,
 	                      ShaderInstructionType::BufferStoreDwordx2, ShaderInstructionType::BufferStoreDwordx3,
 	                      ShaderInstructionType::BufferStoreDwordx4, ShaderInstructionType::BufferStoreFormatX,
 	                      ShaderInstructionType::BufferStoreFormatXy, ShaderInstructionType::BufferStoreFormatXyzw,
@@ -2456,10 +2468,10 @@ void ShaderParseUsage(uint64_t addr, ShaderParsedUsage* info, ShaderBindResource
 	}
 }
 
-bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
-                                        std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS>* snapshot)
+bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords, std::vector<uint32_t>* snapshot)
 {
-	if (snapshot == nullptr || guest_address == 0u || dwords == 0u || dwords > SHADER_GEN5_EUD_MAX_DWORDS)
+	if (snapshot == nullptr || guest_address == 0u || dwords == 0u || dwords > SHADER_GEN5_EUD_MAX_DWORDS ||
+	    snapshot->size() != static_cast<size_t>(dwords))
 	{
 		return false;
 	}
@@ -2469,7 +2481,7 @@ bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
 		return false;
 	}
 
-	std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS> verification {};
+	std::vector<uint32_t> verification(dwords);
 	constexpr uint32_t attempts = 2u;
 	for (uint32_t attempt = 0; attempt < attempts; ++attempt)
 	{
@@ -2498,7 +2510,7 @@ bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code, int user_data_register_base,
-                       bool vertex_resource_types)
+                       bool vertex_resource_types, const ShaderCode* eud_descriptor_code)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2526,6 +2538,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// 2) Type-5 pointer: overflow sharp offsets are fetched from guest memory
 	//    at that pointer (post-detile: S#@0x20/0x24 in a 12-dword EUD).
 	const bool has_eud_ptr = Gen5HasEudPointer(user_data);
+	const auto* eud_code = eud_descriptor_code != nullptr ? eud_descriptor_code : code;
 	if (has_eud_ptr)
 	{
 		bind->extended.eud_user_sgpr_num = user_sgpr_num;
@@ -2746,11 +2759,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	// Every resource in this draw/dispatch must come from one observed EUD
 	// table version. Reading descriptor words directly from guest memory lets a
 	// concurrent table update combine two versions into a valid-looking V#/T#.
-	std::array<uint32_t, SHADER_GEN5_EUD_MAX_DWORDS> eud_snapshot {};
+	std::vector<uint32_t> eud_snapshot;
 	if (eud_pointer_valid)
 	{
 		uint32_t required_end_dw = 0u;
-		if (!ShaderGen5EudRequiredEndDwords(user_data, user_sgpr_num, bind->extended.start_register, code,
+		if (!ShaderGen5EudRequiredEndDwords(user_data, user_sgpr_num, bind->extended.start_register, eud_code,
 		                                      user_data_register_base, &required_end_dw))
 		{
 			EXIT("invalid Gen5 EUD snapshot span: eud_dw=%u pointer_reg=%d\n",
@@ -2759,6 +2772,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		bool snapshot_ready = false;
 		for (uint32_t pass = 0; pass < 2u; ++pass)
 		{
+			if (required_end_dw == 0u || required_end_dw > SHADER_GEN5_EUD_MAX_DWORDS)
+			{
+				EXIT("invalid Gen5 EUD snapshot size: dwords=%u\n", static_cast<unsigned>(required_end_dw));
+			}
+			eud_snapshot.resize(required_end_dw);
 			if (!ShaderSnapshotGuestDescriptorTable(eud_guest_address, required_end_dw, &eud_snapshot))
 			{
 				EXIT("unstable or unreadable Gen5 EUD snapshot: dwords=%u\n", static_cast<unsigned>(required_end_dw));
@@ -2974,7 +2992,11 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 	if (code != nullptr && has_eud_ptr && extended_buffer != nullptr)
 	{
 		ShaderPruneUnusedMetadataStorage(*code, &bind->storage_buffers, user_sgpr_num, user_data_register_base);
-		ShaderCollectDynamicScalarResources(*code, bind, user_sgpr, info, extended_buffer, user_data->eud_size_dw);
+	}
+	if (eud_code != nullptr && has_eud_ptr && extended_buffer != nullptr)
+	{
+		ShaderCollectDynamicScalarResources(*eud_code, bind, user_sgpr, info, extended_buffer, user_data->eud_size_dw,
+		                                    user_data_register_base);
 	}
 	if (code != nullptr && !vertex_resource_types)
 	{
@@ -3100,7 +3122,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					continue;
 				}
 				exact_evidence.raw_smem_use = true;
-				if (!ShaderDynamicSLoadScalarSpan(*code, record, &exact_evidence.raw_smem_required_bytes))
+				if (eud_code == nullptr || !ShaderDynamicSLoadScalarSpan(*eud_code, record, &exact_evidence.raw_smem_required_bytes))
 				{
 					exact_evidence.raw_smem_dynamic_offset = true;
 				}
@@ -3112,7 +3134,8 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		{
 			unbased_evidence = AnalyzeShaderStorageUse(*code, bind->storage_buffers.start_register[i]);
 		}
-		const auto evidence = ResolveShaderStorageAccessEvidence(code != nullptr, bind->storage_buffers.sources[i], exact,
+		const bool code_available = code != nullptr || (has_dynamic_sload && eud_code != nullptr);
+		const auto evidence = ResolveShaderStorageAccessEvidence(code_available, bind->storage_buffers.sources[i], exact,
 		                                                         unbased_evidence.access,
 		                                                         exact_evidence.decoded_unknown, exact_evidence.indirect_descriptor_use);
 		bind->storage_buffers.accesses[i]                = evidence.access;
@@ -3379,11 +3402,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 			RebaseNggConstantSharps(&rebased_user, vs_isa, user_sgpr, static_cast<int>(user_sgpr_num));
 			usage_user = &rebased_user;
 		}
-		// Do not pass the ISA into ParseUsage2 here: the instruction-stream
-		// fallback AddZeroSBufferResource on a reused s[16:19] V# zeros the
-		// projection CBV. Rebase the metadata sharp table instead.
+		// Keep general ISA analysis disabled: the scalar-buffer fallback on a
+		// reused s[16:19] V# zeros the projection CBV. EUD load destinations
+		// are resolved separately from the rebased metadata sharp table.
 		ShaderParseUsage2(usage_user, &usage, &info->bind, user_sgpr, static_cast<int>(user_sgpr_num), nullptr,
-		                  kGen5GsFrontUserDataBase);
+		                  kGen5GsFrontUserDataBase, true, vs_isa);
 		if (vs_isa != nullptr)
 		{
 			info->native_wave = info->program->native_wave.Get(info->program->code, guest_wave_size);
@@ -3635,6 +3658,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 	{
 		ps_info->target_output_mode[i]  = sh->target_output_mode[i];
 		ps_info->target_output_order[i] = sh->target_output_order[i];
+		ps_info->target_output_number[i] = sh->target_output_number[i];
 	}
 
 	bool ps5 = Config::IsNextGen();
@@ -3653,7 +3677,9 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		if (data.user_data == nullptr) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: data.user_data == nullptr condition ignored (continuing)\n"); }
 
 		const auto analysis = g_shader_resolution_usage_cache.GetOrAnalyze(
-		    {regs->ps_regs.data_addr, regs->ps_regs.chksum, kShaderTranslatorVersion},
+		    {regs->ps_regs.data_addr, regs->ps_regs.chksum, kShaderTranslatorVersion,
+		     static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u,
+		     static_cast<int>(regs->ps_regs.rsrc2.user_sgpr)},
 		    [regs]()
 		    {
 			    auto code = std::make_shared<ShaderCode>();
@@ -3664,6 +3690,8 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 				    DebugStatsScopedTimer timer(RecordShaderInputAnalysis);
 				    ShaderParseMapped(regs->ps_regs.data_addr, code.get());
 			    }
+			    code->SetPixelLdsAllocation(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u,
+			                                static_cast<int>(regs->ps_regs.rsrc2.user_sgpr));
 			    ShaderProbeWrite("ps", *code, nullptr, nullptr);
 			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code, std::make_shared<ShaderNativeWaveVerdict>()};
 		    });
@@ -4453,6 +4481,13 @@ ShaderCode ShaderParsePS(const HW::PixelShaderInfo* regs, const HW::ShaderRegist
 			DebugStatsScopedTimer timer(RecordShaderPipelineMissParse);
 			ShaderParseMapped(regs->ps_regs.data_addr, &code);
 		}
+		if (Config::IsNextGen())
+		{
+			// GFX10 EXTRA_LDS_SIZE is encoded in blocks of 128 dwords. The
+			// implicit parameter scalar follows the user-provided SGPR words.
+			code.SetPixelLdsAllocation(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u,
+			                           static_cast<int>(regs->ps_regs.rsrc2.user_sgpr));
+		}
 
 		ShaderCopyDebugPrintfs(&code);
 	}
@@ -4494,8 +4529,8 @@ Vector<uint32_t> ShaderRecompilePS(const ShaderCode& code, const ShaderPixelInpu
 	spirv_ok         = ShaderToolchain::Run(source, &ret, &err_msg);
 	if (!spirv_ok)
 	{
-		KYTY_LOG_WARN("WARNING: pixel SpirvRun failed: %s\n", err_msg.c_str());
-		return {};
+		EXIT("pixel shader translation failed: hash=0x%08" PRIx32 " crc=0x%08" PRIx32 " %.512s\n", code.GetHash0(), code.GetCrc32(),
+		     err_msg.c_str());
 	}
 
 	log.DumpOptimizedShader(ret);
@@ -4798,7 +4833,7 @@ static void ShaderGetBindIds(ShaderId* ret, const ShaderBindResources& bind)
 		ret->ids.Add(storage ? r.LastLevel() : 0u);
 		ret->ids.Add(storage ? r.MaxMip() : 0u);
 		// Image stores apply a channel selection the storage view cannot express.
-		ret->ids.Add(storage && ShaderStorageImageSwizzleInShader(r.DstSelXYZW()) ? r.DstSelXYZW() : 0u);
+		ret->ids.Add(storage && ShaderStorageTextureSwizzleInShader(r) ? r.DstSelXYZW() : 0u);
 		// ret->ids.Add(r.Depth());
 		// ret->ids.Add(r.Pitch());
 		// ret->ids.Add(r.BaseArray());
@@ -5041,6 +5076,9 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	{
 		ret.hash0 = (regs->ps_regs.chksum >> 32u) & 0xffffffffu;
 		ret.crc32 = regs->ps_regs.chksum & 0xffffffffu;
+		ret.ids.Add(0x504c4431u); // PLD1: reserved pixel LDS and implicit parameter scalar.
+		ret.ids.Add(static_cast<uint32_t>(regs->ps_regs.rsrc2.extra_lds_size) * 128u);
+		ret.ids.Add(regs->ps_regs.rsrc2.user_sgpr);
 	} else
 	{
 		const auto* src = reinterpret_cast<const uint32_t*>(regs->ps_regs.data_addr);
@@ -5091,13 +5129,14 @@ ShaderId ShaderGetIdPS(const HW::PixelShaderInfo* regs, const ShaderPixelInputIn
 	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow));
 	ret.ids.Add(static_cast<uint32_t>(input_info->fp16_overflow_known));
 
-	// The export declarations and component order are part of the generated
-	// SPIR-V interface. They must distinguish pipelines that use the same guest
-	// shader with different render-target formats or COMP_SWAP values.
+	// The export declarations, component order and channel type are part of the
+	// generated SPIR-V interface. They must distinguish pipelines that use the
+	// same guest shader with different render-target formats or COMP_SWAP values.
 	for (int i = 0; i < 8; i++)
 	{
 		ret.ids.Add(input_info->target_output_mode[i]);
 		ret.ids.Add(input_info->target_output_order[i]);
+		ret.ids.Add(input_info->target_output_number[i]);
 	}
 
 	for (uint32_t i = 0; i < 32u; i++)

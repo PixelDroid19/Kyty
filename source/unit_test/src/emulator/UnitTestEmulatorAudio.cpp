@@ -839,6 +839,78 @@ TEST(EmulatorAudio, OpensDecoderThroughCanonicalNamespaceWithoutPrivateMedia)
 	EXPECT_FALSE(error.empty());
 }
 
+TEST(EmulatorAudio, ElementaryVideoDecoderEnforcesConfiguredBoundsForCroppedAvcAndHevc)
+{
+	if (!::Kyty::Emulator::AudioVideoBackend::Decoder::IsAvailable())
+	{
+		GTEST_SKIP();
+	}
+
+	// Generated constant-color Annex B fixtures. Both streams include coded-picture padding cropped by the decoder.
+	static constexpr uint8_t avc_fixture[] = {
+	    0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xc0, 0x0a, 0xdc, 0x97, 0xe2, 0x30, 0x11, 0x00, 0x00, 0x03,
+	    0x00, 0x01, 0x00, 0x00, 0x03, 0x00, 0x02, 0x8f, 0x12, 0x27, 0x80, 0x00, 0x00, 0x00, 0x01, 0x68,
+	    0xce, 0x0f, 0xc8, 0x00, 0x00, 0x00, 0x01, 0x65, 0x88, 0x84, 0x3a, 0x11, 0x8a, 0x00, 0x02, 0x19,
+	    0x71, 0xc0, 0x00, 0x40, 0x32, 0x38, 0x00, 0x08, 0x03, 0xc9, 0xd7, 0x5e,
+	};
+	static constexpr uint8_t hevc_fixture[] = {
+	    0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00,
+	    0x9f, 0xa8, 0x00, 0x00, 0x03, 0x00, 0x00, 0x1e, 0xba, 0x02, 0x40, 0x00, 0x00, 0x00, 0x01, 0x42,
+	    0x01, 0x01, 0x04, 0x08, 0x00, 0x00, 0x03, 0x00, 0x9f, 0xa8, 0x00, 0x00, 0x03, 0x00, 0x00, 0x1e,
+	    0xa0, 0x20, 0x83, 0x1d, 0x56, 0x5b, 0xab, 0x93, 0x2b, 0xc0, 0x5a, 0x02, 0x00, 0x00, 0x03, 0x00,
+	    0x02, 0x00, 0x00, 0x03, 0x00, 0x02, 0x10, 0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xc1, 0x73, 0xc0,
+	    0x89, 0x00, 0x00, 0x00, 0x01, 0x28, 0x01, 0xaf, 0x78, 0xf7, 0x04, 0x03, 0xff, 0xdc, 0xd4, 0xd0,
+	    0x58, 0xfe, 0x7e, 0xdd, 0xc4, 0x40, 0x83, 0xc0, 0x00, 0x78,
+	};
+	struct Fixture
+	{
+		::Kyty::Emulator::AudioVideoBackend::VideoCodec codec;
+		const uint8_t*                                  data;
+		size_t                                          size;
+		int32_t                                         width;
+		int32_t                                         height;
+	};
+	const Fixture fixtures[] = {
+	    {::Kyty::Emulator::AudioVideoBackend::VideoCodec::Avc, avc_fixture, sizeof(avc_fixture), 32, 18},
+	    {::Kyty::Emulator::AudioVideoBackend::VideoCodec::Hevc, hevc_fixture, sizeof(hevc_fixture), 62, 46},
+	};
+
+	for (const auto& fixture: fixtures)
+	{
+		std::string error;
+		auto decoder = ::Kyty::Emulator::AudioVideoBackend::ElementaryVideoDecoder::Open(
+		    fixture.codec, fixture.width, fixture.height, &error);
+		ASSERT_NE(decoder, nullptr) << error;
+		ASSERT_TRUE(decoder->Send(fixture.data, fixture.size, 23)) << decoder->LastError();
+		ASSERT_TRUE(decoder->Drain()) << decoder->LastError();
+
+		::Kyty::Emulator::AudioVideoBackend::VideoFrame frame;
+		int64_t tag = 0;
+		ASSERT_TRUE(decoder->Receive(&frame, &tag));
+		EXPECT_EQ(tag, 23);
+		EXPECT_EQ(frame.width, static_cast<uint32_t>(fixture.width));
+		EXPECT_EQ(frame.height, static_cast<uint32_t>(fixture.height));
+		EXPECT_EQ(frame.data.size(), static_cast<size_t>(fixture.width) * fixture.height * 3u / 2u);
+		EXPECT_FALSE(decoder->Receive(&frame, &tag));
+	}
+
+	for (const auto& fixture: fixtures)
+	{
+		std::string error;
+		auto decoder = ::Kyty::Emulator::AudioVideoBackend::ElementaryVideoDecoder::Open(
+		    fixture.codec, fixture.width - 1, fixture.height - 1, &error);
+		ASSERT_NE(decoder, nullptr) << error;
+		const bool sent   = decoder->Send(fixture.data, fixture.size, 29);
+		const bool drained = decoder->Drain();
+		EXPECT_FALSE(sent && drained);
+
+		::Kyty::Emulator::AudioVideoBackend::VideoFrame frame;
+		int64_t tag = 0;
+		EXPECT_FALSE(decoder->Receive(&frame, &tag));
+		EXPECT_TRUE(frame.data.empty());
+	}
+}
+
 TEST(EmulatorAudio, DecodesConfiguredAvPlayerMedia)
 {
 	const char* media_path = std::getenv("KYTY_AVPLAYER_TEST_MEDIA");

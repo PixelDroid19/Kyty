@@ -54,6 +54,9 @@ KYTY_SHADER_PARSER(shader_parse_mubuf);
 KYTY_SHADER_PARSER(shader_parse_ds);
 KYTY_SHADER_PARSER(shader_parse_mimg);
 KYTY_SHADER_PARSER(shader_parse_bvh);
+
+// Rewrites relative-move waterfall loops into per-lane indexed moves (ShaderWaterfall.cpp).
+void ShaderLowerWaterfallMoves(ShaderCode* code);
 KYTY_SHADER_PARSER(shader_parse_mtbuf);
 KYTY_SHADER_PARSER(shader_parse_flat);
 KYTY_SHADER_PARSER(shader_parse_vintrp);
