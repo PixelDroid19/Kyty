@@ -207,6 +207,22 @@ Unresolved: the reflection patterns (one generic pattern is rendered for every
 value), the absolute levels against native output, and setups other than
 stereo. A title that sets up an eight-channel reverb stays refused.
 
+## NGS2 guest allocators
+
+`SystemCreateWithAllocator` and `RackCreateWithAllocator` take a 24-byte
+allocator (alloc handler, free handler, user data) in place of a buffer info.
+Two references agree that each handler takes the 64-byte buffer info
+(host_buffer at +0, host_buffer_size at +8, user_data at +56). Kyty snapshots the
+option first (an unreadable or unsupported one is an invalid option), then calls
+the alloc handler with `{null, size, user_data}`, where size is what the
+matching QueryBufferSize reports, and creates the object on the buffer the
+handler returns. An allocator without both handlers is refused before anything
+is allocated; a nonzero handler result is returned as is, and a null buffer is
+an invalid buffer address. The free handler gets the buffer back, with the same
+size and user data, when the create fails after the allocation, when the rack
+is destroyed, and for every remaining rack and the system itself when the
+system is destroyed (outside the system's state lock).
+
 ## NGS2 ATRAC9 path
 
 Waveform format 0x40 uses `ElementaryAudioDecoder` (in `AudioVideoBackend`), which
@@ -285,6 +301,21 @@ proves device creation, not sound generation.
   capability evidence.
 - NGS2 rack/system destruction and long-running voice reclamation require
   explicit lifecycle exports before host state can be reclaimed safely.
+- HEVAG sampler waveforms are refused. A roguelike title sets up its sampler
+  voices with waveform type `0x1c` on `VAGp` data whose header version is
+  `0x00020001` and whose frames use predictor indices above 4 combined with
+  the high nibble of the flag byte. That is the high-efficiency variant, which
+  needs a 128-entry, four-tap predictor table; no source for that table fits
+  the data boundary here (the local references that carry it are GPL, no
+  native module is available, and the system FFmpeg decodes only classic
+  PS-ADPCM). The same title adds blocks with flags 0 right after a setup, and
+  builds its graph from a custom submixer rack `0x4002` with the 0x30-byte
+  option expansion (0x508 bytes: module 0 is id `0x1d`, which no reference
+  defines), eight-channel reverb and custom submixer setups, and an
+  eight-channel mastering voice. Its samplers patch straight to mastering, so
+  the waveform format is the first blocker. Direction: obtain the predictor
+  table from a permissible source (the native library or a published
+  contract), then admit block adds with flags 0 on an empty queue.
 
 ## Related graphics boundary
 
