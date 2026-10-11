@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <iterator>
 #include <limits>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -304,6 +305,60 @@ ShaderSamplerOperationEvidence AnalyzeShaderSamplerOperationEvidence(const Shade
 		}
 	}
 	return evidence;
+}
+
+// Analyses run outside the lock: they can be long, and a race only computes
+// the same pure result twice.
+template <typename Value, typename Analyze>
+static Value MemoizedAnalysis(std::mutex* mutex, std::unordered_map<int, Value>* results, int start_register, Analyze analyze)
+{
+	{
+		std::lock_guard<std::mutex> lock(*mutex);
+		if (const auto it = results->find(start_register); it != results->end())
+		{
+			return it->second;
+		}
+	}
+	const Value value = analyze();
+	std::lock_guard<std::mutex> lock(*mutex);
+	results->emplace(start_register, value);
+	return value;
+}
+
+ShaderStorageUseEvidence ShaderCodeResourceMemo::StorageUse(const ShaderCode& code, int start_register) const
+{
+	return MemoizedAnalysis(&m_mutex, &m_storage_use, start_register, [&] { return AnalyzeShaderStorageUse(code, start_register); });
+}
+
+ShaderDirectImageUse ShaderCodeResourceMemo::DirectImageUse(const ShaderCode& code, int start_register,
+                                                            const std::vector<std::bitset<106>>* entry_values) const
+{
+	return MemoizedAnalysis(&m_mutex, entry_values != nullptr ? &m_entry_image_use : &m_direct_image_use, start_register,
+	                        [&] { return AnalyzeShaderDirectImageUse(code, start_register, entry_values); });
+}
+
+ShaderSamplerOperationEvidence ShaderCodeResourceMemo::SamplerOperation(const ShaderCode& code, int start_register) const
+{
+	return MemoizedAnalysis(&m_mutex, &m_sampler_operation, start_register,
+	                        [&] { return AnalyzeShaderSamplerOperationEvidence(code, start_register); });
+}
+
+ShaderStorageUseEvidence AnalyzeShaderStorageUse(const ShaderCode& code, int start_register, const ShaderCodeResourceMemo* memo)
+{
+	return memo != nullptr ? memo->StorageUse(code, start_register) : AnalyzeShaderStorageUse(code, start_register);
+}
+
+ShaderDirectImageUse AnalyzeShaderDirectImageUse(const ShaderCode& code, int start_register,
+                                                 const std::vector<std::bitset<106>>* entry_values, const ShaderCodeResourceMemo* memo)
+{
+	return memo != nullptr ? memo->DirectImageUse(code, start_register, entry_values)
+	                       : AnalyzeShaderDirectImageUse(code, start_register, entry_values);
+}
+
+ShaderSamplerOperationEvidence AnalyzeShaderSamplerOperationEvidence(const ShaderCode& code, int start_register,
+                                                                     const ShaderCodeResourceMemo* memo)
+{
+	return memo != nullptr ? memo->SamplerOperation(code, start_register) : AnalyzeShaderSamplerOperationEvidence(code, start_register);
 }
 
 State::ImageSampleOperation AnalyzeShaderSamplerOperation(const ShaderCode& code, int start_register)

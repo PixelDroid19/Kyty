@@ -2463,12 +2463,13 @@ struct ShaderUserData
 	uint16_t     sharp_resource_count[4];
 };
 
+class ShaderCodeResourceMemo;
 // Cached scalar flows must correspond to their code stream; EUD descriptor code can differ from general code.
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code = nullptr,
                        int user_data_register_base = 0, bool vertex_resource_types = true,
                        const ShaderCode* eud_descriptor_code = nullptr, const ShaderScalarFlow* cached_code_flow = nullptr,
-                       const ShaderScalarFlow* cached_eud_flow = nullptr);
+                       const ShaderScalarFlow* cached_eud_flow = nullptr, const ShaderCodeResourceMemo* code_memo = nullptr);
 
 [[nodiscard]] bool ShaderGen5EudRequiredEndDwords(const ShaderUserData* user_data, int user_sgpr_num,
                                                    int eud_pointer_register, const ShaderCode* code,

@@ -2649,7 +2649,8 @@ bool ShaderSnapshotGuestDescriptorTable(uint64_t guest_address, uint32_t dwords,
 void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info, ShaderBindResources* bind,
                        const HW::UserSgprInfo& user_sgpr, int user_sgpr_num, const ShaderCode* code, int user_data_register_base,
                        bool vertex_resource_types, const ShaderCode* eud_descriptor_code,
-                       const ShaderScalarFlow* cached_code_flow, const ShaderScalarFlow* cached_eud_flow)
+                       const ShaderScalarFlow* cached_code_flow, const ShaderScalarFlow* cached_eud_flow,
+                       const ShaderCodeResourceMemo* code_memo)
 {
 	KYTY_PROFILER_FUNCTION();
 
@@ -2839,7 +2840,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				}
 				if (code != nullptr)
 				{
-					const auto image = AnalyzeShaderDirectImageUse(*code, reg + user_data_register_base, &entry_values);
+					const auto image = AnalyzeShaderDirectImageUse(*code, reg + user_data_register_base, &entry_values, code_memo);
 					if (image.texture != ShaderTextureUsage::Unknown)
 					{
 						ShaderGetTextureBuffer(&bind->textures2D, direct_sgprs, reg, bind->textures2D.textures_num, image.texture,
@@ -2874,7 +2875,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 				{
 					if (code != nullptr)
 					{
-						const auto storage_use = AnalyzeShaderStorageUse(*code, reg + user_data_register_base);
+						const auto storage_use = AnalyzeShaderStorageUse(*code, reg + user_data_register_base, code_memo);
 						if (storage_use.access != ShaderStorageAccess::Unknown)
 						{
 							EXIT("direct storage descriptor crosses declared SRT span: reg=%d dwords=%d srt_size_dw=%u\n", reg,
@@ -2897,7 +2898,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					// With the instruction stream available, only a slot that
 					// reaches a storage consumer is a buffer descriptor; others (for
 					// example 64-bit table pointers) stay ordinary SGPR data.
-					const auto storage_use = AnalyzeShaderStorageUse(*code, reg + user_data_register_base);
+					const auto storage_use = AnalyzeShaderStorageUse(*code, reg + user_data_register_base, code_memo);
 					if (storage_use.access == ShaderStorageAccess::Unknown)
 					{
 						break;
@@ -3160,12 +3161,12 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 
 	if (code != nullptr && has_eud_ptr && extended_buffer != nullptr)
 	{
-		ShaderPruneUnusedMetadataStorage(*code, &bind->storage_buffers, user_sgpr_num, user_data_register_base);
+		ShaderPruneUnusedMetadataStorage(*code, &bind->storage_buffers, user_sgpr_num, user_data_register_base, code_memo);
 	}
 	if (eud_code != nullptr && has_eud_ptr && extended_buffer != nullptr)
 	{
 		ShaderCollectDynamicScalarResources(*eud_code, bind, user_sgpr, info, extended_buffer, user_data->eud_size_dw,
-		                                    user_data_register_base, *eud_flow);
+		                                    user_data_register_base, *eud_flow, eud_code == code ? code_memo : nullptr);
 	}
 	if (code != nullptr && !vertex_resource_types)
 	{
@@ -3265,7 +3266,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		                                  ? ShaderGen5EudOffsetBase(user_sgpr_num) + (bind->storage_buffers.start_register[i] - 16)
 		                                  : bind->storage_buffers.start_register[i];
 		const int  register_with_base = local_dynamic_sload ? binding_register : binding_register + user_data_register_base;
-		auto exact_evidence = code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base) : ShaderStorageUseEvidence {};
+		auto exact_evidence = code != nullptr ? AnalyzeShaderStorageUse(*code, register_with_base, code_memo) : ShaderStorageUseEvidence {};
 		if (has_dynamic_sload)
 		{
 			// Each mapping is proven to reach its descriptor consumers before a clobber.
@@ -3301,7 +3302,7 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 		ShaderStorageUseEvidence unbased_evidence {};
 		if (!local_dynamic_sload && code != nullptr && user_data_register_base != 0)
 		{
-			unbased_evidence = AnalyzeShaderStorageUse(*code, bind->storage_buffers.start_register[i]);
+			unbased_evidence = AnalyzeShaderStorageUse(*code, bind->storage_buffers.start_register[i], code_memo);
 		}
 		const bool code_available = code != nullptr || (has_dynamic_sload && eud_code != nullptr);
 		const auto evidence = ResolveShaderStorageAccessEvidence(code_available, bind->storage_buffers.sources[i], exact,
@@ -3354,10 +3355,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			const int binding_register = descriptor.extended
 			                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (descriptor.start_register - 16)
 			                                 : descriptor.start_register;
-			auto image = AnalyzeShaderDirectImageUse(*code, binding_register + user_data_register_base);
+			auto image = AnalyzeShaderDirectImageUse(*code, binding_register + user_data_register_base, nullptr, code_memo);
 			if (image.texture == ShaderTextureUsage::Unknown && user_data_register_base != 0)
 			{
-				image = AnalyzeShaderDirectImageUse(*code, binding_register);
+				image = AnalyzeShaderDirectImageUse(*code, binding_register, nullptr, code_memo);
 			}
 			if (image.texture != ShaderTextureUsage::Unknown)
 			{
@@ -3374,10 +3375,10 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 			const int binding_register = bind->samplers.extended[i]
 			                                 ? ShaderGen5EudOffsetBase(user_sgpr_num) + (bind->samplers.start_register[i] - 16)
 			                                 : bind->samplers.start_register[i];
-			auto evidence = AnalyzeShaderSamplerOperationEvidence(*code, binding_register + user_data_register_base);
+			auto evidence = AnalyzeShaderSamplerOperationEvidence(*code, binding_register + user_data_register_base, code_memo);
 			if (!evidence.found && user_data_register_base != 0)
 			{
-				evidence = AnalyzeShaderSamplerOperationEvidence(*code, binding_register);
+				evidence = AnalyzeShaderSamplerOperationEvidence(*code, binding_register, code_memo);
 			}
 			bind->samplers.operations[i] = evidence.operation;
 		}
@@ -3897,10 +3898,11 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 			    pixel_analysis->has_global_memory_load      = ShaderHasGlobalMemoryLoad(*code);
 			    return RenderResolutionShaderAnalysis {AnalyzeResolutionShaderUsage(*code), code,
 			                                           std::make_shared<ShaderNativeWaveVerdict>(),
-			                                           std::move(pixel_analysis), std::move(scalar_flow)};
+			                                           std::move(pixel_analysis), std::move(scalar_flow),
+			                                           std::make_shared<ShaderCodeResourceMemo>()};
 		    });
 		EXIT_IF(analysis.code == nullptr || analysis.native_wave == nullptr || analysis.pixel_analysis == nullptr ||
-		        analysis.scalar_flow == nullptr);
+		        analysis.scalar_flow == nullptr || analysis.resource_memo == nullptr);
 		ps_info->integer_image_coordinates = analysis.usage.integer_image_coordinates;
 		ps_info->image_size_query          = analysis.usage.image_size_query;
 		ps_info->native_wave = analysis.native_wave->Get(*analysis.code, ps_wave32 ? 32u : 64u);
@@ -3914,7 +3916,7 @@ void ShaderGetInputInfoPS(const HW::PixelShaderInfo* regs, const HW::ShaderRegis
 		}
 		ShaderResolveCustomInterpolation(*analysis.code, *vs_info, ps_info);
 		ShaderParseUsage2(data.user_data, &usage, &ps_info->bind, regs->ps_user_sgpr, regs->ps_regs.rsrc2.user_sgpr, analysis.code.get(), 0,
-		                  false, nullptr, analysis.scalar_flow.get());
+		                  false, nullptr, analysis.scalar_flow.get(), nullptr, analysis.resource_memo.get());
 		// GETPC uses runtime metadata so relocated pixel programs keep their
 		// inline tables. A constructed V# must read guest bytes, not index the
 		// descriptor array using its base address.

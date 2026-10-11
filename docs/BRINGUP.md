@@ -9,6 +9,26 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Per-program shader resource analyses (2026-10-11)
+
+- Lap timers in `ShaderParseUsage2` on the Unity fishing title (gameplay,
+  about 7,000 pixel-shader parses per second) put about 1.1 s per 10 s
+  in storage-use, direct-image and sampler-operation scans and 0.7 s in
+  the consumer scans of dynamic scalar loads. These results depend only on
+  the program code and a start register. The entry values come from the
+  code's own cached scalar flow.
+- The pixel-shader analysis cache entry now owns a `ShaderCodeResourceMemo`
+  next to the code and scalar flow. It holds those results per start
+  register, plus the consumer analysis of every whole-descriptor S_LOAD
+  computed once per program. Descriptor words, EUD spans and table reads
+  stay per draw. Vertex, compute and fold-capture callers pass no memo and
+  analyze directly.
+- With the lap timers compiled in, the scans fell from 368/412/309 ms to
+  9/101/37 ms per interval, and the dynamic scalar-load lap fell from 720 ms
+  to 165 ms. Gameplay fps went from 5.5-5.8 to 6.0-6.3. The S_LOAD part
+  alone gave no measurable fps change, because the label snapshot below was
+  the larger cost on the same thread.
+
 ## Materialization range invalidation (2026-10-11)
 
 - A user-space IP sampler on the command-processor thread of the Unity
