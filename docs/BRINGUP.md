@@ -9,6 +9,31 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Physical view index and residency sweeps (2026-10-11)
+
+- On the beat 'em up, guest device-address preparation took about 15% of the
+  run, about 40% of command-processor time. Each change in physical
+  population starts a residency sweep, about 13 per second. A sweep took
+  about 12 ms: 0.6 ms collecting about 10,000 unimported spans, 10 ms finding
+  the unpopulated ones and 1.6 ms importing the roughly 1,000 newly populated
+  pages.
+- Inside the 10 ms: 4.8 ms of SEEK_DATA queries (one per span, about 0.48 us
+  each), 1.4 ms of view lookups, and 3.5 ms re-sorting the index of 26,000
+  guest views. The guest maps and unmaps views every frame, so the index was
+  stale at every sweep.
+- The index now stays sorted through every insertion and removal. Equal
+  addresses keep insertion order, as the stable rebuild did. A temporary
+  build compared the incremental index with a full stable rebuild at 1,000
+  sweeps and found zero mismatches.
+- Measured on the same route: the beat 'em up's late window went from
+  10.4 fps (p50 101 ms) to 10.7 fps (p50 91 ms), and residency fell from 14%
+  to 11%. The racing title and the Unity fishing title (held-cross route,
+  into gameplay) are unchanged.
+- Open: the remaining sweep cost is one SEEK_DATA per unpopulated span. That
+  title is latency-bound: guest, command processor and GPU each use about a
+  third of the frame, one after another. Rendering at a fixed 1280x720
+  extent gave the same frame rate and the same GPU engine occupancy.
+
 ## Per-draw vertex-stream reader scan (2026-10-11)
 
 - Timers around each part of the draw state setup on the racing title

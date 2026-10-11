@@ -292,15 +292,27 @@ private:
 	// Backing offset of a live view of [vaddr, vaddr + size) whose physical
 	// range is neither released nor pending release.
 	[[nodiscard]] bool FindAliasablePhysicalUnlocked(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
+	// m_mapped_order stays sorted through every change. Re-sorting all views on
+	// the first lookup after a change cost milliseconds with tens of thousands
+	// of views, and titles map and unmap every frame.
 	void                             AddMappedUnlocked(const MappedBlock& block)
 	{
+		const uint32_t index = m_mapped.Size();
 		m_mapped.Add(block);
-		m_mapped_order_stale = true;
+		// Views at an equal address stay in insertion order.
+		const auto position = std::upper_bound(m_mapped_order.begin(), m_mapped_order.end(), block.map_vaddr,
+		                                       [this](uint64_t address, uint32_t i) { return address < m_mapped[i].map_vaddr; });
+		m_mapped_order.insert(position, index);
 	}
 	void RemoveMappedAtUnlocked(uint32_t index)
 	{
 		m_mapped.RemoveAt(index);
-		m_mapped_order_stale = true;
+		// Later views shift down by one and keep their relative order.
+		m_mapped_order.erase(std::find(m_mapped_order.begin(), m_mapped_order.end(), index));
+		for (auto& order: m_mapped_order)
+		{
+			order -= order > index ? 1u : 0u;
+		}
 	}
 
 	// Gen5 releases the physical reservation independently from its virtual mapping.
@@ -309,7 +321,6 @@ private:
 	Vector<AllocatedBlock>             m_allocated;
 	Vector<MappedBlock>                m_mapped;
 	std::vector<uint32_t>              m_mapped_order; // m_mapped indices by guest address
-	bool                               m_mapped_order_stale = false;
 	std::vector<MemoryProtectionBlock> m_protections;
 	struct PendingDirectRelease
 	{
@@ -1845,17 +1856,6 @@ void PhysicalMemory::FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t coun
 
 const PhysicalMemory::MappedBlock* PhysicalMemory::FindLiveViewUnlocked(uint64_t vaddr)
 {
-	if (m_mapped_order_stale)
-	{
-		m_mapped_order.resize(m_mapped.Size());
-		for (uint32_t index = 0; index < m_mapped.Size(); index++)
-		{
-			m_mapped_order[index] = index;
-		}
-		std::stable_sort(m_mapped_order.begin(), m_mapped_order.end(),
-		                 [this](uint32_t a, uint32_t b) { return m_mapped[a].map_vaddr < m_mapped[b].map_vaddr; });
-		m_mapped_order_stale = false;
-	}
 	auto next = std::upper_bound(m_mapped_order.begin(), m_mapped_order.end(), vaddr,
 	                             [this](uint64_t address, uint32_t index) { return address < m_mapped[index].map_vaddr; });
 	while (next != m_mapped_order.begin())
