@@ -60,10 +60,14 @@ fail on the current HEAD before acting on them.
     viewports and scissors matching it.
   - A per-frame copy of the shadow map: it is bound directly as depth, so it
     has no measured frame-time cost.
-- Next step: read back the D16 atlas at a rolling-start frame. Bare-road
-  texels at the cleared reverse-Z far value point to the receiver (cascade
-  matrix fetch, coordinates or reference). Road texels that occlude their own
-  receiver point to the casters.
+  - Later exclusions (frame mismatch of the cascade matrices, bias magnitude,
+    depth clip versus clamp, cross-submit hazards, a second host image for
+    the atlas) are recorded with their measurements in the graphics handoff.
+    The disc is the receiver's cascade-0 region holding real road depth with
+    a shortfall between about 32 D16 units and 1/256.
+- Next step: read back one receiver's reference and texel inside the
+  cascade-0 region in a disc frame, and compare its interpolated world
+  position with the caster vertex of the same road triangle.
 
 ## Dynamic scalar-load spans memoized per program (2026-10-11)
 

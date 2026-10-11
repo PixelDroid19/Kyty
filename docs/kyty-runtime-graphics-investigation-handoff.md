@@ -357,12 +357,35 @@ against the same correct gameplay capture.
     runs show the disc at comparable frames.
   - The defect is therefore a small, uniform, frame-dependent depth offset
     across the near cascade, not a clear, content or comparison-path fault.
-  - The leading lead is the receiver's cascade data (one 4x3 matrix per
-    cascade read from an indexed buffer) coming from a different frame than
-    the atlas the casters wrote. That fits a near cascade whose depth range is
-    re-fit every frame while the camera moves. Next, record the guest's
-    cascade buffer address and contents per frame with the shadow pass and
-    the receiver draw, and check that both see the same frame's values.
+  - The receiver picks the cascade from four nested camera spheres (index 0
+    to 3, 4 for none) and reads that cascade's light matrix as four records
+    at `cascade * 4` of a matrix buffer; a reference outside [0, 1] is lit.
+    The disc is the cascade-0 sphere.
+  - Excluded, frame mismatch (2026-10-11): in 460 receiver draws over one
+    strict run, every receiver had the near-cascade caster pass of the same
+    guest frame 4 to 6 submits earlier, and the receiver's cascade-0 matrix
+    equals the caster's light matrix mapped to the atlas half (x / 4 + 1/4,
+    -y / 2 + 1/2, z unchanged; linear terms within 1e-7, depth translation
+    identical at print precision). Every storage binding of both receivers
+    and of the caster vertex shader took the per-submit snapshot path, which
+    copies guest memory at record time and reuses an entry only on a
+    byte-exact `memcmp`, so the GPU reads the same values.
+  - Excluded, same strict route with captures every 4 s: caster bias times 8
+    (car shadows shrink, so the bias reaches Vulkan; the disc stays), depth
+    clamp instead of clipping for every pipeline, and `vkQueueWaitIdle` after
+    every submit (no cross-submit hazard). The near and far caster passes and
+    the receivers all use one host depth image at one guest address; the
+    receiver samples it directly (`depth-exact`, no copy). A census of every
+    draw into the atlas shows only the expected caster vertex shader with
+    depth test and write on (GEQUAL), plus 3-vertex draws that leave the atlas
+    bound with depth test and write off while sampling it; those bind it in
+    the read-only depth layout.
+  - Still open: the shortfall that the 8x bias does not cover is larger than
+    about 32 D16 units and below 1/256. Next, read back the receiver's
+    reference and texel for one road pixel inside the cascade-0 sphere in a
+    disc frame (one shader readback, not colour encoding), and compare the
+    interpolated world position against the caster's vertex for the same
+    road triangle.
 
 - Uninitialized constant-buffer V# in a Unity title's EUD (2026-10-04, open).
   A colour-grading pixel shader loads its constant-buffer V# with `s_load_dwordx4
