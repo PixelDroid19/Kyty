@@ -9,6 +9,33 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Descriptor-set reverse index (2026-10-11)
+
+- `DescriptorCache::FreeDescriptor` scanned every cached set, each several
+  KB of resource ids, whenever an image or buffer was destroyed. On the
+  Unity fishing title, the image variant was 7.1% of the command-processor
+  thread, and nearly all of another thread's samples went there as well.
+- The cache now indexes live sets by the unique id of every image and
+  buffer they reference. Images and buffers share one id counter.
+  - A release looks up candidates, applies the same per-variant reference
+    rule as before, and frees the sets in index order.
+  - Insertion, release and reset keep the index in sync.
+- Same route, gameplay windows 5-7: the title went from 7.2-7.3 to 8.0-8.1
+  fps (p50 121 ms, p95 132-146 ms), and the capture is correct.
+- Controls:
+  - The racing title's race window rose from 79.6 to 83.1 fps.
+  - The beat 'em up held at 11.5 fps.
+- Open defect, not changed:
+  - In `GraphicsRenderDescriptor.cpp`, the image release rule
+    (`FreeDescriptor(VulkanImage*)`) does not test
+    `textures2d_sampled_depth_id`.
+  - A set that references a destroyed image only through a depth-sampled
+    slot therefore stays cached until reset.
+  - Unique ids are never reused, so the set cannot be matched again. It
+    only keeps its pool slot.
+  - Suggested direction: include the depth-sampled ids in the rule after
+    checking that a depth sample view owns no other lifetime.
+
 ## Transient tail clearing (2026-10-11)
 
 - When a command-buffer transient entry is larger than the bytes it

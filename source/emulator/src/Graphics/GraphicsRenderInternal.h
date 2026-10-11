@@ -56,6 +56,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <vector>
 
 #ifdef KYTY_EMU_ENABLED
@@ -406,8 +407,13 @@ private:
 	void                  CreatePool();
 
 	static uint32_t CalcHash(const Set& s);
+	static void     CollectResourceIds(const Set& s, std::vector<uint64_t>* ids);
 
 	VulkanDescriptorSet* FindSet(const Set& s);
+	void                 IndexSet(int index);
+	void                 ReleaseSet(int index);
+	template <typename References>
+	void FreeSetsReferencing(uint64_t unique_id, References references);
 
 	Core::Mutex  m_mutex;
 	Vector<Pool> m_pools;
@@ -416,6 +422,8 @@ private:
 	int          m_first_free_pool = -1;
 
 	Core::Hashmap<uint32_t, Vector<int>> m_sets_map;
+	// Live set indices by the unique id of each image or buffer they reference.
+	std::unordered_map<uint64_t, std::vector<int>> m_sets_by_resource;
 
 	std::map<ShaderDescriptorLayoutPlan::Key, VkDescriptorSetLayout> m_descriptor_set_layouts;
 };

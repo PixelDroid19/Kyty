@@ -25,6 +25,7 @@
 #include "Emulator/Log.h"
 #include "Emulator/Profiler.h"
 
+#include <algorithm>
 #include <cinttypes>
 #include <limits>
 
@@ -1118,8 +1119,94 @@ VulkanDescriptorSet* DescriptorCache::GetDescriptor(Stage stage, VulkanBuffer** 
 	{
 		ids.Add(index);
 	}
+	IndexSet(index);
 
 	return new_set;
+}
+
+void DescriptorCache::CollectResourceIds(const Set& s, std::vector<uint64_t>* ids)
+{
+	EXIT_IF(ids == nullptr);
+	ids->clear();
+	const auto add = [ids](const uint64_t* first, int num) { ids->insert(ids->end(), first, first + num); };
+	add(s.textures2d_sampled_id, s.textures2d_sampled_num);
+	add(s.textures2d_sampled_depth_id, s.textures2d_sampled_depth_num);
+	add(s.textures2d_array_sampled_id, s.textures2d_array_sampled_num);
+	add(s.textures3d_sampled_id, s.textures3d_sampled_num);
+	add(s.textures2d_sampled_uint_id, s.textures2d_sampled_uint_num);
+	add(s.textures2d_array_sampled_uint_id, s.textures2d_array_sampled_uint_num);
+	add(s.textures3d_sampled_uint_id, s.textures3d_sampled_uint_num);
+	add(s.textures2d_storage_id, s.textures2d_storage_num);
+	for (int i = 0; i < s.storage_buffers_num; i++)
+	{
+		ids->push_back(s.storage_buffers[i].unique_id);
+	}
+	if (s.vsharp_uniform_buffer)
+	{
+		ids->push_back(s.vsharp_uniform_buffer_key.unique_id);
+	}
+	std::sort(ids->begin(), ids->end());
+	ids->erase(std::unique(ids->begin(), ids->end()), ids->end());
+}
+
+void DescriptorCache::IndexSet(int index)
+{
+	std::vector<uint64_t> ids;
+	CollectResourceIds(m_sets.At(index), &ids);
+	for (const auto id: ids)
+	{
+		m_sets_by_resource[id].push_back(index);
+	}
+}
+
+void DescriptorCache::ReleaseSet(int index)
+{
+	auto& set = m_sets[index];
+	EXIT_IF(set.set == nullptr);
+	std::vector<uint64_t> ids;
+	CollectResourceIds(set, &ids);
+	for (const auto id: ids)
+	{
+		auto it = m_sets_by_resource.find(id);
+		EXIT_IF(it == m_sets_by_resource.end());
+		auto& indices = it->second;
+		indices.erase(std::remove(indices.begin(), indices.end(), index), indices.end());
+		if (indices.empty())
+		{
+			m_sets_by_resource.erase(it);
+		}
+	}
+	Free(set.set);
+	set.set           = nullptr;
+	set.next_free_set = m_first_free_set;
+	m_first_free_set  = index;
+	auto& hash_ids    = m_sets_map[set.hash];
+	hash_ids.Remove(index);
+	if (hash_ids.IsEmpty())
+	{
+		m_sets_map.Remove(set.hash);
+	}
+}
+
+// Candidates come from the reverse index; `references` keeps each caller's
+// exact ownership rule. Sets are released in index order.
+template <typename References>
+void DescriptorCache::FreeSetsReferencing(uint64_t unique_id, References references)
+{
+	const auto it = m_sets_by_resource.find(unique_id);
+	if (it == m_sets_by_resource.end())
+	{
+		return;
+	}
+	std::vector<int> candidates = it->second;
+	std::sort(candidates.begin(), candidates.end());
+	for (const int index: candidates)
+	{
+		if (references(m_sets.At(index)))
+		{
+			ReleaseSet(index);
+		}
+	}
 }
 
 void DescriptorCache::FreeDescriptor(VulkanBuffer* buffer)
@@ -1133,27 +1220,11 @@ void DescriptorCache::FreeDescriptor(VulkanBuffer* buffer)
 	}
 
 	Core::LockGuard lock(m_mutex);
-
-	int index = 0;
-	for (auto& set: m_sets)
-	{
-		if (set.set != nullptr &&
-		    VulkanDescriptorReferencesBuffer(set.storage_buffers, set.storage_buffers_num, set.vsharp_uniform_buffer,
-		                                     set.vsharp_uniform_buffer_key, buffer->memory.unique_id))
-		{
-			Free(set.set);
-			set.set           = nullptr;
-			set.next_free_set = m_first_free_set;
-			m_first_free_set  = index;
-			auto& ids         = m_sets_map[set.hash];
-			ids.Remove(index);
-			if (ids.IsEmpty())
-			{
-				m_sets_map.Remove(set.hash);
-			}
-		}
-		index++;
-	}
+	const uint64_t  unique_id = buffer->memory.unique_id;
+	FreeSetsReferencing(unique_id, [unique_id](const Set& set) {
+		return VulkanDescriptorReferencesBuffer(set.storage_buffers, set.storage_buffers_num, set.vsharp_uniform_buffer,
+		                                        set.vsharp_uniform_buffer_key, unique_id);
+	});
 }
 
 void DescriptorCache::FreeDescriptor(VulkanImage* image)
@@ -1163,61 +1234,17 @@ void DescriptorCache::FreeDescriptor(VulkanImage* image)
 	EXIT_IF(image == nullptr);
 
 	Core::LockGuard lock(m_mutex);
-
-	int index = 0;
-	for (auto& set: m_sets)
-	{
-		if (set.set != nullptr)
-		{
-			bool references_image = false;
-			for (int i = 0; i < set.textures2d_sampled_num; i++)
-			{
-				if (set.textures2d_sampled_id[i] == image->memory.unique_id)
-				{
-					references_image = true;
-					break;
-				}
-			}
-			for (int i = 0; !references_image && i < set.textures2d_array_sampled_num; i++)
-			{
-				references_image = set.textures2d_array_sampled_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures3d_sampled_num; i++)
-			{
-				references_image = set.textures3d_sampled_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures2d_sampled_uint_num; i++)
-			{
-				references_image = set.textures2d_sampled_uint_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures2d_array_sampled_uint_num; i++)
-			{
-				references_image = set.textures2d_array_sampled_uint_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures3d_sampled_uint_num; i++)
-			{
-				references_image = set.textures3d_sampled_uint_id[i] == image->memory.unique_id;
-			}
-			for (int i = 0; !references_image && i < set.textures2d_storage_num; i++)
-			{
-				references_image = set.textures2d_storage_id[i] == image->memory.unique_id;
-			}
-			if (references_image)
-			{
-				Free(set.set);
-				set.set           = nullptr;
-				set.next_free_set = m_first_free_set;
-				m_first_free_set  = index;
-				auto& ids         = m_sets_map[set.hash];
-				ids.Remove(index);
-				if (ids.IsEmpty())
-				{
-					m_sets_map.Remove(set.hash);
-				}
-			}
-		}
-		index++;
-	}
+	const uint64_t  unique_id = image->memory.unique_id;
+	FreeSetsReferencing(unique_id, [unique_id](const Set& set) {
+		const auto references = [unique_id](const uint64_t* ids, int num) { return std::find(ids, ids + num, unique_id) != ids + num; };
+		return references(set.textures2d_sampled_id, set.textures2d_sampled_num) ||
+		       references(set.textures2d_array_sampled_id, set.textures2d_array_sampled_num) ||
+		       references(set.textures3d_sampled_id, set.textures3d_sampled_num) ||
+		       references(set.textures2d_sampled_uint_id, set.textures2d_sampled_uint_num) ||
+		       references(set.textures2d_array_sampled_uint_id, set.textures2d_array_sampled_uint_num) ||
+		       references(set.textures3d_sampled_uint_id, set.textures3d_sampled_uint_num) ||
+		       references(set.textures2d_storage_id, set.textures2d_storage_num);
+	});
 }
 
 void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
@@ -1249,6 +1276,7 @@ void DescriptorCache::DeleteAllForTesting(GraphicContext* ctx)
 
 	m_descriptor_set_layouts.clear();
 	m_sets_map.Clear();
+	m_sets_by_resource.clear();
 	m_sets.Clear();
 	m_pools.Clear();
 	m_first_free_set  = -1;
