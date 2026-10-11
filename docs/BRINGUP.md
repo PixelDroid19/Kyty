@@ -11,8 +11,8 @@ fail on the current HEAD before acting on them.
 
 ## Range-query cache invalidation through compact spans (2026-10-11)
 
-- A stack sampler on the Unity fishing title's gameplay (Intel A770, route
-  `dredge-hold`, 15 s window) put 6.9% of command-processor samples in
+- A stack sampler on the Unity fishing title's gameplay (Intel A770, scripted
+  hold route, 15 s window) put 6.9% of command-processor samples in
   `GpuMemory::CreateBlock` and 6.3% in `QueryOverlapsLocked`.
   - Every object creation and deletion calls `InvalidateRange` on the
     range-query caches. Each call walked all 4,096 slots of the overlap
