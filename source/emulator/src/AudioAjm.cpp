@@ -1002,9 +1002,10 @@ float AjmReportedResampleRatio(const AjmResampleState& state)
 }
 
 // Profiles observed from the guest: a non-negative ratio, constant or moving, that is not frozen at zero, and anything
-// but the neutral profile only on a finite (gapless) stream; the reset marker at ratio 1 in the window after a Clear; and
-// flags 2, which the guest sets on the last calls of a finite stream from the current ratio. The stream end stays the
-// gapless limit.
+// but the neutral profile only on a finite (gapless) stream; the reset marker at ratio 1 in the window after a Clear;
+// flags 2, which the guest sets on the last calls of a finite stream from the current ratio; and both bits together on a
+// short stream whose first call is also its last, where the cleared stream's current ratio is the neutral one. The
+// stream end stays the gapless limit.
 bool IsAjmResampleProfileAdmitted(const AjmResampleState& running, const AjmGaplessDecodeState& gapless, const AjmBatch2DataJob& job)
 {
 	const float ratio   = job.ratio_start;
@@ -1019,6 +1020,7 @@ bool IsAjmResampleProfileAdmitted(const AjmResampleState& running, const AjmGapl
 		case 0u: return true;
 		case 1u: return neutral && running.reset_window;
 		case 2u: return running.configured && AjmReportedResampleRatio(running) == ratio;
+		case 3u: return neutral && running.reset_window && AjmReportedResampleRatio(running) == ratio;
 		default: return false;
 	}
 }
@@ -2588,7 +2590,7 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 				auto format_it = decoder_formats.find(job.instance);
 				auto state_it  = resample_states.find(job.instance);
 				if (!active || format_it == decoder_formats.end() || state_it == resample_states.end() ||
-				    !AjmInstanceResamples(*instance_state) || !state_it->second.configured || state_it->second.flags > 2u)
+				    !AjmInstanceResamples(*instance_state) || !state_it->second.configured || state_it->second.flags > 3u)
 				{
 					lock.unlock();
 					RejectUnsupportedAjmDataOperation(AjmDataOperation::GetResampleInfo);

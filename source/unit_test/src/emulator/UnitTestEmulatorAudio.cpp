@@ -7008,6 +7008,8 @@ TEST(EmulatorAudio, AjmOpusGaplessFreshResetTrimsPrimingFramesAtNeutralResampleR
 
 	ASSERT_EXIT(std::_Exit(RunAjmOpusGaplessScenario(framed_input, expected_output, 0, 0)), ::testing::ExitedWithCode(0), "");
 	ASSERT_EXIT(std::_Exit(RunAjmOpusGaplessScenario(framed_input, expected_output, 1, 0)), ::testing::ExitedWithCode(0), "");
+	// A short stream whose first call is also its last sets the reset marker and the end marker together.
+	ASSERT_EXIT(std::_Exit(RunAjmOpusGaplessScenario(framed_input, expected_output, 3, 0)), ::testing::ExitedWithCode(0), "");
 	// Before any decode, reset one configures the same fresh stream as reset zero.
 	ASSERT_EXIT(std::_Exit(RunAjmOpusGaplessScenario(framed_input, expected_output, 0, 1)), ::testing::ExitedWithCode(0), "");
 #endif
@@ -7381,6 +7383,8 @@ TEST(EmulatorAudio, RejectsUnobservedAjmOpusResampleProfilesAtomically)
 	    {"flags 2 after a non-unity profile", true, 0.9375f, 1.0f, 0.0f, 2},
 	    {"moving ratio without gapless", false, 0.0f, 1.0f, 0x1p-20f, 0},
 	    {"reset marker on a moving ratio", true, 0.0f, 1.0f, 0x1p-20f, 1},
+	    {"both markers at non-unity ratio", true, 0.0f, 0.9375f, 0.0f, 3},
+	    {"both markers after a profile closed the window", true, 1.0f, 1.0f, 0.0f, 3},
 	    {"zero ratio moving down", true, 0.0f, 0.0f, -0x1p-20f, 0},
 	    {"zero ratio", true, 0.0f, 0.0f, 0.0f, 0},
 	    {"negative ratio", true, 0.0f, -1.0f, 0.0f, 0},
@@ -7733,10 +7737,9 @@ TEST(EmulatorAudio, RejectsAjmResampleResetMarkerOutsideAClearedWindowAtomically
 		AfterResampleConfiguration,
 		AfterDecode,
 		Flag2WithoutNeutralProfile,
-		UnknownFlag3,
 	};
 	const Scenario   scenarios[] = {Scenario::BeforeClear, Scenario::AfterResampleConfiguration, Scenario::AfterDecode,
-	                                Scenario::Flag2WithoutNeutralProfile, Scenario::UnknownFlag3};
+	                                Scenario::Flag2WithoutNeutralProfile};
 	GuestSharedBlock result_storage(sizeof(AjmBatchSharedResults));
 	ASSERT_TRUE(result_storage.IsValid());
 	auto* const shared            = ::new (result_storage.Data()) AjmBatchSharedResults {};
@@ -7786,14 +7789,7 @@ TEST(EmulatorAudio, RejectsAjmResampleResetMarkerOutsideAClearedWindowAtomically
 			    {
 				    std::_Exit(94);
 			    }
-			    uint32_t reset_flags = 1;
-			    if (scenario == Scenario::Flag2WithoutNeutralProfile)
-			    {
-				    reset_flags = 2;
-			    } else if (scenario == Scenario::UnknownFlag3)
-			    {
-				    reset_flags = 3;
-			    }
+			    const uint32_t reset_flags = scenario == Scenario::Flag2WithoutNeutralProfile ? 2u : 1u;
 			    if (Ajm::AjmBatchJobSetResampleParametersEx(batch, instance, 1.0f, 0.0f, reset_flags, shared->sideband_output + 16) != 0 ||
 			        !outputs_untouched())
 			    {

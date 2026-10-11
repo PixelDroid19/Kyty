@@ -9,6 +9,32 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## AJM combined resample markers (2026-10-11)
+
+- The beat 'em up's strict combat run ended at `SetResampleParametersEx`.
+  An opt-in capture at the rejection recorded:
+  - ATRAC9, instance flags `0x1002`.
+  - Ratio one, zero increment, flags three.
+  - The fresh initialize-then-clear window: no prior profile or decode.
+  - A finite gapless stream of 3,072 frames with 256 priming frames.
+- Flags three sets both previously evidenced bits:
+  - Bit zero: the reset marker of a fresh stream.
+  - Bit one: the end marker on a finite stream's last calls, from the
+    current ratio.
+- On a stream whose first call is also its last, the cleared stream's
+  current ratio is the neutral one. Flags three is therefore admitted only
+  for the neutral profile inside the reset window. `GetResampleInfo` accepts
+  the stored value.
+- Flags are admission qualifiers only; resampled output does not depend on
+  them.
+- The former `UnknownFlag3` refusal scenario asserted exactly this observed
+  sequence and was removed. A positive gapless case and two refusals
+  replace it: flags three at a non-unity ratio, and flags three after a
+  profile closed the window.
+- Result: the next strict run passed the marker and reached 307 s, with
+  non-zero output RMS. It then stopped at the AJM batch write-range
+  capacity, which is the next item.
+
 ## Vertex buffer objects without a staging fence (2026-10-11)
 
 - Beat 'em up combat baseline (Intel A770, 260 s route, windows perf-7..9):
