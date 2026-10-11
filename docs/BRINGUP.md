@@ -9,6 +9,40 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Range-query cache invalidation through compact spans (2026-10-11)
+
+- A stack sampler on the Unity fishing title's gameplay (Intel A770, route
+  `dredge-hold`, 15 s window) put 6.9% of command-processor samples in
+  `GpuMemory::CreateBlock` and 6.3% in `QueryOverlapsLocked`.
+  - Every object creation and deletion calls `InvalidateRange` on the
+    range-query caches. Each call walked all 4,096 slots of the overlap
+    snapshot cache, about 1.4 MB of entries, to test one key per slot.
+- `GpuMemoryRangeQueryCache` and `GpuMemoryAdaptiveRangeQueryCache` now keep
+  a compact `[begin, end)` span per slot, as the materialization cache
+  already does. An invalidation reads a full entry only where its span
+  overlaps. The full-key overlap test and the lookup rules are unchanged.
+- The same sampler afterwards: `CreateBlock` 1.0%, `QueryOverlapsLocked` 2.0%.
+- Frame rate on the same routes, `KYTY_RUN_PERF=1`:
+
+  | Title | Windows | Before (fps) | After (fps) |
+  | --- | --- | --- | --- |
+  | Unity fishing title (A/B binaries, alternated) | perf-5..7 | 9.6, 9.6, 9.5 | 9.1, 8.4, 10.4 |
+  | Racing title race | perf-4 | 88.3 | 87.8 |
+  | Beat 'em up | perf-4 | 11.9 | 12.5 |
+
+  The racing and beat 'em up "before" values are the last recorded windows,
+  not alternated runs. The change is within run-to-run noise in frame rate.
+  Captures are correct.
+- Why less command-processor work does not raise the frame rate: over a 20 s
+  gameplay window the command-processor thread used 68% of one core and the
+  render engine was busy 44% (`drm-cycles-rcs`). Neither is saturated. The
+  title is bound by serialization between them: about 80 submits per frame,
+  fence waits 19-23% and `WAIT_REG_MEM` 11-15% of the window.
+- `EmulatorAudio.StandardSamplerRackDestroyWaitsForACallbackRunningOnAnotherThread`
+  times out (10 s) in about one of four runs of the `EmulatorAudio.*` suite.
+  It does so with and without this change, and it passes when run alone.
+  The cause is not investigated.
+
 ## Table-loaded comparison samplers paired by instruction (2026-10-11)
 
 - A sampler sharp read from a descriptor table through `S_LOAD` is registered

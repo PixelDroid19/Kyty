@@ -1,11 +1,13 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GPUMEMORYRANGEQUERYCACHE_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GPUMEMORYRANGEQUERYCACHE_H_
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace Kyty::Libs::Graphics {
@@ -55,6 +57,24 @@ public:
 			}
 		}
 		return false;
+	}
+
+	// Smallest [begin, end) covering every range; Create rejects ranges whose
+	// end overflows.
+	[[nodiscard]] std::pair<uint64_t, uint64_t> Span() const
+	{
+		if (!m_valid)
+		{
+			return {0u, 0u};
+		}
+		uint64_t begin = std::numeric_limits<uint64_t>::max();
+		uint64_t end   = 0u;
+		for (uint8_t i = 0; i < m_range_count; ++i)
+		{
+			begin = std::min(begin, m_address[i]);
+			end   = std::max(end, m_address[i] + m_size[i]);
+		}
+		return {begin, end};
 	}
 
 	[[nodiscard]] uint64_t Hash() const
@@ -166,7 +186,9 @@ public:
 		{
 			return;
 		}
-		m_entries[static_cast<size_t>(key.Hash()) & (Capacity - 1u)] = Entry {m_epoch, key, value};
+		const size_t slot = static_cast<size_t>(key.Hash()) & (Capacity - 1u);
+		m_entries[slot]   = Entry {m_epoch, key, value};
+		m_spans[slot]     = key.Span();
 	}
 
 	void Invalidate()
@@ -188,18 +210,28 @@ public:
 		{
 			return;
 		}
-		for (auto& entry: m_entries)
+		// Every object creation invalidates its range; scan the compact spans
+		// and read a full entry only where its span overlaps.
+		const uint64_t end = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
+		for (size_t slot = 0; slot < Capacity; ++slot)
 		{
-			if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
+			if (m_spans[slot].second <= address || m_spans[slot].first >= end)
+			{
+				continue;
+			}
+			auto& entry = m_entries[slot];
+			if (!entry.has_value() || entry->epoch != m_epoch || entry->key.Overlaps(address, size))
 			{
 				entry.reset();
+				m_spans[slot] = {0u, 0u};
 			}
 		}
 	}
 
 private:
-	std::array<std::optional<Entry>, Capacity> m_entries {};
-	uint64_t                                   m_epoch = 1u;
+	std::array<std::optional<Entry>, Capacity>          m_entries {};
+	std::array<std::pair<uint64_t, uint64_t>, Capacity> m_spans {};
+	uint64_t                                            m_epoch = 1u;
 };
 
 // The same memoization with a table that follows its owner's population. A
@@ -232,6 +264,7 @@ public:
 		if (wanted > m_entries.size())
 		{
 			m_entries.assign(wanted, std::nullopt);
+			m_spans.assign(wanted, {0u, 0u});
 		}
 	}
 
@@ -257,7 +290,9 @@ public:
 		{
 			return;
 		}
-		m_entries[static_cast<size_t>(key.Hash()) & (m_entries.size() - 1u)] = Entry {m_epoch, key, value};
+		const size_t slot = static_cast<size_t>(key.Hash()) & (m_entries.size() - 1u);
+		m_entries[slot]   = Entry {m_epoch, key, value};
+		m_spans[slot]     = key.Span();
 	}
 
 	void InvalidateRange(uint64_t address, uint64_t size)
@@ -266,18 +301,26 @@ public:
 		{
 			return;
 		}
-		for (auto& entry: m_entries)
+		const uint64_t end = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
+		for (size_t slot = 0; slot < m_entries.size(); ++slot)
 		{
-			if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
+			if (m_spans[slot].second <= address || m_spans[slot].first >= end)
+			{
+				continue;
+			}
+			auto& entry = m_entries[slot];
+			if (!entry.has_value() || entry->epoch != m_epoch || entry->key.Overlaps(address, size))
 			{
 				entry.reset();
+				m_spans[slot] = {0u, 0u};
 			}
 		}
 	}
 
 private:
-	std::vector<std::optional<Entry>> m_entries;
-	uint64_t                          m_epoch = 1u;
+	std::vector<std::optional<Entry>>          m_entries;
+	std::vector<std::pair<uint64_t, uint64_t>> m_spans;
+	uint64_t                                   m_epoch = 1u;
 };
 
 } // namespace Kyty::Libs::Graphics
