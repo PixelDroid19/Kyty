@@ -9,6 +9,23 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Racing title race-window correction (2026-10-11)
+
+- The racing title's "race window" figures above (70 to 88 fps) were
+  measured with the car stationary on the grid. The route pressed R2 only
+  after the race clock ran out. A scripted R2 also set only the digital bit,
+  and the title reads the analog trigger.
+- With scripted triggers reporting full travel and acceleration from the
+  race start, the moving race measured 43.0 and 42.6 fps (p50 21-22 ms,
+  381-413 draws per frame). The time-over flyby that follows measured
+  33.8 fps at 538 draws per frame.
+- These are the baselines for the racing title from now on. The grid
+  figures remain valid only as A/B pairs measured on the same scene.
+- The beat 'em up's 11-12 fps window is its intro card (6-7 draws per frame),
+  not combat. Its gameplay has not been measured yet.
+- Moving captures show small grey squares around the car, likely particles.
+  This is not yet investigated.
+
 ## Atomic container reference counts (2026-10-11)
 
 - In the Unity fishing title's gameplay profile, mutex lock, trylock and
@@ -71,6 +88,21 @@ fail on the current HEAD before acting on them.
     before. The capture is correct.
 - Controls, with correct captures: the racing title's race window measured
   82.9 fps and the beat 'em up 11.1 fps.
+- Open defect, made wider by this change:
+  - In `GraphicsRenderDraw.cpp`, the indexed draw computes the vertex range
+    from live guest index memory (`ResolveIndexedVertexRecords`, line 1640).
+    It captures the index snapshot later (line 1767), outside that read.
+  - If the guest rewrites indices in between, the draw uses indices whose
+    range was never scanned. Records above the scanned maximum already read
+    the zeroed tail. Records below the scanned minimum now read stale bytes
+    from a recycled entry.
+  - Suggested direction: capture the index snapshot first, and derive the
+    range from the captured bytes.
+- Open defect, unchanged: in `ShaderComputeWaveAnalysis.cpp` (line 1197),
+  the native lowering admission tests the prefix `Tbuffer`. The mnemonic is
+  `TBuffer`, so MTBUF instructions are never classified as memory there.
+  Fixing it changes which programs are admitted. It needs its own focused
+  test and a strict run.
 
 ## Per-draw scan costs (2026-10-11)
 
