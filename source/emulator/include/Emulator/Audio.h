@@ -65,6 +65,8 @@ int KYTY_SYSV_ABI AudioOut2UserDestroy(uintptr_t user);
 // sceAudioOut2GetSpeakerInfo (NID DImz2Ft9E2g): flags is the speaker-set
 // selector (0 and 1 observed); the output is a 0x50-byte record.
 int KYTY_SYSV_ABI AudioOut2GetSpeakerInfo(void* info, uint32_t flags);
+// sceAudioOut2Set3DLatency (NID TViD1EZXkNI): (user, latency) for the system user.
+int KYTY_SYSV_ABI AudioOut2Set3DLatency(int32_t user_id, uint32_t latency);
 
 // C++-only unit-test seam for host-state regression coverage. It is not a
 // guest export and must not be used to infer an AudioOut2 ContextCreate ABI.

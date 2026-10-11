@@ -479,35 +479,24 @@ static bool CopyToGuest(void* destination, const void* source, size_t size)
 	       Core::VirtualMemory::CopyToGuestOrLent(reinterpret_cast<uint64_t>(destination), source, static_cast<uint64_t>(size));
 }
 
-struct CapturedContextProfile
+// sceAudioOut2 context parameters: six 32-bit fields lead the 0x40-byte block and the rest is reserved. Titles pass
+// uninitialized reserved bytes after ResetParam, so only the defined fields are read. The grain at +0x10 matches the
+// PCM count of live 256- and 512-frame producer/consumer traces. The port counts and the queue depth are capacities
+// the HLE context does not enforce.
+struct ContextParam
 {
-	std::array<uint64_t, kContextParamBytes / sizeof(uint64_t)> parameters;
-	uint32_t                                                    frames_per_submission;
+	uint32_t max_ports;
+	uint32_t max_object_ports;
+	uint32_t guarantee_object_ports;
+	uint32_t queue_depth;
+	uint32_t num_grains;
+	uint32_t flags;
 };
 
-static const CapturedContextProfile* ReadSupportedContextParam(const void* param)
+static bool ReadContextParam(const void* param, ContextParam* out)
 {
-	std::array<uint64_t, kContextParamBytes / sizeof(uint64_t)> words {};
-	if (!CopyFromGuest(words.data(), param, sizeof(words)))
-	{
-		return nullptr;
-	}
-	// Match complete live-observed parameter blocks, including their zero tail.
-	// The headers remain opaque; do not infer generic ranges from these values.
-	// The 512-frame producer/consumer trace establishes the PCM count and stride
-	// corresponding to the 32-bit input at +0x10 in the second configuration.
-	static constexpr CapturedContextProfile profiles[] = {
-	    {{0x0000008000000012ull, 0x0000000100000000ull, 0x0000000100000100ull}, 256},
-	    {{0x0000020000000014ull, 0x0000000100000000ull, 0x0000000100000200ull}, 512},
-	};
-	for (const auto& profile: profiles)
-	{
-		if (words == profile.parameters)
-		{
-			return &profile;
-		}
-	}
-	return nullptr;
+	// The host mixer handles 64..4096-frame grains.
+	return CopyFromGuest(out, param, sizeof(*out)) && out->num_grains >= 64 && out->num_grains <= 4096;
 }
 
 static bool CalculatePcmGrainBytes(uint32_t grain, uint32_t channels, uint32_t sample_bytes, size_t* bytes_out)
@@ -669,7 +658,8 @@ int KYTY_SYSV_ABI AudioOut2ContextQueryMemory(const void* param, uint64_t* size_
 	PRINT_NAME();
 	KYTY_LOG_DEBUG("\t param    = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(param));
 	KYTY_LOG_DEBUG("\t size_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(size_out));
-	if (!ReadSupportedContextParam(param))
+	ContextParam context_param {};
+	if (!ReadContextParam(param, &context_param))
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -685,9 +675,9 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	KYTY_LOG_DEBUG("\t buffer     = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(buffer));
 	KYTY_LOG_DEBUG("\t size       = 0x%016" PRIx64 "\n", size);
 	KYTY_LOG_DEBUG("\t handle_out = 0x%016" PRIx64 "\n", reinterpret_cast<uint64_t>(handle_out));
-	const auto* profile = ReadSupportedContextParam(param);
-	if (profile == nullptr || size != kHleContextWorkspaceBytes || !IsGuestWritableRange(buffer, static_cast<size_t>(size)) ||
-	    !IsGuestWritableRange(handle_out, sizeof(*handle_out)))
+	ContextParam context_param {};
+	if (!ReadContextParam(param, &context_param) || size != kHleContextWorkspaceBytes ||
+	    !IsGuestWritableRange(buffer, static_cast<size_t>(size)) || !IsGuestWritableRange(handle_out, sizeof(*handle_out)))
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
@@ -700,7 +690,7 @@ int KYTY_SYSV_ABI AudioOut2ContextCreate(const void* param, void* buffer, uint64
 	}
 	g_contexts[id - 1].buffer = buffer;
 	g_contexts[id - 1].size   = size;
-	g_contexts[id - 1].grain  = profile->frames_per_submission;
+	g_contexts[id - 1].grain  = context_param.num_grains;
 	if (!CopyToGuest(handle_out, &id, sizeof(id)))
 	{
 		g_contexts[id - 1] = ContextSlot {};
@@ -1224,6 +1214,20 @@ int KYTY_SYSV_ABI AudioOut2GetSpeakerInfo(void* info, uint32_t flags)
 	out.speaker_angle[0].azimuth = 30;
 	out.speaker_angle[1].azimuth = -30;
 	return CopyToGuest(info, &out, sizeof(out)) ? OK : LibKernel::KERNEL_ERROR_EINVAL;
+}
+
+// sceAudioOut2Set3DLatency (NID TViD1EZXkNI): selects the system user's 3D
+// (object) audio latency mode, 1 or 2. The host mixer renders no object ports,
+// so the mode has nothing to change in the stereo output.
+int KYTY_SYSV_ABI AudioOut2Set3DLatency(int32_t user_id, uint32_t latency)
+{
+	PRINT_NAME();
+	KYTY_LOG_DEBUG("\t user_id = 0x%x latency = %u\n", static_cast<uint32_t>(user_id), latency);
+	if (user_id != 0xff || latency < 1u || latency > 2u)
+	{
+		EXIT("unsupported sceAudioOut2Set3DLatency: user=0x%x latency=%u\n", static_cast<uint32_t>(user_id), latency);
+	}
+	return OK;
 }
 
 } // namespace AudioOut2

@@ -532,19 +532,48 @@ TEST(EmulatorAudio, AudioOut2ContextLifecycleAcceptsSecondCapturedProfile)
 	EXPECT_GT(*context_storage.Data(), 0);
 	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(*context_storage.Data()), 0);
 
-	for (const size_t offset: {0u, 4u, 16u, 24u, 63u})
+	// The grain at word 4 is the only field the context consumes; the host mixer handles 64..4096 frames.
+	for (const uint32_t grain: {0u, 63u, 4097u})
 	{
-		auto* bytes = static_cast<uint8_t*>(parameter_storage.Data());
-		bytes[offset] ^= 1u;
+		auto*          words = static_cast<uint32_t*>(parameter_storage.Data());
+		const uint32_t saved = words[4];
+		words[4]             = grain;
 		*memory_size_storage.Data() = UINT64_MAX;
 		*context_storage.Data()     = INT32_MAX;
-		EXPECT_EQ(AudioOut2::AudioOut2ContextQueryMemory(bytes, memory_size_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
+		EXPECT_EQ(AudioOut2::AudioOut2ContextQueryMemory(words, memory_size_storage.Data()), Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 		EXPECT_EQ(*memory_size_storage.Data(), UINT64_MAX);
-		EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(bytes, workspace.Data(), 0x10000, context_storage.Data()),
+		EXPECT_EQ(AudioOut2::AudioOut2ContextCreate(words, workspace.Data(), 0x10000, context_storage.Data()),
 		          Kyty::Libs::LibKernel::KERNEL_ERROR_EINVAL);
 		EXPECT_EQ(*context_storage.Data(), INT32_MAX);
-		bytes[offset] ^= 1u;
+		words[4] = saved;
 	}
+}
+
+TEST(EmulatorAudio, AudioOut2ContextLifecycleAcceptsADeeperQueueProfile)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	GuestReadableBlock   parameter_storage(0x40);
+	GuestValue<uint64_t> memory_size_storage;
+	GuestValue<int32_t>  context_storage;
+	ASSERT_TRUE(parameter_storage.IsValid());
+	ASSERT_TRUE(memory_size_storage.IsValid());
+	ASSERT_TRUE(context_storage.IsValid());
+	// The leading fields are captured from a guest: 16 ports, 128 object ports, a queue depth of 4 and a 512-frame grain.
+	// The reserved tail is nonzero because titles leave it uninitialized after ResetParam.
+	const uint64_t observed_configuration[8] = {0x0000008000000010ull, 0x0000000400000000ull, 0x0000000100000200ull, 0xa5a5a5a5a5a5a5a5ull};
+	std::memcpy(parameter_storage.Data(), observed_configuration, sizeof(observed_configuration));
+	ASSERT_EQ(AudioOut2::AudioOut2ContextQueryMemory(parameter_storage.Data(), memory_size_storage.Data()), 0);
+	GuestReadableBlock workspace(*memory_size_storage.Data());
+	ASSERT_TRUE(workspace.IsValid());
+	ASSERT_EQ(
+	    AudioOut2::AudioOut2ContextCreate(parameter_storage.Data(), workspace.Data(), *memory_size_storage.Data(), context_storage.Data()),
+	    0);
+	EXPECT_GT(*context_storage.Data(), 0);
+	EXPECT_EQ(AudioOut2::AudioOut2ContextDestroy(*context_storage.Data()), 0);
 }
 
 TEST(EmulatorAudio, AudioOut2SecondCapturedProfileReadsAComplete512FrameGrain)
