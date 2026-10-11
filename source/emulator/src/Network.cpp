@@ -3911,6 +3911,8 @@ int KYTY_SYSV_ABI NetCtlGetInfo(int code, NetCtlInfo* info)
 	uint64_t   output_size = 0;
 	switch (code)
 	{
+		// DEVICE: the wired device (0).
+		case 1: output.device = 0; output_size = sizeof(output.device); break;
 		case 2:
 			memset(output.ether_addr.data, 0, sizeof(output.ether_addr.data));
 			output_size = sizeof(output.ether_addr);
