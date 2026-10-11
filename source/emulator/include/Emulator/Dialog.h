@@ -75,8 +75,8 @@ struct ImeDialogResult
 };
 static_assert(sizeof(ImeDialogResult) == 0x10);
 
-// The emulator has no on-screen keyboard: an opened dialog is confirmed at once
-// with the text the title placed in its buffer, as a user accepting the default.
+// The emulator has no on-screen keyboard: an opened dialog runs while the host
+// keyboard edits the text the title placed in its buffer, and Enter confirms it.
 int KYTY_SYSV_ABI ImeDialogInit(const ImeDialogParam* param, const void* extended);
 int KYTY_SYSV_ABI ImeDialogGetStatus();
 int KYTY_SYSV_ABI ImeDialogGetResult(ImeDialogResult* result);

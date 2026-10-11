@@ -15,6 +15,7 @@
 #include "Emulator/Config.h"
 #include "Emulator/Ports/AudioPausePort.h"
 #include "Emulator/Ports/ControllerInputPort.h"
+#include "Emulator/Ports/KeyboardTextPort.h"
 #include "Emulator/Graphics/DebugOverlay.h"
 #include "Emulator/Graphics/DebugStats.h"
 #include "Emulator/Graphics/GraphicContext.h"
@@ -791,6 +792,46 @@ static void ApplyKeyboardLeftStickControllerAxes(const ::Kyty::Emulator::Host::K
 	::Kyty::Emulator::Ports::ControllerInputPort::Axis(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, ::Kyty::Emulator::Ports::Axis::LeftY, update.axes.y);
 }
 
+// Text entry (F2, and always while a guest IME dialog runs): keys reach only the
+// guest IME, so letters bound to pad buttons or to the stick type instead of pressing them.
+static std::atomic<bool> g_keyboard_text_entry {false};
+
+static void ReleaseKeyboardPad()
+{
+	ApplyKeyboardLeftStickControllerAxes(::Kyty::Emulator::Host::ResetKeyboardLeftStick(g_keyboard_left_stick));
+	for (const uint32_t button:
+	     {::Kyty::Emulator::Ports::PAD_BUTTON_CROSS, ::Kyty::Emulator::Ports::PAD_BUTTON_CIRCLE, ::Kyty::Emulator::Ports::PAD_BUTTON_SQUARE,
+	      ::Kyty::Emulator::Ports::PAD_BUTTON_TRIANGLE, ::Kyty::Emulator::Ports::PAD_BUTTON_UP, ::Kyty::Emulator::Ports::PAD_BUTTON_DOWN,
+	      ::Kyty::Emulator::Ports::PAD_BUTTON_LEFT, ::Kyty::Emulator::Ports::PAD_BUTTON_RIGHT, ::Kyty::Emulator::Ports::PAD_BUTTON_L1,
+	      ::Kyty::Emulator::Ports::PAD_BUTTON_R1, ::Kyty::Emulator::Ports::PAD_BUTTON_OPTIONS})
+	{
+		::Kyty::Emulator::Ports::ControllerInputPort::Button(::Kyty::Emulator::Ports::CONTROLLER_KEYBOARD_ID, button, false);
+	}
+}
+
+static void SetKeyboardTextEntry(bool on)
+{
+	g_keyboard_text_entry.store(on);
+	// Keys held across the switch would otherwise stay pressed on the virtual pad.
+	ReleaseKeyboardPad();
+	KYTY_LOG_INFO("Keyboard text entry %s (F2 toggles)%s\n", on ? "on" : "off",
+	              on && !::Kyty::Emulator::Ports::KeyboardTextPort::GuestOpen() ? ": the title has no keyboard open" : "");
+}
+
+static void ForwardKeyboardText(const EventKeyboard& key)
+{
+	::Kyty::Emulator::Ports::KeyboardTextKey text {};
+	text.usage = ::Kyty::Emulator::Host::HostInput::KeyboardHidUsage(key.scan_code);
+	if (text.usage == 0)
+	{
+		return;
+	}
+	text.down      = key.down;
+	text.repeat    = key.repeat;
+	text.character = key.down ? ::Kyty::Emulator::Host::HostInput::KeyboardTextCharacter(key.key_code, key.mod) : 0;
+	(void)::Kyty::Emulator::Ports::KeyboardTextPort::Push(text);
+}
+
 void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 {
 	if (NativeCaptureEnvEnabled("KYTY_INPUT_LOG") && key != nullptr && (key->down || key->up))
@@ -825,6 +866,31 @@ void game_event_keyboard(GameApi* game, const EventKeyboard* key)
 		case HostWindowCommand::TogglePause: SetPause(game, !game->m_game_is_paused); break;
 		case HostWindowCommand::ToggleFullscreen: ToggleHostFullscreen(); break;
 		case HostWindowCommand::None: break;
+	}
+
+	if (::Kyty::Emulator::Host::HostInput::IsTextEntryToggleKey(key->key_code))
+	{
+		if (key->down && !key->repeat)
+		{
+			SetKeyboardTextEntry(!g_keyboard_text_entry.load());
+		}
+		return;
+	}
+	const bool text_entry = g_keyboard_text_entry.load() || ::Kyty::Emulator::Ports::KeyboardTextPort::DialogOpen();
+	static bool s_text_entry = false;
+	if (text_entry != s_text_entry)
+	{
+		// Keys held across the switch would otherwise stay pressed on the virtual pad.
+		s_text_entry = text_entry;
+		ReleaseKeyboardPad();
+	}
+	if (text_entry)
+	{
+		if ((key->down || key->up) && !suppress_guest_enter)
+		{
+			ForwardKeyboardText(*key);
+		}
+		return;
 	}
 
 	// Virtual pad (id 0): keyboard maps to DualShock buttons so splash/menus are skippable
@@ -3255,7 +3321,19 @@ void WindowUpdateTitle()
 	}
 	s_last_title_time = t;
 
-	auto fps = String::FromPrintf("%s%s%s%s%s%s[%s] [%s], frame: %d, fps: %f", (has_title ? title : ""), (has_title ? ", " : ""),
+	// No system keyboard is drawn, so the title shows what the user types into a guest IME dialog.
+	String text_entry;
+	if (::Kyty::Emulator::Ports::KeyboardTextPort::DialogOpen())
+	{
+		const std::u16string typed = ::Kyty::Emulator::Ports::KeyboardTextPort::DialogText();
+		text_entry                 = typed.c_str();
+		text_entry                 = "[type, Enter confirms: " + text_entry + "_] ";
+	} else if (g_keyboard_text_entry.load())
+	{
+		text_entry = "[text entry] ";
+	}
+	auto fps = String::FromPrintf("%s%s%s%s%s%s%s[%s] [%s], frame: %d, fps: %f", text_entry.C_Str(),
+	                              (has_title ? title : ""), (has_title ? ", " : ""),
 	                              (has_title_id ? title_id : ""), (has_title_id ? ", " : ""), (has_app_ver ? app_ver : ""),
 	                              (has_app_ver ? ", " : ""), g_window_ctx->device_name, g_window_ctx->processor_name, frame_num, fps_now);
 
