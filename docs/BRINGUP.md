@@ -9,6 +9,34 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## AJM batch input budget (2026-10-11)
+
+- After the resample-marker fix, the beat 'em up's strict combat run ended
+  at 307-329 s with "batch exceeds the host write-range capacity".
+- An opt-in capture showed what happened before the failure:
+  - The first refused batch held 36 jobs, 8 of them ATRAC9 decodes of short
+    effects (1,792 input bytes, 12,288 output bytes, stereo), so 65-77
+    superframes of 128 bytes each.
+  - The host refused any batch start that decoded more than 64 ATRAC9
+    superframes in total, returning `AJM_ERROR_OUT_OF_RESOURCES`.
+  - The guest kept appending to the same batch and retried. The start
+    failed 75 times, the batch grew to 872 jobs, and it then crossed the
+    write-range capacity.
+- The 64-superframe count had no guest evidence behind it. The direct
+  decode preflight now bounds the ATRAC9 input admitted by one batch start
+  by the same 1 MiB input bound as the largest single direct job.
+- Test: one start of 72 one-superframe decodes is admitted, and each result
+  reports its superframe consumed.
+- Result: the next strict run reached the 320 s bound with no AJM refusal
+  and no error. Combat windows perf-7..9 ran at 11.8, 10.2 and 9.2 fps,
+  which is neutral.
+- Open defect: when `AjmBatchStart` fails, the jobs of that batch stay
+  queued under its address (`source/emulator/src/AudioAjm.cpp`, batch jobs
+  are erased only on a successful start). A guest that appends to the same
+  batch after a refusal therefore accumulates jobs until a capacity check
+  fails. Direction: capture the guest's retry contract and decide whether a
+  refused start must consume or keep its jobs.
+
 ## AJM combined resample markers (2026-10-11)
 
 - The beat 'em up's strict combat run ended at `SetResampleParametersEx`.

@@ -68,7 +68,9 @@ constexpr size_t   AJM_MAX_COMPLETED_BATCHES            = 256u;
 constexpr size_t AJM_MAX_LIVE_DECODERS             = 64u;
 constexpr size_t AJM_MAX_DIRECT_JOB_INPUT_SIZE     = 1024u * 1024u;
 constexpr size_t AJM_MAX_DIRECT_BUFFER_DESCRIPTORS = 16u;
-constexpr size_t AJM_MAX_DIRECT_SUPERFRAMES        = 64u;
+// ATRAC9 input one batch start decodes. Guests batch many short effects at once, so the bound is the input of the
+// largest single job rather than a superframe count.
+constexpr size_t AJM_MAX_DIRECT_BATCH_INPUT_SIZE   = AJM_MAX_DIRECT_JOB_INPUT_SIZE;
 constexpr size_t AJM_MAX_OPUS_PACKETS              = 64u;
 // The guest sizes its batch storage itself, so a batch is bounded only by the guest ranges one host transaction publishes:
 // the batch error and identifier plus each job's result and outputs.
@@ -2406,7 +2408,7 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 	resample_states.reserve(queued_batch == nullptr ? 0u : queued_batch->jobs.size());
 	size_t active_decoder_count = g_ajm_live_decoder_count;
 	size_t staged_decoder_count = 0;
-	size_t superframes_admitted = 0;
+	size_t atrac9_input_admitted = 0;
 
 	if (queued_batch != nullptr)
 	{
@@ -2630,12 +2632,11 @@ int KYTY_SYSV_ABI AjmBatchStart(uint32_t context, void* batch, int priority, Ajm
 						lock.unlock();
 						RejectMalformedAjmData("ATRAC9 job extent is not a whole number of samples or superframes");
 					}
-					const size_t job_superframes = static_cast<size_t>(job.input_size / format.block_align);
-					if (job_superframes > AJM_MAX_DIRECT_SUPERFRAMES - superframes_admitted)
+					if (job.input_size > AJM_MAX_DIRECT_BATCH_INPUT_SIZE - atrac9_input_admitted)
 					{
 						return AJM_ERROR_OUT_OF_RESOURCES;
 					}
-					superframes_admitted += job_superframes;
+					atrac9_input_admitted += static_cast<size_t>(job.input_size);
 					// A split job is the same decode with its input gathered and its PCM scattered.
 					const bool staged = job.operation == AjmDataOperation::Decode
 					                        ? PrepareAjmContiguousDecode(job, &write_plans, &prepared)
