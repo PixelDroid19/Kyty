@@ -5778,3 +5778,25 @@ sole guest was explicitly stopped. There is no matched-scene visual A/B or
 sustained gameplay/performance acceptance for this change. Resolve the
 source-EXEC/FI concern and validate the actual scene before publishing a
 complete DPP or visual-correctness claim.
+
+## Open defect: intermittent image-layout tracker fatal
+
+`set_image_layout` in `source/emulator/src/Graphics/Utils.cpp` (the `EXIT_IF`
+on `dst_image->layout != old_image_layout`) stopped two strict runs of the
+2D pixel-art exploration title during gameplay, about 42 s and 75 s after boot,
+on an Intel Arc A770 with a bounded scripted route. Several later runs of the
+same route and binary family passed 90-120 s without it, so the trigger is
+nondeterministic. The fatal block carries an empty stack trace, so the caller,
+the image and both layouts are not known.
+
+The check means a caller expected a tracked layout the image no longer had:
+either another recording path changed the single per-allocation tracker in
+between, or a caller derived its expected layout from stale state. It is
+independent of the audio changes made alongside it (it was seen before the NGS2
+reverb existed).
+
+Suggested direction: in a repeat run, gate a capped stderr record of the caller,
+image (format, extent, usage, array layers) and both layouts just before the
+check, then compare a failing run with a passing one; check whether two command
+buffers recorded against the same image disagree about the order in which the
+tracker was updated.

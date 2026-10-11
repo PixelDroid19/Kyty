@@ -57,8 +57,8 @@ stereo at 44.1 kHz:
 - data control `0x40010001` validates pointer, bytes, frames and
   `bytes = frames * channels * 2`;
 - play/stop update per-voice state;
-- render applies voice gain, linearly resamples to 48 kHz and clips to float
-  stereo.
+- render linearly resamples to the system rate; the result reaches an output
+  only through the voice graph below.
 
 Unrecognized module controls remain opaque. Kyty does not synthesize audible
 behavior for them.
@@ -98,9 +98,9 @@ captured streaming title; sizes are the values the guest writes:
   is the loop start when the block repeats, else the next block's first frame.
 - Pitch is limited to 16 (a host limit, logged when exceeded), so a voice moves at
   most 64 source frames per output frame. Every voice (sampler and custom PCM)
-  is interpolated and gained in double precision and summed into one double
-  accumulator for the whole system, with no per-voice clip; the sum is clamped
-  once to +-1 when the float output is written. Finite sources and gains stay
+  is interpolated in double precision into its own bus and summed down the voice
+  graph in double, with no per-voice clip; each render buffer is clamped once to
+  +-1 when it is written. Finite sources and gains stay
   finite in double, and opposite-sign voices are combined before the clamp.
   Floating-point summation can still round according to voice order.
 - Callbacks: only block end (flag 1) is confirmed on a guest. Registration with
@@ -123,11 +123,89 @@ captured streaming title; sizes are the values the guest writes:
   host qualification: a locked destroy is not supported here, and no separate
   native error value is assumed.
 - The voice state reports `num_decoded_samples` at +0x10 of the 48-byte state.
-- Stop-immediate clears the queue. Setup resets the voice to Empty.
+- Stop-immediate and kill clear the queue. Setup resets the voice to Empty with
+  a unit port volume.
 
 Unresolved: the continue flag and any non-reset add, the meaning of the setup
-word at +0x20, the block repeat callback, and stop, pause and resume event values
-beyond play, stop-immediate and gain.
+word at +0x20, and the block repeat callback.
+
+## NGS2 voice commands and port state
+
+`Ngs2VoiceRunCommands` takes 16-byte records `{u32 id, u8 flags, u8 type,
+u16 count, 8-byte value}`; Kyty reads the first 12 bytes, the last word is
+padding the guest leaves uninitialized. Two independent references agree on:
+
+| Command | Type | Value |
+| --- | --- | --- |
+| Event `2` | `0x400` (unsigned) | one bit: play 0x1, stop 0x2, stop-immediate 0x4, kill 0x8, pause 0x10, resume 0x20 |
+| Port volume `6` | `0x100` (float) | linear gain of port 0 |
+| Port matrix `7` | `0x300` (integer) | refused: no matrix is implemented |
+
+Play on a sampler needs queued blocks; a pause keeps the cursor and a resume
+continues from it. A source voice and a submixer take the port volume.
+
+`Ngs2VoiceGetPortInfo(voice, 0, info, 24)` writes `{i32 matrix_id, f32 volume,
+u32 num_delay_samples, u32 destination_input, uintptr destination}`: matrix -1,
+the port volume, no delay, input 0 and the patch destination as the guest named
+it (0 once the destination is gone). Another port or size is refused without a
+write. A title ramps fades by reading the volume back.
+
+## NGS2 voice graph
+
+Patch (`0x5`, 24 bytes, destination at +16) connects port 0 of a source,
+submixer or reverb voice to input 0 of a submixer, reverb or mastering voice of
+the same system; the destination is a voice handle or the handle of a one-voice
+rack. Cycles, mastering sources and source-voice destinations are refused. Each
+grain, every source voice renders into its own stereo bus, then the routing
+voices run in decreasing distance from the end of their route:
+
+- a playing submixer (setup `0x20000000` with 2 channels) passes its input on at
+  its port volume;
+- a playing reverb voice passes it on through its reverb, every grain, with a
+  silent input when nothing feeds it;
+- a playing mastering voice (setup `0x30000000`: 1, 2 or 8 channels; output
+  `0x30000005`: render buffer index) adds it to its render buffer: stereo as is,
+  mono as the mean, eight channels on the front pair. A buffer whose channel
+  count differs from the setup refuses the render.
+
+Every render buffer is cleared, and a buffer shorter than one grain is refused
+before anything is written. A voice that is not patched reaches no output.
+
+## NGS2 reverb
+
+Rack `0x2001`. Setup `0x20010000` (24 bytes: input and output channels, flags,
+reserved) admits only `{2, 2, 0, 0}`, as the bus is stereo; a setup clears the
+tail and loads the block the guest library fills by default (wet 1, dry 0, room,
+reflections and reverb at -10000 mB), so a voice that was only set up is silent.
+The I3DL2 block `0x20010001` (96 bytes) holds wet and dry gains, then room,
+room_hf, reflection_pattern, decay_time, decay_hf_ratio, reflections,
+reflections_delay, reverb, reverb_delay, diffusion, density and hf_reference,
+then eight reserved words that are not checked (the guest library writes 8 to
+the first). Two references agree on this layout; the values one title sends
+match the published I3DL2 cave preset.
+
+Non-finite fields are refused and the rest are clamped to the I3DL2 ranges. The
+host rendition (`AudioNgs2Reverb`) is derived from the published I3DL2
+definitions, not from native output:
+
+- -10000 mB is silence; other levels are `10^(mB/2000)`;
+- early reflections are four taps spread over reverb_delay after
+  reflections_delay, at room * reflections;
+- the late reverb is a four-line feedback delay network fed
+  reflections_delay + reverb_delay after the input, at room * reverb; each line
+  decays by 60 dB in decay_time, tending to decay_time * decay_hf_ratio above
+  hf_reference, and density scales the line lengths;
+- room_hf attenuates the wet path above hf_reference;
+- the output is `dry * input + wet * reverb`. The wet/dry reading rests on the
+  field names and one implementation: an assumption, not a measured contract.
+
+An identical block re-sent every update changes nothing; an immediate stop or
+kill clears the tail. Buffers are sized at setup for the I3DL2 maxima, and a
+render does not allocate.
+
+Unresolved: the reflection patterns (one generic pattern is rendered for every
+value), the absolute levels against native output, and setups other than
+stereo. A title that sets up an eight-channel reverb stays refused.
 
 ## NGS2 ATRAC9 path
 

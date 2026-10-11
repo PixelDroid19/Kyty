@@ -66,6 +66,16 @@ array (often **0** voices). Subsequent `Ngs2RackGetVoiceHandle` calls with
 `Ngs2RackCreate` stores the resolved count in `rack->option.common.max_voices`
 and initializes that many voice slots.
 
+## Default and expanded routing options
+
+A rack created with a null option takes its default voice count: 256 for the
+standard sampler (0x1000), one voice for submixer (0x2000), reverb (0x2001) and
+mastering (0x3000) racks. Custom racks have no default option and refuse a null
+one. Submixer, reverb and mastering options are accepted at their classic size
+or at the classic size plus the 0x30-byte common expansion; the expanded blocks
+a title passes (0xc8 submixer, 0xb8 mastering) repeat the default fields and set
+only the voice count at +0x50.
+
 ## GetVoiceHandle errors
 
 | Condition | Result |
@@ -83,6 +93,8 @@ Focused coverage lives in `UnitTestEmulatorAudio.cpp`:
 - Custom rack 0x518: buffer size scales with the +0x50 voice count.
 - Reverb-style 0xb8 option: create with 16 voices at +0x50; handles for ids
   0 and 15 succeed; id 16 returns `0x804a0300`.
+- Null options for the sampler, reverb and routing racks, and expanded
+  submixer and mastering options, create the evidenced voice counts.
 
 ## Standard sampler rack (0x1000)
 
