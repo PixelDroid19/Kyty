@@ -9,6 +9,44 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Range-filtered label fence snapshots (2026-10-11)
+
+- A sampler that records the user stack showed where the mutex samples on
+  the command-processor thread of the Unity fishing title came from. About
+  13% of that thread was `LabelFenceRegistry::Snapshot`, called by every
+  label-aware upload. Each call copied the whole registry, where entries
+  stay until unmap, into `Vector`s whose `Add` takes a lock per element.
+- `Upload` and `Copy` use only destinations that overlap the object, and
+  `MemcpySkipAbsoluteRanges` already drops holes outside the copied range.
+  `Snapshot` and `SnapshotExcluded` now take that range and return only
+  the overlapping entries, so the result does not change.
+- Same route, gameplay windows 5-7, with the shader memo in place and the
+  lap timers compiled in: 6.1-6.2 to 7.3-7.6 fps.
+- Clean build with both changes, against the materialization-span run:
+  - The Unity fishing title went from 5.5-5.8 to 6.6-7.2 fps, and p50 frame
+    time from 169 to 131 ms. The capture shows the same scene.
+  - The racing title's race window went from 69.8 to 79.6 fps, with p95
+    falling from 58 to 44 ms.
+  - The beat 'em up's late window went from 11.3 to 11.6 fps.
+  - The command-processor thread is still the limit, at about 81% CPU while
+    the render engine is about 30% busy.
+- Open items:
+  - The registry size was not measured.
+  - `Register`, `Complete` and `NeedsUpload` remain linear scans.
+- Next costs on the same thread, ranked:
+  - `memcpy` in `GpuMemory::CaptureSnapshotReadOnlyBuffer`, from the
+    display and depth-only resolution cohorts, plus `memset` in
+    `CommandBuffer::CaptureTransientSnapshotBuffer`, from
+    `BindVertexBuffers` and `MaterializeRenderColorInfo`: about 18%
+    together. The stripped libc reports these routines under the wrong
+    symbol.
+  - `DescriptorCache::FreeDescriptor`: 5.8%.
+  - Indexed vertex-record scans: 5.7%.
+  - Dirty-tracker rearm: 4.9%.
+  - `ShaderInstructionTypeStartsWith`, a name-string compare from the
+    assembled buffer-descriptor scan: 4.8%.
+  - `GpuMemory::ResetHash`: 4.2%.
+
 ## Per-program shader resource analyses (2026-10-11)
 
 - Lap timers in `ShaderParseUsage2` on the Unity fishing title (gameplay,

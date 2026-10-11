@@ -6831,7 +6831,7 @@ TEST(EmulatorGraphicsState, LabelFenceRegistryPreservesUniqueHolesAfterTransient
 
 	Vector<uint64_t> hole_begin;
 	Vector<uint64_t> hole_end;
-	registry.Snapshot(&hole_begin, &hole_end);
+	registry.Snapshot(reinterpret_cast<uint64_t>(dst), sizeof(dst), &hole_begin, &hole_end);
 	ASSERT_EQ(hole_begin.Size(), 1u);
 	ASSERT_EQ(hole_end.Size(), 1u);
 
@@ -6862,7 +6862,7 @@ TEST(EmulatorGraphicsState, LabelFenceRegistryUnmapRemovesHolesBeforeAddressReus
 
 	Vector<uint64_t> begin;
 	Vector<uint64_t> end;
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(allocation, sizeof(storage), &begin, &end);
 	MemcpySkipAbsoluteRanges(storage, source, sizeof(storage), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
 	for (int i = 0; i < 64; i++)
 	{
@@ -6876,7 +6876,7 @@ TEST(EmulatorGraphicsState, LabelFenceRegistryUnmapRemovesHolesBeforeAddressReus
 	EXPECT_EQ(registry.Size(), 0u);
 
 	std::memset(storage, 0xa5, sizeof(storage));
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(allocation, sizeof(storage), &begin, &end);
 	MemcpySkipAbsoluteRanges(storage, source, sizeof(storage), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
 	EXPECT_EQ(std::memcmp(storage, source, sizeof(storage)), 0);
 
@@ -6886,11 +6886,13 @@ TEST(EmulatorGraphicsState, LabelFenceRegistryUnmapRemovesHolesBeforeAddressReus
 	EXPECT_EQ(registry.ReleaseAllocation(allocation, 0u), LabelFenceReleaseStatus::InvalidArgument);
 	EXPECT_EQ(registry.ReleaseAllocation(UINT64_MAX - 3u, 8u), LabelFenceReleaseStatus::InvalidArgument);
 
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(allocation, sizeof(storage), &begin, &end);
 	ASSERT_EQ(begin.Size(), 1u);
 	ASSERT_EQ(end.Size(), 1u);
 	EXPECT_EQ(begin.At(0), allocation + 8u);
 	EXPECT_EQ(end.At(0), allocation + 12u);
+	registry.Snapshot(allocation + 12u, sizeof(storage) - 12u, &begin, &end);
+	EXPECT_EQ(begin.Size(), 0u);
 }
 
 TEST(EmulatorGraphicsState, LabelFenceGdsStoreProtectsEveryWrittenDword)
@@ -6913,7 +6915,7 @@ TEST(EmulatorGraphicsState, LabelFenceGdsStoreProtectsEveryWrittenDword)
 
 	Vector<uint64_t> begin;
 	Vector<uint64_t> end;
-	registry.Snapshot(&begin, &end);
+	registry.Snapshot(base, sizeof(dst), &begin, &end);
 	MemcpySkipAbsoluteRanges(dst, src, sizeof(dst), begin.GetData(), end.GetData(), static_cast<int>(begin.Size()));
 
 	for (int i = 0; i < 32; i++)

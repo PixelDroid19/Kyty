@@ -47,11 +47,14 @@ class LabelFenceRegistry
 public:
 	[[nodiscard]] LabelFenceRegistrationStatus Register(uint64_t addr, uint64_t bytes);
 	[[nodiscard]] LabelFenceReleaseStatus      ReleaseAllocation(uint64_t addr, uint64_t bytes);
-	void Snapshot(Vector<uint64_t>* begin, Vector<uint64_t>* end) const;
+	// Registered destinations that overlap [addr, addr + bytes).
+	void Snapshot(uint64_t addr, uint64_t bytes, Vector<uint64_t>* begin, Vector<uint64_t>* end) const;
 	// Called after the real completion callback/store, never at event creation
 	// or deletion. A completed version can be acquired by a subsequent upload.
 	void Complete(uint64_t addr, uint64_t bytes);
-	void SnapshotExcluded(uint64_t acquired_version, Vector<uint64_t>* begin, Vector<uint64_t>* end) const;
+	// Destinations overlapping [addr, addr + bytes) still pending or completed after acquired_version.
+	void SnapshotExcluded(uint64_t addr, uint64_t bytes, uint64_t acquired_version, Vector<uint64_t>* begin,
+	                      Vector<uint64_t>* end) const;
 	[[nodiscard]] bool NeedsUpload(uint64_t addr, uint64_t bytes, uint64_t acquired_version) const;
 	[[nodiscard]] uint64_t Version() const { return m_version; }
 
