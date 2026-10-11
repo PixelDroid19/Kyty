@@ -9,6 +9,55 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Vertex buffer objects without a staging fence (2026-10-11)
+
+- Beat 'em up combat baseline (Intel A770, 260 s route, windows perf-7..9):
+  8.0, 7.4 and 6.6 fps, p50 122-142 ms, 257-350 draws and 262-343 submits
+  per frame. Fence waits took 10.6 s of a 26 s window.
+- A fence-wait backtrace counter attributed 71% of all waits to
+  `UtilCopyBuffer` inside the vertex buffer object's update.
+  - Every create or update allocated a staging buffer, then submitted a
+    one-shot utility-queue copy and waited for its fence.
+  - It ran on two paths: from `BindVertexBuffers` when the title binds
+    vertex data that a compute dispatch wrote as a storage buffer, and from
+    the storage write-back at end-of-pipe, which refreshes the linked vertex
+    objects.
+- Excluded on the same route:
+  - `WAIT_REG_MEM` totalled 30 ms per window; its waits take the
+    consolidated barrier path.
+  - The guest device-address storage write-back fired 24 times in a full run.
+  - The guest device-address snapshot-reader wait fired three times.
+- Vertex buffer objects now use the transient snapshots' host-visible,
+  coherent memory, and update writes guest bytes through the mapping.
+  - Coherent host writes are visible to every later submission, which is
+    the ordering the waited copy provided.
+  - In-flight readers were unsynchronized before as well.
+  - On the A770 both kinds resolve to the same system-memory type.
+- Measured on the same routes:
+
+  | Title | Windows | Before (fps) | After (fps) | Notes |
+  | --- | --- | --- | --- | --- |
+  | Beat 'em up combat | perf-7 | 8.0 | 12.0 | Submits fell from 262 to 5 per frame; upload time from 7.8 s to 0.08 s per window |
+  | Unity fishing title | perf-5..7 | 10.7, 9.6, 10.1 | 10.7, 10.3, 10.6 | |
+  | Racing title | perf-5/6 | 43.0, 42.6 | 36.5, 36.5 | See below |
+
+  - The racing title's windows did not land on the same scene (381-413 versus
+    468-479 draws per frame). Its draw-processor cost per draw fell from
+    47.2 to 45.9 µs, and it keeps only 4 to 5 vertex buffer objects alive.
+- Remaining waits in beat 'em up combat:
+  - About 1,500 fence waits per window still take 6.8 s.
+  - The next site is the full quiesce on guest direct-memory release:
+    `release_direct_memory` → `GraphicsInvalidateGpuMappingRanges` →
+    `RunQuiesced`.
+- The index buffer object keeps the same staging copy and fence. The Unity
+  fishing title creates about 1,600 index buffer objects per window.
+- Open defects:
+  - `AudioAjm.cpp:271` rejects `SetResampleParametersEx` and ends the beat
+    'em up's strict run in combat (2 of 4 runs, at 248 and 269 s). The faster
+    combat makes it more likely to reach that point.
+  - Beat 'em up combat shows a flat lilac parallelogram above the companion,
+    probably a bubble or prompt drawn without its content.
+
 ## Racing title race-window correction (2026-10-11)
 
 - The racing title's "race window" figures above (70 to 88 fps) were
