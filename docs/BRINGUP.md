@@ -9,6 +9,28 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Materialization range invalidation (2026-10-11)
+
+- A user-space IP sampler on the command-processor thread of the Unity
+  fishing title (gameplay, 15 s) put 8.6% of its samples in
+  `GpuMemory::ResetHash`. Each draw resets the hash of its attachments, and
+  every reset walked all 2,048 materialization cache entries, about 450 KB
+  of full keys, to drop the overlapping ones (about 7 us per call).
+- The cache now keeps one compact `[begin, end)` span per slot that covers
+  all of the key's ranges. Invalidation scans those 32 KB and checks the full
+  key only where a span overlaps, so the result is the same exact per-range
+  check. The existing cache tests cover disjoint, multi-range and adjacent
+  keys.
+- Measured on the same route, gameplay windows 5-7: p50 frame time 185-187 ms
+  to 169 ms, 5.0-5.3 to 5.5-5.8 fps. The gameplay capture is unchanged. The
+  racing title (69.8 fps race window) and the beat 'em up (11.3 fps late
+  window) show no regression.
+- The same profile ranks the next costs: per-draw shader resource analysis
+  in `ShaderParseUsage2` (about 21% in storage-use, SGPR-liveness and
+  dynamic scalar-load scans that depend only on program code), mutexes
+  (about 12%), dirty-tracker rearm (3.3%), indexed vertex-record scans
+  (3.2%) and label fence snapshots (3.1%).
+
 ## Dirty-tracker identities revoked by unmap (2026-10-11)
 
 - In gameplay on the Unity fishing title (held-cross route), every

@@ -1,11 +1,13 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GPUMEMORYMATERIALIZATIONCACHE_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_GPUMEMORYMATERIALIZATIONCACHE_H_
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <utility>
 
 namespace Kyty::Libs::Graphics {
 
@@ -72,6 +74,22 @@ public:
 		return false;
 	}
 
+	// Smallest [begin, end) covering every range; empty for an invalid key.
+	[[nodiscard]] std::pair<uint64_t, uint64_t> Span() const
+	{
+		if (!m_valid)
+		{
+			return {0u, 0u};
+		}
+		uint64_t begin = std::numeric_limits<uint64_t>::max();
+		uint64_t end   = 0u;
+		for (uint8_t i = 0; i < m_range_count; ++i)
+		{
+			begin = std::min(begin, m_address[i]);
+			end   = std::max(end, m_address[i] + m_size[i]);
+		}
+		return {begin, end};
+	}
 	[[nodiscard]] uint64_t Hash() const
 	{
 		uint64_t hash = 0x510e527fade682d1ull;
@@ -177,11 +195,14 @@ public:
 		{
 			return;
 		}
-		m_entries[static_cast<size_t>(key.Hash()) & (Capacity - 1u)] = Entry {m_epoch, key, value};
+		const size_t slot = static_cast<size_t>(key.Hash()) & (Capacity - 1u);
+		m_entries[slot]   = Entry {m_epoch, key, value};
+		m_spans[slot]     = key.Span();
 	}
 
 	void Invalidate()
 	{
+		m_spans.fill({0u, 0u});
 		++m_epoch;
 		if (m_epoch == 0u)
 		{
@@ -199,17 +220,27 @@ public:
 		{
 			return;
 		}
-		for (auto& entry: m_entries)
+		// Recording invalidates attachments every draw; scan the compact spans
+		// and read a full entry only where its span overlaps.
+		const uint64_t end = size > std::numeric_limits<uint64_t>::max() - address ? std::numeric_limits<uint64_t>::max() : address + size;
+		for (size_t slot = 0; slot < Capacity; ++slot)
 		{
+			if (m_spans[slot].second <= address || m_spans[slot].first >= end)
+			{
+				continue;
+			}
+			auto& entry = m_entries[slot];
 			if (entry.has_value() && entry->epoch == m_epoch && entry->key.Overlaps(address, size))
 			{
 				entry.reset();
+				m_spans[slot] = {0u, 0u};
 			}
 		}
 	}
 
 private:
 	std::array<std::optional<Entry>, Capacity> m_entries {};
+	std::array<std::pair<uint64_t, uint64_t>, Capacity> m_spans {};
 	uint64_t                                   m_epoch = 1u;
 };
 
