@@ -670,6 +670,8 @@ public:
 		draw->host_submission_sequence = m_has_submission ? m_submission.sequence : 0u;
 	}
 	VulkanBuffer* UploadTransientBuffer(const void* data, uint64_t size, uint32_t usage);
+	// One zero dword shared by every empty descriptor of this recording.
+	VulkanBuffer* UploadTransientZeroCarrier(uint32_t usage);
 	VulkanBuffer* CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
 	                                             uint64_t* upload_ns, uint64_t* compare_ns, bool* reused);
 	// Reusable scratch for commands recorded in this buffer. Callers must order

@@ -2861,15 +2861,14 @@ static void PrepareStorageBuffers(uint64_t submit_id, CommandBuffer* buffer, VkS
 		                           (!storage_buffers.raw_smem_use[i] || raw_smem_empty_oob);
 
 		VulkanBuffer* buf = nullptr;
-		if (raw_empty_oob)
+		if (raw_empty_oob || storage_buffers.unread_stream[i])
 		{
 			// Every known raw consumer is proven out of range: MUBUF is guarded in
-			// SPIR-V and S_BUFFER_LOAD is lowered to zero. Vulkan still requires a
-			// valid SSBO array element, so bind a minimal carrier with no guest-memory
-			// ownership or observable data path.
-			static constexpr uint32_t kEmptyRawStorageDescriptorCarrier = 0;
-			buf = buffer->UploadTransientBuffer(&kEmptyRawStorageDescriptorCarrier, sizeof(kEmptyRawStorageDescriptorCarrier),
-			                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+			// SPIR-V and S_BUFFER_LOAD is lowered to zero. An unread vertex stream has
+			// no consumer at all: each of its fetches became a vertex attribute.
+			// Vulkan still requires a valid SSBO array element, so bind a minimal
+			// carrier with no guest-memory ownership or observable data path.
+			buf = buffer->UploadTransientZeroCarrier(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 		} else
 		{
 			const uint64_t declared_size = ShaderBufferByteSize(stride, num_records);

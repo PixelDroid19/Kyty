@@ -1725,6 +1725,9 @@ struct ShaderStorageResources
 	// True only when this physical binding exists solely for a dynamic S_LOAD
 	// result and must therefore not be initialized at shader entry.
 	bool                       dynamic_sload[BUFFERS_MAX]           = {};
+	// A vertex-stream SSBO that no instruction of the compiled program reads. The
+	// slot stays in the layout; its descriptor gets an empty carrier.
+	bool                       unread_stream[BUFFERS_MAX]           = {};
 	int                        slots[BUFFERS_MAX]                   = {0};
 	int                        start_register[BUFFERS_MAX]          = {0};
 	bool                       extended[BUFFERS_MAX]                = {};
@@ -2092,7 +2095,17 @@ struct ShaderVertexInputInfo
 // format-loads can address through the live V# base instead of Fetch-remapping
 // onto semantic 0. start_register stays negative so bind-time UpdateAddress48
 // leaves the guest base in the descriptor word.
-void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info);
+// streams_read false records every SSBO appended here as unread: PrepareStorageBuffers then
+// binds an empty carrier instead of materializing the stream range.
+void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info, bool streams_read = true);
+
+// MUBUF format loads of a fetch-embedded vertex program that the generator rewrites into
+// vertex-attribute fetches, with the input resource each one reads.
+[[nodiscard]] Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const ShaderCode&            code,
+                                                                                    const ShaderVertexInputInfo& info);
+// Only a MUBUF/MTBUF instruction left after that rewrite addresses a vertex-stream SSBO.
+// False when every such instruction becomes a fetch: the streams then have no reader.
+[[nodiscard]] bool ShaderVertexStreamStorageHasReader(const ShaderCode& code, const ShaderVertexInputInfo& info);
 
 // Why the fused NGG front of this vertex stage was not proven width neutral at its guest
 // width ("" when it was, or when the stage has no fused front). For the native-wave

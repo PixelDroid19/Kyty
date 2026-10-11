@@ -3529,7 +3529,11 @@ void ShaderGetInputInfoVS(const HW::VertexShaderInfo* regs, const HW::ShaderRegi
 
 		ShaderParseAttrib(info, data.input_semantics, data.num_input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info, ps5);
-		ShaderAppendVertexStreamStorage(info);
+		// The generator compiles program->code for a Gen5 non-embedded stage
+		// (ShaderParseVS), so the stream readers are decided on that code.
+		const bool streams_read = !(ps5 && !regs->vs_embedded && info->program != nullptr) ||
+		                          ShaderVertexStreamStorageHasReader(info->program->code, *info);
+		ShaderAppendVertexStreamStorage(info, streams_read);
 
 		constexpr uint32_t user_data_base = 8;
 		const uint32_t shader_hash0 = (regs->gs_regs.chksum >> 32u) & 0xffffffffu;

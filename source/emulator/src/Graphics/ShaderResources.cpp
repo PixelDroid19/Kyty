@@ -1580,7 +1580,7 @@ void ShaderPruneUnusedMetadataStorage(const ShaderCode& code, ShaderStorageResou
 	ExcludeUnusedMetadataStorage(resources);
 }
 
-void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info)
+void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info, bool streams_read)
 {
 	if (info == nullptr || !info->fetch_embedded || info->buffers_num <= 0)
 	{
@@ -1626,6 +1626,7 @@ void ShaderAppendVertexStreamStorage(ShaderVertexInputInfo* info)
 		storage.raw_tbuffer_use[index]  = true;
 		storage.slots[index]            = index;
 		storage.start_register[index]   = -1;
+		storage.unread_stream[index]    = !streams_read;
 		storage.buffers_num++;
 		stream.storage_slot = index;
 	}

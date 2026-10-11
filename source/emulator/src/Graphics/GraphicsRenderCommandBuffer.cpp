@@ -840,6 +840,7 @@ class TransientBufferPool
 		bool         snapshot_valid = false;
 		uint64_t     snapshot_vaddr = 0;
 		uint64_t     snapshot_size  = 0;
+		bool         zero_carrier   = false;
 	};
 
 public:
@@ -858,6 +859,36 @@ public:
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
 		Commit(entry, size);
 		return &entry->buffer;
+	}
+
+	// Every empty descriptor recorded into one command buffer reads the same
+	// zero dword, so one entry per usage serves them all until the next Reset.
+	// A carrier per draw would exhaust the per-usage entry limit.
+	VulkanBuffer* ZeroCarrier(GraphicContext* ctx, uint32_t usage)
+	{
+		EXIT_IF(ctx == nullptr || usage == 0u);
+		for (auto* entry: m_entries)
+		{
+			if (entry->used && entry->zero_carrier && entry->usage == usage)
+			{
+				return &entry->buffer;
+			}
+		}
+		static constexpr uint32_t kZero = 0;
+		auto* buffer = Upload(ctx, &kZero, sizeof(kZero), usage, GpuMemoryTransientBufferAllocationClass::Critical);
+		if (buffer == nullptr)
+		{
+			return nullptr;
+		}
+		for (auto* entry: m_entries)
+		{
+			if (&entry->buffer == buffer)
+			{
+				entry->zero_carrier = true;
+				break;
+			}
+		}
+		return buffer;
 	}
 
 	VulkanBuffer* Capture(GraphicContext* ctx, uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,
@@ -1097,6 +1128,7 @@ private:
 				*created = true;
 			}
 		}
+		entry->zero_carrier = false;
 		return entry;
 	}
 
@@ -1243,6 +1275,16 @@ VulkanBuffer* CommandBuffer::UploadTransientBuffer(const void* data, uint64_t si
 	}
 	return m_transient_buffers->Upload(g_render_ctx->GetGraphicCtx(), data, size, usage,
 	                                   GpuMemoryTransientBufferAllocationClass::Critical);
+}
+
+VulkanBuffer* CommandBuffer::UploadTransientZeroCarrier(uint32_t usage)
+{
+	EXIT_IF(IsInvalid());
+	if (m_transient_buffers == nullptr)
+	{
+		m_transient_buffers = new TransientBufferPool;
+	}
+	return m_transient_buffers->ZeroCarrier(g_render_ctx->GetGraphicCtx(), usage);
 }
 
 VulkanBuffer* CommandBuffer::CaptureTransientSnapshotBuffer(uint64_t vaddr, uint64_t size, uint32_t usage, uint64_t* validation_ns,

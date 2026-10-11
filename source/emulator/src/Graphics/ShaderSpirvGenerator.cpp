@@ -2373,14 +2373,8 @@ String8 Spirv::EmitNativeThreadLimitExec() const
 	return source;
 }
 
-void Spirv::DetectFetch()
+Vector<std::pair<ShaderInstruction, int>> ShaderDetectVertexFetchLoads(const ShaderCode& code, const ShaderVertexInputInfo& info)
 {
-	EXIT_IF(m_vs_input_info == nullptr);
-	EXIT_IF(!m_vs_input_info->fetch_embedded);
-
-	if (!m_vs_input_info->gs_prolog) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_vs_input_info->gs_prolog condition ignored (continuing)\n"); }
-	if (m_vs_input_info->fetch_inline) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_vs_input_info->fetch_inline condition ignored (continuing)\n"); }
-
 	enum class Type
 	{
 		Unknown,
@@ -2408,33 +2402,33 @@ void Spirv::DetectFetch()
 	auto vgpr_reg = [](const ShaderOperand& op) { return op.register_id; };
 
 	int shift_regs = 8;
-	int attrib_reg = m_vs_input_info->fetch_attrib_reg + shift_regs;
-	int buffer_reg = m_vs_input_info->fetch_buffer_reg + shift_regs;
+	int attrib_reg = info.fetch_attrib_reg + shift_regs;
+	int buffer_reg = info.fetch_buffer_reg + shift_regs;
 
 	Vector<ShaderControlFlowBlock> blocks;
 
-	blocks.Add(m_code.ReadBlock(0));
+	blocks.Add(code.ReadBlock(0));
 
-	for (const auto& label: m_code.GetLabels())
+	for (const auto& label: code.GetLabels())
 	{
-		blocks.Add(m_code.ReadBlock(label.GetDst()));
+		blocks.Add(code.ReadBlock(label.GetDst()));
 	}
 
-	for (const auto& label: m_code.GetIndirectLabels())
+	for (const auto& label: code.GetIndirectLabels())
 	{
-		blocks.Add(m_code.ReadBlock(label.GetDst()));
+		blocks.Add(code.ReadBlock(label.GetDst()));
 	}
 
 	Vector<std::pair<ShaderInstruction, int>> load_instructions;
 
 	for (const auto& block: blocks)
 	{
-		auto code = m_code.ReadIntructions(block);
+		auto block_code = code.ReadIntructions(block);
 
 		Core::Array<SgprInfo, 108> sgprs;
 		Core::Array<VgprInfo, 256> vgprs;
 
-		for (const auto& inst: code)
+		for (const auto& inst: block_code)
 		{
 
 			switch (inst.type)
@@ -2496,9 +2490,9 @@ void Spirv::DetectFetch()
 
 					const int semantic = sgprs[sgpr_reg(inst.src[1])].attrib_id;
 					int       resource = -1;
-					for (int i = 0; i < m_vs_input_info->resources_num; i++)
+					for (int i = 0; i < info.resources_num; i++)
 					{
-						if (m_vs_input_info->resources_dst[i].semantic == semantic)
+						if (info.resources_dst[i].semantic == semantic)
 						{
 							resource = i;
 							break;
@@ -2520,6 +2514,37 @@ void Spirv::DetectFetch()
 			}
 		}
 	}
+
+	return load_instructions;
+}
+
+bool ShaderVertexStreamStorageHasReader(const ShaderCode& code, const ShaderVertexInputInfo& info)
+{
+	const auto fetch_loads = ShaderDetectVertexFetchLoads(code, info);
+	for (const auto& inst: code.GetInstructions())
+	{
+		const auto name = Core::EnumName8(inst.type);
+		if (!name.StartsWith("Buffer") && !name.StartsWith("TBuffer") && !name.StartsWith("Tbuffer"))
+		{
+			continue;
+		}
+		if (!fetch_loads.Contains(inst.pc, [](const auto& load, uint32_t pc) { return load.first.pc == pc; }))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void Spirv::DetectFetch()
+{
+	EXIT_IF(m_vs_input_info == nullptr);
+	EXIT_IF(!m_vs_input_info->fetch_embedded);
+
+	if (!m_vs_input_info->gs_prolog) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: !m_vs_input_info->gs_prolog condition ignored (continuing)\n"); }
+	if (m_vs_input_info->fetch_inline) { KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: m_vs_input_info->fetch_inline condition ignored (continuing)\n"); }
+
+	const auto load_instructions = ShaderDetectVertexFetchLoads(m_code, *m_vs_input_info);
 
 	for (auto& inst: m_code.GetInstructions())
 	{
