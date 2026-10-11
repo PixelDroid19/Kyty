@@ -9,6 +9,20 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Materialization range scans per draw: excluded (2026-10-11)
+
+- On the Unity fishing title's command-processor thread, `GpuMemory::ResetHash`
+  took 4.8-6.2% of samples. It is called once per draw for each render-target
+  attachment, and its cost is the scan of the 2,048 materialization spans.
+- Tried: skip the scan when the range lies inside a recently scanned range
+  and no entry was stored since that scan (invalidation only removes
+  entries, so the skip is exact).
+- Result: `ResetHash` still took 5.5% of samples. Every draw stores at least
+  one materialization between two invalidations of the same attachment, so
+  the skip never fired. Discarded.
+- The next work on this site needs a span index that answers overlap without
+  visiting every slot.
+
 ## Index buffer objects through the mapping: excluded (2026-10-11)
 
 - A fence-wait backtrace counter over the Unity fishing title's 200 s route
