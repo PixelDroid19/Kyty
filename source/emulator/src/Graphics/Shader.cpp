@@ -3292,10 +3292,14 @@ void ShaderParseUsage2(const ShaderUserData* user_data, ShaderParsedUsage* info,
 					continue;
 				}
 				exact_evidence.raw_smem_use = true;
-				if (eud_code == nullptr || !ShaderDynamicSLoadScalarSpan(*eud_code, record, &exact_evidence.raw_smem_required_bytes))
+				if (eud_code == nullptr)
 				{
 					exact_evidence.raw_smem_dynamic_offset = true;
+					continue;
 				}
+				const auto span = AnalyzeShaderDynamicSLoadSpan(*eud_code, record, eud_code == code ? code_memo : nullptr);
+				exact_evidence.raw_smem_required_bytes = std::max(exact_evidence.raw_smem_required_bytes, span.required_bytes);
+				exact_evidence.raw_smem_dynamic_offset = exact_evidence.raw_smem_dynamic_offset || !span.exact;
 			}
 		}
 		const auto exact = exact_evidence.access;

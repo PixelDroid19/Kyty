@@ -9,6 +9,32 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Dynamic scalar-load spans memoized per program (2026-10-11)
+
+- `ShaderDynamicSLoadScalarSpan` scanned the whole program for every storage
+  buffer reached through a dynamic descriptor load, on every draw. Its result
+  depends only on the program and the mapping's load PC, last consumer PC,
+  destination register and dword count.
+- The per-program `ShaderCodeResourceMemo` now keeps that result. The caller
+  folds it in with the same maximum the scan used, so required bytes and the
+  dynamic-offset flag are unchanged.
+- Verified on the racing title's moving race (Intel A770):
+  - An env-gated, temporary equality check compared the memoized and the
+    direct result on 7.4 million calls with no mismatch.
+  - The function left the command-processor thread's top samples (1.5%
+    before).
+  - Three 200 s strict runs: two held to the bound. One ended at 183 s on
+    the open depth-reference refusal below, which is outside the storage
+    path this change touches.
+- 2,378 unit tests pass.
+- Open, intermittent (1 of 4 runs on this tree, 0 of 7 earlier): a
+  comparison sample of a 1x1 single-channel float image at an address that a
+  60x33 render target in use overlaps stops the run with
+  `unsupported depth-reference image binding ... materialize=depth-unsupported`
+  (`GraphicsRenderBind.cpp`, `ResolveDepthReferenceImageView`). The overlapping
+  object's dependencies were not complete when it was bound, so ordering
+  against the producing submit is the first lead.
+
 ## Instruction type names resolved once (2026-10-11)
 
 - Per-draw shader analyses classify instructions by name prefix

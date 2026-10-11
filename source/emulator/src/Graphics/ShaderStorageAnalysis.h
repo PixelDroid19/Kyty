@@ -10,7 +10,9 @@
 
 #include <bitset>
 #include <cstdint>
+#include <map>
 #include <mutex>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -45,6 +47,14 @@ struct ShaderDynamicSLoadUse
 	bool                        valid              = true;
 };
 
+// Scalar bytes read through one dynamic S_LOAD mapping, as computed by
+// ShaderDynamicSLoadScalarSpan from a zero byte count.
+struct ShaderDynamicSLoadSpan
+{
+	uint64_t required_bytes = 0;
+	bool     exact          = false;
+};
+
 // Results of the resource analyses that depend only on the program code and one
 // start register. Each memo belongs to one immutable code object and is shared
 // by every draw of that program; a null memo analyzes the code directly. Entry
@@ -59,6 +69,7 @@ public:
 	// Consumers of every whole-descriptor S_LOAD up to the first branch, indexed
 	// by instruction; other entries keep the default value.
 	[[nodiscard]] const std::vector<ShaderDynamicSLoadUse>& DescriptorSLoadUses(const ShaderCode& code) const;
+	[[nodiscard]] ShaderDynamicSLoadSpan DynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping) const;
 
 private:
 	mutable std::mutex                                              m_mutex;
@@ -68,6 +79,8 @@ private:
 	mutable std::unordered_map<int, ShaderSamplerOperationEvidence> m_sampler_operation;
 	mutable std::vector<ShaderDynamicSLoadUse>                      m_descriptor_sload_uses;
 	mutable bool                                                    m_descriptor_sload_uses_ready = false;
+	// Keyed by load PC, last consumer PC, destination register and dword count.
+	mutable std::map<std::tuple<uint32_t, uint32_t, int, int>, ShaderDynamicSLoadSpan> m_dynamic_sload_spans;
 };
 
 [[nodiscard]] ShaderStorageUseEvidence       AnalyzeShaderStorageUse(const ShaderCode& code, int start_register,
@@ -77,6 +90,8 @@ private:
                                                                          const ShaderCodeResourceMemo* memo);
 [[nodiscard]] ShaderSamplerOperationEvidence AnalyzeShaderSamplerOperationEvidence(const ShaderCode& code, int start_register,
                                                                                    const ShaderCodeResourceMemo* memo);
+[[nodiscard]] ShaderDynamicSLoadSpan AnalyzeShaderDynamicSLoadSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping,
+                                                                  const ShaderCodeResourceMemo* memo);
 
 void ShaderGetTextureBuffer(ShaderTextureResources* info, bool* direct_sgprs, int start_index, int slot, ShaderTextureUsage usage,
                             const HW::UserSgprInfo& user_sgpr, const uint32_t* extended_buffer);

@@ -497,6 +497,36 @@ bool ShaderDynamicSLoadScalarSpan(const ShaderCode& code, const ShaderDynamicSLo
 	return found && !dynamic_offset;
 }
 
+ShaderDynamicSLoadSpan ShaderCodeResourceMemo::DynamicSLoadScalarSpan(const ShaderCode&                code,
+                                                                     const ShaderDynamicSLoadMapping& mapping) const
+{
+	const auto key = std::make_tuple(mapping.instruction_pc, mapping.last_consumer_pc, mapping.destination_register, mapping.dword_count);
+	{
+		std::lock_guard<std::mutex> lock(m_mutex);
+		if (const auto it = m_dynamic_sload_spans.find(key); it != m_dynamic_sload_spans.end())
+		{
+			return it->second;
+		}
+	}
+	ShaderDynamicSLoadSpan span {};
+	span.exact = ShaderDynamicSLoadScalarSpan(code, mapping, &span.required_bytes);
+	std::lock_guard<std::mutex> lock(m_mutex);
+	m_dynamic_sload_spans.emplace(key, span);
+	return span;
+}
+
+ShaderDynamicSLoadSpan AnalyzeShaderDynamicSLoadSpan(const ShaderCode& code, const ShaderDynamicSLoadMapping& mapping,
+                                                     const ShaderCodeResourceMemo* memo)
+{
+	if (memo != nullptr)
+	{
+		return memo->DynamicSLoadScalarSpan(code, mapping);
+	}
+	ShaderDynamicSLoadSpan span {};
+	span.exact = ShaderDynamicSLoadScalarSpan(code, mapping, &span.required_bytes);
+	return span;
+}
+
 static bool ShaderStorageResourcesEqual(const ShaderBufferResource& first, const ShaderBufferResource& second)
 {
 	for (int field = 0; field < 4; ++field)
