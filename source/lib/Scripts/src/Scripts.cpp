@@ -293,7 +293,7 @@ void PrintHelp()
 	}
 }
 
-class ScriptVar::ScriptVarPrivate: public Core::RefCounter<Core::DummyMutex>
+class ScriptVar::ScriptVarPrivate: public Core::RefCounter
 {
 public:
 	ScriptVarPrivate() = default;
