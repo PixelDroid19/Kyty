@@ -427,4 +427,32 @@ TEST(EmulatorGraphicsDirtyLookup, IdentityBudgetRefusalPreservesRetiredFaultEvid
 	ASSERT_TRUE(tracker.RegisterRange(SyntheticPage(page_size, identity_budget + 1u), page_size));
 }
 
+TEST(EmulatorGraphicsDirtyLookup, IdentityBudgetReusesRetiredPagesWhoseTokenWasRevoked)
+{
+	const size_t page_size = GetPageSize();
+	ASSERT_TRUE(page_size != 0u);
+	GpuDirtyPageTracker tracker;
+	uintptr_t           retired = 0;
+	{
+		NativeMapping mapping;
+		ASSERT_TRUE(mapping.address != 0u);
+		retired = mapping.address;
+		ASSERT_TRUE(tracker.RegisterRange(retired, page_size));
+		ASSERT_TRUE(tracker.Rearm(retired, page_size));
+		ASSERT_TRUE(tracker.UnregisterRange(retired, page_size));
+	}
+
+	// The unmap revoked the retired token, so its identity no longer holds
+	// late-fault evidence and admission can reuse it.
+	constexpr size_t identity_budget = (kPageTableMask + 1u) / 2u;
+	const uintptr_t  filler          = SyntheticPage(page_size, 0u);
+	ASSERT_TRUE(tracker.RegisterRange(filler, (identity_budget - 1u) * page_size));
+	const uintptr_t admitted = SyntheticPage(page_size, identity_budget + 1u);
+	EXPECT_TRUE(tracker.RegisterRange(admitted, page_size));
+	EXPECT_FALSE(tracker.HandleWriteFault(retired));
+	EXPECT_FALSE(tracker.RegisterRange(SyntheticPage(page_size, identity_budget + 3u), page_size));
+	ASSERT_TRUE(tracker.UnregisterRange(admitted, page_size));
+	ASSERT_TRUE(tracker.UnregisterRange(filler, (identity_budget - 1u) * page_size));
+}
+
 UT_END();

@@ -223,6 +223,8 @@ private:
 	[[nodiscard]] PageEntry*         FindWritePage(uintptr_t page) noexcept;
 	[[nodiscard]] PageEntry*        FindOrCreatePage(uintptr_t page) noexcept;
 	[[nodiscard]] bool               HasPageCapacity(uintptr_t first, uintptr_t last) const noexcept;
+	[[nodiscard]] bool               AdmitPages(uintptr_t first, uintptr_t last) noexcept;
+	void                             ReleaseRevokedRetiredPages() noexcept;
 	void                             ReactivateRetiredPage(PageEntry* entry) noexcept;
 	void                            ReleasePageSlot(PageEntry* entry) noexcept;
 	[[nodiscard]] uintptr_t         BlockKey(uintptr_t page) const noexcept;
@@ -300,6 +302,9 @@ private:
 	std::atomic<uint32_t>         m_identity_gate {0};
 	std::atomic<uint32_t>         m_restorers {0};
 	std::atomic<uint32_t>         m_authority_fences {0};
+	// Unreferenced identities whose token an unmap revoked since the last
+	// admission sweep. Raised by publishers; an overcount only costs a sweep.
+	std::atomic<uint32_t>         m_revoked_identities {0};
 	bool                          m_enabled = true;
 };
 

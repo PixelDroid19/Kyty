@@ -9,6 +9,41 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Dirty-tracker identities revoked by unmap (2026-10-11)
+
+- In gameplay on the Unity fishing title (held-cross route), every
+  `stable_buffer_create` fell back (1,359 of 1,359 per 26 s window) and
+  content hashing read about 48 GB per window, all of it through the hash
+  fallback. A temporary build counted registration refusals by reason: all
+  were the page identity budget, with the table at 131,072 identities and
+  only 104-135 live ranges. No range was marked fallback after registering.
+- Classifying the table: 102,960 identities were retired pages whose token
+  an unmap had already revoked, 11,984-15,022 were retired with a live
+  token, and 13,092-16,225 were referenced. Those revoked identities had
+  retired with a live token and were unmapped afterwards.
+- A revoked token restores nothing. A late fault over such an identity
+  fails the captured-writable check and is reported untracked, which is the
+  same result as having no slot. `UnregisterRange` already frees untokened
+  pages at once on that basis. Admission now frees retired, unreferenced
+  identities with a revoked token when the budget would otherwise refuse
+  a registration. A publisher-side counter gates the sweep, so a refusal
+  with nothing revoked costs no scan. The sweep runs on the registration
+  thread under the registration mutex and frees each slot through the
+  existing identity-writer and restorer fence. Retired identities with a
+  live token keep their late-fault evidence, and the budget is unchanged.
+- Measured on the same route, gameplay windows 5-7: fallback hashing went
+  to zero, all hashing fell from about 48 GB to 5.3 GB per window,
+  `stable_buffer_create` captured 1,345 of 1,345, and the frame rate went
+  from 4.7-5.0 to 5.0-5.3 fps. Gameplay captures are unchanged. The racing
+  title (68.4 vs 70.3 fps in the race window) and the beat 'em up (10.4 vs
+  10.7 fps) are unchanged within run noise.
+- Open: the Unity fishing title is still bound by per-draw resource binding
+  (41% of the window), state setup (24%) and about 31 GB of uploads in
+  430,000 calls per window. Retired identities with a live token still count
+  against the budget. The run audio probe measured silence on the racing
+  title and only a few seconds of signal on the Unity fishing title, in the
+  baseline and the change runs alike; this was not investigated here.
+
 ## Physical view index and residency sweeps (2026-10-11)
 
 - On the beat 'em up, guest device-address preparation took about 15% of the
@@ -27,8 +62,9 @@ fail on the current HEAD before acting on them.
   sweeps and found zero mismatches.
 - Measured on the same route: the beat 'em up's late window went from
   10.4 fps (p50 101 ms) to 10.7 fps (p50 91 ms), and residency fell from 14%
-  to 11%. The racing title and the Unity fishing title (held-cross route,
-  into gameplay) are unchanged.
+  to 11%. The racing title is unchanged. The Unity fishing title was
+  measured in gameplay (held-cross route) only with this change built, at
+  about 4.7-5.0 fps; there is no before/after pair for it.
 - Open: the remaining sweep cost is one SEEK_DATA per unpopulated span. That
   title is latency-bound: guest, command processor and GPU each use about a
   third of the frame, one after another. Rendering at a fixed 1280x720
@@ -49,8 +85,9 @@ fail on the current HEAD before acting on them.
   Each draw resolves only those semantics against its own input resources,
   so the verdict stays per draw.
 - Equivalence: a temporary build computed both verdicts on every draw:
-  376,832 draws on the racing title, 114,688 on the Unity fishing title and
-  16,384 on the beat 'em up, with zero mismatches.
+  376,832 draws on the racing title, 114,688 on the Unity fishing title
+  (its autosave notice, before gameplay) and 16,384 on the beat 'em up, with
+  zero mismatches.
 - Measured on the same route against two baseline runs: the race window
   rose from 45-46 to 70 fps (p95 frame time 91-101 ms to 60 ms), and the
   three earlier windows rose 27-60%. Captures of the race scene are
@@ -684,7 +721,8 @@ Limits: tombstones retain probe history, so admission does not guarantee an
 empty slot or a short exact lookup under arbitrary churn. Retired identities
 remain counted even after a later unmap invalidates their protection token;
 new registrations can therefore use hashing until identities are safely
-reused. This preserves lifetime evidence at a capacity and performance cost.
+reused. (Since 2026-10-11 admission frees revoked identities; see "Dirty-tracker
+identities revoked by unmap".) This preserves lifetime evidence at a capacity and performance cost.
 Long-session performance, other GPUs, complete gameplay and audio remain
 unverified. Dark camp captures also receive a low-entropy heuristic verdict,
 including the reference capture; scene recognition requires visual inspection.

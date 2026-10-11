@@ -702,6 +702,39 @@ bool GpuDirtyPageTracker::HasPageCapacity(uintptr_t first, uintptr_t last) const
 	return true;
 }
 
+// A revoked token restores nothing: a late fault over that retired identity is
+// reported untracked with or without its slot, as UnregisterRange already
+// assumes when it frees untokened pages at once. Retired identities whose
+// token is still live keep their late-fault evidence.
+void GpuDirtyPageTracker::ReleaseRevokedRetiredPages() noexcept
+{
+	for (size_t i = 0; i < kPageTableSize; ++i)
+	{
+		PageEntry& entry = m_pages[i];
+		if (entry.key.load(std::memory_order_acquire) > kTombstoneKey && entry.refs.load(std::memory_order_acquire) == 0u &&
+		    entry.protection_state.load(std::memory_order_acquire) == static_cast<uint32_t>(GpuDirtyProtectionState::Retired) &&
+		    entry.original_mode_valid.load(std::memory_order_acquire) == 0u)
+		{
+			ReleasePageSlot(&entry);
+		}
+	}
+}
+
+// Revoked identities are freed only when the budget would otherwise refuse.
+bool GpuDirtyPageTracker::AdmitPages(uintptr_t first, uintptr_t last) noexcept
+{
+	if (HasPageCapacity(first, last))
+	{
+		return true;
+	}
+	if (m_revoked_identities.exchange(0, std::memory_order_acq_rel) == 0u)
+	{
+		return false;
+	}
+	ReleaseRevokedRetiredPages();
+	return HasPageCapacity(first, last);
+}
+
 bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 {
 	if (!m_enabled || m_page_size == 0 || address == 0 || size == 0)
@@ -731,7 +764,7 @@ bool GpuDirtyPageTracker::RegisterRange(uintptr_t address, size_t size) noexcept
 	{
 		return false;
 	}
-	if (!HasPageCapacity(first, last))
+	if (!AdmitPages(first, last))
 	{
 		return false;
 	}
@@ -1899,6 +1932,10 @@ void GpuDirtyPageTracker::PublishAuthorityChange(const Core::VirtualMemory::Writ
 		if (PageEntry* entry = FindPage(page); entry != nullptr && unmap)
 		{
 			entry->original_mode_valid.store(0, std::memory_order_release);
+			if (entry->refs.load(std::memory_order_acquire) == 0u)
+			{
+				m_revoked_identities.fetch_add(1, std::memory_order_relaxed);
+			}
 			entry->original_token.store(0, std::memory_order_relaxed);
 			entry->original_mode.store(static_cast<uint32_t>(Core::VirtualMemory::Mode::NoAccess), std::memory_order_relaxed);
 			uint32_t state = entry->protection_state.load(std::memory_order_acquire);
