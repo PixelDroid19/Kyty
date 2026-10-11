@@ -9,6 +9,25 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Per-draw scan costs (2026-10-11)
+
+- Two per-draw scans on the command-processor thread were removed from the
+  Unity fishing title's profile.
+  - `ShaderVectorBufferDescriptor` classified every instruction of the
+    program as MUBUF or MTBUF by comparing its type name, on every draw.
+    The classification is now a table built once from the same names.
+    Name comparison fell from 5.1% to 2.2% of the thread; the remainder
+    comes from other callers.
+  - `ResolveIndexedVertexRecords` found the index range in a loop that
+    switched on the index width per element. It now runs one loop per width,
+    which the compiler vectorizes. The function left the profile (5.7%
+    before).
+- Same route, gameplay windows 5-7: the title went from 8.0-8.1 to 8.4-8.7
+  fps (p50 121 to 112 ms), and the capture is correct.
+- Controls, both within run-to-run noise and with correct captures:
+  - The racing title's race window measured 81.0 fps.
+  - The beat 'em up measured 11.2 fps.
+
 ## Descriptor-set reverse index (2026-10-11)
 
 - `DescriptorCache::FreeDescriptor` scanned every cached set, each several

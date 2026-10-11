@@ -47,6 +47,7 @@
 #include <cstdlib>
 #include <limits>
 #include <set>
+#include <utility>
 
 // IWYU pragma: no_forward_declare VkImageView_T
 
@@ -85,6 +86,22 @@ VertexRecordRequirement ResolveLinearVertexRecords(int32_t first_vertex, uint32_
 	                             : VertexRecordRequirement {.valid = false};
 }
 
+// Smallest and largest index value; one loop per index width so it vectorizes.
+template <typename Index>
+static std::pair<uint32_t, uint32_t> IndexValueRange(const uint8_t* bytes, uint32_t index_count)
+{
+	Index minimum = std::numeric_limits<Index>::max();
+	Index maximum = 0;
+	for (uint32_t index = 0; index < index_count; ++index)
+	{
+		Index value = 0;
+		std::memcpy(&value, bytes + static_cast<uint64_t>(index) * sizeof(Index), sizeof(Index));
+		minimum = std::min(minimum, value);
+		maximum = std::max(maximum, value);
+	}
+	return {minimum, maximum};
+}
+
 VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint32_t index_count, VkIndexType index_type,
 	                                                  int32_t vertex_offset)
 {
@@ -106,16 +123,10 @@ VertexRecordRequirement ResolveIndexedVertexRecords(const void* index_addr, uint
 		return {};
 	}
 
-	const auto* bytes = static_cast<const uint8_t*>(index_addr);
-	uint32_t    minimum = UINT32_MAX;
-	uint32_t    maximum = 0;
-	for (uint32_t index = 0; index < index_count; ++index)
-	{
-		uint32_t value = 0;
-		std::memcpy(&value, bytes + static_cast<uint64_t>(index) * element_size, element_size);
-		minimum = std::min(minimum, value);
-		maximum = std::max(maximum, value);
-	}
+	const auto* bytes   = static_cast<const uint8_t*>(index_addr);
+	const auto  range   = element_size == 2u ? IndexValueRange<uint16_t>(bytes, index_count) : IndexValueRange<uint32_t>(bytes, index_count);
+	const uint32_t minimum = range.first;
+	const uint32_t maximum = range.second;
 
 	const int64_t first = static_cast<int64_t>(minimum) + vertex_offset;
 	const int64_t last  = static_cast<int64_t>(maximum) + vertex_offset;
