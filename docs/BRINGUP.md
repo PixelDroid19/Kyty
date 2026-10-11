@@ -9,6 +9,27 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Instruction type names resolved once (2026-10-11)
+
+- Per-draw shader analyses classify instructions by name prefix
+  (`ShaderInstructionTypeStartsWith`), mostly from `ShaderGetInputInfoPS`
+  through `ShaderScalarLoadNeedsGuestAddress`, and from
+  `ShaderHasUnboundBufferLoad`. Each call resolved the enum name through the
+  generic enum reflection.
+- `ShaderInstructionTypeName` now reads a table built once over the enum
+  range. Names and prefix results are unchanged.
+- Measured on the racing title's moving race (Intel A770, task-clock samples
+  of the command-processor thread over 20 s):
+  - `ShaderInstructionTypeStartsWith` fell from 4.5% to 0.7% of samples.
+  - The thread's share of process samples fell from 87.3% to 82.9%.
+  - Frame rate stayed within the route's scene variation (28-42 fps at
+    405-619 draws per frame).
+- 2,378 unit tests pass.
+- The remaining per-draw shader analysis on that thread is about 6%:
+  `ShaderParseUsage2` 2.4%, `ShaderCollectDynamicScalarResources` 1.7% and
+  `ShaderDynamicSLoadScalarSpan` 1.5%. It depends on the program and not on
+  the draw, so it is the next memoization target.
+
 ## Materialization range scans per draw: excluded (2026-10-11)
 
 - On the Unity fishing title's command-processor thread, `GpuMemory::ResetHash`
