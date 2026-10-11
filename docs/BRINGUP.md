@@ -9,6 +9,22 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Transient tail clearing (2026-10-11)
+
+- When a command-buffer transient entry is larger than the bytes it
+  receives, `Commit` zeroes the rest so reads past the logical size see
+  zero. It cleared the whole tail on every commit. On the Unity fishing
+  title, that `memset` was about 4% of the command-processor thread
+  (`CaptureTransientSnapshotBuffer` from vertex binding).
+- Each entry now records where its possibly non-zero bytes end. A new
+  entry counts as non-zero to its full size. Uploads and capture attempts,
+  including refused ones, raise the mark before they write. `Commit` clears
+  only `[size, mark)` and then lowers the mark to `size`. Only host uploads
+  and captures write these read-only entries, so every byte past the
+  logical size still reads as zero.
+- Same route, gameplay windows 5-7: the `memset` samples fell from 601 to
+  259, and the title went from 6.6-7.2 to 7.2-7.3 fps (p50 128 ms).
+
 ## Range-filtered label fence snapshots (2026-10-11)
 
 - A sampler that records the user stack showed where the mutex samples on

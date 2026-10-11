@@ -899,6 +899,8 @@ class TransientBufferPool
 		uint64_t     snapshot_vaddr = 0;
 		uint64_t     snapshot_size  = 0;
 		bool         zero_carrier   = false;
+		// Bytes at or past this offset are known to be zero.
+		uint64_t     nonzero_end    = 0;
 	};
 
 public:
@@ -914,6 +916,7 @@ public:
 
 		const DebugStatsScopedWork upload_work(DebugStatsRecordUpload, size);
 		entry->snapshot_valid = false;
+		entry->nonzero_end    = std::max(entry->nonzero_end, size);
 		std::memcpy(entry->mapped, data, static_cast<size_t>(size));
 		Commit(entry, size);
 		return &entry->buffer;
@@ -1022,6 +1025,8 @@ public:
 
 		uint64_t atomic_validation_ns = 0u;
 		uint64_t copy_ns              = 0u;
+		// A refused capture may already have copied part of the range.
+		entry->nonzero_end = std::max(entry->nonzero_end, size);
 		if (!GpuMemoryCaptureSnapshotReadOnlyBuffer(vaddr, size, entry->mapped, &atomic_validation_ns, &copy_ns))
 		{
 			*validation_ns += atomic_validation_ns;
@@ -1211,6 +1216,7 @@ private:
 			entry->buffer.usage           = usage;
 			entry->buffer.memory.property = static_cast<uint32_t>(VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) |
 			                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+			entry->nonzero_end            = size;
 			VulkanCreateBuffer(ctx, size, &entry->buffer);
 			VulkanMapMemory(ctx, &entry->buffer.memory, &entry->mapped);
 			EXIT_IF(entry->mapped == nullptr);
@@ -1276,14 +1282,17 @@ private:
 		delete entry;
 	}
 
+	// Bytes past the committed size read as zero; only the part of that tail
+	// an earlier write reached needs clearing.
 	static void Commit(Entry* entry, uint64_t size)
 	{
-		EXIT_IF(entry == nullptr || entry->mapped == nullptr || size == 0u || size > entry->size);
-		const uint64_t tail_bytes = GpuMemoryTransientBufferTailBytes(entry->size, size);
+		EXIT_IF(entry == nullptr || entry->mapped == nullptr || size == 0u || size > entry->size || entry->nonzero_end > entry->size);
+		const uint64_t tail_bytes = GpuMemoryTransientBufferTailBytes(entry->nonzero_end, size);
 		if (tail_bytes != 0u)
 		{
 			std::memset(static_cast<uint8_t*>(entry->mapped) + size, 0, static_cast<size_t>(tail_bytes));
 		}
+		entry->nonzero_end             = size;
 		entry->buffer.descriptor_range = size;
 		entry->used = true;
 	}
