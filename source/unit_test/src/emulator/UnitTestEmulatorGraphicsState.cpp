@@ -7383,6 +7383,39 @@ TEST(EmulatorGraphicsState, PreservesOnlyPureDepthReferenceHostSampler)
 	EXPECT_EQ(ResolveSamplerBindingOperation(ImageSampleOperation::DepthReference, false), ImageSampleOperation::Regular);
 }
 
+TEST(EmulatorGraphicsState, PairsTableLoadedDepthReferenceSamplerByInstruction)
+{
+	using namespace Kyty::Libs::Graphics::State;
+
+	// A color image and a depth image, each sampled with its own sampler; the
+	// depth sampler was loaded through a descriptor table, so its slot pairs
+	// with no image.
+	ShaderTextureResources textures {};
+	textures.textures_num             = 2;
+	textures.desc[0].usage            = ShaderTextureUsage::ReadOnly;
+	textures.desc[0].sample_operation = ImageSampleOperation::Regular;
+	textures.desc[0].slot             = 0;
+	textures.desc[0].sampler_indices_mask = 0x1u;
+	textures.desc[1].usage            = ShaderTextureUsage::ReadOnly;
+	textures.desc[1].sample_operation = ImageSampleOperation::DepthReference;
+	textures.desc[1].slot             = 2;
+	textures.desc[1].sampled_shape    = ShaderGen5SampledTextureShape::TwoDimensional;
+	textures.desc[1].sampled_shape_from_instruction = true;
+	textures.desc[1].sampler_indices_mask = 0x2u;
+	ShaderSamplerResources samplers {};
+	samplers.samplers_num     = 2;
+	samplers.operations[0]    = ImageSampleOperation::Regular;
+	samplers.operations[1]    = ImageSampleOperation::DepthReference;
+	samplers.slots[1]         = 4;
+	samplers.dynamic_sload[1] = true;
+
+	EXPECT_TRUE(ShaderSamplerDepthComparisonEligible(textures, samplers, 1));
+
+	// The same sampler also filtering the color image keeps the regular path.
+	textures.desc[0].sampler_indices_mask = 0x3u;
+	EXPECT_FALSE(ShaderSamplerDepthComparisonEligible(textures, samplers, 1));
+}
+
 TEST(EmulatorGraphicsState, MaterializesOnlyUnambiguousGen5DepthSamples)
 {
 	const auto accepts = [](uint32_t format = 7u, uint32_t type = 9u, uint32_t depth = 0u, uint32_t base_array = 0u,

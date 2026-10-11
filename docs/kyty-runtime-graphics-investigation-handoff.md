@@ -326,6 +326,23 @@ against the same correct gameplay capture.
 
 ## Evidence and exclusions
 
+- Racing-title shadows (2026-10-11, partly open). The two shadow-receiver
+  pixel shaders take one `image_sample_c_lz` against a 2048x1024 D16 atlas
+  (two 1024x1024 cascades chosen from squared camera distance) with a GEQUAL
+  reverse-Z, bilinear, clamp-to-edge sampler read from a descriptor table.
+  Before the instruction-pairing change in `docs/BRINGUP.md` they took the
+  manual filter-then-compare path. They now take hardware comparison. A dark
+  disc around the camera and curved bands on the road, plus stepped shadow
+  edges, appear the same on both paths in captures from the same route at a
+  1920 edge. Excluded: caster bias (offset -4, scale -40, 16-bit unorm DB
+  format, enabled front and back on every shadow draw), the `/16` slope scale,
+  the atlas viewports and scissors, and a per-frame copy of the atlas.
+  Earlier reference imagery shows hard polygonal shadows are part of the
+  title's art direction, so judge the stepped edges against a same-checkpoint
+  reference before treating them as a defect. The disc follows the camera and
+  is the next target. Read back the atlas at the rolling start and check
+  whether bare road holds the cleared far value.
+
 - Uninitialized constant-buffer V# in a Unity title's EUD (2026-10-04, open).
   A colour-grading pixel shader loads its constant-buffer V# with `s_load_dwordx4
   s[88:91], s[28:29], 160` and reads 208 bytes through it at immediate offsets

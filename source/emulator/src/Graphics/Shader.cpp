@@ -89,6 +89,27 @@ bool ShaderSamplerDepthComparisonEligible(const ShaderTextureResources& textures
 		       ShaderResolvedSampledTextureShape(descriptor) == ShaderGen5SampledTextureShape::TwoDimensional;
 	};
 
+	// The parse's instruction pairing names exactly the images this sampler
+	// filters; a sampler loaded through a descriptor table has no pair slot.
+	bool paired = false;
+	for (int i = 0; i < textures.textures_num; ++i)
+	{
+		const auto& descriptor = textures.desc[i];
+		if ((descriptor.sampler_indices_mask & (1u << static_cast<uint32_t>(sampler_index))) == 0u)
+		{
+			continue;
+		}
+		if (!eligible(descriptor))
+		{
+			return false;
+		}
+		paired = true;
+	}
+	if (paired)
+	{
+		return true;
+	}
+
 	bool matched = false;
 	for (int i = 0; i < textures.textures_num; ++i)
 	{

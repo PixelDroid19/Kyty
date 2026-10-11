@@ -9,6 +9,62 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Table-loaded comparison samplers paired by instruction (2026-10-11)
+
+- A sampler sharp read from a descriptor table through `S_LOAD` is registered
+  twice: once as static metadata (slot 2, regular operation) and once as a
+  dynamic sampler whose slot is its dword offset in the table. The image
+  instruction resolves to the dynamic sampler. Its slot matches no texture
+  slot, so `ShaderSamplerDepthComparisonEligible` refused comparison. Pure
+  depth-reference samples then took the manual filter-then-compare path.
+- The eligibility check now uses the parse's instruction pairing
+  (`sampler_indices_mask`) first. A sampler qualifies only when every image it
+  is paired with is a normalized, pure depth-reference 2D view. The slot match
+  and the all-descriptors fallback still apply to samplers with no pairing.
+  The same answer drives the translator's Dref lowering and the bound
+  `VkSampler` compare state, so the two stay consistent. Translator identity
+  advances to 130.
+- An env-gated, temporary check computed the old and new answers on every
+  call during strict runs (Intel A770):
+  - The racing title: every mismatch was its two shadow receivers' sampler
+    (dynamic slot 4) moving to the comparison path. All 8 receiver modules now
+    lower to `OpImageSampleDrefExplicitLod`, with no manual path left, on a
+    clean build.
+  - The Unity fishing title: about 112,000 mismatches in 4.2 million calls, all
+    one shape. One sampler compares a depth-reference image and also filters a
+    regular image. The old slot match enabled comparison on that shared
+    `VkSampler`, and sampling a regular image through a comparison sampler has
+    no defined result in Vulkan. The new check keeps the non-comparison
+    sampler. Captures on the same route differ from the previous HEAD only in
+    animated regions.
+  - The beat 'em up: 0 mismatches.
+- Strict runs on the checked build reached their bounds: the Unity fishing
+  title 202 s, the beat 'em up 162 s, the racing title 126 s. Twelve
+  interleaved 110 s racing runs with and without the change all reached the
+  rolling start. Across the earlier runs the change hung once in 10 runs at
+  race load (frame ~17620), against 0 in 8 without it, which does not separate
+  the two. It is recorded as an open intermittent on that route.
+- Frame counts at 110 s average 23,012 with the change and 22,993 without; load
+  time dominates that window, so this shows no measurable difference, not a
+  race frame rate.
+- 2,379 unit tests pass, including a pairing contract for a table-loaded
+  depth-reference sampler.
+- Open in the racing title: a distance-centred dark disc and curved bands on
+  the road around the camera, and stepped shadow edges. Both appear identically
+  with and without this change, so it does not fix the visible shadow defect.
+  Excluded for them:
+  - Caster depth bias: front and back enabled with offset -4 and scale -40
+    (slope -2.5 after the `/16` scale shared by three independent
+    implementations), 16-bit unorm DB format (`NEG_NUM_DB_BITS` -16).
+  - Atlas layout: two 1024x1024 cascades in a 2048x1024 D16 target, with
+    viewports and scissors matching it.
+  - A per-frame copy of the shadow map: it is bound directly as depth, so it
+    has no measured frame-time cost.
+- Next step: read back the D16 atlas at a rolling-start frame. Bare-road
+  texels at the cleared reverse-Z far value point to the receiver (cascade
+  matrix fetch, coordinates or reference). Road texels that occlude their own
+  receiver point to the casters.
+
 ## Dynamic scalar-load spans memoized per program (2026-10-11)
 
 - `ShaderDynamicSLoadScalarSpan` scanned the whole program for every storage
@@ -28,7 +84,7 @@ fail on the current HEAD before acting on them.
     path this change touches.
 - 2,378 unit tests pass.
 - Open, intermittent (1 of 4 runs on this tree, 0 of 7 earlier): a
-  comparison sample of a 1x1 single-channel float image at an address that a
+  comparison sample of a 1x1 16-bit unorm depth image at an address that a
   60x33 render target in use overlaps stops the run with
   `unsupported depth-reference image binding ... materialize=depth-unsupported`
   (`GraphicsRenderBind.cpp`, `ResolveDepthReferenceImageView`). The overlapping
