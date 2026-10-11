@@ -21,7 +21,7 @@ KYTY_ENUM_RANGE(Kyty::Libs::Graphics::ShaderInstructionType, 0, static_cast<int>
 namespace Kyty::Libs::Graphics {
 namespace {
 
-constexpr int kMaxSgpr                  = 103;
+constexpr int kMaxSgpr                  = 105; // RDNA2 SGPR0..SGPR105
 constexpr int kMaxVgpr                  = 255;
 constexpr int kMinIntegerInlineConstant = -16;
 constexpr int kMaxIntegerInlineConstant = 64;

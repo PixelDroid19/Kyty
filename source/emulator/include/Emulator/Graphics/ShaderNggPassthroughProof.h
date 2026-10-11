@@ -25,7 +25,7 @@ struct ShaderNggPassthroughCounts
 // Conservative dependencies on INITIAL scalar words: SGPR 0..103, VCC_LO,
 // VCC_HI, EXEC_LO, EXEC_HI, M0, SCC, in that order. A dependency may remain
 // after an operation makes its value known; it is not a liveness certificate.
-using ShaderNggScalarDependencies = std::bitset<110>;
+using ShaderNggScalarDependencies = std::bitset<112>;
 
 struct ShaderNggKnownBits
 {
@@ -75,6 +75,7 @@ enum class ShaderNggPassthroughStepKind
 	VertexAlu,
 	PositionExport,
 	LayerExport,
+	ClipDistanceExport,
 	ParameterExport,
 	End,
 };
@@ -114,12 +115,16 @@ struct ShaderNggPassthroughProof
 	uint32_t primitive_export_index = ShaderNggPassthroughNoInstruction;
 	uint32_t position_export_index  = ShaderNggPassthroughNoInstruction;
 	uint32_t layer_export_index     = ShaderNggPassthroughNoInstruction;
+	uint32_t clip_distance_export_index = ShaderNggPassthroughNoInstruction;
 	uint32_t parameter_mask = 0;
 	bool primitive_forwarding_proved = false;
 	bool independent_vertex_transforms_proved = false;
 	// POS1's enabled Z word is defined. Interpreting that word as a layer still
 	// requires the renderer's position-format/output-control contract.
 	bool requires_layer_output_contract = false;
+	// POS1's enabled X word is defined. Its clipping meaning remains a
+	// separate position-format/output-control obligation of the renderer.
+	bool requires_clip_distance_output_contract = false;
 	// Prologue mode only (ShaderAnalyzeNggPassthroughPrologue). The exact scalar,
 	// allocation and primitive-forwarding proof holds through instruction
 	// prologue_end_index, the write after which EXEC equals the vertex-count mask.

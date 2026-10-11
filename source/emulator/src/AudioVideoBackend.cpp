@@ -1100,6 +1100,8 @@ void Decoder::Close()
 struct ElementaryVideoDecoder::State
 {
 	std::string error;
+	int32_t     max_frame_width  = 0;
+	int32_t     max_frame_height = 0;
 #if defined(KYTY_HAVE_FFMPEG)
 	AVCodecContext* context  = nullptr;
 	AVPacket*       packet   = nullptr;
@@ -1138,6 +1140,13 @@ static bool CollectPictures(ElementaryVideoDecoder::State* state)
 			state->error = "receive decoded picture";
 			return false;
 		}
+		if (state->frame->width <= 0 || state->frame->height <= 0 || state->frame->width > state->max_frame_width ||
+		    state->frame->height > state->max_frame_height)
+		{
+			state->error = "decoded picture exceeds configured maximum dimensions";
+			av_frame_unref(state->frame);
+			return false;
+		}
 		VideoFrame  picture;
 		const char* copy_error = nullptr;
 		const bool  copied     = CopyNv12Picture(state->frame, static_cast<uint32_t>(state->frame->width),
@@ -1154,18 +1163,31 @@ static bool CollectPictures(ElementaryVideoDecoder::State* state)
 }
 #endif
 
-std::unique_ptr<ElementaryVideoDecoder> ElementaryVideoDecoder::Open(VideoCodec codec, std::string* error)
+std::unique_ptr<ElementaryVideoDecoder> ElementaryVideoDecoder::Open(VideoCodec codec, int32_t max_frame_width,
+	                                                                 int32_t max_frame_height, std::string* error)
 {
 #if !defined(KYTY_HAVE_FFMPEG)
 	(void)codec;
+	(void)max_frame_width;
+	(void)max_frame_height;
 	if (error != nullptr)
 	{
 		*error = "FFmpeg is not available";
 	}
 	return nullptr;
 #else
+	if (max_frame_width <= 0 || max_frame_height <= 0)
+	{
+		if (error != nullptr)
+		{
+			*error = "invalid maximum video dimensions";
+		}
+		return nullptr;
+	}
 	std::unique_ptr<ElementaryVideoDecoder> decoder(new ElementaryVideoDecoder());
 	auto*                                   state = decoder->state_.get();
+	state->max_frame_width                   = max_frame_width;
+	state->max_frame_height                  = max_frame_height;
 	const AVCodec* av_codec = avcodec_find_decoder(codec == VideoCodec::Hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_H264);
 	state->context          = av_codec != nullptr ? avcodec_alloc_context3(av_codec) : nullptr;
 	state->packet           = av_packet_alloc();

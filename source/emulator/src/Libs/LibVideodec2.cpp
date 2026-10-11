@@ -8,7 +8,6 @@
 #include <cinttypes>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -125,32 +124,25 @@ struct ComputeQueue
 	uint16_t queue_id = 0;
 };
 
-struct PictureSource
-{
-	uint64_t pts_data;
-	uint64_t dts_data;
-	uint64_t attached_data;
-};
-
 struct Decoder
 {
 	std::mutex                                       mutex;
 	uint32_t                                         codec_type = 0;
 	std::unique_ptr<Backend::ElementaryVideoDecoder> backend;
 	int64_t                                          next_tag = 0;
-	std::map<int64_t, PictureSource>                 sources;
 };
 
 static uint32_t AlignUp(uint32_t value, uint32_t alignment)
 {
-	return (value + alignment - 1u) / alignment * alignment;
+	return static_cast<uint32_t>((static_cast<uint64_t>(value) + alignment - 1u) / alignment * alignment);
 }
 
 // NV12 with the chroma rows right after the luma rows, both at the same pitch.
 static uint64_t FrameBufferSize(uint32_t width, uint32_t height)
 {
-	const uint64_t pitch = AlignUp(width, FRAME_PITCH_ALIGNMENT);
-	return pitch * height + pitch * ((height + 1u) / 2u);
+	const uint64_t pitch        = AlignUp(width, FRAME_PITCH_ALIGNMENT);
+	const uint64_t frame_height = height;
+	return pitch * frame_height + pitch * ((frame_height + 1u) / 2u);
 }
 
 static bool SizeIs(uint64_t this_size, uint64_t expected, const char* name)
@@ -229,13 +221,15 @@ static KYTY_SYSV_ABI int Videodec2CreateDecoder(const DecoderConfigInfo* config,
 	if (config == nullptr || memory == nullptr || decoder == nullptr ||
 	    !SizeIs(config->this_size, sizeof(DecoderConfigInfo), "DecoderConfigInfo") ||
 	    !SizeIs(memory->this_size, sizeof(DecoderMemoryInfo), "DecoderMemoryInfo") ||
-	    (config->codec_type != CODEC_AVC && config->codec_type != CODEC_HEVC))
+	    (config->codec_type != CODEC_AVC && config->codec_type != CODEC_HEVC) || config->max_frame_width <= 0 ||
+	    config->max_frame_height <= 0)
 	{
 		return LibKernel::KERNEL_ERROR_EINVAL;
 	}
 	std::string error;
 	auto        backend = Backend::ElementaryVideoDecoder::Open(
-	           config->codec_type == CODEC_HEVC ? Backend::VideoCodec::Hevc : Backend::VideoCodec::Avc, &error);
+	           config->codec_type == CODEC_HEVC ? Backend::VideoCodec::Hevc : Backend::VideoCodec::Avc, config->max_frame_width,
+	           config->max_frame_height, &error);
 	if (backend == nullptr)
 	{
 		KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Videodec2 decoder unavailable: %s\n", error.c_str());
@@ -273,7 +267,7 @@ static int OutputPicture(Decoder* decoder, FrameBuffer* frame_buffer, OutputInfo
 	{
 		return OK;
 	}
-	decoder->sources.erase(tag);
+	(void)tag;
 	const uint32_t pitch       = AlignUp(picture.width, FRAME_PITCH_ALIGNMENT);
 	const uint64_t frame_bytes = FrameBufferSize(picture.width, picture.height);
 	if (frame_buffer->frame_buffer == nullptr || frame_buffer->frame_buffer_size < frame_bytes)
@@ -318,12 +312,10 @@ static KYTY_SYSV_ABI int Videodec2Decode(Decoder* decoder, const InputData* inpu
 	std::lock_guard<std::mutex> lock(decoder->mutex);
 	if (input->au_data != nullptr && input->au_size != 0)
 	{
-		const int64_t tag     = decoder->next_tag++;
-		decoder->sources[tag] = {input->pts_data, input->dts_data, input->attached_data};
+		const int64_t tag = decoder->next_tag++;
 		if (!decoder->backend->Send(static_cast<const uint8_t*>(input->au_data), input->au_size, tag))
 		{
 			KYTY_LOG_LIMIT(Log::Level::Warn, 8, "WARNING: Videodec2 decode failed: %s\n", decoder->backend->LastError());
-			decoder->sources.erase(tag);
 		}
 	}
 	return OutputPicture(decoder, frame_buffer, output);
@@ -354,7 +346,6 @@ static KYTY_SYSV_ABI int Videodec2Reset(Decoder* decoder)
 	}
 	std::lock_guard<std::mutex> lock(decoder->mutex);
 	decoder->backend->Reset();
-	decoder->sources.clear();
 	return OK;
 }
 

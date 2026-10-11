@@ -15,13 +15,14 @@
 // merged where control flow joins.
 namespace Kyty::Libs::Graphics::LaneFlow {
 
-// Scalar word numbering, identical to ShaderNggScalarDependencies.
-constexpr unsigned kSgprWords   = 104;
-constexpr unsigned kVccLoWord   = 104;
-constexpr unsigned kExecLoWord  = 106;
-constexpr unsigned kM0Word      = 108;
-constexpr unsigned kSccWord     = 109;
-constexpr unsigned kWords       = 110;
+// Scalar word numbering, identical to ShaderNggScalarDependencies: the RDNA2
+// SGPR0..SGPR105, then VCC, EXEC, M0 and SCC.
+constexpr unsigned kSgprWords   = 106;
+constexpr unsigned kVccLoWord   = 106;
+constexpr unsigned kExecLoWord  = 108;
+constexpr unsigned kM0Word      = 110;
+constexpr unsigned kSccWord     = 111;
+constexpr unsigned kWords       = 112;
 constexpr int      kVgprs       = 256;
 
 // Taint of a scalar word.

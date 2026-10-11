@@ -14,9 +14,11 @@ class ShaderNativeWaveVerdict;
 
 struct RenderResolutionShaderUsageKey
 {
-	uint64_t address            = 0;
-	uint64_t checksum           = 0;
-	uint32_t translator_version = 0;
+	uint64_t address                = 0;
+	uint64_t checksum               = 0;
+	uint32_t translator_version     = 0;
+	uint32_t pixel_extra_lds_dwords = 0;
+	int      pixel_parameter_sgpr   = -1;
 
 	[[nodiscard]] bool operator==(const RenderResolutionShaderUsageKey& other) const;
 };

@@ -51,6 +51,12 @@ TEST(EmulatorComputeWaveResourceAnalysis, AdmitsExactMappedEudStorageLoad)
 	const auto instruction = MappedLoad();
 	const auto bind        = MappedBinding();
 	EXPECT_TRUE(ShaderPairedEudStorageLoadSupported(instruction, bind));
+	auto high_instruction = instruction;
+	auto high_bind = bind;
+	high_instruction.src[1].constant.u = 264u * 4u;
+	high_bind.extended.eud_size_dw = 268u;
+	high_bind.dynamic_sloads.records[0].offset_dw = 264;
+	EXPECT_TRUE(ShaderPairedEudStorageLoadSupported(high_instruction, high_bind));
 }
 
 TEST(EmulatorComputeWaveResourceAnalysis, RejectsNonExactOrIncompleteMappings)
@@ -150,9 +156,9 @@ TEST(EmulatorComputeWaveResourceAnalysis, RejectsNonExactOrIncompleteMappings)
 	changed_bind.extended.eud_offset_base = 16;
 	EXPECT_FALSE(ShaderPairedEudStorageLoadSupported(instruction, changed_bind));
 	changed_instruction = instruction;
-	changed_instruction.src[1].constant.u = 253u * 4u;
+	changed_instruction.src[1].constant.u = (SHADER_GEN5_EUD_MAX_DWORDS - 3u) * 4u;
 	changed_bind = bind;
-	changed_bind.dynamic_sloads.records[0].offset_dw = 253;
+	changed_bind.dynamic_sloads.records[0].offset_dw = SHADER_GEN5_EUD_MAX_DWORDS - 3;
 	changed_bind.extended.eud_size_dw = 1u;
 	EXPECT_FALSE(ShaderPairedEudStorageLoadSupported(changed_instruction, changed_bind));
 }

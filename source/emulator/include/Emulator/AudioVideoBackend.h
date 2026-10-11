@@ -113,7 +113,8 @@ class ElementaryVideoDecoder final
 public:
 	struct State;
 
-	static std::unique_ptr<ElementaryVideoDecoder> Open(VideoCodec codec, std::string* error = nullptr);
+	static std::unique_ptr<ElementaryVideoDecoder> Open(VideoCodec codec, int32_t max_frame_width, int32_t max_frame_height,
+	                                                   std::string* error = nullptr);
 
 	~ElementaryVideoDecoder();
 

@@ -2307,11 +2307,34 @@ void TileGetTextureSize2(uint32_t format, uint32_t width, uint32_t height, uint3
 		// This path is intentionally limited to a single mip until the tail layout is
 		// independently exercised; it still covers any dimensions/pitches that
 		// fit the documented one-level block geometry.
-		// kStandard256B (tile 1) uses the same arithmetic with 256-byte blocks; its mip
-		// tail is not modelled, so it accepts one level only.
+		// kStandard256B (tile 1) uses the same arithmetic with 256-byte blocks. Its
+		// mip chains have no tail; Gen5GetStandard256BTextureMipLayout places them.
 		if (tile == 0x01u && levels != 1u)
 		{
-			EXIT("unsupported Gen5 SW_256B_S mip chain: format=%u %ux%u levels=%u\n", format, width, height, levels);
+			Gen5TextureMipLayout chain {};
+			if (!Gen5GetStandard256BTextureMipLayout(format, width, height, pitch != 0u ? pitch : width, levels, &chain))
+			{
+				EXIT("unsupported Gen5 SW_256B_S mip chain: format=%u %ux%u levels=%u\n", format, width, height, levels);
+			}
+			if (total_size != nullptr)
+			{
+				*total_size = chain.tiled;
+			}
+			for (uint32_t l = 0; l < levels; l++)
+			{
+				const auto& entry = chain.level[l];
+				if (level_sizes != nullptr)
+				{
+					level_sizes[l].offset = entry.tiled_offset;
+					level_sizes[l].size   = entry.tiled_size;
+				}
+				if (padded_size != nullptr)
+				{
+					padded_size[l].width  = entry.tiled_pitch * chain.texels_per_element_x;
+					padded_size[l].height = entry.tiled_size / (entry.tiled_pitch * chain.bytes_per_element) * chain.texels_per_element_y;
+				}
+			}
+			return;
 		}
 		if (tile == 0x05u || tile == 0x01u)
 		{

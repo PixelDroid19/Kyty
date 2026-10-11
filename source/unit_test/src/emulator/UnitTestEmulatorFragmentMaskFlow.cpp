@@ -4,6 +4,8 @@
 #include "Emulator/Graphics/ShaderFragmentMaskFlow.h"
 #include "Emulator/Graphics/ShaderParse.h"
 #include "Emulator/Graphics/ShaderSpirv.h"
+#include "Emulator/Config.h"
+#include "Emulator/ConfigSource.h"
 #include "NggPassthroughFixture.h"
 #include "../../../emulator/src/Graphics/ShaderSpirvToolchain.h"
 
@@ -21,6 +23,25 @@ using namespace Libs::Graphics;
 namespace {
 
 using namespace NggFixture;
+
+class ScopedShaderValidation final: public Config::ConfigSource
+{
+public:
+	ScopedShaderValidation(): m_previous(Config::ShaderValidationEnabled()) { Config::Load(*this); }
+	~ScopedShaderValidation() override
+	{
+		m_enabled = m_previous;
+		Config::Load(*this);
+	}
+	bool Has(const Core::String& key) const override { return key == U"ShaderValidationEnabled"; }
+	int64_t GetInteger(const Core::String&) const override { return 0; }
+	bool GetBool(const Core::String&) const override { return m_enabled; }
+	Core::String GetString(const Core::String&) const override { return {}; }
+
+private:
+	bool m_previous;
+	bool m_enabled = true;
+};
 
 // One entry per source instruction so a variant can insert, drop or reorder whole
 // instructions. Independently authored generic RDNA2 encodings of the pattern a
@@ -108,7 +129,476 @@ void ExpectNotLaneLocal(const ShaderCode& code, const char* why)
 	}
 }
 
+void ExpectNativeRefusal(const ShaderCode& code, const char* why)
+{
+	for (uint32_t width: {32u, 64u})
+	{
+		const auto wave = ShaderAnalyzeNativeWave(code, width);
+		Check(wave.refusal_reason != nullptr, why);
+	}
+}
+
+Words DsAddtidWrite(uint32_t data, uint16_t offset)
+{
+	return {0xd8000000u | (0xb0u << 18u) | offset, data << 8u};
+}
+
+Words DsAddtidRead(uint32_t destination, uint16_t offset)
+{
+	return {0xd8000000u | (0xb1u << 18u) | offset, destination << 24u};
+}
+
+Words DsWriteB32(uint32_t address, uint32_t data, uint16_t offset)
+{
+	return {0xd8000000u | (0x0du << 18u) | offset, (data << 8u) | address};
+}
+
+Words VAddF32FromScalarMask()
+{
+	// VOP3 v_add_f32 v10, exec_lo, 0: a valid tuple that reads the mask as a number.
+	return {0xd0000000u | (0x103u << 16u) | 10u, kExecLo | (Inline(0) << 9u)};
+}
+
+Words Mrt0Export(uint32_t red, uint32_t green, uint32_t blue, uint32_t alpha)
+{
+	return {0xf800180fu, red | (green << 8u) | (blue << 16u) | (alpha << 24u)};
+}
+
+Words VInterpP1(uint32_t destination, uint32_t source, uint32_t attribute, uint32_t channel)
+{
+	return {0xc8000000u | (destination << 18u) | (attribute << 10u) | (channel << 8u) | source};
+}
+
+struct AddtidOp
+{
+	Words words;
+	bool  read = false;
+};
+
+enum class AddtidMutation
+{
+	None,
+	AliasPlanes,
+	ReadBeforeWrite,
+	UnknownM0,
+	UnalignedM0,
+	AlignedM0Offset,
+	HighM0Address,
+	ClobberedM0,
+	WidenExecBetweenStoreAndRead,
+	MixedDs,
+	BranchIntoInterval,
+	BranchTargetResetsM0,
+	Wave64PlaneOverlap,
+	NoWqmReadBeforeWrite,
+	ScalarMaskAsNumber,
+};
+
+std::vector<Words> AddtidProgram(AddtidMutation mutation)
+{
+	if (mutation == AddtidMutation::NoWqmReadBeforeWrite)
+	{
+		std::vector<Words> slots;
+		Words             m0;
+		Sop1(m0, 3, kM0Reg, Inline(0));
+		slots.push_back(m0);
+		slots.push_back(DsAddtidRead(20u, 0u));
+		slots.push_back(DsAddtidWrite(10u, 0u));
+		slots.push_back(Mrt0Export(20u, 20u, 20u, 20u));
+		Words end;
+		Sopp(end, 1);
+		slots.push_back(end);
+		return slots;
+	}
+
+	auto slots = Baseline();
+	slots[kZero].clear(); // leave the reloaded values live through the MRT0 export
+	slots[kExport] = Mrt0Export(20u, 21u, 22u, 22u);
+	const uint32_t m0_source = mutation == AddtidMutation::UnknownM0 ? 16u
+	                           : mutation == AddtidMutation::UnalignedM0 ? Inline(1)
+	                                                                    : Inline(0);
+	if (mutation == AddtidMutation::AlignedM0Offset)
+	{
+		Sop1(slots[kM0], 3, kM0Reg, 255u, 256u);
+	} else if (mutation == AddtidMutation::HighM0Address)
+	{
+		Sop1(slots[kM0], 3, kM0Reg, 255u, 0xfffffffcu);
+	} else
+	{
+		Sop1(slots[kM0], 3, kM0Reg, m0_source); // exact M0=0 for the accepted fixture
+	}
+
+	const uint16_t offsets[] = {0u, mutation == AddtidMutation::AliasPlanes       ? 4u
+	                                  : mutation == AddtidMutation::Wave64PlaneOverlap ? 0x80u
+	                                                                                   : 0x100u,
+	                            0x200u};
+	std::vector<AddtidOp> operations;
+	if (mutation == AddtidMutation::ScalarMaskAsNumber) { operations.push_back({VAddF32FromScalarMask(), false}); }
+	for (uint32_t plane = 0; plane < 3u; ++plane)
+	{
+		if (mutation == AddtidMutation::ScalarMaskAsNumber && plane == 0u) { continue; }
+		Words seed;
+		Vop1(seed, 1, 10u + plane, Inline(static_cast<int>(plane + 1u)));
+		operations.push_back({seed, false});
+	}
+	if (mutation == AddtidMutation::ReadBeforeWrite)
+	{
+		operations.push_back({DsAddtidRead(20u, offsets[0]), true});
+	}
+	for (uint32_t plane = 0; plane < 3u; ++plane)
+	{
+		const auto write = mutation == AddtidMutation::MixedDs && plane == 0u ? DsWriteB32(30u, 10u, offsets[plane])
+		                                                                        : DsAddtidWrite(10u + plane, offsets[plane]);
+		operations.push_back({write, false});
+	}
+	if (mutation == AddtidMutation::ClobberedM0)
+	{
+		Words clobber;
+		Sop1(clobber, 3, kM0Reg, Inline(4));
+		operations.push_back({clobber, false});
+	}
+	for (uint32_t plane = mutation == AddtidMutation::ReadBeforeWrite ? 1u : 0u;
+	     plane < 3u; ++plane)
+	{
+		operations.push_back({DsAddtidRead(20u + plane, offsets[plane]), true});
+	}
+
+	if (mutation == AddtidMutation::BranchIntoInterval)
+	{
+		uint32_t words_before_read = 0;
+		for (const auto& operation: operations)
+		{
+			if (operation.read) { break; }
+			words_before_read += static_cast<uint32_t>(operation.words.size());
+		}
+		Words branch;
+		Sopp(branch, 2, words_before_read); // jump directly into the read half, bypassing every store
+		operations.insert(operations.begin(), {branch, false});
+	}
+
+	if (mutation == AddtidMutation::WidenExecBetweenStoreAndRead)
+	{
+		std::vector<Words> stores;
+		std::vector<Words> reads;
+		for (const auto& operation: operations)
+		{
+			(operation.read ? reads : stores).push_back(operation.words);
+		}
+		const uint32_t wait_index = kWait + static_cast<uint32_t>(stores.size());
+		slots.insert(slots.begin() + kWqm, stores.begin(), stores.end()); // live EXEC stores precede WQM
+		slots.insert(slots.begin() + wait_index + 1u, reads.begin(), reads.end()); // reads run after WQM widens EXEC
+	} else
+	{
+		std::vector<Words> encoded;
+		for (const auto& operation: operations) { encoded.push_back(operation.words); }
+		slots.insert(slots.begin() + kWait + 1u, encoded.begin(), encoded.end());
+	}
+	if (mutation == AddtidMutation::BranchTargetResetsM0)
+	{
+		Words branch;
+		Sopp(branch, 2, 0); // branch to the next instruction, before the first ADD_TID access
+		slots.insert(slots.begin() + kM0 + 1u, branch);
+	}
+	return slots;
+}
+
+std::vector<Words> AddtidVinterpProgram(bool restore_origin)
+{
+	std::vector<Words> slots;
+	Words             setup_parameter_m0;
+	Sop1(setup_parameter_m0, 3, kM0Reg, 30); // m0 = the caller-provided pixel LDS parameter
+	slots.push_back(setup_parameter_m0);
+	Words save_parameter_m0;
+	Sop1(save_parameter_m0, 3, 0, kM0Reg); // s0 = the original parameter base
+	slots.push_back(save_parameter_m0);
+	Words reuse_parameter_sgpr;
+	Sop1(reuse_parameter_sgpr, 3, 30, Inline(8)); // reusing the incoming parameter SGPR must not erase s0's origin
+	slots.push_back(reuse_parameter_sgpr);
+	Words set_scratch_m0;
+	Sop1(set_scratch_m0, 3, kM0Reg, Inline(0));
+	slots.push_back(set_scratch_m0);
+	Words save_exec;
+	Sop1(save_exec, 4, 12, kExecLo);
+	slots.push_back(save_exec);
+	Words enter_wqm;
+	Sop1(enter_wqm, 10, kExecLo, kExecLo);
+	slots.push_back(enter_wqm);
+	Words wait;
+	Sopp(wait, 12, 0xc07f);
+	slots.push_back(wait);
+	for (uint32_t plane = 0; plane < 3u; ++plane)
+	{
+		Words seed;
+		Vop1(seed, 1, 10u + plane, Inline(static_cast<int>(plane + 1u)));
+		slots.push_back(seed);
+	}
+	const uint16_t offsets[] = {0u, 0x100u, 0x200u};
+	for (uint32_t plane = 0; plane < 3u; ++plane) { slots.push_back(DsAddtidWrite(10u + plane, offsets[plane])); }
+	for (uint32_t plane = 0; plane < 3u; ++plane) { slots.push_back(DsAddtidRead(20u + plane, offsets[plane])); }
+	Words restore_m0;
+	if (restore_origin)
+	{
+		Sop1(restore_m0, 3, kM0Reg, 0);
+	} else
+	{
+		Sop1(restore_m0, 3, kM0Reg, Inline(4));
+	}
+	slots.push_back(restore_m0);
+	slots.push_back(VInterpP1(23u, 0u, 0u, 0u));
+	Words restore_exec;
+	Sop1(restore_exec, 4, kExecLo, 12);
+	slots.push_back(restore_exec);
+	slots.push_back(Mrt0Export(23u, 23u, 23u, 23u));
+	Words end;
+	Sopp(end, 1);
+	slots.push_back(end);
+	return slots;
+}
+
+std::vector<Words> AddtidEmitterProgram()
+{
+	std::vector<Words> slots;
+	Words             m0;
+	Sop1(m0, 3, kM0Reg, Inline(0));
+	slots.push_back(m0);
+	Words save_exec;
+	Sop1(save_exec, 4, 12, kExecLo);
+	slots.push_back(save_exec);
+	Words enter_wqm;
+	Sop1(enter_wqm, 10, kExecLo, kExecLo);
+	slots.push_back(enter_wqm);
+	Words wait;
+	Sopp(wait, 12, 0xc07f);
+	slots.push_back(wait);
+	for (uint32_t plane = 0; plane < 3u; ++plane)
+	{
+		Words seed;
+		Vop1(seed, 1, 10u + plane, Inline(static_cast<int>(plane + 1u)));
+		slots.push_back(seed);
+	}
+	const uint16_t offsets[] = {0u, 0x100u, 0x200u};
+	for (uint32_t plane = 0; plane < 3u; ++plane) { slots.push_back(DsAddtidWrite(10u + plane, offsets[plane])); }
+	for (uint32_t plane = 0; plane < 3u; ++plane) { slots.push_back(DsAddtidRead(20u + plane, offsets[plane])); }
+	Words restore_exec;
+	Sop1(restore_exec, 4, kExecLo, 12);
+	slots.push_back(restore_exec);
+	slots.push_back(Mrt0Export(20u, 21u, 22u, 22u));
+	Words end;
+	Sopp(end, 1);
+	slots.push_back(end);
+	return slots;
+}
+
+ShaderCode ParseAddtidPixel(const std::vector<Words>& words, uint32_t extra_dwords = 256u)
+{
+	auto code = ParsePixel(words);
+	code.SetPixelLdsAllocation(extra_dwords, 30);
+	return code;
+}
+
+ShaderCode ParseAddtidPixel(AddtidMutation mutation, uint32_t extra_dwords = 256u)
+{
+	return ParseAddtidPixel(AddtidProgram(mutation), extra_dwords);
+}
+
 } // namespace
+
+TEST(EmulatorFragmentMaskFlow, ProvesStableWqmAddtidPlanesForBothNativeWaveSizes)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto code = ParseAddtidPixel(AddtidMutation::None);
+		const auto& instructions = code.GetInstructions();
+		uint32_t writes = 0;
+		uint32_t reads = 0;
+		uint32_t wqm_count = 0;
+		bool     reads_started = false;
+		bool     exact_m0_zero = false;
+		bool     wqm_seen = false;
+		for (uint32_t index = 0; index < instructions.Size(); ++index)
+		{
+			const auto& inst = instructions.At(index);
+			if (inst.dst.type == ShaderOperandType::M0 && inst.src_num == 1 &&
+			    inst.src[0].type == ShaderOperandType::IntegerInlineConstant && inst.src[0].constant.i == 0)
+			{
+				exact_m0_zero = true;
+			}
+			if (inst.type == ShaderInstructionType::SWqmB64)
+			{
+				Check(exact_m0_zero, "M0=0 is established before WQM");
+				++wqm_count;
+				wqm_seen = true;
+			}
+			if (inst.type == ShaderInstructionType::DsWriteAddtidB32)
+			{
+				Check(wqm_seen, "the private-slot stores run after WQM starts");
+				Check(!reads_started, "all private-slot stores precede their reads");
+				++writes;
+			}
+			if (inst.type == ShaderInstructionType::DsReadAddtidB32)
+			{
+				reads_started = true;
+				++reads;
+			}
+		}
+		Check(exact_m0_zero && wqm_count == 1u && writes == 3u && reads == 3u,
+		      "the complete three-slot fixture uses M0=0 inside one stable WQM region");
+		const auto& export_inst = instructions.At(Find(code, ShaderInstructionType::Exp));
+		Check(export_inst.src_num == 4 && export_inst.src[0].register_id == 20 && export_inst.src[1].register_id == 21 &&
+		          export_inst.src[2].register_id == 22 && export_inst.src[3].register_id == 22,
+		      "the ADD_TID reloads feed the exported MRT0 components");
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		Check(flow.lane_local && flow.reason == nullptr, "paired private slots preserve lane-local masks");
+		for (uint32_t width: {32u, 64u})
+		{
+			const auto wave = ShaderAnalyzeNativeWave(code, width);
+			Check(wave.refusal_reason == nullptr && wave.proof == ShaderNativeWaveProof::LaneLocal,
+			      "the proved fragment pattern is native-wave lane local");
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, RequiresEnoughDeclaredPixelLdsForTheAddtidSpan)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		struct Case
+		{
+			uint32_t extra_dwords;
+			bool     admitted;
+		};
+		const Case cases[] = {{0u, false}, {128u, false}, {256u, true}};
+		for (const auto& test: cases)
+		{
+			const auto code = ParseAddtidPixel(AddtidMutation::None, test.extra_dwords);
+			Check(code.GetPixelExtraLdsDwords() == test.extra_dwords && code.GetPixelParameterSgpr() == 30,
+			      "the fixture carries the declared PS LDS metadata");
+			const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+			Check(flow.lane_local == test.admitted, "the full three-plane span must fit its declared allocation");
+			for (uint32_t width: {32u, 64u})
+			{
+				const auto wave = ShaderAnalyzeNativeWave(code, width);
+				if (test.admitted)
+				{
+					Check(wave.refusal_reason == nullptr && wave.proof == ShaderNativeWaveProof::LaneLocal,
+					      "the full allocation admits the three-plane proof");
+				} else
+				{
+					Check(wave.refusal_reason != nullptr, "an undersized allocation carries an explicit refusal");
+				}
+			}
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, AcceptsAlignedM0OffsetInsideTheDeclaredPixelLds)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto code = ParseAddtidPixel(AddtidMutation::AlignedM0Offset);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		Check(flow.lane_local && flow.reason == nullptr,
+		      "aligned nonzero M0 keeps all three wave64 spill planes inside the declared allocation");
+		for (uint32_t width: {32u, 64u})
+		{
+			const auto wave = ShaderAnalyzeNativeWave(code, width);
+			Check(wave.refusal_reason == nullptr && wave.proof == ShaderNativeWaveProof::LaneLocal,
+			      "the bounded aligned M0 offset preserves the proof for either supported native width");
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, RestoresThePixelParameterM0BeforeInterpolation)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto restored = ParseAddtidPixel(AddtidVinterpProgram(true));
+		Check(restored.GetPixelParameterSgpr() == 30, "the fixture identifies the implicit pixel LDS parameter");
+		Check(Find(restored, ShaderInstructionType::VInterpP1F32) < Find(restored, ShaderInstructionType::Exp),
+		      "the interpolation follows the ADD_TID spill and restore");
+		const auto accepted = ShaderAnalyzeFragmentMaskFlow(restored);
+		Check(accepted.lane_local && accepted.reason == nullptr,
+		      "VInterp observes the restored parameter M0 after the private spill");
+
+		const auto clobbered = ParseAddtidPixel(AddtidVinterpProgram(false));
+		const auto rejected = ShaderAnalyzeFragmentMaskFlow(clobbered);
+		Check(!rejected.lane_local, "numeric M0 overlapping the private spill is refused before VInterp");
+		ExpectNativeRefusal(clobbered, "VInterp with scratch M0 has an explicit native-wave refusal");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, EmitsAndValidatesADeclaredPixelAddtidSpill)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		ScopedShaderValidation validation;
+		Check(Config::ShaderValidationEnabled(), "SPIR-V validation is explicitly enabled at the toolchain boundary");
+		const auto code = ParseAddtidPixel(AddtidEmitterProgram());
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		Check(flow.lane_local && flow.reason == nullptr, "the emitter fixture proves stable private spill slots");
+		ShaderPixelInputInfo input {};
+		input.native_wave = ShaderAnalyzeNativeWave(code, 64u);
+		Check(input.native_wave.refusal_reason == nullptr, "the emitter consumes the native-wave proof");
+		input.required_subgroup_size = 64u;
+		const auto source = SpirvGenerateSource(code, nullptr, &input, nullptr);
+		Check(!source.IsEmpty(), "the fragment ADD_TID program emits GLSL-like SPIR-V source");
+		Vector<uint32_t> binary;
+		String8          error;
+		Check(ShaderToolchain::Run(source, &binary, &error) && !binary.IsEmpty(), error.c_str());
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, RejectsAddtidPatternsWithoutAnExactPrivateSlotProof)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		struct Case
+		{
+			AddtidMutation mutation;
+			const char*    reason;
+		};
+		const Case cases[] = {
+		    {AddtidMutation::AliasPlanes, "overlapping private slots are refused"},
+		    {AddtidMutation::ReadBeforeWrite, "a read before its matching store is refused"},
+			{AddtidMutation::UnknownM0, "an unknown M0 base is refused"},
+			{AddtidMutation::UnalignedM0, "an unaligned M0 base is refused"},
+			{AddtidMutation::HighM0Address, "an aligned high M0 address outside the allocation is refused without wraparound"},
+			{AddtidMutation::ClobberedM0, "an M0 clobber inside the interval is refused"},
+		    {AddtidMutation::WidenExecBetweenStoreAndRead, "widening EXEC between the store and read is refused"},
+		    {AddtidMutation::MixedDs, "a mixed shared DS access is refused"},
+			{AddtidMutation::BranchIntoInterval, "a branch into the read half is refused"},
+			{AddtidMutation::BranchTargetResetsM0, "a branch target before the spill resets M0 provenance"},
+			{AddtidMutation::Wave64PlaneOverlap, "planes 128 bytes apart still overlap for a wave64 spill"},
+		    {AddtidMutation::NoWqmReadBeforeWrite, "a no-WQM read before store is refused despite monotone masks"},
+		};
+		for (const auto& test: cases)
+		{
+			const auto code = ParseAddtidPixel(test.mutation);
+			const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+			Check(!flow.lane_local, test.reason);
+			ExpectNativeRefusal(code, test.reason);
+		}
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
+
+TEST(EmulatorFragmentMaskFlow, RefusesNumericMaskBeforeTheValueCanBeSpilledThroughAddtid)
+{
+	ASSERT_EXIT(([] {
+		Initialize();
+		const auto code = ParseAddtidPixel(AddtidMutation::ScalarMaskAsNumber);
+		const auto flow = ShaderAnalyzeFragmentMaskFlow(code);
+		Check(!flow.lane_local && Contains(flow.reason, "mask observed as a number"),
+		      "a mask cannot become a numeric VGPR value before the LDS spill");
+		ExpectNativeRefusal(code, "a numeric mask value is never native-wave lane local");
+		std::_Exit(0);
+	})(), ::testing::ExitedWithCode(0), "");
+}
 
 TEST(EmulatorFragmentMaskFlow, AdmitsTheWqmBracketedUniformSelectAsLaneLocal)
 {

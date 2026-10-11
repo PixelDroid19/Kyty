@@ -763,6 +763,12 @@ static void graphics_init_jmp_tables_sh_indirect()
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_CHKSUM_PS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetPsShaderChksum(value); };
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC3_PS] = [](KYTY_HW_SH_INDIRECT_ARGS) { cp->GetShCtx()->SetPsRsrc3(value); };
+	// Offset 1 has a different legacy meaning; only decode it as Gen5 PS RSRC4 in next-gen mode.
+	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC4_PS] = [](KYTY_HW_SH_INDIRECT_ARGS)
+	{
+		if (!Config::IsNextGen()) { EXIT("SPI_SHADER_PGM_RSRC4_PS is unsupported outside next-gen mode\n"); }
+		cp->GetShCtx()->SetPsRsrc4(value);
+	};
 
 	g_hw_sh_indirect_func[Pm4::SPI_SHADER_PGM_RSRC1_PS] = [](KYTY_HW_SH_INDIRECT_ARGS)
 	{
@@ -1020,6 +1026,12 @@ void graphics_init_jmp_tables()
 	{
 		func = nullptr;
 	}
+	g_hw_sh_func[Pm4::SPI_SHADER_PGM_RSRC4_PS] = [](KYTY_HW_SH_PARSER_ARGS)
+	{
+		if (!Config::IsNextGen() || ((cmd_id >> 16u) & 0x3fffu) != 1u || dw < 2u) { return 0u; }
+		cp->GetShCtx()->SetPsRsrc4(buffer[0]);
+		return 1u;
+	};
 
 	for (uint32_t slot = 0; slot < 16; slot++)
 	{

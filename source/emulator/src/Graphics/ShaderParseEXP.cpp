@@ -113,12 +113,19 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		}
 	} else if (target == 0x08u && dst->GetType() == ShaderType::Pixel)
 	{
-		// RDNA2 Table 56: target 8 is pixel Z. Only the captured full-precision
-		// one-channel form is accepted; all other target-8 encodings remain strict.
-		if (done != 0 && compr == 0 && vm != 0 && en == 0x1u)
+		// RDNA2 Table 56: target 8 is pixel Z. Only the full-precision depth-only
+		// form is accepted, as the last export or ahead of the color exports;
+		// stencil, sample-mask and alpha channels remain strict.
+		if (compr == 0 && vm != 0 && en == 0x1u)
 		{
-			inst.format  = ShaderInstructionFormat::PixelZVsrc0VmDone;
+			inst.format  = done != 0 ? ShaderInstructionFormat::PixelZVsrc0VmDone : ShaderInstructionFormat::PixelZVsrc0Vm;
 			inst.src_num = 1;
+		} else if (done != 0 && compr == 0 && vm != 0 && en == 0u)
+		{
+			// With no channel enabled the export carries only the valid mask and
+			// DONE, exactly like the NULL target (a discard tail).
+			inst.format  = ShaderInstructionFormat::NullVmDone;
+			inst.src_num = 0;
 		}
 	} else if (target == 0x09u && next_gen && dst->GetType() == ShaderType::Pixel)
 	{
@@ -133,15 +140,26 @@ KYTY_SHADER_PARSER(shader_parse_exp)
 		if (done != 0 && en == 0xfu)
 		{
 			inst.format = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3Done;
+		} else if (next_gen && dst->GetType() == ShaderType::Vertex && done == 0 && compr == 0 && vm == 0 && en == 0xfu)
+		{
+			inst.format = ShaderInstructionFormat::Pos0Vsrc0Vsrc1Vsrc2Vsrc3;
 		}
 	} else if (target == 0x0du && dst->GetType() == ShaderType::Vertex && Config::IsNextGen())
 	{
-		// Z is the only source in this form. DONE marks the last position
-		// export, so both intermediate and final miscellaneous exports are valid.
+		// Preserve physical Z or non-final X. The position-format/output-control
+		// state determines their meaning when the instruction is lowered.
 		if (compr == 0 && vm == 0 && en == 0x4u)
 		{
 			inst.format  = ShaderInstructionFormat::Pos1OffOffVsrc0Off;
 			inst.src[0]  = inst.src[2];
+			inst.src_num = 1;
+		} else if (compr == 0 && vm == 0 && done != 0 && en == 0x1u)
+		{
+			inst.format  = ShaderInstructionFormat::Pos1Vsrc0OffOffOffDone;
+			inst.src_num = 1;
+		} else if (compr == 0 && vm == 0 && done == 0 && en == 0x1u)
+		{
+			inst.format  = ShaderInstructionFormat::Pos1Vsrc0OffOffOff;
 			inst.src_num = 1;
 		}
 	} else if (target == 0x14u)

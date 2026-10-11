@@ -71,8 +71,12 @@ static bool IsIdentityViewStorageFormat(uint32_t fmt)
 	return fmt == 5u || fmt == 7u || fmt == 11u || fmt == 13u || fmt == 14u || fmt == 62u;
 }
 
-static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
+// `format` is the packed PARAM_FORMAT (fmt << 16 | dfmt << 8 | nfmt).
+static uint32_t NormalizeStorageTextureSwizzle(uint64_t format, uint32_t swizzle)
 {
+	const auto fmt  = static_cast<uint32_t>((format >> 16u) & 0xffffu);
+	const auto dfmt = static_cast<uint8_t>(format >> 8u);
+	const auto nfmt = static_cast<uint8_t>(format);
 	// Storage image views for these typed formats use identity component
 	// mapping. Reuse must follow the effective host view contract rather than
 	// the raw guest selector bits, otherwise equivalent bindings churn a fresh
@@ -104,7 +108,7 @@ static uint32_t NormalizeStorageTextureSwizzle(uint32_t fmt, uint32_t swizzle)
 		// image views must keep an identity component mapping.
 		return DstSel(4, 5, 6, 7);
 	}
-	if (ShaderStorageImageSwizzleInShader(swizzle))
+	if (ShaderStorageImageSwizzleInShader(swizzle, VulkanStorageHasRedBlueView(dfmt, nfmt, static_cast<uint16_t>(fmt))))
 	{
 		// The image-store emitter places each component in its selected channel.
 		return DstSel(4, 5, 6, 7);
@@ -463,7 +467,7 @@ static void* create_func(GraphicContext* ctx, const uint64_t* params, const uint
 	auto       height            = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
 	auto       base_level        = params[StorageTextureObject::PARAM_LEVELS] >> 32u;
 	auto       levels            = params[StorageTextureObject::PARAM_LEVELS] & 0xffffffffu;
-	auto       swizzle           = NormalizeStorageTextureSwizzle(fmt, params[StorageTextureObject::PARAM_SWIZZLE]);
+	auto       swizzle           = NormalizeStorageTextureSwizzle(params[StorageTextureObject::PARAM_FORMAT], params[StorageTextureObject::PARAM_SWIZZLE]);
 	auto       resource_type     = params[StorageTextureObject::PARAM_RESOURCE_TYPE];
 	auto       depth             = params[StorageTextureObject::PARAM_DEPTH];
 	auto       base_array        = params[StorageTextureObject::PARAM_BASE_ARRAY];
@@ -778,8 +782,6 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 		return false;
 	}
 
-	const auto fmt       = static_cast<uint32_t>((params[PARAM_FORMAT] >> 16u) & 0xffffu);
-	const auto other_fmt = static_cast<uint32_t>((other[PARAM_FORMAT] >> 16u) & 0xffffu);
 	// Descriptors that pick different levels of one chain are views of one backing.
 	const bool gen5               = GuestIsGen5();
 	const bool same_mip_backing   = StorageTextureUsesMipBacking(params, gen5) && StorageTextureUsesMipBacking(other, gen5) &&
@@ -788,7 +790,8 @@ bool StorageTextureObject::Equal(const uint64_t* other) const
 	return (params[PARAM_FORMAT] == other[PARAM_FORMAT] && params[PARAM_PITCH] == other[PARAM_PITCH] &&
 	        params[PARAM_WIDTH_HEIGHT] == other[PARAM_WIDTH_HEIGHT] && same_levels &&
 	        params[PARAM_TILE] == other[PARAM_TILE] && params[PARAM_NEO] == other[PARAM_NEO] &&
-	        NormalizeStorageTextureSwizzle(fmt, params[PARAM_SWIZZLE]) == NormalizeStorageTextureSwizzle(other_fmt, other[PARAM_SWIZZLE]) &&
+	        NormalizeStorageTextureSwizzle(params[PARAM_FORMAT], params[PARAM_SWIZZLE]) ==
+	            NormalizeStorageTextureSwizzle(other[PARAM_FORMAT], other[PARAM_SWIZZLE]) &&
 	        params[PARAM_RESOURCE_TYPE] == other[PARAM_RESOURCE_TYPE] && params[PARAM_DEPTH] == other[PARAM_DEPTH] &&
 	        params[PARAM_BASE_ARRAY] == other[PARAM_BASE_ARRAY] && params[PARAM_SKIP_SEED] == other[PARAM_SKIP_SEED]);
 }
@@ -879,8 +882,6 @@ bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_
 		return false;
 	}
 
-	const auto existing_fmt = static_cast<uint32_t>((existing[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu);
-	const auto incoming_fmt = static_cast<uint32_t>((incoming[StorageTextureObject::PARAM_FORMAT] >> 16u) & 0xffffu);
 	if (existing[StorageTextureObject::PARAM_FORMAT] != incoming[StorageTextureObject::PARAM_FORMAT] ||
 	    existing[StorageTextureObject::PARAM_PITCH] != incoming[StorageTextureObject::PARAM_PITCH] ||
 	    existing[StorageTextureObject::PARAM_WIDTH_HEIGHT] != incoming[StorageTextureObject::PARAM_WIDTH_HEIGHT] ||
@@ -890,8 +891,8 @@ bool StorageTextureCanCopyGrowingBacking(const uint64_t* existing, const uint64_
 	{
 		return false;
 	}
-	return NormalizeStorageTextureSwizzle(existing_fmt, existing[StorageTextureObject::PARAM_SWIZZLE]) ==
-	       NormalizeStorageTextureSwizzle(incoming_fmt, incoming[StorageTextureObject::PARAM_SWIZZLE]);
+	return NormalizeStorageTextureSwizzle(existing[StorageTextureObject::PARAM_FORMAT], existing[StorageTextureObject::PARAM_SWIZZLE]) ==
+	       NormalizeStorageTextureSwizzle(incoming[StorageTextureObject::PARAM_FORMAT], incoming[StorageTextureObject::PARAM_SWIZZLE]);
 }
 
 // A render-target alias copies texel bytes unchanged. Equal formats alias, and so
@@ -942,7 +943,8 @@ static uint32_t RenderAliasBytesPerElement(const uint64_t* render_params, const 
 	    static_cast<uint8_t>(storage_params[StorageTextureObject::PARAM_FORMAT]), static_cast<uint16_t>(guest_format));
 	VkComponentMapping components {};
 	if (storage_format == VK_FORMAT_UNDEFINED ||
-	    !VulkanDecodeComponentMapping(NormalizeStorageTextureSwizzle(guest_format, storage_params[StorageTextureObject::PARAM_SWIZZLE]),
+	    !VulkanDecodeComponentMapping(NormalizeStorageTextureSwizzle(storage_params[StorageTextureObject::PARAM_FORMAT],
+	                                                                 storage_params[StorageTextureObject::PARAM_SWIZZLE]),
 	                                  &components) ||
 	    !VulkanNormalizeStorageComponentMapping(&storage_format, &components))
 	{
@@ -1087,7 +1089,7 @@ bool StorageTexturePlanRawRenderAlias(const uint64_t* render_params, uint64_t re
 	    storage_params[StorageTextureObject::PARAM_SKIP_SEED] != 0u ||
 	    (storage_params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 8u &&
 	     storage_params[StorageTextureObject::PARAM_RESOURCE_TYPE] != 9u) ||
-	    NormalizeStorageTextureSwizzle(storage_format, storage_params[StorageTextureObject::PARAM_SWIZZLE]) !=
+	    NormalizeStorageTextureSwizzle(storage_params[StorageTextureObject::PARAM_FORMAT], storage_params[StorageTextureObject::PARAM_SWIZZLE]) !=
 	        DstSel(4, 5, 6, 7))
 	{
 		return false;
@@ -1217,7 +1219,8 @@ bool StorageTextureCanCompositeRawRenderDestination(const uint64_t* params, uint
 	const uint64_t height = params[StorageTextureObject::PARAM_WIDTH_HEIGHT] & 0xffffffffu;
 	return width != 0u && height != 0u && width <= UINT32_MAX / 8u && height <= UINT32_MAX / (width * 8u) &&
 	       params[StorageTextureObject::PARAM_PITCH] == width && size == width * height * 8u &&
-	       NormalizeStorageTextureSwizzle(65u, params[StorageTextureObject::PARAM_SWIZZLE]) == DstSel(4, 5, 6, 7);
+	       NormalizeStorageTextureSwizzle(params[StorageTextureObject::PARAM_FORMAT], params[StorageTextureObject::PARAM_SWIZZLE]) ==
+	           DstSel(4, 5, 6, 7);
 }
 
 void StorageTextureCopyRenderAlias(CommandBuffer* buffer, VulkanImage* source, VulkanImage* destination,

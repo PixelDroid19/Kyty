@@ -114,7 +114,7 @@ TEST(EmulatorComputeWaveScalar, ShiftPathClaimsOnlyTheExactVccHiTuple)
 			case 2: invalid.dst.size = 2; break;
 			case 3: invalid.src[0].type = ShaderOperandType::Vgpr; break;
 			case 4: invalid.src[0].size = 2; break;
-			case 5: invalid.src[0].register_id = 104; break;
+			case 5: invalid.src[0].register_id = 106; break;
 			case 6: invalid.src[1].constant.i = -1; break;
 			case 7: invalid.src[1].constant.i = 32; break;
 			case 8: invalid.src[1].size = 1; break;
