@@ -339,9 +339,30 @@ against the same correct gameplay capture.
   the atlas viewports and scissors, and a per-frame copy of the atlas.
   Earlier reference imagery shows hard polygonal shadows are part of the
   title's art direction, so judge the stepped edges against a same-checkpoint
-  reference before treating them as a defect. The disc follows the camera and
-  is the next target. Read back the atlas at the rolling start and check
-  whether bare road holds the cleared far value.
+  reference before treating them as a defect. The disc follows the camera.
+  Env-gated, temporary receiver rewrites (one strict 115-130 s run each,
+  captures every 4 s, translator output in a separate SPIR-V cache) localize
+  it:
+  - Forcing the comparison result to lit removes the disc, so it comes from
+    the shadow term.
+  - Marking samples whose atlas x is in the left half (the near cascade) gives
+    exactly the disc's outline, so the disc is the near-cascade region
+    reporting occlusion over bare road.
+  - On the manual path, no road sample reads a texel of exactly 1.0 or 0.0,
+    and no reference is at or below 0. The near half is neither left at a
+    clear value nor empty: it holds real road depth.
+  - Shading `1 + (reference - texel) * 2^n` shows no disc at n = 8, so any
+    shortfall is below 1/256. At n = 14 (about four D16 units), the rolling
+    start frames of that run show only genuine car shadows, yet other normal
+    runs show the disc at comparable frames.
+  - The defect is therefore a small, uniform, frame-dependent depth offset
+    across the near cascade, not a clear, content or comparison-path fault.
+  - The leading lead is the receiver's cascade data (one 4x3 matrix per
+    cascade read from an indexed buffer) coming from a different frame than
+    the atlas the casters wrote. That fits a near cascade whose depth range is
+    re-fit every frame while the camera moves. Next, record the guest's
+    cascade buffer address and contents per frame with the shadow pass and
+    the receiver draw, and check that both see the same frame's values.
 
 - Uninitialized constant-buffer V# in a Unity title's EUD (2026-10-04, open).
   A colour-grading pixel shader loads its constant-buffer V# with `s_load_dwordx4
