@@ -64,12 +64,11 @@ public:
 
 	// Refuses non-finite, negative and above-kMaxPitch ratios.
 	bool SetPitch(float pitch);
-	void SetGain(float gain) { m_gain = gain; }
 	// A paused or stopped voice keeps its cursor and queue but renders nothing.
 	void SetPlaying(bool playing) { m_playing = playing; }
 
 	// Accumulates up to frames stereo frames into stereo (two doubles per frame,
-	// gained but not clipped, so the caller clamps the whole system mix once) and
+	// not clipped, so the caller clamps the whole system mix once) and
 	// appends one event per finished block. Mono sources are written to both
 	// channels. Returns false, accumulating nothing, when the step for output_rate
 	// exceeds kMaxSourceFramesPerOutputFrame.
@@ -91,7 +90,6 @@ private:
 	uint32_t          m_cursor      = 0;
 	double            m_phase       = 0.0;
 	float             m_pitch       = 1.0f;
-	float             m_gain        = 1.0f;
 	uint64_t          m_decoded     = 0;
 	bool              m_playing     = false;
 	bool              m_ended       = false;

@@ -15,7 +15,6 @@ bool Playback::Configure(uint32_t channels, uint32_t sample_rate)
 	m_channels    = channels;
 	m_sample_rate = sample_rate;
 	m_pitch       = 1.0f;
-	m_gain        = 1.0f;
 	m_decoded     = 0;
 	Reset();
 	return true;
@@ -99,11 +98,10 @@ bool Playback::Render(uint32_t frames, uint32_t output_rate, double* stereo, std
 		const double fraction = m_phase;
 		for (uint32_t channel = 0; channel < m_channels; channel++)
 		{
-			// Gained but not clipped: the system mix sums in double and clamps once,
-			// so opposite-sign voices still cancel before the final clamp.
-			const double sample = static_cast<double>(current[channel]) +
-			                      (static_cast<double>(next[channel]) - static_cast<double>(current[channel])) * fraction;
-			const double value = sample * static_cast<double>(m_gain);
+			// Not clipped: the system mix sums in double and clamps once, so
+			// opposite-sign voices still cancel before the final clamp.
+			const double value = static_cast<double>(current[channel]) +
+			                     (static_cast<double>(next[channel]) - static_cast<double>(current[channel])) * fraction;
 			if (m_channels == 1)
 			{
 				stereo[2 * i]     += value;

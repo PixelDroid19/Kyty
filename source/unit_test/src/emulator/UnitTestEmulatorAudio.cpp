@@ -1495,7 +1495,7 @@ TEST(EmulatorAudio, Ngs2SystemCreateRejectsOversizedGrainWithoutUsingWorkspace)
 	}
 }
 
-TEST(EmulatorAudio, RejectsNgs2SamplerRackQueryWithoutAnEvidencedOption)
+TEST(EmulatorAudio, RejectsNgs2SamplerRackQueryWithAnUnreadableOption)
 {
 	if (!Config::IsInitialized())
 	{
@@ -1511,13 +1511,82 @@ TEST(EmulatorAudio, RejectsNgs2SamplerRackQueryWithoutAnEvidencedOption)
 
 	raw_info[0] = UINT64_MAX;
 	raw_info[1] = UINT64_MAX;
-	EXPECT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x1000u, nullptr, info), static_cast<int32_t>(0x804a0081u));
-	EXPECT_EQ(raw_info[0], UINT64_MAX);
-	EXPECT_EQ(raw_info[1], UINT64_MAX);
 	EXPECT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x1000u, reinterpret_cast<const Ngs2::Ngs2RackOption*>(uintptr_t {1}), info),
 	          static_cast<int32_t>(0x804a0081u));
 	EXPECT_EQ(raw_info[0], UINT64_MAX);
 	EXPECT_EQ(raw_info[1], UINT64_MAX);
+	EXPECT_EQ(Ngs2::Ngs2RackQueryBufferSize(0x4001u, nullptr, info), static_cast<int32_t>(0x804a0081u));
+	EXPECT_EQ(raw_info[1], UINT64_MAX);
+}
+
+// A title creates its sampler and reverb racks without an option and its submixer and mastering racks with Gen5
+// expanded options (0xc8 and 0xb8 bytes) that set only the voice count at +0x50.
+TEST(EmulatorAudio, Ngs2CreatesRacksFromDefaultAndExpandedOptions)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	GuestReadableBlock sys_info_storage(sizeof(uint64_t) * 8);
+	ASSERT_TRUE(sys_info_storage.IsValid());
+	auto* raw_sys_info = static_cast<uint64_t*>(sys_info_storage.Data());
+	std::memset(raw_sys_info, 0, sizeof(uint64_t) * 8);
+	auto* sys_info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_sys_info);
+	ASSERT_EQ(Ngs2::Ngs2SystemQueryBufferSize(nullptr, sys_info), 0);
+	GuestReadableBlock sys_storage(raw_sys_info[1]);
+	ASSERT_TRUE(sys_storage.IsValid());
+	raw_sys_info[0] = reinterpret_cast<uintptr_t>(sys_storage.Data());
+	GuestValue<uintptr_t> system_handle_storage;
+	ASSERT_TRUE(system_handle_storage.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2SystemCreate(nullptr, sys_info, system_handle_storage.Data()), 0);
+	const uintptr_t system = *system_handle_storage.Data();
+
+	GuestReadableBlock submixer_option(0xc8);
+	GuestReadableBlock mastering_option(0xb8);
+	ASSERT_TRUE(submixer_option.IsValid());
+	ASSERT_TRUE(mastering_option.IsValid());
+	std::memset(submixer_option.Data(), 0, 0xc8);
+	std::memset(mastering_option.Data(), 0, 0xb8);
+	auto* submixer_bytes = static_cast<uint8_t*>(submixer_option.Data());
+	auto* mastering_bytes = static_cast<uint8_t*>(mastering_option.Data());
+	*reinterpret_cast<size_t*>(submixer_bytes)          = 0xc8;
+	*reinterpret_cast<uint32_t*>(submixer_bytes + 0x50) = 5;
+	*reinterpret_cast<size_t*>(mastering_bytes)          = 0xb8;
+	*reinterpret_cast<uint32_t*>(mastering_bytes + 0x50) = 3;
+
+	struct RackCase
+	{
+		uint32_t    rack_id;
+		const void* option;
+		uint32_t    voices;
+	};
+	const RackCase cases[] = {{0x1000, nullptr, 256}, {0x2001, nullptr, 1}, {0x2000, submixer_bytes, 5}, {0x3000, mastering_bytes, 3}};
+	GuestReadableBlock rack_info_storage(sizeof(uint64_t) * 8);
+	GuestValue<uintptr_t> rack_handle_storage;
+	GuestValue<uintptr_t> voice_storage;
+	ASSERT_TRUE(rack_info_storage.IsValid());
+	ASSERT_TRUE(rack_handle_storage.IsValid());
+	ASSERT_TRUE(voice_storage.IsValid());
+	auto* raw_rack_info = static_cast<uint64_t*>(rack_info_storage.Data());
+	auto* rack_info     = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_rack_info);
+	for (const RackCase& rack_case: cases)
+	{
+		const auto* option = static_cast<const Ngs2::Ngs2RackOption*>(rack_case.option);
+		std::memset(raw_rack_info, 0, sizeof(uint64_t) * 8);
+		ASSERT_EQ(Ngs2::Ngs2RackQueryBufferSize(rack_case.rack_id, option, rack_info), 0);
+		GuestReadableBlock rack_storage(raw_rack_info[1]);
+		ASSERT_TRUE(rack_storage.IsValid());
+		raw_rack_info[0] = reinterpret_cast<uintptr_t>(rack_storage.Data());
+		ASSERT_EQ(Ngs2::Ngs2RackCreate(system, rack_case.rack_id, option, rack_info, rack_handle_storage.Data()), 0);
+		const uintptr_t rack = *rack_handle_storage.Data();
+		EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, rack_case.voices - 1, voice_storage.Data()), 0);
+		EXPECT_NE(*voice_storage.Data(), 0u);
+		EXPECT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, rack_case.voices, voice_storage.Data()), static_cast<int32_t>(0x804a0300u));
+		ASSERT_EQ(Ngs2::Ngs2RackDestroy(rack, nullptr), 0);
+	}
+	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
 }
 
 TEST(EmulatorAudio, Ngs2RejectsUnreadableDescriptorAndHandleBlocks)
@@ -1699,7 +1768,7 @@ TEST(EmulatorAudio, Ngs2StartsLibcBackedMasteringVoiceBeforeTheApplicationHeap)
 	play_command[1] = 0x400;
 	play_command[2] = 1;
 	EXPECT_EQ(Ngs2::Ngs2VoiceRunCommands(*mastering_voice, play_command, 1), 0);
-	play_command[2] = 2;
+	play_command[2] = 3;
 	EXPECT_EQ(Ngs2::Ngs2VoiceRunCommands(*mastering_voice, play_command, 1), static_cast<int32_t>(0x804a0309u));
 
 	ASSERT_EQ(Ngs2::Ngs2RackDestroy(handle_storage[1], nullptr), 0);
@@ -1767,7 +1836,7 @@ TEST(EmulatorAudio, Ngs2SystemRenderRejectsInvalidBuffers)
 	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
 }
 
-TEST(EmulatorAudio, Ngs2SystemRenderRejectsMultipleBuffersWithoutWritingThem)
+TEST(EmulatorAudio, Ngs2SystemRenderClearsEveryBufferWithoutARoutedVoice)
 {
 	if (!Config::IsInitialized())
 	{
@@ -1805,8 +1874,18 @@ TEST(EmulatorAudio, Ngs2SystemRenderRejectsMultipleBuffersWithoutWritingThem)
 	render_infos[4]    = kGrainBytes;
 	render_infos[5]    = (uint64_t {2} << 32u) | 24u;
 
+	ASSERT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_infos), 2), 0);
+	EXPECT_FLOAT_EQ(output0[0], 0.0f);
+	EXPECT_FLOAT_EQ(output0[256 * 2 - 1], 0.0f);
+	EXPECT_FLOAT_EQ(output1[0], 0.0f);
+	EXPECT_FLOAT_EQ(output1[256 * 2 - 1], 0.0f);
+
+	// A buffer below one grain is refused before any buffer is written.
+	std::fill_n(output0, 256 * 2, 0.25f);
+	std::fill_n(output1, 256 * 2, 0.5f);
+	render_infos[4] = kGrainBytes - 1;
 	EXPECT_EQ(Ngs2::Ngs2SystemRender(system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(render_infos), 2),
-	          static_cast<int32_t>(0x804a0206u));
+	          static_cast<int32_t>(0x804a0209u));
 	EXPECT_FLOAT_EQ(output0[0], 0.25f);
 	EXPECT_FLOAT_EQ(output1[0], 0.5f);
 
@@ -2238,6 +2317,77 @@ TEST(EmulatorAudio, AcceptsOnlyEvidencedCustomSamplerControls)
 	ASSERT_EQ(Ngs2::Ngs2SystemDestroy(system), 0);
 }
 
+namespace {
+
+constexpr uint32_t kSubmixerRackId  = 0x2000;
+constexpr uint32_t kMasteringRackId = 0x3000;
+
+// A rack created from the default option, with its single voice started by a play event.
+struct PlayingRack
+{
+	std::unique_ptr<GuestReadableBlock> workspace;
+	uintptr_t                           rack  = 0;
+	uintptr_t                           voice = 0;
+};
+
+bool CreatePlayingRack(uintptr_t system, uint32_t rack_id, PlayingRack* out)
+{
+	GuestReadableBlock    info_storage(sizeof(uint64_t) * 8);
+	GuestReadableBlock    command_storage(sizeof(uint32_t) * 3);
+	GuestValue<uintptr_t> rack_storage;
+	GuestValue<uintptr_t> voice_storage;
+	if (!info_storage.IsValid() || !command_storage.IsValid() || !rack_storage.IsValid() || !voice_storage.IsValid())
+	{
+		return false;
+	}
+	auto* raw_info = static_cast<uint64_t*>(info_storage.Data());
+	std::memset(raw_info, 0, sizeof(uint64_t) * 8);
+	auto* info = reinterpret_cast<Ngs2::Ngs2ContextBufferInfo*>(raw_info);
+	if (Ngs2::Ngs2RackQueryBufferSize(rack_id, nullptr, info) != 0)
+	{
+		return false;
+	}
+	out->workspace = std::make_unique<GuestReadableBlock>(raw_info[1]);
+	if (!out->workspace->IsValid())
+	{
+		return false;
+	}
+	raw_info[0] = reinterpret_cast<uintptr_t>(out->workspace->Data());
+	if (Ngs2::Ngs2RackCreate(system, rack_id, nullptr, info, rack_storage.Data()) != 0)
+	{
+		return false;
+	}
+	out->rack = *rack_storage.Data();
+	if (Ngs2::Ngs2RackGetVoiceHandle(out->rack, 0, voice_storage.Data()) != 0)
+	{
+		return false;
+	}
+	out->voice  = *voice_storage.Data();
+	auto* play  = static_cast<uint32_t*>(command_storage.Data());
+	play[0]     = 2;
+	play[1]     = 0x400;
+	play[2]     = 1;
+	return Ngs2::Ngs2VoiceRunCommands(out->voice, play, 1) == 0;
+}
+
+// The patch param: port 0 of voice to input 0 of destination, a voice or a single-voice rack.
+int32_t PatchVoice(uintptr_t voice, uintptr_t destination)
+{
+	GuestReadableBlock storage(24);
+	if (!storage.IsValid())
+	{
+		return static_cast<int32_t>(0x804a0309u);
+	}
+	auto* param = static_cast<uint8_t*>(storage.Data());
+	std::memset(param, 0, 24);
+	*reinterpret_cast<uint16_t*>(param + 0)   = 24;
+	*reinterpret_cast<uint32_t*>(param + 4)   = 0x5u;
+	*reinterpret_cast<uintptr_t*>(param + 16) = destination;
+	return Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(param));
+}
+
+} // namespace
+
 TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 {
 	if (!Config::IsInitialized())
@@ -2284,6 +2434,9 @@ TEST(EmulatorAudio, RendersCapturedCustomSamplerPcmIntoStereoGrain)
 	ASSERT_TRUE(voice_handle_storage.IsValid());
 	ASSERT_EQ(Ngs2::Ngs2RackGetVoiceHandle(rack, 0, voice_handle_storage.Data()), 0);
 	const uintptr_t voice = *voice_handle_storage.Data();
+	PlayingRack     mastering;
+	ASSERT_TRUE(CreatePlayingRack(system, kMasteringRackId, &mastering));
+	ASSERT_EQ(PatchVoice(voice, mastering.rack), 0);
 
 	GuestReadableBlock format_storage(40);
 	ASSERT_TRUE(format_storage.IsValid());
@@ -2723,12 +2876,13 @@ uint64_t KYTY_SYSV_ABI SamplerInvokeHandler(uint64_t target, uint64_t arg0, uint
 	return 0;
 }
 
-// Owns a sampler system, its rack and the first voice. The rack and system are
-// destroyed before their guest workspaces are released.
+// Owns a sampler system, its rack, the first voice and a playing mastering voice every sampler voice is patched to.
+// The racks and system are destroyed before their guest workspaces are released.
 struct SamplerRig
 {
 	std::unique_ptr<GuestReadableBlock> system_workspace;
 	std::unique_ptr<GuestReadableBlock> rack_workspace;
+	PlayingRack                         mastering;
 	uintptr_t                           system = 0;
 	uintptr_t                           rack   = 0;
 	uintptr_t                           voice  = 0;
@@ -2741,6 +2895,10 @@ struct SamplerRig
 		if (rack != 0)
 		{
 			(void)Ngs2::Ngs2RackDestroy(rack, nullptr);
+		}
+		if (mastering.rack != 0)
+		{
+			(void)Ngs2::Ngs2RackDestroy(mastering.rack, nullptr);
 		}
 		if (system != 0)
 		{
@@ -2807,9 +2965,17 @@ bool CreateSamplerRigVoices(SamplerRig* rig, uint32_t voice_count)
 		return false;
 	}
 	rig->rack = *rack_handle_storage.Data();
-	if (Ngs2::Ngs2RackGetVoiceHandle(rig->rack, 0, voice_handle_storage.Data()) != 0)
+	if (!CreatePlayingRack(rig->system, kMasteringRackId, &rig->mastering))
 	{
 		return false;
+	}
+	for (uint32_t i = voice_count; i > 0; i--)
+	{
+		if (Ngs2::Ngs2RackGetVoiceHandle(rig->rack, i - 1, voice_handle_storage.Data()) != 0 ||
+		    PatchVoice(*voice_handle_storage.Data(), rig->mastering.rack) != 0)
+		{
+			return false;
+		}
 	}
 	rig->voice = *voice_handle_storage.Data();
 	return rig->voice != 0;
@@ -2962,6 +3128,212 @@ TEST(EmulatorAudio, StandardSamplerRendersLinearlyResampledPcm)
 		EXPECT_EQ(output[2 * k], 0.0f);
 		EXPECT_EQ(output[2 * k + 1], 0.0f);
 	}
+}
+
+namespace {
+
+int32_t RunSamplerGain(uintptr_t voice, float gain)
+{
+	GuestReadableBlock command_storage(sizeof(uint32_t) * 3);
+	if (!command_storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	auto* command = static_cast<uint32_t*>(command_storage.Data());
+	command[0]    = 6;     // port volume command
+	command[1]    = 0x100; // float value type
+	std::memcpy(&command[2], &gain, sizeof(gain));
+	return Ngs2::Ngs2VoiceRunCommands(voice, command, 1);
+}
+
+int32_t SetRoutingValue(uintptr_t voice, uint32_t id, uint32_t value)
+{
+	GuestReadableBlock storage(16);
+	if (!storage.IsValid())
+	{
+		return kSamplerInvalidControl;
+	}
+	auto* param = static_cast<uint8_t*>(storage.Data());
+	std::memset(param, 0, 16);
+	*reinterpret_cast<uint16_t*>(param + 0) = 16;
+	*reinterpret_cast<uint32_t*>(param + 4) = id;
+	*reinterpret_cast<uint32_t*>(param + 8) = value;
+	return Ngs2::Ngs2VoiceControl(voice, reinterpret_cast<const Ngs2::Ngs2VoiceParamHeader*>(param));
+}
+
+// Queues one 256-frame mono PCM16 block of a constant sample and plays it.
+bool PlayConstantBlock(uintptr_t voice, GuestReadableBlock* pcm_storage, int16_t sample)
+{
+	if (!pcm_storage->IsValid())
+	{
+		return false;
+	}
+	std::fill_n(static_cast<int16_t*>(pcm_storage->Data()), kSamplerGrainFrames, sample);
+	SamplerBlock block {};
+	block.data_size   = sizeof(int16_t) * kSamplerGrainFrames;
+	block.num_samples = kSamplerGrainFrames;
+	return SetSamplerFormat(voice, kWaveformPcmI16, 1, 48000) == 0 &&
+	       AddSamplerBlock(voice, pcm_storage->Data(), kBlocksFlagReset, block) == 0 && RunSamplerEvent(voice, kSamplerPlayEvent) == 0;
+}
+
+} // namespace
+
+TEST(EmulatorAudio, Ngs2RoutesASamplerThroughASubmixerToItsMasteringBuffer)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * kSamplerGrainFrames);
+	ASSERT_TRUE(PlayConstantBlock(rig.voice, &pcm_storage, 16384));
+
+	// sampler -> submixer (port volume 0.5) -> second mastering voice, which writes mono render buffer 1.
+	PlayingRack submixer;
+	PlayingRack mono_mastering;
+	ASSERT_TRUE(CreatePlayingRack(rig.system, kSubmixerRackId, &submixer));
+	ASSERT_TRUE(CreatePlayingRack(rig.system, kMasteringRackId, &mono_mastering));
+	ASSERT_EQ(SetRoutingValue(submixer.voice, 0x20000000u, 2), 0);
+	EXPECT_EQ(SetRoutingValue(submixer.voice, 0x20000000u, 1), kSamplerInvalidControl);
+	ASSERT_EQ(SetRoutingValue(mono_mastering.voice, 0x30000000u, 1), 0);
+	ASSERT_EQ(SetRoutingValue(mono_mastering.voice, 0x30000005u, 1), 0);
+	ASSERT_EQ(PatchVoice(rig.voice, submixer.voice), 0);
+	ASSERT_EQ(PatchVoice(submixer.voice, mono_mastering.rack), 0);
+	ASSERT_EQ(RunSamplerGain(submixer.voice, 0.5f), 0);
+
+	// A patch that closes a cycle, starts at a mastering voice or ends at a source voice is refused.
+	EXPECT_EQ(PatchVoice(submixer.voice, submixer.voice), kSamplerInvalidControl);
+	EXPECT_EQ(PatchVoice(mono_mastering.voice, submixer.voice), kSamplerInvalidControl);
+	EXPECT_EQ(PatchVoice(submixer.voice, rig.voice), kSamplerInvalidControl);
+
+	constexpr size_t   kStereoBytes = sizeof(float) * kSamplerGrainFrames * 2;
+	constexpr size_t   kMonoBytes   = sizeof(int16_t) * kSamplerGrainFrames;
+	GuestReadableBlock storage(kStereoBytes + kMonoBytes + sizeof(uint64_t) * 6);
+	ASSERT_TRUE(storage.IsValid());
+	auto* bytes  = static_cast<uint8_t*>(storage.Data());
+	auto* stereo = reinterpret_cast<float*>(bytes);
+	auto* mono   = reinterpret_cast<int16_t*>(bytes + kStereoBytes);
+	auto* infos  = reinterpret_cast<uint64_t*>(bytes + kStereoBytes + kMonoBytes);
+	std::fill_n(stereo, kSamplerGrainFrames * 2, 1.0f);
+	infos[0] = reinterpret_cast<uintptr_t>(stereo);
+	infos[1] = kStereoBytes;
+	infos[2] = (uint64_t {2} << 32u) | kWaveformPcmF32;
+	infos[3] = reinterpret_cast<uintptr_t>(mono);
+	infos[4] = kMonoBytes;
+	infos[5] = (uint64_t {1} << 32u) | kWaveformPcmI16;
+	ASSERT_EQ(Ngs2::Ngs2SystemRender(rig.system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(infos), 2), 0);
+	// 0.5 * 0.5 on both bus channels; the mono buffer takes their mean.
+	EXPECT_EQ(mono[0], 8192);
+	EXPECT_EQ(mono[kSamplerGrainFrames - 1], 8192);
+	EXPECT_FLOAT_EQ(stereo[0], 0.0f);
+
+	// A mastering voice whose setup names another channel count than its buffer refuses the render.
+	infos[5] = (uint64_t {2} << 32u) | kWaveformPcmI16;
+	infos[4] = kMonoBytes * 2;
+	EXPECT_EQ(Ngs2::Ngs2SystemRender(rig.system, reinterpret_cast<const Ngs2::Ngs2RenderBufferInfo*>(infos), 2),
+	          static_cast<int32_t>(0x804a0206u));
+
+	(void)Ngs2::Ngs2RackDestroy(mono_mastering.rack, nullptr);
+	(void)Ngs2::Ngs2RackDestroy(submixer.rack, nullptr);
+}
+
+TEST(EmulatorAudio, Ngs2PortInfoReportsThePortVolumeAndPatchDestination)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	ASSERT_EQ(RunSamplerGain(rig.voice, 0.25f), 0);
+
+	// {matrix_id, volume, num_delay_samples, destination_input, destination}
+	GuestReadableBlock info_storage(24);
+	ASSERT_TRUE(info_storage.IsValid());
+	auto* info = static_cast<uint8_t*>(info_storage.Data());
+	std::memset(info, 0xa5, 24);
+	ASSERT_EQ(Ngs2::Ngs2VoiceGetPortInfo(rig.voice, 0, info, 24), 0);
+	EXPECT_EQ(*reinterpret_cast<const int32_t*>(info + 0), -1);
+	EXPECT_FLOAT_EQ(*reinterpret_cast<const float*>(info + 4), 0.25f);
+	EXPECT_EQ(*reinterpret_cast<const uint32_t*>(info + 8), 0u);
+	EXPECT_EQ(*reinterpret_cast<const uint32_t*>(info + 12), 0u);
+	EXPECT_EQ(*reinterpret_cast<const uintptr_t*>(info + 16), rig.mastering.rack);
+
+	// Only port 0 exists, and the size must be the layout's.
+	std::memset(info, 0xa5, 24);
+	EXPECT_EQ(Ngs2::Ngs2VoiceGetPortInfo(rig.voice, 1, info, 24), kSamplerInvalidControl);
+	EXPECT_EQ(Ngs2::Ngs2VoiceGetPortInfo(rig.voice, 0, info, 23), kSamplerInvalidControl);
+	EXPECT_EQ(info[0], 0xa5);
+
+	// A setup restores unit volume; a voice whose destination is gone reports no destination.
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000), 0);
+	ASSERT_EQ(Ngs2::Ngs2RackDestroy(rig.mastering.rack, nullptr), 0);
+	rig.mastering.rack = 0;
+	ASSERT_EQ(Ngs2::Ngs2VoiceGetPortInfo(rig.voice, 0, info, 24), 0);
+	EXPECT_FLOAT_EQ(*reinterpret_cast<const float*>(info + 4), 1.0f);
+	EXPECT_EQ(*reinterpret_cast<const uintptr_t*>(info + 16), 0u);
+}
+
+TEST(EmulatorAudio, Ngs2SamplerEventsStopPauseAndResumePlayback)
+{
+	if (!Config::IsInitialized())
+	{
+		Config::ConfigSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+	}
+	Log::LogSubsystem::Instance()->Init(Core::SubsystemsList::Instance());
+
+	SamplerRig rig;
+	ASSERT_TRUE(CreateSamplerRig(&rig));
+	// A ramp twice a grain long: frame k is k / 512 of full scale.
+	GuestReadableBlock pcm_storage(sizeof(int16_t) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(pcm_storage.IsValid());
+	auto* pcm = static_cast<int16_t*>(pcm_storage.Data());
+	for (uint32_t k = 0; k < kSamplerGrainFrames * 2; k++)
+	{
+		pcm[k] = static_cast<int16_t>(k * 64);
+	}
+	SamplerBlock block {};
+	block.data_size   = sizeof(int16_t) * kSamplerGrainFrames * 2;
+	block.num_samples = kSamplerGrainFrames * 2;
+	ASSERT_EQ(SetSamplerFormat(rig.voice, kWaveformPcmI16, 1, 48000), 0);
+	ASSERT_EQ(AddSamplerBlock(rig.voice, pcm_storage.Data(), kBlocksFlagReset, block), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+
+	GuestReadableBlock output_storage(sizeof(float) * kSamplerGrainFrames * 2);
+	ASSERT_TRUE(output_storage.IsValid());
+	const auto* output = static_cast<const float*>(output_storage.Data());
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	EXPECT_NEAR(output[2 * 1], 64.0f / 32768.0f, 1e-6f);
+
+	// Pause (0x10) renders silence and keeps the position; resume (0x20) continues from it.
+	ASSERT_EQ(RunSamplerEvent(rig.voice, 0x10), 0);
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	EXPECT_EQ(output[2 * 1], 0.0f);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, 0x20), 0);
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	EXPECT_NEAR(output[0], static_cast<float>(kSamplerGrainFrames * 64) / 32768.0f, 1e-6f);
+
+	// Stop (0x2) ends playback: the voice reports stopped, then empty.
+	ASSERT_EQ(RunSamplerEvent(rig.voice, kSamplerPlayEvent), 0);
+	ASSERT_EQ(RunSamplerEvent(rig.voice, 0x2), 0);
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	EXPECT_EQ(output[0], 0.0f);
+	GuestValue<uint32_t> flags;
+	ASSERT_TRUE(flags.IsValid());
+	ASSERT_EQ(Ngs2::Ngs2VoiceGetStateFlags(rig.voice, flags.Data()), 0);
+	EXPECT_EQ(*flags.Data(), 0xbu);
+	ASSERT_EQ(RenderSamplerGrain(rig.system, output_storage.Data()), 0);
+	ASSERT_EQ(Ngs2::Ngs2VoiceGetStateFlags(rig.voice, flags.Data()), 0);
+	EXPECT_EQ(*flags.Data(), 0u);
+
+	// Values that are not one event bit are refused.
+	EXPECT_EQ(RunSamplerEvent(rig.voice, 0x3), kSamplerInvalidControl);
+	EXPECT_EQ(RunSamplerEvent(rig.voice, 0x40), kSamplerInvalidControl);
 }
 
 TEST(EmulatorAudio, StandardSamplerRefusesRepeatCallbacksAndReportsTheEndAfterRepeats)
@@ -3135,20 +3507,6 @@ int32_t SetSamplerPitch(uintptr_t voice, float ratio)
 	param.header = MakeSamplerHeader(sizeof(param), kSamplerPitchId);
 	param.ratio  = ratio;
 	return VoiceControlWith(voice, param);
-}
-
-int32_t RunSamplerGain(uintptr_t voice, float gain)
-{
-	GuestReadableBlock command_storage(sizeof(uint32_t) * 3);
-	if (!command_storage.IsValid())
-	{
-		return kSamplerInvalidControl;
-	}
-	auto* command = static_cast<uint32_t*>(command_storage.Data());
-	command[0]    = 6;     // port volume
-	command[1]    = 0x100; // float value type
-	std::memcpy(&command[2], &gain, sizeof(gain));
-	return Ngs2::Ngs2VoiceRunCommands(voice, command, 1);
 }
 
 void AppendLe(std::vector<uint8_t>* out, uint64_t value, size_t bytes)
@@ -3825,11 +4183,10 @@ void AccumulateConstantVoice(std::vector<double>* mix, float sample, float gain)
 	Ngs2Sampler::Playback playback;
 	ASSERT_TRUE(playback.Configure(1, 48000));
 	std::vector<Ngs2Sampler::Block> blocks(1);
-	blocks[0].frames      = {sample};
+	blocks[0].frames      = {sample * gain};
 	blocks[0].num_samples = 1;
 	blocks[0].num_repeats = Ngs2Sampler::kRepeatForever;
 	ASSERT_TRUE(playback.ReplaceQueue(std::move(blocks)));
-	playback.SetGain(gain);
 	playback.SetPlaying(true);
 	std::vector<Ngs2Sampler::Event> events;
 	ASSERT_TRUE(playback.Render(static_cast<uint32_t>(mix->size() / 2), 48000, mix->data(), &events));

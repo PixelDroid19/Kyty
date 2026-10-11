@@ -232,7 +232,7 @@ static_assert(sizeof(Ngs2CustomSamplerWaveformParam) == 32);
 // The +16 word is the waveform type of the output; PCM_F32L is the only one accepted.
 struct Ngs2RenderBufferInfoImpl
 {
-	float*   data;
+	void*    data;
 	size_t   data_size;
 	uint32_t waveform_type;
 	uint32_t channels;
@@ -319,6 +319,36 @@ struct Ngs2VoiceCallbackParam
 };
 static_assert(sizeof(Ngs2VoiceCallbackParam) == 32);
 
+// Routing params. A patch connects port 0 of a voice to input 0 of another voice (both indices are observed as zero).
+// The submixer and mastering setups carry a channel count, and the mastering output param the index of the render
+// buffer the voice writes; a zero word follows each value.
+struct Ngs2VoicePatchParam
+{
+	Ngs2VoiceParamHeader header;
+	uint32_t             port;
+	uint32_t             destination_input;
+	uintptr_t            destination;
+};
+static_assert(sizeof(Ngs2VoicePatchParam) == 24);
+
+struct Ngs2VoicePortInfo
+{
+	int32_t   matrix_id;
+	float     volume;
+	uint32_t  num_delay_samples;
+	uint32_t  destination_input;
+	uintptr_t destination;
+};
+static_assert(sizeof(Ngs2VoicePortInfo) == 24);
+
+struct Ngs2RoutingValueParam
+{
+	Ngs2VoiceParamHeader header;
+	uint32_t             value;
+	uint32_t             reserved;
+};
+static_assert(sizeof(Ngs2RoutingValueParam) == 16);
+
 // Input of a block callback handler. Only callback_data (+0), flag (+0x10) and
 // user_data (+0x18) are confirmed by a native callback's reads. The other offsets
 // are inferred from a classic header and are not verified on a guest: real values
@@ -375,10 +405,13 @@ constexpr uint32_t kNgs2WaveformTypePcmF32 = 0x18;
 constexpr uint32_t kNgs2WaveformTypeAtrac9 = 0x40;
 constexpr uint32_t kNgs2RepeatForever      = 0xffffffffu;
 
-// Sampler rack option size. Derived, not captured as a whole: the classic
-// 0xa8 sampler option plus the 0x30-byte common expansion that the captured
-// extended rack options share, with max_voices at +0x50.
-constexpr size_t kNgs2SamplerRackOptionSize = 0xd8;
+// Gen5 rack options carry a 0x30-byte expansion after the common prefix; captured
+// extended options place max_voices at +0x50 and the rack body 0x30 bytes past its
+// classic offset.
+constexpr size_t kNgs2RackOptionExpansionBytes = 0x30;
+// Sampler rack option size. Derived, not captured as a whole: the classic 0xa8
+// sampler option plus the expansion.
+constexpr size_t kNgs2SamplerRackOptionSize = 0xa8 + kNgs2RackOptionExpansionBytes;
 
 // Standard sampler parameter IDs (header.id). The guest's param builders write
 // these with size 40 (setup), 32 (blocks) and 16 (pitch) at offset +0.
@@ -386,6 +419,12 @@ constexpr uint32_t kNgs2SamplerSetupId  = 0x10000000u;
 constexpr uint32_t kNgs2SamplerBlocksId = 0x10000001u;
 constexpr uint32_t kNgs2SamplerPitchId  = 0x10000005u;
 constexpr uint32_t kNgs2VoiceParamCallback          = 0x7u;
+constexpr uint32_t kNgs2VoiceParamPatch             = 0x5u;
+constexpr uint32_t kNgs2SubmixerSetupId             = 0x20000000u;
+constexpr uint32_t kNgs2MasteringSetupId            = 0x30000000u;
+constexpr uint32_t kNgs2MasteringOutputId           = 0x30000005u;
+// Host bound on the render buffers of one SystemRender call; titles pass one or three.
+constexpr uint32_t kNgs2MaxRenderBuffers            = 8;
 constexpr uint32_t kNgs2VoiceCallbackFlagEnd        = 0x1u;
 // The only blocks flag seen at a native call site: one block added with 4, which
 // replaces the waveform (RESET). Other values are refused.
@@ -705,14 +744,19 @@ static bool Ngs2SnapshotSystemOption(const Ngs2SystemOption* option, Ngs2SystemO
 	       snapshot->num_grain_samples <= kNgs2MaxGrainSamples && snapshot->sample_rate == kNgs2DefaultSampleRate;
 }
 
+static bool Ngs2ClassicOrExpandedSize(size_t size, size_t classic_size)
+{
+	return size == classic_size || size == classic_size + kNgs2RackOptionExpansionBytes;
+}
+
 static bool Ngs2SupportedRackOptionSize(uint32_t rack_id, size_t size)
 {
 	switch (rack_id)
 	{
 		case 0x1000: return size == kNgs2SamplerRackOptionSize;
-		case 0x2000: return size == sizeof(Ngs2SubmixerRackOption);
-		case 0x2001: return size == sizeof(Ngs2ReverbRackOption) || size == 0xb8;
-		case 0x3000: return size == sizeof(Ngs2MasteringRackOption);
+		case 0x2000: return Ngs2ClassicOrExpandedSize(size, sizeof(Ngs2SubmixerRackOption));
+		case 0x2001: return Ngs2ClassicOrExpandedSize(size, sizeof(Ngs2ReverbRackOption));
+		case 0x3000: return Ngs2ClassicOrExpandedSize(size, sizeof(Ngs2MasteringRackOption));
 		case 0x4001: return size == 0x518;
 		case 0x4002: return size == sizeof(Ngs2CustomSubmixerRackOption);
 		default: return false;
@@ -745,20 +789,20 @@ struct Ngs2RackConfig
 	std::array<uint8_t, kNgs2MaxRackOptionBytes> option_bytes {};
 };
 
+// A rack created without an option takes the default voice count: 256 for a sampler, one voice for the routing racks.
+// The explicit submixer and mastering options a title passes repeat every other default field and set only the voice
+// count. Custom racks have no default option.
 static bool Ngs2MakeDefaultRackConfig(uint32_t rack_id, Ngs2RackConfig* config)
 {
-	if (config == nullptr || rack_id != 0x3000)
+	switch (rack_id)
 	{
-		return false;
+		case 0x1000: config->max_voices = 256; break;
+		case 0x2000:
+		case 0x2001:
+		case 0x3000: config->max_voices = 1; break;
+		default: return false;
 	}
-	Ngs2MasteringRackOption option {};
-	option.rack_option.size       = sizeof(option);
-	option.rack_option.max_voices = 1;
-	config->type                  = Ngs2RackType::Mastering;
-	config->max_voices            = 1;
-	config->option_size           = sizeof(option);
-	std::memcpy(config->option_bytes.data(), &option, sizeof(option));
-	return true;
+	return Ngs2RackTypeFromId(rack_id, &config->type);
 }
 
 static bool Ngs2SnapshotRackConfig(uint32_t rack_id, const Ngs2RackOption* option, Ngs2RackConfig* config)
@@ -815,7 +859,6 @@ struct Ngs2PcmStream
 	uint32_t                 format_id   = 0;
 	uint32_t                 channels    = 0;
 	uint32_t                 sample_rate = 0;
-	float                    gain        = 1.0f;
 	bool                     playing     = false;
 	// Blocks play in submission order; the cursor is in the front one.
 	std::deque<Ngs2PcmBlock> blocks;
@@ -902,6 +945,14 @@ struct Ngs2VoiceRecord
 	Ngs2SamplerSetup                   sampler_setup;
 	Ngs2VoiceCallbackRegistration      callback;
 	Ngs2Sampler::Playback              sampler;
+	// Routing: port 0 feeds the patched voice at port_volume; a mastering voice writes its input to render buffer
+	// output_index, whose channel count must match output_channels once that is set. patch_handle is the destination
+	// as the guest named it.
+	std::weak_ptr<Ngs2VoiceRecord>     patch;
+	uintptr_t                          patch_handle    = 0;
+	float                              port_volume     = 1.0f;
+	uint32_t                           output_channels = 0;
+	uint32_t                           output_index    = 0;
 };
 
 static uint32_t Ngs2GetVoiceStateFlags(const Ngs2VoiceRecord& voice)
@@ -950,9 +1001,9 @@ static bool Ngs2MixPcmStream(Ngs2PcmStream* stream, double* output, uint32_t out
 			const uint32_t source_channel = block.channels == 1 ? 0 : channel;
 			const float current = static_cast<float>(block.samples[index * block.channels + source_channel]) / 32768.0f;
 			const float next = static_cast<float>(block.samples[next_index * block.channels + source_channel]) / 32768.0f;
-			// Gained but not clipped: the system mix sums in double and clamps once,
-			// so opposite-sign voices still cancel before the final clamp.
-			output[frame * output_channels + channel] += static_cast<double>(current + (next - current) * fraction) * static_cast<double>(stream->gain);
+			// Not clipped: the system mix sums in double and clamps once, so opposite-sign voices still cancel before
+			// the final clamp.
+			output[frame * output_channels + channel] += static_cast<double>(current + (next - current) * fraction);
 		}
 		stream->source_frame += step;
 	}
@@ -1753,7 +1804,8 @@ static int32_t Ngs2SetSamplerFormat(Ngs2VoiceRecord& voice, const Ngs2SamplerSet
 	{
 		return kNgs2InvalidControl;
 	}
-	// A setup starts from a stopped voice with an empty queue.
+	// A setup starts from a stopped voice with an empty queue and a unit port volume.
+	voice.port_volume   = 1.0f;
 	voice.event         = Ngs2VoicePlayEvent::None;
 	voice.state         = Ngs2VoicePlayState::Empty;
 	voice.sampler_setup = setup;
@@ -1889,57 +1941,174 @@ static int32_t Ngs2SamplerControl(Ngs2VoiceRecord& voice, const Ngs2VoiceParamHe
 	}
 }
 
-// Event commands of a voice that only routes other voices (mastering, submixer, reverb). It has no source data, so
-// play and immediate stop change only its state.
-static int32_t Ngs2MixerRunCommand(Ngs2VoiceRecord& voice, const std::array<uint32_t, 3>& command)
+// The gain command {6, 0x100, float}: a finite, non-negative linear gain.
+static bool Ngs2ReadGainCommand(const std::array<uint32_t, 3>& command, float* gain)
+{
+	if (command[0] != 6u || command[1] != 0x100u)
+	{
+		return false;
+	}
+	std::memcpy(gain, &command[2], sizeof(*gain));
+	return std::isfinite(*gain) && *gain >= 0.0f;
+}
+
+// The event command {2, 0x400, value}: one event bit, play 0x1, stop 0x2, stop-immediate 0x4, kill 0x8, pause 0x10 or
+// resume 0x20.
+static bool Ngs2ReadEventCommand(const std::array<uint32_t, 3>& command, Ngs2VoicePlayEvent* event)
 {
 	if (command[0] != 2u || command[1] != 0x400u)
 	{
-		return kNgs2InvalidControl;
+		return false;
 	}
 	switch (command[2])
 	{
-		case 1u: voice.event = Ngs2VoicePlayEvent::Play; return OK;
-		case 8u: voice.event = Ngs2VoicePlayEvent::StopImm; return OK;
-		default: return kNgs2InvalidControl;
+		case 0x1u: *event = Ngs2VoicePlayEvent::Play; return true;
+		case 0x2u: *event = Ngs2VoicePlayEvent::Stop; return true;
+		case 0x4u: *event = Ngs2VoicePlayEvent::StopImm; return true;
+		case 0x8u: *event = Ngs2VoicePlayEvent::Kill; return true;
+		case 0x10u: *event = Ngs2VoicePlayEvent::Pause; return true;
+		case 0x20u: *event = Ngs2VoicePlayEvent::Resume; return true;
+		default: return false;
 	}
+}
+
+static bool Ngs2IsImmediateStop(Ngs2VoicePlayEvent event)
+{
+	return event == Ngs2VoicePlayEvent::StopImm || event == Ngs2VoicePlayEvent::Kill;
+}
+
+// Event commands of a voice that only routes other voices (mastering, submixer, reverb). It has no source data, so
+// an event changes only its state. A submixer also takes the gain command.
+static int32_t Ngs2MixerRunCommand(Ngs2VoiceRecord& voice, Ngs2RackType type, const std::array<uint32_t, 3>& command)
+{
+	float gain = 0.0f;
+	if (type == Ngs2RackType::Submixer && Ngs2ReadGainCommand(command, &gain))
+	{
+		voice.port_volume = gain;
+		return OK;
+	}
+	Ngs2VoicePlayEvent event = Ngs2VoicePlayEvent::None;
+	if (!Ngs2ReadEventCommand(command, &event))
+	{
+		return kNgs2InvalidControl;
+	}
+	voice.event = event;
+	return OK;
+}
+
+static bool Ngs2SupportedRenderChannels(uint32_t channels)
+{
+	return channels == 1 || channels == 2 || channels == 8;
+}
+
+// Setups of the routing voices. The bus is stereo, so a submixer admits only the stereo setup it already mixes.
+static int32_t Ngs2RoutingControl(Ngs2VoiceRecord& voice, Ngs2RackType type, const Ngs2VoiceParamHeader& header,
+                                  const Ngs2VoiceParamHeader* param_list)
+{
+	Ngs2RoutingValueParam param {};
+	if (header.size != sizeof(param) || !Ngs2ReadGuest(&param, reinterpret_cast<const Ngs2RoutingValueParam*>(param_list)) ||
+	    param.reserved != 0)
+	{
+		return kNgs2InvalidControl;
+	}
+	if (type == Ngs2RackType::Submixer && header.id == kNgs2SubmixerSetupId)
+	{
+		return param.value == 2 ? OK : kNgs2InvalidControl;
+	}
+	if (type == Ngs2RackType::Mastering && header.id == kNgs2MasteringSetupId && Ngs2SupportedRenderChannels(param.value))
+	{
+		voice.output_channels = param.value;
+		return OK;
+	}
+	if (type == Ngs2RackType::Mastering && header.id == kNgs2MasteringOutputId && param.value < kNgs2MaxRenderBuffers)
+	{
+		voice.output_index = param.value;
+		return OK;
+	}
+	return kNgs2InvalidControl;
+}
+
+static bool Ngs2IsRoutingRack(Ngs2RackType type)
+{
+	return type == Ngs2RackType::Submixer || type == Ngs2RackType::Reverb || type == Ngs2RackType::Mastering;
+}
+
+// A patch names a voice, or a rack of exactly one voice: a title routes its sampler voices to its single-voice
+// mastering rack by the rack handle.
+static std::shared_ptr<Ngs2VoiceRecord> Ngs2ResolvePatchDestination(uintptr_t destination)
+{
+	if (auto voice = Ngs2AcquireVoice(destination))
+	{
+		return voice.Shared();
+	}
+	auto rack = Ngs2AcquireRack(destination);
+	if (!rack || rack->voices.size() != 1)
+	{
+		return nullptr;
+	}
+	return rack->voices.front();
+}
+
+// Connects port 0 of a source or submixer voice to a routing voice of the same system. The destination is resolved
+// before the state lock is taken; the graph stays acyclic.
+static int32_t Ngs2PatchVoice(Ngs2VoiceRecord* voice, const Ngs2VoiceParamHeader& header, const Ngs2VoiceParamHeader* param_list)
+{
+	Ngs2VoicePatchParam param {};
+	if (header.size != sizeof(param) || !Ngs2ReadGuest(&param, reinterpret_cast<const Ngs2VoicePatchParam*>(param_list)) ||
+	    param.port != 0 || param.destination_input != 0)
+	{
+		return kNgs2InvalidControl;
+	}
+	const auto destination = Ngs2ResolvePatchDestination(param.destination);
+	if (destination == nullptr || destination->system != voice->system)
+	{
+		return kNgs2InvalidControl;
+	}
+	std::lock_guard lock(voice->system->state_mutex);
+	const auto source_rack      = voice->rack.lock();
+	const auto destination_rack = destination->rack.lock();
+	if (source_rack == nullptr || destination_rack == nullptr || source_rack->type == Ngs2RackType::Mastering ||
+	    !Ngs2IsRoutingRack(destination_rack->type))
+	{
+		return kNgs2InvalidControl;
+	}
+	for (auto hop = destination; hop != nullptr; hop = hop->patch.lock())
+	{
+		if (hop.get() == voice)
+		{
+			return kNgs2InvalidControl;
+		}
+	}
+	voice->patch        = destination;
+	voice->patch_handle = param.destination;
+	return OK;
 }
 
 // Event and gain commands of a standard sampler voice.
 static int32_t Ngs2SamplerRunCommand(Ngs2VoiceRecord& voice, const std::array<uint32_t, 3>& command)
 {
-	if (command[0] == 2u && command[1] == 0x400u)
+	Ngs2VoicePlayEvent event = Ngs2VoicePlayEvent::None;
+	if (Ngs2ReadEventCommand(command, &event))
 	{
-		if (command[2] == 1u)
-		{
-			if (!voice.sampler.HasBlocks())
-			{
-				return kNgs2InvalidControl;
-			}
-			voice.event = Ngs2VoicePlayEvent::Play;
-			return OK;
-		}
-		if (command[2] == 8u)
-		{
-			// An immediate stop drops the queued blocks as well.
-			voice.sampler.Reset();
-			voice.event = Ngs2VoicePlayEvent::StopImm;
-			return OK;
-		}
-		return kNgs2InvalidControl;
-	}
-	if (command[0] == 6u && command[1] == 0x100u)
-	{
-		float gain = 0.0f;
-		std::memcpy(&gain, &command[2], sizeof(gain));
-		if (!std::isfinite(gain) || gain < 0.0f)
+		if (event == Ngs2VoicePlayEvent::Play && !voice.sampler.HasBlocks())
 		{
 			return kNgs2InvalidControl;
 		}
-		voice.sampler.SetGain(gain);
+		if (Ngs2IsImmediateStop(event))
+		{
+			// An immediate stop drops the queued blocks as well.
+			voice.sampler.Reset();
+		}
+		voice.event = event;
 		return OK;
 	}
-	return kNgs2InvalidControl;
+	float gain = 0.0f;
+	if (!Ngs2ReadGainCommand(command, &gain))
+	{
+		return kNgs2InvalidControl;
+	}
+	voice.port_volume = gain;
+	return OK;
 }
 
 // Queues the callback of a finished block. The info carries the guest's own
@@ -2001,9 +2170,6 @@ static void Ngs2RenderSamplerVoice(const std::shared_ptr<Ngs2VoiceRecord>& voice
 	}
 }
 
-// Sums every voice of the system into mixed (stereo float) and clamps once. Only
-// the system lease and the state lock are held; callbacks are queued, not run.
-// system_out receives the record (not a lease) for the later dispatch.
 // Most block end callbacks one render can produce: every queued block of a voice
 // with an end callback can end at most once per render, and no block is added
 // during a render.
@@ -2029,34 +2195,140 @@ static uint64_t Ngs2MaxEndCallbacks(const Ngs2SystemRecord& system)
 	return count;
 }
 
-// defer_callbacks is set when the calling thread holds the explicit system lock.
-// Each render bounds its callback batch before changing voice state. When the
-// caller holds the explicit lock, the deferred list must also have room for
-// every callback the render could produce, since dispatch waits for unlock.
+// One render buffer of a SystemRender call and the samples mixed for it.
+struct Ngs2RenderTarget
+{
+	Ngs2RenderBufferInfoImpl info {};
+	std::vector<double>      mix;
+};
+
+// A grain of the stereo bus, interleaved, indexed by the voice it feeds.
+using Ngs2BusMap = std::unordered_map<const Ngs2VoiceRecord*, std::vector<double>>;
+
+static size_t Ngs2RenderSampleBytes(uint32_t waveform_type)
+{
+	return waveform_type == kNgs2WaveformTypePcmI16 ? sizeof(int16_t) : sizeof(float);
+}
+
+static int32_t Ngs2ReadRenderTargets(const Ngs2RenderBufferInfo* buffer_info, uint32_t num_buffer_info,
+                                     std::vector<Ngs2RenderTarget>* targets)
+{
+	if (buffer_info == nullptr || num_buffer_info == 0 || num_buffer_info > kNgs2MaxRenderBuffers)
+	{
+		return kNgs2InvalidBufferInfo;
+	}
+	std::array<Ngs2RenderBufferInfoImpl, kNgs2MaxRenderBuffers> infos {};
+	if (!Ngs2CopyFromGuest(infos.data(), buffer_info, sizeof(infos[0]) * num_buffer_info))
+	{
+		return kNgs2InvalidBufferInfo;
+	}
+	targets->resize(num_buffer_info);
+	for (uint32_t i = 0; i < num_buffer_info; i++)
+	{
+		const auto& info = infos[i];
+		if (info.data == nullptr)
+		{
+			return kNgs2InvalidBufferAddress;
+		}
+		if ((info.waveform_type != kNgs2WaveformTypePcmF32 && info.waveform_type != kNgs2WaveformTypePcmI16) ||
+		    !Ngs2SupportedRenderChannels(info.channels))
+		{
+			return kNgs2InvalidBufferInfo;
+		}
+		(*targets)[i].info = info;
+	}
+	return OK;
+}
+
+static int32_t Ngs2CheckRenderTargetSizes(uint32_t grain, std::vector<Ngs2RenderTarget>* targets)
+{
+	for (auto& target: *targets)
+	{
+		const size_t samples = static_cast<size_t>(grain) * target.info.channels;
+		const size_t bytes   = samples * Ngs2RenderSampleBytes(target.info.waveform_type);
+		if (target.info.data_size < bytes)
+		{
+			return kNgs2InvalidBufferSize;
+		}
+		if (!Ngs2IsGuestWritable(target.info.data, bytes))
+		{
+			return kNgs2InvalidBufferAddress;
+		}
+		target.mix.assign(samples, 0.0);
+	}
+	return OK;
+}
+
+// Adds a voice's output at its port volume to the input of the voice its port 0 is patched to. An unpatched voice
+// reaches no output.
+static void Ngs2RouteBus(const Ngs2VoiceRecord& voice, const std::vector<double>& bus, Ngs2BusMap* inputs)
+{
+	const auto destination = voice.patch.lock();
+	if (destination == nullptr)
+	{
+		return;
+	}
+	auto& input = (*inputs)[destination.get()];
+	input.resize(bus.size(), 0.0);
+	for (size_t i = 0; i < bus.size(); i++)
+	{
+		input[i] += bus[i] * static_cast<double>(voice.port_volume);
+	}
+}
+
+// Writes the stereo bus into a render buffer: stereo as is, mono as the mean of both channels, and eight channels with
+// the bus on the front pair and silence elsewhere.
+static void Ngs2AddBusToTarget(const std::vector<double>& bus, Ngs2RenderTarget* target)
+{
+	const uint32_t channels = target->info.channels;
+	const size_t   frames   = bus.size() / 2;
+	for (size_t frame = 0; frame < frames; frame++)
+	{
+		const double left  = bus[frame * 2];
+		const double right = bus[frame * 2 + 1];
+		double*      out   = target->mix.data() + frame * channels;
+		if (channels == 1)
+		{
+			out[0] += (left + right) * 0.5;
+			continue;
+		}
+		out[0] += left;
+		out[1] += right;
+	}
+}
+
+// Hops from a routing voice to the end of its route. Upstream voices are farther, so mixing in decreasing distance
+// finishes every input of a voice before the voice itself runs.
+static uint32_t Ngs2RouteDistance(const Ngs2VoiceRecord& voice)
+{
+	uint32_t distance = 0;
+	for (auto hop = voice.patch.lock(); hop != nullptr; hop = hop->patch.lock())
+	{
+		distance++;
+	}
+	return distance;
+}
+
+// Renders every source voice into its own bus, then runs the routing voices down the graph: a playing submixer passes
+// its input on at its gain, a playing mastering voice writes it to its render buffer. Reverb processing is not
+// implemented, so a reverb voice passes nothing on. Only the system lease and the state lock are held; callbacks are
+// queued, not run. system_out receives the record (not a lease) for the later dispatch.
+// defer_callbacks is set when the calling thread holds the explicit system lock. Each render bounds its callback batch
+// before changing voice state; when the caller holds the explicit lock, the deferred list must also have room for every
+// callback the render could produce, since dispatch waits for unlock.
 static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo* buffer_info, uint32_t num_buffer_info,
-                             bool defer_callbacks, Ngs2RenderBufferInfoImpl* render, std::vector<float>* mixed,
-                             std::vector<Ngs2PendingCallback>* pending, std::shared_ptr<Ngs2SystemRecord>* system_out)
+                             bool defer_callbacks, std::vector<Ngs2RenderTarget>* targets, std::vector<Ngs2PendingCallback>* pending,
+                             std::shared_ptr<Ngs2SystemRecord>* system_out)
 {
 	auto system = Ngs2AcquireSystem(system_handle);
 	if (!system)
 	{
 		return kNgs2InvalidSystem;
 	}
-	if (buffer_info == nullptr || num_buffer_info != 1)
+	const int32_t read_result = Ngs2ReadRenderTargets(buffer_info, num_buffer_info, targets);
+	if (read_result != OK)
 	{
-		return kNgs2InvalidBufferInfo;
-	}
-	if (!Ngs2CopyFromGuest(render, buffer_info, sizeof(*render)))
-	{
-		return kNgs2InvalidBufferInfo;
-	}
-	if (render->data == nullptr)
-	{
-		return kNgs2InvalidBufferAddress;
-	}
-	if (render->waveform_type != kNgs2WaveformTypePcmF32 || render->channels != 2)
-	{
-		return kNgs2InvalidBufferInfo;
+		return read_result;
 	}
 
 	std::lock_guard lock(system->state_mutex);
@@ -2065,14 +2337,10 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 	{
 		return kNgs2InvalidControl;
 	}
-	const size_t render_size = static_cast<size_t>(grain) * 2u * sizeof(float);
-	if (render->data_size < render_size)
+	const int32_t size_result = Ngs2CheckRenderTargetSizes(grain, targets);
+	if (size_result != OK)
 	{
-		return kNgs2InvalidBufferSize;
-	}
-	if (!Ngs2IsGuestWritable(render->data, render_size))
-	{
-		return kNgs2InvalidBufferAddress;
+		return size_result;
 	}
 	size_t deferred = 0;
 	if (defer_callbacks)
@@ -2088,19 +2356,28 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 		return kNgs2InvalidControl;
 	}
 
-	// Every voice sums into this double accumulator, so finite voices,
-	// including large opposite-sign and high-gain ones, add without intermediate
-	// rounding or clipping. The guest float buffer is written once, clamped.
-	std::vector<double> accumulator(static_cast<size_t>(grain) * 2u, 0.0);
+	// Buses sum in double, so finite voices, including large opposite-sign and high-gain ones, add without intermediate
+	// rounding or clipping. Each render buffer is clamped once, when it is written.
+	const size_t                                      bus_samples = static_cast<size_t>(grain) * 2u;
+	Ngs2BusMap                                        inputs;
+	std::vector<std::pair<uint32_t, Ngs2VoiceRecord*>> routing;
+	std::vector<double>                               bus(bus_samples);
 	for (const auto& [unused_workspace, rack]: system->racks)
 	{
 		(void)unused_workspace;
 		for (const auto& voice: rack->voices)
 		{
 			Ngs2ApplyVoiceEvent(voice.get());
+			if (Ngs2IsRoutingRack(rack->type))
+			{
+				routing.emplace_back(Ngs2RouteDistance(*voice), voice.get());
+				continue;
+			}
+			std::fill(bus.begin(), bus.end(), 0.0);
 			if (rack->type == Ngs2RackType::Sampler)
 			{
-				Ngs2RenderSamplerVoice(voice, grain, system->option.sample_rate, accumulator.data(), pending);
+				Ngs2RenderSamplerVoice(voice, grain, system->option.sample_rate, bus.data(), pending);
+				Ngs2RouteBus(*voice, bus, &inputs);
 				continue;
 			}
 			if (voice->state != Ngs2VoicePlayState::Playing || !voice->stream.playing)
@@ -2108,7 +2385,7 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 				continue;
 			}
 			std::vector<Ngs2PcmBlock> finished;
-			const bool playing = Ngs2MixPcmStream(&voice->stream, accumulator.data(), grain, 2, system->option.sample_rate, &finished);
+			const bool playing = Ngs2MixPcmStream(&voice->stream, bus.data(), grain, 2, system->option.sample_rate, &finished);
 			for (const auto& block: finished)
 			{
 				Ngs2QueueBlockEnd(voice, block, pending);
@@ -2117,15 +2394,58 @@ static int32_t Ngs2MixSystem(uintptr_t system_handle, const Ngs2RenderBufferInfo
 			{
 				voice->state = Ngs2VoicePlayState::Stopped;
 			}
+			Ngs2RouteBus(*voice, bus, &inputs);
 		}
 	}
-	mixed->resize(accumulator.size());
-	for (size_t i = 0; i < accumulator.size(); i++)
+
+	std::stable_sort(routing.begin(), routing.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+	for (const auto& [unused_distance, voice]: routing)
 	{
-		(*mixed)[i] = static_cast<float>(std::clamp(accumulator[i], -1.0, 1.0));
+		(void)unused_distance;
+		const auto input = inputs.find(voice);
+		const auto rack  = voice->rack.lock();
+		if (input == inputs.end() || rack == nullptr || voice->state != Ngs2VoicePlayState::Playing)
+		{
+			continue;
+		}
+		if (rack->type == Ngs2RackType::Submixer)
+		{
+			Ngs2RouteBus(*voice, input->second, &inputs);
+			continue;
+		}
+		if (rack->type != Ngs2RackType::Mastering || voice->output_index >= targets->size())
+		{
+			continue;
+		}
+		auto& target = (*targets)[voice->output_index];
+		if (voice->output_channels != 0 && voice->output_channels != target.info.channels)
+		{
+			return kNgs2InvalidBufferInfo;
+		}
+		Ngs2AddBusToTarget(input->second, &target);
 	}
 	*system_out = system.Shared();
 	return OK;
+}
+
+// Clamps a mixed render buffer once and writes it in the buffer's sample format.
+static bool Ngs2WriteRenderTarget(const Ngs2RenderTarget& target)
+{
+	if (target.info.waveform_type == kNgs2WaveformTypePcmI16)
+	{
+		std::vector<int16_t> samples(target.mix.size());
+		for (size_t i = 0; i < samples.size(); i++)
+		{
+			samples[i] = static_cast<int16_t>(std::lround(std::clamp(target.mix[i], -1.0, 1.0) * 32767.0));
+		}
+		return Ngs2CopyToGuest(target.info.data, samples.data(), samples.size() * sizeof(int16_t));
+	}
+	std::vector<float> samples(target.mix.size());
+	for (size_t i = 0; i < samples.size(); i++)
+	{
+		samples[i] = static_cast<float>(std::clamp(target.mix[i], -1.0, 1.0));
+	}
+	return Ngs2CopyToGuest(target.info.data, samples.data(), samples.size() * sizeof(float));
 }
 
 // A queued callback still applies only while its voice entry is active and holds
@@ -2534,8 +2854,7 @@ int KYTY_SYSV_ABI Ngs2RackDestroy(uintptr_t rack_handle, Ngs2ContextBufferInfo* 
 int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBufferInfo* buffer_info, uint32_t num_buffer_info)
 {
 	PRINT_NAME();
-	Ngs2RenderBufferInfoImpl          render {};
-	std::vector<float>                mixed;
+	std::vector<Ngs2RenderTarget>     targets;
 	std::vector<Ngs2PendingCallback>  pending;
 	std::shared_ptr<Ngs2SystemRecord> system;
 	// If this thread holds the explicit system lock, that lock is still held after
@@ -2544,12 +2863,13 @@ int KYTY_SYSV_ABI Ngs2SystemRender(uintptr_t system_handle, const Ngs2RenderBuff
 	// unlock; the mix admits the render only if they all fit (see Ngs2MixSystem).
 	const bool    defer_callbacks = g_ngs_thread_locks.find(system_handle) != g_ngs_thread_locks.end();
 	const int32_t mix_result =
-	    Ngs2MixSystem(system_handle, buffer_info, num_buffer_info, defer_callbacks, &render, &mixed, &pending, &system);
+	    Ngs2MixSystem(system_handle, buffer_info, num_buffer_info, defer_callbacks, &targets, &pending, &system);
 	if (mix_result != OK)
 	{
 		return mix_result;
 	}
-	const int32_t copy_result = Ngs2CopyToGuest(render.data, mixed.data(), mixed.size() * sizeof(float)) ? OK : kNgs2InvalidBufferAddress;
+	const bool    written     = std::all_of(targets.begin(), targets.end(), [](const auto& target) { return Ngs2WriteRenderTarget(target); });
+	const int32_t copy_result = written ? OK : kNgs2InvalidBufferAddress;
 	if (!pending.empty())
 	{
 		if (defer_callbacks)
@@ -2603,11 +2923,19 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 	{
 		return kNgs2InvalidVoice;
 	}
+	if (header.id == kNgs2VoiceParamPatch)
+	{
+		return Ngs2PatchVoice(voice.Get(), header, param_list);
+	}
 	std::lock_guard lock(voice->system->state_mutex);
 	auto rack = voice->rack.lock();
 	if (rack != nullptr && rack->type == Ngs2RackType::Sampler)
 	{
 		return Ngs2SamplerControl(*voice.Get(), header, param_list);
+	}
+	if (rack != nullptr && (rack->type == Ngs2RackType::Submixer || rack->type == Ngs2RackType::Mastering))
+	{
+		return Ngs2RoutingControl(*voice.Get(), rack->type, header, param_list);
 	}
 	if (rack == nullptr || rack->type != Ngs2RackType::CustomSampler)
 	{
@@ -2629,6 +2957,7 @@ int KYTY_SYSV_ABI Ngs2VoiceControl(uintptr_t voice_handle, const Ngs2VoiceParamH
 			return kNgs2InvalidControl;
 		}
 		voice->stream             = {};
+		voice->port_volume        = 1.0f;
 		voice->stream.format_id   = format.format_id;
 		voice->stream.channels    = format.channels;
 		voice->stream.sample_rate = format.sample_rate;
@@ -2712,7 +3041,7 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 		{
 			voice->last_command[i] = command[i];
 		}
-		return Ngs2MixerRunCommand(*voice.Get(), command);
+		return Ngs2MixerRunCommand(*voice.Get(), rack->type, command);
 	}
 	if (rack == nullptr)
 	{
@@ -2722,42 +3051,35 @@ int KYTY_SYSV_ABI Ngs2VoiceRunCommands(uintptr_t voice_handle, const void* comma
 	{
 		voice->last_command[i] = command[i];
 	}
-	if (command[0] == 2u && command[1] == 0x400u)
+	Ngs2VoicePlayEvent event = Ngs2VoicePlayEvent::None;
+	if (Ngs2ReadEventCommand(command, &event))
 	{
-		if (command[2] == 1u)
+		if (event == Ngs2VoicePlayEvent::Play)
 		{
 			if (voice->stream.format_id != 0x12u || voice->stream.blocks.empty())
 			{
 				return kNgs2InvalidControl;
 			}
-			voice->event          = Ngs2VoicePlayEvent::Play;
 			voice->stream.playing = true;
-			return OK;
 		}
-		if (command[2] == 8u)
+		if (Ngs2IsImmediateStop(event))
 		{
 			// An immediate stop drops the queued blocks as well.
-			voice->event                = Ngs2VoicePlayEvent::StopImm;
 			voice->stream.playing       = false;
 			voice->stream.blocks.clear();
 			voice->stream.queued_frames = 0;
 			voice->stream.source_frame  = 0.0;
-			return OK;
 		}
-		return kNgs2InvalidControl;
-	}
-	if (command[0] == 6u && command[1] == 0x100u)
-	{
-		float gain = 0.0f;
-		std::memcpy(&gain, &command[2], sizeof(gain));
-		if (!std::isfinite(gain) || gain < 0.0f)
-		{
-			return kNgs2InvalidControl;
-		}
-		voice->stream.gain = gain;
+		voice->event = event;
 		return OK;
 	}
-	return kNgs2InvalidControl;
+	float gain = 0.0f;
+	if (!Ngs2ReadGainCommand(command, &gain))
+	{
+		return kNgs2InvalidControl;
+	}
+	voice->port_volume = gain;
+	return OK;
 }
 
 int KYTY_SYSV_ABI Ngs2ParseWaveformData(const void* data, size_t data_size, Ngs2WaveformInfo* info)
@@ -2887,6 +3209,8 @@ int KYTY_SYSV_ABI Ngs2RackGetInfo(uintptr_t rack_handle, void* out_info, size_t 
 	return kNgs2InvalidControl;
 }
 
+// Port 0 is the only port. It has no matrix (-1, as port matrix commands are refused) and no delay, and a patch
+// always names input 0.
 int KYTY_SYSV_ABI Ngs2VoiceGetPortInfo(uintptr_t voice_handle, uint32_t port, void* out_info, size_t out_info_size)
 {
 	PRINT_NAME();
@@ -2895,10 +3219,18 @@ int KYTY_SYSV_ABI Ngs2VoiceGetPortInfo(uintptr_t voice_handle, uint32_t port, vo
 	{
 		return kNgs2InvalidVoice;
 	}
-	(void)port;
-	(void)out_info;
-	(void)out_info_size;
-	return kNgs2InvalidControl;
+	if (port != 0 || out_info == nullptr || out_info_size != sizeof(Ngs2VoicePortInfo))
+	{
+		return kNgs2InvalidControl;
+	}
+	Ngs2VoicePortInfo info {};
+	info.matrix_id = -1;
+	{
+		std::lock_guard lock(voice->system->state_mutex);
+		info.volume      = voice->port_volume;
+		info.destination = voice->patch.expired() ? 0 : voice->patch_handle;
+	}
+	return Ngs2CopyToGuest(out_info, &info, sizeof(info)) ? OK : kNgs2InvalidControl;
 }
 
 int KYTY_SYSV_ABI Ngs2VoiceQueryInfo(uintptr_t voice_handle, uint32_t query_type, const void* param, void* out_info)
