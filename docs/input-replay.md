@@ -15,7 +15,8 @@ single timestamp uses a 300 ms press. Comments begin with `#`. The parser
 accepts face, shoulder, directional, and analog actions such as
 `left-stick-right` and `right-stick-up`. Analog actions drive the corresponding
 axis to its full travel for the interval and return to the neutral value between
-intervals. Routes are limited to 4096 entries and 24 hours, and one immutable
+intervals. A scripted `l2` or `r2` press also reports its analog trigger fully
+pressed, as a physical trigger does. Routes are limited to 4096 entries and 24 hours, and one immutable
 route is published per process. Set `KYTY_PAD_SCRIPT_LOG=1` to log only state
 transitions.
 

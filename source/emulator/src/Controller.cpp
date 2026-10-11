@@ -1652,6 +1652,9 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	PadScriptState scripted {};
 	(void)g_pad_script.Sample(&scripted);
 	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
+	// A pressed trigger button always carries its analog value; scripted L2/R2 are fully pressed.
+	const auto script_trigger = [&scripted](uint32_t button, uint8_t value) -> uint8_t
+	{ return (scripted.buttons & button) != 0 ? 255u : value; };
 
 	const uint64_t now_ts = Kernel::KernelGetProcessTime();
 
@@ -1668,8 +1671,8 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data)
 	data->right_stick_y          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0
 	                                    ? script_axis(scripted.right_y)
 	                                    : state.axes[static_cast<int>(Axis::RightY)];
-	data->analog_buttons_l2      = state.axes[static_cast<int>(Axis::TriggerLeft)];
-	data->analog_buttons_r2      = state.axes[static_cast<int>(Axis::TriggerRight)];
+	data->analog_buttons_l2      = script_trigger(PAD_BUTTON_L2, state.axes[static_cast<int>(Axis::TriggerLeft)]);
+	data->analog_buttons_r2      = script_trigger(PAD_BUTTON_R2, state.axes[static_cast<int>(Axis::TriggerRight)]);
 	AgentPadApplyToButtonsAndAxes(true, &data->buttons, &data->left_stick_x, &data->left_stick_y, &data->right_stick_x,
 	                              &data->right_stick_y, &data->analog_buttons_l2, &data->analog_buttons_r2);
 	data->orientation_x          = 0.0f;
@@ -1720,6 +1723,9 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 	PadScriptState scripted {};
 	const bool script_active = g_pad_script.Sample(&scripted);
 	const auto script_axis = [](int8_t value) -> uint8_t { return value < 0 ? 0u : (value > 0 ? 255u : 128u); };
+	// A pressed trigger button always carries its analog value; scripted L2/R2 are fully pressed.
+	const auto script_trigger = [&scripted](uint32_t button, uint8_t value) -> uint8_t
+	{ return (scripted.buttons & button) != 0 ? 255u : value; };
 
 	for (int i = 0; i < ret_num; i++)
 	{
@@ -1737,8 +1743,8 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num)
 		data[i].right_stick_y          = (scripted.axis_mask & (1u << static_cast<uint8_t>(Axis::RightY))) != 0
 		                                    ? script_axis(scripted.right_y)
 		                                    : states[i].axes[static_cast<int>(Axis::RightY)];
-		data[i].analog_buttons_l2      = states[i].axes[static_cast<int>(Axis::TriggerLeft)];
-		data[i].analog_buttons_r2      = states[i].axes[static_cast<int>(Axis::TriggerRight)];
+		data[i].analog_buttons_l2      = script_trigger(PAD_BUTTON_L2, states[i].axes[static_cast<int>(Axis::TriggerLeft)]);
+		data[i].analog_buttons_r2      = script_trigger(PAD_BUTTON_R2, states[i].axes[static_cast<int>(Axis::TriggerRight)]);
 		// Advance the tap FSM at most once per PadRead call (first sample only) so a
 		// large num cannot collapse release/press/release into one HLE invocation.
 		AgentPadApplyToButtonsAndAxes(i == 0, &data[i].buttons, &data[i].left_stick_x, &data[i].left_stick_y, &data[i].right_stick_x,
