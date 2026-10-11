@@ -81,6 +81,18 @@ enum class GpuMemoryObjectType : uint64_t
 	return buffer_type && !owns_device_content && !depth_meta_bound;
 }
 
+// Frame retirement ages objects in presented frames, so a phase that records
+// many submissions between two presents (a loading screen) ages nothing while
+// it creates buffers. Once this many bytes of buffers were created since the
+// last retirement pass, creation retires buffers that own no device content and
+// whose recorded submissions have all completed.
+constexpr uint64_t kGpuMemoryBufferPressureRetireBytes = 256u * 1024u * 1024u;
+
+[[nodiscard]] inline bool GpuMemoryBufferPressureRetirementDue(uint64_t buffer_bytes_since_last_pass)
+{
+	return buffer_bytes_since_last_pass >= kGpuMemoryBufferPressureRetireBytes;
+}
+
 enum class GpuMemoryScenario
 {
 	Common,

@@ -2550,6 +2550,20 @@ void* GpuMemory::CreateObject(uint64_t submit_id, GraphicContext* ctx, CommandBu
 			m_transient_creates_since_retirement++;
 		}
 	}
+	if (info.type == GpuMemoryObjectType::StorageBuffer || info.type == GpuMemoryObjectType::VertexBuffer ||
+	    info.type == GpuMemoryObjectType::IndexBuffer)
+	{
+		m_buffer_bytes_since_retirement = created_bytes > UINT64_MAX - m_buffer_bytes_since_retirement
+		                                      ? UINT64_MAX
+		                                      : m_buffer_bytes_since_retirement + created_bytes;
+		if (GpuMemoryBufferPressureRetirementDue(m_buffer_bytes_since_retirement))
+		{
+			// The new object carries this command buffer's use, which has not completed.
+			Vector<Destructor> pressure_destructors;
+			RetireBuffersUnderPressureLocked(&pressure_destructors);
+			ScheduleDestructorsOutsideMutationLocks(ctx, &pressure_destructors);
+		}
+	}
 
 	if (reclaimed_existing)
 	{

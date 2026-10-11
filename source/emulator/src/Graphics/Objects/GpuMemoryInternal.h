@@ -474,6 +474,9 @@ private:
 	[[nodiscard]] Destructor Free(int heap_id, int object_id);
 	void RequireDetachable(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors, const char* operation,
 	                       GpuMemoryObjectType incoming_type = GpuMemoryObjectType::Invalid);
+	// Retires buffers that own no device content and whose submissions have
+	// completed, without a frame age (GpuMemoryBufferPressureRetirementDue).
+	void RetireBuffersUnderPressureLocked(Vector<Destructor>* destructors);
 	void WriteBackObjectLocked(GraphicContext* ctx, int heap_id, int object_id, Vector<Destructor>* destructors,
 	                           const SubmissionId* publishing_submission = nullptr);
 	void RecordUse(ObjectInfo* object, SubmissionId submission);
@@ -561,6 +564,7 @@ private:
 	uint64_t m_current_frame                      = 0;
 	uint64_t m_content_sequence                   = 0;
 	uint32_t m_transient_creates_since_retirement = 0;
+	uint64_t m_buffer_bytes_since_retirement      = 0;
 	uint32_t m_retirement_heap_cursor            = 0;
 	uint32_t m_retirement_object_cursor          = 0;
 
