@@ -1941,11 +1941,11 @@ TEST(EmulatorModuleLoad, SysmoduleTracksLoadAndUnloadState)
 
 	constexpr uint16_t module_id = 0xfffe;
 	EXPECT_EQ(unload(module_id), 0);
-	EXPECT_EQ(is_loaded(module_id), Kyty::Libs::LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(is_loaded(module_id), static_cast<int>(0x805A1001u));
 	EXPECT_EQ(load(module_id), 0);
 	EXPECT_EQ(is_loaded(module_id), 0);
 	EXPECT_EQ(unload(module_id), 0);
-	EXPECT_EQ(is_loaded(module_id), Kyty::Libs::LibKernel::KERNEL_ERROR_ENOENT);
+	EXPECT_EQ(is_loaded(module_id), static_cast<int>(0x805A1001u));
 }
 
 TEST(EmulatorModuleLoad, LibkernelRegistersKernelSleep)
