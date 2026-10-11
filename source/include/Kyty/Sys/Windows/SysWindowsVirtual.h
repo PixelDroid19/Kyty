@@ -34,6 +34,8 @@ bool     sys_virtual_discard_shared_backing_range(void* backing, uint64_t backin
 bool     sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next);
 // Bytes of the backing that hold a page (st_blocks). False when the host cannot tell.
 bool     sys_virtual_query_shared_backing_populated_bytes(void* backing, uint64_t* bytes);
+int      sys_virtual_export_shared_backing_dma_buf(void* backing, uint64_t backing_offset, uint64_t size);
+void     sys_virtual_close_dma_buf(int dma_buf);
 uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
                                         VirtualMemory::Mode mode, uint64_t alignment);
 bool     sys_virtual_map_shared_fixed(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,

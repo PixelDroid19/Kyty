@@ -47,6 +47,7 @@ struct Chunk
 	VkBuffer       buffer     = nullptr;
 	uint64_t       device = 0;
 	uint64_t       alias  = 0;       // writable host view that was imported
+	bool           physical = false; // imports the direct-memory pages themselves
 	void*          copy   = nullptr; // tracked snapshot that was imported
 	std::size_t    copy_alignment = 0;
 	uint64_t       generation = 0;   // dirty-tracker generation of the snapshot
@@ -301,11 +302,13 @@ bool FindHostImportMemoryType(VkPhysicalDevice physical, uint32_t type_bits, uin
 	    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, index);
 }
 
-VkBuffer CreateAddressBuffer(VkDevice device, uint64_t size, bool external)
+// A zero handle type creates a device-owned buffer.
+VkBuffer CreateAddressBuffer(VkDevice device, uint64_t size, VkExternalMemoryHandleTypeFlags handle_type)
 {
+	const bool external = handle_type != 0;
 	VkExternalMemoryBufferCreateInfo external_info {};
 	external_info.sType       = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO;
-	external_info.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
+	external_info.handleTypes = handle_type;
 
 	VkBufferCreateInfo info {};
 	info.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -369,7 +372,8 @@ struct PreparedHostImport
 		memory        = VK_NULL_HANDLE;
 	}
 
-	bool Prepare(GraphicContext* ctx, uint64_t size)
+	bool Prepare(GraphicContext* ctx, uint64_t size,
+	             VkExternalMemoryHandleTypeFlags handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT)
 	{
 		device = ctx->device;
 		VkPhysicalDeviceExternalMemoryHostPropertiesEXT host_properties {};
@@ -384,7 +388,7 @@ struct PreparedHostImport
 			return false;
 		}
 
-		buffer = CreateAddressBuffer(device, size, true);
+		buffer = CreateAddressBuffer(device, size, handle_type);
 		if (buffer == VK_NULL_HANDLE)
 		{
 			return false;
@@ -500,6 +504,93 @@ bool ImportPointer(GraphicContext* ctx, void* pointer, uint64_t span, uint64_t h
 	return true;
 }
 
+// Takes ownership of `dma_buf` and imports its pages into a device-addressable buffer.
+bool ImportDmaBuf(GraphicContext* ctx, int dma_buf, uint64_t span, Chunk* out)
+{
+	PreparedHostImport prepared;
+	auto get_properties = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(vkGetDeviceProcAddr(ctx->device, "vkGetMemoryFdPropertiesKHR"));
+	VkMemoryFdPropertiesKHR properties {};
+	properties.sType    = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+	uint32_t type_index = 0;
+	if (dma_buf < 0 || get_properties == nullptr || !prepared.Prepare(ctx, span, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) ||
+	    prepared.requirements.size > span ||
+	    get_properties(ctx->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT, dma_buf, &properties) != VK_SUCCESS ||
+	    !FindHostImportMemoryType(ctx->physical_device, properties.memoryTypeBits & prepared.requirements.memoryTypeBits, &type_index))
+	{
+		Core::VirtualMemory::CloseDmaBuf(dma_buf);
+		return false;
+	}
+	VkImportMemoryFdInfoKHR import_info {};
+	import_info.sType      = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+	import_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+	import_info.fd         = dma_buf;
+	VkMemoryAllocateFlagsInfo flags {};
+	flags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+	flags.pNext = &import_info;
+	flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+	VkMemoryAllocateInfo allocate {};
+	allocate.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+	allocate.pNext           = &flags;
+	allocate.allocationSize  = span;
+	allocate.memoryTypeIndex = type_index;
+	// A successful import owns the descriptor.
+	if (vkAllocateMemory(ctx->device, &allocate, nullptr, &prepared.memory) != VK_SUCCESS)
+	{
+		Core::VirtualMemory::CloseDmaBuf(dma_buf);
+		return false;
+	}
+	if (vkBindBufferMemory(ctx->device, prepared.buffer, prepared.memory, 0) != VK_SUCCESS)
+	{
+		return false;
+	}
+	prepared.Release(out);
+	out->physical = true;
+	return true;
+}
+
+enum class PhysicalImport
+{
+	HostPointer,
+	DmaBuf,
+	Unavailable,
+};
+
+// Physical direct memory is a shared host mapping. Some drivers import only
+// private anonymous host pointers, so one shared page decides how physical
+// ranges are imported for the device's lifetime.
+PhysicalImport ProbePhysicalImport(GraphicContext* ctx)
+{
+	PreparedHostImport prepared;
+	auto*              backing = prepared.Prepare(ctx, kPageBytes) ? Core::VirtualMemory::CreateSharedBacking(kPageBytes) : nullptr;
+	const uint64_t     view    = backing == nullptr ? 0
+	                                                : Core::VirtualMemory::MapSharedAligned(
+	                                                      backing, 0, 0, kPageBytes, Core::VirtualMemory::Mode::ReadWrite,
+	                                                      std::max(prepared.min_pointer_alignment, kPageBytes));
+	Chunk          probe;
+	PhysicalImport result = PhysicalImport::Unavailable;
+	if (view != 0 && ImportPointer(ctx, reinterpret_cast<void*>(view), kPageBytes, kPageBytes, true, &prepared, &probe))
+	{
+		result = PhysicalImport::HostPointer;
+		DestroyChunk(ctx->device, probe);
+	} else if (backing != nullptr && ctx->guest_dma_buf_import_supported &&
+	           ImportDmaBuf(ctx, Core::VirtualMemory::ExportSharedBackingDmaBuf(backing, 0, kPageBytes), kPageBytes, &probe))
+	{
+		result = PhysicalImport::DmaBuf;
+		DestroyChunk(ctx->device, probe);
+	}
+	if (view != 0)
+	{
+		(void)Core::VirtualMemory::Free(view);
+	}
+	Core::VirtualMemory::DestroySharedBacking(backing);
+	if (result == PhysicalImport::Unavailable)
+	{
+		std::fprintf(stderr, "guest physical memory cannot be device-addressed: the device rejects shared host pointers and "
+		                     "the host cannot export it as a dma-buf (needs read-write access to /dev/udmabuf)\n");
+	}
+	return result;
+}
+
 // Imports [guest, guest + span) for a chunk mapping [guest, guest + size)
 // from a writable alias of physical direct memory, or else from a snapshot.
 // The guest view itself is never imported: dirty tracking and guest mprotect
@@ -516,6 +607,12 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	out->guest = guest;
 	out->size  = size;
 	out->span  = span;
+	static const PhysicalImport physical_import = ProbePhysicalImport(ctx);
+	int                         dma_buf         = -1;
+	if (physical_import == PhysicalImport::DmaBuf && Kernel::Memory::KernelExportPhysicalDmaBuf(guest, span, &dma_buf))
+	{
+		return ImportDmaBuf(ctx, dma_buf, span, out);
+	}
 	PreparedHostImport prepared;
 	if (!prepared.Prepare(ctx, span))
 	{
@@ -525,7 +622,8 @@ bool ImportChunk(GraphicContext* ctx, uint64_t guest, uint64_t size, uint64_t sp
 	{
 		if (ImportPointer(ctx, reinterpret_cast<void*>(alias), span, span, true, &prepared, out))
 		{
-			out->alias = alias;
+			out->alias    = alias;
+			out->physical = true;
 			return true;
 		}
 		prepared.Reset();
@@ -741,7 +839,7 @@ bool RebuildTable(GraphicContext* ctx, Registry* registry)
 	}
 	const uint64_t bytes  = words.size() * 4u;
 	Table          table;
-	table.buffer          = CreateAddressBuffer(ctx->device, bytes, false);
+	table.buffer          = CreateAddressBuffer(ctx->device, bytes, 0);
 	VkMemoryRequirements requirements {};
 	uint32_t             type_index = 0;
 	if (table.buffer == nullptr)
@@ -932,7 +1030,7 @@ bool GuestDeviceAddressRecordPublication(GraphicContext* ctx, VkCommandBuffer_T*
 		const Chunk* found = nullptr;
 		for (const auto& chunk: range->second.chunks)
 		{
-			if (chunk.alias != 0 && chunk.guest <= cursor && cursor - chunk.guest < chunk.size)
+			if (chunk.physical && chunk.guest <= cursor && cursor - chunk.guest < chunk.size)
 			{
 				found = &chunk;
 				break;

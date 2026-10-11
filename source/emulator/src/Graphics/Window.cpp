@@ -3022,6 +3022,34 @@ static void VulkanCreate(WindowContext* ctx)
 			{
 				device_extensions.Add(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
 			}
+			// Some drivers import only private anonymous host pointers; guest
+			// physical memory is shared, so it is imported as a dma-buf there.
+			VkExternalMemoryFeatureFlags dma_buf_features = 0;
+			if (ctx->graphic_ctx.guest_device_address_supported && has_ext(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+			    has_ext(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME))
+			{
+				VkPhysicalDeviceExternalBufferInfo external_buffer_info {};
+				external_buffer_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO;
+				external_buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+				                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+				external_buffer_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+				VkExternalBufferProperties external_buffer_properties {};
+				external_buffer_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES;
+				vkGetPhysicalDeviceExternalBufferProperties(ctx->graphic_ctx.physical_device, &external_buffer_info,
+				                                           &external_buffer_properties);
+				dma_buf_features = external_buffer_properties.externalMemoryProperties.externalMemoryFeatures;
+			}
+			ctx->graphic_ctx.guest_dma_buf_import_supported =
+			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) != 0 &&
+			    (dma_buf_features & VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) == 0;
+			for (const char* extension: {VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME})
+			{
+				if (ctx->graphic_ctx.guest_dma_buf_import_supported &&
+				    !device_extensions.Contains(extension, [](auto s, auto l) { return strcmp(s, l) == 0; }))
+				{
+					device_extensions.Add(extension);
+				}
+			}
 		}
 		ctx->graphic_ctx.subgroup_size_control_supported = has_ext(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
 		auto& wave_state = ctx->graphic_ctx.compute_wave_vulkan_state;

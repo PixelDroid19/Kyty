@@ -260,6 +260,7 @@ public:
 	              uint64_t* phys_addr = nullptr, int* memory_type = nullptr);
 	bool     Find(uint64_t phys_addr, bool next, PhysicalMemory::AllocatedBlock* out);
 	uint64_t MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignment);
+	bool     ExportDmaBuf(uint64_t vaddr, uint64_t size, int* dma_buf);
 	void     FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count);
 	uint64_t TotalAllocatedBytes();
 	void     FillSnapshot(KernelMemorySnapshot* snapshot);
@@ -288,6 +289,9 @@ private:
 	// live view at or below it. Titles keep thousands of views; per-address
 	// queries search an index ordered by guest address instead of the list.
 	[[nodiscard]] const MappedBlock* FindLiveViewUnlocked(uint64_t vaddr);
+	// Backing offset of a live view of [vaddr, vaddr + size) whose physical
+	// range is neither released nor pending release.
+	[[nodiscard]] bool FindAliasablePhysicalUnlocked(uint64_t vaddr, uint64_t size, uint64_t* phys_addr);
 	void                             AddMappedUnlocked(const MappedBlock& block)
 	{
 		m_mapped.Add(block);
@@ -1751,28 +1755,15 @@ bool PhysicalMemory::DecommitRange(uint64_t vaddr, uint64_t size)
 // Maps a read-write view of the backing pages behind [vaddr, vaddr + size) at
 // a host-chosen address. The view shares bytes with the guest mapping and
 // ignores its protection, which the dirty-page tracker may have lowered.
-uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignment)
+bool PhysicalMemory::FindAliasablePhysicalUnlocked(uint64_t vaddr, uint64_t size, uint64_t* phys_addr)
 {
-	const uint64_t page_size = VirtualMemory::GetPageSize();
-	alignment = alignment == 0 ? page_size : alignment;
-	if (size == 0 || alignment < page_size || (alignment & (alignment - 1u)) != 0)
-	{
-		return 0;
-	}
-	Core::LockGuard    lock(m_mutex);
 	const MappedBlock* live = FindLiveViewUnlocked(vaddr);
 	if (live != nullptr && size <= live->map_size && vaddr - live->map_vaddr <= live->map_size - size)
 	{
-		const uint64_t phys_addr = live->phys_addr + (vaddr - live->map_vaddr);
+		*phys_addr = live->phys_addr + (vaddr - live->map_vaddr);
 		// Registration publishes committed backing. Its pending state excludes
 		// teardown, but a reader of the published range already needs an alias.
-		if (live->physical_released || IsDirectReleasePendingUnlocked(phys_addr, size))
-		{
-			return 0;
-		}
-		const auto alias = VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size,
-		                                                 VirtualMemory::Mode::ReadWrite, alignment);
-		return alias;
+		return !live->physical_released && !IsDirectReleasePendingUnlocked(*phys_addr, size);
 	}
 	for (const auto& mapping: m_mapped)
 	{
@@ -1783,16 +1774,44 @@ uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignm
 		}
 		// CPU protection segments can split one physical mapping. The alias
 		// follows its backing bytes and must remain independent of those rights.
-		const uint64_t phys_addr = mapping.phys_addr + (vaddr - mapping.map_vaddr);
-		if (IsDirectReleasePendingUnlocked(phys_addr, size))
-		{
-			return 0;
-		}
-		const auto alias = VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size, VirtualMemory::Mode::ReadWrite,
-		                                                 alignment);
-		return alias;
+		*phys_addr = mapping.phys_addr + (vaddr - mapping.map_vaddr);
+		return !IsDirectReleasePendingUnlocked(*phys_addr, size);
 	}
-	return 0;
+	return false;
+}
+
+uint64_t PhysicalMemory::MapAlias(uint64_t vaddr, uint64_t size, uint64_t alignment)
+{
+	const uint64_t page_size = VirtualMemory::GetPageSize();
+	alignment = alignment == 0 ? page_size : alignment;
+	if (size == 0 || alignment < page_size || (alignment & (alignment - 1u)) != 0)
+	{
+		return 0;
+	}
+	Core::LockGuard lock(m_mutex);
+	uint64_t        phys_addr = 0;
+	if (!FindAliasablePhysicalUnlocked(vaddr, size, &phys_addr))
+	{
+		return 0;
+	}
+	return VirtualMemory::MapSharedAligned(m_backing, 0, phys_addr, size, VirtualMemory::Mode::ReadWrite, alignment);
+}
+
+bool PhysicalMemory::ExportDmaBuf(uint64_t vaddr, uint64_t size, int* dma_buf)
+{
+	*dma_buf = -1;
+	if (size == 0)
+	{
+		return false;
+	}
+	Core::LockGuard lock(m_mutex);
+	uint64_t        phys_addr = 0;
+	if (!FindAliasablePhysicalUnlocked(vaddr, size, &phys_addr))
+	{
+		return false;
+	}
+	*dma_buf = VirtualMemory::ExportSharedBackingDmaBuf(m_backing, phys_addr, size);
+	return true;
 }
 
 void PhysicalMemory::FindUnpopulatedSpans(KernelPhysicalSpan* spans, size_t count)
@@ -3135,6 +3154,16 @@ uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size, uint64_t alignmen
 		return 0;
 	}
 	return g_physical_memory->MapAlias(vaddr, size, alignment);
+}
+
+bool KernelExportPhysicalDmaBuf(uint64_t vaddr, uint64_t size, int* dma_buf)
+{
+	if (dma_buf == nullptr)
+	{
+		return false;
+	}
+	*dma_buf = -1;
+	return g_physical_memory != nullptr && g_physical_memory->ExportDmaBuf(vaddr, size, dma_buf);
 }
 
 bool KernelUnmapPhysicalAlias(uint64_t alias)

@@ -172,6 +172,11 @@ struct SharedBackingPopulation
 };
 // False when the host cannot report the population.
 bool           QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulation* population);
+// A dma-buf descriptor sharing the pages of a page-aligned backing interval, or
+// -1 when the host cannot export one. Release it with CloseDmaBuf unless a
+// consumer took ownership.
+int            ExportSharedBackingDmaBuf(SharedBacking* backing, uint64_t backing_offset, uint64_t size);
+void           CloseDmaBuf(int dma_buf);
 uint64_t       MapSharedAligned(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode,
                                 uint64_t alignment);
 bool           MapSharedFixed(SharedBacking* backing, uint64_t address, uint64_t backing_offset, uint64_t size, Mode mode);

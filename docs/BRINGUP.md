@@ -9,6 +9,37 @@ process weight (do not apply this full loop to ordinary code tasks).
 Note: frontier facts below are a snapshot — always re-capture the first strict
 fail on the current HEAD before acting on them.
 
+## Guest physical memory on host-pointer-restricted drivers (2026-10-11)
+
+- The integrated RADV device stopped every title that dereferences guest
+  pointers: importing the shared direct-memory alias returned
+  `VK_ERROR_INVALID_EXTERNAL_HANDLE`. A standalone probe on the same host
+  shows that the amdgpu driver imports only private anonymous host pointers
+  (shared anonymous, shared memfd and private memfd mappings are refused),
+  while the discrete device accepts all four. Guest physical memory is a
+  shared memfd, so the capability check at device creation was not enough.
+- At the first physical import, one shared scratch page decides the import
+  path for the device lifetime. If the device refuses the host pointer,
+  physical ranges are exported from the backing as dma-bufs through
+  `/dev/udmabuf` and imported with `VK_EXT_external_memory_dma_buf`. The
+  backing memfd is now sealed against shrinking, which udmabuf requires;
+  punch-hole discards are unaffected. Devices that accept the host pointer
+  keep the previous path unchanged.
+- The probe verified GPU writes visible through the CPU mapping and CPU writes
+  read by the GPU on both devices. udmabuf needs read-write access to
+  `/dev/udmabuf` (a seat ACL on the reference host) and limits one export to
+  `size_limit_mb` (64 MiB by default, equal to the import chunk bound). When
+  neither path works, the run reports it once and still stops on the existing
+  strict refusal.
+- Verified on the integrated device: the roguelike, the watercolour
+  platformer, the beat 'em up, the Unity fishing title, the zoo title, the
+  insect platformer, the pixel-art well title, the racing title, the dream
+  platformer, the fighting title and the 2D ninja title run their bounded
+  routes with captures. The tower-defence title loses the device on a GPUVM
+  read fault from scalar loads (`SQC`, permission fault) after about 100 s;
+  open. The discrete device keeps its reference results on the roguelike,
+  the watercolour platformer, the ninja title and the tower-defence title.
+
 ## ATRAC9 decoder checkpoint (2026-10-11)
 
 - ATRAC9 superframes decode through the bundled LibAtrac9 instead of FFmpeg.

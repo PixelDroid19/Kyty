@@ -1937,6 +1937,20 @@ bool QuerySharedBackingPopulation(SharedBacking* backing, SharedBackingPopulatio
 	return sys_virtual_query_shared_backing_populated_bytes(backing->handle, &population->populated_bytes);
 }
 
+int ExportSharedBackingDmaBuf(SharedBacking* backing, uint64_t backing_offset, uint64_t size)
+{
+	if (!shared_range_is_valid(backing, backing_offset, size))
+	{
+		return -1;
+	}
+	return sys_virtual_export_shared_backing_dma_buf(backing->handle, backing_offset, size);
+}
+
+void CloseDmaBuf(int dma_buf)
+{
+	sys_virtual_close_dma_buf(dma_buf);
+}
+
 void FindUnpopulatedSharedBackingSpans(SharedBacking* backing, SharedBackingSpan* spans, size_t count)
 {
 	const uint64_t                  page_size = GetPageSize();

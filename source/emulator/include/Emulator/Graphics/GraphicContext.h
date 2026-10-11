@@ -187,6 +187,8 @@ struct GraphicContext
 	// Guest memory is importable as device-addressable buffers (host pointer
 	// import, buffer device address and 64-bit shader integers).
 	bool guest_device_address_supported = false;
+	// Device-addressable buffers can also import dma-buf descriptors.
+	bool guest_dma_buf_import_supported = false;
 	ShaderComputeWaveVulkanState compute_wave_vulkan_state {};
 
 	// VK_EXT_sample_locations is optional at device discovery time. A draw that

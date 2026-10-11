@@ -924,6 +924,14 @@ bool sys_virtual_query_shared_backing_populated_bytes([[maybe_unused]] void* bac
 	return false;
 }
 
+int sys_virtual_export_shared_backing_dma_buf([[maybe_unused]] void* backing, [[maybe_unused]] uint64_t backing_offset,
+                                              [[maybe_unused]] uint64_t size)
+{
+	return -1;
+}
+
+void sys_virtual_close_dma_buf([[maybe_unused]] int dma_buf) {}
+
 uint64_t sys_virtual_map_shared_aligned(void* backing, uint64_t address, uint64_t backing_offset, uint64_t size,
 	                                    VirtualMemory::Mode mode, uint64_t alignment)
 {

@@ -31,6 +31,8 @@
 #include <mach/mach_vm.h>
 #else
 #include <linux/falloc.h>
+#include <linux/udmabuf.h>
+#include <sys/ioctl.h>
 #include <sys/syscall.h>
 #endif
 
@@ -884,12 +886,14 @@ void* sys_virtual_create_shared_backing(uint64_t size)
 	}
 #else
 #ifdef SYS_memfd_create
-	static constexpr unsigned int kMemfdCloseOnExec = 0x0001u;
-	static constexpr unsigned int kMemfdExecutable  = 0x0010u;
-	fd = static_cast<int>(syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec | kMemfdExecutable));
+	static constexpr unsigned int kMemfdCloseOnExec    = 0x0001u;
+	static constexpr unsigned int kMemfdAllowSealing   = 0x0002u;
+	static constexpr unsigned int kMemfdExecutable     = 0x0010u;
+	fd = static_cast<int>(
+	    syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec | kMemfdAllowSealing | kMemfdExecutable));
 	if (fd < 0 && errno == EINVAL)
 	{
-		fd = static_cast<int>(syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec));
+		fd = static_cast<int>(syscall(SYS_memfd_create, "kyty-direct-memory", kMemfdCloseOnExec | kMemfdAllowSealing));
 	}
 #endif
 #endif
@@ -909,6 +913,11 @@ void* sys_virtual_create_shared_backing(uint64_t size)
 		close(fd);
 		return nullptr;
 	}
+#if defined(__linux__)
+	// The backing never shrinks; dma-buf export requires that seal. A host that
+	// refuses it only loses dma-buf export.
+	(void)::fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK);
+#endif
 
 	auto* backing = new SharedBacking;
 	backing->fd    = fd;
@@ -970,6 +979,46 @@ bool sys_virtual_discard_shared_backing_range(void* backing, uint64_t backing_of
 	return ::fallocate(shared->fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, static_cast<off_t>(start),
 	                   static_cast<off_t>(end - start)) == 0;
 #endif
+}
+
+int sys_virtual_export_shared_backing_dma_buf(void* backing, uint64_t backing_offset, uint64_t size)
+{
+#if defined(__linux__)
+	const auto*    shared    = static_cast<const SharedBacking*>(backing);
+	const uint64_t page_size = sys_virtual_get_page_size();
+	if (shared == nullptr || shared->fd < 0 || size == 0 || page_size == 0 || backing_offset % page_size != 0 ||
+	    size % page_size != 0 || backing_offset > shared->size || size > shared->size - backing_offset)
+	{
+		return -1;
+	}
+	static const int device = ::open("/dev/udmabuf", O_RDWR | O_CLOEXEC);
+	if (device < 0)
+	{
+		return -1;
+	}
+	udmabuf_create create {};
+	create.memfd  = static_cast<uint32_t>(shared->fd);
+	create.flags  = UDMABUF_FLAGS_CLOEXEC;
+	create.offset = backing_offset;
+	create.size   = size;
+	const int saved_errno = errno;
+	const int dma_buf     = ::ioctl(device, UDMABUF_CREATE, &create);
+	errno                 = saved_errno;
+	return dma_buf;
+#else
+	(void)backing;
+	(void)backing_offset;
+	(void)size;
+	return -1;
+#endif
+}
+
+void sys_virtual_close_dma_buf(int dma_buf)
+{
+	if (dma_buf >= 0)
+	{
+		::close(dma_buf);
+	}
 }
 
 bool sys_virtual_next_shared_backing_data(void* backing, uint64_t backing_offset, uint64_t* next)

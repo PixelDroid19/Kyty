@@ -132,6 +132,10 @@ int KYTY_SYSV_ABI    KernelQueryMemoryProtection(void* addr, void** start, void*
 // guest view's protection. Returns 0 for non-physical or partial ranges.
 [[nodiscard]] uint64_t KernelMapPhysicalAlias(uint64_t vaddr, uint64_t size, uint64_t alignment = 0);
 bool                 KernelUnmapPhysicalAlias(uint64_t alias);
+// Exports the direct-memory pages behind a physical guest mapping as a dma-buf
+// that the caller owns. False for the ranges KernelMapPhysicalAlias rejects;
+// otherwise *dma_buf is the descriptor, or -1 when the host cannot export it.
+[[nodiscard]] bool   KernelExportPhysicalDmaBuf(uint64_t vaddr, uint64_t size, int* dma_buf);
 struct KernelPhysicalSpan
 {
 	uint64_t vaddr       = 0;
